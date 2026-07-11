@@ -137,13 +137,23 @@ writes (addV+property, addE via `to(__.V(id))`), discard, error trailers.
 The shared contract (`test/contract.ts`) passes against unmodified
 gremlin@4.0.0-beta.2 on both runtimes (Bun + Cloudflare DO); corpus 100%.
 
-**P1 — correctness spine.**
-1. Vertex property materialization (custom framing, above) → `valueMap`,
-   `elementMap` land free afterwards.
-2. `drop()` — `WITH targets AS (...) DELETE ...` (reads already produce the CTE).
-3. `order().by(key[, desc])`, `range`, `skip`.
-4. Stand up the L3 cucumber run (see Test strategy) with tags for the
-   implemented step set; publish the first score.
+**P1 — correctness spine. DONE.**
+1. Vertex property materialization — custom vertex framing (`handler.ts`
+   `vertexBuffer`) bypasses the client's empty-props serializer; `valueMap`
+   (list-valued, `+tokens`, key filter), `elementMap` (flat, T-token keys)
+   land on it.
+2. `drop()` — `WITH <ctes> DELETE FROM edges …; DELETE FROM nodes …`; deletes
+   the target vertices and their incident edges (`compileDrop`).
+3. `order().by(key[, desc])`, `range`, `skip` — a tail-modifier model in
+   `compileRead`: order/range/skip/limit fold `ORDER BY`/`LIMIT`/`OFFSET` into
+   the projection select; range/skip/limit stay CTEs when no `order()` precedes
+   (so mid-chain limit still works). Plus `inject(consts)` as a value stream.
+4. L3 cucumber stood up: `conformance/conformance-server.ts` hosts the named
+   graphs (routing by the `g` field — dev only), `conformance/conformance.test.ts`
+   is a self-contained mini-L3 through the real GLV, and
+   `conformance/README-cucumber.md` has the full external run + tag ratchet.
+   Publishing the full scenario count needs `npm install` in the TinkerPop GLV
+   checkout (next action).
 
 **P2 — the column-threading compiler.** `as()`/`select()`/`by()`/`project()`
 require carrying labelled columns through the CTE chain (each `as('a')`
@@ -194,8 +204,8 @@ unlocks most of the Medium tier; design it once, carefully:
 | out/in/both | covering-index joins | done | excellent |
 | values/id/label/count/dedup/limit | SQL | done | excellent |
 | addV/property, addE (restricted) | INSERT RETURNING | done | excellent |
-| drop | DELETE + CTE targets | easy | excellent |
-| order/range/valueMap/elementMap | SQL / json_extract | easy | excellent |
+| drop | DELETE + CTE targets | done | excellent |
+| order/range/skip/valueMap/elementMap/inject | SQL / json_extract | done | excellent |
 | mergeV/mergeE | UPSERT RETURNING | easy | excellent |
 | as/select/project/by | column threading | medium | very good |
 | where/not (anon traversals) | correlated EXISTS | medium | good |

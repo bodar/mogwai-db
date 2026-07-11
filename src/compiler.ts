@@ -67,6 +67,12 @@ function extractArgs(ctx: any, params: Record<string, any>): any[] {
     if (cls.startsWith('TraversalPredicate_')) {
       args.push(parsePredicate(node, params)); return;
     }
+    // order()/by() take an Order token (asc|desc|shuffle) that is a grammar rule,
+    // not a literal — capture it so the compiler can pick sort direction.
+    if (cls === 'TraversalOrderContext') {
+      const seg = node.getText().split('.').pop().toLowerCase();
+      args.push({ order: seg }); return;
+    }
     if (cls === 'NestedTraversalContext') { args.push({ nested: node }); return; }
     for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) walk(node.getChild(i));
   };
@@ -95,6 +101,8 @@ export type Shape =
   | { kind: 'vertex' }
   | { kind: 'value' }
   | { kind: 'count' }
+  | { kind: 'valueMap'; keys: string[] | null; tokens: boolean }
+  | { kind: 'elementMap'; keys: string[] | null }
   | { kind: 'discard' };
 
 export interface Compiled {
@@ -108,6 +116,13 @@ export interface WritePlan { kind: 'write'; run: (store: GraphStore) => any[]; }
 
 const P_OPS: Record<string, string> = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 
+/** range(low, high) → SQL [offset, limit]. high < 0 means "no upper bound". */
+function rangeToOffsetLimit(args: any[]): { offset: number; limit: number } {
+  const [lo, hi] = args.map(Number);
+  if (hi >= 0 && lo > hi) throw new Error(`Not a legal range: [${lo}, ${hi}]`);
+  return { offset: lo, limit: hi < 0 ? -1 : hi - lo };
+}
+
 export function compile(gremlin: string, params: Record<string, any>): Compiled | WritePlan {
   const steps = stepChain(parseGremlin(gremlin), params);
   if (steps.length === 0) throw new Error('empty traversal');
@@ -120,6 +135,8 @@ export function compile(gremlin: string, params: Record<string, any>): Compiled 
   let plan: Compiled | WritePlan;
   if (steps[0].name === 'addV') plan = compileAddV(steps);
   else if (steps[0].name === 'V' && steps.some(s => s.name === 'addE')) plan = compileAddE(steps, params);
+  else if (steps[0].name === 'inject') plan = compileInject(steps);
+  else if (steps[steps.length - 1].name === 'drop') plan = compileDrop(steps);
   else plan = compileRead(steps);
 
   if (discard) {
@@ -129,14 +146,18 @@ export function compile(gremlin: string, params: Record<string, any>): Compiled 
   return plan;
 }
 
-function compileRead(steps: Step[]): Compiled {
+/**
+ * Build the movement/filter CTE prefix (the id-relation). Consumes V + the
+ * filter/traversal/cardinality steps that compose as pure CTEs; stops at the
+ * first order()/projection/other step and returns where it stopped. Shared by
+ * reads and drop().
+ */
+function traversalCtes(steps: Step[]): { ctes: string[]; binds: any[]; stop: number } {
   const ctes: string[] = [];
   const binds: any[] = [];
-  let shape: Shape = { kind: 'vertex' };
-  let i = 0;
   const prev = () => `c${ctes.length - 1}`;
 
-  const first = steps[i++];
+  const first = steps[0];
   if (first.name !== 'V') throw new Error(`unsupported source step: ${first.name}`);
   if (first.args.length > 0) {
     ctes.push(`c0 AS (SELECT id FROM nodes WHERE id IN (${first.args.map(() => '?').join(',')}))`);
@@ -145,8 +166,7 @@ function compileRead(steps: Step[]): Compiled {
     ctes.push(`c0 AS (SELECT id FROM nodes)`);
   }
 
-  let terminalSql: string | null = null;
-
+  let i = 1;
   for (; i < steps.length; i++) {
     const s = steps[i];
     switch (s.name) {
@@ -171,7 +191,7 @@ function compileRead(steps: Step[]): Compiled {
             ctes.push(`c${ctes.length} AS (SELECT n.id FROM nodes n JOIN ${prev()} p ON n.id=p.id WHERE json_extract(n.props, ${path}) ${neg}IN (${ph}))`);
             binds.push(key, ...p.values);
           } else if (p.op === 'between' || p.op === 'inside') {
-            ctes.push(`c${ctes.length} AS (SELECT n.id FROM nodes n JOIN ${prev()} p ON n.id=p.id WHERE json_extract(n.props, ${path}) >= ? AND json_extract(n.props, ${path.replace('?', '?')}) < ?)`);
+            ctes.push(`c${ctes.length} AS (SELECT n.id FROM nodes n JOIN ${prev()} p ON n.id=p.id WHERE json_extract(n.props, ${path}) >= ? AND json_extract(n.props, ${path}) < ?)`);
             binds.push(key, p.values[0], key, p.values[1]);
           } else throw new Error(`unsupported predicate: P.${p.op}`);
         } else {
@@ -194,37 +214,162 @@ function compileRead(steps: Step[]): Compiled {
       case 'dedup':
         ctes.push(`c${ctes.length} AS (SELECT DISTINCT id FROM ${prev()})`);
         break;
+      // limit/range/skip compose as CTEs while still on the id-relation (before
+      // any order()); once order() is seen they fold into the final select as
+      // tail modifiers so ORDER BY + LIMIT + OFFSET stay in one query.
       case 'limit':
         ctes.push(`c${ctes.length} AS (SELECT id FROM ${prev()} LIMIT ${Number(s.args[0])})`);
         break;
-      case 'values': {
-        const key = s.args[0];
-        terminalSql = `SELECT json_extract(n.props, '$.' || ?) AS v FROM nodes n JOIN ${prev()} p ON n.id=p.id WHERE json_extract(n.props, '$.' || ?) IS NOT NULL`;
-        binds.push(key, key);
-        shape = { kind: 'value' };
+      case 'range': {
+        const { offset, limit } = rangeToOffsetLimit(s.args);
+        ctes.push(`c${ctes.length} AS (SELECT id FROM ${prev()} LIMIT ${limit} OFFSET ${offset})`);
         break;
       }
-      case 'id':
-        terminalSql = `SELECT id AS v FROM ${prev()}`;
-        shape = { kind: 'value' };
+      case 'skip':
+        ctes.push(`c${ctes.length} AS (SELECT id FROM ${prev()} LIMIT -1 OFFSET ${Number(s.args[0])})`);
         break;
-      case 'label':
-        terminalSql = `SELECT l.name AS v FROM nodes n JOIN ${prev()} p ON n.id=p.id JOIN labels l ON l.id=n.label`;
-        shape = { kind: 'value' };
+      default:
+        return { ctes, binds, stop: i };
+    }
+  }
+  return { ctes, binds, stop: i };
+}
+
+interface OrderClause { key: string | null; dir: 'asc' | 'desc' | 'shuffle'; }
+
+function compileRead(steps: Step[]): Compiled {
+  const { ctes, binds, stop } = traversalCtes(steps);
+  const last = `c${ctes.length - 1}`;
+
+  // Tail phase: an optional projection + order()/range()/skip()/limit() and dedup.
+  let projStep: Step | null = null;
+  const orders: OrderClause[] = [];
+  let offset = 0, limit: number | null = null, distinct = false;
+
+  const PROJECTIONS = new Set(['values', 'id', 'label', 'count', 'valueMap', 'elementMap']);
+
+  for (let i = stop; i < steps.length; i++) {
+    const s = steps[i];
+    if (PROJECTIONS.has(s.name)) {
+      if (projStep) throw new Error('only one projection step is supported per traversal');
+      projStep = s;
+      continue;
+    }
+    switch (s.name) {
+      case 'order':
+        // by() modulators (next steps) attach to this order; a bare order() with
+        // no by() orders by element identity.
+        if (steps[i + 1]?.name !== 'by') orders.push({ key: null, dir: 'asc' });
         break;
-      case 'count':
-        terminalSql = `SELECT COUNT(*) AS v FROM ${prev()}`;
-        shape = { kind: 'count' };
+      case 'by': {
+        if (orders.length === 0 && steps[i - 1]?.name !== 'order')
+          throw new Error('by() is only supported as an order() modulator');
+        const key = s.args.find((a) => typeof a === 'string') ?? null;
+        const ord = s.args.find((a) => a && typeof a === 'object' && 'order' in a);
+        orders.push({ key, dir: (ord?.order ?? 'asc') as OrderClause['dir'] });
         break;
+      }
+      case 'range': ({ offset, limit } = rangeToOffsetLimit(s.args)); break;
+      case 'skip': offset = Number(s.args[0]); break;
+      case 'limit': limit = Number(s.args[0]); break;
+      case 'dedup': distinct = true; break;
       default:
         throw new Error(`step not implemented: ${s.name}()`);
     }
-    if (terminalSql && i < steps.length - 1) throw new Error(`no steps allowed after ${s.name}() yet`);
   }
 
-  const finalSelect = terminalSql ??
-    `SELECT n.id, l.name AS label, n.props FROM nodes n JOIN ${prev()} p ON n.id=p.id JOIN labels l ON l.id=n.label`;
-  return { kind: 'read', sql: `WITH ${ctes.join(',\n')}\n${finalSelect}`, binds, shape };
+  // Resolve the projection to a shape + a row source (cols/from/where).
+  const projName = projStep?.name ?? 'vertex';
+  let shape: Shape;
+  const fb: any[] = []; // final-select binds, appended after the CTE-prefix binds
+
+  // count folds any tail limit/offset/distinct into the counted id-relation.
+  if (projName === 'count') {
+    let src = `SELECT ${distinct ? 'DISTINCT ' : ''}id FROM ${last}`;
+    if (limit !== null || offset > 0) src += ` LIMIT ${limit ?? -1} OFFSET ${offset}`;
+    return { kind: 'read', sql: `WITH ${ctes.join(',\n')}\nSELECT COUNT(*) AS v FROM (${src})`, binds, shape: { kind: 'count' } };
+  }
+
+  const vJoin = `nodes n JOIN ${last} p ON n.id=p.id`;
+  const vlJoin = `${vJoin} JOIN labels l ON l.id=n.label`;
+  let cols: string, from: string, where = '';
+  switch (projName) {
+    case 'values':
+      shape = { kind: 'value' };
+      cols = `json_extract(n.props, '$.' || ?) AS v`; from = vJoin;
+      where = ` WHERE json_extract(n.props, '$.' || ?) IS NOT NULL`;
+      fb.push(projStep!.args[0], projStep!.args[0]);
+      break;
+    case 'id':
+      // Join nodes n even though the id lives in `last`, so a preceding
+      // order().by(key) — which references n.props — has the alias in scope.
+      shape = { kind: 'value' }; cols = `n.id AS v`; from = vJoin; break;
+    case 'label':
+      shape = { kind: 'value' }; cols = `l.name AS v`; from = vlJoin; break;
+    case 'valueMap': {
+      const keys = projStep!.args.filter((a) => typeof a === 'string') as string[];
+      shape = { kind: 'valueMap', keys: keys.length ? keys : null, tokens: projStep!.args.includes(true) };
+      cols = `n.id, l.name AS label, n.props`; from = vlJoin; break;
+    }
+    case 'elementMap': {
+      const keys = projStep!.args.filter((a) => typeof a === 'string') as string[];
+      shape = { kind: 'elementMap', keys: keys.length ? keys : null };
+      cols = `n.id, l.name AS label, n.props`; from = vlJoin; break;
+    }
+    default: // vertex
+      shape = { kind: 'vertex' }; cols = `n.id, l.name AS label, n.props`; from = vlJoin;
+  }
+
+  let sql = `SELECT ${distinct ? 'DISTINCT ' : ''}${cols} FROM ${from}${where}`;
+
+  if (orders.length) {
+    const parts = orders.map((o) => {
+      if (o.dir === 'shuffle') return 'RANDOM()';
+      const dir = o.dir === 'desc' ? 'DESC' : 'ASC';
+      if (o.key !== null) { fb.push(o.key); return `json_extract(n.props, '$.' || ?) ${dir}`; }
+      return `${shape.kind === 'value' ? 'v' : 'n.id'} ${dir}`;
+    });
+    sql += ` ORDER BY ${parts.join(', ')}`;
+  }
+  if (limit !== null || offset > 0) sql += ` LIMIT ${limit ?? -1} OFFSET ${offset}`;
+
+  return { kind: 'read', sql: `WITH ${ctes.join(',\n')}\n${sql}`, binds: [...binds, ...fb], shape };
+}
+
+// g.V(...).<filters>.drop() — delete the target vertices and their incident
+// edges. (Edge-valued drop, e.g. g.V().outE().drop(), waits on edge traversal.)
+function compileDrop(steps: Step[]): WritePlan {
+  const { ctes, binds, stop } = traversalCtes(steps.slice(0, -1));
+  if (stop !== steps.length - 1)
+    throw new Error(`drop() after ${steps[stop].name}() not yet supported`);
+  const targetSql = `WITH ${ctes.join(',\n')}\nSELECT id FROM c${ctes.length - 1}`;
+  return {
+    kind: 'write',
+    run: (store) => {
+      // Materialize the target ids ONCE, before mutating. If the traversal
+      // reads the edges table (out()/in()/both() before drop()), deleting the
+      // incident edges first would empty a re-evaluated target CTE, silently
+      // leaving the vertices behind. Snapshot the ids, then delete by value.
+      const ids = store.query<{ id: number }>(targetSql, binds).map((r) => r.id);
+      if (ids.length) {
+        const ph = ids.map(() => '?').join(',');
+        store.query(`DELETE FROM edges WHERE src IN (${ph}) OR tgt IN (${ph})`, [...ids, ...ids]);
+        store.query(`DELETE FROM nodes WHERE id IN (${ph})`, ids);
+      }
+      return [];
+    },
+  };
+}
+
+// g.inject(v1, v2, ...) — seed a value stream from constants. The collection /
+// mid-traversal forms (and inject as a barrier) belong to the P2 select() work.
+function compileInject(steps: Step[]): Compiled {
+  if (steps.length !== 1) throw new Error('inject() with subsequent steps not yet supported');
+  const vals = steps[0].args;
+  if (vals.length === 0)
+    return { kind: 'read', sql: `SELECT NULL AS v WHERE 0`, binds: [], shape: { kind: 'value' } };
+  const rows = vals.map(() => '(?)').join(',');
+  return { kind: 'read', sql: `WITH c0(v) AS (VALUES ${rows}) SELECT v FROM c0`, binds: vals, shape: { kind: 'value' } };
 }
 
 // g.addV('label').property(k, v)...

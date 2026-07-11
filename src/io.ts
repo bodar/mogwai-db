@@ -14,5 +14,11 @@
 import ioc from '../node_modules/gremlin/build/esm/structure/io/binary/GraphBinary.js';
 // @ts-ignore - deep import, no shipped type declarations for this subpath
 import { Vertex, VertexProperty, Edge } from '../node_modules/gremlin/build/esm/structure/graph.js';
+// The T enum (id/key/label/value tokens). valueMap(true)/elementMap emit maps
+// whose id/label keys are these tokens, not strings — the GLV deserializes them
+// as T, so they must ride the wire as GraphBinary DataType.T (via EnumSerializer),
+// which anySerializer picks automatically for an EnumValue instance.
+// @ts-ignore - deep import, no shipped type declarations for this subpath
+import { t } from '../node_modules/gremlin/build/esm/process/traversal.js';
 
-export { ioc, Vertex, VertexProperty, Edge };
+export { ioc, Vertex, VertexProperty, Edge, t };
