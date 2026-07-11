@@ -238,9 +238,10 @@ function compileAddV(steps: Step[]): WritePlan {
     kind: 'write',
     run: (store) => {
       const lid = store.labelId(label);
-      const row = store.db
-        .prepare('INSERT INTO nodes(label, props) VALUES(?, ?) RETURNING id, props')
-        .get(lid, JSON.stringify(props)) as any;
+      const row = store.query(
+        'INSERT INTO nodes(label, props) VALUES(?, ?) RETURNING id, props',
+        [lid, JSON.stringify(props)],
+      )[0];
       return [{ vertex: { id: row.id, label, props } }];
     },
   };
@@ -263,9 +264,10 @@ function compileAddE(steps: Step[], params: Record<string, any>): WritePlan {
     kind: 'write',
     run: (store) => {
       const lid = store.labelId(label);
-      const row = store.db
-        .prepare('INSERT INTO edges(src, label, tgt) VALUES(?,?,?) RETURNING id')
-        .get(src, lid, tgt) as any;
+      const row = store.query(
+        'INSERT INTO edges(src, label, tgt) VALUES(?,?,?) RETURNING id',
+        [src, lid, tgt],
+      )[0];
       return [{ edge: { id: row.id, label, src, tgt } }];
     },
   };

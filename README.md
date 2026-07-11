@@ -11,29 +11,50 @@ A TinkerPop 4 Gremlin server on SQLite, targeting Cloudflare Durable Objects.
   out/in/both(labels...), dedup, limit, values, id, label, count
 - Errors propagate as GraphBinary status trailers (client raises ResponseError with server message)
 
+## Runs on two runtimes from one codebase
+
+Everything above the storage driver is runtime-agnostic; the platform-specific
+leaf is injected via DI (`@bodar/yadic`). Same parser, compiler, framing and
+request handler serve both:
+- **Bun** (dev/local) — `Bun.serve` over `bun:sqlite`.
+- **Cloudflare Durable Objects** (production) — one DO = one isolated graph, over
+  `ctx.storage.sql`. Worker routes `POST /g/{graphId}` → `getByName` → DO.
+
+The `Sql` interface (`src/storage.ts`) is the seam — two ~15-line adapters
+(`src/bun/BunSqlite.ts`, `src/cloudflare/DurableObjectSqlite.ts`). Both SQLite,
+both synchronous. One shared contract test (`test/contract.ts`) runs against
+both over the real GraphBinary wire, so they're proven identical, not tested twice.
+
 ## Layout
-- src/storage.ts   — schema: interned labels, integer ids, covering edge indexes
-- src/compiler.ts  — canonical Gremlin -> step chain -> parameterised SQL / write plans
-- src/server.ts        — Bun.serve endpoint + GraphBinary response framing (reuses the
-                         client package's Apache-2.0 serializers)
-- test/e2e.test.ts     — end-to-end suite via the real GLV (in-process server)
-- conformance/         — corpus parse/chain conformance test
-- parser/              — generated from gremlin-language/Gremlin.g4 (regenerate, don't edit)
+- src/storage.ts                     — `Sql` seam + agnostic `GraphStore` (schema, label interning)
+- src/compiler.ts                    — canonical Gremlin -> step chain -> parameterised SQL / write plans
+- src/handler.ts                     — request handling + GraphBinary framing (Web Request/Response)
+- src/application.ts                 — DI wiring (`application(deps)`), shared by both runtimes
+- src/io.ts                          — reused Apache-2.0 GraphBinary serializers from the gremlin client
+- src/bun/{BunSqlite,server}.ts      — Bun entry: bun:sqlite + Bun.serve
+- src/cloudflare/{DurableObjectSqlite,worker}.ts — CF entry: ctx.storage.sql + Worker/DO
+- test/contract.ts                   — shared conformance contract (both runtimes run it)
+- conformance/                       — corpus parse/chain conformance test
+- parser/                            — generated from gremlin-language/Gremlin.g4 (regenerate, don't edit)
 
 ## Run
 Runtime is [Bun](https://bun.sh) (pinned via mise). `mise install` to get it.
 
 ```
 bun install
-bun run start                  # listens on :8182
-bun test                       # e2e + corpus conformance
+bun run start                  # Bun server on :8182
+bun test                       # contract (bun + live-DO via wrangler) + corpus
+bun run dev:cf                 # Worker + DO under wrangler dev
+bun run deploy                 # wrangler deploy
 ```
+
+`bun test` boots the Worker under `wrangler dev` for the Cloudflare half, so the
+first run may pause while workerd starts.
 
 ## Known gaps / next
 - Vertex property materialization: client's VertexSerializer hardcodes empty properties
   on write; implement our own vertex framing with ioc primitives (~15 lines)
-- Port storage.ts to DO SQLite (ctx.storage.sql) + Worker fetch handler; bun:sqlite
-  is a shim with matching (synchronous) semantics
+- Worker router hardening: per-graph bearer auth, management/delete endpoints, real deploy
 - Step coverage per the feature table: as/select, where, union, repeat (recursive CTE),
   order().by, valueMap, drop, mergeV/mergeE
 - Conformance: run gremlin-test Gherkin subset

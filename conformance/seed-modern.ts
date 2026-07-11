@@ -9,19 +9,19 @@ export function seedModern(store: GraphStore) {
   const knows = store.labelId('knows');
   const created = store.labelId('created');
 
-  const v = store.db.prepare('INSERT INTO nodes(id, label, props) VALUES(?,?,?)');
-  v.run(1, person, JSON.stringify({ name: 'marko', age: 29 }));
-  v.run(2, person, JSON.stringify({ name: 'vadas', age: 27 }));
-  v.run(3, software, JSON.stringify({ name: 'lop', lang: 'java' }));
-  v.run(4, person, JSON.stringify({ name: 'josh', age: 32 }));
-  v.run(5, software, JSON.stringify({ name: 'ripple', lang: 'java' }));
-  v.run(6, person, JSON.stringify({ name: 'peter', age: 35 }));
+  const node = 'INSERT INTO nodes(id, label, props) VALUES(?,?,?)';
+  store.query(node, [1, person, JSON.stringify({ name: 'marko', age: 29 })]);
+  store.query(node, [2, person, JSON.stringify({ name: 'vadas', age: 27 })]);
+  store.query(node, [3, software, JSON.stringify({ name: 'lop', lang: 'java' })]);
+  store.query(node, [4, person, JSON.stringify({ name: 'josh', age: 32 })]);
+  store.query(node, [5, software, JSON.stringify({ name: 'ripple', lang: 'java' })]);
+  store.query(node, [6, person, JSON.stringify({ name: 'peter', age: 35 })]);
 
-  const e = store.db.prepare('INSERT INTO edges(id, src, label, tgt, props) VALUES(?,?,?,?,?)');
-  e.run(7, 1, knows, 2, JSON.stringify({ weight: 0.5 }));
-  e.run(8, 1, knows, 4, JSON.stringify({ weight: 1.0 }));
-  e.run(9, 1, created, 3, JSON.stringify({ weight: 0.4 }));
-  e.run(10, 4, created, 5, JSON.stringify({ weight: 1.0 }));
-  e.run(11, 4, created, 3, JSON.stringify({ weight: 0.4 }));
-  e.run(12, 6, created, 3, JSON.stringify({ weight: 0.2 }));
+  const edge = 'INSERT INTO edges(id, src, label, tgt, props) VALUES(?,?,?,?,?)';
+  store.query(edge, [7, 1, knows, 2, JSON.stringify({ weight: 0.5 })]);
+  store.query(edge, [8, 1, knows, 4, JSON.stringify({ weight: 1.0 })]);
+  store.query(edge, [9, 1, created, 3, JSON.stringify({ weight: 0.4 })]);
+  store.query(edge, [10, 4, created, 5, JSON.stringify({ weight: 1.0 })]);
+  store.query(edge, [11, 4, created, 3, JSON.stringify({ weight: 0.4 })]);
+  store.query(edge, [12, 6, created, 3, JSON.stringify({ weight: 0.2 })]);
 }
