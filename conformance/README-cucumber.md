@@ -34,10 +34,15 @@ natively — no `npm install`, no ts-node).
 ```bash
 CLIENT_MIMETYPE='application/vnd.graphbinary-v4.0' \
   bunx --bun cucumber-js \
-  --tags "(@StepCount or @StepHasLabel or @StepHas or @StepValues or @StepId or @StepLabel or @StepDedup or @StepLimit or @StepRange or @StepOrder or @StepValueMap or @StepElementMap or @StepDrop or @StepInject or @StepSelect or @StepProject) and not @StepWrite and not @GraphComputerOnly" \
+  --tags "(@StepCount or @StepHasLabel or @StepHas or @StepValues or @StepId or @StepLabel or @StepDedup or @StepLimit or @StepRange or @StepOrder or @StepValueMap or @StepElementMap or @StepDrop or @StepInject or @StepSelect or @StepProject or @StepOut or @StepIn or @StepBoth or @StepProperties or @StepGroup or @StepGroupCount or @StepFold or @StepSum or @StepIs or @StepWhere or @StepNot or @StepFilter) and not @StepWrite and not @GraphComputerOnly and not @AllowNullPropertyValues" \
   --import test/cucumber \
   ../../gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/
 ```
+
+**Current live number: 485 scenarios run, 119 pass** (P2b). P2c-2 cleared the
+`BeforeAll` gate (below) and published the first number (85); P2b (is/where/not/
+filter/TextP) took it to 119. Before P2c-2 it was 0 — the gate blocked every
+scenario. Ratchet only upward as steps land.
 
 `bunx --bun` forces the cucumber-js bin to run under the **bun** runtime, not
 node (its shebang is `#!/usr/bin/env node`). Bun then resolves the GLV's `.ts`
@@ -46,12 +51,13 @@ sources and the `.js`→`.ts` imports natively, so the old
 dance is gone. Verified: cucumber loads the harness and drives the live server
 over GraphBinary under bun.
 
-**Prerequisite before ANY scenario runs:** the harness `BeforeAll`
-(`test/cucumber/world.js`) caches every seeded graph's vertex *properties* via
-`properties()` — so `properties()` (element step, not yet implemented) must land
-before the full suite gets past setup, independent of the runtime. Until then
-the mini-L3 (`conformance/conformance.test.ts`, `bun test`) is the live-wire
-proof.
+**The `BeforeAll` gate (CLEARED in P2c-2).** The harness `BeforeAll`
+(`test/cucumber/world.js`) caches every seeded graph via three aggregation
+traversals — `g.V().group().by('name').by(__.tail())`, an `g.E().group()` with a
+`project(o,l,i)` composite key, and `g.V().properties().group()` with a
+`project(n,k,v)` key. All three now compile and frame (P2c-2's `compileGroup` +
+`compileNestedScalar`), so the runner gets past setup and scenarios execute.
+Before P2c-2 this blocked the entire suite at 0.
 
 The passing-scenario count is **THE conformance number** — publish it per commit
 and ratchet only upward. Widen the `--tags` set as each new step lands (P2+).

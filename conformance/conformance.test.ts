@@ -12,7 +12,8 @@ import { startConformanceServer } from './conformance-server.ts';
 const { DriverRemoteConnection } = gremlin.driver;
 const { traversal } = gremlin.process.AnonymousTraversalSource;
 const __ = gremlin.process.statics;
-const { order } = gremlin.process;
+const { order, P, TextP } = gremlin.process;
+const { gt } = P;
 
 describe('conformance host — modern graph (official ids/results)', () => {
   let server: any, drc: any, g: any;
@@ -116,6 +117,106 @@ describe('conformance host — modern graph (official ids/results)', () => {
     expect(props.length).toBe(1);
     expect(props[0].key).toBe('name');
     expect(props[0].value).toBe('marko');
+  });
+
+  // P2c-2: group/groupCount over the real wire — proves the group Map (and its
+  // vertex/edge/property values + composite Map keys) round-trips as GraphBinary.
+  test('g_V_group_byXnameX (Map<name, List<vertex>>)', async () => {
+    const m = (await g.V().group().by('name').next()).value;
+    expect(m instanceof Map).toBe(true);
+    expect(m.size).toBe(6);
+    const marko = m.get('marko');
+    expect(Array.isArray(marko)).toBe(true);
+    expect(marko[0].id).toBe(1);
+    expect(marko[0].label).toBe('person');
+  });
+
+  test('g_V_groupCount_byXlabelX (Map<label, Long>)', async () => {
+    const m = (await g.V().groupCount().by(__.label()).next()).value;
+    expect(m.get('person')).toBe(4n);
+    expect(m.get('software')).toBe(2n);
+  });
+
+  test('g_V_group_byXnameX_byXageX (Map<name, List<Int>>; software → [])', async () => {
+    const m = (await g.V().group().by('name').by('age').next()).value;
+    expect(m.get('marko')).toEqual([29]);
+    expect(m.get('lop')).toEqual([]); // no age → filtered to empty list
+  });
+
+  test('g_V_valuesXageX_sum / g_V_valuesXnameX_fold (reducers over the wire)', async () => {
+    // sum of int ages → Int (d[123].i), deserializes as a JS number, not BigInt.
+    expect((await g.V().hasLabel('person').values('age').sum().next()).value).toBe(123);
+    const list = (await g.V().values('name').fold().next()).value;
+    expect(Array.isArray(list)).toBe(true);
+    expect(list.sort()).toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+  });
+
+  test('g_V_group_byXageX excludes software (no null-keyed group)', async () => {
+    const m = (await g.V().group().by('age').next()).value;
+    expect(m.size).toBe(4); // 4 person ages; lop/ripple (no age) excluded
+    expect([...m.keys()].some((k) => k === null)).toBe(false);
+  });
+
+  // P2b: is/where/not/TextP over the real wire.
+  test('g_V_valuesXageX_isXgt30X / count_is (is over the wire)', async () => {
+    expect((await g.V().values('age').is(gt(30)).toList()).sort()).toEqual([32, 35]);
+    expect((await g.V().hasLabel('person').count().is(gt(3)).next()).value).toBe(4n);
+  });
+
+  test('g_V_whereXoutXknowsXX / not / TextP (filters over the wire)', async () => {
+    expect(await g.V().where(__.out('knows')).values('name').toList()).toEqual(['marko']);
+    expect((await g.V().not(__.out('created')).values('name').toList()).sort()).toEqual(['lop', 'ripple', 'vadas']);
+    expect(await g.V().has('name', TextP.startingWith('jo')).values('name').toList()).toEqual(['josh']);
+  });
+
+  test('g_V_asXaX_out_created_in_created_whereXneqXaXX (co-creator alias-compare)', async () => {
+    const names = (await g.V().as('a').out('created').in_('created').where(P.neq('a')).values('name').toList()).sort();
+    expect(names).toEqual(['josh', 'josh', 'marko', 'marko', 'peter', 'peter']);
+  });
+
+  test('sum of doubles landing on a whole number stays Double (not Long)', async () => {
+    // ripple(5) has one incident edge, weight 1.0 → sum 1.0. Must frame as Double
+    // (d[1.0].d → JS number), not Long (which deserializes as BigInt). Guards the
+    // typeof(SUM) framing fix.
+    const v = (await g.V(5).bothE().values('weight').sum().next()).value;
+    expect(v).toBe(1.0);
+    expect(typeof v).toBe('number');
+  });
+
+  test('g_VX1X_outEXknowsX_fold (List<edge> with materialised props)', async () => {
+    const list = (await g.V(1).outE('knows').fold().next()).value;
+    expect(list.length).toBe(2);
+    expect(list.every((e: any) => e.label === 'knows')).toBe(true);
+    expect(list.every((e: any) => e.properties.some((p: any) => p.key === 'weight'))).toBe(true);
+  });
+
+  // The exact L3 BeforeAll gate traversals (world.js getVertices/getEdges/
+  // getVertexProperties) — these must pass or NO upstream scenario runs.
+  test('gate: g.V().group().by("name").by(__.tail()) (Map<name, vertex>)', async () => {
+    const m = (await g.V().group().by('name').by(__.tail()).next()).value;
+    expect(m.size).toBe(6);
+    expect(m.get('marko').id).toBe(1);
+    expect(m.get('ripple').id).toBe(5);
+  });
+
+  test('gate: g.E().group().by(project o/l/i).by(tail) (Map<Map, edge>)', async () => {
+    const m = (await g.E().group()
+      .by(__.project('o', 'l', 'i').by(__.outV().values('name')).by(__.label()).by(__.inV().values('name')))
+      .by(__.tail()).next()).value;
+    expect(m.size).toBe(6);
+    // find the marko-created->lop key
+    const entry = [...m.entries()].find(([k]: any) => k.get('o') === 'marko' && k.get('l') === 'created' && k.get('i') === 'lop');
+    expect(entry).toBeDefined();
+    expect(entry![1].id).toBe(9); // the edge
+  });
+
+  test('gate: g.V().properties().group().by(project n/k/v).by(tail) (Map<Map, property>)', async () => {
+    const m = (await g.V().properties().group()
+      .by(__.project('n', 'k', 'v').by(__.element().values('name')).by(__.key()).by(__.value()))
+      .by(__.tail()).next()).value;
+    expect(m.size).toBe(12); // 6 vertices × 2 props each
+    const entry = [...m.entries()].find(([k]: any) => k.get('n') === 'marko' && k.get('k') === 'name');
+    expect(entry![1].value).toBe('marko');
   });
 });
 

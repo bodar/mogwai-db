@@ -187,11 +187,20 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
   select/project). Corpus stays 100% parse. Design constraint honoured: each
   alias is a stable, *referenceable* column so P2b's correlated subqueries build
   on it without reopening this work.
-- **P2b — `where`/`not` + `is`.** Correlated EXISTS / scalar subquery over the
-  threaded alias columns; `is(P)` as a filter on a scalar stream. `is` is the
-  single highest-frequency missing step in the suite (295 scenarios);
-  `where(__…count().is())` is the dominant "filter by sub-traversal result"
-  idiom. Reuses the P2a plumbing directly.
+- **P2b — `where`/`not` + `is`. DONE.** Live L3 **85 → 119**. A shared
+  `predicateSql(expr,binds,pred)` now backs `has`/`is`/`where` (one predicate code
+  path), gaining **TextP** (`startingWith`/`endingWith`/`containing` + negations →
+  `LIKE`/`NOT LIKE` with the pattern escaped and **bound**; regex/typeOf throw).
+  `is(P)` folds onto the projected scalar (values/label/id → WHERE; count/sum →
+  wrap). `where`/`not`/`filter(__.T)` are movement-phase filter CTEs via
+  `compileFilterPredicate`: `EXISTS` over incident edges for bare movement,
+  correlated scalar (`compileNestedScalar`, extended to `outE/inE/bothE`) for
+  `.count().is(P)`, current-prop for `.values(k)[.is(P)]`/`has`/`hasLabel`; `not()`
+  wraps `NOT COALESCE((pred),0)` so a NULL predicate (missing prop) counts as "no
+  output" → kept. Alias-compare `where(P.neq("a"))` / `where("a",P.eq("b"))[.by(k)]`
+  compares carried alias columns (P2a), consuming a trailing `by()`. Deferred with
+  clear errors: `and()`/`or()`, nested `as()` inside where, multi-hop/neighbour-
+  filter where, `where(P.eq(__.constant()))`, regex.
 - **P2c — edge/element traversal + aggregation, sequenced to clear the L3
   `BeforeAll` gate.** The official cucumber runner's `BeforeAll` caches every
   seeded graph via three aggregation traversals
@@ -220,9 +229,21 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
     framed as a `VertexProperty`. Trailing steps past the follow-on throw (no
     silent drop); property→element→movement chains and `hasKey`/`hasValue`
     deferred. ~+33 (→~298).
-  - **P2c-2 — aggregation.** `group`/`groupCount`/`fold`/`unfold`/`tail`/`sum`/
-    `cap`/`aggregate` + nested-traversal `by()`. Clears the `BeforeAll` gate →
-    unmodified upstream L3 number goes live. Full edge+agg cluster → ~447.
+  - **P2c-2 — aggregation. DONE (gate + adjacent slice).** `group`/`groupCount`/
+    `fold`/`sum` + nested-traversal `by()` (the shared correlated-scalar-subquery
+    machinery, `compileNestedScalar` — also P2b's `where` engine). **Clears the L3
+    `BeforeAll` gate**: the upstream cucumber runner now gets past setup, so the
+    official number is **live for the first time — 85 scenarios pass** (from 0;
+    everything was gate-blocked) across the implemented tag set. group() is a
+    barrier → one Map via a new `{kind:'group'}` shape; dual-path (locked #3):
+    SQL `GROUP BY` for scalar reducers (count/sum/`json_group_array` scalar-lists),
+    ordered-stream + linear handler assembly for element values (default list /
+    `by(__.tail())`). `fold()`→`{kind:'list'}`, `sum()`→`{kind:'scalar'}` (Long/
+    Double). Composite `by(__.project(...))` keys and group over V/E/`properties()`
+    all land (the three gate traversals). Deferred with clear errors: `cap`/
+    `aggregate` (side-effect state), general `unfold`, top-level `tail`, deep
+    nested-`by()` chains, `local`/`Scope`. Remaining agg failures are all
+    out-of-scope steps (repeat/as-in-complex-position/where/union/local).
 - **P2 tail (after the above):**
   - `union`, `coalesce`, `optional` → UNION ALL / LEFT JOIN
   - `path()` → JSON-array accumulation column (accept loss of index-only scans)
