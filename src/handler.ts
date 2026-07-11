@@ -55,6 +55,13 @@ function edgeBuffer(id: number, label: string, src: number, tgt: number, props: 
   ]);
 }
 
+// properties(): a standalone VertexProperty element per (owner, key, value) row.
+// Synthetic id (owner:key) — we don't persist per-property ids; scenario
+// comparison keys on key+value+owning element, not on this id.
+function propertyBuffer(owner: number, key: string, value: any): Buffer {
+  return ioc.anySerializer.serialize(new VertexProperty(`${owner}:${key}`, key, value, []));
+}
+
 // valueMap()/valueMap(true)/valueMap(keys...): Map<key, [values]>; with tokens,
 // prepend the T.id/T.label entries (T tokens ride as GraphBinary DataType.T).
 function valueMapBuffer(id: number, label: string, props: Record<string, any>,
@@ -118,6 +125,7 @@ function execute(store: GraphStore, gremlin: string, params: Record<string, any>
     case 'count': return rows.map((r) => ioc.anySerializer.serialize(BigInt(r.v)));
     case 'value': return rows.map((r) => ioc.anySerializer.serialize(r.v));
     case 'map': return rows.map((r) => mapBuffer(r, shape.entries));
+    case 'property': return rows.map((r) => propertyBuffer(r.owner, r.pk, r.pv));
     case 'discard': return [];
   }
 }

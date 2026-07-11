@@ -212,9 +212,14 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
     edge-typed label throws (would otherwise silently join `nodes`). Deferred
     with clear errors: edge `drop()`, edge `elementMap()` (needs IN/OUT tokens),
     edge-valued `select`/`project`. ~+57 (→~265).
-  - **P2c-1b — property elements.** `properties`/`element`/`key`/`value`: the
-    traverser becomes a property (owner+key+value, a `json_each` expansion —
-    multi-column, harder than edges). ~+33.
+  - **P2c-1b — property elements. DONE.** `properties(keys?)` then an optional
+    `key`/`value`/`count`/`element`[`.values(k)`/`.id`/`.label`/`.count`]. The
+    traverser is a property — a `json_each(props)` expansion carrying owner
+    id/label/props + key(pk)/value(pv) — compiled in its own tail fn
+    (`compileProperties`) rather than the movement phase. New `property` shape
+    framed as a `VertexProperty`. Trailing steps past the follow-on throw (no
+    silent drop); property→element→movement chains and `hasKey`/`hasValue`
+    deferred. ~+33 (→~298).
   - **P2c-2 — aggregation.** `group`/`groupCount`/`fold`/`unfold`/`tail`/`sum`/
     `cap`/`aggregate` + nested-traversal `by()`. Clears the `BeforeAll` gate →
     unmodified upstream L3 number goes live. Full edge+agg cluster → ~447.
