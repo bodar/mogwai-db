@@ -200,11 +200,18 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
   `g.V().properties().group().by(__.project("n","k","v").by(__.element().values('name')).by(__.key()).by(__.value()))`)
   — so *no* upstream L3 scenario runs until that whole cluster works. Split
   (coverage vs the 2099-scenario suite, cumulative from P2a's 208):
-  - **P2c-1 — edge traversal proper.** `E`, `outE`/`inE`/`bothE`,
+  - **P2c-1 — edge traversal proper. DONE.** `E`, `outE`/`inE`/`bothE`,
     `outV`/`inV`/`bothV`, and edge-aware `has`/`hasLabel`/`label`/`values`/
-    `count`/`order`. The id-relation becomes *typed*: `id` is a node-id or
-    edge-id, tracked statically by the compiler (no runtime tag). New `edge`
-    result shape. ~+57 (→~265).
+    `count`/`order`/`valueMap`. The id-relation is now *typed*: `id` is a
+    node-id or edge-id, tracked statically by the compiler (`Elem`, no runtime
+    tag); `outE/inE/bothE` flip it to edge, `outV/inV/bothV` back to node,
+    wrong-kind uses throw. New `edge` result shape framed by `handler.ts`
+    `edgeBuffer` — materialises edge props as `Property` elements
+    (`EdgeSerializer` hardcodes empty props, same bug `vertexBuffer` works
+    around). Alias bindings record the element kind so `select`/`project` of an
+    edge-typed label throws (would otherwise silently join `nodes`). Deferred
+    with clear errors: edge `drop()`, edge `elementMap()` (needs IN/OUT tokens),
+    edge-valued `select`/`project`. ~+57 (→~265).
   - **P2c-1b — property elements.** `properties`/`element`/`key`/`value`: the
     traverser becomes a property (owner+key+value, a `json_each` expansion —
     multi-column, harder than edges). ~+33.
@@ -258,8 +265,9 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
 | addV/property, addE (restricted) | INSERT RETURNING | done | excellent |
 | drop | DELETE + CTE targets | done | excellent |
 | order/range/skip/valueMap/elementMap/inject | SQL / json_extract | done | excellent |
+| E/outE/inE/bothE/outV/inV/bothV | typed id-relation + edge shape | done | excellent |
+| as/select/project/by(key\|vertex) | column threading | done | very good |
 | mergeV/mergeE | UPSERT RETURNING | easy | excellent |
-| as/select/project/by | column threading | medium | very good |
 | where/not (anon traversals) | correlated EXISTS | medium | good |
 | union/coalesce/optional | UNION ALL/LEFT JOIN | medium | good |
 | repeat/until/emit | recursive CTE + guard | medium | good |

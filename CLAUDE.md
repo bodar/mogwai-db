@@ -156,13 +156,25 @@ locked decision). `makeHandler` now takes a `StoreSource` (a store *or* a
 `(g)=>store` resolver). See `conformance/README-cucumber.md` to run the full
 suite.
 
-## Immediate next work (P2 in PLAN.md)
+## Immediate next work (P2c in PLAN.md)
 
-The as()/select()/by()/project() column-threading compiler — the structural
-piece everything Medium-tier hangs off (each `as('a')` adds an `a_id` column to
-every subsequent CTE). Design carefully; it's where this project is won or lost.
-`by()` already parses as its own step (currently only attached to `order()`);
-extend it to select/project. Also publish the first full L3 cucumber score.
+P2a (as/select/project/by column-threading) and P2c-1 (edge traversal — the
+typed node/edge id-relation, edge shape, `edgeBuffer`) are DONE. The remaining
+P2c work is sequenced to clear the L3 `BeforeAll` gate (the upstream cucumber
+runner caches every seeded graph via `group`/`project`-nested-`by`/`tail`/`E`/
+`properties`/`element`/`key`/`value` — *no* upstream scenario runs until that
+whole cluster works, so that's what unlocks the first published L3 score):
+
+- **P2c-1b — property elements** (`properties`/`element`/`key`/`value`). The
+  traverser becomes a *property* — owner id + key + value, a `json_each`
+  expansion over `props`, i.e. a multi-column traverser (harder than edges,
+  which stayed single-`id`). Thread the extra pkey/pval columns like the alias
+  columns; `element()` flips the static `Elem` back to node (id unchanged),
+  `key()`/`value()` project the expansion columns.
+- **P2c-2 — aggregation** (`group`/`groupCount`/`fold`/`unfold`/`tail`/`sum` +
+  nested-traversal `by()`). Clears the gate → publish the first L3 score.
+
+Then P2b (where/not/is) and the P2 tail (union/coalesce/optional, path).
 
 ## Environment notes
 
