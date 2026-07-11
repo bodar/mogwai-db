@@ -1,6 +1,6 @@
 import type { GraphStore } from './storage.ts';
 import { parseGremlin, stepChain, stepName, type Step, type Pred } from './frontend.ts';
-import { render, compiled, type Compiled, type WritePlan, type Shape, type MapEntry, type ElemShape, type GroupKey, type GroupVal } from './render.ts';
+import { render, compiled, readCompiled, withPrefixTree, type CteDef, type Compiled, type WritePlan, type Shape, type MapEntry, type ElemShape, type GroupKey, type GroupVal } from './render.ts';
 // Re-export the compile-output contract so handler.ts / tests keep importing it here.
 export type { Compiled, WritePlan, Shape, MapEntry, ElemShape, GroupKey, GroupVal } from './render.ts';
 import { P_OPS, propExtract, labelIn, edgeLabelFilter, predicateSql, rangeToOffsetLimit, dirsFor, type Elem,
@@ -9,6 +9,8 @@ import { P_OPS, propExtract, labelIn, edgeLabelFilter, predicateSql, rangeToOffs
 // lazyrecords typed SQL construction (bind-safe: params derive from the tree).
 import { sql as lsql } from '@bodar/lazyrecords/sql/template/Sql.ts';
 import { text as sqlText } from '@bodar/lazyrecords/sql/template/Text.ts';
+import { expression, list } from '@bodar/lazyrecords/sql/template/Compound.ts';
+import { value } from '@bodar/lazyrecords/sql/template/Value.ts';
 import { cte } from '@bodar/lazyrecords/sql/ansi/CommonTableExpression.ts';
 import { withClause } from '@bodar/lazyrecords/sql/ansi/WithClause.ts';
 import { valuesClause } from '@bodar/lazyrecords/sql/ansi/ValuesClause.ts';
@@ -74,14 +76,13 @@ export function compile(gremlin: string, params: Record<string, any>): Compiled 
 
 /** A union() branch (currently a single out/in/both movement) → a SELECT of the
  *  neighbour node ids from `seed`. Non-movement / multi-step branches defer. */
-function branchMovementSelect(bs: Step[], seed: string): { sql: string; binds: any[] } {
+function branchMovementSelect(bs: Step[], seed: string): Expression {
   if (bs.length !== 1 || (bs[0].name !== 'out' && bs[0].name !== 'in' && bs[0].name !== 'both'))
     throw new Error(`union() branch __.${bs.map((s) => s.name + '()').join('.')} not yet supported (single out()/in()/both() only)`);
   const mv = bs[0];
-  const lf = edgeLabelFilter(mv.args);
-  const binds: any[] = [];
-  const sel = dirsFor(mv.name).map(([from, to]) => { binds.push(...lf.binds); return `SELECT e.${to} AS id FROM edges e JOIN ${seed} p ON e.${from}=p.id${lf.sql}`; });
-  return { sql: sel.join(' UNION ALL '), binds };
+  const sel = dirsFor(mv.name).map(([from, to]) =>
+    lsql(sqlText(`SELECT e.${to} AS id FROM edges e JOIN ${seed} p ON e.${from}=p.id`), edgeLabelFilter(mv.args)));
+  return list(sel, sqlText(' UNION ALL '));
 }
 
 /** Bound as() labels: label -> its carried column and the element kind it holds. */
@@ -94,9 +95,8 @@ function aliasIdExpr(label: string, aliases: AliasMap): string {
   return `p.${entry.col}`;
 }
 
-function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes: string[]; binds: any[]; stop: number; indexKeys: Set<string>; aliases: AliasMap; elem: Elem } {
-  const ctes: string[] = [];
-  const binds: any[] = [];
+function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes: CteDef[]; stop: number; indexKeys: Set<string>; aliases: AliasMap; elem: Elem } {
+  const ctes: CteDef[] = [];
   const indexKeys = new Set<string>();
   // as('x') labels: label -> { synthetic column name (a0,a1,… — user strings
   // never enter SQL identifiers, injection-safe, and stable so a later
@@ -105,8 +105,10 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
   // bound a label stays live to the end (Gremlin never unbinds one), so every
   // CTE after the bind carries every bound alias column forward from `p`.
   const aliases: AliasMap = new Map();
-  const prev = () => `c${ctes.length - 1}`;
+  const prev = () => ctes[ctes.length - 1].name;
   const carry = () => [...aliases.values()].map((a) => `, p.${a.col}`).join('');
+  // Each movement/filter step appends one CTE, named c0, c1, … by position.
+  const push = (body: Expression, cols?: string[]) => ctes.push({ name: `c${ctes.length}`, body, cols });
 
   const first = steps[0];
   if (first.name !== 'V' && first.name !== 'E') throw new Error(`unsupported source step: ${first.name}`);
@@ -118,13 +120,13 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
     // still projects `id` (the rowid).
     const nums = first.args.filter((a) => typeof a === 'number');
     const strs = first.args.filter((a) => typeof a === 'string');
-    const clauses: string[] = [];
-    if (nums.length) { clauses.push(`id IN (${nums.map(() => '?').join(',')})`); binds.push(...nums); }
-    if (strs.length) { clauses.push(`uid IN (${strs.map(() => '?').join(',')})`); binds.push(...strs); }
+    const clauses: Expression[] = [];
+    if (nums.length) clauses.push(lsql(sqlText('id IN ('), list(nums.map(value), sqlText(',')), sqlText(')')));
+    if (strs.length) clauses.push(lsql(sqlText('uid IN ('), list(strs.map(value), sqlText(',')), sqlText(')')));
     if (!clauses.length) throw new Error('V()/E() ids must be numbers or strings');
-    ctes.push(`c0 AS (SELECT id FROM ${srcTable} WHERE ${clauses.join(' OR ')})`);
+    push(lsql(sqlText(`SELECT id FROM ${srcTable} WHERE `), list(clauses, sqlText(' OR '))));
   } else {
-    ctes.push(`c0 AS (SELECT id FROM ${srcTable})`);
+    push(sqlText(`SELECT id FROM ${srcTable}`));
   }
 
   let i = 1;
@@ -144,24 +146,21 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
           rebind.push(entry.col);
         }
         const cols = ['id', ...[...aliases.values()].map((a) => rebind.includes(a.col) ? `id AS ${a.col}` : a.col)];
-        ctes.push(`c${ctes.length} AS (SELECT ${cols.join(', ')} FROM ${prev()})`);
+        push(sqlText(`SELECT ${cols.join(', ')} FROM ${prev()}`));
         break;
       }
       case 'hasLabel': {
         const tbl = elem === 'edge' ? 'edges' : 'nodes';
-        const lf = labelIn('n.label', s.args);
-        ctes.push(`c${ctes.length} AS (SELECT n.id${carry()} FROM ${tbl} n JOIN ${prev()} p ON n.id=p.id WHERE ${lf.sql})`);
-        binds.push(...lf.binds);
+        push(lsql(sqlText(`SELECT n.id${carry()} FROM ${tbl} n JOIN ${prev()} p ON n.id=p.id WHERE `), labelIn('n.label', s.args)));
         break;
       }
       case 'has': {
         const tbl = elem === 'edge' ? 'edges' : 'nodes';
-        const conds: string[] = [];
-        const hbinds: any[] = [];
+        const conds: Expression[] = [];
         let a = s.args;
         // has(label, key, value) — the 3-arg overload folds in a label filter.
         if (a.length === 3 && typeof a[0] === 'string') {
-          conds.push('n.label IN (SELECT id FROM labels WHERE name=?)'); hbinds.push(a[0]);
+          conds.push(lsql(sqlText('n.label IN (SELECT id FROM labels WHERE name='), value(a[0]), sqlText(')')));
           a = a.slice(1);
         }
         const [key, val] = a;
@@ -172,18 +171,15 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
           const expr = key.token === 'label' ? '(SELECT name FROM labels WHERE id=n.label)'
             : key.token === 'id' ? 'COALESCE(n.uid, n.id)'
             : (() => { throw new Error(`has(T.${key.token}) not supported`); })();
-          const r = render(predicateSql(sqlText(expr), val));
-          conds.push(r.sql); hbinds.push(...r.binds);
+          conds.push(predicateSql(sqlText(expr), val));
         } else {
           const pe = propExtract('n.props', key); // literal path for indexable keys
           // Only node property indexes are auto-built (ensureNodePropIndex); an
           // edge has() filters correctly but stays unindexed for now.
           if (pe.indexKey && elem === 'node') indexKeys.add(pe.indexKey);
-          const r = render(predicateSql(pe.expr, val));
-          conds.push(r.sql); hbinds.push(...r.binds);
+          conds.push(predicateSql(pe.expr, val));
         }
-        ctes.push(`c${ctes.length} AS (SELECT n.id${carry()} FROM ${tbl} n JOIN ${prev()} p ON n.id=p.id WHERE ${conds.join(' AND ')})`);
-        binds.push(...hbinds);
+        push(lsql(sqlText(`SELECT n.id${carry()} FROM ${tbl} n JOIN ${prev()} p ON n.id=p.id WHERE `), list(conds, sqlText(' AND '))));
         break;
       }
       case 'where': case 'filter': case 'not': {
@@ -194,12 +190,11 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
         const arg0 = s.args[0];
         const tbl = elem === 'edge' ? 'edges' : 'nodes';
         const ctx: ScalarCtx = { elem, idExpr: 'n.id', propsExpr: 'n.props', labelIdExpr: 'n.label', srcExpr: 'n.src', tgtExpr: 'n.tgt' };
-        let test: string; const fbinds: any[] = [];
+        let testNode: Expression;
         if (arg0 && typeof arg0 === 'object' && 'nested' in arg0) {
           const pred = compileFilterPredicate(stepChain(arg0.nested, params), ctx, params);
           for (const k of pred.indexKeys) indexKeys.add(k);
-          test = s.name === 'not' ? `NOT COALESCE((${pred.sql}), 0)` : pred.sql;
-          fbinds.push(...pred.binds);
+          testNode = s.name === 'not' ? lsql(sqlText('NOT COALESCE(('), pred.expr, sqlText('), 0)')) : pred.expr;
         } else {
           // Alias-compare: where("a", P.eq("b")) (label vs label) or
           // where(P.neq("a")) (current traverser vs label), optionally .by(key)
@@ -216,16 +211,14 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
             // propAt reads the nodes table; an edge-typed operand would silently
             // read a vertex's props (ids collide across spaces) → reject.
             if (leftElem === 'edge' || rightElem === 'edge') throw new Error('where().by(key) on an edge-typed label not yet supported');
-            const l = render(propAt(left, null, byKey).expr), r = render(propAt(right, null, byKey).expr);
-            test = `${l.sql} ${P_OPS[pred.op]} ${r.sql}`; fbinds.push(...l.binds, ...r.binds);
+            testNode = expression(propAt(left, null, byKey).expr, sqlText(P_OPS[pred.op]), propAt(right, null, byKey).expr);
             i++; // consume the by() modulator
           } else {
-            test = `${left} ${P_OPS[pred.op]} ${right}`;
+            testNode = sqlText(`${left} ${P_OPS[pred.op]} ${right}`);
           }
-          if (s.name === 'not') test = `NOT COALESCE((${test}), 0)`;
+          if (s.name === 'not') testNode = lsql(sqlText('NOT COALESCE(('), testNode, sqlText('), 0)'));
         }
-        ctes.push(`c${ctes.length} AS (SELECT n.id${carry()} FROM ${tbl} n JOIN ${prev()} p ON n.id=p.id WHERE ${test})`);
-        binds.push(...fbinds);
+        push(lsql(sqlText(`SELECT n.id${carry()} FROM ${tbl} n JOIN ${prev()} p ON n.id=p.id WHERE `), testNode));
         break;
       }
       case 'and': case 'or': {
@@ -234,8 +227,7 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
         const ctx: ScalarCtx = { elem, idExpr: 'n.id', propsExpr: 'n.props', labelIdExpr: 'n.label', srcExpr: 'n.src', tgtExpr: 'n.tgt' };
         const pred = combineBranchPreds(s, ctx, params, s.name === 'and' ? 'AND' : 'OR');
         for (const k of pred.indexKeys) indexKeys.add(k);
-        ctes.push(`c${ctes.length} AS (SELECT n.id${carry()} FROM ${tbl} n JOIN ${prev()} p ON n.id=p.id WHERE ${pred.sql})`);
-        binds.push(...pred.binds);
+        push(lsql(sqlText(`SELECT n.id${carry()} FROM ${tbl} n JOIN ${prev()} p ON n.id=p.id WHERE `), pred.expr));
         break;
       }
       case 'union': {
@@ -247,8 +239,7 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
         const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
         if (branches.length < 2) throw new Error('union() needs at least two branches');
         const parts = branches.map((b) => branchMovementSelect(stepChain(b.nested, params), prev()));
-        ctes.push(`c${ctes.length} AS (${parts.map((p) => p.sql).join(' UNION ALL ')})`);
-        for (const p of parts) binds.push(...p.binds);
+        push(list(parts, sqlText(' UNION ALL ')));
         break;
       }
       case 'optional': {
@@ -261,9 +252,7 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
         if (bs.length !== 1 || (bs[0].name !== 'out' && bs[0].name !== 'in'))
           throw new Error(`optional(__.${bs[0]?.name}()) not yet supported (single out()/in() only)`);
         const [from, to] = dirsFor(bs[0].name)[0];
-        const lf = edgeLabelFilter(bs[0].args);
-        ctes.push(`c${ctes.length} AS (SELECT COALESCE(e.${to}, p.id) AS id FROM ${prev()} p LEFT JOIN edges e ON e.${from}=p.id${lf.sql})`);
-        binds.push(...lf.binds);
+        push(lsql(sqlText(`SELECT COALESCE(e.${to}, p.id) AS id FROM ${prev()} p LEFT JOIN edges e ON e.${from}=p.id`), edgeLabelFilter(bs[0].args)));
         break;
       }
       case 'repeat': case 'emit': case 'times': case 'until': {
@@ -299,40 +288,33 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
           throw new Error(`repeat(__.${body.map((s) => s.name + '()').join('.')}) not yet supported (single out()/in()/both() only)`);
         const mv = body[0];
         const maxDepth = Number(timesStep.args[0]); // always present (checked above) → bounded depth
-        const lf = edgeLabelFilter(mv.args);
         const w = `w${ctes.length}`;
         const rec = dirsFor(mv.name).map(([from, to]) =>
-          `SELECT e.${to} AS id, ${w}.depth + 1 AS depth FROM ${w} JOIN edges e ON e.${from}=${w}.id WHERE ${w}.depth < ${maxDepth}${lf.sql}`);
-        ctes.push(`${w}(id, depth) AS (SELECT id, 0 AS depth FROM ${prev()} UNION ALL ${rec.join(' UNION ALL ')})`);
-        for (const _ of dirsFor(mv.name)) binds.push(...lf.binds);
+          lsql(sqlText(`SELECT e.${to} AS id, ${w}.depth + 1 AS depth FROM ${w} JOIN edges e ON e.${from}=${w}.id WHERE ${w}.depth < ${maxDepth}`), edgeLabelFilter(mv.args)));
+        ctes.push({ name: w, cols: ['id', 'depth'], body: lsql(sqlText(`SELECT id, 0 AS depth FROM ${prev()} UNION ALL `), list(rec, sqlText(' UNION ALL '))) });
         // times() only → the final depth; emit after → every iteration (≥1);
         // emit before → also the starting traverser (≥0).
         const depthCond = !emitStep ? `depth = ${maxDepth}` : emitBefore ? 'depth >= 0' : 'depth >= 1';
-        ctes.push(`c${ctes.length} AS (SELECT id FROM ${w} WHERE ${depthCond})`);
+        push(sqlText(`SELECT id FROM ${w} WHERE ${depthCond}`));
         i = j - 1; // consume the whole cluster (loop's i++ steps past it)
         break;
       }
       case 'out': case 'in': case 'both': {
         if (elem !== 'node') throw new Error(`${s.name}() expects a vertex, not an ${elem}`);
-        const dirs = dirsFor(s.name);
-        const lf = edgeLabelFilter(s.args);
         // Movement carries the alias columns unchanged from p while id moves to
         // the neighbour — this is what recovers "the vertex before the hop".
-        const selects = dirs.map(([from, to]) =>
-          `SELECT e.${to} AS id${carry()} FROM edges e JOIN ${prev()} p ON e.${from}=p.id${lf.sql}`);
-        ctes.push(`c${ctes.length} AS (${selects.join(' UNION ALL ')})`);
-        for (const _ of dirs) binds.push(...lf.binds);
+        const selects = dirsFor(s.name).map(([from, to]) =>
+          lsql(sqlText(`SELECT e.${to} AS id${carry()} FROM edges e JOIN ${prev()} p ON e.${from}=p.id`), edgeLabelFilter(s.args)));
+        push(list(selects, sqlText(' UNION ALL ')));
         break;
       }
       case 'outE': case 'inE': case 'bothE': {
         // vertex → incident edges. The new id is the EDGE id; elem becomes edge.
         if (elem !== 'node') throw new Error(`${s.name}() expects a vertex, not an ${elem}`);
         const froms = s.name === 'outE' ? ['src'] : s.name === 'inE' ? ['tgt'] : ['src', 'tgt'];
-        const lf = edgeLabelFilter(s.args);
         const selects = froms.map((from) =>
-          `SELECT e.id AS id${carry()} FROM edges e JOIN ${prev()} p ON e.${from}=p.id${lf.sql}`);
-        ctes.push(`c${ctes.length} AS (${selects.join(' UNION ALL ')})`);
-        for (const _ of froms) binds.push(...lf.binds);
+          lsql(sqlText(`SELECT e.id AS id${carry()} FROM edges e JOIN ${prev()} p ON e.${from}=p.id`), edgeLabelFilter(s.args)));
+        push(list(selects, sqlText(' UNION ALL ')));
         elem = 'edge';
         break;
       }
@@ -341,8 +323,8 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
         if (elem !== 'edge') throw new Error(`${s.name}() expects an edge, not a ${elem}`);
         const cols = s.name === 'outV' ? ['src'] : s.name === 'inV' ? ['tgt'] : ['src', 'tgt'];
         const selects = cols.map((col) =>
-          `SELECT e.${col} AS id${carry()} FROM edges e JOIN ${prev()} p ON e.id=p.id`);
-        ctes.push(`c${ctes.length} AS (${selects.join(' UNION ALL ')})`);
+          sqlText(`SELECT e.${col} AS id${carry()} FROM edges e JOIN ${prev()} p ON e.id=p.id`));
+        push(list(selects, sqlText(' UNION ALL ')));
         elem = 'node';
         break;
       }
@@ -353,40 +335,40 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
         // dedup("a") and dedup-with-active-labels rather than answer wrongly.
         if (s.args.length > 0) throw new Error('dedup(label) not yet supported');
         if (aliases.size > 0) throw new Error('dedup() after as() not yet supported (path-distinct semantics)');
-        ctes.push(`c${ctes.length} AS (SELECT DISTINCT id FROM ${prev()})`);
+        push(sqlText(`SELECT DISTINCT id FROM ${prev()}`));
         break;
       // limit/range/skip compose as CTEs while still on the id-relation (before
       // any order()); once order() is seen they fold into the final select as
       // tail modifiers so ORDER BY + LIMIT + OFFSET stay in one query.
       case 'limit':
-        ctes.push(`c${ctes.length} AS (SELECT p.id${carry()} FROM ${prev()} p LIMIT ${Number(s.args[0])})`);
+        push(sqlText(`SELECT p.id${carry()} FROM ${prev()} p LIMIT ${Number(s.args[0])}`));
         break;
       case 'range': {
         const { offset, limit } = rangeToOffsetLimit(s.args);
-        ctes.push(`c${ctes.length} AS (SELECT p.id${carry()} FROM ${prev()} p LIMIT ${limit} OFFSET ${offset})`);
+        push(sqlText(`SELECT p.id${carry()} FROM ${prev()} p LIMIT ${limit} OFFSET ${offset}`));
         break;
       }
       case 'skip':
-        ctes.push(`c${ctes.length} AS (SELECT p.id${carry()} FROM ${prev()} p LIMIT -1 OFFSET ${Number(s.args[0])})`);
+        push(sqlText(`SELECT p.id${carry()} FROM ${prev()} p LIMIT -1 OFFSET ${Number(s.args[0])}`));
         break;
       default:
-        return { ctes, binds, stop: i, indexKeys, aliases, elem };
+        return { ctes, stop: i, indexKeys, aliases, elem };
     }
   }
-  return { ctes, binds, stop: i, indexKeys, aliases, elem };
+  return { ctes, stop: i, indexKeys, aliases, elem };
 }
 
 interface OrderClause { key: string | null; dir: 'asc' | 'desc' | 'shuffle'; }
 
 function compileRead(steps: Step[], params: Record<string, any> = {}): Compiled {
-  const { ctes, binds, stop, indexKeys, aliases, elem } = traversalCtes(steps, params);
-  const last = `c${ctes.length - 1}`;
+  const { ctes, stop, indexKeys, aliases, elem } = traversalCtes(steps, params);
+  const last = ctes[ctes.length - 1].name;
 
   // properties() turns the traverser into a property (owner+key+value) — a shape
   // the node/edge id-relation can't carry, so it and its follow-ons (key/value/
   // element/count) compile in their own tail fn rather than the movement phase.
   if (steps[stop]?.name === 'properties')
-    return compileProperties(ctes, binds, last, elem, steps.slice(stop), indexKeys, params);
+    return compileProperties(ctes, last, elem, steps.slice(stop), indexKeys, params);
 
   // group()/groupCount() is a barrier over the current element stream → one Map.
   if (steps[stop]?.name === 'group' || steps[stop]?.name === 'groupCount') {
@@ -395,7 +377,7 @@ function compileRead(steps: Step[], params: Record<string, any> = {}): Compiled 
     const tbl = elem === 'edge' ? 'edges' : 'nodes';
     const ctx: ScalarCtx = { elem, idExpr: 'n.id', extIdExpr: 'COALESCE(n.uid, n.id)', propsExpr: 'n.props', labelIdExpr: 'n.label', srcExpr: 'n.src', tgtExpr: 'n.tgt' };
     const src: GroupSource = { from: `${tbl} n JOIN ${last} p ON n.id=p.id`, ctx, elem: elem === 'edge' ? 'edge' : 'vertex' };
-    return compileGroup(steps[stop].name === 'groupCount', bys, src, ctes, binds, indexKeys, params);
+    return compileGroup(steps[stop].name === 'groupCount', bys, src, ctes, indexKeys, params);
   }
 
   // Tail phase: an optional projection + order()/range()/skip()/limit() and dedup.
@@ -461,34 +443,35 @@ function compileRead(steps: Step[], params: Record<string, any> = {}): Compiled 
   }
 
   if (isMapProj())
-    return compileSelectProject(projStep!, bys, aliases, ctes, binds, last, { orders, distinct, offset, limit }, indexKeys, elem);
+    return compileSelectProject(projStep!, bys, aliases, ctes, last, { orders, distinct, offset, limit }, indexKeys, elem);
 
   // Resolve the projection to a shape + a row source (cols/from/where).
   const projName = projStep?.name ?? 'vertex';
   let shape: Shape;
-  const fb: any[] = []; // final-select binds, appended after the CTE-prefix binds
 
   if (reducer && projName === 'count') throw new Error(`${reducer}() after count() not yet supported`);
 
   // count folds any tail limit/offset/distinct into the counted id-relation.
   if (projName === 'count') {
-    let src = `SELECT ${distinct ? 'DISTINCT ' : ''}id FROM ${last}`;
-    if (limit !== null || offset > 0) src += ` LIMIT ${limit ?? -1} OFFSET ${offset}`;
-    let sql = `SELECT COUNT(*) AS v FROM (${src})`;
+    const inner = sqlText(`SELECT ${distinct ? 'DISTINCT ' : ''}id FROM ${last}`);
+    const innerLim = (limit !== null || offset > 0) ? sqlText(` LIMIT ${limit ?? -1} OFFSET ${offset}`) : sqlText('');
+    let countNode: Expression = lsql(sqlText('SELECT COUNT(*) AS v FROM ('), inner, innerLim, sqlText(')'));
     // count().is(P): filter the single count value (0 or 1 result rows).
-    const cb: any[] = [];
-    if (isPreds.length) sql = `SELECT v FROM (${sql}) WHERE ${isPreds.map((p) => { const q = render(predicateSql(sqlText('v'), p)); cb.push(...q.binds); return q.sql; }).join(' AND ')}`;
-    return { kind: 'read', sql: `WITH RECURSIVE ${ctes.join(',\n')}\n${sql}`, binds: [...binds, ...cb], shape: { kind: 'count' }, indexKeys: [...indexKeys] };
+    if (isPreds.length)
+      countNode = lsql(sqlText('SELECT v FROM ('), countNode, sqlText(') WHERE '), list(isPreds.map((p) => predicateSql(sqlText('v'), p)), sqlText(' AND ')));
+    return readCompiled(ctes, countNode, { kind: 'count' }, [...indexKeys]);
   }
 
   // The current element's table; `n` is the element row regardless of kind.
   const tbl = elem === 'edge' ? 'edges' : 'nodes';
   const vJoin = `${tbl} n JOIN ${last} p ON n.id=p.id`;
   const vlJoin = `${vJoin} JOIN labels l ON l.id=n.label`;
-  let cols: string, from: string, where = '';
-  // The projected scalar expression (+ its binds), captured so a trailing is(P)
-  // can filter on it. Non-scalar projections leave it null → is() throws.
+  let colsNode: Expression, fromText: string;
+  // The projected scalar expression, captured so a trailing is(P) can filter on
+  // it. Non-scalar projections leave it null → is() throws. `baseWhere` is the
+  // values() existence check (shares the same json_extract node as the select).
   let scalarExpr: Expression | null = null;
+  let baseWhere: Expression | null = null;
   // An element reports its user id when it has one, else the rowid. Used only in
   // the outward-facing projection — the id-relation joins keep the raw rowid.
   const extId = 'COALESCE(n.uid, n.id)';
@@ -496,10 +479,8 @@ function compileRead(steps: Step[], params: Record<string, any> = {}): Compiled 
     case 'values': {
       shape = { kind: 'value' };
       const pe = propExtract('n.props', projStep!.args[0]);
-      const r = render(pe.expr);
-      cols = `${r.sql} AS v`; from = vJoin;
-      where = ` WHERE ${r.sql} IS NOT NULL`;
-      fb.push(...r.binds, ...r.binds); // one set for the SELECT, one for the WHERE
+      colsNode = lsql(pe.expr, sqlText(' AS v')); fromText = vJoin;
+      baseWhere = predicateSql(pe.expr, undefined); // <pe> IS NOT NULL (same node → binds fall out per occurrence)
       scalarExpr = pe.expr;
       // values(k).is(P) is a filter-position use → auto-index the key (like has());
       // a bare values() projection is deliberately NOT indexed (bounds proliferation).
@@ -509,52 +490,52 @@ function compileRead(steps: Step[], params: Record<string, any> = {}): Compiled 
     case 'id':
       // Join the element table even though the id lives in `last`, so a preceding
       // order().by(key) — which references n.props — has the alias in scope.
-      shape = { kind: 'value' }; cols = `${extId} AS v`; from = vJoin; scalarExpr = sqlText(extId); break;
+      shape = { kind: 'value' }; colsNode = sqlText(`${extId} AS v`); fromText = vJoin; scalarExpr = sqlText(extId); break;
     case 'label':
-      shape = { kind: 'value' }; cols = `l.name AS v`; from = vlJoin; scalarExpr = sqlText('l.name'); break;
+      shape = { kind: 'value' }; colsNode = sqlText('l.name AS v'); fromText = vlJoin; scalarExpr = sqlText('l.name'); break;
     case 'valueMap': {
       const keys = projStep!.args.filter((a) => typeof a === 'string') as string[];
       shape = { kind: 'valueMap', keys: keys.length ? keys : null, tokens: projStep!.args.includes(true) };
-      cols = `${extId} AS id, l.name AS label, n.props`; from = vlJoin; break;
+      colsNode = sqlText(`${extId} AS id, l.name AS label, n.props`); fromText = vlJoin; break;
     }
     case 'elementMap': {
       if (elem === 'edge') throw new Error('elementMap() on edges not yet supported'); // needs IN/OUT direction tokens
       const keys = projStep!.args.filter((a) => typeof a === 'string') as string[];
       shape = { kind: 'elementMap', keys: keys.length ? keys : null };
-      cols = `${extId} AS id, l.name AS label, n.props`; from = vlJoin; break;
+      colsNode = sqlText(`${extId} AS id, l.name AS label, n.props`); fromText = vlJoin; break;
     }
     default: // the element itself
-      if (elem === 'edge') { shape = { kind: 'edge' }; cols = `${extId} AS id, l.name AS label, n.src, n.tgt, n.props`; from = vlJoin; }
-      else { shape = { kind: 'vertex' }; cols = `${extId} AS id, l.name AS label, n.props`; from = vlJoin; }
+      if (elem === 'edge') { shape = { kind: 'edge' }; colsNode = sqlText(`${extId} AS id, l.name AS label, n.src, n.tgt, n.props`); fromText = vlJoin; }
+      else { shape = { kind: 'vertex' }; colsNode = sqlText(`${extId} AS id, l.name AS label, n.props`); fromText = vlJoin; }
   }
 
-  // is(P): filter the projected scalar. Folds into the WHERE so a following
-  // order()/limit() still composes; non-scalar projections reject it.
+  // WHERE: the values() existence check + any is(P) on the projected scalar,
+  // AND'd. is() on a non-scalar projection has no scalarExpr → reject.
+  const whereParts: Expression[] = [];
+  if (baseWhere) whereParts.push(baseWhere);
   if (isPreds.length) {
     if (!scalarExpr) throw new Error('is() requires a scalar stream (values/label/id/count)');
-    for (const p of isPreds) {
-      const q = render(predicateSql(scalarExpr, p));
-      where += where ? ` AND ${q.sql}` : ` WHERE ${q.sql}`;
-      fb.push(...q.binds);
-    }
+    for (const p of isPreds) whereParts.push(predicateSql(scalarExpr, p));
   }
+  const whereNode: Expression = whereParts.length ? lsql(sqlText(' WHERE '), list(whereParts, sqlText(' AND '))) : sqlText('');
 
-  let sql = `SELECT ${distinct ? 'DISTINCT ' : ''}${cols} FROM ${from}${where}`;
-
+  let orderNode: Expression = sqlText('');
   if (orders.length) {
-    const parts = orders.map((o) => {
-      if (o.dir === 'shuffle') return 'RANDOM()';
-      const dir = o.dir === 'desc' ? 'DESC' : 'ASC';
+    const keyNodes = orders.map((o) => {
+      if (o.dir === 'shuffle') return sqlText('RANDOM()');
+      const dir = o.dir === 'desc' ? ' DESC' : ' ASC';
       if (o.key !== null) {
-        const pe = propExtract('n.props', o.key); const r = render(pe.expr); fb.push(...r.binds);
+        const pe = propExtract('n.props', o.key);
         if (pe.indexKey && elem === 'node') indexKeys.add(pe.indexKey); // order().by(key) sorts via the index (node-only auto-index)
-        return `${r.sql} ${dir}`;
+        return lsql(pe.expr, sqlText(dir));
       }
-      return `${shape.kind === 'value' ? 'v' : 'n.id'} ${dir}`;
+      return sqlText(`${shape.kind === 'value' ? 'v' : 'n.id'}${dir}`);
     });
-    sql += ` ORDER BY ${parts.join(', ')}`;
+    orderNode = lsql(sqlText(' ORDER BY '), list(keyNodes, sqlText(', ')));
   }
-  if (limit !== null || offset > 0) sql += ` LIMIT ${limit ?? -1} OFFSET ${offset}`;
+  const limitNode: Expression = (limit !== null || offset > 0) ? sqlText(` LIMIT ${limit ?? -1} OFFSET ${offset}`) : sqlText('');
+
+  let tailNode: Expression = lsql(sqlText(`SELECT ${distinct ? 'DISTINCT ' : ''}`), colsNode, sqlText(` FROM ${fromText}`), whereNode, orderNode, limitNode);
 
   // Terminal reducers wrap the projected select. fold() → the whole stream as one
   // List (handler collapses rows); sum() → one numeric via SQL SUM.
@@ -567,11 +548,11 @@ function compileRead(steps: Step[], params: Record<string, any> = {}): Compiled 
     if (shape.kind !== 'value') throw new Error(`sum() of ${shape.kind} not yet supported`);
     // typeof(SUM) is 'integer' or 'real' → the handler frames Int/Long vs Double
     // to match TinkerPop (sum of ints → Int/Long by magnitude; of doubles → Double).
-    sql = `SELECT SUM(v) AS v, typeof(SUM(v)) AS vt FROM (${sql})`;
+    tailNode = lsql(sqlText('SELECT SUM(v) AS v, typeof(SUM(v)) AS vt FROM ('), tailNode, sqlText(')'));
     shape = { kind: 'scalar' };
   }
 
-  return { kind: 'read', sql: `WITH RECURSIVE ${ctes.join(',\n')}\n${sql}`, binds: [...binds, ...fb], shape, indexKeys: [...indexKeys] };
+  return readCompiled(ctes, tailNode, shape, [...indexKeys]);
 }
 
 interface TailMods { orders: OrderClause[]; distinct: boolean; offset: number; limit: number | null; }
@@ -596,12 +577,11 @@ function byToEntry(byArgs: any[] | undefined): { sub: 'vertex' | 'value'; key?: 
  */
 function compileSelectProject(
   proj: Step, bys: any[][], aliases: AliasMap,
-  ctes: string[], binds: any[], last: string, tail: TailMods, indexKeys: Set<string>, curElem: Elem,
+  ctes: CteDef[], last: string, tail: TailMods, indexKeys: Set<string>, curElem: Elem,
 ): Compiled {
   const { orders, distinct, offset, limit } = tail;
   if (orders.length) throw new Error('order() after select()/project() not yet supported');
   const isProject = proj.name === 'project';
-  const fb: any[] = [];
 
   // Reject the deferred long-tail forms explicitly (tokens are now captured, not
   // silently dropped) so a Pop/Column arg can never mis-execute as a plain key.
@@ -630,27 +610,24 @@ function compileSelectProject(
   const entryKind = (i: number) => byToEntry(bys.length ? bys[i % bys.length] : undefined);
 
   const tailSql = (limit !== null || offset > 0) ? ` LIMIT ${limit ?? -1} OFFSET ${offset}` : '';
-  const withPrefix = `WITH RECURSIVE ${ctes.join(',\n')}\n`;
+  const dist = distinct ? 'DISTINCT ' : '';
 
   // Single-key select → the labelled element directly (not wrapped in a Map),
   // reusing the existing vertex/value shapes so the handler needs no new case.
   if (!isProject && keys.length === 1) {
     const src = sourceOf(keys[0]);
     const e = entryKind(0);
-    if (e.sub === 'vertex') {
-      const sql = `SELECT ${distinct ? 'DISTINCT ' : ''}COALESCE(n.uid, n.id) AS id, l.name AS label, n.props FROM nodes n JOIN ${last} p ON n.id=${src} JOIN labels l ON l.id=n.label${tailSql}`;
-      return { kind: 'read', sql: withPrefix + sql, binds, shape: { kind: 'vertex' }, indexKeys: [...indexKeys] };
-    }
+    if (e.sub === 'vertex')
+      return readCompiled(ctes, sqlText(`SELECT ${dist}COALESCE(n.uid, n.id) AS id, l.name AS label, n.props FROM nodes n JOIN ${last} p ON n.id=${src} JOIN labels l ON l.id=n.label${tailSql}`), { kind: 'vertex' }, [...indexKeys]);
     // A by(key) here is a projection, not a filter/order — deliberately NOT
     // reported as an indexKey (matches values(); bounds index proliferation).
-    const pe = render(propExtract('n.props', e.key).expr); fb.push(...pe.binds);
-    const sql = `SELECT ${distinct ? 'DISTINCT ' : ''}${pe.sql} AS v FROM nodes n JOIN ${last} p ON n.id=${src}${tailSql}`;
-    return { kind: 'read', sql: withPrefix + sql, binds: [...binds, ...fb], shape: { kind: 'value' }, indexKeys: [...indexKeys] };
+    const pe = propExtract('n.props', e.key);
+    return readCompiled(ctes, lsql(sqlText(`SELECT ${dist}`), pe.expr, sqlText(` AS v FROM nodes n JOIN ${last} p ON n.id=${src}${tailSql}`)), { kind: 'value' }, [...indexKeys]);
   }
 
   // Multi-key select / any project → a Map per row. Each entry joins nodes for
   // its source element under a distinct alias and emits prefixed columns.
-  const cols: string[] = [];
+  const cols: Expression[] = [];
   const joins: string[] = [`${last} p`];
   const entries: MapEntry[] = keys.map((k, i) => {
     const prefix = `e${i}`;
@@ -659,16 +636,15 @@ function compileSelectProject(
     joins.push(`JOIN nodes ${prefix}n ON ${prefix}n.id=${src}`);
     if (e.sub === 'vertex') {
       joins.push(`JOIN labels ${prefix}l ON ${prefix}l.id=${prefix}n.label`);
-      cols.push(`COALESCE(${prefix}n.uid, ${prefix}n.id) AS ${prefix}_id`, `${prefix}l.name AS ${prefix}_label`, `${prefix}n.props AS ${prefix}_props`);
+      cols.push(sqlText(`COALESCE(${prefix}n.uid, ${prefix}n.id) AS ${prefix}_id, ${prefix}l.name AS ${prefix}_label, ${prefix}n.props AS ${prefix}_props`));
     } else {
-      const pe = render(propExtract(`${prefix}n.props`, e.key).expr); fb.push(...pe.binds); // projection, not indexed
-      cols.push(`${pe.sql} AS ${prefix}_v`);
+      cols.push(lsql(propExtract(`${prefix}n.props`, e.key).expr, sqlText(` AS ${prefix}_v`))); // projection, not indexed
     }
     return { key: k, prefix, sub: e.sub };
   });
 
-  const sql = `SELECT ${distinct ? 'DISTINCT ' : ''}${cols.join(', ')} FROM ${joins.join(' ')}${tailSql}`;
-  return { kind: 'read', sql: withPrefix + sql, binds: [...binds, ...fb], shape: { kind: 'map', entries }, indexKeys: [...indexKeys] };
+  const node = lsql(sqlText(`SELECT ${dist}`), list(cols, sqlText(', ')), sqlText(` FROM ${joins.join(' ')}${tailSql}`));
+  return readCompiled(ctes, node, { kind: 'map', entries }, [...indexKeys]);
 }
 
 // ---------- group()/groupCount() (barrier → one Map) ----------
@@ -701,27 +677,25 @@ function collectBys(steps: Step[], i: number): { bys: any[][]; end: number } {
   return { bys, end: j };
 }
 
-interface GroupKeyBuild { desc: GroupKey; cols: string; group: string; binds: any[] }
+interface GroupKeyBuild { desc: GroupKey; cols: Expression; group: string }
 
 /** Build the key columns for group(). `params` re-parses nested project()/by(). */
 function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, indexKeys: Set<string>, params: Record<string, any>): GroupKeyBuild {
-  const binds: any[] = [];
   // Bare by() (or no key by()) → the element itself is the key.
   if (!keyArgs || keyArgs.length === 0) {
     if (src.elem === 'property') throw new Error('group().by() on a property element is not yet supported');
-    return { desc: { kind: 'element', elem: src.elem }, cols: elementSelect(src.elem, 'k', src.ctx), group: elementIdExpr(src.elem, src.ctx), binds };
+    return { desc: { kind: 'element', elem: src.elem }, cols: sqlText(elementSelect(src.elem, 'k', src.ctx)), group: elementIdExpr(src.elem, src.ctx) };
   }
   const a = keyArgs[0];
   if (typeof a === 'string') { // by('name')
     const pe = propExtract(src.ctx.propsExpr, a); // property ctx sets propsExpr = ownerProps
     if (pe.indexKey && src.elem === 'vertex') indexKeys.add(pe.indexKey);
-    const r = render(pe.expr); binds.push(...r.binds);
-    return { desc: { kind: 'scalar' }, cols: `${r.sql} AS gk`, group: 'gk', binds };
+    return { desc: { kind: 'scalar' }, cols: lsql(pe.expr, sqlText(' AS gk')), group: 'gk' };
   }
   if (a && typeof a === 'object' && 'token' in a) { // by(T.label)/by(T.id)
     const expr = a.token === 'label' ? labelNameSub(src.ctx.labelIdExpr) : a.token === 'id' ? src.ctx.idExpr : null;
     if (!expr) throw new Error(`group().by(T.${a.token}) not yet supported`);
-    return { desc: { kind: 'scalar' }, cols: `${expr} AS gk`, group: 'gk', binds };
+    return { desc: { kind: 'scalar' }, cols: sqlText(`${expr} AS gk`), group: 'gk' };
   }
   if (a && typeof a === 'object' && 'nested' in a) {
     const inner = stepChain(a.nested, params);
@@ -730,18 +704,17 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, indexKeys: 
       const partBys = inner.slice(1);
       if (partBys.some((s) => s.name !== 'by')) throw new Error(`step not implemented in group().by(project): ${partBys.find((s) => s.name !== 'by')!.name}()`);
       if (partBys.length !== keys.length) throw new Error('group().by(project) needs one by() per key');
-      const cols: string[] = [], group: string[] = [];
+      const cols: Expression[] = [], group: string[] = [];
       keys.forEach((k, idx) => {
         const nb = partBys[idx].args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
         if (!nb) throw new Error('group().by(project(...).by(x)) requires a traversal in each by()');
-        const sc = render(compileNestedScalar(stepChain(nb.nested, params), src.ctx).expr);
-        binds.push(...sc.binds); cols.push(`${sc.sql} AS k${idx}_v`); group.push(`k${idx}_v`);
+        const sc = compileNestedScalar(stepChain(nb.nested, params), src.ctx);
+        cols.push(lsql(sc.expr, sqlText(` AS k${idx}_v`))); group.push(`k${idx}_v`);
       });
-      return { desc: { kind: 'map', parts: keys.map((k) => ({ key: k })) }, cols: cols.join(', '), group: group.join(', '), binds };
+      return { desc: { kind: 'map', parts: keys.map((k) => ({ key: k })) }, cols: list(cols, sqlText(', ')), group: group.join(', ') };
     }
-    const sc = render(compileNestedScalar(inner, src.ctx).expr); // by(__.label()) etc → scalar
-    binds.push(...sc.binds);
-    return { desc: { kind: 'scalar' }, cols: `${sc.sql} AS gk`, group: 'gk', binds };
+    const sc = compileNestedScalar(inner, src.ctx); // by(__.label()) etc → scalar
+    return { desc: { kind: 'scalar' }, cols: lsql(sc.expr, sqlText(' AS gk')), group: 'gk' };
   }
   throw new Error('unsupported group().by() key modulator');
 }
@@ -754,44 +727,41 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, indexKeys: 
  * rows ORDER BY the key and the handler folds runs into the Map. Both shapes are
  * one Map buffer; the handler's assembler is one loop keyed on GroupVal.kind.
  */
-function compileGroup(isCount: boolean, bys: any[][], src: GroupSource, ctes: string[], binds: any[], indexKeys: Set<string>, params: Record<string, any>): Compiled {
+function compileGroup(isCount: boolean, bys: any[][], src: GroupSource, ctes: CteDef[], indexKeys: Set<string>, params: Record<string, any>): Compiled {
   // Only key (bys[0]) and value (bys[1]) modulators are read; reject extras
   // rather than silently drop them (the file's no-silent-drop discipline).
   if (bys.length > 2) throw new Error('group() with more than two by() modulators not yet supported');
-  const withPrefix = `WITH RECURSIVE ${ctes.join(',\n')}\n`;
   const key = buildGroupKey(bys[0], src, indexKeys, params);
-  const fb: any[] = [...key.binds];
 
   // Resolve the value reducer.
-  let val: GroupVal, valSql: string, groupBy = true;
+  let val: GroupVal, valNode: Expression, groupBy = true;
   const valArgs = bys[1];
-  if (isCount) { val = { kind: 'count' }; valSql = 'COUNT(*) AS gv'; }
-  else if (!valArgs || valArgs.length === 0) { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valSql = elementSelect(src.elem, 'v', src.ctx); }
+  if (isCount) { val = { kind: 'count' }; valNode = sqlText('COUNT(*) AS gv'); }
+  else if (!valArgs || valArgs.length === 0) { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = sqlText(elementSelect(src.elem, 'v', src.ctx)); }
   else {
     const a = valArgs[0];
     if (typeof a === 'string') { // by('age') → list of scalars
-      const pe = render(propExtract(src.ctx.propsExpr, a).expr); // property ctx sets propsExpr = ownerProps
-      fb.push(...pe.binds); val = { kind: 'scalarList' }; valSql = `json_group_array(${pe.sql}) AS gv`;
+      const pe = propExtract(src.ctx.propsExpr, a); // property ctx sets propsExpr = ownerProps
+      val = { kind: 'scalarList' }; valNode = lsql(sqlText('json_group_array('), pe.expr, sqlText(') AS gv'));
     } else if (a && typeof a === 'object' && 'nested' in a) {
       const inner = stepChain(a.nested, params);
       const names = inner.map((s) => s.name);
-      if (names.length === 1 && names[0] === 'tail') { val = { kind: 'elementLast', elem: src.elem }; groupBy = false; valSql = elementSelect(src.elem, 'v', src.ctx); }
-      else if (names.length === 1 && names[0] === 'fold') { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valSql = elementSelect(src.elem, 'v', src.ctx); }
-      else if (names.length === 1 && names[0] === 'count') { val = { kind: 'count' }; valSql = 'COUNT(*) AS gv'; }
+      if (names.length === 1 && names[0] === 'tail') { val = { kind: 'elementLast', elem: src.elem }; groupBy = false; valNode = sqlText(elementSelect(src.elem, 'v', src.ctx)); }
+      else if (names.length === 1 && names[0] === 'fold') { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = sqlText(elementSelect(src.elem, 'v', src.ctx)); }
+      else if (names.length === 1 && names[0] === 'count') { val = { kind: 'count' }; valNode = sqlText('COUNT(*) AS gv'); }
       else if (names[names.length - 1] === 'sum') {
-        const sc = render(compileNestedScalar(inner.slice(0, -1), src.ctx).expr); fb.push(...sc.binds, ...sc.binds);
-        val = { kind: 'sum' }; valSql = `SUM(${sc.sql}) AS gv, typeof(SUM(${sc.sql})) AS gvt`; // gvt → Int/Long vs Double
+        const sc = compileNestedScalar(inner.slice(0, -1), src.ctx);
+        val = { kind: 'sum' }; valNode = lsql(sqlText('SUM('), sc.expr, sqlText(') AS gv, typeof(SUM('), sc.expr, sqlText(')) AS gvt')); // gvt → Int/Long vs Double
       } else { // scalar projection folded to a list, e.g. by(__.label()) / by(__.values("name"))
-        const sc = render(compileNestedScalar(inner, src.ctx).expr); fb.push(...sc.binds);
-        val = { kind: 'scalarList' }; valSql = `json_group_array(${sc.sql}) AS gv`;
+        const sc = compileNestedScalar(inner, src.ctx);
+        val = { kind: 'scalarList' }; valNode = lsql(sqlText('json_group_array('), sc.expr, sqlText(') AS gv'));
       }
     } else throw new Error('unsupported group().by() value modulator');
   }
 
-  const sql = groupBy
-    ? `SELECT ${key.cols}, ${valSql} FROM ${src.from} GROUP BY ${key.group}`
-    : `SELECT ${key.cols}, ${valSql} FROM ${src.from} ORDER BY ${key.group}`;
-  return { kind: 'read', sql: withPrefix + sql, binds: [...binds, ...fb], shape: { kind: 'group', key: key.desc, val }, indexKeys: [...indexKeys] };
+  const node = lsql(sqlText('SELECT '), key.cols, sqlText(', '), valNode,
+    sqlText(` FROM ${src.from} ${groupBy ? 'GROUP BY' : 'ORDER BY'} ${key.group}`));
+  return readCompiled(ctes, node, { kind: 'group', key: key.desc, val }, [...indexKeys]);
 }
 
 /**
@@ -803,26 +773,25 @@ function compileGroup(isCount: boolean, bys: any[][], src: GroupSource, ctes: st
  * property predicates (hasKey/hasValue) are deferred to later work.
  */
 function compileProperties(
-  ctes: string[], binds: any[], last: string, elem: Elem, tail: Step[], indexKeys: Set<string>,
+  ctes: CteDef[], last: string, elem: Elem, tail: Step[], indexKeys: Set<string>,
   params: Record<string, any> = {},
 ): Compiled {
   const tbl = elem === 'edge' ? 'edges' : 'nodes';
   const keys = tail[0].args.filter((a): a is string => typeof a === 'string');
-  const fb: any[] = [];
-  const keyFilter = keys.length ? ` WHERE je.key IN (${keys.map(() => '?').join(',')})` : '';
-  if (keys.length) fb.push(...keys);
+  const keyFilter: Expression = keys.length
+    ? lsql(sqlText(' WHERE je.key IN ('), list(keys.map(value), sqlText(',')), sqlText(')'))
+    : sqlText('');
   // Expand each element's JSON props into (owner, key, value) rows; keep the
   // owner's label/props too so a following element() projection has them.
   const pc = `c${ctes.length}`;
-  const propCte = `${pc} AS (SELECT n.id AS owner, l.name AS ownerLabel, n.props AS ownerProps, je.key AS pk, je.value AS pv FROM ${tbl} n JOIN ${last} p ON n.id=p.id JOIN labels l ON l.id=n.label, json_each(n.props) je${keyFilter})`;
-  const allCtes = [...ctes, propCte];
-  const withPrefix = `WITH RECURSIVE ${allCtes.join(',\n')}\n`;
+  const propBody = lsql(sqlText(`SELECT n.id AS owner, l.name AS ownerLabel, n.props AS ownerProps, je.key AS pk, je.value AS pv FROM ${tbl} n JOIN ${last} p ON n.id=p.id JOIN labels l ON l.id=n.label, json_each(n.props) je`), keyFilter);
+  const allCtes: CteDef[] = [...ctes, { name: pc, body: propBody }];
   // `consumed` = how many tail steps this shape accounts for; reject any trailing
   // steps rather than silently dropping them (matches the file's discard-discipline).
-  const done = (sql: string, shape: Shape, consumed: number): Compiled => {
+  const done = (node: Expression, shape: Shape, consumed: number): Compiled => {
     if (tail.length > consumed)
       throw new Error(`step not implemented after properties(): ${tail[consumed].name}()`);
-    return { kind: 'read', sql: withPrefix + sql, binds: [...binds, ...fb], shape, indexKeys: [...indexKeys] };
+    return readCompiled(allCtes, node, shape, [...indexKeys]);
   };
 
   const next = tail[1]?.name;
@@ -834,18 +803,18 @@ function compileProperties(
     if (end < tail.length) throw new Error(`step not implemented after properties().${next}(): ${tail[end].name}()`);
     const ctx: ScalarCtx = { elem: 'property', idExpr: 'owner', propsExpr: 'ownerProps', labelIdExpr: '(SELECT label FROM nodes WHERE id=owner)', ownerExpr: 'owner', ownerPropsExpr: 'ownerProps', pkExpr: 'pk', pvExpr: 'pv' };
     const src: GroupSource = { from: pc, ctx, elem: 'property' };
-    return compileGroup(next === 'groupCount', bys, src, allCtes, [...binds, ...fb], indexKeys, params);
+    return compileGroup(next === 'groupCount', bys, src, allCtes, indexKeys, params);
   }
 
   switch (next) {
     case undefined: // properties() terminal → VertexProperty elements
-      return done(`SELECT owner, pk, pv FROM ${pc}`, { kind: 'property' }, 1);
+      return done(sqlText(`SELECT owner, pk, pv FROM ${pc}`), { kind: 'property' }, 1);
     case 'key':
-      return done(`SELECT pk AS v FROM ${pc}`, { kind: 'value' }, 2);
+      return done(sqlText(`SELECT pk AS v FROM ${pc}`), { kind: 'value' }, 2);
     case 'value':
-      return done(`SELECT pv AS v FROM ${pc}`, { kind: 'value' }, 2);
+      return done(sqlText(`SELECT pv AS v FROM ${pc}`), { kind: 'value' }, 2);
     case 'count':
-      return done(`SELECT COUNT(*) AS v FROM ${pc}`, { kind: 'count' }, 2);
+      return done(sqlText(`SELECT COUNT(*) AS v FROM ${pc}`), { kind: 'count' }, 2);
     case 'element': {
       // Back to the owning element. Support a terminal projection off it.
       const after = tail[2]?.name;
@@ -856,18 +825,17 @@ function compileProperties(
         throw new Error('element() of an edge property not yet supported');
       switch (after) {
         case undefined:
-          return done(`SELECT owner AS id, ownerLabel AS label, ownerProps AS props FROM ${pc}`, { kind: 'vertex' }, 2);
+          return done(sqlText(`SELECT owner AS id, ownerLabel AS label, ownerProps AS props FROM ${pc}`), { kind: 'vertex' }, 2);
         case 'id':
-          return done(`SELECT owner AS v FROM ${pc}`, { kind: 'value' }, 3);
+          return done(sqlText(`SELECT owner AS v FROM ${pc}`), { kind: 'value' }, 3);
         case 'label':
-          return done(`SELECT ownerLabel AS v FROM ${pc}`, { kind: 'value' }, 3);
+          return done(sqlText(`SELECT ownerLabel AS v FROM ${pc}`), { kind: 'value' }, 3);
         case 'values': {
-          const pe = render(propExtract('ownerProps', tail[2].args[0]).expr);
-          fb.push(...pe.binds, ...pe.binds); // SELECT + WHERE occurrences
-          return done(`SELECT ${pe.sql} AS v FROM ${pc} WHERE ${pe.sql} IS NOT NULL`, { kind: 'value' }, 3);
+          const pe = propExtract('ownerProps', tail[2].args[0]); // same node in SELECT + WHERE → binds fall out per occurrence
+          return done(lsql(sqlText('SELECT '), pe.expr, sqlText(` AS v FROM ${pc} WHERE `), predicateSql(pe.expr, undefined)), { kind: 'value' }, 3);
         }
         case 'count':
-          return done(`SELECT COUNT(*) AS v FROM ${pc}`, { kind: 'count' }, 3);
+          return done(sqlText(`SELECT COUNT(*) AS v FROM ${pc}`), { kind: 'count' }, 3);
         default:
           throw new Error(`step not implemented after element(): ${after}()`);
       }
@@ -880,11 +848,11 @@ function compileProperties(
 // g.V(...).<filters>.drop() — delete the target vertices and their incident
 // edges. (Edge-valued drop, e.g. g.V().outE().drop(), waits on edge traversal.)
 function compileDrop(steps: Step[]): WritePlan {
-  const { ctes, binds, stop, elem } = traversalCtes(steps.slice(0, -1));
+  const { ctes, stop, elem } = traversalCtes(steps.slice(0, -1));
   if (stop !== steps.length - 1)
     throw new Error(`drop() after ${steps[stop].name}() not yet supported`);
   if (elem === 'edge') throw new Error('edge drop() (e.g. g.E().drop()) not yet supported');
-  const targetSql = `WITH RECURSIVE ${ctes.join(',\n')}\nSELECT id FROM c${ctes.length - 1}`;
+  const target = render(withPrefixTree(ctes, sqlText(`SELECT id FROM ${ctes[ctes.length - 1].name}`)));
   return {
     kind: 'write',
     run: (store) => {
@@ -892,7 +860,7 @@ function compileDrop(steps: Step[]): WritePlan {
       // reads the edges table (out()/in()/both() before drop()), deleting the
       // incident edges first would empty a re-evaluated target CTE, silently
       // leaving the vertices behind. Snapshot the ids, then delete by value.
-      const ids = store.query<{ id: number }>(targetSql, binds).map((r) => r.id);
+      const ids = store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id);
       if (ids.length) {
         const ph = ids.map(() => '?').join(',');
         store.query(`DELETE FROM edges WHERE src IN (${ph}) OR tgt IN (${ph})`, [...ids, ...ids]);
@@ -912,7 +880,7 @@ function compileDrop(steps: Step[]): WritePlan {
 function compileSetProperty(steps: Step[], params: Record<string, any>): WritePlan {
   const firstProp = steps.findIndex((s) => s.name === 'property');
   const prefix = steps.slice(0, firstProp);
-  const { ctes, binds, stop, elem } = traversalCtes(prefix, params);
+  const { ctes, stop, elem } = traversalCtes(prefix, params);
   if (stop !== prefix.length)
     throw new Error(`property() after ${steps[stop].name}() not yet supported`);
   const setProps: Record<string, any> = {};
@@ -929,11 +897,11 @@ function compileSetProperty(steps: Step[], params: Record<string, any>): WritePl
   const readCur = elem === 'edge'
     ? `SELECT uid, src, tgt, props, ${labelSub} FROM edges WHERE id=?`
     : `SELECT uid, props, ${labelSub} FROM nodes WHERE id=?`;
-  const targetSql = `WITH RECURSIVE ${ctes.join(',\n')}\nSELECT id FROM c${ctes.length - 1}`;
+  const target = render(withPrefixTree(ctes, sqlText(`SELECT id FROM ${ctes[ctes.length - 1].name}`)));
   return {
     kind: 'write',
     run: (store) => {
-      const ids = store.query<{ id: number }>(targetSql, binds).map((r) => r.id);
+      const ids = store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id);
       return ids.map((id) => {
         const cur = store.query<any>(readCur, [id])[0];
         const props = { ...JSON.parse(cur.props), ...setProps };
@@ -1084,10 +1052,10 @@ function compileAddE(steps: Step[], params: Record<string, any>): WritePlan {
   const t = traversalCtes(prefix, params);
   if (t.stop !== prefix.length) throw new Error(`addE after ${prefix[t.stop].name}() not yet supported`);
   const aliasCols: [string, string][] = [...t.aliases].map(([lbl, a]) => [lbl, a.col]);
-  const readSql = `WITH RECURSIVE ${t.ctes.join(',\n')}\nSELECT ${['id', ...aliasCols.map(([, c]) => c)].join(', ')} FROM c${t.ctes.length - 1}`;
+  const read = render(withPrefixTree(t.ctes, sqlText(`SELECT ${['id', ...aliasCols.map(([, c]) => c)].join(', ')} FROM ${t.ctes[t.ctes.length - 1].name}`)));
   return {
     kind: 'write',
-    run: (store) => store.query<any>(readSql, t.binds).map((r) =>
+    run: (store) => store.query<any>(read.sql, read.binds).map((r) =>
       applyEdgeCluster(store, cluster, new Map(aliasCols.map(([lbl, c]) => [lbl, r[c]])), r.id, params)),
   };
 }
@@ -1131,7 +1099,8 @@ function resolveEndpoint(store: GraphStore, spec: any, d: { aliases: Map<string,
     const inner = stepChain(spec.nested, params);
     const t = traversalCtes(inner, params);
     if (t.stop !== inner.length) throw new Error(`addE endpoint traversal not supported past ${inner[t.stop].name}()`);
-    const rows = store.query<{ id: number }>(`WITH RECURSIVE ${t.ctes.join(',\n')}\nSELECT id FROM c${t.ctes.length - 1}`, t.binds);
+    const q = render(withPrefixTree(t.ctes, sqlText(`SELECT id FROM ${t.ctes[t.ctes.length - 1].name}`)));
+    const rows = store.query<{ id: number }>(q.sql, q.binds);
     if (!rows.length) throw new Error('addE endpoint traversal matched no vertex');
     return rows[0].id;
   }
@@ -1228,8 +1197,8 @@ function mergeDrivers(prefix: Step[], params: Record<string, any>): (store: Grap
   if (prefix.length === 1 && prefix[0].name === 'inject') { const nulls = prefix[0].args.map(() => null); return () => nulls; }
   const t = traversalCtes(prefix, params);
   if (t.stop !== prefix.length) throw new Error(`merge after ${prefix[t.stop].name}() not yet supported`);
-  const sql = `WITH RECURSIVE ${t.ctes.join(',\n')}\nSELECT id FROM c${t.ctes.length - 1}`;
-  return (store) => store.query<{ id: number }>(sql, t.binds).map((r) => r.id);
+  const q = render(withPrefixTree(t.ctes, sqlText(`SELECT id FROM ${t.ctes[t.ctes.length - 1].name}`)));
+  return (store) => store.query<{ id: number }>(q.sql, q.binds).map((r) => r.id);
 }
 
 // g.mergeV(map) [.option(Merge.onCreate, map)] [.option(Merge.onMatch, map)]

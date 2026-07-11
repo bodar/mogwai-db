@@ -1,6 +1,6 @@
-import { render } from './render.ts';
 import { stepChain, type Step, type Pred } from './frontend.ts';
 import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
+import { sql } from '@bodar/lazyrecords/sql/template/Sql.ts';
 import { text as sqlText } from '@bodar/lazyrecords/sql/template/Text.ts';
 import { expression, and, parens, list } from '@bodar/lazyrecords/sql/template/Compound.ts';
 import { value } from '@bodar/lazyrecords/sql/template/Value.ts';
@@ -32,17 +32,15 @@ export function propExtract(col: string, key: unknown): { expr: Expression; inde
 }
 
 /** `<col> IN (SELECT id FROM labels WHERE name IN (?,?))` — the canonical
- *  label-name→id filter. Names ride as bound Value tokens (node-built, no splice). */
-export function labelIn(col: string, names: any[]): { sql: string; binds: any[] } {
-  return render(expression(sqlText(`${col} IN (SELECT id FROM labels WHERE name IN`), parens(names.map(value)), sqlText(')')));
+ *  label-name→id filter as a node. Names ride as bound Value tokens (no splice). */
+export function labelIn(col: string, names: any[]): Expression {
+  return expression(sqlText(`${col} IN (SELECT id FROM labels WHERE name IN`), parens(names.map(value)), sqlText(')'));
 }
 
-/** Optional ` AND e.label IN (…)` appended to a movement JOIN's ON. Empty when
- *  no labels. Replaces ~7 hand-rolled `?`-splice + manual bind-push copies. */
-export function edgeLabelFilter(names: any[]): { sql: string; binds: any[] } {
-  if (!names.length) return { sql: '', binds: [] };
-  const r = labelIn('e.label', names);
-  return { sql: ` AND ${r.sql}`, binds: r.binds };
+/** Optional ` AND e.label IN (…)` appended to a movement JOIN's ON, as a node
+ *  (empty text when no labels). Replaces ~7 hand-rolled `?`-splice + bind-push copies. */
+export function edgeLabelFilter(names: any[]): Expression {
+  return names.length ? expression(sqlText(' AND'), labelIn('e.label', names)) : sqlText('');
 }
 
 /**
@@ -219,7 +217,7 @@ const requireTerminal = (steps: Step[], n: number) => {
  *   __.and(t…) / __.or(t…)    → the branch predicates combined with AND / OR
  * Multi-hop / neighbour-terminal-filter are deferred with clear errors.
  */
-export function compileFilterPredicate(nested: Step[], ctx: ScalarCtx, params: Record<string, any> = {}): { sql: string; binds: any[]; indexKeys: string[] } {
+export function compileFilterPredicate(nested: Step[], ctx: ScalarCtx, params: Record<string, any> = {}): { expr: Expression; indexKeys: string[] } {
   const indexKeys: string[] = [];
   let body = nested;
   let isPred: any = undefined, hasIs = false;
@@ -238,60 +236,53 @@ export function compileFilterPredicate(nested: Step[], ctx: ScalarCtx, params: R
   // A reducing scalar (count/sum) compared by is(P). Bare (no is) always yields
   // one value → the traverser always passes, so it's a no-op filter.
   if (term === 'count' || term === 'sum') {
-    if (!hasIs) return { sql: '1', binds: [], indexKeys };
-    const sc = compileNestedScalar(body, ctx);
-    const q = render(predicateSql(sc.expr, isPred));
-    return { sql: q.sql, binds: q.binds, indexKeys };
+    if (!hasIs) return { expr: sqlText('1'), indexKeys };
+    return { expr: predicateSql(compileNestedScalar(body, ctx).expr, isPred), indexKeys };
   }
 
   // Current-element predicates (no movement).
   if (head === 'values' && body.length === 1) {
     const pe = propExtract(ctx.propsExpr, body[0].args[0]);
     if (pe.indexKey && ctx.elem === 'node') indexKeys.push(pe.indexKey);
-    const q = render(predicateSql(pe.expr, hasIs ? isPred : undefined)); // bare where(__.values(k)) → exists → IS NOT NULL
-    return { sql: q.sql, binds: q.binds, indexKeys };
+    return { expr: predicateSql(pe.expr, hasIs ? isPred : undefined), indexKeys }; // bare where(__.values(k)) → exists → IS NOT NULL
   }
   if (head === 'has' && body.length === 1 && typeof body[0].args[0] === 'string') {
     const pe = propExtract(ctx.propsExpr, body[0].args[0]);
     if (pe.indexKey && ctx.elem === 'node') indexKeys.push(pe.indexKey);
-    const q = render(predicateSql(pe.expr, body[0].args[1]));
-    return { sql: q.sql, binds: q.binds, indexKeys };
+    return { expr: predicateSql(pe.expr, body[0].args[1]), indexKeys };
   }
-  if (head === 'hasLabel' && body.length === 1) {
-    const ph = body[0].args.map(() => '?').join(',');
-    return { sql: `${ctx.labelIdExpr} IN (SELECT id FROM labels WHERE name IN (${ph}))`, binds: [...body[0].args], indexKeys };
-  }
+  if (head === 'hasLabel' && body.length === 1)
+    return { expr: labelIn(ctx.labelIdExpr, body[0].args), indexKeys };
 
   if (MOVES.has(head) && body.length === 1) {
     // where(__.out().is(P)) would mean "has a neighbour satisfying P" — the bare
     // EXISTS ignores P, so reject rather than silently drop it.
     if (hasIs) throw new Error(`where(__.${head}().is(P)) not yet supported`);
-    return { ...compileExists(body[0], ctx), indexKeys };
+    return { expr: compileExists(body[0], ctx), indexKeys };
   }
   throw new Error(`where()/filter() form not yet supported: __.${body.map((s) => s.name + '()').join('.')}`);
 }
 
-/** and(t…)/or(t…): each branch → a filter predicate, joined by AND/OR. Used both
- *  as a top-level filter step and inside where(__.and/or). */
-export function combineBranchPreds(step: Step, ctx: ScalarCtx, params: Record<string, any>, op: 'AND' | 'OR'): { sql: string; binds: any[]; indexKeys: string[] } {
+/** and(t…)/or(t…): each branch → a filter predicate node, joined by AND/OR
+ *  (`((p0) AND (p1))`). Used both as a top-level filter step and inside where(__.and/or). */
+export function combineBranchPreds(step: Step, ctx: ScalarCtx, params: Record<string, any>, op: 'AND' | 'OR'): { expr: Expression; indexKeys: string[] } {
   const branches = step.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 2) throw new Error(`${step.name}() needs at least two traversal branches`);
-  const binds: any[] = [], indexKeys: string[] = [];
+  const indexKeys: string[] = [];
   const parts = branches.map((b) => {
     const p = compileFilterPredicate(stepChain(b.nested, params), ctx, params);
-    binds.push(...p.binds); indexKeys.push(...p.indexKeys);
-    return `(${p.sql})`;
+    indexKeys.push(...p.indexKeys);
+    return parens([p.expr]);
   });
-  return { sql: `(${parts.join(` ${op} `)})`, binds, indexKeys };
+  return { expr: parens(parts, sqlText(` ${op} `)), indexKeys };
 }
 
 /** EXISTS over a single incident-edge movement (out/in/both/outE/inE/bothE),
- *  correlated on the outer node. "Does this vertex have such a neighbour/edge." */
-function compileExists(mv: Step, ctx: ScalarCtx): { sql: string; binds: any[] } {
+ *  correlated on the outer node, as a node. "Does this vertex have such a neighbour/edge." */
+function compileExists(mv: Step, ctx: ScalarCtx): Expression {
   if (ctx.elem !== 'node') throw new Error(`where(__.${mv.name}()) expects a vertex, not an ${ctx.elem}`);
   const dirs = dirsFor(mv.name.endsWith('E') ? mv.name.slice(0, -1) : mv.name);
-  const lf = edgeLabelFilter(mv.args);
-  const binds: any[] = [];
-  const terms = dirs.map(([from]) => { binds.push(...lf.binds); return `EXISTS(SELECT 1 FROM edges e WHERE e.${from}=${ctx.idExpr}${lf.sql})`; });
-  return { sql: terms.length === 1 ? terms[0] : `(${terms.join(' OR ')})`, binds };
+  const terms = dirs.map(([from]) =>
+    sql(sqlText(`EXISTS(SELECT 1 FROM edges e WHERE e.${from}=${ctx.idExpr}`), edgeLabelFilter(mv.args), sqlText(')')));
+  return terms.length === 1 ? terms[0] : parens(terms, sqlText(' OR '));
 }
