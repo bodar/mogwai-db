@@ -9,8 +9,9 @@ things that took a whole investigation to learn — do not re-derive them.
 A TinkerPop 4 Gremlin server compiled onto SQLite, targeting Cloudflare
 Durable Objects. One DO = one isolated graph database, created on first
 request via `idFromName`. Any TinkerPop 4 GLV in any language connects over
-plain HTTP. Verified working against unmodified `gremlin@4.0.0-beta.2`:
-11/11 e2e checks (test/e2e.ts), 2177/2177 official corpus parse rate.
+plain HTTP. Verified against unmodified `gremlin@4.0.0-beta.2` on both runtimes
+(Bun + Cloudflare DO): the shared contract (`test/contract.ts`) passes over
+GraphBinary, 2177/2177 official corpus parse rate.
 
 The name: mogwai are what gremlins start as. A DO that becomes a Gremlin
 server when you feed it. npm name `mogwai-db` (bare `mogwai` is squatted by
@@ -122,16 +123,24 @@ future management endpoint.
 - Runtime is Bun (pinned in `mise.toml`), not Node. `bun run start` serves
   via `Bun.serve`; `bun test` runs the suite (`*.test.ts`). No tsx/esbuild —
   Bun runs TS natively.
-- Dev storage shim is `bun:sqlite` (synchronous, matching DO SQLite
-  semantics). The DO port swaps `src/storage.ts` internals to
-  `ctx.storage.sql` and adds the Worker router; compiler/server logic is
-  storage-agnostic. `src/server.ts` exports `startServer(port, dbPath)` and
-  only listens under `import.meta.main`, so tests run it in-process.
-- Bun ⇄ Cloudflare via DI (`@bodar/yadic`): the `GraphStore` seam gets two
-  impls (`bun:sqlite`, DO `ctx.storage.sql` — both sync). See PLAN.md
-  "Runtime abstraction"; reference impl is `~/Projects/the client`
-  (`src/Application.ts`, `src/{bun,cloudflare}/app.ts`, `src/database/`).
-- Bundle budget verified: parser + antlr4ng + serializers ≈ 1 MB minified;
+- Storage runtimes meet at the `Sql` interface in `src/storage.ts` (both sync):
+  `bun:sqlite` for dev/Bun, DO `ctx.storage.sql` for production. The agnostic
+  `GraphStore` (schema, label interning) sits on top; compiler + handler are
+  storage-agnostic.
+- Bun ⇄ Cloudflare via DI (`@bodar/yadic`), DONE: `application(deps)` in
+  `src/application.ts` wires the shared `handler` from the one injected leaf,
+  `store`. Entry points: `src/bun/server.ts` (`Bun.serve` + `BunSqlite`;
+  exports `startServer`, listens under `import.meta.main`) and
+  `src/cloudflare/worker.ts` (route `POST /g/{graphId}` → DO `GraphDatabase` +
+  `DurableObjectSqlite`). Reference impl: `~/Projects/the client`.
+- Bind-type gotcha (cost a review cycle): `bun:sqlite` accepts `boolean`/`bigint`
+  binds; DO `ctx.storage.sql` (`SqlStorageValue`) throws on them. `GraphStore.query`
+  coerces boolean→1/0 and bigint→number at the one seam so both runtimes agree —
+  don't reintroduce raw binds. Covered by a contract test.
+- `src/io.ts` reuses gremlin's GraphBinary serializers via a RELATIVE import
+  (bypasses the package `exports` map; bundles under esbuild). Upstream fix
+  pending: apache/tinkerpop#3511 adds a `gremlin/io` export.
+- Worker bundle (`wrangler deploy --dry-run`): ~2.2 MB raw, ~265 KB gzip.
   ATN warm-up ~few ms once per isolate; warm parse ~0.27 ms.
 - Useful references live in the Apache TinkerPop repo (sparse-clone it):
   grammar at `gremlin-language/src/main/antlr4/`, features at
