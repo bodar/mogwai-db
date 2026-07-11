@@ -109,14 +109,37 @@ future management endpoint.
 - Every new step lands with: SQL snapshot tests, its cucumber tag enabled,
   corpus still 100%.
 
-## Immediate next work (P1 in PLAN.md)
+## P1 done — how the read compiler is now shaped
 
-1. Custom vertex framing → property materialization → valueMap/elementMap.
-2. drop(), order().by, range/skip, inject.
-3. Stand up the L3 cucumber run; publish first score.
-4. Then P2: the as()/select() column-threading compiler — the structural
-   piece everything Medium-tier hangs off. Design carefully; it's where this
-   project is won or lost.
+`compileRead` is two phases. `traversalCtes()` builds the movement/filter CTE
+prefix (V, hasLabel, has, out/in/both, dedup, and range/skip/limit *as CTEs*)
+and returns where it stopped. Then a tail loop consumes an optional projection
+(values/id/label/count/valueMap/elementMap) plus `order().by(key[,dir])` and
+range/skip/limit as **tail modifiers** that fold `ORDER BY`/`LIMIT`/`OFFSET`
+into the final projection select. Key rule: range/skip/limit are CTEs when they
+appear *before* any `order()` (so mid-chain `out().limit(5).out()` works) and
+tail modifiers *after* order() (so ORDER BY + LIMIT stay one query). `count()`
+wraps the tail-limited id-relation. `drop()` and `inject()` have their own
+compile fns (`compileDrop`, `compileInject`).
+
+Property materialization: `handler.ts` `vertexBuffer` frames the vertex from
+ioc primitives instead of routing through anySerializer (whose VertexSerializer
+hardcodes empty props). valueMap/elementMap build JS `Map`s; the id/label token
+keys are `t.id`/`t.label` (from `io.ts`), which ride as GraphBinary `DataType.T`.
+
+L3 harness: `conformance/conformance-server.ts` fronts the named graphs by the
+request `g` field (DEV ONLY — production routes tenancy by URL path per the
+locked decision). `makeHandler` now takes a `StoreSource` (a store *or* a
+`(g)=>store` resolver). See `conformance/README-cucumber.md` to run the full
+suite.
+
+## Immediate next work (P2 in PLAN.md)
+
+The as()/select()/by()/project() column-threading compiler — the structural
+piece everything Medium-tier hangs off (each `as('a')` adds an `a_id` column to
+every subsequent CTE). Design carefully; it's where this project is won or lost.
+`by()` already parses as its own step (currently only attached to `order()`);
+extend it to select/project. Also publish the first full L3 cucumber score.
 
 ## Environment notes
 

@@ -86,13 +86,67 @@ export function graphContract(name: string, harness: Harness) {
       expect((await g.V().limit(2).count().next()).value).toBe(2n);
     });
 
-    test('vertex round-trips id and label', async () => {
+    test('vertex round-trips id, label, and materialized properties', async () => {
       const v = (await g.V().has('name', 'ada').next()).value;
       expect(v.id).toBe(ada.id);
       expect(v.label).toBe('person');
-      // Properties come back empty: the client's VertexSerializer hardcodes empty
-      // properties. Materializing them (custom vertex framing) is P1 in PLAN.md.
-      expect(v.properties ?? []).toEqual([]);
+      // Custom vertex framing (P1) materializes properties over the wire.
+      const props = Object.fromEntries((v.properties ?? []).map((p: any) => [p.key, p.value]));
+      expect(props).toEqual({ name: 'ada', age: 36 });
+    });
+
+    test('valueMap(keys) returns list-valued map', async () => {
+      const m = (await g.V().has('name', 'dan').valueMap('name', 'age').next()).value;
+      expect(m.get('name')).toEqual(['dan']);
+      expect(m.get('age')).toEqual([44]);
+    });
+
+    test('elementMap returns flat scalar map with id/label tokens', async () => {
+      const m = (await g.V().has('name', 'dan').elementMap().next()).value;
+      expect(m.get('name')).toBe('dan');
+      expect(m.get('age')).toBe(44);
+      // id/label ride as T tokens; find them by their string element name.
+      const byToken = (name: string) =>
+        [...m.entries()].find(([k]: any) => k?.elementName === name)?.[1];
+      expect(byToken('id')).toBe(dan.id);
+      expect(byToken('label')).toBe('person');
+    });
+
+    test('order().by(key) then values', async () => {
+      expect(await g.V().hasLabel('person').order().by('age').values('name').toList())
+        .toEqual(['ada', 'dan']); // 36 < 44
+    });
+
+    test('order().by(key, desc)', async () => {
+      expect(await g.V().hasLabel('person').order().by('age', gremlin.process.order.desc).values('name').toList())
+        .toEqual(['dan', 'ada']);
+    });
+
+    test('values().order() sorts scalars ascending', async () => {
+      expect(await g.V().hasLabel('person').values('age').order().toList()).toEqual([36, 44]);
+    });
+
+    test('order + range window', async () => {
+      expect(await g.V().hasLabel('person').order().by('age').range(0, 1).values('name').toList())
+        .toEqual(['ada']);
+    });
+
+    test('order + skip', async () => {
+      expect(await g.V().hasLabel('person').order().by('age').skip(1).values('name').toList())
+        .toEqual(['dan']);
+    });
+
+    test('inject seeds a constant value stream', async () => {
+      expect(await g.inject(1, 2, 3).toList()).toEqual([1, 2, 3]);
+    });
+
+    test('drop removes a vertex and its incident edges', async () => {
+      const doomed = (await g.addV('temp').property('name', 'doomed').next()).value;
+      await g.V(dan.id).addE('knows').to(__.V(doomed.id)).iterate();
+      await g.V(doomed.id).drop().iterate();
+      expect((await g.V().has('name', 'doomed').count().next()).value).toBe(0n);
+      // incident edge is gone: dan still only knows ada
+      expect(await g.V(dan.id).out('knows').values('name').toList()).toEqual(['ada']);
     });
 
     // Cross-runtime bind coercion: bun:sqlite accepts boolean binds, DO's

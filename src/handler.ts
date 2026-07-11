@@ -1,6 +1,6 @@
 import { compile } from './compiler.js';
 import type { GraphStore } from './storage.js';
-import { ioc, Vertex, VertexProperty, Edge } from './io.js';
+import { ioc, Vertex, VertexProperty, Edge, t } from './io.js';
 
 // ---- GraphBinary v4 response framing (mirrors GraphBinaryReader.readResponse) ----
 function frame(values: Buffer[], status = 200, message: string | null = null): Buffer {
@@ -17,28 +17,58 @@ function frame(values: Buffer[], status = 200, message: string | null = null): B
   return Buffer.concat(parts);
 }
 
-function toVertex(id: number, label: string, props: Record<string, any>): InstanceType<typeof Vertex> {
+// Custom vertex framing to MATERIALIZE properties. The client's
+// VertexSerializer.serialize() hardcodes an empty property list (the client
+// never sends props), so routing a Vertex through anySerializer drops them.
+// We frame the vertex from ioc primitives instead — its deserialize side reads
+// properties fine. Per-property framing (id/label/value) is left to
+// VertexPropertySerializer via the qualified list, which serializes correctly.
+function vertexBuffer(id: number, label: string, props: Record<string, any>): Buffer {
   let pid = 0;
-  const vprops = Object.entries(props).map(
-    ([k, v]) => new VertexProperty(`${id}.${pid++}`, k, v, []),
-  );
-  return new Vertex(id, label, vprops);
+  const vprops = Object.entries(props).map(([k, v]) => new VertexProperty(`${id}.${pid++}`, k, v, []));
+  return Buffer.concat([
+    Buffer.from([ioc.DataType.VERTEX, 0x00]),
+    ioc.anySerializer.serialize(id),            // {id}, fully qualified
+    ioc.listSerializer.serialize([label], false), // {label}, bare list of one
+    ioc.listSerializer.serialize(vprops, true),   // {properties}, qualified list
+  ]);
+}
+
+// valueMap()/valueMap(true)/valueMap(keys...): Map<key, [values]>; with tokens,
+// prepend the T.id/T.label entries (T tokens ride as GraphBinary DataType.T).
+function valueMapBuffer(id: number, label: string, props: Record<string, any>,
+                        keys: string[] | null, tokens: boolean): Buffer {
+  const m = new Map<any, any>();
+  if (tokens) { m.set(t.id, id); m.set(t.label, label); }
+  for (const key of keys ?? Object.keys(props)) if (key in props) m.set(key, [props[key]]);
+  return ioc.anySerializer.serialize(m);
+}
+
+// elementMap(): flat Map with scalar values; id/label tokens are ALWAYS present.
+function elementMapBuffer(id: number, label: string, props: Record<string, any>,
+                          keys: string[] | null): Buffer {
+  const m = new Map<any, any>();
+  m.set(t.id, id); m.set(t.label, label);
+  for (const key of keys ?? Object.keys(props)) if (key in props) m.set(key, props[key]);
+  return ioc.anySerializer.serialize(m);
 }
 
 function execute(store: GraphStore, gremlin: string, params: Record<string, any>): Buffer[] {
   const plan = compile(gremlin, params);
   if (plan.kind === 'write') {
     return plan.run(store).map((r: any) => {
-      if (r.vertex) return ioc.anySerializer.serialize(
-        toVertex(r.vertex.id, r.vertex.label, r.vertex.props));
+      if (r.vertex) return vertexBuffer(r.vertex.id, r.vertex.label, r.vertex.props);
       const e = r.edge;
       return ioc.anySerializer.serialize(
         new Edge(e.id, new Vertex(e.src, '', null), e.label, new Vertex(e.tgt, '', null), []));
     });
   }
   const rows = store.query(plan.sql, plan.binds) as any[];
-  switch (plan.shape.kind) {
-    case 'vertex': return rows.map((r) => ioc.anySerializer.serialize(toVertex(r.id, r.label, JSON.parse(r.props))));
+  const shape = plan.shape;
+  switch (shape.kind) {
+    case 'vertex': return rows.map((r) => vertexBuffer(r.id, r.label, JSON.parse(r.props)));
+    case 'valueMap': return rows.map((r) => valueMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys, shape.tokens));
+    case 'elementMap': return rows.map((r) => elementMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys));
     case 'count': return rows.map((r) => ioc.anySerializer.serialize(BigInt(r.v)));
     case 'value': return rows.map((r) => ioc.anySerializer.serialize(r.v));
     case 'discard': return [];
@@ -46,18 +76,27 @@ function execute(store: GraphStore, gremlin: string, params: Record<string, any>
 }
 
 /**
+ * A store, or a resolver that picks one from the request's traversal-source
+ * name (the `g` field). Production injects a single `GraphStore` (tenancy is
+ * routed at the Worker by URL path, per the locked decision). The dev
+ * conformance harness injects a resolver so one server can host the several
+ * named toy graphs the cucumber suite opens (gmodern, ggraph, ...).
+ */
+export type StoreSource = GraphStore | ((g: string) => GraphStore);
+
+/**
  * The runtime-agnostic request handler: sniff JSON/GraphBinary, compile,
  * execute against the injected store, frame the GraphBinary v4 response.
  * Returns a Web-standard Response, so it drops straight into both `Bun.serve`
  * and a Durable Object `fetch`.
  */
-export function makeHandler(store: GraphStore): (req: Request) => Promise<Response> {
+export function makeHandler(source: StoreSource): (req: Request) => Promise<Response> {
   return async function handler(req: Request): Promise<Response> {
     let gremlinForLog = '?';
     let body: Buffer;
     try {
       const raw = Buffer.from(await req.arrayBuffer());
-      let msg: { gremlin: string; parameters?: Record<string, any> };
+      let msg: { gremlin: string; parameters?: Record<string, any>; g?: string };
       if (raw[0] === 0x84) {
         // GraphBinary request: 0x84, fields map (bare), gremlin string (bare)
         let cursor = raw.subarray(1);
@@ -65,11 +104,12 @@ export function makeHandler(store: GraphStore): (req: Request) => Promise<Respon
         cursor = cursor.subarray(len);
         const { v: gremlin } = ioc.stringSerializer.deserialize(cursor, false);
         const bindings = fields.get?.('bindings') ?? fields.get?.('parameters') ?? {};
-        msg = { gremlin, parameters: bindings instanceof Map ? Object.fromEntries(bindings) : bindings };
+        msg = { gremlin, g: fields.get?.('g'), parameters: bindings instanceof Map ? Object.fromEntries(bindings) : bindings };
       } else {
         msg = JSON.parse(raw.toString('utf8'));
       }
       gremlinForLog = msg.gremlin;
+      const store = typeof source === 'function' ? source(msg.g ?? 'g') : source;
       const values = execute(store, msg.gremlin, msg.parameters ?? {});
       body = frame(values);
       console.log(`OK   ${msg.gremlin} -> ${values.length} result(s)`);
