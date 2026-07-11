@@ -55,7 +55,8 @@ describe('compiler SQL snapshots', () => {
 
   test('inject seeds a VALUES stream', () => {
     const p = read('g.inject(1,2,3)');
-    expect(p.sql).toBe('WITH c0(v) AS (VALUES (?),(?),(?)) SELECT v FROM c0');
+    // Node-built: quoted CTE name/cols + lowercase keywords (lazyrecords canonical).
+    expect(p.sql).toBe('with "c0"("v") as (values (?), (?), (?)) select v from c0');
     expect(p.binds).toEqual([1, 2, 3]);
   });
 
@@ -307,11 +308,11 @@ describe('compiler SQL snapshots', () => {
 
   test('TextP compiles to LIKE with a bound, metachar-escaped pattern', () => {
     const sw = read('g.V().has("name", TextP.startingWith("jo"))');
-    expect(sw.sql).toContain("LIKE ? ESCAPE '\\'");
+    expect(sw.sql).toContain("like ? escape ?"); // node renderer: lowercase kw, escape bound
     expect(sw.binds).toContain('jo%');
     expect(read('g.V().values("name").is(TextP.containing("ar"))').binds).toContain('%ar%');
     // negation → NOT LIKE
-    expect(read('g.V().has("name", TextP.notEndingWith("o"))').sql).toContain("NOT LIKE ? ESCAPE '\\'");
+    expect(read('g.V().has("name", TextP.notEndingWith("o"))').sql).toContain("not like ? escape ?");
     // metachars in the user value are escaped, never spliced
     const esc = read('g.V().has("name", TextP.containing("50%_x"))');
     expect(esc.binds).toContain('%50\\%\\_x%');
@@ -410,8 +411,8 @@ describe('compiler SQL snapshots', () => {
 
   test('P.inside is exclusive-low (distinct from between)', () => {
     // between = [lo,hi) ; inside = (lo,hi)
-    expect(read('g.V().has("age", P.between(29,35))').sql).toContain('>= ? AND');
-    expect(read('g.V().has("age", P.inside(29,35))').sql).toContain('> ? AND');
+    expect(read('g.V().has("age", P.between(29,35))').sql).toContain('>= ? and');
+    expect(read('g.V().has("age", P.inside(29,35))').sql).toContain('> ? and');
     expect(read('g.V().has("age", P.inside(29,35))').sql).not.toContain('>= ?');
   });
 
@@ -431,8 +432,8 @@ describe('compiler SQL snapshots', () => {
   test('has() still compiles all predicate forms after the predicateSql refactor', () => {
     expect(read('g.V().has("age", 30)').sql).toContain('= ?');
     expect(read('g.V().has("age", P.gt(30))').sql).toContain('> ?');
-    expect(read('g.V().has("age", P.within(29,30))').sql).toContain('IN (?,?)');
-    expect(read('g.V().has("age", P.between(29,35))').sql).toContain('>= ? AND');
+    expect(read('g.V().has("age", P.within(29,30))').sql).toContain('in (?, ?)');
+    expect(read('g.V().has("age", P.between(29,35))').sql).toContain('>= ? and');
   });
 
   test('identifier keys splice as literal JSON paths (index-friendly); exotic keys are bound', () => {

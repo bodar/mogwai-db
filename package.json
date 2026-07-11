@@ -31,6 +31,7 @@
   },
   "homepage": "https://github.com/bodar/mogwai-db#readme",
   "dependencies": {
+    "@bodar/lazyrecords": "npm:@jsr/bodar__lazyrecords",
     "@bodar/yadic": "npm:@jsr/bodar__yadic",
     "antlr4ng": "^3.0.16",
     "gremlin": "^4.0.0-beta.2"
