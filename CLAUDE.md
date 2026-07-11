@@ -123,6 +123,9 @@ future management endpoint.
 - Runtime is Bun (pinned in `mise.toml`), not Node. `bun run start` serves
   via `Bun.serve`; `bun test` runs the suite (`*.test.ts`). No tsx/esbuild —
   Bun runs TS natively.
+- Build graph is mise tasks (`mise.toml`): `install ─▶ {test, build} ─▶ ci`.
+  GitHub Actions (`.github/workflows/ci.yml`) runs `mise run ci` — nothing
+  CI-specific lives in the workflow, so the gate is reproducible locally.
 - Storage runtimes meet at the `Sql` interface in `src/storage.ts` (both sync):
   `bun:sqlite` for dev/Bun, DO `ctx.storage.sql` for production. The agnostic
   `GraphStore` (schema, label interning) sits on top; compiler + handler are
