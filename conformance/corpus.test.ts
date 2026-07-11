@@ -1,6 +1,6 @@
 import { test, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseGremlin, stepChain } from '../src/compiler.ts';
+import { parseGremlin, stepChain } from '../src/frontend.ts';
 
 const lines = readFileSync(new URL('./corpus.txt', import.meta.url), 'utf8')
   .split('\n').filter(Boolean);
