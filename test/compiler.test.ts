@@ -119,6 +119,17 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().has("age",30).as("a").select("a").by("name")').indexKeys).toEqual(['age']);
   });
 
+  test('withStrategies/withoutStrategies fail closed (never silently drop a filtering strategy)', () => {
+    // A dropped PartitionStrategy/SubgraphStrategy would return unfiltered data with
+    // no error — an isolation leak. Must reject, not silently ignore.
+    expect(() => compile("g.withStrategies(new PartitionStrategy(partitionKey:'_p',writePartition:'a',readPartitions:['a'])).V().values('name')", {}))
+      .toThrow('withStrategies(...) is not supported');
+    expect(() => compile("g.withStrategies(new SubgraphStrategy(vertices:__.has('name','marko'))).V()", {}))
+      .toThrow('withStrategies(...) is not supported');
+    expect(() => compile('g.withoutStrategies(PartitionStrategy).V()', {}))
+      .toThrow('withoutStrategies(...) is not supported');
+  });
+
   test('deferred long-tail forms error clearly (never silently mis-execute)', () => {
     expect(() => compile('g.V().select(Pop.first,"a")', {})).toThrow('select(Pop.first) not yet supported');
     expect(() => compile('g.V().as("a").select("a").by(__.out().count())', {})).toThrow('by(traversal) modulator not yet supported');
