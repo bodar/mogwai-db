@@ -1,8 +1,10 @@
 # CLAUDE.md — mogwai-db
 
-Context file for Claude (Code or otherwise) working on this repo. Read PLAN.md
-after this; it has the phased roadmap and test strategy. This file is the
-things that took a whole investigation to learn — do not re-derive them.
+Context file for Claude (Code or otherwise) working on this repo. Read
+`docs/2026-07-11-phased-roadmap-plan.md` after this; it has the phased roadmap
+and test strategy. Active refactor: `docs/2026-07-11-lazyrecords-cutover-plan.md`
+(compiler.ts → lazyrecords, 3-seam decomposition). This file is the things that
+took a whole investigation to learn — do not re-derive them.
 
 ## What this is
 
@@ -156,7 +158,7 @@ locked decision). `makeHandler` now takes a `StoreSource` (a store *or* a
 `(g)=>store` resolver). See `conformance/README-cucumber.md` to run the full
 suite.
 
-## Immediate next work (P2b in PLAN.md)
+## Immediate next work (P2b in docs/2026-07-11-phased-roadmap-plan.md)
 
 DONE: P2a (as/select/project/by column-threading), P2c-1 (edge traversal — the
 typed node/edge `Elem` id-relation, edge shape, `edgeBuffer`), P2c-1b (property
@@ -206,7 +208,7 @@ sit either side of `repeat`). All `WITH` → `WITH RECURSIVE` (harmless for
 non-recursive CTEs; needed once any walk appears). Depth guard 32 when `times`
 absent. Deferred: `until`, `emit(pred)`, complex bodies, `path`/`simplePath`.
 
-**Target locked — see PLAN.md "Target — declared feature profile" + the W1–W5
+**Target locked — see docs/2026-07-11-phased-roadmap-plan.md "Target — declared feature profile" + the W1–W5
 writes-first roadmap.** Profile: UserSuppliedIds ✅, Multi/MetaProperties ✅ (W4
 schema rework), Upsert ✅, no lambdas/OLAP/multi-request-tx. Sequence:
 ids → writes → deploy → multi/meta rework → conformance grind.

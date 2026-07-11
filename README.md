@@ -30,7 +30,7 @@ A TinkerPop 4 Gremlin server on SQLite, targeting Cloudflare Durable Objects.
 >   multi/meta properties (breaking schema rework), the conformance grind
 >   (`match`, `path`, `coalesce`, …).
 >
-> See [PLAN.md](PLAN.md) for the phased roadmap and the writes-first sequence.
+> See [docs/2026-07-11-phased-roadmap-plan.md](docs/2026-07-11-phased-roadmap-plan.md) for the phased roadmap and the writes-first sequence.
 
 ## Where mogwai-db fits (and where it doesn't)
 
@@ -133,7 +133,7 @@ bun run deploy                 # wrangler deploy
 `mise run test` boots the Worker under `wrangler dev` for the Cloudflare half, so
 the first run may pause while workerd starts.
 
-## Known gaps / next (see PLAN.md for the sequenced roadmap)
+## Known gaps / next (see docs/2026-07-11-phased-roadmap-plan.md for the sequenced roadmap)
 - **Deploy (W3, immediate next):** Worker router hardening — per-graph bearer
   auth, management/delete endpoint, real Cloudflare deploy → *deployable*.
 - **Multi/meta properties (W4):** props are still a flat JSON object; reworking to
