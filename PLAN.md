@@ -192,10 +192,25 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
   single highest-frequency missing step in the suite (295 scenarios);
   `where(__…count().is())` is the dominant "filter by sub-traversal result"
   idiom. Reuses the P2a plumbing directly.
-- **P2c — `fold`/`unfold` + aggregation** (`sum`/`group`/`groupCount`/`cap`/
-  `aggregate`). Largest remaining lever (~50 scenarios; `unfold`/`fold` are the
-  top co-blockers of the still-locked as/select scenarios). Distinct
-  staged-execution / GROUP BY subsystem — separate from threading.
+- **P2c — edge/element traversal + aggregation, sequenced to clear the L3
+  `BeforeAll` gate.** The official cucumber runner's `BeforeAll` caches every
+  seeded graph via three aggregation traversals
+  (`g.V().group().by('name').by(__.tail())`,
+  `g.E().group().by(__.project(...).by(__.outV().values('name'))...)`,
+  `g.V().properties().group().by(__.project("n","k","v").by(__.element().values('name')).by(__.key()).by(__.value()))`)
+  — so *no* upstream L3 scenario runs until that whole cluster works. Split
+  (coverage vs the 2099-scenario suite, cumulative from P2a's 208):
+  - **P2c-1 — edge traversal proper.** `E`, `outE`/`inE`/`bothE`,
+    `outV`/`inV`/`bothV`, and edge-aware `has`/`hasLabel`/`label`/`values`/
+    `count`/`order`. The id-relation becomes *typed*: `id` is a node-id or
+    edge-id, tracked statically by the compiler (no runtime tag). New `edge`
+    result shape. ~+57 (→~265).
+  - **P2c-1b — property elements.** `properties`/`element`/`key`/`value`: the
+    traverser becomes a property (owner+key+value, a `json_each` expansion —
+    multi-column, harder than edges). ~+33.
+  - **P2c-2 — aggregation.** `group`/`groupCount`/`fold`/`unfold`/`tail`/`sum`/
+    `cap`/`aggregate` + nested-traversal `by()`. Clears the `BeforeAll` gate →
+    unmodified upstream L3 number goes live. Full edge+agg cluster → ~447.
 - **P2 tail (after the above):**
   - `union`, `coalesce`, `optional` → UNION ALL / LEFT JOIN
   - `path()` → JSON-array accumulation column (accept loss of index-only scans)

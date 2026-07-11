@@ -118,6 +118,7 @@ export interface MapEntry { key: string; prefix: string; sub: 'vertex' | 'value'
 
 export type Shape =
   | { kind: 'vertex' }
+  | { kind: 'edge' }
   | { kind: 'value' }
   | { kind: 'count' }
   | { kind: 'valueMap'; keys: string[] | null; tokens: boolean }
@@ -194,26 +195,37 @@ export function compile(gremlin: string, params: Record<string, any>): Compiled 
  * first order()/projection/other step and returns where it stopped. Shared by
  * reads and drop().
  */
-function traversalCtes(steps: Step[]): { ctes: string[]; binds: any[]; stop: number; indexKeys: Set<string>; aliases: Map<string, string> } {
+/** Whether the current traverser's `id` column is a node id or an edge id. The
+ *  id-relation is typed but the type is *static* — known from the step chain, so
+ *  no runtime tag is needed. V()/out()/…V() → node; E()/…E() → edge. */
+type Elem = 'node' | 'edge';
+
+/** Bound as() labels: label -> its carried column and the element kind it holds. */
+type AliasMap = Map<string, { col: string; elem: Elem }>;
+
+function traversalCtes(steps: Step[]): { ctes: string[]; binds: any[]; stop: number; indexKeys: Set<string>; aliases: AliasMap; elem: Elem } {
   const ctes: string[] = [];
   const binds: any[] = [];
   const indexKeys = new Set<string>();
-  // as('x') labels: label -> synthetic column name (a0, a1, …). Synthetic names
-  // keep user strings out of SQL identifiers (injection-safe) and stay stable so
-  // a later correlated subquery (P2b where/is) can reference them. Once bound, an
-  // alias stays live to the end (Gremlin never unbinds a label), so every CTE
-  // after the bind carries every bound alias column forward from `p`.
-  const aliases = new Map<string, string>();
+  // as('x') labels: label -> { synthetic column name (a0,a1,… — user strings
+  // never enter SQL identifiers, injection-safe, and stable so a later
+  // correlated subquery can reference them), element kind at bind time (so
+  // select/project knows whether the label holds a vertex or an edge) }. Once
+  // bound a label stays live to the end (Gremlin never unbinds one), so every
+  // CTE after the bind carries every bound alias column forward from `p`.
+  const aliases: AliasMap = new Map();
   const prev = () => `c${ctes.length - 1}`;
-  const carry = () => [...aliases.values()].map((c) => `, p.${c}`).join('');
+  const carry = () => [...aliases.values()].map((a) => `, p.${a.col}`).join('');
 
   const first = steps[0];
-  if (first.name !== 'V') throw new Error(`unsupported source step: ${first.name}`);
+  if (first.name !== 'V' && first.name !== 'E') throw new Error(`unsupported source step: ${first.name}`);
+  let elem: Elem = first.name === 'E' ? 'edge' : 'node';
+  const srcTable = elem === 'edge' ? 'edges' : 'nodes';
   if (first.args.length > 0) {
-    ctes.push(`c0 AS (SELECT id FROM nodes WHERE id IN (${first.args.map(() => '?').join(',')}))`);
+    ctes.push(`c0 AS (SELECT id FROM ${srcTable} WHERE id IN (${first.args.map(() => '?').join(',')}))`);
     binds.push(...first.args.map(Number));
   } else {
-    ctes.push(`c0 AS (SELECT id FROM nodes)`);
+    ctes.push(`c0 AS (SELECT id FROM ${srcTable})`);
   }
 
   let i = 1;
@@ -227,25 +239,30 @@ function traversalCtes(steps: Step[]): { ctes: string[]; binds: any[]; stop: num
         const labels = s.args.filter((a): a is string => typeof a === 'string');
         const rebind: string[] = [];
         for (const lbl of labels) {
-          let col = aliases.get(lbl);
-          if (!col) { col = `a${aliases.size}`; aliases.set(lbl, col); }
-          rebind.push(col);
+          let entry = aliases.get(lbl);
+          if (!entry) { entry = { col: `a${aliases.size}`, elem }; aliases.set(lbl, entry); }
+          else entry.elem = elem; // rebind: default Pop = last, and re-capture kind
+          rebind.push(entry.col);
         }
-        const cols = ['id', ...[...aliases.values()].map((c) => rebind.includes(c) ? `id AS ${c}` : c)];
+        const cols = ['id', ...[...aliases.values()].map((a) => rebind.includes(a.col) ? `id AS ${a.col}` : a.col)];
         ctes.push(`c${ctes.length} AS (SELECT ${cols.join(', ')} FROM ${prev()})`);
         break;
       }
       case 'hasLabel': {
         const ph = s.args.map(() => '?').join(',');
-        ctes.push(`c${ctes.length} AS (SELECT n.id${carry()} FROM nodes n JOIN ${prev()} p ON n.id=p.id WHERE n.label IN (SELECT id FROM labels WHERE name IN (${ph})))`);
+        const tbl = elem === 'edge' ? 'edges' : 'nodes';
+        ctes.push(`c${ctes.length} AS (SELECT n.id${carry()} FROM ${tbl} n JOIN ${prev()} p ON n.id=p.id WHERE n.label IN (SELECT id FROM labels WHERE name IN (${ph})))`);
         binds.push(...s.args);
         break;
       }
       case 'has': {
         const [key, val] = s.args;
         const pe = propExtract('n.props', key); // literal path for indexable keys
-        if (pe.indexKey) indexKeys.add(pe.indexKey); // has() is a filter → worth indexing
-        const join = `SELECT n.id${carry()} FROM nodes n JOIN ${prev()} p ON n.id=p.id`;
+        // Only node property indexes are auto-built (ensureNodePropIndex); an
+        // edge has() filters correctly but stays unindexed for now.
+        if (pe.indexKey && elem === 'node') indexKeys.add(pe.indexKey);
+        const tbl = elem === 'edge' ? 'edges' : 'nodes';
+        const join = `SELECT n.id${carry()} FROM ${tbl} n JOIN ${prev()} p ON n.id=p.id`;
         if (val !== null && typeof val === 'object' && 'op' in val) {
           const p = val as Pred;
           if (p.op in P_OPS) {
@@ -267,6 +284,7 @@ function traversalCtes(steps: Step[]): { ctes: string[]; binds: any[]; stop: num
         break;
       }
       case 'out': case 'in': case 'both': {
+        if (elem !== 'node') throw new Error(`${s.name}() expects a vertex, not an ${elem}`);
         const dirs = s.name === 'out' ? [['src', 'tgt']] : s.name === 'in' ? [['tgt', 'src']] : [['src', 'tgt'], ['tgt', 'src']];
         const labelFilter = s.args.length
           ? ` AND e.label IN (SELECT id FROM labels WHERE name IN (${s.args.map(() => '?').join(',')}))`
@@ -277,6 +295,30 @@ function traversalCtes(steps: Step[]): { ctes: string[]; binds: any[]; stop: num
           `SELECT e.${to} AS id${carry()} FROM edges e JOIN ${prev()} p ON e.${from}=p.id${labelFilter}`);
         ctes.push(`c${ctes.length} AS (${selects.join(' UNION ALL ')})`);
         for (const _ of dirs) binds.push(...s.args);
+        break;
+      }
+      case 'outE': case 'inE': case 'bothE': {
+        // vertex → incident edges. The new id is the EDGE id; elem becomes edge.
+        if (elem !== 'node') throw new Error(`${s.name}() expects a vertex, not an ${elem}`);
+        const froms = s.name === 'outE' ? ['src'] : s.name === 'inE' ? ['tgt'] : ['src', 'tgt'];
+        const labelFilter = s.args.length
+          ? ` AND e.label IN (SELECT id FROM labels WHERE name IN (${s.args.map(() => '?').join(',')}))`
+          : '';
+        const selects = froms.map((from) =>
+          `SELECT e.id AS id${carry()} FROM edges e JOIN ${prev()} p ON e.${from}=p.id${labelFilter}`);
+        ctes.push(`c${ctes.length} AS (${selects.join(' UNION ALL ')})`);
+        for (const _ of froms) binds.push(...s.args);
+        elem = 'edge';
+        break;
+      }
+      case 'outV': case 'inV': case 'bothV': {
+        // edge → endpoint vertices. The new id is the NODE id; elem becomes node.
+        if (elem !== 'edge') throw new Error(`${s.name}() expects an edge, not a ${elem}`);
+        const cols = s.name === 'outV' ? ['src'] : s.name === 'inV' ? ['tgt'] : ['src', 'tgt'];
+        const selects = cols.map((col) =>
+          `SELECT e.${col} AS id${carry()} FROM edges e JOIN ${prev()} p ON e.id=p.id`);
+        ctes.push(`c${ctes.length} AS (${selects.join(' UNION ALL ')})`);
+        elem = 'node';
         break;
       }
       case 'dedup':
@@ -303,16 +345,16 @@ function traversalCtes(steps: Step[]): { ctes: string[]; binds: any[]; stop: num
         ctes.push(`c${ctes.length} AS (SELECT p.id${carry()} FROM ${prev()} p LIMIT -1 OFFSET ${Number(s.args[0])})`);
         break;
       default:
-        return { ctes, binds, stop: i, indexKeys, aliases };
+        return { ctes, binds, stop: i, indexKeys, aliases, elem };
     }
   }
-  return { ctes, binds, stop: i, indexKeys, aliases };
+  return { ctes, binds, stop: i, indexKeys, aliases, elem };
 }
 
 interface OrderClause { key: string | null; dir: 'asc' | 'desc' | 'shuffle'; }
 
 function compileRead(steps: Step[]): Compiled {
-  const { ctes, binds, stop, indexKeys, aliases } = traversalCtes(steps);
+  const { ctes, binds, stop, indexKeys, aliases, elem } = traversalCtes(steps);
   const last = `c${ctes.length - 1}`;
 
   // Tail phase: an optional projection + order()/range()/skip()/limit() and dedup.
@@ -362,7 +404,7 @@ function compileRead(steps: Step[]): Compiled {
   }
 
   if (isMapProj())
-    return compileSelectProject(projStep!, bys, aliases, ctes, binds, last, { orders, distinct, offset, limit }, indexKeys);
+    return compileSelectProject(projStep!, bys, aliases, ctes, binds, last, { orders, distinct, offset, limit }, indexKeys, elem);
 
   // Resolve the projection to a shape + a row source (cols/from/where).
   const projName = projStep?.name ?? 'vertex';
@@ -376,7 +418,9 @@ function compileRead(steps: Step[]): Compiled {
     return { kind: 'read', sql: `WITH ${ctes.join(',\n')}\nSELECT COUNT(*) AS v FROM (${src})`, binds, shape: { kind: 'count' }, indexKeys: [...indexKeys] };
   }
 
-  const vJoin = `nodes n JOIN ${last} p ON n.id=p.id`;
+  // The current element's table; `n` is the element row regardless of kind.
+  const tbl = elem === 'edge' ? 'edges' : 'nodes';
+  const vJoin = `${tbl} n JOIN ${last} p ON n.id=p.id`;
   const vlJoin = `${vJoin} JOIN labels l ON l.id=n.label`;
   let cols: string, from: string, where = '';
   switch (projName) {
@@ -389,7 +433,7 @@ function compileRead(steps: Step[]): Compiled {
       break;
     }
     case 'id':
-      // Join nodes n even though the id lives in `last`, so a preceding
+      // Join the element table even though the id lives in `last`, so a preceding
       // order().by(key) — which references n.props — has the alias in scope.
       shape = { kind: 'value' }; cols = `n.id AS v`; from = vJoin; break;
     case 'label':
@@ -400,12 +444,14 @@ function compileRead(steps: Step[]): Compiled {
       cols = `n.id, l.name AS label, n.props`; from = vlJoin; break;
     }
     case 'elementMap': {
+      if (elem === 'edge') throw new Error('elementMap() on edges not yet supported'); // needs IN/OUT direction tokens
       const keys = projStep!.args.filter((a) => typeof a === 'string') as string[];
       shape = { kind: 'elementMap', keys: keys.length ? keys : null };
       cols = `n.id, l.name AS label, n.props`; from = vlJoin; break;
     }
-    default: // vertex
-      shape = { kind: 'vertex' }; cols = `n.id, l.name AS label, n.props`; from = vlJoin;
+    default: // the element itself
+      if (elem === 'edge') { shape = { kind: 'edge' }; cols = `n.id, l.name AS label, n.src, n.tgt, n.props`; from = vlJoin; }
+      else { shape = { kind: 'vertex' }; cols = `n.id, l.name AS label, n.props`; from = vlJoin; }
   }
 
   let sql = `SELECT ${distinct ? 'DISTINCT ' : ''}${cols} FROM ${from}${where}`;
@@ -416,7 +462,7 @@ function compileRead(steps: Step[]): Compiled {
       const dir = o.dir === 'desc' ? 'DESC' : 'ASC';
       if (o.key !== null) {
         const pe = propExtract('n.props', o.key); fb.push(...pe.binds);
-        if (pe.indexKey) indexKeys.add(pe.indexKey); // order().by(key) sorts via the index
+        if (pe.indexKey && elem === 'node') indexKeys.add(pe.indexKey); // order().by(key) sorts via the index (node-only auto-index)
         return `${pe.sql} ${dir}`;
       }
       return `${shape.kind === 'value' ? 'v' : 'n.id'} ${dir}`;
@@ -449,8 +495,8 @@ function byToEntry(byArgs: any[] | undefined): { sub: 'vertex' | 'value'; key?: 
  * per-row Map ({kind:'map'}).
  */
 function compileSelectProject(
-  proj: Step, bys: any[][], aliases: Map<string, string>,
-  ctes: string[], binds: any[], last: string, tail: TailMods, indexKeys: Set<string>,
+  proj: Step, bys: any[][], aliases: AliasMap,
+  ctes: string[], binds: any[], last: string, tail: TailMods, indexKeys: Set<string>, curElem: Elem,
 ): Compiled {
   const { orders, distinct, offset, limit } = tail;
   if (orders.length) throw new Error('order() after select()/project() not yet supported');
@@ -466,13 +512,20 @@ function compileSelectProject(
   const keys = proj.args.filter((a): a is string => typeof a === 'string');
   if (!keys.length) throw new Error(`${proj.name}() requires at least one key`);
 
-  // The `last`-CTE column holding each key's element id: project → current
-  // traverser (p.id); select → the label's alias column (must have been bound).
+  // The `last`-CTE column holding each key's element id, and the element kind it
+  // holds: project → current traverser (p.id); select → the label's alias column
+  // (must have been bound). The joins below assume a vertex — an edge-typed
+  // source would silently join the wrong table (nodes), so reject it clearly
+  // (edge-valued select/project waits on the edge-shape map work).
   const sourceOf = (k: string): string => {
-    if (isProject) return 'p.id';
-    const col = aliases.get(k);
-    if (!col) throw new Error(`select("${k}"): no such label — as("${k}") was not seen`);
-    return `p.${col}`;
+    if (isProject) {
+      if (curElem === 'edge') throw new Error('project() of an edge is not yet supported');
+      return 'p.id';
+    }
+    const entry = aliases.get(k);
+    if (!entry) throw new Error(`select("${k}"): no such label — as("${k}") was not seen`);
+    if (entry.elem === 'edge') throw new Error(`select("${k}") of an edge-typed label is not yet supported`);
+    return `p.${entry.col}`;
   };
   const entryKind = (i: number) => byToEntry(bys.length ? bys[i % bys.length] : undefined);
 
@@ -521,9 +574,10 @@ function compileSelectProject(
 // g.V(...).<filters>.drop() — delete the target vertices and their incident
 // edges. (Edge-valued drop, e.g. g.V().outE().drop(), waits on edge traversal.)
 function compileDrop(steps: Step[]): WritePlan {
-  const { ctes, binds, stop } = traversalCtes(steps.slice(0, -1));
+  const { ctes, binds, stop, elem } = traversalCtes(steps.slice(0, -1));
   if (stop !== steps.length - 1)
     throw new Error(`drop() after ${steps[stop].name}() not yet supported`);
+  if (elem === 'edge') throw new Error('edge drop() (e.g. g.E().drop()) not yet supported');
   const targetSql = `WITH ${ctes.join(',\n')}\nSELECT id FROM c${ctes.length - 1}`;
   return {
     kind: 'write',

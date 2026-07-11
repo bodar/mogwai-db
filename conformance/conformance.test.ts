@@ -88,6 +88,25 @@ describe('conformance host — modern graph (official ids/results)', () => {
     const byName = Object.fromEntries(maps.map((m: any) => [m.get('name'), m.get('age')]));
     expect(byName).toEqual({ marko: 29, vadas: 27, josh: 32, peter: 35 });
   });
+
+  // P2c-1: edge traversal over the real wire — proves the edge shape / edgeBuffer
+  // (materialised edge props) round-trips through the unmodified GLV.
+  test('g_E_count / g_VX1X_outEXknowsX_inV_name', async () => {
+    expect((await g.E().count().next()).value).toBe(6n);
+    expect((await g.V(1).outE('knows').inV().values('name').toList()).sort())
+      .toEqual(['josh', 'vadas']);
+  });
+
+  test('g_VX1X_outEXknowsX (edge elements with materialised weight)', async () => {
+    const edges = await g.V(1).outE('knows').toList();
+    expect(edges.length).toBe(2);
+    for (const e of edges) {
+      expect(e.label).toBe('knows');
+      expect(e.outV.id).toBe(1);              // marko is the source
+      expect([2, 4]).toContain(e.inV.id);     // vadas or josh
+      expect(e.properties.find((p: any) => p.key === 'weight')).toBeDefined(); // props materialised
+    }
+  });
 });
 
 describe('conformance host — empty graph write/reset (ggraph)', () => {

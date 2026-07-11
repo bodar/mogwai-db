@@ -122,7 +122,7 @@ describe('compiler SQL snapshots', () => {
   test('deferred long-tail forms error clearly (never silently mis-execute)', () => {
     expect(() => compile('g.V().select(Pop.first,"a")', {})).toThrow('select(Pop.first) not yet supported');
     expect(() => compile('g.V().as("a").select("a").by(__.out().count())', {})).toThrow('by(traversal) modulator not yet supported');
-    expect(() => compile('g.E().properties("weight").as("a").select("a").by(T.key)', {})).toThrow(/by\(T\.key\)|unsupported source/);
+    expect(() => compile('g.V().as("a").select("a").by(T.id)', {})).toThrow('by(T.id) modulator not yet supported');
     expect(() => compile('g.V().as("a").out().as("b").select("a","b").order()', {})).toThrow('order() after select()/project() not yet supported');
     expect(() => compile('g.V().select("x")', {})).toThrow('no such label');
     // order().by() deferred modulators must throw, not silently sort by id
@@ -131,6 +131,46 @@ describe('compiler SQL snapshots', () => {
     // dedup: label-scoped and dedup-after-as() deferred rather than answered wrongly
     expect(() => compile('g.V().as("a").out().as("b").dedup("a","b")', {})).toThrow('dedup(label) not yet supported');
     expect(() => compile('g.V().as("a").out().dedup()', {})).toThrow('dedup() after as() not yet supported');
+  });
+
+  test('E() sources the edges table; default projection is the edge shape', () => {
+    const p = read('g.E()');
+    expect(p.sql).toContain('c0 AS (SELECT id FROM edges)');
+    expect(p.shape).toEqual({ kind: 'edge' });
+    expect(p.sql).toContain('n.src, n.tgt');
+  });
+
+  test('outE/inE go vertex→edge; outV/inV go edge→vertex', () => {
+    const oe = read('g.V(1).outE("knows")');
+    expect(oe.sql).toContain('SELECT e.id AS id FROM edges e JOIN c0 p ON e.src=p.id');
+    expect(oe.shape).toEqual({ kind: 'edge' });
+
+    const iv = read('g.V(1).outE("knows").inV()');
+    // edge → target vertex; back to vertex shape
+    expect(iv.sql).toContain('SELECT e.tgt AS id FROM edges e JOIN c1 p ON e.id=p.id');
+    expect(iv.shape).toEqual({ kind: 'vertex' });
+  });
+
+  test('edge steps reject the wrong element kind', () => {
+    expect(() => compile('g.V().outV()', {})).toThrow('outV() expects an edge, not a node');
+    expect(() => compile('g.E().out()', {})).toThrow('out() expects a vertex, not an edge');
+    expect(() => compile('g.E().drop()', {})).toThrow('edge drop() (e.g. g.E().drop()) not yet supported');
+    expect(() => compile('g.E().elementMap()', {})).toThrow('elementMap() on edges not yet supported');
+  });
+
+  test('has()/values() on edges filter/project the edges table', () => {
+    const h = read('g.E().has("weight",0.5)');
+    expect(h.sql).toContain('FROM edges n JOIN c0 p ON n.id=p.id');
+    // edge has() is not auto-indexed (node-only index helper)
+    expect(h.indexKeys).toEqual([]);
+    expect(read('g.V(1).outE().values("weight")').sql).toContain("json_extract(n.props, '$.weight') AS v");
+  });
+
+  test('select/project of an edge throws rather than silently joining nodes', () => {
+    // regression: edge-typed alias/traverser must not join the nodes table
+    // (silent empty, or wrong row if node/edge ids collide)
+    expect(() => compile('g.V(1).outE("knows").as("b").select("b")', {})).toThrow('select("b") of an edge-typed label is not yet supported');
+    expect(() => compile('g.V(1).outE().project("w").by("weight")', {})).toThrow('project() of an edge is not yet supported');
   });
 
   test('identifier keys splice as literal JSON paths (index-friendly); exotic keys are bound', () => {
@@ -249,6 +289,26 @@ describe('compiler execution semantics', () => {
     // 'a' bound at marko then rebound at each out-neighbour; select('a') = last
     const ids = run(store, 'g.V(1).as("a").out("knows").as("a").select("a")').map((r) => r.id).sort();
     expect(ids).toEqual([2, 4]); // vadas, josh — the rebound (last) positions
+  });
+
+  test('outE().inV() equals out(); outV/inV recover edge endpoints', () => {
+    const store = seededStore();
+    // marko(1) outE knows → 2 edges → inV → vadas+josh (== out('knows'))
+    expect(run(store, 'g.V(1).outE("knows").inV().values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'vadas']);
+    // edge endpoints: edge 9 (marko-created->lop) outV=marko, inV=lop
+    expect(run(store, 'g.E(9).outV().values("name")').map((r) => r.v)).toEqual(['marko']);
+    expect(run(store, 'g.E(9).inV().values("name")').map((r) => r.v)).toEqual(['lop']);
+  });
+
+  test('E()/hasLabel/count and edge values() over the edges table', () => {
+    const store = seededStore();
+    expect(run(store, 'g.E().count()').map((r) => r.v)).toEqual([6]);
+    expect(run(store, 'g.E().hasLabel("knows").count()').map((r) => r.v)).toEqual([2]);
+    expect(run(store, 'g.V(1).outE("knows").values("weight")').map((r) => r.v).sort())
+      .toEqual([0.5, 1.0]);
+    // bothE from lop(3): the 3 created-edges into it
+    expect(run(store, 'g.V(3).bothE().count()').map((r) => r.v)).toEqual([3]);
   });
 
   test('drop() after an edge-reading traversal deletes the right vertices', () => {
