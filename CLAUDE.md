@@ -156,27 +156,48 @@ locked decision). `makeHandler` now takes a `StoreSource` (a store *or* a
 `(g)=>store` resolver). See `conformance/README-cucumber.md` to run the full
 suite.
 
-## Immediate next work (P2c-2 in PLAN.md)
+## Immediate next work (P2b in PLAN.md)
 
 DONE: P2a (as/select/project/by column-threading), P2c-1 (edge traversal — the
 typed node/edge `Elem` id-relation, edge shape, `edgeBuffer`), P2c-1b (property
-elements). Note P2c-1b did NOT thread pkey/pval through movement as first
-sketched — `properties()` compiles in its own tail fn `compileProperties` (a
-`json_each(props)` expansion, intercepted in `compileRead`), because a property
-is a multi-column traverser the single-`id` movement CTEs can't carry; chains
-past `element()` are deferred.
+elements), **P2c-2 (aggregation — gate + adjacent slice)**. Note P2c-1b did NOT
+thread pkey/pval through movement as first sketched — `properties()` compiles in
+its own tail fn `compileProperties`, because a property is a multi-column
+traverser the single-`id` movement CTEs can't carry.
 
-**P2c-2 — aggregation** (`group`/`groupCount`/`fold`/`unfold`/`tail`/`sum` +
-nested-traversal `by()`). This clears the L3 `BeforeAll` gate — the upstream
-cucumber runner caches every seeded graph via
-`group().by(k).by(__.…)`-style traversals, so *no* upstream scenario runs until
-`group` + nested-`by` + `tail` work. Clearing it publishes the first real L3
-score. Design forks to settle first: `group` value-shape (`GROUP BY` +
-`json_group_object`/`json_group_array`), and nested-traversal `by(__.…)` as a
-correlated scalar subquery — the latter is shared machinery with P2b's `where`,
-so design them together.
+**P2c-2 shape (what landed).** `group`/`groupCount`/`fold`/`sum` + nested `by()`.
+The L3 `BeforeAll` gate is **cleared** — official cucumber runs live (82 pass,
+was 0). Key pieces:
+- `compileNestedScalar(inner, ScalarCtx)` — compiles a nested `by(__.…)`/(future
+  `where(__.…)`) traversal into a **correlated SQL scalar** for node/edge/property
+  contexts (values/label/id/key/value/element/outV/inV/`out…count()`). This is
+  the shared engine P2b's `where` builds on — extend it, don't rewrite it.
+- `compileGroup` — group() is a **barrier** → one `{kind:'group'}` Map. Dual-path
+  (locked #3): scalar reducers (count/sum, `json_group_array` scalar-lists) →
+  real SQL `GROUP BY`; element values (default list / `by(__.tail())`) →
+  `ORDER BY key` + the handler's `groupBuffer` folds runs into the Map. Composite
+  `by(__.project(...))` keys build one correlated scalar per part (`k0_v`,`k1_v`,…).
+  Group over `properties()` is handed off from `compileProperties`.
+- Handler: `groupBuffer` (one loop keyed on `GroupVal.kind`; element values via
+  `v_`-prefixed cols, scalar keys/values via `anySerializer`), `listBuffer`
+  (hand-framed LIST so vertex/edge items keep props), `numberBuffer` (Long/Double).
+  `fold()`→`{kind:'list'}` (reuses the plain projection cols), `sum()`→
+  `{kind:'scalar'}` (SQL `SUM`, integer→Long).
+- Deferred with clear errors: `cap`/`aggregate` (side-effect state), general
+  `unfold`, top-level `tail`, deep nested-`by()` chains, `local`/`Scope`.
 
-Then P2b (where/not/is) and the P2 tail (union/coalesce/optional, path).
+**P2b — `where`/`not`/`is` + TextP. DONE** (live L3 85→119). Shared
+`predicateSql(expr,binds,pred)` backs `has`/`is`/`where` (+ TextP → bound `LIKE`).
+`is(P)` folds onto the projected scalar. `where`/`not`/`filter(__.T)` are filter
+CTEs via `compileFilterPredicate` (EXISTS movement / correlated `.count().is` /
+current-prop); `not()` uses `NOT COALESCE((pred),0)` for correct missing-prop
+semantics. Alias-compare `where(P.neq("a"))`/`where("a",P,by(k))` over P2a columns.
+
+**Immediate next work — P2 tail.** `union`/`coalesce`/`optional` (UNION ALL /
+LEFT JOIN) and `path()` (JSON-array accumulation column, accept loss of
+index-only scans). Then P3 (`repeat`/`until`/`emit` recursive CTE; `mergeV`/
+`mergeE` upserts). Deferred where-forms (`and`/`or`, nested `as`, multi-hop) also
+await — `and`/`or` are the natural companion to `union`.
 
 ## Environment notes
 

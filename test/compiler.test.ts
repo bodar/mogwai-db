@@ -201,6 +201,166 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.E(7).properties().element()', {})).toThrow('element() of an edge property not yet supported');
   });
 
+  // ---- P2c-2 aggregation: group/groupCount + nested by() ----
+
+  test('group().by(key).by(__.tail()) → element-last, ORDER BY key (assembly path)', () => {
+    const p = read('g.V().group().by("name").by(__.tail())');
+    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'elementLast', elem: 'vertex' } });
+    expect(p.sql).toContain("json_extract(n.props, '$.name') AS gk");
+    expect(p.sql).toContain('n.id AS v_id');
+    expect(p.sql).toContain('ORDER BY gk'); // element value → no GROUP BY, ordered for run-folding
+  });
+
+  test('group().by(key) default value → element list; group by key reports an index key', () => {
+    const p = read('g.V().group().by("name")');
+    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'elementList', elem: 'vertex' } });
+    expect(p.indexKeys).toEqual(['name']); // group().by(key) is a filter/order-position use
+  });
+
+  test('group().by(key).by(prop) → scalar-list via json_group_array + GROUP BY', () => {
+    const p = read('g.V().group().by("name").by("age")');
+    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'scalarList' } });
+    expect(p.sql).toContain("json_group_array(json_extract(n.props, '$.age')) AS gv");
+    expect(p.sql).toContain('GROUP BY gk');
+  });
+
+  test('groupCount() → count value; GROUP BY', () => {
+    const p = read('g.V().groupCount().by("name")');
+    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
+    expect(p.sql).toContain('COUNT(*) AS gv');
+    expect(p.sql).toContain('GROUP BY gk');
+  });
+
+  test('group().by(__.project) composite key with nested scalar by()s (edge gate)', () => {
+    const p = read('g.E().group().by(__.project("o","l","i").by(__.outV().values("name")).by(__.label()).by(__.inV().values("name"))).by(__.tail())');
+    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'map', parts: [{ key: 'o' }, { key: 'l' }, { key: 'i' }] }, val: { kind: 'elementLast', elem: 'edge' } });
+    // nested scalars → correlated subqueries on the edge endpoints
+    expect(p.sql).toContain("(SELECT json_extract(props, '$.name') FROM nodes WHERE id=n.src) AS k0_v");
+    expect(p.sql).toContain('(SELECT name FROM labels WHERE id=n.label) AS k1_v');
+    expect(p.sql).toContain("(SELECT json_extract(props, '$.name') FROM nodes WHERE id=n.tgt) AS k2_v");
+    expect(p.sql).toContain('n.src AS v_src'); // edge value framing
+  });
+
+  test('properties().group() over the property stream (vertex-property gate)', () => {
+    const p = read('g.V().properties().group().by(__.project("n","k","v").by(__.element().values("name")).by(__.key()).by(__.value())).by(__.tail())');
+    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'map', parts: [{ key: 'n' }, { key: 'k' }, { key: 'v' }] }, val: { kind: 'elementLast', elem: 'property' } });
+    expect(p.sql).toContain("json_extract(ownerProps, '$.name') AS k0_v");
+    expect(p.sql).toContain('pk AS k1_v');
+    expect(p.sql).toContain('pv AS k2_v');
+    expect(p.sql).toContain('owner AS v_owner'); // property value framing
+  });
+
+  test('fold() wraps the projection in a list shape (element or scalar)', () => {
+    expect(read('g.V().fold()').shape).toEqual({ kind: 'list', elem: 'vertex' });
+    expect(read('g.V().values("name").fold()').shape).toEqual({ kind: 'list', elem: 'scalar' });
+    expect(read('g.V(1).outE().fold()').shape).toEqual({ kind: 'list', elem: 'edge' });
+  });
+
+  test('sum() wraps a value stream in SQL SUM → scalar shape', () => {
+    const p = read('g.V().values("age").sum()');
+    expect(p.shape).toEqual({ kind: 'scalar' });
+    expect(p.sql).toContain('SELECT SUM(v) AS v, typeof(SUM(v)) AS vt FROM (');
+  });
+
+  test('aggregation deferred forms throw clearly', () => {
+    expect(() => compile('g.V().group().by("name").cap("x")', {})).toThrow('step not implemented after group(): cap()');
+    expect(() => compile('g.V().group().by(__.out().values("name"))', {})).toThrow(); // deep nested key
+    expect(() => compile('g.V().properties().group().by()', {})).toThrow('group().by() on a property element is not yet supported');
+    expect(() => compile('g.V().group().by("name").by("age").by("x")', {})).toThrow('more than two by() modulators');
+    expect(() => compile('g.V().fold().unfold()', {})).toThrow('step not implemented after fold(): unfold()');
+    expect(() => compile('g.V().count().fold()', {})).toThrow('fold() after count() not yet supported');
+    expect(() => compile('g.V().sum()', {})).toThrow('sum() of vertex not yet supported');
+  });
+
+  // ---- P2b: is / where / not / TextP ----
+
+  test('is(P) folds a predicate onto the projected scalar', () => {
+    const gt = read('g.V().values("age").is(P.gt(30))');
+    expect(gt.shape).toEqual({ kind: 'value' });
+    expect(gt.sql).toContain("json_extract(n.props, '$.age') IS NOT NULL AND json_extract(n.props, '$.age') > ?");
+    expect(gt.binds).toContain(30);
+    // bare literal → equality
+    expect(read('g.V().values("age").is(29)').sql).toContain("json_extract(n.props, '$.age') = ?");
+  });
+
+  test('count().is(P) wraps the count in a value filter (0/1 rows)', () => {
+    const p = read('g.V().count().is(P.gt(3))');
+    expect(p.sql).toContain('SELECT v FROM (SELECT COUNT(*) AS v FROM');
+    expect(p.sql).toContain('WHERE v > ?');
+    expect(p.shape).toEqual({ kind: 'count' });
+  });
+
+  test('is() on a non-scalar projection throws', () => {
+    expect(() => compile('g.V().is(1)', {})).toThrow('is() requires a scalar stream');
+  });
+
+  test('TextP compiles to LIKE with a bound, metachar-escaped pattern', () => {
+    const sw = read('g.V().has("name", TextP.startingWith("jo"))');
+    expect(sw.sql).toContain("LIKE ? ESCAPE '\\'");
+    expect(sw.binds).toContain('jo%');
+    expect(read('g.V().values("name").is(TextP.containing("ar"))').binds).toContain('%ar%');
+    // negation → NOT LIKE
+    expect(read('g.V().has("name", TextP.notEndingWith("o"))').sql).toContain("NOT LIKE ? ESCAPE '\\'");
+    // metachars in the user value are escaped, never spliced
+    const esc = read('g.V().has("name", TextP.containing("50%_x"))');
+    expect(esc.binds).toContain('%50\\%\\_x%');
+  });
+
+  test('where(__.movement) → EXISTS filter CTE; not() → NOT COALESCE', () => {
+    const w = read('g.V().where(__.out("knows")).values("name")');
+    expect(w.sql).toContain('EXISTS(SELECT 1 FROM edges e WHERE e.src=n.id AND e.label IN');
+    const n = read('g.V().not(__.out("created")).values("name")');
+    expect(n.sql).toContain('WHERE NOT COALESCE((EXISTS(');
+  });
+
+  test('where(__.count().is(P)) → correlated scalar compare; reports index key on values(k)', () => {
+    const c = read('g.V().where(__.inE("knows").count().is(P.gte(1))).values("name")');
+    expect(c.sql).toContain('(SELECT COUNT(*) FROM edges WHERE tgt=n.id');
+    expect(c.sql).toContain('>= ?');
+    // where(__.values(k).is(P)) is a filter-position use → index key reported
+    expect(read('g.V().where(__.values("age").is(P.gt(30)))').indexKeys).toEqual(['age']);
+  });
+
+  test('alias-compare where(P.neq("a")) and where("a",P,by(key)); unknown label throws', () => {
+    const idc = read('g.V().as("a").out().where(P.neq("a"))');
+    expect(idc.sql).toContain('WHERE n.id != p.a0');
+    const keyc = read('g.V().as("a").out().as("b").where("a", P.eq("b")).by("name")');
+    expect(keyc.sql).toContain("(SELECT json_extract(props, '$.name') FROM nodes WHERE id=p.a0) = (SELECT json_extract(props, '$.name') FROM nodes WHERE id=p.a1)");
+    expect(() => compile('g.V().where("x", P.eq("y"))', {})).toThrow('no such label');
+  });
+
+  test('where()/filter() deferred forms throw clearly', () => {
+    expect(() => compile('g.V().where(__.out().out())', {})).toThrow('not yet supported');
+    expect(() => compile('g.V().filter(P.gt(1))', {})).toThrow('filter(predicate) not supported');
+  });
+
+  test('P.inside is exclusive-low (distinct from between)', () => {
+    // between = [lo,hi) ; inside = (lo,hi)
+    expect(read('g.V().has("age", P.between(29,35))').sql).toContain('>= ? AND');
+    expect(read('g.V().has("age", P.inside(29,35))').sql).toContain('> ? AND');
+    expect(read('g.V().has("age", P.inside(29,35))').sql).not.toContain('>= ?');
+  });
+
+  test('review-fix regressions: no silent mis-execution', () => {
+    // edge out().count() must throw (was silently mis-counting via edge id)
+    expect(() => compile('g.E().where(__.out().count().is(P.gt(0)))', {})).toThrow('over an edge not yet supported');
+    // where(__.move().is(P)) must not silently drop the is()
+    expect(() => compile('g.V().where(__.out("knows").is(1))', {})).toThrow('where(__.out().is(P)) not yet supported');
+    // is() after limit() must throw (position-sensitive)
+    expect(() => compile('g.V().values("age").limit(3).is(P.gt(25))', {})).toThrow('is() after limit()');
+    // values(k).is(P) now reports the index key (like has())
+    expect(read('g.V().values("age").is(P.gt(30))').indexKeys).toEqual(['age']);
+    // alias-compare by(key) on an edge label throws rather than reading nodes
+    expect(() => compile('g.V().as("a").outE().as("e").where("e", P.eq("a")).by("weight")', {})).toThrow('edge-typed label not yet supported');
+  });
+
+  test('has() still compiles all predicate forms after the predicateSql refactor', () => {
+    expect(read('g.V().has("age", 30)').sql).toContain('= ?');
+    expect(read('g.V().has("age", P.gt(30))').sql).toContain('> ?');
+    expect(read('g.V().has("age", P.within(29,30))').sql).toContain('IN (?,?)');
+    expect(read('g.V().has("age", P.between(29,35))').sql).toContain('>= ? AND');
+  });
+
   test('identifier keys splice as literal JSON paths (index-friendly); exotic keys are bound', () => {
     // Safe identifier: spliced literally so `CREATE INDEX ...(json_extract(props,'$.age'))`
     // can engage. See the property-index performance test below.
@@ -350,6 +510,73 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V(1).properties("age").element().values("name")').map((r) => r.v)).toEqual(['marko']);
     // edge properties too (edge 7 = marko-knows->vadas, weight 0.5)
     expect(run(store, 'g.E(7).properties().value()').map((r) => r.v)).toEqual([0.5]);
+  });
+
+  test('group().by(name).by(tail) yields one vertex per name (gate #1 rows)', () => {
+    const store = seededStore();
+    const rows = run(store, 'g.V().group().by("name").by(__.tail())');
+    expect(rows.length).toBe(6);
+    const byName = Object.fromEntries(rows.map((r) => [r.gk, r.v_id]));
+    expect(byName).toEqual({ marko: 1, vadas: 2, lop: 3, josh: 4, ripple: 5, peter: 6 });
+  });
+
+  test('groupCount().by(label) counts per label', () => {
+    const store = seededStore();
+    const rows = run(store, 'g.V().groupCount().by(T.label)');
+    const m = Object.fromEntries(rows.map((r) => [r.gk, r.gv]));
+    expect(m).toEqual({ person: 4, software: 2 });
+  });
+
+  test('group scalar-list drops members missing the property (json_group_array + null filter is in handler)', () => {
+    const store = seededStore();
+    const rows = run(store, 'g.V().group().by("name").by("age")');
+    const byName = Object.fromEntries(rows.map((r) => [r.gk, r.gv]));
+    expect(byName.marko).toBe('[29]');
+    expect(byName.lop).toBe('[null]'); // SQL keeps null; handler strips it to [] on frame
+  });
+
+  test('is(P) filters a scalar stream; TextP is LIKE', () => {
+    const store = seededStore();
+    expect(run(store, 'g.V().values("age").is(P.gt(30))').map((r) => r.v).sort()).toEqual([32, 35]);
+    expect(run(store, 'g.V().hasLabel("person").count().is(P.gt(3))').map((r) => r.v)).toEqual([4]);
+    expect(run(store, 'g.V().has("name", TextP.startingWith("jo")).values("name")').map((r) => r.v)).toEqual(['josh']);
+    expect(run(store, 'g.V().values("name").is(TextP.containing("ar"))').map((r) => r.v)).toEqual(['marko']);
+  });
+
+  test('where/not/filter filter the traverser (EXISTS/NULL semantics)', () => {
+    const store = seededStore();
+    // only marko knows anyone
+    expect(run(store, 'g.V().where(__.out("knows")).values("name")').map((r) => r.v)).toEqual(['marko']);
+    // creators
+    expect(run(store, 'g.V().where(__.out("created")).values("name")').map((r) => r.v).sort()).toEqual(['josh', 'marko', 'peter']);
+    // not(created): software has no age either — NULL is kept (not(traversal) = no output)
+    expect(run(store, 'g.V().not(__.out("created")).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple', 'vadas']);
+    // people known by someone
+    expect(run(store, 'g.V().hasLabel("person").where(__.inE("knows").count().is(P.gte(1))).values("name")').map((r) => r.v).sort()).toEqual(['josh', 'vadas']);
+    expect(run(store, 'g.V().filter(__.out("created")).values("name")').map((r) => r.v).sort()).toEqual(['josh', 'marko', 'peter']);
+  });
+
+  test('alias-compare where — the co-creator idiom', () => {
+    const store = seededStore();
+    // people who created something also created by someone else (exclude self)
+    const names = run(store, 'g.V().as("a").out("created").in("created").where(P.neq("a")).values("name")').map((r) => r.v).sort();
+    expect(names).toEqual(['josh', 'josh', 'marko', 'marko', 'peter', 'peter']); // all three co-created lop
+  });
+
+  test('sum() sums a value stream; fold() collects it', () => {
+    const store = seededStore();
+    expect(run(store, 'g.V().hasLabel("person").values("age").sum()').map((r) => r.v)).toEqual([123]);
+    expect(run(store, 'g.V().values("name").fold()').map((r) => r.v).sort())
+      .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+  });
+
+  test('edge-gate composite key rows carry o/l/i + the edge (gate #2)', () => {
+    const store = seededStore();
+    const rows = run(store, 'g.E().group().by(__.project("o","l","i").by(__.outV().values("name")).by(__.label()).by(__.inV().values("name"))).by(__.tail())');
+    // 6 distinct edges → 6 groups; verify marko-created->lop maps to edge 9
+    const hit = rows.find((r) => r.k0_v === 'marko' && r.k1_v === 'created' && r.k2_v === 'lop');
+    expect(hit.v_id).toBe(9);
+    expect(hit.v_src).toBe(1); expect(hit.v_tgt).toBe(3);
   });
 
   test('drop() after an edge-reading traversal deletes the right vertices', () => {
