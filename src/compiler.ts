@@ -110,6 +110,10 @@ export interface Compiled {
   sql: string;
   binds: any[];
   shape: Shape;
+  /** Identifier-safe property keys used in a filter/order position — the
+   *  handler ensures a matching expression index exists before running, so hot
+   *  properties become index seeks on first filtered use (self-tuning). */
+  indexKeys?: string[];
 }
 
 export interface WritePlan { kind: 'write'; run: (store: GraphStore) => any[]; }
@@ -126,11 +130,12 @@ const P_OPS: Record<string, string> = { eq: '=', neq: '!=', gt: '>', gte: '>=', 
 const SAFE_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /** `json_extract(col, '$.key')` for a property key. Splices safe identifier
- *  keys literally (index-friendly); binds anything else (returned in `binds`). */
-function propExtract(col: string, key: unknown): { sql: string; binds: any[] } {
+ *  keys literally (index-friendly, and `indexKey` names it so the caller can
+ *  auto-build the matching expression index); binds anything else. */
+function propExtract(col: string, key: unknown): { sql: string; binds: any[]; indexKey: string | null } {
   if (typeof key !== 'string') throw new Error('property key must be a string');
-  if (SAFE_KEY.test(key)) return { sql: `json_extract(${col}, '$.${key}')`, binds: [] };
-  return { sql: `json_extract(${col}, '$.' || ?)`, binds: [key] };
+  if (SAFE_KEY.test(key)) return { sql: `json_extract(${col}, '$.${key}')`, binds: [], indexKey: key };
+  return { sql: `json_extract(${col}, '$.' || ?)`, binds: [key], indexKey: null };
 }
 
 /** range(low, high) → SQL [offset, limit]. high < 0 means "no upper bound". */
@@ -169,9 +174,10 @@ export function compile(gremlin: string, params: Record<string, any>): Compiled 
  * first order()/projection/other step and returns where it stopped. Shared by
  * reads and drop().
  */
-function traversalCtes(steps: Step[]): { ctes: string[]; binds: any[]; stop: number } {
+function traversalCtes(steps: Step[]): { ctes: string[]; binds: any[]; stop: number; indexKeys: Set<string> } {
   const ctes: string[] = [];
   const binds: any[] = [];
+  const indexKeys = new Set<string>();
   const prev = () => `c${ctes.length - 1}`;
 
   const first = steps[0];
@@ -196,6 +202,7 @@ function traversalCtes(steps: Step[]): { ctes: string[]; binds: any[]; stop: num
       case 'has': {
         const [key, val] = s.args;
         const pe = propExtract('n.props', key); // literal path for indexable keys
+        if (pe.indexKey) indexKeys.add(pe.indexKey); // has() is a filter → worth indexing
         const join = `SELECT n.id FROM nodes n JOIN ${prev()} p ON n.id=p.id`;
         if (val !== null && typeof val === 'object' && 'op' in val) {
           const p = val as Pred;
@@ -246,16 +253,16 @@ function traversalCtes(steps: Step[]): { ctes: string[]; binds: any[]; stop: num
         ctes.push(`c${ctes.length} AS (SELECT id FROM ${prev()} LIMIT -1 OFFSET ${Number(s.args[0])})`);
         break;
       default:
-        return { ctes, binds, stop: i };
+        return { ctes, binds, stop: i, indexKeys };
     }
   }
-  return { ctes, binds, stop: i };
+  return { ctes, binds, stop: i, indexKeys };
 }
 
 interface OrderClause { key: string | null; dir: 'asc' | 'desc' | 'shuffle'; }
 
 function compileRead(steps: Step[]): Compiled {
-  const { ctes, binds, stop } = traversalCtes(steps);
+  const { ctes, binds, stop, indexKeys } = traversalCtes(steps);
   const last = `c${ctes.length - 1}`;
 
   // Tail phase: an optional projection + order()/range()/skip()/limit() and dedup.
@@ -304,7 +311,7 @@ function compileRead(steps: Step[]): Compiled {
   if (projName === 'count') {
     let src = `SELECT ${distinct ? 'DISTINCT ' : ''}id FROM ${last}`;
     if (limit !== null || offset > 0) src += ` LIMIT ${limit ?? -1} OFFSET ${offset}`;
-    return { kind: 'read', sql: `WITH ${ctes.join(',\n')}\nSELECT COUNT(*) AS v FROM (${src})`, binds, shape: { kind: 'count' } };
+    return { kind: 'read', sql: `WITH ${ctes.join(',\n')}\nSELECT COUNT(*) AS v FROM (${src})`, binds, shape: { kind: 'count' }, indexKeys: [...indexKeys] };
   }
 
   const vJoin = `nodes n JOIN ${last} p ON n.id=p.id`;
@@ -345,14 +352,18 @@ function compileRead(steps: Step[]): Compiled {
     const parts = orders.map((o) => {
       if (o.dir === 'shuffle') return 'RANDOM()';
       const dir = o.dir === 'desc' ? 'DESC' : 'ASC';
-      if (o.key !== null) { const pe = propExtract('n.props', o.key); fb.push(...pe.binds); return `${pe.sql} ${dir}`; }
+      if (o.key !== null) {
+        const pe = propExtract('n.props', o.key); fb.push(...pe.binds);
+        if (pe.indexKey) indexKeys.add(pe.indexKey); // order().by(key) sorts via the index
+        return `${pe.sql} ${dir}`;
+      }
       return `${shape.kind === 'value' ? 'v' : 'n.id'} ${dir}`;
     });
     sql += ` ORDER BY ${parts.join(', ')}`;
   }
   if (limit !== null || offset > 0) sql += ` LIMIT ${limit ?? -1} OFFSET ${offset}`;
 
-  return { kind: 'read', sql: `WITH ${ctes.join(',\n')}\n${sql}`, binds: [...binds, ...fb], shape };
+  return { kind: 'read', sql: `WITH ${ctes.join(',\n')}\n${sql}`, binds: [...binds, ...fb], shape, indexKeys: [...indexKeys] };
 }
 
 // g.V(...).<filters>.drop() — delete the target vertices and their incident

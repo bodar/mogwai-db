@@ -95,10 +95,13 @@ CREATE INDEX n_label ON nodes(label);
   below to match — a bound path never does, forcing a full scan (measured ~90×
   slower). Injection-safe by validation, not parameterization. See
   `compiler.ts` `propExtract` and `test/performance.test.ts`.
-- Hot properties: expression indexes created on demand via a management
-  endpoint (`CREATE INDEX ... ON nodes(json_extract(props,'$.name'))`);
-  SQLite's planner picks them up automatically — but ONLY because the compiled
-  predicate uses the matching literal path (above).
+- Hot properties: expression indexes are **auto-built on first filtered use**
+  (`CREATE INDEX ... ON nodes(json_extract(props,'$.name'))`), driven by the
+  compiler's `indexKeys` (keys hit by `has`/`order().by`) and
+  `GraphStore.ensureNodePropIndex`. Self-tuning — no operator configuration. The
+  planner uses them automatically because the compiled predicate uses the
+  matching literal path (above). First touch of a cold key pays a one-time
+  build (~270 ms at 1 M rows); thereafter index seeks.
 - Constraint: DO SQLite has no user-defined functions. Anything SQL can't
   express (regex TextP) filters post-SQL in JS.
 
