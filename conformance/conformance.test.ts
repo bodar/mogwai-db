@@ -12,7 +12,7 @@ import { startConformanceServer } from './conformance-server.ts';
 const { DriverRemoteConnection } = gremlin.driver;
 const { traversal } = gremlin.process.AnonymousTraversalSource;
 const __ = gremlin.process.statics;
-const { order, P, TextP } = gremlin.process;
+const { order, P, TextP, t } = gremlin.process;
 const { gt } = P;
 
 describe('conformance host — modern graph (official ids/results)', () => {
@@ -263,5 +263,18 @@ describe('conformance host — empty graph write/reset (ggraph)', () => {
     const modern = traversal().with_(
       new DriverRemoteConnection(`http://localhost:${server.port}/gremlin`, { traversalSource: 'gmodern' }));
     expect((await modern.V().count().next()).value).toBe(6n);
+  });
+
+  // W1: user-supplied string ids round-trip through the real GLV.
+  test('user-supplied string ids (property(T.id), V(uid), edge endpoints)', async () => {
+    await g.V().drop().iterate();
+    const m = (await g.addV('person').property(t.id, 'person:marko').property('name', 'marko').next()).value;
+    expect(m.id).toBe('person:marko');
+    await g.addV('person').property(t.id, 'person:vadas').property('name', 'vadas').iterate();
+    await g.V('person:marko').addE('knows').to(__.V('person:vadas')).iterate();
+    // V(uid) seed resolves; id() and out().id() expose the user id
+    expect(await g.V('person:marko').values('name').toList()).toEqual(['marko']);
+    expect(await g.V('person:marko').out('knows').id().toList()).toEqual(['person:vadas']);
+    await g.V().drop().iterate();
   });
 });

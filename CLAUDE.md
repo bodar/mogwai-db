@@ -206,15 +206,29 @@ sit either side of `repeat`). All `WITH` → `WITH RECURSIVE` (harmless for
 non-recursive CTEs; needed once any walk appears). Depth guard 32 when `times`
 absent. Deferred: `until`, `emit(pred)`, complex bodies, `path`/`simplePath`.
 
-**Immediate next work.** `repeat().until()` + `emit(pred)` (cond = a
-`compileFilterPredicate` on the walk row — needs the recursive step to join
-nodes); `path()`/`simplePath` (JSON-array accumulation column threaded through
-movement — structural, like alias threading); `coalesce` (correlated per-seed
-EXISTS chaining). Then the P3 write workhorse `mergeV`/`mergeE` (INSERT … ON
-CONFLICT … RETURNING — note: `@StepWrite` scenarios are runner-skipped, so it
-lifts the agent use-case, not the L3 number). Also-deferred: multi-hop/scalar
-`union` branches, `both()`/multi-hop `optional`, multi-hop `where`,
-`where(P.eq(__.constant()))`.
+**Target locked — see PLAN.md "Target — declared feature profile" + the W1–W5
+writes-first roadmap.** Profile: UserSuppliedIds ✅, Multi/MetaProperties ✅ (W4
+schema rework), Upsert ✅, no lambdas/OLAP/multi-request-tx. Sequence:
+ids → writes → deploy → multi/meta rework → conformance grind.
+
+**W1 user-supplied ids — DONE.** `nodes`/`edges` have a nullable `uid TEXT UNIQUE`;
+rowid stays the internal PK (joins/perf untouched). uid resolved only at the
+`V('x')` seed (`uid IN`) and framing-out (`COALESCE(uid,id) AS id`, via
+`ScalarCtx.extIdExpr` for group/select element framing). `addV().property(T.id,v)`
+sets id, `property(T.label,v)` overrides label. Gaps: `properties().element().id()`
+and `group().by(__.id())` still show rowid; `addE` can't set the edge's own uid.
+
+**Immediate next work — W2 writes.** `mergeV`/`mergeE` (`INSERT … ON CONFLICT(uid)
+DO UPDATE … RETURNING`, match by uid), `property()` update on existing elements,
+general `addE`. PREREQUISITE: `extractArgs` has NO map-literal case — `mergeV([Map])`
+/`property([T.id: 'x', …])` currently flatten and lose key→value pairing; add a
+`genericMapLiteral`/`mapEntry` case to the visitor first. (`@StepWrite` scenarios
+are runner-skipped, so W2 lifts the agent use-case, not the L3 number.)
+
+Read-step backlog (continues under W5): `repeat().until()`/`emit(pred)`,
+`path`/`simplePath`, `coalesce`, `aggregate`/`cap`, `match`, `local`, `choose`,
+`sack`; multi-hop/scalar `union`, `both()`/multi-hop `optional`, multi-hop
+`where`, `where(P.eq(__.constant()))`.
 
 ## Environment notes
 
