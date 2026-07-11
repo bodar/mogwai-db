@@ -94,7 +94,8 @@ function unquote(s: string): string {
 export type Shape =
   | { kind: 'vertex' }
   | { kind: 'value' }
-  | { kind: 'count' };
+  | { kind: 'count' }
+  | { kind: 'discard' };
 
 export interface Compiled {
   kind: 'read';
@@ -123,7 +124,7 @@ export function compile(gremlin: string, params: Record<string, any>): Compiled 
 
   if (discard) {
     if (plan.kind === 'write') { const inner = plan.run; return { kind: 'write', run: (s) => { inner(s); return []; } }; }
-    return { ...plan, shape: { kind: 'discard' } as any };
+    return { ...plan, shape: { kind: 'discard' } };
   }
   return plan;
 }
@@ -239,7 +240,7 @@ function compileAddV(steps: Step[]): WritePlan {
     run: (store) => {
       const lid = store.labelId(label);
       const row = store.query(
-        'INSERT INTO nodes(label, props) VALUES(?, ?) RETURNING id, props',
+        'INSERT INTO nodes(label, props) VALUES(?, ?) RETURNING id',
         [lid, JSON.stringify(props)],
       )[0];
       return [{ vertex: { id: row.id, label, props } }];

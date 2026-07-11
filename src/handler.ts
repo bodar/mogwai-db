@@ -17,13 +17,12 @@ function frame(values: Buffer[], status = 200, message: string | null = null): B
   return Buffer.concat(parts);
 }
 
-function toVertex(row: { id: number; label: string; props: string }): InstanceType<typeof Vertex> {
-  const props = JSON.parse(row.props);
+function toVertex(id: number, label: string, props: Record<string, any>): InstanceType<typeof Vertex> {
   let pid = 0;
   const vprops = Object.entries(props).map(
-    ([k, v]) => new VertexProperty(`${row.id}.${pid++}`, k, v, []),
+    ([k, v]) => new VertexProperty(`${id}.${pid++}`, k, v, []),
   );
-  return new Vertex(row.id, row.label, vprops);
+  return new Vertex(id, label, vprops);
 }
 
 function execute(store: GraphStore, gremlin: string, params: Record<string, any>): Buffer[] {
@@ -31,7 +30,7 @@ function execute(store: GraphStore, gremlin: string, params: Record<string, any>
   if (plan.kind === 'write') {
     return plan.run(store).map((r: any) => {
       if (r.vertex) return ioc.anySerializer.serialize(
-        toVertex({ id: r.vertex.id, label: r.vertex.label, props: JSON.stringify(r.vertex.props) }));
+        toVertex(r.vertex.id, r.vertex.label, r.vertex.props));
       const e = r.edge;
       return ioc.anySerializer.serialize(
         new Edge(e.id, new Vertex(e.src, '', null), e.label, new Vertex(e.tgt, '', null), []));
@@ -39,10 +38,10 @@ function execute(store: GraphStore, gremlin: string, params: Record<string, any>
   }
   const rows = store.query(plan.sql, plan.binds) as any[];
   switch (plan.shape.kind) {
-    case 'vertex': return rows.map((r) => ioc.anySerializer.serialize(toVertex(r)));
+    case 'vertex': return rows.map((r) => ioc.anySerializer.serialize(toVertex(r.id, r.label, JSON.parse(r.props))));
     case 'count': return rows.map((r) => ioc.anySerializer.serialize(BigInt(r.v)));
     case 'value': return rows.map((r) => ioc.anySerializer.serialize(r.v));
-    case 'discard' as any: return [];
+    case 'discard': return [];
   }
 }
 

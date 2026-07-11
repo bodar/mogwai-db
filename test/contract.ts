@@ -95,6 +95,15 @@ export function graphContract(name: string, harness: Harness) {
       expect(v.properties ?? []).toEqual([]);
     });
 
+    // Cross-runtime bind coercion: bun:sqlite accepts boolean binds, DO's
+    // ctx.storage.sql rejects them. Added last so the extra vertex doesn't
+    // perturb the count/limit assertions above.
+    test('boolean predicate works on both runtimes', async () => {
+      const t = (await g.addV('thing').property('name', 'flag').property('active', true).next()).value;
+      expect(await g.V().has('active', true).id().toList()).toEqual([t.id]);
+      expect(await g.V().has('active', false).id().toList()).toEqual([]);
+    });
+
     test('unsupported step rejected server-side', async () => {
       expect(g.V().sack().toList()).rejects.toThrow();
     });
