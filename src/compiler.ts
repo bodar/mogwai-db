@@ -53,46 +53,96 @@ export function stepChain(tree: any, params: Record<string, any>): Step[] {
 /** Pull literal / predicate / variable arguments out of a step context. */
 function extractArgs(ctx: any, params: Record<string, any>): any[] {
   const args: any[] = [];
-  const walk = (node: any) => {
-    const cls = node.constructor.name;
-    if (cls === 'StringLiteralContext') { args.push(unquote(node.getText())); return; }
-    if (cls === 'IntegerLiteralContext') { args.push(parseInt(node.getText().replace(/[lL]$/, ''), 10)); return; }
-    if (cls === 'FloatLiteralContext') { args.push(parseFloat(node.getText())); return; }
-    if (cls === 'BooleanLiteralContext') { args.push(node.getText() === 'true'); return; }
-    if (cls === 'VariableContext') {
-      const name = node.getText();
-      if (!(name in params)) throw new Error(`Unbound parameter '${name}'`);
-      args.push(params[name]); return;
-    }
-    if (cls.startsWith('TraversalPredicate_')) {
-      args.push(parsePredicate(node, params)); return;
-    }
-    // order()/by() take an Order token (asc|desc|shuffle) that is a grammar rule,
-    // not a literal — capture it so the compiler can pick sort direction.
-    if (cls === 'TraversalOrderContext') {
-      const seg = node.getText().split('.').pop().toLowerCase();
-      args.push({ order: seg }); return;
-    }
-    // Enum tokens carried as tagged objects so consumers can act on them (or
-    // reject them cleanly). Previously these grammar rules had no case and the
-    // generic recursion dropped them silently — e.g. select(Pop.first, 'a')
-    // parsed as select('a') and mis-executed. Capture, then let the step throw
-    // "not implemented" for anything past the current supported set.
-    if (cls === 'TraversalPopContext') {
-      args.push({ pop: node.getText().split('.').pop().toLowerCase() }); return;
-    }
-    if (cls === 'TraversalColumnContext') {
-      args.push({ column: node.getText().split('.').pop().toLowerCase() }); return;
-    }
-    if (cls === 'TraversalTContext') {
-      args.push({ token: node.getText().split('.').pop().toLowerCase() }); return;
-    }
-    if (cls === 'NestedTraversalContext') { args.push({ nested: node }); return; }
-    for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) walk(node.getChild(i));
-  };
   // skip child 0 (step name token) and parens; walking all children is fine since tokens have no children
-  for (let i = 0; i < ctx.getChildCount(); i++) walk(ctx.getChild(i));
+  for (let i = 0; i < ctx.getChildCount(); i++) walkArgs(ctx.getChild(i), args, params);
   return args;
+}
+
+/** The single argument a subtree contributes — used for map-entry values, which
+ *  must not flatten into the surrounding step's arg list. */
+function argOf(node: any, params: Record<string, any>): any {
+  const out: any[] = [];
+  walkArgs(node, out, params);
+  return out.length === 1 ? out[0] : out;
+}
+
+/** Walk one AST node, pushing each recognised argument onto `out`. Unrecognised
+ *  nodes recurse into children (a literal buried deeper still surfaces). */
+function walkArgs(node: any, out: any[], params: Record<string, any>): void {
+  const cls = node.constructor.name;
+  if (cls === 'StringLiteralContext') { out.push(unquote(node.getText())); return; }
+  if (cls === 'IntegerLiteralContext') { out.push(parseInt(node.getText().replace(/[lL]$/, ''), 10)); return; }
+  if (cls === 'FloatLiteralContext') { out.push(parseFloat(node.getText())); return; }
+  if (cls === 'BooleanLiteralContext') { out.push(node.getText() === 'true'); return; }
+  if (cls === 'NullLiteralContext') { out.push(null); return; }
+  if (cls === 'VariableContext') {
+    const name = node.getText();
+    if (!(name in params)) throw new Error(`Unbound parameter '${name}'`);
+    out.push(params[name]); return;
+  }
+  if (cls.startsWith('TraversalPredicate_')) {
+    out.push(parsePredicate(node, params)); return;
+  }
+  // order()/by() take an Order token (asc|desc|shuffle) that is a grammar rule,
+  // not a literal — capture it so the compiler can pick sort direction.
+  if (cls === 'TraversalOrderContext') {
+    out.push({ order: node.getText().split('.').pop().toLowerCase() }); return;
+  }
+  // Enum tokens carried as tagged objects so consumers can act on them (or
+  // reject them cleanly). Previously these grammar rules had no case and the
+  // generic recursion dropped them silently — e.g. select(Pop.first, 'a')
+  // parsed as select('a') and mis-executed. Capture, then let the step throw
+  // "not implemented" for anything past the current supported set.
+  if (cls === 'TraversalPopContext') { out.push({ pop: enumSuffix(node) }); return; }
+  if (cls === 'TraversalColumnContext') { out.push({ column: enumSuffix(node) }); return; }
+  // T.id/T.label as a step arg or map key. Both the parenthesized (TraversalT)
+  // and bare (TraversalTLong/Short) grammar shapes carry the same token.
+  if (cls === 'TraversalTContext' || cls === 'TraversalTLongContext' || cls === 'TraversalTShortContext') {
+    out.push({ token: enumSuffix(node) }); return;
+  }
+  // Direction.OUT/IN (+ from/to aliases) — mergeE endpoints / addE from()/to().
+  if (cls === 'TraversalDirectionContext' || cls === 'TraversalDirectionLongContext' || cls === 'TraversalDirectionShortContext') {
+    out.push({ direction: enumSuffix(node) }); return;
+  }
+  // Merge.onCreate/onMatch/outV/inV — mergeV/mergeE option() selector + endpoints.
+  if (cls === 'TraversalMergeContext') { out.push({ merge: enumSuffix(node) }); return; }
+  // Cardinality.list/set/single — property() cardinality (list/set deferred to W4).
+  if (cls === 'TraversalCardinalityContext') { out.push({ cardinality: enumSuffix(node) }); return; }
+  // A map literal [k: v, …] / [:] — a real JS Map so it matches how a bound map
+  // parameter (xx1) arrives after GraphBinary deserialization. Keys are tagged
+  // ({token}/{direction}) or strings; values recurse via argOf. Do NOT fall
+  // through to the generic recursion, which would flatten and drop pairing.
+  if (cls === 'GenericMapLiteralContext') { out.push(mapLiteral(node, params)); return; }
+  if (cls === 'NestedTraversalContext') { out.push({ nested: node }); return; }
+  for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) walkArgs(node.getChild(i), out, params);
+}
+
+/** The trailing identifier of an enum token node, lowercased: `T.id`→`id`,
+ *  `Direction.OUT`→`out`, `Merge.onCreate`→`oncreate`, bare `id`→`id`. */
+function enumSuffix(node: any): string {
+  return node.getText().split('.').pop().toLowerCase();
+}
+
+/** A `[k: v, …]` / `[:]` map literal → a JS Map, keyed by the classified map
+ *  key ({token}/{direction} tag or a plain string), values via argOf so nested
+ *  traversals/maps survive. Mirrors the shape of a bound map parameter. */
+function mapLiteral(node: any, params: Record<string, any>): Map<any, any> {
+  const m = new Map<any, any>();
+  for (const entry of node.mapEntry()) {
+    m.set(mapKeyOf(entry.mapKey()), argOf(entry.genericLiteral(), params));
+  }
+  return m;
+}
+
+/** Classify a map key: T token → {token}, Direction → {direction}, else the
+ *  literal/naked string. */
+function mapKeyOf(mk: any): any {
+  const tok = mk.traversalT?.() ?? mk.traversalTLong?.() ?? mk.traversalTShort?.();
+  if (tok) return { token: enumSuffix(tok) };
+  const dir = mk.traversalDirection?.() ?? mk.traversalDirectionLong?.() ?? mk.traversalDirectionShort?.();
+  if (dir) return { direction: enumSuffix(dir) };
+  if (mk.stringLiteral?.()) return unquote(mk.stringLiteral().getText());
+  return mk.getText();
 }
 
 export interface Pred { op: string; values: any[]; }
@@ -241,10 +291,13 @@ export function compile(gremlin: string, params: Record<string, any>): Compiled 
   if (last.name === 'discard' || last.name === 'none') { steps.pop(); discard = true; }
 
   let plan: Compiled | WritePlan;
-  if (steps[0].name === 'addV') plan = compileAddV(steps);
-  else if (steps[0].name === 'V' && steps.some(s => s.name === 'addE')) plan = compileAddE(steps, params);
+  if (steps.some((s) => s.name === 'addE')) plan = compileAddE(steps, params);
+  else if (steps[0].name === 'addV') plan = compileAddV(steps);
+  else if (steps.some((s) => s.name === 'mergeV')) plan = compileMergeV(steps, params);
+  else if (steps.some((s) => s.name === 'mergeE')) plan = compileMergeE(steps, params);
   else if (steps[0].name === 'inject') plan = compileInject(steps);
   else if (steps[steps.length - 1].name === 'drop') plan = compileDrop(steps);
+  else if (steps.some((s) => s.name === 'property')) plan = compileSetProperty(steps, params);
   else plan = compileRead(steps, params);
 
   if (discard) {
@@ -354,15 +407,35 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
         break;
       }
       case 'has': {
-        const [key, val] = s.args;
-        const pe = propExtract('n.props', key); // literal path for indexable keys
-        // Only node property indexes are auto-built (ensureNodePropIndex); an
-        // edge has() filters correctly but stays unindexed for now.
-        if (pe.indexKey && elem === 'node') indexKeys.add(pe.indexKey);
         const tbl = elem === 'edge' ? 'edges' : 'nodes';
-        const pred = predicateSql(pe.sql, pe.binds, val);
-        ctes.push(`c${ctes.length} AS (SELECT n.id${carry()} FROM ${tbl} n JOIN ${prev()} p ON n.id=p.id WHERE ${pred.sql})`);
-        binds.push(...pred.binds);
+        const conds: string[] = [];
+        const hbinds: any[] = [];
+        let a = s.args;
+        // has(label, key, value) — the 3-arg overload folds in a label filter.
+        if (a.length === 3 && typeof a[0] === 'string') {
+          conds.push('n.label IN (SELECT id FROM labels WHERE name=?)'); hbinds.push(a[0]);
+          a = a.slice(1);
+        }
+        const [key, val] = a;
+        if (key && typeof key === 'object' && 'token' in key) {
+          // has(T.label, v|P) / has(T.id, v|P): predicate over the label name or
+          // the external id (COALESCE uid,id). Routing through predicateSql means
+          // both a bare value AND a P/TextP predicate work (a bare value → equality).
+          const expr = key.token === 'label' ? '(SELECT name FROM labels WHERE id=n.label)'
+            : key.token === 'id' ? 'COALESCE(n.uid, n.id)'
+            : (() => { throw new Error(`has(T.${key.token}) not supported`); })();
+          const pred = predicateSql(expr, [], val);
+          conds.push(pred.sql); hbinds.push(...pred.binds);
+        } else {
+          const pe = propExtract('n.props', key); // literal path for indexable keys
+          // Only node property indexes are auto-built (ensureNodePropIndex); an
+          // edge has() filters correctly but stays unindexed for now.
+          if (pe.indexKey && elem === 'node') indexKeys.add(pe.indexKey);
+          const pred = predicateSql(pe.sql, pe.binds, val);
+          conds.push(pred.sql); hbinds.push(...pred.binds);
+        }
+        ctes.push(`c${ctes.length} AS (SELECT n.id${carry()} FROM ${tbl} n JOIN ${prev()} p ON n.id=p.id WHERE ${conds.join(' AND ')})`);
+        binds.push(...hbinds);
         break;
       }
       case 'where': case 'filter': case 'not': {
@@ -1278,6 +1351,51 @@ function compileDrop(steps: Step[]): WritePlan {
   };
 }
 
+// g.V(x).<filters>.property(k, v)[.property(...)] — set properties on the
+// matched existing element(s), single cardinality (last write wins). Reuses the
+// read movement engine to pick the targets, snapshots their ids (drop()'s
+// mutate-after-snapshot discipline), then JS-merges the new keys into each props
+// bag and writes it back whole (preserves value types exactly, like addV).
+// Multi-property (Cardinality.list/set) waits on W4's schema rework.
+function compileSetProperty(steps: Step[], params: Record<string, any>): WritePlan {
+  const firstProp = steps.findIndex((s) => s.name === 'property');
+  const prefix = steps.slice(0, firstProp);
+  const { ctes, binds, stop, elem } = traversalCtes(prefix, params);
+  if (stop !== prefix.length)
+    throw new Error(`property() after ${steps[stop].name}() not yet supported`);
+  const setProps: Record<string, any> = {};
+  for (const s of steps.slice(firstProp)) {
+    if (s.name !== 'property')
+      throw new Error(`step not implemented after property(): ${s.name}()`);
+    const [key, val] = stripCardinality(s.args);
+    if (key && typeof key === 'object' && 'token' in key)
+      throw new Error(`property(T.${key.token}) on an existing element not yet supported`);
+    setProps[key] = val;
+  }
+  const tbl = elem === 'edge' ? 'edges' : 'nodes';
+  const labelSub = `(SELECT name FROM labels WHERE id=${tbl}.label) AS label`;
+  const readCur = elem === 'edge'
+    ? `SELECT uid, src, tgt, props, ${labelSub} FROM edges WHERE id=?`
+    : `SELECT uid, props, ${labelSub} FROM nodes WHERE id=?`;
+  const targetSql = `WITH RECURSIVE ${ctes.join(',\n')}\nSELECT id FROM c${ctes.length - 1}`;
+  return {
+    kind: 'write',
+    run: (store) => {
+      const ids = store.query<{ id: number }>(targetSql, binds).map((r) => r.id);
+      return ids.map((id) => {
+        const cur = store.query<any>(readCur, [id])[0];
+        const props = { ...JSON.parse(cur.props), ...setProps };
+        store.query(`UPDATE ${tbl} SET props=? WHERE id=?`, [JSON.stringify(props), id]);
+        // Edge endpoints expose the external id (COALESCE uid,id), consistent
+        // with the addE/mergeE write paths (nodeExtId).
+        return elem === 'edge'
+          ? { edge: { id: cur.uid ?? id, label: cur.label, src: nodeExtId(store, cur.src), tgt: nodeExtId(store, cur.tgt), props } }
+          : { vertex: { id: cur.uid ?? id, label: cur.label, props } };
+      });
+    },
+  };
+}
+
 // g.inject(v1, v2, ...) — seed a value stream from constants. The collection /
 // mid-traversal forms (and inject as a barrier) belong to the P2 select() work.
 function compileInject(steps: Step[]): Compiled {
@@ -1289,15 +1407,28 @@ function compileInject(steps: Step[]): Compiled {
   return { kind: 'read', sql: `WITH c0(v) AS (VALUES ${rows}) SELECT v FROM c0`, binds: vals, shape: { kind: 'value' } };
 }
 
-// g.addV('label').property(k, v)...
-function compileAddV(steps: Step[]): WritePlan {
-  let label = (typeof steps[0].args[0] === 'string' ? steps[0].args[0] : null) ?? 'vertex';
+interface VertexSpec { label: string; props: Record<string, any>; uid: string | number | null; }
+
+// A leading Cardinality token on property() args: `single` is a no-op we drop;
+// list/set (real multi-property) wait on W4's schema rework. One place so every
+// property()-consuming site (addV/addE/set) rejects list/set identically.
+function stripCardinality(args: any[]): any[] {
+  if (args[0] && typeof args[0] === 'object' && 'cardinality' in args[0]) {
+    if (args[0].cardinality !== 'single') throw new Error(`property(Cardinality.${args[0].cardinality}) (multi-property) deferred to W4`);
+    return args.slice(1);
+  }
+  return args;
+}
+
+// An addV(...) step + its trailing property() steps → a vertex spec.
+// property(T.id, …)/property(T.label, …) set the id/label; the rest are data props.
+function parseVertexSpec(addV: Step, propSteps: Step[]): VertexSpec {
+  let label = (typeof addV.args[0] === 'string' ? addV.args[0] : null) ?? 'vertex';
   const props: Record<string, any> = {};
-  let uid: string | number | null = null; // user-supplied id via property(T.id, …)
-  for (const s of steps.slice(1)) {
-    if (s.name !== 'property') throw new Error(`step not implemented after addV: ${s.name}()`);
-    const [key, val] = s.args;
-    // property(T.id, …)/property(T.label, …): id/label tokens, not data props.
+  let uid: string | number | null = null;
+  for (const s of propSteps) {
+    const a = stripCardinality(s.args);
+    const [key, val] = a;
     if (key && typeof key === 'object' && 'token' in key) {
       if (key.token === 'id') uid = val;
       else if (key.token === 'label') label = String(val);
@@ -1306,54 +1437,345 @@ function compileAddV(steps: Step[]): WritePlan {
     }
     props[key] = val;
   }
+  return { label, props, uid };
+}
+
+// Insert a vertex from a spec; returns its rowid and external id (uid ?? rowid).
+// A numeric T.id writes the rowid directly; a string T.id becomes the uid.
+function insertVertex(store: GraphStore, spec: VertexSpec): { id: number; extId: string | number } {
+  const lid = store.labelId(spec.label);
+  const uidCol = typeof spec.uid === 'string' ? spec.uid : null;
+  const idCol = typeof spec.uid === 'number' ? spec.uid : null;
+  const cols = ['label', 'props', ...(uidCol !== null ? ['uid'] : []), ...(idCol !== null ? ['id'] : [])];
+  const vals: any[] = [lid, JSON.stringify(spec.props), ...(uidCol !== null ? [uidCol] : []), ...(idCol !== null ? [idCol] : [])];
+  const row = store.query<{ id: number; uid: string | null }>(
+    `INSERT INTO nodes(${cols.join(', ')}) VALUES(${cols.map(() => '?').join(', ')}) RETURNING id, uid`, vals)[0];
+  return { id: row.id, extId: row.uid ?? row.id };
+}
+
+// g.addV('label').property(k, v)...  — and multi-element chains (a graph
+// initializer, e.g. g.addV(a).addV(b)): the linear write interpreter. Like
+// Gremlin, the stream after the chain is just the last created element.
+function compileAddV(steps: Step[]): WritePlan {
+  if (steps.some((s, i) => i > 0 && s.name !== 'property'))
+    return { kind: 'write', run: (store) => runWriteChainFull(store, steps, {}) };
+  const spec = parseVertexSpec(steps[0], steps.slice(1));
+  return { kind: 'write', run: (store) => [{ vertex: { id: insertVertex(store, spec).extId, label: spec.label, props: spec.props } }] };
+}
+
+// An addE(label) + its trailing from/to/property modulators, plus the index of
+// the first step that is NOT part of the cluster (so chains of addE parse).
+interface EdgeCluster { label: string; fromSpec: any; toSpec: any; edgeUid: string | number | null; props: Record<string, any>; next: number; }
+function parseEdgeCluster(steps: Step[], addEIdx: number): EdgeCluster {
+  const label = steps[addEIdx].args[0];
+  if (typeof label !== 'string') throw new Error('addE(label): nested-traversal label not supported');
+  let fromSpec: any, toSpec: any, edgeUid: string | number | null = null;
+  const props: Record<string, any> = {};
+  let i = addEIdx + 1;
+  for (; i < steps.length && (steps[i].name === 'from' || steps[i].name === 'to' || steps[i].name === 'property'); i++) {
+    const m = steps[i];
+    if (m.name === 'from') fromSpec = m.args[0];
+    else if (m.name === 'to') toSpec = m.args[0];
+    else {
+      const [k, v] = stripCardinality(m.args);
+      if (k && typeof k === 'object' && 'token' in k) { if (k.token === 'id') edgeUid = v; else throw new Error(`property(T.${k.token}) on an edge not supported`); }
+      else props[k] = v;
+    }
+  }
+  return { label, fromSpec, toSpec, edgeUid, props, next: i };
+}
+
+function nodeExtId(store: GraphStore, rowid: number): any {
+  return store.query<{ x: any }>('SELECT COALESCE(uid, id) AS x FROM nodes WHERE id=?', [rowid])[0]?.x ?? rowid;
+}
+
+// Insert one edge from a cluster + resolved endpoints; returns the framed result.
+function insertEdge(store: GraphStore, c: EdgeCluster, src: number, tgt: number): any {
+  const lid = store.labelId(c.label);
+  const uidCol = typeof c.edgeUid === 'string' ? c.edgeUid : null;
+  const idCol = typeof c.edgeUid === 'number' ? c.edgeUid : null;
+  const cols = ['src', 'label', 'tgt', 'props', ...(uidCol !== null ? ['uid'] : []), ...(idCol !== null ? ['id'] : [])];
+  const vals: any[] = [src, lid, tgt, JSON.stringify(c.props), ...(uidCol !== null ? [uidCol] : []), ...(idCol !== null ? [idCol] : [])];
+  const row = store.query<{ id: number; uid: string | null }>(
+    `INSERT INTO edges(${cols.join(', ')}) VALUES(${cols.map(() => '?').join(', ')}) RETURNING id, uid`, vals)[0];
+  return { edge: { id: row.uid ?? row.id, label: c.label, src: nodeExtId(store, src), tgt: nodeExtId(store, tgt), props: c.props } };
+}
+
+// Resolve a cluster's from()/to() (each an alias / nested __.V / the fallback
+// traverser) and insert the edge. Shared by the read-mode and write-chain paths.
+function applyEdgeCluster(store: GraphStore, c: EdgeCluster, aliases: Map<string, number>, fallback: number | null, params: Record<string, any>): any {
+  const src = c.fromSpec !== undefined ? resolveEndpoint(store, c.fromSpec, { aliases }, params) : fallback;
+  const tgt = c.toSpec !== undefined ? resolveEndpoint(store, c.toSpec, { aliases }, params) : fallback;
+  if (src == null || tgt == null) throw new Error('addE needs both endpoints — supply from()/to() or an incoming traverser');
+  return insertEdge(store, c, src, tgt);
+}
+
+// addE — general form. A pure write chain (addV/as/addE/from/to/property — a
+// graph initializer, possibly many addE) goes to the sequential interpreter;
+// otherwise it's a single addE with a V()-rooted prefix (mid-traversal), one
+// edge per resulting traverser (outV = from() else the incoming, inV = to()
+// else the incoming). from()/to() take an as() alias or a nested __.V(...).
+function compileAddE(steps: Step[], params: Record<string, any>): WritePlan {
+  const CHAIN = new Set(['addV', 'as', 'addE', 'from', 'to', 'property']);
+  if (steps.every((s) => CHAIN.has(s.name)))
+    return { kind: 'write', run: (store) => runWriteChainFull(store, steps, params) };
+
+  const addEIdx = steps.findIndex((s) => s.name === 'addE');
+  const cluster = parseEdgeCluster(steps, addEIdx);
+  if (cluster.next !== steps.length) throw new Error(`step not implemented after addE(): ${steps[cluster.next].name}()`);
+  const prefix = steps.slice(0, addEIdx);
+  const t = traversalCtes(prefix, params);
+  if (t.stop !== prefix.length) throw new Error(`addE after ${prefix[t.stop].name}() not yet supported`);
+  const aliasCols: [string, string][] = [...t.aliases].map(([lbl, a]) => [lbl, a.col]);
+  const readSql = `WITH RECURSIVE ${t.ctes.join(',\n')}\nSELECT ${['id', ...aliasCols.map(([, c]) => c)].join(', ')} FROM c${t.ctes.length - 1}`;
+  return {
+    kind: 'write',
+    run: (store) => store.query<any>(readSql, t.binds).map((r) =>
+      applyEdgeCluster(store, cluster, new Map(aliasCols.map(([lbl, c]) => [lbl, r[c]])), r.id, params)),
+  };
+}
+
+// Interpret a linear write chain (addV/property/as/addE/from/to): vertices thread
+// into as() aliases; each addE creates an edge (from/to = alias / nested __.V /
+// the current vertex). Returns the last created element (Gremlin's 1→1 stream).
+function runWriteChainFull(store: GraphStore, steps: Step[], params: Record<string, any>): any[] {
+  const aliases = new Map<string, number>();
+  let currentV: number | null = null;
+  let last: any = null;
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    if (s.name === 'addV') {
+      const propSteps: Step[] = [];
+      while (i + 1 < steps.length && steps[i + 1].name === 'property') propSteps.push(steps[++i]);
+      const spec = parseVertexSpec(s, propSteps);
+      const v = insertVertex(store, spec);
+      currentV = v.id; last = { vertex: { id: v.extId, label: spec.label, props: spec.props } };
+    } else if (s.name === 'as') {
+      if (currentV == null) throw new Error('as() before any vertex in write chain');
+      for (const lbl of s.args) if (typeof lbl === 'string') aliases.set(lbl, currentV);
+    } else if (s.name === 'addE') {
+      const cluster = parseEdgeCluster(steps, i);
+      i = cluster.next - 1;
+      last = applyEdgeCluster(store, cluster, aliases, currentV, params);
+    } else throw new Error(`write-chain step not supported: ${s.name}()`);
+  }
+  return last ? [last] : [];
+}
+
+// Resolve an addE from()/to() endpoint to a node rowid: a string names an as()
+// alias; a nested traversal is run and its FIRST matched vertex used.
+function resolveEndpoint(store: GraphStore, spec: any, d: { aliases: Map<string, number> }, params: Record<string, any>): number {
+  if (typeof spec === 'string') {
+    const id = d.aliases.get(spec);
+    if (id === undefined) throw new Error(`addE from/to("${spec}"): unknown as() label`);
+    return id;
+  }
+  if (spec && typeof spec === 'object' && spec.nested) {
+    const inner = stepChain(spec.nested, params);
+    const t = traversalCtes(inner, params);
+    if (t.stop !== inner.length) throw new Error(`addE endpoint traversal not supported past ${inner[t.stop].name}()`);
+    const rows = store.query<{ id: number }>(`WITH RECURSIVE ${t.ctes.join(',\n')}\nSELECT id FROM c${t.ctes.length - 1}`, t.binds);
+    if (!rows.length) throw new Error('addE endpoint traversal matched no vertex');
+    return rows[0].id;
+  }
+  throw new Error('addE from()/to() must be an as() label or a nested __.V(...) traversal');
+}
+
+// ---------- mergeV / mergeE (upsert) ----------
+
+// A merge search/apply map, normalised from either a bound Map parameter (keys
+// arrive as GraphBinary EnumValues) or an inline [k: v] literal (keys arrive as
+// {token}/{direction} tags). label/id/outV/inV are the reserved T./Direction./
+// Merge. keys; everything else is a data property.
+interface MergeSpec { label: string | null; id: string | number | null; outV: any; inV: any; props: Record<string, any>; }
+
+/** The reserved role a merge-map key plays (or a plain data-property key). */
+function classifyMergeKey(k: any): { kind: 'label' | 'id' | 'outV' | 'inV' | 'prop'; name?: string } {
+  const enumName = (typeName: string) => k && typeof k === 'object' && k.typeName === typeName ? String(k.elementName).toLowerCase() : null;
+  const t = enumName('T') ?? (k && typeof k === 'object' && 'token' in k ? k.token : null);
+  if (t) { if (t === 'label') return { kind: 'label' }; if (t === 'id') return { kind: 'id' }; throw new Error(`merge map key T.${t} not supported`); }
+  const d = enumName('Direction') ?? (k && typeof k === 'object' && 'direction' in k ? k.direction : null);
+  if (d) {
+    if (d === 'out' || d === 'from') return { kind: 'outV' };
+    if (d === 'in' || d === 'to') return { kind: 'inV' };
+    throw new Error(`merge map key Direction.${d} not supported`);
+  }
+  return { kind: 'prop', name: String(k) };
+}
+
+/** A merge-map endpoint VALUE: a Merge.outV/inV token means "the incoming
+ *  traverser" (mergeE mid-chain); otherwise it's a concrete endpoint id. */
+function classifyMergeVal(v: any): any {
+  const m = v && typeof v === 'object' ? (v.typeName === 'Merge' ? String(v.elementName).toLowerCase() : ('merge' in v ? v.merge : null)) : null;
+  return m ? { incoming: m } : v;
+}
+
+function normalizeMergeMap(raw: any): MergeSpec {
+  const spec: MergeSpec = { label: null, id: null, outV: undefined, inV: undefined, props: {} };
+  if (raw == null) return spec; // mergeV(null) — match anything
+  if (!(raw instanceof Map)) {
+    if (raw && typeof raw === 'object' && 'nested' in raw) throw new Error('merge with a traversal argument (e.g. __.select(...)) not yet supported');
+    throw new Error('merge argument must be a map ([k:v] / bound Map), null, or empty ([:])');
+  }
+  for (const [k, v] of raw) {
+    const c = classifyMergeKey(k);
+    if (c.kind === 'label') spec.label = String(v);
+    else if (c.kind === 'id') spec.id = v;
+    else if (c.kind === 'outV') spec.outV = classifyMergeVal(v);
+    else if (c.kind === 'inV') spec.inV = classifyMergeVal(v);
+    else spec.props[c.name!] = v;
+  }
+  return spec;
+}
+
+/** SELECT of the vertices matching a merge spec (label + id/uid + prop equality;
+ *  an empty spec matches every vertex). Returns the columns write-framing needs. */
+function mergeMatchQuery(spec: MergeSpec): { sql: string; binds: any[] } {
+  const conds: string[] = [];
+  const binds: any[] = [];
+  if (spec.label != null) { conds.push('label IN (SELECT id FROM labels WHERE name=?)'); binds.push(spec.label); }
+  if (spec.id != null) { conds.push(typeof spec.id === 'number' ? 'id=?' : 'uid=?'); binds.push(spec.id); }
+  for (const [k, v] of Object.entries(spec.props)) {
+    const pe = propExtract('props', k);
+    conds.push(`${pe.sql} = ?`); binds.push(...pe.binds, v);
+  }
+  return {
+    sql: `SELECT id, uid, (SELECT name FROM labels WHERE id=nodes.label) AS label, props FROM nodes WHERE ${conds.length ? conds.join(' AND ') : '1'}`,
+    binds,
+  };
+}
+
+// The option(Merge.onCreate|onMatch, map) modulators following a merge step.
+function parseMergeOptions(mods: Step[], step: string): { onCreate: MergeSpec | null; onMatch: MergeSpec | null } {
+  let onCreate: MergeSpec | null = null, onMatch: MergeSpec | null = null;
+  for (const s of mods) {
+    if (s.name !== 'option') throw new Error(`step not implemented after ${step}(): ${s.name}()`);
+    const [sel, mapArg] = s.args;
+    if (!sel || typeof sel !== 'object' || !('merge' in sel))
+      throw new Error(`${step} option() selector must be Merge.onCreate/onMatch`);
+    const spec = normalizeMergeMap(mapArg);
+    if (sel.merge === 'oncreate') onCreate = spec;
+    else if (sel.merge === 'onmatch') onMatch = spec;
+    else throw new Error(`${step} option(Merge.${sel.merge}) not supported`);
+  }
+  return { onCreate, onMatch };
+}
+
+// The incoming traversers a merge runs once per, evaluated at run time. A start
+// step → one null driver (no vertex identity). A bare inject(v1,…) prefix → one
+// null driver per injected value (so g.inject(a,b).mergeV runs twice, per the
+// multiset semantics). A V()-rooted prefix → the matched vertex rowids (which a
+// mergeE endpoint token Merge.outV/inV binds to).
+function mergeDrivers(prefix: Step[], params: Record<string, any>): (store: GraphStore) => (number | null)[] {
+  if (prefix.length === 0) return () => [null];
+  if (prefix.length === 1 && prefix[0].name === 'inject') { const nulls = prefix[0].args.map(() => null); return () => nulls; }
+  const t = traversalCtes(prefix, params);
+  if (t.stop !== prefix.length) throw new Error(`merge after ${prefix[t.stop].name}() not yet supported`);
+  const sql = `WITH RECURSIVE ${t.ctes.join(',\n')}\nSELECT id FROM c${t.ctes.length - 1}`;
+  return (store) => store.query<{ id: number }>(sql, t.binds).map((r) => r.id);
+}
+
+// g.mergeV(map) [.option(Merge.onCreate, map)] [.option(Merge.onMatch, map)]
+// Upsert by the search map: matches → emitted (props patched by onMatch); no
+// match → one vertex created from the search map merged with onCreate. As a
+// start step it runs once; mid-chain (g.V()....mergeV) it runs once per incoming
+// traverser, re-querying each time so an earlier create is visible to a later one.
+function compileMergeV(steps: Step[], params: Record<string, any>): WritePlan {
+  const mvIdx = steps.findIndex((s) => s.name === 'mergeV');
+  if (steps[mvIdx].args.length === 0)
+    throw new Error('mergeV() with no argument (uses the incoming traverser as the map) not yet supported');
+  const matchSpec = normalizeMergeMap(steps[mvIdx].args[0]);
+  const { onCreate, onMatch } = parseMergeOptions(steps.slice(mvIdx + 1), 'mergeV');
+  const drivers = mergeDrivers(steps.slice(0, mvIdx), params);
+  const match = mergeMatchQuery(matchSpec);
   return {
     kind: 'write',
     run: (store) => {
-      const lid = store.labelId(label);
-      // A numeric T.id writes the rowid directly; a string T.id is the uid.
-      const uidCol = typeof uid === 'string' ? uid : null;
-      const idCol = typeof uid === 'number' ? uid : null;
-      const cols = ['label', 'props', ...(uidCol !== null ? ['uid'] : []), ...(idCol !== null ? ['id'] : [])];
-      const vals: any[] = [lid, JSON.stringify(props), ...(uidCol !== null ? [uidCol] : []), ...(idCol !== null ? [idCol] : [])];
-      const row = store.query(
-        `INSERT INTO nodes(${cols.join(', ')}) VALUES(${cols.map(() => '?').join(', ')}) RETURNING id, uid`,
-        vals,
-      )[0];
-      return [{ vertex: { id: row.uid ?? row.id, label, props } }];
+      const out: any[] = [];
+      for (const _driver of drivers(store)) {
+        const matches = store.query<any>(match.sql, match.binds);
+        if (matches.length) {
+          for (const m of matches) {
+            let props = JSON.parse(m.props);
+            if (onMatch) { props = { ...props, ...onMatch.props }; store.query('UPDATE nodes SET props=? WHERE id=?', [JSON.stringify(props), m.id]); }
+            out.push({ vertex: { id: m.uid ?? m.id, label: m.label, props } });
+          }
+        } else {
+          const label = onCreate?.label ?? matchSpec.label ?? 'vertex';
+          const props = { ...matchSpec.props, ...(onCreate?.props ?? {}) };
+          const v = insertVertex(store, { label, props, uid: matchSpec.id ?? onCreate?.id ?? null });
+          out.push({ vertex: { id: v.extId, label, props } });
+        }
+      }
+      return out;
     },
   };
 }
 
-// g.V(a).addE('label').to(__.V(b)) — restricted nested-traversal shape for the slice
-function compileAddE(steps: Step[], params: Record<string, any>): WritePlan {
-  const [vStep, addE, to] = steps;
-  if (steps.length !== 3 || vStep.name !== 'V' || addE.name !== 'addE' || to.name !== 'to')
-    throw new Error('addE currently supports exactly g.V(id).addE(label).to(__.V(id))');
-  const srcArg = vStep.args[0];
-  const nested = to.args[0]?.nested;
-  if (!nested) throw new Error('to() must contain a nested traversal');
-  const inner = stepChain(nested, params);
-  if (inner.length !== 1 || inner[0].name !== 'V' || inner[0].args.length !== 1)
-    throw new Error('to() nested traversal must be __.V(id) for now');
-  const tgtArg = inner[0].args[0];
-  const label = addE.args[0];
+// Resolve a mergeE endpoint spec to a node rowid, requiring the vertex to exist
+// (mergeE cannot create endpoints — matches TinkerPop's error). A rowid comes in
+// from an incoming traverser; a user id (number/string) resolves through id/uid.
+function resolveMergeEndpoint(store: GraphStore, raw: any): number {
+  const r = store.query<{ id: number }>(
+    typeof raw === 'number' ? 'SELECT id FROM nodes WHERE id=?' : 'SELECT id FROM nodes WHERE uid=?', [raw])[0];
+  if (!r) throw new Error('Vertex does not exist for mergeE');
+  return r.id;
+}
+
+// SELECT of edges matching a merge spec between two resolved endpoints.
+function edgeMatchQuery(spec: MergeSpec, outV: number, inV: number): { sql: string; binds: any[] } {
+  const conds = ['src=?', 'tgt=?'];
+  const binds: any[] = [outV, inV];
+  if (spec.label != null) { conds.push('label IN (SELECT id FROM labels WHERE name=?)'); binds.push(spec.label); }
+  if (spec.id != null) { conds.push(typeof spec.id === 'number' ? 'id=?' : 'uid=?'); binds.push(spec.id); }
+  for (const [k, v] of Object.entries(spec.props)) {
+    const pe = propExtract('props', k);
+    conds.push(`${pe.sql} = ?`); binds.push(...pe.binds, v);
+  }
+  return { sql: `SELECT id, uid, src, tgt, (SELECT name FROM labels WHERE id=edges.label) AS label, props FROM edges WHERE ${conds.join(' AND ')}`, binds };
+}
+
+// g.mergeE(map) [.option(Merge.onCreate, map)] [.option(Merge.onMatch, map)]
+// Upsert an edge keyed on (outV, inV, label, props). Endpoints come from the
+// map's Direction.OUT/IN keys (a Merge.outV/inV value means the incoming
+// traverser); both must exist. Mid-chain it runs per incoming traverser.
+function compileMergeE(steps: Step[], params: Record<string, any>): WritePlan {
+  const meIdx = steps.findIndex((s) => s.name === 'mergeE');
+  if (steps[meIdx].args.length === 0)
+    throw new Error('mergeE() with no argument (uses the incoming traverser as the map) not yet supported');
+  const matchSpec = normalizeMergeMap(steps[meIdx].args[0]);
+  const { onCreate, onMatch } = parseMergeOptions(steps.slice(meIdx + 1), 'mergeE');
+  const drivers = mergeDrivers(steps.slice(0, meIdx), params);
   return {
     kind: 'write',
     run: (store) => {
-      // Endpoints are rowids internally; a string arg resolves through uid.
-      const resolve = (a: any): number => {
-        if (typeof a !== 'string') return Number(a);
-        const r = store.query<{ id: number }>('SELECT id FROM nodes WHERE uid=?', [a])[0];
-        if (!r) throw new Error(`addE: no vertex with id '${a}'`);
-        return r.id;
+      // An endpoint spec: a Merge.outV/inV token → the incoming traverser; else a
+      // concrete id. onCreate can also supply the endpoints if the search map omits them.
+      const endpoint = (spec: any, oc: any, cur: number | null, role: string): number => {
+        const raw = spec?.incoming !== undefined ? cur : spec ?? (oc?.incoming !== undefined ? cur : oc);
+        if (raw == null) throw new Error(`mergeE: missing ${role} endpoint (need Direction.${role === 'outV' ? 'OUT' : 'IN'} or an incoming traverser)`);
+        return resolveMergeEndpoint(store, raw);
       };
-      const lid = store.labelId(label);
-      const row = store.query(
-        'INSERT INTO edges(src, label, tgt) VALUES(?,?,?) RETURNING id',
-        [resolve(srcArg), lid, resolve(tgtArg)],
-      )[0];
-      // Echo the endpoint ids the caller used (uid if supplied) on the wire.
-      return [{ edge: { id: row.id, label, src: srcArg, tgt: tgtArg } }];
+      const out: any[] = [];
+      for (const cur of drivers(store)) {
+        const outV = endpoint(matchSpec.outV, onCreate?.outV, cur, 'outV');
+        const inV = endpoint(matchSpec.inV, onCreate?.inV, cur, 'inV');
+        const match = edgeMatchQuery(matchSpec, outV, inV);
+        const matches = store.query<any>(match.sql, match.binds);
+        if (matches.length) {
+          for (const m of matches) {
+            let props = JSON.parse(m.props);
+            if (onMatch) { props = { ...props, ...onMatch.props }; store.query('UPDATE edges SET props=? WHERE id=?', [JSON.stringify(props), m.id]); }
+            out.push({ edge: { id: m.uid ?? m.id, label: m.label, src: nodeExtId(store, m.src), tgt: nodeExtId(store, m.tgt), props } });
+          }
+        } else {
+          const label = matchSpec.label ?? onCreate?.label;
+          if (!label) throw new Error('mergeE cannot create an edge without a label');
+          const props = { ...matchSpec.props, ...(onCreate?.props ?? {}) };
+          out.push(insertEdge(store, { label, fromSpec: undefined, toSpec: undefined, edgeUid: matchSpec.id ?? onCreate?.id ?? null, props, next: 0 }, outV, inV));
+        }
+      }
+      return out;
     },
   };
 }
