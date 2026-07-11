@@ -455,6 +455,27 @@ const run = (store: GraphStore, q: string) => {
 };
 
 describe('compiler execution semantics', () => {
+  test('has(label, key, value) 3-arg folds in a label filter', () => {
+    const store = seededStore();
+    // the standard cucumber verification idiom
+    expect(run(store, 'g.V().has("person","name","marko").has("age",29).count()').map((r) => r.v)).toEqual([1]);
+    // wrong label → no match, even though a software vertex is named "lop"
+    expect(run(store, 'g.V().has("person","name","lop").count()').map((r) => r.v)).toEqual([0]);
+    expect(run(store, 'g.V().has("software","name","lop").count()').map((r) => r.v)).toEqual([1]);
+  });
+
+  test('has(T.label, v) / has(T.id, v) token forms filter on label / id', () => {
+    const store = seededStore();
+    expect(run(store, 'g.V().has(T.label,"person").count()').map((r) => r.v)).toEqual([4]);
+    expect(run(store, 'g.V().has(T.id, 1).values("name")').map((r) => r.v)).toEqual(['marko']);
+  });
+
+  test('has(T.id|T.label, P) routes through a predicate (no crash on P/TextP)', () => {
+    const store = seededStore();
+    expect(run(store, 'g.V().has(T.id, P.within(1,2)).values("name")').map((r) => r.v).sort()).toEqual(['marko', 'vadas']);
+    expect(run(store, 'g.V().has(T.label, P.eq("software")).count()').map((r) => r.v)).toEqual([2]);
+  });
+
   test('order().by numeric ascending vs descending', () => {
     const store = seededStore();
     expect(run(store, 'g.V().hasLabel("person").order().by("age").values("name")').map((r) => r.v))
@@ -711,5 +732,163 @@ describe('compiler execution semantics', () => {
     run(store, 'g.V().drop()');
     expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([0]);
     expect(store.query('SELECT COUNT(*) AS c FROM edges')[0].c).toBe(0);
+  });
+
+  test('property() updates existing vertices (overwrite + new key, single cardinality)', () => {
+    const store = seededStore();
+    // overwrite marko's age, add a new key
+    const res = run(store, 'g.V(1).property("age", 30).property("city", "London")');
+    expect((res[0] as any).vertex).toEqual({ id: 1, label: 'person', props: { name: 'marko', age: 30, city: 'London' } });
+    expect(run(store, 'g.V(1).values("age")').map((r) => r.v)).toEqual([30]);
+    expect(run(store, 'g.V(1).values("city")').map((r) => r.v)).toEqual(['London']);
+    // untouched vertices keep their props
+    expect(run(store, 'g.V(2).values("age")').map((r) => r.v)).toEqual([27]);
+  });
+
+  test('property() updates every matched vertex in the set', () => {
+    const store = seededStore();
+    run(store, 'g.V().hasLabel("person").property("kind", "human")');
+    expect(run(store, 'g.V().has("kind","human").count()').map((r) => r.v)).toEqual([4]);
+  });
+
+  test('property(Cardinality.single) allowed; list/set deferred to W4', () => {
+    const store = seededStore();
+    run(store, 'g.V(1).property(Cardinality.single, "age", 40)');
+    expect(run(store, 'g.V(1).values("age")').map((r) => r.v)).toEqual([40]);
+    expect(() => run(store, 'g.V(1).property(Cardinality.list, "nick", "x")')).toThrow(/W4/);
+  });
+
+  test('property() updates edges too (materialized on the wire via edgeBuffer)', () => {
+    const store = seededStore();
+    const res = run(store, 'g.V(1).outE("created").property("weight2", 0.9)');
+    expect((res[0] as any).edge.props).toEqual({ weight: 0.4, weight2: 0.9 });
+    expect(run(store, 'g.V(1).outE("created").values("weight2")').map((r) => r.v)).toEqual([0.9]);
+  });
+
+  test('addE start-step: from()/to() nested traversals + edge property', () => {
+    const store = seededStore();
+    const res = run(store, 'g.addE("knows").from(__.V().has("name","marko")).to(__.V().has("name","vadas")).property("weight", 0.9)');
+    expect((res[0] as any).edge).toMatchObject({ label: 'knows', src: 1, tgt: 2, props: { weight: 0.9 } });
+    // marko already knew vadas (edge 7); now a second knows edge exists → 2 paths to vadas
+    expect(run(store, 'g.V(1).out("knows").has("name","vadas").count()').map((r) => r.v)).toEqual([2]);
+    expect(run(store, 'g.V(1).outE("knows").count()').map((r) => r.v)).toEqual([3]);
+  });
+
+  test('addE from() sets outV, incoming traverser is inV', () => {
+    const store = seededStore();
+    // g.V(2).addE("likes").from(__.V(1)) → edge 1→2 (inV defaults to current, vadas)
+    run(store, 'g.V(2).addE("likes").from(__.V(1))');
+    expect(run(store, 'g.V(1).out("likes").values("name")').map((r) => r.v)).toEqual(['vadas']);
+  });
+
+  test('addE mid-traversal with as() alias endpoint (per incoming traverser)', () => {
+    const store = seededStore();
+    // everything marko created gets a createdBy edge back to marko
+    run(store, 'g.V(1).as("a").out("created").addE("createdBy").to("a")');
+    expect(run(store, 'g.V(3).out("createdBy").values("name")').map((r) => r.v)).toEqual(['marko']);
+  });
+
+  test('addE sets its own uid via property(T.id)', () => {
+    const store = seededStore();
+    const res = run(store, 'g.addE("knows").from(__.V(1)).to(__.V(2)).property(T.id, "e:marko-vadas")');
+    expect((res[0] as any).edge.id).toBe('e:marko-vadas');
+    expect(run(store, 'g.E("e:marko-vadas").label()').map((r) => r.v)).toEqual(['knows']);
+  });
+
+  test('addE write-chain graph initializer (addV.as.addV.as.addE.from.to)', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    run(store, 'g.addV("person").property("name","marko").as("a").addV("person").property("name","vadas").as("b").addE("knows").from("a").to("b").property("weight", 0.5)');
+    expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([2]);
+    expect(run(store, 'g.V().has("name","marko").out("knows").values("name")').map((r) => r.v)).toEqual(['vadas']);
+    expect(run(store, 'g.V().has("name","marko").outE("knows").values("weight")').map((r) => r.v)).toEqual([0.5]);
+  });
+
+  test('mergeV creates when no match, matches when it exists (inline map)', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    const a = run(store, 'g.mergeV([(T.label): "person", name: "marko"])');
+    expect((a[0] as any).vertex).toMatchObject({ label: 'person', props: { name: 'marko' } });
+    // second identical merge matches the first → still one vertex
+    run(store, 'g.mergeV([(T.label): "person", name: "marko"])');
+    expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([1]);
+    expect(run(store, 'g.V().hasLabel("person").has("name","marko").count()').map((r) => r.v)).toEqual([1]);
+  });
+
+  test('mergeV([:]) matches all; on empty graph creates one default-label vertex', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    run(store, 'g.mergeV([:])');
+    expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([1]);
+    // now match-all matches the one; no new vertex
+    run(store, 'g.mergeV([:])');
+    expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([1]);
+  });
+
+  test('mergeV mid-chain runs per incoming traverser (g.V().mergeV([:]) → N×matches)', () => {
+    const store = seededStore(); // 6 vertices
+    const res = run(store, 'g.V().mergeV([:])'); // each of 6 drivers matches all 6
+    expect(res.length).toBe(36);
+    expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([6]); // no creates
+  });
+
+  test('mergeV option(onMatch) patches props on the matched vertex', () => {
+    const store = seededStore();
+    run(store, 'g.mergeV([(T.label): "person", name: "marko"]).option(Merge.onMatch, [age: 30])');
+    expect(run(store, 'g.V().has("name","marko").values("age")').map((r) => r.v)).toEqual([30]);
+  });
+
+  test('mergeV option(onCreate) adds props only on the create branch', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    run(store, 'g.mergeV([(T.label): "person", name: "stephen"]).option(Merge.onCreate, [created: "Y"])');
+    expect(run(store, 'g.V().has("name","stephen").values("created")').map((r) => r.v)).toEqual(['Y']);
+  });
+
+  test('mergeV accepts a bound Map parameter with EnumValue keys (wire path)', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    // mimic a GraphBinary-deserialized m[{"t[label]":"person","name":"stephen"}]
+    const xx1 = new Map<any, any>([[{ typeName: 'T', elementName: 'label' }, 'person'], ['name', 'stephen']]);
+    const p = compile('g.mergeV(xx1).option(Merge.onCreate, null)', { xx1 });
+    if (p.kind !== 'write') throw new Error('want write');
+    p.run(store);
+    const r = compile('g.V().hasLabel("person").has("name","stephen").count()', {});
+    if (r.kind !== 'read') throw new Error('want read');
+    expect(store.query(r.sql, r.binds).map((x: any) => x.v)).toEqual([1]);
+  });
+
+  test('mergeE creates an edge between existing endpoints, then matches it', () => {
+    const store = seededStore(); // marko=1, vadas=2, already knows via edge 7
+    // a NEW label between marko and josh(4)
+    const c = run(store, 'g.mergeE([(T.label): "likes", (Direction.OUT): 1, (Direction.IN): 4])');
+    expect((c[0] as any).edge).toMatchObject({ label: 'likes', src: 1, tgt: 4 });
+    expect(run(store, 'g.V(1).out("likes").values("name")').map((r) => r.v)).toEqual(['josh']);
+    // merging again matches the existing edge → no duplicate
+    run(store, 'g.mergeE([(T.label): "likes", (Direction.OUT): 1, (Direction.IN): 4])');
+    expect(run(store, 'g.V(1).outE("likes").count()').map((r) => r.v)).toEqual([1]);
+  });
+
+  test('mergeE onCreate/onMatch patch edge props on the right branch', () => {
+    const store = seededStore();
+    run(store, 'g.mergeE([(T.label): "likes", (Direction.OUT): 1, (Direction.IN): 4]).option(Merge.onCreate, [w: "new"]).option(Merge.onMatch, [w: "old"])');
+    expect(run(store, 'g.V(1).outE("likes").values("w")').map((r) => r.v)).toEqual(['new']);
+    // second merge takes the onMatch branch
+    run(store, 'g.mergeE([(T.label): "likes", (Direction.OUT): 1, (Direction.IN): 4]).option(Merge.onCreate, [w: "new"]).option(Merge.onMatch, [w: "old"])');
+    expect(run(store, 'g.V(1).outE("likes").values("w")').map((r) => r.v)).toEqual(['old']);
+  });
+
+  test('mergeE raises when an endpoint vertex does not exist', () => {
+    const store = seededStore();
+    expect(() => run(store, 'g.mergeE([(T.label): "knows", (Direction.OUT): 100, (Direction.IN): 101])'))
+      .toThrow(/Vertex does not exist for mergeE/);
+  });
+
+  test('bare mergeV()/mergeE() (incoming-as-map) is a clear deferral, not silent match-all', () => {
+    const store = seededStore();
+    expect(() => run(store, 'g.inject(0).mergeV()')).toThrow(/no argument/);
+    expect(() => run(store, 'g.inject(0).mergeE()')).toThrow(/no argument/);
+  });
+
+  test('inject(v1,…).mergeV runs once per injected value (arity, not always 1)', () => {
+    const store = seededStore(); // 6 vertices
+    // 3 injected values → 3 drivers, each match-all matches 6 → 18 results, no creates
+    expect(run(store, 'g.inject(1,2,3).mergeV([:])').length).toBe(18);
+    expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([6]);
   });
 });

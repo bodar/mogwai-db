@@ -218,12 +218,43 @@ rowid stays the internal PK (joins/perf untouched). uid resolved only at the
 sets id, `property(T.label,v)` overrides label. Gaps: `properties().element().id()`
 and `group().by(__.id())` still show rowid; `addE` can't set the edge's own uid.
 
-**Immediate next work — W2 writes.** `mergeV`/`mergeE` (`INSERT … ON CONFLICT(uid)
-DO UPDATE … RETURNING`, match by uid), `property()` update on existing elements,
-general `addE`. PREREQUISITE: `extractArgs` has NO map-literal case — `mergeV([Map])`
-/`property([T.id: 'x', …])` currently flatten and lose key→value pairing; add a
-`genericMapLiteral`/`mapEntry` case to the visitor first. (`@StepWrite` scenarios
-are runner-skipped, so W2 lifts the agent use-case, not the L3 number.)
+**W2 writes — DONE (live L3 130 → 205).** `mergeV`/`mergeE`, `property()` update,
+general `addE`, all landed. Shape:
+- **Front-end**: `extractArgs` refactored to `walkArgs`/`argOf`; new cases for
+  map literals (`GenericMapLiteralContext` → JS `Map`, matching how a bound Map
+  param arrives after GraphBinary deserialization), bare enum tokens
+  (`TraversalTLong`/`Direction`/`Merge`/`Cardinality`), so `mergeV([(T.label):…])`
+  and `option(Merge.onCreate,…)` parse without flattening/dropping.
+- **mergeV/mergeE** (`compileMergeV`/`compileMergeE`): upsert closures. Match map
+  normalised (`normalizeMergeMap` — handles BOTH EnumValue keys from bound Map
+  params AND `{token}`/`{direction}` tags from inline literals). Match → emit
+  (props patched by `option(Merge.onMatch,…)`); miss → insert (match + onCreate).
+  `mergeDrivers` sizes the run: start=1, `inject(v1,…)`=one per value, `V()`-rooted
+  =one per incoming (re-queried each iteration so an earlier create is visible to a
+  later match). mergeE endpoints from `Direction.OUT/IN` (`Merge.outV/inV`=incoming);
+  missing endpoint → "Vertex does not exist for mergeE". Bare `mergeV()`/`mergeE()`
+  (incoming-as-map) throws a clear deferral.
+- **general addE** (`compileAddE` + `runWriteChainFull`): a pure write chain
+  (addV/as/addE/from/to/property — a graph initializer, MANY addE) runs through the
+  sequential interpreter; a `V()`-rooted single addE runs one edge per driver row
+  (alias cols carried). `from()`/`to()` = an `as()` alias or nested `__.V(...)`;
+  default endpoint = the incoming traverser. `property(T.id)` sets the edge uid.
+  Shared `parseEdgeCluster`/`insertEdge`/`applyEdgeCluster`/`resolveEndpoint`.
+- **property() update** (`compileSetProperty`): `UPDATE … props` (JS-merge, single
+  cardinality) on the movement-selected V/E set. `Cardinality.list/set` → W4.
+- **Fixes landed alongside**: `has(label,key,value)` 3-arg + `has(T.label|T.id, v|P)`
+  (was ignoring the 3rd arg / crashing on a predicate — the dominant cucumber
+  *verification* idiom); edge write-response now frames via `edgeBuffer`
+  (materialises props; `handler.ts` was dropping them through `anySerializer`).
+- **Edge endpoints on write responses** expose the external id (`nodeExtId` =
+  COALESCE(uid,id)); the READ path still shows raw rowid endpoints (perf: avoids
+  correlated subqueries on index-only edge scans) — a known divergence, identity
+  for integer-id graphs, matters only under UserSuppliedIds.
+- **Deferred (clear errors)**: nested-traversal merge maps (`mergeV(__.select…)`),
+  `option(…, __.traversal)`, `Cardinality.list/set` (W4), `.with()`, `hasId`.
+
+Cucumber tag set widened with `@StepAddV/@StepAddE/@StepMergeV/@StepMergeE` (NOT
+`@StepWrite`, which is the unrelated `io().write()` serialization feature).
 
 Read-step backlog (continues under W5): `repeat().until()`/`emit(pred)`,
 `path`/`simplePath`, `coalesce`, `aggregate`/`cap`, `match`, `local`, `choose`,

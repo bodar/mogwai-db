@@ -162,7 +162,8 @@ the "we execute it correctly" metric.
 
 ### Revised roadmap — writes-first (usable before feature-complete)
 
-The P2/P3 read compiler is largely done (live L3 130). The path to *usable* is
+The P2/P3 read compiler is largely done, and W2 writes have landed (live L3 205).
+The path to *usable* is
 sequenced so the invasive schema rework lands behind a deployed, writable
 baseline:
 
@@ -181,8 +182,15 @@ baseline:
   (owner-uid not threaded into those two paths); `addE` can't yet set the edge's
   OWN uid (edges get rowid ids; endpoints echo user ids). mergeV/mergeE (W2) will
   build on this.
-- **W2 — writes.** `mergeV`/`mergeE` (upsert, id-aware), `property()` update on
-  existing elements, general `addE` from arbitrary traverser sets. → *writable*.
+- **W2 — writes. DONE (live L3 130 → 205).** `mergeV`/`mergeE` (upsert, id-aware,
+  onCreate/onMatch, start + mid-chain per-traverser), `property()` update on
+  existing V/E (single cardinality), general `addE` (from/to alias|nested, edge
+  uid, multi-addE graph initializers via a sequential write-chain interpreter).
+  Prereq landed: `extractArgs` map-literal + enum-token cases. Also fixed
+  `has(label,key,value)`/`has(T.x, P)` (the cucumber verification idiom) and the
+  edge write-response prop-drop. See CLAUDE.md "W2 writes — DONE" for the full
+  shape. → *writable*. Deferred to later: nested-traversal merge maps,
+  `Cardinality.list/set` (W4), `.with()`, `hasId`.
 - **W3 — P4 deploy.** Worker router (`POST /g/{graphId}` → `idFromName` → DO,
   LOCKED design) + bearer auth per graph + delete/lifecycle management endpoint.
   → *deployable*.
