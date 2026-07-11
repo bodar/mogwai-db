@@ -1,4 +1,3 @@
-import http from 'node:http';
 import { GraphStore } from './storage.js';
 import { compile } from './compiler.js';
 
@@ -6,8 +5,6 @@ import { compile } from './compiler.js';
 const ESM = 'file://' + process.cwd() + '/node_modules/gremlin/build/esm/';
 const ioc = (await import(ESM + 'structure/io/binary/GraphBinary.js')).default;
 const { Vertex, VertexProperty, Edge } = await import(ESM + 'structure/graph.js');
-
-const store = new GraphStore(process.env.MOGWAI_DB ?? ':memory:');
 
 // ---- GraphBinary v4 response framing (mirrors GraphBinaryReader.readResponse) ----
 function frame(values: Buffer[], status = 200, message: string | null = null): Buffer {
@@ -33,7 +30,7 @@ function toVertex(row: { id: number; label: string; props: string }): InstanceTy
   return new Vertex(row.id, row.label, vprops);
 }
 
-function execute(gremlin: string, params: Record<string, any>): Buffer[] {
+function execute(store: GraphStore, gremlin: string, params: Record<string, any>): Buffer[] {
   const plan = compile(gremlin, params);
   if (plan.kind === 'write') {
     return plan.run(store).map((r: any) => {
@@ -53,40 +50,44 @@ function execute(gremlin: string, params: Record<string, any>): Buffer[] {
   }
 }
 
-const server = http.createServer((req, res) => {
-  const chunks: Buffer[] = [];
-  req.on('data', (c) => chunks.push(c));
-  req.on("end", () => {
-    let gremlinForLog = "?";
-    let body: Buffer;
-    try {
-      const raw = Buffer.concat(chunks);
-      let msg: { gremlin: string; parameters?: Record<string, any> };
-      if (raw[0] === 0x84) {
-        // GraphBinary request: 0x84, fields map (bare), gremlin string (bare)
-        let cursor = raw.subarray(1);
-        const { v: fields, len } = ioc.mapSerializer.deserialize(cursor, false);
-        cursor = cursor.subarray(len);
-        const { v: gremlin } = ioc.stringSerializer.deserialize(cursor, false);
-        const bindings = fields.get?.('bindings') ?? fields.get?.('parameters') ?? {};
-        msg = { gremlin, parameters: bindings instanceof Map ? Object.fromEntries(bindings) : bindings };
-      } else {
-        msg = JSON.parse(raw.toString('utf8'));
+export function startServer(port = 8182, dbPath = process.env.MOGWAI_DB ?? ':memory:') {
+  const store = new GraphStore(dbPath);
+  return Bun.serve({
+    port,
+    async fetch(req) {
+      let gremlinForLog = '?';
+      let body: Buffer;
+      try {
+        const raw = Buffer.from(await req.arrayBuffer());
+        let msg: { gremlin: string; parameters?: Record<string, any> };
+        if (raw[0] === 0x84) {
+          // GraphBinary request: 0x84, fields map (bare), gremlin string (bare)
+          let cursor = raw.subarray(1);
+          const { v: fields, len } = ioc.mapSerializer.deserialize(cursor, false);
+          cursor = cursor.subarray(len);
+          const { v: gremlin } = ioc.stringSerializer.deserialize(cursor, false);
+          const bindings = fields.get?.('bindings') ?? fields.get?.('parameters') ?? {};
+          msg = { gremlin, parameters: bindings instanceof Map ? Object.fromEntries(bindings) : bindings };
+        } else {
+          msg = JSON.parse(raw.toString('utf8'));
+        }
+        gremlinForLog = msg.gremlin;
+        const values = execute(store, msg.gremlin, msg.parameters ?? {});
+        body = frame(values);
+        console.log(`OK   ${msg.gremlin} -> ${values.length} result(s)`);
+      } catch (e: any) {
+        body = frame([], 500, e.message);
+        console.log(`ERR  [${gremlinForLog}] ${e.message}`);
       }
-      gremlinForLog = msg.gremlin;
-      const values = execute(msg.gremlin, msg.parameters ?? {});
-      body = frame(values);
-      console.log(`OK   ${msg.gremlin} -> ${values.length} result(s)`);
-    } catch (e: any) {
-      body = frame([], 500, e.message);
-      console.log(`ERR  [${gremlinForLog}] ${e.message}`);
-    }
-    res.writeHead(200, {
-      'Content-Type': 'application/vnd.graphbinary-v4.0',
-      'Content-Length': body.length,
-    });
-    res.end(body);
+      // Always HTTP 200; errors ride the GraphBinary status trailer.
+      return new Response(body, {
+        headers: { 'Content-Type': 'application/vnd.graphbinary-v4.0' },
+      });
+    },
   });
-});
+}
 
-server.listen(8182, () => console.log('mogwai-db listening on :8182'));
+if (import.meta.main) {
+  const server = startServer();
+  console.log(`mogwai-db listening on :${server.port}`);
+}

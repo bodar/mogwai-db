@@ -110,10 +110,14 @@ future management endpoint.
 
 ## Environment notes
 
-- Dev storage shim is better-sqlite3 (synchronous, matching DO SQLite
+- Runtime is Bun (pinned in `mise.toml`), not Node. `bun run start` serves
+  via `Bun.serve`; `bun test` runs the suite (`*.test.ts`). No tsx/esbuild —
+  Bun runs TS natively.
+- Dev storage shim is `bun:sqlite` (synchronous, matching DO SQLite
   semantics). The DO port swaps `src/storage.ts` internals to
   `ctx.storage.sql` and adds the Worker router; compiler/server logic is
-  storage-agnostic.
+  storage-agnostic. `src/server.ts` exports `startServer(port, dbPath)` and
+  only listens under `import.meta.main`, so tests run it in-process.
 - Bundle budget verified: parser + antlr4ng + serializers ≈ 1 MB minified;
   ATN warm-up ~few ms once per isolate; warm parse ~0.27 ms.
 - Useful references live in the Apache TinkerPop repo (sparse-clone it):

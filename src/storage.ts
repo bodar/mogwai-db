@@ -1,11 +1,11 @@
-import Database from 'better-sqlite3';
+import { Database } from 'bun:sqlite';
 
 export class GraphStore {
-  db: Database.Database;
+  db: Database;
 
   constructor(path = ':memory:') {
     this.db = new Database(path);
-    this.db.pragma('journal_mode = WAL');
+    this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS labels(
         id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);

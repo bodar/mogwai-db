@@ -23,7 +23,7 @@ GLV client ──HTTP POST──▶ Worker ──graphId──▶ Durable Object
                                     compiler: CTE-chained SQL over
                                     nodes/edges, or write plans
                                                  ▼
-                                    DO SQLite (dev shim: better-sqlite3)
+                                    DO SQLite (dev shim: bun:sqlite)
                                                  ▼
                                     GraphBinary v4 streamed response
 ```
@@ -130,7 +130,7 @@ unlocks most of the Medium tier; design it once, carefully:
   nested traversals).
 
 **P4 — DO deployment.**
-- Port `storage.ts` to `ctx.storage.sql` (synchronous, like better-sqlite3;
+- Port `storage.ts` to `ctx.storage.sql` (synchronous, like bun:sqlite;
   the shim was chosen for matching semantics).
 - Worker router (LOCKED design): `POST /g/{graphId}` → `idFromName(graphId)`
   → DO; graph springs into existence on first request. The request's `g`
