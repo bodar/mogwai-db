@@ -260,8 +260,15 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
     movement (structural, like alias threading; accept loss of index-only scans).
 
 **P3 — recursion & upserts.**
-- `repeat/until/emit/times` → recursive CTE with depth column; `simplePath`
-  via path-array containment check.
+- `repeat/times/emit` → **DONE (live L3 126 → 130).** `WITH RECURSIVE
+  walk(id, depth)` seeded from the current relation; body = single out/in/both
+  hop (both = two recursive terms). `times(n)` (either side of `repeat`) → project
+  `depth = n`; `emit` after → `depth >= 1`, before → `depth >= 0`; depth guard 32
+  when `times` absent. All `WITH` became `WITH RECURSIVE` (harmless for
+  non-recursive CTEs). Deferred with clear errors: `until()`, `emit(pred)`/
+  `times(pred)`, complex bodies (order/limit/local inside repeat), `path`/
+  `simplePath`, repeat after `as()`, repeat on edges.
+- `until/emit(pred)` + `simplePath` via path-array containment — next.
 - `mergeV`/`mergeE` → `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`
   (requires unique indexes; part of the management/schema story). This is
   the agent-workload workhorse — prioritize if that's the driving use case.

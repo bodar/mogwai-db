@@ -437,6 +437,52 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
         binds.push(...bs[0].args);
         break;
       }
+      case 'repeat': case 'emit': case 'times': case 'until': {
+        // A repeat cluster: gather the contiguous repeat/emit/times/until run
+        // (the modulators can sit either side of repeat()). Compile to a
+        // WITH RECURSIVE walk(id, depth) seeded from the current relation.
+        if (elem !== 'node') throw new Error('repeat() on edges not yet supported');
+        if (aliases.size > 0) throw new Error('repeat() after as() not yet supported');
+        // Gather one repeat cluster: the contiguous repeat/emit/times/until run,
+        // stopping at the first REPEATED step name so a second repeat-loop isn't
+        // swallowed — it compiles as a fresh cluster next iteration, correctly
+        // chained on this one's output (e.g. repeat(out).times(2).repeat(in).times(1)).
+        let j = i;
+        const cluster: Step[] = [], seen = new Set<string>();
+        while (j < steps.length && ['repeat', 'emit', 'times', 'until'].includes(steps[j].name) && !seen.has(steps[j].name)) {
+          seen.add(steps[j].name); cluster.push(steps[j]); j++;
+        }
+        const rep = cluster.find((s) => s.name === 'repeat');
+        if (!rep) throw new Error(`${s.name}() without repeat() not yet supported`);
+        if (cluster.some((s) => s.name === 'until')) throw new Error('repeat().until() not yet supported');
+        const emitStep = cluster.find((s) => s.name === 'emit');
+        if (emitStep?.args.length) throw new Error('emit(predicate) not yet supported');
+        const timesStep = cluster.find((s) => s.name === 'times');
+        if (timesStep && typeof timesStep.args[0] !== 'number') throw new Error('times(predicate) not yet supported');
+        // Require times(): it bounds depth to a user-given n. Unbounded forms
+        // (bare emit() with no times, until()) would let the recursive walk fan
+        // out to branching-factor^depth rows — deferred rather than risk exhaustion.
+        if (!timesStep) throw new Error('repeat() without times() not yet supported (unbounded emit()/until() deferred)');
+        const emitBefore = !!emitStep && cluster.indexOf(emitStep) < cluster.indexOf(rep);
+
+        const body = stepChain(rep.args[0]?.nested, params);
+        if (body.length !== 1 || !['out', 'in', 'both'].includes(body[0].name))
+          throw new Error(`repeat(__.${body.map((s) => s.name + '()').join('.')}) not yet supported (single out()/in()/both() only)`);
+        const mv = body[0];
+        const maxDepth = Number(timesStep.args[0]); // always present (checked above) → bounded depth
+        const lbl = mv.args.length ? ` AND e.label IN (SELECT id FROM labels WHERE name IN (${mv.args.map(() => '?').join(',')}))` : '';
+        const w = `w${ctes.length}`;
+        const rec = dirsFor(mv.name).map(([from, to]) =>
+          `SELECT e.${to} AS id, ${w}.depth + 1 AS depth FROM ${w} JOIN edges e ON e.${from}=${w}.id WHERE ${w}.depth < ${maxDepth}${lbl}`);
+        ctes.push(`${w}(id, depth) AS (SELECT id, 0 AS depth FROM ${prev()} UNION ALL ${rec.join(' UNION ALL ')})`);
+        for (const _ of dirsFor(mv.name)) binds.push(...mv.args);
+        // times() only → the final depth; emit after → every iteration (≥1);
+        // emit before → also the starting traverser (≥0).
+        const depthCond = !emitStep ? `depth = ${maxDepth}` : emitBefore ? 'depth >= 0' : 'depth >= 1';
+        ctes.push(`c${ctes.length} AS (SELECT id FROM ${w} WHERE ${depthCond})`);
+        i = j - 1; // consume the whole cluster (loop's i++ steps past it)
+        break;
+      }
       case 'out': case 'in': case 'both': {
         if (elem !== 'node') throw new Error(`${s.name}() expects a vertex, not an ${elem}`);
         const dirs = dirsFor(s.name);
@@ -607,7 +653,7 @@ function compileRead(steps: Step[], params: Record<string, any> = {}): Compiled 
     // count().is(P): filter the single count value (0 or 1 result rows).
     const cb: any[] = [];
     if (isPreds.length) sql = `SELECT v FROM (${sql}) WHERE ${isPreds.map((p) => { const q = predicateSql('v', [], p); cb.push(...q.binds); return q.sql; }).join(' AND ')}`;
-    return { kind: 'read', sql: `WITH ${ctes.join(',\n')}\n${sql}`, binds: [...binds, ...cb], shape: { kind: 'count' }, indexKeys: [...indexKeys] };
+    return { kind: 'read', sql: `WITH RECURSIVE ${ctes.join(',\n')}\n${sql}`, binds: [...binds, ...cb], shape: { kind: 'count' }, indexKeys: [...indexKeys] };
   }
 
   // The current element's table; `n` is the element row regardless of kind.
@@ -696,7 +742,7 @@ function compileRead(steps: Step[], params: Record<string, any> = {}): Compiled 
     shape = { kind: 'scalar' };
   }
 
-  return { kind: 'read', sql: `WITH ${ctes.join(',\n')}\n${sql}`, binds: [...binds, ...fb], shape, indexKeys: [...indexKeys] };
+  return { kind: 'read', sql: `WITH RECURSIVE ${ctes.join(',\n')}\n${sql}`, binds: [...binds, ...fb], shape, indexKeys: [...indexKeys] };
 }
 
 interface TailMods { orders: OrderClause[]; distinct: boolean; offset: number; limit: number | null; }
@@ -947,7 +993,7 @@ function compileSelectProject(
   const entryKind = (i: number) => byToEntry(bys.length ? bys[i % bys.length] : undefined);
 
   const tailSql = (limit !== null || offset > 0) ? ` LIMIT ${limit ?? -1} OFFSET ${offset}` : '';
-  const withPrefix = `WITH ${ctes.join(',\n')}\n`;
+  const withPrefix = `WITH RECURSIVE ${ctes.join(',\n')}\n`;
 
   // Single-key select → the labelled element directly (not wrapped in a Map),
   // reusing the existing vertex/value shapes so the handler needs no new case.
@@ -1075,7 +1121,7 @@ function compileGroup(isCount: boolean, bys: any[][], src: GroupSource, ctes: st
   // Only key (bys[0]) and value (bys[1]) modulators are read; reject extras
   // rather than silently drop them (the file's no-silent-drop discipline).
   if (bys.length > 2) throw new Error('group() with more than two by() modulators not yet supported');
-  const withPrefix = `WITH ${ctes.join(',\n')}\n`;
+  const withPrefix = `WITH RECURSIVE ${ctes.join(',\n')}\n`;
   const key = buildGroupKey(bys[0], src, indexKeys, params);
   const fb: any[] = [...key.binds];
 
@@ -1133,7 +1179,7 @@ function compileProperties(
   const pc = `c${ctes.length}`;
   const propCte = `${pc} AS (SELECT n.id AS owner, l.name AS ownerLabel, n.props AS ownerProps, je.key AS pk, je.value AS pv FROM ${tbl} n JOIN ${last} p ON n.id=p.id JOIN labels l ON l.id=n.label, json_each(n.props) je${keyFilter})`;
   const allCtes = [...ctes, propCte];
-  const withPrefix = `WITH ${allCtes.join(',\n')}\n`;
+  const withPrefix = `WITH RECURSIVE ${allCtes.join(',\n')}\n`;
   // `consumed` = how many tail steps this shape accounts for; reject any trailing
   // steps rather than silently dropping them (matches the file's discard-discipline).
   const done = (sql: string, shape: Shape, consumed: number): Compiled => {
@@ -1201,7 +1247,7 @@ function compileDrop(steps: Step[]): WritePlan {
   if (stop !== steps.length - 1)
     throw new Error(`drop() after ${steps[stop].name}() not yet supported`);
   if (elem === 'edge') throw new Error('edge drop() (e.g. g.E().drop()) not yet supported');
-  const targetSql = `WITH ${ctes.join(',\n')}\nSELECT id FROM c${ctes.length - 1}`;
+  const targetSql = `WITH RECURSIVE ${ctes.join(',\n')}\nSELECT id FROM c${ctes.length - 1}`;
   return {
     kind: 'write',
     run: (store) => {

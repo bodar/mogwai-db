@@ -199,13 +199,22 @@ or)`); `union` (element branches, `branchMovementSelect` — single out/in/both 
 UNION ALL merged id-relation); `optional` (single hop, LEFT JOIN + COALESCE-to-
 self). All compose mid-chain as CTEs in `traversalCtes`.
 
-**Immediate next work.** `coalesce` (first-non-empty branch per traverser —
-correlated per-seed EXISTS chaining), then `path()` (JSON-array accumulation
-column threaded through movement — structural, like alias threading). Then P3:
-`repeat`/`until`/`emit` (recursive CTE + depth guard, default ~32), `mergeV`/
-`mergeE` (INSERT … ON CONFLICT … RETURNING — the agent-workload workhorse).
-Also-deferred: multi-hop/scalar `union` branches, `both()` `optional`, multi-hop
-`where`, `where(P.eq(__.constant()))`.
+**P3 repeat — PARTIALLY DONE** (live L3 126→130). `repeat(__.<out/in/both>).
+times(n)` [+ emit before/after] → `WITH RECURSIVE walk(id, depth)` in
+`traversalCtes` (the repeat/emit/times cluster is gathered since the modulators
+sit either side of `repeat`). All `WITH` → `WITH RECURSIVE` (harmless for
+non-recursive CTEs; needed once any walk appears). Depth guard 32 when `times`
+absent. Deferred: `until`, `emit(pred)`, complex bodies, `path`/`simplePath`.
+
+**Immediate next work.** `repeat().until()` + `emit(pred)` (cond = a
+`compileFilterPredicate` on the walk row — needs the recursive step to join
+nodes); `path()`/`simplePath` (JSON-array accumulation column threaded through
+movement — structural, like alias threading); `coalesce` (correlated per-seed
+EXISTS chaining). Then the P3 write workhorse `mergeV`/`mergeE` (INSERT … ON
+CONFLICT … RETURNING — note: `@StepWrite` scenarios are runner-skipped, so it
+lifts the agent use-case, not the L3 number). Also-deferred: multi-hop/scalar
+`union` branches, `both()`/multi-hop `optional`, multi-hop `where`,
+`where(P.eq(__.constant()))`.
 
 ## Environment notes
 

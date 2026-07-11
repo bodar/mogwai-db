@@ -34,15 +34,15 @@ natively — no `npm install`, no ts-node).
 ```bash
 CLIENT_MIMETYPE='application/vnd.graphbinary-v4.0' \
   bunx --bun cucumber-js \
-  --tags "(@StepCount or @StepHasLabel or @StepHas or @StepValues or @StepId or @StepLabel or @StepDedup or @StepLimit or @StepRange or @StepOrder or @StepValueMap or @StepElementMap or @StepDrop or @StepInject or @StepSelect or @StepProject or @StepOut or @StepIn or @StepBoth or @StepProperties or @StepGroup or @StepGroupCount or @StepFold or @StepSum or @StepIs or @StepWhere or @StepNot or @StepFilter or @StepAnd or @StepOr or @StepUnion or @StepOptional) and not @StepWrite and not @GraphComputerOnly and not @AllowNullPropertyValues" \
+  --tags "(@StepCount or @StepHasLabel or @StepHas or @StepValues or @StepId or @StepLabel or @StepDedup or @StepLimit or @StepRange or @StepOrder or @StepValueMap or @StepElementMap or @StepDrop or @StepInject or @StepSelect or @StepProject or @StepOut or @StepIn or @StepBoth or @StepProperties or @StepGroup or @StepGroupCount or @StepFold or @StepSum or @StepIs or @StepWhere or @StepNot or @StepFilter or @StepAnd or @StepOr or @StepUnion or @StepOptional or @StepRepeat) and not @StepWrite and not @GraphComputerOnly and not @AllowNullPropertyValues" \
   --import test/cucumber \
   ../../gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/
 ```
 
-**Current live number: 517 scenarios run, 126 pass** (P2-tail). Progression:
+**Current live number: 579 scenarios run, 130 pass** (P3 repeat). Progression:
 P2c-2 cleared the `BeforeAll` gate and published 85; P2b (is/where/not/filter/
-TextP) → 119; P2-tail (and/or/union/optional) → 126. Before P2c-2 it was 0 — the
-gate blocked every scenario. Ratchet only upward as steps land.
+TextP) → 119; P2-tail (and/or/union/optional) → 126; P3 repeat/times/emit → 130.
+Before P2c-2 it was 0 — the gate blocked every scenario. Ratchet only upward.
 
 `bunx --bun` forces the cucumber-js bin to run under the **bun** runtime, not
 node (its shebang is `#!/usr/bin/env node`). Bun then resolves the GLV's `.ts`
