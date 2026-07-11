@@ -1,7 +1,7 @@
 import { CharStream, CommonTokenStream, BaseErrorListener, ParserRuleContext } from 'antlr4ng';
-import { GremlinLexer } from '../parser/GremlinLexer.js';
-import { GremlinParser } from '../parser/GremlinParser.js';
-import type { GraphStore } from './storage.js';
+import { GremlinLexer } from '../parser/GremlinLexer.ts';
+import { GremlinParser } from '../parser/GremlinParser.ts';
+import type { GraphStore } from './storage.ts';
 
 // ---------- parsing ----------
 
@@ -73,6 +73,20 @@ function extractArgs(ctx: any, params: Record<string, any>): any[] {
       const seg = node.getText().split('.').pop().toLowerCase();
       args.push({ order: seg }); return;
     }
+    // Enum tokens carried as tagged objects so consumers can act on them (or
+    // reject them cleanly). Previously these grammar rules had no case and the
+    // generic recursion dropped them silently — e.g. select(Pop.first, 'a')
+    // parsed as select('a') and mis-executed. Capture, then let the step throw
+    // "not implemented" for anything past the current supported set.
+    if (cls === 'TraversalPopContext') {
+      args.push({ pop: node.getText().split('.').pop().toLowerCase() }); return;
+    }
+    if (cls === 'TraversalColumnContext') {
+      args.push({ column: node.getText().split('.').pop().toLowerCase() }); return;
+    }
+    if (cls === 'TraversalTContext') {
+      args.push({ token: node.getText().split('.').pop().toLowerCase() }); return;
+    }
     if (cls === 'NestedTraversalContext') { args.push({ nested: node }); return; }
     for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) walk(node.getChild(i));
   };
@@ -97,12 +111,18 @@ function unquote(s: string): string {
 
 // ---------- compilation ----------
 
+// select(labels…)/project(keys…): a Map per row. Each entry names its result
+// key plus the SQL column prefix carrying its value, and whether that value is
+// a whole vertex (prefix_id/_label/_props) or a scalar (prefix_v).
+export interface MapEntry { key: string; prefix: string; sub: 'vertex' | 'value'; }
+
 export type Shape =
   | { kind: 'vertex' }
   | { kind: 'value' }
   | { kind: 'count' }
   | { kind: 'valueMap'; keys: string[] | null; tokens: boolean }
   | { kind: 'elementMap'; keys: string[] | null }
+  | { kind: 'map'; entries: MapEntry[] }
   | { kind: 'discard' };
 
 export interface Compiled {
@@ -174,11 +194,18 @@ export function compile(gremlin: string, params: Record<string, any>): Compiled 
  * first order()/projection/other step and returns where it stopped. Shared by
  * reads and drop().
  */
-function traversalCtes(steps: Step[]): { ctes: string[]; binds: any[]; stop: number; indexKeys: Set<string> } {
+function traversalCtes(steps: Step[]): { ctes: string[]; binds: any[]; stop: number; indexKeys: Set<string>; aliases: Map<string, string> } {
   const ctes: string[] = [];
   const binds: any[] = [];
   const indexKeys = new Set<string>();
+  // as('x') labels: label -> synthetic column name (a0, a1, …). Synthetic names
+  // keep user strings out of SQL identifiers (injection-safe) and stay stable so
+  // a later correlated subquery (P2b where/is) can reference them. Once bound, an
+  // alias stays live to the end (Gremlin never unbinds a label), so every CTE
+  // after the bind carries every bound alias column forward from `p`.
+  const aliases = new Map<string, string>();
   const prev = () => `c${ctes.length - 1}`;
+  const carry = () => [...aliases.values()].map((c) => `, p.${c}`).join('');
 
   const first = steps[0];
   if (first.name !== 'V') throw new Error(`unsupported source step: ${first.name}`);
@@ -193,9 +220,24 @@ function traversalCtes(steps: Step[]): { ctes: string[]; binds: any[]; stop: num
   for (; i < steps.length; i++) {
     const s = steps[i];
     switch (s.name) {
+      case 'as': {
+        // Bind each label to the current traverser. Rebinds reuse the label's
+        // column (default Pop = last). Emit a pass-through CTE that keeps id +
+        // all carried alias columns, (re)setting the bound ones to the current id.
+        const labels = s.args.filter((a): a is string => typeof a === 'string');
+        const rebind: string[] = [];
+        for (const lbl of labels) {
+          let col = aliases.get(lbl);
+          if (!col) { col = `a${aliases.size}`; aliases.set(lbl, col); }
+          rebind.push(col);
+        }
+        const cols = ['id', ...[...aliases.values()].map((c) => rebind.includes(c) ? `id AS ${c}` : c)];
+        ctes.push(`c${ctes.length} AS (SELECT ${cols.join(', ')} FROM ${prev()})`);
+        break;
+      }
       case 'hasLabel': {
         const ph = s.args.map(() => '?').join(',');
-        ctes.push(`c${ctes.length} AS (SELECT n.id FROM nodes n JOIN ${prev()} p ON n.id=p.id WHERE n.label IN (SELECT id FROM labels WHERE name IN (${ph})))`);
+        ctes.push(`c${ctes.length} AS (SELECT n.id${carry()} FROM nodes n JOIN ${prev()} p ON n.id=p.id WHERE n.label IN (SELECT id FROM labels WHERE name IN (${ph})))`);
         binds.push(...s.args);
         break;
       }
@@ -203,7 +245,7 @@ function traversalCtes(steps: Step[]): { ctes: string[]; binds: any[]; stop: num
         const [key, val] = s.args;
         const pe = propExtract('n.props', key); // literal path for indexable keys
         if (pe.indexKey) indexKeys.add(pe.indexKey); // has() is a filter → worth indexing
-        const join = `SELECT n.id FROM nodes n JOIN ${prev()} p ON n.id=p.id`;
+        const join = `SELECT n.id${carry()} FROM nodes n JOIN ${prev()} p ON n.id=p.id`;
         if (val !== null && typeof val === 'object' && 'op' in val) {
           const p = val as Pred;
           if (p.op in P_OPS) {
@@ -229,48 +271,58 @@ function traversalCtes(steps: Step[]): { ctes: string[]; binds: any[]; stop: num
         const labelFilter = s.args.length
           ? ` AND e.label IN (SELECT id FROM labels WHERE name IN (${s.args.map(() => '?').join(',')}))`
           : '';
+        // Movement carries the alias columns unchanged from p while id moves to
+        // the neighbour — this is what recovers "the vertex before the hop".
         const selects = dirs.map(([from, to]) =>
-          `SELECT e.${to} AS id FROM edges e JOIN ${prev()} p ON e.${from}=p.id${labelFilter}`);
+          `SELECT e.${to} AS id${carry()} FROM edges e JOIN ${prev()} p ON e.${from}=p.id${labelFilter}`);
         ctes.push(`c${ctes.length} AS (${selects.join(' UNION ALL ')})`);
         for (const _ of dirs) binds.push(...s.args);
         break;
       }
       case 'dedup':
+        // Bare dedup() dedups on the current object. Splicing carried alias
+        // columns into the DISTINCT would make it path-distinct and silently
+        // over-count (the count()-corruption trap). Defer both label-scoped
+        // dedup("a") and dedup-with-active-labels rather than answer wrongly.
+        if (s.args.length > 0) throw new Error('dedup(label) not yet supported');
+        if (aliases.size > 0) throw new Error('dedup() after as() not yet supported (path-distinct semantics)');
         ctes.push(`c${ctes.length} AS (SELECT DISTINCT id FROM ${prev()})`);
         break;
       // limit/range/skip compose as CTEs while still on the id-relation (before
       // any order()); once order() is seen they fold into the final select as
       // tail modifiers so ORDER BY + LIMIT + OFFSET stay in one query.
       case 'limit':
-        ctes.push(`c${ctes.length} AS (SELECT id FROM ${prev()} LIMIT ${Number(s.args[0])})`);
+        ctes.push(`c${ctes.length} AS (SELECT p.id${carry()} FROM ${prev()} p LIMIT ${Number(s.args[0])})`);
         break;
       case 'range': {
         const { offset, limit } = rangeToOffsetLimit(s.args);
-        ctes.push(`c${ctes.length} AS (SELECT id FROM ${prev()} LIMIT ${limit} OFFSET ${offset})`);
+        ctes.push(`c${ctes.length} AS (SELECT p.id${carry()} FROM ${prev()} p LIMIT ${limit} OFFSET ${offset})`);
         break;
       }
       case 'skip':
-        ctes.push(`c${ctes.length} AS (SELECT id FROM ${prev()} LIMIT -1 OFFSET ${Number(s.args[0])})`);
+        ctes.push(`c${ctes.length} AS (SELECT p.id${carry()} FROM ${prev()} p LIMIT -1 OFFSET ${Number(s.args[0])})`);
         break;
       default:
-        return { ctes, binds, stop: i, indexKeys };
+        return { ctes, binds, stop: i, indexKeys, aliases };
     }
   }
-  return { ctes, binds, stop: i, indexKeys };
+  return { ctes, binds, stop: i, indexKeys, aliases };
 }
 
 interface OrderClause { key: string | null; dir: 'asc' | 'desc' | 'shuffle'; }
 
 function compileRead(steps: Step[]): Compiled {
-  const { ctes, binds, stop, indexKeys } = traversalCtes(steps);
+  const { ctes, binds, stop, indexKeys, aliases } = traversalCtes(steps);
   const last = `c${ctes.length - 1}`;
 
   // Tail phase: an optional projection + order()/range()/skip()/limit() and dedup.
   let projStep: Step | null = null;
   const orders: OrderClause[] = [];
+  const bys: any[][] = []; // by() modulator arg-lists attached to a select/project
   let offset = 0, limit: number | null = null, distinct = false;
 
-  const PROJECTIONS = new Set(['values', 'id', 'label', 'count', 'valueMap', 'elementMap']);
+  const PROJECTIONS = new Set(['values', 'id', 'label', 'count', 'valueMap', 'elementMap', 'select', 'project']);
+  const isMapProj = () => projStep?.name === 'select' || projStep?.name === 'project';
 
   for (let i = stop; i < steps.length; i++) {
     const s = steps[i];
@@ -286,8 +338,15 @@ function compileRead(steps: Step[]): Compiled {
         if (steps[i + 1]?.name !== 'by') orders.push({ key: null, dir: 'asc' });
         break;
       case 'by': {
+        // A by() after select()/project() is a projection modulator; otherwise
+        // it modulates a preceding order().
+        if (isMapProj()) { bys.push(s.args); break; }
         if (orders.length === 0 && steps[i - 1]?.name !== 'order')
-          throw new Error('by() is only supported as an order() modulator');
+          throw new Error('by() is only supported as an order() or select()/project() modulator');
+        // Reject deferred modulators (mirror byToEntry) rather than let a
+        // {token}/{nested} arg fall through to key=null and silently sort by id.
+        const bad = s.args.find((a) => a && typeof a === 'object' && ('token' in a || 'nested' in a));
+        if (bad) throw new Error('token' in bad ? `by(T.${bad.token}) modulator not yet supported` : 'by(traversal) modulator not yet supported');
         const key = s.args.find((a) => typeof a === 'string') ?? null;
         const ord = s.args.find((a) => a && typeof a === 'object' && 'order' in a);
         orders.push({ key, dir: (ord?.order ?? 'asc') as OrderClause['dir'] });
@@ -301,6 +360,9 @@ function compileRead(steps: Step[]): Compiled {
         throw new Error(`step not implemented: ${s.name}()`);
     }
   }
+
+  if (isMapProj())
+    return compileSelectProject(projStep!, bys, aliases, ctes, binds, last, { orders, distinct, offset, limit }, indexKeys);
 
   // Resolve the projection to a shape + a row source (cols/from/where).
   const projName = projStep?.name ?? 'vertex';
@@ -364,6 +426,96 @@ function compileRead(steps: Step[]): Compiled {
   if (limit !== null || offset > 0) sql += ` LIMIT ${limit ?? -1} OFFSET ${offset}`;
 
   return { kind: 'read', sql: `WITH ${ctes.join(',\n')}\n${sql}`, binds: [...binds, ...fb], shape, indexKeys: [...indexKeys] };
+}
+
+interface TailMods { orders: OrderClause[]; distinct: boolean; offset: number; limit: number | null; }
+
+/** Interpret one by() modulator's args into a projected sub-value kind. */
+function byToEntry(byArgs: any[] | undefined): { sub: 'vertex' | 'value'; key?: string } {
+  if (!byArgs || byArgs.length === 0) return { sub: 'vertex' }; // no by() / bare by() → the element itself
+  const a = byArgs[0];
+  if (typeof a === 'string') return { sub: 'value', key: a };
+  if (a && typeof a === 'object' && 'nested' in a) throw new Error('by(traversal) modulator not yet supported');
+  if (a && typeof a === 'object' && 'token' in a) throw new Error(`by(T.${a.token}) modulator not yet supported`);
+  throw new Error('unsupported by() modulator');
+}
+
+/**
+ * select(labels…)/project(keys…). select reads previously-labelled traversers
+ * from their alias columns; project applies its by() modulators to the current
+ * traverser under freshly-named keys. by() modulators cycle across the keys
+ * (`by('name')` alone → applied to all; `.by('age').by('name')` → key0/key1/…).
+ * A single-key select reuses the scalar vertex/value shape; anything else is a
+ * per-row Map ({kind:'map'}).
+ */
+function compileSelectProject(
+  proj: Step, bys: any[][], aliases: Map<string, string>,
+  ctes: string[], binds: any[], last: string, tail: TailMods, indexKeys: Set<string>,
+): Compiled {
+  const { orders, distinct, offset, limit } = tail;
+  if (orders.length) throw new Error('order() after select()/project() not yet supported');
+  const isProject = proj.name === 'project';
+  const fb: any[] = [];
+
+  // Reject the deferred long-tail forms explicitly (tokens are now captured, not
+  // silently dropped) so a Pop/Column arg can never mis-execute as a plain key.
+  const pop = proj.args.find((a) => a && typeof a === 'object' && 'pop' in a) as { pop: string } | undefined;
+  if (pop && pop.pop !== 'last') throw new Error(`select(Pop.${pop.pop}) not yet supported`);
+  if (proj.args.some((a) => a && typeof a === 'object' && 'column' in a)) throw new Error('select(Column) not yet supported');
+
+  const keys = proj.args.filter((a): a is string => typeof a === 'string');
+  if (!keys.length) throw new Error(`${proj.name}() requires at least one key`);
+
+  // The `last`-CTE column holding each key's element id: project → current
+  // traverser (p.id); select → the label's alias column (must have been bound).
+  const sourceOf = (k: string): string => {
+    if (isProject) return 'p.id';
+    const col = aliases.get(k);
+    if (!col) throw new Error(`select("${k}"): no such label — as("${k}") was not seen`);
+    return `p.${col}`;
+  };
+  const entryKind = (i: number) => byToEntry(bys.length ? bys[i % bys.length] : undefined);
+
+  const tailSql = (limit !== null || offset > 0) ? ` LIMIT ${limit ?? -1} OFFSET ${offset}` : '';
+  const withPrefix = `WITH ${ctes.join(',\n')}\n`;
+
+  // Single-key select → the labelled element directly (not wrapped in a Map),
+  // reusing the existing vertex/value shapes so the handler needs no new case.
+  if (!isProject && keys.length === 1) {
+    const src = sourceOf(keys[0]);
+    const e = entryKind(0);
+    if (e.sub === 'vertex') {
+      const sql = `SELECT ${distinct ? 'DISTINCT ' : ''}n.id, l.name AS label, n.props FROM nodes n JOIN ${last} p ON n.id=${src} JOIN labels l ON l.id=n.label${tailSql}`;
+      return { kind: 'read', sql: withPrefix + sql, binds, shape: { kind: 'vertex' }, indexKeys: [...indexKeys] };
+    }
+    // A by(key) here is a projection, not a filter/order — deliberately NOT
+    // reported as an indexKey (matches values(); bounds index proliferation).
+    const pe = propExtract('n.props', e.key); fb.push(...pe.binds);
+    const sql = `SELECT ${distinct ? 'DISTINCT ' : ''}${pe.sql} AS v FROM nodes n JOIN ${last} p ON n.id=${src}${tailSql}`;
+    return { kind: 'read', sql: withPrefix + sql, binds: [...binds, ...fb], shape: { kind: 'value' }, indexKeys: [...indexKeys] };
+  }
+
+  // Multi-key select / any project → a Map per row. Each entry joins nodes for
+  // its source element under a distinct alias and emits prefixed columns.
+  const cols: string[] = [];
+  const joins: string[] = [`${last} p`];
+  const entries: MapEntry[] = keys.map((k, i) => {
+    const prefix = `e${i}`;
+    const e = entryKind(i);
+    const src = sourceOf(k);
+    joins.push(`JOIN nodes ${prefix}n ON ${prefix}n.id=${src}`);
+    if (e.sub === 'vertex') {
+      joins.push(`JOIN labels ${prefix}l ON ${prefix}l.id=${prefix}n.label`);
+      cols.push(`${prefix}n.id AS ${prefix}_id`, `${prefix}l.name AS ${prefix}_label`, `${prefix}n.props AS ${prefix}_props`);
+    } else {
+      const pe = propExtract(`${prefix}n.props`, e.key); fb.push(...pe.binds); // projection, not indexed
+      cols.push(`${pe.sql} AS ${prefix}_v`);
+    }
+    return { key: k, prefix, sub: e.sub };
+  });
+
+  const sql = `SELECT ${distinct ? 'DISTINCT ' : ''}${cols.join(', ')} FROM ${joins.join(' ')}${tailSql}`;
+  return { kind: 'read', sql: withPrefix + sql, binds: [...binds, ...fb], shape: { kind: 'map', entries }, indexKeys: [...indexKeys] };
 }
 
 // g.V(...).<filters>.drop() — delete the target vertices and their incident

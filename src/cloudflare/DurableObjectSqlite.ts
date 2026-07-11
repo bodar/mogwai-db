@@ -1,4 +1,4 @@
-import type { Sql } from '../storage.js';
+import type { Sql } from '../storage.ts';
 
 /** `Sql` over a Durable Object's `ctx.storage.sql` (production runtime).
  *  `SqlStorage.exec` is synchronous and takes variadic positional bindings;

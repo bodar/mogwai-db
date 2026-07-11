@@ -1,7 +1,7 @@
 import { LazyMap } from '@bodar/yadic/LazyMap.ts';
 import type { Dependency } from '@bodar/yadic/types.ts';
-import type { GraphStore } from './storage.js';
-import { makeHandler } from './handler.js';
+import type { GraphStore } from './storage.ts';
+import { makeHandler } from './handler.ts';
 
 // The runtime-agnostic dependency graph. Platform entry points provide the
 // leaves (currently just `store`); everything above is wired here and shared

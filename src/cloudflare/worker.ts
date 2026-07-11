@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
-import { GraphStore } from '../storage.js';
-import { application } from '../application.js';
-import { DurableObjectSqlite } from './DurableObjectSqlite.js';
+import { GraphStore } from '../storage.ts';
+import { application } from '../application.ts';
+import { DurableObjectSqlite } from './DurableObjectSqlite.ts';
 
 export interface Env {
   GRAPH: DurableObjectNamespace<GraphDatabase>;

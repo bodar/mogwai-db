@@ -164,11 +164,41 @@ gremlin@4.0.0-beta.2 on both runtimes (Bun + Cloudflare DO); corpus 100%.
 
 **P2 — the column-threading compiler.** `as()`/`select()`/`by()`/`project()`
 require carrying labelled columns through the CTE chain (each `as('a')`
-adds `a_id` to every subsequent CTE). This is the structural upgrade that
-unlocks most of the Medium tier; design it once, carefully:
-- `where(__.out(...).count().is(P.gte(n)))` → correlated EXISTS / scalar subquery
-- `union`, `coalesce`, `optional` → UNION ALL / LEFT JOIN
-- `path()` → JSON-array accumulation column (accept loss of index-only scans)
+adds an alias column to every subsequent CTE). This is the structural upgrade
+that unlocks most of the Medium tier. Split into data-ranked substages (coverage
+measured against the official Gherkin suite, 2099 scenarios, 155 unlocked after
+P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
+*structural* lever available):
+
+- **P2a — threading core: `as`/`select`/`project`/`by(key|vertex)`. DONE.**
+  +53 scenarios (→208). Alias columns threaded through `traversalCtes` as
+  synthetic safe names (`a0`,`a1`, … — never user strings in SQL identifiers);
+  `as('a')` binds the current traverser id to its column, every subsequent CTE
+  carries all bound alias columns, `out/in/both` move `id` while carrying
+  aliases unchanged. Single `select('a')` reuses the existing `vertex`/`value`
+  shape sourced from the alias column; multi-`select`/`project` produce a new
+  `{kind:'map'}` shape framed by `handler.ts` `mapBuffer` (reuses `vertexBuffer`
+  for vertex-valued entries — can't route those through `anySerializer`, same
+  empty-props bug). `by()` modulators cycle across entries; `by('key')`→scalar,
+  bare→vertex. Correctness guard: `extractArgs` now captures `Pop`/`Column`/`T`
+  tokens (previously silently dropped → would mis-execute) and consumers throw a
+  clear "not implemented" for everything past the P2a set (`Pop.first/all/mixed`,
+  `Column`, `Scope.local`, `by(T.x)`, `by(__.nested)`, `order()` after
+  select/project). Corpus stays 100% parse. Design constraint honoured: each
+  alias is a stable, *referenceable* column so P2b's correlated subqueries build
+  on it without reopening this work.
+- **P2b — `where`/`not` + `is`.** Correlated EXISTS / scalar subquery over the
+  threaded alias columns; `is(P)` as a filter on a scalar stream. `is` is the
+  single highest-frequency missing step in the suite (295 scenarios);
+  `where(__…count().is())` is the dominant "filter by sub-traversal result"
+  idiom. Reuses the P2a plumbing directly.
+- **P2c — `fold`/`unfold` + aggregation** (`sum`/`group`/`groupCount`/`cap`/
+  `aggregate`). Largest remaining lever (~50 scenarios; `unfold`/`fold` are the
+  top co-blockers of the still-locked as/select scenarios). Distinct
+  staged-execution / GROUP BY subsystem — separate from threading.
+- **P2 tail (after the above):**
+  - `union`, `coalesce`, `optional` → UNION ALL / LEFT JOIN
+  - `path()` → JSON-array accumulation column (accept loss of index-only scans)
 
 **P3 — recursion & upserts.**
 - `repeat/until/emit/times` → recursive CTE with depth column; `simplePath`

@@ -1,4 +1,4 @@
-import { graphContract } from './contract.js';
+import { graphContract } from './contract.ts';
 
 // Live Durable Object: boot the Worker under `wrangler dev` (local workerd),
 // then drive it with the same contract over the same GraphBinary wire as Bun.

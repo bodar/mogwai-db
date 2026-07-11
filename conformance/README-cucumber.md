@@ -28,16 +28,30 @@ The runner defaults to `http://localhost:45940/gremlin` (hardcoded in
 ## 2. Run the suite, narrowed to the implemented step set
 
 In the TinkerPop checkout (`~/Projects/tinkerpop/gremlin-js/gremlin-javascript`),
-once (`npm install` — pulls cucumber-js, ts-node, chai, cross-env):
+once: `bun install` (bun runs the GLV's TS source and the cucumber step defs
+natively — no `npm install`, no ts-node).
 
 ```bash
-cross-env NODE_OPTIONS='--loader ts-node/esm' TS_NODE_PROJECT='tsconfig.test.json' \
-  CLIENT_MIMETYPE='application/vnd.graphbinary-v4.0' \
-  cucumber-js \
-  --tags "(@StepCount or @StepHasLabel or @StepHas or @StepValues or @StepId or @StepLabel or @StepDedup or @StepLimit or @StepRange or @StepOrder or @StepValueMap or @StepElementMap or @StepDrop or @StepInject) and not @StepWrite and not @GraphComputerOnly" \
+CLIENT_MIMETYPE='application/vnd.graphbinary-v4.0' \
+  bunx --bun cucumber-js \
+  --tags "(@StepCount or @StepHasLabel or @StepHas or @StepValues or @StepId or @StepLabel or @StepDedup or @StepLimit or @StepRange or @StepOrder or @StepValueMap or @StepElementMap or @StepDrop or @StepInject or @StepSelect or @StepProject) and not @StepWrite and not @GraphComputerOnly" \
   --import test/cucumber \
   ../../gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/
 ```
+
+`bunx --bun` forces the cucumber-js bin to run under the **bun** runtime, not
+node (its shebang is `#!/usr/bin/env node`). Bun then resolves the GLV's `.ts`
+sources and the `.js`→`.ts` imports natively, so the old
+`NODE_OPTIONS='--loader ts-node/esm' TS_NODE_PROJECT='tsconfig.test.json'`
+dance is gone. Verified: cucumber loads the harness and drives the live server
+over GraphBinary under bun.
+
+**Prerequisite before ANY scenario runs:** the harness `BeforeAll`
+(`test/cucumber/world.js`) caches every seeded graph's vertex *properties* via
+`properties()` — so `properties()` (element step, not yet implemented) must land
+before the full suite gets past setup, independent of the runtime. Until then
+the mini-L3 (`conformance/conformance.test.ts`, `bun test`) is the live-wire
+proof.
 
 The passing-scenario count is **THE conformance number** — publish it per commit
 and ratchet only upward. Widen the `--tags` set as each new step lands (P2+).
@@ -55,5 +69,5 @@ entry (keyed by scenario name) to `ignoredScenarios` in
 - `@StepWrite` scenarios are skipped by upstream anyway; the empty-graph
   write/reset path is still exercised by every `Given the empty graph` step,
   which is why `drop()` shipped in P1.
-- Node compatibility: the runner uses the `ts-node/esm` loader. If the local
-  Node rejects it, run under the Node version in the GLV's `.nvmrc`.
+- Runs under bun (`bunx --bun`), same runtime as `bun test` — no node/ts-node
+  toolchain needed. `bun install` in the GLV checkout is the only setup.
