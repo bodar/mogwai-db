@@ -42,6 +42,27 @@ export class GraphStore {
     return this.sql.query<T>(sql, binds.map(coerceBind));
   }
 
+  // Property keys that already have (or don't need) an expression index this
+  // isolate's lifetime — avoids re-issuing CREATE INDEX IF NOT EXISTS per query.
+  private indexed = new Set<string>();
+
+  /**
+   * Ensure an on-demand expression index exists for a hot property key, so
+   * `has(key,…)`/`order().by(key)` become index seeks instead of full scans.
+   * The key is an identifier the compiler already validated as index-safe (it
+   * only asks for keys it spliced literally); guard again defensively since we
+   * build the index name and JSON path from it. First call on a cold key pays
+   * the one-time build; later calls (and warm isolates) short-circuit.
+   */
+  ensureNodePropIndex(key: string): void {
+    if (this.indexed.has(key)) return;
+    if (!SAFE_KEY.test(key)) return; // never splice a non-identifier
+    this.sql.exec(
+      `CREATE INDEX IF NOT EXISTS "n_prop_${key}" ON nodes(json_extract(props, '$.${key}'))`,
+    );
+    this.indexed.add(key);
+  }
+
   labelId(name: string): number {
     return this.query<{ id: number }>(
       'INSERT INTO labels(name) VALUES(?) ON CONFLICT(name) DO UPDATE SET name=name RETURNING id',
@@ -53,6 +74,10 @@ export class GraphStore {
     return this.query<{ name: string }>('SELECT name FROM labels WHERE id=?', [id])[0].name;
   }
 }
+
+// Identifier keys only — must match the compiler's SAFE_KEY so we index exactly
+// the keys it splices as literal JSON paths.
+const SAFE_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function coerceBind(value: unknown): unknown {
   if (typeof value === 'boolean') return value ? 1 : 0;

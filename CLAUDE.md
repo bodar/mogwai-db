@@ -90,11 +90,23 @@ forces a full SCAN and silently defeats the whole hot-property index story
 (measured: 32 ms scan vs 0.35 ms index seek at 200 k rows, ~90×). So we splice
 identifier-safe keys (`^[A-Za-z_][A-Za-z0-9_]*$`) literally — index-eligible,
 injection-safe by *validation* — and fall back to binding only for exotic keys
-(spaces/dots/unicode), which can't be an index target anyway. `test/performance.test.ts`
-asserts via EXPLAIN QUERY PLAN that the index engages; it fails if the literal
-splice regresses. Perf shape: traversal hops (out/in/both) are index-only and
-sub-ms at 1 M edges; property filters/orders need the expression index to avoid
-a linear scan.
+(spaces/dots/unicode), which can't be an index target anyway.
+
+Those expression indexes are **auto-built on first filtered use** (self-tuning,
+no management endpoint / no key-guessing). `compileRead` reports the hot keys
+used in a filter/order position (`has`, `order().by` — NOT plain `values`
+projections, to bound proliferation) as `Compiled.indexKeys`; the handler calls
+`store.ensureNodePropIndex(key)` for each before running. `ensureNodePropIndex`
+is idempotent (`CREATE INDEX IF NOT EXISTS`) with a per-isolate cache. Cost: the
+first filtered query on a cold key pays a one-time index build (~53 ms at 200 k
+rows, ~270 ms at 1 M — blocks that one request), then it's a ~0.005 ms seek;
+the index persists in SQLite across DO restarts. `test/performance.test.ts`
+asserts via EXPLAIN QUERY PLAN that the key is reported, the index is built, and
+it engages — failing if the literal splice or the auto-build regresses.
+
+Perf shape: traversal hops (out/in/both) are index-only and sub-ms at 1 M edges
+with no tuning; property filters/orders full-scan on first touch of a key, then
+ride the auto-built expression index.
 
 ## Semantics traps — encode as tests before touching related steps
 

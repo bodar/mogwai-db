@@ -1,18 +1,22 @@
 import { test, expect, describe, beforeAll } from 'bun:test';
-import { compile } from '../src/compiler.js';
+import { compile, type Compiled } from '../src/compiler.js';
 import { GraphStore } from '../src/storage.js';
 import { BunSqlite } from '../src/bun/BunSqlite.js';
 
-// Performance regression guard. Property predicates and ordering must be able to
-// use an on-demand expression index — `CREATE INDEX ...(json_extract(props,'$.k'))`.
-// SQLite only matches such an index against a LITERAL json path; the injection-
-// safe `json_extract(props,'$.'||?)` form the compiler used to emit forces a
-// full table SCAN and silently defeats the hot-property index strategy the
-// project's perf claim depends on. These tests assert (via EXPLAIN QUERY PLAN,
-// so they're machine-independent) that the index actually engages. If someone
-// reverts propExtract() to the bound-path form, these flip to SCAN and fail.
+// Performance regression guard for property access.
+//
+// (1) Property predicates/ordering must be able to use an expression index —
+//     `CREATE INDEX ...(json_extract(props,'$.k'))`. SQLite only matches such an
+//     index against a LITERAL json path; the injection-safe `'$.'||?` form
+//     forces a full SCAN and silently defeats the hot-property index strategy.
+// (2) Those indexes are built AUTOMATICALLY on first filtered use of a key
+//     (compiler reports the hot keys as `indexKeys`; the handler ensures them).
+//     This test drives the same compile → ensure-indexes → run path the handler
+//     uses, and asserts via EXPLAIN QUERY PLAN that the index gets created and
+//     engaged. If either the literal splice or the auto-build regresses, the
+//     plans flip back to SCAN and these fail.
 
-describe('property expression indexes engage (perf regression guard)', () => {
+describe('property expression indexes: auto-built and engaged', () => {
   let store: GraphStore, raw: BunSqlite;
 
   beforeAll(() => {
@@ -25,47 +29,62 @@ describe('property expression indexes engage (perf regression guard)', () => {
         [i, person, JSON.stringify({ name: 'n' + i, age: 18 + (i % 60) })]);
     }
     raw.exec('COMMIT');
-    // The "management endpoint" story: an operator indexes a hot property.
-    raw.exec("CREATE INDEX n_age ON nodes(json_extract(props, '$.age'))");
-    raw.exec("CREATE INDEX n_name ON nodes(json_extract(props, '$.name'))");
+    // NOTE: no manual CREATE INDEX — the indexes below are auto-built by run().
   });
 
-  const plan = (q: string): string[] => {
-    const p = compile(q, {});
-    if (p.kind !== 'read') throw new Error('expected read plan');
-    return store.query(`EXPLAIN QUERY PLAN ${p.sql}`, p.binds).map((r: any) => r.detail);
+  // Mirror the handler: ensure hot-property indexes, then execute.
+  const run = (q: string): { plan: Compiled; details: string[] } => {
+    const plan = compile(q, {});
+    if (plan.kind !== 'read') throw new Error('expected read plan');
+    for (const key of plan.indexKeys ?? []) store.ensureNodePropIndex(key);
+    const details = store.query(`EXPLAIN QUERY PLAN ${plan.sql}`, plan.binds).map((r: any) => r.detail);
+    return { plan, details };
   };
-  const usesIndex = (detail: string[], idx: string) => detail.some((d) => d.includes(idx));
-  const fullScans = (detail: string[]) =>
-    detail.some((d) => /\bSCAN\b/.test(d) && !/USING\s+(COVERING\s+)?INDEX/.test(d));
+  const indexNames = () =>
+    store.query<{ name: string }>("SELECT name FROM sqlite_master WHERE type='index'").map((r) => r.name);
+  const usesIndex = (d: string[], idx: string) => d.some((s) => s.includes(idx));
+  const fullScans = (d: string[]) => d.some((s) => /\bSCAN\b/.test(s) && !/USING\s+(COVERING\s+)?INDEX/.test(s));
 
-  test('has(key, predicate) range filter uses the property index, not a scan', () => {
-    const p = plan('g.V().has("age", gt(70)).count()');
-    expect(usesIndex(p, 'n_age')).toBe(true);
-    expect(fullScans(p)).toBe(false);
+  test('has(key) reports the key and auto-builds its index', () => {
+    expect(indexNames()).not.toContain('n_prop_age'); // not there yet
+    const { plan, details } = run('g.V().has("age", gt(70)).count()');
+    expect(plan.indexKeys).toEqual(['age']);
+    expect(indexNames()).toContain('n_prop_age'); // built on first use
+    expect(usesIndex(details, 'n_prop_age')).toBe(true);
+    expect(fullScans(details)).toBe(false);
   });
 
-  test('has(key, value) point lookup uses the property index', () => {
-    const p = plan('g.V().has("name", "n42")');
-    expect(usesIndex(p, 'n_name')).toBe(true);
-    expect(fullScans(p)).toBe(false);
+  test('has(key, value) point lookup auto-builds and uses the index', () => {
+    const { details } = run('g.V().has("name", "n42")');
+    expect(indexNames()).toContain('n_prop_name');
+    expect(usesIndex(details, 'n_prop_name')).toBe(true);
+    expect(fullScans(details)).toBe(false);
   });
 
-  test('values(key) projection uses the property index (covering)', () => {
-    const p = plan('g.V().values("age")');
-    expect(usesIndex(p, 'n_age')).toBe(true);
+  test('order().by(key) sorts via the auto-built index, no temp B-tree', () => {
+    const { plan, details } = run('g.V().order().by("age").limit(10).id()');
+    expect(plan.indexKeys).toContain('age');
+    expect(usesIndex(details, 'n_prop_age')).toBe(true);
+    expect(details.some((d) => /B-TREE/.test(d))).toBe(false);
   });
 
-  test('order().by(key) sorts via the index, no temp B-tree', () => {
-    const p = plan('g.V().order().by("age").limit(10).id()');
-    expect(usesIndex(p, 'n_age')).toBe(true);
-    expect(p.some((d) => /B-TREE/.test(d))).toBe(false);
+  test('exotic (non-identifier) keys are NOT indexed and do not splice', () => {
+    const plan = compile('g.V().has("first name", "x")', {});
+    if (plan.kind !== 'read') throw new Error('read');
+    expect(plan.indexKeys).toEqual([]); // bound, not index-eligible
+    expect(plan.sql).toContain("json_extract(n.props, '$.' || ?)");
+    expect(plan.sql).not.toContain('first name');
   });
 
-  test('the compiled path is a literal (index-matchable), not a bound concat', () => {
-    const p = compile('g.V().has("age", 30)', {});
-    if (p.kind !== 'read') throw new Error('read');
-    expect(p.sql).toContain("json_extract(n.props, '$.age')");
-    expect(p.sql).not.toContain("'$.' || ?");
+  test('index build is idempotent / cached (no duplicate, no throw on re-run)', () => {
+    run('g.V().has("age", lt(30)).count()');
+    run('g.V().has("age", lt(30)).count()');
+    expect(indexNames().filter((n) => n === 'n_prop_age')).toHaveLength(1);
+  });
+
+  test('plain values(key) projection does NOT trigger an index (bounds proliferation)', () => {
+    const plan = compile('g.V().values("name")', {});
+    if (plan.kind !== 'read') throw new Error('read');
+    expect(plan.indexKeys).toEqual([]); // projection alone isn't a filter
   });
 });
