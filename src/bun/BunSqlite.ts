@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite';
-import type { Sql } from '../storage.js';
+import type { Sql } from '../storage.ts';
 
 /** `Sql` over `bun:sqlite` (dev / local runtime). Synchronous. */
 export class BunSqlite implements Sql {
@@ -16,6 +16,6 @@ export class BunSqlite implements Sql {
 
   query<T = any>(sql: string, binds: readonly unknown[] = []): T[] {
     // db.query caches the prepared statement by SQL text.
-    return this.db.query(sql).all(...(binds as unknown[])) as T[];
+    return this.db.query(sql).all(...(binds as any[])) as T[];
   }
 }

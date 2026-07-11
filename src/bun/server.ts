@@ -1,6 +1,6 @@
-import { GraphStore } from '../storage.js';
-import { application } from '../application.js';
-import { BunSqlite } from './BunSqlite.js';
+import { GraphStore } from '../storage.ts';
+import { application } from '../application.ts';
+import { BunSqlite } from './BunSqlite.ts';
 
 /** Bun entry point: build the store over bun:sqlite, wire the app, serve. */
 export function startServer(port = 8182, dbPath = process.env.MOGWAI_DB ?? ':memory:') {

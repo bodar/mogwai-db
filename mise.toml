@@ -5,13 +5,19 @@ bun = "latest"
 # Keep wrangler non-interactive in CI (no telemetry prompt / phone-home).
 WRANGLER_SEND_METRICS = "false"
 
-# Build graph: install ─┬─▶ test ─┐
+# Build graph: install ─┬─▶ check ─┐
+#                       ├─▶ test  ─┤
 #                       └─▶ build ─┴─▶ ci
 [tasks.install]
 description = "Install dependencies"
 run = "bun install"
 sources = ["package.json", "bun.lock"]
 outputs = ["node_modules"]
+
+[tasks.check]
+description = "Type-check (tsc --noEmit); no emit — Bun/esbuild run the TS directly"
+depends = ["install"]
+run = "bunx tsc --noEmit"
 
 [tasks.test]
 description = "Full suite: corpus + contract on both runtimes (Bun + live DO)"
@@ -24,6 +30,6 @@ depends = ["install"]
 run = "bunx wrangler deploy --dry-run --outdir dist"
 
 [tasks.ci]
-description = "CI gate: test + worker build"
-depends = ["test", "build"]
+description = "CI gate: type-check + test + worker build"
+depends = ["check", "test", "build"]
 run = "echo 'CI passed'"

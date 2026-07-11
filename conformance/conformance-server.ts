@@ -14,10 +14,10 @@
 // This is a DEV harness only. It routes on the `g` field on purpose, which the
 // production Worker must NOT do (locked decision: tenancy is the URL path).
 // Here there is one tenant and many named graphs, exactly the two-level model.
-import { GraphStore } from '../src/storage.js';
-import { seedModern } from './seed-modern.js';
-import { makeHandler } from '../src/handler.js';
-import { BunSqlite } from '../src/bun/BunSqlite.js';
+import { GraphStore } from '../src/storage.ts';
+import { seedModern } from './seed-modern.ts';
+import { makeHandler } from '../src/handler.ts';
+import { BunSqlite } from '../src/bun/BunSqlite.ts';
 
 const SEEDS: Record<string, (s: GraphStore) => void> = {
   gmodern: seedModern,

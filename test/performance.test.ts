@@ -1,7 +1,7 @@
 import { test, expect, describe, beforeAll } from 'bun:test';
-import { compile, type Compiled } from '../src/compiler.js';
-import { GraphStore } from '../src/storage.js';
-import { BunSqlite } from '../src/bun/BunSqlite.js';
+import { compile, type Compiled } from '../src/compiler.ts';
+import { GraphStore } from '../src/storage.ts';
+import { BunSqlite } from '../src/bun/BunSqlite.ts';
 
 // Performance regression guard for property access.
 //

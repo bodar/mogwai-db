@@ -7,7 +7,7 @@
 // conformance/README-cucumber.md for the command and current tag set.
 import { test, expect, describe, beforeAll, afterAll } from 'bun:test';
 import gremlin from 'gremlin';
-import { startConformanceServer } from './conformance-server.js';
+import { startConformanceServer } from './conformance-server.ts';
 
 const { DriverRemoteConnection } = gremlin.driver;
 const { traversal } = gremlin.process.AnonymousTraversalSource;
@@ -58,6 +58,36 @@ describe('conformance host — modern graph (official ids/results)', () => {
   test('g_V_valuesXnameX_order (lexicographic)', async () =>
     expect(await g.V().values('name').order().toList())
       .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']));
+
+  // P2a: as()/select()/project()/by() over the real GraphBinary wire — proves
+  // alias-column threading + Map framing round-trip through the unmodified GLV.
+  test('g_VX1X_asXaX_outXknowsX_selectXaX (single-label select → vertex)', async () => {
+    const vs = await g.V(1).as('a').out('knows').select('a').toList();
+    expect(vs.map((v: any) => v.id)).toEqual([1, 1]); // marko, twice
+    expect(vs.every((v: any) => v.label === 'person')).toBe(true);
+  });
+
+  test('g_VX1X_asXaX_outXknowsX_asXbX_selectXa_bX_byXnameX (Map result)', async () => {
+    const maps = await g.V(1).as('a').out('knows').as('b').select('a', 'b').by('name').toList();
+    const pairs = maps.map((m: any) => [m.get('a'), m.get('b')]).sort((x: any, y: any) => x[1].localeCompare(y[1]));
+    expect(pairs).toEqual([['marko', 'josh'], ['marko', 'vadas']]);
+  });
+
+  test('g_VX1X_asXaX_outXknowsX_asXbX_selectXa_bX (Map of vertices)', async () => {
+    const maps = await g.V(1).as('a').out('knows').as('b').select('a', 'b').toList();
+    expect(maps.length).toBe(2);
+    for (const m of maps) {
+      expect(m.get('a').id).toBe(1); // marko
+      expect([2, 4]).toContain(m.get('b').id); // vadas or josh
+      expect(m.get('b').label).toBe('person');
+    }
+  });
+
+  test('g_V_hasLabelXpersonX_projectXname_ageX (project → Map from current)', async () => {
+    const maps = await g.V().hasLabel('person').project('name', 'age').by('name').by('age').toList();
+    const byName = Object.fromEntries(maps.map((m: any) => [m.get('name'), m.get('age')]));
+    expect(byName).toEqual({ marko: 29, vadas: 27, josh: 32, peter: 35 });
+  });
 });
 
 describe('conformance host — empty graph write/reset (ggraph)', () => {

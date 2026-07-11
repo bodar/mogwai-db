@@ -1,6 +1,6 @@
-import { compile } from './compiler.js';
-import type { GraphStore } from './storage.js';
-import { ioc, Vertex, VertexProperty, Edge, t } from './io.js';
+import { compile, type MapEntry } from './compiler.ts';
+import type { GraphStore } from './storage.ts';
+import { ioc, Vertex, VertexProperty, Edge, t } from './io.ts';
 
 // ---- GraphBinary v4 response framing (mirrors GraphBinaryReader.readResponse) ----
 function frame(values: Buffer[], status = 200, message: string | null = null): Buffer {
@@ -53,6 +53,26 @@ function elementMapBuffer(id: number, label: string, props: Record<string, any>,
   return ioc.anySerializer.serialize(m);
 }
 
+// select(labels…)/project(keys…): one GraphBinary Map per row. Framed by hand
+// (not via anySerializer on a JS Map) because vertex-valued entries must go
+// through vertexBuffer — routing a Vertex through anySerializer drops its props
+// (the same client-serializer bug vertexBuffer exists to work around). Layout
+// mirrors MapSerializer: [MAP, 0x00], bare int32 count, then key/value pairs
+// where each value is an already-fully-qualified buffer.
+function mapBuffer(row: any, entries: MapEntry[]): Buffer {
+  const parts: Buffer[] = [
+    Buffer.from([ioc.DataType.MAP, 0x00]),
+    ioc.intSerializer.serialize(entries.length, false),
+  ];
+  for (const e of entries) {
+    parts.push(ioc.anySerializer.serialize(e.key));
+    parts.push(e.sub === 'vertex'
+      ? vertexBuffer(row[`${e.prefix}_id`], row[`${e.prefix}_label`], JSON.parse(row[`${e.prefix}_props`]))
+      : ioc.anySerializer.serialize(row[`${e.prefix}_v`]));
+  }
+  return Buffer.concat(parts);
+}
+
 function execute(store: GraphStore, gremlin: string, params: Record<string, any>): Buffer[] {
   const plan = compile(gremlin, params);
   if (plan.kind === 'write') {
@@ -75,6 +95,7 @@ function execute(store: GraphStore, gremlin: string, params: Record<string, any>
     case 'elementMap': return rows.map((r) => elementMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys));
     case 'count': return rows.map((r) => ioc.anySerializer.serialize(BigInt(r.v)));
     case 'value': return rows.map((r) => ioc.anySerializer.serialize(r.v));
+    case 'map': return rows.map((r) => mapBuffer(r, shape.entries));
     case 'discard': return [];
   }
 }
@@ -107,8 +128,8 @@ export function makeHandler(source: StoreSource): (req: Request) => Promise<Resp
         const { v: fields, len } = ioc.mapSerializer.deserialize(cursor, false);
         cursor = cursor.subarray(len);
         const { v: gremlin } = ioc.stringSerializer.deserialize(cursor, false);
-        const bindings = fields.get?.('bindings') ?? fields.get?.('parameters') ?? {};
-        msg = { gremlin, g: fields.get?.('g'), parameters: bindings instanceof Map ? Object.fromEntries(bindings) : bindings };
+        const bindings = fields?.get?.('bindings') ?? fields?.get?.('parameters') ?? {};
+        msg = { gremlin, g: fields?.get?.('g'), parameters: bindings instanceof Map ? Object.fromEntries(bindings) : bindings };
       } else {
         msg = JSON.parse(raw.toString('utf8'));
       }

@@ -1,5 +1,5 @@
-import { startServer } from '../src/bun/server.js';
-import { graphContract } from './contract.js';
+import { startServer } from '../src/bun/server.ts';
+import { graphContract } from './contract.ts';
 
 let server: ReturnType<typeof startServer> | undefined;
 

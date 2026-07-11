@@ -1,8 +1,8 @@
 import { test, expect, describe } from 'bun:test';
-import { compile } from '../src/compiler.js';
-import { GraphStore } from '../src/storage.js';
-import { BunSqlite } from '../src/bun/BunSqlite.js';
-import { seedModern } from '../conformance/seed-modern.js';
+import { compile } from '../src/compiler.ts';
+import { GraphStore } from '../src/storage.ts';
+import { BunSqlite } from '../src/bun/BunSqlite.ts';
+import { seedModern } from '../conformance/seed-modern.ts';
 
 // ---------- L2: SQL snapshots (canonical string -> SQL + binds + shape) ----------
 
@@ -41,8 +41,8 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('range/skip/limit compose as CTEs when no order() is present', () => {
-    expect(read('g.V().range(1,3)').sql).toContain('SELECT id FROM c0 LIMIT 2 OFFSET 1');
-    expect(read('g.V().skip(2)').sql).toContain('SELECT id FROM c0 LIMIT -1 OFFSET 2');
+    expect(read('g.V().range(1,3)').sql).toContain('SELECT p.id FROM c0 p LIMIT 2 OFFSET 1');
+    expect(read('g.V().skip(2)').sql).toContain('SELECT p.id FROM c0 p LIMIT -1 OFFSET 2');
   });
 
   test('illegal range is rejected', () => {
@@ -57,6 +57,80 @@ describe('compiler SQL snapshots', () => {
     const p = read('g.inject(1,2,3)');
     expect(p.sql).toBe('WITH c0(v) AS (VALUES (?),(?),(?)) SELECT v FROM c0');
     expect(p.binds).toEqual([1, 2, 3]);
+  });
+
+  test('as() threads a synthetic alias column through subsequent CTEs', () => {
+    const p = read('g.V().as("a").out("knows").select("a")');
+    // as('a') binds the current id to column a0; out() carries a0 while id moves
+    expect(p.sql).toContain('id AS a0 FROM c0');
+    expect(p.sql).toContain('SELECT e.tgt AS id, p.a0 FROM edges e');
+    // single-label select('a') → vertex shape sourced from the alias column
+    expect(p.sql).toContain('JOIN c2 p ON n.id=p.a0');
+    expect(p.shape).toEqual({ kind: 'vertex' });
+  });
+
+  test('single-label select().by(key) → scalar value from the alias column', () => {
+    const p = read('g.V().as("a").out().select("a").by("name")');
+    expect(p.shape).toEqual({ kind: 'value' });
+    expect(p.sql).toContain("json_extract(n.props, '$.name') AS v");
+    expect(p.sql).toContain('ON n.id=p.a0');
+  });
+
+  test('multi-label select → map shape with per-entry prefixed columns', () => {
+    const p = read('g.V().as("a").out().as("b").select("a","b")');
+    expect(p.shape).toEqual({ kind: 'map', entries: [
+      { key: 'a', prefix: 'e0', sub: 'vertex' },
+      { key: 'b', prefix: 'e1', sub: 'vertex' },
+    ] });
+    expect(p.sql).toContain('e0n.id AS e0_id');
+    expect(p.sql).toContain('e1n.id AS e1_id');
+    expect(p.sql).toContain('JOIN nodes e0n ON e0n.id=p.a0');
+    expect(p.sql).toContain('JOIN nodes e1n ON e1n.id=p.a1');
+  });
+
+  test('select().by(key) maps every entry to a scalar; by mods cycle', () => {
+    const both = read('g.V().as("a").out().as("b").select("a","b").by("name")');
+    expect(both.shape).toEqual({ kind: 'map', entries: [
+      { key: 'a', prefix: 'e0', sub: 'value' },
+      { key: 'b', prefix: 'e1', sub: 'value' },
+    ] });
+    const cyc = read('g.V().as("a").out().as("b").select("a","b").by("age").by("name")');
+    // e0 uses by('age'), e1 uses by('name')
+    expect(cyc.sql).toContain("json_extract(e0n.props, '$.age') AS e0_v");
+    expect(cyc.sql).toContain("json_extract(e1n.props, '$.name') AS e1_v");
+  });
+
+  test('project() applies by mods to the current traverser under fresh keys', () => {
+    const p = read('g.V().project("n","a").by("name").by("age")');
+    expect(p.shape).toEqual({ kind: 'map', entries: [
+      { key: 'n', prefix: 'e0', sub: 'value' },
+      { key: 'a', prefix: 'e1', sub: 'value' },
+    ] });
+    // both entries source the current traverser (p.id), not an alias column
+    expect(p.sql).toContain('JOIN nodes e0n ON e0n.id=p.id');
+    expect(p.sql).toContain('JOIN nodes e1n ON e1n.id=p.id');
+  });
+
+  test('select/project by(key) is a projection — does NOT report an index key', () => {
+    // Mirrors the values() policy (test/performance.test.ts): only has()/order().by()
+    // report indexKeys. A has() filter still does, even alongside a select projection.
+    expect(read('g.V().as("a").out().select("a").by("age")').indexKeys).toEqual([]);
+    expect(read('g.V().project("n","a").by("name").by("age")').indexKeys).toEqual([]);
+    expect(read('g.V().has("age",30).as("a").select("a").by("name")').indexKeys).toEqual(['age']);
+  });
+
+  test('deferred long-tail forms error clearly (never silently mis-execute)', () => {
+    expect(() => compile('g.V().select(Pop.first,"a")', {})).toThrow('select(Pop.first) not yet supported');
+    expect(() => compile('g.V().as("a").select("a").by(__.out().count())', {})).toThrow('by(traversal) modulator not yet supported');
+    expect(() => compile('g.E().properties("weight").as("a").select("a").by(T.key)', {})).toThrow(/by\(T\.key\)|unsupported source/);
+    expect(() => compile('g.V().as("a").out().as("b").select("a","b").order()', {})).toThrow('order() after select()/project() not yet supported');
+    expect(() => compile('g.V().select("x")', {})).toThrow('no such label');
+    // order().by() deferred modulators must throw, not silently sort by id
+    expect(() => compile('g.V().order().by(T.label)', {})).toThrow('by(T.label) modulator not yet supported');
+    expect(() => compile('g.V().order().by(__.values("age"))', {})).toThrow('by(traversal) modulator not yet supported');
+    // dedup: label-scoped and dedup-after-as() deferred rather than answered wrongly
+    expect(() => compile('g.V().as("a").out().as("b").dedup("a","b")', {})).toThrow('dedup(label) not yet supported');
+    expect(() => compile('g.V().as("a").out().dedup()', {})).toThrow('dedup() after as() not yet supported');
   });
 
   test('identifier keys splice as literal JSON paths (index-friendly); exotic keys are bound', () => {
@@ -140,6 +214,41 @@ describe('compiler execution semantics', () => {
     // regression: id projection needs the nodes n join so ORDER BY key resolves
     expect(run(store, 'g.V().hasLabel("person").order().by("age").id()').map((r) => r.v))
       .toEqual([2, 1, 4, 6]); // vadas,marko,josh,peter by age 27,29,32,35
+  });
+
+  test('select("a") returns the labelled vertex (id after two hops recovered)', () => {
+    const store = seededStore();
+    // marko(1) as 'a', hop to who he knows, select back to marko each time
+    const ids = run(store, 'g.V(1).as("a").out("knows").select("a")').map((r) => r.id);
+    expect(ids).toEqual([1, 1]); // marko knows vadas+josh → two traversers, both select marko
+  });
+
+  test('select("a").by(key) projects a property of the labelled element', () => {
+    const store = seededStore();
+    const names = run(store, 'g.V(1).as("a").out("knows").as("b").select("b").by("name")').map((r) => r.v).sort();
+    expect(names).toEqual(['josh', 'vadas']);
+  });
+
+  test('multi-label select yields the paired elements per traverser', () => {
+    const store = seededStore();
+    // map shape: each row has e0_/e1_ columns; verify the (a,b) name pairs
+    const rows = run(store, 'g.V(1).as("a").out("knows").as("b").select("a","b").by("name")');
+    const pairs = rows.map((r) => [r.e0_v, r.e1_v]).sort((x, y) => x[1].localeCompare(y[1]));
+    expect(pairs).toEqual([['marko', 'josh'], ['marko', 'vadas']]);
+  });
+
+  test('project builds columns from the current traverser', () => {
+    const store = seededStore();
+    const rows = run(store, 'g.V().hasLabel("person").project("name","age").by("name").by("age")');
+    const byName = Object.fromEntries(rows.map((r) => [r.e0_v, r.e1_v]));
+    expect(byName).toEqual({ marko: 29, vadas: 27, josh: 32, peter: 35 });
+  });
+
+  test('rebinding a label (as("a")…as("a")) keeps default Pop=last', () => {
+    const store = seededStore();
+    // 'a' bound at marko then rebound at each out-neighbour; select('a') = last
+    const ids = run(store, 'g.V(1).as("a").out("knows").as("a").select("a")').map((r) => r.id).sort();
+    expect(ids).toEqual([2, 4]); // vadas, josh — the rebound (last) positions
   });
 
   test('drop() after an edge-reading traversal deletes the right vertices', () => {
