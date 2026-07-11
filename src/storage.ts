@@ -34,7 +34,12 @@ export class GraphStore {
   }
 
   query<T = any>(sql: string, binds: readonly unknown[] = []): T[] {
-    return this.sql.query<T>(sql, binds);
+    // Normalize bind types at the one seam both runtimes cross. bun:sqlite
+    // accepts boolean/bigint binds; DO ctx.storage.sql (SqlStorageValue =
+    // ArrayBuffer|string|number|null) throws on them. Coerce here so a
+    // traversal like has('sold', true) behaves identically on both — and
+    // matches bun:sqlite's own boolean→1/0 coercion, so results are unchanged.
+    return this.sql.query<T>(sql, binds.map(coerceBind));
   }
 
   labelId(name: string): number {
@@ -47,4 +52,10 @@ export class GraphStore {
   labelName(id: number): string {
     return this.query<{ name: string }>('SELECT name FROM labels WHERE id=?', [id])[0].name;
   }
+}
+
+function coerceBind(value: unknown): unknown {
+  if (typeof value === 'boolean') return value ? 1 : 0;
+  if (typeof value === 'bigint') return Number(value);
+  return value;
 }
