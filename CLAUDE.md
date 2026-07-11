@@ -193,11 +193,19 @@ CTEs via `compileFilterPredicate` (EXISTS movement / correlated `.count().is` /
 current-prop); `not()` uses `NOT COALESCE((pred),0)` for correct missing-prop
 semantics. Alias-compare `where(P.neq("a"))`/`where("a",P,by(k))` over P2a columns.
 
-**Immediate next work — P2 tail.** `union`/`coalesce`/`optional` (UNION ALL /
-LEFT JOIN) and `path()` (JSON-array accumulation column, accept loss of
-index-only scans). Then P3 (`repeat`/`until`/`emit` recursive CTE; `mergeV`/
-`mergeE` upserts). Deferred where-forms (`and`/`or`, nested `as`, multi-hop) also
-await — `and`/`or` are the natural companion to `union`.
+**P2 tail — PARTIALLY DONE** (live L3 119→126). `and`/`or` filter steps
+(`combineBranchPreds`, reuses `compileFilterPredicate`; also inside `where(__.and/
+or)`); `union` (element branches, `branchMovementSelect` — single out/in/both hop,
+UNION ALL merged id-relation); `optional` (single hop, LEFT JOIN + COALESCE-to-
+self). All compose mid-chain as CTEs in `traversalCtes`.
+
+**Immediate next work.** `coalesce` (first-non-empty branch per traverser —
+correlated per-seed EXISTS chaining), then `path()` (JSON-array accumulation
+column threaded through movement — structural, like alias threading). Then P3:
+`repeat`/`until`/`emit` (recursive CTE + depth guard, default ~32), `mergeV`/
+`mergeE` (INSERT … ON CONFLICT … RETURNING — the agent-workload workhorse).
+Also-deferred: multi-hop/scalar `union` branches, `both()` `optional`, multi-hop
+`where`, `where(P.eq(__.constant()))`.
 
 ## Environment notes
 

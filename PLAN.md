@@ -244,9 +244,20 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
     `aggregate` (side-effect state), general `unfold`, top-level `tail`, deep
     nested-`by()` chains, `local`/`Scope`. Remaining agg failures are all
     out-of-scope steps (repeat/as-in-complex-position/where/union/local).
-- **P2 tail (after the above):**
-  - `union`, `coalesce`, `optional` → UNION ALL / LEFT JOIN
-  - `path()` → JSON-array accumulation column (accept loss of index-only scans)
+- **P2 tail — PARTIALLY DONE (live L3 119 → 126).**
+  - **`and`/`or`. DONE.** Filter steps: each branch → a `compileFilterPredicate`
+    boolean, joined `AND`/`OR`; also inside `where(__.and/or)` (`combineBranchPreds`,
+    shared). Reuses the P2b predicate engine.
+  - **`union`. DONE (element branches).** `UNION ALL` of each branch's movement
+    (`branchMovementSelect`, single out/in/both hop) seeded from the current
+    relation → merged id-relation continues downstream. Scalar/mixed/multi-hop/
+    aliased/edge branches defer with clear errors.
+  - **`optional`. DONE (single hop).** `LEFT JOIN` + `COALESCE(neighbour, self)` —
+    matches emit neighbour(s), a miss falls back to self. `both()`/multi-hop defer.
+  - **`coalesce`. DEFERRED** (first-non-empty-branch-per-traverser needs correlated
+    per-seed EXISTS chaining) — clear error.
+  - **`path()`. DEFERRED** → JSON-array accumulation column threaded through
+    movement (structural, like alias threading; accept loss of index-only scans).
 
 **P3 — recursion & upserts.**
 - `repeat/until/emit/times` → recursive CTE with depth column; `simplePath`
