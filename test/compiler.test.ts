@@ -147,7 +147,7 @@ describe('compiler SQL snapshots', () => {
 
   test('E() sources the edges table; default projection is the edge shape', () => {
     const p = read('g.E()');
-    expect(p.sql).toContain('c0 AS (SELECT id FROM edges)');
+    expect(p.sql).toContain('"c0" as (SELECT id FROM edges)');
     expect(p.shape).toEqual({ kind: 'edge' });
     expect(p.sql).toContain('n.src, n.tgt');
   });
@@ -289,7 +289,7 @@ describe('compiler SQL snapshots', () => {
   test('is(P) folds a predicate onto the projected scalar', () => {
     const gt = read('g.V().values("age").is(P.gt(30))');
     expect(gt.shape).toEqual({ kind: 'value' });
-    expect(gt.sql).toContain("json_extract(n.props, '$.age') IS NOT NULL AND json_extract(n.props, '$.age') > ?");
+    expect(gt.sql).toContain("json_extract(n.props, '$.age') is not null AND json_extract(n.props, '$.age') > ?");
     expect(gt.binds).toContain(30);
     // bare literal → equality
     expect(read('g.V().values("age").is(29)').sql).toContain("json_extract(n.props, '$.age') = ?");
@@ -380,8 +380,8 @@ describe('compiler SQL snapshots', () => {
 
   test('repeat().times() → WITH RECURSIVE walk(id, depth); final depth only', () => {
     const p = read('g.V().repeat(__.out()).times(2).values("name")');
-    expect(p.sql).toContain('WITH RECURSIVE');
-    expect(p.sql).toContain('AS (SELECT id, 0 AS depth FROM c0 UNION ALL SELECT e.tgt AS id, w1.depth + 1 AS depth FROM w1 JOIN edges e ON e.src=w1.id WHERE w1.depth < 2)');
+    expect(p.sql).toContain('with recursive');
+    expect(p.sql).toContain('as (SELECT id, 0 AS depth FROM c0 UNION ALL SELECT e.tgt AS id, w1.depth + 1 AS depth FROM w1 JOIN edges e ON e.src=w1.id WHERE w1.depth < 2)');
     expect(p.sql).toContain('WHERE depth = 2');
   });
 
