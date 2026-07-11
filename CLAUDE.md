@@ -81,9 +81,20 @@ a dead 2013 OGM).
 Integer rowid PKs; interned labels (small hot indexes); props as JSON text
 (move to JSONB when DO SQLite ≥ 3.45); covering edge indexes
 `(src,label,tgt)` and `(tgt,label,src)` so out()/in() are index-only scans.
-Property filters bind the key: `json_extract(props, '$.' || ?)` — never
-splice keys into SQL. Hot properties get on-demand expression indexes via a
-future management endpoint.
+
+Property key handling — **do not naively "always bind the key"** (`compiler.ts`
+`propExtract`). SQLite matches an on-demand expression index
+`CREATE INDEX ...(json_extract(props,'$.age'))` ONLY against a *literal* JSON
+path; the parameterized `json_extract(props,'$.'||?)` form never matches, so it
+forces a full SCAN and silently defeats the whole hot-property index story
+(measured: 32 ms scan vs 0.35 ms index seek at 200 k rows, ~90×). So we splice
+identifier-safe keys (`^[A-Za-z_][A-Za-z0-9_]*$`) literally — index-eligible,
+injection-safe by *validation* — and fall back to binding only for exotic keys
+(spaces/dots/unicode), which can't be an index target anyway. `test/performance.test.ts`
+asserts via EXPLAIN QUERY PLAN that the index engages; it fails if the literal
+splice regresses. Perf shape: traversal hops (out/in/both) are index-only and
+sub-ms at 1 M edges; property filters/orders need the expression index to avoid
+a linear scan.
 
 ## Semantics traps — encode as tests before touching related steps
 

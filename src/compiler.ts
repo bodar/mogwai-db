@@ -116,6 +116,23 @@ export interface WritePlan { kind: 'write'; run: (store: GraphStore) => any[]; }
 
 const P_OPS: Record<string, string> = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 
+// A property key that is a plain identifier is safe to splice literally into
+// the JSON path — and doing so is REQUIRED for SQLite to use an on-demand
+// expression index `CREATE INDEX ... (json_extract(props,'$.key'))`: the
+// planner only matches a literal path, never the parameterized `'$.' || ?`
+// form (which always forces a full scan, defeating the hot-property index
+// strategy). Keys that aren't plain identifiers (spaces, dots, unicode) can't
+// be an index target anyway, so we keep binding them — correct, just unindexed.
+const SAFE_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** `json_extract(col, '$.key')` for a property key. Splices safe identifier
+ *  keys literally (index-friendly); binds anything else (returned in `binds`). */
+function propExtract(col: string, key: unknown): { sql: string; binds: any[] } {
+  if (typeof key !== 'string') throw new Error('property key must be a string');
+  if (SAFE_KEY.test(key)) return { sql: `json_extract(${col}, '$.${key}')`, binds: [] };
+  return { sql: `json_extract(${col}, '$.' || ?)`, binds: [key] };
+}
+
 /** range(low, high) → SQL [offset, limit]. high < 0 means "no upper bound". */
 function rangeToOffsetLimit(args: any[]): { offset: number; limit: number } {
   const [lo, hi] = args.map(Number);
@@ -178,25 +195,25 @@ function traversalCtes(steps: Step[]): { ctes: string[]; binds: any[]; stop: num
       }
       case 'has': {
         const [key, val] = s.args;
-        if (typeof key !== 'string') throw new Error('has: key must be a string');
-        const path = `'$.' || ?`; // key bound, path built in SQL to avoid injection via key
+        const pe = propExtract('n.props', key); // literal path for indexable keys
+        const join = `SELECT n.id FROM nodes n JOIN ${prev()} p ON n.id=p.id`;
         if (val !== null && typeof val === 'object' && 'op' in val) {
           const p = val as Pred;
           if (p.op in P_OPS) {
-            ctes.push(`c${ctes.length} AS (SELECT n.id FROM nodes n JOIN ${prev()} p ON n.id=p.id WHERE json_extract(n.props, ${path}) ${P_OPS[p.op]} ?)`);
-            binds.push(key, p.values[0]);
+            ctes.push(`c${ctes.length} AS (${join} WHERE ${pe.sql} ${P_OPS[p.op]} ?)`);
+            binds.push(...pe.binds, p.values[0]);
           } else if (p.op === 'within' || p.op === 'without') {
             const ph = p.values.map(() => '?').join(',');
             const neg = p.op === 'without' ? 'NOT ' : '';
-            ctes.push(`c${ctes.length} AS (SELECT n.id FROM nodes n JOIN ${prev()} p ON n.id=p.id WHERE json_extract(n.props, ${path}) ${neg}IN (${ph}))`);
-            binds.push(key, ...p.values);
+            ctes.push(`c${ctes.length} AS (${join} WHERE ${pe.sql} ${neg}IN (${ph}))`);
+            binds.push(...pe.binds, ...p.values);
           } else if (p.op === 'between' || p.op === 'inside') {
-            ctes.push(`c${ctes.length} AS (SELECT n.id FROM nodes n JOIN ${prev()} p ON n.id=p.id WHERE json_extract(n.props, ${path}) >= ? AND json_extract(n.props, ${path}) < ?)`);
-            binds.push(key, p.values[0], key, p.values[1]);
+            ctes.push(`c${ctes.length} AS (${join} WHERE ${pe.sql} >= ? AND ${pe.sql} < ?)`);
+            binds.push(...pe.binds, p.values[0], ...pe.binds, p.values[1]);
           } else throw new Error(`unsupported predicate: P.${p.op}`);
         } else {
-          ctes.push(`c${ctes.length} AS (SELECT n.id FROM nodes n JOIN ${prev()} p ON n.id=p.id WHERE json_extract(n.props, ${path}) = ?)`);
-          binds.push(key, val);
+          ctes.push(`c${ctes.length} AS (${join} WHERE ${pe.sql} = ?)`);
+          binds.push(...pe.binds, val);
         }
         break;
       }
@@ -294,12 +311,14 @@ function compileRead(steps: Step[]): Compiled {
   const vlJoin = `${vJoin} JOIN labels l ON l.id=n.label`;
   let cols: string, from: string, where = '';
   switch (projName) {
-    case 'values':
+    case 'values': {
       shape = { kind: 'value' };
-      cols = `json_extract(n.props, '$.' || ?) AS v`; from = vJoin;
-      where = ` WHERE json_extract(n.props, '$.' || ?) IS NOT NULL`;
-      fb.push(projStep!.args[0], projStep!.args[0]);
+      const pe = propExtract('n.props', projStep!.args[0]);
+      cols = `${pe.sql} AS v`; from = vJoin;
+      where = ` WHERE ${pe.sql} IS NOT NULL`;
+      fb.push(...pe.binds, ...pe.binds); // one set for the SELECT, one for the WHERE
       break;
+    }
     case 'id':
       // Join nodes n even though the id lives in `last`, so a preceding
       // order().by(key) — which references n.props — has the alias in scope.
@@ -326,7 +345,7 @@ function compileRead(steps: Step[]): Compiled {
     const parts = orders.map((o) => {
       if (o.dir === 'shuffle') return 'RANDOM()';
       const dir = o.dir === 'desc' ? 'DESC' : 'ASC';
-      if (o.key !== null) { fb.push(o.key); return `json_extract(n.props, '$.' || ?) ${dir}`; }
+      if (o.key !== null) { const pe = propExtract('n.props', o.key); fb.push(...pe.binds); return `${pe.sql} ${dir}`; }
       return `${shape.kind === 'value' ? 'v' : 'n.id'} ${dir}`;
     });
     sql += ` ORDER BY ${parts.join(', ')}`;

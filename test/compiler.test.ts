@@ -22,12 +22,11 @@ describe('compiler SQL snapshots', () => {
 
   test('order().by(key[, dir]) folds ORDER BY into the projection select', () => {
     const asc = read('g.V().hasLabel("person").order().by("age").values("name")');
-    expect(asc.sql).toContain("ORDER BY json_extract(n.props, '$.' || ?) ASC");
-    expect(asc.binds).toEqual(['person', 'name', 'name', 'age']);
+    expect(asc.sql).toContain("ORDER BY json_extract(n.props, '$.age') ASC");
+    expect(asc.binds).toEqual(['person']); // name/age spliced as literal paths
 
     const desc = read('g.V().hasLabel("person").order().by("age",desc).values("name")');
-    expect(desc.sql).toContain("ORDER BY json_extract(n.props, '$.' || ?) DESC");
-    expect(desc.binds).toEqual(['person', 'name', 'name', 'age']);
+    expect(desc.sql).toContain("ORDER BY json_extract(n.props, '$.age') DESC");
   });
 
   test('values().order() sorts the projected scalar', () => {
@@ -60,10 +59,19 @@ describe('compiler SQL snapshots', () => {
     expect(p.binds).toEqual([1, 2, 3]);
   });
 
-  test('property key is always bound, never spliced', () => {
-    // no query text contains the literal key — injection-safe by construction
-    expect(read('g.V().valueMap("name")').binds).toEqual([]); // keys ride in the shape, not SQL
-    expect(read('g.V().values("age")').sql).not.toContain('age');
+  test('identifier keys splice as literal JSON paths (index-friendly); exotic keys are bound', () => {
+    // Safe identifier: spliced literally so `CREATE INDEX ...(json_extract(props,'$.age'))`
+    // can engage. See the property-index performance test below.
+    const safe = read('g.V().has("age",30)');
+    expect(safe.sql).toContain("json_extract(n.props, '$.age')");
+    expect(safe.binds).toEqual([30]); // key not bound
+
+    // Exotic key (space): falls back to the bound `'$.' || ?` form — correct,
+    // just not index-eligible. The key value is never spliced into SQL.
+    const exotic = read('g.V().has("first name","x")');
+    expect(exotic.sql).toContain("json_extract(n.props, '$.' || ?)");
+    expect(exotic.sql).not.toContain('first name');
+    expect(exotic.binds).toEqual(['first name', 'x']);
   });
 });
 
