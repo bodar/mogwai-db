@@ -1,15 +1,33 @@
 {
   "name": "mogwai-db",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "version": "0.1.0",
+  "description": "TinkerPop 4 Gremlin server compiled onto SQLite, targeting Cloudflare Durable Objects",
   "type": "module",
+  "main": "src/server.ts",
+  "scripts": {
+    "start": "tsx src/server.ts",
+    "test": "tsx conformance/corpus-test.ts",
+    "test:e2e": "tsx test/e2e.ts"
+  },
+  "keywords": [
+    "gremlin",
+    "tinkerpop",
+    "graph-database",
+    "sqlite",
+    "cloudflare",
+    "durable-objects",
+    "graphdb"
+  ],
+  "author": "Daniel Bodart",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bodar/mogwai-db.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bodar/mogwai-db/issues"
+  },
+  "homepage": "https://github.com/bodar/mogwai-db#readme",
   "dependencies": {
     "antlr4ng": "^3.0.16",
     "better-sqlite3": "^12.11.1",
