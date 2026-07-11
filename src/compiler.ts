@@ -3,6 +3,7 @@ import { parseGremlin, stepChain, stepName, type Step, type Pred } from './front
 import { render, compiled, type Compiled, type WritePlan, type Shape, type MapEntry, type ElemShape, type GroupKey, type GroupVal } from './render.ts';
 // Re-export the compile-output contract so handler.ts / tests keep importing it here.
 export type { Compiled, WritePlan, Shape, MapEntry, ElemShape, GroupKey, GroupVal } from './render.ts';
+import { P_OPS, propExtract, labelIn, edgeLabelFilter, predicateSql, rangeToOffsetLimit, dirsFor, type Elem } from './plan.ts';
 
 // lazyrecords typed SQL construction (bind-safe: params derive from the tree).
 import { sql as lsql, type Sql } from '@bodar/lazyrecords/sql/template/Sql.ts';
@@ -24,90 +25,6 @@ import { inExpression, notIn } from '@bodar/lazyrecords/sql/ansi/InExpression.ts
 // ---------- compilation ----------
 
 
-const P_OPS: Record<string, string> = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
-
-// A property key that is a plain identifier is safe to splice literally into
-// the JSON path — and doing so is REQUIRED for SQLite to use an on-demand
-// expression index `CREATE INDEX ... (json_extract(props,'$.key'))`: the
-// planner only matches a literal path, never the parameterized `'$.' || ?`
-// form (which always forces a full scan, defeating the hot-property index
-// strategy). Keys that aren't plain identifiers (spaces, dots, unicode) can't
-// be an index target anyway, so we keep binding them — correct, just unindexed.
-const SAFE_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-/** `json_extract(col, '$.key')` for a property key. Splices safe identifier
- *  keys literally (index-friendly, and `indexKey` names it so the caller can
- *  auto-build the matching expression index); binds anything else. */
-function propExtract(col: string, key: unknown): { expr: Expression; indexKey: string | null } {
-  if (typeof key !== 'string') throw new Error('property key must be a string');
-  // The lazyrecords jsonExtract node owns the literal-vs-bound path splice (its
-  // SAFE_KEY matches ours) and reports the spliced key via .indexKey. The column
-  // is a bind-free fragment (`n.props`) wrapped as raw text() so it renders
-  // unquoted — index-eligible. Any exotic-key bind lives as a Value in the node.
-  const node = jsonExtract(sqlText(col), key);
-  return { expr: node, indexKey: node.indexKey };
-}
-
-/** `<col> IN (SELECT id FROM labels WHERE name IN (?,?))` — the canonical
- *  label-name→id filter. Names ride as bound Value tokens (node-built, no splice). */
-function labelIn(col: string, names: any[]): { sql: string; binds: any[] } {
-  return render(expression(sqlText(`${col} IN (SELECT id FROM labels WHERE name IN`), parens(names.map(value)), sqlText(')')));
-}
-
-/** Optional ` AND e.label IN (…)` appended to a movement JOIN's ON. Empty when
- *  no labels. Replaces ~7 hand-rolled `?`-splice + manual bind-push copies. */
-function edgeLabelFilter(names: any[]): { sql: string; binds: any[] } {
-  if (!names.length) return { sql: '', binds: [] };
-  const r = labelIn('e.label', names);
-  return { sql: ` AND ${r.sql}`, binds: r.binds };
-}
-
-/**
- * A boolean SQL comparison fragment over a pre-built column expression, shared by
- * has()/is()/where(). `expr` is SQL (a json_extract, a column, a subquery);
- * `exprBinds` are its own placeholders, spliced once per occurrence of `expr` in
- * the output (between/inside mention it twice). `pred` is a `Pred` {op,values},
- * a bare literal (→ equality), or `undefined` (existence → IS NOT NULL).
- * TextP (startingWith/endingWith/containing + negations) → LIKE with the pattern
- * assembled and BOUND (never spliced); regex/typeOf throw.
- */
-function predicateSql(expr: Expression, pred: any): Expression {
-  if (pred === undefined) return expression(expr, isNotNull());
-  if (pred === null || typeof pred !== 'object' || !('op' in pred))
-    return expression(expr, comparison('=', pred));
-  const { op, values } = pred as Pred;
-  if (op in P_OPS) return expression(expr, comparison(P_OPS[op] as ComparisonOperator, values[0]));
-  if (op === 'within') return expression(expr, inExpression(values));
-  if (op === 'without') return expression(expr, notIn(values));
-  // between = [lo, hi) inclusive low; inside = (lo, hi) exclusive low. `expr`
-  // appears in both bounds — as a shared subtree, so its binds fall out twice in
-  // order automatically (no manual double-splice).
-  if (op === 'between' || op === 'inside')
-    return and(expression(expr, comparison(op === 'inside' ? '>' : '>=', values[0])),
-               expression(expr, comparison('<', values[1])));
-  const lp = likePattern(op, values[0]);
-  if (lp) return expression(expr, lp.neg ? notLike(lp.pat, '\\') : like(lp.pat, '\\'));
-  throw new Error(`unsupported predicate: P.${op}`);
-}
-
-/** TextP → a LIKE pattern (metachars in the user value escaped). null if not a
- *  supported TextP op (regex/typeOf fall through to the caller's throw). */
-function likePattern(op: string, value: unknown): { pat: string; neg: boolean } | null {
-  const neg = op.startsWith('not');
-  const base = neg ? op[3].toLowerCase() + op.slice(4) : op; // notStartingWith → startingWith
-  const v = String(value).replace(/[\\%_]/g, (c) => '\\' + c);
-  if (base === 'startingWith') return { pat: `${v}%`, neg };
-  if (base === 'endingWith') return { pat: `%${v}`, neg };
-  if (base === 'containing') return { pat: `%${v}%`, neg };
-  return null;
-}
-
-/** range(low, high) → SQL [offset, limit]. high < 0 means "no upper bound". */
-function rangeToOffsetLimit(args: any[]): { offset: number; limit: number } {
-  const [lo, hi] = args.map(Number);
-  if (hi >= 0 && lo > hi) throw new Error(`Not a legal range: [${lo}, ${hi}]`);
-  return { offset: lo, limit: hi < 0 ? -1 : hi - lo };
-}
 
 /**
  * Fail closed on traversal-strategy application. `withStrategies`/`withoutStrategies`
@@ -161,16 +78,6 @@ export function compile(gremlin: string, params: Record<string, any>): Compiled 
  * first order()/projection/other step and returns where it stopped. Shared by
  * reads and drop().
  */
-/** Whether the current traverser's `id` column is a node id or an edge id. The
- *  id-relation is typed but the type is *static* — known from the step chain, so
- *  no runtime tag is needed. V()/out()/…V() → node; E()/…E() → edge. */
-type Elem = 'node' | 'edge';
-
-/** The (from,to) edge-column pairs a directional step walks: out→src/tgt,
- *  in→tgt/src, both→both. One place so the movement CTE and the correlated
- *  edge-count (edgeCountFrom) can't diverge. */
-const dirsFor = (name: string): [string, string][] =>
-  name === 'out' ? [['src', 'tgt']] : name === 'in' ? [['tgt', 'src']] : [['src', 'tgt'], ['tgt', 'src']];
 
 /** A union() branch (currently a single out/in/both movement) → a SELECT of the
  *  neighbour node ids from `seed`. Non-movement / multi-step branches defer. */
