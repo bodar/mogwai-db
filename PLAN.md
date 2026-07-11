@@ -54,11 +54,11 @@ builder), `src/cloudflare/app.ts` and `src/bun/app.ts` (the two entry points tha
 provide platform `deps`), and `src/database/TalebraryDatabase.ts` +
 `D1Adapter.ts` / `src/bun/SqliteDatabase.ts` (the swapped storage interface).
 
-- **The seam is `GraphStore`.** Extract an interface (the `prepare/get/all/run`
-  surface the compiler + framing consume) with two implementations:
-  `BunSqlite` (`bun:sqlite`) and `DurableObjectSqlite` (`ctx.storage.sql`).
-  The compiler already consumes only `{sql, binds}` + write plans, so it needs
-  no change; `src/server.ts`'s `execute()` already takes the store as a param.
+- **The seam is `Sql`** (`exec` + `query(sql, binds)`), consumed by the agnostic
+  `GraphStore`, with two implementations: `BunSqlite` (`bun:sqlite`) and
+  `DurableObjectSqlite` (`ctx.storage.sql`). The compiler consumes only
+  `{sql, binds}` + write plans, so it needs no change; `src/handler.ts`'s
+  `execute()` takes the store as a param.
 - **Stays synchronous — deliberate divergence from talebrary.** Talebrary's
   `TalebraryDatabase` is async because D1 is async. We target DO
   `ctx.storage.sql`, which is *synchronous* (like `bun:sqlite`), so our
@@ -134,7 +134,8 @@ CREATE INDEX n_label ON nodes(label);
 **P0 — done (this repo).** Protocol shell, parser, schema, compiler slice
 (V, hasLabel, has+P, out/in/both, dedup, limit, values, id, label, count),
 writes (addV+property, addE via `to(__.V(id))`), discard, error trailers.
-11/11 e2e checks against unmodified gremlin@4.0.0-beta.2.
+The shared contract (`test/contract.ts`) passes against unmodified
+gremlin@4.0.0-beta.2 on both runtimes (Bun + Cloudflare DO); corpus 100%.
 
 **P1 — correctness spine.**
 1. Vertex property materialization (custom framing, above) → `valueMap`,
@@ -254,7 +255,7 @@ exact wire path. Requirements to host it:
 
 **L4 — Cross-language spot checks.**
 Once L3 is respectable, run gremlin-python (also v4) against the same server
-with a port of test/e2e.ts. Two independent GLVs passing is strong evidence
+with a port of the contract (test/contract.ts). Two independent GLVs passing is strong evidence
 the protocol implementation is right rather than accidentally co-adapted to
 the JS client.
 
