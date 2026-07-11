@@ -6,8 +6,9 @@
 // bundled by wrangler/esbuild for the Worker build. Both runtimes share this
 // one module; there is no per-runtime divergence in the io layer.
 //
-// TODO(upstream): a ~2-line PR adding an `io` subpath to gremlin's `exports`
-// would turn these into clean bare imports and drop the node_modules path.
+// TODO(upstream): filed apache/tinkerpop#3511 to add a `gremlin/io` export.
+// Once released, switch to `import ioc from 'gremlin/io'` and drop the
+// node_modules path.
 
 // @ts-ignore - deep import, no shipped type declarations for this subpath
 import ioc from '../node_modules/gremlin/build/esm/structure/io/binary/GraphBinary.js';
