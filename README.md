@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="mogwai-db" width="480">
+</p>
+
 # mogwai-db
 
 A TinkerPop 4 Gremlin server on SQLite, targeting Cloudflare Durable Objects.
