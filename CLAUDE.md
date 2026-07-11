@@ -118,6 +118,10 @@ future management endpoint.
   `ctx.storage.sql` and adds the Worker router; compiler/server logic is
   storage-agnostic. `src/server.ts` exports `startServer(port, dbPath)` and
   only listens under `import.meta.main`, so tests run it in-process.
+- Bun ⇄ Cloudflare via DI (`@bodar/yadic`): the `GraphStore` seam gets two
+  impls (`bun:sqlite`, DO `ctx.storage.sql` — both sync). See PLAN.md
+  "Runtime abstraction"; reference impl is `~/Projects/the client`
+  (`src/Application.ts`, `src/{bun,cloudflare}/app.ts`, `src/database/`).
 - Bundle budget verified: parser + antlr4ng + serializers ≈ 1 MB minified;
   ATN warm-up ~few ms once per isolate; warm parse ~0.27 ms.
 - Useful references live in the Apache TinkerPop repo (sparse-clone it):
