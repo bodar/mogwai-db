@@ -1,6 +1,6 @@
 import { compile, type MapEntry } from './compiler.ts';
 import type { GraphStore } from './storage.ts';
-import { ioc, Vertex, VertexProperty, Edge, t } from './io.ts';
+import { ioc, Vertex, VertexProperty, Edge, Property, t } from './io.ts';
 
 // ---- GraphBinary v4 response framing (mirrors GraphBinaryReader.readResponse) ----
 function frame(values: Buffer[], status = 200, message: string | null = null): Buffer {
@@ -31,6 +31,27 @@ function vertexBuffer(id: number, label: string, props: Record<string, any>): Bu
     ioc.anySerializer.serialize(id),            // {id}, fully qualified
     ioc.listSerializer.serialize([label], false), // {label}, bare list of one
     ioc.listSerializer.serialize(vprops, true),   // {properties}, qualified list
+  ]);
+}
+
+// Custom edge framing to MATERIALIZE properties — EdgeSerializer.serialize
+// hardcodes an empty property list, exactly like VertexSerializer. Wire layout
+// (mirrors EdgeSerializer): id, {label} bare list, inV(=tgt) id + bare label
+// list, outV(=src) id + bare label list, null parent, qualified property list.
+// Endpoint labels ride empty (as the addE write path does); readers that need
+// endpoint names traverse for them rather than read the embedded edge element.
+function edgeBuffer(id: number, label: string, src: number, tgt: number, props: Record<string, any>): Buffer {
+  const eprops = Object.entries(props).map(([k, v]) => new Property(k, v));
+  return Buffer.concat([
+    Buffer.from([ioc.DataType.EDGE, 0x00]),
+    ioc.anySerializer.serialize(id),
+    ioc.listSerializer.serialize([label], false),
+    ioc.anySerializer.serialize(tgt),          // inV id
+    ioc.listSerializer.serialize([], false),   // inV label (omitted)
+    ioc.anySerializer.serialize(src),          // outV id
+    ioc.listSerializer.serialize([], false),   // outV label (omitted)
+    ioc.unspecifiedNullSerializer.serialize(null), // parent
+    ioc.listSerializer.serialize(eprops, true),     // properties (qualified)
   ]);
 }
 
@@ -91,6 +112,7 @@ function execute(store: GraphStore, gremlin: string, params: Record<string, any>
   const shape = plan.shape;
   switch (shape.kind) {
     case 'vertex': return rows.map((r) => vertexBuffer(r.id, r.label, JSON.parse(r.props)));
+    case 'edge': return rows.map((r) => edgeBuffer(r.id, r.label, r.src, r.tgt, JSON.parse(r.props)));
     case 'valueMap': return rows.map((r) => valueMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys, shape.tokens));
     case 'elementMap': return rows.map((r) => elementMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys));
     case 'count': return rows.map((r) => ioc.anySerializer.serialize(BigInt(r.v)));
