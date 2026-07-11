@@ -281,8 +281,28 @@ function rangeToOffsetLimit(args: any[]): { offset: number; limit: number } {
   return { offset: lo, limit: hi < 0 ? -1 : hi - lo };
 }
 
+/**
+ * Fail closed on traversal-strategy application. `withStrategies`/`withoutStrategies`
+ * parse and chain fine (so they count toward the L1 "we understand the language"
+ * corpus metric), but the compiler does not yet APPLY them. A PartitionStrategy or
+ * SubgraphStrategy — which a client relies on to FILTER reads/writes for logical
+ * isolation — would otherwise be silently dropped and return unfiltered data with
+ * no error. Reject at execution until the compiler honours them, rather than leak.
+ */
+function rejectUnsupportedStrategies(tree: any): void {
+  const scan = (node: any) => {
+    const m = stepName(node.constructor.name, 'TraversalSourceSelfMethod_');
+    if (m === 'withStrategies' || m === 'withoutStrategies')
+      throw new Error(`${m}(...) is not supported: traversal strategies (e.g. PartitionStrategy, SubgraphStrategy) are not yet applied by the compiler, so accepting them would silently ignore the filtering they imply and leak unfiltered data. Rejected to fail closed.`);
+    for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) scan(node.getChild(i));
+  };
+  scan(tree);
+}
+
 export function compile(gremlin: string, params: Record<string, any>): Compiled | WritePlan {
-  const steps = stepChain(parseGremlin(gremlin), params);
+  const tree = parseGremlin(gremlin);
+  rejectUnsupportedStrategies(tree);
+  const steps = stepChain(tree, params);
   if (steps.length === 0) throw new Error('empty traversal');
 
   // v4 iterate() appends discard(): execute, return nothing
