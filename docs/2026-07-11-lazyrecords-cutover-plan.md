@@ -112,32 +112,34 @@ boundary — a **temporary adapter** that vanishes when the bodies go node-nativ
 - [~] **S2** label-filter splice-kill (`labelIn`/`edgeLabelFilter`, ~7 copies
   collapsed). Read prefix splice-free. Remainder (CTE bodies as node trees) folded
   into S5. Trunk `6715529`.
-- [ ] **S3 — read tail → nodes.** `compileRead` projection switch, `is`-filter,
-  order-by, `compileSelectProject`, `compileGroup`, `compileProperties`. Residual
-  splices: `fb.push(...r.binds, ...r.binds)` double-pushes (SELECT+WHERE mention the
-  same expr) — kill by building the tail SELECT as a `select()` node tree where the
-  expr subtree is shared. Fold together with S5 (node-tree bodies pay off in `steps/*`).
-- [ ] **S4 — write path → nodes.** `compileDrop`, `compileInject` (done, node-built),
-  `compileAddV`, `compileAddE`, `compileMergeV`, `compileMergeE`, `compileSetProperty`,
-  + `insertVertex`/`insertEdge`/`mergeMatchQuery`/`edgeMatchQuery`. Imperative
-  run-closures; less splice payoff. `mergeMatchQuery`/`edgeMatchQuery` already use
-  `render(propExtract(...).expr)`.
-- [~] **S5 — restructure.** Extracted so far (each green, on trunk): `frontend.ts`
-  `89328a7`, `render.ts` `cb7638d`, `plan.ts` `24851fe`. compiler.ts 1801→1540.
-  STILL TO DO, in order:
-  1. Move `ScalarCtx` cluster (compiler.ts **596–795**: `ScalarCtx`/`Scalar`/
-     `labelNameSub`/`propAt`/`compileNestedScalar`/`MOVES`/`edgeCountFrom`/
-     `requireTerminal`/`compileFilterPredicate`/`combineBranchPreds`/`compileExists`)
-     into `plan.ts`. Contiguous block, circular-safe (no reverse dep on step compilers;
-     needs `stepChain`/`Step` from frontend + `list` from Compound added to plan.ts
-     imports; add `export` to the moved fns; compiler imports them back).
-  2. Split step compilers into `steps/*.ts` behind `Map<name, StepCompiler>` dispatch
-     (Seam 2). Families: movement (out/in/both/…E/…V), filter (has/hasLabel/where/
-     and/or/not/is), branch (union/optional/repeat), projection/barrier (values/id/
-     label/valueMap/elementMap/count/order/group/fold/sum/properties/select/project),
-     write. Each `StepCompiler` a small unit-testable fn.
-  3. Node-tree the CTE bodies (5 templates — see below) + tail; remove the `render()`
-     adapters. Extract inline rewrites into `strategies.ts` (Seam 3).
+- [x] **S3 — read tail → nodes. DONE** (trunk `3aae1f4`). `compileRead` projection
+  switch, `is`-filter, order-by, `compileSelectProject`, `compileGroup`,
+  `compileProperties` all build a single tail node. The `fb.push(...r.binds, ...r.binds)`
+  double-pushes are GONE — the projected `json_extract` node is shared between the
+  SELECT and WHERE occurrences so its binds fall out of the one render per occurrence.
+- [x] **S4 — write path → nodes. DONE** (trunk `3aae1f4`). `compileDrop`/`compileSetProperty`/
+  `compileAddE`/`mergeDrivers`/`resolveEndpoint` assemble their id-materialising query via
+  `render(withPrefixTree(ctes, tail))`; `compileInject` fully node-built. `mergeMatchQuery`/
+  `edgeMatchQuery` keep their standalone `render(propExtract(...))` (a legit `{sql,binds}`
+  boundary for a run-closure, not an adapter). Imperative `INSERT`/`UPDATE` statements in
+  `insertVertex`/`insertEdge` stay plain parameterised SQL (fixed statements, no splicing).
+- [~] **S5 — restructure.** Extracted (each green, on trunk): `frontend.ts` `89328a7`,
+  `render.ts` `cb7638d`, `plan.ts` `24851fe`.
+  1. [x] Move `ScalarCtx` cluster into `plan.ts` (**S5.1**, trunk `6b8c0b3`).
+  2. [ ] **S5.2 — the one remaining piece.** Split the step compilers into `steps/*.ts`
+     behind a `Map<name, StepCompiler>` dispatch (Seam 2). Families: movement
+     (out/in/both/…E/…V), filter (has/hasLabel/where/and/or/not/is), branch
+     (union/optional/repeat), projection/barrier (values/id/label/valueMap/elementMap/
+     count/order/group/fold/sum/properties/select/project), write. Each a small
+     unit-testable fn. NOTE: `traversalCtes` now threads mutable context (aliases/`prev()`/
+     `carry()`/`push()`/`elem`/`i`) — the dispatch must pass this as an explicit ctx object.
+  3. [x] Node-tree the CTE bodies + tail; remove the `render()` CTE-assembly adapter
+     (**S5.3**, trunk `3aae1f4`, folded into S3/S4). `withPrefixTree(ctes, tail)` is now
+     ONE tree. Seam 3 (extract inline rewrites — discard-strip, repeat-cluster gather,
+     range/limit-vs-order — into `strategies.ts`) still pending, lower priority.
+- **Location note:** work moved out of the `lazyrecords-cutover` worktree into the main
+  checkout `~/Projects/mogwai-db`, committed directly on `trunk`. The worktree is stale
+  (all its work is on trunk) and can be `git worktree remove`d.
 - [x] **S6 — publish + wire (DONE early).** lazyrecords G1–G7 committed+pushed
   (`d6618a4`), auto-published JSR `0.494.348`; mogwai wired to it, symlink dropped,
   `mise run ci` + worker build green. Remaining nicety: `wrangler deploy --dry-run`
