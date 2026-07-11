@@ -54,8 +54,16 @@ The three seams:
   select/project → nodes.
 - [ ] **S4 — write path.** drop, inject(done), addV, addE, mergeV, mergeE,
   setProperty → nodes.
-- [ ] **S5 — restructure.** Split into the end-state layout; extract Seam-3
-  passes; wire the Seam-2 dispatch table.
+- [~] **S5 — restructure.** IN PROGRESS. Extracted (each green, on trunk):
+  `frontend.ts` (parse + Step[] IR), `render.ts` (compile-output contract +
+  render/compiled boundary), `plan.ts` (leaf SQL node-builders: propExtract,
+  labelIn, predicateSql, dirsFor, …). compiler.ts 1801 → 1540. STILL TO DO:
+  move the `ScalarCtx` correlated-scalar + filter-predicate cluster (compiler.ts
+  596–795: propAt/compileNestedScalar/edgeCountFrom/compileFilterPredicate/
+  combineBranchPreds/compileExists — contiguous, circular-safe) into plan.ts;
+  then split the step compilers into `steps/*` behind a `Map<name,StepCompiler>`
+  dispatch table (Seam 2); extract the inline Step[]→Step[] rewrites into
+  `strategies.ts` (Seam 3); node-tree the CTE/tail bodies (absorbs S2/S3 remainder).
 - [ ] **S6 — publish.** Commit bodar.ts lazyrecords (G1–G7), version bump,
   `jsr publish`; mogwai `package.json` → `npm:@jsr/bodar__lazyrecords`; drop
   symlink; `mise run ci` green; `wrangler deploy --dry-run` bundle sane.
