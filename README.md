@@ -40,16 +40,21 @@ both over the real GraphBinary wire, so they're proven identical, not tested twi
 ## Run
 Runtime is [Bun](https://bun.sh) (pinned via mise). `mise install` to get it.
 
+The build graph lives in [mise tasks](mise.toml) — `install ─▶ {test, build} ─▶ ci`.
+CI (GitHub Actions) just runs `mise run ci`.
+
 ```
-bun install
+mise run test                  # full suite: corpus + contract on both runtimes
+mise run build                 # bundle the Worker (wrangler dry-run deploy)
+mise run ci                    # the gate: test + build
+
 bun run start                  # Bun server on :8182
-bun test                       # contract (bun + live-DO via wrangler) + corpus
 bun run dev:cf                 # Worker + DO under wrangler dev
 bun run deploy                 # wrangler deploy
 ```
 
-`bun test` boots the Worker under `wrangler dev` for the Cloudflare half, so the
-first run may pause while workerd starts.
+`mise run test` boots the Worker under `wrangler dev` for the Cloudflare half, so
+the first run may pause while workerd starts.
 
 ## Known gaps / next
 - Vertex property materialization: client's VertexSerializer hardcodes empty properties
