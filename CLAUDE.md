@@ -156,23 +156,25 @@ locked decision). `makeHandler` now takes a `StoreSource` (a store *or* a
 `(g)=>store` resolver). See `conformance/README-cucumber.md` to run the full
 suite.
 
-## Immediate next work (P2c in PLAN.md)
+## Immediate next work (P2c-2 in PLAN.md)
 
-P2a (as/select/project/by column-threading) and P2c-1 (edge traversal — the
-typed node/edge id-relation, edge shape, `edgeBuffer`) are DONE. The remaining
-P2c work is sequenced to clear the L3 `BeforeAll` gate (the upstream cucumber
-runner caches every seeded graph via `group`/`project`-nested-`by`/`tail`/`E`/
-`properties`/`element`/`key`/`value` — *no* upstream scenario runs until that
-whole cluster works, so that's what unlocks the first published L3 score):
+DONE: P2a (as/select/project/by column-threading), P2c-1 (edge traversal — the
+typed node/edge `Elem` id-relation, edge shape, `edgeBuffer`), P2c-1b (property
+elements). Note P2c-1b did NOT thread pkey/pval through movement as first
+sketched — `properties()` compiles in its own tail fn `compileProperties` (a
+`json_each(props)` expansion, intercepted in `compileRead`), because a property
+is a multi-column traverser the single-`id` movement CTEs can't carry; chains
+past `element()` are deferred.
 
-- **P2c-1b — property elements** (`properties`/`element`/`key`/`value`). The
-  traverser becomes a *property* — owner id + key + value, a `json_each`
-  expansion over `props`, i.e. a multi-column traverser (harder than edges,
-  which stayed single-`id`). Thread the extra pkey/pval columns like the alias
-  columns; `element()` flips the static `Elem` back to node (id unchanged),
-  `key()`/`value()` project the expansion columns.
-- **P2c-2 — aggregation** (`group`/`groupCount`/`fold`/`unfold`/`tail`/`sum` +
-  nested-traversal `by()`). Clears the gate → publish the first L3 score.
+**P2c-2 — aggregation** (`group`/`groupCount`/`fold`/`unfold`/`tail`/`sum` +
+nested-traversal `by()`). This clears the L3 `BeforeAll` gate — the upstream
+cucumber runner caches every seeded graph via
+`group().by(k).by(__.…)`-style traversals, so *no* upstream scenario runs until
+`group` + nested-`by` + `tail` work. Clearing it publishes the first real L3
+score. Design forks to settle first: `group` value-shape (`GROUP BY` +
+`json_group_object`/`json_group_array`), and nested-traversal `by(__.…)` as a
+correlated scalar subquery — the latter is shared machinery with P2b's `where`,
+so design them together.
 
 Then P2b (where/not/is) and the P2 tail (union/coalesce/optional, path).
 
