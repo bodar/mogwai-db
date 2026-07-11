@@ -136,6 +136,67 @@ CREATE INDEX n_label ON nodes(label);
 - Element ids are integers (SQLite rowids). v4 clients round-trip them fine;
   don't invent string ids.
 
+## Target — declared feature profile (the north star)
+
+We aim to be a **conformant TinkerPop provider for a declared feature subset** —
+not 100% of the 2101-scenario suite (no provider is). The suite's own
+`Graph.Features` + tag mechanism sanctions this; our profile:
+
+| `Graph.Features` | Supported | Notes |
+|---|---|---|
+| Persistence, Add/Remove V+E | ✅ | |
+| Transactions (per-request, implicit) | ✅ | DO single-threading = serializable |
+| ThreadedTransactions / multi-request `tx()` | ❌ | needs DO session state (P5) |
+| Computer (OLAP / GraphComputer) | ❌ | locked out |
+| Lambdas | ❌ | locked out (v4-native stance) |
+| UserSuppliedIds (string/custom) | ✅ | target |
+| MultiProperties | ✅ | target (schema rework) |
+| MetaProperties | ✅ | target (schema rework) |
+| Upsert (`mergeV`/`mergeE`) | ✅ | target — the agent workhorse |
+| Property data types | primitives + list/map | JSON storage |
+
+The conformance denominator is therefore "all non-lambda / non-OLAP /
+non-multi-request-tx scenarios". `conformance/corpus.txt` (2177/2177 parse+chain)
+is the "we understand the whole language" metric; the live cucumber pass count is
+the "we execute it correctly" metric.
+
+### Revised roadmap — writes-first (usable before feature-complete)
+
+The P2/P3 read compiler is largely done (live L3 130). The path to *usable* is
+sequenced so the invasive schema rework lands behind a deployed, writable
+baseline:
+
+- **W1 — user-supplied ids. DONE.** `nodes`/`edges` gained a nullable
+  `uid TEXT UNIQUE`; the SQLite rowid stays the internal PK (all movement joins
+  untouched — zero perf hit). uid is resolved at exactly two boundaries:
+  `V('x')`/`E('x')` seed (numeric args → `id IN`, string args → `uid IN`, OR'd)
+  and framing-out (`COALESCE(uid, id) AS id` at the id/vertex/edge/valueMap/
+  elementMap/select/group-element projections). `addV().property(T.id, v)` sets
+  the id (string→uid, int→rowid) and `property(T.label, v)` overrides the label
+  — **also fixed a latent bug** where `property(T.id, …)` corrupted the prop bag.
+  `addE` resolves string endpoint ids through uid and echoes the caller's ids on
+  the wire. Verified end-to-end through the real GLV (`property(t.id,'person:marko')`,
+  `V('person:marko').out().id()`). Known small gaps (deferred, not blocking):
+  `properties().element().id()` and `group().by(__.id())` still surface the rowid
+  (owner-uid not threaded into those two paths); `addE` can't yet set the edge's
+  OWN uid (edges get rowid ids; endpoints echo user ids). mergeV/mergeE (W2) will
+  build on this.
+- **W2 — writes.** `mergeV`/`mergeE` (upsert, id-aware), `property()` update on
+  existing elements, general `addE` from arbitrary traverser sets. → *writable*.
+- **W3 — P4 deploy.** Worker router (`POST /g/{graphId}` → `idFromName` → DO,
+  LOCKED design) + bearer auth per graph + delete/lifecycle management endpoint.
+  → *deployable*.
+- **W4 — multi/meta-property schema rework.** Props stop being a flat JSON object
+  (design fork: nested JSON `{key:[{value,meta}]}` vs a normalized
+  `properties` table). Touches valueMap/values/has/properties/addV/storage —
+  biggest blast radius, deliberately after a deployed baseline exists.
+- **W5 — conformance grind.** `aggregate`/`cap`, `path`/`simplePath`, `match`,
+  `local`, `choose`, `coalesce`, `sack` + the multi/meta scenarios W4 unlocks +
+  seeding the other reference graphs (classic/crew/grateful/sink).
+
+The read-step backlog (below, P2-tail/P3/P5) continues under W5. Phases P0–P3 and
+their step-level detail follow.
+
 ## Phases
 
 **P0 — done (this repo).** Protocol shell, parser, schema, compiler slice

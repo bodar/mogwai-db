@@ -82,8 +82,8 @@ describe('compiler SQL snapshots', () => {
       { key: 'a', prefix: 'e0', sub: 'vertex' },
       { key: 'b', prefix: 'e1', sub: 'vertex' },
     ] });
-    expect(p.sql).toContain('e0n.id AS e0_id');
-    expect(p.sql).toContain('e1n.id AS e1_id');
+    expect(p.sql).toContain('COALESCE(e0n.uid, e0n.id) AS e0_id'); // element reports uid ?? rowid
+    expect(p.sql).toContain('COALESCE(e1n.uid, e1n.id) AS e1_id');
     expect(p.sql).toContain('JOIN nodes e0n ON e0n.id=p.a0');
     expect(p.sql).toContain('JOIN nodes e1n ON e1n.id=p.a1');
   });
@@ -207,7 +207,7 @@ describe('compiler SQL snapshots', () => {
     const p = read('g.V().group().by("name").by(__.tail())');
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'elementLast', elem: 'vertex' } });
     expect(p.sql).toContain("json_extract(n.props, '$.name') AS gk");
-    expect(p.sql).toContain('n.id AS v_id');
+    expect(p.sql).toContain('COALESCE(n.uid, n.id) AS v_id');
     expect(p.sql).toContain('ORDER BY gk'); // element value → no GROUP BY, ordered for run-folding
   });
 
@@ -633,6 +633,22 @@ describe('compiler execution semantics', () => {
       .toEqual(['josh', 'lop', 'lop', 'marko', 'ripple', 'vadas']);
     // both() one hop from marko = 3 incident
     expect(run(store, 'g.V(1).repeat(__.both()).times(1).count()').map((r) => r.v)).toEqual([3]);
+  });
+
+  test('user-supplied string ids: create, seed, traverse, expose (COALESCE uid,id)', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    const w = (q: string) => { const p = compile(q, {}); if (p.kind !== 'write') throw new Error('want write'); return p.run(store); };
+    const r = (q: string) => { const p = compile(q, {}); if (p.kind === 'write') return p.run(store); return store.query(p.sql, p.binds); };
+    w('g.addV("person").property(T.id,"person:marko").property("name","marko")');
+    w('g.addV("person").property(T.id,"person:vadas").property("name","vadas")');
+    w('g.V("person:marko").addE("knows").to(__.V("person:vadas"))');
+    expect(r('g.V("person:marko").id()').map((x: any) => x.v)).toEqual(['person:marko']); // V(uid) seed + id() exposure
+    expect(r('g.V("person:marko").out("knows").id()').map((x: any) => x.v)).toEqual(['person:vadas']); // traverse + expose
+    expect(r('g.V("person:marko").values("name")').map((x: any) => x.v)).toEqual(['marko']);
+    // plain addV (no T.id) keeps its integer rowid as the id — mixed graph
+    const lop = w('g.addV("software").property("name","lop")');
+    expect(typeof (lop[0] as any).vertex.id).toBe('number');
+    expect(r('g.V().has("name","lop").id()').map((x: any) => typeof x.v)).toEqual(['number']);
   });
 
   test('and/or/union/optional execute correctly', () => {

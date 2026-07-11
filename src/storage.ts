@@ -17,11 +17,15 @@ export interface Sql {
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS labels(
      id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE)`,
+  // `id` stays the SQLite rowid (integer PK) — the whole covering-index /
+  // index-only-scan perf story rides on integer src/tgt joins. `uid` is the
+  // optional TinkerPop user-supplied id (string/custom); UNIQUE auto-indexes it
+  // for the V(uid) lookup. Elements report COALESCE(uid, id) as their id.
   `CREATE TABLE IF NOT EXISTS nodes(
-     id INTEGER PRIMARY KEY, label INTEGER NOT NULL REFERENCES labels(id),
+     id INTEGER PRIMARY KEY, uid TEXT UNIQUE, label INTEGER NOT NULL REFERENCES labels(id),
      props TEXT NOT NULL DEFAULT '{}')`,
   `CREATE TABLE IF NOT EXISTS edges(
-     id INTEGER PRIMARY KEY, src INTEGER NOT NULL, label INTEGER NOT NULL,
+     id INTEGER PRIMARY KEY, uid TEXT UNIQUE, src INTEGER NOT NULL, label INTEGER NOT NULL,
      tgt INTEGER NOT NULL, props TEXT NOT NULL DEFAULT '{}')`,
   `CREATE INDEX IF NOT EXISTS n_label ON nodes(label)`,
   `CREATE INDEX IF NOT EXISTS e_out ON edges(src, label, tgt)`,

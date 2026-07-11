@@ -312,8 +312,16 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
   let elem: Elem = first.name === 'E' ? 'edge' : 'node';
   const srcTable = elem === 'edge' ? 'edges' : 'nodes';
   if (first.args.length > 0) {
-    ctes.push(`c0 AS (SELECT id FROM ${srcTable} WHERE id IN (${first.args.map(() => '?').join(',')}))`);
-    binds.push(...first.args.map(Number));
+    // V(...)/E(...) ids: numeric args match the rowid, string args match the
+    // user id (uid). The id-relation carries rowids throughout, so a uid match
+    // still projects `id` (the rowid).
+    const nums = first.args.filter((a) => typeof a === 'number');
+    const strs = first.args.filter((a) => typeof a === 'string');
+    const clauses: string[] = [];
+    if (nums.length) { clauses.push(`id IN (${nums.map(() => '?').join(',')})`); binds.push(...nums); }
+    if (strs.length) { clauses.push(`uid IN (${strs.map(() => '?').join(',')})`); binds.push(...strs); }
+    if (!clauses.length) throw new Error('V()/E() ids must be numbers or strings');
+    ctes.push(`c0 AS (SELECT id FROM ${srcTable} WHERE ${clauses.join(' OR ')})`);
   } else {
     ctes.push(`c0 AS (SELECT id FROM ${srcTable})`);
   }
@@ -568,7 +576,7 @@ function compileRead(steps: Step[], params: Record<string, any> = {}): Compiled 
     const { bys, end } = collectBys(steps, stop);
     if (end < steps.length) throw new Error(`step not implemented after ${steps[stop].name}(): ${steps[end].name}()`);
     const tbl = elem === 'edge' ? 'edges' : 'nodes';
-    const ctx: ScalarCtx = { elem, idExpr: 'n.id', propsExpr: 'n.props', labelIdExpr: 'n.label', srcExpr: 'n.src', tgtExpr: 'n.tgt' };
+    const ctx: ScalarCtx = { elem, idExpr: 'n.id', extIdExpr: 'COALESCE(n.uid, n.id)', propsExpr: 'n.props', labelIdExpr: 'n.label', srcExpr: 'n.src', tgtExpr: 'n.tgt' };
     const src: GroupSource = { from: `${tbl} n JOIN ${last} p ON n.id=p.id`, ctx, elem: elem === 'edge' ? 'edge' : 'vertex' };
     return compileGroup(steps[stop].name === 'groupCount', bys, src, ctes, binds, indexKeys, params);
   }
@@ -664,6 +672,9 @@ function compileRead(steps: Step[], params: Record<string, any> = {}): Compiled 
   // The projected scalar expression (+ its binds), captured so a trailing is(P)
   // can filter on it. Non-scalar projections leave it null → is() throws.
   let scalarExpr: string | null = null, scalarBinds: any[] = [];
+  // An element reports its user id when it has one, else the rowid. Used only in
+  // the outward-facing projection — the id-relation joins keep the raw rowid.
+  const extId = 'COALESCE(n.uid, n.id)';
   switch (projName) {
     case 'values': {
       shape = { kind: 'value' };
@@ -680,23 +691,23 @@ function compileRead(steps: Step[], params: Record<string, any> = {}): Compiled 
     case 'id':
       // Join the element table even though the id lives in `last`, so a preceding
       // order().by(key) — which references n.props — has the alias in scope.
-      shape = { kind: 'value' }; cols = `n.id AS v`; from = vJoin; scalarExpr = 'n.id'; break;
+      shape = { kind: 'value' }; cols = `${extId} AS v`; from = vJoin; scalarExpr = extId; break;
     case 'label':
       shape = { kind: 'value' }; cols = `l.name AS v`; from = vlJoin; scalarExpr = 'l.name'; break;
     case 'valueMap': {
       const keys = projStep!.args.filter((a) => typeof a === 'string') as string[];
       shape = { kind: 'valueMap', keys: keys.length ? keys : null, tokens: projStep!.args.includes(true) };
-      cols = `n.id, l.name AS label, n.props`; from = vlJoin; break;
+      cols = `${extId} AS id, l.name AS label, n.props`; from = vlJoin; break;
     }
     case 'elementMap': {
       if (elem === 'edge') throw new Error('elementMap() on edges not yet supported'); // needs IN/OUT direction tokens
       const keys = projStep!.args.filter((a) => typeof a === 'string') as string[];
       shape = { kind: 'elementMap', keys: keys.length ? keys : null };
-      cols = `n.id, l.name AS label, n.props`; from = vlJoin; break;
+      cols = `${extId} AS id, l.name AS label, n.props`; from = vlJoin; break;
     }
     default: // the element itself
-      if (elem === 'edge') { shape = { kind: 'edge' }; cols = `n.id, l.name AS label, n.src, n.tgt, n.props`; from = vlJoin; }
-      else { shape = { kind: 'vertex' }; cols = `n.id, l.name AS label, n.props`; from = vlJoin; }
+      if (elem === 'edge') { shape = { kind: 'edge' }; cols = `${extId} AS id, l.name AS label, n.src, n.tgt, n.props`; from = vlJoin; }
+      else { shape = { kind: 'vertex' }; cols = `${extId} AS id, l.name AS label, n.props`; from = vlJoin; }
   }
 
   // is(P): filter the projected scalar. Folds into the WHERE so a following
@@ -764,7 +775,8 @@ function byToEntry(byArgs: any[] | undefined): { sub: 'vertex' | 'value'; key?: 
  *  on these. Property context carries the json_each expansion's columns. */
 export interface ScalarCtx {
   elem: 'node' | 'edge' | 'property';
-  idExpr: string;        // n.id
+  idExpr: string;        // n.id  (rowid — for correlated joins)
+  extIdExpr?: string;    // COALESCE(n.uid, n.id) — the outward-facing id for framing
   propsExpr: string;     // n.props   (base row, directly readable)
   labelIdExpr: string;   // n.label
   srcExpr?: string;      // n.src  (edge)
@@ -1001,7 +1013,7 @@ function compileSelectProject(
     const src = sourceOf(keys[0]);
     const e = entryKind(0);
     if (e.sub === 'vertex') {
-      const sql = `SELECT ${distinct ? 'DISTINCT ' : ''}n.id, l.name AS label, n.props FROM nodes n JOIN ${last} p ON n.id=${src} JOIN labels l ON l.id=n.label${tailSql}`;
+      const sql = `SELECT ${distinct ? 'DISTINCT ' : ''}COALESCE(n.uid, n.id) AS id, l.name AS label, n.props FROM nodes n JOIN ${last} p ON n.id=${src} JOIN labels l ON l.id=n.label${tailSql}`;
       return { kind: 'read', sql: withPrefix + sql, binds, shape: { kind: 'vertex' }, indexKeys: [...indexKeys] };
     }
     // A by(key) here is a projection, not a filter/order — deliberately NOT
@@ -1022,7 +1034,7 @@ function compileSelectProject(
     joins.push(`JOIN nodes ${prefix}n ON ${prefix}n.id=${src}`);
     if (e.sub === 'vertex') {
       joins.push(`JOIN labels ${prefix}l ON ${prefix}l.id=${prefix}n.label`);
-      cols.push(`${prefix}n.id AS ${prefix}_id`, `${prefix}l.name AS ${prefix}_label`, `${prefix}n.props AS ${prefix}_props`);
+      cols.push(`COALESCE(${prefix}n.uid, ${prefix}n.id) AS ${prefix}_id`, `${prefix}l.name AS ${prefix}_label`, `${prefix}n.props AS ${prefix}_props`);
     } else {
       const pe = propExtract(`${prefix}n.props`, e.key); fb.push(...pe.binds); // projection, not indexed
       cols.push(`${pe.sql} AS ${prefix}_v`);
@@ -1045,10 +1057,10 @@ interface GroupSource { from: string; ctx: ScalarCtx; elem: ElemShape; }
  *  base exprs from ctx. label rides as a subquery so the FROM needs no labels join. */
 function elementSelect(elem: ElemShape, prefix: string, ctx: ScalarCtx): string {
   if (elem === 'edge')
-    return `${ctx.idExpr} AS ${prefix}_id, ${labelNameSub(ctx.labelIdExpr)} AS ${prefix}_label, ${ctx.srcExpr} AS ${prefix}_src, ${ctx.tgtExpr} AS ${prefix}_tgt, ${ctx.propsExpr} AS ${prefix}_props`;
+    return `${ctx.extIdExpr ?? ctx.idExpr} AS ${prefix}_id, ${labelNameSub(ctx.labelIdExpr)} AS ${prefix}_label, ${ctx.srcExpr} AS ${prefix}_src, ${ctx.tgtExpr} AS ${prefix}_tgt, ${ctx.propsExpr} AS ${prefix}_props`;
   if (elem === 'property')
     return `${ctx.ownerExpr} AS ${prefix}_owner, ${ctx.pkExpr} AS ${prefix}_pk, ${ctx.pvExpr} AS ${prefix}_pv`;
-  return `${ctx.idExpr} AS ${prefix}_id, ${labelNameSub(ctx.labelIdExpr)} AS ${prefix}_label, ${ctx.propsExpr} AS ${prefix}_props`;
+  return `${ctx.extIdExpr ?? ctx.idExpr} AS ${prefix}_id, ${labelNameSub(ctx.labelIdExpr)} AS ${prefix}_label, ${ctx.propsExpr} AS ${prefix}_props`;
 }
 
 /** The SQL expr to GROUP BY / frame an element by identity. */
@@ -1279,21 +1291,35 @@ function compileInject(steps: Step[]): Compiled {
 
 // g.addV('label').property(k, v)...
 function compileAddV(steps: Step[]): WritePlan {
-  const label = steps[0].args[0] ?? 'vertex';
+  let label = (typeof steps[0].args[0] === 'string' ? steps[0].args[0] : null) ?? 'vertex';
   const props: Record<string, any> = {};
+  let uid: string | number | null = null; // user-supplied id via property(T.id, …)
   for (const s of steps.slice(1)) {
     if (s.name !== 'property') throw new Error(`step not implemented after addV: ${s.name}()`);
-    props[s.args[0]] = s.args[1];
+    const [key, val] = s.args;
+    // property(T.id, …)/property(T.label, …): id/label tokens, not data props.
+    if (key && typeof key === 'object' && 'token' in key) {
+      if (key.token === 'id') uid = val;
+      else if (key.token === 'label') label = String(val);
+      else throw new Error(`property(T.${key.token}) not supported`);
+      continue;
+    }
+    props[key] = val;
   }
   return {
     kind: 'write',
     run: (store) => {
       const lid = store.labelId(label);
+      // A numeric T.id writes the rowid directly; a string T.id is the uid.
+      const uidCol = typeof uid === 'string' ? uid : null;
+      const idCol = typeof uid === 'number' ? uid : null;
+      const cols = ['label', 'props', ...(uidCol !== null ? ['uid'] : []), ...(idCol !== null ? ['id'] : [])];
+      const vals: any[] = [lid, JSON.stringify(props), ...(uidCol !== null ? [uidCol] : []), ...(idCol !== null ? [idCol] : [])];
       const row = store.query(
-        'INSERT INTO nodes(label, props) VALUES(?, ?) RETURNING id',
-        [lid, JSON.stringify(props)],
+        `INSERT INTO nodes(${cols.join(', ')}) VALUES(${cols.map(() => '?').join(', ')}) RETURNING id, uid`,
+        vals,
       )[0];
-      return [{ vertex: { id: row.id, label, props } }];
+      return [{ vertex: { id: row.uid ?? row.id, label, props } }];
     },
   };
 }
@@ -1303,23 +1329,31 @@ function compileAddE(steps: Step[], params: Record<string, any>): WritePlan {
   const [vStep, addE, to] = steps;
   if (steps.length !== 3 || vStep.name !== 'V' || addE.name !== 'addE' || to.name !== 'to')
     throw new Error('addE currently supports exactly g.V(id).addE(label).to(__.V(id))');
-  const src = Number(vStep.args[0]);
+  const srcArg = vStep.args[0];
   const nested = to.args[0]?.nested;
   if (!nested) throw new Error('to() must contain a nested traversal');
   const inner = stepChain(nested, params);
   if (inner.length !== 1 || inner[0].name !== 'V' || inner[0].args.length !== 1)
     throw new Error('to() nested traversal must be __.V(id) for now');
-  const tgt = Number(inner[0].args[0]);
+  const tgtArg = inner[0].args[0];
   const label = addE.args[0];
   return {
     kind: 'write',
     run: (store) => {
+      // Endpoints are rowids internally; a string arg resolves through uid.
+      const resolve = (a: any): number => {
+        if (typeof a !== 'string') return Number(a);
+        const r = store.query<{ id: number }>('SELECT id FROM nodes WHERE uid=?', [a])[0];
+        if (!r) throw new Error(`addE: no vertex with id '${a}'`);
+        return r.id;
+      };
       const lid = store.labelId(label);
       const row = store.query(
         'INSERT INTO edges(src, label, tgt) VALUES(?,?,?) RETURNING id',
-        [src, lid, tgt],
+        [resolve(srcArg), lid, resolve(tgtArg)],
       )[0];
-      return [{ edge: { id: row.id, label, src, tgt } }];
+      // Echo the endpoint ids the caller used (uid if supplied) on the wire.
+      return [{ edge: { id: row.id, label, src: srcArg, tgt: tgtArg } }];
     },
   };
 }
