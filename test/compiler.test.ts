@@ -364,6 +364,39 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().coalesce(__.out("knows"), __.out("created"))', {})).toThrow('step not implemented: coalesce()');
   });
 
+  // ---- P3: repeat/times/emit ----
+
+  test('repeat().times() → WITH RECURSIVE walk(id, depth); final depth only', () => {
+    const p = read('g.V().repeat(__.out()).times(2).values("name")');
+    expect(p.sql).toContain('WITH RECURSIVE');
+    expect(p.sql).toContain('AS (SELECT id, 0 AS depth FROM c0 UNION ALL SELECT e.tgt AS id, w1.depth + 1 AS depth FROM w1 JOIN edges e ON e.src=w1.id WHERE w1.depth < 2)');
+    expect(p.sql).toContain('WHERE depth = 2');
+  });
+
+  test('emit position controls the projected depth band', () => {
+    expect(read('g.V().repeat(__.out()).times(2).emit()').sql).toContain('WHERE depth >= 1'); // after → iterations
+    expect(read('g.V().emit().repeat(__.out()).times(2)').sql).toContain('WHERE depth >= 0'); // before → + seed
+    expect(read('g.V().repeat(__.out()).times(2)').sql).toContain('WHERE depth = 2');          // times only → final
+  });
+
+  test('both() repeat emits two recursive terms', () => {
+    const p = read('g.V().repeat(__.both()).times(2)');
+    expect(p.sql).toContain('e.tgt AS id, w1.depth + 1');
+    expect(p.sql).toContain('e.src AS id, w1.depth + 1'); // both directions
+  });
+
+  test('repeat requires times() (unbounded emit/until deferred); sequential repeats chain', () => {
+    // require times() — bounds the recursive depth (guards against fan-out blow-up)
+    expect(() => compile('g.V().repeat(__.out())', {})).toThrow('without times()');
+    expect(() => compile('g.V().repeat(__.out()).emit()', {})).toThrow('without times()');
+    expect(() => compile('g.V().repeat(__.out()).until(__.hasLabel("x")).times(3)', {})).toThrow('repeat().until() not yet supported');
+    expect(() => compile('g.V().repeat(__.out().order()).times(2)', {})).toThrow('single out()/in()/both() only');
+    expect(() => compile('g.V().emit().times(2)', {})).toThrow('without repeat()');
+    // a second repeat is NOT swallowed — it compiles as a chained cluster (two walks)
+    const chained = read('g.V().repeat(__.out()).times(1).repeat(__.out()).times(1).values("name")');
+    expect((chained.sql.match(/UNION ALL SELECT e\.tgt/g) || []).length).toBe(2); // two walk CTEs
+  });
+
   test('P.inside is exclusive-low (distinct from between)', () => {
     // between = [lo,hi) ; inside = (lo,hi)
     expect(read('g.V().has("age", P.between(29,35))').sql).toContain('>= ? AND');
@@ -584,6 +617,22 @@ describe('compiler execution semantics', () => {
     // people known by someone
     expect(run(store, 'g.V().hasLabel("person").where(__.inE("knows").count().is(P.gte(1))).values("name")').map((r) => r.v).sort()).toEqual(['josh', 'vadas']);
     expect(run(store, 'g.V().filter(__.out("created")).values("name")').map((r) => r.v).sort()).toEqual(['josh', 'marko', 'peter']);
+  });
+
+  test('repeat/times/emit execute (multiset + emit bands)', () => {
+    const store = seededStore();
+    // exactly 2 out-hops from all V → ripple, lop
+    expect(run(store, 'g.V().repeat(__.out()).times(2).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple']);
+    // times before repeat is the same
+    expect(run(store, 'g.V(1).times(2).repeat(__.out()).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple']);
+    // emit-after from marko: depth1 {vadas,josh,lop} + depth2 {ripple,lop} — lop twice (multiset)
+    expect(run(store, 'g.V(1).repeat(__.out()).times(2).emit().values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'lop', 'lop', 'ripple', 'vadas']);
+    // emit-before adds the seed (marko)
+    expect(run(store, 'g.V(1).emit().repeat(__.out()).times(2).values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'lop', 'lop', 'marko', 'ripple', 'vadas']);
+    // both() one hop from marko = 3 incident
+    expect(run(store, 'g.V(1).repeat(__.both()).times(1).count()').map((r) => r.v)).toEqual([3]);
   });
 
   test('and/or/union/optional execute correctly', () => {

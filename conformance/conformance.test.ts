@@ -184,6 +184,14 @@ describe('conformance host — modern graph (official ids/results)', () => {
     expect(await g.V(2).optional(__.out('created')).values('name').toList()).toEqual(['vadas']);
   });
 
+  // P3: repeat/times/emit over the real wire (recursive CTE round-trip).
+  test('g_V_repeatXoutX_timesX2X (+emit)', async () => {
+    expect((await g.V().repeat(__.out()).times(2).values('name').toList()).sort()).toEqual(['lop', 'ripple']);
+    // emit-after from marko includes intermediates (lop appears twice — multiset)
+    expect((await g.V(1).repeat(__.out()).times(2).emit().values('name').toList()).sort())
+      .toEqual(['josh', 'lop', 'lop', 'ripple', 'vadas']);
+  });
+
   test('sum of doubles landing on a whole number stays Double (not Long)', async () => {
     // ripple(5) has one incident edge, weight 1.0 → sum 1.0. Must frame as Double
     // (d[1.0].d → JS number), not Long (which deserializes as BigInt). Guards the
