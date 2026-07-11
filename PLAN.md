@@ -89,12 +89,16 @@ CREATE INDEX e_in  ON edges(tgt, label, src);  -- the table, index-only hops
 CREATE INDEX n_label ON nodes(label);
 ```
 
-- Property filters: `json_extract(props, '$.' || ?)` with the key **bound**,
-  never spliced (injection-safe by construction; mirrors Gremlin's own
-  parameterization).
+- Property filters: `json_extract(props, '$.<key>')` with identifier-safe keys
+  spliced **literally** (validated against `^[A-Za-z_][A-Za-z0-9_]*$`), exotic
+  keys bound (`'$.'||?`). The literal path is REQUIRED for the expression index
+  below to match — a bound path never does, forcing a full scan (measured ~90×
+  slower). Injection-safe by validation, not parameterization. See
+  `compiler.ts` `propExtract` and `test/performance.test.ts`.
 - Hot properties: expression indexes created on demand via a management
   endpoint (`CREATE INDEX ... ON nodes(json_extract(props,'$.name'))`);
-  SQLite's planner picks them up automatically.
+  SQLite's planner picks them up automatically — but ONLY because the compiled
+  predicate uses the matching literal path (above).
 - Constraint: DO SQLite has no user-defined functions. Anything SQL can't
   express (regex TextP) filters post-SQL in JS.
 
