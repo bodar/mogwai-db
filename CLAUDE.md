@@ -16,6 +16,15 @@ The name: mogwai are what gremlins start as. A DO that becomes a Gremlin
 server when you feed it. npm name `mogwai-db` (bare `mogwai` is squatted by
 a dead 2013 OGM).
 
+## Working rules
+
+- **No new dependencies without explicit approval.** Do not add a package
+  (runtime or dev) — or a second build/test tool — without asking first and
+  getting a clear yes. This includes defaults pulled in by skills or docs
+  (e.g. a skill suggesting Vitest when the project runs `bun test`).
+  Reconcile any such suggestion against the project's existing stack and
+  surface the tradeoff instead of silently adding it.
+
 ## Locked decisions — do not relitigate without strong cause
 
 1. **TinkerPop 4, not 3.7.** v4 dropped bytecode entirely; the wire format is

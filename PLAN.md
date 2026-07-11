@@ -70,8 +70,10 @@ provide platform `deps`), and `src/database/TalebraryDatabase.ts` +
   in `Bun.serve`; `src/cloudflare/worker.ts` (the DO) provides
   `{store: new DurableObjectSqlite(ctx.storage.sql)}` and wraps `handler` in the
   DO `fetch`. `package.json` `module` points at the CF entry (talebrary does this).
-- **Do this early** (before/with P1), while the surface is small — it makes P4
-  a drop-in rather than a port, and lets both runtimes share one test suite.
+- **DONE.** The seam, both adapters, `application(deps)`, and both entry points
+  exist; one contract test runs on both runtimes over the real wire. `io` ended
+  up a shared module (relative import bypasses gremlin's `exports` map and
+  bundles under esbuild), not an injected leaf — only `store` is injected.
 
 ## Schema (performance rationale inline)
 
@@ -160,11 +162,12 @@ unlocks most of the Medium tier; design it once, carefully:
   nested traversals).
 
 **P4 — DO deployment.**
-- Add the `DurableObjectSqlite` implementation of the `GraphStore` interface
-  (`ctx.storage.sql`, synchronous like `bun:sqlite`) and the
-  `src/cloudflare/worker.ts` entry point. If the DI seam landed early (see
-  "Runtime abstraction" in Architecture), this is a drop-in, not a port.
-- Worker router (LOCKED design): `POST /g/{graphId}` → `idFromName(graphId)`
+- DONE: the DI seam (`Sql` interface + agnostic `GraphStore`), both adapters
+  (`BunSqlite`, `DurableObjectSqlite`), `application(deps)` yadic wiring, and
+  the `src/cloudflare/worker.ts` entry (Worker + `GraphDatabase` DO). The shared
+  contract test (`test/contract.ts`) passes on both runtimes over GraphBinary;
+  the Worker builds for production (`wrangler deploy --dry-run`, ~265 KB gzip).
+- Remaining: Worker router (LOCKED design): `POST /g/{graphId}` → `idFromName(graphId)`
   → DO; graph springs into existence on first request. The request's `g`
   field selects an optional named graph *within* the tenant. Never route on
   the `g` field at the Worker (forces body-parse before routing). Deletion/

@@ -3,10 +3,13 @@
   "version": "0.1.0",
   "description": "TinkerPop 4 Gremlin server compiled onto SQLite, targeting Cloudflare Durable Objects",
   "type": "module",
-  "main": "src/server.ts",
+  "main": "src/bun/server.ts",
+  "module": "src/cloudflare/worker.ts",
   "scripts": {
-    "start": "bun run src/server.ts",
-    "test": "bun test"
+    "start": "bun run src/bun/server.ts",
+    "test": "bun test",
+    "dev:cf": "wrangler dev",
+    "deploy": "wrangler deploy"
   },
   "keywords": [
     "gremlin",
@@ -28,11 +31,14 @@
   },
   "homepage": "https://github.com/bodar/mogwai-db#readme",
   "dependencies": {
+    "@bodar/yadic": "npm:@jsr/bodar__yadic",
     "antlr4ng": "^3.0.16",
     "gremlin": "^4.0.0-beta.2"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260711.1",
     "@types/bun": "^1.3.14",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "wrangler": "^4.110.0"
   }
 }

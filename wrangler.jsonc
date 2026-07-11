@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mogwai-db",
+  "main": "src/cloudflare/worker.ts",
+  "compatibility_date": "2026-07-01",
+  // nodejs_compat: the reused GraphBinary serializers use node's Buffer.
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "GRAPH", "class_name": "GraphDatabase" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GraphDatabase"] }]
+}
