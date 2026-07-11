@@ -119,6 +119,7 @@ export interface MapEntry { key: string; prefix: string; sub: 'vertex' | 'value'
 export type Shape =
   | { kind: 'vertex' }
   | { kind: 'edge' }
+  | { kind: 'property' } // properties(): VertexProperty elements (owner/key/value cols)
   | { kind: 'value' }
   | { kind: 'count' }
   | { kind: 'valueMap'; keys: string[] | null; tokens: boolean }
@@ -357,6 +358,12 @@ function compileRead(steps: Step[]): Compiled {
   const { ctes, binds, stop, indexKeys, aliases, elem } = traversalCtes(steps);
   const last = `c${ctes.length - 1}`;
 
+  // properties() turns the traverser into a property (owner+key+value) — a shape
+  // the node/edge id-relation can't carry, so it and its follow-ons (key/value/
+  // element/count) compile in their own tail fn rather than the movement phase.
+  if (steps[stop]?.name === 'properties')
+    return compileProperties(ctes, binds, last, elem, steps.slice(stop), indexKeys);
+
   // Tail phase: an optional projection + order()/range()/skip()/limit() and dedup.
   let projStep: Step | null = null;
   const orders: OrderClause[] = [];
@@ -569,6 +576,77 @@ function compileSelectProject(
 
   const sql = `SELECT ${distinct ? 'DISTINCT ' : ''}${cols.join(', ')} FROM ${joins.join(' ')}${tailSql}`;
   return { kind: 'read', sql: withPrefix + sql, binds: [...binds, ...fb], shape: { kind: 'map', entries }, indexKeys: [...indexKeys] };
+}
+
+/**
+ * properties()/properties(keys) on the current element, plus an optional single
+ * follow-on: key()/value()/count(), or element()[.values(k)/.id()/.label()/
+ * .count()]. The traverser is a property — a json_each expansion over the
+ * owner's props — carrying owner id/label/props + the property key(pk)/value(pv).
+ * Chains that traverse on past element() (e.g. properties().element().out()) and
+ * property predicates (hasKey/hasValue) are deferred to later work.
+ */
+function compileProperties(
+  ctes: string[], binds: any[], last: string, elem: Elem, tail: Step[], indexKeys: Set<string>,
+): Compiled {
+  const tbl = elem === 'edge' ? 'edges' : 'nodes';
+  const keys = tail[0].args.filter((a): a is string => typeof a === 'string');
+  const fb: any[] = [];
+  const keyFilter = keys.length ? ` WHERE je.key IN (${keys.map(() => '?').join(',')})` : '';
+  if (keys.length) fb.push(...keys);
+  // Expand each element's JSON props into (owner, key, value) rows; keep the
+  // owner's label/props too so a following element() projection has them.
+  const pc = `c${ctes.length}`;
+  const propCte = `${pc} AS (SELECT n.id AS owner, l.name AS ownerLabel, n.props AS ownerProps, je.key AS pk, je.value AS pv FROM ${tbl} n JOIN ${last} p ON n.id=p.id JOIN labels l ON l.id=n.label, json_each(n.props) je${keyFilter})`;
+  const allCtes = [...ctes, propCte];
+  const withPrefix = `WITH ${allCtes.join(',\n')}\n`;
+  // `consumed` = how many tail steps this shape accounts for; reject any trailing
+  // steps rather than silently dropping them (matches the file's discard-discipline).
+  const done = (sql: string, shape: Shape, consumed: number): Compiled => {
+    if (tail.length > consumed)
+      throw new Error(`step not implemented after properties(): ${tail[consumed].name}()`);
+    return { kind: 'read', sql: withPrefix + sql, binds: [...binds, ...fb], shape, indexKeys: [...indexKeys] };
+  };
+
+  const next = tail[1]?.name;
+  switch (next) {
+    case undefined: // properties() terminal → VertexProperty elements
+      return done(`SELECT owner, pk, pv FROM ${pc}`, { kind: 'property' }, 1);
+    case 'key':
+      return done(`SELECT pk AS v FROM ${pc}`, { kind: 'value' }, 2);
+    case 'value':
+      return done(`SELECT pv AS v FROM ${pc}`, { kind: 'value' }, 2);
+    case 'count':
+      return done(`SELECT COUNT(*) AS v FROM ${pc}`, { kind: 'count' }, 2);
+    case 'element': {
+      // Back to the owning element. Support a terminal projection off it.
+      const after = tail[2]?.name;
+      // Bare element() needs the full owner element; for an edge that means
+      // src/tgt cols the property CTE doesn't carry, so defer just that case.
+      // Scalar projections (.id/.label/.values/.count) need no such cols.
+      if (elem === 'edge' && after === undefined)
+        throw new Error('element() of an edge property not yet supported');
+      switch (after) {
+        case undefined:
+          return done(`SELECT owner AS id, ownerLabel AS label, ownerProps AS props FROM ${pc}`, { kind: 'vertex' }, 2);
+        case 'id':
+          return done(`SELECT owner AS v FROM ${pc}`, { kind: 'value' }, 3);
+        case 'label':
+          return done(`SELECT ownerLabel AS v FROM ${pc}`, { kind: 'value' }, 3);
+        case 'values': {
+          const pe = propExtract('ownerProps', tail[2].args[0]);
+          fb.push(...pe.binds, ...pe.binds); // SELECT + WHERE occurrences
+          return done(`SELECT ${pe.sql} AS v FROM ${pc} WHERE ${pe.sql} IS NOT NULL`, { kind: 'value' }, 3);
+        }
+        case 'count':
+          return done(`SELECT COUNT(*) AS v FROM ${pc}`, { kind: 'count' }, 3);
+        default:
+          throw new Error(`step not implemented after element(): ${after}()`);
+      }
+    }
+    default:
+      throw new Error(`step not implemented after properties(): ${next}()`);
+  }
 }
 
 // g.V(...).<filters>.drop() — delete the target vertices and their incident

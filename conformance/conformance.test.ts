@@ -107,6 +107,16 @@ describe('conformance host — modern graph (official ids/results)', () => {
       expect(e.properties.find((p: any) => p.key === 'weight')).toBeDefined(); // props materialised
     }
   });
+
+  // P2c-1b: property elements over the real wire.
+  test('g_VX1X_properties_value / _key (VertexProperty elements)', async () => {
+    expect((await g.V(1).properties().value().toList()).sort()).toEqual([29, 'marko']);
+    expect((await g.V(1).properties().key().toList()).sort()).toEqual(['age', 'name']);
+    const props = await g.V(1).properties('name').toList();
+    expect(props.length).toBe(1);
+    expect(props[0].key).toBe('name');
+    expect(props[0].value).toBe('marko');
+  });
 });
 
 describe('conformance host — empty graph write/reset (ggraph)', () => {

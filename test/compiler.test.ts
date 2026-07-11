@@ -173,6 +173,34 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V(1).outE().project("w").by("weight")', {})).toThrow('project() of an edge is not yet supported');
   });
 
+  test('properties() expands props via json_each into a property shape', () => {
+    const p = read('g.V().properties()');
+    expect(p.sql).toContain('json_each(n.props) je');
+    expect(p.shape).toEqual({ kind: 'property' });
+    // key filter uses WHERE, and binds the requested keys
+    const named = read('g.V().properties("name","age")');
+    expect(named.sql).toContain('WHERE je.key IN (?,?)');
+    expect(named.binds).toEqual(['name', 'age']);
+  });
+
+  test('properties() follow-ons: key/value/count/element project the right column', () => {
+    expect(read('g.V().properties().key()').sql).toContain('SELECT pk AS v');
+    expect(read('g.V().properties().value()').sql).toContain('SELECT pv AS v');
+    expect(read('g.V().properties().count()').shape).toEqual({ kind: 'count' });
+    expect(read('g.V().properties().element()').shape).toEqual({ kind: 'vertex' });
+    expect(read('g.V().properties().element().values("name")').sql).toContain("json_extract(ownerProps, '$.name')");
+  });
+
+  test('properties(): trailing steps past the follow-on throw; edge element().label() allowed', () => {
+    // regression: a step after the resolved follow-on must not be silently dropped
+    expect(() => compile('g.V(1).properties().key().limit(1)', {})).toThrow('step not implemented after properties(): limit()');
+    expect(() => compile('g.V(1).properties().element().values("name").count()', {})).toThrow('step not implemented after properties(): count()');
+    // regression: element().label() on an edge property is a scalar — must NOT be blocked
+    expect(read('g.E(7).properties().element().label()').sql).toContain('ownerLabel AS v');
+    // bare element() on an edge IS still deferred (needs src/tgt)
+    expect(() => compile('g.E(7).properties().element()', {})).toThrow('element() of an edge property not yet supported');
+  });
+
   test('identifier keys splice as literal JSON paths (index-friendly); exotic keys are bound', () => {
     // Safe identifier: spliced literally so `CREATE INDEX ...(json_extract(props,'$.age'))`
     // can engage. See the property-index performance test below.
@@ -309,6 +337,19 @@ describe('compiler execution semantics', () => {
       .toEqual([0.5, 1.0]);
     // bothE from lop(3): the 3 created-edges into it
     expect(run(store, 'g.V(3).bothE().count()').map((r) => r.v)).toEqual([3]);
+  });
+
+  test('properties() streams a VertexProperty per (key,value); key/value/element project', () => {
+    const store = seededStore();
+    // marko(1) has name+age → two properties
+    expect(run(store, 'g.V(1).properties().count()').map((r) => r.v)).toEqual([2]);
+    expect(run(store, 'g.V(1).properties().key()').map((r) => r.v).sort()).toEqual(['age', 'name']);
+    expect(run(store, 'g.V(1).properties("name").value()').map((r) => r.v)).toEqual(['marko']);
+    // element() returns the owner; both properties resolve back to marko
+    expect(run(store, 'g.V(1).properties().element().id()').map((r) => r.v)).toEqual([1, 1]);
+    expect(run(store, 'g.V(1).properties("age").element().values("name")').map((r) => r.v)).toEqual(['marko']);
+    // edge properties too (edge 7 = marko-knows->vadas, weight 0.5)
+    expect(run(store, 'g.E(7).properties().value()').map((r) => r.v)).toEqual([0.5]);
   });
 
   test('drop() after an edge-reading traversal deletes the right vertices', () => {
