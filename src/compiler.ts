@@ -271,6 +271,18 @@ type Elem = 'node' | 'edge';
 const dirsFor = (name: string): [string, string][] =>
   name === 'out' ? [['src', 'tgt']] : name === 'in' ? [['tgt', 'src']] : [['src', 'tgt'], ['tgt', 'src']];
 
+/** A union() branch (currently a single out/in/both movement) → a SELECT of the
+ *  neighbour node ids from `seed`. Non-movement / multi-step branches defer. */
+function branchMovementSelect(bs: Step[], seed: string): { sql: string; binds: any[] } {
+  if (bs.length !== 1 || (bs[0].name !== 'out' && bs[0].name !== 'in' && bs[0].name !== 'both'))
+    throw new Error(`union() branch __.${bs.map((s) => s.name + '()').join('.')} not yet supported (single out()/in()/both() only)`);
+  const mv = bs[0];
+  const lbl = mv.args.length ? ` AND e.label IN (SELECT id FROM labels WHERE name IN (${mv.args.map(() => '?').join(',')}))` : '';
+  const binds: any[] = [];
+  const sel = dirsFor(mv.name).map(([from, to]) => { binds.push(...mv.args); return `SELECT e.${to} AS id FROM edges e JOIN ${seed} p ON e.${from}=p.id${lbl}`; });
+  return { sql: sel.join(' UNION ALL '), binds };
+}
+
 /** Bound as() labels: label -> its carried column and the element kind it holds. */
 type AliasMap = Map<string, { col: string; elem: Elem }>;
 
@@ -355,7 +367,7 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
         const ctx: ScalarCtx = { elem, idExpr: 'n.id', propsExpr: 'n.props', labelIdExpr: 'n.label', srcExpr: 'n.src', tgtExpr: 'n.tgt' };
         let test: string; const fbinds: any[] = [];
         if (arg0 && typeof arg0 === 'object' && 'nested' in arg0) {
-          const pred = compileFilterPredicate(stepChain(arg0.nested, params), ctx);
+          const pred = compileFilterPredicate(stepChain(arg0.nested, params), ctx, params);
           for (const k of pred.indexKeys) indexKeys.add(k);
           test = s.name === 'not' ? `NOT COALESCE((${pred.sql}), 0)` : pred.sql;
           fbinds.push(...pred.binds);
@@ -385,6 +397,44 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
         }
         ctes.push(`c${ctes.length} AS (SELECT n.id${carry()} FROM ${tbl} n JOIN ${prev()} p ON n.id=p.id WHERE ${test})`);
         binds.push(...fbinds);
+        break;
+      }
+      case 'and': case 'or': {
+        // Filter: keep the traverser when ALL / ANY branch predicates hold.
+        const tbl = elem === 'edge' ? 'edges' : 'nodes';
+        const ctx: ScalarCtx = { elem, idExpr: 'n.id', propsExpr: 'n.props', labelIdExpr: 'n.label', srcExpr: 'n.src', tgtExpr: 'n.tgt' };
+        const pred = combineBranchPreds(s, ctx, params, s.name === 'and' ? 'AND' : 'OR');
+        for (const k of pred.indexKeys) indexKeys.add(k);
+        ctes.push(`c${ctes.length} AS (SELECT n.id${carry()} FROM ${tbl} n JOIN ${prev()} p ON n.id=p.id WHERE ${pred.sql})`);
+        binds.push(...pred.binds);
+        break;
+      }
+      case 'union': {
+        // UNION ALL of each branch, seeded from the current relation. Element
+        // branches only (each a single movement step); the merged id-relation
+        // continues downstream. Aliased/edge/scalar/multi-hop branches defer.
+        if (elem !== 'node') throw new Error('union() on edges not yet supported');
+        if (aliases.size > 0) throw new Error('union() after as() not yet supported');
+        const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+        if (branches.length < 2) throw new Error('union() needs at least two branches');
+        const parts = branches.map((b) => branchMovementSelect(stepChain(b.nested, params), prev()));
+        ctes.push(`c${ctes.length} AS (${parts.map((p) => p.sql).join(' UNION ALL ')})`);
+        for (const p of parts) binds.push(...p.binds);
+        break;
+      }
+      case 'optional': {
+        // optional(t) = t if it yields output, else the traverser itself. A
+        // single out()/in() → LEFT JOIN: matches emit the neighbour(s), a miss
+        // COALESCEs back to self. both()/multi-hop/aliased defer.
+        if (elem !== 'node') throw new Error('optional() on edges not yet supported');
+        if (aliases.size > 0) throw new Error('optional() after as() not yet supported');
+        const bs = stepChain(s.args[0]?.nested, params);
+        if (bs.length !== 1 || (bs[0].name !== 'out' && bs[0].name !== 'in'))
+          throw new Error(`optional(__.${bs[0]?.name}()) not yet supported (single out()/in() only)`);
+        const [from, to] = dirsFor(bs[0].name)[0];
+        const lbl = bs[0].args.length ? ` AND e.label IN (SELECT id FROM labels WHERE name IN (${bs[0].args.map(() => '?').join(',')}))` : '';
+        ctes.push(`c${ctes.length} AS (SELECT COALESCE(e.${to}, p.id) AS id FROM ${prev()} p LEFT JOIN edges e ON e.${from}=p.id${lbl})`);
+        binds.push(...bs[0].args);
         break;
       }
       case 'out': case 'in': case 'both': {
@@ -773,9 +823,10 @@ const requireTerminal = (steps: Step[], n: number) => {
  *   __.values(k)[.is(P)]      → current-property predicate (bare → IS NOT NULL)
  *   __.has(k[,v]) / hasLabel  → current-element predicate
  *   __.<move>([label])        → EXISTS over incident edges (bare "has a neighbour")
- * Multi-hop / neighbour-terminal-filter / and()/or() are deferred with clear errors.
+ *   __.and(t…) / __.or(t…)    → the branch predicates combined with AND / OR
+ * Multi-hop / neighbour-terminal-filter are deferred with clear errors.
  */
-function compileFilterPredicate(nested: Step[], ctx: ScalarCtx): { sql: string; binds: any[]; indexKeys: string[] } {
+function compileFilterPredicate(nested: Step[], ctx: ScalarCtx, params: Record<string, any> = {}): { sql: string; binds: any[]; indexKeys: string[] } {
   const indexKeys: string[] = [];
   let body = nested;
   let isPred: any = undefined, hasIs = false;
@@ -783,6 +834,12 @@ function compileFilterPredicate(nested: Step[], ctx: ScalarCtx): { sql: string; 
 
   const head = body[0]?.name;
   if (!head) throw new Error('empty where()/filter() traversal');
+
+  // and(t…)/or(t…): combine each branch's predicate. (infix .and()/.or() — a
+  // multi-step body — is not this shape and falls through to the deferred throw.)
+  if ((head === 'and' || head === 'or') && body.length === 1)
+    return combineBranchPreds(body[0], ctx, params, head === 'and' ? 'AND' : 'OR');
+
   const term = body[body.length - 1]?.name;
 
   // A reducing scalar (count/sum) compared by is(P). Bare (no is) always yields
@@ -819,6 +876,20 @@ function compileFilterPredicate(nested: Step[], ctx: ScalarCtx): { sql: string; 
     return { ...compileExists(body[0], ctx), indexKeys };
   }
   throw new Error(`where()/filter() form not yet supported: __.${body.map((s) => s.name + '()').join('.')}`);
+}
+
+/** and(t…)/or(t…): each branch → a filter predicate, joined by AND/OR. Used both
+ *  as a top-level filter step and inside where(__.and/or). */
+function combineBranchPreds(step: Step, ctx: ScalarCtx, params: Record<string, any>, op: 'AND' | 'OR'): { sql: string; binds: any[]; indexKeys: string[] } {
+  const branches = step.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  if (branches.length < 2) throw new Error(`${step.name}() needs at least two traversal branches`);
+  const binds: any[] = [], indexKeys: string[] = [];
+  const parts = branches.map((b) => {
+    const p = compileFilterPredicate(stepChain(b.nested, params), ctx, params);
+    binds.push(...p.binds); indexKeys.push(...p.indexKeys);
+    return `(${p.sql})`;
+  });
+  return { sql: `(${parts.join(` ${op} `)})`, binds, indexKeys };
 }
 
 /** EXISTS over a single incident-edge movement (out/in/both/outE/inE/bothE),

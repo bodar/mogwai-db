@@ -334,6 +334,36 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().filter(P.gt(1))', {})).toThrow('filter(predicate) not supported');
   });
 
+  // ---- P2 tail: and/or/union/optional ----
+
+  test('and()/or() combine branch predicates; nested where(__.and)', () => {
+    const a = read('g.V().and(__.out("knows"), __.out("created"))');
+    expect(a.sql).toContain('WHERE ((EXISTS(SELECT 1 FROM edges e WHERE e.src=n.id AND e.label IN');
+    expect(a.sql).toContain(') AND (EXISTS(');
+    expect(read('g.V().or(__.out("knows"), __.in("created"))').sql).toContain(') OR (EXISTS(');
+    // <2 branches → clear throw
+    expect(() => compile('g.V().and(__.out())', {})).toThrow('needs at least two traversal branches');
+  });
+
+  test('union() → UNION ALL of movement branches as a merged id-relation', () => {
+    const u = read('g.V(1).union(__.out("knows"), __.out("created")).values("name")');
+    expect(u.sql).toContain('UNION ALL');
+    expect(u.sql).toContain('SELECT e.tgt AS id FROM edges e JOIN c0 p ON e.src=p.id');
+    expect(() => compile('g.V().union(__.out())', {})).toThrow('needs at least two branches');
+    expect(() => compile('g.V().as("a").union(__.out(), __.in())', {})).toThrow('union() after as() not yet supported');
+    expect(() => compile('g.V().union(__.values("name"), __.out())', {})).toThrow('not yet supported (single out()/in()/both() only)');
+  });
+
+  test('optional() → LEFT JOIN with COALESCE fallback to self', () => {
+    const o = read('g.V().optional(__.out("created")).values("name")');
+    expect(o.sql).toContain('SELECT COALESCE(e.tgt, p.id) AS id FROM c0 p LEFT JOIN edges e ON e.src=p.id');
+    expect(() => compile('g.V().optional(__.both())', {})).toThrow('not yet supported (single out()/in() only)');
+  });
+
+  test('coalesce() is deferred with a clear error', () => {
+    expect(() => compile('g.V().coalesce(__.out("knows"), __.out("created"))', {})).toThrow('step not implemented: coalesce()');
+  });
+
   test('P.inside is exclusive-low (distinct from between)', () => {
     // between = [lo,hi) ; inside = (lo,hi)
     expect(read('g.V().has("age", P.between(29,35))').sql).toContain('>= ? AND');
@@ -554,6 +584,21 @@ describe('compiler execution semantics', () => {
     // people known by someone
     expect(run(store, 'g.V().hasLabel("person").where(__.inE("knows").count().is(P.gte(1))).values("name")').map((r) => r.v).sort()).toEqual(['josh', 'vadas']);
     expect(run(store, 'g.V().filter(__.out("created")).values("name")').map((r) => r.v).sort()).toEqual(['josh', 'marko', 'peter']);
+  });
+
+  test('and/or/union/optional execute correctly', () => {
+    const store = seededStore();
+    // and: has BOTH out-knows and out-created → only marko
+    expect(run(store, 'g.V().and(__.out("knows"), __.out("created")).values("name")').map((r) => r.v)).toEqual(['marko']);
+    // union: marko's knows + created neighbours
+    expect(run(store, 'g.V(1).union(__.out("knows"), __.out("created")).values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'lop', 'vadas']);
+    // optional hit: josh created ripple+lop
+    expect(run(store, 'g.V(4).optional(__.out("created")).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple']);
+    // optional miss: vadas has no out-created → falls back to self
+    expect(run(store, 'g.V(2).optional(__.out("created")).values("name")').map((r) => r.v)).toEqual(['vadas']);
+    // optional over the whole graph: marko(2 knows) + 5 others as self = 7
+    expect(run(store, 'g.V().optional(__.out("knows")).count()').map((r) => r.v)).toEqual([7]);
   });
 
   test('alias-compare where — the co-creator idiom', () => {

@@ -174,6 +174,16 @@ describe('conformance host — modern graph (official ids/results)', () => {
     expect(names).toEqual(['josh', 'josh', 'marko', 'marko', 'peter', 'peter']);
   });
 
+  // P2 tail: and/or/union/optional over the real wire.
+  test('g_VX1X_unionXout_knows__out_createdX / and / optional', async () => {
+    expect((await g.V(1).union(__.out('knows'), __.out('created')).values('name').toList()).sort())
+      .toEqual(['josh', 'lop', 'vadas']);
+    expect(await g.V().and(__.out('knows'), __.out('created')).values('name').toList()).toEqual(['marko']);
+    // optional: josh→created ripple/lop; vadas→self
+    expect((await g.V(4).optional(__.out('created')).values('name').toList()).sort()).toEqual(['lop', 'ripple']);
+    expect(await g.V(2).optional(__.out('created')).values('name').toList()).toEqual(['vadas']);
+  });
+
   test('sum of doubles landing on a whole number stays Double (not Long)', async () => {
     // ripple(5) has one incident edge, weight 1.0 → sum 1.0. Must frame as Double
     // (d[1.0].d → JS number), not Long (which deserializes as BigInt). Guards the
