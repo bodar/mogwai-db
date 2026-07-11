@@ -43,6 +43,36 @@ Key decisions and why:
 - **Own IR = the step chain** (`{name, args}[]`). The grammar visitor is a
   thin front-end; if the wire format ever changes again, only that layer moves.
 
+### Runtime abstraction (Bun ⇄ Cloudflare via DI)
+
+One codebase, two runtimes: `bun run` locally, Durable Objects in production.
+The platform-specific leaves are injected; everything above them (parser,
+compiler, framing, request handler) is runtime-agnostic. Wiring uses Dan's
+`@bodar/yadic` (JSR). Reference implementation to mirror:
+`~/Projects/talebrary` — see `src/Application.ts` (the agnostic `application(deps)`
+builder), `src/cloudflare/app.ts` and `src/bun/app.ts` (the two entry points that
+provide platform `deps`), and `src/database/TalebraryDatabase.ts` +
+`D1Adapter.ts` / `src/bun/SqliteDatabase.ts` (the swapped storage interface).
+
+- **The seam is `GraphStore`.** Extract an interface (the `prepare/get/all/run`
+  surface the compiler + framing consume) with two implementations:
+  `BunSqlite` (`bun:sqlite`) and `DurableObjectSqlite` (`ctx.storage.sql`).
+  The compiler already consumes only `{sql, binds}` + write plans, so it needs
+  no change; `src/server.ts`'s `execute()` already takes the store as a param.
+- **Stays synchronous — deliberate divergence from talebrary.** Talebrary's
+  `TalebraryDatabase` is async because D1 is async. We target DO
+  `ctx.storage.sql`, which is *synchronous* (like `bun:sqlite`), so our
+  interface keeps sync `get/all/run` — no promise wrapping, simpler compiler.
+- **Wiring.** `application(deps)` = `LazyMap.create(deps)` layering the
+  agnostic services (`Dependency<'store', GraphStore>`, `Dependency<'io', …>`
+  for the GraphBinary primitives, then the request `handler`). Entry points:
+  `src/bun/server.ts` provides `{store: new BunSqlite(...)}` and wraps `handler`
+  in `Bun.serve`; `src/cloudflare/worker.ts` (the DO) provides
+  `{store: new DurableObjectSqlite(ctx.storage.sql)}` and wraps `handler` in the
+  DO `fetch`. `package.json` `module` points at the CF entry (talebrary does this).
+- **Do this early** (before/with P1), while the surface is small — it makes P4
+  a drop-in rather than a port, and lets both runtimes share one test suite.
+
 ## Schema (performance rationale inline)
 
 ```sql
@@ -130,8 +160,10 @@ unlocks most of the Medium tier; design it once, carefully:
   nested traversals).
 
 **P4 — DO deployment.**
-- Port `storage.ts` to `ctx.storage.sql` (synchronous, like bun:sqlite;
-  the shim was chosen for matching semantics).
+- Add the `DurableObjectSqlite` implementation of the `GraphStore` interface
+  (`ctx.storage.sql`, synchronous like `bun:sqlite`) and the
+  `src/cloudflare/worker.ts` entry point. If the DI seam landed early (see
+  "Runtime abstraction" in Architecture), this is a drop-in, not a port.
 - Worker router (LOCKED design): `POST /g/{graphId}` → `idFromName(graphId)`
   → DO; graph springs into existence on first request. The request's `g`
   field selects an optional named graph *within* the tenant. Never route on
