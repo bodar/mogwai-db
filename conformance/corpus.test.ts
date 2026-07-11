@@ -35,4 +35,5 @@ test('corpus parses and chains at 100%', () => {
 
   expect(parsed).toBe(lines.length);
   expect(chained).toBe(lines.length);
-});
+}, 30_000); // 2,177 parses + one-time ANTLR ATN warm-up; the default 5s times
+            // out on cold/slow CI runners (locally ~2.3s).
