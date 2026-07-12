@@ -150,6 +150,17 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile("g.V().valueMap().toUpper()", {})).toThrow('requires a scalar stream');
   });
 
+  test('values(k).inject(c) appends constants to the value stream', () => {
+    const p = read("g.V().values('age').inject(1000).sum()");
+    expect(p.sql).toContain('UNION ALL');
+    expect(p.sql).toContain('SUM(v)');
+    expect(p.binds).toContain(1000);
+    // append before a min() reducer
+    expect(read("g.V().values('foo').inject(42).min()").sql).toContain('UNION ALL');
+    // rejected on a non-scalar projection
+    expect(() => compile("g.V().valueMap().inject(1)", {})).toThrow('non-scalar projection');
+  });
+
   test('limit before count wraps the counted id-relation', () => {
     expect(read('g.V().limit(2).count()').sql).toContain('SELECT COUNT(*) AS v FROM (SELECT id FROM c1)');
   });
