@@ -257,7 +257,7 @@ describe('compiler SQL snapshots', () => {
   test('properties().group() over the property stream (vertex-property gate)', () => {
     const p = read('g.V().properties().group().by(__.project("n","k","v").by(__.element().values("name")).by(__.key()).by(__.value())).by(__.tail())');
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'map', parts: [{ key: 'n' }, { key: 'k' }, { key: 'v' }] }, val: { kind: 'elementLast', elem: 'property' } });
-    expect(p.sql).toContain("json_extract(ownerProps, '$.name') AS k0_v");
+    expect(p.sql).toContain("json_extract(c1.ownerProps, '$.name') AS k0_v"); // property-group ctx columns typed via the CTE relation
     expect(p.sql).toContain('pk AS k1_v');
     expect(p.sql).toContain('pv AS k2_v');
     expect(p.sql).toContain('owner AS v_owner'); // property value framing

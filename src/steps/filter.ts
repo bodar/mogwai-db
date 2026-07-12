@@ -1,8 +1,8 @@
 import { q, list } from '../q.ts';
 import { stepChain, type Pred } from '../frontend.ts';
 import {
-  P_OPS, propExtract, labelIn, predicateSql, propAt,
-  compileFilterPredicate, combineBranchPreds, type ScalarCtx, type Elem,
+  P_OPS, propExtract, labelIn, predicateSql, propAt, elemCtx,
+  compileFilterPredicate, combineBranchPreds, type Elem,
 } from '../plan.ts';
 import { advance, carryFrag, elemRel, prevRel, type AliasMap, type St, type StepFn } from './context.ts';
 import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
@@ -21,8 +21,7 @@ function aliasIdExpr(label: string, aliases: AliasMap): string {
 }
 
 /** The scalar context a current-element predicate correlates on (aliased `n`). */
-const currentCtx = (st: St): ScalarCtx =>
-  ({ elem: st.elem, idExpr: 'n.id', propsExpr: 'n.props', labelIdExpr: 'n.label', srcExpr: 'n.src', tgtExpr: 'n.tgt' });
+const currentCtx = (st: St) => elemCtx(elemRel(st), st.elem);
 
 /** `SELECT n.id<carry> FROM <elem> n JOIN prev p … WHERE <test>` — the filter CTE
  *  shape shared by has/hasLabel/where/and/or. */
