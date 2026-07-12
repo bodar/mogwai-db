@@ -115,6 +115,10 @@ ecosystem has it), so upstreaming it later is a real give-back, not a fork.
   `StepFn = (step, St) => St` fold over an immutable `St`) + normalization passes
   (`src/strategies.ts`). See the "Decomposition complete" note in
   `docs/2026-07-11-lazyrecords-cutover-plan.md`. `compiler.ts` is now a 51-line orchestrator.
-- [ ] **Later:** the `plan.ts` ScalarCtx cluster still passes SQL fragments as strings (uses kernel
-  primitives — low priority); then evaluate upstreaming the surface (identifier-default template,
-  `Relation`, typed-self recursive CTE, `list` string-sep) to lazyrecords.
+- [x] **ScalarCtx typed (2026-07-12).** `ScalarCtx`'s fields are now `Expression`, not raw SQL
+  strings — built from typed `Relation` columns (`elemCtx(elemRel(st), elem)` for node/edge; the
+  properties CTE's `Relation` for the property ctx). `propExtract`/`propAt`/`labelIn` accept
+  `Expression | string`; `labelNameSub` returns an `Expression`. No hand-written SQL column
+  fragments remain in the compiler — only `q.ts` touches raw lazyrecords `Text`/`Compound`.
+- [ ] **Later:** evaluate upstreaming the kernel surface (identifier-default template, `Relation`,
+  typed-self recursive CTE, `list`/`values`/`paren` helpers) to lazyrecords.

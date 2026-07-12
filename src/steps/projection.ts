@@ -1,7 +1,7 @@
 import { q, value, list, empty, Relation } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
 import {
-  propExtract, predicateSql, compileNestedScalar, labelNameSub, rangeToOffsetLimit,
+  propExtract, predicateSql, compileNestedScalar, labelNameSub, rangeToOffsetLimit, elemCtx,
   type ScalarCtx,
 } from '../plan.ts';
 import { stepChain, type Step } from '../frontend.ts';
@@ -93,7 +93,7 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
   if (steps[stop]?.name === 'group' || steps[stop]?.name === 'groupCount') {
     if (stop + 1 < steps.length) throw new Error(`step not implemented after ${steps[stop].name}(): ${steps[stop + 1].name}()`);
     const tbl = st.elem === 'edge' ? 'edges' : 'nodes';
-    const ctx: ScalarCtx = { elem: st.elem, idExpr: 'n.id', extIdExpr: 'COALESCE(n.uid, n.id)', propsExpr: 'n.props', labelIdExpr: 'n.label', srcExpr: 'n.src', tgtExpr: 'n.tgt' };
+    const ctx = elemCtx(elemRel(st), st.elem);
     const src: GroupSource = { from: `${tbl} n JOIN ${st.last.name} p ON n.id=p.id`, ctx, elem: st.elem === 'edge' ? 'edge' : 'vertex' };
     return compileGroup(st, steps[stop].name === 'groupCount', steps[stop].bys ?? [], src, indexKeys);
   }
@@ -343,9 +343,9 @@ function elementSelect(elem: ElemShape, prefix: string, ctx: ScalarCtx): Express
 }
 
 /** The SQL expr to GROUP BY / frame an element by identity. */
-const elementIdExpr = (elem: ElemShape, ctx: ScalarCtx) => elem === 'property' ? ctx.pkExpr! : ctx.idExpr;
+const elementIdExpr = (elem: ElemShape, ctx: ScalarCtx): Expression => elem === 'property' ? ctx.pkExpr! : ctx.idExpr;
 
-interface GroupKeyBuild { desc: GroupKey; cols: Expression; group: string }
+interface GroupKeyBuild { desc: GroupKey; cols: Expression; group: string | Expression }
 
 /** Build the key columns for group(). */
 function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, indexKeys: Set<string>, params: Record<string, any>): GroupKeyBuild {
@@ -452,7 +452,7 @@ function compileProperties(st: St, tail: PStep[], indexKeys: Set<string>): Compi
   // properties().group()/.groupCount() — group over the property stream.
   if (next === 'group' || next === 'groupCount') {
     if (2 < tail.length) throw new Error(`step not implemented after properties().${next}(): ${tail[2].name}()`);
-    const ctx: ScalarCtx = { elem: 'property', idExpr: 'owner', propsExpr: 'ownerProps', labelIdExpr: '(SELECT label FROM nodes WHERE id=owner)', ownerExpr: 'owner', ownerPropsExpr: 'ownerProps', pkExpr: 'pk', pvExpr: 'pv' };
+    const ctx: ScalarCtx = { elem: 'property', idExpr: pc.c.owner, propsExpr: pc.c.ownerProps, labelIdExpr: q`(SELECT label FROM nodes WHERE id=${pc.c.owner})`, ownerExpr: pc.c.owner, ownerPropsExpr: pc.c.ownerProps, pkExpr: pc.c.pk, pvExpr: pc.c.pv };
     const src: GroupSource = { from: pc.name, ctx, elem: 'property' };
     return compileGroup(st, next === 'groupCount', tail[1].bys ?? [], src, indexKeys);
   }

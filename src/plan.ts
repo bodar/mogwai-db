@@ -1,6 +1,6 @@
 import { stepChain, type Step, type Pred } from './frontend.ts';
 import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
-import { q, list, values, paren, empty, value, raw, jsonExtract } from './q.ts';
+import { q, list, values, paren, empty, value, raw, jsonExtract, type Relation } from './q.ts';
 
 // ---------- SQL node builders ----------
 //
@@ -17,15 +17,17 @@ export const P_OPS: Record<string, string> = { eq: '=', neq: '!=', gt: '>', gte:
  *  literally so an expression index on that exact path engages; exotic keys bind)
  *  and reports the spliced key via `.indexKey`. The column is a bind-free fragment
  *  (`n.props`) wrapped as raw text() so it renders unquoted — index-eligible. */
-export function propExtract(col: string, key: unknown): { expr: Expression; indexKey: string | null } {
+export function propExtract(col: Expression | string, key: unknown): { expr: Expression; indexKey: string | null } {
   if (typeof key !== 'string') throw new Error('property key must be a string');
-  const node = jsonExtract(raw(col), key);
+  // A string column is a bind-free fragment (`n.props`) → raw text so the literal
+  // json path renders unquoted (index-eligible); a Relation column arrives typed.
+  const node = jsonExtract(typeof col === 'string' ? raw(col) : col, key);
   return { expr: node, indexKey: node.indexKey };
 }
 
 /** `<col> IN (SELECT id FROM labels WHERE name IN (?,?))` — the canonical
  *  label-name→id filter as a node. Names ride as bound Value tokens (no splice). */
-export function labelIn(col: string, names: any[]): Expression {
+export function labelIn(col: Expression | string, names: any[]): Expression {
   return q`${col} IN (SELECT id FROM labels WHERE name IN (${values(names)}))`;
 }
 
@@ -97,29 +99,43 @@ export const dirsFor = (name: string): [string, string][] =>
  *  on these. Property context carries the json_each expansion's columns. */
 export interface ScalarCtx {
   elem: 'node' | 'edge' | 'property';
-  idExpr: string;        // n.id  (rowid — for correlated joins)
-  extIdExpr?: string;    // COALESCE(n.uid, n.id) — the outward-facing id for framing
-  propsExpr: string;     // n.props   (base row, directly readable)
-  labelIdExpr: string;   // n.label
-  srcExpr?: string;      // n.src  (edge)
-  tgtExpr?: string;      // n.tgt  (edge)
-  ownerExpr?: string;      // property: owning node id
-  ownerPropsExpr?: string; // property: owner props (directly readable)
-  pkExpr?: string;         // property: key column
-  pvExpr?: string;         // property: value column
+  idExpr: Expression;        // n.id  (rowid — for correlated joins)
+  extIdExpr?: Expression;    // COALESCE(n.uid, n.id) — the outward-facing id for framing
+  propsExpr: Expression;     // n.props   (base row, directly readable)
+  labelIdExpr: Expression;   // n.label
+  srcExpr?: Expression;      // n.src  (edge)
+  tgtExpr?: Expression;      // n.tgt  (edge)
+  ownerExpr?: Expression;      // property: owning node id
+  ownerPropsExpr?: Expression; // property: owner props (directly readable)
+  pkExpr?: Expression;         // property: key column
+  pvExpr?: Expression;         // property: value column
 }
 
 interface Scalar { expr: Expression; indexKey: string | null }
 
-export const labelNameSub = (labelIdExpr: string) => `(SELECT name FROM labels WHERE id=${labelIdExpr})`;
+/** Build a node/edge ScalarCtx from the (aliased) element relation `n` — its
+ *  typed columns become the correlated-scalar base exprs. src/tgt exist only on
+ *  edges. Shared by where()/filter() (current traverser) and group() over an
+ *  element stream. */
+export function elemCtx(n: Relation, elem: Elem): ScalarCtx {
+  return {
+    elem, idExpr: n.c.id, extIdExpr: q`COALESCE(${n.c.uid}, ${n.c.id})`,
+    propsExpr: n.c.props, labelIdExpr: n.c.label,
+    ...(elem === 'edge' ? { srcExpr: n.c.src, tgtExpr: n.c.tgt } : {}),
+  };
+}
+
+/** `(SELECT name FROM labels WHERE id=<labelIdExpr>)` — resolve a label id to its
+ *  name as a scalar subquery node. */
+export const labelNameSub = (labelIdExpr: Expression): Expression => q`(SELECT name FROM labels WHERE id=${labelIdExpr})`;
 
 /** json_extract of a property on a node identified by `nodeId`. `directProps`,
  *  when set, is a props column already in scope (base row) → read it inline;
  *  otherwise correlate a subquery into nodes. */
-export function propAt(nodeId: string, directProps: string | null, key: unknown): Scalar {
+export function propAt(nodeId: Expression | string, directProps: Expression | string | null, key: unknown): Scalar {
   if (directProps) return propExtract(directProps, key);
   // Correlated subquery: keep the json_extract node as a child so any exotic-key
-  // bind stays a Value token (nodeId is a bind-free fragment → raw text()).
+  // bind stays a Value token (nodeId is a bind-free fragment / typed column).
   const pe = propExtract('props', key);
   return { expr: q`(SELECT ${pe.expr} FROM nodes WHERE id=${nodeId})`, indexKey: null };
 }
@@ -136,22 +152,22 @@ export function propAt(nodeId: string, directProps: string | null, key: unknown)
 export function compileNestedScalar(inner: Step[], ctx: ScalarCtx): Scalar {
   let steps = inner;
   // A pointer to the "current node" for terminal value/label/id reads.
-  let nodeId: string;
-  let directProps: string | null;   // props readable inline (base row), else null → subquery
-  let directLabelId: string | null; // label id readable inline, else null → subquery via nodes
+  let nodeId: Expression;
+  let directProps: Expression | null;   // props readable inline (base row), else null → subquery
+  let directLabelId: Expression | null; // label id readable inline, else null → subquery via nodes
 
   const head = steps[0]?.name;
   if (!head) throw new Error('empty nested traversal');
 
   if (ctx.elem === 'property') {
-    if (head === 'key') { requireTerminal(steps, 1); return { expr: raw(ctx.pkExpr!), indexKey: null }; }
-    if (head === 'value') { requireTerminal(steps, 1); return { expr: raw(ctx.pvExpr!), indexKey: null }; }
+    if (head === 'key') { requireTerminal(steps, 1); return { expr: ctx.pkExpr!, indexKey: null }; }
+    if (head === 'value') { requireTerminal(steps, 1); return { expr: ctx.pvExpr!, indexKey: null }; }
     if (head === 'element') { nodeId = ctx.ownerExpr!; directProps = ctx.ownerPropsExpr!; directLabelId = null; steps = steps.slice(1); }
     else throw new Error(`by(__.${head}()) over a property not yet supported`);
   } else if (ctx.elem === 'edge') {
     if (head === 'outV' || head === 'inV') { nodeId = head === 'outV' ? ctx.srcExpr! : ctx.tgtExpr!; directProps = null; directLabelId = null; steps = steps.slice(1); }
-    else if (head === 'label') { requireTerminal(steps, 1); return { expr: raw(labelNameSub(ctx.labelIdExpr)), indexKey: null }; }
-    else if (head === 'id') { requireTerminal(steps, 1); return { expr: raw(ctx.idExpr), indexKey: null }; }
+    else if (head === 'label') { requireTerminal(steps, 1); return { expr: labelNameSub(ctx.labelIdExpr), indexKey: null }; }
+    else if (head === 'id') { requireTerminal(steps, 1); return { expr: ctx.idExpr, indexKey: null }; }
     else if (head === 'values') { requireTerminal(steps, 1); return propAt(ctx.idExpr, ctx.propsExpr, steps[0].args[0]); }
     // out()/in()/both() are NOT valid on an edge (must go through outV()/inV());
     // routing them to edgeCountFrom here would compare edges.src to the edge's own
@@ -167,8 +183,8 @@ export function compileNestedScalar(inner: Step[], ctx: ScalarCtx): Scalar {
   if (!s) throw new Error('nested traversal resolves to no projection');
   switch (s.name) {
     case 'values': requireTerminal(steps, 1); return propAt(nodeId, directProps, s.args[0]);
-    case 'label':  requireTerminal(steps, 1); return { expr: raw(labelNameSub(directLabelId ?? `(SELECT label FROM nodes WHERE id=${nodeId})`)), indexKey: null };
-    case 'id':     requireTerminal(steps, 1); return { expr: raw(nodeId), indexKey: null };
+    case 'label':  requireTerminal(steps, 1); return { expr: labelNameSub(directLabelId ?? q`(SELECT label FROM nodes WHERE id=${nodeId})`), indexKey: null };
+    case 'id':     requireTerminal(steps, 1); return { expr: nodeId, indexKey: null };
     default: throw new Error(`by(__.${s.name}()) not yet supported`);
   }
 }
@@ -179,7 +195,7 @@ const MOVES = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE']);
 /** out/in/both/outE/inE/bothE([label])…count() → a correlated edge count on the
  *  outer node. The E-suffixed forms count the same incident edges (1:1 with the
  *  neighbour hop), so direction is the un-suffixed base. */
-function edgeCountFrom(steps: Step[], nodeIdExpr: string): Scalar {
+function edgeCountFrom(steps: Step[], nodeIdExpr: Expression): Scalar {
   const mv = steps[0];
   if (steps[1]?.name !== 'count' || steps.length > 2)
     throw new Error(`by(__.${mv.name}(…)) only supports a terminal count() for now`);
