@@ -11,9 +11,6 @@ import { sql as lsql } from '@bodar/lazyrecords/sql/template/Sql.ts';
 import { text as sqlText } from '@bodar/lazyrecords/sql/template/Text.ts';
 import { expression, list } from '@bodar/lazyrecords/sql/template/Compound.ts';
 import { value } from '@bodar/lazyrecords/sql/template/Value.ts';
-import { cte } from '@bodar/lazyrecords/sql/ansi/CommonTableExpression.ts';
-import { withClause } from '@bodar/lazyrecords/sql/ansi/WithClause.ts';
-import { valuesClause } from '@bodar/lazyrecords/sql/ansi/ValuesClause.ts';
 import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
 
 // template-first kernel + typed relation handles (see src/q.ts, src/schema.ts)
@@ -897,6 +894,12 @@ function compileProperties(
   }
 }
 
+/** Render a movement CTE prefix + `SELECT <cols> FROM <lastCte>` to {sql,binds}.
+ *  The write paths materialize target ids this way before mutating. */
+function renderCteSelect(ctes: CteDef[], cols: string = 'id'): { sql: string; binds: any[] } {
+  return render(withPrefixTree(ctes, q`SELECT ${cols} FROM ${ctes[ctes.length - 1].name}`));
+}
+
 // g.V(...).<filters>.drop() — delete the target vertices and their incident
 // edges. (Edge-valued drop, e.g. g.V().outE().drop(), waits on edge traversal.)
 function compileDrop(steps: Step[]): WritePlan {
@@ -904,7 +907,7 @@ function compileDrop(steps: Step[]): WritePlan {
   if (stop !== steps.length - 1)
     throw new Error(`drop() after ${steps[stop].name}() not yet supported`);
   if (elem === 'edge') throw new Error('edge drop() (e.g. g.E().drop()) not yet supported');
-  const target = render(withPrefixTree(ctes, sqlText(`SELECT id FROM ${ctes[ctes.length - 1].name}`)));
+  const target = renderCteSelect(ctes);
   return {
     kind: 'write',
     run: (store) => {
@@ -949,7 +952,7 @@ function compileSetProperty(steps: Step[], params: Record<string, any>): WritePl
   const readCur = elem === 'edge'
     ? `SELECT uid, src, tgt, props, ${labelSub} FROM edges WHERE id=?`
     : `SELECT uid, props, ${labelSub} FROM nodes WHERE id=?`;
-  const target = render(withPrefixTree(ctes, sqlText(`SELECT id FROM ${ctes[ctes.length - 1].name}`)));
+  const target = renderCteSelect(ctes);
   return {
     kind: 'write',
     run: (store) => {
@@ -975,12 +978,10 @@ function compileInject(steps: Step[]): Compiled {
   const vals = steps[0].args;
   if (vals.length === 0)
     return { kind: 'read', sql: `SELECT NULL AS v WHERE 0`, binds: [], shape: { kind: 'value' } };
-  // Built entirely from lazyrecords nodes: WITH c0(v) AS (VALUES …) SELECT v FROM c0.
-  // The injected values are Value tokens, so binds derive from the tree.
-  const tree = lsql(withClause(
-    [cte('c0', valuesClause(vals.map((v) => [v])), ['v'])],
-    lsql(sqlText('select v from c0')),
-  ));
+  // WITH "c0"("v") AS (VALUES (?), …) SELECT v FROM c0. The injected values are
+  // Value tokens (one row each), so binds derive from the tree.
+  const rows = list(vals.map((v) => q`(${value(v)})`), sqlText(', '));
+  const tree = q`with "c0"("v") as (values ${rows}) select v from c0`;
   return compiled(tree, { kind: 'value' });
 }
 
@@ -1104,7 +1105,7 @@ function compileAddE(steps: Step[], params: Record<string, any>): WritePlan {
   const t = traversalCtes(prefix, params);
   if (t.stop !== prefix.length) throw new Error(`addE after ${prefix[t.stop].name}() not yet supported`);
   const aliasCols: [string, string][] = [...t.aliases].map(([lbl, a]) => [lbl, a.col]);
-  const read = render(withPrefixTree(t.ctes, sqlText(`SELECT ${['id', ...aliasCols.map(([, c]) => c)].join(', ')} FROM ${t.ctes[t.ctes.length - 1].name}`)));
+  const read = renderCteSelect(t.ctes, ['id', ...aliasCols.map(([, c]) => c)].join(', '));
   return {
     kind: 'write',
     run: (store) => store.query<any>(read.sql, read.binds).map((r) =>
@@ -1151,8 +1152,8 @@ function resolveEndpoint(store: GraphStore, spec: any, d: { aliases: Map<string,
     const inner = stepChain(spec.nested, params);
     const t = traversalCtes(inner, params);
     if (t.stop !== inner.length) throw new Error(`addE endpoint traversal not supported past ${inner[t.stop].name}()`);
-    const q = render(withPrefixTree(t.ctes, sqlText(`SELECT id FROM ${t.ctes[t.ctes.length - 1].name}`)));
-    const rows = store.query<{ id: number }>(q.sql, q.binds);
+    const sel = renderCteSelect(t.ctes);
+    const rows = store.query<{ id: number }>(sel.sql, sel.binds);
     if (!rows.length) throw new Error('addE endpoint traversal matched no vertex');
     return rows[0].id;
   }
@@ -1209,18 +1210,13 @@ function normalizeMergeMap(raw: any): MergeSpec {
 /** SELECT of the vertices matching a merge spec (label + id/uid + prop equality;
  *  an empty spec matches every vertex). Returns the columns write-framing needs. */
 function mergeMatchQuery(spec: MergeSpec): { sql: string; binds: any[] } {
-  const conds: string[] = [];
-  const binds: any[] = [];
-  if (spec.label != null) { conds.push('label IN (SELECT id FROM labels WHERE name=?)'); binds.push(spec.label); }
-  if (spec.id != null) { conds.push(typeof spec.id === 'number' ? 'id=?' : 'uid=?'); binds.push(spec.id); }
-  for (const [k, v] of Object.entries(spec.props)) {
-    const pe = render(propExtract('props', k).expr);
-    conds.push(`${pe.sql} = ?`); binds.push(...pe.binds, v);
-  }
-  return {
-    sql: `SELECT id, uid, (SELECT name FROM labels WHERE id=nodes.label) AS label, props FROM nodes WHERE ${conds.length ? conds.join(' AND ') : '1'}`,
-    binds,
-  };
+  const conds: Expression[] = [];
+  if (spec.label != null) conds.push(q`label IN (SELECT id FROM labels WHERE name=${value(spec.label)})`);
+  if (spec.id != null) conds.push(typeof spec.id === 'number' ? q`id=${value(spec.id)}` : q`uid=${value(spec.id)}`);
+  for (const [k, v] of Object.entries(spec.props))
+    conds.push(q`${propExtract('props', k).expr} = ${value(v)}`);
+  const where = conds.length ? list(conds, sqlText(' AND ')) : sqlText('1');
+  return render(q`SELECT id, uid, (SELECT name FROM labels WHERE id=nodes.label) AS label, props FROM nodes WHERE ${where}`);
 }
 
 // The option(Merge.onCreate|onMatch, map) modulators following a merge step.
@@ -1249,8 +1245,8 @@ function mergeDrivers(prefix: Step[], params: Record<string, any>): (store: Grap
   if (prefix.length === 1 && prefix[0].name === 'inject') { const nulls = prefix[0].args.map(() => null); return () => nulls; }
   const t = traversalCtes(prefix, params);
   if (t.stop !== prefix.length) throw new Error(`merge after ${prefix[t.stop].name}() not yet supported`);
-  const q = render(withPrefixTree(t.ctes, sqlText(`SELECT id FROM ${t.ctes[t.ctes.length - 1].name}`)));
-  return (store) => store.query<{ id: number }>(q.sql, q.binds).map((r) => r.id);
+  const sel = renderCteSelect(t.ctes);
+  return (store) => store.query<{ id: number }>(sel.sql, sel.binds).map((r) => r.id);
 }
 
 // g.mergeV(map) [.option(Merge.onCreate, map)] [.option(Merge.onMatch, map)]
@@ -1302,15 +1298,12 @@ function resolveMergeEndpoint(store: GraphStore, raw: any): number {
 
 // SELECT of edges matching a merge spec between two resolved endpoints.
 function edgeMatchQuery(spec: MergeSpec, outV: number, inV: number): { sql: string; binds: any[] } {
-  const conds = ['src=?', 'tgt=?'];
-  const binds: any[] = [outV, inV];
-  if (spec.label != null) { conds.push('label IN (SELECT id FROM labels WHERE name=?)'); binds.push(spec.label); }
-  if (spec.id != null) { conds.push(typeof spec.id === 'number' ? 'id=?' : 'uid=?'); binds.push(spec.id); }
-  for (const [k, v] of Object.entries(spec.props)) {
-    const pe = render(propExtract('props', k).expr);
-    conds.push(`${pe.sql} = ?`); binds.push(...pe.binds, v);
-  }
-  return { sql: `SELECT id, uid, src, tgt, (SELECT name FROM labels WHERE id=edges.label) AS label, props FROM edges WHERE ${conds.join(' AND ')}`, binds };
+  const conds: Expression[] = [q`src=${value(outV)}`, q`tgt=${value(inV)}`];
+  if (spec.label != null) conds.push(q`label IN (SELECT id FROM labels WHERE name=${value(spec.label)})`);
+  if (spec.id != null) conds.push(typeof spec.id === 'number' ? q`id=${value(spec.id)}` : q`uid=${value(spec.id)}`);
+  for (const [k, v] of Object.entries(spec.props))
+    conds.push(q`${propExtract('props', k).expr} = ${value(v)}`);
+  return render(q`SELECT id, uid, src, tgt, (SELECT name FROM labels WHERE id=edges.label) AS label, props FROM edges WHERE ${list(conds, sqlText(' AND '))}`);
 }
 
 // g.mergeE(map) [.option(Merge.onCreate, map)] [.option(Merge.onMatch, map)]
