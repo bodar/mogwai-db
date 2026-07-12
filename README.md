@@ -59,14 +59,14 @@ where each database sits on that dimension.
 
 | Property | mogwai-db | Neptune | Cosmos (Gremlin) | Neo4j Aura | TigerGraph | JanusGraph |
 |---|---|---|---|---|---|---|
-| Gremlin / TinkerPop version | ✅✅ native **v4** | v3 | v3 | Cypher only | GSQL only | v3 |
-| Managed infra (HA, backups, patching) | ✅ Cloudflare-run | managed | managed | managed | managed | self-run |
-| Capacity planning / sizing | ✅✅ none (autoscale) | serverless option | autoscale RU | fixed tiers | sized cluster | sized backend |
-| Idle cost / scale-to-zero | ✅✅ ~$0 | instance/NCU floor | RU floor | tier floor | high floor | backend cost |
-| Cheap per-tenant fleets | ✅✅ free (1 DO/graph) | costly | costly | costly | costly | manual |
-| Single-graph scale ceiling | ❌ ~10 GB / graph | ~unbounded | ~unbounded | large | large | large |
-| Analytics / OLAP algorithms | ❌ none | Analytics | weak | GDS | strong | via Spark |
-| Production maturity | ❌ **pre-alpha** | GA | GA | GA | GA | GA |
+| Gremlin / TinkerPop | ✅✅ **v4** | v3 | v3 | Cypher | GSQL | v3 |
+| Managed infra | ✅ Cloudflare-run | managed | managed | managed | managed | self-run |
+| Capacity planning / sizing | ✅✅ autoscale | serverless | autoscale | provisioned | provisioned | provisioned |
+| Scale-to-zero | ✅✅ ~$0 | no | no | no | no | no |
+| Cheap per-tenant fleets | ✅✅ free | costly | costly | costly | costly | costly |
+| Single-graph scale | ❌ ~10 GB | ~unbounded | ~unbounded | large | large | large |
+| OLAP | ❌ none | strong | weak | strong | strong | Spark |
+| Maturity | ❌ **pre-alpha** | GA | GA | GA | GA | GA |
 
 Read the columns: mogwai's real edges are **idle cost, per-tenant isolation, and
 v4 currency**; it honestly concedes **scale ceiling, OLAP, and — for now —
