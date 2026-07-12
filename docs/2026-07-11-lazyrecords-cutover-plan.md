@@ -6,12 +6,16 @@
 > from lazyrecords *ansi builders* (`select`/`from`/`join`/`comparison`/…) or a `render()`
 > node adapter. It now uses a **template-first `q` kernel + typed `Relation` handles** —
 > see `docs/2026-07-12-q-kernel-sql-builder.md` (the current SQL-build design). Seam 1 (SQL
-> AST) is DONE and folded into that kernel; all read+write bodies are `q\`\``+relations,
-> byte-identical, on trunk. The **stages / seam roadmap below still stands** for the
-> *remaining* work — **Seam 2** (step-family dispatch table, was S5.2) and **Seam 3**
-> (normalization passes → `strategies.ts`) are the outstanding decomposition. But treat the
-> two sections marked "SUPERSEDED" below (the ansi API cheat-sheet + the 5 node-recipe
-> templates) as **historical only** — do NOT follow them; use `q\`\``+relations.
+> AST) is DONE and folded into that kernel; all read+write bodies are `q\`\``+relations.
+>
+> **ALL THREE SEAMS ARE NOW DONE (2026-07-12).** Seam 2 (step-family dispatch) + Seam 3
+> (normalization passes) landed as a full functional-fold decomposition: `src/strategies.ts`
+> (pure `Step[]→Step[]` passes) + `src/steps/*.ts` (per-family dispatch tables) + `Query`
+> kernel adoption (typed-`self` recursive CTE, minted CTE names; `CteDef`/`withPrefixTree`
+> retired). `compiler.ts` is now a 51-line orchestrator. See the end-of-doc "Decomposition
+> complete" note. The stages roadmap below is HISTORICAL. Treat the two sections marked
+> "SUPERSEDED" (ansi API cheat-sheet + 5 node-recipe templates) as historical too — do NOT
+> follow them; use `q\`\``+relations.
 
 ## Where the work lives
 - Worktree: `~/Projects/mogwai-db-worktrees/lazyrecords-cutover`, branch
@@ -180,3 +184,33 @@ Label subquery: compose `expression(col, text('in'), parens([select…]))`.
 - `~/Projects/janusgraph` (sparse, `.../tinkerpop/optimize/`) — `HasStepFolder`
   fold utilities. `~/Projects/tinkerpop` — TinkerGraph + strategy sources
   (step taxonomy: Filter/Map/FlatMap/Barrier/Branch; TraversalStrategy pipeline).
+
+## Decomposition complete (2026-07-12) — Seam 2 + Seam 3 landed
+
+`compiler.ts` went from 1352 lines (flat `switch` + inline rewrites) to a **51-line
+orchestrator**: `parse → normalize → dispatch`. Chosen shape (all four maximal):
+
+- **Seam 3 — `src/strategies.ts`.** Pure `Step[]→Step[]` passes run once up front so the
+  dispatch sees a canonical, *peek-free* chain: `stripTerminal` (discard/none → flag),
+  `foldRepeatClusters` (repeat/emit/times/until run → one step carrying `.cluster`),
+  `foldByModulators` (trailing by() absorbed onto order/select/project/group + alias-compare
+  where's single by(key) → `.bys`). This removed ALL index arithmetic from the compilers.
+- **Seam 2 — `src/steps/*.ts`.** Fully functional fold: each prefix compiler is
+  `StepFn = (step, St) => St` over an **immutable** `St` (`context.ts`); nothing mutates in
+  place — only the `Query` builder accumulates CTEs. Per-family modules
+  (`movement`/`filter`/`branch`/`passthrough`) + tail (`projection.ts`: `PROJECTORS` +
+  `MODIFIERS` dispatch Maps + group/properties/select barriers) + `write.ts` (imperative
+  interpreters behind an ordered `WRITE_RULES` table). `index.ts` builds the `PREFIX` Map +
+  `buildPrefix` fold + `compileRead`.
+- **`Query` kernel adopted** (was the q-kernel doc's pending follow-up): CTE names minted
+  (no `c${len}`), **typed-`self` recursive CTE** for repeat(); `CteDef`/`withPrefixTree`/the
+  `cte`/`withRecursive` ansi nodes retired from `render.ts`. Non-recursive queries now emit
+  plain `WITH` (was always `WITH RECURSIVE`). Only `src/q.ts` imports raw lazyrecords
+  `Text`/`Compound` now — every step module builds SQL through the kernel (`q`/`list`/`empty`).
+
+SQL text changed (CTE quoting, walk names `w1`→`c1`, `WITH` vs `WITH RECURSIVE`) — 4 snapshot
+assertions rebaselined; behaviour preserved (192 tests + contract + perf-EXPLAIN gate green).
+One regression caught in review + fixed: alias-compare `where().by(a).by(b)` now fails closed
+(a second by() is invalid there) instead of silently dropping the second — regression test added.
+L3 cucumber (was 205) needs the tinkerpop repo + live server to re-run; behavioural gates green
+so expected unchanged.

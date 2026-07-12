@@ -18,12 +18,19 @@
 import { text as raw, empty, type Text } from '@bodar/lazyrecords/sql/template/Text.ts';
 import { value } from '@bodar/lazyrecords/sql/template/Value.ts';
 import { sql, type Sql } from '@bodar/lazyrecords/sql/template/Sql.ts';
-import { list } from '@bodar/lazyrecords/sql/template/Compound.ts';
+import { list as lrList } from '@bodar/lazyrecords/sql/template/Compound.ts';
 import { statement } from '@bodar/lazyrecords/sql/statement/ordinalPlaceholder.ts';
 import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
 
-export { value };
+export { value, empty };
 export { jsonExtract } from '@bodar/lazyrecords/sql/sqlite/jsonExtract.ts';
+
+/** Join `parts` with a raw separator string (identifier-safe SQL, not a bound
+ *  value): `list(conds, ' AND ')`. The separator is spliced RAW — it's SQL text,
+ *  never user data. Omit `sep` for the lazyrecords default (', '). Re-exported here
+ *  so step modules build every compound through the kernel, not raw lazyrecords. */
+export const list = (parts: readonly Expression[], sep?: string): Expression =>
+  sep === undefined ? lrList(parts) : lrList(parts, raw(sep));
 
 /** Identifier-shaped name → spliced raw; else double-quoted (render-time safe
  *  quoting, à la SQLAlchemy/jOOQ — quote only when unsafe). */
@@ -107,7 +114,7 @@ export class Query {
     const heads = this.ctes.map((c) =>
       q`${raw(c.name)}${c.cols ? raw(`(${c.cols.join(', ')})`) : empty} as (${c.body})`);
     const recursive = this.ctes.some((c) => c.recursive) ? raw('recursive ') : empty;
-    const tree = q`with ${recursive}${list(heads, raw(', '))} ${tail}`;
+    const tree = q`with ${recursive}${list(heads)} ${tail}`;
     const { text, args } = statement(tree);
     return { sql: text, binds: args };
   }
