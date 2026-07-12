@@ -115,6 +115,17 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.inject(1).as("a").select("a")', {})).toThrow('inject() with subsequent step as()');
   });
 
+  test('group().by(__.bothE().values(k).<reducer>()) is a correlated neighbourhood aggregate', () => {
+    const p = read("g.V().hasLabel('software').group().by('name').by(__.bothE().values('weight').mean())");
+    // one correlated AVG over incident edges, wrapped by MAX to satisfy GROUP BY;
+    // typeof carries the storage class so a whole-number mean still frames as Double
+    expect(p.sql).toContain('AVG(json_extract(props');
+    expect(p.sql).toContain('src=n.id OR tgt=n.id');
+    expect(p.sql).toContain('MAX(');
+    expect(p.sql).toContain('gvt');
+    expect(read("g.V().group().by('name').by(__.bothE().values('weight').sum())").sql).toContain('SUM(json_extract(props');
+  });
+
   test('limit before count wraps the counted id-relation', () => {
     expect(read('g.V().limit(2).count()').sql).toContain('SELECT COUNT(*) AS v FROM (SELECT id FROM c1)');
   });
@@ -394,7 +405,7 @@ describe('compiler SQL snapshots', () => {
 
   test('where(__.count().is(P)) → correlated scalar compare; reports index key on values(k)', () => {
     const c = read('g.V().where(__.inE("knows").count().is(P.gte(1))).values("name")');
-    expect(c.sql).toContain('(SELECT COUNT(*) FROM edges WHERE tgt=n.id');
+    expect(c.sql).toContain('(SELECT COUNT(*) FROM edges WHERE (tgt=n.id)');
     expect(c.sql).toContain('>= ?');
     // where(__.values(k).is(P)) is a filter-position use → index key reported
     expect(read('g.V().where(__.values("age").is(P.gt(30)))').indexKeys).toEqual(['age']);

@@ -213,7 +213,7 @@ export function compileNestedScalar(inner: Step[], ctx: ScalarCtx): Scalar {
     else throw new Error(`by(__.${head}()) over an edge not yet supported`);
   } else { // node
     nodeId = ctx.idExpr; directProps = ctx.propsExpr; directLabelId = ctx.labelIdExpr;
-    if (MOVES.has(head)) return edgeCountFrom(steps, ctx.idExpr);
+    if (MOVES.has(head)) return edgeAggFrom(steps, ctx.idExpr);
   }
 
   // Terminal projection on the resolved current node.
@@ -230,18 +230,33 @@ export function compileNestedScalar(inner: Step[], ctx: ScalarCtx): Scalar {
 /** Vertex→edge/neighbour movement steps (count/EXISTS both key off these). */
 const MOVES = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE']);
 
-/** out/in/both/outE/inE/bothE([label])…count() → a correlated edge count on the
- *  outer node. The E-suffixed forms count the same incident edges (1:1 with the
- *  neighbour hop), so direction is the un-suffixed base. */
-function edgeCountFrom(steps: Step[], nodeIdExpr: Expression): Scalar {
+/** SQL aggregate for a terminal reducer over a correlated stream. */
+const AGG_FN: Record<string, string> = { count: 'COUNT', sum: 'SUM', min: 'MIN', max: 'MAX', mean: 'AVG' };
+
+/** out/in/both/outE/inE/bothE([label]) then either …count() or (E-forms only)
+ *  …values(k).<sum|min|max|mean>() → a correlated aggregate over the incident
+ *  edges on the outer node. The E-suffixed forms cover the same incident edges
+ *  (1:1 with the neighbour hop), so direction is the un-suffixed base. */
+function edgeAggFrom(steps: Step[], nodeIdExpr: Expression): Scalar {
   const mv = steps[0];
-  if (steps[1]?.name !== 'count' || steps.length > 2)
-    throw new Error(`by(__.${mv.name}(…)) only supports a terminal count() for now`);
-  const dirs = dirsFor(mv.name.endsWith('E') ? mv.name.slice(0, -1) : mv.name);
-  const lblFilter = (): Expression => mv.args.length ? q` AND ${labelIn('label', mv.args)}` : empty;
-  const terms = dirs.map(([from]) =>
-    q`(SELECT COUNT(*) FROM edges WHERE ${from}=${nodeIdExpr}${lblFilter()})`);
-  return { expr: terms.length === 1 ? terms[0] : paren(list(terms, ' + ')), indexKey: null };
+  const base = mv.name.endsWith('E') ? mv.name.slice(0, -1) : mv.name;
+  const dirs = dirsFor(base);
+  // Incidence: an incoming edge matches on any of the base directions' `from` cols
+  // (both → src OR tgt). A self-loop matches once (acceptable — no weighted loops).
+  const incidence = paren(list(dirs.map(([from]) => q`${from}=${nodeIdExpr}`), ' OR '));
+  const lbl: Expression = mv.args.length ? q` AND ${labelIn('label', mv.args)}` : empty;
+
+  if (steps[1]?.name === 'count' && steps.length === 2)
+    return { expr: q`(SELECT COUNT(*) FROM edges WHERE ${incidence}${lbl})`, indexKey: null };
+
+  // …values(k).<reducer>() aggregates an edge property. E-forms only: on a bare
+  // out()/in()/both() the value would come from the NEIGHBOUR vertex (a join),
+  // which is a separate, unimplemented shape.
+  if (mv.name.endsWith('E') && steps[1]?.name === 'values' && steps.length === 3 && steps[2].name in AGG_FN && steps[2].name !== 'count') {
+    const pe = propExtract('props', steps[1].args[0]);
+    return { expr: q`(SELECT ${AGG_FN[steps[2].name]}(${pe.expr}) FROM edges WHERE ${incidence}${lbl})`, indexKey: null };
+  }
+  throw new Error(`by(__.${mv.name}(…)) only supports a terminal count() or values(k).sum/min/max/mean() for now`);
 }
 
 const requireTerminal = (steps: Step[], n: number) => {
