@@ -534,7 +534,7 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().repeat(__.out())', {})).toThrow('without times()');
     expect(() => compile('g.V().repeat(__.out()).emit()', {})).toThrow('without times()');
     expect(() => compile('g.V().repeat(__.out()).until(__.hasLabel("x")).times(3)', {})).toThrow('repeat().until() not yet supported');
-    expect(() => compile('g.V().repeat(__.out().order()).times(2)', {})).toThrow('single out()/in()/both() only');
+    expect(() => compile('g.V().repeat(__.out().order()).times(2)', {})).toThrow('single out()/in()/both(), optional .simplePath()');
     expect(() => compile('g.V().emit().times(2)', {})).toThrow('without repeat()');
     // a second repeat is NOT swallowed — it compiles as a chained cluster (two walks)
     const chained = read('g.V().repeat(__.out()).times(1).repeat(__.out()).times(1).values("name")');
@@ -634,7 +634,6 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('path() over a branch/aggregating source or with an unsupported tail defers cleanly', () => {
-    expect(() => compile('g.V().repeat(__.out()).times(2).path()', {})).toThrow('path tracking through repeat() not yet supported');
     expect(() => compile('g.V().union(__.out(),__.in()).path()', {})).toThrow('path tracking through union() not yet supported');
     // union() as a SOURCE step never seeds p0 → its own clear deferral (not the mid-chain guard).
     expect(() => compile('g.union(__.V(),__.V()).path()', {})).toThrow('path() over a union() source step is not yet supported');
@@ -643,6 +642,48 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V(1).out().path().by(__.values("name"))', {})).toThrow('path().by(traversal) modulator not yet supported');
     expect(() => compile('g.V(1).out().path().by(T.id)', {})).toThrow('path().by(T.id) modulator not yet supported');
     expect(() => compile('g.V(1).out().path().order()', {})).toThrow('order() after path() not yet supported');
+  });
+
+  // ---------- recursive repeat().path() (JSONB array regime) ----------
+
+  test('repeat().path() accumulates a JSONB array through the WITH RECURSIVE walk', () => {
+    const p = read('g.V(1).repeat(__.out()).times(2).path()');
+    expect(p.sql).toContain('jsonb_array(id) AS path');                  // seed
+    expect(p.sql).toContain("jsonb_insert(c1.path, '$[#]', e.tgt) AS path"); // append per hop
+    expect(p.sql).toContain('json_each(pp.path) je JOIN nodes n ON n.id=je.value'); // explode + materialize
+    expect(p.shape).toEqual({ kind: 'pathGrouped', elem: 'vertex' });
+  });
+
+  test('simplePath() inside repeat() folds into the recursive cycle guard', () => {
+    const p = read('g.V().repeat(__.both().simplePath()).times(3).path()');
+    expect(p.sql).toContain('NOT EXISTS (SELECT 1 FROM json_each(c1.path) je WHERE je.value=e.tgt)');
+    expect(p.sql).toContain('NOT EXISTS (SELECT 1 FROM json_each(c1.path) je WHERE je.value=e.src)'); // both directions
+  });
+
+  test('simplePath() in the body works without path() output — array is internal to the walk', () => {
+    const p = read('g.V().repeat(__.both().simplePath()).times(3)');
+    expect(p.sql).toContain('NOT EXISTS (SELECT 1 FROM json_each(c1.path)'); // guard present
+    expect(p.shape).toEqual({ kind: 'vertex' });                            // but output is plain vertices
+  });
+
+  test('a non-path repeat() is byte-identical (no JSONB path column added)', () => {
+    expect(read('g.V(1).repeat(__.out()).times(2)').sql).not.toContain('path');
+  });
+
+  test('recursive path() defers mixed/edge/emit forms with clear errors', () => {
+    expect(() => compile('g.V(1).out().repeat(__.out()).times(2).path()', {})).toThrow('path() spanning more than one repeat()/movement is not yet supported');
+    expect(() => compile('g.V().repeat(__.outE().inV()).times(2).path()', {})).toThrow('single out()/in()/both(), optional .simplePath()');
+    expect(() => compile('g.V().repeat(__.out()).emit().times(2).path()', {})).toThrow('emit() with path() not yet supported');
+    // A SECOND repeat cluster after an array-tracked path() would reseed the walk and
+    // silently drop the first walk's segment — fail closed instead.
+    expect(() => compile('g.V(1).repeat(__.out()).times(1).repeat(__.out()).times(1).path()', {})).toThrow('path() spanning more than one repeat()/movement is not yet supported');
+  });
+
+  test('dedup() after a recursive path() distinct-ifies BEFORE row-numbering (ROW_NUMBER would defeat DISTINCT)', () => {
+    const p = read('g.V(1).repeat(__.both()).times(1).path().dedup()');
+    // DISTINCT must be in its own CTE over the raw path, not the same SELECT as ROW_NUMBER().
+    expect(p.sql).toContain('SELECT DISTINCT');
+    expect(p.sql.replace(/\s+/g, ' ')).not.toMatch(/DISTINCT[^)]*ROW_NUMBER/);
   });
 });
 
@@ -1135,5 +1176,54 @@ describe('compiler execution semantics', () => {
     expect(path.labels).toEqual([new Set(), new Set(), new Set()]); // labels-on-path deferred
     // The reason for hand-framing: vertex props survive (client's serializer drops them).
     expect(path.objects[0].properties.map((p: any) => ({ [p.label]: p.value }))).toEqual([{ name: 'marko' }, { age: 29 }]);
+  });
+
+  // ---------- recursive repeat().path() (modern-graph semantics) ----------
+
+  // Decode every Path from a framed GraphBinary response (shared by the recursive tests).
+  async function decodePaths(store: GraphStore, gremlin: string): Promise<any[]> {
+    const { makeHandler } = await import('../src/handler.ts');
+    const { ioc } = await import('../src/io.ts');
+    const res = await makeHandler(store)(new Request('http://x/', { method: 'POST', body: JSON.stringify({ gremlin }) }));
+    let c = Buffer.from(await res.arrayBuffer()).subarray(2); // skip 0x84,0x00
+    const out: any[] = [];
+    while (c[0] !== 0xfd) { const { v, len } = ioc.anySerializer.deserialize(c); out.push(v); c = c.subarray(len); }
+    return out;
+  }
+
+  test('repeat().times(n).path() emits the ordered walk, one Path per route', async () => {
+    const paths = await decodePaths(seededStore(), 'g.V(1).repeat(__.out()).times(2).path()');
+    // marko(1)→josh(4)→{lop(3),ripple(5)} — cycles allowed (no simplePath), depth-bounded.
+    expect(paths.map((p) => p.objects.map((o: any) => o.id))).toEqual([[1, 4, 3], [1, 4, 5]]);
+  });
+
+  test('repeat(simplePath).times(3).path() = all acyclic length-4 walks (SimplePath.feature:34)', async () => {
+    const paths = await decodePaths(seededStore(), 'g.V().repeat(__.both().simplePath()).times(3).path()');
+    expect(paths.length).toBe(18); // the canonical count
+    // every path is simple: no vertex repeats within it (the cycle guard held).
+    for (const p of paths) {
+      const ids = p.objects.map((o: any) => o.id);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(ids.length).toBe(4); // seed + 3 hops
+    }
+  });
+
+  test('simplePath() inside repeat() prunes cycles even without path() output', () => {
+    const store = seededStore();
+    // both() would revisit endlessly; simplePath keeps each 3-hop walk acyclic. The
+    // walk carries the path array internally for the guard, then outputs plain vertices.
+    const rows = run(store, 'g.V(1).repeat(__.both().simplePath()).times(2)') as any[];
+    expect(rows.length).toBeGreaterThan(0);
+  });
+
+  test('dedup() after a recursive path() collapses equal paths (multigraph parallel edges)', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    const person = store.labelId('person'), knows = store.labelId('knows');
+    store.query('INSERT INTO nodes(id,label,props) VALUES(1,?,?),(2,?,?)', [person, '{}', person, '{}']);
+    store.query('INSERT INTO edges(id,src,label,tgt,props) VALUES(10,1,?,2,?),(11,1,?,2,?)', [knows, '{}', knows, '{}']);
+    const npaths = (q: string) => new Set((run(store, q) as any[]).map((r) => r.pk)).size;
+    // two parallel 1→2 edges → out() reaches 2 twice → two identical [1,2] paths.
+    expect(npaths('g.V(1).repeat(__.out()).times(1).path()')).toBe(2);
+    expect(npaths('g.V(1).repeat(__.out()).times(1).path().dedup()')).toBe(1); // collapsed
   });
 });

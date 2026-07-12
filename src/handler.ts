@@ -129,15 +129,34 @@ function elementBuffer(r: any, prefix: string, elem: ElemShape): Buffer {
 // (routing them via anySerializer would drop props — the same client bug). {labels}
 // rides as one empty Set per position (labels-on-path deferred); it's plain data
 // (empty Sets), so listSerializer handles it directly.
-function pathBuffer(r: any, positions: PathPos[]): Buffer {
-  const objects = positions.map((pos) =>
-    pos.render === 'element' ? elementBuffer(r, pos.prefix, pos.elem) : ioc.anySerializer.serialize(r[`${pos.prefix}_v`]));
-  const labels = positions.map(() => new Set<string>());
+function framePath(objects: Buffer[]): Buffer {
+  const labels = objects.map(() => new Set<string>()); // labels-on-path deferred → one empty Set per object
   return Buffer.concat([
     Buffer.from([ioc.DataType.PATH, 0x00]),
     ioc.listSerializer.serialize(labels), // {labels}: List<Set<String>>
     listBuffer(objects),                  // {objects}: List of framed, fully-qualified values
   ]);
+}
+
+// Linear path(): one row → one Path, positions framed from per-position columns.
+function pathBuffer(r: any, positions: PathPos[]): Buffer {
+  return framePath(positions.map((pos) =>
+    pos.render === 'element' ? elementBuffer(r, pos.prefix, pos.elem) : ioc.anySerializer.serialize(r[`${pos.prefix}_v`])));
+}
+
+// Recursive repeat().path(): rows arrive ORDER BY (pk, ord) — one row per path
+// element, runs of equal pk being one path. Fold each pk-run into a Path.
+function pathGroupedBuffers(rows: any[], elem: ElemShape): Buffer[] {
+  const frame = elem === 'edge' ? rowEdge : rowVertex;
+  const out: Buffer[] = [];
+  let objs: Buffer[] = [];
+  let curPk: any;
+  for (const r of rows) {
+    if (r.pk !== curPk) { if (objs.length) out.push(framePath(objs)); objs = []; curPk = r.pk; }
+    objs.push(frame(r));
+  }
+  if (objs.length) out.push(framePath(objs));
+  return out;
 }
 
 // A summed numeric, framed to match SQLite's storage class of the SUM (passed as
@@ -220,6 +239,7 @@ function execute(store: GraphStore, gremlin: string, params: Record<string, any>
     case 'scalar': return rows.filter((r) => r.v !== null).map((r) => sumBuffer(r.v, r.vt));
     case 'map': return rows.map((r) => mapBuffer(r, shape.entries));
     case 'path': return rows.map((r) => pathBuffer(r, shape.positions));
+    case 'pathGrouped': return pathGroupedBuffers(rows, shape.elem);
     case 'property': return rows.map((r) => propertyBuffer(r.owner, r.pk, r.pv));
     // Barriers: the whole stream collapses to ONE value (Map / List).
     case 'group': return [groupBuffer(rows, shape.key, shape.val)];

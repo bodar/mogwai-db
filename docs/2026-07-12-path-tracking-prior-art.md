@@ -269,24 +269,29 @@ quantifiers — matching why users put `simplePath()` inside `repeat()`.
 **Yes, one, and it changes the plan:** don't thread a path column through the
 linear movement fold. Adopt Sqlg's **two-regime split**:
 
-1. **Recursive-repeat regime** (`repeat(...).until/times(...).path()`,
-   `repeat(...simplePath()...)`): true SQL path accumulation, but **only here**.
-   **Sub-split by whether `simplePath` is present** (added 2026-07-12 after the
-   SQLite-array research — a trick worth taking):
-   - **`repeat().path()` WITHOUT simplePath**: no per-hop membership test is needed
-     (cycles are allowed / depth-bounded). So DON'T accumulate a path array — carry
-     `(id, depth, parent)` in the walk and **reconstruct the Path in the handler in
-     JS** (reuses the *linear* regime's JS Path-assembly; no JSON append/parse per
-     hop at all). Cheaper for the common case.
-   - **`repeat(...simplePath()...)`**: simplePath needs full-path membership at every
-     hop, and rebuilding that from parent pointers is O(depth²). So here carry a
-     JSONB `path` (`jsonb_insert '$[#]'`), `simplePath` = `NOT EXISTS json_each`
-     early-reject in the recursive WHERE, `cyclicPath` = the dual predicate post-hoc
-     (unbounded, leans on the depth-32 guard).
+1. **Recursive-repeat regime** (`repeat(...).times(...).path()`,
+   `repeat(...simplePath()...)`) — **DONE 2026-07-12** (Core slice): true SQL path
+   accumulation via a JSONB array, **only here**. Widen the one `recursiveCte` in
+   `branch.ts` to `walk(id, depth, path)`: seed `jsonb_array(id)`, append
+   `jsonb_insert(path,'$[#]', tgt)` per hop; `simplePath()` in the body = `NOT EXISTS
+   (json_each(path) WHERE value=tgt)` cycle guard in the recursive WHERE. `compilePathArray`
+   (projection.ts) row-numbers surviving paths, `json_each`-explodes + materialises
+   each element, emits one row per element `ORDER BY (pk, ord)`; the handler
+   (`pathGroupedBuffers`) folds each pk-run into a Path.
+   **A parent-pointer alternative was considered and REJECTED** (correcting an earlier
+   draft of this doc): carrying `(id, depth, parent)` and reconstructing in JS is the
+   textbook *tree* pattern, but it's ambiguous for general graphs with **reconvergence**
+   — e.g. `A→B, A→C, B→D, C→D, D→E`: the row `(E, depth 3, parent=D)` can't say *which*
+   of the two `D` arrivals it came from, because a node-id parent doesn't identify a
+   *path*. Disambiguating needs a per-row path identity, which is the accumulated array
+   itself — so parent-pointer collapses back to carrying the path. Use the JSONB array
+   uniformly (both with and without simplePath); correct-by-design beats the false
+   economy.
    **Hard constraint (validates the plan):** SQLite forbids aggregate/window
    functions in a recursive term, so `json_group_array` is out — a scalar per-row
-   append (`jsonb_insert`) is the *only* structurally-legal accumulator. Contained to
-   one function; upgrades the repeat we already shipped.
+   append (`jsonb_insert`) is the *only* structurally-legal accumulator. `cyclicPath`
+   in-repeat, `until`, `emit(pred)`, `path().by()` on recursive, edge-inclusive bodies,
+   and mixed linear+repeat paths remain deferred (clear errors).
 2. **Linear regime** (`g.V().out().out().path()`, `tree`, `select`, standalone
    `simplePath`/`cyclicPath`): **do not compute path in SQL.** Detect the
    `PATH` requirement, force every intermediate element into the projection

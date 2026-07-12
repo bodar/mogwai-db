@@ -60,7 +60,7 @@ function seedSource(first: PStep, query: Query, params: Record<string, any>, tra
     body = q`SELECT ${sel} FROM ${srcRel}`;
   }
   const cols = trackPath ? ['id', 'p0'] : ['id'];
-  const path = trackPath ? { cols: [{ col: 'p0', elem }] } : undefined;
+  const path = trackPath ? { kind: 'cols' as const, cols: [{ col: 'p0', elem }] } : undefined;
   return { q: query, last: query.cte(body, cols), aliases: new Map(), elem, indexKeys: new Set(), params, path };
 }
 
