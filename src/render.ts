@@ -55,7 +55,8 @@ export type Shape =
   | { kind: 'elementMap'; keys: string[] | null }
   | { kind: 'map'; entries: MapEntry[] }
   | { kind: 'group'; key: GroupKey; val: GroupVal }
-  | { kind: 'path'; positions: PathPos[] }
+  | { kind: 'path'; positions: PathPos[] }                 // linear: one row per path, per-position columns
+  | { kind: 'pathGrouped'; elem: ElemShape }               // recursive: N rows per path (pk, ord, element), grouped
   | { kind: 'discard' };
 
 export interface Compiled {

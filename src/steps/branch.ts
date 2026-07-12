@@ -54,10 +54,6 @@ export const optional: StepFn = (s, st) => {
 export const repeat: StepFn = (s, st) => {
   if (st.elem !== 'node') throw new Error('repeat() on edges not yet supported');
   if (st.aliases.size > 0) throw new Error('repeat() after as() not yet supported');
-  // The recursive-repeat regime (a JSON path column in the WITH RECURSIVE walk) is
-  // the other half of path tracking, deferred: linear path() carries per-position
-  // columns the fixed-width walk can't append to. See docs/2026-07-12-path-tracking-prior-art.md.
-  if (st.path) throw new Error('path tracking through repeat() not yet supported');
   const cluster = s.cluster ?? [s];
   const rep = cluster.find((c) => c.name === 'repeat');
   if (!rep) throw new Error(`${s.name}() without repeat() not yet supported`);
@@ -72,20 +68,46 @@ export const repeat: StepFn = (s, st) => {
   if (!timesStep) throw new Error('repeat() without times() not yet supported (unbounded emit()/until() deferred)');
   const emitBefore = !!emitStep && cluster.indexOf(emitStep) < cluster.indexOf(rep);
 
+  // Body: a single out/in/both, optionally followed by simplePath() (cycle-free walk).
   const body = stepChain(rep.args[0]?.nested, st.params);
-  if (body.length !== 1 || !['out', 'in', 'both'].includes(body[0].name))
-    throw new Error(`repeat(__.${body.map((c) => c.name + '()').join('.')}) not yet supported (single out()/in()/both() only)`);
   const mv = body[0];
+  const simplePathInBody = body.length === 2 && body[1].name === 'simplePath';
+  if (!mv || !['out', 'in', 'both'].includes(mv.name) || (body.length > 1 && !simplePathInBody))
+    throw new Error(`repeat(__.${body.map((c) => c.name + '()').join('.')}) not yet supported (single out()/in()/both(), optional .simplePath())`);
   const maxDepth = Number(timesStep.args[0]); // always present (checked above) → bounded depth
 
-  const walk = st.q.recursiveCte(['id', 'depth'], (self: Relation) => {
+  // Path tracking. `wantsPathOutput`: a downstream path() (chain seeded st.path at V).
+  // simplePath() in the body needs the accumulated path for its cycle guard even
+  // when nothing outputs it. Either → accumulate a JSONB array through the walk.
+  const wantsPathOutput = !!st.path;
+  // Fail closed on path() spanning more than one movement segment: either a linear
+  // hop before repeat (`cols` length > 1) OR a path already accumulated by a PRIOR
+  // repeat cluster (`array`). Both would need the walk seeded from the carried path,
+  // not a fresh jsonb_array(id) — deferred rather than silently dropping the prefix.
+  if (wantsPathOutput && (st.path!.kind === 'array' || st.path!.cols.length > 1))
+    throw new Error('path() spanning more than one repeat()/movement is not yet supported');
+  if (wantsPathOutput && emitStep) throw new Error('emit() with path() not yet supported');
+  const trackArray = wantsPathOutput || simplePathInBody;
+
+  const walkCols = trackArray ? ['id', 'depth', 'path'] : ['id', 'depth'];
+  const walk = st.q.recursiveCte(walkCols, (self: Relation) => {
     const e = edges.as('e');
-    const rec = dirsFor(mv.name).map(([from, to]) =>
-      q`SELECT ${e.c[to]} AS id, ${self.c.depth} + 1 AS depth FROM ${self} JOIN ${e} ON ${e.c[from]}=${self.c.id} WHERE ${self.c.depth} < ${maxDepth}${edgeLabelFilter(mv.args)}`);
-    return q`SELECT id, 0 AS depth FROM ${st.last} UNION ALL ${list(rec, ' UNION ALL ')}`;
+    const rec = dirsFor(mv.name).map(([from, to]) => {
+      // Accumulate the visited-id path (jsonb — no text reparse per hop). simplePath
+      // rejects revisiting any element already in the path (the cycle guard).
+      const pathAcc = trackArray ? q`, jsonb_insert(${self.c.path}, '$[#]', ${e.c[to]}) AS path` : q``;
+      const guard = simplePathInBody ? q` AND NOT EXISTS (SELECT 1 FROM json_each(${self.c.path}) je WHERE je.value=${e.c[to]})` : q``;
+      return q`SELECT ${e.c[to]} AS id, ${self.c.depth} + 1 AS depth${pathAcc} FROM ${self} JOIN ${e} ON ${e.c[from]}=${self.c.id} WHERE ${self.c.depth} < ${maxDepth}${guard}${edgeLabelFilter(mv.args)}`;
+    });
+    const seedPath = trackArray ? q`, jsonb_array(id) AS path` : q``;
+    return q`SELECT id, 0 AS depth${seedPath} FROM ${st.last} UNION ALL ${list(rec, ' UNION ALL ')}`;
   });
   // times() only → final depth; emit after → every iteration (≥1); emit before →
   // also the starting traverser (≥0).
   const depthCond = !emitStep ? `depth = ${maxDepth}` : emitBefore ? 'depth >= 0' : 'depth >= 1';
+  // Expose the path column iff a path() will frame it; else drop it (the array was
+  // internal to the walk, only there for simplePath's guard).
+  if (wantsPathOutput)
+    return advance(st, q`SELECT id, path FROM ${walk} WHERE ${depthCond}`, { path: { kind: 'array', col: 'path', elem: 'node' } });
   return advance(st, q`SELECT id FROM ${walk} WHERE ${depthCond}`);
 };

@@ -18,20 +18,29 @@ import { type PStep } from '../strategies.ts';
  *  select/where knows whether the label is a vertex or an edge). */
 export type AliasMap = ReadonlyMap<string, { col: string; elem: Elem }>;
 
-/** Path tracking (linear regime): the ordered path elements, each remembered as a
- *  carried column (p0, p1, … — one per emitting step) + the element kind at that
- *  position. Present only when the chain contains path()/simplePath()/cyclicPath()
- *  (seeded at V()); movement appends a position, filters carry them unchanged. */
-export interface PathState { readonly cols: readonly { col: string; elem: Elem }[]; }
+/** Path tracking. Two regimes (see docs/2026-07-12-path-tracking-prior-art.md):
+ *  - `cols` (linear): each emitted element is a carried column (p0, p1, … — one per
+ *    mapping step, statically known length). Movement appends a position; filters
+ *    carry them unchanged. Backs path()/simplePath()/cyclicPath() over plain movement.
+ *  - `array` (recursive): the repeat() walk accumulates a single JSONB array column
+ *    (dynamic length). Backs repeat(...).path() — `col` is the array column, `elem`
+ *    the walk's element kind (node for out/in/both). */
+export type PathState =
+  | { readonly kind: 'cols'; readonly cols: readonly { col: string; elem: Elem }[] }
+  | { readonly kind: 'array'; readonly col: string; readonly elem: Elem };
 
-/** The carried path columns, in order (p0, p1, …). */
-export const pathColsOf = (p?: PathState): string[] => p ? p.cols.map((x) => x.col) : [];
+/** The carried path columns: the p0,p1,… positions (linear) or the single array
+ *  column (recursive). */
+export const pathColsOf = (p?: PathState): string[] =>
+  !p ? [] : p.kind === 'cols' ? p.cols.map((x) => x.col) : [p.col];
 
-/** Append a new path position holding the current id, kind `elem`. Returns the new
- *  PathState and the freshly-minted column name (p{k}). */
+/** Append a new linear path position holding the current id, kind `elem`. Only the
+ *  `cols` regime appends per hop; a recursive `array` path is terminal (movement
+ *  after it isn't supported). Returns the new PathState + the minted column (p{k}). */
 export function appendPathPos(p: PathState, elem: Elem): { path: PathState; col: string } {
+  if (p.kind !== 'cols') throw new Error('movement after recursive repeat().path() not yet supported');
   const col = `p${p.cols.length}`;
-  return { path: { cols: [...p.cols, { col, elem }] }, col };
+  return { path: { kind: 'cols', cols: [...p.cols, { col, elem }] }, col };
 }
 
 /** Immutable prefix state threaded through the step fold. Everything the dispatch

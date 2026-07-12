@@ -408,6 +408,8 @@ function compilePath(st: St, proj: PStep, acc: TailAcc, indexKeys: Set<string>):
   // seedSource, which handles V()/E()), so path tracking never starts. Mid-chain
   // union()/optional()/repeat() are caught earlier by their own path guards.
   if (!st.path) throw new Error('path() over a union() source step is not yet supported');
+  if (st.path.kind === 'array') return compilePathArray(st, acc, indexKeys);
+  const pathState = st.path; // narrowed to 'cols'; held in a local so the .map closure keeps the narrowing
   if (acc.orders.length) throw new Error('order() after path() not yet supported');
   if (acc.reducer) throw new Error(`${acc.reducer}() after path() not yet supported`);
   if (acc.isPreds.length) throw new Error('is() after path() not yet supported');
@@ -419,7 +421,7 @@ function compilePath(st: St, proj: PStep, acc: TailAcc, indexKeys: Set<string>):
   const joins: Expression[] = [];
   const cols: Expression[] = [];
   const whereParts: Expression[] = [];
-  const positions: PathPos[] = st.path.cols.map((pos, i) => {
+  const positions: PathPos[] = pathState.cols.map((pos, i) => {
     const prefix = `x${i}`;
     const tbl = (pos.elem === 'edge' ? edges : nodes).as(`${prefix}n`);
     joins.push(q` JOIN ${tbl} ON ${tbl.c.id}=${p.c[pos.col]}`);
@@ -447,6 +449,31 @@ function compilePath(st: St, proj: PStep, acc: TailAcc, indexKeys: Set<string>):
   const tailSql = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
   const node = q`SELECT ${dist}${list(cols, ', ')} FROM ${p}${list(joins, '')}${whereNode}${tailSql}`;
   return readCompiled(st.q, node, { kind: 'path', positions }, [...indexKeys]);
+}
+
+/**
+ * path() over a recursive repeat() walk (the `array` regime). The walk (branch.ts)
+ * accumulated a JSONB array of visited ids per surviving traverser (`st.last` =
+ * `(id, path)`). Give each path a row number (`pk`), explode the array with
+ * `json_each` (`.key` = ordinal), materialize each element, and emit ONE ROW PER
+ * PATH ELEMENT ordered by `(pk, ord)` — the handler folds each pk-run into one Path.
+ * All elements are vertices (out/in/both bodies); edge-inclusive bodies defer.
+ */
+function compilePathArray(st: St, acc: TailAcc, indexKeys: Set<string>): Compiled {
+  if (acc.orders.length || acc.reducer || acc.isPreds.length || acc.transforms.length || acc.injects.length)
+    throw new Error('order()/reducer/is()/transform after a recursive repeat().path() not yet supported');
+  // dedup() must collapse equal paths BEFORE row-numbering: ROW_NUMBER() is computed
+  // with the SELECT list, so a `SELECT DISTINCT path, ROW_NUMBER()…` never removes a
+  // row (the unique pk defeats DISTINCT). Distinct-ify in a prior CTE, then number.
+  const src = acc.distinct ? st.q.cte(q`SELECT DISTINCT ${st.last.c.path} AS path FROM ${st.last}`, ['path']) : st.last;
+  // ROW_NUMBER over the surviving paths → a stable per-path key so equal-id paths
+  // stay distinct (multiset) after the json_each explode.
+  const limitSql = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
+  const paths = st.q.cte(q`SELECT ${src.c.path} AS path, ROW_NUMBER() OVER (ORDER BY ${src.c.path}) AS pk FROM ${src}${limitSql}`, ['path', 'pk']);
+  const n = nodes.as('n');
+  const l = labels.as('l');
+  const node = q`SELECT pp.pk, je.key AS ord, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${n.c.props} AS props FROM ${paths} pp, json_each(pp.path) je JOIN ${n} ON ${n.c.id}=je.value JOIN ${l} ON ${l.c.id}=${n.c.label} ORDER BY pp.pk, je.key`;
+  return readCompiled(st.q, node, { kind: 'pathGrouped', elem: 'vertex' }, [...indexKeys]);
 }
 
 // ---------- group()/groupCount() (barrier → one Map) ----------

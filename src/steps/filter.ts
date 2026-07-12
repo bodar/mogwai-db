@@ -57,7 +57,12 @@ export const as: StepFn = (s, st) => {
  *  positions are known at compile time, so the test is a static conjunction. by()/
  *  from()/to() scoping is deferred (they arrive as their own steps → clear error). */
 function pathDistinctTest(st: St, simple: boolean): Expression {
-  if (!st.path) throw new Error(`${simple ? 'simplePath' : 'cyclicPath'}() requires a tracked path`);
+  const name = simple ? 'simplePath' : 'cyclicPath';
+  if (!st.path) throw new Error(`${name}() requires a tracked path`);
+  // A standalone filter reads the linear per-position columns; over a recursive
+  // repeat() walk, simplePath belongs INSIDE the repeat body (folded into the walk's
+  // cycle guard), not as a post-filter.
+  if (st.path.kind !== 'cols') throw new Error(`${name}() over a recursive repeat().path() is not yet supported (put simplePath() inside the repeat body)`);
   const p = prevRel(st, 'p');
   const cols = st.path.cols;
   const pairs: Expression[] = [];
