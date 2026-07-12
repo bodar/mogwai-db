@@ -2,9 +2,17 @@
 
 Context file for Claude (Code or otherwise) working on this repo. Read
 `docs/2026-07-11-phased-roadmap-plan.md` after this; it has the phased roadmap
-and test strategy. Active refactor: `docs/2026-07-11-lazyrecords-cutover-plan.md`
-(compiler.ts → lazyrecords, 3-seam decomposition). This file is the things that
-took a whole investigation to learn — do not re-derive them.
+and test strategy. This file is the things that took a whole investigation to
+learn — do not re-derive them.
+
+**SQL generation (current):** the compiler builds SQL with a template-first `q`
+kernel + typed `Relation` handles — `src/q.ts` (kernel) + `src/schema.ts`
+(nodes/edges/labels relation constants). Design + rationale:
+`docs/2026-07-12-q-kernel-sql-builder.md`. Do NOT reintroduce lazyrecords ansi
+builders (`select`/`from`/`join`/`comparison`/`cte`/…) — they were tried and
+retired. The older `docs/2026-07-11-lazyrecords-cutover-plan.md` holds the
+3-seam decomposition roadmap; its SQL-build sections are marked SUPERSEDED —
+Seam 2 (step dispatch table) + Seam 3 (`strategies.ts`) are the remaining work.
 
 ## What this is
 
