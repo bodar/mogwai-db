@@ -53,10 +53,39 @@ export function idPredFromArgs(args: any[]): any {
   return { op: 'within', values: args.filter((a) => a !== null && a !== undefined) };
 }
 
+// GType → SQLite `typeof()` category. `null` = a recognized Gremlin type we don't
+// distinctly represent in JSON storage (boolean is stored as int, char/uuid/etc.
+// never occur), so it can never match → folds to constant false. `undefined` =
+// not a registered type name → the caller raises (matches the spec's error case).
+const GTYPE_SQL: Record<string, string | null> = {
+  string: 'text',
+  int: 'integer', integer: 'integer', long: 'integer', short: 'integer',
+  byte: 'integer', bigint: 'integer', biginteger: 'integer',
+  double: 'real', float: 'real', bigdecimal: 'real',
+  boolean: null, char: null, binary: null, uuid: null, datetime: null,
+  duration: null, tree: null, edge: null, vertex: null, vertexproperty: null,
+  vproperty: null, property: null, list: null, map: null, set: null, path: null,
+  graph: null,
+};
+
+/** P.typeOf(GType|"ClassName") → a SQL type test over `expr`. `null` type folds
+ *  to false; unknown/unregistered names raise (spec: "traversal will raise an error"). */
+function typeOfSql(expr: Expression, arg: any): Expression {
+  const name = (arg && typeof arg === 'object' && 'gtype' in arg) ? String(arg.gtype)
+    : typeof arg === 'string' ? arg.toLowerCase()
+    : (() => { throw new Error('typeOf() requires a GType argument'); })();
+  if (name === 'null') return q`${expr} is null`;
+  if (!(name in GTYPE_SQL)) throw new Error(`typeOf(): unregistered type '${name}'`);
+  const sqlType = GTYPE_SQL[name];
+  return sqlType === null ? q`0` : q`typeof(${expr}) = ${value(sqlType)}`;
+}
+
 export function predicateSql(expr: Expression, pred: any): Expression {
   if (pred === undefined) return q`${expr} is not null`;
   if (pred === null || typeof pred !== 'object' || !('op' in pred)) return q`${expr} = ${value(pred)}`;
   const { op, values: vals } = pred as Pred;
+  if (op === 'not') return q`NOT (${predicateSql(expr, vals[0])})`;
+  if (op === 'typeOf') return typeOfSql(expr, vals[0]);
   if (op in P_OPS) return q`${expr} ${P_OPS[op]} ${value(vals[0])}`;
   // SQLite rejects an empty `IN ()` list, so fold the degenerate sets to their
   // constant truth value: within nothing = never, without nothing = always.
