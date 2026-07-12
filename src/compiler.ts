@@ -706,12 +706,13 @@ interface GroupSource { from: string; ctx: ScalarCtx; elem: ElemShape; }
 
 /** Columns that frame one element (vertex/edge/property) under `prefix`, using
  *  base exprs from ctx. label rides as a subquery so the FROM needs no labels join. */
-function elementSelect(elem: ElemShape, prefix: string, ctx: ScalarCtx): string {
+function elementSelect(elem: ElemShape, prefix: string, ctx: ScalarCtx): Expression {
+  const extId = ctx.extIdExpr ?? ctx.idExpr;
   if (elem === 'edge')
-    return `${ctx.extIdExpr ?? ctx.idExpr} AS ${prefix}_id, ${labelNameSub(ctx.labelIdExpr)} AS ${prefix}_label, ${ctx.srcExpr} AS ${prefix}_src, ${ctx.tgtExpr} AS ${prefix}_tgt, ${ctx.propsExpr} AS ${prefix}_props`;
+    return q`${extId} AS ${prefix}_id, ${labelNameSub(ctx.labelIdExpr)} AS ${prefix}_label, ${ctx.srcExpr!} AS ${prefix}_src, ${ctx.tgtExpr!} AS ${prefix}_tgt, ${ctx.propsExpr} AS ${prefix}_props`;
   if (elem === 'property')
-    return `${ctx.ownerExpr} AS ${prefix}_owner, ${ctx.pkExpr} AS ${prefix}_pk, ${ctx.pvExpr} AS ${prefix}_pv`;
-  return `${ctx.extIdExpr ?? ctx.idExpr} AS ${prefix}_id, ${labelNameSub(ctx.labelIdExpr)} AS ${prefix}_label, ${ctx.propsExpr} AS ${prefix}_props`;
+    return q`${ctx.ownerExpr!} AS ${prefix}_owner, ${ctx.pkExpr!} AS ${prefix}_pk, ${ctx.pvExpr!} AS ${prefix}_pv`;
+  return q`${extId} AS ${prefix}_id, ${labelNameSub(ctx.labelIdExpr)} AS ${prefix}_label, ${ctx.propsExpr} AS ${prefix}_props`;
 }
 
 /** The SQL expr to GROUP BY / frame an element by identity. */
@@ -734,18 +735,18 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, indexKeys: 
   // Bare by() (or no key by()) → the element itself is the key.
   if (!keyArgs || keyArgs.length === 0) {
     if (src.elem === 'property') throw new Error('group().by() on a property element is not yet supported');
-    return { desc: { kind: 'element', elem: src.elem }, cols: sqlText(elementSelect(src.elem, 'k', src.ctx)), group: elementIdExpr(src.elem, src.ctx) };
+    return { desc: { kind: 'element', elem: src.elem }, cols: elementSelect(src.elem, 'k', src.ctx), group: elementIdExpr(src.elem, src.ctx) };
   }
   const a = keyArgs[0];
   if (typeof a === 'string') { // by('name')
     const pe = propExtract(src.ctx.propsExpr, a); // property ctx sets propsExpr = ownerProps
     if (pe.indexKey && src.elem === 'vertex') indexKeys.add(pe.indexKey);
-    return { desc: { kind: 'scalar' }, cols: lsql(pe.expr, sqlText(' AS gk')), group: 'gk' };
+    return { desc: { kind: 'scalar' }, cols: q`${pe.expr} AS gk`, group: 'gk' };
   }
   if (a && typeof a === 'object' && 'token' in a) { // by(T.label)/by(T.id)
     const expr = a.token === 'label' ? labelNameSub(src.ctx.labelIdExpr) : a.token === 'id' ? src.ctx.idExpr : null;
     if (!expr) throw new Error(`group().by(T.${a.token}) not yet supported`);
-    return { desc: { kind: 'scalar' }, cols: sqlText(`${expr} AS gk`), group: 'gk' };
+    return { desc: { kind: 'scalar' }, cols: q`${expr} AS gk`, group: 'gk' };
   }
   if (a && typeof a === 'object' && 'nested' in a) {
     const inner = stepChain(a.nested, params);
@@ -759,12 +760,12 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, indexKeys: 
         const nb = partBys[idx].args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
         if (!nb) throw new Error('group().by(project(...).by(x)) requires a traversal in each by()');
         const sc = compileNestedScalar(stepChain(nb.nested, params), src.ctx);
-        cols.push(lsql(sc.expr, sqlText(` AS k${idx}_v`))); group.push(`k${idx}_v`);
+        cols.push(q`${sc.expr} AS k${idx}_v`); group.push(`k${idx}_v`);
       });
       return { desc: { kind: 'map', parts: keys.map((k) => ({ key: k })) }, cols: list(cols, sqlText(', ')), group: group.join(', ') };
     }
     const sc = compileNestedScalar(inner, src.ctx); // by(__.label()) etc → scalar
-    return { desc: { kind: 'scalar' }, cols: lsql(sc.expr, sqlText(' AS gk')), group: 'gk' };
+    return { desc: { kind: 'scalar' }, cols: q`${sc.expr} AS gk`, group: 'gk' };
   }
   throw new Error('unsupported group().by() key modulator');
 }
@@ -786,31 +787,30 @@ function compileGroup(isCount: boolean, bys: any[][], src: GroupSource, ctes: Ct
   // Resolve the value reducer.
   let val: GroupVal, valNode: Expression, groupBy = true;
   const valArgs = bys[1];
-  if (isCount) { val = { kind: 'count' }; valNode = sqlText('COUNT(*) AS gv'); }
-  else if (!valArgs || valArgs.length === 0) { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = sqlText(elementSelect(src.elem, 'v', src.ctx)); }
+  if (isCount) { val = { kind: 'count' }; valNode = q`COUNT(*) AS gv`; }
+  else if (!valArgs || valArgs.length === 0) { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx); }
   else {
     const a = valArgs[0];
     if (typeof a === 'string') { // by('age') → list of scalars
       const pe = propExtract(src.ctx.propsExpr, a); // property ctx sets propsExpr = ownerProps
-      val = { kind: 'scalarList' }; valNode = lsql(sqlText('json_group_array('), pe.expr, sqlText(') AS gv'));
+      val = { kind: 'scalarList' }; valNode = q`json_group_array(${pe.expr}) AS gv`;
     } else if (a && typeof a === 'object' && 'nested' in a) {
       const inner = stepChain(a.nested, params);
       const names = inner.map((s) => s.name);
-      if (names.length === 1 && names[0] === 'tail') { val = { kind: 'elementLast', elem: src.elem }; groupBy = false; valNode = sqlText(elementSelect(src.elem, 'v', src.ctx)); }
-      else if (names.length === 1 && names[0] === 'fold') { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = sqlText(elementSelect(src.elem, 'v', src.ctx)); }
-      else if (names.length === 1 && names[0] === 'count') { val = { kind: 'count' }; valNode = sqlText('COUNT(*) AS gv'); }
+      if (names.length === 1 && names[0] === 'tail') { val = { kind: 'elementLast', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx); }
+      else if (names.length === 1 && names[0] === 'fold') { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx); }
+      else if (names.length === 1 && names[0] === 'count') { val = { kind: 'count' }; valNode = q`COUNT(*) AS gv`; }
       else if (names[names.length - 1] === 'sum') {
         const sc = compileNestedScalar(inner.slice(0, -1), src.ctx);
-        val = { kind: 'sum' }; valNode = lsql(sqlText('SUM('), sc.expr, sqlText(') AS gv, typeof(SUM('), sc.expr, sqlText(')) AS gvt')); // gvt → Int/Long vs Double
+        val = { kind: 'sum' }; valNode = q`SUM(${sc.expr}) AS gv, typeof(SUM(${sc.expr})) AS gvt`; // gvt → Int/Long vs Double
       } else { // scalar projection folded to a list, e.g. by(__.label()) / by(__.values("name"))
         const sc = compileNestedScalar(inner, src.ctx);
-        val = { kind: 'scalarList' }; valNode = lsql(sqlText('json_group_array('), sc.expr, sqlText(') AS gv'));
+        val = { kind: 'scalarList' }; valNode = q`json_group_array(${sc.expr}) AS gv`;
       }
     } else throw new Error('unsupported group().by() value modulator');
   }
 
-  const node = lsql(sqlText('SELECT '), key.cols, sqlText(', '), valNode,
-    sqlText(` FROM ${src.from} ${groupBy ? 'GROUP BY' : 'ORDER BY'} ${key.group}`));
+  const node = q`SELECT ${key.cols}, ${valNode} FROM ${src.from} ${groupBy ? 'GROUP BY' : 'ORDER BY'} ${key.group}`;
   return readCompiled(ctes, node, { kind: 'group', key: key.desc, val }, [...indexKeys]);
 }
 
