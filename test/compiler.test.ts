@@ -97,6 +97,24 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().values("age").fold().min(Scope.local)', {})).toThrow('step not implemented after fold(): min()');
   });
 
+  test('inject() is a value stream that reducers/modifiers chain onto', () => {
+    expect(read('g.inject(1,2,3)').shape).toEqual({ kind: 'value' });
+    expect(read('g.inject(1,2,3)').binds).toEqual([1, 2, 3]);
+    // trailing inject() appends via UNION ALL
+    expect(read('g.inject(1,3).inject(100,300)').sql).toContain('UNION ALL');
+    // reducers reuse the shared wrapper
+    expect(read('g.inject(1,2,3).sum()').shape).toEqual({ kind: 'scalar' });
+    expect(read('g.inject(1,2,3).sum()').sql).toContain('SUM(v)');
+    expect(read('g.inject(1,2,3).mean()').sql).toContain('AVG(v)');
+    expect(read('g.inject(1,2,3).count()').shape).toEqual({ kind: 'count' });
+    expect(read('g.inject(1,2,3).fold()').shape).toEqual({ kind: 'list', elem: 'scalar' });
+    // value modifiers
+    expect(read('g.inject(3,1,2).order()').sql).toContain('ORDER BY v ASC');
+    expect(read('g.inject(1,1,2).dedup()').sql).toContain('DISTINCT v');
+    // an unsupported follow-on step defers cleanly
+    expect(() => compile('g.inject(1).as("a").select("a")', {})).toThrow('inject() with subsequent step as()');
+  });
+
   test('limit before count wraps the counted id-relation', () => {
     expect(read('g.V().limit(2).count()').sql).toContain('SELECT COUNT(*) AS v FROM (SELECT id FROM c1)');
   });
