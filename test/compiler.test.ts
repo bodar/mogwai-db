@@ -64,6 +64,25 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().not(__.hasId(P.within([])))').sql).toContain('NOT COALESCE');
   });
 
+  test('P.typeOf maps GType to a SQL typeof() test', () => {
+    // value stream + is(): typeof over the projected scalar expr; type binds as ?
+    const str = read('g.V().values("name").is(P.typeOf(GType.STRING))');
+    expect(str.sql).toContain("typeof(json_extract(n.props, '$.name')) = ?");
+    expect(str.binds).toContain('text');
+    expect(read('g.V().values("age").is(P.typeOf(GType.INT))').binds).toContain('integer');
+    // java class-name string form is equivalent
+    expect(read('g.V().values("name").is(P.typeOf("String"))').binds).toContain('text');
+    // has(): typeof over the property expression
+    expect(read('g.V().has("name", P.typeOf(GType.STRING))').sql).toContain("typeof(json_extract(n.props, '$.name'))");
+    // NULL → is-null; recognized-but-unrepresentable type → constant false
+    expect(read('g.V().values("age").is(P.typeOf(GType.NULL))').sql).toContain('is null');
+    expect(read('g.V().values("age").is(P.typeOf(GType.BOOLEAN))').sql).toMatch(/\b0\b/);
+    // P.not wraps and negates the inner predicate
+    expect(read('g.V().values("age").is(P.not(P.typeOf(GType.STRING)))').sql).toContain('NOT (typeof(');
+    // an unregistered type name raises
+    expect(() => compile('g.V().values("age").is(P.typeOf("bogus-name"))', {})).toThrow('unregistered type');
+  });
+
   test('limit before count wraps the counted id-relation', () => {
     expect(read('g.V().limit(2).count()').sql).toContain('SELECT COUNT(*) AS v FROM (SELECT id FROM c1)');
   });

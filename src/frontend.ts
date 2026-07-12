@@ -117,6 +117,10 @@ function walkArgs(node: any, out: any[], params: Record<string, any>): void {
   // ({token}/{direction}) or strings; values recurse via argOf. Do NOT fall
   // through to the generic recursion, which would flatten and drop pairing.
   if (cls === 'GenericMapLiteralContext') { out.push(mapLiteral(node, params)); return; }
+  // GType.STRING / bare STRING (P.typeOf(...), asNumber(...)) — a type-name enum,
+  // captured as a tagged token so predicateSql can map it to a SQL type test.
+  // Without this the generic recursion drops it and typeOf sees no argument.
+  if (cls === 'TraversalGTypeContext') { out.push({ gtype: enumSuffix(node) }); return; }
   if (cls === 'NestedTraversalContext') { out.push({ nested: node }); return; }
   for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) walkArgs(node.getChild(i), out, params);
 }
