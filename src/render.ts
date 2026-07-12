@@ -35,6 +35,14 @@ export type GroupVal =
   | { kind: 'count' }                                    // by(__.count())/groupCount → Long
   | { kind: 'sum' };                                     // by(__.…sum()) → numeric
 
+// path(): one Path per row. Each position frames either a whole element
+// (prefix_id/_label/_props[/_src/_tgt]) or, under a by(key) modulator, a scalar
+// (prefix_v). Positions are in traversal order; labels ride empty (labels-on-path
+// deferred). See docs/2026-07-12-path-tracking-prior-art.md.
+export type PathPos =
+  | { render: 'element'; elem: ElemShape; prefix: string }
+  | { render: 'value'; prefix: string };
+
 export type Shape =
   | { kind: 'vertex' }
   | { kind: 'edge' }
@@ -47,6 +55,7 @@ export type Shape =
   | { kind: 'elementMap'; keys: string[] | null }
   | { kind: 'map'; entries: MapEntry[] }
   | { kind: 'group'; key: GroupKey; val: GroupVal }
+  | { kind: 'path'; positions: PathPos[] }
   | { kind: 'discard' };
 
 export interface Compiled {

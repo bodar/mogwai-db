@@ -29,7 +29,7 @@ export type PStep = Step & { cluster?: Step[]; bys?: any[][] };
 const REPEAT_CLUSTER = new Set(['repeat', 'emit', 'times', 'until']);
 /** Steps that absorb trailing by() modulators. Alias-compare where()/not() also
  *  host a single by(key) but are detected structurally (see isAliasCompareWhere). */
-const BY_HOSTS = new Set(['order', 'select', 'project', 'group', 'groupCount']);
+const BY_HOSTS = new Set(['order', 'select', 'project', 'group', 'groupCount', 'path']);
 
 /** Run every normalization pass. `discard` rides out-of-band — it's an output
  *  shape (iterate() → return nothing), not a step the compiler dispatches. */

@@ -4,7 +4,7 @@ import {
   P_OPS, propExtract, labelIn, predicateSql, propAt, elemCtx,
   compileFilterPredicate, combineBranchPreds, idPredFromArgs, type Elem,
 } from '../plan.ts';
-import { advance, carryFrag, elemRel, prevRel, type AliasMap, type St, type StepFn } from './context.ts';
+import { advance, carryFrag, elemRel, pathColsOf, prevRel, type AliasMap, type St, type StepFn } from './context.ts';
 
 // ---------- filter (predicates over the current traverser) ----------
 
@@ -43,9 +43,34 @@ export const as: StepFn = (s, st) => {
     aliases.set(lbl, { col, elem: st.elem }); // rebind: default Pop = last, re-capture kind
     rebind.push(col);
   }
-  const cols = ['id', ...[...aliases.values()].map((a) => rebind.includes(a.col) ? `id AS ${a.col}` : a.col)];
+  // Path-position columns pass through untouched (labels-on-path is deferred, so
+  // as() only rebinds alias columns here — the path element set is unchanged).
+  const cols = ['id', ...[...aliases.values()].map((a) => rebind.includes(a.col) ? `id AS ${a.col}` : a.col), ...pathColsOf(st.path)];
   return advance(st, q`SELECT ${cols.join(', ')} FROM ${prevRel(st)}`, { aliases });
 };
+
+/** simplePath()/cyclicPath(): a whole-path object-identity filter. simplePath keeps
+ *  traversers whose path has NO repeated element; cyclicPath keeps those with at
+ *  least one repeat (the exact negation). Objects only, all pairs — and only pairs
+ *  of the SAME element kind can be equal (a vertex rowid and an edge rowid collide
+ *  numerically but are distinct objects), so cross-kind pairs are skipped. The path
+ *  positions are known at compile time, so the test is a static conjunction. by()/
+ *  from()/to() scoping is deferred (they arrive as their own steps → clear error). */
+function pathDistinctTest(st: St, simple: boolean): Expression {
+  if (!st.path) throw new Error(`${simple ? 'simplePath' : 'cyclicPath'}() requires a tracked path`);
+  const p = prevRel(st, 'p');
+  const cols = st.path.cols;
+  const pairs: Expression[] = [];
+  for (let i = 0; i < cols.length; i++)
+    for (let j = i + 1; j < cols.length; j++)
+      if (cols[i].elem === cols[j].elem) pairs.push(q`${p.c[cols[i].col]} = ${p.c[cols[j].col]}`);
+  if (!pairs.length) return simple ? q`1` : q`0`; // no comparable pair → every path is simple
+  const anyEqual = list(pairs, ' OR ');
+  return simple ? q`NOT (${anyEqual})` : q`(${anyEqual})`;
+}
+
+export const simplePath: StepFn = (_s, st) => filterCte(st, pathDistinctTest(st, true));
+export const cyclicPath: StepFn = (_s, st) => filterCte(st, pathDistinctTest(st, false));
 
 export const hasLabel: StepFn = (s, st) => filterCte(st, labelIn('n.label', s.args));
 
@@ -132,5 +157,6 @@ export const andOr: StepFn = (s, st) => {
 export const dedup: StepFn = (s, st) => {
   if (s.args.length > 0) throw new Error('dedup(label) not yet supported');
   if (st.aliases.size > 0) throw new Error('dedup() after as() not yet supported (path-distinct semantics)');
+  if (st.path) throw new Error('dedup() with path tracking not yet supported (path-distinct semantics)');
   return advance(st, q`SELECT DISTINCT id FROM ${prevRel(st)}`);
 };
