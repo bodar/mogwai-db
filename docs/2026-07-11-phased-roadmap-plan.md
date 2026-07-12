@@ -80,8 +80,9 @@ provide platform `deps`), and `src/database/TheClientDatabase.ts` +
 ```sql
 labels(id INTEGER PRIMARY KEY, name TEXT UNIQUE);       -- interning keeps edge
                                                         -- indexes small & hot
-nodes(id INTEGER PRIMARY KEY, label INTEGER, props TEXT); -- JSON props; JSONB
-                                                          -- when DO SQLite ≥3.45
+nodes(id INTEGER PRIMARY KEY, label INTEGER, props TEXT); -- JSON text props; JSONB
+                                              -- now available (DO 3.47.0/Bun 3.53.0)
+                                              -- but a measured migration, see CLAUDE.md
 edges(id INTEGER PRIMARY KEY, src INTEGER, label INTEGER,
       tgt INTEGER, props TEXT);
 CREATE INDEX e_out ON edges(src, label, tgt);  -- covering: out() never touches

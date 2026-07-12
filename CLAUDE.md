@@ -102,9 +102,22 @@ a dead 2013 OGM).
 
 ## Schema (src/storage.ts) — rationale
 
-Integer rowid PKs; interned labels (small hot indexes); props as JSON text
-(move to JSONB when DO SQLite ≥ 3.45); covering edge indexes
-`(src,label,tgt)` and `(tgt,label,src)` so out()/in() are index-only scans.
+Integer rowid PKs; interned labels (small hot indexes); props as JSON **text**;
+covering edge indexes `(src,label,tgt)` and `(tgt,label,src)` so out()/in() are
+index-only scans.
+
+**JSONB is available on both runtimes** (verified 2026-07-12: DO SQLite = **3.47.0**
+in workerd `1.20260708.1`; Bun dev = **3.53.0**; JSONB landed 3.45.0). Migrating the
+`props` storage column to a JSONB blob is a *measured perf opportunity*, not done and
+not a bug — json_extract/json_each skip the per-row text-parse. It is NOT a
+find-replace: (a) the ~6 read sites doing JS `JSON.parse(r.props)` must select
+`json(props)` (a JSONB blob isn't JSON.parse-able); (b) writes wrap `jsonb(?)`;
+(c) contract-test both runtimes. Verified the property expression index STILL matches
+on a JSONB column (`SEARCH … USING COVERING INDEX`), so the hot-property story
+survives. Expected gain is marginal for the target workload (small OLTP prop-maps);
+JSONB's win scales with JSON size — measure before migrating. **New JSON columns
+(e.g. the recursive path-tracking column) should use JSONB from the start** — free
+at build time, no migration, no read-boundary issue if framed in SQL.
 
 Property key handling — **do not naively "always bind the key"** (`compiler.ts`
 `propExtract`). SQLite matches an on-demand expression index
