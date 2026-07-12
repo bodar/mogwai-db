@@ -2,13 +2,13 @@ import { stepChain, type Step, type Pred } from './frontend.ts';
 import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
 import { sql } from '@bodar/lazyrecords/sql/template/Sql.ts';
 import { text as sqlText } from '@bodar/lazyrecords/sql/template/Text.ts';
-import { expression, and, parens, list } from '@bodar/lazyrecords/sql/template/Compound.ts';
+import { expression, parens, list } from '@bodar/lazyrecords/sql/template/Compound.ts';
 import { value } from '@bodar/lazyrecords/sql/template/Value.ts';
 import { jsonExtract } from '@bodar/lazyrecords/sql/sqlite/jsonExtract.ts';
-import { comparison, type ComparisonOperator } from '@bodar/lazyrecords/sql/ansi/ComparisonExpression.ts';
-import { isNotNull } from '@bodar/lazyrecords/sql/ansi/NullExpression.ts';
-import { like, notLike } from '@bodar/lazyrecords/sql/ansi/LikeExpression.ts';
-import { inExpression, notIn } from '@bodar/lazyrecords/sql/ansi/InExpression.ts';
+import { q } from './q.ts';
+
+/** `?, ?, …` — a comma-list of bound values. */
+const valueList = (vs: any[]): Expression => list(vs.map(value), sqlText(', '));
 
 // ---------- SQL node builders ----------
 //
@@ -53,19 +53,18 @@ export function edgeLabelFilter(names: any[]): Expression {
  * order — no manual double-splice. TextP → LIKE with a bound pattern; regex/typeOf throw.
  */
 export function predicateSql(expr: Expression, pred: any): Expression {
-  if (pred === undefined) return expression(expr, isNotNull());
-  if (pred === null || typeof pred !== 'object' || !('op' in pred))
-    return expression(expr, comparison('=', pred));
+  if (pred === undefined) return q`${expr} is not null`;
+  if (pred === null || typeof pred !== 'object' || !('op' in pred)) return q`${expr} = ${value(pred)}`;
   const { op, values } = pred as Pred;
-  if (op in P_OPS) return expression(expr, comparison(P_OPS[op] as ComparisonOperator, values[0]));
-  if (op === 'within') return expression(expr, inExpression(values));
-  if (op === 'without') return expression(expr, notIn(values));
-  // between = [lo, hi) inclusive low; inside = (lo, hi) exclusive low.
+  if (op in P_OPS) return q`${expr} ${sqlText(P_OPS[op])} ${value(values[0])}`;
+  if (op === 'within') return q`${expr} in (${valueList(values)})`;
+  if (op === 'without') return q`${expr} not in (${valueList(values)})`;
+  // between = [lo, hi) inclusive low; inside = (lo, hi) exclusive low. `expr` is
+  // shared into both bounds → its binds fall out twice in order (no double-splice).
   if (op === 'between' || op === 'inside')
-    return and(expression(expr, comparison(op === 'inside' ? '>' : '>=', values[0])),
-               expression(expr, comparison('<', values[1])));
+    return q`(${expr} ${sqlText(op === 'inside' ? '>' : '>=')} ${value(values[0])} and ${expr} < ${value(values[1])})`;
   const lp = likePattern(op, values[0]);
-  if (lp) return expression(expr, lp.neg ? notLike(lp.pat, '\\') : like(lp.pat, '\\'));
+  if (lp) return q`${expr} ${sqlText(lp.neg ? 'not like' : 'like')} ${value(lp.pat)} escape ${value('\\')}`;
   throw new Error(`unsupported predicate: P.${op}`);
 }
 
