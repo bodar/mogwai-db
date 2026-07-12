@@ -2,7 +2,7 @@ import { q, list, type Expression } from '../q.ts';
 import { stepChain, type Pred } from '../frontend.ts';
 import {
   P_OPS, propExtract, labelIn, predicateSql, propAt, elemCtx,
-  compileFilterPredicate, combineBranchPreds, type Elem,
+  compileFilterPredicate, combineBranchPreds, idPredFromArgs, type Elem,
 } from '../plan.ts';
 import { advance, carryFrag, elemRel, prevRel, type AliasMap, type St, type StepFn } from './context.ts';
 
@@ -48,6 +48,13 @@ export const as: StepFn = (s, st) => {
 };
 
 export const hasLabel: StepFn = (s, st) => filterCte(st, labelIn('n.label', s.args));
+
+/** hasId(id…|P): filter the current element by its external id (COALESCE(uid,id)).
+ *  A lone predicate passes through; bare ids become a `within` set. */
+export const hasId: StepFn = (s, st) => {
+  const n = elemRel(st);
+  return filterCte(st, predicateSql(q`COALESCE(${n.c.uid}, ${n.c.id})`, idPredFromArgs(s.args)));
+};
 
 export const has: StepFn = (s, st) => {
   const conds: Expression[] = [];

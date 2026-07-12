@@ -4,7 +4,7 @@ import { type Elem } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { type St, type StepFn } from './context.ts';
 import { move, toEdge, toVertex } from './movement.ts';
-import { as, hasLabel, has, where, andOr, dedup } from './filter.ts';
+import { as, hasLabel, has, hasId, where, andOr, dedup } from './filter.ts';
 import { union, optional, repeat } from './branch.ts';
 import { limit, range, skip } from './passthrough.ts';
 import { compileTail } from './projection.ts';
@@ -21,7 +21,7 @@ const PREFIX = new Map<string, StepFn>([
   ['out', move], ['in', move], ['both', move],
   ['outE', toEdge], ['inE', toEdge], ['bothE', toEdge],
   ['outV', toVertex], ['inV', toVertex], ['bothV', toVertex],
-  ['as', as], ['hasLabel', hasLabel], ['has', has],
+  ['as', as], ['hasLabel', hasLabel], ['has', has], ['hasId', hasId],
   ['where', where], ['filter', where], ['not', where],
   ['and', andOr], ['or', andOr], ['dedup', dedup],
   ['union', union], ['optional', optional],
