@@ -1,15 +1,20 @@
 # L3 — the official TinkerPop cucumber suite
 
-The conformance number. TinkerPop's own JS cucumber runner drives the 164
-official Gherkin feature files over GraphBinary against a live mogwai-db.
-`conformance/conformance.test.ts` is a self-contained mini-L3 (runs under
-`bun test`, no external deps) that proves the wiring; this file is how to run
-the *full* suite for a published score.
+The conformance number. TinkerPop's own JS cucumber runner drives the official
+Gherkin feature files over GraphBinary against a live mogwai-db.
+
+**This now runs automatically as a ratchet under `bun test`** —
+`test/conformance/l3.test.ts` boots the host in-process, runs the cucumber suite
+against the pinned `vendor/tinkerpop` submodule, and compares the passing count
+to `baseline.json` (fewer → fail; more → auto-bump locally). The step scope lives
+in `tags.ts`. `conformance.test.ts` is a self-contained mini-L3 (no submodule)
+that proves the wiring. **This file is the runbook for running the full suite
+manually** (e.g. to inspect individual failures).
 
 ## 1. Start the conformance host
 
 ```bash
-bun run conformance/conformance-server.ts     # listens on :45940/gremlin
+bun run test/conformance/conformance-server.ts     # listens on :45940/gremlin
 ```
 
 Hosts the named toy graphs the runner opens, selected by traversal-source name
@@ -27,14 +32,20 @@ The runner defaults to `http://localhost:45940/gremlin` (hardcoded in
 
 ## 2. Run the suite, narrowed to the implemented step set
 
-In the TinkerPop checkout (`~/Projects/tinkerpop/gremlin-js/gremlin-javascript`),
-once: `bun install` (bun runs the GLV's TS source and the cucumber step defs
-natively — no `npm install`, no ts-node).
+In the pinned submodule runner (`vendor/tinkerpop/gremlin-js/gremlin-javascript`);
+`mise run submodule` has already `bun install`ed the workspace (bun runs the GLV's
+TS source and the cucumber step defs natively — no `npm install`, no ts-node).
+The `--tags` scope is the single source of truth in `test/conformance/tags.ts`
+(the ratchet lever). Read it from there so this command never drifts:
 
 ```bash
+# from the mogwai-db repo root:
+TAGS="$(bun -e 'import{L3_TAGS}from"./test/conformance/tags.ts";console.log(L3_TAGS)')"
+
+cd vendor/tinkerpop/gremlin-js/gremlin-javascript
 CLIENT_MIMETYPE='application/vnd.graphbinary-v4.0' \
   bunx --bun cucumber-js \
-  --tags "(@StepCount or @StepHasLabel or @StepHas or @StepValues or @StepId or @StepLabel or @StepDedup or @StepLimit or @StepRange or @StepOrder or @StepValueMap or @StepElementMap or @StepDrop or @StepInject or @StepSelect or @StepProject or @StepOut or @StepIn or @StepBoth or @StepProperties or @StepGroup or @StepGroupCount or @StepFold or @StepSum or @StepIs or @StepWhere or @StepNot or @StepFilter or @StepAnd or @StepOr or @StepUnion or @StepOptional or @StepRepeat or @StepAddV or @StepAddE or @StepMergeV or @StepMergeE) and not @StepWrite and not @GraphComputerOnly and not @AllowNullPropertyValues" \
+  --tags "$TAGS" \
   --import test/cucumber \
   ../../gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/
 ```

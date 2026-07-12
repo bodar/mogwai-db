@@ -14,5 +14,5 @@
     "esModuleInterop": true,
     "resolveJsonModule": true
   },
-  "include": ["src", "test", "conformance", "parser"]
+  "include": ["src", "test", "parser"]
 }

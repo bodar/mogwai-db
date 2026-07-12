@@ -1,4 +1,3 @@
-// Generated from Gremlin.g4 by ANTLR 4.13.1
 
 import * as antlr from "antlr4ng";
 import { Token } from "antlr4ng";
@@ -22109,41 +22108,6 @@ export class TraversalSourceSpawnMethod_mergeVContext extends antlr.ParserRuleCo
         super.copyFrom(ctx);
     }
 }
-export class TraversalSourceSpawnMethod_mergeV_TraversalContext extends TraversalSourceSpawnMethod_mergeVContext {
-    public constructor(ctx: TraversalSourceSpawnMethod_mergeVContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_MERGEV(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_MERGEV, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public nestedTraversal(): NestedTraversalContext {
-        return this.getRuleContext(0, NestedTraversalContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalSourceSpawnMethod_mergeV_Traversal) {
-             listener.enterTraversalSourceSpawnMethod_mergeV_Traversal(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalSourceSpawnMethod_mergeV_Traversal) {
-             listener.exitTraversalSourceSpawnMethod_mergeV_Traversal(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalSourceSpawnMethod_mergeV_Traversal) {
-            return visitor.visitTraversalSourceSpawnMethod_mergeV_Traversal(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
 export class TraversalSourceSpawnMethod_mergeV_MapContext extends TraversalSourceSpawnMethod_mergeVContext {
     public constructor(ctx: TraversalSourceSpawnMethod_mergeVContext) {
         super(ctx.parent, ctx.invokingState);
@@ -22179,26 +22143,13 @@ export class TraversalSourceSpawnMethod_mergeV_MapContext extends TraversalSourc
         }
     }
 }
-
-
-export class TraversalSourceSpawnMethod_mergeEContext extends antlr.ParserRuleContext {
-    public constructor(parent: antlr.ParserRuleContext | null, invokingState: number) {
-        super(parent, invokingState);
-    }
-    public override get ruleIndex(): number {
-        return GremlinParser.RULE_traversalSourceSpawnMethod_mergeE;
-    }
-    public override copyFrom(ctx: TraversalSourceSpawnMethod_mergeEContext): void {
-        super.copyFrom(ctx);
-    }
-}
-export class TraversalSourceSpawnMethod_mergeE_TraversalContext extends TraversalSourceSpawnMethod_mergeEContext {
-    public constructor(ctx: TraversalSourceSpawnMethod_mergeEContext) {
+export class TraversalSourceSpawnMethod_mergeV_TraversalContext extends TraversalSourceSpawnMethod_mergeVContext {
+    public constructor(ctx: TraversalSourceSpawnMethod_mergeVContext) {
         super(ctx.parent, ctx.invokingState);
         super.copyFrom(ctx);
     }
-    public K_MERGEE(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_MERGEE, 0)!;
+    public K_MERGEV(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_MERGEV, 0)!;
     }
     public LPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.LPAREN, 0)!;
@@ -22210,21 +22161,34 @@ export class TraversalSourceSpawnMethod_mergeE_TraversalContext extends Traversa
         return this.getToken(GremlinParser.RPAREN, 0)!;
     }
     public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalSourceSpawnMethod_mergeE_Traversal) {
-             listener.enterTraversalSourceSpawnMethod_mergeE_Traversal(this);
+        if(listener.enterTraversalSourceSpawnMethod_mergeV_Traversal) {
+             listener.enterTraversalSourceSpawnMethod_mergeV_Traversal(this);
         }
     }
     public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalSourceSpawnMethod_mergeE_Traversal) {
-             listener.exitTraversalSourceSpawnMethod_mergeE_Traversal(this);
+        if(listener.exitTraversalSourceSpawnMethod_mergeV_Traversal) {
+             listener.exitTraversalSourceSpawnMethod_mergeV_Traversal(this);
         }
     }
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalSourceSpawnMethod_mergeE_Traversal) {
-            return visitor.visitTraversalSourceSpawnMethod_mergeE_Traversal(this);
+        if (visitor.visitTraversalSourceSpawnMethod_mergeV_Traversal) {
+            return visitor.visitTraversalSourceSpawnMethod_mergeV_Traversal(this);
         } else {
             return visitor.visitChildren(this);
         }
+    }
+}
+
+
+export class TraversalSourceSpawnMethod_mergeEContext extends antlr.ParserRuleContext {
+    public constructor(parent: antlr.ParserRuleContext | null, invokingState: number) {
+        super(parent, invokingState);
+    }
+    public override get ruleIndex(): number {
+        return GremlinParser.RULE_traversalSourceSpawnMethod_mergeE;
+    }
+    public override copyFrom(ctx: TraversalSourceSpawnMethod_mergeEContext): void {
+        super.copyFrom(ctx);
     }
 }
 export class TraversalSourceSpawnMethod_mergeE_MapContext extends TraversalSourceSpawnMethod_mergeEContext {
@@ -22257,6 +22221,41 @@ export class TraversalSourceSpawnMethod_mergeE_MapContext extends TraversalSourc
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalSourceSpawnMethod_mergeE_Map) {
             return visitor.visitTraversalSourceSpawnMethod_mergeE_Map(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalSourceSpawnMethod_mergeE_TraversalContext extends TraversalSourceSpawnMethod_mergeEContext {
+    public constructor(ctx: TraversalSourceSpawnMethod_mergeEContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_MERGEE(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_MERGEE, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public nestedTraversal(): NestedTraversalContext {
+        return this.getRuleContext(0, NestedTraversalContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalSourceSpawnMethod_mergeE_Traversal) {
+             listener.enterTraversalSourceSpawnMethod_mergeE_Traversal(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalSourceSpawnMethod_mergeE_Traversal) {
+             listener.exitTraversalSourceSpawnMethod_mergeE_Traversal(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalSourceSpawnMethod_mergeE_Traversal) {
+            return visitor.visitTraversalSourceSpawnMethod_mergeE_Traversal(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -22307,7 +22306,7 @@ export class TraversalSourceSpawnMethod_call_emptyContext extends TraversalSourc
         }
     }
 }
-export class TraversalSourceSpawnMethod_call_string_traversalContext extends TraversalSourceSpawnMethod_callContext {
+export class TraversalSourceSpawnMethod_call_stringContext extends TraversalSourceSpawnMethod_callContext {
     public constructor(ctx: TraversalSourceSpawnMethod_callContext) {
         super(ctx.parent, ctx.invokingState);
         super.copyFrom(ctx);
@@ -22321,28 +22320,22 @@ export class TraversalSourceSpawnMethod_call_string_traversalContext extends Tra
     public stringLiteral(): StringLiteralContext {
         return this.getRuleContext(0, StringLiteralContext)!;
     }
-    public COMMA(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.COMMA, 0)!;
-    }
-    public nestedTraversal(): NestedTraversalContext {
-        return this.getRuleContext(0, NestedTraversalContext)!;
-    }
     public RPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.RPAREN, 0)!;
     }
     public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalSourceSpawnMethod_call_string_traversal) {
-             listener.enterTraversalSourceSpawnMethod_call_string_traversal(this);
+        if(listener.enterTraversalSourceSpawnMethod_call_string) {
+             listener.enterTraversalSourceSpawnMethod_call_string(this);
         }
     }
     public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalSourceSpawnMethod_call_string_traversal) {
-             listener.exitTraversalSourceSpawnMethod_call_string_traversal(this);
+        if(listener.exitTraversalSourceSpawnMethod_call_string) {
+             listener.exitTraversalSourceSpawnMethod_call_string(this);
         }
     }
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalSourceSpawnMethod_call_string_traversal) {
-            return visitor.visitTraversalSourceSpawnMethod_call_string_traversal(this);
+        if (visitor.visitTraversalSourceSpawnMethod_call_string) {
+            return visitor.visitTraversalSourceSpawnMethod_call_string(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -22389,7 +22382,7 @@ export class TraversalSourceSpawnMethod_call_string_mapContext extends Traversal
         }
     }
 }
-export class TraversalSourceSpawnMethod_call_stringContext extends TraversalSourceSpawnMethod_callContext {
+export class TraversalSourceSpawnMethod_call_string_traversalContext extends TraversalSourceSpawnMethod_callContext {
     public constructor(ctx: TraversalSourceSpawnMethod_callContext) {
         super(ctx.parent, ctx.invokingState);
         super.copyFrom(ctx);
@@ -22403,22 +22396,28 @@ export class TraversalSourceSpawnMethod_call_stringContext extends TraversalSour
     public stringLiteral(): StringLiteralContext {
         return this.getRuleContext(0, StringLiteralContext)!;
     }
+    public COMMA(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.COMMA, 0)!;
+    }
+    public nestedTraversal(): NestedTraversalContext {
+        return this.getRuleContext(0, NestedTraversalContext)!;
+    }
     public RPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.RPAREN, 0)!;
     }
     public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalSourceSpawnMethod_call_string) {
-             listener.enterTraversalSourceSpawnMethod_call_string(this);
+        if(listener.enterTraversalSourceSpawnMethod_call_string_traversal) {
+             listener.enterTraversalSourceSpawnMethod_call_string_traversal(this);
         }
     }
     public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalSourceSpawnMethod_call_string) {
-             listener.exitTraversalSourceSpawnMethod_call_string(this);
+        if(listener.exitTraversalSourceSpawnMethod_call_string_traversal) {
+             listener.exitTraversalSourceSpawnMethod_call_string_traversal(this);
         }
     }
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalSourceSpawnMethod_call_string) {
-            return visitor.visitTraversalSourceSpawnMethod_call_string(this);
+        if (visitor.visitTraversalSourceSpawnMethod_call_string_traversal) {
+            return visitor.visitTraversalSourceSpawnMethod_call_string_traversal(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -22526,6 +22525,41 @@ export class TraversalSourceSpawnMethod_matchContext extends antlr.ParserRuleCon
         super.copyFrom(ctx);
     }
 }
+export class TraversalSourceSpawnMethod_match_stringContext extends TraversalSourceSpawnMethod_matchContext {
+    public constructor(ctx: TraversalSourceSpawnMethod_matchContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_MATCH(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_MATCH, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public stringLiteral(): StringLiteralContext {
+        return this.getRuleContext(0, StringLiteralContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalSourceSpawnMethod_match_string) {
+             listener.enterTraversalSourceSpawnMethod_match_string(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalSourceSpawnMethod_match_string) {
+             listener.exitTraversalSourceSpawnMethod_match_string(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalSourceSpawnMethod_match_string) {
+            return visitor.visitTraversalSourceSpawnMethod_match_string(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 export class TraversalSourceSpawnMethod_match_string_mapContext extends TraversalSourceSpawnMethod_matchContext {
     public constructor(ctx: TraversalSourceSpawnMethod_matchContext) {
         super(ctx.parent, ctx.invokingState);
@@ -22562,41 +22596,6 @@ export class TraversalSourceSpawnMethod_match_string_mapContext extends Traversa
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalSourceSpawnMethod_match_string_map) {
             return visitor.visitTraversalSourceSpawnMethod_match_string_map(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalSourceSpawnMethod_match_stringContext extends TraversalSourceSpawnMethod_matchContext {
-    public constructor(ctx: TraversalSourceSpawnMethod_matchContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_MATCH(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_MATCH, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public stringLiteral(): StringLiteralContext {
-        return this.getRuleContext(0, StringLiteralContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalSourceSpawnMethod_match_string) {
-             listener.enterTraversalSourceSpawnMethod_match_string(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalSourceSpawnMethod_match_string) {
-             listener.exitTraversalSourceSpawnMethod_match_string(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalSourceSpawnMethod_match_string) {
-            return visitor.visitTraversalSourceSpawnMethod_match_string(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -23239,41 +23238,6 @@ export class TraversalMethod_addEContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
-export class TraversalMethod_addE_TraversalContext extends TraversalMethod_addEContext {
-    public constructor(ctx: TraversalMethod_addEContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_ADDE(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_ADDE, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public nestedTraversal(): NestedTraversalContext {
-        return this.getRuleContext(0, NestedTraversalContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_addE_Traversal) {
-             listener.enterTraversalMethod_addE_Traversal(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_addE_Traversal) {
-             listener.exitTraversalMethod_addE_Traversal(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_addE_Traversal) {
-            return visitor.visitTraversalMethod_addE_Traversal(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
 export class TraversalMethod_addE_StringContext extends TraversalMethod_addEContext {
     public constructor(ctx: TraversalMethod_addEContext) {
         super(ctx.parent, ctx.invokingState);
@@ -23304,6 +23268,41 @@ export class TraversalMethod_addE_StringContext extends TraversalMethod_addECont
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_addE_String) {
             return visitor.visitTraversalMethod_addE_String(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_addE_TraversalContext extends TraversalMethod_addEContext {
+    public constructor(ctx: TraversalMethod_addEContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_ADDE(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_ADDE, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public nestedTraversal(): NestedTraversalContext {
+        return this.getRuleContext(0, NestedTraversalContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_addE_Traversal) {
+             listener.enterTraversalMethod_addE_Traversal(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_addE_Traversal) {
+             listener.exitTraversalMethod_addE_Traversal(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_addE_Traversal) {
+            return visitor.visitTraversalMethod_addE_Traversal(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -23932,6 +23931,38 @@ export class TraversalMethod_barrier_ConsumerContext extends TraversalMethod_bar
         }
     }
 }
+export class TraversalMethod_barrier_EmptyContext extends TraversalMethod_barrierContext {
+    public constructor(ctx: TraversalMethod_barrierContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_BARRIER(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_BARRIER, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_barrier_Empty) {
+             listener.enterTraversalMethod_barrier_Empty(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_barrier_Empty) {
+             listener.exitTraversalMethod_barrier_Empty(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_barrier_Empty) {
+            return visitor.visitTraversalMethod_barrier_Empty(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 export class TraversalMethod_barrier_intContext extends TraversalMethod_barrierContext {
     public constructor(ctx: TraversalMethod_barrierContext) {
         super(ctx.parent, ctx.invokingState);
@@ -23962,38 +23993,6 @@ export class TraversalMethod_barrier_intContext extends TraversalMethod_barrierC
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_barrier_int) {
             return visitor.visitTraversalMethod_barrier_int(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_barrier_EmptyContext extends TraversalMethod_barrierContext {
-    public constructor(ctx: TraversalMethod_barrierContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_BARRIER(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_BARRIER, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_barrier_Empty) {
-             listener.enterTraversalMethod_barrier_Empty(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_barrier_Empty) {
-             listener.exitTraversalMethod_barrier_Empty(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_barrier_Empty) {
-            return visitor.visitTraversalMethod_barrier_Empty(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -24165,6 +24164,184 @@ export class TraversalMethod_byContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
+export class TraversalMethod_by_ComparatorContext extends TraversalMethod_byContext {
+    public constructor(ctx: TraversalMethod_byContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_BY(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_BY, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public traversalComparator(): TraversalComparatorContext {
+        return this.getRuleContext(0, TraversalComparatorContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_by_Comparator) {
+             listener.enterTraversalMethod_by_Comparator(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_by_Comparator) {
+             listener.exitTraversalMethod_by_Comparator(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_by_Comparator) {
+            return visitor.visitTraversalMethod_by_Comparator(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_by_EmptyContext extends TraversalMethod_byContext {
+    public constructor(ctx: TraversalMethod_byContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_BY(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_BY, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_by_Empty) {
+             listener.enterTraversalMethod_by_Empty(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_by_Empty) {
+             listener.exitTraversalMethod_by_Empty(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_by_Empty) {
+            return visitor.visitTraversalMethod_by_Empty(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_by_FunctionContext extends TraversalMethod_byContext {
+    public constructor(ctx: TraversalMethod_byContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_BY(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_BY, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public traversalFunction(): TraversalFunctionContext {
+        return this.getRuleContext(0, TraversalFunctionContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_by_Function) {
+             listener.enterTraversalMethod_by_Function(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_by_Function) {
+             listener.exitTraversalMethod_by_Function(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_by_Function) {
+            return visitor.visitTraversalMethod_by_Function(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_by_Function_ComparatorContext extends TraversalMethod_byContext {
+    public constructor(ctx: TraversalMethod_byContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_BY(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_BY, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public traversalFunction(): TraversalFunctionContext {
+        return this.getRuleContext(0, TraversalFunctionContext)!;
+    }
+    public COMMA(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.COMMA, 0)!;
+    }
+    public traversalComparator(): TraversalComparatorContext {
+        return this.getRuleContext(0, TraversalComparatorContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_by_Function_Comparator) {
+             listener.enterTraversalMethod_by_Function_Comparator(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_by_Function_Comparator) {
+             listener.exitTraversalMethod_by_Function_Comparator(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_by_Function_Comparator) {
+            return visitor.visitTraversalMethod_by_Function_Comparator(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_by_OrderContext extends TraversalMethod_byContext {
+    public constructor(ctx: TraversalMethod_byContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_BY(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_BY, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public traversalOrder(): TraversalOrderContext {
+        return this.getRuleContext(0, TraversalOrderContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_by_Order) {
+             listener.enterTraversalMethod_by_Order(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_by_Order) {
+             listener.exitTraversalMethod_by_Order(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_by_Order) {
+            return visitor.visitTraversalMethod_by_Order(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 export class TraversalMethod_by_StringContext extends TraversalMethod_byContext {
     public constructor(ctx: TraversalMethod_byContext) {
         super(ctx.parent, ctx.invokingState);
@@ -24241,7 +24418,7 @@ export class TraversalMethod_by_String_ComparatorContext extends TraversalMethod
         }
     }
 }
-export class TraversalMethod_by_FunctionContext extends TraversalMethod_byContext {
+export class TraversalMethod_by_TContext extends TraversalMethod_byContext {
     public constructor(ctx: TraversalMethod_byContext) {
         super(ctx.parent, ctx.invokingState);
         super.copyFrom(ctx);
@@ -24252,25 +24429,25 @@ export class TraversalMethod_by_FunctionContext extends TraversalMethod_byContex
     public LPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.LPAREN, 0)!;
     }
-    public traversalFunction(): TraversalFunctionContext {
-        return this.getRuleContext(0, TraversalFunctionContext)!;
+    public traversalT(): TraversalTContext {
+        return this.getRuleContext(0, TraversalTContext)!;
     }
     public RPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.RPAREN, 0)!;
     }
     public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_by_Function) {
-             listener.enterTraversalMethod_by_Function(this);
+        if(listener.enterTraversalMethod_by_T) {
+             listener.enterTraversalMethod_by_T(this);
         }
     }
     public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_by_Function) {
-             listener.exitTraversalMethod_by_Function(this);
+        if(listener.exitTraversalMethod_by_T) {
+             listener.exitTraversalMethod_by_T(this);
         }
     }
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_by_Function) {
-            return visitor.visitTraversalMethod_by_Function(this);
+        if (visitor.visitTraversalMethod_by_T) {
+            return visitor.visitTraversalMethod_by_T(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -24306,184 +24483,6 @@ export class TraversalMethod_by_TraversalContext extends TraversalMethod_byConte
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_by_Traversal) {
             return visitor.visitTraversalMethod_by_Traversal(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_by_EmptyContext extends TraversalMethod_byContext {
-    public constructor(ctx: TraversalMethod_byContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_BY(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_BY, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_by_Empty) {
-             listener.enterTraversalMethod_by_Empty(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_by_Empty) {
-             listener.exitTraversalMethod_by_Empty(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_by_Empty) {
-            return visitor.visitTraversalMethod_by_Empty(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_by_ComparatorContext extends TraversalMethod_byContext {
-    public constructor(ctx: TraversalMethod_byContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_BY(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_BY, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public traversalComparator(): TraversalComparatorContext {
-        return this.getRuleContext(0, TraversalComparatorContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_by_Comparator) {
-             listener.enterTraversalMethod_by_Comparator(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_by_Comparator) {
-             listener.exitTraversalMethod_by_Comparator(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_by_Comparator) {
-            return visitor.visitTraversalMethod_by_Comparator(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_by_OrderContext extends TraversalMethod_byContext {
-    public constructor(ctx: TraversalMethod_byContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_BY(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_BY, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public traversalOrder(): TraversalOrderContext {
-        return this.getRuleContext(0, TraversalOrderContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_by_Order) {
-             listener.enterTraversalMethod_by_Order(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_by_Order) {
-             listener.exitTraversalMethod_by_Order(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_by_Order) {
-            return visitor.visitTraversalMethod_by_Order(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_by_Function_ComparatorContext extends TraversalMethod_byContext {
-    public constructor(ctx: TraversalMethod_byContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_BY(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_BY, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public traversalFunction(): TraversalFunctionContext {
-        return this.getRuleContext(0, TraversalFunctionContext)!;
-    }
-    public COMMA(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.COMMA, 0)!;
-    }
-    public traversalComparator(): TraversalComparatorContext {
-        return this.getRuleContext(0, TraversalComparatorContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_by_Function_Comparator) {
-             listener.enterTraversalMethod_by_Function_Comparator(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_by_Function_Comparator) {
-             listener.exitTraversalMethod_by_Function_Comparator(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_by_Function_Comparator) {
-            return visitor.visitTraversalMethod_by_Function_Comparator(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_by_TContext extends TraversalMethod_byContext {
-    public constructor(ctx: TraversalMethod_byContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_BY(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_BY, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public traversalT(): TraversalTContext {
-        return this.getRuleContext(0, TraversalTContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_by_T) {
-             listener.enterTraversalMethod_by_T(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_by_T) {
-             listener.exitTraversalMethod_by_T(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_by_T) {
-            return visitor.visitTraversalMethod_by_T(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -24543,6 +24542,41 @@ export class TraversalMethod_callContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
+export class TraversalMethod_call_stringContext extends TraversalMethod_callContext {
+    public constructor(ctx: TraversalMethod_callContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_CALL(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_CALL, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public stringLiteral(): StringLiteralContext {
+        return this.getRuleContext(0, StringLiteralContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_call_string) {
+             listener.enterTraversalMethod_call_string(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_call_string) {
+             listener.exitTraversalMethod_call_string(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_call_string) {
+            return visitor.visitTraversalMethod_call_string(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 export class TraversalMethod_call_string_mapContext extends TraversalMethod_callContext {
     public constructor(ctx: TraversalMethod_callContext) {
         super(ctx.parent, ctx.invokingState);
@@ -24579,6 +24613,47 @@ export class TraversalMethod_call_string_mapContext extends TraversalMethod_call
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_call_string_map) {
             return visitor.visitTraversalMethod_call_string_map(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_call_string_traversalContext extends TraversalMethod_callContext {
+    public constructor(ctx: TraversalMethod_callContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_CALL(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_CALL, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public stringLiteral(): StringLiteralContext {
+        return this.getRuleContext(0, StringLiteralContext)!;
+    }
+    public COMMA(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.COMMA, 0)!;
+    }
+    public nestedTraversal(): NestedTraversalContext {
+        return this.getRuleContext(0, NestedTraversalContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_call_string_traversal) {
+             listener.enterTraversalMethod_call_string_traversal(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_call_string_traversal) {
+             listener.exitTraversalMethod_call_string_traversal(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_call_string_traversal) {
+            return visitor.visitTraversalMethod_call_string_traversal(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -24629,82 +24704,6 @@ export class TraversalMethod_call_string_map_traversalContext extends TraversalM
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_call_string_map_traversal) {
             return visitor.visitTraversalMethod_call_string_map_traversal(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_call_string_traversalContext extends TraversalMethod_callContext {
-    public constructor(ctx: TraversalMethod_callContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_CALL(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_CALL, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public stringLiteral(): StringLiteralContext {
-        return this.getRuleContext(0, StringLiteralContext)!;
-    }
-    public COMMA(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.COMMA, 0)!;
-    }
-    public nestedTraversal(): NestedTraversalContext {
-        return this.getRuleContext(0, NestedTraversalContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_call_string_traversal) {
-             listener.enterTraversalMethod_call_string_traversal(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_call_string_traversal) {
-             listener.exitTraversalMethod_call_string_traversal(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_call_string_traversal) {
-            return visitor.visitTraversalMethod_call_string_traversal(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_call_stringContext extends TraversalMethod_callContext {
-    public constructor(ctx: TraversalMethod_callContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_CALL(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_CALL, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public stringLiteral(): StringLiteralContext {
-        return this.getRuleContext(0, StringLiteralContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_call_string) {
-             listener.enterTraversalMethod_call_string(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_call_string) {
-             listener.exitTraversalMethod_call_string(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_call_string) {
-            return visitor.visitTraversalMethod_call_string(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -24768,41 +24767,6 @@ export class TraversalMethod_chooseContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
-export class TraversalMethod_choose_TraversalContext extends TraversalMethod_chooseContext {
-    public constructor(ctx: TraversalMethod_chooseContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_CHOOSE(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_CHOOSE, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public nestedTraversal(): NestedTraversalContext {
-        return this.getRuleContext(0, NestedTraversalContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_choose_Traversal) {
-             listener.enterTraversalMethod_choose_Traversal(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_choose_Traversal) {
-             listener.exitTraversalMethod_choose_Traversal(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_choose_Traversal) {
-            return visitor.visitTraversalMethod_choose_Traversal(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
 export class TraversalMethod_choose_FunctionContext extends TraversalMethod_chooseContext {
     public constructor(ctx: TraversalMethod_chooseContext) {
         super(ctx.parent, ctx.invokingState);
@@ -24833,50 +24797,6 @@ export class TraversalMethod_choose_FunctionContext extends TraversalMethod_choo
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_choose_Function) {
             return visitor.visitTraversalMethod_choose_Function(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_choose_Traversal_TraversalContext extends TraversalMethod_chooseContext {
-    public constructor(ctx: TraversalMethod_chooseContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_CHOOSE(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_CHOOSE, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public nestedTraversal(): NestedTraversalContext[];
-    public nestedTraversal(i: number): NestedTraversalContext | null;
-    public nestedTraversal(i?: number): NestedTraversalContext[] | NestedTraversalContext | null {
-        if (i === undefined) {
-            return this.getRuleContexts(NestedTraversalContext);
-        }
-
-        return this.getRuleContext(i, NestedTraversalContext);
-    }
-    public COMMA(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.COMMA, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_choose_Traversal_Traversal) {
-             listener.enterTraversalMethod_choose_Traversal_Traversal(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_choose_Traversal_Traversal) {
-             listener.exitTraversalMethod_choose_Traversal_Traversal(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_choose_Traversal_Traversal) {
-            return visitor.visitTraversalMethod_choose_Traversal_Traversal(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -24971,6 +24891,85 @@ export class TraversalMethod_choose_Predicate_Traversal_TraversalContext extends
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_choose_Predicate_Traversal_Traversal) {
             return visitor.visitTraversalMethod_choose_Predicate_Traversal_Traversal(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_choose_TraversalContext extends TraversalMethod_chooseContext {
+    public constructor(ctx: TraversalMethod_chooseContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_CHOOSE(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_CHOOSE, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public nestedTraversal(): NestedTraversalContext {
+        return this.getRuleContext(0, NestedTraversalContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_choose_Traversal) {
+             listener.enterTraversalMethod_choose_Traversal(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_choose_Traversal) {
+             listener.exitTraversalMethod_choose_Traversal(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_choose_Traversal) {
+            return visitor.visitTraversalMethod_choose_Traversal(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_choose_Traversal_TraversalContext extends TraversalMethod_chooseContext {
+    public constructor(ctx: TraversalMethod_chooseContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_CHOOSE(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_CHOOSE, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public nestedTraversal(): NestedTraversalContext[];
+    public nestedTraversal(i: number): NestedTraversalContext | null;
+    public nestedTraversal(i?: number): NestedTraversalContext[] | NestedTraversalContext | null {
+        if (i === undefined) {
+            return this.getRuleContexts(NestedTraversalContext);
+        }
+
+        return this.getRuleContext(i, NestedTraversalContext);
+    }
+    public COMMA(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.COMMA, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_choose_Traversal_Traversal) {
+             listener.enterTraversalMethod_choose_Traversal_Traversal(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_choose_Traversal_Traversal) {
+             listener.exitTraversalMethod_choose_Traversal_Traversal(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_choose_Traversal_Traversal) {
+            return visitor.visitTraversalMethod_choose_Traversal_Traversal(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -25377,6 +25376,38 @@ export class TraversalMethod_countContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
+export class TraversalMethod_count_EmptyContext extends TraversalMethod_countContext {
+    public constructor(ctx: TraversalMethod_countContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_COUNT(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_COUNT, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_count_Empty) {
+             listener.enterTraversalMethod_count_Empty(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_count_Empty) {
+             listener.exitTraversalMethod_count_Empty(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_count_Empty) {
+            return visitor.visitTraversalMethod_count_Empty(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 export class TraversalMethod_count_ScopeContext extends TraversalMethod_countContext {
     public constructor(ctx: TraversalMethod_countContext) {
         super(ctx.parent, ctx.invokingState);
@@ -25407,38 +25438,6 @@ export class TraversalMethod_count_ScopeContext extends TraversalMethod_countCon
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_count_Scope) {
             return visitor.visitTraversalMethod_count_Scope(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_count_EmptyContext extends TraversalMethod_countContext {
-    public constructor(ctx: TraversalMethod_countContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_COUNT(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_COUNT, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_count_Empty) {
-             listener.enterTraversalMethod_count_Empty(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_count_Empty) {
-             listener.exitTraversalMethod_count_Empty(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_count_Empty) {
-            return visitor.visitTraversalMethod_count_Empty(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -26068,6 +26067,38 @@ export class TraversalMethod_failContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
+export class TraversalMethod_fail_EmptyContext extends TraversalMethod_failContext {
+    public constructor(ctx: TraversalMethod_failContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_FAIL(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_FAIL, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_fail_Empty) {
+             listener.enterTraversalMethod_fail_Empty(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_fail_Empty) {
+             listener.exitTraversalMethod_fail_Empty(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_fail_Empty) {
+            return visitor.visitTraversalMethod_fail_Empty(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 export class TraversalMethod_fail_StringContext extends TraversalMethod_failContext {
     public constructor(ctx: TraversalMethod_failContext) {
         super(ctx.parent, ctx.invokingState);
@@ -26098,38 +26129,6 @@ export class TraversalMethod_fail_StringContext extends TraversalMethod_failCont
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_fail_String) {
             return visitor.visitTraversalMethod_fail_String(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_fail_EmptyContext extends TraversalMethod_failContext {
-    public constructor(ctx: TraversalMethod_failContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_FAIL(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_FAIL, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_fail_Empty) {
-             listener.enterTraversalMethod_fail_Empty(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_fail_Empty) {
-             listener.exitTraversalMethod_fail_Empty(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_fail_Empty) {
-            return visitor.visitTraversalMethod_fail_Empty(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -26270,6 +26269,38 @@ export class TraversalMethod_foldContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
+export class TraversalMethod_fold_EmptyContext extends TraversalMethod_foldContext {
+    public constructor(ctx: TraversalMethod_foldContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_FOLD(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_FOLD, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_fold_Empty) {
+             listener.enterTraversalMethod_fold_Empty(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_fold_Empty) {
+             listener.exitTraversalMethod_fold_Empty(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_fold_Empty) {
+            return visitor.visitTraversalMethod_fold_Empty(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 export class TraversalMethod_fold_Object_BiFunctionContext extends TraversalMethod_foldContext {
     public constructor(ctx: TraversalMethod_foldContext) {
         super(ctx.parent, ctx.invokingState);
@@ -26306,38 +26337,6 @@ export class TraversalMethod_fold_Object_BiFunctionContext extends TraversalMeth
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_fold_Object_BiFunction) {
             return visitor.visitTraversalMethod_fold_Object_BiFunction(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_fold_EmptyContext extends TraversalMethod_foldContext {
-    public constructor(ctx: TraversalMethod_foldContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_FOLD(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_FOLD, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_fold_Empty) {
-             listener.enterTraversalMethod_fold_Empty(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_fold_Empty) {
-             listener.exitTraversalMethod_fold_Empty(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_fold_Empty) {
-            return visitor.visitTraversalMethod_fold_Empty(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -26567,6 +26566,38 @@ export class TraversalMethod_groupCountContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
+export class TraversalMethod_groupCount_EmptyContext extends TraversalMethod_groupCountContext {
+    public constructor(ctx: TraversalMethod_groupCountContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_GROUPCOUNT(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_GROUPCOUNT, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_groupCount_Empty) {
+             listener.enterTraversalMethod_groupCount_Empty(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_groupCount_Empty) {
+             listener.exitTraversalMethod_groupCount_Empty(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_groupCount_Empty) {
+            return visitor.visitTraversalMethod_groupCount_Empty(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 export class TraversalMethod_groupCount_StringContext extends TraversalMethod_groupCountContext {
     public constructor(ctx: TraversalMethod_groupCountContext) {
         super(ctx.parent, ctx.invokingState);
@@ -26602,38 +26633,6 @@ export class TraversalMethod_groupCount_StringContext extends TraversalMethod_gr
         }
     }
 }
-export class TraversalMethod_groupCount_EmptyContext extends TraversalMethod_groupCountContext {
-    public constructor(ctx: TraversalMethod_groupCountContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_GROUPCOUNT(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_GROUPCOUNT, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_groupCount_Empty) {
-             listener.enterTraversalMethod_groupCount_Empty(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_groupCount_Empty) {
-             listener.exitTraversalMethod_groupCount_Empty(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_groupCount_Empty) {
-            return visitor.visitTraversalMethod_groupCount_Empty(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
 
 
 export class TraversalMethod_hasContext extends antlr.ParserRuleContext {
@@ -26645,6 +26644,264 @@ export class TraversalMethod_hasContext extends antlr.ParserRuleContext {
     }
     public override copyFrom(ctx: TraversalMethod_hasContext): void {
         super.copyFrom(ctx);
+    }
+}
+export class TraversalMethod_has_StringContext extends TraversalMethod_hasContext {
+    public constructor(ctx: TraversalMethod_hasContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_HAS(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_HAS, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public stringNullableLiteral(): StringNullableLiteralContext {
+        return this.getRuleContext(0, StringNullableLiteralContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_has_String) {
+             listener.enterTraversalMethod_has_String(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_has_String) {
+             listener.exitTraversalMethod_has_String(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_has_String) {
+            return visitor.visitTraversalMethod_has_String(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_has_String_ObjectContext extends TraversalMethod_hasContext {
+    public constructor(ctx: TraversalMethod_hasContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_HAS(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_HAS, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public stringNullableLiteral(): StringNullableLiteralContext {
+        return this.getRuleContext(0, StringNullableLiteralContext)!;
+    }
+    public COMMA(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.COMMA, 0)!;
+    }
+    public genericArgument(): GenericArgumentContext {
+        return this.getRuleContext(0, GenericArgumentContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_has_String_Object) {
+             listener.enterTraversalMethod_has_String_Object(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_has_String_Object) {
+             listener.exitTraversalMethod_has_String_Object(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_has_String_Object) {
+            return visitor.visitTraversalMethod_has_String_Object(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_has_String_PContext extends TraversalMethod_hasContext {
+    public constructor(ctx: TraversalMethod_hasContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_HAS(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_HAS, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public stringNullableLiteral(): StringNullableLiteralContext {
+        return this.getRuleContext(0, StringNullableLiteralContext)!;
+    }
+    public COMMA(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.COMMA, 0)!;
+    }
+    public traversalPredicate(): TraversalPredicateContext {
+        return this.getRuleContext(0, TraversalPredicateContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_has_String_P) {
+             listener.enterTraversalMethod_has_String_P(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_has_String_P) {
+             listener.exitTraversalMethod_has_String_P(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_has_String_P) {
+            return visitor.visitTraversalMethod_has_String_P(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_has_String_TraversalContext extends TraversalMethod_hasContext {
+    public constructor(ctx: TraversalMethod_hasContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_HAS(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_HAS, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public stringNullableLiteral(): StringNullableLiteralContext {
+        return this.getRuleContext(0, StringNullableLiteralContext)!;
+    }
+    public COMMA(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.COMMA, 0)!;
+    }
+    public nestedTraversal(): NestedTraversalContext {
+        return this.getRuleContext(0, NestedTraversalContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_has_String_Traversal) {
+             listener.enterTraversalMethod_has_String_Traversal(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_has_String_Traversal) {
+             listener.exitTraversalMethod_has_String_Traversal(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_has_String_Traversal) {
+            return visitor.visitTraversalMethod_has_String_Traversal(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_has_String_String_ObjectContext extends TraversalMethod_hasContext {
+    public constructor(ctx: TraversalMethod_hasContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_HAS(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_HAS, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public stringNullableArgument(): StringNullableArgumentContext {
+        return this.getRuleContext(0, StringNullableArgumentContext)!;
+    }
+    public COMMA(): antlr.TerminalNode[];
+    public COMMA(i: number): antlr.TerminalNode | null;
+    public COMMA(i?: number): antlr.TerminalNode | null | antlr.TerminalNode[] {
+    	if (i === undefined) {
+    		return this.getTokens(GremlinParser.COMMA);
+    	} else {
+    		return this.getToken(GremlinParser.COMMA, i);
+    	}
+    }
+    public stringNullableLiteral(): StringNullableLiteralContext {
+        return this.getRuleContext(0, StringNullableLiteralContext)!;
+    }
+    public genericArgument(): GenericArgumentContext {
+        return this.getRuleContext(0, GenericArgumentContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_has_String_String_Object) {
+             listener.enterTraversalMethod_has_String_String_Object(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_has_String_String_Object) {
+             listener.exitTraversalMethod_has_String_String_Object(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_has_String_String_Object) {
+            return visitor.visitTraversalMethod_has_String_String_Object(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_has_String_String_PContext extends TraversalMethod_hasContext {
+    public constructor(ctx: TraversalMethod_hasContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_HAS(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_HAS, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public stringNullableArgument(): StringNullableArgumentContext {
+        return this.getRuleContext(0, StringNullableArgumentContext)!;
+    }
+    public COMMA(): antlr.TerminalNode[];
+    public COMMA(i: number): antlr.TerminalNode | null;
+    public COMMA(i?: number): antlr.TerminalNode | null | antlr.TerminalNode[] {
+    	if (i === undefined) {
+    		return this.getTokens(GremlinParser.COMMA);
+    	} else {
+    		return this.getToken(GremlinParser.COMMA, i);
+    	}
+    }
+    public stringNullableLiteral(): StringNullableLiteralContext {
+        return this.getRuleContext(0, StringNullableLiteralContext)!;
+    }
+    public traversalPredicate(): TraversalPredicateContext {
+        return this.getRuleContext(0, TraversalPredicateContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_has_String_String_P) {
+             listener.enterTraversalMethod_has_String_String_P(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_has_String_String_P) {
+             listener.exitTraversalMethod_has_String_String_P(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_has_String_String_P) {
+            return visitor.visitTraversalMethod_has_String_String_P(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
     }
 }
 export class TraversalMethod_has_String_String_TraversalContext extends TraversalMethod_hasContext {
@@ -26738,173 +26995,6 @@ export class TraversalMethod_has_T_ObjectContext extends TraversalMethod_hasCont
         }
     }
 }
-export class TraversalMethod_has_T_TraversalContext extends TraversalMethod_hasContext {
-    public constructor(ctx: TraversalMethod_hasContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_HAS(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_HAS, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public traversalT(): TraversalTContext {
-        return this.getRuleContext(0, TraversalTContext)!;
-    }
-    public COMMA(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.COMMA, 0)!;
-    }
-    public nestedTraversal(): NestedTraversalContext {
-        return this.getRuleContext(0, NestedTraversalContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_has_T_Traversal) {
-             listener.enterTraversalMethod_has_T_Traversal(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_has_T_Traversal) {
-             listener.exitTraversalMethod_has_T_Traversal(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_has_T_Traversal) {
-            return visitor.visitTraversalMethod_has_T_Traversal(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_has_String_String_ObjectContext extends TraversalMethod_hasContext {
-    public constructor(ctx: TraversalMethod_hasContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_HAS(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_HAS, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public stringNullableArgument(): StringNullableArgumentContext {
-        return this.getRuleContext(0, StringNullableArgumentContext)!;
-    }
-    public COMMA(): antlr.TerminalNode[];
-    public COMMA(i: number): antlr.TerminalNode | null;
-    public COMMA(i?: number): antlr.TerminalNode | null | antlr.TerminalNode[] {
-    	if (i === undefined) {
-    		return this.getTokens(GremlinParser.COMMA);
-    	} else {
-    		return this.getToken(GremlinParser.COMMA, i);
-    	}
-    }
-    public stringNullableLiteral(): StringNullableLiteralContext {
-        return this.getRuleContext(0, StringNullableLiteralContext)!;
-    }
-    public genericArgument(): GenericArgumentContext {
-        return this.getRuleContext(0, GenericArgumentContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_has_String_String_Object) {
-             listener.enterTraversalMethod_has_String_String_Object(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_has_String_String_Object) {
-             listener.exitTraversalMethod_has_String_String_Object(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_has_String_String_Object) {
-            return visitor.visitTraversalMethod_has_String_String_Object(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_has_String_TraversalContext extends TraversalMethod_hasContext {
-    public constructor(ctx: TraversalMethod_hasContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_HAS(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_HAS, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public stringNullableLiteral(): StringNullableLiteralContext {
-        return this.getRuleContext(0, StringNullableLiteralContext)!;
-    }
-    public COMMA(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.COMMA, 0)!;
-    }
-    public nestedTraversal(): NestedTraversalContext {
-        return this.getRuleContext(0, NestedTraversalContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_has_String_Traversal) {
-             listener.enterTraversalMethod_has_String_Traversal(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_has_String_Traversal) {
-             listener.exitTraversalMethod_has_String_Traversal(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_has_String_Traversal) {
-            return visitor.visitTraversalMethod_has_String_Traversal(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_has_StringContext extends TraversalMethod_hasContext {
-    public constructor(ctx: TraversalMethod_hasContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_HAS(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_HAS, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public stringNullableLiteral(): StringNullableLiteralContext {
-        return this.getRuleContext(0, StringNullableLiteralContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_has_String) {
-             listener.enterTraversalMethod_has_String(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_has_String) {
-             listener.exitTraversalMethod_has_String(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_has_String) {
-            return visitor.visitTraversalMethod_has_String(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
 export class TraversalMethod_has_T_PContext extends TraversalMethod_hasContext {
     public constructor(ctx: TraversalMethod_hasContext) {
         super(ctx.parent, ctx.invokingState);
@@ -26946,7 +27036,7 @@ export class TraversalMethod_has_T_PContext extends TraversalMethod_hasContext {
         }
     }
 }
-export class TraversalMethod_has_String_PContext extends TraversalMethod_hasContext {
+export class TraversalMethod_has_T_TraversalContext extends TraversalMethod_hasContext {
     public constructor(ctx: TraversalMethod_hasContext) {
         super(ctx.parent, ctx.invokingState);
         super.copyFrom(ctx);
@@ -26957,122 +27047,31 @@ export class TraversalMethod_has_String_PContext extends TraversalMethod_hasCont
     public LPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.LPAREN, 0)!;
     }
-    public stringNullableLiteral(): StringNullableLiteralContext {
-        return this.getRuleContext(0, StringNullableLiteralContext)!;
+    public traversalT(): TraversalTContext {
+        return this.getRuleContext(0, TraversalTContext)!;
     }
     public COMMA(): antlr.TerminalNode {
         return this.getToken(GremlinParser.COMMA, 0)!;
     }
-    public traversalPredicate(): TraversalPredicateContext {
-        return this.getRuleContext(0, TraversalPredicateContext)!;
+    public nestedTraversal(): NestedTraversalContext {
+        return this.getRuleContext(0, NestedTraversalContext)!;
     }
     public RPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.RPAREN, 0)!;
     }
     public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_has_String_P) {
-             listener.enterTraversalMethod_has_String_P(this);
+        if(listener.enterTraversalMethod_has_T_Traversal) {
+             listener.enterTraversalMethod_has_T_Traversal(this);
         }
     }
     public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_has_String_P) {
-             listener.exitTraversalMethod_has_String_P(this);
+        if(listener.exitTraversalMethod_has_T_Traversal) {
+             listener.exitTraversalMethod_has_T_Traversal(this);
         }
     }
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_has_String_P) {
-            return visitor.visitTraversalMethod_has_String_P(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_has_String_ObjectContext extends TraversalMethod_hasContext {
-    public constructor(ctx: TraversalMethod_hasContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_HAS(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_HAS, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public stringNullableLiteral(): StringNullableLiteralContext {
-        return this.getRuleContext(0, StringNullableLiteralContext)!;
-    }
-    public COMMA(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.COMMA, 0)!;
-    }
-    public genericArgument(): GenericArgumentContext {
-        return this.getRuleContext(0, GenericArgumentContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_has_String_Object) {
-             listener.enterTraversalMethod_has_String_Object(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_has_String_Object) {
-             listener.exitTraversalMethod_has_String_Object(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_has_String_Object) {
-            return visitor.visitTraversalMethod_has_String_Object(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_has_String_String_PContext extends TraversalMethod_hasContext {
-    public constructor(ctx: TraversalMethod_hasContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_HAS(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_HAS, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public stringNullableArgument(): StringNullableArgumentContext {
-        return this.getRuleContext(0, StringNullableArgumentContext)!;
-    }
-    public COMMA(): antlr.TerminalNode[];
-    public COMMA(i: number): antlr.TerminalNode | null;
-    public COMMA(i?: number): antlr.TerminalNode | null | antlr.TerminalNode[] {
-    	if (i === undefined) {
-    		return this.getTokens(GremlinParser.COMMA);
-    	} else {
-    		return this.getToken(GremlinParser.COMMA, i);
-    	}
-    }
-    public stringNullableLiteral(): StringNullableLiteralContext {
-        return this.getRuleContext(0, StringNullableLiteralContext)!;
-    }
-    public traversalPredicate(): TraversalPredicateContext {
-        return this.getRuleContext(0, TraversalPredicateContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_has_String_String_P) {
-             listener.enterTraversalMethod_has_String_String_P(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_has_String_String_P) {
-             listener.exitTraversalMethod_has_String_String_P(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_has_String_String_P) {
-            return visitor.visitTraversalMethod_has_String_String_P(this);
+        if (visitor.visitTraversalMethod_has_T_Traversal) {
+            return visitor.visitTraversalMethod_has_T_Traversal(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -27089,41 +27088,6 @@ export class TraversalMethod_hasIdContext extends antlr.ParserRuleContext {
     }
     public override copyFrom(ctx: TraversalMethod_hasIdContext): void {
         super.copyFrom(ctx);
-    }
-}
-export class TraversalMethod_hasId_PContext extends TraversalMethod_hasIdContext {
-    public constructor(ctx: TraversalMethod_hasIdContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_HASID(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_HASID, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public traversalPredicate(): TraversalPredicateContext {
-        return this.getRuleContext(0, TraversalPredicateContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_hasId_P) {
-             listener.enterTraversalMethod_hasId_P(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_hasId_P) {
-             listener.exitTraversalMethod_hasId_P(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_hasId_P) {
-            return visitor.visitTraversalMethod_hasId_P(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
     }
 }
 export class TraversalMethod_hasId_Object_ObjectContext extends TraversalMethod_hasIdContext {
@@ -27167,6 +27131,41 @@ export class TraversalMethod_hasId_Object_ObjectContext extends TraversalMethod_
         }
     }
 }
+export class TraversalMethod_hasId_PContext extends TraversalMethod_hasIdContext {
+    public constructor(ctx: TraversalMethod_hasIdContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_HASID(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_HASID, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public traversalPredicate(): TraversalPredicateContext {
+        return this.getRuleContext(0, TraversalPredicateContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_hasId_P) {
+             listener.enterTraversalMethod_hasId_P(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_hasId_P) {
+             listener.exitTraversalMethod_hasId_P(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_hasId_P) {
+            return visitor.visitTraversalMethod_hasId_P(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 
 
 export class TraversalMethod_hasKeyContext extends antlr.ParserRuleContext {
@@ -27178,41 +27177,6 @@ export class TraversalMethod_hasKeyContext extends antlr.ParserRuleContext {
     }
     public override copyFrom(ctx: TraversalMethod_hasKeyContext): void {
         super.copyFrom(ctx);
-    }
-}
-export class TraversalMethod_hasKey_TraversalContext extends TraversalMethod_hasKeyContext {
-    public constructor(ctx: TraversalMethod_hasKeyContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_HASKEY(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_HASKEY, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public nestedTraversal(): NestedTraversalContext {
-        return this.getRuleContext(0, NestedTraversalContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_hasKey_Traversal) {
-             listener.enterTraversalMethod_hasKey_Traversal(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_hasKey_Traversal) {
-             listener.exitTraversalMethod_hasKey_Traversal(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_hasKey_Traversal) {
-            return visitor.visitTraversalMethod_hasKey_Traversal(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
     }
 }
 export class TraversalMethod_hasKey_PContext extends TraversalMethod_hasKeyContext {
@@ -27291,6 +27255,41 @@ export class TraversalMethod_hasKey_String_StringContext extends TraversalMethod
         }
     }
 }
+export class TraversalMethod_hasKey_TraversalContext extends TraversalMethod_hasKeyContext {
+    public constructor(ctx: TraversalMethod_hasKeyContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_HASKEY(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_HASKEY, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public nestedTraversal(): NestedTraversalContext {
+        return this.getRuleContext(0, NestedTraversalContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_hasKey_Traversal) {
+             listener.enterTraversalMethod_hasKey_Traversal(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_hasKey_Traversal) {
+             listener.exitTraversalMethod_hasKey_Traversal(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_hasKey_Traversal) {
+            return visitor.visitTraversalMethod_hasKey_Traversal(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 
 
 export class TraversalMethod_hasLabelContext extends antlr.ParserRuleContext {
@@ -27302,6 +27301,41 @@ export class TraversalMethod_hasLabelContext extends antlr.ParserRuleContext {
     }
     public override copyFrom(ctx: TraversalMethod_hasLabelContext): void {
         super.copyFrom(ctx);
+    }
+}
+export class TraversalMethod_hasLabel_PContext extends TraversalMethod_hasLabelContext {
+    public constructor(ctx: TraversalMethod_hasLabelContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_HASLABEL(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_HASLABEL, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public traversalPredicate(): TraversalPredicateContext {
+        return this.getRuleContext(0, TraversalPredicateContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_hasLabel_P) {
+             listener.enterTraversalMethod_hasLabel_P(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_hasLabel_P) {
+             listener.exitTraversalMethod_hasLabel_P(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_hasLabel_P) {
+            return visitor.visitTraversalMethod_hasLabel_P(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
     }
 }
 export class TraversalMethod_hasLabel_String_StringContext extends TraversalMethod_hasLabelContext {
@@ -27380,41 +27414,6 @@ export class TraversalMethod_hasLabel_TraversalContext extends TraversalMethod_h
         }
     }
 }
-export class TraversalMethod_hasLabel_PContext extends TraversalMethod_hasLabelContext {
-    public constructor(ctx: TraversalMethod_hasLabelContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_HASLABEL(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_HASLABEL, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public traversalPredicate(): TraversalPredicateContext {
-        return this.getRuleContext(0, TraversalPredicateContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_hasLabel_P) {
-             listener.enterTraversalMethod_hasLabel_P(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_hasLabel_P) {
-             listener.exitTraversalMethod_hasLabel_P(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_hasLabel_P) {
-            return visitor.visitTraversalMethod_hasLabel_P(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
 
 
 export class TraversalMethod_hasNotContext extends antlr.ParserRuleContext {
@@ -27465,6 +27464,47 @@ export class TraversalMethod_hasValueContext extends antlr.ParserRuleContext {
     }
     public override copyFrom(ctx: TraversalMethod_hasValueContext): void {
         super.copyFrom(ctx);
+    }
+}
+export class TraversalMethod_hasValue_Object_ObjectContext extends TraversalMethod_hasValueContext {
+    public constructor(ctx: TraversalMethod_hasValueContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_HASVALUE(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_HASVALUE, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public genericArgument(): GenericArgumentContext {
+        return this.getRuleContext(0, GenericArgumentContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public COMMA(): antlr.TerminalNode | null {
+        return this.getToken(GremlinParser.COMMA, 0);
+    }
+    public genericArgumentVarargs(): GenericArgumentVarargsContext | null {
+        return this.getRuleContext(0, GenericArgumentVarargsContext);
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_hasValue_Object_Object) {
+             listener.enterTraversalMethod_hasValue_Object_Object(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_hasValue_Object_Object) {
+             listener.exitTraversalMethod_hasValue_Object_Object(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_hasValue_Object_Object) {
+            return visitor.visitTraversalMethod_hasValue_Object_Object(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
     }
 }
 export class TraversalMethod_hasValue_PContext extends TraversalMethod_hasValueContext {
@@ -27532,47 +27572,6 @@ export class TraversalMethod_hasValue_TraversalContext extends TraversalMethod_h
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_hasValue_Traversal) {
             return visitor.visitTraversalMethod_hasValue_Traversal(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_hasValue_Object_ObjectContext extends TraversalMethod_hasValueContext {
-    public constructor(ctx: TraversalMethod_hasValueContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_HASVALUE(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_HASVALUE, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public genericArgument(): GenericArgumentContext {
-        return this.getRuleContext(0, GenericArgumentContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public COMMA(): antlr.TerminalNode | null {
-        return this.getToken(GremlinParser.COMMA, 0);
-    }
-    public genericArgumentVarargs(): GenericArgumentVarargsContext | null {
-        return this.getRuleContext(0, GenericArgumentVarargsContext);
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_hasValue_Object_Object) {
-             listener.enterTraversalMethod_hasValue_Object_Object(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_hasValue_Object_Object) {
-             listener.exitTraversalMethod_hasValue_Object_Object(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_hasValue_Object_Object) {
-            return visitor.visitTraversalMethod_hasValue_Object_Object(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -28055,6 +28054,38 @@ export class TraversalMethod_lengthContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
+export class TraversalMethod_length_EmptyContext extends TraversalMethod_lengthContext {
+    public constructor(ctx: TraversalMethod_lengthContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_LENGTH(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_LENGTH, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_length_Empty) {
+             listener.enterTraversalMethod_length_Empty(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_length_Empty) {
+             listener.exitTraversalMethod_length_Empty(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_length_Empty) {
+            return visitor.visitTraversalMethod_length_Empty(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 export class TraversalMethod_length_ScopeContext extends TraversalMethod_lengthContext {
     public constructor(ctx: TraversalMethod_lengthContext) {
         super(ctx.parent, ctx.invokingState);
@@ -28085,38 +28116,6 @@ export class TraversalMethod_length_ScopeContext extends TraversalMethod_lengthC
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_length_Scope) {
             return visitor.visitTraversalMethod_length_Scope(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_length_EmptyContext extends TraversalMethod_lengthContext {
-    public constructor(ctx: TraversalMethod_lengthContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_LENGTH(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_LENGTH, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_length_Empty) {
-             listener.enterTraversalMethod_length_Empty(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_length_Empty) {
-             listener.exitTraversalMethod_length_Empty(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_length_Empty) {
-            return visitor.visitTraversalMethod_length_Empty(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -28263,6 +28262,38 @@ export class TraversalMethod_loopsContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
+export class TraversalMethod_loops_EmptyContext extends TraversalMethod_loopsContext {
+    public constructor(ctx: TraversalMethod_loopsContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_LOOPS(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_LOOPS, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_loops_Empty) {
+             listener.enterTraversalMethod_loops_Empty(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_loops_Empty) {
+             listener.exitTraversalMethod_loops_Empty(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_loops_Empty) {
+            return visitor.visitTraversalMethod_loops_Empty(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 export class TraversalMethod_loops_StringContext extends TraversalMethod_loopsContext {
     public constructor(ctx: TraversalMethod_loopsContext) {
         super(ctx.parent, ctx.invokingState);
@@ -28298,38 +28329,6 @@ export class TraversalMethod_loops_StringContext extends TraversalMethod_loopsCo
         }
     }
 }
-export class TraversalMethod_loops_EmptyContext extends TraversalMethod_loopsContext {
-    public constructor(ctx: TraversalMethod_loopsContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_LOOPS(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_LOOPS, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_loops_Empty) {
-             listener.enterTraversalMethod_loops_Empty(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_loops_Empty) {
-             listener.exitTraversalMethod_loops_Empty(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_loops_Empty) {
-            return visitor.visitTraversalMethod_loops_Empty(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
 
 
 export class TraversalMethod_lTrimContext extends antlr.ParserRuleContext {
@@ -28341,6 +28340,38 @@ export class TraversalMethod_lTrimContext extends antlr.ParserRuleContext {
     }
     public override copyFrom(ctx: TraversalMethod_lTrimContext): void {
         super.copyFrom(ctx);
+    }
+}
+export class TraversalMethod_lTrim_EmptyContext extends TraversalMethod_lTrimContext {
+    public constructor(ctx: TraversalMethod_lTrimContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_LTRIM(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_LTRIM, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_lTrim_Empty) {
+             listener.enterTraversalMethod_lTrim_Empty(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_lTrim_Empty) {
+             listener.exitTraversalMethod_lTrim_Empty(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_lTrim_Empty) {
+            return visitor.visitTraversalMethod_lTrim_Empty(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
     }
 }
 export class TraversalMethod_lTrim_ScopeContext extends TraversalMethod_lTrimContext {
@@ -28373,38 +28404,6 @@ export class TraversalMethod_lTrim_ScopeContext extends TraversalMethod_lTrimCon
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_lTrim_Scope) {
             return visitor.visitTraversalMethod_lTrim_Scope(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_lTrim_EmptyContext extends TraversalMethod_lTrimContext {
-    public constructor(ctx: TraversalMethod_lTrimContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_LTRIM(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_LTRIM, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_lTrim_Empty) {
-             listener.enterTraversalMethod_lTrim_Empty(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_lTrim_Empty) {
-             listener.exitTraversalMethod_lTrim_Empty(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_lTrim_Empty) {
-            return visitor.visitTraversalMethod_lTrim_Empty(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -28460,47 +28459,6 @@ export class TraversalMethod_matchContext extends antlr.ParserRuleContext {
     }
     public override copyFrom(ctx: TraversalMethod_matchContext): void {
         super.copyFrom(ctx);
-    }
-}
-export class TraversalMethod_match_string_mapContext extends TraversalMethod_matchContext {
-    public constructor(ctx: TraversalMethod_matchContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_MATCH(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_MATCH, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public stringLiteral(): StringLiteralContext {
-        return this.getRuleContext(0, StringLiteralContext)!;
-    }
-    public COMMA(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.COMMA, 0)!;
-    }
-    public genericMapLiteral(): GenericMapLiteralContext {
-        return this.getRuleContext(0, GenericMapLiteralContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_match_string_map) {
-             listener.enterTraversalMethod_match_string_map(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_match_string_map) {
-             listener.exitTraversalMethod_match_string_map(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_match_string_map) {
-            return visitor.visitTraversalMethod_match_string_map(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
     }
 }
 export class TraversalMethod_match_traversalContext extends TraversalMethod_matchContext {
@@ -28573,6 +28531,47 @@ export class TraversalMethod_match_stringContext extends TraversalMethod_matchCo
         }
     }
 }
+export class TraversalMethod_match_string_mapContext extends TraversalMethod_matchContext {
+    public constructor(ctx: TraversalMethod_matchContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_MATCH(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_MATCH, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public stringLiteral(): StringLiteralContext {
+        return this.getRuleContext(0, StringLiteralContext)!;
+    }
+    public COMMA(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.COMMA, 0)!;
+    }
+    public genericMapLiteral(): GenericMapLiteralContext {
+        return this.getRuleContext(0, GenericMapLiteralContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_match_string_map) {
+             listener.enterTraversalMethod_match_string_map(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_match_string_map) {
+             listener.exitTraversalMethod_match_string_map(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_match_string_map) {
+            return visitor.visitTraversalMethod_match_string_map(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 
 
 export class TraversalMethod_mathContext extends antlr.ParserRuleContext {
@@ -28625,6 +28624,38 @@ export class TraversalMethod_maxContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
+export class TraversalMethod_max_EmptyContext extends TraversalMethod_maxContext {
+    public constructor(ctx: TraversalMethod_maxContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_MAX(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_MAX, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_max_Empty) {
+             listener.enterTraversalMethod_max_Empty(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_max_Empty) {
+             listener.exitTraversalMethod_max_Empty(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_max_Empty) {
+            return visitor.visitTraversalMethod_max_Empty(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 export class TraversalMethod_max_ScopeContext extends TraversalMethod_maxContext {
     public constructor(ctx: TraversalMethod_maxContext) {
         super(ctx.parent, ctx.invokingState);
@@ -28660,38 +28691,6 @@ export class TraversalMethod_max_ScopeContext extends TraversalMethod_maxContext
         }
     }
 }
-export class TraversalMethod_max_EmptyContext extends TraversalMethod_maxContext {
-    public constructor(ctx: TraversalMethod_maxContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_MAX(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_MAX, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_max_Empty) {
-             listener.enterTraversalMethod_max_Empty(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_max_Empty) {
-             listener.exitTraversalMethod_max_Empty(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_max_Empty) {
-            return visitor.visitTraversalMethod_max_Empty(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
 
 
 export class TraversalMethod_meanContext extends antlr.ParserRuleContext {
@@ -28703,6 +28702,38 @@ export class TraversalMethod_meanContext extends antlr.ParserRuleContext {
     }
     public override copyFrom(ctx: TraversalMethod_meanContext): void {
         super.copyFrom(ctx);
+    }
+}
+export class TraversalMethod_mean_EmptyContext extends TraversalMethod_meanContext {
+    public constructor(ctx: TraversalMethod_meanContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_MEAN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_MEAN, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_mean_Empty) {
+             listener.enterTraversalMethod_mean_Empty(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_mean_Empty) {
+             listener.exitTraversalMethod_mean_Empty(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_mean_Empty) {
+            return visitor.visitTraversalMethod_mean_Empty(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
     }
 }
 export class TraversalMethod_mean_ScopeContext extends TraversalMethod_meanContext {
@@ -28735,38 +28766,6 @@ export class TraversalMethod_mean_ScopeContext extends TraversalMethod_meanConte
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_mean_Scope) {
             return visitor.visitTraversalMethod_mean_Scope(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_mean_EmptyContext extends TraversalMethod_meanContext {
-    public constructor(ctx: TraversalMethod_meanContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_MEAN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_MEAN, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_mean_Empty) {
-             listener.enterTraversalMethod_mean_Empty(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_mean_Empty) {
-             listener.exitTraversalMethod_mean_Empty(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_mean_Empty) {
-            return visitor.visitTraversalMethod_mean_Empty(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -28831,6 +28830,38 @@ export class TraversalMethod_mergeVContext extends antlr.ParserRuleContext {
     }
     public override copyFrom(ctx: TraversalMethod_mergeVContext): void {
         super.copyFrom(ctx);
+    }
+}
+export class TraversalMethod_mergeV_emptyContext extends TraversalMethod_mergeVContext {
+    public constructor(ctx: TraversalMethod_mergeVContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_MERGEV(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_MERGEV, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_mergeV_empty) {
+             listener.enterTraversalMethod_mergeV_empty(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_mergeV_empty) {
+             listener.exitTraversalMethod_mergeV_empty(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_mergeV_empty) {
+            return visitor.visitTraversalMethod_mergeV_empty(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
     }
 }
 export class TraversalMethod_mergeV_MapContext extends TraversalMethod_mergeVContext {
@@ -28898,38 +28929,6 @@ export class TraversalMethod_mergeV_TraversalContext extends TraversalMethod_mer
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_mergeV_Traversal) {
             return visitor.visitTraversalMethod_mergeV_Traversal(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_mergeV_emptyContext extends TraversalMethod_mergeVContext {
-    public constructor(ctx: TraversalMethod_mergeVContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_MERGEV(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_MERGEV, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_mergeV_empty) {
-             listener.enterTraversalMethod_mergeV_empty(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_mergeV_empty) {
-             listener.exitTraversalMethod_mergeV_empty(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_mergeV_empty) {
-            return visitor.visitTraversalMethod_mergeV_empty(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -29230,6 +29229,47 @@ export class TraversalMethod_optionContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
+export class TraversalMethod_option_Predicate_TraversalContext extends TraversalMethod_optionContext {
+    public constructor(ctx: TraversalMethod_optionContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_OPTION(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_OPTION, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public traversalPredicate(): TraversalPredicateContext {
+        return this.getRuleContext(0, TraversalPredicateContext)!;
+    }
+    public COMMA(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.COMMA, 0)!;
+    }
+    public nestedTraversal(): NestedTraversalContext {
+        return this.getRuleContext(0, NestedTraversalContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_option_Predicate_Traversal) {
+             listener.enterTraversalMethod_option_Predicate_Traversal(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_option_Predicate_Traversal) {
+             listener.exitTraversalMethod_option_Predicate_Traversal(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_option_Predicate_Traversal) {
+            return visitor.visitTraversalMethod_option_Predicate_Traversal(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 export class TraversalMethod_option_Merge_MapContext extends TraversalMethod_optionContext {
     public constructor(ctx: TraversalMethod_optionContext) {
         super(ctx.parent, ctx.invokingState);
@@ -29398,47 +29438,6 @@ export class TraversalMethod_option_Object_TraversalContext extends TraversalMet
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_option_Object_Traversal) {
             return visitor.visitTraversalMethod_option_Object_Traversal(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_option_Predicate_TraversalContext extends TraversalMethod_optionContext {
-    public constructor(ctx: TraversalMethod_optionContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_OPTION(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_OPTION, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public traversalPredicate(): TraversalPredicateContext {
-        return this.getRuleContext(0, TraversalPredicateContext)!;
-    }
-    public COMMA(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.COMMA, 0)!;
-    }
-    public nestedTraversal(): NestedTraversalContext {
-        return this.getRuleContext(0, NestedTraversalContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_option_Predicate_Traversal) {
-             listener.enterTraversalMethod_option_Predicate_Traversal(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_option_Predicate_Traversal) {
-             listener.exitTraversalMethod_option_Predicate_Traversal(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_option_Predicate_Traversal) {
-            return visitor.visitTraversalMethod_option_Predicate_Traversal(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -30000,6 +29999,38 @@ export class TraversalMethod_profileContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
+export class TraversalMethod_profile_EmptyContext extends TraversalMethod_profileContext {
+    public constructor(ctx: TraversalMethod_profileContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_PROFILE(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_PROFILE, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_profile_Empty) {
+             listener.enterTraversalMethod_profile_Empty(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_profile_Empty) {
+             listener.exitTraversalMethod_profile_Empty(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_profile_Empty) {
+            return visitor.visitTraversalMethod_profile_Empty(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 export class TraversalMethod_profile_StringContext extends TraversalMethod_profileContext {
     public constructor(ctx: TraversalMethod_profileContext) {
         super(ctx.parent, ctx.invokingState);
@@ -30030,38 +30061,6 @@ export class TraversalMethod_profile_StringContext extends TraversalMethod_profi
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_profile_String) {
             return visitor.visitTraversalMethod_profile_String(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_profile_EmptyContext extends TraversalMethod_profileContext {
-    public constructor(ctx: TraversalMethod_profileContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_PROFILE(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_PROFILE, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_profile_Empty) {
-             listener.enterTraversalMethod_profile_Empty(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_profile_Empty) {
-             listener.exitTraversalMethod_profile_Empty(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_profile_Empty) {
-            return visitor.visitTraversalMethod_profile_Empty(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -30217,7 +30216,7 @@ export class TraversalMethod_property_Cardinality_Object_Object_ObjectContext ex
         }
     }
 }
-export class TraversalMethod_property_Object_TraversalContext extends TraversalMethod_propertyContext {
+export class TraversalMethod_property_Cardinality_Object_TraversalContext extends TraversalMethod_propertyContext {
     public constructor(ctx: TraversalMethod_propertyContext) {
         super(ctx.parent, ctx.invokingState);
         super.copyFrom(ctx);
@@ -30228,11 +30227,20 @@ export class TraversalMethod_property_Object_TraversalContext extends TraversalM
     public LPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.LPAREN, 0)!;
     }
+    public traversalCardinality(): TraversalCardinalityContext {
+        return this.getRuleContext(0, TraversalCardinalityContext)!;
+    }
+    public COMMA(): antlr.TerminalNode[];
+    public COMMA(i: number): antlr.TerminalNode | null;
+    public COMMA(i?: number): antlr.TerminalNode | null | antlr.TerminalNode[] {
+    	if (i === undefined) {
+    		return this.getTokens(GremlinParser.COMMA);
+    	} else {
+    		return this.getToken(GremlinParser.COMMA, i);
+    	}
+    }
     public genericLiteral(): GenericLiteralContext {
         return this.getRuleContext(0, GenericLiteralContext)!;
-    }
-    public COMMA(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.COMMA, 0)!;
     }
     public nestedTraversal(): NestedTraversalContext {
         return this.getRuleContext(0, NestedTraversalContext)!;
@@ -30241,24 +30249,24 @@ export class TraversalMethod_property_Object_TraversalContext extends TraversalM
         return this.getToken(GremlinParser.RPAREN, 0)!;
     }
     public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_property_Object_Traversal) {
-             listener.enterTraversalMethod_property_Object_Traversal(this);
+        if(listener.enterTraversalMethod_property_Cardinality_Object_Traversal) {
+             listener.enterTraversalMethod_property_Cardinality_Object_Traversal(this);
         }
     }
     public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_property_Object_Traversal) {
-             listener.exitTraversalMethod_property_Object_Traversal(this);
+        if(listener.exitTraversalMethod_property_Cardinality_Object_Traversal) {
+             listener.exitTraversalMethod_property_Cardinality_Object_Traversal(this);
         }
     }
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_property_Object_Traversal) {
-            return visitor.visitTraversalMethod_property_Object_Traversal(this);
+        if (visitor.visitTraversalMethod_property_Cardinality_Object_Traversal) {
+            return visitor.visitTraversalMethod_property_Cardinality_Object_Traversal(this);
         } else {
             return visitor.visitChildren(this);
         }
     }
 }
-export class TraversalMethod_property_TraversalContext extends TraversalMethod_propertyContext {
+export class TraversalMethod_property_Cardinality_ObjectContext extends TraversalMethod_propertyContext {
     public constructor(ctx: TraversalMethod_propertyContext) {
         super(ctx.parent, ctx.invokingState);
         super.copyFrom(ctx);
@@ -30269,25 +30277,31 @@ export class TraversalMethod_property_TraversalContext extends TraversalMethod_p
     public LPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.LPAREN, 0)!;
     }
-    public nestedTraversal(): NestedTraversalContext {
-        return this.getRuleContext(0, NestedTraversalContext)!;
+    public traversalCardinality(): TraversalCardinalityContext {
+        return this.getRuleContext(0, TraversalCardinalityContext)!;
+    }
+    public COMMA(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.COMMA, 0)!;
+    }
+    public genericMapNullableArgument(): GenericMapNullableArgumentContext {
+        return this.getRuleContext(0, GenericMapNullableArgumentContext)!;
     }
     public RPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.RPAREN, 0)!;
     }
     public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_property_Traversal) {
-             listener.enterTraversalMethod_property_Traversal(this);
+        if(listener.enterTraversalMethod_property_Cardinality_Object) {
+             listener.enterTraversalMethod_property_Cardinality_Object(this);
         }
     }
     public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_property_Traversal) {
-             listener.exitTraversalMethod_property_Traversal(this);
+        if(listener.exitTraversalMethod_property_Cardinality_Object) {
+             listener.exitTraversalMethod_property_Cardinality_Object(this);
         }
     }
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_property_Traversal) {
-            return visitor.visitTraversalMethod_property_Traversal(this);
+        if (visitor.visitTraversalMethod_property_Cardinality_Object) {
+            return visitor.visitTraversalMethod_property_Cardinality_Object(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -30343,7 +30357,7 @@ export class TraversalMethod_property_Object_Object_ObjectContext extends Traver
         }
     }
 }
-export class TraversalMethod_property_Cardinality_Object_TraversalContext extends TraversalMethod_propertyContext {
+export class TraversalMethod_property_Object_TraversalContext extends TraversalMethod_propertyContext {
     public constructor(ctx: TraversalMethod_propertyContext) {
         super(ctx.parent, ctx.invokingState);
         super.copyFrom(ctx);
@@ -30354,20 +30368,11 @@ export class TraversalMethod_property_Cardinality_Object_TraversalContext extend
     public LPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.LPAREN, 0)!;
     }
-    public traversalCardinality(): TraversalCardinalityContext {
-        return this.getRuleContext(0, TraversalCardinalityContext)!;
-    }
-    public COMMA(): antlr.TerminalNode[];
-    public COMMA(i: number): antlr.TerminalNode | null;
-    public COMMA(i?: number): antlr.TerminalNode | null | antlr.TerminalNode[] {
-    	if (i === undefined) {
-    		return this.getTokens(GremlinParser.COMMA);
-    	} else {
-    		return this.getToken(GremlinParser.COMMA, i);
-    	}
-    }
     public genericLiteral(): GenericLiteralContext {
         return this.getRuleContext(0, GenericLiteralContext)!;
+    }
+    public COMMA(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.COMMA, 0)!;
     }
     public nestedTraversal(): NestedTraversalContext {
         return this.getRuleContext(0, NestedTraversalContext)!;
@@ -30376,18 +30381,18 @@ export class TraversalMethod_property_Cardinality_Object_TraversalContext extend
         return this.getToken(GremlinParser.RPAREN, 0)!;
     }
     public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_property_Cardinality_Object_Traversal) {
-             listener.enterTraversalMethod_property_Cardinality_Object_Traversal(this);
+        if(listener.enterTraversalMethod_property_Object_Traversal) {
+             listener.enterTraversalMethod_property_Object_Traversal(this);
         }
     }
     public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_property_Cardinality_Object_Traversal) {
-             listener.exitTraversalMethod_property_Cardinality_Object_Traversal(this);
+        if(listener.exitTraversalMethod_property_Object_Traversal) {
+             listener.exitTraversalMethod_property_Object_Traversal(this);
         }
     }
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_property_Cardinality_Object_Traversal) {
-            return visitor.visitTraversalMethod_property_Cardinality_Object_Traversal(this);
+        if (visitor.visitTraversalMethod_property_Object_Traversal) {
+            return visitor.visitTraversalMethod_property_Object_Traversal(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -30428,7 +30433,7 @@ export class TraversalMethod_property_ObjectContext extends TraversalMethod_prop
         }
     }
 }
-export class TraversalMethod_property_Cardinality_ObjectContext extends TraversalMethod_propertyContext {
+export class TraversalMethod_property_TraversalContext extends TraversalMethod_propertyContext {
     public constructor(ctx: TraversalMethod_propertyContext) {
         super(ctx.parent, ctx.invokingState);
         super.copyFrom(ctx);
@@ -30439,31 +30444,25 @@ export class TraversalMethod_property_Cardinality_ObjectContext extends Traversa
     public LPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.LPAREN, 0)!;
     }
-    public traversalCardinality(): TraversalCardinalityContext {
-        return this.getRuleContext(0, TraversalCardinalityContext)!;
-    }
-    public COMMA(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.COMMA, 0)!;
-    }
-    public genericMapNullableArgument(): GenericMapNullableArgumentContext {
-        return this.getRuleContext(0, GenericMapNullableArgumentContext)!;
+    public nestedTraversal(): NestedTraversalContext {
+        return this.getRuleContext(0, NestedTraversalContext)!;
     }
     public RPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.RPAREN, 0)!;
     }
     public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_property_Cardinality_Object) {
-             listener.enterTraversalMethod_property_Cardinality_Object(this);
+        if(listener.enterTraversalMethod_property_Traversal) {
+             listener.enterTraversalMethod_property_Traversal(this);
         }
     }
     public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_property_Cardinality_Object) {
-             listener.exitTraversalMethod_property_Cardinality_Object(this);
+        if(listener.exitTraversalMethod_property_Traversal) {
+             listener.exitTraversalMethod_property_Traversal(this);
         }
     }
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_property_Cardinality_Object) {
-            return visitor.visitTraversalMethod_property_Cardinality_Object(this);
+        if (visitor.visitTraversalMethod_property_Traversal) {
+            return visitor.visitTraversalMethod_property_Traversal(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -30911,6 +30910,38 @@ export class TraversalMethod_rTrimContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
+export class TraversalMethod_rTrim_EmptyContext extends TraversalMethod_rTrimContext {
+    public constructor(ctx: TraversalMethod_rTrimContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_RTRIM(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_RTRIM, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_rTrim_Empty) {
+             listener.enterTraversalMethod_rTrim_Empty(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_rTrim_Empty) {
+             listener.exitTraversalMethod_rTrim_Empty(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_rTrim_Empty) {
+            return visitor.visitTraversalMethod_rTrim_Empty(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 export class TraversalMethod_rTrim_ScopeContext extends TraversalMethod_rTrimContext {
     public constructor(ctx: TraversalMethod_rTrimContext) {
         super(ctx.parent, ctx.invokingState);
@@ -30946,38 +30977,6 @@ export class TraversalMethod_rTrim_ScopeContext extends TraversalMethod_rTrimCon
         }
     }
 }
-export class TraversalMethod_rTrim_EmptyContext extends TraversalMethod_rTrimContext {
-    public constructor(ctx: TraversalMethod_rTrimContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_RTRIM(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_RTRIM, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_rTrim_Empty) {
-             listener.enterTraversalMethod_rTrim_Empty(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_rTrim_Empty) {
-             listener.exitTraversalMethod_rTrim_Empty(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_rTrim_Empty) {
-            return visitor.visitTraversalMethod_rTrim_Empty(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
 
 
 export class TraversalMethod_sackContext extends antlr.ParserRuleContext {
@@ -30989,38 +30988,6 @@ export class TraversalMethod_sackContext extends antlr.ParserRuleContext {
     }
     public override copyFrom(ctx: TraversalMethod_sackContext): void {
         super.copyFrom(ctx);
-    }
-}
-export class TraversalMethod_sack_EmptyContext extends TraversalMethod_sackContext {
-    public constructor(ctx: TraversalMethod_sackContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_SACK(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_SACK, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_sack_Empty) {
-             listener.enterTraversalMethod_sack_Empty(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_sack_Empty) {
-             listener.exitTraversalMethod_sack_Empty(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_sack_Empty) {
-            return visitor.visitTraversalMethod_sack_Empty(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
     }
 }
 export class TraversalMethod_sack_BiFunctionContext extends TraversalMethod_sackContext {
@@ -31053,6 +31020,38 @@ export class TraversalMethod_sack_BiFunctionContext extends TraversalMethod_sack
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_sack_BiFunction) {
             return visitor.visitTraversalMethod_sack_BiFunction(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_sack_EmptyContext extends TraversalMethod_sackContext {
+    public constructor(ctx: TraversalMethod_sackContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_SACK(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_SACK, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_sack_Empty) {
+             listener.enterTraversalMethod_sack_Empty(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_sack_Empty) {
+             listener.exitTraversalMethod_sack_Empty(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_sack_Empty) {
+            return visitor.visitTraversalMethod_sack_Empty(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -31160,226 +31159,6 @@ export class TraversalMethod_selectContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
-export class TraversalMethod_select_String_String_StringContext extends TraversalMethod_selectContext {
-    public constructor(ctx: TraversalMethod_selectContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_SELECT(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_SELECT, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public stringLiteral(): StringLiteralContext[];
-    public stringLiteral(i: number): StringLiteralContext | null;
-    public stringLiteral(i?: number): StringLiteralContext[] | StringLiteralContext | null {
-        if (i === undefined) {
-            return this.getRuleContexts(StringLiteralContext);
-        }
-
-        return this.getRuleContext(i, StringLiteralContext);
-    }
-    public COMMA(): antlr.TerminalNode[];
-    public COMMA(i: number): antlr.TerminalNode | null;
-    public COMMA(i?: number): antlr.TerminalNode | null | antlr.TerminalNode[] {
-    	if (i === undefined) {
-    		return this.getTokens(GremlinParser.COMMA);
-    	} else {
-    		return this.getToken(GremlinParser.COMMA, i);
-    	}
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public stringNullableLiteralVarargs(): StringNullableLiteralVarargsContext | null {
-        return this.getRuleContext(0, StringNullableLiteralVarargsContext);
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_select_String_String_String) {
-             listener.enterTraversalMethod_select_String_String_String(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_select_String_String_String) {
-             listener.exitTraversalMethod_select_String_String_String(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_select_String_String_String) {
-            return visitor.visitTraversalMethod_select_String_String_String(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_select_Pop_String_String_StringContext extends TraversalMethod_selectContext {
-    public constructor(ctx: TraversalMethod_selectContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_SELECT(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_SELECT, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public traversalPop(): TraversalPopContext {
-        return this.getRuleContext(0, TraversalPopContext)!;
-    }
-    public COMMA(): antlr.TerminalNode[];
-    public COMMA(i: number): antlr.TerminalNode | null;
-    public COMMA(i?: number): antlr.TerminalNode | null | antlr.TerminalNode[] {
-    	if (i === undefined) {
-    		return this.getTokens(GremlinParser.COMMA);
-    	} else {
-    		return this.getToken(GremlinParser.COMMA, i);
-    	}
-    }
-    public stringLiteral(): StringLiteralContext[];
-    public stringLiteral(i: number): StringLiteralContext | null;
-    public stringLiteral(i?: number): StringLiteralContext[] | StringLiteralContext | null {
-        if (i === undefined) {
-            return this.getRuleContexts(StringLiteralContext);
-        }
-
-        return this.getRuleContext(i, StringLiteralContext);
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public stringNullableLiteralVarargs(): StringNullableLiteralVarargsContext | null {
-        return this.getRuleContext(0, StringNullableLiteralVarargsContext);
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_select_Pop_String_String_String) {
-             listener.enterTraversalMethod_select_Pop_String_String_String(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_select_Pop_String_String_String) {
-             listener.exitTraversalMethod_select_Pop_String_String_String(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_select_Pop_String_String_String) {
-            return visitor.visitTraversalMethod_select_Pop_String_String_String(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_select_StringContext extends TraversalMethod_selectContext {
-    public constructor(ctx: TraversalMethod_selectContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_SELECT(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_SELECT, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public stringLiteral(): StringLiteralContext {
-        return this.getRuleContext(0, StringLiteralContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_select_String) {
-             listener.enterTraversalMethod_select_String(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_select_String) {
-             listener.exitTraversalMethod_select_String(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_select_String) {
-            return visitor.visitTraversalMethod_select_String(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_select_Pop_TraversalContext extends TraversalMethod_selectContext {
-    public constructor(ctx: TraversalMethod_selectContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_SELECT(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_SELECT, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public traversalPop(): TraversalPopContext {
-        return this.getRuleContext(0, TraversalPopContext)!;
-    }
-    public COMMA(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.COMMA, 0)!;
-    }
-    public nestedTraversal(): NestedTraversalContext {
-        return this.getRuleContext(0, NestedTraversalContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_select_Pop_Traversal) {
-             listener.enterTraversalMethod_select_Pop_Traversal(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_select_Pop_Traversal) {
-             listener.exitTraversalMethod_select_Pop_Traversal(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_select_Pop_Traversal) {
-            return visitor.visitTraversalMethod_select_Pop_Traversal(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_select_TraversalContext extends TraversalMethod_selectContext {
-    public constructor(ctx: TraversalMethod_selectContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_SELECT(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_SELECT, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public nestedTraversal(): NestedTraversalContext {
-        return this.getRuleContext(0, NestedTraversalContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_select_Traversal) {
-             listener.enterTraversalMethod_select_Traversal(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_select_Traversal) {
-             listener.exitTraversalMethod_select_Traversal(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_select_Traversal) {
-            return visitor.visitTraversalMethod_select_Traversal(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
 export class TraversalMethod_select_ColumnContext extends TraversalMethod_selectContext {
     public constructor(ctx: TraversalMethod_selectContext) {
         super(ctx.parent, ctx.invokingState);
@@ -31451,6 +31230,226 @@ export class TraversalMethod_select_Pop_StringContext extends TraversalMethod_se
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_select_Pop_String) {
             return visitor.visitTraversalMethod_select_Pop_String(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_select_Pop_String_String_StringContext extends TraversalMethod_selectContext {
+    public constructor(ctx: TraversalMethod_selectContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_SELECT(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_SELECT, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public traversalPop(): TraversalPopContext {
+        return this.getRuleContext(0, TraversalPopContext)!;
+    }
+    public COMMA(): antlr.TerminalNode[];
+    public COMMA(i: number): antlr.TerminalNode | null;
+    public COMMA(i?: number): antlr.TerminalNode | null | antlr.TerminalNode[] {
+    	if (i === undefined) {
+    		return this.getTokens(GremlinParser.COMMA);
+    	} else {
+    		return this.getToken(GremlinParser.COMMA, i);
+    	}
+    }
+    public stringLiteral(): StringLiteralContext[];
+    public stringLiteral(i: number): StringLiteralContext | null;
+    public stringLiteral(i?: number): StringLiteralContext[] | StringLiteralContext | null {
+        if (i === undefined) {
+            return this.getRuleContexts(StringLiteralContext);
+        }
+
+        return this.getRuleContext(i, StringLiteralContext);
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public stringNullableLiteralVarargs(): StringNullableLiteralVarargsContext | null {
+        return this.getRuleContext(0, StringNullableLiteralVarargsContext);
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_select_Pop_String_String_String) {
+             listener.enterTraversalMethod_select_Pop_String_String_String(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_select_Pop_String_String_String) {
+             listener.exitTraversalMethod_select_Pop_String_String_String(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_select_Pop_String_String_String) {
+            return visitor.visitTraversalMethod_select_Pop_String_String_String(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_select_Pop_TraversalContext extends TraversalMethod_selectContext {
+    public constructor(ctx: TraversalMethod_selectContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_SELECT(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_SELECT, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public traversalPop(): TraversalPopContext {
+        return this.getRuleContext(0, TraversalPopContext)!;
+    }
+    public COMMA(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.COMMA, 0)!;
+    }
+    public nestedTraversal(): NestedTraversalContext {
+        return this.getRuleContext(0, NestedTraversalContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_select_Pop_Traversal) {
+             listener.enterTraversalMethod_select_Pop_Traversal(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_select_Pop_Traversal) {
+             listener.exitTraversalMethod_select_Pop_Traversal(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_select_Pop_Traversal) {
+            return visitor.visitTraversalMethod_select_Pop_Traversal(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_select_StringContext extends TraversalMethod_selectContext {
+    public constructor(ctx: TraversalMethod_selectContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_SELECT(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_SELECT, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public stringLiteral(): StringLiteralContext {
+        return this.getRuleContext(0, StringLiteralContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_select_String) {
+             listener.enterTraversalMethod_select_String(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_select_String) {
+             listener.exitTraversalMethod_select_String(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_select_String) {
+            return visitor.visitTraversalMethod_select_String(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_select_String_String_StringContext extends TraversalMethod_selectContext {
+    public constructor(ctx: TraversalMethod_selectContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_SELECT(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_SELECT, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public stringLiteral(): StringLiteralContext[];
+    public stringLiteral(i: number): StringLiteralContext | null;
+    public stringLiteral(i?: number): StringLiteralContext[] | StringLiteralContext | null {
+        if (i === undefined) {
+            return this.getRuleContexts(StringLiteralContext);
+        }
+
+        return this.getRuleContext(i, StringLiteralContext);
+    }
+    public COMMA(): antlr.TerminalNode[];
+    public COMMA(i: number): antlr.TerminalNode | null;
+    public COMMA(i?: number): antlr.TerminalNode | null | antlr.TerminalNode[] {
+    	if (i === undefined) {
+    		return this.getTokens(GremlinParser.COMMA);
+    	} else {
+    		return this.getToken(GremlinParser.COMMA, i);
+    	}
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public stringNullableLiteralVarargs(): StringNullableLiteralVarargsContext | null {
+        return this.getRuleContext(0, StringNullableLiteralVarargsContext);
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_select_String_String_String) {
+             listener.enterTraversalMethod_select_String_String_String(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_select_String_String_String) {
+             listener.exitTraversalMethod_select_String_String_String(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_select_String_String_String) {
+            return visitor.visitTraversalMethod_select_String_String_String(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_select_TraversalContext extends TraversalMethod_selectContext {
+    public constructor(ctx: TraversalMethod_selectContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_SELECT(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_SELECT, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public nestedTraversal(): NestedTraversalContext {
+        return this.getRuleContext(0, NestedTraversalContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_select_Traversal) {
+             listener.enterTraversalMethod_select_Traversal(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_select_Traversal) {
+             listener.exitTraversalMethod_select_Traversal(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_select_Traversal) {
+            return visitor.visitTraversalMethod_select_Traversal(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -31797,50 +31796,6 @@ export class TraversalMethod_substringContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
-export class TraversalMethod_substring_int_intContext extends TraversalMethod_substringContext {
-    public constructor(ctx: TraversalMethod_substringContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_SUBSTRING(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_SUBSTRING, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public integerLiteral(): IntegerLiteralContext[];
-    public integerLiteral(i: number): IntegerLiteralContext | null;
-    public integerLiteral(i?: number): IntegerLiteralContext[] | IntegerLiteralContext | null {
-        if (i === undefined) {
-            return this.getRuleContexts(IntegerLiteralContext);
-        }
-
-        return this.getRuleContext(i, IntegerLiteralContext);
-    }
-    public COMMA(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.COMMA, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_substring_int_int) {
-             listener.enterTraversalMethod_substring_int_int(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_substring_int_int) {
-             listener.exitTraversalMethod_substring_int_int(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_substring_int_int) {
-            return visitor.visitTraversalMethod_substring_int_int(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
 export class TraversalMethod_substring_intContext extends TraversalMethod_substringContext {
     public constructor(ctx: TraversalMethod_substringContext) {
         super(ctx.parent, ctx.invokingState);
@@ -31912,6 +31867,50 @@ export class TraversalMethod_substring_Scope_intContext extends TraversalMethod_
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_substring_Scope_int) {
             return visitor.visitTraversalMethod_substring_Scope_int(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_substring_int_intContext extends TraversalMethod_substringContext {
+    public constructor(ctx: TraversalMethod_substringContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_SUBSTRING(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_SUBSTRING, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public integerLiteral(): IntegerLiteralContext[];
+    public integerLiteral(i: number): IntegerLiteralContext | null;
+    public integerLiteral(i?: number): IntegerLiteralContext[] | IntegerLiteralContext | null {
+        if (i === undefined) {
+            return this.getRuleContexts(IntegerLiteralContext);
+        }
+
+        return this.getRuleContext(i, IntegerLiteralContext);
+    }
+    public COMMA(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.COMMA, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_substring_int_int) {
+             listener.enterTraversalMethod_substring_int_int(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_substring_int_int) {
+             listener.exitTraversalMethod_substring_int_int(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_substring_int_int) {
+            return visitor.visitTraversalMethod_substring_int_int(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -32063,41 +32062,6 @@ export class TraversalMethod_tailContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
-export class TraversalMethod_tail_longContext extends TraversalMethod_tailContext {
-    public constructor(ctx: TraversalMethod_tailContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_TAIL(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_TAIL, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public integerArgument(): IntegerArgumentContext {
-        return this.getRuleContext(0, IntegerArgumentContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_tail_long) {
-             listener.enterTraversalMethod_tail_long(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_tail_long) {
-             listener.exitTraversalMethod_tail_long(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_tail_long) {
-            return visitor.visitTraversalMethod_tail_long(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
 export class TraversalMethod_tail_EmptyContext extends TraversalMethod_tailContext {
     public constructor(ctx: TraversalMethod_tailContext) {
         super(ctx.parent, ctx.invokingState);
@@ -32125,6 +32089,41 @@ export class TraversalMethod_tail_EmptyContext extends TraversalMethod_tailConte
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_tail_Empty) {
             return visitor.visitTraversalMethod_tail_Empty(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_tail_ScopeContext extends TraversalMethod_tailContext {
+    public constructor(ctx: TraversalMethod_tailContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_TAIL(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_TAIL, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public traversalScope(): TraversalScopeContext {
+        return this.getRuleContext(0, TraversalScopeContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_tail_Scope) {
+             listener.enterTraversalMethod_tail_Scope(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_tail_Scope) {
+             listener.exitTraversalMethod_tail_Scope(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_tail_Scope) {
+            return visitor.visitTraversalMethod_tail_Scope(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -32171,7 +32170,7 @@ export class TraversalMethod_tail_Scope_longContext extends TraversalMethod_tail
         }
     }
 }
-export class TraversalMethod_tail_ScopeContext extends TraversalMethod_tailContext {
+export class TraversalMethod_tail_longContext extends TraversalMethod_tailContext {
     public constructor(ctx: TraversalMethod_tailContext) {
         super(ctx.parent, ctx.invokingState);
         super.copyFrom(ctx);
@@ -32182,25 +32181,25 @@ export class TraversalMethod_tail_ScopeContext extends TraversalMethod_tailConte
     public LPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.LPAREN, 0)!;
     }
-    public traversalScope(): TraversalScopeContext {
-        return this.getRuleContext(0, TraversalScopeContext)!;
+    public integerArgument(): IntegerArgumentContext {
+        return this.getRuleContext(0, IntegerArgumentContext)!;
     }
     public RPAREN(): antlr.TerminalNode {
         return this.getToken(GremlinParser.RPAREN, 0)!;
     }
     public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_tail_Scope) {
-             listener.enterTraversalMethod_tail_Scope(this);
+        if(listener.enterTraversalMethod_tail_long) {
+             listener.enterTraversalMethod_tail_long(this);
         }
     }
     public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_tail_Scope) {
-             listener.exitTraversalMethod_tail_Scope(this);
+        if(listener.exitTraversalMethod_tail_long) {
+             listener.exitTraversalMethod_tail_long(this);
         }
     }
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_tail_Scope) {
-            return visitor.visitTraversalMethod_tail_Scope(this);
+        if (visitor.visitTraversalMethod_tail_long) {
+            return visitor.visitTraversalMethod_tail_long(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -32297,41 +32296,6 @@ export class TraversalMethod_toContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
-export class TraversalMethod_to_TraversalContext extends TraversalMethod_toContext {
-    public constructor(ctx: TraversalMethod_toContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_TO(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_TO, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public nestedTraversal(): NestedTraversalContext {
-        return this.getRuleContext(0, NestedTraversalContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_to_Traversal) {
-             listener.enterTraversalMethod_to_Traversal(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_to_Traversal) {
-             listener.exitTraversalMethod_to_Traversal(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_to_Traversal) {
-            return visitor.visitTraversalMethod_to_Traversal(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
 export class TraversalMethod_to_Direction_StringContext extends TraversalMethod_toContext {
     public constructor(ctx: TraversalMethod_toContext) {
         super(ctx.parent, ctx.invokingState);
@@ -32408,6 +32372,41 @@ export class TraversalMethod_to_StringContext extends TraversalMethod_toContext 
         }
     }
 }
+export class TraversalMethod_to_TraversalContext extends TraversalMethod_toContext {
+    public constructor(ctx: TraversalMethod_toContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_TO(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_TO, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public nestedTraversal(): NestedTraversalContext {
+        return this.getRuleContext(0, NestedTraversalContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_to_Traversal) {
+             listener.enterTraversalMethod_to_Traversal(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_to_Traversal) {
+             listener.exitTraversalMethod_to_Traversal(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_to_Traversal) {
+            return visitor.visitTraversalMethod_to_Traversal(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 
 
 export class TraversalMethod_toEContext extends antlr.ParserRuleContext {
@@ -32466,6 +32465,38 @@ export class TraversalMethod_toLowerContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
+export class TraversalMethod_toLower_EmptyContext extends TraversalMethod_toLowerContext {
+    public constructor(ctx: TraversalMethod_toLowerContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_TOLOWER(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_TOLOWER, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_toLower_Empty) {
+             listener.enterTraversalMethod_toLower_Empty(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_toLower_Empty) {
+             listener.exitTraversalMethod_toLower_Empty(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_toLower_Empty) {
+            return visitor.visitTraversalMethod_toLower_Empty(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 export class TraversalMethod_toLower_ScopeContext extends TraversalMethod_toLowerContext {
     public constructor(ctx: TraversalMethod_toLowerContext) {
         super(ctx.parent, ctx.invokingState);
@@ -32501,38 +32532,6 @@ export class TraversalMethod_toLower_ScopeContext extends TraversalMethod_toLowe
         }
     }
 }
-export class TraversalMethod_toLower_EmptyContext extends TraversalMethod_toLowerContext {
-    public constructor(ctx: TraversalMethod_toLowerContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_TOLOWER(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_TOLOWER, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_toLower_Empty) {
-             listener.enterTraversalMethod_toLower_Empty(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_toLower_Empty) {
-             listener.exitTraversalMethod_toLower_Empty(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_toLower_Empty) {
-            return visitor.visitTraversalMethod_toLower_Empty(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
 
 
 export class TraversalMethod_toUpperContext extends antlr.ParserRuleContext {
@@ -32544,6 +32543,38 @@ export class TraversalMethod_toUpperContext extends antlr.ParserRuleContext {
     }
     public override copyFrom(ctx: TraversalMethod_toUpperContext): void {
         super.copyFrom(ctx);
+    }
+}
+export class TraversalMethod_toUpper_EmptyContext extends TraversalMethod_toUpperContext {
+    public constructor(ctx: TraversalMethod_toUpperContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_TOUPPER(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_TOUPPER, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_toUpper_Empty) {
+             listener.enterTraversalMethod_toUpper_Empty(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_toUpper_Empty) {
+             listener.exitTraversalMethod_toUpper_Empty(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_toUpper_Empty) {
+            return visitor.visitTraversalMethod_toUpper_Empty(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
     }
 }
 export class TraversalMethod_toUpper_ScopeContext extends TraversalMethod_toUpperContext {
@@ -32576,38 +32607,6 @@ export class TraversalMethod_toUpper_ScopeContext extends TraversalMethod_toUppe
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_toUpper_Scope) {
             return visitor.visitTraversalMethod_toUpper_Scope(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_toUpper_EmptyContext extends TraversalMethod_toUpperContext {
-    public constructor(ctx: TraversalMethod_toUpperContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_TOUPPER(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_TOUPPER, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_toUpper_Empty) {
-             listener.enterTraversalMethod_toUpper_Empty(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_toUpper_Empty) {
-             listener.exitTraversalMethod_toUpper_Empty(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_toUpper_Empty) {
-            return visitor.visitTraversalMethod_toUpper_Empty(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -32665,6 +32664,38 @@ export class TraversalMethod_treeContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
+export class TraversalMethod_tree_EmptyContext extends TraversalMethod_treeContext {
+    public constructor(ctx: TraversalMethod_treeContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_TREE(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_TREE, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_tree_Empty) {
+             listener.enterTraversalMethod_tree_Empty(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_tree_Empty) {
+             listener.exitTraversalMethod_tree_Empty(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_tree_Empty) {
+            return visitor.visitTraversalMethod_tree_Empty(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
 export class TraversalMethod_tree_StringContext extends TraversalMethod_treeContext {
     public constructor(ctx: TraversalMethod_treeContext) {
         super(ctx.parent, ctx.invokingState);
@@ -32695,38 +32726,6 @@ export class TraversalMethod_tree_StringContext extends TraversalMethod_treeCont
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_tree_String) {
             return visitor.visitTraversalMethod_tree_String(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
-export class TraversalMethod_tree_EmptyContext extends TraversalMethod_treeContext {
-    public constructor(ctx: TraversalMethod_treeContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_TREE(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_TREE, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_tree_Empty) {
-             listener.enterTraversalMethod_tree_Empty(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_tree_Empty) {
-             listener.exitTraversalMethod_tree_Empty(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_tree_Empty) {
-            return visitor.visitTraversalMethod_tree_Empty(this);
         } else {
             return visitor.visitChildren(this);
         }
@@ -32900,41 +32899,6 @@ export class TraversalMethod_untilContext extends antlr.ParserRuleContext {
         super.copyFrom(ctx);
     }
 }
-export class TraversalMethod_until_TraversalContext extends TraversalMethod_untilContext {
-    public constructor(ctx: TraversalMethod_untilContext) {
-        super(ctx.parent, ctx.invokingState);
-        super.copyFrom(ctx);
-    }
-    public K_UNTIL(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.K_UNTIL, 0)!;
-    }
-    public LPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.LPAREN, 0)!;
-    }
-    public nestedTraversal(): NestedTraversalContext {
-        return this.getRuleContext(0, NestedTraversalContext)!;
-    }
-    public RPAREN(): antlr.TerminalNode {
-        return this.getToken(GremlinParser.RPAREN, 0)!;
-    }
-    public override enterRule(listener: GremlinListener): void {
-        if(listener.enterTraversalMethod_until_Traversal) {
-             listener.enterTraversalMethod_until_Traversal(this);
-        }
-    }
-    public override exitRule(listener: GremlinListener): void {
-        if(listener.exitTraversalMethod_until_Traversal) {
-             listener.exitTraversalMethod_until_Traversal(this);
-        }
-    }
-    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
-        if (visitor.visitTraversalMethod_until_Traversal) {
-            return visitor.visitTraversalMethod_until_Traversal(this);
-        } else {
-            return visitor.visitChildren(this);
-        }
-    }
-}
 export class TraversalMethod_until_PredicateContext extends TraversalMethod_untilContext {
     public constructor(ctx: TraversalMethod_untilContext) {
         super(ctx.parent, ctx.invokingState);
@@ -32965,6 +32929,41 @@ export class TraversalMethod_until_PredicateContext extends TraversalMethod_unti
     public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
         if (visitor.visitTraversalMethod_until_Predicate) {
             return visitor.visitTraversalMethod_until_Predicate(this);
+        } else {
+            return visitor.visitChildren(this);
+        }
+    }
+}
+export class TraversalMethod_until_TraversalContext extends TraversalMethod_untilContext {
+    public constructor(ctx: TraversalMethod_untilContext) {
+        super(ctx.parent, ctx.invokingState);
+        super.copyFrom(ctx);
+    }
+    public K_UNTIL(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.K_UNTIL, 0)!;
+    }
+    public LPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.LPAREN, 0)!;
+    }
+    public nestedTraversal(): NestedTraversalContext {
+        return this.getRuleContext(0, NestedTraversalContext)!;
+    }
+    public RPAREN(): antlr.TerminalNode {
+        return this.getToken(GremlinParser.RPAREN, 0)!;
+    }
+    public override enterRule(listener: GremlinListener): void {
+        if(listener.enterTraversalMethod_until_Traversal) {
+             listener.enterTraversalMethod_until_Traversal(this);
+        }
+    }
+    public override exitRule(listener: GremlinListener): void {
+        if(listener.exitTraversalMethod_until_Traversal) {
+             listener.exitTraversalMethod_until_Traversal(this);
+        }
+    }
+    public override accept<Result>(visitor: GremlinVisitor<Result>): Result | null {
+        if (visitor.visitTraversalMethod_until_Traversal) {
+            return visitor.visitTraversalMethod_until_Traversal(this);
         } else {
             return visitor.visitChildren(this);
         }

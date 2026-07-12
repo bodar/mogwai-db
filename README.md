@@ -15,13 +15,13 @@ A TinkerPop 4 Gremlin server on SQLite, targeting Cloudflare Durable Objects.
 > visible, not because it's usable. If you pull `trunk`, expect churn.
 >
 > **Where we are today:**
-> - **Understands the whole language:** 2,177 / 2,177 canonical Gremlin traversals
+> - **Understands the whole language:** 2,298 / 2,298 canonical Gremlin traversals
 >   from the official Gherkin corpus parse + chain-extract (100%).
-> - **Executes correctly:** **205** official TinkerPop Gherkin scenarios pass
+> - **Executes correctly:** **204** official TinkerPop Gherkin scenarios pass
 >   against a live server through the *unmodified* `gremlin@4.0.0-beta.2` client
 >   (of a ~2,101-scenario suite that no provider passes 100% of — we target a
 >   declared feature subset: no lambdas, no OLAP, no multi-request transactions).
->   The number only ratchets up.
+>   This runs under `bun test` as a **ratchet** (see below); the number only goes up.
 > - **Reads:** compiler is largely complete (movement, filters, projections,
 >   aggregation, `where`/`and`/`or`/`union`/`optional`, `repeat`/`times`/`emit`).
 > - **Writes:** the graph is now **writable** — `addV`/`addE`, user-supplied ids,
@@ -111,7 +111,8 @@ both over the real GraphBinary wire, so they're proven identical, not tested twi
 - src/bun/{BunSqlite,server}.ts      — Bun entry: bun:sqlite + Bun.serve
 - src/cloudflare/{DurableObjectSqlite,worker}.ts — CF entry: ctx.storage.sql + Worker/DO
 - test/contract.ts                   — shared conformance contract (both runtimes run it)
-- conformance/                       — corpus parse/chain conformance test
+- test/conformance/                  — L1 corpus parse/chain + L3 official cucumber ratchet
+- vendor/tinkerpop/                  — pinned submodule (grammar + Gherkin features + JS GLV cucumber runner)
 - parser/                            — generated from gremlin-language/Gremlin.g4 (regenerate, don't edit)
 
 ## Run
@@ -121,17 +122,28 @@ The build graph lives in [mise tasks](mise.toml) — `install ─▶ {test, buil
 CI (GitHub Actions) just runs `mise run ci`.
 
 ```
-mise run test                  # full suite: corpus + contract on both runtimes
+mise run test                  # full suite: corpus + contract (both runtimes) + L3 cucumber ratchet
 mise run build                 # bundle the Worker (wrangler dry-run deploy)
 mise run ci                    # the gate: test + build
+mise run submodule             # provision the pinned tinkerpop submodule (auto-run by test)
+mise run generate              # regenerate parser/ from the submodule grammar (antlr-ng)
+mise run regen-corpus          # re-extract test/conformance/corpus.txt from the submodule features
 
 bun run start                  # Bun server on :8182
 bun run dev:cf                 # Worker + DO under wrangler dev
 bun run deploy                 # wrangler deploy
 ```
 
-`mise run test` boots the Worker under `wrangler dev` for the Cloudflare half, so
-the first run may pause while workerd starts.
+`mise run test` (and plain `bun test`) auto-provisions the tinkerpop submodule
+(blobless + sparse) and boots the Worker under `wrangler dev` for the Cloudflare
+half, so the first run may pause while it clones/installs and workerd starts.
+
+**L3 conformance ratchet:** `test/conformance/l3.test.ts` runs the official
+TinkerPop cucumber suite over GraphBinary against an in-process server and
+compares the passing count to `test/conformance/baseline.json`. Fewer than
+baseline fails; more auto-bumps the baseline locally (commit it) — CI only reads
+it, never rewrites, so there is no re-trigger loop. Widen the step scope in
+`test/conformance/tags.ts` as new steps land.
 
 ## Known gaps / next (see docs/2026-07-11-phased-roadmap-plan.md for the sequenced roadmap)
 - **Deploy (W3, immediate next):** Worker router hardening — per-graph bearer

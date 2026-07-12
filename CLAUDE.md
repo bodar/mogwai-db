@@ -35,7 +35,7 @@ Durable Objects. One DO = one isolated graph database, created on first
 request via `idFromName`. Any TinkerPop 4 GLV in any language connects over
 plain HTTP. Verified against unmodified `gremlin@4.0.0-beta.2` on both runtimes
 (Bun + Cloudflare DO): the shared contract (`test/contract.ts`) passes over
-GraphBinary, 2177/2177 official corpus parse rate.
+GraphBinary, 2298/2298 official corpus parse rate.
 
 The name: mogwai are what gremlins start as. A DO that becomes a Gremlin
 server when you feed it. npm name `mogwai-db` (bare `mogwai` is squatted by
@@ -142,19 +142,37 @@ ride the auto-built expression index.
 
 ## Testing (the build discipline)
 
-- L1: `conformance/corpus-test.ts` — 2,177 canonical traversals from the
-  official Gherkin features; parse+chain must stay 100%. Its step-frequency
-  output is the implementation priority order. Notable: `inject` is #4 in
-  the corpus (test-data setup idiom) — implement early to unlock scenarios;
-  `drop()` early too because the official runner cleans graphs with it.
-- L3: TinkerPop's own cucumber runner (in the tinkerpop repo:
-  `gremlin-js/gremlin-javascript`, `npm run features-graphbinary`) pointed at
-  a live mogwai-db seeded with `conformance/seed-modern.ts` (canonical ids).
-  Server URL is hardcoded to `localhost:45940/gremlin` in test/helper.js.
-  Start with `--tags` for implemented steps; the passing count is THE
-  conformance number; ratchet only upward.
-- Every new step lands with: SQL snapshot tests, its cucumber tag enabled,
-  corpus still 100%.
+Everything runs under bare `bun test` (scoped to `test/` by `bunfig.toml` so it
+skips the submodule's own suites). The `vendor/tinkerpop` submodule (pinned at
+4.0.0-beta.2 = the published npm) supplies the grammar, Gherkin features, and JS
+cucumber runner; `mise run submodule` (a dep of `mise run test`, and self-healed
+in the L3 test's `beforeAll`) provisions it blobless+sparse, so nobody has to
+think about checkout. See `scripts/init-submodule.sh`.
+
+**Version split — DO NOT collapse (cost a full investigation, 2026-07-12):**
+- **Parser + corpus track tinkerpop `origin/master`** (ahead of beta.2). master's
+  grammar is a strict *superset* (adds Char/Duration/Binary/PDT literals,
+  `match(String)`, child-traversal args — all unreleased but landing, none
+  removed), so mogwai is forward-compatible; beta.2 clients are unaffected
+  (proven: L3=204). `mise run generate` (parser, antlr-ng) and `mise run
+  regen-corpus` both source `origin/master` via the submodule. The committed
+  parser is now **antlr-ng output** (was Java ANTLR 4.13.1) so `generate` is
+  byte-stable; frontend uses only Lexer+Parser (Visitor/Listener unused).
+- **L3 conformance tracks the pinned beta.2 checkout** (matches the `gremlin` npm
+  dep `io.ts` links + its GraphBinary wire). Pinning L3 to master *breaks* it
+  (204→0: master's cucumber harness hits a bun+cucumber dual-instance load issue)
+  for zero gain — don't. Bump the pin only when a new `gremlin` npm ships.
+- L1: `test/conformance/corpus.test.ts` — 2,298 canonical traversals; parse+chain
+  must stay 100%. Step-frequency output = implementation priority order.
+- L3: `test/conformance/l3.test.ts` — a ratcheted `bun test`. Boots the
+  conformance host in-process (port 45940, hardcoded in the GLV's `helper.js`) and
+  spawns `bunx --bun cucumber-js --format json` against the submodule runner. Parses
+  the passing-scenario count, compares `test/conformance/baseline.json`: fewer →
+  fail; more → auto-bump baseline *locally* (`!process.env.CI`; commit it) so CI
+  only reads it (no re-trigger loop). Step scope = `test/conformance/tags.ts`
+  (widen as steps land; never narrow). Full runbook: `test/conformance/README-cucumber.md`.
+- Every new step lands with: SQL snapshot tests, its cucumber tag added to
+  `tags.ts` (baseline ratchets up), corpus still 100%.
 
 ## P1–W2 done — read/write semantics (historical function names)
 
@@ -182,11 +200,11 @@ ioc primitives instead of routing through anySerializer (whose VertexSerializer
 hardcodes empty props). valueMap/elementMap build JS `Map`s; the id/label token
 keys are `t.id`/`t.label` (from `io.ts`), which ride as GraphBinary `DataType.T`.
 
-L3 harness: `conformance/conformance-server.ts` fronts the named graphs by the
+L3 harness: `test/conformance/conformance-server.ts` fronts the named graphs by the
 request `g` field (DEV ONLY — production routes tenancy by URL path per the
 locked decision). `makeHandler` now takes a `StoreSource` (a store *or* a
-`(g)=>store` resolver). See `conformance/README-cucumber.md` to run the full
-suite.
+`(g)=>store` resolver). See `test/conformance/README-cucumber.md` to run the full
+suite manually.
 
 ## Immediate next work (P2b in docs/2026-07-11-phased-roadmap-plan.md)
 
@@ -250,7 +268,7 @@ rowid stays the internal PK (joins/perf untouched). uid resolved only at the
 sets id, `property(T.label,v)` overrides label. Gaps: `properties().element().id()`
 and `group().by(__.id())` still show rowid; `addE` can't set the edge's own uid.
 
-**W2 writes — DONE (live L3 130 → 205).** `mergeV`/`mergeE`, `property()` update,
+**W2 writes — DONE (live L3 130 → 204).** `mergeV`/`mergeE`, `property()` update,
 general `addE`, all landed. Shape:
 - **Front-end**: `extractArgs` refactored to `walkArgs`/`argOf`; new cases for
   map literals (`GenericMapLiteralContext` → JS `Map`, matching how a bound Map

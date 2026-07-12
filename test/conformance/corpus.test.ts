@@ -1,6 +1,6 @@
 import { test, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseGremlin, stepChain } from '../src/frontend.ts';
+import { parseGremlin, stepChain } from '../../src/frontend.ts';
 
 const lines = readFileSync(new URL('./corpus.txt', import.meta.url), 'utf8')
   .split('\n').filter(Boolean);
@@ -35,5 +35,5 @@ test('corpus parses and chains at 100%', () => {
 
   expect(parsed).toBe(lines.length);
   expect(chained).toBe(lines.length);
-}, 30_000); // 2,177 parses + one-time ANTLR ATN warm-up; the default 5s times
+}, 30_000); // 2,298 parses + one-time ANTLR ATN warm-up; the default 5s times
             // out on cold/slow CI runners (locally ~2.3s).
