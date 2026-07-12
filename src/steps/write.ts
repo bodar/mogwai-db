@@ -1,11 +1,10 @@
 import type { GraphStore } from '../storage.ts';
-import { q, value, list, Query } from '../q.ts';
+import { q, value, list, render, Query, type Expression } from '../q.ts';
 import { propExtract, labelIn } from '../plan.ts';
 import { stepChain, type Step } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { render, readCompiled, renderFrom, type Compiled, type WritePlan } from '../render.ts';
+import { readCompiled, renderFrom, type Compiled, type WritePlan } from '../render.ts';
 import { buildPrefix } from './index.ts';
-import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
 
 // ---------- write compilers ----------
 //

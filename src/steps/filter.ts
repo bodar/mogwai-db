@@ -1,11 +1,10 @@
-import { q, list } from '../q.ts';
+import { q, list, type Expression } from '../q.ts';
 import { stepChain, type Pred } from '../frontend.ts';
 import {
   P_OPS, propExtract, labelIn, predicateSql, propAt, elemCtx,
   compileFilterPredicate, combineBranchPreds, type Elem,
 } from '../plan.ts';
 import { advance, carryFrag, elemRel, prevRel, type AliasMap, type St, type StepFn } from './context.ts';
-import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
 
 // ---------- filter (predicates over the current traverser) ----------
 

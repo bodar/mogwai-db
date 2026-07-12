@@ -1,14 +1,12 @@
 import type { GraphStore } from './storage.ts';
-import { sql as lsql, type Sql } from '@bodar/lazyrecords/sql/template/Sql.ts';
-import { statement } from '@bodar/lazyrecords/sql/statement/ordinalPlaceholder.ts';
-import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
-import { q, type Query, type Relation } from './q.ts';
+import { q, type Expression, type Query, type Relation } from './q.ts';
 
 // ---------- compile output contract ----------
 //
-// The shapes a compiled traversal can produce and the boundary that renders a
-// lazyrecords node tree to `{sql, binds}`. This is the seam between the compiler
-// (produces these) and the handler (frames them onto the wire).
+// The shapes a compiled traversal can produce, plus the two boundaries that turn a
+// Query's node tree into a read `Compiled` / a write's `{sql,binds}`. The seam
+// between the compiler (produces these) and the handler (frames them onto the wire).
+// SQL text is built through the q kernel; this module never touches lazyrecords.
 
 // select(labels…)/project(keys…): a Map per row. Each entry names its result
 // key plus the SQL column prefix carrying its value, and whether that value is
@@ -63,22 +61,6 @@ export interface Compiled {
 }
 
 export interface WritePlan { kind: 'write'; run: (store: GraphStore) => any[]; }
-
-/** Boundary: render a self-contained lazyrecords Sql tree to a read Compiled.
- *  Binds fall out of the tree (statement → {text,args}); no parallel array. Used
- *  for reads with no CTE prefix. */
-export function compiled(tree: Sql, shape: Shape, indexKeys?: string[]): Compiled {
-  const { text, args } = statement(tree);
-  return { kind: 'read', sql: text, binds: args, shape, ...(indexKeys ? { indexKeys } : {}) };
-}
-
-/** Fragment boundary: render a node Expression to `{sql,binds}`. Binds fall out of
- *  the tree — no parallel array. Used at the few spots that still need a standalone
- *  `{sql,binds}` (e.g. a merge run-closure's match query). */
-export function render(node: Expression): { sql: string; binds: any[] } {
-  const { text, args } = statement(lsql(node));
-  return { sql: text, binds: args };
-}
 
 /** Boundary: assemble the Query's CTE prefix + `tail` into one tree (Query.render)
  *  and wrap as a read Compiled. Every bound value lives as a Value token in a CTE
