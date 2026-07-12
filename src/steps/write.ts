@@ -1,6 +1,6 @@
 import type { GraphStore } from '../storage.ts';
 import { q, value, list, empty, render, Query, type Expression } from '../q.ts';
-import { propExtract, labelIn, predicateSql, rangeToOffsetLimit } from '../plan.ts';
+import { propExtract, labelIn, predicateSql, rangeToOffsetLimit, scalarTx } from '../plan.ts';
 import { stepChain, type Step } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../render.ts';
@@ -111,6 +111,10 @@ function compileInject(steps: PStep[]): Compiled {
     if (nm === 'skip') { offset = Number(s.args[0]); continue; }
     if (nm === 'range') { ({ offset, limit } = rangeToOffsetLimit(s.args)); continue; }
     if (nm === 'count' || nm === 'fold' || nm === 'sum' || nm === 'min' || nm === 'max' || nm === 'mean') { reducer = nm; continue; }
+    // Per-element scalar transform (concat/length/toUpper/…): wrap the value now so
+    // it composes left-to-right with further transforms and precedes any reducer.
+    const tx = scalarTx(nm, s.args, q`v`);
+    if (tx) { stream = q`SELECT ${tx} AS v FROM (${stream})`; continue; }
     throw new Error(`inject() with subsequent step ${nm}() not yet supported`);
   }
 

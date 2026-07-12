@@ -126,6 +126,20 @@ describe('compiler SQL snapshots', () => {
     expect(read("g.V().group().by('name').by(__.bothE().values('weight').sum())").sql).toContain('SUM(json_extract(props');
   });
 
+  test('inject().<scalar transform>() maps to SQLite scalar functions', () => {
+    expect(read('g.inject("a","b").concat("c")').sql).toContain('v ||');
+    expect(read('g.inject("a").length()').sql).toContain('length(v)');
+    expect(read('g.inject("A").toLower()').sql).toContain('lower(v)');
+    expect(read('g.inject("a").toUpper()').sql).toContain('upper(v)');
+    expect(read('g.inject(1).asString()').sql).toContain('CAST(v AS TEXT)');
+    expect(read('g.inject("hello").substring(1,8)').sql).toContain('substr(v');
+    expect(read('g.inject("that").replace("h","j")').sql).toContain('replace(v');
+    // Scope.local on a scalar stream is a no-op (per-element == per-list)
+    expect(read('g.inject("a").length(Scope.local)').sql).toContain('length(v)');
+    // transforms chain
+    expect(read('g.inject("a").concat("b").toUpper()').sql).toContain('upper(v)');
+  });
+
   test('limit before count wraps the counted id-relation', () => {
     expect(read('g.V().limit(2).count()').sql).toContain('SELECT COUNT(*) AS v FROM (SELECT id FROM c1)');
   });
