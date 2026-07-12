@@ -582,6 +582,68 @@ describe('compiler SQL snapshots', () => {
     expect(exotic.sql).not.toContain('first name');
     expect(exotic.binds).toEqual(['first name', 'x']);
   });
+
+  // ---------- path()/simplePath()/cyclicPath() (linear regime) ----------
+
+  test('path() threads a per-position column through the movement fold', () => {
+    const p = read('g.V(1).out().out().path()');
+    // V() seeds p0; each hop appends a new position holding the moved id, carrying
+    // the earlier positions unchanged.
+    expect(p.sql).toContain('SELECT id, id AS p0 FROM nodes');
+    expect(p.sql).toContain('SELECT e.tgt AS id, p.p0, e.tgt AS p1 FROM edges');
+    expect(p.sql).toContain('SELECT e.tgt AS id, p.p0, p.p1, e.tgt AS p2 FROM edges');
+    // Non-path queries stay byte-identical (no p-columns).
+    expect(read('g.V(1).out().out()').sql).not.toContain('p0');
+    expect(p.shape).toEqual({ kind: 'path', positions: [
+      { render: 'element', elem: 'vertex', prefix: 'x0' },
+      { render: 'element', elem: 'vertex', prefix: 'x1' },
+      { render: 'element', elem: 'vertex', prefix: 'x2' },
+    ] });
+  });
+
+  test('path().by(k1).by(k2) cycles modulators round-robin and drops on missing key', () => {
+    // Three positions, two by()s → name, age, name (index % byCount).
+    const p = read('g.V(1).out().out().path().by("name").by("age")');
+    expect(p.sql).toContain("json_extract(x0n.props, '$.name') AS x0_v");
+    expect(p.sql).toContain("json_extract(x1n.props, '$.age') AS x1_v");
+    expect(p.sql).toContain("json_extract(x2n.props, '$.name') AS x2_v");
+    // Non-productive-by is a filter: every projected value must be present or the
+    // whole path drops (TinkerPop default, no ProductiveByStrategy).
+    expect(p.sql).toContain("json_extract(x0n.props, '$.name') is not null AND");
+    expect(p.shape).toEqual({ kind: 'path', positions: [
+      { render: 'value', prefix: 'x0' }, { render: 'value', prefix: 'x1' }, { render: 'value', prefix: 'x2' },
+    ] });
+  });
+
+  test('simplePath()/cyclicPath() compile to a static all-pairs identity test', () => {
+    // Three same-kind positions → 3 pairs; simple keeps none-equal, cyclic keeps any-equal.
+    const simple = read('g.V(1).out().in().simplePath()');
+    expect(simple.sql).toContain('WHERE NOT (p.p0 = p.p1 OR p.p0 = p.p2 OR p.p1 = p.p2)');
+    const cyclic = read('g.V(1).out().in().cyclicPath()');
+    expect(cyclic.sql).toContain('WHERE (p.p0 = p.p1 OR p.p0 = p.p2 OR p.p1 = p.p2)');
+  });
+
+  test('path() interleaves edge and vertex positions with the right element shape', () => {
+    const p = read('g.V(1).outE("created").inV().path()');
+    expect(p.sql).toContain('x1n.src AS x1_src, x1n.tgt AS x1_tgt'); // edge position frames endpoints
+    expect(p.shape).toEqual({ kind: 'path', positions: [
+      { render: 'element', elem: 'vertex', prefix: 'x0' },
+      { render: 'element', elem: 'edge', prefix: 'x1' },
+      { render: 'element', elem: 'vertex', prefix: 'x2' },
+    ] });
+  });
+
+  test('path() over a branch/aggregating source or with an unsupported tail defers cleanly', () => {
+    expect(() => compile('g.V().repeat(__.out()).times(2).path()', {})).toThrow('path tracking through repeat() not yet supported');
+    expect(() => compile('g.V().union(__.out(),__.in()).path()', {})).toThrow('path tracking through union() not yet supported');
+    // union() as a SOURCE step never seeds p0 → its own clear deferral (not the mid-chain guard).
+    expect(() => compile('g.union(__.V(),__.V()).path()', {})).toThrow('path() over a union() source step is not yet supported');
+    expect(() => compile('g.V().optional(__.out()).path()', {})).toThrow('path tracking through optional() not yet supported');
+    expect(() => compile('g.V(1).out().dedup().path()', {})).toThrow('dedup() with path tracking not yet supported');
+    expect(() => compile('g.V(1).out().path().by(__.values("name"))', {})).toThrow('path().by(traversal) modulator not yet supported');
+    expect(() => compile('g.V(1).out().path().by(T.id)', {})).toThrow('path().by(T.id) modulator not yet supported');
+    expect(() => compile('g.V(1).out().path().order()', {})).toThrow('order() after path() not yet supported');
+  });
 });
 
 // ---------- L2: execution semantics against a seeded store ----------
@@ -1034,5 +1096,44 @@ describe('compiler execution semantics', () => {
     // 3 injected values → 3 drivers, each match-all matches 6 → 18 results, no creates
     expect(run(store, 'g.inject(1,2,3).mergeV([:])').length).toBe(18);
     expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([6]);
+  });
+
+  // ---------- path()/simplePath()/cyclicPath() (modern-graph semantics) ----------
+
+  test('path() emits the ordered walk (one Path per distinct route)', () => {
+    const store = seededStore();
+    // marko(1)→josh(4)→{lop(3),ripple(5)} — two length-3 paths, in traversal order.
+    const paths = run(store, 'g.V(1).out().out().path()').map((r) => [r.x0_id, r.x1_id, r.x2_id]);
+    expect(paths).toEqual([[1, 4, 3], [1, 4, 5]]);
+  });
+
+  test('simplePath() drops repeated-vertex walks; cyclicPath() keeps only them', () => {
+    const store = seededStore();
+    // marko→created→lop→created→{marko,josh,peter}: the marko→lop→marko walk cycles.
+    expect(run(store, 'g.V(1).out("created").in("created").simplePath().values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'peter']); // marko excluded (revisits marko)
+    expect(run(store, 'g.V(1).out("created").in("created").cyclicPath().values("name")').map((r) => r.v))
+      .toEqual(['marko']); // only the returns-to-marko walk
+  });
+
+  test('path().by(key) projects each element; a missing key drops the whole path', () => {
+    const store = seededStore();
+    // marko(age29)→{vadas27,josh32, lop(no age)}: lop path drops (non-productive by).
+    const rows = run(store, 'g.V(1).out().path().by("age")').map((r) => [r.x0_v, r.x1_v]);
+    expect(rows).toEqual([[29, 27], [29, 32]]); // three out-neighbours, only two survive
+  });
+
+  test('path() interleaves edges and vertices with materialized props (via handler)', async () => {
+    const { makeHandler } = await import('../src/handler.ts');
+    const { ioc } = await import('../src/io.ts');
+    const handler = makeHandler(seededStore());
+    const res = await handler(new Request('http://x/', { method: 'POST', body: JSON.stringify({ gremlin: 'g.V(1).outE("created").inV().path()' }) }));
+    const buf = Buffer.from(await res.arrayBuffer());
+    const { v: path } = ioc.anySerializer.deserialize(buf.subarray(2)); // skip 0x84,0x00
+    expect(path.constructor.name).toBe('Path');
+    expect(path.objects.map((o: any) => o.constructor.name)).toEqual(['Vertex', 'Edge', 'Vertex']);
+    expect(path.labels).toEqual([new Set(), new Set(), new Set()]); // labels-on-path deferred
+    // The reason for hand-framing: vertex props survive (client's serializer drops them).
+    expect(path.objects[0].properties.map((p: any) => ({ [p.label]: p.value }))).toEqual([{ name: 'marko' }, { age: 29 }]);
   });
 });

@@ -18,6 +18,22 @@ import { type PStep } from '../strategies.ts';
  *  select/where knows whether the label is a vertex or an edge). */
 export type AliasMap = ReadonlyMap<string, { col: string; elem: Elem }>;
 
+/** Path tracking (linear regime): the ordered path elements, each remembered as a
+ *  carried column (p0, p1, … — one per emitting step) + the element kind at that
+ *  position. Present only when the chain contains path()/simplePath()/cyclicPath()
+ *  (seeded at V()); movement appends a position, filters carry them unchanged. */
+export interface PathState { readonly cols: readonly { col: string; elem: Elem }[]; }
+
+/** The carried path columns, in order (p0, p1, …). */
+export const pathColsOf = (p?: PathState): string[] => p ? p.cols.map((x) => x.col) : [];
+
+/** Append a new path position holding the current id, kind `elem`. Returns the new
+ *  PathState and the freshly-minted column name (p{k}). */
+export function appendPathPos(p: PathState, elem: Elem): { path: PathState; col: string } {
+  const col = `p${p.cols.length}`;
+  return { path: { cols: [...p.cols, { col, elem }] }, col };
+}
+
 /** Immutable prefix state threaded through the step fold. Everything the dispatch
  *  reasons about is replaced wholesale by each StepFn's return; `q` is the shared
  *  append-only CTE builder. */
@@ -28,6 +44,7 @@ export interface St {
   readonly elem: Elem;
   readonly indexKeys: ReadonlySet<string>;
   readonly params: Record<string, any>;
+  readonly path?: PathState;             // present iff the chain tracks a linear path
 }
 
 /** A prefix step compiler: consume the step, return the next state. */
@@ -43,11 +60,15 @@ export const prevRel = (st: St, alias?: string): Relation => alias ? st.last.as(
 /** The current element's table aliased `n` (nodes/edges by elem). */
 export const elemRel = (st: St, alias = 'n'): Relation => (st.elem === 'edge' ? edges : nodes).as(alias);
 
-/** `, p.a0, p.a1` — the carried alias columns qualified by `p`; empty when no
- *  as() label is live. Movement/filter CTEs splice this after the moved id so the
- *  labelled traversers ride forward. */
+/** Every column carried UNCHANGED across a hop: the as() alias columns plus the
+ *  path-position columns (when path tracking is active). */
+export const carriedCols = (st: St): string[] => [...aliasColsOf(st.aliases), ...pathColsOf(st.path)];
+
+/** `, p.a0, p.p0, …` — the carried columns qualified by `p`; empty when nothing is
+ *  live. Movement/filter CTEs splice this after the moved id so labelled traversers
+ *  and path positions ride forward. */
 export function carryFrag(st: St, p: Relation): Expression {
-  const cols = aliasColsOf(st.aliases);
+  const cols = carriedCols(st);
   return cols.length ? list(cols.map((c) => q`, ${p.c[c]}`), '') : empty;
 }
 
@@ -60,13 +81,15 @@ export function carryFrag(st: St, p: Relation): Expression {
  */
 export function advance(
   st: St, body: Expression,
-  opts: { aliases?: AliasMap; elem?: Elem; cols?: readonly string[]; indexKeys?: Iterable<string> } = {},
+  opts: { aliases?: AliasMap; elem?: Elem; cols?: readonly string[]; indexKeys?: Iterable<string>; path?: PathState } = {},
 ): St {
   const aliases = opts.aliases ?? st.aliases;
-  const cols = opts.cols ?? ['id', ...aliasColsOf(aliases)];
+  const path = opts.path ?? st.path;
+  const cols = opts.cols ?? ['id', ...aliasColsOf(aliases), ...pathColsOf(path)];
   return {
     ...st,
     aliases,
+    path,
     elem: opts.elem ?? st.elem,
     last: st.q.cte(body, cols),
     indexKeys: opts.indexKeys ? new Set([...st.indexKeys, ...opts.indexKeys]) : st.indexKeys,

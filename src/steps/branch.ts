@@ -23,6 +23,7 @@ function branchMovementSelect(bs: Step[], seed: Relation): Expression {
 export const union: StepFn = (s, st) => {
   if (st.elem !== 'node') throw new Error('union() on edges not yet supported');
   if (st.aliases.size > 0) throw new Error('union() after as() not yet supported');
+  if (st.path) throw new Error('path tracking through union() not yet supported');
   const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 2) throw new Error('union() needs at least two branches');
   const parts = branches.map((b) => branchMovementSelect(stepChain(b.nested, st.params), prevRel(st, 'p')));
@@ -35,6 +36,7 @@ export const union: StepFn = (s, st) => {
 export const optional: StepFn = (s, st) => {
   if (st.elem !== 'node') throw new Error('optional() on edges not yet supported');
   if (st.aliases.size > 0) throw new Error('optional() after as() not yet supported');
+  if (st.path) throw new Error('path tracking through optional() not yet supported');
   const bs = stepChain(s.args[0]?.nested, st.params);
   if (bs.length !== 1 || (bs[0].name !== 'out' && bs[0].name !== 'in'))
     throw new Error(`optional(__.${bs[0]?.name}()) not yet supported (single out()/in() only)`);
@@ -52,6 +54,10 @@ export const optional: StepFn = (s, st) => {
 export const repeat: StepFn = (s, st) => {
   if (st.elem !== 'node') throw new Error('repeat() on edges not yet supported');
   if (st.aliases.size > 0) throw new Error('repeat() after as() not yet supported');
+  // The recursive-repeat regime (a JSON path column in the WITH RECURSIVE walk) is
+  // the other half of path tracking, deferred: linear path() carries per-position
+  // columns the fixed-width walk can't append to. See docs/2026-07-12-path-tracking-prior-art.md.
+  if (st.path) throw new Error('path tracking through repeat() not yet supported');
   const cluster = s.cluster ?? [s];
   const rep = cluster.find((c) => c.name === 'repeat');
   if (!rep) throw new Error(`${s.name}() without repeat() not yet supported`);

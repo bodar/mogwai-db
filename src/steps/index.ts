@@ -5,7 +5,7 @@ import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { type St, type StepFn } from './context.ts';
 import { move, toEdge, toVertex } from './movement.ts';
-import { as, hasLabel, has, hasId, where, andOr, dedup } from './filter.ts';
+import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from './filter.ts';
 import { union, optional, repeat } from './branch.ts';
 import { limit, range, skip } from './passthrough.ts';
 import { compileTail } from './projection.ts';
@@ -25,6 +25,7 @@ const PREFIX = new Map<string, StepFn>([
   ['as', as], ['hasLabel', hasLabel], ['has', has], ['hasId', hasId],
   ['where', where], ['filter', where], ['not', where],
   ['and', andOr], ['or', andOr], ['dedup', dedup],
+  ['simplePath', simplePath], ['cyclicPath', cyclicPath],
   ['union', union], ['optional', optional],
   // The whole folded repeat/emit/times/until cluster dispatches here (strategies
   // anchors it on repeat() when present, else the first cluster step).
@@ -32,10 +33,18 @@ const PREFIX = new Map<string, StepFn>([
   ['limit', limit], ['range', range], ['skip', skip],
 ]);
 
-/** Seed the source CTE (c0) from V(...)/E(...) and its optional id list. */
-function seedSource(first: PStep, query: Query, params: Record<string, any>): St {
+/** Steps that need the linear path threaded through the fold: the source vertex
+ *  becomes path position p0 and every hop appends a position. */
+const PATH_STEPS = new Set(['path', 'simplePath', 'cyclicPath']);
+const chainTracksPath = (steps: PStep[]): boolean => steps.some((s) => PATH_STEPS.has(s.name));
+
+/** Seed the source CTE (c0) from V(...)/E(...) and its optional id list. When the
+ *  chain tracks a path, the source element is path position p0 (projected as the
+ *  extra `p0` column). */
+function seedSource(first: PStep, query: Query, params: Record<string, any>, trackPath: boolean): St {
   const elem: Elem = first.name === 'E' ? 'edge' : 'node';
   const srcRel = elem === 'edge' ? edges : nodes;
+  const sel = trackPath ? 'id, id AS p0' : 'id';
   let body: Expression;
   if (first.args.length > 0) {
     // Numeric args match the rowid, string args the user id (uid); the id-relation
@@ -46,11 +55,13 @@ function seedSource(first: PStep, query: Query, params: Record<string, any>): St
     if (nums.length) clauses.push(q`id IN (${list(nums.map(value), ',')})`);
     if (strs.length) clauses.push(q`uid IN (${list(strs.map(value), ',')})`);
     if (!clauses.length) throw new Error('V()/E() ids must be numbers or strings');
-    body = q`SELECT id FROM ${srcRel} WHERE ${list(clauses, ' OR ')}`;
+    body = q`SELECT ${sel} FROM ${srcRel} WHERE ${list(clauses, ' OR ')}`;
   } else {
-    body = q`SELECT id FROM ${srcRel}`;
+    body = q`SELECT ${sel} FROM ${srcRel}`;
   }
-  return { q: query, last: query.cte(body, ['id']), aliases: new Map(), elem, indexKeys: new Set(), params };
+  const cols = trackPath ? ['id', 'p0'] : ['id'];
+  const path = trackPath ? { cols: [{ col: 'p0', elem }] } : undefined;
+  return { q: query, last: query.cte(body, cols), aliases: new Map(), elem, indexKeys: new Set(), params, path };
 }
 
 /** union(b1, b2, …) as a SOURCE step: compile each branch's prefix into the SAME
@@ -85,8 +96,9 @@ function seedUnion(first: PStep, query: Query, params: Record<string, any>): St 
  */
 export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, query: Query = new Query()): { st: St; stop: number } {
   const first = steps[0];
+  const trackPath = chainTracksPath(steps);
   const st0 = first.name === 'union' ? seedUnion(first, query, params)
-    : (first.name === 'V' || first.name === 'E') ? seedSource(first, query, params)
+    : (first.name === 'V' || first.name === 'E') ? seedSource(first, query, params, trackPath)
     : (() => { throw new Error(`unsupported source step: ${first.name}`); })();
   let st = st0;
   let i = 1;
