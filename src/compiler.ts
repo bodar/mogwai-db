@@ -655,38 +655,45 @@ function compileSelectProject(
   const tailSql = (limit !== null || offset > 0) ? ` LIMIT ${limit ?? -1} OFFSET ${offset}` : '';
   const dist = distinct ? 'DISTINCT ' : '';
 
+  const p = relation(last, ['id']).as('p');
+
   // Single-key select → the labelled element directly (not wrapped in a Map),
   // reusing the existing vertex/value shapes so the handler needs no new case.
   if (!isProject && keys.length === 1) {
     const src = sourceOf(keys[0]);
     const e = entryKind(0);
-    if (e.sub === 'vertex')
-      return readCompiled(ctes, sqlText(`SELECT ${dist}COALESCE(n.uid, n.id) AS id, l.name AS label, n.props FROM nodes n JOIN ${last} p ON n.id=${src} JOIN labels l ON l.id=n.label${tailSql}`), { kind: 'vertex' }, [...indexKeys]);
+    const n = nodes.as('n');
+    if (e.sub === 'vertex') {
+      const l = labels.as('l');
+      return readCompiled(ctes, q`SELECT ${dist}COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${n.c.props} FROM ${n} JOIN ${p} ON ${n.c.id}=${src} JOIN ${l} ON ${l.c.id}=${n.c.label}${tailSql}`, { kind: 'vertex' }, [...indexKeys]);
+    }
     // A by(key) here is a projection, not a filter/order — deliberately NOT
     // reported as an indexKey (matches values(); bounds index proliferation).
     const pe = propExtract('n.props', e.key);
-    return readCompiled(ctes, lsql(sqlText(`SELECT ${dist}`), pe.expr, sqlText(` AS v FROM nodes n JOIN ${last} p ON n.id=${src}${tailSql}`)), { kind: 'value' }, [...indexKeys]);
+    return readCompiled(ctes, q`SELECT ${dist}${pe.expr} AS v FROM ${n} JOIN ${p} ON ${n.c.id}=${src}${tailSql}`, { kind: 'value' }, [...indexKeys]);
   }
 
   // Multi-key select / any project → a Map per row. Each entry joins nodes for
   // its source element under a distinct alias and emits prefixed columns.
   const cols: Expression[] = [];
-  const joins: string[] = [`${last} p`];
+  const joins: Expression[] = [];
   const entries: MapEntry[] = keys.map((k, i) => {
     const prefix = `e${i}`;
     const e = entryKind(i);
     const src = sourceOf(k);
-    joins.push(`JOIN nodes ${prefix}n ON ${prefix}n.id=${src}`);
+    const en = nodes.as(`${prefix}n`);
+    joins.push(q` JOIN ${en} ON ${en.c.id}=${src}`);
     if (e.sub === 'vertex') {
-      joins.push(`JOIN labels ${prefix}l ON ${prefix}l.id=${prefix}n.label`);
-      cols.push(sqlText(`COALESCE(${prefix}n.uid, ${prefix}n.id) AS ${prefix}_id, ${prefix}l.name AS ${prefix}_label, ${prefix}n.props AS ${prefix}_props`));
+      const el = labels.as(`${prefix}l`);
+      joins.push(q` JOIN ${el} ON ${el.c.id}=${en.c.label}`);
+      cols.push(q`COALESCE(${en.c.uid}, ${en.c.id}) AS ${prefix}_id, ${el.c.name} AS ${prefix}_label, ${en.c.props} AS ${prefix}_props`);
     } else {
-      cols.push(lsql(propExtract(`${prefix}n.props`, e.key).expr, sqlText(` AS ${prefix}_v`))); // projection, not indexed
+      cols.push(q`${propExtract(`${prefix}n.props`, e.key).expr} AS ${prefix}_v`); // projection, not indexed
     }
     return { key: k, prefix, sub: e.sub };
   });
 
-  const node = lsql(sqlText(`SELECT ${dist}`), list(cols, sqlText(', ')), sqlText(` FROM ${joins.join(' ')}${tailSql}`));
+  const node = q`SELECT ${dist}${list(cols, sqlText(', '))} FROM ${p}${list(joins, sqlText(''))}${tailSql}`;
   return readCompiled(ctes, node, { kind: 'map', entries }, [...indexKeys]);
 }
 
