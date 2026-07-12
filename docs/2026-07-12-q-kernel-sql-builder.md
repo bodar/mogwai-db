@@ -98,8 +98,17 @@ ecosystem has it), so upstreaming it later is a real give-back, not a fork.
   (`prevRel`/`carryFrag`/`aliasCols` helpers). Byte-identical, zero churn. Trunk `5a18894`.
 - [x] `compileRead` projection tail (values/id/label/valueMap/elementMap/vertex/edge +
   is/order/limit/count/fold/sum) → `q\`\``+relations. Trunk `c65900c`.
-- [ ] **In progress:** `compileSelectProject`, `compileGroup`/`buildGroupKey`/`elementSelect`,
-  `compileProperties`, and the write compilers (drop/setProperty/addE/merge/inject).
-- [ ] **Later:** adopt `Query` to retire `CteDef`/`withPrefixTree` + the `cte`/`withClause`/
-  `valuesClause` ansi nodes; consider the plan.ts ScalarCtx cluster (uses primitives —
-  low priority); then evaluate upstreaming the surface to lazyrecords.
+- [x] `compileSelectProject`, `compileGroup`/`buildGroupKey`/`elementSelect`,
+  `compileProperties`, and the write compilers (drop/setProperty/addE/merge*/inject) →
+  `q\`\``+relations. Added `renderCteSelect(ctes, cols)` (collapsed 5 copies of the
+  CTE-render pattern). `compileInject` rewritten off `withClause`/`cte`/`valuesClause`,
+  which are now **retired** — no ansi builder imports remain in compiler.ts/plan.ts.
+  Byte-identical, zero churn. Trunk `98dfc46`.
+- [ ] **Later:** adopt `Query` to retire `CteDef`/`withPrefixTree` (the last CTE-assembly
+  machinery in `render.ts`); the plan.ts ScalarCtx cluster (uses kernel primitives — low
+  priority); then evaluate upstreaming the surface (identifier-default template, `Relation`,
+  typed-self recursive CTE) to lazyrecords.
+- **Orthogonal, still pending (pre-kernel cutover):** Seam 2 — the step-family dispatch
+  table (`Map<name, StepCompiler>`, = S5.2 in `docs/2026-07-11-lazyrecords-cutover-plan.md`);
+  Seam 3 — normalization passes → `strategies.ts`. The kernel changed HOW bodies build SQL,
+  not the `switch` structure, so these remain the outstanding decomposition work.
