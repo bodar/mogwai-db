@@ -1,14 +1,6 @@
 import { stepChain, type Step, type Pred } from './frontend.ts';
 import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
-import { sql } from '@bodar/lazyrecords/sql/template/Sql.ts';
-import { text as sqlText } from '@bodar/lazyrecords/sql/template/Text.ts';
-import { expression, parens, list } from '@bodar/lazyrecords/sql/template/Compound.ts';
-import { value } from '@bodar/lazyrecords/sql/template/Value.ts';
-import { jsonExtract } from '@bodar/lazyrecords/sql/sqlite/jsonExtract.ts';
-import { q } from './q.ts';
-
-/** `?, ?, …` — a comma-list of bound values. */
-const valueList = (vs: any[]): Expression => list(vs.map(value), sqlText(', '));
+import { q, list, values, paren, empty, value, raw, jsonExtract } from './q.ts';
 
 // ---------- SQL node builders ----------
 //
@@ -27,20 +19,20 @@ export const P_OPS: Record<string, string> = { eq: '=', neq: '!=', gt: '>', gte:
  *  (`n.props`) wrapped as raw text() so it renders unquoted — index-eligible. */
 export function propExtract(col: string, key: unknown): { expr: Expression; indexKey: string | null } {
   if (typeof key !== 'string') throw new Error('property key must be a string');
-  const node = jsonExtract(sqlText(col), key);
+  const node = jsonExtract(raw(col), key);
   return { expr: node, indexKey: node.indexKey };
 }
 
 /** `<col> IN (SELECT id FROM labels WHERE name IN (?,?))` — the canonical
  *  label-name→id filter as a node. Names ride as bound Value tokens (no splice). */
 export function labelIn(col: string, names: any[]): Expression {
-  return expression(sqlText(`${col} IN (SELECT id FROM labels WHERE name IN`), parens(names.map(value)), sqlText(')'));
+  return q`${col} IN (SELECT id FROM labels WHERE name IN (${values(names)}))`;
 }
 
 /** Optional ` AND e.label IN (…)` appended to a movement JOIN's ON, as a node
  *  (empty text when no labels). Replaces ~7 hand-rolled `?`-splice + bind-push copies. */
 export function edgeLabelFilter(names: any[]): Expression {
-  return names.length ? expression(sqlText(' AND'), labelIn('e.label', names)) : sqlText('');
+  return names.length ? q` AND ${labelIn('e.label', names)}` : empty;
 }
 
 /**
@@ -48,23 +40,23 @@ export function edgeLabelFilter(names: any[]): Expression {
  * has()/is()/where(). `expr` is a node (json_extract, a column, a subquery); its
  * binds ride as Value tokens. `pred` is a `Pred` {op,values}, a bare literal
  * (→ equality), or `undefined` (existence → IS NOT NULL). The predicate tail
- * (comparison/in/like/isNotNull) is placed after `expr` via expression(); for
+ * (=/in/like/is not null) is appended after `expr` in the q`` template; for
  * between/inside `expr` is shared into both bounds so its binds fall out twice in
  * order — no manual double-splice. TextP → LIKE with a bound pattern; regex/typeOf throw.
  */
 export function predicateSql(expr: Expression, pred: any): Expression {
   if (pred === undefined) return q`${expr} is not null`;
   if (pred === null || typeof pred !== 'object' || !('op' in pred)) return q`${expr} = ${value(pred)}`;
-  const { op, values } = pred as Pred;
-  if (op in P_OPS) return q`${expr} ${sqlText(P_OPS[op])} ${value(values[0])}`;
-  if (op === 'within') return q`${expr} in (${valueList(values)})`;
-  if (op === 'without') return q`${expr} not in (${valueList(values)})`;
+  const { op, values: vals } = pred as Pred;
+  if (op in P_OPS) return q`${expr} ${P_OPS[op]} ${value(vals[0])}`;
+  if (op === 'within') return q`${expr} in (${values(vals)})`;
+  if (op === 'without') return q`${expr} not in (${values(vals)})`;
   // between = [lo, hi) inclusive low; inside = (lo, hi) exclusive low. `expr` is
   // shared into both bounds → its binds fall out twice in order (no double-splice).
   if (op === 'between' || op === 'inside')
-    return q`(${expr} ${sqlText(op === 'inside' ? '>' : '>=')} ${value(values[0])} and ${expr} < ${value(values[1])})`;
-  const lp = likePattern(op, values[0]);
-  if (lp) return q`${expr} ${sqlText(lp.neg ? 'not like' : 'like')} ${value(lp.pat)} escape ${value('\\')}`;
+    return q`(${expr} ${op === 'inside' ? '>' : '>='} ${value(vals[0])} and ${expr} < ${value(vals[1])})`;
+  const lp = likePattern(op, vals[0]);
+  if (lp) return q`${expr} ${lp.neg ? 'not like' : 'like'} ${value(lp.pat)} escape ${value('\\')}`;
   throw new Error(`unsupported predicate: P.${op}`);
 }
 
@@ -129,7 +121,7 @@ export function propAt(nodeId: string, directProps: string | null, key: unknown)
   // Correlated subquery: keep the json_extract node as a child so any exotic-key
   // bind stays a Value token (nodeId is a bind-free fragment → raw text()).
   const pe = propExtract('props', key);
-  return { expr: expression(sqlText('(SELECT'), pe.expr, sqlText(`FROM nodes WHERE id=${nodeId})`)), indexKey: null };
+  return { expr: q`(SELECT ${pe.expr} FROM nodes WHERE id=${nodeId})`, indexKey: null };
 }
 
 /**
@@ -152,14 +144,14 @@ export function compileNestedScalar(inner: Step[], ctx: ScalarCtx): Scalar {
   if (!head) throw new Error('empty nested traversal');
 
   if (ctx.elem === 'property') {
-    if (head === 'key') { requireTerminal(steps, 1); return { expr: sqlText(ctx.pkExpr!), indexKey: null }; }
-    if (head === 'value') { requireTerminal(steps, 1); return { expr: sqlText(ctx.pvExpr!), indexKey: null }; }
+    if (head === 'key') { requireTerminal(steps, 1); return { expr: raw(ctx.pkExpr!), indexKey: null }; }
+    if (head === 'value') { requireTerminal(steps, 1); return { expr: raw(ctx.pvExpr!), indexKey: null }; }
     if (head === 'element') { nodeId = ctx.ownerExpr!; directProps = ctx.ownerPropsExpr!; directLabelId = null; steps = steps.slice(1); }
     else throw new Error(`by(__.${head}()) over a property not yet supported`);
   } else if (ctx.elem === 'edge') {
     if (head === 'outV' || head === 'inV') { nodeId = head === 'outV' ? ctx.srcExpr! : ctx.tgtExpr!; directProps = null; directLabelId = null; steps = steps.slice(1); }
-    else if (head === 'label') { requireTerminal(steps, 1); return { expr: sqlText(labelNameSub(ctx.labelIdExpr)), indexKey: null }; }
-    else if (head === 'id') { requireTerminal(steps, 1); return { expr: sqlText(ctx.idExpr), indexKey: null }; }
+    else if (head === 'label') { requireTerminal(steps, 1); return { expr: raw(labelNameSub(ctx.labelIdExpr)), indexKey: null }; }
+    else if (head === 'id') { requireTerminal(steps, 1); return { expr: raw(ctx.idExpr), indexKey: null }; }
     else if (head === 'values') { requireTerminal(steps, 1); return propAt(ctx.idExpr, ctx.propsExpr, steps[0].args[0]); }
     // out()/in()/both() are NOT valid on an edge (must go through outV()/inV());
     // routing them to edgeCountFrom here would compare edges.src to the edge's own
@@ -175,8 +167,8 @@ export function compileNestedScalar(inner: Step[], ctx: ScalarCtx): Scalar {
   if (!s) throw new Error('nested traversal resolves to no projection');
   switch (s.name) {
     case 'values': requireTerminal(steps, 1); return propAt(nodeId, directProps, s.args[0]);
-    case 'label':  requireTerminal(steps, 1); return { expr: sqlText(labelNameSub(directLabelId ?? `(SELECT label FROM nodes WHERE id=${nodeId})`)), indexKey: null };
-    case 'id':     requireTerminal(steps, 1); return { expr: sqlText(nodeId), indexKey: null };
+    case 'label':  requireTerminal(steps, 1); return { expr: raw(labelNameSub(directLabelId ?? `(SELECT label FROM nodes WHERE id=${nodeId})`)), indexKey: null };
+    case 'id':     requireTerminal(steps, 1); return { expr: raw(nodeId), indexKey: null };
     default: throw new Error(`by(__.${s.name}()) not yet supported`);
   }
 }
@@ -192,12 +184,10 @@ function edgeCountFrom(steps: Step[], nodeIdExpr: string): Scalar {
   if (steps[1]?.name !== 'count' || steps.length > 2)
     throw new Error(`by(__.${mv.name}(…)) only supports a terminal count() for now`);
   const dirs = dirsFor(mv.name.endsWith('E') ? mv.name.slice(0, -1) : mv.name);
-  const lblFilter = (): Expression => mv.args.length
-    ? expression(sqlText('AND label IN (SELECT id FROM labels WHERE name IN'), parens(mv.args.map(value)), sqlText(')'))
-    : sqlText('');
+  const lblFilter = (): Expression => mv.args.length ? q` AND ${labelIn('label', mv.args)}` : empty;
   const terms = dirs.map(([from]) =>
-    expression(sqlText(`(SELECT COUNT(*) FROM edges WHERE ${from}=${nodeIdExpr}`), lblFilter(), sqlText(')')));
-  return { expr: terms.length === 1 ? terms[0] : expression(sqlText('('), list(terms, sqlText(' + ')), sqlText(')')), indexKey: null };
+    q`(SELECT COUNT(*) FROM edges WHERE ${from}=${nodeIdExpr}${lblFilter()})`);
+  return { expr: terms.length === 1 ? terms[0] : paren(list(terms, ' + ')), indexKey: null };
 }
 
 const requireTerminal = (steps: Step[], n: number) => {
@@ -235,7 +225,7 @@ export function compileFilterPredicate(nested: Step[], ctx: ScalarCtx, params: R
   // A reducing scalar (count/sum) compared by is(P). Bare (no is) always yields
   // one value → the traverser always passes, so it's a no-op filter.
   if (term === 'count' || term === 'sum') {
-    if (!hasIs) return { expr: sqlText('1'), indexKeys };
+    if (!hasIs) return { expr: q`1`, indexKeys };
     return { expr: predicateSql(compileNestedScalar(body, ctx).expr, isPred), indexKeys };
   }
 
@@ -271,9 +261,9 @@ export function combineBranchPreds(step: Step, ctx: ScalarCtx, params: Record<st
   const parts = branches.map((b) => {
     const p = compileFilterPredicate(stepChain(b.nested, params), ctx, params);
     indexKeys.push(...p.indexKeys);
-    return parens([p.expr]);
+    return paren(p.expr);
   });
-  return { expr: parens(parts, sqlText(` ${op} `)), indexKeys };
+  return { expr: paren(list(parts, ` ${op} `)), indexKeys };
 }
 
 /** EXISTS over a single incident-edge movement (out/in/both/outE/inE/bothE),
@@ -282,6 +272,6 @@ function compileExists(mv: Step, ctx: ScalarCtx): Expression {
   if (ctx.elem !== 'node') throw new Error(`where(__.${mv.name}()) expects a vertex, not an ${ctx.elem}`);
   const dirs = dirsFor(mv.name.endsWith('E') ? mv.name.slice(0, -1) : mv.name);
   const terms = dirs.map(([from]) =>
-    sql(sqlText(`EXISTS(SELECT 1 FROM edges e WHERE e.${from}=${ctx.idExpr}`), edgeLabelFilter(mv.args), sqlText(')')));
-  return terms.length === 1 ? terms[0] : parens(terms, sqlText(' OR '));
+    q`EXISTS(SELECT 1 FROM edges e WHERE e.${from}=${ctx.idExpr}${edgeLabelFilter(mv.args)})`);
+  return terms.length === 1 ? terms[0] : paren(list(terms, ' OR '));
 }

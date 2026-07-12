@@ -23,6 +23,11 @@ import { statement } from '@bodar/lazyrecords/sql/statement/ordinalPlaceholder.t
 import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
 
 export { value, empty };
+/** A bind-free SQL fragment as a node (unquoted, verbatim). ONLY for text the
+ *  compiler controls (column refs, operators) — never user data; wrap values in
+ *  `value(x)`. Prefer bare-string interpolation in `q\`\``; use `raw` when an API
+ *  needs a Text node directly (e.g. jsonExtract's column). */
+export { raw };
 export { jsonExtract } from '@bodar/lazyrecords/sql/sqlite/jsonExtract.ts';
 
 /** Join `parts` with a raw separator string (identifier-safe SQL, not a bound
@@ -31,6 +36,13 @@ export { jsonExtract } from '@bodar/lazyrecords/sql/sqlite/jsonExtract.ts';
  *  so step modules build every compound through the kernel, not raw lazyrecords. */
 export const list = (parts: readonly Expression[], sep?: string): Expression =>
   sep === undefined ? lrList(parts) : lrList(parts, raw(sep));
+
+/** A bound comma-list `?, ?, …` from raw JS values (each wrapped as a Value token)
+ *  — the plural of `value`, for IN-lists / VALUES rows: `id IN (${values(ids)})`. */
+export const values = (xs: readonly any[]): Expression => list(xs.map(value), ', ');
+
+/** Parenthesise an expression: `(<e>)`. */
+export const paren = (e: Expression): Expression => q`(${e})`;
 
 /** Identifier-shaped name → spliced raw; else double-quoted (render-time safe
  *  quoting, à la SQLAlchemy/jOOQ — quote only when unsafe). */

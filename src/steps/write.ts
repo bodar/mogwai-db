@@ -1,6 +1,6 @@
 import type { GraphStore } from '../storage.ts';
 import { q, value, list, Query } from '../q.ts';
-import { propExtract } from '../plan.ts';
+import { propExtract, labelIn } from '../plan.ts';
 import { stepChain, type Step } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { render, readCompiled, renderFrom, type Compiled, type WritePlan } from '../render.ts';
@@ -295,7 +295,7 @@ function normalizeMergeMap(raw: any): MergeSpec {
 // edge merge-match queries.
 function commonMergeConds(spec: MergeSpec): Expression[] {
   const conds: Expression[] = [];
-  if (spec.label != null) conds.push(q`label IN (SELECT id FROM labels WHERE name=${value(spec.label)})`);
+  if (spec.label != null) conds.push(labelIn('label', [spec.label]));
   if (spec.id != null) conds.push(typeof spec.id === 'number' ? q`id=${value(spec.id)}` : q`uid=${value(spec.id)}`);
   for (const [k, v] of Object.entries(spec.props))
     conds.push(q`${propExtract('props', k).expr} = ${value(v)}`);
