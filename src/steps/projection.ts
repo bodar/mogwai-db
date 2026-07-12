@@ -1,7 +1,7 @@
 import { q, value, list, empty, Relation, type Expression } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
 import {
-  propExtract, predicateSql, compileNestedScalar, labelNameSub, rangeToOffsetLimit, elemCtx,
+  propExtract, predicateSql, compileNestedScalar, labelNameSub, rangeToOffsetLimit, elemCtx, scalarTx,
   type ScalarCtx,
 } from '../plan.ts';
 import { stepChain, type Step } from '../frontend.ts';
@@ -35,9 +35,11 @@ interface TailAcc {
   distinct: boolean;
   reducer: 'fold' | 'sum' | 'min' | 'max' | 'mean' | null; // terminal stream reducer applied after the projection
   isPreds: any[];                  // is(P) filters on the projected scalar (AND'd)
+  transforms: PStep[];             // scalar string/cast transforms wrapping the projected scalar, in order
 }
 
 const PROJECTION_NAMES = new Set(['values', 'id', 'label', 'count', 'valueMap', 'elementMap', 'select', 'project']);
+const SCALAR_TX_NAMES = new Set(['concat', 'length', 'toUpper', 'toLower', 'asString', 'substring', 'replace']);
 const isMapProj = (p: PStep | null) => p?.name === 'select' || p?.name === 'project';
 
 /** A tail modifier: fold the step into the accumulator. `at` gives position so a
@@ -109,7 +111,7 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
   }
 
   // Tail fold: accumulate the projection + modifiers.
-  const acc: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, reducer: null, isPreds: [] };
+  const acc: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, reducer: null, isPreds: [], transforms: [] };
   for (let i = stop; i < steps.length; i++) {
     const s = steps[i];
     if (PROJECTION_NAMES.has(s.name)) {
@@ -117,6 +119,8 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
       acc.projStep = s;
       continue;
     }
+    // A scalar string/cast transform (concat/length/…) wraps the projected scalar.
+    if (SCALAR_TX_NAMES.has(s.name)) { acc.transforms.push(s); continue; }
     const mod = MODIFIERS.get(s.name);
     if (!mod) throw new Error(`step not implemented: ${s.name}()`);
     mod(s, acc, { last: i === steps.length - 1, next: steps[i + 1]?.name });
@@ -204,6 +208,17 @@ function buildProjection(st: St, acc: TailAcc, indexKeys: Set<string>): Compiled
   const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
   const proj = PROJECTORS.get(projName)!({ st, n, l, extId, vJoin, vlJoin, projStep: acc.projStep, indexKeys, hasIs: isPreds.length > 0 });
   let { shape } = proj;
+
+  // Scalar string/cast transforms (values('name').concat('X').toUpper()) wrap the
+  // projected scalar; is()/order() then see the transformed value. Only a scalar
+  // stream (values/id/label) has a scalarExpr to transform.
+  if (acc.transforms.length) {
+    if (!proj.scalarExpr) throw new Error(`${acc.transforms[0].name}() requires a scalar stream (values/id/label)`);
+    const txExpr = acc.transforms.reduce<Expression>(
+      (e, s) => scalarTx(s.name, s.args, e) ?? (() => { throw new Error(`scalar transform ${s.name}() not supported`); })(), proj.scalarExpr);
+    proj.colsNode = q`${txExpr} AS v`;
+    proj.scalarExpr = txExpr;
+  }
 
   // WHERE: the values() existence check + any is(P) on the projected scalar, AND'd.
   const whereParts: Expression[] = [];

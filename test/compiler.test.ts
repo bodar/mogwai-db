@@ -140,6 +140,16 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.inject("a").concat("b").toUpper()').sql).toContain('upper(v)');
   });
 
+  test('scalar transforms also wrap an element value projection', () => {
+    expect(read("g.V().values('name').substring(2)").sql).toContain("substr(json_extract(n.props, '$.name')");
+    expect(read("g.V().values('name').toUpper()").sql).toContain("upper(json_extract(n.props, '$.name'))");
+    expect(read("g.V().values('name').concat('X')").sql).toContain("json_extract(n.props, '$.name') || ?");
+    // chained; is()/order() see the transformed value
+    expect(read("g.V().values('name').toUpper().is('MARKO')").sql).toContain('upper(');
+    // transform on a non-scalar projection is rejected
+    expect(() => compile("g.V().valueMap().toUpper()", {})).toThrow('requires a scalar stream');
+  });
+
   test('limit before count wraps the counted id-relation', () => {
     expect(read('g.V().limit(2).count()').sql).toContain('SELECT COUNT(*) AS v FROM (SELECT id FROM c1)');
   });
