@@ -245,15 +245,21 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().has("age",30).as("a").select("a").by("name")').indexKeys).toEqual(['age']);
   });
 
-  test('withStrategies/withoutStrategies fail closed (never silently drop a filtering strategy)', () => {
+  test('withStrategies fails closed; withoutStrategies is an accepted no-op', () => {
     // A dropped PartitionStrategy/SubgraphStrategy would return unfiltered data with
-    // no error — an isolation leak. Must reject, not silently ignore.
+    // no error — an isolation leak. Applying one must reject, not silently ignore.
     expect(() => compile("g.withStrategies(new PartitionStrategy(partitionKey:'_p',writePartition:'a',readPartitions:['a'])).V().values('name')", {}))
       .toThrow('withStrategies(...) is not supported');
     expect(() => compile("g.withStrategies(new SubgraphStrategy(vertices:__.has('name','marko'))).V()", {}))
       .toThrow('withStrategies(...) is not supported');
-    expect(() => compile('g.withoutStrategies(PartitionStrategy).V()', {}))
-      .toThrow('withoutStrategies(...) is not supported');
+    // withoutStrategies removes strategies we never apply → a genuine no-op, so it
+    // compiles like the bare traversal.
+    expect(read('g.withoutStrategies(PartitionStrategy).V().values("name")').sql)
+      .toBe(read('g.V().values("name")').sql);
+    expect(read('g.withoutStrategies(LazyBarrierStrategy).V().count()').shape).toEqual({ kind: 'count' });
+    // still rejected when combined with an applied strategy
+    expect(() => compile("g.withStrategies(new SubgraphStrategy(vertices:__.has('name','marko'))).withoutStrategies(LazyBarrierStrategy).V()", {}))
+      .toThrow('withStrategies(...) is not supported');
   });
 
   test('deferred long-tail forms error clearly (never silently mis-execute)', () => {

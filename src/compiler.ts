@@ -17,18 +17,25 @@ export type { Compiled, WritePlan, Shape, MapEntry, ElemShape, GroupKey, GroupVa
 // This file is just the wiring + the strategy fail-closed guard.
 
 /**
- * Fail closed on traversal-strategy application. `withStrategies`/`withoutStrategies`
- * parse and chain fine (so they count toward the L1 "we understand the language"
- * corpus metric), but the compiler does not yet APPLY them. A PartitionStrategy or
- * SubgraphStrategy — which a client relies on to FILTER reads/writes for logical
- * isolation — would otherwise be silently dropped and return unfiltered data with
- * no error. Reject at execution until the compiler honours them, rather than leak.
+ * Fail closed on traversal-strategy APPLICATION, but accept strategy REMOVAL.
+ *
+ * `withStrategies(...)` asks the engine to apply a strategy the compiler does not
+ * honour. A PartitionStrategy/SubgraphStrategy filters reads/writes for logical
+ * isolation; silently dropping it would return unfiltered data with no error — and
+ * could even *falsely* pass a conformance scenario on a toy graph where the filter
+ * happens to be identity. So `withStrategies` stays rejected until honoured.
+ *
+ * `withoutStrategies(...)` is the opposite: it asks the engine NOT to apply named
+ * strategies. Since this compiler applies NONE of them, removing any is a genuine
+ * no-op — the result is identical whether they were "on" or not. Accepting it is
+ * therefore safe (and unblocks the many scenarios that only opt out of the default
+ * optimization strategies), so it is allowed through.
  */
 function rejectUnsupportedStrategies(tree: any): void {
   const scan = (node: any) => {
     const m = stepName(node.constructor.name, 'TraversalSourceSelfMethod_');
-    if (m === 'withStrategies' || m === 'withoutStrategies')
-      throw new Error(`${m}(...) is not supported: traversal strategies (e.g. PartitionStrategy, SubgraphStrategy) are not yet applied by the compiler, so accepting them would silently ignore the filtering they imply and leak unfiltered data. Rejected to fail closed.`);
+    if (m === 'withStrategies')
+      throw new Error(`withStrategies(...) is not supported: traversal strategies (e.g. PartitionStrategy, SubgraphStrategy) are not yet applied by the compiler, so accepting them would silently ignore the filtering they imply and leak unfiltered data. Rejected to fail closed.`);
     for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) scan(node.getChild(i));
   };
   scan(tree);
