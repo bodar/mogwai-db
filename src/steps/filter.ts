@@ -1,4 +1,4 @@
-import { q, list, value } from '../q.ts';
+import { q, list } from '../q.ts';
 import { stepChain, type Pred } from '../frontend.ts';
 import {
   P_OPS, propExtract, labelIn, predicateSql, propAt,
@@ -57,7 +57,7 @@ export const has: StepFn = (s, st) => {
   let a = s.args;
   // has(label, key, value) — the 3-arg overload folds in a label filter.
   if (a.length === 3 && typeof a[0] === 'string') {
-    conds.push(q`n.label IN (SELECT id FROM labels WHERE name=${value(a[0])})`);
+    conds.push(labelIn('n.label', [a[0]]));
     a = a.slice(1);
   }
   const [key, val] = a;

@@ -3,7 +3,6 @@ import { sql as lsql, type Sql } from '@bodar/lazyrecords/sql/template/Sql.ts';
 import { statement } from '@bodar/lazyrecords/sql/statement/ordinalPlaceholder.ts';
 import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
 import { q, type Query, type Relation } from './q.ts';
-import { text as sqlText } from '@bodar/lazyrecords/sql/template/Text.ts';
 
 // ---------- compile output contract ----------
 //
@@ -92,5 +91,5 @@ export function readCompiled(query: Query, tail: Expression, shape: Shape, index
 /** Render `SELECT <cols> FROM <current id-relation>` over a Query's CTE prefix to
  *  {sql,binds}. The write paths materialize target ids this way before mutating. */
 export function renderFrom(query: Query, last: Relation, cols: string = 'id'): { sql: string; binds: any[] } {
-  return query.render(q`SELECT ${sqlText(cols)} FROM ${last}`);
+  return query.render(q`SELECT ${cols} FROM ${last}`);
 }
