@@ -6,13 +6,27 @@ and test strategy. This file is the things that took a whole investigation to
 learn — do not re-derive them.
 
 **SQL generation (current):** the compiler builds SQL with a template-first `q`
-kernel + typed `Relation` handles — `src/q.ts` (kernel) + `src/schema.ts`
-(nodes/edges/labels relation constants). Design + rationale:
-`docs/2026-07-12-q-kernel-sql-builder.md`. Do NOT reintroduce lazyrecords ansi
-builders (`select`/`from`/`join`/`comparison`/`cte`/…) — they were tried and
-retired. The older `docs/2026-07-11-lazyrecords-cutover-plan.md` holds the
-3-seam decomposition roadmap; its SQL-build sections are marked SUPERSEDED —
-Seam 2 (step dispatch table) + Seam 3 (`strategies.ts`) are the remaining work.
+kernel + typed `Relation` handles — `src/q.ts` (kernel: `q`/`Relation`/`Query`/
+`list`/`empty`) + `src/schema.ts` (nodes/edges/labels relation constants). Design
++ rationale: `docs/2026-07-12-q-kernel-sql-builder.md`. Do NOT reintroduce
+lazyrecords ansi builders (`select`/`from`/`join`/`comparison`/`cte`/…) — retired;
+only `src/q.ts` may import raw lazyrecords `Text`/`Compound`, every step module
+builds through the kernel.
+
+**Compiler is fully decomposed (all 3 seams done, 2026-07-12).** `compile()` in
+`src/compiler.ts` is a 51-line orchestrator: `parse → normalize → dispatch`.
+- **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
+  (`stripTerminal`, `foldRepeatClusters`, `foldByModulators`) run once up front so
+  the dispatch sees a canonical, peek-free chain (no index arithmetic anywhere).
+- **Seam 2 — `src/steps/*.ts`:** the read prefix is a **functional fold** —
+  `StepFn = (step, St) => St` over an immutable `St` (`context.ts`); only the
+  `Query` builder accumulates CTEs. Per-family modules (`movement`/`filter`/
+  `branch`/`passthrough`), tail (`projection.ts`: `PROJECTORS` + `MODIFIERS` Maps +
+  group/properties/select barriers), writes (`write.ts`: imperative interpreters
+  behind an ordered `WRITE_RULES` table). `index.ts` = `PREFIX` Map + `buildPrefix`
+  + `compileRead`. To add a read step: write a `StepFn`, register it in the right
+  Map — do NOT grow a switch. Multi-step modulator consumption belongs in a
+  `strategies.ts` fold, NOT in a compiler peeking at siblings.
 
 ## What this is
 

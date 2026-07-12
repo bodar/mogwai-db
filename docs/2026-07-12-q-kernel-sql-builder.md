@@ -104,11 +104,17 @@ ecosystem has it), so upstreaming it later is a real give-back, not a fork.
   CTE-render pattern). `compileInject` rewritten off `withClause`/`cte`/`valuesClause`,
   which are now **retired** — no ansi builder imports remain in compiler.ts/plan.ts.
   Byte-identical, zero churn. Trunk `98dfc46`.
-- [ ] **Later:** adopt `Query` to retire `CteDef`/`withPrefixTree` (the last CTE-assembly
-  machinery in `render.ts`); the plan.ts ScalarCtx cluster (uses kernel primitives — low
-  priority); then evaluate upstreaming the surface (identifier-default template, `Relation`,
-  typed-self recursive CTE) to lazyrecords.
-- **Orthogonal, still pending (pre-kernel cutover):** Seam 2 — the step-family dispatch
-  table (`Map<name, StepCompiler>`, = S5.2 in `docs/2026-07-11-lazyrecords-cutover-plan.md`);
-  Seam 3 — normalization passes → `strategies.ts`. The kernel changed HOW bodies build SQL,
-  not the `switch` structure, so these remain the outstanding decomposition work.
+- [x] **`Query` adopted (2026-07-12).** `CteDef`/`withPrefixTree`/`readCompiled(ctes,…)` and the
+  `cte`/`withRecursive` ansi nodes are retired from `render.ts`; the compiler builds CTEs via
+  `Query` (minted names, typed-`self` recursive CTE for repeat()). `readCompiled(query,tail,…)` /
+  `renderFrom(query,last,…)` are the new boundaries. Only `src/q.ts` imports raw lazyrecords
+  `Text`/`Compound` now; a `list(parts, sep?: string)` + `empty` are re-exported so step modules
+  build every compound through the kernel. `q.ts` also gained the `list` string-separator wrapper
+  (no more `sqlText(' AND ')` at call sites).
+- [x] **Seam 2 + Seam 3 done (2026-07-12).** Step-family dispatch (`src/steps/*.ts`, functional
+  `StepFn = (step, St) => St` fold over an immutable `St`) + normalization passes
+  (`src/strategies.ts`). See the "Decomposition complete" note in
+  `docs/2026-07-11-lazyrecords-cutover-plan.md`. `compiler.ts` is now a 51-line orchestrator.
+- [ ] **Later:** the `plan.ts` ScalarCtx cluster still passes SQL fragments as strings (uses kernel
+  primitives — low priority); then evaluate upstreaming the surface (identifier-default template,
+  `Relation`, typed-self recursive CTE, `list` string-sep) to lazyrecords.

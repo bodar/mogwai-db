@@ -2,8 +2,8 @@ import type { GraphStore } from './storage.ts';
 import { sql as lsql, type Sql } from '@bodar/lazyrecords/sql/template/Sql.ts';
 import { statement } from '@bodar/lazyrecords/sql/statement/ordinalPlaceholder.ts';
 import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
-import { cte } from '@bodar/lazyrecords/sql/ansi/CommonTableExpression.ts';
-import { withRecursive } from '@bodar/lazyrecords/sql/ansi/WithClause.ts';
+import { q, type Query, type Relation } from './q.ts';
+import { text as sqlText } from '@bodar/lazyrecords/sql/template/Text.ts';
 
 // ---------- compile output contract ----------
 //
@@ -65,34 +65,32 @@ export interface Compiled {
 
 export interface WritePlan { kind: 'write'; run: (store: GraphStore) => any[]; }
 
-/** Boundary: render a finished lazyrecords Sql tree to a read Compiled. Binds fall
- *  out of the tree (statement → {text,args}); no hand-maintained parallel array. */
+/** Boundary: render a self-contained lazyrecords Sql tree to a read Compiled.
+ *  Binds fall out of the tree (statement → {text,args}); no parallel array. Used
+ *  for reads with no CTE prefix. */
 export function compiled(tree: Sql, shape: Shape, indexKeys?: string[]): Compiled {
   const { text, args } = statement(tree);
   return { kind: 'read', sql: text, binds: args, shape, ...(indexKeys ? { indexKeys } : {}) };
 }
 
 /** Fragment boundary: render a node Expression to `{sql,binds}`. Binds fall out of
- *  the tree — no parallel array. Used at the few remaining spots that still need a
- *  standalone `{sql,binds}` (e.g. a run-closure's match query). */
+ *  the tree — no parallel array. Used at the few spots that still need a standalone
+ *  `{sql,binds}` (e.g. a merge run-closure's match query). */
 export function render(node: Expression): { sql: string; binds: any[] } {
   const { text, args } = statement(lsql(node));
   return { sql: text, binds: args };
 }
 
-/** One movement/filter CTE: its name (`c0`, `w1`), its body node, and — for a
- *  recursive walk — an explicit `(id, depth)` column list. The whole read query is
- *  ONE tree (all CTE bodies + the tail), so binds derive from it in a single render. */
-export interface CteDef { name: string; body: Expression; cols?: string[]; }
-
-/** Assemble `WITH RECURSIVE "c0" AS (…), "c1" AS (…) <tail>` as one node tree.
- *  Every bound value lives as a Value token inside a body/tail sub-node, so the
- *  binds fall out of the one render — no per-CTE render()+bind-array threading. */
-export function withPrefixTree(ctes: CteDef[], tail: Expression): Sql {
-  return lsql(withRecursive(ctes.map((c) => cte(c.name, c.body, c.cols)), tail));
+/** Boundary: assemble the Query's CTE prefix + `tail` into one tree (Query.render)
+ *  and wrap as a read Compiled. Every bound value lives as a Value token in a CTE
+ *  body or the tail, so binds fall out of the single render. */
+export function readCompiled(query: Query, tail: Expression, shape: Shape, indexKeys?: string[]): Compiled {
+  const { sql, binds } = query.render(tail);
+  return { kind: 'read', sql, binds, shape, ...(indexKeys ? { indexKeys } : {}) };
 }
 
-/** Boundary: assemble the CTE prefix + tail into one tree and render to a read Compiled. */
-export function readCompiled(ctes: CteDef[], tail: Expression, shape: Shape, indexKeys?: string[]): Compiled {
-  return compiled(withPrefixTree(ctes, tail), shape, indexKeys);
+/** Render `SELECT <cols> FROM <current id-relation>` over a Query's CTE prefix to
+ *  {sql,binds}. The write paths materialize target ids this way before mutating. */
+export function renderFrom(query: Query, last: Relation, cols: string = 'id'): { sql: string; binds: any[] } {
+  return query.render(q`SELECT ${sqlText(cols)} FROM ${last}`);
 }

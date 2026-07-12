@@ -55,8 +55,9 @@ describe('compiler SQL snapshots', () => {
 
   test('inject seeds a VALUES stream', () => {
     const p = read('g.inject(1,2,3)');
-    // Node-built: quoted CTE name/cols + lowercase keywords (lazyrecords canonical).
-    expect(p.sql).toBe('with "c0"("v") as (values (?), (?), (?)) select v from c0');
+    // q-kernel built: Query mints the CTE name (unquoted, identifier-safe) + our
+    // SQL casing; binds ride as Value tokens (one row each).
+    expect(p.sql).toBe('with c0(v) as (VALUES (?), (?), (?)) SELECT v FROM c0');
     expect(p.binds).toEqual([1, 2, 3]);
   });
 
@@ -147,7 +148,7 @@ describe('compiler SQL snapshots', () => {
 
   test('E() sources the edges table; default projection is the edge shape', () => {
     const p = read('g.E()');
-    expect(p.sql).toContain('"c0" as (SELECT id FROM edges)');
+    expect(p.sql).toContain('c0(id) as (SELECT id FROM edges)');
     expect(p.shape).toEqual({ kind: 'edge' });
     expect(p.sql).toContain('n.src, n.tgt');
   });
@@ -339,6 +340,10 @@ describe('compiler SQL snapshots', () => {
     const keyc = read('g.V().as("a").out().as("b").where("a", P.eq("b")).by("name")');
     expect(keyc.sql).toContain("(SELECT json_extract(props, '$.name') FROM nodes WHERE id=p.a0) = (SELECT json_extract(props, '$.name') FROM nodes WHERE id=p.a1)");
     expect(() => compile('g.V().where("x", P.eq("y"))', {})).toThrow('no such label');
+    // alias-compare where() takes at most one by(key) — a second is not a valid
+    // modulator here; fail closed rather than silently drop it.
+    expect(() => compile('g.V().as("a").out().as("b").where("a", P.eq("b")).by("name").by("age")', {}))
+      .toThrow('by() is only supported as an order() or select()/project() modulator');
   });
 
   test('where()/filter() deferred forms throw clearly', () => {
@@ -378,10 +383,10 @@ describe('compiler SQL snapshots', () => {
 
   // ---- P3: repeat/times/emit ----
 
-  test('repeat().times() → WITH RECURSIVE walk(id, depth); final depth only', () => {
+  test('repeat().times() → WITH RECURSIVE walk c1(id, depth); final depth only', () => {
     const p = read('g.V().repeat(__.out()).times(2).values("name")');
     expect(p.sql).toContain('with recursive');
-    expect(p.sql).toContain('as (SELECT id, 0 AS depth FROM c0 UNION ALL SELECT e.tgt AS id, w1.depth + 1 AS depth FROM w1 JOIN edges e ON e.src=w1.id WHERE w1.depth < 2)');
+    expect(p.sql).toContain('as (SELECT id, 0 AS depth FROM c0 UNION ALL SELECT e.tgt AS id, c1.depth + 1 AS depth FROM c1 JOIN edges e ON e.src=c1.id WHERE c1.depth < 2)');
     expect(p.sql).toContain('WHERE depth = 2');
   });
 
@@ -393,8 +398,8 @@ describe('compiler SQL snapshots', () => {
 
   test('both() repeat emits two recursive terms', () => {
     const p = read('g.V().repeat(__.both()).times(2)');
-    expect(p.sql).toContain('e.tgt AS id, w1.depth + 1');
-    expect(p.sql).toContain('e.src AS id, w1.depth + 1'); // both directions
+    expect(p.sql).toContain('e.tgt AS id, c1.depth + 1');
+    expect(p.sql).toContain('e.src AS id, c1.depth + 1'); // both directions
   });
 
   test('repeat requires times() (unbounded emit/until deferred); sequential repeats chain', () => {
