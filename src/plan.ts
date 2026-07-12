@@ -366,7 +366,12 @@ export function combineBranchPreds(step: Step, ctx: ScalarCtx, params: Record<st
 function compileExists(mv: Step, ctx: ScalarCtx): Expression {
   if (ctx.elem !== 'node') throw new Error(`where(__.${mv.name}()) expects a vertex, not an ${ctx.elem}`);
   const dirs = dirsFor(mv.name.endsWith('E') ? mv.name.slice(0, -1) : mv.name);
+  // Alias the subquery's edges `xe`, NOT `e`: when this predicate correlates on an
+  // outer row that is ITSELF an `edges e` (e.g. until(__.out()) inside repeat()'s
+  // recursive term, where ctx.idExpr is `e.tgt`), a shared `e` would shadow the outer
+  // one and silently correlate the EXISTS on itself. `xe` can't collide.
+  const labelFilter = mv.args.length ? q` AND ${labelIn('xe.label', mv.args)}` : empty;
   const terms = dirs.map(([from]) =>
-    q`EXISTS(SELECT 1 FROM edges e WHERE e.${from}=${ctx.idExpr}${edgeLabelFilter(mv.args)})`);
+    q`EXISTS(SELECT 1 FROM edges xe WHERE xe.${from}=${ctx.idExpr}${labelFilter})`);
   return terms.length === 1 ? terms[0] : paren(list(terms, ' OR '));
 }

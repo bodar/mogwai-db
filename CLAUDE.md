@@ -262,12 +262,18 @@ or)`); `union` (element branches, `branchMovementSelect` — single out/in/both 
 UNION ALL merged id-relation); `optional` (single hop, LEFT JOIN + COALESCE-to-
 self). All compose mid-chain as CTEs in `traversalCtes`.
 
-**P3 repeat — PARTIALLY DONE** (live L3 126→130). `repeat(__.<out/in/both>).
-times(n)` [+ emit before/after] → `WITH RECURSIVE walk(id, depth)` in
-`traversalCtes` (the repeat/emit/times cluster is gathered since the modulators
-sit either side of `repeat`). All `WITH` → `WITH RECURSIVE` (harmless for
-non-recursive CTEs; needed once any walk appears). Depth guard 32 when `times`
-absent. Deferred: `until`, `emit(pred)`, complex bodies, `path`/`simplePath`.
+**P3 repeat — MOSTLY DONE** (live L3 126→130, then path/until landed 2026-07-12).
+`repeat(__.<out/in/both>).times(n)` [+ emit before/after] → `WITH RECURSIVE
+walk(id, depth)` in `src/steps/branch.ts` (the repeat/emit/times/until cluster is
+gathered by strategies since the modulators sit either side of `repeat`). All
+`WITH` → `WITH RECURSIVE`. **`repeat().path()`** adds a JSONB `path` column
+(`jsonb_insert '$[#]'`); **`simplePath()` in the body** = a `NOT EXISTS(json_each)`
+cycle guard; **`until(<pred>)`** = a `done` column (do-while / while-do), predicate
+via `compileFilterPredicate` on a correlated node ctx, `loops().is(n)` → depth
+predicate — `until().path()` composes. Depth guard 32 when `times`/`until` bound is
+soft. Deferred: `emit(pred)`, `until`+`times`/`emit`, cyclicPath-in-repeat,
+`path().by()` on recursive, edge-inclusive bodies, mixed linear+repeat path, complex
+bodies. See `docs/2026-07-12-path-tracking-prior-art.md`.
 
 **Target locked — see docs/2026-07-11-phased-roadmap-plan.md "Target — declared feature profile" + the W1–W5
 writes-first roadmap.** Profile: UserSuppliedIds ✅, Multi/MetaProperties ✅ (W4

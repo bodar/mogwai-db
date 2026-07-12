@@ -448,7 +448,7 @@ describe('compiler SQL snapshots', () => {
 
   test('where(__.movement) → EXISTS filter CTE; not() → NOT COALESCE', () => {
     const w = read('g.V().where(__.out("knows")).values("name")');
-    expect(w.sql).toContain('EXISTS(SELECT 1 FROM edges e WHERE e.src=n.id AND e.label IN');
+    expect(w.sql).toContain('EXISTS(SELECT 1 FROM edges xe WHERE xe.src=n.id AND xe.label IN');
     const n = read('g.V().not(__.out("created")).values("name")');
     expect(n.sql).toContain('WHERE NOT COALESCE((EXISTS(');
   });
@@ -482,7 +482,7 @@ describe('compiler SQL snapshots', () => {
 
   test('and()/or() combine branch predicates; nested where(__.and)', () => {
     const a = read('g.V().and(__.out("knows"), __.out("created"))');
-    expect(a.sql).toContain('WHERE ((EXISTS(SELECT 1 FROM edges e WHERE e.src=n.id AND e.label IN');
+    expect(a.sql).toContain('WHERE ((EXISTS(SELECT 1 FROM edges xe WHERE xe.src=n.id AND xe.label IN');
     expect(a.sql).toContain(') AND (EXISTS(');
     expect(read('g.V().or(__.out("knows"), __.in("created"))').sql).toContain(') OR (EXISTS(');
     // <2 branches → clear throw
@@ -533,7 +533,6 @@ describe('compiler SQL snapshots', () => {
     // require times() — bounds the recursive depth (guards against fan-out blow-up)
     expect(() => compile('g.V().repeat(__.out())', {})).toThrow('without times()');
     expect(() => compile('g.V().repeat(__.out()).emit()', {})).toThrow('without times()');
-    expect(() => compile('g.V().repeat(__.out()).until(__.hasLabel("x")).times(3)', {})).toThrow('repeat().until() not yet supported');
     expect(() => compile('g.V().repeat(__.out().order()).times(2)', {})).toThrow('single out()/in()/both(), optional .simplePath()');
     expect(() => compile('g.V().emit().times(2)', {})).toThrow('without repeat()');
     // a second repeat is NOT swallowed — it compiles as a chained cluster (two walks)
@@ -684,6 +683,49 @@ describe('compiler SQL snapshots', () => {
     // DISTINCT must be in its own CTE over the raw path, not the same SELECT as ROW_NUMBER().
     expect(p.sql).toContain('SELECT DISTINCT');
     expect(p.sql.replace(/\s+/g, ' ')).not.toMatch(/DISTINCT[^)]*ROW_NUMBER/);
+  });
+
+  // ---------- repeat().until() ----------
+
+  test('until() compiles a `done` column: expand from done=0, output done=1', () => {
+    const p = read('g.V(1).repeat(__.out()).until(__.has("name","ripple"))');
+    expect(p.sql).toContain('AS done');
+    expect(p.sql).toContain('c1.done=0');           // expand only from still-looping rows
+    expect(p.sql).toContain('WHERE done = 1');       // output satisfied rows
+  });
+
+  test('until(loops().is(n)) tests the depth counter, not an element', () => {
+    const p = read('g.V(1).repeat(__.out()).until(__.loops().is(2))');
+    expect(p.sql).toContain('c1.depth + 1 = ?');     // done = (new depth) = 2
+  });
+
+  test('while-do (until before repeat) qualifies the seed id in the correlated predicate', () => {
+    const p = read('g.V(3).until(__.has("name","lop")).repeat(__.out())');
+    // seed source aliased `w` so until()'s (SELECT props FROM nodes WHERE id=w.id) is
+    // not the `id=id` self-match that would read the wrong row.
+    expect(p.sql).toContain('WHERE id=w.id');
+    expect(p.sql).not.toContain('WHERE id=id');
+  });
+
+  test('until().path() carries both the JSONB path array and the done column', () => {
+    const p = read('g.V(1).repeat(__.out()).until(__.has("name","ripple")).path()');
+    expect(p.sql).toContain('jsonb_insert');
+    expect(p.sql).toContain('AS done');
+    expect(p.shape).toEqual({ kind: 'pathGrouped', elem: 'vertex' });
+  });
+
+  test('until(__.out()) correlates the EXISTS on the walk row, not itself (alias collision)', () => {
+    // The walk aliases its edges `e`; compileExists must NOT reuse `e` or its EXISTS
+    // would shadow to `e.src=e.tgt` (a self-loop test disconnected from the walk).
+    const p = read('g.V(1).repeat(__.out()).until(__.out())');
+    expect(p.sql).toContain('EXISTS(SELECT 1 FROM edges xe WHERE xe.src=e.tgt)');
+    expect(p.sql).not.toContain('xe.src=xe.tgt');
+  });
+
+  test('until() defers the combinations not yet built', () => {
+    expect(() => compile('g.V(1).repeat(__.out()).until(__.has("name","x")).times(3)', {})).toThrow('until() together with times() not yet supported');
+    expect(() => compile('g.V(1).repeat(__.out()).emit().until(__.has("name","x"))', {})).toThrow('until() together with emit() not yet supported');
+    expect(() => compile('g.V(1).repeat(__.out())', {})).toThrow('without times() or until()');
   });
 });
 
@@ -1225,5 +1267,45 @@ describe('compiler execution semantics', () => {
     // two parallel 1→2 edges → out() reaches 2 twice → two identical [1,2] paths.
     expect(npaths('g.V(1).repeat(__.out()).times(1).path()')).toBe(2);
     expect(npaths('g.V(1).repeat(__.out()).times(1).path().dedup()')).toBe(1); // collapsed
+  });
+
+  // ---------- repeat().until() (modern-graph semantics) ----------
+
+  const uNames = (store: GraphStore, q: string) => (run(store, q) as any[]).map((r) => JSON.parse(r.props).name);
+
+  test('do-while: repeat(out()).until(pred) runs the body then tests, multiset-correct', () => {
+    const store = seededStore();
+    // until a property predicate: marko→josh→ripple is the only name=ripple exit.
+    expect(uNames(store, 'g.V(1).repeat(__.out()).until(__.has("name","ripple"))')).toEqual(['ripple']);
+    // until a label: marko reaches lop directly AND via josh (two paths) + ripple via josh.
+    expect(uNames(store, 'g.V(1).repeat(__.out()).until(__.hasLabel("software"))').sort()).toEqual(['lop', 'lop', 'ripple']);
+  });
+
+  test('until(loops().is(n)) is equivalent to times(n)', () => {
+    const store = seededStore();
+    const byUntil = uNames(store, 'g.V(1).repeat(__.out()).until(__.loops().is(2))').sort();
+    const byTimes = uNames(store, 'g.V(1).repeat(__.out()).times(2)').sort();
+    expect(byUntil).toEqual(byTimes);
+    expect(byUntil).toEqual(['lop', 'ripple']);
+  });
+
+  test('while-do: until(pred).repeat(t) tests the seed first (emits it un-iterated if it holds)', () => {
+    const store = seededStore();
+    // lop already satisfies name=lop → emitted without running the body.
+    expect(uNames(store, 'g.V(3).until(__.has("name","lop")).repeat(__.out())')).toEqual(['lop']);
+    // marko doesn't satisfy hasLabel(software) → iterate until it does.
+    expect(uNames(store, 'g.V(1).until(__.hasLabel("software")).repeat(__.out())').sort()).toEqual(['lop', 'lop', 'ripple']);
+  });
+
+  test('until().path() emits the route to each satisfied traverser', async () => {
+    const paths = await decodePaths(seededStore(), 'g.V(1).repeat(__.out()).until(__.has("name","ripple")).path()');
+    expect(paths.map((p) => p.objects.map((o: any) => o.id))).toEqual([[1, 4, 5]]); // marko→josh→ripple
+  });
+
+  test('until(__.out()) stops at the first vertex having an out-edge (EXISTS correlates correctly)', () => {
+    const store = seededStore();
+    // marko→{vadas,josh,lop}; only josh has an out-edge → done. vadas/lop have none →
+    // not done and can't expand → dropped. (Bug would self-correlate → wrong set.)
+    expect(uNames(store, 'g.V(1).repeat(__.out()).until(__.out())')).toEqual(['josh']);
   });
 });
