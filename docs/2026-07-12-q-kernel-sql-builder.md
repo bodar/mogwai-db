@@ -1,8 +1,9 @@
 # The `q` kernel — a template-first SQL builder for the compiler
 
-**Status: in progress.** Kernel shipped + read path converted on trunk; remaining
-bodies (select/project, group, properties, writes) mid-sweep. This doc records
-the design and *why*, so the reasoning isn't lost.
+**Status: complete.** The compiler builds ALL its SQL through the kernel — reads,
+writes, the decomposed step dispatch (Seams 2+3), and typed `ScalarCtx`. `src/q.ts`
+is the only module that touches lazyrecords. This doc records the design and *why*,
+so the reasoning isn't lost.
 
 ## The problem
 
@@ -39,9 +40,9 @@ ansi builders entirely.
 - **`Query`** — a per-query context that mints CTE names (`c0`, `c1`, … — you never
   write a number) and gives recursive CTEs a **typed `self` handle**
   (`recursiveCte(['id','depth'], self => q\`… ${self.c.depth} … ${self} …\`)`) — no
-  stringly-typed self. (Currently the compiler still uses the older `CteDef[]` +
-  `withPrefixTree` machinery in `render.ts`; adopting `Query` to retire that — and
-  the `cte`/`withClause`/`valuesClause` ansi nodes — is a follow-up.)
+  stringly-typed self. `Query` IS the compiler's CTE machinery now; the older
+  `CteDef[]`/`withPrefixTree` in `render.ts` and the `cte`/`withClause`/`valuesClause`
+  ansi nodes are retired.
 - **`src/schema.ts`** — `nodes`/`edges`/`labels` as typed relation constants (Drizzle's
   "one object, columns as properties, import everywhere" shape; lean — no types/DDL,
   which mogwai doesn't consume).
@@ -95,7 +96,7 @@ ecosystem has it), so upstreaming it later is a real give-back, not a fork.
   proven (renders + executes a full read path and the recursive `repeat()` walk). Trunk `7543161`.
 - [x] `src/schema.ts` relation constants + `predicateSql` on `q\`\`` (zero churn). Trunk `6a9e1f2`.
 - [x] `traversalCtes` CTE bodies (movement/filter/branch/source/pass-through) → `q\`\``+relations
-  (`prevRel`/`carryFrag`/`aliasCols` helpers). Byte-identical, zero churn. Trunk `5a18894`.
+  (`prevRel`/`carryFrag`/`aliasCols` helpers). Semantically identical, zero churn. Trunk `5a18894`.
 - [x] `compileRead` projection tail (values/id/label/valueMap/elementMap/vertex/edge +
   is/order/limit/count/fold/sum) → `q\`\``+relations. Trunk `c65900c`.
 - [x] `compileSelectProject`, `compileGroup`/`buildGroupKey`/`elementSelect`,
@@ -103,7 +104,7 @@ ecosystem has it), so upstreaming it later is a real give-back, not a fork.
   `q\`\``+relations. Added `renderCteSelect(ctes, cols)` (collapsed 5 copies of the
   CTE-render pattern). `compileInject` rewritten off `withClause`/`cte`/`valuesClause`,
   which are now **retired** — no ansi builder imports remain in compiler.ts/plan.ts.
-  Byte-identical, zero churn. Trunk `98dfc46`.
+  Semantically identical, zero churn. Trunk `98dfc46`.
 - [x] **`Query` adopted (2026-07-12).** `CteDef`/`withPrefixTree`/`readCompiled(ctes,…)` and the
   `cte`/`withRecursive` ansi nodes are retired from `render.ts`; the compiler builds CTEs via
   `Query` (minted names, typed-`self` recursive CTE for repeat()). `readCompiled(query,tail,…)` /

@@ -1,9 +1,8 @@
-import { q, list, Relation } from '../q.ts';
+import { q, list, Relation, type Expression } from '../q.ts';
 import { edges } from '../schema.ts';
 import { stepChain, type Step } from '../frontend.ts';
 import { dirsFor, edgeLabelFilter } from '../plan.ts';
 import { advance, prevRel, type St, type StepFn } from './context.ts';
-import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
 
 // ---------- branch (union / optional / repeat) ----------
 

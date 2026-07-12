@@ -156,7 +156,15 @@ ride the auto-built expression index.
 - Every new step lands with: SQL snapshot tests, its cucumber tag enabled,
   corpus still 100%.
 
-## P1 done — how the read compiler is now shaped
+## P1–W2 done — read/write semantics (historical function names)
+
+> **Names moved (see "Compiler is fully decomposed" above).** The P1–W2 notes below
+> describe *semantics that are still current*, but the function/structure names are
+> historical: `traversalCtes()` is now the `buildPrefix` fold in `src/steps/index.ts`
+> (per-family `StepFn`s in `src/steps/{movement,filter,branch,passthrough}.ts`); the
+> `compileRead` tail is `compileTail` in `src/steps/projection.ts`; the write compilers
+> live in `src/steps/write.ts`; multi-step gathering (repeat cluster, by() modulators)
+> is now `src/strategies.ts` normalization, so the compilers no longer scan siblings.
 
 `compileRead` is two phases. `traversalCtes()` builds the movement/filter CTE
 prefix (V, hasLabel, has, out/in/both, dedup, and range/skip/limit *as CTEs*)

@@ -1,6 +1,5 @@
 import { stepChain, type Step, type Pred } from './frontend.ts';
-import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
-import { q, list, values, paren, empty, value, raw, jsonExtract, type Relation } from './q.ts';
+import { q, list, values, paren, empty, value, raw, jsonExtract, type Expression, type Relation } from './q.ts';
 
 // ---------- SQL node builders ----------
 //

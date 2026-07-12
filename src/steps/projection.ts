@@ -1,4 +1,4 @@
-import { q, value, list, empty, Relation } from '../q.ts';
+import { q, value, list, empty, Relation, type Expression } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
 import {
   propExtract, predicateSql, compileNestedScalar, labelNameSub, rangeToOffsetLimit, elemCtx,
@@ -10,7 +10,6 @@ import { elemRel, type AliasMap, type St } from './context.ts';
 import {
   readCompiled, type Compiled, type Shape, type MapEntry, type ElemShape, type GroupKey, type GroupVal,
 } from '../render.ts';
-import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
 //

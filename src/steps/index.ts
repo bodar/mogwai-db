@@ -1,4 +1,4 @@
-import { q, value, list, Query } from '../q.ts';
+import { q, value, list, Query, type Expression } from '../q.ts';
 import { nodes, edges } from '../schema.ts';
 import { type Elem } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
@@ -9,7 +9,6 @@ import { union, optional, repeat } from './branch.ts';
 import { limit, range, skip } from './passthrough.ts';
 import { compileTail } from './projection.ts';
 import { type Compiled } from '../render.ts';
-import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
 
 export { compileTail };
 

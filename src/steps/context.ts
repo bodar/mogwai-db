@@ -1,8 +1,7 @@
-import { q, list, empty, Query, Relation } from '../q.ts';
+import { q, list, empty, Query, Relation, type Expression } from '../q.ts';
 import { nodes, edges } from '../schema.ts';
 import { type Elem } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
-import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
 
 // ---------- prefix-compilation state (Seam 2) ----------
 //

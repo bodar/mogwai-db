@@ -1,19 +1,20 @@
 // ---------- q: a template-first SQL kernel for the compiler ----------
 //
-// PROTOTYPE (not yet wired into the live compiler). The ansi builder layer
-// (select/from/join positional nodes) is app-shaped; a *compiler* writes SQL
-// shapes, and a template expresses shapes with less noise. So this kernel is
-// template-first: `q\`…\`` where interpolations default to RAW identifiers/text
-// and only bound VALUES are wrapped (`value(x)`) — the flip of the usual
-// bind-by-default tag. It reuses lazyrecords' bind-safe core (Text/Value/Sql/
-// statement/jsonExtract) — the subtle, worth-keeping machinery — and drops the
-// ansi builders entirely.
+// The compiler builds ALL of its SQL through this kernel — no ansi builder layer,
+// no hand-rolled {sql,binds}. This is the ONE module that touches lazyrecords
+// directly (its bind-safe core: Text/Value/Sql/statement/jsonExtract); every
+// other module builds SQL via the exports here. Template-first: `q\`…\``
+// interpolations default to RAW identifiers/text and only bound VALUES are wrapped
+// (`value(x)`) — the flip of the usual bind-by-default tag, right for an
+// identifier-heavy compiler where table/column names dominate and real binds are few.
 //
-// The two ideas that kill the compiler's noise:
+// The pieces that kill the compiler's noise:
 //   • Relation — a base table OR a generated CTE, indistinguishable at the use
 //     site: `${rel}` renders its FROM form, `rel.c.x` a qualified column.
 //   • Query    — a per-query context that MINTS CTE names (you never see c0/c1)
 //     and gives recursive CTEs a typed `self` handle (no stringly-typed name).
+//   • q / list / values / paren / empty / raw — the template + compound helpers.
+//   • render(node) — the node → {sql, binds} boundary for standalone (non-CTE) SQL.
 
 import { text as raw, empty, type Text } from '@bodar/lazyrecords/sql/template/Text.ts';
 import { value } from '@bodar/lazyrecords/sql/template/Value.ts';
@@ -22,6 +23,8 @@ import { list as lrList } from '@bodar/lazyrecords/sql/template/Compound.ts';
 import { statement } from '@bodar/lazyrecords/sql/statement/ordinalPlaceholder.ts';
 import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
 
+// Re-export the node types so no other module imports them from lazyrecords.
+export type { Expression, Sql };
 export { value, empty };
 /** A bind-free SQL fragment as a node (unquoted, verbatim). ONLY for text the
  *  compiler controls (column refs, operators) — never user data; wrap values in
@@ -43,6 +46,14 @@ export const values = (xs: readonly any[]): Expression => list(xs.map(value), ',
 
 /** Parenthesise an expression: `(<e>)`. */
 export const paren = (e: Expression): Expression => q`(${e})`;
+
+/** Render a standalone node (a fragment or a whole tree) to `{sql, binds}` — the
+ *  boundary for the few spots that need SQL text without the `Query` CTE machinery
+ *  (e.g. a merge run-closure's match query). Binds fall out of the tree. */
+export function render(node: Expression): { sql: string; binds: any[] } {
+  const { text, args } = statement(sql(node));
+  return { sql: text, binds: args };
+}
 
 /** Identifier-shaped name → spliced raw; else double-quoted (render-time safe
  *  quoting, à la SQLAlchemy/jOOQ — quote only when unsafe). */
