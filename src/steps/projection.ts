@@ -36,6 +36,7 @@ interface TailAcc {
   reducer: 'fold' | 'sum' | 'min' | 'max' | 'mean' | null; // terminal stream reducer applied after the projection
   isPreds: any[];                  // is(P) filters on the projected scalar (AND'd)
   transforms: PStep[];             // scalar string/cast transforms wrapping the projected scalar, in order
+  injects: any[];                  // constants appended to the value stream (values(k).inject(c))
 }
 
 const PROJECTION_NAMES = new Set(['values', 'id', 'label', 'count', 'valueMap', 'elementMap', 'select', 'project']);
@@ -111,7 +112,7 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
   }
 
   // Tail fold: accumulate the projection + modifiers.
-  const acc: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, reducer: null, isPreds: [], transforms: [] };
+  const acc: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, reducer: null, isPreds: [], transforms: [], injects: [] };
   for (let i = stop; i < steps.length; i++) {
     const s = steps[i];
     if (PROJECTION_NAMES.has(s.name)) {
@@ -119,6 +120,8 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
       acc.projStep = s;
       continue;
     }
+    // inject(c…) after a value projection appends constants to the value stream.
+    if (s.name === 'inject') { acc.injects.push(...s.args); continue; }
     // A scalar string/cast transform (concat/length/…) wraps the projected scalar.
     if (SCALAR_TX_NAMES.has(s.name)) { acc.transforms.push(s); continue; }
     const mod = MODIFIERS.get(s.name);
@@ -246,6 +249,13 @@ function buildProjection(st: St, acc: TailAcc, indexKeys: Set<string>): Compiled
   const limitNode: Expression = (limit !== null || offset > 0) ? q` LIMIT ${limit ?? -1} OFFSET ${offset}` : empty;
 
   let tailNode: Expression = q`SELECT ${distinct ? 'DISTINCT ' : ''}${proj.colsNode} FROM ${proj.fromNode}${whereNode}${orderNode}${limitNode}`;
+
+  // values(k).inject(c…): append the constants as extra value rows before any
+  // reducer. Only meaningful on a scalar stream (the injected value shares `v`).
+  if (acc.injects.length) {
+    if (shape.kind !== 'value') throw new Error('inject() after a non-scalar projection not yet supported');
+    tailNode = q`SELECT v FROM (${tailNode}) UNION ALL ${list(acc.injects.map((c) => q`SELECT ${value(c)} AS v`), ' UNION ALL ')}`;
+  }
 
   // Terminal reducers wrap the projected select.
   if (reducer) ({ tailNode, shape } = wrapReducer(tailNode, reducer, shape));
