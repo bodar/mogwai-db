@@ -28,7 +28,7 @@ interface TailAcc {
   offset: number;
   limit: number | null;
   distinct: boolean;
-  reducer: 'fold' | 'sum' | null; // terminal stream reducer applied after the projection
+  reducer: 'fold' | 'sum' | 'min' | 'max' | 'mean' | null; // terminal stream reducer applied after the projection
   isPreds: any[];                  // is(P) filters on the projected scalar (AND'd)
 }
 
@@ -65,13 +65,19 @@ const MODIFIERS = new Map<string, ModFn>([
     if (acc.limit !== null || acc.offset > 0) throw new Error('is() after limit()/range()/skip() not yet supported');
     acc.isPreds.push(s.args[0]);
   }],
-  ['fold', foldOrSum('fold')],
-  ['sum', foldOrSum('sum')],
+  ['fold', reducerMod('fold')],
+  ['sum', reducerMod('sum')],
+  ['min', reducerMod('min')],
+  ['max', reducerMod('max')],
+  ['mean', reducerMod('mean')],
   ['by', () => { throw new Error('by() is only supported as an order() or select()/project() modulator'); }],
 ]);
 
-function foldOrSum(name: 'fold' | 'sum'): ModFn {
+function reducerMod(name: NonNullable<TailAcc['reducer']>): ModFn {
   return (_s, acc, at) => {
+    // Scope.local (a per-list reduction) always arrives after fold()/aggregate()
+    // in the suite, so the reducer-after-reducer / step-after-reducer guards below
+    // already defer it — no separate Scope handling needed here.
     if (acc.reducer) throw new Error(`${name}() after ${acc.reducer}() not yet supported`);
     if (!at.last) throw new Error(`step not implemented after ${name}(): ${at.next}()`);
     acc.reducer = name;
@@ -231,6 +237,18 @@ function buildProjection(st: St, acc: TailAcc, indexKeys: Set<string>): Compiled
     if (shape.kind !== 'value') throw new Error(`sum() of ${shape.kind} not yet supported`);
     // typeof(SUM) is 'integer' or 'real' → handler frames Int/Long vs Double.
     tailNode = q`SELECT SUM(v) AS v, typeof(SUM(v)) AS vt FROM (${tailNode})`;
+    shape = { kind: 'scalar' };
+  } else if (reducer === 'min' || reducer === 'max' || reducer === 'mean') {
+    if (shape.kind !== 'value') throw new Error(`${reducer}() of ${shape.kind} not yet supported`);
+    // min/max/mean reduce over NUMERIC values only: a non-numeric or absent stream
+    // yields nothing (SQL aggregate over the empty filtered set → NULL → the
+    // handler drops it). Restricting to numbers matches TinkerPop, where min() of
+    // strings produces no result. mean() is always a Double; min/max keep the
+    // element's storage class (int→Int/Long, real→Double) via typeof().
+    const nums = q`SELECT v FROM (${tailNode}) WHERE typeof(v) in ('integer', 'real')`;
+    tailNode = reducer === 'mean'
+      ? q`SELECT AVG(v) AS v, 'real' AS vt FROM (${nums})`
+      : q`SELECT ${reducer === 'min' ? 'MIN' : 'MAX'}(v) AS v, typeof(${reducer === 'min' ? 'MIN' : 'MAX'}(v)) AS vt FROM (${nums})`;
     shape = { kind: 'scalar' };
   }
 
