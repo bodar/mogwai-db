@@ -83,6 +83,20 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().values("age").is(P.typeOf("bogus-name"))', {})).toThrow('unregistered type');
   });
 
+  test('min/max/mean reduce over numeric values only', () => {
+    const mn = read('g.V().values("age").min()');
+    expect(mn.sql).toContain("typeof(v) in ('integer', 'real')"); // non-numeric filtered out → empty
+    expect(mn.sql).toContain('MIN(v)');
+    expect(mn.shape).toEqual({ kind: 'scalar' });
+    expect(read('g.V().values("age").max()').sql).toContain('MAX(v)');
+    // mean is always a Double (forced vt='real')
+    const avg = read('g.V().values("age").mean()');
+    expect(avg.sql).toContain('AVG(v)');
+    expect(avg.sql).toContain("'real' AS vt");
+    // Scope.local / a step after the reducer defer cleanly
+    expect(() => compile('g.V().values("age").fold().min(Scope.local)', {})).toThrow('step not implemented after fold(): min()');
+  });
+
   test('limit before count wraps the counted id-relation', () => {
     expect(read('g.V().limit(2).count()').sql).toContain('SELECT COUNT(*) AS v FROM (SELECT id FROM c1)');
   });
