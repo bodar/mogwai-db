@@ -11,6 +11,11 @@ import {
   readCompiled, type Compiled, type Shape, type MapEntry, type ElemShape, type GroupKey, type GroupVal,
 } from '../render.ts';
 
+/** Movement heads whose nested-by() aggregate is a correlated neighbourhood
+ *  reduction (handled by edgeAggFrom), and the scalar reducers that terminate one. */
+const MOVES_ROOT = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE']);
+const SCALAR_REDUCERS = new Set(['sum', 'min', 'max', 'mean']);
+
 // ---------- tail: projection + barriers + modifiers ----------
 //
 // After the prefix fold lands the id-relation, the tail applies an optional
@@ -435,7 +440,14 @@ function compileGroup(st: St, isCount: boolean, bys: any[][], src: GroupSource, 
       if (names.length === 1 && names[0] === 'tail') { val = { kind: 'elementLast', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx); }
       else if (names.length === 1 && names[0] === 'fold') { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx); }
       else if (names.length === 1 && names[0] === 'count') { val = { kind: 'count' }; valNode = q`COUNT(*) AS gv`; }
-      else if (names[names.length - 1] === 'sum') {
+      else if (MOVES_ROOT.has(names[0]) && SCALAR_REDUCERS.has(names[names.length - 1])) {
+        // A neighbourhood aggregate — e.g. by(__.bothE().values('weight').mean()).
+        // compileNestedScalar reduces the WHOLE chain to one correlated scalar per
+        // group key; MAX() just satisfies GROUP BY (each such group is one vertex,
+        // so the scalar is constant within it). typeof() carries Int/Long/Double.
+        const sc = compileNestedScalar(inner, src.ctx);
+        val = { kind: 'sum' }; valNode = q`MAX(${sc.expr}) AS gv, typeof(MAX(${sc.expr})) AS gvt`;
+      } else if (names[names.length - 1] === 'sum') {
         const sc = compileNestedScalar(inner.slice(0, -1), src.ctx);
         val = { kind: 'sum' }; valNode = q`SUM(${sc.expr}) AS gv, typeof(SUM(${sc.expr})) AS gvt`; // gvt → Int/Long vs Double
       } else { // scalar projection folded to a list
