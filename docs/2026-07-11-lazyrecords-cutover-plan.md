@@ -1,7 +1,17 @@
 # compiler.ts → lazyrecords cutover + 3-seam decomposition
 
 **Self-contained handoff. Read `CLAUDE.md` first (project law), then this.**
-This doc has everything needed to continue after a context clear.
+
+> ⚠️ **SQL-BUILD APPROACH SUPERSEDED (2026-07-12).** The compiler no longer builds SQL
+> from lazyrecords *ansi builders* (`select`/`from`/`join`/`comparison`/…) or a `render()`
+> node adapter. It now uses a **template-first `q` kernel + typed `Relation` handles** —
+> see `docs/2026-07-12-q-kernel-sql-builder.md` (the current SQL-build design). Seam 1 (SQL
+> AST) is DONE and folded into that kernel; all read+write bodies are `q\`\``+relations,
+> byte-identical, on trunk. The **stages / seam roadmap below still stands** for the
+> *remaining* work — **Seam 2** (step-family dispatch table, was S5.2) and **Seam 3**
+> (normalization passes → `strategies.ts`) are the outstanding decomposition. But treat the
+> two sections marked "SUPERSEDED" below (the ansi API cheat-sheet + the 5 node-recipe
+> templates) as **historical only** — do NOT follow them; use `q\`\``+relations.
 
 ## Where the work lives
 - Worktree: `~/Projects/mogwai-db-worktrees/lazyrecords-cutover`, branch
@@ -43,7 +53,11 @@ The three seams:
   summarized by the RTK proxy (values collapse to `string`) — use `bun -e fetch`
   or `rtk proxy curl` to read registry JSON.
 
-## lazyrecords API cheat-sheet (learned the hard way)
+## lazyrecords API cheat-sheet (learned the hard way) — ⚠️ SUPERSEDED (historical)
+<!-- Describes the ansi-builder API the compiler NO LONGER uses. Kept for context on the
+     bind-safe core (Value/Text/statement/jsonExtract) the q kernel still reuses. For how
+     SQL is actually built now, see docs/2026-07-12-q-kernel-sql-builder.md. -->
+
 Import via `.ts` subpaths: `@bodar/lazyrecords/sql/ansi/SelectExpression.ts`, etc.
 - Render boundary: `statement(sql(node))` → `{text, args}`. `statement` from
   `sql/statement/ordinalPlaceholder.ts` emits `?` placeholders; `args` = the tree's
@@ -145,7 +159,11 @@ boundary — a **temporary adapter** that vanishes when the bodies go node-nativ
   `mise run ci` + worker build green. Remaining nicety: `wrangler deploy --dry-run`
   gzip-size sanity (was ~265 KB before).
 
-## The 5 CTE-body templates (for S5 step 3 — node recipes)
+## The 5 CTE-body templates (for S5 step 3 — node recipes) — ⚠️ SUPERSEDED (historical)
+<!-- These ansi-node recipes were NOT used. CTE bodies are now built with the q`` template
+     + Relation handles (see docs/2026-07-12-q-kernel-sql-builder.md and traversalCtes in
+     src/compiler.ts). Kept only to record what the 5 body shapes are. -->
+
 `traversalCtes` cases reduce to: (1) **Filter** `SELECT n.id{carry} FROM tbl n JOIN
 prev p ON n.id=p.id WHERE test` → `sql(select(all,[cols],from(table(tbl).as('n'))),
 join(table(prev).as('p'), onExpr), sqlText('where'), predExpr)`; (2) **Movement**
