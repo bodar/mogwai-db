@@ -53,8 +53,9 @@ work already done. Best ratio of the lot.
 **Prior-art scan (2026-07-12): `2026-07-12-path-tracking-prior-art.md`.** Sqlg
 (local, `~/Projects/sqlg`) already solved Gremlin-path-in-SQL and splits it two
 ways — revise the "thread a path column through the fold" plan above: only the
-recursive-`repeat` regime accumulates a SQL path (JSON1 `json_insert`/`json_each`
-in the one `branch.ts` CTE); linear `path()`/`tree()` force-label every element
+recursive-`repeat` regime accumulates a SQL path (JSONB `jsonb_insert`/`json_each`
+in the one `branch.ts` CTE — JSONB available: DO SQLite 3.47.0, Bun 3.53.0); linear
+`path()`/`tree()` force-label every element
 and assemble in `handler.ts` (reuse the `as()` column-carry rails), never a path
 column through movement. Governed by the `PATH` vs `LABELED_PATH` requirement
 split; path presence kills bulking (walk-cardinality). Don't build a CSR operator.

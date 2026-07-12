@@ -91,7 +91,7 @@ which SQLite has):
 
 | Sqlg (Postgres) | Purpose | SQLite equivalent |
 |---|---|---|
-| `path` `bigint[]`, `path \|\| id` | accumulate path | JSON1 `json_insert(path,'$[#]', id)` (SQLite has no array type) |
+| `path` `bigint[]`, `path \|\| id` | accumulate path | `jsonb_insert(path,'$[#]', id)` (SQLite has no native array type — binary JSON is the substitute) |
 | `id = ANY(path)` | `simplePath` cycle guard | `NOT EXISTS(SELECT 1 FROM json_each(path) WHERE value=id)` |
 | `UNNEST(path) WITH ORDINALITY` | explode elements in order | `json_each(path)` — `.key` gives the ordinal for free |
 | `previous` array + `path NOT IN (SELECT previous)` | keep only maximal paths, drop prefixes | portable as-is (compare serialised text) — a neat set-based trick |
@@ -106,6 +106,19 @@ parallel `epath` edge-id array, V/E interleave, `LIMIT 500000` guard);
 loop-unroll `BaseStrategy.java:1081`; force-label `BaseStrategy.java:1657-1075`;
 path→Emit reconstruction `SqlgUtil.java:376-410`; label→column encoding in the
 column alias string `SchemaTableTree.java:3055-3072`.
+
+> **Use JSONB, not JSON text, for the recursive path column** (verified 2026-07-12).
+> Both runtimes ship SQLite ≥ 3.45, so JSONB is available: **DO = 3.47.0** (workerd
+> `1.20260708.1`, sourceid 2024-10-21), **Bun dev = 3.53.0**. Build the path column
+> with `jsonb_array(id)` / `jsonb_insert(path,'$[#]', id)` — a binary blob avoids the
+> text parse+reparse of the whole array on every recursive hop. `json_each` reads a
+> JSONB blob identically (membership + `.key` ordinal both work — verified), so only
+> the *constructors* change from the JSON1 examples below (`json_*` → `jsonb_*`); the
+> read/membership SQL is unchanged. This is the one column where JSONB is a clean
+> default (new column, framed entirely in SQL → no JS `JSON.parse` boundary to cross,
+> unlike the existing `props` text column). SQLite still has **no native array type**
+> and **no SQL:1999 `CYCLE` clause** — the `json_each` membership guard remains the
+> only native cycle detection.
 
 ---
 
@@ -178,10 +191,10 @@ simplePath).times(3).path` — cycle-free repeat), `Tree.feature:38` (prefix mer
 Full survey in the agent report; the load-bearing facts:
 
 - **`repeat` recursive CTE carries `(id, depth)` only** (`branch.ts:75-84`).
-  Widening to `(id, depth, path)` with `json_array(id)` seed + `json_insert(...,
-  '$[#]', tgt)` in the recursive term is the natural, *contained* change — and
-  it's the only place SQL path accumulation should live. Note repeat currently
-  **refuses alias-carry** (`branch.ts:54`) and requires `times()`.
+  Widening to `(id, depth, path)` with `jsonb_array(id)` seed + `jsonb_insert(...,
+  '$[#]', tgt)` in the recursive term (JSONB per the callout above) is the natural,
+  *contained* change — and it's the only place SQL path accumulation should live.
+  Note repeat currently **refuses alias-carry** (`branch.ts:54`) and requires `times()`.
 - **`St` traverser state is one relation, columns = `id` + alias cols**
   (`context.ts:24-31`). Columns are fixed at CTE construction (`q.ts:119-133`) —
   `Relation` is not open-ended. So threading a path column *through the linear
@@ -228,13 +241,14 @@ small at the source (that's the entire lesson of 605M-vs-19K).
 
 SQLite's own docs never show a path column (community idiom); they do recommend
 `UNION` for cycle-safety and a `LIMIT` in the recursive term as a hard safety
-valve. Canonical SQLite path+cycle pattern we'd adopt (JSON1):
+valve. Canonical SQLite path+cycle pattern we'd adopt (JSONB — see the callout
+above; `json_*` shown, use `jsonb_*` constructors so the blob isn't reparsed each hop):
 
 ```sql
 WITH RECURSIVE walk(id, path, depth) AS (
-  SELECT id, json_array(id), 0 FROM nodes WHERE id = :start
+  SELECT id, jsonb_array(id), 0 FROM nodes WHERE id = :start
   UNION ALL
-  SELECT e.tgt, json_insert(w.path,'$[#]', e.tgt), w.depth+1
+  SELECT e.tgt, jsonb_insert(w.path,'$[#]', e.tgt), w.depth+1
   FROM walk w JOIN edges e ON e.src = w.id
   WHERE w.depth < 32
     AND NOT EXISTS (SELECT 1 FROM json_each(w.path) je WHERE je.value = e.tgt)  -- simplePath
@@ -256,12 +270,23 @@ quantifiers — matching why users put `simplePath()` inside `repeat()`.
 linear movement fold. Adopt Sqlg's **two-regime split**:
 
 1. **Recursive-repeat regime** (`repeat(...).until/times(...).path()`,
-   `repeat(...simplePath()...)`): true SQL path accumulation, but **only here** —
-   widen the one `recursiveCte` in `branch.ts` to carry a JSON `path` (`json_
-   insert '$[#]'`), `simplePath` = `NOT EXISTS json_each` early-reject in the
-   recursive WHERE, `cyclicPath` = the dual predicate post-hoc (unbounded, leans
-   on the depth-32 guard). This is contained to one function and is where the
-   `path` work *upgrades* the repeat we already shipped.
+   `repeat(...simplePath()...)`): true SQL path accumulation, but **only here**.
+   **Sub-split by whether `simplePath` is present** (added 2026-07-12 after the
+   SQLite-array research — a trick worth taking):
+   - **`repeat().path()` WITHOUT simplePath**: no per-hop membership test is needed
+     (cycles are allowed / depth-bounded). So DON'T accumulate a path array — carry
+     `(id, depth, parent)` in the walk and **reconstruct the Path in the handler in
+     JS** (reuses the *linear* regime's JS Path-assembly; no JSON append/parse per
+     hop at all). Cheaper for the common case.
+   - **`repeat(...simplePath()...)`**: simplePath needs full-path membership at every
+     hop, and rebuilding that from parent pointers is O(depth²). So here carry a
+     JSONB `path` (`jsonb_insert '$[#]'`), `simplePath` = `NOT EXISTS json_each`
+     early-reject in the recursive WHERE, `cyclicPath` = the dual predicate post-hoc
+     (unbounded, leans on the depth-32 guard).
+   **Hard constraint (validates the plan):** SQLite forbids aggregate/window
+   functions in a recursive term, so `json_group_array` is out — a scalar per-row
+   append (`jsonb_insert`) is the *only* structurally-legal accumulator. Contained to
+   one function; upgrades the repeat we already shipped.
 2. **Linear regime** (`g.V().out().out().path()`, `tree`, `select`, standalone
    `simplePath`/`cyclicPath`): **do not compute path in SQL.** Detect the
    `PATH` requirement, force every intermediate element into the projection
