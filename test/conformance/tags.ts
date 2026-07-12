@@ -9,6 +9,7 @@ export const L3_TAGS =
   ' or @StepDedup or @StepLimit or @StepRange or @StepOrder or @StepValueMap or @StepElementMap' +
   ' or @StepDrop or @StepInject or @StepSelect or @StepProject or @StepOut or @StepIn or @StepBoth' +
   ' or @StepHasId or @StepMin or @StepMax or @StepMean' +
+  ' or @StepConcat or @StepLength or @StepToUpper or @StepToLower or @StepAsString or @StepSubstring or @StepReplace' +
   ' or @StepProperties or @StepGroup or @StepGroupCount or @StepFold or @StepSum or @StepIs' +
   ' or @StepWhere or @StepNot or @StepFilter or @StepAnd or @StepOr or @StepUnion or @StepOptional' +
   ' or @StepRepeat or @StepAddV or @StepAddE or @StepMergeV or @StepMergeE)' +

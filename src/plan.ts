@@ -45,6 +45,30 @@ export function edgeLabelFilter(names: any[]): Expression {
  * between/inside `expr` is shared into both bounds so its binds fall out twice in
  * order — no manual double-splice. TextP → LIKE with a bound pattern; regex/typeOf throw.
  */
+/** Per-element scalar string/cast transforms (map to SQLite scalar functions).
+ *  Returns a new value expression wrapping `v`, or null if `name` isn't a
+ *  transform. NULL propagates through every function (SQLite semantics), matching
+ *  Gremlin's null-in→null-out. A trailing Scope token is a no-op on a scalar
+ *  stream (per-element == per-list), so it's simply ignored. Deferred: reverse
+ *  (no SQLite builtin), split (list-valued), trim family (Unicode-whitespace). */
+export function scalarTx(name: string, args: any[], v: Expression): Expression | null {
+  const nums = args.filter((a) => typeof a === 'number');
+  const strs = args.filter((a) => typeof a === 'string');
+  switch (name) {
+    case 'concat': return strs.length ? q`${v}${list(strs.map((a) => q` || ${value(a)}`), '')}` : v;
+    case 'length': return q`length(${v})`;
+    case 'toUpper': return q`upper(${v})`;
+    case 'toLower': return q`lower(${v})`;
+    case 'asString': return q`CAST(${v} AS TEXT)`;
+    case 'replace': return q`replace(${v}, ${value(strs[0])}, ${value(strs[1])})`;
+    case 'substring': { // 0-based [start, end) → 1-based substr(v, start+1, end-start)
+      const [s, e] = nums;
+      return e !== undefined ? q`substr(${v}, ${value(s + 1)}, ${value(e - s)})` : q`substr(${v}, ${value(s + 1)})`;
+    }
+    default: return null;
+  }
+}
+
 /** hasId(...) args → a single predicate over the external id. A lone P argument
  *  passes through (P.within/without/eq/neq/…); otherwise the bare id args form a
  *  `within` set (nulls dropped — no element has a null id, so they never match). */
