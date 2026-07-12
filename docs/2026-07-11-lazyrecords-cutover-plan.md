@@ -127,9 +127,9 @@ boundary — a **temporary adapter** that vanishes when the bodies go node-nativ
 - [x] **S1** leaf scalar/predicate → nodes. `predicateSql` builds tails via
   `expression()`; the 8-caller `exprBinds` double-splices GONE. `Scalar`=`{expr,indexKey}`.
   ~20 consumers `render()` at boundary. Trunk `6715529`.
-- [~] **S2** label-filter splice-kill (`labelIn`/`edgeLabelFilter`, ~7 copies
+- [x] **S2** label-filter splice-kill (`labelIn`/`edgeLabelFilter`, ~7 copies
   collapsed). Read prefix splice-free. Remainder (CTE bodies as node trees) folded
-  into S5. Trunk `6715529`.
+  into S5 (done). Trunk `6715529`.
 - [x] **S3 — read tail → nodes. DONE** (trunk `3aae1f4`). `compileRead` projection
   switch, `is`-filter, order-by, `compileSelectProject`, `compileGroup`,
   `compileProperties` all build a single tail node. The `fb.push(...r.binds, ...r.binds)`
@@ -141,20 +141,21 @@ boundary — a **temporary adapter** that vanishes when the bodies go node-nativ
   `edgeMatchQuery` keep their standalone `render(propExtract(...))` (a legit `{sql,binds}`
   boundary for a run-closure, not an adapter). Imperative `INSERT`/`UPDATE` statements in
   `insertVertex`/`insertEdge` stay plain parameterised SQL (fixed statements, no splicing).
-- [~] **S5 — restructure.** Extracted (each green, on trunk): `frontend.ts` `89328a7`,
+- [x] **S5 — restructure. DONE.** Extracted (each green, on trunk): `frontend.ts` `89328a7`,
   `render.ts` `cb7638d`, `plan.ts` `24851fe`.
   1. [x] Move `ScalarCtx` cluster into `plan.ts` (**S5.1**, trunk `6b8c0b3`).
-  2. [ ] **S5.2 — the one remaining piece.** Split the step compilers into `steps/*.ts`
-     behind a `Map<name, StepCompiler>` dispatch (Seam 2). Families: movement
-     (out/in/both/…E/…V), filter (has/hasLabel/where/and/or/not/is), branch
-     (union/optional/repeat), projection/barrier (values/id/label/valueMap/elementMap/
-     count/order/group/fold/sum/properties/select/project), write. Each a small
-     unit-testable fn. NOTE: `traversalCtes` now threads mutable context (aliases/`prev()`/
-     `carry()`/`push()`/`elem`/`i`) — the dispatch must pass this as an explicit ctx object.
+  2. [x] **S5.2 — DONE.** Step compilers split into `src/steps/*.ts` behind Map
+     dispatch (Seam 2). The read prefix is a functional fold (`StepFn = (step, St) => St`
+     over immutable `St` in `context.ts`); per-family modules
+     `movement`/`filter`/`branch`/`passthrough`, tail in `projection.ts`
+     (`PROJECTORS`/`MODIFIERS` Maps + group/properties/select barriers), writes in
+     `write.ts` (ordered `WRITE_RULES` table), `index.ts` = `PREFIX` Map + `buildPrefix`
+     + `compileRead`. Ctx threaded as an explicit immutable object, not mutable state.
   3. [x] Node-tree the CTE bodies + tail; remove the `render()` CTE-assembly adapter
      (**S5.3**, trunk `3aae1f4`, folded into S3/S4). `withPrefixTree(ctes, tail)` is now
-     ONE tree. Seam 3 (extract inline rewrites — discard-strip, repeat-cluster gather,
-     range/limit-vs-order — into `strategies.ts`) still pending, lower priority.
+     ONE tree. Seam 3 also DONE — inline rewrites (discard-strip, repeat-cluster gather,
+     by()-modulator fold) extracted into `src/strategies.ts` as pure `Step[]→Step[]`
+     passes run once up front, so the dispatch sees a canonical peek-free chain.
 - **Location note:** work moved out of the `lazyrecords-cutover` worktree into the main
   checkout `~/Projects/mogwai-db`, committed directly on `trunk`. The worktree is stale
   (all its work is on trunk) and can be `git worktree remove`d.
