@@ -16,6 +16,10 @@ import { withClause } from '@bodar/lazyrecords/sql/ansi/WithClause.ts';
 import { valuesClause } from '@bodar/lazyrecords/sql/ansi/ValuesClause.ts';
 import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
 
+// template-first kernel + typed relation handles (see src/q.ts, src/schema.ts)
+import { q, relation, Relation } from './q.ts';
+import { nodes, edges, labels } from './schema.ts';
+
 
 // ---------- compilation ----------
 
@@ -76,12 +80,13 @@ export function compile(gremlin: string, params: Record<string, any>): Compiled 
 
 /** A union() branch (currently a single out/in/both movement) → a SELECT of the
  *  neighbour node ids from `seed`. Non-movement / multi-step branches defer. */
-function branchMovementSelect(bs: Step[], seed: string): Expression {
+function branchMovementSelect(bs: Step[], seed: Relation): Expression {
   if (bs.length !== 1 || (bs[0].name !== 'out' && bs[0].name !== 'in' && bs[0].name !== 'both'))
     throw new Error(`union() branch __.${bs.map((s) => s.name + '()').join('.')} not yet supported (single out()/in()/both() only)`);
   const mv = bs[0];
+  const e = edges.as('e');
   const sel = dirsFor(mv.name).map(([from, to]) =>
-    lsql(sqlText(`SELECT e.${to} AS id FROM edges e JOIN ${seed} p ON e.${from}=p.id`), edgeLabelFilter(mv.args)));
+    q`SELECT ${e.c[to]} AS id FROM ${e} JOIN ${seed} ON ${e.c[from]}=${seed.c.id}${edgeLabelFilter(mv.args)}`);
   return list(sel, sqlText(' UNION ALL '));
 }
 
@@ -106,14 +111,28 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
   // CTE after the bind carries every bound alias column forward from `p`.
   const aliases: AliasMap = new Map();
   const prev = () => ctes[ctes.length - 1].name;
-  const carry = () => [...aliases.values()].map((a) => `, p.${a.col}`).join('');
+  // The carried alias columns, in bind order (a0, a1, …).
+  const aliasCols = () => [...aliases.values()].map((a) => a.col);
+  // The previous CTE as a Relation: its columns are id + every carried alias
+  // column, so `p.c.a0` resolves downstream. Optionally aliased (movement/filter
+  // CTEs join it as `p`; the pass-through/dedup/repeat forms use it unaliased).
+  const prevRel = (alias?: string) => {
+    const r = relation(prev(), ['id', ...aliasCols()]);
+    return alias ? r.as(alias) : r;
+  };
+  // `, p.a0, p.a1` — the carried alias columns, qualified by the given prev
+  // relation; empty when no as() label is live.
+  const carryFrag = (p: Relation): Expression => {
+    const cols = aliasCols();
+    return cols.length ? list(cols.map((c) => q`, ${p.c[c]}`), sqlText('')) : sqlText('');
+  };
   // Each movement/filter step appends one CTE, named c0, c1, … by position.
   const push = (body: Expression, cols?: string[]) => ctes.push({ name: `c${ctes.length}`, body, cols });
 
   const first = steps[0];
   if (first.name !== 'V' && first.name !== 'E') throw new Error(`unsupported source step: ${first.name}`);
   let elem: Elem = first.name === 'E' ? 'edge' : 'node';
-  const srcTable = elem === 'edge' ? 'edges' : 'nodes';
+  const srcRel = elem === 'edge' ? edges : nodes;
   if (first.args.length > 0) {
     // V(...)/E(...) ids: numeric args match the rowid, string args match the
     // user id (uid). The id-relation carries rowids throughout, so a uid match
@@ -121,12 +140,12 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
     const nums = first.args.filter((a) => typeof a === 'number');
     const strs = first.args.filter((a) => typeof a === 'string');
     const clauses: Expression[] = [];
-    if (nums.length) clauses.push(lsql(sqlText('id IN ('), list(nums.map(value), sqlText(',')), sqlText(')')));
-    if (strs.length) clauses.push(lsql(sqlText('uid IN ('), list(strs.map(value), sqlText(',')), sqlText(')')));
+    if (nums.length) clauses.push(q`id IN (${list(nums.map(value), sqlText(','))})`);
+    if (strs.length) clauses.push(q`uid IN (${list(strs.map(value), sqlText(','))})`);
     if (!clauses.length) throw new Error('V()/E() ids must be numbers or strings');
-    push(lsql(sqlText(`SELECT id FROM ${srcTable} WHERE `), list(clauses, sqlText(' OR '))));
+    push(q`SELECT id FROM ${srcRel} WHERE ${list(clauses, sqlText(' OR '))}`);
   } else {
-    push(sqlText(`SELECT id FROM ${srcTable}`));
+    push(q`SELECT id FROM ${srcRel}`);
   }
 
   let i = 1;
@@ -146,21 +165,23 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
           rebind.push(entry.col);
         }
         const cols = ['id', ...[...aliases.values()].map((a) => rebind.includes(a.col) ? `id AS ${a.col}` : a.col)];
-        push(sqlText(`SELECT ${cols.join(', ')} FROM ${prev()}`));
+        push(q`SELECT ${cols.join(', ')} FROM ${prevRel()}`);
         break;
       }
       case 'hasLabel': {
-        const tbl = elem === 'edge' ? 'edges' : 'nodes';
-        push(lsql(sqlText(`SELECT n.id${carry()} FROM ${tbl} n JOIN ${prev()} p ON n.id=p.id WHERE `), labelIn('n.label', s.args)));
+        const n = (elem === 'edge' ? edges : nodes).as('n');
+        const p = prevRel('p');
+        push(q`SELECT ${n.c.id}${carryFrag(p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${labelIn('n.label', s.args)}`);
         break;
       }
       case 'has': {
-        const tbl = elem === 'edge' ? 'edges' : 'nodes';
+        const n = (elem === 'edge' ? edges : nodes).as('n');
+        const p = prevRel('p');
         const conds: Expression[] = [];
         let a = s.args;
         // has(label, key, value) — the 3-arg overload folds in a label filter.
         if (a.length === 3 && typeof a[0] === 'string') {
-          conds.push(lsql(sqlText('n.label IN (SELECT id FROM labels WHERE name='), value(a[0]), sqlText(')')));
+          conds.push(q`n.label IN (SELECT id FROM labels WHERE name=${value(a[0])})`);
           a = a.slice(1);
         }
         const [key, val] = a;
@@ -168,10 +189,10 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
           // has(T.label, v|P) / has(T.id, v|P): predicate over the label name or
           // the external id (COALESCE uid,id). Routing through predicateSql means
           // both a bare value AND a P/TextP predicate work (a bare value → equality).
-          const expr = key.token === 'label' ? '(SELECT name FROM labels WHERE id=n.label)'
-            : key.token === 'id' ? 'COALESCE(n.uid, n.id)'
+          const expr: Expression = key.token === 'label' ? q`(SELECT name FROM labels WHERE id=${n.c.label})`
+            : key.token === 'id' ? q`COALESCE(${n.c.uid}, ${n.c.id})`
             : (() => { throw new Error(`has(T.${key.token}) not supported`); })();
-          conds.push(predicateSql(sqlText(expr), val));
+          conds.push(predicateSql(expr, val));
         } else {
           const pe = propExtract('n.props', key); // literal path for indexable keys
           // Only node property indexes are auto-built (ensureNodePropIndex); an
@@ -179,7 +200,7 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
           if (pe.indexKey && elem === 'node') indexKeys.add(pe.indexKey);
           conds.push(predicateSql(pe.expr, val));
         }
-        push(lsql(sqlText(`SELECT n.id${carry()} FROM ${tbl} n JOIN ${prev()} p ON n.id=p.id WHERE `), list(conds, sqlText(' AND '))));
+        push(q`SELECT ${n.c.id}${carryFrag(p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${list(conds, sqlText(' AND '))}`);
         break;
       }
       case 'where': case 'filter': case 'not': {
@@ -188,7 +209,8 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
         // negates with COALESCE so a NULL predicate (missing prop) counts as
         // "no output" → kept, matching not(traversal) semantics.
         const arg0 = s.args[0];
-        const tbl = elem === 'edge' ? 'edges' : 'nodes';
+        const n = (elem === 'edge' ? edges : nodes).as('n');
+        const p = prevRel('p');
         const ctx: ScalarCtx = { elem, idExpr: 'n.id', propsExpr: 'n.props', labelIdExpr: 'n.label', srcExpr: 'n.src', tgtExpr: 'n.tgt' };
         let testNode: Expression;
         if (arg0 && typeof arg0 === 'object' && 'nested' in arg0) {
@@ -218,16 +240,17 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
           }
           if (s.name === 'not') testNode = lsql(sqlText('NOT COALESCE(('), testNode, sqlText('), 0)'));
         }
-        push(lsql(sqlText(`SELECT n.id${carry()} FROM ${tbl} n JOIN ${prev()} p ON n.id=p.id WHERE `), testNode));
+        push(q`SELECT ${n.c.id}${carryFrag(p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${testNode}`);
         break;
       }
       case 'and': case 'or': {
         // Filter: keep the traverser when ALL / ANY branch predicates hold.
-        const tbl = elem === 'edge' ? 'edges' : 'nodes';
+        const n = (elem === 'edge' ? edges : nodes).as('n');
+        const p = prevRel('p');
         const ctx: ScalarCtx = { elem, idExpr: 'n.id', propsExpr: 'n.props', labelIdExpr: 'n.label', srcExpr: 'n.src', tgtExpr: 'n.tgt' };
         const pred = combineBranchPreds(s, ctx, params, s.name === 'and' ? 'AND' : 'OR');
         for (const k of pred.indexKeys) indexKeys.add(k);
-        push(lsql(sqlText(`SELECT n.id${carry()} FROM ${tbl} n JOIN ${prev()} p ON n.id=p.id WHERE `), pred.expr));
+        push(q`SELECT ${n.c.id}${carryFrag(p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${pred.expr}`);
         break;
       }
       case 'union': {
@@ -238,7 +261,7 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
         if (aliases.size > 0) throw new Error('union() after as() not yet supported');
         const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
         if (branches.length < 2) throw new Error('union() needs at least two branches');
-        const parts = branches.map((b) => branchMovementSelect(stepChain(b.nested, params), prev()));
+        const parts = branches.map((b) => branchMovementSelect(stepChain(b.nested, params), prevRel('p')));
         push(list(parts, sqlText(' UNION ALL ')));
         break;
       }
@@ -252,7 +275,9 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
         if (bs.length !== 1 || (bs[0].name !== 'out' && bs[0].name !== 'in'))
           throw new Error(`optional(__.${bs[0]?.name}()) not yet supported (single out()/in() only)`);
         const [from, to] = dirsFor(bs[0].name)[0];
-        push(lsql(sqlText(`SELECT COALESCE(e.${to}, p.id) AS id FROM ${prev()} p LEFT JOIN edges e ON e.${from}=p.id`), edgeLabelFilter(bs[0].args)));
+        const e = edges.as('e');
+        const p = prevRel('p');
+        push(q`SELECT COALESCE(${e.c[to]}, ${p.c.id}) AS id FROM ${p} LEFT JOIN ${e} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(bs[0].args)}`);
         break;
       }
       case 'repeat': case 'emit': case 'times': case 'until': {
@@ -289,13 +314,15 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
         const mv = body[0];
         const maxDepth = Number(timesStep.args[0]); // always present (checked above) → bounded depth
         const w = `w${ctes.length}`;
+        const wRel = relation(w, ['id', 'depth']);
+        const e = edges.as('e');
         const rec = dirsFor(mv.name).map(([from, to]) =>
-          lsql(sqlText(`SELECT e.${to} AS id, ${w}.depth + 1 AS depth FROM ${w} JOIN edges e ON e.${from}=${w}.id WHERE ${w}.depth < ${maxDepth}`), edgeLabelFilter(mv.args)));
-        ctes.push({ name: w, cols: ['id', 'depth'], body: lsql(sqlText(`SELECT id, 0 AS depth FROM ${prev()} UNION ALL `), list(rec, sqlText(' UNION ALL '))) });
+          q`SELECT ${e.c[to]} AS id, ${wRel.c.depth} + 1 AS depth FROM ${wRel} JOIN ${e} ON ${e.c[from]}=${wRel.c.id} WHERE ${wRel.c.depth} < ${maxDepth}${edgeLabelFilter(mv.args)}`);
+        ctes.push({ name: w, cols: ['id', 'depth'], body: q`SELECT id, 0 AS depth FROM ${prevRel()} UNION ALL ${list(rec, sqlText(' UNION ALL '))}` });
         // times() only → the final depth; emit after → every iteration (≥1);
         // emit before → also the starting traverser (≥0).
         const depthCond = !emitStep ? `depth = ${maxDepth}` : emitBefore ? 'depth >= 0' : 'depth >= 1';
-        push(sqlText(`SELECT id FROM ${w} WHERE ${depthCond}`));
+        push(q`SELECT id FROM ${wRel} WHERE ${depthCond}`);
         i = j - 1; // consume the whole cluster (loop's i++ steps past it)
         break;
       }
@@ -303,8 +330,11 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
         if (elem !== 'node') throw new Error(`${s.name}() expects a vertex, not an ${elem}`);
         // Movement carries the alias columns unchanged from p while id moves to
         // the neighbour — this is what recovers "the vertex before the hop".
+        const e = edges.as('e');
+        const p = prevRel('p');
+        const cf = carryFrag(p);
         const selects = dirsFor(s.name).map(([from, to]) =>
-          lsql(sqlText(`SELECT e.${to} AS id${carry()} FROM edges e JOIN ${prev()} p ON e.${from}=p.id`), edgeLabelFilter(s.args)));
+          q`SELECT ${e.c[to]} AS id${cf} FROM ${e} JOIN ${p} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(s.args)}`);
         push(list(selects, sqlText(' UNION ALL ')));
         break;
       }
@@ -312,8 +342,11 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
         // vertex → incident edges. The new id is the EDGE id; elem becomes edge.
         if (elem !== 'node') throw new Error(`${s.name}() expects a vertex, not an ${elem}`);
         const froms = s.name === 'outE' ? ['src'] : s.name === 'inE' ? ['tgt'] : ['src', 'tgt'];
+        const e = edges.as('e');
+        const p = prevRel('p');
+        const cf = carryFrag(p);
         const selects = froms.map((from) =>
-          lsql(sqlText(`SELECT e.id AS id${carry()} FROM edges e JOIN ${prev()} p ON e.${from}=p.id`), edgeLabelFilter(s.args)));
+          q`SELECT ${e.c.id} AS id${cf} FROM ${e} JOIN ${p} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(s.args)}`);
         push(list(selects, sqlText(' UNION ALL ')));
         elem = 'edge';
         break;
@@ -322,8 +355,11 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
         // edge → endpoint vertices. The new id is the NODE id; elem becomes node.
         if (elem !== 'edge') throw new Error(`${s.name}() expects an edge, not a ${elem}`);
         const cols = s.name === 'outV' ? ['src'] : s.name === 'inV' ? ['tgt'] : ['src', 'tgt'];
+        const e = edges.as('e');
+        const p = prevRel('p');
+        const cf = carryFrag(p);
         const selects = cols.map((col) =>
-          sqlText(`SELECT e.${col} AS id${carry()} FROM edges e JOIN ${prev()} p ON e.id=p.id`));
+          q`SELECT ${e.c[col]} AS id${cf} FROM ${e} JOIN ${p} ON ${e.c.id}=${p.c.id}`);
         push(list(selects, sqlText(' UNION ALL ')));
         elem = 'node';
         break;
@@ -335,22 +371,27 @@ function traversalCtes(steps: Step[], params: Record<string, any> = {}): { ctes:
         // dedup("a") and dedup-with-active-labels rather than answer wrongly.
         if (s.args.length > 0) throw new Error('dedup(label) not yet supported');
         if (aliases.size > 0) throw new Error('dedup() after as() not yet supported (path-distinct semantics)');
-        push(sqlText(`SELECT DISTINCT id FROM ${prev()}`));
+        push(q`SELECT DISTINCT id FROM ${prevRel()}`);
         break;
       // limit/range/skip compose as CTEs while still on the id-relation (before
       // any order()); once order() is seen they fold into the final select as
       // tail modifiers so ORDER BY + LIMIT + OFFSET stay in one query.
-      case 'limit':
-        push(sqlText(`SELECT p.id${carry()} FROM ${prev()} p LIMIT ${Number(s.args[0])}`));
-        break;
-      case 'range': {
-        const { offset, limit } = rangeToOffsetLimit(s.args);
-        push(sqlText(`SELECT p.id${carry()} FROM ${prev()} p LIMIT ${limit} OFFSET ${offset}`));
+      case 'limit': {
+        const p = prevRel('p');
+        push(q`SELECT ${p.c.id}${carryFrag(p)} FROM ${p} LIMIT ${Number(s.args[0])}`);
         break;
       }
-      case 'skip':
-        push(sqlText(`SELECT p.id${carry()} FROM ${prev()} p LIMIT -1 OFFSET ${Number(s.args[0])}`));
+      case 'range': {
+        const { offset, limit } = rangeToOffsetLimit(s.args);
+        const p = prevRel('p');
+        push(q`SELECT ${p.c.id}${carryFrag(p)} FROM ${p} LIMIT ${limit} OFFSET ${offset}`);
         break;
+      }
+      case 'skip': {
+        const p = prevRel('p');
+        push(q`SELECT ${p.c.id}${carryFrag(p)} FROM ${p} LIMIT -1 OFFSET ${Number(s.args[0])}`);
+        break;
+      }
       default:
         return { ctes, stop: i, indexKeys, aliases, elem };
     }
