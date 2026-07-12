@@ -826,15 +826,17 @@ function compileProperties(
   ctes: CteDef[], last: string, elem: Elem, tail: Step[], indexKeys: Set<string>,
   params: Record<string, any> = {},
 ): Compiled {
-  const tbl = elem === 'edge' ? 'edges' : 'nodes';
   const keys = tail[0].args.filter((a): a is string => typeof a === 'string');
   const keyFilter: Expression = keys.length
-    ? lsql(sqlText(' WHERE je.key IN ('), list(keys.map(value), sqlText(',')), sqlText(')'))
+    ? q` WHERE je.key IN (${list(keys.map(value), sqlText(','))})`
     : sqlText('');
   // Expand each element's JSON props into (owner, key, value) rows; keep the
   // owner's label/props too so a following element() projection has them.
   const pc = `c${ctes.length}`;
-  const propBody = lsql(sqlText(`SELECT n.id AS owner, l.name AS ownerLabel, n.props AS ownerProps, je.key AS pk, je.value AS pv FROM ${tbl} n JOIN ${last} p ON n.id=p.id JOIN labels l ON l.id=n.label, json_each(n.props) je`), keyFilter);
+  const n = (elem === 'edge' ? edges : nodes).as('n');
+  const p = relation(last, ['id']).as('p');
+  const l = labels.as('l');
+  const propBody = q`SELECT ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, ${n.c.props} AS ownerProps, je.key AS pk, je.value AS pv FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}, json_each(${n.c.props}) je${keyFilter}`;
   const allCtes: CteDef[] = [...ctes, { name: pc, body: propBody }];
   // `consumed` = how many tail steps this shape accounts for; reject any trailing
   // steps rather than silently dropping them (matches the file's discard-discipline).
@@ -858,13 +860,13 @@ function compileProperties(
 
   switch (next) {
     case undefined: // properties() terminal → VertexProperty elements
-      return done(sqlText(`SELECT owner, pk, pv FROM ${pc}`), { kind: 'property' }, 1);
+      return done(q`SELECT owner, pk, pv FROM ${pc}`, { kind: 'property' }, 1);
     case 'key':
-      return done(sqlText(`SELECT pk AS v FROM ${pc}`), { kind: 'value' }, 2);
+      return done(q`SELECT pk AS v FROM ${pc}`, { kind: 'value' }, 2);
     case 'value':
-      return done(sqlText(`SELECT pv AS v FROM ${pc}`), { kind: 'value' }, 2);
+      return done(q`SELECT pv AS v FROM ${pc}`, { kind: 'value' }, 2);
     case 'count':
-      return done(sqlText(`SELECT COUNT(*) AS v FROM ${pc}`), { kind: 'count' }, 2);
+      return done(q`SELECT COUNT(*) AS v FROM ${pc}`, { kind: 'count' }, 2);
     case 'element': {
       // Back to the owning element. Support a terminal projection off it.
       const after = tail[2]?.name;
@@ -875,17 +877,17 @@ function compileProperties(
         throw new Error('element() of an edge property not yet supported');
       switch (after) {
         case undefined:
-          return done(sqlText(`SELECT owner AS id, ownerLabel AS label, ownerProps AS props FROM ${pc}`), { kind: 'vertex' }, 2);
+          return done(q`SELECT owner AS id, ownerLabel AS label, ownerProps AS props FROM ${pc}`, { kind: 'vertex' }, 2);
         case 'id':
-          return done(sqlText(`SELECT owner AS v FROM ${pc}`), { kind: 'value' }, 3);
+          return done(q`SELECT owner AS v FROM ${pc}`, { kind: 'value' }, 3);
         case 'label':
-          return done(sqlText(`SELECT ownerLabel AS v FROM ${pc}`), { kind: 'value' }, 3);
+          return done(q`SELECT ownerLabel AS v FROM ${pc}`, { kind: 'value' }, 3);
         case 'values': {
           const pe = propExtract('ownerProps', tail[2].args[0]); // same node in SELECT + WHERE → binds fall out per occurrence
-          return done(lsql(sqlText('SELECT '), pe.expr, sqlText(` AS v FROM ${pc} WHERE `), predicateSql(pe.expr, undefined)), { kind: 'value' }, 3);
+          return done(q`SELECT ${pe.expr} AS v FROM ${pc} WHERE ${predicateSql(pe.expr, undefined)}`, { kind: 'value' }, 3);
         }
         case 'count':
-          return done(sqlText(`SELECT COUNT(*) AS v FROM ${pc}`), { kind: 'count' }, 3);
+          return done(q`SELECT COUNT(*) AS v FROM ${pc}`, { kind: 'count' }, 3);
         default:
           throw new Error(`step not implemented after element(): ${after}()`);
       }
