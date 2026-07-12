@@ -161,6 +161,18 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile("g.V().valueMap().inject(1)", {})).toThrow('non-scalar projection');
   });
 
+  test('union() as a source step UNION ALLs its vertex-rooted branches', () => {
+    const p = read("g.union(__.V(2),__.V(4)).values('name')");
+    expect(p.sql).toContain('UNION ALL');
+    expect(p.sql).toContain("json_extract(n.props, '$.name')");
+    // branches sharing the one WITH clause
+    expect(read("g.union(__.V().hasLabel('software'),__.V().hasLabel('person')).count()").shape).toEqual({ kind: 'count' });
+    // mid-chain union() still works (different code path)
+    expect(read("g.V().union(__.out(),__.in()).values('name')").sql).toContain('UNION ALL');
+    // non-vertex / unsupported branch defers with a clear error
+    expect(() => compile('g.union(__.inject(1),__.inject(2))', {})).toThrow('unsupported source step: inject');
+  });
+
   test('limit before count wraps the counted id-relation', () => {
     expect(read('g.V().limit(2).count()').sql).toContain('SELECT COUNT(*) AS v FROM (SELECT id FROM c1)');
   });
