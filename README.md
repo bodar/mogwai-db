@@ -53,20 +53,19 @@ graph analytics at scale, use Neptune / TigerGraph — that's their job, not thi
 
 ### How it compares
 
-Rated **relative to mogwai-db**: ✅ = the other DB is better · ➖ = roughly the
-same · ❌ = the other DB is worse. "—" = not applicable.
+Rated **relative to mogwai-db**: ✅✅ = mogwai-db is better · ✅ = roughly the
+same · ❌ = mogwai-db is worse. "—" = not applicable.
 
 | Property | mogwai-db | Neptune | Cosmos (Gremlin) | Neo4j Aura | TigerGraph | JanusGraph |
 |---|---|---|---|---|---|---|
-| Speaks Gremlin / TinkerPop | native | ➖ yes | ➖ yes | ❌ Cypher only | ❌ GSQL only | ➖ native |
-| TinkerPop version | **v4** | ❌ v3 | ❌ v3 | — | — | ❌ v3 |
-| Managed infra (HA, backups, patching) | Cloudflare-run | ➖ managed | ➖ managed | ➖ managed | ➖ managed | ❌ self-run |
-| Capacity planning / sizing | none (autoscale) | ➖ serverless option | ➖ autoscale RU | ❌ fixed tiers | ❌ sized cluster | ❌ sized backend |
-| Idle cost / scale-to-zero | ~$0 | ❌ instance/NCU floor | ❌ RU floor | ❌ tier floor | ❌ high floor | ❌ backend cost |
-| Cheap per-tenant fleets | free (1 DO/graph) | ❌ costly | ❌ costly | ❌ costly | ❌ costly | ❌ manual |
-| Single-graph scale ceiling | ~10 GB / graph | ✅ ~unbounded | ✅ ~unbounded | ✅ large | ✅ billions | ✅ large |
-| Analytics / OLAP algorithms | none | ✅ Analytics | ➖ weak | ✅ GDS | ✅ strong | ✅ via Spark |
-| Production maturity | ❌ **pre-alpha** | ✅ GA | ✅ GA | ✅ GA | ✅ GA | ✅ GA |
+| Gremlin / TinkerPop version | native **v4** | ✅ v3 | ✅ v3 | ❌ Cypher only | ❌ GSQL only | ✅ v3 |
+| Managed infra (HA, backups, patching) | Cloudflare-run | ✅ managed | ✅ managed | ✅ managed | ✅ managed | ✅✅ self-run |
+| Capacity planning / sizing | none (autoscale) | ✅ serverless option | ✅ autoscale RU | ✅✅ fixed tiers | ✅✅ sized cluster | ✅✅ sized backend |
+| Idle cost / scale-to-zero | ~$0 | ✅✅ instance/NCU floor | ✅✅ RU floor | ✅✅ tier floor | ✅✅ high floor | ✅✅ backend cost |
+| Cheap per-tenant fleets | free (1 DO/graph) | ✅✅ costly | ✅✅ costly | ✅✅ costly | ✅✅ costly | ✅✅ manual |
+| Single-graph scale ceiling | ~10 GB / graph | ❌ ~unbounded | ❌ ~unbounded | ❌ large | ❌ large | ❌ large |
+| Analytics / OLAP algorithms | none | ❌ Analytics | ✅ weak | ❌ GDS | ❌ strong | ❌ via Spark |
+| Production maturity | **pre-alpha** | ❌ GA | ❌ GA | ❌ GA | ❌ GA | ❌ GA |
 
 Read the columns: mogwai's real edges are **idle cost, per-tenant isolation, and
 v4 currency**; it honestly concedes **scale ceiling, OLAP, and — for now —
