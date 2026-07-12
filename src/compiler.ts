@@ -494,20 +494,22 @@ function compileRead(steps: Step[], params: Record<string, any> = {}): Compiled 
 
   // count folds any tail limit/offset/distinct into the counted id-relation.
   if (projName === 'count') {
-    const inner = sqlText(`SELECT ${distinct ? 'DISTINCT ' : ''}id FROM ${last}`);
-    const innerLim = (limit !== null || offset > 0) ? sqlText(` LIMIT ${limit ?? -1} OFFSET ${offset}`) : sqlText('');
-    let countNode: Expression = lsql(sqlText('SELECT COUNT(*) AS v FROM ('), inner, innerLim, sqlText(')'));
+    const inner = q`SELECT ${distinct ? 'DISTINCT ' : ''}id FROM ${relation(last, ['id'])}`;
+    const innerLim = (limit !== null || offset > 0) ? q` LIMIT ${limit ?? -1} OFFSET ${offset}` : sqlText('');
+    let countNode: Expression = q`SELECT COUNT(*) AS v FROM (${inner}${innerLim})`;
     // count().is(P): filter the single count value (0 or 1 result rows).
     if (isPreds.length)
-      countNode = lsql(sqlText('SELECT v FROM ('), countNode, sqlText(') WHERE '), list(isPreds.map((p) => predicateSql(sqlText('v'), p)), sqlText(' AND ')));
+      countNode = q`SELECT v FROM (${countNode}) WHERE ${list(isPreds.map((pr) => predicateSql(sqlText('v'), pr)), sqlText(' AND '))}`;
     return readCompiled(ctes, countNode, { kind: 'count' }, [...indexKeys]);
   }
 
   // The current element's table; `n` is the element row regardless of kind.
-  const tbl = elem === 'edge' ? 'edges' : 'nodes';
-  const vJoin = `${tbl} n JOIN ${last} p ON n.id=p.id`;
-  const vlJoin = `${vJoin} JOIN labels l ON l.id=n.label`;
-  let colsNode: Expression, fromText: string;
+  const n = (elem === 'edge' ? edges : nodes).as('n');
+  const p = relation(last, ['id']).as('p');
+  const l = labels.as('l');
+  const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
+  const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
+  let colsNode: Expression, fromNode: Expression;
   // The projected scalar expression, captured so a trailing is(P) can filter on
   // it. Non-scalar projections leave it null → is() throws. `baseWhere` is the
   // values() existence check (shares the same json_extract node as the select).
@@ -515,12 +517,12 @@ function compileRead(steps: Step[], params: Record<string, any> = {}): Compiled 
   let baseWhere: Expression | null = null;
   // An element reports its user id when it has one, else the rowid. Used only in
   // the outward-facing projection — the id-relation joins keep the raw rowid.
-  const extId = 'COALESCE(n.uid, n.id)';
+  const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
   switch (projName) {
     case 'values': {
       shape = { kind: 'value' };
       const pe = propExtract('n.props', projStep!.args[0]);
-      colsNode = lsql(pe.expr, sqlText(' AS v')); fromText = vJoin;
+      colsNode = q`${pe.expr} AS v`; fromNode = vJoin;
       baseWhere = predicateSql(pe.expr, undefined); // <pe> IS NOT NULL (same node → binds fall out per occurrence)
       scalarExpr = pe.expr;
       // values(k).is(P) is a filter-position use → auto-index the key (like has());
@@ -531,23 +533,23 @@ function compileRead(steps: Step[], params: Record<string, any> = {}): Compiled 
     case 'id':
       // Join the element table even though the id lives in `last`, so a preceding
       // order().by(key) — which references n.props — has the alias in scope.
-      shape = { kind: 'value' }; colsNode = sqlText(`${extId} AS v`); fromText = vJoin; scalarExpr = sqlText(extId); break;
+      shape = { kind: 'value' }; colsNode = q`${extId} AS v`; fromNode = vJoin; scalarExpr = extId; break;
     case 'label':
-      shape = { kind: 'value' }; colsNode = sqlText('l.name AS v'); fromText = vlJoin; scalarExpr = sqlText('l.name'); break;
+      shape = { kind: 'value' }; colsNode = q`${l.c.name} AS v`; fromNode = vlJoin; scalarExpr = l.c.name; break;
     case 'valueMap': {
       const keys = projStep!.args.filter((a) => typeof a === 'string') as string[];
       shape = { kind: 'valueMap', keys: keys.length ? keys : null, tokens: projStep!.args.includes(true) };
-      colsNode = sqlText(`${extId} AS id, l.name AS label, n.props`); fromText = vlJoin; break;
+      colsNode = q`${extId} AS id, ${l.c.name} AS label, ${n.c.props}`; fromNode = vlJoin; break;
     }
     case 'elementMap': {
       if (elem === 'edge') throw new Error('elementMap() on edges not yet supported'); // needs IN/OUT direction tokens
       const keys = projStep!.args.filter((a) => typeof a === 'string') as string[];
       shape = { kind: 'elementMap', keys: keys.length ? keys : null };
-      colsNode = sqlText(`${extId} AS id, l.name AS label, n.props`); fromText = vlJoin; break;
+      colsNode = q`${extId} AS id, ${l.c.name} AS label, ${n.c.props}`; fromNode = vlJoin; break;
     }
     default: // the element itself
-      if (elem === 'edge') { shape = { kind: 'edge' }; colsNode = sqlText(`${extId} AS id, l.name AS label, n.src, n.tgt, n.props`); fromText = vlJoin; }
-      else { shape = { kind: 'vertex' }; colsNode = sqlText(`${extId} AS id, l.name AS label, n.props`); fromText = vlJoin; }
+      if (elem === 'edge') { shape = { kind: 'edge' }; colsNode = q`${extId} AS id, ${l.c.name} AS label, ${n.c.src}, ${n.c.tgt}, ${n.c.props}`; fromNode = vlJoin; }
+      else { shape = { kind: 'vertex' }; colsNode = q`${extId} AS id, ${l.c.name} AS label, ${n.c.props}`; fromNode = vlJoin; }
   }
 
   // WHERE: the values() existence check + any is(P) on the projected scalar,
@@ -556,9 +558,9 @@ function compileRead(steps: Step[], params: Record<string, any> = {}): Compiled 
   if (baseWhere) whereParts.push(baseWhere);
   if (isPreds.length) {
     if (!scalarExpr) throw new Error('is() requires a scalar stream (values/label/id/count)');
-    for (const p of isPreds) whereParts.push(predicateSql(scalarExpr, p));
+    for (const pr of isPreds) whereParts.push(predicateSql(scalarExpr, pr));
   }
-  const whereNode: Expression = whereParts.length ? lsql(sqlText(' WHERE '), list(whereParts, sqlText(' AND '))) : sqlText('');
+  const whereNode: Expression = whereParts.length ? q` WHERE ${list(whereParts, sqlText(' AND '))}` : sqlText('');
 
   let orderNode: Expression = sqlText('');
   if (orders.length) {
@@ -568,15 +570,15 @@ function compileRead(steps: Step[], params: Record<string, any> = {}): Compiled 
       if (o.key !== null) {
         const pe = propExtract('n.props', o.key);
         if (pe.indexKey && elem === 'node') indexKeys.add(pe.indexKey); // order().by(key) sorts via the index (node-only auto-index)
-        return lsql(pe.expr, sqlText(dir));
+        return q`${pe.expr}${dir}`;
       }
       return sqlText(`${shape.kind === 'value' ? 'v' : 'n.id'}${dir}`);
     });
-    orderNode = lsql(sqlText(' ORDER BY '), list(keyNodes, sqlText(', ')));
+    orderNode = q` ORDER BY ${list(keyNodes, sqlText(', '))}`;
   }
-  const limitNode: Expression = (limit !== null || offset > 0) ? sqlText(` LIMIT ${limit ?? -1} OFFSET ${offset}`) : sqlText('');
+  const limitNode: Expression = (limit !== null || offset > 0) ? q` LIMIT ${limit ?? -1} OFFSET ${offset}` : sqlText('');
 
-  let tailNode: Expression = lsql(sqlText(`SELECT ${distinct ? 'DISTINCT ' : ''}`), colsNode, sqlText(` FROM ${fromText}`), whereNode, orderNode, limitNode);
+  let tailNode: Expression = q`SELECT ${distinct ? 'DISTINCT ' : ''}${colsNode} FROM ${fromNode}${whereNode}${orderNode}${limitNode}`;
 
   // Terminal reducers wrap the projected select. fold() → the whole stream as one
   // List (handler collapses rows); sum() → one numeric via SQL SUM.
@@ -589,7 +591,7 @@ function compileRead(steps: Step[], params: Record<string, any> = {}): Compiled 
     if (shape.kind !== 'value') throw new Error(`sum() of ${shape.kind} not yet supported`);
     // typeof(SUM) is 'integer' or 'real' → the handler frames Int/Long vs Double
     // to match TinkerPop (sum of ints → Int/Long by magnitude; of doubles → Double).
-    tailNode = lsql(sqlText('SELECT SUM(v) AS v, typeof(SUM(v)) AS vt FROM ('), tailNode, sqlText(')'));
+    tailNode = q`SELECT SUM(v) AS v, typeof(SUM(v)) AS vt FROM (${tailNode})`;
     shape = { kind: 'scalar' };
   }
 
