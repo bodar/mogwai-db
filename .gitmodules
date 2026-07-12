@@ -1,0 +1,7 @@
+[submodule "vendor/tinkerpop"]
+	path = vendor/tinkerpop
+	url = https://github.com/apache/tinkerpop.git
+	shallow = false
+	# Pinned by SHA; its working tree carries build artifacts (node_modules,
+	# bun.lock, generated grammar) we never track — ignore all working-tree state.
+	ignore = all

@@ -1,7 +1,7 @@
 // The canonical TinkerPop "modern" graph, with the exact element ids the
 // official Gherkin scenarios reference. Seed an empty store before running
 // the conformance suite.
-import type { GraphStore } from '../src/storage.ts';
+import type { GraphStore } from '../../src/storage.ts';
 
 export function seedModern(store: GraphStore) {
   const person = store.labelId('person');

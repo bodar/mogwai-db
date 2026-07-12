@@ -2,7 +2,7 @@ import { test, expect, describe } from 'bun:test';
 import { compile } from '../src/compiler.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
-import { seedModern } from '../conformance/seed-modern.ts';
+import { seedModern } from './conformance/seed-modern.ts';
 
 // ---------- L2: SQL snapshots (canonical string -> SQL + binds + shape) ----------
 

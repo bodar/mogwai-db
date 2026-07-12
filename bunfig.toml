@@ -1,0 +1,5 @@
+# Scope `bun test` discovery to our own test/ tree. Without this, bun recurses
+# into vendor/tinkerpop (the pinned submodule) and runs TinkerPop's own test
+# suites, which aren't ours to pass.
+[test]
+root = "test"

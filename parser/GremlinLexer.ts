@@ -1,4 +1,3 @@
-// Generated from Gremlin.g4 by ANTLR 4.13.1
 
 import * as antlr from "antlr4ng";
 import { Token } from "antlr4ng";
