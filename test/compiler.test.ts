@@ -49,6 +49,21 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().range(2,1)', {})).toThrow('Not a legal range: [2, 1]');
   });
 
+  test('hasId filters on the external id (COALESCE(uid,id))', () => {
+    const one = read('g.V().hasId(1)');
+    expect(one.sql).toContain('COALESCE(n.uid, n.id) in (?)');
+    expect(one.binds).toEqual([1]);
+    const many = read('g.V().hasId(1,2)');
+    expect(many.sql).toContain('COALESCE(n.uid, n.id) in (?, ?)');
+    expect(many.binds).toEqual([1, 2]);
+    // nulls dropped from the set; predicate arg passes through
+    expect(read('g.V().hasId(1,null)').binds).toEqual([1]);
+    expect(read('g.V().hasId(P.neq(1))').sql).toContain('COALESCE(n.uid, n.id) != ?');
+    // empty within/without fold to constants, not the SQLite-illegal `IN ()`
+    expect(read('g.V().hasId(P.within([]))').sql).toContain('WHERE 0');
+    expect(read('g.V().not(__.hasId(P.within([])))').sql).toContain('NOT COALESCE');
+  });
+
   test('limit before count wraps the counted id-relation', () => {
     expect(read('g.V().limit(2).count()').sql).toContain('SELECT COUNT(*) AS v FROM (SELECT id FROM c1)');
   });

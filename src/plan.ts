@@ -45,13 +45,23 @@ export function edgeLabelFilter(names: any[]): Expression {
  * between/inside `expr` is shared into both bounds so its binds fall out twice in
  * order — no manual double-splice. TextP → LIKE with a bound pattern; regex/typeOf throw.
  */
+/** hasId(...) args → a single predicate over the external id. A lone P argument
+ *  passes through (P.within/without/eq/neq/…); otherwise the bare id args form a
+ *  `within` set (nulls dropped — no element has a null id, so they never match). */
+export function idPredFromArgs(args: any[]): any {
+  if (args.length === 1 && args[0] && typeof args[0] === 'object' && 'op' in args[0]) return args[0];
+  return { op: 'within', values: args.filter((a) => a !== null && a !== undefined) };
+}
+
 export function predicateSql(expr: Expression, pred: any): Expression {
   if (pred === undefined) return q`${expr} is not null`;
   if (pred === null || typeof pred !== 'object' || !('op' in pred)) return q`${expr} = ${value(pred)}`;
   const { op, values: vals } = pred as Pred;
   if (op in P_OPS) return q`${expr} ${P_OPS[op]} ${value(vals[0])}`;
-  if (op === 'within') return q`${expr} in (${values(vals)})`;
-  if (op === 'without') return q`${expr} not in (${values(vals)})`;
+  // SQLite rejects an empty `IN ()` list, so fold the degenerate sets to their
+  // constant truth value: within nothing = never, without nothing = always.
+  if (op === 'within') return vals.length ? q`${expr} in (${values(vals)})` : q`0`;
+  if (op === 'without') return vals.length ? q`${expr} not in (${values(vals)})` : q`1`;
   // between = [lo, hi) inclusive low; inside = (lo, hi) exclusive low. `expr` is
   // shared into both bounds → its binds fall out twice in order (no double-splice).
   if (op === 'between' || op === 'inside')
@@ -257,6 +267,8 @@ export function compileFilterPredicate(nested: Step[], ctx: ScalarCtx, params: R
   }
   if (head === 'hasLabel' && body.length === 1)
     return { expr: labelIn(ctx.labelIdExpr, body[0].args), indexKeys };
+  if (head === 'hasId' && body.length === 1)
+    return { expr: predicateSql(ctx.extIdExpr!, idPredFromArgs(body[0].args)), indexKeys };
 
   if (MOVES.has(head) && body.length === 1) {
     // where(__.out().is(P)) would mean "has a neighbour satisfying P" — the bare
