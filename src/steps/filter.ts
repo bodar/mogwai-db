@@ -1,8 +1,8 @@
 import { q, list, type Expression } from '../q.ts';
 import { stepChain, type Pred } from '../frontend.ts';
 import {
-  P_OPS, propExtract, labelIn, predicateSql, propAt, elemCtx,
-  compileFilterPredicate, combineBranchPreds, idPredFromArgs, type Elem,
+  P_OPS, propExtract, labelIn, predicateSql, propAt, elemCtx, aliasCtx,
+  compileFilterPredicate, combineBranchPreds, idPredFromArgs, type Elem, type ScalarCtx,
 } from '../plan.ts';
 import { advance, carryFrag, elemRel, pathColsOf, prevRel, type AliasMap, type St, type StepFn } from './context.ts';
 
@@ -21,6 +21,15 @@ function aliasIdExpr(label: string, aliases: AliasMap): string {
 
 /** The scalar context a current-element predicate correlates on (aliased `n`). */
 const currentCtx = (st: St) => elemCtx(elemRel(st), st.elem);
+
+/** Re-root a where()/and()/or() sub-traversal that begins with as('x')/select('x')
+ *  onto the aliased traverser: its correlation becomes the carried alias column
+ *  (`p.a{k}`), read back via aliasCtx. Throws for an unseen label. */
+const aliasResolver = (st: St) => (label: string): ScalarCtx => {
+  const entry = st.aliases.get(label);
+  if (!entry) throw new Error(`where(__.as("${label}")): no such label — as("${label}") was not seen`);
+  return aliasCtx(prevRel(st, 'p').c[entry.col], entry.elem);
+};
 
 /** `SELECT n.id<carry> FROM <elem> n JOIN prev p … WHERE <test>` — the filter CTE
  *  shape shared by has/hasLabel/where/and/or. */
@@ -119,7 +128,7 @@ export const has: StepFn = (s, st) => {
 export const where: StepFn = (s, st) => {
   const arg0 = s.args[0];
   if (arg0 && typeof arg0 === 'object' && 'nested' in arg0) {
-    const pred = compileFilterPredicate(stepChain(arg0.nested, st.params), currentCtx(st), st.params);
+    const pred = compileFilterPredicate(stepChain(arg0.nested, st.params), currentCtx(st), st.params, aliasResolver(st));
     return filterCte(st, s.name === 'not' ? notCoalesce(pred.expr) : pred.expr, pred.indexKeys);
   }
   // Alias-compare: where("a", P.eq("b")) (label vs label) or where(P.neq("a"))
@@ -152,7 +161,7 @@ export const where: StepFn = (s, st) => {
 
 /** and()/or(): keep the traverser when ALL / ANY branch predicates hold. */
 export const andOr: StepFn = (s, st) => {
-  const pred = combineBranchPreds(s, currentCtx(st), st.params, s.name === 'and' ? 'AND' : 'OR');
+  const pred = combineBranchPreds(s, currentCtx(st), st.params, s.name === 'and' ? 'AND' : 'OR', aliasResolver(st));
   return filterCte(st, pred.expr, pred.indexKeys);
 };
 

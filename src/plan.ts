@@ -191,6 +191,19 @@ export function elemCtx(n: Relation, elem: Elem): ScalarCtx {
  *  name as a scalar subquery node. */
 export const labelNameSub = (labelIdExpr: Expression): Expression => q`(SELECT name FROM labels WHERE id=${labelIdExpr})`;
 
+/** A ScalarCtx correlating on an element identified by `idExpr` (a rowid column, e.g.
+ *  an as()-bound alias column `p.a0`, or a recursive-walk row's id). props/label/src/
+ *  tgt are read back by correlated subquery. Lets where()/by() sub-traversals re-root
+ *  on an aliased traverser (`where(__.as('b').out()…)`) or a synthetic row. */
+export function aliasCtx(idExpr: Expression, elem: Elem): ScalarCtx {
+  const tbl = elem === 'edge' ? 'edges' : 'nodes';
+  const sub = (c: string) => q`(SELECT ${c} FROM ${raw(tbl)} WHERE id=${idExpr})`;
+  return {
+    elem, idExpr, extIdExpr: sub('COALESCE(uid, id)'), propsExpr: sub('props'), labelIdExpr: sub('label'),
+    ...(elem === 'edge' ? { srcExpr: sub('src'), tgtExpr: sub('tgt') } : {}),
+  };
+}
+
 /** Resolve an endpoint rowid (an edge's `src`/`tgt` column) to the node's
  *  outward-facing external id `(SELECT COALESCE(uid,id) FROM nodes WHERE id=<rowid>)`.
  *  Used ONLY when framing an edge ELEMENT out (materialization → a bounded result
@@ -310,8 +323,19 @@ const requireTerminal = (steps: Step[], n: number) => {
  *   __.and(t…) / __.or(t…)    → the branch predicates combined with AND / OR
  * Multi-hop / neighbour-terminal-filter are deferred with clear errors.
  */
-export function compileFilterPredicate(nested: Step[], ctx: ScalarCtx, params: Record<string, any> = {}): { expr: Expression; indexKeys: string[] } {
+export function compileFilterPredicate(
+  nested: Step[], ctx: ScalarCtx, params: Record<string, any> = {},
+  resolveAlias?: (label: string) => ScalarCtx,
+): { expr: Expression; indexKeys: string[] } {
   const indexKeys: string[] = [];
+
+  // A leading as('x')/select('x') re-roots the predicate on the aliased traverser:
+  // where(__.as('b').out('created').has('name','ripple')) correlates on b's column.
+  const h0 = nested[0];
+  if (resolveAlias && nested.length > 1 && (h0.name === 'as' || h0.name === 'select')
+      && h0.args.length === 1 && typeof h0.args[0] === 'string')
+    return compileFilterPredicate(nested.slice(1), resolveAlias(h0.args[0]), params, resolveAlias);
+
   let body = nested;
   let isPred: any = undefined, hasIs = false;
   if (body[body.length - 1]?.name === 'is') { isPred = body[body.length - 1].args[0]; hasIs = true; body = body.slice(0, -1); }
@@ -322,7 +346,7 @@ export function compileFilterPredicate(nested: Step[], ctx: ScalarCtx, params: R
   // and(t…)/or(t…): combine each branch's predicate. (infix .and()/.or() — a
   // multi-step body — is not this shape and falls through to the deferred throw.)
   if ((head === 'and' || head === 'or') && body.length === 1)
-    return combineBranchPreds(body[0], ctx, params, head === 'and' ? 'AND' : 'OR');
+    return combineBranchPreds(body[0], ctx, params, head === 'and' ? 'AND' : 'OR', resolveAlias);
 
   const term = body[body.length - 1]?.name;
 
@@ -368,7 +392,7 @@ export function compileFilterPredicate(nested: Step[], ctx: ScalarCtx, params: R
   if (head === 'not' && body.length === 1) {
     const arg = body[0].args.find((a: any) => a && typeof a === 'object' && 'nested' in a);
     if (!arg) throw new Error('not() requires a traversal');
-    const inner = compileFilterPredicate(stepChain(arg.nested, params), ctx, params);
+    const inner = compileFilterPredicate(stepChain(arg.nested, params), ctx, params, resolveAlias);
     indexKeys.push(...inner.indexKeys);
     return { expr: q`NOT COALESCE((${inner.expr}), 0)`, indexKeys };
   }
@@ -382,12 +406,15 @@ export function compileFilterPredicate(nested: Step[], ctx: ScalarCtx, params: R
 
 /** and(t…)/or(t…): each branch → a filter predicate node, joined by AND/OR
  *  (`((p0) AND (p1))`). Used both as a top-level filter step and inside where(__.and/or). */
-export function combineBranchPreds(step: Step, ctx: ScalarCtx, params: Record<string, any>, op: 'AND' | 'OR'): { expr: Expression; indexKeys: string[] } {
+export function combineBranchPreds(
+  step: Step, ctx: ScalarCtx, params: Record<string, any>, op: 'AND' | 'OR',
+  resolveAlias?: (label: string) => ScalarCtx,
+): { expr: Expression; indexKeys: string[] } {
   const branches = step.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 2) throw new Error(`${step.name}() needs at least two traversal branches`);
   const indexKeys: string[] = [];
   const parts = branches.map((b) => {
-    const p = compileFilterPredicate(stepChain(b.nested, params), ctx, params);
+    const p = compileFilterPredicate(stepChain(b.nested, params), ctx, params, resolveAlias);
     indexKeys.push(...p.indexKeys);
     return paren(p.expr);
   });
