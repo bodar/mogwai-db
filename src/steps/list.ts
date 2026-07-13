@@ -6,8 +6,9 @@
 // and, later, inject-of-a-list / select(Column.values).
 
 import { q, type Expression } from '../q.ts';
+import { predicateSql } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
-import { carryOf, type ListStream, type ScalarStream } from './stream.ts';
+import { carryOf, toListStream, type ListStream, type ScalarStream } from './stream.ts';
 import { type St } from './context.ts';
 import { readCompiled, type Compiled } from '../render.ts';
 import { dispatchNext } from './index.ts';
@@ -51,6 +52,18 @@ export function compileUnfold(s: ListStream): St | ScalarStream {
   return { ...c, kind: 'scalar', rel, as: s.of.as };
 }
 
+/** none(pred): keep each list where NO element satisfies pred (a per-list collection
+ *  filter) — stays a list stream. (SQL null semantics: an eq(null)/neq(null) predicate
+ *  won't match a null element, so those edge forms may differ from TinkerPop.) */
+function listNoneFilter(s: ListStream, pred: any): ListStream {
+  const c = s.rel.as('c');
+  const rel = s.q.cte(
+    q`SELECT ${c.c.list} AS list FROM ${c} WHERE NOT EXISTS (SELECT 1 FROM json_each(${c.c.list}) je WHERE ${predicateSql(q`je.value`, pred)})`,
+    ['list'],
+  );
+  return toListStream(carryOf(s), rel, s.of);
+}
+
 /**
  * The list arm of dispatchNext. A non-terminal fold always leaves a follower, so a
  * ListStream here is never terminal (a terminal fold stays the reducer path). unfold()
@@ -58,9 +71,17 @@ export function compileUnfold(s: ListStream): St | ScalarStream {
  * later — until then they defer with a clear message.
  */
 export function compileFromList(s: ListStream, steps: PStep[], at: number): Compiled {
-  if (at >= steps.length) throw new Error('a bare list value cannot be framed here (only a terminal fold() can)');
+  // End of chain → frame each list value as one GraphBinary List (json() so the JSONB
+  // blob reads back as text for the handler to parse).
+  if (at >= steps.length) {
+    const c = s.rel.as('c');
+    return readCompiled(s.q, q`SELECT json(${c.c.list}) AS list FROM ${c}`, { kind: 'jsonbList' });
+  }
   const step = steps[at];
   if (step.name === 'unfold') return dispatchNext(compileUnfold(s), steps, at + 1);
+  // none(pred): keep each list where NO element satisfies pred (a collection filter);
+  // stays a list stream, so downstream continues.
+  if (step.name === 'none') return dispatchNext(listNoneFilter(s, step.args[0]), steps, at + 1);
   // Scope.local per-list reducers (count/sum/min/max/mean) — reduce each list to a
   // scalar. Terminal only for now; a trailing step (e.g. .is(P)) defers.
   if (['count', 'sum', 'min', 'max', 'mean'].includes(step.name) && isLocal(step)) {

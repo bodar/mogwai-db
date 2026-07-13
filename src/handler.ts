@@ -272,6 +272,9 @@ function execute(store: GraphStore, gremlin: string, params: Record<string, any>
       if (shape.elem === 'scalar') return [ioc.listSerializer.serialize(rows.map((r) => r.v))];
       return [listBuffer(rows.map(shape.elem === 'edge' ? rowEdge : rowVertex))];
     }
+    // A list-VALUE stream: one framed List per row (the `list` column arrives as JSON
+    // text via json(), so it JSON.parses; scalar elements frame via listSerializer).
+    case 'jsonbList': return rows.map((r) => ioc.listSerializer.serialize(JSON.parse(r.list)));
     case 'discard': return [];
   }
 }

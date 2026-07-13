@@ -1,13 +1,13 @@
 import { q, value, list, empty, Relation, Query, type Expression } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
 import {
-  propExtract, propAt, predicateSql, compileNestedScalar, labelNameSub, rangeToOffsetLimit, elemCtx, aliasCtx, scalarTx, extIdOf, jsonbGroupArray,
+  propExtract, propAt, predicateSql, compileNestedScalar, labelNameSub, rangeToOffsetLimit, elemCtx, aliasCtx, scalarTx, extIdOf, jsonbGroupArray, jsonbArrayOf,
   type ScalarCtx,
 } from '../plan.ts';
 import { mathToSql, mathVars } from '../math.ts';
 import { stepChain, parseIsoMs, flattenListArgs, type Step } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { elemRel, type AliasMap, type St } from './context.ts';
+import { elemRel, type AliasMap, type Carry, type St } from './context.ts';
 import { carryOf, toListStream, type ListStream, type ScalarStream } from './stream.ts';
 import { dispatchNext } from './index.ts';
 import {
@@ -40,6 +40,7 @@ interface TailAcc {
   isPreds: any[];                  // is(P) filters on the projected scalar (AND'd)
   transforms: PStep[];             // scalar string/cast transforms wrapping the projected scalar, in order
   injects: any[];                  // constants appended to the value stream (values(k).inject(c))
+  localMean: boolean;              // mean(Scope.local) on a scalar stream → coerce each value to Double
 }
 
 const PROJECTION_NAMES = new Set(['values', 'id', 'label', 'count', 'valueMap', 'elementMap', 'select', 'project', 'path']);
@@ -104,7 +105,7 @@ function reducerMod(name: NonNullable<TailAcc['reducer']>): ModFn {
  *  Shared by compileTail (element-rooted) and compileInject (scalar-stream-rooted)
  *  so both consume one modifier vocabulary — add a value-tail step once, here. */
 export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop: number } {
-  const acc: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, reducer: null, isPreds: [], transforms: [], injects: [] };
+  const acc: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, reducer: null, isPreds: [], transforms: [], injects: [], localMean: false };
   let i = from;
   for (; i < steps.length; i++) {
     const s = steps[i];
@@ -115,6 +116,21 @@ export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop:
     //    A TERMINAL fold (last step) stays the current reducer below, byte-identical.
     if (s.name === 'unfold') break;
     if (s.name === 'fold' && i !== steps.length - 1) break;
+    // Scope.local means "per-element WITHIN a list". Reached HERE (element/scalar
+    // tail, NOT the list phase), each traverser is a scalar — a degenerate one-element
+    // list — so the local reduce operates on that single value, correct BY DESIGN
+    // (not the global form, which would differ for a multi-element stream). A scalar's
+    // local sum/min/max/order/dedup is the value itself (identity → skip the step);
+    // mean coerces to Double (mean is always Double, even of one value). Scalar
+    // TRANSFORMS (concat/length/toLower/…) already treat Scope.local as a no-op — the
+    // project relies on this (see the inject().length(Scope.local) test), so they fall
+    // through to their own handler. Ops whose scalar-local form isn't yet worked out
+    // (count→1, limit/range/tail/skip) fail closed rather than run the global form.
+    if (!SCALAR_TX_NAMES.has(s.name) && (s.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local')) {
+      if (s.name === 'sum' || s.name === 'min' || s.name === 'max' || s.name === 'order' || s.name === 'dedup') continue; // identity
+      if (s.name === 'mean') { acc.localMean = true; continue; }
+      throw new Error(`${s.name}(Scope.local) requires a preceding list-producing step (e.g. fold())`);
+    }
     if (PROJECTION_NAMES.has(s.name)) {
       if (acc.projStep) throw new Error('only one projection step is supported per traversal');
       acc.projStep = s;
@@ -386,6 +402,14 @@ function renderProjection(
     }
     colsNode = q`${scalarExpr} AS v`;
   }
+  // mean(Scope.local) on a scalar stream: each value is a one-element list whose mean
+  // is the value AS A DOUBLE (mean is always Double, even of one element — d[29.0].d).
+  if (acc.localMean) {
+    if (!scalarExpr) throw new Error('mean(Scope.local) requires a scalar stream');
+    scalarExpr = q`CAST(${scalarExpr} AS REAL)`;
+    shape = { kind: 'value', as: 'double' };
+    colsNode = q`${scalarExpr} AS v`;
+  }
   // A typed-cast tag can't survive a terminal reducer (wrapReducer only sees
   // shape.kind) — sum()/fold() after asNumber() would wire the wrong subtype, so defer.
   if (shape.kind === 'value' && shape.as && reducer)
@@ -584,6 +608,19 @@ const asDateSql = (e: Expression): Expression =>
   q`(CASE WHEN typeof(${e}) IN ('integer', 'real') THEN CAST(${e} AS INTEGER) ELSE unixepoch(${e}) * 1000 END)`;
 
 export function compileInject(steps: PStep[]): Compiled {
+  // inject of ALL-array args → a stream of LIST VALUES (the list substrate): each
+  // bracket arg is ONE list traverser (inject([1,2,3]) = one list; inject([1,2],[3,4])
+  // = two). Route to the list phase (dispatchNext → compileFromList): unfold explodes,
+  // Scope.local reducers reduce per-list, a terminal inject frames each list. A mixed
+  // (some scalar) or all-scalar inject stays the flat `v`-stream path below.
+  if (steps[0].args.length >= 1 && steps[0].args.every((a: any) => Array.isArray(a))) {
+    const Q = new Query();
+    const rows = steps[0].args.map((a: any[]) => q`(${jsonbArrayOf(a)})`);
+    const rel = Q.cte(q`VALUES ${list(rows, ', ')}`, ['list']);
+    const carry: Carry = { q: Q, aliases: new Map(), indexKeys: new Set(), params: {} };
+    return dispatchNext(toListStream(carry, rel, { kind: 'scalar' }), steps, 1);
+  }
+
   const Q = new Query();
   const { acc, stop } = foldTailAcc(steps, 1);
   // A retype boundary after inject (inject([..]).unfold(), a non-terminal fold) needs
