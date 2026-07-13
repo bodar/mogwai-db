@@ -191,6 +191,15 @@ export function elemCtx(n: Relation, elem: Elem): ScalarCtx {
  *  name as a scalar subquery node. */
 export const labelNameSub = (labelIdExpr: Expression): Expression => q`(SELECT name FROM labels WHERE id=${labelIdExpr})`;
 
+/** Resolve an endpoint rowid (an edge's `src`/`tgt` column) to the node's
+ *  outward-facing external id `(SELECT COALESCE(uid,id) FROM nodes WHERE id=<rowid>)`.
+ *  Used ONLY when framing an edge ELEMENT out (materialization → a bounded result
+ *  set), never inside the movement/filter CTEs — so this per-row PK lookup can't
+ *  touch the index-only edge-scan hot path. Keeps the read path's edge endpoints
+ *  identical to the write path's (write.ts nodeExtId), instead of leaking the raw
+ *  rowid that diverges from the user-supplied id. */
+export const extIdOf = (rowid: Expression): Expression => q`(SELECT COALESCE(uid, id) FROM nodes WHERE id=${rowid})`;
+
 /** json_extract of a property on a node identified by `nodeId`. `directProps`,
  *  when set, is a props column already in scope (base row) → read it inline;
  *  otherwise correlate a subquery into nodes. */

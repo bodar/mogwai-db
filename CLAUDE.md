@@ -319,10 +319,21 @@ general `addE`, all landed. Shape:
   (was ignoring the 3rd arg / crashing on a predicate — the dominant cucumber
   *verification* idiom); edge write-response now frames via `edgeBuffer`
   (materialises props; `handler.ts` was dropping them through `anySerializer`).
-- **Edge endpoints on write responses** expose the external id (`nodeExtId` =
-  COALESCE(uid,id)); the READ path still shows raw rowid endpoints (perf: avoids
-  correlated subqueries on index-only edge scans) — a known divergence, identity
-  for integer-id graphs, matters only under UserSuppliedIds.
+- **Edge endpoints are external ids on BOTH paths** (`COALESCE(uid,id)`). Writes use
+  `nodeExtId` (write.ts); reads use `plan.ts` `extIdOf(rowid)` =
+  `(SELECT COALESCE(uid,id) FROM nodes WHERE id=<rowid>)`, applied at the three edge-
+  ELEMENT materialization sites in `steps/projection.ts` (the `__element` edge
+  projector, `compilePath`'s edge position, `elementSelect` for group). This was a
+  read/write divergence (read showed the raw rowid — identity for integer-id graphs,
+  wrong under UserSuppliedIds); DO NOT reintroduce it. The old "perf: avoids
+  correlated subqueries" rationale was misdiagnosed: endpoint resolution is only ever
+  needed when framing an edge OUT (a bounded result set that has already left the
+  index-only regime), NEVER inside the movement/filter CTEs (those carry only bare
+  `id` and use src/tgt as JOIN keys), so the per-row PK lookup can't touch the hot
+  traversal path. Covered by SQL snapshots + a `guid` end-to-end round-trip
+  (test/conformance/seed-uid.ts).
+  Still rowid (separate W1 gaps, NOT this fix): the SCALAR id of an endpoint via
+  `by(__.outV().id())` / `group().by(__.id())`, and `properties().element().id()`.
 - **Deferred (clear errors)**: nested-traversal merge maps (`mergeV(__.select…)`),
   `option(…, __.traversal)`, `Cardinality.list/set` (W4), `.with()`, `hasId`.
 

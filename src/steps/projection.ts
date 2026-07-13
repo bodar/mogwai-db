@@ -1,7 +1,7 @@
 import { q, value, list, empty, Relation, type Expression } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
 import {
-  propExtract, predicateSql, compileNestedScalar, labelNameSub, rangeToOffsetLimit, elemCtx, scalarTx,
+  propExtract, predicateSql, compileNestedScalar, labelNameSub, rangeToOffsetLimit, elemCtx, scalarTx, extIdOf,
   type ScalarCtx,
 } from '../plan.ts';
 import { stepChain, type Step } from '../frontend.ts';
@@ -189,7 +189,9 @@ const PROJECTORS = new Map<string, ProjFn>([
     };
   }],
   ['__element', (c) => c.st.elem === 'edge'
-    ? { shape: { kind: 'edge' }, colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${c.n.c.src}, ${c.n.c.tgt}, ${c.n.c.props}`, fromNode: c.vlJoin }
+    // Endpoints resolve to external ids (COALESCE(uid,id)) so a materialized edge
+    // reports the SAME src/tgt as the write path — not the raw rowid.
+    ? { shape: { kind: 'edge' }, colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${extIdOf(c.n.c.src)} AS src, ${extIdOf(c.n.c.tgt)} AS tgt, ${c.n.c.props}`, fromNode: c.vlJoin }
     : { shape: { kind: 'vertex' }, colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${c.n.c.props}`, fromNode: c.vlJoin }],
 ]);
 
@@ -435,7 +437,8 @@ function compilePath(st: St, proj: PStep, acc: TailAcc, indexKeys: Set<string>):
       joins.push(q` JOIN ${l} ON ${l.c.id}=${tbl.c.label}`);
       const extId = q`COALESCE(${tbl.c.uid}, ${tbl.c.id})`;
       if (pos.elem === 'edge') {
-        cols.push(q`${extId} AS ${`${prefix}_id`}, ${l.c.name} AS ${`${prefix}_label`}, ${tbl.c.src} AS ${`${prefix}_src`}, ${tbl.c.tgt} AS ${`${prefix}_tgt`}, ${tbl.c.props} AS ${`${prefix}_props`}`);
+        // Endpoints as external ids (see the __element edge projector).
+        cols.push(q`${extId} AS ${`${prefix}_id`}, ${l.c.name} AS ${`${prefix}_label`}, ${extIdOf(tbl.c.src)} AS ${`${prefix}_src`}, ${extIdOf(tbl.c.tgt)} AS ${`${prefix}_tgt`}, ${tbl.c.props} AS ${`${prefix}_props`}`);
         return { render: 'element', elem: 'edge', prefix };
       }
       cols.push(q`${extId} AS ${`${prefix}_id`}, ${l.c.name} AS ${`${prefix}_label`}, ${tbl.c.props} AS ${`${prefix}_props`}`);
@@ -544,7 +547,8 @@ interface GroupSource { from: string; ctx: ScalarCtx; elem: ElemShape; }
 function elementSelect(elem: ElemShape, prefix: string, ctx: ScalarCtx): Expression {
   const extId = ctx.extIdExpr ?? ctx.idExpr;
   if (elem === 'edge')
-    return q`${extId} AS ${`${prefix}_id`}, ${labelNameSub(ctx.labelIdExpr)} AS ${`${prefix}_label`}, ${ctx.srcExpr!} AS ${`${prefix}_src`}, ${ctx.tgtExpr!} AS ${`${prefix}_tgt`}, ${ctx.propsExpr} AS ${`${prefix}_props`}`;
+    // Endpoints as external ids (see the __element edge projector).
+    return q`${extId} AS ${`${prefix}_id`}, ${labelNameSub(ctx.labelIdExpr)} AS ${`${prefix}_label`}, ${extIdOf(ctx.srcExpr!)} AS ${`${prefix}_src`}, ${extIdOf(ctx.tgtExpr!)} AS ${`${prefix}_tgt`}, ${ctx.propsExpr} AS ${`${prefix}_props`}`;
   if (elem === 'property')
     return q`${ctx.ownerExpr!} AS ${`${prefix}_owner`}, ${ctx.pkExpr!} AS ${`${prefix}_pk`}, ${ctx.pvExpr!} AS ${`${prefix}_pv`}`;
   return q`${extId} AS ${`${prefix}_id`}, ${labelNameSub(ctx.labelIdExpr)} AS ${`${prefix}_label`}, ${ctx.propsExpr} AS ${`${prefix}_props`}`;
