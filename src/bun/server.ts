@@ -1,15 +1,17 @@
-import { GraphStore } from '../storage.ts';
 import { application } from '../application.ts';
-import { BunSqlite } from './BunSqlite.ts';
+import { BunGraphManager } from './BunGraphManager.ts';
 
-/** Bun entry point: build the store over bun:sqlite, wire the app, serve. */
-export function startServer(port = 8182, dbPath = process.env.MOGWAI_DB ?? ':memory:') {
-  const store = new GraphStore(new BunSqlite(dbPath));
-  const app = application({ store });
-  return Bun.serve({ port, fetch: app.handler });
+/** Bun entry point: build the multi-graph manager (in-memory by default, or a
+ *  directory of files when `$MOGWAI_DB_DIR` is set), wire the shared router, and
+ *  serve. Graphs are addressed by `/g/{id}` — the same management API as the
+ *  Cloudflare Worker, just running locally over `bun:sqlite`. */
+export function startServer(port = 8182, dir = process.env.MOGWAI_DB_DIR) {
+  const manager = new BunGraphManager(dir);
+  const app = application({ manager });
+  return Bun.serve({ port, fetch: app.router });
 }
 
 if (import.meta.main) {
   const server = startServer();
-  console.log(`mogwai-db listening on :${server.port}`);
+  console.log(`mogwai-db listening on :${server.port} (graphs at /g/{id})`);
 }

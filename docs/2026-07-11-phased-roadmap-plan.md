@@ -66,9 +66,9 @@ provide platform `deps`), and `src/database/TheClientDatabase.ts` +
 - **Wiring.** `application(deps)` = `LazyMap.create(deps)` layering the
   agnostic services (`Dependency<'store', GraphStore>`, `Dependency<'io', …>`
   for the GraphBinary primitives, then the request `handler`). Entry points:
-  `src/bun/server.ts` provides `{store: new BunSqlite(...)}` and wraps `handler`
-  in `Bun.serve`; `src/cloudflare/worker.ts` (the DO) provides
-  `{store: new DurableObjectSqlite(ctx.storage.sql)}` and wraps `handler` in the
+  `src/bun/server.ts` provides `{manager: new BunGraphManager(...)}` and wraps the
+  shared `router` in `Bun.serve`; `src/cloudflare/worker.ts` provides
+  `{manager: new CloudflareGraphManager(env.GRAPH)}` and the DO wraps `handler` in the
   DO `fetch`. `package.json` `module` points at the CF entry (the client does this).
 - **DONE.** The seam, both adapters, `application(deps)`, and both entry points
   exist; one contract test runs on both runtimes over the real wire. `io` ended
@@ -200,8 +200,10 @@ baseline:
   shape. → *writable*. Deferred to later: nested-traversal merge maps,
   `Cardinality.list/set` (W4), `.with()`, `hasId`.
 - **W3 — P4 deploy.** Worker router (`POST /g/{graphId}` → `idFromName` → DO,
-  LOCKED design) + bearer auth per graph + delete/lifecycle management endpoint.
-  → *deployable*.
+  LOCKED design) + graph lifecycle. **Router + lifecycle DONE** (shared
+  `makeRouter`/`GraphManager`, in-band REST verbs, Bun↔CF parity + shared
+  `managementContract` — see CLAUDE.md "Management API + runtime parity").
+  Remaining: bearer auth per graph + real Cloudflare deploy → *deployable*.
 - **W4 — multi/meta-property schema rework.** Props stop being a flat JSON object
   (design fork: nested JSON `{key:[{value,meta}]}` vs a normalized
   `properties` table). Touches valueMap/values/has/properties/addV/storage —
@@ -374,15 +376,20 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
   the `src/cloudflare/worker.ts` entry (Worker + `GraphDatabase` DO). The shared
   contract test (`test/contract.ts`) passes on both runtimes over GraphBinary;
   the Worker builds for production (`wrangler deploy --dry-run`, ~265 KB gzip).
-- Remaining: Worker router (LOCKED design): `POST /g/{graphId}` → `idFromName(graphId)`
+- DONE: Worker router (LOCKED design): `POST /g/{graphId}` → `idFromName(graphId)`
   → DO; graph springs into existence on first request. The request's `g`
   field selects an optional named graph *within* the tenant. Never route on
-  the `g` field at the Worker (forces body-parse before routing). Deletion/
-  lifecycle = management endpoint on the Worker. Wrap each request in one
-  implicit transaction (DO single-threading gives serializable isolation).
+  the `g` field at the Worker (forces body-parse before routing). Graph
+  lifecycle is in-band REST on the same path (`PUT`/`GET`/`DELETE`), idempotent
+  + create-on-demand, with full Bun↔CF parity via the shared
+  `makeRouter`/`GraphManager` seam — NOT an out-of-band control plane. Teardown
+  is `ctx.storage.deleteAll()` (+ the warm-instance re-init gotcha). See
+  CLAUDE.md "Management API + runtime parity".
+- Remaining: wrap each request in one implicit transaction (DO single-threading
+  gives serializable isolation); real Cloudflare deploy.
 - Bundle check: parser + antlr4ng + serializers ≈ 1 MB minified (verified);
   ATN warm-up once per isolate.
-- Auth: bearer token per graph at the Worker layer.
+- Auth: bearer token per graph at the Worker layer (deferred, its own bundle).
 
 **P5 — stretch.**
 - `match()` as a rewrite onto where/select (TinkerPop itself does this).

@@ -18,4 +18,8 @@ export class BunSqlite implements Sql {
     // db.query caches the prepared statement by SQL text.
     return this.db.query(sql).all(...(binds as any[])) as T[];
   }
+
+  close(): void {
+    this.db.close();
+  }
 }

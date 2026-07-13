@@ -33,8 +33,9 @@ graphContract('cloudflare', {
       },
     );
     await waitForReady(`http://127.0.0.1:${PORT}/`);
-    // Unique graph id per run → fresh DO (wrangler dev persists state on disk).
-    return `http://127.0.0.1:${PORT}/g/contract-${Date.now()}`;
+    // The contract addresses graphs under {origin}/g/{id}; ids are unique per
+    // run so DOs stay fresh (wrangler dev persists state on disk).
+    return `http://127.0.0.1:${PORT}`;
   },
   async stop() {
     proc?.kill();

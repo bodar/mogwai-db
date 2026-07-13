@@ -1,16 +1,17 @@
 import { LazyMap } from '@bodar/yadic/LazyMap.ts';
 import type { Dependency } from '@bodar/yadic/types.ts';
-import type { GraphStore } from './storage.ts';
-import { makeHandler } from './handler.ts';
+import type { GraphManager } from './manager.ts';
+import { makeRouter } from './router.ts';
 
-// The runtime-agnostic dependency graph. Platform entry points provide the
-// leaves (currently just `store`); everything above is wired here and shared
-// across Bun and Cloudflare. As the server grows (auth, digest, management
-// endpoints…) new services layer on with `.set()`/`.decorate()`, mirroring
-// the client's `application()`.
-export interface AppDependencies extends Dependency<'store', GraphStore> {}
+// The runtime-agnostic dependency graph. Platform entry points provide the one
+// leaf that differs — a `GraphManager` abstracting graph lifecycle over Bun's
+// in-process registry or Cloudflare's Durable Object namespace — and everything
+// above (the shared HTTP router with the identical management API) is wired here
+// and used by both. As the server grows (auth, digest…) new services layer on
+// with `.set()`/`.decorate()`, mirroring the client's `application()`.
+export interface AppDependencies extends Dependency<'manager', GraphManager> {}
 
 export function application(deps: AppDependencies) {
   return LazyMap.create(deps)
-    .set('handler', ({ store }) => makeHandler(store));
+    .set('router', ({ manager }) => makeRouter(manager));
 }

@@ -503,7 +503,6 @@ describe('compiler SQL snapshots', () => {
   test('edge steps reject the wrong element kind', () => {
     expect(() => compile('g.V().outV()', {})).toThrow('outV() expects an edge, not a node');
     expect(() => compile('g.E().out()', {})).toThrow('out() expects a vertex, not an edge');
-    expect(() => compile('g.E().drop()', {})).toThrow('edge drop() (e.g. g.E().drop()) not yet supported');
     expect(() => compile('g.E().elementMap()', {})).toThrow('elementMap() on edges not yet supported');
   });
 
@@ -1475,6 +1474,20 @@ describe('compiler execution semantics', () => {
     run(store, 'g.V().drop()');
     expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([0]);
     expect(store.query('SELECT COUNT(*) AS c FROM edges')[0].c).toBe(0);
+  });
+
+  test('edge drop() deletes only the matched edges, not their endpoints', () => {
+    const store = seededStore();
+    run(store, 'g.V(1).outE().drop()'); // marko's 3 out-edges (7,8,9)
+    expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([6]); // every vertex survives
+    expect(store.query('SELECT COUNT(*) AS c FROM edges')[0].c).toBe(3); // edges 10,11,12 remain
+  });
+
+  test('g.E().drop() removes every edge but keeps all vertices', () => {
+    const store = seededStore();
+    run(store, 'g.E().drop()');
+    expect(store.query('SELECT COUNT(*) AS c FROM edges')[0].c).toBe(0);
+    expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([6]);
   });
 
   test('property() updates existing vertices (overwrite + new key, single cardinality)', () => {
