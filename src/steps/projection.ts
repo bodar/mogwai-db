@@ -1268,46 +1268,68 @@ function compileProperties(st: St, tail: PStep[], indexKeys: Set<string>): Compi
   }
   const pc = st.q.cte(propBody, ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta']);
 
-  const done = (node: Expression, shape: Shape, consumed: number): Compiled => {
-    if (tail.length > consumed) throw new Error(`step not implemented after properties(): ${tail[consumed].name}()`);
+  // properties().group()/.groupCount() — group over the property stream.
+  const next1 = tail[1]?.name;
+  if (next1 === 'group' || next1 === 'groupCount') {
+    if (2 < tail.length) throw new Error(`step not implemented after properties().${next1}(): ${tail[2].name}()`);
+    const ctx: ScalarCtx = { elem: 'property', idExpr: pc.c.owner, labelIdExpr: q`(SELECT label FROM nodes WHERE id=${pc.c.owner})`, ownerExpr: pc.c.owner, pkExpr: pc.c.pk, pvExpr: pc.c.pv };
+    const src: GroupSource = { from: pc.name, ctx, elem: 'property' };
+    return compileGroup(st, next1 === 'groupCount', tail[1].bys ?? [], src, indexKeys);
+  }
+
+  // Consume leading has(metaKey[, pred]) — meta-property filters over the pmeta blob
+  // (a VertexProperty's own properties). json_extract reads the JSON-text pmeta column.
+  let ti = 1;
+  const metaConds: Expression[] = [];
+  while (tail[ti]?.name === 'has') {
+    const [mk, mv] = tail[ti].args;
+    if (typeof mk !== 'string') throw new Error('properties().has() requires a meta-property key');
+    metaConds.push(predicateSql(propExtract('pmeta', mk).expr, tail[ti].args.length > 1 ? mv : undefined));
+    ti++;
+  }
+  const metaWhere: Expression = metaConds.length ? q` WHERE ${list(metaConds, ' AND ')}` : empty;
+
+  const done = (node: Expression, shape: Shape, termSteps: number): Compiled => {
+    if (tail.length > ti + termSteps) throw new Error(`step not implemented after properties(): ${tail[ti + termSteps].name}()`);
     return readCompiled(st.q, node, shape, [...indexKeys]);
   };
 
-  const next = tail[1]?.name;
-
-  // properties().group()/.groupCount() — group over the property stream.
-  if (next === 'group' || next === 'groupCount') {
-    if (2 < tail.length) throw new Error(`step not implemented after properties().${next}(): ${tail[2].name}()`);
-    const ctx: ScalarCtx = { elem: 'property', idExpr: pc.c.owner, labelIdExpr: q`(SELECT label FROM nodes WHERE id=${pc.c.owner})`, ownerExpr: pc.c.owner, pkExpr: pc.c.pk, pvExpr: pc.c.pv };
-    const src: GroupSource = { from: pc.name, ctx, elem: 'property' };
-    return compileGroup(st, next === 'groupCount', tail[1].bys ?? [], src, indexKeys);
-  }
-
+  const next = tail[ti]?.name;
   switch (next) {
-    case undefined: // properties() terminal → VertexProperty elements
-      return done(q`SELECT owner, pk, pv FROM ${pc}`, { kind: 'property' }, 1);
+    case undefined: // properties() terminal → VertexProperty elements (with meta framed)
+      return done(q`SELECT vpid, owner, pk, pv, pmeta FROM ${pc}${metaWhere}`, { kind: 'property' }, 0);
     case 'key':
-      return done(q`SELECT pk AS v FROM ${pc}`, { kind: 'value' }, 2);
+      return done(q`SELECT pk AS v FROM ${pc}${metaWhere}`, { kind: 'value' }, 1);
     case 'value':
-      return done(q`SELECT pv AS v FROM ${pc}`, { kind: 'value' }, 2);
+      return done(q`SELECT pv AS v FROM ${pc}${metaWhere}`, { kind: 'value' }, 1);
+    case 'id': // the real VertexProperty id
+      return done(q`SELECT vpid AS v FROM ${pc}${metaWhere}`, { kind: 'value' }, 1);
     case 'count':
-      return done(q`SELECT COUNT(*) AS v FROM ${pc}`, { kind: 'count' }, 2);
+      return done(q`SELECT COUNT(*) AS v FROM ${pc}${metaWhere}`, { kind: 'count' }, 1);
+    case 'valueMap': // a VertexProperty's meta-properties as a flat {metaKey: value} map
+      return done(q`SELECT pmeta AS meta FROM ${pc}${metaWhere}`, { kind: 'metaMap' }, 1);
+    case 'properties': { // meta-properties of the VertexProperty → Property elements
+      const mkeys = tail[ti].args.filter((a): a is string => typeof a === 'string');
+      const mkeyFilter = mkeys.length ? q` WHERE je.key IN (${list(mkeys.map(value), ',')})` : empty;
+      return done(q`SELECT je.key AS mk, je.value AS mv FROM (SELECT pmeta FROM ${pc}${metaWhere}) x, json_each(COALESCE(x.pmeta, '{}')) je${mkeyFilter}`, { kind: 'metaProperty' }, 1);
+    }
     case 'element': {
-      const after = tail[2]?.name;
+      const after = tail[ti + 1]?.name;
       if (elem === 'edge' && after === undefined) throw new Error('element() of an edge property not yet supported');
       switch (after) {
         case undefined:
-          return done(q`SELECT owner AS id, ownerLabel AS label, ${vertexPropsAgg(raw('owner'))} AS props FROM ${pc}`, { kind: 'vertex' }, 2);
+          return done(q`SELECT owner AS id, ownerLabel AS label, ${vertexPropsAgg(raw('owner'))} AS props FROM ${pc}${metaWhere}`, { kind: 'vertex' }, 1);
         case 'id':
-          return done(q`SELECT owner AS v FROM ${pc}`, { kind: 'value' }, 3);
+          return done(q`SELECT owner AS v FROM ${pc}${metaWhere}`, { kind: 'value' }, 2);
         case 'label':
-          return done(q`SELECT ownerLabel AS v FROM ${pc}`, { kind: 'value' }, 3);
+          return done(q`SELECT ownerLabel AS v FROM ${pc}${metaWhere}`, { kind: 'value' }, 2);
         case 'values': {
-          const pe = nodePropScalar(raw('owner'), tail[2].args[0]);
-          return done(q`SELECT ${pe} AS v FROM ${pc} WHERE ${predicateSql(pe, undefined)}`, { kind: 'value' }, 3);
+          const pe = nodePropScalar(raw('owner'), tail[ti + 1].args[0]);
+          const w = metaConds.length ? q` WHERE ${list([...metaConds, predicateSql(pe, undefined)], ' AND ')}` : q` WHERE ${predicateSql(pe, undefined)}`;
+          return done(q`SELECT ${pe} AS v FROM ${pc}${w}`, { kind: 'value' }, 2);
         }
         case 'count':
-          return done(q`SELECT COUNT(*) AS v FROM ${pc}`, { kind: 'count' }, 3);
+          return done(q`SELECT COUNT(*) AS v FROM ${pc}${metaWhere}`, { kind: 'count' }, 2);
         default:
           throw new Error(`step not implemented after element(): ${after}()`);
       }
