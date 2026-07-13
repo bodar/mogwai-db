@@ -270,7 +270,7 @@ suite manually.
 
 > This section is a *record* of how the read compiler was built, not a to-do list.
 > The **actual immediate next work is W3 — Cloudflare deploy + Worker auth** (see
-> docs/2026-07-11-phased-roadmap-plan.md). Live L3 is 582 (path family, then the
+> docs/2026-07-11-phased-roadmap-plan.md). Live L3 is 583 (path family, then the
 > per-traverser branching family + multi-hop/alias where landed 2026-07-13; then the
 > safe optimization-strategy whitelist 473→495; then the value-tail unification
 > 495→496 (compileInject reuses the shared foldTailAcc+renderProjection in
