@@ -361,10 +361,13 @@ carried input-ordinal `St.origin`), multi-hop `union`/`optional` (rewritten onto
 `map` (`compileMapScalar`), **multi-hop `where`** (`compileExistsChain` — correlated
 EXISTS over a movement chain + terminal filter) + `where(__.label()/not())`, and the
 **alias-threading foundation** (`aliasCtx` + `resolveAlias`: a where/and/or/not predicate
-starting `as('x')`/`select('x')` re-roots on that alias's carried column). Still open:
+starting `as('x')`/`select('x')` re-roots on that alias's carried column) and **`match`**
+(`src/steps/match.ts` — a conjunctive pattern join: bind the root var to the incoming id,
+fold patterns in dependency order, each a join CTE extending the alias columns; downstream
+select/count/dedup consume them; deferred: both()/scalar-terminal/or/not/nested patterns,
+strategies, select-then-movement). Still open:
 `emit(pred)`, compound `until(…and/or().loops())`, `path().by()` on the recursive walk,
-`aggregate`/`cap`, **`match`** (next deliberate batch — builds on aliasCtx/resolveAlias),
-`local`, `sack`; element-body `map` (first-result), scalar branch bodies, mixed-shape
+`aggregate`/`cap`, `local`, `sack`; element-body `map` (first-result), scalar branch bodies, mixed-shape
 branches, branch-inside-branch, option-map choose without a scalar `Pick.none`. `tree()`
 deliberately skipped (0 L3: JS GLV stubs it).
 
