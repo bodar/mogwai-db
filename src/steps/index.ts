@@ -1,7 +1,7 @@
 import { q, value, list, Query, type Expression } from '../q.ts';
 import { nodes, edges } from '../schema.ts';
 import { type Elem } from '../plan.ts';
-import { stepChain } from '../frontend.ts';
+import { stepChain, flattenListArgs } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { type St, type StepFn } from './context.ts';
 import { move, toEdge, toVertex } from './movement.ts';
@@ -47,12 +47,15 @@ function seedSource(first: PStep, query: Query, params: Record<string, any>, tra
   const elem: Elem = first.name === 'E' ? 'edge' : 'node';
   const srcRel = elem === 'edge' ? edges : nodes;
   const sel = trackPath ? 'id, id AS p0' : 'id';
+  // V(1,[2,3]) ≡ V(1,2,3): flatten any Collection id arg (collection literals + bound
+  // list params render inline as [..] and parse as arrays).
+  const ids = flattenListArgs(first.args);
   let body: Expression;
-  if (first.args.length > 0) {
+  if (ids.length > 0) {
     // Numeric args match the rowid, string args the user id (uid); the id-relation
     // carries rowids throughout, so a uid match still projects `id` (the rowid).
-    const nums = first.args.filter((a) => typeof a === 'number');
-    const strs = first.args.filter((a) => typeof a === 'string');
+    const nums = ids.filter((a) => typeof a === 'number');
+    const strs = ids.filter((a) => typeof a === 'string');
     const clauses: Expression[] = [];
     if (nums.length) clauses.push(q`id IN (${list(nums.map(value), ',')})`);
     if (strs.length) clauses.push(q`uid IN (${list(strs.map(value), ',')})`);

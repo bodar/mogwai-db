@@ -97,6 +97,22 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().values("age").fold().min(Scope.local)', {})).toThrow('step not implemented after fold(): min()');
   });
 
+  test('collection literals parse as one array value; varargs-style steps flatten it', () => {
+    // A bracketed list is ONE array arg (walkArgs), not N flattened args. The
+    // varargs-style consumers (V/E/hasId + — until the list substrate lands — inject)
+    // flatten it back, so these compile identically to the comma-varargs form.
+    expect(read('g.V([1,2,3])').sql).toBe(read('g.V(1,2,3)').sql);
+    expect(read('g.V().hasId([1,2])').sql).toBe(read('g.V().hasId(1,2)').sql);
+    // hasId(1,[2,6]) ≡ hasId(1,2,6): HasIdStep flattens every Collection arg.
+    expect(read('g.V().hasId(1,[2,6])').binds).toEqual([1, 2, 6]);
+    expect(read('g.inject([1,2,3])').binds).toEqual([1, 2, 3]);
+    // A lone P predicate arg is not an array → still passes through, not flattened.
+    expect(read('g.V().hasId(P.within([1,2]))').sql).toContain('COALESCE(n.uid, n.id) in (?, ?)');
+    // Scope.local is now captured on the step (was silently dropped) — a bare
+    // reducer ignores the scope arg, so global sum() is unchanged (Scope.local lands later).
+    expect(read('g.inject(1,2,3).sum()').binds).toEqual([1, 2, 3]);
+  });
+
   test('inject() is a value stream that reducers/modifiers chain onto', () => {
     expect(read('g.inject(1,2,3)').shape).toEqual({ kind: 'value' });
     expect(read('g.inject(1,2,3)').binds).toEqual([1, 2, 3]);

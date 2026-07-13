@@ -5,7 +5,7 @@ import {
   type ScalarCtx,
 } from '../plan.ts';
 import { mathToSql, mathVars } from '../math.ts';
-import { stepChain, parseIsoMs, type Step } from '../frontend.ts';
+import { stepChain, parseIsoMs, flattenListArgs, type Step } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { elemRel, type AliasMap, type St } from './context.ts';
 import {
@@ -521,7 +521,11 @@ export function compileInject(steps: PStep[]): Compiled {
   if (constCast && (acc.reducer || acc.projStep || acc.injects.length))
     throw new Error(`${cast!.name}() composed with a reducer/count()/trailing inject() not yet supported`);
 
-  const vals = [...steps[0].args, ...acc.injects];
+  // TEMPORARY (removed when inject-list becomes a real list value, commit 4): a lone
+  // collection-literal arg spreads back to varargs so inject([a,b]) keeps its current
+  // flattened stream semantics. TinkerPop's inject([a,b]) is actually ONE list object;
+  // that lands with the list substrate — until then, preserve the existing behavior.
+  const vals = [...flattenListArgs(steps[0].args), ...acc.injects];
   acc.injects.length = 0; // consumed into the seed, not appended after the tail
 
   if (cast?.name === 'asBool') {

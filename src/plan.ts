@@ -1,4 +1,4 @@
-import { stepChain, type Step, type Pred } from './frontend.ts';
+import { stepChain, flattenListArgs, type Step, type Pred } from './frontend.ts';
 import { q, list, values, paren, empty, value, raw, jsonExtract, type Expression, type Relation } from './q.ts';
 
 // ---------- SQL node builders ----------
@@ -72,7 +72,11 @@ export function scalarTx(name: string, args: any[], v: Expression): Expression |
 /** hasId(...) args → a single predicate over the external id. A lone P argument
  *  passes through (P.within/without/eq/neq/…); otherwise the bare id args form a
  *  `within` set (nulls dropped — no element has a null id, so they never match). */
-export function idPredFromArgs(args: any[]): any {
+export function idPredFromArgs(rawArgs: any[]): any {
+  // hasId(1,[2,6]) ≡ hasId(1,2,6): HasIdStep flattens every Collection id arg
+  // (collection literals + bound list params parse as arrays). A lone P predicate is
+  // NOT an array, so it still passes through the check below.
+  const args = flattenListArgs(rawArgs);
   if (args.length === 1 && args[0] && typeof args[0] === 'object' && 'op' in args[0]) return args[0];
   return { op: 'within', values: args.filter((a) => a !== null && a !== undefined) };
 }
