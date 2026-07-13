@@ -93,8 +93,9 @@ describe('compiler SQL snapshots', () => {
     const avg = read('g.V().values("age").mean()');
     expect(avg.sql).toContain('AVG(v)');
     expect(avg.sql).toContain("'real' AS vt");
-    // Scope.local / a step after the reducer defer cleanly
-    expect(() => compile('g.V().values("age").fold().min(Scope.local)', {})).toThrow('step not implemented after fold(): min()');
+    // min(Scope.local) after fold() is now a list-phase reducer — deferred until
+    // Scope.local lands (a non-terminal fold retypes to a list value first).
+    expect(() => compile('g.V().values("age").fold().min(Scope.local)', {})).toThrow('min() on a list value not yet supported');
   });
 
   test('collection literals parse as one array value; varargs-style steps flatten it', () => {
@@ -111,6 +112,27 @@ describe('compiler SQL snapshots', () => {
     // Scope.local is now captured on the step (was silently dropped) — a bare
     // reducer ignores the scope arg, so global sum() is unchanged (Scope.local lands later).
     expect(read('g.inject(1,2,3).sum()').binds).toEqual([1, 2, 3]);
+  });
+
+  test('fold() as a value + unfold() re-enters the tail', () => {
+    // A TERMINAL fold() is unchanged: N rows collapsed to one List by the handler.
+    expect(read('g.V().fold()').shape).toEqual({ kind: 'list', elem: 'vertex' });
+    expect(read('g.V().values("name").fold()').shape).toEqual({ kind: 'list', elem: 'scalar' });
+    // A NON-terminal fold() retypes to a JSONB list value (jsonb(json_group_array)),
+    // and unfold() explodes it (json_each) — the stream continues. fold().unfold() is
+    // an identity roundtrip (deliberately not peepholed).
+    const fu = read('g.V().fold().unfold()');
+    expect(fu.shape).toEqual({ kind: 'vertex' });
+    expect(fu.sql).toContain('json_group_array');
+    expect(fu.sql).toContain('json_each');
+    // scalar list: values().fold().unfold() → a scalar `v` stream again.
+    expect(read('g.V().values("name").fold().unfold()').shape).toEqual({ kind: 'value' });
+    // unfold() directly on an element stream is identity (a vertex is not a collection).
+    expect(read('g.V().unfold()').shape).toEqual({ kind: 'vertex' });
+    // continuation after the roundtrip: movement/projection resume as a fresh phase.
+    expect(read('g.V().hasLabel("person").fold().unfold().values("name")').shape).toEqual({ kind: 'value' });
+    // inject-as-list and Scope.local list reducers are the next commits — still defer.
+    expect(() => compile('g.V().values("age").fold().sum(Scope.local)', {})).toThrow('sum() on a list value not yet supported');
   });
 
   test('inject() is a value stream that reducers/modifiers chain onto', () => {
@@ -717,7 +739,6 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().group().by(__.out().values("name"))', {})).toThrow(); // deep nested key
     expect(() => compile('g.V().properties().group().by()', {})).toThrow('group().by() on a property element is not yet supported');
     expect(() => compile('g.V().group().by("name").by("age").by("x")', {})).toThrow('more than two by() modulators');
-    expect(() => compile('g.V().fold().unfold()', {})).toThrow('step not implemented after fold(): unfold()');
     expect(() => compile('g.V().count().fold()', {})).toThrow('fold() after count() not yet supported');
     expect(() => compile('g.V().sum()', {})).toThrow('sum() of vertex not yet supported');
   });

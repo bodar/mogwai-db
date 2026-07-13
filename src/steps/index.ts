@@ -9,7 +9,9 @@ import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath }
 import { union, optional, repeat, choose, coalesce, flatMap } from './branch.ts';
 import { match } from './match.ts';
 import { identity, limit, range, skip } from './passthrough.ts';
-import { compileTail } from './projection.ts';
+import { compileTail, compileFromScalar } from './projection.ts';
+import { compileFromList } from './list.ts';
+import { type Stream } from './stream.ts';
 import { type Compiled } from '../render.ts';
 
 export { compileTail };
@@ -127,7 +129,25 @@ export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, qu
   return foldBody(steps, st0, 1);
 }
 
-/** A read traversal: prefix fold + tail projection. */
+/**
+ * The re-enterable tail dispatcher. Routes a Stream + the remaining steps by shape:
+ * an elements stream absorbs any further movement/filter (foldBody) then runs the
+ * element tail; a scalar/list stream runs its own tail. A retype step (fold→list,
+ * unfold→elements/scalar) inside those tails builds the next Stream and calls back
+ * here — so V().fold().unfold().out() flows elements→list→elements→… each phase with
+ * its own ≤1 projection. This is what dissolves the old "one projection per traversal"
+ * ceiling structurally (each phase has a fresh accumulator).
+ */
+export function dispatchNext(s: Stream, steps: PStep[], at: number): Compiled {
+  if (s.kind === 'elements') {
+    const { st, stop } = foldBody(steps, s, at);
+    return compileTail(st, steps, stop);
+  }
+  if (s.kind === 'scalar') return compileFromScalar(s, steps, at);
+  return compileFromList(s, steps, at);
+}
+
+/** A read traversal: prefix fold + tail projection (re-enterable via dispatchNext). */
 export function compileRead(steps: PStep[], params: Record<string, any> = {}): Compiled {
   const { st, stop } = buildPrefix(steps, params);
   return compileTail(st, steps, stop);
