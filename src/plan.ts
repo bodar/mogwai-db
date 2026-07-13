@@ -30,6 +30,17 @@ export function labelIn(col: Expression | string, names: any[]): Expression {
   return q`${col} IN (SELECT id FROM labels WHERE name IN (${values(names)}))`;
 }
 
+/** Aggregate a value column into a single JSONB array (the fold()/select(values)
+ *  producer). `jsonb(json_group_array(..))` is the universally-valid form — the
+ *  native `jsonb_group_array` is unverified on the DO's SQLite 3.47, and `json_each`
+ *  reads a JSONB blob transparently, so the wrapper costs nothing at read time.
+ *  New JSON columns use JSONB per project policy (see CLAUDE.md). */
+export const jsonbGroupArray = (expr: Expression): Expression => q`jsonb(json_group_array(${expr}))`;
+
+/** A JSONB array literal from constant values — inject([a,b,c]) → one list value.
+ *  Values ride as bound tokens; an empty list yields `json_array()` → `[]`. */
+export const jsonbArrayOf = (xs: readonly any[]): Expression => q`jsonb(json_array(${values(xs)}))`;
+
 /** Optional ` AND e.label IN (…)` appended to a movement JOIN's ON, as a node
  *  (empty text when no labels). Replaces ~7 hand-rolled `?`-splice + bind-push copies. */
 export function edgeLabelFilter(names: any[]): Expression {
