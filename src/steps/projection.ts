@@ -1277,15 +1277,23 @@ function compileProperties(st: St, tail: PStep[], indexKeys: Set<string>): Compi
     return compileGroup(st, next1 === 'groupCount', tail[1].bys ?? [], src, indexKeys);
   }
 
-  // Consume leading has(metaKey[, pred]) — meta-property filters over the pmeta blob
-  // (a VertexProperty's own properties). json_extract reads the JSON-text pmeta column.
+  // Consume leading property-stream filters:
+  //   has(metaKey[, pred]) → a meta-property filter over the pmeta blob;
+  //   hasKey(k|P)          → filter on the property's own key (pk);
+  //   hasValue(v|P)        → filter on the property's own value (pv).
   let ti = 1;
   const metaConds: Expression[] = [];
-  while (tail[ti]?.name === 'has') {
-    const [mk, mv] = tail[ti].args;
-    if (typeof mk !== 'string') throw new Error('properties().has() requires a meta-property key');
-    metaConds.push(predicateSql(propExtract('pmeta', mk).expr, tail[ti].args.length > 1 ? mv : undefined));
-    ti++;
+  for (; ; ti++) {
+    const s = tail[ti];
+    if (s?.name === 'has') {
+      const [mk, mv] = s.args;
+      if (typeof mk !== 'string') throw new Error('properties().has() requires a meta-property key');
+      metaConds.push(predicateSql(propExtract('pmeta', mk).expr, s.args.length > 1 ? mv : undefined));
+    } else if (s?.name === 'hasKey') {
+      metaConds.push(predicateSql(raw('pk'), s.args[0]));
+    } else if (s?.name === 'hasValue') {
+      metaConds.push(predicateSql(raw('pv'), s.args[0]));
+    } else break;
   }
   const metaWhere: Expression = metaConds.length ? q` WHERE ${list(metaConds, ' AND ')}` : empty;
 
