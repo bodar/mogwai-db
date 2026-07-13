@@ -53,35 +53,42 @@ function compileSetProperty(steps: PStep[], params: Record<string, any>): WriteP
   const { st, stop } = buildPrefix(prefix, params);
   if (stop !== prefix.length) throw new Error(`property() after ${steps[stop].name}() not yet supported`);
   const elem = st.elem;
-  // Each property() step → [key, value] (single cardinality; list/set + meta land later).
-  const propArgs: [string, any][] = [];
+  const specs: PropSpec[] = [];
   for (const s of steps.slice(firstProp)) {
     if (s.name !== 'property') throw new Error(`step not implemented after property(): ${s.name}()`);
-    const [key, val] = stripCardinality(s.args);
-    if (key && typeof key === 'object' && 'token' in key)
+    const { cardinality, rest } = readCardinality(s.args);
+    const [key, val, ...metaArgs] = rest;
+    // null/map-form property() is a no-op (see parseVertexSpec).
+    if (key == null || (typeof key === 'object' && !('token' in key))) continue;
+    if (typeof key === 'object' && 'token' in key)
       throw new Error(`property(T.${key.token}) on an existing element not yet supported`);
-    propArgs.push([key, val]);
+    specs.push({ key, value: val, meta: metaOf(metaArgs), cardinality });
   }
   const target = renderFrom(st.q, st.last);
   if (elem === 'edge') {
-    // Edge props are a flat JSONB blob: read-merge-write (json() out, jsonb() in).
+    // Edge props are a flat JSONB blob with no cardinality/meta (TinkerPop Property):
+    // read-merge-write (json() out, jsonb() in).
+    for (const sp of specs) {
+      if (sp.cardinality !== 'single') throw new Error('Cardinality is not valid on an edge property');
+      if (sp.meta) throw new Error('meta-properties are not valid on an edge property');
+    }
     const readCur = `SELECT uid, src, tgt, json(props) AS props, (SELECT name FROM labels WHERE id=edges.label) AS label FROM edges WHERE id=?`;
     return {
       kind: 'write',
       run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
         const cur = store.query<any>(readCur, [id])[0];
-        const props = { ...JSON.parse(cur.props), ...Object.fromEntries(propArgs) };
+        const props = { ...JSON.parse(cur.props), ...Object.fromEntries(specs.map((sp) => [sp.key, sp.value])) };
         store.query('UPDATE edges SET props=jsonb(?) WHERE id=?', [JSON.stringify(props), id]);
         return { edge: { id: cur.uid ?? id, label: cur.label, src: nodeExtId(store, cur.src), tgt: nodeExtId(store, cur.tgt), props } };
       }),
     };
   }
-  // Vertex props are normalized rows: set each key directly (single cardinality).
+  // Vertex props are normalized rows: apply each with its cardinality (+ meta).
   const readCur = `SELECT uid, (SELECT name FROM labels WHERE id=nodes.label) AS label FROM nodes WHERE id=?`;
   return {
     kind: 'write',
     run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
-      for (const [key, val] of propArgs) applyVertexProperty(store, id, key, val, null, 'single');
+      for (const sp of specs) applyVertexProperty(store, id, sp.key, sp.value, sp.meta, sp.cardinality);
       const cur = store.query<any>(readCur, [id])[0];
       return { vertex: { id: cur.uid ?? id, label: cur.label, props: readVertexProps(store, id) } };
     }),
@@ -92,32 +99,59 @@ function compileSetProperty(steps: PStep[], params: Record<string, any>): WriteP
 // shared value tail in projection.ts (compileInject). WRITE_RULES routes it here
 // only because it has no V/E source; see the import at the top of this file.
 
-interface VertexSpec { label: string; props: Record<string, any>; uid: string | number | null; }
+type Cardinality = 'single' | 'list' | 'set';
+interface PropSpec { key: string; value: any; meta: Record<string, any> | null; cardinality: Cardinality; }
+interface VertexSpec { label: string; props: PropSpec[]; uid: string | number | null; }
 
-// A leading Cardinality token on property() args: `single` is a no-op we drop;
-// list/set (real multi-property) wait on W4's schema rework.
-function stripCardinality(args: any[]): any[] {
-  if (args[0] && typeof args[0] === 'object' && 'cardinality' in args[0]) {
-    if (args[0].cardinality !== 'single') throw new Error(`property(Cardinality.${args[0].cardinality}) (multi-property) deferred to W4`);
-    return args.slice(1);
-  }
-  return args;
+// A leading Cardinality token on property() args (default single). Returns it plus
+// the remaining [key, value, ...metaArgs].
+function readCardinality(args: any[]): { cardinality: Cardinality; rest: any[] } {
+  if (args[0] && typeof args[0] === 'object' && 'cardinality' in args[0])
+    return { cardinality: args[0].cardinality as Cardinality, rest: args.slice(1) };
+  return { cardinality: 'single', rest: args };
 }
+
+// Trailing property() args after (key, value) are meta-property key/value pairs
+// (VertexProperty meta-properties). A meta value must be a scalar (no traversal / no
+// meta-of-meta).
+function metaOf(metaArgs: any[]): Record<string, any> | null {
+  if (!metaArgs.length) return null;
+  if (metaArgs.length % 2 !== 0) throw new Error('property() meta-properties must be key/value pairs');
+  const m: Record<string, any> = {};
+  for (let i = 0; i < metaArgs.length; i += 2) {
+    const mk = metaArgs[i];
+    if (typeof mk !== 'string') throw new Error('property() meta-property key must be a string');
+    const mv = metaArgs[i + 1];
+    if (mv && typeof mv === 'object' && 'nested' in mv) throw new Error('property() meta-property value must be a scalar');
+    m[mk] = mv;
+  }
+  return m;
+}
+
+// A single-cardinality prop bag (a merge map) → PropSpecs.
+const singleProps = (rec: Record<string, any>): PropSpec[] =>
+  Object.entries(rec).map(([key, value]) => ({ key, value, meta: null, cardinality: 'single' as Cardinality }));
 
 // An addV(...) step + its trailing property() steps → a vertex spec.
 function parseVertexSpec(addV: Step, propSteps: Step[]): VertexSpec {
   let label = (typeof addV.args[0] === 'string' ? addV.args[0] : null) ?? 'vertex';
-  const props: Record<string, any> = {};
+  const props: PropSpec[] = [];
   let uid: string | number | null = null;
   for (const s of propSteps) {
-    const [key, val] = stripCardinality(s.args);
-    if (key && typeof key === 'object' && 'token' in key) {
+    const { cardinality, rest } = readCardinality(s.args);
+    const [key, val, ...metaArgs] = rest;
+    // property(null) / property([:]) / property([map]) — a null or map-form key adds
+    // nothing (map-form property() is a no-op for now, matching TinkerPop's null/empty
+    // cases; a populated map would add its entries, not yet implemented).
+    if (key == null || (typeof key === 'object' && !('token' in key))) continue;
+    if (typeof key === 'object' && 'token' in key) {
+      if (metaArgs.length) throw new Error(`property(T.${key.token}) does not take meta-properties`);
       if (key.token === 'id') uid = val;
       else if (key.token === 'label') label = String(val);
       else throw new Error(`property(T.${key.token}) not supported`);
       continue;
     }
-    props[key] = val;
+    props.push({ key, value: val, meta: metaOf(metaArgs), cardinality });
   }
   return { label, props, uid };
 }
@@ -175,7 +209,7 @@ function readVertexProps(store: GraphStore, node: number): Record<string, any> {
 // Insert a vertex from a spec; returns its rowid and external id (uid ?? rowid).
 function insertVertex(store: GraphStore, spec: VertexSpec): { id: number; extId: string | number } {
   const row = insertRow(store, 'nodes', ['label'], [store.labelId(spec.label)], spec.uid);
-  for (const [key, val] of Object.entries(spec.props)) applyVertexProperty(store, row.id, key, val, null, 'single');
+  for (const p of spec.props) applyVertexProperty(store, row.id, p.key, p.value, p.meta, p.cardinality);
   return row;
 }
 
@@ -184,7 +218,7 @@ function compileAddV(steps: PStep[]): WritePlan {
   if (steps.some((s, i) => i > 0 && s.name !== 'property'))
     return { kind: 'write', run: (store) => runWriteChainFull(store, steps, {}) };
   const spec = parseVertexSpec(steps[0], steps.slice(1));
-  return { kind: 'write', run: (store) => [{ vertex: { id: insertVertex(store, spec).extId, label: spec.label, props: spec.props } }] };
+  return { kind: 'write', run: (store) => { const v = insertVertex(store, spec); return [{ vertex: { id: v.extId, label: spec.label, props: readVertexProps(store, v.id) } }]; } };
 }
 
 interface EdgeCluster { label: string; fromSpec: any; toSpec: any; edgeUid: string | number | null; props: Record<string, any>; next: number; }
@@ -199,7 +233,10 @@ function parseEdgeCluster(steps: Step[], addEIdx: number): EdgeCluster {
     if (m.name === 'from') fromSpec = m.args[0];
     else if (m.name === 'to') toSpec = m.args[0];
     else {
-      const [k, v] = stripCardinality(m.args);
+      const { cardinality, rest } = readCardinality(m.args);
+      const [k, v, ...metaArgs] = rest;
+      if (cardinality !== 'single') throw new Error('Cardinality is not valid on an edge property');
+      if (metaArgs.length) throw new Error('meta-properties are not valid on an edge property');
       if (k && typeof k === 'object' && 'token' in k) { if (k.token === 'id') edgeUid = v; else throw new Error(`property(T.${k.token}) on an edge not supported`); }
       else props[k] = v;
     }
@@ -259,7 +296,7 @@ function runWriteChainFull(store: GraphStore, steps: Step[], params: Record<stri
       while (i + 1 < steps.length && steps[i + 1].name === 'property') propSteps.push(steps[++i]);
       const spec = parseVertexSpec(s, propSteps);
       const v = insertVertex(store, spec);
-      currentV = v.id; last = { vertex: { id: v.extId, label: spec.label, props: spec.props } };
+      currentV = v.id; last = { vertex: { id: v.extId, label: spec.label, props: readVertexProps(store, v.id) } };
     } else if (s.name === 'as') {
       if (currentV == null) throw new Error('as() before any vertex in write chain');
       for (const lbl of s.args) if (typeof lbl === 'string') aliases.set(lbl, currentV);
@@ -397,7 +434,7 @@ function compileMergeV(steps: PStep[], params: Record<string, any>): WritePlan {
         } else {
           const label = onCreate?.label ?? matchSpec.label ?? 'vertex';
           const props = { ...matchSpec.props, ...(onCreate?.props ?? {}) };
-          const v = insertVertex(store, { label, props, uid: matchSpec.id ?? onCreate?.id ?? null });
+          const v = insertVertex(store, { label, props: singleProps(props), uid: matchSpec.id ?? onCreate?.id ?? null });
           out.push({ vertex: { id: v.extId, label, props } });
         }
       }
