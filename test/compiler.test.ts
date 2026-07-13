@@ -152,6 +152,42 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.inject([5,8,10],[10,7]).none(P.lt(7))').shape).toEqual({ kind: 'jsonbList' });
   });
 
+  test('group()/groupCount() retypes to a MapStream on a follower (select(Column.*))', () => {
+    // A TERMINAL group() is unchanged — the row-folding groupBuffer Map.
+    expect(read('g.V().groupCount().by("name")').shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
+    // A NON-terminal group() retypes → MapStream; select(Column.values) aggregates the
+    // value column into a list value (one row), unfold() explodes it. Count → Long tag.
+    const gv = read('g.V().groupCount().by("name").select(Column.values)');
+    expect(gv.shape).toEqual({ kind: 'jsonbList' });
+    expect(gv.sql).toContain('json_group_array');
+    expect(read('g.V().groupCount().by("name").select(Column.values).unfold()').shape).toEqual({ kind: 'value', as: 'long' });
+    // select(Column.keys) over a scalar key → a scalar stream on unfold.
+    expect(read('g.V().groupCount().by("name").select(Column.keys).unfold()').shape).toEqual({ kind: 'value' });
+    // Element keys (bare groupCount()) carry their rowid → unfold rejoins vertices.
+    expect(read('g.V().groupCount().select(Column.keys).unfold()').shape).toEqual({ kind: 'vertex' });
+    // group().by(k).by(__.count()) → same scalar-valued map path.
+    expect(read('g.V().group().by("name").by(__.count()).select(Column.values).unfold()').shape).toEqual({ kind: 'value', as: 'long' });
+  });
+
+  test('Scope.local collection transforms reshape a list (order/dedup/limit/tail)', () => {
+    // A non-terminal fold() → ListStream; a Scope.local transform rebuilds each list
+    // (correlated json_each) and stays a list, so unfold() re-enters afterwards.
+    const o = read('g.V().values("age").fold().order(Scope.local)');
+    expect(o.shape).toEqual({ kind: 'jsonbList' });
+    expect(o.sql).toContain('json_group_array');
+    // order().by(Order.desc) — direction-only by() flips the sort.
+    expect(read('g.V().values("age").fold().order(Scope.local).by(Order.desc).unfold()').shape).toEqual({ kind: 'value' });
+    // tail avoids a count() subquery (DESC LIMIT then re-sort asc) so it correlates once.
+    const t = read('g.V().values("age").fold().tail(Scope.local,2).unfold()');
+    expect(t.shape).toEqual({ kind: 'value' });
+    expect(t.sql).toContain('DESC');
+    expect(read('g.V().values("age").fold().dedup(Scope.local).unfold()').shape).toEqual({ kind: 'value' });
+    // Transforms compose: order then skip, both per-list, then unfold.
+    expect(read('g.V().values("age").fold().order(Scope.local).skip(Scope.local,2).unfold()').shape).toEqual({ kind: 'value' });
+    // A by(key)/traversal comparator defers clearly.
+    expect(() => compile('g.V().values("age").fold().order(Scope.local).by("age")', {})).toThrow('order(Scope.local).by(key/traversal) not yet supported');
+  });
+
   test('Scope.local reducer on a SCALAR stream is per-element (degenerate 1-list)', () => {
     // A scalar's local sum/min/max is the value itself (identity); shape stays value.
     expect(read('g.V(1).values("age").sum(Scope.local)').shape).toEqual({ kind: 'value' });
@@ -786,7 +822,11 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('aggregation deferred forms throw clearly', () => {
-    expect(() => compile('g.V().group().by("name").cap("x")', {})).toThrow('step not implemented after group(): cap()');
+    // group() is now re-enterable (retypes to a MapStream on a follower): an element-
+    // VALUE group can't collapse to one map-value column, and an unknown step on a
+    // (scalar-valued) map defers in the map arm — both clear.
+    expect(() => compile('g.V().group().by("name").select(Column.values)', {})).toThrow('select(Column) over a group of element values not yet supported');
+    expect(() => compile('g.V().groupCount().by("name").cap("x")', {})).toThrow('cap() on a map value not yet supported');
     expect(() => compile('g.V().group().by(__.out().values("name"))', {})).toThrow(); // deep nested key
     expect(() => compile('g.V().properties().group().by()', {})).toThrow('group().by() on a property element is not yet supported');
     expect(() => compile('g.V().group().by("name").by("age").by("x")', {})).toThrow('more than two by() modulators');
