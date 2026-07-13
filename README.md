@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.png" alt="mogwai-db" width="480" height="240">
+  <img src="logo.png" alt="mogwai-db" width="900" height="450">
 </p>
 
 # mogwai-db
