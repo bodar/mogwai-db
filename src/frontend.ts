@@ -194,8 +194,28 @@ function walkArgs(node: any, out: any[], params: Record<string, any>, types: (st
   // this the generic recursion drops them, so option(Pick.none,…) and
   // option(Pick.unproductive,…) both collapse to a key-less option (indistinguishable).
   if (cls === 'TraversalPickContext') { emit({ pick: enumSuffix(node) }); return; }
+  // datetime('iso') / DateTime('iso') / datetime() (now) — a date literal, captured as
+  // epoch-millis (the internal datetime representation; the 'date' shape tag frames it
+  // back to a JS Date). An offset-bearing ISO string folds into the correct instant.
+  if (cls === 'DateLiteralContext') {
+    const s = node.stringLiteral();
+    emit(s ? parseIsoMs(unquote(s.getText())) : Date.now()); return;
+  }
+  // DT.second/minute/hour/day (or the bare unit) — dateAdd()'s unit selector.
+  if (cls === 'TraversalDTContext') { emit({ dt: enumSuffix(node) }); return; }
   if (cls === 'NestedTraversalContext') { emit({ nested: node }); return; }
   for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) walkArgs(node.getChild(i), out, params, types);
+}
+
+/** Parse an ISO-8601 date / date-time string to epoch-millis, UTC-normalized. Per
+ *  ECMAScript, `Date.parse` treats an offset-less *date-time* string as HOST-LOCAL
+ *  time — which would make the same query yield different instants on Bun vs the DO
+ *  (workerd, UTC). Append `Z` when there's a time component but no timezone designator
+ *  so both runtimes agree (matching SQLite `unixepoch` and TinkerPop's "dates assumed
+ *  UTC"). A date-only string is already UTC per spec; an offset/`Z` is kept as-is. */
+export function parseIsoMs(s: string): number {
+  const iso = /T/.test(s) && !/(Z|[+-]\d\d:?\d\d)$/.test(s) ? `${s}Z` : s;
+  return Date.parse(iso);
 }
 
 /** The trailing identifier of an enum token node, lowercased: `T.id`→`id`,

@@ -5,7 +5,7 @@ import {
   type ScalarCtx,
 } from '../plan.ts';
 import { mathToSql, mathVars } from '../math.ts';
-import { stepChain, type Step } from '../frontend.ts';
+import { stepChain, parseIsoMs, type Step } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { elemRel, type AliasMap, type St } from './context.ts';
 import {
@@ -45,7 +45,7 @@ const PROJECTION_NAMES = new Set(['values', 'id', 'label', 'count', 'valueMap', 
 // expressions (scalarTx). `asBool` is a typed cast: compileInject resolves it over
 // inject constants (see asBoolConst); on a V/E-rooted stream it falls through to
 // scalarTx → undefined → a clean "not supported" defer (needs local()/sack()).
-const SCALAR_TX_NAMES = new Set(['concat', 'length', 'toUpper', 'toLower', 'asString', 'substring', 'replace', 'asBool', 'asNumber']);
+const SCALAR_TX_NAMES = new Set(['concat', 'length', 'toUpper', 'toLower', 'asString', 'substring', 'replace', 'asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff']);
 const isMapProj = (p: PStep | null) => p?.name === 'select' || p?.name === 'project';
 
 /** A tail modifier: fold the step into the accumulator. `at` gives position so a
@@ -279,14 +279,23 @@ function renderProjection(
   // inject constants resolve in compileInject with overflow checks instead).
   if (acc.transforms.length) {
     if (!scalarExpr) throw new Error(`${acc.transforms[0].name}() requires a scalar stream (values/id/label)`);
-    for (const s of acc.transforms) {
+    for (let i = 0; i < acc.transforms.length; i++) {
+      const s = acc.transforms[i];
       if (s.name === 'asNumber') {
         const spec = numericSpec(s.args[0]); // throws on a non-numeric GType; null = bare
-        if (!spec) throw new Error('scalar transform asNumber() not supported'); // bare — needs the input subtype (frontend flattens it)
-        scalarExpr = asNumberSql(spec, scalarExpr);
-        shape = { kind: 'value', as: spec.as };
-        continue;
+        if (spec) { scalarExpr = asNumberSql(spec, scalarExpr); shape = { kind: 'value', as: spec.as }; continue; }
+        // bare asNumber() over a runtime scalar. A date → its epoch-millis (Long,
+        // identity). Otherwise only valid as the ms-value leg of a date round-trip —
+        // i.e. immediately feeding an asDate() (which overwrites the tag), where a
+        // CAST to INTEGER is right. A standalone bare asNumber() over a runtime value
+        // can't recover its subtype (fractional vs integral), so fail closed.
+        if (shape.kind === 'value' && shape.as === 'date') { shape = { kind: 'value', as: 'long' }; continue; }
+        if (acc.transforms[i + 1]?.name === 'asDate') { scalarExpr = q`CAST(${scalarExpr} AS INTEGER)`; shape = { kind: 'value', as: 'long' }; continue; }
+        throw new Error('bare asNumber() over a non-date runtime value not yet supported');
       }
+      if (s.name === 'asDate') { scalarExpr = asDateSql(scalarExpr); shape = { kind: 'value', as: 'date' }; continue; }
+      if (s.name === 'dateAdd') { scalarExpr = q`(${scalarExpr} + ${value(Number(s.args[1]) * dtFactor(s.args[0]))})`; shape = { kind: 'value', as: 'date' }; continue; }
+      if (s.name === 'dateDiff') { scalarExpr = q`(${scalarExpr} - ${value(dateDiffOtherMs(s.args[0], {}))})`; shape = { kind: 'value', as: 'long' }; continue; }
       scalarExpr = scalarTx(s.name, s.args, scalarExpr) ?? (() => { throw new Error(`scalar transform ${s.name}() not supported`); })();
     }
     colsNode = q`${scalarExpr} AS v`;
@@ -430,6 +439,64 @@ function asNumberBare(v: any, subtype: string | null): { val: number; as: ValueT
   throw new Error(`Can't parse type ${v === null || v === undefined ? 'null' : cap(typeof v)} as number.`);
 }
 
+// ---------- date casts (asDate / dateAdd / dateDiff) ----------
+//
+// Internal datetime = epoch-millis (INTEGER); the 'date' shape tag frames it back to a
+// JS Date (handler.ts frameValue). second/minute/hour/day are fixed-width, so date
+// arithmetic is pure integer — no SQLite date functions needed for datetime literals;
+// only a runtime ISO-string asDate() calls unixepoch(). All GraphBinary offsets fold
+// into the instant, so only the instant is carried (matching the client's UTC wire).
+const DT_MS: Record<string, number> = { second: 1000, minute: 60000, hour: 3600000, day: 86400000 };
+
+/** dateAdd's DT unit token → its millisecond factor. */
+function dtFactor(arg: any): number {
+  const u = arg && typeof arg === 'object' && 'dt' in arg ? String(arg.dt) : null;
+  const f = u ? DT_MS[u] : undefined;
+  if (!f) throw new Error(`dateAdd() requires a DT unit (second/minute/hour/day), got ${u ?? arg}`);
+  return f;
+}
+
+/** asDate() over a compile-time constant → epoch-millis. An ISO-8601 string (offset
+ *  folds into the instant) or an integer/long epoch; a float epoch, non-ISO string,
+ *  list, or null raises TinkerPop's "Can't parse" (SQL can't raise it, and every
+ *  reachable inject input is a literal). */
+function asDateConst(v: any, subtype: string | null): number {
+  if (typeof v === 'number') {
+    if (subtype === 'float' || subtype === 'double' || subtype === 'bigdecimal' || !Number.isInteger(v))
+      throw new Error(`Can't parse ${v} as a Date: a floating-point epoch is not allowed.`);
+    return v;
+  }
+  if (typeof v === 'bigint') return Number(v);
+  if (typeof v === 'string') {
+    const ms = parseIsoMs(v); // UTC-normalized so Bun and the DO agree on the instant
+    if (Number.isNaN(ms)) throw new Error(`Can't parse '${v}' as an ISO-8601 Date.`);
+    return ms;
+  }
+  throw new Error(`Can't parse ${v === null || v === undefined ? 'null' : cap(typeof v)} as a Date.`);
+}
+
+/** dateDiff's other operand in millis (result = self − other). A datetime literal
+ *  (epoch-ms number) or a `constant(datetime|null)` nested traversal (null → epoch 0,
+ *  = new Date(null)). A nested inject()/movement defers. */
+function dateDiffOtherMs(arg: any, params: Record<string, any>): number {
+  if (typeof arg === 'number') return arg;
+  if (arg && typeof arg === 'object' && 'nested' in arg) {
+    const inner = stepChain(arg.nested, params);
+    if (inner.length === 1 && inner[0].name === 'constant') {
+      const c = inner[0].args[0];
+      return c === null || c === undefined ? 0 : Number(c);
+    }
+    throw new Error('dateDiff(): only a datetime literal or constant(datetime) argument is supported');
+  }
+  throw new Error('dateDiff() requires a datetime literal or constant(datetime) argument');
+}
+
+/** asDate() over a runtime scalar → epoch-millis. An integer/real value is already
+ *  millis; a text value is an ISO-8601 string (unixepoch resolves any offset into the
+ *  instant; ×1000 → millis). */
+const asDateSql = (e: Expression): Expression =>
+  q`(CASE WHEN typeof(${e}) IN ('integer', 'real') THEN CAST(${e} AS INTEGER) ELSE unixepoch(${e}) * 1000 END)`;
+
 export function compileInject(steps: PStep[]): Compiled {
   const Q = new Query();
   const acc = foldTailAcc(steps, 1);
@@ -449,7 +516,8 @@ export function compileInject(steps: PStep[]): Compiled {
   const cast = acc.transforms.length === 1 ? acc.transforms[0] : undefined;
   const spec = cast?.name === 'asNumber' ? numericSpec(cast.args[0]) : null; // throws on a non-numeric GType
   const bareNum = cast?.name === 'asNumber' && !spec; // asNumber() with no GType arg
-  const constCast = cast?.name === 'asBool' || (cast?.name === 'asNumber' && spec) || bareNum;
+  const dateCast = cast?.name === 'asDate' || cast?.name === 'dateAdd' || cast?.name === 'dateDiff';
+  const constCast = cast?.name === 'asBool' || (cast?.name === 'asNumber' && spec) || bareNum || dateCast;
   if (constCast && (acc.reducer || acc.projStep || acc.injects.length))
     throw new Error(`${cast!.name}() composed with a reducer/count()/trailing inject() not yet supported`);
 
@@ -475,6 +543,21 @@ export function compileInject(steps: PStep[]): Compiled {
       else if (valueAs !== as) throw new Error('asNumber() over a stream of mixed numeric subtypes not yet supported');
     }
     acc.transforms.length = 0;
+  } else if (cast?.name === 'asDate') {
+    const at = steps[0].argTypes ?? [];
+    for (let i = 0; i < vals.length; i++) vals[i] = asDateConst(vals[i], at[i] ?? null);
+    acc.transforms.length = 0;
+    valueAs = 'date';
+  } else if (cast?.name === 'dateAdd') {
+    const delta = Number(cast.args[1]) * dtFactor(cast.args[0]); // fixed-width unit → ms
+    for (let i = 0; i < vals.length; i++) vals[i] = Number(vals[i]) + delta;
+    acc.transforms.length = 0;
+    valueAs = 'date';
+  } else if (cast?.name === 'dateDiff') {
+    const other = dateDiffOtherMs(cast.args[0], {}); // datetime literals carry no bound params
+    for (let i = 0; i < vals.length; i++) vals[i] = Number(vals[i]) - other;
+    acc.transforms.length = 0;
+    valueAs = 'long';
   }
   // A numeric asNumber(GType) NOT const-folded above (composed with another transform)
   // would flow into renderProjection's runtime CAST, which skips the overflow check —

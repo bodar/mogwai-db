@@ -184,6 +184,9 @@ function frameValue(v: any, as: ValueType | undefined): Buffer {
     case 'bigint': return ioc.bigIntegerSerializer.serialize(BigInt(v), true);
     case 'float': return ioc.floatSerializer.serialize(Number(v), true);
     case 'double': return ioc.doubleSerializer.serialize(Number(v), true);
+    // Datetime is carried as epoch-millis (INTEGER); the client's DateTimeSerializer
+    // takes a JS Date (GraphBinary DATETIME 0x04, UTC wire), so reconstruct it here.
+    case 'date': return ioc.dateTimeSerializer.serialize(new Date(Number(v)), true);
   }
 }
 
