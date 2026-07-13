@@ -4,7 +4,7 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-13 · **live L3 conformance:** 661 · **corpus parse+chain:**
+**Last synced:** 2026-07-13 · **live L3 conformance:** 685 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
 
@@ -70,8 +70,8 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `id()`, `label()`, `count()` | ✅ | ✅ ids frame as `COALESCE(uid,id)` |
 | `valueMap`, `elementMap` | ✅ | ✅ custom vertex/edge framing (client serializer hardcodes empty props) |
 | `properties(k…)` [`.key`/`.value`/`.element`/`.id`/`.label`/`.count`] | ✅ | ✅ `.key`/`.value`/`.element`/`.id`/`.label`/`.count`; real VP id + meta framed (W4)<br>✅ `has(metaKey)`/`hasKey`/`hasValue`/`.properties()`(meta)/`valueMap`(metaMap)<br>❌ `element()` of an **edge** property<br>❌ `properties().dedup()` |
-| `select('a')`, multi-`select`, `project(…)` | 🟡 | ✅ column-threaded aliases<br>❌ `select`/`project` of an **edge**-typed label<br>❌ `select(Column.values/keys)` |
-| `select(Column)` | ❌ | the group-values cluster (`group()…select(Column.values).unfold()`) — a list-substrate tail add |
+| `select('a')`, multi-`select`, `project(…)` | 🟡 | ✅ column-threaded aliases<br>❌ `select`/`project` of an **edge**-typed label |
+| `select(Column.values/keys)` | 🟡 | ✅ over a `group()`/`groupCount()` map (retypes → MapStream, §MapStream): scalar/count/sum values + element/scalar keys, incl. list-VALUED maps (`by(__.<move>()…fold())`) as list-of-lists<br>❌ element-VALUE maps, Map-unfold (→Map.Entry), select(Column) on a raw Map param |
 | **chained projections** (`values().count()`, `valueMap().select()`) | ❌ | `only one projection step is supported per traversal` — element→scalar→scalar re-type; partly dissolved by §9, still open for this shape |
 | `order()` [`.by(key[,dir])`] | 🟡 | ✅ tail modifier<br>❌ `order()` after `path()`<br>❌ `order().by(key)` on a scalar stream |
 | `limit`, `range`, `skip` | ✅ | ✅ CTE mid-chain, tail-modifier after `order()` |
@@ -81,7 +81,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 
 | Step | Status | Notes |
 |---|:--:|---|
-| `group`, `groupCount` | 🟡 | ✅ scalar reducers → SQL `GROUP BY`<br>✅ element values → ordered-stream + handler fold<br>❌ >2 `by()` modulators<br>❌ `by(T.x)` key<br>❌ deep nested-`by()` chains |
+| `group`, `groupCount` | 🟡 | ✅ scalar reducers → SQL `GROUP BY`<br>✅ element values → ordered-stream + handler fold<br>✅ **re-enterable**: a follower (`select(Column.*)`/unfold) retypes it → MapStream (§MapStream)<br>❌ >2 `by()` modulators<br>❌ `by(T.x)` key<br>❌ deep nested-`by()` chains |
 | `fold()` | ✅ | ✅ terminal reducer **and** a real JSONB list value when followed (§9) |
 | `sum`, `min`, `max`, `mean` | ✅ | ✅ Long/Double framing<br>✅ also as `Scope.local` list reducers (§9) |
 | `group('a')`/`groupCount('a')` (side-effecting) | 🟡 | pass-through barrier: stashes the group-spec, `cap('a')` re-emits it (§12). ❌ after `as()`/`path()`, `cap('a')` then more steps |
@@ -133,11 +133,11 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | Step | Status | Notes |
 |---|:--:|---|
 | `fold()` as a re-usable list value | ✅ | ✅ JSONB list<br>✅ re-enters the tail |
-| `unfold()` | 🟡 | ✅ `json_each` explode → elements or scalar stream<br>❌ after a projection/modifier on an element stream<br>❌ Map-unfold |
+| `unfold()` | 🟡 | ✅ `json_each` explode → elements/scalar/nested-list stream (list-of-lists → per-list rows)<br>❌ after a projection/modifier on an element stream<br>❌ Map-unfold (→Map.Entry) |
 | `inject([…])` as a list | ✅ | ✅ each bracket arg = one list value |
 | `Scope.local` reducers (count/sum/min/max/mean) | ✅ | ✅ per-list correlated aggregate<br>✅ also degenerate scalar-local |
 | `none(P)` collection filter | ✅ | ✅ keep lists where no element matches |
-| `Scope.local` order/limit/range/tail/dedup on a list | ❌ | their scenarios chain `reverse()`/`skip(local)` — a list-substrate tail add |
+| `Scope.local` order/limit/range/skip/tail/dedup on a list | 🟡 | ✅ per-list correlated `json_each` rebuild (order sorts by value / direction-only `by(Order.desc)`; dedup keeps first occurrence; tail avoids a count() subquery)<br>❌ `order(Scope.local).by(key/traversal)`, `reverse()` |
 | **set-ops** (`combine`/`intersect`/`conjoin`/`disjunct`/`product`/`difference`) | ❌ | ~64 scenarios; small adds now that fold-as-value exists |
 | scalar-stream `none(P)` barrier | ❌ | whole-stream barrier (distinct from the per-list filter); fails closed |
 
@@ -174,14 +174,14 @@ home (`Carry`): a **named side-effect registry** (aggregate/cap/group('a')) and 
 |---|:--:|---|
 | `aggregate('x')` | 🟡 | ✅ pass-through barrier → a JSONB-list side-effect CTE; `aggregate('x').by(key)` scalar bag (by-miss drops)<br>❌ on a scalar stream (`values(k).aggregate(x)`), `by(<nested/token>)`, `local(aggregate(...))` |
 | `store('x')` | 🚫 | dropped in TinkerPop 4 (no grammar rule); `aggregate(Scope.local)` replaces it |
-| `cap('x')` | 🟡 | ✅ a list side-effect UNROLLS to individual results (no BulkSet wire type); a group side-effect re-emits one Map<br>❌ multi-key `cap('x','y')`, `cap('x')` then more steps (except a list-cap's tail) |
+| `cap('x')` | 🟡 | ✅ a list side-effect UNROLLS to individual results (no BulkSet wire type); a group side-effect re-emits one Map, **re-enterable** (a follower retypes it → MapStream, so `cap('a').select(Column.values).unfold()` composes)<br>❌ multi-key `cap('x','y')` |
 | `sack()` / `withSack(…)` | 🟡 | ✅ carried column: `sack(Operator.x).by(key/T.label/nested)` mutate, bare `sack()` read, `withSack(init)` seed, trailing reducer<br>❌ inject-const numeric promotion (NumberHelper byte→short bump), `repeat()`/`barrier`/`local`, split/merge-on-fork, `sack(BiFunction)` |
 | `group('a')` / `groupCount('a')` (side-effecting) | 🟡 | ✅ pass-through barrier → stashed group-spec, `cap('a')` re-runs `compileGroup`<br>❌ nested value-`by()` with movement+order, `by(__.select…)`, after `as()`/`path()` (inherits `compileGroup`'s §4 limits) |
 | `within('x')` / `without('x')` readback | ❌ | mid-chain read of a side-effect (the aggregate-dedup idiom) — where eager/lazy diverge; fails closed |
 
-Landed L3 618→634 (sack +4, aggregate/cap +8, group('a')/cap +4). Still gates
-`ProductiveByStrategy` (needs `local()` too) and the `group('a')…cap('a').select(Column.values).unfold()`
-cluster (needs `select(Column.values)`, §9).
+Landed L3 618→634 (sack +4, aggregate/cap +8, group('a')/cap +4). The
+`group('a')…cap('a').select(Column.values).unfold()` cluster now lands (cap re-enters →
+MapStream, §MapStream). Still gates `ProductiveByStrategy` (needs `local()` too).
 
 ## 13. Traversal strategies
 
@@ -223,7 +223,8 @@ Cheapest wins are long done. What's left, by structural weight:
 
 1. ~~**Side-effect state** (§12)~~ — **substrate LANDED** (618→634): the registry
    (aggregate/cap/group('a')) + carried column (sack). Remaining tails: `within/without`
-   readback, sack numeric-promotion, the `group('a')…select(Column.values)` cluster.
+   readback, sack numeric-promotion. (The `group('a')…select(Column.values)` cluster now
+   lands via the MapStream re-entry, §MapStream.)
 2. ~~**Multi/meta-properties (W4)** (§11, §14)~~ — **LANDED** (634→648): normalized
    `vertex_properties` table + edge JSONB, multi/set cardinality, meta writes+reads. The
    self-tuning `json_extract` index machinery is retired for static vp covering indexes.
@@ -232,8 +233,9 @@ Cheapest wins are long done. What's left, by structural weight:
    ProductiveByStrategy), `order()`/`dedup()` inside local.
 4. **Chained projections** (§3) — element→scalar→scalar re-type; partly dissolved by the
    list substrate, still open for this shape (~40).
-5. **Collection-algebra tail** (§9) — set-ops / Map-unfold / `select(Column.values)` /
-   rest of Scope.local; small adds on the list substrate (also unblocks the group('a')
-   select(Column.values) cap cluster).
+5. **Collection-algebra tail** (§9) — ~~`select(Column.values/keys)`~~ + list-local
+   Scope.local ops + nested list-valued maps **LANDED** (661→685, §MapStream). Remaining:
+   **set-ops** (combine/intersect/difference/conjoin/disjoin — a separate sub-project:
+   operand compilation + vertex identity + null semantics) and **Map-unfold** (→Map.Entry).
 
 Full analysis: `docs/2026-07-12-conformance-structural-bets.md` (the "remaining frontier").

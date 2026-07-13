@@ -717,6 +717,54 @@ Deferred (clear throws): non-movement local bodies (match/simplePath/union/neste
 no-barrier bodies, `order()`/`dedup()` inside local, local after `as()`/`path()`/branch/sack,
 `local(aggregate(...))` (gates ProductiveByStrategy), `otherV` with no preceding edge step.
 
+## MapStream — re-enterable group()/list tail: select(Column) + list-local + nested lists (LANDED 2026-07-13, L3 661→685)
+
+The traverser stream model's missing FOURTH shape. `group()`/`groupCount()` used to be a
+terminal `Compiled {kind:'group'}` (framed from rows by the handler's `groupBuffer`); now a
+group WITH a follower **retypes to a `MapStream`** (`stream.ts` — a `(mk,mv)` row relation,
+sibling to St/Scalar/List) and `dispatchNext` routes it exactly like fold→ListStream. This
+dissolves the "group()/fold() is terminal" wall the same way fold→unfold dissolved the
+one-projection ceiling. A **TERMINAL group() is byte-identical** (stays the `groupBuffer`
+path) — only the re-enterable form is new.
+
+- **`groupToMapStream`** (`steps/group.ts`) builds `(mk,mv)` via a real SQL GROUP BY. Scalar
+  keys drop nulls (values() semantics, mirrors `groupBuffer`); **element keys carry their
+  rowid** (`keyOf={kind:'elem'}`) so `select(Column.keys).unfold()` rejoins vertices.
+  Values (Stage 1) = single scalars: count/sum/neighbourhood-reduction (`MAX(nested scalar)`).
+- **`select(Column.values)`/`select(Column.keys)`** (`compileFromMap`, `steps/list.ts`)
+  aggregate one map column into ONE list value (`json_group_array`, COALESCE→`[]` for an
+  empty map) → a `ListStream` that unfold()/framing handles. So
+  `group().select(Column.values).unfold()` flows **map→list→scalar**, each phase a fresh
+  accumulator. `{column:'values'|'keys'}` comes from `frontend.ts enumSuffix`.
+- **List-local `Scope.local` transforms** (order/dedup/limit/skip/range/tail) on a
+  `ListStream` (`listLocalTransform`, `steps/list.ts`): rebuild EACH row's list via a
+  correlated `json_each` aggregate (works on a one-row fold() list AND a multi-row stream of
+  lists alike). Stays a list, so downstream continues. Element order preserved: order() sorts
+  by value (bare or direction-only `by(Order.desc)`), subset ops keep position order, dedup
+  keeps first occurrence (`GROUP BY value ORDER BY MIN(key)`). **tail avoids a count()
+  subquery** (`ORDER BY key DESC LIMIT n`, outer re-sort asc) — a two-level `json_each`
+  correlation on `c.list` fails ("no such column"). `by(key)`/traversal comparators defer.
+- **Nested (list-VALUED) maps** — `group().by().by(__.<move>().<label|values(k)|id>()…fold())`.
+  `compileNestedList` (`plan.ts`) → ONE correlated JSONB array per group key
+  (out/in/both([lbl]) → neighbour projection, ordered by incident-edge id; both() unions both
+  directions). A single **pre-fold op folds into the subquery** — `out().label().dedup().fold()`
+  ≡ dedup the neighbour stream then collect. `ListOf`/`MapOf` gain a **`'list'` variant** so
+  `select(Column.values)` of a list-valued map is a **list-of-lists** and `compileUnfold`
+  explodes it to per-list `ListStream` rows (which the Scope.local ops above then reshape).
+  **jsonb-in-jsonb nests correctly** (`json_group_array` recognizes jsonb blobs). The
+  per-member list is wrapped in `MAX` (constant within an element-keyed group) — a
+  **non-element key would need a UNION over members, so defers** (correct-by-design).
+- **`cap('a')` of a group side-effect** (`compileCap`) retypes to a MapStream on a follower
+  too — `group('a')…cap('a').select(Column.values).unfold()` composes like inline group()
+  (closes the §-side-effect deferral that waited on select(Column)).
+
+No handler change beyond reusing `jsonbList`. **Deferred (clear throws):** Map-unfold
+(→Map.Entry, the reserved `'entry'` ListOf), element-VALUE group maps, non-element-key
+neighbour-list values, `order(Scope.local).by(key/traversal)`, and set-ops
+(combine/intersect/difference — a separate sub-project: operand compilation + vertex identity
++ null semantics). Plan/decision log context: `docs/2026-07-13-list-value-substrate-plan.md`
+(this is Stage §9/§10's natural completion).
+
 ## Environment notes
 
 - Runtime is Bun (pinned in `mise.toml`), not Node. `bun run start` serves
