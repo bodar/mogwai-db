@@ -176,7 +176,7 @@ standalone analysis for the SQL-native design (named side-effect CTEs threaded t
 
 | Strategy | Status | Notes |
 |---|:--:|---|
-| 15 optimization strategies (Count/IdentityRemoval/FilterRanking/LazyBarrier/EarlyLimit/OrderLimit/Adjacent↔Incident/InlineFilter/PathRetraction/PathProcessor/ByModulatorOptimization/RepeatUnroll/Match{Algorithm,Predicate}) | ✅ | accepted as **no-ops** (result-preserving by TinkerPop's contract; our SQL does its own planning) |
+| 15 optimization strategies | ✅ | accepted as **no-ops** (result-preserving by TinkerPop's contract; our SQL does its own planning) |
 | `withoutStrategies(…)` | ✅ | safe no-op (we apply no default) |
 | **SubgraphStrategy** (vertex criterion) | 🟡 | `where`/`has` injection pass. ❌ edge/vertexProperty criteria, adjacency (`out()` expansion) |
 | **PartitionStrategy** (read-filter + write-stamp) | 🟡 | `has(within)` + property stamp. ❌ `includeMetaProperties`, partition-aware merge |
