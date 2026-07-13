@@ -119,6 +119,18 @@ GraphBinary error, no corruption), not correct. This is the per-request-transact
 gap P4 still lists as remaining (DO single-threading + one implicit txn per request
 closes it); destroy is a rare admin op, so it's not yet worth a lock.
 
+**Self-describing docs surface (DONE).** The shared router also serves, GET-only,
+on both runtimes: `/openapi.json` (a hand-written OpenAPI 3.1 spec for the 4 verbs,
+`src/docs.ts`), `/docs` (a tiny Scalar shell rendering it as an interactive
+reference — CDN-loaded, **pinned**, so zero npm dep and zero Worker-bundle cost),
+and `/` → 302 `/docs`. Management verbs (PUT/GET/DELETE) are fully interactive in
+Scalar's try-it; the gremlin POST accepts a JSON request body but its response is
+still GraphBinary (binary), so try-it shows the request succeeding with an
+unrenderable body. **Future improvement (scoped, not built):** content-negotiated
+**untyped GraphSON v4** responses make the POST fully readable for non-binary
+clients — `docs/2026-07-13-graphson-untyped-scope.md` (request-side JSON parsing
+already works; only a parallel `executeJson` response encoder is missing).
+
 ## Hard-won wire-protocol facts (each cost debugging time)
 
 - beta.2 sends **requests in GraphBinary** (`0x84 + map(fields,bare) +
