@@ -1,4 +1,4 @@
-import { q, value, list, empty, Relation, type Expression } from '../q.ts';
+import { q, value, list, empty, Relation, Query, type Expression } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
 import {
   propExtract, predicateSql, compileNestedScalar, labelNameSub, rangeToOffsetLimit, elemCtx, scalarTx, extIdOf,
@@ -92,6 +92,30 @@ function reducerMod(name: NonNullable<TailAcc['reducer']>): ModFn {
   };
 }
 
+/** Fold the tail steps from `from` into a TailAcc: one optional projection step,
+ *  scalar transforms, inject-appends, and the value-shape modifiers (MODIFIERS).
+ *  Shared by compileTail (element-rooted) and compileInject (scalar-stream-rooted)
+ *  so both consume one modifier vocabulary — add a value-tail step once, here. */
+export function foldTailAcc(steps: PStep[], from: number): TailAcc {
+  const acc: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, reducer: null, isPreds: [], transforms: [], injects: [] };
+  for (let i = from; i < steps.length; i++) {
+    const s = steps[i];
+    if (PROJECTION_NAMES.has(s.name)) {
+      if (acc.projStep) throw new Error('only one projection step is supported per traversal');
+      acc.projStep = s;
+      continue;
+    }
+    // inject(c…) after a value projection appends constants to the value stream.
+    if (s.name === 'inject') { acc.injects.push(...s.args); continue; }
+    // A scalar string/cast transform (concat/length/…) wraps the projected scalar.
+    if (SCALAR_TX_NAMES.has(s.name)) { acc.transforms.push(s); continue; }
+    const mod = MODIFIERS.get(s.name);
+    if (!mod) throw new Error(`step not implemented: ${s.name}()`);
+    mod(s, acc, { last: i === steps.length - 1, next: steps[i + 1]?.name });
+  }
+  return acc;
+}
+
 /** Compile the tail: `st` is the finished prefix state, `steps[stop]` the first
  *  step the prefix dispatch didn't consume. */
 export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
@@ -121,22 +145,7 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
   }
 
   // Tail fold: accumulate the projection + modifiers.
-  const acc: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, reducer: null, isPreds: [], transforms: [], injects: [] };
-  for (let i = stop; i < steps.length; i++) {
-    const s = steps[i];
-    if (PROJECTION_NAMES.has(s.name)) {
-      if (acc.projStep) throw new Error('only one projection step is supported per traversal');
-      acc.projStep = s;
-      continue;
-    }
-    // inject(c…) after a value projection appends constants to the value stream.
-    if (s.name === 'inject') { acc.injects.push(...s.args); continue; }
-    // A scalar string/cast transform (concat/length/…) wraps the projected scalar.
-    if (SCALAR_TX_NAMES.has(s.name)) { acc.transforms.push(s); continue; }
-    const mod = MODIFIERS.get(s.name);
-    if (!mod) throw new Error(`step not implemented: ${s.name}()`);
-    mod(s, acc, { last: i === steps.length - 1, next: steps[i + 1]?.name });
-  }
+  const acc = foldTailAcc(steps, stop);
 
   if (acc.projStep?.name === 'path')
     return compilePath(st, acc.projStep, acc, indexKeys);
@@ -201,7 +210,7 @@ const PROJECTORS = new Map<string, ProjFn>([
 ]);
 
 function buildProjection(st: St, acc: TailAcc, indexKeys: Set<string>): Compiled {
-  const { orders, distinct, offset, limit, isPreds, reducer } = acc;
+  const { distinct, offset, limit, isPreds, reducer } = acc;
   const projName = acc.projStep?.name ?? '__element';
 
   if (reducer && projName === 'count') throw new Error(`${reducer}() after count() not yet supported`);
@@ -224,25 +233,46 @@ function buildProjection(st: St, acc: TailAcc, indexKeys: Set<string>): Compiled
   const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
   const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
   const proj = PROJECTORS.get(projName)!({ st, n, l, extId, vJoin, vlJoin, projStep: acc.projStep, indexKeys, hasIs: isPreds.length > 0 });
-  let { shape } = proj;
+
+  // order().by(key) sorts by a property expression (element context) — auto-index it.
+  const orderKey = (key: string): Expression => {
+    const pe = propExtract('n.props', key);
+    if (pe.indexKey && st.elem === 'node') indexKeys.add(pe.indexKey);
+    return pe.expr;
+  };
+  return renderProjection(st.q, proj, acc, indexKeys, orderKey);
+}
+
+/** Render a resolved projection + the value-shape tail (scalar transforms, is()
+ *  filter, dedup, order, range/limit, inject-append, terminal reducer) into a
+ *  Compiled. The single tail renderer shared by element projections (buildProjection)
+ *  and the inject scalar stream (compileInject) — so a new value-tail behaviour is
+ *  written once. `orderKey(key)` resolves an order().by(key) to a SQL expression in
+ *  the caller's context (a property lookup for elements; a throw for a scalar stream
+ *  that has no properties). Identity order uses `v` (value shape) or `n.id`. */
+function renderProjection(
+  Q: Query, proj: ProjResult, acc: TailAcc, indexKeys: Set<string>,
+  orderKey: (key: string) => Expression,
+): Compiled {
+  const { orders, distinct, offset, limit, isPreds, reducer, injects } = acc;
+  let { shape, colsNode, scalarExpr } = proj;
 
   // Scalar string/cast transforms (values('name').concat('X').toUpper()) wrap the
   // projected scalar; is()/order() then see the transformed value. Only a scalar
-  // stream (values/id/label) has a scalarExpr to transform.
+  // stream (values/id/label/inject) has a scalarExpr to transform.
   if (acc.transforms.length) {
-    if (!proj.scalarExpr) throw new Error(`${acc.transforms[0].name}() requires a scalar stream (values/id/label)`);
-    const txExpr = acc.transforms.reduce<Expression>(
-      (e, s) => scalarTx(s.name, s.args, e) ?? (() => { throw new Error(`scalar transform ${s.name}() not supported`); })(), proj.scalarExpr);
-    proj.colsNode = q`${txExpr} AS v`;
-    proj.scalarExpr = txExpr;
+    if (!scalarExpr) throw new Error(`${acc.transforms[0].name}() requires a scalar stream (values/id/label)`);
+    scalarExpr = acc.transforms.reduce<Expression>(
+      (e, s) => scalarTx(s.name, s.args, e) ?? (() => { throw new Error(`scalar transform ${s.name}() not supported`); })(), scalarExpr);
+    colsNode = q`${scalarExpr} AS v`;
   }
 
   // WHERE: the values() existence check + any is(P) on the projected scalar, AND'd.
   const whereParts: Expression[] = [];
   if (proj.baseWhere) whereParts.push(proj.baseWhere);
   if (isPreds.length) {
-    if (!proj.scalarExpr) throw new Error('is() requires a scalar stream (values/label/id/count)');
-    for (const pr of isPreds) whereParts.push(predicateSql(proj.scalarExpr, pr));
+    if (!scalarExpr) throw new Error('is() requires a scalar stream (values/label/id/count)');
+    for (const pr of isPreds) whereParts.push(predicateSql(scalarExpr, pr));
   }
   const whereNode: Expression = whereParts.length ? q` WHERE ${list(whereParts, ' AND ')}` : empty;
 
@@ -251,30 +281,67 @@ function buildProjection(st: St, acc: TailAcc, indexKeys: Set<string>): Compiled
     const keyNodes = orders.map((o) => {
       if (o.dir === 'shuffle') return q`RANDOM()`;
       const dir = o.dir === 'desc' ? ' DESC' : ' ASC';
-      if (o.key !== null) {
-        const pe = propExtract('n.props', o.key);
-        if (pe.indexKey && st.elem === 'node') indexKeys.add(pe.indexKey); // order().by(key) sorts via the index
-        return q`${pe.expr}${dir}`;
-      }
+      if (o.key !== null) return q`${orderKey(o.key)}${dir}`;
       return q`${shape.kind === 'value' ? 'v' : 'n.id'}${dir}`;
     });
     orderNode = q` ORDER BY ${list(keyNodes, ', ')}`;
   }
   const limitNode: Expression = (limit !== null || offset > 0) ? q` LIMIT ${limit ?? -1} OFFSET ${offset}` : empty;
 
-  let tailNode: Expression = q`SELECT ${distinct ? 'DISTINCT ' : ''}${proj.colsNode} FROM ${proj.fromNode}${whereNode}${orderNode}${limitNode}`;
+  let tailNode: Expression = q`SELECT ${distinct ? 'DISTINCT ' : ''}${colsNode} FROM ${proj.fromNode}${whereNode}${orderNode}${limitNode}`;
 
   // values(k).inject(c…): append the constants as extra value rows before any
   // reducer. Only meaningful on a scalar stream (the injected value shares `v`).
-  if (acc.injects.length) {
+  if (injects.length) {
     if (shape.kind !== 'value') throw new Error('inject() after a non-scalar projection not yet supported');
-    tailNode = q`SELECT v FROM (${tailNode}) UNION ALL ${list(acc.injects.map((c) => q`SELECT ${value(c)} AS v`), ' UNION ALL ')}`;
+    tailNode = q`SELECT v FROM (${tailNode}) UNION ALL ${list(injects.map((c) => q`SELECT ${value(c)} AS v`), ' UNION ALL ')}`;
   }
 
   // Terminal reducers wrap the projected select.
   if (reducer) ({ tailNode, shape } = wrapReducer(tailNode, reducer, shape));
 
-  return readCompiled(st.q, tailNode, shape, [...indexKeys]);
+  return readCompiled(Q, tailNode, shape, [...indexKeys]);
+}
+
+/** g.inject(v1, v2, …) — an inject-rooted read: a scalar `v` stream seeded from
+ *  constants, then the SAME value tail every projection uses (foldTailAcc +
+ *  renderProjection). All inject() args across the chain seed one VALUES union (so
+ *  dedup/order/reducer see the whole stream); the shared tail applies the rest.
+ *  Only reaches here for pure inject-rooted chains (addV/addE/mergeV/mergeE match
+ *  earlier in WRITE_RULES). A bare inject() is an empty stream. */
+export function compileInject(steps: PStep[]): Compiled {
+  const Q = new Query();
+  const acc = foldTailAcc(steps, 1);
+  // Fold every inject() value (the source args + any later inject appends) into one
+  // VALUES-backed `v` seed, so the tail's dedup/order/limit/reducer act on the full
+  // stream — matching the pre-unification inline-UNION semantics.
+  const vals = [...steps[0].args, ...acc.injects];
+  acc.injects.length = 0; // consumed into the seed, not appended after the tail
+  // The seed is a FROM source directly (the VALUES CTE relation, or an empty select)
+  // — renderProjection wraps it, so no extra subquery here.
+  const from: Expression = vals.length
+    ? Q.cte(q`VALUES ${list(vals.map((v) => q`(${value(v)})`), ', ')}`, ['v'])
+    : q`(SELECT NULL AS v WHERE 0)`;
+
+  // count() is the only projection valid on a scalar stream (values/id/label/… need
+  // an element). COUNT the (dedup/is/range-applied) rows. A step AFTER count() would
+  // operate on the count value, not the stream (e.g. count().is(P) filters the count)
+  // — a different semantics the acc's position-free fold can't express, so defer it
+  // (the pre-unification inject compiler deferred everything after count() too). Any
+  // is()/dedup/range here is therefore pre-count and correctly filters the stream.
+  if (acc.projStep) {
+    if (acc.projStep.name !== 'count') throw new Error(`${acc.projStep.name}() requires element input (a scalar stream has no ${acc.projStep.name})`);
+    const countIdx = steps.findIndex((s) => s.name === 'count');
+    if (countIdx !== steps.length - 1) throw new Error(`step not implemented after count(): ${steps[countIdx + 1].name}()`);
+    const dist = acc.distinct ? 'DISTINCT ' : '';
+    const whereNode = acc.isPreds.length ? q` WHERE ${list(acc.isPreds.map((p) => predicateSql(q`v`, p)), ' AND ')}` : empty;
+    const limitNode = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
+    return readCompiled(Q, q`SELECT COUNT(*) AS v FROM (SELECT ${dist}v FROM ${from}${whereNode}${limitNode})`, { kind: 'count' });
+  }
+
+  const proj: ProjResult = { shape: { kind: 'value' }, colsNode: q`v AS v`, fromNode: from, scalarExpr: q`v`, baseWhere: null };
+  const orderKey = (): Expression => { throw new Error('inject().order().by(key) not supported (scalar stream has no properties)'); };
+  return renderProjection(Q, proj, acc, new Set(), orderKey);
 }
 
 /** Wrap a `v`-projecting select in a terminal reducer (fold/sum/min/max/mean),

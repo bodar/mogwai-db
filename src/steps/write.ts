@@ -1,11 +1,11 @@
 import type { GraphStore } from '../storage.ts';
-import { q, value, list, empty, render, Query, type Expression } from '../q.ts';
-import { propExtract, labelIn, predicateSql, rangeToOffsetLimit, scalarTx } from '../plan.ts';
+import { q, value, list, empty, render, type Expression } from '../q.ts';
+import { propExtract, labelIn } from '../plan.ts';
 import { stepChain, type Step } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../render.ts';
 import { buildPrefix } from './index.ts';
-import { wrapReducer } from './projection.ts';
+import { compileInject } from './projection.ts';
 
 // ---------- write compilers ----------
 //
@@ -77,61 +77,9 @@ function compileSetProperty(steps: PStep[], params: Record<string, any>): WriteP
   };
 }
 
-// g.inject(v1, v2, ...) — seed a value stream from constants, then apply a value
-// tail: further inject() appends, dedup/order/range/limit/skip, is(P), and a
-// terminal count()/fold()/sum()/min()/max()/mean() reducer. Only reaches here for
-// pure inject-rooted chains (addV/addE/mergeV/mergeE match earlier in WRITE_RULES).
-function compileInject(steps: PStep[]): Compiled {
-  const Q = new Query();
-  // Each inject(args) → one VALUES-backed SELECT of `v` rows (a bare inject() is an
-  // empty stream). Constants ride as Value tokens (binds derive from the tree).
-  const valuesSelect = (vals: any[]): Expression =>
-    vals.length
-      ? q`SELECT v FROM ${Q.cte(q`VALUES ${list(vals.map((v) => q`(${value(v)})`), ', ')}`, ['v'])}`
-      : q`SELECT NULL AS v WHERE 0`;
-
-  // Fold the tail into an accumulator, mirroring compileTail's value-shape modifiers.
-  let stream: Expression = valuesSelect(steps[0].args);
-  const isPreds: any[] = [];
-  let distinct = false, reducer: NonNullable<Parameters<typeof wrapReducer>[1]> | 'count' | null = null;
-  let orderDir: 'asc' | 'desc' | null = null, offset = 0, limit: number | null = null;
-  for (let i = 1; i < steps.length; i++) {
-    const s = steps[i], nm = s.name;
-    if (reducer) throw new Error(`step not implemented after ${reducer}(): ${nm}()`);
-    if (nm === 'inject') { stream = q`${stream} UNION ALL ${valuesSelect(s.args)}`; continue; }
-    if (nm === 'dedup') { if (s.args.length) throw new Error('dedup(label) not yet supported'); distinct = true; continue; }
-    if (nm === 'is') { isPreds.push(s.args[0]); continue; }
-    if (nm === 'order') {
-      const by = (s.bys ?? [])[0];
-      if (by?.some((a: any) => typeof a === 'string')) throw new Error('inject().order().by(key) not supported (scalar stream has no properties)');
-      orderDir = (by?.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order ?? 'asc') as 'asc' | 'desc';
-      continue;
-    }
-    if (nm === 'limit') { limit = Number(s.args[0]); continue; }
-    if (nm === 'skip') { offset = Number(s.args[0]); continue; }
-    if (nm === 'range') { ({ offset, limit } = rangeToOffsetLimit(s.args)); continue; }
-    if (nm === 'count' || nm === 'fold' || nm === 'sum' || nm === 'min' || nm === 'max' || nm === 'mean') { reducer = nm; continue; }
-    // Per-element scalar transform (concat/length/toUpper/…): wrap the value now so
-    // it composes left-to-right with further transforms and precedes any reducer.
-    const tx = scalarTx(nm, s.args, q`v`);
-    if (tx) { stream = q`SELECT ${tx} AS v FROM (${stream})`; continue; }
-    throw new Error(`inject() with subsequent step ${nm}() not yet supported`);
-  }
-
-  const whereNode = isPreds.length ? q` WHERE ${list(isPreds.map((p) => predicateSql(q`v`, p)), ' AND ')}` : empty;
-  const orderNode = orderDir ? q` ORDER BY v${orderDir === 'desc' ? ' DESC' : ' ASC'}` : empty;
-  const limitNode = (limit !== null || offset > 0) ? q` LIMIT ${limit ?? -1} OFFSET ${offset}` : empty;
-  // Only wrap the raw stream when a modifier actually applies — a bare inject()
-  // (or inject().reducer()) keeps the minimal `SELECT v FROM c0` the reducer wraps.
-  const wrap = distinct || isPreds.length || orderDir || limit !== null || offset > 0;
-  let tailNode: Expression = wrap ? q`SELECT ${distinct ? 'DISTINCT ' : ''}v FROM (${stream})${whereNode}${orderNode}${limitNode}` : stream;
-  let shape: Shape = { kind: 'value' };
-
-  if (reducer === 'count') tailNode = q`SELECT COUNT(*) AS v FROM (${tailNode})`, shape = { kind: 'count' };
-  else if (reducer) ({ tailNode, shape } = wrapReducer(tailNode, reducer, shape));
-
-  return readCompiled(Q, tailNode, shape);
-}
+// g.inject(...) is a scalar-stream READ (not a write) — it compiles through the
+// shared value tail in projection.ts (compileInject). WRITE_RULES routes it here
+// only because it has no V/E source; see the import at the top of this file.
 
 interface VertexSpec { label: string; props: Record<string, any>; uid: string | number | null; }
 

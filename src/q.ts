@@ -132,8 +132,11 @@ export class Query {
     return self;
   }
 
-  /** Assemble `WITH [RECURSIVE] … <tail>` as one tree and render to {sql, binds}. */
+  /** Assemble `WITH [RECURSIVE] … <tail>` as one tree and render to {sql, binds}.
+   *  With no CTEs, render the bare tail — an empty `with ` prefix is malformed SQL
+   *  (the only zero-CTE read is a constant source like `g.inject()`). */
   render(tail: Expression): { sql: string; binds: any[] } {
+    if (this.ctes.length === 0) { const { text, args } = statement(q`${tail}`); return { sql: text, binds: args }; }
     const heads = this.ctes.map((c) =>
       q`${raw(c.name)}${c.cols ? raw(`(${c.cols.join(', ')})`) : empty} as (${c.body})`);
     const recursive = this.ctes.some((c) => c.recursive) ? raw('recursive ') : empty;

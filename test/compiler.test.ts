@@ -100,19 +100,26 @@ describe('compiler SQL snapshots', () => {
   test('inject() is a value stream that reducers/modifiers chain onto', () => {
     expect(read('g.inject(1,2,3)').shape).toEqual({ kind: 'value' });
     expect(read('g.inject(1,2,3)').binds).toEqual([1, 2, 3]);
-    // trailing inject() appends via UNION ALL
-    expect(read('g.inject(1,3).inject(100,300)').sql).toContain('UNION ALL');
+    // every inject() value across the chain folds into one VALUES seed (so the tail's
+    // dedup/order/reducer see the whole stream)
+    expect(read('g.inject(1,3).inject(100,300)').binds).toEqual([1, 3, 100, 300]);
     // reducers reuse the shared wrapper
     expect(read('g.inject(1,2,3).sum()').shape).toEqual({ kind: 'scalar' });
     expect(read('g.inject(1,2,3).sum()').sql).toContain('SUM(v)');
     expect(read('g.inject(1,2,3).mean()').sql).toContain('AVG(v)');
     expect(read('g.inject(1,2,3).count()').shape).toEqual({ kind: 'count' });
     expect(read('g.inject(1,2,3).fold()').shape).toEqual({ kind: 'list', elem: 'scalar' });
+    // is() BEFORE count() filters the pre-count stream (WHERE inside the counted set)
+    expect(read('g.inject(1,2,3).is(P.gt(1)).count()').sql).toContain('COUNT(*) AS v FROM (SELECT v FROM c0 WHERE v > ?)');
+    // is()/steps AFTER count() would filter the count value — a different semantics
+    // the position-free tail can't express, so defer (never silently miscount).
+    expect(() => compile('g.inject(1,2,3).count().is(P.gt(2))', {})).toThrow('step not implemented after count(): is()');
     // value modifiers
     expect(read('g.inject(3,1,2).order()').sql).toContain('ORDER BY v ASC');
     expect(read('g.inject(1,1,2).dedup()').sql).toContain('DISTINCT v');
-    // an unsupported follow-on step defers cleanly
-    expect(() => compile('g.inject(1).as("a").select("a")', {})).toThrow('inject() with subsequent step as()');
+    // an unsupported follow-on step defers cleanly (shared tail's message, since
+    // inject now flows through the same value tail as element projections)
+    expect(() => compile('g.inject(1).as("a").select("a")', {})).toThrow('step not implemented: as()');
   });
 
   test('group().by(__.bothE().values(k).<reducer>()) is a correlated neighbourhood aggregate', () => {
@@ -136,8 +143,8 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.inject("that").replace("h","j")').sql).toContain('replace(v');
     // Scope.local on a scalar stream is a no-op (per-element == per-list)
     expect(read('g.inject("a").length(Scope.local)').sql).toContain('length(v)');
-    // transforms chain
-    expect(read('g.inject("a").concat("b").toUpper()').sql).toContain('upper(v)');
+    // transforms chain — composed inline (upper(v || ?)), one shared value tail
+    expect(read('g.inject("a").concat("b").toUpper()').sql).toContain('upper(v ||');
   });
 
   test('scalar transforms also wrap an element value projection', () => {
@@ -181,7 +188,9 @@ describe('compiler SQL snapshots', () => {
     const p = read('g.inject(1,2,3)');
     // q-kernel built: Query mints the CTE name (unquoted, identifier-safe) + our
     // SQL casing; binds ride as Value tokens (one row each).
-    expect(p.sql).toBe('with c0(v) as (VALUES (?), (?), (?)) SELECT v FROM c0');
+    // inject compiles through the shared value tail (projection.ts) — a scalar `v`
+    // stream projected from the VALUES CTE.
+    expect(p.sql).toBe('with c0(v) as (VALUES (?), (?), (?)) SELECT v AS v FROM c0');
     expect(p.binds).toEqual([1, 2, 3]);
   });
 
