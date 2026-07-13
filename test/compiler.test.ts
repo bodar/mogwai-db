@@ -1179,6 +1179,24 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V(1).out("knows").map(__.values("name"))').map((r) => r.v).sort()).toEqual(['josh', 'vadas']);
   });
 
+  test('alias-in-predicate where — re-root the sub-traversal on an as()/select() label', () => {
+    const store = seededStore();
+    // keep created-things whose creator (a) is josh, then their creators' names
+    expect(run(store, 'g.V().as("a").out("created").where(__.as("a").values("name").is("josh")).in("created").values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'josh', 'marko', 'peter']);
+    // or() of two select('n') branches (all vertices are person or software)
+    expect(run(store, 'g.V().as("n").where(__.or(__.select("n").hasLabel("software"), __.select("n").hasLabel("person"))).select("n").by("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+    // multi-hop chain rooted at an alias b
+    expect(run(store, 'g.V(1).as("a").out("created").in("created").as("b").where(__.as("b").out("created").has("name","ripple")).values("name")').map((r) => r.v))
+      .toEqual(['josh']);
+    // SQL: the predicate correlates on the alias column, read back by subquery
+    expect(read('g.V().as("a").out().where(__.as("a").values("name").is("marko"))').sql)
+      .toContain("(SELECT props FROM nodes WHERE id=p.a0)");
+    // unknown label fails closed
+    expect(() => compile('g.V().where(__.as("z").out())', {})).toThrow('no such label');
+  });
+
   test('alias-compare where — the co-creator idiom', () => {
     const store = seededStore();
     // people who created something also created by someone else (exclude self)
