@@ -178,50 +178,65 @@ already works; only a parallel `executeJson` response encoder is missing).
 - DO SQLite has **no user-defined functions**: regex TextP and anything SQL
   can't express filters post-SQL in JS inside the DO.
 
-## Schema (src/storage.ts) — rationale
+## Schema (src/storage.ts) — rationale (W4 property model)
 
-Integer rowid PKs; interned labels (small hot indexes); props as JSON **text**;
-covering edge indexes `(src,label,tgt)` and `(tgt,label,src)` so out()/in() are
-index-only scans.
+Integer rowid PKs; interned labels (small hot indexes); covering edge indexes
+`(src,label,tgt)` and `(tgt,label,src)` so out()/in() are index-only scans.
 
-**JSONB is available on both runtimes** (verified 2026-07-12: DO SQLite = **3.47.0**
-in workerd `1.20260708.1`; Bun dev = **3.53.0**; JSONB landed 3.45.0). Migrating the
-`props` storage column to a JSONB blob is a *measured perf opportunity*, not done and
-not a bug — json_extract/json_each skip the per-row text-parse. It is NOT a
-find-replace: (a) the ~6 read sites doing JS `JSON.parse(r.props)` must select
-`json(props)` (a JSONB blob isn't JSON.parse-able); (b) writes wrap `jsonb(?)`;
-(c) contract-test both runtimes. Verified the property expression index STILL matches
-on a JSONB column (`SEARCH … USING COVERING INDEX`), so the hot-property story
-survives. Expected gain is marginal for the target workload (small OLTP prop-maps);
-JSONB's win scales with JSON size — measure before migrating. **New JSON columns
-(e.g. the recursive path-tracking column) should use JSONB from the start** — free
-at build time, no migration, no read-boundary issue if framed in SQL.
+**Vertex properties are NORMALIZED** (W4, `docs`/memory `w4-property-model`): a
+`vertex_properties(id, node, key, value, meta BLOB)` table, one row per
+VertexProperty instance — so a key may repeat (multi-property, `Cardinality.list`/
+`set`) and `id` (rowid) IS the VertexProperty id. `value` has **no declared type**
+(BLOB affinity) so it keeps whatever SQLite storage class the bound value has
+(correct numeric order/range for `has('age',gt(30))`/`order().by('age')`). `meta`
+is a JSONB `{metaKey:scalar}` blob (meta-properties). **Edges keep a FLAT JSONB
+`props` column** — TinkerPop's edge `Property` has no id/meta/multi, so no table is
+warranted; edge writes wrap `jsonb(?)`, reads select `json(props)`.
 
-Property key handling — **do not naively "always bind the key"** (`compiler.ts`
-`propExtract`). SQLite matches an on-demand expression index
-`CREATE INDEX ...(json_extract(props,'$.age'))` ONLY against a *literal* JSON
-path; the parameterized `json_extract(props,'$.'||?)` form never matches, so it
-forces a full SCAN and silently defeats the whole hot-property index story
-(measured: 32 ms scan vs 0.35 ms index seek at 200 k rows, ~90×). So we splice
-identifier-safe keys (`^[A-Za-z_][A-Za-z0-9_]*$`) literally — index-eligible,
-injection-safe by *validation* — and fall back to binding only for exotic keys
-(spaces/dots/unicode), which can't be an index target anyway.
+**Static covering indexes** `vp_key_value(key,value)` + `vp_node_key(node,key)`,
+built once at schema time, REPLACE the old self-tuning `json_extract` expression
+index (and its literal-key-splice requirement). A property key now BINDS as a
+parameter (`key=?`) — a plain B-tree column seeks fine bound, so no splice and no
+injection surface. There is no per-key `indexKeys` reporting / `ensureNodePropIndex`
+anymore (the machinery is gone; a vestigial always-empty `Compiled.indexKeys`
+accumulator remains inert — a scoped follow-up removes the threading).
 
-Those expression indexes are **auto-built on first filtered use** (self-tuning,
-no management endpoint / no key-guessing). `compileRead` reports the hot keys
-used in a filter/order position (`has`, `order().by` — NOT plain `values`
-projections, to bound proliferation) as `Compiled.indexKeys`; the handler calls
-`store.ensureNodePropIndex(key)` for each before running. `ensureNodePropIndex`
-is idempotent (`CREATE INDEX IF NOT EXISTS`) with a per-isolate cache. Cost: the
-first filtered query on a cold key pays a one-time index build (~53 ms at 200 k
-rows, ~270 ms at 1 M — blocks that one request), then it's a ~0.005 ms seek;
-the index persists in SQLite across DO restarts. `test/performance.test.ts`
-asserts via EXPLAIN QUERY PLAN that the key is reported, the index is built, and
-it engages — failing if the literal splice or the auto-build regresses.
+**The read seam (`src/plan.ts`).** `ScalarCtx.propsExpr` is EDGE-ONLY (the flat
+blob); nodes read props via `idExpr` through three dispatchers: `hasProp`
+(node → ANY-match `EXISTS(vertex_properties …)` = multi-property has semantics),
+`scalarProp` (node → `value … ORDER BY id LIMIT 1` = first-under-multi, for
+order/group-key/by(key)/map/sack), and `vertexPropsAgg`/`framedProps` (a correlated
+`json_group_object(key, [values])` used ONLY at leaf materialization — never inside
+the movement/filter CTEs, so the traversal hot path stays index-only; `extIdOf`
+precedent). `values('k')` is a genuine **flatMap JOIN** (one row per value);
+`valueMap` frames `{key:[values]}` uniformly (node + edge). `vertexPropsAgg` is
+`ORDER BY MIN(id)` so property order is insertion order.
 
-Perf shape: traversal hops (out/in/both) are index-only and sub-ms at 1 M edges
-with no tuning; property filters/orders full-scan on first touch of a key, then
-ride the auto-built expression index.
+**Writes (`src/steps/write.ts`).** `applyVertexProperty(node,key,value,meta,card)`:
+single = delete-then-insert, list = append, set = append-unless-equal (patch meta);
+one SQL statement each. `readCardinality`+`metaOf` parse `property([Cardinality,] k,
+v [,mk,mv…])`. `VertexSpec.props` is an ordered `PropSpec[]` (a Record can't hold a
+repeated key). Edges reject cardinality/meta. `property(null)`/`property([:])`/
+map-form `property()` are no-ops (map-form not yet implemented). `drop()` cascades
+`vertex_properties`.
+
+**Meta reads (`compileProperties`).** `properties()` frames the real VP id + meta
+via a hand-rolled `vertexPropertyBuffer` (the client's `VertexPropertySerializer`
+hardcodes empty meta — same bug as vertex/edge). Leading `has(metaKey[,P])` /
+`hasKey(k|P)` / `hasValue(v|P)` are property-stream filters; `properties().id()`,
+`properties().properties()` (meta → `metaProperty` shape), `properties(k).valueMap()`
+(→ `metaMap`) all land. Deferred: `properties().dedup()`, map-form `property()`,
+a traversal-valued `property(k, __.…)`, `properties()`-scalar `count()` after meta.
+
+**JSONB is available on both runtimes** (DO SQLite 3.47.0, Bun 3.53.0; JSONB landed
+3.45.0). New JSON columns (edge props, vp.meta, path-tracking) use JSONB: bind the
+JSON *text* + wrap `jsonb(?)` (a raw Buffer bind diverges across runtimes — see the
+bind-type gotcha), read back via `json(col)`.
+
+Perf shape: traversal hops (out/in/both) are index-only and sub-ms; property
+filters/orders/projections ride `vp_node_key`/`vp_key_value` (a static index seek,
+no cold-key build). `test/performance.test.ts` asserts via EXPLAIN QUERY PLAN that
+the vp indexes engage (no full scan of vertex_properties).
 
 ## Semantics traps — encode as tests before touching related steps
 

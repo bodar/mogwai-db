@@ -303,10 +303,6 @@ function* execute(store: GraphStore, gremlin: string, params: Record<string, any
     }
     return;
   }
-  // Self-tuning: ensure an expression index for each hot property key the plan
-  // filters/orders on, so the first filtered use of a key pays the one-time
-  // build and every subsequent query is an index seek.
-  for (const key of plan.indexKeys ?? []) store.ensureNodePropIndex(key);
   const rows = store.query(plan.sql, plan.binds) as any[];
   const shape = plan.shape;
   switch (shape.kind) {

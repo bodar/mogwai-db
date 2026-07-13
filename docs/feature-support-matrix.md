@@ -67,7 +67,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `values(k…)` | ✅ | |
 | `id()`, `label()`, `count()` | ✅ | ✅ ids frame as `COALESCE(uid,id)` |
 | `valueMap`, `elementMap` | ✅ | ✅ custom vertex/edge framing (client serializer hardcodes empty props) |
-| `properties(k…)` [`.key`/`.value`/`.element`/`.id`/`.label`/`.count`] | 🟡 | ✅ `.key`/`.value`/`.element`/`.id`/`.label`/`.count` on a vertex property<br>❌ `element()` of an **edge** property<br>❌ most steps trailing `properties()`<br>❌ `group().by()` on a property element |
+| `properties(k…)` [`.key`/`.value`/`.element`/`.id`/`.label`/`.count`] | ✅ | ✅ `.key`/`.value`/`.element`/`.id`/`.label`/`.count`; real VP id + meta framed (W4)<br>✅ `has(metaKey)`/`hasKey`/`hasValue`/`.properties()`(meta)/`valueMap`(metaMap)<br>❌ `element()` of an **edge** property<br>❌ `properties().dedup()` |
 | `select('a')`, multi-`select`, `project(…)` | 🟡 | ✅ column-threaded aliases<br>❌ `select`/`project` of an **edge**-typed label<br>❌ `select(Column.values/keys)` |
 | `select(Column)` | ❌ | the group-values cluster (`group()…select(Column.values).unfold()`) — a list-substrate tail add |
 | **chained projections** (`values().count()`, `valueMap().select()`) | ❌ | `only one projection step is supported per traversal` — element→scalar→scalar re-type; partly dissolved by §9, still open for this shape |
@@ -158,9 +158,9 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `addV()`, `.property(k,v)`, `property(T.id/T.label)` | ✅ | ✅ user-supplied ids (string→uid, int→rowid) |
 | `addE()`, `from`/`to` | 🟡 | ✅ `as()` alias or nested `__.V(…)`<br>✅ edge uid via `property(T.id)`<br>✅ multi-addE graph initializers<br>❌ nested-traversal `addE` label<br>❌ endpoint traversal past a movement<br>❌ `addE` after some prefixes |
 | `mergeV`, `mergeE` | 🟡 | ✅ id-aware upsert, onCreate/onMatch, start + mid-chain<br>❌ nested-traversal merge maps (`mergeV(__.select…)`)<br>❌ `option(…, __.traversal)`<br>❌ bare `mergeV()`/`mergeE()` (incoming-as-map) |
-| `property()` update | 🟡 | ✅ JS-merge, **single** cardinality<br>❌ `Cardinality.list/set` (→ W4) |
+| `property()` update | ✅ | ✅ vertex: normalized rows, single/list/set + meta (W4); edge: JSON-merge blob |
 | `drop()` (vertices + edges) | 🟡 | ✅ vertex `drop()`<br>❌ edge `drop()`<br>❌ `drop()` after some steps |
-| `property(Cardinality.list/set, …)` (multi-property) | ❌ | **W4** schema rework |
+| `property(Cardinality.list/set, …)` (multi-property) | ✅ | list appends, set dedups by value (W4 normalized table) |
 
 ## 12. Side-effect state (🟡 — the registry + carried-column substrate landed)
 
@@ -200,8 +200,8 @@ cluster (needs `select(Column.values)`, §9).
 |---|:--:|---|
 | Integer rowid ids | ✅ | |
 | **User-supplied ids** (string `uid`) | 🟡 | ✅ resolved at `V('x')` seed + framing-out<br>❌ scalar id via `by(__.outV().id())`/`group().by(__.id())`<br>❌ edge's own uid via `addE` in some paths<br>❌ `properties().element().id()` |
-| **Multi-properties** (list cardinality) | ❌ | **W4** — props are a flat JSON object today |
-| **Meta-properties** (properties-on-properties) | ❌ | **W4** — schema rework |
+| **Multi-properties** (list/set cardinality) | ✅ | normalized `vertex_properties` table; `values()` flatMaps, `has()` ANY-matches, `valueMap` `{k:[…]}` (W4) |
+| **Meta-properties** (properties-on-properties) | ✅ | JSONB `meta` per VP row; write `property(k,v,mk,mv)`, read `properties().has(mk)`/`.properties()`/`valueMap` (W4) |
 | Property types: primitives + list/map | ✅ | ✅ JSON text storage (JSONB migration is a measured opportunity, not done) |
 
 ## 15. Locked non-goals (🚫)
