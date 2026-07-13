@@ -163,8 +163,10 @@ the "we execute it correctly" metric.
 
 ### Revised roadmap — writes-first (usable before feature-complete)
 
-The P2/P3 read compiler is largely done, and W2 writes have landed (live L3 205).
-The path to *usable* is
+The P2/P3 read compiler is largely done, W2 writes have landed, and the path
+family (path/simplePath/cyclicPath, recursive repeat().path(), repeat().until())
+landed under W5 (**live L3 455** as of 2026-07-13; see CLAUDE.md + the
+conformance-grind memory for the running count). The path to *usable* is
 sequenced so the invasive schema rework lands behind a deployed, writable
 baseline:
 
@@ -199,9 +201,16 @@ baseline:
   (design fork: nested JSON `{key:[{value,meta}]}` vs a normalized
   `properties` table). Touches valueMap/values/has/properties/addV/storage —
   biggest blast radius, deliberately after a deployed baseline exists.
-- **W5 — conformance grind.** `aggregate`/`cap`, `path`/`simplePath`, `match`,
-  `local`, `choose`, `coalesce`, `sack` + the multi/meta scenarios W4 unlocks +
-  seeding the other reference graphs (classic/crew/grateful/sink).
+- **W5 — conformance grind.** Landed so far (2026-07-13): the **path family** —
+  linear `path()`/`path().by()`/`simplePath()`/`cyclicPath()`, recursive
+  `repeat().path()` (JSONB array walk), `simplePath()` in the repeat body, and
+  `repeat().until()` (do-while/while-do, `loops().is(n)`, `until().path()`).
+  Still open: `aggregate`/`cap`, `match`, `local`, `choose`, `coalesce`, `sack`,
+  `emit(pred)`, `path().by()` on the recursive walk, compound `until(…and/or().loops())`
+  + the multi/meta scenarios W4 unlocks + seeding the other reference graphs
+  (classic/crew/grateful/sink). `tree()` is intentionally NOT on this list: the JS
+  GLV cucumber ignores all 13 tree scenarios and stubs `DataType.TREE`, so it yields
+  0 conformance (build only if a non-JS GLV consumer appears).
 
 The read-step backlog (below, P2-tail/P3/P5) continues under W5. Phases P0–P3 and
 their step-level detail follow.
@@ -326,8 +335,13 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
     matches emit neighbour(s), a miss falls back to self. `both()`/multi-hop defer.
   - **`coalesce`. DEFERRED** (first-non-empty-branch-per-traverser needs correlated
     per-seed EXISTS chaining) — clear error.
-  - **`path()`. DEFERRED** → JSON-array accumulation column threaded through
-    movement (structural, like alias threading; accept loss of index-only scans).
+  - **`path()`. DONE (W5, 2026-07-13).** NOT the originally-sketched "JSON-array
+    through movement" — that was overturned. Two regimes (see
+    `docs/2026-07-12-path-tracking-prior-art.md`): linear `path()` carries per-position
+    columns (p0..pN) reusing the alias-carry rails and assembles the Path in the
+    handler; recursive `repeat().path()` accumulates a JSONB array in the walk.
+    `simplePath()`/`cyclicPath()` = all-pairs identity (linear) or a `json_each`
+    cycle guard (in a repeat body). `path().by()` round-robin + non-productive drop.
 
 **P3 — recursion & upserts.**
 - `repeat/times/emit` → **DONE (live L3 126 → 130).** `WITH RECURSIVE
@@ -335,10 +349,13 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
   hop (both = two recursive terms). `times(n)` (either side of `repeat`) → project
   `depth = n`; `emit` after → `depth >= 1`, before → `depth >= 0`; depth guard 32
   when `times` absent. All `WITH` became `WITH RECURSIVE` (harmless for
-  non-recursive CTEs). Deferred with clear errors: `until()`, `emit(pred)`/
-  `times(pred)`, complex bodies (order/limit/local inside repeat), `path`/
-  `simplePath`, repeat after `as()`, repeat on edges.
-- `until/emit(pred)` + `simplePath` via path-array containment — next.
+  non-recursive CTEs). **`until()` + `simplePath()` + `repeat().path()` landed
+  under W5 (2026-07-13)** — `until()` is a `done` column (do-while/while-do,
+  `loops().is(n)`, predicate via `compileFilterPredicate`); `simplePath()` in the
+  body is a `json_each` cycle guard; `repeat().path()` carries a JSONB array.
+  Still deferred with clear errors: `emit(pred)`/`times(pred)`, `until`+`times`/`emit`,
+  compound `until(…and/or().loops())`, `path().by()` on the recursive walk, complex
+  bodies (order/limit/edge-inclusive inside repeat), repeat after `as()`, repeat on edges.
 - `mergeV`/`mergeE` → `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`
   (requires unique indexes; part of the management/schema story). This is
   the agent-workload workhorse — prioritize if that's the driving use case.
