@@ -130,8 +130,11 @@ CREATE INDEX n_label ON nodes(label);
 - Traversers are **multisets**: UNION ALL everywhere; `dedup()` is the only
   thing that collapses. Silent DISTINCT changes `count()` answers.
 - `both()` on a self-loop yields the vertex twice.
-- `repeat()` without `until()` is legal and infinite: enforce a max-depth
-  guard (configurable, default ~32) and document the deviation.
+- `repeat()` needs an exit modulator (`times()`/`until()`/`emit()`). No artificial
+  depth cap (a `~32` guard was tried and removed 2026-07-13 — it silently truncated
+  legitimate deep walks): `times()` bounds depth, `until()`/`emit()` run to the natural
+  fixpoint, and a cyclic body without `simplePath()` is infinite per spec, bounded by
+  the DO's per-request CPU/memory limit.
 - `has()` on a missing property filters the traverser (SQL NULL semantics
   align, but keep the explicit `IS NOT NULL` in `values()`).
 - Element ids are integers (SQLite rowids). v4 clients round-trip them fine;
@@ -349,8 +352,9 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
 - `repeat/times/emit` → **DONE (live L3 126 → 130).** `WITH RECURSIVE
   walk(id, depth)` seeded from the current relation; body = single out/in/both
   hop (both = two recursive terms). `times(n)` (either side of `repeat`) → project
-  `depth = n`; `emit` after → `depth >= 1`, before → `depth >= 0`; depth guard 32
-  when `times` absent. All `WITH` became `WITH RECURSIVE` (harmless for
+  `depth = n`; `emit` after → `depth >= 1`, before → `depth >= 0`. No depth cap
+  (`times()` is the only depth bound; `until()`/`emit()` run to the natural fixpoint —
+  the `~32` guard was removed 2026-07-13). All `WITH` became `WITH RECURSIVE` (harmless for
   non-recursive CTEs). **`until()` + `simplePath()` + `repeat().path()` landed
   under W5 (2026-07-13)** — `until()` is a `done` column (do-while/while-do,
   `loops().is(n)`, predicate via `compileFilterPredicate`); `simplePath()` in the

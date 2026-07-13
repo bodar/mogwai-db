@@ -657,10 +657,15 @@ describe('compiler SQL snapshots', () => {
     expect(p.sql).toContain('e.src AS id, c1.depth + 1'); // both directions
   });
 
-  test('repeat requires times() (unbounded emit/until deferred); sequential repeats chain', () => {
-    // require times() — bounds the recursive depth (guards against fan-out blow-up)
-    expect(() => compile('g.V().repeat(__.out())', {})).toThrow('without times()');
-    expect(() => compile('g.V().repeat(__.out()).emit()', {})).toThrow('without times()');
+  test('repeat requires an exit modulator; emit()/until() run unbounded; sequential repeats chain', () => {
+    // bare repeat() has no termination AND no output semantics → reject
+    expect(() => compile('g.V().repeat(__.out())', {})).toThrow('repeat() requires times(), until(), or emit()');
+    // unbounded emit() now compiles — no artificial depth cap; it terminates at the
+    // natural fixpoint (frontier exhaustion) on an acyclic body.
+    const em = read('g.V().repeat(__.out()).emit()');
+    expect(em.sql).toContain('with recursive');
+    expect(em.sql).not.toContain('depth <');       // no depth cap in the recursion
+    expect(em.sql).toContain('WHERE depth >= 1');   // emit-after band
     expect(() => compile('g.V().repeat(__.out().order()).times(2)', {})).toThrow('single out()/in()/both(), optional .simplePath()');
     expect(() => compile('g.V().emit().times(2)', {})).toThrow('without repeat()');
     // a second repeat is NOT swallowed — it compiles as a chained cluster (two walks)
@@ -821,6 +826,7 @@ describe('compiler SQL snapshots', () => {
     expect(p.sql).toContain('AS done');
     expect(p.sql).toContain('c1.done=0');           // expand only from still-looping rows
     expect(p.sql).toContain('WHERE done = 1');       // output satisfied rows
+    expect(p.sql).not.toContain('depth <');          // no artificial depth cap — runs to fixpoint
   });
 
   test('until(loops().is(n)) tests the depth counter, not an element', () => {
@@ -854,7 +860,7 @@ describe('compiler SQL snapshots', () => {
   test('until() defers the combinations not yet built', () => {
     expect(() => compile('g.V(1).repeat(__.out()).until(__.has("name","x")).times(3)', {})).toThrow('until() together with times() not yet supported');
     expect(() => compile('g.V(1).repeat(__.out()).emit().until(__.has("name","x"))', {})).toThrow('until() together with emit() not yet supported');
-    expect(() => compile('g.V(1).repeat(__.out())', {})).toThrow('without times() or until()');
+    expect(() => compile('g.V(1).repeat(__.out())', {})).toThrow('repeat() requires times(), until(), or emit()');
   });
 });
 
@@ -1088,6 +1094,18 @@ describe('compiler execution semantics', () => {
       .toEqual(['josh', 'lop', 'lop', 'marko', 'ripple', 'vadas']);
     // both() one hop from marko = 3 incident
     expect(run(store, 'g.V(1).repeat(__.both()).times(1).count()').map((r) => r.v)).toEqual([3]);
+  });
+
+  test('unbounded emit() terminates at the fixpoint (no depth cap) — == times(2) here', () => {
+    const store = seededStore();
+    // out() from marko bottoms out at depth 2, so emit-only (no times) must terminate
+    // there on its own. The test COMPLETING is the proof it terminates; the result must
+    // match the depth-bounded form. emit-after → all iterations, not the seed.
+    expect(run(store, 'g.V(1).repeat(__.out()).emit().values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'lop', 'lop', 'ripple', 'vadas']);
+    // emit-before adds the seed (marko)
+    expect(run(store, 'g.V(1).emit().repeat(__.out()).values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'lop', 'lop', 'marko', 'ripple', 'vadas']);
   });
 
   test('user-supplied string ids: create, seed, traverse, expose (COALESCE uid,id)', () => {
@@ -1528,5 +1546,20 @@ describe('compiler execution semantics', () => {
     // marko→{vadas,josh,lop}; only josh has an out-edge → done. vadas/lop have none →
     // not done and can't expand → dropped. (Bug would self-correlate → wrong set.)
     expect(uNames(store, 'g.V(1).repeat(__.out()).until(__.out())')).toEqual(['josh']);
+  });
+
+  test('until() has NO depth cap: reaches a target deeper than the retired 32-hop limit', () => {
+    // Regression for removing the 32-hop cap: build a 40-hop linear chain and let
+    // until() walk the whole way. Under the old cap this silently returned [] (the
+    // target sat beyond depth 32) — a wrong answer masquerading as "no match".
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    const person = store.labelId('person');
+    const knows = store.labelId('knows');
+    const node = 'INSERT INTO nodes(id, label, props) VALUES(?,?,?)';
+    const edge = 'INSERT INTO edges(id, src, label, tgt, props) VALUES(?,?,?,?,?)';
+    const N = 40; // deeper than the retired cap
+    for (let i = 0; i <= N; i++) store.query(node, [i + 1, person, JSON.stringify({ name: `n${i}` })]);
+    for (let i = 0; i < N; i++) store.query(edge, [100 + i, i + 1, knows, i + 2, '{}']); // n0→n1→…→n40
+    expect(uNames(store, `g.V(1).repeat(__.out()).until(__.has("name","n${N}"))`)).toEqual([`n${N}`]);
   });
 });

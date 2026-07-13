@@ -233,8 +233,9 @@ O(depth) per row (`json_each` scan), so cost is multiplicative.
 
 **SQLite has no mitigation**: `USING KEY`/settled-set is DuckDB-only; SQLite's
 recursive CTE is strictly append-only (only `UNION` whole-row dedup, no
-settled-set-by-key). So we inherit the worst case with only depth caps and
-`until()`/`limit()` early-termination as guard rails. The saving grace in
+settled-set-by-key). So we inherit the worst case, with `simplePath()`/`until()`/
+`limit()` early-termination as the only guard rails (there is no internal depth cap —
+the DO's per-request CPU/memory limit is the runaway backstop). The saving grace in
 practice: our target is small OLTP graphs (agent memory, per-tenant KGs) with low
 branching factor, and `simplePath()`'s **early-reject** guard keeps the frontier
 small at the source (that's the entire lesson of 605M-vs-19K).

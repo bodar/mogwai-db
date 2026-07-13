@@ -1,7 +1,7 @@
 import { q, list, Relation, type Expression } from '../q.ts';
 import { edges } from '../schema.ts';
 import { stepChain, type Step } from '../frontend.ts';
-import { dirsFor, edgeLabelFilter, compileFilterPredicate, predicateSql, elemCtx, type ScalarCtx } from '../plan.ts';
+import { dirsFor, edgeLabelFilter, labelIn, compileFilterPredicate, predicateSql, elemCtx, type ScalarCtx } from '../plan.ts';
 import { advance, elemRel, prevRel, type St, type StepFn } from './context.ts';
 import { foldBody } from './index.ts';
 
@@ -143,10 +143,16 @@ export const flatMap: StepFn = (s, st) => {
 };
 
 /** repeat(): the folded repeat/emit/times/until cluster (strategies.foldRepeat) →
- *  a WITH RECURSIVE walk. times() bounds the depth (emit before/after selects the
- *  band). until() is a per-row termination predicate compiled to a `done` column —
- *  expand only from not-done rows, output done rows (do-while when until is after
- *  repeat, while-do when before); a 32-hop cap bounds it. Path tracking (JSONB
+ *  a WITH RECURSIVE walk. Termination is spec-faithful and structural, NOT a magic
+ *  depth cap: times() is the only depth bound (emit before/after selects the band);
+ *  until() and emit() run to the natural fixpoint (the recursion stops when the
+ *  frontier is exhausted). A genuinely cyclic body without simplePath() (e.g. any
+ *  both()) is infinite PER THE SPEC — we compile it faithfully and let the DO's
+ *  per-request CPU/memory limit be the backstop (one self-inflicted request fails and
+ *  the DO reloads from durable storage; blast radius is the caller's own tenant). Do
+ *  NOT reintroduce an artificial cap: it silently truncates legitimate deep walks.
+ *  until() → a `done` column (expand only from not-done rows, output done rows;
+ *  do-while when until is after repeat, while-do when before). Path tracking (JSONB
  *  array) and simplePath()'s cycle guard compose in. Deferred forms (emit-pred,
  *  until+times/emit, complex body) throw — the fold gathered the cluster, not validated it. */
 export const repeat: StepFn = (s, st) => {
@@ -164,9 +170,11 @@ export const repeat: StepFn = (s, st) => {
   // Interactions not built yet — fail closed rather than silently mis-terminate.
   if (hasUntil && timesStep) throw new Error('until() together with times() not yet supported');
   if (hasUntil && emitStep) throw new Error('until() together with emit() not yet supported');
-  // Require a bound: times() (fixed depth) or until() (stop predicate). Neither would
-  // fan out to branching-factor^depth rows — deferred.
-  if (!timesStep && !hasUntil) throw new Error('repeat() without times() or until() not yet supported (unbounded emit() deferred)');
+  // Require an exit modulator: times() (fixed depth), until() (stop predicate), or
+  // emit() (output every iteration; terminates when the frontier is exhausted). Bare
+  // repeat() has no termination AND no output semantics → reject. Note: unbounded
+  // until()/emit() on a cyclic body are infinite by spec — see the docstring.
+  if (!timesStep && !hasUntil && !emitStep) throw new Error('repeat() requires times(), until(), or emit()');
   const emitBefore = !!emitStep && cluster.indexOf(emitStep) < cluster.indexOf(rep);
 
   // Body: a single out/in/both, optionally followed by simplePath() (cycle-free walk).
@@ -175,8 +183,9 @@ export const repeat: StepFn = (s, st) => {
   const simplePathInBody = body.length === 2 && body[1].name === 'simplePath';
   if (!mv || !['out', 'in', 'both'].includes(mv.name) || (body.length > 1 && !simplePathInBody))
     throw new Error(`repeat(__.${body.map((c) => c.name + '()').join('.')}) not yet supported (single out()/in()/both(), optional .simplePath())`);
-  // times() → its fixed depth; until() → the 32-hop safety cap (documented deviation).
-  const maxDepth = timesStep ? Number(timesStep.args[0]) : 32;
+  // times() → its fixed depth (the ONLY depth bound). until()/emit() have none —
+  // they terminate at the natural fixpoint (see the docstring). null = no bound.
+  const maxDepth = timesStep ? Number(timesStep.args[0]) : null;
 
   // Path tracking. `wantsPathOutput`: a downstream path() (chain seeded st.path at V).
   // simplePath() in the body needs the accumulated path for its cycle guard even
@@ -206,9 +215,16 @@ export const repeat: StepFn = (s, st) => {
       // rejects revisiting any element already in the path (the cycle guard).
       const pathAcc = trackArray ? q`, jsonb_insert(${self.c.path}, '$[#]', ${e.c[to]}) AS path` : q``;
       const doneAcc = hasUntil ? doneCol(e.c[to], q`${self.c.depth} + 1`) : q``;
-      const cycleGuard = simplePathInBody ? q` AND NOT EXISTS (SELECT 1 FROM json_each(${self.c.path}) je WHERE je.value=${e.c[to]})` : q``;
-      const stillLooping = hasUntil ? q` AND ${self.c.done}=0` : q``; // until() expands only from looping rows
-      return q`SELECT ${e.c[to]} AS id, ${self.c.depth} + 1 AS depth${pathAcc}${doneAcc} FROM ${self} JOIN ${e} ON ${e.c[from]}=${self.c.id} WHERE ${self.c.depth} < ${maxDepth}${stillLooping}${cycleGuard}${edgeLabelFilter(mv.args)}`;
+      // Expansion guards, ALL of which must hold to keep walking. A depth bound is
+      // added ONLY for times(); until()/emit() rely on frontier exhaustion (and
+      // simplePath(), if present) to terminate — no artificial cap.
+      const guards: Expression[] = [];
+      if (timesStep) guards.push(q`${self.c.depth} < ${maxDepth!}`); // maxDepth non-null when timesStep set
+      if (hasUntil) guards.push(q`${self.c.done}=0`); // until() expands only from still-looping rows
+      if (simplePathInBody) guards.push(q`NOT EXISTS (SELECT 1 FROM json_each(${self.c.path}) je WHERE je.value=${e.c[to]})`);
+      if (mv.args.length) guards.push(labelIn('e.label', mv.args));
+      const where = guards.length ? q` WHERE ${list(guards, ' AND ')}` : q``;
+      return q`SELECT ${e.c[to]} AS id, ${self.c.depth} + 1 AS depth${pathAcc}${doneAcc} FROM ${self} JOIN ${e} ON ${e.c[from]}=${self.c.id}${where}`;
     });
     // Only while-do (untilFirst) tests the SEED against until()'s correlated
     // `(SELECT props FROM nodes WHERE id=<seed id>)`; a bare `id` there would bind
@@ -221,9 +237,13 @@ export const repeat: StepFn = (s, st) => {
     const seedDone = hasUntil ? (untilFirst ? doneCol(seedId, q`0`) : q`, 0 AS done`) : q``;
     return q`SELECT ${seedSel}, 0 AS depth${seedPath}${seedDone} FROM ${seedSrc} UNION ALL ${list(rec, ' UNION ALL ')}`;
   });
-  // Output: until() → the rows that satisfied the stop predicate; else the depth band
-  // (times() final depth; emit after → ≥1 iteration; emit before → also the seed, ≥0).
-  const outWhere = hasUntil ? 'done = 1' : !emitStep ? `depth = ${maxDepth}` : emitBefore ? 'depth >= 0' : 'depth >= 1';
+  // Output: until() → the rows that satisfied the stop predicate; emit() → every
+  // iteration (after → depth≥1; before → also the seed, depth≥0); times() without
+  // emit → the final depth band. maxDepth is non-null in the last case (times present
+  // whenever neither until nor emit is).
+  const outWhere = hasUntil ? 'done = 1'
+    : emitStep ? (emitBefore ? 'depth >= 0' : 'depth >= 1')
+    : `depth = ${maxDepth}`;
   // Expose the path column iff a path() will frame it; else drop it (the array was
   // internal to the walk, only there for simplePath's guard).
   if (wantsPathOutput)
