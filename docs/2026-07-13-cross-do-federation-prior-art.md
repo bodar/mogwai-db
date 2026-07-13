@@ -33,7 +33,7 @@ graph query languages, and does mogwai's topology admit it.
 | **Neo4j Fabric** | Property graph | Cypher `USE <db>` routes sub-queries to shards/named graphs; coordinator combines. | Strongest graph-native analog. **Proprietary.** |
 | **Apollo GraphQL Federation** | API composition | Gateway decomposes query per subgraph, stitches on entity `@key`. | Different "graph", same decompose+join mechanic. |
 | **Steampipe / osquery** | Ops data | External sources as virtual tables; SQLite/Postgres FDW joins. | Precedent for the coordinator idea below. |
-| **TinkerPop / Gremlin** | Property graph | **Nothing.** One `GraphTraversalSource` = one graph. `union()` stays intra-graph. `withRemote()` is transport, not federation. OLAP partitions ONE logical graph. | The gap. |
+| **TinkerPop / Gremlin** | Property graph | **Nothing.** One `GraphTraversalSource` = one graph. `union()` stays intra-graph. `withRemote()` is transport, not federation. OLAP partitions ONE logical graph — and v4 kept the OLAP *step names* (`pageRank`/`peerPressure`/`connectedComponent`/`shortestPath` parse) but **dropped the `withComputer`/`program` GraphComputer surface**, so OLAP is even less of a federation path in v4 than in 3.x. | The gap. |
 
 ## Why Gremlin has no federation — and it's structural, not an oversight
 
@@ -104,12 +104,14 @@ between a demo and something you'd run.
    consistency is best-effort. Fine for analytics, wrong for invariants. (Sibling to
    the per-request-transaction gap already noted for the management API.)
 3. **The missing language primitive.** No Gremlin step marks the boundary.
-   TinkerPop 3.x added **`call()`** (`TraversalService` / service-call step) —
-   inject external-service results into the stream. THAT is the extension point; a
-   `call("federate", …)` or a new `service()` step is where a cross-graph construct
-   would live, riding the existing grammar rather than forking it. The current
-   `g`-field-selects-named-graph decision is single-graph *selection*, not *join* —
-   federation needs a construct above it.
+   **`call()`** (`TraversalService` / service-call step) — inject external-service
+   results into the stream — is the extension point. Added in 3.x and **confirmed
+   live in the v4 grammar** (`Gremlin.g4`: both the spawn `g.call('svc')` and the
+   mid-traversal `.call('svc')`, with overloads up to
+   `call(string, genericMap, nestedTraversal)`). So a `call("federate", …)` cross-
+   graph construct rides an **existing v4 primitive** — no grammar fork (locked #2
+   holds). The current `g`-field-selects-named-graph decision is single-graph
+   *selection*, not *join* — federation needs a construct above it.
 
 ## Upstream angle (the actually-interesting finding)
 
