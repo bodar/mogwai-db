@@ -106,6 +106,20 @@ small extension of existing `group`.
 storage flattens them, and GraphBinary framing needs the exact type (`d[5].b` vs
 `.i` vs `.l`). Needs a small typed-value carrier + framing rules. `math()` also needs
 a tiny expression parser. Mechanical once the type carrier exists.
+**✅ CARRIER + `asBool` LANDED (2026-07-13, L3 496→508).** The typed-value carrier is
+in: `Shape`'s value variant carries an optional **compile-time** type tag
+(`{kind:'value', as?: ValueType}`, `render.ts`) and the handler's `frameValue`
+(`handler.ts`) frames `v` with the matching GraphBinary serializer. Key insight that
+makes it correct-by-design: **the output subtype is compile-time metadata** (from the
+typed literal or the cast's target arg), NOT the SQLite storage class — so no storage
+change, just a tag + framing rule. `asBool` is the first cast: it resolves inject
+constants at compile time (`asBoolConst`, since its per-value parse errors can't be
+raised from SQL and reachable inputs are all literals) and tags `as:'bool'`. **NEXT
+(step 2): `asNumber`** extends `ValueType` with the numeric subtype ladder (byte/short/
+int/long/bigint/float/double), sets the tag from the GType arg (or literal type), adds
+those serializers to `frameValue`, and makes `typeOf` subtype-precise (today
+`GTYPE_SQL` in `plan.ts` collapses to storage classes). Then **`math`** (194) on top:
+carrier + a small formula parser + promotion rules. Then `asDate` (datetime rep).
 
 ### 5. `match()`  (~35)
 **Real-world: MEDIUM-LOW.** Powerful declarative pattern matching, but many users

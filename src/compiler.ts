@@ -4,7 +4,7 @@ import { compileRead } from './steps/index.ts';
 import { routeWrite } from './steps/write.ts';
 import { type Compiled, type WritePlan } from './render.ts';
 // Re-export the compile-output contract so handler.ts / tests keep importing it here.
-export type { Compiled, WritePlan, Shape, MapEntry, ElemShape, GroupKey, GroupVal, PathPos } from './render.ts';
+export type { Compiled, WritePlan, Shape, ValueType, MapEntry, ElemShape, GroupKey, GroupVal, PathPos } from './render.ts';
 
 // ---------- compilation orchestrator ----------
 //

@@ -8,7 +8,7 @@ import { stepChain, type Step } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { elemRel, type AliasMap, type St } from './context.ts';
 import {
-  readCompiled, type Compiled, type Shape, type MapEntry, type ElemShape, type GroupKey, type GroupVal, type PathPos,
+  readCompiled, type Compiled, type Shape, type ValueType, type MapEntry, type ElemShape, type GroupKey, type GroupVal, type PathPos,
 } from '../render.ts';
 
 /** Movement heads whose nested-by() aggregate is a correlated neighbourhood
@@ -40,7 +40,11 @@ interface TailAcc {
 }
 
 const PROJECTION_NAMES = new Set(['values', 'id', 'label', 'count', 'valueMap', 'elementMap', 'select', 'project', 'path']);
-const SCALAR_TX_NAMES = new Set(['concat', 'length', 'toUpper', 'toLower', 'asString', 'substring', 'replace']);
+// Per-value transform steps gathered into acc.transforms. Most are SQL scalar
+// expressions (scalarTx). `asBool` is a typed cast: compileInject resolves it over
+// inject constants (see asBoolConst); on a V/E-rooted stream it falls through to
+// scalarTx → undefined → a clean "not supported" defer (needs local()/sack()).
+const SCALAR_TX_NAMES = new Set(['concat', 'length', 'toUpper', 'toLower', 'asString', 'substring', 'replace', 'asBool']);
 const isMapProj = (p: PStep | null) => p?.name === 'select' || p?.name === 'project';
 
 /** A tail modifier: fold the step into the accumulator. `at` gives position so a
@@ -309,14 +313,50 @@ function renderProjection(
  *  dedup/order/reducer see the whole stream); the shared tail applies the rest.
  *  Only reaches here for pure inject-rooted chains (addV/addE/mergeV/mergeE match
  *  earlier in WRITE_RULES). A bare inject() is an empty stream. */
+/** asBool() over a compile-time constant — TinkerPop's parse semantics. Its
+ *  per-value errors (null / non-bool string / list → "Can't parse …") can't be
+ *  raised from SQL, and every reachable input is an inject() literal, so evaluate
+ *  here. Number: NaN/0/-0 → false, else true. String: "true"/"false"
+ *  (case-insensitive); anything else throws. */
+function asBoolConst(v: any): boolean {
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'number') return !Number.isNaN(v) && v !== 0;
+  if (typeof v === 'bigint') return v !== 0n;
+  if (typeof v === 'string') {
+    const s = v.trim().toLowerCase(); // AsBoolStep trims before the case-insensitive match
+    if (s === 'true') return true;
+    if (s === 'false') return false;
+  }
+  throw new Error(`Can't parse ${v === null || v === undefined ? 'null' : v} as Boolean.`);
+}
+
 export function compileInject(steps: PStep[]): Compiled {
   const Q = new Query();
   const acc = foldTailAcc(steps, 1);
   // Fold every inject() value (the source args + any later inject appends) into one
   // VALUES-backed `v` seed, so the tail's dedup/order/limit/reducer act on the full
   // stream — matching the pre-unification inline-UNION semantics.
+  // asBool(): resolve each constant to a bool now (see asBoolConst). The value shape
+  // then carries `as:'bool'` so the 0/1 SQLite carries frames as GraphBinary Boolean.
+  // Only the bare form (inject(consts).asBool() [+ value-preserving dedup/order/range])
+  // is supported: a reducer, count(), or a trailing inject() would each need the tag
+  // threaded per-position (fold→List<Boolean>) or mix types into the bool stream — a
+  // uniform compile-time `as:'bool'` can't express that, so defer rather than
+  // miscompute. (Every reachable asBool input is a bare inject literal — V-rooted
+  // asBool needs local()/sack(), deferred.)
+  let valueAs: ValueType | undefined;
+  const isAsBool = acc.transforms[0]?.name === 'asBool';
+  if (isAsBool && (acc.transforms.length !== 1 || acc.reducer || acc.projStep || acc.injects.length))
+    throw new Error('asBool() composed with a reducer/count()/trailing inject() not yet supported');
+
   const vals = [...steps[0].args, ...acc.injects];
   acc.injects.length = 0; // consumed into the seed, not appended after the tail
+
+  if (isAsBool) {
+    for (let i = 0; i < vals.length; i++) vals[i] = asBoolConst(vals[i]);
+    acc.transforms.length = 0; // consumed — do not also run it through scalarTx
+    valueAs = 'bool';
+  }
   // The seed is a FROM source directly (the VALUES CTE relation, or an empty select)
   // — renderProjection wraps it, so no extra subquery here.
   const from: Expression = vals.length
@@ -339,7 +379,7 @@ export function compileInject(steps: PStep[]): Compiled {
     return readCompiled(Q, q`SELECT COUNT(*) AS v FROM (SELECT ${dist}v FROM ${from}${whereNode}${limitNode})`, { kind: 'count' });
   }
 
-  const proj: ProjResult = { shape: { kind: 'value' }, colsNode: q`v AS v`, fromNode: from, scalarExpr: q`v`, baseWhere: null };
+  const proj: ProjResult = { shape: { kind: 'value', as: valueAs }, colsNode: q`v AS v`, fromNode: from, scalarExpr: q`v`, baseWhere: null };
   const orderKey = (): Expression => { throw new Error('inject().order().by(key) not supported (scalar stream has no properties)'); };
   return renderProjection(Q, proj, acc, new Set(), orderKey);
 }

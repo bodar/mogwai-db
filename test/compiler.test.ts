@@ -122,6 +122,31 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.inject(1).as("a").select("a")', {})).toThrow('step not implemented: as()');
   });
 
+  test('asBool() resolves inject constants at compile time + tags the value shape', () => {
+    // The value shape carries `as:'bool'` so the handler frames the 0/1 as Boolean.
+    expect(read('g.inject(1).asBool()').shape).toEqual({ kind: 'value', as: 'bool' });
+    // TinkerPop truthiness: NaN/0/-0 → false, nonzero → true, "true"/"false"
+    // (case-insensitive), bool → itself. Constants resolve to the bound values.
+    expect(read('g.inject(1).asBool()').binds).toEqual([true]);
+    expect(read('g.inject(0).asBool()').binds).toEqual([false]);
+    expect(read('g.inject(-0.0).asBool()').binds).toEqual([false]);
+    expect(read('g.inject(NaN).asBool()').binds).toEqual([false]);
+    expect(read('g.inject(3.14).asBool()').binds).toEqual([true]);
+    expect(read("g.inject('tRUe').asBool()").binds).toEqual([true]);
+    expect(read('g.inject(false).asBool()').binds).toEqual([false]);
+    // strings are trimmed before the match (AsBoolStep.trim())
+    expect(read("g.inject(' true ').asBool()").binds).toEqual([true]);
+    // per-value parse errors (can't come from SQL) raise the exact TinkerPop message
+    expect(() => compile("g.inject('hello').asBool()", {})).toThrow("Can't parse hello as Boolean.");
+    expect(() => compile('g.inject(null).asBool()', {})).toThrow("Can't parse null as Boolean.");
+    // on a runtime (V-rooted) stream asBool defers — needs local()/sack()
+    expect(() => compile('g.V().values("name").asBool()', {})).toThrow('scalar transform asBool() not supported');
+    // composition with a reducer / trailing inject would mis-type the stream — defer,
+    // never silently wire the wrong GraphBinary type
+    expect(() => compile('g.inject(1,0).asBool().fold()', {})).toThrow('asBool() composed');
+    expect(() => compile('g.inject(1).asBool().inject(5)', {})).toThrow('asBool() composed');
+  });
+
   test('group().by(__.bothE().values(k).<reducer>()) is a correlated neighbourhood aggregate', () => {
     const p = read("g.V().hasLabel('software').group().by('name').by(__.bothE().values('weight').mean())");
     // one correlated AVG over incident edges, wrapped by MAX to satisfy GROUP BY;
