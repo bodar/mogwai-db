@@ -160,9 +160,18 @@ fails closed (`if (st.origin) throw`). Building this carry **also unblocks
   multi-hop.
 - `flatMap(t)` = `foldBody` + advance (a fan-out `UNION ALL`); trivial once the seam
   exists.
-- `map(t)` deferred beyond C: `map` takes the **first** result per input (vs
-  `flatMap`'s all), which needs `ROW_NUMBER() OVER (PARTITION BY <ordinal>) = 1` —
-  the Phase B ordinal again. Low real-world value; fold in opportunistically.
+- `map(t)` with an **element** body deferred beyond C: `map` takes the **first**
+  result per input (vs `flatMap`'s all), needing `ROW_NUMBER() OVER (PARTITION BY
+  <ordinal>) = 1` — the Phase B ordinal again. Low real-world value.
+
+## Phase E (landed) — scalar-body `map`
+
+`map(__.<scalar>)` → one correlated scalar per traverser (shape `value`), a tail
+projector (`compileMapScalar`) reusing `compileNestedScalar` — `map(__.out().count())`
+(per-vertex out-degree), `map(__.values('name'))`, `map(__.label())`,
+`map(__.constant(x))`. Element-body map (first-result), alias/`select`/`fold` bodies,
+and any trailing step defer via `compileNestedScalar`'s throw. Same projector family as
+the option-map choose CASE, minus the CASE.
 
 ## Test discipline
 
