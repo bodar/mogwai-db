@@ -1755,11 +1755,30 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V().has("kind","human").count()').map((r) => r.v)).toEqual([4]);
   });
 
-  test('property(Cardinality.single) allowed; list/set deferred to W4', () => {
+  test('property() cardinality: single replaces, list appends, set dedups (W4)', () => {
     const store = seededStore();
+    // single replaces the existing value
     run(store, 'g.V(1).property(Cardinality.single, "age", 40)');
     expect(run(store, 'g.V(1).values("age")').map((r) => r.v)).toEqual([40]);
-    expect(() => run(store, 'g.V(1).property(Cardinality.list, "nick", "x")')).toThrow(/W4/);
+    // list appends — multiple values under one key
+    run(store, 'g.V(1).property(Cardinality.list, "nick", "x")');
+    run(store, 'g.V(1).property(Cardinality.list, "nick", "y")');
+    expect(run(store, 'g.V(1).values("nick")').map((r) => r.v).sort()).toEqual(['x', 'y']);
+    // set dedups by value — re-adding "x" is a no-op
+    run(store, 'g.V(1).property(Cardinality.set, "nick", "x")');
+    expect(run(store, 'g.V(1).values("nick")').map((r) => r.v).sort()).toEqual(['x', 'y']);
+    // has() matches ANY value under the key (multi-property semantics)
+    expect(run(store, 'g.V(1).has("nick","y").count()').map((r) => r.v)).toEqual([1]);
+  });
+
+  test('addV multi-property + meta-property write (W4)', () => {
+    const store = seededStore();
+    run(store, 'g.addV("crew").property(Cardinality.list, "location", "sd", "startTime", 1997).property(Cardinality.list, "location", "sf", "startTime", 2005)');
+    // both values land under the multi-valued key
+    expect(run(store, 'g.V().hasLabel("crew").values("location")').map((r) => r.v).sort()).toEqual(['sd', 'sf']);
+    // the meta blob is stored on the VertexProperty row
+    const metas = store.query("SELECT json(meta) m FROM vertex_properties WHERE key='location' ORDER BY value").map((r: any) => JSON.parse(r.m));
+    expect(metas).toEqual([{ startTime: 1997 }, { startTime: 2005 }]);
   });
 
   test('property() updates edges too (materialized on the wire via edgeBuffer)', () => {
