@@ -52,7 +52,6 @@ describe('property indexes: static vp indexes engage (no full scan)', () => {
     const d = explain(p);
     expect(usesVpIndex(d)).toBe(true);
     expect(scansVp(d)).toBe(false);
-    expect(p.indexKeys).toEqual([]); // keys are bound; no per-key reporting
   });
 
   test('has(key, value) point lookup rides a vp index', () => {

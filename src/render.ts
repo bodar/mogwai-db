@@ -77,10 +77,6 @@ export interface Compiled {
   sql: string;
   binds: any[];
   shape: Shape;
-  /** Identifier-safe property keys used in a filter/order position — the
-   *  handler ensures a matching expression index exists before running, so hot
-   *  properties become index seeks on first filtered use (self-tuning). */
-  indexKeys?: string[];
 }
 
 export interface WritePlan { kind: 'write'; run: (store: GraphStore) => any[]; }
@@ -88,9 +84,9 @@ export interface WritePlan { kind: 'write'; run: (store: GraphStore) => any[]; }
 /** Boundary: assemble the Query's CTE prefix + `tail` into one tree (Query.render)
  *  and wrap as a read Compiled. Every bound value lives as a Value token in a CTE
  *  body or the tail, so binds fall out of the single render. */
-export function readCompiled(query: Query, tail: Expression, shape: Shape, indexKeys?: string[]): Compiled {
+export function readCompiled(query: Query, tail: Expression, shape: Shape): Compiled {
   const { sql, binds } = query.render(tail);
-  return { kind: 'read', sql, binds, shape, ...(indexKeys ? { indexKeys } : {}) };
+  return { kind: 'read', sql, binds, shape };
 }
 
 /** Render `SELECT <cols> FROM <current id-relation>` over a Query's CTE prefix to

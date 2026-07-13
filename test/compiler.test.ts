@@ -477,14 +477,6 @@ describe('compiler SQL snapshots', () => {
     expect(p.sql).toContain('JOIN nodes e1n ON e1n.id=p.id');
   });
 
-  test('select/project by(key) is a projection — does NOT report an index key', () => {
-    // W4: vertex props are normalized with static (key,value)/(node,key) indexes, so
-    // there is no per-key indexKeys reporting anymore — every read reports [].
-    expect(read('g.V().as("a").out().select("a").by("age")').indexKeys).toEqual([]);
-    expect(read('g.V().project("n","a").by("name").by("age")').indexKeys).toEqual([]);
-    expect(read('g.V().has("age",30).as("a").select("a").by("name")').indexKeys).toEqual([]);
-  });
-
   test('result-preserving optimization strategies accepted as no-ops (correct-by-design)', () => {
     // These cannot change the result set (TinkerPop optimization-strategy contract),
     // so not applying them is exactly correct. The official suite proves it: the
@@ -664,8 +656,6 @@ describe('compiler SQL snapshots', () => {
   test('has()/values() on edges filter/project the edges table', () => {
     const h = read('g.E().has("weight",0.5)');
     expect(h.sql).toContain('FROM edges n JOIN c0 p ON n.id=p.id');
-    // edge has() is not auto-indexed (node-only index helper)
-    expect(h.indexKeys).toEqual([]);
     expect(read('g.V(1).outE().values("weight")').sql).toContain("json_extract(n.props, '$.weight') AS v");
   });
 
@@ -717,7 +707,6 @@ describe('compiler SQL snapshots', () => {
   test('group().by(key) default value → element list; group by key reports an index key', () => {
     const p = read('g.V().group().by("name")');
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'elementList', elem: 'vertex' } });
-    expect(p.indexKeys).toEqual([]); // W4: static vp indexes — no per-key reporting
   });
 
   test('group().by(key).by(prop) → scalar-list via json_group_array + GROUP BY', () => {
@@ -744,7 +733,6 @@ describe('compiler SQL snapshots', () => {
     // groupCount('a') passes traversers through: out() runs between it and cap('a').
     const gc = read('g.V().groupCount("a").by("name").out().cap("a")');
     expect(gc.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
-    expect(gc.indexKeys).toEqual([]); // W4: static vp indexes — no per-key reporting
   });
 
   test('terminal group(a) with no cap passes the traversers through (side-effect discarded)', () => {
@@ -847,12 +835,10 @@ describe('compiler SQL snapshots', () => {
     expect(n.sql).toContain('WHERE NOT COALESCE((EXISTS(');
   });
 
-  test('where(__.count().is(P)) → correlated scalar compare; reports index key on values(k)', () => {
+  test('where(__.count().is(P)) → correlated scalar compare over incident edges', () => {
     const c = read('g.V().where(__.inE("knows").count().is(P.gte(1))).values("name")');
     expect(c.sql).toContain('(SELECT COUNT(*) FROM edges WHERE (tgt=n.id)');
     expect(c.sql).toContain('>= ?');
-    // W4: static vp indexes — no per-key indexKeys reporting
-    expect(read('g.V().where(__.values("age").is(P.gt(30)))').indexKeys).toEqual([]);
   });
 
   test('alias-compare where(P.neq("a")) and where("a",P,by(key)); unknown label throws', () => {
@@ -1060,8 +1046,6 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().where(__.out("knows").is(1))', {})).toThrow('where(__.out().is(P)) not yet supported');
     // is() after limit() must throw (position-sensitive)
     expect(() => compile('g.V().values("age").limit(3).is(P.gt(25))', {})).toThrow('is() after limit()');
-    // W4: static vp indexes — no per-key indexKeys reporting
-    expect(read('g.V().values("age").is(P.gt(30))').indexKeys).toEqual([]);
     // alias-compare by(key) on an edge label throws rather than reading nodes
     expect(() => compile('g.V().as("a").outE().as("e").where("e", P.eq("a")).by("weight")', {})).toThrow('edge-typed label not yet supported');
   });

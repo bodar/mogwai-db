@@ -51,7 +51,7 @@ export function appendPathPos(p: PathState, elem: Elem): { path: PathState; col:
  *  this state outlives the current traverser stream. */
 export type SideEffectDef =
   | { kind: 'list'; rel: Relation; of: { kind: 'elem'; elem: Elem } | { kind: 'scalar' } }
-  | { kind: 'group'; from: string; ctx: import('../plan.ts').ScalarCtx; elem: import('../render.ts').ElemShape; isCount: boolean; bys: any[][]; groupIndexKeys: string[] };
+  | { kind: 'group'; from: string; ctx: import('../plan.ts').ScalarCtx; elem: import('../render.ts').ElemShape; isCount: boolean; bys: any[][] };
 export type SideEffectMap = ReadonlyMap<string, SideEffectDef>;
 
 /** The context every traverser stream carries, independent of its shape (elements
@@ -62,7 +62,6 @@ export type SideEffectMap = ReadonlyMap<string, SideEffectDef>;
 export interface Carry {
   readonly q: Query;
   readonly aliases: AliasMap;
-  readonly indexKeys: ReadonlySet<string>;
   readonly params: Record<string, any>;
   readonly path?: PathState;             // present iff the chain tracks a linear path
   readonly origin?: string;              // coalesce/optional: the carried input-ordinal column
@@ -111,13 +110,12 @@ export function carryFrag(st: St, p: Relation): Expression {
 /**
  * Append `body` as the new id-relation and advance to it. `cols` defaults to
  * id + the currently-bound alias columns (what movement/filter carry); as()
- * passes a widened alias set. `elem`/`indexKeys` override when a step changes the
- * element kind (…E/…V) or reports a hot key. The returned St is a fresh object —
- * the old one is untouched.
+ * passes a widened alias set. `elem` overrides when a step changes the element kind
+ * (…E/…V). The returned St is a fresh object — the old one is untouched.
  */
 export function advance(
   st: St, body: Expression,
-  opts: { aliases?: AliasMap; elem?: Elem; cols?: readonly string[]; indexKeys?: Iterable<string>; path?: PathState; origin?: string | null; sack?: string | null } = {},
+  opts: { aliases?: AliasMap; elem?: Elem; cols?: readonly string[]; path?: PathState; origin?: string | null; sack?: string | null } = {},
 ): St {
   const aliases = opts.aliases ?? st.aliases;
   const path = opts.path ?? st.path;
@@ -134,6 +132,5 @@ export function advance(
     sack,
     elem: opts.elem ?? st.elem,
     last: st.q.cte(body, cols),
-    indexKeys: opts.indexKeys ? new Set([...st.indexKeys, ...opts.indexKeys]) : st.indexKeys,
   };
 }
