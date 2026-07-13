@@ -39,14 +39,26 @@ function originSeed(st: St): { base: Relation; seedSt: St } {
   return { base, seedSt: { ...st, last: base, origin: 'o', aliases: new Map(), path: undefined } };
 }
 
+/** PREFIX steps that hand-roll a SELECT that DROPS the input-ordinal (`St.origin`)
+ *  instead of threading it via carryFrag — so a coalesce/optional body containing one
+ *  must defer rather than emit a column-mismatched CTE. (Movement/filter/passthrough
+ *  carry it via carryFrag; union/flatMap re-project it; a scalar/projection step isn't
+ *  in PREFIX at all → it gets the clearer scalar-body message below.) */
+const ORIGIN_UNSAFE = new Set(['dedup', 'as', 'repeat', 'choose']);
+
 /** Fold a branch body (element-only) from `seed` through the movement/filter
  *  dispatch. Multi-hop bodies work (they chain CTEs off the seed). A scalar/
- *  projection tail (a step absent from PREFIX) fails closed. Returns the finished St
- *  — its `last` carries the seed's origin ordinal when active (so the caller can
- *  re-associate results with their input). */
+ *  projection tail (a step absent from PREFIX) fails closed. When `seed` carries an
+ *  input ordinal (coalesce/optional), a body step that wouldn't thread it also fails
+ *  closed. Returns the finished St — its `last` carries the ordinal when active, so
+ *  the caller can re-associate results with their input. */
 function branchArm(name: string, nested: any, seed: St, params: Record<string, any>): St {
   if (!nested) throw new Error(`${name}(traversal) required`);
   const body = stepChain(nested, params);
+  if (seed.origin) {
+    const bad = body.find((c) => ORIGIN_UNSAFE.has(c.name));
+    if (bad) throw new Error(`${name}() branch step __.${bad.name}() not yet supported inside coalesce()/optional() (input-ordinal not carried)`);
+  }
   const { st: end, stop } = foldBody(body, seed, 0);
   if (stop !== body.length)
     throw new Error(`${name}() branch __.${body.map((c) => c.name + '()').join('.')} not yet supported (scalar/projection body)`);

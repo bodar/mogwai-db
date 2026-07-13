@@ -524,6 +524,10 @@ describe('compiler SQL snapshots', () => {
     expect(c.shape).toEqual({ kind: 'value' });
     expect(() => compile('g.V().coalesce(__.out(), __.values("name"))', {})).toThrow('scalar/projection body');
     expect(() => compile('g.V().coalesce(__.out(), __.outE())', {})).toThrow('different element kinds');
+    // an origin-unsafe body step (drops the ordinal) fails closed, not a broken CTE
+    expect(() => compile('g.V().coalesce(__.out().dedup(), __.in())', {})).toThrow('input-ordinal not carried');
+    // union() inside coalesce threads the ordinal through → valid
+    expect(read('g.V().coalesce(__.union(__.out(),__.in()), __.both())').sql).toContain('ROW_NUMBER() OVER () AS o');
   });
 
   test('flatMap() inlines an element body (fan-out), scalar body defers', () => {
