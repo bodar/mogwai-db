@@ -39,7 +39,7 @@ export type Stream = St | ScalarStream | ListStream;
 
 /** Project a stream's shape-independent state (for building the next phase's stream). */
 export const carryOf = (s: Stream): Carry =>
-  ({ q: s.q, aliases: s.aliases, indexKeys: s.indexKeys, params: s.params, path: s.path, origin: s.origin, sack: s.sack });
+  ({ q: s.q, aliases: s.aliases, indexKeys: s.indexKeys, params: s.params, path: s.path, origin: s.origin, sack: s.sack, sideEffects: s.sideEffects });
 
 export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType): ScalarStream => ({ ...c, kind: 'scalar', rel, as });
 export const toListStream = (c: Carry, rel: Relation, of: ListOf): ListStream => ({ ...c, kind: 'list', rel, of });

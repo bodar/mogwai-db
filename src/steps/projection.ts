@@ -9,6 +9,7 @@ import { stepChain, parseIsoMs, flattenListArgs, type Step } from '../frontend.t
 import { type PStep } from '../strategies.ts';
 import { elemRel, type AliasMap, type Carry, type St } from './context.ts';
 import { carryOf, toListStream, type ListStream, type ScalarStream } from './stream.ts';
+import { compileUnfold } from './list.ts';
 import { dispatchNext } from './index.ts';
 import {
   readCompiled, type Compiled, type Shape, type ValueType, type MapEntry, type ElemShape, type GroupKey, type GroupVal, type PathPos,
@@ -175,6 +176,10 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
   // trailing reducer (sum/…)/is/order composes via the shared value tail.
   if (steps[stop]?.name === 'sack')
     return compileSackRead(st, steps, stop, indexKeys);
+
+  // cap('x') emits a named side-effect collection registered earlier in the chain.
+  if (steps[stop]?.name === 'cap')
+    return compileCap(st, steps, stop, indexKeys);
 
   // group()/groupCount() is a barrier over the current element stream → one Map.
   if (steps[stop]?.name === 'group' || steps[stop]?.name === 'groupCount') {
@@ -379,6 +384,28 @@ function compileSackRead(st: St, steps: PStep[], stop: number, indexKeys: Set<st
   const proj: ProjResult = { shape: { kind: 'value' }, colsNode: q`${p.c[st.sack]} AS v`, fromNode: p, scalarExpr: p.c[st.sack], baseWhere: null };
   const orderKey = (): Expression => { throw new Error('order().by(key) after sack() not supported'); };
   return renderProjection(st.q, proj, acc, indexKeys, orderKey);
+}
+
+/** cap('x') — emit a named side-effect collection. A list side-effect (aggregate/
+ *  store) is a BulkSet that UNROLLS to individual results (there's no BulkSet wire
+ *  type, and the suite expects one result per bagged element), so explode the stored
+ *  JSONB list back into an element/scalar stream and continue the tail. A group
+ *  side-effect (group('a')/groupCount('a')) re-runs compileGroup over its stashed
+ *  source → one Map (steps/group.ts). Deferred: multi-key cap('x','y'). */
+function compileCap(st: St, steps: PStep[], stop: number, indexKeys: Set<string>): Compiled {
+  const names = (steps[stop].args ?? []).filter((a: any) => typeof a === 'string');
+  if (names.length !== 1) throw new Error('cap() with multiple side-effect keys not yet supported');
+  const def = st.sideEffects?.get(names[0]);
+  if (!def) throw new Error(`cap('${names[0]}') references an undefined side-effect`);
+  if (def.kind === 'list') {
+    const ls = toListStream(carryOf(st), def.rel, def.of);
+    return dispatchNext(compileUnfold(ls), steps, stop + 1);
+  }
+  // group('a')/groupCount('a') side-effect → re-run compileGroup over the stashed
+  // source (Stage 3).
+  if (stop + 1 < steps.length) throw new Error(`step not implemented after cap('${names[0]}'): ${steps[stop + 1].name}()`);
+  const src: GroupSource = { from: def.from, ctx: def.ctx, elem: def.elem };
+  return compileGroup(st, def.isCount, def.bys, src, new Set([...indexKeys, ...def.groupIndexKeys]));
 }
 
 /** Render a resolved projection + the value-shape tail (scalar transforms, is()

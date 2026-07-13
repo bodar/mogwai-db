@@ -43,11 +43,22 @@ export function appendPathPos(p: PathState, elem: Elem): { path: PathState; col:
   return { path: { kind: 'cols', cols: [...p.cols, { col, elem }] }, col };
 }
 
+/** A named side-effect collection (aggregate()/store()/group('a')) — the registry
+ *  value threaded through Carry.sideEffects. Registered where the step appears (may be
+ *  mid-chain), read back at cap('name'). A `list` def is a materialized JSONB list CTE
+ *  (aggregate: element rowids or a by()-projected scalar); a `group` def is a stashed
+ *  group-spec re-run by cap (see steps/group.ts, Stage 3). Unlike the id-relation,
+ *  this state outlives the current traverser stream. */
+export type SideEffectDef =
+  | { kind: 'list'; rel: Relation; of: { kind: 'elem'; elem: Elem } | { kind: 'scalar' } }
+  | { kind: 'group'; from: string; ctx: import('../plan.ts').ScalarCtx; elem: import('../render.ts').ElemShape; isCount: boolean; bys: any[][]; groupIndexKeys: string[] };
+export type SideEffectMap = ReadonlyMap<string, SideEffectDef>;
+
 /** The context every traverser stream carries, independent of its shape (elements
  *  vs a scalar/list value stream — see stream.ts). Carved out of `St` so a retype
  *  at a tail boundary (fold→list, unfold→elements/scalar) preserves the shared state
- *  — the query builder, bound params, live aliases, path, and coalesce ordinal —
- *  without the elements-only `last`/`elem`. */
+ *  — the query builder, bound params, live aliases, path, coalesce ordinal, sack, and
+ *  the named side-effect registry — without the elements-only `last`/`elem`. */
 export interface Carry {
   readonly q: Query;
   readonly aliases: AliasMap;
@@ -56,6 +67,7 @@ export interface Carry {
   readonly path?: PathState;             // present iff the chain tracks a linear path
   readonly origin?: string;              // coalesce/optional: the carried input-ordinal column
   readonly sack?: string;                // sack: the carried per-traverser scalar column (e.g. 'sk')
+  readonly sideEffects?: SideEffectMap;  // named side-effect collections (aggregate/store/group('a'))
 }
 
 /** Immutable prefix state threaded through the step fold. Everything the dispatch
