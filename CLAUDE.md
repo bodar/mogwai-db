@@ -520,6 +520,57 @@ strategies, select-then-movement). Still open:
 branches, branch-inside-branch, option-map choose without a scalar `Pick.none`. `tree()`
 deliberately skipped (0 L3: JS GLV stubs it).
 
+## List-value substrate + re-enterable tail (LANDED 2026-07-13, L3 608→617)
+
+The tail used to be **strictly terminal** — a projection/fold produced a value the chain
+couldn't continue from, which is why `unfold`, chained projections, `Scope.local`, and
+set-ops were all blocked. Fixed by a **re-enterable tail** built on an explicit stream
+model. Plan + decision log: `docs/2026-07-13-list-value-substrate-plan.md` (Approach A).
+
+- **`src/steps/stream.ts`** — the `Stream` union: `St` (elements, context.ts) |
+  `ScalarStream` (a `v` column) | `ListStream` (a JSONB `list` column, N rows). All share
+  `Carry` (the shape-independent state — `q`/aliases/indexKeys/params/path/origin) carved
+  out of `St`, so a retype preserves it. **`St.elem` stays `'node'|'edge'` — the 20+
+  movement/filter StepFns only ever see `St`; the union lives at the orchestration layer.**
+- **`dispatchNext(stream, steps, at)`** (`src/steps/index.ts`) routes by stream shape:
+  elements → `foldBody` (absorb further movement) + `compileTail`; scalar →
+  `compileFromScalar`; list → `compileFromList`. A retype step calls back into it, so
+  `V().fold().unfold().out()` flows elements→list→elements→… — each phase with its own ≤1
+  projection. The old "only one projection per traversal" ceiling is dissolved
+  STRUCTURALLY (fresh accumulator per phase), not by loosening a check.
+- **`foldTailAcc` now returns `{acc, stop}`**, breaking at a retype boundary (`unfold`, or a
+  NON-terminal `fold`). A **terminal `fold` stays the reducer path, byte-identical** (N rows
+  → one List in the handler) — it never becomes a JSONB value, avoiding a wasteful
+  build+explode for the common case. Only a fold WITH followers retypes to a `ListStream`.
+- **`compileFold`** (projection.ts): a non-terminal fold → one JSONB list value via
+  `jsonbGroupArray` (plan.ts) — element rowids (`ListOf {elem}`) or a values/id/label scalar
+  (`ListOf {scalar}`). Refuses aliases/path/origin through the retype (deferred).
+- **`compileUnfold`** (`src/steps/list.ts`): `json_each` explode (ordered by array position)
+  → a fresh `St` (elements, rejoined downstream) or a `ScalarStream`. Mirrors
+  `compilePathArray`'s idiom. `fold().unfold()` is a deliberate materialize→explode roundtrip
+  — NO peephole (correct-but-wasteful beats code for a query nobody writes; see decision log).
+- **`Scope.local` list reducers** (`compileFromList` `listReducer`): `count/sum/min/max/mean
+  (Scope.local)` reduce EACH folded list (row) to one scalar via a correlated `json_each`
+  aggregate. Lands `fold().{sum,min,max,mean}(Scope.local)` on element-projected lists.
+- **No handler change**: unfold's exploded relation frames via the existing vertex/value
+  shapes; terminal fold keeps its N-row List framing.
+
+**Frontend prerequisites** (`src/frontend.ts`): collection literals `[a,b,c]` now parse as
+ONE array value (not N flattened args), and `Scope.local/global` is captured (was dropped —
+`order(Scope.local)` latently compiled as global). The varargs-style steps TinkerPop spreads
+a Collection into — V/E/hasId (`hasId(1,[2,6])`≡`hasId(1,2,6)`) and, UNTIL inject-as-list
+lands, `inject` — flatten a list arg back via `flattenListArgs`; predicates unwrap a lone
+list in `parsePredicate`.
+
+**Deferred (each its own follow-on, NOT built):** **inject-as-list** (a stream of MULTIPLE
+list values — `inject([1,2],[3,4])` — plus mixed-type spreading and the `none()` collection
+filter); `order/limit/range/tail/dedup(Scope.local)` (their scenarios chain `reverse()`/
+`skip(local)`); element-list `order(Scope.local).by(key)`; **`select(Column.values/keys)`** +
+the group-values cluster; set-ops (`combine`/`intersect`/…); Map-unfold; `local()`. The
+**global-MODIFIERS fail-loud Scope guard** (plan A.6) is NOT yet added — it would regress the
+inject-list scenarios still passing by flatten-coincidence until inject-as-list lands; add it
+WITH inject-as-list. Do NOT add the guard alone.
+
 ## Environment notes
 
 - Runtime is Bun (pinned in `mise.toml`), not Node. `bun run start` serves

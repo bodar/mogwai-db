@@ -1,9 +1,45 @@
 # List-as-first-class-value + re-enterable tail — implementation plan
 
 **Date:** 2026-07-13
-**Status:** PLAN (nothing implemented yet). Execute from this doc in a fresh context.
+**Status:** PARTIALLY IMPLEMENTED (Approach A). Core substrate + Scope.local reducers
+landed; L3 608→617. See "Implementation status" below and the CLAUDE.md section
+"List-value substrate + re-enterable tail". Remaining: inject-as-list, the rest of
+Scope.local, select(Column.values), set-ops.
 **Baseline at time of writing:** live L3 = 608 (trunk tip `e370560`).
 **Branch/worktree:** `worktree-with-strategies` (this is a git worktree — run everything here).
+
+## Implementation status (2026-07-13)
+
+LANDED (Approach A, each commit green, name-diff-verified zero regressions):
+- **Commit 0** — frontend: collection literals parse as one array value; `Scope` captured;
+  V/E/hasId/inject flatten a list arg via `flattenListArgs`; predicates unwrap. Neutral (608).
+- **Commit 1** — scaffolding: `Carry` base + `St` tagged `kind:'elements'`; `stream.ts`
+  (`Stream` union); `jsonbGroupArray`/`jsonbArrayOf` in plan.ts. Neutral (608).
+- **Commit 3** (dispatcher merged in) — `dispatchNext` re-enterable tail; `compileFold`
+  (non-terminal fold → JSONB `ListStream`); `compileUnfold` (json_each explode); terminal
+  fold unchanged; `compileFromScalar` factored out. L3 608→609 (`g_V_fold_unfold`).
+- **Scope.local reducers** — `count/sum/min/max/mean(Scope.local)` reduce each folded list
+  (`compileFromList` `listReducer`). L3 609→617 (fold-sourced reducer cluster).
+
+The plan's separate "commit 2 (inert dispatcher)" was MERGED into commit 3 — an inert
+behavior-neutral refactor hides bugs (nothing exercises it); building it with fold/unfold
+means real scenarios test it. Approach A's file decomposition (scalar.ts/group.ts/path.ts
+splits) was intentionally NOT done — the plan marks it optional; only `stream.ts`/`list.ts`
+were added, keeping churn/risk down. `St.elem` stays `'node'|'edge'` as mandated.
+
+NOT YET DONE (each larger than the plan framed — verify semantics per-scenario like commit 0):
+- **inject-as-list** (was "commit 4"): `inject([...])` is a stream of MULTIPLE list values
+  (`inject([1,2],[3,4])` = two lists), needs mixed-type spreading (`inject([a,b],'c')`) and a
+  `none()` collection filter. `ListStream` already supports N rows, so unfold works; the
+  producer + terminal JSONB-list framing + none() are the work. inject still FLATTENS a lone
+  list (commit-0 temporary) until this lands.
+- **rest of Scope.local**: `order/limit/range/tail/dedup(Scope.local)` — their scenarios chain
+  `reverse()`/`skip(Scope.local)`; element-list `order(local).by(key)` needs a rejoin.
+- **select(Column.values/keys)** + the group-values cluster (`group().by().by(__.…fold())
+  .select(Column.values).unfold().order(local)`) — re-plumbs group's Map into a list stream.
+- **the global-MODIFIERS fail-loud Scope guard** (A.6): NOT added — it regresses the
+  inject-list scenarios still passing by flatten-coincidence. Add it WITH inject-as-list.
+- set-ops (`combine`/`intersect`/…), Map-unfold, `local()` — Tier 2, unchanged.
 
 ## Why this is the next thing (the compounding thesis)
 
