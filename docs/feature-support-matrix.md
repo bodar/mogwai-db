@@ -4,7 +4,7 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-13 · **live L3 conformance:** 634 · **corpus parse+chain:**
+**Last synced:** 2026-07-13 · **live L3 conformance:** 648 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
 
@@ -46,7 +46,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 
 | Step | Status | Notes |
 |---|:--:|---|
-| `hasLabel`, `has(k)`, `has(k,v)`, `has(k,P)` | ✅ | ✅ auto-builds a hot-property expression index on first filtered use |
+| `hasLabel`, `has(k)`, `has(k,v)`, `has(k,P)` | ✅ | ✅ ANY-match `EXISTS(vertex_properties…)` (multi-property has), rides the static `vp_key_value` covering index (W4 — key binds, no splice) |
 | `has(label,k,v)`, `has(T.label/T.id, v/P)` | ✅ | ✅ the cucumber verification idiom |
 | `hasId(…)` | ✅ | ✅ flattens list args |
 | `is(P)` | 🟡 | ✅ folds onto the projected scalar<br>❌ after `limit`/`range`/`skip`<br>❌ after `path()` |
@@ -202,7 +202,7 @@ cluster (needs `select(Column.values)`, §9).
 | **User-supplied ids** (string `uid`) | 🟡 | ✅ resolved at `V('x')` seed + framing-out<br>❌ scalar id via `by(__.outV().id())`/`group().by(__.id())`<br>❌ edge's own uid via `addE` in some paths<br>❌ `properties().element().id()` |
 | **Multi-properties** (list/set cardinality) | ✅ | normalized `vertex_properties` table; `values()` flatMaps, `has()` ANY-matches, `valueMap` `{k:[…]}` (W4) |
 | **Meta-properties** (properties-on-properties) | ✅ | JSONB `meta` per VP row; write `property(k,v,mk,mv)`, read `properties().has(mk)`/`.properties()`/`valueMap` (W4) |
-| Property types: primitives + list/map | ✅ | ✅ JSON text storage (JSONB migration is a measured opportunity, not done) |
+| Property types: primitives + list/map | ✅ | ✅ vertex: normalized `vertex_properties` rows, `value` BLOB affinity (keeps SQLite storage class → correct numeric order/range); edge: flat JSONB `props` (W4) |
 
 ## 15. Locked non-goals (🚫)
 
@@ -222,8 +222,9 @@ Cheapest wins are long done. What's left, by structural weight:
 1. ~~**Side-effect state** (§12)~~ — **substrate LANDED** (618→634): the registry
    (aggregate/cap/group('a')) + carried column (sack). Remaining tails: `within/without`
    readback, sack numeric-promotion, the `group('a')…select(Column.values)` cluster.
-2. **Multi/meta-properties (W4)** (§11, §14) — the committed target-profile schema rework;
-   biggest storage blast radius, best done before more read features assume flat props.
+2. ~~**Multi/meta-properties (W4)** (§11, §14)~~ — **LANDED** (634→648): normalized
+   `vertex_properties` table + edge JSONB, multi/set cardinality, meta writes+reads. The
+   self-tuning `json_extract` index machinery is retired for static vp covering indexes.
 3. **`local`** (§5) — per-element scope; the hardest remaining branching piece (also
    unblocks `local(aggregate(...))` + ProductiveByStrategy).
 4. **Chained projections** (§3) — element→scalar→scalar re-type; partly dissolved by the
