@@ -31,7 +31,8 @@ describe('conformance host — modern graph (official ids/results)', () => {
     expect((await g.V().hasLabel('person').count().next()).value).toBe(4n));
 
   test('g_VX1X_outXknowsX_name', async () =>
-    expect(await g.V(1).out('knows').values('name').toList()).toEqual(['vadas', 'josh']));
+    // bare values() has no guaranteed order (TinkerPop); compare as a set
+    expect((await g.V(1).out('knows').values('name').toList()).sort()).toEqual(['josh', 'vadas']));
 
   test('g_VX1X_out_out_name (two hops)', async () =>
     expect((await g.V(1).out().out().values('name').toList()).sort()).toEqual(['lop', 'ripple']));

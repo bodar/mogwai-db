@@ -1,5 +1,5 @@
 import { q } from '../q.ts';
-import { propExtract, predicateSql, jsonbGroupArray, elemCtx } from '../plan.ts';
+import { scalarProp, predicateSql, jsonbGroupArray, elemCtx } from '../plan.ts';
 import { elemRel, type St, type StepFn, type SideEffectDef } from './context.ts';
 
 // ---------- named side-effect collections (aggregate) ----------
@@ -39,12 +39,12 @@ export const aggregate: StepFn = (s, st) => {
       throw new Error('aggregate().by() only supports a property key (nested/token by() not yet supported)');
     const n = elemRel(st);
     const p = st.last.as('p');
-    const pe = propExtract('n.props', a);
+    const pe = scalarProp(elemCtx(n, st.elem), a); // first-under-multi for a node
     // A by() that yields nothing (a missing property) contributes no member — matching
     // values() semantics, the exact behaviour the suite's aggregate('x').by('age')
     // (software vertices have no age) expects.
     const rel = st.q.cte(
-      q`SELECT ${jsonbGroupArray(pe.expr)} AS list FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${predicateSql(pe.expr, undefined)}`,
+      q`SELECT ${jsonbGroupArray(pe)} AS list FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${predicateSql(pe, undefined)}`,
       ['list'],
     );
     def = { kind: 'list', rel, of: { kind: 'scalar' } };

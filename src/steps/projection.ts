@@ -1,7 +1,8 @@
-import { q, value, list, empty, Relation, Query, type Expression } from '../q.ts';
-import { nodes, edges, labels } from '../schema.ts';
+import { q, value, list, empty, raw, Relation, Query, type Expression } from '../q.ts';
+import { nodes, edges, labels, vertexProperties } from '../schema.ts';
 import {
-  propExtract, propAt, predicateSql, compileNestedScalar, labelNameSub, rangeToOffsetLimit, elemCtx, aliasCtx, scalarTx, extIdOf, jsonbGroupArray, jsonbArrayOf,
+  propExtract, predicateSql, compileNestedScalar, labelNameSub, rangeToOffsetLimit, elemCtx, aliasCtx, scalarTx, extIdOf, jsonbGroupArray, jsonbArrayOf,
+  scalarProp, nodePropScalar, vertexPropsAgg, framedProps, framedPropsCtx, valueMapProps,
   type ScalarCtx,
 } from '../plan.ts';
 import { mathToSql, mathVars } from '../math.ts';
@@ -292,13 +293,19 @@ type ProjFn = (c: ProjCtx) => ProjResult;
 
 const PROJECTORS = new Map<string, ProjFn>([
   ['values', (c) => {
-    const pe = propExtract('n.props', c.projStep!.args[0]);
-    // values(k).is(P) is a filter-position use → auto-index the key (like has());
-    // a bare values() projection is deliberately NOT indexed (bounds proliferation).
-    if (c.hasIs && pe.indexKey && c.st.elem === 'node') c.indexKeys.add(pe.indexKey);
+    const key = c.projStep!.args[0] as string;
+    // Node: values() is a genuine flatMap — JOIN vertex_properties so a multi-valued
+    // key yields one row PER value (the INNER JOIN also drops missing-key vertices, so
+    // no separate IS NOT NULL). Edge: json_extract the flat blob (single-valued).
+    if (c.st.elem === 'edge') {
+      const pe = propExtract(c.n.c.props, key).expr;
+      return { shape: { kind: 'value' }, colsNode: q`${pe} AS v`, fromNode: c.vJoin, scalarExpr: pe, baseWhere: predicateSql(pe, undefined) };
+    }
+    const vp = vertexProperties.as('vp');
     return {
-      shape: { kind: 'value' }, colsNode: q`${pe.expr} AS v`, fromNode: c.vJoin,
-      scalarExpr: pe.expr, baseWhere: predicateSql(pe.expr, undefined), // <pe> IS NOT NULL (shared node → binds fall out per occurrence)
+      shape: { kind: 'value' }, colsNode: q`${vp.c.value} AS v`,
+      fromNode: q`${c.vJoin} JOIN ${vp} ON ${vp.c.node}=${c.n.c.id} AND ${vp.c.key}=${value(key)}`,
+      scalarExpr: vp.c.value, baseWhere: null,
     };
   }],
   ['id', (c) => ({
@@ -311,9 +318,11 @@ const PROJECTORS = new Map<string, ProjFn>([
   })],
   ['valueMap', (c) => {
     const keys = c.projStep!.args.filter((a) => typeof a === 'string') as string[];
+    // valueMap props are ALWAYS {key:[values]} (node: multi from the table; edge: each
+    // flat value wrapped in a 1-list) so the handler frames both uniformly.
     return {
       shape: { kind: 'valueMap', keys: keys.length ? keys : null, tokens: c.projStep!.args.includes(true) },
-      colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${c.n.c.props}`, fromNode: c.vlJoin,
+      colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${valueMapProps(c.n, c.st.elem)} AS props`, fromNode: c.vlJoin,
     };
   }],
   ['elementMap', (c) => {
@@ -321,24 +330,21 @@ const PROJECTORS = new Map<string, ProjFn>([
     const keys = c.projStep!.args.filter((a) => typeof a === 'string') as string[];
     return {
       shape: { kind: 'elementMap', keys: keys.length ? keys : null },
-      colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${c.n.c.props}`, fromNode: c.vlJoin,
+      colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${valueMapProps(c.n, c.st.elem)} AS props`, fromNode: c.vlJoin,
     };
   }],
   ['__element', (c) => c.st.elem === 'edge'
     // Endpoints resolve to external ids (COALESCE(uid,id)) so a materialized edge
     // reports the SAME src/tgt as the write path — not the raw rowid.
-    ? { shape: { kind: 'edge' }, colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${extIdOf(c.n.c.src)} AS src, ${extIdOf(c.n.c.tgt)} AS tgt, ${c.n.c.props}`, fromNode: c.vlJoin }
-    : { shape: { kind: 'vertex' }, colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${c.n.c.props}`, fromNode: c.vlJoin }],
+    ? { shape: { kind: 'edge' }, colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${extIdOf(c.n.c.src)} AS src, ${extIdOf(c.n.c.tgt)} AS tgt, ${framedProps(c.n, 'edge')} AS props`, fromNode: c.vlJoin }
+    : { shape: { kind: 'vertex' }, colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${framedProps(c.n, 'node')} AS props`, fromNode: c.vlJoin }],
 ]);
 
-/** An order().by(key) resolver over the element's props (context `n`): a property
- *  expression, auto-indexing the key on node streams. Shared by buildProjection and
- *  compileMath — both render a value tail whose identity/keyed order sorts node props. */
-const nodePropOrderKey = (st: St, indexKeys: Set<string>) => (key: string): Expression => {
-  const pe = propExtract('n.props', key);
-  if (pe.indexKey && st.elem === 'node') indexKeys.add(pe.indexKey);
-  return pe.expr;
-};
+/** An order().by(key) resolver over the current element (aliased `n`): node → the
+ *  first-under-multi value from vertex_properties; edge → json_extract of the flat blob.
+ *  Shared by buildProjection and compileMath — both sort a value tail by an element prop. */
+const nodePropOrderKey = (st: St, _indexKeys: Set<string>) => (key: string): Expression =>
+  st.elem === 'edge' ? propExtract('n.props', key).expr : nodePropScalar(raw('n.id'), key);
 
 function buildProjection(st: St, acc: TailAcc, indexKeys: Set<string>): Compiled {
   const { distinct, offset, limit, isPreds, reducer } = acc;
@@ -858,10 +864,10 @@ function compileSelectProject(st: St, proj: PStep, tail: TailMods, indexKeys: Se
     const n = nodes.as('n');
     if (e.sub === 'vertex') {
       const l = labels.as('l');
-      return readCompiled(st.q, q`SELECT ${dist}COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${n.c.props} FROM ${n} JOIN ${p} ON ${n.c.id}=${src} JOIN ${l} ON ${l.c.id}=${n.c.label}${tailSql}`, { kind: 'vertex' }, [...indexKeys]);
+      return readCompiled(st.q, q`SELECT ${dist}COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props FROM ${n} JOIN ${p} ON ${n.c.id}=${src} JOIN ${l} ON ${l.c.id}=${n.c.label}${tailSql}`, { kind: 'vertex' }, [...indexKeys]);
     }
-    const pe = propExtract('n.props', e.key); // projection, not indexed (matches values())
-    return readCompiled(st.q, q`SELECT ${dist}${pe.expr} AS v FROM ${n} JOIN ${p} ON ${n.c.id}=${src}${tailSql}`, { kind: 'value' }, [...indexKeys]);
+    const pe = nodePropScalar(n.c.id, e.key!); // first-under-multi; projection, not indexed (matches values())
+    return readCompiled(st.q, q`SELECT ${dist}${pe} AS v FROM ${n} JOIN ${p} ON ${n.c.id}=${src}${tailSql}`, { kind: 'value' }, [...indexKeys]);
   }
 
   // Multi-key select / any project → a Map per row.
@@ -876,9 +882,9 @@ function compileSelectProject(st: St, proj: PStep, tail: TailMods, indexKeys: Se
     if (e.sub === 'vertex') {
       const el = labels.as(`${prefix}l`);
       joins.push(q` JOIN ${el} ON ${el.c.id}=${en.c.label}`);
-      cols.push(q`COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${en.c.props} AS ${`${prefix}_props`}`);
+      cols.push(q`COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${framedProps(en, 'node')} AS ${`${prefix}_props`}`);
     } else {
-      cols.push(q`${propExtract(`${prefix}n.props`, e.key).expr} AS ${`${prefix}_v`}`); // projection, not indexed
+      cols.push(q`${nodePropScalar(en.c.id, e.key!)} AS ${`${prefix}_v`}`); // first-under-multi; projection, not indexed
     }
     return { key: k, prefix, sub: e.sub };
   });
@@ -937,16 +943,17 @@ function compilePath(st: St, proj: PStep, acc: TailAcc, indexKeys: Set<string>):
       const extId = q`COALESCE(${tbl.c.uid}, ${tbl.c.id})`;
       if (pos.elem === 'edge') {
         // Endpoints as external ids (see the __element edge projector).
-        cols.push(q`${extId} AS ${`${prefix}_id`}, ${l.c.name} AS ${`${prefix}_label`}, ${extIdOf(tbl.c.src)} AS ${`${prefix}_src`}, ${extIdOf(tbl.c.tgt)} AS ${`${prefix}_tgt`}, ${tbl.c.props} AS ${`${prefix}_props`}`);
+        cols.push(q`${extId} AS ${`${prefix}_id`}, ${l.c.name} AS ${`${prefix}_label`}, ${extIdOf(tbl.c.src)} AS ${`${prefix}_src`}, ${extIdOf(tbl.c.tgt)} AS ${`${prefix}_tgt`}, ${framedProps(tbl, 'edge')} AS ${`${prefix}_props`}`);
         return { render: 'element', elem: 'edge', prefix };
       }
-      cols.push(q`${extId} AS ${`${prefix}_id`}, ${l.c.name} AS ${`${prefix}_label`}, ${tbl.c.props} AS ${`${prefix}_props`}`);
+      cols.push(q`${extId} AS ${`${prefix}_id`}, ${l.c.name} AS ${`${prefix}_label`}, ${framedProps(tbl, 'node')} AS ${`${prefix}_props`}`);
       return { render: 'element', elem: 'vertex', prefix };
     }
-    // by(key): project the element's property; a missing key drops the whole path.
-    const pe = propExtract(`${prefix}n.props`, key);
-    cols.push(q`${pe.expr} AS ${`${prefix}_v`}`);
-    whereParts.push(predicateSql(pe.expr, undefined)); // <pe> IS NOT NULL (non-productive by → drop)
+    // by(key): project the element's property (first-under-multi for a vertex); a missing
+    // key drops the whole path. Edge → json_extract of the flat blob.
+    const pe = pos.elem === 'edge' ? propExtract(tbl.c.props, key).expr : nodePropScalar(tbl.c.id, key);
+    cols.push(q`${pe} AS ${`${prefix}_v`}`);
+    whereParts.push(predicateSql(pe, undefined)); // <pe> IS NOT NULL (non-productive by → drop)
     return { render: 'value', prefix };
   });
 
@@ -978,7 +985,7 @@ function compilePathArray(st: St, acc: TailAcc, indexKeys: Set<string>): Compile
   const paths = st.q.cte(q`SELECT ${src.c.path} AS path, ROW_NUMBER() OVER (ORDER BY ${src.c.path}) AS pk FROM ${src}${limitSql}`, ['path', 'pk']);
   const n = nodes.as('n');
   const l = labels.as('l');
-  const node = q`SELECT pp.pk, je.key AS ord, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${n.c.props} AS props FROM ${paths} pp, json_each(pp.path) je JOIN ${n} ON ${n.c.id}=je.value JOIN ${l} ON ${l.c.id}=${n.c.label} ORDER BY pp.pk, je.key`;
+  const node = q`SELECT pp.pk, je.key AS ord, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props FROM ${paths} pp, json_each(pp.path) je JOIN ${n} ON ${n.c.id}=je.value JOIN ${l} ON ${l.c.id}=${n.c.label} ORDER BY pp.pk, je.key`;
   return readCompiled(st.q, node, { kind: 'pathGrouped', elem: 'vertex' }, [...indexKeys]);
 }
 
@@ -1047,7 +1054,7 @@ function compileMath(st: St, steps: PStep[], stop: number, indexKeys: Set<string
     const strKey = byArgs.find((a: any) => typeof a === 'string');
     let sc;
     if (nested) sc = compileNestedScalar(stepChain(nested.nested, st.params), ctx);
-    else if (strKey !== undefined) sc = propAt(ctx.idExpr, ctx.propsExpr, strKey); // by(key): a plain property read
+    else if (strKey !== undefined) sc = { expr: scalarProp(ctx, strKey), indexKey: null }; // by(key): a plain property read (first-under-multi for a node)
     else throw new Error(`math("${formula}"): by() modulator must be a property key or a traversal`);
     if (sc.indexKey && ctx.elem === 'node') indexKeys.add(sc.indexKey);
     cache.set(name, sc.expr);
@@ -1139,10 +1146,10 @@ function elementSelect(elem: ElemShape, prefix: string, ctx: ScalarCtx): Express
   const extId = ctx.extIdExpr ?? ctx.idExpr;
   if (elem === 'edge')
     // Endpoints as external ids (see the __element edge projector).
-    return q`${extId} AS ${`${prefix}_id`}, ${labelNameSub(ctx.labelIdExpr)} AS ${`${prefix}_label`}, ${extIdOf(ctx.srcExpr!)} AS ${`${prefix}_src`}, ${extIdOf(ctx.tgtExpr!)} AS ${`${prefix}_tgt`}, ${ctx.propsExpr} AS ${`${prefix}_props`}`;
+    return q`${extId} AS ${`${prefix}_id`}, ${labelNameSub(ctx.labelIdExpr)} AS ${`${prefix}_label`}, ${extIdOf(ctx.srcExpr!)} AS ${`${prefix}_src`}, ${extIdOf(ctx.tgtExpr!)} AS ${`${prefix}_tgt`}, ${framedPropsCtx(ctx)} AS ${`${prefix}_props`}`;
   if (elem === 'property')
     return q`${ctx.ownerExpr!} AS ${`${prefix}_owner`}, ${ctx.pkExpr!} AS ${`${prefix}_pk`}, ${ctx.pvExpr!} AS ${`${prefix}_pv`}`;
-  return q`${extId} AS ${`${prefix}_id`}, ${labelNameSub(ctx.labelIdExpr)} AS ${`${prefix}_label`}, ${ctx.propsExpr} AS ${`${prefix}_props`}`;
+  return q`${extId} AS ${`${prefix}_id`}, ${labelNameSub(ctx.labelIdExpr)} AS ${`${prefix}_label`}, ${framedPropsCtx(ctx)} AS ${`${prefix}_props`}`;
 }
 
 /** The SQL expr to GROUP BY / frame an element by identity. */
@@ -1157,10 +1164,9 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, indexKeys: 
     return { desc: { kind: 'element', elem: src.elem }, cols: elementSelect(src.elem, 'k', src.ctx), group: elementIdExpr(src.elem, src.ctx) };
   }
   const a = keyArgs[0];
-  if (typeof a === 'string') { // by('name')
-    const pe = propExtract(src.ctx.propsExpr, a);
-    if (pe.indexKey && src.elem === 'vertex') indexKeys.add(pe.indexKey);
-    return { desc: { kind: 'scalar' }, cols: q`${pe.expr} AS gk`, group: 'gk' };
+  if (typeof a === 'string') { // by('name') — first-under-multi for a node
+    const pe = scalarProp(src.ctx, a);
+    return { desc: { kind: 'scalar' }, cols: q`${pe} AS gk`, group: 'gk' };
   }
   if (a && typeof a === 'object' && 'token' in a) { // by(T.label)/by(T.id)
     const expr = a.token === 'label' ? labelNameSub(src.ctx.labelIdExpr) : a.token === 'id' ? src.ctx.idExpr : null;
@@ -1205,9 +1211,9 @@ function compileGroup(st: St, isCount: boolean, bys: any[][], src: GroupSource, 
   else if (!valArgs || valArgs.length === 0) { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx); }
   else {
     const a = valArgs[0];
-    if (typeof a === 'string') { // by('age') → list of scalars
-      const pe = propExtract(src.ctx.propsExpr, a);
-      val = { kind: 'scalarList' }; valNode = q`json_group_array(${pe.expr}) AS gv`;
+    if (typeof a === 'string') { // by('age') → list of scalars (first-under-multi per member)
+      const pe = scalarProp(src.ctx, a);
+      val = { kind: 'scalarList' }; valNode = q`json_group_array(${pe}) AS gv`;
     } else if (a && typeof a === 'object' && 'nested' in a) {
       const inner = stepChain(a.nested, st.params);
       const names = inner.map((s) => s.name);
@@ -1245,12 +1251,22 @@ function compileGroup(st: St, isCount: boolean, bys: any[][], src: GroupSource, 
 function compileProperties(st: St, tail: PStep[], indexKeys: Set<string>): Compiled {
   const elem = st.elem;
   const keys = tail[0].args.filter((a): a is string => typeof a === 'string');
-  const keyFilter: Expression = keys.length ? q` WHERE je.key IN (${list(keys.map(value), ',')})` : empty;
   const n = elemRel(st);
   const p = st.last.as('p');
   const l = labels.as('l');
-  const propBody = q`SELECT ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, ${n.c.props} AS ownerProps, je.key AS pk, je.value AS pv FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}, json_each(${n.c.props}) je${keyFilter}`;
-  const pc = st.q.cte(propBody, ['owner', 'ownerLabel', 'ownerProps', 'pk', 'pv']);
+  // Node: the property stream IS the vertex_properties rows (one per instance, so a
+  // multi-valued key yields several) — vpid is the real VertexProperty id, pmeta its
+  // meta bag. Edge: json_each the flat blob (edge Property has no id/meta/multi).
+  let propBody: Expression;
+  if (elem === 'edge') {
+    const keyFilter: Expression = keys.length ? q` WHERE je.key IN (${list(keys.map(value), ',')})` : empty;
+    propBody = q`SELECT NULL AS vpid, ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, je.key AS pk, je.value AS pv, NULL AS pmeta FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}, json_each(json(${n.c.props})) je${keyFilter}`;
+  } else {
+    const vp = vertexProperties.as('vp');
+    const keyFilter: Expression = keys.length ? q` AND ${vp.c.key} IN (${list(keys.map(value), ',')})` : empty;
+    propBody = q`SELECT ${vp.c.id} AS vpid, ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, ${vp.c.key} AS pk, ${vp.c.value} AS pv, json(${vp.c.meta}) AS pmeta FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label} JOIN ${vp} ON ${vp.c.node}=${n.c.id}${keyFilter}`;
+  }
+  const pc = st.q.cte(propBody, ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta']);
 
   const done = (node: Expression, shape: Shape, consumed: number): Compiled => {
     if (tail.length > consumed) throw new Error(`step not implemented after properties(): ${tail[consumed].name}()`);
@@ -1262,7 +1278,7 @@ function compileProperties(st: St, tail: PStep[], indexKeys: Set<string>): Compi
   // properties().group()/.groupCount() — group over the property stream.
   if (next === 'group' || next === 'groupCount') {
     if (2 < tail.length) throw new Error(`step not implemented after properties().${next}(): ${tail[2].name}()`);
-    const ctx: ScalarCtx = { elem: 'property', idExpr: pc.c.owner, propsExpr: pc.c.ownerProps, labelIdExpr: q`(SELECT label FROM nodes WHERE id=${pc.c.owner})`, ownerExpr: pc.c.owner, ownerPropsExpr: pc.c.ownerProps, pkExpr: pc.c.pk, pvExpr: pc.c.pv };
+    const ctx: ScalarCtx = { elem: 'property', idExpr: pc.c.owner, labelIdExpr: q`(SELECT label FROM nodes WHERE id=${pc.c.owner})`, ownerExpr: pc.c.owner, pkExpr: pc.c.pk, pvExpr: pc.c.pv };
     const src: GroupSource = { from: pc.name, ctx, elem: 'property' };
     return compileGroup(st, next === 'groupCount', tail[1].bys ?? [], src, indexKeys);
   }
@@ -1281,14 +1297,14 @@ function compileProperties(st: St, tail: PStep[], indexKeys: Set<string>): Compi
       if (elem === 'edge' && after === undefined) throw new Error('element() of an edge property not yet supported');
       switch (after) {
         case undefined:
-          return done(q`SELECT owner AS id, ownerLabel AS label, ownerProps AS props FROM ${pc}`, { kind: 'vertex' }, 2);
+          return done(q`SELECT owner AS id, ownerLabel AS label, ${vertexPropsAgg(raw('owner'))} AS props FROM ${pc}`, { kind: 'vertex' }, 2);
         case 'id':
           return done(q`SELECT owner AS v FROM ${pc}`, { kind: 'value' }, 3);
         case 'label':
           return done(q`SELECT ownerLabel AS v FROM ${pc}`, { kind: 'value' }, 3);
         case 'values': {
-          const pe = propExtract('ownerProps', tail[2].args[0]);
-          return done(q`SELECT ${pe.expr} AS v FROM ${pc} WHERE ${predicateSql(pe.expr, undefined)}`, { kind: 'value' }, 3);
+          const pe = nodePropScalar(raw('owner'), tail[2].args[0]);
+          return done(q`SELECT ${pe} AS v FROM ${pc} WHERE ${predicateSql(pe, undefined)}`, { kind: 'value' }, 3);
         }
         case 'count':
           return done(q`SELECT COUNT(*) AS v FROM ${pc}`, { kind: 'count' }, 3);

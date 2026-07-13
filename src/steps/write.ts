@@ -1,6 +1,6 @@
 import type { GraphStore } from '../storage.ts';
-import { q, value, list, empty, render, type Expression } from '../q.ts';
-import { propExtract, labelIn } from '../plan.ts';
+import { q, value, list, empty, raw, render, type Expression } from '../q.ts';
+import { propExtract, labelIn, nodeHasProp } from '../plan.ts';
 import { stepChain, type Step } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../render.ts';
@@ -37,6 +37,7 @@ function compileDrop(steps: PStep[]): WritePlan {
         store.query(`DELETE FROM edges WHERE id IN (${ph})`, ids);
       } else {
         store.query(`DELETE FROM edges WHERE src IN (${ph}) OR tgt IN (${ph})`, [...ids, ...ids]);
+        store.query(`DELETE FROM vertex_properties WHERE node IN (${ph})`, ids);
         store.query(`DELETE FROM nodes WHERE id IN (${ph})`, ids);
       }
       return [];
@@ -52,33 +53,38 @@ function compileSetProperty(steps: PStep[], params: Record<string, any>): WriteP
   const { st, stop } = buildPrefix(prefix, params);
   if (stop !== prefix.length) throw new Error(`property() after ${steps[stop].name}() not yet supported`);
   const elem = st.elem;
-  const setProps: Record<string, any> = {};
+  // Each property() step → [key, value] (single cardinality; list/set + meta land later).
+  const propArgs: [string, any][] = [];
   for (const s of steps.slice(firstProp)) {
     if (s.name !== 'property') throw new Error(`step not implemented after property(): ${s.name}()`);
     const [key, val] = stripCardinality(s.args);
     if (key && typeof key === 'object' && 'token' in key)
       throw new Error(`property(T.${key.token}) on an existing element not yet supported`);
-    setProps[key] = val;
+    propArgs.push([key, val]);
   }
-  const tbl = elem === 'edge' ? 'edges' : 'nodes';
-  const labelSub = `(SELECT name FROM labels WHERE id=${tbl}.label) AS label`;
-  const readCur = elem === 'edge'
-    ? `SELECT uid, src, tgt, props, ${labelSub} FROM edges WHERE id=?`
-    : `SELECT uid, props, ${labelSub} FROM nodes WHERE id=?`;
   const target = renderFrom(st.q, st.last);
+  if (elem === 'edge') {
+    // Edge props are a flat JSONB blob: read-merge-write (json() out, jsonb() in).
+    const readCur = `SELECT uid, src, tgt, json(props) AS props, (SELECT name FROM labels WHERE id=edges.label) AS label FROM edges WHERE id=?`;
+    return {
+      kind: 'write',
+      run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
+        const cur = store.query<any>(readCur, [id])[0];
+        const props = { ...JSON.parse(cur.props), ...Object.fromEntries(propArgs) };
+        store.query('UPDATE edges SET props=jsonb(?) WHERE id=?', [JSON.stringify(props), id]);
+        return { edge: { id: cur.uid ?? id, label: cur.label, src: nodeExtId(store, cur.src), tgt: nodeExtId(store, cur.tgt), props } };
+      }),
+    };
+  }
+  // Vertex props are normalized rows: set each key directly (single cardinality).
+  const readCur = `SELECT uid, (SELECT name FROM labels WHERE id=nodes.label) AS label FROM nodes WHERE id=?`;
   return {
     kind: 'write',
-    run: (store) => {
-      const ids = store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id);
-      return ids.map((id) => {
-        const cur = store.query<any>(readCur, [id])[0];
-        const props = { ...JSON.parse(cur.props), ...setProps };
-        store.query(`UPDATE ${tbl} SET props=? WHERE id=?`, [JSON.stringify(props), id]);
-        return elem === 'edge'
-          ? { edge: { id: cur.uid ?? id, label: cur.label, src: nodeExtId(store, cur.src), tgt: nodeExtId(store, cur.tgt), props } }
-          : { vertex: { id: cur.uid ?? id, label: cur.label, props } };
-      });
-    },
+    run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
+      for (const [key, val] of propArgs) applyVertexProperty(store, id, key, val, null, 'single');
+      const cur = store.query<any>(readCur, [id])[0];
+      return { vertex: { id: cur.uid ?? id, label: cur.label, props: readVertexProps(store, id) } };
+    }),
   };
 }
 
@@ -119,19 +125,58 @@ function parseVertexSpec(addV: Step, propSteps: Step[]): VertexSpec {
 // INSERT one row into nodes/edges with the shared optional-uid/id column splice.
 // A string uid writes the `uid` column; a numeric uid writes the rowid `id`
 // directly. Returns the rowid + external id (uid ?? rowid).
-function insertRow(store: GraphStore, table: string, baseCols: string[], baseVals: any[], uid: string | number | null): { id: number; extId: string | number } {
+function insertRow(store: GraphStore, table: string, baseCols: string[], baseVals: any[], uid: string | number | null, jsonbCol?: string): { id: number; extId: string | number } {
   const uidCol = typeof uid === 'string' ? uid : null;
   const idCol = typeof uid === 'number' ? uid : null;
   const cols = [...baseCols, ...(uidCol !== null ? ['uid'] : []), ...(idCol !== null ? ['id'] : [])];
   const vals = [...baseVals, ...(uidCol !== null ? [uidCol] : []), ...(idCol !== null ? [idCol] : [])];
+  // A JSONB column binds its JSON *text* and wraps jsonb(?) so SQLite builds the blob
+  // (both runtimes accept a string bind; a raw Buffer bind would diverge — see storage.ts).
+  const ph = (c: string) => c === jsonbCol ? 'jsonb(?)' : '?';
   const row = store.query<{ id: number; uid: string | null }>(
-    `INSERT INTO ${table}(${cols.join(', ')}) VALUES(${cols.map(() => '?').join(', ')}) RETURNING id, uid`, vals)[0];
+    `INSERT INTO ${table}(${cols.join(', ')}) VALUES(${cols.map(ph).join(', ')}) RETURNING id, uid`, vals)[0];
   return { id: row.id, extId: row.uid ?? row.id };
+}
+
+// Set/append ONE vertex property (W4). single = replace all rows for the key then insert
+// one; list = append; set = append unless an equal value already exists (then patch its
+// meta). Meta is a {metaKey:scalar} object stored as a JSONB blob. A single SQL statement
+// each (locked #3). A traversal-valued property defers to a later stage.
+export function applyVertexProperty(
+  store: GraphStore, node: number, key: string, val: any,
+  meta: Record<string, any> | null, cardinality: 'single' | 'list' | 'set',
+): void {
+  if (val && typeof val === 'object' && 'nested' in val) throw new Error('property() with a traversal value not yet supported');
+  const metaJson = meta ? JSON.stringify(meta) : null;
+  if (cardinality === 'single') store.query('DELETE FROM vertex_properties WHERE node=? AND key=?', [node, key]);
+  if (cardinality === 'set') {
+    const existing = store.query<{ id: number }>('SELECT id FROM vertex_properties WHERE node=? AND key=? AND value=?', [node, key, val]);
+    if (existing.length) {
+      if (metaJson !== null) store.query('UPDATE vertex_properties SET meta=jsonb(?) WHERE id=?', [metaJson, existing[0].id]);
+      return;
+    }
+  }
+  store.query(
+    `INSERT INTO vertex_properties(node, key, value, meta) VALUES(?, ?, ?, ${metaJson === null ? 'NULL' : 'jsonb(?)'})`,
+    metaJson === null ? [node, key, val] : [node, key, val, metaJson],
+  );
+}
+
+// Read a vertex's properties back as a flat {key:value} bag (first value under a key)
+// for a write response. Multi-valued keys collapse to the first here — the write
+// response shape is flat; full multi framing is on the read path.
+function readVertexProps(store: GraphStore, node: number): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const r of store.query<{ key: string; value: any }>('SELECT key, value FROM vertex_properties WHERE node=? ORDER BY id', [node]))
+    if (!(r.key in out)) out[r.key] = r.value;
+  return out;
 }
 
 // Insert a vertex from a spec; returns its rowid and external id (uid ?? rowid).
 function insertVertex(store: GraphStore, spec: VertexSpec): { id: number; extId: string | number } {
-  return insertRow(store, 'nodes', ['label', 'props'], [store.labelId(spec.label), JSON.stringify(spec.props)], spec.uid);
+  const row = insertRow(store, 'nodes', ['label'], [store.labelId(spec.label)], spec.uid);
+  for (const [key, val] of Object.entries(spec.props)) applyVertexProperty(store, row.id, key, val, null, 'single');
+  return row;
 }
 
 // g.addV('label').property(k, v)... — and multi-element chains (a graph initializer).
@@ -168,7 +213,7 @@ function nodeExtId(store: GraphStore, rowid: number): any {
 
 // Insert one edge from a cluster + resolved endpoints; returns the framed result.
 function insertEdge(store: GraphStore, c: EdgeCluster, src: number, tgt: number): any {
-  const { extId } = insertRow(store, 'edges', ['src', 'label', 'tgt', 'props'], [src, store.labelId(c.label), tgt, JSON.stringify(c.props)], c.edgeUid);
+  const { extId } = insertRow(store, 'edges', ['src', 'label', 'tgt', 'props'], [src, store.labelId(c.label), tgt, JSON.stringify(c.props)], c.edgeUid, 'props');
   return { edge: { id: extId, label: c.label, src: nodeExtId(store, src), tgt: nodeExtId(store, tgt), props: c.props } };
 }
 
@@ -288,19 +333,20 @@ function normalizeMergeMap(raw: any): MergeSpec {
 
 // The label / id-or-uid / per-prop equality conditions shared by the vertex and
 // edge merge-match queries.
-function commonMergeConds(spec: MergeSpec): Expression[] {
+function commonMergeConds(spec: MergeSpec, elem: 'node' | 'edge'): Expression[] {
   const conds: Expression[] = [];
   if (spec.label != null) conds.push(labelIn('label', [spec.label]));
   if (spec.id != null) conds.push(typeof spec.id === 'number' ? q`id=${value(spec.id)}` : q`uid=${value(spec.id)}`);
   for (const [k, v] of Object.entries(spec.props))
-    conds.push(q`${propExtract('props', k).expr} = ${value(v)}`);
+    // Node: an ANY-match EXISTS over vertex_properties. Edge: json_extract of the flat blob.
+    conds.push(elem === 'node' ? nodeHasProp(raw('nodes.id'), k, v) : q`${propExtract('props', k).expr} = ${value(v)}`);
   return conds;
 }
 
 function mergeMatchQuery(spec: MergeSpec): { sql: string; binds: any[] } {
-  const conds = commonMergeConds(spec);
+  const conds = commonMergeConds(spec, 'node');
   const where = conds.length ? list(conds, ' AND ') : q`1`;
-  return render(q`SELECT id, uid, (SELECT name FROM labels WHERE id=nodes.label) AS label, props FROM nodes WHERE ${where}`);
+  return render(q`SELECT id, uid, (SELECT name FROM labels WHERE id=nodes.label) AS label FROM nodes WHERE ${where}`);
 }
 
 function parseMergeOptions(mods: Step[], step: string): { onCreate: MergeSpec | null; onMatch: MergeSpec | null } {
@@ -345,9 +391,8 @@ function compileMergeV(steps: PStep[], params: Record<string, any>): WritePlan {
         const matches = store.query<any>(match.sql, match.binds);
         if (matches.length) {
           for (const m of matches) {
-            let props = JSON.parse(m.props);
-            if (onMatch) { props = { ...props, ...onMatch.props }; store.query('UPDATE nodes SET props=? WHERE id=?', [JSON.stringify(props), m.id]); }
-            out.push({ vertex: { id: m.uid ?? m.id, label: m.label, props } });
+            if (onMatch) for (const [k, v] of Object.entries(onMatch.props)) applyVertexProperty(store, m.id, k, v, null, 'single');
+            out.push({ vertex: { id: m.uid ?? m.id, label: m.label, props: readVertexProps(store, m.id) } });
           }
         } else {
           const label = onCreate?.label ?? matchSpec.label ?? 'vertex';
@@ -370,8 +415,8 @@ function resolveMergeEndpoint(store: GraphStore, raw: any): number {
 }
 
 function edgeMatchQuery(spec: MergeSpec, outV: number, inV: number): { sql: string; binds: any[] } {
-  const conds: Expression[] = [q`src=${value(outV)}`, q`tgt=${value(inV)}`, ...commonMergeConds(spec)];
-  return render(q`SELECT id, uid, src, tgt, (SELECT name FROM labels WHERE id=edges.label) AS label, props FROM edges WHERE ${list(conds, ' AND ')}`);
+  const conds: Expression[] = [q`src=${value(outV)}`, q`tgt=${value(inV)}`, ...commonMergeConds(spec, 'edge')];
+  return render(q`SELECT id, uid, src, tgt, (SELECT name FROM labels WHERE id=edges.label) AS label, json(props) AS props FROM edges WHERE ${list(conds, ' AND ')}`);
 }
 
 // g.mergeE(map) [.option(Merge.onCreate, map)] [.option(Merge.onMatch, map)]
@@ -399,7 +444,7 @@ function compileMergeE(steps: PStep[], params: Record<string, any>): WritePlan {
         if (matches.length) {
           for (const m of matches) {
             let props = JSON.parse(m.props);
-            if (onMatch) { props = { ...props, ...onMatch.props }; store.query('UPDATE edges SET props=? WHERE id=?', [JSON.stringify(props), m.id]); }
+            if (onMatch) { props = { ...props, ...onMatch.props }; store.query('UPDATE edges SET props=jsonb(?) WHERE id=?', [JSON.stringify(props), m.id]); }
             out.push({ edge: { id: m.uid ?? m.id, label: m.label, src: nodeExtId(store, m.src), tgt: nodeExtId(store, m.tgt), props } });
           }
         } else {

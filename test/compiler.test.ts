@@ -22,11 +22,11 @@ describe('compiler SQL snapshots', () => {
 
   test('order().by(key[, dir]) folds ORDER BY into the projection select', () => {
     const asc = read('g.V().hasLabel("person").order().by("age").values("name")');
-    expect(asc.sql).toContain("ORDER BY json_extract(n.props, '$.age') ASC");
-    expect(asc.binds).toEqual(['person']); // name/age spliced as literal paths
+    expect(asc.sql).toContain("ORDER BY (SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) ASC");
+    expect(asc.binds).toEqual(['person', 'name', 'age']); // label, then the values() join key + the order key (bound)
 
     const desc = read('g.V().hasLabel("person").order().by("age",desc).values("name")');
-    expect(desc.sql).toContain("ORDER BY json_extract(n.props, '$.age') DESC");
+    expect(desc.sql).toContain("ORDER BY (SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) DESC");
   });
 
   test('values().order() sorts the projected scalar', () => {
@@ -67,13 +67,13 @@ describe('compiler SQL snapshots', () => {
   test('P.typeOf maps GType to a SQL typeof() test', () => {
     // value stream + is(): typeof over the projected scalar expr; type binds as ?
     const str = read('g.V().values("name").is(P.typeOf(GType.STRING))');
-    expect(str.sql).toContain("typeof(json_extract(n.props, '$.name')) = ?");
+    expect(str.sql).toContain("typeof(vp.value) = ?");
     expect(str.binds).toContain('text');
     expect(read('g.V().values("age").is(P.typeOf(GType.INT))').binds).toContain('integer');
     // java class-name string form is equivalent
     expect(read('g.V().values("name").is(P.typeOf("String"))').binds).toContain('text');
     // has(): typeof over the property expression
-    expect(read('g.V().has("name", P.typeOf(GType.STRING))').sql).toContain("typeof(json_extract(n.props, '$.name'))");
+    expect(read('g.V().has("name", P.typeOf(GType.STRING))').sql).toContain("typeof(value) = ?");
     // NULL → is-null; recognized-but-unrepresentable type → constant false
     expect(read('g.V().values("age").is(P.typeOf(GType.NULL))').sql).toContain('is null');
     expect(read('g.V().values("age").is(P.typeOf(GType.BOOLEAN))').sql).toMatch(/\b0\b/);
@@ -227,7 +227,7 @@ describe('compiler SQL snapshots', () => {
     // runtime value → SQL CAST + tag (no compile-time constant)
     const f = read('g.V().values("weight").asNumber(GType.FLOAT)');
     expect(f.shape).toEqual({ kind: 'value', as: 'float' });
-    expect(f.sql).toContain('CAST(json_extract(n.props');
+    expect(f.sql).toContain('CAST(vp.value AS REAL)');
     // is(P.typeOf(X)) on the uniformly-typed stream rides the existing storage-class
     // typeOf — no precision change needed
     expect(read('g.V().values("weight").asNumber(GType.FLOAT).is(P.typeOf(GType.FLOAT))').sql).toContain("typeof(CAST(");
@@ -271,7 +271,7 @@ describe('compiler SQL snapshots', () => {
     // `_` resolves through the by() modulator; result always tagged Double.
     const p = read('g.V().math("_+_").by("age")');
     expect(p.shape).toEqual({ kind: 'value', as: 'double' });
-    expect(p.sql).toContain("(CAST(json_extract(n.props, '$.age') AS REAL) + CAST(json_extract(n.props, '$.age') AS REAL)) AS v");
+    expect(p.sql).toContain("(CAST((SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS REAL) + CAST((SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS REAL)) AS v");
     // a missing by() value makes the arithmetic NULL → the traverser is filtered
     expect(p.sql).toContain('is not null');
     // `0-_` (subtraction-based negation) on an edge property
@@ -293,12 +293,12 @@ describe('compiler SQL snapshots', () => {
     // named aliases resolve via the carried rowid column (correlated subquery); one
     // by() feeds every variable (round-robin), N by()s feed N variables positionally.
     const shared = read('g.V().as("a").out("knows").as("b").math("a + b").by("age")');
-    expect(shared.sql).toContain("json_extract((SELECT props FROM nodes WHERE id=p.a0), '$.age')");
-    expect(shared.sql).toContain("json_extract((SELECT props FROM nodes WHERE id=p.a1), '$.age')");
+    expect(shared.sql).toContain("(SELECT value FROM vertex_properties WHERE node=p.a0 AND key=? ORDER BY id LIMIT 1)");
+    expect(shared.sql).toContain("(SELECT value FROM vertex_properties WHERE node=p.a1 AND key=? ORDER BY id LIMIT 1)");
     // per-variable by(): first-seen order (`b` before `a`), nested traversal + key
     const perVar = read('g.V().as("a").out("created").as("b").math("b + a").by(__.in("created").count()).by("age")');
     expect(perVar.sql).toContain('COUNT(*)');                 // b ← by(__.in("created").count())
-    expect(perVar.sql).toContain("id=p.a0), '$.age'");        // a ← by("age")
+    expect(perVar.sql).toContain("node=p.a0 AND key=?");      // a ← by("age")
     // math() composes with a trailing typed cast (result narrows to the cast's subtype)
     expect(read('g.V().as("a").out("knows").as("b").math("a + b").by("age").asNumber(GType.INT)').shape)
       .toEqual({ kind: 'value', as: 'int' });
@@ -321,7 +321,7 @@ describe('compiler SQL snapshots', () => {
     // runtime: an ISO-text property → unixepoch()*1000; an integer/real is already millis
     const rt = read('g.V().values("birthday").asDate()');
     expect(rt.shape).toEqual({ kind: 'value', as: 'date' });
-    expect(rt.sql).toContain("unixepoch(json_extract(n.props, '$.birthday')) * 1000");
+    expect(rt.sql).toContain("unixepoch(vp.value) * 1000");
     // bare asNumber() over a date → its epoch-millis (Long, identity); asDate composes back
     expect(read('g.V().values("birthday").asDate().asNumber().asDate()').shape).toEqual({ kind: 'value', as: 'date' });
     // bare asNumber() as the ms-string leg feeding asDate() is allowed; standalone it
@@ -348,7 +348,7 @@ describe('compiler SQL snapshots', () => {
     // runtime dateDiff against a literal → v − other_ms (the epoch bound as a value)
     const rd = read('g.V().values("birthday").asNumber().asDate().dateDiff(datetime("1970-01-01T00:00Z"))');
     expect(rd.shape).toEqual({ kind: 'value', as: 'long' });
-    expect(rd.binds).toEqual([Date.parse('1970-01-01T00:00Z')]); // = 0
+    expect(rd.binds).toEqual([Date.parse('1970-01-01T00:00Z'), 'birthday']); // the other epoch (= 0), then the values() join key
     // nested inject() as the dateDiff operand defers (not a literal/constant)
     expect(() => compile("g.inject(datetime('2023-08-08T00:00:00Z')).dateDiff(inject(datetime('2023-10-11T00:00:00Z')))", {})).toThrow('datetime literal or constant');
   });
@@ -379,9 +379,9 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('scalar transforms also wrap an element value projection', () => {
-    expect(read("g.V().values('name').substring(2)").sql).toContain("substr(json_extract(n.props, '$.name')");
-    expect(read("g.V().values('name').toUpper()").sql).toContain("upper(json_extract(n.props, '$.name'))");
-    expect(read("g.V().values('name').concat('X')").sql).toContain("json_extract(n.props, '$.name') || ?");
+    expect(read("g.V().values('name').substring(2)").sql).toContain("substr(vp.value");
+    expect(read("g.V().values('name').toUpper()").sql).toContain("upper(vp.value)");
+    expect(read("g.V().values('name').concat('X')").sql).toContain("vp.value || ?");
     // chained; is()/order() see the transformed value
     expect(read("g.V().values('name').toUpper().is('MARKO')").sql).toContain('upper(');
     // transform on a non-scalar projection is rejected
@@ -402,7 +402,7 @@ describe('compiler SQL snapshots', () => {
   test('union() as a source step UNION ALLs its vertex-rooted branches', () => {
     const p = read("g.union(__.V(2),__.V(4)).values('name')");
     expect(p.sql).toContain('UNION ALL');
-    expect(p.sql).toContain("json_extract(n.props, '$.name')");
+    expect(p.sql).toContain('vp.value AS v');
     // branches sharing the one WITH clause
     expect(read("g.union(__.V().hasLabel('software'),__.V().hasLabel('person')).count()").shape).toEqual({ kind: 'count' });
     // mid-chain union() still works (different code path)
@@ -438,7 +438,7 @@ describe('compiler SQL snapshots', () => {
   test('single-label select().by(key) → scalar value from the alias column', () => {
     const p = read('g.V().as("a").out().select("a").by("name")');
     expect(p.shape).toEqual({ kind: 'value' });
-    expect(p.sql).toContain("json_extract(n.props, '$.name') AS v");
+    expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS v");
     expect(p.sql).toContain('ON n.id=p.a0');
   });
 
@@ -462,8 +462,8 @@ describe('compiler SQL snapshots', () => {
     ] });
     const cyc = read('g.V().as("a").out().as("b").select("a","b").by("age").by("name")');
     // e0 uses by('age'), e1 uses by('name')
-    expect(cyc.sql).toContain("json_extract(e0n.props, '$.age') AS e0_v");
-    expect(cyc.sql).toContain("json_extract(e1n.props, '$.name') AS e1_v");
+    expect(cyc.sql).toContain("(SELECT value FROM vertex_properties WHERE node=e0n.id AND key=? ORDER BY id LIMIT 1) AS e0_v");
+    expect(cyc.sql).toContain("(SELECT value FROM vertex_properties WHERE node=e1n.id AND key=? ORDER BY id LIMIT 1) AS e1_v");
   });
 
   test('project() applies by mods to the current traverser under fresh keys', () => {
@@ -478,11 +478,11 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('select/project by(key) is a projection — does NOT report an index key', () => {
-    // Mirrors the values() policy (test/performance.test.ts): only has()/order().by()
-    // report indexKeys. A has() filter still does, even alongside a select projection.
+    // W4: vertex props are normalized with static (key,value)/(node,key) indexes, so
+    // there is no per-key indexKeys reporting anymore — every read reports [].
     expect(read('g.V().as("a").out().select("a").by("age")').indexKeys).toEqual([]);
     expect(read('g.V().project("n","a").by("name").by("age")').indexKeys).toEqual([]);
-    expect(read('g.V().has("age",30).as("a").select("a").by("name")').indexKeys).toEqual(['age']);
+    expect(read('g.V().has("age",30).as("a").select("a").by("name")').indexKeys).toEqual([]);
   });
 
   test('result-preserving optimization strategies accepted as no-ops (correct-by-design)', () => {
@@ -508,9 +508,9 @@ describe('compiler SQL snapshots', () => {
     // out/in/both). Both endpoints of a hop are checked: source filtered before, the
     // moved-to vertex filtered after.
     const sql = read('g.withStrategies(new SubgraphStrategy(vertices: __.has("name", P.within("a","b")))).V().values("name")').sql;
-    expect(sql).toContain("json_extract(n.props, '$.name') in (?, ?)"); // criterion applied
+    expect(sql).toContain('EXISTS(SELECT 1 FROM vertex_properties WHERE node=n.id AND key=? AND value in (?, ?))'); // criterion applied
     // after V() the filter is c1 (source c0 → filtered c1)
-    expect(sql).toMatch(/c1\(id\) as \(SELECT n\.id FROM nodes n JOIN c0 p .* WHERE json_extract\(n\.props, '\$\.name'\) in/);
+    expect(sql).toMatch(/c1\(id\) as \(SELECT n\.id FROM nodes n JOIN c0 p .* WHERE EXISTS\(SELECT 1 FROM vertex_properties WHERE node=n\.id AND key=\? AND value in/);
   });
 
   test('PartitionStrategy read-filter isolates partitions; write-stamp tags created elements', () => {
@@ -518,8 +518,8 @@ describe('compiler SQL snapshots', () => {
     // write two vertices into partitions a and b via the write-stamp
     run(store, 'g.withStrategies(new PartitionStrategy(partitionKey:"_p", writePartition:"a")).addV("person").property("name","marko")');
     run(store, 'g.withStrategies(new PartitionStrategy(partitionKey:"_p", writePartition:"b")).addV("person").property("name","josh")');
-    // the stamp is a real property
-    expect(store.query("SELECT json_extract(props,'$._p') p FROM nodes ORDER BY id").map((r: any) => r.p)).toEqual(['a', 'b']);
+    // the stamp is a real property (normalized into vertex_properties)
+    expect(store.query("SELECT value p FROM vertex_properties WHERE key='_p' ORDER BY node").map((r: any) => r.p)).toEqual(['a', 'b']);
     // read visibility follows readPartitions
     const names = (q: string) => run(store, q).map((r: any) => r.v).sort();
     expect(names('g.V().values("name")')).toEqual(['josh', 'marko']); // unfiltered: both
@@ -678,11 +678,11 @@ describe('compiler SQL snapshots', () => {
 
   test('properties() expands props via json_each into a property shape', () => {
     const p = read('g.V().properties()');
-    expect(p.sql).toContain('json_each(n.props) je');
+    expect(p.sql).toContain('JOIN vertex_properties vp ON vp.node=n.id');
     expect(p.shape).toEqual({ kind: 'property' });
-    // key filter uses WHERE, and binds the requested keys
+    // key filter is an extra JOIN condition, and binds the requested keys
     const named = read('g.V().properties("name","age")');
-    expect(named.sql).toContain('WHERE je.key IN (?,?)');
+    expect(named.sql).toContain('AND vp.key IN (?,?)');
     expect(named.binds).toEqual(['name', 'age']);
   });
 
@@ -691,7 +691,7 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().properties().value()').sql).toContain('SELECT pv AS v');
     expect(read('g.V().properties().count()').shape).toEqual({ kind: 'count' });
     expect(read('g.V().properties().element()').shape).toEqual({ kind: 'vertex' });
-    expect(read('g.V().properties().element().values("name")').sql).toContain("json_extract(ownerProps, '$.name')");
+    expect(read('g.V().properties().element().values("name")').sql).toContain("(SELECT value FROM vertex_properties WHERE node=owner AND key=? ORDER BY id LIMIT 1)");
   });
 
   test('properties(): trailing steps past the follow-on throw; edge element().label() allowed', () => {
@@ -709,7 +709,7 @@ describe('compiler SQL snapshots', () => {
   test('group().by(key).by(__.tail()) → element-last, ORDER BY key (assembly path)', () => {
     const p = read('g.V().group().by("name").by(__.tail())');
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'elementLast', elem: 'vertex' } });
-    expect(p.sql).toContain("json_extract(n.props, '$.name') AS gk");
+    expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS gk");
     expect(p.sql).toContain('COALESCE(n.uid, n.id) AS v_id');
     expect(p.sql).toContain('ORDER BY gk'); // element value → no GROUP BY, ordered for run-folding
   });
@@ -717,23 +717,23 @@ describe('compiler SQL snapshots', () => {
   test('group().by(key) default value → element list; group by key reports an index key', () => {
     const p = read('g.V().group().by("name")');
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'elementList', elem: 'vertex' } });
-    expect(p.indexKeys).toEqual(['name']); // group().by(key) is a filter/order-position use
+    expect(p.indexKeys).toEqual([]); // W4: static vp indexes — no per-key reporting
   });
 
   test('group().by(key).by(prop) → scalar-list via json_group_array + GROUP BY', () => {
     const p = read('g.V().group().by("name").by("age")');
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'scalarList' } });
-    expect(p.sql).toContain("json_group_array(json_extract(n.props, '$.age')) AS gv");
+    expect(p.sql).toContain("json_group_array((SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1)) AS gv");
     expect(p.sql).toContain('GROUP BY gk');
   });
 
   test('sack(op).by(key) mutates a carried sk column; bare sack() reads it', () => {
     const p = read('g.V().sack(assign).by("age").sack()');
     expect(p.shape).toEqual({ kind: 'value' });
-    expect(p.sql).toContain("json_extract(n.props, '$.age') AS sk");
+    expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS sk");
     expect(p.sql).toContain('SELECT p.sk AS v FROM'); // bare sack() reads the carried column
     // sum accumulator references the prior sk; div forces REAL division.
-    expect(read('g.withSack(0.0d).V().sack(sum).by("age").sack()').sql).toContain('(p.sk + json_extract(n.props');
+    expect(read('g.withSack(0.0d).V().sack(sum).by("age").sack()').sql).toContain('(p.sk + (SELECT value FROM vertex_properties WHERE node=n.id AND key=?');
     expect(read('g.withSack(2).V().sack(div).by(__.constant(4.0d)).sack()').sql).toContain('(CAST(p.sk AS REAL) / ?)');
   });
 
@@ -744,7 +744,7 @@ describe('compiler SQL snapshots', () => {
     // groupCount('a') passes traversers through: out() runs between it and cap('a').
     const gc = read('g.V().groupCount("a").by("name").out().cap("a")');
     expect(gc.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
-    expect(gc.indexKeys).toEqual(['name']); // the key is auto-indexed at cap time
+    expect(gc.indexKeys).toEqual([]); // W4: static vp indexes — no per-key reporting
   });
 
   test('terminal group(a) with no cap passes the traversers through (side-effect discarded)', () => {
@@ -770,16 +770,16 @@ describe('compiler SQL snapshots', () => {
     const p = read('g.E().group().by(__.project("o","l","i").by(__.outV().values("name")).by(__.label()).by(__.inV().values("name"))).by(__.tail())');
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'map', parts: [{ key: 'o' }, { key: 'l' }, { key: 'i' }] }, val: { kind: 'elementLast', elem: 'edge' } });
     // nested scalars → correlated subqueries on the edge endpoints
-    expect(p.sql).toContain("(SELECT json_extract(props, '$.name') FROM nodes WHERE id=n.src) AS k0_v");
+    expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.src AND key=? ORDER BY id LIMIT 1) AS k0_v");
     expect(p.sql).toContain('(SELECT name FROM labels WHERE id=n.label) AS k1_v');
-    expect(p.sql).toContain("(SELECT json_extract(props, '$.name') FROM nodes WHERE id=n.tgt) AS k2_v");
+    expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.tgt AND key=? ORDER BY id LIMIT 1) AS k2_v");
     expect(p.sql).toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=n.src) AS v_src'); // edge value framing → external endpoint id
   });
 
   test('properties().group() over the property stream (vertex-property gate)', () => {
     const p = read('g.V().properties().group().by(__.project("n","k","v").by(__.element().values("name")).by(__.key()).by(__.value())).by(__.tail())');
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'map', parts: [{ key: 'n' }, { key: 'k' }, { key: 'v' }] }, val: { kind: 'elementLast', elem: 'property' } });
-    expect(p.sql).toContain("json_extract(c1.ownerProps, '$.name') AS k0_v"); // property-group ctx columns typed via the CTE relation
+    expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=c1.owner AND key=? ORDER BY id LIMIT 1) AS k0_v"); // property-group ctx columns typed via the CTE relation
     expect(p.sql).toContain('pk AS k1_v');
     expect(p.sql).toContain('pv AS k2_v');
     expect(p.sql).toContain('owner AS v_owner'); // property value framing
@@ -811,10 +811,10 @@ describe('compiler SQL snapshots', () => {
   test('is(P) folds a predicate onto the projected scalar', () => {
     const gt = read('g.V().values("age").is(P.gt(30))');
     expect(gt.shape).toEqual({ kind: 'value' });
-    expect(gt.sql).toContain("json_extract(n.props, '$.age') is not null AND json_extract(n.props, '$.age') > ?");
+    expect(gt.sql).toContain("WHERE vp.value > ?"); // the values() JOIN handles existence; is() adds the predicate
     expect(gt.binds).toContain(30);
     // bare literal → equality
-    expect(read('g.V().values("age").is(29)').sql).toContain("json_extract(n.props, '$.age') = ?");
+    expect(read('g.V().values("age").is(29)').sql).toContain("vp.value = ?");
   });
 
   test('count().is(P) wraps the count in a value filter (0/1 rows)', () => {
@@ -851,15 +851,15 @@ describe('compiler SQL snapshots', () => {
     const c = read('g.V().where(__.inE("knows").count().is(P.gte(1))).values("name")');
     expect(c.sql).toContain('(SELECT COUNT(*) FROM edges WHERE (tgt=n.id)');
     expect(c.sql).toContain('>= ?');
-    // where(__.values(k).is(P)) is a filter-position use → index key reported
-    expect(read('g.V().where(__.values("age").is(P.gt(30)))').indexKeys).toEqual(['age']);
+    // W4: static vp indexes — no per-key indexKeys reporting
+    expect(read('g.V().where(__.values("age").is(P.gt(30)))').indexKeys).toEqual([]);
   });
 
   test('alias-compare where(P.neq("a")) and where("a",P,by(key)); unknown label throws', () => {
     const idc = read('g.V().as("a").out().where(P.neq("a"))');
     expect(idc.sql).toContain('WHERE n.id != p.a0');
     const keyc = read('g.V().as("a").out().as("b").where("a", P.eq("b")).by("name")');
-    expect(keyc.sql).toContain("(SELECT json_extract(props, '$.name') FROM nodes WHERE id=p.a0) = (SELECT json_extract(props, '$.name') FROM nodes WHERE id=p.a1)");
+    expect(keyc.sql).toContain("(SELECT value FROM vertex_properties WHERE node=p.a0 AND key=? ORDER BY id LIMIT 1) = (SELECT value FROM vertex_properties WHERE node=p.a1 AND key=? ORDER BY id LIMIT 1)");
     expect(() => compile('g.V().where("x", P.eq("y"))', {})).toThrow('no such label');
     // alias-compare where() takes at most one by(key) — a second is not a valid
     // modulator here; fail closed rather than silently drop it.
@@ -873,7 +873,7 @@ describe('compiler SQL snapshots', () => {
     expect(two.sql).toContain('EXISTS(SELECT 1 FROM edges xe0 JOIN nodes xn0 ON xn0.id=xe0.tgt JOIN edges xe1 ON xe1.src=xn0.id JOIN nodes xn1 ON xn1.id=xe1.tgt WHERE xe0.src=n.id');
     // terminal has() on the neighbour
     expect(read('g.V().where(__.out("knows").has("age", P.gt(30)))').sql)
-      .toContain("json_extract(xn0.props, '$.age') > ?");
+      .toContain("EXISTS(SELECT 1 FROM vertex_properties WHERE node=xn0.id AND key=? AND value > ?)");
     // terminal hasLabel()
     expect(read('g.V().where(__.out("created").hasLabel("software"))').sql).toContain('xn0.label IN (SELECT id FROM labels');
     // a lone bare movement keeps the leaner edge-only EXISTS (no node join)
@@ -947,7 +947,7 @@ describe('compiler SQL snapshots', () => {
     const m = read('g.V().map(__.out().count())');
     expect(m.shape).toEqual({ kind: 'value' });
     expect(m.sql).toContain('SELECT (SELECT COUNT(*) FROM edges WHERE (src=n.id)) AS v FROM nodes n JOIN c0 p');
-    expect(read('g.V(1).map(__.values("name"))').sql).toContain("json_extract(n.props, '$.name') AS v");
+    expect(read('g.V(1).map(__.values("name"))').sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS v");
     // element-body map (first-result-only) and select/fold bodies defer
     expect(() => compile('g.V().map(__.out())', {})).toThrow('only supports a terminal count');
     expect(() => compile('g.V().map(__.select("a"))', {})).toThrow('not yet supported');
@@ -957,12 +957,12 @@ describe('compiler SQL snapshots', () => {
   test('choose(pred, then, else) → gated-seed UNION ALL, arms fold from their seed', () => {
     const c = read('g.V().choose(__.has("name","vadas"), __.out("knows"), __.in("knows"))');
     // two gated seeds off the same source (c0): pred and NOT-pred
-    expect(c.sql).toContain("WHERE json_extract(n.props, '$.name') = ?");
-    expect(c.sql).toContain("WHERE NOT COALESCE((json_extract(n.props, '$.name') = ?), 0)");
+    expect(c.sql).toContain("WHERE EXISTS(SELECT 1 FROM vertex_properties WHERE node=n.id AND key=? AND value = ?)");
+    expect(c.sql).toContain("WHERE NOT COALESCE((EXISTS(SELECT 1 FROM vertex_properties WHERE node=n.id AND key=? AND value = ?)), 0)");
     // arms fold through movement; the two element id-relations merge UNION ALL
     expect(c.sql).toContain('UNION ALL');
     expect(c.shape).toEqual({ kind: 'vertex' });
-    expect(c.binds).toEqual(['vadas', 'knows', 'vadas', 'knows']);
+    expect(c.binds).toEqual(['name', 'vadas', 'knows', 'name', 'vadas', 'knows']);
     // count().is predicate rides as a correlated subquery; multi-hop arm folds
     expect(read('g.V().choose(__.out("knows").count().is(P.gt(0)), __.out("created").out())').sql)
       .toContain('(SELECT COUNT(*) FROM edges WHERE (src=n.id)');
@@ -987,8 +987,8 @@ describe('compiler SQL snapshots', () => {
   test('option-map choose → CASE over the choice scalar (value shape)', () => {
     const c = read('g.V().choose(__.values("age")).option(P.between(26,30), __.constant("x")).option(Pick.none, __.constant("z"))');
     expect(c.shape).toEqual({ kind: 'value' });
-    expect(c.sql).toContain("CASE WHEN (json_extract(n.props, '$.age') >= ? and json_extract(n.props, '$.age') < ?) THEN ? ELSE ? END AS v");
-    expect(c.binds).toEqual([26, 30, 'x', 'z']);
+    expect(c.sql).toContain("CASE WHEN ((SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) >= ? and (SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) < ?) THEN ? ELSE ? END AS v");
+    expect(c.binds).toEqual(['age', 26, 'age', 30, 'x', 'z']);
     // T.label choice, literal-equality keys
     expect(read('g.V().choose(T.label).option("person", __.constant("p")).option(Pick.none, __.constant("o"))').sql)
       .toContain('CASE WHEN (SELECT name FROM labels WHERE id=n.label) = ? THEN ? ELSE ? END');
@@ -1060,8 +1060,8 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().where(__.out("knows").is(1))', {})).toThrow('where(__.out().is(P)) not yet supported');
     // is() after limit() must throw (position-sensitive)
     expect(() => compile('g.V().values("age").limit(3).is(P.gt(25))', {})).toThrow('is() after limit()');
-    // values(k).is(P) now reports the index key (like has())
-    expect(read('g.V().values("age").is(P.gt(30))').indexKeys).toEqual(['age']);
+    // W4: static vp indexes — no per-key indexKeys reporting
+    expect(read('g.V().values("age").is(P.gt(30))').indexKeys).toEqual([]);
     // alias-compare by(key) on an edge label throws rather than reading nodes
     expect(() => compile('g.V().as("a").outE().as("e").where("e", P.eq("a")).by("weight")', {})).toThrow('edge-typed label not yet supported');
   });
@@ -1073,17 +1073,17 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().has("age", P.between(29,35))').sql).toContain('>= ? and');
   });
 
-  test('identifier keys splice as literal JSON paths (index-friendly); exotic keys are bound', () => {
-    // Safe identifier: spliced literally so `CREATE INDEX ...(json_extract(props,'$.age'))`
-    // can engage. See the property-index performance test below.
+  test('vertex property keys bind as parameters (static vp index, no literal splice)', () => {
+    // W4: vertex props are normalized into vertex_properties; has(key,val) is an EXISTS
+    // with BOTH key and value bound. The static (key,value) index serves a bound key
+    // fine (a plain B-tree column, not an expression index), so no literal splice — and
+    // no injection surface for any key.
     const safe = read('g.V().has("age",30)');
-    expect(safe.sql).toContain("json_extract(n.props, '$.age')");
-    expect(safe.binds).toEqual([30]); // key not bound
+    expect(safe.sql).toContain('EXISTS(SELECT 1 FROM vertex_properties WHERE node=n.id AND key=? AND value = ?)');
+    expect(safe.binds).toEqual(['age', 30]);
 
-    // Exotic key (space): falls back to the bound `'$.' || ?` form — correct,
-    // just not index-eligible. The key value is never spliced into SQL.
+    // an exotic key (space) is handled identically — bound, never spliced into SQL
     const exotic = read('g.V().has("first name","x")');
-    expect(exotic.sql).toContain("json_extract(n.props, '$.' || ?)");
     expect(exotic.sql).not.toContain('first name');
     expect(exotic.binds).toEqual(['first name', 'x']);
   });
@@ -1109,12 +1109,12 @@ describe('compiler SQL snapshots', () => {
   test('path().by(k1).by(k2) cycles modulators round-robin and drops on missing key', () => {
     // Three positions, two by()s → name, age, name (index % byCount).
     const p = read('g.V(1).out().out().path().by("name").by("age")');
-    expect(p.sql).toContain("json_extract(x0n.props, '$.name') AS x0_v");
-    expect(p.sql).toContain("json_extract(x1n.props, '$.age') AS x1_v");
-    expect(p.sql).toContain("json_extract(x2n.props, '$.name') AS x2_v");
+    expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=x0n.id AND key=? ORDER BY id LIMIT 1) AS x0_v");
+    expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=x1n.id AND key=? ORDER BY id LIMIT 1) AS x1_v");
+    expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=x2n.id AND key=? ORDER BY id LIMIT 1) AS x2_v");
     // Non-productive-by is a filter: every projected value must be present or the
     // whole path drops (TinkerPop default, no ProductiveByStrategy).
-    expect(p.sql).toContain("json_extract(x0n.props, '$.name') is not null AND");
+    expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=x0n.id AND key=? ORDER BY id LIMIT 1) is not null AND");
     expect(p.shape).toEqual({ kind: 'path', positions: [
       { render: 'value', prefix: 'x0' }, { render: 'value', prefix: 'x1' }, { render: 'value', prefix: 'x2' },
     ] });
@@ -1209,10 +1209,10 @@ describe('compiler SQL snapshots', () => {
 
   test('while-do (until before repeat) qualifies the seed id in the correlated predicate', () => {
     const p = read('g.V(3).until(__.has("name","lop")).repeat(__.out())');
-    // seed source aliased `w` so until()'s (SELECT props FROM nodes WHERE id=w.id) is
-    // not the `id=id` self-match that would read the wrong row.
-    expect(p.sql).toContain('WHERE id=w.id');
-    expect(p.sql).not.toContain('WHERE id=id');
+    // seed source aliased `w` so until()'s correlated predicate references the seed as
+    // `node=w.id`, not the `node=id` self-match that would read the wrong row.
+    expect(p.sql).toContain('node=w.id');
+    expect(p.sql).not.toContain('node=id ');
   });
 
   test('until().path() carries both the JSONB path array and the done column', () => {
@@ -1365,8 +1365,9 @@ describe('compiler execution semantics', () => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     const person = store.labelId('person');
     const self = store.labelId('self');
-    store.query('INSERT INTO nodes(id,label,props) VALUES(?,?,?)', [1, person, JSON.stringify({ name: 'ouro' })]);
-    store.query('INSERT INTO edges(id,src,label,tgt,props) VALUES(?,?,?,?,?)', [2, 1, self, 1, '{}']);
+    store.query('INSERT INTO nodes(id,label) VALUES(?,?)', [1, person]);
+    store.query('INSERT INTO vertex_properties(node,key,value) VALUES(?,?,?)', [1, 'name', 'ouro']);
+    store.query('INSERT INTO edges(id,src,label,tgt,props) VALUES(?,?,?,?,jsonb(?))', [2, 1, self, 1, '{}']);
     expect(run(store, 'g.V(1).both().count()').map((r) => r.v)).toEqual([2]);
   });
 
@@ -1642,9 +1643,9 @@ describe('compiler execution semantics', () => {
     // multi-hop chain rooted at an alias b
     expect(run(store, 'g.V(1).as("a").out("created").in("created").as("b").where(__.as("b").out("created").has("name","ripple")).values("name")').map((r) => r.v))
       .toEqual(['josh']);
-    // SQL: the predicate correlates on the alias column, read back by subquery
+    // SQL: the predicate correlates on the alias column (an ANY-match EXISTS over vertex_properties)
     expect(read('g.V().as("a").out().where(__.as("a").values("name").is("marko"))').sql)
-      .toContain("(SELECT props FROM nodes WHERE id=p.a0)");
+      .toContain("EXISTS(SELECT 1 FROM vertex_properties WHERE node=p.a0 AND key=? AND value = ?)");
     // unknown label fails closed
     expect(() => compile('g.V().where(__.as("z").out())', {})).toThrow('no such label');
   });
@@ -1975,8 +1976,8 @@ describe('compiler execution semantics', () => {
   test('dedup() after a recursive path() collapses equal paths (multigraph parallel edges)', () => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     const person = store.labelId('person'), knows = store.labelId('knows');
-    store.query('INSERT INTO nodes(id,label,props) VALUES(1,?,?),(2,?,?)', [person, '{}', person, '{}']);
-    store.query('INSERT INTO edges(id,src,label,tgt,props) VALUES(10,1,?,2,?),(11,1,?,2,?)', [knows, '{}', knows, '{}']);
+    store.query('INSERT INTO nodes(id,label) VALUES(1,?),(2,?)', [person, person]);
+    store.query('INSERT INTO edges(id,src,label,tgt,props) VALUES(10,1,?,2,jsonb(?)),(11,1,?,2,jsonb(?))', [knows, '{}', knows, '{}']);
     const npaths = (q: string) => new Set((run(store, q) as any[]).map((r) => r.pk)).size;
     // two parallel 1→2 edges → out() reaches 2 twice → two identical [1,2] paths.
     expect(npaths('g.V(1).repeat(__.out()).times(1).path()')).toBe(2);
@@ -1985,7 +1986,7 @@ describe('compiler execution semantics', () => {
 
   // ---------- repeat().until() (modern-graph semantics) ----------
 
-  const uNames = (store: GraphStore, q: string) => (run(store, q) as any[]).map((r) => JSON.parse(r.props).name);
+  const uNames = (store: GraphStore, q: string) => (run(store, q) as any[]).map((r) => JSON.parse(r.props).name[0]);
 
   test('do-while: repeat(out()).until(pred) runs the body then tests, multiset-correct', () => {
     const store = seededStore();
@@ -2030,10 +2031,11 @@ describe('compiler execution semantics', () => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     const person = store.labelId('person');
     const knows = store.labelId('knows');
-    const node = 'INSERT INTO nodes(id, label, props) VALUES(?,?,?)';
-    const edge = 'INSERT INTO edges(id, src, label, tgt, props) VALUES(?,?,?,?,?)';
+    const node = 'INSERT INTO nodes(id, label) VALUES(?,?)';
+    const prop = 'INSERT INTO vertex_properties(node, key, value) VALUES(?,?,?)';
+    const edge = 'INSERT INTO edges(id, src, label, tgt, props) VALUES(?,?,?,?,jsonb(?))';
     const N = 40; // deeper than the retired cap
-    for (let i = 0; i <= N; i++) store.query(node, [i + 1, person, JSON.stringify({ name: `n${i}` })]);
+    for (let i = 0; i <= N; i++) { store.query(node, [i + 1, person]); store.query(prop, [i + 1, 'name', `n${i}`]); }
     for (let i = 0; i < N; i++) store.query(edge, [100 + i, i + 1, knows, i + 2, '{}']); // n0→n1→…→n40
     expect(uNames(store, `g.V(1).repeat(__.out()).until(__.has("name","n${N}"))`)).toEqual([`n${N}`]);
   });

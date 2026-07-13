@@ -1,7 +1,7 @@
-import { q, list, type Expression } from '../q.ts';
+import { q, list, raw, type Expression } from '../q.ts';
 import { stepChain, type Pred } from '../frontend.ts';
 import {
-  P_OPS, propExtract, labelIn, predicateSql, propAt, elemCtx, aliasCtx,
+  P_OPS, labelIn, predicateSql, nodePropScalar, hasProp, elemCtx, aliasCtx,
   compileFilterPredicate, combineBranchPreds, idPredFromArgs, type Elem, type ScalarCtx,
 } from '../plan.ts';
 import { advance, carryFrag, elemRel, pathColsOf, prevRel, type AliasMap, type St, type StepFn } from './context.ts';
@@ -114,11 +114,9 @@ export const has: StepFn = (s, st) => {
       : (() => { throw new Error(`has(T.${key.token}) not supported`); })();
     conds.push(predicateSql(expr, val));
   } else {
-    const pe = propExtract('n.props', key); // literal path for indexable keys
-    // Only node property indexes are auto-built; an edge has() filters correctly
-    // but stays unindexed for now.
-    if (pe.indexKey && st.elem === 'node') indexKeys.push(pe.indexKey);
-    conds.push(predicateSql(pe.expr, val));
+    // Node → ANY-match EXISTS over vertex_properties; edge → json_extract of the flat
+    // blob. hasProp dispatches on elem (the current traverser is aliased `n`).
+    conds.push(hasProp(currentCtx(st), key, val));
   }
   return filterCte(st, list(conds, ' AND '), indexKeys);
 };
@@ -149,10 +147,10 @@ export const where: StepFn = (s, st) => {
   const byKey = s.bys?.[0]?.find((x: any) => typeof x === 'string') as string | undefined;
   let testNode: Expression;
   if (byKey !== undefined) {
-    // propAt reads the nodes table; an edge-typed operand would silently read a
-    // vertex's props (ids collide across spaces) → reject.
+    // nodePropScalar reads vertex_properties; an edge-typed operand would silently read
+    // a vertex's props (ids collide across spaces) → reject.
     if (leftElem === 'edge' || rightElem === 'edge') throw new Error('where().by(key) on an edge-typed label not yet supported');
-    testNode = q`${propAt(left, null, byKey).expr} ${P_OPS[pred.op]} ${propAt(right, null, byKey).expr}`;
+    testNode = q`${nodePropScalar(raw(left), byKey)} ${P_OPS[pred.op]} ${nodePropScalar(raw(right), byKey)}`;
   } else {
     testNode = q`${left} ${P_OPS[pred.op]} ${right}`;
   }
