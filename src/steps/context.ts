@@ -54,6 +54,7 @@ export interface St {
   readonly indexKeys: ReadonlySet<string>;
   readonly params: Record<string, any>;
   readonly path?: PathState;             // present iff the chain tracks a linear path
+  readonly origin?: string;              // coalesce/optional: the carried input-ordinal column
 }
 
 /** A prefix step compiler: consume the step, return the next state. */
@@ -69,9 +70,12 @@ export const prevRel = (st: St, alias?: string): Relation => alias ? st.last.as(
 /** The current element's table aliased `n` (nodes/edges by elem). */
 export const elemRel = (st: St, alias = 'n'): Relation => (st.elem === 'edge' ? edges : nodes).as(alias);
 
-/** Every column carried UNCHANGED across a hop: the as() alias columns plus the
- *  path-position columns (when path tracking is active). */
-export const carriedCols = (st: St): string[] => [...aliasColsOf(st.aliases), ...pathColsOf(st.path)];
+/** Every column carried UNCHANGED across a hop: the as() alias columns, the
+ *  path-position columns (when path tracking is active), and the coalesce/optional
+ *  input-ordinal (when set) — so a branch body's results stay tagged with which
+ *  input traverser produced them. */
+export const carriedCols = (st: St): string[] =>
+  [...aliasColsOf(st.aliases), ...pathColsOf(st.path), ...(st.origin ? [st.origin] : [])];
 
 /** `, p.a0, p.p0, …` — the carried columns qualified by `p`; empty when nothing is
  *  live. Movement/filter CTEs splice this after the moved id so labelled traversers
@@ -90,15 +94,19 @@ export function carryFrag(st: St, p: Relation): Expression {
  */
 export function advance(
   st: St, body: Expression,
-  opts: { aliases?: AliasMap; elem?: Elem; cols?: readonly string[]; indexKeys?: Iterable<string>; path?: PathState } = {},
+  opts: { aliases?: AliasMap; elem?: Elem; cols?: readonly string[]; indexKeys?: Iterable<string>; path?: PathState; origin?: string | null } = {},
 ): St {
   const aliases = opts.aliases ?? st.aliases;
   const path = opts.path ?? st.path;
-  const cols = opts.cols ?? ['id', ...aliasColsOf(aliases), ...pathColsOf(path)];
+  // origin: opts.origin === null clears it (a branch step dropping the ordinal at
+  // its output); undefined keeps st's; a string sets it.
+  const origin = opts.origin === null ? undefined : (opts.origin ?? st.origin);
+  const cols = opts.cols ?? ['id', ...aliasColsOf(aliases), ...pathColsOf(path), ...(origin ? [origin] : [])];
   return {
     ...st,
     aliases,
     path,
+    origin,
     elem: opts.elem ?? st.elem,
     last: st.q.cte(body, cols),
     indexKeys: opts.indexKeys ? new Set([...st.indexKeys, ...opts.indexKeys]) : st.indexKeys,

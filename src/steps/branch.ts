@@ -29,44 +29,105 @@ function untilPredicate(untilStep: Step, params: Record<string, any>): (id: Expr
 
 // ---------- branch (union / optional / repeat) ----------
 
-/** A union() branch (a single out/in/both movement) → a SELECT of the neighbour
- *  node ids from `seed`. Non-movement / multi-step branches defer. */
-function branchMovementSelect(bs: Step[], seed: Relation): Expression {
-  if (bs.length !== 1 || (bs[0].name !== 'out' && bs[0].name !== 'in' && bs[0].name !== 'both'))
-    throw new Error(`union() branch __.${bs.map((s) => s.name + '()').join('.')} not yet supported (single out()/in()/both() only)`);
-  const mv = bs[0];
-  const e = edges.as('e');
-  const sel = dirsFor(mv.name).map(([from, to]) =>
-    q`SELECT ${e.c[to]} AS id FROM ${e} JOIN ${seed} ON ${e.c[from]}=${seed.c.id}${edgeLabelFilter(mv.args)}`);
-  return list(sel, ' UNION ALL ');
+/** Seed a coalesce/optional branch fold: tag each current traverser with a unique
+ *  ordinal `o` (ROW_NUMBER) so a branch body's results stay tied to their input row,
+ *  even across the multiset (two equal ids get distinct ordinals — the technique
+ *  sqlg uses as `sqlg_index`). Returns the base relation (id, o) and a seed St that
+ *  carries `o` through the body fold. */
+function originSeed(st: St): { base: Relation; seedSt: St } {
+  const base = st.q.cte(q`SELECT id, ROW_NUMBER() OVER () AS o FROM ${st.last}`, ['id', 'o']);
+  return { base, seedSt: { ...st, last: base, origin: 'o', aliases: new Map(), path: undefined } };
 }
 
-/** union(): UNION ALL of each element branch, seeded from the current relation.
- *  Aliased/edge/scalar/multi-hop branches defer. */
+/** Fold a branch body (element-only) from `seed` through the movement/filter
+ *  dispatch. Multi-hop bodies work (they chain CTEs off the seed). A scalar/
+ *  projection tail (a step absent from PREFIX) fails closed. Returns the finished St
+ *  — its `last` carries the seed's origin ordinal when active (so the caller can
+ *  re-associate results with their input). */
+function branchArm(name: string, nested: any, seed: St, params: Record<string, any>): St {
+  if (!nested) throw new Error(`${name}(traversal) required`);
+  const body = stepChain(nested, params);
+  const { st: end, stop } = foldBody(body, seed, 0);
+  if (stop !== body.length)
+    throw new Error(`${name}() branch __.${body.map((c) => c.name + '()').join('.')} not yet supported (scalar/projection body)`);
+  return end;
+}
+
+/** The SELECT column list a merged branch relation projects: just `id`, plus the
+ *  input-ordinal when this branch step is itself nested inside a coalesce/optional
+ *  (so the outer ordinal threads through). */
+const branchOutCols = (st: St): string => (st.origin ? `id, ${st.origin}` : 'id');
+
+/** union(): UNION ALL of each branch, each folded from the current relation through
+ *  the full dispatch (multi-hop bodies work). Same-shape branches only (all node or
+ *  all edge). Aliased/path-tracked chains defer; scalar/projection branch bodies defer. */
 export const union: StepFn = (s, st) => {
-  if (st.elem !== 'node') throw new Error('union() on edges not yet supported');
   if (st.aliases.size > 0) throw new Error('union() after as() not yet supported');
   if (st.path) throw new Error('path tracking through union() not yet supported');
   const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 2) throw new Error('union() needs at least two branches');
-  const parts = branches.map((b) => branchMovementSelect(stepChain(b.nested, st.params), prevRel(st, 'p')));
-  return advance(st, list(parts, ' UNION ALL '));
+  const seed: St = { ...st, aliases: new Map(), path: undefined };
+  const ends = branches.map((b) => branchArm('union', b.nested, seed, st.params));
+  const elem = ends[0].elem;
+  if (ends.some((e) => e.elem !== elem)) throw new Error('union() branches produce different element kinds (mixed-shape) not yet supported');
+  const cols = branchOutCols(st);
+  return advance(st, list(ends.map((e) => q`SELECT ${cols} FROM ${e.last}`), ' UNION ALL '), { elem });
 };
 
-/** optional(t) = t if it yields output, else the traverser itself. A single
- *  out()/in() → LEFT JOIN: matches emit the neighbour(s), a miss COALESCEs back
- *  to self. both()/multi-hop/aliased defer. */
+/** optional(t) = t where it yields output, else the traverser itself. Fast path: a
+ *  single out()/in() over vertices → LEFT JOIN + COALESCE-to-self (index-only, no
+ *  window). General path: optional(t) = coalesce(t, identity) via the input ordinal
+ *  — emit t's results, plus each input unchanged where t produced nothing. Same-shape
+ *  only: the self-on-miss fallback is the input element, so t must not flip the kind. */
 export const optional: StepFn = (s, st) => {
-  if (st.elem !== 'node') throw new Error('optional() on edges not yet supported');
   if (st.aliases.size > 0) throw new Error('optional() after as() not yet supported');
   if (st.path) throw new Error('path tracking through optional() not yet supported');
-  const bs = stepChain(s.args[0]?.nested, st.params);
-  if (bs.length !== 1 || (bs[0].name !== 'out' && bs[0].name !== 'in'))
-    throw new Error(`optional(__.${bs[0]?.name}()) not yet supported (single out()/in() only)`);
-  const [from, to] = dirsFor(bs[0].name)[0];
-  const e = edges.as('e');
-  const p = prevRel(st, 'p');
-  return advance(st, q`SELECT COALESCE(${e.c[to]}, ${p.c.id}) AS id FROM ${p} LEFT JOIN ${e} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(bs[0].args)}`);
+  const body = stepChain(s.args[0]?.nested, st.params);
+  if (!body.length) throw new Error('optional(traversal) required');
+  if (!st.origin && body.length === 1 && (body[0].name === 'out' || body[0].name === 'in') && st.elem === 'node') {
+    const [from, to] = dirsFor(body[0].name)[0];
+    const e = edges.as('e');
+    const p = prevRel(st, 'p');
+    return advance(st, q`SELECT COALESCE(${e.c[to]}, ${p.c.id}) AS id FROM ${p} LEFT JOIN ${e} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(body[0].args)}`);
+  }
+  if (st.origin) throw new Error('optional() inside coalesce()/optional() not yet supported');
+  const { base, seedSt } = originSeed(st);
+  const end = branchArm('optional', s.args[0].nested, seedSt, st.params);
+  if (end.elem !== st.elem)
+    throw new Error('optional() body changing element kind not yet supported (self-on-miss would be mixed-shape)');
+  const miss = q`SELECT id FROM ${base} WHERE o NOT IN (SELECT o FROM ${end.last})`;
+  return advance(st, list([q`SELECT id FROM ${end.last}`, miss], ' UNION ALL '), { elem: end.elem, origin: null });
+};
+
+/** coalesce(t1, …, tn): the first branch that yields output, per input traverser.
+ *  Tag each input with a unique ordinal (originSeed), fold every branch carrying it,
+ *  then emit branch k only for inputs no earlier branch produced a row for. Same-shape
+ *  branches only; aliased/path/scalar-body/nested-in-origin cases defer. */
+export const coalesce: StepFn = (s, st) => {
+  if (st.aliases.size > 0) throw new Error('coalesce() after as() not yet supported');
+  if (st.path) throw new Error('path tracking through coalesce() not yet supported');
+  if (st.origin) throw new Error('coalesce() inside coalesce()/optional() not yet supported');
+  const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  if (branches.length < 1) throw new Error('coalesce() needs at least one branch');
+  const { seedSt } = originSeed(st);
+  const ends = branches.map((b) => branchArm('coalesce', b.nested, seedSt, st.params));
+  const elem = ends[0].elem;
+  if (ends.some((e) => e.elem !== elem)) throw new Error('coalesce() branches produce different element kinds (mixed-shape) not yet supported');
+  const parts = ends.map((end, k) => {
+    if (k === 0) return q`SELECT id FROM ${end.last}`;
+    const notPrior = list(ends.slice(0, k).map((pr) => q`o NOT IN (SELECT o FROM ${pr.last})`), ' AND ');
+    return q`SELECT id FROM ${end.last} WHERE ${notPrior}`;
+  });
+  return advance(st, list(parts, ' UNION ALL '), { elem, origin: null });
+};
+
+/** flatMap(t): apply t per traverser, flatten all results — for element bodies this
+ *  is just inlining the body (a fan-out through the dispatch). map()'s first-result-
+ *  only semantics differ (needs a per-input row-number) and stay deferred. */
+export const flatMap: StepFn = (s, st) => {
+  if (st.aliases.size > 0) throw new Error('flatMap() after as() not yet supported');
+  if (st.path) throw new Error('path tracking through flatMap() not yet supported');
+  return branchArm('flatMap', s.args[0]?.nested, st, st.params);
 };
 
 /** repeat(): the folded repeat/emit/times/until cluster (strategies.foldRepeat) →
