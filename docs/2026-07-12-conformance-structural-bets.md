@@ -128,11 +128,51 @@ uniformly one type (no precision change needed, verified). **Deferred: bare `asN
 numeric literal's declared subtype (grammar context + suffix) in a parallel
 `Step.argTypes` array — `args` stays plain numbers, so no consumer ripple (has/limit/V/
 property/binds untouched); only bare asNumber() reads `argTypes` to recover the input
-subtype (`asNumberBare`, uniform-subtype required). **NEXT:** (a) **`math`** (194) —
-carrier + a small formula parser + promotion rules (the big one); (b) `asDate` (datetime
-rep); (c) the deferred tail: asNumber+reducer (fold/sum — needs the subtype tag threaded
-through `wrapReducer`), bigdecimal (no client serializer), the JS-GLV upstream give-back
-(TINKERPOP-3044/3043 — client-side, tangential to our server).
+subtype (`asNumberBare`, uniform-subtype required).
+
+#### `math()` — SCOPED + DE-RISKED (2026-07-13, next up)
+Explored before building. **Size corrected: ~22 scenarios that actually call `.math()`**
+(Math.feature=11 + scattered in data/asNumber/Select; PageRank=3 is OLAP-excluded), **NOT
+194** — that earlier number wrongly counted whole files × all their scenarios. Realistic
+reachable **~10–15** (some gated on `by()`/`select` var-threading or `asDate`). Real-world
+**MEDIUM** (computed/derived values, scoring; not core to point/k-hop OLTP).
+
+**Fully SQL-mappable — the appeal.** `math('<formula>')` is a scalar expression: `_` =
+current value, named vars (`a`,`b`) = `as()`/`by()` values. Maps straight onto SQLite
+arithmetic + math functions (no per-row JS — honours locked #3). `math('ceil(_ * 100)')`
+→ `CEIL(v * 100.0)`.
+- **DO math functions VERIFIED present** (2026-07-13, probed real workerd SQLite 3.47 via
+  `wrangler dev`): `ceil/floor/abs/sqrt/sin/cos/pow/exp/ln` all work; `round`, `%`, `/`
+  too. This was the only real risk — cleared. (Bun 3.53 also has them.)
+- **Three semantic fixups** (found while probing): SQLite `/` is INTEGER division
+  (`7/2=3`) but TinkerPop math is floating → coerce operands to REAL (`7.0/2`); SQLite
+  `log()` is log10 → TinkerPop `log` is natural → map to `ln()`; no `^` operator → `pow()`.
+- **Sqlg has NO math support** (does traversal-joins, punts on scalar expr) — we'd lead,
+  as with coalesce/map.
+
+**Effort MEDIUM — the work is a small formula parser**, not the SQL. Tokenize +
+precedence for `_ * 2` / `a + b` / `ceil(_ * 100)` / `sin _` (function-by-juxtaposition!)
+/ `0-_` / `_+_` → a SQL expression with variable substitution; wire variable resolution
+into the existing `by()`/`select` column threading (P2a). Tested operator surface is tiny
+(`+ - * /`, funcs `ceil`,`sin`) — implement TinkerPop's full function set (~19 trig/log/
+rounding, all in SQLite) for robustness. Lands on the value-tail carrier; `math` is a
+scalar transform like `asNumber`, tagged (result of a float expr is Double). **Follow-up:
+a small CF contract test** (one math query through `wrangler dev`) once it lands, to lock
+Bun/DO parity permanently (cheaper than full L3-on-CF; see below).
+
+**NEXT after math:** `asDate` (datetime rep — SQLite has strong date fns); the deferred
+tail: asNumber+reducer (fold/sum — thread the subtype tag through `wrapReducer`),
+bigdecimal (no client serializer), the JS-GLV upstream give-back (TINKERPOP-3044/3043 —
+client-side, our server unaffected).
+
+**Aside — running L3 against deployed CF (workerd), feasible, medium effort:** the L3 host
+(`conformance-server.ts`) is a Bun server fronting named graphs by the request `g` field;
+to run the full suite on workerd needs (1) a ~10-line conformance-only worker entry that
+routes by `g` to named DOs (dev-only shim), (2) per-DO seeding of `gmodern`, (3) pointing
+the GLV runner (hardcoded `:45940`) at `wrangler dev`. Value: exercises the REAL DO SQLite
+against all scenarios (catches Bun/DO divergences — bind types, fn availability). Cost:
+slow (wrangler boot + cucumber) → a periodic high-fidelity gate, not every-CI. For
+de-risking ONE runtime-specific feature, a targeted probe (as done for math) beats it.
 
 ### 5. `match()`  (~35)
 **Real-world: MEDIUM-LOW.** Powerful declarative pattern matching, but many users
