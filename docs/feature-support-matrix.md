@@ -4,7 +4,7 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-13 · **live L3 conformance:** 618 · **corpus parse+chain:**
+**Last synced:** 2026-07-13 · **live L3 conformance:** 634 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
 
@@ -82,7 +82,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `group`, `groupCount` | 🟡 | ✅ scalar reducers → SQL `GROUP BY`<br>✅ element values → ordered-stream + handler fold<br>❌ >2 `by()` modulators<br>❌ `by(T.x)` key<br>❌ deep nested-`by()` chains |
 | `fold()` | ✅ | ✅ terminal reducer **and** a real JSONB list value when followed (§9) |
 | `sum`, `min`, `max`, `mean` | ✅ | ✅ Long/Double framing<br>✅ also as `Scope.local` list reducers (§9) |
-| `group('a')` (side-effecting) | ❌ | side-effect state — see §12 |
+| `group('a')`/`groupCount('a')` (side-effecting) | 🟡 | pass-through barrier: stashes the group-spec, `cap('a')` re-emits it (§12). ❌ after `as()`/`path()`, `cap('a')` then more steps |
 
 ## 5. Per-traverser branching
 
@@ -162,19 +162,24 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `drop()` (vertices + edges) | 🟡 | ✅ vertex `drop()`<br>❌ edge `drop()`<br>❌ `drop()` after some steps |
 | `property(Cardinality.list/set, …)` (multi-property) | ❌ | **W4** schema rework |
 
-## 12. Side-effect state — ❌ the next big structural bet
+## 12. Side-effect state (🟡 — the registry + carried-column substrate landed)
+
+Design + decision log: `docs/2026-07-13-side-effect-state-plan.md`. Two mechanisms, one
+home (`Carry`): a **named side-effect registry** (aggregate/cap/group('a')) and a
+**carried per-traverser column** (sack) — both stay one SQL statement (no interpreter).
 
 | Step | Status | Notes |
 |---|:--:|---|
-| `aggregate('x')` / `store('x')` | ❌ | named collection that outlives the current id-relation — **a new execution notion** (~57 + 21 scenarios) |
-| `cap('x')` | ❌ | emit a named side-effect (composes with §9: `cap` → a list → `unfold`) |
-| `sack()` / `withSack(…)` | ❌ | per-traverser mutable scalar + merge fn (~29 scenarios); a carried column, not a named relation |
-| `group('a')` (side-effecting) | ❌ | small extension of `group` once the substrate exists |
+| `aggregate('x')` | 🟡 | ✅ pass-through barrier → a JSONB-list side-effect CTE; `aggregate('x').by(key)` scalar bag (by-miss drops)<br>❌ on a scalar stream (`values(k).aggregate(x)`), `by(<nested/token>)`, `local(aggregate(...))` |
+| `store('x')` | 🚫 | dropped in TinkerPop 4 (no grammar rule); `aggregate(Scope.local)` replaces it |
+| `cap('x')` | 🟡 | ✅ a list side-effect UNROLLS to individual results (no BulkSet wire type); a group side-effect re-emits one Map<br>❌ multi-key `cap('x','y')`, `cap('x')` then more steps (except a list-cap's tail) |
+| `sack()` / `withSack(…)` | 🟡 | ✅ carried column: `sack(Operator.x).by(key/T.label/nested)` mutate, bare `sack()` read, `withSack(init)` seed, trailing reducer<br>❌ inject-const numeric promotion (NumberHelper byte→short bump), `repeat()`/`barrier`/`local`, split/merge-on-fork, `sack(BiFunction)` |
+| `group('a')` / `groupCount('a')` (side-effecting) | 🟡 | ✅ pass-through barrier → stashed group-spec, `cap('a')` re-runs `compileGroup`<br>❌ nested value-`by()` with movement+order, `by(__.select…)`, after `as()`/`path()` (inherits `compileGroup`'s §4 limits) |
+| `within('x')` / `without('x')` readback | ❌ | mid-chain read of a side-effect (the aggregate-dedup idiom) — where eager/lazy diverge; fails closed |
 
-These are the **largest coherent block still deferred** (~110 scenarios direct, plus it
-gates `ProductiveByStrategy` ~29 and ~25 deferred `cap().unfold()` scenarios). See the
-standalone analysis for the SQL-native design (named side-effect CTEs threaded through
-`Carry`, materialized at barriers, read at `cap`/`within`/`without`/`select`).
+Landed L3 618→634 (sack +4, aggregate/cap +8, group('a')/cap +4). Still gates
+`ProductiveByStrategy` (needs `local()` too) and the `group('a')…cap('a').select(Column.values).unfold()`
+cluster (needs `select(Column.values)`, §9).
 
 ## 13. Traversal strategies
 
@@ -185,7 +190,7 @@ standalone analysis for the SQL-native design (named side-effect CTEs threaded t
 | **SubgraphStrategy** (vertex criterion) | 🟡 | ✅ `where`/`has` injection pass<br>❌ edge/vertexProperty criteria<br>❌ adjacency (`out()` expansion) |
 | **PartitionStrategy** (read-filter + write-stamp) | 🟡 | ✅ `has(within)` + property stamp<br>❌ `includeMetaProperties`<br>❌ partition-aware merge |
 | ReadOnly / EdgeLabel / ReservedKeys **verification** | ✅ | ✅ throw TinkerPop's canonical messages |
-| ProductiveByStrategy | ❌ | gated on `aggregate`/`cap` (§12) |
+| ProductiveByStrategy | ❌ | `aggregate`/`cap` now exist (§12), but its scenarios also need `local()` |
 | `with(…)` (OptionsStrategy sugar) | ❌ | `step not implemented: with()` |
 | OLAP / GraphComputer / Seed / Event strategies | 🚫 | out of scope |
 
@@ -214,14 +219,17 @@ standalone analysis for the SQL-native design (named side-effect CTEs threaded t
 
 Cheapest wins are long done. What's left, by structural weight:
 
-1. **Side-effect state** (§12) — the one genuinely-new execution concept left, highest
-   downstream unlock (~110 direct + gates ProductiveBy + cap-unfold). **The next big bet.**
+1. ~~**Side-effect state** (§12)~~ — **substrate LANDED** (618→634): the registry
+   (aggregate/cap/group('a')) + carried column (sack). Remaining tails: `within/without`
+   readback, sack numeric-promotion, the `group('a')…select(Column.values)` cluster.
 2. **Multi/meta-properties (W4)** (§11, §14) — the committed target-profile schema rework;
    biggest storage blast radius, best done before more read features assume flat props.
-3. **`local`** (§5) — per-element scope; the hardest remaining branching piece.
+3. **`local`** (§5) — per-element scope; the hardest remaining branching piece (also
+   unblocks `local(aggregate(...))` + ProductiveByStrategy).
 4. **Chained projections** (§3) — element→scalar→scalar re-type; partly dissolved by the
    list substrate, still open for this shape (~40).
 5. **Collection-algebra tail** (§9) — set-ops / Map-unfold / `select(Column.values)` /
-   rest of Scope.local; small adds on the list substrate.
+   rest of Scope.local; small adds on the list substrate (also unblocks the group('a')
+   select(Column.values) cap cluster).
 
 Full analysis: `docs/2026-07-12-conformance-structural-bets.md` (the "remaining frontier").
