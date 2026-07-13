@@ -1,13 +1,15 @@
 import { q, value, list, empty, Relation, Query, type Expression } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
 import {
-  propExtract, propAt, predicateSql, compileNestedScalar, labelNameSub, rangeToOffsetLimit, elemCtx, aliasCtx, scalarTx, extIdOf,
+  propExtract, propAt, predicateSql, compileNestedScalar, labelNameSub, rangeToOffsetLimit, elemCtx, aliasCtx, scalarTx, extIdOf, jsonbGroupArray,
   type ScalarCtx,
 } from '../plan.ts';
 import { mathToSql, mathVars } from '../math.ts';
 import { stepChain, parseIsoMs, flattenListArgs, type Step } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { elemRel, type AliasMap, type St } from './context.ts';
+import { carryOf, toListStream, type ListStream, type ScalarStream } from './stream.ts';
+import { dispatchNext } from './index.ts';
 import {
   readCompiled, type Compiled, type Shape, type ValueType, type MapEntry, type ElemShape, type GroupKey, type GroupVal, type PathPos,
 } from '../render.ts';
@@ -101,10 +103,18 @@ function reducerMod(name: NonNullable<TailAcc['reducer']>): ModFn {
  *  scalar transforms, inject-appends, and the value-shape modifiers (MODIFIERS).
  *  Shared by compileTail (element-rooted) and compileInject (scalar-stream-rooted)
  *  so both consume one modifier vocabulary — add a value-tail step once, here. */
-export function foldTailAcc(steps: PStep[], from: number): TailAcc {
+export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop: number } {
   const acc: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, reducer: null, isPreds: [], transforms: [], injects: [] };
-  for (let i = from; i < steps.length; i++) {
+  let i = from;
+  for (; i < steps.length; i++) {
     const s = steps[i];
+    // Retype boundaries — the tail cannot fold past these; the caller builds the next
+    // Stream (stream.ts) and re-enters via dispatchNext (index.ts):
+    //  · unfold — a list value → its element/scalar stream.
+    //  · a NON-terminal fold — the stream → one list value (set-ops sit here later).
+    //    A TERMINAL fold (last step) stays the current reducer below, byte-identical.
+    if (s.name === 'unfold') break;
+    if (s.name === 'fold' && i !== steps.length - 1) break;
     if (PROJECTION_NAMES.has(s.name)) {
       if (acc.projStep) throw new Error('only one projection step is supported per traversal');
       acc.projStep = s;
@@ -118,7 +128,7 @@ export function foldTailAcc(steps: PStep[], from: number): TailAcc {
     if (!mod) throw new Error(`step not implemented: ${s.name}()`);
     mod(s, acc, { last: i === steps.length - 1, next: steps[i + 1]?.name });
   }
-  return acc;
+  return { acc, stop: i };
 }
 
 /** Compile the tail: `st` is the finished prefix state, `steps[stop]` the first
@@ -154,16 +164,92 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
     return compileGroup(st, steps[stop].name === 'groupCount', steps[stop].bys ?? [], src, indexKeys);
   }
 
-  // Tail fold: accumulate the projection + modifiers.
-  const acc = foldTailAcc(steps, stop);
+  // Tail fold: accumulate the projection + modifiers, stopping at a retype boundary
+  // (unfold / a non-terminal fold).
+  const { acc, stop: at } = foldTailAcc(steps, stop);
 
-  if (acc.projStep?.name === 'path')
-    return compilePath(st, acc.projStep, acc, indexKeys);
+  // Consumed the whole chain → render terminally, exactly as before.
+  if (at === steps.length) {
+    if (acc.projStep?.name === 'path')
+      return compilePath(st, acc.projStep, acc, indexKeys);
+    if (isMapProj(acc.projStep))
+      return compileSelectProject(st, acc.projStep!, acc, indexKeys);
+    return buildProjection(st, acc, indexKeys);
+  }
 
-  if (isMapProj(acc.projStep))
-    return compileSelectProject(st, acc.projStep!, acc, indexKeys);
+  // Stopped at a retype boundary: steps[at] is `unfold` or a non-terminal `fold`.
+  const boundary = steps[at].name;
+  if (boundary === 'unfold') {
+    // unfold() on an ELEMENT stream is identity (a vertex/edge is not a collection)
+    // — continue from after it. Only the bare form (no projection/modifier consumed
+    // first) is identity-safe; values().unfold() etc. defer.
+    if (acc.projStep || acc.orders.length || acc.reducer || acc.isPreds.length || acc.transforms.length || acc.injects.length || acc.distinct || acc.offset || acc.limit !== null)
+      throw new Error('unfold() after a projection/modifier on an element stream not yet supported');
+    return dispatchNext(st, steps, at + 1);
+  }
+  // A non-terminal fold → a single list value; continue from the ListStream.
+  return dispatchNext(compileFold(st, acc, indexKeys), steps, at + 1);
+}
 
-  return buildProjection(st, acc, indexKeys);
+/**
+ * A non-terminal fold(): collapse the element stream into ONE list value — a JSONB
+ * array in a one-row relation (the list-value substrate; see stream.ts). An element
+ * stream folds its bare rowids (rejoined on unfold/framing); a values/id/label
+ * projection folds its scalar. Bare form only: an inner order()/dedup()/limit()/is()/
+ * transform before the fold, a non-scalar projection (valueMap/select/path), or
+ * aliases/path/origin riding through the retype all defer (clear throws). A TERMINAL
+ * fold never reaches here — it stays the reducer path (byte-identical). The wasteful
+ * roundtrip in fold().unfold() (materialize then json_each) is deliberate — correct
+ * beats a peephole nobody's query needs (see the plan's decision log).
+ */
+function compileFold(st: St, acc: TailAcc, indexKeys: Set<string>): ListStream {
+  if (acc.orders.length || acc.reducer || acc.isPreds.length || acc.transforms.length || acc.injects.length || acc.distinct || acc.offset || acc.limit !== null)
+    throw new Error('order()/dedup()/limit()/range()/is()/transform before a non-terminal fold() not yet supported');
+  if (st.aliases.size || st.path || st.origin)
+    throw new Error('fold() carrying as()/path()/branch state into a list value not yet supported');
+  const carry = carryOf(st);
+  const projName = acc.projStep?.name;
+  if (!projName) {
+    // Element list: fold the bare rowids; unfold/framing rejoins nodes/edges.
+    const rel = st.q.cte(q`SELECT ${jsonbGroupArray(q`p.id`)} AS list FROM ${st.last.as('p')}`, ['list']);
+    return toListStream(carry, rel, { kind: 'elem', elem: st.elem });
+  }
+  if (projName === 'values' || projName === 'id' || projName === 'label') {
+    const n = elemRel(st);
+    const p = st.last.as('p');
+    const l = labels.as('l');
+    const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
+    const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
+    const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
+    const proj = PROJECTORS.get(projName)!({ st, n, l, extId, vJoin, vlJoin, projStep: acc.projStep, indexKeys, hasIs: false });
+    // values() drops missing-property elements (baseWhere = IS NOT NULL), matching
+    // TinkerPop's fold-of-values. id/label have no baseWhere.
+    const where = proj.baseWhere ? q` WHERE ${proj.baseWhere}` : empty;
+    const rel = st.q.cte(q`SELECT ${jsonbGroupArray(proj.scalarExpr!)} AS list FROM ${proj.fromNode}${where}`, ['list']);
+    return toListStream(carry, rel, { kind: 'scalar' });
+  }
+  throw new Error(`fold() of a ${projName}() projection not yet supported`);
+}
+
+/**
+ * The scalar-stream tail: a one-column `v` relation → foldTailAcc + the shared value
+ * tail (renderProjection). Entered from unfold() of a scalar list (dispatchNext); the
+ * same engine compileInject's tail runs, factored out so both consume one modifier
+ * vocabulary. count() is the only projection valid on a scalar stream.
+ */
+export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number): Compiled {
+  const { acc, stop } = foldTailAcc(steps, from);
+  if (stop !== steps.length) throw new Error(`${steps[stop].name}() after a scalar stream not yet supported`);
+  if (acc.projStep) {
+    if (acc.projStep.name !== 'count') throw new Error(`${acc.projStep.name}() requires element input (a scalar stream has no ${acc.projStep.name})`);
+    const dist = acc.distinct ? 'DISTINCT ' : '';
+    const whereNode = acc.isPreds.length ? q` WHERE ${list(acc.isPreds.map((p) => predicateSql(q`v`, p)), ' AND ')}` : empty;
+    const limitNode = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
+    return readCompiled(s.q, q`SELECT COUNT(*) AS v FROM (SELECT ${dist}v FROM ${s.rel}${whereNode}${limitNode})`, { kind: 'count' });
+  }
+  const proj: ProjResult = { shape: { kind: 'value', as: s.as }, colsNode: q`v AS v`, fromNode: s.rel, scalarExpr: q`v`, baseWhere: null };
+  const orderKey = (): Expression => { throw new Error('order().by(key) on a scalar stream not supported (no properties)'); };
+  return renderProjection(s.q, proj, acc, new Set(), orderKey);
 }
 
 interface TailMods { orders: OrderClause[]; distinct: boolean; offset: number; limit: number | null; }
@@ -499,7 +585,10 @@ const asDateSql = (e: Expression): Expression =>
 
 export function compileInject(steps: PStep[]): Compiled {
   const Q = new Query();
-  const acc = foldTailAcc(steps, 1);
+  const { acc, stop } = foldTailAcc(steps, 1);
+  // A retype boundary after inject (inject([..]).unfold(), a non-terminal fold) needs
+  // the inject-as-list-value substrate — deferred (inject still flattens for now).
+  if (stop !== steps.length) throw new Error(`${steps[stop].name}() after inject() not yet supported`);
   // Fold every inject() value (the source args + any later inject appends) into one
   // VALUES-backed `v` seed, so the tail's dedup/order/limit/reducer act on the full
   // stream — matching the pre-unification inline-UNION semantics.
@@ -882,7 +971,8 @@ function compileMath(st: St, steps: PStep[], stop: number, indexKeys: Set<string
   const mathExpr = mathToSql(formula, resolveVar);
 
   // math() always yields a Double; route through the shared value tail.
-  const acc = foldTailAcc(steps, stop + 1);
+  const { acc, stop: mstop } = foldTailAcc(steps, stop + 1);
+  if (mstop !== steps.length) throw new Error(`${steps[mstop].name}() after math() not yet supported`);
   const n = elemRel(st);
   const proj: ProjResult = {
     shape: { kind: 'value', as: 'double' }, colsNode: q`${mathExpr} AS v`,
