@@ -17,19 +17,25 @@ A TinkerPop 4 Gremlin server on SQLite, targeting Cloudflare Durable Objects.
 > **Where we are today:**
 > - **Understands the whole language:** 2,298 / 2,298 canonical Gremlin traversals
 >   from the official Gherkin corpus parse + chain-extract (100%).
-> - **Executes correctly:** **455** official TinkerPop Gherkin scenarios pass
+> - **Executes correctly:** **582** official TinkerPop Gherkin scenarios pass
 >   against a live server through the *unmodified* `gremlin@4.0.0-beta.2` client
 >   (of a ~2,041-scenario suite that no provider passes 100% of — we target a
 >   declared feature subset: no lambdas, no OLAP, no multi-request transactions).
 >   This runs under `bun test` as a **ratchet** (see below); the number only goes up.
 > - **Reads:** compiler is largely complete (movement, filters, projections,
 >   aggregation, `where`/`and`/`or`/`union`/`optional`, `repeat`/`times`/`emit`,
->   `path`/`simplePath`/`cyclicPath`, `repeat().path()`, `repeat().until()`).
+>   `path`/`simplePath`/`cyclicPath`, `repeat().path()`, `repeat().until()`, the
+>   per-traverser branching family (`choose`/`coalesce`/`flatMap`/`map`), `match`,
+>   and numeric type casts (`asBool`/`asNumber`)).
 > - **Writes:** the graph is now **writable** — `addV`/`addE`, user-supplied ids,
 >   `mergeV`/`mergeE` upsert, and `property()` update all land.
+> - **Traversal strategies:** `withStrategies`/`withoutStrategies` — `SubgraphStrategy`
+>   (filtered views) and `PartitionStrategy` (in-graph sub-partitioning: read-filter +
+>   write-stamp) apply as filter injection; `ReadOnly`/`EdgeLabel`/`ReservedKeys`
+>   verification enforced; optimization strategies accepted as no-ops.
 > - **Not yet:** Cloudflare deploy + Worker auth (**the immediate next milestone**),
 >   multi/meta properties (breaking schema rework), the rest of the conformance grind
->   (`match`, `coalesce`, `local`, `choose`, …).
+>   (`local`, `aggregate`/`cap`, `sack`, …).
 >
 > See [docs/2026-07-11-phased-roadmap-plan.md](docs/2026-07-11-phased-roadmap-plan.md) for the phased roadmap and the writes-first sequence.
 
