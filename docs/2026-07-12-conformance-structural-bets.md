@@ -40,14 +40,20 @@ seed of #1 in `compileNestedScalar` (correlated *scalar* subqueries for `by()`/
 ## The bets, ranked by (real-world value × unlock)
 
 ### 1. Path tracking — `path` / `simplePath` / `cyclicPath` / `tree`  (~48)
+**✅ MOSTLY DONE (2026-07-12/13).** `path`/`simplePath`/`cyclicPath` + `path().by()`,
+recursive `repeat().path()`, `simplePath()` in a repeat body, and `repeat().until()`
+all landed. `tree()` intentionally skipped (0 L3 — the JS GLV stubs `DataType.TREE`).
+Still open: `path().by()` on the recursive walk, `from`/`to` subpath, labels-on-path.
+**The approach below was the original sketch and was OVERTURNED** — see the
+prior-art scan note at the end of this bet for what actually shipped.
 **Real-world: VERY HIGH.** "How is A connected to B", provenance, "show the route"
 — this is a *primary* reason people reach for a graph DB at all, and it's a glaring
 hole. `simplePath`/`cyclicPath` also make `repeat()` genuinely useful (cycle
 avoidance in unbounded walks).
-**Structural: self-contained, medium-large.** Thread a JSON path-array column
-through the movement/filter fold — every `advance()` appends the current id; `path()`
-frames the array, `path().by(k)` projects each element, `simplePath` adds a
-`NOT array-contains` guard in the recursive walk. Doesn't touch the other areas.
+**Structural: self-contained, medium-large.** *(Original sketch, superseded:)* Thread a
+JSON path-array column through the movement/filter fold — every `advance()` appends the
+current id; `path()` frames the array, `path().by(k)` projects each element, `simplePath`
+adds a `NOT array-contains` guard in the recursive walk. Doesn't touch the other areas.
 **Why first:** highest user value, cleanest boundary, and it upgrades the `repeat`
 work already done. Best ratio of the lot.
 **Prior-art scan (2026-07-12): `2026-07-12-path-tracking-prior-art.md`.** Sqlg
@@ -121,8 +127,9 @@ supported. Lowest priority.
 
 ## Recommended sequence
 
-1. **Path** (#1) — highest value, clean, self-contained, upgrades `repeat`.
-2. **Per-traverser sub-traversal engine** (#2) — the big substrate; unlocks
+1. ~~**Path** (#1)~~ — **DONE (2026-07-12/13)**, see bet #1 above.
+2. **Per-traverser sub-traversal engine** (#2) — **the current top pick.** The big
+   substrate; unlocks
    `choose`/`local`/`map` and feeds `match` + `where` + `repeat` bodies.
 3. **Side-effect state** (#3) — `aggregate`/`cap`/`sack`.
 4. Then opportunistically: **types** (#4), **match** (#5, rides on #2), and

@@ -219,7 +219,11 @@ locked decision). `makeHandler` now takes a `StoreSource` (a store *or* a
 `(g)=>store` resolver). See `test/conformance/README-cucumber.md` to run the full
 suite manually.
 
-## Immediate next work (P2b in docs/2026-07-11-phased-roadmap-plan.md)
+## P2/P3 read-compiler progress log (all landed; historical narrative)
+
+> This section is a *record* of how the read compiler was built, not a to-do list.
+> The **actual immediate next work is W3 — Cloudflare deploy + Worker auth** (see
+> docs/2026-07-11-phased-roadmap-plan.md). Live L3 is 455 (path family + until done).
 
 DONE: P2a (as/select/project/by column-threading), P2c-1 (edge traversal — the
 typed node/edge `Elem` id-relation, edge shape, `edgeBuffer`), P2c-1b (property
@@ -325,10 +329,13 @@ general `addE`, all landed. Shape:
 Cucumber tag set widened with `@StepAddV/@StepAddE/@StepMergeV/@StepMergeE` (NOT
 `@StepWrite`, which is the unrelated `io().write()` serialization feature).
 
-Read-step backlog (continues under W5): `repeat().until()`/`emit(pred)`,
-`path`/`simplePath`, `coalesce`, `aggregate`/`cap`, `match`, `local`, `choose`,
-`sack`; multi-hop/scalar `union`, `both()`/multi-hop `optional`, multi-hop
-`where`, `where(P.eq(__.constant()))`.
+Read-step backlog (continues under W5). DONE 2026-07-12/13: the **path family** —
+`path`/`simplePath`/`cyclicPath` + `path().by()`, `repeat().path()` (JSONB array
+walk), `repeat().until()` (do-while/while-do, `loops().is(n)`). Still open:
+`emit(pred)`, compound `until(…and/or().loops())`, `path().by()` on the recursive
+walk, `coalesce`, `aggregate`/`cap`, `match`, `local`, `choose`, `sack`; multi-hop/
+scalar `union`, `both()`/multi-hop `optional`, multi-hop `where`,
+`where(P.eq(__.constant()))`. `tree()` deliberately skipped (0 L3: JS GLV stubs it).
 
 ## Environment notes
 

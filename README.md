@@ -17,18 +17,19 @@ A TinkerPop 4 Gremlin server on SQLite, targeting Cloudflare Durable Objects.
 > **Where we are today:**
 > - **Understands the whole language:** 2,298 / 2,298 canonical Gremlin traversals
 >   from the official Gherkin corpus parse + chain-extract (100%).
-> - **Executes correctly:** **445** official TinkerPop Gherkin scenarios pass
+> - **Executes correctly:** **455** official TinkerPop Gherkin scenarios pass
 >   against a live server through the *unmodified* `gremlin@4.0.0-beta.2` client
 >   (of a ~2,041-scenario suite that no provider passes 100% of — we target a
 >   declared feature subset: no lambdas, no OLAP, no multi-request transactions).
 >   This runs under `bun test` as a **ratchet** (see below); the number only goes up.
 > - **Reads:** compiler is largely complete (movement, filters, projections,
->   aggregation, `where`/`and`/`or`/`union`/`optional`, `repeat`/`times`/`emit`).
+>   aggregation, `where`/`and`/`or`/`union`/`optional`, `repeat`/`times`/`emit`,
+>   `path`/`simplePath`/`cyclicPath`, `repeat().path()`, `repeat().until()`).
 > - **Writes:** the graph is now **writable** — `addV`/`addE`, user-supplied ids,
 >   `mergeV`/`mergeE` upsert, and `property()` update all land.
 > - **Not yet:** Cloudflare deploy + Worker auth (**the immediate next milestone**),
->   multi/meta properties (breaking schema rework), the conformance grind
->   (`match`, `path`, `coalesce`, …).
+>   multi/meta properties (breaking schema rework), the rest of the conformance grind
+>   (`match`, `coalesce`, `local`, `choose`, …).
 >
 > See [docs/2026-07-11-phased-roadmap-plan.md](docs/2026-07-11-phased-roadmap-plan.md) for the phased roadmap and the writes-first sequence.
 
@@ -84,7 +85,8 @@ maturity**. The managed services are *equals* on infrastructure ops, not worse.
   - structure: as/select/project/by (column threading), order().by
   - aggregation: group/groupCount/fold/sum + nested by()
   - filter/branch: where/not/is, and/or, union, optional
-  - recursion: repeat(__.…).times(n) [+ emit] via recursive CTE (depth-guarded)
+  - recursion: repeat(__.…).times(n) [+ emit] / .until(pred) via recursive CTE (depth-guarded)
+  - paths: path/simplePath/cyclicPath + path().by(), repeat().path() (JSONB-array walk), repeat(simplePath) cycle-free walks
 - Vertex/edge property materialization (custom GraphBinary framing — client serializer ships empty props)
 - Errors propagate as GraphBinary status trailers (client raises ResponseError with server message)
 
@@ -151,8 +153,10 @@ it, never rewrites, so there is no re-trigger loop. Widen the step scope in
 - **Multi/meta properties (W4):** props are still a flat JSON object; reworking to
   support multi-/meta-properties touches storage + valueMap/values/has/properties
   (breaking, biggest blast radius — deliberately after a deployed baseline).
-- **Conformance grind (W5):** `aggregate`/`cap`, `path`/`simplePath`, `match`,
-  `local`, `choose`, `coalesce`, `sack`; seed the other reference graphs.
+- **Conformance grind (W5):** the path family (`path`/`simplePath`/`cyclicPath`,
+  `repeat().path()`, `repeat().until()`) has landed; still open — `aggregate`/`cap`,
+  `match`, `local`, `choose`, `coalesce`, `sack`, `emit(pred)`; seed the other
+  reference graphs.
 - **Not planned (declared out of scope):** lambdas, OLAP/GraphComputer,
   multi-request transactions.
 
