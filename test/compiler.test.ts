@@ -198,6 +198,46 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.inject(5b,5l).asNumber()', {})).toThrow('mixed numeric subtypes');
   });
 
+  test('math("<formula>") compiles to one Double scalar; leaves coerced to REAL', () => {
+    // `_` resolves through the by() modulator; result always tagged Double.
+    const p = read('g.V().math("_+_").by("age")');
+    expect(p.shape).toEqual({ kind: 'value', as: 'double' });
+    expect(p.sql).toContain("(CAST(json_extract(n.props, '$.age') AS REAL) + CAST(json_extract(n.props, '$.age') AS REAL)) AS v");
+    // a missing by() value makes the arithmetic NULL → the traverser is filtered
+    expect(p.sql).toContain('is not null');
+    // `0-_` (subtraction-based negation) on an edge property
+    expect(read('g.V().outE().math("0-_").by("weight")').sql).toContain("(0.0 - CAST(json_extract(n.props, '$.weight') AS REAL))");
+    // integer literals emit REAL form so `/` is real division, not SQLite integer div
+    expect(read('g.V().math("_ / 2").by("age")').sql).toContain('/ 2.0)');
+    // `^` → POW, `%` → MOD (SQLite `%` truncates operands to int)
+    expect(read('g.V().math("_ ^ 2").by("age")').sql).toContain('POW(');
+    expect(read('g.V().math("_ % 10").by("age")').sql).toContain('MOD(');
+    // functions: parenthesised call and juxtaposition; exp4j `log` → natural log (LN)
+    expect(read('g.V().math("ceil(_ * 100)").by("age")').sql).toContain('CEIL((');
+    expect(read('g.V().math("sin _").by("age")').sql).toContain('SIN(');
+    expect(read('g.V().math("log _").by("age")').sql).toContain('LN(');
+    // cbrt splits on sign (POW domain-errors on a negative base + fractional exponent)
+    expect(read('g.V().math("cbrt(_)").by("age")').sql).toContain('CASE WHEN');
+  });
+
+  test('math() variables: `_` = current, an identifier = an as()-bound alias', () => {
+    // named aliases resolve via the carried rowid column (correlated subquery); one
+    // by() feeds every variable (round-robin), N by()s feed N variables positionally.
+    const shared = read('g.V().as("a").out("knows").as("b").math("a + b").by("age")');
+    expect(shared.sql).toContain("json_extract((SELECT props FROM nodes WHERE id=p.a0), '$.age')");
+    expect(shared.sql).toContain("json_extract((SELECT props FROM nodes WHERE id=p.a1), '$.age')");
+    // per-variable by(): first-seen order (`b` before `a`), nested traversal + key
+    const perVar = read('g.V().as("a").out("created").as("b").math("b + a").by(__.in("created").count()).by("age")');
+    expect(perVar.sql).toContain('COUNT(*)');                 // b ← by(__.in("created").count())
+    expect(perVar.sql).toContain("id=p.a0), '$.age'");        // a ← by("age")
+    // math() composes with a trailing typed cast (result narrows to the cast's subtype)
+    expect(read('g.V().as("a").out("knows").as("b").math("a + b").by("age").asNumber(GType.INT)').shape)
+      .toEqual({ kind: 'value', as: 'int' });
+    // defers: a variable with no by(), and an unbound identifier
+    expect(() => compile('g.V().math("_+_")', {})).toThrow('needs a by() modulator');
+    expect(() => compile('g.V().math("a + b").by("age")', {})).toThrow('no such variable "a"');
+  });
+
   test('group().by(__.bothE().values(k).<reducer>()) is a correlated neighbourhood aggregate', () => {
     const p = read("g.V().hasLabel('software').group().by('name').by(__.bothE().values('weight').mean())");
     // one correlated AVG over incident edges, wrapped by MAX to satisfy GROUP BY;

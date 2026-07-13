@@ -270,7 +270,7 @@ suite manually.
 
 > This section is a *record* of how the read compiler was built, not a to-do list.
 > The **actual immediate next work is W3 — Cloudflare deploy + Worker auth** (see
-> docs/2026-07-11-phased-roadmap-plan.md). Live L3 is 583 (path family, then the
+> docs/2026-07-11-phased-roadmap-plan.md). Live L3 is 589 (path family, then the
 > per-traverser branching family + multi-hop/alias where landed 2026-07-13; then the
 > safe optimization-strategy whitelist 473→495; then the value-tail unification
 > 495→496 (compileInject reuses the shared foldTailAcc+renderProjection in
@@ -281,6 +281,27 @@ suite manually.
 > 525→534 (frontend now records each numeric literal's subtype in a parallel
 > `Step.argTypes`; args stay plain numbers so no consumer ripple); then semantic
 > strategies 534→582 (see below) — see docs/2026-07-13-per-traverser-branching.md).
+
+**`math()` — LANDED (2026-07-13, L3 583→589).** `math("<formula>")` compiles to ONE
+SQL arithmetic scalar (locked #3 — no per-row JS), always Double. The formula parser
+is `src/math.ts` (pure: tokenizer + recursive-descent, precedence `+ -` < `* / %` <
+unary `-` < `^` right-assoc < function-apply/primary; exp4j function set — `log`=natural
+→`LN`, `signum`/`cbrt` expand inline; call form `ceil(_ * 100)` AND juxtaposition
+`sin _`). **Correct-by-leaf-REAL-coercion:** literals emit real form (`100.0`), variables
+wrap `CAST(… AS REAL)` → all arithmetic floats, so `/` is real division (SQLite `/` is
+integer div on ints) with no per-op fixups except `^`→`POW`, `%`→`MOD`. `compileMath`
+(`steps/projection.ts`, sibling to `compileMapScalar`/`compileChooseOptions`) resolves
+each variable — `_`→`elemCtx` (current), an identifier→`aliasCtx` on the carried
+`as()`-rowid column — through its `by()` modulator (a property key or nested traversal via
+`compileNestedScalar`; positional/round-robin over folded `.bys` in first-seen variable
+order, so 1 by feeds all vars, N bys feed N vars — matching `project()`). A missing by()
+value → NULL arithmetic → the traverser is filtered (`baseWhere` = `<expr> IS NOT NULL`).
+Routes through the shared `renderProjection` value tail, so a trailing
+`.asNumber(GType.X)`/`is`/`order`/`dedup`/`limit` composes for free. `'math'` added to
+`strategies.ts` BY_HOSTS. Frontend/handler unchanged (`stepName` extracts `math`
+generically; `frameValue('double')` already exists). Deferred (clear throws): a var with
+no by() (bare incoming — needs local()/sack()), `withSideEffect`-bound vars, and reading
+`project()`/`select()` map columns (`order().by(__.math(...))`).
 
 **Traversal strategies — semantic support LANDED (2026-07-13, L3 534→582).**
 `withStrategies`/`withoutStrategies` are extracted from the parse tree by

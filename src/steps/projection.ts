@@ -1,9 +1,10 @@
 import { q, value, list, empty, Relation, Query, type Expression } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
 import {
-  propExtract, predicateSql, compileNestedScalar, labelNameSub, rangeToOffsetLimit, elemCtx, scalarTx, extIdOf,
+  propExtract, propAt, predicateSql, compileNestedScalar, labelNameSub, rangeToOffsetLimit, elemCtx, aliasCtx, scalarTx, extIdOf,
   type ScalarCtx,
 } from '../plan.ts';
+import { mathToSql, mathVars } from '../math.ts';
 import { stepChain, type Step } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { elemRel, type AliasMap, type St } from './context.ts';
@@ -139,6 +140,11 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
   if (steps[stop]?.name === 'map')
     return compileMapScalar(st, steps, stop, indexKeys);
 
+  // math("<formula>") → one SQL arithmetic scalar (always Double). Its variables
+  // (`_` / as()-bound names) resolve through the by() modulators folded onto it.
+  if (steps[stop]?.name === 'math')
+    return compileMath(st, steps, stop, indexKeys);
+
   // group()/groupCount() is a barrier over the current element stream → one Map.
   if (steps[stop]?.name === 'group' || steps[stop]?.name === 'groupCount') {
     if (stop + 1 < steps.length) throw new Error(`step not implemented after ${steps[stop].name}(): ${steps[stop + 1].name}()`);
@@ -213,6 +219,15 @@ const PROJECTORS = new Map<string, ProjFn>([
     : { shape: { kind: 'vertex' }, colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${c.n.c.props}`, fromNode: c.vlJoin }],
 ]);
 
+/** An order().by(key) resolver over the element's props (context `n`): a property
+ *  expression, auto-indexing the key on node streams. Shared by buildProjection and
+ *  compileMath — both render a value tail whose identity/keyed order sorts node props. */
+const nodePropOrderKey = (st: St, indexKeys: Set<string>) => (key: string): Expression => {
+  const pe = propExtract('n.props', key);
+  if (pe.indexKey && st.elem === 'node') indexKeys.add(pe.indexKey);
+  return pe.expr;
+};
+
 function buildProjection(st: St, acc: TailAcc, indexKeys: Set<string>): Compiled {
   const { distinct, offset, limit, isPreds, reducer } = acc;
   const projName = acc.projStep?.name ?? '__element';
@@ -239,12 +254,7 @@ function buildProjection(st: St, acc: TailAcc, indexKeys: Set<string>): Compiled
   const proj = PROJECTORS.get(projName)!({ st, n, l, extId, vJoin, vlJoin, projStep: acc.projStep, indexKeys, hasIs: isPreds.length > 0 });
 
   // order().by(key) sorts by a property expression (element context) — auto-index it.
-  const orderKey = (key: string): Expression => {
-    const pe = propExtract('n.props', key);
-    if (pe.indexKey && st.elem === 'node') indexKeys.add(pe.indexKey);
-    return pe.expr;
-  };
-  return renderProjection(st.q, proj, acc, indexKeys, orderKey);
+  return renderProjection(st.q, proj, acc, indexKeys, nodePropOrderKey(st, indexKeys));
 }
 
 /** Render a resolved projection + the value-shape tail (scalar transforms, is()
@@ -730,6 +740,75 @@ function compileMapScalar(st: St, steps: PStep[], stop: number, indexKeys: Set<s
   const node = q`SELECT ${sc.expr} AS v FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
   const keys = sc.indexKey ? new Set([...indexKeys, sc.indexKey]) : indexKeys;
   return readCompiled(st.q, node, { kind: 'value' }, [...keys]);
+}
+
+// ---------- math (scalar arithmetic projector) ----------
+
+/**
+ * math("<formula>") → a per-traverser Double scalar. The formula (src/math.ts)
+ * becomes one SQL arithmetic expression; its variables resolve here:
+ *   - `_`        → the current traverser (elemCtx).
+ *   - an alias   → an as()-bound traverser (aliasCtx over the carried rowid column).
+ * Each variable's scalar value comes from its by() modulator (a property key or a
+ * nested traversal, via compileNestedScalar) — positional/round-robin over the
+ * folded by()s in first-seen variable order, so a single by() feeds every variable
+ * and N by()s feed N variables (matching project()). A missing by() value makes the
+ * arithmetic NULL, so the traverser is filtered (a by() that produces nothing drops
+ * the traverser, per TinkerPop). The result routes through the shared value tail, so
+ * a trailing asNumber()/is()/order()/dedup()/limit() composes (renderProjection).
+ * Deferred (clear throws): a variable with no by() (bare incoming value — needs
+ * local()/sack()), withSideEffect-bound variables, and reading project()/select()
+ * map columns (math inside order().by(__.math(...))).
+ */
+function compileMath(st: St, steps: PStep[], stop: number, indexKeys: Set<string>): Compiled {
+  const s = steps[stop];
+  const formula = s.args[0];
+  if (typeof formula !== 'string') throw new Error('math(string) required');
+  const bys = s.bys ?? [];
+  const varOrder = mathVars(formula);
+
+  const p = st.last.as('p');
+  const cache = new Map<string, Expression>();
+  const resolveVar = (name: string): Expression => {
+    const hit = cache.get(name);
+    if (hit) return hit;
+    if (!bys.length) throw new Error(`math("${formula}"): variable "${name}" needs a by() modulator`);
+    const byArgs = bys[varOrder.indexOf(name) % bys.length];
+    let ctx: ScalarCtx;
+    if (name === '_') ctx = elemCtx(elemRel(st), st.elem);
+    else {
+      const entry = st.aliases.get(name);
+      if (!entry) throw new Error(`math("${formula}"): no such variable "${name}" — as("${name}") was not seen`);
+      ctx = aliasCtx(p.c[entry.col], entry.elem);
+    }
+    const nested = byArgs.find((a: any) => a && typeof a === 'object' && 'nested' in a);
+    const strKey = byArgs.find((a: any) => typeof a === 'string');
+    let sc;
+    if (nested) sc = compileNestedScalar(stepChain(nested.nested, st.params), ctx);
+    else if (strKey !== undefined) sc = propAt(ctx.idExpr, ctx.propsExpr, strKey); // by(key): a plain property read
+    else throw new Error(`math("${formula}"): by() modulator must be a property key or a traversal`);
+    if (sc.indexKey && ctx.elem === 'node') indexKeys.add(sc.indexKey);
+    cache.set(name, sc.expr);
+    return sc.expr;
+  };
+
+  const mathExpr = mathToSql(formula, resolveVar);
+
+  // math() always yields a Double; route through the shared value tail.
+  const acc = foldTailAcc(steps, stop + 1);
+  const n = elemRel(st);
+  const proj: ProjResult = {
+    shape: { kind: 'value', as: 'double' }, colsNode: q`${mathExpr} AS v`,
+    fromNode: q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`, scalarExpr: mathExpr,
+    // Drop rows a non-productive by() left NULL (a missing property/empty traversal
+    // filters the traverser, per MathStep). NULL propagates through every op, so this
+    // one check on the result subsumes a per-variable NULL guard. It ALSO drops a SQL
+    // domain-error result (X/0, sqrt(neg), log(0) → NULL in SQLite, never Inf/NaN):
+    // fail-closed (no row), since GraphBinary Double framing has no Inf/NaN path — a
+    // known, unreachable-in-corpus divergence, deliberately not emitting a wrong 0.0.
+    baseWhere: predicateSql(mathExpr, undefined),
+  };
+  return renderProjection(st.q, proj, acc, indexKeys, nodePropOrderKey(st, indexKeys));
 }
 
 // ---------- option-map choose (scalar CASE projector) ----------
