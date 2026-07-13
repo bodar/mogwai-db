@@ -400,6 +400,26 @@ function asNumberConst(v: any, spec: NonNullable<ReturnType<typeof numericSpec>>
 const asNumberSql = (spec: { int: boolean }, e: Expression): Expression =>
   spec.int ? q`CAST(${e} AS INTEGER)` : q`CAST(${e} AS REAL)`;
 
+/** Bare asNumber() over a constant: the output subtype is the INPUT literal's declared
+ *  type (`subtype`, from Step.argTypes) — 5b→byte, 5l→long, 5.0→double, 5.75f→float.
+ *  A numeric string parses to int/double by value; a non-numeric string / non-number
+ *  throws. Returns the numeric value + its framing tag. */
+function asNumberBare(v: any, subtype: string | null): { val: number; as: ValueType } {
+  if (subtype === 'bigdecimal') throw new Error('asNumber() to BigDecimal not yet supported'); // no GraphBinary serializer
+  if (typeof v === 'number' || typeof v === 'bigint') {
+    const n = Number(v);
+    return { val: n, as: (subtype ?? (Number.isInteger(n) ? 'int' : 'double')) as ValueType };
+  }
+  if (typeof v === 'string') {
+    const t = v.trim();
+    if (t === '' || Number.isNaN(Number(t))) throw new Error(`Can't parse string '${v}' as number.`);
+    // int vs double is decided by the STRING's form (a '.'/'e'/'E' → floating point),
+    // like AsNumberStep — NOT by whether the value is whole ("5.0" is double, not int).
+    return { val: Number(t), as: /[.eE]/.test(t) ? 'double' : 'int' };
+  }
+  throw new Error(`Can't parse type ${v === null || v === undefined ? 'null' : cap(typeof v)} as number.`);
+}
+
 export function compileInject(steps: PStep[]): Compiled {
   const Q = new Query();
   const acc = foldTailAcc(steps, 1);
@@ -412,25 +432,39 @@ export function compileInject(steps: PStep[]): Compiled {
   // `as` tag so SQLite's plain numeric/0-1 value frames as the right GraphBinary type.
   // Only the bare form (cast [+ value-preserving dedup/order/range]) is supported: a
   // reducer, count(), or trailing inject() would need the tag threaded per-position
-  // (fold→List<T>) or mix types into the stream — defer rather than miscompute. (Bare
-  // asNumber() — no GType — needs the input subtype the frontend flattens away, so it
-  // falls through to the runtime path and defers there; V-rooted casts need
-  // local()/sack().)
+  // (fold→List<T>) or mix types into the stream — defer rather than miscompute. Bare
+  // asNumber() (no GType) recovers each input's subtype from Step.argTypes (5b→byte,
+  // 5l→long, 5.0→double); V-rooted casts need local()/sack().
   let valueAs: ValueType | undefined;
   const cast = acc.transforms.length === 1 ? acc.transforms[0] : undefined;
-  const spec = cast?.name === 'asNumber' ? numericSpec(cast.args[0]) : null;
-  const constCast = cast?.name === 'asBool' || (cast?.name === 'asNumber' && spec);
+  const spec = cast?.name === 'asNumber' ? numericSpec(cast.args[0]) : null; // throws on a non-numeric GType
+  const bareNum = cast?.name === 'asNumber' && !spec; // asNumber() with no GType arg
+  const constCast = cast?.name === 'asBool' || (cast?.name === 'asNumber' && spec) || bareNum;
   if (constCast && (acc.reducer || acc.projStep || acc.injects.length))
     throw new Error(`${cast!.name}() composed with a reducer/count()/trailing inject() not yet supported`);
 
   const vals = [...steps[0].args, ...acc.injects];
   acc.injects.length = 0; // consumed into the seed, not appended after the tail
 
-  if (constCast) {
-    const conv = cast!.name === 'asBool' ? asBoolConst : (v: any) => asNumberConst(v, spec!);
-    for (let i = 0; i < vals.length; i++) vals[i] = conv(vals[i]);
-    acc.transforms.length = 0; // consumed — do not also run it through scalarTx
-    valueAs = cast!.name === 'asBool' ? 'bool' : spec!.as;
+  if (cast?.name === 'asBool') {
+    for (let i = 0; i < vals.length; i++) vals[i] = asBoolConst(vals[i]);
+    acc.transforms.length = 0;
+    valueAs = 'bool';
+  } else if (spec) {
+    for (let i = 0; i < vals.length; i++) vals[i] = asNumberConst(vals[i], spec);
+    acc.transforms.length = 0;
+    valueAs = spec.as;
+  } else if (bareNum) {
+    // Each value keeps its declared subtype; a uniform tag frames the whole `v` column,
+    // so a stream mixing subtypes (rare, unreachable) defers rather than mis-frame.
+    const argTypes = steps[0].argTypes ?? [];
+    for (let i = 0; i < vals.length; i++) {
+      const { val, as } = asNumberBare(vals[i], argTypes[i] ?? null);
+      vals[i] = val;
+      if (valueAs === undefined) valueAs = as;
+      else if (valueAs !== as) throw new Error('asNumber() over a stream of mixed numeric subtypes not yet supported');
+    }
+    acc.transforms.length = 0;
   }
   // A numeric asNumber(GType) NOT const-folded above (composed with another transform)
   // would flow into renderProjection's runtime CAST, which skips the overflow check —
