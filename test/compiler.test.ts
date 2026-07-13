@@ -553,9 +553,9 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('choose() deferrals fail closed', () => {
-    // option-map form needs a strategies pass
-    expect(() => compile('g.V().choose(__.values("age")).option(1, __.out())', {}))
-      .toThrow('option-map form not yet supported');
+    // a bare choice traversal with no then/else and no option() isn't a supported form
+    expect(() => compile('g.V().choose(__.out())', {}))
+      .toThrow('predicate form');
     // a scalar/projection arm body can't ride the id-relation
     expect(() => compile('g.V().choose(__.has("x"), __.out(), __.values("name"))', {}))
       .toThrow('not yet supported (scalar/projection body)');
@@ -564,6 +564,31 @@ describe('compiler SQL snapshots', () => {
       .toThrow('different element kinds');
     expect(() => compile('g.V().as("a").choose(__.has("x"), __.out(), __.in())', {}))
       .toThrow('choose() after as() not yet supported');
+  });
+
+  test('option-map choose → CASE over the choice scalar (value shape)', () => {
+    const c = read('g.V().choose(__.values("age")).option(P.between(26,30), __.constant("x")).option(Pick.none, __.constant("z"))');
+    expect(c.shape).toEqual({ kind: 'value' });
+    expect(c.sql).toContain("CASE WHEN (json_extract(n.props, '$.age') >= ? and json_extract(n.props, '$.age') < ?) THEN ? ELSE ? END AS v");
+    expect(c.binds).toEqual([26, 30, 'x', 'z']);
+    // T.label choice, literal-equality keys
+    expect(read('g.V().choose(T.label).option("person", __.constant("p")).option(Pick.none, __.constant("o"))').sql)
+      .toContain('CASE WHEN (SELECT name FROM labels WHERE id=n.label) = ? THEN ? ELSE ? END');
+    // count() choice as a correlated subquery
+    expect(read('g.V().choose(__.out().count()).option(1, __.values("name")).option(Pick.none, __.values("age"))').sql)
+      .toContain('CASE WHEN (SELECT COUNT(*) FROM edges WHERE (src=n.id)) = ? THEN');
+  });
+
+  test('option-map choose deferrals fail closed', () => {
+    // no Pick.none → unmatched pass-through is mixed vertex/scalar
+    expect(() => compile('g.V().choose(__.out().count()).option(1, __.values("name")).option(2, __.values("age"))', {}))
+      .toThrow('without a Pick.none default');
+    // an element option body isn't a scalar for the CASE (compileNestedScalar rejects it)
+    expect(() => compile('g.V().choose(T.label).option("person", __.out("knows")).option(Pick.none, __.constant("x"))', {}))
+      .toThrow('only supports a terminal count');
+    // Pick.unproductive semantics
+    expect(() => compile('g.V().choose(__.values("age")).option(P.gt(30), __.constant("x")).option(Pick.unproductive, __.constant("u")).option(Pick.none, __.constant("z"))', {}))
+      .toThrow('Pick.unproductive');
   });
 
   // ---- P3: repeat/times/emit ----
@@ -1069,6 +1094,19 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V(2).optional(__.both()).values("name")').map((r) => r.v)).toEqual(['marko']);
     // flatMap = inline the body: marko out().out() = lop,ripple
     expect(run(store, 'g.V(1).flatMap(__.out().out()).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple']);
+  });
+
+  test('option-map choose executes: choice scalar → matched option body', () => {
+    const store = seededStore();
+    // age in [26,30) → "x" (marko 29, vadas 27), else "z"
+    expect(run(store, 'g.V().choose(__.values("age")).option(P.between(26,30), __.constant("x")).option(Pick.none, __.constant("z"))').map((r) => r.v).sort())
+      .toEqual(['x', 'x', 'z', 'z', 'z', 'z']);
+    // T.label dispatch: person→P (4), software→S (2)
+    expect(run(store, 'g.V().choose(T.label).option("person", __.constant("P")).option("software", __.constant("S")).option(Pick.none, __.constant("?"))').map((r) => r.v).sort())
+      .toEqual(['P', 'P', 'P', 'P', 'S', 'S']);
+    // out(created) degree: 0→"none" (vadas,lop,ripple), else values(name)
+    expect(run(store, 'g.V().choose(__.out("created").count()).option(0, __.constant("none")).option(Pick.none, __.values("name"))').map((r) => r.v).sort())
+      .toEqual(['josh', 'marko', 'none', 'none', 'none', 'peter']);
   });
 
   test('alias-compare where — the co-creator idiom', () => {
