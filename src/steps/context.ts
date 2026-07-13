@@ -67,6 +67,8 @@ export interface Carry {
   readonly origin?: string;              // coalesce/optional: the carried input-ordinal column
   readonly sack?: string;                // sack: the carried per-traverser scalar column (e.g. 'sk')
   readonly sideEffects?: SideEffectMap;  // named side-effect collections (aggregate/store/group('a'))
+  readonly fromV?: string;               // edge context: the column holding the vertex an edge was entered from (for otherV())
+  readonly trackFromV?: boolean;         // seeded true iff the chain uses otherV() — gates fromV emission on edge steps (hot-path: no extra column otherwise)
 }
 
 /** Immutable prefix state threaded through the step fold. Everything the dispatch
@@ -97,7 +99,7 @@ export const elemRel = (st: St, alias = 'n'): Relation => (st.elem === 'edge' ? 
  *  input-ordinal (when set) — so a branch body's results stay tagged with which
  *  input traverser produced them. */
 export const carriedCols = (st: St): string[] =>
-  [...aliasColsOf(st.aliases), ...pathColsOf(st.path), ...(st.origin ? [st.origin] : []), ...(st.sack ? [st.sack] : [])];
+  [...aliasColsOf(st.aliases), ...pathColsOf(st.path), ...(st.origin ? [st.origin] : []), ...(st.sack ? [st.sack] : []), ...(st.fromV ? [st.fromV] : [])];
 
 /** `, p.a0, p.p0, …` — the carried columns qualified by `p`; empty when nothing is
  *  live. Movement/filter CTEs splice this after the moved id so labelled traversers
@@ -115,21 +117,23 @@ export function carryFrag(st: St, p: Relation): Expression {
  */
 export function advance(
   st: St, body: Expression,
-  opts: { aliases?: AliasMap; elem?: Elem; cols?: readonly string[]; path?: PathState; origin?: string | null; sack?: string | null } = {},
+  opts: { aliases?: AliasMap; elem?: Elem; cols?: readonly string[]; path?: PathState; origin?: string | null; sack?: string | null; fromV?: string | null } = {},
 ): St {
   const aliases = opts.aliases ?? st.aliases;
   const path = opts.path ?? st.path;
   // origin: opts.origin === null clears it (a branch step dropping the ordinal at
-  // its output); undefined keeps st's; a string sets it. sack rides the same tri-state.
+  // its output); undefined keeps st's; a string sets it. sack/fromV ride the same tri-state.
   const origin = opts.origin === null ? undefined : (opts.origin ?? st.origin);
   const sack = opts.sack === null ? undefined : (opts.sack ?? st.sack);
-  const cols = opts.cols ?? ['id', ...aliasColsOf(aliases), ...pathColsOf(path), ...(origin ? [origin] : []), ...(sack ? [sack] : [])];
+  const fromV = opts.fromV === null ? undefined : (opts.fromV ?? st.fromV);
+  const cols = opts.cols ?? ['id', ...aliasColsOf(aliases), ...pathColsOf(path), ...(origin ? [origin] : []), ...(sack ? [sack] : []), ...(fromV ? [fromV] : [])];
   return {
     ...st,
     aliases,
     path,
     origin,
     sack,
+    fromV,
     elem: opts.elem ?? st.elem,
     last: st.q.cte(body, cols),
   };

@@ -37,7 +37,9 @@ export const move: StepFn = (s, st) => {
   return advance(st, list(selects, ' UNION ALL '), pa.opts);
 };
 
-/** outE()/inE()/bothE(): vertex → incident edges. The new id is the EDGE id. */
+/** outE()/inE()/bothE(): vertex → incident edges. The new id is the EDGE id. Records
+ *  the entering vertex (`p.id`) in a carried `fv` column so a following otherV() knows
+ *  which end to skip; bothE's two UNION branches both entered from `p.id`. */
 export const toEdge: StepFn = (s, st) => {
   if (st.elem !== 'node') throw new Error(`${s.name}() expects a vertex, not an ${st.elem}`);
   const froms = s.name === 'outE' ? ['src'] : s.name === 'inE' ? ['tgt'] : ['src', 'tgt'];
@@ -45,20 +47,40 @@ export const toEdge: StepFn = (s, st) => {
   const p = prevRel(st, 'p');
   const cf = carryFrag(st, p);
   const pa = pathAppend(st, 'edge');
+  // Only record the entering vertex when a downstream otherV() needs it (trackFromV) —
+  // otherwise every edge step would carry a dead column off the index-only hot path.
+  const fvCol = (idExpr: Expression) => st.trackFromV ? q`, ${idExpr} AS fv` : empty;
   const selects = froms.map((from) =>
-    q`SELECT ${e.c.id} AS id${cf}${pa.frag(e.c.id)} FROM ${e} JOIN ${p} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(s.args)}`);
-  return advance(st, list(selects, ' UNION ALL '), { elem: 'edge', ...pa.opts });
+    q`SELECT ${e.c.id} AS id${cf}${pa.frag(e.c.id)}${fvCol(p.c.id)} FROM ${e} JOIN ${p} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(s.args)}`);
+  return advance(st, list(selects, ' UNION ALL '), { elem: 'edge', fromV: st.trackFromV ? 'fv' : null, ...pa.opts });
 };
 
-/** outV()/inV()/bothV(): edge → endpoint vertices. The new id is the NODE id. */
+/** outV()/inV()/bothV(): edge → endpoint vertices. The new id is the NODE id. Landing
+ *  on a vertex clears the edge-entered-from context (fv). */
 export const toVertex: StepFn = (s, st) => {
   if (st.elem !== 'edge') throw new Error(`${s.name}() expects an edge, not a ${st.elem}`);
   const cols = s.name === 'outV' ? ['src'] : s.name === 'inV' ? ['tgt'] : ['src', 'tgt'];
   const e = edges.as('e');
   const p = prevRel(st, 'p');
-  const cf = carryFrag(st, p);
+  const cf = carryFrag({ ...st, fromV: undefined }, p); // fv is dropped at the vertex
   const pa = pathAppend(st, 'node');
   const selects = cols.map((col) =>
     q`SELECT ${e.c[col]} AS id${cf}${pa.frag(e.c[col])} FROM ${e} JOIN ${p} ON ${e.c.id}=${p.c.id}`);
-  return advance(st, list(selects, ' UNION ALL '), { elem: 'node', ...pa.opts });
+  return advance(st, list(selects, ' UNION ALL '), { elem: 'node', fromV: null, ...pa.opts });
+};
+
+/** otherV(): edge → the endpoint that ISN'T the one the traverser was on before the
+ *  edge step (the carried `fv`). Well-defined only right after an edge step (the fv
+ *  context); bothE()'s ambiguous direction is exactly why this is needed. */
+export const otherV: StepFn = (s, st) => {
+  if (st.elem !== 'edge') throw new Error(`otherV() expects an edge, not a ${st.elem}`);
+  if (!st.fromV) throw new Error('otherV() requires a preceding edge step (no entering-vertex context)');
+  const e = edges.as('e');
+  const p = prevRel(st, 'p');
+  const fv = p.c[st.fromV];
+  const cf = carryFrag({ ...st, fromV: undefined }, p); // fv is consumed here
+  const other = q`CASE WHEN ${e.c.src}=${fv} THEN ${e.c.tgt} ELSE ${e.c.src} END`;
+  const pa = pathAppend(st, 'node');
+  const body = q`SELECT ${other} AS id${cf}${pa.frag(other)} FROM ${e} JOIN ${p} ON ${e.c.id}=${p.c.id}`;
+  return advance(st, body, { elem: 'node', fromV: null, ...pa.opts });
 };

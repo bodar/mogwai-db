@@ -4,12 +4,13 @@ import { type Elem } from '../plan.ts';
 import { stepChain, flattenListArgs } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { type St, type StepFn } from './context.ts';
-import { move, toEdge, toVertex } from './movement.ts';
+import { move, toEdge, toVertex, otherV } from './movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from './filter.ts';
 import { union, optional, repeat, choose, coalesce, flatMap } from './branch.ts';
 import { match } from './match.ts';
 import { identity, limit, range, skip } from './passthrough.ts';
 import { sack } from './sack.ts';
+import { local } from './local.ts';
 import { aggregate, group as groupSE, groupCount as groupCountSE } from './sideeffect.ts';
 import { type SackSpec } from '../frontend.ts';
 import { compileTail, compileFromScalar } from './projection.ts';
@@ -27,7 +28,7 @@ export { compileTail };
 const PREFIX = new Map<string, StepFn>([
   ['out', move], ['in', move], ['both', move],
   ['outE', toEdge], ['inE', toEdge], ['bothE', toEdge],
-  ['outV', toVertex], ['inV', toVertex], ['bothV', toVertex],
+  ['outV', toVertex], ['inV', toVertex], ['bothV', toVertex], ['otherV', otherV],
   ['as', as], ['hasLabel', hasLabel], ['has', has], ['hasId', hasId],
   ['where', where], ['filter', where], ['not', where],
   ['and', andOr], ['or', andOr], ['dedup', dedup],
@@ -48,6 +49,9 @@ const PREFIX = new Map<string, StepFn>([
   // The SIDE-EFFECTING group('a')/groupCount('a') (has a string key) is a pass-through
   // barrier too; the bare terminal group()/groupCount() breaks to the tail (guard below).
   ['group', groupSE], ['groupCount', groupCountSE],
+  // local() with a movement body + per-element limit/range is a prefix step; a
+  // scalar-reduction body (local(out().count())) breaks to the tail (guard below).
+  ['local', local],
 ]);
 
 /** A sack step in its mutate form (has an Operator arg); the bare read form is a tail
@@ -58,10 +62,24 @@ const isSackMutate = (s: PStep): boolean => (s.args ?? []).some((a: any) => a &&
  *  form is a terminal barrier handled by compileTail, so it must break out of the prefix. */
 const isSideEffectGroup = (s: PStep): boolean => (s.args ?? []).some((a: any) => typeof a === 'string');
 
+/** A local() whose body is a per-element SCALAR reduction (…count()/sum()/…) — it
+ *  projects one scalar per input, so it's a tail projector (compileMapScalar), not a
+ *  prefix step. A movement + limit/range body stays the prefix window step (local.ts). */
+const SCALAR_LOCAL_END = new Set(['count', 'sum', 'min', 'max', 'mean']);
+const isScalarLocal = (s: PStep, params: Record<string, any>): boolean => {
+  const nested = (s.args ?? [])[0]?.nested;
+  if (!nested) return false;
+  const body = stepChain(nested, params);
+  return body.length > 0 && SCALAR_LOCAL_END.has(body[body.length - 1].name);
+};
+
 /** Steps that need the linear path threaded through the fold: the source vertex
  *  becomes path position p0 and every hop appends a position. */
 const PATH_STEPS = new Set(['path', 'simplePath', 'cyclicPath']);
 const chainTracksPath = (steps: PStep[]): boolean => steps.some((s) => PATH_STEPS.has(s.name));
+/** otherV() needs each edge step to record its entering vertex — gate that on the
+ *  chain naming otherV, so ordinary edge traversals stay index-only (no dead column). */
+const chainNeedsFromV = (steps: PStep[]): boolean => steps.some((s) => s.name === 'otherV');
 
 /** Seed the source CTE (c0) from V(...)/E(...) and its optional id list. When the
  *  chain tracks a path, the source element is path position p0 (projected as the
@@ -140,7 +158,8 @@ export function foldBody(steps: PStep[], seedSt: St, from: number): { st: St; st
     if (!fn
       || (steps[i].name === 'choose' && steps[i].options)
       || (steps[i].name === 'sack' && !isSackMutate(steps[i]))
-      || ((steps[i].name === 'group' || steps[i].name === 'groupCount') && !isSideEffectGroup(steps[i]))) break;
+      || ((steps[i].name === 'group' || steps[i].name === 'groupCount') && !isSideEffectGroup(steps[i]))
+      || (steps[i].name === 'local' && isScalarLocal(steps[i], seedSt.params))) break;
     st = fn(steps[i], st);
   }
   return { st, stop: i };
@@ -149,9 +168,12 @@ export function foldBody(steps: PStep[], seedSt: St, from: number): { st: St; st
 export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, query: Query = new Query(), sackInit?: SackSpec): { st: St; stop: number } {
   const first = steps[0];
   const trackPath = chainTracksPath(steps);
-  const st0 = first.name === 'union' ? seedUnion(first, query, params, sackInit)
+  const seeded = first.name === 'union' ? seedUnion(first, query, params, sackInit)
     : (first.name === 'V' || first.name === 'E') ? seedSource(first, query, params, trackPath, sackInit)
     : (() => { throw new Error(`unsupported source step: ${first.name}`); })();
+  // Gate the otherV() entering-vertex tracking on the chain; local()'s body inherits
+  // the flag through its {...st} seed, so an inner edge step records it too.
+  const st0 = chainNeedsFromV(steps) ? { ...seeded, trackFromV: true } : seeded;
   return foldBody(steps, st0, 1);
 }
 

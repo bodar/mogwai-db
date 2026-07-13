@@ -931,8 +931,9 @@ describe('compiler SQL snapshots', () => {
 
   test('map(__.<scalar>) → per-traverser scalar projection (value shape)', () => {
     const m = read('g.V().map(__.out().count())');
-    expect(m.shape).toEqual({ kind: 'value' });
+    expect(m.shape).toEqual({ kind: 'value', as: 'long' }); // count() is a Long
     expect(m.sql).toContain('SELECT (SELECT COUNT(*) FROM edges WHERE (src=n.id)) AS v FROM nodes n JOIN c0 p');
+    expect(read('g.V(1).map(__.values("name"))').shape).toEqual({ kind: 'value', as: undefined });
     expect(read('g.V(1).map(__.values("name"))').sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS v");
     // element-body map (first-result-only) and select/fold bodies defer
     expect(() => compile('g.V().map(__.out())', {})).toThrow('only supports a terminal count');
@@ -1307,6 +1308,39 @@ describe('compiler execution semantics', () => {
 
   test('cap of an undefined side-effect key throws', () => {
     expect(() => compile('g.V().cap("nope")', {})).toThrow("cap('nope') references an undefined side-effect");
+  });
+
+  test('local(scalar reduction) is a per-input scalar (zeros preserved; count is Long)', () => {
+    const store = seededStore();
+    // out-degree per vertex, incl 0 for the software/leaf vertices.
+    expect(run(store, 'g.V().local(__.outE().count())').map((r) => r.v).sort((a, b) => a - b))
+      .toEqual([0, 0, 0, 1, 2, 3]);
+    expect(read('g.V().local(__.outE().count())').shape).toEqual({ kind: 'value', as: 'long' });
+  });
+
+  test('local(edgeStep.limit(N)) scopes the limit PER input (window), not globally', () => {
+    const store = seededStore();
+    // marko has 2 knows edges; local limit(1) keeps 1 (per-vertex), then inV → 1 name.
+    expect(run(store, 'g.V(1).local(__.outE("knows").limit(1)).inV().values("name")').length).toBe(1);
+    // per-input: each of vadas/josh has 1 in-knows → outV = marko, twice (global limit(2) would give 2 total anyway; the point is per-input scoping)
+    expect(run(store, 'g.V().local(__.inE("knows").limit(2)).outV().values("name")').map((r) => r.v))
+      .toEqual(['marko', 'marko']);
+  });
+
+  test('otherV() after local(bothE.limit) picks the end away from the input vertex', () => {
+    const store = seededStore();
+    // josh(4): bothE = marko-knows->josh, josh-created->ripple, josh-created->lop.
+    // limit(2) per input → first 2 by edge id; otherV skips josh.
+    const two = run(store, 'g.V(4).local(__.bothE().limit(2)).otherV().values("name")').map((r) => r.v);
+    expect(two.length).toBe(2);
+    for (const name of two) expect(['marko', 'ripple', 'lop']).toContain(name);
+    // otherV outside local still needs an edge context.
+    expect(() => compile('g.V().otherV()', {})).toThrow('otherV() expects an edge');
+  });
+
+  test('local() with a non-movement / no-barrier body defers clearly', () => {
+    expect(() => compile('g.V().local(__.out().in().simplePath()).path()', {})).toThrow('not yet supported');
+    expect(() => compile('g.V().local(__.out())', {})).toThrow('per-element limit()/range() only');
   });
 
   test('sack with two by() modulators throws TinkerPop message', () => {
