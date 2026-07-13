@@ -93,9 +93,8 @@ describe('compiler SQL snapshots', () => {
     const avg = read('g.V().values("age").mean()');
     expect(avg.sql).toContain('AVG(v)');
     expect(avg.sql).toContain("'real' AS vt");
-    // min(Scope.local) after fold() is now a list-phase reducer — deferred until
-    // Scope.local lands (a non-terminal fold retypes to a list value first).
-    expect(() => compile('g.V().values("age").fold().min(Scope.local)', {})).toThrow('min() on a list value not yet supported');
+    // min(Scope.local) after fold() reduces the folded list per-list (list phase).
+    expect(read('g.V().values("age").fold().min(Scope.local)').shape).toEqual({ kind: 'scalar' });
   });
 
   test('collection literals parse as one array value; varargs-style steps flatten it', () => {
@@ -131,8 +130,12 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().unfold()').shape).toEqual({ kind: 'vertex' });
     // continuation after the roundtrip: movement/projection resume as a fresh phase.
     expect(read('g.V().hasLabel("person").fold().unfold().values("name")').shape).toEqual({ kind: 'value' });
-    // inject-as-list and Scope.local list reducers are the next commits — still defer.
-    expect(() => compile('g.V().values("age").fold().sum(Scope.local)', {})).toThrow('sum() on a list value not yet supported');
+    // Scope.local reducers reduce EACH folded list to one scalar (per-list, not global).
+    expect(read('g.V().fold().count(Scope.local)').shape).toEqual({ kind: 'count' });
+    expect(read('g.V().values("age").fold().sum(Scope.local)').shape).toEqual({ kind: 'scalar' });
+    expect(read('g.V().values("age").fold().sum(Scope.local)').sql).toContain('json_each');
+    // a trailing step after a local reducer, and inject-as-list, are later commits.
+    expect(() => compile('g.V().values("age").fold().sum(Scope.local).is(P.gt(1))', {})).toThrow('step after sum(Scope.local) not yet supported');
   });
 
   test('inject() is a value stream that reducers/modifiers chain onto', () => {
