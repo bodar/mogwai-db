@@ -360,12 +360,23 @@ export function compileFilterPredicate(nested: Step[], ctx: ScalarCtx, params: R
   if (head === 'hasId' && body.length === 1)
     return { expr: predicateSql(ctx.extIdExpr!, idPredFromArgs(body[0].args)), indexKeys };
 
-  if (MOVES.has(head) && body.length === 1) {
-    // where(__.out().is(P)) would mean "has a neighbour satisfying P" — the bare
-    // EXISTS ignores P, so reject rather than silently drop it.
-    if (hasIs) throw new Error(`where(__.${head}().is(P)) not yet supported`);
-    return { expr: compileExists(body[0], ctx), indexKeys };
+  // where(__.label()[.is(P)]) — predicate on the current element's label name.
+  if (head === 'label' && body.length === 1)
+    return { expr: predicateSql(labelNameSub(ctx.labelIdExpr), hasIs ? isPred : undefined), indexKeys };
+
+  // where(__.not(t)) — negate an inner predicate; a NULL (missing) is kept (NOT COALESCE).
+  if (head === 'not' && body.length === 1) {
+    const arg = body[0].args.find((a: any) => a && typeof a === 'object' && 'nested' in a);
+    if (!arg) throw new Error('not() requires a traversal');
+    const inner = compileFilterPredicate(stepChain(arg.nested, params), ctx, params);
+    indexKeys.push(...inner.indexKeys);
+    return { expr: q`NOT COALESCE((${inner.expr}), 0)`, indexKeys };
   }
+
+  if (MOVES.has(head))
+    // A movement chain → a correlated EXISTS over the path, with an optional terminal
+    // filter (has/hasLabel/values.is) on the last node. (count/sum handled above.)
+    return { expr: compileExistsChain(body, ctx, isPred, hasIs), indexKeys };
   throw new Error(`where()/filter() form not yet supported: __.${body.map((s) => s.name + '()').join('.')}`);
 }
 
@@ -396,4 +407,58 @@ function compileExists(mv: Step, ctx: ScalarCtx): Expression {
   const terms = dirs.map(([from]) =>
     q`EXISTS(SELECT 1 FROM edges xe WHERE xe.${from}=${ctx.idExpr}${labelFilter})`);
   return terms.length === 1 ? terms[0] : paren(list(terms, ' OR '));
+}
+
+/**
+ * A multi-hop vertex-movement chain → a correlated EXISTS over the path, with an
+ * optional terminal filter on the last node. Handles out()/in() chains (single
+ * direction per hop) plus a trailing has(k[,v])/hasLabel(l)/values(k)[.is(P)]; a lone
+ * bare movement delegates to the leaner edge-only compileExists (which also does
+ * both()). Multi-hop both(), edge-typed hops, and unknown terminals defer. Aliases
+ * xe{k}/xn{k} can't collide with the outer `n`/`e`/`p`.
+ */
+function compileExistsChain(body: Step[], ctx: ScalarCtx, isPred: any, hasIs: boolean): Expression {
+  if (ctx.elem !== 'node') throw new Error(`where(__.${body[0].name}()) expects a vertex, not an ${ctx.elem}`);
+
+  // A lone bare movement (incl. the outE/inE/bothE edge forms) → the leaner edge-only
+  // EXISTS (index-only; both() ok). Must stay ahead of the vertex-chain builder below,
+  // which handles only out()/in() hops.
+  if (body.length === 1 && !hasIs && MOVES.has(body[0].name)) return compileExists(body[0], ctx);
+
+  const moves: Step[] = [];
+  let i = 0;
+  for (; i < body.length && ['out', 'in', 'both'].includes(body[i].name); i++) moves.push(body[i]);
+  const terminal = body[i];
+  if (body[i + 1]) throw new Error(`where()/filter() form not yet supported: __.${body.map((s) => s.name + '()').join('.')}`);
+  if (!moves.length) throw new Error(`where()/filter() form not yet supported: __.${body.map((s) => s.name + '()').join('.')}`);
+  if (moves.some((m) => m.name === 'both')) throw new Error('where(__.both()…) multi-hop / with a terminal filter not yet supported');
+
+  // Correlated join chain: edges xe0 JOIN nodes xn0 … [JOIN edges xe1 … JOIN nodes xn1 …].
+  const parts: Expression[] = [];
+  const conds: Expression[] = [];
+  let prevId: Expression = ctx.idExpr;
+  moves.forEach((m, k) => {
+    const [from, to] = dirsFor(m.name)[0];
+    const e = `xe${k}`, n = `xn${k}`;
+    parts.push(k === 0
+      ? q`edges ${e} JOIN nodes ${n} ON ${n}.id=${e}.${to}`
+      : q`JOIN edges ${e} ON ${e}.${from}=${prevId} JOIN nodes ${n} ON ${n}.id=${e}.${to}`);
+    if (k === 0) conds.push(q`${e}.${from}=${prevId}`);
+    if (m.args.length) conds.push(labelIn(`${e}.label`, m.args));
+    prevId = q`${n}.id`;
+  });
+  const last = `xn${moves.length - 1}`;
+
+  if (terminal) {
+    if (terminal.name === 'has' && typeof terminal.args[0] === 'string')
+      conds.push(predicateSql(propExtract(`${last}.props`, terminal.args[0]).expr, terminal.args[1]));
+    else if (terminal.name === 'hasLabel')
+      conds.push(labelIn(`${last}.label`, terminal.args));
+    else if (terminal.name === 'values' && typeof terminal.args[0] === 'string')
+      conds.push(predicateSql(propExtract(`${last}.props`, terminal.args[0]).expr, hasIs ? isPred : undefined));
+    else throw new Error(`where() chain terminal __.${terminal.name}() not yet supported`);
+  } else if (hasIs) {
+    throw new Error(`where(__.${moves.map((m) => m.name + '()').join('.')}.is(P)) not yet supported`);
+  }
+  return q`EXISTS(SELECT 1 FROM ${list(parts, ' ')} WHERE ${list(conds, ' AND ')})`;
 }
