@@ -223,7 +223,9 @@ suite manually.
 
 > This section is a *record* of how the read compiler was built, not a to-do list.
 > The **actual immediate next work is W3 — Cloudflare deploy + Worker auth** (see
-> docs/2026-07-11-phased-roadmap-plan.md). Live L3 is 455 (path family + until done).
+> docs/2026-07-11-phased-roadmap-plan.md). Live L3 is 473 (path family, then the
+> per-traverser branching family + multi-hop/alias where landed 2026-07-13 — see
+> docs/2026-07-13-per-traverser-branching.md).
 
 DONE: P2a (as/select/project/by column-threading), P2c-1 (edge traversal — the
 typed node/edge `Elem` id-relation, edge shape, `edgeBuffer`), P2c-1b (property
@@ -342,11 +344,20 @@ Cucumber tag set widened with `@StepAddV/@StepAddE/@StepMergeV/@StepMergeE` (NOT
 
 Read-step backlog (continues under W5). DONE 2026-07-12/13: the **path family** —
 `path`/`simplePath`/`cyclicPath` + `path().by()`, `repeat().path()` (JSONB array
-walk), `repeat().until()` (do-while/while-do, `loops().is(n)`). Still open:
-`emit(pred)`, compound `until(…and/or().loops())`, `path().by()` on the recursive
-walk, `coalesce`, `aggregate`/`cap`, `match`, `local`, `choose`, `sack`; multi-hop/
-scalar `union`, `both()`/multi-hop `optional`, multi-hop `where`,
-`where(P.eq(__.constant()))`. `tree()` deliberately skipped (0 L3: JS GLV stubs it).
+walk), `repeat().until()` (do-while/while-do, `loops().is(n)`). **DONE 2026-07-13: the
+per-traverser BRANCHING family** (455→473, `docs/2026-07-13-per-traverser-branching.md`)
+— `choose` (predicate form + option-map scalar CASE), `coalesce` (first-non-empty via a
+carried input-ordinal `St.origin`), multi-hop `union`/`optional` (rewritten onto the
+`foldBody` seam; optional keeps its single-hop LEFT JOIN fast path), `flatMap`, scalar
+`map` (`compileMapScalar`), **multi-hop `where`** (`compileExistsChain` — correlated
+EXISTS over a movement chain + terminal filter) + `where(__.label()/not())`, and the
+**alias-threading foundation** (`aliasCtx` + `resolveAlias`: a where/and/or/not predicate
+starting `as('x')`/`select('x')` re-roots on that alias's carried column). Still open:
+`emit(pred)`, compound `until(…and/or().loops())`, `path().by()` on the recursive walk,
+`aggregate`/`cap`, **`match`** (next deliberate batch — builds on aliasCtx/resolveAlias),
+`local`, `sack`; element-body `map` (first-result), scalar branch bodies, mixed-shape
+branches, branch-inside-branch, option-map choose without a scalar `Pick.none`. `tree()`
+deliberately skipped (0 L3: JS GLV stubs it).
 
 ## Environment notes
 

@@ -67,6 +67,16 @@ column through movement. Governed by the `PATH` vs `LABELED_PATH` requirement
 split; path presence kills bulking (walk-cardinality). Don't build a CSR operator.
 
 ### 2. Per-traverser sub-traversal engine — `local` / `map` / `choose` / `flatMap` / complex `where`  (~90–100)
+**✅ LARGELY DONE (2026-07-13, live L3 455 → 473).** See
+`docs/2026-07-13-per-traverser-branching.md`. Landed: `choose` (predicate + option-map
+scalar CASE), `coalesce`, multi-hop `union`/`optional`, `flatMap`, scalar `map`,
+multi-hop `where` (correlated EXISTS chain) + `where(label/not)`, and the
+alias-threading foundation (`aliasCtx`/`resolveAlias`). The engine split into **two
+correlation regimes**: inline correlated subquery (where/by/scalar-map/option-choose)
+vs seeded shared-`WITH` relation (`foldBody` — element branch arms). Still open on this
+bet: `local` (per-element scope — hardest), element-body `map` (first-result), scalar
+branch bodies, alias-in-predicate beyond re-root, and **`match`** (the next deliberate
+batch — builds directly on `aliasCtx`/`resolveAlias`).
 **Real-world: HIGH.** `choose` (if/then/else) is everyday branching logic;
 `local` ("for each vertex, its top-3 …") and `map` (per-element transform) are
 common idioms. This is the **biggest single area we structurally ignored.**
@@ -128,13 +138,17 @@ supported. Lowest priority.
 ## Recommended sequence
 
 1. ~~**Path** (#1)~~ — **DONE (2026-07-12/13)**, see bet #1 above.
-2. **Per-traverser sub-traversal engine** (#2) — **the current top pick.** The big
-   substrate; unlocks
-   `choose`/`local`/`map` and feeds `match` + `where` + `repeat` bodies.
-3. **Side-effect state** (#3) — `aggregate`/`cap`/`sack`.
-4. Then opportunistically: **types** (#4), **match** (#5, rides on #2), and
-   **collection algebra** (#6) for completeness.
-5. **Strategies** (#7) only when in-graph partitioning is an actual ask — the
+2. ~~**Per-traverser sub-traversal engine** (#2)~~ — **LARGELY DONE (2026-07-13, L3
+   455→473)**, see bet #2 above + `docs/2026-07-13-per-traverser-branching.md`.
+3. **`match`** (#5) — **the current top pick.** Now unblocked: it lowers onto
+   `where`/`select`/`and` and its patterns are alias-rooted constraints — all of which
+   the #2 alias-threading foundation (`aliasCtx`/`resolveAlias`) now provides. Needs
+   declarative pattern ordering (dependency sort) + shared-variable joins.
+4. **`local`** (rest of #2) — per-element scope (Scope.local/fold); structurally the
+   hardest remaining piece of the branching bet.
+5. **Side-effect state** (#3) — `aggregate`/`cap`/`sack`.
+6. Then opportunistically: **types** (#4) and **collection algebra** (#6) for completeness.
+7. **Strategies** (#7) only when in-graph partitioning is an actual ask — the
    DO-per-tenant model already covers isolation.
 
 The throughline: **grow the SQL compiler (correlated/lateral/recursive), don't add
