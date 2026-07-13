@@ -1,8 +1,9 @@
 import { q, list, Relation, type Expression } from '../q.ts';
 import { edges } from '../schema.ts';
 import { stepChain, type Step } from '../frontend.ts';
-import { dirsFor, edgeLabelFilter, compileFilterPredicate, predicateSql, type ScalarCtx } from '../plan.ts';
-import { advance, prevRel, type St, type StepFn } from './context.ts';
+import { dirsFor, edgeLabelFilter, compileFilterPredicate, predicateSql, elemCtx, type ScalarCtx } from '../plan.ts';
+import { advance, elemRel, prevRel, type St, type StepFn } from './context.ts';
+import { foldBody } from './index.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
  *  read back from `nodes` by subquery (the walk row carries only the id). Lets
@@ -155,4 +156,58 @@ export const repeat: StepFn = (s, st) => {
   if (wantsPathOutput)
     return advance(st, q`SELECT id, path FROM ${walk} WHERE ${outWhere}`, { path: { kind: 'array', col: 'path', elem: 'node' } });
   return advance(st, q`SELECT id FROM ${walk} WHERE ${outWhere}`);
+};
+
+// ---------- choose (predicate form) ----------
+
+/** `NOT COALESCE((<pred>), 0)` — a NULL (missing prop) counts as false, so the
+ *  else arm gets exactly the traversers the then arm didn't (mirrors filter.ts). */
+const notCoalesce = (e: Expression): Expression => q`NOT COALESCE((${e}), 0)`;
+
+/** Gate the current traverser relation by a boolean test → a one-column (id) seed
+ *  CTE. choose()'s then/else arms fold from their gated seed; aliases/path are
+ *  refused by choose() up front, so the seed carries only id. */
+function gate(st: St, test: Expression): St {
+  const n = elemRel(st);
+  const p = prevRel(st, 'p');
+  return advance(st, q`SELECT ${n.c.id} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${test}`);
+}
+
+/**
+ * choose(pred, then[, else]) — the predicate form. The predicate traversal compiles
+ * to a correlated boolean (reusing the where()/filter() engine); the current stream
+ * splits into two gated seeds (pred / NOT pred); each arm folds from its seed through
+ * the movement/filter dispatch (multi-hop arms work); the two element id-relations
+ * merge UNION ALL. Same-shape arms only (both node or both edge). else absent →
+ * identity passthrough (the gated NOT-pred seed itself).
+ *
+ * Deferred (clear errors): the option-map form choose(choiceFn).option(k, t)… (needs
+ * a strategies pass), scalar/projection arm bodies (values/count/fold — the id-relation
+ * can't carry them), and choose() after as()/with path tracking.
+ */
+export const choose: StepFn = (s, st) => {
+  if (st.aliases.size > 0) throw new Error('choose() after as() not yet supported');
+  if (st.path) throw new Error('path tracking through choose() not yet supported');
+  const args = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  if (args.length < 2 || args.length > 3)
+    throw new Error('choose(): only the predicate form choose(pred, then[, else]) is supported (option-map form not yet supported)');
+  const [predArg, thenArg, elseArg] = args;
+  const pred = compileFilterPredicate(stepChain(predArg.nested, st.params), elemCtx(elemRel(st), st.elem), st.params);
+
+  const arm = (arg: any, seed: St): St => {
+    const body = stepChain(arg.nested, st.params);
+    const { st: end, stop } = foldBody(body, seed, 0);
+    if (stop !== body.length)
+      throw new Error(`choose() branch __.${body.map((c) => c.name + '()').join('.')} not yet supported (scalar/projection body)`);
+    return end;
+  };
+
+  const thenEnd = arm(thenArg, gate(st, pred.expr));
+  const elseSeed = gate(st, notCoalesce(pred.expr));
+  const elseEnd = elseArg ? arm(elseArg, elseSeed) : elseSeed; // else absent → identity
+  if (thenEnd.elem !== elseEnd.elem)
+    throw new Error('choose() branches produce different element kinds (mixed-shape) not yet supported');
+
+  const merged = list([q`SELECT id FROM ${thenEnd.last}`, q`SELECT id FROM ${elseEnd.last}`], ' UNION ALL ');
+  return advance(st, merged, { elem: thenEnd.elem, indexKeys: [...pred.indexKeys, ...thenEnd.indexKeys, ...elseEnd.indexKeys] });
 };

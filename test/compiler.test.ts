@@ -508,6 +508,36 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().coalesce(__.out("knows"), __.out("created"))', {})).toThrow('step not implemented: coalesce()');
   });
 
+  test('choose(pred, then, else) → gated-seed UNION ALL, arms fold from their seed', () => {
+    const c = read('g.V().choose(__.has("name","vadas"), __.out("knows"), __.in("knows"))');
+    // two gated seeds off the same source (c0): pred and NOT-pred
+    expect(c.sql).toContain("WHERE json_extract(n.props, '$.name') = ?");
+    expect(c.sql).toContain("WHERE NOT COALESCE((json_extract(n.props, '$.name') = ?), 0)");
+    // arms fold through movement; the two element id-relations merge UNION ALL
+    expect(c.sql).toContain('UNION ALL');
+    expect(c.shape).toEqual({ kind: 'vertex' });
+    expect(c.binds).toEqual(['vadas', 'knows', 'vadas', 'knows']);
+    // count().is predicate rides as a correlated subquery; multi-hop arm folds
+    expect(read('g.V().choose(__.out("knows").count().is(P.gt(0)), __.out("created").out())').sql)
+      .toContain('(SELECT COUNT(*) FROM edges WHERE (src=n.id)');
+    // 2-arg form: else absent → identity passthrough of the NOT-pred seed
+    expect(read('g.V().choose(__.hasLabel("software"), __.in("created"))').sql).toContain('UNION ALL');
+  });
+
+  test('choose() deferrals fail closed', () => {
+    // option-map form needs a strategies pass
+    expect(() => compile('g.V().choose(__.values("age")).option(1, __.out())', {}))
+      .toThrow('option-map form not yet supported');
+    // a scalar/projection arm body can't ride the id-relation
+    expect(() => compile('g.V().choose(__.has("x"), __.out(), __.values("name"))', {}))
+      .toThrow('not yet supported (scalar/projection body)');
+    // mixed element kinds across arms
+    expect(() => compile('g.V().choose(__.has("x"), __.out(), __.outE())', {}))
+      .toThrow('different element kinds');
+    expect(() => compile('g.V().as("a").choose(__.has("x"), __.out(), __.in())', {}))
+      .toThrow('choose() after as() not yet supported');
+  });
+
   // ---- P3: repeat/times/emit ----
 
   test('repeat().times() → WITH RECURSIVE walk c1(id, depth); final depth only', () => {
@@ -974,6 +1004,19 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V(2).optional(__.out("created")).values("name")').map((r) => r.v)).toEqual(['vadas']);
     // optional over the whole graph: marko(2 knows) + 5 others as self = 7
     expect(run(store, 'g.V().optional(__.out("knows")).count()').map((r) => r.v)).toEqual([7]);
+  });
+
+  test('choose(pred, then, else) executes both arms, multiset preserved', () => {
+    const store = seededStore();
+    // person → out(created); software → in(created). Covers both arms + multiset.
+    expect(run(store, 'g.V().choose(__.hasLabel("person"), __.out("created"), __.in("created")).values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'josh', 'lop', 'lop', 'lop', 'marko', 'peter', 'ripple']);
+    // 2-arg: software → in(created) (creators); person → identity (self)
+    expect(run(store, 'g.V().choose(__.hasLabel("software"), __.in("created")).values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'josh', 'josh', 'marko', 'marko', 'peter', 'peter', 'vadas']);
+    // predicate = count().is: marko has 2 knows-edges → out(knows); others → self
+    expect(run(store, 'g.V(1).choose(__.out("knows").count().is(P.gt(1)), __.out("knows")).values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'vadas']);
   });
 
   test('alias-compare where — the co-creator idiom', () => {

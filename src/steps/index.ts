@@ -6,7 +6,7 @@ import { type PStep } from '../strategies.ts';
 import { type St, type StepFn } from './context.ts';
 import { move, toEdge, toVertex } from './movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from './filter.ts';
-import { union, optional, repeat } from './branch.ts';
+import { union, optional, repeat, choose } from './branch.ts';
 import { limit, range, skip } from './passthrough.ts';
 import { compileTail } from './projection.ts';
 import { type Compiled } from '../render.ts';
@@ -26,7 +26,7 @@ const PREFIX = new Map<string, StepFn>([
   ['where', where], ['filter', where], ['not', where],
   ['and', andOr], ['or', andOr], ['dedup', dedup],
   ['simplePath', simplePath], ['cyclicPath', cyclicPath],
-  ['union', union], ['optional', optional],
+  ['union', union], ['optional', optional], ['choose', choose],
   // The whole folded repeat/emit/times/until cluster dispatches here (strategies
   // anchors it on repeat() when present, else the first cluster step).
   ['repeat', repeat], ['emit', repeat], ['times', repeat], ['until', repeat],
@@ -94,20 +94,30 @@ function seedUnion(first: PStep, query: Query, params: Record<string, any>): St 
  * accumulates. `query` is threaded so a nested sub-traversal (union branch) shares
  * the outer WITH.
  */
-export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, query: Query = new Query()): { st: St; stop: number } {
-  const first = steps[0];
-  const trackPath = chainTracksPath(steps);
-  const st0 = first.name === 'union' ? seedUnion(first, query, params)
-    : (first.name === 'V' || first.name === 'E') ? seedSource(first, query, params, trackPath)
-    : (() => { throw new Error(`unsupported source step: ${first.name}`); })();
-  let st = st0;
-  let i = 1;
+/** Fold the PREFIX dispatch over `steps` from index `from`, threading St. Stops at
+ *  the first step absent from PREFIX (order/projection/write) and reports where. The
+ *  shared primitive behind both buildPrefix (folding from a V/E/union source) and a
+ *  branch body (folding from an already-seeded relation — choose()'s arms, see
+ *  branch.ts). A body carries no strategies normalization (matching seedUnion), so a
+ *  repeat/by cluster inside an arm defers via its own compiler's guards. */
+export function foldBody(steps: PStep[], seedSt: St, from: number): { st: St; stop: number } {
+  let st = seedSt;
+  let i = from;
   for (; i < steps.length; i++) {
     const fn = PREFIX.get(steps[i].name);
     if (!fn) break;
     st = fn(steps[i], st);
   }
   return { st, stop: i };
+}
+
+export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, query: Query = new Query()): { st: St; stop: number } {
+  const first = steps[0];
+  const trackPath = chainTracksPath(steps);
+  const st0 = first.name === 'union' ? seedUnion(first, query, params)
+    : (first.name === 'V' || first.name === 'E') ? seedSource(first, query, params, trackPath)
+    : (() => { throw new Error(`unsupported source step: ${first.name}`); })();
+  return foldBody(steps, st0, 1);
 }
 
 /** A read traversal: prefix fold + tail projection. */
