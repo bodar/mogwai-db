@@ -24,7 +24,7 @@ import { type Step } from './frontend.ts';
  * The compilers read these fields instead of re-scanning, so the whole read
  * dispatch is a peek-free fold over the step list.
  */
-export type PStep = Step & { cluster?: Step[]; bys?: any[][] };
+export type PStep = Step & { cluster?: Step[]; bys?: any[][]; options?: Step[] };
 
 const REPEAT_CLUSTER = new Set(['repeat', 'emit', 'times', 'until']);
 /** Steps that absorb trailing by() modulators. Alias-compare where()/not() also
@@ -35,7 +35,7 @@ const BY_HOSTS = new Set(['order', 'select', 'project', 'group', 'groupCount', '
  *  shape (iterate() → return nothing), not a step the compiler dispatches. */
 export function normalize(steps: Step[]): { steps: PStep[]; discard: boolean } {
   const stripped = stripTerminal(steps);
-  return { steps: foldByModulators(foldRepeatClusters(stripped.steps)), discard: stripped.discard };
+  return { steps: foldChooseOptions(foldByModulators(foldRepeatClusters(stripped.steps))), discard: stripped.discard };
 }
 
 /** v4 iterate() appends a trailing discard() (or none()): execute, return nothing.
@@ -99,6 +99,24 @@ function foldByModulators(steps: PStep[]): PStep[] {
     let j = i + 1;
     for (; j < steps.length && steps[j].name === 'by'; j++) bys.push(steps[j].args);
     out.push(bys.length ? { ...s, bys } : s);
+    i = j - 1;
+  }
+  return out;
+}
+
+/** Absorb each choose()'s trailing contiguous option() steps into `choose.options`
+ *  — the option-map form choose(choiceFn).option(key, traversal)…. A choose with no
+ *  trailing option() is the predicate form (untouched → the prefix branch compiler).
+ *  The compiler reads `.options` and never scans siblings. */
+function foldChooseOptions(steps: PStep[]): PStep[] {
+  const out: PStep[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    if (s.name !== 'choose') { out.push(s); continue; }
+    const options: Step[] = [];
+    let j = i + 1;
+    for (; j < steps.length && steps[j].name === 'option'; j++) options.push(steps[j]);
+    out.push(options.length ? { ...s, options } : s);
     i = j - 1;
   }
   return out;

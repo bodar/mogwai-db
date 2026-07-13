@@ -247,6 +247,8 @@ export function compileNestedScalar(inner: Step[], ctx: ScalarCtx): Scalar {
     case 'values': requireTerminal(steps, 1); return propAt(nodeId, directProps, s.args[0]);
     case 'label':  requireTerminal(steps, 1); return { expr: labelNameSub(directLabelId ?? q`(SELECT label FROM nodes WHERE id=${nodeId})`), indexKey: null };
     case 'id':     requireTerminal(steps, 1); return { expr: nodeId, indexKey: null };
+    // constant(x): a fixed scalar per traverser — the common choose().option() body.
+    case 'constant': requireTerminal(steps, 1); return { expr: value(s.args[0]), indexKey: null };
     default: throw new Error(`by(__.${s.name}()) not yet supported`);
   }
 }

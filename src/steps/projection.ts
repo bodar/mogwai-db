@@ -102,6 +102,10 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
   if (steps[stop]?.name === 'properties')
     return compileProperties(st, steps.slice(stop), indexKeys);
 
+  // option-map choose (choose().option()…) → a CASE over a correlated choice scalar.
+  if (steps[stop]?.name === 'choose' && steps[stop].options)
+    return compileChooseOptions(st, steps, stop, indexKeys);
+
   // group()/groupCount() is a barrier over the current element stream → one Map.
   if (steps[stop]?.name === 'group' || steps[stop]?.name === 'groupCount') {
     if (stop + 1 < steps.length) throw new Error(`step not implemented after ${steps[stop].name}(): ${steps[stop + 1].name}()`);
@@ -474,6 +478,59 @@ function compilePathArray(st: St, acc: TailAcc, indexKeys: Set<string>): Compile
   const l = labels.as('l');
   const node = q`SELECT pp.pk, je.key AS ord, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${n.c.props} AS props FROM ${paths} pp, json_each(pp.path) je JOIN ${n} ON ${n.c.id}=je.value JOIN ${l} ON ${l.c.id}=${n.c.label} ORDER BY pp.pk, je.key`;
   return readCompiled(st.q, node, { kind: 'pathGrouped', elem: 'vertex' }, [...indexKeys]);
+}
+
+// ---------- option-map choose (scalar CASE projector) ----------
+
+/**
+ * option-map choose(choiceFn).option(key, body)… → one CASE over a correlated choice
+ * scalar. The choice is a T token or a nested scalar traversal (values/label/id/
+ * out().count()); each keyed option → `WHEN predicateSql(choice, key) THEN <body>`
+ * (a P key → its predicate, a literal → equality); the key-less option (Pick.none) →
+ * the ELSE. Requires a Pick.none default with a scalar body: without one, unmatched
+ * inputs pass through as the element itself (TinkerPop identity) → a mixed vertex/
+ * scalar result the one-shape framing can't carry, so that defers. Scalar bodies only
+ * (constant/values/label/id via compileNestedScalar); element bodies, Pick.
+ * unproductive/any, and any trailing step defer. Shape: value.
+ */
+function compileChooseOptions(st: St, steps: PStep[], stop: number, indexKeys: Set<string>): Compiled {
+  const cs = steps[stop];
+  if (stop + 1 < steps.length) throw new Error(`step not implemented after choose().option(): ${steps[stop + 1].name}()`);
+  const ctx = elemCtx(elemRel(st), st.elem);
+
+  const a0 = cs.args[0];
+  let choice: Expression;
+  if (a0 && typeof a0 === 'object' && 'token' in a0)
+    choice = a0.token === 'label' ? labelNameSub(ctx.labelIdExpr)
+      : a0.token === 'id' ? ctx.extIdExpr!
+      : (() => { throw new Error(`choose(T.${a0.token}) not yet supported`); })();
+  else if (a0 && typeof a0 === 'object' && 'nested' in a0)
+    choice = compileNestedScalar(stepChain(a0.nested, st.params), ctx).expr;
+  else throw new Error('choose() choice must be a traversal or a T token');
+
+  const whens: Expression[] = [];
+  let elseExpr: Expression = q`NULL`;
+  let sawNone = false;
+  for (const opt of cs.options!) {
+    const bodyArg = opt.args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
+    if (!bodyArg) throw new Error('option() requires a traversal body');
+    const bodyScalar = compileNestedScalar(stepChain(bodyArg.nested, st.params), ctx).expr;
+    const keyArg = opt.args.find((x: any) => x !== bodyArg);
+    if (keyArg === undefined || (keyArg && typeof keyArg === 'object' && 'pick' in keyArg)) {
+      const pick = keyArg && typeof keyArg === 'object' && 'pick' in keyArg ? keyArg.pick : 'none';
+      if (pick !== 'none') throw new Error(`option(Pick.${pick}) not yet supported`);
+      if (!sawNone) { elseExpr = bodyScalar; sawNone = true; } // first Pick.none wins
+    } else {
+      whens.push(q`WHEN ${predicateSql(choice, keyArg)} THEN ${bodyScalar}`);
+    }
+  }
+  if (!whens.length) throw new Error('choose().option() needs at least one keyed option');
+  // No Pick.none → unmatched inputs are the element itself (mixed vertex/scalar): defer.
+  if (!sawNone) throw new Error('choose().option() without a Pick.none default not yet supported (unmatched pass-through is mixed-shape)');
+  const n = elemRel(st);
+  const p = st.last.as('p');
+  const node = q`SELECT CASE ${list(whens, ' ')} ELSE ${elseExpr} END AS v FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
+  return readCompiled(st.q, node, { kind: 'value' }, [...indexKeys]);
 }
 
 // ---------- group()/groupCount() (barrier → one Map) ----------

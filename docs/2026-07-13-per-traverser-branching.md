@@ -6,10 +6,11 @@ per current traverser and fold the result back. This is "bet #2" from
 investment after the path family landed). It stays true to locked decision #3:
 **compile to one SQL statement, never interpret**.
 
-Status: **Phases A–C landed (2026-07-13, live L3 455 → 459).** `choose` (predicate
-form), `coalesce`, multi-hop `union`/`optional`, `flatMap` — all in one SQL statement.
-Deferred with clear errors: option-map `choose`, scalar/projection branch bodies,
-mixed-shape branches, branch-inside-branch (nested origin), `map` (first-result).
+Status: **Phases A–D landed (2026-07-13, live L3 455 → 463).** `choose` (predicate
+form + option-map scalar form), `coalesce`, multi-hop `union`/`optional`, `flatMap` —
+all in one SQL statement. Deferred with clear errors: scalar/projection branch bodies
+(predicate choose), mixed-shape branches, branch-inside-branch (nested origin), `map`
+(first-result), option-map choose without a scalar `Pick.none`.
 
 ## The prior-art scan settled the approach (do not relitigate)
 
@@ -86,10 +87,29 @@ Correctness note: each input row evaluates the predicate independently in its ga
 CTE, so multiset semantics and per-row dispatch are automatic — no ordinal column
 needed here (contrast `coalesce`).
 
-**Deferred, fail-closed (clear errors):**
-- Option-map form `choose(choiceFn).option(k, t)…` — needs a `foldChooseOptions`
-  normalization pass in `strategies.ts` (gather the trailing `option()` siblings onto
-  the `choose` step, à la `foldByModulators`). Phase D.
+## Phase D (landed) — option-map `choose` (scalar CASE projector)
+
+`choose(choiceFn).option(key, body)…` where every body is a scalar and a `Pick.none`
+default is present → one `CASE` over a correlated choice scalar, a **tail projector**
+(not a prefix branch), shape `value`:
+
+- `foldChooseOptions` (`strategies.ts`) gathers trailing `option()` steps onto the
+  `choose` step (`PStep.options`); the prefix fold (`foldBody`) stops at an option-map
+  choose so `compileTail` routes it to `compileChooseOptions` (`projection.ts`).
+- Choice = a `T.label`/`T.id` token or a nested scalar traversal (`values`/`label`/
+  `id`/`out().count()`) via `compileNestedScalar` (which now also compiles
+  `constant(x)`). Each keyed option → `WHEN predicateSql(choice, key) THEN <body>`
+  (a `P` key → its predicate, a literal → equality); `Pick.none` → the `ELSE`.
+- **`CASE` first-match = TinkerPop first-matching-option** (verified: overlapping
+  `P.between` keys pick the earlier option — expected `x,x,z,z`). The frontend now
+  captures the `Pick` token (`TraversalPickContext`) so `Pick.none` ≠ `Pick.unproductive`.
+
+**Deferred, fail-closed:** no `Pick.none` (unmatched inputs pass through as the element
+itself → mixed vertex/scalar, the framing wall); element/`discard`/`identity`/`fail`
+option bodies; `Pick.unproductive`/`any`; any step trailing the option-map choose;
+`P.or`/`P.and` compound keys.
+
+**Deferred, fail-closed (predicate-form choose, clear errors):**
 - Scalar/projection arm bodies (`__.values('name')`, `__.constant(x).fold()`) — the
   id-relation can't carry a scalar (the `St`-vs-`ScalarCtx` fork). Would need the
   scalar-body engine (a later bet).

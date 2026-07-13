@@ -106,7 +106,9 @@ export function foldBody(steps: PStep[], seedSt: St, from: number): { st: St; st
   let i = from;
   for (; i < steps.length; i++) {
     const fn = PREFIX.get(steps[i].name);
-    if (!fn) break;
+    // Option-map choose (choose().option()…) is a tail CASE projector, not a prefix
+    // branch — stop so compileTail handles it (predicate-form choose has no .options).
+    if (!fn || (steps[i].name === 'choose' && steps[i].options)) break;
     st = fn(steps[i], st);
   }
   return { st, stop: i };
