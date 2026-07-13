@@ -494,8 +494,21 @@ describe('compiler SQL snapshots', () => {
       .toThrow('by() is only supported as an order() or select()/project() modulator');
   });
 
+  test('where(__.<multi-hop chain>) → correlated EXISTS over the path', () => {
+    // 2-hop path existence
+    const two = read('g.V().where(__.out().out()).values("name")');
+    expect(two.sql).toContain('EXISTS(SELECT 1 FROM edges xe0 JOIN nodes xn0 ON xn0.id=xe0.tgt JOIN edges xe1 ON xe1.src=xn0.id JOIN nodes xn1 ON xn1.id=xe1.tgt WHERE xe0.src=n.id');
+    // terminal has() on the neighbour
+    expect(read('g.V().where(__.out("knows").has("age", P.gt(30)))').sql)
+      .toContain("json_extract(xn0.props, '$.age') > ?");
+    // terminal hasLabel()
+    expect(read('g.V().where(__.out("created").hasLabel("software"))').sql).toContain('xn0.label IN (SELECT id FROM labels');
+    // a lone bare movement keeps the leaner edge-only EXISTS (no node join)
+    expect(read('g.V().where(__.out()).count()').sql).toContain('EXISTS(SELECT 1 FROM edges xe WHERE xe.src=n.id))');
+  });
+
   test('where()/filter() deferred forms throw clearly', () => {
-    expect(() => compile('g.V().where(__.out().out())', {})).toThrow('not yet supported');
+    expect(() => compile('g.V().where(__.both().both())', {})).toThrow('multi-hop');
     expect(() => compile('g.V().filter(P.gt(1))', {})).toThrow('filter(predicate) not supported');
   });
 
@@ -1043,6 +1056,22 @@ describe('compiler execution semantics', () => {
     // people known by someone
     expect(run(store, 'g.V().hasLabel("person").where(__.inE("knows").count().is(P.gte(1))).values("name")').map((r) => r.v).sort()).toEqual(['josh', 'vadas']);
     expect(run(store, 'g.V().filter(__.out("created")).values("name")').map((r) => r.v).sort()).toEqual(['josh', 'marko', 'peter']);
+  });
+
+  test('multi-hop where executes: correlated EXISTS over the path', () => {
+    const store = seededStore();
+    // has an out-neighbour created ripple → only josh (josh created ripple)
+    expect(run(store, 'g.V().where(__.out().has("name","ripple")).values("name")').map((r) => r.v)).toEqual(['josh']);
+    // has a 2-hop out path → only marko (marko→josh→ripple/lop)
+    expect(run(store, 'g.V().where(__.out().out()).values("name")').map((r) => r.v)).toEqual(['marko']);
+    // created something that is a software vertex → marko, josh, peter
+    expect(run(store, 'g.V().where(__.out("created").hasLabel("software")).values("name")').map((r) => r.v).sort()).toEqual(['josh', 'marko', 'peter']);
+    // terminal values().is on the neighbour: known-by a person over 30 → nobody (marko is 29)
+    expect(run(store, 'g.V().where(__.in("knows").values("age").is(P.gt(30)))').map((r) => r.v)).toEqual([]);
+    // where(__.label().is(P)) — current-label predicate
+    expect(run(store, 'g.V().where(__.label().is("person")).values("name")').map((r) => r.v).sort()).toEqual(['josh', 'marko', 'peter', 'vadas']);
+    // where(__.not(t)) — negated inner predicate (non-creators)
+    expect(run(store, 'g.V().where(__.not(__.out("created"))).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple', 'vadas']);
   });
 
   test('repeat/times/emit execute (multiset + emit bands)', () => {
