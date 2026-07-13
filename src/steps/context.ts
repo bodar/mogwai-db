@@ -43,18 +43,28 @@ export function appendPathPos(p: PathState, elem: Elem): { path: PathState; col:
   return { path: { kind: 'cols', cols: [...p.cols, { col, elem }] }, col };
 }
 
-/** Immutable prefix state threaded through the step fold. Everything the dispatch
- *  reasons about is replaced wholesale by each StepFn's return; `q` is the shared
- *  append-only CTE builder. */
-export interface St {
+/** The context every traverser stream carries, independent of its shape (elements
+ *  vs a scalar/list value stream — see stream.ts). Carved out of `St` so a retype
+ *  at a tail boundary (fold→list, unfold→elements/scalar) preserves the shared state
+ *  — the query builder, bound params, live aliases, path, and coalesce ordinal —
+ *  without the elements-only `last`/`elem`. */
+export interface Carry {
   readonly q: Query;
-  readonly last: Relation;               // the current id-relation (a CTE handle)
   readonly aliases: AliasMap;
-  readonly elem: Elem;
   readonly indexKeys: ReadonlySet<string>;
   readonly params: Record<string, any>;
   readonly path?: PathState;             // present iff the chain tracks a linear path
   readonly origin?: string;              // coalesce/optional: the carried input-ordinal column
+}
+
+/** Immutable prefix state threaded through the step fold. Everything the dispatch
+ *  reasons about is replaced wholesale by each StepFn's return; `q` is the shared
+ *  append-only CTE builder. The `elements` arm of the `Stream` union (stream.ts):
+ *  movement/filter/branch StepFns are ONLY ever handed this shape. */
+export interface St extends Carry {
+  readonly kind: 'elements';
+  readonly last: Relation;               // the current id-relation (a CTE handle)
+  readonly elem: Elem;
 }
 
 /** A prefix step compiler: consume the step, return the next state. */
