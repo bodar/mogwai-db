@@ -8,7 +8,7 @@ import { move, toEdge, toVertex } from './movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from './filter.ts';
 import { union, optional, repeat, choose, coalesce, flatMap } from './branch.ts';
 import { match } from './match.ts';
-import { limit, range, skip } from './passthrough.ts';
+import { identity, limit, range, skip } from './passthrough.ts';
 import { compileTail } from './projection.ts';
 import { type Compiled } from '../render.ts';
 
@@ -32,7 +32,7 @@ const PREFIX = new Map<string, StepFn>([
   // The whole folded repeat/emit/times/until cluster dispatches here (strategies
   // anchors it on repeat() when present, else the first cluster step).
   ['repeat', repeat], ['emit', repeat], ['times', repeat], ['until', repeat],
-  ['limit', limit], ['range', range], ['skip', skip],
+  ['limit', limit], ['range', range], ['skip', skip], ['identity', identity],
 ]);
 
 /** Steps that need the linear path threaded through the fold: the source vertex
