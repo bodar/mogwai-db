@@ -14,7 +14,7 @@ import { local } from './local.ts';
 import { aggregate, group as groupSE, groupCount as groupCountSE } from './sideeffect.ts';
 import { type SackSpec } from '../frontend.ts';
 import { compileTail, compileFromScalar } from './projection.ts';
-import { compileFromList } from './list.ts';
+import { compileFromList, compileFromMap } from './list.ts';
 import { type Stream } from './stream.ts';
 import { type Compiled } from '../render.ts';
 
@@ -192,6 +192,7 @@ export function dispatchNext(s: Stream, steps: PStep[], at: number): Compiled {
     return compileTail(st, steps, stop);
   }
   if (s.kind === 'scalar') return compileFromScalar(s, steps, at);
+  if (s.kind === 'map') return compileFromMap(s, steps, at);
   return compileFromList(s, steps, at);
 }
 

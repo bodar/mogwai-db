@@ -15,7 +15,7 @@ import {
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
 import { compileSelectProject, compilePath } from './select.ts';
 import { compileMapScalar, compileMath, compileChooseOptions } from './mapscalar.ts';
-import { compileGroup, compileProperties, type GroupSource } from './group.ts';
+import { compileGroup, groupToMapStream, compileProperties, type GroupSource } from './group.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
 //
@@ -180,13 +180,17 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
   if (steps[stop]?.name === 'cap')
     return compileCap(st, steps, stop);
 
-  // group()/groupCount() is a barrier over the current element stream → one Map.
+  // group()/groupCount() is a barrier over the current element stream → one Map. A
+  // TERMINAL group() frames the Map directly (groupBuffer). A NON-terminal group()
+  // retypes to a MapStream so a follower (select(Column.*)/unfold) re-enters the tail.
   if (steps[stop]?.name === 'group' || steps[stop]?.name === 'groupCount') {
-    if (stop + 1 < steps.length) throw new Error(`step not implemented after ${steps[stop].name}(): ${steps[stop + 1].name}()`);
+    const isCount = steps[stop].name === 'groupCount';
     const tbl = st.elem === 'edge' ? 'edges' : 'nodes';
     const ctx = elemCtx(elemRel(st), st.elem);
     const src: GroupSource = { from: `${tbl} n JOIN ${st.last.name} p ON n.id=p.id`, ctx, elem: st.elem === 'edge' ? 'edge' : 'vertex' };
-    return compileGroup(st, steps[stop].name === 'groupCount', steps[stop].bys ?? [], src);
+    if (stop + 1 < steps.length)
+      return dispatchNext(groupToMapStream(st, isCount, steps[stop].bys ?? [], src), steps, stop + 1);
+    return compileGroup(st, isCount, steps[stop].bys ?? [], src);
   }
 
   // Tail fold: accumulate the projection + modifiers, stopping at a retype boundary
