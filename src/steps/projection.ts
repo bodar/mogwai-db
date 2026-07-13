@@ -106,6 +106,11 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
   if (steps[stop]?.name === 'choose' && steps[stop].options)
     return compileChooseOptions(st, steps, stop, indexKeys);
 
+  // map(__.<scalar>) → a per-traverser scalar projection (out-degree, a property, a
+  // label). Element-body map (first-result-only) and select/fold bodies defer.
+  if (steps[stop]?.name === 'map')
+    return compileMapScalar(st, steps, stop, indexKeys);
+
   // group()/groupCount() is a barrier over the current element stream → one Map.
   if (steps[stop]?.name === 'group' || steps[stop]?.name === 'groupCount') {
     if (stop + 1 < steps.length) throw new Error(`step not implemented after ${steps[stop].name}(): ${steps[stop + 1].name}()`);
@@ -481,6 +486,28 @@ function compilePathArray(st: St, acc: TailAcc, indexKeys: Set<string>): Compile
   const l = labels.as('l');
   const node = q`SELECT pp.pk, je.key AS ord, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${n.c.props} AS props FROM ${paths} pp, json_each(pp.path) je JOIN ${n} ON ${n.c.id}=je.value JOIN ${l} ON ${l.c.id}=${n.c.label} ORDER BY pp.pk, je.key`;
   return readCompiled(st.q, node, { kind: 'pathGrouped', elem: 'vertex' }, [...indexKeys]);
+}
+
+// ---------- map (scalar body → per-traverser scalar projector) ----------
+
+/**
+ * map(__.<scalar>) → one correlated scalar per traverser (shape value), reusing
+ * compileNestedScalar (values/label/id/constant/out().count()/edge-aggregate). An
+ * element-body map is first-result-only (needs a per-input row-number) and an alias/
+ * select/fold body isn't a plain scalar — both defer via compileNestedScalar's throw.
+ * A trailing step defers.
+ */
+function compileMapScalar(st: St, steps: PStep[], stop: number, indexKeys: Set<string>): Compiled {
+  if (stop + 1 < steps.length) throw new Error(`step not implemented after map(): ${steps[stop + 1].name}()`);
+  const arg = steps[stop].args[0];
+  if (!arg || typeof arg !== 'object' || !('nested' in arg)) throw new Error('map(traversal) required');
+  const ctx = elemCtx(elemRel(st), st.elem);
+  const sc = compileNestedScalar(stepChain(arg.nested, st.params), ctx);
+  const n = elemRel(st);
+  const p = st.last.as('p');
+  const node = q`SELECT ${sc.expr} AS v FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
+  const keys = sc.indexKey ? new Set([...indexKeys, sc.indexKey]) : indexKeys;
+  return readCompiled(st.q, node, { kind: 'value' }, [...keys]);
 }
 
 // ---------- option-map choose (scalar CASE projector) ----------

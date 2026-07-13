@@ -557,6 +557,17 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().flatMap(__.values("name"))', {})).toThrow('scalar/projection body');
   });
 
+  test('map(__.<scalar>) → per-traverser scalar projection (value shape)', () => {
+    const m = read('g.V().map(__.out().count())');
+    expect(m.shape).toEqual({ kind: 'value' });
+    expect(m.sql).toContain('SELECT (SELECT COUNT(*) FROM edges WHERE (src=n.id)) AS v FROM nodes n JOIN c0 p');
+    expect(read('g.V(1).map(__.values("name"))').sql).toContain("json_extract(n.props, '$.name') AS v");
+    // element-body map (first-result-only) and select/fold bodies defer
+    expect(() => compile('g.V().map(__.out())', {})).toThrow('only supports a terminal count');
+    expect(() => compile('g.V().map(__.select("a"))', {})).toThrow('not yet supported');
+    expect(() => compile('g.V().map(__.values("name")).map(__.values("age"))', {})).toThrow('step not implemented after map()');
+  });
+
   test('choose(pred, then, else) → gated-seed UNION ALL, arms fold from their seed', () => {
     const c = read('g.V().choose(__.has("name","vadas"), __.out("knows"), __.in("knows"))');
     // two gated seeds off the same source (c0): pred and NOT-pred
@@ -1129,6 +1140,14 @@ describe('compiler execution semantics', () => {
     // out(created) degree: 0→"none" (vadas,lop,ripple), else values(name)
     expect(run(store, 'g.V().choose(__.out("created").count()).option(0, __.constant("none")).option(Pick.none, __.values("name"))').map((r) => r.v).sort())
       .toEqual(['josh', 'marko', 'none', 'none', 'none', 'peter']);
+  });
+
+  test('map(__.<scalar>) executes per-traverser', () => {
+    const store = seededStore();
+    // out-degree per vertex: marko3, josh2, peter1, vadas/lop/ripple 0
+    expect(run(store, 'g.V().map(__.out().count())').map((r) => r.v).sort((a, b) => a - b)).toEqual([0, 0, 0, 1, 2, 3]);
+    // per-vertex property projection
+    expect(run(store, 'g.V(1).out("knows").map(__.values("name"))').map((r) => r.v).sort()).toEqual(['josh', 'vadas']);
   });
 
   test('alias-compare where — the co-creator idiom', () => {
