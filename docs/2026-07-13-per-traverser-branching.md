@@ -216,10 +216,29 @@ broke, L3 dipped, caught by the ratchet). Plus `where(__.label()[.is(P)])` and
 `where(__.or(__.select('n').hasLabel('software'), __.select('n').hasLabel('person')))`.
 Unknown label fails closed.
 
-**This is the foundation `match()` builds on** — a match pattern (`as('a').out().as('b')`)
-is an alias-rooted constraint; `aliasCtx`/`resolveAlias` + the `as()`/`carryFrag` alias
-machinery are the reusable pieces. `match` itself (declarative pattern → shared-variable
-join, dependency-ordered) is the next deliberate batch, not yet built.
+## Phase H (landed) — `match()` (conjunctive pattern join)
+
+`src/steps/match.ts`, a prefix step. `match(p1, p2, …)` where each pattern is
+`as(start).<out/in([label])>*[.has/hasLabel].as(end)`:
+
+- **Root** = the one start var never used as an end (nor an outer alias) → bound to the
+  incoming id. `≠1` root (e.g. mutual `a↔b`) defers.
+- Fold patterns in **dependency order** (process one whose start is already bound): each
+  emits a join CTE that navigates the movement chain from the start var's column and
+  either **binds** the end var (a new alias column `a{k}`) or **constrains** it (a
+  `WHERE end.id = p.a{j}` equality) when already bound. `has`/`hasLabel` filters apply to
+  the last node.
+- The result keeps `id` = the root's id and carries every var as an alias column, so a
+  downstream `select`/`count`/`dedup` consumes it through the existing rails (no new
+  framing). Reuses `dirsFor`/`labelIn`/`predicateSql`/`propExtract` + the `as()` alias-
+  column scheme.
+
+Built directly on Phase G's alias machinery (a match pattern *is* an alias-rooted
+constraint). **Deferred, fail-closed:** `both()`/edge/scalar-terminal (`count`/`values`)
+patterns, `or`/`not`/`where`/nested-`match` patterns, `repeat`/`order`/`map` in a pattern,
+`>1`/`0` root vars, `match`-inside-`where`, `select`-then-movement continuations, and
+`MatchAlgorithm`/`MatchPredicate` strategies (result-neutral optimizer hints, but the
+strategy gate stays fail-closed by policy — a future safe whitelist could accept them).
 
 ## Test discipline
 

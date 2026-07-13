@@ -1215,6 +1215,33 @@ describe('compiler execution semantics', () => {
     expect(() => compile('g.V().where(__.as("z").out())', {})).toThrow('no such label');
   });
 
+  test('match() — conjunctive pattern join over shared variables', () => {
+    const store = seededStore();
+    // a knows b AND a created c (multi-select raw cols are e{i}_v)
+    expect(run(store, 'g.V().match(__.as("a").out("knows").as("b"), __.as("a").out("created").as("c")).select("a","b","c").by("name")')
+      .map((r: any) => `${r.e0_v}-${r.e1_v}-${r.e2_v}`).sort())
+      .toEqual(['marko-josh-lop', 'marko-vadas-lop']);
+    // co-creators (a and c both created b), a != c
+    expect(run(store, 'g.V().match(__.as("a").out("created").as("b"), __.as("b").in("created").as("c")).where("a",P.neq("c")).select("a","c").by("name")')
+      .map((r: any) => `${r.e0_v}-${r.e1_v}`).sort())
+      .toEqual(['josh-marko', 'josh-peter', 'marko-josh', 'marko-peter', 'peter-josh', 'peter-marko']);
+    // pattern order is declarative (root = the start-only var 'a', not the first pattern)
+    expect(run(store, 'g.V().match(__.as("b").out("created").as("c"), __.as("a").out("knows").as("b")).select("a").by("name")').map((r) => r.v).sort())
+      .toEqual(['marko', 'marko']);
+    // shared-var + has-filter patterns, count of solutions
+    expect(run(store, 'g.V().match(__.as("a").out("knows").as("b")).count()').map((r) => r.v)).toEqual([2]);
+  });
+
+  test('match() deferrals fail closed', () => {
+    expect(() => compile('g.V().match(__.as("a").both().as("b"))', {})).toThrow('both()');
+    // scalar-terminal pattern (count binds a scalar var)
+    expect(() => compile('g.V().match(__.as("a").out("knows").count().as("b"))', {})).toThrow('count()');
+    // mutual recursion → no single start-only root
+    expect(() => compile('g.V().match(__.as("a").out("created").as("b"), __.as("b").in("created").as("a"))', {})).toThrow('root variable');
+    // or/and pattern
+    expect(() => compile('g.V().match(__.or(__.as("a").out().as("b")))', {})).toThrow('must start with as');
+  });
+
   test('alias-compare where — the co-creator idiom', () => {
     const store = seededStore();
     // people who created something also created by someone else (exclude self)
