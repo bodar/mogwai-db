@@ -207,10 +207,16 @@ baseline:
   `makeRouter`/`GraphManager`, in-band REST verbs, Bun↔CF parity + shared
   `managementContract` — see CLAUDE.md "Management API + runtime parity").
   Remaining: bearer auth per graph + real Cloudflare deploy → *deployable*.
-- **W4 — multi/meta-property schema rework.** Props stop being a flat JSON object
-  (design fork: nested JSON `{key:[{value,meta}]}` vs a normalized
-  `properties` table). Touches valueMap/values/has/properties/addV/storage —
-  biggest blast radius, deliberately after a deployed baseline exists.
+- **W4 — multi/meta-property schema rework. DONE (L3 634 → 648).** Design fork
+  resolved to the **normalized `vertex_properties(id,node,key,value,meta)` table**
+  (edges keep a flat JSONB props blob — Property has no id/meta/multi). Cardinality
+  single/list/set + meta-property writes, `values()`-as-flatMap, `valueMap`
+  `{key:[values]}`, ANY-match `has()`, meta read chains (`properties().has(metaKey)`/
+  `hasKey`/`hasValue`/`.properties()`/`valueMap`/`.id()`), static vp indexes replacing
+  the self-tuning expression index, crew-graph seed. See CLAUDE.md "Schema — W4
+  property model" + memory `w4-property-model`. Remaining polish: remove the inert
+  `indexKeys` accumulator threading; `properties().dedup()`; map-form `property()`;
+  traversal-valued `property(k,__.…)`.
 - **W5 — conformance grind.** Landed so far (2026-07-13, L3 130→618): the **path
   family** (linear `path()`/`by()`/`simplePath()`/`cyclicPath()`, recursive
   `repeat().path()`, `simplePath()` in-body, `repeat().until()`); the **per-traverser

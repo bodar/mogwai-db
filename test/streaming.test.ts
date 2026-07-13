@@ -86,7 +86,6 @@ describe('chunked streaming response', () => {
     // rowVertex's JSON.parse throws AFTER the first value has already been streamed.
     let calls = 0;
     const brokenStore = {
-      ensureNodePropIndex() {},
       query() {
         return [
           { id: 1, label: 'person', props: '{}' },

@@ -73,15 +73,6 @@ export class GraphStore {
     return this.sql.query<T>(sql, binds.map(coerceBind));
   }
 
-  /**
-   * No-op since W4: vertex properties are normalized into `vertex_properties`
-   * with static `(key,value)`/`(node,key)` indexes built once in the schema, so
-   * there is no per-key on-demand expression index to self-tune anymore. Kept as
-   * a no-op call site for one release to keep the handler's index-priming loop
-   * intact; the whole indexKeys plumbing is removed in the follow-up cleanup.
-   */
-  ensureNodePropIndex(_key: string): void {}
-
   labelId(name: string): number {
     return this.query<{ id: number }>(
       'INSERT INTO labels(name) VALUES(?) ON CONFLICT(name) DO UPDATE SET name=name RETURNING id',
