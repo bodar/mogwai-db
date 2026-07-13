@@ -409,10 +409,12 @@ function compileCap(st: St, steps: PStep[], stop: number): Compiled {
     const ls = toListStream(carryOf(st), def.rel, def.of);
     return dispatchNext(compileUnfold(ls), steps, stop + 1);
   }
-  // group('a')/groupCount('a') side-effect → re-run compileGroup over the stashed
-  // source (Stage 3).
-  if (stop + 1 < steps.length) throw new Error(`step not implemented after cap('${names[0]}'): ${steps[stop + 1].name}()`);
+  // group('a')/groupCount('a') side-effect → re-emit the stashed Map. A TERMINAL cap
+  // frames it directly; a follower (select(Column.*)/unfold) retypes it to a MapStream
+  // and re-enters the tail — same as an inline group().
   const src: GroupSource = { from: def.from, ctx: def.ctx, elem: def.elem };
+  if (stop + 1 < steps.length)
+    return dispatchNext(groupToMapStream(st, def.isCount, def.bys, src), steps, stop + 1);
   return compileGroup(st, def.isCount, def.bys, src);
 }
 

@@ -1,7 +1,7 @@
 import { q, value, list, empty, raw, type Expression } from '../q.ts';
 import { labels, vertexProperties } from '../schema.ts';
 import {
-  compileNestedScalar, scalarProp, labelNameSub, framedPropsCtx, vertexPropsAgg, extIdOf, propExtract, predicateSql, nodePropScalar,
+  compileNestedScalar, compileNestedList, scalarProp, labelNameSub, framedPropsCtx, vertexPropsAgg, extIdOf, propExtract, predicateSql, nodePropScalar,
   type ScalarCtx,
 } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
@@ -172,6 +172,16 @@ export function groupToMapStream(st: St, isCount: boolean, bys: any[][], src: Gr
         mv = q`MAX(${compileNestedScalar(inner, src.ctx).expr})`; valOf = { kind: 'scalar' };
       } else if (names[names.length - 1] === 'sum') {
         mv = q`SUM(${compileNestedScalar(inner.slice(0, -1), src.ctx).expr})`; valOf = { kind: 'scalar' };
+      } else if (names[names.length - 1] === 'fold' && MOVES_ROOT.has(names[0])) {
+        // by(__.<move>().<proj>()…fold()) → one correlated neighbour-list per key. The
+        // list is per-member, so MAX (which satisfies GROUP BY) is only the value when
+        // each group is ONE element — i.e. the key is the element itself. A multi-member
+        // key would need the fold over ALL members' neighbours (a UNION over the group),
+        // so defer it. The nesting rides valOf so select(Column.values) yields a
+        // list-of-lists that unfold explodes into per-list rows.
+        if (keyOf.kind !== 'elem') throw new Error('select(Column) over a group with a non-element key and a neighbour-list value not yet supported');
+        const nl = compileNestedList(inner.slice(0, -1), src.ctx);
+        mv = q`MAX(${nl.expr})`; valOf = { kind: 'list', of: nl.of };
       } else throw new Error('select(Column) over this group() value modulator not yet supported');
     } else throw new Error('select(Column) over this group() value modulator not yet supported');
   }

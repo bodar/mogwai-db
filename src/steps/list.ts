@@ -40,13 +40,19 @@ function listReducer(s: ListStream, name: string): Compiled {
  * through the retype (compileFold refused to fold them in), so the new stream starts
  * clean.
  */
-export function compileUnfold(s: ListStream): St | ScalarStream {
+export function compileUnfold(s: ListStream): St | ScalarStream | ListStream {
   const c = carryOf(s);
   const explode = (col: string): Expression =>
     q`SELECT je.value AS ${col} FROM ${s.rel}, json_each(${s.rel.c.list}) je ORDER BY je.key`;
   if (s.of.kind === 'elem') {
     const rel = s.q.cte(explode('id'), ['id']);
     return { ...c, kind: 'elements', last: rel, elem: s.of.elem, aliases: new Map(), path: undefined, origin: undefined };
+  }
+  // A list-of-lists: each exploded element is itself a JSONB array → a ListStream row
+  // of the inner shape (so a further unfold / Scope.local op re-enters the list phase).
+  if (s.of.kind === 'list') {
+    const rel = s.q.cte(explode('list'), ['list']);
+    return toListStream(c, rel, s.of.of);
   }
   const rel = s.q.cte(explode('v'), ['v']);
   return { ...c, kind: 'scalar', rel, as: s.of.as };
