@@ -10,6 +10,11 @@ export interface Sql {
   /** Run a query with positional `?` bindings and return all rows. Writes use
    *  `RETURNING` to read back generated ids, so this covers reads and writes. */
   query<T = any>(sql: string, binds?: readonly unknown[]): T[];
+  /** Release the underlying handle, if any. Bun closes its `bun:sqlite`
+   *  Database (so a file-backed graph can then be unlinked); the Durable Object
+   *  adapter owns no releasable handle (teardown there is `ctx.storage.deleteAll`),
+   *  so it omits this. Optional at the seam because only Bun's registry needs it. */
+  close?(): void;
 }
 
 // One statement per entry: DO `ctx.storage.sql.exec` runs a single statement,
@@ -34,7 +39,16 @@ const SCHEMA = [
 
 export class GraphStore {
   constructor(private sql: Sql) {
+    this.initSchema();
+  }
+
+  /** Run the schema DDL (idempotent — every statement is `IF NOT EXISTS`) and
+   *  reset the per-isolate index cache. Called once from the ctor, and again by
+   *  a Durable Object after `ctx.storage.deleteAll()` wipes the tables out from
+   *  under a still-live instance, to restore it to a fresh empty graph. */
+  initSchema(): void {
     for (const statement of SCHEMA) this.sql.exec(statement);
+    this.indexed.clear();
   }
 
   query<T = any>(sql: string, binds: readonly unknown[] = []): T[] {

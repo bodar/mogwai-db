@@ -75,8 +75,49 @@ a dead 2013 OGM).
    graph *within* a tenant — two-level hierarchy for free. Do NOT route on
    the `g` field at the Worker layer; it would force body-parsing before
    routing. TinkerPop has no data-plane create/drop-database API — DO
-   on-first-access *is* the provisioning story; deletion is a management
-   endpoint on the Worker, out-of-band, as it always was in TinkerPop.
+   on-first-access *is* the provisioning story. *Element* deletion is native
+   client gremlin (`drop()`, vertices+edges); *whole-graph* lifecycle is a thin
+   in-band REST layer on the SAME `/g/{graphId}` path (see "Management API +
+   runtime parity" below), NOT an out-of-band control plane.
+
+## Management API + runtime parity (W3, DONE)
+
+Whole-graph lifecycle is a thin REST layer on the same `/g/{id}` path, **identical
+on Bun and Cloudflare** — no separate control plane. The shared `makeRouter`
+(`src/router.ts`) owns ALL management HTTP framing in one place and dispatches by
+verb onto an injected `GraphManager` (`src/manager.ts`), the one thing that differs
+per runtime (sibling seam to `Sql`):
+- `POST /g/{id}` → gremlin query (GraphBinary, always 200; errors ride the status
+  trailer). Creates-on-demand.
+- `PUT /g/{id}` → create-if-absent → 201. `GET /g/{id}` → `{vertexCount,edgeCount}`
+  (auto-creates empty). `DELETE /g/{id}` → 204. Bad path → 404; bad verb → 405.
+
+**Semantics are idempotent + create-on-demand on BOTH, because CF's DO namespace
+has no "does this exist?" query** (`getByName`/`idFromName` always returns a stub;
+the DO springs into being on first access). So no verb 404s on a valid id — that's
+not laziness, it's the only honest mirror of the platform. Bun matches via
+`BunGraphManager`: a `Map<id,GraphStore>` registry (one `bun:sqlite` per graph),
+`:memory:` default, file-per-id (`{dir}/{id}.sqlite`, WAL sidecars removed on
+destroy) when `$MOGWAI_DB_DIR` set. Element deletion stays native gremlin `drop()`
+(vertices *and* edges).
+
+**Teardown = `ctx.storage.deleteAll()`, NOT dropping tables** (CF docs: dropping
+tables leaves internal metadata; `deleteAll` is the only route to zero storage /
+stop billing). CF-only gotcha that cost a debug cycle and a contract-test failure:
+`deleteAll()` wipes the SQLite tables but the **warm DO instance keeps serving** —
+CF doesn't evict it synchronously — and that instance's `GraphStore` ran its schema
+DDL once in the ctor, so the next request on the same instance hits `no such table:
+nodes`. Fix (`worker.ts`): `destroy()` sets an in-memory `wiped` flag; `ensureLive()`
+(called by fetch/create/info) lazily re-runs `GraphStore.initSchema()` on reuse.
+Lazy, NOT eager in `destroy()`, on purpose — an abandoned graph then leaves storage
+empty so the DO is GC-eligible and billing stops; only actual reuse pays to rebuild.
+Proven identical on both runtimes by the shared `managementContract` in
+`test/contract.ts` (write→count→destroy→recreated-empty, delete-twice idempotent).
+Known limitation (both runtimes): a `DELETE` racing an in-flight `POST` on the
+same graph can make the query resume against wiped storage → it fails *safe* (a
+GraphBinary error, no corruption), not correct. This is the per-request-transaction
+gap P4 still lists as remaining (DO single-threading + one implicit txn per request
+closes it); destroy is a rare admin op, so it's not yet worth a lock.
 
 ## Hard-won wire-protocol facts (each cost debugging time)
 
@@ -413,11 +454,12 @@ deliberately skipped (0 L3: JS GLV stubs it).
   `GraphStore` (schema, label interning) sits on top; compiler + handler are
   storage-agnostic.
 - Bun ⇄ Cloudflare via DI (`@bodar/yadic`), DONE: `application(deps)` in
-  `src/application.ts` wires the shared `handler` from the one injected leaf,
-  `store`. Entry points: `src/bun/server.ts` (`Bun.serve` + `BunSqlite`;
-  exports `startServer`, listens under `import.meta.main`) and
-  `src/cloudflare/worker.ts` (route `POST /g/{graphId}` → DO `GraphDatabase` +
-  `DurableObjectSqlite`). Reference impl: `~/Projects/talebrary`.
+  `src/application.ts` wires the shared `router` (`src/router.ts`) from the one
+  injected leaf, a `GraphManager` (`src/manager.ts` — the graph-lifecycle seam,
+  sibling to `Sql`). Entry points: `src/bun/server.ts` (`Bun.serve` +
+  `BunGraphManager`; exports `startServer`, listens under `import.meta.main`)
+  and `src/cloudflare/worker.ts` (`CloudflareGraphManager` over the DO namespace;
+  DO `GraphDatabase` + `DurableObjectSqlite`). Reference impl: `~/Projects/talebrary`.
 - Bind-type gotcha (cost a review cycle): `bun:sqlite` accepts `boolean`/`bigint`
   binds; DO `ctx.storage.sql` (`SqlStorageValue`) throws on them. `GraphStore.query`
   coerces boolean→1/0 and bigint→number at the one seam so both runtimes agree —

@@ -16,21 +16,26 @@ import { compileInject } from './projection.ts';
 // the right compiler; routing is predicate/position based (addE can be mid-chain,
 // drop must be last), so it's an ordered rule list rather than a name→fn Map.
 
-// g.V(...).<filters>.drop() — delete the target vertices and their incident edges.
+// drop() — remove the target elements. Vertices (g.V()…drop()) take their
+// incident edges with them; edges (g.E()…drop(), g.V().outE()…drop()) delete
+// only the matched edge rows.
 function compileDrop(steps: PStep[]): WritePlan {
   const { st, stop } = buildPrefix(steps.slice(0, -1));
   if (stop !== steps.length - 1) throw new Error(`drop() after ${steps[stop].name}() not yet supported`);
-  if (st.elem === 'edge') throw new Error('edge drop() (e.g. g.E().drop()) not yet supported');
+  const isEdge = st.elem === 'edge';
   const target = renderFrom(st.q, st.last);
   return {
     kind: 'write',
     run: (store) => {
-      // Materialize the target ids ONCE, before mutating. Deleting incident edges
-      // first would empty a re-evaluated target CTE (if it reads the edges table),
-      // silently leaving vertices behind. Snapshot ids, then delete by value.
+      // Materialize the target ids ONCE, before mutating. For vertices, deleting
+      // incident edges first would empty a re-evaluated target CTE (if it reads
+      // the edges table), silently leaving vertices behind. Snapshot, then delete.
       const ids = store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id);
-      if (ids.length) {
-        const ph = ids.map(() => '?').join(',');
+      if (!ids.length) return [];
+      const ph = ids.map(() => '?').join(',');
+      if (isEdge) {
+        store.query(`DELETE FROM edges WHERE id IN (${ph})`, ids);
+      } else {
         store.query(`DELETE FROM edges WHERE src IN (${ph}) OR tgt IN (${ph})`, [...ids, ...ids]);
         store.query(`DELETE FROM nodes WHERE id IN (${ph})`, ids);
       }

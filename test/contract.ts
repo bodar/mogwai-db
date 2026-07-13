@@ -6,8 +6,9 @@ const { traversal } = gremlin.process.AnonymousTraversalSource;
 const __ = gremlin.process.statics;
 const P = gremlin.process.P;
 
-/** A runtime under test: start it, get a URL to connect the GLV to, stop it.
- *  `start` returns the base URL a TinkerPop 4 GLV connects to. */
+/** A runtime under test: start it, get its ORIGIN (base URL, no graph path), stop
+ *  it. Graphs are addressed under `{origin}/g/{id}` identically on both runtimes,
+ *  so the same contract proves them equivalent — data plane and management. */
 export interface Harness {
   start(): Promise<string>;
   stop(): Promise<void> | void;
@@ -16,15 +17,33 @@ export interface Harness {
 /**
  * The shared conformance contract. One set of assertions, driven through the
  * real gremlin GLV over GraphBinary — run against every runtime (Bun server,
- * Cloudflare DO) so the two are proven identical, not tested twice.
+ * Cloudflare DO) so the two are proven identical, not tested twice. Boots the
+ * runtime ONCE, then exercises both the gremlin data plane and the graph
+ * management API (create/info/destroy over plain HTTP verbs).
  */
 export function graphContract(name: string, harness: Harness) {
   describe(name, () => {
+    let origin: string;
+    beforeAll(async () => {
+      origin = await harness.start();
+    }, 60_000); // generous: wrangler dev can take a while to boot
+    afterAll(async () => {
+      await harness.stop();
+    });
+
+    gremlinContract(() => origin);
+    managementContract(() => origin);
+  });
+}
+
+// The gremlin data plane: seed a graph over the wire, then read it back.
+function gremlinContract(getOrigin: () => string) {
+  describe('gremlin', () => {
     let drc: any, g: any, dan: any, ada: any, zig: any;
 
     beforeAll(async () => {
-      const url = await harness.start();
-      drc = new DriverRemoteConnection(url);
+      // A fresh graph id per run keeps the seed isolated from other graphs.
+      drc = new DriverRemoteConnection(`${getOrigin()}/g/gremlin-${Date.now()}`);
       g = traversal().with_(drc);
 
       // inserts through the wire
@@ -34,11 +53,10 @@ export function graphContract(name: string, harness: Harness) {
       await g.V(dan.id).addE('knows').to(__.V(ada.id)).iterate();
       await g.V(dan.id).addE('likes').to(__.V(zig.id)).iterate();
       await g.V(ada.id).addE('likes').to(__.V(zig.id)).iterate();
-    }, 60_000); // generous: wrangler dev can take a while to boot
+    }, 60_000);
 
     afterAll(async () => {
       await drc?.close();
-      await harness.stop();
     });
 
     test('inserts return materialized vertices', () => {
@@ -149,6 +167,16 @@ export function graphContract(name: string, harness: Harness) {
       expect(await g.V(dan.id).out('knows').values('name').toList()).toEqual(['ada']);
     });
 
+    test('edge drop removes only the matched edge, keeping its endpoints', async () => {
+      // dan -likes-> zig (seeded). Drop just that edge via an edge-typed traversal.
+      await g.V(dan.id).outE('likes').drop().iterate();
+      expect(await g.V(dan.id).out('likes').toList()).toEqual([]);
+      // dan's other edge and both endpoints survive.
+      expect(await g.V(dan.id).out('knows').values('name').toList()).toEqual(['ada']);
+      expect((await g.V(dan.id).values('name').next()).value).toBe('dan');
+      expect((await g.V(zig.id).values('name').next()).value).toBe('zig');
+    });
+
     // Cross-runtime bind coercion: bun:sqlite accepts boolean binds, DO's
     // ctx.storage.sql rejects them. Added last so the extra vertex doesn't
     // perturb the count/limit assertions above.
@@ -160,6 +188,66 @@ export function graphContract(name: string, harness: Harness) {
 
     test('unsupported step rejected server-side', async () => {
       expect(g.V().sack().toList()).rejects.toThrow();
+    });
+  });
+}
+
+// The management API: whole-graph lifecycle over plain HTTP verbs. Idempotent and
+// create-on-demand on BOTH runtimes — matching Cloudflare's provisioning (a DO
+// springs into being on first access; the namespace can't report "not found"),
+// which the Bun registry mirrors so the local, dependency-free server has
+// identical semantics.
+function managementContract(getOrigin: () => string) {
+  describe('management', () => {
+    const graphUrl = (id: string) => `${getOrigin()}/g/${id}`;
+    // Unique id per test so runs don't collide (wrangler dev persists to disk).
+    const freshId = (tag: string) => `mgmt-${tag}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+
+    test('PUT creates a graph (201)', async () => {
+      const res = await fetch(graphUrl(freshId('put')), { method: 'PUT' });
+      expect(res.status).toBe(201);
+    });
+
+    test('GET returns element counts, auto-creating an empty graph', async () => {
+      const res = await fetch(graphUrl(freshId('get')));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ vertexCount: 0, edgeCount: 0 });
+    });
+
+    test('full lifecycle: write, count, destroy, recreated empty', async () => {
+      const id = freshId('life');
+      const drc = new DriverRemoteConnection(graphUrl(id));
+      const g = traversal().with_(drc);
+      try {
+        await g.addV('person').property('name', 'x').iterate();
+        await g.addV('person').property('name', 'y').iterate();
+
+        const before = (await (await fetch(graphUrl(id))).json()) as any;
+        expect(before.vertexCount).toBe(2);
+
+        const del = await fetch(graphUrl(id), { method: 'DELETE' });
+        expect(del.status).toBe(204);
+
+        // Re-addressing recreates the graph empty (CF provisioning; Bun mirrors).
+        const after = (await (await fetch(graphUrl(id))).json()) as any;
+        expect(after.vertexCount).toBe(0);
+      } finally {
+        await drc.close();
+      }
+    }, 30_000);
+
+    test('DELETE is idempotent (delete twice is fine)', async () => {
+      const id = freshId('idem');
+      expect((await fetch(graphUrl(id), { method: 'DELETE' })).status).toBe(204);
+      expect((await fetch(graphUrl(id), { method: 'DELETE' })).status).toBe(204);
+    });
+
+    test('malformed path 404s', async () => {
+      expect((await fetch(`${getOrigin()}/nope`)).status).toBe(404);
+    });
+
+    test('unsupported method 405s', async () => {
+      expect((await fetch(graphUrl(freshId('method')), { method: 'PATCH' })).status).toBe(405);
     });
   });
 }
