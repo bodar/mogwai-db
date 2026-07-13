@@ -1,8 +1,10 @@
 # Side-effect state — `aggregate`/`store`/`cap`, `sack`, `group('a')` (design + plan)
 
-**Status:** planned 2026-07-13. The standalone analysis §12 of the feature-support
-matrix has pointed at (and `docs/2026-07-12-conformance-structural-bets.md` #3 promised)
-but never written. This is it.
+**Status:** LANDED 2026-07-13 (L3 618→634: sack +4, aggregate/cap +8, group('a')/cap +4).
+The standalone analysis §12 of the feature-support matrix pointed at (and
+`docs/2026-07-12-conformance-structural-bets.md` #3 promised) but never written. This is it
+— written as the plan, kept as the record. Note: TinkerPop 4 dropped `store()` (no grammar
+rule; `aggregate(Scope.local)` replaces it), so Stage 2 is `aggregate` only.
 
 The one genuinely-new execution notion left: **state that is not the current
 id-relation.** Everything so far is one id-relation flowing through CTEs. Side-effects

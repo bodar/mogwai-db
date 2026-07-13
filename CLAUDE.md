@@ -589,6 +589,55 @@ fold().none(…)`); the **scalar-stream `none(P)` barrier** (`V().values('age').
 empty — a whole-stream barrier, NOT the per-list collection filter; semantics not yet modelled,
 fails closed). Mixed-type inject (`inject([a,b],'c')`) stays flattened for now.
 
+## Side-effect state — sack + aggregate/cap + group('a') (LANDED 2026-07-13, L3 618→634)
+
+The one genuinely-new execution notion: state that is NOT the current id-relation. Two
+mechanisms, one home (`Carry`), both still ONE SQL statement (locked #3 holds — no
+interpreter). Plan + decision log: `docs/2026-07-13-side-effect-state-plan.md`.
+
+- **`sack` = a carried per-traverser column** (`Carry.sack`, sibling to `origin`),
+  threaded through movement/filter CTEs by the EXISTING `carryFrag`/`carriedCols`/`advance`
+  plumbing — `advance` gained a `sack?: string|null` tri-state opt (set/keep/clear) exactly
+  like `origin`. `withSack(init)` seeds the `sk` column at the V()/E() source (extracted by
+  `frontend.ts extractSack`, mirroring extractStrategies; thread `sackInit` → `compileRead`
+  → `buildPrefix` → `seedSource`). `sack(Operator.x).by(v)` is a PREFIX StepFn
+  (`src/steps/sack.ts`) that REPLACES the carried column (assign/sum/minus/mult/div/min/max;
+  div forces REAL division; one by() only; a by-miss drops the traverser like values()); it
+  hand-rolls its SELECT so it excludes `sk` from `carryFrag` and re-projects. Bare `sack()`
+  is a TAIL read (`compileSackRead` in projection.ts) through the shared value tail (framing
+  INFERRED like values() — as:undefined; a trailing sum()/dedup/order composes). `Operator`
+  tokens need the `TraversalOperatorContext` walkArgs case (was dropped, like the other enum
+  tokens). `sack` ∈ PREFIX (mutate only — bare read guarded to break to the tail) and BY_HOSTS.
+- **Side-effects = a named registry** (`Carry.sideEffects: Map<name, SideEffectDef>`, sibling
+  to `aliases`). `SideEffectDef` = a `list` def (aggregate → a JSONB-list CTE) or a `group`
+  def (stashed group-spec). `aggregate('x')` (`src/steps/sideeffect.ts`) is a PASS-THROUGH
+  barrier StepFn: builds the bag CTE (`jsonbGroupArray` of rowids, or a by(key) scalar with a
+  by-miss `IS NOT NULL` filter), registers it, returns `st` UNCHANGED (so the chain continues
+  — `V().aggregate('x').out()` works). **`store()` does NOT exist in TinkerPop 4** (dropped;
+  `aggregate(Scope.local)` replaces it — no grammar rule), so only `aggregate` reaches here.
+- **`cap('x')` (`compileCap` in projection.ts)** looks the name up. A **list side-effect
+  UNROLLS to individual results** — there is NO BulkSet wire type in the client and the suite
+  expects one result per bagged element (`aggregate('x').cap('x')` → 6 vertices, NOT one
+  List), so cap explodes the stored list via `compileUnfold` → the element/scalar stream →
+  `dispatchNext` (reuses the §9 list substrate, zero new list code). A **group side-effect
+  re-emits ONE Map** via `compileGroup` over the stashed source.
+- **`group('a')`/`groupCount('a')` (side-effecting, `sideeffect.ts`)** = a PASS-THROUGH
+  barrier that stashes the group-spec (source `from` string referencing the persistent
+  `st.last` CTE + `elemCtx` + folded `bys`) and returns `st` unchanged, so movement between
+  it and `cap('a')` works (`groupCount('a').by('name').out().cap('a')`). In `foldBody`,
+  group/groupCount dispatch as a prefix step ONLY when they carry a string side-effect key
+  (`isSideEffectGroup` guard, mirroring the sack/choose guards); the bare terminal form falls
+  to the existing `compileTail` barrier. Index keys for the group key are computed at cap time
+  (compileGroup mutates the passed set) — the def carries none.
+- **Deferred, fail closed (each a clear throw):** `within('x')`/`without('x')` mid-chain
+  readback (the aggregate-dedup idiom — where eager/lazy actually diverge; set-based join
+  can't honour incremental visibility); the sack inject-const **numeric-promotion** block
+  (NumberHelper byte→short-on-overflow bump — number-chasing risk, deliberately not chased);
+  sack through `repeat()`/`barrier`/`local`, split/merge-on-fork, `sack(BiFunction)`;
+  aggregate on a SCALAR stream (`values(k).aggregate(x)`) and `by(<nested/token>)`; multi-key
+  `cap('x','y')`; `group('a')…cap('a').select(Column.values).unfold()` (needs
+  `select(Column.values)`, §9); group side-effect after `as()`/`path()`.
+
 ## Environment notes
 
 - Runtime is Bun (pinned in `mise.toml`), not Node. `bun run start` serves
