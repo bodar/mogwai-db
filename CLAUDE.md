@@ -282,7 +282,7 @@ suite manually.
 
 > This section is a *record* of how the read compiler was built, not a to-do list.
 > The **actual immediate next work is W3 — Cloudflare deploy + Worker auth** (see
-> docs/2026-07-11-phased-roadmap-plan.md). Live L3 is 589 (path family, then the
+> docs/2026-07-11-phased-roadmap-plan.md). Live L3 is 608 (path family, then the
 > per-traverser branching family + multi-hop/alias where landed 2026-07-13; then the
 > safe optimization-strategy whitelist 473→495; then the value-tail unification
 > 495→496 (compileInject reuses the shared foldTailAcc+renderProjection in
@@ -314,6 +314,52 @@ Routes through the shared `renderProjection` value tail, so a trailing
 generically; `frameValue('double')` already exists). Deferred (clear throws): a var with
 no by() (bare incoming — needs local()/sack()), `withSideEffect`-bound vars, and reading
 `project()`/`select()` map columns (`order().by(__.math(...))`).
+
+**`asDate`/`dateAdd`/`dateDiff` + `datetime()` literals — LANDED (2026-07-13, L3 589→608).**
+The date family, all on the value-tail carrier. **Internal representation = epoch-millis
+INTEGER**; a new `'date'` ValueType tag (`render.ts`) frames it back to a JS Date via the
+client's `dateTimeSerializer` (GraphBinary DATETIME 0x04, UTC wire — `handler.ts`
+`frameValue`). Second/minute/hour/day are **fixed-width** (no month/year DT token exists),
+so date arithmetic is pure integer — NO SQLite date functions for datetime literals; only a
+runtime ISO-string `asDate()` calls `unixepoch(x)*1000` (`asDateSql`). All three are scalar
+transforms (in `SCALAR_TX_NAMES`, sibling to asBool/asNumber): const-fold over inject
+literals in `compileInject` (`asDateConst` parses ISO/int/long→ms, rejects float/non-ISO/null
+with "Can't parse"; dateAdd = `ms + n*factor`; dateDiff = `self−other` → Long), runtime SQL in
+`renderProjection` (`projection.ts`). Frontend: `datetime('iso')`/`DateTime('iso')` →
+epoch-ms via `parseIsoMs` (`frontend.ts`) — an offset folds into the instant; an
+**offset-less** date-time is UTC-normalized (append `Z`), because bare `Date.parse` would
+read it as HOST-LOCAL and diverge Bun↔DO (a parity bug — the JS cucumber comparator checks
+instants only, so this never shows in conformance but would break a real query). `DT.unit`
+→ `{dt}`.
+
+**Timezone/offset — deliberately UTC-only (NOT lossy for the target client).** GraphBinary
+DATETIME 0x04 has a `utcOffsetSeconds` field + nanosecond precision, and TinkerPop's type is
+`OffsetDateTime` — BUT a JS `Date` is a pure UTC-millis instant with NO per-value offset
+(`getTimezoneOffset()` returns the *host* tz, not the value's), so the client's
+`DateTimeSerializer` always writes offset=0 and ms precision; its deserialize folds any
+offset into the instant. So against the JS reference client + JS conformance harness (which
+compares instants only) we CANNOT preserve offset/sub-ms no matter what the server emits.
+We match that: epoch-ms, UTC framing — instant + ms are exact, offset-label + sub-ms are
+intentionally dropped (parity with the reference client, not accidental loss). Preserving
+offset would need our OWN DATETIME framing (breaks locked #4) + an `offsetSeconds` carrier,
+for ZERO conformance gain and no JS client that can read it. The internal rep is
+offset-*ready* (add an `offsetSeconds` column + custom framing later, purely additive) IF
+non-JS clients (Python/.NET/Go `OffsetDateTime`) become a target. **Upstream give-back
+(logged, not filed):** the real fix is gremlin-javascript adopting **Temporal** (TC39 Stage
+4 / ES2026 — `Temporal.ZonedDateTime`/`Instant` carry offset + nanos; shipped Chrome 144 /
+Firefox 139 / Node 26, but NOT Bun/JSC yet, so we can't use it server-side) instead of
+`Date` — sibling to the TINKERPOP-3044/3043 JS-can't-author-types family. Only once a JS
+client can *consume* an offset is server-side offset framing worth building. `dateDiff`'s other operand is always
+compile-time (literal ms / `constant(datetime|null)`→0; nested inject/movement defers).
+**Bare `asNumber()` runtime extended**: a date-tagged value → its epoch-millis (Long,
+identity); else `CAST(x AS INTEGER)` (Long) — correct for every reachable use (integral epoch
+in date round-trips like `values('birthday').asNumber().asDate()`); a fractional runtime
+standalone would mis-tag but is unreachable. **DEFERRED (structural wall, NOT built):**
+`P.typeOf(GType.DATETIME)` over a STORED property (DateTime.feature, 8 scenarios) — SQLite
+`typeof()` can't distinguish a stored datetime from a string/number (same wall as bool/uuid
+typeOf, `GTYPE_SQL` `datetime:null`→false); needs a storage type-tag scheme. Also `inject([1,2])
+.asDate()` mis-parses (frontend flattens list literals to varargs — the pre-existing asBool
+`[1,2]` limitation, 1 scenario).
 
 **Traversal strategies — semantic support LANDED (2026-07-13, L3 534→582).**
 `withStrategies`/`withoutStrategies` are extracted from the parse tree by

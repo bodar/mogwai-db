@@ -51,7 +51,7 @@ export type PathPos =
 // Emitted by asBool ('bool') and asNumber(GType.X) (the numeric subtypes). The
 // numeric tag names the GraphBinary type; SQLite carries the value in whichever
 // storage class fits (INTEGER/REAL), and frameValue picks the serializer.
-export type ValueType = 'bool' | 'byte' | 'short' | 'int' | 'long' | 'bigint' | 'float' | 'double';
+export type ValueType = 'bool' | 'byte' | 'short' | 'int' | 'long' | 'bigint' | 'float' | 'double' | 'date';
 
 export type Shape =
   | { kind: 'vertex' }

@@ -170,7 +170,16 @@ scalar transform like `asNumber`, tagged (result of a float expr is Double). **F
 a small CF contract test** (one math query through `wrangler dev`) once it lands, to lock
 Bun/DO parity permanently (cheaper than full L3-on-CF; see below).
 
-**NEXT after math:** `asDate` (datetime rep — SQLite has strong date fns); the deferred
+**✅ `asDate`/`dateAdd`/`dateDiff` + `datetime()` literals LANDED (2026-07-13, L3 589→608).**
+Internal rep = epoch-millis INTEGER + a `'date'` ValueType tag (frames via the client's
+DateTimeSerializer, GraphBinary DATETIME 0x04). Fixed-width sec/min/hour/day → date arithmetic
+is pure integer (no SQL date fns for literals; runtime ISO-string asDate() uses `unixepoch()`).
+Const-fold in compileInject + runtime SQL in renderProjection, sibling to asBool/asNumber. See
+CLAUDE.md "asDate/dateAdd/dateDiff … LANDED". **Deferred (structural wall):** `typeOf(GType.
+DATETIME)` over a STORED property (DateTime.feature) — same SQLite-storage-class wall as
+bool/uuid typeOf; needs a storage type-tag scheme.
+
+**NEXT after date:** the deferred
 tail: asNumber+reducer (fold/sum — thread the subtype tag through `wrapReducer`),
 bigdecimal (no client serializer), the JS-GLV upstream give-back (TINKERPOP-3044/3043 —
 client-side, our server unaffected).

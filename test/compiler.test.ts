@@ -238,6 +238,52 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().math("a + b").by("age")', {})).toThrow('no such variable "a"');
   });
 
+  test('asDate() casts to a date-tagged epoch-millis value (const-fold + runtime)', () => {
+    // inject const-fold: ISO string / int / long epoch → millis, tagged date
+    expect(read('g.inject("2023-08-02T00:00:00Z").asDate()').shape).toEqual({ kind: 'value', as: 'date' });
+    expect(read('g.inject("2023-08-02T00:00:00Z").asDate()').binds).toEqual([Date.parse('2023-08-02T00:00:00Z')]);
+    // an offset-bearing ISO string folds into the correct instant
+    expect(read('g.inject("2023-08-02T00:00:00-07:00").asDate()').binds).toEqual([Date.parse('2023-08-02T07:00:00Z')]);
+    expect(read('g.inject(1694017707000).asDate()').binds).toEqual([1694017707000]);
+    // rejects: float epoch, non-ISO string, null (list defers to frontend flattening)
+    expect(() => compile('g.inject(1694017709000.1d).asDate()', {})).toThrow("Can't parse");
+    expect(() => compile("g.inject('This String is not an ISO 8601 Date').asDate()", {})).toThrow("Can't parse");
+    expect(() => compile('g.inject(null).asDate()', {})).toThrow("Can't parse");
+    // runtime: an ISO-text property → unixepoch()*1000; an integer/real is already millis
+    const rt = read('g.V().values("birthday").asDate()');
+    expect(rt.shape).toEqual({ kind: 'value', as: 'date' });
+    expect(rt.sql).toContain("unixepoch(json_extract(n.props, '$.birthday')) * 1000");
+    // bare asNumber() over a date → its epoch-millis (Long, identity); asDate composes back
+    expect(read('g.V().values("birthday").asDate().asNumber().asDate()').shape).toEqual({ kind: 'value', as: 'date' });
+    // bare asNumber() as the ms-string leg feeding asDate() is allowed; standalone it
+    // can't recover a subtype from a runtime value → fail closed (not a silent CAST)
+    expect(read('g.V().values("birthday").asNumber().asDate()').shape).toEqual({ kind: 'value', as: 'date' });
+    expect(() => compile('g.V().values("weight").asNumber()', {})).toThrow('non-date runtime value');
+    // an offset-less datetime literal is UTC-normalized (not host-local) so Bun ≡ DO
+    expect(read("g.inject(datetime('2023-08-02T00:00:00')).dateAdd(second, 0)").binds).toEqual([Date.parse('2023-08-02T00:00:00Z')]);
+  });
+
+  test('dateAdd(DT.unit, n) / dateDiff(date) — integer millis arithmetic', () => {
+    // dateAdd folds n * fixed-width-unit millis; bare or DT.-prefixed unit; negative n
+    const base = Date.parse('2023-08-02T00:00:00Z');
+    expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(DT.hour, 2)").binds).toEqual([base + 2 * 3600000]);
+    expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(hour, -1)").binds).toEqual([base - 3600000]);
+    expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(day, 11)").shape).toEqual({ kind: 'value', as: 'date' });
+    // only second/minute/hour/day are valid DT units — the grammar rejects the rest
+    expect(() => compile("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(month, 1)", {})).toThrow('parse error');
+    // dateDiff = self − other → signed Long; literal / constant(datetime) / constant(null)→0
+    const d = read("g.inject(datetime('2023-08-02T00:00:00Z')).dateDiff(datetime('2023-08-09T00:00:00Z'))");
+    expect(d.shape).toEqual({ kind: 'value', as: 'long' });
+    expect(d.binds).toEqual([-604800000]);
+    expect(read("g.inject(datetime('2023-08-08T00:00:00Z')).dateDiff(constant(datetime('2023-08-01T00:00:00Z')))").binds).toEqual([604800000]);
+    // runtime dateDiff against a literal → v − other_ms (the epoch bound as a value)
+    const rd = read('g.V().values("birthday").asNumber().asDate().dateDiff(datetime("1970-01-01T00:00Z"))');
+    expect(rd.shape).toEqual({ kind: 'value', as: 'long' });
+    expect(rd.binds).toEqual([Date.parse('1970-01-01T00:00Z')]); // = 0
+    // nested inject() as the dateDiff operand defers (not a literal/constant)
+    expect(() => compile("g.inject(datetime('2023-08-08T00:00:00Z')).dateDiff(inject(datetime('2023-10-11T00:00:00Z')))", {})).toThrow('datetime literal or constant');
+  });
+
   test('group().by(__.bothE().values(k).<reducer>()) is a correlated neighbourhood aggregate', () => {
     const p = read("g.V().hasLabel('software').group().by('name').by(__.bothE().values('weight').mean())");
     // one correlated AVG over incident edges, wrapped by MAX to satisfy GROUP BY;
