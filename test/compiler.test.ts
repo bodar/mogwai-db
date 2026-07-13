@@ -169,6 +169,27 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().group().by("name").by(__.count()).select(Column.values).unfold()').shape).toEqual({ kind: 'value', as: 'long' });
   });
 
+  test('list-VALUED map: group().by().by(__.out()...fold()).select(Column.values)', () => {
+    // A neighbour-list value → a list-valued map; select(Column.values) yields a
+    // list-of-lists, unfold() explodes to per-list rows, order(Scope.local) sorts each.
+    const g = read('g.V().group().by().by(__.out().label().fold()).select(Column.values).unfold().order(Scope.local)');
+    expect(g.shape).toEqual({ kind: 'jsonbList' });
+    // The neighbour-list is one correlated JSONB array per key (edge-id order).
+    expect(g.sql).toContain('json_group_array');
+    // A pre-fold op folds into the correlated subquery (dedup/limit/tail).
+    expect(read('g.V().group().by().by(__.out().label().dedup().fold()).select(Column.values).unfold()').shape).toEqual({ kind: 'jsonbList' });
+    // A non-element key with a neighbour-list value defers (MAX would pick one member).
+    expect(() => compile('g.V().group().by("name").by(__.out().label().fold()).select(Column.values)', {}))
+      .toThrow('non-element key and a neighbour-list value not yet supported');
+  });
+
+  test("cap('a') of a group side-effect retypes to a MapStream on a follower", () => {
+    // A group('a')/groupCount('a') side-effect, re-emitted by cap('a'), is re-enterable
+    // too: select(Column.values)/unfold compose exactly like an inline group().
+    expect(read('g.V().groupCount("a").by("name").cap("a").select(Column.values).unfold()').shape).toEqual({ kind: 'value', as: 'long' });
+    expect(read('g.V().group("a").by().by(__.out().label().fold()).cap("a").select(Column.values).unfold()').shape).toEqual({ kind: 'jsonbList' });
+  });
+
   test('Scope.local collection transforms reshape a list (order/dedup/limit/tail)', () => {
     // A non-terminal fold() → ListStream; a Scope.local transform rebuilds each list
     // (correlated json_each) and stays a list, so unfold() re-enters afterwards.

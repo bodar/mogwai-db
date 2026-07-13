@@ -18,12 +18,14 @@ import { type Elem } from '../plan.ts';
 import { type ValueType } from '../render.ts';
 import { type Carry, type St } from './context.ts';
 
-/** What a list stream holds — i.e. the shape `unfold` produces from it. A one-field
- *  description: `elem` → bare rowids (rejoin nodes/edges on unfold) → a fresh `St`;
- *  `scalar` → typed scalars → a `ScalarStream`. ('entry' reserved for Map-unfold.) */
+/** What a list stream holds — i.e. the shape `unfold` produces from it. `elem` → bare
+ *  rowids (rejoin nodes/edges on unfold) → a fresh `St`; `scalar` → typed scalars → a
+ *  `ScalarStream`; `list` → nested lists (list-of-lists, e.g. select(Column.values) of a
+ *  list-valued map) → a ListStream of the inner shape. ('entry' reserved for Map-unfold.) */
 export type ListOf =
   | { kind: 'elem'; elem: Elem }
-  | { kind: 'scalar'; as?: ValueType };
+  | { kind: 'scalar'; as?: ValueType }
+  | { kind: 'list'; of: ListOf };
 
 /** A stream of scalars in a one-column relation `v` (values/id/label/inject/unfold-
  *  of-scalars). `as` is the compile-time GraphBinary type tag (render.ts ValueType). */
@@ -39,7 +41,8 @@ export interface ListStream extends Carry { readonly kind: 'list'; readonly rel:
  *  nodes/edges when the column is projected out via select(Column) → unfold). */
 export type MapOf =
   | { kind: 'scalar'; as?: ValueType }
-  | { kind: 'elem'; elem: Elem };
+  | { kind: 'elem'; elem: Elem }
+  | { kind: 'list'; of: ListOf };
 
 /** A map value as a `(mk, mv)` row relation — one row per entry (group()/groupCount()
  *  retyped when a follower consumes it: select(Column.values/keys) aggregates a column
@@ -60,5 +63,7 @@ export const toListStream = (c: Carry, rel: Relation, of: ListOf): ListStream =>
 export const toMapStream = (c: Carry, rel: Relation, keyOf: MapOf, valOf: MapOf): MapStream => ({ ...c, kind: 'map', rel, keyOf, valOf });
 
 /** A map key/value column's shape → the list shape it produces when select(Column.*)
- *  aggregates it (scalar carries its type tag; an element rejoins on unfold). */
-export const mapOfToListOf = (m: MapOf): ListOf => m.kind === 'elem' ? { kind: 'elem', elem: m.elem } : { kind: 'scalar', as: m.as };
+ *  aggregates it: a scalar carries its type tag, an element rejoins on unfold, a
+ *  list-valued column becomes a list-of-lists (one nesting level deeper). */
+export const mapOfToListOf = (m: MapOf): ListOf =>
+  m.kind === 'elem' ? { kind: 'elem', elem: m.elem } : m.kind === 'list' ? { kind: 'list', of: m.of } : { kind: 'scalar', as: m.as };

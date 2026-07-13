@@ -373,6 +373,51 @@ const requireTerminal = (steps: Step[], n: number) => {
   if (steps.length > n) throw new Error(`step not implemented in nested traversal: ${steps[n].name}()`);
 };
 
+/** The shape a compileNestedList produces — a scalar per neighbour projection (label/
+ *  values/id). Mirrors stream.ts ListOf's scalar arm without importing it into plan.ts. */
+export interface NestedList { expr: Expression; of: { kind: 'scalar' } }
+
+/**
+ * A group() VALUE sub-traversal ending in fold() over a movement — `out|in|both([lbl])
+ * .<label|values(k)|id>()` with an optional single pre-fold op (dedup/limit(n)/tail(n)/
+ * range(lo,hi)) — compiled to ONE correlated JSONB array per outer vertex (the group
+ * key). `out().label().dedup().fold()` ≡ dedup the neighbour stream then collect, so the
+ * pre-fold op folds into the correlated subquery. Neighbours order by incident-edge id;
+ * both() unions the two directions. Whole-vertex folds (no terminal projection) and
+ * multi-op bodies defer clearly. */
+export function compileNestedList(body: Step[], ctx: ScalarCtx): NestedList {
+  if (ctx.elem !== 'node') throw new Error('by(__.<move>()…fold()) is only supported on a vertex group');
+  const mv = body[0];
+  if (!MOVES.has(mv.name) || mv.name.endsWith('E')) throw new Error(`by(__.${mv.name}()…fold()) not yet supported`);
+  const term = body[1];
+  if (!term) throw new Error('by(__.<move>().fold()) of whole vertices not yet supported');
+  let proj: Expression;
+  if (term.name === 'label') proj = q`(SELECT name FROM labels WHERE id=nb.label)`;
+  else if (term.name === 'values') proj = nodePropScalar(q`nb.id`, term.args[0]);
+  else if (term.name === 'id') proj = q`COALESCE(nb.uid, nb.id)`;
+  else throw new Error(`by(__.${mv.name}().${term.name}()…fold()) not yet supported`);
+  const lbl: Expression = mv.args.length ? q` AND ${labelIn('e.label', mv.args)}` : empty;
+  const legs = dirsFor(mv.name).map(([from, to]) =>
+    q`SELECT ${proj} AS value, e.id AS ord FROM edges e JOIN nodes nb ON nb.id=e.${to} WHERE e.${from}=${ctx.idExpr}${lbl}`);
+  const rows = list(legs, ' UNION ALL ');
+
+  // An optional single pre-fold op on the neighbour stream (== a list op post-fold).
+  const post = body.slice(2);
+  if (post.length > 1) throw new Error('by(__.<move>().<proj>() with more than one op before fold() not yet supported');
+  let src: Expression = q`SELECT value, ord FROM (${rows})`;
+  if (post.length === 1) {
+    const op = post[0];
+    const nums = (op.args ?? []).filter((a: any) => typeof a === 'number') as number[];
+    if (op.name === 'dedup') src = q`SELECT value, MIN(ord) AS ord FROM (${rows}) GROUP BY value`;
+    else if (op.name === 'limit') src = q`SELECT value, ord FROM (${rows}) ORDER BY ord LIMIT ${nums[0]}`;
+    else if (op.name === 'tail') src = q`SELECT value, ord FROM (${rows}) ORDER BY ord DESC LIMIT ${nums[0] ?? 1}`;
+    else if (op.name === 'range') src = q`SELECT value, ord FROM (${rows}) ORDER BY ord LIMIT ${nums[1] < 0 ? -1 : nums[1] - nums[0]} OFFSET ${nums[0]}`;
+    else throw new Error(`by(__.<move>().<proj>().${op.name}()…fold()) not yet supported`);
+  }
+  const expr = q`(SELECT jsonb(COALESCE(json_group_array(value ORDER BY ord), json('[]'))) FROM (${src}))`;
+  return { expr, of: { kind: 'scalar' } };
+}
+
 // ---------- where()/not()/filter(__.…) → a boolean filter predicate ----------
 
 /**
