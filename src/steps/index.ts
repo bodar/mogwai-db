@@ -10,6 +10,7 @@ import { union, optional, repeat, choose, coalesce, flatMap } from './branch.ts'
 import { match } from './match.ts';
 import { identity, limit, range, skip } from './passthrough.ts';
 import { sack } from './sack.ts';
+import { aggregate, group as groupSE, groupCount as groupCountSE } from './sideeffect.ts';
 import { type SackSpec } from '../frontend.ts';
 import { compileTail, compileFromScalar } from './projection.ts';
 import { compileFromList } from './list.ts';
@@ -40,11 +41,22 @@ const PREFIX = new Map<string, StepFn>([
   // Only the MUTATE form sack(Operator.x) is a prefix step; bare sack() (read) breaks
   // out to the tail (foldBody guard below).
   ['sack', sack],
+  // aggregate() is a pass-through barrier: it registers a named side-effect and
+  // returns the stream unchanged, so the traversal continues. (TinkerPop 4 dropped
+  // the lazy store() step; aggregate(Scope.local) replaces it — not in the grammar.)
+  ['aggregate', aggregate],
+  // The SIDE-EFFECTING group('a')/groupCount('a') (has a string key) is a pass-through
+  // barrier too; the bare terminal group()/groupCount() breaks to the tail (guard below).
+  ['group', groupSE], ['groupCount', groupCountSE],
 ]);
 
 /** A sack step in its mutate form (has an Operator arg); the bare read form is a tail
  *  projection, so it must NOT dispatch as a prefix step. */
 const isSackMutate = (s: PStep): boolean => (s.args ?? []).some((a: any) => a && typeof a === 'object' && 'operator' in a);
+
+/** A side-effecting group('a')/groupCount('a') (has a string side-effect key); the bare
+ *  form is a terminal barrier handled by compileTail, so it must break out of the prefix. */
+const isSideEffectGroup = (s: PStep): boolean => (s.args ?? []).some((a: any) => typeof a === 'string');
 
 /** Steps that need the linear path threaded through the fold: the source vertex
  *  becomes path position p0 and every hop appends a position. */
@@ -127,7 +139,10 @@ export function foldBody(steps: PStep[], seedSt: St, from: number): { st: St; st
     const fn = PREFIX.get(steps[i].name);
     // Option-map choose (choose().option()…) is a tail CASE projector, not a prefix
     // branch — stop so compileTail handles it (predicate-form choose has no .options).
-    if (!fn || (steps[i].name === 'choose' && steps[i].options) || (steps[i].name === 'sack' && !isSackMutate(steps[i]))) break;
+    if (!fn
+      || (steps[i].name === 'choose' && steps[i].options)
+      || (steps[i].name === 'sack' && !isSackMutate(steps[i]))
+      || ((steps[i].name === 'group' || steps[i].name === 'groupCount') && !isSideEffectGroup(steps[i]))) break;
     st = fn(steps[i], st);
   }
   return { st, stop: i };

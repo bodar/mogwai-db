@@ -737,6 +737,21 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.withSack(2).V().sack(div).by(__.constant(4.0d)).sack()').sql).toContain('(CAST(p.sk AS REAL) / ?)');
   });
 
+  test('side-effecting group(a)/groupCount(a) → registered spec re-emitted by cap(a)', () => {
+    // group('a').by(key).cap('a') → one Map (compileGroup over the stashed source).
+    const g = read('g.V().group("a").by("name").cap("a")');
+    expect(g.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'elementList', elem: 'vertex' } });
+    // groupCount('a') passes traversers through: out() runs between it and cap('a').
+    const gc = read('g.V().groupCount("a").by("name").out().cap("a")');
+    expect(gc.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
+    expect(gc.indexKeys).toEqual(['name']); // the key is auto-indexed at cap time
+  });
+
+  test('terminal group(a) with no cap passes the traversers through (side-effect discarded)', () => {
+    // a side-effecting group() without a cap is a pass-through: the stream is the result.
+    expect(read('g.V().group("a").by("name")').shape).toEqual({ kind: 'vertex' });
+  });
+
   test('withSack() seeds the sk column at the source as a bound value', () => {
     const p = read('g.withSack(0.0d).V().outE().sack(sum).by("weight").inV().sack()');
     expect(p.sql).toContain('? AS sk FROM nodes'); // seeded at V()
@@ -1282,6 +1297,32 @@ describe('compiler execution semantics', () => {
     const store = seededStore();
     expect(run(store, 'g.withSack(2).V().sack(Operator.div).by(__.constant(4.0d)).sack()').map((r) => r.v))
       .toEqual([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]);
+  });
+
+  test('aggregate(x).by(key).cap(x) bags a scalar; cap unrolls to individual results', () => {
+    const store = seededStore();
+    expect(run(store, 'g.V().aggregate("x").by("name").cap("x")').map((r) => r.v).sort())
+      .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+    // by-miss (software has no age) drops the member → 4 ages, not 6 with nulls.
+    expect(run(store, 'g.V().aggregate("x").by("age").cap("x")').map((r) => r.v).sort((a, b) => a - b))
+      .toEqual([27, 29, 32, 35]);
+  });
+
+  test('bare aggregate(x).cap(x) bags elements; cap unrolls to vertices', () => {
+    const store = seededStore();
+    expect(run(store, 'g.V().aggregate("x").cap("x")').map((r) => r.id).sort((a, b) => a - b))
+      .toEqual([1, 2, 3, 4, 5, 6]);
+  });
+
+  test('aggregate is a pass-through barrier (traversal continues past it)', () => {
+    const store = seededStore();
+    // aggregate mid-chain does not disturb the stream: out() still flows on.
+    expect(run(store, 'g.V(1).aggregate("x").out().values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'lop', 'vadas']);
+  });
+
+  test('cap of an undefined side-effect key throws', () => {
+    expect(() => compile('g.V().cap("nope")', {})).toThrow("cap('nope') references an undefined side-effect");
   });
 
   test('sack with two by() modulators throws TinkerPop message', () => {
