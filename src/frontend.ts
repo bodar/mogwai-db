@@ -52,6 +52,12 @@ export function stepChain(tree: any, params: Record<string, any>): Step[] {
   const steps: Step[] = [];
   const visit = (node: any, insideNested: boolean) => {
     const cls = node.constructor.name;
+    // withStrategies/withoutStrategies are a source-configuration boundary, not
+    // steps — their subtree (which may hold a criterion traversal, e.g.
+    // SubgraphStrategy(vertices: __.has(...))) is consumed by extractStrategies. Do
+    // NOT harvest steps from it, or the criterion's has()/out() would leak into the
+    // main chain as bogus source steps.
+    if (cls.startsWith('TraversalSourceSelfMethod')) return;
     const name = stepName(cls, 'TraversalSourceSpawnMethod_') ?? stepName(cls, 'TraversalMethod_');
     if (!insideNested && name) {
       const { args, types } = extractArgs(node, params);
@@ -66,6 +72,50 @@ export function stepChain(tree: any, params: Record<string, any>): Step[] {
   return steps;
 }
 
+// ---------- traversal-strategy extraction ----------
+//
+// withStrategies/withoutStrategies are TraversalSourceSelfMethod_* nodes, NOT part
+// of the step chain (stepChain only harvests Spawn/TraversalMethod nodes). We pull
+// them straight from the tree into a neutral spec the compiler's applyStrategies
+// (strategies.ts) turns into injected steps / verification checks. Config values go
+// through the same argOf walker as any step arg, so a criterion arrives as `{nested}`
+// (ready for a synthetic where()), a list as an array, a scalar as its literal.
+
+export interface StrategySpec { name: string; config: Record<string, any>; ctx: ParserRuleContext; }
+export interface StrategyUse { with: StrategySpec[]; without: string[]; }
+
+/** Depth-first collect every descendant (self included) of a given context class. */
+function descendants(node: any, cls: string, out: any[] = []): any[] {
+  if (node.constructor.name === cls) out.push(node);
+  for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) descendants(node.getChild(i), cls, out);
+  return out;
+}
+
+/** One `TraversalStrategyContext` → {name, config}. ClassType is the bare strategy
+ *  name (the optional `new` is a sibling terminal, so getText() is clean). Each
+ *  ConfigurationContext is `key : genericArgument`; the value walks via argOf. */
+function strategySpec(node: any, params: Record<string, any>): StrategySpec {
+  const name = descendants(node, 'ClassTypeContext')[0]?.getText() ?? node.getText();
+  const config: Record<string, any> = {};
+  for (const cfg of descendants(node, 'ConfigurationContext')) {
+    const key = cfg.getChild(0).getText(); // nakedKey | keyword, before the COLON
+    const valNode = descendants(cfg, 'GenericArgumentContext')[0];
+    if (valNode) config[key] = argOf(valNode, params);
+  }
+  return { name, config, ctx: node };
+}
+
+/** Pull withStrategies (as {name,config} specs) and withoutStrategies (as bare class
+ *  names) out of the parse tree. Empty arrays when the traversal names none. */
+export function extractStrategies(tree: any, params: Record<string, any>): StrategyUse {
+  const use: StrategyUse = { with: [], without: [] };
+  for (const w of descendants(tree, 'TraversalSourceSelfMethod_withStrategiesContext'))
+    for (const s of descendants(w, 'TraversalStrategyContext')) use.with.push(strategySpec(s, params));
+  for (const w of descendants(tree, 'TraversalSourceSelfMethod_withoutStrategiesContext'))
+    for (const c of descendants(w, 'ClassTypeContext')) use.without.push(c.getText());
+  return use;
+}
+
 /** Pull literal / predicate / variable arguments out of a step context, plus the
  *  parallel numeric-subtype tags (see Step.argTypes). */
 function extractArgs(ctx: any, params: Record<string, any>): { args: any[]; types: (string | null)[] } {
@@ -77,8 +127,10 @@ function extractArgs(ctx: any, params: Record<string, any>): { args: any[]; type
 }
 
 /** The single argument a subtree contributes — used for map-entry values, which
- *  must not flatten into the surrounding step's arg list. (Subtype tags irrelevant
- *  for map values, so they're discarded here.) */
+ *  must not flatten into the surrounding step's arg list (subtype tags irrelevant
+ *  for these, so they're discarded), and for a withStrategies configuration value
+ *  (a nested criterion → `{nested}`, a list → array, a scalar → the literal), so
+ *  strategy config reuses the one arg walker. */
 function argOf(node: any, params: Record<string, any>): any {
   const out: any[] = [];
   walkArgs(node, out, params, []);

@@ -229,7 +229,7 @@ suite manually.
 
 > This section is a *record* of how the read compiler was built, not a to-do list.
 > The **actual immediate next work is W3 — Cloudflare deploy + Worker auth** (see
-> docs/2026-07-11-phased-roadmap-plan.md). Live L3 is 525 (path family, then the
+> docs/2026-07-11-phased-roadmap-plan.md). Live L3 is 582 (path family, then the
 > per-traverser branching family + multi-hop/alias where landed 2026-07-13; then the
 > safe optimization-strategy whitelist 473→495; then the value-tail unification
 > 495→496 (compileInject reuses the shared foldTailAcc+renderProjection in
@@ -238,8 +238,29 @@ suite manually.
 > handler frames by); then asNumber(GType.X) 508→525 (numeric subtype ladder — target
 > from the explicit arg; const overflow-checks + runtime CAST); then bare asNumber()
 > 525→534 (frontend now records each numeric literal's subtype in a parallel
-> `Step.argTypes`; args stay plain numbers so no consumer ripple) — see
-> docs/2026-07-13-per-traverser-branching.md).
+> `Step.argTypes`; args stay plain numbers so no consumer ripple); then semantic
+> strategies 534→582 (see below) — see docs/2026-07-13-per-traverser-branching.md).
+
+**Traversal strategies — semantic support LANDED (2026-07-13, L3 534→582).**
+`withStrategies`/`withoutStrategies` are extracted from the parse tree by
+`extractStrategies` (`src/frontend.ts`) into `{name,config}` specs and applied by
+`applyStrategies` (`src/strategies.ts`) BEFORE `normalize()`. The insight: every
+semantic strategy is a `Step[]→Step[]` rewrite emitting **synthetic steps the ordinary
+dispatch already compiles** — no new SQL machinery. **SubgraphStrategy** injects
+`where(vertexCriterion)` after every vertex producer (reuses the where/`compileExistsChain`
+seam); **PartitionStrategy** injects `has(partitionKey, within(readPartitions))` after
+every vertex/edge producer (read visibility) + `property(partitionKey, writePartition)`
+after each addV/addE (write stamp). Optimization strategies stay no-ops (15-name
+whitelist, moved here from compiler.ts); **verification** (ReadOnly/EdgeLabel/ReservedKeys)
+throw TinkerPop's canonical messages. `withoutStrategies` is a safe no-op (we apply NO
+default; a co-named `with` is suppressed). Two fail-closed invariants, DO NOT regress:
+(1) an omitted `readPartitions` defaults to EMPTY = "see nothing", never "see everything"
+(gating the filter on presence leaks all data); (2) any form a semantic strategy can't
+yet filter — Subgraph edge/vertexProperty criteria + edge-landing steps (adjacency),
+Partition meta-properties/merge, and ANY nested body (repeat/union/where-with-movement) —
+throws a clear deferral rather than under-filter. ProductiveBy stays rejected (gated on
+aggregate/cap). Rationale + the challenged "DO routing obviates partitioning" presumption:
+`docs/2026-07-13-with-strategies-exploration.md`.
 
 DONE: P2a (as/select/project/by column-threading), P2c-1 (edge traversal — the
 typed node/edge `Elem` id-relation, edge shape, `edgeBuffer`), P2c-1b (property

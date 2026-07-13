@@ -330,25 +330,6 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().has("age",30).as("a").select("a").by("name")').indexKeys).toEqual(['age']);
   });
 
-  test('semantic strategies fail closed (never silently drop a filtering strategy)', () => {
-    // A dropped PartitionStrategy/SubgraphStrategy would return unfiltered data with
-    // no error — an isolation leak. Must reject, not silently ignore.
-    expect(() => compile("g.withStrategies(new PartitionStrategy(partitionKey:'_p',writePartition:'a',readPartitions:['a'])).V().values('name')", {}))
-      .toThrow('withStrategies(...) is not supported');
-    expect(() => compile("g.withStrategies(new SubgraphStrategy(vertices:__.has('name','marko'))).V()", {}))
-      .toThrow('withStrategies(...) is not supported');
-    // ProductiveByStrategy changes by() null semantics — not an optimization. Reject.
-    expect(() => compile('g.withStrategies(ProductiveByStrategy).V().values("name")', {}))
-      .toThrow('withStrategies(...) is not supported');
-    // withoutStrategies is coupled to strategy application, so it stays failing-closed
-    // for semantic strategies until removal is implemented alongside it.
-    expect(() => compile('g.withoutStrategies(PartitionStrategy).V()', {}))
-      .toThrow('withoutStrategies(...) is not supported');
-    // Mixed list: one unsafe strategy poisons the whole call.
-    expect(() => compile('g.withStrategies(CountStrategy, ProductiveByStrategy).V()', {}))
-      .toThrow('withStrategies(...) is not supported');
-  });
-
   test('result-preserving optimization strategies accepted as no-ops (correct-by-design)', () => {
     // These cannot change the result set (TinkerPop optimization-strategy contract),
     // so not applying them is exactly correct. The official suite proves it: the
@@ -361,6 +342,109 @@ describe('compiler SQL snapshots', () => {
     // identity() is the no-op step (what IdentityRemovalStrategy elides) — compiles.
     expect(read('g.V().identity().out().values("name")')).toBeDefined();
     expect(() => compile('g.withStrategies(IdentityRemovalStrategy).V().identity().out()', {})).not.toThrow();
+    // withoutStrategies(anything) is a safe no-op: we apply NO strategy by default,
+    // so there is nothing to suppress — including for semantic strategies.
+    expect(() => compile('g.withoutStrategies(PartitionStrategy).V()', {})).not.toThrow();
+    expect(() => compile('g.withoutStrategies(SubgraphStrategy, ProductiveByStrategy).V()', {})).not.toThrow();
+  });
+
+  test('SubgraphStrategy injects the vertex criterion as a filter after every vertex step', () => {
+    // vertices: __.has(k,P) → a where() filter CTE spliced after V() (and after each
+    // out/in/both). Both endpoints of a hop are checked: source filtered before, the
+    // moved-to vertex filtered after.
+    const sql = read('g.withStrategies(new SubgraphStrategy(vertices: __.has("name", P.within("a","b")))).V().values("name")').sql;
+    expect(sql).toContain("json_extract(n.props, '$.name') in (?, ?)"); // criterion applied
+    // after V() the filter is c1 (source c0 → filtered c1)
+    expect(sql).toMatch(/c1\(id\) as \(SELECT n\.id FROM nodes n JOIN c0 p .* WHERE json_extract\(n\.props, '\$\.name'\) in/);
+  });
+
+  test('PartitionStrategy read-filter isolates partitions; write-stamp tags created elements', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    // write two vertices into partitions a and b via the write-stamp
+    run(store, 'g.withStrategies(new PartitionStrategy(partitionKey:"_p", writePartition:"a")).addV("person").property("name","marko")');
+    run(store, 'g.withStrategies(new PartitionStrategy(partitionKey:"_p", writePartition:"b")).addV("person").property("name","josh")');
+    // the stamp is a real property
+    expect(store.query("SELECT json_extract(props,'$._p') p FROM nodes ORDER BY id").map((r: any) => r.p)).toEqual(['a', 'b']);
+    // read visibility follows readPartitions
+    const names = (q: string) => run(store, q).map((r: any) => r.v).sort();
+    expect(names('g.V().values("name")')).toEqual(['josh', 'marko']); // unfiltered: both
+    expect(names('g.withStrategies(new PartitionStrategy(partitionKey:"_p", readPartitions:["a"])).V().values("name")')).toEqual(['marko']);
+    expect(names('g.withStrategies(new PartitionStrategy(partitionKey:"_p", readPartitions:["a","b"])).V().values("name")')).toEqual(['josh', 'marko']);
+    // empty readPartitions → sees nothing
+    expect(names('g.withStrategies(new PartitionStrategy(partitionKey:"_p", readPartitions:[])).V().values("name")')).toEqual([]);
+    // writePartition-only (readPartitions OMITTED) defaults to EMPTY → sees nothing,
+    // NOT everything. Gating the read filter on presence would leak all data.
+    expect(names('g.withStrategies(new PartitionStrategy(partitionKey:"_p", writePartition:"a")).V().values("name")')).toEqual([]);
+  });
+
+  test('SubgraphStrategy filters real traversal results end-to-end', () => {
+    const store = seededStore();
+    const names = (q: string) => run(store, q).map((r: any) => r.v).sort();
+    // only marko + josh are "in" the subgraph; count and values both respect it
+    expect(run(store, 'g.withStrategies(new SubgraphStrategy(vertices: __.has("name", P.within("marko","josh")))).V().count()').map((r: any) => r.v)).toEqual([2]);
+    expect(names('g.withStrategies(new SubgraphStrategy(vertices: __.has("name", P.within("marko","josh")))).V().values("name")')).toEqual(['josh', 'marko']);
+    // a hop lands only on vertices inside the subgraph: marko knows vadas+josh, but
+    // vadas is filtered out → only josh survives
+    expect(names('g.withStrategies(new SubgraphStrategy(vertices: __.hasLabel("person"))).V().has("name","marko").out("knows").values("name")')).toEqual(['josh', 'vadas']);
+  });
+
+  test('verification strategies throw TinkerPop\'s canonical messages (pass a legal traversal)', () => {
+    // ReadOnly: any mutating step rejected; a read passes.
+    expect(() => compile('g.withStrategies(ReadOnlyStrategy).V().out("knows").values("name")', {})).not.toThrow();
+    expect(() => compile('g.withStrategies(ReadOnlyStrategy).addV("person")', {}))
+      .toThrow('The provided traversal has a mutating step and thus is not read only');
+    expect(() => compile('g.withStrategies(ReadOnlyStrategy).E().property("weight",0)', {}))
+      .toThrow('The provided traversal has a mutating step and thus is not read only');
+    // EdgeLabel: bare out() rejected only when throwException:true; false → no-op pass.
+    expect(() => compile('g.withStrategies(EdgeLabelVerificationStrategy(throwException:true, logWarning:false)).V().out()', {}))
+      .toThrow('The provided traversal contains a vertex step without any specified edge label');
+    expect(() => compile('g.withStrategies(EdgeLabelVerificationStrategy(throwException:false)).V().out()', {})).not.toThrow();
+    expect(() => compile('g.withStrategies(EdgeLabelVerificationStrategy(throwException:true)).V().out("knows")', {})).not.toThrow();
+    // ReservedKeys: default {id,label}; config keys overrides. Message names the key.
+    expect(() => compile('g.withStrategies(ReservedKeysVerificationStrategy(throwException:true)).addV("person").property("id",123)', {}))
+      .toThrow('is setting a property key to a reserved word: id');
+    expect(() => compile('g.withStrategies(ReservedKeysVerificationStrategy(throwException:true, keys:{"age"})).addV("person").property("age",29)', {}))
+      .toThrow('is setting a property key to a reserved word: age');
+    expect(() => compile('g.withStrategies(ReservedKeysVerificationStrategy(throwException:true)).addV("person").property("name","marko")', {})).not.toThrow();
+    // `to` is only a vertex step in the to(Direction) form — an addE().to(__.V(...))
+    // endpoint modulator must NOT trip EdgeLabel verification.
+    expect(() => compile('g.withStrategies(EdgeLabelVerificationStrategy(throwException:true)).addE("knows").from(__.V(1)).to(__.V(2))', {})).not.toThrow();
+  });
+
+  test('semantic/unknown strategies + deferred forms fail closed (never silently leak)', () => {
+    // ProductiveByStrategy changes by() null semantics — not an optimization. Reject.
+    expect(() => compile('g.withStrategies(ProductiveByStrategy).V().values("name")', {}))
+      .toThrow('withStrategies(...) is not supported');
+    // Mixed list: one unsafe strategy poisons the whole call (Count is safe, ProductiveBy not).
+    expect(() => compile('g.withStrategies(CountStrategy, ProductiveByStrategy).V()', {}))
+      .toThrow('withStrategies(...) is not supported');
+    // Deferred subsets throw clearly rather than under-filter:
+    expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.has("name","x"), edges: __.has("weight",1))).V()', {}))
+      .toThrow('SubgraphStrategy(edges) criterion not yet supported');
+    expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.has("name","x"))).V().outE("knows")', {}))
+      .toThrow('SubgraphStrategy with an edge step');
+    expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.has("name","x"))).V().repeat(__.out()).times(2)', {}))
+      .toThrow('SubgraphStrategy with a repeat() sub-traversal');
+    expect(() => compile('g.withStrategies(new PartitionStrategy(partitionKey:"_p", writePartition:"a")).mergeV([(T.label):"person"])', {}))
+      .toThrow('PartitionStrategy with mergeV() not yet supported');
+    // Nested sub-traversals that PRODUCE elements would be computed unfiltered (leak)
+    // — must defer, not under-filter. map/group by-modulator movement, and/or nested
+    // inside a where() criterion, and an addE nested endpoint all fail closed.
+    expect(() => compile('g.withStrategies(new PartitionStrategy(partitionKey:"_p", readPartitions:["a"])).V().map(__.out().count())', {}))
+      .toThrow('element-producing sub-traversal inside map()');
+    expect(() => compile('g.withStrategies(new PartitionStrategy(partitionKey:"_p", readPartitions:["a"])).V().group().by(__.out().count())', {}))
+      .toThrow('element-producing sub-traversal inside by()');
+    expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.hasLabel("person"))).V().where(__.or(__.out("knows"), __.out("created")))', {}))
+      .toThrow('element-producing sub-traversal inside where()');
+    expect(() => compile('g.withStrategies(new PartitionStrategy(partitionKey:"_p", readPartitions:["a"], writePartition:"a")).V().as("x").addE("knows").from("x").to(__.V(2))', {}))
+      .toThrow('element-producing sub-traversal inside to()');
+    // ...but a NON-producing nested body (scalar map, has-only criterion, alias
+    // endpoint) still compiles — the guard is precise, not blanket.
+    expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.hasLabel("person"))).V().map(__.values("name"))', {})).not.toThrow();
+    expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.hasLabel("person"))).V().where(__.has("name","marko"))', {})).not.toThrow();
+    // withoutStrategies suppresses a co-named withStrategies (removal wins) — so a
+    // withoutStrategies(ProductiveBy) makes the otherwise-rejected call compile.
+    expect(() => compile('g.withStrategies(ProductiveByStrategy).withoutStrategies(ProductiveByStrategy).V().values("name")', {})).not.toThrow();
   });
 
   test('deferred long-tail forms error clearly (never silently mis-execute)', () => {
