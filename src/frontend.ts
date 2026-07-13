@@ -42,6 +42,15 @@ const FLOAT_LIT_SUFFIX: Record<string, string> = { f: 'float', d: 'double', m: '
 const intLitType = (text: string): string => INT_LIT_SUFFIX[text.slice(-1).toLowerCase()] ?? 'int';
 const floatLitType = (text: string): string => FLOAT_LIT_SUFFIX[text.slice(-1).toLowerCase()] ?? 'double';
 
+/** Flatten any bracketed-list arguments back to varargs (depth 1). Collection
+ *  literals now parse as one array value (see walkArgs); the varargs-style steps
+ *  that spread a Collection id/value in TinkerPop — V/E/hasId (`hasId(1,[2,6])` ≡
+ *  `hasId(1,2,6)`, HasIdStep flattens every Collection arg) and, until the list
+ *  substrate lands, inject — call this so their existing per-value handling is
+ *  unchanged. Non-array args (scalars, predicates, maps) pass through. */
+export const flattenListArgs = (args: any[]): any[] =>
+  args.flatMap((a) => (Array.isArray(a) ? a : [a]));
+
 export const stepName = (cls: string, prefix: string) =>
   cls.startsWith(prefix) && cls.endsWith('Context')
     ? cls.slice(prefix.length, -'Context'.length).split('_')[0]
@@ -203,6 +212,20 @@ function walkArgs(node: any, out: any[], params: Record<string, any>, types: (st
   }
   // DT.second/minute/hour/day (or the bare unit) — dateAdd()'s unit selector.
   if (cls === 'TraversalDTContext') { emit({ dt: enumSuffix(node) }); return; }
+  // Scope.local / Scope.global (or the bare local/global) — the per-list vs
+  // whole-stream selector on order()/limit()/range()/tail()/sum()/… Without this
+  // the token was dropped and a Scope.local step silently compiled as its GLOBAL
+  // form (a latent wrong-result bug) — capture it so the tail can reject or honour it.
+  if (cls === 'TraversalScopeContext') { emit({ scope: enumSuffix(node) }); return; }
+  // A bracketed collection literal [a, b, c] / [] — ONE list value (a JS array),
+  // NOT N flattened args. Elements recurse via argOf so nested lists/maps/literals
+  // survive. A predicate written with the list form (P.within([...])) unwraps it
+  // back to varargs in parsePredicate; a step consuming a real list value (inject,
+  // Tier-1 list substrate) reads the array directly.
+  if (cls === 'GenericCollectionLiteralContext') {
+    emit(node.genericLiteral().map((lit: any) => argOf(lit, params)));
+    return;
+  }
   if (cls === 'NestedTraversalContext') { emit({ nested: node }); return; }
   for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) walkArgs(node.getChild(i), out, params, types);
 }
@@ -251,7 +274,13 @@ export interface Pred { op: string; values: any[]; }
 function parsePredicate(node: any, params: Record<string, any>): Pred {
   const m = node.constructor.name.match(/^TraversalPredicate_(\w+)Context$/);
   const { args: values } = extractArgs(node, params); // predicate values; subtype tags unused
-  return { op: m![1], values };
+  // P.within/without/inside/between accept both varargs (P.within('a','b')) and a
+  // single bracketed list (P.within(['a','b'])). Collection literals now parse as one
+  // array value, so unwrap a lone array arg back to the value varargs the predicate
+  // consumes (predicateSql spreads them into an IN-list / bounds). A bound-param list
+  // (a JS array from a binding) unwraps the same way, matching the prior flatten.
+  const vals = values.length === 1 && Array.isArray(values[0]) ? values[0] : values;
+  return { op: m![1], values: vals };
 }
 
 function unquote(s: string): string {
