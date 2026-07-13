@@ -489,23 +489,47 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().and(__.out())', {})).toThrow('needs at least two traversal branches');
   });
 
-  test('union() → UNION ALL of movement branches as a merged id-relation', () => {
+  test('union() → UNION ALL of branch id-relations, multi-hop bodies fold', () => {
     const u = read('g.V(1).union(__.out("knows"), __.out("created")).values("name")');
     expect(u.sql).toContain('UNION ALL');
     expect(u.sql).toContain('SELECT e.tgt AS id FROM edges e JOIN c0 p ON e.src=p.id');
+    // multi-hop branch now folds through the dispatch (was single-hop only)
+    expect(read('g.V().union(__.out().out(), __.in()).values("name")').sql)
+      .toContain('SELECT e.tgt AS id FROM edges e JOIN c1 p ON e.src=p.id');
     expect(() => compile('g.V().union(__.out())', {})).toThrow('needs at least two branches');
     expect(() => compile('g.V().as("a").union(__.out(), __.in())', {})).toThrow('union() after as() not yet supported');
-    expect(() => compile('g.V().union(__.values("name"), __.out())', {})).toThrow('not yet supported (single out()/in()/both() only)');
+    // a scalar branch body now defers with the shared scalar-body message
+    expect(() => compile('g.V().union(__.values("name"), __.out())', {})).toThrow('scalar/projection body');
+    // mixed element kinds across branches
+    expect(() => compile('g.V().union(__.out(), __.outE())', {})).toThrow('different element kinds');
   });
 
-  test('optional() → LEFT JOIN with COALESCE fallback to self', () => {
+  test('optional() → single-hop LEFT JOIN fast path; multi-hop via ordinal', () => {
     const o = read('g.V().optional(__.out("created")).values("name")');
     expect(o.sql).toContain('SELECT COALESCE(e.tgt, p.id) AS id FROM c0 p LEFT JOIN edges e ON e.src=p.id');
-    expect(() => compile('g.V().optional(__.both())', {})).toThrow('not yet supported (single out()/in() only)');
+    // both()/multi-hop now compile via the coalesce(t, identity) ordinal shape
+    const b = read('g.V().optional(__.both()).count()');
+    expect(b.sql).toContain('ROW_NUMBER() OVER () AS o');
+    expect(b.sql).toContain('WHERE o NOT IN (SELECT o FROM'); // self-on-miss
+    expect(read('g.V().optional(__.out().out()).count()').sql).toContain('ROW_NUMBER() OVER () AS o');
+    // a body that flips element kind would make self-on-miss mixed-shape → defer
+    expect(() => compile('g.V().optional(__.outE())', {})).toThrow('changing element kind');
   });
 
-  test('coalesce() is deferred with a clear error', () => {
-    expect(() => compile('g.V().coalesce(__.out("knows"), __.out("created"))', {})).toThrow('step not implemented: coalesce()');
+  test('coalesce() → first non-empty branch per input via the ordinal', () => {
+    const c = read('g.V(1).coalesce(__.out("knows"), __.out("created")).values("name")');
+    expect(c.sql).toContain('ROW_NUMBER() OVER () AS o');
+    // branch 2 emits only for inputs branch 1 produced nothing for
+    expect(c.sql).toContain('WHERE o NOT IN (SELECT o FROM');
+    expect(c.shape).toEqual({ kind: 'value' });
+    expect(() => compile('g.V().coalesce(__.out(), __.values("name"))', {})).toThrow('scalar/projection body');
+    expect(() => compile('g.V().coalesce(__.out(), __.outE())', {})).toThrow('different element kinds');
+  });
+
+  test('flatMap() inlines an element body (fan-out), scalar body defers', () => {
+    expect(read('g.V().flatMap(__.out().out()).values("name")').sql)
+      .toContain('SELECT e.tgt AS id FROM edges e JOIN c1 p ON e.src=p.id');
+    expect(() => compile('g.V().flatMap(__.values("name"))', {})).toThrow('scalar/projection body');
   });
 
   test('choose(pred, then, else) → gated-seed UNION ALL, arms fold from their seed', () => {
@@ -1017,6 +1041,30 @@ describe('compiler execution semantics', () => {
     // predicate = count().is: marko has 2 knows-edges → out(knows); others → self
     expect(run(store, 'g.V(1).choose(__.out("knows").count().is(P.gt(1)), __.out("knows")).values("name")').map((r) => r.v).sort())
       .toEqual(['josh', 'vadas']);
+  });
+
+  test('coalesce() executes first-non-empty-per-input, multiset preserved', () => {
+    const store = seededStore();
+    // per vertex: knows if any, else created. marko→(vadas,josh); josh→(ripple,lop);
+    // peter→(lop); vadas/lop/ripple→nothing.
+    expect(run(store, 'g.V().coalesce(__.out("knows"), __.out("created")).values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'lop', 'lop', 'ripple', 'vadas']);
+    // single input, first branch empty → falls to second
+    expect(run(store, 'g.V(6).coalesce(__.out("knows"), __.out("created")).values("name")').map((r) => r.v)).toEqual(['lop']);
+    // all branches empty → no output (not self)
+    expect(run(store, 'g.V(2).coalesce(__.out("knows"), __.out("created")).values("name")').map((r) => r.v)).toEqual([]);
+  });
+
+  test('optional()/flatMap() multi-hop execute correctly', () => {
+    const store = seededStore();
+    // multi-hop optional HIT: marko out().out() = josh's creations = lop,ripple
+    expect(run(store, 'g.V(1).optional(__.out().out()).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple']);
+    // multi-hop optional MISS → self: peter out().out() empty → peter
+    expect(run(store, 'g.V(6).optional(__.out().out()).values("name")').map((r) => r.v)).toEqual(['peter']);
+    // optional(both()) hit: vadas both = marko (knows-in)
+    expect(run(store, 'g.V(2).optional(__.both()).values("name")').map((r) => r.v)).toEqual(['marko']);
+    // flatMap = inline the body: marko out().out() = lop,ripple
+    expect(run(store, 'g.V(1).flatMap(__.out().out()).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple']);
   });
 
   test('alias-compare where — the co-creator idiom', () => {

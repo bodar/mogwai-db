@@ -6,8 +6,10 @@ per current traverser and fold the result back. This is "bet #2" from
 investment after the path family landed). It stays true to locked decision #3:
 **compile to one SQL statement, never interpret**.
 
-Status: **Phase A landed (2026-07-13, live L3 455 → 456).** Phases B/C designed
-below, not yet built.
+Status: **Phases A–C landed (2026-07-13, live L3 455 → 459).** `choose` (predicate
+form), `coalesce`, multi-hop `union`/`optional`, `flatMap` — all in one SQL statement.
+Deferred with clear errors: option-map `choose`, scalar/projection branch bodies,
+mixed-shape branches, branch-inside-branch (nested origin), `map` (first-result).
 
 ## The prior-art scan settled the approach (do not relitigate)
 
@@ -100,7 +102,7 @@ needed here (contrast `coalesce`).
   `has(T.id,…)` token form. Widening it there (mirroring `filter.ts` `has`'s token
   branch) is an independent small win.
 
-## Phase B (designed, not built) — `coalesce` + the ordinal column
+## Phase B (landed) — `coalesce` + the ordinal column
 
 `coalesce(t1, t2, …)` = for each traverser, emit the results of the **first branch
 that produces ≥1 result**. This is the one branch step with a genuine cross-branch
@@ -121,10 +123,14 @@ dependency, so it needs the **origin ordinal** Sqlg uses:
 - Same-shape branches only; scalar branches (`__.constant('x')`) deferred with the
   same fork rationale as `choose`.
 
-Building the ordinal-carry here **also unblocks `as()`-through-branches** later (the
-carry is the same machinery `union`/`optional`/`repeat` currently refuse).
+The ordinal is a first-class `St.origin` column (`context.ts`), threaded by the same
+`carriedCols`/`carryFrag`/`advance` machinery as `as()` aliases and path positions —
+so it rides through arbitrary multi-hop bodies for free. `optional(t)` reuses it as
+`coalesce(t, identity)`. Nested branch-inside-branch (an outer ordinal already set)
+fails closed (`if (st.origin) throw`). Building this carry **also unblocks
+`as()`-through-branches** later (same machinery `union`/`repeat` still refuse).
 
-## Phase C (designed, not built) — widen `union`/`optional`, add `flatMap`
+## Phase C (landed) — widen `union`/`optional`, add `flatMap`
 
 - Replace `union`/`optional`'s single-JOIN shortcut (`branchMovementSelect`, the
   `LEFT JOIN` in `branch.ts`) with `foldBody`, so multi-hop bodies work

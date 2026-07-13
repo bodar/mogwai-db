@@ -328,10 +328,21 @@ export function compileFilterPredicate(nested: Step[], ctx: ScalarCtx, params: R
     if (pe.indexKey && ctx.elem === 'node') indexKeys.push(pe.indexKey);
     return { expr: predicateSql(pe.expr, hasIs ? isPred : undefined), indexKeys }; // bare where(__.values(k)) → exists → IS NOT NULL
   }
-  if (head === 'has' && body.length === 1 && typeof body[0].args[0] === 'string') {
-    const pe = propExtract(ctx.propsExpr, body[0].args[0]);
-    if (pe.indexKey && ctx.elem === 'node') indexKeys.push(pe.indexKey);
-    return { expr: predicateSql(pe.expr, body[0].args[1]), indexKeys };
+  if (head === 'has' && body.length === 1) {
+    const [key, val] = body[0].args;
+    // has(T.label|T.id, v|P): predicate over the label name / external id (mirrors
+    // filter.ts has()'s token branch, so choose(__.has(T.label,'person')) etc work).
+    if (key && typeof key === 'object' && 'token' in key) {
+      const expr: Expression = key.token === 'label' ? labelNameSub(ctx.labelIdExpr)
+        : key.token === 'id' ? ctx.extIdExpr!
+        : (() => { throw new Error(`has(T.${key.token}) not supported`); })();
+      return { expr: predicateSql(expr, val), indexKeys };
+    }
+    if (typeof key === 'string') {
+      const pe = propExtract(ctx.propsExpr, key);
+      if (pe.indexKey && ctx.elem === 'node') indexKeys.push(pe.indexKey);
+      return { expr: predicateSql(pe.expr, val), indexKeys };
+    }
   }
   if (head === 'hasLabel' && body.length === 1)
     return { expr: labelIn(ctx.labelIdExpr, body[0].args), indexKeys };
