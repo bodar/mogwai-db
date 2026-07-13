@@ -130,7 +130,17 @@ numeric literal's declared subtype (grammar context + suffix) in a parallel
 property/binds untouched); only bare asNumber() reads `argTypes` to recover the input
 subtype (`asNumberBare`, uniform-subtype required).
 
-#### `math()` — SCOPED + DE-RISKED (2026-07-13, next up)
+#### `math()` — ✅ LANDED (2026-07-13, L3 583→589)
+Pure formula parser `src/math.ts` (tokenizer + recursive-descent, full exp4j operator +
+function set) → ONE SQL scalar; `compileMath` in `steps/projection.ts` resolves `_`
+(current, `elemCtx`) and `as()`-alias variables (`aliasCtx`) through their `by()`
+modulators (`compileNestedScalar`), always Double, routed through the shared
+`renderProjection` tail (composes with trailing `asNumber`/`is`/`order`/`limit`).
+Leaf-REAL coercion makes `/` real division; `^`→POW, `%`→MOD, `log`→LN. `'math'` added to
+BY_HOSTS. Deferred: no-by() bare-incoming, `withSideEffect` vars, project/select map-column
+reads. See CLAUDE.md "`math()` — LANDED". Original scoping notes retained below.
+
+#### `math()` — SCOPED + DE-RISKED (2026-07-13, historical scoping)
 Explored before building. **Size corrected: ~22 scenarios that actually call `.math()`**
 (Math.feature=11 + scattered in data/asNumber/Select; PageRank=3 is OLAP-excluded), **NOT
 194** — that earlier number wrongly counted whole files × all their scenarios. Realistic
