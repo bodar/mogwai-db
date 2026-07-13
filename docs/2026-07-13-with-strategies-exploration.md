@@ -1,7 +1,7 @@
 # `withStrategies` / `withoutStrategies` — exploration & research
 
 **Date:** 2026-07-13
-**Status:** research → **partly IMPLEMENTED (2026-07-13, L3 495→543).** The analysis
+**Status:** research → **IMPLEMENTED & on trunk (2026-07-13, L3 534→582).** The analysis
 below stands; the server-side program in Part V (SubgraphStrategy vertex-criterion,
 PartitionStrategy read-filter + write-stamp, and the ReadOnly/EdgeLabel/ReservedKeys
 verification strategies) has since landed as `applyStrategies` in `src/strategies.ts`
