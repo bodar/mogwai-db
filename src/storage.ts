@@ -27,14 +27,28 @@ const SCHEMA = [
   // optional TinkerPop user-supplied id (string/custom); UNIQUE auto-indexes it
   // for the V(uid) lookup. Elements report COALESCE(uid, id) as their id.
   `CREATE TABLE IF NOT EXISTS nodes(
-     id INTEGER PRIMARY KEY, uid TEXT UNIQUE, label INTEGER NOT NULL REFERENCES labels(id),
-     props TEXT NOT NULL DEFAULT '{}')`,
+     id INTEGER PRIMARY KEY, uid TEXT UNIQUE, label INTEGER NOT NULL REFERENCES labels(id))`,
+  // Vertex properties are normalized (W4): one row per VertexProperty instance, so a
+  // key may repeat (multi-property, Cardinality.list/set). `id` (rowid) IS the
+  // VertexProperty id. `value` has NO declared type → BLOB affinity keeps whatever
+  // SQLite storage class the bound value already has (INTEGER/REAL/TEXT), so numeric
+  // order/range (has('age',gt(30)), order().by('age')) stay correct. `meta` is a JSONB
+  // {metaKey: scalar} blob (meta-properties), nullable. Edges keep a FLAT JSONB props
+  // column — TinkerPop's edge Property has no id/meta/multi, so no table is warranted.
+  `CREATE TABLE IF NOT EXISTS vertex_properties(
+     id INTEGER PRIMARY KEY, node INTEGER NOT NULL REFERENCES nodes(id),
+     key TEXT NOT NULL, value, meta BLOB)`,
   `CREATE TABLE IF NOT EXISTS edges(
      id INTEGER PRIMARY KEY, uid TEXT UNIQUE, src INTEGER NOT NULL, label INTEGER NOT NULL,
-     tgt INTEGER NOT NULL, props TEXT NOT NULL DEFAULT '{}')`,
+     tgt INTEGER NOT NULL, props BLOB NOT NULL DEFAULT (jsonb('{}')))`,
   `CREATE INDEX IF NOT EXISTS n_label ON nodes(label)`,
   `CREATE INDEX IF NOT EXISTS e_out ON edges(src, label, tgt)`,
   `CREATE INDEX IF NOT EXISTS e_in  ON edges(tgt, label, src)`,
+  // Static covering indexes replace the old self-tuning per-key expression index on
+  // nodes.props: (key,value) serves a leading has(key,val); (node,key) serves the
+  // given-a-node prop lookups (values()/has()/order/group + leaf materialization).
+  `CREATE INDEX IF NOT EXISTS vp_key_value ON vertex_properties(key, value)`,
+  `CREATE INDEX IF NOT EXISTS vp_node_key  ON vertex_properties(node, key)`,
 ];
 
 export class GraphStore {
@@ -42,13 +56,12 @@ export class GraphStore {
     this.initSchema();
   }
 
-  /** Run the schema DDL (idempotent — every statement is `IF NOT EXISTS`) and
-   *  reset the per-isolate index cache. Called once from the ctor, and again by
-   *  a Durable Object after `ctx.storage.deleteAll()` wipes the tables out from
-   *  under a still-live instance, to restore it to a fresh empty graph. */
+  /** Run the schema DDL (idempotent — every statement is `IF NOT EXISTS`). Called
+   *  once from the ctor, and again by a Durable Object after `ctx.storage.deleteAll()`
+   *  wipes the tables out from under a still-live instance, to restore it to a fresh
+   *  empty graph. */
   initSchema(): void {
     for (const statement of SCHEMA) this.sql.exec(statement);
-    this.indexed.clear();
   }
 
   query<T = any>(sql: string, binds: readonly unknown[] = []): T[] {
@@ -60,26 +73,14 @@ export class GraphStore {
     return this.sql.query<T>(sql, binds.map(coerceBind));
   }
 
-  // Property keys that already have (or don't need) an expression index this
-  // isolate's lifetime — avoids re-issuing CREATE INDEX IF NOT EXISTS per query.
-  private indexed = new Set<string>();
-
   /**
-   * Ensure an on-demand expression index exists for a hot property key, so
-   * `has(key,…)`/`order().by(key)` become index seeks instead of full scans.
-   * The key is an identifier the compiler already validated as index-safe (it
-   * only asks for keys it spliced literally); guard again defensively since we
-   * build the index name and JSON path from it. First call on a cold key pays
-   * the one-time build; later calls (and warm isolates) short-circuit.
+   * No-op since W4: vertex properties are normalized into `vertex_properties`
+   * with static `(key,value)`/`(node,key)` indexes built once in the schema, so
+   * there is no per-key on-demand expression index to self-tune anymore. Kept as
+   * a no-op call site for one release to keep the handler's index-priming loop
+   * intact; the whole indexKeys plumbing is removed in the follow-up cleanup.
    */
-  ensureNodePropIndex(key: string): void {
-    if (this.indexed.has(key)) return;
-    if (!SAFE_KEY.test(key)) return; // never splice a non-identifier
-    this.sql.exec(
-      `CREATE INDEX IF NOT EXISTS "n_prop_${key}" ON nodes(json_extract(props, '$.${key}'))`,
-    );
-    this.indexed.add(key);
-  }
+  ensureNodePropIndex(_key: string): void {}
 
   labelId(name: string): number {
     return this.query<{ id: number }>(
@@ -92,10 +93,6 @@ export class GraphStore {
     return this.query<{ name: string }>('SELECT name FROM labels WHERE id=?', [id])[0].name;
   }
 }
-
-// Identifier keys only — must match the compiler's SAFE_KEY so we index exactly
-// the keys it splices as literal JSON paths.
-const SAFE_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function coerceBind(value: unknown): unknown {
   if (typeof value === 'boolean') return value ? 1 : 0;

@@ -10,7 +10,9 @@ import { foldBody } from './index.ts';
  *  until()'s predicate reuse the where()/filter() predicate engine over each hop. */
 const walkNodeCtx = (idExpr: Expression): ScalarCtx => {
   const sub = (col: string) => q`(SELECT ${col} FROM nodes WHERE id=${idExpr})`;
-  return { elem: 'node', idExpr, extIdExpr: sub('COALESCE(uid, id)'), propsExpr: sub('props'), labelIdExpr: sub('label') };
+  // Node ctx: props are read from vertex_properties via idExpr (hasProp/scalarProp),
+  // so no propsExpr (that's edge-only now).
+  return { elem: 'node', idExpr, extIdExpr: sub('COALESCE(uid, id)'), labelIdExpr: sub('label') };
 };
 
 /** Compile an until(<traversal>) modulator into `(id, depth) → boolean SQL`. A

@@ -1,5 +1,5 @@
-import { q, list, empty, type Expression } from '../q.ts';
-import { labelIn, predicateSql, propExtract, dirsFor } from '../plan.ts';
+import { q, list, empty, raw, type Expression } from '../q.ts';
+import { labelIn, predicateSql, nodeHasProp, dirsFor } from '../plan.ts';
 import { stepChain, type Step } from '../frontend.ts';
 import { advance, aliasColsOf, prevRel, type AliasMap, type St, type StepFn } from './context.ts';
 
@@ -75,7 +75,8 @@ function applyPattern(st: St, p: Pattern, aliases: Map<string, { col: string; el
         : (() => { throw new Error(`match() pattern has(T.${a[0].token}) not yet supported`); })();
       conds.push(predicateSql(expr, a[1]));
     } else {
-      conds.push(predicateSql(propExtract(`${lastNode}.props`, a[0]).expr, a[1]));
+      // has(key,val) on the pattern's node → ANY-match EXISTS over vertex_properties.
+      conds.push(nodeHasProp(raw(`${lastNode}.id`), a[0], a[1]));
     }
   }
 

@@ -178,7 +178,9 @@ export interface ScalarCtx {
   elem: 'node' | 'edge' | 'property';
   idExpr: Expression;        // n.id  (rowid — for correlated joins)
   extIdExpr?: Expression;    // COALESCE(n.uid, n.id) — the outward-facing id for framing
-  propsExpr: Expression;     // n.props   (base row, directly readable)
+  propsExpr?: Expression;    // EDGE ONLY: the flat JSONB props blob (json_extract-able).
+                             // Nodes read props via idExpr into vertex_properties (scalarProp/
+                             // hasProp), so a node ctx has NO propsExpr — see the W4 seam.
   labelIdExpr: Expression;   // n.label
   srcExpr?: Expression;      // n.src  (edge)
   tgtExpr?: Expression;      // n.tgt  (edge)
@@ -197,8 +199,8 @@ interface Scalar { expr: Expression; indexKey: string | null }
 export function elemCtx(n: Relation, elem: Elem): ScalarCtx {
   return {
     elem, idExpr: n.c.id, extIdExpr: q`COALESCE(${n.c.uid}, ${n.c.id})`,
-    propsExpr: n.c.props, labelIdExpr: n.c.label,
-    ...(elem === 'edge' ? { srcExpr: n.c.src, tgtExpr: n.c.tgt } : {}),
+    labelIdExpr: n.c.label,
+    ...(elem === 'edge' ? { propsExpr: n.c.props, srcExpr: n.c.src, tgtExpr: n.c.tgt } : {}),
   };
 }
 
@@ -214,8 +216,8 @@ export function aliasCtx(idExpr: Expression, elem: Elem): ScalarCtx {
   const tbl = elem === 'edge' ? 'edges' : 'nodes';
   const sub = (c: string) => q`(SELECT ${c} FROM ${raw(tbl)} WHERE id=${idExpr})`;
   return {
-    elem, idExpr, extIdExpr: sub('COALESCE(uid, id)'), propsExpr: sub('props'), labelIdExpr: sub('label'),
-    ...(elem === 'edge' ? { srcExpr: sub('src'), tgtExpr: sub('tgt') } : {}),
+    elem, idExpr, extIdExpr: sub('COALESCE(uid, id)'), labelIdExpr: sub('label'),
+    ...(elem === 'edge' ? { propsExpr: sub('props'), srcExpr: sub('src'), tgtExpr: sub('tgt') } : {}),
   };
 }
 
@@ -228,16 +230,61 @@ export function aliasCtx(idExpr: Expression, elem: Elem): ScalarCtx {
  *  rowid that diverges from the user-supplied id. */
 export const extIdOf = (rowid: Expression): Expression => q`(SELECT COALESCE(uid, id) FROM nodes WHERE id=${rowid})`;
 
-/** json_extract of a property on a node identified by `nodeId`. `directProps`,
- *  when set, is a props column already in scope (base row) → read it inline;
- *  otherwise correlate a subquery into nodes. */
-export function propAt(nodeId: Expression | string, directProps: Expression | string | null, key: unknown): Scalar {
-  if (directProps) return propExtract(directProps, key);
-  // Correlated subquery: keep the json_extract node as a child so any exotic-key
-  // bind stays a Value token (nodeId is a bind-free fragment / typed column).
-  const pe = propExtract('props', key);
-  return { expr: q`(SELECT ${pe.expr} FROM nodes WHERE id=${nodeId})`, indexKey: null };
-}
+// ---------- W4 property source seam (vertex_properties table vs edge JSONB) ----------
+//
+// Vertex properties are normalized rows; edge properties are a flat JSONB blob. The
+// three access shapes below dispatch on ctx.elem so every call site is elem-agnostic:
+//   scalarProp  — ONE value (first-under-multi) for order/group-key/map/by(key).
+//   hasProp     — a boolean predicate; nodes use EXISTS so has() matches ANY value.
+//   framedProps — the whole element's props as JSON text {…} for wire materialization
+//                 (node: {key:[values]} multi; edge: {key:value} flat).
+// framedProps/valueMapProps read at the LEAF only (a bounded result set) — never
+// inside movement/filter CTEs, so the index-only traversal hot path is untouched.
+
+/** node: the first value under `key` (ORDER BY id — insertion order), as a correlated
+ *  scalar. Multi-valued keys collapse to the first, matching TinkerPop's by(key). */
+export const nodePropScalar = (nodeIdExpr: Expression, key: string): Expression =>
+  q`(SELECT value FROM vertex_properties WHERE node=${nodeIdExpr} AND key=${value(key)} ORDER BY id LIMIT 1)`;
+
+/** node: does ANY value under `key` satisfy `pred` (undefined → the key exists at
+ *  all). EXISTS over vertex_properties → multi-property has() semantics. */
+export const nodeHasProp = (nodeIdExpr: Expression, key: string, pred: any): Expression => {
+  const base = q`SELECT 1 FROM vertex_properties WHERE node=${nodeIdExpr} AND key=${value(key)}`;
+  return pred === undefined ? q`EXISTS(${base})` : q`EXISTS(${base} AND ${predicateSql(raw('value'), pred)})`;
+};
+
+/** A single scalar value for `key` on the current element (order/group-key/by(key)):
+ *  node → first-under-multi from the table; edge → json_extract of the flat blob. */
+export const scalarProp = (ctx: ScalarCtx, key: string): Expression =>
+  ctx.elem === 'edge' ? propExtract(ctx.propsExpr!, key).expr : nodePropScalar(ctx.idExpr, key);
+
+/** A boolean predicate on `key` for the current element (has/where/is): node → ANY-match
+ *  EXISTS; edge → predicate over the flat blob's json_extract. */
+export const hasProp = (ctx: ScalarCtx, key: string, pred: any): Expression =>
+  ctx.elem === 'edge' ? predicateSql(propExtract(ctx.propsExpr!, key).expr, pred) : nodeHasProp(ctx.idExpr, key, pred);
+
+/** node: assemble ALL properties as JSON text `{key:[value,…]}` (multi-valued,
+ *  insertion-ordered) from vertex_properties, correlated on the node rowid. Empty →
+ *  `{}`. JSON text (not JSONB) — computed on the fly, so the handler JSON.parses it. */
+export const vertexPropsAgg = (nodeIdExpr: Expression): Expression =>
+  q`COALESCE((SELECT json_group_object(key, json(vs)) FROM (SELECT key, json_group_array(value ORDER BY id) AS vs FROM vertex_properties WHERE node=${nodeIdExpr} GROUP BY key ORDER BY MIN(id))), '{}')`;
+
+/** The props expression for framing a whole element out. Node: vertexPropsAgg
+ *  ({key:[values]}); edge: the flat JSONB blob as text ({key:value}). */
+export const framedProps = (rel: Relation, elem: Elem): Expression =>
+  elem === 'edge' ? q`json(${rel.c.props})` : vertexPropsAgg(rel.c.id);
+
+/** framedProps from a ScalarCtx (group()/element framing): edge → the flat blob as
+ *  text; node → vertexPropsAgg on the ctx rowid. */
+export const framedPropsCtx = (ctx: ScalarCtx): Expression =>
+  ctx.elem === 'edge' ? q`json(${ctx.propsExpr!})` : vertexPropsAgg(ctx.idExpr);
+
+/** valueMap()'s props: ALWAYS {key:[values]} (values wrapped in a list) for both
+ *  runtimes' handler. Node = vertexPropsAgg; edge = wrap each flat scalar in a 1-list. */
+export const valueMapProps = (rel: Relation, elem: Elem): Expression =>
+  elem === 'edge'
+    ? q`COALESCE((SELECT json_group_object(je.key, json_array(je.value)) FROM json_each(json(${rel.c.props})) je), '{}')`
+    : vertexPropsAgg(rel.c.id);
 
 /**
  * Compile a nested traversal (the node inside by(__.…)/where(__.…)) to a
@@ -250,9 +297,10 @@ export function propAt(nodeId: Expression | string, directProps: Expression | st
  */
 export function compileNestedScalar(inner: Step[], ctx: ScalarCtx): Scalar {
   let steps = inner;
-  // A pointer to the "current node" for terminal value/label/id reads.
+  // A pointer to the "current NODE" (rowid) for terminal value/label/id reads. Once
+  // here the current element is always a node (edge values/label/id return above), so a
+  // values() terminal reads vertex_properties via nodePropScalar.
   let nodeId: Expression;
-  let directProps: Expression | null;   // props readable inline (base row), else null → subquery
   let directLabelId: Expression | null; // label id readable inline, else null → subquery via nodes
 
   const head = steps[0]?.name;
@@ -261,19 +309,19 @@ export function compileNestedScalar(inner: Step[], ctx: ScalarCtx): Scalar {
   if (ctx.elem === 'property') {
     if (head === 'key') { requireTerminal(steps, 1); return { expr: ctx.pkExpr!, indexKey: null }; }
     if (head === 'value') { requireTerminal(steps, 1); return { expr: ctx.pvExpr!, indexKey: null }; }
-    if (head === 'element') { nodeId = ctx.ownerExpr!; directProps = ctx.ownerPropsExpr!; directLabelId = null; steps = steps.slice(1); }
+    if (head === 'element') { nodeId = ctx.ownerExpr!; directLabelId = null; steps = steps.slice(1); }
     else throw new Error(`by(__.${head}()) over a property not yet supported`);
   } else if (ctx.elem === 'edge') {
-    if (head === 'outV' || head === 'inV') { nodeId = head === 'outV' ? ctx.srcExpr! : ctx.tgtExpr!; directProps = null; directLabelId = null; steps = steps.slice(1); }
+    if (head === 'outV' || head === 'inV') { nodeId = head === 'outV' ? ctx.srcExpr! : ctx.tgtExpr!; directLabelId = null; steps = steps.slice(1); }
     else if (head === 'label') { requireTerminal(steps, 1); return { expr: labelNameSub(ctx.labelIdExpr), indexKey: null }; }
     else if (head === 'id') { requireTerminal(steps, 1); return { expr: ctx.idExpr, indexKey: null }; }
-    else if (head === 'values') { requireTerminal(steps, 1); return propAt(ctx.idExpr, ctx.propsExpr, steps[0].args[0]); }
+    else if (head === 'values') { requireTerminal(steps, 1); return { expr: scalarProp(ctx, steps[0].args[0]), indexKey: null }; }
     // out()/in()/both() are NOT valid on an edge (must go through outV()/inV());
     // routing them to edgeCountFrom here would compare edges.src to the edge's own
     // id and silently mis-count, so let them hit the clear throw below.
     else throw new Error(`by(__.${head}()) over an edge not yet supported`);
   } else { // node
-    nodeId = ctx.idExpr; directProps = ctx.propsExpr; directLabelId = ctx.labelIdExpr;
+    nodeId = ctx.idExpr; directLabelId = ctx.labelIdExpr;
     if (MOVES.has(head)) return edgeAggFrom(steps, ctx.idExpr);
   }
 
@@ -281,7 +329,7 @@ export function compileNestedScalar(inner: Step[], ctx: ScalarCtx): Scalar {
   const s = steps[0];
   if (!s) throw new Error('nested traversal resolves to no projection');
   switch (s.name) {
-    case 'values': requireTerminal(steps, 1); return propAt(nodeId, directProps, s.args[0]);
+    case 'values': requireTerminal(steps, 1); return { expr: nodePropScalar(nodeId, s.args[0]), indexKey: null };
     case 'label':  requireTerminal(steps, 1); return { expr: labelNameSub(directLabelId ?? q`(SELECT label FROM nodes WHERE id=${nodeId})`), indexKey: null };
     case 'id':     requireTerminal(steps, 1); return { expr: nodeId, indexKey: null };
     // constant(x): a fixed scalar per traverser — the common choose().option() body.
@@ -372,11 +420,11 @@ export function compileFilterPredicate(
     return { expr: predicateSql(compileNestedScalar(body, ctx).expr, isPred), indexKeys };
   }
 
-  // Current-element predicates (no movement).
+  // Current-element predicates (no movement). Node props → ANY-match EXISTS over
+  // vertex_properties; edge props → json_extract of the flat blob (hasProp dispatches).
   if (head === 'values' && body.length === 1) {
-    const pe = propExtract(ctx.propsExpr, body[0].args[0]);
-    if (pe.indexKey && ctx.elem === 'node') indexKeys.push(pe.indexKey);
-    return { expr: predicateSql(pe.expr, hasIs ? isPred : undefined), indexKeys }; // bare where(__.values(k)) → exists → IS NOT NULL
+    // bare where(__.values(k)) → the key exists at all; .is(P) → any value matches P.
+    return { expr: hasProp(ctx, body[0].args[0], hasIs ? isPred : undefined), indexKeys };
   }
   if (head === 'has' && body.length === 1) {
     const [key, val] = body[0].args;
@@ -389,9 +437,7 @@ export function compileFilterPredicate(
       return { expr: predicateSql(expr, val), indexKeys };
     }
     if (typeof key === 'string') {
-      const pe = propExtract(ctx.propsExpr, key);
-      if (pe.indexKey && ctx.elem === 'node') indexKeys.push(pe.indexKey);
-      return { expr: predicateSql(pe.expr, val), indexKeys };
+      return { expr: hasProp(ctx, key, val), indexKeys };
     }
   }
   if (head === 'hasLabel' && body.length === 1)
@@ -492,12 +538,14 @@ function compileExistsChain(body: Step[], ctx: ScalarCtx, isPred: any, hasIs: bo
   const last = `xn${moves.length - 1}`;
 
   if (terminal) {
+    // The terminal element is a node (xn{k}); its props → an ANY-match EXISTS over
+    // vertex_properties correlated on the joined node's rowid.
     if (terminal.name === 'has' && typeof terminal.args[0] === 'string')
-      conds.push(predicateSql(propExtract(`${last}.props`, terminal.args[0]).expr, terminal.args[1]));
+      conds.push(nodeHasProp(raw(`${last}.id`), terminal.args[0], terminal.args[1]));
     else if (terminal.name === 'hasLabel')
       conds.push(labelIn(`${last}.label`, terminal.args));
     else if (terminal.name === 'values' && typeof terminal.args[0] === 'string')
-      conds.push(predicateSql(propExtract(`${last}.props`, terminal.args[0]).expr, hasIs ? isPred : undefined));
+      conds.push(nodeHasProp(raw(`${last}.id`), terminal.args[0], hasIs ? isPred : undefined));
     else throw new Error(`where() chain terminal __.${terminal.name}() not yet supported`);
   } else if (hasIs) {
     throw new Error(`where(__.${moves.map((m) => m.name + '()').join('.')}.is(P)) not yet supported`);

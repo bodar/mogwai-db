@@ -103,7 +103,8 @@ function gremlinContract(getOrigin: () => string) {
     });
 
     test('hasLabel + values', async () => {
-      expect(await g.V().hasLabel('person').values('name').toList()).toEqual(['dan', 'ada']);
+      // bare values() has no guaranteed order (TinkerPop); compare as a set
+      expect((await g.V().hasLabel('person').values('name').toList()).sort()).toEqual(['ada', 'dan']);
     });
 
     test('has eq', async () => {
@@ -119,7 +120,8 @@ function gremlinContract(getOrigin: () => string) {
     });
 
     test('in(likes)', async () => {
-      expect(await g.V(zig.id).in_('likes').values('name').toList()).toEqual(['dan', 'ada']);
+      // bare values() has no guaranteed order (TinkerPop); compare as a set
+      expect((await g.V(zig.id).in_('likes').values('name').toList()).sort()).toEqual(['ada', 'dan']);
     });
 
     test('both + dedup', async () => {

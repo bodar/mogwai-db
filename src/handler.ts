@@ -43,9 +43,11 @@ function errorFrame(status: number, message: string): Buffer {
 // We frame the vertex from ioc primitives instead — its deserialize side reads
 // properties fine. Per-property framing (id/label/value) is left to
 // VertexPropertySerializer via the qualified list, which serializes correctly.
-function vertexBuffer(id: number, label: string, props: Record<string, any>): Buffer {
+// props is {key: [value, …]} — one VertexProperty per value (multi-property). The id
+// is synthetic (owner.ordinal); scenarios compare on key+value+owner, not this id.
+function vertexBuffer(id: number, label: string, props: Record<string, any[]>): Buffer {
   let pid = 0;
-  const vprops = Object.entries(props).map(([k, v]) => new VertexProperty(`${id}.${pid++}`, k, v, []));
+  const vprops = Object.entries(props).flatMap(([k, vs]) => vs.map((v) => new VertexProperty(`${id}.${pid++}`, k, v, [])));
   return Buffer.concat([
     Buffer.from([ioc.DataType.VERTEX, 0x00]),
     ioc.anySerializer.serialize(id),            // {id}, fully qualified
@@ -84,20 +86,23 @@ function propertyBuffer(owner: number, key: string, value: any): Buffer {
 
 // valueMap()/valueMap(true)/valueMap(keys...): Map<key, [values]>; with tokens,
 // prepend the T.id/T.label entries (T tokens ride as GraphBinary DataType.T).
-function valueMapBuffer(id: number, label: string, props: Record<string, any>,
+// props is {key:[values]} (multi-valued). valueMap → Map<key, [values]>; with tokens,
+// prepend the T.id/T.label entries (T tokens ride as GraphBinary DataType.T).
+function valueMapBuffer(id: number, label: string, props: Record<string, any[]>,
                         keys: string[] | null, tokens: boolean): Buffer {
   const m = new Map<any, any>();
   if (tokens) { m.set(t.id, id); m.set(t.label, label); }
-  for (const key of keys ?? Object.keys(props)) if (key in props) m.set(key, [props[key]]);
+  for (const key of keys ?? Object.keys(props)) if (key in props) m.set(key, props[key]);
   return ioc.anySerializer.serialize(m);
 }
 
-// elementMap(): flat Map with scalar values; id/label tokens are ALWAYS present.
-function elementMapBuffer(id: number, label: string, props: Record<string, any>,
+// elementMap(): flat Map with ONE value per key (first under multi); id/label tokens
+// are ALWAYS present.
+function elementMapBuffer(id: number, label: string, props: Record<string, any[]>,
                           keys: string[] | null): Buffer {
   const m = new Map<any, any>();
   m.set(t.id, id); m.set(t.label, label);
-  for (const key of keys ?? Object.keys(props)) if (key in props) m.set(key, props[key]);
+  for (const key of keys ?? Object.keys(props)) if (key in props) m.set(key, props[key][0]);
   return ioc.anySerializer.serialize(m);
 }
 
@@ -268,7 +273,10 @@ function* execute(store: GraphStore, gremlin: string, params: Record<string, any
   const plan = compile(gremlin, params);
   if (plan.kind === 'write') {
     for (const r of plan.run(store)) {
-      if (r.vertex) yield vertexBuffer(r.vertex.id, r.vertex.label, r.vertex.props);
+      // Write responses carry a flat {key:value} prop bag; vertexBuffer wants
+      // {key:[values]}, so wrap each value in a 1-list (single-cardinality write).
+      if (r.vertex) yield vertexBuffer(r.vertex.id, r.vertex.label,
+        Object.fromEntries(Object.entries(r.vertex.props as Record<string, any>).map(([k, v]) => [k, [v]])));
       else {
         const e = r.edge;
         // Frame via edgeBuffer so edge properties materialize — routing through

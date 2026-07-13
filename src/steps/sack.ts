@@ -1,5 +1,5 @@
 import { q, list, empty, type Expression } from '../q.ts';
-import { propExtract, labelNameSub, compileNestedScalar, predicateSql, elemCtx } from '../plan.ts';
+import { scalarProp, labelNameSub, compileNestedScalar, predicateSql, elemCtx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { advance, elemRel, prevRel, carriedCols, type St, type StepFn } from './context.ts';
 
@@ -22,7 +22,7 @@ function sackByValue(byArgs: any[] | undefined, st: St): Expression {
   const a = byArgs?.[0];
   if (a === undefined)
     throw new Error('sack(Operator.x) without a by() modulator over an element stream not yet supported');
-  if (typeof a === 'string') return propExtract('n.props', a).expr;
+  if (typeof a === 'string') return scalarProp(elemCtx(elemRel(st), st.elem), a);
   if (a && typeof a === 'object' && 'token' in a) {
     const ctx = elemCtx(elemRel(st), st.elem);
     if (a.token === 'label') return labelNameSub(ctx.labelIdExpr);
