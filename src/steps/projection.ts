@@ -247,7 +247,7 @@ function compileFold(st: St, acc: TailAcc): ListStream {
     const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
     const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
     const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
-    const proj = PROJECTORS.get(projName)!({ st, n, l, extId, vJoin, vlJoin, projStep: acc.projStep, hasIs: false });
+    const proj = PROJECTORS.get(projName)!({ st, n, l, extId, vJoin, vlJoin, projStep: acc.projStep });
     // values() drops missing-property elements (baseWhere = IS NOT NULL), matching
     // TinkerPop's fold-of-values. id/label have no baseWhere.
     const where = proj.baseWhere ? q` WHERE ${proj.baseWhere}` : empty;
@@ -285,7 +285,7 @@ interface TailMods { orders: OrderClause[]; distinct: boolean; offset: number; l
 interface ProjCtx {
   st: St; n: Relation; l: Relation; extId: Expression;
   vJoin: Expression; vlJoin: Expression;
-  projStep: PStep | null; hasIs: boolean;
+  projStep: PStep | null;
 }
 interface ProjResult { shape: Shape; colsNode: Expression; fromNode: Expression; scalarExpr?: Expression | null; baseWhere?: Expression | null; }
 type ProjFn = (c: ProjCtx) => ProjResult;
@@ -368,7 +368,7 @@ function buildProjection(st: St, acc: TailAcc): Compiled {
   const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
   const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
   const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
-  const proj = PROJECTORS.get(projName)!({ st, n, l, extId, vJoin, vlJoin, projStep: acc.projStep, hasIs: isPreds.length > 0 });
+  const proj = PROJECTORS.get(projName)!({ st, n, l, extId, vJoin, vlJoin, projStep: acc.projStep });
 
   // order().by(key) sorts by a property expression (element context) — auto-index it.
   return renderProjection(st.q, proj, acc, nodePropOrderKey(st));
