@@ -163,10 +163,20 @@ them is exactly correct (correct-by-design, not a test-chase). Semantic strategi
 or unknown list still fail closed. Also added `identity()` as a no-op step. What
 remains below is the *semantic* strategy work.
 
-**Real-world: LOW-MEDIUM for us.** `PartitionStrategy` = multi-tenancy *within one
-graph* — but mogwai already isolates tenants as **one Durable Object per graph**, so
-the main use case is covered structurally elsewhere. `SubgraphStrategy` (filtered
-views) is the more interesting bit.
+**SEMANTIC SUPPORT LANDED 2026-07-13 (L3 495→543).** SubgraphStrategy (vertex
+criterion), PartitionStrategy (read-filter + write-stamp), and ReadOnly/EdgeLabel/
+ReservedKeys verification now compile as `applyStrategies` injection passes
+(`src/strategies.ts`). Deferred tails (Subgraph edges/adjacency, Partition meta/merge,
+ProductiveBy, nested bodies) fail closed. See
+`docs/2026-07-13-with-strategies-exploration.md`.
+
+**Real-world: the "DO covers it" framing below was a category error — corrected.**
+`PartitionStrategy` = sub-partitioning *within one graph* (cross-partition reads,
+overlapping visibility); the DO is the *tenant* boundary. They're complementary levels,
+not substitutes — a tenant may still want to sub-partition inside its DO. (Original,
+now-superseded reasoning:) `PartitionStrategy` was thought covered because mogwai
+isolates tenants as one Durable Object per graph. `SubgraphStrategy` (filtered views)
+is the other semantic piece — also landed.
 **Structural: medium, invasive.** Must apply the strategy's implied filter to every
 read *and* write. `withoutStrategies` is **coupled** — once strategies apply, it must
 actively suppress them (today both fail closed on purpose; see
