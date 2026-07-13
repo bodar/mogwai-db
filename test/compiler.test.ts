@@ -727,6 +727,23 @@ describe('compiler SQL snapshots', () => {
     expect(p.sql).toContain('GROUP BY gk');
   });
 
+  test('sack(op).by(key) mutates a carried sk column; bare sack() reads it', () => {
+    const p = read('g.V().sack(assign).by("age").sack()');
+    expect(p.shape).toEqual({ kind: 'value' });
+    expect(p.sql).toContain("json_extract(n.props, '$.age') AS sk");
+    expect(p.sql).toContain('SELECT p.sk AS v FROM'); // bare sack() reads the carried column
+    // sum accumulator references the prior sk; div forces REAL division.
+    expect(read('g.withSack(0.0d).V().sack(sum).by("age").sack()').sql).toContain('(p.sk + json_extract(n.props');
+    expect(read('g.withSack(2).V().sack(div).by(__.constant(4.0d)).sack()').sql).toContain('(CAST(p.sk AS REAL) / ?)');
+  });
+
+  test('withSack() seeds the sk column at the source as a bound value', () => {
+    const p = read('g.withSack(0.0d).V().outE().sack(sum).by("weight").inV().sack()');
+    expect(p.sql).toContain('? AS sk FROM nodes'); // seeded at V()
+    expect(p.binds[0]).toBe(0);
+    expect(p.sql).toContain('p.sk FROM edges'); // carried through outE()/inV()
+  });
+
   test('groupCount() → count value; GROUP BY', () => {
     const p = read('g.V().groupCount().by("name")');
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
@@ -1239,6 +1256,41 @@ describe('compiler execution semantics', () => {
     const store = seededStore();
     expect(run(store, 'g.V().has(T.id, P.within(1,2)).values("name")').map((r) => r.v).sort()).toEqual(['marko', 'vadas']);
     expect(run(store, 'g.V().has(T.label, P.eq("software")).count()').map((r) => r.v)).toEqual([2]);
+  });
+
+  test('sack(assign).by(key) assigns per-traverser; by-miss drops the traverser', () => {
+    const store = seededStore();
+    // 4 persons have age; software (lop, ripple) have none → dropped by the by() miss.
+    expect(run(store, 'g.V().sack(assign).by("age").sack()').map((r) => r.v).sort((a, b) => a - b))
+      .toEqual([27, 29, 32, 35]);
+  });
+
+  test('sack(assign).by(T.label) over edges, carried through inV()', () => {
+    const store = seededStore();
+    expect(run(store, 'g.withSack("hello").V().outE().sack(Operator.assign).by(T.label).inV().sack()').map((r) => r.v).sort())
+      .toEqual(['created', 'created', 'created', 'created', 'knows', 'knows']);
+  });
+
+  test('withSack(0.0d) + sack(sum).by(weight) accumulates per edge; sum() folds', () => {
+    const store = seededStore();
+    // each edge contributes its weight to a fresh (0 + weight) sack; sum over all = 3.5.
+    expect(run(store, 'g.withSack(0.0d).V().outE().sack(Operator.sum).by("weight").inV().sack().sum()').map((r) => r.v))
+      .toEqual([3.5]);
+  });
+
+  test('withSack(2) + sack(div).by(__.constant(4.0)) → real division per vertex', () => {
+    const store = seededStore();
+    expect(run(store, 'g.withSack(2).V().sack(Operator.div).by(__.constant(4.0d)).sack()').map((r) => r.v))
+      .toEqual([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]);
+  });
+
+  test('sack with two by() modulators throws TinkerPop message', () => {
+    expect(() => compile('g.V().sack(assign).by("age").by("name").sack()', {}))
+      .toThrow('Sack step can only have one by modulator');
+  });
+
+  test('bare sack() with no withSack()/sack(op) throws', () => {
+    expect(() => compile('g.V().sack()', {})).toThrow('sack() requires withSack()');
   });
 
   test('order().by numeric ascending vs descending', () => {

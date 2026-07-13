@@ -1,4 +1,4 @@
-import { q, value, list, Query, type Expression } from '../q.ts';
+import { q, value, list, empty, Query, type Expression } from '../q.ts';
 import { nodes, edges } from '../schema.ts';
 import { type Elem } from '../plan.ts';
 import { stepChain, flattenListArgs } from '../frontend.ts';
@@ -9,6 +9,8 @@ import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath }
 import { union, optional, repeat, choose, coalesce, flatMap } from './branch.ts';
 import { match } from './match.ts';
 import { identity, limit, range, skip } from './passthrough.ts';
+import { sack } from './sack.ts';
+import { type SackSpec } from '../frontend.ts';
 import { compileTail, compileFromScalar } from './projection.ts';
 import { compileFromList } from './list.ts';
 import { type Stream } from './stream.ts';
@@ -35,7 +37,14 @@ const PREFIX = new Map<string, StepFn>([
   // anchors it on repeat() when present, else the first cluster step).
   ['repeat', repeat], ['emit', repeat], ['times', repeat], ['until', repeat],
   ['limit', limit], ['range', range], ['skip', skip], ['identity', identity],
+  // Only the MUTATE form sack(Operator.x) is a prefix step; bare sack() (read) breaks
+  // out to the tail (foldBody guard below).
+  ['sack', sack],
 ]);
+
+/** A sack step in its mutate form (has an Operator arg); the bare read form is a tail
+ *  projection, so it must NOT dispatch as a prefix step. */
+const isSackMutate = (s: PStep): boolean => (s.args ?? []).some((a: any) => a && typeof a === 'object' && 'operator' in a);
 
 /** Steps that need the linear path threaded through the fold: the source vertex
  *  becomes path position p0 and every hop appends a position. */
@@ -45,10 +54,13 @@ const chainTracksPath = (steps: PStep[]): boolean => steps.some((s) => PATH_STEP
 /** Seed the source CTE (c0) from V(...)/E(...) and its optional id list. When the
  *  chain tracks a path, the source element is path position p0 (projected as the
  *  extra `p0` column). */
-function seedSource(first: PStep, query: Query, params: Record<string, any>, trackPath: boolean): St {
+function seedSource(first: PStep, query: Query, params: Record<string, any>, trackPath: boolean, sackInit?: SackSpec): St {
   const elem: Elem = first.name === 'E' ? 'edge' : 'node';
   const srcRel = elem === 'edge' ? edges : nodes;
   const sel = trackPath ? 'id, id AS p0' : 'id';
+  // withSack() seeds every traverser's carried sack column with the initial value (a
+  // bound Value so a string init like "hello" escapes safely).
+  const sackCol: Expression = sackInit ? q`, ${value(sackInit.init)} AS sk` : empty;
   // V(1,[2,3]) ≡ V(1,2,3): flatten any Collection id arg (collection literals + bound
   // list params render inline as [..] and parse as arrays).
   const ids = flattenListArgs(first.args);
@@ -62,13 +74,13 @@ function seedSource(first: PStep, query: Query, params: Record<string, any>, tra
     if (nums.length) clauses.push(q`id IN (${list(nums.map(value), ',')})`);
     if (strs.length) clauses.push(q`uid IN (${list(strs.map(value), ',')})`);
     if (!clauses.length) throw new Error('V()/E() ids must be numbers or strings');
-    body = q`SELECT ${sel} FROM ${srcRel} WHERE ${list(clauses, ' OR ')}`;
+    body = q`SELECT ${sel}${sackCol} FROM ${srcRel} WHERE ${list(clauses, ' OR ')}`;
   } else {
-    body = q`SELECT ${sel} FROM ${srcRel}`;
+    body = q`SELECT ${sel}${sackCol} FROM ${srcRel}`;
   }
-  const cols = trackPath ? ['id', 'p0'] : ['id'];
+  const cols = [...(trackPath ? ['id', 'p0'] : ['id']), ...(sackInit ? ['sk'] : [])];
   const path = trackPath ? { kind: 'cols' as const, cols: [{ col: 'p0', elem }] } : undefined;
-  return { kind: 'elements', q: query, last: query.cte(body, cols), aliases: new Map(), elem, indexKeys: new Set(), params, path };
+  return { kind: 'elements', q: query, last: query.cte(body, cols), aliases: new Map(), elem, indexKeys: new Set(), params, path, sack: sackInit ? 'sk' : undefined };
 }
 
 /** union(b1, b2, …) as a SOURCE step: compile each branch's prefix into the SAME
@@ -76,7 +88,8 @@ function seedSource(first: PStep, query: Query, params: Record<string, any>, tra
  *  into one seed. Branches must be vertex-rooted prefixes with no leftover tail or
  *  as() (those defer); the shared-Query recursion also lets a branch be a nested
  *  union. This is the reusable sub-traversal-into-query seam local/map/choose build on. */
-function seedUnion(first: PStep, query: Query, params: Record<string, any>): St {
+function seedUnion(first: PStep, query: Query, params: Record<string, any>, sackInit?: SackSpec): St {
+  if (sackInit) throw new Error('withSack() with a union() source not yet supported');
   const branches = first.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 1) throw new Error('union() needs at least one branch');
   const indexKeys = new Set<string>();
@@ -114,17 +127,17 @@ export function foldBody(steps: PStep[], seedSt: St, from: number): { st: St; st
     const fn = PREFIX.get(steps[i].name);
     // Option-map choose (choose().option()…) is a tail CASE projector, not a prefix
     // branch — stop so compileTail handles it (predicate-form choose has no .options).
-    if (!fn || (steps[i].name === 'choose' && steps[i].options)) break;
+    if (!fn || (steps[i].name === 'choose' && steps[i].options) || (steps[i].name === 'sack' && !isSackMutate(steps[i]))) break;
     st = fn(steps[i], st);
   }
   return { st, stop: i };
 }
 
-export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, query: Query = new Query()): { st: St; stop: number } {
+export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, query: Query = new Query(), sackInit?: SackSpec): { st: St; stop: number } {
   const first = steps[0];
   const trackPath = chainTracksPath(steps);
-  const st0 = first.name === 'union' ? seedUnion(first, query, params)
-    : (first.name === 'V' || first.name === 'E') ? seedSource(first, query, params, trackPath)
+  const st0 = first.name === 'union' ? seedUnion(first, query, params, sackInit)
+    : (first.name === 'V' || first.name === 'E') ? seedSource(first, query, params, trackPath, sackInit)
     : (() => { throw new Error(`unsupported source step: ${first.name}`); })();
   return foldBody(steps, st0, 1);
 }
@@ -147,8 +160,9 @@ export function dispatchNext(s: Stream, steps: PStep[], at: number): Compiled {
   return compileFromList(s, steps, at);
 }
 
-/** A read traversal: prefix fold + tail projection (re-enterable via dispatchNext). */
-export function compileRead(steps: PStep[], params: Record<string, any> = {}): Compiled {
-  const { st, stop } = buildPrefix(steps, params);
+/** A read traversal: prefix fold + tail projection (re-enterable via dispatchNext).
+ *  `sackInit` (from withSack()) seeds the carried sack column at the source. */
+export function compileRead(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec): Compiled {
+  const { st, stop } = buildPrefix(steps, params, new Query(), sackInit);
   return compileTail(st, steps, stop);
 }

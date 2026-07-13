@@ -125,6 +125,28 @@ export function extractStrategies(tree: any, params: Record<string, any>): Strat
   return use;
 }
 
+// ---------- sack extraction ----------
+//
+// withSack(init[, mergeOperator]) is a TraversalSourceSelfMethod_* node (like
+// withStrategies) — not part of the step chain. Pull the initial sack value (and its
+// numeric subtype, for framing) plus the optional merge operator straight from the
+// tree. split/merge-on-fork semantics are deferred; only the initial value is used
+// today (the seed for every traverser's carried sack column).
+
+export interface SackSpec { init: any; initType: string | null; mergeOp?: string; }
+
+/** Pull withSack(init[, Operator.x]) out of the parse tree, or null if none. */
+export function extractSack(tree: any, params: Record<string, any>): SackSpec | null {
+  const w = descendants(tree, 'TraversalSourceSelfMethod_withSackContext')[0];
+  if (!w) return null;
+  const gl = descendants(w, 'GenericLiteralContext')[0];
+  if (!gl) throw new Error('withSack() requires an initial value');
+  const out: any[] = [], types: (string | null)[] = [];
+  walkArgs(gl, out, params, types);
+  const op = descendants(w, 'TraversalOperatorContext')[0];
+  return { init: out[0], initType: types[0] ?? null, mergeOp: op ? enumSuffix(op) : undefined };
+}
+
 /** Pull literal / predicate / variable arguments out of a step context, plus the
  *  parallel numeric-subtype tags (see Step.argTypes). */
 function extractArgs(ctx: any, params: Record<string, any>): { args: any[]; types: (string | null)[] } {
@@ -212,6 +234,11 @@ function walkArgs(node: any, out: any[], params: Record<string, any>, types: (st
   }
   // DT.second/minute/hour/day (or the bare unit) — dateAdd()'s unit selector.
   if (cls === 'TraversalDTContext') { emit({ dt: enumSuffix(node) }); return; }
+  // Operator.sum/minus/mult/div/min/max/assign (or the bare keyword) — sack()'s
+  // merge operator / withSack()'s merge fn. Without this the generic recursion drops
+  // it, so sack(Operator.sum) collapses to a key-less sack() (indistinguishable from
+  // the bare read form).
+  if (cls === 'TraversalOperatorContext') { emit({ operator: enumSuffix(node) }); return; }
   // Scope.local / Scope.global (or the bare local/global) — the per-list vs
   // whole-stream selector on order()/limit()/range()/tail()/sum()/… Without this
   // the token was dropped and a Scope.local step silently compiled as its GLOBAL
