@@ -236,8 +236,9 @@ suite manually.
 > projection.ts, see docs/2026-07-13-seam-reuse-audit.md #1); then the typed-value
 > carrier + asBool 496→508 (Shape value gains a compile-time `as?: ValueType` tag the
 > handler frames by); then asNumber(GType.X) 508→525 (numeric subtype ladder — target
-> from the explicit arg; const overflow-checks + runtime CAST; bare asNumber() defers,
-> needs frontend numeric-literal-suffix preservation) — see
+> from the explicit arg; const overflow-checks + runtime CAST); then bare asNumber()
+> 525→534 (frontend now records each numeric literal's subtype in a parallel
+> `Step.argTypes`; args stay plain numbers so no consumer ripple) — see
 > docs/2026-07-13-per-traverser-branching.md).
 
 DONE: P2a (as/select/project/by column-threading), P2c-1 (edge traversal — the

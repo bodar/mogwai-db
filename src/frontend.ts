@@ -29,7 +29,18 @@ export function parseGremlin(query: string) {
 
 // ---------- step extraction ----------
 
-export interface Step { name: string; args: any[]; ctx: ParserRuleContext; }
+// `argTypes[i]` is the declared numeric subtype of `args[i]` when it is a numeric
+// literal (from the grammar context + suffix), else null. Carried in parallel so
+// `args` stays plain numbers for every existing consumer; only bare asNumber() reads
+// it (to recover the input subtype the value alone can't carry — 5b/5i/5l/5.0 → 5).
+export interface Step { name: string; args: any[]; ctx: ParserRuleContext; argTypes?: (string | null)[]; }
+
+// Numeric-literal suffix → subtype. No suffix: an integer literal defaults to `int`,
+// a float literal to `double` (TinkerPop's literal typing).
+const INT_LIT_SUFFIX: Record<string, string> = { b: 'byte', s: 'short', i: 'int', l: 'long', n: 'bigint' };
+const FLOAT_LIT_SUFFIX: Record<string, string> = { f: 'float', d: 'double', m: 'bigdecimal' };
+const intLitType = (text: string): string => INT_LIT_SUFFIX[text.slice(-1).toLowerCase()] ?? 'int';
+const floatLitType = (text: string): string => FLOAT_LIT_SUFFIX[text.slice(-1).toLowerCase()] ?? 'double';
 
 export const stepName = (cls: string, prefix: string) =>
   cls.startsWith(prefix) && cls.endsWith('Context')
@@ -43,7 +54,8 @@ export function stepChain(tree: any, params: Record<string, any>): Step[] {
     const cls = node.constructor.name;
     const name = stepName(cls, 'TraversalSourceSpawnMethod_') ?? stepName(cls, 'TraversalMethod_');
     if (!insideNested && name) {
-      steps.push({ name, args: extractArgs(node, params), ctx: node });
+      const { args, types } = extractArgs(node, params);
+      steps.push({ name, args, ctx: node, argTypes: types });
       // nested traversals inside this step's args must not contribute to the top chain
       for (let i = 0; i < node.getChildCount(); i++) visit(node.getChild(i), true);
       return;
@@ -54,79 +66,84 @@ export function stepChain(tree: any, params: Record<string, any>): Step[] {
   return steps;
 }
 
-/** Pull literal / predicate / variable arguments out of a step context. */
-function extractArgs(ctx: any, params: Record<string, any>): any[] {
+/** Pull literal / predicate / variable arguments out of a step context, plus the
+ *  parallel numeric-subtype tags (see Step.argTypes). */
+function extractArgs(ctx: any, params: Record<string, any>): { args: any[]; types: (string | null)[] } {
   const args: any[] = [];
+  const types: (string | null)[] = [];
   // skip child 0 (step name token) and parens; walking all children is fine since tokens have no children
-  for (let i = 0; i < ctx.getChildCount(); i++) walkArgs(ctx.getChild(i), args, params);
-  return args;
+  for (let i = 0; i < ctx.getChildCount(); i++) walkArgs(ctx.getChild(i), args, params, types);
+  return { args, types };
 }
 
 /** The single argument a subtree contributes — used for map-entry values, which
- *  must not flatten into the surrounding step's arg list. */
+ *  must not flatten into the surrounding step's arg list. (Subtype tags irrelevant
+ *  for map values, so they're discarded here.) */
 function argOf(node: any, params: Record<string, any>): any {
   const out: any[] = [];
-  walkArgs(node, out, params);
+  walkArgs(node, out, params, []);
   return out.length === 1 ? out[0] : out;
 }
 
-/** Walk one AST node, pushing each recognised argument onto `out`. Unrecognised
- *  nodes recurse into children (a literal buried deeper still surfaces). */
-function walkArgs(node: any, out: any[], params: Record<string, any>): void {
+/** Walk one AST node, pushing each recognised argument onto `out` (and its numeric
+ *  subtype, or null, onto `types` in lockstep). Unrecognised nodes recurse into
+ *  children (a literal buried deeper still surfaces). */
+function walkArgs(node: any, out: any[], params: Record<string, any>, types: (string | null)[]): void {
+  const emit = (v: any, t: string | null = null) => { out.push(v); types.push(t); };
   const cls = node.constructor.name;
-  if (cls === 'StringLiteralContext') { out.push(unquote(node.getText())); return; }
-  if (cls === 'IntegerLiteralContext') { out.push(parseInt(node.getText().replace(/[lL]$/, ''), 10)); return; }
-  if (cls === 'FloatLiteralContext') { out.push(parseFloat(node.getText())); return; }
-  if (cls === 'BooleanLiteralContext') { out.push(node.getText() === 'true'); return; }
-  if (cls === 'NullLiteralContext') { out.push(null); return; }
+  if (cls === 'StringLiteralContext') { emit(unquote(node.getText())); return; }
+  if (cls === 'IntegerLiteralContext') { emit(parseInt(node.getText().replace(/[lL]$/, ''), 10), intLitType(node.getText())); return; }
+  if (cls === 'FloatLiteralContext') { emit(parseFloat(node.getText()), floatLitType(node.getText())); return; }
+  if (cls === 'BooleanLiteralContext') { emit(node.getText() === 'true'); return; }
+  if (cls === 'NullLiteralContext') { emit(null); return; }
   if (cls === 'VariableContext') {
     const name = node.getText();
     if (!(name in params)) throw new Error(`Unbound parameter '${name}'`);
-    out.push(params[name]); return;
+    emit(params[name]); return;
   }
   if (cls.startsWith('TraversalPredicate_')) {
-    out.push(parsePredicate(node, params)); return;
+    emit(parsePredicate(node, params)); return;
   }
   // order()/by() take an Order token (asc|desc|shuffle) that is a grammar rule,
   // not a literal — capture it so the compiler can pick sort direction.
   if (cls === 'TraversalOrderContext') {
-    out.push({ order: node.getText().split('.').pop().toLowerCase() }); return;
+    emit({ order: node.getText().split('.').pop().toLowerCase() }); return;
   }
   // Enum tokens carried as tagged objects so consumers can act on them (or
   // reject them cleanly). Previously these grammar rules had no case and the
   // generic recursion dropped them silently — e.g. select(Pop.first, 'a')
   // parsed as select('a') and mis-executed. Capture, then let the step throw
   // "not implemented" for anything past the current supported set.
-  if (cls === 'TraversalPopContext') { out.push({ pop: enumSuffix(node) }); return; }
-  if (cls === 'TraversalColumnContext') { out.push({ column: enumSuffix(node) }); return; }
+  if (cls === 'TraversalPopContext') { emit({ pop: enumSuffix(node) }); return; }
+  if (cls === 'TraversalColumnContext') { emit({ column: enumSuffix(node) }); return; }
   // T.id/T.label as a step arg or map key. Both the parenthesized (TraversalT)
   // and bare (TraversalTLong/Short) grammar shapes carry the same token.
   if (cls === 'TraversalTContext' || cls === 'TraversalTLongContext' || cls === 'TraversalTShortContext') {
-    out.push({ token: enumSuffix(node) }); return;
+    emit({ token: enumSuffix(node) }); return;
   }
   // Direction.OUT/IN (+ from/to aliases) — mergeE endpoints / addE from()/to().
   if (cls === 'TraversalDirectionContext' || cls === 'TraversalDirectionLongContext' || cls === 'TraversalDirectionShortContext') {
-    out.push({ direction: enumSuffix(node) }); return;
+    emit({ direction: enumSuffix(node) }); return;
   }
   // Merge.onCreate/onMatch/outV/inV — mergeV/mergeE option() selector + endpoints.
-  if (cls === 'TraversalMergeContext') { out.push({ merge: enumSuffix(node) }); return; }
+  if (cls === 'TraversalMergeContext') { emit({ merge: enumSuffix(node) }); return; }
   // Cardinality.list/set/single — property() cardinality (list/set deferred to W4).
-  if (cls === 'TraversalCardinalityContext') { out.push({ cardinality: enumSuffix(node) }); return; }
+  if (cls === 'TraversalCardinalityContext') { emit({ cardinality: enumSuffix(node) }); return; }
   // A map literal [k: v, …] / [:] — a real JS Map so it matches how a bound map
   // parameter (xx1) arrives after GraphBinary deserialization. Keys are tagged
   // ({token}/{direction}) or strings; values recurse via argOf. Do NOT fall
   // through to the generic recursion, which would flatten and drop pairing.
-  if (cls === 'GenericMapLiteralContext') { out.push(mapLiteral(node, params)); return; }
+  if (cls === 'GenericMapLiteralContext') { emit(mapLiteral(node, params)); return; }
   // GType.STRING / bare STRING (P.typeOf(...), asNumber(...)) — a type-name enum,
   // captured as a tagged token so predicateSql can map it to a SQL type test.
   // Without this the generic recursion drops it and typeOf sees no argument.
-  if (cls === 'TraversalGTypeContext') { out.push({ gtype: enumSuffix(node) }); return; }
+  if (cls === 'TraversalGTypeContext') { emit({ gtype: enumSuffix(node) }); return; }
   // Pick.none/any/unproductive — choose().option() default/selector tokens. Without
   // this the generic recursion drops them, so option(Pick.none,…) and
   // option(Pick.unproductive,…) both collapse to a key-less option (indistinguishable).
-  if (cls === 'TraversalPickContext') { out.push({ pick: enumSuffix(node) }); return; }
-  if (cls === 'NestedTraversalContext') { out.push({ nested: node }); return; }
-  for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) walkArgs(node.getChild(i), out, params);
+  if (cls === 'TraversalPickContext') { emit({ pick: enumSuffix(node) }); return; }
+  if (cls === 'NestedTraversalContext') { emit({ nested: node }); return; }
+  for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) walkArgs(node.getChild(i), out, params, types);
 }
 
 /** The trailing identifier of an enum token node, lowercased: `T.id`→`id`,
@@ -161,7 +178,7 @@ export interface Pred { op: string; values: any[]; }
 
 function parsePredicate(node: any, params: Record<string, any>): Pred {
   const m = node.constructor.name.match(/^TraversalPredicate_(\w+)Context$/);
-  const values = extractArgs(node, params);
+  const { args: values } = extractArgs(node, params); // predicate values; subtype tags unused
   return { op: m![1], values };
 }
 

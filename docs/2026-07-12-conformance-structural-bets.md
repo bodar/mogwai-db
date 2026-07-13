@@ -124,9 +124,15 @@ uniformly one type (no precision change needed, verified). **Deferred: bare `asN
 — the frontend flattens numeric-literal suffixes (`5b`/`5l`/`5.0` → plain `5` in
 `frontend.ts:78-79`), so the input subtype is unrecoverable without a parser change
 (preserve the suffix as a typed token). asNumber+reducer defers (tag can't survive
-`wrapReducer`). bigdecimal defers (no client serializer). **NEXT:** (a) bare `asNumber()`
-= a frontend sub-batch (typed numeric literals); (b) **`math`** (194) — carrier + a small
-formula parser + promotion rules; (c) `asDate` (datetime rep).
+`wrapReducer`). bigdecimal defers (no client serializer). **✅ bare `asNumber()` LANDED (2026-07-13, L3 525→534).** The frontend now records each
+numeric literal's declared subtype (grammar context + suffix) in a parallel
+`Step.argTypes` array — `args` stays plain numbers, so no consumer ripple (has/limit/V/
+property/binds untouched); only bare asNumber() reads `argTypes` to recover the input
+subtype (`asNumberBare`, uniform-subtype required). **NEXT:** (a) **`math`** (194) —
+carrier + a small formula parser + promotion rules (the big one); (b) `asDate` (datetime
+rep); (c) the deferred tail: asNumber+reducer (fold/sum — needs the subtype tag threaded
+through `wrapReducer`), bigdecimal (no client serializer), the JS-GLV upstream give-back
+(TINKERPOP-3044/3043 — client-side, tangential to our server).
 
 ### 5. `match()`  (~35)
 **Real-world: MEDIUM-LOW.** Powerful declarative pattern matching, but many users

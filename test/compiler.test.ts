@@ -166,8 +166,6 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.inject(32768).asNumber(GType.SHORT)', {})).toThrow('Can\'t convert number of type Integer to Short due to overflow.');
     expect(() => compile('g.inject(300).asNumber(GType.BYTE)', {})).toThrow('Can\'t convert number of type Integer to Byte due to overflow.');
     expect(() => compile('g.inject(5).asNumber(GType.VERTEX)', {})).toThrow('asNumber() requires a numeric type token, got VERTEX');
-    // bare asNumber() defers (needs the frontend to preserve numeric-literal subtypes)
-    expect(() => compile('g.inject(5).asNumber()', {})).toThrow('asNumber() not supported');
     // a reducer after asNumber() would drop the subtype tag → defer
     expect(() => compile('g.inject(2.0).asNumber(GType.FLOAT).sum()', {})).toThrow('composed with a reducer');
     // overflow message uses the boxed Java type name (Integer, not Int)
@@ -176,6 +174,28 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.inject("").asNumber(GType.INT)', {})).toThrow("Can't parse string '' as number.");
     // a composed cast over inject would skip the overflow check (raw serializer crash) → defer
     expect(() => compile('g.inject(300).asNumber(GType.INT).asNumber(GType.BYTE)', {})).toThrow('composed with other transforms over inject()');
+  });
+
+  test('bare asNumber() recovers the input literal subtype (via Step.argTypes)', () => {
+    // The frontend flattens numeric-literal values (5b/5l/5.0 → 5) but records the
+    // declared subtype in argTypes; bare asNumber() reads it back to tag the shape.
+    expect(read('g.inject(5b).asNumber()').shape).toEqual({ kind: 'value', as: 'byte' });
+    expect(read('g.inject(5s).asNumber()').shape).toEqual({ kind: 'value', as: 'short' });
+    expect(read('g.inject(5i).asNumber()').shape).toEqual({ kind: 'value', as: 'int' });
+    expect(read('g.inject(5l).asNumber()').shape).toEqual({ kind: 'value', as: 'long' });
+    expect(read('g.inject(5n).asNumber()').shape).toEqual({ kind: 'value', as: 'bigint' });
+    expect(read('g.inject(5.0).asNumber()').shape).toEqual({ kind: 'value', as: 'double' });
+    expect(read('g.inject(5.75f).asNumber()').shape).toEqual({ kind: 'value', as: 'float' });
+    // un-suffixed integer → int, un-suffixed decimal → double; numeric string → int
+    expect(read('g.inject(5).asNumber()').shape).toEqual({ kind: 'value', as: 'int' });
+    expect(read("g.inject('5').asNumber()").shape).toEqual({ kind: 'value', as: 'int' });
+    // a numeric string is int vs double by its textual form, not its value ("5.0"→double)
+    expect(read("g.inject('5.0').asNumber()").shape).toEqual({ kind: 'value', as: 'double' });
+    expect(read("g.inject('5e2').asNumber()").shape).toEqual({ kind: 'value', as: 'double' });
+    // non-numeric string raises the parse error
+    expect(() => compile("g.inject('test').asNumber()", {})).toThrow("Can't parse string 'test' as number.");
+    // a stream mixing subtypes can't share one tag → defer
+    expect(() => compile('g.inject(5b,5l).asNumber()', {})).toThrow('mixed numeric subtypes');
   });
 
   test('group().by(__.bothE().values(k).<reducer>()) is a correlated neighbourhood aggregate', () => {
