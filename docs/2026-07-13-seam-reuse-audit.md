@@ -73,6 +73,19 @@ duplicates the shared tail).
 
 ### 1. `compileInject` duplicates the value tail — unify it (simplicity + capability)
 
+**✅ DONE (2026-07-13).** The value tail is now one shared path in `projection.ts`:
+`foldTailAcc(steps, from)` (tail steps → `TailAcc`) + `renderProjection(Q, proj, acc,
+indexKeys, orderKey)` (scalar/element render: transforms/is/dedup/order/range/inject-
+append/reducer). `compileInject` moved out of `write.ts` into `projection.ts` and now
+seeds a `VALUES` `v`-stream that flows through the same two functions (inject-rooted
+`count()` handled inline; other projections rejected — a scalar stream has no
+element). `write.ts` lost its ~50-line private copy. Also fixed a latent kernel bug:
+`Query.render` emitted a malformed `with ` prefix with zero CTEs (the only zero-CTE
+read is `g.inject()`) — now renders the bare tail. L3 495 → 496 (behavior-neutral
+cleanup + the `g.inject()` fix). Future value-tail steps (asBool/asNumber/unfold/…)
+now land once and serve both the read tail and inject.
+
+
 `compileInject` (`src/steps/write.ts:84`) hand-rolls its own fold over
 `dedup`/`order`/`is`/`limit`/`range`/`skip`/`scalarTx`/reducer — the *same* modifier
 logic `compileTail`/`buildProjection` (`src/steps/projection.ts`) already implements,
