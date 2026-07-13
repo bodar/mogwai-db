@@ -4,7 +4,7 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-13 · **live L3 conformance:** 648 · **corpus parse+chain:**
+**Last synced:** 2026-07-13 · **live L3 conformance:** 661 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
 
@@ -40,6 +40,8 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `inject(…)` | ✅ | ✅ value stream<br>✅ all-array args → list stream (§9) |
 | `out`/`in`/`both` | ✅ | ✅ covering-index hops, index-only, sub-ms at 1M edges |
 | `outE`/`inE`/`bothE` | ✅ | ✅ flips the typed id-relation to edge |
+| `outV`/`inV`/`bothV` | ✅ | ✅ flips edge → endpoint vertex |
+| `otherV` | ✅ | ✅ the endpoint away from the entering vertex (a carried `fromV`, gated on chain use — no hot-path cost otherwise) |
 | `outV`/`inV`/`bothV` | ✅ | ✅ flips back to node |
 
 ## 2. Filters & predicates
@@ -95,7 +97,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `optional(…)` | 🟡 | ✅ single-hop LEFT JOIN fast path + multi-hop<br>❌ element-kind change on miss<br>❌ after `as()`<br>❌ path tracking |
 | `flatMap(__.…)` | 🟡 | ✅ element body fan-out<br>❌ after `as()`<br>❌ path tracking |
 | `map(__.<scalar>)` | 🟡 | ✅ correlated scalar (`map(__.out().count())` etc)<br>❌ **element**-body `map` (first-result — needs `ROW_NUMBER` over `St.origin`)<br>❌ alias/select/fold bodies<br>❌ trailing steps |
-| `local(…)` | ❌ | per-element scope — the hardest remaining branching piece (a future bet) |
+| `local(…)` | 🟡 | ✅ per-element scalar reduction (`local(outE().count())` → tail projector)<br>✅ movement + a per-element `limit()`/`range()` via `ROW_NUMBER() OVER (PARTITION BY` input ordinal`)` (`local(bothE().limit(1))`)<br>❌ non-movement bodies (match/simplePath/union/nested local), no-barrier bodies, `order()`/`dedup()` inside, after `as()`/`path()`, `local(aggregate(...))` |
 
 ## 6. Recursion (`repeat`)
 
@@ -190,7 +192,7 @@ cluster (needs `select(Column.values)`, §9).
 | **SubgraphStrategy** (vertex criterion) | 🟡 | ✅ `where`/`has` injection pass<br>❌ edge/vertexProperty criteria<br>❌ adjacency (`out()` expansion) |
 | **PartitionStrategy** (read-filter + write-stamp) | 🟡 | ✅ `has(within)` + property stamp<br>❌ `includeMetaProperties`<br>❌ partition-aware merge |
 | ReadOnly / EdgeLabel / ReservedKeys **verification** | ✅ | ✅ throw TinkerPop's canonical messages |
-| ProductiveByStrategy | ❌ | `aggregate`/`cap` now exist (§12), but its scenarios also need `local()` |
+| ProductiveByStrategy | ❌ | its scenarios use `local(aggregate(...))` — the aggregate-in-local body (§5) still defers |
 | `with(…)` (OptionsStrategy sugar) | ❌ | `step not implemented: with()` |
 | OLAP / GraphComputer / Seed / Event strategies | 🚫 | out of scope |
 
@@ -225,8 +227,9 @@ Cheapest wins are long done. What's left, by structural weight:
 2. ~~**Multi/meta-properties (W4)** (§11, §14)~~ — **LANDED** (634→648): normalized
    `vertex_properties` table + edge JSONB, multi/set cardinality, meta writes+reads. The
    self-tuning `json_extract` index machinery is retired for static vp covering indexes.
-3. **`local`** (§5) — per-element scope; the hardest remaining branching piece (also
-   unblocks `local(aggregate(...))` + ProductiveByStrategy).
+3. ~~**`local`** (§5)~~ — **substrate LANDED** (648→661): per-element scalar reduction +
+   movement window. Remaining: non-movement bodies, `local(aggregate(...))` (→
+   ProductiveByStrategy), `order()`/`dedup()` inside local.
 4. **Chained projections** (§3) — element→scalar→scalar re-type; partly dissolved by the
    list substrate, still open for this shape (~40).
 5. **Collection-algebra tail** (§9) — set-ops / Map-unfold / `select(Column.values)` /

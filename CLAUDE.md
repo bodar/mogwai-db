@@ -674,6 +674,36 @@ interpreter). Plan + decision log: `docs/2026-07-13-side-effect-state-plan.md`.
   `cap('x','y')`; `group('a')…cap('a').select(Column.values).unfold()` (needs
   `select(Column.values)`, §9); group side-effect after `as()`/`path()`.
 
+## local() — per-element scope + otherV (LANDED 2026-07-13, L3 648→661)
+
+`local(child)` runs the child once PER incoming traverser, so a barrier inside it scopes
+per-element, not globally: `local(outE().limit(1))` = one edge PER vertex. Two shapes,
+dispatched by body (like sack/group):
+- **Scalar-reduction body** (`local(outE().count())`) → a tail projector reusing
+  `compileMapScalar`/`compileNestedScalar` (the `foldBody` guard `isScalarLocal` — body's
+  last step ∈ {count,sum,min,max,mean} — breaks it to the tail). Per-input scalar, zeros
+  preserved (correlated subquery). **`compileMapScalar` now tags a nested `count()` as
+  `as:'long'`** (TinkerPop count is always Long; the SQLite COUNT integer would otherwise
+  infer as Int via anySerializer — a latent bug that also fixed `map(...count())`).
+- **Movement + a per-element `limit`/`range`** (`src/steps/local.ts`, a prefix StepFn) →
+  the movement folds normally under a fresh input ordinal (ROW_NUMBER seed, the coalesce
+  technique), then the barrier is a WINDOW `ROW_NUMBER() OVER (PARTITION BY <ordinal> ORDER
+  BY id)` sliced to the local range — NOT a global LIMIT. The ordinal is dropped at local's
+  output. `limit` non-determinism is spec-safe: the suite asserts `should be of` (subset) +
+  `count of N`, so a deterministic id-order pick is a valid subset.
+
+**`otherV`** (`movement.ts`) — the endpoint away from the vertex an edge was entered from.
+Needs that entering vertex, carried as a `fromV` column set by `toEdge` (= `p.id`, both
+bothE branches). **Gated on `Carry.trackFromV`** (seeded true iff the chain names `otherV`,
+`chainNeedsFromV`) so ordinary edge traversals stay index-only with no dead column;
+`local`'s body inherits the flag through its `{...st}` seed. `toVertex`/`otherV` clear
+`fromV` on landing (drop it from the carried frag + `fromV:null`) so a later edge step
+doesn't collide. `otherV` = `CASE WHEN e.src=fromV THEN e.tgt ELSE e.src END`.
+
+Deferred (clear throws): non-movement local bodies (match/simplePath/union/nested local),
+no-barrier bodies, `order()`/`dedup()` inside local, local after `as()`/`path()`/branch/sack,
+`local(aggregate(...))` (gates ProductiveByStrategy), `otherV` with no preceding edge step.
+
 ## Environment notes
 
 - Runtime is Bun (pinned in `mise.toml`), not Node. `bun run start` serves
