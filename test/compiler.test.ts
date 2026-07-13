@@ -138,6 +138,34 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().values("age").fold().sum(Scope.local).is(P.gt(1))', {})).toThrow('step after sum(Scope.local) not yet supported');
   });
 
+  test('inject([...]) is a real list value (not flattened)', () => {
+    // Each bracket arg is ONE list traverser → a JSONB list-value stream.
+    expect(read('g.inject([1,3,100,300])').shape).toEqual({ kind: 'jsonbList' });
+    expect(read('g.inject([1,2],[3,4])').shape).toEqual({ kind: 'jsonbList' });
+    // unfold() explodes the list back to a scalar stream.
+    expect(read('g.inject([1,2,3]).unfold()').shape).toEqual({ kind: 'value' });
+    // Scope.local reducers act per-list (mean over the numeric elements → Double).
+    expect(read('g.inject([null,10,20,null]).mean(Scope.local)').shape).toEqual({ kind: 'scalar' });
+    // none(P) on a LIST keeps the list iff no element matches (collection filter).
+    expect(read('g.inject([5,8,10],[10,7]).none(P.lt(7))').sql).toContain('NOT EXISTS');
+    // none(pred) is NOT the iterate discard-marker (only a bare none() is stripped).
+    expect(read('g.inject([5,8,10],[10,7]).none(P.lt(7))').shape).toEqual({ kind: 'jsonbList' });
+  });
+
+  test('Scope.local reducer on a SCALAR stream is per-element (degenerate 1-list)', () => {
+    // A scalar's local sum/min/max is the value itself (identity); shape stays value.
+    expect(read('g.V(1).values("age").sum(Scope.local)').shape).toEqual({ kind: 'value' });
+    expect(read('g.V(1).values("age").max(Scope.local)').shape).toEqual({ kind: 'value' });
+    // mean is ALWAYS Double, even of one value (d[29.0].d) → CAST to REAL, tagged double.
+    const mn = read('g.V(1).values("age").mean(Scope.local)');
+    expect(mn.shape).toEqual({ kind: 'value', as: 'double' });
+    expect(mn.sql).toContain('CAST(');
+    // a scalar TRANSFORM's Scope.local stays a no-op (per-element == per-list).
+    expect(read('g.V().values("name").toLower(Scope.local)').sql).toContain('lower(');
+    // count(local)/limit(local) on a scalar stream aren't worked out yet → fail closed.
+    expect(() => compile('g.V().values("age").count(Scope.local)', {})).toThrow('requires a preceding list-producing step');
+  });
+
   test('inject() is a value stream that reducers/modifiers chain onto', () => {
     expect(read('g.inject(1,2,3)').shape).toEqual({ kind: 'value' });
     expect(read('g.inject(1,2,3)').binds).toEqual([1, 2, 3]);

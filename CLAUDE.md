@@ -550,10 +550,25 @@ model. Plan + decision log: `docs/2026-07-13-list-value-substrate-plan.md` (Appr
   `compilePathArray`'s idiom. `fold().unfold()` is a deliberate materialize→explode roundtrip
   — NO peephole (correct-but-wasteful beats code for a query nobody writes; see decision log).
 - **`Scope.local` list reducers** (`compileFromList` `listReducer`): `count/sum/min/max/mean
-  (Scope.local)` reduce EACH folded list (row) to one scalar via a correlated `json_each`
-  aggregate. Lands `fold().{sum,min,max,mean}(Scope.local)` on element-projected lists.
-- **No handler change**: unfold's exploded relation frames via the existing vertex/value
-  shapes; terminal fold keeps its N-row List framing.
+  (Scope.local)` reduce EACH list (row) to one scalar via a correlated `json_each` aggregate.
+- **inject-as-list** (`compileInject`): an all-array inject → a stream of list VALUES (each
+  bracket arg is ONE list; `inject([1,2],[3,4])` = two rows) via `jsonbArrayOf`, dispatched to
+  the list phase. `inject([1,3,100,300])` frames as one List (`{kind:'jsonbList'}`, handler
+  reads `json(list)`); `inject([...]).unfold()`, `.mean(Scope.local)`, `.none(P)` all compose.
+  A mixed/all-scalar inject stays the flat `v`-stream path (`flattenListArgs`).
+- **`none(P)` on a list** (`listNoneFilter`): keep each list where NO element matches P
+  (`NOT EXISTS(json_each …)`), a collection filter. NOTE `stripTerminal` now only strips a
+  BARE `none()`/`discard()` (the iterate marker) — `none(P)` is the real NoneStep, kept.
+- **scalar-local semantics** (`foldTailAcc`): a `Scope.local` reducer/order reached in the
+  element/scalar tail operates on each scalar as a degenerate one-element list —
+  `sum/min/max/order/dedup` = identity, `mean` = the value AS Double (`localMean`, always
+  Double even of one value: `d[29.0].d`). Scalar TRANSFORMS keep their Scope.local no-op.
+  A Scope.local step whose scalar form isn't worked out (count/limit/range/tail/skip, and
+  scalar-stream `none()` which is a barrier we don't model) FAILS CLOSED — no silent global
+  form (correctness-by-design over the old flatten-coincidence; traded ~11 coincidental passes
+  for honest throws, net L3 608→618 all-correct).
+- **No handler change beyond `{kind:'jsonbList'}`**: unfold's exploded relation frames via the
+  existing vertex/value shapes; terminal fold keeps its N-row List framing.
 
 **Frontend prerequisites** (`src/frontend.ts`): collection literals `[a,b,c]` now parse as
 ONE array value (not N flattened args), and `Scope.local/global` is captured (was dropped —
@@ -562,14 +577,13 @@ a Collection into — V/E/hasId (`hasId(1,[2,6])`≡`hasId(1,2,6)`) and, UNTIL i
 lands, `inject` — flatten a list arg back via `flattenListArgs`; predicates unwrap a lone
 list in `parsePredicate`.
 
-**Deferred (each its own follow-on, NOT built):** **inject-as-list** (a stream of MULTIPLE
-list values — `inject([1,2],[3,4])` — plus mixed-type spreading and the `none()` collection
-filter); `order/limit/range/tail/dedup(Scope.local)` (their scenarios chain `reverse()`/
-`skip(local)`); element-list `order(Scope.local).by(key)`; **`select(Column.values/keys)`** +
-the group-values cluster; set-ops (`combine`/`intersect`/…); Map-unfold; `local()`. The
-**global-MODIFIERS fail-loud Scope guard** (plan A.6) is NOT yet added — it would regress the
-inject-list scenarios still passing by flatten-coincidence until inject-as-list lands; add it
-WITH inject-as-list. Do NOT add the guard alone.
+**Deferred (each its own follow-on, NOT built):** `order/limit/range/tail/dedup(Scope.local)`
+on a LIST (their scenarios chain `reverse()`/`skip(local)`); element-list `order(Scope.local).
+by(key)`; **`select(Column.values/keys)`** + the group-values cluster; set-ops (`combine`/
+`intersect`/…); Map-unfold; `local()`; order-before-a-non-terminal-fold (`order().by(desc).
+fold().none(…)`); the **scalar-stream `none(P)` barrier** (`V().values('age').none(gt(32))`→
+empty — a whole-stream barrier, NOT the per-list collection filter; semantics not yet modelled,
+fails closed). Mixed-type inject (`inject([a,b],'c')`) stays flattened for now.
 
 ## Environment notes
 

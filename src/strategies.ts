@@ -235,11 +235,12 @@ export function normalize(steps: Step[]): { steps: PStep[]; discard: boolean } {
   return { steps: foldChooseOptions(foldByModulators(foldRepeatClusters(stripped.steps))), discard: stripped.discard };
 }
 
-/** v4 iterate() appends a trailing discard() (or none()): execute, return nothing.
- *  Pop the marker and flag it. */
+/** v4 iterate() appends a trailing discard() (or bare none()): execute, return
+ *  nothing. Pop the marker and flag it. A `none(pred)` with a predicate is NOT the
+ *  discard marker — it's the NoneStep collection filter (kept for compilation). */
 function stripTerminal(steps: Step[]): { steps: Step[]; discard: boolean } {
   const last = steps[steps.length - 1];
-  if (last && (last.name === 'discard' || last.name === 'none'))
+  if (last && (last.name === 'discard' || (last.name === 'none' && last.args.length === 0)))
     return { steps: steps.slice(0, -1), discard: true };
   return { steps, discard: false };
 }
