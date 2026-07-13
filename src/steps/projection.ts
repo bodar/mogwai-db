@@ -164,7 +164,10 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
 
   // map(__.<scalar>) → a per-traverser scalar projection (out-degree, a property, a
   // label). Element-body map (first-result-only) and select/fold bodies defer.
-  if (steps[stop]?.name === 'map')
+  // map(__.<scalar>) and a scalar-reduction local(__.<…count/sum/…>) are the same
+  // per-element scalar projector (local's element+barrier body compiles as a prefix
+  // step; only its scalar-reduction body reaches the tail here).
+  if (steps[stop]?.name === 'map' || steps[stop]?.name === 'local')
     return compileMapScalar(st, steps, stop);
 
   // math("<formula>") → one SQL arithmetic scalar (always Double). Its variables
@@ -998,15 +1001,20 @@ function compilePathArray(st: St, acc: TailAcc): Compiled {
  * A trailing step defers.
  */
 function compileMapScalar(st: St, steps: PStep[], stop: number): Compiled {
-  if (stop + 1 < steps.length) throw new Error(`step not implemented after map(): ${steps[stop + 1].name}()`);
+  const name = steps[stop].name; // 'map' or a scalar-reduction 'local'
+  if (stop + 1 < steps.length) throw new Error(`step not implemented after ${name}(): ${steps[stop + 1].name}()`);
   const arg = steps[stop].args[0];
-  if (!arg || typeof arg !== 'object' || !('nested' in arg)) throw new Error('map(traversal) required');
+  if (!arg || typeof arg !== 'object' || !('nested' in arg)) throw new Error(`${name}(traversal) required`);
   const ctx = elemCtx(elemRel(st), st.elem);
-  const sc = compileNestedScalar(stepChain(arg.nested, st.params), ctx);
+  const inner = stepChain(arg.nested, st.params);
+  const sc = compileNestedScalar(inner, ctx);
   const n = elemRel(st);
   const p = st.last.as('p');
   const node = q`SELECT ${sc.expr} AS v FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
-  return readCompiled(st.q, node, { kind: 'value' });
+  // A nested count() is always a Long (TinkerPop's count semantics); the SQLite
+  // COUNT integer would otherwise infer as Int via anySerializer.
+  const as: ValueType | undefined = inner[inner.length - 1]?.name === 'count' ? 'long' : undefined;
+  return readCompiled(st.q, node, { kind: 'value', as });
 }
 
 // ---------- math (scalar arithmetic projector) ----------
