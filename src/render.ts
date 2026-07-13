@@ -43,11 +43,19 @@ export type PathPos =
   | { render: 'element'; elem: ElemShape; prefix: string }
   | { render: 'value'; prefix: string };
 
+// A compile-time type tag on a scalar value stream — the value's GraphBinary type
+// is known from the producing step (a typed literal, or an as*() cast's target), NOT
+// from the SQLite storage class (which collapses byte..long → INTEGER, float/double →
+// REAL). The handler frames `v` with the matching serializer. `undefined` = infer
+// from the JS value (anySerializer), the default for untyped projections.
+// Currently emitted: 'bool' (asBool). The numeric subtypes land with asNumber.
+export type ValueType = 'bool';
+
 export type Shape =
   | { kind: 'vertex' }
   | { kind: 'edge' }
   | { kind: 'property' } // properties(): VertexProperty elements (owner/key/value cols)
-  | { kind: 'value' }
+  | { kind: 'value'; as?: ValueType }
   | { kind: 'count' }
   | { kind: 'scalar' } // sum(): one numeric; handler picks Long/Double per value (numberBuffer)
   | { kind: 'list'; elem: ElemShape | 'scalar' }   // fold(): the whole stream as one List value

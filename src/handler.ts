@@ -1,4 +1,4 @@
-import { compile, type MapEntry, type ElemShape, type GroupKey, type GroupVal, type PathPos } from './compiler.ts';
+import { compile, type MapEntry, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from './compiler.ts';
 import type { GraphStore } from './storage.ts';
 import { ioc, VertexProperty, Property, t } from './io.ts';
 
@@ -167,6 +167,15 @@ function sumBuffer(v: number, storageClass: string): Buffer {
   return storageClass === 'real' ? ioc.doubleSerializer.serialize(v, true) : ioc.anySerializer.serialize(v);
 }
 
+// A scalar value(), framed by its compile-time type tag (Shape `as`) when set — the
+// GraphBinary type comes from the producing step, not the SQLite storage class. No
+// tag → infer from the JS value (anySerializer). 'bool': SQLite carries the boolean
+// as 0/1, so frame Boolean(v) explicitly (anySerializer would otherwise emit Int).
+function frameValue(v: any, as: ValueType | undefined): Buffer {
+  if (as === 'bool') return ioc.booleanSerializer.serialize(Boolean(v), true);
+  return ioc.anySerializer.serialize(v);
+}
+
 // The GraphBinary key + a canonical string (JS Map dedup key) for one group row.
 function groupKey(r: any, key: GroupKey): { buf: Buffer; canon: string } {
   if (key.kind === 'element') return { buf: elementBuffer(r, 'k', key.elem), canon: `e:${r[key.elem === 'property' ? 'k_pk' : 'k_id']}` };
@@ -233,7 +242,7 @@ function execute(store: GraphStore, gremlin: string, params: Record<string, any>
     case 'valueMap': return rows.map((r) => valueMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys, shape.tokens));
     case 'elementMap': return rows.map((r) => elementMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys));
     case 'count': return rows.map((r) => ioc.anySerializer.serialize(BigInt(r.v)));
-    case 'value': return rows.map((r) => ioc.anySerializer.serialize(r.v));
+    case 'value': return rows.map((r) => frameValue(r.v, shape.as));
     // sum(): Int/Long/Double by SQLite storage class. SUM of an empty stream is
     // NULL → no result (TinkerPop yields nothing, matching SQL sum aggregation).
     case 'scalar': return rows.filter((r) => r.v !== null).map((r) => sumBuffer(r.v, r.vt));
