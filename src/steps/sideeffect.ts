@@ -80,7 +80,6 @@ const groupSideEffect = (isCount: boolean): StepFn => (s, st) => {
     elem: st.elem === 'edge' ? 'edge' : 'vertex',
     isCount,
     bys: (s as any).bys ?? [],
-    groupIndexKeys: [],
   };
   return register(st, name, def);
 };

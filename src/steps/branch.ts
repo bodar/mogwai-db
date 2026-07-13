@@ -26,7 +26,7 @@ function untilPredicate(untilStep: Step, params: Record<string, any>): (id: Expr
     if (nested.length === 2 && nested[1].name === 'is') return (_id, depth) => predicateSql(depth, nested[1].args[0]);
     throw new Error('until(__.loops()…) form not yet supported (only loops().is(P))');
   }
-  return (id) => compileFilterPredicate(nested, walkNodeCtx(id), params).expr;
+  return (id) => compileFilterPredicate(nested, walkNodeCtx(id), params);
 }
 
 // ---------- branch (union / optional / repeat) ----------
@@ -297,12 +297,12 @@ export const choose: StepFn = (s, st) => {
     return end;
   };
 
-  const thenEnd = arm(thenArg, gate(st, pred.expr));
-  const elseSeed = gate(st, notCoalesce(pred.expr));
+  const thenEnd = arm(thenArg, gate(st, pred));
+  const elseSeed = gate(st, notCoalesce(pred));
   const elseEnd = elseArg ? arm(elseArg, elseSeed) : elseSeed; // else absent → identity
   if (thenEnd.elem !== elseEnd.elem)
     throw new Error('choose() branches produce different element kinds (mixed-shape) not yet supported');
 
   const merged = list([q`SELECT id FROM ${thenEnd.last}`, q`SELECT id FROM ${elseEnd.last}`], ' UNION ALL ');
-  return advance(st, merged, { elem: thenEnd.elem, indexKeys: [...pred.indexKeys, ...thenEnd.indexKeys, ...elseEnd.indexKeys] });
+  return advance(st, merged, { elem: thenEnd.elem });
 };

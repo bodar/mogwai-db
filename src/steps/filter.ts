@@ -33,10 +33,10 @@ const aliasResolver = (st: St) => (label: string): ScalarCtx => {
 
 /** `SELECT n.id<carry> FROM <elem> n JOIN prev p … WHERE <test>` — the filter CTE
  *  shape shared by has/hasLabel/where/and/or. */
-function filterCte(st: St, test: Expression, indexKeys?: Iterable<string>): St {
+function filterCte(st: St, test: Expression): St {
   const n = elemRel(st);
   const p = prevRel(st, 'p');
-  return advance(st, q`SELECT ${n.c.id}${carryFrag(st, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${test}`, { indexKeys });
+  return advance(st, q`SELECT ${n.c.id}${carryFrag(st, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${test}`);
 }
 
 /** as(): bind each label to the current traverser (rebinds reuse the label's
@@ -97,7 +97,6 @@ export const hasId: StepFn = (s, st) => {
 
 export const has: StepFn = (s, st) => {
   const conds: Expression[] = [];
-  const indexKeys: string[] = [];
   let a = s.args;
   // has(label, key, value) — the 3-arg overload folds in a label filter.
   if (a.length === 3 && typeof a[0] === 'string') {
@@ -118,7 +117,7 @@ export const has: StepFn = (s, st) => {
     // blob. hasProp dispatches on elem (the current traverser is aliased `n`).
     conds.push(hasProp(currentCtx(st), key, val));
   }
-  return filterCte(st, list(conds, ' AND '), indexKeys);
+  return filterCte(st, list(conds, ' AND '));
 };
 
 /** where()/filter()/not(): keep rows satisfying the nested traversal (or an
@@ -127,7 +126,7 @@ export const where: StepFn = (s, st) => {
   const arg0 = s.args[0];
   if (arg0 && typeof arg0 === 'object' && 'nested' in arg0) {
     const pred = compileFilterPredicate(stepChain(arg0.nested, st.params), currentCtx(st), st.params, aliasResolver(st));
-    return filterCte(st, s.name === 'not' ? notCoalesce(pred.expr) : pred.expr, pred.indexKeys);
+    return filterCte(st, s.name === 'not' ? notCoalesce(pred) : pred);
   }
   // Alias-compare: where("a", P.eq("b")) (label vs label) or where(P.neq("a"))
   // (current traverser vs label), optionally .by(key) (folded onto s.bys) to
@@ -160,7 +159,7 @@ export const where: StepFn = (s, st) => {
 /** and()/or(): keep the traverser when ALL / ANY branch predicates hold. */
 export const andOr: StepFn = (s, st) => {
   const pred = combineBranchPreds(s, currentCtx(st), st.params, s.name === 'and' ? 'AND' : 'OR', aliasResolver(st));
-  return filterCte(st, pred.expr, pred.indexKeys);
+  return filterCte(st, pred);
 };
 
 /** dedup(): collapse the multiset on the current object. Label-scoped dedup and

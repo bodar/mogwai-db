@@ -152,35 +152,34 @@ export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop:
 /** Compile the tail: `st` is the finished prefix state, `steps[stop]` the first
  *  step the prefix dispatch didn't consume. */
 export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
-  const indexKeys = new Set(st.indexKeys);
 
   // properties() turns the traverser into a property (owner+key+value) — a shape
   // the id-relation can't carry, so it and its follow-ons compile in their own fn.
   if (steps[stop]?.name === 'properties')
-    return compileProperties(st, steps.slice(stop), indexKeys);
+    return compileProperties(st, steps.slice(stop));
 
   // option-map choose (choose().option()…) → a CASE over a correlated choice scalar.
   if (steps[stop]?.name === 'choose' && steps[stop].options)
-    return compileChooseOptions(st, steps, stop, indexKeys);
+    return compileChooseOptions(st, steps, stop);
 
   // map(__.<scalar>) → a per-traverser scalar projection (out-degree, a property, a
   // label). Element-body map (first-result-only) and select/fold bodies defer.
   if (steps[stop]?.name === 'map')
-    return compileMapScalar(st, steps, stop, indexKeys);
+    return compileMapScalar(st, steps, stop);
 
   // math("<formula>") → one SQL arithmetic scalar (always Double). Its variables
   // (`_` / as()-bound names) resolve through the by() modulators folded onto it.
   if (steps[stop]?.name === 'math')
-    return compileMath(st, steps, stop, indexKeys);
+    return compileMath(st, steps, stop);
 
   // bare sack() reads the carried per-traverser sack column as a scalar value; a
   // trailing reducer (sum/…)/is/order composes via the shared value tail.
   if (steps[stop]?.name === 'sack')
-    return compileSackRead(st, steps, stop, indexKeys);
+    return compileSackRead(st, steps, stop);
 
   // cap('x') emits a named side-effect collection registered earlier in the chain.
   if (steps[stop]?.name === 'cap')
-    return compileCap(st, steps, stop, indexKeys);
+    return compileCap(st, steps, stop);
 
   // group()/groupCount() is a barrier over the current element stream → one Map.
   if (steps[stop]?.name === 'group' || steps[stop]?.name === 'groupCount') {
@@ -188,7 +187,7 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
     const tbl = st.elem === 'edge' ? 'edges' : 'nodes';
     const ctx = elemCtx(elemRel(st), st.elem);
     const src: GroupSource = { from: `${tbl} n JOIN ${st.last.name} p ON n.id=p.id`, ctx, elem: st.elem === 'edge' ? 'edge' : 'vertex' };
-    return compileGroup(st, steps[stop].name === 'groupCount', steps[stop].bys ?? [], src, indexKeys);
+    return compileGroup(st, steps[stop].name === 'groupCount', steps[stop].bys ?? [], src);
   }
 
   // Tail fold: accumulate the projection + modifiers, stopping at a retype boundary
@@ -198,10 +197,10 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
   // Consumed the whole chain → render terminally, exactly as before.
   if (at === steps.length) {
     if (acc.projStep?.name === 'path')
-      return compilePath(st, acc.projStep, acc, indexKeys);
+      return compilePath(st, acc.projStep, acc);
     if (isMapProj(acc.projStep))
-      return compileSelectProject(st, acc.projStep!, acc, indexKeys);
-    return buildProjection(st, acc, indexKeys);
+      return compileSelectProject(st, acc.projStep!, acc);
+    return buildProjection(st, acc);
   }
 
   // Stopped at a retype boundary: steps[at] is `unfold` or a non-terminal `fold`.
@@ -215,7 +214,7 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
     return dispatchNext(st, steps, at + 1);
   }
   // A non-terminal fold → a single list value; continue from the ListStream.
-  return dispatchNext(compileFold(st, acc, indexKeys), steps, at + 1);
+  return dispatchNext(compileFold(st, acc), steps, at + 1);
 }
 
 /**
@@ -229,7 +228,7 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
  * roundtrip in fold().unfold() (materialize then json_each) is deliberate — correct
  * beats a peephole nobody's query needs (see the plan's decision log).
  */
-function compileFold(st: St, acc: TailAcc, indexKeys: Set<string>): ListStream {
+function compileFold(st: St, acc: TailAcc): ListStream {
   if (acc.orders.length || acc.reducer || acc.isPreds.length || acc.transforms.length || acc.injects.length || acc.distinct || acc.offset || acc.limit !== null)
     throw new Error('order()/dedup()/limit()/range()/is()/transform before a non-terminal fold() not yet supported');
   if (st.aliases.size || st.path || st.origin)
@@ -248,7 +247,7 @@ function compileFold(st: St, acc: TailAcc, indexKeys: Set<string>): ListStream {
     const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
     const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
     const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
-    const proj = PROJECTORS.get(projName)!({ st, n, l, extId, vJoin, vlJoin, projStep: acc.projStep, indexKeys, hasIs: false });
+    const proj = PROJECTORS.get(projName)!({ st, n, l, extId, vJoin, vlJoin, projStep: acc.projStep, hasIs: false });
     // values() drops missing-property elements (baseWhere = IS NOT NULL), matching
     // TinkerPop's fold-of-values. id/label have no baseWhere.
     const where = proj.baseWhere ? q` WHERE ${proj.baseWhere}` : empty;
@@ -276,7 +275,7 @@ export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number)
   }
   const proj: ProjResult = { shape: { kind: 'value', as: s.as }, colsNode: q`v AS v`, fromNode: s.rel, scalarExpr: q`v`, baseWhere: null };
   const orderKey = (): Expression => { throw new Error('order().by(key) on a scalar stream not supported (no properties)'); };
-  return renderProjection(s.q, proj, acc, new Set(), orderKey);
+  return renderProjection(s.q, proj, acc, orderKey);
 }
 
 interface TailMods { orders: OrderClause[]; distinct: boolean; offset: number; limit: number | null; }
@@ -286,7 +285,7 @@ interface TailMods { orders: OrderClause[]; distinct: boolean; offset: number; l
 interface ProjCtx {
   st: St; n: Relation; l: Relation; extId: Expression;
   vJoin: Expression; vlJoin: Expression;
-  projStep: PStep | null; indexKeys: Set<string>; hasIs: boolean;
+  projStep: PStep | null; hasIs: boolean;
 }
 interface ProjResult { shape: Shape; colsNode: Expression; fromNode: Expression; scalarExpr?: Expression | null; baseWhere?: Expression | null; }
 type ProjFn = (c: ProjCtx) => ProjResult;
@@ -343,10 +342,10 @@ const PROJECTORS = new Map<string, ProjFn>([
 /** An order().by(key) resolver over the current element (aliased `n`): node → the
  *  first-under-multi value from vertex_properties; edge → json_extract of the flat blob.
  *  Shared by buildProjection and compileMath — both sort a value tail by an element prop. */
-const nodePropOrderKey = (st: St, _indexKeys: Set<string>) => (key: string): Expression =>
+const nodePropOrderKey = (st: St) => (key: string): Expression =>
   st.elem === 'edge' ? propExtract('n.props', key).expr : nodePropScalar(raw('n.id'), key);
 
-function buildProjection(st: St, acc: TailAcc, indexKeys: Set<string>): Compiled {
+function buildProjection(st: St, acc: TailAcc): Compiled {
   const { distinct, offset, limit, isPreds, reducer } = acc;
   const projName = acc.projStep?.name ?? '__element';
 
@@ -360,7 +359,7 @@ function buildProjection(st: St, acc: TailAcc, indexKeys: Set<string>): Compiled
     // count().is(P): filter the single count value (0 or 1 result rows).
     if (isPreds.length)
       countNode = q`SELECT v FROM (${countNode}) WHERE ${list(isPreds.map((pr) => predicateSql(q`v`, pr)), ' AND ')}`;
-    return readCompiled(st.q, countNode, { kind: 'count' }, [...indexKeys]);
+    return readCompiled(st.q, countNode, { kind: 'count' });
   }
 
   const n = elemRel(st);
@@ -369,10 +368,10 @@ function buildProjection(st: St, acc: TailAcc, indexKeys: Set<string>): Compiled
   const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
   const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
   const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
-  const proj = PROJECTORS.get(projName)!({ st, n, l, extId, vJoin, vlJoin, projStep: acc.projStep, indexKeys, hasIs: isPreds.length > 0 });
+  const proj = PROJECTORS.get(projName)!({ st, n, l, extId, vJoin, vlJoin, projStep: acc.projStep, hasIs: isPreds.length > 0 });
 
   // order().by(key) sorts by a property expression (element context) — auto-index it.
-  return renderProjection(st.q, proj, acc, indexKeys, nodePropOrderKey(st, indexKeys));
+  return renderProjection(st.q, proj, acc, nodePropOrderKey(st));
 }
 
 /** bare sack() — read the carried per-traverser sack column (context.ts Carry.sack)
@@ -380,7 +379,7 @@ function buildProjection(st: St, acc: TailAcc, indexKeys: Set<string>): Compiled
  *  composes). The value's GraphBinary type is inferred (as:undefined → anySerializer),
  *  matching values(): sack holds whatever the withSack seed / sack(op) arithmetic
  *  produced (int age, double weight, string label). */
-function compileSackRead(st: St, steps: PStep[], stop: number, indexKeys: Set<string>): Compiled {
+function compileSackRead(st: St, steps: PStep[], stop: number): Compiled {
   if (!st.sack) throw new Error('sack() requires withSack() or a preceding sack(Operator.x) step');
   if ((steps[stop].args ?? []).length) throw new Error('sack(argument) read form not supported (bare sack() only)');
   const { acc, stop: at } = foldTailAcc(steps, stop + 1);
@@ -389,7 +388,7 @@ function compileSackRead(st: St, steps: PStep[], stop: number, indexKeys: Set<st
   const p = st.last.as('p');
   const proj: ProjResult = { shape: { kind: 'value' }, colsNode: q`${p.c[st.sack]} AS v`, fromNode: p, scalarExpr: p.c[st.sack], baseWhere: null };
   const orderKey = (): Expression => { throw new Error('order().by(key) after sack() not supported'); };
-  return renderProjection(st.q, proj, acc, indexKeys, orderKey);
+  return renderProjection(st.q, proj, acc, orderKey);
 }
 
 /** cap('x') — emit a named side-effect collection. A list side-effect (aggregate/
@@ -398,7 +397,7 @@ function compileSackRead(st: St, steps: PStep[], stop: number, indexKeys: Set<st
  *  JSONB list back into an element/scalar stream and continue the tail. A group
  *  side-effect (group('a')/groupCount('a')) re-runs compileGroup over its stashed
  *  source → one Map (steps/group.ts). Deferred: multi-key cap('x','y'). */
-function compileCap(st: St, steps: PStep[], stop: number, indexKeys: Set<string>): Compiled {
+function compileCap(st: St, steps: PStep[], stop: number): Compiled {
   const names = (steps[stop].args ?? []).filter((a: any) => typeof a === 'string');
   if (names.length !== 1) throw new Error('cap() with multiple side-effect keys not yet supported');
   const def = st.sideEffects?.get(names[0]);
@@ -411,7 +410,7 @@ function compileCap(st: St, steps: PStep[], stop: number, indexKeys: Set<string>
   // source (Stage 3).
   if (stop + 1 < steps.length) throw new Error(`step not implemented after cap('${names[0]}'): ${steps[stop + 1].name}()`);
   const src: GroupSource = { from: def.from, ctx: def.ctx, elem: def.elem };
-  return compileGroup(st, def.isCount, def.bys, src, new Set([...indexKeys, ...def.groupIndexKeys]));
+  return compileGroup(st, def.isCount, def.bys, src);
 }
 
 /** Render a resolved projection + the value-shape tail (scalar transforms, is()
@@ -422,7 +421,7 @@ function compileCap(st: St, steps: PStep[], stop: number, indexKeys: Set<string>
  *  the caller's context (a property lookup for elements; a throw for a scalar stream
  *  that has no properties). Identity order uses `v` (value shape) or `n.id`. */
 function renderProjection(
-  Q: Query, proj: ProjResult, acc: TailAcc, indexKeys: Set<string>,
+  Q: Query, proj: ProjResult, acc: TailAcc,
   orderKey: (key: string) => Expression,
 ): Compiled {
   const { orders, distinct, offset, limit, isPreds, reducer, injects } = acc;
@@ -503,7 +502,7 @@ function renderProjection(
   // Terminal reducers wrap the projected select.
   if (reducer) ({ tailNode, shape } = wrapReducer(tailNode, reducer, shape));
 
-  return readCompiled(Q, tailNode, shape, [...indexKeys]);
+  return readCompiled(Q, tailNode, shape);
 }
 
 /** g.inject(v1, v2, …) — an inject-rooted read: a scalar `v` stream seeded from
@@ -672,7 +671,7 @@ export function compileInject(steps: PStep[]): Compiled {
     const Q = new Query();
     const rows = steps[0].args.map((a: any[]) => q`(${jsonbArrayOf(a)})`);
     const rel = Q.cte(q`VALUES ${list(rows, ', ')}`, ['list']);
-    const carry: Carry = { q: Q, aliases: new Map(), indexKeys: new Set(), params: {} };
+    const carry: Carry = { q: Q, aliases: new Map(), params: {} };
     return dispatchNext(toListStream(carry, rel, { kind: 'scalar' }), steps, 1);
   }
 
@@ -774,7 +773,7 @@ export function compileInject(steps: PStep[]): Compiled {
 
   const proj: ProjResult = { shape: { kind: 'value', as: valueAs }, colsNode: q`v AS v`, fromNode: from, scalarExpr: q`v`, baseWhere: null };
   const orderKey = (): Expression => { throw new Error('inject().order().by(key) not supported (scalar stream has no properties)'); };
-  return renderProjection(Q, proj, acc, new Set(), orderKey);
+  return renderProjection(Q, proj, acc, orderKey);
 }
 
 /** Wrap a `v`-projecting select in a terminal reducer (fold/sum/min/max/mean),
@@ -824,7 +823,7 @@ function byToEntry(byArgs: any[] | undefined): { sub: 'vertex' | 'value'; key?: 
  * traverser under freshly-named keys. by() modulators cycle across the keys. A
  * single-key select reuses the scalar vertex/value shape; anything else is a Map.
  */
-function compileSelectProject(st: St, proj: PStep, tail: TailMods, indexKeys: Set<string>): Compiled {
+function compileSelectProject(st: St, proj: PStep, tail: TailMods): Compiled {
   const bys = proj.bys ?? [];
   const { orders, distinct, offset, limit } = tail;
   if (orders.length) throw new Error('order() after select()/project() not yet supported');
@@ -864,10 +863,10 @@ function compileSelectProject(st: St, proj: PStep, tail: TailMods, indexKeys: Se
     const n = nodes.as('n');
     if (e.sub === 'vertex') {
       const l = labels.as('l');
-      return readCompiled(st.q, q`SELECT ${dist}COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props FROM ${n} JOIN ${p} ON ${n.c.id}=${src} JOIN ${l} ON ${l.c.id}=${n.c.label}${tailSql}`, { kind: 'vertex' }, [...indexKeys]);
+      return readCompiled(st.q, q`SELECT ${dist}COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props FROM ${n} JOIN ${p} ON ${n.c.id}=${src} JOIN ${l} ON ${l.c.id}=${n.c.label}${tailSql}`, { kind: 'vertex' });
     }
     const pe = nodePropScalar(n.c.id, e.key!); // first-under-multi; projection, not indexed (matches values())
-    return readCompiled(st.q, q`SELECT ${dist}${pe} AS v FROM ${n} JOIN ${p} ON ${n.c.id}=${src}${tailSql}`, { kind: 'value' }, [...indexKeys]);
+    return readCompiled(st.q, q`SELECT ${dist}${pe} AS v FROM ${n} JOIN ${p} ON ${n.c.id}=${src}${tailSql}`, { kind: 'value' });
   }
 
   // Multi-key select / any project → a Map per row.
@@ -890,7 +889,7 @@ function compileSelectProject(st: St, proj: PStep, tail: TailMods, indexKeys: Se
   });
 
   const node = q`SELECT ${dist}${list(cols, ', ')} FROM ${p}${list(joins, '')}${tailSql}`;
-  return readCompiled(st.q, node, { kind: 'map', entries }, [...indexKeys]);
+  return readCompiled(st.q, node, { kind: 'map', entries });
 }
 
 // ---------- path() (linear regime) ----------
@@ -914,12 +913,12 @@ function pathBy(byArgs: any[] | undefined): string | undefined {
  * by(key) (missing property) drops the whole path (TinkerPop's default — only
  * ProductiveByStrategy would emit null). order()/reducers/from()/to() defer.
  */
-function compilePath(st: St, proj: PStep, acc: TailAcc, indexKeys: Set<string>): Compiled {
+function compilePath(st: St, proj: PStep, acc: TailAcc): Compiled {
   // Reachable only from a union() SOURCE step: seedUnion doesn't seed p0 (unlike
   // seedSource, which handles V()/E()), so path tracking never starts. Mid-chain
   // union()/optional()/repeat() are caught earlier by their own path guards.
   if (!st.path) throw new Error('path() over a union() source step is not yet supported');
-  if (st.path.kind === 'array') return compilePathArray(st, acc, indexKeys);
+  if (st.path.kind === 'array') return compilePathArray(st, acc);
   const pathState = st.path; // narrowed to 'cols'; held in a local so the .map closure keeps the narrowing
   if (acc.orders.length) throw new Error('order() after path() not yet supported');
   if (acc.reducer) throw new Error(`${acc.reducer}() after path() not yet supported`);
@@ -961,7 +960,7 @@ function compilePath(st: St, proj: PStep, acc: TailAcc, indexKeys: Set<string>):
   const whereNode = whereParts.length ? q` WHERE ${list(whereParts, ' AND ')}` : empty;
   const tailSql = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
   const node = q`SELECT ${dist}${list(cols, ', ')} FROM ${p}${list(joins, '')}${whereNode}${tailSql}`;
-  return readCompiled(st.q, node, { kind: 'path', positions }, [...indexKeys]);
+  return readCompiled(st.q, node, { kind: 'path', positions });
 }
 
 /**
@@ -972,7 +971,7 @@ function compilePath(st: St, proj: PStep, acc: TailAcc, indexKeys: Set<string>):
  * PATH ELEMENT ordered by `(pk, ord)` — the handler folds each pk-run into one Path.
  * All elements are vertices (out/in/both bodies); edge-inclusive bodies defer.
  */
-function compilePathArray(st: St, acc: TailAcc, indexKeys: Set<string>): Compiled {
+function compilePathArray(st: St, acc: TailAcc): Compiled {
   if (acc.orders.length || acc.reducer || acc.isPreds.length || acc.transforms.length || acc.injects.length)
     throw new Error('order()/reducer/is()/transform after a recursive repeat().path() not yet supported');
   // dedup() must collapse equal paths BEFORE row-numbering: ROW_NUMBER() is computed
@@ -986,7 +985,7 @@ function compilePathArray(st: St, acc: TailAcc, indexKeys: Set<string>): Compile
   const n = nodes.as('n');
   const l = labels.as('l');
   const node = q`SELECT pp.pk, je.key AS ord, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props FROM ${paths} pp, json_each(pp.path) je JOIN ${n} ON ${n.c.id}=je.value JOIN ${l} ON ${l.c.id}=${n.c.label} ORDER BY pp.pk, je.key`;
-  return readCompiled(st.q, node, { kind: 'pathGrouped', elem: 'vertex' }, [...indexKeys]);
+  return readCompiled(st.q, node, { kind: 'pathGrouped', elem: 'vertex' });
 }
 
 // ---------- map (scalar body → per-traverser scalar projector) ----------
@@ -998,7 +997,7 @@ function compilePathArray(st: St, acc: TailAcc, indexKeys: Set<string>): Compile
  * select/fold body isn't a plain scalar — both defer via compileNestedScalar's throw.
  * A trailing step defers.
  */
-function compileMapScalar(st: St, steps: PStep[], stop: number, indexKeys: Set<string>): Compiled {
+function compileMapScalar(st: St, steps: PStep[], stop: number): Compiled {
   if (stop + 1 < steps.length) throw new Error(`step not implemented after map(): ${steps[stop + 1].name}()`);
   const arg = steps[stop].args[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) throw new Error('map(traversal) required');
@@ -1007,8 +1006,7 @@ function compileMapScalar(st: St, steps: PStep[], stop: number, indexKeys: Set<s
   const n = elemRel(st);
   const p = st.last.as('p');
   const node = q`SELECT ${sc.expr} AS v FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
-  const keys = sc.indexKey ? new Set([...indexKeys, sc.indexKey]) : indexKeys;
-  return readCompiled(st.q, node, { kind: 'value' }, [...keys]);
+  return readCompiled(st.q, node, { kind: 'value' });
 }
 
 // ---------- math (scalar arithmetic projector) ----------
@@ -1029,7 +1027,7 @@ function compileMapScalar(st: St, steps: PStep[], stop: number, indexKeys: Set<s
  * local()/sack()), withSideEffect-bound variables, and reading project()/select()
  * map columns (math inside order().by(__.math(...))).
  */
-function compileMath(st: St, steps: PStep[], stop: number, indexKeys: Set<string>): Compiled {
+function compileMath(st: St, steps: PStep[], stop: number): Compiled {
   const s = steps[stop];
   const formula = s.args[0];
   if (typeof formula !== 'string') throw new Error('math(string) required');
@@ -1054,9 +1052,8 @@ function compileMath(st: St, steps: PStep[], stop: number, indexKeys: Set<string
     const strKey = byArgs.find((a: any) => typeof a === 'string');
     let sc;
     if (nested) sc = compileNestedScalar(stepChain(nested.nested, st.params), ctx);
-    else if (strKey !== undefined) sc = { expr: scalarProp(ctx, strKey), indexKey: null }; // by(key): a plain property read (first-under-multi for a node)
+    else if (strKey !== undefined) sc = { expr: scalarProp(ctx, strKey) }; // by(key): a plain property read (first-under-multi for a node)
     else throw new Error(`math("${formula}"): by() modulator must be a property key or a traversal`);
-    if (sc.indexKey && ctx.elem === 'node') indexKeys.add(sc.indexKey);
     cache.set(name, sc.expr);
     return sc.expr;
   };
@@ -1078,7 +1075,7 @@ function compileMath(st: St, steps: PStep[], stop: number, indexKeys: Set<string
     // known, unreachable-in-corpus divergence, deliberately not emitting a wrong 0.0.
     baseWhere: predicateSql(mathExpr, undefined),
   };
-  return renderProjection(st.q, proj, acc, indexKeys, nodePropOrderKey(st, indexKeys));
+  return renderProjection(st.q, proj, acc, nodePropOrderKey(st));
 }
 
 // ---------- option-map choose (scalar CASE projector) ----------
@@ -1094,7 +1091,7 @@ function compileMath(st: St, steps: PStep[], stop: number, indexKeys: Set<string
  * (constant/values/label/id via compileNestedScalar); element bodies, Pick.
  * unproductive/any, and any trailing step defer. Shape: value.
  */
-function compileChooseOptions(st: St, steps: PStep[], stop: number, indexKeys: Set<string>): Compiled {
+function compileChooseOptions(st: St, steps: PStep[], stop: number): Compiled {
   const cs = steps[stop];
   if (stop + 1 < steps.length) throw new Error(`step not implemented after choose().option(): ${steps[stop + 1].name}()`);
   const ctx = elemCtx(elemRel(st), st.elem);
@@ -1131,7 +1128,7 @@ function compileChooseOptions(st: St, steps: PStep[], stop: number, indexKeys: S
   const n = elemRel(st);
   const p = st.last.as('p');
   const node = q`SELECT CASE ${list(whens, ' ')} ELSE ${elseExpr} END AS v FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
-  return readCompiled(st.q, node, { kind: 'value' }, [...indexKeys]);
+  return readCompiled(st.q, node, { kind: 'value' });
 }
 
 // ---------- group()/groupCount() (barrier → one Map) ----------
@@ -1158,7 +1155,7 @@ const elementIdExpr = (elem: ElemShape, ctx: ScalarCtx): Expression => elem === 
 interface GroupKeyBuild { desc: GroupKey; cols: Expression; group: string | Expression }
 
 /** Build the key columns for group(). */
-function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, indexKeys: Set<string>, params: Record<string, any>): GroupKeyBuild {
+function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Record<string, any>): GroupKeyBuild {
   if (!keyArgs || keyArgs.length === 0) { // bare by() → the element itself is the key
     if (src.elem === 'property') throw new Error('group().by() on a property element is not yet supported');
     return { desc: { kind: 'element', elem: src.elem }, cols: elementSelect(src.elem, 'k', src.ctx), group: elementIdExpr(src.elem, src.ctx) };
@@ -1201,9 +1198,9 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, indexKeys: 
  * GROUP BY aggregate; an element value can't be aggregated in SQL (props must be
  * framed), so we emit rows ORDER BY the key and the handler folds runs into the Map.
  */
-function compileGroup(st: St, isCount: boolean, bys: any[][], src: GroupSource, indexKeys: Set<string>): Compiled {
+function compileGroup(st: St, isCount: boolean, bys: any[][], src: GroupSource): Compiled {
   if (bys.length > 2) throw new Error('group() with more than two by() modulators not yet supported');
-  const key = buildGroupKey(bys[0], src, indexKeys, st.params);
+  const key = buildGroupKey(bys[0], src, st.params);
 
   let val: GroupVal, valNode: Expression, groupBy = true;
   const valArgs = bys[1];
@@ -1238,7 +1235,7 @@ function compileGroup(st: St, isCount: boolean, bys: any[][], src: GroupSource, 
   }
 
   const node = q`SELECT ${key.cols}, ${valNode} FROM ${src.from} ${groupBy ? 'GROUP BY' : 'ORDER BY'} ${key.group}`;
-  return readCompiled(st.q, node, { kind: 'group', key: key.desc, val }, [...indexKeys]);
+  return readCompiled(st.q, node, { kind: 'group', key: key.desc, val });
 }
 
 // ---------- properties() ----------
@@ -1248,7 +1245,7 @@ function compileGroup(st: St, isCount: boolean, bys: any[][], src: GroupSource, 
  * follow-on: key()/value()/count(), or element()[.values/.id/.label/.count]. The
  * traverser is a property — a json_each expansion over the owner's props.
  */
-function compileProperties(st: St, tail: PStep[], indexKeys: Set<string>): Compiled {
+function compileProperties(st: St, tail: PStep[]): Compiled {
   const elem = st.elem;
   const keys = tail[0].args.filter((a): a is string => typeof a === 'string');
   const n = elemRel(st);
@@ -1274,7 +1271,7 @@ function compileProperties(st: St, tail: PStep[], indexKeys: Set<string>): Compi
     if (2 < tail.length) throw new Error(`step not implemented after properties().${next1}(): ${tail[2].name}()`);
     const ctx: ScalarCtx = { elem: 'property', idExpr: pc.c.owner, labelIdExpr: q`(SELECT label FROM nodes WHERE id=${pc.c.owner})`, ownerExpr: pc.c.owner, pkExpr: pc.c.pk, pvExpr: pc.c.pv };
     const src: GroupSource = { from: pc.name, ctx, elem: 'property' };
-    return compileGroup(st, next1 === 'groupCount', tail[1].bys ?? [], src, indexKeys);
+    return compileGroup(st, next1 === 'groupCount', tail[1].bys ?? [], src);
   }
 
   // Consume leading property-stream filters:
@@ -1299,7 +1296,7 @@ function compileProperties(st: St, tail: PStep[], indexKeys: Set<string>): Compi
 
   const done = (node: Expression, shape: Shape, termSteps: number): Compiled => {
     if (tail.length > ti + termSteps) throw new Error(`step not implemented after properties(): ${tail[ti + termSteps].name}()`);
-    return readCompiled(st.q, node, shape, [...indexKeys]);
+    return readCompiled(st.q, node, shape);
   };
 
   const next = tail[ti]?.name;

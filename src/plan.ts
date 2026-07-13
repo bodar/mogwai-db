@@ -11,17 +11,16 @@ import { q, list, values, paren, empty, value, raw, jsonExtract, type Expression
 
 export const P_OPS: Record<string, string> = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 
-/** `json_extract(col, '$.key')` for a property key. The lazyrecords jsonExtract
- *  node owns the literal-vs-bound path splice (a safe identifier key is spliced
- *  literally so an expression index on that exact path engages; exotic keys bind)
- *  and reports the spliced key via `.indexKey`. The column is a bind-free fragment
- *  (`n.props`) wrapped as raw text() so it renders unquoted — index-eligible. */
-export function propExtract(col: Expression | string, key: unknown): { expr: Expression; indexKey: string | null } {
+/** `json_extract(col, '$.key')` for an EDGE property key (nodes read via
+ *  scalarProp/hasProp into vertex_properties). A string column is a bind-free
+ *  fragment (`e.props`) → raw text so it renders unquoted; a Relation column
+ *  arrives typed. (The lazyrecords jsonExtract still splices identifier-safe keys
+ *  literally — harmless; edges carry no property index.) */
+export function propExtract(col: Expression | string, key: unknown): { expr: Expression } {
   if (typeof key !== 'string') throw new Error('property key must be a string');
-  // A string column is a bind-free fragment (`n.props`) → raw text so the literal
-  // json path renders unquoted (index-eligible); a Relation column arrives typed.
-  const node = jsonExtract(typeof col === 'string' ? raw(col) : col, key);
-  return { expr: node, indexKey: node.indexKey };
+  // A string column is a bind-free fragment (`e.props`) → raw text; a Relation column
+  // arrives typed. Edge-only now (nodes read via scalarProp/hasProp into vertex_properties).
+  return { expr: jsonExtract(typeof col === 'string' ? raw(col) : col, key) };
 }
 
 /** `<col> IN (SELECT id FROM labels WHERE name IN (?,?))` — the canonical
@@ -190,7 +189,7 @@ export interface ScalarCtx {
   pvExpr?: Expression;         // property: value column
 }
 
-interface Scalar { expr: Expression; indexKey: string | null }
+interface Scalar { expr: Expression }
 
 /** Build a node/edge ScalarCtx from the (aliased) element relation `n` — its
  *  typed columns become the correlated-scalar base exprs. src/tgt exist only on
@@ -307,15 +306,15 @@ export function compileNestedScalar(inner: Step[], ctx: ScalarCtx): Scalar {
   if (!head) throw new Error('empty nested traversal');
 
   if (ctx.elem === 'property') {
-    if (head === 'key') { requireTerminal(steps, 1); return { expr: ctx.pkExpr!, indexKey: null }; }
-    if (head === 'value') { requireTerminal(steps, 1); return { expr: ctx.pvExpr!, indexKey: null }; }
+    if (head === 'key') { requireTerminal(steps, 1); return { expr: ctx.pkExpr! }; }
+    if (head === 'value') { requireTerminal(steps, 1); return { expr: ctx.pvExpr! }; }
     if (head === 'element') { nodeId = ctx.ownerExpr!; directLabelId = null; steps = steps.slice(1); }
     else throw new Error(`by(__.${head}()) over a property not yet supported`);
   } else if (ctx.elem === 'edge') {
     if (head === 'outV' || head === 'inV') { nodeId = head === 'outV' ? ctx.srcExpr! : ctx.tgtExpr!; directLabelId = null; steps = steps.slice(1); }
-    else if (head === 'label') { requireTerminal(steps, 1); return { expr: labelNameSub(ctx.labelIdExpr), indexKey: null }; }
-    else if (head === 'id') { requireTerminal(steps, 1); return { expr: ctx.idExpr, indexKey: null }; }
-    else if (head === 'values') { requireTerminal(steps, 1); return { expr: scalarProp(ctx, steps[0].args[0]), indexKey: null }; }
+    else if (head === 'label') { requireTerminal(steps, 1); return { expr: labelNameSub(ctx.labelIdExpr) }; }
+    else if (head === 'id') { requireTerminal(steps, 1); return { expr: ctx.idExpr }; }
+    else if (head === 'values') { requireTerminal(steps, 1); return { expr: scalarProp(ctx, steps[0].args[0]) }; }
     // out()/in()/both() are NOT valid on an edge (must go through outV()/inV());
     // routing them to edgeCountFrom here would compare edges.src to the edge's own
     // id and silently mis-count, so let them hit the clear throw below.
@@ -329,11 +328,11 @@ export function compileNestedScalar(inner: Step[], ctx: ScalarCtx): Scalar {
   const s = steps[0];
   if (!s) throw new Error('nested traversal resolves to no projection');
   switch (s.name) {
-    case 'values': requireTerminal(steps, 1); return { expr: nodePropScalar(nodeId, s.args[0]), indexKey: null };
-    case 'label':  requireTerminal(steps, 1); return { expr: labelNameSub(directLabelId ?? q`(SELECT label FROM nodes WHERE id=${nodeId})`), indexKey: null };
-    case 'id':     requireTerminal(steps, 1); return { expr: nodeId, indexKey: null };
+    case 'values': requireTerminal(steps, 1); return { expr: nodePropScalar(nodeId, s.args[0]) };
+    case 'label':  requireTerminal(steps, 1); return { expr: labelNameSub(directLabelId ?? q`(SELECT label FROM nodes WHERE id=${nodeId})`) };
+    case 'id':     requireTerminal(steps, 1); return { expr: nodeId };
     // constant(x): a fixed scalar per traverser — the common choose().option() body.
-    case 'constant': requireTerminal(steps, 1); return { expr: value(s.args[0]), indexKey: null };
+    case 'constant': requireTerminal(steps, 1); return { expr: value(s.args[0]) };
     default: throw new Error(`by(__.${s.name}()) not yet supported`);
   }
 }
@@ -358,14 +357,14 @@ function edgeAggFrom(steps: Step[], nodeIdExpr: Expression): Scalar {
   const lbl: Expression = mv.args.length ? q` AND ${labelIn('label', mv.args)}` : empty;
 
   if (steps[1]?.name === 'count' && steps.length === 2)
-    return { expr: q`(SELECT COUNT(*) FROM edges WHERE ${incidence}${lbl})`, indexKey: null };
+    return { expr: q`(SELECT COUNT(*) FROM edges WHERE ${incidence}${lbl})` };
 
   // …values(k).<reducer>() aggregates an edge property. E-forms only: on a bare
   // out()/in()/both() the value would come from the NEIGHBOUR vertex (a join),
   // which is a separate, unimplemented shape.
   if (mv.name.endsWith('E') && steps[1]?.name === 'values' && steps.length === 3 && steps[2].name in AGG_FN && steps[2].name !== 'count') {
     const pe = propExtract('props', steps[1].args[0]);
-    return { expr: q`(SELECT ${AGG_FN[steps[2].name]}(${pe.expr}) FROM edges WHERE ${incidence}${lbl})`, indexKey: null };
+    return { expr: q`(SELECT ${AGG_FN[steps[2].name]}(${pe.expr}) FROM edges WHERE ${incidence}${lbl})` };
   }
   throw new Error(`by(__.${mv.name}(…)) only supports a terminal count() or values(k).sum/min/max/mean() for now`);
 }
@@ -389,9 +388,7 @@ const requireTerminal = (steps: Step[], n: number) => {
 export function compileFilterPredicate(
   nested: Step[], ctx: ScalarCtx, params: Record<string, any> = {},
   resolveAlias?: (label: string) => ScalarCtx,
-): { expr: Expression; indexKeys: string[] } {
-  const indexKeys: string[] = [];
-
+): Expression {
   // A leading as('x')/select('x') re-roots the predicate on the aliased traverser:
   // where(__.as('b').out('created').has('name','ripple')) correlates on b's column.
   const h0 = nested[0];
@@ -416,15 +413,15 @@ export function compileFilterPredicate(
   // A reducing scalar (count/sum) compared by is(P). Bare (no is) always yields
   // one value → the traverser always passes, so it's a no-op filter.
   if (term === 'count' || term === 'sum') {
-    if (!hasIs) return { expr: q`1`, indexKeys };
-    return { expr: predicateSql(compileNestedScalar(body, ctx).expr, isPred), indexKeys };
+    if (!hasIs) return q`1`;
+    return predicateSql(compileNestedScalar(body, ctx).expr, isPred);
   }
 
   // Current-element predicates (no movement). Node props → ANY-match EXISTS over
   // vertex_properties; edge props → json_extract of the flat blob (hasProp dispatches).
   if (head === 'values' && body.length === 1) {
     // bare where(__.values(k)) → the key exists at all; .is(P) → any value matches P.
-    return { expr: hasProp(ctx, body[0].args[0], hasIs ? isPred : undefined), indexKeys };
+    return hasProp(ctx, body[0].args[0], hasIs ? isPred : undefined);
   }
   if (head === 'has' && body.length === 1) {
     const [key, val] = body[0].args;
@@ -434,34 +431,33 @@ export function compileFilterPredicate(
       const expr: Expression = key.token === 'label' ? labelNameSub(ctx.labelIdExpr)
         : key.token === 'id' ? ctx.extIdExpr!
         : (() => { throw new Error(`has(T.${key.token}) not supported`); })();
-      return { expr: predicateSql(expr, val), indexKeys };
+      return predicateSql(expr, val);
     }
     if (typeof key === 'string') {
-      return { expr: hasProp(ctx, key, val), indexKeys };
+      return hasProp(ctx, key, val);
     }
   }
   if (head === 'hasLabel' && body.length === 1)
-    return { expr: labelIn(ctx.labelIdExpr, body[0].args), indexKeys };
+    return labelIn(ctx.labelIdExpr, body[0].args);
   if (head === 'hasId' && body.length === 1)
-    return { expr: predicateSql(ctx.extIdExpr!, idPredFromArgs(body[0].args)), indexKeys };
+    return predicateSql(ctx.extIdExpr!, idPredFromArgs(body[0].args));
 
   // where(__.label()[.is(P)]) — predicate on the current element's label name.
   if (head === 'label' && body.length === 1)
-    return { expr: predicateSql(labelNameSub(ctx.labelIdExpr), hasIs ? isPred : undefined), indexKeys };
+    return predicateSql(labelNameSub(ctx.labelIdExpr), hasIs ? isPred : undefined);
 
   // where(__.not(t)) — negate an inner predicate; a NULL (missing) is kept (NOT COALESCE).
   if (head === 'not' && body.length === 1) {
     const arg = body[0].args.find((a: any) => a && typeof a === 'object' && 'nested' in a);
     if (!arg) throw new Error('not() requires a traversal');
     const inner = compileFilterPredicate(stepChain(arg.nested, params), ctx, params, resolveAlias);
-    indexKeys.push(...inner.indexKeys);
-    return { expr: q`NOT COALESCE((${inner.expr}), 0)`, indexKeys };
+    return q`NOT COALESCE((${inner}), 0)`;
   }
 
   if (MOVES.has(head))
     // A movement chain → a correlated EXISTS over the path, with an optional terminal
     // filter (has/hasLabel/values.is) on the last node. (count/sum handled above.)
-    return { expr: compileExistsChain(body, ctx, isPred, hasIs), indexKeys };
+    return compileExistsChain(body, ctx, isPred, hasIs);
   throw new Error(`where()/filter() form not yet supported: __.${body.map((s) => s.name + '()').join('.')}`);
 }
 
@@ -470,16 +466,11 @@ export function compileFilterPredicate(
 export function combineBranchPreds(
   step: Step, ctx: ScalarCtx, params: Record<string, any>, op: 'AND' | 'OR',
   resolveAlias?: (label: string) => ScalarCtx,
-): { expr: Expression; indexKeys: string[] } {
+): Expression {
   const branches = step.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 2) throw new Error(`${step.name}() needs at least two traversal branches`);
-  const indexKeys: string[] = [];
-  const parts = branches.map((b) => {
-    const p = compileFilterPredicate(stepChain(b.nested, params), ctx, params, resolveAlias);
-    indexKeys.push(...p.indexKeys);
-    return paren(p.expr);
-  });
-  return { expr: paren(list(parts, ` ${op} `)), indexKeys };
+  const parts = branches.map((b) => paren(compileFilterPredicate(stepChain(b.nested, params), ctx, params, resolveAlias)));
+  return paren(list(parts, ` ${op} `));
 }
 
 /** EXISTS over a single incident-edge movement (out/in/both/outE/inE/bothE),

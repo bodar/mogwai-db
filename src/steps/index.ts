@@ -92,7 +92,7 @@ function seedSource(first: PStep, query: Query, params: Record<string, any>, tra
   }
   const cols = [...(trackPath ? ['id', 'p0'] : ['id']), ...(sackInit ? ['sk'] : [])];
   const path = trackPath ? { kind: 'cols' as const, cols: [{ col: 'p0', elem }] } : undefined;
-  return { kind: 'elements', q: query, last: query.cte(body, cols), aliases: new Map(), elem, indexKeys: new Set(), params, path, sack: sackInit ? 'sk' : undefined };
+  return { kind: 'elements', q: query, last: query.cte(body, cols), aliases: new Map(), elem, params, path, sack: sackInit ? 'sk' : undefined };
 }
 
 /** union(b1, b2, …) as a SOURCE step: compile each branch's prefix into the SAME
@@ -104,18 +104,16 @@ function seedUnion(first: PStep, query: Query, params: Record<string, any>, sack
   if (sackInit) throw new Error('withSack() with a union() source not yet supported');
   const branches = first.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 1) throw new Error('union() needs at least one branch');
-  const indexKeys = new Set<string>();
   const rels = branches.map((b: any) => {
     const bsteps = stepChain(b.nested, params);
     const { st, stop } = buildPrefix(bsteps, params, query);
     if (stop !== bsteps.length) throw new Error(`union() source branch tail __.${bsteps[stop].name}() not yet supported`);
     if (st.elem !== 'node') throw new Error('union() source branch must be vertex-typed');
     if (st.aliases.size > 0) throw new Error('union() source branch with as() not yet supported');
-    for (const k of st.indexKeys) indexKeys.add(k);
     return st.last;
   });
   const body = list(rels.map((r) => q`SELECT id FROM ${r}`), ' UNION ALL ');
-  return { kind: 'elements', q: query, last: query.cte(body, ['id']), aliases: new Map(), elem: 'node', indexKeys, params };
+  return { kind: 'elements', q: query, last: query.cte(body, ['id']), aliases: new Map(), elem: 'node', params };
 }
 
 /**
