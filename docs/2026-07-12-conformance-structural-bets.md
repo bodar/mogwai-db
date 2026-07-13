@@ -114,12 +114,19 @@ makes it correct-by-design: **the output subtype is compile-time metadata** (fro
 typed literal or the cast's target arg), NOT the SQLite storage class — so no storage
 change, just a tag + framing rule. `asBool` is the first cast: it resolves inject
 constants at compile time (`asBoolConst`, since its per-value parse errors can't be
-raised from SQL and reachable inputs are all literals) and tags `as:'bool'`. **NEXT
-(step 2): `asNumber`** extends `ValueType` with the numeric subtype ladder (byte/short/
-int/long/bigint/float/double), sets the tag from the GType arg (or literal type), adds
-those serializers to `frameValue`, and makes `typeOf` subtype-precise (today
-`GTYPE_SQL` in `plan.ts` collapses to storage classes). Then **`math`** (194) on top:
-carrier + a small formula parser + promotion rules. Then `asDate` (datetime rep).
+raised from SQL and reachable inputs are all literals) and tags `as:'bool'`. **✅ `asNumber(GType.X)` LANDED (2026-07-13, L3 508→525).** The numeric subtype ladder
+(byte/short/int/long/bigint/float/double) is in `ValueType` + `frameValue`. Target comes
+from the **explicit GType arg** (`numericSpec`), so no frontend work: `inject(const)`
+resolves at compile time with overflow/parse errors (`asNumberConst`); a runtime value
+(`values(x)`) gets a SQL `CAST` + the tag (`asNumberSql`). `typeOf` stayed as-is — the
+storage-class check suffices because `asNumber(GType.X).is(typeOf(X))` streams are
+uniformly one type (no precision change needed, verified). **Deferred: bare `asNumber()`**
+— the frontend flattens numeric-literal suffixes (`5b`/`5l`/`5.0` → plain `5` in
+`frontend.ts:78-79`), so the input subtype is unrecoverable without a parser change
+(preserve the suffix as a typed token). asNumber+reducer defers (tag can't survive
+`wrapReducer`). bigdecimal defers (no client serializer). **NEXT:** (a) bare `asNumber()`
+= a frontend sub-batch (typed numeric literals); (b) **`math`** (194) — carrier + a small
+formula parser + promotion rules; (c) `asDate` (datetime rep).
 
 ### 5. `match()`  (~35)
 **Real-world: MEDIUM-LOW.** Powerful declarative pattern matching, but many users

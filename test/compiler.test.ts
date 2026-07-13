@@ -147,6 +147,37 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.inject(1).asBool().inject(5)', {})).toThrow('asBool() composed');
   });
 
+  test('asNumber(GType.X) tags the value shape with the target subtype', () => {
+    // Target comes from the explicit GType arg (the frontend flattens numeric-literal
+    // suffixes, so bare asNumber() can't recover the input subtype — it defers).
+    expect(read('g.inject(5).asNumber(GType.LONG)').shape).toEqual({ kind: 'value', as: 'long' });
+    expect(read('g.inject(12).asNumber(GType.BYTE)').shape).toEqual({ kind: 'value', as: 'byte' });
+    // integer targets truncate toward zero; the converted constant is bound
+    expect(read('g.inject(5.43).asNumber(GType.INT)').binds).toEqual([5]);
+    expect(read("g.inject('5').asNumber(GType.BYTE)").binds).toEqual([5]);
+    // runtime value → SQL CAST + tag (no compile-time constant)
+    const f = read('g.V().values("weight").asNumber(GType.FLOAT)');
+    expect(f.shape).toEqual({ kind: 'value', as: 'float' });
+    expect(f.sql).toContain('CAST(json_extract(n.props');
+    // is(P.typeOf(X)) on the uniformly-typed stream rides the existing storage-class
+    // typeOf — no precision change needed
+    expect(read('g.V().values("weight").asNumber(GType.FLOAT).is(P.typeOf(GType.FLOAT))').sql).toContain("typeof(CAST(");
+    // overflow + non-numeric-token errors raise TinkerPop's exact messages
+    expect(() => compile('g.inject(32768).asNumber(GType.SHORT)', {})).toThrow('Can\'t convert number of type Integer to Short due to overflow.');
+    expect(() => compile('g.inject(300).asNumber(GType.BYTE)', {})).toThrow('Can\'t convert number of type Integer to Byte due to overflow.');
+    expect(() => compile('g.inject(5).asNumber(GType.VERTEX)', {})).toThrow('asNumber() requires a numeric type token, got VERTEX');
+    // bare asNumber() defers (needs the frontend to preserve numeric-literal subtypes)
+    expect(() => compile('g.inject(5).asNumber()', {})).toThrow('asNumber() not supported');
+    // a reducer after asNumber() would drop the subtype tag → defer
+    expect(() => compile('g.inject(2.0).asNumber(GType.FLOAT).sum()', {})).toThrow('composed with a reducer');
+    // overflow message uses the boxed Java type name (Integer, not Int)
+    expect(() => compile('g.inject(3000000000).asNumber(GType.INT)', {})).toThrow('to Integer due to overflow.');
+    // blank string is a parse error, not a silent 0
+    expect(() => compile('g.inject("").asNumber(GType.INT)', {})).toThrow("Can't parse string '' as number.");
+    // a composed cast over inject would skip the overflow check (raw serializer crash) → defer
+    expect(() => compile('g.inject(300).asNumber(GType.INT).asNumber(GType.BYTE)', {})).toThrow('composed with other transforms over inject()');
+  });
+
   test('group().by(__.bothE().values(k).<reducer>()) is a correlated neighbourhood aggregate', () => {
     const p = read("g.V().hasLabel('software').group().by('name').by(__.bothE().values('weight').mean())");
     // one correlated AVG over incident edges, wrapped by MAX to satisfy GROUP BY;

@@ -48,8 +48,10 @@ export type PathPos =
 // from the SQLite storage class (which collapses byte..long → INTEGER, float/double →
 // REAL). The handler frames `v` with the matching serializer. `undefined` = infer
 // from the JS value (anySerializer), the default for untyped projections.
-// Currently emitted: 'bool' (asBool). The numeric subtypes land with asNumber.
-export type ValueType = 'bool';
+// Emitted by asBool ('bool') and asNumber(GType.X) (the numeric subtypes). The
+// numeric tag names the GraphBinary type; SQLite carries the value in whichever
+// storage class fits (INTEGER/REAL), and frameValue picks the serializer.
+export type ValueType = 'bool' | 'byte' | 'short' | 'int' | 'long' | 'bigint' | 'float' | 'double';
 
 export type Shape =
   | { kind: 'vertex' }
