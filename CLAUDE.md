@@ -149,8 +149,14 @@ ride the auto-built expression index.
 
 - Traversers are multisets: UNION ALL everywhere; only dedup() collapses.
 - `both()` on a self-loop yields the vertex twice.
-- `repeat()` without `until()` is legal and infinite — max-depth guard
-  (default ~32), documented deviation.
+- `repeat()` needs an exit modulator — `times()`, `until()`, or `emit()` (bare
+  `repeat()` is rejected). There is NO artificial depth cap: `times()` bounds depth;
+  `until()`/`emit()` run to the natural fixpoint (frontier exhaustion). A cyclic body
+  without `simplePath()` (any `both()`) is infinite *per the spec* — we compile it
+  faithfully and rely on the DO's per-request CPU/memory limit as the backstop (a
+  self-inflicted request fails, the DO reloads from durable storage; blast radius is
+  the caller's own tenant). Do NOT reintroduce a cap — it silently truncated legit
+  deep walks (removed 2026-07-13).
 - Element ids are integer rowids; don't invent string ids.
 
 ## Testing (the build discipline)
@@ -276,8 +282,10 @@ gathered by strategies since the modulators sit either side of `repeat`). All
 (`jsonb_insert '$[#]'`); **`simplePath()` in the body** = a `NOT EXISTS(json_each)`
 cycle guard; **`until(<pred>)`** = a `done` column (do-while / while-do), predicate
 via `compileFilterPredicate` on a correlated node ctx, `loops().is(n)` → depth
-predicate — `until().path()` composes. Depth guard 32 when `times`/`until` bound is
-soft. Deferred: `emit(pred)`, `until`+`times`/`emit`, cyclicPath-in-repeat,
+predicate — `until().path()` composes. **No depth cap** (removed 2026-07-13): `times()`
+bounds depth; `until()` and unbounded `emit()` run to the natural fixpoint — a cyclic
+body without `simplePath()` is infinite by spec, bounded only by the DO's per-request
+CPU/memory limit. Deferred: `emit(pred)`, `until`+`times`/`emit`, cyclicPath-in-repeat,
 `path().by()` on recursive, edge-inclusive bodies, mixed linear+repeat path, complex
 bodies. See `docs/2026-07-12-path-tracking-prior-art.md`.
 
@@ -344,7 +352,8 @@ Cucumber tag set widened with `@StepAddV/@StepAddE/@StepMergeV/@StepMergeE` (NOT
 
 Read-step backlog (continues under W5). DONE 2026-07-12/13: the **path family** —
 `path`/`simplePath`/`cyclicPath` + `path().by()`, `repeat().path()` (JSONB array
-walk), `repeat().until()` (do-while/while-do, `loops().is(n)`). **DONE 2026-07-13: the
+walk), `repeat().until()` (do-while/while-do, `loops().is(n)`), unbounded `repeat().emit()`
+(natural-fixpoint termination, no depth cap). **DONE 2026-07-13: the
 per-traverser BRANCHING family** (455→473, `docs/2026-07-13-per-traverser-branching.md`)
 — `choose` (predicate form + option-map scalar CASE), `coalesce` (first-non-empty via a
 carried input-ordinal `St.origin`), multi-hop `union`/`optional` (rewritten onto the
