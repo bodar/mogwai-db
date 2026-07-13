@@ -66,6 +66,11 @@ export const OPENAPI_SPEC = {
                     type: 'string',
                     description: 'Optional traversal-source name (named graph within the tenant).',
                   },
+                  batchSize: {
+                    type: 'integer',
+                    description: 'Optional. Results per response chunk (default 64). Paces the ' +
+                      'chunked GraphBinary response; also accepted as resultIterationBatchSize.',
+                  },
                 },
               },
               examples: {

@@ -3,11 +3,24 @@ import type { GraphStore } from './storage.ts';
 import { ioc, VertexProperty, Property, t } from './io.ts';
 
 // ---- GraphBinary v4 response framing (mirrors GraphBinaryReader.readResponse) ----
-function frame(values: Buffer[], status = 200, message: string | null = null): Buffer {
-  const parts: Buffer[] = [Buffer.from([0x84, 0x00])]; // version, bulked=false
-  parts.push(...values);
-  parts.push(Buffer.from([0xfd, 0x00, 0x00])); // end-of-stream marker
-  parts.push(ioc.intSerializer.serialize(status, false)); // status code, bare int
+// The response is ONE logical frame — `HEADER | value* | trailer` — regardless of
+// how many HTTP chunks carry it (v4 chunking splits this same byte stream across
+// chunks; the client reassembles via arrayBuffer() and reads it once). Split into
+// header/trailer so the streaming path can emit the header first, then values in
+// batches, then the trailer last — while `frame()` still builds the whole thing in
+// one shot for the pre-stream error path.
+const HEADER = Buffer.from([0x84, 0x00]); // version, bulked=false
+const CONTENT_TYPE = 'application/vnd.graphbinary-v4.0';
+// TinkerPop's default resultIterationBatchSize. Governs only how many value
+// buffers get concatenated into one enqueue() (HTTP chunk pacing) — NOT a
+// protocol boundary; the v4 wire is one logical frame however it's chunked.
+const DEFAULT_BATCH_SIZE = 64;
+
+function frameTrailer(status = 200, message: string | null = null): Buffer {
+  const parts: Buffer[] = [
+    Buffer.from([0xfd, 0x00, 0x00]),         // end-of-stream marker
+    ioc.intSerializer.serialize(status, false), // status code, bare int
+  ];
   if (message !== null) {
     parts.push(Buffer.from([0x00]), ioc.stringSerializer.serialize(message, false));
   } else {
@@ -15,6 +28,13 @@ function frame(values: Buffer[], status = 200, message: string | null = null): B
   }
   parts.push(Buffer.from([0x01])); // null exception
   return Buffer.concat(parts);
+}
+
+// The pre-stream error path builds the whole frame in one shot: an error carries no
+// result values, just HEADER + the status trailer (values only ever stream, via
+// streamResponse — nothing threads a non-empty value list through here).
+function errorFrame(status: number, message: string): Buffer {
+  return Buffer.concat([HEADER, frameTrailer(status, message)]);
 }
 
 // Custom vertex framing to MATERIALIZE properties. The client's
@@ -233,16 +253,30 @@ function groupBuffer(rows: any[], key: GroupKey, val: GroupVal): Buffer {
   return Buffer.concat(parts);
 }
 
-function execute(store: GraphStore, gremlin: string, params: Record<string, any>): Buffer[] {
+// A generator over the result value buffers, so the response can stream: per-row
+// shapes `yield` one buffer per row (framed lazily, over the already-materialized
+// row array — never a live cursor, so it's safe to cross the ReadableStream's
+// pull() awaits); barrier shapes (group/list) drain the array then yield their one
+// value. The row array itself is fully materialized up front by store.query() — the
+// memory the streaming path avoids is holding EVERY framed value buffer plus the
+// final concat copy simultaneously (framed batches flush + GC as the stream drains,
+// leaving only the row array + one in-flight batch resident). The DO SQLite cursor
+// can't be held open across awaits for a stable snapshot, so true row-level laziness
+// (which would also free the row array) isn't safe there — draining it synchronously
+// via store.query() is deliberate, not an oversight.
+function* execute(store: GraphStore, gremlin: string, params: Record<string, any>): Generator<Buffer> {
   const plan = compile(gremlin, params);
   if (plan.kind === 'write') {
-    return plan.run(store).map((r: any) => {
-      if (r.vertex) return vertexBuffer(r.vertex.id, r.vertex.label, r.vertex.props);
-      const e = r.edge;
-      // Frame via edgeBuffer so edge properties materialize — routing through
-      // anySerializer's EdgeSerializer drops them (same client bug edgeBuffer works around).
-      return edgeBuffer(e.id, e.label, e.src, e.tgt, e.props ?? {});
-    });
+    for (const r of plan.run(store)) {
+      if (r.vertex) yield vertexBuffer(r.vertex.id, r.vertex.label, r.vertex.props);
+      else {
+        const e = r.edge;
+        // Frame via edgeBuffer so edge properties materialize — routing through
+        // anySerializer's EdgeSerializer drops them (same client bug edgeBuffer works around).
+        yield edgeBuffer(e.id, e.label, e.src, e.tgt, e.props ?? {});
+      }
+    }
+    return;
   }
   // Self-tuning: ensure an expression index for each hot property key the plan
   // filters/orders on, so the first filtered use of a key pays the one-time
@@ -251,31 +285,33 @@ function execute(store: GraphStore, gremlin: string, params: Record<string, any>
   const rows = store.query(plan.sql, plan.binds) as any[];
   const shape = plan.shape;
   switch (shape.kind) {
-    case 'vertex': return rows.map(rowVertex);
-    case 'edge': return rows.map(rowEdge);
-    case 'valueMap': return rows.map((r) => valueMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys, shape.tokens));
-    case 'elementMap': return rows.map((r) => elementMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys));
-    case 'count': return rows.map((r) => ioc.anySerializer.serialize(BigInt(r.v)));
-    case 'value': return rows.map((r) => frameValue(r.v, shape.as));
+    case 'vertex': for (const r of rows) yield rowVertex(r); return;
+    case 'edge': for (const r of rows) yield rowEdge(r); return;
+    case 'valueMap': for (const r of rows) yield valueMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys, shape.tokens); return;
+    case 'elementMap': for (const r of rows) yield elementMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys); return;
+    case 'count': for (const r of rows) yield ioc.anySerializer.serialize(BigInt(r.v)); return;
+    case 'value': for (const r of rows) yield frameValue(r.v, shape.as); return;
     // sum(): Int/Long/Double by SQLite storage class. SUM of an empty stream is
     // NULL → no result (TinkerPop yields nothing, matching SQL sum aggregation).
-    case 'scalar': return rows.filter((r) => r.v !== null).map((r) => sumBuffer(r.v, r.vt));
-    case 'map': return rows.map((r) => mapBuffer(r, shape.entries));
-    case 'path': return rows.map((r) => pathBuffer(r, shape.positions));
-    case 'pathGrouped': return pathGroupedBuffers(rows, shape.elem);
-    case 'property': return rows.map((r) => propertyBuffer(r.owner, r.pk, r.pv));
+    case 'scalar': for (const r of rows) if (r.v !== null) yield sumBuffer(r.v, r.vt); return;
+    case 'map': for (const r of rows) yield mapBuffer(r, shape.entries); return;
+    case 'path': for (const r of rows) yield pathBuffer(r, shape.positions); return;
+    // pathGrouped folds pk-runs into Paths — a bounded fold, so yield each completed Path.
+    case 'pathGrouped': yield* pathGroupedBuffers(rows, shape.elem); return;
+    case 'property': for (const r of rows) yield propertyBuffer(r.owner, r.pk, r.pv); return;
     // Barriers: the whole stream collapses to ONE value (Map / List).
-    case 'group': return [groupBuffer(rows, shape.key, shape.val)];
+    case 'group': yield groupBuffer(rows, shape.key, shape.val); return;
     case 'list': {
       // fold() reuses the plain vertex/edge projection (unprefixed id/label/…),
       // unlike group's v_-prefixed element columns.
-      if (shape.elem === 'scalar') return [ioc.listSerializer.serialize(rows.map((r) => r.v))];
-      return [listBuffer(rows.map(shape.elem === 'edge' ? rowEdge : rowVertex))];
+      if (shape.elem === 'scalar') yield ioc.listSerializer.serialize(rows.map((r) => r.v));
+      else yield listBuffer(rows.map(shape.elem === 'edge' ? rowEdge : rowVertex));
+      return;
     }
     // A list-VALUE stream: one framed List per row (the `list` column arrives as JSON
     // text via json(), so it JSON.parses; scalar elements frame via listSerializer).
-    case 'jsonbList': return rows.map((r) => ioc.listSerializer.serialize(JSON.parse(r.list)));
-    case 'discard': return [];
+    case 'jsonbList': for (const r of rows) yield ioc.listSerializer.serialize(JSON.parse(r.list)); return;
+    case 'discard': return;
   }
 }
 
@@ -289,41 +325,122 @@ function execute(store: GraphStore, gremlin: string, params: Record<string, any>
 export type StoreSource = GraphStore | ((g: string) => GraphStore);
 
 /**
- * The runtime-agnostic request handler: sniff JSON/GraphBinary, compile,
- * execute against the injected store, frame the GraphBinary v4 response.
- * Returns a Web-standard Response, so it drops straight into both `Bun.serve`
- * and a Durable Object `fetch`.
+ * Drive a result generator out as a chunked GraphBinary v4 response: emit the
+ * HEADER, then value buffers concatenated `batchSize` at a time per pull(), then
+ * the status trailer. The generator is primed by the caller (its first value is
+ * `primed`) so that pre-stream errors — compile failures, bad SQL, the synchronous
+ * cursor drain — have already surfaced as a thrown exception the caller turns into
+ * a buffered error Response; by the time we're here, streaming has committed.
+ *
+ * A mid-stream throw (a later row failing to frame) flushes whatever's buffered,
+ * writes a 500 trailer, and closes NORMALLY — never controller.error(), which would
+ * abort the HTTP body into a truncated frame the client can't reassemble. Errors
+ * always ride the trailer; HTTP stays 200. On client disconnect, cancel() returns
+ * the generator so it (and the row array it closes over) can unwind.
+ */
+function streamResponse(
+  gen: Generator<Buffer>,
+  primed: IteratorResult<Buffer>,
+  batchSize: number,
+  onDone: (count: number, error?: string) => void,
+): Response {
+  let pending: IteratorResult<Buffer> | null = primed;
+  let finished = false;
+  let count = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(HEADER);
+    },
+    pull(controller) {
+      if (finished) return;
+      const batch: Buffer[] = [];
+      try {
+        while (batch.length < batchSize) {
+          const step = pending ?? gen.next();
+          pending = null;
+          if (step.done) { finished = true; break; }
+          batch.push(step.value);
+          count++;
+        }
+      } catch (e: any) {
+        finished = true;
+        if (batch.length) controller.enqueue(Buffer.concat(batch));
+        controller.enqueue(frameTrailer(500, e.message));
+        controller.close();
+        onDone(count, e.message);
+        return;
+      }
+      if (batch.length) controller.enqueue(Buffer.concat(batch));
+      if (finished) {
+        controller.enqueue(frameTrailer(200, null));
+        controller.close();
+        onDone(count);
+      }
+    },
+    cancel() {
+      // Client disconnected mid-stream: return the generator so it (and the row
+      // array it closes over) unwinds, and stop any further pull() work.
+      finished = true;
+      gen.return(undefined);
+      onDone(count, 'stream cancelled by client');
+    },
+  });
+  return new Response(stream, { headers: { 'Content-Type': CONTENT_TYPE } });
+}
+
+/**
+ * The runtime-agnostic request handler: sniff JSON/GraphBinary, compile, execute
+ * against the injected store, and stream the GraphBinary v4 response in
+ * `batchSize`-paced chunks. Returns a Web-standard Response (streaming body), so it
+ * drops straight into both `Bun.serve` and a Durable Object `fetch`.
  */
 export function makeHandler(source: StoreSource): (req: Request) => Promise<Response> {
+  const errorResponse = (message: string): Response =>
+    new Response(errorFrame(500, message), { headers: { 'Content-Type': CONTENT_TYPE } });
   return async function handler(req: Request): Promise<Response> {
     let gremlinForLog = '?';
-    let body: Buffer;
     try {
       const raw = Buffer.from(await req.arrayBuffer());
-      let msg: { gremlin: string; parameters?: Record<string, any>; g?: string };
+      let msg: { gremlin: string; parameters?: Record<string, any>; g?: string; batchSize?: number; resultIterationBatchSize?: number };
       if (raw[0] === 0x84) {
-        // GraphBinary request: 0x84, fields map (bare), gremlin string (bare)
+        // GraphBinary request: 0x84, fields map (bare), gremlin string (bare). Copy
+        // the batch-size fields through raw — precedence + defaulting live at the one
+        // seam below, so binary and JSON requests resolve it identically.
         let cursor = raw.subarray(1);
         const { v: fields, len } = ioc.mapSerializer.deserialize(cursor, false);
         cursor = cursor.subarray(len);
         const { v: gremlin } = ioc.stringSerializer.deserialize(cursor, false);
         const bindings = fields?.get?.('bindings') ?? fields?.get?.('parameters') ?? {};
-        msg = { gremlin, g: fields?.get?.('g'), parameters: bindings instanceof Map ? Object.fromEntries(bindings) : bindings };
+        msg = {
+          gremlin,
+          g: fields?.get?.('g'),
+          parameters: bindings instanceof Map ? Object.fromEntries(bindings) : bindings,
+          batchSize: fields?.get?.('batchSize'),
+          resultIterationBatchSize: fields?.get?.('resultIterationBatchSize'),
+        };
       } else {
         msg = JSON.parse(raw.toString('utf8'));
       }
       gremlinForLog = msg.gremlin;
+      // The one seam resolving batch size for BOTH request shapes: batchSize wins over
+      // resultIterationBatchSize; 0 / negative / non-numeric fall back to the default.
+      const requestedBatchSize = Number(msg.batchSize ?? msg.resultIterationBatchSize);
+      const batchSize = requestedBatchSize > 0 ? requestedBatchSize : DEFAULT_BATCH_SIZE;
       const store = typeof source === 'function' ? source(msg.g ?? 'g') : source;
-      const values = execute(store, msg.gremlin, msg.parameters ?? {});
-      body = frame(values);
-      console.log(`OK   ${msg.gremlin} -> ${values.length} result(s)`);
+      const gen = execute(store, msg.gremlin, msg.parameters ?? {});
+      // Prime the generator: this runs compile() + the synchronous cursor drain +
+      // the first frame, so any pre-stream error throws HERE and is caught below as
+      // a buffered 500 (before a single streamed byte commits us to HTTP 200).
+      const primed = gen.next();
+      return streamResponse(gen, primed, batchSize, (count, error) =>
+        console.log(error
+          ? `ERR  [${gremlinForLog}] ${error} (after ${count} result(s) streamed)`
+          : `OK   ${gremlinForLog} -> ${count} result(s)`));
     } catch (e: any) {
-      body = frame([], 500, e.message);
+      // Request-parse or pre-stream (compile/SQL) failure → always HTTP 200; the
+      // error rides the GraphBinary status trailer.
       console.log(`ERR  [${gremlinForLog}] ${e.message}`);
+      return errorResponse(e.message);
     }
-    // Always HTTP 200; errors ride the GraphBinary status trailer.
-    return new Response(body, {
-      headers: { 'Content-Type': 'application/vnd.graphbinary-v4.0' },
-    });
   };
 }
