@@ -16,11 +16,15 @@
 // Here there is one tenant and many named graphs, exactly the two-level model.
 import { GraphStore } from '../../src/storage.ts';
 import { seedModern } from './seed-modern.ts';
+import { seedUid } from './seed-uid.ts';
 import { makeHandler } from '../../src/handler.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 
 const SEEDS: Record<string, (s: GraphStore) => void> = {
   gmodern: seedModern,
+  // guid: a UserSuppliedIds graph (not part of the official suite) — used by the
+  // in-repo conformance test to prove external-id framing on the read path.
+  guid: seedUid,
   // gclassic/gcrew/ggrateful/gsink: add seeds as their scenarios come online.
 };
 

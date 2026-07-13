@@ -278,3 +278,46 @@ describe('conformance host — empty graph write/reset (ggraph)', () => {
     await g.V().drop().iterate();
   });
 });
+
+// Read-path edge endpoints under UserSuppliedIds: a materialized edge element must
+// report the SAME external endpoint ids the write path reports — not the internal
+// rowid. Regression for the documented read/write divergence. Uses the pre-seeded
+// `guid` graph (alice/bob/e1) so we read edges without a write-then-read dance.
+describe('conformance host — read-path edge endpoints report external ids (guid)', () => {
+  let server: any, drc: any, g: any;
+
+  beforeAll(async () => {
+    server = startConformanceServer(0);
+    drc = new DriverRemoteConnection(`http://localhost:${server.port}/gremlin`, { traversalSource: 'guid' });
+    g = traversal().with_(drc);
+  });
+  afterAll(async () => { await drc?.close(); server?.stop(); });
+
+  test('g.E(): edge id + outV/inV ids are the user-supplied ids', async () => {
+    const e = (await g.E().next()).value;
+    expect(e.id).toBe('e1');
+    expect(e.outV.id).toBe('alice'); // was the internal rowid (1)
+    expect(e.inV.id).toBe('bob');    // was the internal rowid (2)
+  });
+
+  test('g.V(uid).outE(): endpoints resolve from a vertex-rooted edge scan', async () => {
+    const e = (await g.V('alice').outE('knows').next()).value;
+    expect(e.outV.id).toBe('alice');
+    expect(e.inV.id).toBe('bob');
+  });
+
+  test('g.V(uid).outE().fold(): edges in a list keep external endpoints', async () => {
+    const list = (await g.V('alice').outE('knows').fold().next()).value;
+    expect(list.length).toBe(1);
+    expect(list[0].outV.id).toBe('alice');
+    expect(list[0].inV.id).toBe('bob');
+  });
+
+  test('g.V(uid).outE().inV().path(): the edge position keeps external endpoints', async () => {
+    const path = (await g.V('alice').outE('knows').inV().path().next()).value;
+    // objects: [alice(vertex), e1(edge), bob(vertex)]
+    const edge = path.objects.find((o: any) => o?.outV !== undefined);
+    expect(edge.outV.id).toBe('alice');
+    expect(edge.inV.id).toBe('bob');
+  });
+});

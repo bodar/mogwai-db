@@ -277,7 +277,28 @@ describe('compiler SQL snapshots', () => {
     const p = read('g.E()');
     expect(p.sql).toContain('c0(id) as (SELECT id FROM edges)');
     expect(p.shape).toEqual({ kind: 'edge' });
-    expect(p.sql).toContain('n.src, n.tgt');
+    // Endpoints resolve to the external id (COALESCE(uid,id)) so a materialized edge
+    // reports the SAME endpoint ids as the write path — was raw rowid (n.src, n.tgt),
+    // a read/write divergence that surfaced under user-supplied ids.
+    expect(p.sql).toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=n.src) AS src');
+    expect(p.sql).toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=n.tgt) AS tgt');
+    // ...and the resolution must NOT leak into the traversal CTE (index-only scan):
+    // the source CTE is still a bare `SELECT id FROM edges`, no endpoint join.
+    expect(p.sql).not.toContain('nodes WHERE id=n.src) AS id');
+  });
+
+  test('every edge-element materialization path resolves endpoints to external ids', () => {
+    // Regression: an edge framed out as an element must report external endpoint
+    // ids on ALL paths (was raw rowid), matching the write path (write.ts nodeExtId).
+    // fold() over edges reuses the __element edge projection.
+    expect(read('g.V(1).outE().fold()').sql).toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=n.src) AS src');
+    // path() with an edge position frames endpoints per-position (x{i}_src/_tgt).
+    const pth = read('g.V(1).outE().inV().path()');
+    expect(pth.sql).toContain('WHERE id=x1n.src) AS x1_src');
+    expect(pth.sql).toContain('WHERE id=x1n.tgt) AS x1_tgt');
+    // group() default value = element list of edges (v_src/_tgt).
+    expect(read('g.V(1).outE().group().by(__.label())').sql)
+      .toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=n.src) AS v_src');
   });
 
   test('outE/inE go vertex→edge; outV/inV go edge→vertex', () => {
@@ -378,7 +399,7 @@ describe('compiler SQL snapshots', () => {
     expect(p.sql).toContain("(SELECT json_extract(props, '$.name') FROM nodes WHERE id=n.src) AS k0_v");
     expect(p.sql).toContain('(SELECT name FROM labels WHERE id=n.label) AS k1_v');
     expect(p.sql).toContain("(SELECT json_extract(props, '$.name') FROM nodes WHERE id=n.tgt) AS k2_v");
-    expect(p.sql).toContain('n.src AS v_src'); // edge value framing
+    expect(p.sql).toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=n.src) AS v_src'); // edge value framing → external endpoint id
   });
 
   test('properties().group() over the property stream (vertex-property gate)', () => {
@@ -707,7 +728,8 @@ describe('compiler SQL snapshots', () => {
 
   test('path() interleaves edge and vertex positions with the right element shape', () => {
     const p = read('g.V(1).outE("created").inV().path()');
-    expect(p.sql).toContain('x1n.src AS x1_src, x1n.tgt AS x1_tgt'); // edge position frames endpoints
+    // edge position frames endpoints as external ids (COALESCE(uid,id)), not raw rowid
+    expect(p.sql).toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=x1n.src) AS x1_src, (SELECT COALESCE(uid, id) FROM nodes WHERE id=x1n.tgt) AS x1_tgt');
     expect(p.shape).toEqual({ kind: 'path', positions: [
       { render: 'element', elem: 'vertex', prefix: 'x0' },
       { render: 'element', elem: 'edge', prefix: 'x1' },
