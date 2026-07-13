@@ -7,6 +7,7 @@
 // status codes — that framing is protocol-distinct from gremlin and lives only
 // here, never leaking into the manager implementations.
 import type { GraphManager } from './manager.ts';
+import { DOCS_HTML, OPENAPI_JSON } from './docs.ts';
 
 const GRAPH_PATH = /^\/g\/([^/]+)\/?$/;
 
@@ -20,6 +21,17 @@ function json(body: unknown, status = 200): Response {
 export function makeRouter(mgr: GraphManager): (req: Request) => Promise<Response> {
   return async function router(req: Request): Promise<Response> {
     const { pathname } = new URL(req.url);
+
+    // Docs surface (GET-only). Served identically on both runtimes; separate
+    // paths from /g/{id}, so GLV traffic is untouched.
+    if (req.method === 'GET') {
+      if (pathname === '/') return Response.redirect(new URL('/docs', req.url).toString(), 302);
+      if (pathname === '/docs')
+        return new Response(DOCS_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+      if (pathname === '/openapi.json')
+        return new Response(OPENAPI_JSON, { headers: { 'Content-Type': 'application/json' } });
+    }
+
     const match = pathname.match(GRAPH_PATH);
     if (!match) return new Response('Not found', { status: 404 });
     const id = decodeURIComponent(match[1]);

@@ -33,6 +33,40 @@ export function graphContract(name: string, harness: Harness) {
 
     gremlinContract(() => origin);
     managementContract(() => origin);
+    docsContract(() => origin);
+  });
+}
+
+// The self-describing docs surface: an OpenAPI spec + an interactive Scalar
+// reference, served identically on both runtimes.
+function docsContract(getOrigin: () => string) {
+  describe('docs', () => {
+    test('GET /openapi.json serves a valid OpenAPI spec', async () => {
+      const res = await fetch(`${getOrigin()}/openapi.json`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('application/json');
+      const spec = (await res.json()) as any;
+      expect(spec.openapi).toMatch(/^3\./);
+      expect(Object.keys(spec.paths['/g/{graphId}'])).toEqual(
+        expect.arrayContaining(['post', 'put', 'get', 'delete']),
+      );
+    });
+
+    test('GET /docs serves the Scalar reference HTML', async () => {
+      const res = await fetch(`${getOrigin()}/docs`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('text/html');
+      const html = await res.text();
+      expect(html).toContain('createApiReference');
+      expect(html).toContain('/openapi.json');
+    });
+
+    test('GET / redirects to the docs', async () => {
+      const res = await fetch(`${getOrigin()}/`);
+      expect(res.redirected).toBe(true);
+      expect(new URL(res.url).pathname).toBe('/docs');
+      expect(await res.text()).toContain('createApiReference');
+    });
   });
 }
 
