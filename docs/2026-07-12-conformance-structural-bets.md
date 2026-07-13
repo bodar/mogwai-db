@@ -7,6 +7,12 @@ This doc groups them, sizes them, and weighs them by *what mogwai's actual users
 would use* — not raw scenario count. It is a map for choosing the next big
 investment, not a loop backlog.
 
+> **Status (2026-07-13): live L3 = 618.** Bets #1 (path), #2 (per-traverser branching,
+> minus `local`), #4 (types), #5 (match), #6-core (list substrate), and #7 (semantic
+> strategies) have all landed since this was written — see each bet + the "Recommended
+> sequence" refresh at the bottom. The real remaining frontier is **#3 side-effect
+> state** (`aggregate`/`cap`/`sack`), `local`, and the collection-algebra tail.
+
 Counts are approximate scenario totals in the relevant feature files (some we
 already partially pass). "Real-world" is judged for mogwai's target: many small
 **OLTP** graphs — agent memory, per-tenant/per-user knowledge graphs, personal
@@ -179,10 +185,10 @@ CLAUDE.md "asDate/dateAdd/dateDiff … LANDED". **Deferred (structural wall):** 
 DATETIME)` over a STORED property (DateTime.feature) — same SQLite-storage-class wall as
 bool/uuid typeOf; needs a storage type-tag scheme.
 
-**NEXT after date:** the deferred
-tail: asNumber+reducer (fold/sum — thread the subtype tag through `wrapReducer`),
-bigdecimal (no client serializer), the JS-GLV upstream give-back (TINKERPOP-3044/3043 —
-client-side, our server unaffected).
+**Deferred type-family tail** (opportunistic, not the frontier — the list substrate
+landed next instead): asNumber+reducer (fold/sum — thread the subtype tag through
+`wrapReducer`), bigdecimal (no client serializer), the JS-GLV upstream give-back
+(TINKERPOP-3044/3043 — client-side, our server unaffected).
 
 **Aside — running L3 against deployed CF (workerd), feasible, medium effort:** the L3 host
 (`conformance-server.ts`) is a Bun server fronting named graphs by the request `g` field;
@@ -194,20 +200,30 @@ slow (wrangler boot + cucumber) → a periodic high-fidelity gate, not every-CI.
 de-risking ONE runtime-specific feature, a targeted probe (as done for math) beats it.
 
 ### 5. `match()`  (~35)
+**✅ DONE (2026-07-13, Phase H — `src/steps/match.ts`, L3 473→474).** A conjunctive
+pattern join built directly on #2's alias-threading foundation (`aliasCtx`/
+`resolveAlias`): each `as(start).<out/in>*[.has].as(end)` pattern folds in dependency
+order, binding or constraining vars as alias columns; downstream select/count/dedup
+consume them through the existing rails. See `docs/2026-07-13-per-traverser-branching.md`
+Phase H. **Deferred, fail-closed:** `both()`/edge/scalar-terminal patterns, `or`/`not`/
+nested-`match`, `>1`/`0` root vars, `match`-inside-`where`, select-then-movement.
 **Real-world: MEDIUM-LOW.** Powerful declarative pattern matching, but many users
-write explicit traversals instead.
-**Structural: medium, mostly a rewrite.** TinkerPop itself lowers `match` onto
-`where`/`select`/`and` — so this largely rides on the per-traverser engine (#2) plus
-alias threading (done). Do it *after* #2.
+write explicit traversals instead — which is why the deferred tail is low-priority.
 
 ### 6. Collection algebra — `unfold` + `combine`/`product`/`intersect`/`difference`/`disjunct`/`conjoin`, `Scope.local` reductions  (~100+)
+**✅ SUBSTRATE DONE (2026-07-13, L3 608→618).** The core bet — "make a list a
+first-class traverser value" — landed as the list-value substrate + re-enterable tail
+(`docs/2026-07-13-list-value-substrate-plan.md`, Approach A): `fold()` as a real JSONB
+list value, `unfold()` re-entering the tail, `Scope.local` reducers (count/sum/min/max/
+mean), inject-as-list, and the scalar-local semantics — all SQL-native (`json_each`/
+JSONB), no interpreter. This also structurally dissolved the "only one projection per
+traversal" ceiling.
+**Still open (small adds on the substrate):** the set-ops themselves (`combine`/
+`intersect`/`product`/…), Map-unfold, `select(Column.values/keys)`, and the rest of
+Scope.local on lists (`order/limit/range/tail/dedup(Scope.local)`).
 **Real-world: LOW-MEDIUM for OLTP.** List set-ops and local reductions are more
-analytical than the point/'k-hop' queries mogwai targets. High raw count, low
-priority.
-**Structural: medium.** Make a **list/collection** a first-class traverser value
-(fold produces it; unfold expands it; set-ops and `Scope.local` min/max/tail operate
-on it). Also finally makes `Scope.local` correct everywhere. Worth it for
-completeness, not for the target users.
+analytical than the point/'k-hop' queries mogwai targets — the substrate was worth
+building (it dissolved several walls at once); the remaining set-op tail is opportunistic.
 
 ### 7. Traversal strategies — `withStrategies(PartitionStrategy/SubgraphStrategy)` (+ `withoutStrategies`)  (~86)
 **Partial win landed 2026-07-13 (L3 473→495).** `compiler.ts` now splits strategies:
@@ -245,19 +261,37 @@ supported. Lowest priority.
 
 ## Recommended sequence
 
+**Status refresh (2026-07-13): live L3 = 618.** Items 1–4 and 6-partial have landed
+since this sequence was first written; items 3 (side-effect state) and 4 (rest of #6 /
+collection algebra tail) are the real remaining frontier. See "The remaining frontier"
+below.
+
 1. ~~**Path** (#1)~~ — **DONE (2026-07-12/13)**, see bet #1 above.
 2. ~~**Per-traverser sub-traversal engine** (#2)~~ — **LARGELY DONE (2026-07-13, L3
-   455→473)**, see bet #2 above + `docs/2026-07-13-per-traverser-branching.md`.
-3. **`match`** (#5) — **the current top pick.** Now unblocked: it lowers onto
-   `where`/`select`/`and` and its patterns are alias-rooted constraints — all of which
-   the #2 alias-threading foundation (`aliasCtx`/`resolveAlias`) now provides. Needs
-   declarative pattern ordering (dependency sort) + shared-variable joins.
-4. **`local`** (rest of #2) — per-element scope (Scope.local/fold); structurally the
-   hardest remaining piece of the branching bet.
-5. **Side-effect state** (#3) — `aggregate`/`cap`/`sack`.
-6. Then opportunistically: **types** (#4) and **collection algebra** (#6) for completeness.
-7. **Strategies** (#7) only when in-graph partitioning is an actual ask — the
-   DO-per-tenant model already covers isolation.
+   455→473)**, see bet #2 above + `docs/2026-07-13-per-traverser-branching.md`. `local`
+   (per-element scope) is the one structural piece of #2 still open.
+3. ~~**`match`** (#5)~~ — **DONE (2026-07-13, Phase H, L3 473→474)**, see bet #5 above.
+4. ~~**types** (#4) + **collection-algebra substrate** (#6 core)~~ — **DONE**: the
+   typed-value carrier + asBool/asNumber/asDate/math (L3 496→608), and the list-value
+   substrate + re-enterable tail + Scope.local reducers + unfold (L3 608→618, see
+   `docs/2026-07-13-list-value-substrate-plan.md`).
+5. **Strategies** (#7) — **semantic support DONE** (Subgraph/Partition/verification,
+   L3 495→582). Deferred tails only.
+
+### The remaining frontier (what is actually still open, 2026-07-13)
+
+- **Side-effect state (#3)** — `aggregate`/`store`/`cap`, `sack`, `group('a')`. The one
+  genuinely NEW execution notion left (named collections that outlive the current
+  id-relation). ~63 scenarios. **The next big structural bet** — see the standalone
+  analysis being written.
+- **`local` (rest of #2)** — per-element scope; the hardest remaining branching piece.
+- **Chained projections** (`values().count()`, `valueMap().select()`, ~40) — a tail
+  re-type the substrate partly addressed but the element→scalar→scalar case still defers.
+- **Collection-algebra tail (#6)** — set-ops (`combine`/`intersect`/…), Map-unfold,
+  `select(Column.values/keys)`, the rest of Scope.local on lists. Small adds now that
+  the list substrate exists.
+- **Multi/meta-properties (W4)** — the deferred schema rework; unlocks its own scenario
+  cluster + `Cardinality.list/set` writes.
 
 The throughline: **grow the SQL compiler (correlated/lateral/recursive), don't add
 an interpreter.** Every bet above has a SQL-native shape; that's what keeps mogwai's

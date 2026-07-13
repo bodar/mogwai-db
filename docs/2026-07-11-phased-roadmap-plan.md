@@ -160,7 +160,7 @@ not 100% of the 2101-scenario suite (no provider is). The suite's own
 | Property data types | primitives + list/map | JSON storage |
 
 The conformance denominator is therefore "all non-lambda / non-OLAP /
-non-multi-request-tx scenarios". `conformance/corpus.txt` (2177/2177 parse+chain)
+non-multi-request-tx scenarios". `conformance/corpus.txt` (2298/2298 parse+chain)
 is the "we understand the whole language" metric; the live cucumber pass count is
 the "we execute it correctly" metric.
 
@@ -168,11 +168,14 @@ the "we execute it correctly" metric.
 
 The P2/P3 read compiler is largely done, W2 writes have landed, the path
 family (path/simplePath/cyclicPath, recursive repeat().path(), repeat().until())
-landed under W5, and the **per-traverser branching family + multi-hop/alias where**
-landed 2026-07-13 (choose/coalesce/union/optional/flatMap/map/where — see
-docs/2026-07-13-per-traverser-branching.md) (**live L3 473** as of 2026-07-13; see
-CLAUDE.md + the conformance-grind memory for the running count). The path to *usable* is
-sequenced so the invasive schema rework lands behind a deployed, writable
+landed under W5, the **per-traverser branching family + multi-hop/alias where + match**
+landed 2026-07-13 (choose/coalesce/union/optional/flatMap/map/where/match — see
+docs/2026-07-13-per-traverser-branching.md), the **type/value family** (asBool/asNumber/
+asDate/math + typed-value carrier) landed, the **semantic strategies** (Subgraph/
+Partition/verification) landed, and the **list-value substrate + re-enterable tail**
+(fold-as-value/unfold/Scope.local reducers/inject-as-list) landed (**live L3 618** as of
+2026-07-13; see CLAUDE.md + the conformance-grind memory for the running count). The path
+to *usable* is sequenced so the invasive schema rework lands behind a deployed, writable
 baseline:
 
 - **W1 — user-supplied ids. DONE.** `nodes`/`edges` gained a nullable
@@ -208,16 +211,25 @@ baseline:
   (design fork: nested JSON `{key:[{value,meta}]}` vs a normalized
   `properties` table). Touches valueMap/values/has/properties/addV/storage —
   biggest blast radius, deliberately after a deployed baseline exists.
-- **W5 — conformance grind.** Landed so far (2026-07-13): the **path family** —
-  linear `path()`/`path().by()`/`simplePath()`/`cyclicPath()`, recursive
-  `repeat().path()` (JSONB array walk), `simplePath()` in the repeat body, and
-  `repeat().until()` (do-while/while-do, `loops().is(n)`, `until().path()`).
-  Still open: `aggregate`/`cap`, `match`, `local`, `choose`, `coalesce`, `sack`,
-  `emit(pred)`, `path().by()` on the recursive walk, compound `until(…and/or().loops())`
-  + the multi/meta scenarios W4 unlocks + seeding the other reference graphs
-  (classic/crew/grateful/sink). `tree()` is intentionally NOT on this list: the JS
-  GLV cucumber ignores all 13 tree scenarios and stubs `DataType.TREE`, so it yields
-  0 conformance (build only if a non-JS GLV consumer appears).
+- **W5 — conformance grind.** Landed so far (2026-07-13, L3 130→618): the **path
+  family** (linear `path()`/`by()`/`simplePath()`/`cyclicPath()`, recursive
+  `repeat().path()`, `simplePath()` in-body, `repeat().until()`); the **per-traverser
+  branching family** (`choose`/`coalesce`/`union`/`optional`/`flatMap`/scalar-`map`,
+  multi-hop/alias `where`); **`match()`** (conjunctive pattern join); the **type/value
+  family** (`asBool`/`asNumber`/`asDate`/`dateAdd`/`dateDiff`/`math` + `datetime()`
+  literals, on a typed-value carrier); **semantic strategies** (Subgraph/Partition
+  read-filter+write-stamp, ReadOnly/EdgeLabel/ReservedKeys verification); and the
+  **list-value substrate** (`fold()`-as-value, `unfold()`, `Scope.local` reducers,
+  inject-as-list). Still open — **the remaining frontier**: `aggregate`/`store`/`cap`
+  + `sack` + `group('a')` (**side-effect state — the next big structural bet**, a new
+  execution notion); `local` (per-element scope); chained projections
+  (`values().count()`, ~40); the collection-algebra tail (set-ops/`combine`/`intersect`,
+  Map-unfold, `select(Column.values/keys)`, rest of Scope.local on lists); `emit(pred)`,
+  compound `until(…and/or().loops())`, `path().by()` on the recursive walk; the multi/
+  meta scenarios W4 unlocks; seeding the other reference graphs (classic/crew/grateful/
+  sink). `tree()` is intentionally NOT on this list: the JS GLV cucumber ignores all 13
+  tree scenarios and stubs `DataType.TREE`, so it yields 0 conformance (build only if a
+  non-JS GLV consumer appears).
 
 The read-step backlog (below, P2-tail/P3/P5) continues under W5. Phases P0–P3 and
 their step-level detail follow.
@@ -340,8 +352,10 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
     aliased/edge branches defer with clear errors.
   - **`optional`. DONE (single hop).** `LEFT JOIN` + `COALESCE(neighbour, self)` —
     matches emit neighbour(s), a miss falls back to self. `both()`/multi-hop defer.
-  - **`coalesce`. DEFERRED** (first-non-empty-branch-per-traverser needs correlated
-    per-seed EXISTS chaining) — clear error.
+  - **`coalesce`. DONE (2026-07-13, Phase B).** First-non-empty-branch-per-traverser
+    via the `St.origin` input-ordinal column threaded through each `foldBody` arm
+    (`SELECT … WHERE o NOT IN (earlier arms)`). `optional` = `coalesce(t, identity)`.
+    See `docs/2026-07-13-per-traverser-branching.md`.
   - **`path()`. DONE (W5, 2026-07-13).** NOT the originally-sketched "JSON-array
     through movement" — that was overturned. Two regimes (see
     `docs/2026-07-12-path-tracking-prior-art.md`): linear `path()` carries per-position
@@ -364,11 +378,13 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
   Still deferred with clear errors: `emit(pred)`/`times(pred)`, `until`+`times`/`emit`,
   compound `until(…and/or().loops())`, `path().by()` on the recursive walk, complex
   bodies (order/limit/edge-inclusive inside repeat), repeat after `as()`, repeat on edges.
-- `mergeV`/`mergeE` → `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`
-  (requires unique indexes; part of the management/schema story). This is
-  the agent-workload workhorse — prioritize if that's the driving use case.
-- General `addE` (from any traverser set, `from()`/`to()` with arbitrary
-  nested traversals).
+- `mergeV`/`mergeE` → **DONE (W2, 2026-07-13).** Upsert closures (match-normalise →
+  patch-on-match / insert-on-miss), id-aware, onCreate/onMatch, start + mid-chain
+  per-traverser. Not `ON CONFLICT` — explicit match+branch, so onMatch/onCreate and
+  the re-query-per-driver visibility semantics are exact. See CLAUDE.md "W2 writes".
+- General `addE` → **DONE (W2, 2026-07-13).** from/to as `as()` alias or nested `__.V()`,
+  edge uid via `property(T.id)`, multi-addE graph initializers via the sequential
+  write-chain interpreter.
 
 **P4 — DO deployment.**
 - DONE: the DI seam (`Sql` interface + agnostic `GraphStore`), both adapters
@@ -392,8 +408,11 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
 - Auth: bearer token per graph at the Worker layer (deferred, its own bundle).
 
 **P5 — stretch.**
-- `match()` as a rewrite onto where/select (TinkerPop itself does this).
-- `sack()` as an arithmetic column; `aggregate/cap` via staged execution.
+- `match()` → **DONE (2026-07-13, Phase H).** A conjunctive pattern join on the alias
+  seam (`src/steps/match.ts`), not a full where/select lowering — see
+  `docs/2026-07-13-per-traverser-branching.md`. Deferred tail (both/or/not/nested).
+- `sack()` as an arithmetic column; `aggregate/cap` via staged execution. **← the next
+  big structural bet (side-effect state); still open.**
 - `shortestPath` special-cased recursive CTE.
 - Multi-request `g.tx()` (grammar supports it; needs DO session state).
 - Explicitly out of scope: lambdas (gremlin-lang barely supports them —
@@ -411,16 +430,21 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
 | order/range/skip/valueMap/elementMap/inject | SQL / json_extract | done | excellent |
 | E/outE/inE/bothE/outV/inV/bothV | typed id-relation + edge shape | done | excellent |
 | as/select/project/by(key\|vertex) | column threading | done | very good |
-| mergeV/mergeE | UPSERT RETURNING | easy | excellent |
-| where/not (anon traversals) | correlated EXISTS | medium | good |
-| union/coalesce/optional | UNION ALL/LEFT JOIN | medium | good |
-| repeat/until/emit | recursive CTE + guard | medium | good |
-| path/simplePath | JSON path column | medium | moderate |
-| TextP | LIKE/GLOB; regex in JS | easy | good |
-| group/groupCount | GROUP BY + json_group_object | easy | very good |
+| mergeV/mergeE | match+branch closures (not ON CONFLICT) | done | excellent |
+| where/not (anon traversals) | correlated EXISTS / EXISTS-chain | done | good |
+| choose/flatMap/map(scalar) | gated seeds / foldBody / correlated scalar | done | good |
+| union/coalesce/optional | UNION ALL + origin ordinal / LEFT JOIN | done | good |
+| repeat/until/emit | recursive CTE + guard | done | good |
+| path/simplePath | JSONB walk (recursive) / label-carry (linear) | done | moderate |
+| TextP | LIKE/GLOB; regex in JS | done | good |
+| group/groupCount/fold/sum | GROUP BY + json_group_array | done | very good |
+| asBool/asNumber/asDate/math | typed-value carrier + SQL scalar | done | excellent |
+| list substrate (fold-value/unfold/Scope.local) | JSONB list + json_each + re-enterable tail | done | good |
+| match | conjunctive pattern join on alias seam | done | good |
+| withStrategies (Subgraph/Partition/verify) | strategies.ts injection passes | done | good |
 | sack | threaded column | medium | good |
-| aggregate/cap/sideEffect | staged temp CTEs | hard | moderate |
-| match | rewrite onto P2 primitives | med (after P2) | good |
+| aggregate/cap/sideEffect | staged temp CTEs / named collections | **hard — next big bet** | moderate |
+| local (Scope) | per-element lateral scope | hard | moderate |
 | tx() multi-request | DO session | medium, defer | — |
 | lambdas, OLAP | — | won't support | — |
 
@@ -430,9 +454,9 @@ Four layers, cheapest first. TinkerPop ships everything we need; write as few
 bespoke tests as possible.
 
 **L1 — Grammar corpus gate (exists, passing 100%).**
-`conformance/corpus.txt` holds all 2,177 unique canonical traversals extracted
-from the official Gherkin features; `conformance/corpus-test.ts` parses and
-chain-extracts every one. Current score: 2177/2177 parse, 2177/2177 chain.
+`conformance/corpus.txt` holds all 2,298 unique canonical traversals extracted
+from the official Gherkin features; `conformance/corpus.test.ts` parses and
+chain-extracts every one. Current score: 2298/2298 parse, 2298/2298 chain.
 CI gate: this never regresses. Re-extract when upstream features change
 (regex over `gremlin-test/.../features/**/*.feature`). Side benefit: the
 step-frequency table it prints is the implementation priority order —

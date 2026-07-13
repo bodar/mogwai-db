@@ -13,9 +13,9 @@ Status: **Phases A–E + multi-hop/alias where landed (2026-07-13, live L3 455 �
 — alias-rooted where predicates). All one SQL statement. Deferred with clear errors:
 scalar/projection branch bodies (predicate choose), mixed-shape branches,
 branch-inside-branch (nested origin), element-body `map` (first-result), option-map
-choose without a scalar `Pick.none`, alias-in-predicate beyond re-root, and **`match`**
-(the next deliberate batch — its patterns are alias-rooted constraints built on
-`aliasCtx`/`resolveAlias`).
+choose without a scalar `Pick.none`, and alias-in-predicate beyond re-root. **`match`
+has since landed too** (Phase H below, L3 473→474) — built on this doc's
+`aliasCtx`/`resolveAlias` foundation.
 
 ## Two correlation regimes (the key architecture split — do not conflate)
 
