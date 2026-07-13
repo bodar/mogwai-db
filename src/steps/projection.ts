@@ -171,6 +171,11 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
   if (steps[stop]?.name === 'math')
     return compileMath(st, steps, stop, indexKeys);
 
+  // bare sack() reads the carried per-traverser sack column as a scalar value; a
+  // trailing reducer (sum/…)/is/order composes via the shared value tail.
+  if (steps[stop]?.name === 'sack')
+    return compileSackRead(st, steps, stop, indexKeys);
+
   // group()/groupCount() is a barrier over the current element stream → one Map.
   if (steps[stop]?.name === 'group' || steps[stop]?.name === 'groupCount') {
     if (stop + 1 < steps.length) throw new Error(`step not implemented after ${steps[stop].name}(): ${steps[stop + 1].name}()`);
@@ -357,6 +362,23 @@ function buildProjection(st: St, acc: TailAcc, indexKeys: Set<string>): Compiled
 
   // order().by(key) sorts by a property expression (element context) — auto-index it.
   return renderProjection(st.q, proj, acc, indexKeys, nodePropOrderKey(st, indexKeys));
+}
+
+/** bare sack() — read the carried per-traverser sack column (context.ts Carry.sack)
+ *  as a scalar value, then run the shared value tail (a trailing sum()/dedup/order/is
+ *  composes). The value's GraphBinary type is inferred (as:undefined → anySerializer),
+ *  matching values(): sack holds whatever the withSack seed / sack(op) arithmetic
+ *  produced (int age, double weight, string label). */
+function compileSackRead(st: St, steps: PStep[], stop: number, indexKeys: Set<string>): Compiled {
+  if (!st.sack) throw new Error('sack() requires withSack() or a preceding sack(Operator.x) step');
+  if ((steps[stop].args ?? []).length) throw new Error('sack(argument) read form not supported (bare sack() only)');
+  const { acc, stop: at } = foldTailAcc(steps, stop + 1);
+  if (at !== steps.length) throw new Error(`${steps[at].name}() after sack() not yet supported`);
+  if (acc.projStep) throw new Error(`${acc.projStep.name}() after sack() not yet supported`);
+  const p = st.last.as('p');
+  const proj: ProjResult = { shape: { kind: 'value' }, colsNode: q`${p.c[st.sack]} AS v`, fromNode: p, scalarExpr: p.c[st.sack], baseWhere: null };
+  const orderKey = (): Expression => { throw new Error('order().by(key) after sack() not supported'); };
+  return renderProjection(st.q, proj, acc, indexKeys, orderKey);
 }
 
 /** Render a resolved projection + the value-shape tail (scalar transforms, is()
