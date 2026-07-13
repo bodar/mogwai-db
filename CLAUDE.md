@@ -25,12 +25,25 @@ builds through the kernel.
 - **Seam 2 — `src/steps/*.ts`:** the read prefix is a **functional fold** —
   `StepFn = (step, St) => St` over an immutable `St` (`context.ts`); only the
   `Query` builder accumulates CTEs. Per-family modules (`movement`/`filter`/
-  `branch`/`passthrough`), tail (`projection.ts`: `PROJECTORS` + `MODIFIERS` Maps +
-  group/properties/select barriers), writes (`write.ts`: imperative interpreters
+  `branch`/`passthrough`), writes (`write.ts`: imperative interpreters
   behind an ordered `WRITE_RULES` table). `index.ts` = `PREFIX` Map + `buildPrefix`
   + `compileRead`. To add a read step: write a `StepFn`, register it in the right
   Map — do NOT grow a switch. Multi-step modulator consumption belongs in a
   `strategies.ts` fold, NOT in a compiler peeking at siblings.
+- **The tail is split per step-family (2026-07-13, was one 1353-line file).**
+  `projection.ts` (~530) is the DISPATCHER (`compileTail`/`compileFromScalar`) +
+  shared RENDER BASE (`foldTailAcc` + `MODIFIERS`/`PROJECTORS` Maps +
+  `buildProjection`/`renderProjection`/`compileFold`/`wrapReducer`/`compileSackRead`/
+  `compileCap`). Leaf handlers live in per-family modules, mirroring the prefix's
+  `movement`/`filter`/… grain: `coerce.ts` (asBool/asNumber/asDate const-fold + SQL —
+  the ONE pure leaf, no back-import), `inject.ts` (`compileInject`), `select.ts`
+  (select/project/path), `mapscalar.ts` (map/math/choose), `group.ts` (group +
+  properties). Layering: leaves import the render base UP from `projection.ts`; the
+  dispatcher imports the leaves for dispatch — a value cycle (`projection`↔`mapscalar`)
+  same as the pre-existing `projection`↔`index` `dispatchNext` one, safe (all refs are
+  in fn bodies, none at module-init). To add a tail step: put its `compile*` in the
+  right leaf (or a new one), route it from `compileTail`. `write.ts` imports
+  `compileInject` from `inject.ts`.
 
 ## What this is
 

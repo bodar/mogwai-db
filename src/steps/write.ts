@@ -5,7 +5,7 @@ import { stepChain, type Step } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../render.ts';
 import { buildPrefix } from './index.ts';
-import { compileInject } from './projection.ts';
+import { compileInject } from './inject.ts';
 
 // ---------- write compilers ----------
 //
