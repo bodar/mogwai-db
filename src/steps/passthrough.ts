@@ -11,6 +11,12 @@ import { advance, carryFrag, prevRel, type StepFn } from './context.ts';
 // `order().by(k).limit(5)` truncates after the sort — the split IS the dispatch
 // boundary (see src/steps/index.ts).
 
+// identity(): the no-op step — passes the current traverser set through unchanged
+// (TinkerPop's own identity). IdentityRemovalStrategy exists to elide it; we keep the
+// step so a traversal that names it explicitly (or one built by a client that doesn't
+// run that strategy) compiles the same.
+export const identity: StepFn = (_s, st) => st;
+
 export const limit: StepFn = (s, st) => {
   const p = prevRel(st, 'p');
   return advance(st, q`SELECT ${p.c.id}${carryFrag(st, p)} FROM ${p} LIMIT ${Number(s.args[0])}`);

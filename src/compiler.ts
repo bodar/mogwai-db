@@ -17,28 +17,48 @@ export type { Compiled, WritePlan, Shape, MapEntry, ElemShape, GroupKey, GroupVa
 // This file is just the wiring + the strategy fail-closed guard.
 
 /**
- * Fail closed on traversal-strategy application. `withStrategies`/`withoutStrategies`
- * parse and chain fine (so they count toward the L1 "we understand the language"
- * corpus metric), but the compiler does not yet APPLY them. A PartitionStrategy or
- * SubgraphStrategy — which a client relies on to FILTER reads/writes for logical
- * isolation — would otherwise be silently dropped and return unfiltered data with
- * no error. Reject at execution until the compiler honours them, rather than leak.
+ * Traversal-strategy handling. `withStrategies`/`withoutStrategies` parse and chain
+ * fine (they count toward the L1 corpus metric), but the compiler does not APPLY
+ * strategies. So we split them by whether ignoring one can change the result set:
  *
- * `withoutStrategies` is rejected too, on purpose. It is a no-op *today* (we apply
- * no strategies, so removing one changes nothing), but the two are coupled: once we
- * DO apply strategies — an inline `withStrategies` or a graph's default
- * PartitionStrategy — `withoutStrategies(X)` MUST actively suppress X, and an
- * accept-and-ignore left over from now would silently return filtered data where
- * the caller asked for none. Correct-by-design beats correct-by-accident: keep it
- * failing closed and implement removal alongside application. (Reverted an earlier
- * accept-as-no-op for exactly this reason — a few extra passing scenarios were not
- * worth the latent surprise.)
+ * - **Optimization strategies** (below) are, by TinkerPop's own contract, purely
+ *   performance rewrites — the result set is identical with them applied, removed,
+ *   or absent (the official suite proves it: for each, the `withStrategies(X)` and
+ *   `withoutStrategies(X)` scenarios expect the SAME rows). Our SQL does its own
+ *   planning, so not applying them is exactly correct — accept as a no-op. This is
+ *   correct-by-design, not correct-by-accident: the criterion is "cannot change
+ *   output", not "makes a test pass".
+ * - **Everything else** fails closed. A PartitionStrategy or SubgraphStrategy that a
+ *   client relies on to FILTER reads/writes for logical isolation would otherwise be
+ *   silently dropped and return unfiltered data with no error. ProductiveByStrategy,
+ *   Connective/Options/verification/OLAP strategies all likewise change semantics.
+ *   `withoutStrategies` of these is coupled and stays rejected too: once we DO apply
+ *   a default strategy, `withoutStrategies(X)` MUST actively suppress it, and an
+ *   accept-and-ignore left over from now would leak. Reject until honoured.
+ *
+ * Unknown / mixed lists fail closed: every named strategy must be whitelisted, else
+ * the whole call is rejected.
  */
-function rejectUnsupportedStrategies(tree: any): void {
+const SAFE_OPTIMIZATION_STRATEGIES = new Set([
+  'CountStrategy', 'IdentityRemovalStrategy', 'FilterRankingStrategy',
+  'LazyBarrierStrategy', 'EarlyLimitStrategy', 'OrderLimitStrategy',
+  'AdjacentToIncidentStrategy', 'IncidentToAdjacentStrategy', 'InlineFilterStrategy',
+  'PathRetractionStrategy', 'PathProcessorStrategy', 'ByModulatorOptimizationStrategy',
+  'RepeatUnrollStrategy', 'MatchAlgorithmStrategy', 'MatchPredicateStrategy',
+]);
+
+function checkStrategies(tree: any): void {
   const scan = (node: any) => {
     const m = stepName(node.constructor.name, 'TraversalSourceSelfMethod_');
-    if (m === 'withStrategies' || m === 'withoutStrategies')
-      throw new Error(`${m}(...) is not supported: traversal strategies (e.g. PartitionStrategy, SubgraphStrategy) are not yet applied by the compiler, so accepting them would silently ignore the filtering they imply and leak unfiltered data. Rejected to fail closed.`);
+    if (m === 'withStrategies' || m === 'withoutStrategies') {
+      // Identifiers ending in "Strategy" (ANTLR getText() drops whitespace, so
+      // `new SubgraphStrategy` → `newSubgraphStrategy` — which is NOT whitelisted,
+      // still failing closed). Require ≥1 and ALL whitelisted, else reject.
+      const named = node.getText().match(/[A-Za-z_]\w*Strategy(?![A-Za-z])/g) ?? [];
+      const allSafe = named.length > 0 && named.every((s: string) => SAFE_OPTIMIZATION_STRATEGIES.has(s));
+      if (!allSafe)
+        throw new Error(`${m}(...) is not supported: only result-preserving optimization strategies are accepted (as no-ops); semantic strategies (e.g. PartitionStrategy, SubgraphStrategy) would silently ignore the filtering they imply and leak unfiltered data. Rejected to fail closed.`);
+    }
     for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) scan(node.getChild(i));
   };
   scan(tree);
@@ -46,7 +66,7 @@ function rejectUnsupportedStrategies(tree: any): void {
 
 export function compile(gremlin: string, params: Record<string, any>): Compiled | WritePlan {
   const tree = parseGremlin(gremlin);
-  rejectUnsupportedStrategies(tree);
+  checkStrategies(tree);
   const { steps, discard } = normalize(stepChain(tree, params));
   if (steps.length === 0) throw new Error('empty traversal');
 

@@ -229,8 +229,9 @@ suite manually.
 
 > This section is a *record* of how the read compiler was built, not a to-do list.
 > The **actual immediate next work is W3 — Cloudflare deploy + Worker auth** (see
-> docs/2026-07-11-phased-roadmap-plan.md). Live L3 is 473 (path family, then the
-> per-traverser branching family + multi-hop/alias where landed 2026-07-13 — see
+> docs/2026-07-11-phased-roadmap-plan.md). Live L3 is 495 (path family, then the
+> per-traverser branching family + multi-hop/alias where landed 2026-07-13; then the
+> safe optimization-strategy whitelist 473→495, see below — see
 > docs/2026-07-13-per-traverser-branching.md).
 
 DONE: P2a (as/select/project/by column-threading), P2c-1 (edge traversal — the

@@ -124,6 +124,18 @@ on it). Also finally makes `Scope.local` correct everywhere. Worth it for
 completeness, not for the target users.
 
 ### 7. Traversal strategies — `withStrategies(PartitionStrategy/SubgraphStrategy)` (+ `withoutStrategies`)  (~86)
+**Partial win landed 2026-07-13 (L3 473→495).** `compiler.ts` now splits strategies:
+result-preserving **optimization** strategies (Count/IdentityRemoval/FilterRanking/
+LazyBarrier/EarlyLimit/OrderLimit/Adjacent↔Incident/InlineFilter/PathRetraction/
+PathProcessor/ByModulatorOptimization/RepeatUnroll/Match{Algorithm,Predicate}) are
+accepted as **no-ops** — by TinkerPop's contract they can't change the result set
+(the suite proves it: each strategy's `withStrategies(X)`/`withoutStrategies(X)`
+scenarios expect identical rows), and our SQL does its own planning, so not applying
+them is exactly correct (correct-by-design, not a test-chase). Semantic strategies
+(Subgraph/Partition/ProductiveBy/Connective/Options/verification/OLAP) and any mixed
+or unknown list still fail closed. Also added `identity()` as a no-op step. What
+remains below is the *semantic* strategy work.
+
 **Real-world: LOW-MEDIUM for us.** `PartitionStrategy` = multi-tenancy *within one
 graph* — but mogwai already isolates tenants as **one Durable Object per graph**, so
 the main use case is covered structurally elsewhere. `SubgraphStrategy` (filtered

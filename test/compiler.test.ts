@@ -245,18 +245,37 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().has("age",30).as("a").select("a").by("name")').indexKeys).toEqual(['age']);
   });
 
-  test('withStrategies/withoutStrategies fail closed (never silently drop a filtering strategy)', () => {
+  test('semantic strategies fail closed (never silently drop a filtering strategy)', () => {
     // A dropped PartitionStrategy/SubgraphStrategy would return unfiltered data with
     // no error — an isolation leak. Must reject, not silently ignore.
     expect(() => compile("g.withStrategies(new PartitionStrategy(partitionKey:'_p',writePartition:'a',readPartitions:['a'])).V().values('name')", {}))
       .toThrow('withStrategies(...) is not supported');
     expect(() => compile("g.withStrategies(new SubgraphStrategy(vertices:__.has('name','marko'))).V()", {}))
       .toThrow('withStrategies(...) is not supported');
-    // withoutStrategies is a no-op today but coupled to strategy application, so it
-    // stays failing-closed until removal is implemented alongside it (no
-    // correct-by-accident answers).
+    // ProductiveByStrategy changes by() null semantics — not an optimization. Reject.
+    expect(() => compile('g.withStrategies(ProductiveByStrategy).V().values("name")', {}))
+      .toThrow('withStrategies(...) is not supported');
+    // withoutStrategies is coupled to strategy application, so it stays failing-closed
+    // for semantic strategies until removal is implemented alongside it.
     expect(() => compile('g.withoutStrategies(PartitionStrategy).V()', {}))
       .toThrow('withoutStrategies(...) is not supported');
+    // Mixed list: one unsafe strategy poisons the whole call.
+    expect(() => compile('g.withStrategies(CountStrategy, ProductiveByStrategy).V()', {}))
+      .toThrow('withStrategies(...) is not supported');
+  });
+
+  test('result-preserving optimization strategies accepted as no-ops (correct-by-design)', () => {
+    // These cannot change the result set (TinkerPop optimization-strategy contract),
+    // so not applying them is exactly correct. The official suite proves it: the
+    // withStrategies(X) and withoutStrategies(X) scenarios expect identical rows.
+    for (const s of ['CountStrategy', 'IdentityRemovalStrategy', 'FilterRankingStrategy',
+                     'LazyBarrierStrategy', 'MatchAlgorithmStrategy', 'RepeatUnrollStrategy']) {
+      expect(() => compile(`g.withStrategies(${s}).V().count()`, {})).not.toThrow();
+      expect(() => compile(`g.withoutStrategies(${s}).V().count()`, {})).not.toThrow();
+    }
+    // identity() is the no-op step (what IdentityRemovalStrategy elides) — compiles.
+    expect(read('g.V().identity().out().values("name")')).toBeDefined();
+    expect(() => compile('g.withStrategies(IdentityRemovalStrategy).V().identity().out()', {})).not.toThrow();
   });
 
   test('deferred long-tail forms error clearly (never silently mis-execute)', () => {
