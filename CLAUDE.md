@@ -5,6 +5,10 @@ Context file for Claude (Code or otherwise) working on this repo. Read
 and test strategy. This file is the things that took a whole investigation to
 learn — do not re-derive them.
 
+**For "is step X supported, and where's the edge?" → `docs/feature-support-matrix.md`**
+— a living, code-grounded capability map (✅/🟡/❌/🚫 per step, with the deferral
+reason). Keep it in sync when a step's support changes.
+
 **SQL generation (current):** the compiler builds SQL with a template-first `q`
 kernel + typed `Relation` handles — `src/q.ts` (kernel: `q`/`Relation`/`Query`/
 `list`/`empty`) + `src/schema.ts` (nodes/edges/labels relation constants). Design
