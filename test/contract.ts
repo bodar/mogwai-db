@@ -138,6 +138,27 @@ function gremlinContract(getOrigin: () => string) {
       expect((await g.V().limit(2).count().next()).value).toBe(2n);
     });
 
+    test('chunked streaming round-trips: raw JSON-in, batchSize-paced GraphBinary out', async () => {
+      // Exercise the streaming path over real HTTP on this runtime: a raw POST (JSON
+      // request body, GraphBinary response) with a tiny batchSize so the response is
+      // emitted as a multi-chunk ReadableStream, then reassembled and decoded. Proves
+      // the streamed frame stays byte-correct across the wire and that batchSize is
+      // accepted end-to-end. (Whether the HTTP layer advertises Content-Length vs
+      // chunked transfer is runtime-dependent — Bun buffers small stream bodies — so
+      // the deterministic chunk-pacing proof lives in test/streaming.test.ts instead.)
+      const { ioc } = await import('../src/io.ts');
+      const res = await fetch(`${getOrigin()}/g/stream-${Date.now()}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gremlin: 'g.inject(1,2,3,4,5)', batchSize: 2 }),
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toBe('application/vnd.graphbinary-v4.0');
+      const parsed = ioc.graphBinaryReader.readResponse(Buffer.from(await res.arrayBuffer()));
+      expect(parsed.status.code).toBe(200);
+      expect(parsed.result.data.map((x: any) => Number(x))).toEqual([1, 2, 3, 4, 5]);
+    });
+
     test('vertex round-trips id, label, and materialized properties', async () => {
       const v = (await g.V().has('name', 'ada').next()).value;
       expect(v.id).toBe(ada.id);

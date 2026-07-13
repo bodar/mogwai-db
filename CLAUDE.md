@@ -144,6 +144,27 @@ already works; only a parallel `executeJson` response encoder is missing).
   status int (bare), nullable message (0x00+string bare | 0x01),
   nullable exception (same)`. Always HTTP 200; errors ride the status
   trailer and the client raises ResponseError with the message.
+- **Chunked streaming (DONE, `handler.ts`).** The response body is a
+  `ReadableStream` — v4 chunking splits the SAME single logical frame above across
+  HTTP chunks (HEADER once, then values `resultIterationBatchSize` at a time, then
+  the trailer), NOT N independent frames. `execute()` is a `Generator<Buffer>`;
+  `streamResponse()` drives it (batch per `pull()`). `batchSize`/
+  `resultIterationBatchSize` request field (default 64) paces chunk size only — it's
+  NOT a protocol boundary. Errors: a pre-stream throw (compile/SQL, surfaced by
+  priming the generator with one `gen.next()`) → buffered 500 frame; a mid-stream
+  throw → flush + 500 trailer + `close()`, **never `controller.error()`** (that
+  truncates the frame). The beta.2/master JS client buffers the whole body
+  (`arrayBuffer()`) then reads it once — its `stream()` throws "not yet implemented",
+  and its `submit()` builds ONE request body — so the client streams NEITHER download
+  NOR upload; only gremlin-python has chunked-transfer. **Memory:** on DO the SQLite
+  cursor can't be held open across `pull()` awaits for a stable snapshot (CF docs:
+  consume cursors synchronously before the next `await`), so `store.query()` still
+  drains the whole row array up front — streaming only avoids holding every framed
+  value buffer + the concat copy at once, NOT the row array. True row-level laziness
+  (freeing the row array too) would need keyset pagination per pull, infeasible for
+  arbitrary compiled traversal SQL. So the DO memory win is real but partial;
+  identical drain-then-stream on both runtimes (no per-runtime code, no `Sql` seam
+  change).
 - `iterate()` appends a `.discard()` step. Strip trailing discard/none,
   execute, return no values.
 - Grammar node classes encode step + overload: `TraversalMethod_limit_long`.
