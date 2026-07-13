@@ -1,16 +1,34 @@
-# Per-traverser branching — choose / coalesce / union / optional / map / flatMap
+# Per-traverser branching — choose / coalesce / union / optional / map / flatMap / where
 
 The engine for TinkerPop's *branch family* — steps that run a child sub-traversal
-per current traverser and fold the result back. This is "bet #2" from
-`2026-07-12-conformance-structural-bets.md` (the top-ranked next structural
-investment after the path family landed). It stays true to locked decision #3:
-**compile to one SQL statement, never interpret**.
+per current traverser and fold the result back — plus the "complex where" it shares a
+substrate with. This is "bet #2" from `2026-07-12-conformance-structural-bets.md` (the
+top-ranked structural investment after the path family). It stays true to locked
+decision #3: **compile to one SQL statement, never interpret**.
 
-Status: **Phases A–D landed (2026-07-13, live L3 455 → 463).** `choose` (predicate
-form + option-map scalar form), `coalesce`, multi-hop `union`/`optional`, `flatMap` —
-all in one SQL statement. Deferred with clear errors: scalar/projection branch bodies
-(predicate choose), mixed-shape branches, branch-inside-branch (nested origin), `map`
-(first-result), option-map choose without a scalar `Pick.none`.
+Status: **Phases A–E + multi-hop/alias where landed (2026-07-13, live L3 455 → 473).**
+`choose` (predicate form + option-map scalar CASE), `coalesce`, multi-hop `union`/
+`optional`, `flatMap`, scalar `map`, multi-hop `where` (`compileExistsChain`) +
+`where(__.label()/not())`, and the alias-threading foundation (`aliasCtx`/`resolveAlias`
+— alias-rooted where predicates). All one SQL statement. Deferred with clear errors:
+scalar/projection branch bodies (predicate choose), mixed-shape branches,
+branch-inside-branch (nested origin), element-body `map` (first-result), option-map
+choose without a scalar `Pick.none`, alias-in-predicate beyond re-root, and **`match`**
+(the next deliberate batch — its patterns are alias-rooted constraints built on
+`aliasCtx`/`resolveAlias`).
+
+## Two correlation regimes (the key architecture split — do not conflate)
+
+- **Inline correlated subquery** (`compileNestedScalar`/`compileExists`/`compileExistsChain`/
+  `aliasCtx` in `plan.ts`) — references the outer row (`n.id`, or an alias column
+  `p.a{k}`) directly. Per-row. This is where `where`/`by`/scalar-`map`/option-map-`choose`
+  live.
+- **Seeded shared-`WITH` relation** (`foldBody` — the branch seam) — CTEs computed
+  independently, correlated only via a threaded seed/ordinal column. This is where
+  element `choose`/`coalesce`/`union`/`optional`/`flatMap` arms live.
+
+A `WITH` CTE **cannot** reference the outer row, so `where` (which needs `EXISTS`
+correlated per-row) belongs to the *inline* regime, NOT `foldBody`. Keep them separate.
 
 ## The prior-art scan settled the approach (do not relitigate)
 
@@ -172,6 +190,36 @@ projector (`compileMapScalar`) reusing `compileNestedScalar` — `map(__.out().c
 `map(__.constant(x))`. Element-body map (first-result), alias/`select`/`fold` bodies,
 and any trailing step defer via `compileNestedScalar`'s throw. Same projector family as
 the option-map choose CASE, minus the CASE.
+
+## Phase F (landed) — multi-hop `where` + `label`/`not`
+
+`compileExistsChain` (`plan.ts`): a vertex-movement chain (`out()`/`in()`) → one
+**correlated EXISTS over the path** with an optional terminal filter (`has`/`hasLabel`/
+`values.is`) on the last node — `where(__.out().has('age',gt(30)))`,
+`where(__.out().out())`, `where(__.out('created').hasLabel('software'))`. A lone bare
+movement (incl. `outE`/`inE`/`bothE`) delegates to the leaner edge-only `compileExists`
+(index-only; `both()` ok) — **regression-guarded**: that delegation must stay ahead of
+the vertex-chain builder (an early version dropped the `E`-forms → `where(__.outE())`
+broke, L3 dipped, caught by the ratchet). Plus `where(__.label()[.is(P)])` and
+`where(__.not(t))`. Multi-hop `both()`, edge-typed hops defer.
+
+## Phase G (landed) — alias-threading foundation + alias-in-predicate `where`
+
+`aliasCtx(idExpr, elem)` (`plan.ts`): a `ScalarCtx` correlating on any rowid column
+(props/label/src/tgt as correlated subqueries) — generalizes the recursive walk's
+`walkNodeCtx`. `compileFilterPredicate`/`combineBranchPreds` take an optional
+`resolveAlias`; a `where`/`and`/`or`/`not` predicate that begins with `as('x')`/
+`select('x')` **re-roots** its correlation onto that alias's carried column `p.a{k}`
+(`filter.ts` builds the resolver from `st.aliases` + `prevRel`). Unlocks
+`where(__.as('b').out('created').has('name','ripple'))`,
+`where(__.as('a').values('name').is('josh'))`,
+`where(__.or(__.select('n').hasLabel('software'), __.select('n').hasLabel('person')))`.
+Unknown label fails closed.
+
+**This is the foundation `match()` builds on** — a match pattern (`as('a').out().as('b')`)
+is an alias-rooted constraint; `aliasCtx`/`resolveAlias` + the `as()`/`carryFrag` alias
+machinery are the reusable pieces. `match` itself (declarative pattern → shared-variable
+join, dependency-ordered) is the next deliberate batch, not yet built.
 
 ## Test discipline
 

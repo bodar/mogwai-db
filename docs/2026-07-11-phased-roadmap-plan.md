@@ -163,10 +163,12 @@ the "we execute it correctly" metric.
 
 ### Revised roadmap — writes-first (usable before feature-complete)
 
-The P2/P3 read compiler is largely done, W2 writes have landed, and the path
+The P2/P3 read compiler is largely done, W2 writes have landed, the path
 family (path/simplePath/cyclicPath, recursive repeat().path(), repeat().until())
-landed under W5 (**live L3 455** as of 2026-07-13; see CLAUDE.md + the
-conformance-grind memory for the running count). The path to *usable* is
+landed under W5, and the **per-traverser branching family + multi-hop/alias where**
+landed 2026-07-13 (choose/coalesce/union/optional/flatMap/map/where — see
+docs/2026-07-13-per-traverser-branching.md) (**live L3 473** as of 2026-07-13; see
+CLAUDE.md + the conformance-grind memory for the running count). The path to *usable* is
 sequenced so the invasive schema rework lands behind a deployed, writable
 baseline:
 
