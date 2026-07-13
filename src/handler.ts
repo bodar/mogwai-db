@@ -78,10 +78,27 @@ function edgeBuffer(id: number, label: string, src: number, tgt: number, props: 
 }
 
 // properties(): a standalone VertexProperty element per (owner, key, value) row.
-// Synthetic id (owner:key) — we don't persist per-property ids; scenario
-// comparison keys on key+value+owning element, not on this id.
+// Synthetic id (owner:key) — used by the group/select element paths that don't carry
+// a real vpid or meta.
 function propertyBuffer(owner: number, key: string, value: any): Buffer {
   return ioc.anySerializer.serialize(new VertexProperty(`${owner}:${key}`, key, value, []));
+}
+
+// A VertexProperty WITH its meta-properties, hand-framed — the client's
+// VertexPropertySerializer.serialize() hardcodes an empty {properties} list (same bug
+// as Vertex/Edge), so routing through anySerializer would drop the meta. Layout mirrors
+// VertexPropertySerializer: id, {label}=[key] bare, value, null parent, qualified meta
+// list. `Property`'s own serializer is not buggy, so meta items frame via listSerializer.
+function vertexPropertyBuffer(id: any, key: string, value: any, meta: Record<string, any> | null): Buffer {
+  const metaProps = meta ? Object.entries(meta).map(([k, v]) => new Property(k, v)) : [];
+  return Buffer.concat([
+    Buffer.from([ioc.DataType.VERTEXPROPERTY, 0x00]),
+    ioc.anySerializer.serialize(id),
+    ioc.listSerializer.serialize([key], false),
+    ioc.anySerializer.serialize(value),
+    ioc.unspecifiedNullSerializer.serialize(null), // parent
+    ioc.listSerializer.serialize(metaProps, true), // {properties} = meta, qualified
+  ]);
 }
 
 // valueMap()/valueMap(true)/valueMap(keys...): Map<key, [values]>; with tokens,
@@ -306,7 +323,12 @@ function* execute(store: GraphStore, gremlin: string, params: Record<string, any
     case 'path': for (const r of rows) yield pathBuffer(r, shape.positions); return;
     // pathGrouped folds pk-runs into Paths — a bounded fold, so yield each completed Path.
     case 'pathGrouped': yield* pathGroupedBuffers(rows, shape.elem); return;
-    case 'property': for (const r of rows) yield propertyBuffer(r.owner, r.pk, r.pv); return;
+    // A VertexProperty with its real id + meta-properties framed (vpid null on edges → synthetic).
+    case 'property': for (const r of rows) yield vertexPropertyBuffer(r.vpid ?? `${r.owner}:${r.pk}`, r.pk, r.pv, r.pmeta ? JSON.parse(r.pmeta) : null); return;
+    // properties().properties(): meta-properties as Property elements.
+    case 'metaProperty': for (const r of rows) yield ioc.anySerializer.serialize(new Property(r.mk, r.mv)); return;
+    // properties(k).valueMap(): a VertexProperty's meta as a flat Map.
+    case 'metaMap': for (const r of rows) yield ioc.anySerializer.serialize(new Map(Object.entries(r.meta ? JSON.parse(r.meta) : {}))); return;
     // Barriers: the whole stream collapses to ONE value (Map / List).
     case 'group': yield groupBuffer(rows, shape.key, shape.val); return;
     case 'list': {

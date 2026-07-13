@@ -1781,6 +1781,20 @@ describe('compiler execution semantics', () => {
     expect(metas).toEqual([{ startTime: 1997 }, { startTime: 2005 }]);
   });
 
+  test('meta-property read chains: has(metaKey) filter, properties().properties(), valueMap (W4)', () => {
+    const store = seededStore();
+    run(store, 'g.V(1).property(Cardinality.single, "name", "stephenm", "since", 2010)');
+    // properties(k).has(metaKey, v) filters the VertexProperty stream by its meta
+    expect(run(store, 'g.V(1).properties("name").has("since",2010).count()').map((r) => r.v)).toEqual([1]);
+    expect(run(store, 'g.V(1).properties("name").has("since",2011).count()').map((r) => r.v)).toEqual([0]);
+    // properties().properties() explodes a VertexProperty's meta into Property elements
+    expect(run(store, 'g.V(1).properties("name").properties()').length).toBe(1); // one meta-prop: since
+    // properties(k).valueMap() shape is a flat meta map
+    expect(read('g.V(1).properties("name").valueMap()').shape).toEqual({ kind: 'metaMap' });
+    // properties().id() surfaces the real VertexProperty rowid
+    expect(read('g.V(1).properties("name").id()').shape).toEqual({ kind: 'value' });
+  });
+
   test('property() updates edges too (materialized on the wire via edgeBuffer)', () => {
     const store = seededStore();
     const res = run(store, 'g.V(1).outE("created").property("weight2", 0.9)');

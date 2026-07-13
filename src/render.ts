@@ -56,7 +56,9 @@ export type ValueType = 'bool' | 'byte' | 'short' | 'int' | 'long' | 'bigint' | 
 export type Shape =
   | { kind: 'vertex' }
   | { kind: 'edge' }
-  | { kind: 'property' } // properties(): VertexProperty elements (owner/key/value cols)
+  | { kind: 'property' } // properties(): VertexProperty elements (vpid/owner/pk/pv/pmeta cols)
+  | { kind: 'metaProperty' } // properties().properties(): meta-properties as Property elements (mk/mv cols)
+  | { kind: 'metaMap' } // properties(k).valueMap(): a VertexProperty's meta as a flat Map (meta col, JSON text)
   | { kind: 'value'; as?: ValueType }
   | { kind: 'count' }
   | { kind: 'scalar' } // sum(): one numeric; handler picks Long/Double per value (numberBuffer)
