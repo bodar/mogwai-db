@@ -44,7 +44,7 @@ const PROJECTION_NAMES = new Set(['values', 'id', 'label', 'count', 'valueMap', 
 // expressions (scalarTx). `asBool` is a typed cast: compileInject resolves it over
 // inject constants (see asBoolConst); on a V/E-rooted stream it falls through to
 // scalarTx → undefined → a clean "not supported" defer (needs local()/sack()).
-const SCALAR_TX_NAMES = new Set(['concat', 'length', 'toUpper', 'toLower', 'asString', 'substring', 'replace', 'asBool']);
+const SCALAR_TX_NAMES = new Set(['concat', 'length', 'toUpper', 'toLower', 'asString', 'substring', 'replace', 'asBool', 'asNumber']);
 const isMapProj = (p: PStep | null) => p?.name === 'select' || p?.name === 'project';
 
 /** A tail modifier: fold the step into the accumulator. `at` gives position so a
@@ -263,13 +263,28 @@ function renderProjection(
 
   // Scalar string/cast transforms (values('name').concat('X').toUpper()) wrap the
   // projected scalar; is()/order() then see the transformed value. Only a scalar
-  // stream (values/id/label/inject) has a scalarExpr to transform.
+  // stream (values/id/label/inject) has a scalarExpr to transform. asNumber(GType.X)
+  // is a typed cast: it wraps the scalar in a SQL CAST and tags the value shape so the
+  // handler frames the right numeric subtype (a runtime value, e.g. values('float');
+  // inject constants resolve in compileInject with overflow checks instead).
   if (acc.transforms.length) {
     if (!scalarExpr) throw new Error(`${acc.transforms[0].name}() requires a scalar stream (values/id/label)`);
-    scalarExpr = acc.transforms.reduce<Expression>(
-      (e, s) => scalarTx(s.name, s.args, e) ?? (() => { throw new Error(`scalar transform ${s.name}() not supported`); })(), scalarExpr);
+    for (const s of acc.transforms) {
+      if (s.name === 'asNumber') {
+        const spec = numericSpec(s.args[0]); // throws on a non-numeric GType; null = bare
+        if (!spec) throw new Error('scalar transform asNumber() not supported'); // bare — needs the input subtype (frontend flattens it)
+        scalarExpr = asNumberSql(spec, scalarExpr);
+        shape = { kind: 'value', as: spec.as };
+        continue;
+      }
+      scalarExpr = scalarTx(s.name, s.args, scalarExpr) ?? (() => { throw new Error(`scalar transform ${s.name}() not supported`); })();
+    }
     colsNode = q`${scalarExpr} AS v`;
   }
+  // A typed-cast tag can't survive a terminal reducer (wrapReducer only sees
+  // shape.kind) — sum()/fold() after asNumber() would wire the wrong subtype, so defer.
+  if (shape.kind === 'value' && shape.as && reducer)
+    throw new Error(`${reducer}() after asNumber() not yet supported`);
 
   // WHERE: the values() existence check + any is(P) on the projected scalar, AND'd.
   const whereParts: Expression[] = [];
@@ -330,33 +345,99 @@ function asBoolConst(v: any): boolean {
   throw new Error(`Can't parse ${v === null || v === undefined ? 'null' : v} as Boolean.`);
 }
 
+// asNumber(GType.X): GType token → framing tag + integer range (for overflow) / real
+// flag. The subtype is a COMPILE-TIME property (the explicit arg) — SQLite carries the
+// numeric value, frameValue picks the serializer from the tag. (bigdecimal has no
+// GraphBinary serializer in the client → intentionally absent, defers.)
+// `disp` is the boxed Java type name TinkerPop uses in its overflow message (e.g.
+// GType.INT → "Integer", GType.BIGINT → "BigInteger") — NOT derivable from `as`.
+const NUMERIC_GTYPES: Record<string, { as: ValueType; disp: string; int: boolean; min?: number; max?: number }> = {
+  byte: { as: 'byte', disp: 'Byte', int: true, min: -128, max: 127 },
+  short: { as: 'short', disp: 'Short', int: true, min: -32768, max: 32767 },
+  int: { as: 'int', disp: 'Integer', int: true, min: -2147483648, max: 2147483647 },
+  integer: { as: 'int', disp: 'Integer', int: true, min: -2147483648, max: 2147483647 },
+  long: { as: 'long', disp: 'Long', int: true },
+  bigint: { as: 'bigint', disp: 'BigInteger', int: true },
+  biginteger: { as: 'bigint', disp: 'BigInteger', int: true },
+  float: { as: 'float', disp: 'Float', int: false },
+  double: { as: 'double', disp: 'Double', int: false },
+};
+const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
+
+/** asNumber's GType arg → its numeric spec. `null` = bare asNumber() (no arg — needs
+ *  the input subtype, which the frontend flattens away, so it defers). A non-numeric
+ *  token (e.g. GType.VERTEX) raises TinkerPop's error. */
+function numericSpec(arg: any): (typeof NUMERIC_GTYPES[string] & { name: string }) | null {
+  const name = arg && typeof arg === 'object' && 'gtype' in arg ? String(arg.gtype) : null;
+  if (name === null) return null;
+  const spec = NUMERIC_GTYPES[name];
+  if (!spec) throw new Error(`asNumber() requires a numeric type token, got ${name.toUpperCase()}`);
+  return { ...spec, name };
+}
+
+/** asNumber(GType.X) over a compile-time constant: parse/convert + overflow-check,
+ *  raising TinkerPop's exact messages (SQL can't raise these; inject inputs are
+ *  literals). Integer targets truncate toward zero. */
+function asNumberConst(v: any, spec: NonNullable<ReturnType<typeof numericSpec>>): number {
+  let n: number;
+  if (typeof v === 'number') n = v;
+  else if (typeof v === 'bigint') n = Number(v);
+  // Number('') / Number('  ') are 0, not NaN — reject blank strings explicitly so they
+  // raise the parse error like any other non-numeric string rather than becoming 0.
+  else if (typeof v === 'string') { n = v.trim() === '' ? NaN : Number(v); if (Number.isNaN(n)) throw new Error(`Can't parse string '${v}' as number.`); }
+  else throw new Error(`Can't parse type ${v === null || v === undefined ? 'null' : cap(typeof v)} as number.`);
+  if (spec.int) {
+    n = Math.trunc(n);
+    if (spec.min !== undefined && (n < spec.min || n > spec.max!))
+      throw new Error(`Can't convert number of type ${Number.isInteger(v) ? 'Integer' : 'Double'} to ${spec.disp} due to overflow.`);
+  }
+  return n;
+}
+
+/** asNumber(GType.X) over a runtime scalar: a SQL CAST to the target's storage class
+ *  (integer targets truncate; float/double stay real). Overflow isn't range-checked
+ *  (unreachable for the runtime inputs the suite exercises). */
+const asNumberSql = (spec: { int: boolean }, e: Expression): Expression =>
+  spec.int ? q`CAST(${e} AS INTEGER)` : q`CAST(${e} AS REAL)`;
+
 export function compileInject(steps: PStep[]): Compiled {
   const Q = new Query();
   const acc = foldTailAcc(steps, 1);
   // Fold every inject() value (the source args + any later inject appends) into one
   // VALUES-backed `v` seed, so the tail's dedup/order/limit/reducer act on the full
   // stream — matching the pre-unification inline-UNION semantics.
-  // asBool(): resolve each constant to a bool now (see asBoolConst). The value shape
-  // then carries `as:'bool'` so the 0/1 SQLite carries frames as GraphBinary Boolean.
-  // Only the bare form (inject(consts).asBool() [+ value-preserving dedup/order/range])
-  // is supported: a reducer, count(), or a trailing inject() would each need the tag
-  // threaded per-position (fold→List<Boolean>) or mix types into the bool stream — a
-  // uniform compile-time `as:'bool'` can't express that, so defer rather than
-  // miscompute. (Every reachable asBool input is a bare inject literal — V-rooted
-  // asBool needs local()/sack(), deferred.)
+  // Typed casts over the inject constants — asBool() and asNumber(GType.X). Their
+  // per-value errors (parse/overflow) can't be raised from SQL, and every reachable
+  // input is a literal, so resolve each constant now; the value shape then carries the
+  // `as` tag so SQLite's plain numeric/0-1 value frames as the right GraphBinary type.
+  // Only the bare form (cast [+ value-preserving dedup/order/range]) is supported: a
+  // reducer, count(), or trailing inject() would need the tag threaded per-position
+  // (fold→List<T>) or mix types into the stream — defer rather than miscompute. (Bare
+  // asNumber() — no GType — needs the input subtype the frontend flattens away, so it
+  // falls through to the runtime path and defers there; V-rooted casts need
+  // local()/sack().)
   let valueAs: ValueType | undefined;
-  const isAsBool = acc.transforms[0]?.name === 'asBool';
-  if (isAsBool && (acc.transforms.length !== 1 || acc.reducer || acc.projStep || acc.injects.length))
-    throw new Error('asBool() composed with a reducer/count()/trailing inject() not yet supported');
+  const cast = acc.transforms.length === 1 ? acc.transforms[0] : undefined;
+  const spec = cast?.name === 'asNumber' ? numericSpec(cast.args[0]) : null;
+  const constCast = cast?.name === 'asBool' || (cast?.name === 'asNumber' && spec);
+  if (constCast && (acc.reducer || acc.projStep || acc.injects.length))
+    throw new Error(`${cast!.name}() composed with a reducer/count()/trailing inject() not yet supported`);
 
   const vals = [...steps[0].args, ...acc.injects];
   acc.injects.length = 0; // consumed into the seed, not appended after the tail
 
-  if (isAsBool) {
-    for (let i = 0; i < vals.length; i++) vals[i] = asBoolConst(vals[i]);
+  if (constCast) {
+    const conv = cast!.name === 'asBool' ? asBoolConst : (v: any) => asNumberConst(v, spec!);
+    for (let i = 0; i < vals.length; i++) vals[i] = conv(vals[i]);
     acc.transforms.length = 0; // consumed — do not also run it through scalarTx
-    valueAs = 'bool';
+    valueAs = cast!.name === 'asBool' ? 'bool' : spec!.as;
   }
+  // A numeric asNumber(GType) NOT const-folded above (composed with another transform)
+  // would flow into renderProjection's runtime CAST, which skips the overflow check —
+  // over an inject constant that may be out of range, framing then throws a raw
+  // serializer RangeError instead of TinkerPop's clean message. Defer that here.
+  else if (acc.transforms.some((t) => t.name === 'asNumber' && numericSpec(t.args[0])))
+    throw new Error('asNumber(GType) composed with other transforms over inject() not yet supported');
   // The seed is a FROM source directly (the VALUES CTE relation, or an empty select)
   // — renderProjection wraps it, so no extra subquery here.
   const from: Expression = vals.length

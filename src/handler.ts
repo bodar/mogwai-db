@@ -172,8 +172,19 @@ function sumBuffer(v: number, storageClass: string): Buffer {
 // tag → infer from the JS value (anySerializer). 'bool': SQLite carries the boolean
 // as 0/1, so frame Boolean(v) explicitly (anySerializer would otherwise emit Int).
 function frameValue(v: any, as: ValueType | undefined): Buffer {
-  if (as === 'bool') return ioc.booleanSerializer.serialize(Boolean(v), true);
-  return ioc.anySerializer.serialize(v);
+  switch (as) {
+    case undefined: return ioc.anySerializer.serialize(v);
+    case 'bool': return ioc.booleanSerializer.serialize(Boolean(v), true);
+    case 'byte': return ioc.byteSerializer.serialize(Number(v), true);
+    case 'short': return ioc.shortSerializer.serialize(Number(v), true);
+    case 'int': return ioc.intSerializer.serialize(Number(v), true);
+    // Long/BigInteger take a BigInt; SQLite hands back a JS number (or bigint) for
+    // the reachable magnitudes — coerce through BigInt either way.
+    case 'long': return ioc.longSerializer.serialize(BigInt(v), true);
+    case 'bigint': return ioc.bigIntegerSerializer.serialize(BigInt(v), true);
+    case 'float': return ioc.floatSerializer.serialize(Number(v), true);
+    case 'double': return ioc.doubleSerializer.serialize(Number(v), true);
+  }
 }
 
 // The GraphBinary key + a canonical string (JS Map dedup key) for one group row.
