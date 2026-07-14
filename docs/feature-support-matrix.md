@@ -90,12 +90,12 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 
 | Step | Status | Notes |
 |---|:--:|---|
-| `choose(pred, then[, else])` | 🟡 | ✅ gated-seed dispatch<br>✅ **incoming `as()` threads through** the gated arms + merge (carried-schema)<br>❌ scalar/projection arm bodies<br>❌ mixed-shape arms<br>❌ a NEW `as()` bound *inside* an arm (arms diverge — fails closed)<br>❌ path tracking through (1b) |
+| `choose(pred, then[, else])` | 🟡 | ✅ gated-seed dispatch<br>✅ **incoming `as()` threads through** the gated arms + merge (carried-schema)<br>❌ scalar/projection arm bodies<br>❌ mixed-shape arms<br>❌ a NEW `as()` bound *inside* an arm (arms diverge — fails closed)<br>✅ **path threads through** (pad-to-max cols) |
 | `choose(fn).option(k, body)…` | 🟡 | ✅ scalar-CASE option-map<br>❌ without a `Pick.none` default<br>❌ element/discard/identity/fail bodies<br>❌ `Pick.unproductive`/`any`<br>❌ any trailing step |
-| `coalesce(…)` | 🟡 | ✅ first-non-empty via the `St.origin` ordinal<br>✅ **incoming `as()` threads through** (originSeed projects it alongside the ordinal, merge preserves it)<br>❌ scalar branches<br>❌ mixed-shape<br>❌ a NEW `as()` inside an arm<br>❌ nested in coalesce/optional<br>❌ path tracking (1b) |
-| `union(…)` | 🟡 | ✅ multi-hop arms via `foldBody`<br>✅ **incoming `as()` threads through** the merge (`mergeCarried`), so `union(…).select('a')` resolves<br>❌ mixed-shape<br>❌ source-branch tails<br>❌ a NEW `as()` inside an arm<br>❌ path tracking (1b) |
-| `optional(…)` | 🟡 | ✅ single-hop LEFT JOIN fast path + multi-hop<br>✅ **incoming `as()` threads through** (fast path carries it from the input; general path via originSeed)<br>❌ element-kind change on miss<br>❌ a NEW `as()` inside an arm<br>❌ path tracking (1b) |
-| `flatMap(__.…)` | 🟡 | ✅ element body fan-out<br>✅ **incoming `as()` threads through** (single body, no merge)<br>❌ path tracking (1b) |
+| `coalesce(…)` | 🟡 | ✅ first-non-empty via the `St.origin` ordinal<br>✅ **incoming `as()` threads through** (originSeed projects it alongside the ordinal, merge preserves it)<br>❌ scalar branches<br>❌ mixed-shape<br>❌ a NEW `as()` inside an arm<br>❌ nested in coalesce/optional<br>✅ **path threads through** (pad-to-max cols) |
+| `union(…)` | 🟡 | ✅ multi-hop arms via `foldBody`<br>✅ **incoming `as()` threads through** the merge (`mergeBranchCarried`), so `union(…).select('a')`/`.path()` resolve<br>❌ mixed-shape<br>❌ source-branch tails<br>❌ a NEW `as()` inside an arm<br>✅ **path threads through** (pad-to-max cols) |
+| `optional(…)` | 🟡 | ✅ single-hop LEFT JOIN fast path + multi-hop<br>✅ **incoming `as()` threads through** (fast path carries it from the input; general path via originSeed)<br>❌ element-kind change on miss<br>❌ a NEW `as()` inside an arm<br>✅ **path threads through** (pad-to-max cols) |
+| `flatMap(__.…)` | 🟡 | ✅ element body fan-out<br>✅ **incoming `as()` threads through** (single body, no merge)<br>✅ **path threads through** (pad-to-max cols) |
 | `map(__.<scalar>)` | 🟡 | ✅ correlated scalar (`map(__.out().count())` etc)<br>❌ **element**-body `map` (first-result — needs `ROW_NUMBER` over `St.origin`)<br>❌ alias/select/fold bodies<br>❌ trailing steps |
 | `local(…)` | 🟡 | ✅ per-element scalar reduction (`local(outE().count())` → tail projector)<br>✅ movement + a per-element `limit()`/`range()` via `ROW_NUMBER() OVER (PARTITION BY` input ordinal`)` (`local(bothE().limit(1))`)<br>❌ non-movement bodies (match/simplePath/union/nested local), no-barrier bodies, `order()`/`dedup()` inside, after `as()`/`path()`, `local(aggregate(...))` |
 
@@ -118,7 +118,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 
 | Step | Status | Notes |
 |---|:--:|---|
-| `path()`, `path().by(key)` | 🟡 | ✅ linear label-carry + handler assembly<br>❌ `path().by(traversal)`/`by(T.x)`<br>❌ spanning >1 movement/repeat<br>❌ over a `union()` source |
+| `path()`, `path().by(key)` | 🟡 | ✅ linear label-carry + handler assembly<br>✅ **through a branch** (union/coalesce/optional/choose/flatMap — pad-to-max `cols`, ragged arms NULL-padded + LEFT JOIN)<br>❌ `path().by(traversal)`/`by(T.x)`; `path().by()` **through a branch** (padded null vs missing-prop ambiguous)<br>❌ mixed element-kind at one branch position; a dynamic-length (`repeat`) arm (needs tagged-array)<br>❌ spanning >1 linear movement/repeat<br>❌ over a `union()` **source** step |
 | `simplePath()`, `cyclicPath()` | ✅ | ✅ all-pairs identity (linear) / `json_each` guard (in repeat body) |
 | steps after `path()` | ❌ | `order`/reducer/`is`/transform/`inject` after `path()` |
 | `tree()` | 🚫 | JS GLV cucumber ignores all 13 tree scenarios + stubs `DataType.TREE` → 0 conformance. Build only if a non-JS consumer appears |

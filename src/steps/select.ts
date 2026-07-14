@@ -128,6 +128,12 @@ export function compilePath(st: St, proj: PStep, acc: TailAcc): Compiled {
   if (acc.injects.length) throw new Error('inject() after path() not yet supported');
 
   const bys = proj.bys ?? [];
+  // A branched path (pad-to-max cols) has nullable positions: a shorter arm left them
+  // NULL. LEFT JOIN those (an INNER JOIN would drop the whole short-arm path), and the
+  // handler (pathBuffer) omits a null-id position. by() can't ride a branched path —
+  // a padded NULL is indistinguishable from a missing property, so defer.
+  const branched = pathState.cols.some((c) => c.nullable);
+  if (branched && bys.length) throw new Error('path().by() through a branch not yet supported (a padded position is indistinguishable from a missing property)');
   const p = st.last.as('p');
   const joins: Expression[] = [];
   const cols: Expression[] = [];
@@ -135,11 +141,12 @@ export function compilePath(st: St, proj: PStep, acc: TailAcc): Compiled {
   const positions: PathPos[] = pathState.cols.map((pos, i) => {
     const prefix = `x${i}`;
     const tbl = (pos.elem === 'edge' ? edges : nodes).as(`${prefix}n`);
-    joins.push(q` JOIN ${tbl} ON ${tbl.c.id}=${p.c[pos.col]}`);
+    const jn = pos.nullable ? 'LEFT JOIN' : 'JOIN';
+    joins.push(q` ${jn} ${tbl} ON ${tbl.c.id}=${p.c[pos.col]}`);
     const key = pathBy(bys.length ? bys[i % bys.length] : undefined);
     if (key === undefined) {
       const l = labels.as(`${prefix}l`);
-      joins.push(q` JOIN ${l} ON ${l.c.id}=${tbl.c.label}`);
+      joins.push(q` ${jn} ${l} ON ${l.c.id}=${tbl.c.label}`);
       const extId = q`COALESCE(${tbl.c.uid}, ${tbl.c.id})`;
       if (pos.elem === 'edge') {
         // Endpoints as external ids (see the __element edge projector).
