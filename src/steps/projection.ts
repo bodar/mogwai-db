@@ -14,7 +14,7 @@ import {
 } from '../render.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
 import { compileSelectProject, compilePath } from './select.ts';
-import { compileMapScalar, compileMath, compileChooseOptions } from './mapscalar.ts';
+import { compileMapScalar, compileMath, compileFormat, compileChooseOptions } from './mapscalar.ts';
 import { compileGroup, groupToMapStream, compileProperties, type GroupSource } from './group.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
@@ -170,6 +170,10 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
   // (`_` / as()-bound names) resolve through the by() modulators folded onto it.
   if (steps[stop]?.name === 'math')
     return compileMath(st, steps, stop);
+
+  // format("…%{token}…") → one `||`-concatenated SQL string (properties + by()s).
+  if (steps[stop]?.name === 'format')
+    return compileFormat(st, steps, stop);
 
   // bare sack() reads the carried per-traverser sack column as a scalar value; a
   // trailing reducer (sum/…)/is/order composes via the shared value tail.

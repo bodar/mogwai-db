@@ -377,6 +377,19 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().math("cbrt(_)").by("age")').sql).toContain('CASE WHEN');
   });
 
+  test('format("…%{token}…") templates a string from properties + by() modulators', () => {
+    // a constant template → one string literal, no filter.
+    expect(read('g.V().format("Hello world")').shape).toEqual({ kind: 'value' });
+    // named tokens read the element's property; the `||` chain NULLs (drops) on a miss.
+    const f = read('g.V().format("%{name} is %{age}")');
+    expect(f.sql).toContain(' || ');
+    expect(f.sql).toContain('is not null'); // missing-property filter
+    // %{_} placeholders pull by() modulators positionally (round-robin), like math().
+    expect(read('g.V().format("%{_} is %{_}").by(values("name")).by(values("age"))').sql).toContain(' || ');
+    // a by()-traversal placeholder (bothE().count()) resolves as a correlated scalar.
+    expect(read('g.V().format("%{name} has %{_}").by(__.bothE().count())').sql).toContain('COUNT');
+  });
+
   test('math() variables: `_` = current, an identifier = an as()-bound alias', () => {
     // named aliases resolve via the carried rowid column (correlated subquery); one
     // by() feeds every variable (round-robin), N by()s feed N variables positionally.
