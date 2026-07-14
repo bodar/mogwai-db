@@ -46,7 +46,7 @@ const PROJECTION_NAMES = new Set(['values', 'id', 'label', 'count', 'valueMap', 
 // expressions (scalarTx). `asBool` is a typed cast: compileInject resolves it over
 // inject constants (see asBoolConst); on a V/E-rooted stream it falls through to
 // scalarTx → undefined → a clean "not supported" defer (needs local()/sack()).
-const SCALAR_TX_NAMES = new Set(['concat', 'length', 'toUpper', 'toLower', 'asString', 'substring', 'replace', 'asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff']);
+const SCALAR_TX_NAMES = new Set(['concat', 'length', 'toUpper', 'toLower', 'asString', 'substring', 'replace', 'trim', 'lTrim', 'rTrim', 'reverse', 'asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff']);
 const isMapProj = (p: PStep | null) => p?.name === 'select' || p?.name === 'project';
 
 /** A tail modifier: fold the step into the accumulator. `at` gives position so a
@@ -232,12 +232,23 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
  * beats a peephole nobody's query needs (see the plan's decision log).
  */
 function compileFold(st: St, acc: TailAcc): ListStream {
-  if (acc.orders.length || acc.reducer || acc.isPreds.length || acc.transforms.length || acc.injects.length || acc.distinct || acc.offset || acc.limit !== null)
-    throw new Error('order()/dedup()/limit()/range()/is()/transform before a non-terminal fold() not yet supported');
+  if (acc.reducer || acc.isPreds.length || acc.transforms.length || acc.injects.length || acc.distinct || acc.offset || acc.limit !== null)
+    throw new Error('dedup()/limit()/range()/is()/transform before a non-terminal fold() not yet supported');
   if (st.aliases.size || st.path || st.origin)
     throw new Error('fold() carrying as()/path()/branch state into a list value not yet supported');
   const carry = carryOf(st);
   const projName = acc.projStep?.name;
+  // A single bare order() before the fold sorts the folded elements by their projected
+  // scalar value (values('x').order().fold() → a sorted list). Only the by-nothing /
+  // direction-only form on a scalar projection is supported; order().by(key/traversal)
+  // and element-stream order-before-fold defer.
+  let orderDir: 'asc' | 'desc' | null = null;
+  if (acc.orders.length) {
+    if (acc.orders.length > 1 || acc.orders[0].key !== null || acc.orders[0].dir === 'shuffle')
+      throw new Error('order().by(key/traversal) before a non-terminal fold() not yet supported');
+    if (!projName) throw new Error('order() before a non-terminal fold() of an element stream not yet supported');
+    orderDir = acc.orders[0].dir === 'desc' ? 'desc' : 'asc';
+  }
   if (!projName) {
     // Element list: fold the bare rowids; unfold/framing rejoins nodes/edges.
     const rel = st.q.cte(q`SELECT ${jsonbGroupArray(q`p.id`)} AS list FROM ${st.last.as('p')}`, ['list']);
@@ -254,7 +265,10 @@ function compileFold(st: St, acc: TailAcc): ListStream {
     // values() drops missing-property elements (baseWhere = IS NOT NULL), matching
     // TinkerPop's fold-of-values. id/label have no baseWhere.
     const where = proj.baseWhere ? q` WHERE ${proj.baseWhere}` : empty;
-    const rel = st.q.cte(q`SELECT ${jsonbGroupArray(proj.scalarExpr!)} AS list FROM ${proj.fromNode}${where}`, ['list']);
+    const arr = orderDir
+      ? q`jsonb(json_group_array(${proj.scalarExpr!} ORDER BY ${proj.scalarExpr!} ${orderDir === 'desc' ? 'DESC' : 'ASC'}))`
+      : jsonbGroupArray(proj.scalarExpr!);
+    const rel = st.q.cte(q`SELECT ${arr} AS list FROM ${proj.fromNode}${where}`, ['list']);
     return toListStream(carry, rel, { kind: 'scalar' });
   }
   throw new Error(`fold() of a ${projName}() projection not yet supported`);

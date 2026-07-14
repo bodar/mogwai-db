@@ -423,7 +423,8 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('inject().<scalar transform>() maps to SQLite scalar functions', () => {
-    expect(read('g.inject("a","b").concat("c")').sql).toContain('v ||');
+    // concat skips nulls (concat_ws) so an all-null result is null, not '' (Gremlin semantics)
+    expect(read('g.inject("a","b").concat("c")').sql).toContain("concat_ws('', v, ?)");
     expect(read('g.inject("a").length()').sql).toContain('length(v)');
     expect(read('g.inject("A").toLower()').sql).toContain('lower(v)');
     expect(read('g.inject("a").toUpper()').sql).toContain('upper(v)');
@@ -433,13 +434,19 @@ describe('compiler SQL snapshots', () => {
     // Scope.local on a scalar stream is a no-op (per-element == per-list)
     expect(read('g.inject("a").length(Scope.local)').sql).toContain('length(v)');
     // transforms chain — composed inline (upper(v || ?)), one shared value tail
-    expect(read('g.inject("a").concat("b").toUpper()').sql).toContain('upper(v ||');
+    expect(read('g.inject("a").concat("b").toUpper()').sql).toContain('upper(concat_ws(');
+    // trim family → SQLite trim/ltrim/rtrim over the Java-whitespace char set
+    expect(read('g.inject(" a ").trim()').sql).toContain('trim(v, ?)');
+    expect(read('g.inject(" a ").lTrim()').sql).toContain('ltrim(v, ?)');
+    expect(read('g.inject(" a ").rTrim()').sql).toContain('rtrim(v, ?)');
+    // reverse: string reverses chars (recursive CTE), non-string is identity
+    expect(read('g.inject("ab").reverse()').sql).toContain('WITH RECURSIVE rev(');
   });
 
   test('scalar transforms also wrap an element value projection', () => {
     expect(read("g.V().values('name').substring(2)").sql).toContain("substr(vp.value");
     expect(read("g.V().values('name').toUpper()").sql).toContain("upper(vp.value)");
-    expect(read("g.V().values('name').concat('X')").sql).toContain("vp.value || ?");
+    expect(read("g.V().values('name').concat('X')").sql).toContain("concat_ws('', vp.value, ?)");
     // chained; is()/order() see the transformed value
     expect(read("g.V().values('name').toUpper().is('MARKO')").sql).toContain('upper(');
     // transform on a non-scalar projection is rejected

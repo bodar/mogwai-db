@@ -4,7 +4,7 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-13 · **live L3 conformance:** 685 · **corpus parse+chain:**
+**Last synced:** 2026-07-14 · **live L3 conformance:** 728 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
 
@@ -137,7 +137,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `inject([…])` as a list | ✅ | ✅ each bracket arg = one list value |
 | `Scope.local` reducers (count/sum/min/max/mean) | ✅ | ✅ per-list correlated aggregate<br>✅ also degenerate scalar-local |
 | `none(P)` collection filter | ✅ | ✅ keep lists where no element matches |
-| `Scope.local` order/limit/range/skip/tail/dedup on a list | 🟡 | ✅ per-list correlated `json_each` rebuild (order sorts by value / direction-only `by(Order.desc)`; dedup keeps first occurrence; tail avoids a count() subquery)<br>❌ `order(Scope.local).by(key/traversal)`, `reverse()` |
+| `Scope.local` order/limit/range/skip/tail/dedup on a list | 🟡 | ✅ per-list correlated `json_each` rebuild (order sorts by value / direction-only `by(Order.desc)`; dedup keeps first occurrence; tail avoids a count() subquery)<br>✅ `reverse()` reverses list order; per-element string transforms (toUpper/trim/length/…)<br>✅ a single bare `order().fold()` sorts the folded scalars<br>❌ `order(Scope.local).by(key/traversal)` |
 | **set-ops** (`combine`/`intersect`/`conjoin`/`disjunct`/`product`/`difference`) | ❌ | ~64 scenarios; small adds now that fold-as-value exists |
 | scalar-stream `none(P)` barrier | ❌ | whole-stream barrier (distinct from the per-list filter); fails closed |
 
@@ -146,7 +146,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | Step | Status | Notes |
 |---|:--:|---|
 | `asBool`, `asNumber(GType.X)`, bare `asNumber()` | ✅ | ✅ typed-value carrier (compile-time subtype tag → GraphBinary framing) |
-| string transforms (`concat`/`length`/`toUpper`/`toLower`/`asString`/`substring`/`replace`) | ✅ | ✅ SQL scalar, text-in text-out |
+| string transforms (`concat`/`length`/`toUpper`/`toLower`/`asString`/`substring`/`replace`/`trim`/`lTrim`/`rTrim`/`reverse`) | ✅ | ✅ SQL scalar, text-in text-out<br>✅ `concat` skips nulls (`concat_ws`), all-null→null<br>✅ trim family over Java's `isWhitespace` set (incl. U+3000)<br>✅ `reverse` string chars (recursive CTE) / number identity / list order (§9)<br>✅ all compose as `Scope.local` per-element list transforms after `fold()`<br>✅ a string op on a non-`local` list raises TinkerPop's "can only take string as argument"<br>❌ `split` (list-valued), `format` (templating), element/map `asString` |
 | `math("<formula>")` | 🟡 | ✅ full exp4j operator/function set → one SQL scalar, always Double<br>❌ a var with no `by()`<br>❌ `withSideEffect` vars<br>❌ reading `project()`/`select()` map columns |
 | `asDate`, `dateAdd`, `dateDiff`, `datetime()`/`DateTime()` literals | 🟡 | ✅ epoch-millis rep + `'date'` tag (UTC-only, ms precision — parity with the JS reference client)<br>❌ `typeOf(GType.DATETIME)` over stored props<br>❌ `inject([…]).asDate()` |
 | `asNumber` + reducer (`fold`/`sum`) | ❌ | subtype tag can't survive `wrapReducer` yet |

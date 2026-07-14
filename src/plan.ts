@@ -55,21 +55,51 @@ export function edgeLabelFilter(names: any[]): Expression {
  * between/inside `expr` is shared into both bounds so its binds fall out twice in
  * order — no manual double-splice. TextP → LIKE with a bound pattern; regex/typeOf throw.
  */
+// Java's Character.isWhitespace(int) set — the chars String.strip()/trim()/AsString's
+// trim family remove. Excludes the non-breaking spaces (U+00A0 NBSP, U+2007 figure,
+// U+202F narrow NBSP), which Java also excludes; includes U+3000 ideographic space
+// (the suite's fullwidth-space case). SQLite trim(x, set) removes any char in `set`.
+// Built from explicit code points so the source carries no literal control/space chars.
+export const JAVA_WHITESPACE = [
+  0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x1680,
+  0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2008, 0x2009, 0x200a,
+  0x2028, 0x2029, 0x205f, 0x3000,
+].map((c) => String.fromCharCode(c)).join("");
+
 /** Per-element scalar string/cast transforms (map to SQLite scalar functions).
  *  Returns a new value expression wrapping `v`, or null if `name` isn't a
  *  transform. NULL propagates through every function (SQLite semantics), matching
  *  Gremlin's null-in→null-out. A trailing Scope token is a no-op on a scalar
- *  stream (per-element == per-list), so it's simply ignored. Deferred: reverse
- *  (no SQLite builtin), split (list-valued), trim family (Unicode-whitespace). */
+ *  stream (per-element == per-list), so it's simply ignored. Shared by the scalar
+ *  tail (renderProjection) and the list-local phase (list.ts, one element at a
+ *  time). Deferred: split (list-valued), element/map asString(). */
 export function scalarTx(name: string, args: any[], v: Expression): Expression | null {
   const nums = args.filter((a) => typeof a === 'number');
   const strs = args.filter((a) => typeof a === 'string');
   switch (name) {
-    case 'concat': return strs.length ? q`${v}${list(strs.map((a) => q` || ${value(a)}`), '')}` : v;
+    // concat: Gremlin concatenates the incoming value with the string args, SKIPPING
+    // nulls (concat_ws('')); an all-null result is null, not '' (so bare concat() of a
+    // null passes null through). The all-null guard is only live when there is no
+    // non-null string arg (a literal arg makes the result non-null regardless of v).
+    case 'concat': {
+      if (!args.length) return v; // bare concat() = identity (v || nothing)
+      const parts = list([v, ...strs.map((a) => value(a))], ', ');
+      const body = q`concat_ws('', ${parts})`;
+      return strs.length ? body : q`CASE WHEN ${v} IS NULL THEN NULL ELSE ${body} END`;
+    }
     case 'length': return q`length(${v})`;
     case 'toUpper': return q`upper(${v})`;
     case 'toLower': return q`lower(${v})`;
     case 'asString': return q`CAST(${v} AS TEXT)`;
+    case 'trim': return q`trim(${v}, ${value(JAVA_WHITESPACE)})`;
+    case 'lTrim': return q`ltrim(${v}, ${value(JAVA_WHITESPACE)})`;
+    case 'rTrim': return q`rtrim(${v}, ${value(JAVA_WHITESPACE)})`;
+    // reverse: a string reverses its characters (a correlated recursive CTE — SQLite
+    // has no REVERSE builtin); a number/null is returned unchanged (reverse() of a
+    // scalar non-string is identity). A list reverses element order — handled in the
+    // list phase (list.ts), never here.
+    case 'reverse':
+      return q`CASE WHEN typeof(${v})='text' THEN (WITH RECURSIVE rev(s,r) AS (SELECT ${v}, '' UNION ALL SELECT substr(s,2), substr(s,1,1)||r FROM rev WHERE s<>'') SELECT r FROM rev WHERE s='') ELSE ${v} END`;
     case 'replace': return q`replace(${v}, ${value(strs[0])}, ${value(strs[1])})`;
     case 'substring': { // 0-based [start, end) → 1-based substr(v, start+1, end-start)
       const [s, e] = nums;

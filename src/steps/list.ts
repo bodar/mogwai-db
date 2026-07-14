@@ -6,7 +6,7 @@
 // and, later, inject-of-a-list / select(Column.values).
 
 import { q, type Expression } from '../q.ts';
-import { predicateSql } from '../plan.ts';
+import { predicateSql, scalarTx } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryOf, toListStream, mapOfToListOf, type ListStream, type ScalarStream, type MapStream } from './stream.ts';
 import { type St } from './context.ts';
@@ -73,6 +73,33 @@ function listNoneFilter(s: ListStream, pred: any): ListStream {
 /** The Scope.local collection transforms that keep a list a list (per-list, not a
  *  whole-stream reduction). Each rebuilds each row's list via a correlated json_each. */
 const LIST_LOCAL_TX = new Set(['order', 'dedup', 'limit', 'skip', 'range', 'tail']);
+
+/** Scalar string transforms that, on a list, apply to EACH element (Scope.local) —
+ *  toUpper(local)/trim(local)/length(local)/… over a folded list. Reuse scalarTx per
+ *  element (list.ts is the only per-element caller besides the scalar tail). reverse
+ *  is NOT here: on a list it reverses element ORDER (listReverse), not each string. */
+const STRING_LOCAL_TX = new Set(['toUpper', 'toLower', 'trim', 'lTrim', 'rTrim', 'asString', 'length', 'substring', 'replace', 'concat']);
+
+/** A per-element string transform over a list value (Scope.local): rebuild each row's
+ *  list applying scalarTx to every element, preserving position order. Null elements
+ *  pass through (SQLite null propagation → the transformed element stays null). */
+function listStringTransform(s: ListStream, step: PStep): ListStream {
+  const c = s.rel.as('c');
+  const elem = scalarTx(step.name, step.args ?? [], q`x.value`);
+  if (!elem) throw new Error(`scalar transform ${step.name}() not supported`);
+  const sub = q`(SELECT jsonb(COALESCE(json_group_array(${elem} ORDER BY x.key), json('[]'))) FROM json_each(${c.c.list}) x)`;
+  const rel = s.q.cte(q`SELECT ${sub} AS list FROM ${c}`, ['list']);
+  return toListStream(carryOf(s), rel, s.of);
+}
+
+/** reverse() on a list value → reverse element order (json_each ordered by position
+ *  DESC). Stays a list stream. */
+function listReverse(s: ListStream): ListStream {
+  const c = s.rel.as('c');
+  const sub = q`(SELECT jsonb(COALESCE(json_group_array(x.value ORDER BY x.key DESC), json('[]'))) FROM json_each(${c.c.list}) x)`;
+  const rel = s.q.cte(q`SELECT ${sub} AS list FROM ${c}`, ['list']);
+  return toListStream(carryOf(s), rel, s.of);
+}
 
 /**
  * A Scope.local collection transform over a list value (order/dedup/limit/skip/range/
@@ -146,6 +173,17 @@ export function compileFromList(s: ListStream, steps: PStep[], at: number): Comp
   // each list and stay a ListStream, so downstream continues.
   if (LIST_LOCAL_TX.has(step.name) && isLocal(step))
     return dispatchNext(listLocalTransform(s, step), steps, at + 1);
+  // reverse() on a list reverses element order (no Scope arg — reverse of a list is
+  // always the whole collection).
+  if (step.name === 'reverse')
+    return dispatchNext(listReverse(s), steps, at + 1);
+  // Scope.local per-element string transforms (toUpper/trim/length/…) over a list.
+  if (STRING_LOCAL_TX.has(step.name)) {
+    // A string op on a list WITHOUT Scope.local is invalid (a list is not a string) —
+    // raise TinkerPop's exact message. WITH Scope.local it applies per element.
+    if (!isLocal(step)) throw new Error(`The ${step.name}() step can only take string as argument`);
+    return dispatchNext(listStringTransform(s, step), steps, at + 1);
+  }
   // Scope.local per-list reducers (count/sum/min/max/mean) — reduce each list to a
   // scalar. Terminal only for now; a trailing step (e.g. .is(P)) defers.
   if (['count', 'sum', 'min', 'max', 'mean'].includes(step.name) && isLocal(step)) {
