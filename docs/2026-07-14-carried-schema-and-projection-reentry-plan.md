@@ -1,8 +1,14 @@
 # Plan — carried-schema-through-branches + chained-projection re-entry
 
 **Date:** 2026-07-14 · **Status:** Item 1 Move A + Move B (aliases through
-union/coalesce/optional/flatMap/choose) **LANDED** (L3 824→825, 330 tests green);
-path-through-branches (1b) + repeat alias-threading + Item 2 still open.
+union/coalesce/optional/flatMap/choose) **LANDED** (L3 824→825, CI green). Item 2
+**count-after-scalar core LANDED** (`values/id/label.count()` retypes to a scalar
+stream — correct, +0 L3 because the official suite rarely writes it). Still open:
+1b path-through-branches, repeat alias-threading, and the REAL bulk of "chained
+projections" — `valueMap().select()` (map-value), projections nested inside
+branch/where/group bodies, and `fold().is(typeOf).count()` (blocked by `typeOf`
+over stored props, a storage-type-tag wall, not the chain). See the corpus note:
+top-level `values(k).count()` is rare; the ~40 estimate conflated these shapes.
 **Context:** architecture review of the read compiler's remaining deferral clusters.
 See `docs/feature-support-matrix.md` (§5 branches, §3 chained projections) and
 `docs/2026-07-12-conformance-structural-bets.md`.
