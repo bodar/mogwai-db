@@ -1,4 +1,4 @@
-import { q, list, empty, type Expression } from '../q.ts';
+import { q, list, type Expression } from '../q.ts';
 import { scalarProp, labelNameSub, compileNestedScalar, predicateSql, elemCtx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { advance, elemRel, prevRel, carriedCols, type St, type StepFn } from './context.ts';
@@ -62,14 +62,15 @@ export const sack: StepFn = (s, st) => {
       : q`MAX(${oldSack}, ${byVal})`;
   }
 
-  // Carry alias/path/origin columns unchanged; REPLACE the sack column (so exclude it
-  // from the carried-forward set and re-project the merged value as `sk`).
+  // Re-project id + every carried column in carriedCols ORDER, computing the new sack
+  // value in the `sk` SLOT (NOT appended last). carriedCols orders sk before fromV/path,
+  // so appending sk would desync the CTE's declared vs physical columns whenever another
+  // column is co-carried — e.g. sack + otherV() (fromV): sk would silently get fromV.
   const n = elemRel(st);
-  const others = carriedCols(st.carried).filter((c) => c !== st.carried.sack);
-  const othersFrag = others.length ? list(others.map((c) => q`, ${p.c[c]}`), '') : empty;
+  const proj = carriedCols({ ...st.carried, sack: 'sk' }).map((c) => (c === 'sk' ? q`${newSack} AS sk` : p.c[c]));
   // A by() that yields nothing (a missing property) drops the traverser (TinkerPop's
   // by-modulator semantics — same as values()); label/id/constant by-values are never
   // null so the guard is a harmless always-true there.
-  const body = q`SELECT ${p.c.id}${othersFrag}, ${newSack} AS sk FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${predicateSql(byVal, undefined)}`;
+  const body = q`SELECT ${p.c.id}, ${list(proj, ', ')} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${predicateSql(byVal, undefined)}`;
   return advance(st, body, { sack: 'sk' });
 };
