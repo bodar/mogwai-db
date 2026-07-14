@@ -156,10 +156,19 @@ function framePath(objects: Buffer[]): Buffer {
   ]);
 }
 
-// Linear path(): one row → one Path, positions framed from per-position columns.
+// Linear path(): one row → one Path, positions framed from per-position columns. A
+// branch-padded position (a shorter arm's trailing NULL) has a null id column → omit it,
+// so a short-arm path is genuinely shorter (a pure-linear path is never null here, so
+// this skip is a no-op there).
 function pathBuffer(r: any, positions: PathPos[]): Buffer {
-  return framePath(positions.map((pos) =>
-    pos.render === 'element' ? elementBuffer(r, pos.prefix, pos.elem) : ioc.anySerializer.serialize(r[`${pos.prefix}_v`])));
+  const objs: Buffer[] = [];
+  for (const pos of positions) {
+    if (pos.render === 'element') {
+      if (r[`${pos.prefix}_id`] == null) continue;
+      objs.push(elementBuffer(r, pos.prefix, pos.elem));
+    } else objs.push(ioc.anySerializer.serialize(r[`${pos.prefix}_v`]));
+  }
+  return framePath(objs);
 }
 
 // Recursive repeat().path(): rows arrive ORDER BY (pk, ord) — one row per path

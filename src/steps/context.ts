@@ -26,7 +26,7 @@ export type AliasMap = ReadonlyMap<string, { col: string; elem: Elem }>;
  *    (dynamic length). Backs repeat(...).path() — `col` is the array column, `elem`
  *    the walk's element kind (node for out/in/both). */
 export type PathState =
-  | { readonly kind: 'cols'; readonly cols: readonly { col: string; elem: Elem }[] }
+  | { readonly kind: 'cols'; readonly cols: readonly { col: string; elem: Elem; nullable?: boolean }[] }
   | { readonly kind: 'array'; readonly col: string; readonly elem: Elem };
 
 /** The carried path columns: the p0,p1,… positions (linear) or the single array
@@ -108,12 +108,18 @@ export const prevRel = (st: St, alias?: string): Relation => alias ? st.last.as(
 /** The current element's table aliased `n` (nodes/edges by elem). */
 export const elemRel = (st: St, alias = 'n'): Relation => (st.elem === 'edge' ? edges : nodes).as(alias);
 
-/** Every column carried UNCHANGED across a hop, in a STABLE order: the as() alias
- *  columns, the path-position columns, then origin/sack/fromV when set. THE single
- *  source of truth for "what columns are on the id-relation" — movement/filter thread
- *  it, and a branch merge MUST reproduce it (mergeCarried). */
+/** Every column carried UNCHANGED across a hop, in a STABLE order: alias columns,
+ *  then origin/sack/fromV, then the path-position columns LAST. THE single source of
+ *  truth for "what columns are on the id-relation" — movement/filter thread it, and a
+ *  branch merge MUST reproduce it (armProjection).
+ *
+ *  Path MUST be last: movement physically APPENDS each new path position at the end of
+ *  its SELECT (after carryFrag of the old carried set), so carriedCols(old) has to be a
+ *  prefix of carriedCols(new) for the appended column to land in the right slot. Any
+ *  carried column ordered AFTER path would desync the CTE's declared columns from its
+ *  physical SELECT once a hop appends a position (the coalesce/optional+path() bug). */
 export const carriedCols = (c: Carried): string[] =>
-  [...aliasColsOf(c.aliases), ...pathColsOf(c.path), ...(c.origin ? [c.origin] : []), ...(c.sack ? [c.sack] : []), ...(c.fromV ? [c.fromV] : [])];
+  [...aliasColsOf(c.aliases), ...(c.origin ? [c.origin] : []), ...(c.sack ? [c.sack] : []), ...(c.fromV ? [c.fromV] : []), ...pathColsOf(c.path)];
 
 /** `, p.a0, p.p0, …` — the carried columns qualified by `p`; empty when nothing is
  *  live. Movement/filter CTEs splice this after the moved id so labelled traversers
@@ -121,21 +127,6 @@ export const carriedCols = (c: Carried): string[] =>
 export function carryFrag(c: Carried, p: Relation): Expression {
   const cols = carriedCols(c);
   return cols.length ? list(cols.map((x) => q`, ${p.c[x]}`), '') : empty;
-}
-
-/** The projection column list a branch merge must reproduce so the carried schema
- *  survives the UNION ALL. Asserts every arm exposes the seed's carried columns (the
- *  shared-seed invariant guarantees this unless an arm bound a NEW as()/path inside its
- *  body — deferred, caught upstream), then returns `['id', ...seed cols]`. A branch that
- *  projects bare `id` instead of calling this is now visibly wrong. */
-export function mergeCarried(seed: Carried, arms: Carried[]): string[] {
-  const want = carriedCols(seed);
-  for (const a of arms) {
-    const got = carriedCols(a);
-    if (got.length !== want.length || got.some((c, i) => c !== want[i]))
-      throw new Error('branch arms disagree on carried columns (a step binding new as()/path/sack state inside a branch arm not yet supported)');
-  }
-  return ['id', ...want];
 }
 
 type CarriedOpts = { aliases?: AliasMap; path?: PathState; origin?: string | null; sack?: string | null; fromV?: string | null };

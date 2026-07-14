@@ -1291,11 +1291,24 @@ describe('compiler SQL snapshots', () => {
     ] });
   });
 
-  test('path() over a branch/aggregating source or with an unsupported tail defers cleanly', () => {
-    expect(() => compile('g.V().union(__.out(),__.in()).path()', {})).toThrow('path tracking through union() not yet supported');
-    // union() as a SOURCE step never seeds p0 → its own clear deferral (not the mid-chain guard).
+  test('path() through a branch (pad-to-max cols): threads + pads, remaining forms defer', () => {
+    // path now threads through the UNION-ALL branch ops (carried-schema + padding).
+    expect(read('g.V(1).union(__.out(), __.in()).path()').shape.kind).toBe('path');
+    expect(read('g.V(1).coalesce(__.out(), __.in()).path()').shape.kind).toBe('path');
+    expect(read('g.V(1).optional(__.out()).path()').shape.kind).toBe('path');
+    expect(read('g.V(1).choose(__.has("name","x"), __.out(), __.in()).path()').shape.kind).toBe('path');
+    // ragged arms: the shorter arm's trailing position is NULL-padded + LEFT JOINed.
+    const r = read('g.V(1).union(__.out(), __.out().out()).path()');
+    expect(r.sql).toContain('NULL AS p2');
+    expect(r.sql).toContain('LEFT JOIN');
+    // ---- still fail-closed ----
+    // union() as a SOURCE step never seeds p0 → its own clear deferral (not the mid-chain path).
     expect(() => compile('g.union(__.V(),__.V()).path()', {})).toThrow('path() over a union() source step is not yet supported');
-    expect(() => compile('g.V().optional(__.out()).path()', {})).toThrow('path tracking through optional() not yet supported');
+    // conflicting element kinds at one position (edge vs vertex) → deferred (needs tagged array).
+    expect(() => compile('g.V(1).union(__.outE().inV(), __.out()).path()', {})).toThrow('conflicting element kinds');
+    // by() can't ride a branched (padded) path — a NULL is indistinguishable from a missing prop.
+    expect(() => compile('g.V(1).union(__.out(), __.out().out()).path().by("name")', {})).toThrow('path().by() through a branch not yet supported');
+    // unchanged deferrals
     expect(() => compile('g.V(1).out().dedup().path()', {})).toThrow('dedup() with path tracking not yet supported');
     expect(() => compile('g.V(1).out().path().by(__.values("name"))', {})).toThrow('path().by(traversal) modulator not yet supported');
     expect(() => compile('g.V(1).out().path().by(T.id)', {})).toThrow('path().by(T.id) modulator not yet supported');
