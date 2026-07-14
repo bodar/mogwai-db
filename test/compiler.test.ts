@@ -867,6 +867,11 @@ describe('compiler SQL snapshots', () => {
     // sum accumulator references the prior sk; div forces REAL division.
     expect(read('g.withSack(0.0d).V().sack(sum).by("age").sack()').sql).toContain('(p.sk + (SELECT value FROM vertex_properties WHERE node=n.id AND key=?');
     expect(read('g.withSack(2).V().sack(div).by(__.constant(4.0d)).sack()').sql).toContain('(CAST(p.sk AS REAL) / ?)');
+    // sack + a co-carried column (otherV's fromV): the mutate CTE re-projects sk in its
+    // carriedCols SLOT, not appended last — so the sk/fv columns don't desync. Regression
+    // for the pre-existing bug where sk silently got the fromV rowid.
+    expect(read('g.withSack(0).V(1).outE().sack(assign).by(T.label).otherV().sack()').sql)
+      .toContain('(SELECT name FROM labels WHERE id=n.label) AS sk'); // sk = the label, not the fv rowid
   });
 
   test('side-effecting group(a)/groupCount(a) → registered spec re-emitted by cap(a)', () => {
