@@ -64,6 +64,7 @@ export type Shape =
   | { kind: 'scalar' } // sum(): one numeric; handler picks Long/Double per value (numberBuffer)
   | { kind: 'list'; elem: ElemShape | 'scalar' }   // fold(): the whole stream as one List value
   | { kind: 'jsonbList' }   // a list-VALUE stream (inject([..]) / list phase): one List per row, from a JSONB `list` column
+  | { kind: 'jsonbSet' }    // a set-VALUE stream (intersect/difference/disjunct): one Set per row, from a JSONB `list` column
   | { kind: 'valueMap'; keys: string[] | null; tokens: boolean }
   | { kind: 'elementMap'; keys: string[] | null }
   | { kind: 'map'; entries: MapEntry[] }

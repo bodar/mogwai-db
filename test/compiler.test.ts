@@ -153,6 +153,32 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.inject([5,8,10],[10,7]).none(P.lt(7))').shape).toEqual({ kind: 'jsonbList' });
   });
 
+  test('set-op / list-algebra family (combine/intersect/difference/disjunct/product/conjoin/all/any)', () => {
+    // combine = concat → a List; intersect/difference/disjunct → a Set (jsonbSet) when terminal.
+    expect(read('g.V().values("age").fold().combine([1,2])').shape).toEqual({ kind: 'jsonbList' });
+    expect(read('g.V().values("age").fold().intersect([27,29])').shape).toEqual({ kind: 'jsonbSet' });
+    expect(read('g.V().values("age").fold().difference([27])').shape).toEqual({ kind: 'jsonbSet' });
+    expect(read('g.V().values("age").fold().disjunct([27])').shape).toEqual({ kind: 'jsonbSet' });
+    // null-safe set membership (IS, not =) so null intersects/differs correctly.
+    expect(read('g.inject(["a",null,"b"]).difference(["a","c"])').sql).toContain('o.value IS je.value');
+    // a Set followed by a list op (order(Scope.local)) degrades to a List (not a Set).
+    expect(read('g.V().values("age").fold().intersect([27]).order(Scope.local)').shape).toEqual({ kind: 'jsonbList' });
+    // constant(c).fold() is a valid compile-time operand; a standalone traversal defers.
+    expect(read('g.V().values("age").fold().intersect(__.constant(27).fold())').shape).toEqual({ kind: 'jsonbSet' });
+    expect(() => compile('g.V().fold().combine(__.V().fold())', {})).toThrow('nested-traversal operand not yet supported');
+    // argument-type errors mirror TinkerPop's messages.
+    expect(() => compile('g.V().fold().combine(2)', {})).toThrow('can only take an array or an Iterable as an argument');
+    expect(() => compile('g.V().fold().combine(null)', {})).toThrow("can't be null");
+    // product → a list of pair-lists; conjoin → a scalar string.
+    expect(read('g.V().values("age").fold().product([1]).unfold()').shape).toEqual({ kind: 'jsonbList' });
+    expect(read('g.V().values("name").order().fold().conjoin("_")').shape).toEqual({ kind: 'value' });
+    // all(P)/any(P) filter the list (IS TRUE / IS NOT TRUE null handling).
+    expect(read('g.V().values("age").order().fold().all(P.gt(10))').sql).toContain('IS NOT TRUE');
+    expect(read('g.V().values("age").order().fold().any(P.gt(10))').sql).toContain('IS TRUE');
+    // a list-collection step on a scalar stream raises the incoming-type error.
+    expect(() => compile('g.V().values("name").fold().unfold().combine([1])', {})).toThrow('incoming traversers');
+  });
+
   test('group()/groupCount() retypes to a MapStream on a follower (select(Column.*))', () => {
     // A TERMINAL group() is unchanged — the row-folding groupBuffer Map.
     expect(read('g.V().groupCount().by("name")').shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });

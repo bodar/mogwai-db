@@ -281,6 +281,11 @@ function compileFold(st: St, acc: TailAcc): ListStream {
  * vocabulary. count() is the only projection valid on a scalar stream.
  */
 export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number): Compiled {
+  // A list-collection step (set-op / conjoin / all / any) requires a list traverser;
+  // reached on a scalar stream it raises TinkerPop's incoming-type error.
+  const LIST_ONLY = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product', 'conjoin', 'all', 'any']);
+  if (LIST_ONLY.has(steps[from]?.name))
+    throw new Error(`${steps[from].name} step can only take an array or an Iterable type for incoming traversers, encountered a scalar`);
   const { acc, stop } = foldTailAcc(steps, from);
   if (stop !== steps.length) throw new Error(`${steps[stop].name}() after a scalar stream not yet supported`);
   if (acc.projStep) {

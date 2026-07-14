@@ -5,10 +5,11 @@
 // re-enterable tail (compileFromList). The producers live in projection.ts (compileFold)
 // and, later, inject-of-a-list / select(Column.values).
 
-import { q, type Expression } from '../q.ts';
+import { q, value, type Expression } from '../q.ts';
 import { predicateSql, scalarTx } from '../plan.ts';
+import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { carryOf, toListStream, mapOfToListOf, type ListStream, type ScalarStream, type MapStream } from './stream.ts';
+import { carryOf, toListStream, toScalarStream, mapOfToListOf, type ListStream, type ScalarStream, type MapStream } from './stream.ts';
 import { type St } from './context.ts';
 import { readCompiled, type Compiled } from '../render.ts';
 import { dispatchNext } from './index.ts';
@@ -151,11 +152,93 @@ function listLocalTransform(s: ListStream, step: PStep): ListStream {
   return toListStream(carryOf(s), rel, s.of);
 }
 
+// ---------- set-op / list-algebra family ----------
+//
+// combine/intersect/difference/disjunct/product take a second list (the OPERAND) and
+// an incoming list; conjoin joins the incoming list into a string; all/any filter the
+// list by a predicate. Intersect/difference/disjunct return a SET (dedup); combine a
+// List; product a List of pair-Lists; conjoin a String. Operands: a literal list or
+// constant(c).fold() (a compile-time JSONB list) — a standalone-traversal operand
+// (__.V()…fold()) defers (needs fresh-root sub-traversal compilation).
+
+const SET_RESULT = new Set(['intersect', 'difference', 'disjunct']);
+const jsGtype = (v: any): string => (typeof v === 'number' ? (Number.isInteger(v) ? 'Integer' : 'Double') : typeof v === 'string' ? 'String' : typeof v === 'boolean' ? 'Boolean' : 'Object');
+
+/** Resolve a set-op operand argument to a JSONB list expression, raising TinkerPop's
+ *  exact argument errors. Literal array / constant(c).fold() only; a standalone
+ *  traversal operand defers. */
+function operandList(arg: any, op: string, params: Record<string, any>): Expression {
+  if (arg === null || arg === undefined) throw new Error(`Argument provided for ${op} step can't be null`);
+  if (Array.isArray(arg)) return q`jsonb(${value(JSON.stringify(arg))})`;
+  if (typeof arg === 'object' && 'nested' in arg) {
+    const inner = stepChain(arg.nested, params);
+    const last = inner[inner.length - 1];
+    if (last?.name !== 'fold') {
+      if (inner.length === 1 && inner[0].name === 'constant') {
+        const c = inner[0].args[0];
+        if (c === null || c === undefined) throw new Error(`traversal argument for ${op} step must yield an iterable type, not null`);
+        throw new Error(`traversal argument for ${op} step must yield an iterable type, encountered ${jsGtype(c)}`);
+      }
+      throw new Error(`traversal argument for ${op} step must yield an iterable type, encountered a non-fold traversal`);
+    }
+    const pre = inner.slice(0, -1);
+    if (pre.length === 1 && pre[0].name === 'constant') {
+      const c = pre[0].args[0];
+      return q`jsonb(${value(JSON.stringify([c ?? null]))})`;
+    }
+    throw new Error(`${op}() with a nested-traversal operand not yet supported (literal list / constant().fold() only)`);
+  }
+  throw new Error(`${op} step can only take an array or an Iterable as an argument, encountered ${jsGtype(arg)}`);
+}
+
+/** Build the JSONB-list result of a set-op over the incoming list `self` and `op`. */
+function setOpExpr(name: string, self: Expression, op: Expression): Expression {
+  const se = q`json_each(${self})`, oe = q`json_each(${op})`;
+  switch (name) {
+    // combine = concatenation: self elements then op elements, order + dups + nulls kept.
+    case 'combine':
+      return q`(SELECT jsonb(COALESCE(json_group_array(value ORDER BY seg, ord), json('[]'))) FROM (SELECT je.value AS value, 0 AS seg, je.key AS ord FROM ${se} je UNION ALL SELECT je.value, 1, je.key FROM ${oe} je))`;
+    // intersect = distinct self-elements also in op (null-safe membership via IS).
+    case 'intersect':
+      return q`(SELECT jsonb(COALESCE(json_group_array(value), json('[]'))) FROM (SELECT DISTINCT je.value AS value FROM ${se} je WHERE EXISTS (SELECT 1 FROM ${oe} o WHERE o.value IS je.value)))`;
+    // difference = distinct self-elements NOT in op.
+    case 'difference':
+      return q`(SELECT jsonb(COALESCE(json_group_array(value), json('[]'))) FROM (SELECT DISTINCT je.value AS value FROM ${se} je WHERE NOT EXISTS (SELECT 1 FROM ${oe} o WHERE o.value IS je.value)))`;
+    // disjunct = symmetric difference (in exactly one), deduped (UNION dedups nulls too).
+    case 'disjunct':
+      return q`(SELECT jsonb(COALESCE(json_group_array(value), json('[]'))) FROM (SELECT je.value AS value FROM ${se} je WHERE NOT EXISTS (SELECT 1 FROM ${oe} o WHERE o.value IS je.value) UNION SELECT o.value FROM ${oe} o WHERE NOT EXISTS (SELECT 1 FROM ${se} je WHERE je.value IS o.value)))`;
+    // product = cartesian product → a list of [selfElem, opElem] pair-lists.
+    case 'product':
+      return q`(SELECT jsonb(COALESCE(json_group_array(jsonb(json_array(a.value, b.value)) ORDER BY a.key, b.key), json('[]'))) FROM ${q`json_each(${self})`} a, ${q`json_each(${op})`} b)`;
+  }
+  throw new Error(`set-op ${name}() not implemented`);
+}
+
+/** all(P)/any(P): keep the incoming list iff every / some element satisfies P (a list
+ *  filter — the list itself passes through, like none()). `IS TRUE`/`IS NOT TRUE` make
+ *  null elements fail a predicate (all([null,x]) drops); an eq/neq(null) predicate is
+ *  null-aware so all([null,null], eq(null)) keeps. */
+function listAllAny(s: ListStream, step: PStep): ListStream {
+  const c = s.rel.as('c');
+  const pred = step.args[0];
+  const je = q`json_each(${c.c.list})`;
+  const isNullEq = pred && typeof pred === 'object' && (pred.op === 'eq' || pred.op === 'neq') && (pred.value === null || pred.value === undefined);
+  const elemPred = isNullEq ? (pred.op === 'eq' ? q`je.value IS NULL` : q`je.value IS NOT NULL`) : predicateSql(q`je.value`, pred);
+  const keep = step.name === 'all'
+    ? q`NOT EXISTS (SELECT 1 FROM ${je} je WHERE (${elemPred}) IS NOT TRUE)`
+    : q`EXISTS (SELECT 1 FROM ${je} je WHERE (${elemPred}) IS TRUE)`;
+  const rel = s.q.cte(q`SELECT ${c.c.list} AS list FROM ${c} WHERE ${keep}`, ['list']);
+  return toListStream(carryOf(s), rel, s.of);
+}
+
+/** The set-op family names that consume a list operand + retype the stream. */
+const LIST_OPERAND_OPS = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product']);
+
 /**
  * The list arm of dispatchNext. A non-terminal fold always leaves a follower, so a
  * ListStream here is never terminal (a terminal fold stays the reducer path). unfold()
  * retypes and re-enters; Scope.local reductions/transforms reshape each list; the
- * set-op family (combine/…) lands later — until then it defers with a clear message.
+ * set-op family reshapes the list (set/list/product) or reduces it (conjoin/all/any).
  */
 export function compileFromList(s: ListStream, steps: PStep[], at: number): Compiled {
   // End of chain → frame each list value as one GraphBinary List (json() so the JSONB
@@ -189,6 +272,34 @@ export function compileFromList(s: ListStream, steps: PStep[], at: number): Comp
   if (['count', 'sum', 'min', 'max', 'mean'].includes(step.name) && isLocal(step)) {
     if (at + 1 !== steps.length) throw new Error(`step after ${step.name}(Scope.local) not yet supported`);
     return listReducer(s, step.name);
+  }
+  // all(P)/any(P): keep the list if every/some element satisfies P (list filter).
+  if (step.name === 'all' || step.name === 'any')
+    return dispatchNext(listAllAny(s, step), steps, at + 1);
+  // conjoin(delim): join the incoming list into ONE string (nulls skipped), delimiter a
+  // plain string arg → a scalar stream (so a trailing step composes; usually terminal).
+  if (step.name === 'conjoin') {
+    const c = s.rel.as('c');
+    const delim = String(step.args[0] ?? '');
+    const joined = q`(SELECT COALESCE(group_concat(value, ${value(delim)}), '') FROM (SELECT value FROM json_each(${c.c.list}) WHERE value IS NOT NULL ORDER BY key))`;
+    const rel = s.q.cte(q`SELECT ${joined} AS v FROM ${c}`, ['v']);
+    return dispatchNext(toScalarStream(carryOf(s), rel, undefined), steps, at + 1);
+  }
+  // set-op family (combine/intersect/difference/disjunct/product) over a list operand.
+  if (LIST_OPERAND_OPS.has(step.name)) {
+    const c = s.rel.as('c');
+    const op = operandList(step.args[0], step.name, s.params);
+    const listExpr = setOpExpr(step.name, c.c.list, op);
+    const terminal = at + 1 >= steps.length;
+    // intersect/difference/disjunct return a Set: frame as a Set only when terminal.
+    // With a follower (order(Scope.local)/unfold) the deduped content is treated as a
+    // plain list (TinkerPop's order(local) on a set yields a List), matching the suite.
+    if (SET_RESULT.has(step.name) && terminal)
+      return readCompiled(s.q, q`SELECT json(${listExpr}) AS list FROM ${c}`, { kind: 'jsonbSet' });
+    const rel = s.q.cte(q`SELECT ${listExpr} AS list FROM ${c}`, ['list']);
+    // product yields a list of pair-lists; the others keep the element shape.
+    const of = step.name === 'product' ? { kind: 'list' as const, of: { kind: 'scalar' as const } } : s.of;
+    return dispatchNext(toListStream(carryOf(s), rel, of), steps, at + 1);
   }
   throw new Error(`${step.name}() on a list value not yet supported`);
 }
