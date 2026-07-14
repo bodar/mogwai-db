@@ -172,9 +172,13 @@ landed under W5, the **per-traverser branching family + multi-hop/alias where + 
 landed 2026-07-13 (choose/coalesce/union/optional/flatMap/map/where/match — see
 docs/2026-07-13-per-traverser-branching.md), the **type/value family** (asBool/asNumber/
 asDate/math + typed-value carrier) landed, the **semantic strategies** (Subgraph/
-Partition/verification) landed, and the **list-value substrate + re-enterable tail**
-(fold-as-value/unfold/Scope.local reducers/inject-as-list) landed (**live L3 618** as of
-2026-07-13; see CLAUDE.md + the conformance-grind memory for the running count). The path
+Partition/verification) landed, the **list-value substrate + re-enterable tail**
+(fold-as-value/unfold/Scope.local reducers/inject-as-list), `local`, side-effects
+(sack/aggregate/cap/group('a')), and the **full collection-algebra tail** — MapStream,
+string transforms (trim/reverse/concat/`format`), and the set-op / list-algebra family
+(combine/intersect/difference/disjunct/product/conjoin/all/any) — all landed (**live L3
+822** as of 2026-07-14; see CLAUDE.md + the conformance-grind memory + feature-support-matrix
+for the running count and exact edges). The path
 to *usable* is sequenced so the invasive schema rework lands behind a deployed, writable
 baseline:
 

@@ -7,11 +7,14 @@ This doc groups them, sizes them, and weighs them by *what mogwai's actual users
 would use* — not raw scenario count. It is a map for choosing the next big
 investment, not a loop backlog.
 
-> **Status (2026-07-13): live L3 = 618.** Bets #1 (path), #2 (per-traverser branching,
-> minus `local`), #4 (types), #5 (match), #6-core (list substrate), and #7 (semantic
-> strategies) have all landed since this was written — see each bet + the "Recommended
-> sequence" refresh at the bottom. The real remaining frontier is **#3 side-effect
-> state** (`aggregate`/`cap`/`sack`), `local`, and the collection-algebra tail.
+> **Status (2026-07-14): live L3 = 822.** Bets #1 (path), #2 (per-traverser branching +
+> `local`), #3 (side-effect state — `aggregate`/`cap`/`sack`/`group('a')`), #4 (types +
+> dates + `math`), #5 (match), #6 (the full collection-algebra tail — list substrate,
+> MapStream, string transforms, set-ops/list-algebra, `format`), and #7 (semantic
+> strategies) have ALL landed since this was written. The remaining frontier is now
+> design-heavy: **traverser bulking** (blocks the grateful graph), path-rooted collection
+> ops, broader `select`/`match`/`repeat`, and mixed-type comparability — see
+> [feature-support-matrix.md](feature-support-matrix.md) "Where this points".
 
 Counts are approximate scenario totals in the relevant feature files (some we
 already partially pass). "Real-world" is judged for mogwai's target: many small
@@ -261,10 +264,10 @@ supported. Lowest priority.
 
 ## Recommended sequence
 
-**Status refresh (2026-07-13): live L3 = 618.** Items 1–4 and 6-partial have landed
-since this sequence was first written; items 3 (side-effect state) and 4 (rest of #6 /
-collection algebra tail) are the real remaining frontier. See "The remaining frontier"
-below.
+**Status refresh (2026-07-14): live L3 = 822.** Every item in this sequence has landed
+(side-effect state, `local`, the whole collection-algebra tail incl. set-ops/`format`).
+The real remaining frontier is now traverser bulking + the design-heavy subsystems — see
+[feature-support-matrix.md](feature-support-matrix.md) "Where this points".
 
 1. ~~**Path** (#1)~~ — **DONE (2026-07-12/13)**, see bet #1 above.
 2. ~~**Per-traverser sub-traversal engine** (#2)~~ — **LARGELY DONE (2026-07-13, L3

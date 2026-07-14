@@ -53,14 +53,17 @@ CLIENT_MIMETYPE='application/vnd.graphbinary-v4.0' \
   ../../gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/
 ```
 
-**Current live number: 455 pass** (2026-07-13; the exact figure lives in
+**Current live number: 822 pass** (2026-07-14; the exact figure lives in
 `baseline.json`, which the ratchet auto-bumps — treat that file, not this line, as
 authoritative). Progression: P2c-2 cleared the `BeforeAll` gate and published 85;
 P2b (is/where/not/filter/TextP) → 119; P2-tail (and/or/union/optional) → 126; P3
-repeat/times/emit → 130; W2 (addV/addE/mergeV/mergeE writes + property update, plus
-a `has(label,key,value)` fix and multi-`addE` graph initializers) → 204; a full-suite
-tag-scope correction → 445; the path family (path/simplePath/cyclicPath,
-repeat().path(), repeat().until()) → **455**. Before P2c-2 it was 0 — the gate blocked
+repeat/times/emit → 130; W2 (addV/addE/mergeV/mergeE writes + property update) → 204;
+a full-suite tag-scope correction → 445; the path family → 455; per-traverser branching +
+match + types/dates/math → 608; side-effects (sack/aggregate/cap) → 634; W4 multi/meta
+properties → 648; `local` → 661; the re-enterable collection tail (MapStream) → 685;
+string transforms → 728; the sink reference graph → 730; the set-op / list-algebra family
+(combine/intersect/…/all/any, incl. standalone operands) → 804; `format` → 810;
+unfold-of-scalar + min/max over Strings → **822**. Before P2c-2 it was 0 — the gate blocked
 every scenario. Ratchet only upward.
 
 `@StepWrite` (excluded) is the `io().write()` graph-serialization feature, NOT

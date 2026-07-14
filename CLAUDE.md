@@ -795,6 +795,53 @@ neighbour-list values, `order(Scope.local).by(key/traversal)`, and set-ops
 + null semantics). Plan/decision log context: `docs/2026-07-13-list-value-substrate-plan.md`
 (this is Stage §9/§10's natural completion).
 
+## String + set-op / list-algebra families + format (LANDED 2026-07-14, L3 685→822)
+
+Six batches finishing the collection-algebra tail (all pure SQL, no per-row JS). Hard-won
+facts:
+- **String transforms (`src/plan.ts` `scalarTx`, list phase `src/steps/list.ts`).**
+  `trim`/`lTrim`/`rTrim` = SQLite `trim(x, set)` over `JAVA_WHITESPACE` (Java's
+  `Character.isWhitespace` code points incl. U+3000 — built from explicit code points, NOT
+  literal chars in source). `reverse` = a **correlated recursive CTE** (SQLite has no
+  REVERSE) for a string; number/null pass through; a LIST reverses element ORDER
+  (`listReverse`). `concat` skips nulls (`concat_ws('')`), all-null→null (a `CASE` guard,
+  live only when no non-null string arg). `scalarTx` is the ONE per-element string builder,
+  reused by the scalar tail AND the list-local phase (`listStringTransform`, `Scope.local`
+  over a folded list). A string op on a non-`local` list raises TinkerPop's "can only take
+  string as argument". A single bare `order().fold()` sorts folded scalars (compileFold).
+- **`format()` (`src/steps/mapscalar.ts` `compileFormat`, sibling to `compileMath`, in
+  BY_HOSTS).** `%{key}` → element prop (scalarProp); `%{_}` → next by() modulator
+  (round-robin); `||`-concatenation so a missing prop NULLs the row (FormatStep filter). A
+  constant template doesn't filter (`hadToken` gate). Defers: project()/select() columns,
+  as()-alias fallback.
+- **Set-op / list-algebra family (`src/steps/list.ts`).** `combine`=concat (List);
+  `intersect`/`difference`/`disjunct`=set ops → a **Set** (new `{kind:'jsonbSet'}` shape →
+  `ioc.setSerializer.serialize(new Set(...))` — MUST be a `Set`, not an array); `product`=
+  cartesian → list of pair-lists; `conjoin`=`group_concat` to a String; `all`/`any`=list
+  filters (`(pred) IS TRUE`/`IS NOT TRUE` so a null element fails; eq/neq(null) null-aware).
+  **Null-safe set membership uses `IS`, not `=`.** A Set followed by a list op degrades to a
+  plain List (matches `intersect().order(local)`), so set-ops emit `jsonbSet` ONLY when
+  terminal, else a deduped ListStream. **Operands** (`operandList`): a literal array
+  (`jsonb(text)`), `constant(c).fold()` (→`[c]`), or a **standalone scalar-fold traversal**
+  (`__.V().values(k).fold()`) — compiled independently via `compileRead` + `json_group_array`
+  and embedded as a scalar subquery by `embedSql` (splits the rendered SQL on `?` and
+  re-interleaves `value()` tokens to carry binds; the inner `WITH` scopes to the subquery).
+  Argument/incoming-type errors mirror TinkerPop's messages. Defers: element-fold operands
+  (a vertex list), set-ops after `path()`.
+- **`unfold()` on a scalar = identity** (`compileFromScalar`) — a scalar isn't a collection.
+  Unlocks `aggregate('a').by(k).cap('a').unfold().<reducer>`. **`min`/`max` range over any
+  Comparable incl. Strings** (v4 made Strings Comparable — `typeof` filter allows `'text'`
+  for min/max; `sum`/`mean` stay numeric).
+- **Reference-graph seeding (`test/conformance/seed-graphson.ts`).** A GraphSON v3 file →
+  write-traversal seed (vertices then edges, ids via numeric `T.id`). `gsink` seeded.
+  **`ggrateful` is deliberately NOT seeded:** its unbounded `repeat(out()).times(N).count()`
+  answers are astronomical (times(8)=2.5e15). TinkerPop BULKS traversers (one (value,count)
+  pair); mogwai materializes each as a UNION-ALL row, so it would try to build quadrillions
+  of rows and hang the CPU-limitless Bun host (and CI — bun:sqlite has no query interrupt).
+  **Blocked on a traverser-bulking engine sub-project** — `graphsonSeed` loads grateful the
+  moment bulking lands. This is the current biggest structural gap; see the feature matrix
+  "Where this points".
+
 ## Environment notes
 
 - Runtime is Bun (pinned in `mise.toml`), not Node. `bun run start` serves
