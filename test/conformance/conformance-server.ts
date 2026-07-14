@@ -15,6 +15,13 @@ import { application } from '../../src/application.ts';
 import { MODERN_SEED } from './seed-modern.ts';
 import { CREW_SEED } from './seed-crew.ts';
 import { UID_SEED } from './seed-uid.ts';
+import { graphsonSeed } from './seed-graphson.ts';
+
+// Reference graphs load from their canonical GraphSON v3 files in the pinned submodule
+// (sink 3 vertices) — turned into write traversals so the integer ids land exactly
+// (V(2000)/V(1000) scenarios).
+const GRAPHSON = 'vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/structure/io/graphson';
+const relToRepo = (p: string) => new URL(`../../${p}`, import.meta.url).pathname;
 
 const SEEDS: Record<string, string[]> = {
   gmodern: MODERN_SEED,
@@ -23,6 +30,17 @@ const SEEDS: Record<string, string[]> = {
   // guid: a UserSuppliedIds graph (not part of the official suite) — used by the
   // in-repo conformance test to prove external-id framing on the read path.
   guid: UID_SEED,
+  // gsink: the self-loop reference graph (loops/message vertices). Safe to seed — small
+  // and acyclic-enough that no scenario explodes.
+  gsink: graphsonSeed(relToRepo(`${GRAPHSON}/tinkerpop-sink-v3.json`)),
+  // ggrateful (808 v / 8049 e) is DELIBERATELY NOT seeded: its scenarios include
+  // whole-graph unbounded `repeat(out()).times(N).count()` whose TinkerPop answers are
+  // astronomically large (times(8) → 2.5e15). TinkerPop reaches those by BULKING
+  // traversers (one (value,count) pair, not one row each); mogwai materializes each
+  // traverser as a UNION-ALL row, so an unbounded repeat-count would try to build
+  // quadrillions of rows and hang the (CPU-limitless) Bun host — which would hang the
+  // L3 test / CI. graphsonSeed() can load it once traverser bulking exists (a separate
+  // engine sub-project that also makes count() over big recursions tractable).
 };
 
 export async function startConformanceServer(port = 45940) {
