@@ -4,7 +4,7 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-14 · **live L3 conformance:** 810 · **corpus parse+chain:**
+**Last synced:** 2026-07-14 · **live L3 conformance:** 822 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
 
@@ -83,7 +83,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 |---|:--:|---|
 | `group`, `groupCount` | 🟡 | ✅ scalar reducers → SQL `GROUP BY`<br>✅ element values → ordered-stream + handler fold<br>✅ **re-enterable**: a follower (`select(Column.*)`/unfold) retypes it → MapStream (§MapStream)<br>❌ >2 `by()` modulators<br>❌ `by(T.x)` key<br>❌ deep nested-`by()` chains |
 | `fold()` | ✅ | ✅ terminal reducer **and** a real JSONB list value when followed (§9) |
-| `sum`, `min`, `max`, `mean` | ✅ | ✅ Long/Double framing<br>✅ also as `Scope.local` list reducers (§9) |
+| `sum`, `min`, `max`, `mean` | ✅ | ✅ Long/Double framing<br>✅ also as `Scope.local` list reducers (§9)<br>✅ `min`/`max` range over any Comparable incl. **Strings** (v4); `sum`/`mean` numeric only<br>✅ `cap('a').unfold().<reducer>` (unfold of a scalar = identity) |
 | `group('a')`/`groupCount('a')` (side-effecting) | 🟡 | pass-through barrier: stashes the group-spec, `cap('a')` re-emits it (§12). ❌ after `as()`/`path()`, `cap('a')` then more steps |
 
 ## 5. Per-traverser branching

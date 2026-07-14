@@ -84,12 +84,15 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().values("age").is(P.typeOf("bogus-name"))', {})).toThrow('unregistered type');
   });
 
-  test('min/max/mean reduce over numeric values only', () => {
+  test('min/max range over comparables (incl. text); mean/sum numeric only', () => {
     const mn = read('g.V().values("age").min()');
-    expect(mn.sql).toContain("typeof(v) in ('integer', 'real')"); // non-numeric filtered out → empty
+    // TinkerPop 4 Strings are Comparable, so min/max include text (numbers order first).
+    expect(mn.sql).toContain("typeof(v) in ('integer', 'real', 'text')");
     expect(mn.sql).toContain('MIN(v)');
     expect(mn.shape).toEqual({ kind: 'scalar' });
     expect(read('g.V().values("age").max()').sql).toContain('MAX(v)');
+    // mean stays numeric-only (never text).
+    expect(read('g.V().values("age").mean()').sql).toContain("typeof(v) in ('integer', 'real')");
     // mean is always a Double (forced vt='real')
     const avg = read('g.V().values("age").mean()');
     expect(avg.sql).toContain('AVG(v)');
