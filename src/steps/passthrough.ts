@@ -19,16 +19,16 @@ export const identity: StepFn = (_s, st) => st;
 
 export const limit: StepFn = (s, st) => {
   const p = prevRel(st, 'p');
-  return advance(st, q`SELECT ${p.c.id}${carryFrag(st, p)} FROM ${p} LIMIT ${Number(s.args[0])}`);
+  return advance(st, q`SELECT ${p.c.id}${carryFrag(st.carried, p)} FROM ${p} LIMIT ${Number(s.args[0])}`);
 };
 
 export const range: StepFn = (s, st) => {
   const { offset, limit } = rangeToOffsetLimit(s.args);
   const p = prevRel(st, 'p');
-  return advance(st, q`SELECT ${p.c.id}${carryFrag(st, p)} FROM ${p} LIMIT ${limit} OFFSET ${offset}`);
+  return advance(st, q`SELECT ${p.c.id}${carryFrag(st.carried, p)} FROM ${p} LIMIT ${limit} OFFSET ${offset}`);
 };
 
 export const skip: StepFn = (s, st) => {
   const p = prevRel(st, 'p');
-  return advance(st, q`SELECT ${p.c.id}${carryFrag(st, p)} FROM ${p} LIMIT -1 OFFSET ${Number(s.args[0])}`);
+  return advance(st, q`SELECT ${p.c.id}${carryFrag(st.carried, p)} FROM ${p} LIMIT -1 OFFSET ${Number(s.args[0])}`);
 };

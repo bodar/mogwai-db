@@ -275,7 +275,7 @@ function compileAddE(steps: PStep[], params: Record<string, any>): WritePlan {
   const prefix = steps.slice(0, addEIdx);
   const { st, stop } = buildPrefix(prefix, params);
   if (stop !== prefix.length) throw new Error(`addE after ${prefix[stop].name}() not yet supported`);
-  const aliasCols: [string, string][] = [...st.aliases].map(([lbl, a]) => [lbl, a.col]);
+  const aliasCols: [string, string][] = [...st.carried.aliases].map(([lbl, a]) => [lbl, a.col]);
   const read = renderFrom(st.q, st.last, ['id', ...aliasCols.map(([, c]) => c)].join(', '));
   return {
     kind: 'write',

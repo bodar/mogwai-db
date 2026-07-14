@@ -1022,7 +1022,14 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().union(__.out().out(), __.in()).values("name")').sql)
       .toContain('SELECT e.tgt AS id FROM edges e JOIN c1 p ON e.src=p.id');
     expect(() => compile('g.V().union(__.out())', {})).toThrow('needs at least two branches');
-    expect(() => compile('g.V().as("a").union(__.out(), __.in())', {})).toThrow('union() after as() not yet supported');
+    // as() before union now threads the alias column through the merge (carried-schema, Move B)
+    const ua = read('g.V().as("a").union(__.out(), __.in()).select("a")');
+    expect(ua.sql).toContain('UNION ALL');
+    expect(ua.sql).toContain('SELECT id, a0 FROM'); // the a0 alias column survives the branch merge
+    // a NEW as() bound INSIDE an arm diverges the arm schemas → still fails closed
+    expect(() => compile('g.V().union(__.as("b").out(), __.in())', {})).toThrow('branch arms disagree on carried columns');
+    // sack through a fork is fail-closed (split/merge-on-fork unverified — carried-schema didn't silently lift it)
+    expect(() => compile('g.withSack(0.0d).V().sack(sum).by("age").union(__.out(), __.in())', {})).toThrow('sack() through union()');
     // a scalar branch body now defers with the shared scalar-body message
     expect(() => compile('g.V().union(__.values("name"), __.out())', {})).toThrow('scalar/projection body');
     // mixed element kinds across branches
@@ -1039,6 +1046,9 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().optional(__.out().out()).count()').sql).toContain('ROW_NUMBER() OVER () AS o');
     // a body that flips element kind would make self-on-miss mixed-shape → defer
     expect(() => compile('g.V().optional(__.outE())', {})).toThrow('changing element kind');
+    // as() before optional threads the alias through the fast path (carryFrag from the input)
+    expect(read('g.V().as("a").optional(__.out()).select("a")').sql)
+      .toContain('SELECT COALESCE(e.tgt, p.id) AS id, p.a0 FROM');
   });
 
   test('coalesce() → first non-empty branch per input via the ordinal', () => {
@@ -1053,6 +1063,11 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().coalesce(__.out().dedup(), __.in())', {})).toThrow('input-ordinal not carried');
     // union() inside coalesce threads the ordinal through → valid
     expect(read('g.V().coalesce(__.union(__.out(),__.in()), __.both())').sql).toContain('ROW_NUMBER() OVER () AS o');
+    // as() before coalesce: originSeed projects the alias alongside the ordinal, the
+    // merge outputs it (dropping the internal `o`) → select("a") resolves (Move B)
+    const ca = read('g.V().as("a").coalesce(__.out(), __.in()).select("a")');
+    expect(ca.sql).toContain('ROW_NUMBER() OVER () AS o');
+    expect(ca.sql).toContain('SELECT id, a0 FROM');
   });
 
   test('flatMap() inlines an element body (fan-out), scalar body defers', () => {
@@ -1099,8 +1114,13 @@ describe('compiler SQL snapshots', () => {
     // mixed element kinds across arms
     expect(() => compile('g.V().choose(__.has("x"), __.out(), __.outE())', {}))
       .toThrow('different element kinds');
-    expect(() => compile('g.V().as("a").choose(__.has("x"), __.out(), __.in())', {}))
-      .toThrow('choose() after as() not yet supported');
+    // as() before choose now threads the alias column through the gated arms + merge (Move B)
+    const ca = read('g.V().as("a").choose(__.has("x"), __.out(), __.in()).select("a")');
+    expect(ca.sql).toContain('UNION ALL');
+    expect(ca.sql).toContain('SELECT id, a0 FROM'); // a0 preserved across the gated-arm merge
+    // a NEW as() inside an arm diverges the arm schemas → still fails closed
+    expect(() => compile('g.V().choose(__.has("x"), __.as("b").out(), __.in())', {}))
+      .toThrow('branch arms disagree on carried columns');
   });
 
   test('option-map choose → CASE over the choice scalar (value shape)', () => {

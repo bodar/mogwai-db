@@ -1,7 +1,7 @@
 import { q, list, empty, type Expression } from '../q.ts';
 import { rangeToOffsetLimit } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
-import { advance, carriedCols, type St, type StepFn } from './context.ts';
+import { advance, carriedCols, withCarried, type St, type StepFn } from './context.ts';
 import { foldBody } from './index.ts';
 
 // ---------- local() — per-element scope ----------
@@ -28,7 +28,8 @@ const WINDOW_BARRIERS = new Set(['limit', 'range']);
 export const local: StepFn = (s, st) => {
   const body = stepChain((s.args ?? [])[0]?.nested, st.params);
   if (!body.length) throw new Error('local(traversal) required');
-  if (st.aliases.size || st.path || st.origin || st.sack || st.fromV)
+  const c = st.carried;
+  if (c.aliases.size || c.path || c.origin || c.sack || c.fromV)
     throw new Error('local() after as()/path()/branch/sack/edge state not yet supported');
 
   const last = body[body.length - 1];
@@ -41,7 +42,7 @@ export const local: StepFn = (s, st) => {
   // Tag each input with a fresh ordinal so the window scopes per input traverser
   // (multiset-safe), then fold the movement carrying it.
   const base = st.q.cte(q`SELECT id, ROW_NUMBER() OVER () AS o FROM ${st.last}`, ['id', 'o']);
-  const seed: St = { ...st, last: base, origin: 'o', aliases: new Map(), path: undefined, sack: undefined, fromV: undefined };
+  const seed: St = withCarried({ ...st, last: base }, { origin: 'o', aliases: new Map(), path: undefined, sack: undefined, fromV: undefined });
   const { st: end, stop } = foldBody(moveSteps, seed, 0);
   if (stop !== moveSteps.length)
     throw new Error(`local(__.${moveSteps[stop].name}()) body step not yet supported`);
@@ -49,7 +50,7 @@ export const local: StepFn = (s, st) => {
   // The carried columns to keep on the way out: everything the body accrued (e.g. the
   // otherV() fv context) EXCEPT the internal ordinal.
   const p = end.last.as('p');
-  const others = carriedCols(end).filter((c) => c !== 'o');
+  const others = carriedCols(end.carried).filter((c) => c !== 'o');
   const frag = (rel: typeof p) => (others.length ? list(others.map((c) => q`, ${rel.c[c]}`), '') : empty);
 
   // ROW_NUMBER within each input ordinal → the per-element slice (limit = 1..N,

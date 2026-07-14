@@ -3,7 +3,7 @@ import { nodes, edges } from '../schema.ts';
 import { type Elem } from '../plan.ts';
 import { stepChain, flattenListArgs } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { type St, type StepFn } from './context.ts';
+import { withCarried, type St, type StepFn } from './context.ts';
 import { move, toEdge, toVertex, otherV } from './movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from './filter.ts';
 import { union, optional, repeat, choose, coalesce, flatMap } from './branch.ts';
@@ -111,7 +111,7 @@ function seedSource(first: PStep, query: Query, params: Record<string, any>, tra
   }
   const cols = [...(trackPath ? ['id', 'p0'] : ['id']), ...(sackInit ? ['sk'] : [])];
   const path = trackPath ? { kind: 'cols' as const, cols: [{ col: 'p0', elem }] } : undefined;
-  return { kind: 'elements', q: query, last: query.cte(body, cols), aliases: new Map(), elem, params, path, sack: sackInit ? 'sk' : undefined };
+  return { kind: 'elements', q: query, params, last: query.cte(body, cols), elem, carried: { aliases: new Map(), path, sack: sackInit ? 'sk' : undefined } };
 }
 
 /** union(b1, b2, …) as a SOURCE step: compile each branch's prefix into the SAME
@@ -128,11 +128,11 @@ function seedUnion(first: PStep, query: Query, params: Record<string, any>, sack
     const { st, stop } = buildPrefix(bsteps, params, query);
     if (stop !== bsteps.length) throw new Error(`union() source branch tail __.${bsteps[stop].name}() not yet supported`);
     if (st.elem !== 'node') throw new Error('union() source branch must be vertex-typed');
-    if (st.aliases.size > 0) throw new Error('union() source branch with as() not yet supported');
+    if (st.carried.aliases.size > 0) throw new Error('union() source branch with as() not yet supported');
     return st.last;
   });
   const body = list(rels.map((r) => q`SELECT id FROM ${r}`), ' UNION ALL ');
-  return { kind: 'elements', q: query, last: query.cte(body, ['id']), aliases: new Map(), elem: 'node', params };
+  return { kind: 'elements', q: query, params, last: query.cte(body, ['id']), elem: 'node', carried: { aliases: new Map() } };
 }
 
 /**
@@ -174,7 +174,7 @@ export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, qu
     : (() => { throw new Error(`unsupported source step: ${first.name}`); })();
   // Gate the otherV() entering-vertex tracking on the chain; local()'s body inherits
   // the flag through its {...st} seed, so an inner edge step records it too.
-  const st0 = chainNeedsFromV(steps) ? { ...seeded, trackFromV: true } : seeded;
+  const st0 = chainNeedsFromV(steps) ? withCarried(seeded, { trackFromV: true }) : seeded;
   return foldBody(steps, st0, 1);
 }
 

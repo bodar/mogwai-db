@@ -70,7 +70,7 @@ export function compileMath(st: St, steps: PStep[], stop: number): Compiled {
     let ctx: ScalarCtx;
     if (name === '_') ctx = elemCtx(elemRel(st), st.elem);
     else {
-      const entry = st.aliases.get(name);
+      const entry = st.carried.aliases.get(name);
       if (!entry) throw new Error(`math("${formula}"): no such variable "${name}" — as("${name}") was not seen`);
       ctx = aliasCtx(p.c[entry.col], entry.elem);
     }

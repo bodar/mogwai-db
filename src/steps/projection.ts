@@ -238,7 +238,7 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
 function compileFold(st: St, acc: TailAcc): ListStream {
   if (acc.reducer || acc.isPreds.length || acc.transforms.length || acc.injects.length || acc.distinct || acc.offset || acc.limit !== null)
     throw new Error('dedup()/limit()/range()/is()/transform before a non-terminal fold() not yet supported');
-  if (st.aliases.size || st.path || st.origin)
+  if (st.carried.aliases.size || st.carried.path || st.carried.origin)
     throw new Error('fold() carrying as()/path()/branch state into a list value not yet supported');
   const carry = carryOf(st);
   const projName = acc.projStep?.name;
@@ -410,13 +410,13 @@ function buildProjection(st: St, acc: TailAcc): Compiled {
  *  matching values(): sack holds whatever the withSack seed / sack(op) arithmetic
  *  produced (int age, double weight, string label). */
 function compileSackRead(st: St, steps: PStep[], stop: number): Compiled {
-  if (!st.sack) throw new Error('sack() requires withSack() or a preceding sack(Operator.x) step');
+  if (!st.carried.sack) throw new Error('sack() requires withSack() or a preceding sack(Operator.x) step');
   if ((steps[stop].args ?? []).length) throw new Error('sack(argument) read form not supported (bare sack() only)');
   const { acc, stop: at } = foldTailAcc(steps, stop + 1);
   if (at !== steps.length) throw new Error(`${steps[at].name}() after sack() not yet supported`);
   if (acc.projStep) throw new Error(`${acc.projStep.name}() after sack() not yet supported`);
   const p = st.last.as('p');
-  const proj: ProjResult = { shape: { kind: 'value' }, colsNode: q`${p.c[st.sack]} AS v`, fromNode: p, scalarExpr: p.c[st.sack], baseWhere: null };
+  const proj: ProjResult = { shape: { kind: 'value' }, colsNode: q`${p.c[st.carried.sack]} AS v`, fromNode: p, scalarExpr: p.c[st.carried.sack], baseWhere: null };
   const orderKey = (): Expression => { throw new Error('order().by(key) after sack() not supported'); };
   return renderProjection(st.q, proj, acc, orderKey);
 }

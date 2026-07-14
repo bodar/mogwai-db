@@ -1,8 +1,8 @@
-import { q, list, Relation, type Expression } from '../q.ts';
+import { q, list, empty, Relation, type Expression } from '../q.ts';
 import { edges } from '../schema.ts';
 import { stepChain, type Step } from '../frontend.ts';
 import { dirsFor, edgeLabelFilter, labelIn, compileFilterPredicate, predicateSql, elemCtx, type ScalarCtx } from '../plan.ts';
-import { advance, elemRel, prevRel, type St, type StepFn } from './context.ts';
+import { advance, elemRel, prevRel, withCarried, carryFrag, carriedCols, mergeCarried, type St, type StepFn } from './context.ts';
 import { foldBody } from './index.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
@@ -34,11 +34,15 @@ function untilPredicate(untilStep: Step, params: Record<string, any>): (id: Expr
 /** Seed a coalesce/optional branch fold: tag each current traverser with a unique
  *  ordinal `o` (ROW_NUMBER) so a branch body's results stay tied to their input row,
  *  even across the multiset (two equal ids get distinct ordinals — the technique
- *  sqlg uses as `sqlg_index`). Returns the base relation (id, o) and a seed St that
- *  carries `o` through the body fold. */
+ *  sqlg uses as `sqlg_index`). The base relation PROJECTS the incoming carried columns
+ *  (as() aliases etc.) alongside `o`, and the seed keeps them, so a branch body threads
+ *  them forward and the merge can preserve them. Returns the base (id, <carried>, o) and
+ *  a seed St carrying `o` + the incoming carried schema. */
 function originSeed(st: St): { base: Relation; seedSt: St } {
-  const base = st.q.cte(q`SELECT id, ROW_NUMBER() OVER () AS o FROM ${st.last}`, ['id', 'o']);
-  return { base, seedSt: { ...st, last: base, origin: 'o', aliases: new Map(), path: undefined } };
+  const s = st.last.as('s');
+  const cc = carriedCols(st.carried);
+  const base = st.q.cte(q`SELECT ${s.c.id} AS id${carryFrag(st.carried, s)}, ROW_NUMBER() OVER () AS o FROM ${s}`, ['id', ...cc, 'o']);
+  return { base, seedSt: withCarried({ ...st, last: base }, { origin: 'o' }) };
 }
 
 /** PREFIX steps that hand-roll a SELECT that DROPS the input-ordinal (`St.origin`)
@@ -57,7 +61,7 @@ const ORIGIN_UNSAFE = new Set(['dedup', 'as', 'repeat', 'choose']);
 function branchArm(name: string, nested: any, seed: St, params: Record<string, any>): St {
   if (!nested) throw new Error(`${name}(traversal) required`);
   const body = stepChain(nested, params);
-  if (seed.origin) {
+  if (seed.carried.origin) {
     const bad = body.find((c) => ORIGIN_UNSAFE.has(c.name));
     if (bad) throw new Error(`${name}() branch step __.${bad.name}() not yet supported inside coalesce()/optional() (input-ordinal not carried)`);
   }
@@ -67,24 +71,33 @@ function branchArm(name: string, nested: any, seed: St, params: Record<string, a
   return end;
 }
 
-/** The SELECT column list a merged branch relation projects: just `id`, plus the
- *  input-ordinal when this branch step is itself nested inside a coalesce/optional
- *  (so the outer ordinal threads through). */
-const branchOutCols = (st: St): string => (st.origin ? `id, ${st.origin}` : 'id');
+/** A branch forks a traverser into arms. as() aliases + path positions are pure
+ *  labels that copy cleanly into each arm, but the sack (a MUTABLE per-traverser
+ *  accumulator) and the otherV() entering-vertex (fromV) have split/merge-on-fork
+ *  semantics we haven't verified — so fail closed rather than let carriedCols carry
+ *  them silently through the merge (CLAUDE.md/the matrix defer 'split/merge-on-fork').
+ *  Aliases/path deliberately pass; only these two are gated here. */
+function assertForkSafe(name: string, st: St): void {
+  if (st.carried.sack) throw new Error(`sack() through ${name}() not yet supported (split/merge-on-fork)`);
+  if (st.carried.fromV) throw new Error(`otherV() context through ${name}() not yet supported`);
+}
 
-/** union(): UNION ALL of each branch, each folded from the current relation through
- *  the full dispatch (multi-hop bodies work). Same-shape branches only (all node or
- *  all edge). Aliased/path-tracked chains defer; scalar/projection branch bodies defer. */
+/** union(): UNION ALL of each branch, each folded from the CURRENT relation (so the
+ *  incoming carried columns — as() aliases, the coalesce/optional ordinal when nested —
+ *  ride into every arm via carryFrag) through the full dispatch (multi-hop bodies work).
+ *  Same-shape branches only (all node or all edge). mergeCarried asserts every arm
+ *  exposes the same carried schema (an arm binding a NEW as() diverges → deferred) and
+ *  the merge projects it, so `union(...).select('a')` resolves. path tracking through a
+ *  branch (1b) still defers. */
 export const union: StepFn = (s, st) => {
-  if (st.aliases.size > 0) throw new Error('union() after as() not yet supported');
-  if (st.path) throw new Error('path tracking through union() not yet supported');
+  if (st.carried.path) throw new Error('path tracking through union() not yet supported');
+  assertForkSafe('union', st);
   const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 2) throw new Error('union() needs at least two branches');
-  const seed: St = { ...st, aliases: new Map(), path: undefined };
-  const ends = branches.map((b) => branchArm('union', b.nested, seed, st.params));
+  const ends = branches.map((b) => branchArm('union', b.nested, st, st.params));
   const elem = ends[0].elem;
   if (ends.some((e) => e.elem !== elem)) throw new Error('union() branches produce different element kinds (mixed-shape) not yet supported');
-  const cols = branchOutCols(st);
+  const cols = mergeCarried(st.carried, ends.map((e) => e.carried)).join(', ');
   return advance(st, list(ends.map((e) => q`SELECT ${cols} FROM ${e.last}`), ' UNION ALL '), { elem });
 };
 
@@ -94,23 +107,30 @@ export const union: StepFn = (s, st) => {
  *  — emit t's results, plus each input unchanged where t produced nothing. Same-shape
  *  only: the self-on-miss fallback is the input element, so t must not flip the kind. */
 export const optional: StepFn = (s, st) => {
-  if (st.aliases.size > 0) throw new Error('optional() after as() not yet supported');
-  if (st.path) throw new Error('path tracking through optional() not yet supported');
+  if (st.carried.path) throw new Error('path tracking through optional() not yet supported');
+  assertForkSafe('optional', st);
   const body = stepChain(s.args[0]?.nested, st.params);
   if (!body.length) throw new Error('optional(traversal) required');
-  if (!st.origin && body.length === 1 && (body[0].name === 'out' || body[0].name === 'in') && st.elem === 'node') {
+  if (!st.carried.origin && body.length === 1 && (body[0].name === 'out' || body[0].name === 'in') && st.elem === 'node') {
     const [from, to] = dirsFor(body[0].name)[0];
     const e = edges.as('e');
     const p = prevRel(st, 'p');
-    return advance(st, q`SELECT COALESCE(${e.c[to]}, ${p.c.id}) AS id FROM ${p} LEFT JOIN ${e} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(body[0].args)}`);
+    // On a hit id = the neighbour; on a miss COALESCE keeps the input id. The carried
+    // columns (aliases) come from `p` (the input) either way — the label bindings are
+    // the input traverser's, correct in both cases.
+    return advance(st, q`SELECT COALESCE(${e.c[to]}, ${p.c.id}) AS id${carryFrag(st.carried, p)} FROM ${p} LEFT JOIN ${e} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(body[0].args)}`);
   }
-  if (st.origin) throw new Error('optional() inside coalesce()/optional() not yet supported');
+  if (st.carried.origin) throw new Error('optional() inside coalesce()/optional() not yet supported');
   const { base, seedSt } = originSeed(st);
   const end = branchArm('optional', s.args[0].nested, seedSt, st.params);
   if (end.elem !== st.elem)
     throw new Error('optional() body changing element kind not yet supported (self-on-miss would be mixed-shape)');
-  const miss = q`SELECT id FROM ${base} WHERE o NOT IN (SELECT o FROM ${end.last})`;
-  return advance(st, list([q`SELECT id FROM ${end.last}`, miss], ' UNION ALL '), { elem: end.elem, origin: null });
+  mergeCarried(seedSt.carried, [end.carried]); // arm must agree with the seed (catches a new as() inside the body)
+  // Output the INCOMING carried schema (drop the internal ordinal `o`); hit rows from
+  // the body, miss rows (o unseen) from the base = the input unchanged, labels intact.
+  const out = ['id', ...carriedCols(st.carried)].join(', ');
+  const miss = q`SELECT ${out} FROM ${base} WHERE o NOT IN (SELECT o FROM ${end.last})`;
+  return advance(st, list([q`SELECT ${out} FROM ${end.last}`, miss], ' UNION ALL '), { elem: end.elem, origin: null });
 };
 
 /** coalesce(t1, …, tn): the first branch that yields output, per input traverser.
@@ -118,19 +138,22 @@ export const optional: StepFn = (s, st) => {
  *  then emit branch k only for inputs no earlier branch produced a row for. Same-shape
  *  branches only; aliased/path/scalar-body/nested-in-origin cases defer. */
 export const coalesce: StepFn = (s, st) => {
-  if (st.aliases.size > 0) throw new Error('coalesce() after as() not yet supported');
-  if (st.path) throw new Error('path tracking through coalesce() not yet supported');
-  if (st.origin) throw new Error('coalesce() inside coalesce()/optional() not yet supported');
+  if (st.carried.path) throw new Error('path tracking through coalesce() not yet supported');
+  assertForkSafe('coalesce', st);
+  if (st.carried.origin) throw new Error('coalesce() inside coalesce()/optional() not yet supported');
   const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 1) throw new Error('coalesce() needs at least one branch');
   const { seedSt } = originSeed(st);
   const ends = branches.map((b) => branchArm('coalesce', b.nested, seedSt, st.params));
   const elem = ends[0].elem;
   if (ends.some((e) => e.elem !== elem)) throw new Error('coalesce() branches produce different element kinds (mixed-shape) not yet supported');
+  mergeCarried(seedSt.carried, ends.map((e) => e.carried)); // arms must agree (catches a new as() inside a body)
+  // Output the INCOMING carried schema (drop the internal ordinal `o`).
+  const out = ['id', ...carriedCols(st.carried)].join(', ');
   const parts = ends.map((end, k) => {
-    if (k === 0) return q`SELECT id FROM ${end.last}`;
+    if (k === 0) return q`SELECT ${out} FROM ${end.last}`;
     const notPrior = list(ends.slice(0, k).map((pr) => q`o NOT IN (SELECT o FROM ${pr.last})`), ' AND ');
-    return q`SELECT id FROM ${end.last} WHERE ${notPrior}`;
+    return q`SELECT ${out} FROM ${end.last} WHERE ${notPrior}`;
   });
   return advance(st, list(parts, ' UNION ALL '), { elem, origin: null });
 };
@@ -139,9 +162,12 @@ export const coalesce: StepFn = (s, st) => {
  *  is just inlining the body (a fan-out through the dispatch). map()'s first-result-
  *  only semantics differ (needs a per-input row-number) and stay deferred. */
 export const flatMap: StepFn = (s, st) => {
-  if (st.aliases.size > 0) throw new Error('flatMap() after as() not yet supported');
-  if (st.path) throw new Error('path tracking through flatMap() not yet supported');
-  return branchArm('flatMap', s.args[0]?.nested, st, st.params);
+  if (st.carried.path) throw new Error('path tracking through flatMap() not yet supported');
+  assertForkSafe('flatMap', st); // 1:many is a split too — same sack/fromV concern
+  // Single body, no merge — incoming aliases ride through the fold (carryFrag from st).
+  const end = branchArm('flatMap', s.args[0]?.nested, st, st.params);
+  mergeCarried(st.carried, [end.carried]); // reject a NEW as() bound inside the body (label escape unverified), matching the merged branch ops
+  return end;
 };
 
 /** repeat(): the folded repeat/emit/times/until cluster (strategies.foldRepeat) →
@@ -159,7 +185,7 @@ export const flatMap: StepFn = (s, st) => {
  *  until+times/emit, complex body) throw — the fold gathered the cluster, not validated it. */
 export const repeat: StepFn = (s, st) => {
   if (st.elem !== 'node') throw new Error('repeat() on edges not yet supported');
-  if (st.aliases.size > 0) throw new Error('repeat() after as() not yet supported');
+  if (st.carried.aliases.size > 0) throw new Error('repeat() after as() not yet supported');
   const cluster = s.cluster ?? [s];
   const rep = cluster.find((c) => c.name === 'repeat');
   if (!rep) throw new Error(`${s.name}() without repeat() not yet supported`);
@@ -189,15 +215,15 @@ export const repeat: StepFn = (s, st) => {
   // they terminate at the natural fixpoint (see the docstring). null = no bound.
   const maxDepth = timesStep ? Number(timesStep.args[0]) : null;
 
-  // Path tracking. `wantsPathOutput`: a downstream path() (chain seeded st.path at V).
+  // Path tracking. `wantsPathOutput`: a downstream path() (chain seeded st.carried.path at V).
   // simplePath() in the body needs the accumulated path for its cycle guard even
   // when nothing outputs it. Either → accumulate a JSONB array through the walk.
-  const wantsPathOutput = !!st.path;
+  const wantsPathOutput = !!st.carried.path;
   // Fail closed on path() spanning more than one movement segment: either a linear
   // hop before repeat (`cols` length > 1) OR a path already accumulated by a PRIOR
   // repeat cluster (`array`). Both would need the walk seeded from the carried path,
   // not a fresh jsonb_array(id) — deferred rather than silently dropping the prefix.
-  if (wantsPathOutput && (st.path!.kind === 'array' || st.path!.cols.length > 1))
+  if (wantsPathOutput && (st.carried.path!.kind === 'array' || st.carried.path!.cols.length > 1))
     throw new Error('path() spanning more than one repeat()/movement is not yet supported');
   if (wantsPathOutput && emitStep) throw new Error('emit() with path() not yet supported');
   const trackArray = wantsPathOutput || simplePathInBody;
@@ -265,7 +291,7 @@ const notCoalesce = (e: Expression): Expression => q`NOT COALESCE((${e}), 0)`;
 function gate(st: St, test: Expression): St {
   const n = elemRel(st);
   const p = prevRel(st, 'p');
-  return advance(st, q`SELECT ${n.c.id} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${test}`);
+  return advance(st, q`SELECT ${n.c.id}${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${test}`);
 }
 
 /**
@@ -281,8 +307,8 @@ function gate(st: St, test: Expression): St {
  * can't carry them), and choose() after as()/with path tracking.
  */
 export const choose: StepFn = (s, st) => {
-  if (st.aliases.size > 0) throw new Error('choose() after as() not yet supported');
-  if (st.path) throw new Error('path tracking through choose() not yet supported');
+  if (st.carried.path) throw new Error('path tracking through choose() not yet supported');
+  assertForkSafe('choose', st);
   const args = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
   if (args.length < 2 || args.length > 3)
     throw new Error('choose(): only the predicate form choose(pred, then[, else]) is supported (option-map form not yet supported)');
@@ -303,6 +329,7 @@ export const choose: StepFn = (s, st) => {
   if (thenEnd.elem !== elseEnd.elem)
     throw new Error('choose() branches produce different element kinds (mixed-shape) not yet supported');
 
-  const merged = list([q`SELECT id FROM ${thenEnd.last}`, q`SELECT id FROM ${elseEnd.last}`], ' UNION ALL ');
+  const cols = mergeCarried(st.carried, [thenEnd.carried, elseEnd.carried]).join(', ');
+  const merged = list([q`SELECT ${cols} FROM ${thenEnd.last}`, q`SELECT ${cols} FROM ${elseEnd.last}`], ' UNION ALL ');
   return advance(st, merged, { elem: thenEnd.elem });
 };

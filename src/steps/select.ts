@@ -29,7 +29,7 @@ export function compileSelectProject(st: St, proj: PStep, tail: TailMods): Compi
   const { orders, distinct, offset, limit } = tail;
   if (orders.length) throw new Error('order() after select()/project() not yet supported');
   const isProject = proj.name === 'project';
-  const aliases: AliasMap = st.aliases;
+  const aliases: AliasMap = st.carried.aliases;
   const curElem = st.elem;
 
   // Reject the deferred long-tail forms explicitly (tokens are captured, not
@@ -118,9 +118,9 @@ export function compilePath(st: St, proj: PStep, acc: TailAcc): Compiled {
   // Reachable only from a union() SOURCE step: seedUnion doesn't seed p0 (unlike
   // seedSource, which handles V()/E()), so path tracking never starts. Mid-chain
   // union()/optional()/repeat() are caught earlier by their own path guards.
-  if (!st.path) throw new Error('path() over a union() source step is not yet supported');
-  if (st.path.kind === 'array') return compilePathArray(st, acc);
-  const pathState = st.path; // narrowed to 'cols'; held in a local so the .map closure keeps the narrowing
+  if (!st.carried.path) throw new Error('path() over a union() source step is not yet supported');
+  if (st.carried.path.kind === 'array') return compilePathArray(st, acc);
+  const pathState = st.carried.path; // narrowed to 'cols'; held in a local so the .map closure keeps the narrowing
   if (acc.orders.length) throw new Error('order() after path() not yet supported');
   if (acc.reducer) throw new Error(`${acc.reducer}() after path() not yet supported`);
   if (acc.isPreds.length) throw new Error('is() after path() not yet supported');

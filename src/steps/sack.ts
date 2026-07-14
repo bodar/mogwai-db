@@ -44,12 +44,12 @@ export const sack: StepFn = (s, st) => {
   if (!SACK_OPS.has(op)) throw new Error(`sack(Operator.${op}) not yet supported`);
   const bys = (s as any).bys ?? [];
   if (bys.length > 1) throw new Error('Sack step can only have one by modulator');
-  if (st.aliases.size || st.path || st.origin)
+  if (st.carried.aliases.size || st.carried.path || st.carried.origin)
     throw new Error('sack(Operator.x) after as()/path()/branch state not yet supported');
 
   const byVal = sackByValue(bys[0], st);
   const p = prevRel(st, 'p');
-  const oldSack = st.sack ? p.c[st.sack] : null;
+  const oldSack = st.carried.sack ? p.c[st.carried.sack] : null;
   let newSack: Expression;
   if (op === 'assign') newSack = byVal;
   else {
@@ -65,7 +65,7 @@ export const sack: StepFn = (s, st) => {
   // Carry alias/path/origin columns unchanged; REPLACE the sack column (so exclude it
   // from the carried-forward set and re-project the merged value as `sk`).
   const n = elemRel(st);
-  const others = carriedCols(st).filter((c) => c !== st.sack);
+  const others = carriedCols(st.carried).filter((c) => c !== st.carried.sack);
   const othersFrag = others.length ? list(others.map((c) => q`, ${p.c[c]}`), '') : empty;
   // A by() that yields nothing (a missing property) drops the traverser (TinkerPop's
   // by-modulator semantics — same as values()); label/id/constant by-values are never

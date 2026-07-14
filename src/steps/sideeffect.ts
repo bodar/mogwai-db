@@ -70,7 +70,7 @@ const register = (st: St, name: string, def: SideEffectDef): St =>
 const groupSideEffect = (isCount: boolean): StepFn => (s, st) => {
   const name = (s.args ?? []).find((a: any) => typeof a === 'string');
   if (typeof name !== 'string') throw new Error(`${isCount ? 'groupCount' : 'group'}() side-effect key must be a string`);
-  if (st.aliases.size || st.path)
+  if (st.carried.aliases.size || st.carried.path)
     throw new Error(`${isCount ? 'groupCount' : 'group'}('${name}') after as()/path() not yet supported`);
   const tbl = st.elem === 'edge' ? 'edges' : 'nodes';
   const def: SideEffectDef = {
