@@ -6,7 +6,7 @@ import {
 } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { elemRel, type St } from './context.ts';
-import { carryOf, toListStream, type ListStream, type ScalarStream } from './stream.ts';
+import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStream } from './stream.ts';
 import { compileUnfold } from './list.ts';
 import { dispatchNext } from './index.ts';
 import {
@@ -42,6 +42,9 @@ export interface TailAcc {
 }
 
 const PROJECTION_NAMES = new Set(['values', 'id', 'label', 'count', 'valueMap', 'elementMap', 'select', 'project', 'path']);
+// Scalar-producing projections: one `v` value per row. A chain that continues past one
+// of these (e.g. into count()) retypes to a ScalarStream and re-enters (compileTail).
+const SCALAR_PROJ = new Set(['values', 'id', 'label']);
 // Per-value transform steps gathered into acc.transforms. Most are SQL scalar
 // expressions (scalarTx). `asBool` is a typed cast: compileInject resolves it over
 // inject constants (see asBoolConst); on a V/E-rooted stream it falls through to
@@ -195,6 +198,27 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
     if (stop + 1 < steps.length)
       return dispatchNext(groupToMapStream(st, isCount, steps[stop].bys ?? [], src), steps, stop + 1);
     return compileGroup(st, isCount, steps[stop].bys ?? [], src);
+  }
+
+  // Chained projection: a scalar-producing projection (values/id/label) whose chain
+  // ENDS in count() retypes to a ScalarStream and re-enters (dispatchNext →
+  // compileFromScalar), dissolving the "one projection per traversal" ceiling the same
+  // way fold()/group() do — each phase gets a fresh accumulator. Scoped to a TERMINAL
+  // count() (the only projection valid on a scalar stream; any intervening dedup/is/
+  // limit is handled by compileFromScalar's own fold). count()-then-more falls through
+  // to the single-projection tail below (fails closed there).
+  if (SCALAR_PROJ.has(steps[stop]?.name) && steps.length - 1 > stop && steps[steps.length - 1]?.name === 'count') {
+    const n = elemRel(st);
+    const l = labels.as('l');
+    const p = st.last.as('p');
+    const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
+    const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
+    const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
+    const proj = PROJECTORS.get(steps[stop].name)!({ st, n, l, extId, vJoin, vlJoin, projStep: steps[stop] });
+    const where = proj.baseWhere ? q` WHERE ${proj.baseWhere}` : empty;
+    const rel = st.q.cte(q`SELECT ${proj.colsNode} FROM ${proj.fromNode}${where}`, ['v']);
+    const asTag = proj.shape.kind === 'value' ? proj.shape.as : undefined;
+    return dispatchNext(toScalarStream(carryOf(st), rel, asTag), steps, stop + 1);
   }
 
   // Tail fold: accumulate the projection + modifiers, stopping at a retype boundary

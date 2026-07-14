@@ -299,6 +299,21 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.inject(1).as("a").select("a")', {})).toThrow('step not implemented: as()');
   });
 
+  test('chained projection: a scalar projection then count() retypes to a scalar stream (re-entry)', () => {
+    // values().count() no longer hits the "one projection per traversal" ceiling — it
+    // retypes to a ScalarStream and counts the value ROWS (multi-valued keys counted
+    // per-value, matching TinkerPop's values()-flatMap semantics).
+    const c = read('g.V().values("age").count()');
+    expect(c.shape).toEqual({ kind: 'count' });
+    expect(c.sql).toContain('COUNT(*) AS v FROM (SELECT v FROM');
+    expect(c.sql).toContain('SELECT vp.value AS v FROM'); // the values() flatMap feeds the count
+    // intervening scalar-stream modifiers compose through the re-entry
+    expect(read('g.V().values("age").dedup().count()').sql).toContain('COUNT(*) AS v FROM (SELECT DISTINCT v FROM');
+    expect(read('g.V().out().id().count()').shape).toEqual({ kind: 'count' });
+    // count() must be terminal for the retype; count()-then-more stays deferred (fail closed)
+    expect(() => compile('g.V().values("age").count().is(P.gt(2))', {})).toThrow('only one projection step is supported per traversal');
+  });
+
   test('asBool() resolves inject constants at compile time + tags the value shape', () => {
     // The value shape carries `as:'bool'` so the handler frames the 0/1 as Boolean.
     expect(read('g.inject(1).asBool()').shape).toEqual({ kind: 'value', as: 'bool' });
