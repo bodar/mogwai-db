@@ -1,4 +1,4 @@
-import { q, list, type Expression } from '../q.ts';
+import { q, list, value, type Expression } from '../q.ts';
 import {
   elemCtx, compileNestedScalar, scalarProp, aliasCtx, labelNameSub, predicateSql, type ScalarCtx,
 } from '../plan.ts';
@@ -100,6 +100,67 @@ export function compileMath(st: St, steps: PStep[], stop: number): Compiled {
     // fail-closed (no row), since GraphBinary Double framing has no Inf/NaN path — a
     // known, unreachable-in-corpus divergence, deliberately not emitting a wrong 0.0.
     baseWhere: predicateSql(mathExpr, undefined),
+  };
+  return renderProjection(st.q, proj, acc, nodePropOrderKey(st));
+}
+
+// ---------- format() (per-traverser string templating) ----------
+
+/**
+ * format("…%{token}…") → one SQL string built by `||`-concatenating the literal parts
+ * with each token's resolved value (SQLite `||` coerces to text, and a NULL operand
+ * makes the whole result NULL — so a missing property filters the traverser, matching
+ * FormatStep). A `%{_}` placeholder pulls the next by() modulator (round-robin, first-
+ * seen order, like math); a `%{key}` placeholder reads the current element's property.
+ * A format with no tokens is a constant string. Deferred: reading project()/select()
+ * map columns, and the as()-alias fallback for a missing property.
+ */
+export function compileFormat(st: St, steps: PStep[], stop: number): Compiled {
+  const s = steps[stop];
+  const tmpl = s.args[0];
+  if (typeof tmpl !== 'string') throw new Error('format(string) required');
+  const bys = s.bys ?? [];
+  const p = st.last.as('p');
+  const ctx = elemCtx(elemRel(st), st.elem);
+
+  // Split into alternating literal / token parts. Each `||` operand is a bound literal
+  // (a plain string) or a resolved value expression; concatenate them all.
+  const re = /%\{([^}]*)\}/g;
+  const pieces: Expression[] = [];
+  let last = 0, m: RegExpExecArray | null, u = 0, hadToken = false;
+  while ((m = re.exec(tmpl)) !== null) {
+    if (m.index > last) pieces.push(q`${value(tmpl.slice(last, m.index))}`);
+    const tok = m[1];
+    hadToken = true;
+    if (tok === '_') {
+      if (!bys.length) throw new Error(`format("${tmpl}"): a %{_} placeholder needs a by() modulator`);
+      const byArgs = bys[u++ % bys.length];
+      const nested = byArgs.find((a: any) => a && typeof a === 'object' && 'nested' in a);
+      const strKey = byArgs.find((a: any) => typeof a === 'string');
+      if (nested) pieces.push(compileNestedScalar(stepChain(nested.nested, st.params), ctx).expr);
+      else if (strKey !== undefined) pieces.push(scalarProp(ctx, strKey));
+      else throw new Error(`format("${tmpl}"): a by() modulator must be a property key or a traversal`);
+    } else {
+      // A named token → the current element's property (first-under-multi for a node).
+      pieces.push(scalarProp(ctx, tok));
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < tmpl.length) pieces.push(q`${value(tmpl.slice(last))}`);
+  // A constant template (no tokens) is one string literal; concatenating a single
+  // piece is fine. Cast the first piece to TEXT so a lone value token frames as string.
+  const expr = pieces.length ? q`CAST(${list(pieces, ' || ')} AS TEXT)` : q`${value('')}`;
+
+  const { acc, stop: fstop } = foldTailAcc(steps, stop + 1);
+  if (fstop !== steps.length) throw new Error(`${steps[fstop].name}() after format() not yet supported`);
+  const n = elemRel(st);
+  const proj: ProjResult = {
+    shape: { kind: 'value' }, colsNode: q`${expr} AS v`,
+    fromNode: q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`, scalarExpr: expr,
+    // A missing property (NULL) propagates through `||` → NULL result → drop the row
+    // (FormatStep filters a traverser that can't fill a placeholder). A constant format
+    // (hadToken=false) never NULLs, so no filter. `hadToken` gates the baseWhere.
+    baseWhere: hadToken ? predicateSql(expr, undefined) : null,
   };
   return renderProjection(st.q, proj, acc, nodePropOrderKey(st));
 }
