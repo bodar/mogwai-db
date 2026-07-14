@@ -57,7 +57,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `and`, `or`, `not`, `filter(__.…)` | ✅ | ✅ `and`/`or`/`not`, `filter(traversal)`<br>❌ `filter(predicate)` (non-traversal) — use `filter(traversal)` |
 | `P` predicates (eq/neq/lt/gt/within/without/between/inside/outside) | ✅ | ✅ `between` is `[lo,hi)` (two comparisons, not SQL `BETWEEN`) |
 | **TextP** (startingWith/endingWith/containing + negations) | ✅ | ✅ bound `LIKE`/`NOT LIKE`, pattern escaped |
-| **TextP regex** (`regex`/`notRegex`) | ❌ | DO SQLite has no regex UDF; would need post-SQL JS filter |
+| **TextP regex** (`regex`/`notRegex`) | 🚫 | **Unimplementable in SQL.** Stock SQLite only *reserves* the `REGEXP` operator (needs a `regexp()` UDF that ships with no implementation — verified `no such function: REGEXP` on bun:sqlite 3.53.0); DO SQLite exposes no `sqlite3_create_function` and blocks `load_extension`, so the UDF can't be supplied. A post-SQL JS filter would violate locked #3. (The `regexp_*` funcs in CF docs are **R2 SQL**, a different engine, not DO SQLite.) `LIKE`-expressible forms — startingWith/endingWith/containing — are ✅ above; only true regex is out |
 | `typeOf(GType)` over a **stored property** | ❌ | SQLite storage class can't distinguish bool/datetime/uuid from int/text — needs a storage type-tag scheme |
 | `dedup()` | 🟡 | ✅ bare `dedup()`<br>❌ `dedup(label)`<br>❌ `dedup()` after `as()` / with path tracking (path-distinct semantics) |
 | `identity()` | ✅ | |
@@ -90,12 +90,12 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 
 | Step | Status | Notes |
 |---|:--:|---|
-| `choose(pred, then[, else])` | 🟡 | ✅ gated-seed dispatch<br>❌ scalar/projection arm bodies<br>❌ mixed-shape arms<br>❌ after `as()`<br>❌ path tracking through |
+| `choose(pred, then[, else])` | 🟡 | ✅ gated-seed dispatch<br>✅ **incoming `as()` threads through** the gated arms + merge (carried-schema)<br>❌ scalar/projection arm bodies<br>❌ mixed-shape arms<br>❌ a NEW `as()` bound *inside* an arm (arms diverge — fails closed)<br>❌ path tracking through (1b) |
 | `choose(fn).option(k, body)…` | 🟡 | ✅ scalar-CASE option-map<br>❌ without a `Pick.none` default<br>❌ element/discard/identity/fail bodies<br>❌ `Pick.unproductive`/`any`<br>❌ any trailing step |
-| `coalesce(…)` | 🟡 | ✅ first-non-empty via the `St.origin` ordinal<br>❌ scalar branches<br>❌ mixed-shape<br>❌ after `as()`<br>❌ nested in coalesce/optional<br>❌ path tracking |
-| `union(…)` | 🟡 | ✅ multi-hop arms via `foldBody`<br>❌ mixed-shape<br>❌ source-branch tails/`as()`<br>❌ path tracking |
-| `optional(…)` | 🟡 | ✅ single-hop LEFT JOIN fast path + multi-hop<br>❌ element-kind change on miss<br>❌ after `as()`<br>❌ path tracking |
-| `flatMap(__.…)` | 🟡 | ✅ element body fan-out<br>❌ after `as()`<br>❌ path tracking |
+| `coalesce(…)` | 🟡 | ✅ first-non-empty via the `St.origin` ordinal<br>✅ **incoming `as()` threads through** (originSeed projects it alongside the ordinal, merge preserves it)<br>❌ scalar branches<br>❌ mixed-shape<br>❌ a NEW `as()` inside an arm<br>❌ nested in coalesce/optional<br>❌ path tracking (1b) |
+| `union(…)` | 🟡 | ✅ multi-hop arms via `foldBody`<br>✅ **incoming `as()` threads through** the merge (`mergeCarried`), so `union(…).select('a')` resolves<br>❌ mixed-shape<br>❌ source-branch tails<br>❌ a NEW `as()` inside an arm<br>❌ path tracking (1b) |
+| `optional(…)` | 🟡 | ✅ single-hop LEFT JOIN fast path + multi-hop<br>✅ **incoming `as()` threads through** (fast path carries it from the input; general path via originSeed)<br>❌ element-kind change on miss<br>❌ a NEW `as()` inside an arm<br>❌ path tracking (1b) |
+| `flatMap(__.…)` | 🟡 | ✅ element body fan-out<br>✅ **incoming `as()` threads through** (single body, no merge)<br>❌ path tracking (1b) |
 | `map(__.<scalar>)` | 🟡 | ✅ correlated scalar (`map(__.out().count())` etc)<br>❌ **element**-body `map` (first-result — needs `ROW_NUMBER` over `St.origin`)<br>❌ alias/select/fold bodies<br>❌ trailing steps |
 | `local(…)` | 🟡 | ✅ per-element scalar reduction (`local(outE().count())` → tail projector)<br>✅ movement + a per-element `limit()`/`range()` via `ROW_NUMBER() OVER (PARTITION BY` input ordinal`)` (`local(bothE().limit(1))`)<br>❌ non-movement bodies (match/simplePath/union/nested local), no-barrier bodies, `order()`/`dedup()` inside, after `as()`/`path()`, `local(aggregate(...))` |
 
@@ -215,6 +215,7 @@ MapStream, §MapStream). Still gates `ProductiveByStrategy` (needs `local()` too
 | **OLAP / GraphComputer** | locked out — mogwai is OLTP (small per-tenant graphs) |
 | **Multi-request `g.tx()`** | needs DO session state (a P5 stretch, not a non-goal forever) |
 | `tree()` | 0 conformance (JS GLV stubs it) — build only for a non-JS consumer |
+| **TextP regex** (`regex`/`notRegex`) | Platform wall, not a design choice: stock SQLite ships no `regexp()` UDF and DO blocks `sqlite3_create_function`/`load_extension`. Same wall as `typeOf` over stored props. `LIKE`-expressible TextP (startsWith/endsWith/containing) stays ✅ |
 
 ---
 

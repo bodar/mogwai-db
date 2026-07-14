@@ -49,7 +49,7 @@ export function compileUnfold(s: ListStream): St | ScalarStream | ListStream {
     q`SELECT je.value AS ${col} FROM ${s.rel}, json_each(${s.rel.c.list}) je ORDER BY je.key`;
   if (s.of.kind === 'elem') {
     const rel = s.q.cte(explode('id'), ['id']);
-    return { ...c, kind: 'elements', last: rel, elem: s.of.elem, aliases: new Map(), path: undefined, origin: undefined };
+    return { ...c, kind: 'elements', last: rel, elem: s.of.elem, carried: { ...c.carried, aliases: new Map(), path: undefined, origin: undefined } };
   }
   // A list-of-lists: each exploded element is itself a JSONB array → a ListStream row
   // of the inner shape (so a further unfold / Scope.local op re-enters the list phase).

@@ -92,19 +92,19 @@ function applyPattern(st: St, p: Pattern, aliases: Map<string, { col: string; el
 
 export const match: StepFn = (s, st) => {
   if (st.elem !== 'node') throw new Error('match() on edges not yet supported');
-  if (st.path) throw new Error('path tracking through match() not yet supported');
+  if (st.carried.path) throw new Error('path tracking through match() not yet supported');
   const patArgs = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
   if (!patArgs.length) throw new Error('match() needs at least one pattern');
   const pats = patArgs.map((a) => parsePattern(stepChain(a.nested, st.params)));
 
   // Root = a start var never used as an end (bound to the incoming traverser).
   const ends = new Set(pats.map((p) => p.end).filter((e): e is string => !!e));
-  const roots = [...new Set(pats.map((p) => p.start))].filter((v) => !ends.has(v) && !st.aliases.has(v));
+  const roots = [...new Set(pats.map((p) => p.start))].filter((v) => !ends.has(v) && !st.carried.aliases.has(v));
   if (roots.length !== 1)
     throw new Error(`match() with ${roots.length} root variables not yet supported (needs exactly one start-only var)`);
   const root = roots[0];
 
-  const aliases = new Map(st.aliases);
+  const aliases = new Map(st.carried.aliases);
   const bind = (v: string): string => {
     let e = aliases.get(v);
     if (!e) { e = { col: `a${aliases.size}`, elem: 'node' as const }; aliases.set(v, e); }
@@ -114,7 +114,7 @@ export const match: StepFn = (s, st) => {
   // Seed: carry the incoming id + any outer alias columns, and bind the root = id.
   const prev0 = prevRel(st, 'p');
   const rootCol = bind(root);
-  const seedProj: Expression[] = [q`${prev0.c.id}`, ...aliasColsOf(st.aliases).map((c) => q`${prev0.c[c]}`), q`${prev0.c.id} AS ${rootCol}`];
+  const seedProj: Expression[] = [q`${prev0.c.id}`, ...aliasColsOf(st.carried.aliases).map((c) => q`${prev0.c[c]}`), q`${prev0.c.id} AS ${rootCol}`];
   let cur: St = advance(st, q`SELECT ${list(seedProj, ', ')} FROM ${prev0}`, { aliases: new Map(aliases), cols: ['id', ...aliasColsOf(aliases)] });
 
   // Greedy dependency order: process a pattern whose start is bound; bind/constrain end.

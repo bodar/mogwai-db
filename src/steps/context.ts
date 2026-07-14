@@ -54,21 +54,35 @@ export type SideEffectDef =
   | { kind: 'group'; from: string; ctx: import('../plan.ts').ScalarCtx; elem: import('../render.ts').ElemShape; isCount: boolean; bys: any[][] };
 export type SideEffectMap = ReadonlyMap<string, SideEffectDef>;
 
-/** The context every traverser stream carries, independent of its shape (elements
- *  vs a scalar/list value stream — see stream.ts). Carved out of `St` so a retype
- *  at a tail boundary (fold→list, unfold→elements/scalar) preserves the shared state
- *  — the query builder, bound params, live aliases, path, coalesce ordinal, sack, and
- *  the named side-effect registry — without the elements-only `last`/`elem`. */
-export interface Carry {
-  readonly q: Query;
+/** The per-traverser CARRIED SCHEMA: the columns physically present on the id-relation
+ *  beyond `id`, threaded UNCHANGED across every hop and REQUIRED to agree across a
+ *  branch merge. These six travel together as ONE unit — grouping them here (rather than
+ *  as loose siblings on Carry) is what makes a branch/tail step that silently drops them
+ *  structurally obvious, and keeps carriedCols/carryFrag/mergeCarried the single source
+ *  of truth. A struct of TYPED ROLES on purpose, NOT a flat column list: aliases is a
+ *  name→col Map (select/where lookup), path a two-regime union, sack is mutable, fromV
+ *  clears on landing, origin drops at a branch output — homogenising them would re-lose
+ *  the structure each reader needs. */
+export interface Carried {
   readonly aliases: AliasMap;
-  readonly params: Record<string, any>;
   readonly path?: PathState;             // present iff the chain tracks a linear path
   readonly origin?: string;              // coalesce/optional: the carried input-ordinal column
   readonly sack?: string;                // sack: the carried per-traverser scalar column (e.g. 'sk')
+  readonly fromV?: string;               // edge context: the vertex an edge was entered from (for otherV())
+  readonly trackFromV?: boolean;         // seeded true iff the chain uses otherV() — gates fromV emission (hot-path: no extra column otherwise)
+}
+
+/** The context every traverser stream carries, independent of its shape (elements vs a
+ *  scalar/list value stream — see stream.ts). Carved out of `St` so a retype at a tail
+ *  boundary (fold→list, unfold→elements/scalar) preserves the shared state. Three
+ *  DELIBERATELY-distinguished kinds of thing: ambient compile context (`q`/`params`),
+ *  the named side-effect registry (`sideEffects` — CTEs that OUTLIVE the traverser), and
+ *  the per-traverser carried column schema (`carried`). */
+export interface Carry {
+  readonly q: Query;
+  readonly params: Record<string, any>;
   readonly sideEffects?: SideEffectMap;  // named side-effect collections (aggregate/store/group('a'))
-  readonly fromV?: string;               // edge context: the column holding the vertex an edge was entered from (for otherV())
-  readonly trackFromV?: boolean;         // seeded true iff the chain uses otherV() — gates fromV emission on edge steps (hot-path: no extra column otherwise)
+  readonly carried: Carried;             // the per-traverser carried column schema
 }
 
 /** Immutable prefix state threaded through the step fold. Everything the dispatch
@@ -94,47 +108,70 @@ export const prevRel = (st: St, alias?: string): Relation => alias ? st.last.as(
 /** The current element's table aliased `n` (nodes/edges by elem). */
 export const elemRel = (st: St, alias = 'n'): Relation => (st.elem === 'edge' ? edges : nodes).as(alias);
 
-/** Every column carried UNCHANGED across a hop: the as() alias columns, the
- *  path-position columns (when path tracking is active), and the coalesce/optional
- *  input-ordinal (when set) — so a branch body's results stay tagged with which
- *  input traverser produced them. */
-export const carriedCols = (st: St): string[] =>
-  [...aliasColsOf(st.aliases), ...pathColsOf(st.path), ...(st.origin ? [st.origin] : []), ...(st.sack ? [st.sack] : []), ...(st.fromV ? [st.fromV] : [])];
+/** Every column carried UNCHANGED across a hop, in a STABLE order: the as() alias
+ *  columns, the path-position columns, then origin/sack/fromV when set. THE single
+ *  source of truth for "what columns are on the id-relation" — movement/filter thread
+ *  it, and a branch merge MUST reproduce it (mergeCarried). */
+export const carriedCols = (c: Carried): string[] =>
+  [...aliasColsOf(c.aliases), ...pathColsOf(c.path), ...(c.origin ? [c.origin] : []), ...(c.sack ? [c.sack] : []), ...(c.fromV ? [c.fromV] : [])];
 
 /** `, p.a0, p.p0, …` — the carried columns qualified by `p`; empty when nothing is
  *  live. Movement/filter CTEs splice this after the moved id so labelled traversers
  *  and path positions ride forward. */
-export function carryFrag(st: St, p: Relation): Expression {
-  const cols = carriedCols(st);
-  return cols.length ? list(cols.map((c) => q`, ${p.c[c]}`), '') : empty;
+export function carryFrag(c: Carried, p: Relation): Expression {
+  const cols = carriedCols(c);
+  return cols.length ? list(cols.map((x) => q`, ${p.c[x]}`), '') : empty;
 }
 
+/** The projection column list a branch merge must reproduce so the carried schema
+ *  survives the UNION ALL. Asserts every arm exposes the seed's carried columns (the
+ *  shared-seed invariant guarantees this unless an arm bound a NEW as()/path inside its
+ *  body — deferred, caught upstream), then returns `['id', ...seed cols]`. A branch that
+ *  projects bare `id` instead of calling this is now visibly wrong. */
+export function mergeCarried(seed: Carried, arms: Carried[]): string[] {
+  const want = carriedCols(seed);
+  for (const a of arms) {
+    const got = carriedCols(a);
+    if (got.length !== want.length || got.some((c, i) => c !== want[i]))
+      throw new Error('branch arms disagree on carried columns (a step binding new as()/path/sack state inside a branch arm not yet supported)');
+  }
+  return ['id', ...want];
+}
+
+type CarriedOpts = { aliases?: AliasMap; path?: PathState; origin?: string | null; sack?: string | null; fromV?: string | null };
+
+/** Apply a carried-column patch with the established tri-state: aliases/path — a value
+ *  overrides, undefined keeps; origin/sack/fromV — `null` CLEARS (a branch step dropping
+ *  the ordinal at its output), undefined keeps, a string sets. trackFromV is chain-global
+ *  (never changed by advance). */
+export function carriedWith(c: Carried, o: CarriedOpts): Carried {
+  return {
+    aliases: o.aliases ?? c.aliases,
+    path: o.path ?? c.path,
+    origin: o.origin === null ? undefined : (o.origin ?? c.origin),
+    sack: o.sack === null ? undefined : (o.sack ?? c.sack),
+    fromV: o.fromV === null ? undefined : (o.fromV ?? c.fromV),
+    trackFromV: c.trackFromV,
+  };
+}
+
+/** Return a new stream state with its carried schema shallow-patched (explicit undefined
+ *  CLEARS — for the branch/local seeds that reset aliases/path). The escape hatch for the
+ *  few sites that rebuild carried directly rather than through advance. */
+export const withCarried = <T extends Carry>(st: T, patch: Partial<Carried>): T =>
+  ({ ...st, carried: { ...st.carried, ...patch } });
+
 /**
- * Append `body` as the new id-relation and advance to it. `cols` defaults to
- * id + the currently-bound alias columns (what movement/filter carry); as()
- * passes a widened alias set. `elem` overrides when a step changes the element kind
- * (…E/…V). The returned St is a fresh object — the old one is untouched.
+ * Append `body` as the new id-relation and advance to it. Carried-column opts route
+ * through carriedWith (same tri-state as before); `cols` defaults to id + the resulting
+ * carried columns; `elem` overrides when a step changes the element kind (…E/…V). Flat
+ * opts kept identical, so every call site is unchanged. Returns a fresh St.
  */
 export function advance(
   st: St, body: Expression,
-  opts: { aliases?: AliasMap; elem?: Elem; cols?: readonly string[]; path?: PathState; origin?: string | null; sack?: string | null; fromV?: string | null } = {},
+  opts: CarriedOpts & { elem?: Elem; cols?: readonly string[] } = {},
 ): St {
-  const aliases = opts.aliases ?? st.aliases;
-  const path = opts.path ?? st.path;
-  // origin: opts.origin === null clears it (a branch step dropping the ordinal at
-  // its output); undefined keeps st's; a string sets it. sack/fromV ride the same tri-state.
-  const origin = opts.origin === null ? undefined : (opts.origin ?? st.origin);
-  const sack = opts.sack === null ? undefined : (opts.sack ?? st.sack);
-  const fromV = opts.fromV === null ? undefined : (opts.fromV ?? st.fromV);
-  const cols = opts.cols ?? ['id', ...aliasColsOf(aliases), ...pathColsOf(path), ...(origin ? [origin] : []), ...(sack ? [sack] : []), ...(fromV ? [fromV] : [])];
-  return {
-    ...st,
-    aliases,
-    path,
-    origin,
-    sack,
-    fromV,
-    elem: opts.elem ?? st.elem,
-    last: st.q.cte(body, cols),
-  };
+  const carried = carriedWith(st.carried, opts);
+  const cols = opts.cols ?? ['id', ...carriedCols(carried)];
+  return { ...st, carried, elem: opts.elem ?? st.elem, last: st.q.cte(body, cols) };
 }

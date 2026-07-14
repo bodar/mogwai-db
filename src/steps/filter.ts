@@ -26,7 +26,7 @@ const currentCtx = (st: St) => elemCtx(elemRel(st), st.elem);
  *  onto the aliased traverser: its correlation becomes the carried alias column
  *  (`p.a{k}`), read back via aliasCtx. Throws for an unseen label. */
 const aliasResolver = (st: St) => (label: string): ScalarCtx => {
-  const entry = st.aliases.get(label);
+  const entry = st.carried.aliases.get(label);
   if (!entry) throw new Error(`where(__.as("${label}")): no such label — as("${label}") was not seen`);
   return aliasCtx(prevRel(st, 'p').c[entry.col], entry.elem);
 };
@@ -36,7 +36,7 @@ const aliasResolver = (st: St) => (label: string): ScalarCtx => {
 function filterCte(st: St, test: Expression): St {
   const n = elemRel(st);
   const p = prevRel(st, 'p');
-  return advance(st, q`SELECT ${n.c.id}${carryFrag(st, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${test}`);
+  return advance(st, q`SELECT ${n.c.id}${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${test}`);
 }
 
 /** as(): bind each label to the current traverser (rebinds reuse the label's
@@ -44,7 +44,7 @@ function filterCte(st: St, test: Expression): St {
  *  columns, (re)setting the bound ones to the current id. */
 export const as: StepFn = (s, st) => {
   const labels = s.args.filter((a): a is string => typeof a === 'string');
-  const aliases = new Map(st.aliases);
+  const aliases = new Map(st.carried.aliases);
   const rebind: string[] = [];
   for (const lbl of labels) {
     const existing = aliases.get(lbl);
@@ -54,7 +54,7 @@ export const as: StepFn = (s, st) => {
   }
   // Path-position columns pass through untouched (labels-on-path is deferred, so
   // as() only rebinds alias columns here — the path element set is unchanged).
-  const cols = ['id', ...[...aliases.values()].map((a) => rebind.includes(a.col) ? `id AS ${a.col}` : a.col), ...pathColsOf(st.path)];
+  const cols = ['id', ...[...aliases.values()].map((a) => rebind.includes(a.col) ? `id AS ${a.col}` : a.col), ...pathColsOf(st.carried.path)];
   return advance(st, q`SELECT ${cols.join(', ')} FROM ${prevRel(st)}`, { aliases });
 };
 
@@ -67,13 +67,13 @@ export const as: StepFn = (s, st) => {
  *  from()/to() scoping is deferred (they arrive as their own steps → clear error). */
 function pathDistinctTest(st: St, simple: boolean): Expression {
   const name = simple ? 'simplePath' : 'cyclicPath';
-  if (!st.path) throw new Error(`${name}() requires a tracked path`);
+  if (!st.carried.path) throw new Error(`${name}() requires a tracked path`);
   // A standalone filter reads the linear per-position columns; over a recursive
   // repeat() walk, simplePath belongs INSIDE the repeat body (folded into the walk's
   // cycle guard), not as a post-filter.
-  if (st.path.kind !== 'cols') throw new Error(`${name}() over a recursive repeat().path() is not yet supported (put simplePath() inside the repeat body)`);
+  if (st.carried.path.kind !== 'cols') throw new Error(`${name}() over a recursive repeat().path() is not yet supported (put simplePath() inside the repeat body)`);
   const p = prevRel(st, 'p');
-  const cols = st.path.cols;
+  const cols = st.carried.path.cols;
   const pairs: Expression[] = [];
   for (let i = 0; i < cols.length; i++)
     for (let j = i + 1; j < cols.length; j++)
@@ -133,11 +133,11 @@ export const where: StepFn = (s, st) => {
   // compare a property instead of element identity.
   if (s.name === 'filter') throw new Error('filter(predicate) not supported; use filter(traversal)');
   const [left, pred, leftElem]: [string, Pred, Elem] = typeof arg0 === 'string'
-    ? [aliasIdExpr(arg0, st.aliases), s.args[1] as Pred, st.aliases.get(arg0)!.elem]
+    ? [aliasIdExpr(arg0, st.carried.aliases), s.args[1] as Pred, st.carried.aliases.get(arg0)!.elem]
     : ['n.id', arg0 as Pred, st.elem];
   if (!(pred?.op in P_OPS)) throw new Error(`where(P.${pred?.op}) alias comparison not yet supported`);
-  const right = aliasIdExpr(pred.values[0], st.aliases);
-  const rightElem = st.aliases.get(pred.values[0])!.elem;
+  const right = aliasIdExpr(pred.values[0], st.carried.aliases);
+  const rightElem = st.carried.aliases.get(pred.values[0])!.elem;
   // An alias-compare where() takes at most one by(key). foldByModulators absorbs
   // every contiguous by(); a second one is not a valid modulator here — fail
   // closed rather than silently answer a different question (matches group()'s
@@ -167,7 +167,7 @@ export const andOr: StepFn = (s, st) => {
  *  silently over-counting. */
 export const dedup: StepFn = (s, st) => {
   if (s.args.length > 0) throw new Error('dedup(label) not yet supported');
-  if (st.aliases.size > 0) throw new Error('dedup() after as() not yet supported (path-distinct semantics)');
-  if (st.path) throw new Error('dedup() with path tracking not yet supported (path-distinct semantics)');
+  if (st.carried.aliases.size > 0) throw new Error('dedup() after as() not yet supported (path-distinct semantics)');
+  if (st.carried.path) throw new Error('dedup() with path tracking not yet supported (path-distinct semantics)');
   return advance(st, q`SELECT DISTINCT id FROM ${prevRel(st)}`);
 };

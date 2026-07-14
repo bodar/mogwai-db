@@ -132,7 +132,7 @@ export function compileGroup(st: St, isCount: boolean, bys: any[][], src: GroupS
  * keys — can't be one `mv`/`mk` column, so they defer here with a clear message (the
  * terminal group() path still handles them; only the re-enterable form is scoped). */
 export function groupToMapStream(st: St, isCount: boolean, bys: any[][], src: GroupSource): MapStream {
-  if (st.aliases.size || st.path || st.origin)
+  if (st.carried.aliases.size || st.carried.path || st.carried.origin)
     throw new Error('group() carrying as()/path()/branch state into a map value not yet supported');
   if (bys.length > 2) throw new Error('group() with more than two by() modulators not yet supported');
 

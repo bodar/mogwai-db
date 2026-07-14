@@ -90,7 +90,7 @@ export function tryBulkRepeatCount(steps: PStep[], params: Record<string, any>, 
   // The prefix must fold completely to a bare vertex id-relation. Anything else
   // (an unconsumed tail, an edge type, or live alias/path/sack) is not bulkable —
   // fall back rather than emit wrong SQL.
-  if (stop !== pre.length || st.elem !== 'node' || st.aliases.size > 0 || st.path || st.sack) return null;
+  if (stop !== pre.length || st.elem !== 'node' || st.carried.aliases.size > 0 || st.carried.path || st.carried.sack) return null;
 
   // f0: the seed frontier, one row per distinct vertex with its multiplicity (a
   // pre-movement multiset like V().out() collapses here — COUNT(*) per id = its bulk).
