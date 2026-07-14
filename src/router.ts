@@ -1,15 +1,19 @@
-// The shared top-level HTTP router — identical on Bun and Cloudflare. It parses
-// `/g/{id}`, dispatches by verb onto the injected `GraphManager`, and owns ALL
-// management HTTP framing (status codes, JSON) in one place. The gremlin data
-// plane (`POST`) is a pass-through: the manager returns an already-framed
-// GraphBinary Response (always 200; errors ride the status trailer per the wire
-// protocol), so we don't touch it. Management verbs are plain REST with real
-// status codes — that framing is protocol-distinct from gremlin and lives only
-// here, never leaking into the manager implementations.
+// The shared top-level HTTP router — identical on Bun and Cloudflare, and the
+// EDGE that owns concerns A (wire parse) and C (HTTP response framing). It parses
+// `/gremlin/{g}`, dispatches by verb onto the injected `GraphManager`, and owns all
+// management HTTP framing (status codes, JSON). The gremlin data plane resolves the
+// graph id from the path (`/gremlin/{g}`) or, on the bare `/gremlin` endpoint a
+// stock TinkerPop client uses, from the request `g` field; it then parses the body
+// once, hands {gremlin, params} across the manager seam (concern B, run in the store
+// tier), and streams the returned framed buffers back out. Nothing routes on the
+// body: a path id is used directly, and the bare endpoint's body-peek only happens
+// when there is no path id to route on.
 import type { GraphManager } from './manager.ts';
+import { parseRequest } from './wire.ts';
+import { streamBuffers, errorResponse } from './http.ts';
 import { DOCS_HTML, OPENAPI_JSON } from './docs.ts';
 
-const GRAPH_PATH = /^\/g\/([^/]+)\/?$/;
+const GRAPH_PATH = /^\/gremlin\/([^/]+)\/?$/;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -18,12 +22,28 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+// Parse the wire, resolve the graph id (path wins over body `g`, default 'g'), run
+// the traversal across the seam, and frame the response. All failure modes — a bad
+// body, a compile/SQL error — ride the GraphBinary trailer (HTTP 200) via errorResponse.
+async function runQuery(mgr: GraphManager, pathId: string | null, req: Request): Promise<Response> {
+  try {
+    const raw = Buffer.from(await req.arrayBuffer());
+    const { gremlin, params, g, batchSize } = parseRequest(raw);
+    const id = pathId ?? g ?? 'g';
+    const buffers = await mgr.query(id, gremlin, params);
+    console.log(`OK   [${id}] ${gremlin} -> ${buffers.length} result(s)`);
+    return streamBuffers(buffers, batchSize);
+  } catch (e: any) {
+    console.log(`ERR  ${e.message}`);
+    return errorResponse(e.message);
+  }
+}
+
 export function makeRouter(mgr: GraphManager): (req: Request) => Promise<Response> {
   return async function router(req: Request): Promise<Response> {
     const { pathname } = new URL(req.url);
 
-    // Docs surface (GET-only). Served identically on both runtimes; separate
-    // paths from /g/{id}, so GLV traffic is untouched.
+    // Docs surface (GET-only). Separate paths from /gremlin/{g}, so GLV traffic is untouched.
     if (req.method === 'GET') {
       if (pathname === '/') return Response.redirect(new URL('/docs', req.url).toString(), 302);
       if (pathname === '/docs')
@@ -32,13 +52,17 @@ export function makeRouter(mgr: GraphManager): (req: Request) => Promise<Respons
         return new Response(OPENAPI_JSON, { headers: { 'Content-Type': 'application/json' } });
     }
 
+    // Bare gremlin endpoint: a stock TinkerPop client POSTs to one URL and names the
+    // graph in the request `g` field. No path id → runQuery peeks the parsed body.
+    if (req.method === 'POST' && pathname === '/gremlin') return runQuery(mgr, null, req);
+
     const match = pathname.match(GRAPH_PATH);
     if (!match) return new Response('Not found', { status: 404 });
     const id = decodeURIComponent(match[1]);
 
     switch (req.method) {
-      case 'POST': // gremlin query — pass the framed GraphBinary Response through
-        return mgr.query(id, req);
+      case 'POST': // gremlin query — graph id from the path
+        return runQuery(mgr, id, req);
       case 'PUT': // create-if-absent (idempotent)
         await mgr.create(id);
         return json({ id, created: true }, 201);

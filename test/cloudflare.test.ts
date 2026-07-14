@@ -33,7 +33,7 @@ graphContract('cloudflare', {
       },
     );
     await waitForReady(`http://127.0.0.1:${PORT}/`);
-    // The contract addresses graphs under {origin}/g/{id}; ids are unique per
+    // The contract addresses graphs under {origin}/gremlin/{id}; ids are unique per
     // run so DOs stay fresh (wrangler dev persists state on disk).
     return `http://127.0.0.1:${PORT}`;
   },

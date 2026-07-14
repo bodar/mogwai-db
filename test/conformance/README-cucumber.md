@@ -27,8 +27,11 @@ in the request `g` field (the runner's convention):
 | classic/crew/grateful/sink | `gclassic` … | empty until seeds land |
 
 The runner defaults to `http://localhost:45940/gremlin` (hardcoded in
-`gremlin-js/gremlin-javascript/test/helper.js`) — no edit needed. Add seeds to
-`SEEDS` in `conformance-server.ts` as more reference graphs come online.
+`gremlin-js/gremlin-javascript/test/helper.js`) — no edit needed; the router's bare
+`/gremlin` endpoint resolves the `traversalSource` (`g` field) to the graph. Add
+seeds to `SEEDS` in `conformance-server.ts` as more reference graphs come online —
+each seed is a list of gremlin write traversals (`seed-*.ts`) run through the normal
+query path, so seeding is identical on both runtimes.
 
 ## 2. Run the suite, narrowed to the implemented step set
 

@@ -1,60 +1,42 @@
-// L3 conformance host: one Bun server that fronts the several named toy graphs
-// the official TinkerPop cucumber suite opens. The suite connects to a single
-// URL (http://localhost:45940/gremlin by default) and selects a graph by the
-// traversal-source name in the request `g` field:
+// L3 conformance host: the SAME shared stack the production Bun server runs
+// (`application` over a `BunGraphManager`), just with the reference toy graphs
+// pre-seeded. The official cucumber suite connects to one URL
+// (http://localhost:45940/gremlin) and selects a graph by the traversal-source
+// name in the request `g` field:
 //
-//   modern -> gmodern   classic -> gclassic   crew -> gcrew
-//   grateful -> ggrateful   sink -> gsink   empty -> ggraph
+//   modern -> gmodern   crew -> gcrew   (empty/other -> auto-created empty)
 //
-// We map that name to a per-graph GraphStore. `gmodern` is seeded with the
-// canonical ids; `ggraph` is empty and writable (the runner resets it with
-// g.V().drop() before each @StepWrite-style scenario). The other reference
-// graphs start empty until their seeds land — run narrow with cucumber --tags.
-//
-// This is a DEV harness only. It routes on the `g` field on purpose, which the
-// production Worker must NOT do (locked decision: tenancy is the URL path).
-// Here there is one tenant and many named graphs, exactly the two-level model.
-import { GraphStore } from '../../src/storage.ts';
-import { seedModern } from './seed-modern.ts';
-import { seedCrew } from './seed-crew.ts';
-import { seedUid } from './seed-uid.ts';
-import { makeHandler } from '../../src/handler.ts';
-import { BunSqlite } from '../../src/bun/BunSqlite.ts';
+// The router's bare `/gremlin` endpoint resolves that `g` field to the graph id —
+// no dev-only handler fork, no StoreSource resolver. Seeding runs the canonical
+// graphs' write traversals through the normal query path (see seed-modern.ts), so
+// it is identical on Bun and Cloudflare — a graph is seeded by talking to it.
+import { BunGraphManager } from '../../src/bun/BunGraphManager.ts';
+import { application } from '../../src/application.ts';
+import { MODERN_SEED } from './seed-modern.ts';
+import { CREW_SEED } from './seed-crew.ts';
+import { UID_SEED } from './seed-uid.ts';
 
-const SEEDS: Record<string, (s: GraphStore) => void> = {
-  gmodern: seedModern,
+const SEEDS: Record<string, string[]> = {
+  gmodern: MODERN_SEED,
   // gcrew: the multi/meta-property showcase (list-cardinality location + startTime/endTime meta).
-  gcrew: seedCrew,
+  gcrew: CREW_SEED,
   // guid: a UserSuppliedIds graph (not part of the official suite) — used by the
   // in-repo conformance test to prove external-id framing on the read path.
-  guid: seedUid,
-  // gclassic/ggrateful/gsink: add seeds as their scenarios come online.
+  guid: UID_SEED,
 };
 
-const stores = new Map<string, GraphStore>();
-function storeFor(g: string): GraphStore {
-  let store = stores.get(g);
-  if (!store) {
-    store = new GraphStore(new BunSqlite(':memory:'));
-    SEEDS[g]?.(store);
-    stores.set(g, store);
+export async function startConformanceServer(port = 45940) {
+  const manager = new BunGraphManager();
+  // Seed before serving so the first scenario sees a populated graph. Each write
+  // traversal goes through the manager seam exactly as a client request would.
+  for (const [g, queries] of Object.entries(SEEDS)) {
+    for (const q of queries) await manager.query(g, q, {});
   }
-  return store;
-}
-
-const handler = makeHandler(storeFor);
-
-export function startConformanceServer(port = 45940) {
-  return Bun.serve({
-    port,
-    async fetch(req) {
-      // The runner posts to /gremlin; accept any path for robustness.
-      return handler(req);
-    },
-  });
+  const app = application({ manager });
+  return Bun.serve({ port, fetch: app.router });
 }
 
 if (import.meta.main) {
-  const server = startConformanceServer();
-  console.log(`mogwai-db conformance host on :${server.port}/gremlin (graphs: gmodern seeded, others empty)`);
+  const server = await startConformanceServer();
+  console.log(`mogwai-db conformance host on :${server.port}/gremlin (gmodern/gcrew/guid seeded)`);
 }

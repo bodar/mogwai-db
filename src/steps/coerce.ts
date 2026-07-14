@@ -106,7 +106,7 @@ export function asNumberBare(v: any, subtype: string | null): { val: number; as:
 // ---------- date casts (asDate / dateAdd / dateDiff) ----------
 //
 // Internal datetime = epoch-millis (INTEGER); the 'date' shape tag frames it back to a
-// JS Date (handler.ts frameValue). second/minute/hour/day are fixed-width, so date
+// JS Date (execute.ts frameValue). second/minute/hour/day are fixed-width, so date
 // arithmetic is pure integer — no SQLite date functions needed for datetime literals;
 // only a runtime ISO-string asDate() calls unixepoch(). All GraphBinary offsets fold
 // into the instant, so only the instant is carried (matching the client's UTC wire).

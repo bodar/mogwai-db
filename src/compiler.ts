@@ -3,7 +3,7 @@ import { applyStrategies, normalize } from './strategies.ts';
 import { compileRead } from './steps/index.ts';
 import { routeWrite } from './steps/write.ts';
 import { type Compiled, type WritePlan } from './render.ts';
-// Re-export the compile-output contract so handler.ts / tests keep importing it here.
+// Re-export the compile-output contract so execute.ts / tests keep importing it here.
 export type { Compiled, WritePlan, Shape, ValueType, MapEntry, ElemShape, GroupKey, GroupVal, PathPos } from './render.ts';
 
 // ---------- compilation orchestrator ----------

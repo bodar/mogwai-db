@@ -7,7 +7,7 @@ const __ = gremlin.process.statics;
 const P = gremlin.process.P;
 
 /** A runtime under test: start it, get its ORIGIN (base URL, no graph path), stop
- *  it. Graphs are addressed under `{origin}/g/{id}` identically on both runtimes,
+ *  it. Graphs are addressed under `{origin}/gremlin/{id}` identically on both runtimes,
  *  so the same contract proves them equivalent — data plane and management. */
 export interface Harness {
   start(): Promise<string>;
@@ -47,7 +47,7 @@ function docsContract(getOrigin: () => string) {
       expect(res.headers.get('content-type')).toContain('application/json');
       const spec = (await res.json()) as any;
       expect(spec.openapi).toMatch(/^3\./);
-      expect(Object.keys(spec.paths['/g/{graphId}'])).toEqual(
+      expect(Object.keys(spec.paths['/gremlin/{graphId}'])).toEqual(
         expect.arrayContaining(['post', 'put', 'get', 'delete']),
       );
     });
@@ -77,7 +77,7 @@ function gremlinContract(getOrigin: () => string) {
 
     beforeAll(async () => {
       // A fresh graph id per run keeps the seed isolated from other graphs.
-      drc = new DriverRemoteConnection(`${getOrigin()}/g/gremlin-${Date.now()}`);
+      drc = new DriverRemoteConnection(`${getOrigin()}/gremlin/gremlin-${Date.now()}`);
       g = traversal().with_(drc);
 
       // inserts through the wire
@@ -149,7 +149,7 @@ function gremlinContract(getOrigin: () => string) {
       // chunked transfer is runtime-dependent — Bun buffers small stream bodies — so
       // the deterministic chunk-pacing proof lives in test/streaming.test.ts instead.)
       const { ioc } = await import('../src/io.ts');
-      const res = await fetch(`${getOrigin()}/g/stream-${Date.now()}`, {
+      const res = await fetch(`${getOrigin()}/gremlin/stream-${Date.now()}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ gremlin: 'g.inject(1,2,3,4,5)', batchSize: 2 }),
@@ -256,7 +256,7 @@ function gremlinContract(getOrigin: () => string) {
 // identical semantics.
 function managementContract(getOrigin: () => string) {
   describe('management', () => {
-    const graphUrl = (id: string) => `${getOrigin()}/g/${id}`;
+    const graphUrl = (id: string) => `${getOrigin()}/gremlin/${id}`;
     // Unique id per test so runs don't collide (wrangler dev persists to disk).
     const freshId = (tag: string) => `mgmt-${tag}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 

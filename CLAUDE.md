@@ -86,28 +86,51 @@ a dead 2013 OGM).
 5. **Own IR = the step chain** `{name, args}[]`. Grammar visitor is a thin
    front-end; compiler consumes the IR. If the wire format ever changes,
    only the front-end moves.
-6. **Multi-tenancy: tenant in the URL.** `POST /g/{graphId}` → Worker does
-   `env.GRAPH.idFromName(graphId)` → DO. Auth tokens scope to the path. The
-   request's `g` field (traversal source name) optionally selects a named
-   graph *within* a tenant — two-level hierarchy for free. Do NOT route on
-   the `g` field at the Worker layer; it would force body-parsing before
-   routing. TinkerPop has no data-plane create/drop-database API — DO
-   on-first-access *is* the provisioning story. *Element* deletion is native
-   client gremlin (`drop()`, vertices+edges); *whole-graph* lifecycle is a thin
-   in-band REST layer on the SAME `/g/{graphId}` path (see "Management API +
-   runtime parity" below), NOT an out-of-band control plane.
+6. **Graph selection: URL path first, `g` field as fallback.** `POST /gremlin/{g}`
+   → Worker does `env.GRAPH.getByName(g)` → DO. Auth tokens scope to the path.
+   `id = pathG ?? bodyG ?? 'g'` — resolved identically on BOTH runtimes into ONE
+   flat namespace (revised 2026-07-14, was two-level tenant/`g`). A path id routes
+   with NO body parse; the body `g` field is peeked ONLY on the bare `/gremlin`
+   endpoint a stock TinkerPop client uses (its `traversalSource`, default `'g'`,
+   rides the body — see the wire fact below). So the old "never route on `g`" perf
+   rule is *preserved as* "path routing never body-parses"; the peek is confined to
+   the one case with no path id to route on. TinkerPop has no data-plane
+   create/drop-database API — DO on-first-access *is* the provisioning story.
+   *Element* deletion is native client gremlin (`drop()`, vertices+edges);
+   *whole-graph* lifecycle is a thin in-band REST layer on the SAME `/gremlin/{g}`
+   path (see "Management API + runtime parity" below), NOT an out-of-band control
+   plane. **Upstream ask (undrafted):** the JS client POSTs to its configured URL
+   verbatim and puts `traversalSource` in the *body*, forcing every L7 proxy/cache
+   to body-parse to route; v4 (not final) should project `traversalSource` onto the
+   URL path. We ship exactly that (`/gremlin/{g}`), so we'd file from the reference impl.
 
-## Management API + runtime parity (W3, DONE)
+## Management API + runtime parity (W3, DONE; edge refactored 2026-07-14)
 
-Whole-graph lifecycle is a thin REST layer on the same `/g/{id}` path, **identical
-on Bun and Cloudflare** — no separate control plane. The shared `makeRouter`
-(`src/router.ts`) owns ALL management HTTP framing in one place and dispatches by
-verb onto an injected `GraphManager` (`src/manager.ts`), the one thing that differs
-per runtime (sibling seam to `Sql`):
-- `POST /g/{id}` → gremlin query (GraphBinary, always 200; errors ride the status
-  trailer). Creates-on-demand.
-- `PUT /g/{id}` → create-if-absent → 201. `GET /g/{id}` → `{vertexCount,edgeCount}`
-  (auto-creates empty). `DELETE /g/{id}` → 204. Bad path → 404; bad verb → 405.
+Whole-graph lifecycle is a thin REST layer on the same `/gremlin/{g}` path,
+**identical on Bun and Cloudflare** — no separate control plane. The shared
+`makeRouter` (`src/router.ts`) is the EDGE: it owns the two HTTP-facing concerns —
+**A** wire parsing (`src/wire.ts` `parseRequest`) and **C** response framing/chunk
+pacing (`src/http.ts` `streamBuffers`/`errorResponse`) — and dispatches by verb onto
+an injected `GraphManager` (`src/manager.ts`), the one thing that differs per runtime
+(sibling seam to `Sql`). The data-plane seam is **`query(id, gremlin, params) →
+Promise<Buffer[]>`**: the store tier (concern **B**, `src/execute.ts` `executeQuery`)
+compiles + runs + frames and returns the GraphBinary value buffers as a materialized
+array; the edge streams them out. No HTTP lives in the store tier / DO.
+- `POST /gremlin/{g}` → gremlin query, graph id from the path. `POST /gremlin` (bare)
+  → same, graph from the body `g` field (default `'g'`) — the stock-client path.
+  GraphBinary, always 200; errors ride the status trailer. Creates-on-demand.
+- `PUT /gremlin/{g}` → create-if-absent → 201. `GET /gremlin/{g}` →
+  `{vertexCount,edgeCount}` (auto-creates empty). `DELETE /gremlin/{g}` → 204. Bad
+  path → 404; bad verb → 405.
+
+**Seam shape rationale (2026-07-14).** The DO already drains the whole row array up
+front (a DO SQLite cursor can't cross `await`s), so lazy streaming from SQLite is a
+fiction. The seam returns `Buffer[]` (bytes only — no SQLite value types cross RPC),
+run in the store tier; on CF that's a native DO RPC `query` method (NOT an internal
+`fetch` — HTTP stays out of the DO). This buys **layering**, not memory: the floor is
+unchanged (do not log it as a perf/memory win). It deletes the old generator-prime +
+mid-stream-error dance — any compile/SQL/framing error just throws to the edge's one
+try/catch (buffered 500), never a partial/truncated body.
 
 **Semantics are idempotent + create-on-demand on BOTH, because CF's DO namespace
 has no "does this exist?" query** (`getByName`/`idFromName` always returns a stub;
@@ -125,7 +148,7 @@ stop billing). CF-only gotcha that cost a debug cycle and a contract-test failur
 CF doesn't evict it synchronously — and that instance's `GraphStore` ran its schema
 DDL once in the ctor, so the next request on the same instance hits `no such table:
 nodes`. Fix (`worker.ts`): `destroy()` sets an in-memory `wiped` flag; `ensureLive()`
-(called by fetch/create/info) lazily re-runs `GraphStore.initSchema()` on reuse.
+(called by query/create/info) lazily re-runs `GraphStore.initSchema()` on reuse.
 Lazy, NOT eager in `destroy()`, on purpose — an abandoned graph then leaves storage
 empty so the DO is GC-eligible and billing stops; only actual reuse pays to rebuild.
 Proven identical on both runtimes by the shared `managementContract` in
@@ -157,27 +180,31 @@ already works; only a parallel `executeJson` response encoder is missing).
   status int (bare), nullable message (0x00+string bare | 0x01),
   nullable exception (same)`. Always HTTP 200; errors ride the status
   trailer and the client raises ResponseError with the message.
-- **Chunked streaming (DONE, `handler.ts`).** The response body is a
-  `ReadableStream` — v4 chunking splits the SAME single logical frame above across
-  HTTP chunks (HEADER once, then values `resultIterationBatchSize` at a time, then
-  the trailer), NOT N independent frames. `execute()` is a `Generator<Buffer>`;
-  `streamResponse()` drives it (batch per `pull()`). `batchSize`/
-  `resultIterationBatchSize` request field (default 64) paces chunk size only — it's
-  NOT a protocol boundary. Errors: a pre-stream throw (compile/SQL, surfaced by
-  priming the generator with one `gen.next()`) → buffered 500 frame; a mid-stream
-  throw → flush + 500 trailer + `close()`, **never `controller.error()`** (that
-  truncates the frame). The beta.2/master JS client buffers the whole body
-  (`arrayBuffer()`) then reads it once — its `stream()` throws "not yet implemented",
-  and its `submit()` builds ONE request body — so the client streams NEITHER download
-  NOR upload; only gremlin-python has chunked-transfer. **Memory:** on DO the SQLite
-  cursor can't be held open across `pull()` awaits for a stable snapshot (CF docs:
-  consume cursors synchronously before the next `await`), so `store.query()` still
-  drains the whole row array up front — streaming only avoids holding every framed
-  value buffer + the concat copy at once, NOT the row array. True row-level laziness
-  (freeing the row array too) would need keyset pagination per pull, infeasible for
-  arbitrary compiled traversal SQL. So the DO memory win is real but partial;
-  identical drain-then-stream on both runtimes (no per-runtime code, no `Sql` seam
-  change).
+- **Chunked streaming (DONE; re-homed to `src/http.ts` 2026-07-14).** The response
+  body is a `ReadableStream` — v4 chunking splits the SAME single logical frame above
+  across HTTP chunks (HEADER once, then values `resultIterationBatchSize` at a time,
+  then the trailer), NOT N independent frames. `streamBuffers(buffers, batchSize)`
+  (concern C, at the edge) takes the already-framed `Buffer[]` from `executeQuery`
+  (concern B, store tier) and paces them: HEADER in `start()`, then `slice(i,i+batch)`
+  per `pull()`, then the trailer. `batchSize`/`resultIterationBatchSize` request field
+  (default 64, resolved in `wire.ts`) paces chunk size only — NOT a protocol boundary.
+  **Errors are now uniform:** framing fully completes before streaming begins, so a
+  value can't fail mid-stream — any compile/SQL/framing throw surfaces from
+  `executeQuery` to the router's one try/catch → `errorResponse` (buffered HEADER +
+  500 trailer). The old generator-prime + mid-stream-flush + "never `controller.error()`"
+  machinery is GONE (deleted with `makeHandler`). The beta.2/master JS client buffers
+  the whole body (`arrayBuffer()`) then reads it once — its `stream()` throws "not yet
+  implemented", and its `submit()` builds ONE request body — so the client streams
+  NEITHER download NOR upload; only gremlin-python has chunked-transfer. **Memory:** on
+  DO the SQLite cursor can't be held open across `await`s for a stable snapshot (CF
+  docs: consume cursors synchronously before the next `await`), so `store.query()`
+  drains the whole row array up front — and since the seam now returns that whole array
+  anyway, streaming only avoids holding the final concat copy, not the array. True
+  row-level laziness would need keyset pagination per pull, infeasible for arbitrary
+  compiled traversal SQL. The floor is a cursor-lifetime constraint, NOT transport:
+  the DO RPC vs the old internal `fetch` doesn't change it (both already streamed the
+  body). Identical drain-then-return on both runtimes (no per-runtime code, no `Sql`
+  seam change).
 - `iterate()` appends a `.discard()` step. Strip trailing discard/none,
   execute, return no values.
 - Grammar node classes encode step + overload: `TraversalMethod_limit_long`.
@@ -320,15 +347,18 @@ tail modifiers *after* order() (so ORDER BY + LIMIT stay one query). `count()`
 wraps the tail-limited id-relation. `drop()` and `inject()` have their own
 compile fns (`compileDrop`, `compileInject`).
 
-Property materialization: `handler.ts` `vertexBuffer` frames the vertex from
+Property materialization: `execute.ts` `vertexBuffer` frames the vertex from
 ioc primitives instead of routing through anySerializer (whose VertexSerializer
 hardcodes empty props). valueMap/elementMap build JS `Map`s; the id/label token
 keys are `t.id`/`t.label` (from `io.ts`), which ride as GraphBinary `DataType.T`.
 
-L3 harness: `test/conformance/conformance-server.ts` fronts the named graphs by the
-request `g` field (DEV ONLY — production routes tenancy by URL path per the
-locked decision). `makeHandler` now takes a `StoreSource` (a store *or* a
-`(g)=>store` resolver). See `test/conformance/README-cucumber.md` to run the full
+L3 harness: `test/conformance/conformance-server.ts` is the SAME shared stack as the
+production Bun server (`application` over a `BunGraphManager`), just with the toy
+graphs pre-seeded; the cucumber suite hits the bare `/gremlin` endpoint and its `g`
+field selects the graph (no dev-only handler fork — the `StoreSource` resolver is
+gone). Seeding runs each graph's write traversals through the normal query path
+(`seed-*.ts` export gremlin `string[]`; a numeric `T.id` → integer rowid, so the
+canonical ids reproduce). See `test/conformance/README-cucumber.md` to run the full
 suite manually.
 
 ## P2/P3 read-compiler progress log (all landed; historical narrative)
@@ -371,7 +401,7 @@ no by() (bare incoming — needs local()/sack()), `withSideEffect`-bound vars, a
 **`asDate`/`dateAdd`/`dateDiff` + `datetime()` literals — LANDED (2026-07-13, L3 589→608).**
 The date family, all on the value-tail carrier. **Internal representation = epoch-millis
 INTEGER**; a new `'date'` ValueType tag (`render.ts`) frames it back to a JS Date via the
-client's `dateTimeSerializer` (GraphBinary DATETIME 0x04, UTC wire — `handler.ts`
+client's `dateTimeSerializer` (GraphBinary DATETIME 0x04, UTC wire — `execute.ts`
 `frameValue`). Second/minute/hour/day are **fixed-width** (no month/year DT token exists),
 so date arithmetic is pure integer — NO SQLite date functions for datetime literals; only a
 runtime ISO-string `asDate()` calls `unixepoch(x)*1000` (`asDateSql`). All three are scalar
@@ -530,7 +560,7 @@ general `addE`, all landed. Shape:
 - **Fixes landed alongside**: `has(label,key,value)` 3-arg + `has(T.label|T.id, v|P)`
   (was ignoring the 3rd arg / crashing on a predicate — the dominant cucumber
   *verification* idiom); edge write-response now frames via `edgeBuffer`
-  (materialises props; `handler.ts` was dropping them through `anySerializer`).
+  (materialises props; `execute.ts` was dropping them through `anySerializer`).
 - **Edge endpoints are external ids on BOTH paths** (`COALESCE(uid,id)`). Writes use
   `nodeExtId` (write.ts); reads use `plan.ts` `extIdOf(rowid)` =
   `(SELECT COALESCE(uid,id) FROM nodes WHERE id=<rowid>)`, applied at the three edge-
@@ -775,8 +805,9 @@ neighbour-list values, `order(Scope.local).by(key/traversal)`, and set-ops
   CI-specific lives in the workflow, so the gate is reproducible locally.
 - Storage runtimes meet at the `Sql` interface in `src/storage.ts` (both sync):
   `bun:sqlite` for dev/Bun, DO `ctx.storage.sql` for production. The agnostic
-  `GraphStore` (schema, label interning) sits on top; compiler + handler are
-  storage-agnostic.
+  `GraphStore` (schema, label interning) sits on top; compiler + the execute/frame
+  tier (`src/execute.ts`) are storage-agnostic. The HTTP edge (`router`/`wire`/`http`)
+  never touches a store.
 - Bun ⇄ Cloudflare via DI (`@bodar/yadic`), DONE: `application(deps)` in
   `src/application.ts` wires the shared `router` (`src/router.ts`) from the one
   injected leaf, a `GraphManager` (`src/manager.ts` — the graph-lifecycle seam,

@@ -76,8 +76,8 @@ It is a **fractal of what mogwai already is**:
   connector type maps). mogwai skips it because leaf and coordinator are the same
   machine.
 
-Coordinator flow: decompose → fire parallel subtraversals at each DO (they already
-stream GraphBinary over HTTP, see `handler.ts`) → load projected values into
+Coordinator flow: decompose → fire parallel subtraversals at each DO (each already
+frames GraphBinary result buffers via `execute.ts` behind its `query` RPC) → load projected values into
 `:memory:` SQLite temp tables → run residual join → frame back out as GraphBinary.
 Coordinator = a Worker or a dedicated coordinator DO.
 

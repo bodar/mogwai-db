@@ -2,13 +2,13 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { GraphStore } from '../storage.ts';
 import { type GraphManager, type GraphInfo, graphInfo } from '../manager.ts';
-import { makeHandler } from '../handler.ts';
+import { executeQuery } from '../execute.ts';
 import { BunSqlite } from './BunSqlite.ts';
 
 /**
  * The Bun half of the graph-lifecycle seam: a local, dependency-free mirror of
  * the Cloudflare Durable Object model. One `bun:sqlite` database = one isolated
- * graph, keyed by the `/g/{id}` path exactly as one DO = one graph keyed by
+ * graph, keyed by the `/gremlin/{id}` path exactly as one DO = one graph keyed by
  * `idFromName`. Graphs spring into existence on first access (create-on-demand),
  * matching CF's provisioning: the registry never reports "not found", it just
  * builds an empty graph.
@@ -20,7 +20,7 @@ import { BunSqlite } from './BunSqlite.ts';
  * arbitrary graph id (CF accepts any name) can never escape the directory.
  */
 export class BunGraphManager implements GraphManager {
-  private graphs = new Map<string, { store: GraphStore; sql: BunSqlite; handler: (req: Request) => Promise<Response> }>();
+  private graphs = new Map<string, { store: GraphStore; sql: BunSqlite }>();
 
   constructor(private dir?: string) {
     if (dir) mkdirSync(dir, { recursive: true });
@@ -36,14 +36,14 @@ export class BunGraphManager implements GraphManager {
     if (!g) {
       const sql = new BunSqlite(this.dir ? this.fileFor(id) : ':memory:');
       const store = new GraphStore(sql); // ctor runs the schema DDL
-      g = { store, sql, handler: makeHandler(store) };
+      g = { store, sql };
       this.graphs.set(id, g);
     }
     return g;
   }
 
-  query(id: string, req: Request): Promise<Response> {
-    return this.resolve(id).handler(req);
+  async query(id: string, gremlin: string, params: Record<string, any>): Promise<Buffer[]> {
+    return executeQuery(this.resolve(id).store, gremlin, params);
   }
 
   async create(id: string): Promise<void> {

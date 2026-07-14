@@ -1,5 +1,5 @@
 // Self-describing HTTP surface: a hand-written OpenAPI 3.1 spec for the four
-// verbs on /g/{id}, plus a tiny Scalar shell that renders it as an interactive
+// verbs on /gremlin/{id}, plus a tiny Scalar shell that renders it as an interactive
 // reference. Both are served by the shared router (router.ts), so Bun and
 // Cloudflare expose the same docs. No build step, no npm dep — Scalar loads from
 // a CDN in the browser (pinned), so the Worker bundle is untouched.
@@ -22,13 +22,14 @@ export const OPENAPI_SPEC = {
     version: VERSION,
     description:
       'A TinkerPop 4 Gremlin server compiled onto SQLite. Each graph is addressed ' +
-      'at `/g/{graphId}` and springs into existence on first access. `POST` runs a ' +
+      'at `/gremlin/{graphId}` and springs into existence on first access. `POST` runs a ' +
       'Gremlin traversal; `PUT`/`GET`/`DELETE` manage the graph lifecycle. All ' +
-      'management verbs are idempotent and create-on-demand.',
+      'management verbs are idempotent and create-on-demand. A stock TinkerPop client ' +
+      'may also POST to the bare `/gremlin` endpoint, naming the graph in the `g` field.',
   },
   servers: [{ url: '/', description: 'This server' }],
   paths: {
-    '/g/{graphId}': {
+    '/gremlin/{graphId}': {
       parameters: [
         {
           name: 'graphId',

@@ -19,7 +19,7 @@ describe('conformance host — modern graph (official ids/results)', () => {
   let server: any, drc: any, g: any;
 
   beforeAll(async () => {
-    server = startConformanceServer(0);
+    server = await startConformanceServer(0);
     const url = `http://localhost:${server.port}/gremlin`;
     drc = new DriverRemoteConnection(url, { traversalSource: 'gmodern' });
     g = traversal().with_(drc);
@@ -243,7 +243,7 @@ describe('conformance host — empty graph write/reset (ggraph)', () => {
   let server: any, drc: any, g: any;
 
   beforeAll(async () => {
-    server = startConformanceServer(0);
+    server = await startConformanceServer(0);
     drc = new DriverRemoteConnection(`http://localhost:${server.port}/gremlin`, { traversalSource: 'ggraph' });
     g = traversal().with_(drc);
   });
@@ -288,7 +288,7 @@ describe('conformance host — read-path edge endpoints report external ids (gui
   let server: any, drc: any, g: any;
 
   beforeAll(async () => {
-    server = startConformanceServer(0);
+    server = await startConformanceServer(0);
     drc = new DriverRemoteConnection(`http://localhost:${server.port}/gremlin`, { traversalSource: 'guid' });
     g = traversal().with_(drc);
   });
