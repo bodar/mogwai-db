@@ -1,7 +1,7 @@
 import { q, list, empty, Relation, type Expression } from '../q.ts';
 import { edges } from '../schema.ts';
 import { stepChain, type Step } from '../frontend.ts';
-import { dirsFor, edgeLabelFilter, labelIn, compileFilterPredicate, predicateSql, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
+import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, compileFilterPredicate, predicateSql, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
 import { advance, elemRel, prevRel, withCarried, carryFrag, carriedCols, aliasColsOf, type Carried, type PathState, type St, type StepFn } from './context.ts';
 import { foldBody } from './index.ts';
 
@@ -232,6 +232,51 @@ export const flatMap: StepFn = (s, st) => {
   return end;
 };
 
+// ---------- repeat body → one recursive-term step ----------
+//
+// SQLite requires the recursive table to appear exactly ONCE in the term's FROM (not in
+// a sub-CTE/subquery), so a multi-step body must compile to a SINGLE flat SELECT: a chain
+// of edge JOINs off `self`, plus has() filters as correlated WHERE conds. Movements
+// out/in/both fork by direction, so the body expands to the cartesian product of each
+// movement's directions (both() = 2) — one recursive SELECT per combo. Barrier/side-effect
+// bodies (limit/dedup/order/local/union/sack/groupCount/nested-repeat) can't live in a
+// recursive term and stay deferred; so does hasLabel()/complex has() (own follow-up).
+
+const REPEAT_MOVES = new Set(['out', 'in', 'both']);
+
+/** Cartesian product of each movement's (from,to) direction pairs. */
+function dirCombos(moves: Step[]): [string, string][][] {
+  let combos: [string, string][][] = [[]];
+  for (const m of moves) combos = combos.flatMap((c) => dirsFor(m.name).map((d) => [...c, d] as [string, string][]));
+  return combos;
+}
+
+/** Expand a movement+has() body into one {finalId, from, conds} per direction combo:
+ *  each movement adds `JOIN edges reN ON reN.<from>=<curId> [AND label]`, advancing curId
+ *  to `reN.<to>`; each has() adds a correlated predicate on the current node. */
+function expandRepeatBody(self: Relation, core: Step[]): { finalId: Expression; from: Expression; conds: Expression[] }[] {
+  const moves = core.filter((c) => REPEAT_MOVES.has(c.name));
+  return dirCombos(moves).map((dirs) => {
+    let curId: Expression = self.c.id;
+    const joins: Expression[] = [];
+    const conds: Expression[] = [];
+    let mi = 0;
+    for (const step of core) {
+      if (REPEAT_MOVES.has(step.name)) {
+        const [from, to] = dirs[mi++];
+        const e = edges.as(`re${mi}`);
+        joins.push(q` JOIN ${e} ON ${e.c[from]}=${curId}${step.args.length ? q` AND ${labelIn(`${e.name}.label`, step.args)}` : empty}`);
+        curId = e.c[to];
+      } else {
+        // has() only (hasLabel/complex has deferred at validation): a correlated EXISTS
+        // over vertex_properties on the current node id.
+        conds.push(nodeHasProp(curId, step.args[0], step.args[1]));
+      }
+    }
+    return { finalId: curId, from: q`${self}${list(joins, '')}`, conds };
+  });
+}
+
 /** repeat(): the folded repeat/emit/times/until cluster (strategies.foldRepeat) →
  *  a WITH RECURSIVE walk. Termination is spec-faithful and structural, NOT a magic
  *  depth cap: times() is the only depth bound (emit before/after selects the band);
@@ -267,12 +312,20 @@ export const repeat: StepFn = (s, st) => {
   if (!timesStep && !hasUntil && !emitStep) throw new Error('repeat() requires times(), until(), or emit()');
   const emitBefore = !!emitStep && cluster.indexOf(emitStep) < cluster.indexOf(rep);
 
-  // Body: a single out/in/both, optionally followed by simplePath() (cycle-free walk).
+  // Body: movements (out/in/both) + has() filters, optionally a trailing simplePath().
+  // A bare single movement keeps the original (byte-identical) term; anything more uses
+  // the general JOIN-chain term (expandRepeatBody). Barrier/side-effect bodies defer.
   const body = stepChain(rep.args[0]?.nested, st.params);
-  const mv = body[0];
-  const simplePathInBody = body.length === 2 && body[1].name === 'simplePath';
-  if (!mv || !['out', 'in', 'both'].includes(mv.name) || (body.length > 1 && !simplePathInBody))
-    throw new Error(`repeat(__.${body.map((c) => c.name + '()').join('.')}) not yet supported (single out()/in()/both(), optional .simplePath())`);
+  const simplePathInBody = body.length > 0 && body[body.length - 1].name === 'simplePath';
+  const core = simplePathInBody ? body.slice(0, -1) : body;
+  const moves = core.filter((c) => REPEAT_MOVES.has(c.name));
+  const badStep = core.find((c) => !REPEAT_MOVES.has(c.name) && c.name !== 'has');
+  if (!moves.length || badStep)
+    throw new Error(`repeat(__.${body.map((c) => c.name + '()').join('.')}) not yet supported (movements + has(), optional trailing simplePath(); barrier/side-effect bodies deferred)`);
+  // has() in a repeat body: only has(key, value|P) — a 3-arg or T-token form defers.
+  const badHas = core.find((c) => c.name === 'has' && (typeof c.args[0] !== 'string' || c.args.length > 2));
+  if (badHas) throw new Error('complex has() (3-arg / T-token) in a repeat() body not yet supported');
+  const singleMove = core.length === 1 && REPEAT_MOVES.has(core[0].name);
   // times() → its fixed depth (the ONLY depth bound). until()/emit() have none —
   // they terminate at the natural fixpoint (see the docstring). null = no bound.
   const maxDepth = timesStep ? Number(timesStep.args[0]) : null;
@@ -289,6 +342,9 @@ export const repeat: StepFn = (s, st) => {
     throw new Error('path() spanning more than one repeat()/movement is not yet supported');
   if (wantsPathOutput && emitStep) throw new Error('emit() with path() not yet supported');
   const trackArray = wantsPathOutput || simplePathInBody;
+  // path()/simplePath() record ONE position per iteration = one movement; a multi-MOVEMENT
+  // body loses its intermediate(s), so defer there. A single movement + has() filters is fine.
+  if (trackArray && moves.length > 1) throw new Error('path()/simplePath() with a multi-hop repeat() body not yet supported');
 
   // until(): `done` = does the stop predicate hold for this row? do-while (until
   // AFTER repeat) leaves the seed untested (body runs ≥1×); while-do (until BEFORE)
@@ -299,23 +355,31 @@ export const repeat: StepFn = (s, st) => {
 
   const walkCols = ['id', 'depth', ...(trackArray ? ['path'] : []), ...(hasUntil ? ['done'] : [])];
   const walk = st.q.recursiveCte(walkCols, (self: Relation) => {
-    const e = edges.as('e');
-    const rec = dirsFor(mv.name).map(([from, to]) => {
-      // Accumulate the visited-id path (jsonb — no text reparse per hop). simplePath
-      // rejects revisiting any element already in the path (the cycle guard).
-      const pathAcc = trackArray ? q`, jsonb_insert(${self.c.path}, '$[#]', ${e.c[to]}) AS path` : q``;
-      const doneAcc = hasUntil ? doneCol(e.c[to], q`${self.c.depth} + 1`) : q``;
-      // Expansion guards, ALL of which must hold to keep walking. A depth bound is
-      // added ONLY for times(); until()/emit() rely on frontier exhaustion (and
-      // simplePath(), if present) to terminate — no artificial cap.
+    // One recursive-term SELECT: advance to `finalId`, bump depth, accumulate path/done,
+    // and guard expansion — shared depth<times / done=0 guards FIRST, then the branch's
+    // own guards, so the bare single-movement case is byte-identical to before.
+    const mkRec = (finalId: Expression, from: Expression, branchGuards: Expression[]): Expression => {
+      const pathAcc = trackArray ? q`, jsonb_insert(${self.c.path}, '$[#]', ${finalId}) AS path` : q``;
+      const doneAcc = hasUntil ? doneCol(finalId, q`${self.c.depth} + 1`) : q``;
       const guards: Expression[] = [];
       if (timesStep) guards.push(q`${self.c.depth} < ${maxDepth!}`); // maxDepth non-null when timesStep set
       if (hasUntil) guards.push(q`${self.c.done}=0`); // until() expands only from still-looping rows
-      if (simplePathInBody) guards.push(q`NOT EXISTS (SELECT 1 FROM json_each(${self.c.path}) je WHERE je.value=${e.c[to]})`);
-      if (mv.args.length) guards.push(labelIn('e.label', mv.args));
+      guards.push(...branchGuards);
       const where = guards.length ? q` WHERE ${list(guards, ' AND ')}` : q``;
-      return q`SELECT ${e.c[to]} AS id, ${self.c.depth} + 1 AS depth${pathAcc}${doneAcc} FROM ${self} JOIN ${e} ON ${e.c[from]}=${self.c.id}${where}`;
-    });
+      return q`SELECT ${finalId} AS id, ${self.c.depth} + 1 AS depth${pathAcc}${doneAcc} FROM ${from}${where}`;
+    };
+    // simplePath()'s cycle guard: reject a finalId already on the accumulated path.
+    const cycleGuard = (finalId: Expression): Expression[] =>
+      simplePathInBody ? [q`NOT EXISTS (SELECT 1 FROM json_each(${self.c.path}) je WHERE je.value=${finalId})`] : [];
+    // Bare single movement → the ORIGINAL term (alias `e`, label in WHERE), byte-identical.
+    // Everything else (movement + has(), or multi-hop) → the general JOIN-chain expansion.
+    const rec = singleMove
+      ? dirsFor(core[0].name).map(([from, to]) => {
+          const e = edges.as('e');
+          const guards = [...cycleGuard(e.c[to]), ...(core[0].args.length ? [labelIn('e.label', core[0].args)] : [])];
+          return mkRec(e.c[to], q`${self} JOIN ${e} ON ${e.c[from]}=${self.c.id}`, guards);
+        })
+      : expandRepeatBody(self, core).map(({ finalId, from, conds }) => mkRec(finalId, from, [...conds, ...cycleGuard(finalId)]));
     // Only while-do (untilFirst) tests the SEED against until()'s correlated
     // `(SELECT props FROM nodes WHERE id=<seed id>)`; a bare `id` there would bind
     // BOTH sides to nodes.id (always true → wrong row), so alias the source (`w.id`).
