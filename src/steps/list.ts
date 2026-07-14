@@ -25,8 +25,10 @@ function listReducer(s: ListStream, name: string): Compiled {
   const c = s.rel.as('c');
   if (name === 'count')
     return readCompiled(s.q, q`SELECT (SELECT COUNT(*) FROM json_each(${c.c.list}) je) AS v FROM ${c}`, { kind: 'count' });
-  // Numeric aggregate over the list's numeric elements (typeof guard mirrors wrapReducer).
-  const agg = (fn: string): Expression => q`(SELECT ${fn}(je.value) FROM json_each(${c.c.list}) je WHERE typeof(je.value) in ('integer', 'real'))`;
+  // Numeric aggregate over the list's numeric elements (typeof guard mirrors wrapReducer);
+  // min/max also range over text (TinkerPop 4 Strings are Comparable), sum/mean stay numeric.
+  const types = (name === 'min' || name === 'max') ? "('integer', 'real', 'text')" : "('integer', 'real')";
+  const agg = (fn: string): Expression => q`(SELECT ${fn}(je.value) FROM json_each(${c.c.list}) je WHERE typeof(je.value) in ${types})`;
   if (name === 'mean') return readCompiled(s.q, q`SELECT ${agg('AVG')} AS v, 'real' AS vt FROM ${c}`, { kind: 'scalar' });
   const fn = name === 'sum' ? 'SUM' : name === 'min' ? 'MIN' : 'MAX';
   return readCompiled(s.q, q`SELECT ${agg(fn)} AS v, typeof(${agg(fn)}) AS vt FROM ${c}`, { kind: 'scalar' });

@@ -290,6 +290,10 @@ export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number)
   const LIST_ONLY = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product', 'conjoin', 'all', 'any']);
   if (LIST_ONLY.has(steps[from]?.name))
     throw new Error(`${steps[from].name} step can only take an array or an Iterable type for incoming traversers, encountered a scalar`);
+  // unfold() on a scalar is identity (a scalar is not a collection) — continue past it,
+  // exactly as unfold() on an element stream. Lets aggregate('a').by(k).cap('a').unfold()
+  // (cap unrolls a by-key bag to a scalar stream) feed a following reducer.
+  if (steps[from]?.name === 'unfold') return dispatchNext(s, steps, from + 1);
   const { acc, stop } = foldTailAcc(steps, from);
   if (stop !== steps.length) throw new Error(`${steps[stop].name}() after a scalar stream not yet supported`);
   if (acc.projStep) {
@@ -551,13 +555,16 @@ export function wrapReducer(
   if (reducer === 'sum')
     // typeof(SUM) is 'integer' or 'real' → handler frames Int/Long vs Double.
     return { tailNode: q`SELECT SUM(v) AS v, typeof(SUM(v)) AS vt FROM (${tailNode})`, shape: { kind: 'scalar' } };
-  // min/max/mean reduce over NUMERIC values only: a non-numeric or absent stream
-  // yields nothing (SQL aggregate over the empty filtered set → NULL → the handler
-  // drops it). Matches TinkerPop, where min() of strings produces no result. mean()
-  // is always a Double; min/max keep the element's storage class via typeof().
-  const nums = q`SELECT v FROM (${tailNode}) WHERE typeof(v) in ('integer', 'real')`;
-  const node = reducer === 'mean'
-    ? q`SELECT AVG(v) AS v, 'real' AS vt FROM (${nums})`
-    : q`SELECT ${reducer === 'min' ? 'MIN' : 'MAX'}(v) AS v, typeof(${reducer === 'min' ? 'MIN' : 'MAX'}(v)) AS vt FROM (${nums})`;
+  // mean reduces over NUMERIC values only (always a Double); an empty/non-numeric
+  // stream → NULL → dropped. min/max are over any Comparable — TinkerPop 4 made
+  // Strings comparable, so min/max also range over text (SQLite orders numbers < text,
+  // matching a uniform stream; a mixed stream is unreachable in the corpus). They keep
+  // the winner's storage class via typeof() so the handler frames Int/Double/String.
+  if (reducer === 'mean') {
+    const nums = q`SELECT v FROM (${tailNode}) WHERE typeof(v) in ('integer', 'real')`;
+    return { tailNode: q`SELECT AVG(v) AS v, 'real' AS vt FROM (${nums})`, shape: { kind: 'scalar' } };
+  }
+  const vals = q`SELECT v FROM (${tailNode}) WHERE typeof(v) in ('integer', 'real', 'text')`;
+  const node = q`SELECT ${reducer === 'min' ? 'MIN' : 'MAX'}(v) AS v, typeof(${reducer === 'min' ? 'MIN' : 'MAX'}(v)) AS vt FROM (${vals})`;
   return { tailNode: node, shape: { kind: 'scalar' } };
 }
