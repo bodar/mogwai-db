@@ -1202,11 +1202,31 @@ describe('compiler SQL snapshots', () => {
     expect(em.sql).toContain('with recursive');
     expect(em.sql).not.toContain('depth <');       // no depth cap in the recursion
     expect(em.sql).toContain('WHERE depth >= 1');   // emit-after band
-    expect(() => compile('g.V().repeat(__.out().order()).times(2)', {})).toThrow('single out()/in()/both(), optional .simplePath()');
+    // a barrier body step (order/dedup/limit/…) can't live in a recursive term → defers.
+    expect(() => compile('g.V().repeat(__.out().order()).times(2)', {})).toThrow('movements + has()');
     expect(() => compile('g.V().emit().times(2)', {})).toThrow('without repeat()');
     // a second repeat is NOT swallowed — it compiles as a chained cluster (two walks)
     const chained = read('g.V().repeat(__.out()).times(1).repeat(__.out()).times(1).values("name")');
     expect((chained.sql.match(/UNION ALL SELECT e\.tgt/g) || []).length).toBe(2); // two walk CTEs
+  });
+
+  test('repeat() body generality: movement + has(), multi-hop, both()-cartesian', () => {
+    // bare single movement stays byte-identical (alias `e`, no per-hop suffix).
+    expect(read('g.V(1).repeat(__.out()).times(2)').sql).toContain('JOIN edges e ON e.src=');
+    // movement + has() → a correlated EXISTS filter on the hop's landing node.
+    const f = read('g.V(1).repeat(__.out().has("lang","java")).times(2)');
+    expect(f.sql).toContain('JOIN edges re1 ON re1.src=');
+    expect(f.sql).toContain('EXISTS(SELECT 1 FROM vertex_properties'); // the has() filter
+    // multi-hop body → a JOIN chain (two edges) in one recursive SELECT.
+    expect(read('g.V(1).repeat(__.in().out()).times(2)').sql).toMatch(/JOIN edges re1 .* JOIN edges re2 /);
+    // both() + has() → cartesian over both directions = 2 recursive SELECTs.
+    const b = read('g.V().repeat(__.both().has("age",P.lt(30))).times(2)');
+    expect((b.sql.match(/EXISTS\(SELECT 1 FROM vertex_properties/g) || []).length).toBe(2);
+    // barrier/side-effect + edge-step bodies still defer (can't live in a recursive term).
+    expect(() => compile('g.V().repeat(__.out().dedup()).times(2)', {})).toThrow('movements + has()');
+    expect(() => compile('g.V().repeat(__.local(__.out())).times(2)', {})).toThrow('movements + has()');
+    // multi-hop body + path() defers (intermediate positions lost).
+    expect(() => compile('g.V(1).repeat(__.in().out()).times(2).path()', {})).toThrow('multi-hop repeat() body');
   });
 
   test('P.inside is exclusive-low (distinct from between)', () => {
@@ -1352,7 +1372,7 @@ describe('compiler SQL snapshots', () => {
 
   test('recursive path() defers mixed/edge/emit forms with clear errors', () => {
     expect(() => compile('g.V(1).out().repeat(__.out()).times(2).path()', {})).toThrow('path() spanning more than one repeat()/movement is not yet supported');
-    expect(() => compile('g.V().repeat(__.outE().inV()).times(2).path()', {})).toThrow('single out()/in()/both(), optional .simplePath()');
+    expect(() => compile('g.V().repeat(__.outE().inV()).times(2).path()', {})).toThrow('movements + has()'); // edge-step body deferred
     expect(() => compile('g.V().repeat(__.out()).emit().times(2).path()', {})).toThrow('emit() with path() not yet supported');
     // A SECOND repeat cluster after an array-tracked path() would reseed the walk and
     // silently drop the first walk's segment — fail closed instead.

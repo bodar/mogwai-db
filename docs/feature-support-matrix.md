@@ -110,7 +110,8 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `repeat().path()`, `simplePath()` in body | ✅ | ✅ JSONB array walk + `json_each` cycle guard |
 | `emit(pred)`, `times(pred)` | ❌ | predicate forms |
 | `until` + `times`, `until` + `emit` | ❌ | combined exit conditions |
-| complex/filtered/multi-hop repeat bodies | ❌ | `repeat(__.out().has(k,v))`, `repeat(__.out().out())` — extend the recursive term (a seam-reuse item) |
+| movement + `has()` / multi-hop repeat bodies | ✅ | ✅ `repeat(__.out().has(k,v/P/TextP))`, `repeat(__.both().has(…))`, `repeat(__.in().out())` — a JOIN-chain recursive term (`expandRepeatBody`); both() forks by cartesian direction<br>❌ `hasLabel`/3-arg/T-token `has` in the body; path()/simplePath() with a MULTI-hop body |
+| barrier/side-effect / edge-step repeat bodies | ❌ | `repeat(__.out().dedup()/limit()/order()/local()/union()/sack()/groupCount())`, nested `repeat`, `repeat(__.outE().inV())` — can't live in a recursive term (a barrier/state/edge-alternation per iteration) |
 | `repeat()` on edges, after `as()` | ❌ | |
 | `path().by()` on the recursive walk | ❌ | |
 
