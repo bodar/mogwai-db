@@ -14,6 +14,23 @@ const read = (q: string) => {
 };
 
 describe('compiler SQL snapshots', () => {
+  test('traverser bulking: times(n).count() unrolls to GROUP-BY-SUM(bulk) CTEs, not a recursion', () => {
+    const c = read('g.V().repeat(__.out()).times(3).count()');
+    expect(c.shape).toEqual({ kind: 'count' });
+    // The bulk path: a per-depth GROUP-BY-SUM, one non-recursive CTE per hop, summed at
+    // the end. SQLite rejects an aggregate in a recursive term, so it MUST NOT recurse.
+    expect(c.sql).not.toContain('recursive');
+    expect(c.sql).toContain('SUM(b) AS bulk');
+    expect(c.sql).toContain('GROUP BY nb');
+    expect(c.sql).toContain('COALESCE(SUM(bulk), 0) AS v');
+    // times(3) → f0 (seed) + three hop CTEs.
+    expect((c.sql.match(/GROUP BY nb/g) ?? []).length).toBe(3);
+    // A NON-bulkable repeat (path/as/emit/complex body) stays the enumerate-walk
+    // recursion — bulking must not hijack it. emit() has no compile-time depth.
+    expect(read('g.V(1).repeat(__.out()).emit().times(2).count()').sql).toContain('recursive');
+    expect(read('g.V(1).repeat(__.out()).times(2).path()').sql).toContain('recursive');
+  });
+
   test('valueMap variants set shape, reuse the vertex row source', () => {
     expect(read('g.V().valueMap()').shape).toEqual({ kind: 'valueMap', keys: null, tokens: false });
     expect(read('g.V().valueMap(true)').shape).toEqual({ kind: 'valueMap', keys: null, tokens: true });
@@ -1662,6 +1679,31 @@ describe('compiler execution semantics', () => {
       .toEqual(['josh', 'lop', 'lop', 'marko', 'ripple', 'vadas']);
     // both() one hop from marko = 3 incident
     expect(run(store, 'g.V(1).repeat(__.both()).times(1).count()').map((r) => r.v)).toEqual([3]);
+  });
+
+  test('traverser bulking: repeat(...).times(n).count() == naive walk count (unroll path)', () => {
+    const store = seededStore();
+    // The bulked count (unrolled GROUP-BY-SUM(bulk) CTEs) must equal the exact walk
+    // count the enumerate-every-walk recursion would produce. Cross-check against a
+    // naive WITH RECURSIVE COUNT(*) for each depth on the modern graph.
+    const naive = (t: number) =>
+      store.query(
+        `WITH RECURSIVE walk(id,depth) AS (SELECT id,0 FROM nodes UNION ALL ` +
+        `SELECT e.tgt,walk.depth+1 FROM walk JOIN edges e ON e.src=walk.id WHERE walk.depth<${t}) ` +
+        `SELECT COUNT(*) v FROM walk WHERE depth=${t}`,
+      )[0].v;
+    for (const t of [0, 1, 2, 3]) {
+      const bulk = run(store, `g.V().repeat(__.out()).times(${t}).count()`)[0].v;
+      expect(Number(bulk)).toBe(Number(naive(t)));
+    }
+    // times(2) out() over modern = 2 walks (marko->josh->{ripple,lop}); matches the
+    // values("name") form's [lop, ripple] above.
+    expect(run(store, 'g.V().repeat(__.out()).times(2).count()')[0].v).toBe(2);
+    // both() bulks too (two legs merged per hop); V(1).both().times(1) = 3 incident.
+    expect(run(store, 'g.V(1).repeat(__.both()).times(1).count()')[0].v).toBe(3);
+    // A leading filter restricts the seed frontier (reuses buildPrefix for the source).
+    expect(Number(run(store, 'g.V().hasLabel("person").repeat(__.out()).times(1).count()')[0].v))
+      .toBe(Number(run(store, 'g.V().hasLabel("person").out().count()')[0].v));
   });
 
   test('unbounded emit() terminates at the fixpoint (no depth cap) — == times(2) here', () => {

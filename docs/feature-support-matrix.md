@@ -4,7 +4,7 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-14 · **live L3 conformance:** 822 · **corpus parse+chain:**
+**Last synced:** 2026-07-14 · **live L3 conformance:** 824 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
 
@@ -104,6 +104,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | Step | Status | Notes |
 |---|:--:|---|
 | `repeat(__.<out/in/both>).times(n)` | ✅ | ✅ `WITH RECURSIVE walk`<br>✅ both = two recursive terms |
+| `repeat(__.<out/in/both>).times(n).count()` | ✅ | ✅ **traverser bulking** — unrolled GROUP-BY-SUM(bulk) CTEs (path/`as`/sack-free), so `times(8).count()`=2.5e15 in ~10ms (§Traverser bulking)<br>❌ `groupCount`/`by(count)`, `sum`, unbounded `until`/`emit`, labeled/`as`-select over the walk |
 | `emit` (before/after, bare) | ✅ | ✅ runs to natural fixpoint (no depth cap) |
 | `until(<pred>)`, `loops().is(n)` | 🟡 | ✅ do-while/while-do<br>❌ `until(__.loops()…)` beyond `loops().is(P)` |
 | `repeat().path()`, `simplePath()` in body | ✅ | ✅ JSONB array walk + `json_each` cycle guard |
@@ -242,11 +243,13 @@ Cheapest wins are long done. What's left, by structural weight:
    Strings. Remaining here: **Map-unfold** (→Map.Entry), element-VALUE maps.
 
 **The current frontier (all design-heavy — clean value-tail/list wins are harvested):**
-- **traverser bulking** — the biggest structural gap. TinkerPop bulks equal traversers
-  (one (value,count) pair); mogwai materializes each as a UNION-ALL row. Blocks the
-  **grateful reference graph** (its `repeat(out).times(N).count()` answers reach 2.5e15 —
-  would hang the host) — `test/conformance/seed-graphson.ts` loads grateful the moment
-  bulking lands (~35 scenarios across Count/Repeat/Range/Order/Group/…).
+- **traverser bulking — COUNT LANDED (2026-07-14).** `repeat(<out/in/both>).times(n).count()`
+  (path/`as`/sack-free) now compiles to unrolled GROUP-BY-SUM(bulk) CTEs (`src/steps/bulk.ts`),
+  so the **grateful reference graph is seeded** and `times(8).count()` = 2.5e15 returns in
+  ~10ms (was an uninterruptible hang). Still deferred (own follow-ups): `groupCount`/
+  `group().by(count)` bulking, `sum`/labeled-select over deep repeat, unbounded `until()`/
+  `emit()` bulking (no compile-time depth → needs a JS depth-loop). See
+  `docs/2026-07-14-traverser-bulking.md`.
 - **path() → re-enterable list** — path isn't yet a list stream, so path-rooted set-ops /
   `reverse()` / `order()` defer.
 - **element-list terminal framing** — rejoin rowids→vertices at a terminal list, for

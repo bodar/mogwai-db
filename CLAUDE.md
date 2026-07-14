@@ -833,14 +833,34 @@ facts:
   Comparable incl. Strings** (v4 made Strings Comparable — `typeof` filter allows `'text'`
   for min/max; `sum`/`mean` stay numeric).
 - **Reference-graph seeding (`test/conformance/seed-graphson.ts`).** A GraphSON v3 file →
-  write-traversal seed (vertices then edges, ids via numeric `T.id`). `gsink` seeded.
-  **`ggrateful` is deliberately NOT seeded:** its unbounded `repeat(out()).times(N).count()`
-  answers are astronomical (times(8)=2.5e15). TinkerPop BULKS traversers (one (value,count)
-  pair); mogwai materializes each as a UNION-ALL row, so it would try to build quadrillions
-  of rows and hang the CPU-limitless Bun host (and CI — bun:sqlite has no query interrupt).
-  **Blocked on a traverser-bulking engine sub-project** — `graphsonSeed` loads grateful the
-  moment bulking lands. This is the current biggest structural gap; see the feature matrix
-  "Where this points".
+  write-traversal seed (vertices then edges, ids via numeric `T.id`). `gsink` + `ggrateful`
+  seeded.
+
+## Traverser bulking — count (LANDED 2026-07-14, L3 822→824)
+
+`repeat(<single out/in/both>).times(n).count()` (path/`as`/sack-free) compiles to unrolled
+per-depth GROUP-BY-SUM(bulk) CTEs (`src/steps/bulk.ts` `tryBulkRepeatCount`, recognized in
+`compileRead` before the normal fold; reuses `buildPrefix` for the source + leading filters)
+instead of enumerating every walk. This is what makes the grateful graph seedable — its
+`repeat(out()).times(8).count()` = 2505037961767380 (2.5e15) now returns in ~10ms; the old
+UNION-ALL model tried to materialize 2.5e15 rows and hung the host UNINTERRUPTIBLY
+(bun:sqlite is synchronous — no query interrupt — so any hang guard MUST be compile-time, a
+runtime timeout can't fire). **SQLite fact (verified both runtimes):** an aggregate/GROUP BY
+in a recursive-CTE term errors `recursive aggregate queries not supported` — so bulking
+CANNOT use `WITH RECURSIVE`; a compile-time-known `times(n)` UNROLLS to n plain CTEs (the
+only viable shape). Bulking fires only with NO per-traverser identity live (path/`as`/sack
+each make same-vertex traversers distinct → the GROUP-BY collapse would be wrong; mirrors
+TinkerPop's `LazyBarrierStrategy` bailing under a PATH requirement). **No fail-fast guard
+was needed** — all 39 grateful queries were run in isolation (zero hangs): the non-bulkable
+`repeat().times(5).as().select().count()` fails closed at compile via the "one projection"
+guard, and deep `V(id)`-rooted repeats throw on unsupported bodies. **Deferred (own
+follow-ups):** `groupCount`/`group().by(count)` bulking (times(2) group already materializes
+fine — its non-pass is a group-value/empty-key semantics gap, NOT tractability); `sum` and
+labeled/`as`-select over deep repeat (non-bulkable by traverser identity); unbounded
+`until()`/`emit()` bulking (no compile-time depth to unroll → would need a JS depth-loop).
+**BulkSet wire type is a dead end (do NOT chase):** v4 removed it, remote clients expand it
+to a flat List, and the pinned beta.2 client has no bulk support — so bulking's payoff is
+100% internal SQL, never a wire feature. See `docs/2026-07-14-traverser-bulking.md`.
 
 ## Environment notes
 

@@ -17,6 +17,7 @@ import { compileTail, compileFromScalar } from './projection.ts';
 import { compileFromList, compileFromMap } from './list.ts';
 import { type Stream } from './stream.ts';
 import { type Compiled } from '../render.ts';
+import { tryBulkRepeatCount } from './bulk.ts';
 
 export { compileTail };
 
@@ -199,6 +200,13 @@ export function dispatchNext(s: Stream, steps: PStep[], at: number): Compiled {
 /** A read traversal: prefix fold + tail projection (re-enterable via dispatchNext).
  *  `sackInit` (from withSack()) seeds the carried sack column at the source. */
 export function compileRead(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec): Compiled {
+  // Traverser bulking: a `repeat(...).times(n).count()` (path/as/sack-free) compiles to
+  // unrolled GROUP-BY-SUM(bulk) CTEs instead of an enumerate-every-walk recursion, so a
+  // dense/deep count (grateful times(8) ≈ 2.5e15 walks) stays tractable. Null → not the
+  // bulkable shape; fall through to the normal fold. See steps/bulk.ts.
+  const bulked = tryBulkRepeatCount(steps, params, sackInit);
+  if (bulked) return bulked;
+
   const { st, stop } = buildPrefix(steps, params, new Query(), sackInit);
   return compileTail(st, steps, stop);
 }

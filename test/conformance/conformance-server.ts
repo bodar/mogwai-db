@@ -33,14 +33,16 @@ const SEEDS: Record<string, string[]> = {
   // gsink: the self-loop reference graph (loops/message vertices). Safe to seed — small
   // and acyclic-enough that no scenario explodes.
   gsink: graphsonSeed(relToRepo(`${GRAPHSON}/tinkerpop-sink-v3.json`)),
-  // ggrateful (808 v / 8049 e) is DELIBERATELY NOT seeded: its scenarios include
-  // whole-graph unbounded `repeat(out()).times(N).count()` whose TinkerPop answers are
-  // astronomically large (times(8) → 2.5e15). TinkerPop reaches those by BULKING
-  // traversers (one (value,count) pair, not one row each); mogwai materializes each
-  // traverser as a UNION-ALL row, so an unbounded repeat-count would try to build
-  // quadrillions of rows and hang the (CPU-limitless) Bun host — which would hang the
-  // L3 test / CI. graphsonSeed() can load it once traverser bulking exists (a separate
-  // engine sub-project that also makes count() over big recursions tractable).
+  // ggrateful (808 v / 8049 e): now seeded. Its blocker was the whole-graph
+  // `repeat(out()).times(N).count()` scenarios whose answers are astronomically large
+  // (times(8) → 2.5e15); mogwai used to materialize each traverser as a UNION-ALL row
+  // and would hang building quadrillions of rows. TRAVERSER BULKING (src/steps/bulk.ts,
+  // docs/2026-07-14-traverser-bulking.md) compiles those to unrolled GROUP-BY-SUM(bulk)
+  // CTEs — times(8).count() now returns 2505037961767380 in ~10ms. Every other grateful
+  // scenario either works, or fails closed at compile with a clear "not yet supported"
+  // (match/union-in-repeat/order-in-repeat), so none execute a runaway materialization
+  // (verified by running all 39 grateful queries in isolation: zero hangs).
+  ggrateful: graphsonSeed(relToRepo(`${GRAPHSON}/grateful-dead-v3.json`)),
 };
 
 export async function startConformanceServer(port = 45940) {
