@@ -310,6 +310,8 @@ function* framedResults(store: GraphStore, gremlin: string, params: Record<strin
     // A list-VALUE stream: one framed List per row (the `list` column arrives as JSON
     // text via json(), so it JSON.parses; scalar elements frame via listSerializer).
     case 'jsonbList': for (const r of rows) yield ioc.listSerializer.serialize(JSON.parse(r.list)); return;
+    // A set-VALUE stream (intersect/difference/disjunct): frame each list column as a Set.
+    case 'jsonbSet': for (const r of rows) yield ioc.setSerializer.serialize(new Set(JSON.parse(r.list))); return;
     case 'discard': return;
   }
 }
