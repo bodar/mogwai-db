@@ -4,7 +4,7 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-14 · **live L3 conformance:** 787 · **corpus parse+chain:**
+**Last synced:** 2026-07-14 · **live L3 conformance:** 804 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
 
@@ -138,7 +138,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `Scope.local` reducers (count/sum/min/max/mean) | ✅ | ✅ per-list correlated aggregate<br>✅ also degenerate scalar-local |
 | `none(P)`/`all(P)`/`any(P)` collection filters | ✅ | ✅ keep a list where no / every / some element matches (`IS TRUE`/`IS NOT TRUE` null handling; null-aware `eq/neq(null)`) |
 | `Scope.local` order/limit/range/skip/tail/dedup on a list | 🟡 | ✅ per-list correlated `json_each` rebuild (order sorts by value / direction-only `by(Order.desc)`; dedup keeps first occurrence; tail avoids a count() subquery)<br>✅ `reverse()` reverses list order; per-element string transforms (toUpper/trim/length/…)<br>✅ a single bare `order().fold()` sorts the folded scalars<br>❌ `order(Scope.local).by(key/traversal)` |
-| **set-ops** (`combine`/`intersect`/`difference`/`disjunct`/`product`/`conjoin`) | 🟡 | ✅ over a list value: `combine`=concat (List), `intersect`/`difference`/`disjunct`=set ops (Set, null-safe `IS` membership), `product`=cartesian (list of pair-lists), `conjoin`=join to a String<br>✅ operand = a literal list or `constant(c).fold()`<br>✅ a Set followed by a list op degrades to a List (matches `intersect().order(local)`)<br>❌ a standalone-traversal operand (`__.V()…fold()` — needs fresh-root sub-traversal compilation)<br>❌ after `path()` (path isn't yet a re-enterable list) |
+| **set-ops** (`combine`/`intersect`/`difference`/`disjunct`/`product`/`conjoin`) | 🟡 | ✅ over a list value: `combine`=concat (List), `intersect`/`difference`/`disjunct`=set ops (Set, null-safe `IS` membership), `product`=cartesian (list of pair-lists), `conjoin`=join to a String<br>✅ operand = a literal list, `constant(c).fold()`, or a standalone scalar-list traversal (`__.V().values(k).fold()` — compiled as an independent read + `json_group_array`, embedded as a scalar subquery)<br>✅ a Set followed by a list op degrades to a List (matches `intersect().order(local)`)<br>❌ an element-fold operand (`__.V().fold()` — a vertex list)<br>❌ after `path()` (path isn't yet a re-enterable list) |
 | scalar-stream `none(P)` barrier | ❌ | whole-stream barrier (distinct from the per-list filter); fails closed |
 
 ## 10. Types, math & dates

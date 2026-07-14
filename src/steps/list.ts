@@ -5,14 +5,14 @@
 // re-enterable tail (compileFromList). The producers live in projection.ts (compileFold)
 // and, later, inject-of-a-list / select(Column.values).
 
-import { q, value, type Expression } from '../q.ts';
+import { q, value, raw, type Expression } from '../q.ts';
 import { predicateSql, scalarTx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { carryOf, toListStream, toScalarStream, mapOfToListOf, type ListStream, type ScalarStream, type MapStream } from './stream.ts';
 import { type St } from './context.ts';
 import { readCompiled, type Compiled } from '../render.ts';
-import { dispatchNext } from './index.ts';
+import { dispatchNext, compileRead } from './index.ts';
 
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
 const isLocal = (s: PStep): boolean => (s.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local');
@@ -186,9 +186,27 @@ function operandList(arg: any, op: string, params: Record<string, any>): Express
       const c = pre[0].args[0];
       return q`jsonb(${value(JSON.stringify([c ?? null]))})`;
     }
-    throw new Error(`${op}() with a nested-traversal operand not yet supported (literal list / constant().fold() only)`);
+    // A standalone read traversal ending in fold() → its own scalar list. It is
+    // independent of the incoming traverser (a fresh V()/E() root), so compile it as a
+    // separate read and aggregate its `v` column into one JSONB list, embedded as a
+    // scalar subquery. Only a scalar-list fold is supported (values/id/label → v col).
+    const sub = compileRead(inner, params);
+    if (sub.shape.kind !== 'list' || sub.shape.elem !== 'scalar')
+      throw new Error(`${op}() operand traversal must fold a scalar list (values/id/label), got ${sub.shape.kind === 'list' ? sub.shape.elem : sub.shape.kind}`);
+    return q`(SELECT jsonb(COALESCE(json_group_array(v), json('[]'))) FROM (${embedSql(sub)}))`;
   }
   throw new Error(`${op} step can only take an array or an Iterable as an argument, encountered ${jsGtype(arg)}`);
+}
+
+/** Embed a fully-rendered Compiled (its own `with … select …`) as an Expression, so it
+ *  can nest as a scalar subquery. The SQL has exactly one `?` per bind (every value is
+ *  bound, never inlined), so splitting on `?` and re-interleaving `value()` tokens
+ *  reconstructs the tree with its binds in order. */
+function embedSql(c: Compiled): Expression {
+  const parts = c.sql.split('?');
+  let e: Expression = raw(parts[0]);
+  for (let i = 0; i < c.binds.length; i++) e = q`${e}${value(c.binds[i])}${raw(parts[i + 1] ?? '')}`;
+  return e;
 }
 
 /** Build the JSONB-list result of a set-op over the incoming list `self` and `op`. */
