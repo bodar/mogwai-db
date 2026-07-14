@@ -2,7 +2,8 @@ import { test, expect, describe } from 'bun:test';
 import { compile } from '../src/compiler.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
-import { seedModern } from './conformance/seed-modern.ts';
+import { executeQuery } from '../src/execute.ts';
+import { MODERN_SEED } from './conformance/seed-modern.ts';
 
 // ---------- L2: SQL snapshots (canonical string -> SQL + binds + shape) ----------
 
@@ -1287,7 +1288,7 @@ describe('compiler SQL snapshots', () => {
 
 function seededStore() {
   const store = new GraphStore(new BunSqlite(':memory:'));
-  seedModern(store);
+  for (const q of MODERN_SEED) executeQuery(store, q, {}); // seed by running the write traversals
   return store;
 }
 
@@ -2033,13 +2034,10 @@ describe('compiler execution semantics', () => {
     expect(rows).toEqual([[29, 27], [29, 32]]); // three out-neighbours, only two survive
   });
 
-  test('path() interleaves edges and vertices with materialized props (via handler)', async () => {
-    const { makeHandler } = await import('../src/handler.ts');
+  test('path() interleaves edges and vertices with materialized props (via framing)', async () => {
     const { ioc } = await import('../src/io.ts');
-    const handler = makeHandler(seededStore());
-    const res = await handler(new Request('http://x/', { method: 'POST', body: JSON.stringify({ gremlin: 'g.V(1).outE("created").inV().path()' }) }));
-    const buf = Buffer.from(await res.arrayBuffer());
-    const { v: path } = ioc.anySerializer.deserialize(buf.subarray(2)); // skip 0x84,0x00
+    const buffers = executeQuery(seededStore(), 'g.V(1).outE("created").inV().path()', {});
+    const { v: path } = ioc.anySerializer.deserialize(Buffer.concat(buffers)); // one framed Path value
     expect(path.constructor.name).toBe('Path');
     expect(path.objects.map((o: any) => o.constructor.name)).toEqual(['Vertex', 'Edge', 'Vertex']);
     expect(path.labels).toEqual([new Set(), new Set(), new Set()]); // labels-on-path deferred
@@ -2051,13 +2049,9 @@ describe('compiler execution semantics', () => {
 
   // Decode every Path from a framed GraphBinary response (shared by the recursive tests).
   async function decodePaths(store: GraphStore, gremlin: string): Promise<any[]> {
-    const { makeHandler } = await import('../src/handler.ts');
     const { ioc } = await import('../src/io.ts');
-    const res = await makeHandler(store)(new Request('http://x/', { method: 'POST', body: JSON.stringify({ gremlin }) }));
-    let c = Buffer.from(await res.arrayBuffer()).subarray(2); // skip 0x84,0x00
-    const out: any[] = [];
-    while (c[0] !== 0xfd) { const { v, len } = ioc.anySerializer.deserialize(c); out.push(v); c = c.subarray(len); }
-    return out;
+    const buffers = executeQuery(store, gremlin, {}); // one framed Path per result value
+    return buffers.map((b) => ioc.anySerializer.deserialize(b).v);
   }
 
   test('repeat().times(n).path() emits the ordered walk, one Path per route', async () => {

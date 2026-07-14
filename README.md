@@ -100,10 +100,17 @@ maturity**. The managed services are *equals* on infrastructure ops, not worse.
 
 Everything above the storage driver is runtime-agnostic; the platform-specific
 leaf is injected via DI (`@bodar/yadic`). Same parser, compiler, framing and
-request handler serve both:
+edge serve both:
 - **Bun** (dev/local) — `Bun.serve` over `bun:sqlite`.
 - **Cloudflare Durable Objects** (production) — one DO = one isolated graph, over
-  `ctx.storage.sql`. Worker routes `POST /g/{graphId}` → `getByName` → DO.
+  `ctx.storage.sql`. Worker routes `POST /gremlin/{graphId}` → `getByName` → DO,
+  and calls a native `query` RPC on it (returns framed result buffers; the Worker
+  streams them). A stock TinkerPop client may instead POST the bare `/gremlin`
+  endpoint, naming the graph in the `g` field.
+
+The request path is split into three concerns: **wire parse** (`src/wire.ts`) and
+**response framing/streaming** (`src/http.ts`) at the HTTP edge, **execute + frame**
+(`src/execute.ts`, `query(id,gremlin,params) → Buffer[]`) in the store tier.
 
 The `Sql` interface (`src/storage.ts`) is the seam — two ~15-line adapters
 (`src/bun/BunSqlite.ts`, `src/cloudflare/DurableObjectSqlite.ts`). Both SQLite,
@@ -113,7 +120,11 @@ both over the real GraphBinary wire, so they're proven identical, not tested twi
 ## Layout
 - src/storage.ts                     — `Sql` seam + agnostic `GraphStore` (schema, label interning)
 - src/compiler.ts                    — canonical Gremlin -> step chain -> parameterised SQL / write plans
-- src/handler.ts                     — request handling + GraphBinary framing (Web Request/Response)
+- src/wire.ts                        — request wire parsing (sniff JSON/GraphBinary → gremlin/g/batchSize)
+- src/execute.ts                     — execute + GraphBinary result framing → Buffer[] (store tier)
+- src/http.ts                        — chunked GraphBinary response streaming (HTTP edge)
+- src/router.ts                      — shared HTTP edge: routes /gremlin/{g}, dispatches onto GraphManager
+- src/manager.ts                     — GraphManager seam (Bun registry vs CF DO namespace)
 - src/application.ts                 — DI wiring (`application(deps)`), shared by both runtimes
 - src/io.ts                          — reused Apache-2.0 GraphBinary serializers from the gremlin client
 - src/bun/{BunSqlite,server}.ts      — Bun entry: bun:sqlite + Bun.serve

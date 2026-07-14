@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { GraphStore } from '../storage.ts';
 import { application } from '../application.ts';
 import { type GraphManager, type GraphInfo, graphInfo } from '../manager.ts';
-import { makeHandler } from '../handler.ts';
+import { executeQuery } from '../execute.ts';
 import { DurableObjectSqlite } from './DurableObjectSqlite.ts';
 
 export interface Env {
@@ -17,7 +17,6 @@ export interface Env {
  *  (dropping tables leaves internal metadata behind). */
 export class GraphDatabase extends DurableObject<Env> {
   private store: GraphStore;
-  private handler: (req: Request) => Promise<Response>;
   // Set by destroy(): this warm instance's storage was wiped. CF doesn't evict
   // the instance synchronously, so if it's reused before eviction we must
   // restore the schema first (see ensureLive). Left false and abandoned, the
@@ -27,9 +26,8 @@ export class GraphDatabase extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     // Schema DDL runs synchronously here (GraphStore ctor); no async init, so
-    // no blockConcurrencyWhile needed — it completes before any fetch/RPC.
+    // no blockConcurrencyWhile needed — it completes before any RPC.
     this.store = new GraphStore(new DurableObjectSqlite(ctx.storage.sql));
-    this.handler = makeHandler(this.store);
   }
 
   /** Restore the schema if this instance was wiped by a prior destroy() and is
@@ -43,9 +41,16 @@ export class GraphDatabase extends DurableObject<Env> {
     }
   }
 
-  fetch(request: Request): Promise<Response> {
+  /** Data-plane RPC: compile + run + frame inside the DO (concern B). The edge
+   *  Worker parsed the wire and resolved the graph; it wraps the returned framed
+   *  buffers into the HTTP response (concern C). Returning the materialized array
+   *  (bytes only) — not a Request/Response over an internal fetch — keeps HTTP out
+   *  of the storage tier and avoids re-parsing GraphBinary here. The row array is
+   *  drained up front regardless (a DO cursor can't cross awaits), so this holds no
+   *  more than the fetch path did. */
+  query(gremlin: string, params: Record<string, any>): Buffer[] {
     this.ensureLive();
-    return this.handler(request);
+    return executeQuery(this.store, gremlin, params);
   }
 
   // ---- lifecycle RPC (called by CloudflareGraphManager) ----
@@ -77,8 +82,8 @@ export class GraphDatabase extends DurableObject<Env> {
 class CloudflareGraphManager implements GraphManager {
   constructor(private ns: DurableObjectNamespace<GraphDatabase>) {}
 
-  query(id: string, req: Request): Promise<Response> {
-    return this.ns.getByName(id).fetch(req);
+  query(id: string, gremlin: string, params: Record<string, any>): Promise<Buffer[]> {
+    return this.ns.getByName(id).query(gremlin, params) as Promise<Buffer[]>;
   }
   create(id: string): Promise<void> {
     return this.ns.getByName(id).create();
@@ -91,10 +96,11 @@ class CloudflareGraphManager implements GraphManager {
   }
 }
 
-// Worker: wire the shared router over a Cloudflare-backed manager. Routing is
-// on the URL path only (LOCKED design) — never body-parse to route. `POST`
-// runs a gremlin query; `PUT`/`GET`/`DELETE` are the management API, identical
-// to the Bun server.
+// Worker: wire the shared router over a Cloudflare-backed manager. The graph id
+// comes from the path (`/gremlin/{g}`) — never from body-parsing to route; the
+// bare `/gremlin` endpoint's `g`-field fallback is the one exception, and only for
+// a client that carries no path id. `POST` runs a gremlin query; `PUT`/`GET`/
+// `DELETE` are the management API, identical to the Bun server.
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const app = application({ manager: new CloudflareGraphManager(env.GRAPH) });

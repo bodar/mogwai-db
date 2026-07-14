@@ -30,7 +30,7 @@ const BASELINE = new URL('./baseline.json', import.meta.url).pathname;
 // take minutes; the default 5s hook/test timeout would abort them.
 const LONG = 600_000;
 
-let server: ReturnType<typeof startConformanceServer> | undefined;
+let server: Awaited<ReturnType<typeof startConformanceServer>> | undefined;
 
 beforeAll(async () => {
   // Self-heal: `mise run test` provisions the submodule first, but a bare
@@ -39,7 +39,7 @@ beforeAll(async () => {
     const p = Bun.spawn({ cmd: ['bash', join(ROOT, 'scripts/init-submodule.sh')], cwd: ROOT, stdout: 'inherit', stderr: 'inherit' });
     if ((await p.exited) !== 0) throw new Error('submodule provisioning failed — run `mise run submodule`');
   }
-  server = startConformanceServer(PORT);
+  server = await startConformanceServer(PORT);
 }, LONG);
 
 afterAll(() => server?.stop(true));
