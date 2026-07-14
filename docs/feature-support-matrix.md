@@ -233,9 +233,28 @@ Cheapest wins are long done. What's left, by structural weight:
    ProductiveByStrategy), `order()`/`dedup()` inside local.
 4. **Chained projections** (§3) — element→scalar→scalar re-type; partly dissolved by the
    list substrate, still open for this shape (~40).
-5. **Collection-algebra tail** (§9) — ~~`select(Column.values/keys)`~~ + list-local
-   Scope.local ops + nested list-valued maps **LANDED** (661→685, §MapStream). Remaining:
-   **set-ops** (combine/intersect/difference/conjoin/disjoin — a separate sub-project:
-   operand compilation + vertex identity + null semantics) and **Map-unfold** (→Map.Entry).
+5. ~~**Collection-algebra tail** (§9)~~ — **LANDED** (661→822 over several batches):
+   `select(Column.values/keys)`, list-local `Scope.local` ops, nested list-valued maps
+   (§MapStream); the **string-step family** (trim/reverse/concat-nulls + list-local
+   transforms); the **set-op family** (combine/intersect/difference/disjunct/product/conjoin
+   + all/any — Set framing via `jsonbSet`, null-safe `IS` membership, literal/`constant`/
+   standalone-scalar-fold operands); `format()`; unfold-of-scalar identity; min/max over
+   Strings. Remaining here: **Map-unfold** (→Map.Entry), element-VALUE maps.
+
+**The current frontier (all design-heavy — clean value-tail/list wins are harvested):**
+- **traverser bulking** — the biggest structural gap. TinkerPop bulks equal traversers
+  (one (value,count) pair); mogwai materializes each as a UNION-ALL row. Blocks the
+  **grateful reference graph** (its `repeat(out).times(N).count()` answers reach 2.5e15 —
+  would hang the host) — `test/conformance/seed-graphson.ts` loads grateful the moment
+  bulking lands (~35 scenarios across Count/Repeat/Range/Order/Group/…).
+- **path() → re-enterable list** — path isn't yet a list stream, so path-rooted set-ops /
+  `reverse()` / `order()` defer.
+- **element-list terminal framing** — rejoin rowids→vertices at a terminal list, for
+  `fold().order(Scope.local).by(key)`.
+- **Select alias-threading** (~68F), **Repeat body generality** (~54F, scattered),
+  **Aggregate `within`/`without` readback** (~54F, eager/lazy divergence), **Match**
+  patterns (~34F), **Choose/Merge map bodies**.
+- **Comparability/Orderability** (~66F) — mixed-type / null / NaN predicate + ordering
+  rules; fail-closed territory (correct-by-design over number-chasing).
 
 Full analysis: `docs/2026-07-12-conformance-structural-bets.md` (the "remaining frontier").
