@@ -66,7 +66,7 @@ export type SideEffectMap = ReadonlyMap<string, SideEffectDef>;
 export interface Carried {
   readonly aliases: AliasMap;
   readonly path?: PathState;             // present iff the chain tracks a linear path
-  readonly origin?: string;              // coalesce/optional: the carried input-ordinal column
+  readonly origins: readonly string[];   // coalesce/optional input-ordinal columns — a STACK (nested branches each push their own unique ordinal; the innermost is last)
   readonly sack?: string;                // sack: the carried per-traverser scalar column (e.g. 'sk')
   readonly fromV?: string;               // edge context: the vertex an edge was entered from (for otherV())
   readonly trackFromV?: boolean;         // seeded true iff the chain uses otherV() — gates fromV emission (hot-path: no extra column otherwise)
@@ -119,7 +119,7 @@ export const elemRel = (st: St, alias = 'n'): Relation => (st.elem === 'edge' ? 
  *  carried column ordered AFTER path would desync the CTE's declared columns from its
  *  physical SELECT once a hop appends a position (the coalesce/optional+path() bug). */
 export const carriedCols = (c: Carried): string[] =>
-  [...aliasColsOf(c.aliases), ...(c.origin ? [c.origin] : []), ...(c.sack ? [c.sack] : []), ...(c.fromV ? [c.fromV] : []), ...pathColsOf(c.path)];
+  [...aliasColsOf(c.aliases), ...c.origins, ...(c.sack ? [c.sack] : []), ...(c.fromV ? [c.fromV] : []), ...pathColsOf(c.path)];
 
 /** `, p.a0, p.p0, …` — the carried columns qualified by `p`; empty when nothing is
  *  live. Movement/filter CTEs splice this after the moved id so labelled traversers
@@ -129,17 +129,17 @@ export function carryFrag(c: Carried, p: Relation): Expression {
   return cols.length ? list(cols.map((x) => q`, ${p.c[x]}`), '') : empty;
 }
 
-type CarriedOpts = { aliases?: AliasMap; path?: PathState; origin?: string | null; sack?: string | null; fromV?: string | null };
+type CarriedOpts = { aliases?: AliasMap; path?: PathState; origins?: readonly string[]; sack?: string | null; fromV?: string | null };
 
-/** Apply a carried-column patch with the established tri-state: aliases/path — a value
- *  overrides, undefined keeps; origin/sack/fromV — `null` CLEARS (a branch step dropping
- *  the ordinal at its output), undefined keeps, a string sets. trackFromV is chain-global
- *  (never changed by advance). */
+/** Apply a carried-column patch: aliases/path/origins — a value overrides, undefined
+ *  keeps; sack/fromV — `null` CLEARS, undefined keeps, a string sets. `origins` is the
+ *  whole ordinal stack (a branch push/pop passes the new array explicitly). trackFromV is
+ *  chain-global (never changed by advance). */
 export function carriedWith(c: Carried, o: CarriedOpts): Carried {
   return {
     aliases: o.aliases ?? c.aliases,
     path: o.path ?? c.path,
-    origin: o.origin === null ? undefined : (o.origin ?? c.origin),
+    origins: o.origins ?? c.origins,
     sack: o.sack === null ? undefined : (o.sack ?? c.sack),
     fromV: o.fromV === null ? undefined : (o.fromV ?? c.fromV),
     trackFromV: c.trackFromV,
