@@ -17,25 +17,31 @@ A TinkerPop 4 Gremlin server on SQLite, targeting Cloudflare Durable Objects.
 > **Where we are today:**
 > - **Understands the whole language:** 2,298 / 2,298 canonical Gremlin traversals
 >   from the official Gherkin corpus parse + chain-extract (100%).
-> - **Executes correctly:** **582** official TinkerPop Gherkin scenarios pass
+> - **Executes correctly:** **822** official TinkerPop Gherkin scenarios pass
 >   against a live server through the *unmodified* `gremlin@4.0.0-beta.2` client
 >   (of a ~2,041-scenario suite that no provider passes 100% of — we target a
 >   declared feature subset: no lambdas, no OLAP, no multi-request transactions).
 >   This runs under `bun test` as a **ratchet** (see below); the number only goes up.
 > - **Reads:** compiler is largely complete (movement, filters, projections,
->   aggregation, `where`/`and`/`or`/`union`/`optional`, `repeat`/`times`/`emit`,
->   `path`/`simplePath`/`cyclicPath`, `repeat().path()`, `repeat().until()`, the
->   per-traverser branching family (`choose`/`coalesce`/`flatMap`/`map`), `match`,
->   and numeric type casts (`asBool`/`asNumber`)).
-> - **Writes:** the graph is now **writable** — `addV`/`addE`, user-supplied ids,
->   `mergeV`/`mergeE` upsert, and `property()` update all land.
+>   aggregation, `where`/`and`/`or`/`union`/`optional`, `repeat`/`times`/`emit`/`until`,
+>   `path`/`simplePath`/`cyclicPath`, the per-traverser branching family
+>   (`choose`/`coalesce`/`flatMap`/`map`), `match`, `local`, side-effects
+>   (`sack`/`aggregate`/`cap`/`group('a')`), the collection tail
+>   (`fold`/`unfold`/`select(Column)`/`Scope.local` ops), the set-op / list-algebra
+>   family (`combine`/`intersect`/`difference`/`disjunct`/`product`/`conjoin`/`all`/`any`),
+>   string transforms (`concat`/`trim`/`reverse`/`toUpper`/`format`/…), `math`, and the
+>   type/date casts (`asBool`/`asNumber`/`asDate`)).
+> - **Writes:** the graph is **writable** — `addV`/`addE`, user-supplied ids,
+>   `mergeV`/`mergeE` upsert, `property()` update, and multi-/meta-properties
+>   (normalized `vertex_properties` table + edge JSONB).
 > - **Traversal strategies:** `withStrategies`/`withoutStrategies` — `SubgraphStrategy`
 >   (filtered views) and `PartitionStrategy` (in-graph sub-partitioning: read-filter +
 >   write-stamp) apply as filter injection; `ReadOnly`/`EdgeLabel`/`ReservedKeys`
 >   verification enforced; optimization strategies accepted as no-ops.
-> - **Not yet:** Cloudflare deploy + Worker auth (**the immediate next milestone**),
->   multi/meta properties (breaking schema rework), the rest of the conformance grind
->   (`local`, `aggregate`/`cap`, `sack`, …).
+> - **Not yet:** traverser bulking (the big structural gap — blocks the dense grateful-dead
+>   reference graph, where an unbounded `repeat().count()` is astronomically large);
+>   path-rooted collection ops; broader `select` alias-threading, `match`, and `repeat`
+>   bodies; mixed-type comparability edge cases. See the feature matrix for the exact edges.
 >
 > See [docs/2026-07-11-phased-roadmap-plan.md](docs/2026-07-11-phased-roadmap-plan.md) for the phased roadmap and the writes-first sequence.
 
@@ -164,16 +170,17 @@ baseline fails; more auto-bumps the baseline locally (commit it) — CI only rea
 it, never rewrites, so there is no re-trigger loop. Widen the step scope in
 `test/conformance/tags.ts` as new steps land.
 
-## Known gaps / next (see docs/2026-07-11-phased-roadmap-plan.md for the sequenced roadmap)
-- **Deploy (W3, immediate next):** Worker router hardening — per-graph bearer
-  auth, management/delete endpoint, real Cloudflare deploy → *deployable*.
-- **Multi/meta properties (W4):** props are still a flat JSON object; reworking to
-  support multi-/meta-properties touches storage + valueMap/values/has/properties
-  (breaking, biggest blast radius — deliberately after a deployed baseline).
-- **Conformance grind (W5):** the path family (`path`/`simplePath`/`cyclicPath`,
-  `repeat().path()`, `repeat().until()`) has landed; still open — `aggregate`/`cap`,
-  `match`, `local`, `choose`, `coalesce`, `sack`, `emit(pred)`; seed the other
-  reference graphs.
+## Known gaps / next (see [docs/feature-support-matrix.md](docs/feature-support-matrix.md) for the exact per-step edges, and docs/2026-07-11-phased-roadmap-plan.md for the roadmap)
+- **Landed since the roadmap was written:** the management API + runtime parity (W3 —
+  in-band REST lifecycle on `/gremlin/{g}`, identical Bun/Cloudflare); multi-/meta-properties
+  (W4 — normalized `vertex_properties` table); and most of the conformance grind (W5) —
+  `aggregate`/`cap`/`sack`/`group('a')`, `match`, `local`, `choose`/`coalesce`, the
+  collection tail + set-op/list-algebra family, string transforms, `math`, date casts.
+- **Deploy:** per-graph bearer auth + a real Cloudflare deploy → *deployable*.
+- **Conformance grind — the current frontier (all design-heavy):** traverser bulking
+  (unblocks the dense grateful-dead reference graph + `count()` over big recursions);
+  path-rooted collection ops; broader `select` alias-threading, `repeat` bodies, and
+  `match` patterns; `aggregate` `within`/`without` readback; mixed-type comparability.
 - **Not planned (declared out of scope):** lambdas, OLAP/GraphComputer,
   multi-request transactions.
 
