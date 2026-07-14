@@ -38,11 +38,12 @@ function untilPredicate(untilStep: Step, params: Record<string, any>): (id: Expr
  *  (as() aliases etc.) alongside `o`, and the seed keeps them, so a branch body threads
  *  them forward and the merge can preserve them. Returns the base (id, <carried>, o) and
  *  a seed St carrying `o` + the incoming carried schema. */
-function originSeed(st: St): { base: Relation; seedSt: St } {
+function originSeed(st: St): { base: Relation; seedSt: St; ord: string } {
   const s = st.last.as('s');
   const cc = carriedCols(st.carried);
-  const base = st.q.cte(q`SELECT ${s.c.id} AS id${carryFrag(st.carried, s)}, ROW_NUMBER() OVER () AS o FROM ${s}`, ['id', ...cc, 'o']);
-  return { base, seedSt: withCarried({ ...st, last: base }, { origin: 'o' }) };
+  const ord = `o${st.carried.origins.length}`; // unique per nesting depth (a nested branch pushes its own)
+  const base = st.q.cte(q`SELECT ${s.c.id} AS id${carryFrag(st.carried, s)}, ROW_NUMBER() OVER () AS ${ord} FROM ${s}`, ['id', ...cc, ord]);
+  return { base, seedSt: withCarried({ ...st, last: base }, { origins: [...st.carried.origins, ord] }), ord };
 }
 
 /** PREFIX steps that hand-roll a SELECT that DROPS the input-ordinal (`St.origin`)
@@ -61,7 +62,7 @@ const ORIGIN_UNSAFE = new Set(['dedup', 'as', 'repeat', 'choose']);
 function branchArm(name: string, nested: any, seed: St, params: Record<string, any>): St {
   if (!nested) throw new Error(`${name}(traversal) required`);
   const body = stepChain(nested, params);
-  if (seed.carried.origin) {
+  if (seed.carried.origins.length) {
     const bad = body.find((c) => ORIGIN_UNSAFE.has(c.name));
     if (bad) throw new Error(`${name}() branch step __.${bad.name}() not yet supported inside coalesce()/optional() (input-ordinal not carried)`);
   }
@@ -130,8 +131,7 @@ function mergeBranchCarried(seed: Carried, arms: Carried[]): Carried {
  *  with `NULL` so the UNION ALL lines up with `out`. Order MUST match carriedCols(out):
  *  id, aliases, origin/sack/fromV, then path LAST. */
 function armProjection(arm: St, out: Carried): string {
-  const parts = ['id', ...aliasColsOf(out.aliases)];
-  if (out.origin) parts.push(out.origin);
+  const parts = ['id', ...aliasColsOf(out.aliases), ...out.origins];
   if (out.sack) parts.push(out.sack);
   if (out.fromV) parts.push(out.fromV);
   if (out.path?.kind === 'cols') {
@@ -171,7 +171,7 @@ export const optional: StepFn = (s, st) => {
   if (!body.length) throw new Error('optional(traversal) required');
   // Fast path only WITHOUT path tracking: with a path, hit extends it and miss doesn't,
   // so the two are ragged and must go through the padded general path below.
-  if (!st.carried.origin && !st.carried.path && body.length === 1 && (body[0].name === 'out' || body[0].name === 'in') && st.elem === 'node') {
+  if (!st.carried.origins.length && !st.carried.path && body.length === 1 && (body[0].name === 'out' || body[0].name === 'in') && st.elem === 'node') {
     const [from, to] = dirsFor(body[0].name)[0];
     const e = edges.as('e');
     const p = prevRel(st, 'p');
@@ -180,44 +180,45 @@ export const optional: StepFn = (s, st) => {
     // the input traverser's, correct in both cases.
     return advance(st, q`SELECT COALESCE(${e.c[to]}, ${p.c.id}) AS id${carryFrag(st.carried, p)} FROM ${p} LEFT JOIN ${e} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(body[0].args)}`);
   }
-  if (st.carried.origin) throw new Error('optional() inside coalesce()/optional() not yet supported');
-  const { base, seedSt } = originSeed(st);
+  // Nesting is supported: originSeed mints a UNIQUE ordinal (o0, o1, …) per depth and
+  // carries the outer ordinals through, so optional()/coalesce() compose.
+  const { base, seedSt, ord } = originSeed(st);
   const end = branchArm('optional', s.args[0].nested, seedSt, st.params);
   if (end.elem !== st.elem)
     throw new Error('optional() body changing element kind not yet supported (self-on-miss would be mixed-shape)');
   // Two ragged arms: the HIT (body, path extended) and the MISS (base = input unchanged,
-  // path at its incoming length). Pad to max; drop the internal ordinal `o` on output.
+  // path at its incoming length). Pad to max; POP this branch's ordinal on output (restore
+  // the outer origins), keeping any outer ordinals threaded.
   const merged = mergeBranchCarried(seedSt.carried, [end.carried, seedSt.carried]);
-  const out: Carried = { ...merged, origin: undefined };
+  const out: Carried = { ...merged, origins: st.carried.origins };
   const baseSt: St = { ...seedSt, last: base };
   const hit = q`SELECT ${armProjection(end, out)} FROM ${end.last}`;
-  const miss = q`SELECT ${armProjection(baseSt, out)} FROM ${base} WHERE o NOT IN (SELECT o FROM ${end.last})`;
-  return advance(st, list([hit, miss], ' UNION ALL '), { elem: end.elem, origin: null, path: out.path });
+  const miss = q`SELECT ${armProjection(baseSt, out)} FROM ${base} WHERE ${ord} NOT IN (SELECT ${ord} FROM ${end.last})`;
+  return advance(st, list([hit, miss], ' UNION ALL '), { elem: end.elem, origins: st.carried.origins, path: out.path });
 };
 
 /** coalesce(t1, …, tn): the first branch that yields output, per input traverser.
  *  Tag each input with a unique ordinal (originSeed), fold every branch carrying it,
  *  then emit branch k only for inputs no earlier branch produced a row for. Same-shape
- *  branches only; aliased/path/scalar-body/nested-in-origin cases defer. */
+ *  branches only; scalar-body defers. Nests inside coalesce/optional (unique ordinal per depth). */
 export const coalesce: StepFn = (s, st) => {
   assertForkSafe('coalesce', st);
-  if (st.carried.origin) throw new Error('coalesce() inside coalesce()/optional() not yet supported');
   const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 1) throw new Error('coalesce() needs at least one branch');
-  const { seedSt } = originSeed(st);
+  const { seedSt, ord } = originSeed(st); // unique ordinal — nests inside optional/coalesce
   const ends = branches.map((b) => branchArm('coalesce', b.nested, seedSt, st.params));
   const elem = ends[0].elem;
   if (ends.some((e) => e.elem !== elem)) throw new Error('coalesce() branches produce different element kinds (mixed-shape) not yet supported');
-  // Pad ragged path arms; output the INCOMING carried schema (drop the ordinal `o`).
+  // Pad ragged path arms; POP this branch's ordinal on output (restore the outer origins).
   const merged = mergeBranchCarried(seedSt.carried, ends.map((e) => e.carried));
-  const out: Carried = { ...merged, origin: undefined };
+  const out: Carried = { ...merged, origins: st.carried.origins };
   const parts = ends.map((end, k) => {
     const sel = armProjection(end, out);
     if (k === 0) return q`SELECT ${sel} FROM ${end.last}`;
-    const notPrior = list(ends.slice(0, k).map((pr) => q`o NOT IN (SELECT o FROM ${pr.last})`), ' AND ');
+    const notPrior = list(ends.slice(0, k).map((pr) => q`${ord} NOT IN (SELECT ${ord} FROM ${pr.last})`), ' AND ');
     return q`SELECT ${sel} FROM ${end.last} WHERE ${notPrior}`;
   });
-  return advance(st, list(parts, ' UNION ALL '), { elem, origin: null, path: out.path });
+  return advance(st, list(parts, ' UNION ALL '), { elem, origins: st.carried.origins, path: out.path });
 };
 
 /** flatMap(t): apply t per traverser, flatten all results — for element bodies this

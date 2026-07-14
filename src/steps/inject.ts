@@ -25,7 +25,7 @@ export function compileInject(steps: PStep[]): Compiled {
     const Q = new Query();
     const rows = steps[0].args.map((a: any[]) => q`(${jsonbArrayOf(a)})`);
     const rel = Q.cte(q`VALUES ${list(rows, ', ')}`, ['list']);
-    const carry: Carry = { q: Q, params: {}, carried: { aliases: new Map() } };
+    const carry: Carry = { q: Q, params: {}, carried: { aliases: new Map(), origins: [] } };
     return dispatchNext(toListStream(carry, rel, { kind: 'scalar' }), steps, 1);
   }
 

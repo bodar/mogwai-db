@@ -111,7 +111,7 @@ function seedSource(first: PStep, query: Query, params: Record<string, any>, tra
   }
   const cols = [...(trackPath ? ['id', 'p0'] : ['id']), ...(sackInit ? ['sk'] : [])];
   const path = trackPath ? { kind: 'cols' as const, cols: [{ col: 'p0', elem }] } : undefined;
-  return { kind: 'elements', q: query, params, last: query.cte(body, cols), elem, carried: { aliases: new Map(), path, sack: sackInit ? 'sk' : undefined } };
+  return { kind: 'elements', q: query, params, last: query.cte(body, cols), elem, carried: { aliases: new Map(), origins: [], path, sack: sackInit ? 'sk' : undefined } };
 }
 
 /** union(b1, b2, …) as a SOURCE step: compile each branch's prefix into the SAME
@@ -132,7 +132,7 @@ function seedUnion(first: PStep, query: Query, params: Record<string, any>, sack
     return st.last;
   });
   const body = list(rels.map((r) => q`SELECT id FROM ${r}`), ' UNION ALL ');
-  return { kind: 'elements', q: query, params, last: query.cte(body, ['id']), elem: 'node', carried: { aliases: new Map() } };
+  return { kind: 'elements', q: query, params, last: query.cte(body, ['id']), elem: 'node', carried: { aliases: new Map(), origins: [] } };
 }
 
 /**

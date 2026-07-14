@@ -29,7 +29,7 @@ export const local: StepFn = (s, st) => {
   const body = stepChain((s.args ?? [])[0]?.nested, st.params);
   if (!body.length) throw new Error('local(traversal) required');
   const c = st.carried;
-  if (c.aliases.size || c.path || c.origin || c.sack || c.fromV)
+  if (c.aliases.size || c.path || c.origins.length || c.sack || c.fromV)
     throw new Error('local() after as()/path()/branch/sack/edge state not yet supported');
 
   const last = body[body.length - 1];
@@ -42,7 +42,7 @@ export const local: StepFn = (s, st) => {
   // Tag each input with a fresh ordinal so the window scopes per input traverser
   // (multiset-safe), then fold the movement carrying it.
   const base = st.q.cte(q`SELECT id, ROW_NUMBER() OVER () AS o FROM ${st.last}`, ['id', 'o']);
-  const seed: St = withCarried({ ...st, last: base }, { origin: 'o', aliases: new Map(), path: undefined, sack: undefined, fromV: undefined });
+  const seed: St = withCarried({ ...st, last: base }, { origins: ['o'], aliases: new Map(), path: undefined, sack: undefined, fromV: undefined });
   const { st: end, stop } = foldBody(moveSteps, seed, 0);
   if (stop !== moveSteps.length)
     throw new Error(`local(__.${moveSteps[stop].name}()) body step not yet supported`);
@@ -66,5 +66,5 @@ export const local: StepFn = (s, st) => {
 
   // Advance from `end` (carries the body's fromV/elem), dropping the ordinal.
   return advance(end, q`SELECT ${r.c.id} AS id${frag(r)} FROM ${r} WHERE ${list(guards, ' AND ')}`,
-    { elem: end.elem, origin: null, cols: ['id', ...others] });
+    { elem: end.elem, origins: [], cols: ['id', ...others] });
 };

@@ -1061,32 +1061,36 @@ describe('compiler SQL snapshots', () => {
     expect(o.sql).toContain('SELECT COALESCE(e.tgt, p.id) AS id FROM c0 p LEFT JOIN edges e ON e.src=p.id');
     // both()/multi-hop now compile via the coalesce(t, identity) ordinal shape
     const b = read('g.V().optional(__.both()).count()');
-    expect(b.sql).toContain('ROW_NUMBER() OVER () AS o');
-    expect(b.sql).toContain('WHERE o NOT IN (SELECT o FROM'); // self-on-miss
-    expect(read('g.V().optional(__.out().out()).count()').sql).toContain('ROW_NUMBER() OVER () AS o');
+    expect(b.sql).toContain('ROW_NUMBER() OVER () AS o0');
+    expect(b.sql).toContain('WHERE o0 NOT IN (SELECT o0 FROM'); // self-on-miss
+    expect(read('g.V().optional(__.out().out()).count()').sql).toContain('ROW_NUMBER() OVER () AS o0');
     // a body that flips element kind would make self-on-miss mixed-shape → defer
     expect(() => compile('g.V().optional(__.outE())', {})).toThrow('changing element kind');
     // as() before optional threads the alias through the fast path (carryFrag from the input)
     expect(read('g.V().as("a").optional(__.out()).select("a")').sql)
       .toContain('SELECT COALESCE(e.tgt, p.id) AS id, p.a0 FROM');
+    // NESTED optional/coalesce: each mints a UNIQUE ordinal (o0 outer, o1 inner) and
+    // carries the outer through — so they compose (unlocks optional(out().optional(out())).path()).
+    expect(read('g.V().optional(__.out().optional(__.out())).path()').sql).toContain('AS o1');
+    expect(read('g.V(1).coalesce(__.coalesce(__.out(), __.in()), __.both())').sql).toContain('AS o1');
   });
 
   test('coalesce() → first non-empty branch per input via the ordinal', () => {
     const c = read('g.V(1).coalesce(__.out("knows"), __.out("created")).values("name")');
-    expect(c.sql).toContain('ROW_NUMBER() OVER () AS o');
+    expect(c.sql).toContain('ROW_NUMBER() OVER () AS o0');
     // branch 2 emits only for inputs branch 1 produced nothing for
-    expect(c.sql).toContain('WHERE o NOT IN (SELECT o FROM');
+    expect(c.sql).toContain('WHERE o0 NOT IN (SELECT o0 FROM');
     expect(c.shape).toEqual({ kind: 'value' });
     expect(() => compile('g.V().coalesce(__.out(), __.values("name"))', {})).toThrow('scalar/projection body');
     expect(() => compile('g.V().coalesce(__.out(), __.outE())', {})).toThrow('different element kinds');
     // an origin-unsafe body step (drops the ordinal) fails closed, not a broken CTE
     expect(() => compile('g.V().coalesce(__.out().dedup(), __.in())', {})).toThrow('input-ordinal not carried');
     // union() inside coalesce threads the ordinal through → valid
-    expect(read('g.V().coalesce(__.union(__.out(),__.in()), __.both())').sql).toContain('ROW_NUMBER() OVER () AS o');
+    expect(read('g.V().coalesce(__.union(__.out(),__.in()), __.both())').sql).toContain('ROW_NUMBER() OVER () AS o0');
     // as() before coalesce: originSeed projects the alias alongside the ordinal, the
     // merge outputs it (dropping the internal `o`) → select("a") resolves (Move B)
     const ca = read('g.V().as("a").coalesce(__.out(), __.in()).select("a")');
-    expect(ca.sql).toContain('ROW_NUMBER() OVER () AS o');
+    expect(ca.sql).toContain('ROW_NUMBER() OVER () AS o0');
     expect(ca.sql).toContain('SELECT id, a0 FROM');
   });
 

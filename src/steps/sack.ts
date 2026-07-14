@@ -44,7 +44,7 @@ export const sack: StepFn = (s, st) => {
   if (!SACK_OPS.has(op)) throw new Error(`sack(Operator.${op}) not yet supported`);
   const bys = (s as any).bys ?? [];
   if (bys.length > 1) throw new Error('Sack step can only have one by modulator');
-  if (st.carried.aliases.size || st.carried.path || st.carried.origin)
+  if (st.carried.aliases.size || st.carried.path || st.carried.origins.length)
     throw new Error('sack(Operator.x) after as()/path()/branch state not yet supported');
 
   const byVal = sackByValue(bys[0], st);

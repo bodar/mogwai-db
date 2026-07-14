@@ -262,7 +262,7 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
 function compileFold(st: St, acc: TailAcc): ListStream {
   if (acc.reducer || acc.isPreds.length || acc.transforms.length || acc.injects.length || acc.distinct || acc.offset || acc.limit !== null)
     throw new Error('dedup()/limit()/range()/is()/transform before a non-terminal fold() not yet supported');
-  if (st.carried.aliases.size || st.carried.path || st.carried.origin)
+  if (st.carried.aliases.size || st.carried.path || st.carried.origins.length)
     throw new Error('fold() carrying as()/path()/branch state into a list value not yet supported');
   const carry = carryOf(st);
   const projName = acc.projStep?.name;
