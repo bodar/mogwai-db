@@ -9,6 +9,11 @@
 # --no-checkout, set sparse, then checkout the pinned gitlink SHA ourselves.
 set -euo pipefail
 
+# Neutralize CDPATH: if set in the caller's environment, `cd` to a dir found via
+# CDPATH echoes the resolved path to stdout, which would poison the command
+# substitution below (ROOT would capture the path twice) and break `cd "$ROOT"`.
+unset CDPATH
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
