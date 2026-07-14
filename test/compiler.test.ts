@@ -163,9 +163,13 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.inject(["a",null,"b"]).difference(["a","c"])').sql).toContain('o.value IS je.value');
     // a Set followed by a list op (order(Scope.local)) degrades to a List (not a Set).
     expect(read('g.V().values("age").fold().intersect([27]).order(Scope.local)').shape).toEqual({ kind: 'jsonbList' });
-    // constant(c).fold() is a valid compile-time operand; a standalone traversal defers.
+    // constant(c).fold() and a standalone scalar-list traversal are valid operands.
     expect(read('g.V().values("age").fold().intersect(__.constant(27).fold())').shape).toEqual({ kind: 'jsonbSet' });
-    expect(() => compile('g.V().fold().combine(__.V().fold())', {})).toThrow('nested-traversal operand not yet supported');
+    expect(read('g.V().values("name").fold().difference(__.V().values("name").fold())').shape).toEqual({ kind: 'jsonbSet' });
+    // the standalone operand embeds as a scalar subquery (its own WITH + json_group_array).
+    expect(read('g.V().values("name").fold().difference(__.V().values("name").fold())').sql).toContain('json_group_array(v)');
+    // an element-fold operand (a vertex list) isn't a scalar list → defers.
+    expect(() => compile('g.V().fold().combine(__.V().fold())', {})).toThrow('must fold a scalar list');
     // argument-type errors mirror TinkerPop's messages.
     expect(() => compile('g.V().fold().combine(2)', {})).toThrow('can only take an array or an Iterable as an argument');
     expect(() => compile('g.V().fold().combine(null)', {})).toThrow("can't be null");
