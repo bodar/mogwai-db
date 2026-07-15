@@ -2,8 +2,9 @@ import { q, list, empty, Relation, type Expression } from '../q.ts';
 import { edges } from '../schema.ts';
 import { stepChain, type Step } from '../frontend.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, compileFilterPredicate, predicateSql, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
-import { advance, elemRel, prevRel, withCarried, carryFrag, carriedCols, aliasColsOf, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
+import { advance, elemRel, prevRel, carryFrag, carriedCols, aliasColsOf, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { foldBody } from './index.ts';
+import { pushChildScope } from './child.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
  *  read back from `nodes` by subquery (the walk row carries only the id). Lets
@@ -39,11 +40,8 @@ function untilPredicate(untilStep: Step, params: Record<string, any>): (id: Expr
  *  them forward and the merge can preserve them. Returns the base (id, <carried>, o) and
  *  a seed ElementStream carrying `o` + the incoming carried schema. */
 function originSeed(st: ElementStream): { base: Relation; seedSt: ElementStream; ord: string } {
-  const s = st.rel.as('s');
-  const cc = carriedCols(st.carried);
-  const ord = `o${st.carried.origins.length}`; // unique per nesting depth (a nested branch pushes its own)
-  const base = st.q.cte(q`SELECT ${s.c.id} AS id${carryFrag(st.carried, s)}, ROW_NUMBER() OVER () AS ${ord} FROM ${s}`, ['id', ...cc, ord]);
-  return { base, seedSt: withCarried({ ...st, rel: base }, { origins: [...st.carried.origins, ord] }), ord };
+  const { frame, seed } = pushChildScope(st);
+  return { base: frame.domain, seedSt: seed, ord: frame.ordinal };
 }
 
 /** PREFIX steps that hand-roll a SELECT that DROPS the input-ordinal (`ElementStream.origin`)
