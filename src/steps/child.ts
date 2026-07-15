@@ -3,7 +3,7 @@ import { stepChain } from '../frontend.ts';
 import { edges, labels, nodes, vertexProperties } from '../schema.ts';
 import { advance, carriedWith, carryFrag, carriedCols, withCarried, type ElementStream } from './context.ts';
 import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStream, type Stream } from './stream.ts';
-import { lowerElementSteps, tryLowerElementSteps } from './index.ts';
+import { lowerElementSteps, lowerSteps, tryLowerElementSteps } from './index.ts';
 import { lowerScalarRows, SCALAR_TRANSFORMS } from './scalar.ts';
 import { normalize, type PStep } from '../strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
@@ -101,6 +101,9 @@ const CHILD_SCALAR_ROW_STEPS = new Set([
 ]);
 const CHILD_SCALAR_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
 const CHILD_ELEMENT_ROW_STEPS = new Set(['limit', 'skip', 'range', 'dedup']);
+const SHARED_SCALAR_CHILD_STEPS = new Set([
+  ...SCALAR_TRANSFORMS, 'is', 'order', 'limit', 'skip', 'range', 'tail', 'dedup',
+]);
 
 function elementRowParts(body: ReturnType<typeof stepChain>): { prefix: ReturnType<typeof stepChain>; suffix: ReturnType<typeof stepChain> } | null {
   const at = body.findIndex((s) => CHILD_ELEMENT_ROW_STEPS.has(s.name));
@@ -238,6 +241,37 @@ function tryCompileCountValueRows(
  * projection adds an explicit provider encounter key; the shared scalar pipeline
  * applies transforms and origin-partitioned row operators; only then does the
  * consumer apply its `first` or `all` cardinality policy. */
+function applyScalarChildCardinality(
+  parent: ElementStream,
+  pushed: ReturnType<typeof pushChildScope>,
+  lowered: ScalarStream,
+  use: ChildUse,
+  retainChildScope: boolean,
+): { stream: ScalarStream; frame: ChildFrame } {
+  if (retainChildScope) return { stream: lowered, frame: pushed.frame };
+  const r = lowered.rel.as('r');
+  const parentCols = carriedCols(parent.carried);
+  const typeCol = lowered.result === 'number' ? q`, ${r.c.vt} AS vt` : empty;
+  const resultCols = lowered.result === 'number' ? ['v', 'vt'] : ['v'];
+  if (use === 'all') {
+    const rel = derived(q`SELECT ${r.c.v} AS v${typeCol}${carryFrag(parent.carried, r)} FROM ${r}`, [...resultCols, ...parentCols], 'all_rows');
+    return { stream: toScalarStream(carryOf(parent), rel, lowered.as, lowered.result), frame: pushed.frame };
+  }
+  if (!lowered.encounter) throw new Error('child first cardinality requires explicit encounter order');
+  const first = derived(
+    q`SELECT ${r.c.v} AS v${typeCol}${carryFrag(parent.carried, r)}, ROW_NUMBER() OVER (PARTITION BY ${r.c[pushed.frame.ordinal]} ORDER BY ${r.c[lowered.encounter]}) AS rn FROM ${r}`,
+    [...resultCols, ...parentCols, 'rn'],
+    'f',
+  );
+  const firstTypeCol = lowered.result === 'number' ? q`, ${first.c.vt} AS vt` : empty;
+  const rel = derived(
+    q`SELECT ${first.c.v} AS v${firstTypeCol}${carryFrag(parent.carried, first)} FROM ${first} WHERE ${first.c.rn}=1`,
+    [...resultCols, ...parentCols],
+    'first_row',
+  );
+  return { stream: toScalarStream(carryOf(parent), rel, lowered.as, lowered.result), frame: pushed.frame };
+}
+
 function compileScalarChildRows(
   parent: ElementStream,
   nested: any,
@@ -253,6 +287,16 @@ function compileScalarChildRows(
   const parts = scalarRowParts(body);
   if (!parts) return null;
   const { prefix, projection: terminal, suffix } = parts;
+
+  // The ordinary row pipeline now uses the exact same iterative lowering loop as a
+  // root traversal. Scoped reducers/folds retain their explicit per-origin policies
+  // below; constant() still needs its child-only projector.
+  if (terminal.name !== 'constant' && suffix.every((step) => SHARED_SCALAR_CHILD_STEPS.has(step.name))) {
+    const pushed = pushChildScope(parent, scope);
+    const stream = lowerSteps(pushed.seed, body, 0);
+    if (stream.kind !== 'scalar') return null;
+    return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
+  }
 
   const pushed = pushChildScope(parent, scope);
   const { stream: end, next: stop } = lowerElementSteps(prefix, pushed.seed);
@@ -306,7 +350,7 @@ function compileScalarChildRows(
       if (!CHILD_SCALAR_REDUCERS.has(reducer))
         throw new Error(`scalar child continuation ${reducer}() not yet supported`);
 
-      stream = lowerScopedScalarReducer(stream, reducer as ScalarReducer, pushed.frame.domain, pushed.frame.ordinal);
+      stream = lowerScopedScalarReducer(stream, reducer as ScalarReducer, pushed.scope);
       at++;
     }
     return stream;
@@ -316,27 +360,7 @@ function compileScalarChildRows(
     ['v', encounter, ...childCols],
   );
   const lowered = continueScalar(toScalarStream(carryOf(end), rows, undefined, 'value', encounter));
-  if (retainChildScope) return { stream: lowered, frame: pushed.frame };
-  const r = lowered.rel.as('r');
-  const parentCols = carriedCols(parent.carried);
-  const typeCol = lowered.result === 'number' ? q`, ${r.c.vt} AS vt` : empty;
-  const resultCols = lowered.result === 'number' ? ['v', 'vt'] : ['v'];
-  if (use === 'all') {
-    const rel = derived(q`SELECT ${r.c.v} AS v${typeCol}${carryFrag(parent.carried, r)} FROM ${r}`, [...resultCols, ...parentCols], 'all_rows');
-    return { stream: toScalarStream(carryOf(parent), rel, lowered.as, lowered.result), frame: pushed.frame };
-  }
-  const first = derived(
-    q`SELECT ${r.c.v} AS v${typeCol}${carryFrag(parent.carried, r)}, ROW_NUMBER() OVER (PARTITION BY ${r.c[pushed.frame.ordinal]} ORDER BY ${r.c[encounter]}) AS rn FROM ${r}`,
-    [...resultCols, ...parentCols, 'rn'],
-    'f',
-  );
-  const firstTypeCol = lowered.result === 'number' ? q`, ${first.c.vt} AS vt` : empty;
-  const rel = derived(
-    q`SELECT ${first.c.v} AS v${firstTypeCol}${carryFrag(parent.carried, first)} FROM ${first} WHERE ${first.c.rn}=1`,
-    [...resultCols, ...parentCols],
-    'first_row',
-  );
-  return { stream: toScalarStream(carryOf(parent), rel, lowered.as, lowered.result), frame: pushed.frame };
+  return applyScalarChildCardinality(parent, pushed, lowered, use, retainChildScope);
 }
 
 export function tryCompileScalarChild(
@@ -439,7 +463,7 @@ export function tryCompileListChild(
 ): ListStream | null {
   const scoped = compileScalarChildRows(parent, nested, 'all', scope, true, 'fold');
   if (scoped) {
-    const folded = lowerScopedScalarFold(scoped.stream, scoped.frame.domain, scoped.frame.ordinal);
+    const folded = lowerScopedScalarFold(scoped.stream, { kind: 'child', frames: [scoped.frame] });
     const l = folded.rel.as('l');
     const rel = parent.q.cte(
       q`SELECT ${l.c.list} AS list${carryFrag(parent.carried, l)} FROM ${l}`,
@@ -450,7 +474,7 @@ export function tryCompileListChild(
 
   const element = compileElementChildRows(parent, nested, scope, 'fold');
   if (!element) return null;
-  const folded = lowerScopedElementFold(element.stream, element.frame.domain, element.frame.ordinal);
+  const folded = lowerScopedElementFold(element.stream, { kind: 'child', frames: [element.frame] });
   const l = folded.rel.as('l');
   const rel = parent.q.cte(
     q`SELECT ${l.c.list} AS list${carryFrag(parent.carried, l)} FROM ${l}`,

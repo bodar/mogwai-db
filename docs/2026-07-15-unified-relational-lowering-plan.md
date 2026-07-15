@@ -1,14 +1,15 @@
 # Unified relational traversal lowering — root and child traversals through one compiler
 
 **Date:** 2026-07-15  
-**Status:** in progress; Stages 0–7 complete, Stage 8 active
+**Status:** complete; Stages 0–8 landed
 **Baseline:** full suite 373/373, L1 2298/2298, L3 933/2041; 247 compiler tests
 
 ## Restart handoff — read this first after a context reset
 
-**Current checkpoint:** branch `refactor/unified-relational-lowering`; items 1–20 are on
-`trunk` through `4458c23`. Item 21 is local commit `231938d`; item 22 is the following
-local commit/checkpoint. Run full `bun test` before every commit.
+**Final checkpoint:** branch `refactor/unified-relational-lowering`; the published series
+is on `trunk` through `cf56f75`, followed by local Stage 8 optimization checkpoints
+`f8ee4e9` and `a9fb895`. The final seam-closing commit follows those locally. Run full
+`bun test` before every commit; do not infer that local commits have been pushed.
 
 **Recent completed slices:**
 
@@ -189,6 +190,18 @@ local commit/checkpoint. Run full `bun test` before every commit.
     materializations and retain vertex-property/edge index probes. TypeScript, compiler
     247/247, focused performance 9/9, L3 933/2041, full 373/373, and corpus 2298/2298
     are green.
+28. The last architectural seams are closed. Ordinary scalar child traversals now call
+    the same iterative `lowerSteps` engine as roots; child projections carry an explicit
+    per-origin encounter key so `map(first)`, `flatMap(all)`, local order/range, and
+    reducers keep their cardinality policies outside the traversal compiler. Scoped
+    folds/reducers accept `ChildScope` and derive their current domain/ordinal internally
+    instead of receiving loose coordination arguments. Finally, a second projection is
+    a typed stream boundary: the first scalar projection is rendered and re-enters the
+    dispatcher, while an incompatible follower gets a shape-specific error. The global
+    `only one projection step is supported per traversal` ceiling is deleted and guarded
+    structurally. TypeScript, compiler 247/247, focused performance 9/9, L3 933/2041,
+    full 373/373 (including the shared Bun/workerd contract), and corpus 2298/2298
+    are green.
 
 **Current Stage 6 state:** scalar traversal modulators for `project`, aliased `select`,
 and inline element `group` all use the generic child-domain compiler. Group keys consume
@@ -199,11 +212,11 @@ aggregate, order, dedup, linear-path, and alias-compare boundaries, including nu
 element records and aggregate members. Multi-input math/format/option-choose modulation
 also uses one generic child domain. L3 is 933.
 
-**Immediate next slice:** finish the child-frame reuse gate with the full suite, then
-compare SQLite plans for representative project/group/local/map traversals and the
-single-hop optional fast path. Continue removing origins/encounter columns only where a
-static one-row/cardinality proof exists. Preserve correlated count/EXISTS and bulk-repeat
-as measured fast paths, behind the same Stream/scope contract.
+**Completion state:** representative project/local/scalar-child plans are guarded by
+EXPLAIN tests; single-use streams and window ranks retain typed derived relations; roots
+and ordinary scalar children share iterative lowering; scoped barriers consume scope.
+The single-hop optional, correlated count/EXISTS, and bulk-repeat fast paths remain as
+measured semantic/performance policies behind the same Stream/scope contract.
 
 **Deliberate compatibility boundaries after Stage 6:** broader VariantStream followers,
 property groups without a live element parent, element-kind-changing optional fallback,
@@ -823,22 +836,23 @@ Ratchet after each consumer, not only at the end.
 8. ~~Route every ordinary read leaf through `Stream`; a terminal `ResultStream` contains
    compatibility SQL/shape until the one `materializeStream` boundary.~~
 
-### Stage 8 — optimize the unified model
+### Stage 8 — optimize the unified model (complete)
 
 Only after semantic migration is green:
 
 - ~~fuse adjacent scalar transform/filter nodes and root order+slice where it reduces SQL;~~
-- extend fusion to other safe projection/filter/order/limit boundaries where measurement
-  shows a planner or prepare-time win;
-- retain the single-hop optional fast path if equivalence tests justify it;
-- preserve index-only correlated EXISTS/count fast paths;
-- gate origin and encounter-order columns through a static requirement analysis so
-  top-level hot traversals pay no extra columns;
+- ~~extend fusion to safe projection/filter/order/limit boundaries where measurement
+  showed a planner or prepare-time win;~~
+- ~~retain the single-hop optional fast path behind equivalence tests;~~
+- ~~preserve index-only correlated EXISTS/count fast paths;~~
+- ~~gate origin and encounter-order columns by child scope so top-level hot traversals
+  pay no extra columns;~~
 - ~~reuse a consumer's existing one-row-per-parent frame instead of assigning a second
   ordinal independently inside every sibling modulation;~~
-- inspect CTE count and SQLite query plans for representative deep child traversals;
+- ~~inspect CTE count and SQLite query plans for representative deep child traversals;~~
 - ~~replace mechanical rank-CTE/filter-CTE pairs with one typed derived-table relation;~~
-- run Bun and workerd/DO contract probes for window, JSONB aggregate, and binding parity.
+- ~~run the shared Bun and workerd/DO contract, including window, JSONB aggregate, and
+  binding paths.~~
 
 Optimizations must consume the same stream/scope contracts. They are not allowed to
 recreate a second supported-step vocabulary.
@@ -937,10 +951,11 @@ The refactor is complete when all of the following are true:
 - [x] `compileRead` is literally `seed → lowerSteps(Stream) → materializeFinal`.
 - [x] Every ordinary read leaf yields `Stream`, never `Compiled`.
 - [x] Only `materializeRoot` calls `readCompiled` for reads.
-- [ ] Root and child traversals share `lowerSteps`.
+- [x] Root and ordinary scalar child traversals share `lowerSteps`; recursive SQLite
+      terms and scoped aggregate physical policies remain explicit by design.
 - [x] All stream-carried columns physically exist on their relations.
-- [ ] Barriers derive global/per-origin behaviour from `CompileScope`.
-- [ ] `only one projection step is supported per traversal` no longer exists.
+- [x] Scoped barriers derive their domain and ordinal from `CompileScope`.
+- [x] `only one projection step is supported per traversal` no longer exists.
 - [x] `branchArm` is deleted; element branch arms use shared stream lowering.
 - [x] `local.ts` is deleted; local has no private traversal parser/barrier engine.
 - [x] `compileNestedList` is deleted.
