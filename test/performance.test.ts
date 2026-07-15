@@ -40,6 +40,8 @@ describe('property indexes: static vp indexes engage (no full scan)', () => {
   // key on the vp_ index name instead.
   const usesVpIndex = (d: string[]) => d.some((s) => /USING (COVERING )?INDEX vp_/.test(s));
   const scansVp = (d: string[]) => d.some((s) => /\bSCAN (vertex_properties|vp)\b/.test(s) && !/USING/.test(s));
+  const usesEdgeIndex = (d: string[], name: 'e_out' | 'e_in') =>
+    d.some((s) => s.includes(`USING COVERING INDEX ${name}`));
 
   test('the static vp indexes exist at schema time (no self-tuning build)', () => {
     const idx = store.query<{ name: string }>("SELECT name FROM sqlite_master WHERE type='index'").map((r) => r.name);
@@ -68,5 +70,15 @@ describe('property indexes: static vp indexes engage (no full scan)', () => {
   test('values(key) flatMap join rides a vp index', () => {
     const d = explain(plan('g.V().values("name")'));
     expect(usesVpIndex(d)).toBe(true);
+  });
+
+  test('correlated where(outE()) stays an index-only existence probe', () => {
+    const d = explain(plan('g.V().where(__.outE())'));
+    expect(usesEdgeIndex(d, 'e_out')).toBe(true);
+  });
+
+  test('correlated map(outE().count()) stays an index-only scalar fast path', () => {
+    const d = explain(plan('g.V().map(__.outE().count())'));
+    expect(usesEdgeIndex(d, 'e_out')).toBe(true);
   });
 });
