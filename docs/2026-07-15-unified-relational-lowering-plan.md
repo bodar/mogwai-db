@@ -505,8 +505,12 @@ unproductive); origin-safe `flatMap()` uses `all`. This recovered the official
 barrier is now `count()`: both `map()` and scalar `local()` lower it by LEFT JOINing
 productive child rows onto the preserved parent domain and grouping by origin. Empty
 children therefore emit an explicit Long zero, while duplicate equal parents remain
-distinct. Other scalar children retain the correlated fast path; further barriers and
-non-element tails are the next expansion.
+distinct. Scalar `values`/`id`/`label`/`constant` tails now use the same child domain:
+their productive values are physical rows (including productive NULL), and `map()`
+selects the first row per origin after the ordinary movement/filter fold. This fixes
+the old correlated-scalar ambiguity where a missing property could masquerade as a
+NULL traverser. Remaining scalar specializations retain the correlated fast path;
+further barriers and structured tails are the next expansion.
 
 1. Extract the existing `originSeed` into `steps/child.ts` as `pushChildScope`.
 2. Preserve the domain relation in `ChildFrame`.

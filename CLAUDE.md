@@ -33,7 +33,9 @@ child seam; do not add another private movement parser. Terminal child `count()`
 the first shared scope-aware barrier (`tryCompileCountChild`): `map()` and scalar
 `local()` both LEFT JOIN productive child rows to the preserved parent domain and
 GROUP BY the child ordinal, so empty children yield zero and duplicate equal parents
-remain distinct.
+remain distinct. Scalar child tails `values`/`id`/`label`/`constant` likewise lower
+through `tryCompileScalarChild`: productivity is row existence (including productive
+NULL), multi-properties are real rows, and `map()` selects the first row per origin.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
   (`stripTerminal`, `foldRepeatClusters`, `foldByModulators`) run once up front so
   the dispatch sees a canonical, peek-free chain (no index arithmetic anywhere).
