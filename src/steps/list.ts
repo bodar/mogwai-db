@@ -12,7 +12,7 @@ import { type PStep } from '../strategies.ts';
 import { carryOf, continueLowering, toListStream, toScalarStream, mapOfToListOf, type ListStream, type LoweringResult, type ScalarStream, type MapStream } from './stream.ts';
 import { carryFrag, carriedCols, type ElementStream } from './context.ts';
 import { type Compiled } from '../render.ts';
-import { materializeListRoot, materializeRoot } from './materialize.ts';
+import { materializeRoot } from './materialize.ts';
 import { compileRead } from './index.ts';
 
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
@@ -273,11 +273,6 @@ const LIST_OPERAND_OPS = new Set(['combine', 'intersect', 'difference', 'disjunc
  * set-op family reshapes the list (set/list/product) or reduces it (conjoin/all/any).
  */
 export function compileFromList(s: ListStream, steps: PStep[], at: number): LoweringResult {
-  // End of chain → frame each list value as one GraphBinary List (json() so the JSONB
-  // blob reads back as text for the handler to parse).
-  if (at >= steps.length) {
-    return materializeListRoot(s);
-  }
   const step = steps[at];
   if (step.name === 'unfold') return continueLowering(compileUnfold(s), at + 1);
   // none(pred): keep each list where NO element satisfies pred (a collection filter);
