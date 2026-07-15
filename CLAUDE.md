@@ -80,7 +80,10 @@ bare vertex/edge fields share it too, retaining their complete element payload a
 internal rowid so later movement can re-enter ordinary element lowering. Single- and
 multi-label `select(...).by(__.<scalar child>)` use the same seam after relationally
 re-rooting each child on its selected alias; mixed direct/bare fields share the outer
-origin join. Inline element `group()`/`groupCount()` scalar traversal keys now do the
+origin join. Record fields may be scalar, first node/edge, or typed scalar/element lists;
+selecting a field re-enters its ordinary stream, and root materialization expands element
+list rowids only at the GraphBinary boundary. `unfold()` preserves the list row's carried
+aliases/path/origins (a global fold simply has none). Inline element `group()`/`groupCount()` scalar traversal keys now do the
 same: compile child-first, join the productive key back to its source element by outer
 origin, then enter the existing GroupStream barrier. Non-reducing scalar group value
 children share that origin and consume `all` productive rows into the group list (not
@@ -90,8 +93,10 @@ while productive numeric/comparable reducers inner-join. Never reduce these per 
 and combine afterward. Scalar child `…fold()` likewise folds raw rows once per final key,
 ordered by parent then child encounter; empty keys receive `[]`. Named `group('a')`
 side effects retain their live source stream, so `cap('a')` uses the same generic path;
-the correlated `compileNestedList` mini-compiler is deleted. Whole-element fold/tail and
-property groups retain compatibility paths. Consumers call
+the correlated `compileNestedList` mini-compiler is deleted. Element `tail()` and property
+groups retain compatibility paths. Group-scoped whole-element `…fold()` now also
+uses raw child rows at the final key boundary; LEFT-joined null payloads retain empty keys
+but are never framed as phantom elements. Consumers call
 `tryCompileScalarValueChild` and never distinguish row projections from total count;
 do not grow `compileNestedScalar` to implement new by forms.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes

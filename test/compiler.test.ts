@@ -777,6 +777,26 @@ describe('compiler SQL snapshots', () => {
       .toEqual({ kind: 'count' });
   });
 
+  test('project/select traversal fields carry typed list and element shapes', () => {
+    const shaped = read('g.V(1).project("friends","first").by(__.out().values("name").fold()).by(__.out())');
+    expect(shaped.shape).toEqual({
+      kind: 'map',
+      entries: [
+        { key: 'friends', prefix: 'e0', sub: 'list', of: { kind: 'scalar' } },
+        { key: 'first', prefix: 'e1', sub: 'vertex' },
+      ],
+    });
+    expect(shaped.sql).toContain('b0.list AS e0_list');
+    expect(shaped.sql).toContain('b1.rid AS e1_rid');
+    expect(shaped.sql).toContain('ON b1.o0=b0.o0');
+    expect(read('g.V(1).project("friends").by(__.out().values("name").fold()).select("friends").unfold().count()').shape)
+      .toEqual({ kind: 'count' });
+    expect(read('g.V(1).project("friends","created").by(__.out().values("name").fold()).by(__.out("created").values("name").fold()).select(Column.values).unfold()').shape)
+      .toEqual({ kind: 'jsonbList' });
+    expect(read('g.V(1).as("a").out().select("a").by(__.out()).values("name")').shape)
+      .toEqual({ kind: 'value' });
+  });
+
   test('multi-select traversal fields re-root generic children on each labelled element', () => {
     const selected = read('g.V(1).as("a").out("knows").as("b").select("a","b").by(__.out().count()).by(__.values("name"))');
     expect(selected.shape).toEqual({
@@ -2034,6 +2054,10 @@ describe('compiler execution semantics', () => {
     expect(names).toEqual(['josh', 'vadas']);
     expect(run(store, 'g.V(1).as("a").out().select("a").by(__.out().count())').map((r) => r.v))
       .toEqual([3, 3, 3]);
+    expect(run(store, 'g.V(1).as("a").out().select("a").by(__.out().values("name").fold()).unfold().count()').map((r) => r.v))
+      .toEqual([9]);
+    expect(run(store, 'g.V(1).as("a").out().select("a").by(__.out()).values("name")').map((r) => r.v))
+      .toEqual(['vadas', 'vadas', 'vadas']);
   });
 
   test('multi-label select yields the paired elements per traverser', () => {
@@ -2050,6 +2074,11 @@ describe('compiler execution semantics', () => {
       .toEqual([['marko', 0], ['marko', 2]]);
     expect(run(store, 'g.V(1).as("a").out("knows").as("b").select("a","b").by().by(__.out().count()).select("a").out().count()')
       .map((r) => r.v)).toEqual([6]);
+    const lists = run(store, 'g.V(1).as("a").out("knows").as("b").select("a","b").by(__.out().values("name").fold()).by(__.out().values("name").fold())');
+    expect(lists.map((r) => JSON.parse(r.e0_list))).toEqual([
+      ['vadas', 'lop', 'josh'], ['vadas', 'lop', 'josh'],
+    ]);
+    expect(lists.map((r) => JSON.parse(r.e1_list))).toEqual([[], ['lop', 'ripple']]);
   });
 
   test('project builds columns from the current traverser', () => {
@@ -2084,6 +2113,13 @@ describe('compiler execution semantics', () => {
       .map((r) => r.v)).toEqual([3]);
     expect(run(store, 'g.V(1).outE("knows").project("self","inName").by().by(__.inV().values("name")).select("self").inV().values("name")')
       .map((r) => r.v).sort()).toEqual(['josh', 'vadas']);
+
+    const shaped = run(store, 'g.V(1).project("friends","first").by(__.out().values("name").fold()).by(__.out())');
+    expect(JSON.parse(shaped[0].e0_list)).toEqual(['vadas', 'lop', 'josh']);
+    expect(shaped[0]).toMatchObject({ e1_id: 2, e1_label: 'person' });
+    expect(run(store, 'g.V(1).project("friends").by(__.out().values("name").fold()).select("friends").unfold().order()').map((r) => r.v))
+      .toEqual(['josh', 'lop', 'vadas']);
+    expect(executeQuery(store, 'g.V(1).project("friends","first").by(__.out().fold()).by(__.out())', {}).length).toBe(1);
   });
 
   test('RecordStream fields compose back into ordinary streams', () => {
@@ -2243,6 +2279,21 @@ describe('compiler execution semantics', () => {
     const sideEffectRows = Object.fromEntries(sideEffect.map((r) => [r.gk, JSON.parse(r.gv)]));
     expect(sideEffectRows.person.sort()).toEqual(rows.person);
     expect(sideEffectRows.software).toEqual(rows.software);
+  });
+
+  test('group element fold emits child elements at the final key boundary', () => {
+    const store = seededStore();
+    const rows = run(store, 'g.V().group().by(T.label).by(__.out().fold())');
+    const ids = (key: string) => rows.filter((r) => r.gk === key && r.v_id != null).map((r) => r.v_id).sort();
+    expect(ids('person')).toEqual([2, 3, 3, 3, 4, 5]);
+    expect(ids('software')).toEqual([]);
+    // The null payload is an explicit empty-group domain row, never a phantom vertex.
+    expect(rows.filter((r) => r.gk === 'software')).toHaveLength(2);
+    expect(rows.filter((r) => r.gk === 'software').every((r) => r.v_id == null)).toBeTrue();
+
+    expect(run(store, 'g.V().group().by(T.label).by(__.fold())').filter((r) => r.gk === 'person')).toHaveLength(4);
+    expect(run(store, 'g.V().group().by(T.label).by(__.outE().fold())').filter((r) => r.gk === 'person' && r.v_id != null)).toHaveLength(6);
+    expect(executeQuery(store, 'g.V().group().by(T.label).by(__.out().fold())', {})).toHaveLength(1);
   });
 
   test('is(P) filters a scalar stream; TextP is LIKE', () => {

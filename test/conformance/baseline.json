@@ -1,4 +1,4 @@
 {
-  "passing": 877,
+  "passing": 878,
   "_comment": "L3 conformance ratchet floor: passing scenarios in the official TinkerPop cucumber suite (scoped by test/conformance/tags.ts). bun test FAILS if fewer pass, auto-bumps this number when more pass (locally only — CI never rewrites it). Commit the bump. Never hand-lower it without human approval."
 }

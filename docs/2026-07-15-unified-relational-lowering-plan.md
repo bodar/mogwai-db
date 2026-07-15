@@ -2,12 +2,12 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–5 complete, Stage 6 active
-**Baseline:** full suite 363/363, L1 2298/2298, L3 877/2041; 239 compiler tests
+**Baseline:** full suite 365/365, L1 2298/2298, L3 878/2041; 241 compiler tests
 
 ## Restart handoff — read this first after a context reset
 
 **Current checkpoint:** branch `refactor/unified-relational-lowering`; every slice through
-item 10 below is represented in this checkpoint. Work is local-only: do not push or merge
+item 11 below is represented in this checkpoint. Work is local-only: do not push or merge
 to trunk. Run the full `bun test` suite before every local commit.
 
 **Recent completed slices:**
@@ -59,6 +59,13 @@ to trunk. Run the full `bun test` suite before every local commit.
     `cap('a')` uses the same path. The last `compileNestedList` consumer and the function
     itself are deleted. Moving `tail()` into the generic origin-partitioned scalar row
     pipeline restored the last legacy pre-fold form and raised L3 876→877.
+11. `project` and aliased `select` now accept shaped traversal fields: scalar, first
+    element, scalar-list, and node/edge-list fields share one outer-origin join and retain
+    enough metadata for later field selection to re-enter ordinary lowering. Record root
+    materialization expands element-list rowids only at the wire boundary; `unfold()` now
+    preserves the list row's carried schema instead of assuming every list was global.
+    Group-scoped whole-element `…fold()` uses the same raw child domain, retaining empty
+    keys without framing phantom elements. L3 ratcheted 877→878.
 
 **Current Stage 6 state:** scalar traversal modulators for `project`, aliased `select`,
 and inline element `group` all use the generic child-domain compiler. Group keys consume
@@ -66,13 +73,12 @@ and inline element `group` all use the generic child-domain compiler. Group keys
 final key barrier. These consumers share multiset-safe origin joins rather than private
 correlated traversal parsers. L3 is 877.
 
-**Immediate next slice:** continue widening `by(traversal)` from a scalar-only consumer
-into a shaped child contract. Scalar group folds and named side-effect groups are done;
-next migrate list/element-valued select or project modulators, then whole-element group
-folds. Property groups still lack a live element parent and remain a compatibility island.
-Inventory sack, math, format, and option-choose after that. Preserve
-correlated count/EXISTS only as measured fast paths until Stage 8. This is the remaining
-prerequisite for making ProductiveByStrategy a consumer policy rather than a global gate.
+**Immediate next slice:** make productive/unproductive `by()` behaviour an explicit
+consumer policy and remove the blanket ProductiveByStrategy rejection where the shaped
+record/group consumers can implement it honestly. Property groups still lack a live
+element parent and remain a compatibility island. Inventory sack, math, format, and
+option-choose afterward. Preserve correlated count/EXISTS only as measured fast paths
+until Stage 8.
 
 **Still pending in Stage 6:** scalar/list `optional`, traversal-valued `by`, an explicit
 ProductiveByStrategy productivity policy, and generic child-existence fallback for

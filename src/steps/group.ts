@@ -1,5 +1,5 @@
 import { q, value, list, empty, type Expression } from '../q.ts';
-import { labels, vertexProperties } from '../schema.ts';
+import { edges, labels, nodes, vertexProperties } from '../schema.ts';
 import {
   compileNestedScalar, scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx,
   type ScalarCtx,
@@ -12,7 +12,7 @@ import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../
 import { materializeGroupRoot, materializePropertyRoot, materializeRoot } from './materialize.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { dispatchNext } from './index.ts';
-import { isScalarChild, isScalarFoldChild, pushChildScope, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild } from './child.ts';
+import { isElementFoldChild, isScalarChild, isScalarFoldChild, pushChildScope, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild } from './child.ts';
 
 /** Movement heads whose nested-by() aggregate is a correlated neighbourhood
  *  reduction (handled by compileNestedScalar), and the scalar reducers that terminate one. */
@@ -41,6 +41,7 @@ export interface GroupSource {
    * child encounter, so folding never relies on incidental join order. */
   valFold?: boolean;
   valOrder?: Expression;
+  valElement?: { elem: 'vertex' | 'edge'; ctx: ScalarCtx };
   /** Present only for an inline element group whose source stream is still live.
    * Stashed cap()/property sources omit it and retain their existing fast paths. */
   parent?: ElementStream;
@@ -127,7 +128,9 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     && isScalarChild(valArg.nested, parent.params);
   const genericFold = valSteps.at(-1)?.name === 'fold'
     && isScalarFoldChild(valArg.nested, parent.params);
-  if (!genericKey && !genericVal && !genericReducer && !genericFold) return null;
+  const genericElementFold = valSteps.at(-1)?.name === 'fold'
+    && isElementFoldChild(valArg.nested, parent.params);
+  if (!genericKey && !genericVal && !genericReducer && !genericFold && !genericElementFold) return null;
 
   const outer = pushChildScope(parent);
   const p = outer.seed.rel.as('gp');
@@ -139,6 +142,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   let valMarker: Expression | undefined;
   let valFold = false;
   let valOrder: Expression | undefined;
+  let valElement: GroupSource['valElement'];
   if (genericKey) {
     const child = tryCompileScalarValueChild(outer.seed, keyArg.nested, 'first', outer.scope);
     if (!child) throw new Error('scalar group key failed after successful shape preflight');
@@ -173,6 +177,16 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     valFold = true;
     valOrder = q`${p.c[outer.frame.ordinal]}, ${valMarker}`;
   }
+  if (genericElementFold) {
+    const rows = tryCompileElementRowsBeforeFold(outer.seed, valArg.nested, outer.scope);
+    if (!rows) throw new Error('group element fold rows failed after successful shape preflight');
+    const c = rows.stream.rel.as('gef');
+    const e = (rows.stream.elem === 'edge' ? edges : nodes).as('gev');
+    joins.push(q` LEFT JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]} LEFT JOIN ${e} ON ${e.c.id}=${c.c.id}`);
+    valMarker = c.c.id;
+    valOrder = q`${p.c[outer.frame.ordinal]}, ${c.c.id}`;
+    valElement = { elem: rows.stream.elem === 'edge' ? 'edge' : 'vertex', ctx: elemCtx(e, rows.stream.elem) };
+  }
   return {
     from: q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}${list(joins, '')}`,
     ctx: elemCtx(n, parent.elem),
@@ -183,6 +197,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     valMarker,
     valFold,
     valOrder,
+    valElement,
   };
 }
 
@@ -210,6 +225,11 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
   else if (src.valFold) {
     val = { kind: 'list' };
     valNode = q`COALESCE(json_group_array(${src.valExpr!} ORDER BY ${src.valOrder!}) FILTER (WHERE ${src.valMarker!} IS NOT NULL), json('[]')) AS gv`;
+  }
+  else if (src.valElement) {
+    val = { kind: 'elementList', elem: src.valElement.elem };
+    groupBy = false;
+    valNode = elementSelect(src.valElement.elem, 'v', src.valElement.ctx);
   }
   else if (src.valExpr) { val = { kind: 'scalarList' }; valNode = q`json_group_array(${src.valExpr}) AS gv`; }
   else {
@@ -242,7 +262,8 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
     } else throw new Error('unsupported group().by() value modulator');
   }
 
-  const node = q`SELECT ${key.cols}, ${valNode} FROM ${src.from} ${groupBy ? 'GROUP BY' : 'ORDER BY'} ${key.group}`;
+  const order = src.valElement && src.valOrder ? q`${key.group}, ${src.valOrder}` : key.group;
+  const node = q`SELECT ${key.cols}, ${valNode} FROM ${src.from} ${groupBy ? 'GROUP BY' : 'ORDER BY'} ${order}`;
   const rel = st.q.cte(node, groupColumns({ key: key.desc, val }));
   return toGroupStream(withoutCarried(st), rel, key.desc, val);
 }

@@ -5,12 +5,12 @@
 // re-enterable tail (compileFromList). The producers live in projection.ts (compileFold)
 // and, later, inject-of-a-list / select(Column.values).
 
-import { q, value, raw, type Expression } from '../q.ts';
+import { q, value, raw, type Expression, type Relation } from '../q.ts';
 import { predicateSql, scalarTx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { carryOf, toListStream, toScalarStream, mapOfToListOf, type ListStream, type ScalarStream, type MapStream } from './stream.ts';
-import { type ElementStream } from './context.ts';
+import { carryFrag, carriedCols, type ElementStream } from './context.ts';
 import { type Compiled } from '../render.ts';
 import { materializeListRoot, materializeRoot } from './materialize.ts';
 import { dispatchNext, compileRead } from './index.ts';
@@ -46,26 +46,29 @@ function lowerListReducer(s: ListStream, name: string): ScalarStream {
  * with json_each (ordered by array position `.key`, preserving list order): an element
  * list → a fresh id-relation (a ElementStream the movement/tail dispatch re-enters, rejoining
  * nodes/edges downstream); a scalar list → a `v` ScalarStream carrying the value tag.
- * Mirrors compilePathArray's json_each idiom. Aliases/path/origin are NOT carried
- * through the retype (compileFold refused to fold them in), so the new stream starts
- * clean.
+ * Mirrors compilePathArray's json_each idiom. Every exploded member retains the
+ * list row's carried schema; global folds simply have an empty schema, while child
+ * folds and record fields preserve their parent traverser identity through re-entry.
  */
 export function compileUnfold(s: ListStream): ElementStream | ScalarStream | ListStream {
   const c = carryOf(s);
-  const explode = (col: string): Expression =>
-    q`SELECT je.value AS ${col} FROM ${s.rel}, json_each(${s.rel.c.list}) je ORDER BY je.key`;
+  const p = s.rel.as('c');
+  const explode = (col: string): Relation => s.q.cte(
+    q`SELECT je.value AS ${col}${carryFrag(s.carried, p)} FROM ${p}, json_each(${p.c.list}) je ORDER BY je.key`,
+    [col, ...carriedCols(s.carried)],
+  );
   if (s.of.kind === 'elem') {
-    const rel = s.q.cte(explode('id'), ['id']);
-    return { ...c, kind: 'elements', rel, elem: s.of.elem, carried: { ...c.carried, aliases: new Map(), path: undefined, origins: [] } };
+    const rel = explode('id');
+    return { ...c, kind: 'elements', rel, elem: s.of.elem };
   }
   // A list-of-lists: each exploded element is itself a JSONB array → a ListStream row
   // of the inner shape (so a further unfold / Scope.local op re-enters the list phase).
   if (s.of.kind === 'list') {
-    const rel = s.q.cte(explode('list'), ['list']);
+    const rel = explode('list');
     return toListStream(c, rel, s.of.of);
   }
-  const rel = s.q.cte(explode('v'), ['v']);
-  return { ...c, kind: 'scalar', rel, as: s.of.as };
+  const rel = explode('v');
+  return toScalarStream(c, rel, s.of.as);
 }
 
 /** none(pred): keep each list where NO element satisfies pred (a per-list collection
