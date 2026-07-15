@@ -4,7 +4,7 @@ import { stepChain, type Step } from '../frontend.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, compileFilterPredicate, predicateSql, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
 import { advance, elemRel, prevRel, carryFrag, carriedCols, aliasColsOf, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { foldBody } from './index.ts';
-import { pushChildScope, tryCompileCountChild, tryCompileElementChild, tryCompileScalarChild } from './child.ts';
+import { isScalarChild, pushChildScope, tryCompileCountChild, tryCompileElementChild, tryCompileScalarChild } from './child.ts';
 import { carryOf, toScalarStream, type ScalarStream } from './stream.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
@@ -484,3 +484,30 @@ export const choose: StepFn = (s, st) => {
   const merged = list([q`SELECT ${armProjection(thenEnd, out)} FROM ${thenEnd.rel}`, q`SELECT ${armProjection(elseEnd, out)} FROM ${elseEnd.rel}`], ' UNION ALL ');
   return advance(st, merged, { elem: thenEnd.elem, path: out.path });
 };
+
+/** Predicate choose with two homogeneous scalar result arms. The predicate gates
+ * two ElementStream seeds exactly like element choose; each gated seed then enters
+ * the generic child compiler and the resulting scalar rows merge with UNION ALL. */
+export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream | null {
+  if ((s as any).options) return null;
+  assertForkSafe('choose', st);
+  const args = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  if (args.length !== 3) return null; // two-arg choose has an element identity else arm
+  const [predArg, thenArg, elseArg] = args;
+  if (!isScalarChild(thenArg.nested, st.params) || !isScalarChild(elseArg.nested, st.params)) return null;
+  const pred = compileFilterPredicate(stepChain(predArg.nested, st.params), elemCtx(elemRel(st), st.elem), st.params);
+  const lowerArm = (arg: any, seed: ElementStream): ScalarStream =>
+    tryCompileScalarChild(seed, arg.nested, 'all')
+      ?? tryCompileCountChild(seed, arg.nested)
+      ?? (() => { throw new Error('choose() scalar branch preflight/compiler mismatch'); })();
+  const thenEnd = lowerArm(thenArg, gate(st, pred));
+  const elseEnd = lowerArm(elseArg, gate(st, notCoalesce(pred)));
+  const cols = carriedCols(st.carried);
+  const parts = [thenEnd, elseEnd].map((arm) => {
+    const a = arm.rel.as('a');
+    return q`SELECT ${a.c.v} AS v${carryFrag(st.carried, a)} FROM ${a}`;
+  });
+  const rel = st.q.cte(list(parts, ' UNION ALL '), ['v', ...cols]);
+  const as = thenEnd.as === elseEnd.as ? thenEnd.as : undefined;
+  return toScalarStream(carryOf(st), rel, as);
+}
