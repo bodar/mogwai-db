@@ -59,9 +59,14 @@ scalar branch merges. `lowerScopedScalarFold` uses the same domain + encounter m
 to produce one ListStream per parent (`[]` for an empty child, `[null]` for a productive
 NULL); map/flatMap/local consume it, and ordinary ListStream lowering handles followers.
 Homogeneous scalar-list `union`/three-arg `choose`/`coalesce` arms merge through
-`unifyScalarLists`; mixed element/scalar/list arms remain fail-closed. An empty folded
-list is productive, so list coalesce correctly never advances past a first fold arm.
-Scalar `local(child)` now uses this same compiler with `all` cardinality (contrasted
+`unifyLists`. `lowerScopedElementFold` applies the same parent-domain rule to element
+children, aggregating rowids in encounter order while retaining the node/edge item tag.
+Map/flatMap/local can therefore return element lists, `unfold()` rejoins the correct
+table, and root materialization expands the rowids back to property-preserving element
+objects in the same SQL query. Homogeneous element-list union/three-arg choose/coalesce
+arms share the same merge; incompatible node/edge or scalar/element lists fail closed.
+An empty folded list is productive, so list coalesce correctly never advances past a
+first fold arm. Scalar/list `local(child)` now uses this same compiler with `all` cardinality (contrasted
 with `map`'s `first`), so movement+projection+row-operator/reducer bodies no longer
 enter local.ts's private element-window vocabulary. Element-valued local windows remain
 there until the generic child compiler grows element barriers.

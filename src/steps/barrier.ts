@@ -1,6 +1,6 @@
 import { q, type Expression, type Relation } from '../q.ts';
 import { carryOf, toListStream, toScalarStream, type ListStream, type Stream, type ScalarStream } from './stream.ts';
-import { carriedCols, carryFrag, withoutCarried } from './context.ts';
+import { carriedCols, carryFrag, withoutCarried, type ElementStream } from './context.ts';
 
 /** Global count is a relational barrier: it consumes any shaped row stream and
  * returns exactly one Long scalar traverser. Row-associated state cannot cross it. */
@@ -37,6 +37,28 @@ export function lowerScopedScalarFold(
     ['list', ...carriedCols(input.carried)],
   );
   return toListStream(carryOf(input), rel, { kind: 'scalar', as: input.as });
+}
+
+/** Element child fold stores rowids in encounter order; ListStream metadata retains
+ * the element kind so unfold rejoins the correct table. The ranked relation gives
+ * duplicates a physical order before aggregation, while the domain supplies []. */
+export function lowerScopedElementFold(
+  input: ElementStream,
+  domain: Relation,
+  ordinal: string,
+): ListStream {
+  const c = input.rel.as('c');
+  const ranked = input.q.cte(
+    q`SELECT ${c.c.id} AS id, ${c.c[ordinal]} AS ${ordinal}, ROW_NUMBER() OVER (PARTITION BY ${c.c[ordinal]} ORDER BY ${c.c.id}) AS encounter FROM ${c}`,
+    ['id', ordinal, 'encounter'],
+  );
+  const d = domain.as('d');
+  const r = ranked.as('r');
+  const rel = input.q.cte(
+    q`SELECT jsonb(COALESCE(json_group_array(${r.c.id} ORDER BY ${r.c.encounter}) FILTER (WHERE ${r.c.encounter} IS NOT NULL), json('[]'))) AS list${carryFrag(input.carried, d)} FROM ${d} LEFT JOIN ${r} ON ${r.c[ordinal]}=${d.c[ordinal]} GROUP BY ${d.c[ordinal]}`,
+    ['list', ...carriedCols(input.carried)],
+  );
+  return toListStream(carryOf(input), rel, { kind: 'elem', elem: input.elem });
 }
 
 export type NumericReducer = 'sum' | 'min' | 'max' | 'mean';

@@ -17,12 +17,17 @@ const walkNodeCtx = (idExpr: Expression): ScalarCtx => {
   return { elem: 'node', idExpr, extIdExpr: sub('COALESCE(uid, id)'), labelIdExpr: sub('label') };
 };
 
-const unifyScalarLists = (arms: readonly ListStream[]): Extract<ListStream['of'], { kind: 'scalar' }> => {
+const unifyLists = (arms: readonly ListStream[]): ListStream['of'] => {
   const ofs = arms.map((arm) => arm.of);
-  if (ofs.some((of) => of.kind !== 'scalar'))
-    throw new Error('list branch arms have incompatible item shapes');
-  const tags = ofs.map((of) => of.kind === 'scalar' ? of.as : undefined);
-  return { kind: 'scalar', as: tags.every((tag) => tag === tags[0]) ? tags[0] : undefined };
+  if (ofs.every((of) => of.kind === 'scalar')) {
+    const tags = ofs.map((of) => of.kind === 'scalar' ? of.as : undefined);
+    return { kind: 'scalar', as: tags.every((tag) => tag === tags[0]) ? tags[0] : undefined };
+  }
+  if (ofs.every((of) => of.kind === 'elem')) {
+    const elems = ofs.map((of) => of.kind === 'elem' ? of.elem : undefined);
+    if (elems.every((elem) => elem === elems[0])) return { kind: 'elem', elem: elems[0]! };
+  }
+  throw new Error('list branch arms have incompatible item shapes');
 };
 
 /** Compile an until(<traversal>) modulator into `(id, depth) → boolean SQL`. A
@@ -204,7 +209,7 @@ export function tryLowerListUnion(s: Step, st: ElementStream): ListStream | null
     return q`SELECT ${a.c.list} AS list${carryFrag(st.carried, a)} FROM ${a}`;
   });
   const rel = st.q.cte(list(parts, ' UNION ALL '), ['list', ...carriedCols(st.carried)]);
-  return toListStream(carryOf(st), rel, unifyScalarLists(arms));
+  return toListStream(carryOf(st), rel, unifyLists(arms));
 }
 
 /** optional(t) = t where it yields output, else the traverser itself. Fast path: a
@@ -304,7 +309,7 @@ export function tryLowerListCoalesce(s: Step, st: ElementStream): ListStream | n
     return q`SELECT ${a.c.list} AS list${carryFrag(st.carried, a)} FROM ${a}${prior}`;
   });
   const rel = st.q.cte(list(parts, ' UNION ALL '), ['list', ...carriedCols(st.carried)]);
-  return toListStream(carryOf(st), rel, unifyScalarLists(arms));
+  return toListStream(carryOf(st), rel, unifyLists(arms));
 }
 
 /** flatMap(t): apply t per traverser, flatten all results — for element bodies this
@@ -590,5 +595,5 @@ export function tryLowerListChoose(s: Step, st: ElementStream): ListStream | nul
     return q`SELECT ${a.c.list} AS list${carryFrag(st.carried, a)} FROM ${a}`;
   });
   const rel = st.q.cte(list(parts, ' UNION ALL '), ['list', ...carriedCols(st.carried)]);
-  return toListStream(carryOf(st), rel, unifyScalarLists([thenEnd, elseEnd]));
+  return toListStream(carryOf(st), rel, unifyLists([thenEnd, elseEnd]));
 }

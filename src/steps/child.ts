@@ -6,7 +6,7 @@ import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStre
 import { foldBody } from './index.ts';
 import { lowerScalarRows, SCALAR_TRANSFORMS } from './scalar.ts';
 import { normalize } from '../strategies.ts';
-import { lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
+import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
 
 /** Root/child compilation context. A child frame retains the complete parent domain,
  * not merely an ordinal on productive child rows: reducers need that domain to
@@ -113,7 +113,9 @@ export function isScalarChild(nested: any, params: Record<string, any>): boolean
 export function isListChild(nested: any, params: Record<string, any>): boolean {
   if (!nested) return false;
   const body = childSteps(nested, params);
-  return body.at(-1)?.name === 'fold' && scalarRowParts(body.slice(0, -1)) !== null;
+  if (body.at(-1)?.name !== 'fold') return false;
+  const before = body.slice(0, -1);
+  return scalarRowParts(before) !== null || before.every((step) => ELEMENT_CHILD_STEPS.has(step.name));
 }
 
 /** Compile a terminal child count as a true scope-aware barrier. The preserved
@@ -268,8 +270,24 @@ export function tryCompileListChild(
   scope: CompileScope = ROOT_SCOPE,
 ): ListStream | null {
   const scoped = compileScalarChildRows(parent, nested, 'all', scope, true, true);
-  if (!scoped) return null;
-  const folded = lowerScopedScalarFold(scoped.stream, scoped.frame.domain, scoped.frame.ordinal);
+  if (scoped) {
+    const folded = lowerScopedScalarFold(scoped.stream, scoped.frame.domain, scoped.frame.ordinal);
+    const l = folded.rel.as('l');
+    const rel = parent.q.cte(
+      q`SELECT ${l.c.list} AS list${carryFrag(parent.carried, l)} FROM ${l}`,
+      ['list', ...carriedCols(parent.carried)],
+    );
+    return toListStream(carryOf(parent), rel, folded.of);
+  }
+
+  const body = childSteps(nested, parent.params);
+  if (body.at(-1)?.name !== 'fold') return null;
+  const prefix = body.slice(0, -1);
+  if (prefix.some((step) => !ELEMENT_CHILD_STEPS.has(step.name))) return null;
+  const pushed = pushChildScope(parent, scope);
+  const { st: end, stop } = foldBody(prefix, pushed.seed, 0);
+  if (stop !== prefix.length) return null;
+  const folded = lowerScopedElementFold(end, pushed.frame.domain, pushed.frame.ordinal);
   const l = folded.rel.as('l');
   const rel = parent.q.cte(
     q`SELECT ${l.c.list} AS list${carryFrag(parent.carried, l)} FROM ${l}`,
