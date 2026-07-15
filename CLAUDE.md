@@ -71,6 +71,13 @@ first fold arm. `local(child)` now uses this same compiler with `all` cardinalit
 `limit`/`skip`/`range`/`dedup` all partition by child origin. The former `local.ts`
 movement parser/private window engine is deleted; bare movement local bodies now work,
 and the same element row operators can feed a child `fold()` without another path.
+Traversal-valued `project().by(__.<scalar child>)` is the first generic by-consumer:
+one outer origin identifies each parent, every field compiles with child `first`
+cardinality, and the field relations inner-join on that origin. Missing child rows drop
+the project traverser; a productive NULL remains a field value; duplicate parents remain
+distinct. This currently requires every cycled project by-modulator to be a scalar child
+traversal. Mixed string/token/element modulators and select/group by-consumers are the
+next slices; do not grow `compileNestedScalar` to implement them.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
   (`stripTerminal`, `foldRepeatClusters`, `foldByModulators`) run once up front so
   the dispatch sees a canonical, peek-free chain (no index arithmetic anywhere).
