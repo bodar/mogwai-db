@@ -4,8 +4,8 @@ import { stepChain, type Step } from '../frontend.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, compileFilterPredicate, predicateSql, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
 import { advance, elemRel, prevRel, carryFrag, carriedCols, aliasColsOf, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { foldBody } from './index.ts';
-import { isScalarChild, pushChildScope, tryCompileCountChild, tryCompileElementChild, tryCompileScalarChild } from './child.ts';
-import { carryOf, toScalarStream, type ScalarStream } from './stream.ts';
+import { isListChild, isScalarChild, pushChildScope, tryCompileCountChild, tryCompileElementChild, tryCompileListChild, tryCompileScalarChild } from './child.ts';
+import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStream } from './stream.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
  *  read back from `nodes` by subquery (the walk row carries only the id). Lets
@@ -15,6 +15,14 @@ const walkNodeCtx = (idExpr: Expression): ScalarCtx => {
   // Node ctx: props are read from vertex_properties via idExpr (hasProp/scalarProp),
   // so no propsExpr (that's edge-only now).
   return { elem: 'node', idExpr, extIdExpr: sub('COALESCE(uid, id)'), labelIdExpr: sub('label') };
+};
+
+const unifyScalarLists = (arms: readonly ListStream[]): Extract<ListStream['of'], { kind: 'scalar' }> => {
+  const ofs = arms.map((arm) => arm.of);
+  if (ofs.some((of) => of.kind !== 'scalar'))
+    throw new Error('list branch arms have incompatible item shapes');
+  const tags = ofs.map((of) => of.kind === 'scalar' ? of.as : undefined);
+  return { kind: 'scalar', as: tags.every((tag) => tag === tags[0]) ? tags[0] : undefined };
 };
 
 /** Compile an until(<traversal>) modulator into `(id, depth) → boolean SQL`. A
@@ -185,6 +193,20 @@ export function tryLowerScalarUnion(s: Step, st: ElementStream): ScalarStream | 
   return toScalarStream(carryOf(st), rel, as, numeric ? 'number' : 'value');
 }
 
+export function tryLowerListUnion(s: Step, st: ElementStream): ListStream | null {
+  assertForkSafe('union', st);
+  const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  if (branches.length < 2 || !branches.every((b) => isListChild(b.nested, st.params))) return null;
+  const arms = branches.map((branch) => tryCompileListChild(st, branch.nested)
+    ?? (() => { throw new Error('union() list branch preflight/compiler mismatch'); })());
+  const parts = arms.map((arm) => {
+    const a = arm.rel.as('a');
+    return q`SELECT ${a.c.list} AS list${carryFrag(st.carried, a)} FROM ${a}`;
+  });
+  const rel = st.q.cte(list(parts, ' UNION ALL '), ['list', ...carriedCols(st.carried)]);
+  return toListStream(carryOf(st), rel, unifyScalarLists(arms));
+}
+
 /** optional(t) = t where it yields output, else the traverser itself. Fast path: a
  *  single out()/in() over vertices → LEFT JOIN + COALESCE-to-self (index-only, no
  *  window). General path: optional(t) = coalesce(t, identity) via the input ordinal
@@ -267,6 +289,22 @@ export function tryLowerScalarCoalesce(s: Step, st: ElementStream): ScalarStream
   const rel = st.q.cte(list(parts, ' UNION ALL '), ['v', ...(numeric ? ['vt'] : []), ...carriedCols(st.carried)]);
   const as = arms.every((arm) => arm.as === arms[0].as) ? arms[0].as : undefined;
   return toScalarStream(carryOf(st), rel, as, numeric ? 'number' : 'value');
+}
+
+export function tryLowerListCoalesce(s: Step, st: ElementStream): ListStream | null {
+  assertForkSafe('coalesce', st);
+  const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  if (!branches.length || !branches.every((b) => isListChild(b.nested, st.params))) return null;
+  const { seedSt, ord } = originSeed(st);
+  const arms = branches.map((branch) => tryCompileListChild(seedSt, branch.nested)
+    ?? (() => { throw new Error('coalesce() list branch preflight/compiler mismatch'); })());
+  const parts = arms.map((arm, k) => {
+    const a = arm.rel.as('a');
+    const prior = k === 0 ? empty : q` WHERE ${list(arms.slice(0, k).map((p) => q`${a.c[ord]} NOT IN (SELECT ${ord} FROM ${p.rel})`), ' AND ')}`;
+    return q`SELECT ${a.c.list} AS list${carryFrag(st.carried, a)} FROM ${a}${prior}`;
+  });
+  const rel = st.q.cte(list(parts, ' UNION ALL '), ['list', ...carriedCols(st.carried)]);
+  return toListStream(carryOf(st), rel, unifyScalarLists(arms));
 }
 
 /** flatMap(t): apply t per traverser, flatten all results — for element bodies this
@@ -535,4 +573,22 @@ export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream |
   const rel = st.q.cte(list(parts, ' UNION ALL '), ['v', ...(numeric ? ['vt'] : []), ...cols]);
   const as = thenEnd.as === elseEnd.as ? thenEnd.as : undefined;
   return toScalarStream(carryOf(st), rel, as, numeric ? 'number' : 'value');
+}
+
+export function tryLowerListChoose(s: Step, st: ElementStream): ListStream | null {
+  if ((s as any).options) return null;
+  assertForkSafe('choose', st);
+  const args = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  if (args.length !== 3) return null;
+  const [predArg, thenArg, elseArg] = args;
+  if (!isListChild(thenArg.nested, st.params) || !isListChild(elseArg.nested, st.params)) return null;
+  const pred = compileFilterPredicate(stepChain(predArg.nested, st.params), elemCtx(elemRel(st), st.elem), st.params);
+  const thenEnd = tryCompileListChild(gate(st, pred), thenArg.nested)!;
+  const elseEnd = tryCompileListChild(gate(st, notCoalesce(pred)), elseArg.nested)!;
+  const parts = [thenEnd, elseEnd].map((arm) => {
+    const a = arm.rel.as('a');
+    return q`SELECT ${a.c.list} AS list${carryFrag(st.carried, a)} FROM ${a}`;
+  });
+  const rel = st.q.cte(list(parts, ' UNION ALL '), ['list', ...carriedCols(st.carried)]);
+  return toListStream(carryOf(st), rel, unifyScalarLists([thenEnd, elseEnd]));
 }

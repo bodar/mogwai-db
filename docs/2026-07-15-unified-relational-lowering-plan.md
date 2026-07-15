@@ -539,8 +539,10 @@ uses the non-null encounter marker so productive NULL is counted, and numeric `v
 survives cardinality plus homogeneous scalar branch merges. `lowerScopedScalarFold`
 uses that domain and encounter marker to emit exactly one ListStream per parent: empty
 children become `[]`, while productive NULL remains `[null]`. Map/flatMap/local now
-compose those list results through ordinary ListStream dispatch; list-valued branch
-arms remain outside shape unification. L3 stays 872.
+compose those list results through ordinary ListStream dispatch. Homogeneous scalar-
+list union, three-argument choose, and coalesce arms share `unifyScalarLists`; mixed
+shapes still fail closed, and empty-list productivity makes coalesce stop correctly.
+L3 stays 872.
 Scalar `local(child)` now routes through that compiler with `all` cardinality, so
 projection, transforms, origin-partitioned row operators, and scalar reducers share the
 same lowering as flatMap. The legacy local prefix handler remains only for element-valued

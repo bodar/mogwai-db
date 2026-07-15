@@ -18,7 +18,7 @@ import { SCALAR_ROW_STEPS } from './scalar.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
 import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerListChild, tryLowerMapElement } from './mapscalar.ts';
-import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, union as lowerLegacyUnion } from './branch.ts';
+import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, union as lowerLegacyUnion } from './branch.ts';
 import { lowerGroup, lowerProperties, type GroupSource } from './group.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
@@ -208,18 +208,24 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
   // concatenate as ScalarStream rows; otherwise the established element-only union
   // remains authoritative and rejects mixed shapes.
   if (steps[stop]?.name === 'union') {
+    const list = tryLowerListUnion(steps[stop], st);
+    if (list) return dispatchNext(list, steps, stop + 1);
     const scalar = tryLowerScalarUnion(steps[stop], st);
     if (scalar) return dispatchNext(scalar, steps, stop + 1);
     return dispatchNext(lowerLegacyUnion(steps[stop], st), steps, stop + 1);
   }
 
   if (steps[stop]?.name === 'choose' && !steps[stop].options) {
+    const list = tryLowerListChoose(steps[stop], st);
+    if (list) return dispatchNext(list, steps, stop + 1);
     const scalar = tryLowerScalarChoose(steps[stop], st);
     if (scalar) return dispatchNext(scalar, steps, stop + 1);
     return dispatchNext(lowerLegacyChoose(steps[stop], st), steps, stop + 1);
   }
 
   if (steps[stop]?.name === 'coalesce') {
+    const list = tryLowerListCoalesce(steps[stop], st);
+    if (list) return dispatchNext(list, steps, stop + 1);
     const scalar = tryLowerScalarCoalesce(steps[stop], st);
     if (scalar) return dispatchNext(scalar, steps, stop + 1);
     return dispatchNext(lowerLegacyCoalesce(steps[stop], st), steps, stop + 1);

@@ -164,21 +164,31 @@ export function foldBody(steps: PStep[], seedSt: ElementStream, from: number): {
       : [];
     const scalarUnion = unionBranches.length >= 2
       && unionBranches.every((a: any) => isScalarChild(a.nested, seedSt.params));
+    const listUnion = unionBranches.length >= 2
+      && unionBranches.every((a: any) => isListChild(a.nested, seedSt.params));
     const chooseArgs = steps[i].name === 'choose' && !steps[i].options
       ? steps[i].args.filter((a: any) => a && typeof a === 'object' && 'nested' in a)
       : [];
     const scalarChoose = chooseArgs.length === 3
       && isScalarChild(chooseArgs[1].nested, seedSt.params)
       && isScalarChild(chooseArgs[2].nested, seedSt.params);
+    const listChoose = chooseArgs.length === 3
+      && isListChild(chooseArgs[1].nested, seedSt.params)
+      && isListChild(chooseArgs[2].nested, seedSt.params);
     const coalesceArgs = steps[i].name === 'coalesce'
       ? steps[i].args.filter((a: any) => a && typeof a === 'object' && 'nested' in a)
       : [];
     const scalarCoalesce = coalesceArgs.length > 0
       && coalesceArgs.every((a: any) => isScalarChild(a.nested, seedSt.params));
+    const listCoalesce = coalesceArgs.length > 0
+      && coalesceArgs.every((a: any) => isListChild(a.nested, seedSt.params));
     if (!fn
       || scalarUnion
+      || listUnion
       || scalarChoose
+      || listChoose
       || scalarCoalesce
+      || listCoalesce
       || (steps[i].name === 'choose' && steps[i].options)
       || (steps[i].name === 'sack' && !isSackMutate(steps[i]))
       || ((steps[i].name === 'group' || steps[i].name === 'groupCount') && !isSideEffectGroup(steps[i]))
