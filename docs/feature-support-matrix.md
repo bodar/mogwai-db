@@ -4,7 +4,7 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-15 · **live L3 conformance:** 851 · **corpus parse+chain:**
+**Last synced:** 2026-07-15 · **live L3 conformance:** 857 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
 
@@ -70,7 +70,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `id()`, `label()`, `count()` | ✅ | ✅ ids frame as `COALESCE(uid,id)` |
 | `valueMap`, `elementMap` | ✅ | ✅ custom vertex/edge framing (client serializer hardcodes empty props) |
 | `properties(k…)` [`.key`/`.value`/`.element`/`.id`/`.label`/`.count`] | ✅ | ✅ relational PropertyStream with explicit owner/key/value/meta payload + carried state<br>✅ `.key`/`.value`/`.id` retype to ScalarStream; later scalar filters/order/range/reducers/fold compose<br>✅ `.element()` retypes to the owner vertex **or edge** stream; later element steps compose<br>✅ real VP id + meta framed; `has(metaKey)`/`hasKey`/`hasValue`/`.properties()`(meta)/`valueMap`(metaMap)<br>❌ property-stream `dedup()`/`order()` before a projection |
-| `select('a')`, multi-`select`, `project(…)` | 🟡 | ✅ column-threaded aliases<br>❌ `select`/`project` of an **edge**-typed label |
+| `select('a')`, multi-`select`, `project(…)` | 🟡 | ✅ column-threaded aliases<br>✅ single-label `select` retypes to an element (vertex/edge) or ScalarStream under `by(key)`; later steps compose<br>❌ edge entries in multi-`select`/`project`; record-valued results still terminal |
 | `select(Column.values/keys)` | 🟡 | ✅ over a `group()`/`groupCount()` map (retypes → MapStream, §MapStream): scalar/count/sum values + element/scalar keys, incl. list-VALUED maps (`by(__.<move>()…fold())`) as list-of-lists<br>❌ element-VALUE maps, Map-unfold (→Map.Entry), select(Column) on a raw Map param |
 | **chained projections** (`values().count()`, `valueMap().select()`) | 🟡 | ✅ scalar projections retype to a physical ScalarStream; transforms, filters, ordering/range, and numeric reducers then lower one relational step at a time<br>❌ structured projection chains such as `valueMap().select()` still hit the compatibility guard |
 | `order()` [`.by(key[,dir])`] | 🟡 | ✅ tail modifier<br>❌ `order()` after `path()`<br>❌ `order().by(key)` on a scalar stream |
