@@ -1,5 +1,6 @@
-import { empty, list, q, type Expression, type Relation } from '../q.ts';
+import { empty, list, q, value, type Expression, type Relation } from '../q.ts';
 import { stepChain } from '../frontend.ts';
+import { edges, labels, nodes, vertexProperties } from '../schema.ts';
 import { advance, carriedWith, carryFrag, carriedCols, withCarried, type ElementStream } from './context.ts';
 import { carryOf, toScalarStream, type ScalarStream, type Stream } from './stream.ts';
 import { foldBody } from './index.ts';
@@ -93,6 +94,76 @@ export function tryCompileCountChild(
     ['v', ...carriedCols(parent.carried)],
   );
   return toScalarStream(carryOf(parent), rel, 'long');
+}
+
+/** Compile a scalar-producing child as rows, so productivity is represented by row
+ * existence rather than SQL NULL. This is map()'s `first` policy over a scalar tail:
+ * movement/filter uses the ordinary element fold, values() genuinely flat-maps
+ * multi-properties, then one productive row survives per child origin. */
+export function tryCompileScalarChild(
+  parent: ElementStream,
+  nested: any,
+  scope: CompileScope = ROOT_SCOPE,
+): ScalarStream | null {
+  if (!nested) return null;
+  const body = stepChain(nested, parent.params);
+  const terminal = body.at(-1);
+  if (!terminal || !['values', 'id', 'label', 'constant'].includes(terminal.name)) return null;
+  const prefix = body.slice(0, -1);
+  if (prefix.some((s) => !ELEMENT_CHILD_STEPS.has(s.name))) return null;
+  if (terminal.name === 'values' && (terminal.args.length !== 1 || typeof terminal.args[0] !== 'string')) return null;
+  if ((terminal.name === 'id' || terminal.name === 'label') && terminal.args.length) return null;
+  if (terminal.name === 'constant' && terminal.args.length !== 1) return null;
+
+  const pushed = pushChildScope(parent, scope);
+  const { st: end, stop } = foldBody(prefix, pushed.seed, 0);
+  if (stop !== prefix.length) return null;
+
+  const c = end.rel.as('c');
+  let scalar: Expression;
+  let from: Expression;
+  let order: Expression;
+  if (terminal.name === 'constant') {
+    scalar = value(terminal.args[0]);
+    from = q`${c}`;
+    order = c.c.id;
+  } else {
+    const elem = (end.elem === 'edge' ? edges : nodes).as('e');
+    if (terminal.name === 'values') {
+      const key = terminal.args[0];
+      if (end.elem === 'node') {
+        const vp = vertexProperties.as('vp');
+        scalar = vp.c.value;
+        from = q`${c} JOIN ${vp} ON ${vp.c.node}=${c.c.id} AND ${vp.c.key}=${value(key)}`;
+        order = q`${c.c.id}, ${vp.c.id}`;
+      } else {
+        scalar = q`j.value`;
+        from = q`${c} JOIN ${elem} ON ${elem.c.id}=${c.c.id} JOIN json_each(json(${elem.c.props})) j ON j.key=${value(key)}`;
+        order = c.c.id;
+      }
+    } else if (terminal.name === 'id') {
+      scalar = q`COALESCE(${elem.c.uid}, ${elem.c.id})`;
+      from = q`${c} JOIN ${elem} ON ${elem.c.id}=${c.c.id}`;
+      order = c.c.id;
+    } else {
+      const l = labels.as('l');
+      scalar = l.c.name;
+      from = q`${c} JOIN ${elem} ON ${elem.c.id}=${c.c.id} JOIN ${l} ON ${l.c.id}=${elem.c.label}`;
+      order = c.c.id;
+    }
+  }
+
+  const parentCols = carriedCols(parent.carried);
+  const ranked = parent.q.cte(
+    q`SELECT ${scalar} AS v${carryFrag(parent.carried, c)}, ${c.c[pushed.frame.ordinal]}, ROW_NUMBER() OVER (PARTITION BY ${c.c[pushed.frame.ordinal]} ORDER BY ${order}) AS rn FROM ${from}`,
+    ['v', ...parentCols, pushed.frame.ordinal, 'rn'],
+  );
+  const r = ranked.as('r');
+  const rel = parent.q.cte(
+    q`SELECT ${r.c.v} AS v${carryFrag(parent.carried, r)} FROM ${r} WHERE ${r.c.rn}=1`,
+    ['v', ...parentCols],
+  );
+  return toScalarStream(carryOf(parent), rel);
 }
 
 /** Compile an element-valued child through the SAME StepFns as the root prefix, then

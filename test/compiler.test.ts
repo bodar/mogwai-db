@@ -1279,8 +1279,10 @@ describe('compiler SQL snapshots', () => {
     expect(localCount.sql).toContain('LEFT JOIN');
     const carriedCount = read('g.V(1).as("a").local(__.out().count())');
     expect(carriedCount.sql).toContain('COUNT(c.id) AS v, d.a0');
-    expect(read('g.V(1).map(__.values("name"))').shape).toEqual({ kind: 'value', as: undefined });
-    expect(read('g.V(1).map(__.values("name"))').sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS v");
+    const childValue = read('g.V(1).map(__.values("name"))');
+    expect(childValue.shape).toEqual({ kind: 'value', as: undefined });
+    expect(childValue.sql).toContain('JOIN vertex_properties vp');
+    expect(childValue.sql).toContain('ROW_NUMBER() OVER (PARTITION BY c.o0');
     // record/list-valued child bodies still defer; element bodies use generic child scope below.
     expect(() => compile('g.V().map(__.select("a"))', {})).toThrow('not yet supported');
     expect(() => compile('g.V().map(__.values("name")).map(__.values("age"))', {})).toThrow('step not implemented: map()');
@@ -2159,6 +2161,10 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V().map(__.out().count())').map((r) => r.v).sort((a, b) => a - b)).toEqual([0, 0, 0, 1, 2, 3]);
     // per-vertex property projection
     expect(run(store, 'g.V(1).out("knows").map(__.values("name"))').map((r) => r.v).sort()).toEqual(['josh', 'vadas']);
+    // Productivity is row existence: missing values drop their parents. Movement
+    // and scalar projection share the first-productive-row child policy.
+    expect(run(store, 'g.V().map(__.values("age"))').map((r) => r.v).sort((a, b) => a - b)).toEqual([27, 29, 32, 35]);
+    expect(run(store, 'g.V(1).map(__.out().values("name"))').map((r) => r.v)).toEqual(['vadas']);
     // A productive null is a real traverser, not an empty child result.
     expect(run(store, 'g.V(1).map(__.constant(null))').map((r) => r.v)).toEqual([null]);
     expect(run(store, 'g.V().map(__.out().count()).is(P.gt(0)).count()').map((r) => r.v)).toEqual([3]);
