@@ -58,7 +58,9 @@ marker (not `v`), and retains dynamic numeric `v,vt` through map/flatMap and hom
 scalar branch merges. `lowerScopedScalarFold` uses the same domain + encounter marker
 to produce one ListStream per parent (`[]` for an empty child, `[null]` for a productive
 NULL); map/flatMap/local consume it, and ordinary ListStream lowering handles followers.
-List-valued branch arms remain fail-closed until branch shape unification grows them.
+Homogeneous scalar-list `union`/three-arg `choose`/`coalesce` arms merge through
+`unifyScalarLists`; mixed element/scalar/list arms remain fail-closed. An empty folded
+list is productive, so list coalesce correctly never advances past a first fold arm.
 Scalar `local(child)` now uses this same compiler with `all` cardinality (contrasted
 with `map`'s `first`), so movement+projection+row-operator/reducer bodies no longer
 enter local.ts's private element-window vocabulary. Element-valued local windows remain

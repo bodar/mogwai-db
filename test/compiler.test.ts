@@ -1255,6 +1255,8 @@ describe('compiler SQL snapshots', () => {
     const scalar = read('g.V().coalesce(__.values("age"), __.constant(0)).count()');
     expect(scalar.shape).toEqual({ kind: 'count' });
     expect(scalar.sql).toContain('a.o0 NOT IN (SELECT o0 FROM');
+    expect(read('g.V().coalesce(__.values("missing").fold(), __.values("name").fold()).unfold().count()').shape)
+      .toEqual({ kind: 'count' });
     expect(() => compile('g.V().coalesce(__.out(), __.values("name"))', {})).toThrow('scalar/projection body');
     expect(() => compile('g.V().coalesce(__.out(), __.outE())', {})).toThrow('different element kinds');
     // an origin-unsafe body step (drops the ordinal) fails closed, not a broken CTE
@@ -2159,6 +2161,8 @@ describe('compiler execution semantics', () => {
       .toEqual([3, 0]);
     expect(run(store, 'g.V(1).union(__.outE("knows").values("weight").sum(), __.outE("created").values("weight").sum())').map((r) => r.v))
       .toEqual([1.5, 0.4]);
+    expect(run(store, 'g.V(1).union(__.out("knows").values("name").fold(), __.out("created").values("name").fold()).unfold().order()').map((r) => r.v))
+      .toEqual(['josh', 'lop', 'vadas']);
     // optional hit: josh created ripple+lop
     expect(run(store, 'g.V(4).optional(__.out("created")).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple']);
     // optional miss: vadas has no out-created → falls back to self
@@ -2180,6 +2184,8 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V().choose(__.hasLabel("person"), __.values("name").toUpper(), __.constant("software").toUpper())').map((r) => r.v).sort())
       .toEqual(['JOSH', 'MARKO', 'PETER', 'SOFTWARE', 'SOFTWARE', 'VADAS']);
     expect(run(store, 'g.V().choose(__.hasLabel("person"), __.out().count(), __.in().count()).count()').map((r) => r.v))
+      .toEqual([6]);
+    expect(run(store, 'g.V().choose(__.hasLabel("person"), __.values("name").fold(), __.constant("software").fold()).unfold().count()').map((r) => r.v))
       .toEqual([6]);
     // predicate = count().is: marko has 2 knows-edges → out(knows); others → self
     expect(run(store, 'g.V(1).choose(__.out("knows").count().is(P.gt(1)), __.out("knows")).values("name")').map((r) => r.v).sort())
@@ -2204,6 +2210,9 @@ describe('compiler execution semantics', () => {
       .toEqual(['MARKO']);
     // count is total, so even zero is productive and prevents fallback.
     expect(run(store, 'g.V(2).coalesce(__.out().count(), __.constant(99))').map((r) => r.v)).toEqual([0]);
+    // fold() is total: an empty list is productive, so coalesce must not advance.
+    expect(run(store, 'g.V(1).coalesce(__.values("missing").fold(), __.values("name").fold()).unfold().count()').map((r) => r.v))
+      .toEqual([0]);
   });
 
   test('optional()/flatMap() multi-hop execute correctly', () => {
