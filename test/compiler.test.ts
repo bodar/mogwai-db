@@ -1260,8 +1260,9 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('flatMap() inlines an element body (fan-out), scalar body defers', () => {
-    expect(read('g.V().flatMap(__.out().out()).values("name")').sql)
-      .toContain('SELECT e.tgt AS id FROM edges e JOIN c1 p ON e.src=p.id');
+    const sql = read('g.V().flatMap(__.out().out()).values("name")').sql;
+    expect(sql).toContain('SELECT e.tgt AS id, p.o0 FROM edges e');
+    expect(sql).toContain('SELECT p.id AS id FROM c3 p'); // `all` consumes the child origin
     expect(() => compile('g.V().flatMap(__.values("name"))', {})).toThrow('scalar/projection body');
   });
 
@@ -1271,12 +1272,19 @@ describe('compiler SQL snapshots', () => {
     expect(m.sql).toContain('SELECT (SELECT COUNT(*) FROM edges WHERE (src=n.id)) AS v FROM nodes n JOIN c0 p');
     expect(read('g.V(1).map(__.values("name"))').shape).toEqual({ kind: 'value', as: undefined });
     expect(read('g.V(1).map(__.values("name"))').sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS v");
-    // element-body map (first-result-only) and select/fold bodies defer
-    expect(() => compile('g.V().map(__.out())', {})).toThrow('only supports a terminal count');
+    // record/list-valued child bodies still defer; element bodies use generic child scope below.
     expect(() => compile('g.V().map(__.select("a"))', {})).toThrow('not yet supported');
     expect(() => compile('g.V().map(__.values("name")).map(__.values("age"))', {})).toThrow('step not implemented: map()');
     // The leaf now returns a ScalarStream instead of materializing terminal SQL.
     expect(read('g.V().map(__.out().count()).is(P.gt(0)).count()').shape).toEqual({ kind: 'count' });
+  });
+
+  test('map(__.<element body>) uses child scope + first-per-parent cardinality', () => {
+    const p = read('g.V().map(__.out()).values("name")');
+    expect(p.shape).toEqual({ kind: 'value' });
+    expect(p.sql).toContain('ROW_NUMBER() OVER (PARTITION BY');
+    expect(p.sql).toContain('WHERE r.rn=1');
+    expect(read('g.V(1).map(__.outE("knows")).inV().values("name")').shape).toEqual({ kind: 'value' });
   });
 
   test('choose(pred, then, else) → gated-seed UNION ALL, arms fold from their seed', () => {
@@ -2145,6 +2153,18 @@ describe('compiler execution semantics', () => {
     // A productive null is a real traverser, not an empty child result.
     expect(run(store, 'g.V(1).map(__.constant(null))').map((r) => r.v)).toEqual([null]);
     expect(run(store, 'g.V().map(__.out().count()).is(P.gt(0)).count()').map((r) => r.v)).toEqual([3]);
+  });
+
+  test('element-body map keeps the first productive child per parent', () => {
+    const store = seededStore();
+    expect(run(store, 'g.V().map(__.out()).values("name")').map((r) => r.v).sort())
+      .toEqual(['lop', 'lop', 'vadas']);
+    expect(run(store, 'g.V(1).union(__.identity(),__.identity()).map(__.out()).values("name")').map((r) => r.v))
+      .toEqual(['vadas', 'vadas']);
+    expect(run(store, 'g.V().map(__.out().hasLabel("software")).values("name")').map((r) => r.v))
+      .toEqual(['lop', 'lop', 'lop']);
+    expect(run(store, 'g.V(1).map(__.outE("knows")).inV().values("name")').map((r) => r.v))
+      .toEqual(['vadas']);
   });
 
   test('scalar-producing leaves re-enter common lowering', () => {

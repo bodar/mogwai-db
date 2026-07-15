@@ -8,14 +8,24 @@ import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, elemRel, type ElementStream } from './context.ts';
 import { carryOf, toScalarStream, type ScalarStream } from './stream.ts';
 import { type ValueType } from '../render.ts';
+import { tryCompileElementChild } from './child.ts';
 
 // ---------- map (scalar body → per-traverser scalar projector) ----------
+
+/** Element-valued map body through the generic child-domain compiler. Null means the
+ * body is outside the currently origin-safe element vocabulary, so the scalar child
+ * fast path (or its clear deferral) should handle it. */
+export function tryLowerMapElement(st: ElementStream, step: PStep): ElementStream | null {
+  const arg = step.args[0];
+  if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
+  return tryCompileElementChild(st, arg.nested, 'first')?.stream ?? null;
+}
 
 /**
  * map(__.<scalar>) → one correlated scalar per traverser (shape value), reusing
  * compileNestedScalar (values/label/id/constant/out().count()/edge-aggregate). An
- * element-body map is first-result-only (needs a per-input row-number) and an alias/
- * select/fold body isn't a plain scalar — both defer via compileNestedScalar's throw.
+ * Element bodies are attempted first through tryCompileElementChild; alias/select/fold
+ * bodies still defer when they are neither an element child nor a plain scalar.
  * The produced ScalarStream re-enters the common dispatcher, so scalar followers
  * compose without this leaf owning a private tail compiler.
  */

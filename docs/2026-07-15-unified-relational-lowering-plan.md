@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–3 complete, Stage 4 active
-**Baseline:** L1 2298/2298, L3 833/2041; latest completed checkpoint: L3 866, 354 tests
+**Baseline:** L1 2298/2298, L3 833/2041; latest completed checkpoint: L3 867, 356 tests
 
 **Implementation checkpoint (2026-07-15):** physical stream schemas and the single
 root materialization boundary are landed. Global count and numeric reducers now lower
@@ -495,6 +495,14 @@ Terminal fast framing remains in `materializeRoot`; semantic lowering no longer 
 on whether another step follows.
 
 ### Stage 5 — build `CompileScope` and generic `compileChild`
+
+**Active checkpoint:** `tryCompileElementChild` is the first real shared child
+compiler: it pushes the existing multiset-safe parent domain, runs movement/filter
+bodies through the ordinary root `StepFn` fold, and applies a consumer cardinality
+policy. `map()` uses `first` (`ROW_NUMBER() PARTITION BY origin`, empty children remain
+unproductive); origin-safe `flatMap()` uses `all`. This recovered the official
+`map(__.in().hasId(1)).limit(2)` scenario, moving L3 866→867. Scalar children still
+use the correlated fast path; barriers and non-element tails are the next expansion.
 
 1. Extract the existing `originSeed` into `steps/child.ts` as `pushChildScope`.
 2. Preserve the domain relation in `ChildFrame`.

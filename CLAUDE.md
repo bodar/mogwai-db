@@ -26,6 +26,10 @@ the root through `steps/materialize.ts`. `select`/`project` always lower to stre
 `group`/`groupCount` always lower through `lowerGroup` to a rich GroupStream, terminal
 or followed. See `docs/2026-07-15-unified-relational-lowering-plan.md` for the active
 staged migration; the older P1–P3 sections below are historical semantics notes.
+Element-valued child `map`/origin-safe `flatMap` bodies now enter
+`tryCompileElementChild` (`steps/child.ts`): the same prefix StepFns run over a pushed
+parent domain, then `first`/`all` cardinality restores the outer scope. Extend this
+child seam; do not add another private movement parser.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
   (`stripTerminal`, `foldRepeatClusters`, `foldByModulators`) run once up front so
   the dispatch sees a canonical, peek-free chain (no index arithmetic anywhere).

@@ -4,7 +4,7 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-15 · **live L3 conformance:** 866 · **corpus parse+chain:**
+**Last synced:** 2026-07-15 · **live L3 conformance:** 867 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
 
@@ -95,8 +95,8 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `coalesce(…)` | 🟡 | ✅ first-non-empty via the `St.origins` ordinal STACK<br>✅ **incoming `as()` threads through** (originSeed projects it alongside the ordinal, merge preserves it)<br>✅ **nested in coalesce/optional** (each branch pushes a unique ordinal `o0`/`o1`/…)<br>❌ scalar branches<br>❌ mixed-shape<br>❌ a NEW `as()` inside an arm<br>✅ **path threads through** (pad-to-max cols) |
 | `union(…)` | 🟡 | ✅ multi-hop arms via `foldBody`<br>✅ **incoming `as()` threads through** the merge (`mergeBranchCarried`), so `union(…).select('a')`/`.path()` resolve<br>❌ mixed-shape<br>❌ source-branch tails<br>❌ a NEW `as()` inside an arm<br>✅ **path threads through** (pad-to-max cols) |
 | `optional(…)` | 🟡 | ✅ single-hop LEFT JOIN fast path + multi-hop<br>✅ **incoming `as()` threads through** (fast path carries it from the input; general path via originSeed)<br>❌ element-kind change on miss<br>❌ a NEW `as()` inside an arm<br>✅ **path threads through** (pad-to-max cols) |
-| `flatMap(__.…)` | 🟡 | ✅ element body fan-out<br>✅ **incoming `as()` threads through** (single body, no merge)<br>✅ **path threads through** (pad-to-max cols) |
-| `map(__.<scalar>)` | 🟡 | ✅ correlated scalar (`map(__.out().count())` etc) returning a ScalarStream; scalar filters, transforms, reducers and `fold` compose<br>✅ productive `constant(null)` remains distinct from no traverser<br>❌ **element**-body `map` (first-result — needs `ROW_NUMBER` over `St.origin`)<br>❌ alias/select/fold bodies; generic child lowering must represent productivity as row presence |
+| `flatMap(__.…)` | 🟡 | ✅ origin-safe movement/filter element bodies use the generic child compiler (`all` cardinality); broader legacy element bodies retain the prefix fallback<br>✅ **incoming `as()` threads through** (single body, no merge)<br>✅ **path threads through** (pad-to-max cols)<br>❌ scalar/projection bodies; NEW `as()` inside body |
+| `map(__.…)` | 🟡 | ✅ correlated scalar (`map(__.out().count())` etc) returning a ScalarStream; scalar filters, transforms, reducers and `fold` compose<br>✅ productive `constant(null)` remains distinct from no traverser<br>✅ movement/filter element bodies compile through the generic child domain; `ROW_NUMBER() PARTITION BY origin` keeps the first productive child per multiset-distinct parent<br>❌ alias/select/fold and barrier-bearing element bodies |
 | `local(…)` | 🟡 | ✅ per-element scalar reduction (`local(outE().count())` → tail projector)<br>✅ movement + a per-element `limit()`/`range()` via the shared child-domain ordinal and `ROW_NUMBER() OVER (PARTITION BY …)`<br>✅ outer `as()` aliases/path columns survive the child scope<br>❌ non-movement bodies (match/simplePath/union/nested local), no-barrier bodies, `order()`/`dedup()` inside, `local(aggregate(...))`, sack/otherV state |
 
 ## 6. Recursion (`repeat`)
