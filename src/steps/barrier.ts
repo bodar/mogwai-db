@@ -1,6 +1,6 @@
-import { q } from '../q.ts';
+import { q, type Expression, type Relation } from '../q.ts';
 import { carryOf, toListStream, toScalarStream, type ListStream, type Stream, type ScalarStream } from './stream.ts';
-import { withoutCarried } from './context.ts';
+import { carriedCols, carryFrag, withoutCarried } from './context.ts';
 
 /** Global count is a relational barrier: it consumes any shaped row stream and
  * returns exactly one Long scalar traverser. Row-associated state cannot cross it. */
@@ -22,6 +22,45 @@ export function lowerGlobalFold(input: ScalarStream): ListStream {
 }
 
 export type NumericReducer = 'sum' | 'min' | 'max' | 'mean';
+export type ScalarReducer = 'count' | NumericReducer;
+
+/** Scope-aware scalar barrier. The parent domain is the aggregate's left side, so
+ * every origin produces one result even when the child row stream is empty. The
+ * explicit encounter column is the non-null productivity marker: COUNT(v) would
+ * incorrectly ignore productive null traversers. */
+export function lowerScopedScalarReducer(
+  input: ScalarStream,
+  reducer: ScalarReducer,
+  domain: Relation,
+  ordinal: string,
+): ScalarStream {
+  if (!input.encounter) throw new Error('scoped scalar reducer requires explicit encounter order');
+  const d = domain.as('d');
+  const s = input.rel.as('s');
+  const join = q`${d} LEFT JOIN ${s} ON ${s.c[ordinal]}=${d.c[ordinal]}`;
+  let aggregate: Expression;
+  let result: ScalarStream['result'];
+  let as = input.as;
+  if (reducer === 'count') {
+    aggregate = q`COUNT(${s.c[input.encounter]}) AS v`;
+    result = 'count';
+    as = 'long';
+  } else {
+    const eligible = reducer === 'min' || reducer === 'max'
+      ? q`CASE WHEN typeof(${s.c.v}) in ('integer', 'real', 'text') THEN ${s.c.v} END`
+      : q`CASE WHEN typeof(${s.c.v}) in ('integer', 'real') THEN ${s.c.v} END`;
+    const fn = reducer === 'sum' ? 'SUM' : reducer === 'mean' ? 'AVG' : reducer === 'min' ? 'MIN' : 'MAX';
+    aggregate = q`${fn}(${eligible}) AS v, ${reducer === 'mean' ? q`'real'` : q`typeof(${fn}(${eligible}))`} AS vt`;
+    result = 'number';
+    as = undefined;
+  }
+  const encounter = 'encounter';
+  const rel = input.q.cte(
+    q`SELECT ${aggregate}, 1 AS ${encounter}${carryFrag(input.carried, d)} FROM ${join} GROUP BY ${d.c[ordinal]}`,
+    [...(result === 'number' ? ['v', 'vt'] : ['v']), encounter, ...carriedCols(input.carried)],
+  );
+  return toScalarStream(carryOf(input), rel, as, result, encounter);
+}
 
 /** A numeric/comparable reduction carries SQLite's winning storage class as `vt`.
  * That is part of the physical scalar payload, so a following is()/order()/limit()

@@ -533,7 +533,11 @@ window operations partitioned by the carried origin stack, and consumers then dr
 private origin/encounter columns. Nested chains run through `normalize()` just like
 roots, so `order().by()` has one IR shape. This composes through map/flatMap/union/
 choose/coalesce without a nested row-operator switch or accidental CTE ordering.
-Origin-scoped scalar reducers/fold remain excluded; L3 stays 872.
+`lowerScopedScalarReducer` in `barrier.ts` then extends that same stream to
+`count/sum/min/max/mean`: the parent domain makes the barrier total per origin, count
+uses the non-null encounter marker so productive NULL is counted, and numeric `v,vt`
+survives cardinality plus homogeneous scalar branch merges. Origin-scoped `fold`
+remains excluded; L3 stays 872.
 
 1. Extract the existing `originSeed` into `steps/child.ts` as `pushChildScope`.
 2. Preserve the domain relation in `ChildFrame`.

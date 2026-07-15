@@ -175,13 +175,14 @@ export function tryLowerScalarUnion(s: Step, st: ElementStream): ScalarStream | 
     arms.push(arm);
   }
   const cols = carriedCols(st.carried);
+  const numeric = arms.every((arm) => arm.result === 'number');
   const parts = arms.map((arm) => {
     const a = arm.rel.as('a');
-    return q`SELECT ${a.c.v} AS v${carryFrag(st.carried, a)} FROM ${a}`;
+    return q`SELECT ${a.c.v} AS v${numeric ? q`, ${a.c.vt} AS vt` : empty}${carryFrag(st.carried, a)} FROM ${a}`;
   });
-  const rel = st.q.cte(list(parts, ' UNION ALL '), ['v', ...cols]);
+  const rel = st.q.cte(list(parts, ' UNION ALL '), ['v', ...(numeric ? ['vt'] : []), ...cols]);
   const as = arms.every((arm) => arm.as === arms[0].as) ? arms[0].as : undefined;
-  return toScalarStream(carryOf(st), rel, as);
+  return toScalarStream(carryOf(st), rel, as, numeric ? 'number' : 'value');
 }
 
 /** optional(t) = t where it yields output, else the traverser itself. Fast path: a
@@ -257,14 +258,15 @@ export function tryLowerScalarCoalesce(s: Step, st: ElementStream): ScalarStream
     tryCompileScalarChild(seedSt, branch.nested, 'all')
       ?? tryCompileCountChild(seedSt, branch.nested)
       ?? (() => { throw new Error('coalesce() scalar branch preflight/compiler mismatch'); })());
+  const numeric = arms.every((arm) => arm.result === 'number');
   const parts = arms.map((arm, k) => {
     const a = arm.rel.as('a');
     const prior = k === 0 ? empty : q` WHERE ${list(arms.slice(0, k).map((p) => q`${a.c[ord]} NOT IN (SELECT ${ord} FROM ${p.rel})`), ' AND ')}`;
-    return q`SELECT ${a.c.v} AS v${carryFrag(st.carried, a)} FROM ${a}${prior}`;
+    return q`SELECT ${a.c.v} AS v${numeric ? q`, ${a.c.vt} AS vt` : empty}${carryFrag(st.carried, a)} FROM ${a}${prior}`;
   });
-  const rel = st.q.cte(list(parts, ' UNION ALL '), ['v', ...carriedCols(st.carried)]);
+  const rel = st.q.cte(list(parts, ' UNION ALL '), ['v', ...(numeric ? ['vt'] : []), ...carriedCols(st.carried)]);
   const as = arms.every((arm) => arm.as === arms[0].as) ? arms[0].as : undefined;
-  return toScalarStream(carryOf(st), rel, as);
+  return toScalarStream(carryOf(st), rel, as, numeric ? 'number' : 'value');
 }
 
 /** flatMap(t): apply t per traverser, flatten all results — for element bodies this
@@ -525,11 +527,12 @@ export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream |
   const thenEnd = lowerArm(thenArg, gate(st, pred));
   const elseEnd = lowerArm(elseArg, gate(st, notCoalesce(pred)));
   const cols = carriedCols(st.carried);
+  const numeric = thenEnd.result === 'number' && elseEnd.result === 'number';
   const parts = [thenEnd, elseEnd].map((arm) => {
     const a = arm.rel.as('a');
-    return q`SELECT ${a.c.v} AS v${carryFrag(st.carried, a)} FROM ${a}`;
+    return q`SELECT ${a.c.v} AS v${numeric ? q`, ${a.c.vt} AS vt` : empty}${carryFrag(st.carried, a)} FROM ${a}`;
   });
-  const rel = st.q.cte(list(parts, ' UNION ALL '), ['v', ...cols]);
+  const rel = st.q.cte(list(parts, ' UNION ALL '), ['v', ...(numeric ? ['vt'] : []), ...cols]);
   const as = thenEnd.as === elseEnd.as ? thenEnd.as : undefined;
-  return toScalarStream(carryOf(st), rel, as);
+  return toScalarStream(carryOf(st), rel, as, numeric ? 'number' : 'value');
 }
