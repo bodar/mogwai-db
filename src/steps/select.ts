@@ -2,7 +2,8 @@ import { q, list, empty, type Expression } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
 import { framedProps, nodePropScalar, predicateSql, propExtract, extIdOf } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
-import { type AliasMap, type ElementStream } from './context.ts';
+import { carryFrag, carriedCols, type AliasMap, type ElementStream } from './context.ts';
+import { carryOf, toScalarStream, type ScalarStream } from './stream.ts';
 import { type Compiled, type MapEntry, type PathPos } from '../render.ts';
 import { materializeRoot } from './materialize.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
@@ -17,6 +18,35 @@ function byToEntry(byArgs: any[] | undefined): { sub: 'vertex' | 'value'; key?: 
   if (a && typeof a === 'object' && 'nested' in a) throw new Error('by(traversal) modulator not yet supported');
   if (a && typeof a === 'object' && 'token' in a) throw new Error(`by(T.${a.token}) modulator not yet supported`);
   throw new Error('unsupported by() modulator');
+}
+
+/** A one-label select is not a record: it emits the selected traverser directly.
+ * Lower it to the ordinary element/scalar stream model so movement, projections and
+ * barriers after select() are handled by the common dispatcher. */
+export function lowerSingleSelect(st: ElementStream, proj: PStep): ElementStream | ScalarStream {
+  const pop = proj.args.find((a) => a && typeof a === 'object' && 'pop' in a) as { pop: string } | undefined;
+  if (pop && pop.pop !== 'last') throw new Error(`select(Pop.${pop.pop}) not yet supported`);
+  if (proj.args.some((a) => a && typeof a === 'object' && 'column' in a)) throw new Error('select(Column) not yet supported');
+  const keys = proj.args.filter((a): a is string => typeof a === 'string');
+  if (keys.length !== 1) throw new Error('lowerSingleSelect requires exactly one label');
+  const selected = st.carried.aliases.get(keys[0]);
+  if (!selected) throw new Error(`select("${keys[0]}"): no such label — as("${keys[0]}") was not seen`);
+  const p = st.rel.as('p');
+  const by = byToEntry(proj.bys?.[0]);
+  if (by.sub === 'vertex') {
+    const rel = st.q.cte(
+      q`SELECT ${p.c[selected.col]} AS id${carryFrag(st.carried, p)} FROM ${p}`,
+      ['id', ...carriedCols(st.carried)],
+    );
+    return { ...st, rel, elem: selected.elem };
+  }
+  const n = (selected.elem === 'edge' ? edges : nodes).as('n');
+  const expr = selected.elem === 'edge' ? propExtract(n.c.props, by.key!).expr : nodePropScalar(n.c.id, by.key!);
+  const rel = st.q.cte(
+    q`SELECT ${expr} AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c[selected.col]}`,
+    ['v', ...carriedCols(st.carried)],
+  );
+  return toScalarStream(carryOf(st), rel);
 }
 
 /**

@@ -658,8 +658,9 @@ describe('compiler SQL snapshots', () => {
     // as('a') binds the current id to column a0; out() carries a0 while id moves
     expect(p.sql).toContain('id AS a0 FROM c0');
     expect(p.sql).toContain('SELECT e.tgt AS id, p.a0 FROM edges e');
-    // single-label select('a') → vertex shape sourced from the alias column
-    expect(p.sql).toContain('JOIN c2 p ON n.id=p.a0');
+    // select retypes the alias to a fresh element stream, then root framing rejoins it.
+    expect(p.sql).toContain('SELECT p.a0 AS id, p.a0 FROM c2 p');
+    expect(p.sql).toContain('JOIN c3 p ON n.id=p.id');
     expect(p.shape).toEqual({ kind: 'vertex' });
   });
 
@@ -887,10 +888,10 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V(1).outE().values("weight")').sql).toContain("json_extract(n.props, '$.weight') AS v");
   });
 
-  test('select/project of an edge throws rather than silently joining nodes', () => {
-    // regression: edge-typed alias/traverser must not join the nodes table
-    // (silent empty, or wrong row if node/edge ids collide)
-    expect(() => compile('g.V(1).outE("knows").as("b").select("b")', {})).toThrow('select("b") of an edge-typed label is not yet supported');
+  test('single select of an edge retypes correctly; project(edge) still defers', () => {
+    const selected = read('g.V(1).outE("knows").as("b").select("b")');
+    expect(selected.shape).toEqual({ kind: 'edge' });
+    expect(selected.sql).toContain('FROM edges n JOIN');
     expect(() => compile('g.V(1).outE().project("w").by("weight")', {})).toThrow('project() of an edge is not yet supported');
   });
 
@@ -1804,6 +1805,15 @@ describe('compiler execution semantics', () => {
     // marko(1) as 'a', hop to who he knows, select back to marko each time
     const ids = run(store, 'g.V(1).as("a").out("knows").select("a")').map((r) => r.id);
     expect(ids).toEqual([1, 1]); // marko knows vadas+josh → two traversers, both select marko
+  });
+
+  test('single-label select re-enters element/scalar lowering', () => {
+    const store = seededStore();
+    // marko is selected once per outgoing traverser (3), then traversed out again (3 each).
+    expect(run(store, 'g.V(1).as("a").out().select("a").out().count()').map((r) => r.v)).toEqual([9]);
+    expect(run(store, 'g.V(1).outE("knows").as("e").select("e").inV().values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'vadas']);
+    expect(run(store, 'g.V().as("a").out().select("a").by("age").is(P.gt(30)).count()').map((r) => r.v)).toEqual([3]);
   });
 
   test('select("a").by(key) projects a property of the labelled element', () => {

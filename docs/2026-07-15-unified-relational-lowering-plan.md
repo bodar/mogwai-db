@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–3 complete, Stage 4 active
-**Baseline:** L1 2298/2298, L3 833/2041; latest completed checkpoint: L3 851, 351 tests
+**Baseline:** L1 2298/2298, L3 833/2041; latest completed checkpoint: L3 857, 352 tests
 
 **Implementation checkpoint (2026-07-15):** physical stream schemas and the single
 root materialization boundary are landed. Global count and numeric reducers now lower
@@ -452,6 +452,13 @@ than weakening the node/edge-only ElementStream invariant): its explicit
 projection re-entry, and owner vertex/edge re-entry. That owner retype recovered the
 three official `properties().element()` scenarios (vertex, filtered edge, all edges),
 moving L3 848→851. The other structured streams remain.
+
+The next structured slice has begun: single-label `select()` now returns the selected
+vertex/edge ElementStream, or a ScalarStream under `by(key)`, so it no longer owns a
+terminal renderer. Multi-label `select`/`project` remain the record-valued boundary and
+will get a per-traverser RecordStream rather than being forced into group()'s
+entry-per-row MapStream. The re-entry recovered six official scenarios (five select
+cases, including edge aliases, plus a match→select→movement chain), moving L3 851→857.
 
 Move the remaining terminal islands to streams:
 
