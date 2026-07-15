@@ -44,6 +44,9 @@ Element union retains its existing branch compiler; mixed shapes fail closed.
 Three-argument predicate `choose` uses the same shape-aware split for homogeneous
 scalar arms: the existing predicate gates seed two child compilations, whose scalar
 rows merge with `UNION ALL`; two-argument identity-else and element choose stay legacy.
+Homogeneous scalar `coalesce` arms share one ordinal-tagged parent domain and retain
+that ordinal until the first-productive merge; a total reducer result such as count=0
+is productive and correctly prevents fallback.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
   (`stripTerminal`, `foldRepeatClusters`, `foldByModulators`) run once up front so
   the dispatch sees a canonical, peek-free chain (no index arithmetic anywhere).

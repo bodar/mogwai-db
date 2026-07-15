@@ -522,6 +522,10 @@ moving L3 867→868. Three-argument predicate `choose` now applies its existing 
 false gates to homogeneous scalar child arms and merges their rows. Constant/value/
 count combinations recovered four more official scenarios, moving L3 868→872; the
 two-argument identity-else form and element arms retain the established compiler.
+Homogeneous scalar `coalesce` now compiles every arm from one child domain and applies
+the same first-non-empty-by-origin rule as element coalesce before dropping the internal
+ordinal. L3 remains 872; notably, a zero from child `count()` is a productive result and
+does not fall through to a later arm.
 
 1. Extract the existing `originSeed` into `steps/child.ts` as `pushChildScope`.
 2. Preserve the domain relation in `ChildFrame`.
