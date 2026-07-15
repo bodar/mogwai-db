@@ -9,10 +9,9 @@ import { q, value, raw, type Expression, type Relation } from '../q.ts';
 import { predicateSql, scalarTx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { carryOf, continueLowering, toListStream, toScalarStream, mapOfToListOf, type ListStream, type LoweringResult, type ScalarStream, type MapStream } from './stream.ts';
+import { carryOf, continueLowering, toListStream, toResultStream, toScalarStream, mapOfToListOf, type ListStream, type LoweringResult, type ScalarStream, type MapStream } from './stream.ts';
 import { carryFrag, carriedCols, type ElementStream } from './context.ts';
 import { type Compiled } from '../render.ts';
-import { materializeRoot } from './materialize.ts';
 import { compileRead } from './index.ts';
 
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
@@ -320,7 +319,7 @@ export function compileFromList(s: ListStream, steps: PStep[], at: number): Lowe
     // With a follower (order(Scope.local)/unfold) the deduped content is treated as a
     // plain list (TinkerPop's order(local) on a set yields a List), matching the suite.
     if (SET_RESULT.has(step.name) && terminal)
-      return materializeRoot(s.q, q`SELECT json(${listExpr}) AS list FROM ${c}`, { kind: 'jsonbSet' });
+      return continueLowering(toResultStream(s.q, q`SELECT json(${listExpr}) AS list FROM ${c}`, { kind: 'jsonbSet' }), at + 1);
     const rel = s.q.cte(q`SELECT ${listExpr} AS list FROM ${c}`, ['list']);
     // product yields a list of pair-lists; the others keep the element shape.
     const of = step.name === 'product' ? { kind: 'list' as const, of: { kind: 'scalar' as const } } : s.of;

@@ -1,15 +1,14 @@
 # Unified relational traversal lowering — root and child traversals through one compiler
 
 **Date:** 2026-07-15  
-**Status:** in progress; Stages 0–5 complete, Stage 6 consumer migration complete, Stage 7 active
+**Status:** in progress; Stages 0–7 complete, Stage 8 active
 **Baseline:** full suite 370/370, L1 2298/2298, L3 933/2041; 246 compiler tests
 
 ## Restart handoff — read this first after a context reset
 
-**Current checkpoint:** branch `refactor/unified-relational-lowering`; items 1–15 are on
-`trunk`, item 16 is local commit `80d7020`, item 17 is local commit `9eabd70`, and item
-items 18–20 are local commits `8a6f3ab`, `7b23f19`, and `4458c23`; item 21 is the
-current uncommitted checkpoint. Run full `bun test` before every commit.
+**Current checkpoint:** branch `refactor/unified-relational-lowering`; items 1–20 are on
+`trunk` through `4458c23`. Item 21 is local commit `231938d`; item 22 is the following
+local commit/checkpoint. Run full `bun test` before every commit.
 
 **Recent completed slices:**
 
@@ -142,6 +141,13 @@ current uncommitted checkpoint. Run full `bun test` before every commit.
     compatibility island is confined to the legacy element/scalar tail accumulator
     (plus shaped set/meta leaves that still need first-class stream kinds). TypeScript,
     compiler 246/246, L3 933/2041, and full 370/370 are green.
+22. Stage 7 is complete. A terminal `ResultStream` now carries the legacy tail SQL and
+    GraphBinary shape through the same continuation loop instead of returning `Compiled`.
+    Projection/scalar compatibility tails, terminal set barriers, select/project records,
+    and property meta results all yield streams; `materializeStream` is the single ordinary
+    read exit. The root-only bulk-repeat count specialization deliberately materializes
+    directly because it replaces the entire lowering pipeline. TypeScript, compiler
+    246/246, L3 933/2041, full 370/370, and corpus 2298/2298 are green.
 
 **Current Stage 6 state:** scalar traversal modulators for `project`, aliased `select`,
 and inline element `group` all use the generic child-domain compiler. Group keys consume
@@ -152,10 +158,10 @@ aggregate, order, dedup, linear-path, and alias-compare boundaries, including nu
 element records and aggregate members. Multi-input math/format/option-choose modulation
 also uses one generic child domain. L3 is 933.
 
-**Immediate next slice:** convert the legacy element/scalar tail accumulator's terminal
-expressions into a typed terminal stream/plan so `compileRead` becomes literally
-`seed → lowerSteps → materializeRoot`. Then give terminal set/meta results first-class
-stream kinds. Preserve correlated count/EXISTS as measured fast paths until Stage 8.
+**Immediate next slice:** begin Stage 8 with static carried-column requirements. Measure
+representative hot root and nested traversals, then stop allocating origin/encounter state
+when no downstream consumer observes it. Preserve correlated count/EXISTS and bulk-repeat
+as measured fast paths, and keep every optimization behind the same Stream/scope contract.
 
 **Deliberate compatibility boundaries after Stage 6:** broader VariantStream followers,
 property groups without a live element parent, element-kind-changing optional fallback,
@@ -758,7 +764,7 @@ Migrate in increasing semantic complexity:
 
 Ratchet after each consumer, not only at the end.
 
-### Stage 7 — demote and delete the mini-compilers
+### Stage 7 — demote and delete the mini-compilers (complete)
 
 1. ~~The surviving optimized pieces are `tryInlineScalar` and
    `tryInlinePredicate`; unsupported means null/fallback.~~
@@ -772,6 +778,8 @@ Ratchet after each consumer, not only at the end.
 6. ~~Remove recursive `dispatchNext`; shape compilers yield typed continuations to the
    iterative `lowerSteps` owner.~~
 7. ~~Remove the `St` alias; source uses `ElementStream` directly.~~
+8. ~~Route every ordinary read leaf through `Stream`; a terminal `ResultStream` contains
+   compatibility SQL/shape until the one `materializeStream` boundary.~~
 
 ### Stage 8 — optimize the unified model
 
@@ -879,9 +887,9 @@ builder and bulking engine, but make its input/output conform to the same Stream
 
 The refactor is complete when all of the following are true:
 
-- [ ] `compileRead` is `seed → lowerSteps → materializeRoot`.
-- [ ] Every ordinary read leaf returns `Stream`, never `Compiled`.
-- [ ] Only `materializeRoot` calls `readCompiled` for reads.
+- [x] `compileRead` is `seed → lowerSteps →` one terminal `materializeStream` boundary.
+- [x] Every ordinary read leaf yields `Stream`, never `Compiled`.
+- [x] Only `materializeRoot` calls `readCompiled` for reads.
 - [ ] Root and child traversals share `lowerSteps`.
 - [x] All stream-carried columns physically exist on their relations.
 - [ ] Barriers derive global/per-origin behaviour from `CompileScope`.

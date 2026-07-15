@@ -135,6 +135,7 @@ export function materializePathRoot(stream: PathStream): Compiled {
  * itself be a Gremlin result value yet. */
 export function materializeStream(stream: Exclude<Stream, import('./context.ts').ElementStream>): Compiled {
   switch (stream.kind) {
+    case 'result': return materializeRoot(stream.q, stream.tail, stream.shape);
     case 'scalar': return materializeScalarRoot(stream);
     case 'variant': return materializeVariantRoot(stream);
     case 'list': return materializeListRoot(stream);

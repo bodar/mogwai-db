@@ -6,12 +6,9 @@ import {
 } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, elemRel, type ElementStream } from './context.ts';
-import { carryOf, continueLowering, toListStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ScalarStream } from './stream.ts';
+import { carryOf, continueLowering, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream } from './stream.ts';
 import { tryLowerLocalAggregate } from './sideeffect.ts';
-import {
-  type Compiled, type Shape, type ElemShape,
-} from '../render.ts';
-import { materializeRoot, materializeScalarRoot } from './materialize.ts';
+import { type Shape, type ElemShape } from '../render.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
 import { SCALAR_ROW_STEPS } from './scalar.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
@@ -173,8 +170,7 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
   // accumulator until those operators migrate to stepwise lowering.
   if (steps[stop]?.name === 'count' && !isScopeLocalStep(steps[stop])) {
     const out = lowerGlobalCount(st);
-    if (stop + 1 < steps.length) return continueLowering(out, stop + 1);
-    return materializeScalarRoot(out);
+    return continueLowering(out, stop + 1);
   }
 
   // properties() turns the traverser into a relational PropertyStream. Property-
@@ -333,8 +329,8 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
     if (acc.projStep?.name === 'path')
       return continueLowering(lowerPath(st, acc.projStep, acc), at);
     if (isMapProj(acc.projStep))
-      return compileSelectProject(st, acc.projStep!, acc);
-    return buildProjection(st, acc);
+      return continueLowering(compileSelectProject(st, acc.projStep!, acc), at);
+    return continueLowering(buildProjection(st, acc), at);
   }
 
   // Stopped at a retype boundary: steps[at] is `unfold` or a non-terminal `fold`.
@@ -423,13 +419,11 @@ export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number)
   // carried state because no single input row owns the global result.
   if (steps[from]?.name === 'count' && !isScopeLocalStep(steps[from])) {
     const out = lowerGlobalCount(s);
-    if (from + 1 < steps.length) return continueLowering(out, from + 1);
-    return materializeScalarRoot(out);
+    return continueLowering(out, from + 1);
   }
   if (NUMERIC_REDUCERS.has(steps[from]?.name as NumericReducer) && !isScopeLocalStep(steps[from])) {
     const out = lowerGlobalNumericReducer(s, steps[from].name as NumericReducer);
-    if (from + 1 < steps.length) return continueLowering(out, from + 1);
-    return materializeScalarRoot(out);
+    return continueLowering(out, from + 1);
   }
   if (steps[from]?.name === 'fold' && !isScopeLocalStep(steps[from]))
     return continueLowering(lowerGlobalFold(s), from + 1);
@@ -446,7 +440,7 @@ export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number)
     const dist = acc.distinct ? 'DISTINCT ' : '';
     const whereNode = acc.isPreds.length ? q` WHERE ${list(acc.isPreds.map((p) => predicateSql(q`v`, p)), ' AND ')}` : empty;
     const limitNode = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
-    return materializeRoot(s.q, q`SELECT COUNT(*) AS v FROM (SELECT ${dist}v FROM ${s.rel}${whereNode}${limitNode})`, { kind: 'count' });
+    return continueLowering(toResultStream(s.q, q`SELECT COUNT(*) AS v FROM (SELECT ${dist}v FROM ${s.rel}${whereNode}${limitNode})`, { kind: 'count' }), stop);
   }
   // Row-preserving operators keep reducer semantics on the stream. In particular,
   // count().is(P) is still a Long count result rather than becoming an untyped value
@@ -463,11 +457,11 @@ export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number)
       q`SELECT ${acc.distinct ? 'DISTINCT ' : ''}${p.c.v} AS v${typeCol}${carryFrag(s.carried, p)} FROM ${p}${whereNode}${orderNode}${limitNode}`,
       [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...carriedCols(s.carried)],
     );
-    return materializeScalarRoot(toScalarStream(carryOf(s), rel, s.as, s.result));
+    return continueLowering(toScalarStream(carryOf(s), rel, s.as, s.result), stop);
   }
   const proj: ProjResult = { shape: { kind: 'value', as: s.as }, colsNode: q`v AS v`, fromNode: s.rel, scalarExpr: q`v`, baseWhere: null };
   const orderKey = (): Expression => { throw new Error('order().by(key) on a scalar stream not supported (no properties)'); };
-  return renderProjection(s.q, proj, acc, orderKey);
+  return continueLowering(renderProjection(s.q, proj, acc, orderKey), stop);
 }
 
 export interface TailMods { orders: OrderClause[]; distinct: boolean; offset: number; limit: number | null; }
@@ -537,7 +531,7 @@ const PROJECTORS = new Map<string, ProjFn>([
 export const nodePropOrderKey = (st: ElementStream) => (key: string): Expression =>
   st.elem === 'edge' ? propExtract('n.props', key).expr : nodePropScalar(raw('n.id'), key);
 
-function buildProjection(st: ElementStream, acc: TailAcc): Compiled {
+function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
   const { distinct, offset, limit, isPreds, reducer } = acc;
   const projName = acc.projStep?.name ?? '__element';
 
@@ -551,7 +545,7 @@ function buildProjection(st: ElementStream, acc: TailAcc): Compiled {
     // count().is(P): filter the single count value (0 or 1 result rows).
     if (isPreds.length)
       countNode = q`SELECT v FROM (${countNode}) WHERE ${list(isPreds.map((pr) => predicateSql(q`v`, pr)), ' AND ')}`;
-    return materializeRoot(st.q, countNode, { kind: 'count' });
+    return toResultStream(st.q, countNode, { kind: 'count' });
   }
 
   const n = elemRel(st);
@@ -615,7 +609,7 @@ export function renderProjection(
   Q: Query, proj: ProjResult, acc: TailAcc,
   orderKey: (key: string) => Expression,
   fallbackOrder?: Expression,
-): Compiled {
+): ResultStream {
   const { orders, distinct, offset, limit, isPreds, reducer, injects } = acc;
   let { shape, colsNode, scalarExpr } = proj;
 
@@ -689,7 +683,7 @@ export function renderProjection(
   // Terminal reducers wrap the projected select.
   if (reducer) ({ tailNode, shape } = wrapReducer(tailNode, reducer, shape));
 
-  return materializeRoot(Q, tailNode, shape);
+  return toResultStream(Q, tailNode, shape);
 }
 
 /** Wrap a `v`-projecting select in a terminal reducer (fold/sum/min/max/mean),

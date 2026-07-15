@@ -13,9 +13,9 @@
 // StepFns only ever see `ElementStream`. The union lives at the ORCHESTRATION layer, never
 // inside a StepFn.
 
-import { type Relation } from '../q.ts';
+import { type Expression, type Query, type Relation } from '../q.ts';
 import { type Elem } from '../plan.ts';
-import { type Compiled, type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type PathPos, type ValueType } from '../render.ts';
+import { type Compiled, type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type PathPos, type Shape, type ValueType } from '../render.ts';
 import { carriedCols, type Carry, type ElementStream } from './context.ts';
 
 /** What a list stream holds — i.e. the shape `unfold` produces from it. `elem` → bare
@@ -118,7 +118,18 @@ export interface PathStream extends Carry {
   readonly layout: PathLayout;
 }
 
-export type Stream = ElementStream | ScalarStream | VariantStream | ListStream | MapStream | PropertyStream | RecordStream | GroupStream | PathStream;
+/** A fully lowered legacy tail awaiting the one root materialization boundary. It is
+ * intentionally not relational/re-enterable: producers may only yield it at the end
+ * of the chain. New step families should prefer a physical typed stream. */
+export interface ResultStream {
+  readonly kind: 'result';
+  readonly q: Query;
+  readonly tail: Expression;
+  readonly shape: Shape;
+}
+
+export type RelationalStream = ElementStream | ScalarStream | VariantStream | ListStream | MapStream | PropertyStream | RecordStream | GroupStream | PathStream;
+export type Stream = RelationalStream | ResultStream;
 
 /** A shape compiler yields this token when lowering should continue with a new
  * relational stream. The central lowerSteps loop consumes it; leaves never recurse
@@ -182,6 +193,7 @@ export const recordResultColumns = (f: RecordField): string[] =>
  * by the stable carried schema. A stream is executable relational state, so metadata
  * may never claim a column that its Relation does not expose. */
 export function streamColumns(s: Stream): readonly string[] {
+  if (s.kind === 'result') return [];
   const payload = s.kind === 'elements' ? ['id']
     : s.kind === 'scalar' ? [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...(s.encounter ? [s.encounter] : [])]
     : s.kind === 'variant' ? ['vk', 'v', 'rid']
@@ -198,6 +210,7 @@ export function streamColumns(s: Stream): readonly string[] {
  * declared CTE layout, so checking it here catches missing or reordered carried
  * columns before SQLite turns the mismatch into corrupt traversal state. */
 export function assertStreamColumns<T extends Stream>(s: T): T {
+  if (s.kind === 'result') return s;
   const expected = streamColumns(s);
   const actual = s.rel.cols;
   if (expected.length !== actual.length || expected.some((col, i) => col !== actual[i]))
@@ -207,7 +220,12 @@ export function assertStreamColumns<T extends Stream>(s: T): T {
 
 /** Project a stream's shape-independent state (for building the next phase's stream). */
 export const carryOf = (s: Stream): Carry =>
-  ({ q: s.q, params: s.params, sideEffects: s.sideEffects, carried: s.carried });
+  s.kind === 'result'
+    ? (() => { throw new Error('a terminal result stream has no traverser carry'); })()
+    : ({ q: s.q, params: s.params, sideEffects: s.sideEffects, carried: s.carried });
+
+export const toResultStream = (q: Query, tail: Expression, shape: Shape): ResultStream =>
+  ({ kind: 'result', q, tail, shape });
 
 export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, result: ScalarStream['result'] = 'value', encounter?: string, productiveNull?: boolean): ScalarStream =>
   assertStreamColumns({ ...c, kind: 'scalar', rel, as, result, encounter, productiveNull });

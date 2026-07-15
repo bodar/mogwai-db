@@ -1,10 +1,10 @@
 import { q, type Expression, type Relation } from '../q.ts';
-import { carryOf, toListStream, toScalarStream, type ListStream, type Stream, type ScalarStream } from './stream.ts';
+import { carryOf, toListStream, toScalarStream, type ListStream, type RelationalStream, type ScalarStream } from './stream.ts';
 import { carriedCols, carryFrag, withoutCarried, type ElementStream } from './context.ts';
 
 /** Global count is a relational barrier: it consumes any shaped row stream and
  * returns exactly one Long scalar traverser. Row-associated state cannot cross it. */
-export function lowerGlobalCount(input: Stream): ScalarStream {
+export function lowerGlobalCount(input: RelationalStream): ScalarStream {
   const rel = input.q.cte(q`SELECT COUNT(*) AS v FROM ${input.rel}`, ['v']);
   return toScalarStream(withoutCarried(carryOf(input)), rel, 'long', 'count');
 }

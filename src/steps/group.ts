@@ -7,9 +7,8 @@ import {
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, elemRel, withoutCarried, type Carry, type ElementStream } from './context.ts';
-import { carryOf, continueLowering, groupColumns, toGroupStream, toMapStream, toPropertyStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type PropertyStream, type ScalarStream } from './stream.ts';
+import { carryOf, continueLowering, groupColumns, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type PropertyStream, type ScalarStream } from './stream.ts';
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
-import { materializeRoot } from './materialize.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { isElementFoldChild, isScalarChild, isScalarFoldChild, pushChildScope, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild } from './child.ts';
 
@@ -435,7 +434,7 @@ export function compileFromProperty(s: PropertyStream, steps: PStep[], at: numbe
   if (step.name === 'valueMap') {
     if (at + 1 < steps.length) throw new Error(`step not implemented after properties().valueMap(): ${steps[at + 1].name}()`);
     const p = s.rel.as('p');
-    return materializeRoot(s.q, q`SELECT ${p.c.pmeta} AS meta FROM ${p}`, { kind: 'metaMap' });
+    return continueLowering(toResultStream(s.q, q`SELECT ${p.c.pmeta} AS meta FROM ${p}`, { kind: 'metaMap' }), at + 1);
   }
 
   if (step.name === 'properties') {
@@ -443,7 +442,7 @@ export function compileFromProperty(s: PropertyStream, steps: PStep[], at: numbe
       const mkeys = step.args.filter((a): a is string => typeof a === 'string');
       const mkeyFilter = mkeys.length ? q` WHERE je.key IN (${list(mkeys.map(value), ',')})` : empty;
       const p = s.rel.as('p');
-      return materializeRoot(s.q, q`SELECT je.key AS mk, je.value AS mv FROM ${p}, json_each(COALESCE(${p.c.pmeta}, '{}')) je${mkeyFilter}`, { kind: 'metaProperty' });
+      return continueLowering(toResultStream(s.q, q`SELECT je.key AS mk, je.value AS mv FROM ${p}, json_each(COALESCE(${p.c.pmeta}, '{}')) je${mkeyFilter}`, { kind: 'metaProperty' }), at + 1);
   }
 
   if (step.name === 'element') {
