@@ -36,6 +36,9 @@ export interface ScalarStream extends Carry {
   /** Root framing semantics carried by the reducer, rather than reconstructed from
    * where the stream happens to become terminal. */
   readonly result?: 'value' | 'count' | 'number';
+  /** Optional physical encounter-order column. Child traversal barriers use this
+   * instead of relying on SQLite relation order, which is not preserved across CTEs. */
+  readonly encounter?: string;
 }
 
 /** A single list value in a one-row relation with a JSONB `list` column (fold /
@@ -150,7 +153,7 @@ export const recordResultColumns = (f: RecordField): string[] =>
  * may never claim a column that its Relation does not expose. */
 export function streamColumns(s: Stream): readonly string[] {
   const payload = s.kind === 'elements' ? ['id']
-    : s.kind === 'scalar' ? (s.result === 'number' ? ['v', 'vt'] : ['v'])
+    : s.kind === 'scalar' ? [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...(s.encounter ? [s.encounter] : [])]
     : s.kind === 'list' ? ['list']
     : s.kind === 'map' ? ['mk', 'mv']
     : s.kind === 'property' ? ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta']
@@ -175,8 +178,8 @@ export function assertStreamColumns<T extends Stream>(s: T): T {
 export const carryOf = (s: Stream): Carry =>
   ({ q: s.q, params: s.params, sideEffects: s.sideEffects, carried: s.carried });
 
-export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, result: ScalarStream['result'] = 'value'): ScalarStream =>
-  assertStreamColumns({ ...c, kind: 'scalar', rel, as, result });
+export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, result: ScalarStream['result'] = 'value', encounter?: string): ScalarStream =>
+  assertStreamColumns({ ...c, kind: 'scalar', rel, as, result, encounter });
 export const toListStream = (c: Carry, rel: Relation, of: ListOf): ListStream =>
   assertStreamColumns({ ...c, kind: 'list', rel, of });
 export const toMapStream = (c: Carry, rel: Relation, keyOf: MapOf, valOf: MapOf): MapStream =>
