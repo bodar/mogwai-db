@@ -339,21 +339,25 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.inject(1,3).inject(100,300)').binds).toEqual([1, 3, 100, 300]);
     // reducers reuse the shared wrapper
     expect(read('g.inject(1,2,3).sum()').shape).toEqual({ kind: 'scalar' });
-    expect(read('g.inject(1,2,3).sum()').sql).toContain('SUM(v)');
-    expect(read('g.inject(1,2,3).mean()').sql).toContain('AVG(v)');
+    expect(read('g.inject(1,2,3).sum()').sql).toContain('SUM(s.v)');
+    expect(read('g.inject(1,2,3).mean()').sql).toContain('AVG(s.v)');
     expect(read('g.inject(1,2,3).count()').shape).toEqual({ kind: 'count' });
-    expect(read('g.inject(1,2,3).fold()').shape).toEqual({ kind: 'list', elem: 'scalar' });
+    expect(read('g.inject(1,2,3).fold()').shape).toEqual({ kind: 'jsonbList' });
     // is() BEFORE count() filters the pre-count stream (WHERE inside the counted set)
-    expect(read('g.inject(1,2,3).is(P.gt(1)).count()').sql).toContain('COUNT(*) AS v FROM (SELECT v FROM c0 WHERE v > ?)');
-    // is()/steps AFTER count() would filter the count value — a different semantics
-    // the position-free tail can't express, so defer (never silently miscount).
-    expect(() => compile('g.inject(1,2,3).count().is(P.gt(2))', {})).toThrow('step not implemented after count(): is()');
+    expect(read('g.inject(1,2,3).is(P.gt(1)).count()').sql).toContain('WHERE p.v > ?');
+    // count is a relational boundary, so later scalar filters compose in position.
+    expect(read('g.inject(1,2,3).count().is(P.gt(2))').sql).toContain('WHERE p.v > ?');
     // value modifiers
-    expect(read('g.inject(3,1,2).order()').sql).toContain('ORDER BY v ASC');
-    expect(read('g.inject(1,1,2).dedup()').sql).toContain('DISTINCT v');
+    expect(read('g.inject(3,1,2).order()').sql).toContain('ORDER BY p.v ASC');
+    expect(read('g.inject(1,1,2).dedup()').sql).toContain('DISTINCT p.v');
     // an unsupported follow-on step defers cleanly (shared tail's message, since
     // inject now flows through the same value tail as element projections)
     expect(() => compile('g.inject(1).as("a").select("a")', {})).toThrow('step not implemented: as()');
+
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    expect(run(store, 'g.inject(1,2,3).limit(2).is(P.gt(1))').map((r) => r.v)).toEqual([2]);
+    expect(run(store, 'g.inject(1,2,3).count().is(P.gt(2))').map((r) => r.v)).toEqual([3]);
+    expect(run(store, 'g.inject(1,3).inject(100,300).sum()').map((r) => r.v)).toEqual([404]);
   });
 
   test('chained projection: a scalar projection then count() retypes to a scalar stream (re-entry)', () => {
@@ -406,8 +410,8 @@ describe('compiler SQL snapshots', () => {
     // on a runtime (V-rooted) stream asBool defers — needs local()/sack()
     expect(() => compile('g.V().values("name").asBool()', {})).toThrow('scalar transform asBool() not supported');
     // fold preserves the uniform item tag; a heterogeneous trailing inject still defers.
-    expect(read('g.inject(1,0).asBool().fold()').shape).toEqual({ kind: 'list', elem: 'scalar', as: 'bool' });
-    expect(() => compile('g.inject(1).asBool().inject(5)', {})).toThrow('asBool() composed');
+    expect(read('g.inject(1,0).asBool().fold()').shape).toEqual({ kind: 'jsonbList', as: 'bool' });
+    expect(() => compile('g.inject(1).asBool().inject(5)', {})).toThrow('after typed/reduced/carried scalar state');
   });
 
   test('asNumber(GType.X) tags the value shape with the target subtype', () => {
@@ -429,14 +433,15 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.inject(32768).asNumber(GType.SHORT)', {})).toThrow('Can\'t convert number of type Integer to Short due to overflow.');
     expect(() => compile('g.inject(300).asNumber(GType.BYTE)', {})).toThrow('Can\'t convert number of type Integer to Byte due to overflow.');
     expect(() => compile('g.inject(5).asNumber(GType.VERTEX)', {})).toThrow('asNumber() requires a numeric type token, got VERTEX');
-    // a reducer after asNumber() would drop the subtype tag → defer
-    expect(() => compile('g.inject(2.0).asNumber(GType.FLOAT).sum()', {})).toThrow('composed with a reducer');
+    // a reducer is now a later ScalarStream transition; its runtime result type is
+    // carried by vt rather than reconstructed from the cast's source position.
+    expect(read('g.inject(2.0).asNumber(GType.FLOAT).sum()').shape).toEqual({ kind: 'scalar' });
     // overflow message uses the boxed Java type name (Integer, not Int)
     expect(() => compile('g.inject(3000000000).asNumber(GType.INT)', {})).toThrow('to Integer due to overflow.');
     // blank string is a parse error, not a silent 0
     expect(() => compile('g.inject("").asNumber(GType.INT)', {})).toThrow("Can't parse string '' as number.");
-    // a composed cast over inject would skip the overflow check (raw serializer crash) → defer
-    expect(() => compile('g.inject(300).asNumber(GType.INT).asNumber(GType.BYTE)', {})).toThrow('composed with other transforms over inject()');
+    // consecutive casts remain compile-time checked; the second reports its own overflow.
+    expect(() => compile('g.inject(300).asNumber(GType.INT).asNumber(GType.BYTE)', {})).toThrow('to Byte due to overflow');
   });
 
   test('bare asNumber() recovers the input literal subtype (via Step.argTypes)', () => {
@@ -573,21 +578,21 @@ describe('compiler SQL snapshots', () => {
 
   test('inject().<scalar transform>() maps to SQLite scalar functions', () => {
     // concat skips nulls (concat_ws) so an all-null result is null, not '' (Gremlin semantics)
-    expect(read('g.inject("a","b").concat("c")').sql).toContain("concat_ws('', v, ?)");
-    expect(read('g.inject("a").length()').sql).toContain('length(v)');
-    expect(read('g.inject("A").toLower()').sql).toContain('lower(v)');
-    expect(read('g.inject("a").toUpper()').sql).toContain('upper(v)');
-    expect(read('g.inject(1).asString()').sql).toContain('CAST(v AS TEXT)');
-    expect(read('g.inject("hello").substring(1,8)').sql).toContain('substr(v');
-    expect(read('g.inject("that").replace("h","j")').sql).toContain('replace(v');
+    expect(read('g.inject("a","b").concat("c")').sql).toContain("concat_ws('', p.v, ?)");
+    expect(read('g.inject("a").length()').sql).toContain('length(p.v)');
+    expect(read('g.inject("A").toLower()').sql).toContain('lower(p.v)');
+    expect(read('g.inject("a").toUpper()').sql).toContain('upper(p.v)');
+    expect(read('g.inject(1).asString()').sql).toContain('CAST(p.v AS TEXT)');
+    expect(read('g.inject("hello").substring(1,8)').sql).toContain('substr(p.v');
+    expect(read('g.inject("that").replace("h","j")').sql).toContain('replace(p.v');
     // Scope.local on a scalar stream is a no-op (per-element == per-list)
     expect(read('g.inject("a").length(Scope.local)').sql).toContain('length(v)');
-    // transforms chain — composed inline (upper(v || ?)), one shared value tail
-    expect(read('g.inject("a").concat("b").toUpper()').sql).toContain('upper(concat_ws(');
+    // transforms chain as successive relations, preserving left-to-right semantics.
+    expect(read('g.inject("a").concat("b").toUpper()').sql).toContain('upper(p.v)');
     // trim family → SQLite trim/ltrim/rtrim over the Java-whitespace char set
-    expect(read('g.inject(" a ").trim()').sql).toContain('trim(v, ?)');
-    expect(read('g.inject(" a ").lTrim()').sql).toContain('ltrim(v, ?)');
-    expect(read('g.inject(" a ").rTrim()').sql).toContain('rtrim(v, ?)');
+    expect(read('g.inject(" a ").trim()').sql).toContain('trim(p.v, ?)');
+    expect(read('g.inject(" a ").lTrim()').sql).toContain('ltrim(p.v, ?)');
+    expect(read('g.inject(" a ").rTrim()').sql).toContain('rtrim(p.v, ?)');
     // reverse: string reverses chars (recursive CTE), non-string is identity
     expect(read('g.inject("ab").reverse()').sql).toContain('WITH RECURSIVE rev(');
   });
@@ -605,7 +610,7 @@ describe('compiler SQL snapshots', () => {
   test('values(k).inject(c) appends constants to the value stream', () => {
     const p = read("g.V().values('age').inject(1000).sum()");
     expect(p.sql).toContain('UNION ALL');
-    expect(p.sql).toContain('SUM(v)');
+    expect(p.sql).toContain('SUM(s.v)');
     expect(p.binds).toContain(1000);
     // append before a min() reducer
     expect(read("g.V().values('foo').inject(42).min()").sql).toContain('UNION ALL');
@@ -635,9 +640,8 @@ describe('compiler SQL snapshots', () => {
     const p = read('g.inject(1,2,3)');
     // q-kernel built: Query mints the CTE name (unquoted, identifier-safe) + our
     // SQL casing; binds ride as Value tokens (one row each).
-    // inject compiles through the shared value tail (projection.ts) — a scalar `v`
-    // stream projected from the VALUES CTE.
-    expect(p.sql).toBe('with c0(v) as (VALUES (?), (?), (?)) SELECT v AS v FROM c0');
+    // inject is a ScalarStream source materialized directly from its VALUES relation.
+    expect(p.sql).toBe('with c0(v) as (VALUES (?), (?), (?)) SELECT v FROM c0');
     expect(p.binds).toEqual([1, 2, 3]);
   });
 

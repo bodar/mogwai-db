@@ -37,7 +37,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 |---|:--:|---|
 | `V()`, `V(id…)` | ✅ | ✅ id resolves numeric rowid **or** string `uid` |
 | `E()`, `E(id…)` | ✅ | |
-| `inject(…)` | ✅ | ✅ value stream<br>✅ all-array args → list stream (§9) |
+| `inject(…)` | ✅ | ✅ shaped source: ordinary args → ScalarStream; all-array args → ListStream (§9)<br>✅ later scalar inject appends relationally, so position-sensitive filters/reducers compose<br>❌ appending a list to an existing scalar stream (needs a mixed-shape row discriminant) |
 | `out`/`in`/`both` | ✅ | ✅ covering-index hops, index-only, sub-ms at 1M edges |
 | `outE`/`inE`/`bothE` | ✅ | ✅ flips the typed id-relation to edge |
 | `outV`/`inV`/`bothV` | ✅ | ✅ flips edge → endpoint vertex |

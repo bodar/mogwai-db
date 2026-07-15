@@ -1,4 +1,4 @@
-import { empty, q, value, type Expression } from '../q.ts';
+import { empty, list, q, value, type Expression } from '../q.ts';
 import { predicateSql, rangeToOffsetLimit, scalarTx } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, withoutCarried } from './context.ts';
@@ -13,7 +13,7 @@ export const SCALAR_TRANSFORMS = new Set([
 
 export const SCALAR_ROW_STEPS = new Set([
   ...SCALAR_TRANSFORMS, 'is', 'limit', 'skip', 'range', 'order', 'dedup',
-  'count', 'sum', 'min', 'max', 'mean', 'fold', 'unfold',
+  'count', 'sum', 'min', 'max', 'mean', 'fold', 'unfold', 'inject',
 ]);
 
 const isLocal = (step: PStep): boolean =>
@@ -58,6 +58,21 @@ function transformScalar(s: ScalarStream, step: PStep, next?: PStep): ScalarStre
   return toScalarStream(carryOf(s), rel, as, 'value');
 }
 
+function appendScalar(s: ScalarStream, step: PStep): ScalarStream {
+  if (step.args.length === 0) return s;
+  if (step.args.some(Array.isArray))
+    throw new Error('inject(list) into a scalar stream needs a mixed-shape row discriminant');
+  if (s.result !== 'value' || s.as || carriedCols(s.carried).length)
+    throw new Error('inject() after typed/reduced/carried scalar state not yet supported');
+  const p = s.rel.as('p');
+  const appended = step.args.map((v) => q`SELECT ${value(v)} AS v`);
+  const rel = s.q.cte(
+    q`SELECT ${p.c.v} AS v FROM ${p} UNION ALL ${list(appended, ' UNION ALL ')}`,
+    ['v'],
+  );
+  return toScalarStream(carryOf(s), rel);
+}
+
 /** Lower the row operators common to every scalar payload one step at a time.
  * Sequential CTEs make order significant (limit().is() is not commuted), while
  * reducer result/type metadata and physically carried columns remain explicit. */
@@ -71,6 +86,10 @@ export function lowerScalarRows(
   for (; i < steps.length; i++) {
     const step = steps[i];
     if (isLocal(step)) break;
+    if (step.name === 'inject') {
+      stream = appendScalar(stream, step);
+      continue;
+    }
     if (SCALAR_TRANSFORMS.has(step.name)) {
       stream = transformScalar(stream, step, steps[i + 1]);
       continue;
