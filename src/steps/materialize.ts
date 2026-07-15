@@ -11,7 +11,7 @@ import { readCompiled, type Compiled, type ListOf, type Shape } from '../render.
 import { list, q } from '../q.ts';
 import { framedProps, extIdOf } from '../plan.ts';
 import { edges, labels, nodes } from '../schema.ts';
-import { groupResultColumns, pathColumns, recordResultColumns, type GroupStream, type ListStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream, type VariantStream } from './stream.ts';
+import { groupResultColumns, pathColumns, recordResultColumns, type GroupStream, type ListStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream, type Stream, type VariantStream } from './stream.ts';
 
 export function materializeRoot(query: Query, tail: Expression, shape: Shape): Compiled {
   return readCompiled(query, tail, shape);
@@ -126,4 +126,22 @@ export function materializePathRoot(stream: PathStream): Compiled {
     ? { kind: 'path', positions: [...stream.layout.positions] }
     : { kind: 'pathGrouped', elem: stream.layout.elem };
   return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${p}`, shape);
+}
+
+/** The single terminal dispatch for every fully-typed relational stream. ElementStream
+ * still passes through compileTail because its historical projection accumulator can
+ * produce a terminal expression; migrating that compatibility island is the final
+ * materialization-boundary slice. MapStream is an internal entry relation and cannot
+ * itself be a Gremlin result value yet. */
+export function materializeStream(stream: Exclude<Stream, import('./context.ts').ElementStream>): Compiled {
+  switch (stream.kind) {
+    case 'scalar': return materializeScalarRoot(stream);
+    case 'variant': return materializeVariantRoot(stream);
+    case 'list': return materializeListRoot(stream);
+    case 'property': return materializePropertyRoot(stream);
+    case 'record': return materializeRecordRoot(stream);
+    case 'group': return materializeGroupRoot(stream);
+    case 'path': return materializePathRoot(stream);
+    case 'map': throw new Error('a map entry stream cannot be materialized directly');
+  }
 }

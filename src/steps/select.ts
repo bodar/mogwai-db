@@ -309,7 +309,6 @@ export function compileSelectProject(st: ElementStream, proj: PStep, tail: TailM
  * ordinary scalar/element stream, while Column.keys/values produces one list value
  * per record. This is intentionally distinct from MapStream's whole-group columns. */
 export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): LoweringResult {
-  if (at >= steps.length) return materializeRecordRoot(s);
   const step = steps[at];
   if (step.name === 'count')
     return continueLowering(lowerGlobalCount(s), at + 1);

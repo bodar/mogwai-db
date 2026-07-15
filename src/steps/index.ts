@@ -21,9 +21,8 @@ import { assertStreamColumns, continueLowering, isLoweringContinuation, type Low
 import { type Compiled } from '../render.ts';
 import { tryBulkRepeatCount } from './bulk.ts';
 import { lowerScalarRows } from './scalar.ts';
-import { materializeScalarRoot, materializeVariantRoot } from './materialize.ts';
+import { materializeStream } from './materialize.ts';
 import { lowerGlobalCount } from './barrier.ts';
-import { materializePathRoot } from './materialize.ts';
 
 export { compileTail };
 
@@ -231,17 +230,17 @@ export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, qu
  */
 function lowerStream(s: Stream, steps: PStep[], at: number): LoweringResult {
   assertStreamColumns(s);
+  if (at >= steps.length && s.kind !== 'elements') return materializeStream(s);
   if (s.kind === 'elements') {
     const lowered = lowerElementSteps(steps, s, at);
     return compileTail(lowered.stream, steps, lowered.next);
   }
   if (s.kind === 'scalar') {
     const { stream, stop } = lowerScalarRows(s, steps, at);
-    if (stop === steps.length) return materializeScalarRoot(stream);
+    if (stop === steps.length) return materializeStream(stream);
     return compileFromScalar(stream, steps, stop);
   }
   if (s.kind === 'variant') {
-    if (at === steps.length) return materializeVariantRoot(s);
     if (s.result === 'list' && steps[at].name === 'unfold')
       return continueLowering({ ...s, result: 'rows' }, at + 1);
     if (steps[at].name === 'count') return continueLowering(lowerGlobalCount(s), at + 1);
@@ -252,8 +251,7 @@ function lowerStream(s: Stream, steps: PStep[], at: number): LoweringResult {
   if (s.kind === 'record') return compileFromRecord(s, steps, at);
   if (s.kind === 'group') return compileFromGroup(s, steps, at);
   if (s.kind === 'path') {
-    if (at < steps.length) throw new Error(`${steps[at].name}() on a path value not yet supported`);
-    return materializePathRoot(s);
+    throw new Error(`${steps[at].name}() on a path value not yet supported`);
   }
   return compileFromList(s, steps, at);
 }

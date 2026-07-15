@@ -137,6 +137,13 @@ fallback, never semantic rejection. Sack and every element-backed group path are
   right leaf (or a new one), route it from `compileTail`. `write.ts` imports
   `compileInject` from `inject.ts`.
 
+**Root materialization (2026-07-15).** Fully typed terminal streams do not frame
+themselves: `lowerSteps` detects end-of-chain and calls the exhaustive
+`materializeStream` switch in `steps/materialize.ts` for scalar/variant/list/property/
+record/group/path. `MapStream` is internal and cannot terminate. The older element-tail
+accumulator still owns a small compatibility set of terminal expressions; do not add a
+new terminal call in a leaf—add a stream kind or return a lowering continuation.
+
 ## What this is
 
 A TinkerPop 4 Gremlin server compiled onto SQLite, targeting Cloudflare

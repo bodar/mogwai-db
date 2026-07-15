@@ -8,7 +8,7 @@
 
 **Current checkpoint:** branch `refactor/unified-relational-lowering`; items 1–15 are on
 `trunk`, item 16 is local commit `80d7020`, item 17 is local commit `9eabd70`, and item
-18 is local commit `8a6f3ab`, item 19 is local commit `7b23f19`, and item 20 is the
+items 18–20 are local commits `8a6f3ab`, `7b23f19`, and `4458c23`; item 21 is the
 current uncommitted checkpoint. Run full `bun test` before every commit.
 
 **Recent completed slices:**
@@ -135,6 +135,13 @@ current uncommitted checkpoint. Run full `bun test` before every commit.
     continuations until root materialization. Element/scalar/list/map/record/group/
     property/variant/path transitions all cross this one loop, including inject roots.
     TypeScript, compiler 246/246, L3 933/2041, and full 370/370 are green.
+21. Every fully typed terminal stream now exits through one exhaustive
+    `materializeStream` dispatch owned by `lowerSteps`: scalar, variant, list,
+    property, record, group, and path leaf modules no longer materialize themselves.
+    MapStream is explicitly internal/non-terminal. The remaining materialization
+    compatibility island is confined to the legacy element/scalar tail accumulator
+    (plus shaped set/meta leaves that still need first-class stream kinds). TypeScript,
+    compiler 246/246, L3 933/2041, and full 370/370 are green.
 
 **Current Stage 6 state:** scalar traversal modulators for `project`, aliased `select`,
 and inline element `group` all use the generic child-domain compiler. Group keys consume
@@ -145,10 +152,10 @@ aggregate, order, dedup, linear-path, and alias-compare boundaries, including nu
 element records and aggregate members. Multi-input math/format/option-choose modulation
 also uses one generic child domain. L3 is 933.
 
-**Immediate next slice:** move the remaining terminal branches behind a single
-`materializeRoot(Stream)` exit so `compileRead` becomes literally
-`seed → lowerSteps → materializeRoot`. Preserve correlated count/EXISTS as measured
-fast paths until Stage 8.
+**Immediate next slice:** convert the legacy element/scalar tail accumulator's terminal
+expressions into a typed terminal stream/plan so `compileRead` becomes literally
+`seed → lowerSteps → materializeRoot`. Then give terminal set/meta results first-class
+stream kinds. Preserve correlated count/EXISTS as measured fast paths until Stage 8.
 
 **Deliberate compatibility boundaries after Stage 6:** broader VariantStream followers,
 property groups without a live element parent, element-kind-changing optional fallback,

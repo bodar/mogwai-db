@@ -9,7 +9,7 @@ import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, elemRel, withoutCarried, type Carry, type ElementStream } from './context.ts';
 import { carryOf, continueLowering, groupColumns, toGroupStream, toMapStream, toPropertyStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type PropertyStream, type ScalarStream } from './stream.ts';
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
-import { materializeGroupRoot, materializePropertyRoot, materializeRoot } from './materialize.ts';
+import { materializeRoot } from './materialize.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { isElementFoldChild, isScalarChild, isScalarFoldChild, pushChildScope, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild } from './child.ts';
 
@@ -322,7 +322,6 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
  * relation; a supported Column selection derives the narrow entry MapStream without
  * recompiling group semantics based on terminal position. */
 export function compileFromGroup(s: GroupStream, steps: PStep[], at: number): LoweringResult {
-  if (at >= steps.length) return materializeGroupRoot(s);
   const step = steps[at];
   const column = step.name === 'select'
     ? step.args.map((a: any) => a && typeof a === 'object' && a.column).find((c: any) => c === 'keys' || c === 'values')
@@ -414,7 +413,6 @@ function propertyScalar(s: PropertyStream, col: 'vpid' | 'pk' | 'pv'): ScalarStr
 /** Consume a PropertyStream. Only property-specific operations live here; once a
  * step changes shape it re-enters the same root dispatcher as every other stream. */
 export function compileFromProperty(s: PropertyStream, steps: PStep[], at: number): LoweringResult {
-  if (at >= steps.length) return materializePropertyRoot(s);
   const step = steps[at];
 
   if (step.name === 'has' || step.name === 'hasKey' || step.name === 'hasValue')
