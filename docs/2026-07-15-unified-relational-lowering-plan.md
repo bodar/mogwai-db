@@ -538,6 +538,10 @@ choose/coalesce without a nested row-operator switch or accidental CTE ordering.
 uses the non-null encounter marker so productive NULL is counted, and numeric `v,vt`
 survives cardinality plus homogeneous scalar branch merges. Origin-scoped `fold`
 remains excluded; L3 stays 872.
+Scalar `local(child)` now routes through that compiler with `all` cardinality, so
+projection, transforms, origin-partitioned row operators, and scalar reducers share the
+same lowering as flatMap. The legacy local prefix handler remains only for element-valued
+movement windows pending generic element barriers. L3 remains 872.
 
 1. Extract the existing `originSeed` into `steps/child.ts` as `pushChildScope`.
 2. Preserve the domain relation in `ChildFrame`.

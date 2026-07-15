@@ -1291,6 +1291,8 @@ describe('compiler SQL snapshots', () => {
     const localCount = read('g.V().local(__.out().count())');
     expect(localCount.sql).toContain('COUNT(c.id) AS v');
     expect(localCount.sql).toContain('LEFT JOIN');
+    const localRows = read('g.V(1).local(__.out().values("name").order().limit(2))');
+    expect(localRows.sql).toContain('PARTITION BY p.o0 ORDER BY p.v ASC');
     const carriedCount = read('g.V(1).as("a").local(__.out().count())');
     expect(carriedCount.sql).toContain('COUNT(c.id) AS v, d.a0');
     const childValue = read('g.V(1).map(__.values("name"))');
@@ -1709,6 +1711,8 @@ describe('compiler execution semantics', () => {
         .toEqual(['vadas']);
       expect(run(store, 'g.V(1).flatMap(__.out().values("name").order().range(1,3))').map((r) => r.v))
         .toEqual(['lop', 'vadas']);
+      expect(run(store, 'g.V(1).local(__.out().values("name").order().limit(2))').map((r) => r.v))
+        .toEqual(['josh', 'lop']);
       expect(run(store, 'g.V(1).flatMap(__.both().label().dedup()).count()').map((r) => r.v)).toEqual([2]);
       // A reducer consumes the already-filtered child rows and restores an explicit
       // zero from the parent domain when none remain.

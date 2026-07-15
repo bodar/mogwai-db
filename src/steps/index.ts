@@ -69,15 +69,12 @@ const isSackMutate = (s: PStep): boolean => (s.args ?? []).some((a: any) => a &&
  *  form is a terminal barrier handled by compileTail, so it must break out of the prefix. */
 const isSideEffectGroup = (s: PStep): boolean => (s.args ?? []).some((a: any) => typeof a === 'string');
 
-/** A local() whose body is a per-element SCALAR reduction (…count()/sum()/…) — it
- *  projects one scalar per input, so it's a tail projector (compileMapScalar), not a
- *  prefix step. A movement + limit/range body stays the prefix window step (local.ts). */
-const SCALAR_LOCAL_END = new Set(['count', 'sum', 'min', 'max', 'mean']);
+/** A local() whose body is scalar-shaped belongs at shape-aware dispatch, not the
+ * element-only prefix local compiler. The generic child compiler applies `all`
+ * cardinality, so row operators and reducers stay partitioned by each parent. */
 const isScalarLocal = (s: PStep, params: Record<string, any>): boolean => {
   const nested = (s.args ?? [])[0]?.nested;
-  if (!nested) return false;
-  const body = stepChain(nested, params);
-  return body.length > 0 && SCALAR_LOCAL_END.has(body[body.length - 1].name);
+  return !!nested && isScalarChild(nested, params);
 };
 
 /** Steps that need the linear path threaded through the fold: the source vertex
