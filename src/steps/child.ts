@@ -79,7 +79,7 @@ const ELEMENT_CHILD_STEPS = new Set([
   'has', 'hasLabel', 'hasId', 'where', 'filter', 'not', 'and', 'or', 'identity',
 ]);
 const CHILD_SCALAR_ROW_STEPS = new Set([
-  ...SCALAR_TRANSFORMS, 'is', 'order', 'limit', 'skip', 'range', 'dedup',
+  ...SCALAR_TRANSFORMS, 'is', 'order', 'limit', 'skip', 'range', 'tail', 'dedup',
   'count', 'sum', 'min', 'max', 'mean',
 ]);
 const CHILD_SCALAR_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
@@ -131,6 +131,12 @@ export function isListChild(nested: any, params: Record<string, any>): boolean {
   if (body.at(-1)?.name !== 'fold') return false;
   const before = body.slice(0, -1);
   return scalarRowParts(before) !== null || before.every((step) => ELEMENT_CHILD_STEPS.has(step.name));
+}
+
+export function isScalarFoldChild(nested: any, params: Record<string, any>): boolean {
+  if (!nested) return false;
+  const body = childSteps(nested, params);
+  return body.at(-1)?.name === 'fold' && scalarRowParts(body.slice(0, -1)) !== null;
 }
 
 /** Compile a terminal child count as a true scope-aware barrier. The preserved
@@ -316,6 +322,17 @@ export function tryCompileListChild(
     ['list', ...carriedCols(parent.carried)],
   );
   return toListStream(carryOf(parent), rel, folded.of);
+}
+
+/** Productive scalar rows immediately before fold(). Group-like consumers use
+ * this when the fold belongs to their final key domain rather than to each parent
+ * independently. The child origin and encounter marker deliberately remain live. */
+export function tryCompileScalarRowsBeforeFold(
+  parent: ElementStream,
+  nested: any,
+  scope: CompileScope = ROOT_SCOPE,
+): { stream: ScalarStream; frame: ChildFrame } | null {
+  return compileScalarChildRows(parent, nested, 'all', scope, true, 'fold');
 }
 
 /** Compile an element-valued child through the SAME StepFns as the root prefix, then

@@ -2,12 +2,12 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–5 complete, Stage 6 active
-**Baseline:** full suite 362/362, L1 2298/2298, L3 876/2041; 238 compiler tests
+**Baseline:** full suite 363/363, L1 2298/2298, L3 877/2041; 239 compiler tests
 
 ## Restart handoff — read this first after a context reset
 
 **Current checkpoint:** branch `refactor/unified-relational-lowering`; every slice through
-item 9 below is represented in this checkpoint. Work is local-only: do not push or merge
+item 10 below is represented in this checkpoint. Work is local-only: do not push or merge
 to trunk. Run the full `bun test` suite before every local commit.
 
 **Recent completed slices:**
@@ -50,21 +50,27 @@ to trunk. Run the full `bun test` suite before every local commit.
    the semantically wrong temptation to reduce per parent then combine those results.
    Count LEFT JOINs the shared parent domain so empty child domains contribute zero;
    numeric/comparable reducers use productive inner domains, and equal parent ids remain
-   distinct traversers. Stashed/property groups retain the correlated compatibility path.
-   L3 remains 876.
+   distinct traversers. Property groups retain the correlated compatibility path; named
+   side-effect groups migrate in the next slice. L3 remains 876.
+10. Scalar `…fold()` group values now expose raw generic child rows and fold once per
+    final key, ordered by parent then child encounter. Empty groups produce `[]`, NULL
+    remains a real member, duplicate parents contribute duplicate rows, and scalar keys
+    are no longer rejected. Named `group('a')` specs retain their live source stream, so
+    `cap('a')` uses the same path. The last `compileNestedList` consumer and the function
+    itself are deleted. Moving `tail()` into the generic origin-partitioned scalar row
+    pipeline restored the last legacy pre-fold form and raised L3 876→877.
 
 **Current Stage 6 state:** scalar traversal modulators for `project`, aliased `select`,
 and inline element `group` all use the generic child-domain compiler. Group keys consume
 `first`, non-reducing values consume `all`, and group reducers consume raw rows at the
 final key barrier. These consumers share multiset-safe origin joins rather than private
-correlated traversal parsers. L3 is 876.
+correlated traversal parsers. L3 is 877.
 
-**Immediate next slice:** widen `by(traversal)` from a scalar-only consumer into a shaped
-child contract. Migrate inline group `…fold()` values and list/element-valued select or
-project modulators through typed child streams, then delete the corresponding
-`compileNestedList` cases instead of adding another compatibility branch. Keep stashed
-side-effect/property groups on their compatibility path until they can carry a live
-parent stream. Inventory sack, math, format, and option-choose after that. Preserve
+**Immediate next slice:** continue widening `by(traversal)` from a scalar-only consumer
+into a shaped child contract. Scalar group folds and named side-effect groups are done;
+next migrate list/element-valued select or project modulators, then whole-element group
+folds. Property groups still lack a live element parent and remain a compatibility island.
+Inventory sack, math, format, and option-choose after that. Preserve
 correlated count/EXISTS only as measured fast paths until Stage 8. This is the remaining
 prerequisite for making ProductiveByStrategy a consumer policy rather than a global gate.
 
@@ -671,7 +677,7 @@ Ratchet after each consumer, not only at the end.
 
 1. Rename the surviving optimized pieces to `tryInlineScalar` and
    `tryInlinePredicate`.
-2. Delete `compileNestedList`; generic child + fold owns its semantics.
+2. ~~Delete `compileNestedList`; generic child + fold owns its semantics.~~
 3. Remove semantic throws from inline fast paths; unrecognized means fallback.
 4. Delete `branchArm`'s prefix-only stop check.
 5. ~~Delete `isScalarLocal`, the local-body movement whitelist, and local's private
@@ -792,7 +798,7 @@ The refactor is complete when all of the following are true:
 - [ ] `only one projection step is supported per traversal` no longer exists.
 - [ ] `branchArm` is not prefix-only.
 - [x] `local.ts` is deleted; local has no private traversal parser/barrier engine.
-- [ ] `compileNestedList` is deleted.
+- [x] `compileNestedList` is deleted.
 - [ ] `compileNestedScalar`/predicate specializations are optional `tryInline*` fast
       paths with generic fallbacks.
 - [ ] ProductiveByStrategy has an explicit productivity policy rather than a global

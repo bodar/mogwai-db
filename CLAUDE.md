@@ -87,8 +87,11 @@ children share that origin and consume `all` productive rows into the group list
 `first`). Inline group-scoped `count`/`sum`/`min`/`max`/`mean` expose raw child rows and
 reduce once at the final group-key barrier: count LEFT JOINs the parent domain for zero,
 while productive numeric/comparable reducers inner-join. Never reduce these per parent
-and combine afterward. Fold/tail plus stashed `cap()` and property groups retain their
-existing compatibility paths. Consumers call
+and combine afterward. Scalar child `…fold()` likewise folds raw rows once per final key,
+ordered by parent then child encounter; empty keys receive `[]`. Named `group('a')`
+side effects retain their live source stream, so `cap('a')` uses the same generic path;
+the correlated `compileNestedList` mini-compiler is deleted. Whole-element fold/tail and
+property groups retain compatibility paths. Consumers call
 `tryCompileScalarValueChild` and never distinguish row projections from total count;
 do not grow `compileNestedScalar` to implement new by forms.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
@@ -848,15 +851,15 @@ semantic compiler.
   subquery** (`ORDER BY key DESC LIMIT n`, outer re-sort asc) — a two-level `json_each`
   correlation on `c.list` fails ("no such column"). `by(key)`/traversal comparators defer.
 - **Nested (list-VALUED) maps** — `group().by().by(__.<move>().<label|values(k)|id>()…fold())`.
-  `compileNestedList` (`plan.ts`) → ONE correlated JSONB array per group key
-  (out/in/both([lbl]) → neighbour projection, ordered by incident-edge id; both() unions both
-  directions). A single **pre-fold op folds into the subquery** — `out().label().dedup().fold()`
-  ≡ dedup the neighbour stream then collect. `ListOf`/`MapOf` gain a **`'list'` variant** so
+  Generic child scalar rows retain parent origin + encounter and fold ONCE at the final
+  group-key boundary (not once per parent). Pre-fold `dedup`/`limit`/`range`/`tail` run
+  in the ordinary origin-partitioned scalar pipeline. `ListOf`/`MapOf` have a **`'list'`
+  variant** so
   `select(Column.values)` of a list-valued map is a **list-of-lists** and `compileUnfold`
   explodes it to per-list `ListStream` rows (which the Scope.local ops above then reshape).
-  **jsonb-in-jsonb nests correctly** (`json_group_array` recognizes jsonb blobs). The
-  per-member list is wrapped in `MAX` (constant within an element-keyed group) — a
-  **non-element key would need a UNION over members, so defers** (correct-by-design).
+  Scalar keys, empty child domains (`[]`), duplicate parents, and productive NULL are
+  explicit relational semantics. The old correlated `compileNestedList` + `MAX` path is
+  deleted.
 - **`cap('a')` of a group side-effect** (`compileCap`) re-emits the same GroupStream as an
   inline group; compatible Column consumers derive MapStream normally.
 

@@ -12,7 +12,7 @@ export const SCALAR_TRANSFORMS = new Set([
 ]);
 
 export const SCALAR_ROW_STEPS = new Set([
-  ...SCALAR_TRANSFORMS, 'is', 'limit', 'skip', 'range', 'order', 'dedup',
+  ...SCALAR_TRANSFORMS, 'is', 'limit', 'skip', 'range', 'tail', 'order', 'dedup',
   'count', 'sum', 'min', 'max', 'mean', 'fold', 'unfold', 'inject',
 ]);
 
@@ -68,6 +68,25 @@ function partitionedSlice(s: ScalarStream, offset: number, limit: number | null)
   const r = ranked.as('r');
   const hi = limit == null ? empty : q` AND ${r.c.rn}<=${offset + limit}`;
   const rel = s.q.cte(q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn}>${offset}${hi}`, cols(s));
+  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter);
+}
+
+function partitionedTail(s: ScalarStream, limit: number): ScalarStream {
+  if (!s.encounter) throw new Error('scalar tail requires explicit encounter order');
+  const p = s.rel.as('p');
+  const partitions = s.carried.origins.map((name) => p.c[name]);
+  const over = partitions.length
+    ? q`PARTITION BY ${list(partitions, ', ')} ORDER BY ${p.c[s.encounter]} DESC`
+    : q`ORDER BY ${p.c[s.encounter]} DESC`;
+  const ranked = s.q.cte(
+    q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER (${over}) AS rn FROM ${p}`,
+    [...cols(s), 'rn'],
+  );
+  const r = ranked.as('r');
+  const rel = s.q.cte(
+    q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn}<=${limit}`,
+    cols(s),
+  );
   return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter);
 }
 
@@ -144,6 +163,10 @@ export function lowerScalarRows(
       stream = stream.carried.origins.length
         ? partitionedSlice(stream, offset, limit)
         : rowPreserving(stream, q` LIMIT ${limit ?? -1} OFFSET ${offset}`);
+      continue;
+    }
+    if (step.name === 'tail') {
+      stream = partitionedTail(stream, Number(step.args.find((a: any) => typeof a === 'number') ?? 1));
       continue;
     }
     if (step.name === 'order') {

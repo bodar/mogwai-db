@@ -576,7 +576,7 @@ function compileCap(st: ElementStream, steps: PStep[], stop: number): Compiled {
   }
   // group('a')/groupCount('a') side-effect → re-emit the same rich GroupStream as an
   // inline group; terminal framing and Column consumers share its dispatch.
-  const src: GroupSource = { from: def.from, ctx: def.ctx, elem: def.elem };
+  const src: GroupSource = { from: def.from, ctx: def.ctx, elem: def.elem, parent: def.parent };
   return dispatchNext(lowerGroup(st, def.isCount, def.bys, src), steps, stop + 1);
 }
 
