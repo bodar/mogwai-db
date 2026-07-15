@@ -17,7 +17,8 @@ import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type Nume
 import { SCALAR_ROW_STEPS } from './scalar.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
-import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerMapElement } from './mapscalar.ts';
+import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerMapElement } from './mapscalar.ts';
+import { flatMap as lowerLegacyFlatMap } from './branch.ts';
 import { lowerGroup, lowerProperties, type GroupSource } from './group.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
@@ -188,6 +189,15 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
   }
   if (steps[stop]?.name === 'local')
     return dispatchNext(lowerMapScalar(st, steps, stop), steps, stop + 1);
+
+  // flatMap consumes ALL productive rows from the same generic child compiler used
+  // by map(first). It lives at the shape-aware dispatcher rather than PREFIX because
+  // a scalar child changes ElementStream → ScalarStream.
+  if (steps[stop]?.name === 'flatMap') {
+    const generic = tryLowerFlatMap(st, steps[stop]);
+    if (generic) return dispatchNext(generic, steps, stop + 1);
+    return dispatchNext(lowerLegacyFlatMap(steps[stop], st), steps, stop + 1);
+  }
 
   // math("<formula>") → one SQL arithmetic scalar (always Double). Its variables
   // (`_` / as()-bound names) resolve through the by() modulators folded onto it.

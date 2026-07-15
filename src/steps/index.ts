@@ -6,7 +6,7 @@ import { type PStep } from '../strategies.ts';
 import { withCarried, type ElementStream, type StepFn } from './context.ts';
 import { move, toEdge, toVertex, otherV } from './movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from './filter.ts';
-import { union, optional, repeat, choose, coalesce, flatMap } from './branch.ts';
+import { union, optional, repeat, choose, coalesce } from './branch.ts';
 import { match } from './match.ts';
 import { identity, limit, range, skip } from './passthrough.ts';
 import { sack } from './sack.ts';
@@ -40,7 +40,7 @@ const PREFIX = new Map<string, StepFn>([
   ['and', andOr], ['or', andOr], ['dedup', dedup],
   ['simplePath', simplePath], ['cyclicPath', cyclicPath],
   ['union', union], ['optional', optional], ['choose', choose],
-  ['coalesce', coalesce], ['flatMap', flatMap], ['match', match],
+  ['coalesce', coalesce], ['match', match],
   // The whole folded repeat/emit/times/until cluster dispatches here (strategies
   // anchors it on repeat() when present, else the first cluster step).
   ['repeat', repeat], ['emit', repeat], ['times', repeat], ['until', repeat],

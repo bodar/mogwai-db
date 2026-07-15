@@ -510,7 +510,11 @@ their productive values are physical rows (including productive NULL), and `map(
 selects the first row per origin after the ordinary movement/filter fold. This fixes
 the old correlated-scalar ambiguity where a missing property could masquerade as a
 NULL traverser. Remaining scalar specializations retain the correlated fast path;
-further barriers and structured tails are the next expansion.
+further barriers and structured tails are the next expansion. `flatMap()` has moved
+from the element-only PREFIX registry to shape-aware dispatch and applies the same
+child compiler with `all`, so scalar projection rows and element rows flatten through
+one cardinality policy. L3 remains 867; these migrations replace semantic islands and
+fix productivity without claiming a conformance increase.
 
 1. Extract the existing `originSeed` into `steps/child.ts` as `pushChildScope`.
 2. Preserve the domain relation in `ChildFrame`.
@@ -528,7 +532,7 @@ vocabulary.
 
 Migrate in increasing semantic complexity:
 
-1. `flatMap`: all child rows.
+1. ~~`flatMap`: all child rows (element + scalar projection tails).~~
 2. element-body `map`: first child row per origin.
 3. scalar/projection arms for `union` and predicate `choose`.
 4. scalar/list arms for `coalesce` and `optional`, preserving first-productive-arm

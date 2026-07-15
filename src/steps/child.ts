@@ -103,6 +103,7 @@ export function tryCompileCountChild(
 export function tryCompileScalarChild(
   parent: ElementStream,
   nested: any,
+  use: ChildUse = 'first',
   scope: CompileScope = ROOT_SCOPE,
 ): ScalarStream | null {
   if (!nested) return null;
@@ -154,6 +155,13 @@ export function tryCompileScalarChild(
   }
 
   const parentCols = carriedCols(parent.carried);
+  if (use === 'all') {
+    const rel = parent.q.cte(
+      q`SELECT ${scalar} AS v${carryFrag(parent.carried, c)} FROM ${from}`,
+      ['v', ...parentCols],
+    );
+    return toScalarStream(carryOf(parent), rel);
+  }
   const ranked = parent.q.cte(
     q`SELECT ${scalar} AS v${carryFrag(parent.carried, c)}, ${c.c[pushed.frame.ordinal]}, ROW_NUMBER() OVER (PARTITION BY ${c.c[pushed.frame.ordinal]} ORDER BY ${order}) AS rn FROM ${from}`,
     ['v', ...parentCols, pushed.frame.ordinal, 'rn'],
