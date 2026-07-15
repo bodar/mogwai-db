@@ -601,15 +601,18 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile("g.inject(datetime('2023-08-08T00:00:00Z')).dateDiff(inject(datetime('2023-10-11T00:00:00Z')))", {})).toThrow('datetime literal or constant');
   });
 
-  test('group().by(__.bothE().values(k).<reducer>()) is a correlated neighbourhood aggregate', () => {
+  test('group-scoped reducers aggregate generic child rows at the final group boundary', () => {
     const p = read("g.V().hasLabel('software').group().by('name').by(__.bothE().values('weight').mean())");
-    // one correlated AVG over incident edges, wrapped by MAX to satisfy GROUP BY;
-    // typeof carries the storage class so a whole-number mean still frames as Double
-    expect(p.sql).toContain('AVG(json_extract(props');
-    expect(p.sql).toContain('src=n.id OR tgt=n.id');
-    expect(p.sql).toContain('MAX(');
-    expect(p.sql).toContain('gvt');
-    expect(read("g.V().group().by('name').by(__.bothE().values('weight').sum())").sql).toContain('SUM(json_extract(props');
+    // Movement and values() become ordinary child relations retaining the parent
+    // origin. AVG runs once over every raw row in the final key, never once per
+    // parent with a MAX() papering over the intermediate result.
+    expect(p.sql).toContain('JOIN c');
+    expect(p.sql).toContain('ON gr.o0=gp.o0');
+    expect(p.sql).toContain('AVG(CASE WHEN typeof(gr.v)');
+    expect(p.sql).toContain("'real' AS gvt");
+    expect(p.sql).not.toContain('MAX((SELECT AVG(');
+    expect(read("g.V().group().by('name').by(__.bothE().values('weight').sum())").sql)
+      .toContain('SUM(CASE WHEN typeof(gr.v)');
   });
 
   test('inject().<scalar transform>() maps to SQLite scalar functions', () => {
@@ -2184,6 +2187,29 @@ describe('compiler execution semantics', () => {
     const initials = Object.fromEntries(run(store, 'g.V().group().by(__.label()).by(__.values("name").substring(0,1))')
       .map((r) => [r.gk, JSON.parse(r.gv).sort()]));
     expect(initials).toEqual({ person: ['j', 'm', 'p', 'v'], software: ['l', 'r'] });
+  });
+
+  test('group reducers operate over the complete child row domain for each key', () => {
+    const store = seededStore();
+    const grouped = (query: string) => Object.fromEntries(run(store, query).map((r) => [r.gk, r.gv]));
+
+    // count is total: parents with no productive child rows retain their key as zero.
+    expect(grouped('g.V().group().by(T.label).by(__.count())'))
+      .toEqual({ person: 4, software: 2 });
+    expect(grouped('g.V().group().by(T.label).by(__.out().count())'))
+      .toEqual({ person: 6, software: 0 });
+
+    // Numeric reducers are productive-only. They combine all child rows sharing the
+    // final key; an empty software domain contributes no map entry.
+    expect(grouped('g.V().group().by(T.label).by(__.values("age").sum())'))
+      .toEqual({ person: 123 });
+    expect(grouped('g.V().group().by(T.label).by(__.outE().values("weight").sum())'))
+      .toEqual({ person: 3.5 });
+
+    // Equal element ids are still distinct traversers. Both marko parents contribute
+    // their full outgoing-weight domain (1.9 each) to the shared person reduction.
+    expect(grouped('g.V(1).union(__.identity(),__.identity()).group().by(T.label).by(__.outE().values("weight").sum())'))
+      .toEqual({ person: 3.8 });
   });
 
   test('is(P) filters a scalar stream; TextP is LIKE', () => {
