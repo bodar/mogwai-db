@@ -5,9 +5,10 @@ import { advance, carriedWith, carryFrag, carriedCols, withCarried, type Element
 import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStream, type Stream } from './stream.ts';
 import { foldBody } from './index.ts';
 import { lowerScalarRows, SCALAR_TRANSFORMS } from './scalar.ts';
-import { normalize } from '../strategies.ts';
+import { normalize, type PStep } from '../strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
-import { elemCtx, rangeToOffsetLimit, scalarProp } from '../plan.ts';
+import { rangeToOffsetLimit } from '../plan.ts';
+import { elementOrderSql } from './modulation.ts';
 
 /** Root/child compilation context. A child frame retains the complete parent domain,
  * not merely an ordinal on productive child rows: reducers need that domain to
@@ -479,20 +480,12 @@ function compileElementChildRows(
     end = advance(end, q`SELECT ${r.c.id} AS id${carryFrag(end.carried, r)} FROM ${r} WHERE ${r.c.rn} > ${slice.offset}${upper}`);
   }
   if (firstPolicy) {
-    const bys = (orderStep as any)?.bys ?? [];
-    if (bys.length > 1) throw new Error('element child order() supports one by() modulator');
-    const by = bys[0] ?? [];
-    const key = by.find((a: any) => typeof a === 'string');
-    const bad = by.find((a: any) => a && typeof a === 'object' && ('nested' in a || 'token' in a));
-    if (bad) throw new Error('element child order().by(token/traversal) not yet supported');
-    const dir = by.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
     const p = end.rel.as('p');
     const n = (end.elem === 'edge' ? edges : nodes).as('n');
-    const orderExpr = dir === 'shuffle' ? q`RANDOM()` : key ? scalarProp(elemCtx(n, end.elem), key) : n.c.id;
-    const direction = dir === 'shuffle' ? empty : dir === 'desc' ? q` DESC` : q` ASC`;
+    const orderExpr = elementOrderSql(end, n, orderStep as PStep | undefined);
     const cols = carriedCols(end.carried);
     const ranked = parent.q.cte(
-      q`SELECT ${p.c.id} AS id${carryFrag(end.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${p.c[pushed.frame.ordinal]} ORDER BY ${orderExpr}${direction}, ${p.c.id}) AS rn FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`,
+      q`SELECT ${p.c.id} AS id${carryFrag(end.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${p.c[pushed.frame.ordinal]} ORDER BY ${orderExpr}, ${p.c.id}) AS rn FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`,
       ['id', ...cols, 'rn'],
     );
     const r = ranked.as('r');

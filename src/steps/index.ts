@@ -45,7 +45,7 @@ const PREFIX = new Map<string, StepFn>([
   // The whole folded repeat/emit/times/until cluster dispatches here (strategies
   // anchors it on repeat() when present, else the first cluster step).
   ['repeat', repeat], ['emit', repeat], ['times', repeat], ['until', repeat],
-  ['limit', limit], ['range', range], ['skip', skip], ['identity', identity],
+  ['limit', limit], ['range', range], ['skip', skip], ['identity', identity], ['barrier', identity],
   // Only the MUTATE form sack(Operator.x) is a prefix step; bare sack() (read) breaks
   // out to the tail (foldBody guard below).
   ['sack', sack],

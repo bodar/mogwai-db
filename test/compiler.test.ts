@@ -946,6 +946,9 @@ describe('compiler SQL snapshots', () => {
       .toContain(' IS ');
     expect(read('g.withStrategies(ProductiveByStrategy).V(1).out().path().by("age")').sql)
       .not.toContain('IS NOT NULL');
+
+    const deduped = run(store, 'g.withStrategies(ProductiveByStrategy).V().order().by("name",desc).barrier().dedup().by("age").values("name")').map((r) => r.v);
+    expect(deduped).toEqual(['vadas', 'ripple', 'peter', 'marko', 'josh']);
   });
 
   test('verification strategies throw TinkerPop\'s canonical messages (pass a legal traversal)', () => {
@@ -975,11 +978,9 @@ describe('compiler SQL snapshots', () => {
     // ProductiveByStrategy is a no-op when no by()-consumer exists, but unsupported
     // consumers still fail closed instead of silently using ordinary productivity.
     expect(() => compile('g.withStrategies(ProductiveByStrategy).V().values("name")', {})).not.toThrow();
-    expect(() => compile('g.withStrategies(ProductiveByStrategy).V().dedup().by("age")', {}))
-      .toThrow('ProductiveByStrategy with unattached by()');
-    // A safe optimization alongside ProductiveBy does not suppress its fail-closed gate.
-    expect(() => compile('g.withStrategies(CountStrategy, ProductiveByStrategy).V().dedup().by("age")', {}))
-      .toThrow('ProductiveByStrategy with unattached by()');
+    expect(() => compile('g.withStrategies(ProductiveByStrategy).V().dedup().by("age")', {})).not.toThrow();
+    // A safe optimization alongside ProductiveBy does not suppress its null-key policy.
+    expect(() => compile('g.withStrategies(CountStrategy, ProductiveByStrategy).V().dedup().by("age")', {})).not.toThrow();
     // Deferred subsets throw clearly rather than under-filter:
     expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.has("name","x"), edges: __.has("weight",1))).V()', {}))
       .toThrow('SubgraphStrategy(edges) criterion not yet supported');
@@ -1020,6 +1021,24 @@ describe('compiler SQL snapshots', () => {
     // dedup: label-scoped and dedup-after-as() deferred rather than answered wrongly
     expect(() => compile('g.V().as("a").out().as("b").dedup("a","b")', {})).toThrow('dedup(label) not yet supported');
     expect(() => compile('g.V().as("a").out().dedup()', {})).toThrow('dedup() after as() not yet supported');
+    expect(() => compile('g.V().dedup().by("age").by("name")', {})).toThrow('at most one by()');
+  });
+
+  test('dedup().by() is a windowed modulation-key consumer with explicit encounter order', () => {
+    const store = seededStore();
+    const ordered = read('g.V().order().by("name",desc).barrier().dedup().by("age").values("name")');
+    expect(ordered.sql).toContain('ROW_NUMBER() OVER (PARTITION BY');
+    expect(ordered.sql).toContain('AS encounter');
+    expect(run(store, 'g.V().order().by("name",desc).barrier().dedup().by("age").values("name")').map((r) => r.v))
+      .toEqual(['vadas', 'peter', 'marko', 'josh']);
+    expect(run(store, 'g.V().order().by("name",desc).barrier().dedup().by("age").as("x").values("name")').map((r) => r.v))
+      .toEqual(['vadas', 'peter', 'marko', 'josh']);
+    expect(run(store, 'g.V().order().by("name",desc).barrier().dedup().by("age").order().by("name").barrier().dedup().values("name")').map((r) => r.v))
+      .toEqual(['josh', 'marko', 'peter', 'vadas']);
+    expect(run(store, 'g.V().both().dedup().by("age").values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'marko', 'peter', 'vadas']);
+    expect(run(store, 'g.V().both().both().dedup().by(T.label).count()').map((r) => r.v)).toEqual([2]);
+    expect(run(store, 'g.V().both().both().dedup().by(__.outE().count()).count()').map((r) => r.v)).toEqual([4]);
   });
 
   test('E() sources the edges table; default projection is the edge shape', () => {

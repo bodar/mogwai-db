@@ -57,7 +57,7 @@ export type SideEffectMap = ReadonlyMap<string, SideEffectDef>;
 
 /** The per-traverser CARRIED SCHEMA: the columns physically present on the id-relation
  *  beyond `id`, threaded UNCHANGED across every hop and REQUIRED to agree across a
- *  branch merge. These six travel together as ONE unit — grouping them here (rather than
+ *  branch merge. These roles travel together as ONE unit — grouping them here (rather than
  *  as loose siblings on Carry) is what makes a branch/tail step that silently drops them
  *  structurally obvious, and keeps carriedCols/carryFrag/mergeCarried the single source
  *  of truth. A struct of TYPED ROLES on purpose, NOT a flat column list: aliases is a
@@ -70,6 +70,7 @@ export interface Carried {
   readonly origins: readonly string[];   // coalesce/optional input-ordinal columns — a STACK (nested branches each push their own unique ordinal; the innermost is last)
   readonly sack?: string;                // sack: the carried per-traverser scalar column (e.g. 'sk')
   readonly fromV?: string;               // edge context: the vertex an edge was entered from (for otherV())
+  readonly encounter?: string;           // explicit provider order retained across a barrier/dedup boundary
   readonly trackFromV?: boolean;         // seeded true iff the chain uses otherV() — gates fromV emission (hot-path: no extra column otherwise)
 }
 
@@ -120,7 +121,7 @@ export const elemRel = (st: ElementStream, alias = 'n'): Relation => (st.elem ==
  *  carried column ordered AFTER path would desync the CTE's declared columns from its
  *  physical SELECT once a hop appends a position (the coalesce/optional+path() bug). */
 export const carriedCols = (c: Carried): string[] =>
-  [...aliasColsOf(c.aliases), ...c.origins, ...(c.sack ? [c.sack] : []), ...(c.fromV ? [c.fromV] : []), ...pathColsOf(c.path)];
+  [...aliasColsOf(c.aliases), ...c.origins, ...(c.sack ? [c.sack] : []), ...(c.fromV ? [c.fromV] : []), ...(c.encounter ? [c.encounter] : []), ...pathColsOf(c.path)];
 
 /** `, p.a0, p.p0, …` — the carried columns qualified by `p`; empty when nothing is
  *  live. Movement/filter CTEs splice this after the moved id so labelled traversers
@@ -130,10 +131,10 @@ export function carryFrag(c: Carried, p: Relation): Expression {
   return cols.length ? list(cols.map((x) => q`, ${p.c[x]}`), '') : empty;
 }
 
-type CarriedOpts = { aliases?: AliasMap; path?: PathState; origins?: readonly string[]; sack?: string | null; fromV?: string | null };
+type CarriedOpts = { aliases?: AliasMap; path?: PathState; origins?: readonly string[]; sack?: string | null; fromV?: string | null; encounter?: string | null };
 
 /** Apply a carried-column patch: aliases/path/origins — a value overrides, undefined
- *  keeps; sack/fromV — `null` CLEARS, undefined keeps, a string sets. `origins` is the
+ *  keeps; sack/fromV/encounter — `null` CLEARS, undefined keeps, a string sets. `origins` is the
  *  whole ordinal stack (a branch push/pop passes the new array explicitly). trackFromV is
  *  chain-global (never changed by advance). */
 export function carriedWith(c: Carried, o: CarriedOpts): Carried {
@@ -143,6 +144,7 @@ export function carriedWith(c: Carried, o: CarriedOpts): Carried {
     origins: o.origins ?? c.origins,
     sack: o.sack === null ? undefined : (o.sack ?? c.sack),
     fromV: o.fromV === null ? undefined : (o.fromV ?? c.fromV),
+    encounter: o.encounter === null ? undefined : (o.encounter ?? c.encounter),
     trackFromV: c.trackFromV,
   };
 }
@@ -155,7 +157,7 @@ export const withCarried = <T extends Carry>(st: T, patch: Partial<Carried>): T 
 
 /** Drop row-associated state at a global barrier while retaining ambient compile
  * context and chain requirements. A barrier result is a new traverser and cannot
- * honestly claim aliases/origins/path/sack/fromV from any one input row. */
+ * honestly claim aliases/origins/path/sack/fromV/encounter from any one input row. */
 export const withoutCarried = <T extends Carry>(st: T): T => ({
   ...st,
   carried: { aliases: new Map(), origins: [], trackFromV: st.carried.trackFromV },

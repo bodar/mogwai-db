@@ -20,9 +20,10 @@ builds through the kernel.
 **Compiler is fully decomposed (all 3 seams done, 2026-07-12).** `compile()` in
 `src/compiler.ts` is a 51-line orchestrator: `parse → normalize → dispatch`.
 **Current lowering model (2026-07-15 refactor):** orchestration dispatches a truthful
-`Stream` union (`ElementStream`/`ScalarStream`/`ListStream`/`PropertyStream`/
-`RecordStream`/`GroupStream`/`PathStream`, with derived entry `MapStream`) and materializes only at
-the root through `steps/materialize.ts`. `select`/`project` always lower to streams;
+`Stream` union (`ElementStream`/`ScalarStream`/`VariantStream`/`ListStream`/
+`PropertyStream`/`RecordStream`/`GroupStream`/`PathStream`, with derived entry
+`MapStream`) and materializes only at the root through `steps/materialize.ts`.
+`select`/`project` always lower to streams;
 `group`/`groupCount` always lower through `lowerGroup` to a rich GroupStream, terminal
 or followed. See `docs/2026-07-15-unified-relational-lowering-plan.md` for the active
 staged migration; the older P1–P3 sections below are historical semantics notes.
@@ -542,12 +543,13 @@ default; a co-named `with` is suppressed). Two fail-closed invariants, DO NOT re
 yet filter — Subgraph edge/vertexProperty criteria + edge-landing steps (adjacency),
 Partition meta-properties/merge, and ANY nested body (repeat/union/where-with-movement) —
 throws a clear deferral rather than under-filter. **ProductiveByStrategy is a consumer
-policy, not a rewrite:** `group`/`groupCount`/`project`/`select`/`aggregate`/`order`/linear
+policy, not a rewrite:** `group`/`groupCount`/`project`/`select`/`aggregate`/`order`/`dedup`/linear
 `path`/alias-compare `where` preserve productive NULL results while ordinary consumers
 drop missing `by()` results. The productive bit survives aggregate list and numeric
 reducer boundaries; `local(aggregate(...))` shares that compiler. A narrow VariantStream
-now carries nullable element-valued record/aggregate results; `barrier().dedup().by(...)`
-still fails closed rather than fabricate a dedup policy.
+now carries nullable element-valued record/aggregate results. Modulated dedup is a
+first-per-key window; ordered barrier forms carry an explicit encounter column so the
+representative is deterministic and ProductiveBy retains one NULL-key member.
 Rationale + the challenged "DO routing obviates partitioning" presumption:
 `docs/2026-07-13-with-strategies-exploration.md`.
 
