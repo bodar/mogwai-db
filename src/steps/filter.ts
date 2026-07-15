@@ -5,6 +5,7 @@ import {
   compileFilterPredicate, combineBranchPreds, idPredFromArgs, type Elem, type ScalarCtx,
 } from '../plan.ts';
 import { advance, carryFrag, elemRel, pathColsOf, prevRel, type AliasMap, type ElementStream, type StepFn } from './context.ts';
+import { tryFilterByChildExistence } from './child.ts';
 
 // ---------- filter (predicates over the current traverser) ----------
 
@@ -125,8 +126,17 @@ export const has: StepFn = (s, st) => {
 export const where: StepFn = (s, st) => {
   const arg0 = s.args[0];
   if (arg0 && typeof arg0 === 'object' && 'nested' in arg0) {
-    const pred = compileFilterPredicate(stepChain(arg0.nested, st.params), currentCtx(st), st.params, aliasResolver(st));
-    return filterCte(st, s.name === 'not' ? notCoalesce(pred) : pred);
+    try {
+      const pred = compileFilterPredicate(stepChain(arg0.nested, st.params), currentCtx(st), st.params, aliasResolver(st));
+      return filterCte(st, s.name === 'not' ? notCoalesce(pred) : pred);
+    } catch (error) {
+      if (!(error instanceof Error)
+          || !error.message.includes('not yet supported')
+          || !(error.message.startsWith('where') || error.message.startsWith('filter'))) throw error;
+      const generic = tryFilterByChildExistence(st, arg0.nested, s.name === 'not');
+      if (generic) return generic;
+      throw error;
+    }
   }
   // Alias-compare: where("a", P.eq("b")) (label vs label) or where(P.neq("a"))
   // (current traverser vs label), optionally .by(key) (folded onto s.bys) to
@@ -149,7 +159,10 @@ export const where: StepFn = (s, st) => {
     // nodePropScalar reads vertex_properties; an edge-typed operand would silently read
     // a vertex's props (ids collide across spaces) → reject.
     if (leftElem === 'edge' || rightElem === 'edge') throw new Error('where().by(key) on an edge-typed label not yet supported');
-    testNode = q`${nodePropScalar(raw(left), byKey)} ${P_OPS[pred.op]} ${nodePropScalar(raw(right), byKey)}`;
+    const op = (s as any).productiveBy && pred.op === 'eq' ? 'IS'
+      : (s as any).productiveBy && pred.op === 'neq' ? 'IS NOT'
+      : P_OPS[pred.op];
+    testNode = q`${nodePropScalar(raw(left), byKey)} ${op} ${nodePropScalar(raw(right), byKey)}`;
   } else {
     testNode = q`${left} ${P_OPS[pred.op]} ${right}`;
   }

@@ -542,10 +542,11 @@ default; a co-named `with` is suppressed). Two fail-closed invariants, DO NOT re
 yet filter — Subgraph edge/vertexProperty criteria + edge-landing steps (adjacency),
 Partition meta-properties/merge, and ANY nested body (repeat/union/where-with-movement) —
 throws a clear deferral rather than under-filter. **ProductiveByStrategy is a consumer
-policy, not a rewrite:** `group`/`groupCount`/`project`/`select` preserve productive NULL
-results while their ordinary forms drop missing `by()` results. Shaped record consumers
-anchor on the parent domain and LEFT JOIN productive fields. `aggregate`/`order`/`path`
-and nullable element-valued fields still fail closed rather than fabricate a shape.
+policy, not a rewrite:** `group`/`groupCount`/`project`/`select`/`aggregate`/`order`/linear
+`path`/alias-compare `where` preserve productive NULL results while ordinary consumers
+drop missing `by()` results. The productive bit survives aggregate list and numeric
+reducer boundaries; `local(aggregate(...))` shares that compiler. Nullable element-valued
+fields and `barrier().dedup().by(...)` still fail closed rather than fabricate a shape.
 Rationale + the challenged "DO routing obviates partitioning" presumption:
 `docs/2026-07-13-with-strategies-exploration.md`.
 
@@ -833,7 +834,8 @@ doesn't collide. `otherV` = `CASE WHEN e.src=fromV THEN e.tgt ELSE e.src END`.
 
 Deferred (clear throws): non-movement local bodies (match/simplePath/union/nested local),
 no-barrier bodies, `order()`/`dedup()` inside local, local after `as()`/`path()`/branch/sack,
-`local(aggregate(...))` (gates ProductiveByStrategy), `otherV` with no preceding edge step.
+and `otherV` with no preceding edge step. A one-step `local(aggregate(...))` is canonicalized
+onto the ordinary aggregate side-effect compiler (including ProductiveBy NULL policy).
 
 ## GroupStream + derived MapStream — select(Column), list-local, nested lists (updated 2026-07-15)
 

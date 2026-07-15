@@ -2,6 +2,7 @@ import { q, list, type Expression } from '../q.ts';
 import { scalarProp, labelNameSub, compileNestedScalar, predicateSql, elemCtx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { advance, elemRel, prevRel, carriedCols, type ElementStream, type StepFn } from './context.ts';
+import { tryCompileScalarValueRows } from './child.ts';
 
 // ---------- sack (per-traverser carried scalar) ----------
 //
@@ -47,20 +48,41 @@ export const sack: StepFn = (s, st) => {
   if (st.carried.aliases.size || st.carried.path || st.carried.origins.length)
     throw new Error('sack(Operator.x) after as()/path()/branch state not yet supported');
 
-  const byVal = sackByValue(bys[0], st);
-  const p = prevRel(st, 'p');
-  const oldSack = st.carried.sack ? p.c[st.carried.sack] : null;
-  let newSack: Expression;
-  if (op === 'assign') newSack = byVal;
-  else {
+  const combine = (byVal: Expression, oldSack: Expression | null): Expression => {
+    if (op === 'assign') return byVal;
     if (!oldSack) throw new Error(`sack(Operator.${op}) requires withSack() or a prior sack(assign)`);
-    newSack = op === 'sum' ? q`(${oldSack} + ${byVal})`
+    return op === 'sum' ? q`(${oldSack} + ${byVal})`
       : op === 'minus' ? q`(${oldSack} - ${byVal})`
       : op === 'mult' ? q`(${oldSack} * ${byVal})`
       : op === 'div' ? q`(CAST(${oldSack} AS REAL) / ${byVal})`
       : op === 'min' ? q`MIN(${oldSack}, ${byVal})`
       : q`MAX(${oldSack}, ${byVal})`;
+  };
+
+  const nested = bys[0]?.find((a: any) => a && typeof a === 'object' && 'nested' in a);
+  if (nested) {
+    const rows = tryCompileScalarValueRows(st, nested.nested);
+    if (rows) {
+      const r = rows.stream.rel.as('r');
+      if (!rows.stream.encounter) throw new Error('sack().by(traversal) requires child encounter order');
+      const ranked = st.q.cte(
+        q`SELECT ${r.c.v} AS v, ${r.c[rows.frame.ordinal]} AS ${rows.frame.ordinal}, ROW_NUMBER() OVER (PARTITION BY ${r.c[rows.frame.ordinal]} ORDER BY ${r.c[rows.stream.encounter]}) AS rn FROM ${r}`,
+        ['v', rows.frame.ordinal, 'rn'],
+      );
+      const d = rows.frame.domain.as('d');
+      const f = ranked.as('f');
+      const newSack = combine(f.c.v, st.carried.sack ? d.c[st.carried.sack] : null);
+      const proj = carriedCols({ ...st.carried, sack: 'sk' }).map((c) => c === 'sk' ? q`${newSack} AS sk` : d.c[c]);
+      return advance(st,
+        q`SELECT ${d.c.id}, ${list(proj, ', ')} FROM ${d} JOIN ${f} ON ${f.c[rows.frame.ordinal]}=${d.c[rows.frame.ordinal]} AND ${f.c.rn}=1`,
+        { sack: 'sk' },
+      );
+    }
   }
+
+  const byVal = sackByValue(bys[0], st);
+  const p = prevRel(st, 'p');
+  const newSack = combine(byVal, st.carried.sack ? p.c[st.carried.sack] : null);
 
   // Re-project id + every carried column in carriedCols ORDER, computing the new sack
   // value in the `sk` SLOT (NOT appended last). carriedCols orders sk before fromV/path,

@@ -311,7 +311,8 @@ function* framedResults(store: GraphStore, gremlin: string, params: Record<strin
     case 'value': for (const r of rows) yield frameValue(r.v, shape.as); return;
     // sum(): Int/Long/Double by SQLite storage class. SUM of an empty stream is
     // NULL → no result (TinkerPop yields nothing, matching SQL sum aggregation).
-    case 'scalar': for (const r of rows) if (r.v !== null) yield sumBuffer(r.v, r.vt); return;
+    case 'scalar': for (const r of rows) if (r.v !== null || shape.productiveNull)
+      yield r.v === null ? frameValue(null, undefined) : sumBuffer(r.v, r.vt); return;
     case 'map': for (const r of rows) yield mapBuffer(r, shape.entries); return;
     case 'path': for (const r of rows) yield pathBuffer(r, shape.positions); return;
     // pathGrouped folds pk-runs into Paths — a bounded fold, so yield each completed Path.

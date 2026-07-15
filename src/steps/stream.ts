@@ -36,6 +36,9 @@ export interface ScalarStream extends Carry {
   /** Optional physical encounter-order column. Child traversal barriers use this
    * instead of relying on SQLite relation order, which is not preserved across CTEs. */
   readonly encounter?: string;
+  /** A NULL row is a real traverser rather than an empty numeric reduction. Set by
+   * ProductiveBy-backed list streams and preserved through their reducers. */
+  readonly productiveNull?: boolean;
 }
 
 /** A single list value in a one-row relation with a JSONB `list` column (fold /
@@ -173,8 +176,8 @@ export function assertStreamColumns<T extends Stream>(s: T): T {
 export const carryOf = (s: Stream): Carry =>
   ({ q: s.q, params: s.params, sideEffects: s.sideEffects, carried: s.carried });
 
-export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, result: ScalarStream['result'] = 'value', encounter?: string): ScalarStream =>
-  assertStreamColumns({ ...c, kind: 'scalar', rel, as, result, encounter });
+export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, result: ScalarStream['result'] = 'value', encounter?: string, productiveNull?: boolean): ScalarStream =>
+  assertStreamColumns({ ...c, kind: 'scalar', rel, as, result, encounter, productiveNull });
 export const toListStream = (c: Carry, rel: Relation, of: ListOf): ListStream =>
   assertStreamColumns({ ...c, kind: 'list', rel, of });
 export const toMapStream = (c: Carry, rel: Relation, keyOf: MapOf, valOf: MapOf): MapStream =>

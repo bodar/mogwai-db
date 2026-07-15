@@ -125,6 +125,17 @@ export function isScalarChild(nested: any, params: Record<string, any>): boolean
   return scalarRowParts(body) !== null;
 }
 
+/** Child scalar forms proven to emit exactly one row per parent. They make
+ * optional(child) equivalent to child because the identity fallback is unreachable. */
+export function isTotalScalarChild(nested: any, params: Record<string, any>): boolean {
+  if (!nested) return false;
+  const body = childSteps(nested, params);
+  const terminal = body.at(-1);
+  return terminal?.name === 'count'
+    && terminal.args.length === 0
+    && body.slice(0, -1).every((s) => ELEMENT_CHILD_STEPS.has(s.name));
+}
+
 export function isListChild(nested: any, params: Record<string, any>): boolean {
   if (!nested) return false;
   const body = childSteps(nested, params);
@@ -174,6 +185,33 @@ export function tryCompileCountChild(
     ['v', ...carriedCols(parent.carried)],
   );
   return toScalarStream(carryOf(parent), rel, 'long');
+}
+
+/** Count child with the origin retained for a consumer-owned by()/barrier policy.
+ * Unlike tryCompileCountChild this does not pop the frame: one total row (including
+ * zero) remains associated with each multiset-distinct parent. */
+function tryCompileCountValueRows(
+  parent: ElementStream,
+  nested: any,
+  scope: CompileScope = ROOT_SCOPE,
+): { stream: ScalarStream; frame: ChildFrame } | null {
+  if (!nested) return null;
+  const body = childSteps(nested, parent.params);
+  const terminal = body.at(-1);
+  if (!terminal || terminal.name !== 'count' || terminal.args.length) return null;
+  const prefix = body.slice(0, -1);
+  if (prefix.some((s) => !ELEMENT_CHILD_STEPS.has(s.name))) return null;
+  const pushed = pushChildScope(parent, scope);
+  const { st: end, stop } = foldBody(prefix, pushed.seed, 0);
+  if (stop !== prefix.length) return null;
+  const d = pushed.frame.domain.as('d');
+  const c = end.rel.as('c');
+  const encounter = 'encounter';
+  const rel = parent.q.cte(
+    q`SELECT COUNT(${c.c.id}) AS v, 1 AS ${encounter}${carryFrag(pushed.seed.carried, d)} FROM ${d} LEFT JOIN ${c} ON ${c.c[pushed.frame.ordinal]}=${d.c[pushed.frame.ordinal]} GROUP BY ${d.c[pushed.frame.ordinal]}`,
+    ['v', encounter, ...carriedCols(pushed.seed.carried)],
+  );
+  return { stream: toScalarStream(carryOf(pushed.seed), rel, 'long', 'value', encounter), frame: pushed.frame };
 }
 
 /** Compile a scalar-producing child as rows, so productivity is represented by row
@@ -302,6 +340,18 @@ export function tryCompileScalarValueChild(
     ?? tryCompileScalarChild(parent, nested, use, scope);
 }
 
+/** Productive scalar rows with the child origin still live. Barrier/side-effect
+ * consumers use this form when THEY own first/all/productive-null cardinality;
+ * keeping that decision out of the child parser is the central consumer-policy seam. */
+export function tryCompileScalarValueRows(
+  parent: ElementStream,
+  nested: any,
+  scope: CompileScope = ROOT_SCOPE,
+): { stream: ScalarStream; frame: ChildFrame } | null {
+  return tryCompileCountValueRows(parent, nested, scope)
+    ?? compileScalarChildRows(parent, nested, 'all', scope, true);
+}
+
 /** Scalar rows followed by fold() become one ListStream per parent. This is a true
  * child barrier: empty children emit [], productive NULL remains [null], and only
  * the innermost origin is removed at the consumer boundary. */
@@ -351,6 +401,36 @@ export function tryCompileElementRowsBeforeFold(
   scope: CompileScope = ROOT_SCOPE,
 ): { stream: ElementStream; frame: ChildFrame } | null {
   return compileElementChildRows(parent, nested, scope, 'fold');
+}
+
+/** Productive element rows with the child origin retained. Existence consumers use
+ * the row marker only; optional/group-like consumers may inspect the typed element. */
+export function tryCompileElementValueRows(
+  parent: ElementStream,
+  nested: any,
+  scope: CompileScope = ROOT_SCOPE,
+): { stream: ElementStream; frame: ChildFrame } | null {
+  return compileElementChildRows(parent, nested, scope);
+}
+
+/** Generic traversal-filter fallback. Fast correlated predicate forms stay in
+ * plan.ts; when they decline a body, any typed child row is existence and no row is
+ * non-existence. The preserved domain ordinal keeps duplicate parents distinct. */
+export function tryFilterByChildExistence(
+  parent: ElementStream,
+  nested: any,
+  negate = false,
+  scope: CompileScope = ROOT_SCOPE,
+): ElementStream | null {
+  const child = tryCompileElementValueRows(parent, nested, scope)
+    ?? tryCompileScalarValueRows(parent, nested, scope);
+  if (!child) return null;
+  const d = child.frame.domain.as('d');
+  const c = child.stream.rel.as('c');
+  const exists = q`EXISTS (SELECT 1 FROM ${c} WHERE ${c.c[child.frame.ordinal]}=${d.c[child.frame.ordinal]})`;
+  return advance(parent,
+    q`SELECT ${d.c.id} AS id${carryFrag(parent.carried, d)} FROM ${d} WHERE ${negate ? q`NOT (${exists})` : exists}`,
+  );
 }
 
 /** Compile an element-valued child through the SAME StepFns as the root prefix, then

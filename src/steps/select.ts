@@ -437,6 +437,7 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   if (acc.injects.length) throw new Error('inject() after path() not yet supported');
 
   const bys = proj.bys ?? [];
+  const productive = proj.productiveBy === true;
   // A branched path (pad-to-max cols) has nullable positions: a shorter arm left them
   // NULL. LEFT JOIN those (an INNER JOIN would drop the whole short-arm path), and the
   // handler (pathBuffer) omits a null-id position. by() can't ride a branched path —
@@ -469,7 +470,7 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
     // key drops the whole path. Edge → json_extract of the flat blob.
     const pe = pos.elem === 'edge' ? propExtract(tbl.c.props, key).expr : nodePropScalar(tbl.c.id, key);
     cols.push(q`${pe} AS ${`${prefix}_v`}`);
-    whereParts.push(predicateSql(pe, undefined)); // <pe> IS NOT NULL (non-productive by → drop)
+    if (!productive) whereParts.push(predicateSql(pe, undefined)); // ProductiveBy retains an explicit NULL position
     return { render: 'value', prefix };
   });
 

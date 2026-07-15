@@ -34,11 +34,11 @@ function lowerListReducer(s: ListStream, name: string): ScalarStream {
   const agg = (fn: string): Expression => q`(SELECT ${fn}(je.value) FROM json_each(${c.c.list}) je WHERE typeof(je.value) in ${types})`;
   if (name === 'mean') {
     const rel = s.q.cte(q`SELECT ${agg('AVG')} AS v, 'real' AS vt FROM ${c}`, ['v', 'vt']);
-    return toScalarStream(carryOf(s), rel, undefined, 'number');
+    return toScalarStream(carryOf(s), rel, undefined, 'number', undefined, s.of.kind === 'scalar' && s.of.productiveNull);
   }
   const fn = name === 'sum' ? 'SUM' : name === 'min' ? 'MIN' : 'MAX';
   const rel = s.q.cte(q`SELECT ${agg(fn)} AS v, typeof(${agg(fn)}) AS vt FROM ${c}`, ['v', 'vt']);
-  return toScalarStream(carryOf(s), rel, undefined, 'number');
+  return toScalarStream(carryOf(s), rel, undefined, 'number', undefined, s.of.kind === 'scalar' && s.of.productiveNull);
 }
 
 /**
@@ -68,7 +68,7 @@ export function compileUnfold(s: ListStream): ElementStream | ScalarStream | Lis
     return toListStream(c, rel, s.of.of);
   }
   const rel = explode('v');
-  return toScalarStream(c, rel, s.of.as);
+  return toScalarStream(c, rel, s.of.as, 'value', undefined, s.of.productiveNull);
 }
 
 /** none(pred): keep each list where NO element satisfies pred (a per-list collection

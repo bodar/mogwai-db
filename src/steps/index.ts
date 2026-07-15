@@ -7,7 +7,7 @@ import { withCarried, type ElementStream, type StepFn } from './context.ts';
 import { move, toEdge, toVertex, otherV } from './movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from './filter.ts';
 import { union, optional, repeat, choose, coalesce } from './branch.ts';
-import { isElementChild, isListChild, isScalarChild } from './child.ts';
+import { isElementChild, isListChild, isScalarChild, isTotalScalarChild } from './child.ts';
 import { match } from './match.ts';
 import { identity, limit, range, skip } from './passthrough.ts';
 import { sack } from './sack.ts';
@@ -178,6 +178,9 @@ export function foldBody(steps: PStep[], seedSt: ElementStream, from: number): {
       && coalesceArgs.every((a: any) => isScalarChild(a.nested, seedSt.params));
     const listCoalesce = coalesceArgs.length > 0
       && coalesceArgs.every((a: any) => isListChild(a.nested, seedSt.params));
+    const optionalNested = steps[i].name === 'optional' ? steps[i].args[0]?.nested : null;
+    const shapedTotalOptional = !!optionalNested
+      && (isListChild(optionalNested, seedSt.params) || isTotalScalarChild(optionalNested, seedSt.params));
     if (!fn
       || scalarUnion
       || listUnion
@@ -185,6 +188,7 @@ export function foldBody(steps: PStep[], seedSt: ElementStream, from: number): {
       || listChoose
       || scalarCoalesce
       || listCoalesce
+      || shapedTotalOptional
       || (steps[i].name === 'choose' && steps[i].options)
       || (steps[i].name === 'sack' && !isSackMutate(steps[i]))
       || ((steps[i].name === 'group' || steps[i].name === 'groupCount') && !isSideEffectGroup(steps[i]))
