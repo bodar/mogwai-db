@@ -4,8 +4,10 @@ import {
   P_OPS, labelIn, predicateSql, nodePropScalar, hasProp, elemCtx, aliasCtx,
   compileFilterPredicate, combineBranchPreds, idPredFromArgs, type Elem, type ScalarCtx,
 } from '../plan.ts';
-import { advance, carryFrag, elemRel, pathColsOf, prevRel, type AliasMap, type ElementStream, type StepFn } from './context.ts';
-import { tryFilterByChildExistence } from './child.ts';
+import { advance, carriedCols, carriedWith, carryFrag, elemRel, pathColsOf, prevRel, type AliasMap, type ElementStream, type StepFn } from './context.ts';
+import { tryCompileScalarValueRows, tryFilterByChildExistence } from './child.ts';
+import { directElementModulation, elementOrderSql } from './modulation.ts';
+import { type PStep } from '../strategies.ts';
 
 // ---------- filter (predicates over the current traverser) ----------
 
@@ -53,9 +55,10 @@ export const as: StepFn = (s, st) => {
     aliases.set(lbl, { col, elem: st.elem }); // rebind: default Pop = last, re-capture kind
     rebind.push(col);
   }
-  // Path-position columns pass through untouched (labels-on-path is deferred, so
-  // as() only rebinds alias columns here — the path element set is unchanged).
-  const cols = ['id', ...[...aliases.values()].map((a) => rebind.includes(a.col) ? `id AS ${a.col}` : a.col), ...pathColsOf(st.carried.path)];
+  // Rebuild from the ONE carried schema so origins/sack/fromV/encounter/path cannot
+  // be dropped when as() replaces alias columns. Only rebound aliases change value.
+  const carried = carriedWith(st.carried, { aliases });
+  const cols = ['id', ...carriedCols(carried).map((col) => rebind.includes(col) ? `id AS ${col}` : col)];
   return advance(st, q`SELECT ${cols.join(', ')} FROM ${prevRel(st)}`, { aliases });
 };
 
@@ -179,8 +182,64 @@ export const andOr: StepFn = (s, st) => {
  *  dedup with active as() labels (path-distinct) are deferred rather than
  *  silently over-counting. */
 export const dedup: StepFn = (s, st) => {
+  return lowerElementDedup(st, s);
+};
+
+/** Element dedup is a key-cardinality consumer. Ordinary by() drops an
+ * unproductive modulation; ProductiveBy retains one NULL-key representative.
+ * When preceded by order().barrier(), two windows encode both observations:
+ * first row per dedup key and the retained stream's explicit encounter order. */
+export function lowerElementDedup(st: ElementStream, s: PStep, order?: PStep): ElementStream {
   if (s.args.length > 0) throw new Error('dedup(label) not yet supported');
   if (st.carried.aliases.size > 0) throw new Error('dedup() after as() not yet supported (path-distinct semantics)');
   if (st.carried.path) throw new Error('dedup() with path tracking not yet supported (path-distinct semantics)');
-  return advance(st, q`SELECT DISTINCT id FROM ${prevRel(st)}`);
-};
+  const bys = s.bys ?? [];
+  if (bys.length > 1) throw new Error('dedup() supports at most one by() modulator');
+  if (!order && !bys.length) return advance(st, q`SELECT DISTINCT id FROM ${prevRel(st)}`);
+
+  const p = prevRel(st, 'p');
+  const n = elemRel(st);
+  // A new ordered barrier supersedes, rather than physically duplicating, any
+  // encounter role inherited from an earlier ordered boundary.
+  const carried = order ? carriedWith(st.carried, { encounter: null }) : st.carried;
+  const key = directElementModulation(st, n, bys[0]);
+  if (!key) {
+    const nested = bys[0]?.[0]?.nested;
+    const rows = nested ? tryCompileScalarValueRows(st, nested) : null;
+    if (!rows?.stream.encounter) throw new Error('dedup().by(traversal) requires a scalar child with encounter order');
+    const c = rows.stream.rel.as('c');
+    const childRank = st.q.cte(
+      q`SELECT ${c.c.v} AS k, ${c.c[rows.frame.ordinal]} AS ${rows.frame.ordinal}, ROW_NUMBER() OVER (PARTITION BY ${c.c[rows.frame.ordinal]} ORDER BY ${c.c[rows.stream.encounter]}) AS child_rn FROM ${c}`,
+      ['k', rows.frame.ordinal, 'child_rn'],
+    );
+    const d = rows.frame.domain.as('d');
+    const f = childRank.as('f');
+    const en = elemRel(st);
+    const source = s.productiveBy
+      ? q`${d} LEFT JOIN ${f} ON ${f.c[rows.frame.ordinal]}=${d.c[rows.frame.ordinal]} AND ${f.c.child_rn}=1 JOIN ${en} ON ${en.c.id}=${d.c.id}`
+      : q`${d} JOIN ${f} ON ${f.c[rows.frame.ordinal]}=${d.c[rows.frame.ordinal]} AND ${f.c.child_rn}=1 JOIN ${en} ON ${en.c.id}=${d.c.id}`;
+    const orderSql = elementOrderSql(st, en, order);
+    const existing = carriedCols(carried);
+    const encounter = order ? 'encounter' : undefined;
+    const encounterExpr = order ? q`, ROW_NUMBER() OVER (ORDER BY ${orderSql}, ${d.c.id}) AS encounter` : q``;
+    const ranked = st.q.cte(
+      q`SELECT ${d.c.id} AS id${carryFrag(carried, d)}, ROW_NUMBER() OVER (PARTITION BY ${f.c.k} ORDER BY ${orderSql}, ${d.c.id}) AS rn${encounterExpr} FROM ${source}`,
+      ['id', ...existing, 'rn', ...(encounter ? [encounter] : [])],
+    );
+    const r = ranked.as('r');
+    const body = q`SELECT ${r.c.id} AS id${carryFrag(carried, r)}${encounter ? q`, ${r.c[encounter]} AS ${encounter}` : q``} FROM ${r} WHERE ${r.c.rn}=1`;
+    return advance(st, body, encounter ? { encounter } : {});
+  }
+  const orderSql = elementOrderSql(st, n, order);
+  const where = bys.length && !s.productiveBy ? q` WHERE ${predicateSql(key, undefined)}` : q``;
+  const existing = carriedCols(carried);
+  const encounter = order ? 'encounter' : undefined;
+  const encounterExpr = order ? q`, ROW_NUMBER() OVER (ORDER BY ${orderSql}, ${p.c.id}) AS encounter` : q``;
+  const ranked = st.q.cte(
+    q`SELECT ${p.c.id} AS id${carryFrag(carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${key} ORDER BY ${orderSql}, ${p.c.id}) AS rn${encounterExpr} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}${where}`,
+    ['id', ...existing, 'rn', ...(encounter ? [encounter] : [])],
+  );
+  const r = ranked.as('r');
+  const body = q`SELECT ${r.c.id} AS id${carryFrag(carried, r)}${encounter ? q`, ${r.c[encounter]} AS ${encounter}` : q``} FROM ${r} WHERE ${r.c.rn}=1`;
+  return advance(st, body, encounter ? { encounter } : {});
+}

@@ -27,7 +27,9 @@ export function materializeScalarRoot(stream: ScalarStream): Compiled {
       ? { kind: 'scalar', productiveNull: stream.productiveNull }
     : { kind: 'value', as: stream.as };
   const cols = stream.result === 'number' ? q`v, vt` : q`v`;
-  return materializeRoot(stream.q, q`SELECT ${cols} FROM ${stream.rel}`, shape);
+  if (!stream.carried.encounter) return materializeRoot(stream.q, q`SELECT ${cols} FROM ${stream.rel}`, shape);
+  const s = stream.rel.as('s');
+  return materializeRoot(stream.q, q`SELECT ${cols} FROM ${s} ORDER BY ${s.c[stream.carried.encounter]}`, shape);
 }
 
 /** Expand only the element arm at the wire boundary. Scalar/null rows never join

@@ -29,7 +29,7 @@ export type PStep = Step & { cluster?: Step[]; bys?: any[][]; options?: Step[]; 
 const REPEAT_CLUSTER = new Set(['repeat', 'emit', 'times', 'until']);
 /** Steps that absorb trailing by() modulators. Alias-compare where()/not() also
  *  host a single by(key) but are detected structurally (see isAliasCompareWhere). */
-const BY_HOSTS = new Set(['order', 'select', 'project', 'group', 'groupCount', 'path', 'math', 'format', 'sack', 'aggregate']);
+const BY_HOSTS = new Set(['order', 'select', 'project', 'group', 'groupCount', 'path', 'math', 'format', 'sack', 'aggregate', 'dedup']);
 
 // ---------- withStrategies / withoutStrategies application ----------
 //
@@ -67,7 +67,7 @@ const SAFE_OPTIMIZATION_STRATEGIES = new Set([
 const VERIFICATION_STRATEGIES = new Set([
   'ReadOnlyStrategy', 'EdgeLabelVerificationStrategy', 'ReservedKeysVerificationStrategy',
 ]);
-const PRODUCTIVE_BY_HOSTS = new Set(['group', 'groupCount', 'project', 'select', 'aggregate', 'order', 'path', 'where', 'not']);
+const PRODUCTIVE_BY_HOSTS = new Set(['group', 'groupCount', 'project', 'select', 'aggregate', 'order', 'path', 'where', 'not', 'dedup']);
 
 /** ProductiveBy is semantic only at by()-consumers. Mark the supported hosts so they
  * choose a LEFT-domain/null policy explicitly; reject any other host rather than

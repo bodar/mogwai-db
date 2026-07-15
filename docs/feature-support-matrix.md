@@ -4,7 +4,7 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-15 · **live L3 conformance:** 922 · **corpus parse+chain:**
+**Last synced:** 2026-07-15 · **live L3 conformance:** 931 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
 
@@ -59,7 +59,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | **TextP** (startingWith/endingWith/containing + negations) | ✅ | ✅ bound `LIKE`/`NOT LIKE`, pattern escaped |
 | **TextP regex** (`regex`/`notRegex`) | 🚫 | **Unimplementable in SQL.** Stock SQLite only *reserves* the `REGEXP` operator (needs a `regexp()` UDF that ships with no implementation — verified `no such function: REGEXP` on bun:sqlite 3.53.0); DO SQLite exposes no `sqlite3_create_function` and blocks `load_extension`, so the UDF can't be supplied. A post-SQL JS filter would violate locked #3. (The `regexp_*` funcs in CF docs are **R2 SQL**, a different engine, not DO SQLite.) `LIKE`-expressible forms — startingWith/endingWith/containing — are ✅ above; only true regex is out |
 | `typeOf(GType)` over a **stored property** | ❌ | SQLite storage class can't distinguish bool/datetime/uuid from int/text — needs a storage type-tag scheme |
-| `dedup()` | 🟡 | ✅ bare `dedup()`<br>❌ `dedup(label)`<br>❌ `dedup()` after `as()` / with path tracking (path-distinct semantics) |
+| `dedup()` | 🟡 | ✅ bare `dedup()`<br>✅ `dedup().by(key|T.id|T.label|scalar traversal)` as a first-per-key window; ordinary missing keys drop, ProductiveBy retains one NULL key<br>✅ `order().barrier().dedup().by(...)` carries explicit encounter order downstream<br>❌ `dedup(label)` and >1 by() modulator<br>❌ `dedup()` after `as()` / with path tracking (path-distinct semantics) |
 | `identity()` | ✅ | |
 
 ## 3. Projections & element data
@@ -196,7 +196,7 @@ path. The VariantStream slice plus correct collection-valued cap framing raised 
 | **SubgraphStrategy** (vertex criterion) | 🟡 | ✅ `where`/`has` injection pass<br>❌ edge/vertexProperty criteria<br>❌ adjacency (`out()` expansion) |
 | **PartitionStrategy** (read-filter + write-stamp) | 🟡 | ✅ `has(within)` + property stamp<br>❌ `includeMetaProperties`<br>❌ partition-aware merge |
 | ReadOnly / EdgeLabel / ReservedKeys **verification** | ✅ | ✅ throw TinkerPop's canonical messages |
-| ProductiveByStrategy | 🟡 | ✅ explicit productive-NULL policy for `group`/`groupCount`/`project`/`select`/`aggregate`/`order`/linear `path`/alias-compare `where`; nullable element-valued records/aggregate bags and `local(aggregate)` included<br>❌ `barrier().dedup().by(...)` fails closed |
+| ProductiveByStrategy | ✅ | ✅ explicit productive-NULL policy for every supported consumer: `group`/`groupCount`/`project`/`select`/`aggregate`/`order`/`dedup`/linear `path`/alias-compare `where`; nullable element-valued records/aggregate bags and `local(aggregate)` included |
 | `with(…)` (OptionsStrategy sugar) | ❌ | `step not implemented: with()` |
 | OLAP / GraphComputer / Seed / Event strategies | 🚫 | out of scope |
 

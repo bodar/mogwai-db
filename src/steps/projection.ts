@@ -21,6 +21,7 @@ import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerFla
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantOptional, union as lowerLegacyUnion } from './branch.ts';
 import { lowerGroup, lowerProperties, type GroupSource } from './group.ts';
 import { isScalarChild, isListChild, isTotalScalarChild, tryCompileCountChild, tryCompileListChild } from './child.ts';
+import { lowerElementDedup } from './filter.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
 //
@@ -159,6 +160,14 @@ export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop:
 /** Compile the tail: `st` is the finished prefix state, `steps[stop]` the first
  *  step the prefix dispatch didn't consume. */
 export function compileTail(st: ElementStream, steps: PStep[], stop: number): Compiled {
+
+  // order().[barrier()].dedup().by(): lower both observations as one window
+  // policy so the representative is chosen by explicit encounter order.
+  if (steps[stop]?.name === 'order') {
+    const dedupAt = steps[stop + 1]?.name === 'barrier' ? stop + 2 : stop + 1;
+    if (steps[dedupAt]?.name === 'dedup')
+      return dispatchNext(lowerElementDedup(st, steps[dedupAt], steps[stop]), steps, dedupAt + 1);
+  }
 
   // A direct global count is a stream transition even when terminal. Forms with
   // preceding tail modifiers (order().limit().count()) still use the compatibility
@@ -555,7 +564,8 @@ function buildProjection(st: ElementStream, acc: TailAcc): Compiled {
   const proj = PROJECTORS.get(projName)!({ st, n, l, extId, vJoin, vlJoin, projStep: acc.projStep });
 
   // order().by(key) sorts by a property expression (element context) — auto-index it.
-  return renderProjection(st.q, proj, acc, nodePropOrderKey(st));
+  const encounter = st.carried.encounter ? p.c[st.carried.encounter] : undefined;
+  return renderProjection(st.q, proj, acc, nodePropOrderKey(st), encounter);
 }
 
 /** bare sack() — read the carried per-traverser sack column (context.ts Carry.sack)
@@ -605,6 +615,7 @@ function compileCap(st: ElementStream, steps: PStep[], stop: number): Compiled {
 export function renderProjection(
   Q: Query, proj: ProjResult, acc: TailAcc,
   orderKey: (key: string) => Expression,
+  fallbackOrder?: Expression,
 ): Compiled {
   const { orders, distinct, offset, limit, isPreds, reducer, injects } = acc;
   let { shape, colsNode, scalarExpr } = proj;
@@ -664,7 +675,7 @@ export function renderProjection(
       return q`${shape.kind === 'value' ? 'v' : 'n.id'}${dir}`;
     });
     orderNode = q` ORDER BY ${list(keyNodes, ', ')}`;
-  }
+  } else if (fallbackOrder) orderNode = q` ORDER BY ${fallbackOrder}`;
   const limitNode: Expression = (limit !== null || offset > 0) ? q` LIMIT ${limit ?? -1} OFFSET ${offset}` : empty;
 
   let tailNode: Expression = q`SELECT ${distinct ? 'DISTINCT ' : ''}${colsNode} FROM ${proj.fromNode}${whereNode}${orderNode}${limitNode}`;
