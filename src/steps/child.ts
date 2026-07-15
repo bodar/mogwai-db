@@ -6,6 +6,7 @@ import { carryOf, toScalarStream, type ScalarStream, type Stream } from './strea
 import { foldBody } from './index.ts';
 import { lowerScalarRows, SCALAR_TRANSFORMS } from './scalar.ts';
 import { normalize } from '../strategies.ts';
+import { lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
 
 /** Root/child compilation context. A child frame retains the complete parent domain,
  * not merely an ordinal on productive child rows: reducers need that domain to
@@ -78,7 +79,9 @@ const ELEMENT_CHILD_STEPS = new Set([
 ]);
 const CHILD_SCALAR_ROW_STEPS = new Set([
   ...SCALAR_TRANSFORMS, 'is', 'order', 'limit', 'skip', 'range', 'dedup',
+  'count', 'sum', 'min', 'max', 'mean',
 ]);
+const CHILD_SCALAR_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
 
 /** Syntax-only preflight for shape-aware dispatch. Unlike the tryCompile functions,
  * this never appends CTEs, so the prefix fold can stop before a homogeneous scalar
@@ -194,10 +197,21 @@ export function tryCompileScalarChild(
   const childCols = carriedCols(end.carried);
   const encounter = 'encounter';
   const continueScalar = (base: ScalarStream): ScalarStream => {
-    const lowered = lowerScalarRows(base, suffix, 0);
-    if (lowered.stop !== suffix.length)
-      throw new Error(`scalar child continuation ${suffix[lowered.stop].name}() not yet supported`);
-    return lowered.stream;
+    let stream = base;
+    let at = 0;
+    while (at < suffix.length) {
+      const lowered = lowerScalarRows(stream, suffix, at);
+      stream = lowered.stream;
+      at = lowered.stop;
+      if (at === suffix.length) break;
+      const reducer = suffix[at].name;
+      if (!CHILD_SCALAR_REDUCERS.has(reducer))
+        throw new Error(`scalar child continuation ${reducer}() not yet supported`);
+
+      stream = lowerScopedScalarReducer(stream, reducer as ScalarReducer, pushed.frame.domain, pushed.frame.ordinal);
+      at++;
+    }
+    return stream;
   };
   const rows = parent.q.cte(
     q`SELECT ${scalar} AS v, ROW_NUMBER() OVER (PARTITION BY ${c.c[pushed.frame.ordinal]} ORDER BY ${order}) AS ${encounter}${carryFrag(end.carried, c)} FROM ${from}`,
@@ -206,18 +220,21 @@ export function tryCompileScalarChild(
   const lowered = continueScalar(toScalarStream(carryOf(end), rows, undefined, 'value', encounter));
   const r = lowered.rel.as('r');
   const parentCols = carriedCols(parent.carried);
+  const typeCol = lowered.result === 'number' ? q`, ${r.c.vt} AS vt` : empty;
+  const resultCols = lowered.result === 'number' ? ['v', 'vt'] : ['v'];
   if (use === 'all') {
-    const rel = parent.q.cte(q`SELECT ${r.c.v} AS v${carryFrag(parent.carried, r)} FROM ${r}`, ['v', ...parentCols]);
+    const rel = parent.q.cte(q`SELECT ${r.c.v} AS v${typeCol}${carryFrag(parent.carried, r)} FROM ${r}`, [...resultCols, ...parentCols]);
     return toScalarStream(carryOf(parent), rel, lowered.as, lowered.result);
   }
   const ranked = parent.q.cte(
-    q`SELECT ${r.c.v} AS v${carryFrag(parent.carried, r)}, ROW_NUMBER() OVER (PARTITION BY ${r.c[pushed.frame.ordinal]} ORDER BY ${r.c[encounter]}) AS rn FROM ${r}`,
-    ['v', ...parentCols, 'rn'],
+    q`SELECT ${r.c.v} AS v${typeCol}${carryFrag(parent.carried, r)}, ROW_NUMBER() OVER (PARTITION BY ${r.c[pushed.frame.ordinal]} ORDER BY ${r.c[encounter]}) AS rn FROM ${r}`,
+    [...resultCols, ...parentCols, 'rn'],
   );
   const first = ranked.as('f');
+  const firstTypeCol = lowered.result === 'number' ? q`, ${first.c.vt} AS vt` : empty;
   const rel = parent.q.cte(
-    q`SELECT ${first.c.v} AS v${carryFrag(parent.carried, first)} FROM ${first} WHERE ${first.c.rn}=1`,
-    ['v', ...parentCols],
+    q`SELECT ${first.c.v} AS v${firstTypeCol}${carryFrag(parent.carried, first)} FROM ${first} WHERE ${first.c.rn}=1`,
+    [...resultCols, ...parentCols],
   );
   return toScalarStream(carryOf(parent), rel, lowered.as, lowered.result);
 }

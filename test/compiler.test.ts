@@ -1300,6 +1300,9 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V(1).map(__.values("name").toUpper())').sql).toContain('upper(p.v) AS v');
     expect(read('g.V(1).map(__.out().values("name").order().by(Order.desc).limit(1))').sql)
       .toContain('ROW_NUMBER() OVER (PARTITION BY p.o0 ORDER BY p.v DESC');
+    const reducedChild = read('g.V().map(__.out().values("name").is("lop").count())');
+    expect(reducedChild.sql).toContain('COUNT(s.encounter) AS v');
+    expect(reducedChild.sql).toContain('LEFT JOIN');
     expect(() => compile('g.V().map(__.constant(1).discard())', {})).toThrow();
     // record/list-valued child bodies still defer; element bodies use generic child scope below.
     expect(() => compile('g.V().map(__.select("a"))', {})).toThrow('not yet supported');
@@ -1707,6 +1710,11 @@ describe('compiler execution semantics', () => {
       expect(run(store, 'g.V(1).flatMap(__.out().values("name").order().range(1,3))').map((r) => r.v))
         .toEqual(['lop', 'vadas']);
       expect(run(store, 'g.V(1).flatMap(__.both().label().dedup()).count()').map((r) => r.v)).toEqual([2]);
+      // A reducer consumes the already-filtered child rows and restores an explicit
+      // zero from the parent domain when none remain.
+      expect(run(store, 'g.V().map(__.out().values("name").is("lop").count())').map((r) => r.v).sort())
+        .toEqual([0, 0, 0, 1, 1, 1]);
+      expect(run(store, 'g.V(1).map(__.outE().values("weight").sum())').map((r) => r.v)).toEqual([1.9]);
     });
 
     test('future child barriers remain explicit deferrals until generic lowering lands', () => {
@@ -2136,6 +2144,8 @@ describe('compiler execution semantics', () => {
       .toEqual(['MARKO', 'X']);
     expect(run(store, 'g.V(1).union(__.out().count(), __.in().count())').map((r) => r.v))
       .toEqual([3, 0]);
+    expect(run(store, 'g.V(1).union(__.outE("knows").values("weight").sum(), __.outE("created").values("weight").sum())').map((r) => r.v))
+      .toEqual([1.5, 0.4]);
     // optional hit: josh created ripple+lop
     expect(run(store, 'g.V(4).optional(__.out("created")).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple']);
     // optional miss: vadas has no out-created → falls back to self

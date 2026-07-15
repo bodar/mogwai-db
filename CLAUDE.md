@@ -51,7 +51,11 @@ Scalar child projections continue through the ordinary `lowerScalarRows` pipelin
 before `first`/`all` selection. `ScalarStream.encounter` makes provider order a physical
 stream contract, so `is`/`order`/`limit`/`skip`/`range`/`dedup` lower there partitioned
 by child origins (never accidental SQLite CTE order). Child chains pass through root
-`normalize()` too, including `order().by()`. Origin-scoped reducers/fold remain deferred.
+`normalize()` too, including `order().by()`.
+`lowerScopedScalarReducer` (`steps/barrier.ts`) now owns child `count/sum/min/max/mean`:
+it LEFT JOINs the preserved domain, groups by origin, counts the non-null encounter
+marker (not `v`), and retains dynamic numeric `v,vt` through map/flatMap and homogeneous
+scalar branch merges. Origin-scoped `fold` remains the next shaped barrier.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
   (`stripTerminal`, `foldRepeatClusters`, `foldByModulators`) run once up front so
   the dispatch sees a canonical, peek-free chain (no index arithmetic anywhere).
