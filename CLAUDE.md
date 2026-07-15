@@ -41,6 +41,9 @@ compiler with `all`, so element and scalar children both flatten without private
 Homogeneous scalar `union()` arms also dispatch through child streams and `UNION ALL`;
 the syntax-only `isScalarChild` preflight stops the prefix without appending CTEs.
 Element union retains its existing branch compiler; mixed shapes fail closed.
+Three-argument predicate `choose` uses the same shape-aware split for homogeneous
+scalar arms: the existing predicate gates seed two child compilations, whose scalar
+rows merge with `UNION ALL`; two-argument identity-else and element choose stay legacy.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
   (`stripTerminal`, `foldRepeatClusters`, `foldByModulators`) run once up front so
   the dispatch sees a canonical, peek-free chain (no index arithmetic anywhere).

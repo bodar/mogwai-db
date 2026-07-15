@@ -1321,6 +1321,10 @@ describe('compiler SQL snapshots', () => {
       .toContain('(SELECT COUNT(*) FROM edges WHERE (src=n.id)');
     // 2-arg form: else absent → identity passthrough of the NOT-pred seed
     expect(read('g.V().choose(__.hasLabel("software"), __.in("created"))').sql).toContain('UNION ALL');
+    const scalar = read('g.V().choose(__.hasLabel("person"), __.values("name"), __.constant("software")).count()');
+    expect(scalar.shape).toEqual({ kind: 'count' });
+    expect(scalar.sql).toContain(' AS v FROM');
+    expect(scalar.sql).toContain('UNION ALL');
   });
 
   test('choose() deferrals fail closed', () => {
@@ -2124,6 +2128,10 @@ describe('compiler execution semantics', () => {
     // 2-arg: software → in(created) (creators); person → identity (self)
     expect(run(store, 'g.V().choose(__.hasLabel("software"), __.in("created")).values("name")').map((r) => r.v).sort())
       .toEqual(['josh', 'josh', 'josh', 'marko', 'marko', 'peter', 'peter', 'vadas']);
+    expect(run(store, 'g.V().choose(__.hasLabel("person"), __.values("name"), __.constant("software"))').map((r) => r.v).sort())
+      .toEqual(['josh', 'marko', 'peter', 'software', 'software', 'vadas']);
+    expect(run(store, 'g.V().choose(__.hasLabel("person"), __.out().count(), __.in().count()).count()').map((r) => r.v))
+      .toEqual([6]);
     // predicate = count().is: marko has 2 knows-edges → out(knows); others → self
     expect(run(store, 'g.V(1).choose(__.out("knows").count().is(P.gt(1)), __.out("knows")).values("name")').map((r) => r.v).sort())
       .toEqual(['josh', 'vadas']);

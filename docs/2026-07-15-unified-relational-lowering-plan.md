@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–3 complete, Stage 4 active
-**Baseline:** L1 2298/2298, L3 833/2041; latest completed checkpoint: L3 868, 356 tests
+**Baseline:** L1 2298/2298, L3 833/2041; latest completed checkpoint: L3 872, 356 tests
 
 **Implementation checkpoint (2026-07-15):** physical stream schemas and the single
 root materialization boundary are landed. Global count and numeric reducers now lower
@@ -518,7 +518,10 @@ fix productivity without claiming a conformance increase. Homogeneous scalar `un
 arms now concatenate child ScalarStreams with `UNION ALL`; a syntax-only child-shape
 preflight leaves ordinary/nested element union on its mature prefix compiler and keeps
 mixed shapes fail-closed. This recovered the official three-`constant()` union scenario,
-moving L3 867→868.
+moving L3 867→868. Three-argument predicate `choose` now applies its existing true/
+false gates to homogeneous scalar child arms and merges their rows. Constant/value/
+count combinations recovered four more official scenarios, moving L3 868→872; the
+two-argument identity-else form and element arms retain the established compiler.
 
 1. Extract the existing `originSeed` into `steps/child.ts` as `pushChildScope`.
 2. Preserve the domain relation in `ChildFrame`.
@@ -538,7 +541,7 @@ Migrate in increasing semantic complexity:
 
 1. ~~`flatMap`: all child rows (element + scalar projection tails).~~
 2. element-body `map`: first child row per origin.
-3. ~~homogeneous scalar arms for `union`~~; scalar predicate-`choose` arms remain.
+3. ~~homogeneous scalar arms for `union` and three-argument predicate `choose`.~~
 4. scalar/list arms for `coalesce` and `optional`, preserving first-productive-arm
    semantics.
 5. `local`: delete its movement-only parser and use child-scoped barriers.
