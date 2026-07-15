@@ -592,12 +592,12 @@ was 0). Key pieces:
 **P2b — `where`/`not`/`is` + TextP. DONE** (live L3 85→119). Shared
 `predicateSql(expr,binds,pred)` backs `has`/`is`/`where` (+ TextP → bound `LIKE`).
 `is(P)` folds onto the projected scalar. `where`/`not`/`filter(__.T)` are filter
-CTEs via `compileFilterPredicate` (EXISTS movement / correlated `.count().is` /
+CTEs via `tryInlinePredicate` (EXISTS movement / correlated `.count().is` /
 current-prop); `not()` uses `NOT COALESCE((pred),0)` for correct missing-prop
 semantics. Alias-compare `where(P.neq("a"))`/`where("a",P,by(k))` over P2a columns.
 
 **P2 tail — PARTIALLY DONE** (live L3 119→126). `and`/`or` filter steps
-(`combineBranchPreds`, reuses `compileFilterPredicate`; also inside `where(__.and/
+(`combineBranchPreds`, reuses the inline predicate kernel; also inside `where(__.and/
 or)`); `union` (element branches, `branchMovementSelect` — single out/in/both hop,
 UNION ALL merged id-relation); `optional` (single hop, LEFT JOIN + COALESCE-to-
 self). All compose mid-chain as CTEs in `traversalCtes`.
@@ -609,7 +609,7 @@ gathered by strategies since the modulators sit either side of `repeat`). All
 `WITH` → `WITH RECURSIVE`. **`repeat().path()`** adds a JSONB `path` column
 (`jsonb_insert '$[#]'`); **`simplePath()` in the body** = a `NOT EXISTS(json_each)`
 cycle guard; **`until(<pred>)`** = a `done` column (do-while / while-do), predicate
-via `compileFilterPredicate` on a correlated node ctx, `loops().is(n)` → depth
+via `tryInlinePredicate` on a correlated node ctx, `loops().is(n)` → depth
 predicate — `until().path()` composes. **No depth cap** (removed 2026-07-13): `times()`
 bounds depth; `until()` and unbounded `emit()` run to the natural fixpoint — a cyclic
 body without `simplePath()` is infinite by spec, bounded only by the DO's per-request

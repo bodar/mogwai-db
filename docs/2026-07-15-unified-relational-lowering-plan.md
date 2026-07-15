@@ -7,8 +7,8 @@
 ## Restart handoff — read this first after a context reset
 
 **Current checkpoint:** branch `refactor/unified-relational-lowering`; items 1–15 are on
-`trunk`, item 16 is local commit `80d7020`, and item 17 is the current uncommitted
-checkpoint. Run full `bun test` before every commit.
+`trunk`, item 16 is local commit `80d7020`, item 17 is local commit `9eabd70`, and item
+18 is the current uncommitted checkpoint. Run full `bun test` before every commit.
 
 **Recent completed slices:**
 
@@ -112,6 +112,13 @@ checkpoint. Run full `bun test` before every commit.
     parsing. The surviving property-group/predicate optimization is named
     `tryInlineScalar` and returns null on an unsupported shape, so it cannot define
     language support or throw semantic policy. L3 remains 932.
+18. The predicate optimization is now `tryInlinePredicate`: unsupported correlated
+    forms return null and `where`/`filter`/`not` fall through to generic child-existence
+    lowering. Element branch arms preflight through the shared child compiler before the
+    compatibility fold, giving `limit` true per-parent semantics and letting `dedup`
+    preserve nested branch ordinals. Duplicate equal parents are covered explicitly.
+    The legacy branch fold remains only for bodies outside the current child vocabulary
+    (nested branches/repeat and general all-row order). L3 remains 932.
 
 **Current Stage 6 state:** scalar traversal modulators for `project`, aliased `select`,
 and inline element `group` all use the generic child-domain compiler. Group keys consume
@@ -122,11 +129,10 @@ aggregate, order, dedup, linear-path, and alias-compare boundaries, including nu
 element records and aggregate members. Multi-input math/format/option-choose modulation
 also uses one generic child domain. L3 is 932.
 
-**Immediate next slice:** finish Stage 7's predicate/branch seam: make the correlated
-predicate helper an explicit `tryInlinePredicate` optimization with generic fallback,
-then delete `branchArm`'s prefix-only vocabulary. After that, replace `dispatchNext`
-with a stepwise `lowerSteps` loop. Preserve correlated count/EXISTS as measured fast
-paths until Stage 8.
+**Immediate next slice:** finish deleting `branchArm`'s compatibility fold by routing
+nested element branches through stream lowering, then replace `dispatchNext` with a
+stepwise `lowerSteps` loop. Preserve correlated count/EXISTS as measured fast paths
+until Stage 8.
 
 **Deliberate compatibility boundaries after Stage 6:** broader VariantStream followers,
 property groups without a live element parent, element-kind-changing optional fallback,
@@ -729,11 +735,12 @@ Ratchet after each consumer, not only at the end.
 
 ### Stage 7 — demote and delete the mini-compilers
 
-1. `tryInlineScalar` is landed; rename/demote the predicate optimization to
-   `tryInlinePredicate`.
+1. ~~The surviving optimized pieces are `tryInlineScalar` and
+   `tryInlinePredicate`; unsupported means null/fallback.~~
 2. ~~Delete `compileNestedList`; generic child + fold owns its semantics.~~
-3. Scalar inline misses now return null; do the same for the predicate fast path.
-4. Delete `branchArm`'s prefix-only stop check.
+3. ~~Scalar and predicate inline misses return null; semantic support lives in generic lowering.~~
+4. Shared element-child lowering now precedes the compatibility fold; delete that fold
+   after nested branch/repeat and all-row order acquire stream policies.
 5. ~~Delete `isScalarLocal`, the local-body movement whitelist, and local's private
    origin window implementation.~~ (`61d028d`)
 6. Remove `dispatchNext` once `lowerSteps` fully supersedes it.
@@ -855,8 +862,8 @@ The refactor is complete when all of the following are true:
 - [ ] `branchArm` is not prefix-only.
 - [x] `local.ts` is deleted; local has no private traversal parser/barrier engine.
 - [x] `compileNestedList` is deleted.
-- [ ] `compileNestedScalar`/predicate specializations are optional `tryInline*` fast
-      paths with generic fallbacks.
+- [x] Scalar/predicate specializations are optional `tryInline*` fast paths with
+      generic fallbacks.
 - [x] ProductiveByStrategy has explicit policies for every supported consumer rather
       than a global rejection.
 - [x] L1 is 2298/2298 and L3 has never regressed below 833 during migration.

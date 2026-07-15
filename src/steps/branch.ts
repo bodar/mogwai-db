@@ -1,10 +1,10 @@
 import { q, list, empty, Relation, type Expression } from '../q.ts';
 import { edges } from '../schema.ts';
 import { stepChain, type Step } from '../frontend.ts';
-import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, compileFilterPredicate, predicateSql, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
+import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, tryInlinePredicate, predicateSql, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
 import { advance, elemRel, prevRel, carryFrag, carriedCols, aliasColsOf, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { foldBody } from './index.ts';
-import { isListChild, isScalarChild, pushChildScope, tryCompileCountChild, tryCompileElementChild, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueRows } from './child.ts';
+import { isElementChild, isListChild, isScalarChild, pushChildScope, tryCompileCountChild, tryCompileElementChild, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueRows } from './child.ts';
 import { carryOf, toListStream, toScalarStream, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from './stream.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
@@ -33,7 +33,7 @@ const unifyLists = (arms: readonly ListStream[]): ListStream['of'] => {
 /** Compile an until(<traversal>) modulator into `(id, depth) → boolean SQL`. A
  *  `loops().is(P)` body tests the depth counter; every other body is an element
  *  predicate over the current vertex (has/hasLabel/values/out…count().is/and/or),
- *  reusing compileFilterPredicate on a correlated ctx. */
+ *  reusing the nullable predicate optimization on a correlated ctx. */
 function untilPredicate(untilStep: Step, params: Record<string, any>): (id: Expression, depth: Expression) => Expression {
   const nested = stepChain(untilStep.args[0]?.nested, params);
   if (!nested.length) throw new Error('until() requires a traversal predicate');
@@ -41,7 +41,8 @@ function untilPredicate(untilStep: Step, params: Record<string, any>): (id: Expr
     if (nested.length === 2 && nested[1].name === 'is') return (_id, depth) => predicateSql(depth, nested[1].args[0]);
     throw new Error('until(__.loops()…) form not yet supported (only loops().is(P))');
   }
-  return (id) => compileFilterPredicate(nested, walkNodeCtx(id), params);
+  return (id) => tryInlinePredicate(nested, walkNodeCtx(id), params)
+    ?? (() => { throw new Error('until() predicate not supported by inline lowering'); })();
 }
 
 // ---------- branch (union / optional / repeat) ----------
@@ -63,7 +64,7 @@ function originSeed(st: ElementStream): { base: Relation; seedSt: ElementStream;
  *  must defer rather than emit a column-mismatched CTE. (Movement/filter/passthrough
  *  carry it via carryFrag; union/flatMap re-project it; a scalar/projection step isn't
  *  in PREFIX at all → it gets the clearer scalar-body message below.) */
-const ORIGIN_UNSAFE = new Set(['dedup', 'as', 'repeat', 'choose']);
+const ORIGIN_UNSAFE = new Set(['as', 'repeat', 'choose']);
 
 /** Fold a branch body (element-only) from `seed` through the movement/filter
  *  dispatch. Multi-hop bodies work (they chain CTEs off the seed). A scalar/
@@ -74,6 +75,14 @@ const ORIGIN_UNSAFE = new Set(['dedup', 'as', 'repeat', 'choose']);
 function branchArm(name: string, nested: any, seed: ElementStream, params: Record<string, any>): ElementStream {
   if (!nested) throw new Error(`${name}(traversal) required`);
   const body = stepChain(nested, params);
+  // The shared child compiler owns origin-partitioned element row policies. Do not
+  // route a terminal order() through its `all` policy yet: an all-row ordered stream
+  // still needs a general encounter contract rather than silently discarding order.
+  if (body.at(-1)?.name !== 'order' && isElementChild(nested, params)) {
+    const generic = tryCompileElementChild(seed, nested, 'all');
+    if (!generic) throw new Error(`${name}() element branch preflight/compiler mismatch`);
+    return generic.stream;
+  }
   if (seed.carried.origins.length) {
     const bad = body.find((c) => ORIGIN_UNSAFE.has(c.name));
     if (bad) throw new Error(`${name}() branch step __.${bad.name}() not yet supported inside coalesce()/optional() (input-ordinal not carried)`);
@@ -547,7 +556,8 @@ export const choose: StepFn = (s, st) => {
   if (args.length < 2 || args.length > 3)
     throw new Error('choose(): only the predicate form choose(pred, then[, else]) is supported (option-map form not yet supported)');
   const [predArg, thenArg, elseArg] = args;
-  const pred = compileFilterPredicate(stepChain(predArg.nested, st.params), elemCtx(elemRel(st), st.elem), st.params);
+  const pred = tryInlinePredicate(stepChain(predArg.nested, st.params), elemCtx(elemRel(st), st.elem), st.params)
+    ?? (() => { throw new Error('choose() predicate not supported by inline lowering'); })();
 
   const arm = (arg: any, seed: ElementStream): ElementStream => {
     const body = stepChain(arg.nested, st.params);
@@ -578,7 +588,8 @@ export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream |
   if (args.length !== 3) return null; // two-arg choose has an element identity else arm
   const [predArg, thenArg, elseArg] = args;
   if (!isScalarChild(thenArg.nested, st.params) || !isScalarChild(elseArg.nested, st.params)) return null;
-  const pred = compileFilterPredicate(stepChain(predArg.nested, st.params), elemCtx(elemRel(st), st.elem), st.params);
+  const pred = tryInlinePredicate(stepChain(predArg.nested, st.params), elemCtx(elemRel(st), st.elem), st.params)
+    ?? (() => { throw new Error('choose() predicate not supported by inline lowering'); })();
   const lowerArm = (arg: any, seed: ElementStream): ScalarStream =>
     tryCompileScalarChild(seed, arg.nested, 'all')
       ?? tryCompileCountChild(seed, arg.nested)
@@ -603,7 +614,8 @@ export function tryLowerListChoose(s: Step, st: ElementStream): ListStream | nul
   if (args.length !== 3) return null;
   const [predArg, thenArg, elseArg] = args;
   if (!isListChild(thenArg.nested, st.params) || !isListChild(elseArg.nested, st.params)) return null;
-  const pred = compileFilterPredicate(stepChain(predArg.nested, st.params), elemCtx(elemRel(st), st.elem), st.params);
+  const pred = tryInlinePredicate(stepChain(predArg.nested, st.params), elemCtx(elemRel(st), st.elem), st.params)
+    ?? (() => { throw new Error('choose() predicate not supported by inline lowering'); })();
   const thenEnd = tryCompileListChild(gate(st, pred), thenArg.nested)!;
   const elseEnd = tryCompileListChild(gate(st, notCoalesce(pred)), elseArg.nested)!;
   const parts = [thenEnd, elseEnd].map((arm) => {
