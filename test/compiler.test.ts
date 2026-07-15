@@ -553,7 +553,8 @@ describe('compiler SQL snapshots', () => {
     expect(shared.sql).toContain("(SELECT value FROM vertex_properties WHERE node=p.a1 AND key=? ORDER BY id LIMIT 1)");
     // per-variable by(): first-seen order (`b` before `a`), nested traversal + key
     const perVar = read('g.V().as("a").out("created").as("b").math("b + a").by(__.in("created").count()).by("age")');
-    expect(perVar.sql).toContain('COUNT(*)');                 // b ← by(__.in("created").count())
+    expect(perVar.sql).toContain('COUNT(c.id) AS v');         // b ← generic child count, total per origin
+    expect(perVar.sql).toContain('ROW_NUMBER() OVER () AS o0');
     expect(perVar.sql).toContain("node=p.a0 AND key=?");      // a ← by("age")
     // math() composes with a trailing typed cast (result narrows to the cast's subtype)
     expect(read('g.V().as("a").out("knows").as("b").math("a + b").by("age").asNumber(GType.INT)').shape)
@@ -1521,7 +1522,7 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().map(__.out().fold()).unfold().values("name")').shape).toEqual({ kind: 'value' });
     expect(() => compile('g.V().map(__.constant(1).discard())', {})).toThrow();
     // record/list-valued child bodies still defer; element bodies use generic child scope below.
-    expect(() => compile('g.V().map(__.select("a"))', {})).toThrow('not yet supported');
+    expect(() => compile('g.V().map(__.select("a"))', {})).toThrow('not supported by generic scalar lowering');
     expect(() => compile('g.V().map(__.values("name")).map(__.values("age"))', {})).toThrow('step not implemented: map()');
     // The leaf now returns a ScalarStream instead of materializing terminal SQL.
     expect(read('g.V().map(__.out().count()).is(P.gt(0)).count()').shape).toEqual({ kind: 'count' });
@@ -1577,14 +1578,16 @@ describe('compiler SQL snapshots', () => {
   test('option-map choose → CASE over the choice scalar (value shape)', () => {
     const c = read('g.V().choose(__.values("age")).option(P.between(26,30), __.constant("x")).option(Pick.none, __.constant("z"))');
     expect(c.shape).toEqual({ kind: 'value' });
-    expect(c.sql).toContain("CASE WHEN ((SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) >= ? and (SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) < ?) THEN ? ELSE ? END AS v");
-    expect(c.binds).toEqual(['age', 26, 'age', 30, 'x', 'z']);
+    expect(c.sql).toContain('LEFT JOIN');
+    expect(c.sql).toContain('m0_present');
+    expect(c.sql).toContain('CASE WHEN (p.m0 >= ? and p.m0 < ?) THEN p.m1 ELSE p.m2 END AS v');
+    expect(c.binds).toEqual(['age', 'x', 'z', 26, 30, 26, 30]);
     // T.label choice, literal-equality keys
     expect(read('g.V().choose(T.label).option("person", __.constant("p")).option(Pick.none, __.constant("o"))').sql)
-      .toContain('CASE WHEN (SELECT name FROM labels WHERE id=n.label) = ? THEN ? ELSE ? END');
-    // count() choice as a correlated subquery
+      .toContain('CASE WHEN (SELECT name FROM labels WHERE id=n.label) = ? THEN p.m0 ELSE p.m1 END');
+    // count() choice is a total generic child barrier
     expect(read('g.V().choose(__.out().count()).option(1, __.values("name")).option(Pick.none, __.values("age"))').sql)
-      .toContain('CASE WHEN (SELECT COUNT(*) FROM edges WHERE (src=n.id)) = ? THEN');
+      .toContain('COUNT(c.id) AS v');
     expect(read('g.V().choose(T.label).option("person", __.constant("p")).option(Pick.none, __.constant("o")).fold()').shape)
       .toEqual({ kind: 'jsonbList' });
   });
@@ -1593,9 +1596,9 @@ describe('compiler SQL snapshots', () => {
     // no Pick.none → unmatched pass-through is mixed vertex/scalar
     expect(() => compile('g.V().choose(__.out().count()).option(1, __.values("name")).option(2, __.values("age"))', {}))
       .toThrow('without a Pick.none default');
-    // an element option body isn't a scalar for the CASE (compileNestedScalar rejects it)
+    // an element option body is rejected by scalar child shape dispatch
     expect(() => compile('g.V().choose(T.label).option("person", __.out("knows")).option(Pick.none, __.constant("x"))', {}))
-      .toThrow('only supports a terminal count');
+      .toThrow('not supported by generic scalar child lowering');
     // Pick.unproductive semantics
     expect(() => compile('g.V().choose(__.values("age")).option(P.gt(30), __.constant("x")).option(Pick.unproductive, __.constant("u")).option(Pick.none, __.constant("z"))', {}))
       .toThrow('Pick.unproductive');
@@ -2612,6 +2615,12 @@ describe('compiler execution semantics', () => {
       .toEqual(['josh', 'marko', 'none', 'none', 'none', 'peter']);
     expect(run(store, 'g.V().choose(T.label).option("person", __.constant("P")).option(Pick.none, __.constant("S")).is("P").count()').map((r) => r.v))
       .toEqual([4]);
+    // Only the SELECTED option body's productivity matters; productive NULL remains
+    // a value, while an unproductive matched body drops its parent.
+    expect(run(store, 'g.V().choose(T.label).option("software", __.values("age")).option(Pick.none, __.constant("p"))').map((r) => r.v))
+      .toEqual(['p', 'p', 'p', 'p']);
+    expect(run(store, 'g.V().choose(T.label).option("person", __.constant(null)).option(Pick.none, __.constant("s"))').map((r) => r.v).sort())
+      .toEqual([null, null, null, null, 's', 's']);
   });
 
   test('map(__.<scalar>) executes per-traverser', () => {
@@ -2644,7 +2653,11 @@ describe('compiler execution semantics', () => {
   test('scalar-producing leaves re-enter common lowering', () => {
     const store = seededStore();
     expect(run(store, 'g.V().math("_").by("age").is(P.gt(30)).count()').map((r) => r.v)).toEqual([2]);
+    expect(run(store, 'g.V().as("a").out("created").as("b").math("b + a").by(__.in("created").count()).by("age")').map((r) => r.v).sort((a, b) => a - b))
+      .toEqual([32, 33, 35, 38]);
     expect(run(store, 'g.V().format("%{age}").count()').map((r) => r.v)).toEqual([4]);
+    expect(run(store, 'g.V().format("%{name} has %{_}").by(__.bothE().count())').map((r) => r.v).sort())
+      .toEqual(['josh has 3', 'lop has 3', 'marko has 3', 'peter has 1', 'ripple has 1', 'vadas has 1']);
     expect(run(store, 'g.withSack(7).V().sack().is(7).count()').map((r) => r.v)).toEqual([6]);
   });
 

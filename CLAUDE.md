@@ -100,6 +100,12 @@ uses raw child rows at the final key boundary; LEFT-joined null payloads retain 
 but are never framed as phantom elements. Consumers call
 `tryCompileScalarValueChild` and never distinguish row projections from total count;
 do not grow `compileNestedScalar` to implement new by forms.
+Multi-input scalar consumers use `tryCompileScalarModulations`: it assigns one outer
+ordinal, compiles each child independently (including re-rooting math variables on an
+`as()` alias), and exposes both value and row-presence columns. `math`, `format`, and
+option-map `choose` use this seam; only the selected option body's presence is observed,
+while an empty choice routes to `Pick.none`. `mapscalar.ts` has no `compileNestedScalar`
+import. Remaining uses are compatibility/inline candidates for Stage 7, not extension points.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
   (`stripTerminal`, `foldRepeatClusters`, `foldByModulators`) run once up front so
   the dispatch sees a canonical, peek-free chain (no index arithmetic anywhere).
@@ -469,7 +475,7 @@ integer div on ints) with no per-op fixups except `^`→`POW`, `%`→`MOD`. `com
 (`steps/projection.ts`, sibling to `compileMapScalar`/`compileChooseOptions`) resolves
 each variable — `_`→`elemCtx` (current), an identifier→`aliasCtx` on the carried
 `as()`-rowid column — through its `by()` modulator (a property key or nested traversal via
-`compileNestedScalar`; positional/round-robin over folded `.bys` in first-seen variable
+the shared child-modulation domain; positional/round-robin over folded `.bys` in first-seen variable
 order, so 1 by feeds all vars, N bys feed N vars — matching `project()`). A missing by()
 value → NULL arithmetic → the traverser is filtered (`baseWhere` = `<expr> IS NOT NULL`).
 Routes through the shared `renderProjection` value tail, so a trailing
@@ -563,10 +569,11 @@ traverser the single-`id` movement CTEs can't carry.
 **P2c-2 shape (what landed).** `group`/`groupCount`/`fold`/`sum` + nested `by()`.
 The L3 `BeforeAll` gate is **cleared** — official cucumber runs live (82 pass,
 was 0). Key pieces:
-- `compileNestedScalar(inner, ScalarCtx)` — compiles a nested `by(__.…)`/(future
-  `where(__.…)`) traversal into a **correlated SQL scalar** for node/edge/property
-  contexts (values/label/id/key/value/element/outV/inV/`out…count()`). This is
-  the shared engine P2b's `where` builds on — extend it, don't rewrite it.
+- Historical compatibility helper `compileNestedScalar(inner, ScalarCtx)` compiled a
+  narrow nested traversal into a correlated scalar. Generic child streams have replaced
+  it for map/local/project/select/group element sources/math/format/option-choose; the
+  remaining property-group/sack/predicate uses are Stage 7 inline candidates. Do not
+  extend its supported vocabulary.
 - `lowerGroup` — group() is a **barrier** → a rich GroupStream, root-framed as one Map. Dual-path
   (locked #3): scalar reducers (count/sum, `json_group_array` scalar-lists) →
   real SQL `GROUP BY`; element values (default list / `by(__.tail())`) →
@@ -813,12 +820,10 @@ interpreter). Plan + decision log: `docs/2026-07-13-side-effect-state-plan.md`.
 per-element, not globally: `local(outE().limit(1))` = one edge PER vertex. The original
 implementation had two private body shapes (recorded below); both now route through the
 shared child compiler and the private parser/window module has been deleted:
-- **Scalar-reduction body** (`local(outE().count())`) → a tail projector reusing
-  `compileMapScalar`/`compileNestedScalar` (the `foldBody` guard `isScalarLocal` — body's
-  last step ∈ {count,sum,min,max,mean} — breaks it to the tail). Per-input scalar, zeros
-  preserved (correlated subquery). **`compileMapScalar` now tags a nested `count()` as
-  `as:'long'`** (TinkerPop count is always Long; the SQLite COUNT integer would otherwise
-  infer as Int via anySerializer — a latent bug that also fixed `map(...count())`).
+- **Scalar-reduction body** (`local(outE().count())`) → the generic child domain plus a
+  scope-aware reducer barrier. Per-input scalar and zeros are preserved; count carries
+  an explicit Long result tag. The former `compileMapScalar`/`compileNestedScalar`
+  fallback has been deleted.
 - **Movement + a per-element `limit`/`range`** (historically a prefix StepFn) →
   the movement folds normally under a fresh input ordinal (ROW_NUMBER seed, the coalesce
   technique), then the barrier is a WINDOW `ROW_NUMBER() OVER (PARTITION BY <ordinal> ORDER
@@ -900,7 +905,7 @@ facts:
   reused by the scalar tail AND the list-local phase (`listStringTransform`, `Scope.local`
   over a folded list). A string op on a non-`local` list raises TinkerPop's "can only take
   string as argument". A single bare `order().fold()` sorts folded scalars (compileFold).
-- **`format()` (`src/steps/mapscalar.ts` `compileFormat`, sibling to `compileMath`, in
+- **`format()` (`src/steps/mapscalar.ts` `lowerFormat`, sibling to `lowerMath`, in
   BY_HOSTS).** `%{key}` → element prop (scalarProp); `%{_}` → next by() modulator
   (round-robin); `||`-concatenation so a missing prop NULLs the row (FormatStep filter). A
   constant template doesn't filter (`hadToken` gate). Defers: project()/select() columns,

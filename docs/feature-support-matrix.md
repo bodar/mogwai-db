@@ -4,7 +4,7 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-15 · **live L3 conformance:** 931 · **corpus parse+chain:**
+**Last synced:** 2026-07-15 · **live L3 conformance:** 932 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
 
@@ -91,7 +91,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | Step | Status | Notes |
 |---|:--:|---|
 | `choose(pred, then[, else])` | 🟡 | ✅ gated-seed dispatch; three-argument homogeneous scalar and list arms (scalar or same-kind element `…fold()`) lower through child streams and later shape-specific steps compose<br>✅ **incoming `as()` threads through** the gated arms + merge (carried-schema)<br>❌ mixed-shape/incompatible list-item arms; two-argument scalar-then + identity-else (mixed by definition)<br>❌ a NEW `as()` bound *inside* an arm (arms diverge — fails closed)<br>✅ **path threads through** element arms (pad-to-max cols) |
-| `choose(fn).option(k, body)…` | 🟡 | ✅ scalar-CASE option-map; its ScalarStream result composes with scalar filters, transforms, reducers and `fold`<br>❌ without a `Pick.none` default<br>❌ element/discard/identity/fail bodies<br>❌ `Pick.unproductive`/`any` |
+| `choose(fn).option(k, body)…` | 🟡 | ✅ scalar option-map over one generic child-modulation domain; choice and body traversals preserve parent multiplicity and productive NULL, and only the selected body's productivity is observed<br>✅ its ScalarStream result composes with scalar filters, transforms, reducers and `fold`<br>❌ without a `Pick.none` default<br>❌ element/discard/identity/fail bodies<br>❌ `Pick.unproductive`/`any` |
 | `coalesce(…)` | 🟡 | ✅ first-productive via the origin stack for homogeneous element, scalar, and list arms (scalar or same-kind element); empty `fold()` list is productive and prevents fallback<br>✅ **incoming `as()` threads through** (originSeed projects it alongside the ordinal, merge preserves it)<br>✅ **nested in coalesce/optional** for element arms (each branch pushes a unique ordinal `o0`/`o1`/…)<br>❌ mixed-shape/incompatible list items; NEW `as()` inside an arm<br>✅ **path threads through** element arms (pad-to-max cols) |
 | `union(…)` | 🟡 | ✅ element multi-hop arms via `foldBody`; homogeneous scalar and list arms (scalar or same-kind element) lower through child streams + `UNION ALL`, with numeric/list item metadata unified centrally<br>✅ **incoming `as()` threads through** the merge (`mergeBranchCarried`), so `union(…).select('a')`/`.path()` resolve<br>❌ mixed-shape/incompatible list items; source-branch tails; NEW `as()` inside an arm<br>✅ **path threads through** element arms (pad-to-max cols) |
 | `optional(…)` | 🟡 | ✅ single-hop LEFT JOIN fast path + multi-hop<br>✅ non-total scalar child → tagged VariantStream (`scalar` hits, original element on miss); root framing + `count()` re-entry<br>✅ **incoming `as()` threads through** (fast path carries it from the input; general path via originSeed)<br>❌ element-kind change on miss; most steps after a VariantStream<br>❌ a NEW `as()` inside an arm<br>✅ **path threads through** homogeneous element arms (pad-to-max cols) |
@@ -149,11 +149,11 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 |---|:--:|---|
 | `asBool`, `asNumber(GType.X)`, bare `asNumber()` | ✅ | ✅ typed-value carrier (compile-time subtype tag → GraphBinary framing)<br>✅ runtime scalar casts lower as relational ScalarStream transforms and compose with later filters/reducers |
 | string transforms | ✅ | ✅ SQL scalar, text-in text-out; non-local scalar transforms lower stepwise as ScalarStream relations<br>✅ `concat` skips nulls (`concat_ws`), all-null→null<br>✅ trim family over Java's `isWhitespace` set (incl. U+3000)<br>✅ `reverse` string chars (recursive CTE) / number identity / list order (§9)<br>✅ all compose as `Scope.local` per-element list transforms after `fold()`<br>✅ a string op on a non-`local` list raises TinkerPop's "can only take string as argument"<br>✅ `format("…%{key}…%{_}…")` templates a string — named tokens read element properties, `%{_}` pulls by() modulators (positional/round-robin); a missing property filters the row (❌ reading project()/select() columns, the as()-alias fallback)<br>❌ `split` (list-valued), element/map `asString` |
-| `math("<formula>")` | 🟡 | ✅ full exp4j operator/function set → one SQL ScalarStream, always Double; later scalar steps/barriers compose<br>❌ a var with no `by()`<br>❌ `withSideEffect` vars<br>❌ reading `project()`/`select()` map columns |
+| `math("<formula>")` | 🟡 | ✅ full exp4j operator/function set → one SQL ScalarStream, always Double; later scalar steps/barriers compose<br>✅ property and generic scalar-child `by()` variables, including child traversal re-rooting on carried `as()` aliases, join through one multiset-safe modulation domain<br>❌ a var with no `by()`<br>❌ `withSideEffect` vars<br>❌ reading `project()`/`select()` map columns |
 | `asDate`, `dateAdd`, `dateDiff`, `datetime()`/`DateTime()` literals | 🟡 | ✅ epoch-millis rep + `'date'` tag (UTC-only, ms precision — parity with the JS reference client)<br>❌ `typeOf(GType.DATETIME)` over stored props<br>❌ `inject([…]).asDate()` |
 | `asNumber` + reducer (`fold`/`sum`) | ✅ | ✅ numeric reducers carry runtime `vt` explicitly (`asNumber(...).sum()`)<br>✅ typed `fold()` carries uniform element metadata through ListStream materialization |
 | bigdecimal | ❌ | no client GraphBinary serializer |
-| `format()` | 🟡 | ✅ element-property template substitution with `%{key}` + `%{_}`/`by()` returning a composable ScalarStream<br>❌ reading project()/select() columns and the as()-alias fallback |
+| `format()` | 🟡 | ✅ element-property template substitution with `%{key}` + `%{_}`/`by()` returning a composable ScalarStream; traversal placeholders use generic child-first productivity<br>❌ reading project()/select() columns and the as()-alias fallback |
 
 ## 11. Writes
 
