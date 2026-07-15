@@ -1,7 +1,7 @@
 // ---------- the traverser stream model (list-value substrate) ----------
 //
 // A traversal's state has more than one SHAPE. The prefix fold works on an
-// id-relation of elements (`St`, context.ts). A projection/inject produces a stream
+// id-relation of elements (`ElementStream`, context.ts). A projection/inject produces a stream
 // of scalars. `fold()` produces a single list value. Historically the tail was
 // strictly terminal, so these value shapes had nowhere to go; the `Stream` union +
 // the dispatcher (index.ts `dispatchNext`) make the tail RE-ENTERABLE — a step can
@@ -9,17 +9,17 @@
 // compiling. Each arm shares `Carry` (context.ts) so a retype preserves the query
 // builder / params / aliases / path.
 //
-// CRITICAL: `St.elem` stays 'node'|'edge' only, and the 20+ movement/filter/branch
-// StepFns only ever see `St`. The union lives at the ORCHESTRATION layer, never
+// CRITICAL: `ElementStream.elem` stays 'node'|'edge' only, and the 20+ movement/filter/branch
+// StepFns only ever see `ElementStream`. The union lives at the ORCHESTRATION layer, never
 // inside a StepFn.
 
 import { type Relation } from '../q.ts';
 import { type Elem } from '../plan.ts';
 import { type ValueType } from '../render.ts';
-import { type Carry, type St } from './context.ts';
+import { carriedCols, type Carry, type ElementStream } from './context.ts';
 
 /** What a list stream holds — i.e. the shape `unfold` produces from it. `elem` → bare
- *  rowids (rejoin nodes/edges on unfold) → a fresh `St`; `scalar` → typed scalars → a
+ *  rowids (rejoin nodes/edges on unfold) → a fresh `ElementStream`; `scalar` → typed scalars → a
  *  `ScalarStream`; `list` → nested lists (list-of-lists, e.g. select(Column.values) of a
  *  list-valued map) → a ListStream of the inner shape. ('entry' reserved for Map-unfold.) */
 export type ListOf =
@@ -52,15 +52,40 @@ export type MapOf =
 export interface MapStream extends Carry { readonly kind: 'map'; readonly rel: Relation; readonly keyOf: MapOf; readonly valOf: MapOf; }
 
 /** The traverser stream shapes a compile phase can be in. */
-export type Stream = St | ScalarStream | ListStream | MapStream;
+export type Stream = ElementStream | ScalarStream | ListStream | MapStream;
+
+/** The physical relation columns promised by a stream. Payload comes first, followed
+ * by the stable carried schema. A stream is executable relational state, so metadata
+ * may never claim a column that its Relation does not expose. */
+export function streamColumns(s: Stream): readonly string[] {
+  const payload = s.kind === 'elements' ? ['id']
+    : s.kind === 'scalar' ? ['v']
+    : s.kind === 'list' ? ['list']
+    : ['mk', 'mv'];
+  return [...payload, ...carriedCols(s.carried)];
+}
+
+/** Development/test guard for the physical stream contract. Relation.cols is the
+ * declared CTE layout, so checking it here catches missing or reordered carried
+ * columns before SQLite turns the mismatch into corrupt traversal state. */
+export function assertStreamColumns<T extends Stream>(s: T): T {
+  const expected = streamColumns(s);
+  const actual = s.rel.cols;
+  if (expected.length !== actual.length || expected.some((col, i) => col !== actual[i]))
+    throw new Error(`${s.kind} stream column mismatch: expected [${expected.join(', ')}], got [${actual.join(', ')}]`);
+  return s;
+}
 
 /** Project a stream's shape-independent state (for building the next phase's stream). */
 export const carryOf = (s: Stream): Carry =>
   ({ q: s.q, params: s.params, sideEffects: s.sideEffects, carried: s.carried });
 
-export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType): ScalarStream => ({ ...c, kind: 'scalar', rel, as });
-export const toListStream = (c: Carry, rel: Relation, of: ListOf): ListStream => ({ ...c, kind: 'list', rel, of });
-export const toMapStream = (c: Carry, rel: Relation, keyOf: MapOf, valOf: MapOf): MapStream => ({ ...c, kind: 'map', rel, keyOf, valOf });
+export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType): ScalarStream =>
+  assertStreamColumns({ ...c, kind: 'scalar', rel, as });
+export const toListStream = (c: Carry, rel: Relation, of: ListOf): ListStream =>
+  assertStreamColumns({ ...c, kind: 'list', rel, of });
+export const toMapStream = (c: Carry, rel: Relation, keyOf: MapOf, valOf: MapOf): MapStream =>
+  assertStreamColumns({ ...c, kind: 'map', rel, keyOf, valOf });
 
 /** A map key/value column's shape → the list shape it produces when select(Column.*)
  *  aggregates it: a scalar carries its type tag, an element rejoins on unfold, a

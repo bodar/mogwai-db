@@ -1,7 +1,7 @@
 import { q, list, type Expression } from '../q.ts';
 import { scalarProp, labelNameSub, compileNestedScalar, predicateSql, elemCtx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
-import { advance, elemRel, prevRel, carriedCols, type St, type StepFn } from './context.ts';
+import { advance, elemRel, prevRel, carriedCols, type ElementStream, type StepFn } from './context.ts';
 
 // ---------- sack (per-traverser carried scalar) ----------
 //
@@ -18,7 +18,7 @@ const SACK_OPS = new Set(['assign', 'sum', 'minus', 'mult', 'div', 'min', 'max']
 
 /** The merge value SQL expr over the current element (aliased `n`): a property key,
  *  a T.label/T.id token, or a nested by(__.…) scalar (constant/label/values/…). */
-function sackByValue(byArgs: any[] | undefined, st: St): Expression {
+function sackByValue(byArgs: any[] | undefined, st: ElementStream): Expression {
   const a = byArgs?.[0];
   if (a === undefined)
     throw new Error('sack(Operator.x) without a by() modulator over an element stream not yet supported');

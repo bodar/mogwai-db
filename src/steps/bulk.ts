@@ -3,7 +3,8 @@ import { edges } from '../schema.ts';
 import { dirsFor, edgeLabelFilter } from '../plan.ts';
 import { stepChain, type SackSpec } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { readCompiled, type Compiled } from '../render.ts';
+import { type Compiled } from '../render.ts';
+import { materializeRoot } from './materialize.ts';
 import { buildPrefix } from './index.ts';
 
 // ---------- traverser bulking: repeat(...).times(n).count() ----------
@@ -94,7 +95,7 @@ export function tryBulkRepeatCount(steps: PStep[], params: Record<string, any>, 
 
   // f0: the seed frontier, one row per distinct vertex with its multiplicity (a
   // pre-movement multiset like V().out() collapses here — COUNT(*) per id = its bulk).
-  let cur = query.cte(q`SELECT id, CAST(COUNT(*) AS INTEGER) AS bulk FROM ${st.last} GROUP BY id`, ['id', 'bulk']);
+  let cur = query.cte(q`SELECT id, CAST(COUNT(*) AS INTEGER) AS bulk FROM ${st.rel} GROUP BY id`, ['id', 'bulk']);
   // f1..fn: each hop merges all walks landing on a vertex into one (id, SUM(bulk)) row,
   // so the frontier stays bounded by reachable |V|, not the walk count.
   for (let d = 1; d <= plan.times; d++) {
@@ -108,5 +109,5 @@ export function tryBulkRepeatCount(steps: PStep[], params: Record<string, any>, 
   // count() = the total traverser count at the final depth = SUM(bulk). (SUM past i64
   // raises SQLite's native `integer overflow` — fail loud, matching TinkerPop's own
   // `long` bulk overflowing at the same point.)
-  return readCompiled(query, q`SELECT COALESCE(SUM(bulk), 0) AS v FROM ${cur}`, { kind: 'count' });
+  return materializeRoot(query, q`SELECT COALESCE(SUM(bulk), 0) AS v FROM ${cur}`, { kind: 'count' });
 }

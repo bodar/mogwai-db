@@ -4,7 +4,7 @@ import {
   P_OPS, labelIn, predicateSql, nodePropScalar, hasProp, elemCtx, aliasCtx,
   compileFilterPredicate, combineBranchPreds, idPredFromArgs, type Elem, type ScalarCtx,
 } from '../plan.ts';
-import { advance, carryFrag, elemRel, pathColsOf, prevRel, type AliasMap, type St, type StepFn } from './context.ts';
+import { advance, carryFrag, elemRel, pathColsOf, prevRel, type AliasMap, type ElementStream, type StepFn } from './context.ts';
 
 // ---------- filter (predicates over the current traverser) ----------
 
@@ -20,12 +20,12 @@ function aliasIdExpr(label: string, aliases: AliasMap): string {
 }
 
 /** The scalar context a current-element predicate correlates on (aliased `n`). */
-const currentCtx = (st: St) => elemCtx(elemRel(st), st.elem);
+const currentCtx = (st: ElementStream) => elemCtx(elemRel(st), st.elem);
 
 /** Re-root a where()/and()/or() sub-traversal that begins with as('x')/select('x')
  *  onto the aliased traverser: its correlation becomes the carried alias column
  *  (`p.a{k}`), read back via aliasCtx. Throws for an unseen label. */
-const aliasResolver = (st: St) => (label: string): ScalarCtx => {
+const aliasResolver = (st: ElementStream) => (label: string): ScalarCtx => {
   const entry = st.carried.aliases.get(label);
   if (!entry) throw new Error(`where(__.as("${label}")): no such label — as("${label}") was not seen`);
   return aliasCtx(prevRel(st, 'p').c[entry.col], entry.elem);
@@ -33,7 +33,7 @@ const aliasResolver = (st: St) => (label: string): ScalarCtx => {
 
 /** `SELECT n.id<carry> FROM <elem> n JOIN prev p … WHERE <test>` — the filter CTE
  *  shape shared by has/hasLabel/where/and/or. */
-function filterCte(st: St, test: Expression): St {
+function filterCte(st: ElementStream, test: Expression): ElementStream {
   const n = elemRel(st);
   const p = prevRel(st, 'p');
   return advance(st, q`SELECT ${n.c.id}${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${test}`);
@@ -65,7 +65,7 @@ export const as: StepFn = (s, st) => {
  *  numerically but are distinct objects), so cross-kind pairs are skipped. The path
  *  positions are known at compile time, so the test is a static conjunction. by()/
  *  from()/to() scoping is deferred (they arrive as their own steps → clear error). */
-function pathDistinctTest(st: St, simple: boolean): Expression {
+function pathDistinctTest(st: ElementStream, simple: boolean): Expression {
   const name = simple ? 'simplePath' : 'cyclicPath';
   if (!st.carried.path) throw new Error(`${name}() requires a tracked path`);
   // A standalone filter reads the linear per-position columns; over a recursive

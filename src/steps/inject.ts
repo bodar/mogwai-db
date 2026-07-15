@@ -5,7 +5,8 @@ import { type PStep } from '../strategies.ts';
 import { type Carry } from './context.ts';
 import { toListStream } from './stream.ts';
 import { dispatchNext } from './index.ts';
-import { readCompiled, type Compiled, type ValueType } from '../render.ts';
+import { type Compiled, type ValueType } from '../render.ts';
+import { materializeRoot } from './materialize.ts';
 import { foldTailAcc, renderProjection, type ProjResult } from './projection.ts';
 import { numericSpec, asBoolConst, asNumberConst, asNumberBare, asDateConst, dtFactor, dateDiffOtherMs } from './coerce.ts';
 
@@ -122,7 +123,7 @@ export function compileInject(steps: PStep[]): Compiled {
     const dist = acc.distinct ? 'DISTINCT ' : '';
     const whereNode = acc.isPreds.length ? q` WHERE ${list(acc.isPreds.map((p) => predicateSql(q`v`, p)), ' AND ')}` : empty;
     const limitNode = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
-    return readCompiled(Q, q`SELECT COUNT(*) AS v FROM (SELECT ${dist}v FROM ${from}${whereNode}${limitNode})`, { kind: 'count' });
+    return materializeRoot(Q, q`SELECT COUNT(*) AS v FROM (SELECT ${dist}v FROM ${from}${whereNode}${limitNode})`, { kind: 'count' });
   }
 
   const proj: ProjResult = { shape: { kind: 'value', as: valueAs }, colsNode: q`v AS v`, fromNode: from, scalarExpr: q`v`, baseWhere: null };

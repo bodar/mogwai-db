@@ -6,9 +6,10 @@ import {
 } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { elemRel, type St } from './context.ts';
+import { elemRel, type ElementStream } from './context.ts';
 import { carryOf, toMapStream, type MapOf, type MapStream } from './stream.ts';
-import { readCompiled, type Compiled, type Shape, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
+import { type Compiled, type Shape, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
+import { materializeRoot } from './materialize.ts';
 
 /** Movement heads whose nested-by() aggregate is a correlated neighbourhood
  *  reduction (handled by compileNestedScalar), and the scalar reducers that terminate one. */
@@ -82,7 +83,7 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
  * GROUP BY aggregate; an element value can't be aggregated in SQL (props must be
  * framed), so we emit rows ORDER BY the key and the handler folds runs into the Map.
  */
-export function compileGroup(st: St, isCount: boolean, bys: any[][], src: GroupSource): Compiled {
+export function compileGroup(st: ElementStream, isCount: boolean, bys: any[][], src: GroupSource): Compiled {
   if (bys.length > 2) throw new Error('group() with more than two by() modulators not yet supported');
   const key = buildGroupKey(bys[0], src, st.params);
 
@@ -119,7 +120,7 @@ export function compileGroup(st: St, isCount: boolean, bys: any[][], src: GroupS
   }
 
   const node = q`SELECT ${key.cols}, ${valNode} FROM ${src.from} ${groupBy ? 'GROUP BY' : 'ORDER BY'} ${key.group}`;
-  return readCompiled(st.q, node, { kind: 'group', key: key.desc, val });
+  return materializeRoot(st.q, node, { kind: 'group', key: key.desc, val });
 }
 
 /**
@@ -131,7 +132,7 @@ export function compileGroup(st: St, isCount: boolean, bys: any[][], src: GroupS
  * element VALUE lists, scalar-LIST values (by('age')/by(__.fold())), composite project
  * keys — can't be one `mv`/`mk` column, so they defer here with a clear message (the
  * terminal group() path still handles them; only the re-enterable form is scoped). */
-export function groupToMapStream(st: St, isCount: boolean, bys: any[][], src: GroupSource): MapStream {
+export function groupToMapStream(st: ElementStream, isCount: boolean, bys: any[][], src: GroupSource): MapStream {
   if (st.carried.aliases.size || st.carried.path || st.carried.origins.length)
     throw new Error('group() carrying as()/path()/branch state into a map value not yet supported');
   if (bys.length > 2) throw new Error('group() with more than two by() modulators not yet supported');
@@ -201,11 +202,11 @@ export function groupToMapStream(st: St, isCount: boolean, bys: any[][], src: Gr
  * follow-on: key()/value()/count(), or element()[.values/.id/.label/.count]. The
  * traverser is a property — a json_each expansion over the owner's props.
  */
-export function compileProperties(st: St, tail: PStep[]): Compiled {
+export function compileProperties(st: ElementStream, tail: PStep[]): Compiled {
   const elem = st.elem;
   const keys = tail[0].args.filter((a): a is string => typeof a === 'string');
   const n = elemRel(st);
-  const p = st.last.as('p');
+  const p = st.rel.as('p');
   const l = labels.as('l');
   // Node: the property stream IS the vertex_properties rows (one per instance, so a
   // multi-valued key yields several) — vpid is the real VertexProperty id, pmeta its
@@ -252,7 +253,7 @@ export function compileProperties(st: St, tail: PStep[]): Compiled {
 
   const done = (node: Expression, shape: Shape, termSteps: number): Compiled => {
     if (tail.length > ti + termSteps) throw new Error(`step not implemented after properties(): ${tail[ti + termSteps].name}()`);
-    return readCompiled(st.q, node, shape);
+    return materializeRoot(st.q, node, shape);
   };
 
   const next = tail[ti]?.name;

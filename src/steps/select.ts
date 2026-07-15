@@ -2,8 +2,9 @@ import { q, list, empty, type Expression } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
 import { framedProps, nodePropScalar, predicateSql, propExtract, extIdOf } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
-import { type AliasMap, type St } from './context.ts';
-import { readCompiled, type Compiled, type MapEntry, type PathPos } from '../render.ts';
+import { type AliasMap, type ElementStream } from './context.ts';
+import { type Compiled, type MapEntry, type PathPos } from '../render.ts';
+import { materializeRoot } from './materialize.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
 
 // ---------- select()/project() ----------
@@ -24,7 +25,7 @@ function byToEntry(byArgs: any[] | undefined): { sub: 'vertex' | 'value'; key?: 
  * traverser under freshly-named keys. by() modulators cycle across the keys. A
  * single-key select reuses the scalar vertex/value shape; anything else is a Map.
  */
-export function compileSelectProject(st: St, proj: PStep, tail: TailMods): Compiled {
+export function compileSelectProject(st: ElementStream, proj: PStep, tail: TailMods): Compiled {
   const bys = proj.bys ?? [];
   const { orders, distinct, offset, limit } = tail;
   if (orders.length) throw new Error('order() after select()/project() not yet supported');
@@ -55,7 +56,7 @@ export function compileSelectProject(st: St, proj: PStep, tail: TailMods): Compi
 
   const tailSql = (limit !== null || offset > 0) ? ` LIMIT ${limit ?? -1} OFFSET ${offset}` : '';
   const dist = distinct ? 'DISTINCT ' : '';
-  const p = st.last.as('p');
+  const p = st.rel.as('p');
 
   // Single-key select → the labelled element directly (not wrapped in a Map).
   if (!isProject && keys.length === 1) {
@@ -64,10 +65,10 @@ export function compileSelectProject(st: St, proj: PStep, tail: TailMods): Compi
     const n = nodes.as('n');
     if (e.sub === 'vertex') {
       const l = labels.as('l');
-      return readCompiled(st.q, q`SELECT ${dist}COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props FROM ${n} JOIN ${p} ON ${n.c.id}=${src} JOIN ${l} ON ${l.c.id}=${n.c.label}${tailSql}`, { kind: 'vertex' });
+      return materializeRoot(st.q, q`SELECT ${dist}COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props FROM ${n} JOIN ${p} ON ${n.c.id}=${src} JOIN ${l} ON ${l.c.id}=${n.c.label}${tailSql}`, { kind: 'vertex' });
     }
     const pe = nodePropScalar(n.c.id, e.key!); // first-under-multi; projection, not indexed (matches values())
-    return readCompiled(st.q, q`SELECT ${dist}${pe} AS v FROM ${n} JOIN ${p} ON ${n.c.id}=${src}${tailSql}`, { kind: 'value' });
+    return materializeRoot(st.q, q`SELECT ${dist}${pe} AS v FROM ${n} JOIN ${p} ON ${n.c.id}=${src}${tailSql}`, { kind: 'value' });
   }
 
   // Multi-key select / any project → a Map per row.
@@ -90,7 +91,7 @@ export function compileSelectProject(st: St, proj: PStep, tail: TailMods): Compi
   });
 
   const node = q`SELECT ${dist}${list(cols, ', ')} FROM ${p}${list(joins, '')}${tailSql}`;
-  return readCompiled(st.q, node, { kind: 'map', entries });
+  return materializeRoot(st.q, node, { kind: 'map', entries });
 }
 
 // ---------- path() (linear regime) ----------
@@ -114,7 +115,7 @@ function pathBy(byArgs: any[] | undefined): string | undefined {
  * by(key) (missing property) drops the whole path (TinkerPop's default — only
  * ProductiveByStrategy would emit null). order()/reducers/from()/to() defer.
  */
-export function compilePath(st: St, proj: PStep, acc: TailAcc): Compiled {
+export function compilePath(st: ElementStream, proj: PStep, acc: TailAcc): Compiled {
   // Reachable only from a union() SOURCE step: seedUnion doesn't seed p0 (unlike
   // seedSource, which handles V()/E()), so path tracking never starts. Mid-chain
   // union()/optional()/repeat() are caught earlier by their own path guards.
@@ -134,7 +135,7 @@ export function compilePath(st: St, proj: PStep, acc: TailAcc): Compiled {
   // a padded NULL is indistinguishable from a missing property, so defer.
   const branched = pathState.cols.some((c) => c.nullable);
   if (branched && bys.length) throw new Error('path().by() through a branch not yet supported (a padded position is indistinguishable from a missing property)');
-  const p = st.last.as('p');
+  const p = st.rel.as('p');
   const joins: Expression[] = [];
   const cols: Expression[] = [];
   const whereParts: Expression[] = [];
@@ -168,24 +169,24 @@ export function compilePath(st: St, proj: PStep, acc: TailAcc): Compiled {
   const whereNode = whereParts.length ? q` WHERE ${list(whereParts, ' AND ')}` : empty;
   const tailSql = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
   const node = q`SELECT ${dist}${list(cols, ', ')} FROM ${p}${list(joins, '')}${whereNode}${tailSql}`;
-  return readCompiled(st.q, node, { kind: 'path', positions });
+  return materializeRoot(st.q, node, { kind: 'path', positions });
 }
 
 /**
  * path() over a recursive repeat() walk (the `array` regime). The walk (branch.ts)
- * accumulated a JSONB array of visited ids per surviving traverser (`st.last` =
+ * accumulated a JSONB array of visited ids per surviving traverser (`st.rel` =
  * `(id, path)`). Give each path a row number (`pk`), explode the array with
  * `json_each` (`.key` = ordinal), materialize each element, and emit ONE ROW PER
  * PATH ELEMENT ordered by `(pk, ord)` — the handler folds each pk-run into one Path.
  * All elements are vertices (out/in/both bodies); edge-inclusive bodies defer.
  */
-function compilePathArray(st: St, acc: TailAcc): Compiled {
+function compilePathArray(st: ElementStream, acc: TailAcc): Compiled {
   if (acc.orders.length || acc.reducer || acc.isPreds.length || acc.transforms.length || acc.injects.length)
     throw new Error('order()/reducer/is()/transform after a recursive repeat().path() not yet supported');
   // dedup() must collapse equal paths BEFORE row-numbering: ROW_NUMBER() is computed
   // with the SELECT list, so a `SELECT DISTINCT path, ROW_NUMBER()…` never removes a
   // row (the unique pk defeats DISTINCT). Distinct-ify in a prior CTE, then number.
-  const src = acc.distinct ? st.q.cte(q`SELECT DISTINCT ${st.last.c.path} AS path FROM ${st.last}`, ['path']) : st.last;
+  const src = acc.distinct ? st.q.cte(q`SELECT DISTINCT ${st.rel.c.path} AS path FROM ${st.rel}`, ['path']) : st.rel;
   // ROW_NUMBER over the surviving paths → a stable per-path key so equal-id paths
   // stay distinct (multiset) after the json_each explode.
   const limitSql = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
@@ -193,5 +194,5 @@ function compilePathArray(st: St, acc: TailAcc): Compiled {
   const n = nodes.as('n');
   const l = labels.as('l');
   const node = q`SELECT pp.pk, je.key AS ord, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props FROM ${paths} pp, json_each(pp.path) je JOIN ${n} ON ${n.c.id}=je.value JOIN ${l} ON ${l.c.id}=${n.c.label} ORDER BY pp.pk, je.key`;
-  return readCompiled(st.q, node, { kind: 'pathGrouped', elem: 'vertex' });
+  return materializeRoot(st.q, node, { kind: 'pathGrouped', elem: 'vertex' });
 }

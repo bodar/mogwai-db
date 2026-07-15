@@ -1,6 +1,6 @@
 import { q } from '../q.ts';
 import { scalarProp, predicateSql, jsonbGroupArray, elemCtx } from '../plan.ts';
-import { elemRel, type St, type StepFn, type SideEffectDef } from './context.ts';
+import { elemRel, type ElementStream, type StepFn, type SideEffectDef } from './context.ts';
 
 // ---------- named side-effect collections (aggregate) ----------
 //
@@ -31,14 +31,14 @@ export const aggregate: StepFn = (s, st) => {
   let def: SideEffectDef;
   if (!by || by.length === 0) {
     // Element bag: store the rowids; cap('x') rejoins nodes/edges when framing.
-    const rel = st.q.cte(q`SELECT ${jsonbGroupArray(q`p.id`)} AS list FROM ${st.last.as('p')}`, ['list']);
+    const rel = st.q.cte(q`SELECT ${jsonbGroupArray(q`p.id`)} AS list FROM ${st.rel.as('p')}`, ['list']);
     def = { kind: 'list', rel, of: { kind: 'elem', elem: st.elem } };
   } else {
     const a = by[0];
     if (typeof a !== 'string')
       throw new Error('aggregate().by() only supports a property key (nested/token by() not yet supported)');
     const n = elemRel(st);
-    const p = st.last.as('p');
+    const p = st.rel.as('p');
     const pe = scalarProp(elemCtx(n, st.elem), a); // first-under-multi for a node
     // A by() that yields nothing (a missing property) contributes no member — matching
     // values() semantics, the exact behaviour the suite's aggregate('x').by('age')
@@ -53,7 +53,7 @@ export const aggregate: StepFn = (s, st) => {
   return register(st, name, def);
 };
 
-const register = (st: St, name: string, def: SideEffectDef): St =>
+const register = (st: ElementStream, name: string, def: SideEffectDef): ElementStream =>
   ({ ...st, sideEffects: new Map([...(st.sideEffects ?? []), [name, def]]) });
 
 // ---------- side-effecting group('a') / groupCount('a') ----------
@@ -63,7 +63,7 @@ const register = (st: St, name: string, def: SideEffectDef): St =>
 // continues — groupCount('a').by('name').out().cap('a') works), read back by cap('a').
 // Unlike the bare terminal group() (a compileTail barrier), this is a PASS-THROUGH:
 // it stashes the group-spec (source relation + scalar ctx + by() modulators) so
-// compileCap can re-run compileGroup over it. The source CTE (st.last) persists in
+// compileCap can re-run compileGroup over it. The source CTE (st.rel) persists in
 // the shared Query, so cap('a') — however much later — references it. The by()
 // modulators fold onto the step (group/groupCount are BY_HOSTS).
 
@@ -75,7 +75,7 @@ const groupSideEffect = (isCount: boolean): StepFn => (s, st) => {
   const tbl = st.elem === 'edge' ? 'edges' : 'nodes';
   const def: SideEffectDef = {
     kind: 'group',
-    from: `${tbl} n JOIN ${st.last.name} p ON n.id=p.id`,
+    from: `${tbl} n JOIN ${st.rel.name} p ON n.id=p.id`,
     ctx: elemCtx(elemRel(st), st.elem),
     elem: st.elem === 'edge' ? 'edge' : 'vertex',
     isCount,

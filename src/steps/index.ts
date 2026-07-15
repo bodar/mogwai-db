@@ -3,7 +3,7 @@ import { nodes, edges } from '../schema.ts';
 import { type Elem } from '../plan.ts';
 import { stepChain, flattenListArgs } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { withCarried, type St, type StepFn } from './context.ts';
+import { withCarried, type ElementStream, type StepFn } from './context.ts';
 import { move, toEdge, toVertex, otherV } from './movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from './filter.ts';
 import { union, optional, repeat, choose, coalesce, flatMap } from './branch.ts';
@@ -15,7 +15,7 @@ import { aggregate, group as groupSE, groupCount as groupCountSE } from './sidee
 import { type SackSpec } from '../frontend.ts';
 import { compileTail, compileFromScalar } from './projection.ts';
 import { compileFromList, compileFromMap } from './list.ts';
-import { type Stream } from './stream.ts';
+import { assertStreamColumns, type Stream } from './stream.ts';
 import { type Compiled } from '../render.ts';
 import { tryBulkRepeatCount } from './bulk.ts';
 
@@ -85,7 +85,7 @@ const chainNeedsFromV = (steps: PStep[]): boolean => steps.some((s) => s.name ==
 /** Seed the source CTE (c0) from V(...)/E(...) and its optional id list. When the
  *  chain tracks a path, the source element is path position p0 (projected as the
  *  extra `p0` column). */
-function seedSource(first: PStep, query: Query, params: Record<string, any>, trackPath: boolean, sackInit?: SackSpec): St {
+function seedSource(first: PStep, query: Query, params: Record<string, any>, trackPath: boolean, sackInit?: SackSpec): ElementStream {
   const elem: Elem = first.name === 'E' ? 'edge' : 'node';
   const srcRel = elem === 'edge' ? edges : nodes;
   const sel = trackPath ? 'id, id AS p0' : 'id';
@@ -111,7 +111,7 @@ function seedSource(first: PStep, query: Query, params: Record<string, any>, tra
   }
   const cols = [...(trackPath ? ['id', 'p0'] : ['id']), ...(sackInit ? ['sk'] : [])];
   const path = trackPath ? { kind: 'cols' as const, cols: [{ col: 'p0', elem }] } : undefined;
-  return { kind: 'elements', q: query, params, last: query.cte(body, cols), elem, carried: { aliases: new Map(), origins: [], path, sack: sackInit ? 'sk' : undefined } };
+  return { kind: 'elements', q: query, params, rel: query.cte(body, cols), elem, carried: { aliases: new Map(), origins: [], path, sack: sackInit ? 'sk' : undefined } };
 }
 
 /** union(b1, b2, …) as a SOURCE step: compile each branch's prefix into the SAME
@@ -119,7 +119,7 @@ function seedSource(first: PStep, query: Query, params: Record<string, any>, tra
  *  into one seed. Branches must be vertex-rooted prefixes with no leftover tail or
  *  as() (those defer); the shared-Query recursion also lets a branch be a nested
  *  union. This is the reusable sub-traversal-into-query seam local/map/choose build on. */
-function seedUnion(first: PStep, query: Query, params: Record<string, any>, sackInit?: SackSpec): St {
+function seedUnion(first: PStep, query: Query, params: Record<string, any>, sackInit?: SackSpec): ElementStream {
   if (sackInit) throw new Error('withSack() with a union() source not yet supported');
   const branches = first.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 1) throw new Error('union() needs at least one branch');
@@ -129,27 +129,27 @@ function seedUnion(first: PStep, query: Query, params: Record<string, any>, sack
     if (stop !== bsteps.length) throw new Error(`union() source branch tail __.${bsteps[stop].name}() not yet supported`);
     if (st.elem !== 'node') throw new Error('union() source branch must be vertex-typed');
     if (st.carried.aliases.size > 0) throw new Error('union() source branch with as() not yet supported');
-    return st.last;
+    return st.rel;
   });
   const body = list(rels.map((r) => q`SELECT id FROM ${r}`), ' UNION ALL ');
-  return { kind: 'elements', q: query, params, last: query.cte(body, ['id']), elem: 'node', carried: { aliases: new Map(), origins: [] } };
+  return { kind: 'elements', q: query, params, rel: query.cte(body, ['id']), elem: 'node', carried: { aliases: new Map(), origins: [] } };
 }
 
 /**
  * Build the movement/filter/branch CTE prefix (the id-relation) by folding the
  * step dispatch over the chain from the source (V/E/union) onward. Stops at the
  * first step absent from PREFIX (order/projection/write) and reports where. Pure
- * functional fold: each StepFn returns a fresh St; only the Query builder
+ * functional fold: each StepFn returns a fresh ElementStream; only the Query builder
  * accumulates. `query` is threaded so a nested sub-traversal (union branch) shares
  * the outer WITH.
  */
-/** Fold the PREFIX dispatch over `steps` from index `from`, threading St. Stops at
+/** Fold the PREFIX dispatch over `steps` from index `from`, threading ElementStream. Stops at
  *  the first step absent from PREFIX (order/projection/write) and reports where. The
  *  shared primitive behind both buildPrefix (folding from a V/E/union source) and a
  *  branch body (folding from an already-seeded relation — choose()'s arms, see
  *  branch.ts). A body carries no strategies normalization (matching seedUnion), so a
  *  repeat/by cluster inside an arm defers via its own compiler's guards. */
-export function foldBody(steps: PStep[], seedSt: St, from: number): { st: St; stop: number } {
+export function foldBody(steps: PStep[], seedSt: ElementStream, from: number): { st: ElementStream; stop: number } {
   let st = seedSt;
   let i = from;
   for (; i < steps.length; i++) {
@@ -166,7 +166,7 @@ export function foldBody(steps: PStep[], seedSt: St, from: number): { st: St; st
   return { st, stop: i };
 }
 
-export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, query: Query = new Query(), sackInit?: SackSpec): { st: St; stop: number } {
+export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, query: Query = new Query(), sackInit?: SackSpec): { st: ElementStream; stop: number } {
   const first = steps[0];
   const trackPath = chainTracksPath(steps);
   const seeded = first.name === 'union' ? seedUnion(first, query, params, sackInit)
@@ -188,6 +188,7 @@ export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, qu
  * ceiling structurally (each phase has a fresh accumulator).
  */
 export function dispatchNext(s: Stream, steps: PStep[], at: number): Compiled {
+  assertStreamColumns(s);
   if (s.kind === 'elements') {
     const { st, stop } = foldBody(steps, s, at);
     return compileTail(st, steps, stop);

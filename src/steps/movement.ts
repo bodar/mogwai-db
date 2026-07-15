@@ -1,7 +1,7 @@
 import { q, list, empty, type Expression } from '../q.ts';
 import { edges } from '../schema.ts';
 import { dirsFor, edgeLabelFilter, type Elem } from '../plan.ts';
-import { advance, appendPathPos, carryFrag, prevRel, type PathState, type St, type StepFn } from './context.ts';
+import { advance, appendPathPos, carryFrag, prevRel, type PathState, type ElementStream, type StepFn } from './context.ts';
 
 // ---------- movement (vertex ⇄ edge traversal) ----------
 //
@@ -19,7 +19,7 @@ import { advance, appendPathPos, carryFrag, prevRel, type PathState, type St, ty
  *  fragment `, <idExpr> AS p{k}` to splice into each branch, the advance()-opts to
  *  register the position, and undefined-fragments/opts when not tracking. `idExpr`
  *  is the branch's own moved-id expression (the same value bound to `id`). */
-function pathAppend(st: St, newElem: Elem): { frag: (idExpr: Expression) => Expression; opts: { path?: PathState } } {
+function pathAppend(st: ElementStream, newElem: Elem): { frag: (idExpr: Expression) => Expression; opts: { path?: PathState } } {
   if (!st.carried.path) return { frag: () => empty, opts: {} };
   const { path, col } = appendPathPos(st.carried.path, newElem);
   return { frag: (idExpr) => q`, ${idExpr} AS ${col}`, opts: { path } };
