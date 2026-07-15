@@ -80,7 +80,10 @@ bare vertex/edge fields share it too, retaining their complete element payload a
 internal rowid so later movement can re-enter ordinary element lowering. Single- and
 multi-label `select(...).by(__.<scalar child>)` use the same seam after relationally
 re-rooting each child on its selected alias; mixed direct/bare fields share the outer
-origin join. Group by-consumers are the next slice. Consumers call
+origin join. Inline element `group()`/`groupCount()` scalar traversal keys now do the
+same: compile child-first, join the productive key back to its source element by outer
+origin, then enter the existing GroupStream barrier. Group value modulators are the
+next slice; stashed `cap()` groups retain their existing correlated paths. Consumers call
 `tryCompileScalarValueChild` and never distinguish row projections from total count;
 do not grow `compileNestedScalar` to implement new by forms.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes

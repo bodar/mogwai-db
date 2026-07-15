@@ -303,6 +303,11 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().groupCount().select(Column.keys).unfold()').shape).toEqual({ kind: 'vertex' });
     // group().by(k).by(__.count()) → same scalar-valued map path.
     expect(read('g.V().group().by("name").by(__.count()).select(Column.values).unfold()').shape).toEqual({ kind: 'value', as: 'long' });
+    const childKey = read('g.V().groupCount().by(__.out().count())');
+    expect(childKey.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
+    expect(childKey.sql).toContain('ROW_NUMBER() OVER () AS o0');
+    expect(childKey.sql).toContain('JOIN c');
+    expect(childKey.sql).toContain('ON gk.o0=gp.o0');
   });
 
   test('list-VALUED map: group().by().by(__.out()...fold()).select(Column.values)', () => {
@@ -959,7 +964,7 @@ describe('compiler SQL snapshots', () => {
     expect(pth.sql).toContain('WHERE id=x1n.tgt) AS x1_tgt');
     // group() default value = element list of edges (v_src/_tgt).
     expect(read('g.V(1).outE().group().by(__.label())').sql)
-      .toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=n.src) AS v_src');
+      .toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=gn.src) AS v_src');
   });
 
   test('outE/inE go vertex→edge; outV/inV go edge→vertex', () => {
@@ -1163,7 +1168,6 @@ describe('compiler SQL snapshots', () => {
     // narrow MapStream consumed by Column.values, and an unknown group consumer defers.
     expect(() => compile('g.V().group().by("name").select(Column.values)', {})).toThrow('select(Column) over a group of element values not yet supported');
     expect(() => compile('g.V().groupCount().by("name").cap("x")', {})).toThrow('cap() on a group value not yet supported');
-    expect(() => compile('g.V().group().by(__.out().values("name"))', {})).toThrow(); // deep nested key
     expect(() => compile('g.V().properties().group().by()', {})).toThrow('group().by() on a property element is not yet supported');
     expect(() => compile('g.V().group().by("name").by("age").by("x")', {})).toThrow('more than two by() modulators');
     expect(read('g.V().count().fold()').shape).toEqual({ kind: 'jsonbList', as: 'long' });
@@ -2139,6 +2143,15 @@ describe('compiler execution semantics', () => {
     const rows = run(store, 'g.V().groupCount().by(T.label)');
     const m = Object.fromEntries(rows.map((r) => [r.gk, r.gv]));
     expect(m).toEqual({ person: 4, software: 2 });
+    const degree = Object.fromEntries(run(store, 'g.V().groupCount().by(__.out().count())').map((r) => [r.gk, r.gv]));
+    expect(degree).toEqual({ 0: 3, 1: 1, 2: 1, 3: 1 });
+    expect(run(store, 'g.V(1).union(__.identity(),__.identity()).groupCount().by(__.out().count())'))
+      .toEqual([{ gk: 3, gv: 2 }]);
+    const firstOut = run(store, 'g.V().group().by(__.out().values("name")).by("name")')
+      .map((r) => [r.gk, JSON.parse(r.gv)]).sort((a, b) => a[0].localeCompare(b[0]));
+    expect(firstOut).toEqual([
+      ['lop', ['josh', 'peter']], ['vadas', ['marko']],
+    ]);
   });
 
   test('group scalar-list drops members missing the property (json_group_array + null filter is in handler)', () => {
