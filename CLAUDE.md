@@ -82,8 +82,10 @@ multi-label `select(...).by(__.<scalar child>)` use the same seam after relation
 re-rooting each child on its selected alias; mixed direct/bare fields share the outer
 origin join. Inline element `group()`/`groupCount()` scalar traversal keys now do the
 same: compile child-first, join the productive key back to its source element by outer
-origin, then enter the existing GroupStream barrier. Group value modulators are the
-next slice; stashed `cap()` groups retain their existing correlated paths. Consumers call
+origin, then enter the existing GroupStream barrier. Non-reducing scalar group value
+children share that origin and consume `all` productive rows into the group list (not
+`first`); group-scoped `count`/`sum`/`min`/`max`/`mean`, fold/tail, and stashed `cap()`
+groups retain their existing barrier/correlated paths. Consumers call
 `tryCompileScalarValueChild` and never distinguish row projections from total count;
 do not grow `compileNestedScalar` to implement new by forms.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes

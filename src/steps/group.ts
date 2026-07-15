@@ -30,6 +30,9 @@ export interface GroupSource {
   /** A generic child-key result already joined one-to-one with each productive
    * source traverser. When present, buildGroupKey need not parse the traversal. */
   keyExpr?: Expression;
+  /** Productive rows from a non-reducing scalar value child. Multiple rows per
+   * source traverser deliberately remain multiple group-list members. */
+  valExpr?: Expression;
   /** Present only for an inline element group whose source stream is still live.
    * Stashed cap()/property sources omit it and retain their existing fast paths. */
   parent?: ElementStream;
@@ -92,26 +95,53 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
   throw new Error('unsupported group().by() key modulator');
 }
 
-/** Lower a scalar traversal-valued group key through the generic child compiler,
- * then join it back to the original element by a multiset-safe parent origin. A
- * missing child removes that member; a total child count still emits zero. */
-function tryLowerGroupKeySource(bys: any[][], src: GroupSource): GroupSource | null {
+const GROUP_VALUE_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
+
+/** Lower generic scalar key/value children and join them back to the original
+ * element through ONE shared parent origin. Keys consume `first`; non-reducing
+ * values consume `all`. Group-scoped reducers/fold/tail stay on their established
+ * barrier paths below — reducing per parent here would change their semantics. */
+function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource | null {
   const parent = src.parent;
   if (!parent) return null;
-  const arg = bys[0]?.[0];
-  if (!arg || typeof arg !== 'object' || !('nested' in arg) || !isScalarChild(arg.nested, parent.params)) return null;
+  const keyArg = bys[0]?.[0];
+  const valArg = bys[1]?.[0];
+  const genericKey = keyArg && typeof keyArg === 'object' && 'nested' in keyArg
+    && isScalarChild(keyArg.nested, parent.params);
+  const valSteps = valArg && typeof valArg === 'object' && 'nested' in valArg
+    ? stepChain(valArg.nested, parent.params)
+    : [];
+  const genericVal = valSteps.length > 0
+    && !GROUP_VALUE_REDUCERS.has(valSteps.at(-1)!.name)
+    && isScalarChild(valArg.nested, parent.params);
+  if (!genericKey && !genericVal) return null;
 
   const outer = pushChildScope(parent);
-  const child = tryCompileScalarValueChild(outer.seed, arg.nested, 'first', outer.scope);
-  if (!child) throw new Error('scalar group key failed after successful shape preflight');
   const p = outer.seed.rel.as('gp');
-  const c = child.rel.as('gk');
   const n = elemRel(parent, 'gn');
+  const joins: Expression[] = [];
+  let keyExpr: Expression | undefined;
+  let valExpr: Expression | undefined;
+  if (genericKey) {
+    const child = tryCompileScalarValueChild(outer.seed, keyArg.nested, 'first', outer.scope);
+    if (!child) throw new Error('scalar group key failed after successful shape preflight');
+    const c = child.rel.as('gk');
+    joins.push(q` JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
+    keyExpr = c.c.v;
+  }
+  if (genericVal) {
+    const child = tryCompileScalarValueChild(outer.seed, valArg.nested, 'all', outer.scope);
+    if (!child) throw new Error('scalar group value failed after successful shape preflight');
+    const c = child.rel.as('gv');
+    joins.push(q` JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
+    valExpr = c.c.v;
+  }
   return {
-    from: q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`,
+    from: q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}${list(joins, '')}`,
     ctx: elemCtx(n, parent.elem),
     elem: parent.elem === 'edge' ? 'edge' : 'vertex',
-    keyExpr: c.c.v,
+    keyExpr,
+    valExpr,
   };
 }
 
@@ -123,13 +153,14 @@ function tryLowerGroupKeySource(bys: any[][], src: GroupSource): GroupSource | n
  */
 export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: GroupSource): GroupStream {
   if (bys.length > 2) throw new Error('group() with more than two by() modulators not yet supported');
-  src = tryLowerGroupKeySource(bys, src) ?? src;
+  src = tryLowerGroupChildSource(bys, src) ?? src;
   const key = buildGroupKey(bys[0], src, st.params);
 
   let val: GroupVal, valNode: Expression, groupBy = true;
   const valArgs = bys[1];
   if (isCount) { val = { kind: 'count' }; valNode = q`COUNT(*) AS gv`; }
   else if (!valArgs || valArgs.length === 0) { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx); }
+  else if (src.valExpr) { val = { kind: 'scalarList' }; valNode = q`json_group_array(${src.valExpr}) AS gv`; }
   else {
     const a = valArgs[0];
     if (typeof a === 'string') { // by('age') → list of scalars (first-under-multi per member)
