@@ -17,7 +17,7 @@ import { compileTail, compileFromScalar } from './projection.ts';
 import { compileFromGroup, compileFromProperty } from './group.ts';
 import { compileFromList, compileFromMap } from './list.ts';
 import { compileFromRecord } from './select.ts';
-import { assertStreamColumns, type Stream } from './stream.ts';
+import { assertStreamColumns, continueLowering, isLoweringContinuation, type LoweringResult, type Stream } from './stream.ts';
 import { type Compiled } from '../render.ts';
 import { tryBulkRepeatCount } from './bulk.ts';
 import { lowerScalarRows } from './scalar.ts';
@@ -201,7 +201,7 @@ export function lowerElementSteps(steps: PStep[], seedSt: ElementStream, from = 
 
 /** Lower a complete element-valued step sequence without materializing it. This is
  * the shared nested/root seam: branch arms can compose element StepFns and retain
- * their relational stream, while dispatchNext remains the sole outer materializer. */
+ * their relational stream, while lowerSteps remains the sole outer materializer. */
 export function tryLowerElementSteps(steps: PStep[], seed: ElementStream): ElementStream | null {
   const lowered = lowerElementSteps(steps, seed);
   return lowered.next === steps.length ? lowered.stream : null;
@@ -229,7 +229,7 @@ export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, qu
  * its own ≤1 projection. This is what dissolves the old "one projection per traversal"
  * ceiling structurally (each phase has a fresh accumulator).
  */
-export function dispatchNext(s: Stream, steps: PStep[], at: number): Compiled {
+function lowerStream(s: Stream, steps: PStep[], at: number): LoweringResult {
   assertStreamColumns(s);
   if (s.kind === 'elements') {
     const lowered = lowerElementSteps(steps, s, at);
@@ -243,8 +243,8 @@ export function dispatchNext(s: Stream, steps: PStep[], at: number): Compiled {
   if (s.kind === 'variant') {
     if (at === steps.length) return materializeVariantRoot(s);
     if (s.result === 'list' && steps[at].name === 'unfold')
-      return dispatchNext({ ...s, result: 'rows' }, steps, at + 1);
-    if (steps[at].name === 'count') return dispatchNext(lowerGlobalCount(s), steps, at + 1);
+      return continueLowering({ ...s, result: 'rows' }, at + 1);
+    if (steps[at].name === 'count') return continueLowering(lowerGlobalCount(s), at + 1);
     throw new Error(`${steps[at].name}() on a variant value not yet supported`);
   }
   if (s.kind === 'property') return compileFromProperty(s, steps, at);
@@ -258,7 +258,21 @@ export function dispatchNext(s: Stream, steps: PStep[], at: number): Compiled {
   return compileFromList(s, steps, at);
 }
 
-/** A read traversal: prefix fold + tail projection (re-enterable via dispatchNext).
+/** Iterative stream orchestrator. Shape compilers yield a continuation instead of
+ * recursively re-entering dispatch, so one loop owns every stream transition and
+ * only a terminal branch may return Compiled. */
+export function lowerSteps(initial: Stream, steps: PStep[], from: number): Compiled {
+  let stream = initial;
+  let at = from;
+  for (;;) {
+    const result = lowerStream(stream, steps, at);
+    if (!isLoweringContinuation(result)) return result;
+    stream = result.stream;
+    at = result.at;
+  }
+}
+
+/** A read traversal: prefix fold + shaped lowering loop.
  *  `sackInit` (from withSack()) seeds the carried sack column at the source. */
 export function compileRead(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec): Compiled {
   // Traverser bulking: a `repeat(...).times(n).count()` (path/as/sack-free) compiles to
@@ -269,5 +283,5 @@ export function compileRead(steps: PStep[], params: Record<string, any> = {}, sa
   if (bulked) return bulked;
 
   const { st, stop } = buildPrefix(steps, params, new Query(), sackInit);
-  return compileTail(st, steps, stop);
+  return lowerSteps(st, steps, stop);
 }

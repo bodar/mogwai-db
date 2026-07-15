@@ -6,8 +6,7 @@ import {
 } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, elemRel, type ElementStream } from './context.ts';
-import { carryOf, toListStream, toScalarStream, toVariantStream, type ListStream, type ScalarStream } from './stream.ts';
-import { dispatchNext } from './index.ts';
+import { carryOf, continueLowering, toListStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ScalarStream } from './stream.ts';
 import { tryLowerLocalAggregate } from './sideeffect.ts';
 import {
   type Compiled, type Shape, type ElemShape,
@@ -120,7 +119,7 @@ export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop:
   for (; i < steps.length; i++) {
     const s = steps[i];
     // Retype boundaries — the tail cannot fold past these; the caller builds the next
-    // Stream (stream.ts) and re-enters via dispatchNext (index.ts):
+    // Stream (stream.ts) and yields back to lowerSteps (index.ts):
     //  · unfold — a list value → its element/scalar stream.
     //  · a NON-terminal fold — the stream → one list value (set-ops sit here later).
     //    A TERMINAL fold (last step) stays the current reducer below, byte-identical.
@@ -159,14 +158,14 @@ export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop:
 
 /** Compile the tail: `st` is the finished prefix state, `steps[stop]` the first
  *  step the prefix dispatch didn't consume. */
-export function compileTail(st: ElementStream, steps: PStep[], stop: number): Compiled {
+export function compileTail(st: ElementStream, steps: PStep[], stop: number): LoweringResult {
 
   // order().[barrier()].dedup().by(): lower both observations as one window
   // policy so the representative is chosen by explicit encounter order.
   if (steps[stop]?.name === 'order') {
     const dedupAt = steps[stop + 1]?.name === 'barrier' ? stop + 2 : stop + 1;
     if (steps[dedupAt]?.name === 'dedup')
-      return dispatchNext(lowerElementDedup(st, steps[dedupAt], steps[stop]), steps, dedupAt + 1);
+      return continueLowering(lowerElementDedup(st, steps[dedupAt], steps[stop]), dedupAt + 1);
   }
 
   // A direct global count is a stream transition even when terminal. Forms with
@@ -174,18 +173,18 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
   // accumulator until those operators migrate to stepwise lowering.
   if (steps[stop]?.name === 'count' && !isScopeLocalStep(steps[stop])) {
     const out = lowerGlobalCount(st);
-    if (stop + 1 < steps.length) return dispatchNext(out, steps, stop + 1);
+    if (stop + 1 < steps.length) return continueLowering(out, stop + 1);
     return materializeScalarRoot(out);
   }
 
   // properties() turns the traverser into a relational PropertyStream. Property-
   // specific followers dispatch there; key/value/element re-enter common streams.
   if (steps[stop]?.name === 'properties')
-    return dispatchNext(lowerProperties(st, steps[stop]), steps, stop + 1);
+    return continueLowering(lowerProperties(st, steps[stop]), stop + 1);
 
   // option-map choose (choose().option()…) → a CASE over a correlated choice scalar.
   if (steps[stop]?.name === 'choose' && steps[stop].options)
-    return dispatchNext(lowerChooseOptions(st, steps, stop), steps, stop + 1);
+    return continueLowering(lowerChooseOptions(st, steps, stop), stop + 1);
 
   // map(__.<scalar>) → a per-traverser scalar projection (out-degree, a property, a
   // label). Element-body map (first-result-only) and select/fold bodies defer.
@@ -194,21 +193,21 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
   // step; only its scalar-reduction body reaches the tail here).
   if (steps[stop]?.name === 'map') {
     const element = tryLowerMapElement(st, steps[stop]);
-    if (element) return dispatchNext(element, steps, stop + 1);
+    if (element) return continueLowering(element, stop + 1);
     const list = tryLowerListChild(st, steps[stop]);
-    if (list) return dispatchNext(list, steps, stop + 1);
-    return dispatchNext(lowerMapScalar(st, steps, stop), steps, stop + 1);
+    if (list) return continueLowering(list, stop + 1);
+    return continueLowering(lowerMapScalar(st, steps, stop), stop + 1);
   }
   if (steps[stop]?.name === 'local') {
     const sideEffect = tryLowerLocalAggregate(st, steps[stop]);
-    if (sideEffect) return dispatchNext(sideEffect, steps, stop + 1);
+    if (sideEffect) return continueLowering(sideEffect, stop + 1);
     const list = tryLowerListChild(st, steps[stop]);
-    if (list) return dispatchNext(list, steps, stop + 1);
+    if (list) return continueLowering(list, stop + 1);
     const element = tryLowerLocalElement(st, steps[stop]);
-    if (element) return dispatchNext(element, steps, stop + 1);
+    if (element) return continueLowering(element, stop + 1);
     const nested = steps[stop].args[0]?.nested;
     if (nested && isScalarChild(nested, st.params))
-      return dispatchNext(lowerMapScalar(st, steps, stop), steps, stop + 1);
+      return continueLowering(lowerMapScalar(st, steps, stop), stop + 1);
     throw new Error('local() child shape not yet supported by generic child lowering');
   }
 
@@ -217,8 +216,8 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
   // a scalar child changes ElementStream → ScalarStream.
   if (steps[stop]?.name === 'flatMap') {
     const generic = tryLowerFlatMap(st, steps[stop]);
-    if (generic) return dispatchNext(generic, steps, stop + 1);
-    return dispatchNext(lowerLegacyFlatMap(steps[stop], st), steps, stop + 1);
+    if (generic) return continueLowering(generic, stop + 1);
+    return continueLowering(lowerLegacyFlatMap(steps[stop], st), stop + 1);
   }
 
   // A fold/count child is total per parent, so optional's identity-on-miss arm is
@@ -227,11 +226,11 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
   if (steps[stop]?.name === 'optional') {
     const nested = steps[stop].args[0]?.nested;
     if (nested && isListChild(nested, st.params))
-      return dispatchNext(tryCompileListChild(st, nested)!, steps, stop + 1);
+      return continueLowering(tryCompileListChild(st, nested)!, stop + 1);
     if (nested && isTotalScalarChild(nested, st.params))
-      return dispatchNext(tryCompileCountChild(st, nested)!, steps, stop + 1);
+      return continueLowering(tryCompileCountChild(st, nested)!, stop + 1);
     const variant = tryLowerVariantOptional(steps[stop], st);
-    if (variant) return dispatchNext(variant, steps, stop + 1);
+    if (variant) return continueLowering(variant, stop + 1);
   }
 
   // A union may change shape when every arm is scalar. Homogeneous scalar arms
@@ -239,41 +238,41 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
   // remains authoritative and rejects mixed shapes.
   if (steps[stop]?.name === 'union') {
     const list = tryLowerListUnion(steps[stop], st);
-    if (list) return dispatchNext(list, steps, stop + 1);
+    if (list) return continueLowering(list, stop + 1);
     const scalar = tryLowerScalarUnion(steps[stop], st);
-    if (scalar) return dispatchNext(scalar, steps, stop + 1);
-    return dispatchNext(lowerLegacyUnion(steps[stop], st), steps, stop + 1);
+    if (scalar) return continueLowering(scalar, stop + 1);
+    return continueLowering(lowerLegacyUnion(steps[stop], st), stop + 1);
   }
 
   if (steps[stop]?.name === 'choose' && !steps[stop].options) {
     const list = tryLowerListChoose(steps[stop], st);
-    if (list) return dispatchNext(list, steps, stop + 1);
+    if (list) return continueLowering(list, stop + 1);
     const scalar = tryLowerScalarChoose(steps[stop], st);
-    if (scalar) return dispatchNext(scalar, steps, stop + 1);
-    return dispatchNext(lowerLegacyChoose(steps[stop], st), steps, stop + 1);
+    if (scalar) return continueLowering(scalar, stop + 1);
+    return continueLowering(lowerLegacyChoose(steps[stop], st), stop + 1);
   }
 
   if (steps[stop]?.name === 'coalesce') {
     const list = tryLowerListCoalesce(steps[stop], st);
-    if (list) return dispatchNext(list, steps, stop + 1);
+    if (list) return continueLowering(list, stop + 1);
     const scalar = tryLowerScalarCoalesce(steps[stop], st);
-    if (scalar) return dispatchNext(scalar, steps, stop + 1);
-    return dispatchNext(lowerLegacyCoalesce(steps[stop], st), steps, stop + 1);
+    if (scalar) return continueLowering(scalar, stop + 1);
+    return continueLowering(lowerLegacyCoalesce(steps[stop], st), stop + 1);
   }
 
   // math("<formula>") → one SQL arithmetic scalar (always Double). Its variables
   // (`_` / as()-bound names) resolve through the by() modulators folded onto it.
   if (steps[stop]?.name === 'math')
-    return dispatchNext(lowerMath(st, steps, stop), steps, stop + 1);
+    return continueLowering(lowerMath(st, steps, stop), stop + 1);
 
   // format("…%{token}…") → one `||`-concatenated SQL string (properties + by()s).
   if (steps[stop]?.name === 'format')
-    return dispatchNext(lowerFormat(st, steps, stop), steps, stop + 1);
+    return continueLowering(lowerFormat(st, steps, stop), stop + 1);
 
   // bare sack() reads the carried per-traverser sack column as a scalar value; a
   // trailing reducer (sum/…)/is/order composes via the shared value tail.
   if (steps[stop]?.name === 'sack')
-    return dispatchNext(lowerSackRead(st, steps[stop]), steps, stop + 1);
+    return continueLowering(lowerSackRead(st, steps[stop]), stop + 1);
 
   // cap('x') emits a named side-effect collection registered earlier in the chain.
   if (steps[stop]?.name === 'cap')
@@ -286,7 +285,7 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
     const tbl = st.elem === 'edge' ? 'edges' : 'nodes';
     const ctx = elemCtx(elemRel(st), st.elem);
     const src: GroupSource = { from: `${tbl} n JOIN ${st.rel.name} p ON n.id=p.id`, ctx, elem: st.elem === 'edge' ? 'edge' : 'vertex', parent: st, productiveBy: steps[stop].productiveBy };
-    return dispatchNext(lowerGroup(st, isCount, steps[stop].bys ?? [], src), steps, stop + 1);
+    return continueLowering(lowerGroup(st, isCount, steps[stop].bys ?? [], src), stop + 1);
   }
 
   // A one-label select emits the labelled traverser itself (or its by(key) scalar),
@@ -294,12 +293,12 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
   if (steps[stop]?.name === 'select' &&
       steps[stop].args.filter((a) => typeof a === 'string').length === 1 &&
       !steps[stop].args.some((a) => a && typeof a === 'object' && 'column' in a))
-    return dispatchNext(lowerSingleSelect(st, steps[stop]), steps, stop + 1);
+    return continueLowering(lowerSingleSelect(st, steps[stop]), stop + 1);
 
   // Multi-label select() and every project() produce a per-traverser RecordStream.
   // Terminal framing and later field selection/counting now share this same lowering.
   if (steps[stop]?.name === 'select' || steps[stop]?.name === 'project')
-    return dispatchNext(lowerRecordSelectProject(st, steps[stop]), steps, stop + 1);
+    return continueLowering(lowerRecordSelectProject(st, steps[stop]), stop + 1);
 
   // A scalar-producing projection is always a real stream transition when another
   // step follows. The next step dispatches against ScalarStream, so composition no
@@ -322,7 +321,7 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
       ['v', ...carriedCols(st.carried)],
     );
     const asTag = proj.shape.kind === 'value' ? proj.shape.as : undefined;
-    return dispatchNext(toScalarStream(carryOf(st), rel, asTag), steps, stop + 1);
+    return continueLowering(toScalarStream(carryOf(st), rel, asTag), stop + 1);
   }
 
   // Tail fold: accumulate the projection + modifiers, stopping at a retype boundary
@@ -332,7 +331,7 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
   // Consumed the whole chain → render terminally, exactly as before.
   if (at === steps.length) {
     if (acc.projStep?.name === 'path')
-      return dispatchNext(lowerPath(st, acc.projStep, acc), steps, at);
+      return continueLowering(lowerPath(st, acc.projStep, acc), at);
     if (isMapProj(acc.projStep))
       return compileSelectProject(st, acc.projStep!, acc);
     return buildProjection(st, acc);
@@ -346,10 +345,10 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
     // first) is identity-safe; values().unfold() etc. defer.
     if (acc.projStep || acc.orders.length || acc.reducer || acc.isPreds.length || acc.transforms.length || acc.injects.length || acc.distinct || acc.offset || acc.limit !== null)
       throw new Error('unfold() after a projection/modifier on an element stream not yet supported');
-    return dispatchNext(st, steps, at + 1);
+    return continueLowering(st, at + 1);
   }
   // A non-terminal fold → a single list value; continue from the ListStream.
-  return dispatchNext(compileFold(st, acc), steps, at + 1);
+  return continueLowering(compileFold(st, acc), at + 1);
 }
 
 /**
@@ -408,11 +407,11 @@ function compileFold(st: ElementStream, acc: TailAcc): ListStream {
 
 /**
  * The scalar-stream tail: a one-column `v` relation → foldTailAcc + the shared value
- * tail (renderProjection). Entered from unfold() of a scalar list (dispatchNext); the
+ * tail (renderProjection). Entered from unfold() of a scalar list (lowerSteps); the
  * same engine compileInject's tail runs, factored out so both consume one modifier
  * vocabulary. count() is the only projection valid on a scalar stream.
  */
-export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number): Compiled {
+export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number): LoweringResult {
   // A list-collection step (set-op / conjoin / all / any) requires a list traverser;
   // reached on a scalar stream it raises TinkerPop's incoming-type error.
   const LIST_ONLY = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product', 'conjoin', 'all', 'any']);
@@ -424,20 +423,20 @@ export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number)
   // carried state because no single input row owns the global result.
   if (steps[from]?.name === 'count' && !isScopeLocalStep(steps[from])) {
     const out = lowerGlobalCount(s);
-    if (from + 1 < steps.length) return dispatchNext(out, steps, from + 1);
+    if (from + 1 < steps.length) return continueLowering(out, from + 1);
     return materializeScalarRoot(out);
   }
   if (NUMERIC_REDUCERS.has(steps[from]?.name as NumericReducer) && !isScopeLocalStep(steps[from])) {
     const out = lowerGlobalNumericReducer(s, steps[from].name as NumericReducer);
-    if (from + 1 < steps.length) return dispatchNext(out, steps, from + 1);
+    if (from + 1 < steps.length) return continueLowering(out, from + 1);
     return materializeScalarRoot(out);
   }
   if (steps[from]?.name === 'fold' && !isScopeLocalStep(steps[from]))
-    return dispatchNext(lowerGlobalFold(s), steps, from + 1);
+    return continueLowering(lowerGlobalFold(s), from + 1);
   // unfold() on a scalar is identity (a scalar is not a collection) — continue past it,
   // exactly as unfold() on an element stream. Lets aggregate('a').by(k).cap('a').unfold()
   // (an explicit cap().unfold() turns a by-key bag into a scalar stream) feed a following reducer.
-  if (steps[from]?.name === 'unfold') return dispatchNext(s, steps, from + 1);
+  if (steps[from]?.name === 'unfold') return continueLowering(s, from + 1);
   const { acc, stop } = foldTailAcc(steps, from);
   if (stop !== steps.length) throw new Error(`${steps[stop].name}() after a scalar stream not yet supported`);
   if (s.result === 'count' && acc.reducer)
@@ -588,21 +587,21 @@ function lowerSackRead(st: ElementStream, step: PStep): ScalarStream {
  *  collection traverser; only an explicit following unfold() emits its members. A group
  *  side-effect (group('a')/groupCount('a')) re-runs lowerGroup over its stashed
  *  source → one GroupStream (steps/group.ts). Deferred: multi-key cap('x','y'). */
-function compileCap(st: ElementStream, steps: PStep[], stop: number): Compiled {
+function compileCap(st: ElementStream, steps: PStep[], stop: number): LoweringResult {
   const names = (steps[stop].args ?? []).filter((a: any) => typeof a === 'string');
   if (names.length !== 1) throw new Error('cap() with multiple side-effect keys not yet supported');
   const def = st.sideEffects?.get(names[0]);
   if (!def) throw new Error(`cap('${names[0]}') references an undefined side-effect`);
   if (def.kind === 'list') {
     const ls = toListStream(carryOf(st), def.rel, def.of);
-    return dispatchNext(ls, steps, stop + 1);
+    return continueLowering(ls, stop + 1);
   }
   if (def.kind === 'variant')
-    return dispatchNext(toVariantStream(carryOf(st), def.rel, def.scalarAs, def.elem, 'list'), steps, stop + 1);
+    return continueLowering(toVariantStream(carryOf(st), def.rel, def.scalarAs, def.elem, 'list'), stop + 1);
   // group('a')/groupCount('a') side-effect → re-emit the same rich GroupStream as an
   // inline group; terminal framing and Column consumers share its dispatch.
   const src: GroupSource = { from: def.from, ctx: def.ctx, elem: def.elem, parent: def.parent, productiveBy: def.productiveBy };
-  return dispatchNext(lowerGroup(st, def.isCount, def.bys, src), steps, stop + 1);
+  return continueLowering(lowerGroup(st, def.isCount, def.bys, src), stop + 1);
 }
 
 /** Render a resolved projection + the value-shape tail (scalar transforms, is()

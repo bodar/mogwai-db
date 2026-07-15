@@ -7,11 +7,10 @@ import {
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, elemRel, withoutCarried, type Carry, type ElementStream } from './context.ts';
-import { carryOf, groupColumns, toGroupStream, toMapStream, toPropertyStream, toScalarStream, type GroupStream, type MapOf, type PropertyStream, type ScalarStream } from './stream.ts';
+import { carryOf, continueLowering, groupColumns, toGroupStream, toMapStream, toPropertyStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type PropertyStream, type ScalarStream } from './stream.ts';
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
 import { materializeGroupRoot, materializePropertyRoot, materializeRoot } from './materialize.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
-import { dispatchNext } from './index.ts';
 import { isElementFoldChild, isScalarChild, isScalarFoldChild, pushChildScope, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild } from './child.ts';
 
 /** Movement heads whose property-group compatibility path can use a correlated
@@ -322,7 +321,7 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
 /** Continue from the rich group barrier. Terminal framing consumes the same lowered
  * relation; a supported Column selection derives the narrow entry MapStream without
  * recompiling group semantics based on terminal position. */
-export function compileFromGroup(s: GroupStream, steps: PStep[], at: number): Compiled {
+export function compileFromGroup(s: GroupStream, steps: PStep[], at: number): LoweringResult {
   if (at >= steps.length) return materializeGroupRoot(s);
   const step = steps[at];
   const column = step.name === 'select'
@@ -348,7 +347,7 @@ export function compileFromGroup(s: GroupStream, steps: PStep[], at: number): Co
 
   const where = s.key.kind === 'scalar' && !s.key.productive ? q` WHERE ${g.c.gk} IS NOT NULL` : empty;
   const rel = s.q.cte(q`SELECT ${mk} AS mk, ${mv} AS mv FROM ${g}${where}`, ['mk', 'mv']);
-  return dispatchNext(toMapStream(carryOf(s), rel, keyOf, valOf), steps, at);
+  return continueLowering(toMapStream(carryOf(s), rel, keyOf, valOf), at);
 }
 
 // ---------- properties() ----------
@@ -414,25 +413,25 @@ function propertyScalar(s: PropertyStream, col: 'vpid' | 'pk' | 'pv'): ScalarStr
 
 /** Consume a PropertyStream. Only property-specific operations live here; once a
  * step changes shape it re-enters the same root dispatcher as every other stream. */
-export function compileFromProperty(s: PropertyStream, steps: PStep[], at: number): Compiled {
+export function compileFromProperty(s: PropertyStream, steps: PStep[], at: number): LoweringResult {
   if (at >= steps.length) return materializePropertyRoot(s);
   const step = steps[at];
 
   if (step.name === 'has' || step.name === 'hasKey' || step.name === 'hasValue')
-    return dispatchNext(filterProperty(s, step), steps, at + 1);
+    return continueLowering(filterProperty(s, step), at + 1);
 
   if (step.name === 'key' || step.name === 'value' || step.name === 'id') {
     const col = step.name === 'key' ? 'pk' : step.name === 'value' ? 'pv' : 'vpid';
-    return dispatchNext(propertyScalar(s, col), steps, at + 1);
+    return continueLowering(propertyScalar(s, col), at + 1);
   }
 
-  if (step.name === 'count') return dispatchNext(lowerGlobalCount(s), steps, at + 1);
+  if (step.name === 'count') return continueLowering(lowerGlobalCount(s), at + 1);
 
   if (step.name === 'group' || step.name === 'groupCount') {
     const ctx = propertyCtx(s);
     const src: GroupSource = { from: s.rel.as('p'), ctx, elem: 'property', productiveBy: step.productiveBy };
     const isCount = step.name === 'groupCount';
-    return dispatchNext(lowerGroup(s, isCount, step.bys ?? [], src), steps, at + 1);
+    return continueLowering(lowerGroup(s, isCount, step.bys ?? [], src), at + 1);
   }
 
   if (step.name === 'valueMap') {
@@ -456,7 +455,7 @@ export function compileFromProperty(s: PropertyStream, steps: PStep[], at: numbe
       ['id', ...carriedCols(s.carried)],
     );
     const out: ElementStream = { ...carryOf(s), kind: 'elements', rel, elem: s.ownerElem };
-    return dispatchNext(out, steps, at + 1);
+    return continueLowering(out, at + 1);
   }
 
   throw new Error(`step not implemented after properties(): ${step.name}()`);

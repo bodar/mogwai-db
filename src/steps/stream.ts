@@ -4,7 +4,7 @@
 // id-relation of elements (`ElementStream`, context.ts). A projection/inject produces a stream
 // of scalars. `fold()` produces a single list value. Historically the tail was
 // strictly terminal, so these value shapes had nowhere to go; the `Stream` union +
-// the dispatcher (index.ts `dispatchNext`) make the tail RE-ENTERABLE — a step can
+// the dispatcher (index.ts `lowerSteps`) make the tail RE-ENTERABLE — a step can
 // retype the stream (fold: elements→list, unfold: list→elements/scalar) and keep
 // compiling. Each arm shares `Carry` (context.ts) so a retype preserves the query
 // builder / params / aliases / path.
@@ -15,7 +15,7 @@
 
 import { type Relation } from '../q.ts';
 import { type Elem } from '../plan.ts';
-import { type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type PathPos, type ValueType } from '../render.ts';
+import { type Compiled, type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type PathPos, type ValueType } from '../render.ts';
 import { carriedCols, type Carry, type ElementStream } from './context.ts';
 
 /** What a list stream holds — i.e. the shape `unfold` produces from it. `elem` → bare
@@ -119,6 +119,23 @@ export interface PathStream extends Carry {
 }
 
 export type Stream = ElementStream | ScalarStream | VariantStream | ListStream | MapStream | PropertyStream | RecordStream | GroupStream | PathStream;
+
+/** A shape compiler yields this token when lowering should continue with a new
+ * relational stream. The central lowerSteps loop consumes it; leaves never recurse
+ * into orchestration or materialize an intermediate result. */
+export interface LoweringContinuation {
+  readonly kind: 'continue-lowering';
+  readonly stream: Stream;
+  readonly at: number;
+}
+
+export type LoweringResult = Compiled | LoweringContinuation;
+
+export const continueLowering = (stream: Stream, at: number): LoweringContinuation =>
+  ({ kind: 'continue-lowering', stream, at });
+
+export const isLoweringContinuation = (result: LoweringResult): result is LoweringContinuation =>
+  result.kind === 'continue-lowering';
 
 const elemColumns = (prefix: string, elem: ElemShape): string[] => elem === 'edge'
   ? [`${prefix}_id`, `${prefix}_label`, `${prefix}_src`, `${prefix}_tgt`, `${prefix}_props`]
