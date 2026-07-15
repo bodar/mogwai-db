@@ -5,7 +5,7 @@ import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { executeQuery } from '../src/execute.ts';
 import { MODERN_SEED } from './conformance/seed-modern.ts';
 import { Query } from '../src/q.ts';
-import { assertStreamColumns, toScalarStream } from '../src/steps/stream.ts';
+import { assertStreamColumns, toPropertyStream, toScalarStream } from '../src/steps/stream.ts';
 import { popChildScope, pushChildScope } from '../src/steps/child.ts';
 import { readdirSync, readFileSync } from 'node:fs';
 
@@ -24,6 +24,11 @@ describe('compiler SQL snapshots', () => {
     expect(assertStreamColumns(toScalarStream(carry, q.cte({} as any, ['v']))).kind).toBe('scalar');
     expect(() => toScalarStream(carry, q.cte({} as any, ['value']))).toThrow(
       'scalar stream column mismatch: expected [v], got [value]',
+    );
+    const propertyCols = ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta'];
+    expect(toPropertyStream(carry, q.cte({} as any, propertyCols), 'node').kind).toBe('property');
+    expect(() => toPropertyStream(carry, q.cte({} as any, propertyCols.slice(1)), 'node')).toThrow(
+      'property stream column mismatch',
     );
   });
 
@@ -900,21 +905,21 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('properties() follow-ons: key/value/count/element project the right column', () => {
-    expect(read('g.V().properties().key()').sql).toContain('SELECT pk AS v');
-    expect(read('g.V().properties().value()').sql).toContain('SELECT pv AS v');
+    expect(read('g.V().properties().key()').sql).toContain('SELECT p.pk AS v');
+    expect(read('g.V().properties().value()').sql).toContain('SELECT p.pv AS v');
     expect(read('g.V().properties().count()').shape).toEqual({ kind: 'count' });
     expect(read('g.V().properties().element()').shape).toEqual({ kind: 'vertex' });
-    expect(read('g.V().properties().element().values("name")').sql).toContain("(SELECT value FROM vertex_properties WHERE node=owner AND key=? ORDER BY id LIMIT 1)");
+    expect(read('g.V().properties().element().values("name")').sql).toContain("JOIN vertex_properties vp ON vp.node=n.id AND vp.key=?");
   });
 
-  test('properties(): trailing steps past the follow-on throw; edge element().label() allowed', () => {
-    // regression: a step after the resolved follow-on must not be silently dropped
-    expect(() => compile('g.V(1).properties().key().limit(1)', {})).toThrow('step not implemented after properties(): limit()');
-    expect(() => compile('g.V(1).properties().element().values("name").count()', {})).toThrow('step not implemented after properties(): count()');
-    // regression: element().label() on an edge property is a scalar — must NOT be blocked
-    expect(read('g.E(7).properties().element().label()').sql).toContain('ownerLabel AS v');
-    // bare element() on an edge IS still deferred (needs src/tgt)
-    expect(() => compile('g.E(7).properties().element()', {})).toThrow('element() of an edge property not yet supported');
+  test('PropertyStream projections re-enter scalar/element lowering', () => {
+    expect(read('g.V(1).properties().key().limit(1)').shape).toEqual({ kind: 'value', as: undefined });
+    expect(read('g.V(1).properties().element().values("name").count()').shape).toEqual({ kind: 'count' });
+    // element() retypes to an ordinary owner stream, including edge materialization.
+    expect(read('g.E(7).properties().element().label()').shape).toEqual({ kind: 'value', as: undefined });
+    expect(read('g.E(7).properties().element()').shape).toEqual({ kind: 'edge' });
+    // Carried aliases survive the property payload and the owner retype.
+    expect(read('g.V(1).as("a").properties().element().select("a")').shape).toEqual({ kind: 'vertex' });
   });
 
   // ---- P2c-2 aggregation: group/groupCount + nested by() ----
@@ -996,10 +1001,10 @@ describe('compiler SQL snapshots', () => {
   test('properties().group() over the property stream (vertex-property gate)', () => {
     const p = read('g.V().properties().group().by(__.project("n","k","v").by(__.element().values("name")).by(__.key()).by(__.value())).by(__.tail())');
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'map', parts: [{ key: 'n' }, { key: 'k' }, { key: 'v' }] }, val: { kind: 'elementLast', elem: 'property' } });
-    expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=c1.owner AND key=? ORDER BY id LIMIT 1) AS k0_v"); // property-group ctx columns typed via the CTE relation
-    expect(p.sql).toContain('pk AS k1_v');
-    expect(p.sql).toContain('pv AS k2_v');
-    expect(p.sql).toContain('owner AS v_owner'); // property value framing
+    expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=p.owner AND key=? ORDER BY id LIMIT 1) AS k0_v"); // property-group ctx columns typed via the CTE relation
+    expect(p.sql).toContain('p.pk AS k1_v');
+    expect(p.sql).toContain('p.pv AS k2_v');
+    expect(p.sql).toContain('p.owner AS v_owner'); // property value framing
   });
 
   test('fold() wraps the projection in a list shape (element or scalar)', () => {
@@ -1860,6 +1865,14 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V(1).properties("age").element().values("name")').map((r) => r.v)).toEqual(['marko']);
     // edge properties too (edge 7 = marko-knows->vadas, weight 0.5)
     expect(run(store, 'g.E(7).properties().value()').map((r) => r.v)).toEqual([0.5]);
+  });
+
+  test('PropertyStream composes through scalar and owner-element dispatch', () => {
+    const store = seededStore();
+    expect(run(store, 'g.V().properties().hasKey("age").value().is(P.gt(30)).count()').map((r) => r.v)).toEqual([2]);
+    // marko has name+age: both property traversers retain the as("a") owner alias.
+    expect(run(store, 'g.V(1).as("a").properties().element().select("a")').length).toBe(2);
+    expect(run(store, 'g.E(7).properties().element().count()').map((r) => r.v)).toEqual([1]);
   });
 
   test('group().by(name).by(tail) yields one vertex per name (gate #1 rows)', () => {

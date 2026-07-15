@@ -4,7 +4,7 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-15 · **live L3 conformance:** 848 · **corpus parse+chain:**
+**Last synced:** 2026-07-15 · **live L3 conformance:** 851 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
 
@@ -69,7 +69,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `values(k…)` | ✅ | |
 | `id()`, `label()`, `count()` | ✅ | ✅ ids frame as `COALESCE(uid,id)` |
 | `valueMap`, `elementMap` | ✅ | ✅ custom vertex/edge framing (client serializer hardcodes empty props) |
-| `properties(k…)` [`.key`/`.value`/`.element`/`.id`/`.label`/`.count`] | ✅ | ✅ `.key`/`.value`/`.element`/`.id`/`.label`/`.count`; real VP id + meta framed (W4)<br>✅ `has(metaKey)`/`hasKey`/`hasValue`/`.properties()`(meta)/`valueMap`(metaMap)<br>❌ `element()` of an **edge** property<br>❌ `properties().dedup()` |
+| `properties(k…)` [`.key`/`.value`/`.element`/`.id`/`.label`/`.count`] | ✅ | ✅ relational PropertyStream with explicit owner/key/value/meta payload + carried state<br>✅ `.key`/`.value`/`.id` retype to ScalarStream; later scalar filters/order/range/reducers/fold compose<br>✅ `.element()` retypes to the owner vertex **or edge** stream; later element steps compose<br>✅ real VP id + meta framed; `has(metaKey)`/`hasKey`/`hasValue`/`.properties()`(meta)/`valueMap`(metaMap)<br>❌ property-stream `dedup()`/`order()` before a projection |
 | `select('a')`, multi-`select`, `project(…)` | 🟡 | ✅ column-threaded aliases<br>❌ `select`/`project` of an **edge**-typed label |
 | `select(Column.values/keys)` | 🟡 | ✅ over a `group()`/`groupCount()` map (retypes → MapStream, §MapStream): scalar/count/sum values + element/scalar keys, incl. list-VALUED maps (`by(__.<move>()…fold())`) as list-of-lists<br>❌ element-VALUE maps, Map-unfold (→Map.Entry), select(Column) on a raw Map param |
 | **chained projections** (`values().count()`, `valueMap().select()`) | 🟡 | ✅ scalar projections retype to a physical ScalarStream; transforms, filters, ordering/range, and numeric reducers then lower one relational step at a time<br>❌ structured projection chains such as `valueMap().select()` still hit the compatibility guard |
@@ -203,7 +203,7 @@ MapStream, §MapStream). Still gates `ProductiveByStrategy` (needs `local()` too
 | Feature | Status | Notes |
 |---|:--:|---|
 | Integer rowid ids | ✅ | |
-| **User-supplied ids** (string `uid`) | 🟡 | ✅ resolved at `V('x')` seed + framing-out<br>❌ scalar id via `by(__.outV().id())`/`group().by(__.id())`<br>❌ edge's own uid via `addE` in some paths<br>❌ `properties().element().id()` |
+| **User-supplied ids** (string `uid`) | 🟡 | ✅ resolved at `V('x')` seed + framing-out and `properties().element().id()`<br>❌ scalar id via `by(__.outV().id())`/`group().by(__.id())`<br>❌ edge's own uid via `addE` in some paths |
 | **Multi-properties** (list/set cardinality) | ✅ | normalized `vertex_properties` table; `values()` flatMaps, `has()` ANY-matches, `valueMap` `{k:[…]}` (W4) |
 | **Meta-properties** (properties-on-properties) | ✅ | JSONB `meta` per VP row; write `property(k,v,mk,mv)`, read `properties().has(mk)`/`.properties()`/`valueMap` (W4) |
 | Property types: primitives + list/map | ✅ | ✅ vertex: normalized `vertex_properties` rows, `value` BLOB affinity (keeps SQLite storage class → correct numeric order/range); edge: flat JSONB `props` (W4) |

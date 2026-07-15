@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–3 complete, Stage 4 active
-**Baseline:** L1 2298/2298, L3 833/2041; latest completed checkpoint: L3 848, 350 tests
+**Baseline:** L1 2298/2298, L3 833/2041; latest completed checkpoint: L3 851, 351 tests
 
 **Implementation checkpoint (2026-07-15):** physical stream schemas and the single
 root materialization boundary are landed. Global count and numeric reducers now lower
@@ -446,11 +446,16 @@ rejected in `renderProjection`.
 
 **Active checkpoint:** the scalar-producing leaf subset is complete: `map`/scalar
 `local`, `math`, `format`, option-choose, and sack read now return ScalarStream and own
-no trailing-step logic. The genuinely structured streams below remain.
+no trailing-step logic. `properties()` now returns a distinct PropertyStream (rather
+than weakening the node/edge-only ElementStream invariant): its explicit
+`vpid,owner,ownerLabel,pk,pv,pmeta + carry` schema supports relational filters, scalar
+projection re-entry, and owner vertex/edge re-entry. That owner retype recovered the
+three official `properties().element()` scenarios (vertex, filtered edge, all edges),
+moving L3 848→851. The other structured streams remain.
 
 Move the remaining terminal islands to streams:
 
-- `properties()` → property ElementStream;
+- ~~`properties()` → PropertyStream~~ (kept distinct from node/edge ElementStream);
 - `select`/`project` → record/map-valued stream;
 - `group`/`groupCount` → MapStream at root and non-root alike;
 - `path` → path-valued stream/materialization strategy;

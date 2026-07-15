@@ -1,15 +1,17 @@
-import { q, value, list, empty, raw, type Expression } from '../q.ts';
+import { q, value, list, empty, type Expression } from '../q.ts';
 import { labels, vertexProperties } from '../schema.ts';
 import {
-  compileNestedScalar, compileNestedList, scalarProp, labelNameSub, framedPropsCtx, vertexPropsAgg, extIdOf, propExtract, predicateSql, nodePropScalar,
+  compileNestedScalar, compileNestedList, scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql,
   type ScalarCtx,
 } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { elemRel, type ElementStream } from './context.ts';
-import { carryOf, toMapStream, type MapOf, type MapStream } from './stream.ts';
-import { type Compiled, type Shape, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
-import { materializeRoot } from './materialize.ts';
+import { carryFrag, carriedCols, elemRel, type Carry, type ElementStream } from './context.ts';
+import { carryOf, toMapStream, toPropertyStream, toScalarStream, type MapOf, type MapStream, type PropertyStream, type ScalarStream } from './stream.ts';
+import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
+import { materializePropertyRoot, materializeRoot } from './materialize.ts';
+import { lowerGlobalCount } from './barrier.ts';
+import { dispatchNext } from './index.ts';
 
 /** Movement heads whose nested-by() aggregate is a correlated neighbourhood
  *  reduction (handled by compileNestedScalar), and the scalar reducers that terminate one. */
@@ -20,7 +22,7 @@ const SCALAR_REDUCERS = new Set(['sum', 'min', 'max', 'mean']);
 
 /** Describes the row source a group() folds over: the FROM (rows aliased `n`),
  *  the scalar context for nested key/value sub-traversals, and the element kind. */
-export interface GroupSource { from: string; ctx: ScalarCtx; elem: ElemShape; }
+export interface GroupSource { from: string | Expression; ctx: ScalarCtx; elem: ElemShape; }
 
 /** Columns that frame one element (vertex/edge/property) under `prefix`. label
  *  rides as a subquery so the FROM needs no labels join. */
@@ -83,7 +85,7 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
  * GROUP BY aggregate; an element value can't be aggregated in SQL (props must be
  * framed), so we emit rows ORDER BY the key and the handler folds runs into the Map.
  */
-export function compileGroup(st: ElementStream, isCount: boolean, bys: any[][], src: GroupSource): Compiled {
+export function compileGroup(st: Carry, isCount: boolean, bys: any[][], src: GroupSource): Compiled {
   if (bys.length > 2) throw new Error('group() with more than two by() modulators not yet supported');
   const key = buildGroupKey(bys[0], src, st.params);
 
@@ -132,7 +134,7 @@ export function compileGroup(st: ElementStream, isCount: boolean, bys: any[][], 
  * element VALUE lists, scalar-LIST values (by('age')/by(__.fold())), composite project
  * keys — can't be one `mv`/`mk` column, so they defer here with a clear message (the
  * terminal group() path still handles them; only the re-enterable form is scoped). */
-export function groupToMapStream(st: ElementStream, isCount: boolean, bys: any[][], src: GroupSource): MapStream {
+export function groupToMapStream(st: Carry, isCount: boolean, bys: any[][], src: GroupSource): MapStream {
   if (st.carried.aliases.size || st.carried.path || st.carried.origins.length)
     throw new Error('group() carrying as()/path()/branch state into a map value not yet supported');
   if (bys.length > 2) throw new Error('group() with more than two by() modulators not yet supported');
@@ -192,19 +194,17 @@ export function groupToMapStream(st: ElementStream, isCount: boolean, bys: any[]
   // null-key drop). Element/token keys are never null, so the filter only guards scalars.
   const keyWhere: Expression = keyOf.kind === 'scalar' ? q` WHERE ${keyGroup} IS NOT NULL` : empty;
   const rel = st.q.cte(q`SELECT ${mk} AS mk, ${mv} AS mv FROM ${src.from}${keyWhere} GROUP BY ${keyGroup}`, ['mk', 'mv']);
-  return toMapStream(carryOf(st), rel, keyOf, valOf);
+  return toMapStream(st, rel, keyOf, valOf);
 }
 
 // ---------- properties() ----------
 
-/**
- * properties()/properties(keys) on the current element, plus an optional single
- * follow-on: key()/value()/count(), or element()[.values/.id/.label/.count]. The
- * traverser is a property — a json_each expansion over the owner's props.
- */
-export function compileProperties(st: ElementStream, tail: PStep[]): Compiled {
-  const elem = st.elem;
-  const keys = tail[0].args.filter((a): a is string => typeof a === 'string');
+const PROPERTY_PAYLOAD = ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta'] as const;
+
+/** properties()/properties(keys) is a genuine shape transition. The property row
+ * stays relational so filters and projections can consume it one step at a time. */
+export function lowerProperties(st: ElementStream, step: PStep): PropertyStream {
+  const keys = step.args.filter((a): a is string => typeof a === 'string');
   const n = elemRel(st);
   const p = st.rel.as('p');
   const l = labels.as('l');
@@ -212,91 +212,100 @@ export function compileProperties(st: ElementStream, tail: PStep[]): Compiled {
   // multi-valued key yields several) — vpid is the real VertexProperty id, pmeta its
   // meta bag. Edge: json_each the flat blob (edge Property has no id/meta/multi).
   let propBody: Expression;
-  if (elem === 'edge') {
+  if (st.elem === 'edge') {
     const keyFilter: Expression = keys.length ? q` WHERE je.key IN (${list(keys.map(value), ',')})` : empty;
-    propBody = q`SELECT NULL AS vpid, ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, je.key AS pk, je.value AS pv, NULL AS pmeta FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}, json_each(json(${n.c.props})) je${keyFilter}`;
+    propBody = q`SELECT NULL AS vpid, ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, je.key AS pk, je.value AS pv, NULL AS pmeta${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}, json_each(json(${n.c.props})) je${keyFilter}`;
   } else {
     const vp = vertexProperties.as('vp');
     const keyFilter: Expression = keys.length ? q` AND ${vp.c.key} IN (${list(keys.map(value), ',')})` : empty;
-    propBody = q`SELECT ${vp.c.id} AS vpid, ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, ${vp.c.key} AS pk, ${vp.c.value} AS pv, json(${vp.c.meta}) AS pmeta FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label} JOIN ${vp} ON ${vp.c.node}=${n.c.id}${keyFilter}`;
+    propBody = q`SELECT ${vp.c.id} AS vpid, ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, ${vp.c.key} AS pk, ${vp.c.value} AS pv, json(${vp.c.meta}) AS pmeta${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label} JOIN ${vp} ON ${vp.c.node}=${n.c.id}${keyFilter}`;
   }
-  const pc = st.q.cte(propBody, ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta']);
+  const rel = st.q.cte(propBody, [...PROPERTY_PAYLOAD, ...carriedCols(st.carried)]);
+  return toPropertyStream(carryOf(st), rel, st.elem);
+}
 
-  // properties().group()/.groupCount() — group over the property stream.
-  const next1 = tail[1]?.name;
-  if (next1 === 'group' || next1 === 'groupCount') {
-    if (2 < tail.length) throw new Error(`step not implemented after properties().${next1}(): ${tail[2].name}()`);
-    const ctx: ScalarCtx = { elem: 'property', idExpr: pc.c.owner, labelIdExpr: q`(SELECT label FROM nodes WHERE id=${pc.c.owner})`, ownerExpr: pc.c.owner, pkExpr: pc.c.pk, pvExpr: pc.c.pv };
-    const src: GroupSource = { from: pc.name, ctx, elem: 'property' };
-    return compileGroup(st, next1 === 'groupCount', tail[1].bys ?? [], src);
-  }
-
-  // Consume leading property-stream filters:
-  //   has(metaKey[, pred]) → a meta-property filter over the pmeta blob;
-  //   hasKey(k|P)          → filter on the property's own key (pk);
-  //   hasValue(v|P)        → filter on the property's own value (pv).
-  let ti = 1;
-  const metaConds: Expression[] = [];
-  for (; ; ti++) {
-    const s = tail[ti];
-    if (s?.name === 'has') {
-      const [mk, mv] = s.args;
-      if (typeof mk !== 'string') throw new Error('properties().has() requires a meta-property key');
-      metaConds.push(predicateSql(propExtract('pmeta', mk).expr, s.args.length > 1 ? mv : undefined));
-    } else if (s?.name === 'hasKey') {
-      metaConds.push(predicateSql(raw('pk'), s.args[0]));
-    } else if (s?.name === 'hasValue') {
-      metaConds.push(predicateSql(raw('pv'), s.args[0]));
-    } else break;
-  }
-  const metaWhere: Expression = metaConds.length ? q` WHERE ${list(metaConds, ' AND ')}` : empty;
-
-  const done = (node: Expression, shape: Shape, termSteps: number): Compiled => {
-    if (tail.length > ti + termSteps) throw new Error(`step not implemented after properties(): ${tail[ti + termSteps].name}()`);
-    return materializeRoot(st.q, node, shape);
+const propertyCtx = (s: PropertyStream): ScalarCtx => {
+  const p = s.rel.as('p');
+  return {
+    elem: 'property', idExpr: p.c.owner,
+    labelIdExpr: q`(SELECT label FROM nodes WHERE id=${p.c.owner})`,
+    ownerExpr: p.c.owner, pkExpr: p.c.pk, pvExpr: p.c.pv,
   };
+};
 
-  const next = tail[ti]?.name;
-  switch (next) {
-    case undefined: // properties() terminal → VertexProperty elements (with meta framed)
-      return done(q`SELECT vpid, owner, pk, pv, pmeta FROM ${pc}${metaWhere}`, { kind: 'property' }, 0);
-    case 'key':
-      return done(q`SELECT pk AS v FROM ${pc}${metaWhere}`, { kind: 'value' }, 1);
-    case 'value':
-      return done(q`SELECT pv AS v FROM ${pc}${metaWhere}`, { kind: 'value' }, 1);
-    case 'id': // the real VertexProperty id
-      return done(q`SELECT vpid AS v FROM ${pc}${metaWhere}`, { kind: 'value' }, 1);
-    case 'count':
-      return done(q`SELECT COUNT(*) AS v FROM ${pc}${metaWhere}`, { kind: 'count' }, 1);
-    case 'valueMap': // a VertexProperty's meta-properties as a flat {metaKey: value} map
-      return done(q`SELECT pmeta AS meta FROM ${pc}${metaWhere}`, { kind: 'metaMap' }, 1);
-    case 'properties': { // meta-properties of the VertexProperty → Property elements
-      const mkeys = tail[ti].args.filter((a): a is string => typeof a === 'string');
-      const mkeyFilter = mkeys.length ? q` WHERE je.key IN (${list(mkeys.map(value), ',')})` : empty;
-      return done(q`SELECT je.key AS mk, je.value AS mv FROM (SELECT pmeta FROM ${pc}${metaWhere}) x, json_each(COALESCE(x.pmeta, '{}')) je${mkeyFilter}`, { kind: 'metaProperty' }, 1);
-    }
-    case 'element': {
-      const after = tail[ti + 1]?.name;
-      if (elem === 'edge' && after === undefined) throw new Error('element() of an edge property not yet supported');
-      switch (after) {
-        case undefined:
-          return done(q`SELECT owner AS id, ownerLabel AS label, ${vertexPropsAgg(raw('owner'))} AS props FROM ${pc}${metaWhere}`, { kind: 'vertex' }, 1);
-        case 'id':
-          return done(q`SELECT owner AS v FROM ${pc}${metaWhere}`, { kind: 'value' }, 2);
-        case 'label':
-          return done(q`SELECT ownerLabel AS v FROM ${pc}${metaWhere}`, { kind: 'value' }, 2);
-        case 'values': {
-          const pe = nodePropScalar(raw('owner'), tail[ti + 1].args[0]);
-          const w = metaConds.length ? q` WHERE ${list([...metaConds, predicateSql(pe, undefined)], ' AND ')}` : q` WHERE ${predicateSql(pe, undefined)}`;
-          return done(q`SELECT ${pe} AS v FROM ${pc}${w}`, { kind: 'value' }, 2);
-        }
-        case 'count':
-          return done(q`SELECT COUNT(*) AS v FROM ${pc}${metaWhere}`, { kind: 'count' }, 2);
-        default:
-          throw new Error(`step not implemented after element(): ${after}()`);
-      }
-    }
-    default:
-      throw new Error(`step not implemented after properties(): ${next}()`);
+function filterProperty(s: PropertyStream, step: PStep): PropertyStream {
+  const p = s.rel.as('p');
+  let test: Expression;
+  if (step.name === 'has') {
+    const [mk, mv] = step.args;
+    if (typeof mk !== 'string') throw new Error('properties().has() requires a meta-property key');
+    test = predicateSql(propExtract(p.c.pmeta, mk).expr, step.args.length > 1 ? mv : undefined);
+  } else if (step.name === 'hasKey') test = predicateSql(p.c.pk, step.args[0]);
+  else test = predicateSql(p.c.pv, step.args[0]);
+  const rel = s.q.cte(
+    q`SELECT ${list(PROPERTY_PAYLOAD.map((c) => p.c[c]), ', ')}${carryFrag(s.carried, p)} FROM ${p} WHERE ${test}`,
+    [...PROPERTY_PAYLOAD, ...carriedCols(s.carried)],
+  );
+  return toPropertyStream(carryOf(s), rel, s.ownerElem);
+}
+
+function propertyScalar(s: PropertyStream, col: 'vpid' | 'pk' | 'pv'): ScalarStream {
+  const p = s.rel.as('p');
+  const rel = s.q.cte(
+    q`SELECT ${p.c[col]} AS v${carryFrag(s.carried, p)} FROM ${p}`,
+    ['v', ...carriedCols(s.carried)],
+  );
+  return toScalarStream(carryOf(s), rel);
+}
+
+/** Consume a PropertyStream. Only property-specific operations live here; once a
+ * step changes shape it re-enters the same root dispatcher as every other stream. */
+export function compileFromProperty(s: PropertyStream, steps: PStep[], at: number): Compiled {
+  if (at >= steps.length) return materializePropertyRoot(s);
+  const step = steps[at];
+
+  if (step.name === 'has' || step.name === 'hasKey' || step.name === 'hasValue')
+    return dispatchNext(filterProperty(s, step), steps, at + 1);
+
+  if (step.name === 'key' || step.name === 'value' || step.name === 'id') {
+    const col = step.name === 'key' ? 'pk' : step.name === 'value' ? 'pv' : 'vpid';
+    return dispatchNext(propertyScalar(s, col), steps, at + 1);
   }
+
+  if (step.name === 'count') return dispatchNext(lowerGlobalCount(s), steps, at + 1);
+
+  if (step.name === 'group' || step.name === 'groupCount') {
+    const ctx = propertyCtx(s);
+    const src: GroupSource = { from: s.rel.as('p'), ctx, elem: 'property' };
+    const isCount = step.name === 'groupCount';
+    if (at + 1 < steps.length)
+      return dispatchNext(groupToMapStream(s, isCount, step.bys ?? [], src), steps, at + 1);
+    return compileGroup(s, isCount, step.bys ?? [], src);
+  }
+
+  if (step.name === 'valueMap') {
+    if (at + 1 < steps.length) throw new Error(`step not implemented after properties().valueMap(): ${steps[at + 1].name}()`);
+    const p = s.rel.as('p');
+    return materializeRoot(s.q, q`SELECT ${p.c.pmeta} AS meta FROM ${p}`, { kind: 'metaMap' });
+  }
+
+  if (step.name === 'properties') {
+      if (at + 1 < steps.length) throw new Error(`step not implemented after properties().properties(): ${steps[at + 1].name}()`);
+      const mkeys = step.args.filter((a): a is string => typeof a === 'string');
+      const mkeyFilter = mkeys.length ? q` WHERE je.key IN (${list(mkeys.map(value), ',')})` : empty;
+      const p = s.rel.as('p');
+      return materializeRoot(s.q, q`SELECT je.key AS mk, je.value AS mv FROM ${p}, json_each(COALESCE(${p.c.pmeta}, '{}')) je${mkeyFilter}`, { kind: 'metaProperty' });
+  }
+
+  if (step.name === 'element') {
+    const p = s.rel.as('p');
+    const rel = s.q.cte(
+      q`SELECT ${p.c.owner} AS id${carryFrag(s.carried, p)} FROM ${p}`,
+      ['id', ...carriedCols(s.carried)],
+    );
+    const out: ElementStream = { ...carryOf(s), kind: 'elements', rel, elem: s.ownerElem };
+    return dispatchNext(out, steps, at + 1);
+  }
+
+  throw new Error(`step not implemented after properties(): ${step.name}()`);
 }

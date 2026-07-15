@@ -9,7 +9,7 @@
 import { type Expression, type Query } from '../q.ts';
 import { readCompiled, type Compiled, type Shape } from '../render.ts';
 import { q } from '../q.ts';
-import { type ListStream, type ScalarStream } from './stream.ts';
+import { type ListStream, type PropertyStream, type ScalarStream } from './stream.ts';
 
 export function materializeRoot(query: Query, tail: Expression, shape: Shape): Compiled {
   return readCompiled(query, tail, shape);
@@ -37,5 +37,17 @@ export function materializeListRoot(stream: ListStream): Compiled {
     stream.q,
     q`SELECT json(${c.c.list}) AS list FROM ${c}`,
     as ? { kind: 'jsonbList', as } : { kind: 'jsonbList' },
+  );
+}
+
+/** Materialize a PropertyStream only at the root boundary. Edge Property rows use
+ * the same payload shape (with a null vpid/meta) as the historical properties()
+ * compiler; VertexProperty rows retain their real id and meta-properties. */
+export function materializePropertyRoot(stream: PropertyStream): Compiled {
+  const p = stream.rel.as('p');
+  return materializeRoot(
+    stream.q,
+    q`SELECT ${p.c.vpid}, ${p.c.owner}, ${p.c.pk}, ${p.c.pv}, ${p.c.pmeta} FROM ${p}`,
+    { kind: 'property' },
   );
 }
