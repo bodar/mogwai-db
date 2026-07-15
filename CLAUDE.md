@@ -75,9 +75,10 @@ Traversal-valued `project().by(__.<scalar child>)` is the first generic by-consu
 one outer origin identifies each parent, every field compiles with child `first`
 cardinality, and the field relations inner-join on that origin. Missing child rows drop
 the project traverser; a productive NULL remains a field value; duplicate parents remain
-distinct. This currently requires every cycled project by-modulator to be a scalar child
-traversal. Mixed string/token/element modulators and select/group by-consumers are the
-next slices; do not grow `compileNestedScalar` to implement them.
+distinct. Mixed property-key and `T.id`/`T.label` scalar modulators share that relation;
+bare element fields plus select/group by-consumers are the next slices. Consumers call
+`tryCompileScalarValueChild` and never distinguish row projections from total count;
+do not grow `compileNestedScalar` to implement new by forms.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
   (`stripTerminal`, `foldRepeatClusters`, `foldByModulators`) run once up front so
   the dispatch sees a canonical, peek-free chain (no index arithmetic anywhere).

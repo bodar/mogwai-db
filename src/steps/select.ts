@@ -1,6 +1,6 @@
 import { q, list, empty, value, type Expression } from '../q.ts';
-import { nodes, edges, labels } from '../schema.ts';
-import { framedProps, nodePropScalar, predicateSql, propExtract, extIdOf } from '../plan.ts';
+import { nodes, edges, labels, vertexProperties } from '../schema.ts';
+import { framedProps, labelNameSub, nodePropScalar, predicateSql, propExtract, extIdOf } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
 import { carryOf, pathColumns, recordFieldColumns, toListStream, toPathStream, toRecordStream, toScalarStream, type PathStream, type RecordField, type RecordStream, type ScalarStream } from './stream.ts';
@@ -9,7 +9,7 @@ import { type TailAcc, type TailMods } from './projection.ts';
 import { materializeRecordRoot } from './materialize.ts';
 import { lowerGlobalCount } from './barrier.ts';
 import { dispatchNext } from './index.ts';
-import { isScalarChild, pushChildScope, tryCompileScalarChild } from './child.ts';
+import { isScalarChild, pushChildScope, tryCompileScalarValueChild } from './child.ts';
 
 // ---------- select()/project() ----------
 
@@ -31,13 +31,51 @@ function byToEntry(byArgs: any[] | undefined): { sub: 'vertex' | 'value'; key?: 
 function tryLowerTraversalProject(st: ElementStream, proj: PStep, keys: string[]): RecordStream | null {
   if (proj.name !== 'project' || !proj.bys?.length) return null;
   const args = keys.map((_, i) => proj.bys![i % proj.bys!.length]);
-  const nested = args.map((by) => by?.find((a: any) => a && typeof a === 'object' && 'nested' in a)?.nested);
-  if (nested.some((body) => !body) || nested.some((body) => !isScalarChild(body, st.params))) return null;
+  const specs = args.map((by) => by?.[0]);
+  const nested = specs.map((a) => a && typeof a === 'object' && 'nested' in a ? a.nested : null);
+  if (!nested.some(Boolean)) return null; // leave the mature all-direct path untouched
+  if (specs.some((a, i) => {
+    if (nested[i]) return !isScalarChild(nested[i], st.params);
+    if (typeof a === 'string') return false;
+    return !(a && typeof a === 'object' && 'token' in a && (a.token === 'id' || a.token === 'label'));
+  })) return null;
 
   const outer = pushChildScope(st);
-  const children = nested.map((body) => tryCompileScalarChild(outer.seed, body, 'first', outer.scope));
-  if (children.some((child) => !child)) return null;
-  const branches = children.map((child, i) => child!.rel.as(`b${i}`));
+  const branches = specs.map((spec, i) => {
+    if (nested[i]) {
+      const child = tryCompileScalarValueChild(outer.seed, nested[i], 'first', outer.scope);
+      if (!child) throw new Error('scalar project child failed after successful shape preflight');
+      return child.rel.as(`b${i}`);
+    }
+
+    const p = outer.seed.rel.as(`p${i}`);
+    const n = (st.elem === 'edge' ? edges : nodes).as(`n${i}`);
+    if (typeof spec === 'string' && st.elem === 'node') {
+      const vp = vertexProperties.as(`vp${i}`);
+      const ranked = st.q.cte(
+        q`SELECT ${vp.c.value} AS v${carryFrag(outer.seed.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${p.c[outer.frame.ordinal]} ORDER BY ${vp.c.id}) AS rn FROM ${p} JOIN ${vp} ON ${vp.c.node}=${p.c.id} AND ${vp.c.key}=${value(spec)}`,
+        ['v', ...carriedCols(outer.seed.carried), 'rn'],
+      );
+      const r = ranked.as(`r${i}`);
+      return st.q.cte(
+        q`SELECT ${r.c.v} AS v${carryFrag(outer.seed.carried, r)} FROM ${r} WHERE ${r.c.rn}=1`,
+        ['v', ...carriedCols(outer.seed.carried)],
+      ).as(`b${i}`);
+    }
+    if (typeof spec === 'string') {
+      return st.q.cte(
+        q`SELECT j.value AS v${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id} JOIN json_each(json(${n.c.props})) j ON j.key=${value(spec)}`,
+        ['v', ...carriedCols(outer.seed.carried)],
+      ).as(`b${i}`);
+    }
+    const scalar = spec.token === 'label'
+      ? labelNameSub(n.c.label)
+      : q`COALESCE(${n.c.uid}, ${n.c.id})`;
+    return st.q.cte(
+      q`SELECT ${scalar} AS v${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`,
+      ['v', ...carriedCols(outer.seed.carried)],
+    ).as(`b${i}`);
+  });
   const first = branches[0];
   const joins = branches.slice(1).map((branch) => q` JOIN ${branch} ON ${branch.c[outer.frame.ordinal]}=${first.c[outer.frame.ordinal]}`);
   const fields: RecordField[] = keys.map((key, i) => ({ key, prefix: `e${i}`, sub: 'value' }));
