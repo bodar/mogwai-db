@@ -20,6 +20,7 @@ import { compileFromRecord } from './select.ts';
 import { assertStreamColumns, continueLowering, type LoweringResult, type Stream } from './stream.ts';
 import { type Compiled } from '../render.ts';
 import { tryBulkRepeatCount } from './bulk.ts';
+import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../fast-paths.ts';
 import { lowerScalarRows } from './scalar.ts';
 import { materializeFinal } from './materialize.ts';
 import { lowerGlobalCount } from './barrier.ts';
@@ -84,7 +85,7 @@ const chainNeedsFromV = (steps: PStep[]): boolean => steps.some((s) => s.name ==
 /** Seed the source CTE (c0) from V(...)/E(...) and its optional id list. When the
  *  chain tracks a path, the source element is path position p0 (projected as the
  *  extra `p0` column). */
-function seedSource(first: PStep, query: Query, params: Record<string, any>, trackPath: boolean, sackInit?: SackSpec): ElementStream {
+function seedSource(first: PStep, query: Query, params: Record<string, any>, trackPath: boolean, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS): ElementStream {
   const elem: Elem = first.name === 'E' ? 'edge' : 'node';
   const srcRel = elem === 'edge' ? edges : nodes;
   const sel = trackPath ? 'id, id AS p0' : 'id';
@@ -110,7 +111,7 @@ function seedSource(first: PStep, query: Query, params: Record<string, any>, tra
   }
   const cols = [...(trackPath ? ['id', 'p0'] : ['id']), ...(sackInit ? ['sk'] : [])];
   const path = trackPath ? { kind: 'cols' as const, cols: [{ col: 'p0', elem }] } : undefined;
-  return { kind: 'elements', q: query, params, rel: query.cte(body, cols), elem, carried: { aliases: new Map(), origins: [], path, sack: sackInit ? 'sk' : undefined } };
+  return { kind: 'elements', q: query, params, fastPaths, rel: query.cte(body, cols), elem, carried: { aliases: new Map(), origins: [], path, sack: sackInit ? 'sk' : undefined } };
 }
 
 /** union(b1, b2, …) as a SOURCE step: compile each branch's prefix into the SAME
@@ -118,20 +119,20 @@ function seedSource(first: PStep, query: Query, params: Record<string, any>, tra
  *  into one seed. Branches must be vertex-rooted prefixes with no leftover tail or
  *  as() (those defer); the shared-Query recursion also lets a branch be a nested
  *  union. This is the reusable sub-traversal-into-query seam local/map/choose build on. */
-function seedUnion(first: PStep, query: Query, params: Record<string, any>, sackInit?: SackSpec): ElementStream {
+function seedUnion(first: PStep, query: Query, params: Record<string, any>, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS): ElementStream {
   if (sackInit) throw new Error('withSack() with a union() source not yet supported');
   const branches = first.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 1) throw new Error('union() needs at least one branch');
   const rels = branches.map((b: any) => {
     const bsteps = stepChain(b.nested, params);
-    const { st, stop } = buildPrefix(bsteps, params, query);
+    const { st, stop } = buildPrefix(bsteps, params, query, undefined, fastPaths);
     if (stop !== bsteps.length) throw new Error(`union() source branch tail __.${bsteps[stop].name}() not yet supported`);
     if (st.elem !== 'node') throw new Error('union() source branch must be vertex-typed');
     if (st.carried.aliases.size > 0) throw new Error('union() source branch with as() not yet supported');
     return st.rel;
   });
   const body = list(rels.map((r) => q`SELECT id FROM ${r}`), ' UNION ALL ');
-  return { kind: 'elements', q: query, params, rel: query.cte(body, ['id']), elem: 'node', carried: { aliases: new Map(), origins: [] } };
+  return { kind: 'elements', q: query, params, fastPaths, rel: query.cte(body, ['id']), elem: 'node', carried: { aliases: new Map(), origins: [] } };
 }
 
 /**
@@ -206,11 +207,11 @@ export function tryLowerElementSteps(steps: PStep[], seed: ElementStream): Eleme
   return lowered.next === steps.length ? lowered.stream : null;
 }
 
-export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, query: Query = new Query(), sackInit?: SackSpec): { st: ElementStream; stop: number } {
+export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, query: Query = new Query(), sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS): { st: ElementStream; stop: number } {
   const first = steps[0];
   const trackPath = chainTracksPath(steps);
-  const seeded = first.name === 'union' ? seedUnion(first, query, params, sackInit)
-    : (first.name === 'V' || first.name === 'E') ? seedSource(first, query, params, trackPath, sackInit)
+  const seeded = first.name === 'union' ? seedUnion(first, query, params, sackInit, fastPaths)
+    : (first.name === 'V' || first.name === 'E') ? seedSource(first, query, params, trackPath, sackInit, fastPaths)
     : (() => { throw new Error(`unsupported source step: ${first.name}`); })();
   // Gate the otherV() entering-vertex tracking on the chain; local()'s body inherits
   // the flag through its {...st} seed, so an inner edge step records it too.
@@ -272,14 +273,14 @@ export function lowerSteps(initial: Stream, steps: PStep[], from: number): Strea
 
 /** A read traversal: prefix fold + shaped lowering loop.
  *  `sackInit` (from withSack()) seeds the carried sack column at the source. */
-export function compileRead(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec): Compiled {
+export function compileRead(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS): Compiled {
   // Traverser bulking: a `repeat(...).times(n).count()` (path/as/sack-free) compiles to
   // unrolled GROUP-BY-SUM(bulk) CTEs instead of an enumerate-every-walk recursion, so a
   // dense/deep count (grateful times(8) ≈ 2.5e15 walks) stays tractable. Null → not the
   // bulkable shape; fall through to the normal fold. See steps/bulk.ts.
-  const bulked = tryBulkRepeatCount(steps, params, sackInit);
+  const bulked = fastPaths.bulkRepeatCount ? tryBulkRepeatCount(steps, params, sackInit) : null;
   if (bulked) return bulked;
 
-  const { st, stop } = buildPrefix(steps, params, new Query(), sackInit);
+  const { st, stop } = buildPrefix(steps, params, new Query(), sackInit, fastPaths);
   return materializeFinal(lowerSteps(st, steps, stop));
 }

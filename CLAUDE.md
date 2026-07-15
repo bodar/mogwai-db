@@ -31,8 +31,45 @@ shared/reused or the planner needs an intentional materialization boundary.
 `MapStream`) and materializes only at the root through `steps/materialize.ts`.
 `select`/`project` always lower to streams;
 `group`/`groupCount` always lower through `lowerGroup` to a rich GroupStream, terminal
-or followed. See `docs/2026-07-15-unified-relational-lowering-plan.md` for the active
-staged migration; the older P1–P3 sections below are historical semantics notes.
+or followed. See `docs/2026-07-15-unified-relational-lowering-plan.md` for the completed
+architecture and decision log; the older P1–P3 sections below are historical semantics
+notes.
+
+### Compiler extension law — mandatory
+
+`lowerSteps(Stream, steps, at)` is the semantic authority for ordinary read traversals,
+at both root and child scope. To implement a step: normalize sibling/modulator structure
+in `strategies.ts`; lower from the appropriate typed `Stream`; return a `Stream` /
+`LoweringContinuation`; for a child, push `ChildScope` and run the same lowering engine;
+apply `first`/`all`/productivity/barrier policy through shared scope-aware helpers; and
+materialize only at the root in `steps/materialize.ts`.
+
+**Do NOT add** a private child traversal parser or supported-step vocabulary, a
+`compileNested*` mini-compiler, sibling/index scanning inside a step compiler, a second
+movement/filter/projection implementation, direct `Compiled`/GraphBinary materialization
+from a read leaf, or loose domain/ordinal arguments where `CompileScope` owns that state.
+
+A specialized lowering is a **fast path only** when all of these hold:
+
+- the generic path remains the semantic authority and disabling the fast path compiles
+  the same traversal through that generic machinery;
+- recognition failure returns `null`/falls through — it never defines language support
+  or throws merely because its optimized vocabulary is exhausted;
+- enabled and disabled executions are result-equivalent in a committed test;
+- an EXPLAIN assertion or benchmark demonstrates a material benefit;
+- it preserves the same Stream/scope contracts (except a documented whole-plan
+  specialization such as bulk repeat-count); if the benefit disappears, delete it.
+
+Fast paths are explicit per-compilation switches in `CompileOptions.fastPaths`; never add
+a mutable global flag. The independently disable-safe fast paths are currently
+`predicateInlining`, `singleHopOptional`, and `bulkRepeatCount`. Their equivalence test is
+in `test/compiler.test.ts`. Some `tryInline*` helpers are also still used as compatibility
+machinery where no generic fallback exists (notably predicate `choose`/`repeat` and
+property-group shapes): those uses are migration debt, **not fast paths**, must not be
+copied as extension patterns, and do not qualify for a new switch until a generic fallback
+exists. New fast paths require a switch, enabled-vs-disabled equivalence coverage, and
+performance evidence in the same change.
+
 Element-valued child `map`/origin-safe `flatMap` bodies now enter
 `tryCompileElementChild` (`steps/child.ts`): the same prefix StepFns run over a pushed
 parent domain, then `first`/`all` cardinality restores the outer scope. Extend this

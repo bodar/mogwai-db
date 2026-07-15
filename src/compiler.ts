@@ -3,8 +3,10 @@ import { applyStrategies, normalize } from './strategies.ts';
 import { compileRead } from './steps/index.ts';
 import { routeWrite } from './steps/write.ts';
 import { type Compiled, type WritePlan } from './render.ts';
+import { resolveFastPaths, type CompileOptions } from './fast-paths.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
 export type { Compiled, WritePlan, Shape, ValueType, ListOf, MapEntry, ElemShape, GroupKey, GroupVal, PathPos } from './render.ts';
+export type { CompileOptions, FastPathConfig } from './fast-paths.ts';
 
 // ---------- compilation orchestrator ----------
 //
@@ -19,14 +21,15 @@ export type { Compiled, WritePlan, Shape, ValueType, ListOf, MapEntry, ElemShape
 // verification checks / fail-closed rejections — lives in strategies.ts
 // (extractStrategies front-end + applyStrategies). See that module's header.
 
-export function compile(gremlin: string, params: Record<string, any>): Compiled | WritePlan {
+export function compile(gremlin: string, params: Record<string, any>, options?: CompileOptions): Compiled | WritePlan {
   const tree = parseGremlin(gremlin);
   const rewritten = applyStrategies(stepChain(tree, params), extractStrategies(tree, params), params);
   const { steps, discard } = normalize(rewritten);
   if (steps.length === 0) throw new Error('empty traversal');
 
   const sackInit = extractSack(tree, params);
-  const plan: Compiled | WritePlan = routeWrite(steps, params) ?? compileRead(steps, params, sackInit ?? undefined);
+  const plan: Compiled | WritePlan = routeWrite(steps, params)
+    ?? compileRead(steps, params, sackInit ?? undefined, resolveFastPaths(options));
 
   if (discard) {
     // v4 iterate(): execute for effect, return nothing.

@@ -129,7 +129,9 @@ export const has: StepFn = (s, st) => {
 export const where: StepFn = (s, st) => {
   const arg0 = s.args[0];
   if (arg0 && typeof arg0 === 'object' && 'nested' in arg0) {
-    const pred = tryInlinePredicate(stepChain(arg0.nested, st.params), currentCtx(st), st.params, aliasResolver(st));
+    const pred = st.fastPaths?.predicateInlining === false
+      ? null
+      : tryInlinePredicate(stepChain(arg0.nested, st.params), currentCtx(st), st.params, aliasResolver(st));
     if (pred)
       return filterCte(st, s.name === 'not' ? notCoalesce(pred) : pred);
     const generic = tryFilterByChildExistence(st, arg0.nested, s.name === 'not');

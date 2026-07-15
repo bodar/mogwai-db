@@ -201,7 +201,7 @@ export const optional: StepFn = (s, st) => {
   if (!body.length) throw new Error('optional(traversal) required');
   // Fast path only WITHOUT path tracking: with a path, hit extends it and miss doesn't,
   // so the two are ragged and must go through the padded general path below.
-  if (!st.carried.origins.length && !st.carried.path && body.length === 1 && (body[0].name === 'out' || body[0].name === 'in') && st.elem === 'node') {
+  if (st.fastPaths?.singleHopOptional !== false && !st.carried.origins.length && !st.carried.path && body.length === 1 && (body[0].name === 'out' || body[0].name === 'in') && st.elem === 'node') {
     const [from, to] = dirsFor(body[0].name)[0];
     const e = edges.as('e');
     const p = prevRel(st, 'p');

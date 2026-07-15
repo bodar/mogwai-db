@@ -1,5 +1,5 @@
 import { test, expect, describe } from 'bun:test';
-import { compile } from '../src/compiler.ts';
+import { compile, type CompileOptions } from '../src/compiler.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { executeQuery } from '../src/execute.ts';
@@ -11,8 +11,8 @@ import { readdirSync, readFileSync } from 'node:fs';
 
 // ---------- L2: SQL snapshots (canonical string -> SQL + binds + shape) ----------
 
-const read = (q: string) => {
-  const p = compile(q, {});
+const read = (q: string, options?: CompileOptions) => {
+  const p = compile(q, {}, options);
   if (p.kind !== 'read') throw new Error('expected read plan');
   return p;
 };
@@ -1923,8 +1923,46 @@ const run = (store: GraphStore, q: string) => {
   return store.query(p.sql, p.binds);
 };
 
+const runWith = (store: GraphStore, q: string, options: CompileOptions) => {
+  const p = compile(q, {}, options);
+  if (p.kind === 'write') return p.run(store);
+  return store.query(p.sql, p.binds);
+};
+
 describe('compiler execution semantics', () => {
   describe('unified lowering characterization', () => {
+    test('every disable-safe fast path is result-equivalent to generic lowering', () => {
+      const store = seededStore();
+      const cases: Array<{ key: keyof NonNullable<CompileOptions['fastPaths']>; query: string; fastSql: string; genericSql: string }> = [
+        {
+          key: 'predicateInlining',
+          query: 'g.V().where(__.out("knows")).values("name").order()',
+          fastSql: 'WHERE EXISTS(SELECT 1 FROM edges',
+          genericSql: 'ROW_NUMBER() OVER () AS o0',
+        },
+        {
+          key: 'singleHopOptional',
+          query: 'g.V().optional(__.out("knows")).count()',
+          fastSql: 'LEFT JOIN edges',
+          genericSql: 'UNION ALL SELECT id',
+        },
+        {
+          key: 'bulkRepeatCount',
+          query: 'g.V().repeat(__.out()).times(2).count()',
+          fastSql: 'SUM(bulk)',
+          genericSql: 'with recursive',
+        },
+      ];
+
+      for (const { key, query, fastSql, genericSql } of cases) {
+        const enabled = { fastPaths: { [key]: true } } as CompileOptions;
+        const disabled = { fastPaths: { [key]: false } } as CompileOptions;
+        expect(read(query, enabled).sql).toContain(fastSql);
+        expect(read(query, disabled).sql).toContain(genericSql);
+        expect(runWith(store, query, enabled)).toEqual(runWith(store, query, disabled));
+      }
+    });
+
     test('duplicate parent traversers remain distinct through a child reduction', () => {
       const store = seededStore();
       // The two identity arms are two traversers with the same vertex id. A future

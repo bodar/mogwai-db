@@ -2,6 +2,7 @@ import { q, list, empty, Query, Relation, type Expression } from '../q.ts';
 import { nodes, edges } from '../schema.ts';
 import { type Elem } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
+import { type FastPathConfig } from '../fast-paths.ts';
 
 // ---------- prefix-compilation state (Seam 2) ----------
 //
@@ -83,6 +84,7 @@ export interface Carried {
 export interface Carry {
   readonly q: Query;
   readonly params: Record<string, any>;
+  readonly fastPaths?: FastPathConfig;
   readonly sideEffects?: SideEffectMap;  // named side-effect collections (aggregate/store/group('a'))
   readonly carried: Carried;             // the per-traverser carried column schema
 }
