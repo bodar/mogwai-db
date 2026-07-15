@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–5 complete, Stage 6 active
-**Baseline:** full suite 360/360, L1 2298/2298, L3 876/2041; 236 compiler tests
+**Baseline:** full suite 360/360, L1 2298/2298, L3 876/2041; 237 compiler tests
 
 ## Restart handoff — read this first after a context reset
 
@@ -41,6 +41,12 @@ do not push or merge to trunk. Run the full `bun test` suite before every local 
    multiset-safe origin before the existing GroupStream barrier. Empty children drop the
    member; count produces zero; duplicate parents remain distinct. Stashed `cap()` and
    property groups keep their mature correlated paths. L3 remains 876.
+8. Non-reducing scalar traversal values for inline element `group()` now lower through
+   the same outer domain with `all` cardinality: every productive child row becomes a
+   scalar-list member, missing children contribute nothing, productive NULL survives,
+   and duplicate parents retain duplicate child rows. A generic key and value share one
+   origin. Group-scoped reducers and fold/tail stay on their existing barrier paths. L3
+   remains 876.
 
 **Current Stage 6 slice:** traversal-valued `project().by()` is now the first generic
 by-consumer. An outer origin identifies each parent; every scalar child modulator lowers
@@ -50,10 +56,10 @@ keys, `T.id`/`T.label`, and complete bare vertex/edge fields can mix with traver
 in the same relation. Element fields retain their internal rowid for downstream movement.
 L3 is 874.
 
-**Immediate next slice:** migrate scalar group value modulators onto the generic
-child-stream and explicit productivity seam while preserving group-scoped barrier
-semantics. Scalar traversal select and inline scalar traversal group keys are complete;
-list/element-valued select modulators remain a later shaped-child extension.
+**Immediate next slice:** give group-scoped scalar reducers an explicit relational
+policy over the shared child-row source, without reducing independently per parent.
+Scalar traversal select and inline scalar traversal group keys/non-reducing values are
+complete; list/element-valued select modulators remain a later shaped-child extension.
 Do not add more recognized syntax to `compileNestedScalar`: treat its current correlated
 SQL cases as optional fast paths and add generic child-stream fallbacks with explicit
 first/productive cardinality. Other consumers to inventory afterward are sack, math,

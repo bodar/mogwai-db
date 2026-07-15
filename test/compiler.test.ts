@@ -1049,6 +1049,17 @@ describe('compiler SQL snapshots', () => {
     expect(p.sql).toContain('GROUP BY gk');
   });
 
+  test('non-reducing scalar group values lower through generic child-all productivity', () => {
+    const p = read('g.V().group().by("name").by(__.out().values("name"))');
+    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'scalarList' } });
+    expect(p.sql).toContain('ROW_NUMBER() OVER () AS o0');
+    expect(p.sql).toContain('ON gv.o0=gp.o0');
+    expect(p.sql).toContain('json_group_array(gv.v) AS gv');
+    const both = read('g.V().group().by(__.label()).by(__.values("name").substring(0,1))');
+    expect(both.sql).toContain('ON gk.o0=gp.o0');
+    expect(both.sql).toContain('ON gv.o0=gp.o0');
+  });
+
   test('sack(op).by(key) mutates a carried sk column; bare sack() reads it', () => {
     const p = read('g.V().sack(assign).by("age").sack()');
     expect(p.shape).toEqual({ kind: 'value' });
@@ -2160,6 +2171,19 @@ describe('compiler execution semantics', () => {
     const byName = Object.fromEntries(rows.map((r) => [r.gk, r.gv]));
     expect(byName.marko).toBe('[29]');
     expect(byName.lop).toBe('[null]'); // SQL keeps null; handler strips it to [] on frame
+    const children = Object.fromEntries(run(store, 'g.V().group().by("name").by(__.out().values("name"))')
+      .map((r) => [r.gk, JSON.parse(r.gv).sort()]));
+    expect(children).toEqual({
+      marko: ['josh', 'lop', 'vadas'],
+      josh: ['lop', 'ripple'],
+      peter: ['lop'],
+    });
+    const duplicateChildren = JSON.parse(run(store, 'g.V(1).union(__.identity(),__.identity()).group().by("name").by(__.out().values("name"))')[0].gv).sort();
+    expect(duplicateChildren).toEqual(['josh', 'josh', 'lop', 'lop', 'vadas', 'vadas']);
+    expect(run(store, 'g.V().group().by("name").by(__.values("missing"))')).toEqual([]);
+    const initials = Object.fromEntries(run(store, 'g.V().group().by(__.label()).by(__.values("name").substring(0,1))')
+      .map((r) => [r.gk, JSON.parse(r.gv).sort()]));
+    expect(initials).toEqual({ person: ['j', 'm', 'p', 'v'], software: ['l', 'r'] });
   });
 
   test('is(P) filters a scalar stream; TextP is LIKE', () => {
