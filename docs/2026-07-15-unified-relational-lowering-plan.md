@@ -2,14 +2,14 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–5 complete, Stage 6 active
-**Baseline:** L1 2298/2298, L3 876/2041; latest focused checkpoint: 236 compiler tests
+**Baseline:** full suite 360/360, L1 2298/2298, L3 876/2041; 236 compiler tests
 
 ## Restart handoff — read this first after a context reset
 
-**Last committed checkpoint:** branch `refactor/unified-relational-lowering`, commit
-`8bc5b60` (`unify heterogeneous project by fields`). The next local commit contains the
-labelled select slice described below. Work is local-only: do not push or merge to trunk.
-Run the full `bun test` suite before every local commit.
+**Current committed checkpoint:** branch `refactor/unified-relational-lowering`; every
+slice through item 7 below is committed, ending with `lower scalar group keys through
+child streams`. The working tree was clean before this handoff refresh. Work is local-only:
+do not push or merge to trunk. Run the full `bun test` suite before every local commit.
 
 **Recent completed slices:**
 
