@@ -1,10 +1,48 @@
 # Unified relational traversal lowering — root and child traversals through one compiler
 
 **Date:** 2026-07-15  
-**Status:** in progress; Stages 0–3 complete, Stage 4 active
-**Baseline:** L1 2298/2298, L3 833/2041; latest completed checkpoint: L3 872, 357 tests
+**Status:** in progress; Stages 0–5 complete, Stage 6 active
+**Baseline:** L1 2298/2298, L3 873/2041; latest completed checkpoint: 357 tests, 1274 assertions
 
-**Implementation checkpoint (2026-07-15):** physical stream schemas and the single
+## Restart handoff — read this first after a context reset
+
+**Clean checkpoint:** branch `refactor/unified-relational-lowering`, commit `61d028d`
+(`route local element barriers through child streams`). The working tree was clean when
+this handoff was written. Work is local-only: do not push or merge to trunk. Run the full
+`bun test` suite before every local commit.
+
+**Last two completed slices:**
+
+1. `fe361a9` — scoped element `fold()` now produces a typed ListStream per parent;
+   homogeneous element-list union/choose/coalesce arms share `unifyLists`; terminal
+   materialization expands rowids to property-bearing vertex/edge objects in the same
+   SQL query. L3 ratcheted 872→873.
+2. `61d028d` — `local()` now uses generic child `all` cardinality for bare movement and
+   origin-partitioned element `limit`/`skip`/`range`/`dedup` (including before `fold`).
+   `src/steps/local.ts` and its private movement/window compiler were deleted. L3 stayed
+   873. Full suite: 357/357; corpus: 2298/2298.
+
+**Immediate next slice:** traversal-valued `by()`. Do not add more recognized syntax to
+`compileNestedScalar`. Treat its current correlated SQL cases as optional fast paths and
+add a generic child-stream fallback with explicit first/productive cardinality. Inventory
+the consumers before editing: `select/project` (`steps/select.ts`), group keys/values
+(`steps/group.ts`), sack, math, format, and option-choose. Land one coherent consumer
+family per commit; preserve the correlated count/EXISTS fast paths until Stage 8 proves
+whether they should remain. This work is the prerequisite for ProductiveByStrategy.
+
+**Still pending in Stage 6:** scalar/list `optional`, traversal-valued `by`, an explicit
+ProductiveByStrategy productivity policy, and generic child-existence fallback for
+`where`/`filter`/`not`. Element-valued child `order()` is also deferred: it needs
+encounter-order metadata that survives later lowering and root materialization, not a
+CTE-local `ORDER BY` assumption.
+
+**Non-negotiable invariants:** productive SQL NULL is a traverser; no child row is
+different from a NULL row. Child barriers group by multiset-safe origin ordinals and use
+the preserved parent domain for total empty results. Mixed stream/list item shapes fail
+closed. SQL generation stays in the `q` kernel; no JS traversal interpretation and no
+new dependency.
+
+**Implementation history (earlier 2026-07-15 checkpoint):** physical stream schemas and the single
 root materialization boundary are landed. Global count and numeric reducers now lower
 to ScalarStreams (numeric payload `v,vt`), scalar row operators and transforms/casts lower left-to-right,
 scalar `fold` lowers to a typed ListStream, and list-local reducers re-enter ScalarStream,
@@ -559,14 +597,14 @@ movement local bodies are no longer rejected. The same element-row helper feeds 
 `fold()`, so slicing/deduplication before an element fold is not a second compiler path.
 L3 remains 873.
 
-1. Extract the existing `originSeed` into `steps/child.ts` as `pushChildScope`.
-2. Preserve the domain relation in `ChildFrame`.
-3. Compile a child with the same `lowerSteps` used at root.
-4. Add cardinality combinators (`all`, `first`, `exists`, `notExists`, `scalar`).
-5. Make reducers/barriers partition by active origins and use the domain for total empty
-   results.
-6. Prove nested child frames with `optional(coalesce(...))`, then with a true
-   value-producing nested child.
+1. [x] Extract the existing `originSeed` into `steps/child.ts` as `pushChildScope`.
+2. [x] Preserve the domain relation in `ChildFrame`.
+3. [x] Compile element/scalar/list children through shared root lowerers.
+4. [x] Implement `all` and `first` cardinality plus scalar/list barrier policies.
+5. [x] Make scalar/element reducers and folds partition by active origins and use the
+   domain for total empty results.
+6. [ ] Add explicit `exists`/`notExists` policies as the generic where/filter fallback.
+7. [ ] Extend nested-frame proofs through scalar/list `optional`.
 
 This stage is the architectural milestone. A child traversal no longer has its own step
 vocabulary.
@@ -576,10 +614,10 @@ vocabulary.
 Migrate in increasing semantic complexity:
 
 1. ~~`flatMap`: all child rows (element + scalar projection tails).~~
-2. element-body `map`: first child row per origin.
-3. ~~homogeneous scalar arms for `union` and three-argument predicate `choose`.~~
-4. scalar/list arms for `coalesce` and `optional`, preserving first-productive-arm
-   semantics.
+2. ~~element-body `map`: first child row per origin.~~
+3. ~~homogeneous scalar/list arms for `union` and three-argument predicate `choose`.~~
+4. ~~scalar/list arms for `coalesce`, preserving first-productive-arm semantics.~~
+   Scalar/list `optional` remains.
 5. ~~`local`: delete its movement-only parser and use child-scoped barriers.~~
 6. `by(traversal)`: use child scalar cardinality plus productivity.
 7. ProductiveByStrategy: make productive/unproductive handling an explicit consumer
@@ -596,8 +634,8 @@ Ratchet after each consumer, not only at the end.
 2. Delete `compileNestedList`; generic child + fold owns its semantics.
 3. Remove semantic throws from inline fast paths; unrecognized means fallback.
 4. Delete `branchArm`'s prefix-only stop check.
-5. Delete `isScalarLocal`, the local-body movement whitelist, and local's private origin
-   window implementation.
+5. ~~Delete `isScalarLocal`, the local-body movement whitelist, and local's private
+   origin window implementation.~~ (`61d028d`)
 6. Remove `dispatchNext` once `lowerSteps` fully supersedes it.
 7. Remove the `St` alias.
 
