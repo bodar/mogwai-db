@@ -322,7 +322,7 @@ function compileScalarChildRows(
   const typeCol = lowered.result === 'number' ? q`, ${r.c.vt} AS vt` : empty;
   const resultCols = lowered.result === 'number' ? ['v', 'vt'] : ['v'];
   if (use === 'all') {
-    const rel = parent.q.cte(q`SELECT ${r.c.v} AS v${typeCol}${carryFrag(parent.carried, r)} FROM ${r}`, [...resultCols, ...parentCols]);
+    const rel = derived(q`SELECT ${r.c.v} AS v${typeCol}${carryFrag(parent.carried, r)} FROM ${r}`, [...resultCols, ...parentCols], 'all_rows');
     return { stream: toScalarStream(carryOf(parent), rel, lowered.as, lowered.result), frame: pushed.frame };
   }
   const first = derived(
@@ -331,9 +331,10 @@ function compileScalarChildRows(
     'f',
   );
   const firstTypeCol = lowered.result === 'number' ? q`, ${first.c.vt} AS vt` : empty;
-  const rel = parent.q.cte(
+  const rel = derived(
     q`SELECT ${first.c.v} AS v${firstTypeCol}${carryFrag(parent.carried, first)} FROM ${first} WHERE ${first.c.rn}=1`,
     [...resultCols, ...parentCols],
+    'first_row',
   );
   return { stream: toScalarStream(carryOf(parent), rel, lowered.as, lowered.result), frame: pushed.frame };
 }

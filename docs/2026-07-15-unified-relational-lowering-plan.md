@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–7 complete, Stage 8 active
-**Baseline:** full suite 371/371, L1 2298/2298, L3 933/2041; 247 compiler tests
+**Baseline:** full suite 373/373, L1 2298/2298, L3 933/2041; 247 compiler tests
 
 ## Restart handoff — read this first after a context reset
 
@@ -180,6 +180,15 @@ local commit/checkpoint. Run full `bun test` before every commit.
     Together with frame reuse, the representative two-field project fell 11→8 CTEs;
     ordered local slice fell 8→7, and root modulated dedup fell 3→2. TypeScript,
     compiler 247/247, L3 933/2041, full 371/371, and corpus 2298/2298 are green.
+27. Typed streams may now retain a derived relation directly instead of immediately
+    wrapping it in another named CTE. Scalar correlated slice/tail/dedup and child
+    first/all cardinality outputs use that contract; downstream stream lowering sees
+    the same exact physical columns. The representative project fell again 8→7 CTEs
+    (11→7 across Stage 8), and ordered local slice 7→5 (8→5 overall). New EXPLAIN guards
+    assert these derived ranks remain SQLite co-routines rather than forced
+    materializations and retain vertex-property/edge index probes. TypeScript, compiler
+    247/247, focused performance 9/9, L3 933/2041, full 373/373, and corpus 2298/2298
+    are green.
 
 **Current Stage 6 state:** scalar traversal modulators for `project`, aliased `select`,
 and inline element `group` all use the generic child-domain compiler. Group keys consume

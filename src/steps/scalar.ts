@@ -101,7 +101,7 @@ function partitionedSlice(s: ScalarStream, offset: number, limit: number | null)
   const rankedCols = [...cols(s), 'rn'];
   const r = derived(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER (${over}) AS rn FROM ${p}`, rankedCols, 'r');
   const hi = limit == null ? empty : q` AND ${r.c.rn}<=${offset + limit}`;
-  const rel = s.q.cte(q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn}>${offset}${hi}`, cols(s));
+  const rel = derived(q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn}>${offset}${hi}`, cols(s), 'slice');
   return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter);
 }
 
@@ -117,9 +117,10 @@ function partitionedTail(s: ScalarStream, limit: number): ScalarStream {
     [...cols(s), 'rn'],
     'r',
   );
-  const rel = s.q.cte(
+  const rel = derived(
     q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn}<=${limit}`,
     cols(s),
+    'tail_rows',
   );
   return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter);
 }
@@ -143,7 +144,7 @@ function partitionedDedup(s: ScalarStream): ScalarStream {
     [...cols(s), 'rn'],
     'r',
   );
-  const rel = s.q.cte(q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn}=1`, cols(s));
+  const rel = derived(q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn}=1`, cols(s), 'dedup_rows');
   return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter);
 }
 
