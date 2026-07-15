@@ -7,6 +7,7 @@ import { withCarried, type ElementStream, type StepFn } from './context.ts';
 import { move, toEdge, toVertex, otherV } from './movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from './filter.ts';
 import { union, optional, repeat, choose, coalesce } from './branch.ts';
+import { isScalarChild } from './child.ts';
 import { match } from './match.ts';
 import { identity, limit, range, skip } from './passthrough.ts';
 import { sack } from './sack.ts';
@@ -161,7 +162,13 @@ export function foldBody(steps: PStep[], seedSt: ElementStream, from: number): {
     const fn = PREFIX.get(steps[i].name);
     // Option-map choose (choose().option()…) is a tail CASE projector, not a prefix
     // branch — stop so compileTail handles it (predicate-form choose has no .options).
+    const unionBranches = steps[i].name === 'union'
+      ? steps[i].args.filter((a: any) => a && typeof a === 'object' && 'nested' in a)
+      : [];
+    const scalarUnion = unionBranches.length >= 2
+      && unionBranches.every((a: any) => isScalarChild(a.nested, seedSt.params));
     if (!fn
+      || scalarUnion
       || (steps[i].name === 'choose' && steps[i].options)
       || (steps[i].name === 'sack' && !isSackMutate(steps[i]))
       || ((steps[i].name === 'group' || steps[i].name === 'groupCount') && !isSideEffectGroup(steps[i]))

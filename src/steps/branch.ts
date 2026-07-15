@@ -4,7 +4,8 @@ import { stepChain, type Step } from '../frontend.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, compileFilterPredicate, predicateSql, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
 import { advance, elemRel, prevRel, carryFrag, carriedCols, aliasColsOf, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { foldBody } from './index.ts';
-import { pushChildScope, tryCompileElementChild } from './child.ts';
+import { pushChildScope, tryCompileCountChild, tryCompileElementChild, tryCompileScalarChild } from './child.ts';
+import { carryOf, toScalarStream, type ScalarStream } from './stream.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
  *  read back from `nodes` by subquery (the walk row carries only the id). Lets
@@ -157,6 +158,31 @@ export const union: StepFn = (s, st) => {
   const selects = ends.map((e) => q`SELECT ${armProjection(e, out)} FROM ${e.rel}`);
   return advance(st, list(selects, ' UNION ALL '), { elem, path: out.path });
 };
+
+/** Homogeneous scalar union through the generic child compiler. Every arm applies
+ * `all` to the same incoming parent stream; UNION ALL then concatenates their
+ * productive rows. Element/scalar mixing deliberately returns null so the legacy
+ * element union emits its existing fail-closed mixed-shape error. */
+export function tryLowerScalarUnion(s: Step, st: ElementStream): ScalarStream | null {
+  assertForkSafe('union', st);
+  const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  if (branches.length < 2) throw new Error('union() needs at least two branches');
+  const arms: ScalarStream[] = [];
+  for (const branch of branches) {
+    const arm = tryCompileScalarChild(st, branch.nested, 'all')
+      ?? tryCompileCountChild(st, branch.nested);
+    if (!arm) return null;
+    arms.push(arm);
+  }
+  const cols = carriedCols(st.carried);
+  const parts = arms.map((arm) => {
+    const a = arm.rel.as('a');
+    return q`SELECT ${a.c.v} AS v${carryFrag(st.carried, a)} FROM ${a}`;
+  });
+  const rel = st.q.cte(list(parts, ' UNION ALL '), ['v', ...cols]);
+  const as = arms.every((arm) => arm.as === arms[0].as) ? arms[0].as : undefined;
+  return toScalarStream(carryOf(st), rel, as);
+}
 
 /** optional(t) = t where it yields output, else the traverser itself. Fast path: a
  *  single out()/in() over vertices → LEFT JOIN + COALESCE-to-self (index-only, no

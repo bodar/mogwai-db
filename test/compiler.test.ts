@@ -1206,6 +1206,12 @@ describe('compiler SQL snapshots', () => {
     // multi-hop branch now folds through the dispatch (was single-hop only)
     expect(read('g.V().union(__.out().out(), __.in()).values("name")').sql)
       .toContain('SELECT e.tgt AS id FROM edges e JOIN c1 p ON e.src=p.id');
+    // Homogeneous scalar arms lower at the shape-aware dispatcher and re-enter the
+    // scalar pipeline; this is not the element-only PREFIX union.
+    const scalar = read('g.V(1).union(__.values("name"), __.constant("x")).count()');
+    expect(scalar.shape).toEqual({ kind: 'count' });
+    expect(scalar.sql).toContain(' AS v FROM');
+    expect(scalar.sql).toContain('UNION ALL');
     expect(() => compile('g.V().union(__.out())', {})).toThrow('needs at least two branches');
     // as() before union now threads the alias column through the merge (carried-schema, Move B)
     const ua = read('g.V().as("a").union(__.out(), __.in()).select("a")');
@@ -2098,6 +2104,10 @@ describe('compiler execution semantics', () => {
     // union: marko's knows + created neighbours
     expect(run(store, 'g.V(1).union(__.out("knows"), __.out("created")).values("name")').map((r) => r.v).sort())
       .toEqual(['josh', 'lop', 'vadas']);
+    expect(run(store, 'g.V(1).union(__.values("name"), __.constant("x"))').map((r) => r.v).sort())
+      .toEqual(['marko', 'x']);
+    expect(run(store, 'g.V(1).union(__.out().count(), __.in().count())').map((r) => r.v))
+      .toEqual([3, 0]);
     // optional hit: josh created ripple+lop
     expect(run(store, 'g.V(4).optional(__.out("created")).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple']);
     // optional miss: vadas has no out-created → falls back to self

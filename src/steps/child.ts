@@ -67,6 +67,22 @@ const ELEMENT_CHILD_STEPS = new Set([
   'has', 'hasLabel', 'hasId', 'where', 'filter', 'not', 'and', 'or', 'identity',
 ]);
 
+/** Syntax-only preflight for shape-aware dispatch. Unlike the tryCompile functions,
+ * this never appends CTEs, so the prefix fold can stop before a homogeneous scalar
+ * union without speculatively mutating the Query. */
+export function isScalarChild(nested: any, params: Record<string, any>): boolean {
+  if (!nested) return false;
+  const body = stepChain(nested, params);
+  const terminal = body.at(-1);
+  if (!terminal) return false;
+  const prefix = body.slice(0, -1);
+  if (prefix.some((s) => !ELEMENT_CHILD_STEPS.has(s.name))) return false;
+  if (terminal.name === 'count') return terminal.args.length === 0;
+  if (terminal.name === 'values') return terminal.args.length === 1 && typeof terminal.args[0] === 'string';
+  if (terminal.name === 'id' || terminal.name === 'label') return terminal.args.length === 0;
+  return terminal.name === 'constant' && terminal.args.length === 1;
+}
+
 /** Compile a terminal child count as a true scope-aware barrier. The preserved
  * parent domain is the left side of the aggregate, so an unproductive child still
  * emits one Long zero for that parent. Grouping by the child ordinal (rather than
