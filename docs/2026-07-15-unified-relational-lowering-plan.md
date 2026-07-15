@@ -526,6 +526,11 @@ Homogeneous scalar `coalesce` now compiles every arm from one child domain and a
 the same first-non-empty-by-origin rule as element coalesce before dropping the internal
 ordinal. L3 remains 872; notably, a zero from child `count()` is a productive result and
 does not fall through to a later arm.
+Scalar child rows now continue through the ordinary `lowerScalarRows` transform
+pipeline (`toUpper`/substring/casts/date transforms/etc.) after the consumer's
+`first`/`all` policy. This composes through map/flatMap/union/choose/coalesce without
+a nested-transform switch. Origin-sensitive scalar order/limit/dedup/reducers remain
+excluded until their shared lowering partitions by `CompileScope`; L3 stays 872.
 
 1. Extract the existing `originSeed` into `steps/child.ts` as `pushChildScope`.
 2. Preserve the domain relation in `ChildFrame`.

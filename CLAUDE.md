@@ -47,6 +47,9 @@ rows merge with `UNION ALL`; two-argument identity-else and element choose stay 
 Homogeneous scalar `coalesce` arms share one ordinal-tagged parent domain and retain
 that ordinal until the first-productive merge; a total reducer result such as count=0
 is productive and correctly prevents fallback.
+Scalar child projections may continue through one-to-one `SCALAR_TRANSFORMS`; child.ts
+delegates them to the ordinary `lowerScalarRows` pipeline after `first`/`all` selection.
+Do not admit order/limit/dedup/reducers there until they partition by the active origin.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
   (`stripTerminal`, `foldRepeatClusters`, `foldByModulators`) run once up front so
   the dispatch sees a canonical, peek-free chain (no index arithmetic anywhere).
