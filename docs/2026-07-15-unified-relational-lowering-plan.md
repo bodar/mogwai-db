@@ -22,13 +22,19 @@ this handoff was written. Work is local-only: do not push or merge to trunk. Run
    `src/steps/local.ts` and its private movement/window compiler were deleted. L3 stayed
    873. Full suite: 357/357; corpus: 2298/2298.
 
-**Immediate next slice:** traversal-valued `by()`. Do not add more recognized syntax to
-`compileNestedScalar`. Treat its current correlated SQL cases as optional fast paths and
-add a generic child-stream fallback with explicit first/productive cardinality. Inventory
-the consumers before editing: `select/project` (`steps/select.ts`), group keys/values
-(`steps/group.ts`), sack, math, format, and option-choose. Land one coherent consumer
-family per commit; preserve the correlated count/EXISTS fast paths until Stage 8 proves
-whether they should remain. This work is the prerequisite for ProductiveByStrategy.
+**Current Stage 6 slice:** traversal-valued `project().by()` is now the first generic
+by-consumer. An outer origin identifies each parent; every scalar child modulator lowers
+with `first` cardinality; productive fields inner-join by origin. Missing child rows drop
+the record, productive NULL survives, and duplicate parents remain distinct. The current
+slice requires every cycled project modulator to be a traversal. L3 remains 873.
+
+**Immediate next slice:** broaden that project path to mixed traversal + string/token/
+bare-element modulators, then migrate labelled `select` and group key/value consumers.
+Do not add more recognized syntax to `compileNestedScalar`: treat its current correlated
+SQL cases as optional fast paths and add generic child-stream fallbacks with explicit
+first/productive cardinality. Other consumers to inventory afterward are sack, math,
+format, and option-choose. Preserve correlated count/EXISTS fast paths until Stage 8
+proves whether they should remain. This work is the prerequisite for ProductiveByStrategy.
 
 **Still pending in Stage 6:** scalar/list `optional`, traversal-valued `by`, an explicit
 ProductiveByStrategy productivity policy, and generic child-existence fallback for
@@ -619,7 +625,9 @@ Migrate in increasing semantic complexity:
 4. ~~scalar/list arms for `coalesce`, preserving first-productive-arm semantics.~~
    Scalar/list `optional` remains.
 5. ~~`local`: delete its movement-only parser and use child-scoped barriers.~~
-6. `by(traversal)`: use child scalar cardinality plus productivity.
+6. `by(traversal)`: use child scalar cardinality plus productivity. Project with all-
+   traversal scalar modulators is done; mixed project, select, group, sack/math/format/
+   choose consumers remain.
 7. ProductiveByStrategy: make productive/unproductive handling an explicit consumer
    policy rather than a strategy-wide rejection.
 8. `where`/`filter`/`not`: keep inline fast paths; generic fallback uses child

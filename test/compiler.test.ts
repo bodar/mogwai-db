@@ -729,6 +729,22 @@ describe('compiler SQL snapshots', () => {
     expect(p.sql).toContain('JOIN nodes e1n ON e1n.id=p.id');
   });
 
+  test('project().by(traversal) lowers each field through child scalar streams', () => {
+    const p = read('g.V().project("name","friend").by(__.values("name")).by(__.out().values("name"))');
+    expect(p.shape).toEqual({
+      kind: 'map',
+      entries: [
+        { key: 'name', prefix: 'e0', sub: 'value' },
+        { key: 'friend', prefix: 'e1', sub: 'value' },
+      ],
+    });
+    expect(p.sql).toContain('ROW_NUMBER() OVER () AS o0');
+    expect(p.sql).toContain('JOIN c');
+    expect(p.sql).toContain('ON b1.o0=b0.o0');
+    expect(read('g.V().project("friend").by(__.out().values("name")).select("friend")').shape)
+      .toEqual({ kind: 'value', as: undefined });
+  });
+
   test('record fields re-enter element/scalar/list lowering', () => {
     expect(read('g.V().project("n","a").by("name").by("age").select("a").is(P.gt(30)).count()').shape)
       .toEqual({ kind: 'count' });
@@ -1964,6 +1980,20 @@ describe('compiler execution semantics', () => {
     const rows = run(store, 'g.V().hasLabel("person").project("name","age").by("name").by("age")');
     const byName = Object.fromEntries(rows.map((r) => [r.e0_v, r.e1_v]));
     expect(byName).toEqual({ marko: 29, vadas: 27, josh: 32, peter: 35 });
+  });
+
+  test('traversal-valued project fields use child productivity and preserve parent multiplicity', () => {
+    const store = seededStore();
+    expect(run(store, 'g.V(1).project("name","friend").by(__.values("name")).by(__.out().values("name"))'))
+      .toEqual([{ e0_v: 'marko', e1_v: 'vadas' }]);
+    // Vertices without an outgoing child are unproductive: the whole project row drops.
+    expect(run(store, 'g.V().project("name","friend").by(__.values("name")).by(__.out().values("name"))')
+      .map((r) => r.e0_v).sort()).toEqual(['josh', 'marko', 'peter']);
+    // A produced NULL is not an unproductive child row.
+    expect(run(store, 'g.V(1).project("x").by(__.constant(null))')).toEqual([{ e0_v: null }]);
+    // Equal parents remain separate traversers through the outer by-origin join.
+    expect(run(store, 'g.V(1).union(__.identity(),__.identity()).project("x").by(__.values("name"))'))
+      .toEqual([{ e0_v: 'marko' }, { e0_v: 'marko' }]);
   });
 
   test('RecordStream fields compose back into ordinary streams', () => {

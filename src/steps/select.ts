@@ -9,6 +9,7 @@ import { type TailAcc, type TailMods } from './projection.ts';
 import { materializeRecordRoot } from './materialize.ts';
 import { lowerGlobalCount } from './barrier.ts';
 import { dispatchNext } from './index.ts';
+import { isScalarChild, pushChildScope, tryCompileScalarChild } from './child.ts';
 
 // ---------- select()/project() ----------
 
@@ -20,6 +21,32 @@ function byToEntry(byArgs: any[] | undefined): { sub: 'vertex' | 'value'; key?: 
   if (a && typeof a === 'object' && 'nested' in a) throw new Error('by(traversal) modulator not yet supported');
   if (a && typeof a === 'object' && 'token' in a) throw new Error(`by(T.${a.token}) modulator not yet supported`);
   throw new Error('unsupported by() modulator');
+}
+
+/** Project fields whose by() modulators are all scalar child traversals. One outer
+ * origin identifies each multiset-distinct input; each modulator independently uses
+ * child `first` cardinality and retains that origin. Inner joins implement ordinary
+ * productive-by semantics: a missing child drops the project row, while a produced
+ * SQL NULL remains a real field value. */
+function tryLowerTraversalProject(st: ElementStream, proj: PStep, keys: string[]): RecordStream | null {
+  if (proj.name !== 'project' || !proj.bys?.length) return null;
+  const args = keys.map((_, i) => proj.bys![i % proj.bys!.length]);
+  const nested = args.map((by) => by?.find((a: any) => a && typeof a === 'object' && 'nested' in a)?.nested);
+  if (nested.some((body) => !body) || nested.some((body) => !isScalarChild(body, st.params))) return null;
+
+  const outer = pushChildScope(st);
+  const children = nested.map((body) => tryCompileScalarChild(outer.seed, body, 'first', outer.scope));
+  if (children.some((child) => !child)) return null;
+  const branches = children.map((child, i) => child!.rel.as(`b${i}`));
+  const first = branches[0];
+  const joins = branches.slice(1).map((branch) => q` JOIN ${branch} ON ${branch.c[outer.frame.ordinal]}=${first.c[outer.frame.ordinal]}`);
+  const fields: RecordField[] = keys.map((key, i) => ({ key, prefix: `e${i}`, sub: 'value' }));
+  const cols = branches.map((branch, i) => q`${branch.c.v} AS ${`e${i}_v`}`);
+  const rel = st.q.cte(
+    q`SELECT ${list(cols, ', ')}${carryFrag(st.carried, first)} FROM ${first}${list(joins, '')}`,
+    [...fields.flatMap(recordFieldColumns), ...carriedCols(st.carried)],
+  );
+  return toRecordStream(carryOf(st), rel, fields);
 }
 
 /** A one-label select is not a record: it emits the selected traverser directly.
@@ -71,6 +98,8 @@ export function lowerRecordSelectProject(st: ElementStream, proj: PStep): Record
 
   const keys = proj.args.filter((a): a is string => typeof a === 'string');
   if (!keys.length) throw new Error(`${proj.name}() requires at least one key`);
+  const traversalProject = tryLowerTraversalProject(st, proj, keys);
+  if (traversalProject) return traversalProject;
 
   const sourceOf = (k: string): { expr: Expression; elem: 'node' | 'edge' } => {
     if (isProject) {
