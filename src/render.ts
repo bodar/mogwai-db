@@ -11,7 +11,7 @@ import { q, type Expression, type Query, type Relation } from './q.ts';
 // select(labels…)/project(keys…): a Map per row. Each entry names its result
 // key plus the SQL column prefix carrying its value, and whether that value is
 // a whole vertex (prefix_id/_label/_props) or a scalar (prefix_v).
-export interface MapEntry { key: string; prefix: string; sub: 'vertex' | 'value'; }
+export interface MapEntry { key: string; prefix: string; sub: 'vertex' | 'edge' | 'value'; }
 
 // The element kind an element-shaped column carries, and the columns that frame
 // it. `node`→vertexBuffer(v_id,v_label,v_props); `edge`→edgeBuffer(+v_src,v_tgt);

@@ -8,8 +8,8 @@
 
 import { type Expression, type Query } from '../q.ts';
 import { readCompiled, type Compiled, type Shape } from '../render.ts';
-import { q } from '../q.ts';
-import { type ListStream, type PropertyStream, type ScalarStream } from './stream.ts';
+import { list, q } from '../q.ts';
+import { recordResultColumns, type ListStream, type PropertyStream, type RecordStream, type ScalarStream } from './stream.ts';
 
 export function materializeRoot(query: Query, tail: Expression, shape: Shape): Compiled {
   return readCompiled(query, tail, shape);
@@ -50,4 +50,12 @@ export function materializePropertyRoot(stream: PropertyStream): Compiled {
     q`SELECT ${p.c.vpid}, ${p.c.owner}, ${p.c.pk}, ${p.c.pv}, ${p.c.pmeta} FROM ${p}`,
     { kind: 'property' },
   );
+}
+
+/** Materialize a per-traverser heterogeneous record as the existing map wire shape.
+ * Carried compiler state is deliberately not projected across the root boundary. */
+export function materializeRecordRoot(stream: RecordStream): Compiled {
+  const r = stream.rel.as('r');
+  const cols = stream.fields.flatMap(recordResultColumns).map((name) => r.c[name]);
+  return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${r}`, { kind: 'map', entries: [...stream.fields] });
 }

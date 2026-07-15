@@ -69,7 +69,33 @@ export interface PropertyStream extends Carry {
   readonly ownerElem: Elem;
 }
 
-export type Stream = ElementStream | ScalarStream | ListStream | MapStream | PropertyStream;
+/** One field of a per-traverser select()/project() record. Unlike MapStream, whose
+ * two columns describe an entry stream for a global group barrier, a RecordStream
+ * is one wide row per incoming traverser and may have heterogeneous field shapes. */
+export interface RecordField {
+  readonly key: string;
+  readonly prefix: string;
+  readonly sub: 'value' | 'vertex' | 'edge';
+}
+
+export interface RecordStream extends Carry {
+  readonly kind: 'record';
+  readonly rel: Relation;
+  readonly fields: readonly RecordField[];
+}
+
+export type Stream = ElementStream | ScalarStream | ListStream | MapStream | PropertyStream | RecordStream;
+
+export const recordFieldColumns = (f: RecordField): string[] => f.sub === 'value'
+  ? [`${f.prefix}_v`]
+  : f.sub === 'edge'
+    ? [`${f.prefix}_rid`, `${f.prefix}_id`, `${f.prefix}_label`, `${f.prefix}_src`, `${f.prefix}_tgt`, `${f.prefix}_props`]
+    : [`${f.prefix}_rid`, `${f.prefix}_id`, `${f.prefix}_label`, `${f.prefix}_props`];
+
+/** Root-visible record columns omit the internal rowid retained solely so selecting
+ * an element field can re-enter movement even when its external id is a string uid. */
+export const recordResultColumns = (f: RecordField): string[] =>
+  recordFieldColumns(f).filter((name) => name !== `${f.prefix}_rid`);
 
 /** The physical relation columns promised by a stream. Payload comes first, followed
  * by the stable carried schema. A stream is executable relational state, so metadata
@@ -79,7 +105,8 @@ export function streamColumns(s: Stream): readonly string[] {
     : s.kind === 'scalar' ? (s.result === 'number' ? ['v', 'vt'] : ['v'])
     : s.kind === 'list' ? ['list']
     : s.kind === 'map' ? ['mk', 'mv']
-    : ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta'];
+    : s.kind === 'property' ? ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta']
+    : s.fields.flatMap(recordFieldColumns);
   return [...payload, ...carriedCols(s.carried)];
 }
 
@@ -106,6 +133,8 @@ export const toMapStream = (c: Carry, rel: Relation, keyOf: MapOf, valOf: MapOf)
   assertStreamColumns({ ...c, kind: 'map', rel, keyOf, valOf });
 export const toPropertyStream = (c: Carry, rel: Relation, ownerElem: Elem): PropertyStream =>
   assertStreamColumns({ ...c, kind: 'property', rel, ownerElem });
+export const toRecordStream = (c: Carry, rel: Relation, fields: readonly RecordField[]): RecordStream =>
+  assertStreamColumns({ ...c, kind: 'record', rel, fields });
 
 /** A map key/value column's shape → the list shape it produces when select(Column.*)
  *  aggregates it: a scalar carries its type tag, an element rejoins on unfold, a

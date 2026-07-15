@@ -5,7 +5,7 @@ import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { executeQuery } from '../src/execute.ts';
 import { MODERN_SEED } from './conformance/seed-modern.ts';
 import { Query } from '../src/q.ts';
-import { assertStreamColumns, toPropertyStream, toScalarStream } from '../src/steps/stream.ts';
+import { assertStreamColumns, toPropertyStream, toRecordStream, toScalarStream } from '../src/steps/stream.ts';
 import { popChildScope, pushChildScope } from '../src/steps/child.ts';
 import { readdirSync, readFileSync } from 'node:fs';
 
@@ -29,6 +29,12 @@ describe('compiler SQL snapshots', () => {
     expect(toPropertyStream(carry, q.cte({} as any, propertyCols), 'node').kind).toBe('property');
     expect(() => toPropertyStream(carry, q.cte({} as any, propertyCols.slice(1)), 'node')).toThrow(
       'property stream column mismatch',
+    );
+    const fields = [{ key: 'x', prefix: 'e0', sub: 'vertex' as const }];
+    const recordCols = ['e0_rid', 'e0_id', 'e0_label', 'e0_props'];
+    expect(toRecordStream(carry, q.cte({} as any, recordCols), fields).kind).toBe('record');
+    expect(() => toRecordStream(carry, q.cte({} as any, recordCols.slice(1)), fields)).toThrow(
+      'record stream column mismatch',
     );
   });
 
@@ -71,7 +77,13 @@ describe('compiler SQL snapshots', () => {
     expect(c.sql).toContain('COALESCE(SUM(bulk), 0) AS v');
     // times(3) → f0 (seed) + three hop CTEs.
     expect((c.sql.match(/GROUP BY nb/g) ?? []).length).toBe(3);
-    // A NON-bulkable repeat (path/as/emit/complex body) stays the enumerate-walk
+    // A post-repeat as()/movement/select() chain discarded by count remains bulkable:
+    // naming/building the final record does not change cardinality, and the extra hop
+    // propagates multiplicity with one more grouped frontier.
+    const selected = read('g.V().repeat(__.out()).times(5).as("a").out("writtenBy").as("b").select("a","b").count()');
+    expect(selected.sql).not.toContain('recursive');
+    expect((selected.sql.match(/GROUP BY nb/g) ?? []).length).toBe(6);
+    // A NON-bulkable repeat (path/emit/complex body) stays the enumerate-walk
     // recursion — bulking must not hijack it. emit() has no compile-time depth.
     expect(read('g.V(1).repeat(__.out()).emit().times(2).count()').sql).toContain('recursive');
     expect(read('g.V(1).repeat(__.out()).times(2).path()').sql).toContain('recursive');
@@ -706,6 +718,21 @@ describe('compiler SQL snapshots', () => {
     expect(p.sql).toContain('JOIN nodes e1n ON e1n.id=p.id');
   });
 
+  test('record fields re-enter element/scalar/list lowering', () => {
+    expect(read('g.V().project("n","a").by("name").by("age").select("a").is(P.gt(30)).count()').shape)
+      .toEqual({ kind: 'count' });
+    expect(read('g.V().as("a").out().as("b").select("a","b").select("b").out().count()').shape)
+      .toEqual({ kind: 'count' });
+    expect(read('g.V().project("n","a").by("name").by("age").select(Column.values).unfold().count()').shape)
+      .toEqual({ kind: 'count' });
+    expect(read('g.V().project("n","a").by("name").by("age").select(Column.keys).unfold().count()').shape)
+      .toEqual({ kind: 'count' });
+    expect(read('g.V().project("n","a").by("name").by("age").limit(Scope.local,1)').shape)
+      .toEqual({ kind: 'map', entries: [{ key: 'n', prefix: 'e0', sub: 'value' }] });
+    expect(read('g.V().project("n","a").by("name").by("age").tail(Scope.local,1)').shape)
+      .toEqual({ kind: 'map', entries: [{ key: 'a', prefix: 'e1', sub: 'value' }] });
+  });
+
   test('result-preserving optimization strategies accepted as no-ops (correct-by-design)', () => {
     // These cannot change the result set (TinkerPop optimization-strategy contract),
     // so not applying them is exactly correct. The official suite proves it: the
@@ -827,7 +854,7 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().select(Pop.first,"a")', {})).toThrow('select(Pop.first) not yet supported');
     expect(() => compile('g.V().as("a").select("a").by(__.out().count())', {})).toThrow('by(traversal) modulator not yet supported');
     expect(() => compile('g.V().as("a").select("a").by(T.id)', {})).toThrow('by(T.id) modulator not yet supported');
-    expect(() => compile('g.V().as("a").out().as("b").select("a","b").order()', {})).toThrow('order() after select()/project() not yet supported');
+    expect(() => compile('g.V().as("a").out().as("b").select("a","b").order()', {})).toThrow('order() on a record value not yet supported');
     expect(() => compile('g.V().select("x")', {})).toThrow('no such label');
     // order().by() deferred modulators must throw, not silently sort by id
     expect(() => compile('g.V().order().by(T.label)', {})).toThrow('by(T.label) modulator not yet supported');
@@ -888,11 +915,13 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V(1).outE().values("weight")').sql).toContain("json_extract(n.props, '$.weight') AS v");
   });
 
-  test('single select of an edge retypes correctly; project(edge) still defers', () => {
+  test('single select and record projection preserve edge element typing', () => {
     const selected = read('g.V(1).outE("knows").as("b").select("b")');
     expect(selected.shape).toEqual({ kind: 'edge' });
     expect(selected.sql).toContain('FROM edges n JOIN');
-    expect(() => compile('g.V(1).outE().project("w").by("weight")', {})).toThrow('project() of an edge is not yet supported');
+    expect(read('g.V(1).outE().project("w").by("weight")').shape).toEqual({
+      kind: 'map', entries: [{ key: 'w', prefix: 'e0', sub: 'value' }],
+    });
   });
 
   test('properties() expands props via json_each into a property shape', () => {
@@ -1835,6 +1864,22 @@ describe('compiler execution semantics', () => {
     const rows = run(store, 'g.V().hasLabel("person").project("name","age").by("name").by("age")');
     const byName = Object.fromEntries(rows.map((r) => [r.e0_v, r.e1_v]));
     expect(byName).toEqual({ marko: 29, vadas: 27, josh: 32, peter: 35 });
+  });
+
+  test('RecordStream fields compose back into ordinary streams', () => {
+    const store = seededStore();
+    expect(run(store, 'g.V().hasLabel("person").project("n","a").by("name").by("age").select("a").is(P.gt(30)).count()').map((r) => r.v))
+      .toEqual([2]);
+    expect(run(store, 'g.V(1).as("a").out("knows").as("b").select("a","b").select("b").out("created").values("name")').map((r) => r.v))
+      .toEqual(['lop', 'ripple']);
+    expect(run(store, 'g.V().hasLabel("person").project("n","a").by("name").by("age").select(Column.values).unfold().count()').map((r) => r.v))
+      .toEqual([8]);
+    expect(run(store, 'g.V().hasLabel("person").project("n","a").by("name").by("age").select(Column.keys).unfold().count()').map((r) => r.v))
+      .toEqual([8]);
+    expect(run(store, 'g.V(1).outE("knows").project("e").by().select("e").inV().values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'vadas']);
+    expect(run(store, 'g.V(1).project("name","age").by("name").by("age").range(Scope.local,1,2)')[0])
+      .toMatchObject({ e1_v: 29 });
   });
 
   test('rebinding a label (as("a")…as("a")) keeps default Pop=last', () => {

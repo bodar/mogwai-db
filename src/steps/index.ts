@@ -16,6 +16,7 @@ import { type SackSpec } from '../frontend.ts';
 import { compileTail, compileFromScalar } from './projection.ts';
 import { compileFromProperty } from './group.ts';
 import { compileFromList, compileFromMap } from './list.ts';
+import { compileFromRecord } from './select.ts';
 import { assertStreamColumns, type Stream } from './stream.ts';
 import { type Compiled } from '../render.ts';
 import { tryBulkRepeatCount } from './bulk.ts';
@@ -203,6 +204,7 @@ export function dispatchNext(s: Stream, steps: PStep[], at: number): Compiled {
   }
   if (s.kind === 'property') return compileFromProperty(s, steps, at);
   if (s.kind === 'map') return compileFromMap(s, steps, at);
+  if (s.kind === 'record') return compileFromRecord(s, steps, at);
   return compileFromList(s, steps, at);
 }
 
