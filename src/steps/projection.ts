@@ -13,7 +13,7 @@ import {
   type Compiled, type Shape, type ElemShape,
 } from '../render.ts';
 import { materializeRoot, materializeScalarRoot } from './materialize.ts';
-import { lowerGlobalCount } from './barrier.ts';
+import { lowerGlobalCount, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
 import { compileSelectProject, compilePath } from './select.ts';
 import { compileMapScalar, compileMath, compileFormat, compileChooseOptions } from './mapscalar.ts';
@@ -55,7 +55,8 @@ const SCALAR_TX_NAMES = new Set(['concat', 'length', 'toUpper', 'toLower', 'asSt
 const isMapProj = (p: PStep | null) => p?.name === 'select' || p?.name === 'project';
 const isScopeLocalStep = (s: PStep | undefined): boolean =>
   !!s && (s.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local');
-const SCALAR_BOUNDARIES = new Set(['count', 'group', 'groupCount', 'select', 'project', 'path']);
+const SCALAR_BOUNDARIES = new Set(['count', 'sum', 'min', 'max', 'mean', 'group', 'groupCount', 'select', 'project', 'path']);
+const NUMERIC_REDUCERS = new Set<NumericReducer>(['sum', 'min', 'max', 'mean']);
 
 /** A tail modifier: fold the step into the accumulator. `at` gives position so a
  *  terminal reducer (fold/sum) can reject anything following it. */
@@ -219,7 +220,7 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
   // longer depends on a terminal-tail special case (values().count().is(),
   // values().groupCount(), and future scalar consumers all cross the same seam).
   const needsScalarBoundary = steps.slice(stop + 1).some((s) =>
-    SCALAR_BOUNDARIES.has(s.name) && !(s.name === 'count' && isScopeLocalStep(s)));
+    SCALAR_BOUNDARIES.has(s.name) && !isScopeLocalStep(s));
   if (SCALAR_PROJ.has(steps[stop]?.name) && needsScalarBoundary) {
     const n = elemRel(st);
     const l = labels.as('l');
@@ -339,6 +340,11 @@ export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number)
     if (from + 1 < steps.length) return dispatchNext(out, steps, from + 1);
     return materializeScalarRoot(out);
   }
+  if (NUMERIC_REDUCERS.has(steps[from]?.name as NumericReducer) && !isScopeLocalStep(steps[from])) {
+    const out = lowerGlobalNumericReducer(s, steps[from].name as NumericReducer);
+    if (from + 1 < steps.length) return dispatchNext(out, steps, from + 1);
+    return materializeScalarRoot(out);
+  }
   // unfold() on a scalar is identity (a scalar is not a collection) — continue past it,
   // exactly as unfold() on an element stream. Lets aggregate('a').by(k).cap('a').unfold()
   // (cap unrolls a by-key bag to a scalar stream) feed a following reducer.
@@ -357,18 +363,19 @@ export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number)
   // Row-preserving operators keep reducer semantics on the stream. In particular,
   // count().is(P) is still a Long count result rather than becoming an untyped value
   // merely because the predicate happened to be terminal.
-  if (s.result === 'count' && acc.transforms.length === 0 && acc.injects.length === 0) {
+  if (s.result !== 'value' && acc.transforms.length === 0 && acc.injects.length === 0) {
     const p = s.rel.as('p');
     const whereNode = acc.isPreds.length
       ? q` WHERE ${list(acc.isPreds.map((pr) => predicateSql(p.c.v, pr)), ' AND ')}`
       : empty;
     const orderNode = acc.orders.length ? q` ORDER BY ${p.c.v}` : empty;
     const limitNode = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
+    const typeCol = s.result === 'number' ? q`, ${p.c.vt} AS vt` : empty;
     const rel = s.q.cte(
-      q`SELECT ${acc.distinct ? 'DISTINCT ' : ''}${p.c.v} AS v${carryFrag(s.carried, p)} FROM ${p}${whereNode}${orderNode}${limitNode}`,
-      ['v', ...carriedCols(s.carried)],
+      q`SELECT ${acc.distinct ? 'DISTINCT ' : ''}${p.c.v} AS v${typeCol}${carryFrag(s.carried, p)} FROM ${p}${whereNode}${orderNode}${limitNode}`,
+      [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...carriedCols(s.carried)],
     );
-    return materializeScalarRoot(toScalarStream(carryOf(s), rel, 'long', 'count'));
+    return materializeScalarRoot(toScalarStream(carryOf(s), rel, s.as, s.result));
   }
   const proj: ProjResult = { shape: { kind: 'value', as: s.as }, colsNode: q`v AS v`, fromNode: s.rel, scalarExpr: q`v`, baseWhere: null };
   const orderKey = (): Expression => { throw new Error('order().by(key) on a scalar stream not supported (no properties)'); };
@@ -563,11 +570,6 @@ export function renderProjection(
     shape = { kind: 'value', as: 'double' };
     colsNode = q`${scalarExpr} AS v`;
   }
-  // A typed-cast tag can't survive a terminal reducer (wrapReducer only sees
-  // shape.kind) — sum()/fold() after asNumber() would wire the wrong subtype, so defer.
-  if (shape.kind === 'value' && shape.as && reducer)
-    throw new Error(`${reducer}() after asNumber() not yet supported`);
-
   // WHERE: the values() existence check + any is(P) on the projected scalar, AND'd.
   const whereParts: Expression[] = [];
   if (proj.baseWhere) whereParts.push(proj.baseWhere);

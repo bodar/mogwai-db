@@ -21,6 +21,9 @@ export function materializeRoot(query: Query, tail: Expression, shape: Shape): C
 export function materializeScalarRoot(stream: ScalarStream): Compiled {
   const shape: Shape = stream.result === 'count'
     ? { kind: 'count' }
+    : stream.result === 'number'
+      ? { kind: 'scalar' }
     : { kind: 'value', as: stream.as };
-  return materializeRoot(stream.q, q`SELECT v FROM ${stream.rel}`, shape);
+  const cols = stream.result === 'number' ? q`v, vt` : q`v`;
+  return materializeRoot(stream.q, q`SELECT ${cols} FROM ${stream.rel}`, shape);
 }

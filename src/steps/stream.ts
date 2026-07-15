@@ -35,7 +35,7 @@ export interface ScalarStream extends Carry {
   readonly as?: ValueType;
   /** Root framing semantics carried by the reducer, rather than reconstructed from
    * where the stream happens to become terminal. */
-  readonly result?: 'value' | 'count';
+  readonly result?: 'value' | 'count' | 'number';
 }
 
 /** A single list value in a one-row relation with a JSONB `list` column (fold /
@@ -66,7 +66,7 @@ export type Stream = ElementStream | ScalarStream | ListStream | MapStream;
  * may never claim a column that its Relation does not expose. */
 export function streamColumns(s: Stream): readonly string[] {
   const payload = s.kind === 'elements' ? ['id']
-    : s.kind === 'scalar' ? ['v']
+    : s.kind === 'scalar' ? (s.result === 'number' ? ['v', 'vt'] : ['v'])
     : s.kind === 'list' ? ['list']
     : ['mk', 'mv'];
   return [...payload, ...carriedCols(s.carried)];
