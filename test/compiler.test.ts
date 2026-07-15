@@ -90,7 +90,7 @@ describe('compiler SQL snapshots', () => {
 
   test('values().order() sorts the projected scalar', () => {
     const p = read('g.V().values("age").order()');
-    expect(p.sql).toContain('ORDER BY v ASC');
+    expect(p.sql).toContain('ORDER BY p.v ASC');
     expect(p.shape).toEqual({ kind: 'value' });
   });
 
@@ -126,7 +126,7 @@ describe('compiler SQL snapshots', () => {
   test('P.typeOf maps GType to a SQL typeof() test', () => {
     // value stream + is(): typeof over the projected scalar expr; type binds as ?
     const str = read('g.V().values("name").is(P.typeOf(GType.STRING))');
-    expect(str.sql).toContain("typeof(vp.value) = ?");
+    expect(str.sql).toContain("typeof(p.v) = ?");
     expect(str.binds).toContain('text');
     expect(read('g.V().values("age").is(P.typeOf(GType.INT))').binds).toContain('integer');
     // java class-name string form is equivalent
@@ -406,10 +406,10 @@ describe('compiler SQL snapshots', () => {
     // runtime value → SQL CAST + tag (no compile-time constant)
     const f = read('g.V().values("weight").asNumber(GType.FLOAT)');
     expect(f.shape).toEqual({ kind: 'value', as: 'float' });
-    expect(f.sql).toContain('CAST(vp.value AS REAL)');
+    expect(f.sql).toContain('CAST(p.v AS REAL)');
     // is(P.typeOf(X)) on the uniformly-typed stream rides the existing storage-class
     // typeOf — no precision change needed
-    expect(read('g.V().values("weight").asNumber(GType.FLOAT).is(P.typeOf(GType.FLOAT))').sql).toContain("typeof(CAST(");
+    expect(read('g.V().values("weight").asNumber(GType.FLOAT).is(P.typeOf(GType.FLOAT))').sql).toContain("typeof(p.v)");
     // overflow + non-numeric-token errors raise TinkerPop's exact messages
     expect(() => compile('g.inject(32768).asNumber(GType.SHORT)', {})).toThrow('Can\'t convert number of type Integer to Short due to overflow.');
     expect(() => compile('g.inject(300).asNumber(GType.BYTE)', {})).toThrow('Can\'t convert number of type Integer to Byte due to overflow.');
@@ -513,7 +513,7 @@ describe('compiler SQL snapshots', () => {
     // runtime: an ISO-text property → unixepoch()*1000; an integer/real is already millis
     const rt = read('g.V().values("birthday").asDate()');
     expect(rt.shape).toEqual({ kind: 'value', as: 'date' });
-    expect(rt.sql).toContain("unixepoch(vp.value) * 1000");
+    expect(rt.sql).toContain("unixepoch(p.v) * 1000");
     // bare asNumber() over a date → its epoch-millis (Long, identity); asDate composes back
     expect(read('g.V().values("birthday").asDate().asNumber().asDate()').shape).toEqual({ kind: 'value', as: 'date' });
     // bare asNumber() as the ms-string leg feeding asDate() is allowed; standalone it
@@ -540,7 +540,7 @@ describe('compiler SQL snapshots', () => {
     // runtime dateDiff against a literal → v − other_ms (the epoch bound as a value)
     const rd = read('g.V().values("birthday").asNumber().asDate().dateDiff(datetime("1970-01-01T00:00Z"))');
     expect(rd.shape).toEqual({ kind: 'value', as: 'long' });
-    expect(rd.binds).toEqual([Date.parse('1970-01-01T00:00Z'), 'birthday']); // the other epoch (= 0), then the values() join key
+    expect(rd.binds).toEqual(['birthday', Date.parse('1970-01-01T00:00Z')]); // the values() join key, then the later dateDiff operand
     // nested inject() as the dateDiff operand defers (not a literal/constant)
     expect(() => compile("g.inject(datetime('2023-08-08T00:00:00Z')).dateDiff(inject(datetime('2023-10-11T00:00:00Z')))", {})).toThrow('datetime literal or constant');
   });
@@ -578,9 +578,9 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('scalar transforms also wrap an element value projection', () => {
-    expect(read("g.V().values('name').substring(2)").sql).toContain("substr(vp.value");
-    expect(read("g.V().values('name').toUpper()").sql).toContain("upper(vp.value)");
-    expect(read("g.V().values('name').concat('X')").sql).toContain("concat_ws('', vp.value, ?)");
+    expect(read("g.V().values('name').substring(2)").sql).toContain("substr(p.v");
+    expect(read("g.V().values('name').toUpper()").sql).toContain("upper(p.v)");
+    expect(read("g.V().values('name').concat('X')").sql).toContain("concat_ws('', p.v, ?)");
     // chained; is()/order() see the transformed value
     expect(read("g.V().values('name').toUpper().is('MARKO')").sql).toContain('upper(');
     // transform on a non-scalar projection is rejected
@@ -1015,6 +1015,21 @@ describe('compiler SQL snapshots', () => {
     expect(run(store, 'g.V().values("age").count().limit(0).is(P.gt(3))')).toEqual([]);
   });
 
+  test('scalar transforms lower relationally and feed later filters/reducers', () => {
+    const transformed = read('g.V().values("name").toUpper().is("MARKO")');
+    expect(transformed.sql).toContain('upper(p.v) AS v');
+    expect(transformed.sql).toContain('WHERE p.v = ?');
+
+    const typedSum = read('g.V().values("age").asNumber(GType.DOUBLE).sum().is(P.gt(100))');
+    expect(typedSum.shape).toEqual({ kind: 'scalar' });
+    expect(typedSum.sql).toContain('CAST(p.v AS REAL) AS v');
+    expect(typedSum.sql).toContain('SUM(s.v) AS v');
+
+    const store = seededStore();
+    expect(run(store, 'g.V().values("name").toUpper().is("MARKO")').map((r) => r.v)).toEqual(['MARKO']);
+    expect(run(store, 'g.V().values("age").asNumber(GType.DOUBLE).sum().is(P.gt(100))').map((r) => r.v)).toEqual([123]);
+  });
+
   test('aggregation deferred forms throw clearly', () => {
     // group() is now re-enterable (retypes to a MapStream on a follower): an element-
     // VALUE group can't collapse to one map-value column, and an unknown step on a
@@ -1033,10 +1048,10 @@ describe('compiler SQL snapshots', () => {
   test('is(P) folds a predicate onto the projected scalar', () => {
     const gt = read('g.V().values("age").is(P.gt(30))');
     expect(gt.shape).toEqual({ kind: 'value' });
-    expect(gt.sql).toContain("WHERE vp.value > ?"); // the values() JOIN handles existence; is() adds the predicate
+    expect(gt.sql).toContain("WHERE p.v > ?"); // the values() JOIN handles existence; is() adds a relational filter
     expect(gt.binds).toContain(30);
     // bare literal → equality
-    expect(read('g.V().values("age").is(29)').sql).toContain("vp.value = ?");
+    expect(read('g.V().values("age").is(29)').sql).toContain("p.v = ?");
   });
 
   test('count().is(P) wraps the count in a value filter (0/1 rows)', () => {
@@ -1323,8 +1338,10 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.E().where(__.out().count().is(P.gt(0)))', {})).toThrow('over an edge not yet supported');
     // where(__.move().is(P)) must not silently drop the is()
     expect(() => compile('g.V().where(__.out("knows").is(1))', {})).toThrow('where(__.out().is(P)) not yet supported');
-    // is() after limit() must throw (position-sensitive)
-    expect(() => compile('g.V().values("age").limit(3).is(P.gt(25))', {})).toThrow('is() after limit()');
+    // limit() then is() remains position-sensitive: only the first three values
+    // reach the predicate, so Peter's later age (35) cannot leak through.
+    const limited = seededStore();
+    expect(run(limited, 'g.V().values("age").limit(3).is(P.gt(30))').map((r) => r.v)).toEqual([32]);
     // alias-compare by(key) on an edge label throws rather than reading nodes
     expect(() => compile('g.V().as("a").outE().as("e").where("e", P.eq("a")).by("weight")', {})).toThrow('edge-typed label not yet supported');
   });

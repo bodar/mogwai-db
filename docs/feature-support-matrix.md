@@ -51,7 +51,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `hasLabel`, `has(k)`, `has(k,v)`, `has(k,P)` | ✅ | ✅ ANY-match `EXISTS(vertex_properties…)` (multi-property has), rides the static `vp_key_value` covering index (W4 — key binds, no splice) |
 | `has(label,k,v)`, `has(T.label/T.id, v/P)` | ✅ | ✅ the cucumber verification idiom |
 | `hasId(…)` | ✅ | ✅ flattens list args |
-| `is(P)` | 🟡 | ✅ folds onto a projected scalar<br>✅ stepwise after a relational count/numeric reducer (including after `limit`/`range`/`skip`)<br>❌ after `limit`/`range`/`skip` in the remaining fused element-projection compatibility path<br>❌ after `path()` |
+| `is(P)` | 🟡 | ✅ relational scalar filter, including after transforms, reducers, and position-sensitive `limit`/`range`/`skip` chains<br>❌ after `path()` |
 | `where(__.…)` | 🟡 | ✅ single- & multi-hop (`compileExistsChain`)<br>✅ `where(__.label()/not())`<br>✅ alias-rooted `where(__.as('x')…)`<br>❌ `both()` multi-hop<br>❌ edge-typed hops |
 | `where(P)` / `where('a',P)` | 🟡 | ✅ alias-column compare (P2a)<br>❌ some `where(P.op)` alias forms<br>❌ `where().by(key)` on an edge-typed label |
 | `and`, `or`, `not`, `filter(__.…)` | ✅ | ✅ `and`/`or`/`not`, `filter(traversal)`<br>❌ `filter(predicate)` (non-traversal) — use `filter(traversal)` |
@@ -72,7 +72,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `properties(k…)` [`.key`/`.value`/`.element`/`.id`/`.label`/`.count`] | ✅ | ✅ `.key`/`.value`/`.element`/`.id`/`.label`/`.count`; real VP id + meta framed (W4)<br>✅ `has(metaKey)`/`hasKey`/`hasValue`/`.properties()`(meta)/`valueMap`(metaMap)<br>❌ `element()` of an **edge** property<br>❌ `properties().dedup()` |
 | `select('a')`, multi-`select`, `project(…)` | 🟡 | ✅ column-threaded aliases<br>❌ `select`/`project` of an **edge**-typed label |
 | `select(Column.values/keys)` | 🟡 | ✅ over a `group()`/`groupCount()` map (retypes → MapStream, §MapStream): scalar/count/sum values + element/scalar keys, incl. list-VALUED maps (`by(__.<move>()…fold())`) as list-of-lists<br>❌ element-VALUE maps, Map-unfold (→Map.Entry), select(Column) on a raw Map param |
-| **chained projections** (`values().count()`, `valueMap().select()`) | 🟡 | ✅ scalar projections retype to a physical ScalarStream before `count`/`sum`/`min`/`max`/`mean`; row operators then lower stepwise<br>❌ structured projection chains such as `valueMap().select()` still hit the compatibility guard |
+| **chained projections** (`values().count()`, `valueMap().select()`) | 🟡 | ✅ scalar projections retype to a physical ScalarStream; transforms, filters, ordering/range, and numeric reducers then lower one relational step at a time<br>❌ structured projection chains such as `valueMap().select()` still hit the compatibility guard |
 | `order()` [`.by(key[,dir])`] | 🟡 | ✅ tail modifier<br>❌ `order()` after `path()`<br>❌ `order().by(key)` on a scalar stream |
 | `limit`, `range`, `skip` | ✅ | ✅ CTE mid-chain, tail-modifier after `order()` |
 | `by(…)` modulator | ✅ | ✅ only as an `order`/`select`/`project`/`group`/`groupCount`/`path`/`math` modulator |
@@ -147,13 +147,13 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 
 | Step | Status | Notes |
 |---|:--:|---|
-| `asBool`, `asNumber(GType.X)`, bare `asNumber()` | ✅ | ✅ typed-value carrier (compile-time subtype tag → GraphBinary framing) |
-| string transforms | ✅ | ✅ SQL scalar, text-in text-out<br>✅ `concat` skips nulls (`concat_ws`), all-null→null<br>✅ trim family over Java's `isWhitespace` set (incl. U+3000)<br>✅ `reverse` string chars (recursive CTE) / number identity / list order (§9)<br>✅ all compose as `Scope.local` per-element list transforms after `fold()`<br>✅ a string op on a non-`local` list raises TinkerPop's "can only take string as argument"<br>✅ `format("…%{key}…%{_}…")` templates a string — named tokens read element properties, `%{_}` pulls by() modulators (positional/round-robin); a missing property filters the row (❌ reading project()/select() columns, the as()-alias fallback)<br>❌ `split` (list-valued), element/map `asString` |
+| `asBool`, `asNumber(GType.X)`, bare `asNumber()` | ✅ | ✅ typed-value carrier (compile-time subtype tag → GraphBinary framing)<br>✅ runtime scalar casts lower as relational ScalarStream transforms and compose with later filters/reducers |
+| string transforms | ✅ | ✅ SQL scalar, text-in text-out; non-local scalar transforms lower stepwise as ScalarStream relations<br>✅ `concat` skips nulls (`concat_ws`), all-null→null<br>✅ trim family over Java's `isWhitespace` set (incl. U+3000)<br>✅ `reverse` string chars (recursive CTE) / number identity / list order (§9)<br>✅ all compose as `Scope.local` per-element list transforms after `fold()`<br>✅ a string op on a non-`local` list raises TinkerPop's "can only take string as argument"<br>✅ `format("…%{key}…%{_}…")` templates a string — named tokens read element properties, `%{_}` pulls by() modulators (positional/round-robin); a missing property filters the row (❌ reading project()/select() columns, the as()-alias fallback)<br>❌ `split` (list-valued), element/map `asString` |
 | `math("<formula>")` | 🟡 | ✅ full exp4j operator/function set → one SQL scalar, always Double<br>❌ a var with no `by()`<br>❌ `withSideEffect` vars<br>❌ reading `project()`/`select()` map columns |
 | `asDate`, `dateAdd`, `dateDiff`, `datetime()`/`DateTime()` literals | 🟡 | ✅ epoch-millis rep + `'date'` tag (UTC-only, ms precision — parity with the JS reference client)<br>❌ `typeOf(GType.DATETIME)` over stored props<br>❌ `inject([…]).asDate()` |
 | `asNumber` + reducer (`fold`/`sum`) | 🟡 | ✅ numeric reducers carry runtime `vt` explicitly (`asNumber(...).sum()`)<br>❌ typed `fold()` still needs element-type metadata on ListStream materialization |
 | bigdecimal | ❌ | no client GraphBinary serializer |
-| `format()` | ❌ | template substitution — net-new (small, its own piece) |
+| `format()` | 🟡 | ✅ element-property template substitution with `%{key}` + `%{_}`/`by()`<br>❌ reading project()/select() columns and the as()-alias fallback |
 
 ## 11. Writes
 
