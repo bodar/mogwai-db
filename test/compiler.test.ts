@@ -349,7 +349,9 @@ describe('compiler SQL snapshots', () => {
     expect(c.sql).toContain('SELECT COUNT(*) AS v FROM c1');
     expect(c.sql).toContain('SELECT vp.value AS v FROM'); // the values() flatMap feeds the count
     // intervening scalar-stream modifiers compose through the re-entry
-    expect(read('g.V().values("age").dedup().count()').sql).toContain('COUNT(*) AS v FROM (SELECT DISTINCT v FROM');
+    const dedupCount = read('g.V().values("age").dedup().count()').sql;
+    expect(dedupCount).toContain('SELECT DISTINCT p.v AS v');
+    expect(dedupCount).toContain('SELECT COUNT(*) AS v FROM c2');
     expect(read('g.V().out().id().count()').shape).toEqual({ kind: 'count' });
     // The reducer is another scalar stream, so lowering can continue past it.
     expect(read('g.V().values("age").count().is(P.gt(2))').sql).toContain('WHERE p.v > ?');
@@ -999,6 +1001,18 @@ describe('compiler SQL snapshots', () => {
     const store = seededStore();
     expect(run(store, 'g.V().values("age").sum().is(P.gt(100))').map((r) => r.v)).toEqual([123]);
     expect(run(store, 'g.V().values("age").asNumber(GType.DOUBLE).sum()').map((r) => r.v)).toEqual([123]);
+  });
+
+  test('scalar row operators lower left-to-right instead of commuting through a tail accumulator', () => {
+    const p = read('g.V().values("age").count().limit(1).is(P.gt(3))');
+    expect(p.shape).toEqual({ kind: 'count' });
+    expect(p.sql).toContain('LIMIT 1 OFFSET 0');
+    expect(p.sql).toContain('WHERE p.v > ?');
+    expect(p.sql.indexOf('LIMIT 1 OFFSET 0')).toBeLessThan(p.sql.indexOf('WHERE p.v > ?'));
+
+    const store = seededStore();
+    expect(run(store, 'g.V().values("age").count().limit(1).is(P.gt(3))').map((r) => r.v)).toEqual([4]);
+    expect(run(store, 'g.V().values("age").count().limit(0).is(P.gt(3))')).toEqual([]);
   });
 
   test('aggregation deferred forms throw clearly', () => {
