@@ -21,6 +21,15 @@ export function tryLowerMapElement(st: ElementStream, step: PStep): ElementStrea
   return tryCompileElementChild(st, arg.nested, 'first')?.stream ?? null;
 }
 
+/** local() consumes every row produced by one child invocation per incoming
+ * traverser. The child compiler owns origin-partitioned element barriers, so local
+ * no longer needs a movement-only parser or a private window implementation. */
+export function tryLowerLocalElement(st: ElementStream, step: PStep): ElementStream | null {
+  const arg = step.args[0];
+  if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
+  return tryCompileElementChild(st, arg.nested, 'all')?.stream ?? null;
+}
+
 /** flatMap() consumes every productive child row. Keeping this next to map() makes
  * `first` versus `all` an explicit consumer policy over one child compiler, for both
  * element and scalar output shapes. */

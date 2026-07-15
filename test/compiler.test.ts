@@ -1705,6 +1705,12 @@ describe('compiler execution semantics', () => {
       const store = seededStore();
       expect(run(store, 'g.V(1).local(__.outE().limit(1)).inV().values("name")')
         .map((r) => r.v)).toEqual(['vadas']); // edge id 7 precedes edge ids 8 and 9
+      expect(run(store, 'g.V(1).flatMap(__.out().range(1,3)).values("name")')
+        .map((r) => r.v).sort()).toEqual(['josh', 'lop']);
+      expect(run(store, 'g.V(1).map(__.out().skip(1)).values("name")')
+        .map((r) => r.v)).toEqual(['lop']);
+      expect(run(store, 'g.V(1).local(__.out().limit(2).fold()).unfold().values("name")')
+        .map((r) => r.v).sort()).toEqual(['lop', 'vadas']);
     });
 
     test('scalar child row operators partition by parent before cardinality consumption', () => {
@@ -1857,7 +1863,8 @@ describe('compiler execution semantics', () => {
 
   test('local() with a non-movement / no-barrier body defers clearly', () => {
     expect(() => compile('g.V().local(__.out().in().simplePath()).path()', {})).toThrow('not yet supported');
-    expect(() => compile('g.V().local(__.out())', {})).toThrow('per-element limit()/range() only');
+    expect(run(seededStore(), 'g.V(1).local(__.out()).values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'lop', 'vadas']);
   });
 
   test('sack with two by() modulators throws TinkerPop message', () => {

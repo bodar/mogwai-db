@@ -99,7 +99,7 @@ There are currently six overlapping semantic compilers:
 
 Each is locally reasonable. Together they make composition depend on where a traversal
 appears. `out().values()` works at the root but may not work in a branch; a reducer works
-terminally but not after another projection; a barrier is global unless `local.ts` has a
+terminally but not after another projection; a barrier is global unless local has a
 bespoke window case; a nested traversal works only if `compileNestedScalar` happens to
 recognize its exact syntax.
 
@@ -258,8 +258,8 @@ const partitionKeys = scope.kind === 'root'
 - `group()`/`groupCount()` produce one map per active origin; `MapStream` therefore carries
   the origin columns on every entry row.
 
-Put these operators in a dedicated `steps/barrier.ts`. `local.ts` should eventually be a
-thin cardinality policy over `compileChild`, not an alternate barrier engine.
+Put these operators in the shared child/barrier layer. `local` should be a thin
+cardinality policy over `compileChild`, not an alternate barrier engine.
 
 ### 5. Materialization is a single root-only boundary
 
@@ -551,10 +551,13 @@ property-bearing element objects inside the compiled SQL before GraphBinary fram
 it never falls back to JS traversal interpretation or additional store queries.
 `unifyLists` also merges homogeneous element-list union/choose/coalesce arms and rejects
 incompatible item kinds. This recovered one official scenario, moving L3 872→873.
-Scalar `local(child)` now routes through that compiler with `all` cardinality, so
-projection, transforms, origin-partitioned row operators, and scalar reducers share the
-same lowering as flatMap. The legacy local prefix handler remains only for element-valued
-movement windows pending generic element barriers. L3 remains 872.
+`local(child)` now routes through that compiler with `all` cardinality. Scalar
+projection/transforms/reducers and element `limit`/`skip`/`range`/`dedup` all partition
+by the child origin; aliases, path columns, and `otherV` context survive scope exit.
+The movement-only parser and private window engine (`local.ts`) are deleted, and bare
+movement local bodies are no longer rejected. The same element-row helper feeds scoped
+`fold()`, so slicing/deduplication before an element fold is not a second compiler path.
+L3 remains 873.
 
 1. Extract the existing `originSeed` into `steps/child.ts` as `pushChildScope`.
 2. Preserve the domain relation in `ChildFrame`.
@@ -577,7 +580,7 @@ Migrate in increasing semantic complexity:
 3. ~~homogeneous scalar arms for `union` and three-argument predicate `choose`.~~
 4. scalar/list arms for `coalesce` and `optional`, preserving first-productive-arm
    semantics.
-5. `local`: delete its movement-only parser and use child-scoped barriers.
+5. ~~`local`: delete its movement-only parser and use child-scoped barriers.~~
 6. `by(traversal)`: use child scalar cardinality plus productivity.
 7. ProductiveByStrategy: make productive/unproductive handling an explicit consumer
    policy rather than a strategy-wide rejection.
@@ -710,7 +713,7 @@ The refactor is complete when all of the following are true:
 - [ ] Barriers derive global/per-origin behaviour from `CompileScope`.
 - [ ] `only one projection step is supported per traversal` no longer exists.
 - [ ] `branchArm` is not prefix-only.
-- [ ] `local.ts` contains no child traversal parser or private barrier engine.
+- [x] `local.ts` is deleted; local has no private traversal parser/barrier engine.
 - [ ] `compileNestedList` is deleted.
 - [ ] `compileNestedScalar`/predicate specializations are optional `tryInline*` fast
       paths with generic fallbacks.
