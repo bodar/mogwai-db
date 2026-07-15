@@ -3,12 +3,11 @@ import { nodes, edges, labels } from '../schema.ts';
 import { framedProps, labelNameSub, nodePropScalar, predicateSql, propExtract, extIdOf } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
-import { carryOf, pathColumns, recordFieldColumns, toListStream, toPathStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type PathStream, type RecordField, type RecordStream, type ScalarStream, type Stream } from './stream.ts';
+import { carryOf, continueLowering, pathColumns, recordFieldColumns, toListStream, toPathStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type LoweringResult, type PathStream, type RecordField, type RecordStream, type ScalarStream, type Stream } from './stream.ts';
 import { type Compiled, type PathPos } from '../render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
 import { materializeRecordRoot } from './materialize.ts';
 import { lowerGlobalCount } from './barrier.ts';
-import { dispatchNext } from './index.ts';
 import { isElementChild, isListChild, isScalarChild, pushChildScope, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
 
 // ---------- select()/project() ----------
@@ -309,11 +308,11 @@ export function compileSelectProject(st: ElementStream, proj: PStep, tail: TailM
 /** Continue from a per-traverser record. Selecting a named field retypes it to the
  * ordinary scalar/element stream, while Column.keys/values produces one list value
  * per record. This is intentionally distinct from MapStream's whole-group columns. */
-export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): Compiled {
+export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): LoweringResult {
   if (at >= steps.length) return materializeRecordRoot(s);
   const step = steps[at];
   if (step.name === 'count')
-    return dispatchNext(lowerGlobalCount(s), steps, at + 1);
+    return continueLowering(lowerGlobalCount(s), at + 1);
   if (step.name === 'limit' || step.name === 'range' || step.name === 'skip' || step.name === 'tail') {
     const local = step.args.some((a: any) => a && typeof a === 'object' && a.scope === 'local');
     const nums = step.args.filter((a): a is number => typeof a === 'number').map(Number);
@@ -331,7 +330,7 @@ export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): 
       const r = s.rel.as('r');
       const names = [...fields.flatMap(recordFieldColumns), ...carriedCols(s.carried)];
       const rel = s.q.cte(q`SELECT ${list(names.map((name) => r.c[name]), ', ')} FROM ${r}`, names);
-      return dispatchNext(toRecordStream(carryOf(s), rel, fields), steps, at + 1);
+      return continueLowering(toRecordStream(carryOf(s), rel, fields), at + 1);
     }
     if (step.name === 'tail') throw new Error('tail() on a record stream needs explicit encounter-order metadata');
     const offset = step.name === 'skip' ? nums[0] : step.name === 'range' ? nums[0] : 0;
@@ -343,7 +342,7 @@ export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): 
       q`SELECT ${list(names.map((name) => r.c[name]), ', ')} FROM ${r} LIMIT ${limit ?? -1} OFFSET ${offset}`,
       names,
     );
-    return dispatchNext(toRecordStream(carryOf(s), rel, s.fields), steps, at + 1);
+    return continueLowering(toRecordStream(carryOf(s), rel, s.fields), at + 1);
   }
   if (step.name !== 'select') throw new Error(`${step.name}() on a record value not yet supported`);
 
@@ -372,7 +371,7 @@ export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): 
       q`SELECT ${expr} AS list${carryFrag(s.carried, r)} FROM ${r}`,
       ['list', ...carriedCols(s.carried)],
     );
-    return dispatchNext(toListStream(carryOf(s), rel, of), steps, at + 1);
+    return continueLowering(toListStream(carryOf(s), rel, of), at + 1);
   }
 
   const keys = step.args.filter((a): a is string => typeof a === 'string');
@@ -385,14 +384,14 @@ export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): 
       q`SELECT ${r.c[`${field.prefix}_v`]} AS v${carryFrag(s.carried, r)} FROM ${r}`,
       ['v', ...carriedCols(s.carried)],
     );
-    return dispatchNext(toScalarStream(carryOf(s), rel), steps, at + 1);
+    return continueLowering(toScalarStream(carryOf(s), rel), at + 1);
   }
   if (field.sub === 'list') {
     const rel = s.q.cte(
       q`SELECT ${r.c[`${field.prefix}_list`]} AS list${carryFrag(s.carried, r)} FROM ${r}`,
       ['list', ...carriedCols(s.carried)],
     );
-    return dispatchNext(toListStream(carryOf(s), rel, field.of), steps, at + 1);
+    return continueLowering(toListStream(carryOf(s), rel, field.of), at + 1);
   }
   if (field.nullable) {
     const rid = r.c[`${field.prefix}_rid`];
@@ -400,13 +399,13 @@ export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): 
       q`SELECT CASE WHEN ${rid} IS NULL THEN 0 ELSE 2 END AS vk, NULL AS v, ${rid} AS rid${carryFrag(s.carried, r)} FROM ${r}`,
       ['vk', 'v', 'rid', ...carriedCols(s.carried)],
     );
-    return dispatchNext(toVariantStream(carryOf(s), rel, undefined, field.sub === 'edge' ? 'edge' : 'node'), steps, at + 1);
+    return continueLowering(toVariantStream(carryOf(s), rel, undefined, field.sub === 'edge' ? 'edge' : 'node'), at + 1);
   }
   const rel = s.q.cte(
     q`SELECT ${r.c[`${field.prefix}_rid`]} AS id${carryFrag(s.carried, r)} FROM ${r}`,
     ['id', ...carriedCols(s.carried)],
   );
-  return dispatchNext({ ...carryOf(s), kind: 'elements', rel, elem: field.sub === 'edge' ? 'edge' : 'node' }, steps, at + 1);
+  return continueLowering({ ...carryOf(s), kind: 'elements', rel, elem: field.sub === 'edge' ? 'edge' : 'node' }, at + 1);
 }
 
 // ---------- path() (linear regime) ----------

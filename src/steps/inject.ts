@@ -4,7 +4,7 @@ import { flattenListArgs } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { type Carry } from './context.ts';
 import { toListStream, toScalarStream } from './stream.ts';
-import { dispatchNext } from './index.ts';
+import { lowerSteps } from './index.ts';
 import { type Compiled, type ValueType } from '../render.ts';
 import {
   numericSpec, asBoolConst, asNumberConst, asNumberBare, asDateConst,
@@ -71,7 +71,7 @@ function foldConstantCoercions(steps: PStep[], vals: any[]): { at: number; as?: 
 
 /** g.inject(v1, v2, …) is now only a shaped source constructor. List literals seed
  * ListStream rows; ordinary values seed ScalarStream rows. Every following step is
- * handled by dispatchNext, the same lowering engine used after values()/unfold(). */
+ * handled by lowerSteps, the same lowering engine used after values()/unfold(). */
 export function compileInject(steps: PStep[]): Compiled {
   const Q = new Query();
   const carry: Carry = { q: Q, params: {}, carried: { aliases: new Map(), origins: [] } };
@@ -80,7 +80,7 @@ export function compileInject(steps: PStep[]): Compiled {
   if (steps[0].args.length >= 1 && steps[0].args.every((a: any) => Array.isArray(a))) {
     const rows = steps[0].args.map((a: any[]) => q`(${jsonbArrayOf(a)})`);
     const rel = Q.cte(q`VALUES ${list(rows, ', ')}`, ['list']);
-    return dispatchNext(toListStream(carry, rel, { kind: 'scalar' }), steps, 1);
+    return lowerSteps(toListStream(carry, rel, { kind: 'scalar' }), steps, 1);
   }
 
   // Mixed list/scalar inject remains the historical flattened representation until
@@ -90,5 +90,5 @@ export function compileInject(steps: PStep[]): Compiled {
   const rel = vals.length
     ? Q.cte(q`VALUES ${list(vals.map((v) => q`(${value(v)})`), ', ')}`, ['v'])
     : Q.cte(q`SELECT NULL AS v WHERE 0`, ['v']);
-  return dispatchNext(toScalarStream(carry, rel, folded.as), steps, folded.at);
+  return lowerSteps(toScalarStream(carry, rel, folded.as), steps, folded.at);
 }

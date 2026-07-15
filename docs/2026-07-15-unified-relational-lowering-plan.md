@@ -8,8 +8,8 @@
 
 **Current checkpoint:** branch `refactor/unified-relational-lowering`; items 1–15 are on
 `trunk`, item 16 is local commit `80d7020`, item 17 is local commit `9eabd70`, and item
-18 is local commit `8a6f3ab`; item 19 is the current uncommitted checkpoint. Run full
-`bun test` before every commit.
+18 is local commit `8a6f3ab`, item 19 is local commit `7b23f19`, and item 20 is the
+current uncommitted checkpoint. Run full `bun test` before every commit.
 
 **Recent completed slices:**
 
@@ -129,6 +129,12 @@
     `repeat()` remains an explicit physical boundary because its SQLite recursive term
     cannot carry arbitrary parent columns. Compiler suite remains 246/246, L3 ratcheted
     932→933, and the full suite is 370/370.
+20. Recursive `dispatchNext` orchestration is deleted. Shape compilers now return
+    either a terminal `Compiled` or a typed `LoweringContinuation {stream,at}`;
+    `lowerSteps` is the single iterative owner of stream re-entry and consumes those
+    continuations until root materialization. Element/scalar/list/map/record/group/
+    property/variant/path transitions all cross this one loop, including inject roots.
+    TypeScript, compiler 246/246, L3 933/2041, and full 370/370 are green.
 
 **Current Stage 6 state:** scalar traversal modulators for `project`, aliased `select`,
 and inline element `group` all use the generic child-domain compiler. Group keys consume
@@ -139,9 +145,10 @@ aggregate, order, dedup, linear-path, and alias-compare boundaries, including nu
 element records and aggregate members. Multi-input math/format/option-choose modulation
 also uses one generic child domain. L3 is 933.
 
-**Immediate next slice:** replace `dispatchNext` with a stepwise `lowerSteps` loop and
-make the root path `seed → lowerSteps → materializeRoot`. Preserve correlated
-count/EXISTS as measured fast paths until Stage 8.
+**Immediate next slice:** move the remaining terminal branches behind a single
+`materializeRoot(Stream)` exit so `compileRead` becomes literally
+`seed → lowerSteps → materializeRoot`. Preserve correlated count/EXISTS as measured
+fast paths until Stage 8.
 
 **Deliberate compatibility boundaries after Stage 6:** broader VariantStream followers,
 property groups without a live element parent, element-kind-changing optional fallback,
@@ -213,8 +220,8 @@ The compiler's successful structural work has converged on the pieces this chang
 needs:
 
 - `Stream` already distinguishes element, scalar, list, and map relations.
-- `dispatchNext` already proves that a stream can re-enter compilation after a shape
-  change.
+- iterative `lowerSteps` now proves that every shape can re-enter compilation through
+  typed continuation tokens.
 - `Carried` now makes physical traverser columns explicit and preserves aliases/path
   through branch merges.
 - `Carried.origins` is a nested ordinal stack, proven by nested
@@ -238,13 +245,14 @@ which input traverser produced each output.
 
 ## The current architectural fault line
 
-There are currently six overlapping semantic compilers:
+The refactor began with six overlapping semantic compilers:
 
 1. `lowerElementSteps`: non-materializing element `StepFn` lowering, shared by roots,
    re-entry, generic children, and branch arms.
 2. `foldTailAcc` + `renderProjection`: scalar projection/modifier/reducer lowering,
    usually straight to `Compiled`.
-3. `dispatchNext`: partial shape re-entry for scalar/list/map streams.
+3. `dispatchNext`: partial recursive shape re-entry for scalar/list/map streams
+   (deleted by item 20 in favour of iterative `lowerSteps`).
 4. `compileNestedScalar`: hand-recognized correlated scalar traversals.
 5. `compileNestedList`: hand-recognized movement/projection/fold traversals.
 6. Branch/local implementations: seeded relation folds and ordinal-window barriers.
@@ -754,8 +762,9 @@ Ratchet after each consumer, not only at the end.
    all-row order remain explicit physical-policy boundaries.
 5. ~~Delete `isScalarLocal`, the local-body movement whitelist, and local's private
    origin window implementation.~~ (`61d028d`)
-6. Remove `dispatchNext` once `lowerSteps` fully supersedes it.
-7. Remove the `St` alias.
+6. ~~Remove recursive `dispatchNext`; shape compilers yield typed continuations to the
+   iterative `lowerSteps` owner.~~
+7. ~~Remove the `St` alias; source uses `ElementStream` directly.~~
 
 ### Stage 8 — optimize the unified model
 

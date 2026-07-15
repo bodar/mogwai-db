@@ -9,11 +9,11 @@ import { q, value, raw, type Expression, type Relation } from '../q.ts';
 import { predicateSql, scalarTx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { carryOf, toListStream, toScalarStream, mapOfToListOf, type ListStream, type ScalarStream, type MapStream } from './stream.ts';
+import { carryOf, continueLowering, toListStream, toScalarStream, mapOfToListOf, type ListStream, type LoweringResult, type ScalarStream, type MapStream } from './stream.ts';
 import { carryFrag, carriedCols, type ElementStream } from './context.ts';
 import { type Compiled } from '../render.ts';
 import { materializeListRoot, materializeRoot } from './materialize.ts';
-import { dispatchNext, compileRead } from './index.ts';
+import { compileRead } from './index.ts';
 
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
 const isLocal = (s: PStep): boolean => (s.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local');
@@ -267,45 +267,45 @@ function listAllAny(s: ListStream, step: PStep): ListStream {
 const LIST_OPERAND_OPS = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product']);
 
 /**
- * The list arm of dispatchNext. A non-terminal fold always leaves a follower, so a
+ * The list arm of lowerSteps. A non-terminal fold always leaves a follower, so a
  * ListStream here is never terminal (a terminal fold stays the reducer path). unfold()
  * retypes and re-enters; Scope.local reductions/transforms reshape each list; the
  * set-op family reshapes the list (set/list/product) or reduces it (conjoin/all/any).
  */
-export function compileFromList(s: ListStream, steps: PStep[], at: number): Compiled {
+export function compileFromList(s: ListStream, steps: PStep[], at: number): LoweringResult {
   // End of chain → frame each list value as one GraphBinary List (json() so the JSONB
   // blob reads back as text for the handler to parse).
   if (at >= steps.length) {
     return materializeListRoot(s);
   }
   const step = steps[at];
-  if (step.name === 'unfold') return dispatchNext(compileUnfold(s), steps, at + 1);
+  if (step.name === 'unfold') return continueLowering(compileUnfold(s), at + 1);
   // none(pred): keep each list where NO element satisfies pred (a collection filter);
   // stays a list stream, so downstream continues.
-  if (step.name === 'none') return dispatchNext(listNoneFilter(s, step.args[0]), steps, at + 1);
+  if (step.name === 'none') return continueLowering(listNoneFilter(s, step.args[0]), at + 1);
   // Scope.local collection transforms (order/dedup/limit/skip/range/tail) — reshape
   // each list and stay a ListStream, so downstream continues.
   if (LIST_LOCAL_TX.has(step.name) && isLocal(step))
-    return dispatchNext(listLocalTransform(s, step), steps, at + 1);
+    return continueLowering(listLocalTransform(s, step), at + 1);
   // reverse() on a list reverses element order (no Scope arg — reverse of a list is
   // always the whole collection).
   if (step.name === 'reverse')
-    return dispatchNext(listReverse(s), steps, at + 1);
+    return continueLowering(listReverse(s), at + 1);
   // Scope.local per-element string transforms (toUpper/trim/length/…) over a list.
   if (STRING_LOCAL_TX.has(step.name)) {
     // A string op on a list WITHOUT Scope.local is invalid (a list is not a string) —
     // raise TinkerPop's exact message. WITH Scope.local it applies per element.
     if (!isLocal(step)) throw new Error(`The ${step.name}() step can only take string as argument`);
-    return dispatchNext(listStringTransform(s, step), steps, at + 1);
+    return continueLowering(listStringTransform(s, step), at + 1);
   }
   // Scope.local per-list reducers (count/sum/min/max/mean) — reduce each list to a
   // scalar stream, so a trailing filter/transform/reducer continues normally.
   if (['count', 'sum', 'min', 'max', 'mean'].includes(step.name) && isLocal(step)) {
-    return dispatchNext(lowerListReducer(s, step.name), steps, at + 1);
+    return continueLowering(lowerListReducer(s, step.name), at + 1);
   }
   // all(P)/any(P): keep the list if every/some element satisfies P (list filter).
   if (step.name === 'all' || step.name === 'any')
-    return dispatchNext(listAllAny(s, step), steps, at + 1);
+    return continueLowering(listAllAny(s, step), at + 1);
   // conjoin(delim): join the incoming list into ONE string (nulls skipped), delimiter a
   // plain string arg → a scalar stream (so a trailing step composes; usually terminal).
   if (step.name === 'conjoin') {
@@ -313,7 +313,7 @@ export function compileFromList(s: ListStream, steps: PStep[], at: number): Comp
     const delim = String(step.args[0] ?? '');
     const joined = q`(SELECT COALESCE(group_concat(value, ${value(delim)}), '') FROM (SELECT value FROM json_each(${c.c.list}) WHERE value IS NOT NULL ORDER BY key))`;
     const rel = s.q.cte(q`SELECT ${joined} AS v FROM ${c}`, ['v']);
-    return dispatchNext(toScalarStream(carryOf(s), rel, undefined), steps, at + 1);
+    return continueLowering(toScalarStream(carryOf(s), rel, undefined), at + 1);
   }
   // set-op family (combine/intersect/difference/disjunct/product) over a list operand.
   if (LIST_OPERAND_OPS.has(step.name)) {
@@ -329,7 +329,7 @@ export function compileFromList(s: ListStream, steps: PStep[], at: number): Comp
     const rel = s.q.cte(q`SELECT ${listExpr} AS list FROM ${c}`, ['list']);
     // product yields a list of pair-lists; the others keep the element shape.
     const of = step.name === 'product' ? { kind: 'list' as const, of: { kind: 'scalar' as const } } : s.of;
-    return dispatchNext(toListStream(carryOf(s), rel, of), steps, at + 1);
+    return continueLowering(toListStream(carryOf(s), rel, of), at + 1);
   }
   throw new Error(`${step.name}() on a list value not yet supported`);
 }
@@ -339,14 +339,14 @@ const columnOf = (step: PStep): 'keys' | 'values' | undefined =>
   (step.args ?? []).map((a: any) => a && typeof a === 'object' && a.column).find((c: any) => c === 'keys' || c === 'values');
 
 /**
- * The map arm of dispatchNext. A MapStream (stream.ts) is a `(mk, mv)` row relation
+ * The map arm of lowerSteps. A MapStream (stream.ts) is a `(mk, mv)` row relation
  * reached only when a follower consumes a group()/groupCount(). select(Column.values)/
  * select(Column.keys) aggregate one column into a single list value (mirroring how
  * fold() builds a list), which unfold()/framing then handles — so
  * group().select(Column.values).unfold() flows map→list→scalar. Map-unfold (→ Map.Entry)
  * and select(Column) with a trailing key defer with a clear message.
  */
-export function compileFromMap(s: MapStream, steps: PStep[], at: number): Compiled {
+export function compileFromMap(s: MapStream, steps: PStep[], at: number): LoweringResult {
   // Terminal is unreachable: a group() only retypes to a MapStream when a follower
   // exists (else it stays the row-folding groupBuffer path).
   if (at >= steps.length) throw new Error('a map value at end of chain should not be a MapStream');
@@ -362,7 +362,7 @@ export function compileFromMap(s: MapStream, steps: PStep[], at: number): Compil
       : [c.c.mk, mapOfToListOf(s.keyOf), s.keyOf.kind === 'list'];
     const item = nested ? q`json(${srcCol})` : srcCol;
     const rel = s.q.cte(q`SELECT jsonb(COALESCE(json_group_array(${item}), json('[]'))) AS list FROM ${c}`, ['list']);
-    return dispatchNext(toListStream(carryOf(s), rel, of), steps, at + 1);
+    return continueLowering(toListStream(carryOf(s), rel, of), at + 1);
   }
   throw new Error(`${step.name}() on a map value not yet supported`);
 }

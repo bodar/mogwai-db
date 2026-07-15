@@ -111,11 +111,14 @@ fallback, never semantic rejection. Sack and every element-backed group path are
   (`stripTerminal`, `foldRepeatClusters`, `foldByModulators`) run once up front so
   the dispatch sees a canonical, peek-free chain (no index arithmetic anywhere).
 - **Seam 2 — `src/steps/*.ts`:** the read prefix is a **functional fold** —
-  `StepFn = (step, St) => St` over an immutable `St` (`context.ts`); only the
+  `StepFn = (step, ElementStream) => ElementStream` over an immutable stream
+  (`context.ts`); only the
   `Query` builder accumulates CTEs. Per-family modules (`movement`/`filter`/
   `branch`/`passthrough`), writes (`write.ts`: imperative interpreters
-  behind an ordered `WRITE_RULES` table). `index.ts` = `PREFIX` Map + `buildPrefix`
-  + `compileRead`. To add a read step: write a `StepFn`, register it in the right
+  behind an ordered `WRITE_RULES` table). `index.ts` = `PREFIX` Map +
+  `lowerElementSteps` + the iterative shaped `lowerSteps` owner + `compileRead`.
+  Shape compilers yield a typed `LoweringContinuation {stream,at}` rather than
+  recursively dispatching. To add a read step: write a `StepFn`, register it in the right
   Map — do NOT grow a switch. Multi-step modulator consumption belongs in a
   `strategies.ts` fold, NOT in a compiler peeking at siblings.
 - **The tail is split per step-family (2026-07-13, was one 1353-line file).**
@@ -127,9 +130,10 @@ fallback, never semantic rejection. Sack and every element-backed group path are
   the ONE pure leaf, no back-import), `inject.ts` (`compileInject`), `select.ts`
   (select/project/path), `mapscalar.ts` (map/math/choose), `group.ts` (group +
   properties). Layering: leaves import the render base UP from `projection.ts`; the
-  dispatcher imports the leaves for dispatch — a value cycle (`projection`↔`mapscalar`)
-  same as the pre-existing `projection`↔`index` `dispatchNext` one, safe (all refs are
-  in fn bodies, none at module-init). To add a tail step: put its `compile*` in the
+  dispatcher imports the leaves for dispatch — the `projection`↔`mapscalar` value cycle
+  is safe (all refs are in fn bodies, none at module-init). Stream continuation tokens
+  live in `stream.ts`, so leaf modules do not recursively import the orchestrator.
+  To add a tail step: put its `compile*` in the
   right leaf (or a new one), route it from `compileTail`. `write.ts` imports
   `compileInject` from `inject.ts`.
 
@@ -685,7 +689,7 @@ walk), `repeat().until()` (do-while/while-do, `loops().is(n)`), unbounded `repea
 per-traverser BRANCHING family** (455→473, `docs/2026-07-13-per-traverser-branching.md`)
 — `choose` (predicate form + option-map scalar CASE), `coalesce` (first-non-empty via a
 carried input-ordinal `St.origin`), multi-hop `union`/`optional` (rewritten onto the
-`foldBody` seam; optional keeps its single-hop LEFT JOIN fast path), `flatMap`, scalar
+shared element-stream lowering seam; optional keeps its single-hop LEFT JOIN fast path), `flatMap`, scalar
 `map` (`compileMapScalar`), **multi-hop `where`** (`compileExistsChain` — correlated
 EXISTS over a movement chain + terminal filter) + `where(__.label()/not())`, and the
 **alias-threading foundation** (`aliasCtx` + `resolveAlias`: a where/and/or/not predicate
@@ -706,14 +710,15 @@ couldn't continue from, which is why `unfold`, chained projections, `Scope.local
 set-ops were all blocked. Fixed by a **re-enterable tail** built on an explicit stream
 model. Plan + decision log: `docs/2026-07-13-list-value-substrate-plan.md` (Approach A).
 
-- **`src/steps/stream.ts`** — the `Stream` union: `St` (elements, context.ts) |
+- **`src/steps/stream.ts`** — the `Stream` union: `ElementStream` (context.ts) |
   `ScalarStream` (a `v` column) | `ListStream` (a JSONB `list` column, N rows). All share
   `Carry` (the shape-independent state — `q`/aliases/indexKeys/params/path/origin) carved
-  out of `St`, so a retype preserves it. **`St.elem` stays `'node'|'edge'` — the 20+
-  movement/filter StepFns only ever see `St`; the union lives at the orchestration layer.**
-- **`dispatchNext(stream, steps, at)`** (`src/steps/index.ts`) routes by stream shape:
-  elements → `foldBody` (absorb further movement) + `compileTail`; scalar →
-  `compileFromScalar`; list → `compileFromList`. A retype step calls back into it, so
+  out of it, so a retype preserves it. **`ElementStream.elem` stays `'node'|'edge'` —
+  movement/filter StepFns only ever see ElementStream; the union lives at orchestration.**
+- **`lowerSteps(stream, steps, at)`** (`src/steps/index.ts`) is the ONE iterative
+  shape orchestrator: elements → `lowerElementSteps` + `compileTail`; scalar →
+  `compileFromScalar`; list → `compileFromList`; map/record/group/property/variant/path
+  route to their typed handlers. A retype yields `LoweringContinuation` to that loop, so
   `V().fold().unfold().out()` flows elements→list→elements→… — each phase with its own ≤1
   projection. The old "only one projection per traversal" ceiling is dissolved
   STRUCTURALLY (fresh accumulator per phase), not by loosening a check.
@@ -800,7 +805,7 @@ interpreter). Plan + decision log: `docs/2026-07-13-side-effect-state-plan.md`.
 - **`group('a')`/`groupCount('a')` (side-effecting, `sideeffect.ts`)** = a PASS-THROUGH
   barrier that stashes the group-spec (source `from` string referencing the persistent
   `st.last` CTE + `elemCtx` + folded `bys`) and returns `st` unchanged, so movement between
-  it and `cap('a')` works (`groupCount('a').by('name').out().cap('a')`). In `foldBody`,
+  it and `cap('a')` works (`groupCount('a').by('name').out().cap('a')`). In `lowerElementSteps`,
   group/groupCount dispatch as a prefix step ONLY when they carry a string side-effect key
   (`isSideEffectGroup` guard, mirroring the sack/choose guards); the bare terminal form falls
   to the existing `compileTail` barrier. Index keys for the group key are computed at cap time
