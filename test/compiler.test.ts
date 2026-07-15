@@ -1295,6 +1295,7 @@ describe('compiler SQL snapshots', () => {
     expect(childValue.shape).toEqual({ kind: 'value', as: undefined });
     expect(childValue.sql).toContain('JOIN vertex_properties vp');
     expect(childValue.sql).toContain('ROW_NUMBER() OVER (PARTITION BY c.o0');
+    expect(read('g.V(1).map(__.values("name").toUpper())').sql).toContain('upper(p.v) AS v');
     // record/list-valued child bodies still defer; element bodies use generic child scope below.
     expect(() => compile('g.V().map(__.select("a"))', {})).toThrow('not yet supported');
     expect(() => compile('g.V().map(__.values("name")).map(__.values("age"))', {})).toThrow('step not implemented: map()');
@@ -2113,6 +2114,8 @@ describe('compiler execution semantics', () => {
       .toEqual(['josh', 'lop', 'vadas']);
     expect(run(store, 'g.V(1).union(__.values("name"), __.constant("x"))').map((r) => r.v).sort())
       .toEqual(['marko', 'x']);
+    expect(run(store, 'g.V(1).union(__.values("name").toUpper(), __.constant("x").toUpper())').map((r) => r.v).sort())
+      .toEqual(['MARKO', 'X']);
     expect(run(store, 'g.V(1).union(__.out().count(), __.in().count())').map((r) => r.v))
       .toEqual([3, 0]);
     // optional hit: josh created ripple+lop
@@ -2133,6 +2136,8 @@ describe('compiler execution semantics', () => {
       .toEqual(['josh', 'josh', 'josh', 'marko', 'marko', 'peter', 'peter', 'vadas']);
     expect(run(store, 'g.V().choose(__.hasLabel("person"), __.values("name"), __.constant("software"))').map((r) => r.v).sort())
       .toEqual(['josh', 'marko', 'peter', 'software', 'software', 'vadas']);
+    expect(run(store, 'g.V().choose(__.hasLabel("person"), __.values("name").toUpper(), __.constant("software").toUpper())').map((r) => r.v).sort())
+      .toEqual(['JOSH', 'MARKO', 'PETER', 'SOFTWARE', 'SOFTWARE', 'VADAS']);
     expect(run(store, 'g.V().choose(__.hasLabel("person"), __.out().count(), __.in().count()).count()').map((r) => r.v))
       .toEqual([6]);
     // predicate = count().is: marko has 2 knows-edges → out(knows); others → self
@@ -2154,6 +2159,8 @@ describe('compiler execution semantics', () => {
       .toEqual([0, 0, 27, 29, 32, 35]);
     expect(run(store, 'g.V(1).coalesce(__.values("missing"), __.values("name"), __.constant("x"))').map((r) => r.v))
       .toEqual(['marko']);
+    expect(run(store, 'g.V(1).coalesce(__.values("missing"), __.values("name").toUpper())').map((r) => r.v))
+      .toEqual(['MARKO']);
     // count is total, so even zero is productive and prevents fallback.
     expect(run(store, 'g.V(2).coalesce(__.out().count(), __.constant(99))').map((r) => r.v)).toEqual([0]);
   });
@@ -2169,6 +2176,7 @@ describe('compiler execution semantics', () => {
     // flatMap = inline the body: marko out().out() = lop,ripple
     expect(run(store, 'g.V(1).flatMap(__.out().out()).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple']);
     expect(run(store, 'g.V(1).flatMap(__.out().values("name"))').map((r) => r.v).sort()).toEqual(['josh', 'lop', 'vadas']);
+    expect(run(store, 'g.V(1).flatMap(__.out().values("name").toUpper())').map((r) => r.v).sort()).toEqual(['JOSH', 'LOP', 'VADAS']);
     expect(run(store, 'g.V().flatMap(__.values("age")).count()').map((r) => r.v)).toEqual([4]);
   });
 
