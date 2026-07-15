@@ -18,7 +18,7 @@ import { SCALAR_ROW_STEPS } from './scalar.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
 import { compileSelectProject, compilePath } from './select.ts';
 import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions } from './mapscalar.ts';
-import { compileGroup, groupToMapStream, compileProperties, type GroupSource } from './group.ts';
+import { compileGroup, groupToMapStream, lowerProperties, type GroupSource } from './group.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
 //
@@ -167,10 +167,10 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
     return materializeScalarRoot(out);
   }
 
-  // properties() turns the traverser into a property (owner+key+value) — a shape
-  // the id-relation can't carry, so it and its follow-ons compile in their own fn.
+  // properties() turns the traverser into a relational PropertyStream. Property-
+  // specific followers dispatch there; key/value/element re-enter common streams.
   if (steps[stop]?.name === 'properties')
-    return compileProperties(st, steps.slice(stop));
+    return dispatchNext(lowerProperties(st, steps[stop]), steps, stop + 1);
 
   // option-map choose (choose().option()…) → a CASE over a correlated choice scalar.
   if (steps[stop]?.name === 'choose' && steps[stop].options)

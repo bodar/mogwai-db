@@ -59,7 +59,17 @@ export type MapOf =
 export interface MapStream extends Carry { readonly kind: 'map'; readonly rel: Relation; readonly keyOf: MapOf; readonly valOf: MapOf; }
 
 /** The traverser stream shapes a compile phase can be in. */
-export type Stream = ElementStream | ScalarStream | ListStream | MapStream;
+/** A stream of Property/VertexProperty traversers. Properties are element-like at
+ * the Gremlin level but deliberately are not ElementStream: movement/filter StepFns
+ * only understand node/edge rowids. The payload keeps the owner and property fields
+ * relational until key/value/id/element/materialization chooses the next shape. */
+export interface PropertyStream extends Carry {
+  readonly kind: 'property';
+  readonly rel: Relation;
+  readonly ownerElem: Elem;
+}
+
+export type Stream = ElementStream | ScalarStream | ListStream | MapStream | PropertyStream;
 
 /** The physical relation columns promised by a stream. Payload comes first, followed
  * by the stable carried schema. A stream is executable relational state, so metadata
@@ -68,7 +78,8 @@ export function streamColumns(s: Stream): readonly string[] {
   const payload = s.kind === 'elements' ? ['id']
     : s.kind === 'scalar' ? (s.result === 'number' ? ['v', 'vt'] : ['v'])
     : s.kind === 'list' ? ['list']
-    : ['mk', 'mv'];
+    : s.kind === 'map' ? ['mk', 'mv']
+    : ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta'];
   return [...payload, ...carriedCols(s.carried)];
 }
 
@@ -93,6 +104,8 @@ export const toListStream = (c: Carry, rel: Relation, of: ListOf): ListStream =>
   assertStreamColumns({ ...c, kind: 'list', rel, of });
 export const toMapStream = (c: Carry, rel: Relation, keyOf: MapOf, valOf: MapOf): MapStream =>
   assertStreamColumns({ ...c, kind: 'map', rel, keyOf, valOf });
+export const toPropertyStream = (c: Carry, rel: Relation, ownerElem: Elem): PropertyStream =>
+  assertStreamColumns({ ...c, kind: 'property', rel, ownerElem });
 
 /** A map key/value column's shape → the list shape it produces when select(Column.*)
  *  aggregates it: a scalar carries its type tag, an element rejoins on unfold, a
