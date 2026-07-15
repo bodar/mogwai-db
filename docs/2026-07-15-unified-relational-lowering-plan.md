@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–3 complete, Stage 4 active
-**Baseline:** L1 2298/2298, L3 833/2041; latest completed checkpoint: L3 848, 349 tests
+**Baseline:** L1 2298/2298, L3 833/2041; latest completed checkpoint: L3 848, 350 tests
 
 **Implementation checkpoint (2026-07-15):** physical stream schemas and the single
 root materialization boundary are landed. Global count and numeric reducers now lower
@@ -12,7 +12,12 @@ scalar `fold` lowers to a typed ListStream, and list-local reducers re-enter Sca
 scope construction backs branches plus `local`. Typed scalar
 folding and the unified inject source recovered seven official scenarios across the
 two checkpoints; L3 has ratcheted to 848/2041. The original 833 remains the migration's
-comparison floor.
+comparison floor. Stage 4's first slice has converted every scalar-producing element
+leaf (`map`/scalar `local`, `math`, `format`, option-choose, and sack read) from a
+terminal mini-compiler into a typed ScalarStream producer that re-enters common lowering.
+The null regression caught during the full ratchet is now explicit: productive
+`map(constant(null))` is a row containing NULL; child productivity must never be inferred
+from value nullability.
 
 ## Decision
 
@@ -439,13 +444,18 @@ rejected in `renderProjection`.
 
 ### Stage 4 — convert structured element/value families
 
+**Active checkpoint:** the scalar-producing leaf subset is complete: `map`/scalar
+`local`, `math`, `format`, option-choose, and sack read now return ScalarStream and own
+no trailing-step logic. The genuinely structured streams below remain.
+
 Move the remaining terminal islands to streams:
 
 - `properties()` → property ElementStream;
 - `select`/`project` → record/map-valued stream;
 - `group`/`groupCount` → MapStream at root and non-root alike;
 - `path` → path-valued stream/materialization strategy;
-- `map`, `math`, `format`, option-choose, sack read, and cap return streams.
+- ~~`map`, `math`, `format`, option-choose, sack read~~ return ScalarStream; `cap`
+  and its structured side-effect shapes still need the general stream boundary.
 
 Terminal fast framing remains in `materializeRoot`; semantic lowering no longer branches
 on whether another step follows.

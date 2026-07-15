@@ -4,7 +4,7 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-15 · **live L3 conformance:** 841 · **corpus parse+chain:**
+**Last synced:** 2026-07-15 · **live L3 conformance:** 848 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
 
@@ -91,12 +91,12 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | Step | Status | Notes |
 |---|:--:|---|
 | `choose(pred, then[, else])` | 🟡 | ✅ gated-seed dispatch<br>✅ **incoming `as()` threads through** the gated arms + merge (carried-schema)<br>❌ scalar/projection arm bodies<br>❌ mixed-shape arms<br>❌ a NEW `as()` bound *inside* an arm (arms diverge — fails closed)<br>✅ **path threads through** (pad-to-max cols) |
-| `choose(fn).option(k, body)…` | 🟡 | ✅ scalar-CASE option-map<br>❌ without a `Pick.none` default<br>❌ element/discard/identity/fail bodies<br>❌ `Pick.unproductive`/`any`<br>❌ any trailing step |
+| `choose(fn).option(k, body)…` | 🟡 | ✅ scalar-CASE option-map; its ScalarStream result composes with scalar filters, transforms, reducers and `fold`<br>❌ without a `Pick.none` default<br>❌ element/discard/identity/fail bodies<br>❌ `Pick.unproductive`/`any` |
 | `coalesce(…)` | 🟡 | ✅ first-non-empty via the `St.origins` ordinal STACK<br>✅ **incoming `as()` threads through** (originSeed projects it alongside the ordinal, merge preserves it)<br>✅ **nested in coalesce/optional** (each branch pushes a unique ordinal `o0`/`o1`/…)<br>❌ scalar branches<br>❌ mixed-shape<br>❌ a NEW `as()` inside an arm<br>✅ **path threads through** (pad-to-max cols) |
 | `union(…)` | 🟡 | ✅ multi-hop arms via `foldBody`<br>✅ **incoming `as()` threads through** the merge (`mergeBranchCarried`), so `union(…).select('a')`/`.path()` resolve<br>❌ mixed-shape<br>❌ source-branch tails<br>❌ a NEW `as()` inside an arm<br>✅ **path threads through** (pad-to-max cols) |
 | `optional(…)` | 🟡 | ✅ single-hop LEFT JOIN fast path + multi-hop<br>✅ **incoming `as()` threads through** (fast path carries it from the input; general path via originSeed)<br>❌ element-kind change on miss<br>❌ a NEW `as()` inside an arm<br>✅ **path threads through** (pad-to-max cols) |
 | `flatMap(__.…)` | 🟡 | ✅ element body fan-out<br>✅ **incoming `as()` threads through** (single body, no merge)<br>✅ **path threads through** (pad-to-max cols) |
-| `map(__.<scalar>)` | 🟡 | ✅ correlated scalar (`map(__.out().count())` etc)<br>❌ **element**-body `map` (first-result — needs `ROW_NUMBER` over `St.origin`)<br>❌ alias/select/fold bodies<br>❌ trailing steps |
+| `map(__.<scalar>)` | 🟡 | ✅ correlated scalar (`map(__.out().count())` etc) returning a ScalarStream; scalar filters, transforms, reducers and `fold` compose<br>✅ productive `constant(null)` remains distinct from no traverser<br>❌ **element**-body `map` (first-result — needs `ROW_NUMBER` over `St.origin`)<br>❌ alias/select/fold bodies; generic child lowering must represent productivity as row presence |
 | `local(…)` | 🟡 | ✅ per-element scalar reduction (`local(outE().count())` → tail projector)<br>✅ movement + a per-element `limit()`/`range()` via the shared child-domain ordinal and `ROW_NUMBER() OVER (PARTITION BY …)`<br>✅ outer `as()` aliases/path columns survive the child scope<br>❌ non-movement bodies (match/simplePath/union/nested local), no-barrier bodies, `order()`/`dedup()` inside, `local(aggregate(...))`, sack/otherV state |
 
 ## 6. Recursion (`repeat`)
@@ -149,11 +149,11 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 |---|:--:|---|
 | `asBool`, `asNumber(GType.X)`, bare `asNumber()` | ✅ | ✅ typed-value carrier (compile-time subtype tag → GraphBinary framing)<br>✅ runtime scalar casts lower as relational ScalarStream transforms and compose with later filters/reducers |
 | string transforms | ✅ | ✅ SQL scalar, text-in text-out; non-local scalar transforms lower stepwise as ScalarStream relations<br>✅ `concat` skips nulls (`concat_ws`), all-null→null<br>✅ trim family over Java's `isWhitespace` set (incl. U+3000)<br>✅ `reverse` string chars (recursive CTE) / number identity / list order (§9)<br>✅ all compose as `Scope.local` per-element list transforms after `fold()`<br>✅ a string op on a non-`local` list raises TinkerPop's "can only take string as argument"<br>✅ `format("…%{key}…%{_}…")` templates a string — named tokens read element properties, `%{_}` pulls by() modulators (positional/round-robin); a missing property filters the row (❌ reading project()/select() columns, the as()-alias fallback)<br>❌ `split` (list-valued), element/map `asString` |
-| `math("<formula>")` | 🟡 | ✅ full exp4j operator/function set → one SQL scalar, always Double<br>❌ a var with no `by()`<br>❌ `withSideEffect` vars<br>❌ reading `project()`/`select()` map columns |
+| `math("<formula>")` | 🟡 | ✅ full exp4j operator/function set → one SQL ScalarStream, always Double; later scalar steps/barriers compose<br>❌ a var with no `by()`<br>❌ `withSideEffect` vars<br>❌ reading `project()`/`select()` map columns |
 | `asDate`, `dateAdd`, `dateDiff`, `datetime()`/`DateTime()` literals | 🟡 | ✅ epoch-millis rep + `'date'` tag (UTC-only, ms precision — parity with the JS reference client)<br>❌ `typeOf(GType.DATETIME)` over stored props<br>❌ `inject([…]).asDate()` |
 | `asNumber` + reducer (`fold`/`sum`) | ✅ | ✅ numeric reducers carry runtime `vt` explicitly (`asNumber(...).sum()`)<br>✅ typed `fold()` carries uniform element metadata through ListStream materialization |
 | bigdecimal | ❌ | no client GraphBinary serializer |
-| `format()` | 🟡 | ✅ element-property template substitution with `%{key}` + `%{_}`/`by()`<br>❌ reading project()/select() columns and the as()-alias fallback |
+| `format()` | 🟡 | ✅ element-property template substitution with `%{key}` + `%{_}`/`by()` returning a composable ScalarStream<br>❌ reading project()/select() columns and the as()-alias fallback |
 
 ## 11. Writes
 
@@ -177,7 +177,7 @@ home (`Carry`): a **named side-effect registry** (aggregate/cap/group('a')) and 
 | `aggregate('x')` | 🟡 | ✅ pass-through barrier → a JSONB-list side-effect CTE; `aggregate('x').by(key)` scalar bag (by-miss drops)<br>❌ on a scalar stream (`values(k).aggregate(x)`), `by(<nested/token>)`, `local(aggregate(...))` |
 | `store('x')` | 🚫 | dropped in TinkerPop 4 (no grammar rule); `aggregate(Scope.local)` replaces it |
 | `cap('x')` | 🟡 | ✅ a list side-effect UNROLLS to individual results (no BulkSet wire type); a group side-effect re-emits one Map, **re-enterable** (a follower retypes it → MapStream, so `cap('a').select(Column.values).unfold()` composes)<br>❌ multi-key `cap('x','y')` |
-| `sack()` / `withSack(…)` | 🟡 | ✅ carried column: `sack(Operator.x).by(key/T.label/nested)` mutate, bare `sack()` read, `withSack(init)` seed, trailing reducer<br>❌ inject-const numeric promotion (NumberHelper byte→short bump), `repeat()`/`barrier`/`local`, split/merge-on-fork, `sack(BiFunction)` |
+| `sack()` / `withSack(…)` | 🟡 | ✅ carried column: `sack(Operator.x).by(key/T.label/nested)` mutate, bare `sack()` read as a ScalarStream, `withSack(init)` seed; later scalar steps/barriers compose<br>❌ inject-const numeric promotion (NumberHelper byte→short bump), `repeat()`/`barrier`/`local`, split/merge-on-fork, `sack(BiFunction)` |
 | `group('a')` / `groupCount('a')` (side-effecting) | 🟡 | ✅ pass-through barrier → stashed group-spec, `cap('a')` re-runs `compileGroup`<br>❌ nested value-`by()` with movement+order, `by(__.select…)`, after `as()`/`path()` (inherits `compileGroup`'s §4 limits) |
 | `within('x')` / `without('x')` readback | ❌ | mid-chain read of a side-effect (the aggregate-dedup idiom) — where eager/lazy diverge; fails closed |
 

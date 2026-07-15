@@ -486,6 +486,8 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().math("log _").by("age")').sql).toContain('LN(');
     // cbrt splits on sign (POW domain-errors on a negative base + fractional exponent)
     expect(read('g.V().math("cbrt(_)").by("age")').sql).toContain('CASE WHEN');
+    // math is a relational producer; a later barrier is dispatched independently.
+    expect(read('g.V().math("_").by("age").is(P.gt(30)).count()').shape).toEqual({ kind: 'count' });
   });
 
   test('format("…%{token}…") templates a string from properties + by() modulators', () => {
@@ -499,6 +501,7 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().format("%{_} is %{_}").by(values("name")).by(values("age"))').sql).toContain(' || ');
     // a by()-traversal placeholder (bothE().count()) resolves as a correlated scalar.
     expect(read('g.V().format("%{name} has %{_}").by(__.bothE().count())').sql).toContain('COUNT');
+    expect(read('g.V().format("%{name}").count()').shape).toEqual({ kind: 'count' });
   });
 
   test('math() variables: `_` = current, an identifier = an as()-bound alias', () => {
@@ -940,7 +943,8 @@ describe('compiler SQL snapshots', () => {
     const p = read('g.V().sack(assign).by("age").sack()');
     expect(p.shape).toEqual({ kind: 'value' });
     expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS sk");
-    expect(p.sql).toContain('SELECT p.sk AS v FROM'); // bare sack() reads the carried column
+    expect(p.sql).toContain('SELECT p.sk AS v, p.sk FROM'); // scalar CTE reads + carries the sack
+    expect(read('g.withSack(1).V().sack().fold()').shape).toEqual({ kind: 'jsonbList' });
     // sum accumulator references the prior sk; div forces REAL division.
     expect(read('g.withSack(0.0d).V().sack(sum).by("age").sack()').sql).toContain('(p.sk + (SELECT value FROM vertex_properties WHERE node=n.id AND key=?');
     expect(read('g.withSack(2).V().sack(div).by(__.constant(4.0d)).sack()').sql).toContain('(CAST(p.sk AS REAL) / ?)');
@@ -1225,7 +1229,9 @@ describe('compiler SQL snapshots', () => {
     // element-body map (first-result-only) and select/fold bodies defer
     expect(() => compile('g.V().map(__.out())', {})).toThrow('only supports a terminal count');
     expect(() => compile('g.V().map(__.select("a"))', {})).toThrow('not yet supported');
-    expect(() => compile('g.V().map(__.values("name")).map(__.values("age"))', {})).toThrow('step not implemented after map()');
+    expect(() => compile('g.V().map(__.values("name")).map(__.values("age"))', {})).toThrow('step not implemented: map()');
+    // The leaf now returns a ScalarStream instead of materializing terminal SQL.
+    expect(read('g.V().map(__.out().count()).is(P.gt(0)).count()').shape).toEqual({ kind: 'count' });
   });
 
   test('choose(pred, then, else) → gated-seed UNION ALL, arms fold from their seed', () => {
@@ -1274,6 +1280,8 @@ describe('compiler SQL snapshots', () => {
     // count() choice as a correlated subquery
     expect(read('g.V().choose(__.out().count()).option(1, __.values("name")).option(Pick.none, __.values("age"))').sql)
       .toContain('CASE WHEN (SELECT COUNT(*) FROM edges WHERE (src=n.id)) = ? THEN');
+    expect(read('g.V().choose(T.label).option("person", __.constant("p")).option(Pick.none, __.constant("o")).fold()').shape)
+      .toEqual({ kind: 'jsonbList' });
   });
 
   test('option-map choose deferrals fail closed', () => {
@@ -2046,6 +2054,8 @@ describe('compiler execution semantics', () => {
     // out(created) degree: 0→"none" (vadas,lop,ripple), else values(name)
     expect(run(store, 'g.V().choose(__.out("created").count()).option(0, __.constant("none")).option(Pick.none, __.values("name"))').map((r) => r.v).sort())
       .toEqual(['josh', 'marko', 'none', 'none', 'none', 'peter']);
+    expect(run(store, 'g.V().choose(T.label).option("person", __.constant("P")).option(Pick.none, __.constant("S")).is("P").count()').map((r) => r.v))
+      .toEqual([4]);
   });
 
   test('map(__.<scalar>) executes per-traverser', () => {
@@ -2054,6 +2064,16 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V().map(__.out().count())').map((r) => r.v).sort((a, b) => a - b)).toEqual([0, 0, 0, 1, 2, 3]);
     // per-vertex property projection
     expect(run(store, 'g.V(1).out("knows").map(__.values("name"))').map((r) => r.v).sort()).toEqual(['josh', 'vadas']);
+    // A productive null is a real traverser, not an empty child result.
+    expect(run(store, 'g.V(1).map(__.constant(null))').map((r) => r.v)).toEqual([null]);
+    expect(run(store, 'g.V().map(__.out().count()).is(P.gt(0)).count()').map((r) => r.v)).toEqual([3]);
+  });
+
+  test('scalar-producing leaves re-enter common lowering', () => {
+    const store = seededStore();
+    expect(run(store, 'g.V().math("_").by("age").is(P.gt(30)).count()').map((r) => r.v)).toEqual([2]);
+    expect(run(store, 'g.V().format("%{age}").count()').map((r) => r.v)).toEqual([4]);
+    expect(run(store, 'g.withSack(7).V().sack().is(7).count()').map((r) => r.v)).toEqual([6]);
   });
 
   test('alias-in-predicate where — re-root the sub-traversal on an as()/select() label', () => {
