@@ -325,6 +325,13 @@ function* framedResults(store: GraphStore, gremlin: string, params: Record<strin
       const items = JSON.parse(r.list);
       yield shape.as ? listBuffer(items.map((v: any) => frameValue(v, shape.as))) : ioc.listSerializer.serialize(items);
     } return;
+    // Relational element-list values materialize as ordered JSON object arrays in
+    // SQL, then frame each member through the same property-preserving element
+    // encoders as ordinary vertex/edge rows.
+    case 'jsonbElementList': for (const r of rows) {
+      const items = JSON.parse(r.list);
+      yield listBuffer(items.map(shape.elem === 'edge' ? rowEdge : rowVertex));
+    } return;
     // A set-VALUE stream (intersect/difference/disjunct): frame each list column as a Set.
     case 'jsonbSet': for (const r of rows) yield ioc.setSerializer.serialize(new Set(JSON.parse(r.list))); return;
     case 'discard': return;

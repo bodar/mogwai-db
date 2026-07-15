@@ -540,9 +540,17 @@ survives cardinality plus homogeneous scalar branch merges. `lowerScopedScalarFo
 uses that domain and encounter marker to emit exactly one ListStream per parent: empty
 children become `[]`, while productive NULL remains `[null]`. Map/flatMap/local now
 compose those list results through ordinary ListStream dispatch. Homogeneous scalar-
-list union, three-argument choose, and coalesce arms share `unifyScalarLists`; mixed
+list union, three-argument choose, and coalesce arms share `unifyLists`; mixed
 shapes still fail closed, and empty-list productivity makes coalesce stop correctly.
 L3 stays 872.
+Element-valued child `fold()` now uses the same domain/barrier architecture:
+`lowerScopedElementFold` aggregates rowids per origin and carries a node/edge `ListOf`
+tag, so map/flatMap/local followers use ordinary ListStream dispatch and `unfold()`
+rejoins the correct table. Root materialization expands those rowids to ordered,
+property-bearing element objects inside the compiled SQL before GraphBinary framing;
+it never falls back to JS traversal interpretation or additional store queries.
+`unifyLists` also merges homogeneous element-list union/choose/coalesce arms and rejects
+incompatible item kinds. This recovered one official scenario, moving L3 872→873.
 Scalar `local(child)` now routes through that compiler with `all` cardinality, so
 projection, transforms, origin-partitioned row operators, and scalar reducers share the
 same lowering as flatMap. The legacy local prefix handler remains only for element-valued

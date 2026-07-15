@@ -9,6 +9,8 @@
 import { type Expression, type Query } from '../q.ts';
 import { readCompiled, type Compiled, type Shape } from '../render.ts';
 import { list, q } from '../q.ts';
+import { framedProps, extIdOf } from '../plan.ts';
+import { edges, labels, nodes } from '../schema.ts';
 import { groupResultColumns, pathColumns, recordResultColumns, type GroupStream, type ListStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream } from './stream.ts';
 
 export function materializeRoot(query: Query, tail: Expression, shape: Shape): Compiled {
@@ -32,6 +34,21 @@ export function materializeScalarRoot(stream: ScalarStream): Compiled {
  * tag; element/nested lists continue through the existing JSONB framing path. */
 export function materializeListRoot(stream: ListStream): Compiled {
   const c = stream.rel.as('c');
+  if (stream.of.kind === 'elem') {
+    const elem = stream.of.elem;
+    const n = (elem === 'edge' ? edges : nodes).as('n');
+    const l = labels.as('l');
+    const object = elem === 'edge'
+      ? q`json_object('id', COALESCE(${n.c.uid}, ${n.c.id}), 'label', ${l.c.name}, 'src', ${extIdOf(n.c.src)}, 'tgt', ${extIdOf(n.c.tgt)}, 'props', json(${framedProps(n, elem)}))`
+      : q`json_object('id', COALESCE(${n.c.uid}, ${n.c.id}), 'label', ${l.c.name}, 'props', json(${framedProps(n, elem)}))`;
+    const expanded = q`json_each(json(${c.c.list})) AS j JOIN ${n} ON ${n.c.id}=j.value JOIN ${l} ON ${l.c.id}=${n.c.label}`;
+    const items = q`COALESCE((SELECT json_group_array(${object} ORDER BY j.key) FROM ${expanded}), json('[]'))`;
+    return materializeRoot(
+      stream.q,
+      q`SELECT json(${items}) AS list FROM ${c}`,
+      { kind: 'jsonbElementList', elem: elem === 'edge' ? 'edge' : 'vertex' },
+    );
+  }
   const as = stream.of.kind === 'scalar' ? stream.of.as : undefined;
   return materializeRoot(
     stream.q,

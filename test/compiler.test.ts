@@ -1310,6 +1310,7 @@ describe('compiler SQL snapshots', () => {
     const foldedChild = read('g.V().map(__.out().values("name").fold()).count(Scope.local)');
     expect(foldedChild.sql).toContain('json_group_array(s.v ORDER BY s.encounter) FILTER');
     expect(foldedChild.sql).toContain("json('[]')");
+    expect(read('g.V().map(__.out().fold()).unfold().values("name")').shape).toEqual({ kind: 'value' });
     expect(() => compile('g.V().map(__.constant(1).discard())', {})).toThrow();
     // record/list-valued child bodies still defer; element bodies use generic child scope below.
     expect(() => compile('g.V().map(__.select("a"))', {})).toThrow('not yet supported');
@@ -1730,10 +1731,15 @@ describe('compiler execution semantics', () => {
         .toEqual(['josh', 'lop', 'vadas']);
       expect(run(store, 'g.V(1).flatMap(__.constant(null).fold()).count(Scope.local)').map((r) => r.v))
         .toEqual([1]);
+      expect(run(store, 'g.V().map(__.out().fold()).count(Scope.local)').map((r) => r.v).sort())
+        .toEqual([0, 0, 0, 1, 2, 3]);
     });
 
-    test('future child barriers remain explicit deferrals until generic lowering lands', () => {
-      expect(() => compile('g.V().local(__.outE().fold())', {})).toThrow('not yet supported');
+    test('remaining child barriers stay explicit deferrals until their generic lowering lands', () => {
+      expect(read('g.V().local(__.outE().fold())').shape).toEqual({ kind: 'jsonbElementList', elem: 'edge' });
+      const lists = run(seededStore(), 'g.V(1).local(__.out().fold())').map((r) => JSON.parse(r.list));
+      expect(lists).toHaveLength(1);
+      expect(lists[0].map((v: any) => v.id)).toEqual([2, 3, 4]);
       expect(() => compile('g.V().local(__.out().order().by("name").limit(1))', {})).toThrow('not yet supported');
     });
   });
@@ -2163,6 +2169,8 @@ describe('compiler execution semantics', () => {
       .toEqual([1.5, 0.4]);
     expect(run(store, 'g.V(1).union(__.out("knows").values("name").fold(), __.out("created").values("name").fold()).unfold().order()').map((r) => r.v))
       .toEqual(['josh', 'lop', 'vadas']);
+    expect(run(store, 'g.V(1).union(__.out("knows").fold(), __.out("created").fold()).unfold().values("name").order()').map((r) => r.v))
+      .toEqual(['josh', 'lop', 'vadas']);
     // optional hit: josh created ripple+lop
     expect(run(store, 'g.V(4).optional(__.out("created")).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple']);
     // optional miss: vadas has no out-created → falls back to self
@@ -2187,6 +2195,8 @@ describe('compiler execution semantics', () => {
       .toEqual([6]);
     expect(run(store, 'g.V().choose(__.hasLabel("person"), __.values("name").fold(), __.constant("software").fold()).unfold().count()').map((r) => r.v))
       .toEqual([6]);
+    expect(run(store, 'g.V().choose(__.hasLabel("person"), __.identity().fold(), __.in().fold()).unfold().count()').map((r) => r.v))
+      .toEqual([8]);
     // predicate = count().is: marko has 2 knows-edges → out(knows); others → self
     expect(run(store, 'g.V(1).choose(__.out("knows").count().is(P.gt(1)), __.out("knows")).values("name")').map((r) => r.v).sort())
       .toEqual(['josh', 'vadas']);
@@ -2212,6 +2222,8 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V(2).coalesce(__.out().count(), __.constant(99))').map((r) => r.v)).toEqual([0]);
     // fold() is total: an empty list is productive, so coalesce must not advance.
     expect(run(store, 'g.V(1).coalesce(__.values("missing").fold(), __.values("name").fold()).unfold().count()').map((r) => r.v))
+      .toEqual([0]);
+    expect(run(store, 'g.V(2).coalesce(__.out().fold(), __.identity().fold()).unfold().count()').map((r) => r.v))
       .toEqual([0]);
   });
 
