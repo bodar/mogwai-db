@@ -145,15 +145,15 @@ describe('compiler SQL snapshots', () => {
   test('min/max range over comparables (incl. text); mean/sum numeric only', () => {
     const mn = read('g.V().values("age").min()');
     // TinkerPop 4 Strings are Comparable, so min/max include text (numbers order first).
-    expect(mn.sql).toContain("typeof(v) in ('integer', 'real', 'text')");
-    expect(mn.sql).toContain('MIN(v)');
+    expect(mn.sql).toContain("typeof(s.v) in ('integer', 'real', 'text')");
+    expect(mn.sql).toContain('MIN(s.v)');
     expect(mn.shape).toEqual({ kind: 'scalar' });
-    expect(read('g.V().values("age").max()').sql).toContain('MAX(v)');
+    expect(read('g.V().values("age").max()').sql).toContain('MAX(s.v)');
     // mean stays numeric-only (never text).
-    expect(read('g.V().values("age").mean()').sql).toContain("typeof(v) in ('integer', 'real')");
+    expect(read('g.V().values("age").mean()').sql).toContain("typeof(s.v) in ('integer', 'real')");
     // mean is always a Double (forced vt='real')
     const avg = read('g.V().values("age").mean()');
-    expect(avg.sql).toContain('AVG(v)');
+    expect(avg.sql).toContain('AVG(s.v)');
     expect(avg.sql).toContain("'real' AS vt");
     // min(Scope.local) after fold() reduces the folded list per-list (list phase).
     expect(read('g.V().values("age").fold().min(Scope.local)').shape).toEqual({ kind: 'scalar' });
@@ -986,7 +986,19 @@ describe('compiler SQL snapshots', () => {
   test('sum() wraps a value stream in SQL SUM → scalar shape', () => {
     const p = read('g.V().values("age").sum()');
     expect(p.shape).toEqual({ kind: 'scalar' });
-    expect(p.sql).toContain('SELECT SUM(v) AS v, typeof(SUM(v)) AS vt FROM (');
+    expect(p.sql).toContain('SELECT SUM(s.v) AS v, typeof(SUM(s.v)) AS vt FROM');
+  });
+
+  test('numeric reducers are scalar streams and preserve dynamic type past filters', () => {
+    const summed = read('g.V().values("age").sum().is(P.gt(100))');
+    expect(summed.shape).toEqual({ kind: 'scalar' });
+    expect(summed.sql).toContain('SUM(s.v) AS v');
+    expect(summed.sql).toContain('p.vt AS vt');
+    expect(summed.sql).toContain('WHERE p.v > ?');
+
+    const store = seededStore();
+    expect(run(store, 'g.V().values("age").sum().is(P.gt(100))').map((r) => r.v)).toEqual([123]);
+    expect(run(store, 'g.V().values("age").asNumber(GType.DOUBLE).sum()').map((r) => r.v)).toEqual([123]);
   });
 
   test('aggregation deferred forms throw clearly', () => {
