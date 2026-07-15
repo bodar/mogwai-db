@@ -81,10 +81,15 @@ describe('compiler SQL snapshots', () => {
   test('read steps materialize through one root boundary', () => {
     const dir = new URL('../src/steps/', import.meta.url);
     const allowed = new Set(['materialize.ts', 'write.ts']);
-    const offenders = readdirSync(dir)
-      .filter((name) => name.endsWith('.ts') && !allowed.has(name))
-      .filter((name) => readFileSync(new URL(name, dir), 'utf8').includes('readCompiled'));
+    const sources = readdirSync(dir)
+      .filter((name) => name.endsWith('.ts'))
+      .map((name) => [name, readFileSync(new URL(name, dir), 'utf8')] as const);
+    const offenders = sources
+      .filter(([name]) => !allowed.has(name))
+      .filter(([, source]) => source.includes('readCompiled'))
+      .map(([name]) => name);
     expect(offenders).toEqual([]);
+    expect(sources.some(([, source]) => source.includes('only one projection step is supported per traversal'))).toBe(false);
   });
 
   test('window rank/filter boundaries use typed derived tables, not paired CTEs', () => {
@@ -432,6 +437,17 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().out().id().count()').shape).toEqual({ kind: 'count' });
     // The reducer is another scalar stream, so lowering can continue past it.
     expect(read('g.V().values("age").count().is(P.gt(2))').sql).toContain('WHERE p.v > ?');
+
+    // Element-side policies before the scalar boundary are rendered first, then the
+    // projected rows re-enter the same scalar dispatcher. This was the last route
+    // through the old one-projection accumulator ceiling.
+    const ordered = read('g.V().order().by("age").limit(2).values("name").count()');
+    expect(ordered.shape).toEqual({ kind: 'count' });
+    expect(ordered.sql).toContain('ORDER BY (SELECT value FROM vertex_properties');
+    expect(ordered.sql).toContain('LIMIT 2 OFFSET 0), c2(v) as (SELECT COUNT(*) AS v FROM c1)');
+    expect(run(seededStore(), 'g.V().order().by("age").limit(2).values("name").count()').map((r) => r.v))
+      .toEqual([2]);
+    expect(() => compile('g.V().values("name").id()', {})).toThrow('id() requires element input');
   });
 
   test('count is a relational scalar boundary and can continue lowering', () => {
@@ -1233,7 +1249,7 @@ describe('compiler SQL snapshots', () => {
     // ordinal; no composite-key field uses a correlated scalar mini-compiler.
     expect(p.sql).toContain('ROW_NUMBER() OVER () AS o0');
     expect(p.sql).toContain('gkp0.v AS k0_v, gkp1.v AS k1_v, gkp2.v AS k2_v');
-    expect(p.sql).toContain('JOIN vertex_properties vp ON vp.node=c.id');
+    expect(p.sql).toContain('JOIN vertex_properties vp ON vp.node=n.id');
     expect(p.sql).toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=gn.src) AS v_src'); // edge value framing → external endpoint id
   });
 
@@ -1535,7 +1551,7 @@ describe('compiler SQL snapshots', () => {
     const childValue = read('g.V(1).map(__.values("name"))');
     expect(childValue.shape).toEqual({ kind: 'value', as: undefined });
     expect(childValue.sql).toContain('JOIN vertex_properties vp');
-    expect(childValue.sql).toContain('ROW_NUMBER() OVER (PARTITION BY c.o0');
+    expect(childValue.sql).toContain('ROW_NUMBER() OVER (PARTITION BY p.o0');
     expect(read('g.V(1).map(__.values("name").toUpper())').sql).toContain('upper(p.v) AS v');
     expect(read('g.V(1).map(__.out().values("name").order().by(Order.desc).limit(1))').sql)
       .toContain('ROW_NUMBER() OVER (PARTITION BY p.o0 ORDER BY p.v DESC');

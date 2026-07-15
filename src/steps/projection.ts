@@ -5,7 +5,7 @@ import {
   nodePropScalar, framedProps, valueMapProps,
 } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
-import { carryFrag, carriedCols, elemRel, type ElementStream } from './context.ts';
+import { carryFrag, carriedCols, elemRel, withoutCarried, type ElementStream } from './context.ts';
 import { carryOf, continueLowering, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream } from './stream.ts';
 import { tryLowerLocalAggregate } from './sideeffect.ts';
 import { type Shape, type ElemShape } from '../render.ts';
@@ -138,7 +138,7 @@ export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop:
       throw new Error(`${s.name}(Scope.local) requires a preceding list-producing step (e.g. fold())`);
     }
     if (PROJECTION_NAMES.has(s.name)) {
-      if (acc.projStep) throw new Error('only one projection step is supported per traversal');
+      if (acc.projStep) break;
       acc.projStep = s;
       continue;
     }
@@ -301,8 +301,8 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
   // longer depends on a terminal-tail special case (values().count().is(),
   // values().groupCount(), and future scalar consumers all cross the same seam).
   const scalarRest = steps.slice(stop + 1);
-  const needsScalarBoundary = scalarRest.length > 0 && scalarRest.every((s) =>
-    SCALAR_ROW_STEPS.has(s.name) && !isScopeLocalStep(s));
+  const needsScalarBoundary = st.carried.origins.length > 0 || (scalarRest.length > 0 && scalarRest.every((s) =>
+    SCALAR_ROW_STEPS.has(s.name) && !isScopeLocalStep(s)));
   if (SCALAR_PROJ.has(steps[stop]?.name) && needsScalarBoundary) {
     const n = elemRel(st);
     const l = labels.as('l');
@@ -310,14 +310,19 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
     const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
     const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
     const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
-    const proj = PROJECTORS.get(steps[stop].name)!({ st, n, l, extId, vJoin, vlJoin, projStep: steps[stop] });
+    const proj = PROJECTORS.get(steps[stop].name)!({ st, n, p, l, extId, vJoin, vlJoin, projStep: steps[stop] });
     const where = proj.baseWhere ? q` WHERE ${proj.baseWhere}` : empty;
+    const origin = st.carried.origins.at(-1);
+    const encounter = origin ? 'encounter' : undefined;
+    const encounterExpr = origin
+      ? q`, ROW_NUMBER() OVER (PARTITION BY ${p.c[origin]} ORDER BY ${proj.encounterKey ?? p.c.id}) AS encounter`
+      : empty;
     const rel = st.q.cte(
-      q`SELECT ${proj.colsNode}${carryFrag(st.carried, p)} FROM ${proj.fromNode}${where}`,
-      ['v', ...carriedCols(st.carried)],
+      q`SELECT ${proj.colsNode}${encounterExpr}${carryFrag(st.carried, p)} FROM ${proj.fromNode}${where}`,
+      ['v', ...(encounter ? [encounter] : []), ...carriedCols(st.carried)],
     );
     const asTag = proj.shape.kind === 'value' ? proj.shape.as : undefined;
-    return continueLowering(toScalarStream(carryOf(st), rel, asTag), stop + 1);
+    return continueLowering(toScalarStream(carryOf(st), rel, asTag, 'value', encounter), stop + 1);
   }
 
   // Tail fold: accumulate the projection + modifiers, stopping at a retype boundary
@@ -332,6 +337,19 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
       return continueLowering(compileSelectProject(st, acc.projStep!, acc), at);
     return continueLowering(buildProjection(st, acc), at);
   }
+
+  // A second projection is a shape boundary, not a global error. Finish the first
+  // scalar projection (including any element-side order/range/dedup modifiers), turn
+  // its SQL into a ScalarStream, and let the iterative dispatcher validate/compile
+  // the follower against scalar input.
+  if (acc.projStep && SCALAR_PROJ.has(acc.projStep.name) && PROJECTION_NAMES.has(steps[at].name)) {
+    const result = buildProjection(st, acc);
+    if (result.shape.kind !== 'value') throw new Error(`${acc.projStep.name}() did not produce a scalar stream`);
+    const rel = st.q.cte(result.tail, ['v']);
+    return continueLowering(toScalarStream(withoutCarried(carryOf(st)), rel, result.shape.as), at);
+  }
+  if (PROJECTION_NAMES.has(steps[at].name))
+    throw new Error(`${steps[at].name}() cannot consume the ${acc.projStep?.name ?? 'element'} result shape`);
 
   // Stopped at a retype boundary: steps[at] is `unfold` or a non-terminal `fold`.
   const boundary = steps[at].name;
@@ -388,7 +406,7 @@ function compileFold(st: ElementStream, acc: TailAcc): ListStream {
     const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
     const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
     const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
-    const proj = PROJECTORS.get(projName)!({ st, n, l, extId, vJoin, vlJoin, projStep: acc.projStep });
+    const proj = PROJECTORS.get(projName)!({ st, n, p, l, extId, vJoin, vlJoin, projStep: acc.projStep });
     // values() drops missing-property elements (baseWhere = IS NOT NULL), matching
     // TinkerPop's fold-of-values. id/label have no baseWhere.
     const where = proj.baseWhere ? q` WHERE ${proj.baseWhere}` : empty;
@@ -469,11 +487,11 @@ export interface TailMods { orders: OrderClause[]; distinct: boolean; offset: nu
 // ---------- projection resolution (values/id/label/valueMap/elementMap/element) ----------
 
 interface ProjCtx {
-  st: ElementStream; n: Relation; l: Relation; extId: Expression;
+  st: ElementStream; n: Relation; p: Relation; l: Relation; extId: Expression;
   vJoin: Expression; vlJoin: Expression;
   projStep: PStep | null;
 }
-export interface ProjResult { shape: Shape; colsNode: Expression; fromNode: Expression; scalarExpr?: Expression | null; baseWhere?: Expression | null; }
+export interface ProjResult { shape: Shape; colsNode: Expression; fromNode: Expression; scalarExpr?: Expression | null; baseWhere?: Expression | null; encounterKey?: Expression; }
 type ProjFn = (c: ProjCtx) => ProjResult;
 
 const PROJECTORS = new Map<string, ProjFn>([
@@ -484,22 +502,22 @@ const PROJECTORS = new Map<string, ProjFn>([
     // no separate IS NOT NULL). Edge: json_extract the flat blob (single-valued).
     if (c.st.elem === 'edge') {
       const pe = propExtract(c.n.c.props, key).expr;
-      return { shape: { kind: 'value' }, colsNode: q`${pe} AS v`, fromNode: c.vJoin, scalarExpr: pe, baseWhere: predicateSql(pe, undefined) };
+      return { shape: { kind: 'value' }, colsNode: q`${pe} AS v`, fromNode: c.vJoin, scalarExpr: pe, baseWhere: predicateSql(pe, undefined), encounterKey: c.p.c.id };
     }
     const vp = vertexProperties.as('vp');
     return {
       shape: { kind: 'value' }, colsNode: q`${vp.c.value} AS v`,
       fromNode: q`${c.vJoin} JOIN ${vp} ON ${vp.c.node}=${c.n.c.id} AND ${vp.c.key}=${value(key)}`,
-      scalarExpr: vp.c.value, baseWhere: null,
+      scalarExpr: vp.c.value, baseWhere: null, encounterKey: q`${c.p.c.id}, ${vp.c.id}`,
     };
   }],
   ['id', (c) => ({
     // Join the element table even though the id lives in `rel`, so a preceding
     // order().by(key) — which references n.props — has the alias in scope.
-    shape: { kind: 'value' }, colsNode: q`${c.extId} AS v`, fromNode: c.vJoin, scalarExpr: c.extId,
+    shape: { kind: 'value' }, colsNode: q`${c.extId} AS v`, fromNode: c.vJoin, scalarExpr: c.extId, encounterKey: c.p.c.id,
   })],
   ['label', (c) => ({
-    shape: { kind: 'value' }, colsNode: q`${c.l.c.name} AS v`, fromNode: c.vlJoin, scalarExpr: c.l.c.name,
+    shape: { kind: 'value' }, colsNode: q`${c.l.c.name} AS v`, fromNode: c.vlJoin, scalarExpr: c.l.c.name, encounterKey: c.p.c.id,
   })],
   ['valueMap', (c) => {
     const keys = c.projStep!.args.filter((a) => typeof a === 'string') as string[];
@@ -554,7 +572,7 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
   const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
   const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
   const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
-  const proj = PROJECTORS.get(projName)!({ st, n, l, extId, vJoin, vlJoin, projStep: acc.projStep });
+  const proj = PROJECTORS.get(projName)!({ st, n, p, l, extId, vJoin, vlJoin, projStep: acc.projStep });
 
   // order().by(key) sorts by a property expression (element context) — auto-index it.
   const encounter = st.carried.encounter ? p.c[st.carried.encounter] : undefined;

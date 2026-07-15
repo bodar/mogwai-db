@@ -1,6 +1,13 @@
-import { derived, q, type Expression, type Relation } from '../q.ts';
+import { derived, q, type Expression } from '../q.ts';
 import { carryOf, toListStream, toScalarStream, type ListStream, type RelationalStream, type ScalarStream } from './stream.ts';
 import { carriedCols, carryFrag, withoutCarried, type ElementStream } from './context.ts';
+import { type ChildScope } from './child.ts';
+
+const currentFrame = (scope: ChildScope) => {
+  const frame = scope.frames.at(-1);
+  if (!frame) throw new Error('scoped barrier requires a child frame');
+  return frame;
+};
 
 /** Global count is a relational barrier: it consumes any shaped row stream and
  * returns exactly one Long scalar traverser. Row-associated state cannot cross it. */
@@ -26,9 +33,9 @@ export function lowerGlobalFold(input: ScalarStream): ListStream {
  * rather than value so a productive SQL NULL is retained as a list member. */
 export function lowerScopedScalarFold(
   input: ScalarStream,
-  domain: Relation,
-  ordinal: string,
+  scope: ChildScope,
 ): ListStream {
+  const { domain, ordinal } = currentFrame(scope);
   if (!input.encounter) throw new Error('scoped scalar fold requires explicit encounter order');
   const d = domain.as('d');
   const s = input.rel.as('s');
@@ -44,9 +51,9 @@ export function lowerScopedScalarFold(
  * duplicates a physical order before aggregation, while the domain supplies []. */
 export function lowerScopedElementFold(
   input: ElementStream,
-  domain: Relation,
-  ordinal: string,
+  scope: ChildScope,
 ): ListStream {
+  const { domain, ordinal } = currentFrame(scope);
   const c = input.rel.as('c');
   const r = derived(
     q`SELECT ${c.c.id} AS id, ${c.c[ordinal]} AS ${ordinal}, ROW_NUMBER() OVER (PARTITION BY ${c.c[ordinal]} ORDER BY ${c.c.id}) AS encounter FROM ${c}`,
@@ -86,9 +93,9 @@ export function numericReducerAggregate(
 export function lowerScopedScalarReducer(
   input: ScalarStream,
   reducer: ScalarReducer,
-  domain: Relation,
-  ordinal: string,
+  scope: ChildScope,
 ): ScalarStream {
+  const { domain, ordinal } = currentFrame(scope);
   if (!input.encounter) throw new Error('scoped scalar reducer requires explicit encounter order');
   const d = domain.as('d');
   const s = input.rel.as('s');
