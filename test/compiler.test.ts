@@ -1275,7 +1275,9 @@ describe('compiler SQL snapshots', () => {
     const scalar = read('g.V().flatMap(__.values("name"))');
     expect(scalar.shape).toEqual({ kind: 'value', as: undefined });
     expect(scalar.sql).toContain('JOIN vertex_properties vp');
-    expect(scalar.sql).not.toContain('PARTITION BY'); // all, unlike map(first)
+    // Every scalar child records provider encounter order explicitly. `all` drops
+    // the child ordinal without applying map's second first-per-parent window.
+    expect(scalar.sql.match(/PARTITION BY/g)?.length).toBe(1);
   });
 
   test('map(__.<scalar>) → per-traverser scalar projection (value shape)', () => {
@@ -1296,6 +1298,9 @@ describe('compiler SQL snapshots', () => {
     expect(childValue.sql).toContain('JOIN vertex_properties vp');
     expect(childValue.sql).toContain('ROW_NUMBER() OVER (PARTITION BY c.o0');
     expect(read('g.V(1).map(__.values("name").toUpper())').sql).toContain('upper(p.v) AS v');
+    expect(read('g.V(1).map(__.out().values("name").order().by(Order.desc).limit(1))').sql)
+      .toContain('ROW_NUMBER() OVER (PARTITION BY p.o0 ORDER BY p.v DESC');
+    expect(() => compile('g.V().map(__.constant(1).discard())', {})).toThrow();
     // record/list-valued child bodies still defer; element bodies use generic child scope below.
     expect(() => compile('g.V().map(__.select("a"))', {})).toThrow('not yet supported');
     expect(() => compile('g.V().map(__.values("name")).map(__.values("age"))', {})).toThrow('step not implemented: map()');
@@ -1689,6 +1694,19 @@ describe('compiler execution semantics', () => {
       const store = seededStore();
       expect(run(store, 'g.V(1).local(__.outE().limit(1)).inV().values("name")')
         .map((r) => r.v)).toEqual(['vadas']); // edge id 7 precedes edge ids 8 and 9
+    });
+
+    test('scalar child row operators partition by parent before cardinality consumption', () => {
+      const store = seededStore();
+      // is() must filter the productive child rows before map chooses its first row.
+      expect(run(store, 'g.V(1).map(__.out().values("name").is("josh"))').map((r) => r.v)).toEqual(['josh']);
+      // order/range are local to marko's child stream and retain their explicit
+      // encounter key through successive relational operators.
+      expect(run(store, 'g.V(1).map(__.out().values("name").order().by(Order.desc).limit(1))').map((r) => r.v))
+        .toEqual(['vadas']);
+      expect(run(store, 'g.V(1).flatMap(__.out().values("name").order().range(1,3))').map((r) => r.v))
+        .toEqual(['lop', 'vadas']);
+      expect(run(store, 'g.V(1).flatMap(__.both().label().dedup()).count()').map((r) => r.v)).toEqual([2]);
     });
 
     test('future child barriers remain explicit deferrals until generic lowering lands', () => {

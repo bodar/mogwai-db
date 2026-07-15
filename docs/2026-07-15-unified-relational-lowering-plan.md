@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–3 complete, Stage 4 active
-**Baseline:** L1 2298/2298, L3 833/2041; latest completed checkpoint: L3 872, 356 tests
+**Baseline:** L1 2298/2298, L3 833/2041; latest completed checkpoint: L3 872, 357 tests
 
 **Implementation checkpoint (2026-07-15):** physical stream schemas and the single
 root materialization boundary are landed. Global count and numeric reducers now lower
@@ -526,11 +526,14 @@ Homogeneous scalar `coalesce` now compiles every arm from one child domain and a
 the same first-non-empty-by-origin rule as element coalesce before dropping the internal
 ordinal. L3 remains 872; notably, a zero from child `count()` is a productive result and
 does not fall through to a later arm.
-Scalar child rows now continue through the ordinary `lowerScalarRows` transform
-pipeline (`toUpper`/substring/casts/date transforms/etc.) after the consumer's
-`first`/`all` policy. This composes through map/flatMap/union/choose/coalesce without
-a nested-transform switch. Origin-sensitive scalar order/limit/dedup/reducers remain
-excluded until their shared lowering partitions by `CompileScope`; L3 stays 872.
+Scalar child rows now continue through the ordinary `lowerScalarRows` pipeline before
+the consumer's `first`/`all` policy. `ScalarStream.encounter` is explicit physical
+metadata: child transforms plus `is`/`order`/`limit`/`skip`/`range`/`dedup` use shared
+window operations partitioned by the carried origin stack, and consumers then drop the
+private origin/encounter columns. Nested chains run through `normalize()` just like
+roots, so `order().by()` has one IR shape. This composes through map/flatMap/union/
+choose/coalesce without a nested row-operator switch or accidental CTE ordering.
+Origin-scoped scalar reducers/fold remain excluded; L3 stays 872.
 
 1. Extract the existing `originSeed` into `steps/child.ts` as `pushChildScope`.
 2. Preserve the domain relation in `ChildFrame`.

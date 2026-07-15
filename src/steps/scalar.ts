@@ -20,15 +20,15 @@ const isLocal = (step: PStep): boolean =>
   (step.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local');
 
 const payload = (s: ScalarStream, p: ReturnType<ScalarStream['rel']['as']>): Expression =>
-  s.result === 'number' ? q`${p.c.v} AS v, ${p.c.vt} AS vt` : q`${p.c.v} AS v`;
+  q`${s.result === 'number' ? q`${p.c.v} AS v, ${p.c.vt} AS vt` : q`${p.c.v} AS v`}${s.encounter ? q`, ${p.c[s.encounter]} AS ${s.encounter}` : empty}`;
 
 const cols = (s: ScalarStream): string[] =>
-  [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...carriedCols(s.carried)];
+  [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...(s.encounter ? [s.encounter] : []), ...carriedCols(s.carried)];
 
 function rowPreserving(s: ScalarStream, suffix: Expression): ScalarStream {
   const p = s.rel.as('p');
   const rel = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)} FROM ${p}${suffix}`, cols(s));
-  return toScalarStream(carryOf(s), rel, s.as, s.result);
+  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter);
 }
 
 function transformScalar(s: ScalarStream, step: PStep, next?: PStep): ScalarStream {
@@ -52,10 +52,46 @@ function transformScalar(s: ScalarStream, step: PStep, next?: PStep): ScalarStre
       ?? (() => { throw new Error(`scalar transform ${step.name}() not supported`); })();
   }
   const rel = s.q.cte(
-    q`SELECT ${expr} AS v${carryFrag(s.carried, p)} FROM ${p}`,
-    ['v', ...carriedCols(s.carried)],
+    q`SELECT ${expr} AS v${s.encounter ? q`, ${p.c[s.encounter]}` : empty}${carryFrag(s.carried, p)} FROM ${p}`,
+    ['v', ...(s.encounter ? [s.encounter] : []), ...carriedCols(s.carried)],
   );
-  return toScalarStream(carryOf(s), rel, as, 'value');
+  return toScalarStream(carryOf(s), rel, as, 'value', s.encounter);
+}
+
+function partitionedSlice(s: ScalarStream, offset: number, limit: number | null): ScalarStream {
+  if (!s.encounter) throw new Error('correlated scalar slice requires explicit encounter order');
+  const p = s.rel.as('p');
+  const partitions = s.carried.origins.map((name) => p.c[name]);
+  const over = partitions.length ? q`PARTITION BY ${list(partitions, ', ')} ORDER BY ${p.c[s.encounter]}` : q`ORDER BY ${p.c[s.encounter]}`;
+  const rankedCols = [...cols(s), 'rn'];
+  const ranked = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER (${over}) AS rn FROM ${p}`, rankedCols);
+  const r = ranked.as('r');
+  const hi = limit == null ? empty : q` AND ${r.c.rn}<=${offset + limit}`;
+  const rel = s.q.cte(q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn}>${offset}${hi}`, cols(s));
+  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter);
+}
+
+function partitionedOrder(s: ScalarStream, order: Expression): ScalarStream {
+  if (!s.encounter) throw new Error('correlated scalar order requires explicit encounter order');
+  const p = s.rel.as('p');
+  const partitions = s.carried.origins.map((name) => p.c[name]);
+  const over = partitions.length ? q`PARTITION BY ${list(partitions, ', ')} ORDER BY ${order}, ${p.c[s.encounter]}` : q`ORDER BY ${order}, ${p.c[s.encounter]}`;
+  const valuePayload = s.result === 'number' ? q`${p.c.v} AS v, ${p.c.vt} AS vt` : q`${p.c.v} AS v`;
+  const rel = s.q.cte(q`SELECT ${valuePayload}, ROW_NUMBER() OVER (${over}) AS ${s.encounter}${carryFrag(s.carried, p)} FROM ${p}`, cols(s));
+  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter);
+}
+
+function partitionedDedup(s: ScalarStream): ScalarStream {
+  if (!s.encounter) throw new Error('correlated scalar dedup requires explicit encounter order');
+  const p = s.rel.as('p');
+  const partitions = [...s.carried.origins.map((name) => p.c[name]), p.c.v, ...(s.result === 'number' ? [p.c.vt] : [])];
+  const ranked = s.q.cte(
+    q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${list(partitions, ', ')} ORDER BY ${p.c[s.encounter]}) AS rn FROM ${p}`,
+    [...cols(s), 'rn'],
+  );
+  const r = ranked.as('r');
+  const rel = s.q.cte(q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn}=1`, cols(s));
+  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter);
 }
 
 function appendScalar(s: ScalarStream, step: PStep): ScalarStream {
@@ -105,7 +141,9 @@ export function lowerScalarRows(
         : step.name === 'skip'
           ? { offset: Number(step.args[0]), limit: null }
           : rangeToOffsetLimit(step.args);
-      stream = rowPreserving(stream, q` LIMIT ${limit ?? -1} OFFSET ${offset}`);
+      stream = stream.carried.origins.length
+        ? partitionedSlice(stream, offset, limit)
+        : rowPreserving(stream, q` LIMIT ${limit ?? -1} OFFSET ${offset}`);
       continue;
     }
     if (step.name === 'order') {
@@ -119,12 +157,16 @@ export function lowerScalarRows(
         const dir = by.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
         order = dir === 'shuffle' ? q`RANDOM()` : dir === 'desc' ? q`p.v DESC` : q`p.v ASC`;
       }
-      stream = rowPreserving(stream, q` ORDER BY ${order}`);
+      stream = stream.carried.origins.length
+        ? partitionedOrder(stream, order)
+        : rowPreserving(stream, q` ORDER BY ${order}`);
       continue;
     }
     if (step.name === 'dedup') {
-      if (stream.carried.origins.length)
-        throw new Error('dedup() in a correlated scalar child requires origin-partitioned lowering');
+      if (stream.carried.origins.length) {
+        stream = partitionedDedup(stream);
+        continue;
+      }
       const clean = withoutCarried(carryOf(stream));
       const p = stream.rel.as('p');
       const typeCol = stream.result === 'number' ? q`, ${p.c.vt} AS vt` : empty;

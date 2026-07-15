@@ -5,6 +5,7 @@ import { advance, carriedWith, carryFrag, carriedCols, withCarried, type Element
 import { carryOf, toScalarStream, type ScalarStream, type Stream } from './stream.ts';
 import { foldBody } from './index.ts';
 import { lowerScalarRows, SCALAR_TRANSFORMS } from './scalar.ts';
+import { normalize } from '../strategies.ts';
 
 /** Root/child compilation context. A child frame retains the complete parent domain,
  * not merely an ordinal on productive child rows: reducers need that domain to
@@ -24,6 +25,14 @@ export type CompileScope = RootScope | ChildScope;
 export const ROOT_SCOPE: RootScope = { kind: 'root' };
 
 export type ChildUse = 'all' | 'first';
+
+/** Child chains cross the same normalization seam as the root. In particular,
+ * order().by() must arrive as one PStep before shape-aware scalar lowering. */
+const childSteps = (nested: any, params: Record<string, any>) => {
+  const rawSteps = stepChain(nested, params);
+  const normalized = normalize(rawSteps);
+  return normalized.discard ? [...normalized.steps, rawSteps.at(-1)!] : normalized.steps;
+};
 
 /** Give every parent traverser a multiset-safe identity and seed a correlated child.
  * Equal element ids deliberately get different ordinals. The domain is preserved in
@@ -67,6 +76,9 @@ const ELEMENT_CHILD_STEPS = new Set([
   'out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'bothV',
   'has', 'hasLabel', 'hasId', 'where', 'filter', 'not', 'and', 'or', 'identity',
 ]);
+const CHILD_SCALAR_ROW_STEPS = new Set([
+  ...SCALAR_TRANSFORMS, 'is', 'order', 'limit', 'skip', 'range', 'dedup',
+]);
 
 /** Syntax-only preflight for shape-aware dispatch. Unlike the tryCompile functions,
  * this never appends CTEs, so the prefix fold can stop before a homogeneous scalar
@@ -78,7 +90,7 @@ function scalarRowParts(body: ReturnType<typeof stepChain>): { prefix: ReturnTyp
   const projection = body[at];
   const suffix = body.slice(at + 1);
   if (prefix.some((s) => !ELEMENT_CHILD_STEPS.has(s.name))) return null;
-  if (suffix.some((s) => !SCALAR_TRANSFORMS.has(s.name))) return null;
+  if (suffix.some((s) => !CHILD_SCALAR_ROW_STEPS.has(s.name))) return null;
   if (projection.name === 'values' && (projection.args.length !== 1 || typeof projection.args[0] !== 'string')) return null;
   if ((projection.name === 'id' || projection.name === 'label') && projection.args.length) return null;
   if (projection.name === 'constant' && projection.args.length !== 1) return null;
@@ -87,7 +99,7 @@ function scalarRowParts(body: ReturnType<typeof stepChain>): { prefix: ReturnTyp
 
 export function isScalarChild(nested: any, params: Record<string, any>): boolean {
   if (!nested) return false;
-  const body = stepChain(nested, params);
+  const body = childSteps(nested, params);
   const terminal = body.at(-1);
   if (!terminal) return false;
   if (terminal.name === 'count')
@@ -105,7 +117,7 @@ export function tryCompileCountChild(
   scope: CompileScope = ROOT_SCOPE,
 ): ScalarStream | null {
   if (!nested) return null;
-  const body = stepChain(nested, parent.params);
+  const body = childSteps(nested, parent.params);
   const terminal = body.at(-1);
   if (!terminal || terminal.name !== 'count' || terminal.args.length) return null;
   const prefix = body.slice(0, -1);
@@ -125,9 +137,10 @@ export function tryCompileCountChild(
 }
 
 /** Compile a scalar-producing child as rows, so productivity is represented by row
- * existence rather than SQL NULL. This is map()'s `first` policy over a scalar tail:
- * movement/filter uses the ordinary element fold, values() genuinely flat-maps
- * multi-properties, then one productive row survives per child origin. */
+ * existence rather than SQL NULL. Movement/filter uses the ordinary element fold;
+ * projection adds an explicit provider encounter key; the shared scalar pipeline
+ * applies transforms and origin-partitioned row operators; only then does the
+ * consumer apply its `first` or `all` cardinality policy. */
 export function tryCompileScalarChild(
   parent: ElementStream,
   nested: any,
@@ -135,7 +148,7 @@ export function tryCompileScalarChild(
   scope: CompileScope = ROOT_SCOPE,
 ): ScalarStream | null {
   if (!nested) return null;
-  const body = stepChain(nested, parent.params);
+  const body = childSteps(nested, parent.params);
   const parts = scalarRowParts(body);
   if (!parts) return null;
   const { prefix, projection: terminal, suffix } = parts;
@@ -178,31 +191,35 @@ export function tryCompileScalarChild(
     }
   }
 
-  const parentCols = carriedCols(parent.carried);
+  const childCols = carriedCols(end.carried);
+  const encounter = 'encounter';
   const continueScalar = (base: ScalarStream): ScalarStream => {
-    if (!suffix.length) return base;
     const lowered = lowerScalarRows(base, suffix, 0);
     if (lowered.stop !== suffix.length)
       throw new Error(`scalar child continuation ${suffix[lowered.stop].name}() not yet supported`);
     return lowered.stream;
   };
+  const rows = parent.q.cte(
+    q`SELECT ${scalar} AS v, ROW_NUMBER() OVER (PARTITION BY ${c.c[pushed.frame.ordinal]} ORDER BY ${order}) AS ${encounter}${carryFrag(end.carried, c)} FROM ${from}`,
+    ['v', encounter, ...childCols],
+  );
+  const lowered = continueScalar(toScalarStream(carryOf(end), rows, undefined, 'value', encounter));
+  const r = lowered.rel.as('r');
+  const parentCols = carriedCols(parent.carried);
   if (use === 'all') {
-    const rel = parent.q.cte(
-      q`SELECT ${scalar} AS v${carryFrag(parent.carried, c)} FROM ${from}`,
-      ['v', ...parentCols],
-    );
-    return continueScalar(toScalarStream(carryOf(parent), rel));
+    const rel = parent.q.cte(q`SELECT ${r.c.v} AS v${carryFrag(parent.carried, r)} FROM ${r}`, ['v', ...parentCols]);
+    return toScalarStream(carryOf(parent), rel, lowered.as, lowered.result);
   }
   const ranked = parent.q.cte(
-    q`SELECT ${scalar} AS v${carryFrag(parent.carried, c)}, ${c.c[pushed.frame.ordinal]}, ROW_NUMBER() OVER (PARTITION BY ${c.c[pushed.frame.ordinal]} ORDER BY ${order}) AS rn FROM ${from}`,
-    ['v', ...parentCols, pushed.frame.ordinal, 'rn'],
+    q`SELECT ${r.c.v} AS v${carryFrag(parent.carried, r)}, ROW_NUMBER() OVER (PARTITION BY ${r.c[pushed.frame.ordinal]} ORDER BY ${r.c[encounter]}) AS rn FROM ${r}`,
+    ['v', ...parentCols, 'rn'],
   );
-  const r = ranked.as('r');
+  const first = ranked.as('f');
   const rel = parent.q.cte(
-    q`SELECT ${r.c.v} AS v${carryFrag(parent.carried, r)} FROM ${r} WHERE ${r.c.rn}=1`,
+    q`SELECT ${first.c.v} AS v${carryFrag(parent.carried, first)} FROM ${first} WHERE ${first.c.rn}=1`,
     ['v', ...parentCols],
   );
-  return continueScalar(toScalarStream(carryOf(parent), rel));
+  return toScalarStream(carryOf(parent), rel, lowered.as, lowered.result);
 }
 
 /** Compile an element-valued child through the SAME StepFns as the root prefix, then
@@ -217,7 +234,7 @@ export function tryCompileElementChild(
   scope: CompileScope = ROOT_SCOPE,
 ): { stream: ElementStream; scope: CompileScope } | null {
   if (!nested || parent.carried.path || parent.carried.sack || parent.carried.fromV) return null;
-  const body = stepChain(nested, parent.params);
+  const body = childSteps(nested, parent.params);
   if (!body.length || body.some((s) => !ELEMENT_CHILD_STEPS.has(s.name))) return null;
   const pushed = pushChildScope(parent, scope);
   const { st: end, stop } = foldBody(body, pushed.seed, 0);
