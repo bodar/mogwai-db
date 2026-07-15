@@ -16,7 +16,7 @@ import { materializeRoot, materializeScalarRoot } from './materialize.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
 import { SCALAR_ROW_STEPS } from './scalar.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
-import { compileSelectProject, compilePath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
+import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
 import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions } from './mapscalar.ts';
 import { lowerGroup, lowerProperties, type GroupSource } from './group.ts';
 
@@ -255,7 +255,7 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
   // Consumed the whole chain → render terminally, exactly as before.
   if (at === steps.length) {
     if (acc.projStep?.name === 'path')
-      return compilePath(st, acc.projStep, acc);
+      return dispatchNext(lowerPath(st, acc.projStep, acc), steps, at);
     if (isMapProj(acc.projStep))
       return compileSelectProject(st, acc.projStep!, acc);
     return buildProjection(st, acc);

@@ -9,7 +9,7 @@
 import { type Expression, type Query } from '../q.ts';
 import { readCompiled, type Compiled, type Shape } from '../render.ts';
 import { list, q } from '../q.ts';
-import { groupResultColumns, recordResultColumns, type GroupStream, type ListStream, type PropertyStream, type RecordStream, type ScalarStream } from './stream.ts';
+import { groupResultColumns, pathColumns, recordResultColumns, type GroupStream, type ListStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream } from './stream.ts';
 
 export function materializeRoot(query: Query, tail: Expression, shape: Shape): Compiled {
   return readCompiled(query, tail, shape);
@@ -66,4 +66,13 @@ export function materializeGroupRoot(stream: GroupStream): Compiled {
   const g = stream.rel.as('g');
   const cols = groupResultColumns(stream).map((name) => g.c[name]);
   return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${g}`, { kind: 'group', key: stream.key, val: stream.val });
+}
+
+export function materializePathRoot(stream: PathStream): Compiled {
+  const p = stream.rel.as('p');
+  const cols = pathColumns(stream.layout).map((name) => p.c[name]);
+  const shape: Shape = stream.layout.kind === 'linear'
+    ? { kind: 'path', positions: [...stream.layout.positions] }
+    : { kind: 'pathGrouped', elem: stream.layout.elem };
+  return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${p}`, shape);
 }

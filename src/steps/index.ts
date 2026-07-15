@@ -22,6 +22,7 @@ import { type Compiled } from '../render.ts';
 import { tryBulkRepeatCount } from './bulk.ts';
 import { lowerScalarRows } from './scalar.ts';
 import { materializeScalarRoot } from './materialize.ts';
+import { materializePathRoot } from './materialize.ts';
 
 export { compileTail };
 
@@ -206,6 +207,10 @@ export function dispatchNext(s: Stream, steps: PStep[], at: number): Compiled {
   if (s.kind === 'map') return compileFromMap(s, steps, at);
   if (s.kind === 'record') return compileFromRecord(s, steps, at);
   if (s.kind === 'group') return compileFromGroup(s, steps, at);
+  if (s.kind === 'path') {
+    if (at < steps.length) throw new Error(`${steps[at].name}() on a path value not yet supported`);
+    return materializePathRoot(s);
+  }
   return compileFromList(s, steps, at);
 }
 

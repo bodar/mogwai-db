@@ -2,10 +2,9 @@ import { q, list, empty, value, type Expression } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
 import { framedProps, nodePropScalar, predicateSql, propExtract, extIdOf } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
-import { carryFrag, carriedCols, type AliasMap, type ElementStream } from './context.ts';
-import { carryOf, recordFieldColumns, toListStream, toRecordStream, toScalarStream, type RecordField, type RecordStream, type ScalarStream } from './stream.ts';
+import { carryFrag, carriedCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
+import { carryOf, pathColumns, recordFieldColumns, toListStream, toPathStream, toRecordStream, toScalarStream, type PathStream, type RecordField, type RecordStream, type ScalarStream } from './stream.ts';
 import { type Compiled, type PathPos } from '../render.ts';
-import { materializeRoot } from './materialize.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
 import { materializeRecordRoot } from './materialize.ts';
 import { lowerGlobalCount } from './barrier.ts';
@@ -233,7 +232,7 @@ function pathBy(byArgs: any[] | undefined): string | undefined {
  * by(key) (missing property) drops the whole path (TinkerPop's default — only
  * ProductiveByStrategy would emit null). order()/reducers/from()/to() defer.
  */
-export function compilePath(st: ElementStream, proj: PStep, acc: TailAcc): Compiled {
+export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStream {
   // Reachable only from a union() SOURCE step: seedUnion doesn't seed p0 (unlike
   // seedSource, which handles V()/E()), so path tracking never starts. Mid-chain
   // union()/optional()/repeat() are caught earlier by their own path guards.
@@ -287,7 +286,9 @@ export function compilePath(st: ElementStream, proj: PStep, acc: TailAcc): Compi
   const whereNode = whereParts.length ? q` WHERE ${list(whereParts, ' AND ')}` : empty;
   const tailSql = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
   const node = q`SELECT ${dist}${list(cols, ', ')} FROM ${p}${list(joins, '')}${whereNode}${tailSql}`;
-  return materializeRoot(st.q, node, { kind: 'path', positions });
+  const layout = { kind: 'linear' as const, positions };
+  const rel = st.q.cte(node, pathColumns(layout));
+  return toPathStream(withoutCarried(carryOf(st)), rel, layout);
 }
 
 /**
@@ -298,7 +299,7 @@ export function compilePath(st: ElementStream, proj: PStep, acc: TailAcc): Compi
  * PATH ELEMENT ordered by `(pk, ord)` — the handler folds each pk-run into one Path.
  * All elements are vertices (out/in/both bodies); edge-inclusive bodies defer.
  */
-function compilePathArray(st: ElementStream, acc: TailAcc): Compiled {
+function compilePathArray(st: ElementStream, acc: TailAcc): PathStream {
   if (acc.orders.length || acc.reducer || acc.isPreds.length || acc.transforms.length || acc.injects.length)
     throw new Error('order()/reducer/is()/transform after a recursive repeat().path() not yet supported');
   // dedup() must collapse equal paths BEFORE row-numbering: ROW_NUMBER() is computed
@@ -312,5 +313,7 @@ function compilePathArray(st: ElementStream, acc: TailAcc): Compiled {
   const n = nodes.as('n');
   const l = labels.as('l');
   const node = q`SELECT pp.pk, je.key AS ord, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props FROM ${paths} pp, json_each(pp.path) je JOIN ${n} ON ${n.c.id}=je.value JOIN ${l} ON ${l.c.id}=${n.c.label} ORDER BY pp.pk, je.key`;
-  return materializeRoot(st.q, node, { kind: 'pathGrouped', elem: 'vertex' });
+  const layout = { kind: 'grouped' as const, elem: 'vertex' as const };
+  const rel = st.q.cte(node, pathColumns(layout));
+  return toPathStream(withoutCarried(carryOf(st)), rel, layout);
 }
