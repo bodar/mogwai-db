@@ -19,7 +19,9 @@ builds through the kernel. `q.derived(body, cols, alias)` is the typed non-CTE
 relation boundary: use it when SQL requires a subquery (especially filtering a
 window result) but the Query graph does not need a separately named intermediate.
 Window rank→filter policies use one derived table inside their semantic output CTE;
-do not recreate mechanical rank/filter CTE pairs.
+do not recreate mechanical rank/filter CTE pairs. A `Stream.rel` may itself be derived
+when it has one downstream consumer; wrap it in a named CTE only when the relation is
+shared/reused or the planner needs an intentional materialization boundary.
 
 **Compiler is fully decomposed (all 3 seams done, 2026-07-12).** `compile()` in
 `src/compiler.ts` is a 51-line orchestrator: `parse → normalize → dispatch`.

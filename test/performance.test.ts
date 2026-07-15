@@ -81,4 +81,19 @@ describe('property indexes: static vp indexes engage (no full scan)', () => {
     const d = explain(plan('g.V().map(__.outE().count())'));
     expect(usesEdgeIndex(d, 'e_out')).toBe(true);
   });
+
+  test('deep project keeps derived first-row ranking as a co-routine and preserves indexes', () => {
+    const d = explain(plan('g.V().project("a","b").by(__.out().values("name")).by(__.in().count())'));
+    expect(d).toContain('CO-ROUTINE f');
+    expect(d).not.toContain('MATERIALIZE f');
+    expect(usesVpIndex(d)).toBe(true);
+    expect(usesEdgeIndex(d, 'e_in')).toBe(true);
+  });
+
+  test('correlated ordered slice keeps its derived rank boundary lazy', () => {
+    const d = explain(plan('g.V().local(__.out().values("name").order().limit(2))'));
+    expect(d).toContain('CO-ROUTINE r');
+    expect(d).not.toContain('MATERIALIZE r');
+    expect(usesVpIndex(d)).toBe(true);
+  });
 });
