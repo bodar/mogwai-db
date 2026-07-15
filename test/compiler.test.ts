@@ -176,9 +176,10 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('fold() as a value + unfold() re-enters the tail', () => {
-    // A TERMINAL fold() is unchanged: N rows collapsed to one List by the handler.
+    // Element folds retain the row-framing path; scalar folds become a genuine
+    // ListStream even when terminal, so item metadata can survive the barrier.
     expect(read('g.V().fold()').shape).toEqual({ kind: 'list', elem: 'vertex' });
-    expect(read('g.V().values("name").fold()').shape).toEqual({ kind: 'list', elem: 'scalar' });
+    expect(read('g.V().values("name").fold()').shape).toEqual({ kind: 'jsonbList' });
     // A NON-terminal fold() retypes to a JSONB list value (jsonb(json_group_array)),
     // and unfold() explodes it (json_each) — the stream continues. fold().unfold() is
     // an identity roundtrip (deliberately not peepholed).
@@ -196,8 +197,23 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().fold().count(Scope.local)').shape).toEqual({ kind: 'count' });
     expect(read('g.V().values("age").fold().sum(Scope.local)').shape).toEqual({ kind: 'scalar' });
     expect(read('g.V().values("age").fold().sum(Scope.local)').sql).toContain('json_each');
-    // a trailing step after a local reducer, and inject-as-list, are later commits.
-    expect(() => compile('g.V().values("age").fold().sum(Scope.local).is(P.gt(1))', {})).toThrow('step after sum(Scope.local) not yet supported');
+    // Local reducers are ScalarStream transitions, so a later predicate composes.
+    expect(read('g.V().values("age").fold().sum(Scope.local).is(P.gt(1))').shape).toEqual({ kind: 'scalar' });
+  });
+
+  test('fold preserves uniform scalar item types through ListStream materialization', async () => {
+    const typed = read('g.V().values("age").asNumber(GType.DOUBLE).fold()');
+    expect(typed.shape).toEqual({ kind: 'jsonbList', as: 'double' });
+
+    const { ioc } = await import('../src/io.ts');
+    const doubles = executeQuery(seededStore(), 'g.V().values("age").asNumber(GType.DOUBLE).fold()', {})[0];
+    // LIST header (type+flag) + bare length (4 bytes), then the first qualified item.
+    expect(doubles[6]).toBe(ioc.DataType.DOUBLE);
+    expect(ioc.anySerializer.deserialize(doubles).v.sort((a: number, b: number) => a - b)).toEqual([27, 29, 32, 35]);
+
+    const ints = executeQuery(new GraphStore(new BunSqlite(':memory:')), 'g.inject("1",2,"3",4).asNumber().fold()', {})[0];
+    expect(ints[6]).toBe(ioc.DataType.INT);
+    expect(ioc.anySerializer.deserialize(ints).v).toEqual([1, 2, 3, 4]);
   });
 
   test('inject([...]) is a real list value (not flattened)', () => {
@@ -228,7 +244,7 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().values("age").fold().intersect(__.constant(27).fold())').shape).toEqual({ kind: 'jsonbSet' });
     expect(read('g.V().values("name").fold().difference(__.V().values("name").fold())').shape).toEqual({ kind: 'jsonbSet' });
     // the standalone operand embeds as a scalar subquery (its own WITH + json_group_array).
-    expect(read('g.V().values("name").fold().difference(__.V().values("name").fold())').sql).toContain('json_group_array(v)');
+    expect(read('g.V().values("name").fold().difference(__.V().values("name").fold())').sql).toContain('SELECT jsonb(list)');
     // an element-fold operand (a vertex list) isn't a scalar list → defers.
     expect(() => compile('g.V().fold().combine(__.V().fold())', {})).toThrow('must fold a scalar list');
     // argument-type errors mirror TinkerPop's messages.
@@ -250,7 +266,7 @@ describe('compiler SQL snapshots', () => {
     // A NON-terminal group() retypes → MapStream; select(Column.values) aggregates the
     // value column into a list value (one row), unfold() explodes it. Count → Long tag.
     const gv = read('g.V().groupCount().by("name").select(Column.values)');
-    expect(gv.shape).toEqual({ kind: 'jsonbList' });
+    expect(gv.shape).toEqual({ kind: 'jsonbList', as: 'long' });
     expect(gv.sql).toContain('json_group_array');
     expect(read('g.V().groupCount().by("name").select(Column.values).unfold()').shape).toEqual({ kind: 'value', as: 'long' });
     // select(Column.keys) over a scalar key → a scalar stream on unfold.
@@ -389,9 +405,8 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.inject(null).asBool()', {})).toThrow("Can't parse null as Boolean.");
     // on a runtime (V-rooted) stream asBool defers — needs local()/sack()
     expect(() => compile('g.V().values("name").asBool()', {})).toThrow('scalar transform asBool() not supported');
-    // composition with a reducer / trailing inject would mis-type the stream — defer,
-    // never silently wire the wrong GraphBinary type
-    expect(() => compile('g.inject(1,0).asBool().fold()', {})).toThrow('asBool() composed');
+    // fold preserves the uniform item tag; a heterogeneous trailing inject still defers.
+    expect(read('g.inject(1,0).asBool().fold()').shape).toEqual({ kind: 'list', elem: 'scalar', as: 'bool' });
     expect(() => compile('g.inject(1).asBool().inject(5)', {})).toThrow('asBool() composed');
   });
 
@@ -981,7 +996,7 @@ describe('compiler SQL snapshots', () => {
 
   test('fold() wraps the projection in a list shape (element or scalar)', () => {
     expect(read('g.V().fold()').shape).toEqual({ kind: 'list', elem: 'vertex' });
-    expect(read('g.V().values("name").fold()').shape).toEqual({ kind: 'list', elem: 'scalar' });
+    expect(read('g.V().values("name").fold()').shape).toEqual({ kind: 'jsonbList' });
     expect(read('g.V(1).outE().fold()').shape).toEqual({ kind: 'list', elem: 'edge' });
   });
 
@@ -1039,7 +1054,7 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().group().by(__.out().values("name"))', {})).toThrow(); // deep nested key
     expect(() => compile('g.V().properties().group().by()', {})).toThrow('group().by() on a property element is not yet supported');
     expect(() => compile('g.V().group().by("name").by("age").by("x")', {})).toThrow('more than two by() modulators');
-    expect(() => compile('g.V().count().fold()', {})).toThrow('fold() after count() not yet supported');
+    expect(read('g.V().count().fold()').shape).toEqual({ kind: 'jsonbList', as: 'long' });
     expect(() => compile('g.V().sum()', {})).toThrow('sum() of vertex not yet supported');
   });
 
@@ -2092,7 +2107,7 @@ describe('compiler execution semantics', () => {
   test('sum() sums a value stream; fold() collects it', () => {
     const store = seededStore();
     expect(run(store, 'g.V().hasLabel("person").values("age").sum()').map((r) => r.v)).toEqual([123]);
-    expect(run(store, 'g.V().values("name").fold()').map((r) => r.v).sort())
+    expect(JSON.parse(run(store, 'g.V().values("name").fold()')[0].list).sort())
       .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
   });
 

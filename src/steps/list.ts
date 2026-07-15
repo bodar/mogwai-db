@@ -12,7 +12,7 @@ import { type PStep } from '../strategies.ts';
 import { carryOf, toListStream, toScalarStream, mapOfToListOf, type ListStream, type ScalarStream, type MapStream } from './stream.ts';
 import { type ElementStream } from './context.ts';
 import { type Compiled } from '../render.ts';
-import { materializeRoot } from './materialize.ts';
+import { materializeListRoot, materializeRoot } from './materialize.ts';
 import { dispatchNext, compileRead } from './index.ts';
 
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
@@ -22,17 +22,23 @@ const isLocal = (s: PStep): boolean => (s.args ?? []).some((a: any) => a && type
  *  correlated json_each aggregate. count() counts elements (any list); sum/min/max/mean
  *  reduce the numeric elements (non-numeric filtered out, matching the global reducers).
  *  Terminal — a trailing step defers. */
-function listReducer(s: ListStream, name: string): Compiled {
+function lowerListReducer(s: ListStream, name: string): ScalarStream {
   const c = s.rel.as('c');
-  if (name === 'count')
-    return materializeRoot(s.q, q`SELECT (SELECT COUNT(*) FROM json_each(${c.c.list}) je) AS v FROM ${c}`, { kind: 'count' });
+  if (name === 'count') {
+    const rel = s.q.cte(q`SELECT (SELECT COUNT(*) FROM json_each(${c.c.list}) je) AS v FROM ${c}`, ['v']);
+    return toScalarStream(carryOf(s), rel, 'long', 'count');
+  }
   // Numeric aggregate over the list's numeric elements (typeof guard mirrors wrapReducer);
   // min/max also range over text (TinkerPop 4 Strings are Comparable), sum/mean stay numeric.
   const types = (name === 'min' || name === 'max') ? "('integer', 'real', 'text')" : "('integer', 'real')";
   const agg = (fn: string): Expression => q`(SELECT ${fn}(je.value) FROM json_each(${c.c.list}) je WHERE typeof(je.value) in ${types})`;
-  if (name === 'mean') return materializeRoot(s.q, q`SELECT ${agg('AVG')} AS v, 'real' AS vt FROM ${c}`, { kind: 'scalar' });
+  if (name === 'mean') {
+    const rel = s.q.cte(q`SELECT ${agg('AVG')} AS v, 'real' AS vt FROM ${c}`, ['v', 'vt']);
+    return toScalarStream(carryOf(s), rel, undefined, 'number');
+  }
   const fn = name === 'sum' ? 'SUM' : name === 'min' ? 'MIN' : 'MAX';
-  return materializeRoot(s.q, q`SELECT ${agg(fn)} AS v, typeof(${agg(fn)}) AS vt FROM ${c}`, { kind: 'scalar' });
+  const rel = s.q.cte(q`SELECT ${agg(fn)} AS v, typeof(${agg(fn)}) AS vt FROM ${c}`, ['v', 'vt']);
+  return toScalarStream(carryOf(s), rel, undefined, 'number');
 }
 
 /**
@@ -194,6 +200,8 @@ function operandList(arg: any, op: string, params: Record<string, any>): Express
     // separate read and aggregate its `v` column into one JSONB list, embedded as a
     // scalar subquery. Only a scalar-list fold is supported (values/id/label → v col).
     const sub = compileRead(inner, params);
+    if (sub.shape.kind === 'jsonbList')
+      return q`(SELECT jsonb(list) FROM (${embedSql(sub)}))`;
     if (sub.shape.kind !== 'list' || sub.shape.elem !== 'scalar')
       throw new Error(`${op}() operand traversal must fold a scalar list (values/id/label), got ${sub.shape.kind === 'list' ? sub.shape.elem : sub.shape.kind}`);
     return q`(SELECT jsonb(COALESCE(json_group_array(v), json('[]'))) FROM (${embedSql(sub)}))`;
@@ -265,8 +273,7 @@ export function compileFromList(s: ListStream, steps: PStep[], at: number): Comp
   // End of chain → frame each list value as one GraphBinary List (json() so the JSONB
   // blob reads back as text for the handler to parse).
   if (at >= steps.length) {
-    const c = s.rel.as('c');
-    return materializeRoot(s.q, q`SELECT json(${c.c.list}) AS list FROM ${c}`, { kind: 'jsonbList' });
+    return materializeListRoot(s);
   }
   const step = steps[at];
   if (step.name === 'unfold') return dispatchNext(compileUnfold(s), steps, at + 1);
@@ -289,10 +296,9 @@ export function compileFromList(s: ListStream, steps: PStep[], at: number): Comp
     return dispatchNext(listStringTransform(s, step), steps, at + 1);
   }
   // Scope.local per-list reducers (count/sum/min/max/mean) — reduce each list to a
-  // scalar. Terminal only for now; a trailing step (e.g. .is(P)) defers.
+  // scalar stream, so a trailing filter/transform/reducer continues normally.
   if (['count', 'sum', 'min', 'max', 'mean'].includes(step.name) && isLocal(step)) {
-    if (at + 1 !== steps.length) throw new Error(`step after ${step.name}(Scope.local) not yet supported`);
-    return listReducer(s, step.name);
+    return dispatchNext(lowerListReducer(s, step.name), steps, at + 1);
   }
   // all(P)/any(P): keep the list if every/some element satisfies P (list filter).
   if (step.name === 'all' || step.name === 'any')

@@ -9,7 +9,7 @@
 import { type Expression, type Query } from '../q.ts';
 import { readCompiled, type Compiled, type Shape } from '../render.ts';
 import { q } from '../q.ts';
-import { type ScalarStream } from './stream.ts';
+import { type ListStream, type ScalarStream } from './stream.ts';
 
 export function materializeRoot(query: Query, tail: Expression, shape: Shape): Compiled {
   return readCompiled(query, tail, shape);
@@ -26,4 +26,16 @@ export function materializeScalarRoot(stream: ScalarStream): Compiled {
     : { kind: 'value', as: stream.as };
   const cols = stream.result === 'number' ? q`v, vt` : q`v`;
   return materializeRoot(stream.q, q`SELECT ${cols} FROM ${stream.rel}`, shape);
+}
+
+/** Materialize one list value per relation row. Scalar lists retain a uniform item
+ * tag; element/nested lists continue through the existing JSONB framing path. */
+export function materializeListRoot(stream: ListStream): Compiled {
+  const c = stream.rel.as('c');
+  const as = stream.of.kind === 'scalar' ? stream.of.as : undefined;
+  return materializeRoot(
+    stream.q,
+    q`SELECT json(${c.c.list}) AS list FROM ${c}`,
+    as ? { kind: 'jsonbList', as } : { kind: 'jsonbList' },
+  );
 }

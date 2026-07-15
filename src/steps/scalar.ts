@@ -13,7 +13,7 @@ export const SCALAR_TRANSFORMS = new Set([
 
 export const SCALAR_ROW_STEPS = new Set([
   ...SCALAR_TRANSFORMS, 'is', 'limit', 'skip', 'range', 'order', 'dedup',
-  'count', 'sum', 'min', 'max', 'mean', 'unfold',
+  'count', 'sum', 'min', 'max', 'mean', 'fold', 'unfold',
 ]);
 
 const isLocal = (step: PStep): boolean =>
