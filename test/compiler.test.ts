@@ -1252,6 +1252,9 @@ describe('compiler SQL snapshots', () => {
     // branch 2 emits only for inputs branch 1 produced nothing for
     expect(c.sql).toContain('WHERE o0 NOT IN (SELECT o0 FROM');
     expect(c.shape).toEqual({ kind: 'value' });
+    const scalar = read('g.V().coalesce(__.values("age"), __.constant(0)).count()');
+    expect(scalar.shape).toEqual({ kind: 'count' });
+    expect(scalar.sql).toContain('a.o0 NOT IN (SELECT o0 FROM');
     expect(() => compile('g.V().coalesce(__.out(), __.values("name"))', {})).toThrow('scalar/projection body');
     expect(() => compile('g.V().coalesce(__.out(), __.outE())', {})).toThrow('different element kinds');
     // an origin-unsafe body step (drops the ordinal) fails closed, not a broken CTE
@@ -2147,6 +2150,12 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V(6).coalesce(__.out("knows"), __.out("created")).values("name")').map((r) => r.v)).toEqual(['lop']);
     // all branches empty → no output (not self)
     expect(run(store, 'g.V(2).coalesce(__.out("knows"), __.out("created")).values("name")').map((r) => r.v)).toEqual([]);
+    expect(run(store, 'g.V().coalesce(__.values("age"), __.constant(0))').map((r) => r.v).sort((a, b) => a - b))
+      .toEqual([0, 0, 27, 29, 32, 35]);
+    expect(run(store, 'g.V(1).coalesce(__.values("missing"), __.values("name"), __.constant("x"))').map((r) => r.v))
+      .toEqual(['marko']);
+    // count is total, so even zero is productive and prevents fallback.
+    expect(run(store, 'g.V(2).coalesce(__.out().count(), __.constant(99))').map((r) => r.v)).toEqual([0]);
   });
 
   test('optional()/flatMap() multi-hop execute correctly', () => {

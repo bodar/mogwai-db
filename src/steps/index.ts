@@ -173,9 +173,15 @@ export function foldBody(steps: PStep[], seedSt: ElementStream, from: number): {
     const scalarChoose = chooseArgs.length === 3
       && isScalarChild(chooseArgs[1].nested, seedSt.params)
       && isScalarChild(chooseArgs[2].nested, seedSt.params);
+    const coalesceArgs = steps[i].name === 'coalesce'
+      ? steps[i].args.filter((a: any) => a && typeof a === 'object' && 'nested' in a)
+      : [];
+    const scalarCoalesce = coalesceArgs.length > 0
+      && coalesceArgs.every((a: any) => isScalarChild(a.nested, seedSt.params));
     if (!fn
       || scalarUnion
       || scalarChoose
+      || scalarCoalesce
       || (steps[i].name === 'choose' && steps[i].options)
       || (steps[i].name === 'sack' && !isSackMutate(steps[i]))
       || ((steps[i].name === 'group' || steps[i].name === 'groupCount') && !isSideEffectGroup(steps[i]))

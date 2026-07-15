@@ -245,6 +245,28 @@ export const coalesce: StepFn = (s, st) => {
   return advance(st, list(parts, ' UNION ALL '), { elem, origins: st.carried.origins, path: out.path });
 };
 
+/** Homogeneous scalar coalesce: compile every arm from one ordinal-tagged seed, then
+ * emit arm k only where no earlier arm produced a row for that parent ordinal. The
+ * internal ordinal is removed at the merge boundary while outer carried state stays. */
+export function tryLowerScalarCoalesce(s: Step, st: ElementStream): ScalarStream | null {
+  assertForkSafe('coalesce', st);
+  const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  if (!branches.length || !branches.every((b) => isScalarChild(b.nested, st.params))) return null;
+  const { seedSt, ord } = originSeed(st);
+  const arms = branches.map((branch) =>
+    tryCompileScalarChild(seedSt, branch.nested, 'all')
+      ?? tryCompileCountChild(seedSt, branch.nested)
+      ?? (() => { throw new Error('coalesce() scalar branch preflight/compiler mismatch'); })());
+  const parts = arms.map((arm, k) => {
+    const a = arm.rel.as('a');
+    const prior = k === 0 ? empty : q` WHERE ${list(arms.slice(0, k).map((p) => q`${a.c[ord]} NOT IN (SELECT ${ord} FROM ${p.rel})`), ' AND ')}`;
+    return q`SELECT ${a.c.v} AS v${carryFrag(st.carried, a)} FROM ${a}${prior}`;
+  });
+  const rel = st.q.cte(list(parts, ' UNION ALL '), ['v', ...carriedCols(st.carried)]);
+  const as = arms.every((arm) => arm.as === arms[0].as) ? arms[0].as : undefined;
+  return toScalarStream(carryOf(st), rel, as);
+}
+
 /** flatMap(t): apply t per traverser, flatten all results — for element bodies this
  *  is just inlining the body (a fan-out through the dispatch). map()'s first-result-
  *  only semantics differ (needs a per-input row-number) and stay deferred. */

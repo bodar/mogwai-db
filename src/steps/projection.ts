@@ -18,7 +18,7 @@ import { SCALAR_ROW_STEPS } from './scalar.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
 import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerMapElement } from './mapscalar.ts';
-import { choose as lowerLegacyChoose, flatMap as lowerLegacyFlatMap, tryLowerScalarChoose, tryLowerScalarUnion, union as lowerLegacyUnion } from './branch.ts';
+import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, union as lowerLegacyUnion } from './branch.ts';
 import { lowerGroup, lowerProperties, type GroupSource } from './group.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
@@ -212,6 +212,12 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
     const scalar = tryLowerScalarChoose(steps[stop], st);
     if (scalar) return dispatchNext(scalar, steps, stop + 1);
     return dispatchNext(lowerLegacyChoose(steps[stop], st), steps, stop + 1);
+  }
+
+  if (steps[stop]?.name === 'coalesce') {
+    const scalar = tryLowerScalarCoalesce(steps[stop], st);
+    if (scalar) return dispatchNext(scalar, steps, stop + 1);
+    return dispatchNext(lowerLegacyCoalesce(steps[stop], st), steps, stop + 1);
   }
 
   // math("<formula>") → one SQL arithmetic scalar (always Double). Its variables
