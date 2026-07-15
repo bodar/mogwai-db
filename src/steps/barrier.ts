@@ -21,6 +21,24 @@ export function lowerGlobalFold(input: ScalarStream): ListStream {
   return toListStream(withoutCarried(carryOf(input)), rel, { kind: 'scalar', as: input.as });
 }
 
+/** Child-scoped fold produces exactly one list traverser per parent origin. The
+ * domain keeps empty children alive as `[]`; FILTER keys productivity on encounter
+ * rather than value so a productive SQL NULL is retained as a list member. */
+export function lowerScopedScalarFold(
+  input: ScalarStream,
+  domain: Relation,
+  ordinal: string,
+): ListStream {
+  if (!input.encounter) throw new Error('scoped scalar fold requires explicit encounter order');
+  const d = domain.as('d');
+  const s = input.rel.as('s');
+  const rel = input.q.cte(
+    q`SELECT jsonb(COALESCE(json_group_array(${s.c.v} ORDER BY ${s.c[input.encounter]}) FILTER (WHERE ${s.c[input.encounter]} IS NOT NULL), json('[]'))) AS list${carryFrag(input.carried, d)} FROM ${d} LEFT JOIN ${s} ON ${s.c[ordinal]}=${d.c[ordinal]} GROUP BY ${d.c[ordinal]}`,
+    ['list', ...carriedCols(input.carried)],
+  );
+  return toListStream(carryOf(input), rel, { kind: 'scalar', as: input.as });
+}
+
 export type NumericReducer = 'sum' | 'min' | 'max' | 'mean';
 export type ScalarReducer = 'count' | NumericReducer;
 

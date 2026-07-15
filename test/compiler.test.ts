@@ -1305,6 +1305,9 @@ describe('compiler SQL snapshots', () => {
     const reducedChild = read('g.V().map(__.out().values("name").is("lop").count())');
     expect(reducedChild.sql).toContain('COUNT(s.encounter) AS v');
     expect(reducedChild.sql).toContain('LEFT JOIN');
+    const foldedChild = read('g.V().map(__.out().values("name").fold()).count(Scope.local)');
+    expect(foldedChild.sql).toContain('json_group_array(s.v ORDER BY s.encounter) FILTER');
+    expect(foldedChild.sql).toContain("json('[]')");
     expect(() => compile('g.V().map(__.constant(1).discard())', {})).toThrow();
     // record/list-valued child bodies still defer; element bodies use generic child scope below.
     expect(() => compile('g.V().map(__.select("a"))', {})).toThrow('not yet supported');
@@ -1719,6 +1722,12 @@ describe('compiler execution semantics', () => {
       expect(run(store, 'g.V().map(__.out().values("name").is("lop").count())').map((r) => r.v).sort())
         .toEqual([0, 0, 0, 1, 1, 1]);
       expect(run(store, 'g.V(1).map(__.outE().values("weight").sum())').map((r) => r.v)).toEqual([1.9]);
+      expect(run(store, 'g.V().map(__.out().values("name").fold()).count(Scope.local)').map((r) => r.v).sort())
+        .toEqual([0, 0, 0, 1, 2, 3]);
+      expect(run(store, 'g.V(1).local(__.out().values("name").order().fold()).unfold()').map((r) => r.v))
+        .toEqual(['josh', 'lop', 'vadas']);
+      expect(run(store, 'g.V(1).flatMap(__.constant(null).fold()).count(Scope.local)').map((r) => r.v))
+        .toEqual([1]);
     });
 
     test('future child barriers remain explicit deferrals until generic lowering lands', () => {

@@ -6,9 +6,9 @@ import { stepChain } from '../frontend.ts';
 import { mathToSql, mathVars } from '../math.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, elemRel, type ElementStream } from './context.ts';
-import { carryOf, toScalarStream, type ScalarStream, type Stream } from './stream.ts';
+import { carryOf, toScalarStream, type ListStream, type ScalarStream, type Stream } from './stream.ts';
 import { type ValueType } from '../render.ts';
-import { tryCompileCountChild, tryCompileElementChild, tryCompileScalarChild } from './child.ts';
+import { tryCompileCountChild, tryCompileElementChild, tryCompileListChild, tryCompileScalarChild } from './child.ts';
 
 // ---------- map (scalar body → per-traverser scalar projector) ----------
 
@@ -28,7 +28,14 @@ export function tryLowerFlatMap(st: ElementStream, step: PStep): Stream | null {
   const arg = step.args[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
   return tryCompileElementChild(st, arg.nested, 'all')?.stream
-    ?? tryCompileScalarChild(st, arg.nested, 'all');
+    ?? tryCompileScalarChild(st, arg.nested, 'all')
+    ?? tryCompileListChild(st, arg.nested);
+}
+
+export function tryLowerListChild(st: ElementStream, step: PStep): ListStream | null {
+  const arg = step.args[0];
+  if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
+  return tryCompileListChild(st, arg.nested);
 }
 
 /**

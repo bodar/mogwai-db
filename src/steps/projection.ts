@@ -17,7 +17,7 @@ import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type Nume
 import { SCALAR_ROW_STEPS } from './scalar.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
-import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerMapElement } from './mapscalar.ts';
+import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerListChild, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, union as lowerLegacyUnion } from './branch.ts';
 import { lowerGroup, lowerProperties, type GroupSource } from './group.ts';
 
@@ -185,10 +185,15 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
   if (steps[stop]?.name === 'map') {
     const element = tryLowerMapElement(st, steps[stop]);
     if (element) return dispatchNext(element, steps, stop + 1);
+    const list = tryLowerListChild(st, steps[stop]);
+    if (list) return dispatchNext(list, steps, stop + 1);
     return dispatchNext(lowerMapScalar(st, steps, stop), steps, stop + 1);
   }
-  if (steps[stop]?.name === 'local')
+  if (steps[stop]?.name === 'local') {
+    const list = tryLowerListChild(st, steps[stop]);
+    if (list) return dispatchNext(list, steps, stop + 1);
     return dispatchNext(lowerMapScalar(st, steps, stop), steps, stop + 1);
+  }
 
   // flatMap consumes ALL productive rows from the same generic child compiler used
   // by map(first). It lives at the shape-aware dispatcher rather than PREFIX because

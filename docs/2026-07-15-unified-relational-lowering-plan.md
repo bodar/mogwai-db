@@ -536,8 +536,11 @@ choose/coalesce without a nested row-operator switch or accidental CTE ordering.
 `lowerScopedScalarReducer` in `barrier.ts` then extends that same stream to
 `count/sum/min/max/mean`: the parent domain makes the barrier total per origin, count
 uses the non-null encounter marker so productive NULL is counted, and numeric `v,vt`
-survives cardinality plus homogeneous scalar branch merges. Origin-scoped `fold`
-remains excluded; L3 stays 872.
+survives cardinality plus homogeneous scalar branch merges. `lowerScopedScalarFold`
+uses that domain and encounter marker to emit exactly one ListStream per parent: empty
+children become `[]`, while productive NULL remains `[null]`. Map/flatMap/local now
+compose those list results through ordinary ListStream dispatch; list-valued branch
+arms remain outside shape unification. L3 stays 872.
 Scalar `local(child)` now routes through that compiler with `all` cardinality, so
 projection, transforms, origin-partitioned row operators, and scalar reducers share the
 same lowering as flatMap. The legacy local prefix handler remains only for element-valued
