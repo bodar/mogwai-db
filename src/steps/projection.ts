@@ -17,7 +17,7 @@ import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type Nume
 import { SCALAR_ROW_STEPS } from './scalar.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
-import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions } from './mapscalar.ts';
+import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerMapElement } from './mapscalar.ts';
 import { lowerGroup, lowerProperties, type GroupSource } from './group.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
@@ -181,7 +181,12 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
   // map(__.<scalar>) and a scalar-reduction local(__.<…count/sum/…>) are the same
   // per-element scalar projector (local's element+barrier body compiles as a prefix
   // step; only its scalar-reduction body reaches the tail here).
-  if (steps[stop]?.name === 'map' || steps[stop]?.name === 'local')
+  if (steps[stop]?.name === 'map') {
+    const element = tryLowerMapElement(st, steps[stop]);
+    if (element) return dispatchNext(element, steps, stop + 1);
+    return dispatchNext(lowerMapScalar(st, steps, stop), steps, stop + 1);
+  }
+  if (steps[stop]?.name === 'local')
     return dispatchNext(lowerMapScalar(st, steps, stop), steps, stop + 1);
 
   // math("<formula>") → one SQL arithmetic scalar (always Double). Its variables

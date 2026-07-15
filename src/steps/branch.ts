@@ -4,7 +4,7 @@ import { stepChain, type Step } from '../frontend.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, compileFilterPredicate, predicateSql, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
 import { advance, elemRel, prevRel, carryFrag, carriedCols, aliasColsOf, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { foldBody } from './index.ts';
-import { pushChildScope } from './child.ts';
+import { pushChildScope, tryCompileElementChild } from './child.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
  *  read back from `nodes` by subquery (the walk row carries only the id). Lets
@@ -224,6 +224,8 @@ export const coalesce: StepFn = (s, st) => {
  *  only semantics differ (needs a per-input row-number) and stay deferred. */
 export const flatMap: StepFn = (s, st) => {
   assertForkSafe('flatMap', st); // 1:many is a split too — same sack/fromV concern
+  const generic = tryCompileElementChild(st, s.args[0]?.nested, 'all');
+  if (generic) return generic.stream;
   // Single body, no merge — incoming aliases + the appended path ride through on `end`.
   const end = branchArm('flatMap', s.args[0]?.nested, st, st.params);
   mergeBranchCarried(st.carried, [end.carried]); // reject a NEW as() bound inside (non-path cols must agree); path just rides on `end`
