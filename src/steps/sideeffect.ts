@@ -3,7 +3,7 @@ import { scalarProp, predicateSql, jsonbGroupArray, elemCtx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { normalize, type PStep } from '../strategies.ts';
 import { elemRel, type ElementStream, type StepFn, type SideEffectDef } from './context.ts';
-import { tryCompileScalarValueRows } from './child.ts';
+import { tryCompileFirstElementValueRows, tryCompileScalarValueRows } from './child.ts';
 
 // ---------- named side-effect collections (aggregate) ----------
 //
@@ -15,10 +15,11 @@ import { tryCompileScalarValueRows } from './child.ts';
 // rule in the grammar; only aggregate('x') reaches here.)
 //
 // The bag is a materialized JSONB list CTE in the shared Query: element rowids (bare
-// aggregate — cap rejoins nodes/edges) or a by()-projected scalar. cap('x') explodes
-// it (steps/projection.ts compileCap → the list substrate). Deferred (clear throws):
+// aggregate — cap rejoins nodes/edges) or a by()-projected scalar; nullable element
+// modulation uses a tagged variant relation. cap('x') emits one collection value and
+// explicit unfold() explodes it. Deferred (clear throws):
 // aggregate on a SCALAR stream (values(k).aggregate(x) — a tail-phase register),
-// aggregate().by(<non-property>), local(aggregate(...)).
+// token/general ordered-element modulation.
 
 const aggregateName = (s: any): string => {
   const name = (s.args ?? []).find((a: any) => typeof a === 'string');
@@ -53,27 +54,42 @@ export const aggregate: StepFn = (s, st) => {
       def = { kind: 'list', rel, of: { kind: 'scalar', productiveNull: productive } };
     } else if (a && typeof a === 'object' && 'nested' in a) {
       const rows = tryCompileScalarValueRows(st, a.nested);
-      if (!rows)
-        throw new Error('aggregate().by(traversal) child shape not yet supported by generic child lowering');
-      const r = rows.stream.rel.as('r');
-      const encounter = rows.stream.encounter;
-      if (!encounter) throw new Error('aggregate().by(traversal) requires child encounter order');
-      // by(traversal) is a map-style modulator: retain its FIRST productive result
-      // per input. ProductiveBy then LEFT-restores parents whose child had no row.
-      const ranked = st.q.cte(
-        q`SELECT ${r.c.v} AS v, ${r.c[rows.frame.ordinal]} AS ${rows.frame.ordinal}, ROW_NUMBER() OVER (PARTITION BY ${r.c[rows.frame.ordinal]} ORDER BY ${r.c[encounter]}) AS rn FROM ${r}`,
-        ['v', rows.frame.ordinal, 'rn'],
-      );
-      const first = ranked.as('f');
-      const source = productive
-        ? q`${rows.frame.domain.as('d')} LEFT JOIN ${first} ON ${first.c[rows.frame.ordinal]}=${q`d.${rows.frame.ordinal}`} AND ${first.c.rn}=1`
-        : q`${first}`;
-      const member = productive ? first.c.v : first.c.v;
-      const filter = productive ? q`` : q` WHERE ${first.c.rn}=1`;
-      const rel = st.q.cte(q`SELECT ${jsonbGroupArray(member)} AS list FROM ${source}${filter}`, ['list']);
-      def = { kind: 'list', rel, of: { kind: 'scalar', as: rows.stream.as, productiveNull: productive } };
+      if (rows) {
+        const r = rows.stream.rel.as('r');
+        const encounter = rows.stream.encounter;
+        if (!encounter) throw new Error('aggregate().by(traversal) requires child encounter order');
+        // by(traversal) is a map-style modulator: retain its FIRST productive result
+        // per input. ProductiveBy then LEFT-restores parents whose child had no row.
+        const ranked = st.q.cte(
+          q`SELECT ${r.c.v} AS v, ${r.c[rows.frame.ordinal]} AS ${rows.frame.ordinal}, ROW_NUMBER() OVER (PARTITION BY ${r.c[rows.frame.ordinal]} ORDER BY ${r.c[encounter]}) AS rn FROM ${r}`,
+          ['v', rows.frame.ordinal, 'rn'],
+        );
+        const first = ranked.as('f');
+        const source = productive
+          ? q`${rows.frame.domain.as('d')} LEFT JOIN ${first} ON ${first.c[rows.frame.ordinal]}=${q`d.${rows.frame.ordinal}`} AND ${first.c.rn}=1`
+          : q`${first}`;
+        const filter = productive ? q`` : q` WHERE ${first.c.rn}=1`;
+        const rel = st.q.cte(q`SELECT ${jsonbGroupArray(first.c.v)} AS list FROM ${source}${filter}`, ['list']);
+        def = { kind: 'list', rel, of: { kind: 'scalar', as: rows.stream.as, productiveNull: productive } };
+      } else {
+        const elements = tryCompileFirstElementValueRows(st, a.nested);
+        if (!elements)
+          throw new Error('aggregate().by(traversal) child shape not yet supported by generic child lowering');
+        const c = elements.stream.rel.as('c');
+        if (productive) {
+          const d = elements.frame.domain.as('d');
+          const rel = st.q.cte(
+            q`SELECT CASE WHEN ${c.c.id} IS NULL THEN 0 ELSE 2 END AS vk, NULL AS v, ${c.c.id} AS rid FROM ${d} LEFT JOIN ${c} ON ${c.c[elements.frame.ordinal]}=${d.c[elements.frame.ordinal]}`,
+            ['vk', 'v', 'rid'],
+          );
+          def = { kind: 'variant', rel, elem: elements.stream.elem };
+        } else {
+          const rel = st.q.cte(q`SELECT 2 AS vk, NULL AS v, ${c.c.id} AS rid FROM ${c}`, ['vk', 'v', 'rid']);
+          def = { kind: 'variant', rel, elem: elements.stream.elem };
+        }
+      }
     } else {
-      throw new Error('aggregate().by() only supports a property key or scalar traversal');
+      throw new Error('aggregate().by() only supports a property key or a scalar/element traversal');
     }
   }
   // Pass-through: same id-relation, extended registry. carryOf/advance preserve it.

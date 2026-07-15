@@ -5,7 +5,7 @@ import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { executeQuery } from '../src/execute.ts';
 import { MODERN_SEED } from './conformance/seed-modern.ts';
 import { Query } from '../src/q.ts';
-import { assertStreamColumns, toGroupStream, toPathStream, toPropertyStream, toRecordStream, toScalarStream } from '../src/steps/stream.ts';
+import { assertStreamColumns, toGroupStream, toPathStream, toPropertyStream, toRecordStream, toScalarStream, toVariantStream } from '../src/steps/stream.ts';
 import { popChildScope, pushChildScope } from '../src/steps/child.ts';
 import { readdirSync, readFileSync } from 'node:fs';
 
@@ -24,6 +24,10 @@ describe('compiler SQL snapshots', () => {
     expect(assertStreamColumns(toScalarStream(carry, q.cte({} as any, ['v']))).kind).toBe('scalar');
     expect(() => toScalarStream(carry, q.cte({} as any, ['value']))).toThrow(
       'scalar stream column mismatch: expected [v], got [value]',
+    );
+    expect(toVariantStream(carry, q.cte({} as any, ['vk', 'v', 'rid']), undefined, 'node').kind).toBe('variant');
+    expect(() => toVariantStream(carry, q.cte({} as any, ['v', 'rid']), undefined, 'node')).toThrow(
+      'variant stream column mismatch',
     );
     const propertyCols = ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta'];
     expect(toPropertyStream(carry, q.cte({} as any, propertyCols), 'node').kind).toBe('property');
@@ -913,18 +917,30 @@ describe('compiler SQL snapshots', () => {
       .toEqual([27, 29, 32, 35]);
     expect(executeQuery(store, 'g.withStrategies(ProductiveByStrategy).V().group().by("age").by("name")', {})).toHaveLength(1);
 
-    const aggregate = run(store, 'g.withStrategies(ProductiveByStrategy).V().aggregate("a").by("age").cap("a")').map((r) => r.v);
+    const aggregate = run(store, 'g.withStrategies(ProductiveByStrategy).V().aggregate("a").by("age").cap("a").unfold()').map((r) => r.v);
     expect(aggregate.filter((v) => v == null)).toHaveLength(2);
     expect(aggregate.filter((v) => v != null).sort((a, b) => a - b)).toEqual([27, 29, 32, 35]);
-    const traversed = run(store, 'g.withStrategies(ProductiveByStrategy).V().aggregate("a").by(__.values("age").is(gt(29))).cap("a")').map((r) => r.v);
+    const traversed = run(store, 'g.withStrategies(ProductiveByStrategy).V().aggregate("a").by(__.values("age").is(gt(29))).cap("a").unfold()').map((r) => r.v);
     expect(traversed.filter((v) => v == null)).toHaveLength(4);
     expect(traversed.filter((v) => v != null).sort((a, b) => a - b)).toEqual([32, 35]);
-    expect(run(store, 'g.withStrategies(ProductiveByStrategy).V().local(__.aggregate("a").by("age")).cap("a")').map((r) => r.v).filter((v) => v == null)).toHaveLength(2);
+    expect(run(store, 'g.withStrategies(ProductiveByStrategy).V().local(__.aggregate("a").by("age")).cap("a").unfold()').map((r) => r.v).filter((v) => v == null)).toHaveLength(2);
     expect(run(store, 'g.withStrategies(ProductiveByStrategy).V().aggregate("a").by("age").cap("a").max(Scope.local)').map((r) => r.v)).toEqual([35]);
     expect(run(store, 'g.withStrategies(ProductiveByStrategy).V().aggregate("a").by("foo").cap("a").max(Scope.local)').map((r) => r.v)).toEqual([null]);
     expect(run(store, 'g.withStrategies(ProductiveByStrategy).V().aggregate("a").by("foo").cap("a").unfold().sum()').map((r) => r.v)).toEqual([null]);
-    expect(run(store, 'g.V().aggregate("a").by(__.outE("created").count()).cap("a")').map((r) => r.v).sort((a, b) => a - b))
+    expect(run(store, 'g.V().aggregate("a").by(__.outE("created").count()).cap("a").unfold()').map((r) => r.v).sort((a, b) => a - b))
       .toEqual([0, 0, 0, 1, 1, 2]);
+    const elementAggregate = run(store, 'g.V().aggregate("x").by(__.out().order().by("name")).cap("x").unfold()');
+    expect(elementAggregate.map((r) => r.id).sort((a, b) => a - b)).toEqual([3, 3, 4]);
+    const productiveElements = run(store, 'g.withStrategies(ProductiveByStrategy).V().aggregate("x").by(__.out().order().by("name")).cap("x").unfold()');
+    expect(productiveElements.filter((r) => r.vk === 0)).toHaveLength(3);
+    expect(productiveElements.filter((r) => r.vk === 2).map((r) => r.id).sort((a, b) => a - b)).toEqual([3, 3, 4]);
+    expect(executeQuery(store, 'g.withStrategies(ProductiveByStrategy).V().aggregate("x").by(__.out().order().by("name")).cap("x")', {})).toHaveLength(1);
+
+    const nullableRecord = run(store, 'g.withStrategies(ProductiveByStrategy).V().project("x").by(__.out().order().by("name"))');
+    expect(nullableRecord.filter((r) => r.e0_id == null)).toHaveLength(3);
+    expect(executeQuery(store, 'g.withStrategies(ProductiveByStrategy).V().project("x").by(__.out().order().by("name"))', {})).toHaveLength(6);
+    expect(read('g.withStrategies(ProductiveByStrategy).V().project("x").by(__.out().order().by("name")).select("x")').shape)
+      .toEqual({ kind: 'variant', scalarAs: undefined, elem: 'vertex' });
     expect(() => compile('g.withStrategies(ProductiveByStrategy).V().order().by("age")', {})).not.toThrow();
     expect(read('g.withStrategies(ProductiveByStrategy).V().as("a").out().as("b").where("a",eq("b")).by("age")').sql)
       .toContain(' IS ');
@@ -1404,6 +1420,17 @@ describe('compiler SQL snapshots', () => {
       .toEqual([0, 0, 0, 1, 2, 3]);
     expect(run(store, 'g.V().optional(__.out().values("name").fold()).count(Scope.local)').map((r) => Number(r.v)).sort((a, b) => a - b))
       .toEqual([0, 0, 0, 1, 2, 3]);
+  });
+
+  test('optional non-total scalar child lowers to a scalar-or-element VariantStream', () => {
+    const store = seededStore();
+    const plan = read('g.V().optional(__.values("age"))');
+    expect(plan.shape).toEqual({ kind: 'variant', scalarAs: undefined, elem: 'vertex' });
+    const rows = run(store, 'g.V().optional(__.values("age"))');
+    expect(rows.filter((r) => r.vk === 1).map((r) => r.v).sort((a, b) => a - b)).toEqual([27, 29, 32, 35]);
+    expect(rows.filter((r) => r.vk === 2).map((r) => r.label)).toEqual(['software', 'software']);
+    expect(executeQuery(store, 'g.V().optional(__.values("age"))', {})).toHaveLength(6);
+    expect(run(store, 'g.V().optional(__.values("age")).count()').map((r) => r.v)).toEqual([6]);
   });
 
   test('coalesce() → first non-empty branch per input via the ordinal', () => {
@@ -1959,18 +1986,20 @@ describe('compiler execution semantics', () => {
       .toEqual([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]);
   });
 
-  test('aggregate(x).by(key).cap(x) bags a scalar; cap unrolls to individual results', () => {
+  test('aggregate(x).by(key).cap(x) is one list; explicit unfold emits scalar members', () => {
     const store = seededStore();
-    expect(run(store, 'g.V().aggregate("x").by("name").cap("x")').map((r) => r.v).sort())
+    expect(executeQuery(store, 'g.V().aggregate("x").by("name").cap("x")', {})).toHaveLength(1);
+    expect(run(store, 'g.V().aggregate("x").by("name").cap("x").unfold()').map((r) => r.v).sort())
       .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
     // by-miss (software has no age) drops the member → 4 ages, not 6 with nulls.
-    expect(run(store, 'g.V().aggregate("x").by("age").cap("x")').map((r) => r.v).sort((a, b) => a - b))
+    expect(run(store, 'g.V().aggregate("x").by("age").cap("x").unfold()').map((r) => r.v).sort((a, b) => a - b))
       .toEqual([27, 29, 32, 35]);
   });
 
-  test('bare aggregate(x).cap(x) bags elements; cap unrolls to vertices', () => {
+  test('bare aggregate(x).cap(x) is one list; explicit unfold emits vertices', () => {
     const store = seededStore();
-    expect(run(store, 'g.V().aggregate("x").cap("x")').map((r) => r.id).sort((a, b) => a - b))
+    expect(executeQuery(store, 'g.V().aggregate("x").cap("x")', {})).toHaveLength(1);
+    expect(run(store, 'g.V().aggregate("x").cap("x").unfold()').map((r) => r.id).sort((a, b) => a - b))
       .toEqual([1, 2, 3, 4, 5, 6]);
   });
 

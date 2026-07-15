@@ -3,7 +3,7 @@ import { nodes, edges, labels } from '../schema.ts';
 import { framedProps, labelNameSub, nodePropScalar, predicateSql, propExtract, extIdOf } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
-import { carryOf, pathColumns, recordFieldColumns, toListStream, toPathStream, toRecordStream, toScalarStream, type ListOf, type PathStream, type RecordField, type RecordStream, type ScalarStream, type Stream } from './stream.ts';
+import { carryOf, pathColumns, recordFieldColumns, toListStream, toPathStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type PathStream, type RecordField, type RecordStream, type ScalarStream, type Stream } from './stream.ts';
 import { type Compiled, type PathPos } from '../render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
 import { materializeRecordRoot } from './materialize.ts';
@@ -88,7 +88,6 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
           cols: [q`${rel.c.list} AS ${`${prefix}_list`}`],
         };
       }
-      if (productive) throw new Error('ProductiveByStrategy with an element-valued project/select field needs a nullable element variant');
       const child = tryCompileElementChild(seed, nested[i], 'first', outer.scope);
       if (!child) throw new Error('element record child failed after successful shape preflight');
       const cp = child.stream.rel.as(`cp${i}`);
@@ -104,7 +103,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
         q`SELECT ${payload}${carryFrag(child.stream.carried, cp)} FROM ${cp} JOIN ${n} ON ${n.c.id}=${cp.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}`,
         [...payloadCols, ...carriedCols(child.stream.carried)],
       ).as(`b${i}`);
-      const field: RecordField = { key: keys[i], prefix, sub: child.stream.elem === 'edge' ? 'edge' : 'vertex' };
+      const field: RecordField = { key: keys[i], prefix, sub: child.stream.elem === 'edge' ? 'edge' : 'vertex', nullable: productive || undefined };
       return {
         rel,
         field,
@@ -394,6 +393,14 @@ export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): 
       ['list', ...carriedCols(s.carried)],
     );
     return dispatchNext(toListStream(carryOf(s), rel, field.of), steps, at + 1);
+  }
+  if (field.nullable) {
+    const rid = r.c[`${field.prefix}_rid`];
+    const rel = s.q.cte(
+      q`SELECT CASE WHEN ${rid} IS NULL THEN 0 ELSE 2 END AS vk, NULL AS v, ${rid} AS rid${carryFrag(s.carried, r)} FROM ${r}`,
+      ['vk', 'v', 'rid', ...carriedCols(s.carried)],
+    );
+    return dispatchNext(toVariantStream(carryOf(s), rel, undefined, field.sub === 'edge' ? 'edge' : 'node'), steps, at + 1);
   }
   const rel = s.q.cte(
     q`SELECT ${r.c[`${field.prefix}_rid`]} AS id${carryFrag(s.carried, r)} FROM ${r}`,

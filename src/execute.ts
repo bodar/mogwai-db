@@ -116,7 +116,9 @@ function mapBuffer(row: any, entries: MapEntry[]): Buffer {
       ? ioc.anySerializer.serialize(row[`${e.prefix}_v`])
       : e.sub === 'list'
         ? listFieldBuffer(row[`${e.prefix}_list`], e.of)
-        : elementBuffer(row, e.prefix, e.sub));
+        : e.nullable && row[`${e.prefix}_id`] === null
+          ? frameValue(null, undefined)
+          : elementBuffer(row, e.prefix, e.sub));
   }
   return Buffer.concat(parts);
 }
@@ -309,6 +311,17 @@ function* framedResults(store: GraphStore, gremlin: string, params: Record<strin
     case 'elementMap': for (const r of rows) yield elementMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys); return;
     case 'count': for (const r of rows) yield ioc.anySerializer.serialize(BigInt(r.v)); return;
     case 'value': for (const r of rows) yield frameValue(r.v, shape.as); return;
+    case 'variant': {
+      const framed = rows.map((r) => {
+        if (r.vk === 0) return frameValue(null, undefined);
+        if (r.vk === 1) return frameValue(r.v, shape.scalarAs);
+        if (r.vk === 2 && shape.elem) return shape.elem === 'edge' ? rowEdge(r) : rowVertex(r);
+        throw new Error(`invalid variant result tag ${r.vk}`);
+      });
+      if (shape.list) yield listBuffer(framed);
+      else yield* framed;
+      return;
+    }
     // sum(): Int/Long/Double by SQLite storage class. SUM of an empty stream is
     // NULL → no result (TinkerPop yields nothing, matching SQL sum aggregation).
     case 'scalar': for (const r of rows) if (r.v !== null || shape.productiveNull)

@@ -4,8 +4,8 @@ import { stepChain, type Step } from '../frontend.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, compileFilterPredicate, predicateSql, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
 import { advance, elemRel, prevRel, carryFrag, carriedCols, aliasColsOf, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { foldBody } from './index.ts';
-import { isListChild, isScalarChild, pushChildScope, tryCompileCountChild, tryCompileElementChild, tryCompileListChild, tryCompileScalarChild } from './child.ts';
-import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStream } from './stream.ts';
+import { isListChild, isScalarChild, pushChildScope, tryCompileCountChild, tryCompileElementChild, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueRows } from './child.ts';
+import { carryOf, toListStream, toScalarStream, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from './stream.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
  *  read back from `nodes` by subquery (the walk row carries only the id). Lets
@@ -248,6 +248,22 @@ export const optional: StepFn = (s, st) => {
   const miss = q`SELECT ${armProjection(baseSt, out)} FROM ${base} WHERE ${ord} NOT IN (SELECT ${ord} FROM ${end.rel})`;
   return advance(st, list([hit, miss], ' UNION ALL '), { elem: end.elem, origins: st.carried.origins, path: out.path });
 };
+
+/** Shape-changing optional: productive scalar child rows win; an unproductive
+ * parent emits its original element. Both arms retain the same outer carried
+ * schema, while the child-only origin is consumed by the anti-existence arm. */
+export function tryLowerVariantOptional(s: Step, st: ElementStream): VariantStream | null {
+  const nested = s.args[0]?.nested;
+  if (!nested || !isScalarChild(nested, st.params)) return null;
+  const rows = tryCompileScalarValueRows(st, nested);
+  if (!rows) return null;
+  const c = rows.stream.rel.as('c');
+  const d = rows.frame.domain.as('d');
+  const hit = q`SELECT 1 AS vk, ${c.c.v} AS v, NULL AS rid${carryFrag(st.carried, c)} FROM ${c}`;
+  const miss = q`SELECT 2 AS vk, NULL AS v, ${d.c.id} AS rid${carryFrag(st.carried, d)} FROM ${d} WHERE NOT EXISTS (SELECT 1 FROM ${c} WHERE ${c.c[rows.frame.ordinal]}=${d.c[rows.frame.ordinal]})`;
+  const rel = st.q.cte(list([hit, miss], ' UNION ALL '), ['vk', 'v', 'rid', ...carriedCols(st.carried)]);
+  return toVariantStream(carryOf(st), rel, rows.stream.as, st.elem);
+}
 
 /** coalesce(t1, …, tn): the first branch that yields output, per input traverser.
  *  Tag each input with a unique ordinal (originSeed), fold every branch carrying it,

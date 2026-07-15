@@ -21,7 +21,8 @@ import { assertStreamColumns, type Stream } from './stream.ts';
 import { type Compiled } from '../render.ts';
 import { tryBulkRepeatCount } from './bulk.ts';
 import { lowerScalarRows } from './scalar.ts';
-import { materializeScalarRoot } from './materialize.ts';
+import { materializeScalarRoot, materializeVariantRoot } from './materialize.ts';
+import { lowerGlobalCount } from './barrier.ts';
 import { materializePathRoot } from './materialize.ts';
 
 export { compileTail };
@@ -179,8 +180,8 @@ export function foldBody(steps: PStep[], seedSt: ElementStream, from: number): {
     const listCoalesce = coalesceArgs.length > 0
       && coalesceArgs.every((a: any) => isListChild(a.nested, seedSt.params));
     const optionalNested = steps[i].name === 'optional' ? steps[i].args[0]?.nested : null;
-    const shapedTotalOptional = !!optionalNested
-      && (isListChild(optionalNested, seedSt.params) || isTotalScalarChild(optionalNested, seedSt.params));
+    const shapedOptional = !!optionalNested
+      && (isListChild(optionalNested, seedSt.params) || isScalarChild(optionalNested, seedSt.params));
     if (!fn
       || scalarUnion
       || listUnion
@@ -188,7 +189,7 @@ export function foldBody(steps: PStep[], seedSt: ElementStream, from: number): {
       || listChoose
       || scalarCoalesce
       || listCoalesce
-      || shapedTotalOptional
+      || shapedOptional
       || (steps[i].name === 'choose' && steps[i].options)
       || (steps[i].name === 'sack' && !isSackMutate(steps[i]))
       || ((steps[i].name === 'group' || steps[i].name === 'groupCount') && !isSideEffectGroup(steps[i]))
@@ -229,6 +230,13 @@ export function dispatchNext(s: Stream, steps: PStep[], at: number): Compiled {
     const { stream, stop } = lowerScalarRows(s, steps, at);
     if (stop === steps.length) return materializeScalarRoot(stream);
     return compileFromScalar(stream, steps, stop);
+  }
+  if (s.kind === 'variant') {
+    if (at === steps.length) return materializeVariantRoot(s);
+    if (s.result === 'list' && steps[at].name === 'unfold')
+      return dispatchNext({ ...s, result: 'rows' }, steps, at + 1);
+    if (steps[at].name === 'count') return dispatchNext(lowerGlobalCount(s), steps, at + 1);
+    throw new Error(`${steps[at].name}() on a variant value not yet supported`);
   }
   if (s.kind === 'property') return compileFromProperty(s, steps, at);
   if (s.kind === 'map') return compileFromMap(s, steps, at);
