@@ -1,4 +1,4 @@
-import { q, type Expression, type Relation } from '../q.ts';
+import { derived, q, type Expression, type Relation } from '../q.ts';
 import { carryOf, toListStream, toScalarStream, type ListStream, type RelationalStream, type ScalarStream } from './stream.ts';
 import { carriedCols, carryFrag, withoutCarried, type ElementStream } from './context.ts';
 
@@ -48,12 +48,12 @@ export function lowerScopedElementFold(
   ordinal: string,
 ): ListStream {
   const c = input.rel.as('c');
-  const ranked = input.q.cte(
+  const r = derived(
     q`SELECT ${c.c.id} AS id, ${c.c[ordinal]} AS ${ordinal}, ROW_NUMBER() OVER (PARTITION BY ${c.c[ordinal]} ORDER BY ${c.c.id}) AS encounter FROM ${c}`,
     ['id', ordinal, 'encounter'],
+    'r',
   );
   const d = domain.as('d');
-  const r = ranked.as('r');
   const rel = input.q.cte(
     q`SELECT jsonb(COALESCE(json_group_array(${r.c.id} ORDER BY ${r.c.encounter}) FILTER (WHERE ${r.c.encounter} IS NOT NULL), json('[]'))) AS list${carryFrag(input.carried, d)} FROM ${d} LEFT JOIN ${r} ON ${r.c[ordinal]}=${d.c[ordinal]} GROUP BY ${d.c[ordinal]}`,
     ['list', ...carriedCols(input.carried)],

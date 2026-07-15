@@ -1,4 +1,4 @@
-import { empty, list, q, value, type Expression } from '../q.ts';
+import { derived, empty, list, q, value, type Expression } from '../q.ts';
 import { predicateSql, rangeToOffsetLimit, scalarTx } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, withoutCarried } from './context.ts';
@@ -99,8 +99,7 @@ function partitionedSlice(s: ScalarStream, offset: number, limit: number | null)
   const partitions = s.carried.origins.map((name) => p.c[name]);
   const over = partitions.length ? q`PARTITION BY ${list(partitions, ', ')} ORDER BY ${p.c[s.encounter]}` : q`ORDER BY ${p.c[s.encounter]}`;
   const rankedCols = [...cols(s), 'rn'];
-  const ranked = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER (${over}) AS rn FROM ${p}`, rankedCols);
-  const r = ranked.as('r');
+  const r = derived(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER (${over}) AS rn FROM ${p}`, rankedCols, 'r');
   const hi = limit == null ? empty : q` AND ${r.c.rn}<=${offset + limit}`;
   const rel = s.q.cte(q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn}>${offset}${hi}`, cols(s));
   return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter);
@@ -113,11 +112,11 @@ function partitionedTail(s: ScalarStream, limit: number): ScalarStream {
   const over = partitions.length
     ? q`PARTITION BY ${list(partitions, ', ')} ORDER BY ${p.c[s.encounter]} DESC`
     : q`ORDER BY ${p.c[s.encounter]} DESC`;
-  const ranked = s.q.cte(
+  const r = derived(
     q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER (${over}) AS rn FROM ${p}`,
     [...cols(s), 'rn'],
+    'r',
   );
-  const r = ranked.as('r');
   const rel = s.q.cte(
     q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn}<=${limit}`,
     cols(s),
@@ -139,11 +138,11 @@ function partitionedDedup(s: ScalarStream): ScalarStream {
   if (!s.encounter) throw new Error('correlated scalar dedup requires explicit encounter order');
   const p = s.rel.as('p');
   const partitions = [...s.carried.origins.map((name) => p.c[name]), p.c.v, ...(s.result === 'number' ? [p.c.vt] : [])];
-  const ranked = s.q.cte(
+  const r = derived(
     q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${list(partitions, ', ')} ORDER BY ${p.c[s.encounter]}) AS rn FROM ${p}`,
     [...cols(s), 'rn'],
+    'r',
   );
-  const r = ranked.as('r');
   const rel = s.q.cte(q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn}=1`, cols(s));
   return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter);
 }

@@ -68,19 +68,25 @@ const colRef = (qualifier: string, name: string): Text => raw(`${quote(qualifier
  *  column qualifier — the one trick that makes columns follow the alias. */
 export class Relation {
   /** The FROM-clause form: `name` unaliased, `name alias` aliased. */
-  readonly from: Text;
+  readonly from: Expression;
   /** Columns, qualified by alias (if any) else the table name. */
   readonly c: Record<string, Text>;
-  constructor(readonly name: string, readonly cols: readonly string[], readonly alias?: string) {
+  constructor(readonly name: string, readonly cols: readonly string[], readonly alias?: string, readonly body?: Expression) {
     const qualifier = alias ?? name;
-    this.from = raw(alias ? `${quote(name)} ${quote(alias)}` : quote(name));
+    this.from = body
+      ? q`(${body}) ${raw(quote(qualifier))}`
+      : raw(alias ? `${quote(name)} ${quote(alias)}` : quote(name));
     this.c = Object.fromEntries(cols.map((col) => [col, colRef(qualifier, col)]));
   }
-  as(alias: string): Relation { return new Relation(this.name, this.cols, alias); }
+  as(alias: string): Relation { return new Relation(this.name, this.cols, alias, this.body); }
 }
 
 /** Declare a base table once: `relation('nodes', ['id','props',…])`. */
 export const relation = (name: string, cols: readonly string[]): Relation => new Relation(name, cols);
+
+/** A typed derived table: a required subquery boundary without a separately named CTE. */
+export const derived = (body: Expression, cols: readonly string[], alias: string): Relation =>
+  new Relation(alias, cols, alias, body);
 
 /** A hole in a `q\`\`` template: a Relation renders its FROM form; any other node
  *  embeds as-is (its binds fall out); a number/string splices raw. Bind a value

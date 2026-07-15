@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–7 complete, Stage 8 active
-**Baseline:** full suite 370/370, L1 2298/2298, L3 933/2041; 246 compiler tests
+**Baseline:** full suite 371/371, L1 2298/2298, L3 933/2041; 247 compiler tests
 
 ## Restart handoff — read this first after a context reset
 
@@ -172,6 +172,14 @@ local commit/checkpoint. Run full `bun test` before every commit.
     11 CTEs/1059 characters to 9 CTEs/861 characters and carries only `o0`, not `o0,o1`.
     TypeScript, compiler 246/246, L3 933/2041, full 370/370, and corpus 2298/2298
     are green.
+26. Window rank/filter pairs now use the `q` kernel's typed `derived()` relation instead
+    of allocating a named rank CTE followed by a named filter CTE. Scalar correlated
+    slice/tail/dedup, element-child slice/first, modulated element dedup, element fold,
+    aggregate traversal modulation, and sack traversal modulation keep the required SQL
+    subquery boundary but expose only the semantic output relation to the Query graph.
+    Together with frame reuse, the representative two-field project fell 11→8 CTEs;
+    ordered local slice fell 8→7, and root modulated dedup fell 3→2. TypeScript,
+    compiler 247/247, L3 933/2041, full 371/371, and corpus 2298/2298 are green.
 
 **Current Stage 6 state:** scalar traversal modulators for `project`, aliased `select`,
 and inline element `group` all use the generic child-domain compiler. Group keys consume
@@ -820,6 +828,7 @@ Only after semantic migration is green:
 - ~~reuse a consumer's existing one-row-per-parent frame instead of assigning a second
   ordinal independently inside every sibling modulation;~~
 - inspect CTE count and SQLite query plans for representative deep child traversals;
+- ~~replace mechanical rank-CTE/filter-CTE pairs with one typed derived-table relation;~~
 - run Bun and workerd/DO contract probes for window, JSONB aggregate, and binding parity.
 
 Optimizations must consume the same stream/scope contracts. They are not allowed to

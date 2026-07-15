@@ -1,4 +1,4 @@
-import { empty, list, q, value, type Expression, type Relation } from '../q.ts';
+import { derived, empty, list, q, value, type Expression, type Relation } from '../q.ts';
 import { stepChain } from '../frontend.ts';
 import { edges, labels, nodes, vertexProperties } from '../schema.ts';
 import { advance, carriedWith, carryFrag, carriedCols, withCarried, type ElementStream } from './context.ts';
@@ -325,11 +325,11 @@ function compileScalarChildRows(
     const rel = parent.q.cte(q`SELECT ${r.c.v} AS v${typeCol}${carryFrag(parent.carried, r)} FROM ${r}`, [...resultCols, ...parentCols]);
     return { stream: toScalarStream(carryOf(parent), rel, lowered.as, lowered.result), frame: pushed.frame };
   }
-  const ranked = parent.q.cte(
+  const first = derived(
     q`SELECT ${r.c.v} AS v${typeCol}${carryFrag(parent.carried, r)}, ROW_NUMBER() OVER (PARTITION BY ${r.c[pushed.frame.ordinal]} ORDER BY ${r.c[encounter]}) AS rn FROM ${r}`,
     [...resultCols, ...parentCols, 'rn'],
+    'f',
   );
-  const first = ranked.as('f');
   const firstTypeCol = lowered.result === 'number' ? q`, ${first.c.vt} AS vt` : empty;
   const rel = parent.q.cte(
     q`SELECT ${first.c.v} AS v${firstTypeCol}${carryFrag(parent.carried, first)} FROM ${first} WHERE ${first.c.rn}=1`,
@@ -543,11 +543,11 @@ function compileElementChildRows(
       : step.name === 'skip' ? { offset: Number(step.args[0]), limit: -1 }
       : { offset: 0, limit: Number(step.args[0]) };
     const cols = carriedCols(end.carried);
-    const ranked = parent.q.cte(
+    const r = derived(
       q`SELECT ${p.c.id} AS id${carryFrag(end.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${p.c[pushed.frame.ordinal]} ORDER BY ${p.c.id}) AS rn FROM ${p}`,
       ['id', ...cols, 'rn'],
+      'r',
     );
-    const r = ranked.as('r');
     const hi = slice.limit < 0 ? null : slice.offset + slice.limit;
     const upper = hi === null ? empty : q` AND ${r.c.rn} <= ${hi}`;
     end = advance(end, q`SELECT ${r.c.id} AS id${carryFrag(end.carried, r)} FROM ${r} WHERE ${r.c.rn} > ${slice.offset}${upper}`);
@@ -557,11 +557,11 @@ function compileElementChildRows(
     const n = (end.elem === 'edge' ? edges : nodes).as('n');
     const orderExpr = elementOrderSql(end, n, orderStep as PStep | undefined);
     const cols = carriedCols(end.carried);
-    const ranked = parent.q.cte(
+    const r = derived(
       q`SELECT ${p.c.id} AS id${carryFrag(end.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${p.c[pushed.frame.ordinal]} ORDER BY ${orderExpr}, ${p.c.id}) AS rn FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`,
       ['id', ...cols, 'rn'],
+      'r',
     );
-    const r = ranked.as('r');
     end = advance(end, q`SELECT ${r.c.id} AS id${carryFrag(end.carried, r)} FROM ${r} WHERE ${r.c.rn}=1`);
   }
   return { stream: end, frame: pushed.frame };

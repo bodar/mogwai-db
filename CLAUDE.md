@@ -15,7 +15,11 @@ kernel + typed `Relation` handles — `src/q.ts` (kernel: `q`/`Relation`/`Query`
 + rationale: `docs/2026-07-12-q-kernel-sql-builder.md`. Do NOT reintroduce
 lazyrecords ansi builders (`select`/`from`/`join`/`comparison`/`cte`/…) — retired;
 only `src/q.ts` may import raw lazyrecords `Text`/`Compound`, every step module
-builds through the kernel.
+builds through the kernel. `q.derived(body, cols, alias)` is the typed non-CTE
+relation boundary: use it when SQL requires a subquery (especially filtering a
+window result) but the Query graph does not need a separately named intermediate.
+Window rank→filter policies use one derived table inside their semantic output CTE;
+do not recreate mechanical rank/filter CTE pairs.
 
 **Compiler is fully decomposed (all 3 seams done, 2026-07-12).** `compile()` in
 `src/compiler.ts` is a 51-line orchestrator: `parse → normalize → dispatch`.
