@@ -5,14 +5,15 @@ import {
   nodePropScalar, framedProps, valueMapProps,
 } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
-import { carryFrag, carriedCols, elemRel, withoutCarried, type ElementStream } from './context.ts';
+import { carryFrag, carriedCols, elemRel, type ElementStream } from './context.ts';
 import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStream } from './stream.ts';
 import { compileUnfold } from './list.ts';
 import { dispatchNext } from './index.ts';
 import {
   type Compiled, type Shape, type ElemShape,
 } from '../render.ts';
-import { materializeRoot } from './materialize.ts';
+import { materializeRoot, materializeScalarRoot } from './materialize.ts';
+import { lowerGlobalCount } from './barrier.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
 import { compileSelectProject, compilePath } from './select.ts';
 import { compileMapScalar, compileMath, compileFormat, compileChooseOptions } from './mapscalar.ts';
@@ -155,6 +156,15 @@ export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop:
 /** Compile the tail: `st` is the finished prefix state, `steps[stop]` the first
  *  step the prefix dispatch didn't consume. */
 export function compileTail(st: ElementStream, steps: PStep[], stop: number): Compiled {
+
+  // A direct global count is a stream transition even when terminal. Forms with
+  // preceding tail modifiers (order().limit().count()) still use the compatibility
+  // accumulator until those operators migrate to stepwise lowering.
+  if (steps[stop]?.name === 'count' && !isScopeLocalStep(steps[stop])) {
+    const out = lowerGlobalCount(st);
+    if (stop + 1 < steps.length) return dispatchNext(out, steps, stop + 1);
+    return materializeScalarRoot(out);
+  }
 
   // properties() turns the traverser into a property (owner+key+value) — a shape
   // the id-relation can't carry, so it and its follow-ons compile in their own fn.
@@ -325,10 +335,9 @@ export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number)
   // filter/transform/reducer compile normally. The barrier drops row-associated
   // carried state because no single input row owns the global result.
   if (steps[from]?.name === 'count' && !isScopeLocalStep(steps[from])) {
-    const rel = s.q.cte(q`SELECT COUNT(*) AS v FROM ${s.rel}`, ['v']);
-    const out = toScalarStream(withoutCarried(carryOf(s)), rel, 'long');
+    const out = lowerGlobalCount(s);
     if (from + 1 < steps.length) return dispatchNext(out, steps, from + 1);
-    return materializeRoot(s.q, q`SELECT v FROM ${rel}`, { kind: 'count' });
+    return materializeScalarRoot(out);
   }
   // unfold() on a scalar is identity (a scalar is not a collection) — continue past it,
   // exactly as unfold() on an element stream. Lets aggregate('a').by(k).cap('a').unfold()
@@ -336,12 +345,30 @@ export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number)
   if (steps[from]?.name === 'unfold') return dispatchNext(s, steps, from + 1);
   const { acc, stop } = foldTailAcc(steps, from);
   if (stop !== steps.length) throw new Error(`${steps[stop].name}() after a scalar stream not yet supported`);
+  if (s.result === 'count' && acc.reducer)
+    throw new Error(`${acc.reducer}() after count() not yet supported`);
   if (acc.projStep) {
     if (acc.projStep.name !== 'count') throw new Error(`${acc.projStep.name}() requires element input (a scalar stream has no ${acc.projStep.name})`);
     const dist = acc.distinct ? 'DISTINCT ' : '';
     const whereNode = acc.isPreds.length ? q` WHERE ${list(acc.isPreds.map((p) => predicateSql(q`v`, p)), ' AND ')}` : empty;
     const limitNode = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
     return materializeRoot(s.q, q`SELECT COUNT(*) AS v FROM (SELECT ${dist}v FROM ${s.rel}${whereNode}${limitNode})`, { kind: 'count' });
+  }
+  // Row-preserving operators keep reducer semantics on the stream. In particular,
+  // count().is(P) is still a Long count result rather than becoming an untyped value
+  // merely because the predicate happened to be terminal.
+  if (s.result === 'count' && acc.transforms.length === 0 && acc.injects.length === 0) {
+    const p = s.rel.as('p');
+    const whereNode = acc.isPreds.length
+      ? q` WHERE ${list(acc.isPreds.map((pr) => predicateSql(p.c.v, pr)), ' AND ')}`
+      : empty;
+    const orderNode = acc.orders.length ? q` ORDER BY ${p.c.v}` : empty;
+    const limitNode = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
+    const rel = s.q.cte(
+      q`SELECT ${acc.distinct ? 'DISTINCT ' : ''}${p.c.v} AS v${carryFrag(s.carried, p)} FROM ${p}${whereNode}${orderNode}${limitNode}`,
+      ['v', ...carriedCols(s.carried)],
+    );
+    return materializeScalarRoot(toScalarStream(carryOf(s), rel, 'long', 'count'));
   }
   const proj: ProjResult = { shape: { kind: 'value', as: s.as }, colsNode: q`v AS v`, fromNode: s.rel, scalarExpr: q`v`, baseWhere: null };
   const orderKey = (): Expression => { throw new Error('order().by(key) on a scalar stream not supported (no properties)'); };

@@ -29,7 +29,14 @@ export type ListOf =
 
 /** A stream of scalars in a one-column relation `v` (values/id/label/inject/unfold-
  *  of-scalars). `as` is the compile-time GraphBinary type tag (render.ts ValueType). */
-export interface ScalarStream extends Carry { readonly kind: 'scalar'; readonly rel: Relation; readonly as?: ValueType; }
+export interface ScalarStream extends Carry {
+  readonly kind: 'scalar';
+  readonly rel: Relation;
+  readonly as?: ValueType;
+  /** Root framing semantics carried by the reducer, rather than reconstructed from
+   * where the stream happens to become terminal. */
+  readonly result?: 'value' | 'count';
+}
 
 /** A single list value in a one-row relation with a JSONB `list` column (fold /
  *  inject-of-a-list / select(Column.values)), plus any carried columns. `of` says
@@ -80,8 +87,8 @@ export function assertStreamColumns<T extends Stream>(s: T): T {
 export const carryOf = (s: Stream): Carry =>
   ({ q: s.q, params: s.params, sideEffects: s.sideEffects, carried: s.carried });
 
-export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType): ScalarStream =>
-  assertStreamColumns({ ...c, kind: 'scalar', rel, as });
+export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, result: ScalarStream['result'] = 'value'): ScalarStream =>
+  assertStreamColumns({ ...c, kind: 'scalar', rel, as, result });
 export const toListStream = (c: Carry, rel: Relation, of: ListOf): ListStream =>
   assertStreamColumns({ ...c, kind: 'list', rel, of });
 export const toMapStream = (c: Carry, rel: Relation, keyOf: MapOf, valOf: MapOf): MapStream =>

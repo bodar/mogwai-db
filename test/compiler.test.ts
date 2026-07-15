@@ -352,14 +352,14 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().values("age").dedup().count()').sql).toContain('COUNT(*) AS v FROM (SELECT DISTINCT v FROM');
     expect(read('g.V().out().id().count()').shape).toEqual({ kind: 'count' });
     // The reducer is another scalar stream, so lowering can continue past it.
-    expect(read('g.V().values("age").count().is(P.gt(2))').sql).toContain('WHERE v > ?');
+    expect(read('g.V().values("age").count().is(P.gt(2))').sql).toContain('WHERE p.v > ?');
   });
 
   test('count is a relational scalar boundary and can continue lowering', () => {
     const filtered = read('g.V().values("age").count().is(P.gt(3))');
-    expect(filtered.shape).toEqual({ kind: 'value', as: 'long' });
+    expect(filtered.shape).toEqual({ kind: 'count' });
     expect(filtered.sql).toContain('SELECT COUNT(*) AS v');
-    expect(filtered.sql).toContain('WHERE v > ?');
+    expect(filtered.sql).toContain('WHERE p.v > ?');
 
     const countedAgain = read('g.V().values("age").count().count()');
     expect(countedAgain.shape).toEqual({ kind: 'count' });
@@ -609,7 +609,9 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('limit before count wraps the counted id-relation', () => {
-    expect(read('g.V().limit(2).count()').sql).toContain('SELECT COUNT(*) AS v FROM (SELECT id FROM c1)');
+    const sql = read('g.V().limit(2).count()').sql;
+    expect(sql).toContain('c1(id) as (SELECT p.id FROM c0 p LIMIT 2)');
+    expect(sql).toContain('SELECT COUNT(*) AS v FROM c1');
   });
 
   test('inject seeds a VALUES stream', () => {
@@ -1013,8 +1015,8 @@ describe('compiler SQL snapshots', () => {
 
   test('count().is(P) wraps the count in a value filter (0/1 rows)', () => {
     const p = read('g.V().count().is(P.gt(3))');
-    expect(p.sql).toContain('SELECT v FROM (SELECT COUNT(*) AS v FROM');
-    expect(p.sql).toContain('WHERE v > ?');
+    expect(p.sql).toContain('SELECT COUNT(*) AS v FROM c0');
+    expect(p.sql).toContain('WHERE p.v > ?');
     expect(p.shape).toEqual({ kind: 'count' });
   });
 
