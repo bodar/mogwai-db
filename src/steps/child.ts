@@ -7,6 +7,7 @@ import { foldBody } from './index.ts';
 import { lowerScalarRows, SCALAR_TRANSFORMS } from './scalar.ts';
 import { normalize } from '../strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
+import { rangeToOffsetLimit } from '../plan.ts';
 
 /** Root/child compilation context. A child frame retains the complete parent domain,
  * not merely an ordinal on productive child rows: reducers need that domain to
@@ -82,6 +83,20 @@ const CHILD_SCALAR_ROW_STEPS = new Set([
   'count', 'sum', 'min', 'max', 'mean',
 ]);
 const CHILD_SCALAR_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
+const CHILD_ELEMENT_ROW_STEPS = new Set(['limit', 'skip', 'range', 'dedup']);
+
+function elementRowParts(body: ReturnType<typeof stepChain>): { prefix: ReturnType<typeof stepChain>; suffix: ReturnType<typeof stepChain> } | null {
+  const at = body.findIndex((s) => CHILD_ELEMENT_ROW_STEPS.has(s.name));
+  const prefix = at < 0 ? body : body.slice(0, at);
+  const suffix = at < 0 ? [] : body.slice(at);
+  if (!prefix.length || prefix.some((s) => !ELEMENT_CHILD_STEPS.has(s.name))) return null;
+  if (suffix.some((s) => !CHILD_ELEMENT_ROW_STEPS.has(s.name))) return null;
+  return { prefix, suffix };
+}
+
+export function isElementChild(nested: any, params: Record<string, any>): boolean {
+  return !!nested && elementRowParts(childSteps(nested, params)) !== null;
+}
 
 /** Syntax-only preflight for shape-aware dispatch. Unlike the tryCompile functions,
  * this never appends CTEs, so the prefix fold can stop before a homogeneous scalar
@@ -280,14 +295,9 @@ export function tryCompileListChild(
     return toListStream(carryOf(parent), rel, folded.of);
   }
 
-  const body = childSteps(nested, parent.params);
-  if (body.at(-1)?.name !== 'fold') return null;
-  const prefix = body.slice(0, -1);
-  if (prefix.some((step) => !ELEMENT_CHILD_STEPS.has(step.name))) return null;
-  const pushed = pushChildScope(parent, scope);
-  const { st: end, stop } = foldBody(prefix, pushed.seed, 0);
-  if (stop !== prefix.length) return null;
-  const folded = lowerScopedElementFold(end, pushed.frame.domain, pushed.frame.ordinal);
+  const element = compileElementChildRows(parent, nested, scope, true);
+  if (!element) return null;
+  const folded = lowerScopedElementFold(element.stream, element.frame.domain, element.frame.ordinal);
   const l = folded.rel.as('l');
   const rel = parent.q.cte(
     q`SELECT ${l.c.list} AS list${carryFrag(parent.carried, l)} FROM ${l}`,
@@ -301,27 +311,64 @@ export function tryCompileListChild(
  * are unproductive; otherwise exactly one row survives per multiset-distinct parent.
  * Returns null when the body needs a not-yet-generic tail/barrier so scalar fast paths
  * and clear existing deferrals remain authoritative. */
+function compileElementChildRows(
+  parent: ElementStream,
+  nested: any,
+  scope: CompileScope = ROOT_SCOPE,
+  beforeFold = false,
+): { stream: ElementStream; frame: ChildFrame } | null {
+  if (!nested || parent.carried.sack || parent.carried.fromV) return null;
+  const fullBody = childSteps(nested, parent.params);
+  if (beforeFold && fullBody.at(-1)?.name !== 'fold') return null;
+  const body = beforeFold ? fullBody.slice(0, -1) : fullBody;
+  const parts = body.length ? elementRowParts(body) : beforeFold ? { prefix: [], suffix: [] } : null;
+  if (!parts) return null;
+  const pushed = pushChildScope(parent, scope);
+  const { st: prefixed, stop } = foldBody(parts.prefix, pushed.seed, 0);
+  if (stop !== parts.prefix.length) return null;
+
+  let end = prefixed;
+  for (const step of parts.suffix) {
+    const p = end.rel.as('p');
+    if (step.name === 'dedup') {
+      end = advance(end, q`SELECT DISTINCT ${p.c.id} AS id${carryFrag(end.carried, p)} FROM ${p}`);
+      continue;
+    }
+    const slice = step.name === 'range' ? rangeToOffsetLimit(step.args)
+      : step.name === 'skip' ? { offset: Number(step.args[0]), limit: -1 }
+      : { offset: 0, limit: Number(step.args[0]) };
+    const cols = carriedCols(end.carried);
+    const ranked = parent.q.cte(
+      q`SELECT ${p.c.id} AS id${carryFrag(end.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${p.c[pushed.frame.ordinal]} ORDER BY ${p.c.id}) AS rn FROM ${p}`,
+      ['id', ...cols, 'rn'],
+    );
+    const r = ranked.as('r');
+    const hi = slice.limit < 0 ? null : slice.offset + slice.limit;
+    const upper = hi === null ? empty : q` AND ${r.c.rn} <= ${hi}`;
+    end = advance(end, q`SELECT ${r.c.id} AS id${carryFrag(end.carried, r)} FROM ${r} WHERE ${r.c.rn} > ${slice.offset}${upper}`);
+  }
+  return { stream: end, frame: pushed.frame };
+}
+
 export function tryCompileElementChild(
   parent: ElementStream,
   nested: any,
   use: ChildUse,
   scope: CompileScope = ROOT_SCOPE,
 ): { stream: ElementStream; scope: CompileScope } | null {
-  if (!nested || parent.carried.path || parent.carried.sack || parent.carried.fromV) return null;
-  const body = childSteps(nested, parent.params);
-  if (!body.length || body.some((s) => !ELEMENT_CHILD_STEPS.has(s.name))) return null;
-  const pushed = pushChildScope(parent, scope);
-  const { st: end, stop } = foldBody(body, pushed.seed, 0);
-  if (stop !== body.length) return null;
-  if (use === 'all') return { stream: popChildScope(end, pushed.frame), scope };
+  const lowered = compileElementChildRows(parent, nested, scope);
+  if (!lowered) return null;
+  const { stream: end, frame } = lowered;
+
+  if (use === 'all') return { stream: popChildScope(end, frame), scope };
 
   const p = end.rel.as('p');
-  const others = carriedCols(end.carried).filter((c) => c !== pushed.frame.ordinal);
+  const others = carriedCols(end.carried).filter((c) => c !== frame.ordinal);
   const extra = (rel: typeof p): Expression => others.length
     ? list(others.map((c) => q`, ${rel.c[c]}`), '')
     : empty;
   const ranked = parent.q.cte(
-    q`SELECT ${p.c.id} AS id${extra(p)}, ROW_NUMBER() OVER (PARTITION BY ${p.c[pushed.frame.ordinal]} ORDER BY ${p.c.id}) AS rn FROM ${p}`,
+    q`SELECT ${p.c.id} AS id${extra(p)}, ROW_NUMBER() OVER (PARTITION BY ${p.c[frame.ordinal]} ORDER BY ${p.c.id}) AS rn FROM ${p}`,
     ['id', ...others, 'rn'],
   );
   const r = ranked.as('r');

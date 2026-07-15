@@ -7,11 +7,10 @@ import { withCarried, type ElementStream, type StepFn } from './context.ts';
 import { move, toEdge, toVertex, otherV } from './movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from './filter.ts';
 import { union, optional, repeat, choose, coalesce } from './branch.ts';
-import { isListChild, isScalarChild } from './child.ts';
+import { isElementChild, isListChild, isScalarChild } from './child.ts';
 import { match } from './match.ts';
 import { identity, limit, range, skip } from './passthrough.ts';
 import { sack } from './sack.ts';
-import { local } from './local.ts';
 import { aggregate, group as groupSE, groupCount as groupCountSE } from './sideeffect.ts';
 import { type SackSpec } from '../frontend.ts';
 import { compileTail, compileFromScalar } from './projection.ts';
@@ -56,9 +55,6 @@ const PREFIX = new Map<string, StepFn>([
   // The SIDE-EFFECTING group('a')/groupCount('a') (has a string key) is a pass-through
   // barrier too; the bare terminal group()/groupCount() breaks to the tail (guard below).
   ['group', groupSE], ['groupCount', groupCountSE],
-  // local() with a movement body + per-element limit/range is a prefix step; a
-  // scalar-reduction body (local(out().count())) breaks to the tail (guard below).
-  ['local', local],
 ]);
 
 /** A sack step in its mutate form (has an Operator arg); the bare read form is a tail
@@ -69,12 +65,12 @@ const isSackMutate = (s: PStep): boolean => (s.args ?? []).some((a: any) => a &&
  *  form is a terminal barrier handled by compileTail, so it must break out of the prefix. */
 const isSideEffectGroup = (s: PStep): boolean => (s.args ?? []).some((a: any) => typeof a === 'string');
 
-/** A local() whose body is scalar-shaped belongs at shape-aware dispatch, not the
- * element-only prefix local compiler. The generic child compiler applies `all`
- * cardinality, so row operators and reducers stay partitioned by each parent. */
-const isScalarLocal = (s: PStep, params: Record<string, any>): boolean => {
+/** Every recognized local() body belongs at shape-aware dispatch. The generic child
+ * compiler applies `all` cardinality, so row operators and reducers partition by
+ * parent without a prefix-local parser. */
+const isShapedLocal = (s: PStep, params: Record<string, any>): boolean => {
   const nested = (s.args ?? [])[0]?.nested;
-  return !!nested && (isScalarChild(nested, params) || isListChild(nested, params));
+  return !!nested && (isElementChild(nested, params) || isScalarChild(nested, params) || isListChild(nested, params));
 };
 
 /** Steps that need the linear path threaded through the fold: the source vertex
@@ -192,7 +188,7 @@ export function foldBody(steps: PStep[], seedSt: ElementStream, from: number): {
       || (steps[i].name === 'choose' && steps[i].options)
       || (steps[i].name === 'sack' && !isSackMutate(steps[i]))
       || ((steps[i].name === 'group' || steps[i].name === 'groupCount') && !isSideEffectGroup(steps[i]))
-      || (steps[i].name === 'local' && isScalarLocal(steps[i], seedSt.params))) break;
+      || (steps[i].name === 'local' && isShapedLocal(steps[i], seedSt.params))) break;
     st = fn(steps[i], st);
   }
   return { st, stop: i };
