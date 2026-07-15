@@ -18,6 +18,8 @@ import { compileFromList, compileFromMap } from './list.ts';
 import { assertStreamColumns, type Stream } from './stream.ts';
 import { type Compiled } from '../render.ts';
 import { tryBulkRepeatCount } from './bulk.ts';
+import { lowerScalarRows } from './scalar.ts';
+import { materializeScalarRoot } from './materialize.ts';
 
 export { compileTail };
 
@@ -193,7 +195,11 @@ export function dispatchNext(s: Stream, steps: PStep[], at: number): Compiled {
     const { st, stop } = foldBody(steps, s, at);
     return compileTail(st, steps, stop);
   }
-  if (s.kind === 'scalar') return compileFromScalar(s, steps, at);
+  if (s.kind === 'scalar') {
+    const { stream, stop } = lowerScalarRows(s, steps, at);
+    if (stop === steps.length) return materializeScalarRoot(stream);
+    return compileFromScalar(stream, steps, stop);
+  }
   if (s.kind === 'map') return compileFromMap(s, steps, at);
   return compileFromList(s, steps, at);
 }
