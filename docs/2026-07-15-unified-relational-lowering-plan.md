@@ -467,14 +467,23 @@ records exposed a tractability edge: the bulk optimizer now erases post-repeat l
 and final record construction only when `count()` is the sole consumer, propagating
 bulk through each extra movement instead of enumerating rows.
 
+`group()`/`groupCount()` now also lower once to a rich GroupStream regardless of
+terminal position. Its physical layout truthfully represents scalar, element,
+composite, reducer, and list-valued key/value columns; root materialization folds that
+relation into GraphBinary, while `select(Column.*)` derives the narrow `(mk,mv)`
+MapStream only for compatible layouts. The former duplicate `groupToMapStream`
+semantic compiler is deleted. Inline groups, property-stream groups, and group
+side-effects read through `cap()` all share `lowerGroup`. This checkpoint is
+architectural (L3 stays 866) and preserves the 354-test suite.
+
 Move the remaining terminal islands to streams:
 
 - ~~`properties()` → PropertyStream~~ (kept distinct from node/edge ElementStream);
 - ~~`select`/`project` → RecordStream~~ (record order/dedup/fold/where remain consumers);
-- `group`/`groupCount` → MapStream at root and non-root alike;
+- ~~`group`/`groupCount` → GroupStream at root and non-root alike~~;
 - `path` → path-valued stream/materialization strategy;
-- ~~`map`, `math`, `format`, option-choose, sack read~~ return ScalarStream; `cap`
-  and its structured side-effect shapes still need the general stream boundary.
+- ~~`map`, `math`, `format`, option-choose, sack read~~ return ScalarStream;
+  ~~`cap` re-emits its stored ListStream/GroupStream through common dispatch~~.
 
 Terminal fast framing remains in `materializeRoot`; semantic lowering no longer branches
 on whether another step follows.

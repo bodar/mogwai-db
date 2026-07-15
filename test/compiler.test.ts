@@ -5,7 +5,7 @@ import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { executeQuery } from '../src/execute.ts';
 import { MODERN_SEED } from './conformance/seed-modern.ts';
 import { Query } from '../src/q.ts';
-import { assertStreamColumns, toPropertyStream, toRecordStream, toScalarStream } from '../src/steps/stream.ts';
+import { assertStreamColumns, toGroupStream, toPropertyStream, toRecordStream, toScalarStream } from '../src/steps/stream.ts';
 import { popChildScope, pushChildScope } from '../src/steps/child.ts';
 import { readdirSync, readFileSync } from 'node:fs';
 
@@ -35,6 +35,12 @@ describe('compiler SQL snapshots', () => {
     expect(toRecordStream(carry, q.cte({} as any, recordCols), fields).kind).toBe('record');
     expect(() => toRecordStream(carry, q.cte({} as any, recordCols.slice(1)), fields)).toThrow(
       'record stream column mismatch',
+    );
+    const groupKey = { kind: 'scalar' as const };
+    const groupVal = { kind: 'count' as const };
+    expect(toGroupStream(carry, q.cte({} as any, ['gk', 'gv']), groupKey, groupVal).kind).toBe('group');
+    expect(() => toGroupStream(carry, q.cte({} as any, ['mk', 'mv']), groupKey, groupVal)).toThrow(
+      'group stream column mismatch',
     );
   });
 
@@ -277,10 +283,10 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().values("name").fold().unfold().combine([1])', {})).toThrow('incoming traversers');
   });
 
-  test('group()/groupCount() retypes to a MapStream on a follower (select(Column.*))', () => {
-    // A TERMINAL group() is unchanged — the row-folding groupBuffer Map.
+  test('group()/groupCount() always lowers to GroupStream; Column selection derives MapStream', () => {
+    // A terminal GroupStream reaches the existing row-folding groupBuffer Map.
     expect(read('g.V().groupCount().by("name")').shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
-    // A NON-terminal group() retypes → MapStream; select(Column.values) aggregates the
+    // A Column consumer derives MapStream; select(Column.values) aggregates the
     // value column into a list value (one row), unfold() explodes it. Count → Long tag.
     const gv = read('g.V().groupCount().by("name").select(Column.values)');
     expect(gv.shape).toEqual({ kind: 'jsonbList', as: 'long' });
@@ -991,7 +997,7 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('side-effecting group(a)/groupCount(a) → registered spec re-emitted by cap(a)', () => {
-    // group('a').by(key).cap('a') → one Map (compileGroup over the stashed source).
+    // group('a').by(key).cap('a') → one Map (lowerGroup over the stashed source).
     const g = read('g.V().group("a").by("name").cap("a")');
     expect(g.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'elementList', elem: 'vertex' } });
     // groupCount('a') passes traversers through: out() runs between it and cap('a').
@@ -1089,11 +1095,10 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('aggregation deferred forms throw clearly', () => {
-    // group() is now re-enterable (retypes to a MapStream on a follower): an element-
-    // VALUE group can't collapse to one map-value column, and an unknown step on a
-    // (scalar-valued) map defers in the map arm — both clear.
+    // group() is now always a GroupStream: an element-VALUE layout cannot derive the
+    // narrow MapStream consumed by Column.values, and an unknown group consumer defers.
     expect(() => compile('g.V().group().by("name").select(Column.values)', {})).toThrow('select(Column) over a group of element values not yet supported');
-    expect(() => compile('g.V().groupCount().by("name").cap("x")', {})).toThrow('cap() on a map value not yet supported');
+    expect(() => compile('g.V().groupCount().by("name").cap("x")', {})).toThrow('cap() on a group value not yet supported');
     expect(() => compile('g.V().group().by(__.out().values("name"))', {})).toThrow(); // deep nested key
     expect(() => compile('g.V().properties().group().by()', {})).toThrow('group().by() on a property element is not yet supported');
     expect(() => compile('g.V().group().by("name").by("age").by("x")', {})).toThrow('more than two by() modulators');

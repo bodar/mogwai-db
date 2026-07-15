@@ -354,8 +354,11 @@ export function compileFromMap(s: MapStream, steps: PStep[], at: number): Compil
     const c = s.rel.as('c');
     // Column.values → all values as one list; Column.keys → all keys as one list.
     // COALESCE to '[]' so an empty map still yields one (empty) list, not NULL.
-    const [srcCol, of] = col === 'values' ? [c.c.mv, mapOfToListOf(s.valOf)] : [c.c.mk, mapOfToListOf(s.keyOf)];
-    const rel = s.q.cte(q`SELECT jsonb(COALESCE(json_group_array(${srcCol}), json('[]'))) AS list FROM ${c}`, ['list']);
+    const [srcCol, of, nested] = col === 'values'
+      ? [c.c.mv, mapOfToListOf(s.valOf), s.valOf.kind === 'list']
+      : [c.c.mk, mapOfToListOf(s.keyOf), s.keyOf.kind === 'list'];
+    const item = nested ? q`json(${srcCol})` : srcCol;
+    const rel = s.q.cte(q`SELECT jsonb(COALESCE(json_group_array(${item}), json('[]'))) AS list FROM ${c}`, ['list']);
     return dispatchNext(toListStream(carryOf(s), rel, of), steps, at + 1);
   }
   throw new Error(`${step.name}() on a map value not yet supported`);

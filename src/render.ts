@@ -32,6 +32,7 @@ export type GroupVal =
   | { kind: 'elementList'; elem: ElemShape }             // default/by(__.fold()) → [elements]
   | { kind: 'elementLast'; elem: ElemShape }             // by(__.tail()) → last element
   | { kind: 'scalarList' }                               // by('age') → json_group_array → parsed list
+  | { kind: 'list' }                                     // one JSON list value per group key
   | { kind: 'count' }                                    // by(__.count())/groupCount → Long
   | { kind: 'sum' };                                     // by(__.…sum()) → numeric
 

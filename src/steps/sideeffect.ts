@@ -63,7 +63,7 @@ const register = (st: ElementStream, name: string, def: SideEffectDef): ElementS
 // continues — groupCount('a').by('name').out().cap('a') works), read back by cap('a').
 // Unlike the bare terminal group() (a compileTail barrier), this is a PASS-THROUGH:
 // it stashes the group-spec (source relation + scalar ctx + by() modulators) so
-// compileCap can re-run compileGroup over it. The source CTE (st.rel) persists in
+// compileCap can re-run lowerGroup over it. The source CTE (st.rel) persists in
 // the shared Query, so cap('a') — however much later — references it. The by()
 // modulators fold onto the step (group/groupCount are BY_HOSTS).
 
