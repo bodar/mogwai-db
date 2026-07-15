@@ -47,7 +47,7 @@ const PREFIX = new Map<string, StepFn>([
   ['repeat', repeat], ['emit', repeat], ['times', repeat], ['until', repeat],
   ['limit', limit], ['range', range], ['skip', skip], ['identity', identity], ['barrier', identity],
   // Only the MUTATE form sack(Operator.x) is a prefix step; bare sack() (read) breaks
-  // out to the tail (foldBody guard below).
+  // out to the tail (lowerElementSteps guard below).
   ['sack', sack],
   // aggregate() is a pass-through barrier: it registers a named side-effect and
   // returns the stream unchanged, so the traversal continues. (TinkerPop 4 dropped
@@ -149,7 +149,7 @@ function seedUnion(first: PStep, query: Query, params: Record<string, any>, sack
  *  branch body (folding from an already-seeded relation — choose()'s arms, see
  *  branch.ts). A body carries no strategies normalization (matching seedUnion), so a
  *  repeat/by cluster inside an arm defers via its own compiler's guards. */
-export function foldBody(steps: PStep[], seedSt: ElementStream, from: number): { st: ElementStream; stop: number } {
+export function lowerElementSteps(steps: PStep[], seedSt: ElementStream, from = 0): { stream: ElementStream; next: number } {
   let st = seedSt;
   let i = from;
   for (; i < steps.length; i++) {
@@ -196,7 +196,15 @@ export function foldBody(steps: PStep[], seedSt: ElementStream, from: number): {
       || (steps[i].name === 'local' && isShapedLocal(steps[i], seedSt.params))) break;
     st = fn(steps[i], st);
   }
-  return { st, stop: i };
+  return { stream: st, next: i };
+}
+
+/** Lower a complete element-valued step sequence without materializing it. This is
+ * the shared nested/root seam: branch arms can compose element StepFns and retain
+ * their relational stream, while dispatchNext remains the sole outer materializer. */
+export function tryLowerElementSteps(steps: PStep[], seed: ElementStream): ElementStream | null {
+  const lowered = lowerElementSteps(steps, seed);
+  return lowered.next === steps.length ? lowered.stream : null;
 }
 
 export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, query: Query = new Query(), sackInit?: SackSpec): { st: ElementStream; stop: number } {
@@ -208,12 +216,13 @@ export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, qu
   // Gate the otherV() entering-vertex tracking on the chain; local()'s body inherits
   // the flag through its {...st} seed, so an inner edge step records it too.
   const st0 = chainNeedsFromV(steps) ? withCarried(seeded, { trackFromV: true }) : seeded;
-  return foldBody(steps, st0, 1);
+  const lowered = lowerElementSteps(steps, st0, 1);
+  return { st: lowered.stream, stop: lowered.next };
 }
 
 /**
  * The re-enterable tail dispatcher. Routes a Stream + the remaining steps by shape:
- * an elements stream absorbs any further movement/filter (foldBody) then runs the
+ * an elements stream absorbs any further movement/filter (lowerElementSteps) then runs the
  * element tail; a scalar/list stream runs its own tail. A retype step (fold→list,
  * unfold→elements/scalar) inside those tails builds the next Stream and calls back
  * here — so V().fold().unfold().out() flows elements→list→elements→… each phase with
@@ -223,8 +232,8 @@ export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, qu
 export function dispatchNext(s: Stream, steps: PStep[], at: number): Compiled {
   assertStreamColumns(s);
   if (s.kind === 'elements') {
-    const { st, stop } = foldBody(steps, s, at);
-    return compileTail(st, steps, stop);
+    const lowered = lowerElementSteps(steps, s, at);
+    return compileTail(lowered.stream, steps, lowered.next);
   }
   if (s.kind === 'scalar') {
     const { stream, stop } = lowerScalarRows(s, steps, at);

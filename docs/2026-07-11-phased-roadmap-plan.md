@@ -363,7 +363,7 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
   - **`optional`. DONE (single hop).** `LEFT JOIN` + `COALESCE(neighbour, self)` —
     matches emit neighbour(s), a miss falls back to self. `both()`/multi-hop defer.
   - **`coalesce`. DONE (2026-07-13, Phase B).** First-non-empty-branch-per-traverser
-    via the `St.origin` input-ordinal column threaded through each `foldBody` arm
+    via the child-scope input-ordinal column threaded through shared element lowering
     (`SELECT … WHERE o NOT IN (earlier arms)`). `optional` = `coalesce(t, identity)`.
     See `docs/2026-07-13-per-traverser-branching.md`.
   - **`path()`. DONE (W5, 2026-07-13).** NOT the originally-sketched "JSON-array
@@ -442,7 +442,7 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
 | as/select/project/by(key\|vertex) | column threading | done | very good |
 | mergeV/mergeE | match+branch closures (not ON CONFLICT) | done | excellent |
 | where/not (anon traversals) | correlated EXISTS / EXISTS-chain | done | good |
-| choose/flatMap/map(scalar) | gated seeds / foldBody / correlated scalar | done | good |
+| choose/flatMap/map(scalar) | gated seeds / shared stream lowering / child scalar rows | done | good |
 | union/coalesce/optional | UNION ALL + origin ordinal / LEFT JOIN | done | good |
 | repeat/until/emit | recursive CTE + guard | done | good |
 | path/simplePath | JSONB walk (recursive) / label-carry (linear) | done | moderate |

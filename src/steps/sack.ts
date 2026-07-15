@@ -40,7 +40,7 @@ function sackByValue(byArgs: any[] | undefined, st: ElementStream): Expression {
  *  div forces REAL division (SQLite `/` is integer division on integer operands). */
 export const sack: StepFn = (s, st) => {
   const op = (s.args ?? []).find((a: any) => a && typeof a === 'object' && 'operator' in a)?.operator;
-  if (!op) throw new Error('sack() read form should not dispatch as a prefix step'); // guarded in foldBody
+  if (!op) throw new Error('sack() read form should not dispatch as a prefix step'); // guarded in lowerElementSteps
   if (!SACK_OPS.has(op)) throw new Error(`sack(Operator.${op}) not yet supported`);
   const bys = (s as any).bys ?? [];
   if (bys.length > 1) throw new Error('Sack step can only have one by modulator');
