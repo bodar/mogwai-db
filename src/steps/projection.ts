@@ -5,13 +5,14 @@ import {
   nodePropScalar, framedProps, valueMapProps,
 } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
-import { elemRel, type St } from './context.ts';
+import { elemRel, type ElementStream } from './context.ts';
 import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStream } from './stream.ts';
 import { compileUnfold } from './list.ts';
 import { dispatchNext } from './index.ts';
 import {
-  readCompiled, type Compiled, type Shape, type ElemShape,
+  type Compiled, type Shape, type ElemShape,
 } from '../render.ts';
+import { materializeRoot } from './materialize.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
 import { compileSelectProject, compilePath } from './select.ts';
 import { compileMapScalar, compileMath, compileFormat, compileChooseOptions } from './mapscalar.ts';
@@ -150,7 +151,7 @@ export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop:
 
 /** Compile the tail: `st` is the finished prefix state, `steps[stop]` the first
  *  step the prefix dispatch didn't consume. */
-export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
+export function compileTail(st: ElementStream, steps: PStep[], stop: number): Compiled {
 
   // properties() turns the traverser into a property (owner+key+value) — a shape
   // the id-relation can't carry, so it and its follow-ons compile in their own fn.
@@ -194,7 +195,7 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
     const isCount = steps[stop].name === 'groupCount';
     const tbl = st.elem === 'edge' ? 'edges' : 'nodes';
     const ctx = elemCtx(elemRel(st), st.elem);
-    const src: GroupSource = { from: `${tbl} n JOIN ${st.last.name} p ON n.id=p.id`, ctx, elem: st.elem === 'edge' ? 'edge' : 'vertex' };
+    const src: GroupSource = { from: `${tbl} n JOIN ${st.rel.name} p ON n.id=p.id`, ctx, elem: st.elem === 'edge' ? 'edge' : 'vertex' };
     if (stop + 1 < steps.length)
       return dispatchNext(groupToMapStream(st, isCount, steps[stop].bys ?? [], src), steps, stop + 1);
     return compileGroup(st, isCount, steps[stop].bys ?? [], src);
@@ -210,7 +211,7 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
   if (SCALAR_PROJ.has(steps[stop]?.name) && steps.length - 1 > stop && steps[steps.length - 1]?.name === 'count') {
     const n = elemRel(st);
     const l = labels.as('l');
-    const p = st.last.as('p');
+    const p = st.rel.as('p');
     const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
     const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
     const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
@@ -259,7 +260,7 @@ export function compileTail(st: St, steps: PStep[], stop: number): Compiled {
  * roundtrip in fold().unfold() (materialize then json_each) is deliberate — correct
  * beats a peephole nobody's query needs (see the plan's decision log).
  */
-function compileFold(st: St, acc: TailAcc): ListStream {
+function compileFold(st: ElementStream, acc: TailAcc): ListStream {
   if (acc.reducer || acc.isPreds.length || acc.transforms.length || acc.injects.length || acc.distinct || acc.offset || acc.limit !== null)
     throw new Error('dedup()/limit()/range()/is()/transform before a non-terminal fold() not yet supported');
   if (st.carried.aliases.size || st.carried.path || st.carried.origins.length)
@@ -279,12 +280,12 @@ function compileFold(st: St, acc: TailAcc): ListStream {
   }
   if (!projName) {
     // Element list: fold the bare rowids; unfold/framing rejoins nodes/edges.
-    const rel = st.q.cte(q`SELECT ${jsonbGroupArray(q`p.id`)} AS list FROM ${st.last.as('p')}`, ['list']);
+    const rel = st.q.cte(q`SELECT ${jsonbGroupArray(q`p.id`)} AS list FROM ${st.rel.as('p')}`, ['list']);
     return toListStream(carry, rel, { kind: 'elem', elem: st.elem });
   }
   if (projName === 'values' || projName === 'id' || projName === 'label') {
     const n = elemRel(st);
-    const p = st.last.as('p');
+    const p = st.rel.as('p');
     const l = labels.as('l');
     const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
     const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
@@ -325,7 +326,7 @@ export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number)
     const dist = acc.distinct ? 'DISTINCT ' : '';
     const whereNode = acc.isPreds.length ? q` WHERE ${list(acc.isPreds.map((p) => predicateSql(q`v`, p)), ' AND ')}` : empty;
     const limitNode = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
-    return readCompiled(s.q, q`SELECT COUNT(*) AS v FROM (SELECT ${dist}v FROM ${s.rel}${whereNode}${limitNode})`, { kind: 'count' });
+    return materializeRoot(s.q, q`SELECT COUNT(*) AS v FROM (SELECT ${dist}v FROM ${s.rel}${whereNode}${limitNode})`, { kind: 'count' });
   }
   const proj: ProjResult = { shape: { kind: 'value', as: s.as }, colsNode: q`v AS v`, fromNode: s.rel, scalarExpr: q`v`, baseWhere: null };
   const orderKey = (): Expression => { throw new Error('order().by(key) on a scalar stream not supported (no properties)'); };
@@ -337,7 +338,7 @@ export interface TailMods { orders: OrderClause[]; distinct: boolean; offset: nu
 // ---------- projection resolution (values/id/label/valueMap/elementMap/element) ----------
 
 interface ProjCtx {
-  st: St; n: Relation; l: Relation; extId: Expression;
+  st: ElementStream; n: Relation; l: Relation; extId: Expression;
   vJoin: Expression; vlJoin: Expression;
   projStep: PStep | null;
 }
@@ -362,7 +363,7 @@ const PROJECTORS = new Map<string, ProjFn>([
     };
   }],
   ['id', (c) => ({
-    // Join the element table even though the id lives in `last`, so a preceding
+    // Join the element table even though the id lives in `rel`, so a preceding
     // order().by(key) — which references n.props — has the alias in scope.
     shape: { kind: 'value' }, colsNode: q`${c.extId} AS v`, fromNode: c.vJoin, scalarExpr: c.extId,
   })],
@@ -396,10 +397,10 @@ const PROJECTORS = new Map<string, ProjFn>([
 /** An order().by(key) resolver over the current element (aliased `n`): node → the
  *  first-under-multi value from vertex_properties; edge → json_extract of the flat blob.
  *  Shared by buildProjection and compileMath — both sort a value tail by an element prop. */
-export const nodePropOrderKey = (st: St) => (key: string): Expression =>
+export const nodePropOrderKey = (st: ElementStream) => (key: string): Expression =>
   st.elem === 'edge' ? propExtract('n.props', key).expr : nodePropScalar(raw('n.id'), key);
 
-function buildProjection(st: St, acc: TailAcc): Compiled {
+function buildProjection(st: ElementStream, acc: TailAcc): Compiled {
   const { distinct, offset, limit, isPreds, reducer } = acc;
   const projName = acc.projStep?.name ?? '__element';
 
@@ -407,17 +408,17 @@ function buildProjection(st: St, acc: TailAcc): Compiled {
 
   // count folds any tail limit/offset/distinct into the counted id-relation.
   if (projName === 'count') {
-    const inner = q`SELECT ${distinct ? 'DISTINCT ' : ''}id FROM ${st.last}`;
+    const inner = q`SELECT ${distinct ? 'DISTINCT ' : ''}id FROM ${st.rel}`;
     const innerLim = (limit !== null || offset > 0) ? q` LIMIT ${limit ?? -1} OFFSET ${offset}` : empty;
     let countNode: Expression = q`SELECT COUNT(*) AS v FROM (${inner}${innerLim})`;
     // count().is(P): filter the single count value (0 or 1 result rows).
     if (isPreds.length)
       countNode = q`SELECT v FROM (${countNode}) WHERE ${list(isPreds.map((pr) => predicateSql(q`v`, pr)), ' AND ')}`;
-    return readCompiled(st.q, countNode, { kind: 'count' });
+    return materializeRoot(st.q, countNode, { kind: 'count' });
   }
 
   const n = elemRel(st);
-  const p = st.last.as('p');
+  const p = st.rel.as('p');
   const l = labels.as('l');
   const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
   const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
@@ -433,13 +434,13 @@ function buildProjection(st: St, acc: TailAcc): Compiled {
  *  composes). The value's GraphBinary type is inferred (as:undefined → anySerializer),
  *  matching values(): sack holds whatever the withSack seed / sack(op) arithmetic
  *  produced (int age, double weight, string label). */
-function compileSackRead(st: St, steps: PStep[], stop: number): Compiled {
+function compileSackRead(st: ElementStream, steps: PStep[], stop: number): Compiled {
   if (!st.carried.sack) throw new Error('sack() requires withSack() or a preceding sack(Operator.x) step');
   if ((steps[stop].args ?? []).length) throw new Error('sack(argument) read form not supported (bare sack() only)');
   const { acc, stop: at } = foldTailAcc(steps, stop + 1);
   if (at !== steps.length) throw new Error(`${steps[at].name}() after sack() not yet supported`);
   if (acc.projStep) throw new Error(`${acc.projStep.name}() after sack() not yet supported`);
-  const p = st.last.as('p');
+  const p = st.rel.as('p');
   const proj: ProjResult = { shape: { kind: 'value' }, colsNode: q`${p.c[st.carried.sack]} AS v`, fromNode: p, scalarExpr: p.c[st.carried.sack], baseWhere: null };
   const orderKey = (): Expression => { throw new Error('order().by(key) after sack() not supported'); };
   return renderProjection(st.q, proj, acc, orderKey);
@@ -451,7 +452,7 @@ function compileSackRead(st: St, steps: PStep[], stop: number): Compiled {
  *  JSONB list back into an element/scalar stream and continue the tail. A group
  *  side-effect (group('a')/groupCount('a')) re-runs compileGroup over its stashed
  *  source → one Map (steps/group.ts). Deferred: multi-key cap('x','y'). */
-function compileCap(st: St, steps: PStep[], stop: number): Compiled {
+function compileCap(st: ElementStream, steps: PStep[], stop: number): Compiled {
   const names = (steps[stop].args ?? []).filter((a: any) => typeof a === 'string');
   if (names.length !== 1) throw new Error('cap() with multiple side-effect keys not yet supported');
   const def = st.sideEffects?.get(names[0]);
@@ -558,7 +559,7 @@ export function renderProjection(
   // Terminal reducers wrap the projected select.
   if (reducer) ({ tailNode, shape } = wrapReducer(tailNode, reducer, shape));
 
-  return readCompiled(Q, tailNode, shape);
+  return materializeRoot(Q, tailNode, shape);
 }
 
 /** Wrap a `v`-projecting select in a terminal reducer (fold/sum/min/max/mean),

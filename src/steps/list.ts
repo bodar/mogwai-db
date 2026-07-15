@@ -10,8 +10,9 @@ import { predicateSql, scalarTx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { carryOf, toListStream, toScalarStream, mapOfToListOf, type ListStream, type ScalarStream, type MapStream } from './stream.ts';
-import { type St } from './context.ts';
-import { readCompiled, type Compiled } from '../render.ts';
+import { type ElementStream } from './context.ts';
+import { type Compiled } from '../render.ts';
+import { materializeRoot } from './materialize.ts';
 import { dispatchNext, compileRead } from './index.ts';
 
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
@@ -24,32 +25,32 @@ const isLocal = (s: PStep): boolean => (s.args ?? []).some((a: any) => a && type
 function listReducer(s: ListStream, name: string): Compiled {
   const c = s.rel.as('c');
   if (name === 'count')
-    return readCompiled(s.q, q`SELECT (SELECT COUNT(*) FROM json_each(${c.c.list}) je) AS v FROM ${c}`, { kind: 'count' });
+    return materializeRoot(s.q, q`SELECT (SELECT COUNT(*) FROM json_each(${c.c.list}) je) AS v FROM ${c}`, { kind: 'count' });
   // Numeric aggregate over the list's numeric elements (typeof guard mirrors wrapReducer);
   // min/max also range over text (TinkerPop 4 Strings are Comparable), sum/mean stay numeric.
   const types = (name === 'min' || name === 'max') ? "('integer', 'real', 'text')" : "('integer', 'real')";
   const agg = (fn: string): Expression => q`(SELECT ${fn}(je.value) FROM json_each(${c.c.list}) je WHERE typeof(je.value) in ${types})`;
-  if (name === 'mean') return readCompiled(s.q, q`SELECT ${agg('AVG')} AS v, 'real' AS vt FROM ${c}`, { kind: 'scalar' });
+  if (name === 'mean') return materializeRoot(s.q, q`SELECT ${agg('AVG')} AS v, 'real' AS vt FROM ${c}`, { kind: 'scalar' });
   const fn = name === 'sum' ? 'SUM' : name === 'min' ? 'MIN' : 'MAX';
-  return readCompiled(s.q, q`SELECT ${agg(fn)} AS v, typeof(${agg(fn)}) AS vt FROM ${c}`, { kind: 'scalar' });
+  return materializeRoot(s.q, q`SELECT ${agg(fn)} AS v, typeof(${agg(fn)}) AS vt FROM ${c}`, { kind: 'scalar' });
 }
 
 /**
  * unfold() a list value → its element or scalar stream. The JSONB array is exploded
  * with json_each (ordered by array position `.key`, preserving list order): an element
- * list → a fresh id-relation (a St the movement/tail dispatch re-enters, rejoining
+ * list → a fresh id-relation (a ElementStream the movement/tail dispatch re-enters, rejoining
  * nodes/edges downstream); a scalar list → a `v` ScalarStream carrying the value tag.
  * Mirrors compilePathArray's json_each idiom. Aliases/path/origin are NOT carried
  * through the retype (compileFold refused to fold them in), so the new stream starts
  * clean.
  */
-export function compileUnfold(s: ListStream): St | ScalarStream | ListStream {
+export function compileUnfold(s: ListStream): ElementStream | ScalarStream | ListStream {
   const c = carryOf(s);
   const explode = (col: string): Expression =>
     q`SELECT je.value AS ${col} FROM ${s.rel}, json_each(${s.rel.c.list}) je ORDER BY je.key`;
   if (s.of.kind === 'elem') {
     const rel = s.q.cte(explode('id'), ['id']);
-    return { ...c, kind: 'elements', last: rel, elem: s.of.elem, carried: { ...c.carried, aliases: new Map(), path: undefined, origins: [] } };
+    return { ...c, kind: 'elements', rel, elem: s.of.elem, carried: { ...c.carried, aliases: new Map(), path: undefined, origins: [] } };
   }
   // A list-of-lists: each exploded element is itself a JSONB array → a ListStream row
   // of the inner shape (so a further unfold / Scope.local op re-enters the list phase).
@@ -265,7 +266,7 @@ export function compileFromList(s: ListStream, steps: PStep[], at: number): Comp
   // blob reads back as text for the handler to parse).
   if (at >= steps.length) {
     const c = s.rel.as('c');
-    return readCompiled(s.q, q`SELECT json(${c.c.list}) AS list FROM ${c}`, { kind: 'jsonbList' });
+    return materializeRoot(s.q, q`SELECT json(${c.c.list}) AS list FROM ${c}`, { kind: 'jsonbList' });
   }
   const step = steps[at];
   if (step.name === 'unfold') return dispatchNext(compileUnfold(s), steps, at + 1);
@@ -315,7 +316,7 @@ export function compileFromList(s: ListStream, steps: PStep[], at: number): Comp
     // With a follower (order(Scope.local)/unfold) the deduped content is treated as a
     // plain list (TinkerPop's order(local) on a set yields a List), matching the suite.
     if (SET_RESULT.has(step.name) && terminal)
-      return readCompiled(s.q, q`SELECT json(${listExpr}) AS list FROM ${c}`, { kind: 'jsonbSet' });
+      return materializeRoot(s.q, q`SELECT json(${listExpr}) AS list FROM ${c}`, { kind: 'jsonbSet' });
     const rel = s.q.cte(q`SELECT ${listExpr} AS list FROM ${c}`, ['list']);
     // product yields a list of pair-lists; the others keep the element shape.
     const of = step.name === 'product' ? { kind: 'list' as const, of: { kind: 'scalar' as const } } : s.of;

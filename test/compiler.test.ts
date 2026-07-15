@@ -4,6 +4,9 @@ import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { executeQuery } from '../src/execute.ts';
 import { MODERN_SEED } from './conformance/seed-modern.ts';
+import { Query } from '../src/q.ts';
+import { assertStreamColumns, toScalarStream } from '../src/steps/stream.ts';
+import { readdirSync, readFileSync } from 'node:fs';
 
 // ---------- L2: SQL snapshots (canonical string -> SQL + binds + shape) ----------
 
@@ -14,6 +17,24 @@ const read = (q: string) => {
 };
 
 describe('compiler SQL snapshots', () => {
+  test('stream physical schemas are exact and fail immediately on column drift', () => {
+    const q = new Query();
+    const carry = { q, params: {}, carried: { aliases: new Map(), origins: [] } };
+    expect(assertStreamColumns(toScalarStream(carry, q.cte({} as any, ['v']))).kind).toBe('scalar');
+    expect(() => toScalarStream(carry, q.cte({} as any, ['value']))).toThrow(
+      'scalar stream column mismatch: expected [v], got [value]',
+    );
+  });
+
+  test('read steps materialize through one root boundary', () => {
+    const dir = new URL('../src/steps/', import.meta.url);
+    const allowed = new Set(['materialize.ts', 'write.ts']);
+    const offenders = readdirSync(dir)
+      .filter((name) => name.endsWith('.ts') && !allowed.has(name))
+      .filter((name) => readFileSync(new URL(name, dir), 'utf8').includes('readCompiled'));
+    expect(offenders).toEqual([]);
+  });
+
   test('traverser bulking: times(n).count() unrolls to GROUP-BY-SUM(bulk) CTEs, not a recursion', () => {
     const c = read('g.V().repeat(__.out()).times(3).count()');
     expect(c.shape).toEqual({ kind: 'count' });

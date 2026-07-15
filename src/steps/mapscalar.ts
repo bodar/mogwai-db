@@ -5,8 +5,9 @@ import {
 import { stepChain } from '../frontend.ts';
 import { mathToSql, mathVars } from '../math.ts';
 import { type PStep } from '../strategies.ts';
-import { elemRel, type St } from './context.ts';
-import { readCompiled, type Compiled, type ValueType } from '../render.ts';
+import { elemRel, type ElementStream } from './context.ts';
+import { type Compiled, type ValueType } from '../render.ts';
+import { materializeRoot } from './materialize.ts';
 import { foldTailAcc, renderProjection, nodePropOrderKey, type ProjResult } from './projection.ts';
 
 // ---------- map (scalar body → per-traverser scalar projector) ----------
@@ -18,7 +19,7 @@ import { foldTailAcc, renderProjection, nodePropOrderKey, type ProjResult } from
  * select/fold body isn't a plain scalar — both defer via compileNestedScalar's throw.
  * A trailing step defers.
  */
-export function compileMapScalar(st: St, steps: PStep[], stop: number): Compiled {
+export function compileMapScalar(st: ElementStream, steps: PStep[], stop: number): Compiled {
   const name = steps[stop].name; // 'map' or a scalar-reduction 'local'
   if (stop + 1 < steps.length) throw new Error(`step not implemented after ${name}(): ${steps[stop + 1].name}()`);
   const arg = steps[stop].args[0];
@@ -27,12 +28,12 @@ export function compileMapScalar(st: St, steps: PStep[], stop: number): Compiled
   const inner = stepChain(arg.nested, st.params);
   const sc = compileNestedScalar(inner, ctx);
   const n = elemRel(st);
-  const p = st.last.as('p');
+  const p = st.rel.as('p');
   const node = q`SELECT ${sc.expr} AS v FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
   // A nested count() is always a Long (TinkerPop's count semantics); the SQLite
   // COUNT integer would otherwise infer as Int via anySerializer.
   const as: ValueType | undefined = inner[inner.length - 1]?.name === 'count' ? 'long' : undefined;
-  return readCompiled(st.q, node, { kind: 'value', as });
+  return materializeRoot(st.q, node, { kind: 'value', as });
 }
 
 // ---------- math (scalar arithmetic projector) ----------
@@ -53,14 +54,14 @@ export function compileMapScalar(st: St, steps: PStep[], stop: number): Compiled
  * local()/sack()), withSideEffect-bound variables, and reading project()/select()
  * map columns (math inside order().by(__.math(...))).
  */
-export function compileMath(st: St, steps: PStep[], stop: number): Compiled {
+export function compileMath(st: ElementStream, steps: PStep[], stop: number): Compiled {
   const s = steps[stop];
   const formula = s.args[0];
   if (typeof formula !== 'string') throw new Error('math(string) required');
   const bys = s.bys ?? [];
   const varOrder = mathVars(formula);
 
-  const p = st.last.as('p');
+  const p = st.rel.as('p');
   const cache = new Map<string, Expression>();
   const resolveVar = (name: string): Expression => {
     const hit = cache.get(name);
@@ -115,12 +116,12 @@ export function compileMath(st: St, steps: PStep[], stop: number): Compiled {
  * A format with no tokens is a constant string. Deferred: reading project()/select()
  * map columns, and the as()-alias fallback for a missing property.
  */
-export function compileFormat(st: St, steps: PStep[], stop: number): Compiled {
+export function compileFormat(st: ElementStream, steps: PStep[], stop: number): Compiled {
   const s = steps[stop];
   const tmpl = s.args[0];
   if (typeof tmpl !== 'string') throw new Error('format(string) required');
   const bys = s.bys ?? [];
-  const p = st.last.as('p');
+  const p = st.rel.as('p');
   const ctx = elemCtx(elemRel(st), st.elem);
 
   // Split into alternating literal / token parts. Each `||` operand is a bound literal
@@ -178,7 +179,7 @@ export function compileFormat(st: St, steps: PStep[], stop: number): Compiled {
  * (constant/values/label/id via compileNestedScalar); element bodies, Pick.
  * unproductive/any, and any trailing step defer. Shape: value.
  */
-export function compileChooseOptions(st: St, steps: PStep[], stop: number): Compiled {
+export function compileChooseOptions(st: ElementStream, steps: PStep[], stop: number): Compiled {
   const cs = steps[stop];
   if (stop + 1 < steps.length) throw new Error(`step not implemented after choose().option(): ${steps[stop + 1].name}()`);
   const ctx = elemCtx(elemRel(st), st.elem);
@@ -213,7 +214,7 @@ export function compileChooseOptions(st: St, steps: PStep[], stop: number): Comp
   // No Pick.none → unmatched inputs are the element itself (mixed vertex/scalar): defer.
   if (!sawNone) throw new Error('choose().option() without a Pick.none default not yet supported (unmatched pass-through is mixed-shape)');
   const n = elemRel(st);
-  const p = st.last.as('p');
+  const p = st.rel.as('p');
   const node = q`SELECT CASE ${list(whens, ' ')} ELSE ${elseExpr} END AS v FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
-  return readCompiled(st.q, node, { kind: 'value' });
+  return materializeRoot(st.q, node, { kind: 'value' });
 }

@@ -1,7 +1,7 @@
 import { q, list, empty, raw, type Expression } from '../q.ts';
 import { labelIn, predicateSql, nodeHasProp, dirsFor } from '../plan.ts';
 import { stepChain, type Step } from '../frontend.ts';
-import { advance, aliasColsOf, prevRel, type AliasMap, type St, type StepFn } from './context.ts';
+import { advance, aliasColsOf, prevRel, type AliasMap, type ElementStream, type StepFn } from './context.ts';
 
 // ---------- match() — declarative conjunctive pattern join ----------
 //
@@ -43,7 +43,7 @@ function parsePattern(chain: Step[]): Pattern {
 const hopLabel = (e: string, args: any[]): Expression => (args.length ? q` AND ${labelIn(`${e}.label`, args)}` : empty);
 
 /** Apply one pattern as a join CTE extending the carried columns. */
-function applyPattern(st: St, p: Pattern, aliases: Map<string, { col: string; elem: 'node' | 'edge' }>, bind: (v: string) => string): St {
+function applyPattern(st: ElementStream, p: Pattern, aliases: Map<string, { col: string; elem: 'node' | 'edge' }>, bind: (v: string) => string): ElementStream {
   const prev = prevRel(st, 'p');
   const sCol = aliases.get(p.start)!.col;
   const carried: Expression[] = ['id', ...aliasColsOf(aliases)].map((c) => q`${prev.c[c]}`);
@@ -115,7 +115,7 @@ export const match: StepFn = (s, st) => {
   const prev0 = prevRel(st, 'p');
   const rootCol = bind(root);
   const seedProj: Expression[] = [q`${prev0.c.id}`, ...aliasColsOf(st.carried.aliases).map((c) => q`${prev0.c[c]}`), q`${prev0.c.id} AS ${rootCol}`];
-  let cur: St = advance(st, q`SELECT ${list(seedProj, ', ')} FROM ${prev0}`, { aliases: new Map(aliases), cols: ['id', ...aliasColsOf(aliases)] });
+  let cur: ElementStream = advance(st, q`SELECT ${list(seedProj, ', ')} FROM ${prev0}`, { aliases: new Map(aliases), cols: ['id', ...aliasColsOf(aliases)] });
 
   // Greedy dependency order: process a pattern whose start is bound; bind/constrain end.
   const pending = [...pats];

@@ -2,7 +2,7 @@ import { q, list, empty, Relation, type Expression } from '../q.ts';
 import { edges } from '../schema.ts';
 import { stepChain, type Step } from '../frontend.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, compileFilterPredicate, predicateSql, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
-import { advance, elemRel, prevRel, withCarried, carryFrag, carriedCols, aliasColsOf, type Carried, type PathState, type St, type StepFn } from './context.ts';
+import { advance, elemRel, prevRel, withCarried, carryFrag, carriedCols, aliasColsOf, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { foldBody } from './index.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
@@ -37,16 +37,16 @@ function untilPredicate(untilStep: Step, params: Record<string, any>): (id: Expr
  *  sqlg uses as `sqlg_index`). The base relation PROJECTS the incoming carried columns
  *  (as() aliases etc.) alongside `o`, and the seed keeps them, so a branch body threads
  *  them forward and the merge can preserve them. Returns the base (id, <carried>, o) and
- *  a seed St carrying `o` + the incoming carried schema. */
-function originSeed(st: St): { base: Relation; seedSt: St; ord: string } {
-  const s = st.last.as('s');
+ *  a seed ElementStream carrying `o` + the incoming carried schema. */
+function originSeed(st: ElementStream): { base: Relation; seedSt: ElementStream; ord: string } {
+  const s = st.rel.as('s');
   const cc = carriedCols(st.carried);
   const ord = `o${st.carried.origins.length}`; // unique per nesting depth (a nested branch pushes its own)
   const base = st.q.cte(q`SELECT ${s.c.id} AS id${carryFrag(st.carried, s)}, ROW_NUMBER() OVER () AS ${ord} FROM ${s}`, ['id', ...cc, ord]);
-  return { base, seedSt: withCarried({ ...st, last: base }, { origins: [...st.carried.origins, ord] }), ord };
+  return { base, seedSt: withCarried({ ...st, rel: base }, { origins: [...st.carried.origins, ord] }), ord };
 }
 
-/** PREFIX steps that hand-roll a SELECT that DROPS the input-ordinal (`St.origin`)
+/** PREFIX steps that hand-roll a SELECT that DROPS the input-ordinal (`ElementStream.origin`)
  *  instead of threading it via carryFrag — so a coalesce/optional body containing one
  *  must defer rather than emit a column-mismatched CTE. (Movement/filter/passthrough
  *  carry it via carryFrag; union/flatMap re-project it; a scalar/projection step isn't
@@ -57,9 +57,9 @@ const ORIGIN_UNSAFE = new Set(['dedup', 'as', 'repeat', 'choose']);
  *  dispatch. Multi-hop bodies work (they chain CTEs off the seed). A scalar/
  *  projection tail (a step absent from PREFIX) fails closed. When `seed` carries an
  *  input ordinal (coalesce/optional), a body step that wouldn't thread it also fails
- *  closed. Returns the finished St — its `last` carries the ordinal when active, so
+ *  closed. Returns the finished ElementStream — its `rel` carries the ordinal when active, so
  *  the caller can re-associate results with their input. */
-function branchArm(name: string, nested: any, seed: St, params: Record<string, any>): St {
+function branchArm(name: string, nested: any, seed: ElementStream, params: Record<string, any>): ElementStream {
   if (!nested) throw new Error(`${name}(traversal) required`);
   const body = stepChain(nested, params);
   if (seed.carried.origins.length) {
@@ -78,7 +78,7 @@ function branchArm(name: string, nested: any, seed: St, params: Record<string, a
  *  semantics we haven't verified — so fail closed rather than let carriedCols carry
  *  them silently through the merge (CLAUDE.md/the matrix defer 'split/merge-on-fork').
  *  Aliases/path deliberately pass; only these two are gated here. */
-function assertForkSafe(name: string, st: St): void {
+function assertForkSafe(name: string, st: ElementStream): void {
   if (st.carried.sack) throw new Error(`sack() through ${name}() not yet supported (split/merge-on-fork)`);
   if (st.carried.fromV) throw new Error(`otherV() context through ${name}() not yet supported`);
 }
@@ -130,7 +130,7 @@ function mergeBranchCarried(seed: Carried, arms: Carried[]): Carried {
 /** One arm's merge SELECT column list, padding its missing (trailing) path positions
  *  with `NULL` so the UNION ALL lines up with `out`. Order MUST match carriedCols(out):
  *  id, aliases, origin/sack/fromV, then path LAST. */
-function armProjection(arm: St, out: Carried): string {
+function armProjection(arm: ElementStream, out: Carried): string {
   const parts = ['id', ...aliasColsOf(out.aliases), ...out.origins];
   if (out.sack) parts.push(out.sack);
   if (out.fromV) parts.push(out.fromV);
@@ -156,7 +156,7 @@ export const union: StepFn = (s, st) => {
   const elem = ends[0].elem;
   if (ends.some((e) => e.elem !== elem)) throw new Error('union() branches produce different element kinds (mixed-shape) not yet supported');
   const out = mergeBranchCarried(st.carried, ends.map((e) => e.carried)); // pads ragged path arms
-  const selects = ends.map((e) => q`SELECT ${armProjection(e, out)} FROM ${e.last}`);
+  const selects = ends.map((e) => q`SELECT ${armProjection(e, out)} FROM ${e.rel}`);
   return advance(st, list(selects, ' UNION ALL '), { elem, path: out.path });
 };
 
@@ -191,9 +191,9 @@ export const optional: StepFn = (s, st) => {
   // the outer origins), keeping any outer ordinals threaded.
   const merged = mergeBranchCarried(seedSt.carried, [end.carried, seedSt.carried]);
   const out: Carried = { ...merged, origins: st.carried.origins };
-  const baseSt: St = { ...seedSt, last: base };
-  const hit = q`SELECT ${armProjection(end, out)} FROM ${end.last}`;
-  const miss = q`SELECT ${armProjection(baseSt, out)} FROM ${base} WHERE ${ord} NOT IN (SELECT ${ord} FROM ${end.last})`;
+  const baseSt: ElementStream = { ...seedSt, rel: base };
+  const hit = q`SELECT ${armProjection(end, out)} FROM ${end.rel}`;
+  const miss = q`SELECT ${armProjection(baseSt, out)} FROM ${base} WHERE ${ord} NOT IN (SELECT ${ord} FROM ${end.rel})`;
   return advance(st, list([hit, miss], ' UNION ALL '), { elem: end.elem, origins: st.carried.origins, path: out.path });
 };
 
@@ -214,9 +214,9 @@ export const coalesce: StepFn = (s, st) => {
   const out: Carried = { ...merged, origins: st.carried.origins };
   const parts = ends.map((end, k) => {
     const sel = armProjection(end, out);
-    if (k === 0) return q`SELECT ${sel} FROM ${end.last}`;
-    const notPrior = list(ends.slice(0, k).map((pr) => q`${ord} NOT IN (SELECT ${ord} FROM ${pr.last})`), ' AND ');
-    return q`SELECT ${sel} FROM ${end.last} WHERE ${notPrior}`;
+    if (k === 0) return q`SELECT ${sel} FROM ${end.rel}`;
+    const notPrior = list(ends.slice(0, k).map((pr) => q`${ord} NOT IN (SELECT ${ord} FROM ${pr.rel})`), ' AND ');
+    return q`SELECT ${sel} FROM ${end.rel} WHERE ${notPrior}`;
   });
   return advance(st, list(parts, ' UNION ALL '), { elem, origins: st.carried.origins, path: out.path });
 };
@@ -384,7 +384,7 @@ export const repeat: StepFn = (s, st) => {
     // `(SELECT props FROM nodes WHERE id=<seed id>)`; a bare `id` there would bind
     // BOTH sides to nodes.id (always true → wrong row), so alias the source (`w.id`).
     // Every other seed uses bare `id` (no subquery) → byte-identical to before.
-    const seedSrc = untilFirst ? st.last.as('w') : st.last;
+    const seedSrc = untilFirst ? st.rel.as('w') : st.rel;
     const seedId = untilFirst ? seedSrc.c.id : q`id`;
     const seedSel = untilFirst ? q`${seedId} AS id` : q`id`; // do-while keeps bare `id` → byte-identical
     const seedPath = trackArray ? q`, jsonb_array(${seedId}) AS path` : q``;
@@ -414,7 +414,7 @@ const notCoalesce = (e: Expression): Expression => q`NOT COALESCE((${e}), 0)`;
 /** Gate the current traverser relation by a boolean test → a one-column (id) seed
  *  CTE. choose()'s then/else arms fold from their gated seed; aliases/path are
  *  refused by choose() up front, so the seed carries only id. */
-function gate(st: St, test: Expression): St {
+function gate(st: ElementStream, test: Expression): ElementStream {
   const n = elemRel(st);
   const p = prevRel(st, 'p');
   return advance(st, q`SELECT ${n.c.id}${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${test}`);
@@ -440,7 +440,7 @@ export const choose: StepFn = (s, st) => {
   const [predArg, thenArg, elseArg] = args;
   const pred = compileFilterPredicate(stepChain(predArg.nested, st.params), elemCtx(elemRel(st), st.elem), st.params);
 
-  const arm = (arg: any, seed: St): St => {
+  const arm = (arg: any, seed: ElementStream): ElementStream => {
     const body = stepChain(arg.nested, st.params);
     const { st: end, stop } = foldBody(body, seed, 0);
     if (stop !== body.length)
@@ -455,6 +455,6 @@ export const choose: StepFn = (s, st) => {
     throw new Error('choose() branches produce different element kinds (mixed-shape) not yet supported');
 
   const out = mergeBranchCarried(st.carried, [thenEnd.carried, elseEnd.carried]); // pads ragged path arms
-  const merged = list([q`SELECT ${armProjection(thenEnd, out)} FROM ${thenEnd.last}`, q`SELECT ${armProjection(elseEnd, out)} FROM ${elseEnd.last}`], ' UNION ALL ');
+  const merged = list([q`SELECT ${armProjection(thenEnd, out)} FROM ${thenEnd.rel}`, q`SELECT ${armProjection(elseEnd, out)} FROM ${elseEnd.rel}`], ' UNION ALL ');
   return advance(st, merged, { elem: thenEnd.elem, path: out.path });
 };

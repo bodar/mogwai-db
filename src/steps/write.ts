@@ -23,7 +23,7 @@ function compileDrop(steps: PStep[]): WritePlan {
   const { st, stop } = buildPrefix(steps.slice(0, -1));
   if (stop !== steps.length - 1) throw new Error(`drop() after ${steps[stop].name}() not yet supported`);
   const isEdge = st.elem === 'edge';
-  const target = renderFrom(st.q, st.last);
+  const target = renderFrom(st.q, st.rel);
   return {
     kind: 'write',
     run: (store) => {
@@ -64,7 +64,7 @@ function compileSetProperty(steps: PStep[], params: Record<string, any>): WriteP
       throw new Error(`property(T.${key.token}) on an existing element not yet supported`);
     specs.push({ key, value: val, meta: metaOf(metaArgs), cardinality });
   }
-  const target = renderFrom(st.q, st.last);
+  const target = renderFrom(st.q, st.rel);
   if (elem === 'edge') {
     // Edge props are a flat JSONB blob with no cardinality/meta (TinkerPop Property):
     // read-merge-write (json() out, jsonb() in).
@@ -276,7 +276,7 @@ function compileAddE(steps: PStep[], params: Record<string, any>): WritePlan {
   const { st, stop } = buildPrefix(prefix, params);
   if (stop !== prefix.length) throw new Error(`addE after ${prefix[stop].name}() not yet supported`);
   const aliasCols: [string, string][] = [...st.carried.aliases].map(([lbl, a]) => [lbl, a.col]);
-  const read = renderFrom(st.q, st.last, ['id', ...aliasCols.map(([, c]) => c)].join(', '));
+  const read = renderFrom(st.q, st.rel, ['id', ...aliasCols.map(([, c]) => c)].join(', '));
   return {
     kind: 'write',
     run: (store) => store.query<any>(read.sql, read.binds).map((r) =>
@@ -320,7 +320,7 @@ function resolveEndpoint(store: GraphStore, spec: any, d: { aliases: Map<string,
     const inner = stepChain(spec.nested, params);
     const { st, stop } = buildPrefix(inner, params);
     if (stop !== inner.length) throw new Error(`addE endpoint traversal not supported past ${inner[stop].name}()`);
-    const sel = renderFrom(st.q, st.last);
+    const sel = renderFrom(st.q, st.rel);
     const rows = store.query<{ id: number }>(sel.sql, sel.binds);
     if (!rows.length) throw new Error('addE endpoint traversal matched no vertex');
     return rows[0].id;
@@ -407,7 +407,7 @@ function mergeDrivers(prefix: PStep[], params: Record<string, any>): (store: Gra
   if (prefix.length === 1 && prefix[0].name === 'inject') { const nulls = prefix[0].args.map(() => null); return () => nulls; }
   const { st, stop } = buildPrefix(prefix, params);
   if (stop !== prefix.length) throw new Error(`merge after ${prefix[stop].name}() not yet supported`);
-  const sel = renderFrom(st.q, st.last);
+  const sel = renderFrom(st.q, st.rel);
   return (store) => store.query<{ id: number }>(sel.sql, sel.binds).map((r) => r.id);
 }
 

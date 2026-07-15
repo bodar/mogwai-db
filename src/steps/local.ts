@@ -1,7 +1,7 @@
 import { q, list, empty, type Expression } from '../q.ts';
 import { rangeToOffsetLimit } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
-import { advance, carriedCols, withCarried, type St, type StepFn } from './context.ts';
+import { advance, carriedCols, withCarried, type ElementStream, type StepFn } from './context.ts';
 import { foldBody } from './index.ts';
 
 // ---------- local() — per-element scope ----------
@@ -41,15 +41,15 @@ export const local: StepFn = (s, st) => {
 
   // Tag each input with a fresh ordinal so the window scopes per input traverser
   // (multiset-safe), then fold the movement carrying it.
-  const base = st.q.cte(q`SELECT id, ROW_NUMBER() OVER () AS o FROM ${st.last}`, ['id', 'o']);
-  const seed: St = withCarried({ ...st, last: base }, { origins: ['o'], aliases: new Map(), path: undefined, sack: undefined, fromV: undefined });
+  const base = st.q.cte(q`SELECT id, ROW_NUMBER() OVER () AS o FROM ${st.rel}`, ['id', 'o']);
+  const seed: ElementStream = withCarried({ ...st, rel: base }, { origins: ['o'], aliases: new Map(), path: undefined, sack: undefined, fromV: undefined });
   const { st: end, stop } = foldBody(moveSteps, seed, 0);
   if (stop !== moveSteps.length)
     throw new Error(`local(__.${moveSteps[stop].name}()) body step not yet supported`);
 
   // The carried columns to keep on the way out: everything the body accrued (e.g. the
   // otherV() fv context) EXCEPT the internal ordinal.
-  const p = end.last.as('p');
+  const p = end.rel.as('p');
   const others = carriedCols(end.carried).filter((c) => c !== 'o');
   const frag = (rel: typeof p) => (others.length ? list(others.map((c) => q`, ${rel.c[c]}`), '') : empty);
 

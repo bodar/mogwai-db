@@ -6,8 +6,8 @@ import { type PStep } from '../strategies.ts';
 // ---------- prefix-compilation state (Seam 2) ----------
 //
 // The movement/filter/branch step compilers are a *functional fold*: each is a
-// StepFn `(step, St) => St` that appends its CTE and returns a NEW state pointing
-// at it. Nothing mutates in place — the dispatch threads `St` immutably (see
+// StepFn `(step, ElementStream) => ElementStream` that appends its CTE and returns a NEW state pointing
+// at it. Nothing mutates in place — the dispatch threads `ElementStream` immutably (see
 // src/steps/index.ts). The one piece of essential state, minting unique CTE names
 // and collecting their bodies for the final WITH, is encapsulated in the `Query`
 // builder (src/q.ts): a StepFn calls `st.q.cte(body)` and gets back a Relation
@@ -73,7 +73,7 @@ export interface Carried {
 }
 
 /** The context every traverser stream carries, independent of its shape (elements vs a
- *  scalar/list value stream — see stream.ts). Carved out of `St` so a retype at a tail
+ *  scalar/list value stream — see stream.ts). Carved out of `ElementStream` so a retype at a tail
  *  boundary (fold→list, unfold→elements/scalar) preserves the shared state. Three
  *  DELIBERATELY-distinguished kinds of thing: ambient compile context (`q`/`params`),
  *  the named side-effect registry (`sideEffects` — CTEs that OUTLIVE the traverser), and
@@ -89,24 +89,24 @@ export interface Carry {
  *  reasons about is replaced wholesale by each StepFn's return; `q` is the shared
  *  append-only CTE builder. The `elements` arm of the `Stream` union (stream.ts):
  *  movement/filter/branch StepFns are ONLY ever handed this shape. */
-export interface St extends Carry {
+export interface ElementStream extends Carry {
   readonly kind: 'elements';
-  readonly last: Relation;               // the current id-relation (a CTE handle)
+  readonly rel: Relation;               // the current id-relation (a CTE handle)
   readonly elem: Elem;
 }
 
 /** A prefix step compiler: consume the step, return the next state. */
-export type StepFn = (s: PStep, st: St) => St;
+export type StepFn = (s: PStep, st: ElementStream) => ElementStream;
 
 /** The carried alias columns, in bind order (a0, a1, …). */
 export const aliasColsOf = (a: AliasMap): string[] => [...a.values()].map((x) => x.col);
 
 /** The current id-relation, optionally aliased. Its columns are id + every carried
  *  alias column, so `prevRel(st,'p').c.a0` resolves downstream. */
-export const prevRel = (st: St, alias?: string): Relation => alias ? st.last.as(alias) : st.last;
+export const prevRel = (st: ElementStream, alias?: string): Relation => alias ? st.rel.as(alias) : st.rel;
 
 /** The current element's table aliased `n` (nodes/edges by elem). */
-export const elemRel = (st: St, alias = 'n'): Relation => (st.elem === 'edge' ? edges : nodes).as(alias);
+export const elemRel = (st: ElementStream, alias = 'n'): Relation => (st.elem === 'edge' ? edges : nodes).as(alias);
 
 /** Every column carried UNCHANGED across a hop, in a STABLE order: alias columns,
  *  then origin/sack/fromV, then the path-position columns LAST. THE single source of
@@ -156,13 +156,13 @@ export const withCarried = <T extends Carry>(st: T, patch: Partial<Carried>): T 
  * Append `body` as the new id-relation and advance to it. Carried-column opts route
  * through carriedWith (same tri-state as before); `cols` defaults to id + the resulting
  * carried columns; `elem` overrides when a step changes the element kind (…E/…V). Flat
- * opts kept identical, so every call site is unchanged. Returns a fresh St.
+ * opts kept identical, so every call site is unchanged. Returns a fresh ElementStream.
  */
 export function advance(
-  st: St, body: Expression,
+  st: ElementStream, body: Expression,
   opts: CarriedOpts & { elem?: Elem; cols?: readonly string[] } = {},
-): St {
+): ElementStream {
   const carried = carriedWith(st.carried, opts);
   const cols = opts.cols ?? ['id', ...carriedCols(carried)];
-  return { ...st, carried, elem: opts.elem ?? st.elem, last: st.q.cte(body, cols) };
+  return { ...st, carried, elem: opts.elem ?? st.elem, rel: st.q.cte(body, cols) };
 }
