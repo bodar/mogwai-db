@@ -6,7 +6,7 @@ import { stepChain } from '../frontend.ts';
 import { mathToSql, mathVars } from '../math.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, elemRel, type ElementStream } from './context.ts';
-import { carryOf, toScalarStream, type ScalarStream } from './stream.ts';
+import { carryOf, toScalarStream, type ScalarStream, type Stream } from './stream.ts';
 import { type ValueType } from '../render.ts';
 import { tryCompileCountChild, tryCompileElementChild, tryCompileScalarChild } from './child.ts';
 
@@ -19,6 +19,16 @@ export function tryLowerMapElement(st: ElementStream, step: PStep): ElementStrea
   const arg = step.args[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
   return tryCompileElementChild(st, arg.nested, 'first')?.stream ?? null;
+}
+
+/** flatMap() consumes every productive child row. Keeping this next to map() makes
+ * `first` versus `all` an explicit consumer policy over one child compiler, for both
+ * element and scalar output shapes. */
+export function tryLowerFlatMap(st: ElementStream, step: PStep): Stream | null {
+  const arg = step.args[0];
+  if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
+  return tryCompileElementChild(st, arg.nested, 'all')?.stream
+    ?? tryCompileScalarChild(st, arg.nested, 'all');
 }
 
 /**

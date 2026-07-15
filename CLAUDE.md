@@ -36,6 +36,8 @@ GROUP BY the child ordinal, so empty children yield zero and duplicate equal par
 remain distinct. Scalar child tails `values`/`id`/`label`/`constant` likewise lower
 through `tryCompileScalarChild`: productivity is row existence (including productive
 NULL), multi-properties are real rows, and `map()` selects the first row per origin.
+`flatMap()` is shape-aware dispatch (not a PREFIX entry): it applies the same child
+compiler with `all`, so element and scalar children both flatten without private parsers.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
   (`stripTerminal`, `foldRepeatClusters`, `foldByModulators`) run once up front so
   the dispatch sees a canonical, peek-free chain (no index arithmetic anywhere).

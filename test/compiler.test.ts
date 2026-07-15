@@ -1259,11 +1259,14 @@ describe('compiler SQL snapshots', () => {
     expect(ca.sql).toContain('SELECT id, a0 FROM');
   });
 
-  test('flatMap() inlines an element body (fan-out), scalar body defers', () => {
+  test('flatMap() consumes every productive element or scalar child row', () => {
     const sql = read('g.V().flatMap(__.out().out()).values("name")').sql;
     expect(sql).toContain('SELECT e.tgt AS id, p.o0 FROM edges e');
     expect(sql).toContain('SELECT p.id AS id FROM c3 p'); // `all` consumes the child origin
-    expect(() => compile('g.V().flatMap(__.values("name"))', {})).toThrow('scalar/projection body');
+    const scalar = read('g.V().flatMap(__.values("name"))');
+    expect(scalar.shape).toEqual({ kind: 'value', as: undefined });
+    expect(scalar.sql).toContain('JOIN vertex_properties vp');
+    expect(scalar.sql).not.toContain('PARTITION BY'); // all, unlike map(first)
   });
 
   test('map(__.<scalar>) → per-traverser scalar projection (value shape)', () => {
@@ -2138,6 +2141,8 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V(2).optional(__.both()).values("name")').map((r) => r.v)).toEqual(['marko']);
     // flatMap = inline the body: marko out().out() = lop,ripple
     expect(run(store, 'g.V(1).flatMap(__.out().out()).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple']);
+    expect(run(store, 'g.V(1).flatMap(__.out().values("name"))').map((r) => r.v).sort()).toEqual(['josh', 'lop', 'vadas']);
+    expect(run(store, 'g.V().flatMap(__.values("age")).count()').map((r) => r.v)).toEqual([4]);
   });
 
   test('option-map choose executes: choice scalar → matched option body', () => {
