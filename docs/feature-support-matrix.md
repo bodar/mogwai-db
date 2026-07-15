@@ -4,7 +4,7 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-15 · **live L3 conformance:** 857 · **corpus parse+chain:**
+**Last synced:** 2026-07-15 · **live L3 conformance:** 866 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
 
@@ -70,11 +70,11 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `id()`, `label()`, `count()` | ✅ | ✅ ids frame as `COALESCE(uid,id)` |
 | `valueMap`, `elementMap` | ✅ | ✅ custom vertex/edge framing (client serializer hardcodes empty props) |
 | `properties(k…)` [`.key`/`.value`/`.element`/`.id`/`.label`/`.count`] | ✅ | ✅ relational PropertyStream with explicit owner/key/value/meta payload + carried state<br>✅ `.key`/`.value`/`.id` retype to ScalarStream; later scalar filters/order/range/reducers/fold compose<br>✅ `.element()` retypes to the owner vertex **or edge** stream; later element steps compose<br>✅ real VP id + meta framed; `has(metaKey)`/`hasKey`/`hasValue`/`.properties()`(meta)/`valueMap`(metaMap)<br>❌ property-stream `dedup()`/`order()` before a projection |
-| `select('a')`, multi-`select`, `project(…)` | 🟡 | ✅ column-threaded aliases<br>✅ single-label `select` retypes to an element (vertex/edge) or ScalarStream under `by(key)`; later steps compose<br>❌ edge entries in multi-`select`/`project`; record-valued results still terminal |
-| `select(Column.values/keys)` | 🟡 | ✅ over a `group()`/`groupCount()` map (retypes → MapStream, §MapStream): scalar/count/sum values + element/scalar keys, incl. list-VALUED maps (`by(__.<move>()…fold())`) as list-of-lists<br>❌ element-VALUE maps, Map-unfold (→Map.Entry), select(Column) on a raw Map param |
-| **chained projections** (`values().count()`, `valueMap().select()`) | 🟡 | ✅ scalar projections retype to a physical ScalarStream; transforms, filters, ordering/range, and numeric reducers then lower one relational step at a time<br>❌ structured projection chains such as `valueMap().select()` still hit the compatibility guard |
+| `select('a')`, multi-`select`, `project(…)` | 🟡 | ✅ column-threaded aliases<br>✅ single-label `select` retypes to an element (vertex/edge) or ScalarStream under `by(key)`; later steps compose<br>✅ multi-`select`/`project` lower to a heterogeneous per-traverser RecordStream (scalar/vertex/**edge** fields); selecting a field re-enters ordinary scalar/element lowering, and `count()` composes<br>✅ `limit`/`range`/`skip`/`tail` with `Scope.local` slice record fields<br>❌ record `order`/`dedup`/`fold`/`where`, traversal-valued `by()` |
+| `select(Column.values/keys)` | 🟡 | ✅ over a `group()`/`groupCount()` map (retypes → MapStream, §MapStream): scalar/count/sum values + element/scalar keys, incl. list-VALUED maps (`by(__.<move>()…fold())`) as list-of-lists<br>✅ over a scalar-only RecordStream: one list per record, then ordinary list/unfold lowering<br>❌ heterogeneous element-valued record lists, element-VALUE group maps, Map-unfold (→Map.Entry), raw Map params |
+| **chained projections** (`values().count()`, `project().select()`) | 🟡 | ✅ scalar projections retype to a physical ScalarStream; transforms, filters, ordering/range, and numeric reducers then lower one relational step at a time<br>✅ RecordStream fields retype to scalar/element/list streams<br>❌ `valueMap().select()` and other legacy structured values still hit compatibility boundaries |
 | `order()` [`.by(key[,dir])`] | 🟡 | ✅ tail modifier<br>❌ `order()` after `path()`<br>❌ `order().by(key)` on a scalar stream |
-| `limit`, `range`, `skip` | ✅ | ✅ CTE mid-chain, tail-modifier after `order()` |
+| `limit`, `range`, `skip` | ✅ | ✅ CTE mid-chain, tail-modifier after `order()`<br>✅ `Scope.local` slices RecordStream fields |
 | `by(…)` modulator | ✅ | ✅ only as an `order`/`select`/`project`/`group`/`groupCount`/`path`/`math` modulator |
 
 ## 4. Aggregation & barriers
@@ -104,7 +104,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | Step | Status | Notes |
 |---|:--:|---|
 | `repeat(__.<out/in/both>).times(n)` | ✅ | ✅ `WITH RECURSIVE walk`<br>✅ both = two recursive terms |
-| `repeat(__.<out/in/both>).times(n).count()` | ✅ | ✅ **traverser bulking** — unrolled GROUP-BY-SUM(bulk) CTEs (path/`as`/sack-free), so `times(8).count()`=2.5e15 in ~10ms (§Traverser bulking)<br>❌ `groupCount`/`by(count)`, `sum`, unbounded `until`/`emit`, labeled/`as`-select over the walk |
+| `repeat(__.<out/in/both>).times(n).count()` | ✅ | ✅ **traverser bulking** — unrolled GROUP-BY-SUM(bulk) CTEs, so `times(8).count()`=2.5e15 in ~10ms (§Traverser bulking)<br>✅ post-repeat `as()`/movement/bare `select(labels).count()` erases discarded record identity and propagates bulk per extra hop (`writtenBy` grateful scenario = 24.3bn)<br>❌ `groupCount`/`by(count)`, `sum`, aliases live before/across the walk, unbounded `until`/`emit` |
 | `emit` (before/after, bare) | ✅ | ✅ runs to natural fixpoint (no depth cap) |
 | `until(<pred>)`, `loops().is(n)` | 🟡 | ✅ do-while/while-do<br>❌ `until(__.loops()…)` beyond `loops().is(P)` |
 | `repeat().path()`, `simplePath()` in body | ✅ | ✅ JSONB array walk + `json_each` cycle guard |
@@ -246,10 +246,10 @@ Cheapest wins are long done. What's left, by structural weight:
 
 **The current frontier (all design-heavy — clean value-tail/list wins are harvested):**
 - **traverser bulking — COUNT LANDED (2026-07-14).** `repeat(<out/in/both>).times(n).count()`
-  (path/`as`/sack-free) now compiles to unrolled GROUP-BY-SUM(bulk) CTEs (`src/steps/bulk.ts`),
+  (path/sack-free; plus cardinality-only post-repeat labels/record selection) now compiles to unrolled GROUP-BY-SUM(bulk) CTEs (`src/steps/bulk.ts`),
   so the **grateful reference graph is seeded** and `times(8).count()` = 2.5e15 returns in
   ~10ms (was an uninterruptible hang). Still deferred (own follow-ups): `groupCount`/
-  `group().by(count)` bulking, `sum`/labeled-select over deep repeat, unbounded `until()`/
+  `group().by(count)` bulking, `sum`/labels whose identity remains semantically live, unbounded `until()`/
   `emit()` bulking (no compile-time depth → needs a JS depth-loop). See
   `docs/2026-07-14-traverser-bulking.md`.
 - **path() → re-enterable list** — path isn't yet a list stream, so path-rooted set-ops /

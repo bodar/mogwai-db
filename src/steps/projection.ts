@@ -16,7 +16,7 @@ import { materializeRoot, materializeScalarRoot } from './materialize.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
 import { SCALAR_ROW_STEPS } from './scalar.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
-import { compileSelectProject, compilePath, lowerSingleSelect } from './select.ts';
+import { compileSelectProject, compilePath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
 import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions } from './mapscalar.ts';
 import { compileGroup, groupToMapStream, lowerProperties, type GroupSource } from './group.ts';
 
@@ -221,6 +221,11 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
       steps[stop].args.filter((a) => typeof a === 'string').length === 1 &&
       !steps[stop].args.some((a) => a && typeof a === 'object' && 'column' in a))
     return dispatchNext(lowerSingleSelect(st, steps[stop]), steps, stop + 1);
+
+  // Multi-label select() and every project() produce a per-traverser RecordStream.
+  // Terminal framing and later field selection/counting now share this same lowering.
+  if (steps[stop]?.name === 'select' || steps[stop]?.name === 'project')
+    return dispatchNext(lowerRecordSelectProject(st, steps[stop]), steps, stop + 1);
 
   // A scalar-producing projection is always a real stream transition when another
   // step follows. The next step dispatches against ScalarStream, so composition no

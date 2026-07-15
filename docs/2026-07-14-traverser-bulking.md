@@ -5,16 +5,21 @@ Sources: TinkerPop 4 source (`gremlin-core`), the Sqlg codebase, TinkerPop upgra
 docs + mailing list, and a full sweep of this repo's traverser representation.*
 
 **STATUS: count-bulking SHIPPED (`src/steps/bulk.ts`).** `repeat(...).times(n).count()`
-(path/as/sack-free, simple out/in/both body) compiles to unrolled GROUP-BY-SUM(bulk)
+(path/sack-free, simple out/in/both body) compiles to unrolled GROUP-BY-SUM(bulk)
 CTEs. The grateful graph is now seeded (`test/conformance/conformance-server.ts`);
 `times(8).count()` returns 2505037961767380 in ~10ms (was an uninterruptible hang).
+The same engine accepts a cardinality-only post-repeat suffix of `as()` + movement +
+bare `select(labels).count()`: labels and record construction are erased because their
+value is discarded, while each movement adds another grouped bulk frontier. This keeps
+the official `times(5).as(a).out('writtenBy').as(b).select(a,b).count()` result
+(24,309,134,024) bounded instead of materializing billions of record rows.
 L3 824 (was 822: +times(3).count + times(8).count, matching TinkerPop's exact
 `d[14465066]`/`d[2505037961767380]`). No fail-fast guard was needed — every other
 grateful scenario either works or fails closed at compile (verified by running all 39
 grateful queries in isolation: zero hangs). Deferred (own follow-ups, NOT built):
 `groupCount`/`group().by(count)` bulking (times(2) group already materializes fine, so
 not a tractability blocker — its non-pass is a group-value/empty-key semantics gap),
-`sum`/labeled/`as`-select over deep repeat (non-bulkable by identity), and unbounded
+`sum`/labels whose identity remains live past the reducer, and unbounded
 `until()`/`emit()` bulking (no compile-time depth → would need a JS depth-loop).
 
 ## The problem in one line

@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–3 complete, Stage 4 active
-**Baseline:** L1 2298/2298, L3 833/2041; latest completed checkpoint: L3 857, 352 tests
+**Baseline:** L1 2298/2298, L3 833/2041; latest completed checkpoint: L3 866, 354 tests
 
 **Implementation checkpoint (2026-07-15):** physical stream schemas and the single
 root materialization boundary are landed. Global count and numeric reducers now lower
@@ -453,17 +453,24 @@ projection re-entry, and owner vertex/edge re-entry. That owner retype recovered
 three official `properties().element()` scenarios (vertex, filtered edge, all edges),
 moving L3 848→851. The other structured streams remain.
 
-The next structured slice has begun: single-label `select()` now returns the selected
+The structured select slice is now complete at its first composable boundary. Single-label `select()` returns the selected
 vertex/edge ElementStream, or a ScalarStream under `by(key)`, so it no longer owns a
-terminal renderer. Multi-label `select`/`project` remain the record-valued boundary and
-will get a per-traverser RecordStream rather than being forced into group()'s
-entry-per-row MapStream. The re-entry recovered six official scenarios (five select
-cases, including edge aliases, plus a match→select→movement chain), moving L3 851→857.
+terminal renderer. Multi-label `select`/`project` now lower to a heterogeneous wide-row
+RecordStream rather than being forced into group()'s entry-per-row MapStream. Each
+element field retains both its externally framed id and an internal rowid, so selecting
+a vertex/edge field can re-enter movement even for string ids; scalar fields re-enter
+ScalarStream, scalar-only `Column.keys/values` re-enter ListStream, and local
+limit/range/skip/tail slice the record's static field layout. Record-local slicing
+recovered nine official scenarios, moving L3 857→866 (after the earlier single-select
+re-entry moved 851→857). The newly reachable grateful traversal with 24.3bn labeled
+records exposed a tractability edge: the bulk optimizer now erases post-repeat labels
+and final record construction only when `count()` is the sole consumer, propagating
+bulk through each extra movement instead of enumerating rows.
 
 Move the remaining terminal islands to streams:
 
 - ~~`properties()` → PropertyStream~~ (kept distinct from node/edge ElementStream);
-- `select`/`project` → record/map-valued stream;
+- ~~`select`/`project` → RecordStream~~ (record order/dedup/fold/where remain consumers);
 - `group`/`groupCount` → MapStream at root and non-root alike;
 - `path` → path-valued stream/materialization strategy;
 - ~~`map`, `math`, `format`, option-choose, sack read~~ return ScalarStream; `cap`

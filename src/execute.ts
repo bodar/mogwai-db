@@ -112,9 +112,9 @@ function mapBuffer(row: any, entries: MapEntry[]): Buffer {
   ];
   for (const e of entries) {
     parts.push(ioc.anySerializer.serialize(e.key));
-    parts.push(e.sub === 'vertex'
-      ? elementBuffer(row, e.prefix, 'vertex')
-      : ioc.anySerializer.serialize(row[`${e.prefix}_v`]));
+    parts.push(e.sub === 'value'
+      ? ioc.anySerializer.serialize(row[`${e.prefix}_v`])
+      : elementBuffer(row, e.prefix, e.sub));
   }
   return Buffer.concat(parts);
 }

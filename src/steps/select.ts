@@ -1,12 +1,15 @@
-import { q, list, empty, type Expression } from '../q.ts';
+import { q, list, empty, value, type Expression } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
 import { framedProps, nodePropScalar, predicateSql, propExtract, extIdOf } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, type AliasMap, type ElementStream } from './context.ts';
-import { carryOf, toScalarStream, type ScalarStream } from './stream.ts';
-import { type Compiled, type MapEntry, type PathPos } from '../render.ts';
+import { carryOf, recordFieldColumns, toListStream, toRecordStream, toScalarStream, type RecordField, type RecordStream, type ScalarStream } from './stream.ts';
+import { type Compiled, type PathPos } from '../render.ts';
 import { materializeRoot } from './materialize.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
+import { materializeRecordRoot } from './materialize.ts';
+import { lowerGlobalCount } from './barrier.ts';
+import { dispatchNext } from './index.ts';
 
 // ---------- select()/project() ----------
 
@@ -55,10 +58,8 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): ElementStream
  * traverser under freshly-named keys. by() modulators cycle across the keys. A
  * single-key select reuses the scalar vertex/value shape; anything else is a Map.
  */
-export function compileSelectProject(st: ElementStream, proj: PStep, tail: TailMods): Compiled {
+export function lowerRecordSelectProject(st: ElementStream, proj: PStep): RecordStream {
   const bys = proj.bys ?? [];
-  const { orders, distinct, offset, limit } = tail;
-  if (orders.length) throw new Error('order() after select()/project() not yet supported');
   const isProject = proj.name === 'project';
   const aliases: AliasMap = st.carried.aliases;
   const curElem = st.elem;
@@ -72,56 +73,143 @@ export function compileSelectProject(st: ElementStream, proj: PStep, tail: TailM
   const keys = proj.args.filter((a): a is string => typeof a === 'string');
   if (!keys.length) throw new Error(`${proj.name}() requires at least one key`);
 
-  const sourceOf = (k: string): string => {
+  const sourceOf = (k: string): { expr: Expression; elem: 'node' | 'edge' } => {
     if (isProject) {
-      if (curElem === 'edge') throw new Error('project() of an edge is not yet supported');
-      return 'p.id';
+      return { expr: st.rel.as('p').c.id, elem: curElem };
     }
     const entry = aliases.get(k);
     if (!entry) throw new Error(`select("${k}"): no such label — as("${k}") was not seen`);
-    if (entry.elem === 'edge') throw new Error(`select("${k}") of an edge-typed label is not yet supported`);
-    return `p.${entry.col}`;
+    return { expr: st.rel.as('p').c[entry.col], elem: entry.elem };
   };
   const entryKind = (i: number) => byToEntry(bys.length ? bys[i % bys.length] : undefined);
-
-  const tailSql = (limit !== null || offset > 0) ? ` LIMIT ${limit ?? -1} OFFSET ${offset}` : '';
-  const dist = distinct ? 'DISTINCT ' : '';
   const p = st.rel.as('p');
-
-  // Single-key select → the labelled element directly (not wrapped in a Map).
-  if (!isProject && keys.length === 1) {
-    const src = sourceOf(keys[0]);
-    const e = entryKind(0);
-    const n = nodes.as('n');
-    if (e.sub === 'vertex') {
-      const l = labels.as('l');
-      return materializeRoot(st.q, q`SELECT ${dist}COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props FROM ${n} JOIN ${p} ON ${n.c.id}=${src} JOIN ${l} ON ${l.c.id}=${n.c.label}${tailSql}`, { kind: 'vertex' });
-    }
-    const pe = nodePropScalar(n.c.id, e.key!); // first-under-multi; projection, not indexed (matches values())
-    return materializeRoot(st.q, q`SELECT ${dist}${pe} AS v FROM ${n} JOIN ${p} ON ${n.c.id}=${src}${tailSql}`, { kind: 'value' });
-  }
 
   // Multi-key select / any project → a Map per row.
   const cols: Expression[] = [];
   const joins: Expression[] = [];
-  const entries: MapEntry[] = keys.map((k, i) => {
+  const fields: RecordField[] = keys.map((k, i) => {
     const prefix = `e${i}`;
     const e = entryKind(i);
     const src = sourceOf(k);
-    const en = nodes.as(`${prefix}n`);
-    joins.push(q` JOIN ${en} ON ${en.c.id}=${src}`);
+    const en = (src.elem === 'edge' ? edges : nodes).as(`${prefix}n`);
+    joins.push(q` JOIN ${en} ON ${en.c.id}=${src.expr}`);
     if (e.sub === 'vertex') {
       const el = labels.as(`${prefix}l`);
       joins.push(q` JOIN ${el} ON ${el.c.id}=${en.c.label}`);
-      cols.push(q`COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${framedProps(en, 'node')} AS ${`${prefix}_props`}`);
+      if (src.elem === 'edge')
+        cols.push(q`${en.c.id} AS ${`${prefix}_rid`}, COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${en.c.src} AS ${`${prefix}_src`}, ${en.c.tgt} AS ${`${prefix}_tgt`}, json(${en.c.props}) AS ${`${prefix}_props`}`);
+      else
+        cols.push(q`${en.c.id} AS ${`${prefix}_rid`}, COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${framedProps(en, 'node')} AS ${`${prefix}_props`}`);
     } else {
-      cols.push(q`${nodePropScalar(en.c.id, e.key!)} AS ${`${prefix}_v`}`); // first-under-multi; projection, not indexed
+      const prop = src.elem === 'edge' ? propExtract(en.c.props, e.key!).expr : nodePropScalar(en.c.id, e.key!);
+      cols.push(q`${prop} AS ${`${prefix}_v`}`); // first-under-multi; projection, not indexed
     }
-    return { key: k, prefix, sub: e.sub };
+    return { key: k, prefix, sub: e.sub === 'value' ? 'value' : src.elem === 'edge' ? 'edge' : 'vertex' };
   });
 
-  const node = q`SELECT ${dist}${list(cols, ', ')} FROM ${p}${list(joins, '')}${tailSql}`;
-  return materializeRoot(st.q, node, { kind: 'map', entries });
+  const relCols = [...fields.flatMap(recordFieldColumns), ...carriedCols(st.carried)];
+  const rel = st.q.cte(q`SELECT ${list(cols, ', ')}${carryFrag(st.carried, p)} FROM ${p}${list(joins, '')}`, relCols);
+  return toRecordStream(carryOf(st), rel, fields);
+}
+
+/** Compatibility adapter for element modifiers accumulated before a terminal record
+ * projection. New projection-first chains take the RecordStream path directly. */
+export function compileSelectProject(st: ElementStream, proj: PStep, tail: TailMods): Compiled {
+  if (tail.orders.length) throw new Error('order() after select()/project() not yet supported');
+  let record = lowerRecordSelectProject(st, proj);
+  if (tail.distinct || tail.limit !== null || tail.offset > 0) {
+    const r = record.rel.as('r');
+    const names = record.rel.cols;
+    const projected = names.map((name) => q`${r.c[name]} AS ${name}`);
+    const suffix = tail.limit !== null || tail.offset > 0 ? q` LIMIT ${tail.limit ?? -1} OFFSET ${tail.offset}` : empty;
+    const rel = record.q.cte(
+      q`SELECT ${tail.distinct ? 'DISTINCT ' : ''}${list(projected, ', ')} FROM ${r}${suffix}`,
+      names,
+    );
+    record = toRecordStream(carryOf(record), rel, record.fields);
+  }
+  return materializeRecordRoot(record);
+}
+
+/** Continue from a per-traverser record. Selecting a named field retypes it to the
+ * ordinary scalar/element stream, while Column.keys/values produces one list value
+ * per record. This is intentionally distinct from MapStream's whole-group columns. */
+export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): Compiled {
+  if (at >= steps.length) return materializeRecordRoot(s);
+  const step = steps[at];
+  if (step.name === 'count')
+    return dispatchNext(lowerGlobalCount(s), steps, at + 1);
+  if (step.name === 'limit' || step.name === 'range' || step.name === 'skip' || step.name === 'tail') {
+    const local = step.args.some((a: any) => a && typeof a === 'object' && a.scope === 'local');
+    const nums = step.args.filter((a): a is number => typeof a === 'number').map(Number);
+    if (local) {
+      let offset = 0;
+      let limit: number | null = null;
+      if (step.name === 'limit') limit = nums[0];
+      else if (step.name === 'skip') offset = nums[0];
+      else if (step.name === 'range') { offset = nums[0]; limit = nums[1] - nums[0]; }
+      else { limit = nums[0] ?? 1; offset = Math.max(0, s.fields.length - limit); }
+      if (offset < 0 || (limit !== null && limit < 0)) throw new Error(`Not a legal range: [${offset}, ${limit === null ? -1 : offset + limit}]`);
+      const fields = s.fields.slice(offset, limit === null ? undefined : offset + limit);
+      if (!fields.length && carriedCols(s.carried).length === 0)
+        throw new Error(`${step.name}(Scope.local) producing an empty record needs a zero-field record layout`);
+      const r = s.rel.as('r');
+      const names = [...fields.flatMap(recordFieldColumns), ...carriedCols(s.carried)];
+      const rel = s.q.cte(q`SELECT ${list(names.map((name) => r.c[name]), ', ')} FROM ${r}`, names);
+      return dispatchNext(toRecordStream(carryOf(s), rel, fields), steps, at + 1);
+    }
+    if (step.name === 'tail') throw new Error('tail() on a record stream needs explicit encounter-order metadata');
+    const offset = step.name === 'skip' ? nums[0] : step.name === 'range' ? nums[0] : 0;
+    const limit = step.name === 'limit' ? nums[0] : step.name === 'range' ? nums[1] - nums[0] : null;
+    if (offset < 0 || (limit !== null && limit < 0)) throw new Error(`Not a legal range: [${offset}, ${limit === null ? -1 : offset + limit}]`);
+    const r = s.rel.as('r');
+    const names = s.rel.cols;
+    const rel = s.q.cte(
+      q`SELECT ${list(names.map((name) => r.c[name]), ', ')} FROM ${r} LIMIT ${limit ?? -1} OFFSET ${offset}`,
+      names,
+    );
+    return dispatchNext(toRecordStream(carryOf(s), rel, s.fields), steps, at + 1);
+  }
+  if (step.name !== 'select') throw new Error(`${step.name}() on a record value not yet supported`);
+
+  const pop = step.args.find((a) => a && typeof a === 'object' && 'pop' in a) as { pop: string } | undefined;
+  if (pop && pop.pop !== 'last') throw new Error(`select(Pop.${pop.pop}) on a record not yet supported`);
+  const column = step.args.map((a: any) => a && typeof a === 'object' && a.column)
+    .find((c: any) => c === 'keys' || c === 'values') as 'keys' | 'values' | undefined;
+  const r = s.rel.as('r');
+  if (column) {
+    if (step.bys?.length) throw new Error('by() after select(Column) on a record not yet supported');
+    let expr: Expression;
+    if (column === 'keys') expr = q`jsonb(${value(JSON.stringify(s.fields.map((f) => f.key)))})`;
+    else {
+      if (s.fields.some((f) => f.sub !== 'value'))
+        throw new Error('select(Column.values) on a record containing elements needs a variant list stream');
+      expr = q`jsonb_array(${list(s.fields.map((f) => r.c[`${f.prefix}_v`]), ', ')})`;
+    }
+    const rel = s.q.cte(
+      q`SELECT ${expr} AS list${carryFrag(s.carried, r)} FROM ${r}`,
+      ['list', ...carriedCols(s.carried)],
+    );
+    return dispatchNext(toListStream(carryOf(s), rel, { kind: 'scalar' }), steps, at + 1);
+  }
+
+  const keys = step.args.filter((a): a is string => typeof a === 'string');
+  if (keys.length !== 1) throw new Error('select() on a record requires exactly one key');
+  if (step.bys?.length) throw new Error('by() after selecting a record field not yet supported');
+  const field = s.fields.find((f) => f.key === keys[0]);
+  if (!field) throw new Error(`select("${keys[0]}"): record has no such key`);
+  if (field.sub === 'value') {
+    const rel = s.q.cte(
+      q`SELECT ${r.c[`${field.prefix}_v`]} AS v${carryFrag(s.carried, r)} FROM ${r}`,
+      ['v', ...carriedCols(s.carried)],
+    );
+    return dispatchNext(toScalarStream(carryOf(s), rel), steps, at + 1);
+  }
+  const rel = s.q.cte(
+    q`SELECT ${r.c[`${field.prefix}_rid`]} AS id${carryFrag(s.carried, r)} FROM ${r}`,
+    ['id', ...carriedCols(s.carried)],
+  );
+  return dispatchNext({ ...carryOf(s), kind: 'elements', rel, elem: field.sub === 'edge' ? 'edge' : 'node' }, steps, at + 1);
 }
 
 // ---------- path() (linear regime) ----------

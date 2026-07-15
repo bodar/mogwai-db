@@ -38,6 +38,7 @@ interface BulkPlan {
   dirs: [string, string][];    // the repeat body's movement directions (out/in/both)
   labels: any[];               // the body movement's edge-label filter args
   times: number;               // the (compile-time) loop depth
+  postMoves: { dirs: [string, string][]; labels: any[] }[];
   reducer: 'count';
 }
 
@@ -50,16 +51,20 @@ function bulkPlan(steps: PStep[], params: Record<string, any>, sackInit?: SackSp
   if (n < 3) return null;
   const last = steps[n - 1];
   if (!BULKABLE_REDUCERS.has(last.name) || (last.args?.length ?? 0) > 0) return null;
-  const rep = steps[n - 2];
-  if (rep.name !== 'repeat' || !rep.cluster) return null; // the folded repeat cluster
-
-  // A path/as anywhere defeats bulking (per-traverser identity). Everything between the
-  // source and count() must be exactly the repeat cluster — an as()/select() between
-  // them is the non-bulkable materializing case the fail-fast guard handles instead.
-  const PATH = new Set(['path', 'simplePath', 'cyclicPath']);
-  if (steps.some((s) => s.name === 'as' || PATH.has(s.name))) return null;
-
+  const repAt = steps.findIndex((s) => s.name === 'repeat' && s.cluster);
+  if (repAt < 1) return null;
+  const rep = steps[repAt];
   const cluster = rep.cluster;
+  if (!cluster) return null;
+
+  // Path/as BEFORE the repeat defeats bulking because it makes history live. Labels
+  // bound AFTER a fixed-depth repeat may be erased when the only eventual consumer is
+  // a bare select(...).count(): neither building that record nor naming its fields
+  // changes cardinality. Post-repeat movements still multiply bulk and are folded below.
+  const PATH = new Set(['path', 'simplePath', 'cyclicPath']);
+  if (steps.slice(0, repAt).some((s) => s.name === 'as' || PATH.has(s.name))) return null;
+  if (steps.slice(repAt + 1).some((s) => PATH.has(s.name))) return null;
+
   if (cluster.some((c) => c.name === 'until' || c.name === 'emit')) return null; // no compile-time depth
   const timesStep = cluster.find((c) => c.name === 'times');
   if (!timesStep || typeof timesStep.args[0] !== 'number') return null;
@@ -73,7 +78,35 @@ function bulkPlan(steps: PStep[], params: Record<string, any>, sackInit?: SackSp
   if (body.length !== 1 || !['out', 'in', 'both'].includes(body[0].name)) return null;
   const mv = body[0];
 
-  return { preLen: n - 2, dirs: dirsFor(mv.name), labels: mv.args, times, reducer: 'count' };
+  // Cardinality-only suffix accepted by the bulk engine:
+  //   as()* (out|in|both as*)* [select(bound labels...)] count()
+  // select must be the final pre-count step, bare (no by/Pop/Column), and reference
+  // labels actually bound in this suffix. This is deliberately narrow and fail-closed.
+  const suffix = steps.slice(repAt + 1, -1);
+  const bound = new Set<string>();
+  const postMoves: BulkPlan['postMoves'] = [];
+  let sawSelect = false;
+  for (let i = 0; i < suffix.length; i++) {
+    const s = suffix[i];
+    if (s.name === 'as') {
+      if (sawSelect || s.args.some((a) => typeof a !== 'string')) return null;
+      for (const a of s.args) bound.add(a);
+      continue;
+    }
+    if (['out', 'in', 'both'].includes(s.name)) {
+      if (sawSelect) return null;
+      postMoves.push({ dirs: dirsFor(s.name), labels: s.args });
+      continue;
+    }
+    if (s.name === 'select' && i === suffix.length - 1) {
+      if (s.bys?.length || s.args.length === 0 || s.args.some((a) => typeof a !== 'string' || !bound.has(a))) return null;
+      sawSelect = true;
+      continue;
+    }
+    return null;
+  }
+
+  return { preLen: repAt, dirs: dirsFor(mv.name), labels: mv.args, times, postMoves, reducer: 'count' };
 }
 
 /** Compile the bulkable repeat-count. Reuses buildPrefix for the source + leading
@@ -103,6 +136,15 @@ export function tryBulkRepeatCount(steps: PStep[], params: Record<string, any>, 
     const e = edges.as('e');
     const legs = plan.dirs.map(([from, to]) =>
       q`SELECT ${e.c[to]} AS nb, ${w.c.bulk} AS b FROM ${w} JOIN ${e} ON ${e.c[from]}=${w.c.id}${edgeLabelFilter(plan.labels)}`);
+    cur = query.cte(q`SELECT nb AS id, SUM(b) AS bulk FROM (${list(legs, ' UNION ALL ')}) GROUP BY nb`, ['id', 'bulk']);
+  }
+  // A post-repeat movement is another bulk-preserving frontier hop. The ignored
+  // as()/select() steps only name/build values immediately discarded by count().
+  for (const move of plan.postMoves) {
+    const w = cur.as('w');
+    const e = edges.as('e');
+    const legs = move.dirs.map(([from, to]) =>
+      q`SELECT ${e.c[to]} AS nb, ${w.c.bulk} AS b FROM ${w} JOIN ${e} ON ${e.c[from]}=${w.c.id}${edgeLabelFilter(move.labels)}`);
     cur = query.cte(q`SELECT nb AS id, SUM(b) AS bulk FROM (${list(legs, ' UNION ALL ')}) GROUP BY nb`, ['id', 'bulk']);
   }
 
