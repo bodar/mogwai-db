@@ -13,7 +13,7 @@ import {
   type Compiled, type Shape, type ElemShape,
 } from '../render.ts';
 import { materializeRoot, materializeScalarRoot } from './materialize.ts';
-import { lowerGlobalCount, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
+import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
 import { SCALAR_ROW_STEPS } from './scalar.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
 import { compileSelectProject, compilePath } from './select.ts';
@@ -346,6 +346,8 @@ export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number)
     if (from + 1 < steps.length) return dispatchNext(out, steps, from + 1);
     return materializeScalarRoot(out);
   }
+  if (steps[from]?.name === 'fold' && !isScopeLocalStep(steps[from]))
+    return dispatchNext(lowerGlobalFold(s), steps, from + 1);
   // unfold() on a scalar is identity (a scalar is not a collection) — continue past it,
   // exactly as unfold() on an element stream. Lets aggregate('a').by(k).cap('a').unfold()
   // (cap unrolls a by-key bag to a scalar stream) feed a following reducer.
@@ -619,7 +621,8 @@ export function wrapReducer(
     const fe: ElemShape | 'scalar' =
       shape.kind === 'vertex' ? 'vertex' : shape.kind === 'edge' ? 'edge' :
       shape.kind === 'value' ? 'scalar' : (() => { throw new Error(`fold() of ${shape.kind} not yet supported`); })();
-    return { tailNode, shape: { kind: 'list', elem: fe } };
+    const as = shape.kind === 'value' ? shape.as : undefined;
+    return { tailNode, shape: as ? { kind: 'list', elem: fe, as } : { kind: 'list', elem: fe } };
   }
   if (shape.kind !== 'value') throw new Error(`${reducer}() of ${shape.kind} not yet supported`);
   if (reducer === 'sum')

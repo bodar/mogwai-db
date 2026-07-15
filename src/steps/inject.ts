@@ -53,7 +53,7 @@ export function compileInject(steps: PStep[]): Compiled {
   const bareNum = cast?.name === 'asNumber' && !spec; // asNumber() with no GType arg
   const dateCast = cast?.name === 'asDate' || cast?.name === 'dateAdd' || cast?.name === 'dateDiff';
   const constCast = cast?.name === 'asBool' || (cast?.name === 'asNumber' && spec) || bareNum || dateCast;
-  if (constCast && (acc.reducer || acc.projStep || acc.injects.length))
+  if (constCast && ((acc.reducer && acc.reducer !== 'fold') || acc.projStep || acc.injects.length))
     throw new Error(`${cast!.name}() composed with a reducer/count()/trailing inject() not yet supported`);
 
   // TEMPORARY (removed when inject-list becomes a real list value, commit 4): a lone

@@ -312,13 +312,18 @@ function* framedResults(store: GraphStore, gremlin: string, params: Record<strin
     case 'list': {
       // fold() reuses the plain vertex/edge projection (unprefixed id/label/…),
       // unlike group's v_-prefixed element columns.
-      if (shape.elem === 'scalar') yield ioc.listSerializer.serialize(rows.map((r) => r.v));
+      if (shape.elem === 'scalar') yield shape.as
+        ? listBuffer(rows.map((r) => frameValue(r.v, shape.as)))
+        : ioc.listSerializer.serialize(rows.map((r) => r.v));
       else yield listBuffer(rows.map(shape.elem === 'edge' ? rowEdge : rowVertex));
       return;
     }
     // A list-VALUE stream: one framed List per row (the `list` column arrives as JSON
     // text via json(), so it JSON.parses; scalar elements frame via listSerializer).
-    case 'jsonbList': for (const r of rows) yield ioc.listSerializer.serialize(JSON.parse(r.list)); return;
+    case 'jsonbList': for (const r of rows) {
+      const items = JSON.parse(r.list);
+      yield shape.as ? listBuffer(items.map((v: any) => frameValue(v, shape.as))) : ioc.listSerializer.serialize(items);
+    } return;
     // A set-VALUE stream (intersect/difference/disjunct): frame each list column as a Set.
     case 'jsonbSet': for (const r of rows) yield ioc.setSerializer.serialize(new Set(JSON.parse(r.list))); return;
     case 'discard': return;

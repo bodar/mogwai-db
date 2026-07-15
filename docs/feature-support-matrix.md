@@ -82,7 +82,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | Step | Status | Notes |
 |---|:--:|---|
 | `group`, `groupCount` | 🟡 | ✅ scalar reducers → SQL `GROUP BY`<br>✅ element values → ordered-stream + handler fold<br>✅ **re-enterable**: a follower (`select(Column.*)`/unfold) retypes it → MapStream (§MapStream)<br>❌ >2 `by()` modulators<br>❌ `by(T.x)` key<br>❌ deep nested-`by()` chains |
-| `fold()` | ✅ | ✅ terminal reducer **and** a real JSONB list value when followed (§9) |
+| `fold()` | ✅ | ✅ scalar fold is a relational ListStream even when terminal; uniform scalar item tags survive materialization/unfold<br>✅ element fold retains the element-framing path |
 | `sum`, `min`, `max`, `mean` | ✅ | ✅ relational ScalarStream with explicit `(v,vt)` payload, so filters/range can follow without losing runtime numeric framing<br>✅ also as `Scope.local` list reducers (§9)<br>✅ `min`/`max` range over any Comparable incl. **Strings** (v4); `sum`/`mean` numeric only<br>✅ `cap('a').unfold().<reducer>` (unfold of a scalar = identity) |
 | `group('a')`/`groupCount('a')` (side-effecting) | 🟡 | pass-through barrier: stashes the group-spec, `cap('a')` re-emits it (§12). ❌ after `as()`/`path()`, `cap('a')` then more steps |
 
@@ -135,9 +135,9 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | Step | Status | Notes |
 |---|:--:|---|
 | `fold()` as a re-usable list value | ✅ | ✅ JSONB list<br>✅ re-enters the tail |
-| `unfold()` | 🟡 | ✅ `json_each` explode → elements/scalar/nested-list stream (list-of-lists → per-list rows)<br>❌ after a projection/modifier on an element stream<br>❌ Map-unfold (→Map.Entry) |
+| `unfold()` | 🟡 | ✅ `json_each` explode → elements/scalar/nested-list stream (list-of-lists → per-list rows), retaining uniform scalar item metadata<br>❌ after a projection/modifier on an element stream<br>❌ Map-unfold (→Map.Entry) |
 | `inject([…])` as a list | ✅ | ✅ each bracket arg = one list value |
-| `Scope.local` reducers (count/sum/min/max/mean) | ✅ | ✅ per-list correlated aggregate<br>✅ also degenerate scalar-local |
+| `Scope.local` reducers (count/sum/min/max/mean) | ✅ | ✅ per-list correlated aggregate → ScalarStream, including later filters/reducers<br>✅ also degenerate scalar-local |
 | `none(P)`/`all(P)`/`any(P)` collection filters | ✅ | ✅ keep a list where no / every / some element matches (`IS TRUE`/`IS NOT TRUE` null handling; null-aware `eq/neq(null)`) |
 | `Scope.local` order/limit/range/skip/tail/dedup on a list | 🟡 | ✅ per-list correlated `json_each` rebuild (order sorts by value / direction-only `by(Order.desc)`; dedup keeps first occurrence; tail avoids a count() subquery)<br>✅ `reverse()` reverses list order; per-element string transforms (toUpper/trim/length/…)<br>✅ a single bare `order().fold()` sorts the folded scalars<br>❌ `order(Scope.local).by(key/traversal)` |
 | **set-ops** (`combine`/`intersect`/`difference`/`disjunct`/`product`/`conjoin`) | 🟡 | ✅ over a list value: `combine`=concat (List), `intersect`/`difference`/`disjunct`=set ops (Set, null-safe `IS` membership), `product`=cartesian (list of pair-lists), `conjoin`=join to a String<br>✅ operand = a literal list, `constant(c).fold()`, or a standalone scalar-list traversal (`__.V().values(k).fold()` — compiled as an independent read + `json_group_array`, embedded as a scalar subquery)<br>✅ a Set followed by a list op degrades to a List (matches `intersect().order(local)`)<br>❌ an element-fold operand (`__.V().fold()` — a vertex list)<br>❌ after `path()` (path isn't yet a re-enterable list) |
@@ -151,7 +151,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | string transforms | ✅ | ✅ SQL scalar, text-in text-out; non-local scalar transforms lower stepwise as ScalarStream relations<br>✅ `concat` skips nulls (`concat_ws`), all-null→null<br>✅ trim family over Java's `isWhitespace` set (incl. U+3000)<br>✅ `reverse` string chars (recursive CTE) / number identity / list order (§9)<br>✅ all compose as `Scope.local` per-element list transforms after `fold()`<br>✅ a string op on a non-`local` list raises TinkerPop's "can only take string as argument"<br>✅ `format("…%{key}…%{_}…")` templates a string — named tokens read element properties, `%{_}` pulls by() modulators (positional/round-robin); a missing property filters the row (❌ reading project()/select() columns, the as()-alias fallback)<br>❌ `split` (list-valued), element/map `asString` |
 | `math("<formula>")` | 🟡 | ✅ full exp4j operator/function set → one SQL scalar, always Double<br>❌ a var with no `by()`<br>❌ `withSideEffect` vars<br>❌ reading `project()`/`select()` map columns |
 | `asDate`, `dateAdd`, `dateDiff`, `datetime()`/`DateTime()` literals | 🟡 | ✅ epoch-millis rep + `'date'` tag (UTC-only, ms precision — parity with the JS reference client)<br>❌ `typeOf(GType.DATETIME)` over stored props<br>❌ `inject([…]).asDate()` |
-| `asNumber` + reducer (`fold`/`sum`) | 🟡 | ✅ numeric reducers carry runtime `vt` explicitly (`asNumber(...).sum()`)<br>❌ typed `fold()` still needs element-type metadata on ListStream materialization |
+| `asNumber` + reducer (`fold`/`sum`) | ✅ | ✅ numeric reducers carry runtime `vt` explicitly (`asNumber(...).sum()`)<br>✅ typed `fold()` carries uniform element metadata through ListStream materialization |
 | bigdecimal | ❌ | no client GraphBinary serializer |
 | `format()` | 🟡 | ✅ element-property template substitution with `%{key}` + `%{_}`/`by()`<br>❌ reading project()/select() columns and the as()-alias fallback |
 

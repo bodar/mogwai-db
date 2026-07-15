@@ -2,13 +2,15 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–2 complete, Stage 3 active
-**Baseline:** L1 2298/2298, L3 833/2041; latest completed checkpoint: L3 841, 347 tests
+**Baseline:** L1 2298/2298, L3 833/2041; latest completed checkpoint: L3 842, 349 tests
 
 **Implementation checkpoint (2026-07-15):** physical stream schemas and the single
 root materialization boundary are landed. Global count and numeric reducers now lower
 to ScalarStreams (numeric payload `v,vt`), scalar row operators and transforms/casts lower left-to-right,
-and shared child-domain scope construction backs branches plus `local`. L3 has ratcheted
-to 841/2041; 833 remains the non-regression floor recorded at the start of the migration.
+scalar `fold` lowers to a typed ListStream, and list-local reducers re-enter ScalarStream,
+and shared child-domain scope construction backs branches plus `local`. Typed scalar
+folding recovered the official mixed-input `asNumber().fold()` case; L3 has ratcheted
+to 842/2041. The original 833 remains the migration's comparison floor.
 
 ## Decision
 

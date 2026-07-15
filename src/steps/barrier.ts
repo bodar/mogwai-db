@@ -1,5 +1,5 @@
 import { q } from '../q.ts';
-import { carryOf, toScalarStream, type Stream, type ScalarStream } from './stream.ts';
+import { carryOf, toListStream, toScalarStream, type ListStream, type Stream, type ScalarStream } from './stream.ts';
 import { withoutCarried } from './context.ts';
 
 /** Global count is a relational barrier: it consumes any shaped row stream and
@@ -7,6 +7,18 @@ import { withoutCarried } from './context.ts';
 export function lowerGlobalCount(input: Stream): ScalarStream {
   const rel = input.q.cte(q`SELECT COUNT(*) AS v FROM ${input.rel}`, ['v']);
   return toScalarStream(withoutCarried(carryOf(input)), rel, 'long', 'count');
+}
+
+/** Global fold is a genuine shape transition: all scalar traversers become one
+ * JSONB list traverser. The uniform compile-time item tag survives on ListOf so a
+ * terminal list and a later unfold both retain GraphBinary scalar typing. */
+export function lowerGlobalFold(input: ScalarStream): ListStream {
+  const src = input.rel.as('s');
+  const rel = input.q.cte(
+    q`SELECT jsonb(COALESCE(json_group_array(${src.c.v}), json('[]'))) AS list FROM ${src}`,
+    ['list'],
+  );
+  return toListStream(withoutCarried(carryOf(input)), rel, { kind: 'scalar', as: input.as });
 }
 
 export type NumericReducer = 'sum' | 'min' | 'max' | 'mean';
