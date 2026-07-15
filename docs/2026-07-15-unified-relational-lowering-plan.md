@@ -1,14 +1,13 @@
 # Unified relational traversal lowering — root and child traversals through one compiler
 
 **Date:** 2026-07-15  
-**Status:** in progress; Stages 0–5 complete, Stage 6 active
-**Baseline:** full suite 370/370, L1 2298/2298, L3 931/2041; 246 compiler tests
+**Status:** in progress; Stages 0–5 complete, Stage 6 consumer migration complete, Stage 7 active
+**Baseline:** full suite 370/370, L1 2298/2298, L3 932/2041; 246 compiler tests
 
 ## Restart handoff — read this first after a context reset
 
-**Current checkpoint:** branch `refactor/unified-relational-lowering`; every slice through
-item 15 below is represented in this checkpoint. Item 12 is on trunk; items 13–15 remain
-local checkpoints until explicitly approved for push. Run full `bun test` before every commit.
+**Current checkpoint:** branch `refactor/unified-relational-lowering`; items 1–15 are on
+`trunk`, and item 16 is the current local checkpoint. Run full `bun test` before every commit.
 
 **Recent completed slices:**
 
@@ -97,6 +96,14 @@ local checkpoints until explicitly approved for push. Run full `bun test` before
     The direct key/order resolver is shared with child-first modulation, and `as()` now
     rebuilds every carried role through `carriedCols` instead of a hand-picked subset.
     L3 ratcheted 922→931.
+16. Multi-input scalar consumers now share `tryCompileScalarModulations`: one outer
+    multiset-safe ordinal, independently compiled child streams, optional/required joins,
+    and explicit presence columns distinguish an unproductive child from productive NULL.
+    `math` supports alias-rooted traversal variables, `format` traversal placeholders and
+    option-map `choose` choice/bodies all use it. Only the selected option body's
+    productivity is observed; an empty choice still reaches `Pick.none`. `mapscalar.ts`
+    no longer imports `compileNestedScalar`, including for map/scalar-local. The official
+    alias-rooted math scenario landed and L3 ratcheted 931→932.
 
 **Current Stage 6 state:** scalar traversal modulators for `project`, aliased `select`,
 and inline element `group` all use the generic child-domain compiler. Group keys consume
@@ -104,20 +111,19 @@ and inline element `group` all use the generic child-domain compiler. Group keys
 final key barrier. These consumers share multiset-safe origin joins rather than private
 correlated traversal parsers. ProductiveBy is explicit at group/groupCount/project/select,
 aggregate, order, dedup, linear-path, and alias-compare boundaries, including nullable
-element records and aggregate members. L3 is 931.
+element records and aggregate members. Multi-input math/format/option-choose modulation
+also uses one generic child domain. L3 is 932.
 
-**Immediate next slice:** migrate math/format/option-choose off their legacy scalar fast
-paths and decide which additional VariantStream followers have
-unambiguous semantics. Property groups still lack a live element parent and remain a
-compatibility island. Preserve correlated count/EXISTS as measured fast paths until Stage 8.
+**Immediate next slice:** Stage 7 deletion: demote the remaining group/sack
+`compileNestedScalar` consumers behind explicit `tryInline*` fast paths, remove semantic
+throws from those fast paths, and delete `branchArm`'s prefix-only vocabulary. Preserve
+correlated count/EXISTS as measured fast paths until Stage 8.
 
-**Still pending in Stage 6:** migration of math/format/option-choose off their legacy
-scalar fast paths and broader VariantStream followers. Generic
-existence, total and non-total scalar/list optional, aggregate, sack, order, linear-path,
-and nullable ProductiveBy element policies are landed. Element-valued child order is
-currently supported for the map-style terminal-first policy; the new opt-in encounter
-role makes ordered dedup explicit, but a general all-row ordered element-stream policy
-is still undefined and unsupported.
+**Deliberate compatibility boundaries after Stage 6:** broader VariantStream followers,
+property groups without a live element parent, element-kind-changing optional fallback,
+and general all-row ordered element streams remain unsupported. The new opt-in encounter
+role makes map-style first and ordered dedup explicit; it does not invent semantics for
+those broader cases.
 
 **Non-negotiable invariants:** productive SQL NULL is a traverser; no child row is
 different from a NULL row. Child barriers group by multiset-safe origin ordinals and use
@@ -704,8 +710,8 @@ Migrate in increasing semantic complexity:
    Total scalar/list and non-total scalar `optional` are done; element-kind-changing
    fallback remains.
 5. ~~`local`: delete its movement-only parser and use child-scoped barriers.~~
-6. `by(traversal)`: project/select/group/aggregate/sack use child cardinality; math,
-   format, and option-choose still use their scalar fast path.
+6. ~~`by(traversal)`: project/select/group/aggregate/sack/math/format and option-choose
+   use child cardinality and shared modulation domains.~~
 7. ProductiveByStrategy: group/groupCount/project/select/aggregate/order/dedup/path/where
    now have explicit policies, including nullable element fields.
 8. ~~`where`/`filter`/`not`: inline fast paths plus generic child-existence fallback.~~
@@ -834,7 +840,7 @@ The refactor is complete when all of the following are true:
 - [ ] Every ordinary read leaf returns `Stream`, never `Compiled`.
 - [ ] Only `materializeRoot` calls `readCompiled` for reads.
 - [ ] Root and child traversals share `lowerSteps`.
-- [ ] All stream-carried columns physically exist on their relations.
+- [x] All stream-carried columns physically exist on their relations.
 - [ ] Barriers derive global/per-origin behaviour from `CompileScope`.
 - [ ] `only one projection step is supported per traversal` no longer exists.
 - [ ] `branchArm` is not prefix-only.
@@ -844,8 +850,8 @@ The refactor is complete when all of the following are true:
       paths with generic fallbacks.
 - [x] ProductiveByStrategy has explicit policies for every supported consumer rather
       than a global rejection.
-- [ ] L1 is 2298/2298 and L3 has never regressed below 833 during migration.
-- [ ] Existing hot-path EXPLAIN/performance guards remain green.
+- [x] L1 is 2298/2298 and L3 has never regressed below 833 during migration.
+- [x] Existing hot-path EXPLAIN/performance guards remain green.
 
 ## Recommended first implementation series
 

@@ -1,14 +1,12 @@
 import { q, list, value, type Expression } from '../q.ts';
 import {
-  elemCtx, compileNestedScalar, scalarProp, aliasCtx, labelNameSub, predicateSql, type ScalarCtx,
+  elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, type ScalarCtx,
 } from '../plan.ts';
-import { stepChain } from '../frontend.ts';
 import { mathToSql, mathVars } from '../math.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, elemRel, type ElementStream } from './context.ts';
 import { carryOf, toScalarStream, type ListStream, type ScalarStream, type Stream } from './stream.ts';
-import { type ValueType } from '../render.ts';
-import { tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
+import { tryCompileElementChild, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, type ScalarModulationSpec } from './child.ts';
 
 // ---------- map (scalar body → per-traverser scalar projector) ----------
 
@@ -48,10 +46,9 @@ export function tryLowerListChild(st: ElementStream, step: PStep): ListStream | 
 }
 
 /**
- * map(__.<scalar>) → one correlated scalar per traverser (shape value), reusing
- * compileNestedScalar (values/label/id/constant/out().count()/edge-aggregate). An
- * Element bodies are attempted first through tryCompileElementChild; alias/select/fold
- * bodies still defer when they are neither an element child nor a plain scalar.
+ * map(__.<scalar>) → one relational scalar child per traverser. Element bodies are
+ * attempted first through tryCompileElementChild; alias/select/fold bodies still
+ * defer when they are neither an element child nor a supported scalar/list child.
  * The produced ScalarStream re-enters the common dispatcher, so scalar followers
  * compose without this leaf owning a private tail compiler.
  */
@@ -59,25 +56,9 @@ export function lowerMapScalar(st: ElementStream, steps: PStep[], stop: number):
   const name = steps[stop].name; // 'map' or a scalar-reduction 'local'
   const arg = steps[stop].args[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) throw new Error(`${name}(traversal) required`);
-  const inner = stepChain(arg.nested, st.params);
   const child = tryCompileScalarValueChild(st, arg.nested, name === 'local' ? 'all' : 'first');
   if (child) return child;
-  const ctx = elemCtx(elemRel(st), st.elem);
-  const sc = compileNestedScalar(inner, ctx);
-  const n = elemRel(st);
-  const p = st.rel.as('p');
-  // Do not use `v IS NOT NULL` as a productivity test: constant(null) is a
-  // productive null traverser. compileNestedScalar currently collapses an empty
-  // child and a null value to the same SQL scalar; generic child lowering will
-  // represent productivity as row presence and remove that ambiguity.
-  const rel = st.q.cte(
-    q`SELECT ${sc.expr} AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`,
-    ['v', ...carriedCols(st.carried)],
-  );
-  // A nested count() is always a Long (TinkerPop's count semantics); the SQLite
-  // COUNT integer would otherwise infer as Int via anySerializer.
-  const as: ValueType | undefined = inner[inner.length - 1]?.name === 'count' ? 'long' : undefined;
-  return toScalarStream(carryOf(st), rel, as);
+  throw new Error(`${name}() child not supported by generic scalar lowering`);
 }
 
 // ---------- math (scalar arithmetic projector) ----------
@@ -88,7 +69,7 @@ export function lowerMapScalar(st: ElementStream, steps: PStep[], stop: number):
  *   - `_`        → the current traverser (elemCtx).
  *   - an alias   → an as()-bound traverser (aliasCtx over the carried rowid column).
  * Each variable's scalar value comes from its by() modulator (a property key or a
- * nested traversal, via compileNestedScalar) — positional/round-robin over the
+ * nested traversal, via the shared child-row compiler) — positional/round-robin over the
  * folded by()s in first-seen variable order, so a single by() feeds every variable
  * and N by()s feed N variables (matching project()). A missing by() value makes the
  * arithmetic NULL, so the traverser is filtered (a by() that produces nothing drops
@@ -105,33 +86,42 @@ export function lowerMath(st: ElementStream, steps: PStep[], stop: number): Scal
   const bys = s.bys ?? [];
   const varOrder = mathVars(formula);
 
-  const p = st.rel.as('p');
-  const cache = new Map<string, Expression>();
-  const resolveVar = (name: string): Expression => {
-    const hit = cache.get(name);
-    if (hit) return hit;
+  const specs: ScalarModulationSpec[] = [];
+  const resolved = new Map<string, { key?: string; mod?: number; col?: string; elem: ElementStream['elem'] }>();
+  for (const name of varOrder) {
     if (!bys.length) throw new Error(`math("${formula}"): variable "${name}" needs a by() modulator`);
     const byArgs = bys[varOrder.indexOf(name) % bys.length];
-    let ctx: ScalarCtx;
-    if (name === '_') ctx = elemCtx(elemRel(st), st.elem);
-    else {
+    let col: string | undefined;
+    let elem = st.elem;
+    if (name !== '_') {
       const entry = st.carried.aliases.get(name);
       if (!entry) throw new Error(`math("${formula}"): no such variable "${name}" — as("${name}") was not seen`);
-      ctx = aliasCtx(p.c[entry.col], entry.elem);
+      col = entry.col;
+      elem = entry.elem;
     }
     const nested = byArgs.find((a: any) => a && typeof a === 'object' && 'nested' in a);
     const strKey = byArgs.find((a: any) => typeof a === 'string');
-    let sc;
-    if (nested) sc = compileNestedScalar(stepChain(nested.nested, st.params), ctx);
-    else if (strKey !== undefined) sc = { expr: scalarProp(ctx, strKey) }; // by(key): a plain property read (first-under-multi for a node)
+    if (nested) {
+      const mod = specs.length;
+      specs.push({ nested: nested.nested, rootCol: col, rootElem: elem, required: true });
+      resolved.set(name, { mod, col, elem });
+    } else if (strKey !== undefined) resolved.set(name, { key: strKey, col, elem });
     else throw new Error(`math("${formula}"): by() modulator must be a property key or a traversal`);
-    cache.set(name, sc.expr);
-    return sc.expr;
+  }
+
+  const mods = specs.length ? tryCompileScalarModulations(st, specs) : null;
+  if (specs.length && !mods) throw new Error(`math("${formula}"): traversal modulator not supported by generic child lowering`);
+  const p = (mods?.rel ?? st.rel).as('p');
+  const n = elemRel(st);
+  const resolveVar = (name: string): Expression => {
+    const r = resolved.get(name)!;
+    if (r.mod !== undefined) return p.c[mods!.values[r.mod].value];
+    const ctx: ScalarCtx = r.col ? aliasCtx(p.c[r.col], r.elem) : elemCtx(n, st.elem);
+    return scalarProp(ctx, r.key!);
   };
 
   const mathExpr = mathToSql(formula, resolveVar);
 
-  const n = elemRel(st);
   // Drop a non-productive by() or SQL domain-error result (both yield NULL).
   const rel = st.q.cte(
     q`SELECT ${mathExpr} AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${predicateSql(mathExpr, undefined)}`,
@@ -157,16 +147,14 @@ export function lowerFormat(st: ElementStream, steps: PStep[], stop: number): Sc
   const tmpl = s.args[0];
   if (typeof tmpl !== 'string') throw new Error('format(string) required');
   const bys = s.bys ?? [];
-  const p = st.rel.as('p');
-  const ctx = elemCtx(elemRel(st), st.elem);
-
   // Split into alternating literal / token parts. Each `||` operand is a bound literal
   // (a plain string) or a resolved value expression; concatenate them all.
   const re = /%\{([^}]*)\}/g;
-  const pieces: Expression[] = [];
+  const specs: ScalarModulationSpec[] = [];
+  const parts: ({ kind: 'literal'; text: string } | { kind: 'property'; key: string } | { kind: 'mod'; index: number })[] = [];
   let last = 0, m: RegExpExecArray | null, u = 0, hadToken = false;
   while ((m = re.exec(tmpl)) !== null) {
-    if (m.index > last) pieces.push(q`${value(tmpl.slice(last, m.index))}`);
+    if (m.index > last) parts.push({ kind: 'literal', text: tmpl.slice(last, m.index) });
     const tok = m[1];
     hadToken = true;
     if (tok === '_') {
@@ -174,21 +162,33 @@ export function lowerFormat(st: ElementStream, steps: PStep[], stop: number): Sc
       const byArgs = bys[u++ % bys.length];
       const nested = byArgs.find((a: any) => a && typeof a === 'object' && 'nested' in a);
       const strKey = byArgs.find((a: any) => typeof a === 'string');
-      if (nested) pieces.push(compileNestedScalar(stepChain(nested.nested, st.params), ctx).expr);
-      else if (strKey !== undefined) pieces.push(scalarProp(ctx, strKey));
+      if (nested) {
+        const index = specs.length;
+        specs.push({ nested: nested.nested, required: true });
+        parts.push({ kind: 'mod', index });
+      } else if (strKey !== undefined) parts.push({ kind: 'property', key: strKey });
       else throw new Error(`format("${tmpl}"): a by() modulator must be a property key or a traversal`);
     } else {
       // A named token → the current element's property (first-under-multi for a node).
-      pieces.push(scalarProp(ctx, tok));
+      parts.push({ kind: 'property', key: tok });
     }
     last = m.index + m[0].length;
   }
-  if (last < tmpl.length) pieces.push(q`${value(tmpl.slice(last))}`);
+  if (last < tmpl.length) parts.push({ kind: 'literal', text: tmpl.slice(last) });
+  const mods = specs.length ? tryCompileScalarModulations(st, specs) : null;
+  if (specs.length && !mods) throw new Error(`format("${tmpl}"): traversal modulator not supported by generic child lowering`);
+  const p = (mods?.rel ?? st.rel).as('p');
+  const n = elemRel(st);
+  const ctx = elemCtx(n, st.elem);
+  const pieces = parts.map((part): Expression => part.kind === 'literal'
+    ? q`${value(part.text)}`
+    : part.kind === 'property'
+      ? scalarProp(ctx, part.key)
+      : p.c[mods!.values[part.index].value]);
   // A constant template (no tokens) is one string literal; concatenating a single
   // piece is fine. Cast the first piece to TEXT so a lone value token frames as string.
   const expr = pieces.length ? q`CAST(${list(pieces, ' || ')} AS TEXT)` : q`${value('')}`;
 
-  const n = elemRel(st);
   const where = hadToken ? q` WHERE ${predicateSql(expr, undefined)}` : q``;
   const rel = st.q.cte(
     q`SELECT ${expr} AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}${where}`,
@@ -207,46 +207,61 @@ export function lowerFormat(st: ElementStream, steps: PStep[], stop: number): Sc
  * the ELSE. Requires a Pick.none default with a scalar body: without one, unmatched
  * inputs pass through as the element itself (TinkerPop identity) → a mixed vertex/
  * scalar result the one-shape framing can't carry, so that defers. Scalar bodies only
- * (constant/values/label/id via compileNestedScalar); element bodies and
+ * (through the shared child-row compiler); element bodies and
  * Pick.unproductive/any defer. The CASE result is a composable ScalarStream.
  */
 export function lowerChooseOptions(st: ElementStream, steps: PStep[], stop: number): ScalarStream {
   const cs = steps[stop];
-  const ctx = elemCtx(elemRel(st), st.elem);
-
   const a0 = cs.args[0];
-  let choice: Expression;
-  if (a0 && typeof a0 === 'object' && 'token' in a0)
-    choice = a0.token === 'label' ? labelNameSub(ctx.labelIdExpr)
-      : a0.token === 'id' ? ctx.extIdExpr!
-      : (() => { throw new Error(`choose(T.${a0.token}) not yet supported`); })();
-  else if (a0 && typeof a0 === 'object' && 'nested' in a0)
-    choice = compileNestedScalar(stepChain(a0.nested, st.params), ctx).expr;
-  else throw new Error('choose() choice must be a traversal or a T token');
+  const specs: ScalarModulationSpec[] = [];
+  let choiceMod: number | undefined;
+  if (a0 && typeof a0 === 'object' && 'nested' in a0) {
+    choiceMod = specs.length;
+    // An unproductive choice is still routed to Pick.none; it does not drop the
+    // parent. The LEFT join therefore differs deliberately from by()-productivity.
+    specs.push({ nested: a0.nested, required: false });
+  } else if (!(a0 && typeof a0 === 'object' && 'token' in a0))
+    throw new Error('choose() choice must be a traversal or a T token');
 
-  const whens: Expression[] = [];
-  let elseExpr: Expression = q`NULL`;
+  const options: { key: any; mod: number; isNone: boolean }[] = [];
   let sawNone = false;
   for (const opt of cs.options!) {
     const bodyArg = opt.args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
     if (!bodyArg) throw new Error('option() requires a traversal body');
-    const bodyScalar = compileNestedScalar(stepChain(bodyArg.nested, st.params), ctx).expr;
     const keyArg = opt.args.find((x: any) => x !== bodyArg);
+    let isNone = false;
     if (keyArg === undefined || (keyArg && typeof keyArg === 'object' && 'pick' in keyArg)) {
       const pick = keyArg && typeof keyArg === 'object' && 'pick' in keyArg ? keyArg.pick : 'none';
       if (pick !== 'none') throw new Error(`option(Pick.${pick}) not yet supported`);
-      if (!sawNone) { elseExpr = bodyScalar; sawNone = true; } // first Pick.none wins
-    } else {
-      whens.push(q`WHEN ${predicateSql(choice, keyArg)} THEN ${bodyScalar}`);
+      isNone = true;
+      if (sawNone) continue; // first Pick.none wins
+      sawNone = true;
     }
+    const mod = specs.length;
+    specs.push({ nested: bodyArg.nested, required: false });
+    options.push({ key: keyArg, mod, isNone });
   }
-  if (!whens.length) throw new Error('choose().option() needs at least one keyed option');
+  if (!options.some((x) => !x.isNone)) throw new Error('choose().option() needs at least one keyed option');
   // No Pick.none → unmatched inputs are the element itself (mixed vertex/scalar): defer.
   if (!sawNone) throw new Error('choose().option() without a Pick.none default not yet supported (unmatched pass-through is mixed-shape)');
+  const mods = tryCompileScalarModulations(st, specs);
+  if (!mods) throw new Error('choose().option() traversal not supported by generic scalar child lowering');
+  const p = mods.rel.as('p');
   const n = elemRel(st);
-  const p = st.rel.as('p');
+  const ctx = elemCtx(n, st.elem);
+  const choice = choiceMod !== undefined
+    ? p.c[mods.values[choiceMod].value]
+    : a0.token === 'label' ? labelNameSub(ctx.labelIdExpr)
+      : a0.token === 'id' ? ctx.extIdExpr!
+      : (() => { throw new Error(`choose(T.${a0.token}) not yet supported`); })();
+  const keyed = options.filter((x) => !x.isNone);
+  const fallback = options.find((x) => x.isNone)!;
+  const whens = keyed.map((x) => q`WHEN ${predicateSql(choice, x.key)} THEN ${p.c[mods.values[x.mod].value]}`);
+  const productiveWhens = keyed.map((x) => q`WHEN ${predicateSql(choice, x.key)} THEN ${p.c[mods.values[x.mod].present]}`);
+  const result = q`CASE ${list(whens, ' ')} ELSE ${p.c[mods.values[fallback.mod].value]} END`;
+  const productive = q`CASE ${list(productiveWhens, ' ')} ELSE ${p.c[mods.values[fallback.mod].present]} END`;
   const rel = st.q.cte(
-    q`SELECT CASE ${list(whens, ' ')} ELSE ${elseExpr} END AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`,
+    q`SELECT ${result} AS v${carryFrag(st.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id} WHERE ${predicateSql(productive, undefined)}`,
     ['v', ...carriedCols(st.carried)],
   );
   return toScalarStream(carryOf(st), rel);

@@ -343,6 +343,63 @@ export function tryCompileScalarValueChild(
     ?? tryCompileScalarChild(parent, nested, use, scope);
 }
 
+export interface ScalarModulationSpec {
+  readonly nested: any;
+  /** Re-root the child on a carried as()-label while retaining the outer row. */
+  readonly rootCol?: string;
+  readonly rootElem?: ElementStream['elem'];
+  /** Required = ordinary productive modulation; optional = expose row presence. */
+  readonly required?: boolean;
+}
+
+export interface ScalarModulationDomain {
+  readonly rel: Relation;
+  readonly values: readonly { value: string; present: string }[];
+}
+
+/** Compile independent scalar traversal modulators against ONE multiset-safe parent
+ * domain. Every child gets its own nested scope, then rejoins on the shared outer
+ * ordinal. Optional children expose an explicit presence column, so productive NULL
+ * is never confused with an unproductive child. This is the common relational seam
+ * for multi-input consumers such as math(), format(), and option-map choose(). */
+export function tryCompileScalarModulations(
+  parent: ElementStream,
+  specs: readonly ScalarModulationSpec[],
+): ScalarModulationDomain | null {
+  if (!specs.length) return null;
+  const outer = pushChildScope(parent);
+  const children = specs.map((spec, i) => {
+    let seed = outer.seed;
+    if (spec.rootCol) {
+      const p = outer.seed.rel.as(`mr${i}`);
+      const rel = parent.q.cte(
+        q`SELECT ${p.c[spec.rootCol]} AS id${carryFrag(outer.seed.carried, p)} FROM ${p}`,
+        ['id', ...carriedCols(outer.seed.carried)],
+      );
+      seed = { ...outer.seed, rel, elem: spec.rootElem ?? outer.seed.elem };
+    }
+    const stream = tryCompileScalarValueChild(seed, spec.nested, 'first', outer.scope);
+    return stream ? { stream, required: spec.required !== false } : null;
+  });
+  if (children.some((x) => !x)) return null;
+
+  const d = outer.frame.domain.as('md');
+  const aliases = children.map((child, i) => ({ child: child!, rel: child!.stream.rel.as(`ms${i}`) }));
+  const values = aliases.map((_, i) => ({ value: `m${i}`, present: `m${i}_present` }));
+  const joins = aliases.map(({ child, rel }) =>
+    q`${child.required ? q` JOIN ` : q` LEFT JOIN `}${rel} ON ${rel.c[outer.frame.ordinal]}=${d.c[outer.frame.ordinal]}`,
+  );
+  const payload = aliases.flatMap(({ rel }, i) => [
+    q`${rel.c.v} AS ${values[i].value}`,
+    q`CASE WHEN ${rel.c[outer.frame.ordinal]} IS NOT NULL THEN 1 END AS ${values[i].present}`,
+  ]);
+  const rel = parent.q.cte(
+    q`SELECT ${d.c.id} AS id${carryFrag(parent.carried, d)}, ${list(payload, ', ')} FROM ${d}${list(joins, '')}`,
+    ['id', ...carriedCols(parent.carried), ...values.flatMap((x) => [x.value, x.present])],
+  );
+  return { rel, values };
+}
+
 /** Productive scalar rows with the child origin still live. Barrier/side-effect
  * consumers use this form when THEY own first/all/productive-null cardinality;
  * keeping that decision out of the child parser is the central consumer-policy seam. */
