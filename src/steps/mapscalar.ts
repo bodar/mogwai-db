@@ -8,7 +8,7 @@ import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, elemRel, type ElementStream } from './context.ts';
 import { carryOf, toScalarStream, type ListStream, type ScalarStream, type Stream } from './stream.ts';
 import { type ValueType } from '../render.ts';
-import { tryCompileCountChild, tryCompileElementChild, tryCompileListChild, tryCompileScalarChild } from './child.ts';
+import { tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
 
 // ---------- map (scalar body → per-traverser scalar projector) ----------
 
@@ -37,7 +37,7 @@ export function tryLowerFlatMap(st: ElementStream, step: PStep): Stream | null {
   const arg = step.args[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
   return tryCompileElementChild(st, arg.nested, 'all')?.stream
-    ?? tryCompileScalarChild(st, arg.nested, 'all')
+    ?? tryCompileScalarValueChild(st, arg.nested, 'all')
     ?? tryCompileListChild(st, arg.nested);
 }
 
@@ -60,10 +60,8 @@ export function lowerMapScalar(st: ElementStream, steps: PStep[], stop: number):
   const arg = steps[stop].args[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) throw new Error(`${name}(traversal) required`);
   const inner = stepChain(arg.nested, st.params);
-  const childCount = tryCompileCountChild(st, arg.nested);
-  if (childCount) return childCount;
-  const scalarChild = tryCompileScalarChild(st, arg.nested, name === 'local' ? 'all' : 'first');
-  if (scalarChild) return scalarChild;
+  const child = tryCompileScalarValueChild(st, arg.nested, name === 'local' ? 'all' : 'first');
+  if (child) return child;
   const ctx = elemCtx(elemRel(st), st.elem);
   const sc = compileNestedScalar(inner, ctx);
   const n = elemRel(st);

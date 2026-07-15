@@ -276,6 +276,18 @@ export function tryCompileScalarChild(
   return compileScalarChildRows(parent, nested, use, scope)?.stream ?? null;
 }
 
+/** One public scalar-valued child entry point. Consumers must not know whether a
+ * scalar came from projected rows or a total scope-aware count barrier. */
+export function tryCompileScalarValueChild(
+  parent: ElementStream,
+  nested: any,
+  use: ChildUse = 'first',
+  scope: CompileScope = ROOT_SCOPE,
+): ScalarStream | null {
+  return tryCompileCountChild(parent, nested, scope)
+    ?? tryCompileScalarChild(parent, nested, use, scope);
+}
+
 /** Scalar rows followed by fold() become one ListStream per parent. This is a true
  * child barrier: empty children emit [], productive NULL remains [null], and only
  * the innermost origin is removed at the consumer boundary. */

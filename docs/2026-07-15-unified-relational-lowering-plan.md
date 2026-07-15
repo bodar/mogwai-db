@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–5 complete, Stage 6 active
-**Baseline:** L1 2298/2298, L3 873/2041; latest completed checkpoint: 357 tests, 1274 assertions
+**Baseline:** L1 2298/2298, L3 874/2041; latest completed checkpoint: 359 tests
 
 ## Restart handoff — read this first after a context reset
 
@@ -11,7 +11,7 @@
 this handoff was written. Work is local-only: do not push or merge to trunk. Run the full
 `bun test` suite before every local commit.
 
-**Last two completed slices:**
+**Recent completed slices:**
 
 1. `fe361a9` — scoped element `fold()` now produces a typed ListStream per parent;
    homogeneous element-list union/choose/coalesce arms share `unifyLists`; terminal
@@ -21,15 +21,21 @@ this handoff was written. Work is local-only: do not push or merge to trunk. Run
    origin-partitioned element `limit`/`skip`/`range`/`dedup` (including before `fold`).
    `src/steps/local.ts` and its private movement/window compiler were deleted. L3 stayed
    873. Full suite: 357/357; corpus: 2298/2298.
+3. `d671257` — all-traversal scalar `project().by()` fields lower through child streams,
+   joined by one outer origin with first/productive semantics. Full suite: 359/359; L3
+   stayed 873.
+4. Current slice — mixed property-key and `T.id`/`T.label` scalar fields now share the
+   same project origin join, and `tryCompileScalarValueChild` hides count-vs-row lowering
+   from consumers. L3 ratcheted 873→874.
 
 **Current Stage 6 slice:** traversal-valued `project().by()` is now the first generic
 by-consumer. An outer origin identifies each parent; every scalar child modulator lowers
 with `first` cardinality; productive fields inner-join by origin. Missing child rows drop
-the record, productive NULL survives, and duplicate parents remain distinct. The current
-slice requires every cycled project modulator to be a traversal. L3 remains 873.
+the record, productive NULL survives, and duplicate parents remain distinct. Property
+keys and `T.id`/`T.label` can mix with traversal fields in the same relation. L3 is 874.
 
-**Immediate next slice:** broaden that project path to mixed traversal + string/token/
-bare-element modulators, then migrate labelled `select` and group key/value consumers.
+**Immediate next slice:** add bare-element project fields without weakening the scalar
+productivity join, then migrate labelled `select` and group key/value consumers.
 Do not add more recognized syntax to `compileNestedScalar`: treat its current correlated
 SQL cases as optional fast paths and add generic child-stream fallbacks with explicit
 first/productive cardinality. Other consumers to inventory afterward are sack, math,
@@ -625,9 +631,9 @@ Migrate in increasing semantic complexity:
 4. ~~scalar/list arms for `coalesce`, preserving first-productive-arm semantics.~~
    Scalar/list `optional` remains.
 5. ~~`local`: delete its movement-only parser and use child-scoped barriers.~~
-6. `by(traversal)`: use child scalar cardinality plus productivity. Project with all-
-   traversal scalar modulators is done; mixed project, select, group, sack/math/format/
-   choose consumers remain.
+6. `by(traversal)`: use child scalar cardinality plus productivity. Project scalar
+   traversal/string/token modulators are done; bare-element project, select, group,
+   sack/math/format/choose consumers remain.
 7. ProductiveByStrategy: make productive/unproductive handling an explicit consumer
    policy rather than a strategy-wide rejection.
 8. `where`/`filter`/`not`: keep inline fast paths; generic fallback uses child

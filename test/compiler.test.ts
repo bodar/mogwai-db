@@ -743,6 +743,10 @@ describe('compiler SQL snapshots', () => {
     expect(p.sql).toContain('ON b1.o0=b0.o0');
     expect(read('g.V().project("friend").by(__.out().values("name")).select("friend")').shape)
       .toEqual({ kind: 'value', as: undefined });
+    const mixed = read('g.V().project("name","degree").by("name").by(__.out().count())');
+    expect(mixed.sql).toContain('vp0.key=?');
+    expect(mixed.sql).toContain('ON b1.o0=b0.o0');
+    expect(read('g.V().project("id","friend").by(T.id).by(__.out().values("name"))').shape.kind).toBe('map');
   });
 
   test('record fields re-enter element/scalar/list lowering', () => {
@@ -1994,6 +1998,13 @@ describe('compiler execution semantics', () => {
     // Equal parents remain separate traversers through the outer by-origin join.
     expect(run(store, 'g.V(1).union(__.identity(),__.identity()).project("x").by(__.values("name"))'))
       .toEqual([{ e0_v: 'marko' }, { e0_v: 'marko' }]);
+    expect(run(store, 'g.V().project("name","degree").by("name").by(__.out().count())')
+      .map((r) => [r.e0_v, r.e1_v]).sort((a, b) => a[0].localeCompare(b[0])))
+      .toEqual([
+        ['josh', 2], ['lop', 0], ['marko', 3], ['peter', 1], ['ripple', 0], ['vadas', 0],
+      ]);
+    expect(run(store, 'g.V(1).project("id","kind","friend").by(T.id).by(T.label).by(__.out().values("name"))'))
+      .toEqual([{ e0_v: 1, e1_v: 'person', e2_v: 'vadas' }]);
   });
 
   test('RecordStream fields compose back into ordinary streams', () => {
