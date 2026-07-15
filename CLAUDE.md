@@ -107,6 +107,12 @@ while an empty choice routes to `Pick.none`. The old `compileNestedScalar` symbo
 deleted. `tryInlineScalar` is a nullable correlated optimization used only by property
 groups and predicate fast paths; it is not an extension point and unsupported means
 fallback, never semantic rejection. Sack and every element-backed group path are generic.
+Multi-modulator consumers push one outer parent ordinal, then pass a one-shot
+`reuseCurrentFrame` proof to each independent child. A direct or one-to-one re-rooted
+seed therefore keeps `o0` instead of assigning redundant `o1`; `pushChildScope` consumes
+the marker immediately, so a genuinely nested/cardinality-expanded child still creates
+its own frame. Never infer reuse merely from an origin column being present—the caller
+must own the one-row-per-parent proof.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
   (`stripTerminal`, `foldRepeatClusters`, `foldByModulators`) run once up front so
   the dispatch sees a canonical, peek-free chain (no index arithmetic anywhere).

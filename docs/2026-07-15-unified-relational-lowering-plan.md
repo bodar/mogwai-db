@@ -163,6 +163,15 @@ local commit/checkpoint. Run full `bun test` before every commit.
     This makes the iterative core directly reusable by future child consumers instead of
     exposing a root-framed result. TypeScript, compiler 246/246, L3 933/2041, full
     370/370, and corpus 2298/2298 are green.
+25. Multi-modulator consumers now reuse their already-pushed parent frame one child at
+    a time. `project`/traversal `select`, generic group keys/values/reducers/folds, and
+    math/format/option modulation no longer assign a redundant nested `ROW_NUMBER` for
+    a seed that is provably one row per existing parent ordinal. The reuse marker is
+    explicit and consumed by the next push, so genuinely nested or cardinality-expanded
+    children still mint a fresh frame. Representative two-field `project` SQL fell from
+    11 CTEs/1059 characters to 9 CTEs/861 characters and carries only `o0`, not `o0,o1`.
+    TypeScript, compiler 246/246, L3 933/2041, full 370/370, and corpus 2298/2298
+    are green.
 
 **Current Stage 6 state:** scalar traversal modulators for `project`, aliased `select`,
 and inline element `group` all use the generic child-domain compiler. Group keys consume
@@ -173,10 +182,11 @@ aggregate, order, dedup, linear-path, and alias-compare boundaries, including nu
 element records and aggregate members. Multi-input math/format/option-choose modulation
 also uses one generic child domain. L3 is 933.
 
-**Immediate next slice:** begin Stage 8 with static carried-column requirements. Measure
-representative hot root and nested traversals, then stop allocating origin/encounter state
-when no downstream consumer observes it. Preserve correlated count/EXISTS and bulk-repeat
-as measured fast paths, and keep every optimization behind the same Stream/scope contract.
+**Immediate next slice:** finish the child-frame reuse gate with the full suite, then
+compare SQLite plans for representative project/group/local/map traversals and the
+single-hop optional fast path. Continue removing origins/encounter columns only where a
+static one-row/cardinality proof exists. Preserve correlated count/EXISTS and bulk-repeat
+as measured fast paths, behind the same Stream/scope contract.
 
 **Deliberate compatibility boundaries after Stage 6:** broader VariantStream followers,
 property groups without a live element parent, element-kind-changing optional fallback,
@@ -807,6 +817,8 @@ Only after semantic migration is green:
 - preserve index-only correlated EXISTS/count fast paths;
 - gate origin and encounter-order columns through a static requirement analysis so
   top-level hot traversals pay no extra columns;
+- ~~reuse a consumer's existing one-row-per-parent frame instead of assigning a second
+  ordinal independently inside every sibling modulation;~~
 - inspect CTE count and SQLite query plans for representative deep child traversals;
 - run Bun and workerd/DO contract probes for window, JSONB aggregate, and binding parity.
 

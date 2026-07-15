@@ -7,7 +7,7 @@ import { carryOf, continueLowering, pathColumns, recordFieldColumns, toListStrea
 import { type Compiled, type PathPos } from '../render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
 import { lowerGlobalCount } from './barrier.ts';
-import { isElementChild, isListChild, isScalarChild, pushChildScope, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
+import { isElementChild, isListChild, isScalarChild, pushChildScope, reuseCurrentFrame, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
 
 // ---------- select()/project() ----------
 
@@ -67,7 +67,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
     if (nested[i]) {
       const seed = isProject ? outer.seed : reRootElement(outer.seed, p, source.id, source.elem);
       if (isScalarChild(nested[i], st.params)) {
-        const child = tryCompileScalarValueChild(seed, nested[i], 'first', outer.scope);
+        const child = tryCompileScalarValueChild(seed, nested[i], 'first', reuseCurrentFrame(outer.scope, outer.frame));
         if (!child) throw new Error('scalar record child failed after successful shape preflight');
         const rel = child.rel.as(`b${i}`);
         return {
@@ -77,7 +77,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
         };
       }
       if (isListChild(nested[i], st.params)) {
-        const child = tryCompileListChild(seed, nested[i], outer.scope);
+        const child = tryCompileListChild(seed, nested[i], reuseCurrentFrame(outer.scope, outer.frame));
         if (!child) throw new Error('list record child failed after successful shape preflight');
         const rel = child.rel.as(`b${i}`);
         return {
@@ -86,7 +86,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
           cols: [q`${rel.c.list} AS ${`${prefix}_list`}`],
         };
       }
-      const child = tryCompileElementChild(seed, nested[i], 'first', outer.scope);
+      const child = tryCompileElementChild(seed, nested[i], 'first', reuseCurrentFrame(outer.scope, outer.frame));
       if (!child) throw new Error('element record child failed after successful shape preflight');
       const cp = child.stream.rel.as(`cp${i}`);
       const n = (child.stream.elem === 'edge' ? edges : nodes).as(`n${i}`);
