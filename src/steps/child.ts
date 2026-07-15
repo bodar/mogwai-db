@@ -18,14 +18,22 @@ export interface ChildFrame {
   readonly ordinal: string;
   readonly domain: Relation;
   readonly parent: Stream;
+  readonly reused?: boolean;
 }
 export interface ChildScope {
   readonly kind: 'child';
   readonly frames: readonly ChildFrame[];
+  /** One-shot proof that the next child seed is still one row per current frame. */
+  readonly reuseFrame?: ChildFrame;
 }
 export type CompileScope = RootScope | ChildScope;
 
 export const ROOT_SCOPE: RootScope = { kind: 'root' };
+
+/** Let one child reuse an already-pushed multiset identity. Callers must request
+ * this independently for each sibling; pushChildScope consumes the marker. */
+export const reuseCurrentFrame = (scope: ChildScope, frame: ChildFrame): ChildScope =>
+  ({ ...scope, reuseFrame: frame });
 
 export type ChildUse = 'all' | 'first';
 
@@ -44,6 +52,14 @@ export function pushChildScope(
   parent: ElementStream,
   scope: CompileScope = ROOT_SCOPE,
 ): { scope: ChildScope; frame: ChildFrame; seed: ElementStream } {
+  if (scope.kind === 'child' && scope.reuseFrame) {
+    const ordinal = scope.reuseFrame.ordinal;
+    if (parent.carried.origins.at(-1) !== ordinal)
+      throw new Error(`reused child scope mismatch: expected innermost ${ordinal}, got ${parent.carried.origins.at(-1) ?? 'none'}`);
+    const frame: ChildFrame = { ordinal, domain: parent.rel, parent, reused: true };
+    const frames = [...scope.frames.slice(0, -1), frame];
+    return { scope: { kind: 'child', frames }, frame, seed: parent };
+  }
   const p = parent.rel.as('p');
   const cols = carriedCols(parent.carried);
   const ordinal = `o${parent.carried.origins.length}`;
@@ -378,7 +394,7 @@ export function tryCompileScalarModulations(
       );
       seed = { ...outer.seed, rel, elem: spec.rootElem ?? outer.seed.elem };
     }
-    const stream = tryCompileScalarValueChild(seed, spec.nested, 'first', outer.scope);
+    const stream = tryCompileScalarValueChild(seed, spec.nested, 'first', reuseCurrentFrame(outer.scope, outer.frame));
     return stream ? { stream, required: spec.required !== false } : null;
   });
   if (children.some((x) => !x)) return null;
@@ -605,6 +621,7 @@ export function tryCompileElementChild(
   if (!lowered) return null;
   const { stream: end, frame } = lowered;
 
+  if (frame.reused) return { stream: end, scope };
   if (use === 'all') return { stream: popChildScope(end, frame), scope };
   return { stream: popChildScope(end, frame), scope };
 }

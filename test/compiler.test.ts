@@ -6,7 +6,7 @@ import { executeQuery } from '../src/execute.ts';
 import { MODERN_SEED } from './conformance/seed-modern.ts';
 import { Query } from '../src/q.ts';
 import { assertStreamColumns, toGroupStream, toPathStream, toPropertyStream, toRecordStream, toScalarStream, toVariantStream } from '../src/steps/stream.ts';
-import { popChildScope, pushChildScope } from '../src/steps/child.ts';
+import { popChildScope, pushChildScope, reuseCurrentFrame } from '../src/steps/child.ts';
 import { readdirSync, readFileSync } from 'node:fs';
 
 // ---------- L2: SQL snapshots (canonical string -> SQL + binds + shape) ----------
@@ -65,6 +65,12 @@ describe('compiler SQL snapshots', () => {
     expect(scope.frames).toEqual([frame]);
     expect(seed.carried.origins).toEqual(['o0']);
     expect(assertStreamColumns(seed)).toBe(seed);
+
+    const reused = pushChildScope(seed, reuseCurrentFrame(scope, frame));
+    expect(reused.seed).toBe(seed);
+    expect(reused.frame.ordinal).toBe('o0');
+    expect(reused.frame.reused).toBe(true);
+    expect(reused.seed.carried.origins).toEqual(['o0']);
 
     const popped = popChildScope(seed, frame);
     expect(popped.carried.origins).toEqual([]);
@@ -760,6 +766,7 @@ describe('compiler SQL snapshots', () => {
       ],
     });
     expect(p.sql).toContain('ROW_NUMBER() OVER () AS o0');
+    expect(p.sql).not.toContain(' AS o1');
     expect(p.sql).toContain('JOIN c');
     expect(p.sql).toContain('ON b1.o0=b0.o0');
     expect(read('g.V().project("friend").by(__.out().values("name")).select("friend")').shape)

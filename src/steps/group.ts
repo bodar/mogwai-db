@@ -10,7 +10,7 @@ import { carryFrag, carriedCols, elemRel, withoutCarried, type Carry, type Eleme
 import { carryOf, continueLowering, groupColumns, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type PropertyStream, type ScalarStream } from './stream.ts';
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
-import { isElementFoldChild, isScalarChild, isScalarFoldChild, pushChildScope, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild } from './child.ts';
+import { isElementFoldChild, isScalarChild, isScalarFoldChild, pushChildScope, reuseCurrentFrame, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild } from './child.ts';
 
 /** Movement heads whose property-group compatibility path can use a correlated
  * neighbourhood reduction, and the scalar reducers that terminate one. */
@@ -179,7 +179,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   let valOrder: Expression | undefined;
   let valElement: GroupSource['valElement'];
   if (genericKey) {
-    const child = tryCompileScalarValueChild(outer.seed, keyArg.nested, 'first', outer.scope);
+    const child = tryCompileScalarValueChild(outer.seed, keyArg.nested, 'first', reuseCurrentFrame(outer.scope, outer.frame));
     if (!child) throw new Error('scalar group key failed after successful shape preflight');
     const c = child.rel.as('gk');
     joins.push(q`${src.productiveBy ? ' LEFT JOIN ' : ' JOIN '}${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
@@ -188,7 +188,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   if (genericProjectKey) {
     keyParts = projectKeys.map((key, i) => {
       const nested = projectBys[i].args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
-      const child = tryCompileScalarValueChild(outer.seed, nested.nested, 'first', outer.scope);
+      const child = tryCompileScalarValueChild(outer.seed, nested.nested, 'first', reuseCurrentFrame(outer.scope, outer.frame));
       if (!child) throw new Error('composite group key failed after successful shape preflight');
       const c = child.rel.as(`gkp${i}`);
       joins.push(q`${src.productiveBy ? ' LEFT JOIN ' : ' JOIN '}${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
@@ -196,14 +196,14 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     });
   }
   if (genericVal) {
-    const child = tryCompileScalarValueChild(outer.seed, valArg.nested, 'all', outer.scope);
+    const child = tryCompileScalarValueChild(outer.seed, valArg.nested, 'all', reuseCurrentFrame(outer.scope, outer.frame));
     if (!child) throw new Error('scalar group value failed after successful shape preflight');
     const c = child.rel.as('gv');
     joins.push(q` JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
     valExpr = c.c.v;
   }
   if (genericReducer) {
-    const rows = tryCompileRowsBeforeReducer(outer.seed, valArg.nested, outer.scope);
+    const rows = tryCompileRowsBeforeReducer(outer.seed, valArg.nested, reuseCurrentFrame(outer.scope, outer.frame));
     if (!rows) throw new Error('group reducer rows failed after successful shape preflight');
     const c = rows.stream.rel.as('gr');
     const join = rows.reducer === 'count' ? ' LEFT JOIN ' : ' JOIN ';
@@ -213,7 +213,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     valReducer = rows.reducer;
   }
   if (genericFold) {
-    const rows = tryCompileScalarRowsBeforeFold(outer.seed, valArg.nested, outer.scope);
+    const rows = tryCompileScalarRowsBeforeFold(outer.seed, valArg.nested, reuseCurrentFrame(outer.scope, outer.frame));
     if (!rows) throw new Error('group fold rows failed after successful shape preflight');
     const c = rows.stream.rel.as('gf');
     joins.push(q` LEFT JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
@@ -223,7 +223,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     valOrder = q`${p.c[outer.frame.ordinal]}, ${valMarker}`;
   }
   if (genericElementFold) {
-    const rows = tryCompileElementRowsBeforeFold(outer.seed, valArg.nested, outer.scope);
+    const rows = tryCompileElementRowsBeforeFold(outer.seed, valArg.nested, reuseCurrentFrame(outer.scope, outer.frame));
     if (!rows) throw new Error('group element fold rows failed after successful shape preflight');
     const c = rows.stream.rel.as('gef');
     const e = (rows.stream.elem === 'edge' ? edges : nodes).as('gev');
