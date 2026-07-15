@@ -912,6 +912,24 @@ describe('compiler SQL snapshots', () => {
     expect(run(store, 'g.V().as("a").select("a").by("age")').map((r) => r.v).sort())
       .toEqual([27, 29, 32, 35]);
     expect(executeQuery(store, 'g.withStrategies(ProductiveByStrategy).V().group().by("age").by("name")', {})).toHaveLength(1);
+
+    const aggregate = run(store, 'g.withStrategies(ProductiveByStrategy).V().aggregate("a").by("age").cap("a")').map((r) => r.v);
+    expect(aggregate.filter((v) => v == null)).toHaveLength(2);
+    expect(aggregate.filter((v) => v != null).sort((a, b) => a - b)).toEqual([27, 29, 32, 35]);
+    const traversed = run(store, 'g.withStrategies(ProductiveByStrategy).V().aggregate("a").by(__.values("age").is(gt(29))).cap("a")').map((r) => r.v);
+    expect(traversed.filter((v) => v == null)).toHaveLength(4);
+    expect(traversed.filter((v) => v != null).sort((a, b) => a - b)).toEqual([32, 35]);
+    expect(run(store, 'g.withStrategies(ProductiveByStrategy).V().local(__.aggregate("a").by("age")).cap("a")').map((r) => r.v).filter((v) => v == null)).toHaveLength(2);
+    expect(run(store, 'g.withStrategies(ProductiveByStrategy).V().aggregate("a").by("age").cap("a").max(Scope.local)').map((r) => r.v)).toEqual([35]);
+    expect(run(store, 'g.withStrategies(ProductiveByStrategy).V().aggregate("a").by("foo").cap("a").max(Scope.local)').map((r) => r.v)).toEqual([null]);
+    expect(run(store, 'g.withStrategies(ProductiveByStrategy).V().aggregate("a").by("foo").cap("a").unfold().sum()').map((r) => r.v)).toEqual([null]);
+    expect(run(store, 'g.V().aggregate("a").by(__.outE("created").count()).cap("a")').map((r) => r.v).sort((a, b) => a - b))
+      .toEqual([0, 0, 0, 1, 1, 2]);
+    expect(() => compile('g.withStrategies(ProductiveByStrategy).V().order().by("age")', {})).not.toThrow();
+    expect(read('g.withStrategies(ProductiveByStrategy).V().as("a").out().as("b").where("a",eq("b")).by("age")').sql)
+      .toContain(' IS ');
+    expect(read('g.withStrategies(ProductiveByStrategy).V(1).out().path().by("age")').sql)
+      .not.toContain('IS NOT NULL');
   });
 
   test('verification strategies throw TinkerPop\'s canonical messages (pass a legal traversal)', () => {
@@ -941,11 +959,11 @@ describe('compiler SQL snapshots', () => {
     // ProductiveByStrategy is a no-op when no by()-consumer exists, but unsupported
     // consumers still fail closed instead of silently using ordinary productivity.
     expect(() => compile('g.withStrategies(ProductiveByStrategy).V().values("name")', {})).not.toThrow();
-    expect(() => compile('g.withStrategies(ProductiveByStrategy).V().order().by("age")', {}))
-      .toThrow('ProductiveByStrategy with order by()');
+    expect(() => compile('g.withStrategies(ProductiveByStrategy).V().dedup().by("age")', {}))
+      .toThrow('ProductiveByStrategy with unattached by()');
     // A safe optimization alongside ProductiveBy does not suppress its fail-closed gate.
-    expect(() => compile('g.withStrategies(CountStrategy, ProductiveByStrategy).V().order().by("age")', {}))
-      .toThrow('ProductiveByStrategy with order by()');
+    expect(() => compile('g.withStrategies(CountStrategy, ProductiveByStrategy).V().dedup().by("age")', {}))
+      .toThrow('ProductiveByStrategy with unattached by()');
     // Deferred subsets throw clearly rather than under-filter:
     expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.has("name","x"), edges: __.has("weight",1))).V()', {}))
       .toThrow('SubgraphStrategy(edges) criterion not yet supported');
@@ -1117,7 +1135,9 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.withSack(1).V().sack().fold()').shape).toEqual({ kind: 'jsonbList' });
     // sum accumulator references the prior sk; div forces REAL division.
     expect(read('g.withSack(0.0d).V().sack(sum).by("age").sack()').sql).toContain('(p.sk + (SELECT value FROM vertex_properties WHERE node=n.id AND key=?');
-    expect(read('g.withSack(2).V().sack(div).by(__.constant(4.0d)).sack()').sql).toContain('(CAST(p.sk AS REAL) / ?)');
+    expect(read('g.withSack(2).V().sack(div).by(__.constant(4.0d)).sack()').sql).toContain('(CAST(d.sk AS REAL) / f.v)');
+    expect(read('g.withSack(0).V().sack(assign).by(__.outE().count()).sack()').sql)
+      .toContain('ROW_NUMBER() OVER (PARTITION BY');
     // sack + a co-carried column (otherV's fromV): the mutate CTE re-projects sk in its
     // carriedCols SLOT, not appended last — so the sk/fv columns don't desync. Regression
     // for the pre-existing bug where sk silently got the fromV rowid.
@@ -1307,8 +1327,17 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('where()/filter() deferred forms throw clearly', () => {
-    expect(() => compile('g.V().where(__.both().both())', {})).toThrow('multi-hop');
+    expect(read('g.V().where(__.both().both())').sql).toContain('EXISTS (SELECT 1');
     expect(() => compile('g.V().filter(P.gt(1))', {})).toThrow('filter(predicate) not supported');
+  });
+
+  test('where/filter/not fall back to generic child row existence', () => {
+    const store = seededStore();
+    expect(run(store, 'g.V().where(__.out().id()).values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'marko', 'peter']);
+    expect(run(store, 'g.V().not(__.out().id()).values("name")').map((r) => r.v).sort())
+      .toEqual(['lop', 'ripple', 'vadas']);
+    expect(read('g.V().filter(__.out().id()).count()').sql).toContain('EXISTS (SELECT 1');
   });
 
   // ---- P2 tail: and/or/union/optional ----
@@ -1367,6 +1396,14 @@ describe('compiler SQL snapshots', () => {
     // carries the outer through — so they compose (unlocks optional(out().optional(out())).path()).
     expect(read('g.V().optional(__.out().optional(__.out())).path()').sql).toContain('AS o1');
     expect(read('g.V(1).coalesce(__.coalesce(__.out(), __.in()), __.both())').sql).toContain('AS o1');
+  });
+
+  test('optional total scalar/list children retype without a phantom identity arm', () => {
+    const store = seededStore();
+    expect(run(store, 'g.V().optional(__.out().count())').map((r) => Number(r.v)).sort((a, b) => a - b))
+      .toEqual([0, 0, 0, 1, 2, 3]);
+    expect(run(store, 'g.V().optional(__.out().values("name").fold()).count(Scope.local)').map((r) => Number(r.v)).sort((a, b) => a - b))
+      .toEqual([0, 0, 0, 1, 2, 3]);
   });
 
   test('coalesce() → first non-empty branch per input via the ordinal', () => {

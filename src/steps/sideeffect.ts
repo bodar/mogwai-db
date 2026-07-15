@@ -1,6 +1,9 @@
 import { q } from '../q.ts';
 import { scalarProp, predicateSql, jsonbGroupArray, elemCtx } from '../plan.ts';
+import { stepChain } from '../frontend.ts';
+import { normalize, type PStep } from '../strategies.ts';
 import { elemRel, type ElementStream, type StepFn, type SideEffectDef } from './context.ts';
+import { tryCompileScalarValueRows } from './child.ts';
 
 // ---------- named side-effect collections (aggregate) ----------
 //
@@ -35,19 +38,43 @@ export const aggregate: StepFn = (s, st) => {
     def = { kind: 'list', rel, of: { kind: 'elem', elem: st.elem } };
   } else {
     const a = by[0];
-    if (typeof a !== 'string')
-      throw new Error('aggregate().by() only supports a property key (nested/token by() not yet supported)');
-    const n = elemRel(st);
-    const p = st.rel.as('p');
-    const pe = scalarProp(elemCtx(n, st.elem), a); // first-under-multi for a node
-    // A by() that yields nothing (a missing property) contributes no member — matching
-    // values() semantics, the exact behaviour the suite's aggregate('x').by('age')
-    // (software vertices have no age) expects.
-    const rel = st.q.cte(
-      q`SELECT ${jsonbGroupArray(pe)} AS list FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${predicateSql(pe, undefined)}`,
-      ['list'],
-    );
-    def = { kind: 'list', rel, of: { kind: 'scalar' } };
+    const productive = (s as PStep).productiveBy === true;
+    if (typeof a === 'string') {
+      const n = elemRel(st);
+      const p = st.rel.as('p');
+      const pe = scalarProp(elemCtx(n, st.elem), a); // first-under-multi for a node
+      // ProductiveBy makes a missing modulation one explicit NULL member. Ordinary
+      // aggregate keeps values()-style productivity and drops that parent.
+      const where = productive ? q`` : q` WHERE ${predicateSql(pe, undefined)}`;
+      const rel = st.q.cte(
+        q`SELECT ${jsonbGroupArray(pe)} AS list FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}${where}`,
+        ['list'],
+      );
+      def = { kind: 'list', rel, of: { kind: 'scalar', productiveNull: productive } };
+    } else if (a && typeof a === 'object' && 'nested' in a) {
+      const rows = tryCompileScalarValueRows(st, a.nested);
+      if (!rows)
+        throw new Error('aggregate().by(traversal) child shape not yet supported by generic child lowering');
+      const r = rows.stream.rel.as('r');
+      const encounter = rows.stream.encounter;
+      if (!encounter) throw new Error('aggregate().by(traversal) requires child encounter order');
+      // by(traversal) is a map-style modulator: retain its FIRST productive result
+      // per input. ProductiveBy then LEFT-restores parents whose child had no row.
+      const ranked = st.q.cte(
+        q`SELECT ${r.c.v} AS v, ${r.c[rows.frame.ordinal]} AS ${rows.frame.ordinal}, ROW_NUMBER() OVER (PARTITION BY ${r.c[rows.frame.ordinal]} ORDER BY ${r.c[encounter]}) AS rn FROM ${r}`,
+        ['v', rows.frame.ordinal, 'rn'],
+      );
+      const first = ranked.as('f');
+      const source = productive
+        ? q`${rows.frame.domain.as('d')} LEFT JOIN ${first} ON ${first.c[rows.frame.ordinal]}=${q`d.${rows.frame.ordinal}`} AND ${first.c.rn}=1`
+        : q`${first}`;
+      const member = productive ? first.c.v : first.c.v;
+      const filter = productive ? q`` : q` WHERE ${first.c.rn}=1`;
+      const rel = st.q.cte(q`SELECT ${jsonbGroupArray(member)} AS list FROM ${source}${filter}`, ['list']);
+      def = { kind: 'list', rel, of: { kind: 'scalar', as: rows.stream.as, productiveNull: productive } };
+    } else {
+      throw new Error('aggregate().by() only supports a property key or scalar traversal');
+    }
   }
   // Pass-through: same id-relation, extended registry. carryOf/advance preserve it.
   return register(st, name, def);
@@ -88,3 +115,15 @@ const groupSideEffect = (isCount: boolean): StepFn => (s, st) => {
 
 export const group: StepFn = groupSideEffect(false);
 export const groupCount: StepFn = groupSideEffect(true);
+
+/** local(aggregate(...)) has no value-producing body: local merely scopes the
+ * side-effect to the current traverser and returns that traverser unchanged. Lower
+ * the canonical one-step child through the same aggregate StepFn, so this syntax is
+ * not a second side-effect compiler. */
+export function tryLowerLocalAggregate(st: ElementStream, step: PStep): ElementStream | null {
+  const nested = step.args[0]?.nested;
+  if (!nested) return null;
+  const normalized = normalize(stepChain(nested, st.params)).steps;
+  if (normalized.length !== 1 || normalized[0].name !== 'aggregate') return null;
+  return aggregate({ ...normalized[0], productiveBy: step.productiveBy }, st);
+}

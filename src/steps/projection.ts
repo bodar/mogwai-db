@@ -9,6 +9,7 @@ import { carryFrag, carriedCols, elemRel, type ElementStream } from './context.t
 import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStream } from './stream.ts';
 import { compileUnfold } from './list.ts';
 import { dispatchNext } from './index.ts';
+import { tryLowerLocalAggregate } from './sideeffect.ts';
 import {
   type Compiled, type Shape, type ElemShape,
 } from '../render.ts';
@@ -20,7 +21,7 @@ import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleS
 import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, union as lowerLegacyUnion } from './branch.ts';
 import { lowerGroup, lowerProperties, type GroupSource } from './group.ts';
-import { isScalarChild } from './child.ts';
+import { isScalarChild, isListChild, isTotalScalarChild, tryCompileCountChild, tryCompileListChild } from './child.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
 //
@@ -191,6 +192,8 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
     return dispatchNext(lowerMapScalar(st, steps, stop), steps, stop + 1);
   }
   if (steps[stop]?.name === 'local') {
+    const sideEffect = tryLowerLocalAggregate(st, steps[stop]);
+    if (sideEffect) return dispatchNext(sideEffect, steps, stop + 1);
     const list = tryLowerListChild(st, steps[stop]);
     if (list) return dispatchNext(list, steps, stop + 1);
     const element = tryLowerLocalElement(st, steps[stop]);
@@ -208,6 +211,18 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
     const generic = tryLowerFlatMap(st, steps[stop]);
     if (generic) return dispatchNext(generic, steps, stop + 1);
     return dispatchNext(lowerLegacyFlatMap(steps[stop], st), steps, stop + 1);
+  }
+
+  // A fold/count child is total per parent, so optional's identity-on-miss arm is
+  // statically unreachable. Retype directly through the shared child compiler;
+  // non-total scalar optional still defers until VariantStream can carry scalar OR
+  // original element honestly.
+  if (steps[stop]?.name === 'optional') {
+    const nested = steps[stop].args[0]?.nested;
+    if (nested && isListChild(nested, st.params))
+      return dispatchNext(tryCompileListChild(st, nested)!, steps, stop + 1);
+    if (nested && isTotalScalarChild(nested, st.params))
+      return dispatchNext(tryCompileCountChild(st, nested)!, steps, stop + 1);
   }
 
   // A union may change shape when every arm is scalar. Homogeneous scalar arms
@@ -572,6 +587,8 @@ function compileCap(st: ElementStream, steps: PStep[], stop: number): Compiled {
   if (!def) throw new Error(`cap('${names[0]}') references an undefined side-effect`);
   if (def.kind === 'list') {
     const ls = toListStream(carryOf(st), def.rel, def.of);
+    if (isScopeLocalStep(steps[stop + 1]))
+      return dispatchNext(ls, steps, stop + 1);
     return dispatchNext(compileUnfold(ls), steps, stop + 1);
   }
   // group('a')/groupCount('a') side-effect → re-emit the same rich GroupStream as an

@@ -67,7 +67,7 @@ const SAFE_OPTIMIZATION_STRATEGIES = new Set([
 const VERIFICATION_STRATEGIES = new Set([
   'ReadOnlyStrategy', 'EdgeLabelVerificationStrategy', 'ReservedKeysVerificationStrategy',
 ]);
-const PRODUCTIVE_BY_HOSTS = new Set(['group', 'groupCount', 'project', 'select']);
+const PRODUCTIVE_BY_HOSTS = new Set(['group', 'groupCount', 'project', 'select', 'aggregate', 'order', 'path', 'where', 'not']);
 
 /** ProductiveBy is semantic only at by()-consumers. Mark the supported hosts so they
  * choose a LEFT-domain/null policy explicitly; reject any other host rather than
@@ -75,13 +75,15 @@ const PRODUCTIVE_BY_HOSTS = new Set(['group', 'groupCount', 'project', 'select']
 function markProductiveBy(steps: Step[]): Step[] {
   let host: string | undefined;
   for (const s of steps) {
-    if (BY_HOSTS.has(s.name)) host = s.name;
+    if (BY_HOSTS.has(s.name) || isAliasCompareWhere(s)) host = s.name;
     else if (s.name === 'by') {
       if (!host || !PRODUCTIVE_BY_HOSTS.has(host))
         throw new Error(`ProductiveByStrategy with ${host ?? 'unattached'} by() is not yet supported`);
     } else host = undefined;
   }
-  return steps.map((s) => PRODUCTIVE_BY_HOSTS.has(s.name) ? { ...s, productiveBy: true } : s);
+  return steps.map((s) => PRODUCTIVE_BY_HOSTS.has(s.name) || isAliasCompareWhere(s) || s.name === 'local'
+    ? { ...s, productiveBy: true }
+    : s);
 }
 
 /** Steps whose output traverser is a vertex (a partition/subgraph vertex filter is

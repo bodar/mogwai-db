@@ -12,7 +12,7 @@ import { q, type Expression, type Query, type Relation } from './q.ts';
  * both ListStream and map/record fields must agree on how GraphBinary frames it. */
 export type ListOf =
   | { kind: 'elem'; elem: 'node' | 'edge' }
-  | { kind: 'scalar'; as?: ValueType }
+  | { kind: 'scalar'; as?: ValueType; productiveNull?: boolean }
   | { kind: 'list'; of: ListOf };
 
 // select(labels…)/project(keys…): a Map per row. Each entry names its result
@@ -70,7 +70,7 @@ export type Shape =
   | { kind: 'metaMap' } // properties(k).valueMap(): a VertexProperty's meta as a flat Map (meta col, JSON text)
   | { kind: 'value'; as?: ValueType }
   | { kind: 'count' }
-  | { kind: 'scalar' } // sum(): one numeric; handler picks Long/Double per value (numberBuffer)
+  | { kind: 'scalar'; productiveNull?: boolean } // numeric reducer; productive NULL may be a real result
   | { kind: 'list'; elem: ElemShape | 'scalar'; as?: ValueType } // legacy row-fold; scalar items may carry a uniform type
   | { kind: 'jsonbList'; as?: ValueType } // list-VALUE rows; scalar items may carry a uniform type
   | { kind: 'jsonbElementList'; elem: Exclude<ElemShape, 'property'> } // one JSON object-array per relational element list

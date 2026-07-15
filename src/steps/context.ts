@@ -50,7 +50,7 @@ export function appendPathPos(p: PathState, elem: Elem): { path: PathState; col:
  *  group-spec re-run by cap (see steps/group.ts, Stage 3). Unlike the id-relation,
  *  this state outlives the current traverser stream. */
 export type SideEffectDef =
-  | { kind: 'list'; rel: Relation; of: { kind: 'elem'; elem: Elem } | { kind: 'scalar' } }
+  | { kind: 'list'; rel: Relation; of: import('../render.ts').ListOf }
   | { kind: 'group'; from: string; ctx: import('../plan.ts').ScalarCtx; elem: import('../render.ts').ElemShape; isCount: boolean; bys: any[][]; parent: ElementStream; productiveBy?: boolean };
 export type SideEffectMap = ReadonlyMap<string, SideEffectDef>;
 

@@ -4,7 +4,7 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-15 · **live L3 conformance:** 883 · **corpus parse+chain:**
+**Last synced:** 2026-07-15 · **live L3 conformance:** 911 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
 
@@ -174,7 +174,7 @@ home (`Carry`): a **named side-effect registry** (aggregate/cap/group('a')) and 
 
 | Step | Status | Notes |
 |---|:--:|---|
-| `aggregate('x')` | 🟡 | ✅ pass-through barrier → a JSONB-list side-effect CTE; `aggregate('x').by(key)` scalar bag (by-miss drops)<br>❌ on a scalar stream (`values(k).aggregate(x)`), `by(<nested/token>)`, `local(aggregate(...))` |
+| `aggregate('x')` | 🟡 | ✅ pass-through barrier → a JSONB-list side-effect CTE; `by(key|scalar traversal)`; `local(aggregate(...))`; ProductiveBy NULL membership survives `cap` + local/global reducers<br>❌ on a scalar stream (`values(k).aggregate(x)`), token/element-valued traversal modulators (nullable element variant needed) |
 | `store('x')` | 🚫 | dropped in TinkerPop 4 (no grammar rule); `aggregate(Scope.local)` replaces it |
 | `cap('x')` | 🟡 | ✅ a list side-effect UNROLLS to individual results (no BulkSet wire type); a group side-effect re-emits the same GroupStream as inline `group()` (`cap('a').select(Column.values).unfold()` composes)<br>❌ multi-key `cap('x','y')` |
 | `sack()` / `withSack(…)` | 🟡 | ✅ carried column: `sack(Operator.x).by(key/T.label/nested)` mutate, bare `sack()` read as a ScalarStream, `withSack(init)` seed; later scalar steps/barriers compose<br>❌ inject-const numeric promotion (NumberHelper byte→short bump), `repeat()`/`barrier`/`local`, split/merge-on-fork, `sack(BiFunction)` |
@@ -183,8 +183,8 @@ home (`Carry`): a **named side-effect registry** (aggregate/cap/group('a')) and 
 
 Landed L3 618→634 (sack +4, aggregate/cap +8, group('a')/cap +4). The
 `group('a')…cap('a').select(Column.values).unfold()` cluster now lands (cap re-enters →
-MapStream, §MapStream). `aggregate().by(...)` remains a ProductiveByStrategy frontier;
-group/groupCount/project/select no longer depend on this aggregate limitation.
+MapStream, §MapStream). Scalar aggregate/ProductiveBy is now on the generic child-domain
+path; only element-valued aggregate modulation needs the nullable variant carrier.
 
 ## 13. Traversal strategies
 
@@ -195,7 +195,7 @@ group/groupCount/project/select no longer depend on this aggregate limitation.
 | **SubgraphStrategy** (vertex criterion) | 🟡 | ✅ `where`/`has` injection pass<br>❌ edge/vertexProperty criteria<br>❌ adjacency (`out()` expansion) |
 | **PartitionStrategy** (read-filter + write-stamp) | 🟡 | ✅ `has(within)` + property stamp<br>❌ `includeMetaProperties`<br>❌ partition-aware merge |
 | ReadOnly / EdgeLabel / ReservedKeys **verification** | ✅ | ✅ throw TinkerPop's canonical messages |
-| ProductiveByStrategy | 🟡 | ✅ explicit productive-NULL policy for `group`/`groupCount`/`project`/`select` (ordinary consumers still drop missing `by()` results)<br>❌ `aggregate`/`order`/`path` consumers and nullable element-valued record fields fail closed; aggregate-in-local (§5) remains deferred |
+| ProductiveByStrategy | 🟡 | ✅ explicit productive-NULL policy for `group`/`groupCount`/`project`/`select`/`aggregate`/`order`/linear `path`/alias-compare `where`; `local(aggregate)` included<br>❌ nullable element-valued record/aggregate fields and `barrier().dedup().by(...)` fail closed |
 | `with(…)` (OptionsStrategy sugar) | ❌ | `step not implemented: with()` |
 | OLAP / GraphComputer / Seed / Event strategies | 🚫 | out of scope |
 
@@ -233,8 +233,8 @@ Cheapest wins are long done. What's left, by structural weight:
    `vertex_properties` table + edge JSONB, multi/set cardinality, meta writes+reads. The
    self-tuning `json_extract` index machinery is retired for static vp covering indexes.
 3. ~~**`local`** (§5)~~ — **substrate LANDED** (648→661): per-element scalar reduction +
-   movement window. Remaining: non-movement bodies, `local(aggregate(...))` (the
-   remaining aggregate subset of ProductiveByStrategy), `order()`/`dedup()` inside local.
+   movement window; `local(aggregate(...))` now shares the side-effect compiler.
+   Remaining: other non-movement bodies and `order()`/`dedup()` inside local.
 4. **Chained projections** (§3) — element→scalar→scalar re-type; partly dissolved by the
    list substrate, still open for this shape (~40).
 5. ~~**Collection-algebra tail** (§9)~~ — **LANDED** (661→822 over several batches):

@@ -129,5 +129,5 @@ export function lowerGlobalNumericReducer(input: ScalarStream, reducer: NumericR
     body = q`SELECT ${fn}(${src.c.v}) AS v, typeof(${fn}(${src.c.v})) AS vt FROM ${src} WHERE typeof(${src.c.v}) in ('integer', 'real', 'text')`;
   }
   const rel = input.q.cte(body, ['v', 'vt']);
-  return toScalarStream(withoutCarried(carryOf(input)), rel, undefined, 'number');
+  return toScalarStream(withoutCarried(carryOf(input)), rel, undefined, 'number', undefined, input.productiveNull);
 }
