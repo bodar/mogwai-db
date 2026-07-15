@@ -17,7 +17,7 @@ import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type Nume
 import { SCALAR_ROW_STEPS } from './scalar.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
 import { compileSelectProject, compilePath } from './select.ts';
-import { compileMapScalar, compileMath, compileFormat, compileChooseOptions } from './mapscalar.ts';
+import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions } from './mapscalar.ts';
 import { compileGroup, groupToMapStream, compileProperties, type GroupSource } from './group.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
@@ -174,7 +174,7 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
 
   // option-map choose (choose().option()…) → a CASE over a correlated choice scalar.
   if (steps[stop]?.name === 'choose' && steps[stop].options)
-    return compileChooseOptions(st, steps, stop);
+    return dispatchNext(lowerChooseOptions(st, steps, stop), steps, stop + 1);
 
   // map(__.<scalar>) → a per-traverser scalar projection (out-degree, a property, a
   // label). Element-body map (first-result-only) and select/fold bodies defer.
@@ -182,21 +182,21 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
   // per-element scalar projector (local's element+barrier body compiles as a prefix
   // step; only its scalar-reduction body reaches the tail here).
   if (steps[stop]?.name === 'map' || steps[stop]?.name === 'local')
-    return compileMapScalar(st, steps, stop);
+    return dispatchNext(lowerMapScalar(st, steps, stop), steps, stop + 1);
 
   // math("<formula>") → one SQL arithmetic scalar (always Double). Its variables
   // (`_` / as()-bound names) resolve through the by() modulators folded onto it.
   if (steps[stop]?.name === 'math')
-    return compileMath(st, steps, stop);
+    return dispatchNext(lowerMath(st, steps, stop), steps, stop + 1);
 
   // format("…%{token}…") → one `||`-concatenated SQL string (properties + by()s).
   if (steps[stop]?.name === 'format')
-    return compileFormat(st, steps, stop);
+    return dispatchNext(lowerFormat(st, steps, stop), steps, stop + 1);
 
   // bare sack() reads the carried per-traverser sack column as a scalar value; a
   // trailing reducer (sum/…)/is/order composes via the shared value tail.
   if (steps[stop]?.name === 'sack')
-    return compileSackRead(st, steps, stop);
+    return dispatchNext(lowerSackRead(st, steps[stop]), steps, stop + 1);
 
   // cap('x') emits a named side-effect collection registered earlier in the chain.
   if (steps[stop]?.name === 'cap')
@@ -486,16 +486,15 @@ function buildProjection(st: ElementStream, acc: TailAcc): Compiled {
  *  composes). The value's GraphBinary type is inferred (as:undefined → anySerializer),
  *  matching values(): sack holds whatever the withSack seed / sack(op) arithmetic
  *  produced (int age, double weight, string label). */
-function compileSackRead(st: ElementStream, steps: PStep[], stop: number): Compiled {
+function lowerSackRead(st: ElementStream, step: PStep): ScalarStream {
   if (!st.carried.sack) throw new Error('sack() requires withSack() or a preceding sack(Operator.x) step');
-  if ((steps[stop].args ?? []).length) throw new Error('sack(argument) read form not supported (bare sack() only)');
-  const { acc, stop: at } = foldTailAcc(steps, stop + 1);
-  if (at !== steps.length) throw new Error(`${steps[at].name}() after sack() not yet supported`);
-  if (acc.projStep) throw new Error(`${acc.projStep.name}() after sack() not yet supported`);
+  if ((step.args ?? []).length) throw new Error('sack(argument) read form not supported (bare sack() only)');
   const p = st.rel.as('p');
-  const proj: ProjResult = { shape: { kind: 'value' }, colsNode: q`${p.c[st.carried.sack]} AS v`, fromNode: p, scalarExpr: p.c[st.carried.sack], baseWhere: null };
-  const orderKey = (): Expression => { throw new Error('order().by(key) after sack() not supported'); };
-  return renderProjection(st.q, proj, acc, orderKey);
+  const rel = st.q.cte(
+    q`SELECT ${p.c[st.carried.sack]} AS v${carryFrag(st.carried, p)} FROM ${p}`,
+    ['v', ...carriedCols(st.carried)],
+  );
+  return toScalarStream(carryOf(st), rel);
 }
 
 /** cap('x') — emit a named side-effect collection. A list side-effect (aggregate/

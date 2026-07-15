@@ -5,10 +5,9 @@ import {
 import { stepChain } from '../frontend.ts';
 import { mathToSql, mathVars } from '../math.ts';
 import { type PStep } from '../strategies.ts';
-import { elemRel, type ElementStream } from './context.ts';
-import { type Compiled, type ValueType } from '../render.ts';
-import { materializeRoot } from './materialize.ts';
-import { foldTailAcc, renderProjection, nodePropOrderKey, type ProjResult } from './projection.ts';
+import { carryFrag, carriedCols, elemRel, type ElementStream } from './context.ts';
+import { carryOf, toScalarStream, type ScalarStream } from './stream.ts';
+import { type ValueType } from '../render.ts';
 
 // ---------- map (scalar body → per-traverser scalar projector) ----------
 
@@ -17,11 +16,11 @@ import { foldTailAcc, renderProjection, nodePropOrderKey, type ProjResult } from
  * compileNestedScalar (values/label/id/constant/out().count()/edge-aggregate). An
  * element-body map is first-result-only (needs a per-input row-number) and an alias/
  * select/fold body isn't a plain scalar — both defer via compileNestedScalar's throw.
- * A trailing step defers.
+ * The produced ScalarStream re-enters the common dispatcher, so scalar followers
+ * compose without this leaf owning a private tail compiler.
  */
-export function compileMapScalar(st: ElementStream, steps: PStep[], stop: number): Compiled {
+export function lowerMapScalar(st: ElementStream, steps: PStep[], stop: number): ScalarStream {
   const name = steps[stop].name; // 'map' or a scalar-reduction 'local'
-  if (stop + 1 < steps.length) throw new Error(`step not implemented after ${name}(): ${steps[stop + 1].name}()`);
   const arg = steps[stop].args[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) throw new Error(`${name}(traversal) required`);
   const ctx = elemCtx(elemRel(st), st.elem);
@@ -29,11 +28,18 @@ export function compileMapScalar(st: ElementStream, steps: PStep[], stop: number
   const sc = compileNestedScalar(inner, ctx);
   const n = elemRel(st);
   const p = st.rel.as('p');
-  const node = q`SELECT ${sc.expr} AS v FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
+  // Do not use `v IS NOT NULL` as a productivity test: constant(null) is a
+  // productive null traverser. compileNestedScalar currently collapses an empty
+  // child and a null value to the same SQL scalar; generic child lowering will
+  // represent productivity as row presence and remove that ambiguity.
+  const rel = st.q.cte(
+    q`SELECT ${sc.expr} AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`,
+    ['v', ...carriedCols(st.carried)],
+  );
   // A nested count() is always a Long (TinkerPop's count semantics); the SQLite
   // COUNT integer would otherwise infer as Int via anySerializer.
   const as: ValueType | undefined = inner[inner.length - 1]?.name === 'count' ? 'long' : undefined;
-  return materializeRoot(st.q, node, { kind: 'value', as });
+  return toScalarStream(carryOf(st), rel, as);
 }
 
 // ---------- math (scalar arithmetic projector) ----------
@@ -48,13 +54,13 @@ export function compileMapScalar(st: ElementStream, steps: PStep[], stop: number
  * folded by()s in first-seen variable order, so a single by() feeds every variable
  * and N by()s feed N variables (matching project()). A missing by() value makes the
  * arithmetic NULL, so the traverser is filtered (a by() that produces nothing drops
- * the traverser, per TinkerPop). The result routes through the shared value tail, so
- * a trailing asNumber()/is()/order()/dedup()/limit() composes (renderProjection).
+ * the traverser, per TinkerPop). The result is a ScalarStream, so a trailing
+ * asNumber()/is()/order()/dedup()/limit()/barrier composes through common lowering.
  * Deferred (clear throws): a variable with no by() (bare incoming value — needs
  * local()/sack()), withSideEffect-bound variables, and reading project()/select()
  * map columns (math inside order().by(__.math(...))).
  */
-export function compileMath(st: ElementStream, steps: PStep[], stop: number): Compiled {
+export function lowerMath(st: ElementStream, steps: PStep[], stop: number): ScalarStream {
   const s = steps[stop];
   const formula = s.args[0];
   if (typeof formula !== 'string') throw new Error('math(string) required');
@@ -87,22 +93,13 @@ export function compileMath(st: ElementStream, steps: PStep[], stop: number): Co
 
   const mathExpr = mathToSql(formula, resolveVar);
 
-  // math() always yields a Double; route through the shared value tail.
-  const { acc, stop: mstop } = foldTailAcc(steps, stop + 1);
-  if (mstop !== steps.length) throw new Error(`${steps[mstop].name}() after math() not yet supported`);
   const n = elemRel(st);
-  const proj: ProjResult = {
-    shape: { kind: 'value', as: 'double' }, colsNode: q`${mathExpr} AS v`,
-    fromNode: q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`, scalarExpr: mathExpr,
-    // Drop rows a non-productive by() left NULL (a missing property/empty traversal
-    // filters the traverser, per MathStep). NULL propagates through every op, so this
-    // one check on the result subsumes a per-variable NULL guard. It ALSO drops a SQL
-    // domain-error result (X/0, sqrt(neg), log(0) → NULL in SQLite, never Inf/NaN):
-    // fail-closed (no row), since GraphBinary Double framing has no Inf/NaN path — a
-    // known, unreachable-in-corpus divergence, deliberately not emitting a wrong 0.0.
-    baseWhere: predicateSql(mathExpr, undefined),
-  };
-  return renderProjection(st.q, proj, acc, nodePropOrderKey(st));
+  // Drop a non-productive by() or SQL domain-error result (both yield NULL).
+  const rel = st.q.cte(
+    q`SELECT ${mathExpr} AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${predicateSql(mathExpr, undefined)}`,
+    ['v', ...carriedCols(st.carried)],
+  );
+  return toScalarStream(carryOf(st), rel, 'double');
 }
 
 // ---------- format() (per-traverser string templating) ----------
@@ -114,9 +111,10 @@ export function compileMath(st: ElementStream, steps: PStep[], stop: number): Co
  * FormatStep). A `%{_}` placeholder pulls the next by() modulator (round-robin, first-
  * seen order, like math); a `%{key}` placeholder reads the current element's property.
  * A format with no tokens is a constant string. Deferred: reading project()/select()
- * map columns, and the as()-alias fallback for a missing property.
+ * map columns, and the as()-alias fallback for a missing property. The resulting
+ * ScalarStream composes through the common scalar dispatcher.
  */
-export function compileFormat(st: ElementStream, steps: PStep[], stop: number): Compiled {
+export function lowerFormat(st: ElementStream, steps: PStep[], stop: number): ScalarStream {
   const s = steps[stop];
   const tmpl = s.args[0];
   if (typeof tmpl !== 'string') throw new Error('format(string) required');
@@ -152,18 +150,13 @@ export function compileFormat(st: ElementStream, steps: PStep[], stop: number): 
   // piece is fine. Cast the first piece to TEXT so a lone value token frames as string.
   const expr = pieces.length ? q`CAST(${list(pieces, ' || ')} AS TEXT)` : q`${value('')}`;
 
-  const { acc, stop: fstop } = foldTailAcc(steps, stop + 1);
-  if (fstop !== steps.length) throw new Error(`${steps[fstop].name}() after format() not yet supported`);
   const n = elemRel(st);
-  const proj: ProjResult = {
-    shape: { kind: 'value' }, colsNode: q`${expr} AS v`,
-    fromNode: q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`, scalarExpr: expr,
-    // A missing property (NULL) propagates through `||` → NULL result → drop the row
-    // (FormatStep filters a traverser that can't fill a placeholder). A constant format
-    // (hadToken=false) never NULLs, so no filter. `hadToken` gates the baseWhere.
-    baseWhere: hadToken ? predicateSql(expr, undefined) : null,
-  };
-  return renderProjection(st.q, proj, acc, nodePropOrderKey(st));
+  const where = hadToken ? q` WHERE ${predicateSql(expr, undefined)}` : q``;
+  const rel = st.q.cte(
+    q`SELECT ${expr} AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}${where}`,
+    ['v', ...carriedCols(st.carried)],
+  );
+  return toScalarStream(carryOf(st), rel);
 }
 
 // ---------- option-map choose (scalar CASE projector) ----------
@@ -176,12 +169,11 @@ export function compileFormat(st: ElementStream, steps: PStep[], stop: number): 
  * the ELSE. Requires a Pick.none default with a scalar body: without one, unmatched
  * inputs pass through as the element itself (TinkerPop identity) → a mixed vertex/
  * scalar result the one-shape framing can't carry, so that defers. Scalar bodies only
- * (constant/values/label/id via compileNestedScalar); element bodies, Pick.
- * unproductive/any, and any trailing step defer. Shape: value.
+ * (constant/values/label/id via compileNestedScalar); element bodies and
+ * Pick.unproductive/any defer. The CASE result is a composable ScalarStream.
  */
-export function compileChooseOptions(st: ElementStream, steps: PStep[], stop: number): Compiled {
+export function lowerChooseOptions(st: ElementStream, steps: PStep[], stop: number): ScalarStream {
   const cs = steps[stop];
-  if (stop + 1 < steps.length) throw new Error(`step not implemented after choose().option(): ${steps[stop + 1].name}()`);
   const ctx = elemCtx(elemRel(st), st.elem);
 
   const a0 = cs.args[0];
@@ -215,6 +207,9 @@ export function compileChooseOptions(st: ElementStream, steps: PStep[], stop: nu
   if (!sawNone) throw new Error('choose().option() without a Pick.none default not yet supported (unmatched pass-through is mixed-shape)');
   const n = elemRel(st);
   const p = st.rel.as('p');
-  const node = q`SELECT CASE ${list(whens, ' ')} ELSE ${elseExpr} END AS v FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
-  return materializeRoot(st.q, node, { kind: 'value' });
+  const rel = st.q.cte(
+    q`SELECT CASE ${list(whens, ' ')} ELSE ${elseExpr} END AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`,
+    ['v', ...carriedCols(st.carried)],
+  );
+  return toScalarStream(carryOf(st), rel);
 }
