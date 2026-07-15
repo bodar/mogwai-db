@@ -261,7 +261,7 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
     const isCount = steps[stop].name === 'groupCount';
     const tbl = st.elem === 'edge' ? 'edges' : 'nodes';
     const ctx = elemCtx(elemRel(st), st.elem);
-    const src: GroupSource = { from: `${tbl} n JOIN ${st.rel.name} p ON n.id=p.id`, ctx, elem: st.elem === 'edge' ? 'edge' : 'vertex' };
+    const src: GroupSource = { from: `${tbl} n JOIN ${st.rel.name} p ON n.id=p.id`, ctx, elem: st.elem === 'edge' ? 'edge' : 'vertex', parent: st };
     return dispatchNext(lowerGroup(st, isCount, steps[stop].bys ?? [], src), steps, stop + 1);
   }
 

@@ -36,6 +36,11 @@ Run the full `bun test` suite before every local commit.
    property/bare fields join on one outer origin, so duplicate parents stay distinct and
    element fields retain movement re-entry. The two PathProcessorStrategy select scenarios
    now pass; L3 ratcheted 874→876.
+7. Inline element `group()`/`groupCount()` scalar traversal keys now lower child-first,
+   retain one productive key per parent, and join it back to the source element by a
+   multiset-safe origin before the existing GroupStream barrier. Empty children drop the
+   member; count produces zero; duplicate parents remain distinct. Stashed `cap()` and
+   property groups keep their mature correlated paths. L3 remains 876.
 
 **Current Stage 6 slice:** traversal-valued `project().by()` is now the first generic
 by-consumer. An outer origin identifies each parent; every scalar child modulator lowers
@@ -45,9 +50,10 @@ keys, `T.id`/`T.label`, and complete bare vertex/edge fields can mix with traver
 in the same relation. Element fields retain their internal rowid for downstream movement.
 L3 is 874.
 
-**Immediate next slice:** migrate group key/value consumers onto the generic child-stream
-and explicit productivity seam. Scalar traversal select is complete; list/element-valued
-select modulators remain a later shaped-child extension.
+**Immediate next slice:** migrate scalar group value modulators onto the generic
+child-stream and explicit productivity seam while preserving group-scoped barrier
+semantics. Scalar traversal select and inline scalar traversal group keys are complete;
+list/element-valued select modulators remain a later shaped-child extension.
 Do not add more recognized syntax to `compileNestedScalar`: treat its current correlated
 SQL cases as optional fast paths and add generic child-stream fallbacks with explicit
 first/productive cardinality. Other consumers to inventory afterward are sack, math,

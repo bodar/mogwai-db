@@ -1,7 +1,7 @@
 import { q, value, list, empty, type Expression } from '../q.ts';
 import { labels, vertexProperties } from '../schema.ts';
 import {
-  compileNestedScalar, compileNestedList, scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql,
+  compileNestedScalar, compileNestedList, scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx,
   type ScalarCtx,
 } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
@@ -12,6 +12,7 @@ import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../
 import { materializeGroupRoot, materializePropertyRoot, materializeRoot } from './materialize.ts';
 import { lowerGlobalCount } from './barrier.ts';
 import { dispatchNext } from './index.ts';
+import { isScalarChild, pushChildScope, tryCompileScalarValueChild } from './child.ts';
 
 /** Movement heads whose nested-by() aggregate is a correlated neighbourhood
  *  reduction (handled by compileNestedScalar), and the scalar reducers that terminate one. */
@@ -22,7 +23,17 @@ const SCALAR_REDUCERS = new Set(['sum', 'min', 'max', 'mean']);
 
 /** Describes the row source a group() folds over: the FROM (rows aliased `n`),
  *  the scalar context for nested key/value sub-traversals, and the element kind. */
-export interface GroupSource { from: string | Expression; ctx: ScalarCtx; elem: ElemShape; }
+export interface GroupSource {
+  from: string | Expression;
+  ctx: ScalarCtx;
+  elem: ElemShape;
+  /** A generic child-key result already joined one-to-one with each productive
+   * source traverser. When present, buildGroupKey need not parse the traversal. */
+  keyExpr?: Expression;
+  /** Present only for an inline element group whose source stream is still live.
+   * Stashed cap()/property sources omit it and retain their existing fast paths. */
+  parent?: ElementStream;
+}
 
 /** Columns that frame one element (vertex/edge/property) under `prefix`. label
  *  rides as a subquery so the FROM needs no labels join. */
@@ -44,6 +55,7 @@ interface GroupKeyBuild { desc: GroupKey; cols: Expression; group: string | Expr
 
 /** Build the key columns for group(). */
 function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Record<string, any>): GroupKeyBuild {
+  if (src.keyExpr) return { desc: { kind: 'scalar' }, cols: q`${src.keyExpr} AS gk`, group: 'gk' };
   if (!keyArgs || keyArgs.length === 0) { // bare by() → the element itself is the key
     if (src.elem === 'property') throw new Error('group().by() on a property element is not yet supported');
     return { desc: { kind: 'element', elem: src.elem }, cols: elementSelect(src.elem, 'k', src.ctx, true), group: elementIdExpr(src.elem, src.ctx) };
@@ -80,6 +92,29 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
   throw new Error('unsupported group().by() key modulator');
 }
 
+/** Lower a scalar traversal-valued group key through the generic child compiler,
+ * then join it back to the original element by a multiset-safe parent origin. A
+ * missing child removes that member; a total child count still emits zero. */
+function tryLowerGroupKeySource(bys: any[][], src: GroupSource): GroupSource | null {
+  const parent = src.parent;
+  if (!parent) return null;
+  const arg = bys[0]?.[0];
+  if (!arg || typeof arg !== 'object' || !('nested' in arg) || !isScalarChild(arg.nested, parent.params)) return null;
+
+  const outer = pushChildScope(parent);
+  const child = tryCompileScalarValueChild(outer.seed, arg.nested, 'first', outer.scope);
+  if (!child) throw new Error('scalar group key failed after successful shape preflight');
+  const p = outer.seed.rel.as('gp');
+  const c = child.rel.as('gk');
+  const n = elemRel(parent, 'gn');
+  return {
+    from: q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`,
+    ctx: elemCtx(n, parent.elem),
+    elem: parent.elem === 'edge' ? 'edge' : 'vertex',
+    keyExpr: c.c.v,
+  };
+}
+
 /**
  * group()/groupCount(): fold the whole stream into one Map. Dual-path (locked
  * decision #3): a scalar-reducing value (count/sum) or scalar list becomes a SQL
@@ -88,6 +123,7 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
  */
 export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: GroupSource): GroupStream {
   if (bys.length > 2) throw new Error('group() with more than two by() modulators not yet supported');
+  src = tryLowerGroupKeySource(bys, src) ?? src;
   const key = buildGroupKey(bys[0], src, st.params);
 
   let val: GroupVal, valNode: Expression, groupBy = true;
