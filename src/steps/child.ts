@@ -2,11 +2,11 @@ import { empty, list, q, value, type Expression, type Relation } from '../q.ts';
 import { stepChain } from '../frontend.ts';
 import { edges, labels, nodes, vertexProperties } from '../schema.ts';
 import { advance, carriedWith, carryFrag, carriedCols, withCarried, type ElementStream } from './context.ts';
-import { carryOf, toScalarStream, type ScalarStream, type Stream } from './stream.ts';
+import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStream, type Stream } from './stream.ts';
 import { foldBody } from './index.ts';
 import { lowerScalarRows, SCALAR_TRANSFORMS } from './scalar.ts';
 import { normalize } from '../strategies.ts';
-import { lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
+import { lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
 
 /** Root/child compilation context. A child frame retains the complete parent domain,
  * not merely an ordinal on productive child rows: reducers need that domain to
@@ -110,6 +110,12 @@ export function isScalarChild(nested: any, params: Record<string, any>): boolean
   return scalarRowParts(body) !== null;
 }
 
+export function isListChild(nested: any, params: Record<string, any>): boolean {
+  if (!nested) return false;
+  const body = childSteps(nested, params);
+  return body.at(-1)?.name === 'fold' && scalarRowParts(body.slice(0, -1)) !== null;
+}
+
 /** Compile a terminal child count as a true scope-aware barrier. The preserved
  * parent domain is the left side of the aggregate, so an unproductive child still
  * emits one Long zero for that parent. Grouping by the child ordinal (rather than
@@ -144,14 +150,18 @@ export function tryCompileCountChild(
  * projection adds an explicit provider encounter key; the shared scalar pipeline
  * applies transforms and origin-partitioned row operators; only then does the
  * consumer apply its `first` or `all` cardinality policy. */
-export function tryCompileScalarChild(
+function compileScalarChildRows(
   parent: ElementStream,
   nested: any,
   use: ChildUse = 'first',
   scope: CompileScope = ROOT_SCOPE,
-): ScalarStream | null {
+  retainChildScope = false,
+  beforeFold = false,
+): { stream: ScalarStream; frame: ChildFrame } | null {
   if (!nested) return null;
-  const body = childSteps(nested, parent.params);
+  const fullBody = childSteps(nested, parent.params);
+  if (beforeFold && fullBody.at(-1)?.name !== 'fold') return null;
+  const body = beforeFold ? fullBody.slice(0, -1) : fullBody;
   const parts = scalarRowParts(body);
   if (!parts) return null;
   const { prefix, projection: terminal, suffix } = parts;
@@ -218,13 +228,14 @@ export function tryCompileScalarChild(
     ['v', encounter, ...childCols],
   );
   const lowered = continueScalar(toScalarStream(carryOf(end), rows, undefined, 'value', encounter));
+  if (retainChildScope) return { stream: lowered, frame: pushed.frame };
   const r = lowered.rel.as('r');
   const parentCols = carriedCols(parent.carried);
   const typeCol = lowered.result === 'number' ? q`, ${r.c.vt} AS vt` : empty;
   const resultCols = lowered.result === 'number' ? ['v', 'vt'] : ['v'];
   if (use === 'all') {
     const rel = parent.q.cte(q`SELECT ${r.c.v} AS v${typeCol}${carryFrag(parent.carried, r)} FROM ${r}`, [...resultCols, ...parentCols]);
-    return toScalarStream(carryOf(parent), rel, lowered.as, lowered.result);
+    return { stream: toScalarStream(carryOf(parent), rel, lowered.as, lowered.result), frame: pushed.frame };
   }
   const ranked = parent.q.cte(
     q`SELECT ${r.c.v} AS v${typeCol}${carryFrag(parent.carried, r)}, ROW_NUMBER() OVER (PARTITION BY ${r.c[pushed.frame.ordinal]} ORDER BY ${r.c[encounter]}) AS rn FROM ${r}`,
@@ -236,7 +247,35 @@ export function tryCompileScalarChild(
     q`SELECT ${first.c.v} AS v${firstTypeCol}${carryFrag(parent.carried, first)} FROM ${first} WHERE ${first.c.rn}=1`,
     [...resultCols, ...parentCols],
   );
-  return toScalarStream(carryOf(parent), rel, lowered.as, lowered.result);
+  return { stream: toScalarStream(carryOf(parent), rel, lowered.as, lowered.result), frame: pushed.frame };
+}
+
+export function tryCompileScalarChild(
+  parent: ElementStream,
+  nested: any,
+  use: ChildUse = 'first',
+  scope: CompileScope = ROOT_SCOPE,
+): ScalarStream | null {
+  return compileScalarChildRows(parent, nested, use, scope)?.stream ?? null;
+}
+
+/** Scalar rows followed by fold() become one ListStream per parent. This is a true
+ * child barrier: empty children emit [], productive NULL remains [null], and only
+ * the innermost origin is removed at the consumer boundary. */
+export function tryCompileListChild(
+  parent: ElementStream,
+  nested: any,
+  scope: CompileScope = ROOT_SCOPE,
+): ListStream | null {
+  const scoped = compileScalarChildRows(parent, nested, 'all', scope, true, true);
+  if (!scoped) return null;
+  const folded = lowerScopedScalarFold(scoped.stream, scoped.frame.domain, scoped.frame.ordinal);
+  const l = folded.rel.as('l');
+  const rel = parent.q.cte(
+    q`SELECT ${l.c.list} AS list${carryFrag(parent.carried, l)} FROM ${l}`,
+    ['list', ...carriedCols(parent.carried)],
+  );
+  return toListStream(carryOf(parent), rel, folded.of);
 }
 
 /** Compile an element-valued child through the SAME StepFns as the root prefix, then

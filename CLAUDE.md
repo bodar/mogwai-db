@@ -55,7 +55,10 @@ by child origins (never accidental SQLite CTE order). Child chains pass through 
 `lowerScopedScalarReducer` (`steps/barrier.ts`) now owns child `count/sum/min/max/mean`:
 it LEFT JOINs the preserved domain, groups by origin, counts the non-null encounter
 marker (not `v`), and retains dynamic numeric `v,vt` through map/flatMap and homogeneous
-scalar branch merges. Origin-scoped `fold` remains the next shaped barrier.
+scalar branch merges. `lowerScopedScalarFold` uses the same domain + encounter marker
+to produce one ListStream per parent (`[]` for an empty child, `[null]` for a productive
+NULL); map/flatMap/local consume it, and ordinary ListStream lowering handles followers.
+List-valued branch arms remain fail-closed until branch shape unification grows them.
 Scalar `local(child)` now uses this same compiler with `all` cardinality (contrasted
 with `map`'s `first`), so movement+projection+row-operator/reducer bodies no longer
 enter local.ts's private element-window vocabulary. Element-valued local windows remain

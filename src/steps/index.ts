@@ -7,7 +7,7 @@ import { withCarried, type ElementStream, type StepFn } from './context.ts';
 import { move, toEdge, toVertex, otherV } from './movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from './filter.ts';
 import { union, optional, repeat, choose, coalesce } from './branch.ts';
-import { isScalarChild } from './child.ts';
+import { isListChild, isScalarChild } from './child.ts';
 import { match } from './match.ts';
 import { identity, limit, range, skip } from './passthrough.ts';
 import { sack } from './sack.ts';
@@ -74,7 +74,7 @@ const isSideEffectGroup = (s: PStep): boolean => (s.args ?? []).some((a: any) =>
  * cardinality, so row operators and reducers stay partitioned by each parent. */
 const isScalarLocal = (s: PStep, params: Record<string, any>): boolean => {
   const nested = (s.args ?? [])[0]?.nested;
-  return !!nested && isScalarChild(nested, params);
+  return !!nested && (isScalarChild(nested, params) || isListChild(nested, params));
 };
 
 /** Steps that need the linear path threaded through the fold: the source vertex
