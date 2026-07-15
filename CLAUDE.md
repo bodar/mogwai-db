@@ -29,7 +29,11 @@ staged migration; the older P1–P3 sections below are historical semantics note
 Element-valued child `map`/origin-safe `flatMap` bodies now enter
 `tryCompileElementChild` (`steps/child.ts`): the same prefix StepFns run over a pushed
 parent domain, then `first`/`all` cardinality restores the outer scope. Extend this
-child seam; do not add another private movement parser.
+child seam; do not add another private movement parser. Terminal child `count()` is
+the first shared scope-aware barrier (`tryCompileCountChild`): `map()` and scalar
+`local()` both LEFT JOIN productive child rows to the preserved parent domain and
+GROUP BY the child ordinal, so empty children yield zero and duplicate equal parents
+remain distinct.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
   (`stripTerminal`, `foldRepeatClusters`, `foldByModulators`) run once up front so
   the dispatch sees a canonical, peek-free chain (no index arithmetic anywhere).

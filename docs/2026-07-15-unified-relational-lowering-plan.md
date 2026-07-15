@@ -501,8 +501,12 @@ compiler: it pushes the existing multiset-safe parent domain, runs movement/filt
 bodies through the ordinary root `StepFn` fold, and applies a consumer cardinality
 policy. `map()` uses `first` (`ROW_NUMBER() PARTITION BY origin`, empty children remain
 unproductive); origin-safe `flatMap()` uses `all`. This recovered the official
-`map(__.in().hasId(1)).limit(2)` scenario, moving L3 866→867. Scalar children still
-use the correlated fast path; barriers and non-element tails are the next expansion.
+`map(__.in().hasId(1)).limit(2)` scenario, moving L3 866→867. The first shared child
+barrier is now `count()`: both `map()` and scalar `local()` lower it by LEFT JOINing
+productive child rows onto the preserved parent domain and grouping by origin. Empty
+children therefore emit an explicit Long zero, while duplicate equal parents remain
+distinct. Other scalar children retain the correlated fast path; further barriers and
+non-element tails are the next expansion.
 
 1. Extract the existing `originSeed` into `steps/child.ts` as `pushChildScope`.
 2. Preserve the domain relation in `ChildFrame`.

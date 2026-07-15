@@ -8,7 +8,7 @@ import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, elemRel, type ElementStream } from './context.ts';
 import { carryOf, toScalarStream, type ScalarStream } from './stream.ts';
 import { type ValueType } from '../render.ts';
-import { tryCompileElementChild } from './child.ts';
+import { tryCompileCountChild, tryCompileElementChild } from './child.ts';
 
 // ---------- map (scalar body → per-traverser scalar projector) ----------
 
@@ -33,8 +33,10 @@ export function lowerMapScalar(st: ElementStream, steps: PStep[], stop: number):
   const name = steps[stop].name; // 'map' or a scalar-reduction 'local'
   const arg = steps[stop].args[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) throw new Error(`${name}(traversal) required`);
-  const ctx = elemCtx(elemRel(st), st.elem);
   const inner = stepChain(arg.nested, st.params);
+  const childCount = tryCompileCountChild(st, arg.nested);
+  if (childCount) return childCount;
+  const ctx = elemCtx(elemRel(st), st.elem);
   const sc = compileNestedScalar(inner, ctx);
   const n = elemRel(st);
   const p = st.rel.as('p');

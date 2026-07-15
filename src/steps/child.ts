@@ -1,7 +1,7 @@
 import { empty, list, q, type Expression, type Relation } from '../q.ts';
 import { stepChain } from '../frontend.ts';
 import { advance, carriedWith, carryFrag, carriedCols, withCarried, type ElementStream } from './context.ts';
-import { type Stream } from './stream.ts';
+import { carryOf, toScalarStream, type ScalarStream, type Stream } from './stream.ts';
 import { foldBody } from './index.ts';
 
 /** Root/child compilation context. A child frame retains the complete parent domain,
@@ -65,6 +65,35 @@ const ELEMENT_CHILD_STEPS = new Set([
   'out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'bothV',
   'has', 'hasLabel', 'hasId', 'where', 'filter', 'not', 'and', 'or', 'identity',
 ]);
+
+/** Compile a terminal child count as a true scope-aware barrier. The preserved
+ * parent domain is the left side of the aggregate, so an unproductive child still
+ * emits one Long zero for that parent. Grouping by the child ordinal (rather than
+ * element id) keeps equal/duplicate parent traversers multiset-distinct. */
+export function tryCompileCountChild(
+  parent: ElementStream,
+  nested: any,
+  scope: CompileScope = ROOT_SCOPE,
+): ScalarStream | null {
+  if (!nested) return null;
+  const body = stepChain(nested, parent.params);
+  const terminal = body.at(-1);
+  if (!terminal || terminal.name !== 'count' || terminal.args.length) return null;
+  const prefix = body.slice(0, -1);
+  if (prefix.some((s) => !ELEMENT_CHILD_STEPS.has(s.name))) return null;
+
+  const pushed = pushChildScope(parent, scope);
+  const { st: end, stop } = foldBody(prefix, pushed.seed, 0);
+  if (stop !== prefix.length) return null;
+
+  const d = pushed.frame.domain.as('d');
+  const c = end.rel.as('c');
+  const rel = parent.q.cte(
+    q`SELECT COUNT(${c.c.id}) AS v${carryFrag(parent.carried, d)} FROM ${d} LEFT JOIN ${c} ON ${c.c[pushed.frame.ordinal]}=${d.c[pushed.frame.ordinal]} GROUP BY ${d.c[pushed.frame.ordinal]}`,
+    ['v', ...carriedCols(parent.carried)],
+  );
+  return toScalarStream(carryOf(parent), rel, 'long');
+}
 
 /** Compile an element-valued child through the SAME StepFns as the root prefix, then
  * apply the consumer's cardinality policy. `first` implements map(): zero child rows

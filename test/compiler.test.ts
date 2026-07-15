@@ -1269,7 +1269,16 @@ describe('compiler SQL snapshots', () => {
   test('map(__.<scalar>) → per-traverser scalar projection (value shape)', () => {
     const m = read('g.V().map(__.out().count())');
     expect(m.shape).toEqual({ kind: 'value', as: 'long' }); // count() is a Long
-    expect(m.sql).toContain('SELECT (SELECT COUNT(*) FROM edges WHERE (src=n.id)) AS v FROM nodes n JOIN c0 p');
+    // count() is a child-scope barrier, not a correlated scalar fast path: the
+    // preserved domain makes an empty child an explicit zero row per origin.
+    expect(m.sql).toContain('COUNT(c.id) AS v');
+    expect(m.sql).toContain('LEFT JOIN');
+    expect(m.sql).toContain('GROUP BY d.o0');
+    const localCount = read('g.V().local(__.out().count())');
+    expect(localCount.sql).toContain('COUNT(c.id) AS v');
+    expect(localCount.sql).toContain('LEFT JOIN');
+    const carriedCount = read('g.V(1).as("a").local(__.out().count())');
+    expect(carriedCount.sql).toContain('COUNT(c.id) AS v, d.a0');
     expect(read('g.V(1).map(__.values("name"))').shape).toEqual({ kind: 'value', as: undefined });
     expect(read('g.V(1).map(__.values("name"))').sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS v");
     // record/list-valued child bodies still defer; element bodies use generic child scope below.
