@@ -8,10 +8,18 @@ import { q, type Expression, type Query, type Relation } from './q.ts';
 // between the compiler (produces these) and the handler (frames them onto the wire).
 // SQL text is built through the q kernel; this module never touches lazyrecords.
 
+/** Shape nested inside a relational list value. Kept at the render boundary because
+ * both ListStream and map/record fields must agree on how GraphBinary frames it. */
+export type ListOf =
+  | { kind: 'elem'; elem: 'node' | 'edge' }
+  | { kind: 'scalar'; as?: ValueType }
+  | { kind: 'list'; of: ListOf };
+
 // select(labels…)/project(keys…): a Map per row. Each entry names its result
-// key plus the SQL column prefix carrying its value, and whether that value is
-// a whole vertex (prefix_id/_label/_props) or a scalar (prefix_v).
-export interface MapEntry { key: string; prefix: string; sub: 'vertex' | 'edge' | 'value'; }
+// key plus the SQL column prefix carrying its typed payload.
+export type MapEntry =
+  | { key: string; prefix: string; sub: 'vertex' | 'edge' | 'value' }
+  | { key: string; prefix: string; sub: 'list'; of: ListOf };
 
 // The element kind an element-shaped column carries, and the columns that frame
 // it. `node`→vertexBuffer(v_id,v_label,v_props); `edge`→edgeBuffer(+v_src,v_tgt);

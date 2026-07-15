@@ -3,13 +3,13 @@ import { nodes, edges, labels, vertexProperties } from '../schema.ts';
 import { framedProps, labelNameSub, nodePropScalar, predicateSql, propExtract, extIdOf } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
-import { carryOf, pathColumns, recordFieldColumns, toListStream, toPathStream, toRecordStream, toScalarStream, type PathStream, type RecordField, type RecordStream, type ScalarStream } from './stream.ts';
+import { carryOf, pathColumns, recordFieldColumns, toListStream, toPathStream, toRecordStream, toScalarStream, type ListOf, type PathStream, type RecordField, type RecordStream, type ScalarStream, type Stream } from './stream.ts';
 import { type Compiled, type PathPos } from '../render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
 import { materializeRecordRoot } from './materialize.ts';
 import { lowerGlobalCount } from './barrier.ts';
 import { dispatchNext } from './index.ts';
-import { isScalarChild, pushChildScope, tryCompileScalarValueChild } from './child.ts';
+import { isElementChild, isListChild, isScalarChild, pushChildScope, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
 
 // ---------- select()/project() ----------
 
@@ -33,7 +33,7 @@ function reRootElement(st: ElementStream, p: Relation, id: Expression, elem: Ele
   return { ...st, rel, elem };
 }
 
-/** Lower heterogeneous record fields when at least one by() is a scalar child traversal.
+/** Lower heterogeneous record fields when at least one by() is a shaped child traversal.
  * One outer origin identifies each multiset-distinct input; scalar children use
  * child `first` cardinality while bare by() branches retain the whole source
  * element. Inner joins implement ordinary productive-by semantics: a missing child
@@ -46,7 +46,9 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
   const nested = specs.map((a) => a && typeof a === 'object' && 'nested' in a ? a.nested : null);
   if (!nested.some(Boolean)) return null; // leave the mature all-direct path untouched
   if (specs.some((a, i) => {
-    if (nested[i]) return !isScalarChild(nested[i], st.params);
+    if (nested[i]) return !isScalarChild(nested[i], st.params)
+      && !isListChild(nested[i], st.params)
+      && !isElementChild(nested[i], st.params);
     if (a === undefined) return false;
     if (typeof a === 'string') return false;
     return !(isProject && a && typeof a === 'object' && 'token' in a && (a.token === 'id' || a.token === 'label'));
@@ -65,13 +67,46 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
         })();
     if (nested[i]) {
       const seed = isProject ? outer.seed : reRootElement(outer.seed, p, source.id, source.elem);
-      const child = tryCompileScalarValueChild(seed, nested[i], 'first', outer.scope);
-      if (!child) throw new Error('scalar record child failed after successful shape preflight');
-      const rel = child.rel.as(`b${i}`);
+      if (isScalarChild(nested[i], st.params)) {
+        const child = tryCompileScalarValueChild(seed, nested[i], 'first', outer.scope);
+        if (!child) throw new Error('scalar record child failed after successful shape preflight');
+        const rel = child.rel.as(`b${i}`);
+        return {
+          rel,
+          field: { key: keys[i], prefix, sub: 'value' as const },
+          cols: [q`${rel.c.v} AS ${`${prefix}_v`}`],
+        };
+      }
+      if (isListChild(nested[i], st.params)) {
+        const child = tryCompileListChild(seed, nested[i], outer.scope);
+        if (!child) throw new Error('list record child failed after successful shape preflight');
+        const rel = child.rel.as(`b${i}`);
+        return {
+          rel,
+          field: { key: keys[i], prefix, sub: 'list' as const, of: child.of },
+          cols: [q`${rel.c.list} AS ${`${prefix}_list`}`],
+        };
+      }
+      const child = tryCompileElementChild(seed, nested[i], 'first', outer.scope);
+      if (!child) throw new Error('element record child failed after successful shape preflight');
+      const cp = child.stream.rel.as(`cp${i}`);
+      const n = (child.stream.elem === 'edge' ? edges : nodes).as(`n${i}`);
+      const l = labels.as(`l${i}`);
+      const payload = child.stream.elem === 'edge'
+        ? q`${n.c.id} AS rid, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${extIdOf(n.c.src)} AS src, ${extIdOf(n.c.tgt)} AS tgt, ${framedProps(n, 'edge')} AS props`
+        : q`${n.c.id} AS rid, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props`;
+      const payloadCols = child.stream.elem === 'edge'
+        ? ['rid', 'id', 'label', 'src', 'tgt', 'props']
+        : ['rid', 'id', 'label', 'props'];
+      const rel = st.q.cte(
+        q`SELECT ${payload}${carryFrag(child.stream.carried, cp)} FROM ${cp} JOIN ${n} ON ${n.c.id}=${cp.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}`,
+        [...payloadCols, ...carriedCols(child.stream.carried)],
+      ).as(`b${i}`);
+      const field: RecordField = { key: keys[i], prefix, sub: child.stream.elem === 'edge' ? 'edge' : 'vertex' };
       return {
         rel,
-        field: { key: keys[i], prefix, sub: 'value' as const },
-        cols: [q`${rel.c.v} AS ${`${prefix}_v`}`],
+        field,
+        cols: recordFieldColumns(field).map((name) => q`${rel.c[name.slice(prefix.length + 1)]} AS ${name}`),
       };
     }
 
@@ -141,7 +176,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
 /** A one-label select is not a record: it emits the selected traverser directly.
  * Lower it to the ordinary element/scalar stream model so movement, projections and
  * barriers after select() are handled by the common dispatcher. */
-export function lowerSingleSelect(st: ElementStream, proj: PStep): ElementStream | ScalarStream {
+export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
   const pop = proj.args.find((a) => a && typeof a === 'object' && 'pop' in a) as { pop: string } | undefined;
   if (pop && pop.pop !== 'last') throw new Error(`select(Pop.${pop.pop}) not yet supported`);
   if (proj.args.some((a) => a && typeof a === 'object' && 'column' in a)) throw new Error('select(Column) not yet supported');
@@ -152,10 +187,23 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): ElementStream
   const p = st.rel.as('p');
   const nested = proj.bys?.[0]?.[0];
   if (nested && typeof nested === 'object' && 'nested' in nested) {
-    if (!isScalarChild(nested.nested, st.params)) throw new Error('by(traversal) child shape not yet supported');
-    const child = tryCompileScalarValueChild(reRootElement(st, p, p.c[selected.col], selected.elem), nested.nested, 'first');
-    if (!child) throw new Error('scalar select child failed after successful shape preflight');
-    return child;
+    const seed = reRootElement(st, p, p.c[selected.col], selected.elem);
+    if (isScalarChild(nested.nested, st.params)) {
+      const child = tryCompileScalarValueChild(seed, nested.nested, 'first');
+      if (!child) throw new Error('scalar select child failed after successful shape preflight');
+      return child;
+    }
+    if (isListChild(nested.nested, st.params)) {
+      const child = tryCompileListChild(seed, nested.nested);
+      if (!child) throw new Error('list select child failed after successful shape preflight');
+      return child;
+    }
+    if (isElementChild(nested.nested, st.params)) {
+      const child = tryCompileElementChild(seed, nested.nested, 'first');
+      if (!child) throw new Error('element select child failed after successful shape preflight');
+      return child.stream;
+    }
+    throw new Error('by(traversal) child shape not yet supported');
   }
   const by = byToEntry(proj.bys?.[0]);
   if (by.sub === 'vertex') {
@@ -304,17 +352,24 @@ export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): 
   if (column) {
     if (step.bys?.length) throw new Error('by() after select(Column) on a record not yet supported');
     let expr: Expression;
+    let of: ListOf = { kind: 'scalar' };
     if (column === 'keys') expr = q`jsonb(${value(JSON.stringify(s.fields.map((f) => f.key)))})`;
     else {
-      if (s.fields.some((f) => f.sub !== 'value'))
-        throw new Error('select(Column.values) on a record containing elements needs a variant list stream');
-      expr = q`jsonb_array(${list(s.fields.map((f) => r.c[`${f.prefix}_v`]), ', ')})`;
+      if (s.fields.every((f) => f.sub === 'value'))
+        expr = q`jsonb_array(${list(s.fields.map((f) => r.c[`${f.prefix}_v`]), ', ')})`;
+      else if (s.fields.every((f) => f.sub === 'list')) {
+        const fields = s.fields as Extract<RecordField, { sub: 'list' }>[];
+        if (fields.some((f) => JSON.stringify(f.of) !== JSON.stringify(fields[0].of)))
+          throw new Error('select(Column.values) requires homogeneous list field shapes');
+        expr = q`jsonb_array(${list(fields.map((f) => q`json(${r.c[`${f.prefix}_list`]})`), ', ')})`;
+        of = { kind: 'list', of: fields[0].of };
+      } else throw new Error('select(Column.values) on heterogeneous scalar/element/list fields needs a variant list stream');
     }
     const rel = s.q.cte(
       q`SELECT ${expr} AS list${carryFrag(s.carried, r)} FROM ${r}`,
       ['list', ...carriedCols(s.carried)],
     );
-    return dispatchNext(toListStream(carryOf(s), rel, { kind: 'scalar' }), steps, at + 1);
+    return dispatchNext(toListStream(carryOf(s), rel, of), steps, at + 1);
   }
 
   const keys = step.args.filter((a): a is string => typeof a === 'string');
@@ -328,6 +383,13 @@ export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): 
       ['v', ...carriedCols(s.carried)],
     );
     return dispatchNext(toScalarStream(carryOf(s), rel), steps, at + 1);
+  }
+  if (field.sub === 'list') {
+    const rel = s.q.cte(
+      q`SELECT ${r.c[`${field.prefix}_list`]} AS list${carryFrag(s.carried, r)} FROM ${r}`,
+      ['list', ...carriedCols(s.carried)],
+    );
+    return dispatchNext(toListStream(carryOf(s), rel, field.of), steps, at + 1);
   }
   const rel = s.q.cte(
     q`SELECT ${r.c[`${field.prefix}_rid`]} AS id${carryFrag(s.carried, r)} FROM ${r}`,

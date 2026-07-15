@@ -114,9 +114,17 @@ function mapBuffer(row: any, entries: MapEntry[]): Buffer {
     parts.push(ioc.anySerializer.serialize(e.key));
     parts.push(e.sub === 'value'
       ? ioc.anySerializer.serialize(row[`${e.prefix}_v`])
-      : elementBuffer(row, e.prefix, e.sub));
+      : e.sub === 'list'
+        ? listFieldBuffer(row[`${e.prefix}_list`], e.of)
+        : elementBuffer(row, e.prefix, e.sub));
   }
   return Buffer.concat(parts);
+}
+
+function listFieldBuffer(json: string, of: import('./render.ts').ListOf): Buffer {
+  const items = JSON.parse(json);
+  if (of.kind === 'elem') return listBuffer(items.map(of.elem === 'edge' ? rowEdge : rowVertex));
+  return ioc.listSerializer.serialize(items);
 }
 
 // A GraphBinary LIST framed by hand (mirrors ArraySerializer) so element items
@@ -132,8 +140,9 @@ function listBuffer(items: Buffer[]): Buffer {
 
 // Frame a vertex/edge from a plain (unprefixed) result row — the id/label/props
 // (+ src/tgt) projection the vertex/edge/list shapes share.
-const rowVertex = (r: any): Buffer => vertexBuffer(r.id, r.label, JSON.parse(r.props));
-const rowEdge = (r: any): Buffer => edgeBuffer(r.id, r.label, r.src, r.tgt, JSON.parse(r.props));
+const propsOf = (props: any): Record<string, any> => typeof props === 'string' ? JSON.parse(props) : props;
+const rowVertex = (r: any): Buffer => vertexBuffer(r.id, r.label, propsOf(r.props));
+const rowEdge = (r: any): Buffer => edgeBuffer(r.id, r.label, r.src, r.tgt, propsOf(r.props));
 
 // Frame one element (vertex/edge/property) from prefixed columns (k_* / v_*).
 function elementBuffer(r: any, prefix: string, elem: ElemShape): Buffer {
@@ -241,7 +250,12 @@ function groupBuffer(rows: any[], key: GroupKey, val: GroupVal): Buffer {
     const k = groupKey(r, key);
     let g = groups.get(k.canon);
     if (!g) { g = { buf: k.buf, members: [], gv: undefined, gvt: '' }; groups.set(k.canon, g); }
-    if (val.kind === 'elementList' || val.kind === 'elementLast') g.members.push(elementBuffer(r, 'v', val.elem));
+    if (val.kind === 'elementList' || val.kind === 'elementLast') {
+      // A LEFT-joined group-scoped element fold emits one null payload row so an
+      // empty key still exists and frames as []; it is domain, not a member.
+      if (r.v_id != null || val.elem === 'property' && r.v_pk != null)
+        g.members.push(elementBuffer(r, 'v', val.elem));
+    }
     else { g.gv = r.gv; g.gvt = r.gvt; } // count/sum/scalarList: precomputed, one row per group
   }
   const valueBuf = (g: { members: Buffer[]; gv: any; gvt: string }): Buffer => {

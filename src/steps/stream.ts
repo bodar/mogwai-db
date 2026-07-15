@@ -15,17 +15,14 @@
 
 import { type Relation } from '../q.ts';
 import { type Elem } from '../plan.ts';
-import { type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from '../render.ts';
+import { type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type PathPos, type ValueType } from '../render.ts';
 import { carriedCols, type Carry, type ElementStream } from './context.ts';
 
 /** What a list stream holds — i.e. the shape `unfold` produces from it. `elem` → bare
  *  rowids (rejoin nodes/edges on unfold) → a fresh `ElementStream`; `scalar` → typed scalars → a
  *  `ScalarStream`; `list` → nested lists (list-of-lists, e.g. select(Column.values) of a
  *  list-valued map) → a ListStream of the inner shape. ('entry' reserved for Map-unfold.) */
-export type ListOf =
-  | { kind: 'elem'; elem: Elem }
-  | { kind: 'scalar'; as?: ValueType }
-  | { kind: 'list'; of: ListOf };
+export type { ListOf } from '../render.ts';
 
 /** A stream of scalars in a one-column relation `v` (values/id/label/inject/unfold-
  *  of-scalars). `as` is the compile-time GraphBinary type tag (render.ts ValueType). */
@@ -73,11 +70,7 @@ export interface PropertyStream extends Carry {
 /** One field of a per-traverser select()/project() record. Unlike MapStream, whose
  * two columns describe an entry stream for a global group barrier, a RecordStream
  * is one wide row per incoming traverser and may have heterogeneous field shapes. */
-export interface RecordField {
-  readonly key: string;
-  readonly prefix: string;
-  readonly sub: 'value' | 'vertex' | 'edge';
-}
+export type RecordField = MapEntry;
 
 export interface RecordStream extends Carry {
   readonly kind: 'record';
@@ -139,6 +132,8 @@ export const pathColumns = (layout: PathLayout): string[] => {
 
 export const recordFieldColumns = (f: RecordField): string[] => f.sub === 'value'
   ? [`${f.prefix}_v`]
+  : f.sub === 'list'
+    ? [`${f.prefix}_list`]
   : f.sub === 'edge'
     ? [`${f.prefix}_rid`, `${f.prefix}_id`, `${f.prefix}_label`, `${f.prefix}_src`, `${f.prefix}_tgt`, `${f.prefix}_props`]
     : [`${f.prefix}_rid`, `${f.prefix}_id`, `${f.prefix}_label`, `${f.prefix}_props`];

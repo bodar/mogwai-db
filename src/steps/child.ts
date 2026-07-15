@@ -139,6 +139,14 @@ export function isScalarFoldChild(nested: any, params: Record<string, any>): boo
   return body.at(-1)?.name === 'fold' && scalarRowParts(body.slice(0, -1)) !== null;
 }
 
+export function isElementFoldChild(nested: any, params: Record<string, any>): boolean {
+  if (!nested) return false;
+  const body = childSteps(nested, params);
+  if (body.at(-1)?.name !== 'fold') return false;
+  const before = body.slice(0, -1);
+  return before.length === 0 || elementRowParts(before) !== null;
+}
+
 /** Compile a terminal child count as a true scope-aware barrier. The preserved
  * parent domain is the left side of the aggregate, so an unproductive child still
  * emits one Long zero for that parent. Grouping by the child ordinal (rather than
@@ -333,6 +341,16 @@ export function tryCompileScalarRowsBeforeFold(
   scope: CompileScope = ROOT_SCOPE,
 ): { stream: ScalarStream; frame: ChildFrame } | null {
   return compileScalarChildRows(parent, nested, 'all', scope, true, 'fold');
+}
+
+/** Productive element rows immediately before fold(), retaining the child origin so
+ * a group consumer can fold them over its final key rather than once per parent. */
+export function tryCompileElementRowsBeforeFold(
+  parent: ElementStream,
+  nested: any,
+  scope: CompileScope = ROOT_SCOPE,
+): { stream: ElementStream; frame: ChildFrame } | null {
+  return compileElementChildRows(parent, nested, scope, 'fold');
 }
 
 /** Compile an element-valued child through the SAME StepFns as the root prefix, then
