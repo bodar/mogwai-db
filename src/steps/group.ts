@@ -42,6 +42,7 @@ export interface GroupSource {
   valFold?: boolean;
   valOrder?: Expression;
   valElement?: { elem: 'vertex' | 'edge'; ctx: ScalarCtx };
+  productiveBy?: boolean;
   /** Present only for an inline element group whose source stream is still live.
    * Stashed cap()/property sources omit it and retain their existing fast paths. */
   parent?: ElementStream;
@@ -64,10 +65,13 @@ function elementSelect(elem: ElemShape, prefix: string, ctx: ScalarCtx, internal
 const elementIdExpr = (elem: ElemShape, ctx: ScalarCtx): Expression => elem === 'property' ? ctx.pkExpr! : ctx.idExpr;
 
 interface GroupKeyBuild { desc: GroupKey; cols: Expression; group: string | Expression }
+const scalarGroupKey = (productive?: boolean): GroupKey => productive
+  ? { kind: 'scalar', productive: true }
+  : { kind: 'scalar' };
 
 /** Build the key columns for group(). */
 function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Record<string, any>): GroupKeyBuild {
-  if (src.keyExpr) return { desc: { kind: 'scalar' }, cols: q`${src.keyExpr} AS gk`, group: 'gk' };
+  if (src.keyExpr) return { desc: scalarGroupKey(src.productiveBy), cols: q`${src.keyExpr} AS gk`, group: 'gk' };
   if (!keyArgs || keyArgs.length === 0) { // bare by() → the element itself is the key
     if (src.elem === 'property') throw new Error('group().by() on a property element is not yet supported');
     return { desc: { kind: 'element', elem: src.elem }, cols: elementSelect(src.elem, 'k', src.ctx, true), group: elementIdExpr(src.elem, src.ctx) };
@@ -75,12 +79,12 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
   const a = keyArgs[0];
   if (typeof a === 'string') { // by('name') — first-under-multi for a node
     const pe = scalarProp(src.ctx, a);
-    return { desc: { kind: 'scalar' }, cols: q`${pe} AS gk`, group: 'gk' };
+    return { desc: scalarGroupKey(src.productiveBy), cols: q`${pe} AS gk`, group: 'gk' };
   }
   if (a && typeof a === 'object' && 'token' in a) { // by(T.label)/by(T.id)
     const expr = a.token === 'label' ? labelNameSub(src.ctx.labelIdExpr) : a.token === 'id' ? src.ctx.idExpr : null;
     if (!expr) throw new Error(`group().by(T.${a.token}) not yet supported`);
-    return { desc: { kind: 'scalar' }, cols: q`${expr} AS gk`, group: 'gk' };
+    return { desc: scalarGroupKey(src.productiveBy), cols: q`${expr} AS gk`, group: 'gk' };
   }
   if (a && typeof a === 'object' && 'nested' in a) {
     const inner = stepChain(a.nested, params);
@@ -99,7 +103,7 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
       return { desc: { kind: 'map', parts: keys.map((k) => ({ key: k })) }, cols: list(cols, ', '), group: group.join(', ') };
     }
     const sc = compileNestedScalar(inner, src.ctx); // by(__.label()) etc → scalar
-    return { desc: { kind: 'scalar' }, cols: q`${sc.expr} AS gk`, group: 'gk' };
+    return { desc: scalarGroupKey(src.productiveBy), cols: q`${sc.expr} AS gk`, group: 'gk' };
   }
   throw new Error('unsupported group().by() key modulator');
 }
@@ -147,7 +151,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     const child = tryCompileScalarValueChild(outer.seed, keyArg.nested, 'first', outer.scope);
     if (!child) throw new Error('scalar group key failed after successful shape preflight');
     const c = child.rel.as('gk');
-    joins.push(q` JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
+    joins.push(q`${src.productiveBy ? ' LEFT JOIN ' : ' JOIN '}${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
     keyExpr = c.c.v;
   }
   if (genericVal) {
@@ -198,6 +202,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     valFold,
     valOrder,
     valElement,
+    productiveBy: src.productiveBy,
   };
 }
 
@@ -295,7 +300,7 @@ export function compileFromGroup(s: GroupStream, steps: PStep[], at: number): Co
     throw new Error('select(Column) over a group of element values not yet supported');
   else throw new Error('select(Column) over this rich group value layout not yet supported');
 
-  const where = s.key.kind === 'scalar' ? q` WHERE ${g.c.gk} IS NOT NULL` : empty;
+  const where = s.key.kind === 'scalar' && !s.key.productive ? q` WHERE ${g.c.gk} IS NOT NULL` : empty;
   const rel = s.q.cte(q`SELECT ${mk} AS mk, ${mv} AS mv FROM ${g}${where}`, ['mk', 'mv']);
   return dispatchNext(toMapStream(carryOf(s), rel, keyOf, valOf), steps, at);
 }
@@ -379,7 +384,7 @@ export function compileFromProperty(s: PropertyStream, steps: PStep[], at: numbe
 
   if (step.name === 'group' || step.name === 'groupCount') {
     const ctx = propertyCtx(s);
-    const src: GroupSource = { from: s.rel.as('p'), ctx, elem: 'property' };
+    const src: GroupSource = { from: s.rel.as('p'), ctx, elem: 'property', productiveBy: step.productiveBy };
     const isCount = step.name === 'groupCount';
     return dispatchNext(lowerGroup(s, isCount, step.bys ?? [], src), steps, at + 1);
   }

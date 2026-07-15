@@ -2,13 +2,13 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–5 complete, Stage 6 active
-**Baseline:** full suite 365/365, L1 2298/2298, L3 878/2041; 241 compiler tests
+**Baseline:** full suite 366/366, L1 2298/2298, L3 883/2041; 242 compiler tests
 
 ## Restart handoff — read this first after a context reset
 
 **Current checkpoint:** branch `refactor/unified-relational-lowering`; every slice through
-item 11 below is represented in this checkpoint. Work is local-only: do not push or merge
-to trunk. Run the full `bun test` suite before every local commit.
+item 12 below is represented in this checkpoint. This checkpoint was approved for trunk
+after the complete suite passed; continue to run full `bun test` before every commit.
 
 **Recent completed slices:**
 
@@ -66,22 +66,29 @@ to trunk. Run the full `bun test` suite before every local commit.
     preserves the list row's carried schema instead of assuming every list was global.
     Group-scoped whole-element `…fold()` uses the same raw child domain, retaining empty
     keys without framing phantom elements. L3 ratcheted 877→878.
+12. ProductiveByStrategy is now an explicit policy on the consumers that can represent
+    its result honestly: `group`, `groupCount`, `project`, and `select`. Those consumers
+    preserve a productive SQL NULL while the ordinary path still drops an unproductive
+    `by()` result; shaped records anchor on the parent domain and LEFT JOIN their fields.
+    Unsupported `aggregate`/`order`/`path` consumers and nullable element fields still
+    fail closed. Five official scenarios landed, raising L3 878→883.
 
 **Current Stage 6 state:** scalar traversal modulators for `project`, aliased `select`,
 and inline element `group` all use the generic child-domain compiler. Group keys consume
 `first`, non-reducing values consume `all`, and group reducers consume raw rows at the
 final key barrier. These consumers share multiset-safe origin joins rather than private
-correlated traversal parsers. L3 is 877.
+correlated traversal parsers. ProductiveBy is explicit at group/groupCount/project/select
+boundaries. L3 is 883.
 
-**Immediate next slice:** make productive/unproductive `by()` behaviour an explicit
-consumer policy and remove the blanket ProductiveByStrategy rejection where the shaped
-record/group consumers can implement it honestly. Property groups still lack a live
-element parent and remain a compatibility island. Inventory sack, math, format, and
-option-choose afterward. Preserve correlated count/EXISTS only as measured fast paths
-until Stage 8.
+**Immediate next slice:** extend that consumer policy into `aggregate().by(...)`, the
+highest-density remaining ProductiveBy cluster, by lowering aggregate modulators through
+the same child row/domain contract. Keep `order` and `path` fail-closed until their
+encounter-order and nullable-shape contracts are explicit. Property groups still lack a
+live element parent and remain a compatibility island. Preserve correlated count/EXISTS
+only as measured fast paths until Stage 8.
 
-**Still pending in Stage 6:** scalar/list `optional`, traversal-valued `by`, an explicit
-ProductiveByStrategy productivity policy, and generic child-existence fallback for
+**Still pending in Stage 6:** scalar/list `optional`, traversal-valued `by`, ProductiveBy
+policies for `aggregate`/`order`/`path`, and generic child-existence fallback for
 `where`/`filter`/`not`. Element-valued child `order()` is also deferred: it needs
 encounter-order metadata that survives later lowering and root materialization, not a
 CTE-local `ORDER BY` assumption.
@@ -669,11 +676,10 @@ Migrate in increasing semantic complexity:
 4. ~~scalar/list arms for `coalesce`, preserving first-productive-arm semantics.~~
    Scalar/list `optional` remains.
 5. ~~`local`: delete its movement-only parser and use child-scoped barriers.~~
-6. `by(traversal)`: use child scalar cardinality plus productivity. Project scalar
-   traversal/string/token modulators are done; bare-element project, select, group,
-   sack/math/format/choose consumers remain.
-7. ProductiveByStrategy: make productive/unproductive handling an explicit consumer
-   policy rather than a strategy-wide rejection.
+6. `by(traversal)`: use child scalar cardinality plus productivity. Project, select, and
+   group shaped modulators are done; sack/math/format/choose consumers remain.
+7. ProductiveByStrategy: group/groupCount/project/select now have explicit productive
+   null policies; aggregate/order/path and nullable element fields remain fail-closed.
 8. `where`/`filter`/`not`: keep inline fast paths; generic fallback uses child
    existence.
 
@@ -807,8 +813,9 @@ The refactor is complete when all of the following are true:
 - [x] `compileNestedList` is deleted.
 - [ ] `compileNestedScalar`/predicate specializations are optional `tryInline*` fast
       paths with generic fallbacks.
-- [ ] ProductiveByStrategy has an explicit productivity policy rather than a global
-      rejection.
+- [ ] ProductiveByStrategy has explicit policies for every supported consumer rather
+      than a global rejection. (Done: group/groupCount/project/select; pending:
+      aggregate/order/path and nullable element fields.)
 - [ ] L1 is 2298/2298 and L3 has never regressed below 833 during migration.
 - [ ] Existing hot-path EXPLAIN/performance guards remain green.
 

@@ -760,7 +760,7 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().project("friend").by(__.out().values("name")).select("friend")').shape)
       .toEqual({ kind: 'value', as: undefined });
     const mixed = read('g.V().project("name","degree").by("name").by(__.out().count())');
-    expect(mixed.sql).toContain('vp0.key=?');
+    expect(mixed.sql).toContain('SELECT value FROM vertex_properties WHERE node=p0.id AND key=?');
     expect(mixed.sql).toContain('ON b1.o0=b0.o0');
     expect(read('g.V().project("id","friend").by(T.id).by(__.out().values("name"))').shape.kind).toBe('map');
     const element = read('g.V(1).project("self","friend").by().by(__.out().values("name"))');
@@ -810,7 +810,7 @@ describe('compiler SQL snapshots', () => {
     expect(selected.sql).toContain('SELECT p1.a1 AS id');
     expect(selected.sql).toContain('ON b1.o0=b0.o0');
     const mixed = read('g.V(1).as("a").out("knows").as("b").select("a","b").by("name").by(__.out().count())');
-    expect(mixed.sql).toContain('vp0.node=p0.a0');
+    expect(mixed.sql).toContain('SELECT value FROM vertex_properties WHERE node=p0.a0 AND key=?');
     const element = read('g.V(1).as("a").out("knows").as("b").select("a","b").by().by(__.out().count())');
     expect(element.shape).toEqual({
       kind: 'map',
@@ -894,6 +894,26 @@ describe('compiler SQL snapshots', () => {
     expect(names('g.withStrategies(new SubgraphStrategy(vertices: __.hasLabel("person"))).V().has("name","marko").out("knows").values("name")')).toEqual(['josh', 'vadas']);
   });
 
+  test('ProductiveByStrategy makes missing by-results explicit nulls at supported consumers', () => {
+    const store = seededStore();
+    const grouped = run(store, 'g.withStrategies(ProductiveByStrategy).V().group().by("age").by("name")');
+    expect(grouped.find((r) => r.gk == null)).toMatchObject({ gv: '["lop","ripple"]' });
+    expect(read('g.withoutStrategies(ProductiveByStrategy).V().group().by("age").by("name")').shape)
+      .toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'scalarList' } });
+    expect(run(store, 'g.withStrategies(ProductiveByStrategy).V().groupCount().by("age")').find((r) => r.gk == null)?.gv).toBe(2);
+
+    const projected = run(store, 'g.withStrategies(ProductiveByStrategy).V().project("degree","age").by(__.inE().count()).by("age")');
+    expect(projected).toHaveLength(6);
+    expect(projected.filter((r) => r.e1_v == null).map((r) => r.e0_v).sort()).toEqual([1, 3]);
+
+    const selected = run(store, 'g.withStrategies(ProductiveByStrategy).V().as("a").select("a").by("age")').map((r) => r.v);
+    expect(selected.filter((v) => v == null)).toHaveLength(2);
+    expect(selected.filter((v) => v != null).sort()).toEqual([27, 29, 32, 35]);
+    expect(run(store, 'g.V().as("a").select("a").by("age")').map((r) => r.v).sort())
+      .toEqual([27, 29, 32, 35]);
+    expect(executeQuery(store, 'g.withStrategies(ProductiveByStrategy).V().group().by("age").by("name")', {})).toHaveLength(1);
+  });
+
   test('verification strategies throw TinkerPop\'s canonical messages (pass a legal traversal)', () => {
     // ReadOnly: any mutating step rejected; a read passes.
     expect(() => compile('g.withStrategies(ReadOnlyStrategy).V().out("knows").values("name")', {})).not.toThrow();
@@ -918,12 +938,14 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('semantic/unknown strategies + deferred forms fail closed (never silently leak)', () => {
-    // ProductiveByStrategy changes by() null semantics — not an optimization. Reject.
-    expect(() => compile('g.withStrategies(ProductiveByStrategy).V().values("name")', {}))
-      .toThrow('withStrategies(...) is not supported');
-    // Mixed list: one unsafe strategy poisons the whole call (Count is safe, ProductiveBy not).
-    expect(() => compile('g.withStrategies(CountStrategy, ProductiveByStrategy).V()', {}))
-      .toThrow('withStrategies(...) is not supported');
+    // ProductiveByStrategy is a no-op when no by()-consumer exists, but unsupported
+    // consumers still fail closed instead of silently using ordinary productivity.
+    expect(() => compile('g.withStrategies(ProductiveByStrategy).V().values("name")', {})).not.toThrow();
+    expect(() => compile('g.withStrategies(ProductiveByStrategy).V().order().by("age")', {}))
+      .toThrow('ProductiveByStrategy with order by()');
+    // A safe optimization alongside ProductiveBy does not suppress its fail-closed gate.
+    expect(() => compile('g.withStrategies(CountStrategy, ProductiveByStrategy).V().order().by("age")', {}))
+      .toThrow('ProductiveByStrategy with order by()');
     // Deferred subsets throw clearly rather than under-filter:
     expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.has("name","x"), edges: __.has("weight",1))).V()', {}))
       .toThrow('SubgraphStrategy(edges) criterion not yet supported');

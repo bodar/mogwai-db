@@ -541,8 +541,12 @@ default; a co-named `with` is suppressed). Two fail-closed invariants, DO NOT re
 (gating the filter on presence leaks all data); (2) any form a semantic strategy can't
 yet filter — Subgraph edge/vertexProperty criteria + edge-landing steps (adjacency),
 Partition meta-properties/merge, and ANY nested body (repeat/union/where-with-movement) —
-throws a clear deferral rather than under-filter. ProductiveBy stays rejected (gated on
-aggregate/cap). Rationale + the challenged "DO routing obviates partitioning" presumption:
+throws a clear deferral rather than under-filter. **ProductiveByStrategy is a consumer
+policy, not a rewrite:** `group`/`groupCount`/`project`/`select` preserve productive NULL
+results while their ordinary forms drop missing `by()` results. Shaped record consumers
+anchor on the parent domain and LEFT JOIN productive fields. `aggregate`/`order`/`path`
+and nullable element-valued fields still fail closed rather than fabricate a shape.
+Rationale + the challenged "DO routing obviates partitioning" presumption:
 `docs/2026-07-13-with-strategies-exploration.md`.
 
 DONE: P2a (as/select/project/by column-threading), P2c-1 (edge traversal — the

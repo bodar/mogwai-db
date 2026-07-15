@@ -51,7 +51,7 @@ export function appendPathPos(p: PathState, elem: Elem): { path: PathState; col:
  *  this state outlives the current traverser stream. */
 export type SideEffectDef =
   | { kind: 'list'; rel: Relation; of: { kind: 'elem'; elem: Elem } | { kind: 'scalar' } }
-  | { kind: 'group'; from: string; ctx: import('../plan.ts').ScalarCtx; elem: import('../render.ts').ElemShape; isCount: boolean; bys: any[][]; parent: ElementStream };
+  | { kind: 'group'; from: string; ctx: import('../plan.ts').ScalarCtx; elem: import('../render.ts').ElemShape; isCount: boolean; bys: any[][]; parent: ElementStream; productiveBy?: boolean };
 export type SideEffectMap = ReadonlyMap<string, SideEffectDef>;
 
 /** The per-traverser CARRIED SCHEMA: the columns physically present on the id-relation
