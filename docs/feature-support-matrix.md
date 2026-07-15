@@ -4,7 +4,7 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-15 · **live L3 conformance:** 833 · **corpus parse+chain:**
+**Last synced:** 2026-07-15 · **live L3 conformance:** 841 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
 
@@ -51,7 +51,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `hasLabel`, `has(k)`, `has(k,v)`, `has(k,P)` | ✅ | ✅ ANY-match `EXISTS(vertex_properties…)` (multi-property has), rides the static `vp_key_value` covering index (W4 — key binds, no splice) |
 | `has(label,k,v)`, `has(T.label/T.id, v/P)` | ✅ | ✅ the cucumber verification idiom |
 | `hasId(…)` | ✅ | ✅ flattens list args |
-| `is(P)` | 🟡 | ✅ folds onto the projected scalar<br>❌ after `limit`/`range`/`skip`<br>❌ after `path()` |
+| `is(P)` | 🟡 | ✅ folds onto a projected scalar<br>✅ stepwise after a relational count/numeric reducer (including after `limit`/`range`/`skip`)<br>❌ after `limit`/`range`/`skip` in the remaining fused element-projection compatibility path<br>❌ after `path()` |
 | `where(__.…)` | 🟡 | ✅ single- & multi-hop (`compileExistsChain`)<br>✅ `where(__.label()/not())`<br>✅ alias-rooted `where(__.as('x')…)`<br>❌ `both()` multi-hop<br>❌ edge-typed hops |
 | `where(P)` / `where('a',P)` | 🟡 | ✅ alias-column compare (P2a)<br>❌ some `where(P.op)` alias forms<br>❌ `where().by(key)` on an edge-typed label |
 | `and`, `or`, `not`, `filter(__.…)` | ✅ | ✅ `and`/`or`/`not`, `filter(traversal)`<br>❌ `filter(predicate)` (non-traversal) — use `filter(traversal)` |
@@ -72,7 +72,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `properties(k…)` [`.key`/`.value`/`.element`/`.id`/`.label`/`.count`] | ✅ | ✅ `.key`/`.value`/`.element`/`.id`/`.label`/`.count`; real VP id + meta framed (W4)<br>✅ `has(metaKey)`/`hasKey`/`hasValue`/`.properties()`(meta)/`valueMap`(metaMap)<br>❌ `element()` of an **edge** property<br>❌ `properties().dedup()` |
 | `select('a')`, multi-`select`, `project(…)` | 🟡 | ✅ column-threaded aliases<br>❌ `select`/`project` of an **edge**-typed label |
 | `select(Column.values/keys)` | 🟡 | ✅ over a `group()`/`groupCount()` map (retypes → MapStream, §MapStream): scalar/count/sum values + element/scalar keys, incl. list-VALUED maps (`by(__.<move>()…fold())`) as list-of-lists<br>❌ element-VALUE maps, Map-unfold (→Map.Entry), select(Column) on a raw Map param |
-| **chained projections** (`values().count()`, `valueMap().select()`) | ❌ | `only one projection step is supported per traversal` — element→scalar→scalar re-type; partly dissolved by §9, still open for this shape |
+| **chained projections** (`values().count()`, `valueMap().select()`) | 🟡 | ✅ scalar projections retype to a physical ScalarStream before `count`/`sum`/`min`/`max`/`mean`; row operators then lower stepwise<br>❌ structured projection chains such as `valueMap().select()` still hit the compatibility guard |
 | `order()` [`.by(key[,dir])`] | 🟡 | ✅ tail modifier<br>❌ `order()` after `path()`<br>❌ `order().by(key)` on a scalar stream |
 | `limit`, `range`, `skip` | ✅ | ✅ CTE mid-chain, tail-modifier after `order()` |
 | `by(…)` modulator | ✅ | ✅ only as an `order`/`select`/`project`/`group`/`groupCount`/`path`/`math` modulator |
@@ -83,7 +83,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 |---|:--:|---|
 | `group`, `groupCount` | 🟡 | ✅ scalar reducers → SQL `GROUP BY`<br>✅ element values → ordered-stream + handler fold<br>✅ **re-enterable**: a follower (`select(Column.*)`/unfold) retypes it → MapStream (§MapStream)<br>❌ >2 `by()` modulators<br>❌ `by(T.x)` key<br>❌ deep nested-`by()` chains |
 | `fold()` | ✅ | ✅ terminal reducer **and** a real JSONB list value when followed (§9) |
-| `sum`, `min`, `max`, `mean` | ✅ | ✅ Long/Double framing<br>✅ also as `Scope.local` list reducers (§9)<br>✅ `min`/`max` range over any Comparable incl. **Strings** (v4); `sum`/`mean` numeric only<br>✅ `cap('a').unfold().<reducer>` (unfold of a scalar = identity) |
+| `sum`, `min`, `max`, `mean` | ✅ | ✅ relational ScalarStream with explicit `(v,vt)` payload, so filters/range can follow without losing runtime numeric framing<br>✅ also as `Scope.local` list reducers (§9)<br>✅ `min`/`max` range over any Comparable incl. **Strings** (v4); `sum`/`mean` numeric only<br>✅ `cap('a').unfold().<reducer>` (unfold of a scalar = identity) |
 | `group('a')`/`groupCount('a')` (side-effecting) | 🟡 | pass-through barrier: stashes the group-spec, `cap('a')` re-emits it (§12). ❌ after `as()`/`path()`, `cap('a')` then more steps |
 
 ## 5. Per-traverser branching
@@ -97,7 +97,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `optional(…)` | 🟡 | ✅ single-hop LEFT JOIN fast path + multi-hop<br>✅ **incoming `as()` threads through** (fast path carries it from the input; general path via originSeed)<br>❌ element-kind change on miss<br>❌ a NEW `as()` inside an arm<br>✅ **path threads through** (pad-to-max cols) |
 | `flatMap(__.…)` | 🟡 | ✅ element body fan-out<br>✅ **incoming `as()` threads through** (single body, no merge)<br>✅ **path threads through** (pad-to-max cols) |
 | `map(__.<scalar>)` | 🟡 | ✅ correlated scalar (`map(__.out().count())` etc)<br>❌ **element**-body `map` (first-result — needs `ROW_NUMBER` over `St.origin`)<br>❌ alias/select/fold bodies<br>❌ trailing steps |
-| `local(…)` | 🟡 | ✅ per-element scalar reduction (`local(outE().count())` → tail projector)<br>✅ movement + a per-element `limit()`/`range()` via `ROW_NUMBER() OVER (PARTITION BY` input ordinal`)` (`local(bothE().limit(1))`)<br>❌ non-movement bodies (match/simplePath/union/nested local), no-barrier bodies, `order()`/`dedup()` inside, after `as()`/`path()`, `local(aggregate(...))` |
+| `local(…)` | 🟡 | ✅ per-element scalar reduction (`local(outE().count())` → tail projector)<br>✅ movement + a per-element `limit()`/`range()` via the shared child-domain ordinal and `ROW_NUMBER() OVER (PARTITION BY …)`<br>✅ outer `as()` aliases/path columns survive the child scope<br>❌ non-movement bodies (match/simplePath/union/nested local), no-barrier bodies, `order()`/`dedup()` inside, `local(aggregate(...))`, sack/otherV state |
 
 ## 6. Recursion (`repeat`)
 
@@ -151,7 +151,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | string transforms | ✅ | ✅ SQL scalar, text-in text-out<br>✅ `concat` skips nulls (`concat_ws`), all-null→null<br>✅ trim family over Java's `isWhitespace` set (incl. U+3000)<br>✅ `reverse` string chars (recursive CTE) / number identity / list order (§9)<br>✅ all compose as `Scope.local` per-element list transforms after `fold()`<br>✅ a string op on a non-`local` list raises TinkerPop's "can only take string as argument"<br>✅ `format("…%{key}…%{_}…")` templates a string — named tokens read element properties, `%{_}` pulls by() modulators (positional/round-robin); a missing property filters the row (❌ reading project()/select() columns, the as()-alias fallback)<br>❌ `split` (list-valued), element/map `asString` |
 | `math("<formula>")` | 🟡 | ✅ full exp4j operator/function set → one SQL scalar, always Double<br>❌ a var with no `by()`<br>❌ `withSideEffect` vars<br>❌ reading `project()`/`select()` map columns |
 | `asDate`, `dateAdd`, `dateDiff`, `datetime()`/`DateTime()` literals | 🟡 | ✅ epoch-millis rep + `'date'` tag (UTC-only, ms precision — parity with the JS reference client)<br>❌ `typeOf(GType.DATETIME)` over stored props<br>❌ `inject([…]).asDate()` |
-| `asNumber` + reducer (`fold`/`sum`) | ❌ | subtype tag can't survive `wrapReducer` yet |
+| `asNumber` + reducer (`fold`/`sum`) | 🟡 | ✅ numeric reducers carry runtime `vt` explicitly (`asNumber(...).sum()`)<br>❌ typed `fold()` still needs element-type metadata on ListStream materialization |
 | bigdecimal | ❌ | no client GraphBinary serializer |
 | `format()` | ❌ | template substitution — net-new (small, its own piece) |
 
