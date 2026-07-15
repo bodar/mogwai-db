@@ -98,14 +98,15 @@ the correlated `compileNestedList` mini-compiler is deleted. Element `tail()` an
 groups retain compatibility paths. Group-scoped whole-element `…fold()` now also
 uses raw child rows at the final key boundary; LEFT-joined null payloads retain empty keys
 but are never framed as phantom elements. Consumers call
-`tryCompileScalarValueChild` and never distinguish row projections from total count;
-do not grow `compileNestedScalar` to implement new by forms.
+`tryCompileScalarValueChild` and never distinguish row projections from total count.
 Multi-input scalar consumers use `tryCompileScalarModulations`: it assigns one outer
 ordinal, compiles each child independently (including re-rooting math variables on an
 `as()` alias), and exposes both value and row-presence columns. `math`, `format`, and
 option-map `choose` use this seam; only the selected option body's presence is observed,
-while an empty choice routes to `Pick.none`. `mapscalar.ts` has no `compileNestedScalar`
-import. Remaining uses are compatibility/inline candidates for Stage 7, not extension points.
+while an empty choice routes to `Pick.none`. The old `compileNestedScalar` symbol is
+deleted. `tryInlineScalar` is a nullable correlated optimization used only by property
+groups and predicate fast paths; it is not an extension point and unsupported means
+fallback, never semantic rejection. Sack and every element-backed group path are generic.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
   (`stripTerminal`, `foldRepeatClusters`, `foldByModulators`) run once up front so
   the dispatch sees a canonical, peek-free chain (no index arithmetic anywhere).
@@ -572,8 +573,8 @@ was 0). Key pieces:
 - Historical compatibility helper `compileNestedScalar(inner, ScalarCtx)` compiled a
   narrow nested traversal into a correlated scalar. Generic child streams have replaced
   it for map/local/project/select/group element sources/math/format/option-choose; the
-  remaining property-group/sack/predicate uses are Stage 7 inline candidates. Do not
-  extend its supported vocabulary.
+  remaining property-group/predicate cases now use nullable `tryInlineScalar`; sack has
+  no fallback. Do not extend the inline vocabulary.
 - `lowerGroup` — group() is a **barrier** → a rich GroupStream, root-framed as one Map. Dual-path
   (locked #3): scalar reducers (count/sum, `json_group_array` scalar-lists) →
   real SQL `GROUP BY`; element values (default list / `by(__.tail())`) →

@@ -7,7 +7,8 @@
 ## Restart handoff — read this first after a context reset
 
 **Current checkpoint:** branch `refactor/unified-relational-lowering`; items 1–15 are on
-`trunk`, and item 16 is the current local checkpoint. Run full `bun test` before every commit.
+`trunk`, item 16 is local commit `80d7020`, and item 17 is the current uncommitted
+checkpoint. Run full `bun test` before every commit.
 
 **Recent completed slices:**
 
@@ -104,6 +105,13 @@
     productivity is observed; an empty choice still reaches `Pick.none`. `mapscalar.ts`
     no longer imports `compileNestedScalar`, including for map/scalar-local. The official
     alias-rooted math scenario landed and L3 ratcheted 931→932.
+17. Stage 7 began by deleting the `compileNestedScalar` symbol entirely. Sack traversal
+    modulation now has only its retained child-row policy; composite `group().by(project)`
+    keys compile every field as an independent first-child stream joined on one outer
+    ordinal. Element-backed groups are forbidden from falling back to correlated scalar
+    parsing. The surviving property-group/predicate optimization is named
+    `tryInlineScalar` and returns null on an unsupported shape, so it cannot define
+    language support or throw semantic policy. L3 remains 932.
 
 **Current Stage 6 state:** scalar traversal modulators for `project`, aliased `select`,
 and inline element `group` all use the generic child-domain compiler. Group keys consume
@@ -114,10 +122,11 @@ aggregate, order, dedup, linear-path, and alias-compare boundaries, including nu
 element records and aggregate members. Multi-input math/format/option-choose modulation
 also uses one generic child domain. L3 is 932.
 
-**Immediate next slice:** Stage 7 deletion: demote the remaining group/sack
-`compileNestedScalar` consumers behind explicit `tryInline*` fast paths, remove semantic
-throws from those fast paths, and delete `branchArm`'s prefix-only vocabulary. Preserve
-correlated count/EXISTS as measured fast paths until Stage 8.
+**Immediate next slice:** finish Stage 7's predicate/branch seam: make the correlated
+predicate helper an explicit `tryInlinePredicate` optimization with generic fallback,
+then delete `branchArm`'s prefix-only vocabulary. After that, replace `dispatchNext`
+with a stepwise `lowerSteps` loop. Preserve correlated count/EXISTS as measured fast
+paths until Stage 8.
 
 **Deliberate compatibility boundaries after Stage 6:** broader VariantStream followers,
 property groups without a live element parent, element-kind-changing optional fallback,
@@ -720,10 +729,10 @@ Ratchet after each consumer, not only at the end.
 
 ### Stage 7 — demote and delete the mini-compilers
 
-1. Rename the surviving optimized pieces to `tryInlineScalar` and
+1. `tryInlineScalar` is landed; rename/demote the predicate optimization to
    `tryInlinePredicate`.
 2. ~~Delete `compileNestedList`; generic child + fold owns its semantics.~~
-3. Remove semantic throws from inline fast paths; unrecognized means fallback.
+3. Scalar inline misses now return null; do the same for the predicate fast path.
 4. Delete `branchArm`'s prefix-only stop check.
 5. ~~Delete `isScalarLocal`, the local-body movement whitelist, and local's private
    origin window implementation.~~ (`61d028d`)

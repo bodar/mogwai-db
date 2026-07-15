@@ -1,6 +1,5 @@
 import { q, list, type Expression } from '../q.ts';
-import { scalarProp, labelNameSub, compileNestedScalar, predicateSql, elemCtx } from '../plan.ts';
-import { stepChain } from '../frontend.ts';
+import { scalarProp, labelNameSub, predicateSql, elemCtx } from '../plan.ts';
 import { advance, elemRel, prevRel, carriedCols, type ElementStream, type StepFn } from './context.ts';
 import { tryCompileScalarValueRows } from './child.ts';
 
@@ -31,7 +30,7 @@ function sackByValue(byArgs: any[] | undefined, st: ElementStream): Expression {
     throw new Error(`sack().by(T.${a.token}) not yet supported`);
   }
   if (a && typeof a === 'object' && 'nested' in a)
-    return compileNestedScalar(stepChain(a.nested, st.params), elemCtx(elemRel(st), st.elem)).expr;
+    throw new Error('sack().by(traversal) not supported by generic scalar child lowering');
   throw new Error('unsupported sack().by() modulator');
 }
 

@@ -1,7 +1,7 @@
 import { q, value, list, empty, type Expression } from '../q.ts';
 import { edges, labels, nodes, vertexProperties } from '../schema.ts';
 import {
-  compileNestedScalar, scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx,
+  tryInlineScalar, scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx,
   type ScalarCtx,
 } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
@@ -14,10 +14,18 @@ import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from '
 import { dispatchNext } from './index.ts';
 import { isElementFoldChild, isScalarChild, isScalarFoldChild, pushChildScope, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild } from './child.ts';
 
-/** Movement heads whose nested-by() aggregate is a correlated neighbourhood
- *  reduction (handled by compileNestedScalar), and the scalar reducers that terminate one. */
+/** Movement heads whose property-group compatibility path can use a correlated
+ * neighbourhood reduction, and the scalar reducers that terminate one. */
 const MOVES_ROOT = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE']);
 const SCALAR_REDUCERS = new Set(['sum', 'min', 'max', 'mean']);
+
+/** Property groups do not have a live ElementStream parent yet, so they explicitly
+ * require the narrow inline compatibility path. Element-backed groups never call it. */
+const requireInlineScalar = (inner: ReturnType<typeof stepChain>, ctx: ScalarCtx, use: string) => {
+  const scalar = tryInlineScalar(inner, ctx);
+  if (!scalar) throw new Error(`${use} not supported by typed child lowering or the property compatibility path`);
+  return scalar;
+};
 
 // ---------- group()/groupCount() (barrier → one Map) ----------
 
@@ -30,6 +38,8 @@ export interface GroupSource {
   /** A generic child-key result already joined one-to-one with each productive
    * source traverser. When present, buildGroupKey need not parse the traversal. */
   keyExpr?: Expression;
+  /** Composite project() key parts compiled independently on one outer origin. */
+  keyParts?: readonly { key: string; expr: Expression }[];
   /** Productive rows from a non-reducing scalar value child. Multiple rows per
    * source traverser deliberately remain multiple group-list members. */
   valExpr?: Expression;
@@ -72,6 +82,14 @@ const scalarGroupKey = (productive?: boolean): GroupKey => productive
 /** Build the key columns for group(). */
 function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Record<string, any>): GroupKeyBuild {
   if (src.keyExpr) return { desc: scalarGroupKey(src.productiveBy), cols: q`${src.keyExpr} AS gk`, group: 'gk' };
+  if (src.keyParts) {
+    const cols = src.keyParts.map((part, i) => q`${part.expr} AS ${`k${i}_v`}`);
+    return {
+      desc: { kind: 'map', parts: src.keyParts.map((part) => ({ key: part.key })) },
+      cols: list(cols, ', '),
+      group: src.keyParts.map((_, i) => `k${i}_v`).join(', '),
+    };
+  }
   if (!keyArgs || keyArgs.length === 0) { // bare by() → the element itself is the key
     if (src.elem === 'property') throw new Error('group().by() on a property element is not yet supported');
     return { desc: { kind: 'element', elem: src.elem }, cols: elementSelect(src.elem, 'k', src.ctx, true), group: elementIdExpr(src.elem, src.ctx) };
@@ -89,6 +107,7 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
   if (a && typeof a === 'object' && 'nested' in a) {
     const inner = stepChain(a.nested, params);
     if (inner[0]?.name === 'project') { // composite Map key
+      if (src.parent) throw new Error('element group project key not supported by generic child lowering');
       const keys = inner[0].args.filter((x: any): x is string => typeof x === 'string');
       const partBys = inner.slice(1);
       if (partBys.some((s) => s.name !== 'by')) throw new Error(`step not implemented in group().by(project): ${partBys.find((s) => s.name !== 'by')!.name}()`);
@@ -97,12 +116,12 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
       keys.forEach((k, idx) => {
         const nb = partBys[idx].args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
         if (!nb) throw new Error('group().by(project(...).by(x)) requires a traversal in each by()');
-        const sc = compileNestedScalar(stepChain(nb.nested, params), src.ctx);
+        const sc = requireInlineScalar(stepChain(nb.nested, params), src.ctx, 'property group composite key');
         cols.push(q`${sc.expr} AS ${`k${idx}_v`}`); group.push(`k${idx}_v`);
       });
       return { desc: { kind: 'map', parts: keys.map((k) => ({ key: k })) }, cols: list(cols, ', '), group: group.join(', ') };
     }
-    const sc = compileNestedScalar(inner, src.ctx); // by(__.label()) etc → scalar
+    const sc = requireInlineScalar(inner, src.ctx, 'property group key');
     return { desc: scalarGroupKey(src.productiveBy), cols: q`${sc.expr} AS gk`, group: 'gk' };
   }
   throw new Error('unsupported group().by() key modulator');
@@ -121,6 +140,19 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   const valArg = bys[1]?.[0];
   const genericKey = keyArg && typeof keyArg === 'object' && 'nested' in keyArg
     && isScalarChild(keyArg.nested, parent.params);
+  const keySteps = keyArg && typeof keyArg === 'object' && 'nested' in keyArg
+    ? stepChain(keyArg.nested, parent.params)
+    : [];
+  const projectStep = keySteps[0]?.name === 'project' ? keySteps[0] : undefined;
+  const projectBys = projectStep ? keySteps.slice(1) : [];
+  const projectKeys = projectStep?.args.filter((x: any): x is string => typeof x === 'string') ?? [];
+  const genericProjectKey = !!projectStep
+    && projectBys.length === projectKeys.length
+    && projectBys.every((step, i) => {
+      if (step.name !== 'by') return false;
+      const nested = step.args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
+      return !!nested && isScalarChild(nested.nested, parent.params);
+    });
   const valSteps = valArg && typeof valArg === 'object' && 'nested' in valArg
     ? stepChain(valArg.nested, parent.params)
     : [];
@@ -134,13 +166,14 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     && isScalarFoldChild(valArg.nested, parent.params);
   const genericElementFold = valSteps.at(-1)?.name === 'fold'
     && isElementFoldChild(valArg.nested, parent.params);
-  if (!genericKey && !genericVal && !genericReducer && !genericFold && !genericElementFold) return null;
+  if (!genericKey && !genericProjectKey && !genericVal && !genericReducer && !genericFold && !genericElementFold) return null;
 
   const outer = pushChildScope(parent);
   const p = outer.seed.rel.as('gp');
   const n = elemRel(parent, 'gn');
   const joins: Expression[] = [];
   let keyExpr: Expression | undefined;
+  let keyParts: GroupSource['keyParts'];
   let valExpr: Expression | undefined;
   let valReducer: GroupSource['valReducer'];
   let valMarker: Expression | undefined;
@@ -153,6 +186,16 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     const c = child.rel.as('gk');
     joins.push(q`${src.productiveBy ? ' LEFT JOIN ' : ' JOIN '}${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
     keyExpr = c.c.v;
+  }
+  if (genericProjectKey) {
+    keyParts = projectKeys.map((key, i) => {
+      const nested = projectBys[i].args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
+      const child = tryCompileScalarValueChild(outer.seed, nested.nested, 'first', outer.scope);
+      if (!child) throw new Error('composite group key failed after successful shape preflight');
+      const c = child.rel.as(`gkp${i}`);
+      joins.push(q`${src.productiveBy ? ' LEFT JOIN ' : ' JOIN '}${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
+      return { key, expr: c.c.v };
+    });
   }
   if (genericVal) {
     const child = tryCompileScalarValueChild(outer.seed, valArg.nested, 'all', outer.scope);
@@ -196,6 +239,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     ctx: elemCtx(n, parent.elem),
     elem: parent.elem === 'edge' ? 'edge' : 'vertex',
     keyExpr,
+    keyParts,
     valExpr,
     valReducer,
     valMarker,
@@ -250,18 +294,20 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
       else if (names.length === 1 && names[0] === 'count') { val = { kind: 'count' }; valNode = q`COUNT(*) AS gv`; }
       else if (names[names.length - 1] === 'fold')
         throw new Error('this group fold shape is not yet supported by typed child lowering');
+      else if (src.parent)
+        throw new Error('element group value not supported by generic child lowering');
       else if (MOVES_ROOT.has(names[0]) && SCALAR_REDUCERS.has(names[names.length - 1])) {
         // A neighbourhood aggregate — e.g. by(__.bothE().values('weight').mean()).
-        // compileNestedScalar reduces the WHOLE chain to one correlated scalar per
+        // The compatibility inline path reduces the WHOLE chain to one scalar per
         // group key; MAX() just satisfies GROUP BY (each such group is one vertex,
         // so the scalar is constant within it). typeof() carries Int/Long/Double.
-        const sc = compileNestedScalar(inner, src.ctx);
+        const sc = requireInlineScalar(inner, src.ctx, 'property group neighbourhood reducer');
         val = { kind: 'sum' }; valNode = q`MAX(${sc.expr}) AS gv, typeof(MAX(${sc.expr})) AS gvt`;
       } else if (names[names.length - 1] === 'sum') {
-        const sc = compileNestedScalar(inner.slice(0, -1), src.ctx);
+        const sc = requireInlineScalar(inner.slice(0, -1), src.ctx, 'property group sum');
         val = { kind: 'sum' }; valNode = q`SUM(${sc.expr}) AS gv, typeof(SUM(${sc.expr})) AS gvt`; // gvt → Int/Long vs Double
       } else { // scalar projection folded to a list
-        const sc = compileNestedScalar(inner, src.ctx);
+        const sc = requireInlineScalar(inner, src.ctx, 'property group scalar list');
         val = { kind: 'scalarList' }; valNode = q`json_group_array(${sc.expr}) AS gv`;
       }
     } else throw new Error('unsupported group().by() value modulator');
