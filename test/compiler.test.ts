@@ -5,7 +5,7 @@ import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { executeQuery } from '../src/execute.ts';
 import { MODERN_SEED } from './conformance/seed-modern.ts';
 import { Query } from '../src/q.ts';
-import { assertStreamColumns, toGroupStream, toPropertyStream, toRecordStream, toScalarStream } from '../src/steps/stream.ts';
+import { assertStreamColumns, toGroupStream, toPathStream, toPropertyStream, toRecordStream, toScalarStream } from '../src/steps/stream.ts';
 import { popChildScope, pushChildScope } from '../src/steps/child.ts';
 import { readdirSync, readFileSync } from 'node:fs';
 
@@ -41,6 +41,11 @@ describe('compiler SQL snapshots', () => {
     expect(toGroupStream(carry, q.cte({} as any, ['gk', 'gv']), groupKey, groupVal).kind).toBe('group');
     expect(() => toGroupStream(carry, q.cte({} as any, ['mk', 'mv']), groupKey, groupVal)).toThrow(
       'group stream column mismatch',
+    );
+    const pathLayout = { kind: 'linear' as const, positions: [{ render: 'value' as const, prefix: 'x0' }] };
+    expect(toPathStream(carry, q.cte({} as any, ['x0_v']), pathLayout).kind).toBe('path');
+    expect(() => toPathStream(carry, q.cte({} as any, ['v']), pathLayout)).toThrow(
+      'path stream column mismatch',
     );
   });
 

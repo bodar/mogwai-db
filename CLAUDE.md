@@ -21,7 +21,7 @@ builds through the kernel.
 `src/compiler.ts` is a 51-line orchestrator: `parse → normalize → dispatch`.
 **Current lowering model (2026-07-15 refactor):** orchestration dispatches a truthful
 `Stream` union (`ElementStream`/`ScalarStream`/`ListStream`/`PropertyStream`/
-`RecordStream`/`GroupStream`, with derived entry `MapStream`) and materializes only at
+`RecordStream`/`GroupStream`/`PathStream`, with derived entry `MapStream`) and materializes only at
 the root through `steps/materialize.ts`. `select`/`project` always lower to streams;
 `group`/`groupCount` always lower through `lowerGroup` to a rich GroupStream, terminal
 or followed. See `docs/2026-07-15-unified-relational-lowering-plan.md` for the active

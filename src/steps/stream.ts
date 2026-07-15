@@ -15,7 +15,7 @@
 
 import { type Relation } from '../q.ts';
 import { type Elem } from '../plan.ts';
-import { type ElemShape, type GroupKey, type GroupVal, type ValueType } from '../render.ts';
+import { type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from '../render.ts';
 import { carriedCols, type Carry, type ElementStream } from './context.ts';
 
 /** What a list stream holds — i.e. the shape `unfold` produces from it. `elem` → bare
@@ -92,7 +92,19 @@ export interface GroupStream extends Carry {
   readonly val: GroupVal;
 }
 
-export type Stream = ElementStream | ScalarStream | ListStream | MapStream | PropertyStream | RecordStream | GroupStream;
+export type PathLayout =
+  | { readonly kind: 'linear'; readonly positions: readonly PathPos[] }
+  | { readonly kind: 'grouped'; readonly elem: ElemShape };
+
+/** A fully lowered Path value. Linear paths carry one wide row per path; recursive
+ * paths carry `(pk,ord,element...)` rows that root framing groups by path key. */
+export interface PathStream extends Carry {
+  readonly kind: 'path';
+  readonly rel: Relation;
+  readonly layout: PathLayout;
+}
+
+export type Stream = ElementStream | ScalarStream | ListStream | MapStream | PropertyStream | RecordStream | GroupStream | PathStream;
 
 const elemColumns = (prefix: string, elem: ElemShape): string[] => elem === 'edge'
   ? [`${prefix}_id`, `${prefix}_label`, `${prefix}_src`, `${prefix}_tgt`, `${prefix}_props`]
@@ -115,6 +127,13 @@ export const groupColumns = (s: Pick<GroupStream, 'key' | 'val'>): string[] => {
 export const groupResultColumns = (s: Pick<GroupStream, 'key' | 'val'>): string[] =>
   groupColumns(s).filter((name) => name !== 'k_rid');
 
+export const pathColumns = (layout: PathLayout): string[] => {
+  if (layout.kind === 'grouped') return ['pk', 'ord', ...elemColumns('', layout.elem).map((c) => c.slice(1))];
+  return layout.positions.flatMap((p) => p.render === 'value'
+    ? [`${p.prefix}_v`]
+    : elemColumns(p.prefix, p.elem));
+};
+
 export const recordFieldColumns = (f: RecordField): string[] => f.sub === 'value'
   ? [`${f.prefix}_v`]
   : f.sub === 'edge'
@@ -136,7 +155,8 @@ export function streamColumns(s: Stream): readonly string[] {
     : s.kind === 'map' ? ['mk', 'mv']
     : s.kind === 'property' ? ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta']
     : s.kind === 'record' ? s.fields.flatMap(recordFieldColumns)
-    : groupColumns(s);
+    : s.kind === 'group' ? groupColumns(s)
+    : pathColumns(s.layout);
   return [...payload, ...carriedCols(s.carried)];
 }
 
@@ -167,6 +187,8 @@ export const toRecordStream = (c: Carry, rel: Relation, fields: readonly RecordF
   assertStreamColumns({ ...c, kind: 'record', rel, fields });
 export const toGroupStream = (c: Carry, rel: Relation, key: GroupKey, val: GroupVal): GroupStream =>
   assertStreamColumns({ ...c, kind: 'group', rel, key, val });
+export const toPathStream = (c: Carry, rel: Relation, layout: PathLayout): PathStream =>
+  assertStreamColumns({ ...c, kind: 'path', rel, layout });
 
 /** A map key/value column's shape → the list shape it produces when select(Column.*)
  *  aggregates it: a scalar carries its type tag, an element rejoins on unfold, a

@@ -119,7 +119,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 
 | Step | Status | Notes |
 |---|:--:|---|
-| `path()`, `path().by(key)` | 🟡 | ✅ linear label-carry + handler assembly<br>✅ **through a branch** (union/coalesce/optional/choose/flatMap — pad-to-max `cols`, ragged arms NULL-padded + LEFT JOIN)<br>❌ `path().by(traversal)`/`by(T.x)`; `path().by()` **through a branch** (padded null vs missing-prop ambiguous)<br>❌ mixed element-kind at one branch position; a dynamic-length (`repeat`) arm (needs tagged-array)<br>❌ spanning >1 linear movement/repeat<br>❌ over a `union()` **source** step |
+| `path()`, `path().by(key)` | 🟡 | ✅ always lowers to an explicit PathStream: wide-row linear layout or `(pk,ord,element)` recursive layout; root materialization alone frames GraphBinary<br>✅ linear label-carry + handler assembly<br>✅ **through a branch** (union/coalesce/optional/choose/flatMap — pad-to-max `cols`, ragged arms NULL-padded + LEFT JOIN)<br>❌ `path().by(traversal)`/`by(T.x)`; `path().by()` **through a branch** (padded null vs missing-prop ambiguous)<br>❌ mixed element-kind at one branch position; a dynamic-length (`repeat`) arm (needs tagged-array)<br>❌ spanning >1 linear movement/repeat<br>❌ over a `union()` **source** step |
 | `simplePath()`, `cyclicPath()` | ✅ | ✅ all-pairs identity (linear) / `json_each` guard (in repeat body) |
 | steps after `path()` | ❌ | `order`/reducer/`is`/transform/`inject` after `path()` |
 | `tree()` | 🚫 | JS GLV cucumber ignores all 13 tree scenarios + stubs `DataType.TREE` → 0 conformance. Build only if a non-JS consumer appears |

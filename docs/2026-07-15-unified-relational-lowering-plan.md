@@ -476,12 +476,18 @@ semantic compiler is deleted. Inline groups, property-stream groups, and group
 side-effects read through `cap()` all share `lowerGroup`. This checkpoint is
 architectural (L3 stays 866) and preserves the 354-test suite.
 
+`path()` now returns an explicit PathStream as well. Linear paths use a typed wide-row
+layout described by their `PathPos[]`; recursive repeat paths use the existing grouped
+`(pk,ord,element...)` layout. Both reach GraphBinary only through
+`materializePathRoot`. Path consumers remain deliberately deferred—the architectural
+change removes early materialization without pretending Path is already a ListStream.
+
 Move the remaining terminal islands to streams:
 
 - ~~`properties()` → PropertyStream~~ (kept distinct from node/edge ElementStream);
 - ~~`select`/`project` → RecordStream~~ (record order/dedup/fold/where remain consumers);
 - ~~`group`/`groupCount` → GroupStream at root and non-root alike~~;
-- `path` → path-valued stream/materialization strategy;
+- ~~`path` → PathStream/materialization strategy~~ (path-to-list consumers remain);
 - ~~`map`, `math`, `format`, option-choose, sack read~~ return ScalarStream;
   ~~`cap` re-emits its stored ListStream/GroupStream through common dispatch~~.
 
