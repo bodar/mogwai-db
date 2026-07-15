@@ -1391,10 +1391,11 @@ describe('compiler SQL snapshots', () => {
   test('union() → UNION ALL of branch id-relations, multi-hop bodies fold', () => {
     const u = read('g.V(1).union(__.out("knows"), __.out("created")).values("name")');
     expect(u.sql).toContain('UNION ALL');
-    expect(u.sql).toContain('SELECT e.tgt AS id FROM edges e JOIN c0 p ON e.src=p.id');
+    expect(u.sql).toContain('ROW_NUMBER() OVER () AS o0');
+    expect(u.sql).toContain('SELECT e.tgt AS id, p.o0 FROM edges e JOIN');
     // multi-hop branch now folds through the dispatch (was single-hop only)
     expect(read('g.V().union(__.out().out(), __.in()).values("name")').sql)
-      .toContain('SELECT e.tgt AS id FROM edges e JOIN c1 p ON e.src=p.id');
+      .toContain('SELECT e.tgt AS id, p.o0 FROM edges e JOIN c2 p ON e.src=p.id');
     // Homogeneous scalar arms lower at the shape-aware dispatcher and re-enter the
     // scalar pipeline; this is not the element-only PREFIX union.
     const scalar = read('g.V(1).union(__.values("name"), __.constant("x")).count()');
@@ -1467,8 +1468,9 @@ describe('compiler SQL snapshots', () => {
       .toEqual({ kind: 'count' });
     expect(() => compile('g.V().coalesce(__.out(), __.values("name"))', {})).toThrow('scalar/projection body');
     expect(() => compile('g.V().coalesce(__.out(), __.outE())', {})).toThrow('different element kinds');
-    // an origin-unsafe body step (drops the ordinal) fails closed, not a broken CTE
-    expect(() => compile('g.V().coalesce(__.out().dedup(), __.in())', {})).toThrow('input-ordinal not carried');
+    // dedup now preserves both the branch ordinal and its inner child ordinal.
+    const dedup = read('g.V().coalesce(__.out().dedup(), __.in())');
+    expect(dedup.sql).toContain('SELECT DISTINCT p.id AS id, p.o0, p.o1');
     // union() inside coalesce threads the ordinal through → valid
     expect(read('g.V().coalesce(__.union(__.out(),__.in()), __.both())').sql).toContain('ROW_NUMBER() OVER () AS o0');
     // as() before coalesce: originSeed projects the alias alongside the ordinal, the
@@ -1671,9 +1673,9 @@ describe('compiler SQL snapshots', () => {
 
   test('review-fix regressions: no silent mis-execution', () => {
     // edge out().count() must throw (was silently mis-counting via edge id)
-    expect(() => compile('g.E().where(__.out().count().is(P.gt(0)))', {})).toThrow('where()/filter() form not yet supported');
+    expect(() => compile('g.E().where(__.out().count().is(P.gt(0)))', {})).toThrow('not supported by inline predicate or generic child existence');
     // where(__.move().is(P)) must not silently drop the is()
-    expect(() => compile('g.V().where(__.out("knows").is(1))', {})).toThrow('where(__.out().is(P)) not yet supported');
+    expect(() => compile('g.V().where(__.out("knows").is(1))', {})).toThrow('not supported by inline predicate or generic child existence');
     // limit() then is() remains position-sensitive: only the first three values
     // reach the predicate, so Peter's later age (35) cannot leak through.
     const limited = seededStore();
@@ -2586,6 +2588,12 @@ describe('compiler execution semantics', () => {
       .toEqual([0]);
     expect(run(store, 'g.V(2).coalesce(__.out().fold(), __.identity().fold()).unfold().count()').map((r) => r.v))
       .toEqual([0]);
+    // Element branch row policies are per parent through the shared child compiler.
+    // Two equal parents must each retain their own first outgoing result.
+    expect(run(store, 'g.V(1).union(__.identity(),__.identity()).coalesce(__.out().limit(1),__.identity()).values("name")').map((r) => r.v))
+      .toEqual(['vadas', 'vadas']);
+    expect(run(store, 'g.V(1).coalesce(__.out().dedup(),__.identity()).count()').map((r) => r.v))
+      .toEqual([3]);
   });
 
   test('optional()/flatMap() multi-hop execute correctly', () => {
@@ -2596,6 +2604,7 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V(6).optional(__.out().out()).values("name")').map((r) => r.v)).toEqual(['peter']);
     // optional(both()) hit: vadas both = marko (knows-in)
     expect(run(store, 'g.V(2).optional(__.both()).values("name")').map((r) => r.v)).toEqual(['marko']);
+    expect(run(store, 'g.V(1).optional(__.out().dedup()).count()').map((r) => r.v)).toEqual([3]);
     // flatMap = inline the body: marko out().out() = lop,ripple
     expect(run(store, 'g.V(1).flatMap(__.out().out()).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple']);
     expect(run(store, 'g.V(1).flatMap(__.out().values("name"))').map((r) => r.v).sort()).toEqual(['josh', 'lop', 'vadas']);

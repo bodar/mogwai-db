@@ -428,7 +428,22 @@ const requireTerminal = (steps: Step[], n: number) => {
  *   __.and(t…) / __.or(t…)    → the branch predicates combined with AND / OR
  * Multi-hop / neighbour-terminal-filter are deferred with clear errors.
  */
-export function compileFilterPredicate(
+/** Optional correlated predicate optimization. Unsupported shapes return null so an
+ * element consumer can fall back to generic child-existence lowering. */
+export function tryInlinePredicate(
+  nested: Step[], ctx: ScalarCtx, params: Record<string, any> = {},
+  resolveAlias?: (label: string) => ScalarCtx,
+): Expression | null {
+  try { return compileInlinePredicate(nested, ctx, params, resolveAlias); }
+  catch (error) {
+    if (error instanceof Error
+        && error.message.includes('not yet supported')
+        && (error.message.startsWith('where') || error.message.startsWith('filter'))) return null;
+    throw error;
+  }
+}
+
+function compileInlinePredicate(
   nested: Step[], ctx: ScalarCtx, params: Record<string, any> = {},
   resolveAlias?: (label: string) => ScalarCtx,
 ): Expression {
@@ -437,7 +452,7 @@ export function compileFilterPredicate(
   const h0 = nested[0];
   if (resolveAlias && nested.length > 1 && (h0.name === 'as' || h0.name === 'select')
       && h0.args.length === 1 && typeof h0.args[0] === 'string')
-    return compileFilterPredicate(nested.slice(1), resolveAlias(h0.args[0]), params, resolveAlias);
+    return compileInlinePredicate(nested.slice(1), resolveAlias(h0.args[0]), params, resolveAlias);
 
   let body = nested;
   let isPred: any = undefined, hasIs = false;
@@ -495,7 +510,7 @@ export function compileFilterPredicate(
   if (head === 'not' && body.length === 1) {
     const arg = body[0].args.find((a: any) => a && typeof a === 'object' && 'nested' in a);
     if (!arg) throw new Error('not() requires a traversal');
-    const inner = compileFilterPredicate(stepChain(arg.nested, params), ctx, params, resolveAlias);
+    const inner = compileInlinePredicate(stepChain(arg.nested, params), ctx, params, resolveAlias);
     return q`NOT COALESCE((${inner}), 0)`;
   }
 
@@ -514,7 +529,7 @@ export function combineBranchPreds(
 ): Expression {
   const branches = step.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 2) throw new Error(`${step.name}() needs at least two traversal branches`);
-  const parts = branches.map((b) => paren(compileFilterPredicate(stepChain(b.nested, params), ctx, params, resolveAlias)));
+  const parts = branches.map((b) => paren(compileInlinePredicate(stepChain(b.nested, params), ctx, params, resolveAlias)));
   return paren(list(parts, ` ${op} `));
 }
 
