@@ -77,8 +77,10 @@ cardinality, and the field relations inner-join on that origin. Missing child ro
 the project traverser; a productive NULL remains a field value; duplicate parents remain
 distinct. Mixed property-key and `T.id`/`T.label` scalar modulators share that relation;
 bare vertex/edge fields share it too, retaining their complete element payload and
-internal rowid so later movement can re-enter ordinary element lowering. Labelled
-select/group by-consumers are the next slices. Consumers call
+internal rowid so later movement can re-enter ordinary element lowering. Single- and
+multi-label `select(...).by(__.<scalar child>)` use the same seam after relationally
+re-rooting each child on its selected alias; mixed direct/bare fields share the outer
+origin join. Group by-consumers are the next slice. Consumers call
 `tryCompileScalarValueChild` and never distinguish row projections from total count;
 do not grow `compileNestedScalar` to implement new by forms.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes

@@ -1,4 +1,4 @@
-import { q, list, empty, value, type Expression } from '../q.ts';
+import { q, list, empty, value, type Expression, type Relation } from '../q.ts';
 import { nodes, edges, labels, vertexProperties } from '../schema.ts';
 import { framedProps, labelNameSub, nodePropScalar, predicateSql, propExtract, extIdOf } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
@@ -23,13 +23,24 @@ function byToEntry(byArgs: any[] | undefined): { sub: 'vertex' | 'value'; key?: 
   throw new Error('unsupported by() modulator');
 }
 
-/** Project heterogeneous fields when at least one by() is a scalar child traversal.
+/** Re-root the current traverser on an element id held in one of its carried alias
+ * columns. The row remains the same traverser: aliases/path/origins/sack all survive. */
+function reRootElement(st: ElementStream, p: Relation, id: Expression, elem: ElementStream['elem']): ElementStream {
+  const rel = st.q.cte(
+    q`SELECT ${id} AS id${carryFrag(st.carried, p)} FROM ${p}`,
+    ['id', ...carriedCols(st.carried)],
+  );
+  return { ...st, rel, elem };
+}
+
+/** Lower heterogeneous record fields when at least one by() is a scalar child traversal.
  * One outer origin identifies each multiset-distinct input; scalar children use
- * child `first` cardinality while bare by() branches retain the whole current
+ * child `first` cardinality while bare by() branches retain the whole source
  * element. Inner joins implement ordinary productive-by semantics: a missing child
- * drops the project row, while a produced SQL NULL remains a real field value. */
-function tryLowerTraversalProject(st: ElementStream, proj: PStep, keys: string[]): RecordStream | null {
-  if (proj.name !== 'project' || !proj.bys?.length) return null;
+ * drops the record row, while a produced SQL NULL remains a real field value. */
+function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[]): RecordStream | null {
+  if ((proj.name !== 'project' && proj.name !== 'select') || !proj.bys?.length) return null;
+  const isProject = proj.name === 'project';
   const args = keys.map((_, i) => proj.bys![i % proj.bys!.length]);
   const specs = args.map((by) => by?.[0]);
   const nested = specs.map((a) => a && typeof a === 'object' && 'nested' in a ? a.nested : null);
@@ -38,15 +49,24 @@ function tryLowerTraversalProject(st: ElementStream, proj: PStep, keys: string[]
     if (nested[i]) return !isScalarChild(nested[i], st.params);
     if (a === undefined) return false;
     if (typeof a === 'string') return false;
-    return !(a && typeof a === 'object' && 'token' in a && (a.token === 'id' || a.token === 'label'));
+    return !(isProject && a && typeof a === 'object' && 'token' in a && (a.token === 'id' || a.token === 'label'));
   })) return null;
 
   const outer = pushChildScope(st);
   const branches = specs.map((spec, i) => {
     const prefix = `e${i}`;
+    const p = outer.seed.rel.as(`p${i}`);
+    const source = isProject
+      ? { id: p.c.id, elem: st.elem }
+      : (() => {
+          const selected = st.carried.aliases.get(keys[i]);
+          if (!selected) throw new Error(`select("${keys[i]}"): no such label — as("${keys[i]}") was not seen`);
+          return { id: p.c[selected.col], elem: selected.elem };
+        })();
     if (nested[i]) {
-      const child = tryCompileScalarValueChild(outer.seed, nested[i], 'first', outer.scope);
-      if (!child) throw new Error('scalar project child failed after successful shape preflight');
+      const seed = isProject ? outer.seed : reRootElement(outer.seed, p, source.id, source.elem);
+      const child = tryCompileScalarValueChild(seed, nested[i], 'first', outer.scope);
+      if (!child) throw new Error('scalar record child failed after successful shape preflight');
       const rel = child.rel.as(`b${i}`);
       return {
         rel,
@@ -55,21 +75,20 @@ function tryLowerTraversalProject(st: ElementStream, proj: PStep, keys: string[]
       };
     }
 
-    const p = outer.seed.rel.as(`p${i}`);
-    const n = (st.elem === 'edge' ? edges : nodes).as(`n${i}`);
+    const n = (source.elem === 'edge' ? edges : nodes).as(`n${i}`);
     if (spec === undefined) {
       const l = labels.as(`l${i}`);
-      const payload = st.elem === 'edge'
+      const payload = source.elem === 'edge'
         ? q`${n.c.id} AS rid, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${extIdOf(n.c.src)} AS src, ${extIdOf(n.c.tgt)} AS tgt, ${framedProps(n, 'edge')} AS props`
         : q`${n.c.id} AS rid, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props`;
-      const payloadCols = st.elem === 'edge'
+      const payloadCols = source.elem === 'edge'
         ? ['rid', 'id', 'label', 'src', 'tgt', 'props']
         : ['rid', 'id', 'label', 'props'];
       const rel = st.q.cte(
-        q`SELECT ${payload}${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}`,
+        q`SELECT ${payload}${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${source.id} JOIN ${l} ON ${l.c.id}=${n.c.label}`,
         [...payloadCols, ...carriedCols(outer.seed.carried)],
       ).as(`b${i}`);
-      const field: RecordField = { key: keys[i], prefix, sub: st.elem === 'edge' ? 'edge' : 'vertex' };
+      const field: RecordField = { key: keys[i], prefix, sub: source.elem === 'edge' ? 'edge' : 'vertex' };
       return {
         rel,
         field,
@@ -79,10 +98,10 @@ function tryLowerTraversalProject(st: ElementStream, proj: PStep, keys: string[]
         }),
       };
     }
-    if (typeof spec === 'string' && st.elem === 'node') {
+    if (typeof spec === 'string' && source.elem === 'node') {
       const vp = vertexProperties.as(`vp${i}`);
       const ranked = st.q.cte(
-        q`SELECT ${vp.c.value} AS v${carryFrag(outer.seed.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${p.c[outer.frame.ordinal]} ORDER BY ${vp.c.id}) AS rn FROM ${p} JOIN ${vp} ON ${vp.c.node}=${p.c.id} AND ${vp.c.key}=${value(spec)}`,
+        q`SELECT ${vp.c.value} AS v${carryFrag(outer.seed.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${p.c[outer.frame.ordinal]} ORDER BY ${vp.c.id}) AS rn FROM ${p} JOIN ${vp} ON ${vp.c.node}=${source.id} AND ${vp.c.key}=${value(spec)}`,
         ['v', ...carriedCols(outer.seed.carried), 'rn'],
       );
       const r = ranked.as(`r${i}`);
@@ -94,7 +113,7 @@ function tryLowerTraversalProject(st: ElementStream, proj: PStep, keys: string[]
     }
     if (typeof spec === 'string') {
       const rel = st.q.cte(
-        q`SELECT j.value AS v${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id} JOIN json_each(json(${n.c.props})) j ON j.key=${value(spec)}`,
+        q`SELECT j.value AS v${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${source.id} JOIN json_each(json(${n.c.props})) j ON j.key=${value(spec)}`,
         ['v', ...carriedCols(outer.seed.carried)],
       ).as(`b${i}`);
       return { rel, field: { key: keys[i], prefix, sub: 'value' as const }, cols: [q`${rel.c.v} AS ${`${prefix}_v`}`] };
@@ -103,7 +122,7 @@ function tryLowerTraversalProject(st: ElementStream, proj: PStep, keys: string[]
       ? labelNameSub(n.c.label)
       : q`COALESCE(${n.c.uid}, ${n.c.id})`;
     const rel = st.q.cte(
-      q`SELECT ${scalar} AS v${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`,
+      q`SELECT ${scalar} AS v${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${source.id}`,
       ['v', ...carriedCols(outer.seed.carried)],
     ).as(`b${i}`);
     return { rel, field: { key: keys[i], prefix, sub: 'value' as const }, cols: [q`${rel.c.v} AS ${`${prefix}_v`}`] };
@@ -131,6 +150,13 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): ElementStream
   const selected = st.carried.aliases.get(keys[0]);
   if (!selected) throw new Error(`select("${keys[0]}"): no such label — as("${keys[0]}") was not seen`);
   const p = st.rel.as('p');
+  const nested = proj.bys?.[0]?.[0];
+  if (nested && typeof nested === 'object' && 'nested' in nested) {
+    if (!isScalarChild(nested.nested, st.params)) throw new Error('by(traversal) child shape not yet supported');
+    const child = tryCompileScalarValueChild(reRootElement(st, p, p.c[selected.col], selected.elem), nested.nested, 'first');
+    if (!child) throw new Error('scalar select child failed after successful shape preflight');
+    return child;
+  }
   const by = byToEntry(proj.bys?.[0]);
   if (by.sub === 'vertex') {
     const rel = st.q.cte(
@@ -168,8 +194,8 @@ export function lowerRecordSelectProject(st: ElementStream, proj: PStep): Record
 
   const keys = proj.args.filter((a): a is string => typeof a === 'string');
   if (!keys.length) throw new Error(`${proj.name}() requires at least one key`);
-  const traversalProject = tryLowerTraversalProject(st, proj, keys);
-  if (traversalProject) return traversalProject;
+  const traversalRecord = tryLowerTraversalRecord(st, proj, keys);
+  if (traversalRecord) return traversalRecord;
 
   const sourceOf = (k: string): { expr: Expression; elem: 'node' | 'edge' } => {
     if (isProject) {
