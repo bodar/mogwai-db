@@ -137,12 +137,14 @@ fallback, never semantic rejection. Sack and every element-backed group path are
   right leaf (or a new one), route it from `compileTail`. `write.ts` imports
   `compileInject` from `inject.ts`.
 
-**Root materialization (2026-07-15).** Fully typed terminal streams do not frame
-themselves: `lowerSteps` detects end-of-chain and calls the exhaustive
-`materializeStream` switch in `steps/materialize.ts` for scalar/variant/list/property/
-record/group/path. `MapStream` is internal and cannot terminate. The older element-tail
-accumulator still owns a small compatibility set of terminal expressions; do not add a
-new terminal call in a leaf—add a stream kind or return a lowering continuation.
+**Root materialization (2026-07-15).** Read leaves never frame themselves. `lowerSteps`
+detects end-of-chain and calls the exhaustive `materializeStream` switch in
+`steps/materialize.ts` for scalar/variant/list/property/record/group/path plus terminal
+`ResultStream`. The older element-tail accumulator may produce a `ResultStream` carrying
+its final SQL + GraphBinary shape, but never `Compiled`; terminal set/meta/select results
+likewise yield streams. `MapStream` is internal and cannot terminate. `materializeRoot`
+is the only read caller of `readCompiled`; the root-only bulk-repeat optimization may call
+it directly because it replaces the whole pipeline. Do not add a terminal call in a leaf.
 
 ## What this is
 

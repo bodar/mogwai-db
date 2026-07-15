@@ -6,7 +6,6 @@ import { carryFrag, carriedCols, withoutCarried, type AliasMap, type ElementStre
 import { carryOf, continueLowering, pathColumns, recordFieldColumns, toListStream, toPathStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type LoweringResult, type PathStream, type RecordField, type RecordStream, type ScalarStream, type Stream } from './stream.ts';
 import { type Compiled, type PathPos } from '../render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
-import { materializeRecordRoot } from './materialize.ts';
 import { lowerGlobalCount } from './barrier.ts';
 import { isElementChild, isListChild, isScalarChild, pushChildScope, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
 
@@ -288,7 +287,7 @@ export function lowerRecordSelectProject(st: ElementStream, proj: PStep): Record
 
 /** Compatibility adapter for element modifiers accumulated before a terminal record
  * projection. New projection-first chains take the RecordStream path directly. */
-export function compileSelectProject(st: ElementStream, proj: PStep, tail: TailMods): Compiled {
+export function compileSelectProject(st: ElementStream, proj: PStep, tail: TailMods): RecordStream {
   if (tail.orders.length) throw new Error('order() after select()/project() not yet supported');
   let record = lowerRecordSelectProject(st, proj);
   if (tail.distinct || tail.limit !== null || tail.offset > 0) {
@@ -302,7 +301,7 @@ export function compileSelectProject(st: ElementStream, proj: PStep, tail: TailM
     );
     record = toRecordStream(carryOf(record), rel, record.fields);
   }
-  return materializeRecordRoot(record);
+  return record;
 }
 
 /** Continue from a per-traverser record. Selecting a named field retypes it to the

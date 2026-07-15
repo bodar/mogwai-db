@@ -231,6 +231,7 @@ export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, qu
 function lowerStream(s: Stream, steps: PStep[], at: number): LoweringResult {
   assertStreamColumns(s);
   if (at >= steps.length && s.kind !== 'elements') return materializeStream(s);
+  if (s.kind === 'result') throw new Error('a terminal result stream cannot have following steps');
   if (s.kind === 'elements') {
     const lowered = lowerElementSteps(steps, s, at);
     return compileTail(lowered.stream, steps, lowered.next);
