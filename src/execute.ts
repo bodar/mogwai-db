@@ -250,6 +250,7 @@ function groupBuffer(rows: any[], key: GroupKey, val: GroupVal): Buffer {
       case 'elementLast': return g.members[g.members.length - 1];
       case 'count': return ioc.anySerializer.serialize(BigInt(g.gv));
       case 'sum': return sumBuffer(g.gv, g.gvt);
+      case 'list': return ioc.listSerializer.serialize(JSON.parse(g.gv));
       // by('age')/by(__.values) filters members missing the property (values
       // semantics) → drop the SQL NULLs json_group_array emitted for them.
       case 'scalarList': return ioc.listSerializer.serialize(JSON.parse(g.gv).filter((x: any) => x !== null));

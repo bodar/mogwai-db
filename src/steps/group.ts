@@ -6,10 +6,10 @@ import {
 } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { carryFrag, carriedCols, elemRel, type Carry, type ElementStream } from './context.ts';
-import { carryOf, toMapStream, toPropertyStream, toScalarStream, type MapOf, type MapStream, type PropertyStream, type ScalarStream } from './stream.ts';
+import { carryFrag, carriedCols, elemRel, withoutCarried, type Carry, type ElementStream } from './context.ts';
+import { carryOf, groupColumns, toGroupStream, toMapStream, toPropertyStream, toScalarStream, type GroupStream, type MapOf, type PropertyStream, type ScalarStream } from './stream.ts';
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
-import { materializePropertyRoot, materializeRoot } from './materialize.ts';
+import { materializeGroupRoot, materializePropertyRoot, materializeRoot } from './materialize.ts';
 import { lowerGlobalCount } from './barrier.ts';
 import { dispatchNext } from './index.ts';
 
@@ -26,14 +26,15 @@ export interface GroupSource { from: string | Expression; ctx: ScalarCtx; elem: 
 
 /** Columns that frame one element (vertex/edge/property) under `prefix`. label
  *  rides as a subquery so the FROM needs no labels join. */
-function elementSelect(elem: ElemShape, prefix: string, ctx: ScalarCtx): Expression {
+function elementSelect(elem: ElemShape, prefix: string, ctx: ScalarCtx, internalId = false): Expression {
   const extId = ctx.extIdExpr ?? ctx.idExpr;
+  const rid = internalId ? q`${ctx.idExpr} AS ${`${prefix}_rid`}, ` : empty;
   if (elem === 'edge')
     // Endpoints as external ids (see the __element edge projector).
-    return q`${extId} AS ${`${prefix}_id`}, ${labelNameSub(ctx.labelIdExpr)} AS ${`${prefix}_label`}, ${extIdOf(ctx.srcExpr!)} AS ${`${prefix}_src`}, ${extIdOf(ctx.tgtExpr!)} AS ${`${prefix}_tgt`}, ${framedPropsCtx(ctx)} AS ${`${prefix}_props`}`;
+    return q`${rid}${extId} AS ${`${prefix}_id`}, ${labelNameSub(ctx.labelIdExpr)} AS ${`${prefix}_label`}, ${extIdOf(ctx.srcExpr!)} AS ${`${prefix}_src`}, ${extIdOf(ctx.tgtExpr!)} AS ${`${prefix}_tgt`}, ${framedPropsCtx(ctx)} AS ${`${prefix}_props`}`;
   if (elem === 'property')
     return q`${ctx.ownerExpr!} AS ${`${prefix}_owner`}, ${ctx.pkExpr!} AS ${`${prefix}_pk`}, ${ctx.pvExpr!} AS ${`${prefix}_pv`}`;
-  return q`${extId} AS ${`${prefix}_id`}, ${labelNameSub(ctx.labelIdExpr)} AS ${`${prefix}_label`}, ${framedPropsCtx(ctx)} AS ${`${prefix}_props`}`;
+  return q`${rid}${extId} AS ${`${prefix}_id`}, ${labelNameSub(ctx.labelIdExpr)} AS ${`${prefix}_label`}, ${framedPropsCtx(ctx)} AS ${`${prefix}_props`}`;
 }
 
 /** The SQL expr to GROUP BY / frame an element by identity. */
@@ -45,7 +46,7 @@ interface GroupKeyBuild { desc: GroupKey; cols: Expression; group: string | Expr
 function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Record<string, any>): GroupKeyBuild {
   if (!keyArgs || keyArgs.length === 0) { // bare by() → the element itself is the key
     if (src.elem === 'property') throw new Error('group().by() on a property element is not yet supported');
-    return { desc: { kind: 'element', elem: src.elem }, cols: elementSelect(src.elem, 'k', src.ctx), group: elementIdExpr(src.elem, src.ctx) };
+    return { desc: { kind: 'element', elem: src.elem }, cols: elementSelect(src.elem, 'k', src.ctx, true), group: elementIdExpr(src.elem, src.ctx) };
   }
   const a = keyArgs[0];
   if (typeof a === 'string') { // by('name') — first-under-multi for a node
@@ -85,7 +86,7 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
  * GROUP BY aggregate; an element value can't be aggregated in SQL (props must be
  * framed), so we emit rows ORDER BY the key and the handler folds runs into the Map.
  */
-export function compileGroup(st: Carry, isCount: boolean, bys: any[][], src: GroupSource): Compiled {
+export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: GroupSource): GroupStream {
   if (bys.length > 2) throw new Error('group() with more than two by() modulators not yet supported');
   const key = buildGroupKey(bys[0], src, st.params);
 
@@ -104,6 +105,11 @@ export function compileGroup(st: Carry, isCount: boolean, bys: any[][], src: Gro
       if (names.length === 1 && names[0] === 'tail') { val = { kind: 'elementLast', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx); }
       else if (names.length === 1 && names[0] === 'fold') { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx); }
       else if (names.length === 1 && names[0] === 'count') { val = { kind: 'count' }; valNode = q`COUNT(*) AS gv`; }
+      else if (names[names.length - 1] === 'fold' && MOVES_ROOT.has(names[0])) {
+        if (key.desc.kind !== 'element') throw new Error('select(Column) over a group with a non-element key and a neighbour-list value not yet supported');
+        const nl = compileNestedList(inner.slice(0, -1), src.ctx);
+        val = { kind: 'list' }; valNode = q`MAX(${nl.expr}) AS gv`;
+      }
       else if (MOVES_ROOT.has(names[0]) && SCALAR_REDUCERS.has(names[names.length - 1])) {
         // A neighbourhood aggregate — e.g. by(__.bothE().values('weight').mean()).
         // compileNestedScalar reduces the WHOLE chain to one correlated scalar per
@@ -122,79 +128,40 @@ export function compileGroup(st: Carry, isCount: boolean, bys: any[][], src: Gro
   }
 
   const node = q`SELECT ${key.cols}, ${valNode} FROM ${src.from} ${groupBy ? 'GROUP BY' : 'ORDER BY'} ${key.group}`;
-  return materializeRoot(st.q, node, { kind: 'group', key: key.desc, val });
+  const rel = st.q.cte(node, groupColumns({ key: key.desc, val }));
+  return toGroupStream(withoutCarried(st), rel, key.desc, val);
 }
 
-/**
- * group()/groupCount() retyped to a MapStream (stream.ts) — reached only when a
- * follower (select(Column.*), unfold) consumes the map, so the tail stays re-enterable.
- * Emits one `(mk, mv)` row per entry via a real SQL GROUP BY. Element keys carry their
- * rowid (rejoined on select(Column.keys)→unfold); values are single scalars (count/sum/
- * neighbourhood-reduction). The multi-column shapes the terminal groupBuffer frames —
- * element VALUE lists, scalar-LIST values (by('age')/by(__.fold())), composite project
- * keys — can't be one `mv`/`mk` column, so they defer here with a clear message (the
- * terminal group() path still handles them; only the re-enterable form is scoped). */
-export function groupToMapStream(st: Carry, isCount: boolean, bys: any[][], src: GroupSource): MapStream {
-  if (st.carried.aliases.size || st.carried.path || st.carried.origins.length)
-    throw new Error('group() carrying as()/path()/branch state into a map value not yet supported');
-  if (bys.length > 2) throw new Error('group() with more than two by() modulators not yet supported');
+/** Continue from the rich group barrier. Terminal framing consumes the same lowered
+ * relation; a supported Column selection derives the narrow entry MapStream without
+ * recompiling group semantics based on terminal position. */
+export function compileFromGroup(s: GroupStream, steps: PStep[], at: number): Compiled {
+  if (at >= steps.length) return materializeGroupRoot(s);
+  const step = steps[at];
+  const column = step.name === 'select'
+    ? step.args.map((a: any) => a && typeof a === 'object' && a.column).find((c: any) => c === 'keys' || c === 'values')
+    : undefined;
+  if (!column) throw new Error(`${step.name}() on a group value not yet supported`);
 
-  // KEY column mk + its GROUP BY expr.
-  const keyArgs = bys[0];
-  let mk: Expression, keyGroup: Expression, keyOf: MapOf;
-  if (!keyArgs || keyArgs.length === 0) { // bare by() → the element itself keys the map
-    if (src.elem === 'property') throw new Error('group().by() on a property element is not yet supported');
-    mk = elementIdExpr(src.elem, src.ctx); keyGroup = mk; keyOf = { kind: 'elem', elem: src.elem === 'edge' ? 'edge' : 'node' };
-  } else {
-    const a = keyArgs[0];
-    if (typeof a === 'string') { mk = scalarProp(src.ctx, a); keyGroup = mk; keyOf = { kind: 'scalar' }; }
-    else if (a && typeof a === 'object' && 'token' in a) {
-      const expr = a.token === 'label' ? labelNameSub(src.ctx.labelIdExpr) : a.token === 'id' ? src.ctx.idExpr : null;
-      if (!expr) throw new Error(`group().by(T.${a.token}) not yet supported`);
-      mk = expr; keyGroup = expr; keyOf = { kind: 'scalar' };
-    } else if (a && typeof a === 'object' && 'nested' in a) {
-      const inner = stepChain(a.nested, st.params);
-      if (inner[0]?.name === 'project') throw new Error('select(Column) over a composite project() group key not yet supported');
-      mk = compileNestedScalar(inner, src.ctx).expr; keyGroup = mk; keyOf = { kind: 'scalar' };
-    } else throw new Error('unsupported group().by() key modulator');
-  }
+  const g = s.rel.as('g');
+  let mk: Expression, keyOf: MapOf;
+  if (s.key.kind === 'scalar') { mk = g.c.gk; keyOf = { kind: 'scalar' }; }
+  else if (s.key.kind === 'element') {
+    mk = g.c.k_rid;
+    keyOf = { kind: 'elem', elem: s.key.elem === 'edge' ? 'edge' : 'node' };
+  } else throw new Error('select(Column) over a composite project() group key not yet supported');
 
-  // VALUE column mv — a single scalar (count/sum/neighbourhood-reduction). Element-list
-  // and scalar-list values can't collapse to one column → defer.
-  const valArgs = bys[1];
   let mv: Expression, valOf: MapOf;
-  if (isCount) { mv = q`COUNT(*)`; valOf = { kind: 'scalar', as: 'long' }; }
-  else if (!valArgs || valArgs.length === 0) throw new Error('select(Column) over a group of element values not yet supported');
-  else {
-    const a = valArgs[0];
-    if (a && typeof a === 'object' && 'nested' in a) {
-      const inner = stepChain(a.nested, st.params);
-      const names = inner.map((s) => s.name);
-      if (names.length === 1 && names[0] === 'count') { mv = q`COUNT(*)`; valOf = { kind: 'scalar', as: 'long' }; }
-      else if (MOVES_ROOT.has(names[0]) && SCALAR_REDUCERS.has(names[names.length - 1])) {
-        mv = q`MAX(${compileNestedScalar(inner, src.ctx).expr})`; valOf = { kind: 'scalar' };
-      } else if (names[names.length - 1] === 'sum') {
-        mv = q`SUM(${compileNestedScalar(inner.slice(0, -1), src.ctx).expr})`; valOf = { kind: 'scalar' };
-      } else if (names[names.length - 1] === 'fold' && MOVES_ROOT.has(names[0])) {
-        // by(__.<move>().<proj>()…fold()) → one correlated neighbour-list per key. The
-        // list is per-member, so MAX (which satisfies GROUP BY) is only the value when
-        // each group is ONE element — i.e. the key is the element itself. A multi-member
-        // key would need the fold over ALL members' neighbours (a UNION over the group),
-        // so defer it. The nesting rides valOf so select(Column.values) yields a
-        // list-of-lists that unfold explodes into per-list rows.
-        if (keyOf.kind !== 'elem') throw new Error('select(Column) over a group with a non-element key and a neighbour-list value not yet supported');
-        const nl = compileNestedList(inner.slice(0, -1), src.ctx);
-        mv = q`MAX(${nl.expr})`; valOf = { kind: 'list', of: nl.of };
-      } else throw new Error('select(Column) over this group() value modulator not yet supported');
-    } else throw new Error('select(Column) over this group() value modulator not yet supported');
-  }
+  if (s.val.kind === 'count') { mv = g.c.gv; valOf = { kind: 'scalar', as: 'long' }; }
+  else if (s.val.kind === 'sum') { mv = g.c.gv; valOf = { kind: 'scalar' }; }
+  else if (s.val.kind === 'list') { mv = g.c.gv; valOf = { kind: 'list', of: { kind: 'scalar' } }; }
+  else if (s.val.kind === 'elementList' || s.val.kind === 'elementLast')
+    throw new Error('select(Column) over a group of element values not yet supported');
+  else throw new Error('select(Column) over this rich group value layout not yet supported');
 
-  // A scalar key over a missing property is SQL NULL — by(key) uses values(key), which
-  // yields nothing, so such elements form NO group (mirrors the terminal groupBuffer's
-  // null-key drop). Element/token keys are never null, so the filter only guards scalars.
-  const keyWhere: Expression = keyOf.kind === 'scalar' ? q` WHERE ${keyGroup} IS NOT NULL` : empty;
-  const rel = st.q.cte(q`SELECT ${mk} AS mk, ${mv} AS mv FROM ${src.from}${keyWhere} GROUP BY ${keyGroup}`, ['mk', 'mv']);
-  return toMapStream(st, rel, keyOf, valOf);
+  const where = s.key.kind === 'scalar' ? q` WHERE ${g.c.gk} IS NOT NULL` : empty;
+  const rel = s.q.cte(q`SELECT ${mk} AS mk, ${mv} AS mv FROM ${g}${where}`, ['mk', 'mv']);
+  return dispatchNext(toMapStream(carryOf(s), rel, keyOf, valOf), steps, at);
 }
 
 // ---------- properties() ----------
@@ -278,9 +245,7 @@ export function compileFromProperty(s: PropertyStream, steps: PStep[], at: numbe
     const ctx = propertyCtx(s);
     const src: GroupSource = { from: s.rel.as('p'), ctx, elem: 'property' };
     const isCount = step.name === 'groupCount';
-    if (at + 1 < steps.length)
-      return dispatchNext(groupToMapStream(s, isCount, step.bys ?? [], src), steps, at + 1);
-    return compileGroup(s, isCount, step.bys ?? [], src);
+    return dispatchNext(lowerGroup(s, isCount, step.bys ?? [], src), steps, at + 1);
   }
 
   if (step.name === 'valueMap') {

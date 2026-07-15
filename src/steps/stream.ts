@@ -15,7 +15,7 @@
 
 import { type Relation } from '../q.ts';
 import { type Elem } from '../plan.ts';
-import { type ValueType } from '../render.ts';
+import { type ElemShape, type GroupKey, type GroupVal, type ValueType } from '../render.ts';
 import { carriedCols, type Carry, type ElementStream } from './context.ts';
 
 /** What a list stream holds — i.e. the shape `unfold` produces from it. `elem` → bare
@@ -51,11 +51,9 @@ export type MapOf =
   | { kind: 'elem'; elem: Elem }
   | { kind: 'list'; of: ListOf };
 
-/** A map value as a `(mk, mv)` row relation — one row per entry (group()/groupCount()
- *  retyped when a follower consumes it: select(Column.values/keys) aggregates a column
- *  into a list; Map-unfold explodes entries). `keyOf`/`valOf` describe each column so
- *  the derived list knows whether to rejoin elements. A TERMINAL group() never becomes
- *  a MapStream — it stays the row-folding groupBuffer path (byte-identical). */
+/** A map value as a `(mk, mv)` row relation — one row per entry. A simple GroupStream
+ * derives this layout when select(Column.values/keys) consumes it; Map-unfold will
+ * eventually use the same form. `keyOf`/`valOf` describe re-entry shape. */
 export interface MapStream extends Carry { readonly kind: 'map'; readonly rel: Relation; readonly keyOf: MapOf; readonly valOf: MapOf; }
 
 /** The traverser stream shapes a compile phase can be in. */
@@ -84,7 +82,38 @@ export interface RecordStream extends Carry {
   readonly fields: readonly RecordField[];
 }
 
-export type Stream = ElementStream | ScalarStream | ListStream | MapStream | PropertyStream | RecordStream;
+/** The rich relational result of a global group()/groupCount() barrier. This keeps
+ * terminal element/composite/list layouts honest; simple key/value layouts may later
+ * derive the narrow `(mk,mv)` MapStream used by select(Column.*). */
+export interface GroupStream extends Carry {
+  readonly kind: 'group';
+  readonly rel: Relation;
+  readonly key: GroupKey;
+  readonly val: GroupVal;
+}
+
+export type Stream = ElementStream | ScalarStream | ListStream | MapStream | PropertyStream | RecordStream | GroupStream;
+
+const elemColumns = (prefix: string, elem: ElemShape): string[] => elem === 'edge'
+  ? [`${prefix}_id`, `${prefix}_label`, `${prefix}_src`, `${prefix}_tgt`, `${prefix}_props`]
+  : elem === 'property'
+    ? [`${prefix}_owner`, `${prefix}_pk`, `${prefix}_pv`]
+    : [`${prefix}_id`, `${prefix}_label`, `${prefix}_props`];
+
+export const groupColumns = (s: Pick<GroupStream, 'key' | 'val'>): string[] => {
+  const key = s.key.kind === 'scalar' ? ['gk']
+    : s.key.kind === 'map' ? s.key.parts.map((_, i) => `k${i}_v`)
+    : ['k_rid', ...elemColumns('k', s.key.elem)];
+  const val = s.val.kind === 'elementList' || s.val.kind === 'elementLast'
+    ? elemColumns('v', s.val.elem)
+    : s.val.kind === 'sum' ? ['gv', 'gvt'] : ['gv'];
+  return [...key, ...val];
+};
+
+/** Root-visible group columns omit the internal element-key rowid used only when a
+ * later Column.keys selection re-enters an ElementStream. */
+export const groupResultColumns = (s: Pick<GroupStream, 'key' | 'val'>): string[] =>
+  groupColumns(s).filter((name) => name !== 'k_rid');
 
 export const recordFieldColumns = (f: RecordField): string[] => f.sub === 'value'
   ? [`${f.prefix}_v`]
@@ -106,7 +135,8 @@ export function streamColumns(s: Stream): readonly string[] {
     : s.kind === 'list' ? ['list']
     : s.kind === 'map' ? ['mk', 'mv']
     : s.kind === 'property' ? ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta']
-    : s.fields.flatMap(recordFieldColumns);
+    : s.kind === 'record' ? s.fields.flatMap(recordFieldColumns)
+    : groupColumns(s);
   return [...payload, ...carriedCols(s.carried)];
 }
 
@@ -135,6 +165,8 @@ export const toPropertyStream = (c: Carry, rel: Relation, ownerElem: Elem): Prop
   assertStreamColumns({ ...c, kind: 'property', rel, ownerElem });
 export const toRecordStream = (c: Carry, rel: Relation, fields: readonly RecordField[]): RecordStream =>
   assertStreamColumns({ ...c, kind: 'record', rel, fields });
+export const toGroupStream = (c: Carry, rel: Relation, key: GroupKey, val: GroupVal): GroupStream =>
+  assertStreamColumns({ ...c, kind: 'group', rel, key, val });
 
 /** A map key/value column's shape → the list shape it produces when select(Column.*)
  *  aggregates it: a scalar carries its type tag, an element rejoins on unfold, a

@@ -19,6 +19,13 @@ builds through the kernel.
 
 **Compiler is fully decomposed (all 3 seams done, 2026-07-12).** `compile()` in
 `src/compiler.ts` is a 51-line orchestrator: `parse → normalize → dispatch`.
+**Current lowering model (2026-07-15 refactor):** orchestration dispatches a truthful
+`Stream` union (`ElementStream`/`ScalarStream`/`ListStream`/`PropertyStream`/
+`RecordStream`/`GroupStream`, with derived entry `MapStream`) and materializes only at
+the root through `steps/materialize.ts`. `select`/`project` always lower to streams;
+`group`/`groupCount` always lower through `lowerGroup` to a rich GroupStream, terminal
+or followed. See `docs/2026-07-15-unified-relational-lowering-plan.md` for the active
+staged migration; the older P1–P3 sections below are historical semantics notes.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
   (`stripTerminal`, `foldRepeatClusters`, `foldByModulators`) run once up front so
   the dispatch sees a canonical, peek-free chain (no index arithmetic anywhere).
@@ -479,7 +486,7 @@ was 0). Key pieces:
   `where(__.…)`) traversal into a **correlated SQL scalar** for node/edge/property
   contexts (values/label/id/key/value/element/outV/inV/`out…count()`). This is
   the shared engine P2b's `where` builds on — extend it, don't rewrite it.
-- `compileGroup` — group() is a **barrier** → one `{kind:'group'}` Map. Dual-path
+- `lowerGroup` — group() is a **barrier** → a rich GroupStream, root-framed as one Map. Dual-path
   (locked #3): scalar reducers (count/sum, `json_group_array` scalar-lists) →
   real SQL `GROUP BY`; element values (default list / `by(__.tail())`) →
   `ORDER BY key` + the handler's `groupBuffer` folds runs into the Map. Composite
@@ -699,7 +706,7 @@ interpreter). Plan + decision log: `docs/2026-07-13-side-effect-state-plan.md`.
   expects one result per bagged element (`aggregate('x').cap('x')` → 6 vertices, NOT one
   List), so cap explodes the stored list via `compileUnfold` → the element/scalar stream →
   `dispatchNext` (reuses the §9 list substrate, zero new list code). A **group side-effect
-  re-emits ONE Map** via `compileGroup` over the stashed source.
+  re-emits ONE GroupStream** via `lowerGroup` over the stashed source.
 - **`group('a')`/`groupCount('a')` (side-effecting, `sideeffect.ts`)** = a PASS-THROUGH
   barrier that stashes the group-spec (source `from` string referencing the persistent
   `st.last` CTE + `elemCtx` + folded `bys`) and returns `st` unchanged, so movement between
@@ -707,7 +714,7 @@ interpreter). Plan + decision log: `docs/2026-07-13-side-effect-state-plan.md`.
   group/groupCount dispatch as a prefix step ONLY when they carry a string side-effect key
   (`isSideEffectGroup` guard, mirroring the sack/choose guards); the bare terminal form falls
   to the existing `compileTail` barrier. Index keys for the group key are computed at cap time
-  (compileGroup mutates the passed set) — the def carries none.
+  (`lowerGroup` resolves the source at cap time) — the def carries none.
 - **Deferred, fail closed (each a clear throw):** `within('x')`/`without('x')` mid-chain
   readback (the aggregate-dedup idiom — where eager/lazy actually diverge; set-based join
   can't honour incremental visibility); the sack inject-const **numeric-promotion** block
@@ -747,20 +754,17 @@ Deferred (clear throws): non-movement local bodies (match/simplePath/union/neste
 no-barrier bodies, `order()`/`dedup()` inside local, local after `as()`/`path()`/branch/sack,
 `local(aggregate(...))` (gates ProductiveByStrategy), `otherV` with no preceding edge step.
 
-## MapStream — re-enterable group()/list tail: select(Column) + list-local + nested lists (LANDED 2026-07-13, L3 661→685)
+## GroupStream + derived MapStream — select(Column), list-local, nested lists (updated 2026-07-15)
 
-The traverser stream model's missing FOURTH shape. `group()`/`groupCount()` used to be a
-terminal `Compiled {kind:'group'}` (framed from rows by the handler's `groupBuffer`); now a
-group WITH a follower **retypes to a `MapStream`** (`stream.ts` — a `(mk,mv)` row relation,
-sibling to St/Scalar/List) and `dispatchNext` routes it exactly like fold→ListStream. This
-dissolves the "group()/fold() is terminal" wall the same way fold→unfold dissolved the
-one-projection ceiling. A **TERMINAL group() is byte-identical** (stays the `groupBuffer`
-path) — only the re-enterable form is new.
+`group()`/`groupCount()` now ALWAYS lower to a rich `GroupStream`, whose physical layout
+covers scalar/element/composite keys and scalar/list/element values. Root materialization
+uses the handler's `groupBuffer`; a compatible `select(Column.*)` consumer derives the
+narrow `(mk,mv)` `MapStream` entry layout. Terminal position no longer selects a different
+semantic compiler.
 
-- **`groupToMapStream`** (`steps/group.ts`) builds `(mk,mv)` via a real SQL GROUP BY. Scalar
-  keys drop nulls (values() semantics, mirrors `groupBuffer`); **element keys carry their
-  rowid** (`keyOf={kind:'elem'}`) so `select(Column.keys).unfold()` rejoins vertices.
-  Values (Stage 1) = single scalars: count/sum/neighbourhood-reduction (`MAX(nested scalar)`).
+- **`lowerGroup`** (`steps/group.ts`) builds the one rich relation. `compileFromGroup`
+  derives `(mk,mv)` only for compatible consumers. Scalar keys drop nulls on derivation;
+  **element keys retain an internal rowid** so `select(Column.keys).unfold()` rejoins them.
 - **`select(Column.values)`/`select(Column.keys)`** (`compileFromMap`, `steps/list.ts`)
   aggregate one map column into ONE list value (`json_group_array`, COALESCE→`[]` for an
   empty map) → a `ListStream` that unfold()/framing handles. So
@@ -784,11 +788,10 @@ path) — only the re-enterable form is new.
   **jsonb-in-jsonb nests correctly** (`json_group_array` recognizes jsonb blobs). The
   per-member list is wrapped in `MAX` (constant within an element-keyed group) — a
   **non-element key would need a UNION over members, so defers** (correct-by-design).
-- **`cap('a')` of a group side-effect** (`compileCap`) retypes to a MapStream on a follower
-  too — `group('a')…cap('a').select(Column.values).unfold()` composes like inline group()
-  (closes the §-side-effect deferral that waited on select(Column)).
+- **`cap('a')` of a group side-effect** (`compileCap`) re-emits the same GroupStream as an
+  inline group; compatible Column consumers derive MapStream normally.
 
-No handler change beyond reusing `jsonbList`. **Deferred (clear throws):** Map-unfold
+The handler also frames the rich group's one-list-per-key value layout. **Deferred (clear throws):** Map-unfold
 (→Map.Entry, the reserved `'entry'` ListOf), element-VALUE group maps, non-element-key
 neighbour-list values, `order(Scope.local).by(key/traversal)`, and set-ops
 (combine/intersect/difference — a separate sub-project: operand compilation + vertex identity

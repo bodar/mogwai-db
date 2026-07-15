@@ -9,7 +9,7 @@
 import { type Expression, type Query } from '../q.ts';
 import { readCompiled, type Compiled, type Shape } from '../render.ts';
 import { list, q } from '../q.ts';
-import { recordResultColumns, type ListStream, type PropertyStream, type RecordStream, type ScalarStream } from './stream.ts';
+import { groupResultColumns, recordResultColumns, type GroupStream, type ListStream, type PropertyStream, type RecordStream, type ScalarStream } from './stream.ts';
 
 export function materializeRoot(query: Query, tail: Expression, shape: Shape): Compiled {
   return readCompiled(query, tail, shape);
@@ -58,4 +58,12 @@ export function materializeRecordRoot(stream: RecordStream): Compiled {
   const r = stream.rel.as('r');
   const cols = stream.fields.flatMap(recordResultColumns).map((name) => r.c[name]);
   return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${r}`, { kind: 'map', entries: [...stream.fields] });
+}
+
+/** Materialize the rich group barrier layout. The handler folds rows into one Map;
+ * internal re-entry columns remain behind the root boundary. */
+export function materializeGroupRoot(stream: GroupStream): Compiled {
+  const g = stream.rel.as('g');
+  const cols = groupResultColumns(stream).map((name) => g.c[name]);
+  return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${g}`, { kind: 'group', key: stream.key, val: stream.val });
 }

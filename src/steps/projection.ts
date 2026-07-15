@@ -18,7 +18,7 @@ import { SCALAR_ROW_STEPS } from './scalar.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
 import { compileSelectProject, compilePath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
 import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions } from './mapscalar.ts';
-import { compileGroup, groupToMapStream, lowerProperties, type GroupSource } from './group.ts';
+import { lowerGroup, lowerProperties, type GroupSource } from './group.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
 //
@@ -202,17 +202,14 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
   if (steps[stop]?.name === 'cap')
     return compileCap(st, steps, stop);
 
-  // group()/groupCount() is a barrier over the current element stream → one Map. A
-  // TERMINAL group() frames the Map directly (groupBuffer). A NON-terminal group()
-  // retypes to a MapStream so a follower (select(Column.*)/unfold) re-enters the tail.
+  // group()/groupCount() always lowers to one rich GroupStream. Root materialization
+  // frames it directly; supported Column consumers derive a narrow MapStream.
   if (steps[stop]?.name === 'group' || steps[stop]?.name === 'groupCount') {
     const isCount = steps[stop].name === 'groupCount';
     const tbl = st.elem === 'edge' ? 'edges' : 'nodes';
     const ctx = elemCtx(elemRel(st), st.elem);
     const src: GroupSource = { from: `${tbl} n JOIN ${st.rel.name} p ON n.id=p.id`, ctx, elem: st.elem === 'edge' ? 'edge' : 'vertex' };
-    if (stop + 1 < steps.length)
-      return dispatchNext(groupToMapStream(st, isCount, steps[stop].bys ?? [], src), steps, stop + 1);
-    return compileGroup(st, isCount, steps[stop].bys ?? [], src);
+    return dispatchNext(lowerGroup(st, isCount, steps[stop].bys ?? [], src), steps, stop + 1);
   }
 
   // A one-label select emits the labelled traverser itself (or its by(key) scalar),
@@ -513,8 +510,8 @@ function lowerSackRead(st: ElementStream, step: PStep): ScalarStream {
  *  store) is a BulkSet that UNROLLS to individual results (there's no BulkSet wire
  *  type, and the suite expects one result per bagged element), so explode the stored
  *  JSONB list back into an element/scalar stream and continue the tail. A group
- *  side-effect (group('a')/groupCount('a')) re-runs compileGroup over its stashed
- *  source → one Map (steps/group.ts). Deferred: multi-key cap('x','y'). */
+ *  side-effect (group('a')/groupCount('a')) re-runs lowerGroup over its stashed
+ *  source → one GroupStream (steps/group.ts). Deferred: multi-key cap('x','y'). */
 function compileCap(st: ElementStream, steps: PStep[], stop: number): Compiled {
   const names = (steps[stop].args ?? []).filter((a: any) => typeof a === 'string');
   if (names.length !== 1) throw new Error('cap() with multiple side-effect keys not yet supported');
@@ -524,13 +521,10 @@ function compileCap(st: ElementStream, steps: PStep[], stop: number): Compiled {
     const ls = toListStream(carryOf(st), def.rel, def.of);
     return dispatchNext(compileUnfold(ls), steps, stop + 1);
   }
-  // group('a')/groupCount('a') side-effect → re-emit the stashed Map. A TERMINAL cap
-  // frames it directly; a follower (select(Column.*)/unfold) retypes it to a MapStream
-  // and re-enters the tail — same as an inline group().
+  // group('a')/groupCount('a') side-effect → re-emit the same rich GroupStream as an
+  // inline group; terminal framing and Column consumers share its dispatch.
   const src: GroupSource = { from: def.from, ctx: def.ctx, elem: def.elem };
-  if (stop + 1 < steps.length)
-    return dispatchNext(groupToMapStream(st, def.isCount, def.bys, src), steps, stop + 1);
-  return compileGroup(st, def.isCount, def.bys, src);
+  return dispatchNext(lowerGroup(st, def.isCount, def.bys, src), steps, stop + 1);
 }
 
 /** Render a resolved projection + the value-shape tail (scalar transforms, is()
