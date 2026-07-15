@@ -31,14 +31,12 @@ function rowPreserving(s: ScalarStream, suffix: Expression): ScalarStream {
   return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter);
 }
 
-function transformScalar(s: ScalarStream, step: PStep, next?: PStep): ScalarStream {
-  const p = s.rel.as('p');
-  let expr: Expression = p.c.v;
+function scalarTransform(step: PStep, currentAs: ValueType | undefined, expr: Expression, next?: PStep): { expr: Expression; as?: ValueType } {
   let as: ValueType | undefined;
   if (step.name === 'asNumber') {
     const spec = numericSpec(step.args[0]);
     if (spec) { expr = asNumberSql(spec, expr); as = spec.as; }
-    else if (s.as === 'date') as = 'long';
+    else if (currentAs === 'date') as = 'long';
     else if (next?.name === 'asDate') { expr = q`CAST(${expr} AS INTEGER)`; as = 'long'; }
     else throw new Error('bare asNumber() over a non-date runtime value not yet supported');
   } else if (step.name === 'asDate') {
@@ -51,11 +49,48 @@ function transformScalar(s: ScalarStream, step: PStep, next?: PStep): ScalarStre
     expr = scalarTx(step.name, step.args ?? [], expr)
       ?? (() => { throw new Error(`scalar transform ${step.name}() not supported`); })();
   }
+  return { expr, as };
+}
+
+/** Fuse a maximal transform/predicate segment into one SELECT. Predicates capture the
+ * expression visible at their exact position, so `tx().is().tx()` remains ordered even
+ * though the final SQL has no intermediate CTE. Physical row boundaries are still
+ * emitted for order/slice/dedup/barriers, where sequence changes cardinality/order. */
+function fuseScalarSegment(s: ScalarStream, steps: readonly PStep[], from: number): { stream: ScalarStream; stop: number } {
+  const p = s.rel.as('p');
+  let expr: Expression = p.c.v;
+  let as = s.as;
+  let transformed = false;
+  const predicates: Expression[] = [];
+  let i = from;
+  for (; i < steps.length; i++) {
+    const step = steps[i];
+    if (isLocal(step)) break;
+    if (SCALAR_TRANSFORMS.has(step.name)) {
+      const out = scalarTransform(step, as, expr, steps[i + 1]);
+      expr = out.expr;
+      as = out.as;
+      transformed = true;
+      continue;
+    }
+    if (step.name === 'is') {
+      predicates.push(predicateSql(expr, step.args[0]));
+      continue;
+    }
+    break;
+  }
+  const valueCols = transformed
+    ? q`${expr} AS v`
+    : q`${p.c.v} AS v${s.result === 'number' ? q`, ${p.c.vt} AS vt` : empty}`;
+  const where = predicates.length ? q` WHERE ${list(predicates, ' AND ')}` : empty;
   const rel = s.q.cte(
-    q`SELECT ${expr} AS v${s.encounter ? q`, ${p.c[s.encounter]}` : empty}${carryFrag(s.carried, p)} FROM ${p}`,
-    ['v', ...(s.encounter ? [s.encounter] : []), ...carriedCols(s.carried)],
+    q`SELECT ${valueCols}${s.encounter ? q`, ${p.c[s.encounter]}` : empty}${carryFrag(s.carried, p)} FROM ${p}${where}`,
+    ['v', ...(!transformed && s.result === 'number' ? ['vt'] : []), ...(s.encounter ? [s.encounter] : []), ...carriedCols(s.carried)],
   );
-  return toScalarStream(carryOf(s), rel, as, 'value', s.encounter);
+  return {
+    stream: toScalarStream(carryOf(s), rel, as, transformed ? 'value' : s.result, s.encounter, transformed ? undefined : s.productiveNull),
+    stop: i,
+  };
 }
 
 function partitionedSlice(s: ScalarStream, offset: number, limit: number | null): ScalarStream {
@@ -128,9 +163,8 @@ function appendScalar(s: ScalarStream, step: PStep): ScalarStream {
   return toScalarStream(carryOf(s), rel);
 }
 
-/** Lower the row operators common to every scalar payload one step at a time.
- * Sequential CTEs make order significant (limit().is() is not commuted), while
- * reducer result/type metadata and physically carried columns remain explicit. */
+/** Lower the row operators common to every scalar payload. Consecutive transforms and
+ * predicates share one relational node; cardinality/order boundaries remain explicit. */
 export function lowerScalarRows(
   input: ScalarStream,
   steps: readonly PStep[],
@@ -145,13 +179,10 @@ export function lowerScalarRows(
       stream = appendScalar(stream, step);
       continue;
     }
-    if (SCALAR_TRANSFORMS.has(step.name)) {
-      stream = transformScalar(stream, step, steps[i + 1]);
-      continue;
-    }
-    if (step.name === 'is') {
-      const p = stream.rel.as('p');
-      stream = rowPreserving(stream, q` WHERE ${predicateSql(p.c.v, step.args[0])}`);
+    if (SCALAR_TRANSFORMS.has(step.name) || step.name === 'is') {
+      const fused = fuseScalarSegment(stream, steps, i);
+      stream = fused.stream;
+      i = fused.stop - 1;
       continue;
     }
     if (step.name === 'limit' || step.name === 'skip' || step.name === 'range') {
@@ -180,9 +211,20 @@ export function lowerScalarRows(
         const dir = by.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
         order = dir === 'shuffle' ? q`RANDOM()` : dir === 'desc' ? q`p.v DESC` : q`p.v ASC`;
       }
-      stream = stream.carried.origins.length
-        ? partitionedOrder(stream, order)
-        : rowPreserving(stream, q` ORDER BY ${order}`);
+      if (stream.carried.origins.length) {
+        stream = partitionedOrder(stream, order);
+        continue;
+      }
+      const next = steps[i + 1];
+      if (next && !isLocal(next) && (next.name === 'limit' || next.name === 'skip' || next.name === 'range')) {
+        const { offset, limit } = next.name === 'limit'
+          ? { offset: 0, limit: Number(next.args[0]) }
+          : next.name === 'skip'
+            ? { offset: Number(next.args[0]), limit: null }
+            : rangeToOffsetLimit(next.args);
+        stream = rowPreserving(stream, q` ORDER BY ${order} LIMIT ${limit ?? -1} OFFSET ${offset}`);
+        i++;
+      } else stream = rowPreserving(stream, q` ORDER BY ${order}`);
       continue;
     }
     if (step.name === 'dedup') {

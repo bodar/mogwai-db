@@ -469,7 +469,7 @@ describe('compiler SQL snapshots', () => {
     expect(f.sql).toContain('CAST(p.v AS REAL)');
     // is(P.typeOf(X)) on the uniformly-typed stream rides the existing storage-class
     // typeOf — no precision change needed
-    expect(read('g.V().values("weight").asNumber(GType.FLOAT).is(P.typeOf(GType.FLOAT))').sql).toContain("typeof(p.v)");
+    expect(read('g.V().values("weight").asNumber(GType.FLOAT).is(P.typeOf(GType.FLOAT))').sql).toContain("typeof(CAST(p.v AS REAL))");
     // overflow + non-numeric-token errors raise TinkerPop's exact messages
     expect(() => compile('g.inject(32768).asNumber(GType.SHORT)', {})).toThrow('Can\'t convert number of type Integer to Short due to overflow.');
     expect(() => compile('g.inject(300).asNumber(GType.BYTE)', {})).toThrow('Can\'t convert number of type Integer to Byte due to overflow.');
@@ -635,8 +635,8 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.inject("that").replace("h","j")').sql).toContain('replace(p.v');
     // Scope.local on a scalar stream is a no-op (per-element == per-list)
     expect(read('g.inject("a").length(Scope.local)').sql).toContain('length(v)');
-    // transforms chain as successive relations, preserving left-to-right semantics.
-    expect(read('g.inject("a").concat("b").toUpper()').sql).toContain('upper(p.v)');
+    // Adjacent transforms fuse into one expression while preserving left-to-right order.
+    expect(read('g.inject("a").concat("b").toUpper()').sql).toContain("upper(concat_ws('', p.v, ?))");
     // trim family → SQLite trim/ltrim/rtrim over the Java-whitespace char set
     expect(read('g.inject(" a ").trim()').sql).toContain('trim(p.v, ?)');
     expect(read('g.inject(" a ").lTrim()').sql).toContain('ltrim(p.v, ?)');
@@ -1268,7 +1268,15 @@ describe('compiler SQL snapshots', () => {
   test('scalar transforms lower relationally and feed later filters/reducers', () => {
     const transformed = read('g.V().values("name").toUpper().is("MARKO")');
     expect(transformed.sql).toContain('upper(p.v) AS v');
-    expect(transformed.sql).toContain('WHERE p.v = ?');
+    expect(transformed.sql).toContain('WHERE upper(p.v) = ?');
+
+    const fused = read('g.V().values("name").toLower().is(P.neq("x")).toUpper()');
+    expect(fused.sql).toContain('upper(lower(p.v)) AS v');
+    expect(fused.sql).toContain('WHERE lower(p.v) != ?');
+    expect(fused.sql).not.toContain('FROM c2 p)');
+
+    const ordered = read('g.V().values("age").order().range(1,3)');
+    expect(ordered.sql).toContain('ORDER BY p.v ASC LIMIT 2 OFFSET 1');
 
     const typedSum = read('g.V().values("age").asNumber(GType.DOUBLE).sum().is(P.gt(100))');
     expect(typedSum.shape).toEqual({ kind: 'scalar' });
