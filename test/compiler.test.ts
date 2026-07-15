@@ -2594,6 +2594,10 @@ describe('compiler execution semantics', () => {
       .toEqual(['vadas', 'vadas']);
     expect(run(store, 'g.V(1).coalesce(__.out().dedup(),__.identity()).count()').map((r) => r.v))
       .toEqual([3]);
+    // Nested element branches use the same non-materializing lowerer. choose() must
+    // retain coalesce's parent ordinal so first-productivity remains per traverser.
+    expect(run(store, 'g.V().coalesce(__.choose(__.hasLabel("person"),__.out("created"),__.in("created")),__.identity()).count()').map((r) => r.v))
+      .toEqual([9]);
   });
 
   test('optional()/flatMap() multi-hop execute correctly', () => {
@@ -2605,6 +2609,10 @@ describe('compiler execution semantics', () => {
     // optional(both()) hit: vadas both = marko (knows-in)
     expect(run(store, 'g.V(2).optional(__.both()).values("name")').map((r) => r.v)).toEqual(['marko']);
     expect(run(store, 'g.V(1).optional(__.out().dedup()).count()').map((r) => r.v)).toEqual([3]);
+    // Rebinding an existing alias inside the child is schema-preserving and now
+    // composes through optional's origin scope (a new one-sided alias still fails).
+    expect(run(store, 'g.V(1).as("a").optional(__.out().as("a")).select("a").values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'lop', 'vadas']);
     // flatMap = inline the body: marko out().out() = lop,ripple
     expect(run(store, 'g.V(1).flatMap(__.out().out()).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple']);
     expect(run(store, 'g.V(1).flatMap(__.out().values("name"))').map((r) => r.v).sort()).toEqual(['josh', 'lop', 'vadas']);

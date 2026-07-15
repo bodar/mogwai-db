@@ -3,8 +3,7 @@ import { edges } from '../schema.ts';
 import { stepChain, type Step } from '../frontend.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, tryInlinePredicate, predicateSql, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
 import { advance, elemRel, prevRel, carryFrag, carriedCols, aliasColsOf, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
-import { foldBody } from './index.ts';
-import { isElementChild, isListChild, isScalarChild, pushChildScope, tryCompileCountChild, tryCompileElementChild, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueRows } from './child.ts';
+import { isListChild, isScalarChild, pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueRows } from './child.ts';
 import { carryOf, toListStream, toScalarStream, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from './stream.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
@@ -59,39 +58,8 @@ function originSeed(st: ElementStream): { base: Relation; seedSt: ElementStream;
   return { base: frame.domain, seedSt: seed, ord: frame.ordinal };
 }
 
-/** PREFIX steps that hand-roll a SELECT that DROPS the input-ordinal (`ElementStream.origin`)
- *  instead of threading it via carryFrag — so a coalesce/optional body containing one
- *  must defer rather than emit a column-mismatched CTE. (Movement/filter/passthrough
- *  carry it via carryFrag; union/flatMap re-project it; a scalar/projection step isn't
- *  in PREFIX at all → it gets the clearer scalar-body message below.) */
-const ORIGIN_UNSAFE = new Set(['as', 'repeat', 'choose']);
-
-/** Fold a branch body (element-only) from `seed` through the movement/filter
- *  dispatch. Multi-hop bodies work (they chain CTEs off the seed). A scalar/
- *  projection tail (a step absent from PREFIX) fails closed. When `seed` carries an
- *  input ordinal (coalesce/optional), a body step that wouldn't thread it also fails
- *  closed. Returns the finished ElementStream — its `rel` carries the ordinal when active, so
- *  the caller can re-associate results with their input. */
-function branchArm(name: string, nested: any, seed: ElementStream, params: Record<string, any>): ElementStream {
-  if (!nested) throw new Error(`${name}(traversal) required`);
-  const body = stepChain(nested, params);
-  // The shared child compiler owns origin-partitioned element row policies. Do not
-  // route a terminal order() through its `all` policy yet: an all-row ordered stream
-  // still needs a general encounter contract rather than silently discarding order.
-  if (body.at(-1)?.name !== 'order' && isElementChild(nested, params)) {
-    const generic = tryCompileElementChild(seed, nested, 'all');
-    if (!generic) throw new Error(`${name}() element branch preflight/compiler mismatch`);
-    return generic.stream;
-  }
-  if (seed.carried.origins.length) {
-    const bad = body.find((c) => ORIGIN_UNSAFE.has(c.name));
-    if (bad) throw new Error(`${name}() branch step __.${bad.name}() not yet supported inside coalesce()/optional() (input-ordinal not carried)`);
-  }
-  const { st: end, stop } = foldBody(body, seed, 0);
-  if (stop !== body.length)
-    throw new Error(`${name}() branch __.${body.map((c) => c.name + '()').join('.')} not yet supported (scalar/projection body)`);
-  return end;
-}
+const armDescription = (nested: any, params: Record<string, any>): string =>
+  stepChain(nested, params).map((step) => step.name + '()').join('.');
 
 /** A branch forks a traverser into arms. as() aliases + path positions are pure
  *  labels that copy cleanly into each arm, but the sack (a MUTABLE per-traverser
@@ -173,7 +141,8 @@ export const union: StepFn = (s, st) => {
   assertForkSafe('union', st);
   const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 2) throw new Error('union() needs at least two branches');
-  const ends = branches.map((b) => branchArm('union', b.nested, st, st.params));
+  const ends = branches.map((b) => tryCompileElementTraversal(st, b.nested)
+    ?? (() => { throw new Error(`union() branch __.${armDescription(b.nested, st.params)} not yet supported (scalar/projection body)`); })());
   const elem = ends[0].elem;
   if (ends.some((e) => e.elem !== elem)) throw new Error('union() branches produce different element kinds (mixed-shape) not yet supported');
   const out = mergeBranchCarried(st.carried, ends.map((e) => e.carried)); // pads ragged path arms
@@ -244,7 +213,8 @@ export const optional: StepFn = (s, st) => {
   // Nesting is supported: originSeed mints a UNIQUE ordinal (o0, o1, …) per depth and
   // carries the outer ordinals through, so optional()/coalesce() compose.
   const { base, seedSt, ord } = originSeed(st);
-  const end = branchArm('optional', s.args[0].nested, seedSt, st.params);
+  const end = tryCompileElementTraversal(seedSt, s.args[0].nested)
+    ?? (() => { throw new Error(`optional() branch __.${armDescription(s.args[0].nested, st.params)} not yet supported (scalar/projection body)`); })();
   if (end.elem !== st.elem)
     throw new Error('optional() body changing element kind not yet supported (self-on-miss would be mixed-shape)');
   // Two ragged arms: the HIT (body, path extended) and the MISS (base = input unchanged,
@@ -283,7 +253,8 @@ export const coalesce: StepFn = (s, st) => {
   const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 1) throw new Error('coalesce() needs at least one branch');
   const { seedSt, ord } = originSeed(st); // unique ordinal — nests inside optional/coalesce
-  const ends = branches.map((b) => branchArm('coalesce', b.nested, seedSt, st.params));
+  const ends = branches.map((b) => tryCompileElementTraversal(seedSt, b.nested)
+    ?? (() => { throw new Error(`coalesce() branch __.${armDescription(b.nested, st.params)} not yet supported (scalar/projection body)`); })());
   const elem = ends[0].elem;
   if (ends.some((e) => e.elem !== elem)) throw new Error('coalesce() branches produce different element kinds (mixed-shape) not yet supported');
   // Pad ragged path arms; POP this branch's ordinal on output (restore the outer origins).
@@ -342,10 +313,10 @@ export function tryLowerListCoalesce(s: Step, st: ElementStream): ListStream | n
  *  only semantics differ (needs a per-input row-number) and stay deferred. */
 export const flatMap: StepFn = (s, st) => {
   assertForkSafe('flatMap', st); // 1:many is a split too — same sack/fromV concern
-  const generic = tryCompileElementChild(st, s.args[0]?.nested, 'all');
-  if (generic) return generic.stream;
   // Single body, no merge — incoming aliases + the appended path ride through on `end`.
-  const end = branchArm('flatMap', s.args[0]?.nested, st, st.params);
+  const nested = s.args[0]?.nested;
+  const end = tryCompileElementTraversal(st, nested)
+    ?? (() => { throw new Error(`flatMap() branch __.${armDescription(nested, st.params)} not yet supported (scalar/projection body)`); })();
   mergeBranchCarried(st.carried, [end.carried]); // reject a NEW as() bound inside (non-path cols must agree); path just rides on `end`
   return end;
 };
@@ -561,8 +532,8 @@ export const choose: StepFn = (s, st) => {
 
   const arm = (arg: any, seed: ElementStream): ElementStream => {
     const body = stepChain(arg.nested, st.params);
-    const { st: end, stop } = foldBody(body, seed, 0);
-    if (stop !== body.length)
+    const end = tryCompileElementTraversal(seed, arg.nested);
+    if (!end)
       throw new Error(`choose() branch __.${body.map((c) => c.name + '()').join('.')} not yet supported (scalar/projection body)`);
     return end;
   };

@@ -2,13 +2,14 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–5 complete, Stage 6 consumer migration complete, Stage 7 active
-**Baseline:** full suite 370/370, L1 2298/2298, L3 932/2041; 246 compiler tests
+**Baseline:** full suite 370/370, L1 2298/2298, L3 933/2041; 246 compiler tests
 
 ## Restart handoff — read this first after a context reset
 
 **Current checkpoint:** branch `refactor/unified-relational-lowering`; items 1–15 are on
 `trunk`, item 16 is local commit `80d7020`, item 17 is local commit `9eabd70`, and item
-18 is the current uncommitted checkpoint. Run full `bun test` before every commit.
+18 is local commit `8a6f3ab`; item 19 is the current uncommitted checkpoint. Run full
+`bun test` before every commit.
 
 **Recent completed slices:**
 
@@ -119,6 +120,15 @@
     preserve nested branch ordinals. Duplicate equal parents are covered explicitly.
     The legacy branch fold remains only for bodies outside the current child vocabulary
     (nested branches/repeat and general all-row order). L3 remains 932.
+19. `branchArm` and its private origin-safety vocabulary are deleted. The root,
+    re-entry, generic child, and branch paths now share `lowerElementSteps`; its
+    complete/non-materializing form is `tryLowerElementSteps`, and
+    `tryCompileElementTraversal` composes child-frame row policies with full StepFn
+    lowering. Nested `choose()` now retains optional/coalesce parent ordinals, and
+    schema-preserving alias rebinds work inside correlated element children. Recursive
+    `repeat()` remains an explicit physical boundary because its SQLite recursive term
+    cannot carry arbitrary parent columns. Compiler suite remains 246/246, L3 ratcheted
+    932→933, and the full suite is 370/370.
 
 **Current Stage 6 state:** scalar traversal modulators for `project`, aliased `select`,
 and inline element `group` all use the generic child-domain compiler. Group keys consume
@@ -127,12 +137,11 @@ final key barrier. These consumers share multiset-safe origin joins rather than 
 correlated traversal parsers. ProductiveBy is explicit at group/groupCount/project/select,
 aggregate, order, dedup, linear-path, and alias-compare boundaries, including nullable
 element records and aggregate members. Multi-input math/format/option-choose modulation
-also uses one generic child domain. L3 is 932.
+also uses one generic child domain. L3 is 933.
 
-**Immediate next slice:** finish deleting `branchArm`'s compatibility fold by routing
-nested element branches through stream lowering, then replace `dispatchNext` with a
-stepwise `lowerSteps` loop. Preserve correlated count/EXISTS as measured fast paths
-until Stage 8.
+**Immediate next slice:** replace `dispatchNext` with a stepwise `lowerSteps` loop and
+make the root path `seed → lowerSteps → materializeRoot`. Preserve correlated
+count/EXISTS as measured fast paths until Stage 8.
 
 **Deliberate compatibility boundaries after Stage 6:** broader VariantStream followers,
 property groups without a live element parent, element-kind-changing optional fallback,
@@ -210,12 +219,12 @@ needs:
   through branch merges.
 - `Carried.origins` is a nested ordinal stack, proven by nested
   `optional`/`coalesce`.
-- `foldBody` proves ordinary element steps can compile from an already-seeded relation.
+- `lowerElementSteps` proves ordinary element steps can compile from an already-seeded relation.
 - `local` proves a window partitioned by an input ordinal gives correct per-traverser
   barriers.
 
 What remains is mostly the negative space between them. Read leaf compilers still call
-`readCompiled` themselves, so they stop being composable. `foldBody` stops at the first
+`readCompiled` themselves, so they stop being composable. `lowerElementSteps` stops at the first
 non-element step. `compileNestedScalar` and `compileNestedList` manually recognize small
 subsets of the language. `local` and branch bodies each seed/carry correlation in their
 own way. The one-projection ceiling is a symptom of this early materialization.
@@ -231,7 +240,8 @@ which input traverser produced each output.
 
 There are currently six overlapping semantic compilers:
 
-1. `foldBody`: element-only `StepFn` prefix lowering.
+1. `lowerElementSteps`: non-materializing element `StepFn` lowering, shared by roots,
+   re-entry, generic children, and branch arms.
 2. `foldTailAcc` + `renderProjection`: scalar projection/modifier/reducer lowering,
    usually straight to `Compiled`.
 3. `dispatchNext`: partial shape re-entry for scalar/list/map streams.
@@ -739,8 +749,9 @@ Ratchet after each consumer, not only at the end.
    `tryInlinePredicate`; unsupported means null/fallback.~~
 2. ~~Delete `compileNestedList`; generic child + fold owns its semantics.~~
 3. ~~Scalar and predicate inline misses return null; semantic support lives in generic lowering.~~
-4. Shared element-child lowering now precedes the compatibility fold; delete that fold
-   after nested branch/repeat and all-row order acquire stream policies.
+4. ~~`branchArm` and its compatibility fold are deleted; nested element branches use
+   the shared non-materializing element-step lowerer.~~ Recursive repeat and general
+   all-row order remain explicit physical-policy boundaries.
 5. ~~Delete `isScalarLocal`, the local-body movement whitelist, and local's private
    origin window implementation.~~ (`61d028d`)
 6. Remove `dispatchNext` once `lowerSteps` fully supersedes it.
@@ -859,7 +870,7 @@ The refactor is complete when all of the following are true:
 - [x] All stream-carried columns physically exist on their relations.
 - [ ] Barriers derive global/per-origin behaviour from `CompileScope`.
 - [ ] `only one projection step is supported per traversal` no longer exists.
-- [ ] `branchArm` is not prefix-only.
+- [x] `branchArm` is deleted; element branch arms use shared stream lowering.
 - [x] `local.ts` is deleted; local has no private traversal parser/barrier engine.
 - [x] `compileNestedList` is deleted.
 - [x] Scalar/predicate specializations are optional `tryInline*` fast paths with

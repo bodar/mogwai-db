@@ -3,7 +3,7 @@ import { stepChain } from '../frontend.ts';
 import { edges, labels, nodes, vertexProperties } from '../schema.ts';
 import { advance, carriedWith, carryFrag, carriedCols, withCarried, type ElementStream } from './context.ts';
 import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStream, type Stream } from './stream.ts';
-import { foldBody } from './index.ts';
+import { lowerElementSteps, tryLowerElementSteps } from './index.ts';
 import { lowerScalarRows, SCALAR_TRANSFORMS } from './scalar.ts';
 import { normalize, type PStep } from '../strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
@@ -178,7 +178,7 @@ export function tryCompileCountChild(
   if (prefix.some((s) => !ELEMENT_CHILD_STEPS.has(s.name))) return null;
 
   const pushed = pushChildScope(parent, scope);
-  const { st: end, stop } = foldBody(prefix, pushed.seed, 0);
+  const { stream: end, next: stop } = lowerElementSteps(prefix, pushed.seed);
   if (stop !== prefix.length) return null;
 
   const d = pushed.frame.domain.as('d');
@@ -205,7 +205,7 @@ function tryCompileCountValueRows(
   const prefix = body.slice(0, -1);
   if (prefix.some((s) => !ELEMENT_CHILD_STEPS.has(s.name))) return null;
   const pushed = pushChildScope(parent, scope);
-  const { st: end, stop } = foldBody(prefix, pushed.seed, 0);
+  const { stream: end, next: stop } = lowerElementSteps(prefix, pushed.seed);
   if (stop !== prefix.length) return null;
   const d = pushed.frame.domain.as('d');
   const c = end.rel.as('c');
@@ -239,7 +239,7 @@ function compileScalarChildRows(
   const { prefix, projection: terminal, suffix } = parts;
 
   const pushed = pushChildScope(parent, scope);
-  const { st: end, stop } = foldBody(prefix, pushed.seed, 0);
+  const { stream: end, next: stop } = lowerElementSteps(prefix, pushed.seed);
   if (stop !== prefix.length) return null;
 
   const c = end.rel.as('c');
@@ -513,7 +513,7 @@ function compileElementChildRows(
   const parts = body.length ? elementRowParts(body) : stripTerminal ? { prefix: [], suffix: [] } : null;
   if (!parts) return null;
   const pushed = pushChildScope(parent, scope);
-  const { st: prefixed, stop } = foldBody(parts.prefix, pushed.seed, 0);
+  const { stream: prefixed, next: stop } = lowerElementSteps(parts.prefix, pushed.seed);
   if (stop !== parts.prefix.length) return null;
 
   let end = prefixed;
@@ -607,4 +607,23 @@ export function tryCompileElementChild(
 
   if (use === 'all') return { stream: popChildScope(end, frame), scope };
   return { stream: popChildScope(end, frame), scope };
+}
+
+/** Lower any currently-supported element-valued child without crossing a root
+ * materialization boundary. Ordinary row-scoped children use the child-frame
+ * engine; branch/path compositions fall through to the complete StepFn lowerer.
+ * repeat() remains excluded under a live child origin because its recursive CTE
+ * intentionally carries only walk state, not arbitrary parent columns. */
+export function tryCompileElementTraversal(
+  parent: ElementStream,
+  nested: any,
+  scope: CompileScope = ROOT_SCOPE,
+): ElementStream | null {
+  const scoped = tryCompileElementChild(parent, nested, 'all', scope);
+  if (scoped) return scoped.stream;
+  if (!nested) return null;
+  const body = childSteps(nested, parent.params);
+  if (parent.carried.origins.length && body.some((step) => step.name === 'repeat'))
+    throw new Error('repeat() inside a correlated element child not yet supported (recursive walk does not carry the parent ordinal)');
+  return tryLowerElementSteps(body, parent);
 }
