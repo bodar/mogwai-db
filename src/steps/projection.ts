@@ -5,7 +5,7 @@ import {
   nodePropScalar, framedProps, valueMapProps,
 } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
-import { elemRel, type ElementStream } from './context.ts';
+import { carryFrag, carriedCols, elemRel, withoutCarried, type ElementStream } from './context.ts';
 import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStream } from './stream.ts';
 import { compileUnfold } from './list.ts';
 import { dispatchNext } from './index.ts';
@@ -52,6 +52,9 @@ const SCALAR_PROJ = new Set(['values', 'id', 'label']);
 // scalarTx → undefined → a clean "not supported" defer (needs local()/sack()).
 const SCALAR_TX_NAMES = new Set(['concat', 'length', 'toUpper', 'toLower', 'asString', 'substring', 'replace', 'trim', 'lTrim', 'rTrim', 'reverse', 'asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff']);
 const isMapProj = (p: PStep | null) => p?.name === 'select' || p?.name === 'project';
+const isScopeLocalStep = (s: PStep | undefined): boolean =>
+  !!s && (s.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local');
+const SCALAR_BOUNDARIES = new Set(['count', 'group', 'groupCount', 'select', 'project', 'path']);
 
 /** A tail modifier: fold the step into the accumulator. `at` gives position so a
  *  terminal reducer (fold/sum) can reject anything following it. */
@@ -201,14 +204,13 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
     return compileGroup(st, isCount, steps[stop].bys ?? [], src);
   }
 
-  // Chained projection: a scalar-producing projection (values/id/label) whose chain
-  // ENDS in count() retypes to a ScalarStream and re-enters (dispatchNext →
-  // compileFromScalar), dissolving the "one projection per traversal" ceiling the same
-  // way fold()/group() do — each phase gets a fresh accumulator. Scoped to a TERMINAL
-  // count() (the only projection valid on a scalar stream; any intervening dedup/is/
-  // limit is handled by compileFromScalar's own fold). count()-then-more falls through
-  // to the single-projection tail below (fails closed there).
-  if (SCALAR_PROJ.has(steps[stop]?.name) && steps.length - 1 > stop && steps[steps.length - 1]?.name === 'count') {
+  // A scalar-producing projection is always a real stream transition when another
+  // step follows. The next step dispatches against ScalarStream, so composition no
+  // longer depends on a terminal-tail special case (values().count().is(),
+  // values().groupCount(), and future scalar consumers all cross the same seam).
+  const needsScalarBoundary = steps.slice(stop + 1).some((s) =>
+    SCALAR_BOUNDARIES.has(s.name) && !(s.name === 'count' && isScopeLocalStep(s)));
+  if (SCALAR_PROJ.has(steps[stop]?.name) && needsScalarBoundary) {
     const n = elemRel(st);
     const l = labels.as('l');
     const p = st.rel.as('p');
@@ -217,7 +219,10 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
     const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
     const proj = PROJECTORS.get(steps[stop].name)!({ st, n, l, extId, vJoin, vlJoin, projStep: steps[stop] });
     const where = proj.baseWhere ? q` WHERE ${proj.baseWhere}` : empty;
-    const rel = st.q.cte(q`SELECT ${proj.colsNode} FROM ${proj.fromNode}${where}`, ['v']);
+    const rel = st.q.cte(
+      q`SELECT ${proj.colsNode}${carryFrag(st.carried, p)} FROM ${proj.fromNode}${where}`,
+      ['v', ...carriedCols(st.carried)],
+    );
     const asTag = proj.shape.kind === 'value' ? proj.shape.as : undefined;
     return dispatchNext(toScalarStream(carryOf(st), rel, asTag), steps, stop + 1);
   }
@@ -315,6 +320,16 @@ export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number)
   const LIST_ONLY = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product', 'conjoin', 'all', 'any']);
   if (LIST_ONLY.has(steps[from]?.name))
     throw new Error(`${steps[from].name} step can only take an array or an Iterable type for incoming traversers, encountered a scalar`);
+  // count() is a barrier and therefore another ScalarStream transition, not a
+  // terminal rendering decision. Keeping it relational lets any following scalar
+  // filter/transform/reducer compile normally. The barrier drops row-associated
+  // carried state because no single input row owns the global result.
+  if (steps[from]?.name === 'count' && !isScopeLocalStep(steps[from])) {
+    const rel = s.q.cte(q`SELECT COUNT(*) AS v FROM ${s.rel}`, ['v']);
+    const out = toScalarStream(withoutCarried(carryOf(s)), rel, 'long');
+    if (from + 1 < steps.length) return dispatchNext(out, steps, from + 1);
+    return materializeRoot(s.q, q`SELECT v FROM ${rel}`, { kind: 'count' });
+  }
   // unfold() on a scalar is identity (a scalar is not a collection) — continue past it,
   // exactly as unfold() on an element stream. Lets aggregate('a').by(k).cap('a').unfold()
   // (cap unrolls a by-key bag to a scalar stream) feed a following reducer.

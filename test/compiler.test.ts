@@ -326,13 +326,26 @@ describe('compiler SQL snapshots', () => {
     // per-value, matching TinkerPop's values()-flatMap semantics).
     const c = read('g.V().values("age").count()');
     expect(c.shape).toEqual({ kind: 'count' });
-    expect(c.sql).toContain('COUNT(*) AS v FROM (SELECT v FROM');
+    expect(c.sql).toContain('SELECT COUNT(*) AS v FROM c1');
     expect(c.sql).toContain('SELECT vp.value AS v FROM'); // the values() flatMap feeds the count
     // intervening scalar-stream modifiers compose through the re-entry
     expect(read('g.V().values("age").dedup().count()').sql).toContain('COUNT(*) AS v FROM (SELECT DISTINCT v FROM');
     expect(read('g.V().out().id().count()').shape).toEqual({ kind: 'count' });
-    // count() must be terminal for the retype; count()-then-more stays deferred (fail closed)
-    expect(() => compile('g.V().values("age").count().is(P.gt(2))', {})).toThrow('only one projection step is supported per traversal');
+    // The reducer is another scalar stream, so lowering can continue past it.
+    expect(read('g.V().values("age").count().is(P.gt(2))').sql).toContain('WHERE v > ?');
+  });
+
+  test('count is a relational scalar boundary and can continue lowering', () => {
+    const filtered = read('g.V().values("age").count().is(P.gt(3))');
+    expect(filtered.shape).toEqual({ kind: 'value', as: 'long' });
+    expect(filtered.sql).toContain('SELECT COUNT(*) AS v');
+    expect(filtered.sql).toContain('WHERE v > ?');
+
+    const countedAgain = read('g.V().values("age").count().count()');
+    expect(countedAgain.shape).toEqual({ kind: 'count' });
+    const store = seededStore();
+    expect(run(store, 'g.V().values("age").count().is(P.gt(3))').map((r) => r.v)).toEqual([4]);
+    expect(run(store, 'g.V().values("age").count().count()').map((r) => r.v)).toEqual([1]);
   });
 
   test('asBool() resolves inject constants at compile time + tags the value shape', () => {

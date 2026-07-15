@@ -152,6 +152,14 @@ export function carriedWith(c: Carried, o: CarriedOpts): Carried {
 export const withCarried = <T extends Carry>(st: T, patch: Partial<Carried>): T =>
   ({ ...st, carried: { ...st.carried, ...patch } });
 
+/** Drop row-associated state at a global barrier while retaining ambient compile
+ * context and chain requirements. A barrier result is a new traverser and cannot
+ * honestly claim aliases/origins/path/sack/fromV from any one input row. */
+export const withoutCarried = <T extends Carry>(st: T): T => ({
+  ...st,
+  carried: { aliases: new Map(), origins: [], trackFromV: st.carried.trackFromV },
+});
+
 /**
  * Append `body` as the new id-relation and advance to it. Carried-column opts route
  * through carriedWith (same tri-state as before); `cols` defaults to id + the resulting
