@@ -23,11 +23,11 @@ function byToEntry(byArgs: any[] | undefined): { sub: 'vertex' | 'value'; key?: 
   throw new Error('unsupported by() modulator');
 }
 
-/** Project fields whose by() modulators are all scalar child traversals. One outer
- * origin identifies each multiset-distinct input; each modulator independently uses
- * child `first` cardinality and retains that origin. Inner joins implement ordinary
- * productive-by semantics: a missing child drops the project row, while a produced
- * SQL NULL remains a real field value. */
+/** Project heterogeneous fields when at least one by() is a scalar child traversal.
+ * One outer origin identifies each multiset-distinct input; scalar children use
+ * child `first` cardinality while bare by() branches retain the whole current
+ * element. Inner joins implement ordinary productive-by semantics: a missing child
+ * drops the project row, while a produced SQL NULL remains a real field value. */
 function tryLowerTraversalProject(st: ElementStream, proj: PStep, keys: string[]): RecordStream | null {
   if (proj.name !== 'project' || !proj.bys?.length) return null;
   const args = keys.map((_, i) => proj.bys![i % proj.bys!.length]);
@@ -36,20 +36,49 @@ function tryLowerTraversalProject(st: ElementStream, proj: PStep, keys: string[]
   if (!nested.some(Boolean)) return null; // leave the mature all-direct path untouched
   if (specs.some((a, i) => {
     if (nested[i]) return !isScalarChild(nested[i], st.params);
+    if (a === undefined) return false;
     if (typeof a === 'string') return false;
     return !(a && typeof a === 'object' && 'token' in a && (a.token === 'id' || a.token === 'label'));
   })) return null;
 
   const outer = pushChildScope(st);
   const branches = specs.map((spec, i) => {
+    const prefix = `e${i}`;
     if (nested[i]) {
       const child = tryCompileScalarValueChild(outer.seed, nested[i], 'first', outer.scope);
       if (!child) throw new Error('scalar project child failed after successful shape preflight');
-      return child.rel.as(`b${i}`);
+      const rel = child.rel.as(`b${i}`);
+      return {
+        rel,
+        field: { key: keys[i], prefix, sub: 'value' as const },
+        cols: [q`${rel.c.v} AS ${`${prefix}_v`}`],
+      };
     }
 
     const p = outer.seed.rel.as(`p${i}`);
     const n = (st.elem === 'edge' ? edges : nodes).as(`n${i}`);
+    if (spec === undefined) {
+      const l = labels.as(`l${i}`);
+      const payload = st.elem === 'edge'
+        ? q`${n.c.id} AS rid, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${extIdOf(n.c.src)} AS src, ${extIdOf(n.c.tgt)} AS tgt, ${framedProps(n, 'edge')} AS props`
+        : q`${n.c.id} AS rid, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props`;
+      const payloadCols = st.elem === 'edge'
+        ? ['rid', 'id', 'label', 'src', 'tgt', 'props']
+        : ['rid', 'id', 'label', 'props'];
+      const rel = st.q.cte(
+        q`SELECT ${payload}${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}`,
+        [...payloadCols, ...carriedCols(outer.seed.carried)],
+      ).as(`b${i}`);
+      const field: RecordField = { key: keys[i], prefix, sub: st.elem === 'edge' ? 'edge' : 'vertex' };
+      return {
+        rel,
+        field,
+        cols: recordFieldColumns(field).map((name) => {
+          const source = name.slice(prefix.length + 1);
+          return q`${rel.c[source]} AS ${name}`;
+        }),
+      };
+    }
     if (typeof spec === 'string' && st.elem === 'node') {
       const vp = vertexProperties.as(`vp${i}`);
       const ranked = st.q.cte(
@@ -57,29 +86,32 @@ function tryLowerTraversalProject(st: ElementStream, proj: PStep, keys: string[]
         ['v', ...carriedCols(outer.seed.carried), 'rn'],
       );
       const r = ranked.as(`r${i}`);
-      return st.q.cte(
+      const rel = st.q.cte(
         q`SELECT ${r.c.v} AS v${carryFrag(outer.seed.carried, r)} FROM ${r} WHERE ${r.c.rn}=1`,
         ['v', ...carriedCols(outer.seed.carried)],
       ).as(`b${i}`);
+      return { rel, field: { key: keys[i], prefix, sub: 'value' as const }, cols: [q`${rel.c.v} AS ${`${prefix}_v`}`] };
     }
     if (typeof spec === 'string') {
-      return st.q.cte(
+      const rel = st.q.cte(
         q`SELECT j.value AS v${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id} JOIN json_each(json(${n.c.props})) j ON j.key=${value(spec)}`,
         ['v', ...carriedCols(outer.seed.carried)],
       ).as(`b${i}`);
+      return { rel, field: { key: keys[i], prefix, sub: 'value' as const }, cols: [q`${rel.c.v} AS ${`${prefix}_v`}`] };
     }
     const scalar = spec.token === 'label'
       ? labelNameSub(n.c.label)
       : q`COALESCE(${n.c.uid}, ${n.c.id})`;
-    return st.q.cte(
+    const rel = st.q.cte(
       q`SELECT ${scalar} AS v${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`,
       ['v', ...carriedCols(outer.seed.carried)],
     ).as(`b${i}`);
+    return { rel, field: { key: keys[i], prefix, sub: 'value' as const }, cols: [q`${rel.c.v} AS ${`${prefix}_v`}`] };
   });
-  const first = branches[0];
-  const joins = branches.slice(1).map((branch) => q` JOIN ${branch} ON ${branch.c[outer.frame.ordinal]}=${first.c[outer.frame.ordinal]}`);
-  const fields: RecordField[] = keys.map((key, i) => ({ key, prefix: `e${i}`, sub: 'value' }));
-  const cols = branches.map((branch, i) => q`${branch.c.v} AS ${`e${i}_v`}`);
+  const first = branches[0].rel;
+  const joins = branches.slice(1).map((branch) => q` JOIN ${branch.rel} ON ${branch.rel.c[outer.frame.ordinal]}=${first.c[outer.frame.ordinal]}`);
+  const fields = branches.map((branch) => branch.field);
+  const cols = branches.flatMap((branch) => branch.cols);
   const rel = st.q.cte(
     q`SELECT ${list(cols, ', ')}${carryFrag(st.carried, first)} FROM ${first}${list(joins, '')}`,
     [...fields.flatMap(recordFieldColumns), ...carriedCols(st.carried)],
