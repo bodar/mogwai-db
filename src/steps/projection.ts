@@ -14,6 +14,7 @@ import {
 } from '../render.ts';
 import { materializeRoot, materializeScalarRoot } from './materialize.ts';
 import { lowerGlobalCount, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
+import { SCALAR_ROW_STEPS } from './scalar.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
 import { compileSelectProject, compilePath } from './select.ts';
 import { compileMapScalar, compileMath, compileFormat, compileChooseOptions } from './mapscalar.ts';
@@ -55,7 +56,6 @@ const SCALAR_TX_NAMES = new Set(['concat', 'length', 'toUpper', 'toLower', 'asSt
 const isMapProj = (p: PStep | null) => p?.name === 'select' || p?.name === 'project';
 const isScopeLocalStep = (s: PStep | undefined): boolean =>
   !!s && (s.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local');
-const SCALAR_BOUNDARIES = new Set(['count', 'sum', 'min', 'max', 'mean', 'group', 'groupCount', 'select', 'project', 'path']);
 const NUMERIC_REDUCERS = new Set<NumericReducer>(['sum', 'min', 'max', 'mean']);
 
 /** A tail modifier: fold the step into the accumulator. `at` gives position so a
@@ -219,8 +219,9 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
   // step follows. The next step dispatches against ScalarStream, so composition no
   // longer depends on a terminal-tail special case (values().count().is(),
   // values().groupCount(), and future scalar consumers all cross the same seam).
-  const needsScalarBoundary = steps.slice(stop + 1).some((s) =>
-    SCALAR_BOUNDARIES.has(s.name) && !isScopeLocalStep(s));
+  const scalarRest = steps.slice(stop + 1);
+  const needsScalarBoundary = scalarRest.length > 0 && scalarRest.every((s) =>
+    SCALAR_ROW_STEPS.has(s.name) && !isScopeLocalStep(s));
   if (SCALAR_PROJ.has(steps[stop]?.name) && needsScalarBoundary) {
     const n = elemRel(st);
     const l = labels.as('l');

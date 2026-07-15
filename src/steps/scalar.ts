@@ -1,8 +1,20 @@
-import { empty, list, q, type Expression } from '../q.ts';
-import { predicateSql, rangeToOffsetLimit } from '../plan.ts';
+import { empty, q, value, type Expression } from '../q.ts';
+import { predicateSql, rangeToOffsetLimit, scalarTx } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, withoutCarried } from './context.ts';
 import { carryOf, toScalarStream, type ScalarStream } from './stream.ts';
+import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, numericSpec } from './coerce.ts';
+import { type ValueType } from '../render.ts';
+
+export const SCALAR_TRANSFORMS = new Set([
+  'concat', 'length', 'toUpper', 'toLower', 'asString', 'substring', 'replace',
+  'trim', 'lTrim', 'rTrim', 'reverse', 'asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff',
+]);
+
+export const SCALAR_ROW_STEPS = new Set([
+  ...SCALAR_TRANSFORMS, 'is', 'limit', 'skip', 'range', 'order', 'dedup',
+  'count', 'sum', 'min', 'max', 'mean', 'unfold',
+]);
 
 const isLocal = (step: PStep): boolean =>
   (step.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local');
@@ -19,6 +31,33 @@ function rowPreserving(s: ScalarStream, suffix: Expression): ScalarStream {
   return toScalarStream(carryOf(s), rel, s.as, s.result);
 }
 
+function transformScalar(s: ScalarStream, step: PStep, next?: PStep): ScalarStream {
+  const p = s.rel.as('p');
+  let expr: Expression = p.c.v;
+  let as: ValueType | undefined;
+  if (step.name === 'asNumber') {
+    const spec = numericSpec(step.args[0]);
+    if (spec) { expr = asNumberSql(spec, expr); as = spec.as; }
+    else if (s.as === 'date') as = 'long';
+    else if (next?.name === 'asDate') { expr = q`CAST(${expr} AS INTEGER)`; as = 'long'; }
+    else throw new Error('bare asNumber() over a non-date runtime value not yet supported');
+  } else if (step.name === 'asDate') {
+    expr = asDateSql(expr); as = 'date';
+  } else if (step.name === 'dateAdd') {
+    expr = q`(${expr} + ${value(Number(step.args[1]) * dtFactor(step.args[0]))})`; as = 'date';
+  } else if (step.name === 'dateDiff') {
+    expr = q`(${expr} - ${value(dateDiffOtherMs(step.args[0], {}))})`; as = 'long';
+  } else {
+    expr = scalarTx(step.name, step.args ?? [], expr)
+      ?? (() => { throw new Error(`scalar transform ${step.name}() not supported`); })();
+  }
+  const rel = s.q.cte(
+    q`SELECT ${expr} AS v${carryFrag(s.carried, p)} FROM ${p}`,
+    ['v', ...carriedCols(s.carried)],
+  );
+  return toScalarStream(carryOf(s), rel, as, 'value');
+}
+
 /** Lower the row operators common to every scalar payload one step at a time.
  * Sequential CTEs make order significant (limit().is() is not commuted), while
  * reducer result/type metadata and physically carried columns remain explicit. */
@@ -32,6 +71,10 @@ export function lowerScalarRows(
   for (; i < steps.length; i++) {
     const step = steps[i];
     if (isLocal(step)) break;
+    if (SCALAR_TRANSFORMS.has(step.name)) {
+      stream = transformScalar(stream, step, steps[i + 1]);
+      continue;
+    }
     if (step.name === 'is') {
       const p = stream.rel.as('p');
       stream = rowPreserving(stream, q` WHERE ${predicateSql(p.c.v, step.args[0])}`);
