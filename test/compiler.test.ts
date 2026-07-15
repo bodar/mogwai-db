@@ -6,6 +6,7 @@ import { executeQuery } from '../src/execute.ts';
 import { MODERN_SEED } from './conformance/seed-modern.ts';
 import { Query } from '../src/q.ts';
 import { assertStreamColumns, toScalarStream } from '../src/steps/stream.ts';
+import { popChildScope, pushChildScope } from '../src/steps/child.ts';
 import { readdirSync, readFileSync } from 'node:fs';
 
 // ---------- L2: SQL snapshots (canonical string -> SQL + binds + shape) ----------
@@ -24,6 +25,25 @@ describe('compiler SQL snapshots', () => {
     expect(() => toScalarStream(carry, q.cte({} as any, ['value']))).toThrow(
       'scalar stream column mismatch: expected [v], got [value]',
     );
+  });
+
+  test('child scope retains a parent domain and pushes/pops one physical ordinal', () => {
+    const q = new Query();
+    const parent = {
+      kind: 'elements' as const, elem: 'node' as const, q, params: {},
+      rel: q.cte({} as any, ['id']), carried: { aliases: new Map(), origins: [] },
+    };
+    const { frame, scope, seed } = pushChildScope(parent);
+    expect(frame.domain).toBe(seed.rel);
+    expect(frame.ordinal).toBe('o0');
+    expect(scope.frames).toEqual([frame]);
+    expect(seed.carried.origins).toEqual(['o0']);
+    expect(assertStreamColumns(seed)).toBe(seed);
+
+    const popped = popChildScope(seed, frame);
+    expect(popped.carried.origins).toEqual([]);
+    expect(popped.rel.cols).toEqual(['id']);
+    expect(assertStreamColumns(popped)).toBe(popped);
   });
 
   test('read steps materialize through one root boundary', () => {
@@ -1612,6 +1632,16 @@ describe('compiler execution semantics', () => {
     // per-input: each of vadas/josh has 1 in-knows → outV = marko, twice (global limit(2) would give 2 total anyway; the point is per-input scoping)
     expect(run(store, 'g.V().local(__.inE("knows").limit(2)).outV().values("name")').map((r) => r.v))
       .toEqual(['marko', 'marko']);
+  });
+
+  test('child-scoped local preserves outer aliases and path columns', () => {
+    const store = seededStore();
+    const selected = run(store, 'g.V(1).as("a").local(__.out().limit(1)).select("a")');
+    expect(selected.map((r) => r.id)).toEqual([1]);
+
+    const path = run(store, 'g.V(1).local(__.out().limit(1)).path()');
+    expect(path).toHaveLength(1);
+    expect([path[0].x0_id, path[0].x1_id]).toEqual([1, 2]);
   });
 
   test('otherV() after local(bothE.limit) picks the end away from the input vertex', () => {
