@@ -2,14 +2,13 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–5 complete, Stage 6 active
-**Baseline:** full suite 360/360, L1 2298/2298, L3 876/2041; 237 compiler tests
+**Baseline:** full suite 362/362, L1 2298/2298, L3 876/2041; 238 compiler tests
 
 ## Restart handoff — read this first after a context reset
 
-**Current committed checkpoint:** branch `refactor/unified-relational-lowering`; every
-slice through item 7 below is committed, ending with `lower scalar group keys through
-child streams`. The working tree was clean before this handoff refresh. Work is local-only:
-do not push or merge to trunk. Run the full `bun test` suite before every local commit.
+**Current checkpoint:** branch `refactor/unified-relational-lowering`; every slice through
+item 9 below is represented in this checkpoint. Work is local-only: do not push or merge
+to trunk. Run the full `bun test` suite before every local commit.
 
 **Recent completed slices:**
 
@@ -45,26 +44,29 @@ do not push or merge to trunk. Run the full `bun test` suite before every local 
    the same outer domain with `all` cardinality: every productive child row becomes a
    scalar-list member, missing children contribute nothing, productive NULL survives,
    and duplicate parents retain duplicate child rows. A generic key and value share one
-   origin. Group-scoped reducers and fold/tail stay on their existing barrier paths. L3
-   remains 876.
+   origin. Fold/tail stay on their existing barrier paths. L3 remains 876.
+9. Inline group-scoped `count`/`sum`/`min`/`max`/`mean` now expose the raw productive
+   generic child rows and reduce them once at the final group-key boundary. This removes
+   the semantically wrong temptation to reduce per parent then combine those results.
+   Count LEFT JOINs the shared parent domain so empty child domains contribute zero;
+   numeric/comparable reducers use productive inner domains, and equal parent ids remain
+   distinct traversers. Stashed/property groups retain the correlated compatibility path.
+   L3 remains 876.
 
-**Current Stage 6 slice:** traversal-valued `project().by()` is now the first generic
-by-consumer. An outer origin identifies each parent; every scalar child modulator lowers
-with `first` cardinality; productive fields inner-join by origin. Missing child rows drop
-the record, productive NULL survives, and duplicate parents remain distinct. Property
-keys, `T.id`/`T.label`, and complete bare vertex/edge fields can mix with traversal fields
-in the same relation. Element fields retain their internal rowid for downstream movement.
-L3 is 874.
+**Current Stage 6 state:** scalar traversal modulators for `project`, aliased `select`,
+and inline element `group` all use the generic child-domain compiler. Group keys consume
+`first`, non-reducing values consume `all`, and group reducers consume raw rows at the
+final key barrier. These consumers share multiset-safe origin joins rather than private
+correlated traversal parsers. L3 is 876.
 
-**Immediate next slice:** give group-scoped scalar reducers an explicit relational
-policy over the shared child-row source, without reducing independently per parent.
-Scalar traversal select and inline scalar traversal group keys/non-reducing values are
-complete; list/element-valued select modulators remain a later shaped-child extension.
-Do not add more recognized syntax to `compileNestedScalar`: treat its current correlated
-SQL cases as optional fast paths and add generic child-stream fallbacks with explicit
-first/productive cardinality. Other consumers to inventory afterward are sack, math,
-format, and option-choose. Preserve correlated count/EXISTS fast paths until Stage 8
-proves whether they should remain. This work is the prerequisite for ProductiveByStrategy.
+**Immediate next slice:** widen `by(traversal)` from a scalar-only consumer into a shaped
+child contract. Migrate inline group `…fold()` values and list/element-valued select or
+project modulators through typed child streams, then delete the corresponding
+`compileNestedList` cases instead of adding another compatibility branch. Keep stashed
+side-effect/property groups on their compatibility path until they can carry a live
+parent stream. Inventory sack, math, format, and option-choose after that. Preserve
+correlated count/EXISTS only as measured fast paths until Stage 8. This is the remaining
+prerequisite for making ProductiveByStrategy a consumer policy rather than a global gate.
 
 **Still pending in Stage 6:** scalar/list `optional`, traversal-valued `by`, an explicit
 ProductiveByStrategy productivity policy, and generic child-existence fallback for

@@ -10,9 +10,9 @@ import { carryFrag, carriedCols, elemRel, withoutCarried, type Carry, type Eleme
 import { carryOf, groupColumns, toGroupStream, toMapStream, toPropertyStream, toScalarStream, type GroupStream, type MapOf, type PropertyStream, type ScalarStream } from './stream.ts';
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
 import { materializeGroupRoot, materializePropertyRoot, materializeRoot } from './materialize.ts';
-import { lowerGlobalCount } from './barrier.ts';
+import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { dispatchNext } from './index.ts';
-import { isScalarChild, pushChildScope, tryCompileScalarValueChild } from './child.ts';
+import { isScalarChild, pushChildScope, tryCompileRowsBeforeReducer, tryCompileScalarValueChild } from './child.ts';
 
 /** Movement heads whose nested-by() aggregate is a correlated neighbourhood
  *  reduction (handled by compileNestedScalar), and the scalar reducers that terminate one. */
@@ -33,6 +33,10 @@ export interface GroupSource {
   /** Productive rows from a non-reducing scalar value child. Multiple rows per
    * source traverser deliberately remain multiple group-list members. */
   valExpr?: Expression;
+  /** A terminal reducer to apply across ALL child rows sharing the final group key,
+   * never independently per source parent. */
+  valReducer?: 'count' | NumericReducer;
+  valMarker?: Expression;
   /** Present only for an inline element group whose source stream is still live.
    * Stashed cap()/property sources omit it and retain their existing fast paths. */
   parent?: ElementStream;
@@ -99,8 +103,8 @@ const GROUP_VALUE_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
 
 /** Lower generic scalar key/value children and join them back to the original
  * element through ONE shared parent origin. Keys consume `first`; non-reducing
- * values consume `all`. Group-scoped reducers/fold/tail stay on their established
- * barrier paths below — reducing per parent here would change their semantics. */
+ * values consume `all`; reducers expose their raw productive rows so the final
+ * GROUP BY owns the barrier. Nothing in this phase reduces independently per parent. */
 function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource | null {
   const parent = src.parent;
   if (!parent) return null;
@@ -114,7 +118,10 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   const genericVal = valSteps.length > 0
     && !GROUP_VALUE_REDUCERS.has(valSteps.at(-1)!.name)
     && isScalarChild(valArg.nested, parent.params);
-  if (!genericKey && !genericVal) return null;
+  const genericReducer = valSteps.length > 0
+    && GROUP_VALUE_REDUCERS.has(valSteps.at(-1)!.name)
+    && isScalarChild(valArg.nested, parent.params);
+  if (!genericKey && !genericVal && !genericReducer) return null;
 
   const outer = pushChildScope(parent);
   const p = outer.seed.rel.as('gp');
@@ -122,6 +129,8 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   const joins: Expression[] = [];
   let keyExpr: Expression | undefined;
   let valExpr: Expression | undefined;
+  let valReducer: GroupSource['valReducer'];
+  let valMarker: Expression | undefined;
   if (genericKey) {
     const child = tryCompileScalarValueChild(outer.seed, keyArg.nested, 'first', outer.scope);
     if (!child) throw new Error('scalar group key failed after successful shape preflight');
@@ -136,12 +145,24 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     joins.push(q` JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
     valExpr = c.c.v;
   }
+  if (genericReducer) {
+    const rows = tryCompileRowsBeforeReducer(outer.seed, valArg.nested, outer.scope);
+    if (!rows) throw new Error('group reducer rows failed after successful shape preflight');
+    const c = rows.stream.rel.as('gr');
+    const join = rows.reducer === 'count' ? ' LEFT JOIN ' : ' JOIN ';
+    joins.push(q`${join}${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
+    valExpr = c.c.v;
+    valMarker = c.c[rows.stream.encounter!];
+    valReducer = rows.reducer;
+  }
   return {
     from: q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}${list(joins, '')}`,
     ctx: elemCtx(n, parent.elem),
     elem: parent.elem === 'edge' ? 'edge' : 'vertex',
     keyExpr,
     valExpr,
+    valReducer,
+    valMarker,
   };
 }
 
@@ -160,6 +181,12 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
   const valArgs = bys[1];
   if (isCount) { val = { kind: 'count' }; valNode = q`COUNT(*) AS gv`; }
   else if (!valArgs || valArgs.length === 0) { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx); }
+  else if (src.valReducer === 'count') { val = { kind: 'count' }; valNode = q`COUNT(${src.valMarker!}) AS gv`; }
+  else if (src.valReducer) {
+    const reduced = numericReducerAggregate(src.valExpr!, src.valReducer);
+    val = { kind: 'sum' };
+    valNode = q`${reduced.value} AS gv, ${reduced.type} AS gvt`;
+  }
   else if (src.valExpr) { val = { kind: 'scalarList' }; valNode = q`json_group_array(${src.valExpr}) AS gv`; }
   else {
     const a = valArgs[0];

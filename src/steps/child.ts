@@ -173,12 +173,12 @@ function compileScalarChildRows(
   use: ChildUse = 'first',
   scope: CompileScope = ROOT_SCOPE,
   retainChildScope = false,
-  beforeFold = false,
+  stripTerminal?: string,
 ): { stream: ScalarStream; frame: ChildFrame } | null {
   if (!nested) return null;
   const fullBody = childSteps(nested, parent.params);
-  if (beforeFold && fullBody.at(-1)?.name !== 'fold') return null;
-  const body = beforeFold ? fullBody.slice(0, -1) : fullBody;
+  if (stripTerminal && fullBody.at(-1)?.name !== stripTerminal) return null;
+  const body = stripTerminal ? fullBody.slice(0, -1) : fullBody;
   const parts = scalarRowParts(body);
   if (!parts) return null;
   const { prefix, projection: terminal, suffix } = parts;
@@ -296,7 +296,7 @@ export function tryCompileListChild(
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
 ): ListStream | null {
-  const scoped = compileScalarChildRows(parent, nested, 'all', scope, true, true);
+  const scoped = compileScalarChildRows(parent, nested, 'all', scope, true, 'fold');
   if (scoped) {
     const folded = lowerScopedScalarFold(scoped.stream, scoped.frame.domain, scoped.frame.ordinal);
     const l = folded.rel.as('l');
@@ -307,7 +307,7 @@ export function tryCompileListChild(
     return toListStream(carryOf(parent), rel, folded.of);
   }
 
-  const element = compileElementChildRows(parent, nested, scope, true);
+  const element = compileElementChildRows(parent, nested, scope, 'fold');
   if (!element) return null;
   const folded = lowerScopedElementFold(element.stream, element.frame.domain, element.frame.ordinal);
   const l = folded.rel.as('l');
@@ -327,13 +327,13 @@ function compileElementChildRows(
   parent: ElementStream,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
-  beforeFold = false,
+  stripTerminal?: string,
 ): { stream: ElementStream; frame: ChildFrame } | null {
   if (!nested || parent.carried.sack || parent.carried.fromV) return null;
   const fullBody = childSteps(nested, parent.params);
-  if (beforeFold && fullBody.at(-1)?.name !== 'fold') return null;
-  const body = beforeFold ? fullBody.slice(0, -1) : fullBody;
-  const parts = body.length ? elementRowParts(body) : beforeFold ? { prefix: [], suffix: [] } : null;
+  if (stripTerminal && fullBody.at(-1)?.name !== stripTerminal) return null;
+  const body = stripTerminal ? fullBody.slice(0, -1) : fullBody;
+  const parts = body.length ? elementRowParts(body) : stripTerminal ? { prefix: [], suffix: [] } : null;
   if (!parts) return null;
   const pushed = pushChildScope(parent, scope);
   const { st: prefixed, stop } = foldBody(parts.prefix, pushed.seed, 0);
@@ -360,6 +360,39 @@ function compileElementChildRows(
     end = advance(end, q`SELECT ${r.c.id} AS id${carryFrag(end.carried, r)} FROM ${r} WHERE ${r.c.rn} > ${slice.offset}${upper}`);
   }
   return { stream: end, frame: pushed.frame };
+}
+
+/** Expose the productive child rows immediately BEFORE a terminal group-scoped
+ * reducer. Scalar bodies retain their value; element-only count bodies become one
+ * marker row per element. The child origin remains live so the group consumer can
+ * join these rows to its shared parent domain before reducing by group key. */
+export function tryCompileRowsBeforeReducer(
+  parent: ElementStream,
+  nested: any,
+  scope: CompileScope = ROOT_SCOPE,
+): { stream: ScalarStream; frame: ChildFrame; reducer: ScalarReducer } | null {
+  if (!nested) return null;
+  const body = childSteps(nested, parent.params);
+  const reducer = body.at(-1)?.name as ScalarReducer | undefined;
+  if (!reducer || !CHILD_SCALAR_REDUCERS.has(reducer)) return null;
+
+  const scalar = compileScalarChildRows(parent, nested, 'all', scope, true, reducer);
+  if (scalar) return { ...scalar, reducer };
+  if (reducer !== 'count') return null;
+
+  const element = compileElementChildRows(parent, nested, scope, reducer);
+  if (!element) return null;
+  const e = element.stream.rel.as('er');
+  const encounter = 'encounter';
+  const rel = parent.q.cte(
+    q`SELECT 1 AS v, ROW_NUMBER() OVER (PARTITION BY ${e.c[element.frame.ordinal]} ORDER BY ${e.c.id}) AS ${encounter}${carryFrag(element.stream.carried, e)} FROM ${e}`,
+    ['v', encounter, ...carriedCols(element.stream.carried)],
+  );
+  return {
+    stream: toScalarStream(carryOf(element.stream), rel, undefined, 'value', encounter),
+    frame: element.frame,
+    reducer,
+  };
 }
 
 export function tryCompileElementChild(

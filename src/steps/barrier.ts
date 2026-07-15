@@ -64,6 +64,21 @@ export function lowerScopedElementFold(
 export type NumericReducer = 'sum' | 'min' | 'max' | 'mean';
 export type ScalarReducer = 'count' | NumericReducer;
 
+/** One numeric/comparable reducer policy shared by root, child-scoped, and group-
+ * scoped barriers. Callers decide the domain and productivity join; this helper owns
+ * eligible SQLite storage classes and the dynamic GraphBinary result type. */
+export function numericReducerAggregate(
+  value: Expression,
+  reducer: NumericReducer,
+): { value: Expression; type: Expression } {
+  const eligible = reducer === 'min' || reducer === 'max'
+    ? q`CASE WHEN typeof(${value}) in ('integer', 'real', 'text') THEN ${value} END`
+    : q`CASE WHEN typeof(${value}) in ('integer', 'real') THEN ${value} END`;
+  const fn = reducer === 'sum' ? 'SUM' : reducer === 'mean' ? 'AVG' : reducer === 'min' ? 'MIN' : 'MAX';
+  const reduced = q`${fn}(${eligible})`;
+  return { value: reduced, type: reducer === 'mean' ? q`'real'` : q`typeof(${reduced})` };
+}
+
 /** Scope-aware scalar barrier. The parent domain is the aggregate's left side, so
  * every origin produces one result even when the child row stream is empty. The
  * explicit encounter column is the non-null productivity marker: COUNT(v) would
@@ -86,11 +101,8 @@ export function lowerScopedScalarReducer(
     result = 'count';
     as = 'long';
   } else {
-    const eligible = reducer === 'min' || reducer === 'max'
-      ? q`CASE WHEN typeof(${s.c.v}) in ('integer', 'real', 'text') THEN ${s.c.v} END`
-      : q`CASE WHEN typeof(${s.c.v}) in ('integer', 'real') THEN ${s.c.v} END`;
-    const fn = reducer === 'sum' ? 'SUM' : reducer === 'mean' ? 'AVG' : reducer === 'min' ? 'MIN' : 'MAX';
-    aggregate = q`${fn}(${eligible}) AS v, ${reducer === 'mean' ? q`'real'` : q`typeof(${fn}(${eligible}))`} AS vt`;
+    const reduced = numericReducerAggregate(s.c.v, reducer);
+    aggregate = q`${reduced.value} AS v, ${reduced.type} AS vt`;
     result = 'number';
     as = undefined;
   }

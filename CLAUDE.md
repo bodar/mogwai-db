@@ -84,8 +84,11 @@ origin join. Inline element `group()`/`groupCount()` scalar traversal keys now d
 same: compile child-first, join the productive key back to its source element by outer
 origin, then enter the existing GroupStream barrier. Non-reducing scalar group value
 children share that origin and consume `all` productive rows into the group list (not
-`first`); group-scoped `count`/`sum`/`min`/`max`/`mean`, fold/tail, and stashed `cap()`
-groups retain their existing barrier/correlated paths. Consumers call
+`first`). Inline group-scoped `count`/`sum`/`min`/`max`/`mean` expose raw child rows and
+reduce once at the final group-key barrier: count LEFT JOINs the parent domain for zero,
+while productive numeric/comparable reducers inner-join. Never reduce these per parent
+and combine afterward. Fold/tail plus stashed `cap()` and property groups retain their
+existing compatibility paths. Consumers call
 `tryCompileScalarValueChild` and never distinguish row projections from total count;
 do not grow `compileNestedScalar` to implement new by forms.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
