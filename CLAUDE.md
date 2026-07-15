@@ -56,6 +56,10 @@ by child origins (never accidental SQLite CTE order). Child chains pass through 
 it LEFT JOINs the preserved domain, groups by origin, counts the non-null encounter
 marker (not `v`), and retains dynamic numeric `v,vt` through map/flatMap and homogeneous
 scalar branch merges. Origin-scoped `fold` remains the next shaped barrier.
+Scalar `local(child)` now uses this same compiler with `all` cardinality (contrasted
+with `map`'s `first`), so movement+projection+row-operator/reducer bodies no longer
+enter local.ts's private element-window vocabulary. Element-valued local windows remain
+there until the generic child compiler grows element barriers.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
   (`stripTerminal`, `foldRepeatClusters`, `foldByModulators`) run once up front so
   the dispatch sees a canonical, peek-free chain (no index arithmetic anywhere).
