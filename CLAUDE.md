@@ -146,6 +146,13 @@ likewise yield streams. `MapStream` is internal and cannot terminate. `materiali
 is the only read caller of `readCompiled`; the root-only bulk-repeat optimization may call
 it directly because it replaces the whole pipeline. Do not add a terminal call in a leaf.
 
+**Stage 8 scalar fusion (2026-07-15).** `lowerScalarRows` fuses each maximal adjacent
+transform/`is` segment into one CTE. A predicate captures the scalar expression visible
+at its exact position, so `tx().is().tx()` remains left-to-right without intermediate
+relations. At root scope, `order()` plus one following `limit`/`skip`/`range` also shares
+one CTE. Do not fuse across child partitions, dedup, reducers, or other cardinality/order
+boundaries; those physical nodes encode semantics rather than compiler scaffolding.
+
 ## What this is
 
 A TinkerPop 4 Gremlin server compiled onto SQLite, targeting Cloudflare

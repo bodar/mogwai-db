@@ -148,6 +148,14 @@ local commit/checkpoint. Run full `bun test` before every commit.
     read exit. The root-only bulk-repeat count specialization deliberately materializes
     directly because it replaces the entire lowering pipeline. TypeScript, compiler
     246/246, L3 933/2041, full 370/370, and corpus 2298/2298 are green.
+23. Stage 8 began with scalar relational fusion. A maximal adjacent transform/predicate
+    segment now emits one CTE while predicates retain the expression visible at their
+    exact chain position; root `order().limit/skip/range()` likewise emits one ordered,
+    sliced CTE. Child-partitioned order/slice, dedup, reducers, and every cardinality
+    boundary remain explicit nodes. Representative SQL shrank from five CTEs to three
+    for `values().toLower().is().toUpper()`, and four to three for
+    `values().order().range()`. TypeScript, compiler 246/246, L3 933/2041, full
+    370/370, and corpus 2298/2298 are green.
 
 **Current Stage 6 state:** scalar traversal modulators for `project`, aliased `select`,
 and inline element `group` all use the generic child-domain compiler. Group keys consume
@@ -785,7 +793,9 @@ Ratchet after each consumer, not only at the end.
 
 Only after semantic migration is green:
 
-- fuse adjacent scalar projection/filter/order/limit nodes where it reduces SQL;
+- ~~fuse adjacent scalar transform/filter nodes and root order+slice where it reduces SQL;~~
+- extend fusion to other safe projection/filter/order/limit boundaries where measurement
+  shows a planner or prepare-time win;
 - retain the single-hop optional fast path if equivalence tests justify it;
 - preserve index-only correlated EXISTS/count fast paths;
 - gate origin and encounter-order columns through a static requirement analysis so
