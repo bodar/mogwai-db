@@ -1446,6 +1446,50 @@ const run = (store: GraphStore, q: string) => {
 };
 
 describe('compiler execution semantics', () => {
+  describe('unified lowering characterization', () => {
+    test('duplicate parent traversers remain distinct through a child reduction', () => {
+      const store = seededStore();
+      // The two identity arms are two traversers with the same vertex id. A future
+      // child-domain relation must key them by ordinal, never collapse them by id.
+      expect(run(store, 'g.V(1).union(__.identity(),__.identity()).local(__.outE().count())')
+        .map((r) => r.v)).toEqual([3, 3]);
+    });
+
+    test('empty child count is total per parent, including zero', () => {
+      const store = seededStore();
+      expect(run(store, 'g.V().local(__.outE().count())').map((r) => r.v).sort((a, b) => a - b))
+        .toEqual([0, 0, 0, 1, 2, 3]);
+    });
+
+    test('a SQL NULL traverser is distinct from no traverser', () => {
+      const store = seededStore();
+      expect(run(store, 'g.inject(null).count()').map((r) => r.v)).toEqual([1]);
+      expect(run(store, 'g.inject().count()').map((r) => r.v)).toEqual([0]);
+    });
+
+    test('nested child ordinals are unique and outer correlation survives', () => {
+      const nested = read('g.V().optional(__.out().optional(__.out())).path()');
+      expect(nested.sql).toContain('AS o0');
+      expect(nested.sql).toContain('AS o1');
+
+      const store = seededStore();
+      expect(run(store, 'g.V(1).as("a").optional(__.out("knows")).select("a")')
+        .map((r) => r.id)).toEqual([1, 1]);
+      expect(run(store, 'g.V(1).optional(__.out("knows")).path()').length).toBe(2);
+    });
+
+    test('the current provider encounter key makes local limit deterministic', () => {
+      const store = seededStore();
+      expect(run(store, 'g.V(1).local(__.outE().limit(1)).inV().values("name")')
+        .map((r) => r.v)).toEqual(['vadas']); // edge id 7 precedes edge ids 8 and 9
+    });
+
+    test('future child barriers remain explicit deferrals until generic lowering lands', () => {
+      expect(() => compile('g.V().local(__.outE().fold())', {})).toThrow('not yet supported');
+      expect(() => compile('g.V().local(__.out().order().by("name").limit(1))', {})).toThrow('not yet supported');
+    });
+  });
+
   test('has(label, key, value) 3-arg folds in a label filter', () => {
     const store = seededStore();
     // the standard cucumber verification idiom
