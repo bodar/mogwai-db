@@ -138,8 +138,9 @@ fallback, never semantic rejection. Sack and every element-backed group path are
   `compileInject` from `inject.ts`.
 
 **Root materialization (2026-07-15).** Read leaves never frame themselves. `lowerSteps`
-detects end-of-chain and calls the exhaustive `materializeStream` switch in
-`steps/materialize.ts` for scalar/variant/list/property/record/group/path plus terminal
+returns the final `Stream` and has no `Compiled` branch. `compileRead` (and the inject
+source) then calls `materializeFinal`, whose exhaustive `materializeStream` switch in
+`steps/materialize.ts` handles scalar/variant/list/property/record/group/path plus terminal
 `ResultStream`. The older element-tail accumulator may produce a `ResultStream` carrying
 its final SQL + GraphBinary shape, but never `Compiled`; terminal set/meta/select results
 likewise yield streams. `MapStream` is internal and cannot terminate. `materializeRoot`

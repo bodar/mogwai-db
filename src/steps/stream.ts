@@ -15,7 +15,7 @@
 
 import { type Expression, type Query, type Relation } from '../q.ts';
 import { type Elem } from '../plan.ts';
-import { type Compiled, type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type PathPos, type Shape, type ValueType } from '../render.ts';
+import { type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type PathPos, type Shape, type ValueType } from '../render.ts';
 import { carriedCols, type Carry, type ElementStream } from './context.ts';
 
 /** What a list stream holds — i.e. the shape `unfold` produces from it. `elem` → bare
@@ -140,13 +140,10 @@ export interface LoweringContinuation {
   readonly at: number;
 }
 
-export type LoweringResult = Compiled | LoweringContinuation;
+export type LoweringResult = LoweringContinuation;
 
 export const continueLowering = (stream: Stream, at: number): LoweringContinuation =>
   ({ kind: 'continue-lowering', stream, at });
-
-export const isLoweringContinuation = (result: LoweringResult): result is LoweringContinuation =>
-  result.kind === 'continue-lowering';
 
 const elemColumns = (prefix: string, elem: ElemShape): string[] => elem === 'edge'
   ? [`${prefix}_id`, `${prefix}_label`, `${prefix}_src`, `${prefix}_tgt`, `${prefix}_props`]

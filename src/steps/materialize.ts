@@ -146,3 +146,11 @@ export function materializeStream(stream: Exclude<Stream, import('./context.ts')
     case 'map': throw new Error('a map entry stream cannot be materialized directly');
   }
 }
+
+/** Cross the read boundary after lowering has finished. Keeping the ElementStream
+ * rejection here makes `lowerSteps` reusable without letting a caller accidentally
+ * frame an element relation before its public element projection is built. */
+export function materializeFinal(stream: Stream): Compiled {
+  if (stream.kind === 'elements') throw new Error('element lowering ended before root projection');
+  return materializeStream(stream);
+}

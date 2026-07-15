@@ -156,6 +156,13 @@ local commit/checkpoint. Run full `bun test` before every commit.
     for `values().toLower().is().toUpper()`, and four to three for
     `values().order().range()`. TypeScript, compiler 246/246, L3 933/2041, full
     370/370, and corpus 2298/2298 are green.
+24. The lowering/materialization boundary is now literal in the types. `lowerSteps`
+    returns a final `Stream`, `LoweringResult` is only a continuation token, and neither
+    imports nor returns `Compiled`. `compileRead` and the inject source explicitly call
+    `materializeFinal` after semantic lowering; bulk-repeat remains the root-plan bypass.
+    This makes the iterative core directly reusable by future child consumers instead of
+    exposing a root-framed result. TypeScript, compiler 246/246, L3 933/2041, full
+    370/370, and corpus 2298/2298 are green.
 
 **Current Stage 6 state:** scalar traversal modulators for `project`, aliased `select`,
 and inline element `group` all use the generic child-domain compiler. Group keys consume
@@ -897,7 +904,7 @@ builder and bulking engine, but make its input/output conform to the same Stream
 
 The refactor is complete when all of the following are true:
 
-- [x] `compileRead` is `seed → lowerSteps →` one terminal `materializeStream` boundary.
+- [x] `compileRead` is literally `seed → lowerSteps(Stream) → materializeFinal`.
 - [x] Every ordinary read leaf yields `Stream`, never `Compiled`.
 - [x] Only `materializeRoot` calls `readCompiled` for reads.
 - [ ] Root and child traversals share `lowerSteps`.

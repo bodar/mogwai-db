@@ -17,11 +17,11 @@ import { compileTail, compileFromScalar } from './projection.ts';
 import { compileFromGroup, compileFromProperty } from './group.ts';
 import { compileFromList, compileFromMap } from './list.ts';
 import { compileFromRecord } from './select.ts';
-import { assertStreamColumns, continueLowering, isLoweringContinuation, type LoweringResult, type Stream } from './stream.ts';
+import { assertStreamColumns, continueLowering, type LoweringResult, type Stream } from './stream.ts';
 import { type Compiled } from '../render.ts';
 import { tryBulkRepeatCount } from './bulk.ts';
 import { lowerScalarRows } from './scalar.ts';
-import { materializeStream } from './materialize.ts';
+import { materializeFinal } from './materialize.ts';
 import { lowerGlobalCount } from './barrier.ts';
 
 export { compileTail };
@@ -230,7 +230,6 @@ export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, qu
  */
 function lowerStream(s: Stream, steps: PStep[], at: number): LoweringResult {
   assertStreamColumns(s);
-  if (at >= steps.length && s.kind !== 'elements') return materializeStream(s);
   if (s.kind === 'result') throw new Error('a terminal result stream cannot have following steps');
   if (s.kind === 'elements') {
     const lowered = lowerElementSteps(steps, s, at);
@@ -238,7 +237,7 @@ function lowerStream(s: Stream, steps: PStep[], at: number): LoweringResult {
   }
   if (s.kind === 'scalar') {
     const { stream, stop } = lowerScalarRows(s, steps, at);
-    if (stop === steps.length) return materializeStream(stream);
+    if (stop === steps.length) return continueLowering(stream, stop);
     return compileFromScalar(stream, steps, stop);
   }
   if (s.kind === 'variant') {
@@ -257,15 +256,15 @@ function lowerStream(s: Stream, steps: PStep[], at: number): LoweringResult {
   return compileFromList(s, steps, at);
 }
 
-/** Iterative stream orchestrator. Shape compilers yield a continuation instead of
- * recursively re-entering dispatch, so one loop owns every stream transition and
- * only a terminal branch may return Compiled. */
-export function lowerSteps(initial: Stream, steps: PStep[], from: number): Compiled {
+/** Iterative semantic orchestrator. It returns the final Stream and knows nothing
+ * about Compiled/GraphBinary framing; root callers cross that boundary explicitly. */
+export function lowerSteps(initial: Stream, steps: PStep[], from: number): Stream {
   let stream = initial;
   let at = from;
   for (;;) {
+    assertStreamColumns(stream);
+    if (at >= steps.length && stream.kind !== 'elements') return stream;
     const result = lowerStream(stream, steps, at);
-    if (!isLoweringContinuation(result)) return result;
     stream = result.stream;
     at = result.at;
   }
@@ -282,5 +281,5 @@ export function compileRead(steps: PStep[], params: Record<string, any> = {}, sa
   if (bulked) return bulked;
 
   const { st, stop } = buildPrefix(steps, params, new Query(), sackInit);
-  return lowerSteps(st, steps, stop);
+  return materializeFinal(lowerSteps(st, steps, stop));
 }

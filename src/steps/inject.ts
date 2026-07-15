@@ -5,6 +5,7 @@ import { type PStep } from '../strategies.ts';
 import { type Carry } from './context.ts';
 import { toListStream, toScalarStream } from './stream.ts';
 import { lowerSteps } from './index.ts';
+import { materializeFinal } from './materialize.ts';
 import { type Compiled, type ValueType } from '../render.ts';
 import {
   numericSpec, asBoolConst, asNumberConst, asNumberBare, asDateConst,
@@ -80,7 +81,7 @@ export function compileInject(steps: PStep[]): Compiled {
   if (steps[0].args.length >= 1 && steps[0].args.every((a: any) => Array.isArray(a))) {
     const rows = steps[0].args.map((a: any[]) => q`(${jsonbArrayOf(a)})`);
     const rel = Q.cte(q`VALUES ${list(rows, ', ')}`, ['list']);
-    return lowerSteps(toListStream(carry, rel, { kind: 'scalar' }), steps, 1);
+    return materializeFinal(lowerSteps(toListStream(carry, rel, { kind: 'scalar' }), steps, 1));
   }
 
   // Mixed list/scalar inject remains the historical flattened representation until
@@ -90,5 +91,5 @@ export function compileInject(steps: PStep[]): Compiled {
   const rel = vals.length
     ? Q.cte(q`VALUES ${list(vals.map((v) => q`(${value(v)})`), ', ')}`, ['v'])
     : Q.cte(q`SELECT NULL AS v WHERE 0`, ['v']);
-  return lowerSteps(toScalarStream(carry, rel, folded.as), steps, folded.at);
+  return materializeFinal(lowerSteps(toScalarStream(carry, rel, folded.as), steps, folded.at));
 }
