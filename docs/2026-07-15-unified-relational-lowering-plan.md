@@ -1,8 +1,14 @@
 # Unified relational traversal lowering — root and child traversals through one compiler
 
 **Date:** 2026-07-15  
-**Status:** proposed; implementation plan  
+**Status:** in progress; Stages 0–2 complete, Stage 3 active
 **Baseline:** L1 2298/2298, L3 833/2041, 332 `bun test` tests at the last compiler commit
+
+**Implementation checkpoint (2026-07-15):** physical stream schemas and the single
+root materialization boundary are landed. Global count and numeric reducers now lower
+to ScalarStreams (numeric payload `v,vt`), scalar row operators lower left-to-right,
+and shared child-domain scope construction backs branches plus `local`. L3 has ratcheted
+to 841/2041; 833 remains the non-regression floor recorded at the start of the migration.
 
 ## Decision
 
