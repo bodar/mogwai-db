@@ -324,7 +324,20 @@ export const valueMapProps = (rel: Relation, elem: Elem): Expression =>
  *   prop ctx:  key() | value() | element()[.values(k)|.label()|.id()]
  * Anything past this throws clearly (never silently mis-executes).
  */
-export function compileNestedScalar(inner: Step[], ctx: ScalarCtx): Scalar {
+class InlineScalarMiss extends Error {}
+const inlineScalarMiss = (): never => { throw new InlineScalarMiss(); };
+
+/** Optional correlated-scalar optimization. Unsupported shapes return null so the
+ * caller can use generic child lowering; this helper never defines language support. */
+export function tryInlineScalar(inner: Step[], ctx: ScalarCtx): Scalar | null {
+  try { return compileInlineScalar(inner, ctx); }
+  catch (error) {
+    if (error instanceof InlineScalarMiss) return null;
+    throw error;
+  }
+}
+
+function compileInlineScalar(inner: Step[], ctx: ScalarCtx): Scalar {
   let steps = inner;
   // A pointer to the "current NODE" (rowid) for terminal value/label/id reads. Once
   // here the current element is always a node (edge values/label/id return above), so a
@@ -333,13 +346,13 @@ export function compileNestedScalar(inner: Step[], ctx: ScalarCtx): Scalar {
   let directLabelId: Expression | null; // label id readable inline, else null → subquery via nodes
 
   const head = steps[0]?.name;
-  if (!head) throw new Error('empty nested traversal');
+  if (!head) return inlineScalarMiss();
 
   if (ctx.elem === 'property') {
     if (head === 'key') { requireTerminal(steps, 1); return { expr: ctx.pkExpr! }; }
     if (head === 'value') { requireTerminal(steps, 1); return { expr: ctx.pvExpr! }; }
     if (head === 'element') { nodeId = ctx.ownerExpr!; directLabelId = null; steps = steps.slice(1); }
-    else throw new Error(`by(__.${head}()) over a property not yet supported`);
+    else return inlineScalarMiss();
   } else if (ctx.elem === 'edge') {
     if (head === 'outV' || head === 'inV') { nodeId = head === 'outV' ? ctx.srcExpr! : ctx.tgtExpr!; directLabelId = null; steps = steps.slice(1); }
     else if (head === 'label') { requireTerminal(steps, 1); return { expr: labelNameSub(ctx.labelIdExpr) }; }
@@ -348,7 +361,7 @@ export function compileNestedScalar(inner: Step[], ctx: ScalarCtx): Scalar {
     // out()/in()/both() are NOT valid on an edge (must go through outV()/inV());
     // routing them to edgeCountFrom here would compare edges.src to the edge's own
     // id and silently mis-count, so let them hit the clear throw below.
-    else throw new Error(`by(__.${head}()) over an edge not yet supported`);
+    else return inlineScalarMiss();
   } else { // node
     nodeId = ctx.idExpr; directLabelId = ctx.labelIdExpr;
     if (MOVES.has(head)) return edgeAggFrom(steps, ctx.idExpr);
@@ -356,14 +369,14 @@ export function compileNestedScalar(inner: Step[], ctx: ScalarCtx): Scalar {
 
   // Terminal projection on the resolved current node.
   const s = steps[0];
-  if (!s) throw new Error('nested traversal resolves to no projection');
+  if (!s) return inlineScalarMiss();
   switch (s.name) {
     case 'values': requireTerminal(steps, 1); return { expr: nodePropScalar(nodeId, s.args[0]) };
     case 'label':  requireTerminal(steps, 1); return { expr: labelNameSub(directLabelId ?? q`(SELECT label FROM nodes WHERE id=${nodeId})`) };
     case 'id':     requireTerminal(steps, 1); return { expr: nodeId };
     // constant(x): a fixed scalar per traverser — the common choose().option() body.
     case 'constant': requireTerminal(steps, 1); return { expr: value(s.args[0]) };
-    default: throw new Error(`by(__.${s.name}()) not yet supported`);
+    default: return inlineScalarMiss();
   }
 }
 
@@ -396,11 +409,11 @@ function edgeAggFrom(steps: Step[], nodeIdExpr: Expression): Scalar {
     const pe = propExtract('props', steps[1].args[0]);
     return { expr: q`(SELECT ${AGG_FN[steps[2].name]}(${pe.expr}) FROM edges WHERE ${incidence}${lbl})` };
   }
-  throw new Error(`by(__.${mv.name}(…)) only supports a terminal count() or values(k).sum/min/max/mean() for now`);
+  return inlineScalarMiss();
 }
 
 const requireTerminal = (steps: Step[], n: number) => {
-  if (steps.length > n) throw new Error(`step not implemented in nested traversal: ${steps[n].name}()`);
+  if (steps.length > n) inlineScalarMiss();
 };
 
 // ---------- where()/not()/filter(__.…) → a boolean filter predicate ----------
@@ -408,7 +421,7 @@ const requireTerminal = (steps: Step[], n: number) => {
 /**
  * Compile a where()/filter() nested traversal into a boolean SQL predicate
  * correlated on the current traverser (for `WHERE [NOT] <pred>`). Supported:
- *   __.<move>.count().is(P)   → correlated count compared (reuses compileNestedScalar)
+ *   __.<move>.count().is(P)   → correlated count compared (tries tryInlineScalar)
  *   __.values(k)[.is(P)]      → current-property predicate (bare → IS NOT NULL)
  *   __.has(k[,v]) / hasLabel  → current-element predicate
  *   __.<move>([label])        → EXISTS over incident edges (bare "has a neighbour")
@@ -444,7 +457,9 @@ export function compileFilterPredicate(
   // one value → the traverser always passes, so it's a no-op filter.
   if (term === 'count' || term === 'sum') {
     if (!hasIs) return q`1`;
-    return predicateSql(compileNestedScalar(body, ctx).expr, isPred);
+    const inline = tryInlineScalar(body, ctx);
+    if (!inline) throw new Error(`where()/filter() form not yet supported: __.${body.map((s) => s.name + '()').join('.')}`);
+    return predicateSql(inline.expr, isPred);
   }
 
   // Current-element predicates (no movement). Node props → ANY-match EXISTS over

@@ -1212,11 +1212,12 @@ describe('compiler SQL snapshots', () => {
   test('group().by(__.project) composite key with nested scalar by()s (edge gate)', () => {
     const p = read('g.E().group().by(__.project("o","l","i").by(__.outV().values("name")).by(__.label()).by(__.inV().values("name"))).by(__.tail())');
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'map', parts: [{ key: 'o' }, { key: 'l' }, { key: 'i' }] }, val: { kind: 'elementLast', elem: 'edge' } });
-    // nested scalars → correlated subqueries on the edge endpoints
-    expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.src AND key=? ORDER BY id LIMIT 1) AS k0_v");
-    expect(p.sql).toContain('(SELECT name FROM labels WHERE id=n.label) AS k1_v');
-    expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.tgt AND key=? ORDER BY id LIMIT 1) AS k2_v");
-    expect(p.sql).toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=n.src) AS v_src'); // edge value framing → external endpoint id
+    // Every project field is an independent generic child joined on one outer edge
+    // ordinal; no composite-key field uses a correlated scalar mini-compiler.
+    expect(p.sql).toContain('ROW_NUMBER() OVER () AS o0');
+    expect(p.sql).toContain('gkp0.v AS k0_v, gkp1.v AS k1_v, gkp2.v AS k2_v');
+    expect(p.sql).toContain('JOIN vertex_properties vp ON vp.node=c.id');
+    expect(p.sql).toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=gn.src) AS v_src'); // edge value framing → external endpoint id
   });
 
   test('properties().group() over the property stream (vertex-property gate)', () => {
@@ -1670,7 +1671,7 @@ describe('compiler SQL snapshots', () => {
 
   test('review-fix regressions: no silent mis-execution', () => {
     // edge out().count() must throw (was silently mis-counting via edge id)
-    expect(() => compile('g.E().where(__.out().count().is(P.gt(0)))', {})).toThrow('over an edge not yet supported');
+    expect(() => compile('g.E().where(__.out().count().is(P.gt(0)))', {})).toThrow('where()/filter() form not yet supported');
     // where(__.move().is(P)) must not silently drop the is()
     expect(() => compile('g.V().where(__.out("knows").is(1))', {})).toThrow('where(__.out().is(P)) not yet supported');
     // limit() then is() remains position-sensitive: only the first three values
