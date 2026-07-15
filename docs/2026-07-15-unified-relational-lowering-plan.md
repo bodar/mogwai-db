@@ -2,14 +2,14 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–5 complete, Stage 6 active
-**Baseline:** L1 2298/2298, L3 874/2041; latest completed checkpoint: 359 tests
+**Baseline:** L1 2298/2298, L3 874/2041; latest focused checkpoint: 235 compiler tests
 
 ## Restart handoff — read this first after a context reset
 
-**Clean checkpoint:** branch `refactor/unified-relational-lowering`, commit `61d028d`
-(`route local element barriers through child streams`). The working tree was clean when
-this handoff was written. Work is local-only: do not push or merge to trunk. Run the full
-`bun test` suite before every local commit.
+**Last committed checkpoint:** branch `refactor/unified-relational-lowering`, commit
+`1add322` (`unify mixed project by modulators`). The next local commit contains the bare
+element project slice described below. Work is local-only: do not push or merge to trunk.
+Run the full `bun test` suite before every local commit.
 
 **Recent completed slices:**
 
@@ -27,15 +27,21 @@ this handoff was written. Work is local-only: do not push or merge to trunk. Run
 4. Current slice — mixed property-key and `T.id`/`T.label` scalar fields now share the
    same project origin join, and `tryCompileScalarValueChild` hides count-vs-row lowering
    from consumers. L3 ratcheted 873→874.
+5. Bare vertex/edge `project().by()` fields now share that heterogeneous origin join with
+   traversal scalar fields. They retain the full public element payload plus the internal
+   rowid, so selecting the field re-enters ordinary movement. Node and edge execution,
+   scalar productivity, and movement re-entry are covered. L3 remains 874.
 
 **Current Stage 6 slice:** traversal-valued `project().by()` is now the first generic
 by-consumer. An outer origin identifies each parent; every scalar child modulator lowers
 with `first` cardinality; productive fields inner-join by origin. Missing child rows drop
 the record, productive NULL survives, and duplicate parents remain distinct. Property
-keys and `T.id`/`T.label` can mix with traversal fields in the same relation. L3 is 874.
+keys, `T.id`/`T.label`, and complete bare vertex/edge fields can mix with traversal fields
+in the same relation. Element fields retain their internal rowid for downstream movement.
+L3 is 874.
 
-**Immediate next slice:** add bare-element project fields without weakening the scalar
-productivity join, then migrate labelled `select` and group key/value consumers.
+**Immediate next slice:** migrate traversal-valued labelled `select` onto the generic
+child-stream/productivity seam, then migrate group key/value consumers.
 Do not add more recognized syntax to `compileNestedScalar`: treat its current correlated
 SQL cases as optional fast paths and add generic child-stream fallbacks with explicit
 first/productive cardinality. Other consumers to inventory afterward are sack, math,

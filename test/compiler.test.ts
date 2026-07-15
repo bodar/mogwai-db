@@ -747,6 +747,18 @@ describe('compiler SQL snapshots', () => {
     expect(mixed.sql).toContain('vp0.key=?');
     expect(mixed.sql).toContain('ON b1.o0=b0.o0');
     expect(read('g.V().project("id","friend").by(T.id).by(__.out().values("name"))').shape.kind).toBe('map');
+    const element = read('g.V(1).project("self","friend").by().by(__.out().values("name"))');
+    expect(element.shape).toEqual({
+      kind: 'map',
+      entries: [
+        { key: 'self', prefix: 'e0', sub: 'vertex' },
+        { key: 'friend', prefix: 'e1', sub: 'value' },
+      ],
+    });
+    expect(element.sql).toContain('b0.rid AS e0_rid');
+    expect(element.sql).toContain('ON b1.o0=b0.o0');
+    expect(read('g.V(1).project("self","friend").by().by(__.out().values("name")).select("self").out().count()').shape)
+      .toEqual({ kind: 'count' });
   });
 
   test('record fields re-enter element/scalar/list lowering', () => {
@@ -2005,6 +2017,12 @@ describe('compiler execution semantics', () => {
       ]);
     expect(run(store, 'g.V(1).project("id","kind","friend").by(T.id).by(T.label).by(__.out().values("name"))'))
       .toEqual([{ e0_v: 1, e1_v: 'person', e2_v: 'vadas' }]);
+    expect(run(store, 'g.V(1).project("self","friend").by().by(__.out().values("name"))')[0])
+      .toMatchObject({ e0_id: 1, e0_label: 'person', e1_v: 'vadas' });
+    expect(run(store, 'g.V(1).project("self","friend").by().by(__.out().values("name")).select("self").out().count()')
+      .map((r) => r.v)).toEqual([3]);
+    expect(run(store, 'g.V(1).outE("knows").project("self","inName").by().by(__.inV().values("name")).select("self").inV().values("name")')
+      .map((r) => r.v).sort()).toEqual(['josh', 'vadas']);
   });
 
   test('RecordStream fields compose back into ordinary streams', () => {
