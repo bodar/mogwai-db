@@ -1,4 +1,4 @@
-import { q, list, raw, type Expression } from '../q.ts';
+import { derived, q, list, raw, type Expression } from '../q.ts';
 import { stepChain, type Pred } from '../frontend.ts';
 import {
   P_OPS, labelIn, predicateSql, nodePropScalar, hasProp, elemCtx, aliasCtx,
@@ -217,11 +217,11 @@ export function lowerElementDedup(st: ElementStream, s: PStep, order?: PStep): E
     const existing = carriedCols(carried);
     const encounter = order ? 'encounter' : undefined;
     const encounterExpr = order ? q`, ROW_NUMBER() OVER (ORDER BY ${orderSql}, ${d.c.id}) AS encounter` : q``;
-    const ranked = st.q.cte(
+    const r = derived(
       q`SELECT ${d.c.id} AS id${carryFrag(carried, d)}, ROW_NUMBER() OVER (PARTITION BY ${f.c.k} ORDER BY ${orderSql}, ${d.c.id}) AS rn${encounterExpr} FROM ${source}`,
       ['id', ...existing, 'rn', ...(encounter ? [encounter] : [])],
+      'r',
     );
-    const r = ranked.as('r');
     const body = q`SELECT ${r.c.id} AS id${carryFrag(carried, r)}${encounter ? q`, ${r.c[encounter]} AS ${encounter}` : q``} FROM ${r} WHERE ${r.c.rn}=1`;
     return advance(st, body, encounter ? { encounter } : {});
   }
@@ -230,11 +230,11 @@ export function lowerElementDedup(st: ElementStream, s: PStep, order?: PStep): E
   const existing = carriedCols(carried);
   const encounter = order ? 'encounter' : undefined;
   const encounterExpr = order ? q`, ROW_NUMBER() OVER (ORDER BY ${orderSql}, ${p.c.id}) AS encounter` : q``;
-  const ranked = st.q.cte(
+  const r = derived(
     q`SELECT ${p.c.id} AS id${carryFrag(carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${key} ORDER BY ${orderSql}, ${p.c.id}) AS rn${encounterExpr} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}${where}`,
     ['id', ...existing, 'rn', ...(encounter ? [encounter] : [])],
+    'r',
   );
-  const r = ranked.as('r');
   const body = q`SELECT ${r.c.id} AS id${carryFrag(carried, r)}${encounter ? q`, ${r.c[encounter]} AS ${encounter}` : q``} FROM ${r} WHERE ${r.c.rn}=1`;
   return advance(st, body, encounter ? { encounter } : {});
 }

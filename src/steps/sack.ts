@@ -1,4 +1,4 @@
-import { q, list, type Expression } from '../q.ts';
+import { derived, q, list, type Expression } from '../q.ts';
 import { scalarProp, labelNameSub, predicateSql, elemCtx } from '../plan.ts';
 import { advance, elemRel, prevRel, carriedCols, type ElementStream, type StepFn } from './context.ts';
 import { tryCompileScalarValueRows } from './child.ts';
@@ -64,12 +64,12 @@ export const sack: StepFn = (s, st) => {
     if (rows) {
       const r = rows.stream.rel.as('r');
       if (!rows.stream.encounter) throw new Error('sack().by(traversal) requires child encounter order');
-      const ranked = st.q.cte(
+      const f = derived(
         q`SELECT ${r.c.v} AS v, ${r.c[rows.frame.ordinal]} AS ${rows.frame.ordinal}, ROW_NUMBER() OVER (PARTITION BY ${r.c[rows.frame.ordinal]} ORDER BY ${r.c[rows.stream.encounter]}) AS rn FROM ${r}`,
         ['v', rows.frame.ordinal, 'rn'],
+        'f',
       );
       const d = rows.frame.domain.as('d');
-      const f = ranked.as('f');
       const newSack = combine(f.c.v, st.carried.sack ? d.c[st.carried.sack] : null);
       const proj = carriedCols({ ...st.carried, sack: 'sk' }).map((c) => c === 'sk' ? q`${newSack} AS sk` : d.c[c]);
       return advance(st,

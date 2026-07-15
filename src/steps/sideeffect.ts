@@ -1,4 +1,4 @@
-import { q } from '../q.ts';
+import { derived, q } from '../q.ts';
 import { scalarProp, predicateSql, jsonbGroupArray, elemCtx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { normalize, type PStep } from '../strategies.ts';
@@ -60,11 +60,11 @@ export const aggregate: StepFn = (s, st) => {
         if (!encounter) throw new Error('aggregate().by(traversal) requires child encounter order');
         // by(traversal) is a map-style modulator: retain its FIRST productive result
         // per input. ProductiveBy then LEFT-restores parents whose child had no row.
-        const ranked = st.q.cte(
+        const first = derived(
           q`SELECT ${r.c.v} AS v, ${r.c[rows.frame.ordinal]} AS ${rows.frame.ordinal}, ROW_NUMBER() OVER (PARTITION BY ${r.c[rows.frame.ordinal]} ORDER BY ${r.c[encounter]}) AS rn FROM ${r}`,
           ['v', rows.frame.ordinal, 'rn'],
+          'f',
         );
-        const first = ranked.as('f');
         const source = productive
           ? q`${rows.frame.domain.as('d')} LEFT JOIN ${first} ON ${first.c[rows.frame.ordinal]}=${q`d.${rows.frame.ordinal}`} AND ${first.c.rn}=1`
           : q`${first}`;
