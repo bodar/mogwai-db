@@ -246,7 +246,7 @@ function groupBuffer(rows: any[], key: GroupKey, val: GroupVal): Buffer {
     // A scalar key over a missing property is SQL NULL — TinkerPop's by(key) uses
     // values(key), which yields nothing, so such elements form NO group (not a
     // spurious null-keyed one). Drop them here (covers both GROUP BY and ORDER BY paths).
-    if (key.kind === 'scalar' && r.gk == null) continue;
+    if (key.kind === 'scalar' && !key.productive && r.gk == null) continue;
     const k = groupKey(r, key);
     let g = groups.get(k.canon);
     if (!g) { g = { buf: k.buf, members: [], gv: undefined, gvt: '' }; groups.set(k.canon, g); }

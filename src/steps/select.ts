@@ -1,5 +1,5 @@
 import { q, list, empty, value, type Expression, type Relation } from '../q.ts';
-import { nodes, edges, labels, vertexProperties } from '../schema.ts';
+import { nodes, edges, labels } from '../schema.ts';
 import { framedProps, labelNameSub, nodePropScalar, predicateSql, propExtract, extIdOf } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
@@ -41,6 +41,7 @@ function reRootElement(st: ElementStream, p: Relation, id: Expression, elem: Ele
 function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[]): RecordStream | null {
   if ((proj.name !== 'project' && proj.name !== 'select') || !proj.bys?.length) return null;
   const isProject = proj.name === 'project';
+  const productive = proj.productiveBy === true;
   const args = keys.map((_, i) => proj.bys![i % proj.bys!.length]);
   const specs = args.map((by) => by?.[0]);
   const nested = specs.map((a) => a && typeof a === 'object' && 'nested' in a ? a.nested : null);
@@ -87,6 +88,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
           cols: [q`${rel.c.list} AS ${`${prefix}_list`}`],
         };
       }
+      if (productive) throw new Error('ProductiveByStrategy with an element-valued project/select field needs a nullable element variant');
       const child = tryCompileElementChild(seed, nested[i], 'first', outer.scope);
       if (!child) throw new Error('element record child failed after successful shape preflight');
       const cp = child.stream.rel.as(`cp${i}`);
@@ -134,21 +136,17 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
       };
     }
     if (typeof spec === 'string' && source.elem === 'node') {
-      const vp = vertexProperties.as(`vp${i}`);
-      const ranked = st.q.cte(
-        q`SELECT ${vp.c.value} AS v${carryFrag(outer.seed.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${p.c[outer.frame.ordinal]} ORDER BY ${vp.c.id}) AS rn FROM ${p} JOIN ${vp} ON ${vp.c.node}=${source.id} AND ${vp.c.key}=${value(spec)}`,
-        ['v', ...carriedCols(outer.seed.carried), 'rn'],
-      );
-      const r = ranked.as(`r${i}`);
+      const expr = nodePropScalar(source.id, spec);
       const rel = st.q.cte(
-        q`SELECT ${r.c.v} AS v${carryFrag(outer.seed.carried, r)} FROM ${r} WHERE ${r.c.rn}=1`,
+        q`SELECT ${expr} AS v${carryFrag(outer.seed.carried, p)} FROM ${p}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
         ['v', ...carriedCols(outer.seed.carried)],
       ).as(`b${i}`);
       return { rel, field: { key: keys[i], prefix, sub: 'value' as const }, cols: [q`${rel.c.v} AS ${`${prefix}_v`}`] };
     }
     if (typeof spec === 'string') {
+      const expr = propExtract(n.c.props, spec).expr;
       const rel = st.q.cte(
-        q`SELECT j.value AS v${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${source.id} JOIN json_each(json(${n.c.props})) j ON j.key=${value(spec)}`,
+        q`SELECT ${expr} AS v${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${source.id}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
         ['v', ...carriedCols(outer.seed.carried)],
       ).as(`b${i}`);
       return { rel, field: { key: keys[i], prefix, sub: 'value' as const }, cols: [q`${rel.c.v} AS ${`${prefix}_v`}`] };
@@ -162,12 +160,16 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
     ).as(`b${i}`);
     return { rel, field: { key: keys[i], prefix, sub: 'value' as const }, cols: [q`${rel.c.v} AS ${`${prefix}_v`}`] };
   });
-  const first = branches[0].rel;
-  const joins = branches.slice(1).map((branch) => q` JOIN ${branch.rel} ON ${branch.rel.c[outer.frame.ordinal]}=${first.c[outer.frame.ordinal]}`);
   const fields = branches.map((branch) => branch.field);
   const cols = branches.flatMap((branch) => branch.cols);
+  const first = branches[0].rel;
+  const domain = outer.seed.rel.as('prd');
+  const from = productive ? domain : first;
+  const joins = productive
+    ? branches.map((branch) => q` LEFT JOIN ${branch.rel} ON ${branch.rel.c[outer.frame.ordinal]}=${domain.c[outer.frame.ordinal]}`)
+    : branches.slice(1).map((branch) => q` JOIN ${branch.rel} ON ${branch.rel.c[outer.frame.ordinal]}=${first.c[outer.frame.ordinal]}`);
   const rel = st.q.cte(
-    q`SELECT ${list(cols, ', ')}${carryFrag(st.carried, first)} FROM ${first}${list(joins, '')}`,
+    q`SELECT ${list(cols, ', ')}${carryFrag(st.carried, from)} FROM ${from}${list(joins, '')}`,
     [...fields.flatMap(recordFieldColumns), ...carriedCols(st.carried)],
   );
   return toRecordStream(carryOf(st), rel, fields);
@@ -185,8 +187,10 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
   const selected = st.carried.aliases.get(keys[0]);
   if (!selected) throw new Error(`select("${keys[0]}"): no such label — as("${keys[0]}") was not seen`);
   const p = st.rel.as('p');
+  const productive = proj.productiveBy === true;
   const nested = proj.bys?.[0]?.[0];
   if (nested && typeof nested === 'object' && 'nested' in nested) {
+    if (productive) throw new Error('ProductiveByStrategy with a traversal-valued single select is not yet supported');
     const seed = reRootElement(st, p, p.c[selected.col], selected.elem);
     if (isScalarChild(nested.nested, st.params)) {
       const child = tryCompileScalarValueChild(seed, nested.nested, 'first');
@@ -216,7 +220,7 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
   const n = (selected.elem === 'edge' ? edges : nodes).as('n');
   const expr = selected.elem === 'edge' ? propExtract(n.c.props, by.key!).expr : nodePropScalar(n.c.id, by.key!);
   const rel = st.q.cte(
-    q`SELECT ${expr} AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c[selected.col]}`,
+    q`SELECT ${expr} AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c[selected.col]}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
     ['v', ...carriedCols(st.carried)],
   );
   return toScalarStream(carryOf(st), rel);

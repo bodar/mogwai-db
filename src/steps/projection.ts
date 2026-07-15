@@ -261,7 +261,7 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
     const isCount = steps[stop].name === 'groupCount';
     const tbl = st.elem === 'edge' ? 'edges' : 'nodes';
     const ctx = elemCtx(elemRel(st), st.elem);
-    const src: GroupSource = { from: `${tbl} n JOIN ${st.rel.name} p ON n.id=p.id`, ctx, elem: st.elem === 'edge' ? 'edge' : 'vertex', parent: st };
+    const src: GroupSource = { from: `${tbl} n JOIN ${st.rel.name} p ON n.id=p.id`, ctx, elem: st.elem === 'edge' ? 'edge' : 'vertex', parent: st, productiveBy: steps[stop].productiveBy };
     return dispatchNext(lowerGroup(st, isCount, steps[stop].bys ?? [], src), steps, stop + 1);
   }
 
@@ -576,7 +576,7 @@ function compileCap(st: ElementStream, steps: PStep[], stop: number): Compiled {
   }
   // group('a')/groupCount('a') side-effect → re-emit the same rich GroupStream as an
   // inline group; terminal framing and Column consumers share its dispatch.
-  const src: GroupSource = { from: def.from, ctx: def.ctx, elem: def.elem, parent: def.parent };
+  const src: GroupSource = { from: def.from, ctx: def.ctx, elem: def.elem, parent: def.parent, productiveBy: def.productiveBy };
   return dispatchNext(lowerGroup(st, def.isCount, def.bys, src), steps, stop + 1);
 }
 

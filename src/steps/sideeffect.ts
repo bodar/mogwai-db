@@ -81,6 +81,7 @@ const groupSideEffect = (isCount: boolean): StepFn => (s, st) => {
     isCount,
     bys: (s as any).bys ?? [],
     parent: st,
+    productiveBy: (s as any).productiveBy,
   };
   return register(st, name, def);
 };

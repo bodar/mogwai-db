@@ -24,7 +24,7 @@ import { stepChain, type Step, type StrategySpec, type StrategyUse } from './fro
  * The compilers read these fields instead of re-scanning, so the whole read
  * dispatch is a peek-free fold over the step list.
  */
-export type PStep = Step & { cluster?: Step[]; bys?: any[][]; options?: Step[] };
+export type PStep = Step & { cluster?: Step[]; bys?: any[][]; options?: Step[]; productiveBy?: boolean };
 
 const REPEAT_CLUSTER = new Set(['repeat', 'emit', 'times', 'until']);
 /** Steps that absorb trailing by() modulators. Alias-compare where()/not() also
@@ -49,8 +49,10 @@ const BY_HOSTS = new Set(['order', 'select', 'project', 'group', 'groupCount', '
 //  - Semantic strategies (Subgraph/Partition) are honoured by *injecting the filter
 //    they imply* into the chain.
 //  - Verification strategies assert legality and throw the spec's exact message.
-//  - Everything else (ProductiveBy, Connective, Seed, Options, ElementId, OLAP,
-//    unknown) fails CLOSED — a silently dropped semantic strategy would leak
+//  - ProductiveBy marks supported by()-consumers with an explicit null-productivity
+//    policy; unsupported consumers fail closed.
+//  - Everything else (Connective, Seed, Options, ElementId, OLAP, unknown) fails
+//    CLOSED — a silently dropped semantic strategy would leak
 //    unfiltered data. `withoutStrategies` is a safe no-op because we apply NO
 //    strategy by default; a `without` of a strategy also named in `with` suppresses
 //    it (handled by filtering `with` up front).
@@ -65,6 +67,22 @@ const SAFE_OPTIMIZATION_STRATEGIES = new Set([
 const VERIFICATION_STRATEGIES = new Set([
   'ReadOnlyStrategy', 'EdgeLabelVerificationStrategy', 'ReservedKeysVerificationStrategy',
 ]);
+const PRODUCTIVE_BY_HOSTS = new Set(['group', 'groupCount', 'project', 'select']);
+
+/** ProductiveBy is semantic only at by()-consumers. Mark the supported hosts so they
+ * choose a LEFT-domain/null policy explicitly; reject any other host rather than
+ * pretending a traversal-wide strategy was honoured. */
+function markProductiveBy(steps: Step[]): Step[] {
+  let host: string | undefined;
+  for (const s of steps) {
+    if (BY_HOSTS.has(s.name)) host = s.name;
+    else if (s.name === 'by') {
+      if (!host || !PRODUCTIVE_BY_HOSTS.has(host))
+        throw new Error(`ProductiveByStrategy with ${host ?? 'unattached'} by() is not yet supported`);
+    } else host = undefined;
+  }
+  return steps.map((s) => PRODUCTIVE_BY_HOSTS.has(s.name) ? { ...s, productiveBy: true } : s);
+}
 
 /** Steps whose output traverser is a vertex (a partition/subgraph vertex filter is
  *  injected after each). V()/E() are also the source step, at index 0. */
@@ -221,6 +239,7 @@ export function applyStrategies(steps: Step[], use: StrategyUse, params: Record<
     if (SAFE_OPTIMIZATION_STRATEGIES.has(spec.name)) continue; // result-preserving → no-op
     else if (spec.name === 'SubgraphStrategy') out = injectSubgraph(out, spec, params);
     else if (spec.name === 'PartitionStrategy') out = injectPartition(out, spec, params);
+    else if (spec.name === 'ProductiveByStrategy') out = markProductiveBy(out);
     else if (VERIFICATION_STRATEGIES.has(spec.name)) verifiers.push(spec);
     else throw new Error(rejectMsg(spec.name));
   }
