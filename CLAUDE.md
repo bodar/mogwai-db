@@ -38,6 +38,9 @@ through `tryCompileScalarChild`: productivity is row existence (including produc
 NULL), multi-properties are real rows, and `map()` selects the first row per origin.
 `flatMap()` is shape-aware dispatch (not a PREFIX entry): it applies the same child
 compiler with `all`, so element and scalar children both flatten without private parsers.
+Homogeneous scalar `union()` arms also dispatch through child streams and `UNION ALL`;
+the syntax-only `isScalarChild` preflight stops the prefix without appending CTEs.
+Element union retains its existing branch compiler; mixed shapes fail closed.
 - **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes
   (`stripTerminal`, `foldRepeatClusters`, `foldByModulators`) run once up front so
   the dispatch sees a canonical, peek-free chain (no index arithmetic anywhere).
