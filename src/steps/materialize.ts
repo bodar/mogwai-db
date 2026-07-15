@@ -11,7 +11,7 @@ import { readCompiled, type Compiled, type ListOf, type Shape } from '../render.
 import { list, q } from '../q.ts';
 import { framedProps, extIdOf } from '../plan.ts';
 import { edges, labels, nodes } from '../schema.ts';
-import { groupResultColumns, pathColumns, recordResultColumns, type GroupStream, type ListStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream } from './stream.ts';
+import { groupResultColumns, pathColumns, recordResultColumns, type GroupStream, type ListStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream, type VariantStream } from './stream.ts';
 
 export function materializeRoot(query: Query, tail: Expression, shape: Shape): Compiled {
   return readCompiled(query, tail, shape);
@@ -28,6 +28,24 @@ export function materializeScalarRoot(stream: ScalarStream): Compiled {
     : { kind: 'value', as: stream.as };
   const cols = stream.result === 'number' ? q`v, vt` : q`v`;
   return materializeRoot(stream.q, q`SELECT ${cols} FROM ${stream.rel}`, shape);
+}
+
+/** Expand only the element arm at the wire boundary. Scalar/null rows never join
+ * an element table, and internal rowids remain available until this final SELECT. */
+export function materializeVariantRoot(stream: VariantStream): Compiled {
+  const v = stream.rel.as('v');
+  if (!stream.elem)
+    return materializeRoot(stream.q, q`SELECT ${v.c.vk}, ${v.c.v} FROM ${v}`, { kind: 'variant', scalarAs: stream.scalarAs, list: stream.result === 'list' || undefined });
+  const n = (stream.elem === 'edge' ? edges : nodes).as('n');
+  const l = labels.as('l');
+  const payload = stream.elem === 'edge'
+    ? q`COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${extIdOf(n.c.src)} AS src, ${extIdOf(n.c.tgt)} AS tgt, json(${framedProps(n, 'edge')}) AS props`
+    : q`COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, json(${framedProps(n, 'node')}) AS props`;
+  return materializeRoot(
+    stream.q,
+    q`SELECT ${v.c.vk}, ${v.c.v}, ${payload} FROM ${v} LEFT JOIN ${n} ON ${n.c.id}=${v.c.rid} LEFT JOIN ${l} ON ${l.c.id}=${n.c.label}`,
+    { kind: 'variant', scalarAs: stream.scalarAs, elem: stream.elem === 'edge' ? 'edge' : 'vertex', list: stream.result === 'list' || undefined },
+  );
 }
 
 /** Turn a JSON list of internal element rowids into an ordered JSON array carrying

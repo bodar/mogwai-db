@@ -51,6 +51,7 @@ export function appendPathPos(p: PathState, elem: Elem): { path: PathState; col:
  *  this state outlives the current traverser stream. */
 export type SideEffectDef =
   | { kind: 'list'; rel: Relation; of: import('../render.ts').ListOf }
+  | { kind: 'variant'; rel: Relation; scalarAs?: import('../render.ts').ValueType; elem?: Elem }
   | { kind: 'group'; from: string; ctx: import('../plan.ts').ScalarCtx; elem: import('../render.ts').ElemShape; isCount: boolean; bys: any[][]; parent: ElementStream; productiveBy?: boolean };
 export type SideEffectMap = ReadonlyMap<string, SideEffectDef>;
 

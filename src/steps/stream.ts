@@ -41,6 +41,21 @@ export interface ScalarStream extends Carry {
   readonly productiveNull?: boolean;
 }
 
+/** A runtime-discriminated value stream. `vk` is 0=null, 1=scalar, 2=element;
+ * `v` and `rid` are the mutually-exclusive payload columns. This is deliberately
+ * a narrow relational sum type rather than an `any`: scalar typing and the one
+ * possible element table remain compile-time metadata, while row existence keeps
+ * null distinct from an unproductive child. */
+export interface VariantStream extends Carry {
+  readonly kind: 'variant';
+  readonly rel: Relation;
+  readonly scalarAs?: ValueType;
+  readonly elem?: Elem;
+  /** A named aggregate side effect is one collection traverser at cap(); explicit
+   * unfold() changes it back to member rows without rewriting the relation. */
+  readonly result?: 'rows' | 'list';
+}
+
 /** A single list value in a one-row relation with a JSONB `list` column (fold /
  *  inject-of-a-list / select(Column.values)), plus any carried columns. `of` says
  *  what the list holds so unfold/framing knows how to explode it. */
@@ -103,7 +118,7 @@ export interface PathStream extends Carry {
   readonly layout: PathLayout;
 }
 
-export type Stream = ElementStream | ScalarStream | ListStream | MapStream | PropertyStream | RecordStream | GroupStream | PathStream;
+export type Stream = ElementStream | ScalarStream | VariantStream | ListStream | MapStream | PropertyStream | RecordStream | GroupStream | PathStream;
 
 const elemColumns = (prefix: string, elem: ElemShape): string[] => elem === 'edge'
   ? [`${prefix}_id`, `${prefix}_label`, `${prefix}_src`, `${prefix}_tgt`, `${prefix}_props`]
@@ -152,6 +167,7 @@ export const recordResultColumns = (f: RecordField): string[] =>
 export function streamColumns(s: Stream): readonly string[] {
   const payload = s.kind === 'elements' ? ['id']
     : s.kind === 'scalar' ? [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...(s.encounter ? [s.encounter] : [])]
+    : s.kind === 'variant' ? ['vk', 'v', 'rid']
     : s.kind === 'list' ? ['list']
     : s.kind === 'map' ? ['mk', 'mv']
     : s.kind === 'property' ? ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta']
@@ -178,6 +194,8 @@ export const carryOf = (s: Stream): Carry =>
 
 export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, result: ScalarStream['result'] = 'value', encounter?: string, productiveNull?: boolean): ScalarStream =>
   assertStreamColumns({ ...c, kind: 'scalar', rel, as, result, encounter, productiveNull });
+export const toVariantStream = (c: Carry, rel: Relation, scalarAs?: ValueType, elem?: Elem, result: VariantStream['result'] = 'rows'): VariantStream =>
+  assertStreamColumns({ ...c, kind: 'variant', rel, scalarAs, elem, result });
 export const toListStream = (c: Carry, rel: Relation, of: ListOf): ListStream =>
   assertStreamColumns({ ...c, kind: 'list', rel, of });
 export const toMapStream = (c: Carry, rel: Relation, keyOf: MapOf, valOf: MapOf): MapStream =>

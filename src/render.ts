@@ -18,7 +18,8 @@ export type ListOf =
 // select(labels…)/project(keys…): a Map per row. Each entry names its result
 // key plus the SQL column prefix carrying its typed payload.
 export type MapEntry =
-  | { key: string; prefix: string; sub: 'vertex' | 'edge' | 'value' }
+  | { key: string; prefix: string; sub: 'vertex' | 'edge'; nullable?: boolean }
+  | { key: string; prefix: string; sub: 'value' }
   | { key: string; prefix: string; sub: 'list'; of: ListOf };
 
 // The element kind an element-shaped column carries, and the columns that frame
@@ -69,6 +70,7 @@ export type Shape =
   | { kind: 'metaProperty' } // properties().properties(): meta-properties as Property elements (mk/mv cols)
   | { kind: 'metaMap' } // properties(k).valueMap(): a VertexProperty's meta as a flat Map (meta col, JSON text)
   | { kind: 'value'; as?: ValueType }
+  | { kind: 'variant'; scalarAs?: ValueType; elem?: Exclude<ElemShape, 'property'>; list?: boolean }
   | { kind: 'count' }
   | { kind: 'scalar'; productiveNull?: boolean } // numeric reducer; productive NULL may be a real result
   | { kind: 'list'; elem: ElemShape | 'scalar'; as?: ValueType } // legacy row-fold; scalar items may carry a uniform type

@@ -4,7 +4,7 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-15 · **live L3 conformance:** 911 · **corpus parse+chain:**
+**Last synced:** 2026-07-15 · **live L3 conformance:** 922 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
 
@@ -94,10 +94,10 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `choose(fn).option(k, body)…` | 🟡 | ✅ scalar-CASE option-map; its ScalarStream result composes with scalar filters, transforms, reducers and `fold`<br>❌ without a `Pick.none` default<br>❌ element/discard/identity/fail bodies<br>❌ `Pick.unproductive`/`any` |
 | `coalesce(…)` | 🟡 | ✅ first-productive via the origin stack for homogeneous element, scalar, and list arms (scalar or same-kind element); empty `fold()` list is productive and prevents fallback<br>✅ **incoming `as()` threads through** (originSeed projects it alongside the ordinal, merge preserves it)<br>✅ **nested in coalesce/optional** for element arms (each branch pushes a unique ordinal `o0`/`o1`/…)<br>❌ mixed-shape/incompatible list items; NEW `as()` inside an arm<br>✅ **path threads through** element arms (pad-to-max cols) |
 | `union(…)` | 🟡 | ✅ element multi-hop arms via `foldBody`; homogeneous scalar and list arms (scalar or same-kind element) lower through child streams + `UNION ALL`, with numeric/list item metadata unified centrally<br>✅ **incoming `as()` threads through** the merge (`mergeBranchCarried`), so `union(…).select('a')`/`.path()` resolve<br>❌ mixed-shape/incompatible list items; source-branch tails; NEW `as()` inside an arm<br>✅ **path threads through** element arms (pad-to-max cols) |
-| `optional(…)` | 🟡 | ✅ single-hop LEFT JOIN fast path + multi-hop<br>✅ **incoming `as()` threads through** (fast path carries it from the input; general path via originSeed)<br>❌ element-kind change on miss<br>❌ a NEW `as()` inside an arm<br>✅ **path threads through** (pad-to-max cols) |
+| `optional(…)` | 🟡 | ✅ single-hop LEFT JOIN fast path + multi-hop<br>✅ non-total scalar child → tagged VariantStream (`scalar` hits, original element on miss); root framing + `count()` re-entry<br>✅ **incoming `as()` threads through** (fast path carries it from the input; general path via originSeed)<br>❌ element-kind change on miss; most steps after a VariantStream<br>❌ a NEW `as()` inside an arm<br>✅ **path threads through** homogeneous element arms (pad-to-max cols) |
 | `flatMap(__.…)` | 🟡 | ✅ origin-safe movement/filter element bodies and scalar `values`/`id`/`label`/`constant` tails use generic `all` cardinality; transforms + row operators + scoped reducers share lowering<br>✅ scalar or element-tail `fold()` emits one typed ListStream per parent (`[]` empty, productive scalar NULL retained), with later list operations/unfold composing normally<br>✅ **incoming `as()` threads through** (single body, no merge)<br>✅ **path threads through** element bodies (pad-to-max cols)<br>❌ record/group/path bodies; NEW `as()` inside body |
 | `map(__.…)` | 🟡 | ✅ child `count()` and scalar-tail `count/sum/min/max/mean` are scope-aware barriers: parent-domain LEFT JOIN + origin GROUP BY preserves duplicates/empty children; numeric `v,vt` survives later scalar composition<br>✅ scalar `values`/`id`/`label`/`constant` tails are productive rows through the generic child domain; transforms and origin-partitioned row operators run before first-per-origin<br>✅ scalar or element-tail `fold()` returns a typed ListStream per parent, including explicit empty lists; followers reuse ordinary list dispatch<br>✅ movement/filter element bodies compile through the generic child domain with first-per-origin cardinality<br>❌ alias/select and other structured barrier-bearing bodies |
-| `local(…)` | 🟡 | ✅ one generic child `all` policy: bare element movement, element `limit`/`skip`/`range`/`dedup` (including before element `fold()`), scalar transforms/row operators/reducers, and scalar/element-tail `fold()` all partition by origin<br>✅ outer `as()` aliases/path columns and downstream `otherV()` context survive the child scope; the old movement parser/private window engine is deleted<br>❌ element `order()` (needs persistent encounter-order metadata); structured properties/record/group/path bodies; match/simplePath/union/nested local; `local(aggregate(...))`; sack state |
+| `local(…)` | 🟡 | ✅ one generic child `all` policy: bare element movement, element `limit`/`skip`/`range`/`dedup` (including before element `fold()`), scalar transforms/row operators/reducers, scalar/element-tail `fold()`, plus canonical one-step `local(aggregate(...))`<br>✅ outer `as()` aliases/path columns and downstream `otherV()` context survive the child scope; the old movement parser/private window engine is deleted<br>❌ general element `order()` (only terminal-first modulation is supported); structured properties/record/group/path bodies; match/simplePath/union/nested local; sack state |
 
 ## 6. Recursion (`repeat`)
 
@@ -174,9 +174,9 @@ home (`Carry`): a **named side-effect registry** (aggregate/cap/group('a')) and 
 
 | Step | Status | Notes |
 |---|:--:|---|
-| `aggregate('x')` | 🟡 | ✅ pass-through barrier → a JSONB-list side-effect CTE; `by(key|scalar traversal)`; `local(aggregate(...))`; ProductiveBy NULL membership survives `cap` + local/global reducers<br>❌ on a scalar stream (`values(k).aggregate(x)`), token/element-valued traversal modulators (nullable element variant needed) |
+| `aggregate('x')` | 🟡 | ✅ pass-through barrier → typed list/variant side-effect relation; `by(key|scalar traversal|element traversal with terminal order)`; `local(aggregate(...))`; ProductiveBy NULL membership survives `cap` + local/global reducers and nullable element bags<br>❌ on a scalar stream (`values(k).aggregate(x)`), token modulators, general all-row element ordering |
 | `store('x')` | 🚫 | dropped in TinkerPop 4 (no grammar rule); `aggregate(Scope.local)` replaces it |
-| `cap('x')` | 🟡 | ✅ a list side-effect UNROLLS to individual results (no BulkSet wire type); a group side-effect re-emits the same GroupStream as inline `group()` (`cap('a').select(Column.values).unfold()` composes)<br>❌ multi-key `cap('x','y')` |
+| `cap('x')` | 🟡 | ✅ a list/variant side-effect emits ONE collection value; explicit `unfold()` emits its members; a group side-effect re-emits the same GroupStream as inline `group()` (`cap('a').select(Column.values).unfold()` composes)<br>❌ multi-key `cap('x','y')` |
 | `sack()` / `withSack(…)` | 🟡 | ✅ carried column: `sack(Operator.x).by(key/T.label/nested)` mutate, bare `sack()` read as a ScalarStream, `withSack(init)` seed; later scalar steps/barriers compose<br>❌ inject-const numeric promotion (NumberHelper byte→short bump), `repeat()`/`barrier`/`local`, split/merge-on-fork, `sack(BiFunction)` |
 | `group('a')` / `groupCount('a')` (side-effecting) | 🟡 | ✅ pass-through barrier → stashed group-spec, `cap('a')` re-runs `lowerGroup`<br>❌ nested value-`by()` with movement+order, `by(__.select…)`, after `as()`/`path()` (inherits `lowerGroup`'s §4 limits) |
 | `within('x')` / `without('x')` readback | ❌ | mid-chain read of a side-effect (the aggregate-dedup idiom) — where eager/lazy diverge; fails closed |
@@ -184,7 +184,8 @@ home (`Carry`): a **named side-effect registry** (aggregate/cap/group('a')) and 
 Landed L3 618→634 (sack +4, aggregate/cap +8, group('a')/cap +4). The
 `group('a')…cap('a').select(Column.values).unfold()` cluster now lands (cap re-enters →
 MapStream, §MapStream). Scalar aggregate/ProductiveBy is now on the generic child-domain
-path; only element-valued aggregate modulation needs the nullable variant carrier.
+path. The VariantStream slice plus correct collection-valued cap framing raised L3
+911→922, including element-valued aggregate modulation with ProductiveBy null members.
 
 ## 13. Traversal strategies
 
@@ -195,7 +196,7 @@ path; only element-valued aggregate modulation needs the nullable variant carrie
 | **SubgraphStrategy** (vertex criterion) | 🟡 | ✅ `where`/`has` injection pass<br>❌ edge/vertexProperty criteria<br>❌ adjacency (`out()` expansion) |
 | **PartitionStrategy** (read-filter + write-stamp) | 🟡 | ✅ `has(within)` + property stamp<br>❌ `includeMetaProperties`<br>❌ partition-aware merge |
 | ReadOnly / EdgeLabel / ReservedKeys **verification** | ✅ | ✅ throw TinkerPop's canonical messages |
-| ProductiveByStrategy | 🟡 | ✅ explicit productive-NULL policy for `group`/`groupCount`/`project`/`select`/`aggregate`/`order`/linear `path`/alias-compare `where`; `local(aggregate)` included<br>❌ nullable element-valued record/aggregate fields and `barrier().dedup().by(...)` fail closed |
+| ProductiveByStrategy | 🟡 | ✅ explicit productive-NULL policy for `group`/`groupCount`/`project`/`select`/`aggregate`/`order`/linear `path`/alias-compare `where`; nullable element-valued records/aggregate bags and `local(aggregate)` included<br>❌ `barrier().dedup().by(...)` fails closed |
 | `with(…)` (OptionsStrategy sugar) | ❌ | `step not implemented: with()` |
 | OLAP / GraphComputer / Seed / Event strategies | 🚫 | out of scope |
 

@@ -6,8 +6,7 @@ import {
 } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, elemRel, type ElementStream } from './context.ts';
-import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStream } from './stream.ts';
-import { compileUnfold } from './list.ts';
+import { carryOf, toListStream, toScalarStream, toVariantStream, type ListStream, type ScalarStream } from './stream.ts';
 import { dispatchNext } from './index.ts';
 import { tryLowerLocalAggregate } from './sideeffect.ts';
 import {
@@ -19,7 +18,7 @@ import { SCALAR_ROW_STEPS } from './scalar.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
 import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
-import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, union as lowerLegacyUnion } from './branch.ts';
+import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantOptional, union as lowerLegacyUnion } from './branch.ts';
 import { lowerGroup, lowerProperties, type GroupSource } from './group.ts';
 import { isScalarChild, isListChild, isTotalScalarChild, tryCompileCountChild, tryCompileListChild } from './child.ts';
 
@@ -214,15 +213,16 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Co
   }
 
   // A fold/count child is total per parent, so optional's identity-on-miss arm is
-  // statically unreachable. Retype directly through the shared child compiler;
-  // non-total scalar optional still defers until VariantStream can carry scalar OR
-  // original element honestly.
+  // statically unreachable. Non-total scalar children lower to the tagged
+  // scalar-or-original-element VariantStream.
   if (steps[stop]?.name === 'optional') {
     const nested = steps[stop].args[0]?.nested;
     if (nested && isListChild(nested, st.params))
       return dispatchNext(tryCompileListChild(st, nested)!, steps, stop + 1);
     if (nested && isTotalScalarChild(nested, st.params))
       return dispatchNext(tryCompileCountChild(st, nested)!, steps, stop + 1);
+    const variant = tryLowerVariantOptional(steps[stop], st);
+    if (variant) return dispatchNext(variant, steps, stop + 1);
   }
 
   // A union may change shape when every arm is scalar. Homogeneous scalar arms
@@ -427,7 +427,7 @@ export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number)
     return dispatchNext(lowerGlobalFold(s), steps, from + 1);
   // unfold() on a scalar is identity (a scalar is not a collection) — continue past it,
   // exactly as unfold() on an element stream. Lets aggregate('a').by(k).cap('a').unfold()
-  // (cap unrolls a by-key bag to a scalar stream) feed a following reducer.
+  // (an explicit cap().unfold() turns a by-key bag into a scalar stream) feed a following reducer.
   if (steps[from]?.name === 'unfold') return dispatchNext(s, steps, from + 1);
   const { acc, stop } = foldTailAcc(steps, from);
   if (stop !== steps.length) throw new Error(`${steps[stop].name}() after a scalar stream not yet supported`);
@@ -574,10 +574,8 @@ function lowerSackRead(st: ElementStream, step: PStep): ScalarStream {
   return toScalarStream(carryOf(st), rel);
 }
 
-/** cap('x') — emit a named side-effect collection. A list side-effect (aggregate/
- *  store) is a BulkSet that UNROLLS to individual results (there's no BulkSet wire
- *  type, and the suite expects one result per bagged element), so explode the stored
- *  JSONB list back into an element/scalar stream and continue the tail. A group
+/** cap('x') — emit a named side-effect collection. A list/variant aggregate is ONE
+ *  collection traverser; only an explicit following unfold() emits its members. A group
  *  side-effect (group('a')/groupCount('a')) re-runs lowerGroup over its stashed
  *  source → one GroupStream (steps/group.ts). Deferred: multi-key cap('x','y'). */
 function compileCap(st: ElementStream, steps: PStep[], stop: number): Compiled {
@@ -587,10 +585,10 @@ function compileCap(st: ElementStream, steps: PStep[], stop: number): Compiled {
   if (!def) throw new Error(`cap('${names[0]}') references an undefined side-effect`);
   if (def.kind === 'list') {
     const ls = toListStream(carryOf(st), def.rel, def.of);
-    if (isScopeLocalStep(steps[stop + 1]))
-      return dispatchNext(ls, steps, stop + 1);
-    return dispatchNext(compileUnfold(ls), steps, stop + 1);
+    return dispatchNext(ls, steps, stop + 1);
   }
+  if (def.kind === 'variant')
+    return dispatchNext(toVariantStream(carryOf(st), def.rel, def.scalarAs, def.elem, 'list'), steps, stop + 1);
   // group('a')/groupCount('a') side-effect → re-emit the same rich GroupStream as an
   // inline group; terminal framing and Column consumers share its dispatch.
   const src: GroupSource = { from: def.from, ctx: def.ctx, elem: def.elem, parent: def.parent, productiveBy: def.productiveBy };

@@ -545,8 +545,9 @@ throws a clear deferral rather than under-filter. **ProductiveByStrategy is a co
 policy, not a rewrite:** `group`/`groupCount`/`project`/`select`/`aggregate`/`order`/linear
 `path`/alias-compare `where` preserve productive NULL results while ordinary consumers
 drop missing `by()` results. The productive bit survives aggregate list and numeric
-reducer boundaries; `local(aggregate(...))` shares that compiler. Nullable element-valued
-fields and `barrier().dedup().by(...)` still fail closed rather than fabricate a shape.
+reducer boundaries; `local(aggregate(...))` shares that compiler. A narrow VariantStream
+now carries nullable element-valued record/aggregate results; `barrier().dedup().by(...)`
+still fails closed rather than fabricate a dedup policy.
 Rationale + the challenged "DO routing obviates partitioning" presumption:
 `docs/2026-07-13-with-strategies-exploration.md`.
 
@@ -773,18 +774,19 @@ interpreter). Plan + decision log: `docs/2026-07-13-side-effect-state-plan.md`.
   tokens need the `TraversalOperatorContext` walkArgs case (was dropped, like the other enum
   tokens). `sack` ∈ PREFIX (mutate only — bare read guarded to break to the tail) and BY_HOSTS.
 - **Side-effects = a named registry** (`Carry.sideEffects: Map<name, SideEffectDef>`, sibling
-  to `aliases`). `SideEffectDef` = a `list` def (aggregate → a JSONB-list CTE) or a `group`
-  def (stashed group-spec). `aggregate('x')` (`src/steps/sideeffect.ts`) is a PASS-THROUGH
+  to `aliases`). `SideEffectDef` = a `list` def (homogeneous aggregate → a JSONB-list CTE),
+  a tagged `variant` def (nullable element aggregate), or a `group` def (stashed group-spec).
+  `aggregate('x')` (`src/steps/sideeffect.ts`) is a PASS-THROUGH
   barrier StepFn: builds the bag CTE (`jsonbGroupArray` of rowids, or a by(key) scalar with a
   by-miss `IS NOT NULL` filter), registers it, returns `st` UNCHANGED (so the chain continues
   — `V().aggregate('x').out()` works). **`store()` does NOT exist in TinkerPop 4** (dropped;
   `aggregate(Scope.local)` replaces it — no grammar rule), so only `aggregate` reaches here.
-- **`cap('x')` (`compileCap` in projection.ts)** looks the name up. A **list side-effect
-  UNROLLS to individual results** — there is NO BulkSet wire type in the client and the suite
-  expects one result per bagged element (`aggregate('x').cap('x')` → 6 vertices, NOT one
-  List), so cap explodes the stored list via `compileUnfold` → the element/scalar stream →
-  `dispatchNext` (reuses the §9 list substrate, zero new list code). A **group side-effect
-  re-emits ONE GroupStream** via `lowerGroup` over the stashed source.
+- **`cap('x')` (`compileCap` in projection.ts)** looks the name up. A list/variant side-effect
+  emits **ONE collection value** (the official suite's `next()` observes that collection);
+  only an explicit `.unfold()` emits its members. Homogeneous bags reuse ListStream;
+  nullable element bags use VariantStream with collection root framing. A **group side-effect
+  re-emits ONE GroupStream** via `lowerGroup` over the stashed source. Correcting the old
+  implicit-unfold mistake, together with nullable element modulation, raised L3 911→922.
 - **`group('a')`/`groupCount('a')` (side-effecting, `sideeffect.ts`)** = a PASS-THROUGH
   barrier that stashes the group-spec (source `from` string referencing the persistent
   `st.last` CTE + `elemCtx` + folded `bys`) and returns `st` unchanged, so movement between
@@ -798,7 +800,8 @@ interpreter). Plan + decision log: `docs/2026-07-13-side-effect-state-plan.md`.
   can't honour incremental visibility); the sack inject-const **numeric-promotion** block
   (NumberHelper byte→short-on-overflow bump — number-chasing risk, deliberately not chased);
   sack through `repeat()`/`barrier`/`local`, split/merge-on-fork, `sack(BiFunction)`;
-  aggregate on a SCALAR stream (`values(k).aggregate(x)`) and `by(<nested/token>)`; multi-key
+  aggregate on a SCALAR stream (`values(k).aggregate(x)`) and unsupported token/general
+  ordered-element modulators; multi-key
   `cap('x','y')`; `group('a')…cap('a').select(Column.values).unfold()` (needs
   `select(Column.values)`, §9); group side-effect after `as()`/`path()`.
 

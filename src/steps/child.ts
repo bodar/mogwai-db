@@ -7,7 +7,7 @@ import { foldBody } from './index.ts';
 import { lowerScalarRows, SCALAR_TRANSFORMS } from './scalar.ts';
 import { normalize } from '../strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
-import { rangeToOffsetLimit } from '../plan.ts';
+import { elemCtx, rangeToOffsetLimit, scalarProp } from '../plan.ts';
 
 /** Root/child compilation context. A child frame retains the complete parent domain,
  * not merely an ordinal on productive child rows: reducers need that domain to
@@ -95,7 +95,9 @@ function elementRowParts(body: ReturnType<typeof stepChain>): { prefix: ReturnTy
 }
 
 export function isElementChild(nested: any, params: Record<string, any>): boolean {
-  return !!nested && elementRowParts(childSteps(nested, params)) !== null;
+  if (!nested) return false;
+  const body = childSteps(nested, params);
+  return elementRowParts(body.at(-1)?.name === 'order' ? body.slice(0, -1) : body) !== null;
 }
 
 /** Syntax-only preflight for shape-aware dispatch. Unlike the tryCompile functions,
@@ -443,11 +445,13 @@ function compileElementChildRows(
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
   stripTerminal?: string,
+  firstPolicy = false,
 ): { stream: ElementStream; frame: ChildFrame } | null {
   if (!nested || parent.carried.sack || parent.carried.fromV) return null;
   const fullBody = childSteps(nested, parent.params);
   if (stripTerminal && fullBody.at(-1)?.name !== stripTerminal) return null;
-  const body = stripTerminal ? fullBody.slice(0, -1) : fullBody;
+  const orderStep = firstPolicy && fullBody.at(-1)?.name === 'order' ? fullBody.at(-1) : undefined;
+  const body = stripTerminal || orderStep ? fullBody.slice(0, -1) : fullBody;
   const parts = body.length ? elementRowParts(body) : stripTerminal ? { prefix: [], suffix: [] } : null;
   if (!parts) return null;
   const pushed = pushChildScope(parent, scope);
@@ -474,7 +478,38 @@ function compileElementChildRows(
     const upper = hi === null ? empty : q` AND ${r.c.rn} <= ${hi}`;
     end = advance(end, q`SELECT ${r.c.id} AS id${carryFrag(end.carried, r)} FROM ${r} WHERE ${r.c.rn} > ${slice.offset}${upper}`);
   }
+  if (firstPolicy) {
+    const bys = (orderStep as any)?.bys ?? [];
+    if (bys.length > 1) throw new Error('element child order() supports one by() modulator');
+    const by = bys[0] ?? [];
+    const key = by.find((a: any) => typeof a === 'string');
+    const bad = by.find((a: any) => a && typeof a === 'object' && ('nested' in a || 'token' in a));
+    if (bad) throw new Error('element child order().by(token/traversal) not yet supported');
+    const dir = by.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
+    const p = end.rel.as('p');
+    const n = (end.elem === 'edge' ? edges : nodes).as('n');
+    const orderExpr = dir === 'shuffle' ? q`RANDOM()` : key ? scalarProp(elemCtx(n, end.elem), key) : n.c.id;
+    const direction = dir === 'shuffle' ? empty : dir === 'desc' ? q` DESC` : q` ASC`;
+    const cols = carriedCols(end.carried);
+    const ranked = parent.q.cte(
+      q`SELECT ${p.c.id} AS id${carryFrag(end.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${p.c[pushed.frame.ordinal]} ORDER BY ${orderExpr}${direction}, ${p.c.id}) AS rn FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`,
+      ['id', ...cols, 'rn'],
+    );
+    const r = ranked.as('r');
+    end = advance(end, q`SELECT ${r.c.id} AS id${carryFrag(end.carried, r)} FROM ${r} WHERE ${r.c.rn}=1`);
+  }
   return { stream: end, frame: pushed.frame };
+}
+
+/** Map-style element modulation: retain the first row per parent after an optional
+ * terminal order(). The origin remains live so ProductiveBy consumers can restore
+ * missing parents as explicit nulls. */
+export function tryCompileFirstElementValueRows(
+  parent: ElementStream,
+  nested: any,
+  scope: CompileScope = ROOT_SCOPE,
+): { stream: ElementStream; frame: ChildFrame } | null {
+  return compileElementChildRows(parent, nested, scope, undefined, true);
 }
 
 /** Expose the productive child rows immediately BEFORE a terminal group-scoped
@@ -516,26 +551,10 @@ export function tryCompileElementChild(
   use: ChildUse,
   scope: CompileScope = ROOT_SCOPE,
 ): { stream: ElementStream; scope: CompileScope } | null {
-  const lowered = compileElementChildRows(parent, nested, scope);
+  const lowered = compileElementChildRows(parent, nested, scope, undefined, use === 'first');
   if (!lowered) return null;
   const { stream: end, frame } = lowered;
 
   if (use === 'all') return { stream: popChildScope(end, frame), scope };
-
-  const p = end.rel.as('p');
-  const others = carriedCols(end.carried).filter((c) => c !== frame.ordinal);
-  const extra = (rel: typeof p): Expression => others.length
-    ? list(others.map((c) => q`, ${rel.c[c]}`), '')
-    : empty;
-  const ranked = parent.q.cte(
-    q`SELECT ${p.c.id} AS id${extra(p)}, ROW_NUMBER() OVER (PARTITION BY ${p.c[frame.ordinal]} ORDER BY ${p.c.id}) AS rn FROM ${p}`,
-    ['id', ...others, 'rn'],
-  );
-  const r = ranked.as('r');
-  const stream = advance(
-    end,
-    q`SELECT ${r.c.id} AS id${extra(r)} FROM ${r} WHERE ${r.c.rn}=1`,
-    { elem: end.elem, origins: parent.carried.origins, cols: ['id', ...others] },
-  );
-  return { stream, scope };
+  return { stream: popChildScope(end, frame), scope };
 }

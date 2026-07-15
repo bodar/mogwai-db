@@ -2,13 +2,13 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–5 complete, Stage 6 active
-**Baseline:** full suite 368/368, L1 2298/2298, L3 911/2041; 244 compiler tests
+**Baseline:** full suite 369/369, L1 2298/2298, L3 922/2041; 245 compiler tests
 
 ## Restart handoff — read this first after a context reset
 
 **Current checkpoint:** branch `refactor/unified-relational-lowering`; every slice through
-item 13 below is represented in this checkpoint. Item 12 is on trunk; item 13 remains a
-local checkpoint until explicitly approved for push. Run full `bun test` before every commit.
+item 14 below is represented in this checkpoint. Item 12 is on trunk; items 13–14 remain
+local checkpoints until explicitly approved for push. Run full `bun test` before every commit.
 
 **Recent completed slices:**
 
@@ -80,27 +80,36 @@ local checkpoint until explicitly approved for push. Run full `bun test` before 
     existence is now the fallback for `where`/`filter`/`not`, while the correlated SQL
     forms remain fast paths. Total fold/count children retype through `optional`, and
     sack traversal modulators consume retained first-child rows. L3 jumped 883→911.
+14. A deliberately narrow `VariantStream` is now a relational sum type (`null | scalar |
+    node/edge`) with one root GraphBinary materializer. Non-total scalar `optional()` emits
+    every productive child value and restores the original element only for misses;
+    `count()` is its first re-entry consumer. Nullable element-valued ProductiveBy record
+    fields use the same contract and selecting such a field re-enters VariantStream.
+    Element-valued `aggregate().by(__.…order().by(key))` uses an explicit child-first
+    policy (partitioned property order, never incidental CTE order) and ProductiveBy
+    restores misses as tagged nulls. This exposed and corrected the older `cap()` cardinality
+    bug: cap emits ONE collection value; only explicit `unfold()` emits members. L3 911→922.
 
 **Current Stage 6 state:** scalar traversal modulators for `project`, aliased `select`,
 and inline element `group` all use the generic child-domain compiler. Group keys consume
 `first`, non-reducing values consume `all`, and group reducers consume raw rows at the
 final key barrier. These consumers share multiset-safe origin joins rather than private
 correlated traversal parsers. ProductiveBy is explicit at group/groupCount/project/select,
-aggregate, order, linear-path, and alias-compare boundaries. L3 is 911.
+aggregate, order, linear-path, and alias-compare boundaries, including nullable element
+records and aggregate members. L3 is 922.
 
-**Immediate next slice:** introduce the deliberately scoped VariantStream/nullable-element
-carrier needed by non-total scalar `optional`, element-valued ProductiveBy record fields,
-and `aggregate().by(__.element traversal)` with a NULL fallback. Keep `barrier().dedup().by`
-separate: it needs a dedup modulator plus barrier policy, not more child lowering. Property
-groups still lack a live element parent and remain a compatibility island. Preserve
-correlated count/EXISTS as measured fast paths until Stage 8.
+**Immediate next slice:** keep `barrier().dedup().by` separate: it needs a dedup modulator
+plus barrier policy, not more child lowering. Then migrate math/format/option-choose off
+their legacy scalar fast paths and decide which additional VariantStream followers have
+unambiguous semantics. Property groups still lack a live element parent and remain a
+compatibility island. Preserve correlated count/EXISTS as measured fast paths until Stage 8.
 
-**Still pending in Stage 6:** non-total/mixed-shape `optional`, nullable element-valued
-ProductiveBy fields/aggregate modulators, and migration of math/format/option-choose off
-their legacy scalar fast path. Generic existence, total scalar/list optional, aggregate,
-sack, order, and linear-path policies are landed. Element-valued child `order()` is deferred: it needs
-encounter-order metadata that survives later lowering and root materialization, not a
-CTE-local `ORDER BY` assumption.
+**Still pending in Stage 6:** migration of math/format/option-choose off their legacy
+scalar fast paths, `barrier().dedup().by`, and broader VariantStream followers. Generic
+existence, total and non-total scalar/list optional, aggregate, sack, order, linear-path,
+and nullable ProductiveBy element policies are landed. Element-valued child order is
+currently supported for the map-style terminal-first policy; a general all-row ordered
+element stream still needs persistent encounter metadata.
 
 **Non-negotiable invariants:** productive SQL NULL is a traverser; no child row is
 different from a NULL row. Child barriers group by multiset-safe origin ordinals and use
@@ -670,8 +679,8 @@ L3 remains 873.
 5. [x] Make scalar/element reducers and folds partition by active origins and use the
    domain for total empty results.
 6. [x] Add explicit `exists`/`notExists` policies as the generic where/filter fallback.
-7. [ ] Extend nested-frame proofs through scalar/list `optional`. (Total count/fold
-   children are done; non-total output needs a scalar-or-element VariantStream.)
+7. [x] Extend nested-frame proofs through scalar/list `optional`; non-total scalar output
+   uses a tagged scalar-or-original-element VariantStream.
 
 This stage is the architectural milestone. A child traversal no longer has its own step
 vocabulary.
@@ -684,12 +693,13 @@ Migrate in increasing semantic complexity:
 2. ~~element-body `map`: first child row per origin.~~
 3. ~~homogeneous scalar/list arms for `union` and three-argument predicate `choose`.~~
 4. ~~scalar/list arms for `coalesce`, preserving first-productive-arm semantics.~~
-   Total scalar/list `optional` is done; mixed fallback remains.
+   Total scalar/list and non-total scalar `optional` are done; element-kind-changing
+   fallback remains.
 5. ~~`local`: delete its movement-only parser and use child-scoped barriers.~~
 6. `by(traversal)`: project/select/group/aggregate/sack use child cardinality; math,
    format, and option-choose still use their scalar fast path.
 7. ProductiveByStrategy: group/groupCount/project/select/aggregate/order/path/where now
-   have explicit policies; nullable element fields and dedup().by remain fail-closed.
+   have explicit policies, including nullable element fields; dedup().by remains fail-closed.
 8. ~~`where`/`filter`/`not`: inline fast paths plus generic child-existence fallback.~~
 
 Ratchet after each consumer, not only at the end.
@@ -797,8 +807,10 @@ Gremlin leaves it unspecified.
 
 ### Static GraphBinary shape
 
-Compatible shapes merge in this project. Mixed element/scalar arms stay fail-closed until
-a deliberately scoped VariantStream exists. This is orthogonal to unified child lowering.
+Compatible shapes merge in this project. A deliberately scoped VariantStream now covers
+null/scalar/one element-kind rows at optional, nullable-record, and aggregate boundaries;
+incompatible element kinds and heterogeneous lists still fail closed. This is orthogonal
+to unified child lowering.
 
 ### Recursive repeat
 
@@ -823,7 +835,7 @@ The refactor is complete when all of the following are true:
 - [ ] `compileNestedScalar`/predicate specializations are optional `tryInline*` fast
       paths with generic fallbacks.
 - [x] ProductiveByStrategy has explicit policies for every supported consumer rather
-      than a global rejection. Unsupported nullable-element/dedup shapes fail closed.
+      than a global rejection. Unsupported dedup shapes fail closed.
 - [ ] L1 is 2298/2298 and L3 has never regressed below 833 during migration.
 - [ ] Existing hot-path EXPLAIN/performance guards remain green.
 
