@@ -315,13 +315,17 @@ describe('compiler SQL snapshots', () => {
     // list-of-lists, unfold() explodes to per-list rows, order(Scope.local) sorts each.
     const g = read('g.V().group().by().by(__.out().label().fold()).select(Column.values).unfold().order(Scope.local)');
     expect(g.shape).toEqual({ kind: 'jsonbList' });
-    // The neighbour-list is one correlated JSONB array per key (edge-id order).
+    // The neighbour-list is folded from generic child rows at the group boundary.
     expect(g.sql).toContain('json_group_array');
+    expect(g.sql).toContain('ON gf.o0=gp.o0');
+    expect(g.sql).not.toContain('MAX((SELECT jsonb(COALESCE(json_group_array');
     // A pre-fold op folds into the correlated subquery (dedup/limit/tail).
     expect(read('g.V().group().by().by(__.out().label().dedup().fold()).select(Column.values).unfold()').shape).toEqual({ kind: 'jsonbList' });
-    // A non-element key with a neighbour-list value defers (MAX would pick one member).
-    expect(() => compile('g.V().group().by("name").by(__.out().label().fold()).select(Column.values)', {}))
-      .toThrow('non-element key and a neighbour-list value not yet supported');
+    // A scalar key now works too: the fold owns the complete final key domain, so
+    // there is no per-parent list for MAX() to pick arbitrarily.
+    const scalarKey = read('g.V().group().by("name").by(__.out().label().fold()).select(Column.values)');
+    expect(scalarKey.shape).toEqual({ kind: 'jsonbList' });
+    expect(scalarKey.sql).toContain('GROUP BY gk');
   });
 
   test("cap('a') of a group side-effect retypes to a MapStream on a follower", () => {
@@ -1381,6 +1385,8 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V(1).map(__.values("name").toUpper())').sql).toContain('upper(p.v) AS v');
     expect(read('g.V(1).map(__.out().values("name").order().by(Order.desc).limit(1))').sql)
       .toContain('ROW_NUMBER() OVER (PARTITION BY p.o0 ORDER BY p.v DESC');
+    expect(read('g.V(1).local(__.out().values("name").tail(2))').sql)
+      .toContain('PARTITION BY p.o0 ORDER BY p.encounter DESC');
     const reducedChild = read('g.V().map(__.out().values("name").is("lop").count())');
     expect(reducedChild.sql).toContain('COUNT(s.encounter) AS v');
     expect(reducedChild.sql).toContain('LEFT JOIN');
@@ -2210,6 +2216,33 @@ describe('compiler execution semantics', () => {
     // their full outgoing-weight domain (1.9 each) to the shared person reduction.
     expect(grouped('g.V(1).union(__.identity(),__.identity()).group().by(T.label).by(__.outE().values("weight").sum())'))
       .toEqual({ person: 3.8 });
+  });
+
+  test('group fold collects child rows once per final key, including empty groups', () => {
+    const store = seededStore();
+    const rows = Object.fromEntries(
+      run(store, 'g.V().group().by(T.label).by(__.out().label().fold())')
+        .map((r) => [r.gk, JSON.parse(r.gv)]),
+    );
+    expect(rows.person.sort()).toEqual(['person', 'person', 'software', 'software', 'software', 'software']);
+    expect(rows.software).toEqual([]);
+
+    const duplicate = run(
+      store,
+      'g.V(1).union(__.identity(),__.identity()).group().by(T.label).by(__.out().label().fold())',
+    );
+    expect(JSON.parse(duplicate[0].gv).sort())
+      .toEqual(['person', 'person', 'person', 'person', 'software', 'software']);
+
+    // A named group side effect retains its live source stream, so cap() reuses the
+    // identical shaped child barrier instead of resurrecting a correlated compiler.
+    const sideEffect = run(
+      store,
+      'g.V().group("a").by(T.label).by(__.out().label().fold()).cap("a")',
+    );
+    const sideEffectRows = Object.fromEntries(sideEffect.map((r) => [r.gk, JSON.parse(r.gv)]));
+    expect(sideEffectRows.person.sort()).toEqual(rows.person);
+    expect(sideEffectRows.software).toEqual(rows.software);
   });
 
   test('is(P) filters a scalar stream; TextP is LIKE', () => {
