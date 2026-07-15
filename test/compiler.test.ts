@@ -692,6 +692,10 @@ describe('compiler SQL snapshots', () => {
     expect(p.shape).toEqual({ kind: 'value' });
     expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS v");
     expect(p.sql).toContain('ON n.id=p.a0');
+    const child = read('g.V(1).as("a").out().select("a").by(__.out().count())');
+    expect(child.shape).toEqual({ kind: 'value', as: 'long' });
+    expect(child.sql).toContain('SELECT p.a0 AS id');
+    expect(child.sql).toContain('GROUP BY d.o0');
   });
 
   test('multi-label select → map shape with per-entry prefixed columns', () => {
@@ -759,6 +763,30 @@ describe('compiler SQL snapshots', () => {
     expect(element.sql).toContain('ON b1.o0=b0.o0');
     expect(read('g.V(1).project("self","friend").by().by(__.out().values("name")).select("self").out().count()').shape)
       .toEqual({ kind: 'count' });
+  });
+
+  test('multi-select traversal fields re-root generic children on each labelled element', () => {
+    const selected = read('g.V(1).as("a").out("knows").as("b").select("a","b").by(__.out().count()).by(__.values("name"))');
+    expect(selected.shape).toEqual({
+      kind: 'map',
+      entries: [
+        { key: 'a', prefix: 'e0', sub: 'value' },
+        { key: 'b', prefix: 'e1', sub: 'value' },
+      ],
+    });
+    expect(selected.sql).toContain('SELECT p0.a0 AS id');
+    expect(selected.sql).toContain('SELECT p1.a1 AS id');
+    expect(selected.sql).toContain('ON b1.o0=b0.o0');
+    const mixed = read('g.V(1).as("a").out("knows").as("b").select("a","b").by("name").by(__.out().count())');
+    expect(mixed.sql).toContain('vp0.node=p0.a0');
+    const element = read('g.V(1).as("a").out("knows").as("b").select("a","b").by().by(__.out().count())');
+    expect(element.shape).toEqual({
+      kind: 'map',
+      entries: [
+        { key: 'a', prefix: 'e0', sub: 'vertex' },
+        { key: 'b', prefix: 'e1', sub: 'value' },
+      ],
+    });
   });
 
   test('record fields re-enter element/scalar/list lowering', () => {
@@ -895,7 +923,6 @@ describe('compiler SQL snapshots', () => {
 
   test('deferred long-tail forms error clearly (never silently mis-execute)', () => {
     expect(() => compile('g.V().select(Pop.first,"a")', {})).toThrow('select(Pop.first) not yet supported');
-    expect(() => compile('g.V().as("a").select("a").by(__.out().count())', {})).toThrow('by(traversal) modulator not yet supported');
     expect(() => compile('g.V().as("a").select("a").by(T.id)', {})).toThrow('by(T.id) modulator not yet supported');
     expect(() => compile('g.V().as("a").out().as("b").select("a","b").order()', {})).toThrow('order() on a record value not yet supported');
     expect(() => compile('g.V().select("x")', {})).toThrow('no such label');
@@ -1981,6 +2008,8 @@ describe('compiler execution semantics', () => {
     const store = seededStore();
     const names = run(store, 'g.V(1).as("a").out("knows").as("b").select("b").by("name")').map((r) => r.v).sort();
     expect(names).toEqual(['josh', 'vadas']);
+    expect(run(store, 'g.V(1).as("a").out().select("a").by(__.out().count())').map((r) => r.v))
+      .toEqual([3, 3, 3]);
   });
 
   test('multi-label select yields the paired elements per traverser', () => {
@@ -1989,6 +2018,14 @@ describe('compiler execution semantics', () => {
     const rows = run(store, 'g.V(1).as("a").out("knows").as("b").select("a","b").by("name")');
     const pairs = rows.map((r) => [r.e0_v, r.e1_v]).sort((x, y) => x[1].localeCompare(y[1]));
     expect(pairs).toEqual([['marko', 'josh'], ['marko', 'vadas']]);
+    expect(run(store, 'g.V(1).as("a").out("knows").as("b").select("a","b").by(__.out().count()).by(__.values("name"))')
+      .map((r) => [r.e0_v, r.e1_v]).sort((x, y) => x[1].localeCompare(y[1])))
+      .toEqual([[3, 'josh'], [3, 'vadas']]);
+    expect(run(store, 'g.V(1).as("a").out("knows").as("b").select("a","b").by("name").by(__.out().count())')
+      .map((r) => [r.e0_v, r.e1_v]).sort((x, y) => x[1] - y[1]))
+      .toEqual([['marko', 0], ['marko', 2]]);
+    expect(run(store, 'g.V(1).as("a").out("knows").as("b").select("a","b").by().by(__.out().count()).select("a").out().count()')
+      .map((r) => r.v)).toEqual([6]);
   });
 
   test('project builds columns from the current traverser', () => {

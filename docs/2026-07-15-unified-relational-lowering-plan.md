@@ -2,13 +2,13 @@
 
 **Date:** 2026-07-15  
 **Status:** in progress; Stages 0–5 complete, Stage 6 active
-**Baseline:** L1 2298/2298, L3 874/2041; latest focused checkpoint: 235 compiler tests
+**Baseline:** L1 2298/2298, L3 876/2041; latest focused checkpoint: 236 compiler tests
 
 ## Restart handoff — read this first after a context reset
 
 **Last committed checkpoint:** branch `refactor/unified-relational-lowering`, commit
-`1add322` (`unify mixed project by modulators`). The next local commit contains the bare
-element project slice described below. Work is local-only: do not push or merge to trunk.
+`8bc5b60` (`unify heterogeneous project by fields`). The next local commit contains the
+labelled select slice described below. Work is local-only: do not push or merge to trunk.
 Run the full `bun test` suite before every local commit.
 
 **Recent completed slices:**
@@ -31,6 +31,11 @@ Run the full `bun test` suite before every local commit.
    traversal scalar fields. They retain the full public element payload plus the internal
    rowid, so selecting the field re-enters ordinary movement. Node and edge execution,
    scalar productivity, and movement re-entry are covered. L3 remains 874.
+6. Single- and multi-label `select(...).by(__.<scalar child>)` re-root ordinary element
+   streams on the selected alias, then use the same generic child-first compiler. Mixed
+   property/bare fields join on one outer origin, so duplicate parents stay distinct and
+   element fields retain movement re-entry. The two PathProcessorStrategy select scenarios
+   now pass; L3 ratcheted 874→876.
 
 **Current Stage 6 slice:** traversal-valued `project().by()` is now the first generic
 by-consumer. An outer origin identifies each parent; every scalar child modulator lowers
@@ -40,8 +45,9 @@ keys, `T.id`/`T.label`, and complete bare vertex/edge fields can mix with traver
 in the same relation. Element fields retain their internal rowid for downstream movement.
 L3 is 874.
 
-**Immediate next slice:** migrate traversal-valued labelled `select` onto the generic
-child-stream/productivity seam, then migrate group key/value consumers.
+**Immediate next slice:** migrate group key/value consumers onto the generic child-stream
+and explicit productivity seam. Scalar traversal select is complete; list/element-valued
+select modulators remain a later shaped-child extension.
 Do not add more recognized syntax to `compileNestedScalar`: treat its current correlated
 SQL cases as optional fast paths and add generic child-stream fallbacks with explicit
 first/productive cardinality. Other consumers to inventory afterward are sack, math,
