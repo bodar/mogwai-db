@@ -361,6 +361,23 @@ export function lowerScalarGroupCount(s: ScalarStream): GroupStream {
  * recompiling group semantics based on terminal position. */
 export function compileFromGroup(s: GroupStream, steps: PStep[], at: number): LoweringResult {
   const step = steps[at];
+  // is(typeOf(MAP)) — a group IS a Map → identity.
+  if (step.name === 'is') {
+    const pred = (step.args ?? [])[0];
+    const tn = pred && typeof pred === 'object' && pred.op === 'typeOf'
+      ? (() => { const a = pred.values?.[0]; return (a && typeof a === 'object' && 'gtype' in a) ? String(a.gtype) : typeof a === 'string' ? a : null; })()
+      : null;
+    if (tn && tn.toUpperCase() === 'MAP') return continueLowering(s, at + 1);
+    throw new Error('is() on a group value supports only is(typeOf(GType.MAP))');
+  }
+  // count()/count(Scope.local) — the number of map entries (distinct keys). Scope.local
+  // on a Map counts its size, same value.
+  if (step.name === 'count') {
+    if (s.key.kind !== 'scalar') throw new Error('count() over a non-scalar-key group not yet supported');
+    const g = s.rel.as('g');
+    const rel = s.q.cte(q`SELECT COUNT(DISTINCT ${g.c.gk}) AS v FROM ${g}`, ['v']);
+    return continueLowering(toScalarStream(withoutCarried(carryOf(s)), rel, 'long', 'count'), at + 1);
+  }
   const column = step.name === 'select'
     ? step.args.map((a: any) => a && typeof a === 'object' && a.column).find((c: any) => c === 'keys' || c === 'values')
     : undefined;

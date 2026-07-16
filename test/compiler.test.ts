@@ -393,6 +393,20 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile("g.V().values('name').groupCount('a').cap('a')", {})).toThrow();
   });
 
+  test('P3 Stage C2: count()/is(typeOf(MAP)) re-enter a group value', () => {
+    // count() over a group = number of entries (distinct keys) → COUNT(DISTINCT gk)
+    const c = read('g.V().group().by(T.label).count()');
+    expect(c.shape).toEqual({ kind: 'count' });
+    expect(c.sql).toContain('COUNT(DISTINCT');
+    // count(Scope.local) on a Map = its size, same value
+    expect(read('g.V().group().by(T.label).count(Scope.local)').shape).toEqual({ kind: 'count' });
+    // is(typeOf(MAP)) is identity — a group IS a Map
+    expect(read('g.V().groupCount().by(T.label).is(typeOf(GType.MAP))').shape.kind).toBe('group');
+    // non-scalar-key count + non-MAP typeOf fail closed
+    expect(() => compile('g.V().group().count()', {})).toThrow('non-scalar-key group');
+    expect(() => compile('g.V().groupCount().by(T.label).is(typeOf(GType.LIST))', {})).toThrow('only is(typeOf(GType.MAP))');
+  });
+
   test('group()/groupCount() always lowers to GroupStream; Column selection derives MapStream', () => {
     // A terminal GroupStream reaches the existing row-folding groupBuffer Map.
     expect(read('g.V().groupCount().by("name")').shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
