@@ -290,6 +290,29 @@ B2 (choose/coalesce over a scalar) is now only ~7 and needs a heavy child-engine
 generalization → deprioritized. Next bold target chosen from the refreshed data,
 not the pre-B1 ranking.
 
+## 4c. Value-streams-first-class continued — sack over scalar (L3 1002→1021, +19)
+
+`withSack()` was silently dropped for `inject`-rooted chains (inject compiles via
+`routeWrite`, which never received `sackInit`); threaded it through
+`routeWrite → compileInject`, seeding the carried `sk` column on the VALUES relation
+like `seedSource`. sack mutate/read over a `ScalarStream` (`scalar.ts`
+`lowerScalarSack`) folds the current value into the sack (no by() — the scalar IS the
+value) / rebinds to the sack value. `combineSack`+`SACK_OPS` moved to `scalar.ts`; the
+element sack StepFn reuses them (one implementation). Committed, CI green.
+
+**Value-streams-first-class is now substantially DONE as a coherent abstraction.** A
+scalar traverser supports: is / transforms / order / limit / dedup / reducers / fold /
+unfold (pre-existing) + and/or/not/filter/where/constant (B1) + sack (this). Total for
+the theme: +65 (956→1021), two commits, both CI green.
+
+**The one true remnant** is `choose`/`coalesce` over a scalar parent (~7): its arms are
+barriers over gated subsets (`inject(1).choose(__.is(1), __.constant(10).fold(),
+__.fold())`), which needs a gated-scalar-arm engine — disproportionate for 7 scenarios,
+and genuinely separate BRANCH-family work, not a dangling half of the value-stream
+abstraction. Deferred as scoped follow-up. `math`/`groupCount` over scalar are red
+herrings (blocked by the BIGDECIMAL platform wall and by choose-options/property-group
+deferrals respectively) — not value-stream gaps.
+
 ## 5. What NOT to do
 
 - Do not chase the platform walls (§2) — they are correctly closed.
