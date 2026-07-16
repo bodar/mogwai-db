@@ -2,7 +2,7 @@
 
 **Status:** in progress. Anchors the multi-commit P3 from
 `docs/2026-07-16-compiler-consolidation-plan.md` §3. **Baseline at start:** L3 1046.
-**Now: L3 1061** (Stage A + B1 + B2, all CI-green on trunk).
+**Now: L3 1064** (Stage A + B1 + B2 + C1, all CI-green on trunk).
 
 - **Stage A LANDED** (1046→1047): `path()` re-enterable — `count()`/`is(typeOf(PATH))`.
 - **Stage B1 LANDED** (1047→1050): `valueMap()` → per-element `MapStream`; origin-aware
@@ -10,10 +10,17 @@
 - **Stage B2 LANDED** (1050→1061): thread the origin ordinal through every per-row list
   op (was a crash on `select(Column.values).unfold().<setop>`); `select(unbound-label)`
   → empty.
-- **Stage C (next):** biggest clean lever is scalar-stream `groupCount()`/`group()`
-  (`values('name').groupCount()` → Map{value:count}, ~18) — a scalar→group barrier, no
-  P4. Then group-value re-entry (`unfold`→Map.Entry, `count`/`is`/`order` on a group).
-  Element-VALUE group maps stay the P4 wall.
+- **Stage C1 LANDED** (1061→1064): scalar-stream `groupCount()` barrier
+  (`values('name').groupCount()` → Map{value:count}); `GroupKey.as` frames typed keys.
+- **Stage C remaining (next):** group-value re-entry (`unfold`→Map.Entry, `count`/`is`/
+  `order`/`select(label)` on a group), keys→SET typing for
+  `select(Column.keys).dedup().is(typeOf(SET))`, named `groupCount('a')` over a scalar,
+  `elementMap()` re-entry. Element-VALUE group maps stay the **P4 wall** (dynamic-tag
+  VariantStream).
+
+**Process note:** `bun test` does NOT typecheck; `mise run ci` runs `tsc`. Run
+`bunx tsc --noEmit` after EVERY edit incl. test files — a `.shape.key` union-narrowing
+slip in a test passed `bun test` but broke CI (fixed in a follow-up commit).
 
 ## Root cause (one gap, three shapes)
 
