@@ -38,15 +38,15 @@ const isLocal = (step: PStep): boolean =>
   (step.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local');
 
 const payload = (s: ScalarStream, p: ReturnType<ScalarStream['rel']['as']>): Expression =>
-  q`${s.result === 'number' ? q`${p.c.v} AS v, ${p.c.vt} AS vt` : q`${p.c.v} AS v`}${s.encounter ? q`, ${p.c[s.encounter]} AS ${s.encounter}` : empty}`;
+  q`${s.result === 'number' ? q`${p.c.v} AS v, ${p.c.vt} AS vt` : q`${p.c.v} AS v`}${s.encounter ? q`, ${p.c[s.encounter]} AS ${s.encounter}` : empty}${s.vtype ? q`, ${p.c[s.vtype]} AS ${s.vtype}` : empty}`;
 
 const cols = (s: ScalarStream): string[] =>
-  [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...(s.encounter ? [s.encounter] : []), ...carriedCols(s.carried)];
+  [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...(s.encounter ? [s.encounter] : []), ...(s.vtype ? [s.vtype] : []), ...carriedCols(s.carried)];
 
 function rowPreserving(s: ScalarStream, suffix: Expression): ScalarStream {
   const p = s.rel.as('p');
   const rel = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)} FROM ${p}${suffix}`, cols(s));
-  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter);
+  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
 }
 
 function scalarTransform(step: PStep, currentAs: ValueType | undefined, expr: Expression, next?: PStep): { expr: Expression; as?: ValueType } {
@@ -92,21 +92,28 @@ function fuseScalarSegment(s: ScalarStream, steps: readonly PStep[], from: numbe
       continue;
     }
     if (step.name === 'is') {
-      predicates.push(predicateSql(expr, step.args[0]));
+      // typeOf resolves against the value's type at THIS position: a transform has made
+      // it compile-time-known (staticAs = the transformed `as`); otherwise the per-row
+      // stored vtype column (if any) answers it, else a storage-class fallback.
+      const typeCtx = { staticAs: as, vtypeExpr: (!transformed && s.vtype) ? p.c[s.vtype] : undefined };
+      predicates.push(predicateSql(expr, step.args[0], typeCtx));
       continue;
     }
     break;
   }
+  // A transform changes the value's type → the per-row vtype no longer describes it
+  // (framing follows the new `as`); a pure is()-only segment preserves it.
+  const keepVtype = !transformed && s.vtype;
   const valueCols = transformed
     ? q`${expr} AS v`
     : q`${p.c.v} AS v${s.result === 'number' ? q`, ${p.c.vt} AS vt` : empty}`;
   const where = predicates.length ? q` WHERE ${list(predicates, ' AND ')}` : empty;
   const rel = s.q.cte(
-    q`SELECT ${valueCols}${s.encounter ? q`, ${p.c[s.encounter]}` : empty}${carryFrag(s.carried, p)} FROM ${p}${where}`,
-    ['v', ...(!transformed && s.result === 'number' ? ['vt'] : []), ...(s.encounter ? [s.encounter] : []), ...carriedCols(s.carried)],
+    q`SELECT ${valueCols}${s.encounter ? q`, ${p.c[s.encounter]}` : empty}${keepVtype ? q`, ${p.c[s.vtype!]} AS ${s.vtype}` : empty}${carryFrag(s.carried, p)} FROM ${p}${where}`,
+    ['v', ...(!transformed && s.result === 'number' ? ['vt'] : []), ...(s.encounter ? [s.encounter] : []), ...(keepVtype ? [s.vtype!] : []), ...carriedCols(s.carried)],
   );
   return {
-    stream: toScalarStream(carryOf(s), rel, as, transformed ? 'value' : s.result, s.encounter, transformed ? undefined : s.productiveNull),
+    stream: toScalarStream(carryOf(s), rel, as, transformed ? 'value' : s.result, s.encounter, transformed ? undefined : s.productiveNull, keepVtype ? s.vtype : undefined),
     stop: i,
   };
 }
@@ -120,7 +127,7 @@ function partitionedSlice(s: ScalarStream, offset: number, limit: number | null)
   const r = derived(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER (${over}) AS rn FROM ${p}`, rankedCols, 'r');
   const hi = limit == null ? empty : q` AND ${r.c.rn}<=${offset + limit}`;
   const rel = derived(q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn}>${offset}${hi}`, cols(s), 'slice');
-  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter);
+  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
 }
 
 function partitionedTail(s: ScalarStream, limit: number): ScalarStream {
@@ -140,7 +147,7 @@ function partitionedTail(s: ScalarStream, limit: number): ScalarStream {
     cols(s),
     'tail_rows',
   );
-  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter);
+  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
 }
 
 function partitionedOrder(s: ScalarStream, order: Expression): ScalarStream {
@@ -148,9 +155,12 @@ function partitionedOrder(s: ScalarStream, order: Expression): ScalarStream {
   const p = s.rel.as('p');
   const partitions = s.carried.origins.map((name) => p.c[name]);
   const over = partitions.length ? q`PARTITION BY ${list(partitions, ', ')} ORDER BY ${order}, ${p.c[s.encounter]}` : q`ORDER BY ${order}, ${p.c[s.encounter]}`;
+  // order re-projects the encounter column (ROW_NUMBER) but preserves each row's value +
+  // stored type. Column order must match cols(s) = [v,(vt),encounter,(vtype),carried].
   const valuePayload = s.result === 'number' ? q`${p.c.v} AS v, ${p.c.vt} AS vt` : q`${p.c.v} AS v`;
-  const rel = s.q.cte(q`SELECT ${valuePayload}, ROW_NUMBER() OVER (${over}) AS ${s.encounter}${carryFrag(s.carried, p)} FROM ${p}`, cols(s));
-  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter);
+  const vtypeCol = s.vtype ? q`, ${p.c[s.vtype]} AS ${s.vtype}` : empty;
+  const rel = s.q.cte(q`SELECT ${valuePayload}, ROW_NUMBER() OVER (${over}) AS ${s.encounter}${vtypeCol}${carryFrag(s.carried, p)} FROM ${p}`, cols(s));
+  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
 }
 
 function partitionedDedup(s: ScalarStream): ScalarStream {
@@ -163,7 +173,7 @@ function partitionedDedup(s: ScalarStream): ScalarStream {
     'r',
   );
   const rel = derived(q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn}=1`, cols(s), 'dedup_rows');
-  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter);
+  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
 }
 
 function appendScalar(s: ScalarStream, step: PStep): ScalarStream {
@@ -255,7 +265,7 @@ export function lowerScalarFilter(s: ScalarStream, step: PStep): ScalarStream {
     cond = scalarChildProduces(stepChain(arg.nested, s.params), cur, s.params);
   }
   const rel = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)} FROM ${p} WHERE ${cond}`, cols(s));
-  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull);
+  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
 }
 
 /** sack over a scalar stream. The mutate form sack(Operator.x) folds the CURRENT VALUE
@@ -282,7 +292,7 @@ export function lowerScalarSack(s: ScalarStream, step: PStep): ScalarStream {
     q`SELECT ${payload(s, p)}${carriedProj.length ? q`, ${list(carriedProj, ', ')}` : empty} FROM ${p}`,
     cols(s),
   );
-  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull);
+  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
 }
 
 /** constant(x): replace the current object with the literal x, one per input row. Shape-
