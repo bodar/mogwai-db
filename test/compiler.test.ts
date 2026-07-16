@@ -3228,6 +3228,23 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V().has("kind","human").count()').map((r) => r.v)).toEqual([4]);
   });
 
+  test('property(k, __.trav): correlated value from the read spine', () => {
+    const store = seededStore();
+    // scalar copy: each person's age → a new key, evaluated per element
+    run(store, 'g.V().has("age").property("a2", __.values("age"))');
+    expect(run(store, 'g.V().values("a2")').map((r) => r.v).sort((a, b) => a - b)).toEqual([27, 29, 32, 35]);
+    // count-shaped value: marko(1) has 3 out-edges → deg=3, stored as a Long vtype
+    run(store, 'g.V(1).property("deg", __.outE().count())');
+    expect(run(store, 'g.V(1).values("deg")').map((r) => r.v)).toEqual([3]);
+    expect(store.query("SELECT vtype FROM vertex_properties WHERE key='deg'", []).map((r: any) => r.vtype)).toEqual(['long']);
+    // empty nested traversal → the property is NOT written (lop=3 has no age)
+    run(store, 'g.V(3).property("noage", __.values("age"))');
+    expect(run(store, 'g.V(3).values("noage")').length).toBe(0);
+    // edge property from a traversal value
+    run(store, 'g.E().property("checked", __.constant(true))');
+    expect(run(store, 'g.E().values("checked")').every((r: any) => r.v === 1 || r.v === true)).toBe(true);
+  });
+
   test('property() cardinality: single replaces, list appends, set dedups (W4)', () => {
     const store = seededStore();
     // single replaces the existing value
