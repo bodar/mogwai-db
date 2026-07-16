@@ -387,7 +387,8 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.inject(15).asNumber(GType.BYTE).groupCount()').shape)
       .toEqual({ kind: 'group', key: { kind: 'scalar', productive: true, as: 'byte' }, val: { kind: 'count' } });
     // null keys are counted (groupCount is productive)
-    expect(read('g.inject(10,20,null,20).groupCount()').shape.key).toEqual({ kind: 'scalar', productive: true });
+    expect(read('g.inject(10,20,null,20).groupCount()').shape)
+      .toEqual({ kind: 'group', key: { kind: 'scalar', productive: true }, val: { kind: 'count' } });
     // named side-effect groupCount('a') over a scalar defers (needs side-effect state)
     expect(() => compile("g.V().values('name').groupCount('a').cap('a')", {})).toThrow();
   });
