@@ -2,7 +2,8 @@ import { q, list, empty, Relation, type Expression } from '../q.ts';
 import { edges } from '../schema.ts';
 import { stepChain, type Step } from '../frontend.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, tryInlinePredicate, predicateSql, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
-import { advance, elemRel, prevRel, carryFrag, carriedCols, aliasColsOf, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
+import { advance, elemRel, prevRel, carryFrag, carriedCols, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
+import { type AliasShape } from './alias.ts';
 import { isListChild, isScalarChild, pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueRows } from './child.ts';
 import { carryOf, toListStream, toScalarStream, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from './stream.ts';
 
@@ -82,9 +83,35 @@ function assertForkSafe(name: string, st: ElementStream): void {
 // element-KIND conflict (union(outE(), out())) and on a dynamic-length (array/repeat)
 // arm — both would need the tagged-array regime (a separate, larger piece).
 
-/** The carried columns EXCLUDING path positions (aliases + origin/sack/fromV). These
- *  must be identical across arms; only path is padded. */
-const nonPathCols = (c: Carried): string[] => carriedCols({ ...c, path: undefined });
+/** The RIGID carried columns — origin/sack/fromV/encounter (everything but aliases and
+ *  path). These are per-traverser physical state a branch cannot fork/merge, so they
+ *  must be identical across arms; aliases fork/merge (mergeAliasMaps) and path pads. */
+const rigidCols = (c: Carried): string[] => carriedCols({ ...c, aliases: new Map(), path: undefined });
+
+/** Union the arms' alias maps onto the shared pre-branch seed → the merged label set.
+ *  A label bound before the branch keeps its seed column (every arm inherited it); a
+ *  label first bound INSIDE an arm gets a fresh canonical column appended after the seed
+ *  columns (arms mint columns independently from the same seed size, so their raw a{n}
+ *  collide — armProjection remaps each arm's physical column onto the canonical one).
+ *  `shapes` unions across arms. `binds` stays static only when every arm binds the label
+ *  the same known number of times; a label bound in only some arms, or a differing count,
+ *  or a dynamic (repeat/arm) bind → undefined, so Pop resolves at runtime off the array. */
+function mergeAliasMaps(seed: AliasMap, arms: Carried[]): AliasMap {
+  const order: string[] = [...seed.keys()];
+  for (const a of arms) for (const lbl of a.aliases.keys()) if (!order.includes(lbl)) order.push(lbl);
+  const merged = new Map<string, AliasEntry>();
+  order.forEach((lbl, i) => {
+    const col = seed.get(lbl)?.col ?? `a${i}`; // seed labels keep a{i} (== their mint order)
+    const perArm = arms.map((a) => a.aliases.get(lbl));
+    const shapes = new Set<AliasShape>();
+    for (const e of perArm) if (e) for (const sh of e.shapes) shapes.add(sh);
+    const counts = perArm.map((e) => e?.binds ?? 0); // absent in an arm → 0 bindings on that path
+    const defined = perArm.every((e) => !e || e.binds !== undefined);
+    const binds = defined && counts.every((c) => c === counts[0]) ? counts[0] : undefined;
+    merged.set(lbl, { col, shapes, binds });
+  });
+  return merged;
+}
 
 /** Merge cols() PATH states by padding to the max length. */
 function mergePaths(arms: PathState[]): PathState {
@@ -103,26 +130,34 @@ function mergePaths(arms: PathState[]): PathState {
   return { kind: 'cols', cols: merged };
 }
 
-/** Assert every arm agrees with `seed` on non-path carried cols (a NEW as()/sack inside
- *  an arm diverges → fail closed) and merge the arms' PATH by padding. Returns the
- *  merged Carried (seed's non-path cols + the padded path). */
+/** Merge the arms into the post-branch Carried: fork/merge the alias label set
+ *  (mergeAliasMaps), pad the PATH, and assert the RIGID cols (origin/sack/fromV/encounter)
+ *  agree across arms (those are per-traverser state a fork can't reconcile → fail closed).
+ *  Divergent as() labels are NO LONGER rejected — they union into the merged label set and
+ *  armProjection pads each arm's missing labels with an empty (NULL) history. */
 function mergeBranchCarried(seed: Carried, arms: Carried[]): Carried {
-  const want = nonPathCols(seed);
+  const want = rigidCols(seed);
   for (const a of arms) {
-    const got = nonPathCols(a);
+    const got = rigidCols(a);
     if (got.length !== want.length || got.some((x, i) => x !== want[i]))
-      throw new Error('branch arms disagree on carried columns (a step binding new as()/sack state inside a branch arm not yet supported)');
+      throw new Error('branch arms disagree on carried columns (a step binding new sack/origin state inside a branch arm not yet supported)');
   }
-  return { ...seed, path: seed.path ? mergePaths(arms.map((a) => a.path!)) : undefined };
+  return { ...seed, aliases: mergeAliasMaps(seed.aliases, arms), path: seed.path ? mergePaths(arms.map((a) => a.path!)) : undefined };
 }
 
-/** One arm's merge SELECT column list, padding its missing (trailing) path positions
- *  with `NULL` so the UNION ALL lines up with `out`. Order MUST match carriedCols(out):
- *  id, aliases, origin/sack/fromV, then path LAST. */
+/** One arm's merge SELECT column list. Order MUST match carriedCols(out): id, aliases,
+ *  origin/sack/fromV/encounter, then path LAST. Each canonical alias column selects the
+ *  arm's PHYSICAL column that holds that label (arms mint columns independently, so the
+ *  names can differ → alias with `AS`); a label the arm never bound is padded with a NULL
+ *  history (drop-not-throw: select() of it drops the traverser). Trailing path positions a
+ *  shorter arm lacks are likewise NULL-padded. */
 function armProjection(arm: ElementStream, out: Carried): string {
-  const parts = ['id', ...aliasColsOf(out.aliases), ...out.origins];
-  if (out.sack) parts.push(out.sack);
-  if (out.fromV) parts.push(out.fromV);
+  const parts = ['id'];
+  for (const [label, entry] of out.aliases) {
+    const got = arm.carried.aliases.get(label);
+    parts.push(!got ? `NULL AS ${entry.col}` : got.col === entry.col ? entry.col : `${got.col} AS ${entry.col}`);
+  }
+  parts.push(...rigidCols(out));
   if (out.path?.kind === 'cols') {
     const armLen = arm.carried.path?.kind === 'cols' ? arm.carried.path.cols.length : 0;
     out.path.cols.forEach((pos, j) => parts.push(j < armLen ? pos.col : `NULL AS ${pos.col}`));
@@ -145,9 +180,9 @@ export const union: StepFn = (s, st) => {
     ?? (() => { throw new Error(`union() branch __.${armDescription(b.nested, st.params)} not yet supported (scalar/projection body)`); })());
   const elem = ends[0].elem;
   if (ends.some((e) => e.elem !== elem)) throw new Error('union() branches produce different element kinds (mixed-shape) not yet supported');
-  const out = mergeBranchCarried(st.carried, ends.map((e) => e.carried)); // pads ragged path arms
+  const out = mergeBranchCarried(st.carried, ends.map((e) => e.carried)); // merges alias sets, pads ragged path arms
   const selects = ends.map((e) => q`SELECT ${armProjection(e, out)} FROM ${e.rel}`);
-  return advance(st, list(selects, ' UNION ALL '), { elem, path: out.path });
+  return advance(st, list(selects, ' UNION ALL '), { elem, aliases: out.aliases, path: out.path });
 };
 
 /** Homogeneous scalar union through the generic child compiler. Every arm applies
@@ -225,7 +260,7 @@ export const optional: StepFn = (s, st) => {
   const baseSt: ElementStream = { ...seedSt, rel: base };
   const hit = q`SELECT ${armProjection(end, out)} FROM ${end.rel}`;
   const miss = q`SELECT ${armProjection(baseSt, out)} FROM ${base} WHERE ${ord} NOT IN (SELECT ${ord} FROM ${end.rel})`;
-  return advance(st, list([hit, miss], ' UNION ALL '), { elem: end.elem, origins: st.carried.origins, path: out.path });
+  return advance(st, list([hit, miss], ' UNION ALL '), { elem: end.elem, aliases: out.aliases, origins: st.carried.origins, path: out.path });
 };
 
 /** Shape-changing optional: productive scalar child rows win; an unproductive
@@ -266,7 +301,7 @@ export const coalesce: StepFn = (s, st) => {
     const notPrior = list(ends.slice(0, k).map((pr) => q`${ord} NOT IN (SELECT ${ord} FROM ${pr.rel})`), ' AND ');
     return q`SELECT ${sel} FROM ${end.rel} WHERE ${notPrior}`;
   });
-  return advance(st, list(parts, ' UNION ALL '), { elem, origins: st.carried.origins, path: out.path });
+  return advance(st, list(parts, ' UNION ALL '), { elem, aliases: out.aliases, origins: st.carried.origins, path: out.path });
 };
 
 /** Homogeneous scalar coalesce: compile every arm from one ordinal-tagged seed, then
@@ -317,7 +352,7 @@ export const flatMap: StepFn = (s, st) => {
   const nested = s.args[0]?.nested;
   const end = tryCompileElementTraversal(st, nested)
     ?? (() => { throw new Error(`flatMap() branch __.${armDescription(nested, st.params)} not yet supported (scalar/projection body)`); })();
-  mergeBranchCarried(st.carried, [end.carried]); // reject a NEW as() bound inside (non-path cols must agree); path just rides on `end`
+  mergeBranchCarried(st.carried, [end.carried]); // single arm: assert rigid cols agree; a new as() label rides on `end`
   return end;
 };
 
@@ -544,9 +579,9 @@ export const choose: StepFn = (s, st) => {
   if (thenEnd.elem !== elseEnd.elem)
     throw new Error('choose() branches produce different element kinds (mixed-shape) not yet supported');
 
-  const out = mergeBranchCarried(st.carried, [thenEnd.carried, elseEnd.carried]); // pads ragged path arms
+  const out = mergeBranchCarried(st.carried, [thenEnd.carried, elseEnd.carried]); // merges alias sets, pads ragged path arms
   const merged = list([q`SELECT ${armProjection(thenEnd, out)} FROM ${thenEnd.rel}`, q`SELECT ${armProjection(elseEnd, out)} FROM ${elseEnd.rel}`], ' UNION ALL ');
-  return advance(st, merged, { elem: thenEnd.elem, path: out.path });
+  return advance(st, merged, { elem: thenEnd.elem, aliases: out.aliases, path: out.path });
 };
 
 /** Predicate choose with two homogeneous scalar result arms. The predicate gates

@@ -217,17 +217,22 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
   const selElem = aliasElem(selected);
   const selId = aliasId(p.c[selected.col], 'last');
   const by = byToEntry(proj.bys?.[0]);
+  // A dynamically-bound label (bound inside a branch arm / repeat) may be UNBOUND on some
+  // rows (a traverser through an arm that never bound it) → drop those (aliasPresent). A
+  // statically-bound linear label is always present, so no guard (byte-identical SQL).
+  const present = selected.binds === undefined ? aliasPresent(p.c[selected.col]) : null;
   if (by.sub === 'vertex') {
     const rel = st.q.cte(
-      q`SELECT ${selId} AS id${carryFrag(st.carried, p)} FROM ${p}`,
+      q`SELECT ${selId} AS id${carryFrag(st.carried, p)} FROM ${p}${present ? q` WHERE ${present}` : empty}`,
       ['id', ...carriedCols(st.carried)],
     );
     return { ...st, rel, elem: selElem };
   }
   const n = (selElem === 'edge' ? edges : nodes).as('n');
   const expr = selElem === 'edge' ? propExtract(n.c.props, by.key!).expr : nodePropScalar(n.c.id, by.key!);
+  const conds = [...(present ? [present] : []), ...(productive ? [] : [predicateSql(expr, undefined)])];
   const rel = st.q.cte(
-    q`SELECT ${expr} AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${selId}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
+    q`SELECT ${expr} AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${selId}${conds.length ? q` WHERE ${list(conds, ' AND ')}` : empty}`,
     ['v', ...carriedCols(st.carried)],
   );
   return toScalarStream(carryOf(st), rel);
