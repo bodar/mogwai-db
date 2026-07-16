@@ -144,6 +144,7 @@ const GTYPE_SQL: Record<string, string | null> = {
 const AS_TO_CANONICAL: Record<ValueType, string> = {
   bool: 'boolean', date: 'datetime', byte: 'byte', short: 'short', int: 'int',
   long: 'long', bigint: 'bigint', float: 'float', double: 'double',
+  string: 'string', uuid: 'uuid',
 };
 
 /** How to resolve the CURRENT scalar's type for a typeOf test:

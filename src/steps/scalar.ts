@@ -3,9 +3,38 @@ import { predicateSql, rangeToOffsetLimit, scalarTx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, withoutCarried, type Carry } from './context.ts';
-import { carryOf, toScalarStream, type ScalarStream } from './stream.ts';
+import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStream } from './stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, numericSpec } from './coerce.ts';
+import { normalizeTypeName } from '../gremlin-types.ts';
 import { type ValueType } from '../render.ts';
+
+/** True iff `step` is `is(typeOf(GType.LIST))` — the one collection typeOf that RETYPES
+ *  a scalar value stream into a ListStream (the stored JSONB list value becomes the
+ *  `list` column) so the whole list substrate (unfold/count(local)/range/…) reuses it.
+ *  MAP/SET stay a plain scalar vtype filter (no MapStream retype yet). */
+export function isListTypeOf(step: PStep): boolean {
+  if (step.name !== 'is') return false;
+  const pred = (step.args ?? [])[0];
+  if (!pred || typeof pred !== 'object' || pred.op !== 'typeOf') return false;
+  const arg = pred.values?.[0];
+  const name = (arg && typeof arg === 'object' && 'gtype' in arg) ? String(arg.gtype) : typeof arg === 'string' ? arg : null;
+  return !!name && normalizeTypeName(name) === 'list';
+}
+
+/** Retype a scalar value stream at is(typeOf(LIST)): keep only rows whose stored vtype
+ *  is 'list' and expose each JSONB list value as the ListStream `list` column (json() to
+ *  text so unfold's json_each / list reducers / root framing consume it). Requires the
+ *  per-row stored vtype column (values()/properties() of a stored prop); a computed
+ *  scalar has no stored list → null (the generic is() static-folds it to empty). */
+export function scalarListRetype(s: ScalarStream): ListStream | null {
+  if (!s.vtype) return null;
+  const p = s.rel.as('p');
+  const rel = s.q.cte(
+    q`SELECT json(${p.c.v}) AS list${carryFrag(s.carried, p)} FROM ${p} WHERE ${p.c[s.vtype]} = ${value('list')}`,
+    ['list', ...carriedCols(s.carried)],
+  );
+  return toListStream(carryOf(s), rel, { kind: 'scalar' });
+}
 
 export const SCALAR_TRANSFORMS = new Set([
   'concat', 'length', 'toUpper', 'toLower', 'asString', 'substring', 'replace',
@@ -351,6 +380,10 @@ export function lowerScalarRows(
       stream = appendScalar(stream, step);
       continue;
     }
+    // is(typeOf(LIST)) over a stored-typed stream is a RETYPE (scalar→list), not a value
+    // filter — stop so compileFromScalar builds the ListStream. Without a per-row stored
+    // vtype (a computed scalar) it stays a fused is() that static-folds to empty.
+    if (step.name === 'is' && isListTypeOf(step) && stream.vtype) break;
     if (SCALAR_TRANSFORMS.has(step.name) || step.name === 'is') {
       const fused = fuseScalarSegment(stream, steps, i);
       stream = fused.stream;

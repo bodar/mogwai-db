@@ -206,6 +206,33 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().values("age").is(P.typeOf("bogus-name"))', {})).toThrow('unregistered type');
   });
 
+  test('P3b: uuid/list framing + is(typeOf(LIST)) retypes scalar→ListStream', () => {
+    // A stored TEXT value frames by its true vtype: uuid via UuidSerializer (storage-
+    // ambiguous with string), so values('uuid') carries perRowType framing.
+    expect(read('g.V().values("uuid")').shape).toEqual({ kind: 'value', perRowType: true });
+    // is(typeOf(LIST)) is a RETYPE, not a value filter: the scalar value stream becomes a
+    // ListStream whose `list` column is json() of the stored JSONB list value.
+    const listed = read('g.V().values("list").is(typeOf(GType.LIST))');
+    expect(listed.shape).toEqual({ kind: 'jsonbList' });
+    expect(listed.sql).toContain("json(p.v) AS list");
+    expect(listed.sql).toContain("p.vtype = ?");
+    expect(listed.binds).toContain('list');
+    // once a ListStream, the list substrate composes: unfold/count(local)/range reuse it.
+    expect(read('g.V().values("list").is(typeOf(GType.LIST)).unfold()').shape).toEqual({ kind: 'value' });
+    expect(read('g.V().values("list").is(typeOf(GType.LIST)).count(Scope.local)').shape).toEqual({ kind: 'count' });
+    expect(read('g.V().values("list").is(typeOf(GType.LIST)).unfold().range(1,3)').sql).toContain('json_each');
+
+    // End-to-end framing: a list value frames as ONE List, unfold explodes it, uuid
+    // round-trips through UuidSerializer.
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    executeQuery(store, "g.addV('data').property('list',['a','b','c']).property('uuid', UUID('0263f28b-eff9-4c17-8e33-0b41c74b6d4c'))", {});
+    const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
+    expect(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST))", {}).map(dec)).toEqual([['a', 'b', 'c']]);
+    expect(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST)).unfold()", {}).map(dec)).toEqual(['a', 'b', 'c']);
+    expect(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST)).count(Scope.local)", {}).map(dec)).toEqual([3n]);
+    expect(executeQuery(store, "g.V().values('uuid')", {}).map(dec)).toEqual(['0263f28b-eff9-4c17-8e33-0b41c74b6d4c']);
+  });
+
   test('min/max range over comparables (incl. text); mean/sum numeric only', () => {
     const mn = read('g.V().values("age").min()');
     // TinkerPop 4 Strings are Comparable, so min/max include text (numbers order first).
