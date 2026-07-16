@@ -5,7 +5,7 @@
 // re-enterable tail (compileFromList). The producers live in projection.ts (compileFold)
 // and, later, inject-of-a-list / select(Column.values).
 
-import { q, value, raw, list, type Expression, type Relation } from '../q.ts';
+import { q, value, raw, list, empty, type Expression, type Relation } from '../q.ts';
 import { predicateSql, scalarTx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
@@ -75,16 +75,20 @@ export function compileUnfold(s: ListStream): ElementStream | ScalarStream | Lis
   return toScalarStream(c, rel, s.of.as, 'value', undefined, s.of.productiveNull);
 }
 
+/** Build a per-row list CTE that PRESERVES the carried schema (origin/aliases). A
+ *  per-element list (valueMap().select(Column.*)) carries an origin ordinal, so every
+ *  per-row list op must thread it through or the stream-column contract breaks. */
+function listCte(s: ListStream, c: Relation, listExpr: Expression, of: ListStream['of'], where: Expression = empty): ListStream {
+  const rel = s.q.cte(q`SELECT ${listExpr} AS list${carryFrag(s.carried, c)} FROM ${c}${where}`, ['list', ...carriedCols(s.carried)]);
+  return toListStream(carryOf(s), rel, of);
+}
+
 /** none(pred): keep each list where NO element satisfies pred (a per-list collection
  *  filter) — stays a list stream. (SQL null semantics: an eq(null)/neq(null) predicate
  *  won't match a null element, so those edge forms may differ from TinkerPop.) */
 function listNoneFilter(s: ListStream, pred: any): ListStream {
   const c = s.rel.as('c');
-  const rel = s.q.cte(
-    q`SELECT ${c.c.list} AS list FROM ${c} WHERE NOT EXISTS (SELECT 1 FROM json_each(${c.c.list}) je WHERE ${predicateSql(q`je.value`, pred)})`,
-    ['list'],
-  );
-  return toListStream(carryOf(s), rel, s.of);
+  return listCte(s, c, c.c.list, s.of, q` WHERE NOT EXISTS (SELECT 1 FROM json_each(${c.c.list}) je WHERE ${predicateSql(q`je.value`, pred)})`);
 }
 
 /** The Scope.local collection transforms that keep a list a list (per-list, not a
@@ -105,8 +109,7 @@ function listStringTransform(s: ListStream, step: PStep): ListStream {
   const elem = scalarTx(step.name, step.args ?? [], q`x.value`);
   if (!elem) throw new Error(`scalar transform ${step.name}() not supported`);
   const sub = q`(SELECT jsonb(COALESCE(json_group_array(${elem} ORDER BY x.key), json('[]'))) FROM json_each(${c.c.list}) x)`;
-  const rel = s.q.cte(q`SELECT ${sub} AS list FROM ${c}`, ['list']);
-  return toListStream(carryOf(s), rel, s.of);
+  return listCte(s, c, sub, s.of);
 }
 
 /** reverse() on a list value → reverse element order (json_each ordered by position
@@ -114,8 +117,7 @@ function listStringTransform(s: ListStream, step: PStep): ListStream {
 function listReverse(s: ListStream): ListStream {
   const c = s.rel.as('c');
   const sub = q`(SELECT jsonb(COALESCE(json_group_array(x.value ORDER BY x.key DESC), json('[]'))) FROM json_each(${c.c.list}) x)`;
-  const rel = s.q.cte(q`SELECT ${sub} AS list FROM ${c}`, ['list']);
-  return toListStream(carryOf(s), rel, s.of);
+  return listCte(s, c, sub, s.of);
 }
 
 /**
@@ -164,8 +166,7 @@ function listLocalTransform(s: ListStream, step: PStep): ListStream {
     else if (name === 'tail') { lim = nums[0] ?? 1; dir = 'DESC'; }
     sub = rebuild(q`SELECT x.value AS value, x.key AS ord FROM ${je} x ORDER BY x.key ${dir} LIMIT ${lim} OFFSET ${off}`);
   }
-  const rel = s.q.cte(q`SELECT ${sub} AS list FROM ${c}`, ['list']);
-  return toListStream(carryOf(s), rel, s.of);
+  return listCte(s, c, sub, s.of);
 }
 
 // ---------- set-op / list-algebra family ----------
@@ -263,8 +264,7 @@ function listAllAny(s: ListStream, step: PStep): ListStream {
   const keep = step.name === 'all'
     ? q`NOT EXISTS (SELECT 1 FROM ${je} je WHERE (${elemPred}) IS NOT TRUE)`
     : q`EXISTS (SELECT 1 FROM ${je} je WHERE (${elemPred}) IS TRUE)`;
-  const rel = s.q.cte(q`SELECT ${c.c.list} AS list FROM ${c} WHERE ${keep}`, ['list']);
-  return toListStream(carryOf(s), rel, s.of);
+  return listCte(s, c, c.c.list, s.of, q` WHERE ${keep}`);
 }
 
 /** The set-op family names that consume a list operand + retype the stream. */
@@ -311,7 +311,7 @@ export function compileFromList(s: ListStream, steps: PStep[], at: number): Lowe
     const c = s.rel.as('c');
     const delim = String(step.args[0] ?? '');
     const joined = q`(SELECT COALESCE(group_concat(value, ${value(delim)}), '') FROM (SELECT value FROM json_each(${c.c.list}) WHERE value IS NOT NULL ORDER BY key))`;
-    const rel = s.q.cte(q`SELECT ${joined} AS v FROM ${c}`, ['v']);
+    const rel = s.q.cte(q`SELECT ${joined} AS v${carryFrag(s.carried, c)} FROM ${c}`, ['v', ...carriedCols(s.carried)]);
     return continueLowering(toScalarStream(carryOf(s), rel, undefined), at + 1);
   }
   // set-op family (combine/intersect/difference/disjunct/product) over a list operand.
@@ -325,10 +325,9 @@ export function compileFromList(s: ListStream, steps: PStep[], at: number): Lowe
     // plain list (TinkerPop's order(local) on a set yields a List), matching the suite.
     if (SET_RESULT.has(step.name) && terminal)
       return continueLowering(toResultStream(s.q, q`SELECT json(${listExpr}) AS list FROM ${c}`, { kind: 'jsonbSet' }), at + 1);
-    const rel = s.q.cte(q`SELECT ${listExpr} AS list FROM ${c}`, ['list']);
     // product yields a list of pair-lists; the others keep the element shape.
     const of = step.name === 'product' ? { kind: 'list' as const, of: { kind: 'scalar' as const } } : s.of;
-    return continueLowering(toListStream(carryOf(s), rel, of), at + 1);
+    return continueLowering(listCte(s, c, listExpr, of), at + 1);
   }
   throw new Error(`${step.name}() on a list value not yet supported`);
 }
