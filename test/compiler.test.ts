@@ -857,6 +857,30 @@ describe('compiler SQL snapshots', () => {
     });
   });
 
+  test('order() on a record stream sorts by a by(__.select(field)) modulator', () => {
+    const p = read("g.V().out('created').project('a','b').by('name').by(__.in('created').count()).order().by(__.select('b'), Order.desc).select('a')");
+    expect(p.shape).toEqual({ kind: 'value' });
+    // the order CTE sorts the record rows by field b's value column, descending
+    expect(p.sql).toContain('ORDER BY r.e1_v DESC');
+    // a following limit fuses into the same ORDER BY query (LIMIT after the sort)
+    const lim = read("g.V().out('created').project('a','b').by('name').by(__.in('created').count()).order().by(__.select('b'), Order.desc).limit(2).select('a')");
+    expect(lim.sql).toContain('ORDER BY r.e1_v DESC LIMIT 2 OFFSET 0');
+    // an element field orders by its external id
+    expect(read("g.V(1).project('self','b').by().by(__.out().count()).order().by(__.select('self')).select('b')").sql)
+      .toContain('ORDER BY r.e0_id ASC');
+    // bare order() / a list field defer with a clear error
+    expect(() => compile("g.V().project('a').by('name').order().select('a')", {})).toThrow('requires a by(field)');
+  });
+
+  test('order() on a record executes: sort by a projected count, then extract a field', () => {
+    const store = seededStore();
+    // lop is created by marko/josh/peter (in-count 3), ripple by josh only (1)
+    expect(run(store, "g.V().out('created').project('a','b').by('name').by(__.in('created').count()).order().by(__.select('b'), Order.desc).select('a')").map((r) => r.v))
+      .toEqual(['lop', 'lop', 'lop', 'ripple']);
+    expect(run(store, "g.V().out('created').project('a','b').by('name').by(__.in('created').count()).order().by(__.select('b')).select('a')").map((r) => r.v))
+      .toEqual(['ripple', 'lop', 'lop', 'lop']);
+  });
+
   test('record fields re-enter element/scalar/list lowering', () => {
     expect(read('g.V().project("n","a").by("name").by("age").select("a").is(P.gt(30)).count()').shape)
       .toEqual({ kind: 'count' });
@@ -1047,7 +1071,7 @@ describe('compiler SQL snapshots', () => {
     expect(run(seededStore(), 'g.V().select(Pop.first,"a")')).toEqual([]);
     expect(run(seededStore(), 'g.V().select("x")')).toEqual([]);
     expect(() => compile('g.V().as("a").select("a").by(T.id)', {})).toThrow('by(T.id) modulator not yet supported');
-    expect(() => compile('g.V().as("a").out().as("b").select("a","b").order()', {})).toThrow('order() on a record value not yet supported');
+    expect(() => compile('g.V().as("a").out().as("b").select("a","b").order()', {})).toThrow('order() on a record requires a by(field)');
     // order().by() deferred modulators must throw, not silently sort by id
     expect(() => compile('g.V().order().by(T.label)', {})).toThrow('by(T.label) modulator not yet supported');
     expect(() => compile('g.V().order().by(__.values("age"))', {})).toThrow('by(traversal) modulator not yet supported');

@@ -2,6 +2,7 @@ import { q, list, empty, value, type Expression, type Relation } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
 import { framedProps, labelNameSub, nodePropScalar, predicateSql, propExtract, extIdOf } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
+import { stepChain } from '../frontend.ts';
 import { aliasElem, aliasIsElement, carryFrag, carriedCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
 import { aliasId, aliasPresent, aliasScalar, shapeElem } from './alias.ts';
 import { emptyElementLike, historyValues, popEnd, popIsListResult, selectOneFromAlias } from './labelselect.ts';
@@ -382,6 +383,38 @@ export function compileSelectProject(st: ElementStream, proj: PStep, tail: TailM
   return record;
 }
 
+/** One ORDER BY term per by() modulator over a record's fields. A record has no
+ * "current element" to sort by a bare key, so each by() must name a field — either
+ * directly (`by("b")`) or as the anonymous `by(__.select("b"))` the suite emits. A value
+ * field orders by its scalar column; an element field by its external id (element
+ * comparison is by id in TinkerPop). Direction/shuffle honoured; list/variant fields and
+ * a select-then-values (`__.select("v").values("name")`) modulator defer. */
+function recordOrderTerms(s: RecordStream, r: Relation, bys: any[][]): Expression[] {
+  if (!bys.length) throw new Error('order() on a record requires a by(field) / by(__.select(field)) modulator');
+  return bys.map((by) => {
+    const dir = by.find((a) => a && typeof a === 'object' && 'order' in a)?.order;
+    if (dir === 'shuffle') return q`RANDOM()`;
+    const nested = by.find((a) => a && typeof a === 'object' && 'nested' in a)?.nested;
+    let key: string;
+    if (nested) {
+      const chain = stepChain(nested, s.params);
+      const fk = chain.length === 1 && chain[0].name === 'select' ? chain[0].args.filter((a: any): a is string => typeof a === 'string') : [];
+      if (fk.length !== 1) throw new Error('order().by(traversal) on a record supports only by(__.select(field)) with one field');
+      key = fk[0];
+    } else {
+      const direct = by.find((a) => typeof a === 'string') as string | undefined;
+      if (direct === undefined) throw new Error('order().by() on a record requires a field selector');
+      key = direct;
+    }
+    const field = s.fields.find((f) => f.key === key);
+    if (!field) throw new Error(`order().by(select("${key}")): record has no such field`);
+    const col = field.sub === 'value' ? r.c[`${field.prefix}_v`]
+      : (field.sub === 'vertex' || field.sub === 'edge') ? r.c[`${field.prefix}_id`]
+      : (() => { throw new Error(`order().by(select("${key}")) on a ${field.sub} record field not yet supported`); })();
+    return q`${col}${dir === 'desc' ? q` DESC` : q` ASC`}`;
+  });
+}
+
 /** Continue from a per-traverser record. Selecting a named field retypes it to the
  * ordinary scalar/element stream, while Column.keys/values produces one list value
  * per record. This is intentionally distinct from MapStream's whole-group columns. */
@@ -389,6 +422,26 @@ export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): 
   const step = steps[at];
   if (step.name === 'count')
     return continueLowering(lowerGlobalCount(s), at + 1);
+  if (step.name === 'order') {
+    const r = s.rel.as('r');
+    const names = s.rel.cols;
+    const terms = recordOrderTerms(s, r, step.bys ?? []);
+    // Fuse a directly-following limit/skip/range so the LIMIT applies AFTER the sort in
+    // one query (a following Scope.local limit is a per-field slice, not a row cut → skip).
+    const nxt = steps[at + 1];
+    const fuse = nxt && (nxt.name === 'limit' || nxt.name === 'skip' || nxt.name === 'range')
+      && !nxt.args.some((a: any) => a && typeof a === 'object' && a.scope === 'local');
+    let suffix: Expression = empty;
+    if (fuse) {
+      const nums = nxt.args.filter((a): a is number => typeof a === 'number').map(Number);
+      const offset = nxt.name === 'skip' ? nums[0] : nxt.name === 'range' ? nums[0] : 0;
+      const limit = nxt.name === 'limit' ? nums[0] : nxt.name === 'range' ? nums[1] - nums[0] : null;
+      if (offset < 0 || (limit !== null && limit < 0)) throw new Error(`Not a legal range: [${offset}, ${limit === null ? -1 : offset + limit}]`);
+      suffix = q` LIMIT ${limit ?? -1} OFFSET ${offset}`;
+    }
+    const rel = s.q.cte(q`SELECT ${list(names.map((name) => r.c[name]), ', ')} FROM ${r} ORDER BY ${list(terms, ', ')}${suffix}`, names);
+    return continueLowering(toRecordStream(carryOf(s), rel, s.fields), fuse ? at + 2 : at + 1);
+  }
   if (step.name === 'limit' || step.name === 'range' || step.name === 'skip' || step.name === 'tail') {
     const local = step.args.some((a: any) => a && typeof a === 'object' && a.scope === 'local');
     const nums = step.args.filter((a): a is number => typeof a === 'number').map(Number);
