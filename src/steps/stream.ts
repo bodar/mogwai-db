@@ -78,7 +78,7 @@ export type MapOf =
 /** A map value as a `(mk, mv)` row relation — one row per entry. A simple GroupStream
  * derives this layout when select(Column.values/keys) consumes it; Map-unfold will
  * eventually use the same form. `keyOf`/`valOf` describe re-entry shape. */
-export interface MapStream extends Carry { readonly kind: 'map'; readonly rel: Relation; readonly keyOf: MapOf; readonly valOf: MapOf; }
+export interface MapStream extends Carry { readonly kind: 'map'; readonly rel: Relation; readonly keyOf: MapOf; readonly valOf: MapOf; readonly entries?: boolean; }
 
 /** The traverser stream shapes a compile phase can be in. */
 /** A stream of Property/VertexProperty traversers. Properties are element-like at
@@ -236,8 +236,8 @@ export const toVariantStream = (c: Carry, rel: Relation, scalarAs?: ValueType, e
   assertStreamColumns({ ...c, kind: 'variant', rel, scalarAs, elem, result });
 export const toListStream = (c: Carry, rel: Relation, of: ListOf): ListStream =>
   assertStreamColumns({ ...c, kind: 'list', rel, of });
-export const toMapStream = (c: Carry, rel: Relation, keyOf: MapOf, valOf: MapOf): MapStream =>
-  assertStreamColumns({ ...c, kind: 'map', rel, keyOf, valOf });
+export const toMapStream = (c: Carry, rel: Relation, keyOf: MapOf, valOf: MapOf, entries?: boolean): MapStream =>
+  assertStreamColumns({ ...c, kind: 'map', rel, keyOf, valOf, entries });
 export const toPropertyStream = (c: Carry, rel: Relation, ownerElem: Elem): PropertyStream =>
   assertStreamColumns({ ...c, kind: 'property', rel, ownerElem });
 export const toRecordStream = (c: Carry, rel: Relation, fields: readonly RecordField[]): RecordStream =>
