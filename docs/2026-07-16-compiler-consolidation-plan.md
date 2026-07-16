@@ -1,8 +1,9 @@
 # Compiler consolidation — the strategic map (2026-07-16)
 
 **Status:** research + plan. Telemetry harness LANDED; architecture bets scoped.
-**P1 (unify the tail) LANDED 2026-07-16** — see §3/§4d. **Baseline at authorship:** L3
-956, corpus 2298/2298. **Now: L3 1040.**
+**P1 (unify the tail) LANDED 2026-07-16** — see §3/§4d. **P2 (predicate seam + infix
+connectors) LANDED 2026-07-16** — see §4e. **Baseline at authorship:** L3 956, corpus
+2298/2298. **Now: L3 1046.**
 
 **What this is.** A principled, code-grounded map of where the compiler carries
 duplication / locally-optimized mini-compilers, where it defers language and why,
@@ -165,10 +166,15 @@ lines; the scalar value tail + all per-row framing live in exactly one place. Bo
 unlock: `order().by(k).limit(n).values().count()`. Done BEFORE P3b (typed-property
 framing) as planned — the "so P3b isn't written twice" prerequisite.
 
-**P2 — One predicate seam** *(broad feature unlock; small diff).* Give
-`choose`/`coalesce`/`until` the same `tryFilterByChildExistence` fallback that
-`where` already has (D2). Three support-definers become fast-paths over a generic
-floor. Unblocks complex predicates across the branch + repeat families.
+**P2 — One predicate seam** *(debt removal + small feature unlock).* **LANDED
+2026-07-16 (L3 1040→1046).** `choose` (element/scalar/list arms) now falls through to
+the same `tryFilterByChildExistence` engine `where`/`filter` use, via a shared lazy
+`chooseGate` factory (`tryGateByChildExistence` in `child.ts`). Support-definer (D2)
+removed. `until` left as-is — its predicate runs inside `WITH RECURSIVE` where there is
+no materialized parent domain for the child engine, and its failing cases are
+nested-repeat bodies the child engine can't compile either (genuine structural wall, not
+plumbing). The predicate-seam unification alone cashed +0 — the remaining choose
+predicates hit a *different, shared* wall: infix `.and()`/`.or()` connectors. See §4e.
 
 **P3 — Lift `map`/`group`/`path` to first-class re-enterable streams** *(the big
 substrate).* Do **path first** (clean; `fold`/`unfold` is the template), then the
@@ -346,6 +352,40 @@ memory `typed-property-values` + `docs/2026-07-16-typed-property-values-plan.md`
 **Refreshed remaining bets:** P2 (one predicate seam), P3 (map/group/path re-enterable),
 P4 (dynamic-tag VariantStream), P5 (group live parent) — all still open, now on a
 single-spine tail.
+
+## 4e. P2 LANDED — predicate-seam unification + infix connectors (L3 1040→1046, +6)
+
+Two changes, one commit, CI green:
+1. **D2 removed (+0 alone).** `choose` no longer *defines support by throwing* at the
+   predicate — all three arm sites (element/scalar/list) route through a shared lazy
+   `chooseGate(st, predNested)` factory: inline predicate → `gate()`; else the SAME
+   `tryFilterByChildExistence` generic child engine `where`/`filter` use (new
+   `tryGateByChildExistence`, refactored to share the correlated-existence core with
+   `tryFilterByChildExistence`). **Lazy on purpose** — the inline predicate Expression
+   re-emits its binds at each interpolation, so building both gated seeds eagerly reorders
+   binds vs the arm SQL (caught by a snapshot regression); the caller must build the
+   then-seed + compile its arm before the else-seed. `until` untouched (structural wall
+   above).
+2. **The actual +6: infix `.and()`/`.or()` connectors.** The remaining choose predicates
+   (and a few `where`) all used zero-arg infix connectors — `hasLabel('person').and()
+   .out('created')`, `values('age').is(gt(29)).and().values('age').is(lt(35))` — which
+   `compileInlinePredicate` explicitly punted. New `splitInfixConnectors` splits the body
+   on bare `and`/`or` steps (OR looser than AND, split on OR first, each segment recurses),
+   BEFORE the trailing-`is` strip (so `.is()` stays attached to its own conjunct). **Shared
+   by where/filter/choose/until** — all route through `compileInlinePredicate`.
+
+**Lesson for the map:** P2-as-scoped (predicate-seam fallback) was the *right debt removal*
+but the wrong *conformance model* — the choose/coalesce/until "predicate not supported"
+buckets were dominated by (a) arm-shape gaps (scalar/union/local/`values` arm bodies →
+P3/P4, not the predicate) and (b) the infix-connector gap, which is a `compileInlinePredicate`
+extension orthogonal to the child-existence fallback. Telemetry masked both under one
+message. choose-predicate throws: 4+ → 1 (last is `select`-as-predicate + `as()` arms).
+
+**Next (unchanged order, refreshed counts):** the top self-contained levers are still
+writes-through-`lowerSteps` (~46: merge trav-arg + merge-on-list + mergeE endpoint) and
+Subgraph-edges (~45). The bold/compounding pick is writes-through-`lowerSteps` (§2 gap #3
+— reusable traversal-valued-argument seam). P3/P4 (terminal islands + mixed-arm
+VariantStream) remain the substrate for the choose/local/map arm-shape families (~38+29).
 
 ## 5. What NOT to do
 
