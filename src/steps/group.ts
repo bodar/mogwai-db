@@ -346,6 +346,16 @@ export function lowerValueMap(st: ElementStream, proj: PStep): MapStream {
   return toMapStream(carry, rel, { kind: 'scalar' }, { kind: 'list', of: { kind: 'scalar' } });
 }
 
+/** groupCount() over a SCALAR value stream — a barrier grouping by the value itself:
+ * V().values('name').groupCount() → Map{name: count}. Bare form only (a by()/name-key
+ * defers to the caller). null keys ARE counted (groupCount productive); a typed scalar's
+ * compile-time tag (asNumber(BYTE).groupCount()) frames the key, else inference. */
+export function lowerScalarGroupCount(s: ScalarStream): GroupStream {
+  const c = s.rel.as('c');
+  const rel = s.q.cte(q`SELECT ${c.c.v} AS gk, COUNT(*) AS gv FROM ${c} GROUP BY ${c.c.v}`, ['gk', 'gv']);
+  return toGroupStream(withoutCarried(carryOf(s)), rel, { kind: 'scalar', productive: true, as: s.as }, { kind: 'count' });
+}
+
 /** Continue from the rich group barrier. Terminal framing consumes the same lowered
  * relation; a supported Column selection derives the narrow entry MapStream without
  * recompiling group semantics based on terminal position. */

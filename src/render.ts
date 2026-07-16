@@ -34,7 +34,7 @@ export type ElemShape = 'vertex' | 'edge' | 'property';
 // group: a list of elements, a single element (tail/last), a list of scalars
 // (json_group_array), or a scalar aggregate (count/sum).
 export type GroupKey =
-  | { kind: 'scalar'; productive?: boolean }              // by('name')/by(T.label)/by(__.scalar) → column gk
+  | { kind: 'scalar'; productive?: boolean; as?: ValueType } // by('name')/by(T.label)/by(__.scalar)/scalar-group → gk; `as` frames a typed key (asNumber(BYTE).groupCount())
   | { kind: 'element'; elem: ElemShape }                 // bare by() → the element itself, columns k_*
   | { kind: 'map'; parts: { key: string }[] };           // by(__.project(...)) → columns k0_,k1_,…
 export type GroupVal =
