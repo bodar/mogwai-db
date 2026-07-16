@@ -11,5 +11,9 @@ build/
 *.tsbuildinfo
 .wrangler/
 
+# L3 telemetry artifacts (opt-in via MOGWAI_L3_TELEMETRY)
+test/conformance/l3-telemetry.ndjson
+test/conformance/*.summary.json
+
 # Local Claude Code worktrees / state
 .claude/

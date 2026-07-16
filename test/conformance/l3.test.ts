@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startConformanceServer } from './conformance-server.ts';
 import { L3_TAGS } from './tags.ts';
+import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport } from './telemetry.ts';
 
 // helper.js in the GLV hardcodes http://localhost:45940 — the port is not
 // configurable, so the host must own it for the duration of the run.
@@ -94,6 +95,19 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
 
   // Ratchet.
   expect(passing).toBeGreaterThanOrEqual(baseline.passing);
+
+  // Opt-in telemetry (MOGWAI_L3_TELEMETRY): join the server-side NDJSON (gremlin,
+  // clean deferral, step chain) with this report (scenario names, pass/fail) and
+  // print the systematic-gap view. Read-only — strictly after the ratchet above,
+  // so it cannot affect the count or the build.
+  const tpath = telemetryPath();
+  if (tpath) {
+    const sum = summarize(readTelemetry(tpath));
+    console.log(formatReport(sum, collectScenarios(json)));
+    const artifact = tpath.replace(/\.ndjson$/, '') + '.summary.json';
+    writeFileSync(artifact, JSON.stringify({ ...sum, scenarios: collectScenarios(json) }, null, 2) + '\n');
+    console.log(`L3 telemetry summary → ${artifact}`);
+  }
 
   if (passing > baseline.passing) {
     if (process.env.CI) {
