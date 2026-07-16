@@ -1,6 +1,6 @@
 import { q, value, list, Query } from '../q.ts';
 import { jsonbArrayOf } from '../plan.ts';
-import { flattenListArgs } from '../frontend.ts';
+import { flattenListArgs, type SackSpec } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { type Carry } from './context.ts';
 import { toListStream, toScalarStream } from './stream.ts';
@@ -73,12 +73,13 @@ function foldConstantCoercions(steps: PStep[], vals: any[]): { at: number; as?: 
 /** g.inject(v1, v2, …) is now only a shaped source constructor. List literals seed
  * ListStream rows; ordinary values seed ScalarStream rows. Every following step is
  * handled by lowerSteps, the same lowering engine used after values()/unfold(). */
-export function compileInject(steps: PStep[]): Compiled {
+export function compileInject(steps: PStep[], sackInit?: SackSpec): Compiled {
   const Q = new Query();
   const carry: Carry = { q: Q, params: {}, carried: { aliases: new Map(), origins: [] } };
 
   // Each all-array argument is one list traverser, not scalar varargs.
   if (steps[0].args.length >= 1 && steps[0].args.every((a: any) => Array.isArray(a))) {
+    if (sackInit) throw new Error('withSack() with a list-valued inject() not yet supported');
     const rows = steps[0].args.map((a: any[]) => q`(${jsonbArrayOf(a)})`);
     const rel = Q.cte(q`VALUES ${list(rows, ', ')}`, ['list']);
     return materializeFinal(lowerSteps(toListStream(carry, rel, { kind: 'scalar' }), steps, 1));
@@ -88,8 +89,15 @@ export function compileInject(steps: PStep[]): Compiled {
   // ScalarStream gains a per-row shape/type discriminant.
   const vals = flattenListArgs(steps[0].args);
   const folded = foldConstantCoercions(steps, vals);
+  // withSack(init) seeds every inject traverser's carried sack column (`sk`), exactly
+  // as seedSource does for V()/E() — so withSack(x).inject(v).sack(...) carries state.
+  const sackCarry: Carry = sackInit
+    ? { ...carry, carried: { ...carry.carried, sack: 'sk' } }
+    : carry;
+  const cols = sackInit ? ['v', 'sk'] : ['v'];
+  const row = (v: any) => sackInit ? q`(${value(v)}, ${value(sackInit.init)})` : q`(${value(v)})`;
   const rel = vals.length
-    ? Q.cte(q`VALUES ${list(vals.map((v) => q`(${value(v)})`), ', ')}`, ['v'])
-    : Q.cte(q`SELECT NULL AS v WHERE 0`, ['v']);
-  return materializeFinal(lowerSteps(toScalarStream(carry, rel, folded.as), steps, folded.at));
+    ? Q.cte(q`VALUES ${list(vals.map(row), ', ')}`, cols)
+    : Q.cte(sackInit ? q`SELECT NULL AS v, NULL AS sk WHERE 0` : q`SELECT NULL AS v WHERE 0`, cols);
+  return materializeFinal(lowerSteps(toScalarStream(sackCarry, rel, folded.as), steps, folded.at));
 }

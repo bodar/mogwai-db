@@ -1,7 +1,7 @@
 import type { GraphStore } from '../storage.ts';
 import { q, value, list, empty, raw, render, type Expression } from '../q.ts';
 import { propExtract, labelIn, nodeHasProp } from '../plan.ts';
-import { stepChain, type Step } from '../frontend.ts';
+import { stepChain, type Step, type SackSpec } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../render.ts';
 import { buildPrefix } from './index.ts';
@@ -504,20 +504,23 @@ function compileMergeE(steps: PStep[], params: Record<string, any>): WritePlan {
 // Ordered rules: the first whose `match` fires compiles the chain. Order matters
 // (addE before addV; drop must be the terminal step) — hence a rule list, not a
 // name→fn Map. Returns null when the chain is a read (compiler falls to compileRead).
-interface WriteRule { match: (steps: PStep[]) => boolean; compile: (steps: PStep[], params: Record<string, any>) => WritePlan | Compiled; }
+interface WriteRule { match: (steps: PStep[]) => boolean; compile: (steps: PStep[], params: Record<string, any>, sackInit?: SackSpec) => WritePlan | Compiled; }
 
 const WRITE_RULES: WriteRule[] = [
   { match: (s) => s.some((x) => x.name === 'addE'), compile: (s, p) => compileAddE(s, p) },
   { match: (s) => s[0].name === 'addV', compile: (s) => compileAddV(s) },
   { match: (s) => s.some((x) => x.name === 'mergeV'), compile: (s, p) => compileMergeV(s, p) },
   { match: (s) => s.some((x) => x.name === 'mergeE'), compile: (s, p) => compileMergeE(s, p) },
-  { match: (s) => s[0].name === 'inject', compile: (s) => compileInject(s) },
+  // inject is a scalar-stream READ, not a write — it lives here only because it's a
+  // source constructor. It threads withSack() so a sack-carrying value stream
+  // (withSack(x).inject(v).sack(...)) seeds its `sk` column like the V()/E() path.
+  { match: (s) => s[0].name === 'inject', compile: (s, _p, sackInit) => compileInject(s, sackInit) },
   { match: (s) => s[s.length - 1].name === 'drop', compile: (s) => compileDrop(s) },
   { match: (s) => s.some((x) => x.name === 'property'), compile: (s, p) => compileSetProperty(s, p) },
 ];
 
 /** Route a step chain to its write compiler, or null if it's a read. */
-export function routeWrite(steps: PStep[], params: Record<string, any>): WritePlan | Compiled | null {
-  for (const rule of WRITE_RULES) if (rule.match(steps)) return rule.compile(steps, params);
+export function routeWrite(steps: PStep[], params: Record<string, any>, sackInit?: SackSpec): WritePlan | Compiled | null {
+  for (const rule of WRITE_RULES) if (rule.match(steps)) return rule.compile(steps, params, sackInit);
   return null;
 }
