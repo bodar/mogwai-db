@@ -1,17 +1,16 @@
 import { q, value, list, empty, raw, Relation, Query, type Expression } from '../q.ts';
 import { labels, vertexProperties, edgeProperties } from '../schema.ts';
 import {
-  predicateSql, rangeToOffsetLimit, elemCtx, scalarTx, extIdOf, jsonbGroupArray,
+  predicateSql, rangeToOffsetLimit, elemCtx, extIdOf, jsonbGroupArray,
   nodePropScalar, edgePropScalar, framedProps, valueMapProps,
 } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, carriedWith, elemRel, withoutCarried, type ElementStream } from './context.ts';
 import { carryOf, continueLowering, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream } from './stream.ts';
 import { tryLowerLocalAggregate } from './sideeffect.ts';
-import { type Shape, type ElemShape } from '../render.ts';
+import { type Shape } from '../render.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
-import { SCALAR_ROW_STEPS, lowerScalarFilter, lowerConstant, lowerScalarSack } from './scalar.ts';
-import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
+import { lowerScalarFilter, lowerConstant, lowerScalarSack } from './scalar.ts';
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
 import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantOptional, union as lowerLegacyUnion } from './branch.ts';
@@ -36,26 +35,19 @@ export interface TailAcc {
   offset: number;
   limit: number | null;
   distinct: boolean;
-  reducer: 'fold' | 'sum' | 'min' | 'max' | 'mean' | null; // terminal stream reducer applied after the projection
-  isPreds: any[];                  // is(P) filters on the projected scalar (AND'd)
-  transforms: PStep[];             // scalar string/cast transforms wrapping the projected scalar, in order
-  injects: any[];                  // constants appended to the value stream (values(k).inject(c))
-  localMean: boolean;              // mean(Scope.local) on a scalar stream → coerce each value to Double
+  reducer: 'fold' | 'sum' | 'min' | 'max' | 'mean' | null; // terminal element reducer (fold→List / count guard)
+  isPreds: any[];                  // is(P) after count() (count().is(P))
 }
 
 /** A TailAcc with no modifiers — the bare scalar projection case (no preceding
  *  order/limit/dedup) routes through lowerScalarProjection with this. */
-const EMPTY_TAIL_ACC: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, reducer: null, isPreds: [], transforms: [], injects: [], localMean: false };
+const EMPTY_TAIL_ACC: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, reducer: null, isPreds: [] };
 
 const PROJECTION_NAMES = new Set(['values', 'id', 'label', 'count', 'valueMap', 'elementMap', 'select', 'project', 'path']);
-// Scalar-producing projections: one `v` value per row. A chain that continues past one
-// of these (e.g. into count()) retypes to a ScalarStream and re-enters (compileTail).
+// Scalar-producing projections: one `v` value per row. foldTailAcc stops at one of these
+// so the whole value tail (transforms/is/reducers/inject + framing) routes through the
+// scalar pipeline (lowerScalarProjection → scalar.ts/barrier.ts), never this accumulator.
 const SCALAR_PROJ = new Set(['values', 'id', 'label']);
-// Per-value transform steps gathered into acc.transforms. Most are SQL scalar
-// expressions (scalarTx). `asBool` is a typed cast: compileInject resolves it over
-// inject constants (see asBoolConst); on a V/E-rooted stream it falls through to
-// scalarTx → undefined → a clean "not supported" defer (needs local()/sack()).
-const SCALAR_TX_NAMES = new Set(['concat', 'length', 'toUpper', 'toLower', 'asString', 'substring', 'replace', 'trim', 'lTrim', 'rTrim', 'reverse', 'asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff']);
 const isMapProj = (p: PStep | null) => p?.name === 'select' || p?.name === 'project';
 const isScopeLocalStep = (s: PStep | undefined): boolean =>
   !!s && (s.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local');
@@ -115,7 +107,7 @@ function reducerMod(name: NonNullable<TailAcc['reducer']>): ModFn {
  *  Shared by compileTail (element-rooted) and compileInject (scalar-stream-rooted)
  *  so both consume one modifier vocabulary — add a value-tail step once, here. */
 export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop: number } {
-  const acc: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, reducer: null, isPreds: [], transforms: [], injects: [], localMean: false };
+  const acc: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, reducer: null, isPreds: [] };
   let i = from;
   for (; i < steps.length; i++) {
     const s = steps[i];
@@ -126,35 +118,23 @@ export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop:
     //    A TERMINAL fold (last step) stays the current reducer below, byte-identical.
     if (s.name === 'unfold') break;
     if (s.name === 'fold' && i !== steps.length - 1) break;
-    // Scope.local means "per-element WITHIN a list". Reached HERE (element/scalar
-    // tail, NOT the list phase), each traverser is a scalar — a degenerate one-element
-    // list — so the local reduce operates on that single value, correct BY DESIGN
-    // (not the global form, which would differ for a multi-element stream). A scalar's
-    // local sum/min/max/order/dedup is the value itself (identity → skip the step);
-    // mean coerces to Double (mean is always Double, even of one value). Scalar
-    // TRANSFORMS (concat/length/toLower/…) already treat Scope.local as a no-op — the
-    // project relies on this (see the inject().length(Scope.local) test), so they fall
-    // through to their own handler. Ops whose scalar-local form isn't yet worked out
-    // (count→1, limit/range/tail/skip) fail closed rather than run the global form.
-    if (!SCALAR_TX_NAMES.has(s.name) && (s.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local')) {
+    // Scope.local on this ELEMENT tail (scalar tails run through lowerScalarRows): a
+    // per-element reduce over a global element stream. sum/min/max/order/dedup(local) are
+    // identity; anything else has no worked-out element form → fail closed.
+    if ((s.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local')) {
       if (s.name === 'sum' || s.name === 'min' || s.name === 'max' || s.name === 'order' || s.name === 'dedup') continue; // identity
-      if (s.name === 'mean') { acc.localMean = true; continue; }
       throw new Error(`${s.name}(Scope.local) requires a preceding list-producing step (e.g. fold())`);
     }
     if (PROJECTION_NAMES.has(s.name)) {
       if (acc.projStep) break;
       acc.projStep = s;
-      // A scalar projection (values/id/label) is a stream boundary: stop right after
-      // it so the whole value tail (transforms/is/reducers/inject) routes through the
-      // scalar pipeline, not this accumulator. Non-scalar projections (valueMap/
-      // elementMap/select/project/path/count) stay terminal on buildProjection.
+      // A scalar projection (values/id/label) is a stream boundary: stop right after it
+      // so the whole value tail routes through the scalar pipeline (lowerScalarProjection),
+      // not this accumulator. Non-scalar projections (valueMap/elementMap/select/project/
+      // path/count) stay terminal on buildProjection.
       if (SCALAR_PROJ.has(s.name)) { i++; break; }
       continue;
     }
-    // inject(c…) after a value projection appends constants to the value stream.
-    if (s.name === 'inject') { acc.injects.push(...s.args); continue; }
-    // A scalar string/cast transform (concat/length/…) wraps the projected scalar.
-    if (SCALAR_TX_NAMES.has(s.name)) { acc.transforms.push(s); continue; }
     const mod = MODIFIERS.get(s.name);
     if (!mod) throw new Error(`step not implemented: ${s.name}()`);
     mod(s, acc, { last: i === steps.length - 1, next: steps[i + 1]?.name });
@@ -355,7 +335,7 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
     // unfold() on an ELEMENT stream is identity (a vertex/edge is not a collection)
     // — continue from after it. Only the bare form (no projection/modifier consumed
     // first) is identity-safe; values().unfold() etc. defer.
-    if (acc.projStep || acc.orders.length || acc.reducer || acc.isPreds.length || acc.transforms.length || acc.injects.length || acc.distinct || acc.offset || acc.limit !== null)
+    if (acc.projStep || acc.orders.length || acc.reducer || acc.isPreds.length || acc.distinct || acc.offset || acc.limit !== null)
       throw new Error('unfold() after a projection/modifier on an element stream not yet supported');
     return continueLowering(st, at + 1);
   }
@@ -440,8 +420,8 @@ function lowerScalarProjection(st: ElementStream, projStep: PStep, acc: TailAcc)
  * beats a peephole nobody's query needs (see the plan's decision log).
  */
 function compileFold(st: ElementStream, acc: TailAcc): ListStream {
-  if (acc.reducer || acc.isPreds.length || acc.transforms.length || acc.injects.length || acc.distinct || acc.offset || acc.limit !== null)
-    throw new Error('dedup()/limit()/range()/is()/transform before a non-terminal fold() not yet supported');
+  if (acc.reducer || acc.isPreds.length || acc.distinct || acc.offset || acc.limit !== null)
+    throw new Error('dedup()/limit()/range()/is() before a non-terminal fold() not yet supported');
   if (st.carried.aliases.size || st.carried.path || st.carried.origins.length)
     throw new Error('fold() carrying as()/path()/branch state into a list value not yet supported');
   const carry = carryOf(st);
@@ -524,37 +504,17 @@ export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number)
   // exactly as unfold() on an element stream. Lets aggregate('a').by(k).cap('a').unfold()
   // (an explicit cap().unfold() turns a by-key bag into a scalar stream) feed a following reducer.
   if (steps[from]?.name === 'unfold') return continueLowering(s, from + 1);
-  const { acc, stop } = foldTailAcc(steps, from);
-  if (stop !== steps.length) throw new Error(`${steps[stop].name}() after a scalar stream not yet supported`);
-  if (s.result === 'count' && acc.reducer)
-    throw new Error(`${acc.reducer}() after count() not yet supported`);
-  if (acc.projStep) {
-    if (acc.projStep.name !== 'count') throw new Error(`${acc.projStep.name}() requires element input (a scalar stream has no ${acc.projStep.name})`);
-    const dist = acc.distinct ? 'DISTINCT ' : '';
-    const whereNode = acc.isPreds.length ? q` WHERE ${list(acc.isPreds.map((p) => predicateSql(q`v`, p)), ' AND ')}` : empty;
-    const limitNode = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
-    return continueLowering(toResultStream(s.q, q`SELECT COUNT(*) AS v FROM (SELECT ${dist}v FROM ${s.rel}${whereNode}${limitNode})`, { kind: 'count' }), stop);
-  }
-  // Row-preserving operators keep reducer semantics on the stream. In particular,
-  // count().is(P) is still a Long count result rather than becoming an untyped value
-  // merely because the predicate happened to be terminal.
-  if (s.result !== 'value' && acc.transforms.length === 0 && acc.injects.length === 0) {
-    const p = s.rel.as('p');
-    const whereNode = acc.isPreds.length
-      ? q` WHERE ${list(acc.isPreds.map((pr) => predicateSql(p.c.v, pr)), ' AND ')}`
-      : empty;
-    const orderNode = acc.orders.length ? q` ORDER BY ${p.c.v}` : empty;
-    const limitNode = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
-    const typeCol = s.result === 'number' ? q`, ${p.c.vt} AS vt` : empty;
-    const rel = s.q.cte(
-      q`SELECT ${acc.distinct ? 'DISTINCT ' : ''}${p.c.v} AS v${typeCol}${carryFrag(s.carried, p)} FROM ${p}${whereNode}${orderNode}${limitNode}`,
-      [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...carriedCols(s.carried)],
-    );
-    return continueLowering(toScalarStream(carryOf(s), rel, s.as, s.result), stop);
-  }
-  const proj: ProjResult = { shape: { kind: 'value', as: s.as }, colsNode: q`v AS v`, fromNode: s.rel, scalarExpr: q`v`, baseWhere: null };
-  const orderKey = (): Expression => { throw new Error('order().by(key) on a scalar stream not supported (no properties)'); };
-  return continueLowering(renderProjection(s.q, proj, acc, orderKey), stop);
+  // Every scalar row op (transforms/is/order/limit/skip/range/tail/dedup/inject) and
+  // every Scope.local case is consumed by lowerScalarRows before we reach here, and the
+  // barriers above own count/reducers/fold/unfold/filter/constant/sack. So anything left
+  // is unsupported — fail closed with a precise message (this is why the scalar tail no
+  // longer needs foldTailAcc/renderProjection).
+  const step = steps[from];
+  if (isScopeLocalStep(step))
+    throw new Error(`${step.name}(Scope.local) requires a preceding list-producing step (e.g. fold())`);
+  if (PROJECTION_NAMES.has(step.name))
+    throw new Error(`${step.name}() requires element input (a scalar stream has no ${step.name})`);
+  throw new Error(`${step.name}() after a scalar stream not yet supported`);
 }
 
 export interface TailMods { orders: OrderClause[]; distinct: boolean; offset: number; limit: number | null; }
@@ -629,10 +589,21 @@ const PROJECTORS = new Map<string, ProjFn>([
 export const nodePropOrderKey = (st: ElementStream) => (key: string): Expression =>
   st.elem === 'edge' ? edgePropScalar(raw('n.id'), key) : nodePropScalar(raw('n.id'), key);
 
+/** Render the NON-scalar element tail — __element (vertex/edge), valueMap, elementMap,
+ *  count, and element fold() — with only its element-shape modifiers (order().by(key)
+ *  / carried encounter, dedup, range/limit). Scalar value machinery (transforms/is on a
+ *  value/inject-append/localMean/numeric reducers) lives ONLY in the scalar pipeline
+ *  (lowerScalarProjection → scalar.ts/barrier.ts); a scalar projection never reaches
+ *  here (foldTailAcc hands it to lowerScalarProjection). Any such op arriving on a
+ *  non-scalar shape fails closed. */
 function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
   const { distinct, offset, limit, isPreds, reducer } = acc;
   const projName = acc.projStep?.name ?? '__element';
 
+  // is() on a non-scalar projection (only count() carries a value to test) fails closed;
+  // scalar transforms/inject/mean(local) never reach here (foldTailAcc breaks at the
+  // scalar projection, or MODIFIERS rejects an unknown step).
+  if (isPreds.length && projName !== 'count') throw new Error('is() requires a scalar stream (values/label/id/count)');
   if (reducer && projName === 'count') throw new Error(`${reducer}() after count() not yet supported`);
 
   // count folds any tail limit/offset/distinct into the counted id-relation.
@@ -654,9 +625,29 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
   const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
   const proj = PROJECTORS.get(projName)!({ st, n, p, l, extId, vJoin, vlJoin, projStep: acc.projStep });
 
-  // order().by(key) sorts by a property expression (element context) — auto-index it.
-  const encounter = st.carried.encounter ? p.c[st.carried.encounter] : undefined;
-  return renderProjection(st.q, proj, acc, nodePropOrderKey(st), encounter);
+  // order().by(key) sorts by an element property; a bare order() by n.id; else an upstream
+  // carried encounter (an ordered dedup) fixes the result order.
+  let orderNode: Expression = empty;
+  if (acc.orders.length) {
+    const keyNodes = acc.orders.map((o) => {
+      if (o.dir === 'shuffle') return q`RANDOM()`;
+      const dir = o.dir === 'desc' ? ' DESC' : ' ASC';
+      return o.key !== null ? q`${nodePropOrderKey(st)(o.key)}${dir}` : q`n.id${dir}`;
+    });
+    orderNode = q` ORDER BY ${list(keyNodes, ', ')}`;
+  } else if (st.carried.encounter) orderNode = q` ORDER BY ${p.c[st.carried.encounter]}`;
+  const limitNode = (limit !== null || offset > 0) ? q` LIMIT ${limit ?? -1} OFFSET ${offset}` : empty;
+  const tailNode = q`SELECT ${distinct ? 'DISTINCT ' : ''}${proj.colsNode} FROM ${proj.fromNode}${orderNode}${limitNode}`;
+
+  // fold() collapses an element projection into ONE List of vertices/edges (the handler's
+  // `list` case folds the projected rows). valueMap/elementMap fold defer.
+  if (reducer === 'fold') {
+    if (proj.shape.kind !== 'vertex' && proj.shape.kind !== 'edge')
+      throw new Error(`fold() of ${proj.shape.kind} not yet supported`);
+    return toResultStream(st.q, tailNode, { kind: 'list', elem: proj.shape.kind });
+  }
+  if (reducer) throw new Error(`${reducer}() of ${proj.shape.kind} not yet supported`);
+  return toResultStream(st.q, tailNode, proj.shape);
 }
 
 /** bare sack() — read the carried per-traverser sack column (context.ts Carry.sack)
@@ -694,125 +685,4 @@ function compileCap(st: ElementStream, steps: PStep[], stop: number): LoweringRe
   // inline group; terminal framing and Column consumers share its dispatch.
   const src: GroupSource = { from: def.from, ctx: def.ctx, elem: def.elem, parent: def.parent, productiveBy: def.productiveBy };
   return continueLowering(lowerGroup(st, def.isCount, def.bys, src), stop + 1);
-}
-
-/** Render a resolved projection + the value-shape tail (scalar transforms, is()
- *  filter, dedup, order, range/limit, inject-append, terminal reducer) into a
- *  Compiled. The single tail renderer shared by element projections (buildProjection)
- *  and the inject scalar stream (compileInject) — so a new value-tail behaviour is
- *  written once. `orderKey(key)` resolves an order().by(key) to a SQL expression in
- *  the caller's context (a property lookup for elements; a throw for a scalar stream
- *  that has no properties). Identity order uses `v` (value shape) or `n.id`. */
-export function renderProjection(
-  Q: Query, proj: ProjResult, acc: TailAcc,
-  orderKey: (key: string) => Expression,
-  fallbackOrder?: Expression,
-): ResultStream {
-  const { orders, distinct, offset, limit, isPreds, reducer, injects } = acc;
-  let { shape, colsNode, scalarExpr } = proj;
-
-  // Scalar string/cast transforms (values('name').concat('X').toUpper()) wrap the
-  // projected scalar; is()/order() then see the transformed value. Only a scalar
-  // stream (values/id/label/inject) has a scalarExpr to transform. asNumber(GType.X)
-  // is a typed cast: it wraps the scalar in a SQL CAST and tags the value shape so the
-  // handler frames the right numeric subtype (a runtime value, e.g. values('float');
-  // inject constants resolve in compileInject with overflow checks instead).
-  if (acc.transforms.length) {
-    if (!scalarExpr) throw new Error(`${acc.transforms[0].name}() requires a scalar stream (values/id/label)`);
-    for (let i = 0; i < acc.transforms.length; i++) {
-      const s = acc.transforms[i];
-      if (s.name === 'asNumber') {
-        const spec = numericSpec(s.args[0]); // throws on a non-numeric GType; null = bare
-        if (spec) { scalarExpr = asNumberSql(spec, scalarExpr); shape = { kind: 'value', as: spec.as }; continue; }
-        // bare asNumber() over a runtime scalar. A date → its epoch-millis (Long,
-        // identity). Otherwise only valid as the ms-value leg of a date round-trip —
-        // i.e. immediately feeding an asDate() (which overwrites the tag), where a
-        // CAST to INTEGER is right. A standalone bare asNumber() over a runtime value
-        // can't recover its subtype (fractional vs integral), so fail closed.
-        if (shape.kind === 'value' && shape.as === 'date') { shape = { kind: 'value', as: 'long' }; continue; }
-        if (acc.transforms[i + 1]?.name === 'asDate') { scalarExpr = q`CAST(${scalarExpr} AS INTEGER)`; shape = { kind: 'value', as: 'long' }; continue; }
-        throw new Error('bare asNumber() over a non-date runtime value not yet supported');
-      }
-      if (s.name === 'asDate') { scalarExpr = asDateSql(scalarExpr); shape = { kind: 'value', as: 'date' }; continue; }
-      if (s.name === 'dateAdd') { scalarExpr = q`(${scalarExpr} + ${value(Number(s.args[1]) * dtFactor(s.args[0]))})`; shape = { kind: 'value', as: 'date' }; continue; }
-      if (s.name === 'dateDiff') { scalarExpr = q`(${scalarExpr} - ${value(dateDiffOtherMs(s.args[0], {}))})`; shape = { kind: 'value', as: 'long' }; continue; }
-      scalarExpr = scalarTx(s.name, s.args, scalarExpr) ?? (() => { throw new Error(`scalar transform ${s.name}() not supported`); })();
-    }
-    colsNode = q`${scalarExpr} AS v`;
-  }
-  // mean(Scope.local) on a scalar stream: each value is a one-element list whose mean
-  // is the value AS A DOUBLE (mean is always Double, even of one element — d[29.0].d).
-  if (acc.localMean) {
-    if (!scalarExpr) throw new Error('mean(Scope.local) requires a scalar stream');
-    scalarExpr = q`CAST(${scalarExpr} AS REAL)`;
-    shape = { kind: 'value', as: 'double' };
-    colsNode = q`${scalarExpr} AS v`;
-  }
-  // WHERE: the values() existence check + any is(P) on the projected scalar, AND'd.
-  const whereParts: Expression[] = [];
-  if (proj.baseWhere) whereParts.push(proj.baseWhere);
-  if (isPreds.length) {
-    if (!scalarExpr) throw new Error('is() requires a scalar stream (values/label/id/count)');
-    for (const pr of isPreds) whereParts.push(predicateSql(scalarExpr, pr));
-  }
-  const whereNode: Expression = whereParts.length ? q` WHERE ${list(whereParts, ' AND ')}` : empty;
-
-  let orderNode: Expression = empty;
-  if (orders.length) {
-    const keyNodes = orders.map((o) => {
-      if (o.dir === 'shuffle') return q`RANDOM()`;
-      const dir = o.dir === 'desc' ? ' DESC' : ' ASC';
-      if (o.key !== null) return q`${orderKey(o.key)}${dir}`;
-      return q`${shape.kind === 'value' ? 'v' : 'n.id'}${dir}`;
-    });
-    orderNode = q` ORDER BY ${list(keyNodes, ', ')}`;
-  } else if (fallbackOrder) orderNode = q` ORDER BY ${fallbackOrder}`;
-  const limitNode: Expression = (limit !== null || offset > 0) ? q` LIMIT ${limit ?? -1} OFFSET ${offset}` : empty;
-
-  let tailNode: Expression = q`SELECT ${distinct ? 'DISTINCT ' : ''}${colsNode} FROM ${proj.fromNode}${whereNode}${orderNode}${limitNode}`;
-
-  // values(k).inject(c…): append the constants as extra value rows before any
-  // reducer. Only meaningful on a scalar stream (the injected value shares `v`).
-  if (injects.length) {
-    if (shape.kind !== 'value') throw new Error('inject() after a non-scalar projection not yet supported');
-    tailNode = q`SELECT v FROM (${tailNode}) UNION ALL ${list(injects.map((c) => q`SELECT ${value(c)} AS v`), ' UNION ALL ')}`;
-  }
-
-  // Terminal reducers wrap the projected select.
-  if (reducer) ({ tailNode, shape } = wrapReducer(tailNode, reducer, shape));
-
-  return toResultStream(Q, tailNode, shape);
-}
-
-/** Wrap a `v`-projecting select in a terminal reducer (fold/sum/min/max/mean),
- *  returning the new node + result shape. Shared by the element tail here and the
- *  inject value stream (write.ts) so both reduce identically. fold() keeps the
- *  stream as a List (element or scalar); sum/min/max/mean collapse to one scalar
- *  (min/max/mean over numeric values only → empty stream on non-numeric input). */
-export function wrapReducer(
-  tailNode: Expression, reducer: NonNullable<TailAcc['reducer']>, shape: Shape,
-): { tailNode: Expression; shape: Shape } {
-  if (reducer === 'fold') {
-    const fe: ElemShape | 'scalar' =
-      shape.kind === 'vertex' ? 'vertex' : shape.kind === 'edge' ? 'edge' :
-      shape.kind === 'value' ? 'scalar' : (() => { throw new Error(`fold() of ${shape.kind} not yet supported`); })();
-    const as = shape.kind === 'value' ? shape.as : undefined;
-    return { tailNode, shape: as ? { kind: 'list', elem: fe, as } : { kind: 'list', elem: fe } };
-  }
-  if (shape.kind !== 'value') throw new Error(`${reducer}() of ${shape.kind} not yet supported`);
-  if (reducer === 'sum')
-    // typeof(SUM) is 'integer' or 'real' → handler frames Int/Long vs Double.
-    return { tailNode: q`SELECT SUM(v) AS v, typeof(SUM(v)) AS vt FROM (${tailNode})`, shape: { kind: 'scalar' } };
-  // mean reduces over NUMERIC values only (always a Double); an empty/non-numeric
-  // stream → NULL → dropped. min/max are over any Comparable — TinkerPop 4 made
-  // Strings comparable, so min/max also range over text (SQLite orders numbers < text,
-  // matching a uniform stream; a mixed stream is unreachable in the corpus). They keep
-  // the winner's storage class via typeof() so the handler frames Int/Double/String.
-  if (reducer === 'mean') {
-    const nums = q`SELECT v FROM (${tailNode}) WHERE typeof(v) in ('integer', 'real')`;
-    return { tailNode: q`SELECT AVG(v) AS v, 'real' AS vt FROM (${nums})`, shape: { kind: 'scalar' } };
-  }
-  const vals = q`SELECT v FROM (${tailNode}) WHERE typeof(v) in ('integer', 'real', 'text')`;
-  const node = q`SELECT ${reducer === 'min' ? 'MIN' : 'MAX'}(v) AS v, typeof(${reducer === 'min' ? 'MIN' : 'MAX'}(v)) AS vt FROM (${vals})`;
-  return { tailNode: node, shape: { kind: 'scalar' } };
 }

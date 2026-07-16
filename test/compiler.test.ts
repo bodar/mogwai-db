@@ -696,8 +696,8 @@ describe('compiler SQL snapshots', () => {
     expect(read("g.V().values('name').concat('X')").sql).toContain("concat_ws('', p.v, ?)");
     // chained; is()/order() see the transformed value
     expect(read("g.V().values('name').toUpper().is('MARKO')").sql).toContain('upper(');
-    // transform on a non-scalar projection is rejected
-    expect(() => compile("g.V().valueMap().toUpper()", {})).toThrow('requires a scalar stream');
+    // transform on a non-scalar projection is rejected (no scalar stream to transform)
+    expect(() => compile("g.V().valueMap().toUpper()", {})).toThrow('step not implemented: toUpper()');
   });
 
   test('values(k).inject(c) appends constants to the value stream', () => {
@@ -707,8 +707,8 @@ describe('compiler SQL snapshots', () => {
     expect(p.binds).toContain(1000);
     // append before a min() reducer
     expect(read("g.V().values('foo').inject(42).min()").sql).toContain('UNION ALL');
-    // rejected on a non-scalar projection
-    expect(() => compile("g.V().valueMap().inject(1)", {})).toThrow('non-scalar projection');
+    // rejected on a non-scalar projection (inject-append is a scalar-stream op)
+    expect(() => compile("g.V().valueMap().inject(1)", {})).toThrow('step not implemented: inject()');
   });
 
   test('union() as a source step UNION ALLs its vertex-rooted branches', () => {
@@ -1649,7 +1649,7 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().map(__.constant(1).discard())', {})).toThrow();
     // record/list-valued child bodies still defer; element bodies use generic child scope below.
     expect(() => compile('g.V().map(__.select("a"))', {})).toThrow('not supported by generic scalar lowering');
-    expect(() => compile('g.V().map(__.values("name")).map(__.values("age"))', {})).toThrow('step not implemented: map()');
+    expect(() => compile('g.V().map(__.values("name")).map(__.values("age"))', {})).toThrow('map() after a scalar stream not yet supported');
     // The leaf now returns a ScalarStream instead of materializing terminal SQL.
     expect(read('g.V().map(__.out().count()).is(P.gt(0)).count()').shape).toEqual({ kind: 'count' });
   });

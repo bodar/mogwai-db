@@ -626,8 +626,6 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   if (acc.orders.length) throw new Error('order() after path() not yet supported');
   if (acc.reducer) throw new Error(`${acc.reducer}() after path() not yet supported`);
   if (acc.isPreds.length) throw new Error('is() after path() not yet supported');
-  if (acc.transforms.length) throw new Error(`${acc.transforms[0].name}() after path() not yet supported`);
-  if (acc.injects.length) throw new Error('inject() after path() not yet supported');
 
   const bys = proj.bys ?? [];
   const productive = proj.productiveBy === true;
@@ -685,8 +683,8 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
  * All elements are vertices (out/in/both bodies); edge-inclusive bodies defer.
  */
 function compilePathArray(st: ElementStream, acc: TailAcc): PathStream {
-  if (acc.orders.length || acc.reducer || acc.isPreds.length || acc.transforms.length || acc.injects.length)
-    throw new Error('order()/reducer/is()/transform after a recursive repeat().path() not yet supported');
+  if (acc.orders.length || acc.reducer || acc.isPreds.length)
+    throw new Error('order()/reducer/is() after a recursive repeat().path() not yet supported');
   // dedup() must collapse equal paths BEFORE row-numbering: ROW_NUMBER() is computed
   // with the SELECT list, so a `SELECT DISTINCT path, ROW_NUMBER()…` never removes a
   // row (the unique pk defeats DISTINCT). Distinct-ify in a prior CTE, then number.
