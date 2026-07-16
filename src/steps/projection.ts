@@ -57,6 +57,10 @@ const NUMERIC_REDUCERS = new Set<NumericReducer>(['sum', 'min', 'max', 'mean']);
  *  terminal reducer (fold/sum) can reject anything following it. */
 type ModFn = (s: PStep, acc: TailAcc, at: { last: boolean; next?: string }) => void;
 
+/** Steps a path() projection folds as its OWN tail modifiers (vs a shape-boundary
+ *  follower routed to compileFromPath). order() is deliberately absent — it defers. */
+const PATH_MODIFIERS = new Set(['dedup', 'limit', 'range', 'skip']);
+
 const MODIFIERS = new Map<string, ModFn>([
   ['order', (s, acc) => {
     // Each folded by() → one order clause; a bare order() sorts by identity.
@@ -125,6 +129,10 @@ export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop:
       if (s.name === 'sum' || s.name === 'min' || s.name === 'max' || s.name === 'order' || s.name === 'dedup') continue; // identity
       throw new Error(`${s.name}(Scope.local) requires a preceding list-producing step (e.g. fold())`);
     }
+    // path() is a re-enterable projection (a PathStream): it consumes only its own tail
+    // modifiers (dedup/limit/range/skip); any other following step (count/is/unfold/…) is
+    // a shape boundary, so stop and let the path arm (compileFromPath) handle it.
+    if (acc.projStep?.name === 'path' && !PATH_MODIFIERS.has(s.name)) break;
     if (PROJECTION_NAMES.has(s.name)) {
       if (acc.projStep) break;
       acc.projStep = s;
@@ -307,10 +315,14 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
   if (acc.projStep && SCALAR_PROJ.has(acc.projStep.name))
     return continueLowering(lowerScalarProjection(st, acc.projStep, acc), at);
 
+  // path() → a PathStream, whether terminal (loop returns it) or followed (the path arm
+  // compileFromPath validates count/is(typeOf)/…). Its dedup/limit modifiers already
+  // folded into acc; foldTailAcc stopped at any shape-boundary follower.
+  if (acc.projStep?.name === 'path')
+    return continueLowering(lowerPath(st, acc.projStep, acc), at);
+
   // Consumed the whole chain → render terminally, exactly as before.
   if (at === steps.length) {
-    if (acc.projStep?.name === 'path')
-      return continueLowering(lowerPath(st, acc.projStep, acc), at);
     if (isMapProj(acc.projStep))
       return continueLowering(compileSelectProject(st, acc.projStep!, acc), at);
     return continueLowering(buildProjection(st, acc), at);

@@ -16,7 +16,7 @@ import { type SackSpec } from '../frontend.ts';
 import { compileTail, compileFromScalar } from './projection.ts';
 import { compileFromGroup, compileFromProperty } from './group.ts';
 import { compileFromList, compileFromMap } from './list.ts';
-import { compileFromRecord, selectRecordFromAlias } from './select.ts';
+import { compileFromRecord, compileFromPath, selectRecordFromAlias } from './select.ts';
 import { asOnStream, selectOneFromAlias } from './labelselect.ts';
 import { assertStreamColumns, continueLowering, type LoweringResult, type Stream } from './stream.ts';
 import { type Compiled } from '../render.ts';
@@ -288,9 +288,7 @@ function lowerStream(s: Stream, steps: PStep[], at: number): LoweringResult {
   if (s.kind === 'map') return compileFromMap(s, steps, at);
   if (s.kind === 'record') return compileFromRecord(s, steps, at);
   if (s.kind === 'group') return compileFromGroup(s, steps, at);
-  if (s.kind === 'path') {
-    throw new Error(`${steps[at].name}() on a path value not yet supported`);
-  }
+  if (s.kind === 'path') return compileFromPath(s, steps, at);
   return compileFromList(s, steps, at);
 }
 

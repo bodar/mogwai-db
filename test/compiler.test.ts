@@ -1915,6 +1915,23 @@ describe('compiler SQL snapshots', () => {
     expect(cyclic.sql).toContain('WHERE (p.p0 = p.p1 OR p.p0 = p.p2 OR p.p1 = p.p2)');
   });
 
+  test('P3 Stage A: path() is re-enterable — count()/is(typeOf(PATH))', () => {
+    // count() over a linear path → COUNT(*) (one row per path)
+    const c = read('g.V(1).out().out().path().count()');
+    expect(c.shape).toEqual({ kind: 'count' });
+    expect(c.sql).toContain('COUNT(*) AS v');
+    // count() over a recursive (grouped) path → COUNT(DISTINCT pk), not exploded elements
+    const rc = read('g.V(1).repeat(__.out()).times(2).path().count()');
+    expect(rc.shape).toEqual({ kind: 'count' });
+    expect(rc.sql).toContain('COUNT(DISTINCT');
+    // is(typeOf(GType.PATH)) is identity — a path IS a Path, so the result stays a path
+    const t = read('g.V(1).out().out().path().is(typeOf(GType.PATH))');
+    expect(t.shape.kind).toBe('path');
+    // still-deferred followers fail closed
+    expect(() => compile('g.V(1).out().path().unfold()', {})).toThrow('not yet supported');
+    expect(() => compile('g.V(1).out().path().select(Column.keys)', {})).toThrow('not yet supported');
+  });
+
   test('path() interleaves edge and vertex positions with the right element shape', () => {
     const p = read('g.V(1).outE("created").inV().path()');
     // edge position frames endpoints as external ids (COALESCE(uid,id)), not raw rowid
@@ -1947,7 +1964,7 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V(1).out().dedup().path()', {})).toThrow('dedup() with path tracking not yet supported');
     expect(() => compile('g.V(1).out().path().by(__.values("name"))', {})).toThrow('path().by(traversal) modulator not yet supported');
     expect(() => compile('g.V(1).out().path().by(T.id)', {})).toThrow('path().by(T.id) modulator not yet supported');
-    expect(() => compile('g.V(1).out().path().order()', {})).toThrow('order() after path() not yet supported');
+    expect(() => compile('g.V(1).out().path().order()', {})).toThrow('order() on a path value not yet supported');
   });
 
   // ---------- recursive repeat().path() (JSONB array regime) ----------
