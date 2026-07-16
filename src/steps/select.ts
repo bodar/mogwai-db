@@ -700,3 +700,34 @@ function compilePathArray(st: ElementStream, acc: TailAcc): PathStream {
   const rel = st.q.cte(node, pathColumns(layout));
   return toPathStream(withoutCarried(carryOf(st)), rel, layout);
 }
+
+/** The path arm of lowerSteps — steps AFTER path() over a PathStream (P3 Stage A).
+ * A PathStream is a terminal-island no longer: count()/is(typeOf(PATH)) re-enter the
+ * loop. unfold()/select(Column) defer (they need internal rowid re-entry / the path's
+ * as()-label history — separate slices). */
+export function compileFromPath(s: PathStream, steps: PStep[], at: number): LoweringResult {
+  const step = steps[at];
+  if (step.name === 'count') {
+    // One path per row (linear) vs one row per path ELEMENT (grouped, recursive repeat):
+    // count paths, so grouped counts DISTINCT path keys, not exploded elements.
+    const p = s.rel.as('p');
+    const countExpr = s.layout.kind === 'grouped' ? q`COUNT(DISTINCT ${p.c.pk})` : q`COUNT(*)`;
+    const rel = s.q.cte(q`SELECT ${countExpr} AS v FROM ${p}`, ['v']);
+    return continueLowering(toScalarStream(withoutCarried(carryOf(s)), rel, 'long', 'count'), at + 1);
+  }
+  if (step.name === 'is') {
+    const pred = (step.args ?? [])[0];
+    if (pred && typeof pred === 'object' && pred.op === 'typeOf') {
+      const arg = pred.values?.[0];
+      const name = (arg && typeof arg === 'object' && 'gtype' in arg) ? String(arg.gtype) : typeof arg === 'string' ? arg : null;
+      // A path IS a Path → is(typeOf(PATH)) is identity; any other type matches nothing.
+      if (name && name.toUpperCase() === 'PATH') return continueLowering(s, at + 1);
+      const p = s.rel.as('p');
+      const cols = pathColumns(s.layout);
+      const rel = s.q.cte(q`SELECT ${list(cols.map((c) => p.c[c]), ', ')} FROM ${p} WHERE 0`, cols);
+      return continueLowering(toPathStream(carryOf(s), rel, s.layout), at + 1);
+    }
+    throw new Error('is() after path() supports only is(typeOf(GType.PATH))');
+  }
+  throw new Error(`${step.name}() on a path value not yet supported`);
+}
