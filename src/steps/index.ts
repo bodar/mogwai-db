@@ -183,6 +183,12 @@ export function lowerElementSteps(steps: PStep[], seedSt: ElementStream, from = 
     const optionalNested = steps[i].name === 'optional' ? steps[i].args[0]?.nested : null;
     const shapedOptional = !!optionalNested
       && (isListChild(optionalNested, seedSt.params) || isScalarChild(optionalNested, seedSt.params));
+    // Mixed-shape arms (some non-element) can't be an element StepFn — break so the
+    // shape dispatch tries the list/scalar/variant lowerers (P4). All-element (incl.
+    // mixed node/edge) stays with the element StepFn and its own defer.
+    const mixedUnion = unionBranches.length >= 2 && unionBranches.some((a: any) => !isElementChild(a.nested, seedSt.params));
+    const mixedChoose = chooseArgs.length === 3 && chooseArgs.slice(1).some((a: any) => !isElementChild(a.nested, seedSt.params));
+    const mixedCoalesce = coalesceArgs.length > 0 && coalesceArgs.some((a: any) => !isElementChild(a.nested, seedSt.params));
     if (!fn
       || scalarUnion
       || listUnion
@@ -190,6 +196,9 @@ export function lowerElementSteps(steps: PStep[], seedSt: ElementStream, from = 
       || listChoose
       || scalarCoalesce
       || listCoalesce
+      || mixedUnion
+      || mixedChoose
+      || mixedCoalesce
       || shapedOptional
       || (steps[i].name === 'choose' && steps[i].options)
       || (steps[i].name === 'sack' && !isSackMutate(steps[i]))
