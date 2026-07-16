@@ -460,6 +460,24 @@ describe('compiler SQL snapshots', () => {
     expect(scalarKey.sql).toContain('GROUP BY gk');
   });
 
+  test('element-value group: unreduced value traversal implicitly folds to a list', () => {
+    const store = seededStore();
+    const eq = (a: string, b: string) =>
+      JSON.stringify(executeQuery(store, a, {}).map((x) => [...x])) === JSON.stringify(executeQuery(store, b, {}).map((x) => [...x]));
+    // by(__.out()) ≡ by(__.out().fold()) — TinkerPop collects an unreduced group value.
+    expect(read('g.V().group().by(T.label).by(__.out())').shape).toEqual({ kind: 'group', key: { kind: 'scalar', as: undefined }, val: { kind: 'elementList', elem: 'vertex' } });
+    expect(eq('g.V().group().by(T.label).by(__.out())', 'g.V().group().by(T.label).by(__.out().fold())')).toBe(true);
+    // a trailing bare order() is the fold's natural id order (no-op), incl. before fold()
+    expect(eq('g.V().group().by(T.label).by(__.out().order())', 'g.V().group().by(T.label).by(__.out().fold())')).toBe(true);
+    expect(eq('g.V().group().by(T.label).by(__.out().order().fold())', 'g.V().group().by(T.label).by(__.out().fold())')).toBe(true);
+    // order() before an order-insensitive reducer, and fold().count(Scope.local), collapse to count()
+    expect(eq('g.V().group().by(T.label).by(__.out().order().count())', 'g.V().group().by(T.label).by(__.out().count())')).toBe(true);
+    expect(eq('g.V().group().by(T.label).by(__.out().order().fold().count(Scope.local))', 'g.V().group().by(T.label).by(__.out().count())')).toBe(true);
+    // the two collapses are general (root chains too)
+    expect(eq('g.V().out().order().count()', 'g.V().out().count()')).toBe(true);
+    expect(eq('g.V().out().fold().count(Scope.local)', 'g.V().out().count()')).toBe(true);
+  });
+
   test("cap('a') of a group side-effect retypes to a MapStream on a follower", () => {
     // A group('a')/groupCount('a') side-effect, re-emitted by cap('a'), is re-enterable
     // too: select(Column.values)/unfold compose exactly like an inline group().

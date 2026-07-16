@@ -253,7 +253,27 @@ export function applyStrategies(steps: Step[], use: StrategyUse, params: Record<
  *  shape (iterate() → return nothing), not a step the compiler dispatches. */
 export function normalize(steps: Step[]): { steps: PStep[]; discard: boolean } {
   const stripped = stripTerminal(steps);
-  return { steps: dropRedundantOrder(foldChooseOptions(foldByModulators(foldRepeatClusters(stripped.steps)))), discard: stripped.discard };
+  return { steps: dropRedundantOrder(collapseFoldCountLocal(foldChooseOptions(foldByModulators(foldRepeatClusters(stripped.steps))))), discard: stripped.discard };
+}
+
+/** `fold().count(Scope.local)` counts the one folded list's size = the number of upstream
+ *  elements = `count()`. A provable identity that also unblocks group value children like
+ *  by(__.out().order().fold().count(Scope.local)) (then dropRedundantOrder removes the
+ *  order). Runs before dropRedundantOrder so the resulting order().count() is caught. */
+function collapseFoldCountLocal(steps: PStep[]): PStep[] {
+  const out: PStep[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    const next = steps[i + 1];
+    if (s.name === 'fold' && !s.bys && next?.name === 'count'
+      && next.args.some((a: any) => a && typeof a === 'object' && a.scope === 'local')) {
+      out.push({ ...next, args: next.args.filter((a: any) => !(a && typeof a === 'object' && a.scope === 'local')) });
+      i++; // consume both fold and count(Scope.local)
+      continue;
+    }
+    out.push(s);
+  }
+  return out;
 }
 
 /** Reducers whose result is independent of input order. */

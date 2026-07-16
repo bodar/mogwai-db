@@ -10,7 +10,7 @@ import { carryFrag, carriedCols, carriedWith, elemRel, withoutCarried, type Carr
 import { carryOf, continueLowering, groupColumns, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream } from './stream.ts';
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
-import { isElementFoldChild, isScalarChild, isScalarFoldChild, pushChildScope, reuseCurrentFrame, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild } from './child.ts';
+import { isElementFoldChild, isElementImplicitFoldChild, isScalarChild, isScalarFoldChild, pushChildScope, reuseCurrentFrame, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild } from './child.ts';
 
 /** Movement heads whose property-group compatibility path can use a correlated
  * neighbourhood reduction, and the scalar reducers that terminate one. */
@@ -164,7 +164,12 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     && isScalarFoldChild(valArg.nested, parent.params);
   const genericElementFold = valSteps.at(-1)?.name === 'fold'
     && isElementFoldChild(valArg.nested, parent.params);
-  if (!genericKey && !genericProjectKey && !genericVal && !genericReducer && !genericFold && !genericElementFold) return null;
+  // An unreduced element value traversal (by(__.out()), by(__.out().order())) collects
+  // into a list — TinkerPop's implicit fold. Same relational path as genericElementFold.
+  const genericElementImplicitFold = !genericElementFold
+    && valSteps.length > 0
+    && isElementImplicitFoldChild(valArg.nested, parent.params);
+  if (!genericKey && !genericProjectKey && !genericVal && !genericReducer && !genericFold && !genericElementFold && !genericElementImplicitFold) return null;
 
   const outer = pushChildScope(parent);
   const p = outer.seed.rel.as('gp');
@@ -222,8 +227,10 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     valFold = true;
     valOrder = q`${p.c[outer.frame.ordinal]}, ${valMarker}`;
   }
-  if (genericElementFold) {
-    const rows = tryCompileElementRowsBeforeFold(outer.seed, valArg.nested, reuseCurrentFrame(outer.scope, outer.frame));
+  if (genericElementFold || genericElementImplicitFold) {
+    const rows = (genericElementFold
+      ? tryCompileElementRowsBeforeFold(outer.seed, valArg.nested, reuseCurrentFrame(outer.scope, outer.frame))
+      : tryCompileElementImplicitFoldRows(outer.seed, valArg.nested, reuseCurrentFrame(outer.scope, outer.frame)));
     if (!rows) throw new Error('group element fold rows failed after successful shape preflight');
     const c = rows.stream.rel.as('gef');
     const e = (rows.stream.elem === 'edge' ? edges : nodes).as('gev');
