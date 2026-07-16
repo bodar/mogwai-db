@@ -5,7 +5,7 @@ import {
   nodePropScalar, edgePropScalar, framedProps, valueMapProps,
 } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
-import { carryFrag, carriedCols, elemRel, withoutCarried, type ElementStream } from './context.ts';
+import { carryFrag, carriedCols, carriedWith, elemRel, withoutCarried, type ElementStream } from './context.ts';
 import { carryOf, continueLowering, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream } from './stream.ts';
 import { tryLowerLocalAggregate } from './sideeffect.ts';
 import { type Shape, type ElemShape } from '../render.ts';
@@ -42,6 +42,10 @@ export interface TailAcc {
   injects: any[];                  // constants appended to the value stream (values(k).inject(c))
   localMean: boolean;              // mean(Scope.local) on a scalar stream → coerce each value to Double
 }
+
+/** A TailAcc with no modifiers — the bare scalar projection case (no preceding
+ *  order/limit/dedup) routes through lowerScalarProjection with this. */
+const EMPTY_TAIL_ACC: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, reducer: null, isPreds: [], transforms: [], injects: [], localMean: false };
 
 const PROJECTION_NAMES = new Set(['values', 'id', 'label', 'count', 'valueMap', 'elementMap', 'select', 'project', 'path']);
 // Scalar-producing projections: one `v` value per row. A chain that continues past one
@@ -140,6 +144,11 @@ export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop:
     if (PROJECTION_NAMES.has(s.name)) {
       if (acc.projStep) break;
       acc.projStep = s;
+      // A scalar projection (values/id/label) is a stream boundary: stop right after
+      // it so the whole value tail (transforms/is/reducers/inject) routes through the
+      // scalar pipeline, not this accumulator. Non-scalar projections (valueMap/
+      // elementMap/select/project/path/count) stay terminal on buildProjection.
+      if (SCALAR_PROJ.has(s.name)) { i++; break; }
       continue;
     }
     // inject(c…) after a value projection appends constants to the value stream.
@@ -300,56 +309,23 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
   if (steps[stop]?.name === 'select' || steps[stop]?.name === 'project')
     return continueLowering(lowerRecordSelectProject(st, steps[stop]), stop + 1);
 
-  // A scalar-producing projection is always a real stream transition when another
-  // step follows. The next step dispatches against ScalarStream, so composition no
-  // longer depends on a terminal-tail special case (values().count().is(),
-  // values().groupCount(), and future scalar consumers all cross the same seam).
-  const scalarRest = steps.slice(stop + 1);
-  // as()/select(label) after a scalar projection bind/read a path-history label on the
-  // value stream — force the scalar boundary so they re-enter the shape dispatch.
-  const next = scalarRest[0];
-  const followsValueLabel = !!next && (next.name === 'as'
-    || (next.name === 'select' && next.args.some((a: any) => typeof a === 'string')
-        && !next.args.some((a: any) => a && typeof a === 'object' && 'column' in a)));
-  // A scalar projection followed by the filter family (and/or/not/filter/where) or a
-  // constant() also crosses to the scalar stream, where compileFromScalar re-enters the
-  // generic filter/branch dispatch on the current value.
-  const followsScalarFilter = !!next && ['and', 'or', 'not', 'filter', 'where', 'constant'].includes(next.name);
-  // A BARE terminal scalar projection (values/id/label with nothing after) also crosses
-  // to the scalar stream, so the terminal value tail is materialized by the one scalar
-  // pipeline (materializeScalarRoot) rather than the duplicate renderProjection engine —
-  // per-row typed framing then lives in exactly one place (consolidation P1, unify tail).
-  const terminalScalar = scalarRest.length === 0 && SCALAR_PROJ.has(steps[stop]?.name);
-  const needsScalarBoundary = st.carried.origins.length > 0 || followsValueLabel || followsScalarFilter || terminalScalar || (scalarRest.length > 0 && scalarRest.every((s) =>
-    SCALAR_ROW_STEPS.has(s.name) && !isScopeLocalStep(s)));
-  if (SCALAR_PROJ.has(steps[stop]?.name) && needsScalarBoundary) {
-    const n = elemRel(st);
-    const l = labels.as('l');
-    const p = st.rel.as('p');
-    const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
-    const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
-    const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
-    const proj = PROJECTORS.get(steps[stop].name)!({ st, n, p, l, extId, vJoin, vlJoin, projStep: steps[stop] });
-    const where = proj.baseWhere ? q` WHERE ${proj.baseWhere}` : empty;
-    const origin = st.carried.origins.at(-1);
-    const encounter = origin ? 'encounter' : undefined;
-    const encounterExpr = origin
-      ? q`, ROW_NUMBER() OVER (PARTITION BY ${p.c[origin]} ORDER BY ${proj.encounterKey ?? p.c.id}) AS encounter`
-      : empty;
-    // Carry the stored per-row type (values() reads vp/ep.vtype) so a following
-    // is(typeOf(X)) tests it. Column order must match streamColumns: v, encounter, vtype.
-    const vtypeCol = proj.vtypeExpr ? q`, ${proj.vtypeExpr} AS vtype` : empty;
-    const rel = st.q.cte(
-      q`SELECT ${proj.colsNode}${encounterExpr}${vtypeCol}${carryFrag(st.carried, p)} FROM ${proj.fromNode}${where}`,
-      ['v', ...(encounter ? [encounter] : []), ...(proj.vtypeExpr ? ['vtype'] : []), ...carriedCols(st.carried)],
-    );
-    const asTag = proj.shape.kind === 'value' ? proj.shape.as : undefined;
-    return continueLowering(toScalarStream(carryOf(st), rel, asTag, 'value', encounter, undefined, proj.vtypeExpr ? 'vtype' : undefined), stop + 1);
-  }
+  // A bare scalar-producing projection (values/id/label with no preceding tail
+  // modifier) crosses immediately to the scalar value pipeline: lowerScalarProjection
+  // builds the ScalarStream and every following value op + all per-row framing then
+  // live in scalar.ts/barrier.ts, never renderProjection (consolidation P1, unify tail).
+  if (SCALAR_PROJ.has(steps[stop]?.name))
+    return continueLowering(lowerScalarProjection(st, steps[stop], EMPTY_TAIL_ACC), stop + 1);
 
   // Tail fold: accumulate the projection + modifiers, stopping at a retype boundary
-  // (unfold / a non-terminal fold).
+  // (unfold / a non-terminal fold) or at a scalar projection (values/id/label) — which
+  // foldTailAcc leaves as projStep so the whole value tail routes through the scalar
+  // pipeline below.
   const { acc, stop: at } = foldTailAcc(steps, stop);
+
+  // A scalar projection reached with preceding element modifiers (order()/limit()/…):
+  // hand off to the same scalar value pipeline, carrying the element order.
+  if (acc.projStep && SCALAR_PROJ.has(acc.projStep.name))
+    return continueLowering(lowerScalarProjection(st, acc.projStep, acc), at);
 
   // Consumed the whole chain → render terminally, exactly as before.
   if (at === steps.length) {
@@ -385,6 +361,71 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
   }
   // A non-terminal fold → a single list value; continue from the ListStream.
   return continueLowering(compileFold(st, acc), at + 1);
+}
+
+/**
+ * Turn a scalar projection (values/id/label) — with any preceding element modifiers
+ * folded into `acc` (order/limit/skip/range, and an upstream carried encounter from an
+ * ordered dedup) — into a ScalarStream. This is the ONE entry to the scalar value
+ * pipeline: every following value op (transforms/is/reducers/inject/Scope.local) and all
+ * per-row framing then live in scalar.ts/barrier.ts/materializeScalarRoot, never
+ * renderProjection. Element order().by(key) becomes the carried encounter column, which
+ * threads through the scalar pipeline and orders the final result; a child scope keeps
+ * its per-origin physical encounter. Per-row stored vtype (values() of a typed prop)
+ * rides alongside `v` for a following is(typeOf(X)) and typed framing.
+ */
+function lowerScalarProjection(st: ElementStream, projStep: PStep, acc: TailAcc): ScalarStream {
+  const n = elemRel(st);
+  const l = labels.as('l');
+  const p = st.rel.as('p');
+  const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
+  const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
+  const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
+  const proj = PROJECTORS.get(projStep.name)!({ st, n, p, l, extId, vJoin, vlJoin, projStep });
+  const asTag = proj.shape.kind === 'value' ? proj.shape.as : undefined;
+  const vt = proj.vtypeExpr ? 'vtype' : undefined;
+  const vtypeCol = proj.vtypeExpr ? q`, ${proj.vtypeExpr} AS vtype` : empty;
+  const where = proj.baseWhere ? q` WHERE ${proj.baseWhere}` : empty;
+  const origin = st.carried.origins.at(-1);
+
+  // Child scope: a physical per-origin encounter partitions downstream scalar row ops.
+  // Preceding element order/limit/dedup at a child scope defer (unreached in practice).
+  if (origin) {
+    if (acc.orders.length || acc.limit !== null || acc.offset > 0 || acc.distinct)
+      throw new Error('order()/limit()/dedup() before a projection inside a child scope not yet supported');
+    const encounterExpr = q`, ROW_NUMBER() OVER (PARTITION BY ${p.c[origin]} ORDER BY ${proj.encounterKey ?? p.c.id}) AS encounter`;
+    const rel = st.q.cte(
+      q`SELECT ${proj.colsNode}${encounterExpr}${vtypeCol}${carryFrag(st.carried, p)} FROM ${proj.fromNode}${where}`,
+      ['v', 'encounter', ...(vt ? ['vtype'] : []), ...carriedCols(st.carried)],
+    );
+    return toScalarStream(carryOf(st), rel, asTag, 'value', 'encounter', undefined, vt);
+  }
+
+  // Root scope. An explicit order().by(key) mints the carried encounter; LIMIT/OFFSET
+  // apply in this projection CTE. Otherwise an upstream carried encounter (e.g.
+  // order().dedup()) rides through unchanged via carryFrag.
+  if (acc.distinct) throw new Error('dedup() before a scalar projection not yet supported');
+  const orderExprs = acc.orders.map((o) => {
+    if (o.dir === 'shuffle') return q`RANDOM()`;
+    const dir = o.dir === 'desc' ? ' DESC' : ' ASC';
+    if (o.key !== null) return q`${nodePropOrderKey(st)(o.key)}${dir}`;
+    return q`${proj.scalarExpr ?? p.c.id}${dir}`;
+  });
+  const hasNewEncounter = orderExprs.length > 0;
+  if (hasNewEncounter && (st.carried.path || st.carried.encounter))
+    throw new Error('order() before a projection while tracking a path/encounter not yet supported');
+  const hasLimit = acc.limit !== null || acc.offset > 0;
+  // The ROW_NUMBER window already captures order (materializeScalarRoot sorts by the
+  // encounter); an outer ORDER BY is only needed so LIMIT/OFFSET picks the right slice.
+  const orderNode = hasNewEncounter && hasLimit ? q` ORDER BY ${list(orderExprs, ', ')}` : empty;
+  const limitNode = hasLimit ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
+  const encounterExpr = hasNewEncounter ? q`, ROW_NUMBER() OVER (ORDER BY ${list(orderExprs, ', ')}) AS encounter` : empty;
+  const carried = hasNewEncounter ? carriedWith(st.carried, { encounter: 'encounter' }) : st.carried;
+  const rel = st.q.cte(
+    q`SELECT ${proj.colsNode}${vtypeCol}${carryFrag(st.carried, p)}${encounterExpr} FROM ${proj.fromNode}${where}${orderNode}${limitNode}`,
+    ['v', ...(vt ? ['vtype'] : []), ...carriedCols(st.carried), ...(hasNewEncounter ? ['encounter'] : [])],
+  );
+  return toScalarStream({ ...carryOf(st), carried }, rel, asTag, 'value', undefined, undefined, vt);
 }
 
 /**
