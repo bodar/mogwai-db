@@ -1,7 +1,8 @@
 # Compiler consolidation — the strategic map (2026-07-16)
 
-**Status:** research + plan. Telemetry harness LANDED (this commit); architecture
-bets scoped, not yet built. **Baseline at authorship:** L3 956, corpus 2298/2298.
+**Status:** research + plan. Telemetry harness LANDED; architecture bets scoped.
+**P1 (unify the tail) LANDED 2026-07-16** — see §3/§4d. **Baseline at authorship:** L3
+956, corpus 2298/2298. **Now: L3 1040.**
 
 **What this is.** A principled, code-grounded map of where the compiler carries
 duplication / locally-optimized mini-compilers, where it defers language and why,
@@ -33,9 +34,11 @@ from two sides.** Three things never got lifted:
    materialize at the root and cannot collapse into a carried value or re-enter
    the tail. This gates the path-tail, Map-unfold, `valueMap().select()`,
    element-value group maps, mixed `select(Column)`, and labels follow-up #3.
-2. **The element tail** never moved onto the stepwise engine → a whole
-   **duplicate value-tail compiler** (`foldTailAcc`/`renderProjection`/
-   `wrapReducer`) shadows `lowerScalarRows` + `barrier.ts`.
+2. ~~**The element tail** never moved onto the stepwise engine → a whole
+   **duplicate value-tail compiler**~~ **— LIFTED (P1, 2026-07-16).** `renderProjection`
+   + `wrapReducer` + the duplicate transform ladder are DELETED; `foldTailAcc` now only
+   feeds the NON-scalar element tail (`buildProjection`). Every value tail routes through
+   `lowerScalarProjection` → `scalar.ts`/`barrier.ts`.
 3. **Predicate lowering** got a generic fallback in one caller (`where`) but not
    the others (`choose`/`coalesce`/`until`), so those three *define* support
    (throw) instead of falling through.
@@ -50,18 +53,17 @@ Everything below hangs off those three observations.
 
 | # | Debt | Nature | Blocks |
 |---|---|---|---|
-| D1 | **Dual value-tail engine** — `foldTailAcc`/`renderProjection`/`wrapReducer`/`MODIFIERS` (`projection.ts`) vs `lowerScalarRows`+`barrier.ts` (`scalar.ts`/`barrier.ts`) | the element accumulator **defines** support (`step not implemented: X()` throw at `projection.ts:150`) | element-tail modifiers *before* a barrier (`order().limit().count()`); this is the single largest internal duplication |
+| ~~D1~~ | ~~**Dual value-tail engine**~~ **— RESOLVED (P1, 2026-07-16)** | `renderProjection`/`wrapReducer`/the duplicate transform ladder + `SCALAR_TX_NAMES` DELETED; `buildProjection` renders only the non-scalar element tail; every value tail routes through `lowerScalarProjection` → `scalar.ts`/`barrier.ts` | (unblocked `order().by(k).limit(n).values().count()`) |
 | D2 | **`tryInlinePredicate`/`compileInlinePredicate`** (`plan.ts:433-605`) | true fast-path in `where` (falls through to `tryFilterByChildExistence`); **support-definer** in `choose`/`coalesce`/`until` (throws — `branch.ts:44,565,597`) | complex predicates across the whole branch + repeat families |
 | D3 | **`tryInlineScalar`/`requireInlineScalar`** (`plan.ts:332-413`, `group.ts:22-26`) | support-definer — engages *only because* property-group / `cap('a')` group sources have **no live `ElementStream` parent** (`group.ts:136` returns null → forced onto the inline path) | property-group keys/values, group-over-`properties()`, `cap('a')` group |
 
-Concrete duplication evidence for D1: the scalar transform ladder is written
-twice, near-identically — `renderProjection` (`projection.ts:646-668`) and
-`scalarTransform` (`scalar.ts:34-53`) both branch asNumber/asDate/dateAdd/
-dateDiff/else-scalarTx; the transform-name set is duplicated (`SCALAR_TX_NAMES`
-`projection.ts:54` ≡ `SCALAR_TRANSFORMS` `scalar.ts:9`); reducer logic exists in
-**three** places — `wrapReducer` (`projection.ts:718`), `barrier.ts`
-`lowerGlobalNumericReducer` (the stepwise authority), and `scalar.ts`
-`lowerListReducer` (Scope.local).
+~~Concrete duplication evidence for D1~~ **(historical — D1 is resolved).** The scalar
+transform ladder was written twice (`renderProjection` vs `scalar.ts scalarTransform`),
+the transform-name set was duplicated (`SCALAR_TX_NAMES` ≡ `SCALAR_TRANSFORMS`), and
+reducer logic lived in three places (`wrapReducer` + `barrier.ts` + `scalar.ts`). P1
+deleted the `renderProjection`/`wrapReducer`/`SCALAR_TX_NAMES` copies; the stepwise
+`scalar.ts`/`barrier.ts` are now the sole authority (`scalar.ts lowerListReducer` for
+Scope.local stays, a genuinely distinct per-list aggregate).
 
 ### Maintainability-only (not feature-blocking)
 
@@ -150,13 +152,18 @@ test joins it with the cucumber report and prints a deferral-bucket view. Gated
 on `MOGWAI_L3_TELEMETRY`; default `bun test` is byte-identical → zero ratchet
 risk. This turns every bet below from a guess into a measurement. See §4.
 
-**P1 — Unify the tail** *(debt removal; small feature unlock).* Migrate the
-element tail off `foldTailAcc` onto the stepwise `lowerScalarRows` + `barrier`
-engine; delete `wrapReducer`/`renderProjection`/the duplicate transform ladder
-and name-set. Highest-value refactor: the duplicate tail is what forces every new
-tail feature to be written twice. Unlocks element-tail modifiers before a barrier
-(`order().limit().count()`). *This is the archetypal "malleability win that barely
-moves the number" — and it should be done first among the code bets.*
+**P1 — Unify the tail** *(debt removal; small feature unlock).* **LANDED 2026-07-16
+(L3 1026→1040).** Three green stages: (A) every values/id/label projection routes
+through one `lowerScalarProjection` → `ScalarStream` (an element `order().by(k)` before
+it becomes the carried encounter column, a ROW_NUMBER window); (B) `lowerScalarRows`
+handles `Scope.local` directly (identity sum/min/max/order/dedup, `localMeanScalar`→
+Double, transforms fuse, others fail closed); (C) DELETED `renderProjection`,
+`wrapReducer`, the duplicate transform ladder, `SCALAR_TX_NAMES`, and the dead
+`TailAcc.transforms/injects/localMean` fields. `buildProjection` now renders ONLY the
+non-scalar element tail (vertex/edge/valueMap/elementMap/count/element-fold). Net −132
+lines; the scalar value tail + all per-row framing live in exactly one place. Bonus
+unlock: `order().by(k).limit(n).values().count()`. Done BEFORE P3b (typed-property
+framing) as planned — the "so P3b isn't written twice" prerequisite.
 
 **P2 — One predicate seam** *(broad feature unlock; small diff).* Give
 `choose`/`coalesce`/`until` the same `tryFilterByChildExistence` fallback that
@@ -179,7 +186,8 @@ property-groups / `cap('a')` reach the generic child engine, retiring
 P1, P2, P5 are debt-removal that unlock features as a side effect. P3, P4 are new
 substrate. Sequencing rationale: clear the duplication (P1) and the predicate
 asymmetry (P2) first so the substrate work (P3/P4) is written once, on a clean
-spine, not forked across the accumulator and the stepwise engine.
+spine, not forked across the accumulator and the stepwise engine. **P1 is done; P2/P3/
+P4/P5 remain.**
 
 ---
 
@@ -313,6 +321,32 @@ abstraction. Deferred as scoped follow-up. `math`/`groupCount` over scalar are r
 herrings (blocked by the BIGDECIMAL platform wall and by choose-options/property-group
 deferrals respectively) — not value-stream gaps.
 
+## 4d. P1 — unify the tail LANDED (L3 1026→1040, +14)
+
+The value-tail duplication (D1) is gone. Three green stages, each CI-green:
+1. **One scalar-projection entry.** Every `values`/`id`/`label` projection routes
+   through `lowerScalarProjection` → a `ScalarStream`, re-entering the stepwise loop. An
+   element `order().by(k)` before the projection becomes the carried encounter column (a
+   `ROW_NUMBER` window) so ordering threads through the scalar pipeline.
+2. **`Scope.local` on the scalar spine.** `lowerScalarRows` handles it directly (identity
+   sum/min/max/order/dedup, `localMeanScalar`→Double, transforms fuse ignoring scope,
+   count/limit/range/tail/skip fail closed) — `compileFromScalar` no longer needs
+   `foldTailAcc`/`renderProjection`.
+3. **Delete the second engine.** `renderProjection` + `wrapReducer` + the duplicate
+   transform ladder + `SCALAR_TX_NAMES` name-set + the dead `TailAcc.transforms/injects/
+   localMean` fields are gone. `buildProjection` renders ONLY the non-scalar element tail
+   (vertex/edge/valueMap/elementMap/count/element-fold). Net −132 lines.
+
+The scalar value tail + all per-row framing now live in exactly one place
+(`scalar.ts`/`barrier.ts`/`materializeScalarRoot`) — the "so P3b isn't written twice"
+prerequisite. Bonus unlock: `order().by(k).limit(n).values().count()`. P3b (typed
+property framing + `is(typeOf(LIST))→ListStream`) then landed on top, 1037→1040. See
+memory `typed-property-values` + `docs/2026-07-16-typed-property-values-plan.md`.
+
+**Refreshed remaining bets:** P2 (one predicate seam), P3 (map/group/path re-enterable),
+P4 (dynamic-tag VariantStream), P5 (group live parent) — all still open, now on a
+single-spine tail.
+
 ## 5. What NOT to do
 
 - Do not chase the platform walls (§2) — they are correctly closed.
@@ -321,5 +355,6 @@ deferrals respectively) — not value-stream gaps.
 - Do not add a new mini-compiler or a private child-traversal parser to unblock a
   single scenario (the CLAUDE.md extension law). If a shape needs support, lift it
   onto the spine.
-- Do not build P3/P4 while the dual tail (P1) still exists — you'd fork the new
-  substrate across both engines.
+- ~~Do not build P3/P4 while the dual tail (P1) still exists~~ — **P1 is done**
+  (2026-07-16), so the dual tail is gone; P3/P4 substrate work now lands on the single
+  spine without forking.
