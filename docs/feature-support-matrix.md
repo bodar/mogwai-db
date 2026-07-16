@@ -1,7 +1,7 @@
 # mogwai-db — feature support matrix
 
 Scannable map of what the compiler supports, and where partial steps stop. Grouped
-by traversal concern. **L3 conformance: 1066 · corpus parse+chain: 2298/2298.**
+by traversal concern. **L3 conformance: 1067 · corpus parse+chain: 2298/2298.**
 
 Sourced from the dispatch maps (`src/steps/*.ts`) and the compiler `throw` sites — if
 the code defers a shape, it fails closed with a clear error and this file says so. Keep
@@ -62,7 +62,7 @@ In a 🟡 cell, **✅** = supported form, **❌** = deferred shape.
 
 | Step | | Notes |
 |---|:--:|---|
-| `group`, `groupCount` | 🟡 | scalar reducers → SQL `GROUP BY`; element values → ordered stream + fold; scalar/`T.id`/`T.label`/composite-`project` keys; non-reducing values → scalar lists; group-scoped `count/sum/min/max/mean` + `…fold()` at the key boundary; scalar-stream `groupCount()` groups by value; `count()`/`is(typeOf(MAP))`/`unfold()`→Map.Entry re-enter. ❌ >2 `by()`, deep/non-scalar keys, element-value maps |
+| `group`, `groupCount` | 🟡 | scalar reducers → SQL `GROUP BY`; element values → ordered stream + fold, incl. an **unreduced value traversal** (`by(__.out())`/`by(__.out().order())`) collected via implicit fold; scalar/`T.id`/`T.label`/composite-`project` keys; non-reducing values → scalar lists; group-scoped `count/sum/min/max/mean` + `…fold()` at the key boundary; scalar-stream `groupCount()` groups by value; `count()`/`is(typeOf(MAP))`/`unfold()`→Map.Entry re-enter. ❌ >2 `by()`, deep/non-scalar keys, **nested-MAP values** (`by(__.…groupCount()/group())`), `order().by(key)` in an element value |
 | `fold()` | ✅ | scalar or element list, re-enterable; empty lists and node/edge item metadata preserved |
 | `sum`, `min`, `max`, `mean` | ✅ | carry runtime `(v,vt)`; also `Scope.local` list reducers (§9); `min`/`max` over any Comparable incl. Strings |
 | `group('a')`/`groupCount('a')` (side-effecting) | 🟡 | see §12 |
