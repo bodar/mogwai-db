@@ -12,6 +12,23 @@ export const SCALAR_TRANSFORMS = new Set([
   'trim', 'lTrim', 'rTrim', 'reverse', 'asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff',
 ]);
 
+export const SACK_OPS = new Set(['assign', 'sum', 'minus', 'mult', 'div', 'min', 'max']);
+
+/** Fold a merge value into the sack under an Operator. assign replaces; the rest
+ *  combine with the prior sack (required — via withSack() or a prior assign). div forces
+ *  REAL division (SQLite `/` is integer division on integer operands). Shared by the
+ *  element sack StepFn (sack.ts) and the scalar-stream sack path below. */
+export function combineSack(op: string, byVal: Expression, oldSack: Expression | null): Expression {
+  if (op === 'assign') return byVal;
+  if (!oldSack) throw new Error(`sack(Operator.${op}) requires withSack() or a prior sack(assign)`);
+  return op === 'sum' ? q`(${oldSack} + ${byVal})`
+    : op === 'minus' ? q`(${oldSack} - ${byVal})`
+    : op === 'mult' ? q`(${oldSack} * ${byVal})`
+    : op === 'div' ? q`(CAST(${oldSack} AS REAL) / ${byVal})`
+    : op === 'min' ? q`MIN(${oldSack}, ${byVal})`
+    : q`MAX(${oldSack}, ${byVal})`;
+}
+
 export const SCALAR_ROW_STEPS = new Set([
   ...SCALAR_TRANSFORMS, 'is', 'limit', 'skip', 'range', 'tail', 'order', 'dedup',
   'count', 'sum', 'min', 'max', 'mean', 'fold', 'unfold', 'inject',
@@ -238,6 +255,33 @@ export function lowerScalarFilter(s: ScalarStream, step: PStep): ScalarStream {
     cond = scalarChildProduces(stepChain(arg.nested, s.params), cur, s.params);
   }
   const rel = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)} FROM ${p} WHERE ${cond}`, cols(s));
+  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull);
+}
+
+/** sack over a scalar stream. The mutate form sack(Operator.x) folds the CURRENT VALUE
+ *  (`v`) into the carried sack — a scalar has no properties, so the value itself is the
+ *  merge value (no by() modulator). The read form (bare sack()) rebinds the current
+ *  object to the sack value. Reuses combineSack (the element sack's operator logic). */
+export function lowerScalarSack(s: ScalarStream, step: PStep): ScalarStream {
+  if (!s.carried.sack) throw new Error('sack() over a scalar stream requires withSack() or a preceding sack step');
+  const sk = s.carried.sack;
+  const p = s.rel.as('p');
+  const op = (step.args ?? []).find((a: any) => a && typeof a === 'object' && 'operator' in a)?.operator;
+  if (!op) {
+    // bare sack() read: the sack value becomes the current object.
+    if ((step.args ?? []).length) throw new Error('sack(argument) read form not supported (bare sack() only)');
+    const rel = s.q.cte(q`SELECT ${p.c[sk]} AS v${carryFrag(s.carried, p)} FROM ${p}`, ['v', ...carriedCols(s.carried)]);
+    return toScalarStream(carryOf(s), rel);
+  }
+  if (!SACK_OPS.has(op)) throw new Error(`sack(Operator.${op}) not yet supported`);
+  if (((step as any).bys ?? []).length)
+    throw new Error('sack(Operator.x).by() over a scalar stream not yet supported (the scalar value is the merge value)');
+  const newSack = combineSack(op, p.c.v, p.c[sk]);
+  const carriedProj = carriedCols(s.carried).map((c) => c === sk ? q`${newSack} AS ${sk}` : p.c[c]);
+  const rel = s.q.cte(
+    q`SELECT ${payload(s, p)}${carriedProj.length ? q`, ${list(carriedProj, ', ')}` : empty} FROM ${p}`,
+    cols(s),
+  );
   return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull);
 }
 

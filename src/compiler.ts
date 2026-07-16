@@ -28,7 +28,7 @@ export function compile(gremlin: string, params: Record<string, any>, options?: 
   if (steps.length === 0) throw new Error('empty traversal');
 
   const sackInit = extractSack(tree, params);
-  const plan: Compiled | WritePlan = routeWrite(steps, params)
+  const plan: Compiled | WritePlan = routeWrite(steps, params, sackInit ?? undefined)
     ?? compileRead(steps, params, sackInit ?? undefined, resolveFastPaths(options));
 
   if (discard) {

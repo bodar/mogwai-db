@@ -10,7 +10,7 @@ import { carryOf, continueLowering, toListStream, toResultStream, toScalarStream
 import { tryLowerLocalAggregate } from './sideeffect.ts';
 import { type Shape, type ElemShape } from '../render.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
-import { SCALAR_ROW_STEPS, lowerScalarFilter, lowerConstant } from './scalar.ts';
+import { SCALAR_ROW_STEPS, lowerScalarFilter, lowerConstant, lowerScalarSack } from './scalar.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
 import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
@@ -453,6 +453,10 @@ export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number)
   // constant(x) rebinds every traverser to the literal x (a fresh scalar stream).
   if (steps[from]?.name === 'constant')
     return continueLowering(lowerConstant(carryOf(s), s.rel, steps[from].args), from + 1);
+  // sack over a scalar: mutate (fold the current value into the carried sack) or bare
+  // read (the sack value becomes the current object).
+  if (steps[from]?.name === 'sack')
+    return continueLowering(lowerScalarSack(s, steps[from]), from + 1);
   // count() is a barrier and therefore another ScalarStream transition, not a
   // terminal rendering decision. Keeping it relational lets any following scalar
   // filter/transform/reducer compile normally. The barrier drops row-associated

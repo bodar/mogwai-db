@@ -265,6 +265,31 @@ still holds for *breadth of step families*, but by *raw scenario count today* th
 scalar-tail re-entry (A) is the biggest single unlock, and it's the cheapest
 because it's removing duplication we already own.
 
+## 4b. Milestone B1 landed — value streams first-class for filter/branch (L3 956→1002, +46)
+
+Made the filter family (`and`/`or`/`not`/`filter`/`where`) and `constant()`
+shape-agnostic over a scalar current object (`scalar.ts` `scalarChildProduces` +
+`lowerScalarFilter` + `lowerConstant`, dispatched from `compileFromScalar` and
+`compileTail`). Reuses the predicate leaf (`predicateSql`) + transform ladder
+(`scalarTx`), NOT a forked engine; element-only bodies fail closed. Additive — every
+affected form previously threw. Committed `98169dc`, CI green.
+
+**Refreshed telemetry (post-B1, 845 unique failed).** The B1 buckets are cleared.
+New top single levers:
+- `SubgraphStrategy(edges)` 39 — strategy adjacency (Cluster 9 / P-strategy).
+- merge family ~40 — `merge` traversal-arg 26 + merge-on-list 14 (Cluster 7 / P3
+  writes-through-`lowerSteps`; the reusable traversal-valued-argument substrate).
+- `local()` child-shape 22 — generic child-engine coverage (choose/option element bodies).
+- **list-valued `property('list',[…])` bind 22 — a BUG, not a missing feature**
+  (a JS array bound as a SQLite value throws). Cheap, isolated, high-value.
+- `select()` on a valueMap shape 18 — terminal-island (Cluster 8 / P3 map/group/path).
+- value-streams-theme continuation for other families: `sack`/`groupCount`/`math`
+  over a scalar ~49 combined (each a distinct sub-problem).
+
+B2 (choose/coalesce over a scalar) is now only ~7 and needs a heavy child-engine
+generalization → deprioritized. Next bold target chosen from the refreshed data,
+not the pre-B1 ranking.
+
 ## 5. What NOT to do
 
 - Do not chase the platform walls (§2) — they are correctly closed.

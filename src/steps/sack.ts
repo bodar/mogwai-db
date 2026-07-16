@@ -2,6 +2,7 @@ import { derived, q, list, type Expression } from '../q.ts';
 import { scalarProp, labelNameSub, predicateSql, elemCtx } from '../plan.ts';
 import { advance, elemRel, prevRel, carriedCols, type ElementStream, type StepFn } from './context.ts';
 import { tryCompileScalarValueRows } from './child.ts';
+import { SACK_OPS, combineSack } from './scalar.ts';
 
 // ---------- sack (per-traverser carried scalar) ----------
 //
@@ -14,7 +15,6 @@ import { tryCompileScalarValueRows } from './child.ts';
 // (bare-incoming merge — needs the inject/local scalar substrate), sack through
 // repeat()/barrier/local, split/merge-on-fork, the sack(BiFunction) lambda form.
 
-const SACK_OPS = new Set(['assign', 'sum', 'minus', 'mult', 'div', 'min', 'max']);
 
 /** The merge value SQL expr over the current element (aliased `n`): a property key,
  *  a T.label/T.id token, or a nested by(__.…) scalar (constant/label/values/…). */
@@ -47,16 +47,7 @@ export const sack: StepFn = (s, st) => {
   if (st.carried.aliases.size || st.carried.path || st.carried.origins.length)
     throw new Error('sack(Operator.x) after as()/path()/branch state not yet supported');
 
-  const combine = (byVal: Expression, oldSack: Expression | null): Expression => {
-    if (op === 'assign') return byVal;
-    if (!oldSack) throw new Error(`sack(Operator.${op}) requires withSack() or a prior sack(assign)`);
-    return op === 'sum' ? q`(${oldSack} + ${byVal})`
-      : op === 'minus' ? q`(${oldSack} - ${byVal})`
-      : op === 'mult' ? q`(${oldSack} * ${byVal})`
-      : op === 'div' ? q`(CAST(${oldSack} AS REAL) / ${byVal})`
-      : op === 'min' ? q`MIN(${oldSack}, ${byVal})`
-      : q`MAX(${oldSack}, ${byVal})`;
-  };
+  const combine = (byVal: Expression, oldSack: Expression | null): Expression => combineSack(op, byVal, oldSack);
 
   const nested = bys[0]?.find((a: any) => a && typeof a === 'object' && 'nested' in a);
   if (nested) {
