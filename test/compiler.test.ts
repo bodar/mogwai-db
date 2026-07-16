@@ -3368,6 +3368,27 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V().has("name","stephen").values("created")').map((r) => r.v)).toEqual(['Y']);
   });
 
+  test('mergeV/mergeE map from withSideEffect + __.select(key) constant', () => {
+    // onCreate: select("c") is the (absent) match map, select("m") the create props
+    const s1 = new GraphStore(new BunSqlite(':memory:'));
+    run(s1, 'g.addV("person").property("name","marko").property("age",29)');
+    run(s1, 'g.withSideEffect("c",[(T.label):"person","name":"stephen"]).withSideEffect("m",[(T.label):"person","name":"stephen","age":19]).mergeV(__.select("c")).option(Merge.onCreate, __.select("m"))');
+    expect(run(s1, 'g.V().has("person","name","stephen").values("age")').map((r) => r.v)).toEqual([19]);
+    // onMatch: select("c") matches marko, select("m") patches age
+    const s2 = new GraphStore(new BunSqlite(':memory:'));
+    run(s2, 'g.addV("person").property("name","marko").property("age",29)');
+    run(s2, 'g.withSideEffect("c",[(T.label):"person","name":"marko"]).withSideEffect("m",["age":19]).mergeV(__.select("c")).option(Merge.onMatch, __.select("m"))');
+    expect(run(s2, 'g.V().has("person","name","marko").values("age")').map((r) => r.v)).toEqual([19]);
+    // mergeE match map from a side-effect constant
+    const s3 = new GraphStore(new BunSqlite(':memory:'));
+    run(s3, 'g.addV().property(T.id, 1).as("a").addV().property(T.id, 2).as("b")');
+    run(s3, 'g.withSideEffect("a",[(T.label):"knows",(Direction.OUT):1,(Direction.IN):2]).mergeE(__.select("a"))');
+    expect(run(s3, 'g.E().hasLabel("knows").count()').map((r) => r.v)).toEqual([1]);
+    // a select() with no matching withSideEffect fails closed
+    expect(() => run(new GraphStore(new BunSqlite(':memory:')), 'g.mergeV(__.select("nope"))'))
+      .toThrow("needs a withSideEffect('nope', map)");
+  });
+
   test('mergeV accepts a bound Map parameter with EnumValue keys (wire path)', () => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     // mimic a GraphBinary-deserialized m[{"t[label]":"person","name":"stephen"}]

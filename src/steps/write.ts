@@ -488,13 +488,27 @@ function classifyMergeVal(v: any): any {
   return m ? { incoming: m } : v;
 }
 
-function normalizeMergeMap(raw: any): MergeSpec {
+// Resolve a merge map argument that is a nested traversal to its constant value. A
+// withSideEffect(key, map) constant read back by __.select(key) is compile-time known, so
+// substitute it directly (correct-by-construction — the value never changes). Any other
+// traversal form (identity-on-incoming, a mutating body) defers with a clear message.
+function resolveMergeArg(raw: any, sideEffects: Map<string, any> | undefined, params: Record<string, any>): any {
+  if (!isNested(raw)) return raw;
+  const inner = stepChain(raw.nested, params);
+  if (inner.length === 1 && inner[0].name === 'select' && typeof inner[0].args[0] === 'string') {
+    const k = inner[0].args[0];
+    if (sideEffects?.has(k)) return sideEffects.get(k);
+    throw new Error(`merge with select('${k}') needs a withSideEffect('${k}', map) constant`);
+  }
+  throw new Error('merge with a traversal argument (e.g. __.select(...)) not yet supported');
+}
+
+function normalizeMergeMap(raw: any, sideEffects?: Map<string, any>, params: Record<string, any> = {}): MergeSpec {
+  raw = resolveMergeArg(raw, sideEffects, params);
   const spec: MergeSpec = { label: null, id: null, outV: undefined, inV: undefined, props: {} };
   if (raw == null) return spec; // mergeV(null) — match anything
-  if (!(raw instanceof Map)) {
-    if (raw && typeof raw === 'object' && 'nested' in raw) throw new Error('merge with a traversal argument (e.g. __.select(...)) not yet supported');
+  if (!(raw instanceof Map))
     throw new Error('merge argument must be a map ([k:v] / bound Map), null, or empty ([:])');
-  }
   for (const [k, v] of raw) {
     const c = classifyMergeKey(k);
     if (c.kind === 'label') spec.label = String(v);
@@ -524,14 +538,14 @@ function mergeMatchQuery(spec: MergeSpec): { sql: string; binds: any[] } {
   return render(q`SELECT id, uid, (SELECT name FROM labels WHERE id=nodes.label) AS label FROM nodes WHERE ${where}`);
 }
 
-function parseMergeOptions(mods: Step[], step: string): { onCreate: MergeSpec | null; onMatch: MergeSpec | null } {
+function parseMergeOptions(mods: Step[], step: string, sideEffects: Map<string, any> | undefined, params: Record<string, any>): { onCreate: MergeSpec | null; onMatch: MergeSpec | null } {
   let onCreate: MergeSpec | null = null, onMatch: MergeSpec | null = null;
   for (const s of mods) {
     if (s.name !== 'option') throw new Error(`step not implemented after ${step}(): ${s.name}()`);
     const [sel, mapArg] = s.args;
     if (!sel || typeof sel !== 'object' || !('merge' in sel))
       throw new Error(`${step} option() selector must be Merge.onCreate/onMatch`);
-    const spec = normalizeMergeMap(mapArg);
+    const spec = normalizeMergeMap(mapArg, sideEffects, params);
     if (sel.merge === 'oncreate') onCreate = spec;
     else if (sel.merge === 'onmatch') onMatch = spec;
     else throw new Error(`${step} option(Merge.${sel.merge}) not supported`);
@@ -550,12 +564,12 @@ function mergeDrivers(prefix: PStep[], params: Record<string, any>): (store: Gra
 }
 
 // g.mergeV(map) [.option(Merge.onCreate, map)] [.option(Merge.onMatch, map)]
-function compileMergeV(steps: PStep[], params: Record<string, any>): WritePlan {
+function compileMergeV(steps: PStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
   const mvIdx = steps.findIndex((s) => s.name === 'mergeV');
   if (steps[mvIdx].args.length === 0)
     throw new Error('mergeV() with no argument (uses the incoming traverser as the map) not yet supported');
-  const matchSpec = normalizeMergeMap(steps[mvIdx].args[0]);
-  const { onCreate, onMatch } = parseMergeOptions(steps.slice(mvIdx + 1), 'mergeV');
+  const matchSpec = normalizeMergeMap(steps[mvIdx].args[0], sideEffects, params);
+  const { onCreate, onMatch } = parseMergeOptions(steps.slice(mvIdx + 1), 'mergeV', sideEffects, params);
   const drivers = mergeDrivers(steps.slice(0, mvIdx), params);
   const match = mergeMatchQuery(matchSpec);
   return {
@@ -595,12 +609,12 @@ function edgeMatchQuery(spec: MergeSpec, outV: number, inV: number): { sql: stri
 }
 
 // g.mergeE(map) [.option(Merge.onCreate, map)] [.option(Merge.onMatch, map)]
-function compileMergeE(steps: PStep[], params: Record<string, any>): WritePlan {
+function compileMergeE(steps: PStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
   const meIdx = steps.findIndex((s) => s.name === 'mergeE');
   if (steps[meIdx].args.length === 0)
     throw new Error('mergeE() with no argument (uses the incoming traverser as the map) not yet supported');
-  const matchSpec = normalizeMergeMap(steps[meIdx].args[0]);
-  const { onCreate, onMatch } = parseMergeOptions(steps.slice(meIdx + 1), 'mergeE');
+  const matchSpec = normalizeMergeMap(steps[meIdx].args[0], sideEffects, params);
+  const { onCreate, onMatch } = parseMergeOptions(steps.slice(meIdx + 1), 'mergeE', sideEffects, params);
   const drivers = mergeDrivers(steps.slice(0, meIdx), params);
   return {
     kind: 'write',
@@ -638,13 +652,13 @@ function compileMergeE(steps: PStep[], params: Record<string, any>): WritePlan {
 // Ordered rules: the first whose `match` fires compiles the chain. Order matters
 // (addE before addV; drop must be the terminal step) — hence a rule list, not a
 // name→fn Map. Returns null when the chain is a read (compiler falls to compileRead).
-interface WriteRule { match: (steps: PStep[]) => boolean; compile: (steps: PStep[], params: Record<string, any>, sackInit?: SackSpec) => WritePlan | Compiled; }
+interface WriteRule { match: (steps: PStep[]) => boolean; compile: (steps: PStep[], params: Record<string, any>, sackInit?: SackSpec, sideEffects?: Map<string, any>) => WritePlan | Compiled; }
 
 const WRITE_RULES: WriteRule[] = [
   { match: (s) => s.some((x) => x.name === 'addE'), compile: (s, p) => compileAddE(s, p) },
   { match: (s) => s[0].name === 'addV', compile: (s) => compileAddV(s) },
-  { match: (s) => s.some((x) => x.name === 'mergeV'), compile: (s, p) => compileMergeV(s, p) },
-  { match: (s) => s.some((x) => x.name === 'mergeE'), compile: (s, p) => compileMergeE(s, p) },
+  { match: (s) => s.some((x) => x.name === 'mergeV'), compile: (s, p, _sk, se) => compileMergeV(s, p, se) },
+  { match: (s) => s.some((x) => x.name === 'mergeE'), compile: (s, p, _sk, se) => compileMergeE(s, p, se) },
   // inject is a scalar-stream READ, not a write — it lives here only because it's a
   // source constructor. It threads withSack() so a sack-carrying value stream
   // (withSack(x).inject(v).sack(...)) seeds its `sk` column like the V()/E() path.
@@ -654,7 +668,7 @@ const WRITE_RULES: WriteRule[] = [
 ];
 
 /** Route a step chain to its write compiler, or null if it's a read. */
-export function routeWrite(steps: PStep[], params: Record<string, any>, sackInit?: SackSpec): WritePlan | Compiled | null {
-  for (const rule of WRITE_RULES) if (rule.match(steps)) return rule.compile(steps, params, sackInit);
+export function routeWrite(steps: PStep[], params: Record<string, any>, sackInit?: SackSpec, sideEffects?: Map<string, any>): WritePlan | Compiled | null {
+  for (const rule of WRITE_RULES) if (rule.match(steps)) return rule.compile(steps, params, sackInit, sideEffects);
   return null;
 }
