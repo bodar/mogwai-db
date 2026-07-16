@@ -136,8 +136,11 @@ describe('compiler SQL snapshots', () => {
 
   test('order().by(key[, dir]) folds ORDER BY into the projection select', () => {
     const asc = read('g.V().hasLabel("person").order().by("age").values("name")');
-    expect(asc.sql).toContain("ORDER BY (SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) ASC");
-    expect(asc.binds).toEqual(['person', 'name', 'age']); // label, then the values() join key + the order key (bound)
+    expect(asc.sql).toContain("ROW_NUMBER() OVER (ORDER BY (SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) ASC) AS encounter");
+    // order().by(key) before a scalar projection routes through the scalar pipeline: the
+    // element order becomes the carried encounter (a ROW_NUMBER window). binds: label,
+    // the order key (window), then the values() join key.
+    expect(asc.binds).toEqual(['person', 'age', 'name']);
 
     const desc = read('g.V().hasLabel("person").order().by("age",desc).values("name")');
     expect(desc.sql).toContain("ORDER BY (SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) DESC");
