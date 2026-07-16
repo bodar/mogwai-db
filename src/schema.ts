@@ -10,6 +10,7 @@
 import { relation } from './q.ts';
 
 export const nodes = relation('nodes', ['id', 'uid', 'label']);
-export const vertexProperties = relation('vertex_properties', ['id', 'node', 'key', 'value', 'meta']);
-export const edges = relation('edges', ['id', 'uid', 'src', 'label', 'tgt', 'props']);
+export const vertexProperties = relation('vertex_properties', ['id', 'node', 'key', 'value', 'vtype', 'meta']);
+export const edges = relation('edges', ['id', 'uid', 'src', 'label', 'tgt']);
+export const edgeProperties = relation('edge_properties', ['id', 'edge', 'key', 'value', 'vtype']);
 export const labels = relation('labels', ['id', 'name']);

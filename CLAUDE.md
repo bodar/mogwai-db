@@ -238,9 +238,17 @@ a dead 2013 OGM).
 3. **Compile to SQL, never interpret.** Each read step appends a CTE; SQLite's
    planner + covering indexes do the traversal. Row-at-a-time JS interpretation
    is the failure mode this project exists to avoid.
-4. **Reuse the client package's GraphBinary code.** `gremlin`'s
-   `build/esm/structure/io/binary` ships ~30 bidirectional type serializers
-   (Apache-2.0). We wrote only response framing. Don't write serializers.
+4. **Reuse the client package's GraphBinary code — reuse-first, not reuse-only.**
+   `gremlin`'s `build/esm/structure/io/binary` ships ~30 bidirectional type
+   serializers (Apache-2.0); default to reusing them rather than reimplementing.
+   This is a pragmatic default, NOT a hard lock: where the client code is deficient
+   we already fix it in the wire layer — we own request parsing (`wire.ts`), response
+   framing/pacing (`http.ts`), and hand-roll `vertexBuffer`/`edgeBuffer`/
+   `vertexPropertyBuffer` (`execute.ts`) precisely because the client's own
+   vertex/edge/VP serializers hardcode empty properties. So wiring an unused-but-present
+   serializer (e.g. `uuidSerializer`), reading a leading GraphBinary type-code as
+   parsing glue, or writing a serializer the client lacks are all legitimate when
+   warranted — reuse is the starting point, fixing a real deficiency is the right call.
 5. **Own IR = the step chain** `{name, args}[]`. Grammar visitor is a thin
    front-end; compiler consumes the IR. If the wire format ever changes,
    only the front-end moves.
@@ -382,14 +390,36 @@ Integer rowid PKs; interned labels (small hot indexes); covering edge indexes
 `(src,label,tgt)` and `(tgt,label,src)` so out()/in() are index-only scans.
 
 **Vertex properties are NORMALIZED** (W4, `docs`/memory `w4-property-model`): a
-`vertex_properties(id, node, key, value, meta BLOB)` table, one row per
+`vertex_properties(id, node, key, value, vtype TEXT, meta BLOB)` table, one row per
 VertexProperty instance — so a key may repeat (multi-property, `Cardinality.list`/
 `set`) and `id` (rowid) IS the VertexProperty id. `value` has **no declared type**
 (BLOB affinity) so it keeps whatever SQLite storage class the bound value has
 (correct numeric order/range for `has('age',gt(30))`/`order().by('age')`). `meta`
-is a JSONB `{metaKey:scalar}` blob (meta-properties). **Edges keep a FLAT JSONB
-`props` column** — TinkerPop's edge `Property` has no id/meta/multi, so no table is
-warranted; edge writes wrap `jsonb(?)`, reads select `json(props)`.
+is a JSONB `{metaKey:scalar}` blob (meta-properties).
+
+**Edges ALSO NORMALIZED — `edge_properties(id, edge, key, value, vtype TEXT,
+UNIQUE(edge,key))`** (typed-property-values rework, 2026-07-16 P1; memory
+`typed-property-values`). The old flat JSONB `edges.props` blob is RETIRED. TinkerPop's
+edge `Property` has no id/meta/multi → ONE row per (edge,key) (the UNIQUE constraint
+enforces that single cardinality and doubles as the (edge,key) lookup index). Same
+untyped `value` column as vertices, so edge-prop numeric order/range now works too.
+Every edge read mirrors the node helpers on the edge rowid (`edgePropScalar`/
+`edgeHasProp`/`edgePropsAgg`/`edgeValueMapProps` in `plan.ts`) — there is no
+`propsExpr`. Edge writes go through `insertEdgeProperty` (UPSERT); `drop()` cascades
+`edge_properties`.
+
+**`vtype` = the canonical Gremlin type the write channel carried** (`src/gremlin-types.ts`
+is the ONE type vocabulary: `CanonicalType`, `WIRE_TYPE_TO_NAME` from `ioc.DataType`,
+`normalizeTypeName`, `gremlinTypeOf`). Sourced from the truth channel, never a heuristic:
+a bound param → the GraphBinary DataType the client serialized (captured in `wire.ts`
+`decodeMapWithValueTypes`, threaded `paramTypes` through the manager `query` seam →
+`executeQuery` → `compile` → `stepChain` → frontend `VariableContext`); an inline literal
+→ its parsed subtype (`frontend.ts` walkArgs now tags string/boolean/datetime/uuid/list/
+map, not just numerics — `Step.argTypes` graduated to every literal's canonical type).
+NULL vtype = infer on read (legacy/raw-insert). A collection value (list/map/set) stores
+as JSONB in `value` (fixes the raw-array bind crash). vtype is stored + write only in P1;
+`typeOf` via vtype + per-row framing + the `vt`/`vtype` unify are P2/P3
+(`docs/2026-07-16-typed-property-values-plan.md`).
 
 **Static covering indexes** `vp_key_value(key,value)` + `vp_node_key(node,key)`,
 built once at schema time, REPLACE the old self-tuning `json_extract` expression
@@ -399,24 +429,28 @@ injection surface. There is no per-key `indexKeys` reporting / `ensureNodePropIn
 anymore (the machinery is gone; a vestigial always-empty `Compiled.indexKeys`
 accumulator remains inert — a scoped follow-up removes the threading).
 
-**The read seam (`src/plan.ts`).** `ScalarCtx.propsExpr` is EDGE-ONLY (the flat
-blob); nodes read props via `idExpr` through three dispatchers: `hasProp`
-(node → ANY-match `EXISTS(vertex_properties …)` = multi-property has semantics),
-`scalarProp` (node → `value … ORDER BY id LIMIT 1` = first-under-multi, for
-order/group-key/by(key)/map/sack), and `vertexPropsAgg`/`framedProps` (a correlated
-`json_group_object(key, [values])` used ONLY at leaf materialization — never inside
-the movement/filter CTEs, so the traversal hot path stays index-only; `extIdOf`
-precedent). `values('k')` is a genuine **flatMap JOIN** (one row per value);
-`valueMap` frames `{key:[values]}` uniformly (node + edge). `vertexPropsAgg` is
-`ORDER BY MIN(id)` so property order is insertion order.
+**The read seam (`src/plan.ts`).** Nodes AND edges read props via `idExpr` into their
+own normalized table (no `propsExpr`). Three node dispatchers, each with an edge twin:
+`hasProp` (node → ANY-match `EXISTS(vertex_properties …)` = multi-property has; edge →
+`edgeHasProp` EXISTS over `edge_properties`), `scalarProp` (node → `value … ORDER BY id
+LIMIT 1` first-under-multi; edge → `edgePropScalar`, single value), and `vertexPropsAgg`/
+`framedProps` (correlated `json_group_object` used ONLY at leaf materialization — never
+inside movement/filter CTEs, so the hot path stays index-only; edge → `edgePropsAgg`,
+flat `{key:value}`). `values('k')` is a genuine **flatMap JOIN** (node → `vertex_properties`,
+one row per multi-value; edge → `edge_properties`, single). `valueMap` frames
+`{key:[values]}` uniformly. `propExtract`/`jsonExtract` now serves ONLY vertex-property
+**meta** blobs and materialized record-field props JSON (not edge value props).
 
-**Writes (`src/steps/write.ts`).** `applyVertexProperty(node,key,value,meta,card)`:
+**Writes (`src/steps/write.ts`).** `applyVertexProperty(node,key,value,vtype,meta,card)`:
 single = delete-then-insert, list = append, set = append-unless-equal (patch meta);
-one SQL statement each. `readCardinality`+`metaOf` parse `property([Cardinality,] k,
-v [,mk,mv…])`. `VertexSpec.props` is an ordered `PropSpec[]` (a Record can't hold a
-repeated key). Edges reject cardinality/meta. `property(null)`/`property([:])`/
-map-form `property()` are no-ops (map-form not yet implemented). `drop()` cascades
-`vertex_properties`.
+one SQL statement each. A collection `vtype` (list/map/set) serializes the value to
+JSONB (`jsonb(?)`); a scalar binds raw. `PropSpec` carries `vtype` (via `propVtype` =
+`gremlinTypeOf(value, argType)`). `insertEdgeProperty(edge,key,value,vtype)` is the edge
+twin (UPSERT on UNIQUE(edge,key), single cardinality, no meta). `readCardinality`+`metaOf`
+parse `property([Cardinality,] k, v [,mk,mv…])`. `VertexSpec.props` is an ordered
+`PropSpec[]` (a Record can't hold a repeated key). Edges reject cardinality/meta.
+`property(null)`/`property([:])`/map-form `property()` are no-ops. `drop()` cascades
+BOTH `vertex_properties` and `edge_properties`.
 
 **Meta reads (`compileProperties`).** `properties()` frames the real VP id + meta
 via a hand-rolled `vertexPropertyBuffer` (the client's `VertexPropertySerializer`

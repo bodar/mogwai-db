@@ -29,10 +29,13 @@ export function parseGremlin(query: string) {
 
 // ---------- step extraction ----------
 
-// `argTypes[i]` is the declared numeric subtype of `args[i]` when it is a numeric
-// literal (from the grammar context + suffix), else null. Carried in parallel so
-// `args` stays plain numbers for every existing consumer; only bare asNumber() reads
-// it (to recover the input subtype the value alone can't carry — 5b/5i/5l/5.0 → 5).
+// `argTypes[i]` is the canonical Gremlin type of `args[i]` as declared by its
+// carrying channel — a parsed literal's subtype (numeric suffix, string, boolean,
+// datetime, uuid, list, map) or, for a bound-param reference, the wire DataType the
+// client serialized (applied in Task 6). null when the channel says nothing. Carried
+// in parallel so `args` stays plain values for every consumer; read by bare asNumber()/
+// asDate() (to recover the input subtype the value can't carry) and by the write seam
+// (to store vertex_properties/edge_properties.vtype — see gremlin-types.ts).
 export interface Step { name: string; args: any[]; ctx: ParserRuleContext; argTypes?: (string | null)[]; }
 
 // Numeric-literal suffix → subtype. No suffix: an integer literal defaults to `int`,
@@ -56,8 +59,10 @@ export const stepName = (cls: string, prefix: string) =>
     ? cls.slice(prefix.length, -'Context'.length).split('_')[0]
     : null;
 
-/** Collect the top-level step chain (does not descend into nested traversal args). */
-export function stepChain(tree: any, params: Record<string, any>): Step[] {
+/** Collect the top-level step chain (does not descend into nested traversal args).
+ *  `paramTypes` names the wire DataType of each bound param (from wire.ts) so a
+ *  param-resolved arg records the right canonical type in Step.argTypes. */
+export function stepChain(tree: any, params: Record<string, any>, paramTypes: Record<string, string> = {}): Step[] {
   const steps: Step[] = [];
   const visit = (node: any, insideNested: boolean) => {
     const cls = node.constructor.name;
@@ -69,7 +74,7 @@ export function stepChain(tree: any, params: Record<string, any>): Step[] {
     if (cls.startsWith('TraversalSourceSelfMethod')) return;
     const name = stepName(cls, 'TraversalSourceSpawnMethod_') ?? stepName(cls, 'TraversalMethod_');
     if (!insideNested && name) {
-      const { args, types } = extractArgs(node, params);
+      const { args, types } = extractArgs(node, params, paramTypes);
       steps.push({ name, args, ctx: node, argTypes: types });
       // nested traversals inside this step's args must not contribute to the top chain
       for (let i = 0; i < node.getChildCount(); i++) visit(node.getChild(i), true);
@@ -149,11 +154,11 @@ export function extractSack(tree: any, params: Record<string, any>): SackSpec | 
 
 /** Pull literal / predicate / variable arguments out of a step context, plus the
  *  parallel numeric-subtype tags (see Step.argTypes). */
-function extractArgs(ctx: any, params: Record<string, any>): { args: any[]; types: (string | null)[] } {
+function extractArgs(ctx: any, params: Record<string, any>, paramTypes: Record<string, string> = {}): { args: any[]; types: (string | null)[] } {
   const args: any[] = [];
   const types: (string | null)[] = [];
   // skip child 0 (step name token) and parens; walking all children is fine since tokens have no children
-  for (let i = 0; i < ctx.getChildCount(); i++) walkArgs(ctx.getChild(i), args, params, types);
+  for (let i = 0; i < ctx.getChildCount(); i++) walkArgs(ctx.getChild(i), args, params, types, paramTypes);
   return { args, types };
 }
 
@@ -171,18 +176,28 @@ function argOf(node: any, params: Record<string, any>): any {
 /** Walk one AST node, pushing each recognised argument onto `out` (and its numeric
  *  subtype, or null, onto `types` in lockstep). Unrecognised nodes recurse into
  *  children (a literal buried deeper still surfaces). */
-function walkArgs(node: any, out: any[], params: Record<string, any>, types: (string | null)[]): void {
+function walkArgs(node: any, out: any[], params: Record<string, any>, types: (string | null)[], paramTypes: Record<string, string> = {}): void {
   const emit = (v: any, t: string | null = null) => { out.push(v); types.push(t); };
   const cls = node.constructor.name;
-  if (cls === 'StringLiteralContext') { emit(unquote(node.getText())); return; }
+  if (cls === 'StringLiteralContext') { emit(unquote(node.getText()), 'string'); return; }
   if (cls === 'IntegerLiteralContext') { emit(parseInt(node.getText().replace(/[lL]$/, ''), 10), intLitType(node.getText())); return; }
   if (cls === 'FloatLiteralContext') { emit(parseFloat(node.getText()), floatLitType(node.getText())); return; }
-  if (cls === 'BooleanLiteralContext') { emit(node.getText() === 'true'); return; }
+  if (cls === 'BooleanLiteralContext') { emit(node.getText() === 'true', 'boolean'); return; }
+  // UUID('…') → the string form tagged `uuid` so a property write records it as a
+  // UUID (indistinguishable from a plain string by JS value alone). Bare UUID() (a
+  // random uuid) has no string child — it falls through (uncommon as a stored value).
+  if (cls === 'UuidLiteralContext') {
+    const s = node.stringLiteral();
+    if (s) { emit(unquote(s.getText()), 'uuid'); return; }
+  }
   if (cls === 'NullLiteralContext') { emit(null); return; }
   if (cls === 'VariableContext') {
     const name = node.getText();
     if (!(name in params)) throw new Error(`Unbound parameter '${name}'`);
-    emit(params[name]); return;
+    // The param's canonical type is the wire DataType the client serialized it as
+    // (paramTypes) — the truth a JS value can't carry; null when the channel said
+    // nothing (JSON request path), so the write seam infers from the JS value.
+    emit(params[name], paramTypes[name] ?? null); return;
   }
   if (cls.startsWith('TraversalPredicate_')) {
     emit(parsePredicate(node, params)); return;
@@ -216,7 +231,7 @@ function walkArgs(node: any, out: any[], params: Record<string, any>, types: (st
   // parameter (xx1) arrives after GraphBinary deserialization. Keys are tagged
   // ({token}/{direction}) or strings; values recurse via argOf. Do NOT fall
   // through to the generic recursion, which would flatten and drop pairing.
-  if (cls === 'GenericMapLiteralContext') { emit(mapLiteral(node, params)); return; }
+  if (cls === 'GenericMapLiteralContext') { emit(mapLiteral(node, params), 'map'); return; }
   // GType.STRING / bare STRING (P.typeOf(...), asNumber(...)) — a type-name enum,
   // captured as a tagged token so predicateSql can map it to a SQL type test.
   // Without this the generic recursion drops it and typeOf sees no argument.
@@ -230,7 +245,7 @@ function walkArgs(node: any, out: any[], params: Record<string, any>, types: (st
   // back to a JS Date). An offset-bearing ISO string folds into the correct instant.
   if (cls === 'DateLiteralContext') {
     const s = node.stringLiteral();
-    emit(s ? parseIsoMs(unquote(s.getText())) : Date.now()); return;
+    emit(s ? parseIsoMs(unquote(s.getText())) : Date.now(), 'datetime'); return;
   }
   // DT.second/minute/hour/day (or the bare unit) — dateAdd()'s unit selector.
   if (cls === 'TraversalDTContext') { emit({ dt: enumSuffix(node) }); return; }
@@ -250,11 +265,11 @@ function walkArgs(node: any, out: any[], params: Record<string, any>, types: (st
   // back to varargs in parsePredicate; a step consuming a real list value (inject,
   // Tier-1 list substrate) reads the array directly.
   if (cls === 'GenericCollectionLiteralContext') {
-    emit(node.genericLiteral().map((lit: any) => argOf(lit, params)));
+    emit(node.genericLiteral().map((lit: any) => argOf(lit, params)), 'list');
     return;
   }
   if (cls === 'NestedTraversalContext') { emit({ nested: node }); return; }
-  for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) walkArgs(node.getChild(i), out, params, types);
+  for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) walkArgs(node.getChild(i), out, params, types, paramTypes);
 }
 
 /** Parse an ISO-8601 date / date-time string to epoch-millis, UTC-normalized. Per

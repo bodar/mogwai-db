@@ -32,23 +32,38 @@ const SCHEMA = [
   // key may repeat (multi-property, Cardinality.list/set). `id` (rowid) IS the
   // VertexProperty id. `value` has NO declared type → BLOB affinity keeps whatever
   // SQLite storage class the bound value already has (INTEGER/REAL/TEXT), so numeric
-  // order/range (has('age',gt(30)), order().by('age')) stay correct. `meta` is a JSONB
-  // {metaKey: scalar} blob (meta-properties), nullable. Edges keep a FLAT JSONB props
-  // column — TinkerPop's edge Property has no id/meta/multi, so no table is warranted.
+  // order/range (has('age',gt(30)), order().by('age')) stay correct. `vtype` is the
+  // canonical Gremlin type the write channel carried (wire DataType / parsed literal
+  // subtype), nullable (NULL = infer from storage class, the legacy/raw-insert path) —
+  // it is what lets typeOf and per-row framing recover byte-vs-long, datetime-vs-long,
+  // uuid-vs-string, and collection values (see gremlin-types.ts). A collection value
+  // (list/map/set) is stored as JSONB here with vtype naming the shape. `meta` is a
+  // JSONB {metaKey: scalar} blob (meta-properties), nullable.
   `CREATE TABLE IF NOT EXISTS vertex_properties(
      id INTEGER PRIMARY KEY, node INTEGER NOT NULL REFERENCES nodes(id),
-     key TEXT NOT NULL, value, meta BLOB)`,
+     key TEXT NOT NULL, value, vtype TEXT, meta BLOB)`,
   `CREATE TABLE IF NOT EXISTS edges(
      id INTEGER PRIMARY KEY, uid TEXT UNIQUE, src INTEGER NOT NULL, label INTEGER NOT NULL,
-     tgt INTEGER NOT NULL, props BLOB NOT NULL DEFAULT (jsonb('{}')))`,
+     tgt INTEGER NOT NULL)`,
+  // Edge properties are ALSO normalized rows (the typed-property-values rework retired
+  // the flat JSONB blob): TinkerPop's edge Property has no id/meta/multi, so ONE row per
+  // (edge,key) — the UNIQUE constraint enforces that single cardinality and doubles as
+  // the (edge,key) lookup index. `value`/`vtype` mirror vertex_properties (untyped value
+  // column keeps the storage class, so edge-prop numeric order/range now works too).
+  `CREATE TABLE IF NOT EXISTS edge_properties(
+     id INTEGER PRIMARY KEY, edge INTEGER NOT NULL REFERENCES edges(id),
+     key TEXT NOT NULL, value, vtype TEXT, UNIQUE(edge, key))`,
   `CREATE INDEX IF NOT EXISTS n_label ON nodes(label)`,
   `CREATE INDEX IF NOT EXISTS e_out ON edges(src, label, tgt)`,
   `CREATE INDEX IF NOT EXISTS e_in  ON edges(tgt, label, src)`,
   // Static covering indexes replace the old self-tuning per-key expression index on
   // nodes.props: (key,value) serves a leading has(key,val); (node,key) serves the
-  // given-a-node prop lookups (values()/has()/order/group + leaf materialization).
+  // given-a-node prop lookups (values()/has()/order/group + leaf materialization). The
+  // edge (edge,key) lookup rides the UNIQUE(edge,key) constraint's implicit index;
+  // ep_key_value mirrors vp_key_value for a leading has(edgeKey,val) seek.
   `CREATE INDEX IF NOT EXISTS vp_key_value ON vertex_properties(key, value)`,
   `CREATE INDEX IF NOT EXISTS vp_node_key  ON vertex_properties(node, key)`,
+  `CREATE INDEX IF NOT EXISTS ep_key_value ON edge_properties(key, value)`,
 ];
 
 export class GraphStore {

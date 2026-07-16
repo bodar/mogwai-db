@@ -23,7 +23,7 @@ export interface GraphManager {
    *  run in the store tier). The edge (router) has already parsed the wire and
    *  resolved `id`, and wraps the returned buffers into the HTTP response (concern
    *  C). Throws on compile/SQL/framing failure — the edge frames the error. */
-  query(id: string, gremlin: string, params: Record<string, any>): Promise<Buffer[]>;
+  query(id: string, gremlin: string, params: Record<string, any>, paramTypes?: Record<string, string>): Promise<Buffer[]>;
   /** Create graph `id` if absent. Idempotent. */
   create(id: string): Promise<void>;
   /** Element counts for graph `id`, creating it on demand (fresh = 0, 0). */

@@ -42,8 +42,8 @@ export class BunGraphManager implements GraphManager {
     return g;
   }
 
-  async query(id: string, gremlin: string, params: Record<string, any>): Promise<Buffer[]> {
-    return executeQuery(this.resolve(id).store, gremlin, params);
+  async query(id: string, gremlin: string, params: Record<string, any>, paramTypes: Record<string, string> = {}): Promise<Buffer[]> {
+    return executeQuery(this.resolve(id).store, gremlin, params, paramTypes);
   }
 
   async create(id: string): Promise<void> {

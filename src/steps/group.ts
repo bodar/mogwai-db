@@ -1,5 +1,5 @@
 import { q, value, list, empty, type Expression } from '../q.ts';
-import { edges, labels, nodes, vertexProperties } from '../schema.ts';
+import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
 import {
   tryInlineScalar, scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx,
   type ScalarCtx,
@@ -361,11 +361,13 @@ export function lowerProperties(st: ElementStream, step: PStep): PropertyStream 
   const l = labels.as('l');
   // Node: the property stream IS the vertex_properties rows (one per instance, so a
   // multi-valued key yields several) — vpid is the real VertexProperty id, pmeta its
-  // meta bag. Edge: json_each the flat blob (edge Property has no id/meta/multi).
+  // meta bag. Edge: the edge_properties rows (edge Property has no id/meta/multi, so
+  // vpid/pmeta are NULL — one row per (edge,key)).
   let propBody: Expression;
   if (st.elem === 'edge') {
-    const keyFilter: Expression = keys.length ? q` WHERE je.key IN (${list(keys.map(value), ',')})` : empty;
-    propBody = q`SELECT NULL AS vpid, ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, je.key AS pk, je.value AS pv, NULL AS pmeta${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}, json_each(json(${n.c.props})) je${keyFilter}`;
+    const ep = edgeProperties.as('ep');
+    const keyFilter: Expression = keys.length ? q` AND ${ep.c.key} IN (${list(keys.map(value), ',')})` : empty;
+    propBody = q`SELECT NULL AS vpid, ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, ${ep.c.key} AS pk, ${ep.c.value} AS pv, NULL AS pmeta${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label} JOIN ${ep} ON ${ep.c.edge}=${n.c.id}${keyFilter}`;
   } else {
     const vp = vertexProperties.as('vp');
     const keyFilter: Expression = keys.length ? q` AND ${vp.c.key} IN (${list(keys.map(value), ',')})` : empty;

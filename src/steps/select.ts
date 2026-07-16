@@ -1,6 +1,6 @@
 import { q, list, empty, value, type Expression, type Relation } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
-import { framedProps, labelNameSub, nodePropScalar, predicateSql, propExtract, extIdOf, P_OPS } from '../plan.ts';
+import { framedProps, labelNameSub, nodePropScalar, edgePropScalar, edgePropsAgg, predicateSql, propExtract, extIdOf, P_OPS } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { stepChain } from '../frontend.ts';
 import { aliasElem, aliasIsElement, carryFrag, carriedCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
@@ -144,7 +144,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
       return { rel, field: { key: keys[i], prefix, sub: 'value' as const }, cols: [q`${rel.c.v} AS ${`${prefix}_v`}`] };
     }
     if (typeof spec === 'string') {
-      const expr = propExtract(n.c.props, spec).expr;
+      const expr = edgePropScalar(n.c.id, spec);
       const rel = st.q.cte(
         q`SELECT ${expr} AS v${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${source.id}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
         ['v', ...carriedCols(outer.seed.carried)],
@@ -230,7 +230,7 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
     return { ...st, rel, elem: selElem };
   }
   const n = (selElem === 'edge' ? edges : nodes).as('n');
-  const expr = selElem === 'edge' ? propExtract(n.c.props, by.key!).expr : nodePropScalar(n.c.id, by.key!);
+  const expr = selElem === 'edge' ? edgePropScalar(n.c.id, by.key!) : nodePropScalar(n.c.id, by.key!);
   const conds = [...(present ? [present] : []), ...(productive ? [] : [predicateSql(expr, undefined)])];
   const rel = st.q.cte(
     q`SELECT ${expr} AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${selId}${conds.length ? q` WHERE ${list(conds, ' AND ')}` : empty}`,
@@ -292,11 +292,11 @@ export function lowerRecordSelectProject(st: ElementStream, proj: PStep): Stream
       const el = labels.as(`${prefix}l`);
       joins.push(q` JOIN ${el} ON ${el.c.id}=${en.c.label}`);
       if (src.elem === 'edge')
-        cols.push(q`${en.c.id} AS ${`${prefix}_rid`}, COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${en.c.src} AS ${`${prefix}_src`}, ${en.c.tgt} AS ${`${prefix}_tgt`}, json(${en.c.props}) AS ${`${prefix}_props`}`);
+        cols.push(q`${en.c.id} AS ${`${prefix}_rid`}, COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${en.c.src} AS ${`${prefix}_src`}, ${en.c.tgt} AS ${`${prefix}_tgt`}, ${edgePropsAgg(en.c.id)} AS ${`${prefix}_props`}`);
       else
         cols.push(q`${en.c.id} AS ${`${prefix}_rid`}, COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${framedProps(en, 'node')} AS ${`${prefix}_props`}`);
     } else {
-      const prop = src.elem === 'edge' ? propExtract(en.c.props, e.key!).expr : nodePropScalar(en.c.id, e.key!);
+      const prop = src.elem === 'edge' ? edgePropScalar(en.c.id, e.key!) : nodePropScalar(en.c.id, e.key!);
       cols.push(q`${prop} AS ${`${prefix}_v`}`); // first-under-multi; projection, not indexed
     }
     return { key: k, prefix, sub: e.sub === 'value' ? 'value' : src.elem === 'edge' ? 'edge' : 'vertex' };
@@ -340,14 +340,14 @@ export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, st
       const en = (elem === 'edge' ? edges : nodes).as(`${prefix}n`);
       joins.push(q` JOIN ${en} ON ${en.c.id}=${aliasId(col, end)}`);
       if (by.sub === 'value') {
-        const prop = elem === 'edge' ? propExtract(en.c.props, by.key!).expr : nodePropScalar(en.c.id, by.key!);
+        const prop = elem === 'edge' ? edgePropScalar(en.c.id, by.key!) : nodePropScalar(en.c.id, by.key!);
         cols.push(q`${prop} AS ${`${prefix}_v`}`);
         return { key: k, prefix, sub: 'value' };
       }
       const el = labels.as(`${prefix}l`);
       joins.push(q` JOIN ${el} ON ${el.c.id}=${en.c.label}`);
       if (elem === 'edge')
-        cols.push(q`${en.c.id} AS ${`${prefix}_rid`}, COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${en.c.src} AS ${`${prefix}_src`}, ${en.c.tgt} AS ${`${prefix}_tgt`}, json(${en.c.props}) AS ${`${prefix}_props`}`);
+        cols.push(q`${en.c.id} AS ${`${prefix}_rid`}, COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${en.c.src} AS ${`${prefix}_src`}, ${en.c.tgt} AS ${`${prefix}_tgt`}, ${edgePropsAgg(en.c.id)} AS ${`${prefix}_props`}`);
       else
         cols.push(q`${en.c.id} AS ${`${prefix}_rid`}, COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${framedProps(en, 'node')} AS ${`${prefix}_props`}`);
       return { key: k, prefix, sub: elem === 'edge' ? 'edge' : 'vertex' };
@@ -660,8 +660,8 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
       return { render: 'element', elem: 'vertex', prefix };
     }
     // by(key): project the element's property (first-under-multi for a vertex); a missing
-    // key drops the whole path. Edge → json_extract of the flat blob.
-    const pe = pos.elem === 'edge' ? propExtract(tbl.c.props, key).expr : nodePropScalar(tbl.c.id, key);
+    // key drops the whole path. Edge → the single value from edge_properties.
+    const pe = pos.elem === 'edge' ? edgePropScalar(tbl.c.id, key) : nodePropScalar(tbl.c.id, key);
     cols.push(q`${pe} AS ${`${prefix}_v`}`);
     if (!productive) whereParts.push(predicateSql(pe, undefined)); // ProductiveBy retains an explicit NULL position
     return { render: 'value', prefix };
