@@ -349,6 +349,19 @@ export function compileFromMap(s: MapStream, steps: PStep[], at: number): Loweri
   // exists (else it stays the row-folding groupBuffer path).
   if (at >= steps.length) throw new Error('a map value at end of chain should not be a MapStream');
   const step = steps[at];
+  // Unfolded map (group().unfold()): each row IS one Map.Entry, so select(Column.keys/
+  // values) projects THIS entry's key/value per row (not the whole-map aggregate below).
+  if (s.entries) {
+    if (step.name !== 'select') throw new Error(`${step.name}() on unfolded map entries not yet supported`);
+    const col = columnOf(step);
+    if (!col) throw new Error('select() on a map entry requires Column.keys or Column.values');
+    const c = s.rel.as('c');
+    const [src, of] = col === 'values' ? [c.c.mv, s.valOf] : [c.c.mk, s.keyOf];
+    if (of.kind === 'elem') throw new Error('select(Column) of an element key/value on unfolded entries not yet supported');
+    if (of.kind === 'list')
+      return continueLowering(toListStream(carryOf(s), s.q.cte(q`SELECT json(${src}) AS list${carryFrag(s.carried, c)} FROM ${c}`, ['list', ...carriedCols(s.carried)]), of.of), at + 1);
+    return continueLowering(toScalarStream(carryOf(s), s.q.cte(q`SELECT ${src} AS v${carryFrag(s.carried, c)} FROM ${c}`, ['v', ...carriedCols(s.carried)]), of.as), at + 1);
+  }
   if (step.name === 'select') {
     const col = columnOf(step);
     if (!col) throw new Error('select() on a map value requires Column.keys or Column.values');

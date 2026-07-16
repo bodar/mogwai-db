@@ -1,4 +1,4 @@
-import { q, value, list, empty, type Expression } from '../q.ts';
+import { q, value, list, empty, type Expression, type Relation } from '../q.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
 import {
   tryInlineScalar, scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps,
@@ -378,30 +378,42 @@ export function compileFromGroup(s: GroupStream, steps: PStep[], at: number): Lo
     const rel = s.q.cte(q`SELECT COUNT(DISTINCT ${g.c.gk}) AS v FROM ${g}`, ['v']);
     return continueLowering(toScalarStream(withoutCarried(carryOf(s)), rel, 'long', 'count'), at + 1);
   }
+  // unfold() → Map.Entry stream: the SAME (mk,mv) entry rows, but per-entry (a following
+  // select(Column.keys/values) projects one row's key/value, not the aggregate).
+  if (step.name === 'unfold') {
+    const { rel, keyOf, valOf } = deriveGroupEntries(s);
+    return continueLowering(toMapStream(carryOf(s), rel, keyOf, valOf, true), at + 1);
+  }
   const column = step.name === 'select'
     ? step.args.map((a: any) => a && typeof a === 'object' && a.column).find((c: any) => c === 'keys' || c === 'values')
     : undefined;
   if (!column) throw new Error(`${step.name}() on a group value not yet supported`);
+  const { rel, keyOf, valOf } = deriveGroupEntries(s);
+  return continueLowering(toMapStream(carryOf(s), rel, keyOf, valOf), at);
+}
 
+/** Derive the `(mk, mv)` entry relation of a rich group barrier — shared by the
+ * whole-map select(Column) consumer (aggregate) and the per-entry unfold() consumer. */
+function deriveGroupEntries(s: GroupStream): { rel: Relation; keyOf: MapOf; valOf: MapOf } {
   const g = s.rel.as('g');
   let mk: Expression, keyOf: MapOf;
-  if (s.key.kind === 'scalar') { mk = g.c.gk; keyOf = { kind: 'scalar' }; }
+  if (s.key.kind === 'scalar') { mk = g.c.gk; keyOf = { kind: 'scalar', as: s.key.as }; }
   else if (s.key.kind === 'element') {
     mk = g.c.k_rid;
     keyOf = { kind: 'elem', elem: s.key.elem === 'edge' ? 'edge' : 'node' };
-  } else throw new Error('select(Column) over a composite project() group key not yet supported');
+  } else throw new Error('select(Column)/unfold() over a composite project() group key not yet supported');
 
   let mv: Expression, valOf: MapOf;
   if (s.val.kind === 'count') { mv = g.c.gv; valOf = { kind: 'scalar', as: 'long' }; }
   else if (s.val.kind === 'sum') { mv = g.c.gv; valOf = { kind: 'scalar' }; }
-  else if (s.val.kind === 'list') { mv = g.c.gv; valOf = { kind: 'list', of: { kind: 'scalar' } }; }
+  else if (s.val.kind === 'list' || s.val.kind === 'scalarList') { mv = g.c.gv; valOf = { kind: 'list', of: { kind: 'scalar' } }; }
   else if (s.val.kind === 'elementList' || s.val.kind === 'elementLast')
-    throw new Error('select(Column) over a group of element values not yet supported');
-  else throw new Error('select(Column) over this rich group value layout not yet supported');
+    throw new Error('select(Column)/unfold() over a group of element values not yet supported');
+  else throw new Error('select(Column)/unfold() over this rich group value layout not yet supported');
 
   const where = s.key.kind === 'scalar' && !s.key.productive ? q` WHERE ${g.c.gk} IS NOT NULL` : empty;
   const rel = s.q.cte(q`SELECT ${mk} AS mk, ${mv} AS mv FROM ${g}${where}`, ['mk', 'mv']);
-  return continueLowering(toMapStream(carryOf(s), rel, keyOf, valOf), at);
+  return { rel, keyOf, valOf };
 }
 
 // ---------- properties() ----------

@@ -407,6 +407,19 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().groupCount().by(T.label).is(typeOf(GType.LIST))', {})).toThrow('only is(typeOf(GType.MAP))');
   });
 
+  test('P3 Stage C3: group().unfold() → per-entry Map.Entry stream', () => {
+    // unfold a groupCount map → Map.Entry rows; select(Column.keys) projects THIS entry's
+    // key per row (scalar), not the whole-map aggregate. Trailing unfold() is scalar-identity.
+    const keys = read("g.V().outE().values('weight').groupCount().unfold().select(Column.keys).unfold()");
+    expect(keys.shape.kind).toBe('value');
+    // select(Column.values) → the entry's value (count → Long) per row
+    expect(read("g.V().outE().values('weight').groupCount().unfold().select(Column.values).unfold()").shape)
+      .toEqual({ kind: 'value', as: 'long' });
+    // element-valued group entries still defer (P4 wall)
+    expect(() => compile("g.V().group().by('name').by(__.out().fold()).unfold().select(Column.values)", {}))
+      .toThrow('over a group of element values not yet supported');
+  });
+
   test('group()/groupCount() always lowers to GroupStream; Column selection derives MapStream', () => {
     // A terminal GroupStream reaches the existing row-folding groupBuffer Map.
     expect(read('g.V().groupCount().by("name")').shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
@@ -1467,7 +1480,7 @@ describe('compiler SQL snapshots', () => {
   test('aggregation deferred forms throw clearly', () => {
     // group() is now always a GroupStream: an element-VALUE layout cannot derive the
     // narrow MapStream consumed by Column.values, and an unknown group consumer defers.
-    expect(() => compile('g.V().group().by("name").select(Column.values)', {})).toThrow('select(Column) over a group of element values not yet supported');
+    expect(() => compile('g.V().group().by("name").select(Column.values)', {})).toThrow('over a group of element values not yet supported');
     expect(() => compile('g.V().groupCount().by("name").cap("x")', {})).toThrow('cap() on a group value not yet supported');
     expect(() => compile('g.V().properties().group().by()', {})).toThrow('group().by() on a property element is not yet supported');
     expect(() => compile('g.V().group().by("name").by("age").by("x")', {})).toThrow('more than two by() modulators');
