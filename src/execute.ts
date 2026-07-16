@@ -1,4 +1,4 @@
-import { compile, type MapEntry, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from './compiler.ts';
+import { compile, type ListOf, type MapEntry, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from './compiler.ts';
 import type { GraphStore } from './storage.ts';
 import { ioc, VertexProperty, Property, t } from './io.ts';
 
@@ -246,6 +246,16 @@ function frameValue(v: any, as: ValueType | undefined): Buffer {
   }
 }
 
+// Frame one JSON list value by its item shape — shared by the list-VALUE shapes and a
+// variant's list (vk=4) arm. Element items arrive as {id,label,props[,src,tgt]} objects
+// (rowids already expanded to public payloads in SQL); scalars frame by their tag or infer.
+function frameListOf(json: string, of: ListOf): Buffer {
+  const items = JSON.parse(json);
+  if (of.kind === 'elem') return listBuffer(items.map(of.elem === 'edge' ? rowEdge : rowVertex));
+  if (of.kind === 'scalar') return of.as ? listBuffer(items.map((x: any) => frameValue(x, of.as))) : ioc.listSerializer.serialize(items);
+  return ioc.listSerializer.serialize(items); // list-of-lists: members already framed as JSON
+}
+
 // The GraphBinary key + a canonical string (JS Map dedup key) for one group row.
 function groupKey(r: any, key: GroupKey): { buf: Buffer; canon: string } {
   if (key.kind === 'element') return { buf: elementBuffer(r, 'k', key.elem), canon: `e:${r[key.elem === 'property' ? 'k_pk' : 'k_id']}` };
@@ -334,11 +344,15 @@ function* framedResults(store: GraphStore, gremlin: string, params: Record<strin
     // Per-row framing: values() of a typed prop frames each row by its own stored vtype
     // (like variant frames by vk); otherwise the single compile-time `as` applies.
     case 'value': for (const r of rows) yield frameValue(r.v, shape.perRowType ? vtypeToValueType(r.vtype) : shape.as); return;
+    // P4 dynamic-tag row: dispatch each row by its own `vk` — null / scalar / node /
+    // edge / list — mirroring the per-row `vtype` dispatch of `case 'value'`.
     case 'variant': {
       const framed = rows.map((r) => {
         if (r.vk === 0) return frameValue(null, undefined);
         if (r.vk === 1) return frameValue(r.v, shape.scalarAs);
-        if (r.vk === 2 && shape.elem) return shape.elem === 'edge' ? rowEdge(r) : rowVertex(r);
+        if (r.vk === 2 && shape.node) return rowVertex(r);
+        if (r.vk === 3 && shape.edge) return rowEdge(r);
+        if (r.vk === 4 && shape.listOf) return frameListOf(r.list, shape.listOf);
         throw new Error(`invalid variant result tag ${r.vk}`);
       });
       if (shape.list) yield listBuffer(framed);

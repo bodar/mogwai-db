@@ -32,12 +32,17 @@ function currentEntry(s: Exclude<Stream, { kind: 'result' }>, p: any): { entry: 
       return { entry: aliasEntry('value', p.c.v, s.as ?? null), shape: 'value', as: s.as };
     case 'list':
       return { entry: aliasEntry('list', p.c.list), shape: 'list' };
-    case 'variant':
-      // 0=null / 1=scalar / 2=element (its one possible table)
+    case 'variant': {
+      // 0=null / 1=scalar / 2=node / 3=edge / 4=list (per-row tag)
+      const arms: Expression[] = [];
+      if (s.node) arms.push(q`WHEN 2 THEN ${elemEntry('node', p.c.rid)}`);
+      if (s.edge) arms.push(q`WHEN 3 THEN ${elemEntry('edge', p.c.rid)}`);
+      if (s.listOf) arms.push(q`WHEN 4 THEN ${aliasEntry('list', p.c.list)}`);
       return {
-        entry: q`CASE ${p.c.vk} WHEN 2 THEN ${elemEntry(s.elem ?? 'node', p.c.rid)} ELSE ${aliasEntry('value', p.c.v, s.scalarAs ?? null)} END`,
+        entry: q`CASE ${p.c.vk} ${list(arms, ' ')} ELSE ${aliasEntry('value', p.c.v, s.scalarAs ?? null)} END`,
         shape: 'value',
       };
+    }
     default:
       throw new Error(`as() on a ${s.kind} stream not yet supported`);
   }

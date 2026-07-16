@@ -47,19 +47,36 @@ export interface ScalarStream extends Carry {
   readonly vtype?: string;
 }
 
-/** A runtime-discriminated value stream. `vk` is 0=null, 1=scalar, 2=element;
- * `v` and `rid` are the mutually-exclusive payload columns. This is deliberately
- * a narrow relational sum type rather than an `any`: scalar typing and the one
- * possible element table remain compile-time metadata, while row existence keeps
- * null distinct from an unproductive child. */
+/** A runtime-discriminated value stream (P4 dynamic-tag row). `vk` is a per-row
+ * payload-shape tag — 0=null, 1=scalar (`v`), 2=node (`rid`), 3=edge (`rid`),
+ * 4=list (`list`) — so one relation can carry genuinely heterogeneous traversers
+ * (a scalar OR a node OR an edge OR a list, per row), not just a narrow
+ * null/scalar/one-element-kind sum. `node`/`edge`/`listOf` say which arms can
+ * appear (and thus which physical columns + root joins exist); `scalarAs` is the
+ * uniform GraphBinary type of scalar rows (undefined → infer per JS value; a
+ * genuinely heterogeneous-TYPE scalar arm would need a per-row vtype column, the
+ * documented extension point, not built until a scenario needs it). Row existence
+ * keeps null distinct from an unproductive child. */
 export interface VariantStream extends Carry {
   readonly kind: 'variant';
   readonly rel: Relation;
   readonly scalarAs?: ValueType;
-  readonly elem?: Elem;
+  readonly node?: boolean;
+  readonly edge?: boolean;
+  readonly listOf?: ListOf;
   /** A named aggregate side effect is one collection traverser at cap(); explicit
    * unfold() changes it back to member rows without rewriting the relation. */
   readonly result?: 'rows' | 'list';
+}
+
+/** Which arms a widened variant relation carries. Producers describe the union of
+ * possible per-row shapes; streamColumns/materializeVariantRoot/the handler derive
+ * columns, joins and framing from it. */
+export interface VariantArms {
+  readonly scalarAs?: ValueType;
+  readonly node?: boolean;
+  readonly edge?: boolean;
+  readonly listOf?: ListOf;
 }
 
 /** A single list value in a one-row relation with a JSONB `list` column (fold /
@@ -199,7 +216,7 @@ export function streamColumns(s: Stream): readonly string[] {
   if (s.kind === 'result') return [];
   const payload = s.kind === 'elements' ? ['id']
     : s.kind === 'scalar' ? [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...(s.encounter ? [s.encounter] : []), ...(s.vtype ? [s.vtype] : [])]
-    : s.kind === 'variant' ? ['vk', 'v', 'rid']
+    : s.kind === 'variant' ? ['vk', 'v', 'rid', ...(s.listOf ? ['list'] : [])]
     : s.kind === 'list' ? ['list']
     : s.kind === 'map' ? ['mk', 'mv']
     : s.kind === 'property' ? ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta']
@@ -232,8 +249,8 @@ export const toResultStream = (q: Query, tail: Expression, shape: Shape): Result
 
 export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, result: ScalarStream['result'] = 'value', encounter?: string, productiveNull?: boolean, vtype?: string): ScalarStream =>
   assertStreamColumns({ ...c, kind: 'scalar', rel, as, result, encounter, productiveNull, vtype });
-export const toVariantStream = (c: Carry, rel: Relation, scalarAs?: ValueType, elem?: Elem, result: VariantStream['result'] = 'rows'): VariantStream =>
-  assertStreamColumns({ ...c, kind: 'variant', rel, scalarAs, elem, result });
+export const toVariantStream = (c: Carry, rel: Relation, arms: VariantArms, result: VariantStream['result'] = 'rows'): VariantStream =>
+  assertStreamColumns({ ...c, kind: 'variant', rel, scalarAs: arms.scalarAs, node: arms.node, edge: arms.edge, listOf: arms.listOf, result });
 export const toListStream = (c: Carry, rel: Relation, of: ListOf): ListStream =>
   assertStreamColumns({ ...c, kind: 'list', rel, of });
 export const toMapStream = (c: Carry, rel: Relation, keyOf: MapOf, valOf: MapOf, entries?: boolean): MapStream =>

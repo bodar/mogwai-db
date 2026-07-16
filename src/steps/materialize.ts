@@ -34,22 +34,39 @@ export function materializeScalarRoot(stream: ScalarStream): Compiled {
   return materializeRoot(stream.q, q`SELECT ${cols} FROM ${s} ORDER BY ${s.c[stream.carried.encounter]}`, shape);
 }
 
-/** Expand only the element arm at the wire boundary. Scalar/null rows never join
- * an element table, and internal rowids remain available until this final SELECT. */
+/** Expand each present arm at the wire boundary (P4 dynamic-tag row). The tag is put
+ * in each element join condition (`vk=2`/`vk=3`) so a node and an edge sharing a rowid
+ * never cross-match; a row is exactly one arm, so id/label/props are a CASE over the two
+ * possible element aliases and one labels join keys off whichever is populated. Scalar
+ * (`v`) / null rows join nothing; a list arm expands its `list` column like ListStream.
+ * Internal rowids remain available until this final SELECT. */
 export function materializeVariantRoot(stream: VariantStream): Compiled {
   const v = stream.rel.as('v');
-  if (!stream.elem)
-    return materializeRoot(stream.q, q`SELECT ${v.c.vk}, ${v.c.v} FROM ${v}`, { kind: 'variant', scalarAs: stream.scalarAs, list: stream.result === 'list' || undefined });
-  const n = (stream.elem === 'edge' ? edges : nodes).as('n');
-  const l = labels.as('l');
-  const payload = stream.elem === 'edge'
-    ? q`COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${extIdOf(n.c.src)} AS src, ${extIdOf(n.c.tgt)} AS tgt, json(${framedProps(n, 'edge')}) AS props`
-    : q`COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, json(${framedProps(n, 'node')}) AS props`;
-  return materializeRoot(
-    stream.q,
-    q`SELECT ${v.c.vk}, ${v.c.v}, ${payload} FROM ${v} LEFT JOIN ${n} ON ${n.c.id}=${v.c.rid} LEFT JOIN ${l} ON ${l.c.id}=${n.c.label}`,
-    { kind: 'variant', scalarAs: stream.scalarAs, elem: stream.elem === 'edge' ? 'edge' : 'vertex', list: stream.result === 'list' || undefined },
-  );
+  const shape: Shape = {
+    kind: 'variant', scalarAs: stream.scalarAs,
+    node: stream.node || undefined, edge: stream.edge || undefined, listOf: stream.listOf,
+    list: stream.result === 'list' || undefined,
+  };
+  const cols: Expression[] = [v.c.vk, v.c.v];
+  const joins: Expression[] = [];
+  if (stream.node || stream.edge) {
+    const n = stream.node ? nodes.as('n') : undefined;
+    const e = stream.edge ? edges.as('e') : undefined;
+    const l = labels.as('l');
+    const idParts = [n && q`WHEN 2 THEN COALESCE(${n.c.uid}, ${n.c.id})`, e && q`WHEN 3 THEN COALESCE(${e.c.uid}, ${e.c.id})`].filter(Boolean) as Expression[];
+    const labelParts = [n && q`WHEN 2 THEN ${l.c.name}`, e && q`WHEN 3 THEN ${l.c.name}`].filter(Boolean) as Expression[];
+    const propParts = [n && q`WHEN 2 THEN json(${framedProps(n, 'node')})`, e && q`WHEN 3 THEN json(${framedProps(e, 'edge')})`].filter(Boolean) as Expression[];
+    cols.push(q`CASE ${v.c.vk} ${list(idParts, ' ')} END AS id`);
+    cols.push(q`CASE ${v.c.vk} ${list(labelParts, ' ')} END AS label`);
+    cols.push(q`CASE ${v.c.vk} ${list(propParts, ' ')} END AS props`);
+    if (e) cols.push(q`${extIdOf(e.c.src)} AS src`, q`${extIdOf(e.c.tgt)} AS tgt`);
+    if (n) joins.push(q` LEFT JOIN ${n} ON ${n.c.id}=${v.c.rid} AND ${v.c.vk}=2`);
+    if (e) joins.push(q` LEFT JOIN ${e} ON ${e.c.id}=${v.c.rid} AND ${v.c.vk}=3`);
+    // one labels join keyed on whichever element table matched (only one does per row)
+    joins.push(q` LEFT JOIN ${l} ON ${l.c.id}=${n && e ? q`COALESCE(${n.c.label}, ${e.c.label})` : n ? n.c.label : e!.c.label}`);
+  }
+  if (stream.listOf) cols.push(q`${listResult(v.c.list, stream.listOf)} AS list`);
+  return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${v}${list(joins, '')}`, shape);
 }
 
 /** Turn a JSON list of internal element rowids into an ordered JSON array carrying
