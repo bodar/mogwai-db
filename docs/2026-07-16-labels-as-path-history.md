@@ -1,9 +1,11 @@
 # `as()` labels as per-traverser path history — full Pop across all shapes
 
 **Date:** 2026-07-16
-**Status:** LANDED (core); remaining follow-ups listed below.
-**Baseline:** started full 373/373, compiler 248/248, L3 933. Now full 377/377,
-compiler 251/251, **L3 952** (+19), corpus 2298/2298.
+**Status:** LANDED (core + follow-ups #1/#2/#4); #3 and #5 remain.
+**Baseline:** started full 373/373, compiler 248/248, L3 933. Core landed at full
+377/377, compiler 251/251, **L3 952** (+19). Follow-ups #1/#2/#4 (commits 378bcd2,
+4f8e808, 7003da2) then took it to full 382/382, compiler 256/256, **L3 955** (+3),
+corpus 2298/2298.
 
 ## Landed (commits f4d4661, 93435b6)
 
@@ -22,23 +24,49 @@ compiler 251/251, **L3 952** (+19), corpus 2298/2298.
   delegates non-last Pop to the same resolvers. The 3 `Pop!=='last'` guards deleted.
 - **Unbound label → drop** (empty result), never error (`emptyElementLike`).
 
-## Remaining follow-ups (each its own commit; none block the above)
+## Follow-ups
 
-1. **Branch fork/merge of DIVERGENT arm labels** — `mergeBranchCarried` still requires
-   arms to agree on non-path carried cols. Full fork/merge needs: union the label set
-   across arms, align each label to a canonical column (arms mint `a{n}` independently),
-   pad a missing label with an empty history in `armProjection`. Plus `binds=undefined`
-   (dynamic) for a label bound inside repeat()/an arm, and the runtime Pop.mixed CASE.
-2. **order().by(select("x"))** / `order().by(__.select("x")…)` — `modulation.ts`
-   `elementOrderSql` has no alias branch; add alias→scalar/traversal ordering.
-3. **as() on map/group/path/property streams** — `currentEntry` covers scalar/list/
-   variant; a map/group label must collapse the multi-row shape to one JSON entry.
-4. **where() scalar alias-compare edge cases** — `where(P.not(...))` over labels;
-   where() on a record value.
+1. **Branch fork/merge of DIVERGENT arm labels** — ✅ DONE (378bcd2). `mergeBranchCarried`
+   now unions the label set across arms (`mergeAliasMaps`): a pre-branch label keeps its
+   seed column; a label first bound inside an arm gets a fresh canonical column;
+   `armProjection` remaps each arm's independently-minted physical column onto the
+   canonical one and pads a label an arm never bound with a NULL history. `binds` becomes
+   `undefined` (dynamic) when a label is bound in only some arms or with a differing count.
+   Element-tail `select()` of a dynamic-binds label guards on `aliasPresent` (drop, not a
+   phantom NULL-id row). Rigid cols (origin/sack/fromV/encounter) still must agree. The
+   runtime Pop.mixed CASE was already present in `aliasPop`; static Pop.mixed over a
+   dynamic-binds label still throws the existing clear error (result-shape unknowable at
+   compile time — a genuine separate variant piece, unreached by conformance).
+2. **order().by(select("x"))** — ✅ DONE (4f8e808) for the reachable form: `order()` on a
+   RecordStream by `by(__.select(field))` (`compileFromRecord` → `recordOrderTerms`), value
+   field → its scalar col, element field → external id, following limit/skip/range fused
+   into the sort. The element/scalar-stream `order().by(__.select("x"))` forms (only the
+   `sum(Scope.local)` scenario, blocked by #5) stay deferred in `modulation.ts`/`scalar.ts`.
+3. **as() on map/group/path/property streams** — ⏸ DEFERRED (large, separate shape; 0
+   measurable L3 yield alone). `currentEntry` covers scalar/list/variant. A group/map/path
+   label must COLLAPSE its multi-row physical shape to ONE tagged JSON entry (`k=4` map),
+   which is a barrier (N group-key rows → 1 map traverser) PLUS a new first-class
+   **map-valued carried entry** that `select()` can re-materialize back into a
+   Group/Map/Path stream. That re-materialization is the "later shapes" work this doc's
+   model table already flags. No standalone conformance scenario is unblocked by it alone:
+   every group/path-`as` scenario in the suite is also gated on a separately-deferred
+   feature (`label().groupCount()` = groupCount-on-scalar, `path().as().union(...)` =
+   path-through-union, `elementMap(...).as()` = elementMap-as-a-non-terminal-stream, or a
+   `map(__.…groupCount())` map-nested-group). So it is pure substrate with regression risk
+   on the central group/path barriers and no test-visible payoff — do it as its own scoped
+   shape project (map-value stream + collapse + re-materialize), not a rushed commit.
+4. **where() scalar alias-compare edge cases** — ✅ DONE (7003da2). `where(P.not(<inner>))`
+   over labels unwraps + flips negation (current-vs-label and label-vs-label, with/without
+   by(key)). `where()` on a RecordStream (`recordWhere`) compares two carried alias labels
+   (the record still carries the alias history columns) — element identity or by(key);
+   traversal-predicate / whole-map single-predicate forms defer. Unlocked the canonical
+   `select("a","b").where("a",P.eq/neq("b"))` Where.feature scenarios.
 5. **Pre-existing (now reachable) carried-column drop** in the `sum(Scope.local)`/
    map-local scalar path: a scalar produced there drops carried alias columns, so
    `as("v")…map(...).sum(local).as("s")` trips `assertStreamColumns` (fails closed,
-   not corruption). Fix the handler to thread `carriedCols`.
+   not corruption). Fix the handler to thread `carriedCols`. (Still open; would unblock
+   the `order().by(__.select("s"))` Order.feature scenario together with the element-stream
+   half of #2.)
 
 ## What and why
 
