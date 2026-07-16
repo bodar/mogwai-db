@@ -412,11 +412,9 @@ describe('compiler SQL snapshots', () => {
     // value modifiers
     expect(read('g.inject(3,1,2).order()').sql).toContain('ORDER BY p.v ASC');
     expect(read('g.inject(1,1,2).dedup()').sql).toContain('DISTINCT p.v');
-    // an unsupported follow-on step defers cleanly (shared tail's message, since
-    // inject now flows through the same value tail as element projections)
-    expect(() => compile('g.inject(1).as("a").select("a")', {})).toThrow('step not implemented: as()');
-
     const store = new GraphStore(new BunSqlite(':memory:'));
+    // as()/select() now work on a scalar (value) stream — the label carries the value.
+    expect(run(store, 'g.inject(1).as("a").select("a")').map((r) => r.v)).toEqual([1]);
     expect(run(store, 'g.inject(1,2,3).limit(2).is(P.gt(1))').map((r) => r.v)).toEqual([2]);
     expect(run(store, 'g.inject(1,2,3).count().is(P.gt(2))').map((r) => r.v)).toEqual([3]);
     expect(run(store, 'g.inject(1,3).inject(100,300).sum()').map((r) => r.v)).toEqual([404]);
@@ -1045,10 +1043,11 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('deferred long-tail forms error clearly (never silently mis-execute)', () => {
-    expect(() => compile('g.V().select(Pop.first,"a")', {})).toThrow('select(Pop.first) not yet supported');
+    // a label bound NOWHERE drops every traverser → empty result (TinkerPop drops, never errors)
+    expect(run(seededStore(), 'g.V().select(Pop.first,"a")')).toEqual([]);
+    expect(run(seededStore(), 'g.V().select("x")')).toEqual([]);
     expect(() => compile('g.V().as("a").select("a").by(T.id)', {})).toThrow('by(T.id) modulator not yet supported');
     expect(() => compile('g.V().as("a").out().as("b").select("a","b").order()', {})).toThrow('order() on a record value not yet supported');
-    expect(() => compile('g.V().select("x")', {})).toThrow('no such label');
     // order().by() deferred modulators must throw, not silently sort by id
     expect(() => compile('g.V().order().by(T.label)', {})).toThrow('by(T.label) modulator not yet supported');
     expect(() => compile('g.V().order().by(__.values("age"))', {})).toThrow('by(traversal) modulator not yet supported');
@@ -2040,6 +2039,42 @@ describe('compiler execution semantics', () => {
       expect(lists).toHaveLength(1);
       expect(lists[0].map((v: any) => v.id)).toEqual([2, 3, 4]);
       expect(() => compile('g.V().local(__.out().order().by("name").limit(1))', {})).toThrow('not yet supported');
+    });
+
+    test('as() labels a scalar stream; select() reads it back with Pop semantics', () => {
+      const store = seededStore();
+      // single binding: bare/first/last/mixed all yield the one value; all → singleton list
+      expect(run(store, 'g.V(1).values("name").as("a").select("a")').map((r) => r.v)).toEqual(['marko']);
+      expect(run(store, 'g.V(1).values("name").as("a").select(Pop.first, "a")').map((r) => r.v)).toEqual(['marko']);
+      expect(run(store, 'g.V(1).values("name").as("a").select(Pop.last, "a")').map((r) => r.v)).toEqual(['marko']);
+      expect(run(store, 'g.V(1).values("name").as("a").select(Pop.mixed, "a")').map((r) => r.v)).toEqual(['marko']);
+      expect(run(store, 'g.V(1).values("name").as("a").select(Pop.all, "a")').map((r) => JSON.parse(r.list)))
+        .toEqual([['marko']]);
+      // a labelled count (a scalar) round-trips
+      expect(run(store, 'g.V().hasLabel("person").count().as("a").select("a")').map((r) => r.v)).toEqual([4]);
+    });
+
+    test('rebound scalar label accumulates history; Pop reads the right end / all', () => {
+      const store = seededStore();
+      // name → concat → length, all labelled "a" (3 bindings)
+      const q = (pop: string) => `g.V(1).values("name").as("a").concat("X").as("a").length().as("a").select(${pop})`;
+      expect(run(store, q('"a"')).map((r) => r.v)).toEqual([6]);          // bare = last = length("markoX")
+      expect(run(store, q('Pop.last, "a"')).map((r) => r.v)).toEqual([6]);
+      expect(run(store, q('Pop.first, "a"')).map((r) => r.v)).toEqual(['marko']);
+      expect(run(store, q('Pop.all, "a"')).map((r) => JSON.parse(r.list))).toEqual([['marko', 'markoX', 6]]);
+      // mixed with >1 binding behaves like all
+      expect(run(store, q('Pop.mixed, "a"')).map((r) => JSON.parse(r.list))).toEqual([['marko', 'markoX', 6]]);
+    });
+
+    test('multi-label select mixes a scalar label and an element label into one Map', () => {
+      const record = read('g.V(1).values("name").as("a").select("a")');
+      expect(record.shape).toEqual({ kind: 'value' });
+      // a → element (vertex), b → its name (scalar): a heterogeneous record
+      const mixed = read('g.V(1).as("a").values("name").as("b").select("a","b")');
+      expect(mixed.shape).toEqual({ kind: 'map', entries: [
+        { key: 'a', prefix: 'e0', sub: 'vertex' },
+        { key: 'b', prefix: 'e1', sub: 'value' },
+      ] });
     });
   });
 

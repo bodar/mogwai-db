@@ -59,7 +59,7 @@ export const as: StepFn = (s, st) => {
     const col = existing?.col ?? `a${aliases.size}`;
     // Rebind APPENDS to the label's path history (never overwrites); a fresh label
     // seeds a one-element array. shapes accumulates every binding's kind.
-    aliases.set(lbl, { col, shapes: withShape(existing?.shapes, shape) });
+    aliases.set(lbl, { col, shapes: withShape(existing?.shapes, shape), binds: (existing?.binds ?? 0) + 1 });
     setExpr.set(col, existing ? aliasAppend(p.c[col], entry) : aliasSeed(entry));
   }
   // Rebuild from the ONE carried schema so origins/sack/fromV/encounter/path cannot

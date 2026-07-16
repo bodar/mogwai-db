@@ -301,7 +301,13 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
   // longer depends on a terminal-tail special case (values().count().is(),
   // values().groupCount(), and future scalar consumers all cross the same seam).
   const scalarRest = steps.slice(stop + 1);
-  const needsScalarBoundary = st.carried.origins.length > 0 || (scalarRest.length > 0 && scalarRest.every((s) =>
+  // as()/select(label) after a scalar projection bind/read a path-history label on the
+  // value stream — force the scalar boundary so they re-enter the shape dispatch.
+  const next = scalarRest[0];
+  const followsValueLabel = !!next && (next.name === 'as'
+    || (next.name === 'select' && next.args.some((a: any) => typeof a === 'string')
+        && !next.args.some((a: any) => a && typeof a === 'object' && 'column' in a)));
+  const needsScalarBoundary = st.carried.origins.length > 0 || followsValueLabel || (scalarRest.length > 0 && scalarRest.every((s) =>
     SCALAR_ROW_STEPS.has(s.name) && !isScopeLocalStep(s)));
   if (SCALAR_PROJ.has(steps[stop]?.name) && needsScalarBoundary) {
     const n = elemRel(st);

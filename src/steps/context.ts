@@ -21,7 +21,16 @@ import { type FastPathConfig } from '../fast-paths.ts';
  *  a JSONB history array (see src/steps/alias.ts); `shapes` is the compile-time
  *  summary a consumer uses to decide framing (homogeneous element → fast concrete
  *  path; heterogeneous/list → variant). */
-export type AliasEntry = { col: string; shapes: ReadonlySet<AliasShape> };
+export type AliasEntry = {
+  col: string;
+  shapes: ReadonlySet<AliasShape>;
+  as?: import('../render.ts').ValueType;
+  /** Compile-time binding count along the traverser's path: 1 for a once-bound label,
+   *  >1 after rebinds. `undefined` = dynamic depth (bound inside repeat()/a branch arm),
+   *  where the count is only known at runtime and Pop must resolve via SQL. Lets Pop.all/
+   *  mixed/first/last resolve statically for the common linear case. */
+  binds?: number;
+};
 export type AliasMap = ReadonlyMap<string, AliasEntry>;
 
 /** The element kind of a homogeneously-element label (node/edge). Throws if the
