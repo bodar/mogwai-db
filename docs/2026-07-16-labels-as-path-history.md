@@ -1,9 +1,44 @@
 # `as()` labels as per-traverser path history — full Pop across all shapes
 
 **Date:** 2026-07-16
-**Status:** design approved (big-bang, full fork/merge history); implementing
-**Baseline to hold:** full `bun test` 373/373, compiler 248/248, L1 2298/2298,
-L3 933/2041 (ratchet up only).
+**Status:** LANDED (core); remaining follow-ups listed below.
+**Baseline:** started full 373/373, compiler 248/248, L3 933. Now full 377/377,
+compiler 251/251, **L3 952** (+19), corpus 2298/2298.
+
+## Landed (commits f4d4661, 93435b6)
+
+- **Encoding flip** (`src/steps/alias.ts`): every as() label is a JSONB history array
+  of tagged entries `{k,v[,t]}`, appended per bind. All element-alias consumers
+  (select re-root, where/and/or alias-compare, math vars, match binds+joins, addE
+  endpoints, write chain) read the last entry's id. Behaviour-identical flip.
+- **`AliasEntry`** widened to `{col, shapes, as?, binds?}` — shape set + value type +
+  compile-time binding count (for static Pop resolution on linear chains).
+- **as() on value streams** (`labelselect.ts asOnStream`): scalar/list/variant labels,
+  shape-agnostic rebuild via `streamColumns`. Dispatched once in `lowerStream`
+  (`dispatchAlias`); per-shape row-consumers yield to it (no special cases).
+- **select(Pop.first/last/all/mixed, labels…)**: single-label (`selectOneFromAlias`)
+  → scalar / re-rooted element / List; multi-label (`selectRecordFromAlias`) →
+  heterogeneous Map. Element-tail select (`lowerSingleSelect`/`lowerRecordSelectProject`)
+  delegates non-last Pop to the same resolvers. The 3 `Pop!=='last'` guards deleted.
+- **Unbound label → drop** (empty result), never error (`emptyElementLike`).
+
+## Remaining follow-ups (each its own commit; none block the above)
+
+1. **Branch fork/merge of DIVERGENT arm labels** — `mergeBranchCarried` still requires
+   arms to agree on non-path carried cols. Full fork/merge needs: union the label set
+   across arms, align each label to a canonical column (arms mint `a{n}` independently),
+   pad a missing label with an empty history in `armProjection`. Plus `binds=undefined`
+   (dynamic) for a label bound inside repeat()/an arm, and the runtime Pop.mixed CASE.
+2. **order().by(select("x"))** / `order().by(__.select("x")…)` — `modulation.ts`
+   `elementOrderSql` has no alias branch; add alias→scalar/traversal ordering.
+3. **as() on map/group/path/property streams** — `currentEntry` covers scalar/list/
+   variant; a map/group label must collapse the multi-row shape to one JSON entry.
+4. **where() scalar alias-compare edge cases** — `where(P.not(...))` over labels;
+   where() on a record value.
+5. **Pre-existing (now reachable) carried-column drop** in the `sum(Scope.local)`/
+   map-local scalar path: a scalar produced there drops carried alias columns, so
+   `as("v")…map(...).sum(local).as("s")` trips `assertStreamColumns` (fails closed,
+   not corruption). Fix the handler to thread `carriedCols`.
 
 ## What and why
 
