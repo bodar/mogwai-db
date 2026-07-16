@@ -1,7 +1,7 @@
-import { q, value, list, empty, type Expression, type Relation } from '../q.ts';
+import { q, raw, value, list, empty, type Expression, type Relation } from '../q.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
 import {
-  tryInlineScalar, scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps,
+  tryInlineScalar, scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps, dirsFor,
   type ScalarCtx,
 } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
@@ -10,7 +10,7 @@ import { carryFrag, carriedCols, carriedWith, elemRel, withoutCarried, type Carr
 import { carryOf, continueLowering, groupColumns, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream } from './stream.ts';
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
-import { isElementFoldChild, isElementImplicitFoldChild, isScalarChild, isScalarFoldChild, pushChildScope, reuseCurrentFrame, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild } from './child.ts';
+import { childSteps, isElementFoldChild, isElementImplicitFoldChild, isScalarChild, isScalarFoldChild, pushChildScope, reuseCurrentFrame, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild } from './child.ts';
 
 /** Movement heads whose property-group compatibility path can use a correlated
  * neighbourhood reduction, and the scalar reducers that terminate one. */
@@ -261,8 +261,80 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
  * GROUP BY aggregate; an element value can't be aggregated in SQL (props must be
  * framed), so we emit rows ORDER BY the key and the handler folds runs into the Map.
  */
+/** Nested-MAP group value: group().by(k).by(__.<movement>.groupCount()/group().by(ik)
+ *  .by(__.values(x).<reduce>())). An unreduced inner group is a Map per outer key.
+ *  Compiled as a TWO-LEVEL aggregation reusing the ordinary key/reduce machinery:
+ *  lvl1 groups the outer members' movement-expansion by (outerKey, innerKey) and reduces;
+ *  the result json_group_object()s each outer key's (innerKey→value) pairs into one Map.
+ *  Returns null (fall through) for shapes not yet covered — never a support-definer throw. */
+function tryLowerNestedMapGroup(st: Carry, isCount: boolean, bys: any[][], src: GroupSource): GroupStream | null {
+  if (isCount || !src.parent) return null;
+  const valArg = bys[1]?.[0];
+  if (!valArg || typeof valArg !== 'object' || !('nested' in valArg)) return null;
+  const vsteps = childSteps(valArg.nested, st.params);
+  const gi = vsteps.findIndex((s) => s.name === 'group' || s.name === 'groupCount');
+  if (gi < 0 || gi !== vsteps.length - 1) return null; // inner group must terminate the value
+  const innerGroup = vsteps[gi] as PStep;
+  const move = vsteps.slice(0, gi);
+  const innerBys: any[][] = innerGroup.bys ?? [];
+  const innerKeyArg = innerBys[0]?.[0];
+
+  // Outer key — scalar/token only (nested-map element keys deferred).
+  const outerKey = buildGroupKey(bys[0], src, st.params);
+  if (outerKey.desc.kind !== 'scalar') return null;
+
+  // Movement expansion off the outer element (aliased `n` in src.from) → the inner
+  // element rows + how to read the inner key. `properties()` rows ARE VertexProperties,
+  // whose T.label is the property key; edge movement joins edges for elemCtx-based keys.
+  const nId = raw('n.id');
+  let join: Expression;
+  let ik: Expression | null = null;      // T.label inner key
+  let innerCtx: ScalarCtx | null = null; // for a property-key / values() inner key/reduce
+  const head = move[0]?.name;
+  const bareMove = move.length === 1 && ((move[0] as any).args ?? []).length === 0;
+  if (bareMove && head === 'properties') {
+    const vp = vertexProperties.as('vpn');
+    join = q` JOIN ${vp} ON ${vp.c.node}=${nId}`;
+    if (innerKeyArg && typeof innerKeyArg === 'object' && innerKeyArg.token === 'label') ik = vp.c.key;
+  } else if (bareMove && (head === 'outE' || head === 'inE' || head === 'bothE')) {
+    const ie = edges.as('ie');
+    const dirs = dirsFor(head === 'outE' ? 'out' : head === 'inE' ? 'in' : 'both');
+    join = q` JOIN ${ie} ON (${list(dirs.map(([from]) => q`${ie.c[from]}=${nId}`), ' OR ')})`;
+    innerCtx = elemCtx(ie, 'edge');
+    if (innerKeyArg && typeof innerKeyArg === 'object' && innerKeyArg.token === 'label') ik = labelNameSub(ie.c.label);
+  } else return null;
+  if (!ik && innerCtx && typeof innerKeyArg === 'string') ik = scalarProp(innerCtx, innerKeyArg);
+  if (!ik) return null; // unsupported inner key shape
+
+  // Inner reduce: groupCount → COUNT(*); group().by().by(__.values(x).<reduce>()).
+  let iv: Expression, innerVal: 'count' | 'number';
+  if (innerGroup.name === 'groupCount') { iv = q`COUNT(*)`; innerVal = 'count'; }
+  else {
+    const reduceArg = innerBys[1]?.[0];
+    if (!reduceArg || typeof reduceArg !== 'object' || !('nested' in reduceArg) || !innerCtx) return null;
+    const rsteps = childSteps(reduceArg.nested, st.params);
+    const reducer = rsteps.at(-1)?.name;
+    if (rsteps.length !== 2 || rsteps[0].name !== 'values' || !SCALAR_REDUCERS.has(reducer!)) return null;
+    iv = numericReducerAggregate(scalarProp(innerCtx, rsteps[0].args[0]), reducer as NumericReducer).value;
+    innerVal = 'number';
+  }
+
+  const lvl1 = st.q.cte(
+    q`SELECT ${outerKey.cols}, ${ik} AS ik, ${iv} AS iv FROM ${src.from}${join} GROUP BY ${outerKey.group}, ik`,
+    ['gk', 'ik', 'iv'],
+  );
+  const l = lvl1.as('l');
+  const rel = st.q.cte(
+    q`SELECT ${l.c.gk} AS gk, json_group_object(${l.c.ik}, ${l.c.iv}) AS gv FROM ${l} WHERE ${l.c.ik} IS NOT NULL GROUP BY ${l.c.gk}`,
+    ['gk', 'gv'],
+  );
+  return toGroupStream(withoutCarried(st), rel, outerKey.desc, { kind: 'nestedMap', innerVal });
+}
+
 export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: GroupSource): GroupStream {
   if (bys.length > 2) throw new Error('group() with more than two by() modulators not yet supported');
+  const nestedMap = tryLowerNestedMapGroup(st, isCount, bys, src);
+  if (nestedMap) return nestedMap;
   src = tryLowerGroupChildSource(bys, src) ?? src;
   const key = buildGroupKey(bys[0], src, st.params);
 

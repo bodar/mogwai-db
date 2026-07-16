@@ -301,6 +301,14 @@ function groupBuffer(rows: any[], key: GroupKey, val: GroupVal): Buffer {
       // by('age')/by(__.values) filters members missing the property (values
       // semantics) → drop the SQL NULLs json_group_array emitted for them.
       case 'scalarList': return ioc.listSerializer.serialize(JSON.parse(g.gv).filter((x: any) => x !== null));
+      // A nested groupCount/group value: gv is a JSON object {innerKey: innerVal}
+      // framed as a Map. count values are Long; a numeric reducer infers its type.
+      case 'nestedMap': {
+        const obj = JSON.parse(g.gv) as Record<string, any>;
+        const inner = val.innerVal === 'count' ? 'count' : 'number';
+        return ioc.anySerializer.serialize(new Map(Object.entries(obj).map(
+          ([k, v]) => [k, inner === 'count' ? BigInt(v) : v])));
+      }
     }
   };
   const parts: Buffer[] = [Buffer.from([ioc.DataType.MAP, 0x00]), ioc.intSerializer.serialize(groups.size, false)];

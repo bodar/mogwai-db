@@ -40,7 +40,7 @@ export type ChildUse = 'all' | 'first';
 
 /** Child chains cross the same normalization seam as the root. In particular,
  * order().by() must arrive as one PStep before shape-aware scalar lowering. */
-const childSteps = (nested: any, params: Record<string, any>) => {
+export const childSteps = (nested: any, params: Record<string, any>) => {
   const rawSteps = stepChain(nested, params);
   const normalized = normalize(rawSteps);
   return normalized.discard ? [...normalized.steps, rawSteps.at(-1)!] : normalized.steps;

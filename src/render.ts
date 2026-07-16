@@ -43,7 +43,8 @@ export type GroupVal =
   | { kind: 'scalarList' }                               // by('age') → json_group_array → parsed list
   | { kind: 'list' }                                     // one JSON list value per group key
   | { kind: 'count' }                                    // by(__.count())/groupCount → Long
-  | { kind: 'sum' };                                     // by(__.…sum()) → numeric
+  | { kind: 'sum' }                                      // by(__.…sum()) → numeric
+  | { kind: 'nestedMap'; innerVal: 'count' | 'number' }; // by(__.<move>.groupCount()/group().by().by(reduce)) → a Map per key (json_group_object)
 
 // path(): one Path per row. Each position frames either a whole element
 // (prefix_id/_label/_props[/_src/_tgt]) or, under a by(key) modulator, a scalar

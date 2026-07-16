@@ -478,6 +478,22 @@ describe('compiler SQL snapshots', () => {
     expect(eq('g.V().out().fold().count(Scope.local)', 'g.V().out().count()')).toBe(true);
   });
 
+  test('nested-MAP group value: inner groupCount/group → a Map per outer key (two-level agg)', () => {
+    const store = seededStore();
+    // properties().groupCount().by(T.label): a Map<name, Map<propKey, count>> per person.
+    // marko has name,age (single) → {name:1, age:1}. One outer Map, framed once.
+    const c = read("g.V().hasLabel('person').group().by('name').by(__.properties().groupCount().by(T.label))");
+    expect(c.shape).toEqual({ kind: 'group', key: { kind: 'scalar', as: undefined }, val: { kind: 'nestedMap', innerVal: 'count' } });
+    // two-level: json_group_object over a GROUP BY (outer key, inner key)
+    expect(c.sql).toContain('json_group_object');
+    expect(c.sql).toContain('vpn.key');
+    expect(executeQuery(store, "g.V().hasLabel('person').group().by('name').by(__.properties().groupCount().by(T.label))", {})).toHaveLength(1);
+    // edge movement + inner reducer: Map<label, Map<edgeLabel, sum(weight)>>
+    const s = read("g.V().group().by(T.label).by(__.bothE().group().by(T.label).by(__.values('weight').sum()))");
+    expect(s.shape).toEqual({ kind: 'group', key: { kind: 'scalar', as: undefined }, val: { kind: 'nestedMap', innerVal: 'number' } });
+    expect(() => executeQuery(store, "g.V().group().by(T.label).by(__.bothE().group().by(T.label).by(__.values('weight').sum()))", {})).not.toThrow();
+  });
+
   test("cap('a') of a group side-effect retypes to a MapStream on a follower", () => {
     // A group('a')/groupCount('a') side-effect, re-emitted by cap('a'), is re-enterable
     // too: select(Column.values)/unfold compose exactly like an inline group().
