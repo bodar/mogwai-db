@@ -75,7 +75,7 @@ export type Shape =
   | { kind: 'metaProperty' } // properties().properties(): meta-properties as Property elements (mk/mv cols)
   | { kind: 'metaMap' } // properties(k).valueMap(): a VertexProperty's meta as a flat Map (meta col, JSON text)
   | { kind: 'value'; as?: ValueType; perRowType?: boolean } // perRowType: frame each row by its own stored `vtype` column (values() of typed props), not the single `as`
-  | { kind: 'variant'; scalarAs?: ValueType; elem?: Exclude<ElemShape, 'property'>; list?: boolean }
+  | { kind: 'variant'; scalarAs?: ValueType; node?: boolean; edge?: boolean; listOf?: ListOf; list?: boolean } // per-row tag: null/scalar/node/edge/list; `list` wraps ALL rows into one outer List (cap)
   | { kind: 'count' }
   | { kind: 'scalar'; productiveNull?: boolean } // numeric reducer; productive NULL may be a real result
   | { kind: 'list'; elem: ElemShape | 'scalar'; as?: ValueType } // legacy row-fold; scalar items may carry a uniform type

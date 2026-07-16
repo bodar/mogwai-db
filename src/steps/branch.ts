@@ -276,7 +276,7 @@ export function tryLowerVariantOptional(s: Step, st: ElementStream): VariantStre
   const hit = q`SELECT 1 AS vk, ${c.c.v} AS v, NULL AS rid${carryFrag(st.carried, c)} FROM ${c}`;
   const miss = q`SELECT 2 AS vk, NULL AS v, ${d.c.id} AS rid${carryFrag(st.carried, d)} FROM ${d} WHERE NOT EXISTS (SELECT 1 FROM ${c} WHERE ${c.c[rows.frame.ordinal]}=${d.c[rows.frame.ordinal]})`;
   const rel = st.q.cte(list([hit, miss], ' UNION ALL '), ['vk', 'v', 'rid', ...carriedCols(st.carried)]);
-  return toVariantStream(carryOf(st), rel, rows.stream.as, st.elem);
+  return toVariantStream(carryOf(st), rel, { scalarAs: rows.stream.as, ...(st.elem === 'edge' ? { edge: true } : { node: true }) });
 }
 
 /** coalesce(t1, …, tn): the first branch that yields output, per input traverser.

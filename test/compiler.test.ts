@@ -27,8 +27,8 @@ describe('compiler SQL snapshots', () => {
     expect(() => toScalarStream(carry, q.cte({} as any, ['value']))).toThrow(
       'scalar stream column mismatch: expected [v], got [value]',
     );
-    expect(toVariantStream(carry, q.cte({} as any, ['vk', 'v', 'rid']), undefined, 'node').kind).toBe('variant');
-    expect(() => toVariantStream(carry, q.cte({} as any, ['v', 'rid']), undefined, 'node')).toThrow(
+    expect(toVariantStream(carry, q.cte({} as any, ['vk', 'v', 'rid']), { node: true }).kind).toBe('variant');
+    expect(() => toVariantStream(carry, q.cte({} as any, ['v', 'rid']), { node: true })).toThrow(
       'variant stream column mismatch',
     );
     const propertyCols = ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta'];
@@ -1129,7 +1129,7 @@ describe('compiler SQL snapshots', () => {
     expect(nullableRecord.filter((r) => r.e0_id == null)).toHaveLength(3);
     expect(executeQuery(store, 'g.withStrategies(ProductiveByStrategy).V().project("x").by(__.out().order().by("name"))', {})).toHaveLength(6);
     expect(read('g.withStrategies(ProductiveByStrategy).V().project("x").by(__.out().order().by("name")).select("x")').shape)
-      .toEqual({ kind: 'variant', scalarAs: undefined, elem: 'vertex' });
+      .toEqual({ kind: 'variant', scalarAs: undefined, node: true });
     expect(() => compile('g.withStrategies(ProductiveByStrategy).V().order().by("age")', {})).not.toThrow();
     expect(read('g.withStrategies(ProductiveByStrategy).V().as("a").out().as("b").where("a",eq("b")).by("age")').sql)
       .toContain(' IS ');
@@ -1684,7 +1684,7 @@ describe('compiler SQL snapshots', () => {
   test('optional non-total scalar child lowers to a scalar-or-element VariantStream', () => {
     const store = seededStore();
     const plan = read('g.V().optional(__.values("age"))');
-    expect(plan.shape).toEqual({ kind: 'variant', scalarAs: undefined, elem: 'vertex' });
+    expect(plan.shape).toEqual({ kind: 'variant', scalarAs: undefined, node: true });
     const rows = run(store, 'g.V().optional(__.values("age"))');
     expect(rows.filter((r) => r.vk === 1).map((r) => r.v).sort((a, b) => a - b)).toEqual([27, 29, 32, 35]);
     expect(rows.filter((r) => r.vk === 2).map((r) => r.label)).toEqual(['software', 'software']);

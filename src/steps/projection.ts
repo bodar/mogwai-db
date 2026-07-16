@@ -754,7 +754,7 @@ function compileCap(st: ElementStream, steps: PStep[], stop: number): LoweringRe
     return continueLowering(ls, stop + 1);
   }
   if (def.kind === 'variant')
-    return continueLowering(toVariantStream(carryOf(st), def.rel, def.scalarAs, def.elem, 'list'), stop + 1);
+    return continueLowering(toVariantStream(carryOf(st), def.rel, { scalarAs: def.scalarAs, node: def.elem === 'node' || undefined, edge: def.elem === 'edge' || undefined }, 'list'), stop + 1);
   // group('a')/groupCount('a') side-effect → re-emit the same rich GroupStream as an
   // inline group; terminal framing and Column consumers share its dispatch.
   const src: GroupSource = { from: def.from, ctx: def.ctx, elem: def.elem, parent: def.parent, productiveBy: def.productiveBy };

@@ -586,7 +586,7 @@ export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): 
       q`SELECT CASE WHEN ${rid} IS NULL THEN 0 ELSE 2 END AS vk, NULL AS v, ${rid} AS rid${carryFrag(s.carried, r)} FROM ${r}`,
       ['vk', 'v', 'rid', ...carriedCols(s.carried)],
     );
-    return continueLowering(toVariantStream(carryOf(s), rel, undefined, field.sub === 'edge' ? 'edge' : 'node'), at + 1);
+    return continueLowering(toVariantStream(carryOf(s), rel, field.sub === 'edge' ? { edge: true } : { node: true }), at + 1);
   }
   const rel = s.q.cte(
     q`SELECT ${r.c[`${field.prefix}_rid`]} AS id${carryFrag(s.carried, r)} FROM ${r}`,
