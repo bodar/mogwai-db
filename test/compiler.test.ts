@@ -881,6 +881,28 @@ describe('compiler SQL snapshots', () => {
       .toEqual(['ripple', 'lop', 'lop', 'lop']);
   });
 
+  test('sum(Scope.local) threads carried alias columns (as() survives the per-list reduce)', () => {
+    // #5: the list-local reducer used to drop carried cols, so as() after it tripped
+    // assertStreamColumns. Now the reduced scalar keeps the a0 history of "v".
+    const p = read("g.V().as('v').map(__.bothE().values('weight').fold()).sum(Scope.local).as('s').select('v','s')");
+    expect(p.shape.kind).toBe('map');
+    expect(p.sql).toContain('AS v, typeof('); // the reducer CTE
+    expect(p.sql).toContain(', c.a0 FROM'); // a0 carried through the reduce
+    // record order by an element field's property: by(__.select(field).values(key))
+    const ord = read("g.V().as('v').map(__.bothE().values('weight').fold()).sum(Scope.local).as('s').select('v','s').order().by(__.select('s'), Order.desc).by(__.select('v').values('name'))");
+    expect(ord.sql).toContain('ORDER BY r.e1_v DESC');
+    expect(ord.sql).toContain("(SELECT value FROM vertex_properties WHERE node=r.e0_rid AND key=? ORDER BY id LIMIT 1) ASC");
+  });
+
+  test('order() on a record by a select(field).values(key) modulator executes (Order.feature)', () => {
+    const store = seededStore();
+    // The terminal ordered map result: sum(weight) desc, tie broken by v's name asc.
+    // weights: josh 2.4, marko 1.9, lop 1.0, ripple 1.0, vadas 0.5, peter 0.2.
+    const rows = run(store, "g.V().as('v').map(__.bothE().values('weight').fold()).sum(Scope.local).as('s').select('v','s').order().by(__.select('s'), Order.desc).by(__.select('v').values('name'))");
+    expect(rows.map((r) => r.e0_id)).toEqual([4, 1, 3, 5, 2, 6]); // josh, marko, lop, ripple, vadas, peter
+    expect(rows.map((r) => r.e1_v)).toEqual([2.4, 1.9, 1, 1, 0.5, 0.2]);
+  });
+
   test('record fields re-enter element/scalar/list lowering', () => {
     expect(read('g.V().project("n","a").by("name").by("age").select("a").is(P.gt(30)).count()').shape)
       .toEqual({ kind: 'count' });

@@ -1,11 +1,11 @@
 # `as()` labels as per-traverser path history — full Pop across all shapes
 
 **Date:** 2026-07-16
-**Status:** LANDED (core + follow-ups #1/#2/#4); #3 and #5 remain.
+**Status:** LANDED (core + follow-ups #1/#2/#4/#5); #3 remains (scoped as a shape project).
 **Baseline:** started full 373/373, compiler 248/248, L3 933. Core landed at full
-377/377, compiler 251/251, **L3 952** (+19). Follow-ups #1/#2/#4 (commits 378bcd2,
-4f8e808, 7003da2) then took it to full 382/382, compiler 256/256, **L3 955** (+3),
-corpus 2298/2298.
+377/377, compiler 251/251, **L3 952** (+19). Follow-ups #1/#2/#4/#5 (commits 378bcd2,
+4f8e808, 7003da2, 80bf070) then took it to full 384/384, compiler 258/258,
+**L3 956** (+4), corpus 2298/2298.
 
 ## Landed (commits f4d4661, 93435b6)
 
@@ -37,11 +37,16 @@ corpus 2298/2298.
    runtime Pop.mixed CASE was already present in `aliasPop`; static Pop.mixed over a
    dynamic-binds label still throws the existing clear error (result-shape unknowable at
    compile time — a genuine separate variant piece, unreached by conformance).
-2. **order().by(select("x"))** — ✅ DONE (4f8e808) for the reachable form: `order()` on a
-   RecordStream by `by(__.select(field))` (`compileFromRecord` → `recordOrderTerms`), value
-   field → its scalar col, element field → external id, following limit/skip/range fused
-   into the sort. The element/scalar-stream `order().by(__.select("x"))` forms (only the
-   `sum(Scope.local)` scenario, blocked by #5) stay deferred in `modulation.ts`/`scalar.ts`.
+2. **order().by(select("x"))** — ✅ DONE (4f8e808, extended in 80bf070) for the
+   reachable form: `order()` on a RecordStream by `by(__.select(field))` /
+   `by(__.select(elemField).values(key))` (`compileFromRecord` → `recordOrderTerms`). Value
+   field → its scalar col, element field → external id (or a `.values(key)` property lookup
+   via the field's internal rowid), following limit/skip/range fused into the sort. The
+   element/scalar-stream `order().by(__.select("x"))` forms stay deferred in
+   `modulation.ts`/`scalar.ts` (no conformance scenario needs them — the record form covers
+   the suite). Known remaining gap: selecting a field AFTER a terminal record `order()`
+   (`…order()…select("v").values("name")`) re-roots and loses the sort — separate
+   order-preservation-through-re-root work, not needed by the Order.feature scenario.
 3. **as() on map/group/path/property streams** — ⏸ DEFERRED (large, separate shape; 0
    measurable L3 yield alone). `currentEntry` covers scalar/list/variant. A group/map/path
    label must COLLAPSE its multi-row physical shape to ONE tagged JSON entry (`k=4` map),
@@ -62,11 +67,13 @@ corpus 2298/2298.
    traversal-predicate / whole-map single-predicate forms defer. Unlocked the canonical
    `select("a","b").where("a",P.eq/neq("b"))` Where.feature scenarios.
 5. **Pre-existing (now reachable) carried-column drop** in the `sum(Scope.local)`/
-   map-local scalar path: a scalar produced there drops carried alias columns, so
-   `as("v")…map(...).sum(local).as("s")` trips `assertStreamColumns` (fails closed,
-   not corruption). Fix the handler to thread `carriedCols`. (Still open; would unblock
-   the `order().by(__.select("s"))` Order.feature scenario together with the element-stream
-   half of #2.)
+   map-local scalar path — ✅ DONE (80bf070). `lowerListReducer` (`steps/list.ts`,
+   count/sum/min/max/mean over a list) now threads `carryFrag`/`carriedCols`, so the
+   per-list reduced scalar keeps the row's alias history. `as("v")…map(...).sum(local)
+   .as("s")` composes, and with #2's `by(__.select(field).values(key))` this landed the
+   `g.V().as("v").map(__.bothE().values("weight").fold()).sum(Scope.local).as("s")
+   .select("v","s").order().by(__.select("s"),desc).by(__.select("v").values("name"))`
+   Order.feature scenario (L3 955 → 956).
 
 ## What and why
 
