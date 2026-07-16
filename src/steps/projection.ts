@@ -180,6 +180,17 @@ function lowerValueMapTail(st: ElementStream, proj: PStep, acc: TailAcc, steps: 
     return continueLowering(lowerGlobalCount(st), i + 1);
   if (step.name === 'select' && hasColumnArg(step))
     return continueLowering(lowerValueMap(st, proj), i);
+  // select(label)/select(Pop, label): a valueMap has no as()-label of its own, so an
+  // UNBOUND label selects nothing → empty (TinkerPop). A label bound earlier by as()
+  // would need the map to carry path history — defer that.
+  if (step.name === 'select') {
+    const labels = (step.args ?? []).filter((a: any) => typeof a === 'string') as string[];
+    if (labels.length && labels.every((l) => !st.carried.aliases.has(l))) {
+      const rel = st.q.cte(q`SELECT NULL AS v WHERE 0`, ['v']);
+      return continueLowering(toScalarStream(withoutCarried(carryOf(st)), rel, undefined), i + 1);
+    }
+    throw new Error('select(bound-label) after valueMap() not yet supported');
+  }
   throw new Error(`${step.name}() cannot consume the ${proj.name} result shape`);
 }
 

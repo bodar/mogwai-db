@@ -148,6 +148,13 @@ describe('compiler SQL snapshots', () => {
     // count() over maps = one per element = count of elements; is(typeOf(MAP)) is identity
     expect(read('g.V().valueMap().count()').shape).toEqual({ kind: 'count' });
     expect(read('g.V().valueMap().is(typeOf(GType.MAP)).count()').shape).toEqual({ kind: 'count' });
+    // per-element list ops thread the origin (o0) through unfold + set-ops (was a crash)
+    const combined = read("g.V().valueMap('location').select(Column.values).unfold().combine(['seattle'])");
+    expect(combined.sql).toContain('o0');
+    // select(unbound-label) → empty (TinkerPop); a bound as()-label defers
+    expect(read("g.V().valueMap().select('a')").sql).toContain('WHERE 0');
+    expect(read("g.V().valueMap().select(Pop.first,'a')").sql).toContain('WHERE 0');
+    expect(() => compile("g.V().as('a').valueMap().select('a')", {})).toThrow('select(bound-label) after valueMap() not yet supported');
     // terminal valueMap unchanged; still-unsupported followers fail closed
     expect(read('g.V().valueMap()').shape).toEqual({ kind: 'valueMap', keys: null, tokens: false });
     expect(() => compile('g.V().valueMap(true).select(Column.keys)', {})).toThrow('valueMap(true)/token re-entry not yet supported');
