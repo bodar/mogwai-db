@@ -14,6 +14,17 @@ group maps + mixed branch arms — dynamic-tag VariantStream, the §2 "widest ga
 scattered small bits (elementMap re-entry with heterogeneous followers, keys→SET typing,
 `as()`/`order()` on a group, named `groupCount('a')`-over-scalar). Next major bet = P4.
 
+**P4 LANDED (2026-07-16, substrate + branch arms) — and corrected a mislabel.** See
+`docs/2026-07-16-p4-dynamic-variant-plan.md`. The dynamic-tag VariantStream (per-row
+`vk`: null/scalar/node/edge/list) + its **mixed-shape branch-arm** consumers landed
+(L3 1066, behaviour-neutral + fail-closed→works). Key finding: the "element-VALUE group
+maps" defer above is **NOT** the variant row — the 11-scenario bucket is
+`group().by(k).by(__.…groupCount()/group())`, i.e. **nested-MAP-valued groups** needing a
+`GroupVal {kind:'map'}` + two-level aggregation (a separate feature). The truly
+variant-shaped Map consumers (element-value group `select(Column.values)`/`unfold`, mixed
+record `select(Column.values)`) cash ~0–1 scenarios today. Nested-map-valued groups are
+the recommended next dedicated piece (see the P4 doc §"Recommended next").
+
 - **Stage A LANDED** (1046→1047): `path()` re-enterable — `count()`/`is(typeOf(PATH))`.
 - **Stage B1 LANDED** (1047→1050): `valueMap()` → per-element `MapStream`; origin-aware
   `compileFromMap` `select(Column.keys/values)`; `count`/`is(typeOf(MAP))`.
