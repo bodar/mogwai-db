@@ -210,11 +210,14 @@ function sumBuffer(v: number, storageClass: string): Buffer {
 // tag → infer from the JS value (anySerializer). 'bool': SQLite carries the boolean
 // as 0/1, so frame Boolean(v) explicitly (anySerializer would otherwise emit Int).
 // A stored canonical vtype → the framing ValueType tag. datetime/boolean spell
-// differently ('date'/'bool'); numeric subtypes are identical. string is correct via
-// anySerializer (undefined → String); uuid/list/map/set have no ValueType yet → undefined
-// → anySerializer (deferred: proper uuid/collection framing + is(typeOf(LIST))→ListStream).
+// differently ('date'/'bool'); numeric subtypes are identical. uuid frames via
+// uuidSerializer (storage-ambiguous with string, so the stored vtype disambiguates);
+// string via stringSerializer. list/map/set are deliberately absent: a stored
+// collection value is a JSONB blob, reached through is(typeOf(LIST))→ListStream (which
+// json()s it in SQL and frames via the list substrate), never this per-row scalar tag.
+// bigdecimal/char/duration have no serializer → undefined → anySerializer (deferred).
 const VTYPE_TO_VALUETYPE: Record<string, ValueType> = {
-  datetime: 'date', boolean: 'bool',
+  datetime: 'date', boolean: 'bool', string: 'string', uuid: 'uuid',
   byte: 'byte', short: 'short', int: 'int', long: 'long', bigint: 'bigint', float: 'float', double: 'double',
 };
 const vtypeToValueType = (vt: string | null): ValueType | undefined => (vt ? VTYPE_TO_VALUETYPE[vt] : undefined);
@@ -235,6 +238,11 @@ function frameValue(v: any, as: ValueType | undefined): Buffer {
     // Datetime is carried as epoch-millis (INTEGER); the client's DateTimeSerializer
     // takes a JS Date (GraphBinary DATETIME 0x04, UTC wire), so reconstruct it here.
     case 'date': return ioc.dateTimeSerializer.serialize(new Date(Number(v)), true);
+    // A stored TEXT value framed by its true type: uuid via UuidSerializer (16-byte
+    // GraphBinary UUID from the string), string explicitly (anySerializer would also
+    // pick String, but the stored vtype lets uuid win over a look-alike string).
+    case 'string': return ioc.stringSerializer.serialize(String(v), true);
+    case 'uuid': return ioc.uuidSerializer.serialize(String(v), true);
   }
 }
 

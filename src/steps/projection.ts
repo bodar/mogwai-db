@@ -10,7 +10,7 @@ import { carryOf, continueLowering, toListStream, toResultStream, toScalarStream
 import { tryLowerLocalAggregate } from './sideeffect.ts';
 import { type Shape } from '../render.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
-import { lowerScalarFilter, lowerConstant, lowerScalarSack } from './scalar.ts';
+import { lowerScalarFilter, lowerConstant, lowerScalarSack, isListTypeOf, scalarListRetype } from './scalar.ts';
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
 import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantOptional, union as lowerLegacyUnion } from './branch.ts';
@@ -469,6 +469,14 @@ function compileFold(st: ElementStream, acc: TailAcc): ListStream {
  * vocabulary. count() is the only projection valid on a scalar stream.
  */
 export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number): LoweringResult {
+  // is(typeOf(LIST)) RETYPES a scalar value stream into a ListStream: the stored JSONB
+  // list value becomes the `list` column, so unfold/count(Scope.local)/range/project all
+  // reuse the list substrate (List.feature). A stored non-list row is filtered out; a
+  // computed scalar (no stored vtype) can't be a list, so it stays the generic is() fold.
+  if (steps[from].name === 'is' && isListTypeOf(steps[from])) {
+    const listed = scalarListRetype(s);
+    if (listed) return continueLowering(listed, from + 1);
+  }
   // A list-collection step (set-op / conjoin / all / any) requires a list traverser;
   // reached on a scalar stream it raises TinkerPop's incoming-type error.
   const LIST_ONLY = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product', 'conjoin', 'all', 'any']);

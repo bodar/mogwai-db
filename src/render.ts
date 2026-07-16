@@ -61,7 +61,12 @@ export type PathPos =
 // Emitted by asBool ('bool') and asNumber(GType.X) (the numeric subtypes). The
 // numeric tag names the GraphBinary type; SQLite carries the value in whichever
 // storage class fits (INTEGER/REAL), and frameValue picks the serializer.
-export type ValueType = 'bool' | 'byte' | 'short' | 'int' | 'long' | 'bigint' | 'float' | 'double' | 'date';
+// 'string'/'uuid' frame a stored TEXT value by its true GraphBinary type (a uuid is
+// storage-ambiguous with a plain string, so it needs the stored vtype to disambiguate).
+// Collections (list/map/set) are NOT ValueTypes: a list-valued property is reached via
+// is(typeOf(LIST)) which retypes the scalar stream to a ListStream (the JSONB value
+// becomes the `list` column), so it frames through the list substrate, not this tag.
+export type ValueType = 'bool' | 'byte' | 'short' | 'int' | 'long' | 'bigint' | 'float' | 'double' | 'date' | 'string' | 'uuid';
 
 export type Shape =
   | { kind: 'vertex' }
