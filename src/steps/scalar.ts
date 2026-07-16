@@ -1,7 +1,8 @@
-import { derived, empty, list, q, value, type Expression } from '../q.ts';
+import { derived, empty, list, paren, q, value, type Expression, type Relation } from '../q.ts';
 import { predicateSql, rangeToOffsetLimit, scalarTx } from '../plan.ts';
+import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { carryFrag, carriedCols, withoutCarried } from './context.ts';
+import { carryFrag, carriedCols, withoutCarried, type Carry } from './context.ts';
 import { carryOf, toScalarStream, type ScalarStream } from './stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, numericSpec } from './coerce.ts';
 import { type ValueType } from '../render.ts';
@@ -161,6 +162,98 @@ function appendScalar(s: ScalarStream, step: PStep): ScalarStream {
     ['v'],
   );
   return toScalarStream(carryOf(s), rel);
+}
+
+// ---------- shape-agnostic filter/branch over a scalar current object ----------
+//
+// A value-shaped traverser (inject(1), a projected/reduced scalar, …) is a first-class
+// traverser whose CURRENT OBJECT is the scalar `v`. The filter family (and/or/not/
+// filter/where) and constant() work on it exactly as on an element — the difference is
+// only what the "current object" is. Rather than fork the element predicate engine
+// (plan.ts compileInlinePredicate, which reads props/label/adjacency), this reuses the
+// PREDICATE LEAF (predicateSql) + the scalar transform ladder (scalarTx) for the one
+// case the element engine can't express: a predicate directly over the current scalar.
+// Element-only bodies (values/has/out…) fail closed here — a scalar has no properties
+// or neighbours.
+
+/** Does a child sub-traversal produce a result, evaluated against the current scalar
+ *  `current`? A boolean SQL expression. is(P) filters; transforms rewrite the current
+ *  value; constant(x) rebinds it (and is always productive); and/or/not/filter/where
+ *  compose recursively. Every `is` along a linear body ANDs; a bare/constant body is
+ *  always productive (`1`). Movement/property bodies throw (defer). */
+function scalarChildProduces(body: PStep[], current: Expression, params: Record<string, any>): Expression {
+  let expr = current;
+  const preds: Expression[] = [];
+  const nestedOf = (s: PStep) => s.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  for (const s of body) {
+    if (s.name === 'is') { preds.push(predicateSql(expr, s.args[0])); continue; }
+    if (s.name === 'identity') continue;                 // always productive, no rebind
+    if (s.name === 'constant') { expr = value(s.args[0]); continue; } // rebind current
+    if (s.name === 'and' || s.name === 'or') {
+      const arms = nestedOf(s);
+      if (!arms.length) throw new Error(`${s.name}() needs a traversal branch`);
+      preds.push(paren(list(arms.map((a: any) => paren(scalarChildProduces(stepChain(a.nested, params), expr, params))), s.name === 'and' ? ' AND ' : ' OR ')));
+      continue;
+    }
+    if (s.name === 'not') {
+      const arg = nestedOf(s)[0];
+      if (!arg) throw new Error('not() requires a traversal');
+      preds.push(q`NOT COALESCE((${scalarChildProduces(stepChain(arg.nested, params), expr, params)}), 0)`);
+      continue;
+    }
+    if (s.name === 'filter' || s.name === 'where') {
+      const arg = nestedOf(s)[0];
+      if (!arg) throw new Error(`${s.name}(predicate) inside a scalar filter not yet supported (traversal only)`);
+      preds.push(paren(scalarChildProduces(stepChain(arg.nested, params), expr, params)));
+      continue;
+    }
+    if (SCALAR_TRANSFORMS.has(s.name)) {
+      expr = scalarTx(s.name, s.args ?? [], expr)
+        ?? (() => { throw new Error(`scalar filter transform ${s.name}() not supported`); })();
+      continue;
+    }
+    throw new Error(`${s.name}() in a scalar filter body not yet supported (a scalar has no properties or neighbours)`);
+  }
+  return preds.length ? paren(list(preds, ' AND ')) : q`1`;
+}
+
+/** and/or/not/filter/where over a scalar stream → a WHERE on the value `v`. The arms are
+ *  child predicates against the current scalar (scalarChildProduces). Row-preserving:
+ *  the scalar shape/tag/encounter are unchanged, only rows are dropped. */
+export function lowerScalarFilter(s: ScalarStream, step: PStep): ScalarStream {
+  const p = s.rel.as('p');
+  const cur = p.c.v;
+  const nested = step.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  let cond: Expression;
+  if (step.name === 'and' || step.name === 'or') {
+    if (!nested.length) throw new Error(`${step.name}() needs at least one traversal branch`);
+    cond = paren(list(nested.map((a: any) => paren(scalarChildProduces(stepChain(a.nested, s.params), cur, s.params))), step.name === 'and' ? ' AND ' : ' OR '));
+  } else if (step.name === 'not') {
+    const arg = nested[0];
+    if (!arg) throw new Error('not() requires a traversal');
+    cond = q`NOT COALESCE((${scalarChildProduces(stepChain(arg.nested, s.params), cur, s.params)}), 0)`;
+  } else {
+    const arg = nested[0];
+    if (!arg) throw new Error(`${step.name}(predicate) on a scalar stream not yet supported (traversal only)`);
+    cond = scalarChildProduces(stepChain(arg.nested, s.params), cur, s.params);
+  }
+  const rel = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)} FROM ${p} WHERE ${cond}`, cols(s));
+  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull);
+}
+
+/** constant(x): replace the current object with the literal x, one per input row. Shape-
+ *  agnostic — the source relation may be an element or a scalar; only row identity and
+ *  the carried schema matter. A child scope (origins live) defers: constant loses the
+ *  encounter order downstream partitioned operators require. */
+export function lowerConstant(carry: Carry, rel: Relation, args: any[]): ScalarStream {
+  if (carry.carried.origins.length)
+    throw new Error('constant() inside a child scope not yet supported');
+  const p = rel.as('p');
+  const out = carry.q.cte(
+    q`SELECT ${value(args[0])} AS v${carryFrag(carry.carried, p)} FROM ${p}`,
+    ['v', ...carriedCols(carry.carried)],
+  );
+  return toScalarStream(carry, out, undefined, 'value');
 }
 
 /** Lower the row operators common to every scalar payload. Consecutive transforms and

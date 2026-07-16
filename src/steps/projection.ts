@@ -10,7 +10,7 @@ import { carryOf, continueLowering, toListStream, toResultStream, toScalarStream
 import { tryLowerLocalAggregate } from './sideeffect.ts';
 import { type Shape, type ElemShape } from '../render.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
-import { SCALAR_ROW_STEPS } from './scalar.ts';
+import { SCALAR_ROW_STEPS, lowerScalarFilter, lowerConstant } from './scalar.ts';
 import { numericSpec, asNumberSql, asDateSql, dtFactor, dateDiffOtherMs } from './coerce.ts';
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
 import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
@@ -256,6 +256,10 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
     return continueLowering(lowerLegacyCoalesce(steps[stop], st), stop + 1);
   }
 
+  // constant(x) rebinds every traverser to the literal x — element in, scalar out.
+  if (steps[stop]?.name === 'constant')
+    return continueLowering(lowerConstant(carryOf(st), st.rel, steps[stop].args), stop + 1);
+
   // math("<formula>") → one SQL arithmetic scalar (always Double). Its variables
   // (`_` / as()-bound names) resolve through the by() modulators folded onto it.
   if (steps[stop]?.name === 'math')
@@ -307,7 +311,11 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
   const followsValueLabel = !!next && (next.name === 'as'
     || (next.name === 'select' && next.args.some((a: any) => typeof a === 'string')
         && !next.args.some((a: any) => a && typeof a === 'object' && 'column' in a)));
-  const needsScalarBoundary = st.carried.origins.length > 0 || followsValueLabel || (scalarRest.length > 0 && scalarRest.every((s) =>
+  // A scalar projection followed by the filter family (and/or/not/filter/where) or a
+  // constant() also crosses to the scalar stream, where compileFromScalar re-enters the
+  // generic filter/branch dispatch on the current value.
+  const followsScalarFilter = !!next && ['and', 'or', 'not', 'filter', 'where', 'constant'].includes(next.name);
+  const needsScalarBoundary = st.carried.origins.length > 0 || followsValueLabel || followsScalarFilter || (scalarRest.length > 0 && scalarRest.every((s) =>
     SCALAR_ROW_STEPS.has(s.name) && !isScopeLocalStep(s)));
   if (SCALAR_PROJ.has(steps[stop]?.name) && needsScalarBoundary) {
     const n = elemRel(st);
@@ -437,6 +445,14 @@ export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number)
   const LIST_ONLY = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product', 'conjoin', 'all', 'any']);
   if (LIST_ONLY.has(steps[from]?.name))
     throw new Error(`${steps[from].name} step can only take an array or an Iterable type for incoming traversers, encountered a scalar`);
+  // Filter family over a scalar current object: and/or/not/filter/where evaluate their
+  // child predicate against `v` and drop rows. A scalar traverser is first-class — these
+  // are the same steps as on an element, differing only in the current object.
+  if (['and', 'or', 'not', 'filter', 'where'].includes(steps[from]?.name))
+    return continueLowering(lowerScalarFilter(s, steps[from]), from + 1);
+  // constant(x) rebinds every traverser to the literal x (a fresh scalar stream).
+  if (steps[from]?.name === 'constant')
+    return continueLowering(lowerConstant(carryOf(s), s.rel, steps[from].args), from + 1);
   // count() is a barrier and therefore another ScalarStream transition, not a
   // terminal rendering decision. Keeping it relational lets any following scalar
   // filter/transform/reducer compile normally. The barrier drops row-associated
