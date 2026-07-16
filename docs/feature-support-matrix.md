@@ -1,273 +1,195 @@
 # mogwai-db — feature support matrix
 
-**A living, honest map of what the compiler supports.** Not a conformance gate, not
-a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
-reference. Grouped into tables by traversal concern.
+Scannable map of what the compiler supports, and where partial steps stop. Grouped
+by traversal concern. **L3 conformance: 1066 · corpus parse+chain: 2298/2298.**
 
-**Last synced:** 2026-07-16 · **live L3 conformance:** 1040 · **corpus parse+chain:**
-2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
-`throw` sites in the compiler — if the code defers it, this file says so.
-
-> **Partial re-sync note (2026-07-16).** Rows touched by typed property values
-> (P1/P2/P3a/P3b) + the tail-unification are current as of L3 1040. Rows unrelated to
-> that work may still reflect the earlier L3 932 sync — grep `src/` throw sites when in
-> doubt.
-
-> **How to keep this true.** When a step's support changes, update its row here in the
-> same commit. The deferral notes below are paraphrased from real `throw` messages —
-> grep `src/` for `not yet supported` / `not supported` / `step not implemented` to
-> find the authoritative text.
-
-## Legend
+Sourced from the dispatch maps (`src/steps/*.ts`) and the compiler `throw` sites — if
+the code defers a shape, it fails closed with a clear error and this file says so. Keep
+rows in sync in the same commit that changes support.
 
 | Mark | Meaning |
 |---|---|
-| ✅ | **Full** — supported across its normal forms |
-| 🟡 | **Partial** — common forms work; specific shapes deferred (see note) |
-| ❌ | **Deferred** — not yet compiled; throws a clear error (a named future bet) |
-| 🚫 | **Out of scope** — a locked non-goal (lambdas / OLAP / multi-request tx) |
+| ✅ | Full — all normal forms |
+| 🟡 | Partial — the Notes list what works and what defers |
+| ❌ | Deferred — throws a clear error |
+| 🚫 | Out of scope — locked non-goal |
 
-The throughline for every ❌: it **fails closed** with a clear message, never silently
-under-executes. That honesty is the point of this table.
-
-**Notes convention.** Within a Notes cell, each line is one clause: a ✅ bullet is a
-**supported** form, a ❌ bullet is a **deferred** shape (fails closed). Rows that are
-wholly ❌/🚫 give the deferral reason as a single plain line.
+In a 🟡 cell, **✅** = supported form, **❌** = deferred shape.
 
 ---
 
 ## 1. Sources & movement
 
-| Step | Status | Notes |
+| Step | | Notes |
 |---|:--:|---|
-| `V()`, `V(id…)` | ✅ | ✅ id resolves numeric rowid **or** string `uid` |
-| `E()`, `E(id…)` | ✅ | |
-| `inject(…)` | ✅ | ✅ shaped source: ordinary args → ScalarStream; all-array args → ListStream (§9)<br>✅ later scalar inject appends relationally, so position-sensitive filters/reducers compose<br>❌ appending a list to an existing scalar stream (needs a mixed-shape row discriminant) |
-| `out`/`in`/`both` | ✅ | ✅ covering-index hops, index-only, sub-ms at 1M edges |
-| `outE`/`inE`/`bothE` | ✅ | ✅ flips the typed id-relation to edge |
-| `outV`/`inV`/`bothV` | ✅ | ✅ flips edge → endpoint vertex |
-| `otherV` | ✅ | ✅ the endpoint away from the entering vertex (a carried `fromV`, gated on chain use — no hot-path cost otherwise) |
-| `outV`/`inV`/`bothV` | ✅ | ✅ flips back to node |
+| `V()`/`V(id…)`, `E()`/`E(id…)` | ✅ | `V` id resolves numeric rowid or string `uid` |
+| `out`/`in`/`both`, `outE`/`inE`/`bothE`, `outV`/`inV`/`bothV` | ✅ | index-only covering-index hops |
+| `otherV` | ✅ | endpoint away from the entering vertex |
+| `inject(…)` | ✅ | ordinary args → scalar stream, all-array args → list stream (§9); later scalar injects append relationally. ❌ appending a list onto an existing scalar stream |
 
 ## 2. Filters & predicates
 
-| Step | Status | Notes |
+| Step | | Notes |
 |---|:--:|---|
-| `hasLabel`, `has(k)`, `has(k,v)`, `has(k,P)` | ✅ | ✅ ANY-match `EXISTS(vertex_properties…)` (multi-property has), rides the static `vp_key_value` covering index (W4 — key binds, no splice) |
-| `has(label,k,v)`, `has(T.label/T.id, v/P)` | ✅ | ✅ the cucumber verification idiom |
-| `hasId(…)` | ✅ | ✅ flattens list args |
-| `is(P)` | 🟡 | ✅ relational scalar filter, including after transforms, reducers, and position-sensitive `limit`/`range`/`skip` chains<br>❌ after `path()` |
-| `where(__.…)` | ✅ | ✅ single- & multi-hop (`compileExistsChain`), incl. `both()` multi-hop and **edge-typed hops** (`where(__.outE('knows'))`, `where(__.outE().inV())`)<br>✅ `where(__.label()/not())`<br>✅ alias-rooted `where(__.as('x')…)` |
-| `where(P)` / `where('a',P)` | 🟡 | ✅ alias-column compare (P2a)<br>❌ some `where(P.op)` alias forms<br>❌ `where().by(key)` on an edge-typed label |
-| `and`, `or`, `not`, `filter(__.…)` | ✅ | ✅ `and`/`or`/`not`, `filter(traversal)`<br>❌ `filter(predicate)` (non-traversal) — use `filter(traversal)` |
-| `P` predicates (eq/neq/lt/gt/within/without/between/inside/outside) | ✅ | ✅ `between` is `[lo,hi)` (two comparisons, not SQL `BETWEEN`) |
-| **TextP** (startingWith/endingWith/containing + negations) | ✅ | ✅ bound `LIKE`/`NOT LIKE`, pattern escaped |
-| **TextP regex** (`regex`/`notRegex`) | 🚫 | **Unimplementable in SQL.** Stock SQLite only *reserves* the `REGEXP` operator (needs a `regexp()` UDF that ships with no implementation — verified `no such function: REGEXP` on bun:sqlite 3.53.0); DO SQLite exposes no `sqlite3_create_function` and blocks `load_extension`, so the UDF can't be supplied. A post-SQL JS filter would violate locked #3. (The `regexp_*` funcs in CF docs are **R2 SQL**, a different engine, not DO SQLite.) `LIKE`-expressible forms — startingWith/endingWith/containing — are ✅ above; only true regex is out |
-| `typeOf(GType)` over a **stored property** | ✅ | ✅ resolves the stored `vtype` column (typed property values P2): `is(typeOf(X))` per row + `has('k',typeOf(X))` EXISTS, over int/long/short/byte/bigint/float/double/string/boolean/datetime/uuid/list/map/set<br>✅ static-fold when the type is compile-time known (inject/cast/math), storage-class fallback for legacy NULL-vtype rows<br>❌ `bigdecimal`/`char`/`duration` detect via vtype but can't be **framed** (no client serializer) |
-| `dedup()` | 🟡 | ✅ bare `dedup()`<br>✅ `dedup().by(key|T.id|T.label|scalar traversal)` as a first-per-key window; ordinary missing keys drop, ProductiveBy retains one NULL key<br>✅ `order().barrier().dedup().by(...)` carries explicit encounter order downstream<br>❌ `dedup(label)` and >1 by() modulator<br>❌ `dedup()` after `as()` / with path tracking (path-distinct semantics) |
+| `hasLabel`, `has(k)`, `has(k,v)`, `has(k,P)`, `has(label,k,v)`, `has(T.label/T.id,…)` | ✅ | ANY-match over normalized props, static covering index |
+| `hasId(…)` | ✅ | flattens list args |
+| `is(P)` | 🟡 | scalar filter, incl. after transforms/reducers/`limit`/`range`/`skip`. ❌ after `path()` |
+| `where(__.…)` | ✅ | single- & multi-hop incl. `both()` and edge-typed hops; `label()`/`not()`; alias-rooted `where(__.as('x')…)` |
+| `where(P)` / `where('a',P)` | 🟡 | alias-column compare. ❌ some `where(P.op)` forms; `by(key)` on an edge-typed label |
+| `and`, `or`, `not`, `filter(__.…)` | ✅ | incl. infix `.and()`/`.or()` connectors. ❌ `filter(predicate)` — use a traversal |
+| `P` (eq/neq/lt/gt/within/without/between/inside/outside) | ✅ | `between` is `[lo,hi)` |
+| TextP (startsWith/endsWith/containing + negations) | ✅ | bound `LIKE`, escaped |
+| TextP regex (`regex`/`notRegex`) | 🚫 | no SQLite `regexp()` UDF; DO blocks `create_function`/`load_extension` |
+| `typeOf(GType)` over a stored property | 🟡 | `is(typeOf(X))` / `has('k',typeOf(X))` over int/long/short/byte/bigint/float/double/string/boolean/datetime/uuid/list/map/set via the stored `vtype`. ❌ `bigdecimal`/`char`/`duration` detect but can't frame (no serializer) |
+| `dedup()` | 🟡 | bare; `dedup().by(key/T.id/T.label/scalar traversal)` first-per-key window. ❌ `dedup(label)`, >1 `by()`, after `as()` / path tracking |
 | `identity()` | ✅ | |
 
 ## 3. Projections & element data
 
-| Step | Status | Notes |
+| Step | | Notes |
 |---|:--:|---|
-| `values(k…)` | ✅ | |
-| `id()`, `label()`, `count()` | ✅ | ✅ ids frame as `COALESCE(uid,id)` |
-| `valueMap`, `elementMap` | ✅ | ✅ custom vertex/edge framing (client serializer hardcodes empty props) |
-| `properties(k…)` [`.key`/`.value`/`.element`/`.id`/`.label`/`.count`] | ✅ | ✅ relational PropertyStream with explicit owner/key/value/meta payload + carried state<br>✅ `.key`/`.value`/`.id` retype to ScalarStream; later scalar filters/order/range/reducers/fold compose<br>✅ `.element()` retypes to the owner vertex **or edge** stream; later element steps compose<br>✅ real VP id + meta framed; `has(metaKey)`/`hasKey`/`hasValue`/`.properties()`(meta)/`valueMap`(metaMap)<br>❌ property-stream `dedup()`/`order()` before a projection |
-| `select('a')`, multi-`select`, `project(…)` | 🟡 | ✅ column-threaded aliases<br>✅ single-label `select` retypes to a scalar, node/edge, or typed list under `by(traversal)`; later steps compose<br>✅ multi-`select`/`project` lower to a heterogeneous per-traverser RecordStream with scalar, vertex, edge, scalar-list, and node/edge-list fields; selecting a field re-enters ordinary lowering<br>✅ mixed direct/key/token/shaped-child fields share generic child productivity joined by a multiset-safe outer origin; productive NULL survives and element payloads retain movement re-entry<br>✅ homogeneous list fields compose through `select(Column.values)` as a list-of-lists<br>✅ `limit`/`range`/`skip`/`tail` with `Scope.local` slice record fields<br>❌ record `order`/`dedup`/`fold`/`where`; mixed-shape Column.values needs a variant stream |
-| `select(Column.values/keys)` | 🟡 | ✅ a rich GroupStream derives the narrow MapStream entry layout for scalar/count/sum and neighbour-list values + element/scalar keys; list-valued maps (`by(__.<move>()…fold())`) become list-of-lists<br>✅ over a scalar-only RecordStream: one list per record, then ordinary list/unfold lowering<br>❌ heterogeneous element-valued record lists, element-VALUE group maps, Map-unfold (→Map.Entry), raw Map params |
-| **chained projections** (`values().count()`, `project().select()`) | 🟡 | ✅ scalar projections retype to a physical ScalarStream; transforms, filters, ordering/range, and numeric reducers then lower one relational step at a time<br>✅ RecordStream fields retype to scalar/element/list streams<br>❌ `valueMap().select()` and other legacy structured values still hit compatibility boundaries |
-| `order()` [`.by(key[,dir])`] | 🟡 | ✅ tail modifier<br>❌ `order()` after `path()`<br>❌ `order().by(key)` on a scalar stream |
-| `limit`, `range`, `skip` | ✅ | ✅ CTE mid-chain, tail-modifier after `order()`<br>✅ `Scope.local` slices RecordStream fields |
-| `by(…)` modulator | ✅ | ✅ only as an `order`/`select`/`project`/`group`/`groupCount`/`path`/`math` modulator |
+| `values(k…)`, `id()`, `label()`, `count()` | ✅ | ids frame as `COALESCE(uid,id)` |
+| `valueMap`, `elementMap` | 🟡 | custom vertex/edge framing; re-enterable as a per-element map, so `select(Column.keys/values)`, `count()`, `is(typeOf(MAP))`, `select(unbound-label)`→empty compose. ❌ heterogeneous element-value maps |
+| `properties(k…)` [`.key`/`.value`/`.element`/`.id`/`.label`/`.count`] | 🟡 | full property stream with owner/key/value/meta; `.key`/`.value`/`.id`→scalar, `.element()`→owner vertex/edge, all re-enterable; real VP id + meta, `has(metaKey)`/`hasKey`/`hasValue`/`valueMap`. ❌ `dedup()`/`order()` before a projection |
+| `select('a')`, multi-`select`, `project(…)` | 🟡 | column-threaded aliases; single-label select → scalar/element/typed-list; multi-`select`/`project` → per-traverser record (scalar/vertex/edge/scalar-list/element-list fields), each field re-enters; `limit`/`range`/`skip`/`tail` with `Scope.local` slice fields. ❌ record `order`/`dedup`/`fold`/`where` |
+| `select(Column.values/keys)` | 🟡 | over a group, scalar record, or per-element valueMap/elementMap (keys→Set); list-valued maps → list-of-lists. ❌ heterogeneous element-value lists, raw Map params |
+| chained projections (`values().count()`, `project().select()`, `valueMap().select()`) | 🟡 | scalar/record/map projections retype to a stream and re-enter one step at a time. ❌ heterogeneous structured values |
+| `order()` [`.by(key[,dir])`] | 🟡 | tail modifier. ❌ after `path()`; `by(key)` on a scalar stream |
+| `limit`, `range`, `skip` | ✅ | CTE mid-chain / tail modifier after `order()`; `Scope.local` slices record fields |
+| `by(…)` modulator | ✅ | on `order`/`select`/`project`/`group`/`groupCount`/`path`/`math` |
 
 ## 4. Aggregation & barriers
 
-| Step | Status | Notes |
+| Step | | Notes |
 |---|:--:|---|
-| `group`, `groupCount` | 🟡 | ✅ always lowers to a rich GroupStream (same semantic relation terminal or followed)<br>✅ scalar reducers → SQL `GROUP BY`; element values → ordered-stream + handler fold<br>✅ inline element scalar traversal keys lower through generic child-first productivity and rejoin by multiset-safe origin; `by(T.id|label)` keys also supported<br>✅ composite `by(__.project(...))` keys compile each scalar field as an independent child stream over one multiset-safe outer ordinal<br>✅ non-reducing scalar traversal values consume all productive child rows through the same origin into scalar lists; missing rows contribute nothing, productive NULL survives<br>✅ group-scoped `count/sum/min/max/mean` reduce raw generic child rows at the final key boundary; count preserves zero while numeric/comparable reducers are productive-only<br>✅ scalar and whole-element child `…fold()` fold once per final key with empty-domain semantics; named `group('a')…cap('a')` uses the same live source path<br>✅ `select(Column.*)` derives MapStream only for layouts it can consume<br>❌ >2 `by()` modulators; non-scalar/deep traversal keys; generic traversal keys/values on property groups |
-| `fold()` | ✅ | ✅ scalar fold is a relational ListStream even when terminal; uniform scalar item tags survive materialization/unfold<br>✅ global element fold retains the element-framing path; child-scoped element fold preserves empty lists + node/edge item metadata and materializes property-bearing elements in one SQL query |
-| `sum`, `min`, `max`, `mean` | ✅ | ✅ relational ScalarStream with explicit `(v,vt)` payload, so filters/range can follow without losing runtime numeric framing<br>✅ also as `Scope.local` list reducers (§9)<br>✅ `min`/`max` range over any Comparable incl. **Strings** (v4); `sum`/`mean` numeric only<br>✅ `cap('a').unfold().<reducer>` (unfold of a scalar = identity) |
-| `group('a')`/`groupCount('a')` (side-effecting) | 🟡 | pass-through barrier: stashes the group-spec, `cap('a')` re-emits it (§12). ❌ after `as()`/`path()`, `cap('a')` then more steps |
+| `group`, `groupCount` | 🟡 | scalar reducers → SQL `GROUP BY`; element values → ordered stream + fold; scalar/`T.id`/`T.label`/composite-`project` keys; non-reducing values → scalar lists; group-scoped `count/sum/min/max/mean` + `…fold()` at the key boundary; scalar-stream `groupCount()` groups by value; `count()`/`is(typeOf(MAP))`/`unfold()`→Map.Entry re-enter. ❌ >2 `by()`, deep/non-scalar keys, element-value maps |
+| `fold()` | ✅ | scalar or element list, re-enterable; empty lists and node/edge item metadata preserved |
+| `sum`, `min`, `max`, `mean` | ✅ | carry runtime `(v,vt)`; also `Scope.local` list reducers (§9); `min`/`max` over any Comparable incl. Strings |
+| `group('a')`/`groupCount('a')` (side-effecting) | 🟡 | see §12 |
 
 ## 5. Per-traverser branching
 
-| Step | Status | Notes |
+Common to all four branch steps: incoming `as()` and `path()` thread through element
+arms; **mixed-shape arms (scalar + element + list class) merge into a variant stream**.
+❌ across all: mixed element KIND (node+edge), a NEW `as()` inside an arm, path through a
+mixed-shape arm.
+
+| Step | | Notes |
 |---|:--:|---|
-| `choose(pred, then[, else])` | 🟡 | ✅ gated-seed dispatch; three-argument homogeneous scalar and list arms (scalar or same-kind element `…fold()`) lower through child streams and later shape-specific steps compose<br>✅ **mixed-shape then/else** (scalar+element, element+list, …) merge as a **dynamic-tag VariantStream** (P4) — the predicate partitions, each arm frames per-row by its `vk` tag<br>✅ **incoming `as()` threads through** the gated arms + merge (carried-schema)<br>❌ mixed element KIND (node+edge, both element-class); two-argument scalar-then + identity-else<br>❌ a NEW `as()` bound *inside* an arm (arms diverge — fails closed); `path()` through a mixed-shape arm<br>✅ **path threads through** same-shape element arms (pad-to-max cols) |
-| `choose(fn).option(k, body)…` | 🟡 | ✅ scalar option-map over one generic child-modulation domain; choice and body traversals preserve parent multiplicity and productive NULL, and only the selected body's productivity is observed<br>✅ its ScalarStream result composes with scalar filters, transforms, reducers and `fold`<br>❌ without a `Pick.none` default<br>❌ element/discard/identity/fail bodies<br>❌ `Pick.unproductive`/`any` |
-| `coalesce(…)` | 🟡 | ✅ first-productive via the origin stack for homogeneous element, scalar, and list arms (scalar or same-kind element); empty `fold()` list is productive and prevents fallback<br>✅ **mixed-shape arms** merge as a **dynamic-tag VariantStream** (P4) — one ordinal-tagged seed, arm k emits per-row (`vk`-tagged) only where no earlier arm produced<br>✅ element movement/filter plus `limit`/`skip`/`range`/`dedup` arms use generic per-parent child policies<br>✅ **incoming `as()` threads through** (originSeed projects it alongside the ordinal, merge preserves it)<br>✅ **nested in coalesce/optional** for element arms (each branch pushes a unique ordinal `o0`/`o1`/…)<br>❌ mixed element KIND (node+edge); NEW `as()` inside an arm; `path()` through a mixed-shape arm<br>✅ **path threads through** same-shape element arms (pad-to-max cols) |
-| `union(…)` | 🟡 | ✅ element multi-hop/nested arms via shared non-materializing element-stream lowering; homogeneous scalar and list arms (scalar or same-kind element) lower through child streams + `UNION ALL`, with numeric/list item metadata unified centrally<br>✅ **mixed-shape arms** (scalar+element, element+list, …) merge as a **dynamic-tag VariantStream** (P4) — each arm frames per-row by its `vk` tag (0 null/1 scalar/2 node/3 edge/4 list)<br>✅ **incoming `as()` threads through** the merge (`mergeBranchCarried`), so `union(…).select('a')`/`.path()` resolve<br>❌ mixed element KIND (node+edge, both element-class); source-branch tails; NEW `as()` inside an arm; `path()` through a mixed-shape arm<br>✅ **path threads through** same-shape element arms (pad-to-max cols) |
-| `optional(…)` | 🟡 | ✅ single-hop LEFT JOIN fast path + multi-hop; element `limit`/`skip`/`range`/`dedup` are per-parent generic child policies<br>✅ non-total scalar child → tagged VariantStream (`scalar` hits, original element on miss); root framing + `count()` re-entry<br>✅ **incoming `as()` threads through** (fast path carries it from the input; general path via originSeed)<br>❌ element-kind change on miss; most steps after a VariantStream<br>❌ a NEW `as()` inside an arm<br>✅ **path threads through** homogeneous element arms (pad-to-max cols) |
-| `flatMap(__.…)` | 🟡 | ✅ origin-safe movement/filter element bodies and scalar `values`/`id`/`label`/`constant` tails use generic `all` cardinality; transforms + row operators + scoped reducers share lowering<br>✅ scalar or element-tail `fold()` emits one typed ListStream per parent (`[]` empty, productive scalar NULL retained), with later list operations/unfold composing normally<br>✅ **incoming `as()` threads through** (single body, no merge)<br>✅ **path threads through** element bodies (pad-to-max cols)<br>❌ record/group/path bodies; NEW `as()` inside body |
-| `map(__.…)` | 🟡 | ✅ child `count()` and scalar-tail `count/sum/min/max/mean` are scope-aware barriers: parent-domain LEFT JOIN + origin GROUP BY preserves duplicates/empty children; numeric `v,vt` survives later scalar composition<br>✅ scalar `values`/`id`/`label`/`constant` tails are productive rows through the generic child domain; transforms and origin-partitioned row operators run before first-per-origin<br>✅ scalar or element-tail `fold()` returns a typed ListStream per parent, including explicit empty lists; followers reuse ordinary list dispatch<br>✅ movement/filter element bodies compile through the generic child domain with first-per-origin cardinality<br>❌ alias/select and other structured barrier-bearing bodies |
-| `local(…)` | 🟡 | ✅ one generic child `all` policy: bare element movement, element `limit`/`skip`/`range`/`dedup` (including before element `fold()`), scalar transforms/row operators/reducers, scalar/element-tail `fold()`, plus canonical one-step `local(aggregate(...))`<br>✅ outer `as()` aliases/path columns and downstream `otherV()` context survive the child scope; the old movement parser/private window engine is deleted<br>❌ general element `order()` (only terminal-first modulation is supported); structured properties/record/group/path bodies; match/simplePath/union/nested local; sack state |
+| `choose(pred, then[, else])` | 🟡 | gated dispatch; homogeneous scalar/list arms; predicate on the generic child-existence engine + infix connectors. ❌ 2-arg scalar-then + identity-else |
+| `choose(fn).option(k, body)…` | 🟡 | scalar option-map, composes as a scalar stream. ❌ no `Pick.none` default; element/discard/identity/fail bodies; `Pick.unproductive`/`any` |
+| `coalesce(…)` | 🟡 | first-productive over element/scalar/list arms (empty `fold()` is productive); element movement + `limit`/`skip`/`range`/`dedup`; nests in coalesce/optional |
+| `union(…)` | 🟡 | element multi-hop/nested arms; homogeneous scalar/list arms via `UNION ALL`. ❌ source-branch tails |
+| `optional(…)` | 🟡 | single-hop fast path + multi-hop; element `limit`/`skip`/`range`/`dedup`; non-total scalar child → variant stream (+ `count()` re-entry). ❌ element-kind change on miss; most steps after a variant stream |
+| `flatMap(__.…)` | 🟡 | movement/filter bodies + scalar tails (`all`); scalar or element `fold()` → list per parent. ❌ record/group/path bodies |
+| `map(__.…)` | 🟡 | scope-aware child barriers (`count/sum/min/max/mean`), scalar tails, `fold()` per parent, movement bodies (first-per-origin). ❌ alias/select/structured bodies |
+| `local(…)` | 🟡 | one child `all` policy: movement, `limit`/`skip`/`range`/`dedup`, scalar transforms/reducers, `fold()`, `local(aggregate(...))`; outer `as()`/path/`otherV()` survive. ❌ general `order()`; structured/record/group/path/match/union/nested bodies; sack |
 
 ## 6. Recursion (`repeat`)
 
-| Step | Status | Notes |
+| Step | | Notes |
 |---|:--:|---|
-| `repeat(__.<out/in/both>).times(n)` | ✅ | ✅ `WITH RECURSIVE walk`<br>✅ both = two recursive terms |
-| `repeat(__.<out/in/both>).times(n).count()` | ✅ | ✅ **traverser bulking** — unrolled GROUP-BY-SUM(bulk) CTEs, so `times(8).count()`=2.5e15 in ~10ms (§Traverser bulking)<br>✅ post-repeat `as()`/movement/bare `select(labels).count()` erases discarded record identity and propagates bulk per extra hop (`writtenBy` grateful scenario = 24.3bn)<br>❌ `groupCount`/`by(count)`, `sum`, aliases live before/across the walk, unbounded `until`/`emit` |
-| `emit` (before/after, bare) | ✅ | ✅ runs to natural fixpoint (no depth cap) |
-| `until(<pred>)`, `loops().is(n)` | 🟡 | ✅ do-while/while-do<br>❌ `until(__.loops()…)` beyond `loops().is(P)` |
-| `repeat().path()`, `simplePath()` in body | ✅ | ✅ JSONB array walk + `json_each` cycle guard |
-| `emit(pred)`, `times(pred)` | ❌ | predicate forms |
-| `until` + `times`, `until` + `emit` | ❌ | combined exit conditions |
-| movement + `has()` / multi-hop repeat bodies | ✅ | ✅ `repeat(__.out().has(k,v/P/TextP))`, `repeat(__.both().has(…))`, `repeat(__.in().out())` — a JOIN-chain recursive term (`expandRepeatBody`); both() forks by cartesian direction<br>❌ `hasLabel`/3-arg/T-token `has` in the body; path()/simplePath() with a MULTI-hop body |
-| barrier/side-effect / edge-step repeat bodies | ❌ | `repeat(__.out().dedup()/limit()/order()/local()/union()/sack()/groupCount())`, nested `repeat`, `repeat(__.outE().inV())` — can't live in a recursive term (a barrier/state/edge-alternation per iteration) |
-| `repeat()` on edges, after `as()` | ❌ | |
-| `path().by()` on the recursive walk | ❌ | |
+| `repeat(__.<out/in/both>).times(n)` | ✅ | `WITH RECURSIVE`; `both` = two terms |
+| `…times(n).count()` | ✅ | traverser bulking — unrolled `GROUP-BY-SUM(bulk)` CTEs; propagates through post-repeat labels/movement/`select(labels).count()`. ❌ `groupCount`/`by(count)`, `sum`, aliases live across the walk, unbounded `until`/`emit` |
+| `emit` (before/after, bare) | ✅ | runs to natural fixpoint |
+| `until(<pred>)`, `loops().is(n)` | 🟡 | do-while/while-do. ❌ `until(__.loops()…)` beyond `loops().is(P)` |
+| `repeat().path()`, `simplePath()` in body | ✅ | JSONB array walk + `json_each` cycle guard |
+| movement + `has()` / multi-hop bodies | 🟡 | `out()/both()/in()` chains with `has(k,v/P/TextP)`. ❌ `hasLabel`/3-arg/T-token `has`; path with a multi-hop body |
+| `emit(pred)`, `times(pred)`, `until`+`times`/`emit` | ❌ | predicate / combined exit forms |
+| barrier/side-effect/edge-step bodies, nested `repeat`, on edges, after `as()`, `path().by()` on the walk | ❌ | can't live in a recursive term |
 
 ## 7. Path family
 
-| Step | Status | Notes |
+| Step | | Notes |
 |---|:--:|---|
-| `path()`, `path().by(key)` | 🟡 | ✅ always lowers to an explicit PathStream: wide-row linear layout or `(pk,ord,element)` recursive layout; root materialization alone frames GraphBinary<br>✅ linear label-carry + handler assembly<br>✅ **through a branch** (union/coalesce/optional/choose/flatMap — pad-to-max `cols`, ragged arms NULL-padded + LEFT JOIN)<br>❌ `path().by(traversal)`/`by(T.x)`; `path().by()` **through a branch** (padded null vs missing-prop ambiguous)<br>❌ mixed element-kind at one branch position; a dynamic-length (`repeat`) arm (needs tagged-array)<br>❌ spanning >1 linear movement/repeat<br>❌ over a `union()` **source** step |
-| `simplePath()`, `cyclicPath()` | ✅ | ✅ all-pairs identity (linear) / `json_each` guard (in repeat body) |
-| steps after `path()` | ❌ | `order`/reducer/`is`/transform/`inject` after `path()` |
-| `tree()` | 🚫 | JS GLV cucumber ignores all 13 tree scenarios + stubs `DataType.TREE` → 0 conformance. Build only if a non-JS consumer appears |
+| `path()`, `path().by(key)` | 🟡 | linear or recursive layout; label-carry + handler assembly; `count()`/`is(typeOf(PATH))`/`unfold()` re-enter; through a branch (pad-to-max cols). ❌ `by(traversal)`/`by(T.x)`; `by()` through a branch; mixed element-kind at a position; dynamic-length (`repeat`) arm; spanning >1 movement/repeat; over a `union()` source |
+| `simplePath()`, `cyclicPath()` | ✅ | all-pairs identity / `json_each` guard |
+| other steps after `path()` | ❌ | `order`/reducer/transform/`inject`/`select(Column.keys)` — need label history |
+| `tree()` | 🚫 | JS GLV stubs it, 0 conformance |
 
 ## 8. Pattern matching
 
-| Step | Status | Notes |
+| Step | | Notes |
 |---|:--:|---|
-| `match(p1, p2, …)` | 🟡 | ✅ conjunctive pattern join on the alias seam<br>✅ `as(start).<out/in>*[.has].as(end)` patterns, dependency-ordered<br>❌ `both()`/edge/scalar-terminal patterns<br>❌ `or`/`not`/nested-match<br>❌ `>1`/`0` root vars<br>❌ match-inside-where<br>❌ select-then-movement<br>❌ path tracking |
+| `match(p1, p2, …)` | 🟡 | conjunctive `as(start).<out/in>*[.has].as(end)` patterns, dependency-ordered. ❌ `both()`/edge/scalar-terminal, `or`/`not`/nested, >1 or 0 root vars, in-`where`, select-then-movement, path tracking |
 
 ## 9. Lists & collections
 
-| Step | Status | Notes |
+| Step | | Notes |
 |---|:--:|---|
-| `fold()` as a re-usable list value | ✅ | ✅ JSONB list<br>✅ re-enters the tail |
-| `unfold()` | 🟡 | ✅ `json_each` explode → elements/scalar/nested-list stream (list-of-lists → per-list rows), retaining uniform scalar item metadata<br>❌ after a projection/modifier on an element stream<br>❌ Map-unfold (→Map.Entry) |
-| `is(typeOf(GType.LIST))` → ListStream | ✅ | ✅ RETYPE (not a value filter): keeps stored-`vtype='list'` rows and exposes `json(value)` as a ListStream `list` column, so `unfold`/`count(Scope.local)`/`range`/… reuse the list substrate (typed property values P3b, bulk of List.feature)<br>❌ MAP/SET retype (→MapStream) — still a plain scalar `vtype` filter<br>❌ list-OPERATION steps on a list value: `merge`/`split`/`index`/`order`/`project`/`where`/`asX` (a separate sub-project) |
-| `inject([…])` as a list | ✅ | ✅ each bracket arg = one list value |
-| `Scope.local` reducers (count/sum/min/max/mean) | ✅ | ✅ per-list correlated aggregate → ScalarStream, including later filters/reducers<br>✅ also degenerate scalar-local |
-| `none(P)`/`all(P)`/`any(P)` collection filters | ✅ | ✅ keep a list where no / every / some element matches (`IS TRUE`/`IS NOT TRUE` null handling; null-aware `eq/neq(null)`) |
-| `Scope.local` order/limit/range/skip/tail/dedup on a list | 🟡 | ✅ per-list correlated `json_each` rebuild (order sorts by value / direction-only `by(Order.desc)`; dedup keeps first occurrence; tail avoids a count() subquery)<br>✅ `reverse()` reverses list order; per-element string transforms (toUpper/trim/length/…)<br>✅ a single bare `order().fold()` sorts the folded scalars<br>❌ `order(Scope.local).by(key/traversal)` |
-| **set-ops** (`combine`/`intersect`/`difference`/`disjunct`/`product`/`conjoin`) | 🟡 | ✅ over a list value: `combine`=concat (List), `intersect`/`difference`/`disjunct`=set ops (Set, null-safe `IS` membership), `product`=cartesian (list of pair-lists), `conjoin`=join to a String<br>✅ operand = a literal list, `constant(c).fold()`, or a standalone scalar-list traversal (`__.V().values(k).fold()` — compiled as an independent read + `json_group_array`, embedded as a scalar subquery)<br>✅ a Set followed by a list op degrades to a List (matches `intersect().order(local)`)<br>❌ an element-fold operand (`__.V().fold()` — a vertex list)<br>❌ after `path()` (path isn't yet a re-enterable list) |
-| scalar-stream `none(P)` barrier | ❌ | whole-stream barrier (distinct from the per-list filter); fails closed |
+| `fold()` / `inject([…])` as a list value | ✅ | JSONB list, re-enters the tail; each bracket arg = one list |
+| `unfold()` | 🟡 | explode → elements/scalar/nested-list; Map-unfold → per-entry Map.Entry with `select(Column.keys/values)`. ❌ after a projection/modifier on an element stream; non-`select`/element-value on unfolded entries |
+| `is(typeOf(LIST))`, `is(typeOf(MAP))` | 🟡 | LIST retypes a stored-`vtype='list'` scalar to a list stream; MAP is identity on a valueMap/group map. ❌ SET retype; list-operation steps (`merge`/`split`/`index`/`order`/`project`/`where`/`asX`) |
+| `Scope.local` reducers (count/sum/min/max/mean) | ✅ | per-list aggregate → scalar; also degenerate scalar-local |
+| `none(P)`/`all(P)`/`any(P)` | ✅ | collection filters, null-aware |
+| `Scope.local` order/limit/range/skip/tail/dedup on a list | 🟡 | per-list `json_each` rebuild; `reverse()`; per-element string transforms; bare `order().fold()` sorts. ❌ `order(Scope.local).by(key/traversal)` |
+| set-ops (`combine`/`intersect`/`difference`/`disjunct`/`product`/`conjoin`) | 🟡 | over a list; operand = literal list, `constant(c).fold()`, or a standalone scalar-fold traversal. ❌ element-fold operand; after `path()` |
+| scalar-stream `none(P)` barrier | ❌ | whole-stream barrier (distinct from the per-list filter) |
 
 ## 10. Types, math & dates
 
-| Step | Status | Notes |
+| Step | | Notes |
 |---|:--:|---|
-| `asBool`, `asNumber(GType.X)`, bare `asNumber()` | ✅ | ✅ typed-value carrier (compile-time subtype tag → GraphBinary framing)<br>✅ runtime scalar casts lower as relational ScalarStream transforms and compose with later filters/reducers |
-| string transforms | ✅ | ✅ SQL scalar, text-in text-out; non-local scalar transforms lower stepwise as ScalarStream relations<br>✅ `concat` skips nulls (`concat_ws`), all-null→null<br>✅ trim family over Java's `isWhitespace` set (incl. U+3000)<br>✅ `reverse` string chars (recursive CTE) / number identity / list order (§9)<br>✅ all compose as `Scope.local` per-element list transforms after `fold()`<br>✅ a string op on a non-`local` list raises TinkerPop's "can only take string as argument"<br>✅ `format("…%{key}…%{_}…")` templates a string — named tokens read element properties, `%{_}` pulls by() modulators (positional/round-robin); a missing property filters the row (❌ reading project()/select() columns, the as()-alias fallback)<br>❌ `split` (list-valued), element/map `asString` |
-| `math("<formula>")` | 🟡 | ✅ full exp4j operator/function set → one SQL ScalarStream, always Double; later scalar steps/barriers compose<br>✅ property and generic scalar-child `by()` variables, including child traversal re-rooting on carried `as()` aliases, join through one multiset-safe modulation domain<br>❌ a var with no `by()`<br>❌ `withSideEffect` vars<br>❌ reading `project()`/`select()` map columns |
-| `asDate`, `dateAdd`, `dateDiff`, `datetime()`/`DateTime()` literals | 🟡 | ✅ epoch-millis rep + `'date'` tag (UTC-only, ms precision — parity with the JS reference client)<br>✅ `typeOf(GType.DATETIME)` over stored props (via `vtype`, §2)<br>❌ `inject([…]).asDate()` |
-| `asNumber` + reducer (`fold`/`sum`) | ✅ | ✅ numeric reducers carry runtime `vt` explicitly (`asNumber(...).sum()`)<br>✅ typed `fold()` carries uniform element metadata through ListStream materialization |
-| bigdecimal | ❌ | no client GraphBinary serializer |
-| `format()` | 🟡 | ✅ element-property template substitution with `%{key}` + `%{_}`/`by()` returning a composable ScalarStream; traversal placeholders use generic child-first productivity<br>❌ reading project()/select() columns and the as()-alias fallback |
+| `asBool`, `asNumber(GType.X)`, bare `asNumber()` | ✅ | typed-value carrier → GraphBinary framing; runtime casts compose |
+| string transforms (`trim`/`reverse`/`concat`/`format`/…) | 🟡 | SQL scalar; `concat` skips nulls; trim over Java whitespace; compose as `Scope.local` per-element after `fold()`; `format("…%{key}…%{_}…")` reads props / `by()`. ❌ `split`, element/map `asString`, reading `project()`/`select()` columns |
+| `math("<formula>")` | 🟡 | full exp4j set → one SQL scalar, always Double; property / scalar-child `by()` vars. ❌ var with no `by()`; `withSideEffect` vars; `project()`/`select()` columns |
+| `asDate`, `dateAdd`, `dateDiff`, `datetime()`/`DateTime()` | 🟡 | epoch-millis, UTC-only, ms precision; `typeOf(DATETIME)` over stored props. ❌ `inject([…]).asDate()` |
+| `asNumber` + reducer (`fold`/`sum`) | ✅ | reducers carry runtime `vt` |
+| `bigdecimal` | ❌ | no client serializer |
 
 ## 11. Writes
 
-| Step | Status | Notes |
+| Step | | Notes |
 |---|:--:|---|
-| `addV()`, `.property(k,v)`, `property(T.id/T.label)` | ✅ | ✅ user-supplied ids (string→uid, int→rowid) |
-| `addE()`, `from`/`to` | 🟡 | ✅ `as()` alias or nested `__.V(…)`<br>✅ edge uid via `property(T.id)`<br>✅ multi-addE graph initializers<br>❌ nested-traversal `addE` label<br>❌ endpoint traversal past a movement<br>❌ `addE` after some prefixes |
-| `mergeV`, `mergeE` | 🟡 | ✅ id-aware upsert, onCreate/onMatch, start + mid-chain<br>❌ nested-traversal merge maps (`mergeV(__.select…)`)<br>❌ `option(…, __.traversal)`<br>❌ bare `mergeV()`/`mergeE()` (incoming-as-map) |
-| `property()` update | ✅ | ✅ vertex: normalized rows, single/list/set + meta (W4); edge: normalized `edge_properties` UPSERT (single cardinality, no meta) |
-| `drop()` (vertices + edges) | 🟡 | ✅ vertex AND edge `drop()` (cascades `vertex_properties`/`edge_properties`)<br>✅ after movement/filter/`where` (`g.V().out().drop()`, `g.V().outE('knows').drop()`)<br>❌ after `properties()` / `order()` |
-| `property(Cardinality.list/set, …)` (multi-property) | ✅ | list appends, set dedups by value (W4 normalized table) |
+| `addV()`, `.property(k,v)`, `property(T.id/T.label)` | ✅ | user-supplied ids (string→uid, int→rowid) |
+| `addE()`, `from`/`to` | 🟡 | `as()` alias or nested `__.V(…)`; edge uid; multi-addE initializers. ❌ nested-traversal label; endpoint traversal past a movement; `addE` after some prefixes |
+| `mergeV`, `mergeE` | 🟡 | id-aware upsert, onCreate/onMatch, start + mid-chain. ❌ nested-traversal merge maps; `option(…, __.traversal)`; bare `mergeV()`/`mergeE()` |
+| `property()` update | ✅ | vertex normalized rows single/list/set + meta; edge normalized UPSERT (single, no meta) |
+| `property(Cardinality.list/set,…)` | ✅ | list appends, set dedups by value |
+| `drop()` (vertices + edges) | 🟡 | after movement/filter/`where`, cascades props. ❌ after `properties()` / `order()` |
 
-## 12. Side-effect state (🟡 — the registry + carried-column substrate landed)
+## 12. Side-effect state
 
-Design + decision log: `docs/2026-07-13-side-effect-state-plan.md`. Two mechanisms, one
-home (`Carry`): a **named side-effect registry** (aggregate/cap/group('a')) and a
-**carried per-traverser column** (sack) — both stay one SQL statement (no interpreter).
+One home (`Carry`): a named registry (aggregate/cap/group('a')) and a carried column
+(sack); both stay one SQL statement.
 
-| Step | Status | Notes |
+| Step | | Notes |
 |---|:--:|---|
-| `aggregate('x')` | 🟡 | ✅ pass-through barrier → typed list/variant side-effect relation; `by(key|scalar traversal|element traversal with terminal order)`; `local(aggregate(...))`; ProductiveBy NULL membership survives `cap` + local/global reducers and nullable element bags<br>❌ on a scalar stream (`values(k).aggregate(x)`), token modulators, general all-row element ordering |
-| `store('x')` | 🚫 | dropped in TinkerPop 4 (no grammar rule); `aggregate(Scope.local)` replaces it |
-| `cap('x')` | 🟡 | ✅ a list/variant side-effect emits ONE collection value; explicit `unfold()` emits its members; a group side-effect re-emits the same GroupStream as inline `group()` (`cap('a').select(Column.values).unfold()` composes)<br>❌ multi-key `cap('x','y')` |
-| `sack()` / `withSack(…)` | 🟡 | ✅ carried column: `sack(Operator.x).by(key/T.label/nested)` mutate, bare `sack()` read as a ScalarStream, `withSack(init)` seed; nested modulation has only the generic retained-child-row path; later scalar steps/barriers compose<br>❌ inject-const numeric promotion (NumberHelper byte→short bump), `repeat()`/`barrier`/`local`, split/merge-on-fork, `sack(BiFunction)` |
-| `group('a')` / `groupCount('a')` (side-effecting) | 🟡 | ✅ pass-through barrier → stashed group-spec, `cap('a')` re-runs `lowerGroup`<br>❌ nested value-`by()` with movement+order, `by(__.select…)`, after `as()`/`path()` (inherits `lowerGroup`'s §4 limits) |
-| `within('x')` / `without('x')` readback | ❌ | mid-chain read of a side-effect (the aggregate-dedup idiom) — where eager/lazy diverge; fails closed |
-
-Landed L3 618→634 (sack +4, aggregate/cap +8, group('a')/cap +4). The
-`group('a')…cap('a').select(Column.values).unfold()` cluster now lands (cap re-enters →
-MapStream, §MapStream). Scalar aggregate/ProductiveBy is now on the generic child-domain
-path. The VariantStream slice plus correct collection-valued cap framing raised L3
-911→922, including element-valued aggregate modulation with ProductiveBy null members.
+| `aggregate('x')` | 🟡 | pass-through barrier → list/variant relation; `by(key/scalar/ordered-element traversal)`; `local(aggregate(...))`; ProductiveBy NULL survives. ❌ on a scalar stream, token modulators, general element ordering |
+| `cap('x')` | 🟡 | list/variant emits one collection (`unfold()` for members); group side-effect re-emits its GroupStream. ❌ multi-key `cap('x','y')` |
+| `sack()` / `withSack(…)` | 🟡 | carried column: `sack(Operator.x).by(key/T.label/nested)` mutate, bare `sack()` read, `withSack(init)` seed. ❌ inject-const numeric promotion; `repeat()`/`barrier`/`local`; split/merge-on-fork; `sack(BiFunction)` |
+| `group('a')`/`groupCount('a')` | 🟡 | pass-through barrier, `cap('a')` re-runs the group. ❌ after `as()`/`path()` (inherits §4 limits) |
+| `store('x')` | 🚫 | dropped in v4 — use `aggregate(Scope.local)` |
+| `within('x')`/`without('x')` readback | ❌ | mid-chain side-effect read (eager/lazy divergence) |
 
 ## 13. Traversal strategies
 
-| Strategy | Status | Notes |
+| Strategy | | Notes |
 |---|:--:|---|
-| 15 optimization strategies | ✅ | ✅ accepted as **no-ops** (result-preserving by TinkerPop's contract; our SQL does its own planning) |
-| `withoutStrategies(…)` | ✅ | ✅ safe no-op (we apply no default) |
-| **SubgraphStrategy** (vertex criterion) | 🟡 | ✅ `where`/`has` injection pass<br>❌ edge/vertexProperty criteria<br>❌ adjacency (`out()` expansion) |
-| **PartitionStrategy** (read-filter + write-stamp) | 🟡 | ✅ `has(within)` + property stamp<br>❌ `includeMetaProperties`<br>❌ partition-aware merge |
-| ReadOnly / EdgeLabel / ReservedKeys **verification** | ✅ | ✅ throw TinkerPop's canonical messages |
-| ProductiveByStrategy | ✅ | ✅ explicit productive-NULL policy for every supported consumer: `group`/`groupCount`/`project`/`select`/`aggregate`/`order`/`dedup`/linear `path`/alias-compare `where`; nullable element-valued records/aggregate bags and `local(aggregate)` included |
-| `with(…)` (OptionsStrategy sugar) | ❌ | `step not implemented: with()` |
-| OLAP / GraphComputer / Seed / Event strategies | 🚫 | out of scope |
+| 15 optimization strategies, `withoutStrategies(…)` | ✅ | no-ops (result-preserving; SQL plans itself) |
+| SubgraphStrategy (vertex criterion) | 🟡 | `where`/`has` injection. ❌ edge/vertexProperty criteria, adjacency expansion |
+| PartitionStrategy (read-filter + write-stamp) | 🟡 | `has(within)` + property stamp. ❌ `includeMetaProperties`, partition-aware merge |
+| ReadOnly / EdgeLabel / ReservedKeys verification | ✅ | throw TinkerPop's canonical messages |
+| ProductiveByStrategy | ✅ | productive-NULL policy for every supported consumer |
+| `with(…)` (OptionsStrategy sugar) | ❌ | not implemented |
+| OLAP / GraphComputer / Seed / Event | 🚫 | out of scope |
 
 ## 14. Element / property model
 
-| Feature | Status | Notes |
+| Feature | | Notes |
 |---|:--:|---|
 | Integer rowid ids | ✅ | |
-| **User-supplied ids** (string `uid`) | 🟡 | ✅ resolved at `V('x')` seed + framing-out and `properties().element().id()`<br>❌ scalar id via `by(__.outV().id())`/`group().by(__.id())`<br>❌ edge's own uid via `addE` in some paths |
-| **Multi-properties** (list/set cardinality) | ✅ | normalized `vertex_properties` table; `values()` flatMaps, `has()` ANY-matches, `valueMap` `{k:[…]}` (W4) |
-| **Meta-properties** (properties-on-properties) | ✅ | JSONB `meta` per VP row; write `property(k,v,mk,mv)`, read `properties().has(mk)`/`.properties()`/`valueMap` (W4) |
-| Property types: primitives + list/map/set | ✅ | ✅ vertex + edge BOTH normalized (`vertex_properties` / `edge_properties`), `value` BLOB affinity (keeps SQLite storage class → correct numeric order/range on both); the flat edge JSONB blob is retired (P1)<br>✅ **typed values**: a `vtype` column stores the canonical Gremlin type from the truth channel (wire DataType / parsed literal) → `typeOf` (§2) + per-row framing (§10)<br>✅ list/map/set property VALUES stored as JSONB (P1 fixed the raw-array bind crash) |
+| User-supplied ids (string `uid`) | 🟡 | at `V('x')` seed, framing-out, `properties().element().id()`. ❌ scalar id via `by(__.outV().id())`/`group().by(__.id())`; edge uid via `addE` in some paths |
+| Multi-properties (list/set) | ✅ | normalized `vertex_properties`; `values()` flatMaps, `has()` ANY-matches, `valueMap` `{k:[…]}` |
+| Meta-properties | ✅ | JSONB `meta` per VP row |
+| Property types: primitives + list/map/set | ✅ | vertex + edge normalized (`value` keeps SQLite storage class → correct order/range); `vtype` stores the canonical type (→ `typeOf` §2, framing §10); collections as JSONB |
 
 ## 15. Locked non-goals (🚫)
 
 | Feature | Why |
 |---|---|
-| **Lambdas** | v4-native stance; gremlin-lang barely supports them |
-| **OLAP / GraphComputer** | locked out — mogwai is OLTP (small per-tenant graphs) |
-| **Multi-request `g.tx()`** | needs DO session state (a P5 stretch, not a non-goal forever) |
-| `tree()` | 0 conformance (JS GLV stubs it) — build only for a non-JS consumer |
-| **TextP regex** (`regex`/`notRegex`) | Platform wall, not a design choice: stock SQLite ships no `regexp()` UDF and DO blocks `sqlite3_create_function`/`load_extension`. (`typeOf` over stored props is NO LONGER a wall — the `vtype` column solved it, §2.) `LIKE`-expressible TextP (startsWith/endsWith/containing) stays ✅ |
-
----
-
-## Where this points (the remaining frontier)
-
-Cheapest wins are long done. What's left, by structural weight:
-
-1. ~~**Side-effect state** (§12)~~ — **substrate LANDED** (618→634): the registry
-   (aggregate/cap/group('a')) + carried column (sack). Remaining tails: `within/without`
-   readback, sack numeric-promotion. (The `group('a')…select(Column.values)` cluster now
-   lands via the MapStream re-entry, §MapStream.)
-2. ~~**Multi/meta-properties (W4)** (§11, §14)~~ — **LANDED** (634→648): normalized
-   `vertex_properties` table + edge JSONB, multi/set cardinality, meta writes+reads. The
-   self-tuning `json_extract` index machinery is retired for static vp covering indexes.
-3. ~~**`local`** (§5)~~ — **substrate LANDED** (648→661): per-element scalar reduction +
-   movement window; `local(aggregate(...))` now shares the side-effect compiler.
-   Remaining: other non-movement bodies and `order()`/`dedup()` inside local.
-4. **Chained projections** (§3) — element→scalar→scalar re-type; partly dissolved by the
-   list substrate, still open for this shape (~40).
-5. ~~**Collection-algebra tail** (§9)~~ — **LANDED** (661→822 over several batches):
-   `select(Column.values/keys)`, list-local `Scope.local` ops, nested list-valued maps
-   (§MapStream); the **string-step family** (trim/reverse/concat-nulls + list-local
-   transforms); the **set-op family** (combine/intersect/difference/disjunct/product/conjoin
-   + all/any — Set framing via `jsonbSet`, null-safe `IS` membership, literal/`constant`/
-   standalone-scalar-fold operands); `format()`; unfold-of-scalar identity; min/max over
-   Strings. Remaining here: **Map-unfold** (→Map.Entry), element-VALUE maps.
-
-**The current frontier (all design-heavy — clean value-tail/list wins are harvested):**
-- **traverser bulking — COUNT LANDED (2026-07-14).** `repeat(<out/in/both>).times(n).count()`
-  (path/sack-free; plus cardinality-only post-repeat labels/record selection) now compiles to unrolled GROUP-BY-SUM(bulk) CTEs (`src/steps/bulk.ts`),
-  so the **grateful reference graph is seeded** and `times(8).count()` = 2.5e15 returns in
-  ~10ms (was an uninterruptible hang). Still deferred (own follow-ups): `groupCount`/
-  `group().by(count)` bulking, `sum`/labels whose identity remains semantically live, unbounded `until()`/
-  `emit()` bulking (no compile-time depth → needs a JS depth-loop). See
-  `docs/2026-07-14-traverser-bulking.md`.
-- **path() → re-enterable list** — path isn't yet a list stream, so path-rooted set-ops /
-  `reverse()` / `order()` defer.
-- **element-list terminal framing** — rejoin rowids→vertices at a terminal list, for
-  `fold().order(Scope.local).by(key)`.
-- **Select alias-threading** (~68F), **Repeat body generality** (~54F, scattered),
-  **Aggregate `within`/`without` readback** (~54F, eager/lazy divergence), **Match**
-  patterns (~34F), **Choose/Merge map bodies**.
-- **Comparability/Orderability** (~66F) — mixed-type / null / NaN predicate + ordering
-  rules; fail-closed territory (correct-by-design over number-chasing).
-
-Full analysis: `docs/2026-07-12-conformance-structural-bets.md` (the "remaining frontier").
+| Lambdas | v4-native stance |
+| OLAP / GraphComputer | OLTP-only (small per-tenant graphs) |
+| Multi-request `g.tx()` | needs DO session state (P5 stretch) |
+| `tree()` | 0 conformance (JS GLV stubs it) |
+| TextP regex | platform wall — no SQLite `regexp()` UDF, DO blocks extensions |
