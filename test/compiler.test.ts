@@ -391,9 +391,10 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('Scope.local reducer on a SCALAR stream is per-element (degenerate 1-list)', () => {
-    // A scalar's local sum/min/max is the value itself (identity); shape stays value.
-    expect(read('g.V(1).values("age").sum(Scope.local)').shape).toEqual({ kind: 'value' });
-    expect(read('g.V(1).values("age").max(Scope.local)').shape).toEqual({ kind: 'value' });
+    // A scalar's local sum/min/max is the value itself (identity); shape stays a value,
+    // and the stored per-row type rides through the identity reducer (perRowType).
+    expect(read('g.V(1).values("age").sum(Scope.local)').shape).toEqual({ kind: 'value', perRowType: true });
+    expect(read('g.V(1).values("age").max(Scope.local)').shape).toEqual({ kind: 'value', perRowType: true });
     // mean is ALWAYS Double, even of one value (d[29.0].d) → CAST to REAL, tagged double.
     const mn = read('g.V(1).values("age").mean(Scope.local)');
     expect(mn.shape).toEqual({ kind: 'value', as: 'double' });
@@ -676,8 +677,9 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.inject(1).asString()').sql).toContain('CAST(p.v AS TEXT)');
     expect(read('g.inject("hello").substring(1,8)').sql).toContain('substr(p.v');
     expect(read('g.inject("that").replace("h","j")').sql).toContain('replace(p.v');
-    // Scope.local on a scalar stream is a no-op (per-element == per-list)
-    expect(read('g.inject("a").length(Scope.local)').sql).toContain('length(v)');
+    // Scope.local on a scalar stream is a no-op (per-element == per-list); it now fuses
+    // through the scalar row pipeline like any transform (aliased p.v).
+    expect(read('g.inject("a").length(Scope.local)').sql).toContain('length(p.v)');
     // Adjacent transforms fuse into one expression while preserving left-to-right order.
     expect(read('g.inject("a").concat("b").toUpper()').sql).toContain("upper(concat_ws('', p.v, ?))");
     // trim family → SQLite trim/ltrim/rtrim over the Java-whitespace char set
