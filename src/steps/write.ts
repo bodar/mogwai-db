@@ -3,10 +3,66 @@ import { q, value, list, empty, raw, render, type Expression } from '../q.ts';
 import { labelIn, nodeHasProp, edgeHasProp } from '../plan.ts';
 import { gremlinTypeOf, isCollectionType, type CanonicalType } from '../gremlin-types.ts';
 import { stepChain, type Step, type SackSpec } from '../frontend.ts';
-import { type PStep } from '../strategies.ts';
+import { normalize, type PStep } from '../strategies.ts';
 import { readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../render.ts';
-import { buildPrefix } from './index.ts';
+import { buildPrefix, compileRead } from './index.ts';
 import { compileInject } from './inject.ts';
+
+// ---------- nested-traversal write arguments (read spine reuse) ----------
+//
+// A write-step argument can be a nested traversal — property(k, __.trav), a merge
+// match/option map, an addE endpoint. We do NOT hand-parse it: we compile it with the
+// ordinary read compiler and read the raw column from the resulting (relation, shape)
+// via extractNestedValue — the inverse of execute.ts's framing switch (no GraphBinary).
+// A CORRELATED arg (its value depends on the current element) is seeded at the driver
+// element by prepending a V(<rowid>)/E(<rowid>) source (numeric arg → rowid match), then
+// compiled + run + extracted per driver row. See docs/2026-07-16-write-args-through-read-spine.md.
+
+const isNested = (a: any): a is { nested: any } => a != null && typeof a === 'object' && 'nested' in a;
+
+// Compile a nested traversal (optionally seeded at a driver element) and run it against
+// the store, returning its raw result rows + the compiled shape. Seeding prepends a
+// V/E source on the driver's internal rowid so the child is anchored at that element.
+function runNested(store: GraphStore, nestedNode: any, params: Record<string, any>, seed?: { id: number; elem: 'node' | 'edge' }): { rows: any[]; shape: Shape } {
+  let chain: PStep[] = normalize(stepChain(nestedNode, params)).steps;
+  // Seed at the driver element: a synthetic V/E source on the internal rowid (numeric
+  // arg → rowid match). It borrows the nested node's parse ctx (no ctx of its own).
+  if (seed) chain = [{ name: seed.elem === 'edge' ? 'E' : 'V', args: [seed.id], ctx: nestedNode } as PStep, ...chain];
+  const compiled = compileRead(chain, params);
+  return { rows: store.query<any>(compiled.sql, compiled.binds), shape: compiled.shape };
+}
+
+// A compile-time scalar ValueType → the stored CanonicalType vocab (they overlap except
+// bool/date). null = infer from the JS value.
+const VT_TO_CANON: Record<string, CanonicalType> = {
+  bool: 'boolean', byte: 'byte', short: 'short', int: 'int', long: 'long', bigint: 'bigint',
+  float: 'float', double: 'double', string: 'string', uuid: 'uuid', date: 'datetime',
+};
+
+// The scalar value a nested property()-value traversal produces: the FIRST result row's
+// value (single-cardinality write), or has:false for an empty traversal (→ no property).
+// The stored vtype comes from the read spine's own type (count→long, a typed value→its
+// `as`), else null → inferred from the value. Fails closed on a non-scalar result shape.
+function nestedScalar(store: GraphStore, nestedNode: any, params: Record<string, any>, seed: { id: number; elem: 'node' | 'edge' }): { has: boolean; value: any; vtype: CanonicalType | null } {
+  const { rows, shape } = runNested(store, nestedNode, params, seed);
+  if (shape.kind !== 'value' && shape.kind !== 'scalar' && shape.kind !== 'count')
+    throw new Error(`property() traversal value producing a ${shape.kind} not yet supported`);
+  if (!rows.length || rows[0].v == null) return { has: false, value: undefined, vtype: null };
+  if (shape.kind === 'count') return { has: true, value: Number(rows[0].v), vtype: 'long' };
+  const vt = shape.kind === 'value' && !shape.perRowType && shape.as ? VT_TO_CANON[shape.as] ?? null : null;
+  return { has: true, value: rows[0].v, vtype: vt };
+}
+
+// Resolve a PropSpec's value for one target element: a literal passes through with its
+// captured vtype; a nested traversal is evaluated correlated at the element (its vtype is
+// inferred from the produced value, the honest fallback for an untyped channel). An empty
+// nested traversal → has:false (the property is not written), matching property(traversal)
+// on no result.
+function resolveSpecValue(store: GraphStore, sp: PropSpec, id: number, elem: 'node' | 'edge', params: Record<string, any>): { has: boolean; value: any; vtype: CanonicalType | null } {
+  if (!isNested(sp.value)) return { has: true, value: sp.value, vtype: sp.vtype };
+  const r = nestedScalar(store, sp.value.nested, params, { id, elem });
+  return { has: r.has, value: r.value, vtype: r.vtype ?? (r.has ? gremlinTypeOf(r.value, null) : null) };
+}
 
 // ---------- write compilers ----------
 //
@@ -81,7 +137,10 @@ function compileSetProperty(steps: PStep[], params: Record<string, any>): WriteP
     return {
       kind: 'write',
       run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
-        for (const sp of specs) insertEdgeProperty(store, id, sp.key, sp.value, sp.vtype);
+        for (const sp of specs) {
+          const r = resolveSpecValue(store, sp, id, 'edge', params);
+          if (r.has) insertEdgeProperty(store, id, sp.key, r.value, r.vtype);
+        }
         const cur = store.query<any>(readCur, [id])[0];
         return { edge: { id: cur.uid ?? id, label: cur.label, src: nodeExtId(store, cur.src), tgt: nodeExtId(store, cur.tgt), props: readEdgeProps(store, id) } };
       }),
@@ -92,7 +151,10 @@ function compileSetProperty(steps: PStep[], params: Record<string, any>): WriteP
   return {
     kind: 'write',
     run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
-      for (const sp of specs) applyVertexProperty(store, id, sp.key, sp.value, sp.vtype, sp.meta, sp.cardinality);
+      for (const sp of specs) {
+        const r = resolveSpecValue(store, sp, id, 'node', params);
+        if (r.has) applyVertexProperty(store, id, sp.key, r.value, r.vtype, sp.meta, sp.cardinality);
+      }
       const cur = store.query<any>(readCur, [id])[0];
       return { vertex: { id: cur.uid ?? id, label: cur.label, props: readVertexProps(store, id) } };
     }),
