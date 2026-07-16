@@ -253,7 +253,26 @@ export function applyStrategies(steps: Step[], use: StrategyUse, params: Record<
  *  shape (iterate() → return nothing), not a step the compiler dispatches. */
 export function normalize(steps: Step[]): { steps: PStep[]; discard: boolean } {
   const stripped = stripTerminal(steps);
-  return { steps: foldChooseOptions(foldByModulators(foldRepeatClusters(stripped.steps))), discard: stripped.discard };
+  return { steps: dropRedundantOrder(foldChooseOptions(foldByModulators(foldRepeatClusters(stripped.steps)))), discard: stripped.discard };
+}
+
+/** Reducers whose result is independent of input order. */
+const ORDER_INSENSITIVE_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
+
+/** Drop a keyless `order()` immediately before an order-insensitive reducer: it is a
+ *  provable no-op (count/sum/min/max/mean ignore order, and a keyless order filters
+ *  nothing — unlike order().by(key), which may drop missing-key traversers, so that form
+ *  is left intact). Runs after foldByModulators so an order carrying a by() has its `.bys`
+ *  set and is skipped. Unblocks group value children like by(__.out().order().count())
+ *  and is a general optimization for root chains too. */
+function dropRedundantOrder(steps: PStep[]): PStep[] {
+  const out: PStep[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    if (s.name === 'order' && !s.bys && ORDER_INSENSITIVE_REDUCERS.has(steps[i + 1]?.name)) continue;
+    out.push(s);
+  }
+  return out;
 }
 
 /** v4 iterate() appends a trailing discard() (or bare none()): execute, return
