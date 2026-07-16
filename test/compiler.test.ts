@@ -3374,6 +3374,33 @@ describe('typed property values (P1) — vtype capture + collection storage', ()
     expect(executeQuery(store, "g.E().hasLabel('knows').values('weight')", {})).toHaveLength(1);
   });
 
+  test('has(k, typeOf(X)) matches the stored vtype — the storage-class wall falls', () => {
+    const store = fresh();
+    executeQuery(store, "g.addV('t').property('when',datetime('2024-01-01T00:00:00Z')).property('nick',['a','b']).property('flag',true).property('gid',UUID('0-1')).property('age',30).property('big',5L)", {});
+    const n = (g: string) => executeQuery(store, g, {}).length;
+    // datetime/list/boolean/uuid were all indistinguishable from int/text/long by
+    // storage class alone (folded to false); the stored vtype now answers them.
+    expect(n("g.V().has('when', typeOf(GType.DATETIME))")).toBe(1);
+    expect(n("g.V().has('nick', typeOf(GType.LIST))")).toBe(1);
+    expect(n("g.V().has('flag', typeOf(GType.BOOLEAN))")).toBe(1);
+    expect(n("g.V().has('gid', typeOf(GType.UUID))")).toBe(1);
+    // numeric subtypes are distinguishable now: 30 is int, 5L is long.
+    expect(n("g.V().has('age', typeOf(GType.INT))")).toBe(1);
+    expect(n("g.V().has('age', typeOf(GType.LONG))")).toBe(0);
+    expect(n("g.V().has('big', typeOf(GType.LONG))")).toBe(1);
+    expect(n("g.V().has('when', typeOf(GType.LONG))")).toBe(0);
+    // a non-value GType folds to false; a bogus name still raises.
+    expect(n("g.V().has('age', typeOf(GType.VERTEX))")).toBe(0);
+    expect(() => compile("g.V().has('age', typeOf('bogus-name'))", {})).toThrow('unregistered type');
+  });
+
+  test('has(edgeKey, typeOf(X)) matches the stored edge vtype', () => {
+    const store = fresh();
+    executeQuery(store, "g.addV('p').as('a').addV('p').as('b').addE('knows').from('a').to('b').property('weight',0.5)", {});
+    expect(executeQuery(store, "g.E().has('weight', typeOf(GType.DOUBLE))", {})).toHaveLength(1);
+    expect(executeQuery(store, "g.E().has('weight', typeOf(GType.LONG))", {})).toHaveLength(0);
+  });
+
   test('the wire is the truth: a bound param keeps its GraphBinary DataType', () => {
     const store = fresh();
     // 5e9 is out of int32 range → the client serializes it as a GraphBinary Long. The

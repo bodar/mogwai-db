@@ -1,5 +1,7 @@
 import { stepChain, flattenListArgs, type Step, type Pred } from './frontend.ts';
 import { q, list, values, paren, empty, value, raw, jsonExtract, type Expression, type Relation } from './q.ts';
+import { normalizeTypeName } from './gremlin-types.ts';
+import { type ValueType } from './render.ts';
 
 // ---------- SQL node builders ----------
 //
@@ -122,39 +124,70 @@ export function idPredFromArgs(rawArgs: any[]): any {
   return { op: 'within', values: args.filter((a) => a !== null && a !== undefined) };
 }
 
-// GType → SQLite `typeof()` category. `null` = a recognized Gremlin type we don't
-// distinctly represent in JSON storage (boolean is stored as int, char/uuid/etc.
-// never occur), so it can never match → folds to constant false. `undefined` =
-// not a registered type name → the caller raises (matches the spec's error case).
+// GType → SQLite `typeof()` storage class — the LEGACY FALLBACK used only when a value
+// carries no stored `vtype` (a NULL-vtype/raw-insert row, or a computed scalar with no
+// type tag). `null` = a type SQLite's storage class can't distinguish (boolean/datetime/
+// uuid/list/… all collapse to integer/text) → folds to false in the fallback; the stored
+// `vtype` column is what recovers those (see typeOfSql mode 2). Keyed by canonical name.
 const GTYPE_SQL: Record<string, string | null> = {
   string: 'text',
-  int: 'integer', integer: 'integer', long: 'integer', short: 'integer',
-  byte: 'integer', bigint: 'integer', biginteger: 'integer',
+  int: 'integer', long: 'integer', short: 'integer',
+  byte: 'integer', bigint: 'integer',
   double: 'real', float: 'real', bigdecimal: 'real',
-  boolean: null, char: null, binary: null, uuid: null, datetime: null,
-  duration: null, tree: null, edge: null, vertex: null, vertexproperty: null,
-  vproperty: null, property: null, list: null, map: null, set: null, path: null,
-  graph: null,
+  boolean: null, char: null, uuid: null, datetime: null,
+  duration: null, list: null, map: null, set: null,
 };
 
-/** P.typeOf(GType|"ClassName") → a SQL type test over `expr`. `null` type folds
- *  to false; unknown/unregistered names raise (spec: "traversal will raise an error"). */
-function typeOfSql(expr: Expression, arg: any): Expression {
-  const name = (arg && typeof arg === 'object' && 'gtype' in arg) ? String(arg.gtype)
+// A compile-time scalar `as` tag (ValueType, render.ts) → canonical Gremlin type name,
+// for the static-fold typeOf mode. ValueType spells two names differently ('bool',
+// 'date'); the rest are already canonical.
+const AS_TO_CANONICAL: Record<ValueType, string> = {
+  bool: 'boolean', date: 'datetime', byte: 'byte', short: 'short', int: 'int',
+  long: 'long', bigint: 'bigint', float: 'float', double: 'double',
+};
+
+/** How to resolve the CURRENT scalar's type for a typeOf test:
+ *  - `staticAs`  — the value's GraphBinary type is known at compile time (inject literal,
+ *                  as*() cast, math→double) → fold to a constant.
+ *  - `vtypeExpr` — a per-row stored `vtype` column (values()/properties()/a stored-prop
+ *                  EXISTS) → match it, falling back to storage class for NULL-vtype rows.
+ *  - neither     — no type info → the legacy storage-class test on the value. */
+type TypeCtx = { staticAs?: ValueType; vtypeExpr?: Expression };
+
+/** P.typeOf(GType|"ClassName") → a SQL type test over `expr`, resolved by `ctx` (see
+ *  TypeCtx). A recognized non-value GType (vertex/edge/tree/graph/…) can never match a
+ *  stored scalar → folds to false; a truly unregistered name raises (spec: "traversal
+ *  will raise an error"). */
+function typeOfSql(expr: Expression, arg: any, ctx: TypeCtx = {}): Expression {
+  const rawName = (arg && typeof arg === 'object' && 'gtype' in arg) ? String(arg.gtype)
     : typeof arg === 'string' ? arg.toLowerCase()
     : (() => { throw new Error('typeOf() requires a GType argument'); })();
-  if (name === 'null') return q`${expr} is null`;
-  if (!(name in GTYPE_SQL)) throw new Error(`typeOf(): unregistered type '${name}'`);
-  const sqlType = GTYPE_SQL[name];
-  return sqlType === null ? q`0` : q`typeof(${expr}) = ${value(sqlType)}`;
+  if (rawName === 'null') return q`${expr} is null`;
+  const canonical = normalizeTypeName(rawName);
+  if (!canonical) {
+    // A recognized element/token GType (vertex/edge/vertexproperty/tree/graph/path/binary)
+    // is syntactically valid but a stored property scalar is never one → false. Anything
+    // else is a bad type name → raise.
+    const KNOWN_NON_VALUE = new Set(['vertex', 'edge', 'vertexproperty', 'vproperty', 'property', 'tree', 'graph', 'path', 'binary']);
+    if (KNOWN_NON_VALUE.has(rawName)) return q`0`;
+    throw new Error(`typeOf(): unregistered type '${rawName}'`);
+  }
+  // Mode 1 — compile-time known type → constant fold.
+  if (ctx.staticAs !== undefined) return AS_TO_CANONICAL[ctx.staticAs] === canonical ? q`1` : q`0`;
+  const storage = GTYPE_SQL[canonical];
+  const byStorage = storage ? q`typeof(${expr}) = ${value(storage)}` : q`0`;
+  // Mode 2 — per-row stored vtype, with a storage-class fallback for legacy NULL rows.
+  if (ctx.vtypeExpr) return q`(CASE WHEN ${ctx.vtypeExpr} IS NOT NULL THEN ${ctx.vtypeExpr} = ${value(canonical)} ELSE ${byStorage} END)`;
+  // Mode 3 — no type info → legacy storage-class test.
+  return byStorage;
 }
 
-export function predicateSql(expr: Expression, pred: any): Expression {
+export function predicateSql(expr: Expression, pred: any, typeCtx: TypeCtx = {}): Expression {
   if (pred === undefined) return q`${expr} is not null`;
   if (pred === null || typeof pred !== 'object' || !('op' in pred)) return q`${expr} = ${value(pred)}`;
   const { op, values: vals } = pred as Pred;
-  if (op === 'not') return q`NOT (${predicateSql(expr, vals[0])})`;
-  if (op === 'typeOf') return typeOfSql(expr, vals[0]);
+  if (op === 'not') return q`NOT (${predicateSql(expr, vals[0], typeCtx)})`;
+  if (op === 'typeOf') return typeOfSql(expr, vals[0], typeCtx);
   if (op in P_OPS) return q`${expr} ${P_OPS[op]} ${value(vals[0])}`;
   // SQLite rejects an empty `IN ()` list, so fold the degenerate sets to their
   // constant truth value: within nothing = never, without nothing = always.
@@ -279,7 +312,9 @@ export const nodePropScalar = (nodeIdExpr: Expression, key: string): Expression 
  *  all). EXISTS over vertex_properties → multi-property has() semantics. */
 export const nodeHasProp = (nodeIdExpr: Expression, key: string, pred: any): Expression => {
   const base = q`SELECT 1 FROM vertex_properties WHERE node=${nodeIdExpr} AND key=${value(key)}`;
-  return pred === undefined ? q`EXISTS(${base})` : q`EXISTS(${base} AND ${predicateSql(raw('value'), pred)})`;
+  // The row's own `vtype` column is in scope inside the EXISTS, so has('k',typeOf(X))
+  // matches the stored canonical type (mode 2) instead of only storage class.
+  return pred === undefined ? q`EXISTS(${base})` : q`EXISTS(${base} AND ${predicateSql(raw('value'), pred, { vtypeExpr: raw('vtype') })})`;
 };
 
 /** edge: the value under `key` as a correlated scalar. Edge props are single-cardinality
@@ -292,7 +327,7 @@ export const edgePropScalar = (edgeIdExpr: Expression, key: string): Expression 
  *  edge_properties — mirror of nodeHasProp. */
 export const edgeHasProp = (edgeIdExpr: Expression, key: string, pred: any): Expression => {
   const base = q`SELECT 1 FROM edge_properties WHERE edge=${edgeIdExpr} AND key=${value(key)}`;
-  return pred === undefined ? q`EXISTS(${base})` : q`EXISTS(${base} AND ${predicateSql(raw('value'), pred)})`;
+  return pred === undefined ? q`EXISTS(${base})` : q`EXISTS(${base} AND ${predicateSql(raw('value'), pred, { vtypeExpr: raw('vtype') })})`;
 };
 
 /** edge: all props as flat JSON text `{key:value}` (single-valued per key), correlated
