@@ -1,13 +1,13 @@
 import { q, value, list, empty, type Expression } from '../q.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
 import {
-  tryInlineScalar, scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx,
+  tryInlineScalar, scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps,
   type ScalarCtx,
 } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { carryFrag, carriedCols, elemRel, withoutCarried, type Carry, type ElementStream } from './context.ts';
-import { carryOf, continueLowering, groupColumns, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type PropertyStream, type ScalarStream } from './stream.ts';
+import { carryFrag, carriedCols, carriedWith, elemRel, withoutCarried, type Carry, type ElementStream } from './context.ts';
+import { carryOf, continueLowering, groupColumns, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream } from './stream.ts';
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { isElementFoldChild, isScalarChild, isScalarFoldChild, pushChildScope, reuseCurrentFrame, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild } from './child.ts';
@@ -315,6 +315,35 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
   const node = q`SELECT ${key.cols}, ${valNode} FROM ${src.from} ${groupBy ? 'GROUP BY' : 'ORDER BY'} ${order}`;
   const rel = st.q.cte(node, groupColumns({ key: key.desc, val }));
   return toGroupStream(withoutCarried(st), rel, key.desc, val);
+}
+
+/**
+ * valueMap()/elementMap() as a re-enterable, per-element MapStream — one map per input
+ * element (an origin ordinal `o0`, unlike group's single global map). Each property is a
+ * `(mk=key, mv=value-list)` entry row tagged with its element origin; compileFromMap then
+ * aggregates per origin. Reached ONLY with a follower — terminal valueMap keeps the
+ * byte-identical buildProjection ResultStream. Tokens (valueMap(true)/id/label) and a
+ * carried alias/path/branch/sack state defer (the origin ordinal would collide / tokens
+ * need extra entry keys).
+ */
+export function lowerValueMap(st: ElementStream, proj: PStep): MapStream {
+  if (proj.name === 'elementMap') throw new Error('elementMap() re-entry not yet supported');
+  if (proj.args.includes(true)) throw new Error('valueMap(true)/token re-entry not yet supported');
+  if (st.carried.aliases.size || st.carried.path || st.carried.origins.length || st.carried.sack || st.carried.fromV)
+    throw new Error('valueMap() re-entry carrying as()/path()/branch/sack state not yet supported');
+  const keys = proj.args.filter((a: any) => typeof a === 'string') as string[];
+  const p = st.rel.as('p');
+  const n = elemRel(st);
+  const l = labels.as('l');
+  const vlJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
+  // One row per element: its {key:[values]} JSON + a per-element origin ordinal.
+  const base = st.q.cte(q`SELECT ROW_NUMBER() OVER () AS o0, ${valueMapProps(n, st.elem)} AS props FROM ${vlJoin}`, ['o0', 'props']);
+  const b = base.as('b');
+  const keyFilter = keys.length ? q` WHERE je.key IN (${list(keys.map((k) => value(k)), ', ')})` : empty;
+  const rel = st.q.cte(q`SELECT je.key AS mk, je.value AS mv, ${b.c.o0} AS o0 FROM ${b}, json_each(${b.c.props}) je${keyFilter}`, ['mk', 'mv', 'o0']);
+  const carry: Carry = { ...carryOf(st), carried: carriedWith(st.carried, { origins: ['o0'] }) };
+  // key = a bare string; value = the property's value list (json array per entry).
+  return toMapStream(carry, rel, { kind: 'scalar' }, { kind: 'list', of: { kind: 'scalar' } });
 }
 
 /** Continue from the rich group barrier. Terminal framing consumes the same lowered

@@ -5,7 +5,7 @@
 // re-enterable tail (compileFromList). The producers live in projection.ts (compileFold)
 // and, later, inject-of-a-list / select(Column.values).
 
-import { q, value, raw, type Expression, type Relation } from '../q.ts';
+import { q, value, raw, list, type Expression, type Relation } from '../q.ts';
 import { predicateSql, scalarTx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
@@ -360,6 +360,16 @@ export function compileFromMap(s: MapStream, steps: PStep[], at: number): Loweri
       ? [c.c.mv, mapOfToListOf(s.valOf), s.valOf.kind === 'list']
       : [c.c.mk, mapOfToListOf(s.keyOf), s.keyOf.kind === 'list'];
     const item = nested ? q`json(${srcCol})` : srcCol;
+    // A per-element map (valueMap: one map per input element, tagged by an origin ordinal)
+    // aggregates one list PER origin; a single global group map has no origin → one list.
+    const origins = s.carried.origins;
+    if (origins.length) {
+      const rel = s.q.cte(
+        q`SELECT jsonb(COALESCE(json_group_array(${item}), json('[]'))) AS list${carryFrag(s.carried, c)} FROM ${c} GROUP BY ${list(origins.map((o) => c.c[o]), ', ')}`,
+        ['list', ...carriedCols(s.carried)],
+      );
+      return continueLowering(toListStream(carryOf(s), rel, of), at + 1);
+    }
     const rel = s.q.cte(q`SELECT jsonb(COALESCE(json_group_array(${item}), json('[]'))) AS list FROM ${c}`, ['list']);
     return continueLowering(toListStream(carryOf(s), rel, of), at + 1);
   }
