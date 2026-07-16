@@ -2,7 +2,8 @@ import { q, list, empty, value, type Expression, type Relation } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
 import { framedProps, labelNameSub, nodePropScalar, predicateSql, propExtract, extIdOf } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
-import { carryFrag, carriedCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
+import { aliasElem, carryFrag, carriedCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
+import { aliasId } from './alias.ts';
 import { carryOf, continueLowering, pathColumns, recordFieldColumns, toListStream, toPathStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type LoweringResult, type PathStream, type RecordField, type RecordStream, type ScalarStream, type Stream } from './stream.ts';
 import { type Compiled, type PathPos } from '../render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
@@ -62,7 +63,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
       : (() => {
           const selected = st.carried.aliases.get(keys[i]);
           if (!selected) throw new Error(`select("${keys[i]}"): no such label — as("${keys[i]}") was not seen`);
-          return { id: p.c[selected.col], elem: selected.elem };
+          return { id: aliasId(p.c[selected.col], 'last'), elem: aliasElem(selected) };
         })();
     if (nested[i]) {
       const seed = isProject ? outer.seed : reRootElement(outer.seed, p, source.id, source.elem);
@@ -188,7 +189,7 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
   const nested = proj.bys?.[0]?.[0];
   if (nested && typeof nested === 'object' && 'nested' in nested) {
     if (productive) throw new Error('ProductiveByStrategy with a traversal-valued single select is not yet supported');
-    const seed = reRootElement(st, p, p.c[selected.col], selected.elem);
+    const seed = reRootElement(st, p, aliasId(p.c[selected.col], 'last'), aliasElem(selected));
     if (isScalarChild(nested.nested, st.params)) {
       const child = tryCompileScalarValueChild(seed, nested.nested, 'first');
       if (!child) throw new Error('scalar select child failed after successful shape preflight');
@@ -206,18 +207,20 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
     }
     throw new Error('by(traversal) child shape not yet supported');
   }
+  const selElem = aliasElem(selected);
+  const selId = aliasId(p.c[selected.col], 'last');
   const by = byToEntry(proj.bys?.[0]);
   if (by.sub === 'vertex') {
     const rel = st.q.cte(
-      q`SELECT ${p.c[selected.col]} AS id${carryFrag(st.carried, p)} FROM ${p}`,
+      q`SELECT ${selId} AS id${carryFrag(st.carried, p)} FROM ${p}`,
       ['id', ...carriedCols(st.carried)],
     );
-    return { ...st, rel, elem: selected.elem };
+    return { ...st, rel, elem: selElem };
   }
-  const n = (selected.elem === 'edge' ? edges : nodes).as('n');
-  const expr = selected.elem === 'edge' ? propExtract(n.c.props, by.key!).expr : nodePropScalar(n.c.id, by.key!);
+  const n = (selElem === 'edge' ? edges : nodes).as('n');
+  const expr = selElem === 'edge' ? propExtract(n.c.props, by.key!).expr : nodePropScalar(n.c.id, by.key!);
   const rel = st.q.cte(
-    q`SELECT ${expr} AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c[selected.col]}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
+    q`SELECT ${expr} AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${selId}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
     ['v', ...carriedCols(st.carried)],
   );
   return toScalarStream(carryOf(st), rel);
@@ -252,7 +255,7 @@ export function lowerRecordSelectProject(st: ElementStream, proj: PStep): Record
     }
     const entry = aliases.get(k);
     if (!entry) throw new Error(`select("${k}"): no such label — as("${k}") was not seen`);
-    return { expr: st.rel.as('p').c[entry.col], elem: entry.elem };
+    return { expr: aliasId(st.rel.as('p').c[entry.col], 'last'), elem: aliasElem(entry) };
   };
   const entryKind = (i: number) => byToEntry(bys.length ? bys[i % bys.length] : undefined);
   const p = st.rel.as('p');

@@ -2,6 +2,7 @@ import { derived, empty, list, q, value, type Expression, type Relation } from '
 import { stepChain } from '../frontend.ts';
 import { edges, labels, nodes, vertexProperties } from '../schema.ts';
 import { advance, carriedWith, carryFrag, carriedCols, withCarried, type ElementStream } from './context.ts';
+import { aliasId } from './alias.ts';
 import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStream, type Stream } from './stream.ts';
 import { lowerElementSteps, lowerSteps, tryLowerElementSteps } from './index.ts';
 import { lowerScalarRows, SCALAR_TRANSFORMS } from './scalar.ts';
@@ -413,8 +414,9 @@ export function tryCompileScalarModulations(
     let seed = outer.seed;
     if (spec.rootCol) {
       const p = outer.seed.rel.as(`mr${i}`);
+      // rootCol is an as()-label column: a JSONB history array. Re-root on its last id.
       const rel = parent.q.cte(
-        q`SELECT ${p.c[spec.rootCol]} AS id${carryFrag(outer.seed.carried, p)} FROM ${p}`,
+        q`SELECT ${aliasId(p.c[spec.rootCol], 'last')} AS id${carryFrag(outer.seed.carried, p)} FROM ${p}`,
         ['id', ...carriedCols(outer.seed.carried)],
       );
       seed = { ...outer.seed, rel, elem: spec.rootElem ?? outer.seed.elem };
