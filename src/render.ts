@@ -69,7 +69,7 @@ export type Shape =
   | { kind: 'property' } // properties(): VertexProperty elements (vpid/owner/pk/pv/pmeta cols)
   | { kind: 'metaProperty' } // properties().properties(): meta-properties as Property elements (mk/mv cols)
   | { kind: 'metaMap' } // properties(k).valueMap(): a VertexProperty's meta as a flat Map (meta col, JSON text)
-  | { kind: 'value'; as?: ValueType }
+  | { kind: 'value'; as?: ValueType; perRowType?: boolean } // perRowType: frame each row by its own stored `vtype` column (values() of typed props), not the single `as`
   | { kind: 'variant'; scalarAs?: ValueType; elem?: Exclude<ElemShape, 'property'>; list?: boolean }
   | { kind: 'count' }
   | { kind: 'scalar'; productiveNull?: boolean } // numeric reducer; productive NULL may be a real result

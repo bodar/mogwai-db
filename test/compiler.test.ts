@@ -146,7 +146,8 @@ describe('compiler SQL snapshots', () => {
   test('values().order() sorts the projected scalar', () => {
     const p = read('g.V().values("age").order()');
     expect(p.sql).toContain('ORDER BY p.v ASC');
-    expect(p.shape).toEqual({ kind: 'value' });
+    // values() carries the per-row stored type → framed by it (perRowType).
+    expect(p.shape).toEqual({ kind: 'value', perRowType: true });
   });
 
   test('range/skip become LIMIT/OFFSET tail modifiers under order()', () => {
@@ -252,7 +253,7 @@ describe('compiler SQL snapshots', () => {
     // unfold() directly on an element stream is identity (a vertex is not a collection).
     expect(read('g.V().unfold()').shape).toEqual({ kind: 'vertex' });
     // continuation after the roundtrip: movement/projection resume as a fresh phase.
-    expect(read('g.V().hasLabel("person").fold().unfold().values("name")').shape).toEqual({ kind: 'value' });
+    expect(read('g.V().hasLabel("person").fold().unfold().values("name")').shape).toEqual({ kind: 'value', perRowType: true });
     // Scope.local reducers reduce EACH folded list to one scalar (per-list, not global).
     expect(read('g.V().fold().count(Scope.local)').shape).toEqual({ kind: 'count' });
     expect(read('g.V().values("age").fold().sum(Scope.local)').shape).toEqual({ kind: 'scalar' });
@@ -839,7 +840,7 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V(1).project("friends","created").by(__.out().values("name").fold()).by(__.out("created").values("name").fold()).select(Column.values).unfold()').shape)
       .toEqual({ kind: 'jsonbList' });
     expect(read('g.V(1).as("a").out().select("a").by(__.out()).values("name")').shape)
-      .toEqual({ kind: 'value' });
+      .toEqual({ kind: 'value', perRowType: true });
   });
 
   test('multi-select traversal fields re-root generic children on each labelled element', () => {
@@ -1390,7 +1391,7 @@ describe('compiler SQL snapshots', () => {
 
   test('is(P) folds a predicate onto the projected scalar', () => {
     const gt = read('g.V().values("age").is(P.gt(30))');
-    expect(gt.shape).toEqual({ kind: 'value' });
+    expect(gt.shape).toEqual({ kind: 'value', perRowType: true });
     expect(gt.sql).toContain("WHERE p.v > ?"); // the values() JOIN handles existence; is() adds a relational filter
     expect(gt.binds).toContain(30);
     // bare literal → equality
@@ -1577,7 +1578,7 @@ describe('compiler SQL snapshots', () => {
     expect(c.sql).toContain('ROW_NUMBER() OVER () AS o0');
     // branch 2 emits only for inputs branch 1 produced nothing for
     expect(c.sql).toContain('WHERE o0 NOT IN (SELECT o0 FROM');
-    expect(c.shape).toEqual({ kind: 'value' });
+    expect(c.shape).toEqual({ kind: 'value', perRowType: true });
     const scalar = read('g.V().coalesce(__.values("age"), __.constant(0)).count()');
     expect(scalar.shape).toEqual({ kind: 'count' });
     expect(scalar.sql).toContain('a.o0 NOT IN (SELECT o0 FROM');
@@ -1639,7 +1640,7 @@ describe('compiler SQL snapshots', () => {
     const foldedChild = read('g.V().map(__.out().values("name").fold()).count(Scope.local)');
     expect(foldedChild.sql).toContain('json_group_array(s.v ORDER BY s.encounter) FILTER');
     expect(foldedChild.sql).toContain("json('[]')");
-    expect(read('g.V().map(__.out().fold()).unfold().values("name")').shape).toEqual({ kind: 'value' });
+    expect(read('g.V().map(__.out().fold()).unfold().values("name")').shape).toEqual({ kind: 'value', perRowType: true });
     expect(() => compile('g.V().map(__.constant(1).discard())', {})).toThrow();
     // record/list-valued child bodies still defer; element bodies use generic child scope below.
     expect(() => compile('g.V().map(__.select("a"))', {})).toThrow('not supported by generic scalar lowering');
@@ -1650,10 +1651,10 @@ describe('compiler SQL snapshots', () => {
 
   test('map(__.<element body>) uses child scope + first-per-parent cardinality', () => {
     const p = read('g.V().map(__.out()).values("name")');
-    expect(p.shape).toEqual({ kind: 'value' });
+    expect(p.shape).toEqual({ kind: 'value', perRowType: true });
     expect(p.sql).toContain('ROW_NUMBER() OVER (PARTITION BY');
     expect(p.sql).toContain('WHERE r.rn=1');
-    expect(read('g.V(1).map(__.outE("knows")).inV().values("name")').shape).toEqual({ kind: 'value' });
+    expect(read('g.V(1).map(__.outE("knows")).inV().values("name")').shape).toEqual({ kind: 'value', perRowType: true });
   });
 
   test('choose(pred, then, else) → gated-seed UNION ALL, arms fold from their seed', () => {

@@ -209,6 +209,16 @@ function sumBuffer(v: number, storageClass: string): Buffer {
 // GraphBinary type comes from the producing step, not the SQLite storage class. No
 // tag → infer from the JS value (anySerializer). 'bool': SQLite carries the boolean
 // as 0/1, so frame Boolean(v) explicitly (anySerializer would otherwise emit Int).
+// A stored canonical vtype → the framing ValueType tag. datetime/boolean spell
+// differently ('date'/'bool'); numeric subtypes are identical. string is correct via
+// anySerializer (undefined → String); uuid/list/map/set have no ValueType yet → undefined
+// → anySerializer (deferred: proper uuid/collection framing + is(typeOf(LIST))→ListStream).
+const VTYPE_TO_VALUETYPE: Record<string, ValueType> = {
+  datetime: 'date', boolean: 'bool',
+  byte: 'byte', short: 'short', int: 'int', long: 'long', bigint: 'bigint', float: 'float', double: 'double',
+};
+const vtypeToValueType = (vt: string | null): ValueType | undefined => (vt ? VTYPE_TO_VALUETYPE[vt] : undefined);
+
 function frameValue(v: any, as: ValueType | undefined): Buffer {
   switch (as) {
     case undefined: return ioc.anySerializer.serialize(v);
@@ -310,7 +320,9 @@ function* framedResults(store: GraphStore, gremlin: string, params: Record<strin
     case 'valueMap': for (const r of rows) yield valueMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys, shape.tokens); return;
     case 'elementMap': for (const r of rows) yield elementMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys); return;
     case 'count': for (const r of rows) yield ioc.anySerializer.serialize(BigInt(r.v)); return;
-    case 'value': for (const r of rows) yield frameValue(r.v, shape.as); return;
+    // Per-row framing: values() of a typed prop frames each row by its own stored vtype
+    // (like variant frames by vk); otherwise the single compile-time `as` applies.
+    case 'value': for (const r of rows) yield frameValue(r.v, shape.perRowType ? vtypeToValueType(r.vtype) : shape.as); return;
     case 'variant': {
       const framed = rows.map((r) => {
         if (r.vk === 0) return frameValue(null, undefined);
