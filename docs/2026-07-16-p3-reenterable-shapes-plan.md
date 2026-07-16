@@ -2,7 +2,17 @@
 
 **Status:** in progress. Anchors the multi-commit P3 from
 `docs/2026-07-16-compiler-consolidation-plan.md` §3. **Baseline at start:** L3 1046.
-**Now: L3 1064** (Stage A + B1 + B2 + C1, all CI-green on trunk).
+**Now: L3 1066** (Stages A + B1 + B2 + C1 + C2 + C3, all CI-green on trunk — 8 commits).
+
+- **Stage C2 LANDED** (1064, +0-but-correct): `count()`/`count(Scope.local)`/
+  `is(typeOf(MAP))` re-enter a GroupStream (`COUNT(DISTINCT gk)` = entry count).
+- **Stage C3 LANDED** (1064→1066): `group()/groupCount().unfold()` → per-entry Map.Entry
+  stream (`MapStream.entries`); `select(Column.keys/values)` projects per row.
+
+**P3 substantially complete.** Remaining is either the **P4 substrate** (element-VALUE
+group maps + mixed branch arms — dynamic-tag VariantStream, the §2 "widest gate") or
+scattered small bits (elementMap re-entry with heterogeneous followers, keys→SET typing,
+`as()`/`order()` on a group, named `groupCount('a')`-over-scalar). Next major bet = P4.
 
 - **Stage A LANDED** (1046→1047): `path()` re-enterable — `count()`/`is(typeOf(PATH))`.
 - **Stage B1 LANDED** (1047→1050): `valueMap()` → per-element `MapStream`; origin-aware
