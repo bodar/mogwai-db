@@ -1535,6 +1535,24 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().and(__.out())', {})).toThrow('needs at least two traversal branches');
   });
 
+  test('infix .and()/.or() connectors split a predicate body (where/choose/until)', () => {
+    // where(has().and().has()) → ((p0) AND (p1))
+    const a = read('g.V().where(__.has("name","x").and().has("age",P.gt(1)))');
+    expect(a.sql).toContain(' AND ');
+    expect(a.binds).toEqual(['name', 'x', 'age', 1]);
+    // or() → ((p0) OR (p1)); OR binds looser so mixed a.and().b.or().c groups as ((a AND b) OR c)
+    expect(read('g.V().where(__.has("name","x").or().has("age",P.gt(1)))').sql).toContain(') OR (');
+    const mixed = read('g.V().where(__.hasLabel("person").and().out("created").or().hasLabel("software"))');
+    expect(mixed.sql).toMatch(/\(\(.*AND.*\).*OR.*\)/s);
+    // choose() infix predicate now routes through the same split (movement conjunct →
+    // correlated EXISTS), then the arms fold — D2 support-definer removed.
+    const c = read('g.V().choose(__.hasLabel("person").and().out("created"), __.out("knows"), __.identity())');
+    expect(c.sql).toContain('UNION ALL');
+    expect(c.shape).toEqual({ kind: 'vertex' });
+    // malformed (leading/trailing/empty operand) → clear throw
+    expect(() => compile('g.V().where(__.and().has("name","x"))', {})).toThrow('empty operand');
+  });
+
   test('union() → UNION ALL of branch id-relations, multi-hop bodies fold', () => {
     const u = read('g.V(1).union(__.out("knows"), __.out("created")).values("name")');
     expect(u.sql).toContain('UNION ALL');

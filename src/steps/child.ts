@@ -526,15 +526,41 @@ export function tryFilterByChildExistence(
   negate = false,
   scope: CompileScope = ROOT_SCOPE,
 ): ElementStream | null {
+  return childExistenceGate(parent, nested, scope)?.(negate) ?? null;
+}
+
+/** Split a parent stream into (child-exists, child-absent) gated seeds — the
+ * choose()/predicate analogue of tryFilterByChildExistence's single filtered stream.
+ * Both seeds share the one child CTE. Returns null when no generic child compiles,
+ * so the caller keeps its inline-predicate fast path authoritative. */
+export function tryGateByChildExistence(
+  parent: ElementStream,
+  nested: any,
+  scope: CompileScope = ROOT_SCOPE,
+): { then: ElementStream; else: ElementStream } | null {
+  const gate = childExistenceGate(parent, nested, scope);
+  return gate ? { then: gate(false), else: gate(true) } : null;
+}
+
+/** The shared correlated-existence core: compile the child once, then return a
+ * builder that projects the preserved parent domain filtered on child row existence
+ * (or absence). The domain ordinal keeps duplicate parents distinct. */
+function childExistenceGate(
+  parent: ElementStream,
+  nested: any,
+  scope: CompileScope,
+): ((negate: boolean) => ElementStream) | null {
   const child = tryCompileElementValueRows(parent, nested, scope)
     ?? tryCompileScalarValueRows(parent, nested, scope);
   if (!child) return null;
-  const d = child.frame.domain.as('d');
-  const c = child.stream.rel.as('c');
-  const exists = q`EXISTS (SELECT 1 FROM ${c} WHERE ${c.c[child.frame.ordinal]}=${d.c[child.frame.ordinal]})`;
-  return advance(parent,
-    q`SELECT ${d.c.id} AS id${carryFrag(parent.carried, d)} FROM ${d} WHERE ${negate ? q`NOT (${exists})` : exists}`,
-  );
+  return (negate: boolean) => {
+    const d = child.frame.domain.as('d');
+    const c = child.stream.rel.as('c');
+    const exists = q`EXISTS (SELECT 1 FROM ${c} WHERE ${c.c[child.frame.ordinal]}=${d.c[child.frame.ordinal]})`;
+    return advance(parent,
+      q`SELECT ${d.c.id} AS id${carryFrag(parent.carried, d)} FROM ${d} WHERE ${negate ? q`NOT (${exists})` : exists}`,
+    );
+  };
 }
 
 /** Compile an element-valued child through the SAME StepFns as the root prefix, then
