@@ -12,6 +12,7 @@
 // it is identical on Bun and Cloudflare — a graph is seeded by talking to it.
 import { BunGraphManager } from '../../src/bun/BunGraphManager.ts';
 import { application } from '../../src/application.ts';
+import { LoggingGraphManager, telemetryPath, clearTelemetry } from './telemetry.ts';
 import { MODERN_SEED } from './seed-modern.ts';
 import { CREW_SEED } from './seed-crew.ts';
 import { UID_SEED } from './seed-uid.ts';
@@ -52,7 +53,13 @@ export async function startConformanceServer(port = 45940) {
   for (const [g, queries] of Object.entries(SEEDS)) {
     for (const q of queries) await manager.query(g, q, {});
   }
-  const app = application({ manager });
+  // Opt-in L3 telemetry (MOGWAI_L3_TELEMETRY): wrap the SERVED manager only — seed
+  // writes above go through the raw manager, so they never pollute the capture.
+  // The decorator re-throws unchanged, so the ratchet count is byte-identical.
+  const tpath = telemetryPath();
+  if (tpath) clearTelemetry(tpath);
+  const served = tpath ? new LoggingGraphManager(manager, tpath) : manager;
+  const app = application({ manager: served });
   return Bun.serve({ port, fetch: app.router });
 }
 
