@@ -1,13 +1,47 @@
 # Typed property values — one type vocabulary, parse → store → read → frame
 
-**Date:** 2026-07-16 · **Status:** P1 LANDED (2026-07-16); P2/P3 pending. Schema change
-APPROVED (alpha, no users, no data migration). **Baseline at authorship:** L3 1021,
-corpus 2298/2298. **After P1:** L3 1021 (held — P1 is the enabler; conformance cashes in
-at P2/P3), corpus 2298/2298, uniqueFailed 845→818 (list-bind crash gone), full CI green.
+**Date:** 2026-07-16 · **Status:** P1 + P2 + P3a LANDED & pushed (all CI-green);
+P3b + tail-unification remainder PENDING. Schema change APPROVED (alpha, no users, no
+data migration). **Baseline at authorship:** L3 1021, corpus 2298/2298.
 This doc is written to be executed from a COLD (`/clear`ed) context — it restates
 everything needed. Sibling context: `docs/2026-07-16-compiler-consolidation-plan.md`
 (the value-streams work this builds on) and memory `w4-property-model`,
 `typed-property-values`.
+
+## Progress ledger (trunk, all CI-green)
+
+- **P1** — canonical vocab (`src/gremlin-types.ts`), `vtype` col on `vertex_properties`,
+  NEW normalized `edge_properties(id,edge,key,value,vtype,UNIQUE(edge,key))` (flat blob
+  retired), wire-is-truth param capture (`wire.ts` → seam → frontend), collection-JSONB
+  writes (bind-crash fixed; Map/Set jsonable). L3 1021.
+- **P2a** — `typeOfSql` 3-mode resolver (static-fold / per-row vtype / storage fallback);
+  `has(k,typeOf(X))` EXISTS matches stored vtype (`nodeHasProp`/`edgeHasProp` pass
+  `{vtypeExpr}`). Wall falls. L3 1022.
+- **P2b** — per-row `vtype` column on the ScalarStream (`values()`/edge values());
+  `is(typeOf(X))` precise per row; threads through all scalar row-ops, drops on
+  transform/reduce. L3 1025.
+- **P3a** — per-row typed FRAMING (`Shape.value.perRowType`; `materializeScalarRoot`
+  selects `v,vtype`; `execute.ts` `vtypeToValueType` → existing `frameValue`): `values()`
+  of datetime/boolean/long/etc. frames the true GraphBinary type. Bare terminal
+  `values()/id()/label()` unified onto the scalar pipeline (per-row framing now lives in
+  ONE place; `renderProjection` dup removed). L3 1026.
+
+## STILL PENDING (next session)
+
+- **P3b — uuid/list/map/set framing + `is(typeOf(LIST))`→ListStream.** Extend `ValueType`
+  (render.ts) with string/uuid/list/map/set; add a canonical-keyed serializer dispatch in
+  `execute.ts` (wire `ioc.uuidSerializer` — exists but unwired; collection serializers over
+  the JSONB value); `bigdecimal`/`char`/`duration` stay unframeable. Then `is(typeOf(LIST))`
+  retypes the ScalarStream → ListStream (value JSONB blob → list column) so unfold/
+  count(local)/range/project reuse the list substrate (matrix §9). Bulk of List.feature.
+- **Finish tail-unification (consolidation P1).** P3a unified only the bare-terminal value
+  case. Fully retire `renderProjection`'s value machinery (transforms/is/reducer/inject/
+  localMean) by routing EVERY value tail through the scalar pipeline + verifying coverage,
+  then delete `wrapReducer` + the duplicate transform ladder. Element/valueMap/group/path
+  stay on `buildProjection`. Larger, ratchet-sensitive — do BEFORE more substrate work per
+  the consolidation doc so features aren't written twice.
+- **Deferred edges/cases** noted below stay deferred; `vt`/`vtype` full unify happens
+  naturally when the tail-unification lands (one framing path).
 
 ## P1 LANDED — deviations from the original plan (user steer, 2026-07-16)
 
