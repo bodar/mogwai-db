@@ -14,7 +14,7 @@ import { lowerScalarFilter, lowerConstant, lowerScalarSack, isListTypeOf, scalar
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
 import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantOptional, union as lowerLegacyUnion } from './branch.ts';
-import { lowerGroup, lowerProperties, type GroupSource } from './group.ts';
+import { lowerGroup, lowerProperties, lowerValueMap, type GroupSource } from './group.ts';
 import { isScalarChild, isListChild, isTotalScalarChild, tryCompileCountChild, tryCompileListChild } from './child.ts';
 import { lowerElementDedup } from './filter.ts';
 
@@ -57,9 +57,11 @@ const NUMERIC_REDUCERS = new Set<NumericReducer>(['sum', 'min', 'max', 'mean']);
  *  terminal reducer (fold/sum) can reject anything following it. */
 type ModFn = (s: PStep, acc: TailAcc, at: { last: boolean; next?: string }) => void;
 
-/** Steps a path() projection folds as its OWN tail modifiers (vs a shape-boundary
- *  follower routed to compileFromPath). order() is deliberately absent — it defers. */
-const PATH_MODIFIERS = new Set(['dedup', 'limit', 'range', 'skip']);
+/** A re-enterable non-scalar projection (path/valueMap/elementMap) folds only these as
+ *  its OWN tail modifiers; any other following step is a shape boundary routed to its
+ *  compileFrom* arm. order() is deliberately absent — it defers. */
+const REENTER_MODIFIERS = new Set(['dedup', 'limit', 'range', 'skip']);
+const REENTERABLE_PROJ = new Set(['path', 'valueMap', 'elementMap']);
 
 const MODIFIERS = new Map<string, ModFn>([
   ['order', (s, acc) => {
@@ -129,10 +131,10 @@ export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop:
       if (s.name === 'sum' || s.name === 'min' || s.name === 'max' || s.name === 'order' || s.name === 'dedup') continue; // identity
       throw new Error(`${s.name}(Scope.local) requires a preceding list-producing step (e.g. fold())`);
     }
-    // path() is a re-enterable projection (a PathStream): it consumes only its own tail
-    // modifiers (dedup/limit/range/skip); any other following step (count/is/unfold/…) is
-    // a shape boundary, so stop and let the path arm (compileFromPath) handle it.
-    if (acc.projStep?.name === 'path' && !PATH_MODIFIERS.has(s.name)) break;
+    // A re-enterable projection (path/valueMap/elementMap) consumes only its own tail
+    // modifiers (dedup/limit/range/skip); any other following step (count/is/select/…) is
+    // a shape boundary, so stop and let its compileFrom* arm handle it.
+    if (acc.projStep && REENTERABLE_PROJ.has(acc.projStep.name) && !REENTER_MODIFIERS.has(s.name)) break;
     if (PROJECTION_NAMES.has(s.name)) {
       if (acc.projStep) break;
       acc.projStep = s;
@@ -148,6 +150,37 @@ export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop:
     mod(s, acc, { last: i === steps.length - 1, next: steps[i + 1]?.name });
   }
   return { acc, stop: i };
+}
+
+/** is(typeOf(GType.MAP)) — the identity type-assert on a valueMap/map result. */
+function isMapTypeOf(step: PStep): boolean {
+  if (step.name !== 'is') return false;
+  const pred = (step.args ?? [])[0];
+  if (!pred || typeof pred !== 'object' || pred.op !== 'typeOf') return false;
+  const arg = pred.values?.[0];
+  const name = (arg && typeof arg === 'object' && 'gtype' in arg) ? String(arg.gtype) : typeof arg === 'string' ? arg : null;
+  return !!name && name.toUpperCase() === 'MAP';
+}
+
+const hasColumnArg = (step: PStep): boolean =>
+  (step.args ?? []).some((a: any) => a && typeof a === 'object' && (a.column === 'keys' || a.column === 'values'));
+
+/** valueMap()/elementMap() followers. is(typeOf(MAP)) is identity (skip); count() counts
+ *  the maps (one per element → count of elements); select(Column.*) re-types to the
+ *  per-element MapStream that compileFromMap aggregates. Modifiers before the follower,
+ *  and any other follower, defer. */
+function lowerValueMapTail(st: ElementStream, proj: PStep, acc: TailAcc, steps: PStep[], at: number): LoweringResult {
+  if (acc.orders.length || acc.reducer || acc.distinct || acc.offset || acc.limit !== null)
+    throw new Error(`a modifier before a re-entered ${proj.name}() is not yet supported`);
+  let i = at;
+  while (i < steps.length && isMapTypeOf(steps[i])) i++; // is(typeOf(MAP)) = identity
+  if (i >= steps.length) return continueLowering(buildProjection(st, acc), i); // terminal after identity is()
+  const step = steps[i];
+  if (step.name === 'count' && !isScopeLocalStep(step))
+    return continueLowering(lowerGlobalCount(st), i + 1);
+  if (step.name === 'select' && hasColumnArg(step))
+    return continueLowering(lowerValueMap(st, proj), i);
+  throw new Error(`${step.name}() cannot consume the ${proj.name} result shape`);
 }
 
 /** Compile the tail: `st` is the finished prefix state, `steps[stop]` the first
@@ -320,6 +353,12 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
   // folded into acc; foldTailAcc stopped at any shape-boundary follower.
   if (acc.projStep?.name === 'path')
     return continueLowering(lowerPath(st, acc.projStep, acc), at);
+
+  // valueMap()/elementMap() with a follower: re-enterable as a per-element MapStream
+  // (select(Column)) or answered directly (count/is(typeOf(MAP))). Terminal keeps the
+  // buildProjection ResultStream below (byte-identical).
+  if (acc.projStep && (acc.projStep.name === 'valueMap' || acc.projStep.name === 'elementMap') && at < steps.length)
+    return lowerValueMapTail(st, acc.projStep, acc, steps, at);
 
   // Consumed the whole chain → render terminally, exactly as before.
   if (at === steps.length) {

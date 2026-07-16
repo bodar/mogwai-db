@@ -134,6 +134,25 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().elementMap()').shape).toEqual({ kind: 'elementMap', keys: null });
   });
 
+  test('P3 Stage B: valueMap() re-enterable — select(Column), count, is(typeOf(MAP))', () => {
+    // valueMap() → a per-element MapStream (json_each over the {k:[v]} JSON, tagged by a
+    // per-element origin o0); select(Column.keys) aggregates one list PER origin.
+    const keys = read('g.V().valueMap().select(Column.keys)');
+    expect(keys.sql).toContain('json_each');
+    expect(keys.sql).toContain('ROW_NUMBER() OVER () AS o0');
+    expect(keys.sql).toContain('GROUP BY');
+    expect(keys.shape).toEqual({ kind: 'jsonbList' });
+    // key subset filters at SQL level (je.key IN (?)); values().unfold() explodes per element
+    const vals = read("g.V().valueMap('location').select(Column.values).unfold()");
+    expect(vals.sql).toContain('je.key IN (?)');
+    // count() over maps = one per element = count of elements; is(typeOf(MAP)) is identity
+    expect(read('g.V().valueMap().count()').shape).toEqual({ kind: 'count' });
+    expect(read('g.V().valueMap().is(typeOf(GType.MAP)).count()').shape).toEqual({ kind: 'count' });
+    // terminal valueMap unchanged; still-unsupported followers fail closed
+    expect(read('g.V().valueMap()').shape).toEqual({ kind: 'valueMap', keys: null, tokens: false });
+    expect(() => compile('g.V().valueMap(true).select(Column.keys)', {})).toThrow('valueMap(true)/token re-entry not yet supported');
+  });
+
   test('order().by(key[, dir]) folds ORDER BY into the projection select', () => {
     const asc = read('g.V().hasLabel("person").order().by("age").values("name")');
     expect(asc.sql).toContain("ROW_NUMBER() OVER (ORDER BY (SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) ASC) AS encounter");
@@ -724,7 +743,7 @@ describe('compiler SQL snapshots', () => {
     // chained; is()/order() see the transformed value
     expect(read("g.V().values('name').toUpper().is('MARKO')").sql).toContain('upper(');
     // transform on a non-scalar projection is rejected (no scalar stream to transform)
-    expect(() => compile("g.V().valueMap().toUpper()", {})).toThrow('step not implemented: toUpper()');
+    expect(() => compile("g.V().valueMap().toUpper()", {})).toThrow('toUpper() cannot consume the valueMap result shape');
   });
 
   test('values(k).inject(c) appends constants to the value stream', () => {
@@ -735,7 +754,7 @@ describe('compiler SQL snapshots', () => {
     // append before a min() reducer
     expect(read("g.V().values('foo').inject(42).min()").sql).toContain('UNION ALL');
     // rejected on a non-scalar projection (inject-append is a scalar-stream op)
-    expect(() => compile("g.V().valueMap().inject(1)", {})).toThrow('step not implemented: inject()');
+    expect(() => compile("g.V().valueMap().inject(1)", {})).toThrow('inject() cannot consume the valueMap result shape');
   });
 
   test('union() as a source step UNION ALLs its vertex-rooted branches', () => {

@@ -37,15 +37,26 @@ Telemetry (post-P2, L3 1046) real terminal-island failures:
 - **Purpose:** de-risk the terminal-island→re-enterable *dispatch wiring* on the
   simplest shape. Payoff is small; the point is the clean pattern before B/C.
 
-## Stage B — valueMap/elementMap re-enterable (the 18-lever)
+## Stage B — valueMap/elementMap re-enterable (the canonical map substrate)
 
-- Lift `valueMap`/`elementMap` off the terminal ResultStream onto a **per-element
-  `MapStream`** (`(mk,mv)` rows: `mk`=key string, `mv`=value list for valueMap / scalar
-  for elementMap incl id/label tokens) carrying an **origin ordinal** (one map per input
-  element, unlike group's one global map).
-- Generalize `compileFromMap`'s `select(Column.keys/values)` to aggregate **per origin**
-  (`GROUP BY origin`) so `select(Column.keys).dedup().is(typeOf(SET))` composes.
-- Root materialization frames the per-element maps (one Map result per element).
+**Not the narrow keys/values slice — build the canonical thing once so the whole family
+falls out (SCOPE.md).** Lift `valueMap`/`elementMap` off the terminal ResultStream onto a
+**per-element `MapStream`** (`(mk,mv,o0)` rows: `mk`=key string, `mv`=value list; one map
+per input element via an origin ordinal, unlike group's one global map, when a follower
+exists — terminal valueMap keeps the byte-identical ResultStream). Consumers, all on
+existing rails:
+- `select(Column.keys/values)` — generalize `compileFromMap` to aggregate **per origin**
+  (`GROUP BY o0`); keys→Set. `select(Column.values).unfold().<setop>` composes via the
+  list substrate.
+- `select('a')` / `select(Pop.x,'a')` — the suite expects **empty** (select of an unbound
+  label), NOT an error. Route the map through the label-select rail so unbound→empty
+  falls out. (Was wrongly slated to defer.)
+- `is(typeOf(MAP))` → identity; `count()` → count.
+- `unfold()` → Map.Entry (the reserved `'entry'` ListOf).
+
+**Genuine wall (defer to P4):** mixed element-VALUE maps
+(`group().by().by(__.properties().groupCount()…)`) — heterogeneous element values need
+the dynamic-tag VariantStream.
 
 ## Stage C — group value/unfold extensions (~18)
 
