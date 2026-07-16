@@ -315,7 +315,12 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
   // constant() also crosses to the scalar stream, where compileFromScalar re-enters the
   // generic filter/branch dispatch on the current value.
   const followsScalarFilter = !!next && ['and', 'or', 'not', 'filter', 'where', 'constant'].includes(next.name);
-  const needsScalarBoundary = st.carried.origins.length > 0 || followsValueLabel || followsScalarFilter || (scalarRest.length > 0 && scalarRest.every((s) =>
+  // A BARE terminal scalar projection (values/id/label with nothing after) also crosses
+  // to the scalar stream, so the terminal value tail is materialized by the one scalar
+  // pipeline (materializeScalarRoot) rather than the duplicate renderProjection engine —
+  // per-row typed framing then lives in exactly one place (consolidation P1, unify tail).
+  const terminalScalar = scalarRest.length === 0 && SCALAR_PROJ.has(steps[stop]?.name);
+  const needsScalarBoundary = st.carried.origins.length > 0 || followsValueLabel || followsScalarFilter || terminalScalar || (scalarRest.length > 0 && scalarRest.every((s) =>
     SCALAR_ROW_STEPS.has(s.name) && !isScopeLocalStep(s)));
   if (SCALAR_PROJ.has(steps[stop]?.name) && needsScalarBoundary) {
     const n = elemRel(st);

@@ -25,8 +25,10 @@ export function materializeScalarRoot(stream: ScalarStream): Compiled {
     ? { kind: 'count' }
     : stream.result === 'number'
       ? { kind: 'scalar', productiveNull: stream.productiveNull }
-    : { kind: 'value', as: stream.as };
-  const cols = stream.result === 'number' ? q`v, vt` : q`v`;
+    : { kind: 'value', as: stream.as, perRowType: stream.vtype ? true : undefined };
+  // A per-row stored vtype column (values() of a typed prop) rides alongside v so the
+  // handler frames each row by its own type, not the single compile-time `as`.
+  const cols = stream.result === 'number' ? q`v, vt` : stream.vtype ? q`v, ${stream.vtype}` : q`v`;
   if (!stream.carried.encounter) return materializeRoot(stream.q, q`SELECT ${cols} FROM ${stream.rel}`, shape);
   const s = stream.rel.as('s');
   return materializeRoot(stream.q, q`SELECT ${cols} FROM ${s} ORDER BY ${s.c[stream.carried.encounter]}`, shape);
