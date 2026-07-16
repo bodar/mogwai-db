@@ -178,21 +178,26 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().not(__.hasId(P.within([])))').sql).toContain('NOT COALESCE');
   });
 
-  test('P.typeOf maps GType to a SQL typeof() test', () => {
-    // value stream + is(): typeof over the projected scalar expr; type binds as ?
+  test('P.typeOf resolves the stored vtype, with a storage-class fallback', () => {
+    // value stream + is(): the per-row vtype column (values() reads vp.vtype) answers the
+    // type; a NULL-vtype legacy row falls back to typeof(v). Both binds appear (canonical
+    // name for the vtype match, storage class for the fallback).
     const str = read('g.V().values("name").is(P.typeOf(GType.STRING))');
-    expect(str.sql).toContain("typeof(p.v) = ?");
+    expect(str.sql).toContain('CASE WHEN p.vtype IS NOT NULL THEN p.vtype = ? ELSE typeof(p.v) = ? END');
+    expect(str.binds).toContain('string');
     expect(str.binds).toContain('text');
-    expect(read('g.V().values("age").is(P.typeOf(GType.INT))').binds).toContain('integer');
+    expect(read('g.V().values("age").is(P.typeOf(GType.INT))').binds).toContain('int');
     // java class-name string form is equivalent
-    expect(read('g.V().values("name").is(P.typeOf("String"))').binds).toContain('text');
-    // has(): typeof over the property expression
-    expect(read('g.V().has("name", P.typeOf(GType.STRING))').sql).toContain("typeof(value) = ?");
-    // NULL → is-null; recognized-but-unrepresentable type → constant false
+    expect(read('g.V().values("name").is(P.typeOf("String"))').binds).toContain('string');
+    // has(): the EXISTS matches the stored vtype (fallback to typeof(value)).
+    expect(read('g.V().has("name", P.typeOf(GType.STRING))').sql)
+      .toContain('CASE WHEN vtype IS NOT NULL THEN vtype = ? ELSE typeof(value) = ? END');
+    // NULL → is-null; a storage-class-invisible type (boolean) → vtype match, else 0.
     expect(read('g.V().values("age").is(P.typeOf(GType.NULL))').sql).toContain('is null');
-    expect(read('g.V().values("age").is(P.typeOf(GType.BOOLEAN))').sql).toMatch(/\b0\b/);
+    expect(read('g.V().values("age").is(P.typeOf(GType.BOOLEAN))').sql)
+      .toContain('CASE WHEN p.vtype IS NOT NULL THEN p.vtype = ? ELSE 0 END');
     // P.not wraps and negates the inner predicate
-    expect(read('g.V().values("age").is(P.not(P.typeOf(GType.STRING)))').sql).toContain('NOT (typeof(');
+    expect(read('g.V().values("age").is(P.not(P.typeOf(GType.STRING)))').sql).toContain('NOT ((CASE WHEN p.vtype');
     // an unregistered type name raises
     expect(() => compile('g.V().values("age").is(P.typeOf("bogus-name"))', {})).toThrow('unregistered type');
   });
@@ -429,7 +434,7 @@ describe('compiler SQL snapshots', () => {
     const c = read('g.V().values("age").count()');
     expect(c.shape).toEqual({ kind: 'count' });
     expect(c.sql).toContain('SELECT COUNT(*) AS v FROM c1');
-    expect(c.sql).toContain('SELECT vp.value AS v FROM'); // the values() flatMap feeds the count
+    expect(c.sql).toContain('SELECT vp.value AS v, vp.vtype AS vtype FROM'); // the values() flatMap (now carrying per-row vtype) feeds the count
     // intervening scalar-stream modifiers compose through the re-entry
     const dedupCount = read('g.V().values("age").dedup().count()').sql;
     expect(dedupCount).toContain('SELECT DISTINCT p.v AS v');
@@ -499,9 +504,11 @@ describe('compiler SQL snapshots', () => {
     const f = read('g.V().values("weight").asNumber(GType.FLOAT)');
     expect(f.shape).toEqual({ kind: 'value', as: 'float' });
     expect(f.sql).toContain('CAST(p.v AS REAL)');
-    // is(P.typeOf(X)) on the uniformly-typed stream rides the existing storage-class
-    // typeOf — no precision change needed
-    expect(read('g.V().values("weight").asNumber(GType.FLOAT).is(P.typeOf(GType.FLOAT))').sql).toContain("typeof(CAST(p.v AS REAL))");
+    // is(P.typeOf(X)) after a cast is compile-time known (the cast's `as` tag) → the
+    // typeOf STATIC-FOLDS to a constant instead of a runtime typeof() test.
+    const castTypeOf = read('g.V().values("weight").asNumber(GType.FLOAT).is(P.typeOf(GType.FLOAT))');
+    expect(castTypeOf.sql).toContain('CAST(p.v AS REAL) AS v FROM c1 p WHERE 1');
+    expect(castTypeOf.sql).not.toContain('typeof(');
     // overflow + non-numeric-token errors raise TinkerPop's exact messages
     expect(() => compile('g.inject(32768).asNumber(GType.SHORT)', {})).toThrow('Can\'t convert number of type Integer to Short due to overflow.');
     expect(() => compile('g.inject(300).asNumber(GType.BYTE)', {})).toThrow('Can\'t convert number of type Integer to Byte due to overflow.');
@@ -3392,6 +3399,21 @@ describe('typed property values (P1) — vtype capture + collection storage', ()
     // a non-value GType folds to false; a bogus name still raises.
     expect(n("g.V().has('age', typeOf(GType.VERTEX))")).toBe(0);
     expect(() => compile("g.V().has('age', typeOf('bogus-name'))", {})).toThrow('unregistered type');
+  });
+
+  test('values(k).is(typeOf(X)) tests the per-row stored vtype', () => {
+    const store = fresh();
+    executeQuery(store, "g.addV('t').property('age',30).property('big',5L).property('when',datetime('2024-01-01T00:00:00Z')).property('nm','x')", {});
+    const n = (g: string) => executeQuery(store, g, {}).length;
+    expect(n("g.V().values('age').is(typeOf(GType.INT))")).toBe(1);
+    expect(n("g.V().values('age').is(typeOf(GType.LONG))")).toBe(0); // int, not long
+    expect(n("g.V().values('big').is(typeOf(GType.LONG))")).toBe(1);
+    expect(n("g.V().values('when').is(typeOf(GType.DATETIME))")).toBe(1);
+    expect(n("g.V().values('nm').is(typeOf(GType.STRING))")).toBe(1);
+    // the per-row vtype survives a row-preserving order() before the typeOf test
+    expect(n("g.V().values('age').order().is(typeOf(GType.INT))")).toBe(1);
+    // a cast makes the type compile-known → static fold (asNumber → long)
+    expect(n("g.V().values('when').asNumber(GType.LONG).is(typeOf(GType.LONG))")).toBe(1);
   });
 
   test('has(edgeKey, typeOf(X)) matches the stored edge vtype', () => {

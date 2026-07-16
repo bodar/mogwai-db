@@ -331,12 +331,15 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
     const encounterExpr = origin
       ? q`, ROW_NUMBER() OVER (PARTITION BY ${p.c[origin]} ORDER BY ${proj.encounterKey ?? p.c.id}) AS encounter`
       : empty;
+    // Carry the stored per-row type (values() reads vp/ep.vtype) so a following
+    // is(typeOf(X)) tests it. Column order must match streamColumns: v, encounter, vtype.
+    const vtypeCol = proj.vtypeExpr ? q`, ${proj.vtypeExpr} AS vtype` : empty;
     const rel = st.q.cte(
-      q`SELECT ${proj.colsNode}${encounterExpr}${carryFrag(st.carried, p)} FROM ${proj.fromNode}${where}`,
-      ['v', ...(encounter ? [encounter] : []), ...carriedCols(st.carried)],
+      q`SELECT ${proj.colsNode}${encounterExpr}${vtypeCol}${carryFrag(st.carried, p)} FROM ${proj.fromNode}${where}`,
+      ['v', ...(encounter ? [encounter] : []), ...(proj.vtypeExpr ? ['vtype'] : []), ...carriedCols(st.carried)],
     );
     const asTag = proj.shape.kind === 'value' ? proj.shape.as : undefined;
-    return continueLowering(toScalarStream(carryOf(st), rel, asTag, 'value', encounter), stop + 1);
+    return continueLowering(toScalarStream(carryOf(st), rel, asTag, 'value', encounter, undefined, proj.vtypeExpr ? 'vtype' : undefined), stop + 1);
   }
 
   // Tail fold: accumulate the projection + modifiers, stopping at a retype boundary
@@ -517,7 +520,7 @@ interface ProjCtx {
   vJoin: Expression; vlJoin: Expression;
   projStep: PStep | null;
 }
-export interface ProjResult { shape: Shape; colsNode: Expression; fromNode: Expression; scalarExpr?: Expression | null; baseWhere?: Expression | null; encounterKey?: Expression; }
+export interface ProjResult { shape: Shape; colsNode: Expression; fromNode: Expression; scalarExpr?: Expression | null; baseWhere?: Expression | null; encounterKey?: Expression; vtypeExpr?: Expression | null; }
 type ProjFn = (c: ProjCtx) => ProjResult;
 
 const PROJECTORS = new Map<string, ProjFn>([
@@ -531,14 +534,14 @@ const PROJECTORS = new Map<string, ProjFn>([
       return {
         shape: { kind: 'value' }, colsNode: q`${ep.c.value} AS v`,
         fromNode: q`${c.vJoin} JOIN ${ep} ON ${ep.c.edge}=${c.n.c.id} AND ${ep.c.key}=${value(key)}`,
-        scalarExpr: ep.c.value, baseWhere: null, encounterKey: q`${c.p.c.id}, ${ep.c.id}`,
+        scalarExpr: ep.c.value, baseWhere: null, encounterKey: q`${c.p.c.id}, ${ep.c.id}`, vtypeExpr: ep.c.vtype,
       };
     }
     const vp = vertexProperties.as('vp');
     return {
       shape: { kind: 'value' }, colsNode: q`${vp.c.value} AS v`,
       fromNode: q`${c.vJoin} JOIN ${vp} ON ${vp.c.node}=${c.n.c.id} AND ${vp.c.key}=${value(key)}`,
-      scalarExpr: vp.c.value, baseWhere: null, encounterKey: q`${c.p.c.id}, ${vp.c.id}`,
+      scalarExpr: vp.c.value, baseWhere: null, encounterKey: q`${c.p.c.id}, ${vp.c.id}`, vtypeExpr: vp.c.vtype,
     };
   }],
   ['id', (c) => ({

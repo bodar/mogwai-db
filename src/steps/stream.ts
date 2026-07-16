@@ -39,6 +39,12 @@ export interface ScalarStream extends Carry {
   /** A NULL row is a real traverser rather than an empty numeric reduction. Set by
    * ProductiveBy-backed list streams and preserved through their reducers. */
   readonly productiveNull?: boolean;
+  /** Optional physical per-row stored-type column (its name, conventionally 'vtype')
+   * carrying the canonical Gremlin type of each value (from values()/properties() reading
+   * vertex_properties/edge_properties.vtype). typeOf tests it per row; row-preserving ops
+   * carry it; transforms/reducers that change the type drop it. Distinct from `as` (a
+   * single compile-time framing tag) and from the reducer `vt` (a storage-class string). */
+  readonly vtype?: string;
 }
 
 /** A runtime-discriminated value stream. `vk` is 0=null, 1=scalar, 2=element;
@@ -192,7 +198,7 @@ export const recordResultColumns = (f: RecordField): string[] =>
 export function streamColumns(s: Stream): readonly string[] {
   if (s.kind === 'result') return [];
   const payload = s.kind === 'elements' ? ['id']
-    : s.kind === 'scalar' ? [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...(s.encounter ? [s.encounter] : [])]
+    : s.kind === 'scalar' ? [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...(s.encounter ? [s.encounter] : []), ...(s.vtype ? [s.vtype] : [])]
     : s.kind === 'variant' ? ['vk', 'v', 'rid']
     : s.kind === 'list' ? ['list']
     : s.kind === 'map' ? ['mk', 'mv']
@@ -224,8 +230,8 @@ export const carryOf = (s: Stream): Carry =>
 export const toResultStream = (q: Query, tail: Expression, shape: Shape): ResultStream =>
   ({ kind: 'result', q, tail, shape });
 
-export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, result: ScalarStream['result'] = 'value', encounter?: string, productiveNull?: boolean): ScalarStream =>
-  assertStreamColumns({ ...c, kind: 'scalar', rel, as, result, encounter, productiveNull });
+export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, result: ScalarStream['result'] = 'value', encounter?: string, productiveNull?: boolean, vtype?: string): ScalarStream =>
+  assertStreamColumns({ ...c, kind: 'scalar', rel, as, result, encounter, productiveNull, vtype });
 export const toVariantStream = (c: Carry, rel: Relation, scalarAs?: ValueType, elem?: Elem, result: VariantStream['result'] = 'rows'): VariantStream =>
   assertStreamColumns({ ...c, kind: 'variant', rel, scalarAs, elem, result });
 export const toListStream = (c: Carry, rel: Relation, of: ListOf): ListStream =>
