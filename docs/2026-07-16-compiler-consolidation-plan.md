@@ -184,6 +184,16 @@ the `child.ts` double-parse by unifying the shape model.
 
 **P4 — Dynamic-tag VariantStream** *(widest gate; pairs with P3).* Teach root
 materialization to frame by a runtime row tag. Unblocks mixed arms everywhere.
+**LANDED 2026-07-16 (substrate + branch consumers), L3 1066** — `vk` widened to a
+per-row payload-shape tag (null/scalar/node/edge/list); `materializeVariantRoot` fans
+out to gated dual LEFT JOINs; handler + `labelselect` dispatch per-row by `vk`;
+`union`/`choose`/`coalesce` **mixed-shape arms** now merge as a VariantStream instead of
+throwing. See `docs/2026-07-16-p4-dynamic-variant-plan.md`. **Scope correction (§4 of that
+doc):** the "P3 Map defers" P4 was meant to pair with are dominated by **nested-MAP-valued
+groups** (`group().by().by(__.…groupCount())`, 11 scenarios) — a separate nested-aggregation
+feature (`GroupVal {kind:'map'}` + two-level aggregation), NOT the variant row. The genuine
+variant/list Map consumers cash ~0–1 scenarios today, so they were correctly not forced
+(no fake-case tuple-lists). Nested-map-valued groups = the recommended next dedicated bet.
 
 **P5 — Give group sources a live parent stream** *(debt removal).* So
 property-groups / `cap('a')` reach the generic child engine, retiring
