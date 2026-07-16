@@ -31,9 +31,16 @@ element relation's `id` — a different path. Hence:
 - **Stage 1 (this):** correlated `property(k, __.trav)` scalar value. Seed at the target
   element, `compileRead`, extract `r.v` from `value`/`scalar`/`count` shapes. Empty result
   → property not written. Runtime `vtype` inferred from the produced value.
-- **Stage 2:** merge match map + `option(Merge.onCreate/onMatch, __.trav)` from a
-  traversal → extract a JS Map (`valueMap`/`elementMap`/`map` shapes) → `normalizeMergeMap`.
-  Biggest telemetry cluster (~26 + ~14).
+- **Stage 2 (done):** merge match/option maps from `__.select(k)` of a `withSideEffect(k,
+  map)` constant. Measured (telemetry): the merge-traversal cluster is dominated by
+  `withSideEffect('c', map).mergeV(__.select('c')).option(Merge.x, __.select('m'))`.
+  withSideEffect values are compile-time constants, so `extractSideEffects` (frontend)
+  builds a name→constant registry, threaded through `routeWrite` → the merge compilers,
+  and `resolveMergeArg` substitutes `__.select(k)` directly — correct-by-construction, no
+  runtime read. L3 1071→1079. Deferred (fail closed): `__.identity()`-on-incoming (needs
+  map-inject), mutating `option` bodies (`__.sideEffect(__.property…)`), the reducer form
+  of `withSideEffect`. The registry is reusable — a future read `select(k)` can read it too
+  (e.g. `union(__.select('map'))`).
 - **Stage 3:** `addE`/`mergeE` endpoint traversals past a movement/branch — resolve to the
   bare element relation's rowid (buildPrefix/element-relation path, not the framed shape).
 

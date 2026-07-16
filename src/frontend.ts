@@ -152,6 +152,25 @@ export function extractSack(tree: any, params: Record<string, any>): SackSpec | 
   return { init: out[0], initType: types[0] ?? null, mergeOp: op ? enumSuffix(op) : undefined };
 }
 
+/** Pull withSideEffect(key, constValue) declarations into a name→constant registry.
+ *  withSideEffect values are compile-time constants (a map/list/scalar literal or a bound
+ *  param), so a later select(key) resolves to the constant directly. The reducer form
+ *  withSideEffect(key, seed, BiFunction) is deferred (left unregistered → select throws). */
+export function extractSideEffects(tree: any, params: Record<string, any>): Map<string, any> {
+  const out = new Map<string, any>();
+  for (const w of descendants(tree, 'TraversalSourceSelfMethod_withSideEffectContext')) {
+    if (descendants(w, 'TraversalBiFunctionContext').length) continue; // reducer form → defer
+    const keyNode = descendants(w, 'StringLiteralContext')[0];
+    const valNode = descendants(w, 'GenericLiteralContext')[0];
+    if (!keyNode || !valNode) continue;
+    const ks: any[] = [], vs: any[] = [];
+    walkArgs(keyNode, ks, params, []);
+    walkArgs(valNode, vs, params, []);
+    if (typeof ks[0] === 'string') out.set(ks[0], vs[0]);
+  }
+  return out;
+}
+
 /** Pull literal / predicate / variable arguments out of a step context, plus the
  *  parallel numeric-subtype tags (see Step.argTypes). */
 function extractArgs(ctx: any, params: Record<string, any>, paramTypes: Record<string, string> = {}): { args: any[]; types: (string | null)[] } {

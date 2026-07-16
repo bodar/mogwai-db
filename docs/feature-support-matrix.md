@@ -143,7 +143,7 @@ mixed-shape arm.
 |---|:--:|---|
 | `addV()`, `.property(k,v)`, `property(T.id/T.label)` | ✅ | user-supplied ids (string→uid, int→rowid) |
 | `addE()`, `from`/`to` | 🟡 | `as()` alias or nested `__.V(…)`; edge uid; multi-addE initializers. ❌ nested-traversal label; endpoint traversal past a movement; `addE` after some prefixes |
-| `mergeV`, `mergeE` | 🟡 | id-aware upsert, onCreate/onMatch, start + mid-chain. ❌ nested-traversal merge maps; `option(…, __.traversal)`; bare `mergeV()`/`mergeE()` |
+| `mergeV`, `mergeE` | 🟡 | id-aware upsert, onCreate/onMatch, start + mid-chain; match/option map from `__.select(k)` of a `withSideEffect(k, map)` constant. ❌ non-constant traversal maps (`__.identity()`/mutating bodies); bare `mergeV()`/`mergeE()` |
 | `property()` update | ✅ | vertex normalized rows single/list/set + meta; edge normalized UPSERT (single, no meta) |
 | `property(Cardinality.list/set,…)` | ✅ | list appends, set dedups by value |
 | `drop()` (vertices + edges) | 🟡 | after movement/filter/`where`, cascades props. ❌ after `properties()` / `order()` |

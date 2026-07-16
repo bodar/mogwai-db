@@ -1,4 +1,4 @@
-import { parseGremlin, stepChain, extractStrategies, extractSack } from './frontend.ts';
+import { parseGremlin, stepChain, extractStrategies, extractSack, extractSideEffects } from './frontend.ts';
 import { applyStrategies, normalize } from './strategies.ts';
 import { compileRead } from './steps/index.ts';
 import { routeWrite } from './steps/write.ts';
@@ -28,7 +28,8 @@ export function compile(gremlin: string, params: Record<string, any>, options?: 
   if (steps.length === 0) throw new Error('empty traversal');
 
   const sackInit = extractSack(tree, params);
-  const plan: Compiled | WritePlan = routeWrite(steps, params, sackInit ?? undefined)
+  const sideEffects = extractSideEffects(tree, params);
+  const plan: Compiled | WritePlan = routeWrite(steps, params, sackInit ?? undefined, sideEffects)
     ?? compileRead(steps, params, sackInit ?? undefined, resolveFastPaths(options));
 
   if (discard) {
