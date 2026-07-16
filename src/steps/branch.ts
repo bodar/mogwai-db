@@ -4,8 +4,8 @@ import { stepChain, type Step } from '../frontend.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, tryInlinePredicate, predicateSql, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
 import { advance, elemRel, prevRel, carryFrag, carriedCols, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { type AliasShape } from './alias.ts';
-import { isListChild, isScalarChild, pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueRows, tryGateByChildExistence } from './child.ts';
-import { carryOf, toListStream, toScalarStream, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from './stream.ts';
+import { isElementChild, isListChild, isScalarChild, pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from './child.ts';
+import { carryOf, toListStream, toScalarStream, toVariantStream, type ListStream, type ScalarStream, type VariantArms, type VariantStream } from './stream.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
  *  read back from `nodes` by subquery (the walk row carries only the id). Lets
@@ -341,6 +341,125 @@ export function tryLowerListCoalesce(s: Step, st: ElementStream): ListStream | n
   });
   const rel = st.q.cte(list(parts, ' UNION ALL '), ['list', ...carriedCols(st.carried)]);
   return toListStream(carryOf(st), rel, unifyLists(arms));
+}
+
+// ---------- mixed-shape branch arms → a dynamic-tag VariantStream (P4) ----------
+//
+// When a union/coalesce/choose's arms are NOT one shape class (some scalar, some
+// element, some list), no per-shape handler (list/scalar/legacy-element) applies.
+// Compile each arm to its natural shape and merge the rows into one variant relation
+// where `vk` tags each row's shape (1 scalar / 2 node / 3 edge / 4 list). Homogeneous
+// arms keep their richer per-shape handlers (path/aliases); mixed element KIND
+// (node+edge, both element-class) stays with the legacy element compiler's clear defer.
+
+type ArmShape = 'element' | 'scalar' | 'list';
+const armShape = (nested: any, params: Record<string, any>): ArmShape | null =>
+  isElementChild(nested, params) ? 'element'
+  : isScalarChild(nested, params) ? 'scalar'
+  : isListChild(nested, params) ? 'list'
+  : null;
+
+interface VariantArm {
+  readonly rel: Relation;
+  readonly vk: 1 | 2 | 3 | 4;
+  readonly as?: ScalarStream['as'];
+  readonly listOf?: ListStream['of'];
+}
+
+/** Compile ONE branch body from `seed` to a variant-arm carrying seed's exact carried
+ *  schema: element movement → node/edge, values/id/label/count → scalar, …fold() → list. */
+function compileVariantArm(seed: ElementStream, nested: any): VariantArm {
+  const element = tryCompileElementTraversal(seed, nested);
+  if (element) return { rel: element.rel, vk: element.elem === 'edge' ? 3 : 2 };
+  const scalar = tryCompileScalarValueChild(seed, nested, 'all');
+  if (scalar) return { rel: scalar.rel, vk: 1, as: scalar.as };
+  const listArm = tryCompileListChild(seed, nested);
+  if (listArm) return { rel: listArm.rel, vk: 4, listOf: listArm.of };
+  throw new Error(`variant branch __.${armDescription(nested, seed.params)} not yet supported (shape not element/scalar/list)`);
+}
+
+/** The union of arm shapes → the widened stream's arm flags. */
+function variantArmsMeta(arms: readonly VariantArm[]): VariantArms {
+  const scalarArms = arms.filter((a) => a.vk === 1);
+  const listArms = arms.filter((a) => a.vk === 4);
+  const scalarAs = scalarArms.length && scalarArms.every((a) => a.as === scalarArms[0].as) ? scalarArms[0].as : undefined;
+  const listOf = listArms.length ? unifyLists(listArms.map((a) => ({ of: a.listOf! } as ListStream))) : undefined;
+  return { scalarAs, node: arms.some((a) => a.vk === 2) || undefined, edge: arms.some((a) => a.vk === 3) || undefined, listOf };
+}
+
+/** One arm's variant-row SELECT: `vk, v, rid[, list]` + the outer carried columns.
+ *  `gate` (coalesce's not-in-prior / any per-arm filter) receives the aliased arm rel. */
+function variantArmSelect(arm: VariantArm, st: ElementStream, hasList: boolean, gate?: (a: Relation) => Expression): Expression {
+  const a = arm.rel.as('a');
+  const cols: Expression[] = [
+    q`${arm.vk} AS vk`,
+    q`${arm.vk === 1 ? a.c.v : q`NULL`} AS v`,
+    q`${arm.vk === 2 || arm.vk === 3 ? a.c.id : q`NULL`} AS rid`,
+  ];
+  if (hasList) cols.push(q`${arm.vk === 4 ? a.c.list : q`NULL`} AS list`);
+  const where = gate ? q` WHERE ${gate(a)}` : empty;
+  return q`SELECT ${list(cols, ', ')}${carryFrag(st.carried, a)} FROM ${a}${where}`;
+}
+
+const variantCols = (st: ElementStream, hasList: boolean): string[] =>
+  ['vk', 'v', 'rid', ...(hasList ? ['list'] : []), ...carriedCols(st.carried)];
+
+/** Are these branch shapes genuinely mixed (not all one class, all classifiable)? */
+function branchesAreMixed(branches: readonly any[], params: Record<string, any>): boolean {
+  const shapes = branches.map((b) => armShape(b.nested, params));
+  return !shapes.some((x) => x === null) && !shapes.every((x) => x === shapes[0]);
+}
+
+/** union() over mixed-shape arms → a VariantStream (plain UNION ALL, no gating). */
+export function tryLowerVariantUnion(s: Step, st: ElementStream): VariantStream | null {
+  assertForkSafe('union', st);
+  const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  if (branches.length < 2 || !branchesAreMixed(branches, st.params)) return null;
+  if (st.carried.path) throw new Error('path() through a mixed-shape union() not yet supported');
+  const arms = branches.map((b) => compileVariantArm(st, b.nested));
+  const meta = variantArmsMeta(arms);
+  const hasList = !!meta.listOf;
+  const rel = st.q.cte(list(arms.map((a) => variantArmSelect(a, st, hasList)), ' UNION ALL '), variantCols(st, hasList));
+  return toVariantStream(carryOf(st), rel, meta);
+}
+
+/** coalesce() over mixed-shape arms → a VariantStream. One ordinal-tagged seed feeds
+ *  every arm; arm k emits only for parents no earlier arm produced a row for. */
+export function tryLowerVariantCoalesce(s: Step, st: ElementStream): VariantStream | null {
+  assertForkSafe('coalesce', st);
+  const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  if (!branches.length || !branchesAreMixed(branches, st.params)) return null;
+  if (st.carried.path) throw new Error('path() through a mixed-shape coalesce() not yet supported');
+  const { seedSt, ord } = originSeed(st);
+  const arms = branches.map((b) => compileVariantArm(seedSt, b.nested));
+  const meta = variantArmsMeta(arms);
+  const hasList = !!meta.listOf;
+  const parts = arms.map((arm, k) => variantArmSelect(arm, st, hasList, k === 0 ? undefined
+    : (a) => list(arms.slice(0, k).map((pr) => q`${a.c[ord]} NOT IN (SELECT ${ord} FROM ${pr.rel})`), ' AND ')));
+  const rel = st.q.cte(list(parts, ' UNION ALL '), variantCols(st, hasList));
+  return toVariantStream(carryOf(st), rel, meta);
+}
+
+/** choose(pred, then, else) with mixed-shape then/else → a VariantStream. The gate
+ *  partitions the input (pred / NOT pred); each arm folds from its gated seed. */
+export function tryLowerVariantChoose(s: Step, st: ElementStream): VariantStream | null {
+  if ((s as any).options) return null;
+  assertForkSafe('choose', st);
+  const args = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  if (args.length !== 3) return null; // two-arg choose has an element identity else arm
+  const [predArg, thenArg, elseArg] = args;
+  const thenShape = armShape(thenArg.nested, st.params);
+  const elseShape = armShape(elseArg.nested, st.params);
+  if (!thenShape || !elseShape || thenShape === elseShape) return null;
+  if (st.carried.path) throw new Error('path() through a mixed-shape choose() not yet supported');
+  const seedFor = chooseGate(st, predArg.nested);
+  const thenArm = compileVariantArm(seedFor(false), thenArg.nested); // then before else (lazy gate bind order)
+  const elseArm = compileVariantArm(seedFor(true), elseArg.nested);
+  const arms = [thenArm, elseArm];
+  const meta = variantArmsMeta(arms);
+  const hasList = !!meta.listOf;
+  const rel = st.q.cte(list(arms.map((a) => variantArmSelect(a, st, hasList)), ' UNION ALL '), variantCols(st, hasList));
+  return toVariantStream(carryOf(st), rel, meta);
 }
 
 /** flatMap(t): apply t per traverser, flatten all results — for element bodies this

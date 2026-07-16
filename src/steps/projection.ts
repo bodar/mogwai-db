@@ -13,7 +13,7 @@ import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type Nume
 import { lowerScalarFilter, lowerConstant, lowerScalarSack, isListTypeOf, scalarListRetype } from './scalar.ts';
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
 import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
-import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantOptional, union as lowerLegacyUnion } from './branch.ts';
+import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerLegacyUnion } from './branch.ts';
 import { lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
 import { isScalarChild, isListChild, isTotalScalarChild, tryCompileCountChild, tryCompileListChild } from './child.ts';
 import { lowerElementDedup } from './filter.ts';
@@ -278,6 +278,8 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
     if (list) return continueLowering(list, stop + 1);
     const scalar = tryLowerScalarUnion(steps[stop], st);
     if (scalar) return continueLowering(scalar, stop + 1);
+    const variant = tryLowerVariantUnion(steps[stop], st);
+    if (variant) return continueLowering(variant, stop + 1);
     return continueLowering(lowerLegacyUnion(steps[stop], st), stop + 1);
   }
 
@@ -286,6 +288,8 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
     if (list) return continueLowering(list, stop + 1);
     const scalar = tryLowerScalarChoose(steps[stop], st);
     if (scalar) return continueLowering(scalar, stop + 1);
+    const variant = tryLowerVariantChoose(steps[stop], st);
+    if (variant) return continueLowering(variant, stop + 1);
     return continueLowering(lowerLegacyChoose(steps[stop], st), stop + 1);
   }
 
@@ -294,6 +298,8 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
     if (list) return continueLowering(list, stop + 1);
     const scalar = tryLowerScalarCoalesce(steps[stop], st);
     if (scalar) return continueLowering(scalar, stop + 1);
+    const variant = tryLowerVariantCoalesce(steps[stop], st);
+    if (variant) return continueLowering(variant, stop + 1);
     return continueLowering(lowerLegacyCoalesce(steps[stop], st), stop + 1);
   }
 

@@ -1648,9 +1648,12 @@ describe('compiler SQL snapshots', () => {
     expect(divU.sql).toContain('SELECT id, NULL AS a0 FROM'); // the other arm pads it
     // sack through a fork is fail-closed (split/merge-on-fork unverified — carried-schema didn't silently lift it)
     expect(() => compile('g.withSack(0.0d).V().sack(sum).by("age").union(__.out(), __.in())', {})).toThrow('sack() through union()');
-    // a scalar branch body now defers with the shared scalar-body message
-    expect(() => compile('g.V().union(__.values("name"), __.out())', {})).toThrow('scalar/projection body');
-    // mixed element kinds across branches
+    // mixed scalar+element arms now merge as a dynamic-tag VariantStream (P4)
+    const mixedU = read('g.V().union(__.values("name"), __.out())');
+    expect(mixedU.shape).toEqual({ kind: 'variant', scalarAs: undefined, node: true });
+    expect(mixedU.sql).toContain('1 AS vk'); // scalar arm
+    expect(mixedU.sql).toContain('2 AS vk'); // node arm
+    // mixed element kinds across branches (both element-class) stays the legacy defer
     expect(() => compile('g.V().union(__.out(), __.outE())', {})).toThrow('different element kinds');
   });
 
@@ -1692,6 +1695,24 @@ describe('compiler SQL snapshots', () => {
     expect(run(store, 'g.V().optional(__.values("age")).count()').map((r) => r.v)).toEqual([6]);
   });
 
+  test('mixed-shape branch arms merge as a dynamic-tag VariantStream (P4)', () => {
+    const store = seededStore();
+    // union: scalar arm (name) + element arm (out) — vk 1 vs 2, framing yields all rows
+    const uRows = run(store, 'g.V(1).union(__.values("name"), __.out())');
+    expect(uRows.filter((r) => r.vk === 1).map((r) => r.v)).toEqual(['marko']);
+    expect(uRows.filter((r) => r.vk === 2).length).toBe(3); // marko created lop, knows vadas+josh
+    expect(executeQuery(store, 'g.V(1).union(__.values("name"), __.out())', {})).toHaveLength(4);
+    // union with an EDGE arm exercises vk=3 + the src/tgt columns
+    expect(executeQuery(store, 'g.V(1).union(__.outE(), __.values("age"))', {})).toHaveLength(4);
+    // coalesce: element arm wins per input, scalar fallback where empty; gated by ordinal
+    const cRows = run(store, 'g.V().coalesce(__.out(), __.values("name"))');
+    expect(cRows.some((r) => r.vk === 1)).toBe(true);  // leaves fall back to name
+    expect(cRows.some((r) => r.vk === 2)).toBe(true);  // marko/josh have out()
+    expect(() => executeQuery(store, 'g.V().coalesce(__.out(), __.values("name"))', {})).not.toThrow();
+    // choose: predicate splits, then=element / else=scalar
+    expect(() => executeQuery(store, 'g.V().choose(__.out(), __.label(), __.values("name"))', {})).not.toThrow();
+  });
+
   test('coalesce() → first non-empty branch per input via the ordinal', () => {
     const c = read('g.V(1).coalesce(__.out("knows"), __.out("created")).values("name")');
     expect(c.sql).toContain('ROW_NUMBER() OVER () AS o0');
@@ -1703,7 +1724,11 @@ describe('compiler SQL snapshots', () => {
     expect(scalar.sql).toContain('a.o0 NOT IN (SELECT o0 FROM');
     expect(read('g.V().coalesce(__.values("missing").fold(), __.values("name").fold()).unfold().count()').shape)
       .toEqual({ kind: 'count' });
-    expect(() => compile('g.V().coalesce(__.out(), __.values("name"))', {})).toThrow('scalar/projection body');
+    // mixed element+scalar arms now merge as a dynamic-tag VariantStream (P4), gated
+    // per input ordinal like the homogeneous coalesce.
+    const mixedC = read('g.V().coalesce(__.out(), __.values("name"))');
+    expect(mixedC.shape).toEqual({ kind: 'variant', scalarAs: undefined, node: true });
+    expect(mixedC.sql).toContain('o0 NOT IN (SELECT o0 FROM'); // second arm gated
     expect(() => compile('g.V().coalesce(__.out(), __.outE())', {})).toThrow('different element kinds');
     // dedup now preserves both the branch ordinal and its inner child ordinal.
     const dedup = read('g.V().coalesce(__.out().dedup(), __.in())');
@@ -1800,10 +1825,10 @@ describe('compiler SQL snapshots', () => {
     // a bare choice traversal with no then/else and no option() isn't a supported form
     expect(() => compile('g.V().choose(__.out())', {}))
       .toThrow('predicate form');
-    // a scalar/projection arm body can't ride the id-relation
-    expect(() => compile('g.V().choose(__.has("x"), __.out(), __.values("name"))', {}))
-      .toThrow('not yet supported (scalar/projection body)');
-    // mixed element kinds across arms
+    // mixed element+scalar then/else now merge as a dynamic-tag VariantStream (P4)
+    const mixedCh = read('g.V().choose(__.has("x"), __.out(), __.values("name"))');
+    expect(mixedCh.shape).toEqual({ kind: 'variant', scalarAs: undefined, node: true });
+    // mixed element kinds across arms (both element-class) stays the legacy defer
     expect(() => compile('g.V().choose(__.has("x"), __.out(), __.outE())', {}))
       .toThrow('different element kinds');
     // as() before choose now threads the alias column through the gated arms + merge (Move B)
