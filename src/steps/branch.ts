@@ -4,7 +4,7 @@ import { stepChain, type Step } from '../frontend.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, tryInlinePredicate, predicateSql, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
 import { advance, elemRel, prevRel, carryFrag, carriedCols, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { type AliasShape } from './alias.ts';
-import { isListChild, isScalarChild, pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueRows } from './child.ts';
+import { isListChild, isScalarChild, pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueRows, tryGateByChildExistence } from './child.ts';
 import { carryOf, toListStream, toScalarStream, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from './stream.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
@@ -535,6 +535,22 @@ export const repeat: StepFn = (s, st) => {
  *  else arm gets exactly the traversers the then arm didn't (mirrors filter.ts). */
 const notCoalesce = (e: Expression): Expression => q`NOT COALESCE((${e}), 0)`;
 
+/** choose() predicate gating (shared by element/scalar/list arms): a correlated
+ *  boolean via the where()/filter() inline engine splits the stream into two gated
+ *  seeds; when the predicate is beyond inline lowering, fall through to the SAME
+ *  generic child-existence engine where()/filter() use (D2 — no more support-definer).
+ *  Returns a LAZY seed factory: the inline predicate re-emits its binds at each
+ *  interpolation, so the caller must build the then-seed (and compile its arm) before
+ *  the else-seed to keep bind order interleaved with the arm SQL. Same gated-seed shape
+ *  either way, so the arm compilers are unchanged. */
+function chooseGate(st: ElementStream, predNested: any): (negate: boolean) => ElementStream {
+  const inline = tryInlinePredicate(stepChain(predNested, st.params), elemCtx(elemRel(st), st.elem), st.params);
+  if (inline) return (negate) => gate(st, negate ? notCoalesce(inline) : inline);
+  const gated = tryGateByChildExistence(st, predNested)
+    ?? (() => { throw new Error('choose() predicate not supported by inline predicate or generic child existence lowering'); })();
+  return (negate) => (negate ? gated.else : gated.then);
+}
+
 /** Gate the current traverser relation by a boolean test → a one-column (id) seed
  *  CTE. choose()'s then/else arms fold from their gated seed; aliases/path are
  *  refused by choose() up front, so the seed carries only id. */
@@ -562,8 +578,7 @@ export const choose: StepFn = (s, st) => {
   if (args.length < 2 || args.length > 3)
     throw new Error('choose(): only the predicate form choose(pred, then[, else]) is supported (option-map form not yet supported)');
   const [predArg, thenArg, elseArg] = args;
-  const pred = tryInlinePredicate(stepChain(predArg.nested, st.params), elemCtx(elemRel(st), st.elem), st.params)
-    ?? (() => { throw new Error('choose() predicate not supported by inline lowering'); })();
+  const seedFor = chooseGate(st, predArg.nested);
 
   const arm = (arg: any, seed: ElementStream): ElementStream => {
     const body = stepChain(arg.nested, st.params);
@@ -573,8 +588,8 @@ export const choose: StepFn = (s, st) => {
     return end;
   };
 
-  const thenEnd = arm(thenArg, gate(st, pred));
-  const elseSeed = gate(st, notCoalesce(pred));
+  const thenEnd = arm(thenArg, seedFor(false)); // then-seed + arm before else-seed (bind order)
+  const elseSeed = seedFor(true);
   const elseEnd = elseArg ? arm(elseArg, elseSeed) : elseSeed; // else absent → identity
   if (thenEnd.elem !== elseEnd.elem)
     throw new Error('choose() branches produce different element kinds (mixed-shape) not yet supported');
@@ -594,14 +609,13 @@ export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream |
   if (args.length !== 3) return null; // two-arg choose has an element identity else arm
   const [predArg, thenArg, elseArg] = args;
   if (!isScalarChild(thenArg.nested, st.params) || !isScalarChild(elseArg.nested, st.params)) return null;
-  const pred = tryInlinePredicate(stepChain(predArg.nested, st.params), elemCtx(elemRel(st), st.elem), st.params)
-    ?? (() => { throw new Error('choose() predicate not supported by inline lowering'); })();
+  const seedFor = chooseGate(st, predArg.nested);
   const lowerArm = (arg: any, seed: ElementStream): ScalarStream =>
     tryCompileScalarChild(seed, arg.nested, 'all')
       ?? tryCompileCountChild(seed, arg.nested)
       ?? (() => { throw new Error('choose() scalar branch preflight/compiler mismatch'); })();
-  const thenEnd = lowerArm(thenArg, gate(st, pred));
-  const elseEnd = lowerArm(elseArg, gate(st, notCoalesce(pred)));
+  const thenEnd = lowerArm(thenArg, seedFor(false));
+  const elseEnd = lowerArm(elseArg, seedFor(true));
   const cols = carriedCols(st.carried);
   const numeric = thenEnd.result === 'number' && elseEnd.result === 'number';
   const parts = [thenEnd, elseEnd].map((arm) => {
@@ -620,10 +634,9 @@ export function tryLowerListChoose(s: Step, st: ElementStream): ListStream | nul
   if (args.length !== 3) return null;
   const [predArg, thenArg, elseArg] = args;
   if (!isListChild(thenArg.nested, st.params) || !isListChild(elseArg.nested, st.params)) return null;
-  const pred = tryInlinePredicate(stepChain(predArg.nested, st.params), elemCtx(elemRel(st), st.elem), st.params)
-    ?? (() => { throw new Error('choose() predicate not supported by inline lowering'); })();
-  const thenEnd = tryCompileListChild(gate(st, pred), thenArg.nested)!;
-  const elseEnd = tryCompileListChild(gate(st, notCoalesce(pred)), elseArg.nested)!;
+  const seedFor = chooseGate(st, predArg.nested);
+  const thenEnd = tryCompileListChild(seedFor(false), thenArg.nested)!;
+  const elseEnd = tryCompileListChild(seedFor(true), elseArg.nested)!;
   const parts = [thenEnd, elseEnd].map((arm) => {
     const a = arm.rel.as('a');
     return q`SELECT ${a.c.list} AS list${carryFrag(st.carried, a)} FROM ${a}`;

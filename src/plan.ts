@@ -502,6 +502,27 @@ export function tryInlinePredicate(
   }
 }
 
+/** Split a predicate body on infix .and()/.or() connectors (zero-arg `and`/`or`
+ *  steps). Returns the lower-precedence operator present (OR looser than AND) and the
+ *  segments between its connectors; each segment is recompiled and may still contain
+ *  higher-precedence connectors. Null when the body has no infix connector. */
+function splitInfixConnectors(steps: Step[]): { op: 'AND' | 'OR'; segments: Step[][] } | null {
+  const isConn = (s: Step, n: string) => s.name === n
+    && !s.args.some((a: any) => a && typeof a === 'object' && 'nested' in a);
+  const op: 'AND' | 'OR' = steps.some((s) => isConn(s, 'or')) ? 'OR'
+    : steps.some((s) => isConn(s, 'and')) ? 'AND' : (null as any);
+  if (op === null) return null;
+  const conn = op === 'OR' ? 'or' : 'and';
+  const segments: Step[][] = [[]];
+  for (const s of steps) {
+    if (isConn(s, conn)) segments.push([]);
+    else segments[segments.length - 1].push(s);
+  }
+  if (segments.some((seg) => seg.length === 0))
+    throw new Error('malformed infix .and()/.or() connector (empty operand)');
+  return { op, segments };
+}
+
 function compileInlinePredicate(
   nested: Step[], ctx: ScalarCtx, params: Record<string, any> = {},
   resolveAlias?: (label: string) => ScalarCtx,
@@ -513,6 +534,17 @@ function compileInlinePredicate(
       && h0.args.length === 1 && typeof h0.args[0] === 'string')
     return compileInlinePredicate(nested.slice(1), resolveAlias(h0.args[0]), params, resolveAlias);
 
+  // Infix .and()/.or() connectors — zero-arg `and`/`or` steps splitting the body into
+  // conjuncts/disjuncts (has('a').and().out('b'), values('x').is(P).or().values('y').is(Q)).
+  // OR binds looser than AND, so split on OR first; each segment recurses (inner AND, or
+  // a plain leaf). Distinct from the step-form and(t…)/or(t…) below, which carries nested
+  // traversal args and is one step. Shared by where/filter/choose/until (all route here).
+  const infix = splitInfixConnectors(nested);
+  if (infix) {
+    const parts = infix.segments.map((seg) => paren(compileInlinePredicate(seg, ctx, params, resolveAlias)));
+    return paren(list(parts, ` ${infix.op} `));
+  }
+
   let body = nested;
   let isPred: any = undefined, hasIs = false;
   if (body[body.length - 1]?.name === 'is') { isPred = body[body.length - 1].args[0]; hasIs = true; body = body.slice(0, -1); }
@@ -520,8 +552,8 @@ function compileInlinePredicate(
   const head = body[0]?.name;
   if (!head) throw new Error('empty where()/filter() traversal');
 
-  // and(t…)/or(t…): combine each branch's predicate. (infix .and()/.or() — a
-  // multi-step body — is not this shape and falls through to the deferred throw.)
+  // and(t…)/or(t…) step-form: combine each branch's predicate. (The infix connector
+  // form .and()/.or() was already split above by splitInfixConnectors.)
   if ((head === 'and' || head === 'or') && body.length === 1)
     return combineBranchPreds(body[0], ctx, params, head === 'and' ? 'AND' : 'OR', resolveAlias);
 
