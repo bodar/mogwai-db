@@ -1447,8 +1447,11 @@ describe('compiler SQL snapshots', () => {
     const ua = read('g.V().as("a").union(__.out(), __.in()).select("a")');
     expect(ua.sql).toContain('UNION ALL');
     expect(ua.sql).toContain('SELECT id, a0 FROM'); // the a0 alias column survives the branch merge
-    // a NEW as() bound INSIDE an arm diverges the arm schemas → still fails closed
-    expect(() => compile('g.V().union(__.as("b").out(), __.in())', {})).toThrow('branch arms disagree on carried columns');
+    // a NEW as() bound INSIDE one arm now forks/merges: the label unions into the merged
+    // set and the arm that never bound it pads an empty (NULL) history.
+    const divU = read('g.V().union(__.as("b").out(), __.in()).select("b")');
+    expect(divU.sql).toContain('SELECT id, a0 FROM'); // the binding arm carries its history
+    expect(divU.sql).toContain('SELECT id, NULL AS a0 FROM'); // the other arm pads it
     // sack through a fork is fail-closed (split/merge-on-fork unverified — carried-schema didn't silently lift it)
     expect(() => compile('g.withSack(0.0d).V().sack(sum).by("age").union(__.out(), __.in())', {})).toThrow('sack() through union()');
     // a scalar branch body now defers with the shared scalar-body message
@@ -1613,9 +1616,10 @@ describe('compiler SQL snapshots', () => {
     const ca = read('g.V().as("a").choose(__.has("x"), __.out(), __.in()).select("a")');
     expect(ca.sql).toContain('UNION ALL');
     expect(ca.sql).toContain('SELECT id, a0 FROM'); // a0 preserved across the gated-arm merge
-    // a NEW as() inside an arm diverges the arm schemas → still fails closed
-    expect(() => compile('g.V().choose(__.has("x"), __.as("b").out(), __.in())', {}))
-      .toThrow('branch arms disagree on carried columns');
+    // a NEW as() inside one arm now forks/merges: the non-binding arm pads an empty history.
+    const divC = read('g.V().choose(__.has("x"), __.as("b").out(), __.in()).select("b")');
+    expect(divC.sql).toContain('SELECT id, a0 FROM');
+    expect(divC.sql).toContain('SELECT id, NULL AS a0 FROM');
   });
 
   test('option-map choose → CASE over the choice scalar (value shape)', () => {
@@ -2732,6 +2736,30 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V(1).flatMap(__.out().values("name"))').map((r) => r.v).sort()).toEqual(['josh', 'lop', 'vadas']);
     expect(run(store, 'g.V(1).flatMap(__.out().values("name").toUpper())').map((r) => r.v).sort()).toEqual(['JOSH', 'LOP', 'VADAS']);
     expect(run(store, 'g.V().flatMap(__.values("age")).count()').map((r) => r.v)).toEqual([4]);
+  });
+
+  test('branch fork/merge of DIVERGENT arm labels executes (union/coalesce/choose)', () => {
+    const store = seededStore();
+    // union: arm1 binds 'k' (knows→vadas,josh), arm2 binds 'c' (created→lop). select('k')
+    // keeps only arm1 rows (arm2 padded k=NULL → dropped); select('c') only arm2.
+    expect(run(store, "g.V(1).union(__.out('knows').as('k'), __.out('created').as('c')).select('k').values('name')").map((r) => r.v).sort())
+      .toEqual(['josh', 'vadas']);
+    expect(run(store, "g.V(1).union(__.out('knows').as('k'), __.out('created').as('c')).select('c').values('name')").map((r) => r.v).sort())
+      .toEqual(['lop']);
+    // the SAME label bound in both arms is NOT divergent — every row is present.
+    expect(run(store, "g.V(1).union(__.out('knows').as('x'), __.out('created').as('x')).select('x').values('name')").map((r) => r.v).sort())
+      .toEqual(['josh', 'lop', 'vadas']);
+    // presence guard prevents overcounting: only the binding arm's rows survive select().
+    expect(run(store, "g.V(1).union(__.out('knows').as('k'), __.out('created')).select('k').count()").map((r) => r.v))
+      .toEqual([2]);
+    // coalesce: peter has no knows → the created arm wins and binds 'c'; 'k' is unbound.
+    expect(run(store, "g.V(6).coalesce(__.out('knows').as('k'), __.out('created').as('c')).select('c').values('name')").map((r) => r.v).sort())
+      .toEqual(['lop']);
+    expect(run(store, "g.V(6).coalesce(__.out('knows').as('k'), __.out('created').as('c')).select('k')").map((r) => r.v))
+      .toEqual([]);
+    // choose: marko matches → then-arm binds 'k'.
+    expect(run(store, "g.V(1).choose(__.has('name','marko'), __.out('knows').as('k'), __.out('created').as('c')).select('k').values('name')").map((r) => r.v).sort())
+      .toEqual(['josh', 'vadas']);
   });
 
   test('option-map choose executes: choice scalar → matched option body', () => {
