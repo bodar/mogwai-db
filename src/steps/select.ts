@@ -396,11 +396,21 @@ function recordOrderTerms(s: RecordStream, r: Relation, bys: any[][]): Expressio
     if (dir === 'shuffle') return q`RANDOM()`;
     const nested = by.find((a) => a && typeof a === 'object' && 'nested' in a)?.nested;
     let key: string;
+    let valuesKey: string | undefined; // by(__.select(field).values(key)) → order by that prop
     if (nested) {
       const chain = stepChain(nested, s.params);
-      const fk = chain.length === 1 && chain[0].name === 'select' ? chain[0].args.filter((a: any): a is string => typeof a === 'string') : [];
-      if (fk.length !== 1) throw new Error('order().by(traversal) on a record supports only by(__.select(field)) with one field');
+      if (!chain.length || chain[0].name !== 'select')
+        throw new Error('order().by(traversal) on a record supports only by(__.select(field)[.values(key)])');
+      const fk = chain[0].args.filter((a: any): a is string => typeof a === 'string');
+      if (fk.length !== 1) throw new Error('order().by(__.select) on a record requires exactly one field');
       key = fk[0];
+      if (chain.length === 2 && chain[1].name === 'values') {
+        const vk = chain[1].args.filter((a: any): a is string => typeof a === 'string');
+        if (vk.length !== 1) throw new Error('order().by(__.select(field).values(key)) requires exactly one property key');
+        valuesKey = vk[0];
+      } else if (chain.length > 1) {
+        throw new Error('order().by(traversal) on a record supports only by(__.select(field)[.values(key)])');
+      }
     } else {
       const direct = by.find((a) => typeof a === 'string') as string | undefined;
       if (direct === undefined) throw new Error('order().by() on a record requires a field selector');
@@ -408,9 +418,18 @@ function recordOrderTerms(s: RecordStream, r: Relation, bys: any[][]): Expressio
     }
     const field = s.fields.find((f) => f.key === key);
     if (!field) throw new Error(`order().by(select("${key}")): record has no such field`);
-    const col = field.sub === 'value' ? r.c[`${field.prefix}_v`]
-      : (field.sub === 'vertex' || field.sub === 'edge') ? r.c[`${field.prefix}_id`]
-      : (() => { throw new Error(`order().by(select("${key}")) on a ${field.sub} record field not yet supported`); })();
+    let col: Expression;
+    if (valuesKey !== undefined) {
+      // .values(key) only applies to an element field — read that element's property
+      // (first-under-multi for a vertex) via its internal rowid.
+      if (field.sub !== 'vertex' && field.sub !== 'edge')
+        throw new Error(`order().by(select("${key}").values("${valuesKey}")) requires an element field`);
+      col = field.sub === 'edge' ? propExtract(r.c[`${field.prefix}_props`], valuesKey).expr : nodePropScalar(r.c[`${field.prefix}_rid`], valuesKey);
+    } else {
+      col = field.sub === 'value' ? r.c[`${field.prefix}_v`]
+        : (field.sub === 'vertex' || field.sub === 'edge') ? r.c[`${field.prefix}_id`]
+        : (() => { throw new Error(`order().by(select("${key}")) on a ${field.sub} record field not yet supported`); })();
+    }
     return q`${col}${dir === 'desc' ? q` DESC` : q` ASC`}`;
   });
 }

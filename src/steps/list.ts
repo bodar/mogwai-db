@@ -23,8 +23,13 @@ const isLocal = (s: PStep): boolean => (s.args ?? []).some((a: any) => a && type
  *  Terminal — a trailing step defers. */
 function lowerListReducer(s: ListStream, name: string): ScalarStream {
   const c = s.rel.as('c');
+  // Each list row reduces to one scalar, so the row's carried schema (as() alias
+  // history, path, …) rides through unchanged — one reduced value per original
+  // traverser. So `as("v")…map(...).sum(Scope.local).as("s")` keeps "v".
+  const carry = carryFrag(s.carried, c);
+  const carried = carriedCols(s.carried);
   if (name === 'count') {
-    const rel = s.q.cte(q`SELECT (SELECT COUNT(*) FROM json_each(${c.c.list}) je) AS v FROM ${c}`, ['v']);
+    const rel = s.q.cte(q`SELECT (SELECT COUNT(*) FROM json_each(${c.c.list}) je) AS v${carry} FROM ${c}`, ['v', ...carried]);
     return toScalarStream(carryOf(s), rel, 'long', 'count');
   }
   // Numeric aggregate over the list's numeric elements (typeof guard mirrors wrapReducer);
@@ -32,11 +37,11 @@ function lowerListReducer(s: ListStream, name: string): ScalarStream {
   const types = (name === 'min' || name === 'max') ? "('integer', 'real', 'text')" : "('integer', 'real')";
   const agg = (fn: string): Expression => q`(SELECT ${fn}(je.value) FROM json_each(${c.c.list}) je WHERE typeof(je.value) in ${types})`;
   if (name === 'mean') {
-    const rel = s.q.cte(q`SELECT ${agg('AVG')} AS v, 'real' AS vt FROM ${c}`, ['v', 'vt']);
+    const rel = s.q.cte(q`SELECT ${agg('AVG')} AS v, 'real' AS vt${carry} FROM ${c}`, ['v', 'vt', ...carried]);
     return toScalarStream(carryOf(s), rel, undefined, 'number', undefined, s.of.kind === 'scalar' && s.of.productiveNull);
   }
   const fn = name === 'sum' ? 'SUM' : name === 'min' ? 'MIN' : 'MAX';
-  const rel = s.q.cte(q`SELECT ${agg(fn)} AS v, typeof(${agg(fn)}) AS vt FROM ${c}`, ['v', 'vt']);
+  const rel = s.q.cte(q`SELECT ${agg(fn)} AS v, typeof(${agg(fn)}) AS vt${carry} FROM ${c}`, ['v', 'vt', ...carried]);
   return toScalarStream(carryOf(s), rel, undefined, 'number', undefined, s.of.kind === 'scalar' && s.of.productiveNull);
 }
 
