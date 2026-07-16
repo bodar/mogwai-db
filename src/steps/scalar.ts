@@ -83,7 +83,9 @@ function fuseScalarSegment(s: ScalarStream, steps: readonly PStep[], from: numbe
   let i = from;
   for (; i < steps.length; i++) {
     const step = steps[i];
-    if (isLocal(step)) break;
+    // A Scope.local scalar transform ignores scope (a scalar is a one-element list); a
+    // non-transform local step ends the fused segment (handled by lowerScalarRows).
+    if (isLocal(step) && !SCALAR_TRANSFORMS.has(step.name)) break;
     if (SCALAR_TRANSFORMS.has(step.name)) {
       const out = scalarTransform(step, as, expr, steps[i + 1]);
       expr = out.expr;
@@ -174,6 +176,18 @@ function partitionedDedup(s: ScalarStream): ScalarStream {
   );
   const rel = derived(q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn}=1`, cols(s), 'dedup_rows');
   return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
+}
+
+/** mean(Scope.local) on a scalar stream: each value is a one-element list whose mean is
+ *  the value AS A DOUBLE (mean is always Double, even of one element — d[29.0].d). Drops
+ *  the stored vtype (the result is a fresh Double, not the original type). */
+function localMeanScalar(s: ScalarStream): ScalarStream {
+  const p = s.rel.as('p');
+  const rel = s.q.cte(
+    q`SELECT CAST(${p.c.v} AS REAL) AS v${s.encounter ? q`, ${p.c[s.encounter]}` : empty}${carryFrag(s.carried, p)} FROM ${p}`,
+    ['v', ...(s.encounter ? [s.encounter] : []), ...carriedCols(s.carried)],
+  );
+  return toScalarStream(carryOf(s), rel, 'double', 'value', s.encounter);
 }
 
 function appendScalar(s: ScalarStream, step: PStep): ScalarStream {
@@ -321,7 +335,18 @@ export function lowerScalarRows(
   let i = from;
   for (; i < steps.length; i++) {
     const step = steps[i];
-    if (isLocal(step)) break;
+    // Scope.local means "per-element WITHIN a list". Reached on a SCALAR stream, each
+    // traverser is a degenerate one-element list, so the local op acts on that single
+    // value: sum/min/max/order/dedup are identity, mean coerces to Double (always Double,
+    // even of one value), transforms ignore scope (fall through to the fuse branch).
+    // count/limit/range/tail/skip(local) have no worked-out scalar-local form → break and
+    // fail closed downstream. This is the scalar-pipeline home of the old renderProjection
+    // localMean/scalar-local-identity handling.
+    if (isLocal(step)) {
+      if (step.name === 'sum' || step.name === 'min' || step.name === 'max' || step.name === 'order' || step.name === 'dedup') continue;
+      if (step.name === 'mean') { stream = localMeanScalar(stream); continue; }
+      if (!SCALAR_TRANSFORMS.has(step.name)) break;
+    }
     if (step.name === 'inject') {
       stream = appendScalar(stream, step);
       continue;
