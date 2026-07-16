@@ -14,7 +14,7 @@ import { lowerScalarFilter, lowerConstant, lowerScalarSack, isListTypeOf, scalar
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
 import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantOptional, union as lowerLegacyUnion } from './branch.ts';
-import { lowerGroup, lowerProperties, lowerValueMap, type GroupSource } from './group.ts';
+import { lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
 import { isScalarChild, isListChild, isTotalScalarChild, tryCompileCountChild, tryCompileListChild } from './child.ts';
 import { lowerElementDedup } from './filter.ts';
 
@@ -570,6 +570,10 @@ export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number)
   }
   if (steps[from]?.name === 'fold' && !isScopeLocalStep(steps[from]))
     return continueLowering(lowerGlobalFold(s), from + 1);
+  // Bare groupCount() over a scalar stream → group by the value (Map{value:count}).
+  // A name-keyed side effect (groupCount('a')) or a by()/re-key defers.
+  if (steps[from]?.name === 'groupCount' && (steps[from].args ?? []).length === 0 && !(steps[from].bys?.length))
+    return continueLowering(lowerScalarGroupCount(s), from + 1);
   // unfold() on a scalar is identity (a scalar is not a collection) — continue past it,
   // exactly as unfold() on an element stream. Lets aggregate('a').by(k).cap('a').unfold()
   // (an explicit cap().unfold() turns a by-key bag into a scalar stream) feed a following reducer.

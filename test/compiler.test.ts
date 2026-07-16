@@ -377,6 +377,21 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().values("name").fold().unfold().combine([1])', {})).toThrow('incoming traversers');
   });
 
+  test('P3 Stage C: bare groupCount() over a scalar stream groups by value', () => {
+    // V().values('name').groupCount() → GROUP BY the value → Map{value: count}.
+    const g = read("g.V().out('created').values('name').groupCount()");
+    expect(g.shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: true }, val: { kind: 'count' } });
+    expect(g.sql).toContain('COUNT(*) AS gv');
+    expect(g.sql).toContain('GROUP BY');
+    // a typed scalar (asNumber(X)) carries its tag so the key frames correctly (not inferred)
+    expect(read('g.inject(15).asNumber(GType.BYTE).groupCount()').shape)
+      .toEqual({ kind: 'group', key: { kind: 'scalar', productive: true, as: 'byte' }, val: { kind: 'count' } });
+    // null keys are counted (groupCount is productive)
+    expect(read('g.inject(10,20,null,20).groupCount()').shape.key).toEqual({ kind: 'scalar', productive: true });
+    // named side-effect groupCount('a') over a scalar defers (needs side-effect state)
+    expect(() => compile("g.V().values('name').groupCount('a').cap('a')", {})).toThrow();
+  });
+
   test('group()/groupCount() always lowers to GroupStream; Column selection derives MapStream', () => {
     // A terminal GroupStream reaches the existing row-folding groupBuffer Map.
     expect(read('g.V().groupCount().by("name")').shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });

@@ -254,7 +254,10 @@ function groupKey(r: any, key: GroupKey): { buf: Buffer; canon: string } {
     key.parts.forEach((p, i) => m.set(p.key, r[`k${i}_v`]));
     return { buf: ioc.anySerializer.serialize(m), canon: 'm:' + key.parts.map((_, i) => JSON.stringify(r[`k${i}_v`])).join(' ') };
   }
-  return { buf: ioc.anySerializer.serialize(r.gk), canon: 's:' + JSON.stringify(r.gk) };
+  // A typed scalar key (asNumber(BYTE).groupCount() etc.) frames by its tag; an untagged
+  // key infers from the JS value (correct for string/int/double).
+  const buf = key.as ? frameValue(r.gk, key.as) : ioc.anySerializer.serialize(r.gk);
+  return { buf, canon: `s:${key.as ?? ''}:` + JSON.stringify(r.gk) };
 }
 
 // group()/groupCount(): fold ALL rows into ONE GraphBinary Map. Element-valued

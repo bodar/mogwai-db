@@ -1,8 +1,19 @@
 # P3 — lift the terminal islands to re-enterable streams (2026-07-16)
 
 **Status:** in progress. Anchors the multi-commit P3 from
-`docs/2026-07-16-compiler-consolidation-plan.md` §3. **Baseline:** L3 1046, corpus
-2298/2298.
+`docs/2026-07-16-compiler-consolidation-plan.md` §3. **Baseline at start:** L3 1046.
+**Now: L3 1061** (Stage A + B1 + B2, all CI-green on trunk).
+
+- **Stage A LANDED** (1046→1047): `path()` re-enterable — `count()`/`is(typeOf(PATH))`.
+- **Stage B1 LANDED** (1047→1050): `valueMap()` → per-element `MapStream`; origin-aware
+  `compileFromMap` `select(Column.keys/values)`; `count`/`is(typeOf(MAP))`.
+- **Stage B2 LANDED** (1050→1061): thread the origin ordinal through every per-row list
+  op (was a crash on `select(Column.values).unfold().<setop>`); `select(unbound-label)`
+  → empty.
+- **Stage C (next):** biggest clean lever is scalar-stream `groupCount()`/`group()`
+  (`values('name').groupCount()` → Map{value:count}, ~18) — a scalar→group barrier, no
+  P4. Then group-value re-entry (`unfold`→Map.Entry, `count`/`is`/`order` on a group).
+  Element-VALUE group maps stay the P4 wall.
 
 ## Root cause (one gap, three shapes)
 
