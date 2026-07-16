@@ -4,9 +4,14 @@
 a roadmap — a scannable "can I use this step, and if only partly, where's the edge?"
 reference. Grouped into tables by traversal concern.
 
-**Last synced:** 2026-07-15 · **live L3 conformance:** 932 · **corpus parse+chain:**
+**Last synced:** 2026-07-16 · **live L3 conformance:** 1040 · **corpus parse+chain:**
 2298/2298 (100%). Sourced from the actual dispatch maps (`src/steps/*.ts`) and the
 `throw` sites in the compiler — if the code defers it, this file says so.
+
+> **Partial re-sync note (2026-07-16).** Rows touched by typed property values
+> (P1/P2/P3a/P3b) + the tail-unification are current as of L3 1040. Rows unrelated to
+> that work may still reflect the earlier L3 932 sync — grep `src/` throw sites when in
+> doubt.
 
 > **How to keep this true.** When a step's support changes, update its row here in the
 > same commit. The deferral notes below are paraphrased from real `throw` messages —
@@ -52,13 +57,13 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `has(label,k,v)`, `has(T.label/T.id, v/P)` | ✅ | ✅ the cucumber verification idiom |
 | `hasId(…)` | ✅ | ✅ flattens list args |
 | `is(P)` | 🟡 | ✅ relational scalar filter, including after transforms, reducers, and position-sensitive `limit`/`range`/`skip` chains<br>❌ after `path()` |
-| `where(__.…)` | 🟡 | ✅ single- & multi-hop (`compileExistsChain`)<br>✅ `where(__.label()/not())`<br>✅ alias-rooted `where(__.as('x')…)`<br>❌ `both()` multi-hop<br>❌ edge-typed hops |
+| `where(__.…)` | ✅ | ✅ single- & multi-hop (`compileExistsChain`), incl. `both()` multi-hop and **edge-typed hops** (`where(__.outE('knows'))`, `where(__.outE().inV())`)<br>✅ `where(__.label()/not())`<br>✅ alias-rooted `where(__.as('x')…)` |
 | `where(P)` / `where('a',P)` | 🟡 | ✅ alias-column compare (P2a)<br>❌ some `where(P.op)` alias forms<br>❌ `where().by(key)` on an edge-typed label |
 | `and`, `or`, `not`, `filter(__.…)` | ✅ | ✅ `and`/`or`/`not`, `filter(traversal)`<br>❌ `filter(predicate)` (non-traversal) — use `filter(traversal)` |
 | `P` predicates (eq/neq/lt/gt/within/without/between/inside/outside) | ✅ | ✅ `between` is `[lo,hi)` (two comparisons, not SQL `BETWEEN`) |
 | **TextP** (startingWith/endingWith/containing + negations) | ✅ | ✅ bound `LIKE`/`NOT LIKE`, pattern escaped |
 | **TextP regex** (`regex`/`notRegex`) | 🚫 | **Unimplementable in SQL.** Stock SQLite only *reserves* the `REGEXP` operator (needs a `regexp()` UDF that ships with no implementation — verified `no such function: REGEXP` on bun:sqlite 3.53.0); DO SQLite exposes no `sqlite3_create_function` and blocks `load_extension`, so the UDF can't be supplied. A post-SQL JS filter would violate locked #3. (The `regexp_*` funcs in CF docs are **R2 SQL**, a different engine, not DO SQLite.) `LIKE`-expressible forms — startingWith/endingWith/containing — are ✅ above; only true regex is out |
-| `typeOf(GType)` over a **stored property** | ❌ | SQLite storage class can't distinguish bool/datetime/uuid from int/text — needs a storage type-tag scheme |
+| `typeOf(GType)` over a **stored property** | ✅ | ✅ resolves the stored `vtype` column (typed property values P2): `is(typeOf(X))` per row + `has('k',typeOf(X))` EXISTS, over int/long/short/byte/bigint/float/double/string/boolean/datetime/uuid/list/map/set<br>✅ static-fold when the type is compile-time known (inject/cast/math), storage-class fallback for legacy NULL-vtype rows<br>❌ `bigdecimal`/`char`/`duration` detect via vtype but can't be **framed** (no client serializer) |
 | `dedup()` | 🟡 | ✅ bare `dedup()`<br>✅ `dedup().by(key|T.id|T.label|scalar traversal)` as a first-per-key window; ordinary missing keys drop, ProductiveBy retains one NULL key<br>✅ `order().barrier().dedup().by(...)` carries explicit encounter order downstream<br>❌ `dedup(label)` and >1 by() modulator<br>❌ `dedup()` after `as()` / with path tracking (path-distinct semantics) |
 | `identity()` | ✅ | |
 
@@ -136,6 +141,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 |---|:--:|---|
 | `fold()` as a re-usable list value | ✅ | ✅ JSONB list<br>✅ re-enters the tail |
 | `unfold()` | 🟡 | ✅ `json_each` explode → elements/scalar/nested-list stream (list-of-lists → per-list rows), retaining uniform scalar item metadata<br>❌ after a projection/modifier on an element stream<br>❌ Map-unfold (→Map.Entry) |
+| `is(typeOf(GType.LIST))` → ListStream | ✅ | ✅ RETYPE (not a value filter): keeps stored-`vtype='list'` rows and exposes `json(value)` as a ListStream `list` column, so `unfold`/`count(Scope.local)`/`range`/… reuse the list substrate (typed property values P3b, bulk of List.feature)<br>❌ MAP/SET retype (→MapStream) — still a plain scalar `vtype` filter<br>❌ list-OPERATION steps on a list value: `merge`/`split`/`index`/`order`/`project`/`where`/`asX` (a separate sub-project) |
 | `inject([…])` as a list | ✅ | ✅ each bracket arg = one list value |
 | `Scope.local` reducers (count/sum/min/max/mean) | ✅ | ✅ per-list correlated aggregate → ScalarStream, including later filters/reducers<br>✅ also degenerate scalar-local |
 | `none(P)`/`all(P)`/`any(P)` collection filters | ✅ | ✅ keep a list where no / every / some element matches (`IS TRUE`/`IS NOT TRUE` null handling; null-aware `eq/neq(null)`) |
@@ -150,7 +156,7 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `asBool`, `asNumber(GType.X)`, bare `asNumber()` | ✅ | ✅ typed-value carrier (compile-time subtype tag → GraphBinary framing)<br>✅ runtime scalar casts lower as relational ScalarStream transforms and compose with later filters/reducers |
 | string transforms | ✅ | ✅ SQL scalar, text-in text-out; non-local scalar transforms lower stepwise as ScalarStream relations<br>✅ `concat` skips nulls (`concat_ws`), all-null→null<br>✅ trim family over Java's `isWhitespace` set (incl. U+3000)<br>✅ `reverse` string chars (recursive CTE) / number identity / list order (§9)<br>✅ all compose as `Scope.local` per-element list transforms after `fold()`<br>✅ a string op on a non-`local` list raises TinkerPop's "can only take string as argument"<br>✅ `format("…%{key}…%{_}…")` templates a string — named tokens read element properties, `%{_}` pulls by() modulators (positional/round-robin); a missing property filters the row (❌ reading project()/select() columns, the as()-alias fallback)<br>❌ `split` (list-valued), element/map `asString` |
 | `math("<formula>")` | 🟡 | ✅ full exp4j operator/function set → one SQL ScalarStream, always Double; later scalar steps/barriers compose<br>✅ property and generic scalar-child `by()` variables, including child traversal re-rooting on carried `as()` aliases, join through one multiset-safe modulation domain<br>❌ a var with no `by()`<br>❌ `withSideEffect` vars<br>❌ reading `project()`/`select()` map columns |
-| `asDate`, `dateAdd`, `dateDiff`, `datetime()`/`DateTime()` literals | 🟡 | ✅ epoch-millis rep + `'date'` tag (UTC-only, ms precision — parity with the JS reference client)<br>❌ `typeOf(GType.DATETIME)` over stored props<br>❌ `inject([…]).asDate()` |
+| `asDate`, `dateAdd`, `dateDiff`, `datetime()`/`DateTime()` literals | 🟡 | ✅ epoch-millis rep + `'date'` tag (UTC-only, ms precision — parity with the JS reference client)<br>✅ `typeOf(GType.DATETIME)` over stored props (via `vtype`, §2)<br>❌ `inject([…]).asDate()` |
 | `asNumber` + reducer (`fold`/`sum`) | ✅ | ✅ numeric reducers carry runtime `vt` explicitly (`asNumber(...).sum()`)<br>✅ typed `fold()` carries uniform element metadata through ListStream materialization |
 | bigdecimal | ❌ | no client GraphBinary serializer |
 | `format()` | 🟡 | ✅ element-property template substitution with `%{key}` + `%{_}`/`by()` returning a composable ScalarStream; traversal placeholders use generic child-first productivity<br>❌ reading project()/select() columns and the as()-alias fallback |
@@ -162,8 +168,8 @@ wholly ❌/🚫 give the deferral reason as a single plain line.
 | `addV()`, `.property(k,v)`, `property(T.id/T.label)` | ✅ | ✅ user-supplied ids (string→uid, int→rowid) |
 | `addE()`, `from`/`to` | 🟡 | ✅ `as()` alias or nested `__.V(…)`<br>✅ edge uid via `property(T.id)`<br>✅ multi-addE graph initializers<br>❌ nested-traversal `addE` label<br>❌ endpoint traversal past a movement<br>❌ `addE` after some prefixes |
 | `mergeV`, `mergeE` | 🟡 | ✅ id-aware upsert, onCreate/onMatch, start + mid-chain<br>❌ nested-traversal merge maps (`mergeV(__.select…)`)<br>❌ `option(…, __.traversal)`<br>❌ bare `mergeV()`/`mergeE()` (incoming-as-map) |
-| `property()` update | ✅ | ✅ vertex: normalized rows, single/list/set + meta (W4); edge: JSON-merge blob |
-| `drop()` (vertices + edges) | 🟡 | ✅ vertex `drop()`<br>❌ edge `drop()`<br>❌ `drop()` after some steps |
+| `property()` update | ✅ | ✅ vertex: normalized rows, single/list/set + meta (W4); edge: normalized `edge_properties` UPSERT (single cardinality, no meta) |
+| `drop()` (vertices + edges) | 🟡 | ✅ vertex AND edge `drop()` (cascades `vertex_properties`/`edge_properties`)<br>✅ after movement/filter/`where` (`g.V().out().drop()`, `g.V().outE('knows').drop()`)<br>❌ after `properties()` / `order()` |
 | `property(Cardinality.list/set, …)` (multi-property) | ✅ | list appends, set dedups by value (W4 normalized table) |
 
 ## 12. Side-effect state (🟡 — the registry + carried-column substrate landed)
@@ -208,7 +214,7 @@ path. The VariantStream slice plus correct collection-valued cap framing raised 
 | **User-supplied ids** (string `uid`) | 🟡 | ✅ resolved at `V('x')` seed + framing-out and `properties().element().id()`<br>❌ scalar id via `by(__.outV().id())`/`group().by(__.id())`<br>❌ edge's own uid via `addE` in some paths |
 | **Multi-properties** (list/set cardinality) | ✅ | normalized `vertex_properties` table; `values()` flatMaps, `has()` ANY-matches, `valueMap` `{k:[…]}` (W4) |
 | **Meta-properties** (properties-on-properties) | ✅ | JSONB `meta` per VP row; write `property(k,v,mk,mv)`, read `properties().has(mk)`/`.properties()`/`valueMap` (W4) |
-| Property types: primitives + list/map | ✅ | ✅ vertex: normalized `vertex_properties` rows, `value` BLOB affinity (keeps SQLite storage class → correct numeric order/range); edge: flat JSONB `props` (W4) |
+| Property types: primitives + list/map/set | ✅ | ✅ vertex + edge BOTH normalized (`vertex_properties` / `edge_properties`), `value` BLOB affinity (keeps SQLite storage class → correct numeric order/range on both); the flat edge JSONB blob is retired (P1)<br>✅ **typed values**: a `vtype` column stores the canonical Gremlin type from the truth channel (wire DataType / parsed literal) → `typeOf` (§2) + per-row framing (§10)<br>✅ list/map/set property VALUES stored as JSONB (P1 fixed the raw-array bind crash) |
 
 ## 15. Locked non-goals (🚫)
 
@@ -218,7 +224,7 @@ path. The VariantStream slice plus correct collection-valued cap framing raised 
 | **OLAP / GraphComputer** | locked out — mogwai is OLTP (small per-tenant graphs) |
 | **Multi-request `g.tx()`** | needs DO session state (a P5 stretch, not a non-goal forever) |
 | `tree()` | 0 conformance (JS GLV stubs it) — build only for a non-JS consumer |
-| **TextP regex** (`regex`/`notRegex`) | Platform wall, not a design choice: stock SQLite ships no `regexp()` UDF and DO blocks `sqlite3_create_function`/`load_extension`. Same wall as `typeOf` over stored props. `LIKE`-expressible TextP (startsWith/endsWith/containing) stays ✅ |
+| **TextP regex** (`regex`/`notRegex`) | Platform wall, not a design choice: stock SQLite ships no `regexp()` UDF and DO blocks `sqlite3_create_function`/`load_extension`. (`typeOf` over stored props is NO LONGER a wall — the `vtype` column solved it, §2.) `LIKE`-expressible TextP (startsWith/endsWith/containing) stays ✅ |
 
 ---
 
