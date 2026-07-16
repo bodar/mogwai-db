@@ -581,13 +581,13 @@ describe('compiler SQL snapshots', () => {
     // named aliases resolve via the carried rowid column (correlated subquery); one
     // by() feeds every variable (round-robin), N by()s feed N variables positionally.
     const shared = read('g.V().as("a").out("knows").as("b").math("a + b").by("age")');
-    expect(shared.sql).toContain("(SELECT value FROM vertex_properties WHERE node=p.a0 AND key=? ORDER BY id LIMIT 1)");
-    expect(shared.sql).toContain("(SELECT value FROM vertex_properties WHERE node=p.a1 AND key=? ORDER BY id LIMIT 1)");
+    expect(shared.sql).toContain("(SELECT value FROM vertex_properties WHERE node=CAST(p.a0 ->> ? AS INTEGER) AND key=? ORDER BY id LIMIT 1)");
+    expect(shared.sql).toContain("(SELECT value FROM vertex_properties WHERE node=CAST(p.a1 ->> ? AS INTEGER) AND key=? ORDER BY id LIMIT 1)");
     // per-variable by(): first-seen order (`b` before `a`), nested traversal + key
     const perVar = read('g.V().as("a").out("created").as("b").math("b + a").by(__.in("created").count()).by("age")');
     expect(perVar.sql).toContain('COUNT(c.id) AS v');         // b ← generic child count, total per origin
     expect(perVar.sql).toContain('ROW_NUMBER() OVER () AS o0');
-    expect(perVar.sql).toContain("node=p.a0 AND key=?");      // a ← by("age")
+    expect(perVar.sql).toContain("node=CAST(p.a0 ->> ? AS INTEGER) AND key=?");      // a ← by("age")
     // math() composes with a trailing typed cast (result narrows to the cast's subtype)
     expect(read('g.V().as("a").out("knows").as("b").math("a + b").by("age").asNumber(GType.INT)').shape)
       .toEqual({ kind: 'value', as: 'int' });
@@ -727,11 +727,11 @@ describe('compiler SQL snapshots', () => {
 
   test('as() threads a synthetic alias column through subsequent CTEs', () => {
     const p = read('g.V().as("a").out("knows").select("a")');
-    // as('a') binds the current id to column a0; out() carries a0 while id moves
-    expect(p.sql).toContain('id AS a0 FROM c0');
+    // as('a') appends the current id to label a0's JSONB history array; out() carries a0
+    expect(p.sql).toContain("jsonb_array(jsonb_object('k', ?, 'v', p.id)) AS a0 FROM c0");
     expect(p.sql).toContain('SELECT e.tgt AS id, p.a0 FROM edges e');
-    // select retypes the alias to a fresh element stream, then root framing rejoins it.
-    expect(p.sql).toContain('SELECT p.a0 AS id, p.a0 FROM c2 p');
+    // select retypes the alias to a fresh element stream (last id out of history), then root framing rejoins it.
+    expect(p.sql).toContain('SELECT CAST(p.a0 ->> ? AS INTEGER) AS id, p.a0 FROM c2 p');
     expect(p.sql).toContain('JOIN c3 p ON n.id=p.id');
     expect(p.shape).toEqual({ kind: 'vertex' });
   });
@@ -740,10 +740,10 @@ describe('compiler SQL snapshots', () => {
     const p = read('g.V().as("a").out().select("a").by("name")');
     expect(p.shape).toEqual({ kind: 'value' });
     expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS v");
-    expect(p.sql).toContain('ON n.id=p.a0');
+    expect(p.sql).toContain('ON n.id=CAST(p.a0 ->> ? AS INTEGER)');
     const child = read('g.V(1).as("a").out().select("a").by(__.out().count())');
     expect(child.shape).toEqual({ kind: 'value', as: 'long' });
-    expect(child.sql).toContain('SELECT p.a0 AS id');
+    expect(child.sql).toContain('SELECT CAST(p.a0 ->> ? AS INTEGER) AS id');
     expect(child.sql).toContain('GROUP BY d.o0');
   });
 
@@ -755,8 +755,8 @@ describe('compiler SQL snapshots', () => {
     ] });
     expect(p.sql).toContain('COALESCE(e0n.uid, e0n.id) AS e0_id'); // element reports uid ?? rowid
     expect(p.sql).toContain('COALESCE(e1n.uid, e1n.id) AS e1_id');
-    expect(p.sql).toContain('JOIN nodes e0n ON e0n.id=p.a0');
-    expect(p.sql).toContain('JOIN nodes e1n ON e1n.id=p.a1');
+    expect(p.sql).toContain('JOIN nodes e0n ON e0n.id=CAST(p.a0 ->> ? AS INTEGER)');
+    expect(p.sql).toContain('JOIN nodes e1n ON e1n.id=CAST(p.a1 ->> ? AS INTEGER)');
   });
 
   test('select().by(key) maps every entry to a scalar; by mods cycle', () => {
@@ -844,11 +844,11 @@ describe('compiler SQL snapshots', () => {
         { key: 'b', prefix: 'e1', sub: 'value' },
       ],
     });
-    expect(selected.sql).toContain('SELECT p0.a0 AS id');
-    expect(selected.sql).toContain('SELECT p1.a1 AS id');
+    expect(selected.sql).toContain('SELECT CAST(p0.a0 ->> ? AS INTEGER) AS id');
+    expect(selected.sql).toContain('SELECT CAST(p1.a1 ->> ? AS INTEGER) AS id');
     expect(selected.sql).toContain('ON b1.o0=b0.o0');
     const mixed = read('g.V(1).as("a").out("knows").as("b").select("a","b").by("name").by(__.out().count())');
-    expect(mixed.sql).toContain('SELECT value FROM vertex_properties WHERE node=p0.a0 AND key=?');
+    expect(mixed.sql).toContain('SELECT value FROM vertex_properties WHERE node=CAST(p0.a0 ->> ? AS INTEGER) AND key=?');
     const element = read('g.V(1).as("a").out("knows").as("b").select("a","b").by().by(__.out().count())');
     expect(element.shape).toEqual({
       kind: 'map',
@@ -1381,9 +1381,9 @@ describe('compiler SQL snapshots', () => {
 
   test('alias-compare where(P.neq("a")) and where("a",P,by(key)); unknown label throws', () => {
     const idc = read('g.V().as("a").out().where(P.neq("a"))');
-    expect(idc.sql).toContain('WHERE n.id != p.a0');
+    expect(idc.sql).toContain('WHERE n.id != CAST(p.a0 ->> ? AS INTEGER)');
     const keyc = read('g.V().as("a").out().as("b").where("a", P.eq("b")).by("name")');
-    expect(keyc.sql).toContain("(SELECT value FROM vertex_properties WHERE node=p.a0 AND key=? ORDER BY id LIMIT 1) = (SELECT value FROM vertex_properties WHERE node=p.a1 AND key=? ORDER BY id LIMIT 1)");
+    expect(keyc.sql).toContain("(SELECT value FROM vertex_properties WHERE node=CAST(p.a0 ->> ? AS INTEGER) AND key=? ORDER BY id LIMIT 1) = (SELECT value FROM vertex_properties WHERE node=CAST(p.a1 ->> ? AS INTEGER) AND key=? ORDER BY id LIMIT 1)");
     expect(() => compile('g.V().where("x", P.eq("y"))', {})).toThrow('no such label');
     // alias-compare where() takes at most one by(key) — a second is not a valid
     // modulator here; fail closed rather than silently drop it.
@@ -2771,7 +2771,7 @@ describe('compiler execution semantics', () => {
       .toEqual(['josh']);
     // SQL: the predicate correlates on the alias column (an ANY-match EXISTS over vertex_properties)
     expect(read('g.V().as("a").out().where(__.as("a").values("name").is("marko"))').sql)
-      .toContain("EXISTS(SELECT 1 FROM vertex_properties WHERE node=p.a0 AND key=? AND value = ?)");
+      .toContain("EXISTS(SELECT 1 FROM vertex_properties WHERE node=CAST(p.a0 ->> ? AS INTEGER) AND key=? AND value = ?)");
     // unknown label fails closed
     expect(() => compile('g.V().where(__.as("z").out())', {})).toThrow('no such label');
   });

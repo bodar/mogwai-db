@@ -1,6 +1,7 @@
 import { q, list, empty, Query, Relation, type Expression } from '../q.ts';
 import { nodes, edges } from '../schema.ts';
 import { type Elem } from '../plan.ts';
+import { type AliasShape } from './alias.ts';
 import { type PStep } from '../strategies.ts';
 import { type FastPathConfig } from '../fast-paths.ts';
 
@@ -15,9 +16,31 @@ import { type FastPathConfig } from '../fast-paths.ts';
 // handle it references downstream exactly like a base table.
 
 /** Bound as() labels: label → its carried column (a0, a1, … — user strings never
- *  enter SQL identifiers) + the element kind it holds at bind time (so a later
- *  select/where knows whether the label is a vertex or an edge). */
-export type AliasMap = ReadonlyMap<string, { col: string; elem: Elem }>;
+ *  enter SQL identifiers) + the SET of shapes the label has held across its bindings
+ *  (a label's history can be heterogeneous, e.g. [vertex, string]). The column holds
+ *  a JSONB history array (see src/steps/alias.ts); `shapes` is the compile-time
+ *  summary a consumer uses to decide framing (homogeneous element → fast concrete
+ *  path; heterogeneous/list → variant). */
+export type AliasEntry = { col: string; shapes: ReadonlySet<AliasShape> };
+export type AliasMap = ReadonlyMap<string, AliasEntry>;
+
+/** The element kind of a homogeneously-element label (node/edge). Throws if the
+ *  label is a value/list/map or a mixed-shape history — callers that need a single
+ *  element kind must have already established the label is element-homogeneous. */
+export function aliasElem(entry: AliasEntry): Elem {
+  if (entry.shapes.size !== 1) throw new Error('alias with mixed-shape history has no single element kind');
+  const [s] = entry.shapes;
+  if (s !== 'node' && s !== 'edge') throw new Error(`alias holds a ${s}, not an element`);
+  return s;
+}
+
+/** True iff every binding of the label is the same element kind (node XOR edge). */
+export const aliasIsElement = (entry: AliasEntry): boolean =>
+  entry.shapes.size === 1 && (entry.shapes.has('node') || entry.shapes.has('edge'));
+
+/** Merge a shape into a label's shape set (rebind may add a new shape). */
+export const withShape = (prev: ReadonlySet<AliasShape> | undefined, shape: AliasShape): Set<AliasShape> =>
+  new Set([...(prev ?? []), shape]);
 
 /** Path tracking. Two regimes (see docs/2026-07-12-path-tracking-prior-art.md):
  *  - `cols` (linear): each emitted element is a carried column (p0, p1, … — one per

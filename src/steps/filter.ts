@@ -1,10 +1,11 @@
-import { derived, q, list, raw, type Expression } from '../q.ts';
+import { derived, q, list, raw, type Expression, type Relation } from '../q.ts';
 import { stepChain, type Pred } from '../frontend.ts';
 import {
   P_OPS, labelIn, predicateSql, nodePropScalar, hasProp, elemCtx, aliasCtx,
   tryInlinePredicate, combineBranchPreds, idPredFromArgs, type Elem, type ScalarCtx,
 } from '../plan.ts';
-import { advance, carriedCols, carriedWith, carryFrag, elemRel, pathColsOf, prevRel, type AliasMap, type ElementStream, type StepFn } from './context.ts';
+import { advance, aliasElem, carriedCols, carriedWith, carryFrag, elemRel, pathColsOf, prevRel, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from './context.ts';
+import { aliasAppend, aliasId, aliasSeed, elemEntry, elemShape } from './alias.ts';
 import { tryCompileScalarValueRows, tryFilterByChildExistence } from './child.ts';
 import { directElementModulation, elementOrderSql } from './modulation.ts';
 import { type PStep } from '../strategies.ts';
@@ -15,11 +16,12 @@ import { type PStep } from '../strategies.ts';
  *  counts as "no output" → kept, matching not(traversal) semantics. */
 const notCoalesce = (expr: Expression): Expression => q`NOT COALESCE((${expr}), 0)`;
 
-/** The SQL expr holding a labelled traverser's id (its carried alias column). */
-function aliasIdExpr(label: string, aliases: AliasMap): string {
+/** The SQL expr holding a labelled traverser's id — the last element in its carried
+ *  JSONB history column (default Pop = last). */
+function aliasIdExpr(label: string, aliases: AliasMap, p: Relation): { id: Expression; elem: Elem } {
   const entry = aliases.get(label);
   if (!entry) throw new Error(`where("${label}"): no such label — as("${label}") was not seen`);
-  return `p.${entry.col}`;
+  return { id: aliasId(p.c[entry.col], 'last'), elem: aliasElem(entry) };
 }
 
 /** The scalar context a current-element predicate correlates on (aliased `n`). */
@@ -31,7 +33,7 @@ const currentCtx = (st: ElementStream) => elemCtx(elemRel(st), st.elem);
 const aliasResolver = (st: ElementStream) => (label: string): ScalarCtx => {
   const entry = st.carried.aliases.get(label);
   if (!entry) throw new Error(`where(__.as("${label}")): no such label — as("${label}") was not seen`);
-  return aliasCtx(prevRel(st, 'p').c[entry.col], entry.elem);
+  return aliasCtx(aliasId(prevRel(st, 'p').c[entry.col], 'last'), aliasElem(entry));
 };
 
 /** `SELECT n.id<carry> FROM <elem> n JOIN prev p … WHERE <test>` — the filter CTE
@@ -47,19 +49,28 @@ function filterCte(st: ElementStream, test: Expression): ElementStream {
  *  columns, (re)setting the bound ones to the current id. */
 export const as: StepFn = (s, st) => {
   const labels = s.args.filter((a): a is string => typeof a === 'string');
-  const aliases = new Map(st.carried.aliases);
-  const rebind: string[] = [];
+  const aliases = new Map<string, AliasEntry>(st.carried.aliases);
+  const shape = elemShape(st.elem);
+  const p = prevRel(st, 'p');
+  const entry = elemEntry(st.elem, p.c.id); // the current object, tagged
+  const setExpr = new Map<string, Expression>();
   for (const lbl of labels) {
     const existing = aliases.get(lbl);
     const col = existing?.col ?? `a${aliases.size}`;
-    aliases.set(lbl, { col, elem: st.elem }); // rebind: default Pop = last, re-capture kind
-    rebind.push(col);
+    // Rebind APPENDS to the label's path history (never overwrites); a fresh label
+    // seeds a one-element array. shapes accumulates every binding's kind.
+    aliases.set(lbl, { col, shapes: withShape(existing?.shapes, shape) });
+    setExpr.set(col, existing ? aliasAppend(p.c[col], entry) : aliasSeed(entry));
   }
   // Rebuild from the ONE carried schema so origins/sack/fromV/encounter/path cannot
-  // be dropped when as() replaces alias columns. Only rebound aliases change value.
+  // be dropped when as() rebinds alias columns. Only (re)bound aliases change value.
   const carried = carriedWith(st.carried, { aliases });
-  const cols = ['id', ...carriedCols(carried).map((col) => rebind.includes(col) ? `id AS ${col}` : col)];
-  return advance(st, q`SELECT ${cols.join(', ')} FROM ${prevRel(st)}`, { aliases });
+  const proj = ['id', ...carriedCols(carried)].map((c) => {
+    if (c === 'id') return q`${p.c.id}`;
+    const e = setExpr.get(c);
+    return e ? q`${e} AS ${raw(c)}` : q`${p.c[c]}`;
+  });
+  return advance(st, q`SELECT ${list(proj, ', ')} FROM ${p}`, { aliases });
 };
 
 /** simplePath()/cyclicPath(): a whole-path object-identity filter. simplePath keeps
@@ -142,12 +153,14 @@ export const where: StepFn = (s, st) => {
   // (current traverser vs label), optionally .by(key) (folded onto s.bys) to
   // compare a property instead of element identity.
   if (s.name === 'filter') throw new Error('filter(predicate) not supported; use filter(traversal)');
-  const [left, pred, leftElem]: [string, Pred, Elem] = typeof arg0 === 'string'
-    ? [aliasIdExpr(arg0, st.carried.aliases), s.args[1] as Pred, st.carried.aliases.get(arg0)!.elem]
-    : ['n.id', arg0 as Pred, st.elem];
+  const pw = prevRel(st, 'p');
+  const [left, pred, leftElem]: [Expression, Pred, Elem] = typeof arg0 === 'string'
+    ? [aliasIdExpr(arg0, st.carried.aliases, pw).id, s.args[1] as Pred, aliasIdExpr(arg0, st.carried.aliases, pw).elem]
+    : [q`n.id`, arg0 as Pred, st.elem];
   if (!(pred?.op in P_OPS)) throw new Error(`where(P.${pred?.op}) alias comparison not yet supported`);
-  const right = aliasIdExpr(pred.values[0], st.carried.aliases);
-  const rightElem = st.carried.aliases.get(pred.values[0])!.elem;
+  const rightRes = aliasIdExpr(pred.values[0], st.carried.aliases, pw);
+  const right = rightRes.id;
+  const rightElem = rightRes.elem;
   // An alias-compare where() takes at most one by(key). foldByModulators absorbs
   // every contiguous by(); a second one is not a valid modulator here — fail
   // closed rather than silently answer a different question (matches group()'s
@@ -162,7 +175,7 @@ export const where: StepFn = (s, st) => {
     const op = (s as any).productiveBy && pred.op === 'eq' ? 'IS'
       : (s as any).productiveBy && pred.op === 'neq' ? 'IS NOT'
       : P_OPS[pred.op];
-    testNode = q`${nodePropScalar(raw(left), byKey)} ${op} ${nodePropScalar(raw(right), byKey)}`;
+    testNode = q`${nodePropScalar(left, byKey)} ${op} ${nodePropScalar(right, byKey)}`;
   } else {
     testNode = q`${left} ${P_OPS[pred.op]} ${right}`;
   }

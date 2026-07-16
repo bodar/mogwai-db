@@ -4,7 +4,8 @@ import {
 } from '../plan.ts';
 import { mathToSql, mathVars } from '../math.ts';
 import { type PStep } from '../strategies.ts';
-import { carryFrag, carriedCols, elemRel, type ElementStream } from './context.ts';
+import { aliasElem, carryFrag, carriedCols, elemRel, type ElementStream } from './context.ts';
+import { aliasId } from './alias.ts';
 import { carryOf, toScalarStream, type ListStream, type ScalarStream, type Stream } from './stream.ts';
 import { tryCompileElementChild, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, type ScalarModulationSpec } from './child.ts';
 
@@ -97,7 +98,7 @@ export function lowerMath(st: ElementStream, steps: PStep[], stop: number): Scal
       const entry = st.carried.aliases.get(name);
       if (!entry) throw new Error(`math("${formula}"): no such variable "${name}" — as("${name}") was not seen`);
       col = entry.col;
-      elem = entry.elem;
+      elem = aliasElem(entry);
     }
     const nested = byArgs.find((a: any) => a && typeof a === 'object' && 'nested' in a);
     const strKey = byArgs.find((a: any) => typeof a === 'string');
@@ -116,7 +117,7 @@ export function lowerMath(st: ElementStream, steps: PStep[], stop: number): Scal
   const resolveVar = (name: string): Expression => {
     const r = resolved.get(name)!;
     if (r.mod !== undefined) return p.c[mods!.values[r.mod].value];
-    const ctx: ScalarCtx = r.col ? aliasCtx(p.c[r.col], r.elem) : elemCtx(n, st.elem);
+    const ctx: ScalarCtx = r.col ? aliasCtx(aliasId(p.c[r.col], 'last'), r.elem) : elemCtx(n, st.elem);
     return scalarProp(ctx, r.key!);
   };
 
