@@ -4,7 +4,7 @@
 **Status:** LANDED (core + follow-ups #1/#2/#4/#5); #3 remains (scoped as a shape project).
 **Baseline:** started full 373/373, compiler 248/248, L3 933. Core landed at full
 377/377, compiler 251/251, **L3 952** (+19). Follow-ups #1/#2/#4/#5 (commits 378bcd2,
-4f8e808, 7003da2, 80bf070) then took it to full 384/384, compiler 258/258,
+4f8e808, 7003da2, 7280cda) then took it to full 384/384, compiler 258/258,
 **L3 956** (+4), corpus 2298/2298.
 
 ## Landed (commits f4d4661, 93435b6)
@@ -37,7 +37,7 @@
    runtime Pop.mixed CASE was already present in `aliasPop`; static Pop.mixed over a
    dynamic-binds label still throws the existing clear error (result-shape unknowable at
    compile time — a genuine separate variant piece, unreached by conformance).
-2. **order().by(select("x"))** — ✅ DONE (4f8e808, extended in 80bf070) for the
+2. **order().by(select("x"))** — ✅ DONE (4f8e808, extended in 7280cda) for the
    reachable form: `order()` on a RecordStream by `by(__.select(field))` /
    `by(__.select(elemField).values(key))` (`compileFromRecord` → `recordOrderTerms`). Value
    field → its scalar col, element field → external id (or a `.values(key)` property lookup
@@ -67,7 +67,7 @@
    traversal-predicate / whole-map single-predicate forms defer. Unlocked the canonical
    `select("a","b").where("a",P.eq/neq("b"))` Where.feature scenarios.
 5. **Pre-existing (now reachable) carried-column drop** in the `sum(Scope.local)`/
-   map-local scalar path — ✅ DONE (80bf070). `lowerListReducer` (`steps/list.ts`,
+   map-local scalar path — ✅ DONE (7280cda). `lowerListReducer` (`steps/list.ts`,
    count/sum/min/max/mean over a list) now threads `carryFrag`/`carriedCols`, so the
    per-list reduced scalar keeps the row's alias history. `as("v")…map(...).sum(local)
    .as("s")` composes, and with #2's `by(__.select(field).values(key))` this landed the
