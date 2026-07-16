@@ -1,8 +1,10 @@
 # Typed property values — one type vocabulary, parse → store → read → frame
 
-**Date:** 2026-07-16 · **Status:** P1 + P2 + P3a LANDED & pushed (all CI-green);
-P3b + tail-unification remainder PENDING. Schema change APPROVED (alpha, no users, no
-data migration). **Baseline at authorship:** L3 1021, corpus 2298/2298.
+**Date:** 2026-07-16 · **Status:** P1 + P2 + P3a + **tail-unification + P3b LANDED &
+pushed** (all CI-green). Typed property values COMPLETE for the framing+detect scope;
+remaining is a separate list-OPERATIONS sub-project (merge/split/index/order on lists).
+Schema change APPROVED (alpha, no users, no data migration). **Baseline at authorship:**
+L3 1021, corpus 2298/2298. **Now: L3 1040.**
 This doc is written to be executed from a COLD (`/clear`ed) context — it restates
 everything needed. Sibling context: `docs/2026-07-16-compiler-consolidation-plan.md`
 (the value-streams work this builds on) and memory `w4-property-model`,
@@ -26,22 +28,34 @@ everything needed. Sibling context: `docs/2026-07-16-compiler-consolidation-plan
   `values()/id()/label()` unified onto the scalar pipeline (per-row framing now lives in
   ONE place; `renderProjection` dup removed). L3 1026.
 
-## STILL PENDING (next session)
+## LANDED this session (2026-07-16, L3 1026→1040)
 
-- **P3b — uuid/list/map/set framing + `is(typeOf(LIST))`→ListStream.** Extend `ValueType`
-  (render.ts) with string/uuid/list/map/set; add a canonical-keyed serializer dispatch in
-  `execute.ts` (wire `ioc.uuidSerializer` — exists but unwired; collection serializers over
-  the JSONB value); `bigdecimal`/`char`/`duration` stay unframeable. Then `is(typeOf(LIST))`
-  retypes the ScalarStream → ListStream (value JSONB blob → list column) so unfold/
-  count(local)/range/project reuse the list substrate (matrix §9). Bulk of List.feature.
-- **Finish tail-unification (consolidation P1).** P3a unified only the bare-terminal value
-  case. Fully retire `renderProjection`'s value machinery (transforms/is/reducer/inject/
-  localMean) by routing EVERY value tail through the scalar pipeline + verifying coverage,
-  then delete `wrapReducer` + the duplicate transform ladder. Element/valueMap/group/path
-  stay on `buildProjection`. Larger, ratchet-sensitive — do BEFORE more substrate work per
-  the consolidation doc so features aren't written twice.
-- **Deferred edges/cases** noted below stay deferred; `vt`/`vtype` full unify happens
-  naturally when the tail-unification lands (one framing path).
+- **Tail-unification (consolidation P1) — DONE.** Three green stages:
+  (A) every values/id/label projection routes through one `lowerScalarProjection` →
+  `ScalarStream` (element order before it becomes the carried encounter column, a
+  ROW_NUMBER window); (B) `lowerScalarRows` handles `Scope.local` directly
+  (identity sum/min/max/order/dedup, `localMeanScalar`→Double, transforms fuse, others
+  fail closed); (C) DELETED `renderProjection` + `wrapReducer` + the duplicate transform
+  ladder + `SCALAR_TX_NAMES` name-set + the dead `TailAcc.transforms/injects/localMean`
+  fields. `buildProjection` now renders ONLY the non-scalar element tail
+  (vertex/edge/valueMap/elementMap/count/element-fold). The scalar value tail + all
+  per-row framing live in exactly ONE place (scalar.ts/barrier.ts/materializeScalarRoot).
+  Bonus unlock: `order().by(k).limit(n).values().count()` now works. Net −132 lines.
+- **P3b — DONE.** `ValueType` gains `'string'`/`'uuid'`; `VTYPE_TO_VALUETYPE`+`frameValue`
+  wire `uuidSerializer` (was unwired) + `stringSerializer`. `is(typeOf(GType.LIST))` is a
+  RETYPE (`scalarListRetype`, scalar.ts): keeps stored-`vtype='list'` rows and exposes
+  `json(value)` as a `ListStream` `list` column, so unfold/count(Scope.local)/range/… reuse
+  the list substrate — the bulk of List.feature. Collections stay OFF the scalar `ValueType`
+  tag by design (a list frames through the ListStream substrate, not a per-row blob).
+
+## STILL PENDING (a SEPARATE sub-project — list operations, not framing)
+
+- **MAP/SET retype** (`is(typeOf(MAP))`→MapStream). Deferred; only LIST retypes today.
+- **List-operation STEPS on a list value**: `merge`/`split`/`index`/`order`/`project`/
+  `where`/`asNumber`/`asDate`/`asBool` ON a list (telemetry: ~25 scenarios). Each needs a
+  per-op list implementation — NOT framing, out of typed-property-values scope.
+- **Deferred edges/cases** noted below stay deferred. `vt`/`vtype` now share one framing
+  path (the scalar pipeline) as intended.
 
 ## P1 LANDED — deviations from the original plan (user steer, 2026-07-16)
 

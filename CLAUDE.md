@@ -171,10 +171,21 @@ must own the one-row-per-parent proof.
   Map — do NOT grow a switch. Multi-step modulator consumption belongs in a
   `strategies.ts` fold, NOT in a compiler peeking at siblings.
 - **The tail is split per step-family (2026-07-13, was one 1353-line file).**
-  `projection.ts` (~530) is the DISPATCHER (`compileTail`/`compileFromScalar`) +
-  shared RENDER BASE (`foldTailAcc` + `MODIFIERS`/`PROJECTORS` Maps +
-  `buildProjection`/`renderProjection`/`compileFold`/`wrapReducer`/`compileSackRead`/
-  `compileCap`). Leaf handlers live in per-family modules, mirroring the prefix's
+  `projection.ts` is the DISPATCHER (`compileTail`/`compileFromScalar`) +
+  the NON-scalar render base (`foldTailAcc` + `MODIFIERS`/`PROJECTORS` Maps +
+  `buildProjection`/`compileFold`/`lowerScalarProjection`/`compileSackRead`/`compileCap`).
+  **Tail unified onto the scalar pipeline (2026-07-16, consolidation P1 done).** The scalar
+  VALUE tail no longer has a second engine: `renderProjection` + `wrapReducer` + the
+  duplicate scalar-transform ladder / `SCALAR_TX_NAMES` name-set are DELETED. Every
+  values/id/label projection routes through `lowerScalarProjection` → a `ScalarStream`, and
+  all following value ops (transforms/is/reducers/inject/Scope.local) + all per-row framing
+  live ONLY in `scalar.ts`/`barrier.ts`/`materializeScalarRoot`. `foldTailAcc` stops at a
+  scalar projection so the value tail hands off; `buildProjection` renders ONLY the
+  non-scalar element tail (vertex/edge/valueMap/elementMap/count/element-fold) with element
+  modifiers (order().by(key)/carried encounter, dedup, range/limit). An element order before
+  a scalar projection becomes the carried encounter column (a ROW_NUMBER window) so the
+  scalar stream preserves order. Do NOT reintroduce a value-tail renderer in projection.ts.
+  Leaf handlers live in per-family modules, mirroring the prefix's
   `movement`/`filter`/… grain: `coerce.ts` (asBool/asNumber/asDate const-fold + SQL —
   the ONE pure leaf, no back-import), `inject.ts` (`compileInject`), `select.ts`
   (select/project/path), `mapscalar.ts` (map/math/choose), `group.ts` (group +
@@ -843,10 +854,11 @@ model. Plan + decision log: `docs/2026-07-13-list-value-substrate-plan.md` (Appr
 - **`none(P)` on a list** (`listNoneFilter`): keep each list where NO element matches P
   (`NOT EXISTS(json_each …)`), a collection filter. NOTE `stripTerminal` now only strips a
   BARE `none()`/`discard()` (the iterate marker) — `none(P)` is the real NoneStep, kept.
-- **scalar-local semantics** (`foldTailAcc`): a `Scope.local` reducer/order reached in the
-  element/scalar tail operates on each scalar as a degenerate one-element list —
-  `sum/min/max/order/dedup` = identity, `mean` = the value AS Double (`localMean`, always
-  Double even of one value: `d[29.0].d`). Scalar TRANSFORMS keep their Scope.local no-op.
+- **scalar-local semantics** (`lowerScalarRows`, 2026-07-16): a `Scope.local` reducer/order
+  on a `ScalarStream` operates on each scalar as a degenerate one-element list —
+  `sum/min/max/order/dedup` = identity, `mean` = the value AS Double (`localMeanScalar`,
+  always Double even of one value: `d[29.0].d`). Scalar TRANSFORMS keep their Scope.local
+  no-op (fused ignoring scope).
   A Scope.local step whose scalar form isn't worked out (count/limit/range/tail/skip, and
   scalar-stream `none()` which is a barrier we don't model) FAILS CLOSED — no silent global
   form (correctness-by-design over the old flatten-coincidence; traded ~11 coincidental passes
