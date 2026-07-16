@@ -1412,6 +1412,25 @@ describe('compiler SQL snapshots', () => {
     // modulator here; fail closed rather than silently drop it.
     expect(() => compile('g.V().as("a").out().as("b").where("a", P.eq("b")).by("name").by("age")', {}))
       .toThrow('by() is only supported as an order() or select()/project() modulator');
+    // P.not(<inner>) negates the alias comparison (== P.neq for eq).
+    const notEq = read('g.V().as("a").out().where(P.not(P.eq("a")))');
+    expect(notEq.sql).toContain('WHERE NOT COALESCE((n.id = CAST(p.a0 ->> ? AS INTEGER)), 0)');
+    expect(read('g.V().as("a").out().as("b").where("a", P.not(P.eq("b")))').sql)
+      .toContain('WHERE NOT COALESCE((CAST(p.a0 ->> ? AS INTEGER) = CAST(p.a1 ->> ? AS INTEGER)), 0)');
+  });
+
+  test('where() on a record stream compares two carried alias labels', () => {
+    const eq = read('g.V().as("a").out().in().as("b").select("a","b").where("a", P.eq("b"))');
+    // the record CTE still carries a0/a1; where filters rows by their history-last ids
+    expect(eq.sql).toContain('WHERE CAST(r.a0 ->> ? AS INTEGER) = CAST(r.a1 ->> ? AS INTEGER)');
+    const neq = read('g.V().as("a").out().in().as("b").select("a","b").where("a", P.neq("b"))');
+    expect(neq.sql).toContain('WHERE CAST(r.a0 ->> ? AS INTEGER) != CAST(r.a1 ->> ? AS INTEGER)');
+    // P.not on a record where negates; a missing label still throws (drop-not-throw is
+    // for select, an unknown label in a comparison is a real error).
+    expect(read('g.V().as("a").out().in().as("b").select("a","b").where("a", P.not(P.eq("b")))').sql)
+      .toContain('WHERE NOT COALESCE((CAST(r.a0 ->> ? AS INTEGER) = CAST(r.a1 ->> ? AS INTEGER)), 0)');
+    expect(() => compile('g.V().as("a").out().as("b").select("a","b").where(__.as("a").out())', {}))
+      .toThrow('where() on a record supports only the alias-compare form');
   });
 
   test('where(__.<multi-hop chain>) → correlated EXISTS over the path', () => {
@@ -2784,6 +2803,20 @@ describe('compiler execution semantics', () => {
     // choose: marko matches → then-arm binds 'k'.
     expect(run(store, "g.V(1).choose(__.has('name','marko'), __.out('knows').as('k'), __.out('created').as('c')).select('k').values('name')").map((r) => r.v).sort())
       .toEqual(['josh', 'vadas']);
+  });
+
+  test('where() on a record + P.not alias-compare execute (Where.feature)', () => {
+    const store = seededStore();
+    const g = "g.V().has('age').as('a').out().in().has('age').as('b').select('a','b')";
+    // eq: a==b (out().in() returns to self) → marko×3, josh×2, peter×1
+    expect(run(store, `${g}.where('a', P.eq('b')).select('a').values('name')`).map((r) => r.v).sort())
+      .toEqual(['josh', 'josh', 'marko', 'marko', 'marko', 'peter']);
+    // neq and P.not(eq) are equivalent complements (12 pairs total → 6 each)
+    expect(run(store, `${g}.where('a', P.neq('b')).count()`).map((r) => r.v)).toEqual([6]);
+    expect(run(store, `${g}.where('a', P.not(P.eq('b'))).count()`).map((r) => r.v)).toEqual([6]);
+    // element where(P.not(P.eq(label))) == where(P.neq(label))
+    expect(run(store, "g.V(1).as('a').both().where(P.not(P.eq('a'))).values('name')").map((r) => r.v).sort())
+      .toEqual(run(store, "g.V(1).as('a').both().where(P.neq('a')).values('name')").map((r) => r.v).sort());
   });
 
   test('option-map choose executes: choice scalar → matched option body', () => {

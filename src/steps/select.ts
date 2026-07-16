@@ -1,6 +1,6 @@
 import { q, list, empty, value, type Expression, type Relation } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
-import { framedProps, labelNameSub, nodePropScalar, predicateSql, propExtract, extIdOf } from '../plan.ts';
+import { framedProps, labelNameSub, nodePropScalar, predicateSql, propExtract, extIdOf, P_OPS } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { stepChain } from '../frontend.ts';
 import { aliasElem, aliasIsElement, carryFrag, carriedCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
@@ -415,11 +415,50 @@ function recordOrderTerms(s: RecordStream, r: Relation, bys: any[][]): Expressio
   });
 }
 
+/** where("a", P…["b"]) over a record: filter the record rows by an alias comparison
+ * of two path labels. The record stream still carries the alias history columns (a0,a1,…),
+ * so the labels resolve exactly as on an element stream — element identity by default, or
+ * a property with a trailing by(key). P.not unwraps + negates. Traversal-predicate and
+ * whole-map single-predicate forms defer (they'd need re-rooting a child on the map). */
+function recordWhere(s: RecordStream, step: PStep, at: number): LoweringResult {
+  const arg0 = step.args[0];
+  if (typeof arg0 !== 'string')
+    throw new Error('where() on a record supports only the alias-compare form where("a", P.eq/neq(...)["b"])');
+  let negate = step.name === 'not';
+  let pred: any = step.args[1];
+  if (pred?.op === 'not') { negate = !negate; pred = pred.values[0]; }
+  if (!(pred?.op in P_OPS)) throw new Error(`where(P.${pred?.op}) alias comparison on a record not yet supported`);
+  const r = s.rel.as('r');
+  const resolve = (label: string) => {
+    const entry = s.carried.aliases.get(label);
+    if (!entry) throw new Error(`where("${label}"): no such label — as("${label}") was not seen`);
+    return { id: aliasId(r.c[entry.col], 'last'), elem: aliasElem(entry) };
+  };
+  const leftRes = resolve(arg0);
+  const rightRes = resolve(pred.values[0]);
+  if ((step.bys?.length ?? 0) > 1) throw new Error('by() is only supported as an order() or select()/project() modulator');
+  const byKey = step.bys?.[0]?.find((x: any) => typeof x === 'string') as string | undefined;
+  let test: Expression;
+  if (byKey !== undefined) {
+    if (leftRes.elem === 'edge' || rightRes.elem === 'edge') throw new Error('where().by(key) on an edge-typed label not yet supported');
+    const op = step.productiveBy && pred.op === 'eq' ? 'IS' : step.productiveBy && pred.op === 'neq' ? 'IS NOT' : P_OPS[pred.op];
+    test = q`${nodePropScalar(leftRes.id, byKey)} ${op} ${nodePropScalar(rightRes.id, byKey)}`;
+  } else {
+    test = q`${leftRes.id} ${P_OPS[pred.op]} ${rightRes.id}`;
+  }
+  const names = s.rel.cols;
+  const whereExpr = negate ? q`NOT COALESCE((${test}), 0)` : test;
+  const rel = s.q.cte(q`SELECT ${list(names.map((name) => r.c[name]), ', ')} FROM ${r} WHERE ${whereExpr}`, names);
+  return continueLowering(toRecordStream(carryOf(s), rel, s.fields), at + 1);
+}
+
 /** Continue from a per-traverser record. Selecting a named field retypes it to the
  * ordinary scalar/element stream, while Column.keys/values produces one list value
  * per record. This is intentionally distinct from MapStream's whole-group columns. */
 export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): LoweringResult {
   const step = steps[at];
+  if (step.name === 'where' || step.name === 'not' || step.name === 'filter')
+    return recordWhere(s, step, at);
   if (step.name === 'count')
     return continueLowering(lowerGlobalCount(s), at + 1);
   if (step.name === 'order') {

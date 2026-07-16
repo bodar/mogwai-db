@@ -154,9 +154,14 @@ export const where: StepFn = (s, st) => {
   // compare a property instead of element identity.
   if (s.name === 'filter') throw new Error('filter(predicate) not supported; use filter(traversal)');
   const pw = prevRel(st, 'p');
-  const [left, pred, leftElem]: [Expression, Pred, Elem] = typeof arg0 === 'string'
+  const [left, rawPred, leftElem]: [Expression, Pred, Elem] = typeof arg0 === 'string'
     ? [aliasIdExpr(arg0, st.carried.aliases, pw).id, s.args[1] as Pred, aliasIdExpr(arg0, st.carried.aliases, pw).elem]
     : [q`n.id`, arg0 as Pred, st.elem];
+  // P.not(<inner>) negates the alias comparison — unwrap it and flip the outer negation
+  // (composing with a not() step). The inner predicate then resolves normally.
+  let negate = s.name === 'not';
+  let pred = rawPred;
+  if (pred?.op === 'not') { negate = !negate; pred = pred.values[0] as Pred; }
   if (!(pred?.op in P_OPS)) throw new Error(`where(P.${pred?.op}) alias comparison not yet supported`);
   const rightRes = aliasIdExpr(pred.values[0], st.carried.aliases, pw);
   const right = rightRes.id;
@@ -179,7 +184,7 @@ export const where: StepFn = (s, st) => {
   } else {
     testNode = q`${left} ${P_OPS[pred.op]} ${right}`;
   }
-  return filterCte(st, s.name === 'not' ? notCoalesce(testNode) : testNode);
+  return filterCte(st, negate ? notCoalesce(testNode) : testNode);
 };
 
 /** and()/or(): keep the traverser when ALL / ANY branch predicates hold. */
