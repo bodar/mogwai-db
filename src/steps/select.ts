@@ -2,8 +2,9 @@ import { q, list, empty, value, type Expression, type Relation } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
 import { framedProps, labelNameSub, nodePropScalar, predicateSql, propExtract, extIdOf } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
-import { aliasElem, carryFrag, carriedCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
-import { aliasId } from './alias.ts';
+import { aliasElem, aliasIsElement, carryFrag, carriedCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
+import { aliasId, aliasPresent, aliasScalar, shapeElem } from './alias.ts';
+import { emptyElementLike, historyValues, popEnd, popIsListResult, selectOneFromAlias } from './labelselect.ts';
 import { carryOf, continueLowering, pathColumns, recordFieldColumns, toListStream, toPathStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type LoweringResult, type PathStream, type RecordField, type RecordStream, type ScalarStream, type Stream } from './stream.ts';
 import { type Compiled, type PathPos } from '../render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
@@ -178,12 +179,18 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
  * barriers after select() are handled by the common dispatcher. */
 export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
   const pop = proj.args.find((a) => a && typeof a === 'object' && 'pop' in a) as { pop: string } | undefined;
-  if (pop && pop.pop !== 'last') throw new Error(`select(Pop.${pop.pop}) not yet supported`);
+  const popMode = pop?.pop ?? 'last';
   if (proj.args.some((a) => a && typeof a === 'object' && 'column' in a)) throw new Error('select(Column) not yet supported');
   const keys = proj.args.filter((a): a is string => typeof a === 'string');
   if (keys.length !== 1) throw new Error('lowerSingleSelect requires exactly one label');
   const selected = st.carried.aliases.get(keys[0]);
-  if (!selected) throw new Error(`select("${keys[0]}"): no such label — as("${keys[0]}") was not seen`);
+  if (!selected) return emptyElementLike(st); // label bound nowhere → drop every traverser
+  // A non-last Pop reads the label's history (first/all/mixed); the by()-less forms lower
+  // through the shared shape-agnostic resolver. by()-modulated non-last Pop is uncommon.
+  const hasNestedBy = !!(proj.bys?.[0]?.[0] && typeof proj.bys[0][0] === 'object' && 'nested' in proj.bys[0][0]);
+  if (popMode !== 'last' && !hasNestedBy && !(proj.bys?.length))
+    return selectOneFromAlias(st, proj, keys[0], popMode);
+  if (popMode !== 'last') throw new Error(`select(Pop.${popMode}).by(...) not yet supported`);
   const p = st.rel.as('p');
   const productive = proj.productiveBy === true;
   const nested = proj.bys?.[0]?.[0];
@@ -232,20 +239,26 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
  * traverser under freshly-named keys. by() modulators cycle across the keys. A
  * single-key select reuses the scalar vertex/value shape; anything else is a Map.
  */
-export function lowerRecordSelectProject(st: ElementStream, proj: PStep): RecordStream {
+export function lowerRecordSelectProject(st: ElementStream, proj: PStep): Stream {
   const bys = proj.bys ?? [];
   const isProject = proj.name === 'project';
   const aliases: AliasMap = st.carried.aliases;
   const curElem = st.elem;
 
-  // Reject the deferred long-tail forms explicitly (tokens are captured, not
-  // silently dropped) so a Pop/Column arg can never mis-execute as a plain key.
+  // A non-last Pop on a multi-label select() reads each label's history; the
+  // shared shape-agnostic record builder resolves them. project() (current-object
+  // keys) has no Pop dimension. Column args stay rejected below.
   const pop = proj.args.find((a) => a && typeof a === 'object' && 'pop' in a) as { pop: string } | undefined;
-  if (pop && pop.pop !== 'last') throw new Error(`select(Pop.${pop.pop}) not yet supported`);
+  if (pop && pop.pop !== 'last') {
+    if (isProject) throw new Error(`project(Pop.${pop.pop}) is not a valid form`);
+    const keys = proj.args.filter((a): a is string => typeof a === 'string');
+    return selectRecordFromAlias(st, proj, [...new Set(keys)], pop.pop);
+  }
   if (proj.args.some((a) => a && typeof a === 'object' && 'column' in a)) throw new Error('select(Column) not yet supported');
 
   const keys = proj.args.filter((a): a is string => typeof a === 'string');
   if (!keys.length) throw new Error(`${proj.name}() requires at least one key`);
+  if (!isProject && keys.some((k) => !aliases.has(k))) return emptyElementLike(st); // any unbound → drop all
   const traversalRecord = tryLowerTraversalRecord(st, proj, keys);
   if (traversalRecord) return traversalRecord;
 
@@ -288,11 +301,68 @@ export function lowerRecordSelectProject(st: ElementStream, proj: PStep): Record
   return toRecordStream(carryOf(st), rel, fields);
 }
 
+/** Multi-label select(Pop, "a", "b", …) over a value-shaped stream (scalar/list/variant):
+ * a Map per traverser whose fields come from path-history labels, resolved by Pop. A
+ * traverser is dropped unless EVERY requested label is bound (select's all-present rule).
+ * by() modulators cycle per key (element fields honour by(key); value/list fields ignore it). */
+export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, step: PStep, keys: string[], pop: string): Stream {
+  if (keys.some((k) => !s.carried.aliases.has(k))) return emptyElementLike(s); // any unbound → drop all
+  const bys = step.bys ?? [];
+  const p = s.rel.as('p');
+  const cols: Expression[] = [];
+  const joins: Expression[] = [];
+  const presents: Expression[] = [];
+  const fields: RecordField[] = keys.map((k, i) => {
+    const entry = s.carried.aliases.get(k);
+    if (!entry) throw new Error(`select("${k}"): no such label — as("${k}") was not seen`);
+    const prefix = `e${i}`;
+    const col = p.c[entry.col];
+    presents.push(aliasPresent(col));
+    const by = byToEntry(bys.length ? bys[i % bys.length] : undefined);
+    if (popIsListResult(entry, pop)) {
+      if (entry.shapes.size !== 1) throw new Error('select(Pop.all/mixed) over a mixed-shape label history not yet supported');
+      const shape = [...entry.shapes][0];
+      const of: ListOf = shape === 'value' ? { kind: 'scalar', as: entry.as }
+        : (shape === 'node' || shape === 'edge') ? { kind: 'elem', elem: shapeElem(shape) }
+        : (() => { throw new Error(`select(Pop.all) over a ${shape} label not yet supported`); })();
+      cols.push(q`${historyValues(col)} AS ${`${prefix}_list`}`);
+      return { key: k, prefix, sub: 'list', of };
+    }
+    const end = popEnd(pop);
+    if (aliasIsElement(entry)) {
+      const elem = aliasElem(entry);
+      const en = (elem === 'edge' ? edges : nodes).as(`${prefix}n`);
+      joins.push(q` JOIN ${en} ON ${en.c.id}=${aliasId(col, end)}`);
+      if (by.sub === 'value') {
+        const prop = elem === 'edge' ? propExtract(en.c.props, by.key!).expr : nodePropScalar(en.c.id, by.key!);
+        cols.push(q`${prop} AS ${`${prefix}_v`}`);
+        return { key: k, prefix, sub: 'value' };
+      }
+      const el = labels.as(`${prefix}l`);
+      joins.push(q` JOIN ${el} ON ${el.c.id}=${en.c.label}`);
+      if (elem === 'edge')
+        cols.push(q`${en.c.id} AS ${`${prefix}_rid`}, COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${en.c.src} AS ${`${prefix}_src`}, ${en.c.tgt} AS ${`${prefix}_tgt`}, json(${en.c.props}) AS ${`${prefix}_props`}`);
+      else
+        cols.push(q`${en.c.id} AS ${`${prefix}_rid`}, COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${framedProps(en, 'node')} AS ${`${prefix}_props`}`);
+      return { key: k, prefix, sub: elem === 'edge' ? 'edge' : 'vertex' };
+    }
+    // A scalar value label (by() does not apply to a non-element value).
+    cols.push(q`${aliasScalar(col, end)} AS ${`${prefix}_v`}`);
+    return { key: k, prefix, sub: 'value' };
+  });
+  const where = presents.length ? q` WHERE ${list(presents, ' AND ')}` : empty;
+  const relCols = [...fields.flatMap(recordFieldColumns), ...carriedCols(s.carried)];
+  const rel = s.q.cte(q`SELECT ${list(cols, ', ')}${carryFrag(s.carried, p)} FROM ${p}${list(joins, '')}${where}`, relCols);
+  return toRecordStream(carryOf(s), rel, fields);
+}
+
 /** Compatibility adapter for element modifiers accumulated before a terminal record
  * projection. New projection-first chains take the RecordStream path directly. */
-export function compileSelectProject(st: ElementStream, proj: PStep, tail: TailMods): RecordStream {
+export function compileSelectProject(st: ElementStream, proj: PStep, tail: TailMods): Stream {
   if (tail.orders.length) throw new Error('order() after select()/project() not yet supported');
-  let record = lowerRecordSelectProject(st, proj);
+  const lowered = lowerRecordSelectProject(st, proj);
+  if (lowered.kind !== 'record') return lowered; // unbound label → empty stream
+  let record = lowered;
   if (tail.distinct || tail.limit !== null || tail.offset > 0) {
     const r = record.rel.as('r');
     const names = record.rel.cols;

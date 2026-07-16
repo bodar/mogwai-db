@@ -16,7 +16,8 @@ import { type SackSpec } from '../frontend.ts';
 import { compileTail, compileFromScalar } from './projection.ts';
 import { compileFromGroup, compileFromProperty } from './group.ts';
 import { compileFromList, compileFromMap } from './list.ts';
-import { compileFromRecord } from './select.ts';
+import { compileFromRecord, selectRecordFromAlias } from './select.ts';
+import { asOnStream, selectOneFromAlias } from './labelselect.ts';
 import { assertStreamColumns, continueLowering, type LoweringResult, type Stream } from './stream.ts';
 import { type Compiled } from '../render.ts';
 import { tryBulkRepeatCount } from './bulk.ts';
@@ -229,9 +230,43 @@ export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, qu
  * its own ≤1 projection. This is what dissolves the old "one projection per traversal"
  * ceiling structurally (each phase has a fresh accumulator).
  */
+/** A value-shaped stream (scalar/list/variant) whose current object can be labelled and
+ *  whose select("label") reads a path-history alias — as opposed to record/map/group
+ *  whose select consumes a field/column and is owned by their own dispatchers. */
+const isValueShape = (s: Stream): boolean => s.kind === 'scalar' || s.kind === 'list' || s.kind === 'variant';
+
+/** select(label…) reading path-history labels (string args), not select(Column). */
+const isLabelSelect = (step: PStep): boolean =>
+  step.name === 'select'
+  && step.args.some((a: any) => typeof a === 'string')
+  && !step.args.some((a: any) => a && typeof a === 'object' && 'column' in a);
+
+/** The shape-agnostic label steps: as() binds and select(label) reads a path-history
+ *  label. They are dispatched in ONE place (dispatchAlias, at the top of lowerStream);
+ *  every per-shape row-consumer just yields the step back to that dispatch. */
+const isAliasStep = (step: PStep): boolean => step.name === 'as' || isLabelSelect(step);
+
+const popOf = (step: PStep): string =>
+  (step.args.find((a: any) => a && typeof a === 'object' && 'pop' in a) as { pop: string } | undefined)?.pop ?? 'last';
+
+/** Dispatch as()/select(label) over a value-shaped (scalar/list/variant) stream. */
+function dispatchAlias(s: Exclude<Stream, { kind: 'result' }>, steps: PStep[], at: number): LoweringResult {
+  const step = steps[at];
+  if (step.name === 'as') return continueLowering(asOnStream(s as any, step), at + 1);
+  const uniq = [...new Set(step.args.filter((a: any): a is string => typeof a === 'string'))];
+  const pop = popOf(step);
+  return continueLowering(
+    uniq.length === 1 ? selectOneFromAlias(s, step, uniq[0], pop) : selectRecordFromAlias(s, step, uniq, pop),
+    at + 1,
+  );
+}
+
 function lowerStream(s: Stream, steps: PStep[], at: number): LoweringResult {
   assertStreamColumns(s);
   if (s.kind === 'result') throw new Error('a terminal result stream cannot have following steps');
+  // as()/select(label) over a value-shaped stream bind/read path-history labels — the
+  // single home for these shape-agnostic steps; the shape arms below yield to it.
+  if (isValueShape(s) && isAliasStep(steps[at])) return dispatchAlias(s, steps, at);
   if (s.kind === 'elements') {
     const lowered = lowerElementSteps(steps, s, at);
     return compileTail(lowered.stream, steps, lowered.next);
@@ -239,6 +274,8 @@ function lowerStream(s: Stream, steps: PStep[], at: number): LoweringResult {
   if (s.kind === 'scalar') {
     const { stream, stop } = lowerScalarRows(s, steps, at);
     if (stop === steps.length) return continueLowering(stream, stop);
+    // A scalar row-run stops at an alias step; yield it to the top-level dispatch.
+    if (isAliasStep(steps[stop])) return continueLowering(stream, stop);
     return compileFromScalar(stream, steps, stop);
   }
   if (s.kind === 'variant') {
