@@ -21,9 +21,9 @@ export type { CompileOptions, FastPathConfig } from './fast-paths.ts';
 // verification checks / fail-closed rejections — lives in strategies.ts
 // (extractStrategies front-end + applyStrategies). See that module's header.
 
-export function compile(gremlin: string, params: Record<string, any>, options?: CompileOptions): Compiled | WritePlan {
+export function compile(gremlin: string, params: Record<string, any>, options?: CompileOptions, paramTypes: Record<string, string> = {}): Compiled | WritePlan {
   const tree = parseGremlin(gremlin);
-  const rewritten = applyStrategies(stepChain(tree, params), extractStrategies(tree, params), params);
+  const rewritten = applyStrategies(stepChain(tree, params, paramTypes), extractStrategies(tree, params), params);
   const { steps, discard } = normalize(rewritten);
   if (steps.length === 0) throw new Error('empty traversal');
 

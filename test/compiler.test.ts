@@ -3,6 +3,8 @@ import { compile, type CompileOptions } from '../src/compiler.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { executeQuery } from '../src/execute.ts';
+import { ioc } from '../src/io.ts';
+import { parseRequest } from '../src/wire.ts';
 import { MODERN_SEED } from './conformance/seed-modern.ts';
 import { Query } from '../src/q.ts';
 import { assertStreamColumns, toGroupStream, toPathStream, toPropertyStream, toRecordStream, toScalarStream, toVariantStream } from '../src/steps/stream.ts';
@@ -545,7 +547,7 @@ describe('compiler SQL snapshots', () => {
     // a missing by() value makes the arithmetic NULL → the traverser is filtered
     expect(p.sql).toContain('is not null');
     // `0-_` (subtraction-based negation) on an edge property
-    expect(read('g.V().outE().math("0-_").by("weight")').sql).toContain("(0.0 - CAST(json_extract(n.props, '$.weight') AS REAL))");
+    expect(read('g.V().outE().math("0-_").by("weight")').sql).toContain("(0.0 - CAST((SELECT value FROM edge_properties WHERE edge=n.id AND key=?) AS REAL))");
     // integer literals emit REAL form so `/` is real division, not SQLite integer div
     expect(read('g.V().math("_ / 2").by("age")').sql).toContain('/ 2.0)');
     // `^` → POW, `%` → MOD (SQLite `%` truncates operands to int)
@@ -1168,7 +1170,7 @@ describe('compiler SQL snapshots', () => {
   test('has()/values() on edges filter/project the edges table', () => {
     const h = read('g.E().has("weight",0.5)');
     expect(h.sql).toContain('FROM edges n JOIN c0 p ON n.id=p.id');
-    expect(read('g.V(1).outE().values("weight")').sql).toContain("json_extract(n.props, '$.weight') AS v");
+    expect(read('g.V(1).outE().values("weight")').sql).toContain('JOIN edge_properties ep ON ep.edge=n.id AND ep.key=?');
   });
 
   test('single select and record projection preserve edge element typing', () => {
@@ -2308,7 +2310,7 @@ describe('compiler execution semantics', () => {
     const self = store.labelId('self');
     store.query('INSERT INTO nodes(id,label) VALUES(?,?)', [1, person]);
     store.query('INSERT INTO vertex_properties(node,key,value) VALUES(?,?,?)', [1, 'name', 'ouro']);
-    store.query('INSERT INTO edges(id,src,label,tgt,props) VALUES(?,?,?,?,jsonb(?))', [2, 1, self, 1, '{}']);
+    store.query('INSERT INTO edges(id,src,label,tgt) VALUES(?,?,?,?)', [2, 1, self, 1]);
     expect(run(store, 'g.V(1).both().count()').map((r) => r.v)).toEqual([2]);
   });
 
@@ -3271,7 +3273,7 @@ describe('compiler execution semantics', () => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     const person = store.labelId('person'), knows = store.labelId('knows');
     store.query('INSERT INTO nodes(id,label) VALUES(1,?),(2,?)', [person, person]);
-    store.query('INSERT INTO edges(id,src,label,tgt,props) VALUES(10,1,?,2,jsonb(?)),(11,1,?,2,jsonb(?))', [knows, '{}', knows, '{}']);
+    store.query('INSERT INTO edges(id,src,label,tgt) VALUES(10,1,?,2),(11,1,?,2)', [knows, knows]);
     const npaths = (q: string) => new Set((run(store, q) as any[]).map((r) => r.pk)).size;
     // two parallel 1→2 edges → out() reaches 2 twice → two identical [1,2] paths.
     expect(npaths('g.V(1).repeat(__.out()).times(1).path()')).toBe(2);
@@ -3327,10 +3329,70 @@ describe('compiler execution semantics', () => {
     const knows = store.labelId('knows');
     const node = 'INSERT INTO nodes(id, label) VALUES(?,?)';
     const prop = 'INSERT INTO vertex_properties(node, key, value) VALUES(?,?,?)';
-    const edge = 'INSERT INTO edges(id, src, label, tgt, props) VALUES(?,?,?,?,jsonb(?))';
+    const edge = 'INSERT INTO edges(id, src, label, tgt) VALUES(?,?,?,?)';
     const N = 40; // deeper than the retired cap
     for (let i = 0; i <= N; i++) { store.query(node, [i + 1, person]); store.query(prop, [i + 1, 'name', `n${i}`]); }
-    for (let i = 0; i < N; i++) store.query(edge, [100 + i, i + 1, knows, i + 2, '{}']); // n0→n1→…→n40
+    for (let i = 0; i < N; i++) store.query(edge, [100 + i, i + 1, knows, i + 2]); // n0→n1→…→n40
     expect(uNames(store, `g.V(1).repeat(__.out()).until(__.has("name","n${N}"))`)).toEqual([`n${N}`]);
+  });
+});
+
+// ---- typed property values, P1: canonical vtype stored on write (docs/2026-07-16-typed-property-values-plan.md) ----
+describe('typed property values (P1) — vtype capture + collection storage', () => {
+  const fresh = () => new GraphStore(new BunSqlite(':memory:'));
+  const vprops = (store: GraphStore, keys: string[]) =>
+    store.query<{ key: string; value: any; vtype: string | null }>(
+      `SELECT key, value, vtype FROM vertex_properties WHERE key IN (${keys.map(() => '?').join(',')}) ORDER BY key`, keys);
+
+  test('inline literal subtypes are stored as canonical vtype', () => {
+    const store = fresh();
+    executeQuery(store, "g.addV('t').property('i',1).property('l',5L).property('d',2.5).property('s','hi').property('b',true).property('when',datetime('2024-01-01T00:00:00Z')).property('gid',UUID('0-1'))", {});
+    const got = Object.fromEntries(vprops(store, ['i', 'l', 'd', 's', 'b', 'when', 'gid']).map((r) => [r.key, r.vtype]));
+    expect(got).toEqual({ b: 'boolean', d: 'double', gid: 'uuid', i: 'int', l: 'long', s: 'string', when: 'datetime' });
+  });
+
+  test('a list-valued property is stored as JSONB (no bind crash) with vtype=list', () => {
+    const store = fresh();
+    // Was "Binding expected string…" before collections serialized to JSONB.
+    executeQuery(store, "g.addV('d').property('list',['a','b','c'])", {});
+    const r = store.query<{ v: string; vtype: string }>("SELECT json(value) AS v, vtype FROM vertex_properties WHERE key='list'")[0];
+    expect([r.vtype, JSON.parse(r.v)]).toEqual(['list', ['a', 'b', 'c']]);
+  });
+
+  test('a map-valued property keeps its entries (JSON.stringify(Map) would drop them)', () => {
+    const store = fresh();
+    executeQuery(store, "g.addV('x').property('data',[a:1,b:2])", {});
+    const r = store.query<{ v: string; vtype: string }>("SELECT json(value) AS v, vtype FROM vertex_properties WHERE key='data'")[0];
+    expect([r.vtype, JSON.parse(r.v)]).toEqual(['map', { a: 1, b: 2 }]);
+  });
+
+  test('edge properties store into the normalized edge_properties table with vtype', () => {
+    const store = fresh();
+    executeQuery(store, "g.addV('p').as('a').addV('p').as('b').addE('knows').from('a').to('b').property('weight',0.5)", {});
+    expect(store.query("SELECT edge, key, value, vtype FROM edge_properties")).toEqual([{ edge: 1, key: 'weight', value: 0.5, vtype: 'double' }]);
+    // the flat edges.props blob is retired — reading a value goes through edge_properties.
+    expect(executeQuery(store, "g.E().hasLabel('knows').values('weight')", {})).toHaveLength(1);
+  });
+
+  test('the wire is the truth: a bound param keeps its GraphBinary DataType', () => {
+    const store = fresh();
+    // 5e9 is out of int32 range → the client serializes it as a GraphBinary Long. The
+    // stored vtype must be 'long' (JS-value inference would wrongly guess 'int').
+    const bindings = new Map<any, any>([['n', 5_000_000_000], ['s', 'hi']]);
+    const fields = new Map<any, any>([['bindings', bindings]]);
+    const raw = Buffer.concat([
+      Buffer.from([0x84]),
+      ioc.mapSerializer.serialize(fields, false),
+      ioc.stringSerializer.serialize("g.addV('t').property('big',n).property('txt',s)", false),
+    ]);
+    const parsed = parseRequest(raw);
+    expect(parsed.paramTypes).toEqual({ n: 'long', s: 'string' });
+    executeQuery(store, parsed.gremlin, parsed.params, parsed.paramTypes);
+    const got = Object.fromEntries(vprops(store, ['big', 'txt']).map((r) => [r.key, r.vtype]));
+    expect(got).toEqual({ big: 'long', txt: 'string' });
+    // Without the wire types, the same write falls back to JS inference (int, not long).
+    const store2 = fresh();
+    executeQuery(store2, parsed.gremlin, parsed.params, {});
+    expect(store2.query<{ vtype: string }>("SELECT vtype FROM vertex_properties WHERE key='big'")[0].vtype).toBe('int');
   });
 });

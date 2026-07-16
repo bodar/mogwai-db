@@ -28,9 +28,9 @@ function json(body: unknown, status = 200): Response {
 async function runQuery(mgr: GraphManager, pathId: string | null, req: Request): Promise<Response> {
   try {
     const raw = Buffer.from(await req.arrayBuffer());
-    const { gremlin, params, g, batchSize } = parseRequest(raw);
+    const { gremlin, params, paramTypes, g, batchSize } = parseRequest(raw);
     const id = pathId ?? g ?? 'g';
-    const buffers = await mgr.query(id, gremlin, params);
+    const buffers = await mgr.query(id, gremlin, params, paramTypes);
     console.log(`OK   [${id}] ${gremlin} -> ${buffers.length} result(s)`);
     return streamBuffers(buffers, batchSize);
   } catch (e: any) {

@@ -1,8 +1,8 @@
 import { q, value, list, empty, raw, Relation, Query, type Expression } from '../q.ts';
-import { labels, vertexProperties } from '../schema.ts';
+import { labels, vertexProperties, edgeProperties } from '../schema.ts';
 import {
-  propExtract, predicateSql, rangeToOffsetLimit, elemCtx, scalarTx, extIdOf, jsonbGroupArray,
-  nodePropScalar, framedProps, valueMapProps,
+  predicateSql, rangeToOffsetLimit, elemCtx, scalarTx, extIdOf, jsonbGroupArray,
+  nodePropScalar, edgePropScalar, framedProps, valueMapProps,
 } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, elemRel, withoutCarried, type ElementStream } from './context.ts';
@@ -523,12 +523,16 @@ type ProjFn = (c: ProjCtx) => ProjResult;
 const PROJECTORS = new Map<string, ProjFn>([
   ['values', (c) => {
     const key = c.projStep!.args[0] as string;
-    // Node: values() is a genuine flatMap — JOIN vertex_properties so a multi-valued
-    // key yields one row PER value (the INNER JOIN also drops missing-key vertices, so
-    // no separate IS NOT NULL). Edge: json_extract the flat blob (single-valued).
+    // values() is a genuine flatMap — JOIN the normalized properties table so a
+    // multi-valued key yields one row PER value (the INNER JOIN also drops missing-key
+    // elements, so no separate IS NOT NULL). Edges are single-valued (one row per key).
     if (c.st.elem === 'edge') {
-      const pe = propExtract(c.n.c.props, key).expr;
-      return { shape: { kind: 'value' }, colsNode: q`${pe} AS v`, fromNode: c.vJoin, scalarExpr: pe, baseWhere: predicateSql(pe, undefined), encounterKey: c.p.c.id };
+      const ep = edgeProperties.as('ep');
+      return {
+        shape: { kind: 'value' }, colsNode: q`${ep.c.value} AS v`,
+        fromNode: q`${c.vJoin} JOIN ${ep} ON ${ep.c.edge}=${c.n.c.id} AND ${ep.c.key}=${value(key)}`,
+        scalarExpr: ep.c.value, baseWhere: null, encounterKey: q`${c.p.c.id}, ${ep.c.id}`,
+      };
     }
     const vp = vertexProperties.as('vp');
     return {
@@ -570,10 +574,11 @@ const PROJECTORS = new Map<string, ProjFn>([
 ]);
 
 /** An order().by(key) resolver over the current element (aliased `n`): node → the
- *  first-under-multi value from vertex_properties; edge → json_extract of the flat blob.
- *  Shared by buildProjection and compileMath — both sort a value tail by an element prop. */
+ *  first-under-multi value from vertex_properties; edge → the single value from
+ *  edge_properties. Shared by buildProjection and compileMath — both sort a value tail
+ *  by an element prop. */
 export const nodePropOrderKey = (st: ElementStream) => (key: string): Expression =>
-  st.elem === 'edge' ? propExtract('n.props', key).expr : nodePropScalar(raw('n.id'), key);
+  st.elem === 'edge' ? edgePropScalar(raw('n.id'), key) : nodePropScalar(raw('n.id'), key);
 
 function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
   const { distinct, offset, limit, isPreds, reducer } = acc;

@@ -11,15 +11,16 @@ import { q, list, values, paren, empty, value, raw, jsonExtract, type Expression
 
 export const P_OPS: Record<string, string> = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 
-/** `json_extract(col, '$.key')` for an EDGE property key (nodes read via
- *  scalarProp/hasProp into vertex_properties). A string column is a bind-free
- *  fragment (`e.props`) → raw text so it renders unquoted; a Relation column
- *  arrives typed. (The lazyrecords jsonExtract still splices identifier-safe keys
- *  literally — harmless; edges carry no property index.) */
+/** `json_extract(col, '$.key')` over an already-materialized JSON blob COLUMN — NOT a
+ *  storage table. Post edge-normalization its only callers are the vertex-property META
+ *  blob (`p.c.pmeta`) and a materialized record-field props JSON column (`${prefix}_props`,
+ *  built by edgePropsAgg/vertexPropsAgg). Element property VALUES are read from the
+ *  normalized *_properties tables via scalarProp/hasProp, never here. A string column is a
+ *  bind-free fragment → raw text so it renders unquoted; a Relation column arrives typed.
+ *  (lazyrecords jsonExtract splices identifier-safe keys literally — harmless for a
+ *  compiler-controlled key.) */
 export function propExtract(col: Expression | string, key: unknown): { expr: Expression } {
   if (typeof key !== 'string') throw new Error('property key must be a string');
-  // A string column is a bind-free fragment (`e.props`) → raw text; a Relation column
-  // arrives typed. Edge-only now (nodes read via scalarProp/hasProp into vertex_properties).
   return { expr: jsonExtract(typeof col === 'string' ? raw(col) : col, key) };
 }
 
@@ -207,9 +208,8 @@ export interface ScalarCtx {
   elem: 'node' | 'edge' | 'property';
   idExpr: Expression;        // n.id  (rowid — for correlated joins)
   extIdExpr?: Expression;    // COALESCE(n.uid, n.id) — the outward-facing id for framing
-  propsExpr?: Expression;    // EDGE ONLY: the flat JSONB props blob (json_extract-able).
-                             // Nodes read props via idExpr into vertex_properties (scalarProp/
-                             // hasProp), so a node ctx has NO propsExpr — see the W4 seam.
+  // Both nodes AND edges now read props via idExpr into their normalized *_properties
+  // table (scalarProp/hasProp dispatch on elem) — there is no flat-blob propsExpr.
   labelIdExpr: Expression;   // n.label
   srcExpr?: Expression;      // n.src  (edge)
   tgtExpr?: Expression;      // n.tgt  (edge)
@@ -229,7 +229,7 @@ export function elemCtx(n: Relation, elem: Elem): ScalarCtx {
   return {
     elem, idExpr: n.c.id, extIdExpr: q`COALESCE(${n.c.uid}, ${n.c.id})`,
     labelIdExpr: n.c.label,
-    ...(elem === 'edge' ? { propsExpr: n.c.props, srcExpr: n.c.src, tgtExpr: n.c.tgt } : {}),
+    ...(elem === 'edge' ? { srcExpr: n.c.src, tgtExpr: n.c.tgt } : {}),
   };
 }
 
@@ -246,7 +246,7 @@ export function aliasCtx(idExpr: Expression, elem: Elem): ScalarCtx {
   const sub = (c: string) => q`(SELECT ${c} FROM ${raw(tbl)} WHERE id=${idExpr})`;
   return {
     elem, idExpr, extIdExpr: sub('COALESCE(uid, id)'), labelIdExpr: sub('label'),
-    ...(elem === 'edge' ? { propsExpr: sub('props'), srcExpr: sub('src'), tgtExpr: sub('tgt') } : {}),
+    ...(elem === 'edge' ? { srcExpr: sub('src'), tgtExpr: sub('tgt') } : {}),
   };
 }
 
@@ -282,15 +282,39 @@ export const nodeHasProp = (nodeIdExpr: Expression, key: string, pred: any): Exp
   return pred === undefined ? q`EXISTS(${base})` : q`EXISTS(${base} AND ${predicateSql(raw('value'), pred)})`;
 };
 
+/** edge: the value under `key` as a correlated scalar. Edge props are single-cardinality
+ *  (one row per (edge,key), UNIQUE-enforced), so no ORDER BY / LIMIT dance is needed —
+ *  the mirror of nodePropScalar for the normalized edge_properties table. */
+export const edgePropScalar = (edgeIdExpr: Expression, key: string): Expression =>
+  q`(SELECT value FROM edge_properties WHERE edge=${edgeIdExpr} AND key=${value(key)})`;
+
+/** edge: does `key` satisfy `pred` (undefined → the key exists). EXISTS over
+ *  edge_properties — mirror of nodeHasProp. */
+export const edgeHasProp = (edgeIdExpr: Expression, key: string, pred: any): Expression => {
+  const base = q`SELECT 1 FROM edge_properties WHERE edge=${edgeIdExpr} AND key=${value(key)}`;
+  return pred === undefined ? q`EXISTS(${base})` : q`EXISTS(${base} AND ${predicateSql(raw('value'), pred)})`;
+};
+
+/** edge: all props as flat JSON text `{key:value}` (single-valued per key), correlated
+ *  on the edge rowid. Empty → `{}`. Mirror of vertexPropsAgg (which nests `[values]`
+ *  for multi-property vertices; edges are single so the value is bare). */
+export const edgePropsAgg = (edgeIdExpr: Expression): Expression =>
+  q`COALESCE((SELECT json_group_object(key, value) FROM edge_properties WHERE edge=${edgeIdExpr}), '{}')`;
+
+/** edge: valueMap props as `{key:[value]}` (each value wrapped in a 1-list so the
+ *  handler frames node + edge valueMaps uniformly). */
+export const edgeValueMapProps = (edgeIdExpr: Expression): Expression =>
+  q`COALESCE((SELECT json_group_object(key, json_array(value)) FROM edge_properties WHERE edge=${edgeIdExpr}), '{}')`;
+
 /** A single scalar value for `key` on the current element (order/group-key/by(key)):
- *  node → first-under-multi from the table; edge → json_extract of the flat blob. */
+ *  node → first-under-multi; edge → the single value. Both read their normalized table. */
 export const scalarProp = (ctx: ScalarCtx, key: string): Expression =>
-  ctx.elem === 'edge' ? propExtract(ctx.propsExpr!, key).expr : nodePropScalar(ctx.idExpr, key);
+  ctx.elem === 'edge' ? edgePropScalar(ctx.idExpr, key) : nodePropScalar(ctx.idExpr, key);
 
 /** A boolean predicate on `key` for the current element (has/where/is): node → ANY-match
- *  EXISTS; edge → predicate over the flat blob's json_extract. */
+ *  EXISTS over vertex_properties; edge → EXISTS over edge_properties. */
 export const hasProp = (ctx: ScalarCtx, key: string, pred: any): Expression =>
-  ctx.elem === 'edge' ? predicateSql(propExtract(ctx.propsExpr!, key).expr, pred) : nodeHasProp(ctx.idExpr, key, pred);
+  ctx.elem === 'edge' ? edgeHasProp(ctx.idExpr, key, pred) : nodeHasProp(ctx.idExpr, key, pred);
 
 /** node: assemble ALL properties as JSON text `{key:[value,…]}` (multi-valued,
  *  insertion-ordered) from vertex_properties, correlated on the node rowid. Empty →
@@ -299,21 +323,19 @@ export const vertexPropsAgg = (nodeIdExpr: Expression): Expression =>
   q`COALESCE((SELECT json_group_object(key, json(vs)) FROM (SELECT key, json_group_array(value ORDER BY id) AS vs FROM vertex_properties WHERE node=${nodeIdExpr} GROUP BY key ORDER BY MIN(id))), '{}')`;
 
 /** The props expression for framing a whole element out. Node: vertexPropsAgg
- *  ({key:[values]}); edge: the flat JSONB blob as text ({key:value}). */
+ *  ({key:[values]}); edge: edgePropsAgg ({key:value}), both over the rowid. */
 export const framedProps = (rel: Relation, elem: Elem): Expression =>
-  elem === 'edge' ? q`json(${rel.c.props})` : vertexPropsAgg(rel.c.id);
+  elem === 'edge' ? edgePropsAgg(rel.c.id) : vertexPropsAgg(rel.c.id);
 
-/** framedProps from a ScalarCtx (group()/element framing): edge → the flat blob as
- *  text; node → vertexPropsAgg on the ctx rowid. */
+/** framedProps from a ScalarCtx (group()/element framing): edge → edgePropsAgg on the
+ *  ctx rowid; node → vertexPropsAgg on the ctx rowid. */
 export const framedPropsCtx = (ctx: ScalarCtx): Expression =>
-  ctx.elem === 'edge' ? q`json(${ctx.propsExpr!})` : vertexPropsAgg(ctx.idExpr);
+  ctx.elem === 'edge' ? edgePropsAgg(ctx.idExpr) : vertexPropsAgg(ctx.idExpr);
 
 /** valueMap()'s props: ALWAYS {key:[values]} (values wrapped in a list) for both
- *  runtimes' handler. Node = vertexPropsAgg; edge = wrap each flat scalar in a 1-list. */
+ *  runtimes' handler. Node = vertexPropsAgg; edge = wrap each single value in a 1-list. */
 export const valueMapProps = (rel: Relation, elem: Elem): Expression =>
-  elem === 'edge'
-    ? q`COALESCE((SELECT json_group_object(je.key, json_array(je.value)) FROM json_each(json(${rel.c.props})) je), '{}')`
-    : vertexPropsAgg(rel.c.id);
+  elem === 'edge' ? edgeValueMapProps(rel.c.id) : vertexPropsAgg(rel.c.id);
 
 /**
  * Compile a nested traversal (the node inside by(__.…)/where(__.…)) to a
@@ -406,8 +428,9 @@ function edgeAggFrom(steps: Step[], nodeIdExpr: Expression): Scalar {
   // out()/in()/both() the value would come from the NEIGHBOUR vertex (a join),
   // which is a separate, unimplemented shape.
   if (mv.name.endsWith('E') && steps[1]?.name === 'values' && steps.length === 3 && steps[2].name in AGG_FN && steps[2].name !== 'count') {
-    const pe = propExtract('props', steps[1].args[0]);
-    return { expr: q`(SELECT ${AGG_FN[steps[2].name]}(${pe.expr}) FROM edges WHERE ${incidence}${lbl})` };
+    // Aggregate an edge property over the incident edges — JOIN the normalized
+    // edge_properties table (was json_extract of the retired flat blob).
+    return { expr: q`(SELECT ${raw(AGG_FN[steps[2].name])}(ep.value) FROM edges JOIN edge_properties ep ON ep.edge=edges.id WHERE ${incidence}${lbl} AND ep.key=${value(steps[1].args[0])})` };
   }
   return inlineScalarMiss();
 }
@@ -477,8 +500,8 @@ function compileInlinePredicate(
     return predicateSql(inline.expr, isPred);
   }
 
-  // Current-element predicates (no movement). Node props → ANY-match EXISTS over
-  // vertex_properties; edge props → json_extract of the flat blob (hasProp dispatches).
+  // Current-element predicates (no movement). ANY-match EXISTS over the element's
+  // normalized properties table — vertex_properties / edge_properties (hasProp dispatches).
   if (head === 'values' && body.length === 1) {
     // bare where(__.values(k)) → the key exists at all; .is(P) → any value matches P.
     return hasProp(ctx, body[0].args[0], hasIs ? isPred : undefined);

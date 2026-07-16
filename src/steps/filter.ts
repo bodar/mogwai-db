@@ -128,8 +128,9 @@ export const has: StepFn = (s, st) => {
       : (() => { throw new Error(`has(T.${key.token}) not supported`); })();
     conds.push(predicateSql(expr, val));
   } else {
-    // Node → ANY-match EXISTS over vertex_properties; edge → json_extract of the flat
-    // blob. hasProp dispatches on elem (the current traverser is aliased `n`).
+    // ANY-match EXISTS over the element's normalized properties table (vertex_properties
+    // for a node, edge_properties for an edge). hasProp dispatches on elem (current
+    // traverser aliased `n`).
     conds.push(hasProp(currentCtx(st), key, val));
   }
   return filterCte(st, list(conds, ' AND '));

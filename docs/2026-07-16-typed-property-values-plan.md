@@ -1,10 +1,47 @@
 # Typed property values — one type vocabulary, parse → store → read → frame
 
-**Date:** 2026-07-16 · **Status:** PLAN (not started). Schema change APPROVED (alpha,
-no users, no data migration). **Baseline at authorship:** L3 1021, corpus 2298/2298.
+**Date:** 2026-07-16 · **Status:** P1 LANDED (2026-07-16); P2/P3 pending. Schema change
+APPROVED (alpha, no users, no data migration). **Baseline at authorship:** L3 1021,
+corpus 2298/2298. **After P1:** L3 1021 (held — P1 is the enabler; conformance cashes in
+at P2/P3), corpus 2298/2298, uniqueFailed 845→818 (list-bind crash gone), full CI green.
 This doc is written to be executed from a COLD (`/clear`ed) context — it restates
 everything needed. Sibling context: `docs/2026-07-16-compiler-consolidation-plan.md`
-(the value-streams work this builds on) and memory `w4-property-model`.
+(the value-streams work this builds on) and memory `w4-property-model`,
+`typed-property-values`.
+
+## P1 LANDED — deviations from the original plan (user steer, 2026-07-16)
+
+Three decisions changed the shape from the "Design" section below; that section is now
+the P2/P3 spec, and this block is the truth for what shipped in P1:
+
+1. **Edges bundled into P1, done RIGHT (not deferred to Phase 4).** Open-question #1 →
+   a NORMALIZED `edge_properties(id, edge, key, value, vtype, UNIQUE(edge,key))` table,
+   replacing the retired flat `edges.props` blob. Every edge read/write migrated (see
+   `plan.ts` edge twins `edgePropScalar`/`edgeHasProp`/`edgePropsAgg`/`edgeValueMapProps`,
+   `write.ts` `insertEdgeProperty`/`readEdgeProps`, and the `select.ts`/`projection.ts`/
+   `group.ts`/`child.ts` edge arms). Bonus correctness: edge-prop numeric order/range now
+   works (untyped `value` column keeps storage class). Output is byte-identical to the old
+   flat blob in P1 (typed edge reads are P2/P3).
+2. **"The wire is the truth", not infer-then-discard.** Open-question #2 → a bound param's
+   canonical type is the GraphBinary DataType the client serialized it as, captured at
+   decode (`wire.ts` `decodeMapWithValueTypes` reads each binding value's leading type-code
+   byte, delegating value decode to the client serializers) and threaded `paramTypes`
+   through the manager `query` seam → `executeQuery` → `compile` → `stepChain` → frontend
+   `VariableContext`. A JS client sending `5_000_000_000` → wire `long` → stored `vtype='long'`
+   (inference would have guessed `int`). Inline literals use their parsed subtype; only an
+   untyped channel (JSON request path) falls back to JS-value inference. `gremlin-types.ts`
+   is the one canonical vocabulary (`CanonicalType`, `WIRE_TYPE_TO_NAME`, `gremlinTypeOf`).
+   Locked-decision #4 (reuse serializers) softened in CLAUDE.md to reuse-first (reading a
+   type-code byte as parsing glue is blessed).
+3. **`vt`/`vtype` unify = P2, not P1.** Open-question #3 (unify) applies to the READ-path
+   numeric-reducer `vt` vs stored `vtype`; P1 doesn't touch reducers, so nothing to unify
+   yet. Honour it when P2 adds the per-row `vtype` column to `values()`/`properties()`.
+
+**P1 scope shipped:** schema (`vtype` on `vertex_properties` + new `edge_properties` table);
+`gremlin-types.ts` vocab; frontend literal type capture; wire param-type capture + seam
+threading; write threads `vtype` + serializes collections as JSONB (fixes the bind crash);
+full edge read/write migration. NOT in P1 (→ P2/P3): `typeOf` via `vtype`, per-row `vtype`
+on reads, `ValueType`/`frameValue` extension, `is(typeOf(LIST))`→ListStream retype.
 
 ## Goal
 

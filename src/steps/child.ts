@@ -1,6 +1,6 @@
 import { derived, empty, list, q, value, type Expression, type Relation } from '../q.ts';
 import { stepChain } from '../frontend.ts';
-import { edges, labels, nodes, vertexProperties } from '../schema.ts';
+import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
 import { advance, carriedWith, carryFrag, carriedCols, withCarried, type ElementStream } from './context.ts';
 import { aliasId } from './alias.ts';
 import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStream, type Stream } from './stream.ts';
@@ -321,8 +321,9 @@ function compileScalarChildRows(
         from = q`${c} JOIN ${vp} ON ${vp.c.node}=${c.c.id} AND ${vp.c.key}=${value(key)}`;
         order = q`${c.c.id}, ${vp.c.id}`;
       } else {
-        scalar = q`j.value`;
-        from = q`${c} JOIN ${elem} ON ${elem.c.id}=${c.c.id} JOIN json_each(json(${elem.c.props})) j ON j.key=${value(key)}`;
+        const ep = edgeProperties.as('ep');
+        scalar = ep.c.value;
+        from = q`${c} JOIN ${ep} ON ${ep.c.edge}=${c.c.id} AND ${ep.c.key}=${value(key)}`;
         order = c.c.id;
       }
     } else if (terminal.name === 'id') {

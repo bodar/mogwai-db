@@ -285,8 +285,8 @@ function groupBuffer(rows: any[], key: GroupKey, val: GroupVal): Buffer {
 // row array is fully drained up front by store.query(), a DO SQLite cursor being
 // unable to cross awaits). Any compile/SQL/framing error throws straight out of
 // executeQuery to the edge's one try/catch — there is no partial/streamed state.
-function* framedResults(store: GraphStore, gremlin: string, params: Record<string, any>): Generator<Buffer> {
-  const plan = compile(gremlin, params);
+function* framedResults(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, string>): Generator<Buffer> {
+  const plan = compile(gremlin, params, undefined, paramTypes);
   if (plan.kind === 'write') {
     for (const r of plan.run(store)) {
       // Write responses carry a flat {key:value} prop bag; vertexBuffer wants
@@ -374,7 +374,10 @@ function* framedResults(store: GraphStore, gremlin: string, params: Record<strin
  * (never SQLite value types) cross the seam. Throws on any compile/SQL/framing
  * failure; the edge (router) turns that into a buffered error frame. Wire parsing
  * (concern A) and HTTP response framing/pacing (concern C) live at the edge.
+ * `paramTypes` (the wire DataType per bound param, from concern A) crosses the seam
+ * so the compiler can record typed property writes; defaults to {} (JSON path / callers
+ * without wire types → infer from the JS value).
  */
-export function executeQuery(store: GraphStore, gremlin: string, params: Record<string, any>): Buffer[] {
-  return [...framedResults(store, gremlin, params)];
+export function executeQuery(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, string> = {}): Buffer[] {
+  return [...framedResults(store, gremlin, params, paramTypes)];
 }
