@@ -177,8 +177,24 @@ export function isElementFoldChild(nested: any, params: Record<string, any>): bo
   if (!nested) return false;
   const body = childSteps(nested, params);
   if (body.at(-1)?.name !== 'fold') return false;
-  const before = body.slice(0, -1);
+  let before = body.slice(0, -1);
+  if (before.at(-1)?.name === 'order' && !(before.at(-1) as PStep).bys) before = before.slice(0, -1); // bare order = fold's id order
   return before.length === 0 || elementRowParts(before) !== null;
+}
+
+/** An element traversal used as a group VALUE with no terminal reducer/fold. Per
+ *  TinkerPop, an unreduced group value collects its results into a list, so this is an
+ *  implicit fold — e.g. by(__.out()) ≡ by(__.out().fold()). A trailing bare order() is
+ *  the fold's natural id order (accepted, stripped when compiled); order().by(key) is
+ *  NOT (it would need key-ordered folding — deferred). */
+export function isElementImplicitFoldChild(nested: any, params: Record<string, any>): boolean {
+  if (!nested) return false;
+  let body = childSteps(nested, params);
+  if (body.at(-1)?.name === 'order' && !(body.at(-1) as PStep).bys) body = body.slice(0, -1);
+  if (!body.length) return false;
+  const last = body.at(-1)!.name;
+  if (last === 'fold' || CHILD_SCALAR_REDUCERS.has(last)) return false; // reducer/fold have their own paths
+  return elementRowParts(body) !== null;
 }
 
 /** Compile a terminal child count as a true scope-aware barrier. The preserved
@@ -507,6 +523,17 @@ export function tryCompileElementRowsBeforeFold(
   return compileElementChildRows(parent, nested, scope, 'fold');
 }
 
+/** Element rows for an implicit-fold group value (no terminal fold — the whole body is
+ * collected into a list). Same origin-retaining shape as tryCompileElementRowsBeforeFold;
+ * a trailing bare order() is stripped inside compileElementChildRows. */
+export function tryCompileElementImplicitFoldRows(
+  parent: ElementStream,
+  nested: any,
+  scope: CompileScope = ROOT_SCOPE,
+): { stream: ElementStream; frame: ChildFrame } | null {
+  return compileElementChildRows(parent, nested, scope);
+}
+
 /** Productive element rows with the child origin retained. Existence consumers use
  * the row marker only; optional/group-like consumers may inspect the typed element. */
 export function tryCompileElementValueRows(
@@ -579,7 +606,11 @@ function compileElementChildRows(
   const fullBody = childSteps(nested, parent.params);
   if (stripTerminal && fullBody.at(-1)?.name !== stripTerminal) return null;
   const orderStep = firstPolicy && fullBody.at(-1)?.name === 'order' ? fullBody.at(-1) : undefined;
-  const body = stripTerminal || orderStep ? fullBody.slice(0, -1) : fullBody;
+  let body = stripTerminal || orderStep ? fullBody.slice(0, -1) : fullBody;
+  // A bare (keyless) order() before a fold/collect is redundant with the fold's natural
+  // id ordering, so strip it here (non-first path): out().order()[.fold()] collects like
+  // out().fold(). order().by(key) is left intact — it would need key-ordered folding.
+  if (!firstPolicy && body.at(-1)?.name === 'order' && !(body.at(-1) as PStep).bys) body = body.slice(0, -1);
   const parts = body.length ? elementRowParts(body) : stripTerminal ? { prefix: [], suffix: [] } : null;
   if (!parts) return null;
   const pushed = pushChildScope(parent, scope);
