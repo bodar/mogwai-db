@@ -254,12 +254,22 @@ export function isTotalScalarChild(nested: any, params: Record<string, any>): bo
   return classifyCountChild(childSteps(nested, params)) !== null;
 }
 
-export function isListChild(nested: any, params: Record<string, any>): boolean {
-  if (!nested) return false;
+/** PURE. A fold()-terminated list child (element parent): the strict shape the branch/list
+ * consumers gate on. Returns the parsed body so the emitter (tryCompileListChild) reuses it
+ * instead of re-parsing — one parse per arm, classify-all-then-emit-all. Deliberately
+ * stricter than compileElementChildRows' fold path (routing control): a scalar-rows-before-
+ * fold OR a pure-movement before-fold; a strict body always emits, so no lockstep throw. */
+export function classifyListChild(nested: any, params: Record<string, any>): { body: ReturnType<typeof stepChain> } | null {
+  if (!nested) return null;
   const body = childSteps(nested, params);
-  if (body.at(-1)?.name !== 'fold') return false;
+  if (body.at(-1)?.name !== 'fold') return null;
   const before = body.slice(0, -1);
-  return classifyScalarChildRows('element', before)?.kind === 'element' || before.every((step) => ELEMENT_CHILD_STEPS.has(step.name));
+  return classifyScalarChildRows('element', before)?.kind === 'element' || before.every((step) => ELEMENT_CHILD_STEPS.has(step.name))
+    ? { body } : null;
+}
+
+export function isListChild(nested: any, params: Record<string, any>): boolean {
+  return classifyListChild(nested, params) !== null;
 }
 
 export function isScalarFoldChild(nested: any, params: Record<string, any>): boolean {
@@ -393,9 +403,10 @@ function compileScalarChildRows(
   scope: CompileScope = ROOT_SCOPE,
   retainChildScope = false,
   stripTerminal?: string,
+  preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ScalarStream; frame: ChildFrame } | null {
   if (!nested) return null;
-  const fullBody = childSteps(nested, parent.params);
+  const fullBody = preParsed ?? childSteps(nested, parent.params);
   if (stripTerminal && fullBody.at(-1)?.name !== stripTerminal) return null;
   const body = stripTerminal ? fullBody.slice(0, -1) : fullBody;
 
@@ -591,8 +602,9 @@ export function tryCompileListChild(
   parent: ElementStream,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
+  preParsed?: ReturnType<typeof stepChain>,
 ): ListStream | null {
-  const scoped = compileScalarChildRows(parent, nested, 'all', scope, true, 'fold');
+  const scoped = compileScalarChildRows(parent, nested, 'all', scope, true, 'fold', preParsed);
   if (scoped) {
     const folded = lowerScopedScalarFold(scoped.stream, { kind: 'child', frames: [scoped.frame] });
     const l = folded.rel.as('l');
@@ -603,7 +615,7 @@ export function tryCompileListChild(
     return toListStream(carryOf(parent), rel, folded.of);
   }
 
-  const element = compileElementChildRows(parent, nested, scope, 'fold');
+  const element = compileElementChildRows(parent, nested, scope, 'fold', false, preParsed);
   if (!element) return null;
   const folded = lowerScopedElementFold(element.stream, { kind: 'child', frames: [element.frame] });
   const l = folded.rel.as('l');
@@ -744,6 +756,7 @@ function compileElementChildRows(
   scope: CompileScope = ROOT_SCOPE,
   stripTerminal?: string,
   firstPolicy = false,
+  preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ElementStream; frame: ChildFrame } | null {
   // Element-valued children are element-parent-only: a property has no adjacency, and an
   // `element()` head that re-roots on the owner is a SCALAR-child concern (compileScalar
@@ -755,7 +768,7 @@ function compileElementChildRows(
   // ONE shape classification (the same classifyElementChildRows the element preflight peeks
   // use) — the bare-order strip, firstPolicy order modulator, and empty-before handling all
   // live in the shared helper, so preflight and compiler cannot diverge.
-  const shape = classifyElementChildRows(childSteps(nested, parent.params), stripTerminal, firstPolicy);
+  const shape = classifyElementChildRows(preParsed ?? childSteps(nested, parent.params), stripTerminal, firstPolicy);
   if (!shape) return null;
   const { parts, orderStep } = shape;
   const pushed = pushChildScope(parent, scope);

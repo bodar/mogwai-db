@@ -5,7 +5,7 @@ import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, elemCtx, type ScalarCtx
 import { tryInlinePredicate } from './predicate.ts';
 import { advance, elemRel, prevRel, carryFrag, carriedCols, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { type AliasShape } from './alias.ts';
-import { isElementChild, isListChild, isScalarChild, pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from './child.ts';
+import { classifyListChild, isElementChild, isListChild, isScalarChild, pushChildScope, ROOT_SCOPE, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from './child.ts';
 import { carryOf, toListStream, toScalarStream, toVariantStream, type ListStream, type ScalarStream, type VariantArms, type VariantStream } from './stream.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
@@ -215,9 +215,12 @@ export function tryLowerScalarUnion(s: Step, st: ElementStream): ScalarStream | 
 export function tryLowerListUnion(s: Step, st: ElementStream): ListStream | null {
   assertForkSafe('union', st);
   const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
-  if (branches.length < 2 || !branches.every((b) => isListChild(b.nested, st.params))) return null;
-  const arms = branches.map((branch) => tryCompileListChild(st, branch.nested)
-    ?? (() => { throw new Error('union() list branch preflight/compiler mismatch'); })());
+  if (branches.length < 2) return null;
+  // classify every arm once (pure, no CTE); emit only if ALL qualify, reusing each parsed
+  // body — so a partly-list union never emits arm0's CTEs before a later arm disqualifies.
+  const plans = branches.map((b) => classifyListChild(b.nested, st.params));
+  if (plans.some((p) => !p)) return null;
+  const arms = branches.map((branch, i) => tryCompileListChild(st, branch.nested, ROOT_SCOPE, plans[i]!.body)!);
   const parts = arms.map((arm) => {
     const a = arm.rel.as('a');
     return q`SELECT ${a.c.list} AS list${carryFrag(st.carried, a)} FROM ${a}`;
@@ -331,10 +334,11 @@ export function tryLowerScalarCoalesce(s: Step, st: ElementStream): ScalarStream
 export function tryLowerListCoalesce(s: Step, st: ElementStream): ListStream | null {
   assertForkSafe('coalesce', st);
   const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
-  if (!branches.length || !branches.every((b) => isListChild(b.nested, st.params))) return null;
+  if (!branches.length) return null;
+  const plans = branches.map((b) => classifyListChild(b.nested, st.params));
+  if (plans.some((p) => !p)) return null;
   const { seedSt, ord } = originSeed(st);
-  const arms = branches.map((branch) => tryCompileListChild(seedSt, branch.nested)
-    ?? (() => { throw new Error('coalesce() list branch preflight/compiler mismatch'); })());
+  const arms = branches.map((branch, i) => tryCompileListChild(seedSt, branch.nested, ROOT_SCOPE, plans[i]!.body)!);
   const parts = arms.map((arm, k) => {
     const a = arm.rel.as('a');
     const prior = k === 0 ? empty : q` WHERE ${list(arms.slice(0, k).map((p) => q`${a.c[ord]} NOT IN (SELECT ${ord} FROM ${p.rel})`), ' AND ')}`;
@@ -767,10 +771,12 @@ export function tryLowerListChoose(s: Step, st: ElementStream): ListStream | nul
   const args = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
   if (args.length !== 3) return null;
   const [predArg, thenArg, elseArg] = args;
-  if (!isListChild(thenArg.nested, st.params) || !isListChild(elseArg.nested, st.params)) return null;
+  const thenPlan = classifyListChild(thenArg.nested, st.params);
+  const elsePlan = classifyListChild(elseArg.nested, st.params);
+  if (!thenPlan || !elsePlan) return null;
   const seedFor = chooseGate(st, predArg.nested);
-  const thenEnd = tryCompileListChild(seedFor(false), thenArg.nested)!;
-  const elseEnd = tryCompileListChild(seedFor(true), elseArg.nested)!;
+  const thenEnd = tryCompileListChild(seedFor(false), thenArg.nested, ROOT_SCOPE, thenPlan.body)!;
+  const elseEnd = tryCompileListChild(seedFor(true), elseArg.nested, ROOT_SCOPE, elsePlan.body)!;
   const parts = [thenEnd, elseEnd].map((arm) => {
     const a = arm.rel.as('a');
     return q`SELECT ${a.c.list} AS list${carryFrag(st.carried, a)} FROM ${a}`;
