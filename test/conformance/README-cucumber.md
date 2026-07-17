@@ -55,7 +55,8 @@ CLIENT_MIMETYPE='application/vnd.graphbinary-v4.0' \
 
 **Current live number: 822 pass** (2026-07-14; the exact figure lives in
 `baseline.json`, which the ratchet auto-bumps — treat that file, not this line, as
-authoritative). Progression: P2c-2 cleared the `BeforeAll` gate and published 85;
+authoritative; the same bump also syncs the count in the top-level `README.md`, so commit
+both). Progression: P2c-2 cleared the `BeforeAll` gate and published 85;
 P2b (is/where/not/filter/TextP) → 119; P2-tail (and/or/union/optional) → 126; P3
 repeat/times/emit → 130; W2 (addV/addE/mergeV/mergeE writes + property update) → 204;
 a full-suite tag-scope correction → 445; the path family → 455; per-traverser branching +

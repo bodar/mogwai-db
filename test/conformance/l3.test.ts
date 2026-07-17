@@ -128,7 +128,7 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
 
   if (passing > baseline.passing) {
     if (process.env.CI) {
-      console.log(`L3 ahead of baseline by ${passing - baseline.passing} — bump test/conformance/baseline.json to ${passing} locally and commit (CI does not rewrite it).`);
+      console.log(`L3 ahead of baseline by ${passing - baseline.passing} — run locally to auto-bump test/conformance/baseline.json (and the README count) to ${passing}, then commit both (CI does not rewrite them).`);
     } else {
       const next = { ...baseline, passing };
       writeFileSync(BASELINE, JSON.stringify(next, null, 2) + '\n');

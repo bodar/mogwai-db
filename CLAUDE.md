@@ -258,8 +258,11 @@ blobless+sparse (self-healed in the L3 test's `beforeAll`).
 - **L3** (`test/conformance/l3.test.ts`): a ratcheted `bun test` — boots the conformance
   host in-process and runs the official cucumber suite over GraphBinary. Parses the
   passing count, compares `baseline.json`: fewer → fail; more → auto-bump locally
-  (`!CI`; commit it) so CI only reads it. Step scope = `test/conformance/tags.ts` (widen as
-  steps land; never narrow). Runbook: `test/conformance/README-cucumber.md`.
+  (`!CI`; commit it) so CI only reads it. The same local bump also rewrites the count in
+  `README.md` (fenced by `<!-- L3:passing -->…<!-- /L3:passing -->` — the prose can't drift
+  from the ratchet); commit README alongside baseline.json. Step scope =
+  `test/conformance/tags.ts` (widen as steps land; never narrow). Runbook:
+  `test/conformance/README-cucumber.md`.
 - Every new step lands with SQL snapshot tests, its cucumber tag added to `tags.ts`, and
   corpus still 100%.
 
