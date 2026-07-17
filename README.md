@@ -4,189 +4,132 @@
 
 # mogwai-db
 
-A TinkerPop 4 Gremlin server on SQLite, targeting Cloudflare Durable Objects.
+**A TinkerPop 4 Gremlin graph database that compiles to SQLite — one isolated
+graph per Cloudflare Durable Object, driveable by any TinkerPop client or, over
+its built-in REST + OpenAPI surface, by an agent.**
 
-> ## ⚠️ Status: pre-alpha — work in progress, **not for production**
+Point any TinkerPop 4 client at it and it speaks Gremlin over the standard HTTP
+wire. Under the hood every traversal is **compiled to one SQL query** and run by
+SQLite's planner — it never interprets the graph row-at-a-time. One Durable
+Object is one graph, so per-tenant isolation and scale-to-zero are free.
+
+> ### Status: pre-alpha — design in the open, not for production
 >
-> This is an **active experiment under heavy development on `trunk`**. It is
-> **not ready for real use** — not yet deployed, not hardened, no auth, and the
-> property storage model is about to be reworked (breaking). Do not build
-> anything on it yet. It's shared in the open so the design and progress are
-> visible, not because it's usable. If you pull `trunk`, expect churn.
+> Actively developed on `trunk`; not yet deployed, no auth, expect churn. Shared
+> so the design and progress are visible, not because it's usable yet.
 >
-> **Where we are today:**
-> - **Understands the whole language:** 2,298 / 2,298 canonical Gremlin traversals
->   from the official Gherkin corpus parse + chain-extract (100%).
-> - **Executes correctly:** **822** official TinkerPop Gherkin scenarios pass
->   against a live server through the *unmodified* `gremlin@4.0.0-beta.2` client
->   (of a ~2,041-scenario suite that no provider passes 100% of — we target a
->   declared feature subset: no lambdas, no OLAP, no multi-request transactions).
->   This runs under `bun test` as a **ratchet** (see below); the number only goes up.
-> - **Reads:** compiler is largely complete (movement, filters, projections,
->   aggregation, `where`/`and`/`or`/`union`/`optional`, `repeat`/`times`/`emit`/`until`,
->   `path`/`simplePath`/`cyclicPath`, the per-traverser branching family
->   (`choose`/`coalesce`/`flatMap`/`map`), `match`, `local`, side-effects
->   (`sack`/`aggregate`/`cap`/`group('a')`), the collection tail
->   (`fold`/`unfold`/`select(Column)`/`Scope.local` ops), the set-op / list-algebra
->   family (`combine`/`intersect`/`difference`/`disjunct`/`product`/`conjoin`/`all`/`any`),
->   string transforms (`concat`/`trim`/`reverse`/`toUpper`/`format`/…), `math`, and the
->   type/date casts (`asBool`/`asNumber`/`asDate`)).
-> - **Writes:** the graph is **writable** — `addV`/`addE`, user-supplied ids,
->   `mergeV`/`mergeE` upsert, `property()` update, and multi-/meta-properties
->   (normalized `vertex_properties` table + edge JSONB).
-> - **Traversal strategies:** `withStrategies`/`withoutStrategies` — `SubgraphStrategy`
->   (filtered views) and `PartitionStrategy` (in-graph sub-partitioning: read-filter +
->   write-stamp) apply as filter injection; `ReadOnly`/`EdgeLabel`/`ReservedKeys`
->   verification enforced; optimization strategies accepted as no-ops.
-> - **Not yet:** traverser bulking (the big structural gap — blocks the dense grateful-dead
->   reference graph, where an unbounded `repeat().count()` is astronomically large);
->   path-rooted collection ops; broader `select` alias-threading, `match`, and `repeat`
->   bodies; mixed-type comparability edge cases. See the feature matrix for the exact edges.
->
-> See [docs/2026-07-11-phased-roadmap-plan.md](docs/2026-07-11-phased-roadmap-plan.md) for the phased roadmap and the writes-first sequence.
+> - **Understands the whole language** — 2,298 / 2,298 canonical Gremlin
+>   traversals from the official corpus parse (100%).
+> - **Executes correctly** — **1,080** official TinkerPop Gherkin scenarios pass
+>   against a live server through the *unmodified* `gremlin@4.0.0-beta.2` client,
+>   run under `bun test` as a **ratchet** (the number only goes up).
+> - **Reads + writes + strategies** land across a wide step surface. For the exact
+>   per-step edges see the **[feature support matrix](docs/feature-support-matrix.md)**.
+> - **Next:** per-graph auth + a real Cloudflare deploy, then the conformance grind.
 
-## Where mogwai-db fits (and where it doesn't)
+## Why compile Gremlin to SQL?
 
-mogwai-db is **not** trying to be Neptune or TigerGraph. It's aimed at a
-different, underserved corner of the graph-database space.
+Most Gremlin engines interpret a traversal by walking it step-by-step, pulling
+rows as they go. mogwai-db instead **lowers the whole traversal to a single
+parameterised SQL statement** and hands it to SQLite. The traversal runs *in the
+same process as storage* — no query-engine-to-storage network hop — and k-hop
+movement becomes index-only covering scans. The planner, indexes, and query
+execution are SQLite's job; mogwai-db's job is the compile.
 
-**Good fit:** many small-to-medium **isolated** graphs — per-user knowledge
+```mermaid
+flowchart LR
+  G["Gremlin string<br/>+ params"] --> P["parse<br/><i>generated ANTLR</i>"]
+  P --> IR["step chain<br/><i>own IR</i>"]
+  IR --> N["normalize<br/><i>strategies</i>"]
+  N --> L["lower<br/><i>typed Stream pipeline</i>"]
+  L --> Q["one SQL query<br/><i>CTE chain</i>"]
+  Q --> DB[("SQLite<br/><i>in-process</i>")]
+```
+
+The lowering pipeline is a typed **Stream** model: each read step transforms an
+immutable stream (elements → scalars → lists → groups → …), accumulating CTEs,
+and the whole plan materialises to GraphBinary only at the root. Movement,
+filters, projections, branching, recursion, paths, aggregation, side-effects and
+the collection/string/date families all lower through this one engine — no
+row-at-a-time interpreter anywhere.
+
+## Where it fits (and where it doesn't)
+
+mogwai-db is **not** trying to be Neptune or TigerGraph. It targets a different,
+underserved corner: **many small-to-medium isolated graphs** — per-user knowledge
 graphs, per-tenant SaaS graphs, agent memory, personal projects. One Durable
-Object = one graph, so per-tenant isolation is free and idle graphs cost
-essentially nothing (scale to zero). Point lookups and k-hop traversals compile
-to index-only SQLite queries that run *in the same process as storage* — no
-query-engine-to-storage network hop, so latency on the common OLTP shape is
-competitive with (often faster than) the managed incumbents.
+Object = one graph, so isolation is free and idle graphs cost essentially nothing.
 
-**Poor fit:** one enormous graph, or heavy analytics. A DO caps at ~10 GB of
-SQLite (tens of millions of edges), execution is single-threaded per graph, and
-there are no parallel/OLAP graph algorithms (PageRank, community detection,
-whole-graph scans). If you need to shard one logical graph across machines or run
-graph analytics at scale, use Neptune / TigerGraph — that's their job, not this.
+**Poor fit:** one enormous graph or heavy analytics. A DO caps at ~10 GB of
+SQLite, execution is single-threaded per graph, and there are no OLAP graph
+algorithms. Shard-one-logical-graph or PageRank-at-scale is Neptune/TigerGraph's
+job, not this.
 
-### How it compares
+The tick column is an honest **self-rating**: ✅✅ = a real edge · ✅ = on par ·
+❌ = a weak spot for now. Other columns show where each database sits.
 
-The tick column is mogwai-db's honest **self-rating**: ✅✅ = a real edge · ✅ =
-solid / on par · ❌ = a weak spot for now. The other columns are informational —
-where each database sits on that dimension.
+| Property | mogwai-db | Neptune | Cosmos (Gremlin) | Neo4j Aura | TigerGraph |
+|---|---|---|---|---|---|
+| Gremlin / TinkerPop | ✅✅ **v4** | v3 | v3 | Cypher | GSQL |
+| Managed infra | ✅ Cloudflare-run | managed | managed | managed | managed |
+| Scale-to-zero | ✅✅ ~$0 idle | no | no | no | no |
+| Cheap per-tenant fleets | ✅✅ free | costly | costly | costly | costly |
+| Single-graph scale | ❌ ~10 GB | ~unbounded | ~unbounded | large | large |
+| OLAP | ❌ none | strong | weak | strong | strong |
+| Maturity | ❌ **pre-alpha** | GA | GA | GA | GA |
 
-| Property | mogwai-db | Neptune | Cosmos (Gremlin) | Neo4j Aura | TigerGraph | JanusGraph |
-|---|---|---|---|---|---|---|
-| Gremlin / TinkerPop | ✅✅ **v4** | v3 | v3 | Cypher | GSQL | v3 |
-| Managed infra | ✅ Cloudflare-run | managed | managed | managed | managed | self-run |
-| Capacity planning / sizing | ✅✅ autoscale | serverless | autoscale | provisioned | provisioned | provisioned |
-| Scale-to-zero | ✅✅ ~$0 | no | no | no | no | no |
-| Cheap per-tenant fleets | ✅✅ free | costly | costly | costly | costly | costly |
-| Single-graph scale | ❌ ~10 GB | ~unbounded | ~unbounded | large | large | large |
-| OLAP | ❌ none | strong | weak | strong | strong | Spark |
-| Maturity | ❌ **pre-alpha** | GA | GA | GA | GA | GA |
+Real edges: **idle cost, per-tenant isolation, v4 currency**. Honest concessions:
+**scale ceiling, OLAP, and — for now — maturity**.
 
-Read the columns: mogwai's real edges are **idle cost, per-tenant isolation, and
-v4 currency**; it honestly concedes **scale ceiling, OLAP, and — for now —
-maturity**. The managed services are *equals* on infrastructure ops, not worse.
+## Agent-driven by design
 
-## What works (verified against unmodified gremlin@4.0.0-beta.2)
+Graph lifecycle is a thin **REST layer on the same `/gremlin/{graph}` path** —
+`PUT`/`GET`/`DELETE` create, inspect, and destroy a graph, identically on both
+runtimes; data-plane queries `POST` to it. The server is **self-describing**:
+`GET /openapi.json` serves an OpenAPI 3.1 spec and `/docs` an interactive
+reference. TinkerPop has no data-plane database-provisioning API — here a graph
+springs into being on first access, and management is in-band on the one path.
 
-- v4 HTTP wire protocol: GraphBinary + JSON requests, GraphBinary v4 streamed responses
-- Parser generated from TinkerPop's canonical ANTLR grammar (antlr4ng, TypeScript target)
-- Writes: addV + property (incl. user-supplied `T.id`/`T.label`), general addE (from/to alias or __.V(id)),
-  mergeV/mergeE upsert (option(Merge.onCreate/onMatch)), property() update, iterate()/discard()
-- Reads compiled to CTE-chained SQL:
-  - movement: V/E, hasLabel, has(k,v) + P.gt/gte/lt/lte/within/without + TextP, out/in/both(labels…), dedup, range/skip/limit
-  - projection: values, id, label, count, valueMap, elementMap, properties, edge/property elements
-  - structure: as/select/project/by (column threading), order().by
-  - aggregation: group/groupCount/fold/sum + nested by()
-  - filter/branch: where/not/is, and/or, union, optional
-  - recursion: repeat(__.…).times(n) [+ emit] / .until(pred) via recursive CTE (depth-guarded)
-  - paths: path/simplePath/cyclicPath + path().by(), repeat().path() (JSONB-array walk), repeat(simplePath) cycle-free walks
-- Vertex/edge property materialization (custom GraphBinary framing — client serializer ships empty props)
-- Errors propagate as GraphBinary status trailers (client raises ResponseError with server message)
+The direction of travel: that REST + OpenAPI surface makes mogwai-db a natural
+**MCP-compatible, agent-driven graph database** — an agent can create graphs,
+write, and traverse with no bespoke tooling, just the described HTTP contract.
 
-## Runs on two runtimes from one codebase
+## One codebase, two runtimes
 
-Everything above the storage driver is runtime-agnostic; the platform-specific
-leaf is injected via DI (`@bodar/yadic`). Same parser, compiler, framing and
-edge serve both:
+Everything above the storage driver is runtime-agnostic; the platform leaf is
+injected via DI. The same parser, compiler, and wire framing serve both:
+
 - **Bun** (dev/local) — `Bun.serve` over `bun:sqlite`.
-- **Cloudflare Durable Objects** (production) — one DO = one isolated graph, over
-  `ctx.storage.sql`. Worker routes `POST /gremlin/{graphId}` → `getByName` → DO,
-  and calls a native `query` RPC on it (returns framed result buffers; the Worker
-  streams them). A stock TinkerPop client may instead POST the bare `/gremlin`
-  endpoint, naming the graph in the `g` field.
+- **Cloudflare Durable Objects** (production) — one DO = one isolated graph over
+  `ctx.storage.sql`; the Worker routes `POST /gremlin/{graph}` to the right DO
+  and calls a native `query` RPC on it.
 
-The request path is split into three concerns: **wire parse** (`src/wire.ts`) and
-**response framing/streaming** (`src/http.ts`) at the HTTP edge, **execute + frame**
-(`src/execute.ts`, `query(id,gremlin,params) → Buffer[]`) in the store tier.
-
-The `Sql` interface (`src/storage.ts`) is the seam — two ~15-line adapters
-(`src/bun/BunSqlite.ts`, `src/cloudflare/DurableObjectSqlite.ts`). Both SQLite,
-both synchronous. One shared contract test (`test/contract.ts`) runs against
-both over the real GraphBinary wire, so they're proven identical, not tested twice.
-
-## Layout
-- src/storage.ts                     — `Sql` seam + agnostic `GraphStore` (schema, label interning)
-- src/compiler.ts                    — canonical Gremlin -> step chain -> parameterised SQL / write plans
-- src/wire.ts                        — request wire parsing (sniff JSON/GraphBinary → gremlin/g/batchSize)
-- src/execute.ts                     — execute + GraphBinary result framing → Buffer[] (store tier)
-- src/http.ts                        — chunked GraphBinary response streaming (HTTP edge)
-- src/router.ts                      — shared HTTP edge: routes /gremlin/{g}, dispatches onto GraphManager
-- src/manager.ts                     — GraphManager seam (Bun registry vs CF DO namespace)
-- src/application.ts                 — DI wiring (`application(deps)`), shared by both runtimes
-- src/io.ts                          — reused Apache-2.0 GraphBinary serializers from the gremlin client
-- src/bun/{BunSqlite,server}.ts      — Bun entry: bun:sqlite + Bun.serve
-- src/cloudflare/{DurableObjectSqlite,worker}.ts — CF entry: ctx.storage.sql + Worker/DO
-- test/contract.ts                   — shared conformance contract (both runtimes run it)
-- test/conformance/                  — L1 corpus parse/chain + L3 official cucumber ratchet
-- vendor/tinkerpop/                  — pinned submodule (grammar + Gherkin features + JS GLV cucumber runner)
-- parser/                            — generated from gremlin-language/Gremlin.g4 (regenerate, don't edit)
+Both are SQLite, both synchronous, and one shared contract test runs against both
+over the real GraphBinary wire — so they're proven identical, not tested twice.
 
 ## Run
-Runtime is [Bun](https://bun.sh) (pinned via mise). `mise install` to get it.
 
-The build graph lives in [mise tasks](mise.toml) — `install ─▶ {test, build} ─▶ ci`.
-CI (GitHub Actions) just runs `mise run ci`.
+Runtime is [Bun](https://bun.sh) (pinned via [mise](https://mise.jdx.dev)).
+`mise install` to get it. The build graph is [mise tasks](mise.toml):
+`install ─▶ {test, build} ─▶ ci`; CI just runs `mise run ci`.
 
 ```
-mise run test                  # full suite: corpus + contract (both runtimes) + L3 cucumber ratchet
-mise run build                 # bundle the Worker (wrangler dry-run deploy)
-mise run ci                    # the gate: test + build
-mise run submodule             # provision the pinned tinkerpop submodule (auto-run by test)
-mise run generate              # regenerate parser/ from the submodule grammar (antlr-ng)
-mise run regen-corpus          # re-extract test/conformance/corpus.txt from the submodule features
+mise run test      # full suite: corpus + contract (both runtimes) + L3 cucumber ratchet
+mise run build     # bundle the Worker (wrangler dry-run)
+mise run ci        # the gate: test + build
 
-bun run start                  # Bun server on :8182
-bun run dev:cf                 # Worker + DO under wrangler dev
-bun run deploy                 # wrangler deploy
+bun run start      # Bun server on :8182
+bun run dev:cf     # Worker + DO under wrangler dev
+bun run deploy     # wrangler deploy
 ```
 
-`mise run test` (and plain `bun test`) auto-provisions the tinkerpop submodule
-(blobless + sparse) and boots the Worker under `wrangler dev` for the Cloudflare
-half, so the first run may pause while it clones/installs and workerd starts.
+`bun test` auto-provisions the pinned TinkerPop submodule (grammar + Gherkin
+features + JS cucumber runner) and boots the Cloudflare half under `wrangler
+dev`, so the first run may pause while it clones and `workerd` starts.
 
-**L3 conformance ratchet:** `test/conformance/l3.test.ts` runs the official
-TinkerPop cucumber suite over GraphBinary against an in-process server and
-compares the passing count to `test/conformance/baseline.json`. Fewer than
-baseline fails; more auto-bumps the baseline locally (commit it) — CI only reads
-it, never rewrites, so there is no re-trigger loop. Widen the step scope in
-`test/conformance/tags.ts` as new steps land.
+## Learn more
 
-## Known gaps / next (see [docs/feature-support-matrix.md](docs/feature-support-matrix.md) for the exact per-step edges, and docs/2026-07-11-phased-roadmap-plan.md for the roadmap)
-- **Landed since the roadmap was written:** the management API + runtime parity (W3 —
-  in-band REST lifecycle on `/gremlin/{g}`, identical Bun/Cloudflare); multi-/meta-properties
-  (W4 — normalized `vertex_properties` table); and most of the conformance grind (W5) —
-  `aggregate`/`cap`/`sack`/`group('a')`, `match`, `local`, `choose`/`coalesce`, the
-  collection tail + set-op/list-algebra family, string transforms, `math`, date casts.
-- **Deploy:** per-graph bearer auth + a real Cloudflare deploy → *deployable*.
-- **Conformance grind — the current frontier (all design-heavy):** traverser bulking
-  (unblocks the dense grateful-dead reference graph + `count()` over big recursions);
-  path-rooted collection ops; broader `select` alias-threading, `repeat` bodies, and
-  `match` patterns; `aggregate` `within`/`without` readback; mixed-type comparability.
-- **Not planned (declared out of scope):** lambdas, OLAP/GraphComputer,
-  multi-request transactions.
-
-## Traversal strategies fail closed
-`withStrategies(...)` (e.g. `PartitionStrategy`, `SubgraphStrategy`) parses and
-chains, but the compiler does not yet *apply* it. Rather than silently drop it —
-which would give a client relying on it for logical partition/subgraph isolation
-unfiltered reads with no error — the compiler **rejects it at execution** until
-it's honoured. Fail closed, never leak.
+- **[Feature support matrix](docs/feature-support-matrix.md)** — the scannable,
+  code-grounded map of what compiles and where each partial step stops.
+- The name: *mogwai* (魔怪) is Cantonese for a mischievous little devil — fitting
+  for a pocket-sized graph that speaks **Gremlin**, the TinkerPop query language.
