@@ -1,6 +1,7 @@
 import { CharStream, CommonTokenStream, BaseErrorListener, ParserRuleContext } from 'antlr4ng';
 import { GremlinLexer } from '../parser/GremlinLexer.ts';
 import { GremlinParser } from '../parser/GremlinParser.ts';
+import { flatType, type TypeNode, type CanonicalType } from './gremlin-types.ts';
 
 // ---------- parsing ----------
 //
@@ -36,14 +37,14 @@ export function parseGremlin(query: string) {
 // in parallel so `args` stays plain values for every consumer; read by bare asNumber()/
 // asDate() (to recover the input subtype the value can't carry) and by the write seam
 // (to store vertex_properties/edge_properties.vtype — see gremlin-types.ts).
-export interface Step { name: string; args: any[]; ctx: ParserRuleContext; argTypes?: (string | null)[]; }
+export interface Step { name: string; args: any[]; ctx: ParserRuleContext; argTypes?: (TypeNode | null)[]; }
 
 // Numeric-literal suffix → subtype. No suffix: an integer literal defaults to `int`,
 // a float literal to `double` (TinkerPop's literal typing).
-const INT_LIT_SUFFIX: Record<string, string> = { b: 'byte', s: 'short', i: 'int', l: 'long', n: 'bigint' };
-const FLOAT_LIT_SUFFIX: Record<string, string> = { f: 'float', d: 'double', m: 'bigdecimal' };
-const intLitType = (text: string): string => INT_LIT_SUFFIX[text.slice(-1).toLowerCase()] ?? 'int';
-const floatLitType = (text: string): string => FLOAT_LIT_SUFFIX[text.slice(-1).toLowerCase()] ?? 'double';
+const INT_LIT_SUFFIX: Record<string, CanonicalType> = { b: 'byte', s: 'short', i: 'int', l: 'long', n: 'bigint' };
+const FLOAT_LIT_SUFFIX: Record<string, CanonicalType> = { f: 'float', d: 'double', m: 'bigdecimal' };
+const intLitType = (text: string): CanonicalType => INT_LIT_SUFFIX[text.slice(-1).toLowerCase()] ?? 'int';
+const floatLitType = (text: string): CanonicalType => FLOAT_LIT_SUFFIX[text.slice(-1).toLowerCase()] ?? 'double';
 
 /** Flatten any bracketed-list arguments back to varargs (depth 1). Collection
  *  literals now parse as one array value (see walkArgs); the varargs-style steps
@@ -62,7 +63,7 @@ export const stepName = (cls: string, prefix: string) =>
 /** Collect the top-level step chain (does not descend into nested traversal args).
  *  `paramTypes` names the wire DataType of each bound param (from wire.ts) so a
  *  param-resolved arg records the right canonical type in Step.argTypes. */
-export function stepChain(tree: any, params: Record<string, any>, paramTypes: Record<string, string> = {}): Step[] {
+export function stepChain(tree: any, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Step[] {
   const steps: Step[] = [];
   const visit = (node: any, insideNested: boolean) => {
     const cls = node.constructor.name;
@@ -146,10 +147,10 @@ export function extractSack(tree: any, params: Record<string, any>): SackSpec | 
   if (!w) return null;
   const gl = descendants(w, 'GenericLiteralContext')[0];
   if (!gl) throw new Error('withSack() requires an initial value');
-  const out: any[] = [], types: (string | null)[] = [];
+  const out: any[] = [], types: (TypeNode | null)[] = [];
   walkArgs(gl, out, params, types);
   const op = descendants(w, 'TraversalOperatorContext')[0];
-  return { init: out[0], initType: types[0] ?? null, mergeOp: op ? enumSuffix(op) : undefined };
+  return { init: out[0], initType: flatType(types[0]), mergeOp: op ? enumSuffix(op) : undefined };
 }
 
 /** Pull withSideEffect(key, constValue) declarations into a name→constant registry.
@@ -173,9 +174,9 @@ export function extractSideEffects(tree: any, params: Record<string, any>): Map<
 
 /** Pull literal / predicate / variable arguments out of a step context, plus the
  *  parallel numeric-subtype tags (see Step.argTypes). */
-function extractArgs(ctx: any, params: Record<string, any>, paramTypes: Record<string, string> = {}): { args: any[]; types: (string | null)[] } {
+function extractArgs(ctx: any, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): { args: any[]; types: (TypeNode | null)[] } {
   const args: any[] = [];
-  const types: (string | null)[] = [];
+  const types: (TypeNode | null)[] = [];
   // skip child 0 (step name token) and parens; walking all children is fine since tokens have no children
   for (let i = 0; i < ctx.getChildCount(); i++) walkArgs(ctx.getChild(i), args, params, types, paramTypes);
   return { args, types };
@@ -195,8 +196,8 @@ function argOf(node: any, params: Record<string, any>): any {
 /** Walk one AST node, pushing each recognised argument onto `out` (and its numeric
  *  subtype, or null, onto `types` in lockstep). Unrecognised nodes recurse into
  *  children (a literal buried deeper still surfaces). */
-function walkArgs(node: any, out: any[], params: Record<string, any>, types: (string | null)[], paramTypes: Record<string, string> = {}): void {
-  const emit = (v: any, t: string | null = null) => { out.push(v); types.push(t); };
+function walkArgs(node: any, out: any[], params: Record<string, any>, types: (TypeNode | null)[], paramTypes: Record<string, TypeNode> = {}): void {
+  const emit = (v: any, t: TypeNode | null = null) => { out.push(v); types.push(t); };
   const cls = node.constructor.name;
   if (cls === 'StringLiteralContext') { emit(unquote(node.getText()), 'string'); return; }
   if (cls === 'IntegerLiteralContext') { emit(parseInt(node.getText().replace(/[lL]$/, ''), 10), intLitType(node.getText())); return; }

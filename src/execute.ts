@@ -1,4 +1,5 @@
 import { compile, type ListOf, type MapEntry, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from './compiler.ts';
+import { type TypeNode } from './gremlin-types.ts';
 import type { GraphStore } from './storage.ts';
 import { ioc, VertexProperty, Property, t } from './io.ts';
 
@@ -326,7 +327,7 @@ function groupBuffer(rows: any[], key: GroupKey, val: GroupVal): Buffer {
 // row array is fully drained up front by store.query(), a DO SQLite cursor being
 // unable to cross awaits). Any compile/SQL/framing error throws straight out of
 // executeQuery to the edge's one try/catch — there is no partial/streamed state.
-function* framedResults(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, string>): Generator<Buffer> {
+function* framedResults(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>): Generator<Buffer> {
   const plan = compile(gremlin, params, undefined, paramTypes);
   if (plan.kind === 'write') {
     for (const r of plan.run(store)) {
@@ -425,6 +426,6 @@ function* framedResults(store: GraphStore, gremlin: string, params: Record<strin
  * so the compiler can record typed property writes; defaults to {} (JSON path / callers
  * without wire types → infer from the JS value).
  */
-export function executeQuery(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, string> = {}): Buffer[] {
+export function executeQuery(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Buffer[] {
   return [...framedResults(store, gremlin, params, paramTypes)];
 }

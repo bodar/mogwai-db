@@ -21,6 +21,25 @@ export type CanonicalType =
   | 'datetime' | 'uuid' | 'char' | 'duration'
   | 'list' | 'map' | 'set';
 
+/** The recursively-captured wire/parse type of a value. A scalar leaf is a bare
+ *  CanonicalType string (so every existing argType consumer keeps working — an unknown
+ *  container node falls through gremlinTypeOf to JS inference). A container carries its
+ *  element/entry types so a consumer that needs depth (merge maps) can honor them.
+ *  null = the channel said nothing (JSON path / a JS client that dropped the type). */
+export type TypeNode =
+  | CanonicalType
+  | { t: 'map'; entries: Record<string, TypeNode | null> }
+  | { t: 'list' | 'set'; items: (TypeNode | null)[] };
+
+/** The scalar/container KIND of a TypeNode as a flat name (a scalar node IS its name;
+ *  a container node → its `t`). For the common "I just need a type string" consumer. */
+export const flatType = (tn: TypeNode | null | undefined): CanonicalType | null =>
+  tn == null ? null : typeof tn === 'string' ? tn : tn.t;
+
+/** The value-type under a merge-map key, or null. */
+export const mapEntryType = (tn: TypeNode | null | undefined, key: string): TypeNode | null =>
+  tn != null && typeof tn === 'object' && tn.t === 'map' ? tn.entries[key] ?? null : null;
+
 /** GraphBinary DataType code → canonical name. Built from the client's own DataType
  *  enum so it stays byte-stable with the serializers (no magic numbers). Only the
  *  codes a property VALUE can carry are mapped; element/token codes (VERTEX/T/…) are
@@ -88,9 +107,13 @@ export function normalizeTypeName(name: string): CanonicalType | null {
  *  honest fallback for an untyped channel (a JSON-request param, an unftagged arg).
  *  Returns null when nothing can be said (e.g. a null value), leaving vtype NULL =
  *  "infer on read" (the legacy storage-class path). */
-export function gremlinTypeOf(jsValue: any, argType?: string | null): CanonicalType | null {
-  if (argType) {
-    const c = normalizeTypeName(argType);
+export function gremlinTypeOf(jsValue: any, argType?: TypeNode | null): CanonicalType | null {
+  // A TypeNode may be a scalar name (string) or a container node — flatten to a name;
+  // an unknown/container name falls through to JS inference below (a container JS value
+  // infers to list/map/set anyway, so a container node needs no special handling here).
+  const flat = flatType(argType);
+  if (flat) {
+    const c = normalizeTypeName(flat);
     if (c) return c;
   }
   if (jsValue === null || jsValue === undefined) return null;

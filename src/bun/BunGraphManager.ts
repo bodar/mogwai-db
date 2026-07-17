@@ -1,4 +1,5 @@
 import { mkdirSync, rmSync } from 'node:fs';
+import { type TypeNode } from '../gremlin-types.ts';
 import { join } from 'node:path';
 import { GraphStore } from '../storage.ts';
 import { type GraphManager, type GraphInfo, graphInfo } from '../manager.ts';
@@ -42,7 +43,7 @@ export class BunGraphManager implements GraphManager {
     return g;
   }
 
-  async query(id: string, gremlin: string, params: Record<string, any>, paramTypes: Record<string, string> = {}): Promise<Buffer[]> {
+  async query(id: string, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<Buffer[]> {
     return executeQuery(this.resolve(id).store, gremlin, params, paramTypes);
   }
 

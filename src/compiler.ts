@@ -1,4 +1,5 @@
 import { parseGremlin, stepChain, extractStrategies, extractSack, extractSideEffects } from './frontend.ts';
+import { type TypeNode } from './gremlin-types.ts';
 import { applyStrategies, normalize } from './strategies.ts';
 import { compileRead } from './steps/index.ts';
 import { routeWrite } from './steps/write.ts';
@@ -21,7 +22,7 @@ export type { CompileOptions, FastPathConfig } from './fast-paths.ts';
 // verification checks / fail-closed rejections — lives in strategies.ts
 // (extractStrategies front-end + applyStrategies). See that module's header.
 
-export function compile(gremlin: string, params: Record<string, any>, options?: CompileOptions, paramTypes: Record<string, string> = {}): Compiled | WritePlan {
+export function compile(gremlin: string, params: Record<string, any>, options?: CompileOptions, paramTypes: Record<string, TypeNode> = {}): Compiled | WritePlan {
   const tree = parseGremlin(gremlin);
   const rewritten = applyStrategies(stepChain(tree, params, paramTypes), extractStrategies(tree, params), params);
   const { steps, discard } = normalize(rewritten);
