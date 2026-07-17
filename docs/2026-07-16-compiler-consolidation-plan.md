@@ -574,9 +574,9 @@ P1–P4 landed; P5 partial. What the spree did NOT close, ranked by leverage/app
    `docs/2026-07-17-writes-through-read-spine-plan.md` (with its two corrected premises:
    @StepWrite is io-serialization not data-writes; #3's general axis is the whole map
    completed by traversals per driver, both legal per grammar). **Deferred follow-ons (each
-   unblocks reachable legal shapes):** (a) **typed merge VALUES** — merge props are
-   JS-type-inferred via `singleProps`, so a uuid/datetime/long merge value can mistype
-   (pre-existing; needs a typed prop pipeline through `singleProps`/`commonMergeConds`);
+   unblocks reachable legal shapes):** (a) ~~**typed merge VALUES**~~ **DONE (2026-07-17,
+   `docs/2026-07-17-typed-merge-values-plan.md`)** — merge props now keep their type from
+   the map's `TypeNode` (recursive wire capture + literal subtype + nested read shape);
    (b) **map-valued merge drivers** — unblocks `__.identity()`/incoming-as-map whole-arg;
    (c) **addV mid-chain** + **read-tails-after-write** — unblock the corpus write scenarios
    that seed a value/key/label at the incoming (not new) element.
