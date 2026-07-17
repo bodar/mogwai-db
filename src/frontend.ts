@@ -64,6 +64,15 @@ export const stepName = (cls: string, prefix: string) =>
  *  `paramTypes` names the wire DataType of each bound param (from wire.ts) so a
  *  param-resolved arg records the right canonical type in Step.argTypes. */
 export function stepChain(tree: any, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Step[] {
+  // A nested-traversal arg's payload (`{nested}`) is normally an ANTLR
+  // NestedTraversalContext, lowered lazily here. But a TraversalStrategy rewrite
+  // (strategies.ts) synthesizes filter bodies that have NO parse tree — it stores an
+  // already-lowered `Step[]` as the payload instead. stepChain is the single choke point
+  // every nested-body consumer (where/branch/by/child/write) resolves through, so making
+  // it idempotent on a Step[] lets a synthetic body flow through the WHOLE compiler
+  // identically to a parsed one — the substrate that lets strategy injection recurse into
+  // any nested body. A real parse tree is never an array, so the guard is unambiguous.
+  if (Array.isArray(tree)) return tree;
   const steps: Step[] = [];
   const visit = (node: any, insideNested: boolean) => {
     const cls = node.constructor.name;
@@ -86,6 +95,12 @@ export function stepChain(tree: any, params: Record<string, any>, paramTypes: Re
   visit(tree, false);
   return steps;
 }
+
+/** A nested-traversal argument. Its `nested` payload is an ANTLR NestedTraversalContext or,
+ *  for a strategy-synthesized body, an already-lowered Step[] — stepChain resolves either.
+ *  The one type-guard every consumer uses to detect a sub-traversal arg. */
+export const isNested = (a: any): a is { nested: any } =>
+  a != null && typeof a === 'object' && 'nested' in a;
 
 // ---------- traversal-strategy extraction ----------
 //

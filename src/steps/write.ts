@@ -2,7 +2,7 @@ import type { GraphStore } from '../storage.ts';
 import { q, value, list, empty, raw, render, type Expression } from '../q.ts';
 import { labelIn, nodeHasProp, edgeHasProp } from '../plan.ts';
 import { gremlinTypeOf, isCollectionType, flatType, mapEntryType, type CanonicalType, type TypeNode } from '../gremlin-types.ts';
-import { stepChain, type Step, type SackSpec } from '../frontend.ts';
+import { stepChain, isNested, type Step, type SackSpec } from '../frontend.ts';
 import { normalize, type PStep } from '../strategies.ts';
 import { readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../render.ts';
 import { buildPrefix, compileRead } from './index.ts';
@@ -17,8 +17,6 @@ import { compileInject } from './inject.ts';
 // A CORRELATED arg (its value depends on the current element) is seeded at the driver
 // element by prepending a V(<rowid>)/E(<rowid>) source (numeric arg → rowid match), then
 // compiled + run + extracted per driver row. See docs/2026-07-16-write-args-through-read-spine.md.
-
-const isNested = (a: any): a is { nested: any } => a != null && typeof a === 'object' && 'nested' in a;
 
 // A nested `__.select(k)` where k is a withSideEffect(k, const) key resolves to the
 // constant at compile time (correct-by-construction — the value never changes). Returns

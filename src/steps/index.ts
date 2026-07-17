@@ -151,7 +151,15 @@ function seedUnion(first: PStep, query: Query, params: Record<string, any>, sack
  *  branch.ts). A body carries no strategies normalization (matching seedUnion), so a
  *  repeat/by cluster inside an arm defers via its own compiler's guards. */
 export function lowerElementSteps(steps: PStep[], seedSt: ElementStream, from = 0): { stream: ElementStream; next: number } {
-  let st = seedSt;
+  // trackFromV is per-scope: a chain that lands via otherV() (e.g. an exploded
+  // both()→bothE().otherV() injected by SubgraphStrategy's edge criterion) needs each edge
+  // step in THIS chain to record its entering vertex. The root sets it in buildPrefix; every
+  // OTHER scope (correlated predicate, child count/scalar/element rows, match) folds through
+  // here, so deriving it once at this single choke point fixes them all. Ordinary edge
+  // chains carry no otherV → stay index-only (no dead fv column).
+  let st = (!seedSt.carried.trackFromV && steps.some((s) => s.name === 'otherV'))
+    ? withCarried(seedSt, { trackFromV: true })
+    : seedSt;
   let i = from;
   for (; i < steps.length; i++) {
     const fn = PREFIX.get(steps[i].name);

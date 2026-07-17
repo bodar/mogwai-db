@@ -1,4 +1,4 @@
-import { stepChain, type Step, type StrategySpec, type StrategyUse } from './frontend.ts';
+import { stepChain, isNested, type Step, type StrategySpec, type StrategyUse } from './frontend.ts';
 
 // ---------- normalization passes (Seam 3) ----------
 //
@@ -57,13 +57,48 @@ const BY_HOSTS = new Set(['order', 'select', 'project', 'group', 'groupCount', '
 //    strategy by default; a `without` of a strategy also named in `with` suppresses
 //    it (handled by filtering `with` up front).
 
-const SAFE_OPTIMIZATION_STRATEGIES = new Set([
+// The complete strategy taxonomy. Every strategy TinkerPop ships is classified into ONE
+// handling: no-op / inject / verify / reject. "Unlisted → reject" (the catch-all) is the
+// fail-closed backstop, but every KNOWN strategy is placed explicitly so its classification
+// is a reviewable decision, not an accident of omission.
+//
+// NO-OP — result-preserving on our SQL-compiled OLTP engine (proven identical with/without
+// by TinkerPop's own suite for the optimization set; inert-by-construction for the rest):
+const NO_OP_STRATEGIES = new Set([
+  // Optimization strategies: SQLite's planner + our covering indexes do this work.
   'CountStrategy', 'IdentityRemovalStrategy', 'FilterRankingStrategy',
   'LazyBarrierStrategy', 'EarlyLimitStrategy', 'OrderLimitStrategy',
   'AdjacentToIncidentStrategy', 'IncidentToAdjacentStrategy', 'InlineFilterStrategy',
   'PathRetractionStrategy', 'PathProcessorStrategy', 'ByModulatorOptimizationStrategy',
   'RepeatUnrollStrategy', 'MatchAlgorithmStrategy', 'MatchPredicateStrategy',
+  // GValue/requirement planning: subsumed by our q-kernel bound-value model (locked
+  // decision #1 — no bytecode) and the absence of a traverser-requirement scheduler.
+  'GValueReductionStrategy', 'ProviderGValueReductionStrategy', 'RequirementsStrategy',
+  // OLAP/GraphComputer-only: inert without .withComputer(), which this project never
+  // supports. (VertexProgramStrategy is NOT here — naming it explicitly requests OLAP, so
+  // it must reject; ComputerVerification/VertexProgramRestriction only guard OLAP configs.)
+  'GraphFilterStrategy', 'ComputerFinalizationStrategy', 'MessagePassingReductionStrategy',
+  'ComputerVerificationStrategy', 'VertexProgramRestrictionStrategy', 'HaltedTraverserStrategy',
+  // Lambda ban: our string grammar (locked decision #2/#5) has no lambda production, so the
+  // condition these verify can never occur — a true no-op, not a skipped check.
+  'LambdaRestrictionStrategy', 'StandardVerificationStrategy',
+  // Metadata-only; we consult no provider hints. CAVEAT: OptionsStrategy/ProfileStrategy/
+  // SeedStrategy stop being no-ops the day with()/profile()/coin()-sample() land — revisit then.
+  'OptionsStrategy', 'ProfileStrategy', 'SeedStrategy',
+  // ConnectiveStrategy's effect (infix .and()/.or() folding) is unconditionally baked into
+  // our compiler (predicate.ts splitInfixConnectors), so requesting it is a no-op; DISABLING
+  // it (withoutStrategies) is rejected below — see ALWAYS_ON_STRATEGIES.
+  'ConnectiveStrategy',
 ]);
+// Strategies whose effect we apply unconditionally, so withoutStrategies() of them cannot be
+// honored (rejecting fail-closed beats silently returning wrong rows — e.g.
+// withoutStrategies(ConnectiveStrategy) expects infix .or() to become a no-op filter).
+const ALWAYS_ON_STRATEGIES = new Set(['ConnectiveStrategy']);
+// NOT no-ops, deliberately absent so they hit the catch-all reject (fail closed): SackStrategy,
+// SideEffectStrategy, EventStrategy (need a Java Supplier/listener — unreachable via string, but
+// never laundered as safe), ElementIdStrategy (changes generated ids), ReferenceElementStrategy
+// (property stripping — harmless only by our framing coincidence, not by contract),
+// VertexProgramStrategy (OLAP). Each would change results if silently ignored.
 const VERIFICATION_STRATEGIES = new Set([
   'ReadOnlyStrategy', 'EdgeLabelVerificationStrategy', 'ReservedKeysVerificationStrategy',
 ]);
@@ -87,23 +122,24 @@ function markProductiveBy(steps: Step[]): Step[] {
 }
 
 /** Steps whose output traverser is a vertex (a partition/subgraph vertex filter is
- *  injected after each). V()/E() are also the source step, at index 0. */
-const VERTEX_PRODUCERS = new Set(['V', 'out', 'in', 'both', 'outV', 'inV', 'bothV']);
+ *  injected after each). V()/E() are also the source step, at index 0. Includes otherV
+ *  (an edge→endpoint landing) — TinkerPop's SubgraphStrategy filters EdgeOtherVertexStep
+ *  too, so omitting it silently skipped the criterion after bothE().otherV(). */
+const VERTEX_PRODUCERS = new Set(['V', 'out', 'in', 'both', 'outV', 'inV', 'bothV', 'otherV']);
 /** Steps whose output traverser is an edge (a partition edge filter injects after). */
 const EDGE_PRODUCERS = new Set(['E', 'outE', 'inE', 'bothE']);
-/** Element-producing step names: the V/E sources plus every movement hop. A nested
- *  sub-traversal that reaches any of these produces elements the top-level filter
- *  injection does NOT cover, so a semantic strategy over it must defer (fail-closed). */
-const ELEMENT_PRODUCERS = new Set([...VERTEX_PRODUCERS, ...EDGE_PRODUCERS]);
-/** Steps whose sub-traversal body a semantic strategy would have to descend into to
- *  stay correct regardless of what it contains (they branch / re-source); not yet
- *  supported, so their mere presence defers. (Movement buried in a where()/by()/map()/
- *  from()/to() body is caught separately by nestedProducesElements.) */
-const NESTED_BODY_STEPS = new Set(['repeat', 'union', 'optional', 'choose', 'coalesce', 'flatMap', 'match', 'local']);
+/** Movement explosion (SubgraphStrategy edge criterion only). To filter the traversed
+ *  EDGE, a vertex→vertex hop must first land on the edge: out→outE.inV, in→inE.outV,
+ *  both→bothE.otherV — the same rewrite TinkerPop performs when an edgeCriterion is set.
+ *  (otherV needs the entering-vertex context; see the trackFromV note in steps/child.ts.) */
+const EXPLODE_EDGE: Record<string, string> = { out: 'outE', in: 'inE', both: 'bothE' };
+const EXPLODE_FARV: Record<string, string> = { out: 'inV', in: 'outV', both: 'otherV' };
 /** Edge-traversal steps EdgeLabelVerificationStrategy guards (a bare, unlabelled one
  *  is "a vertex step without any specified edge label"). */
 const EDGE_TRAVERSAL_STEPS = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE', 'to']);
-/** Steps ReadOnlyStrategy rejects. */
+/** The mutating-step vocabulary — the one source of truth for "this traversal writes":
+ *  ReadOnlyStrategy rejects any of these, and SubgraphStrategy defers over them (a write's
+ *  endpoints aren't a post-hoc read filter). Add a new write step here, not in two places. */
 const MUTATING_STEPS = new Set(['addV', 'addE', 'mergeV', 'mergeE', 'property', 'drop']);
 
 const rejectMsg = (name: string) =>
@@ -113,73 +149,113 @@ const rejectMsg = (name: string) =>
 /** A synthetic step (no real parse context of its own — it borrows the strategy's). */
 const synth = (name: string, args: any[], ctx: StrategySpec['ctx']): Step => ({ name, args, ctx });
 
-/** Does a nested sub-traversal (at ANY depth) produce elements — i.e. contain a V/E
- *  source or a movement hop? Recurses through wrapper steps (and/or/not/where…) that
- *  carry their own {nested} branches, which stepChain deliberately does not descend
- *  into — so where(__.or(__.out(),…)) is caught, not just a top-level where(__.out()). */
-function nestedProducesElements(node: any, params: Record<string, any>): boolean {
-  return stepChain(node, params).some((s) =>
-    ELEMENT_PRODUCERS.has(s.name) ||
-    s.args.some((a) => a && typeof a === 'object' && 'nested' in a && nestedProducesElements(a.nested, params)));
+/** Wrap an already-lowered Step[] as a nested-traversal arg (the substrate: stepChain is
+ *  idempotent on a Step[], so the synthetic body flows through every consumer verbatim). */
+const nestedArg = (steps: Step[]): any => ({ nested: steps });
+
+/** Does any step in the tree (at ANY nesting depth) satisfy `pred`? Recurses through every
+ *  {nested} arg — the generalization of the old nestedProducesElements walk, now used to
+ *  scan for movement/otherV/writes across sub-traversal bodies too. */
+function someStepDeep(steps: Step[], params: Record<string, any>, pred: (s: Step) => boolean): boolean {
+  return steps.some((s) =>
+    pred(s) || s.args.some((a) => isNested(a) && someStepDeep(stepChain(a.nested, params), params, pred)));
 }
 
-/** Fail closed if a semantic strategy would have to reach inside a sub-traversal it
- *  cannot yet filter. Injection only covers the TOP-LEVEL chain's producers; ANY
- *  nested body that produces elements — a where()/by()/map()/from()/to()/option()
- *  criterion (its by() still a separate step pre-normalize), or a branch/re-source
- *  step — would leak unfiltered elements (e.g. group().by(__.out().count()) counting
- *  every edge in the store, or addE().to(__.V(x)) resolving an unreadable endpoint).
- *  Defer rather than under-filter — the exact leak the fail-closed posture prevents. */
-function guardNestedBodies(steps: Step[], strategy: string, params: Record<string, any>): void {
-  for (const s of steps) {
-    if (NESTED_BODY_STEPS.has(s.name))
-      throw new Error(`${strategy} with a ${s.name}() sub-traversal is not yet supported (its filter must apply inside the body)`);
-    for (const a of s.args)
-      if (a && typeof a === 'object' && 'nested' in a && nestedProducesElements(a.nested, params))
-        throw new Error(`${strategy} with an element-producing sub-traversal inside ${s.name}() is not yet supported (the produced elements must be filtered too)`);
-  }
+/** Apply a per-chain injection rule at EVERY nesting depth. Postorder: each step's nested
+ *  bodies are rewritten first (recursing, re-wrapped as `{nested: Step[]}`), THEN the rule
+ *  runs on the current chain. This mirrors TinkerPop's strategy model — apply() runs once
+ *  per traversal, recursing into every child traversal — so a filter lands on movement
+ *  wherever it lives (local()/repeat()/union()/where(...) bodies included), with no
+ *  fail-closed hole. The rule's OWN injected filters are added after the map, so the
+ *  strategy never re-filters its own criterion bodies (TinkerPop's hidden-marker rule). */
+function recurseInject(steps: Step[], params: Record<string, any>, applyLevel: (s: Step[]) => Step[]): Step[] {
+  const withRewrittenChildren = steps.map((s) => ({
+    ...s,
+    args: s.args.map((a) => isNested(a)
+      ? nestedArg(recurseInject(stepChain(a.nested, params), params, applyLevel))
+      : a),
+  }));
+  return applyLevel(withRewrittenChildren);
 }
 
-/** SubgraphStrategy(vertices: __.<criterion>) → inject where(criterion) after every
- *  vertex-producing step (TraversalFilterStep semantics). Edge / vertex-property
- *  criteria and edge-landing steps (which need adjacent-vertex filtering) defer. */
-function injectSubgraph(steps: Step[], spec: StrategySpec, params: Record<string, any>): Step[] {
-  if (spec.config.edges !== undefined)
-    throw new Error('SubgraphStrategy(edges) criterion not yet supported (vertex criterion only)');
+/**
+ * SubgraphStrategy: a rewritable-Step[] view over the whole traversal tree. Injects
+ * `where(vertexCriterion)` after every vertex producer and `where(edgeCriterion)` after
+ * every edge producer; enforces checkAdjacentVertices (a visible edge needs BOTH endpoints
+ * in the subgraph) by testing inV+outV against the vertex criterion (the near endpoint is
+ * already filtered upstream, so re-checking it is a redundant no-op — but check-both is
+ * exactly correct AND avoids otherV's entering-vertex context, which a post-hoc filter over
+ * a user's edge lacks). When an edge criterion is set, out/in/both are exploded to
+ * outE.inV / inE.outV / bothE.otherV so the traversed edge itself can be filtered. Recurses
+ * into nested bodies; criterion bodies are used verbatim (never re-subgraphed).
+ */
+function injectSubgraphRec(steps: Step[], spec: StrategySpec, params: Record<string, any>): Step[] {
   if (spec.config.vertexProperties !== undefined)
     throw new Error('SubgraphStrategy(vertexProperties) criterion not yet supported');
-  const vCrit = spec.config.vertices;
-  if (!(vCrit && typeof vCrit === 'object' && 'nested' in vCrit))
+  const vArg = spec.config.vertices;
+  const eArg = spec.config.edges;
+  if (vArg !== undefined && !isNested(vArg))
     throw new Error('SubgraphStrategy requires a vertices criterion traversal');
-  // An edge-landing step (E/outE/inE/bothE) leaves an edge whose *both* endpoints
-  // must satisfy the vertex criterion (checkAdjacentVertices) — endpoint filtering
-  // is not implemented, so defer rather than under-filter.
-  const edgeStep = steps.find((s) => EDGE_PRODUCERS.has(s.name));
-  if (edgeStep)
-    throw new Error(`SubgraphStrategy with an edge step (${edgeStep.name}()) not yet supported (adjacent-vertex filtering)`);
-  guardNestedBodies(steps, 'SubgraphStrategy', params);
-  const out: Step[] = [];
-  for (const s of steps) {
-    out.push(s);
-    if (VERTEX_PRODUCERS.has(s.name)) out.push(synth('where', [vCrit], spec.ctx));
-  }
-  return out;
+  if (eArg !== undefined && !isNested(eArg))
+    throw new Error('SubgraphStrategy requires an edges criterion traversal');
+  if (vArg === undefined && eArg === undefined)
+    throw new Error('SubgraphStrategy requires a vertices or edges criterion');
+  if (someStepDeep(steps, params, (s) => MUTATING_STEPS.has(s.name)))
+    throw new Error('SubgraphStrategy over a mutating traversal (addV/addE/mergeV/mergeE/property/drop) is not yet supported');
+  // Resolve criterion bodies ONCE; reused by reference at every injection site and never
+  // fed back through recurseInject (the strategy never subgraph-filters its own criteria).
+  const vCrit: Step[] | null = vArg ? stepChain(vArg.nested, params) : null;
+  const eCrit: Step[] | null = eArg ? stepChain(eArg.nested, params) : null;
+  // checkAdjacentVertices (default true): when a traverser lands ON an edge, require BOTH
+  // its endpoints in the subgraph. Setting it false keeps an edge whose endpoint falls
+  // outside the vertex criterion visible — so honour it, or we over-filter (mis-execute).
+  const checkAdj = spec.config.checkAdjacentVertices !== false;
+  const whereOf = (body: Step[]): Step => synth('where', [nestedArg(body)], spec.ctx);
+  const vFilter = (): Step => whereOf(vCrit!);
+  const adjacency = (): Step[] => [
+    whereOf([synth('inV', [], spec.ctx), ...vCrit!]),
+    whereOf([synth('outV', [], spec.ctx), ...vCrit!]),
+  ];
+
+  const applyLevel = (level: Step[]): Step[] => {
+    const out: Step[] = [];
+    for (const s of level) {
+      // Movement explosion (edge criterion only): land on the edge, filter it, land on the
+      // far endpoint, filter it. The NEAR endpoint was filtered by the previous producer.
+      if (eCrit && s.name in EXPLODE_EDGE) {
+        out.push(synth(EXPLODE_EDGE[s.name], s.args, s.ctx));
+        out.push(whereOf(eCrit));
+        out.push(synth(EXPLODE_FARV[s.name], [], s.ctx));
+        if (vCrit) out.push(vFilter());
+        continue;
+      }
+      out.push(s);
+      if (VERTEX_PRODUCERS.has(s.name)) {
+        if (vCrit) out.push(vFilter());
+      } else if (EDGE_PRODUCERS.has(s.name)) {
+        // A user-written edge-landing step (traverser stays on the edge): filter the edge,
+        // then (unless checkAdjacentVertices:false) require both endpoints in the subgraph.
+        if (eCrit) out.push(whereOf(eCrit));
+        if (vCrit && checkAdj) out.push(...adjacency());
+      }
+    }
+    return out;
+  };
+  return recurseInject(steps, params, applyLevel);
 }
 
 /** PartitionStrategy → inject has(partitionKey, within(readPartitions)) after every
  *  element-producing step (read visibility) and property(partitionKey, writePartition)
- *  after every addV/addE (write stamping). Read and write partitions are independent
- *  (TinkerPop allows writing to a partition you cannot read). */
-function injectPartition(steps: Step[], spec: StrategySpec, params: Record<string, any>): Step[] {
+ *  after every addV/addE (write stamping), at every nesting depth. Read and write
+ *  partitions are independent (TinkerPop allows writing to a partition you cannot read). */
+function injectPartitionRec(steps: Step[], spec: StrategySpec, params: Record<string, any>): Step[] {
   const key = spec.config.partitionKey;
   if (typeof key !== 'string')
     throw new Error('PartitionStrategy requires a string partitionKey');
   if (spec.config.includeMetaProperties === true)
     throw new Error('PartitionStrategy(includeMetaProperties) not yet supported');
-  const merge = steps.find((s) => s.name === 'mergeV' || s.name === 'mergeE');
-  if (merge)
-    throw new Error(`PartitionStrategy with ${merge.name}() not yet supported (partition-aware upsert)`);
-  guardNestedBodies(steps, 'PartitionStrategy', params);
+  if (someStepDeep(steps, params, (s) => s.name === 'mergeV' || s.name === 'mergeE'))
+    throw new Error('PartitionStrategy with mergeV()/mergeE() not yet supported (partition-aware upsert)');
   // readPartitions defaults to EMPTY, and the read filter is injected UNCONDITIONALLY
   // (matching TinkerPop's PartitionStrategy.Builder default + apply()): an omitted
   // readPartitions means "see nothing" (has(key, within([])) → 0 rows), NOT "see
@@ -188,15 +264,18 @@ function injectPartition(steps: Step[], spec: StrategySpec, params: Record<strin
   const readRaw = spec.config.readPartitions;
   const readVals: any[] = Array.isArray(readRaw) ? readRaw : readRaw == null ? [] : [readRaw];
   const writeVal = spec.config.writePartition;
-  const out: Step[] = [];
-  for (const s of steps) {
-    out.push(s);
-    if (VERTEX_PRODUCERS.has(s.name) || EDGE_PRODUCERS.has(s.name))
-      out.push(synth('has', [key, { op: 'within', values: readVals }], spec.ctx));
-    if (writeVal !== undefined && (s.name === 'addV' || s.name === 'addE'))
-      out.push(synth('property', [key, writeVal], spec.ctx));
-  }
-  return out;
+  const applyLevel = (level: Step[]): Step[] => {
+    const out: Step[] = [];
+    for (const s of level) {
+      out.push(s);
+      if (VERTEX_PRODUCERS.has(s.name) || EDGE_PRODUCERS.has(s.name))
+        out.push(synth('has', [key, { op: 'within', values: readVals }], spec.ctx));
+      if (writeVal !== undefined && (s.name === 'addV' || s.name === 'addE'))
+        out.push(synth('property', [key, writeVal], spec.ctx));
+    }
+    return out;
+  };
+  return recurseInject(steps, params, applyLevel);
 }
 
 /** Verification strategies assert legality against the user's (pre-injection) chain
@@ -233,14 +312,20 @@ function verify(spec: StrategySpec, steps: Step[]): void {
  * `withStrategies` entry (the only case removal matters, since we apply no default).
  */
 export function applyStrategies(steps: Step[], use: StrategyUse, params: Record<string, any> = {}): Step[] {
+  // A bare withoutStrategies(X) is a no-op when X is applied only on request (nothing to
+  // remove, since we apply no strategy by default) — EXCEPT for an always-on strategy whose
+  // effect is unconditionally baked in and cannot be turned off. Reject those fail-closed.
+  for (const name of use.without)
+    if (ALWAYS_ON_STRATEGIES.has(name))
+      throw new Error(`withoutStrategies(${name}) is not supported: its effect (infix .and()/.or() folding) is unconditionally applied by this compiler and cannot be disabled.`);
   const removed = new Set(use.without);
   const verifiers: StrategySpec[] = [];
   let out = steps;
   for (const spec of use.with) {
     if (removed.has(spec.name)) continue;                 // withoutStrategies suppresses it
-    if (SAFE_OPTIMIZATION_STRATEGIES.has(spec.name)) continue; // result-preserving → no-op
-    else if (spec.name === 'SubgraphStrategy') out = injectSubgraph(out, spec, params);
-    else if (spec.name === 'PartitionStrategy') out = injectPartition(out, spec, params);
+    if (NO_OP_STRATEGIES.has(spec.name)) continue;        // result-preserving / inert → no-op
+    else if (spec.name === 'SubgraphStrategy') out = injectSubgraphRec(out, spec, params);
+    else if (spec.name === 'PartitionStrategy') out = injectPartitionRec(out, spec, params);
     else if (spec.name === 'ProductiveByStrategy') out = markProductiveBy(out);
     else if (VERIFICATION_STRATEGIES.has(spec.name)) verifiers.push(spec);
     else throw new Error(rejectMsg(spec.name));

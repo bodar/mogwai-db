@@ -1,7 +1,7 @@
 # mogwai-db — feature support matrix
 
 Scannable map of what the compiler supports, and where partial steps stop. Grouped
-by traversal concern. **L3 conformance: <!-- L3:passing -->1,086<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+by traversal concern. **L3 conformance: <!-- L3:passing -->1,139<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 Sourced from the dispatch maps (`src/steps/*.ts`) and the compiler `throw` sites — if
 the code defers a shape, it fails closed with a clear error and this file says so. Keep
@@ -166,13 +166,14 @@ One home (`Carry`): a named registry (aggregate/cap/group('a')) and a carried co
 
 | Strategy | | Notes |
 |---|:--:|---|
-| 15 optimization strategies, `withoutStrategies(…)` | ✅ | no-ops (result-preserving; SQL plans itself) |
-| SubgraphStrategy (vertex criterion) | 🟡 | `where`/`has` injection. ❌ edge/vertexProperty criteria, adjacency expansion |
-| PartitionStrategy (read-filter + write-stamp) | 🟡 | `has(within)` + property stamp. ❌ `includeMetaProperties`, partition-aware merge |
+| optimization / OLAP-guard / planning strategies, `withoutStrategies(…)` | ✅ | no-ops (result-preserving on our OLTP SQL engine — complete name→handling taxonomy in `strategies.ts`) |
+| SubgraphStrategy (vertex **and** edge criteria) | ✅ | recursive `where(criterion)` injection over the whole traversal tree; edge criterion explodes `out/in/both`→`…E.…V`; `checkAdjacentVertices` (both endpoints in the subgraph). ❌ vertexProperties criterion, mutating traversals |
+| PartitionStrategy (read-filter + write-stamp) | ✅ | recursive `has(within)` + property stamp. ❌ `includeMetaProperties`, partition-aware `mergeV`/`mergeE` |
 | ReadOnly / EdgeLabel / ReservedKeys verification | ✅ | throw TinkerPop's canonical messages |
 | ProductiveByStrategy | ✅ | productive-NULL policy for every supported consumer |
-| `with(…)` (OptionsStrategy sugar) | ❌ | not implemented |
-| OLAP / GraphComputer / Seed / Event | 🚫 | out of scope |
+| `withoutStrategies(ConnectiveStrategy)` | 🚫 | rejected — its infix `.and()/.or()` folding is unconditionally baked in, so it can't be disabled |
+| `with(…)` (OptionsStrategy sugar) | ❌ | not implemented (the `OptionsStrategy` class itself is a no-op) |
+| SackStrategy / ElementId / SideEffect / Event / VertexProgram | 🚫 | reject fail-closed (would change results; several unreachable via the string grammar) |
 
 ## 14. Element / property model
 
