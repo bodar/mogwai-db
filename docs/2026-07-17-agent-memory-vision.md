@@ -288,9 +288,83 @@ pipeline, and the **ranking-in-SQL** compiler work (matrix-dependent).
 
 ---
 
+## Competitive landscape & economics (mid-2026)
+
+### The gap (independently found, maps onto mogwai's strengths)
+
+> No incumbent combines **(a) true scale-to-zero / zero idle cost, (b) per-tenant *physical*
+> isolation, and (c) graph + temporal reasoning depth.** Today those axes are *anti-correlated*:
+> KG-depth players need a standing graph DB; serverless players skimp on graph/temporal or paywall it.
+
+DO-per-graph sits in that empty corner: physical isolation AND free-when-idle AND graph-native.
+Nobody occupies it. Caveat: it's a crowded, fast-moving market (15+ players; giants pivoting in —
+Pinecone **Nexus**, Weaviate **Engram** GA'd Jun 2026, Redis **Iris**, MongoDB). Architecture-market
+fit is strong; the market is GTM-hard.
+
+### Two camps
+
+- **App-layer memory** (Mem0, Zep/Graphiti, Cognee, Supermemory, Hindsight, MemoClaw, Papr, Memobase):
+  generous free tiers, then **10–50× raw-CF cost**, metered by memories/tokens/ops.
+- **Infra-layer** (Pinecone, Weaviate, Neo4j Aura): **fixed monthly floors** ($45 / $45 / $66)
+  disconnected from usage; Neo4j = standing hourly cluster billing.
+
+Isolation patterns: **shared-table+tenant-key** (weak/cheap — Mem0/Zep/Supermemory) ·
+**dedicated-DB-per-workspace** (strong/expensive/hourly — Neo4j NAMS) · **unsolved** (Letta self-host).
+**DO-per-agent is a fourth point: physically isolated yet individually free when idle.**
+
+### Head-to-head
+
+| vs | Their weakness | mogwai line |
+|---|---|---|
+| **Neo4j NAMS** (model twin: tri-partite + reasoning traces) | Standing Aura ~$66/mo floor, per-workspace dedicated DB, idle costs | Same model, free-when-idle, physical isolation, ~100× cheaper small-scale. **Direct beat.** |
+| **Zep/Graphiti** (deepest bitemporal KG) | Killed self-host (CE dep. Apr 2025); $125/mo floor | Serverless *and* trivially self-hostable (single Bun artifact) — unoccupied combo. Must build temporal depth. |
+| **Mem0** | Graph paywalled at $249/mo Pro; shared-table tenancy | Graph-native every tier; physical isolation. |
+| **Hindsight / MemoClaw** (cheap/serverless/single-store — closest in spirit) | Hindsight=one Postgres (no phys. isolation); MemoClaw=no graph depth | Graph query language + Code Mode + physical isolation + edge locality. |
+| **Weaviate Engram** (most direct threat: GA, instant, per-project/user isolation primitive) | Shared tenancy, $45/mo floor, pipeline-run metered | Physical isolation, no floor, one-fn fused retrieval. |
+
+### Economics — price on value, not cost
+
+Modeled agent (10k memories, 1k retrievals/mo) sits **inside CF free-tier on every meter**. Only real
+cost = fixed platform fee: **$5/mo** (Workers Paid, single-tenant) or **$25/mo** (Workers for Platforms)
+÷ N tenants → **~$0.02–0.03/tenant/mo** at scale. Competitor floors ($45–66/mo) are 100–1000× actual
+usage cost at small scale.
+
+**→ A 30% markup on CF resources underprices the market.** Play: **cost like CF, price like the
+app-layer** (per-memory/per-op). That's where **90%+ gross margin** lives *while still undercutting
+every floor-priced incumbent 100×*. Undercut AND keep margin — both are available here.
+
+### Platform notes
+
+- **Workers for Platforms** (dispatch namespaces) = the multi-tenant-SaaS compute product ($25/mo,
+  1,000 scripts incl., unlimited isolated per-tenant Workers, dispatch Worker routes by tenant). **Not
+  needed for the base product** — DO-per-tenant gives data isolation on a plain $5 Worker. WfP earns
+  its keep only for **untrusted per-tenant code** = Code Mode Layer B (Worker Loader sandbox).
+- **Vectorize isolation is logical** (namespace filter), capped **50k namespaces/index, 50k
+  indexes/account, topK≤50 w/ metadata** — a *second, weaker* isolation model beside the DO's. This is
+  the clincher for **in-DO vectors** (the cosine spike): isolation stays uniform/physical/uncapped, one
+  store, one bill. Vectorize only for corpora overflowing a DO.
+
+### Honest risks
+
+1. **GTM-hard, not tech-hard.** The moat (CF-native scale-to-zero + isolation) is real but copyable by
+   anyone building on DO. Durable edge = first-mover + Code-Mode/Gremlin ergonomics, not substrate alone.
+2. **Engine exists; the memory *product* doesn't.** Owe: vector search, extraction, decay/salience
+   ranking, hygiene/consolidation, temporal depth.
+3. **Temporal-depth bar is high** (Zep bitemporal intervals) — tractable on the typed-value substrate,
+   unbuilt.
+
+**Net verdict:** pursue it. "Instant isolated MCP endpoint on signup, graph-native, ~$0 idle" is a story
+none of the 15 can fully tell. Win condition = build the product layer + value-price + move before
+Engram/Nexus close the gap.
+
 ## Sources
 
 - Official Apache `gremlin-mcp`: `~/Projects/tinkerpop/gremlin-js/gremlin-mcp` (beta.2 + master diff).
+- Competitor landscape + pricing (mid-2026): Mem0, Zep/Graphiti, Letta, Cognee, Supermemory, LangMem,
+  Pinecone/Nexus, Weaviate/Engram, Chroma, Neo4j Aura/NAMS, Papr, Memobase, Hindsight, MemoClaw, Redis
+  Iris, MongoDB Atlas — vendor pricing pages + docs (see conversation research for per-vendor URLs).
+- Cloudflare pricing: Durable Objects, Vectorize, Workers, Workers for Platforms, Workers AI
+  (developers.cloudflare.com/*/platform/pricing).
 - `kpritam/gremlin-mcp`: `~/Projects/gremlin-mcp` (community TinkerPop-3 server; enum-discovery idea).
 - `neo4j-labs/agent-memory`: `~/Projects/agent-memory` (tri-partite model, reasoning traces).
 - Cloudflare Code Mode: blog.cloudflare.com/code-mode-mcp, developers.cloudflare.com/agents/tools/codemode.
