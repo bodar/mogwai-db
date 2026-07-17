@@ -1,8 +1,10 @@
 # Typed merge values — honor the wire type channel deeply (2026-07-17)
 
-**Status:** plan, executing. Closes the `feature-support-matrix` mergeV/mergeE limitation
-"merge prop VALUES are JS-type-inferred (uuid/datetime/long may mistype)" and the
-consolidation §6.1 deferred follow-on (a) "typed merge VALUES".
+**Status: DONE (2026-07-17)** — 3 stages landed (wire deep TypeNode capture → literal-map
+deep types → merge honors them), 428 pass, L3 1086 held. Closes the `feature-support-matrix`
+mergeV/mergeE limitation "merge prop VALUES are JS-type-inferred" and the consolidation §6.1
+deferred follow-on (a) "typed merge VALUES". Remaining follow-ons unchanged: upstream
+JS-client PR, non-conformant-client shim, S2 typed collection elements.
 
 ## The bug
 
