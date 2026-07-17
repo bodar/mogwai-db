@@ -54,7 +54,7 @@ const VT_TO_CANON: Record<string, CanonicalType> = {
 // value (single-cardinality write), or has:false for an empty traversal (→ no property).
 // The stored vtype comes from the read spine's own type (count→long, a typed value→its
 // `as`), else null → inferred from the value. Fails closed on a non-scalar result shape.
-function nestedScalar(store: GraphStore, nestedNode: any, params: Record<string, any>, seed: { id: number; elem: 'node' | 'edge' }): { has: boolean; value: any; vtype: CanonicalType | null } {
+function nestedScalar(store: GraphStore, nestedNode: any, params: Record<string, any>, seed?: { id: number; elem: 'node' | 'edge' }): { has: boolean; value: any; vtype: CanonicalType | null } {
   const { rows, shape } = runNested(store, nestedNode, params, seed);
   if (shape.kind !== 'value' && shape.kind !== 'scalar' && shape.kind !== 'count')
     throw new Error(`property() traversal value producing a ${shape.kind} not yet supported`);
@@ -180,7 +180,7 @@ function compileSetProperty(steps: PStep[], params: Record<string, any>, sideEff
 
 type Cardinality = 'single' | 'list' | 'set';
 interface PropSpec { key: string; value: any; vtype: CanonicalType | null; meta: Record<string, any> | null; cardinality: Cardinality; }
-interface VertexSpec { label: string; props: PropSpec[]; uid: string | number | null; }
+interface VertexSpec { label: string | { nested: any }; props: PropSpec[]; uid: string | number | null; }
 
 // A leading Cardinality token on property() args (default single). Returns it plus
 // the remaining [key, value, ...metaArgs], and `off` — how many leading args were
@@ -223,7 +223,13 @@ const singleProps = (rec: Record<string, any>): PropSpec[] =>
 // An addV(...) step + its trailing property() steps → a vertex spec. A property key or
 // value that is __.select(k) of a withSideEffect constant resolves at parse time.
 function parseVertexSpec(addV: Step, propSteps: Step[], sideEffects?: Map<string, any>, params: Record<string, any> = {}): VertexSpec {
-  let label = (typeof addV.args[0] === 'string' ? addV.args[0] : null) ?? 'vertex';
+  // A nested-traversal label (addV(__.…)) stays UNRESOLVED here (it needs the store) —
+  // insertVertex evaluates it at run time. A __.select(sideEffectConst) collapses now.
+  const a0 = addV.args[0];
+  let label: string | { nested: any } =
+    typeof a0 === 'string' ? a0
+    : isNested(a0) ? ((c) => c.has ? String(c.value) : a0)(constFromSelect(a0, sideEffects, params))
+    : 'vertex';
   const props: PropSpec[] = [];
   let uid: string | number | null = null;
   for (const s of propSteps) {
@@ -352,11 +358,26 @@ function readVertexProps(store: GraphStore, node: number): Record<string, any> {
   return out;
 }
 
-// Insert a vertex from a spec; returns its rowid and external id (uid ?? rowid).
-function insertVertex(store: GraphStore, spec: VertexSpec): { id: number; extId: string | number } {
-  const row = insertRow(store, 'nodes', ['label'], [store.labelId(spec.label)], spec.uid);
-  for (const p of spec.props) applyVertexProperty(store, row.id, p.key, p.value, p.vtype, p.meta, p.cardinality);
-  return row;
+// Insert a vertex from a spec; returns its rowid, external id (uid ?? rowid) and the
+// resolved label (for response framing). A nested-traversal label is evaluated first
+// (unseeded — it's a standalone read producing the label string). Each property VALUE
+// routes through resolveSpecValue — the single value-resolution authority — so a nested
+// value (__.constant/__.values/__.out().count()) is evaluated correlated at the NEW
+// vertex (fresh + edge-less → __.out().count() = 0, per TinkerPop). An empty nested
+// value writes no property (r.has=false).
+function insertVertex(store: GraphStore, spec: VertexSpec, params: Record<string, any> = {}, sideEffects?: Map<string, any>): { id: number; extId: string | number; label: string } {
+  let label: string;
+  if (isNested(spec.label)) {
+    const r = nestedScalar(store, spec.label.nested, params);
+    if (!r.has) throw new Error('addV(traversal) label produced no value');
+    label = String(r.value);
+  } else label = spec.label;
+  const row = insertRow(store, 'nodes', ['label'], [store.labelId(label)], spec.uid);
+  for (const p of spec.props) {
+    const r = resolveSpecValue(store, p, row.id, 'node', params, sideEffects);
+    if (r.has) applyVertexProperty(store, row.id, p.key, r.value, r.vtype, p.meta, p.cardinality);
+  }
+  return { ...row, label };
 }
 
 // g.addV('label').property(k, v)... — and multi-element chains (a graph initializer).
@@ -364,7 +385,7 @@ function compileAddV(steps: PStep[], params: Record<string, any> = {}, sideEffec
   if (steps.some((s, i) => i > 0 && s.name !== 'property'))
     return { kind: 'write', run: (store) => runWriteChainFull(store, steps, params, sideEffects) };
   const spec = parseVertexSpec(steps[0], steps.slice(1), sideEffects, params);
-  return { kind: 'write', run: (store) => { const v = insertVertex(store, spec); return [{ vertex: { id: v.extId, label: spec.label, props: readVertexProps(store, v.id) } }]; } };
+  return { kind: 'write', run: (store) => { const v = insertVertex(store, spec, params, sideEffects); return [{ vertex: { id: v.extId, label: v.label, props: readVertexProps(store, v.id) } }]; } };
 }
 
 interface EdgeCluster { label: string; fromSpec: any; toSpec: any; edgeUid: string | number | null; props: Record<string, any>; propTypes: Record<string, CanonicalType | null>; next: number; }
@@ -398,27 +419,36 @@ function nodeExtId(store: GraphStore, rowid: number): any {
 // Insert one edge from a cluster + resolved endpoints; returns the framed result. The
 // edge row carries no props (retired flat blob) — each property becomes an
 // edge_properties row, typed via the cluster's captured argTypes (else JS-inferred).
-function insertEdge(store: GraphStore, c: EdgeCluster, src: number, tgt: number): any {
+function insertEdge(store: GraphStore, c: EdgeCluster, src: number, tgt: number, params: Record<string, any> = {}, sideEffects?: Map<string, any>): any {
   const { id, extId } = insertRow(store, 'edges', ['src', 'label', 'tgt'], [src, store.labelId(c.label), tgt], c.edgeUid);
-  for (const [k, v] of Object.entries(c.props))
-    insertEdgeProperty(store, id, k, v, c.propTypes[k] ?? gremlinTypeOf(v, null));
-  return { edge: { id: extId, label: c.label, src: nodeExtId(store, src), tgt: nodeExtId(store, tgt), props: c.props } };
+  // Each inline prop VALUE routes through resolveSpecValue (a nested value is evaluated
+  // correlated at the new edge). The response echoes the RESOLVED values, never the raw
+  // {nested} args.
+  const resolved: Record<string, any> = {};
+  for (const [k, v] of Object.entries(c.props)) {
+    const sp: PropSpec = { key: k, value: v, vtype: c.propTypes[k] ?? null, meta: null, cardinality: 'single' };
+    const r = resolveSpecValue(store, sp, id, 'edge', params, sideEffects);
+    if (r.has) { insertEdgeProperty(store, id, k, r.value, r.vtype ?? gremlinTypeOf(r.value, null)); resolved[k] = r.value; }
+  }
+  return { edge: { id: extId, label: c.label, src: nodeExtId(store, src), tgt: nodeExtId(store, tgt), props: resolved } };
 }
 
 // Resolve a cluster's from()/to() and insert the edge.
-function applyEdgeCluster(store: GraphStore, c: EdgeCluster, aliases: Map<string, number>, fallback: number | null, params: Record<string, any>): any {
-  const src = c.fromSpec !== undefined ? resolveEndpoint(store, c.fromSpec, { aliases }, params) : fallback;
-  const tgt = c.toSpec !== undefined ? resolveEndpoint(store, c.toSpec, { aliases }, params) : fallback;
+function applyEdgeCluster(store: GraphStore, c: EdgeCluster, aliases: Map<string, number>, fallback: number | null, params: Record<string, any>, sideEffects?: Map<string, any>): any {
+  // Resolve endpoints from-then-to, once per driver row, BEFORE inserting the edge —
+  // a to(__.addV()) endpoint CREATES a vertex as a side effect (see nestedElementRowid).
+  const src = c.fromSpec !== undefined ? resolveEndpoint(store, c.fromSpec, { aliases }, params, sideEffects) : fallback;
+  const tgt = c.toSpec !== undefined ? resolveEndpoint(store, c.toSpec, { aliases }, params, sideEffects) : fallback;
   if (src == null || tgt == null) throw new Error('addE needs both endpoints — supply from()/to() or an incoming traverser');
-  return insertEdge(store, c, src, tgt);
+  return insertEdge(store, c, src, tgt, params, sideEffects);
 }
 
 // addE — general form. A pure write chain goes to the sequential interpreter;
 // otherwise a single addE with a V()-rooted prefix, one edge per resulting traverser.
-function compileAddE(steps: PStep[], params: Record<string, any>): WritePlan {
+function compileAddE(steps: PStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
   const CHAIN = new Set(['addV', 'as', 'addE', 'from', 'to', 'property']);
   if (steps.every((s) => CHAIN.has(s.name)))
-    return { kind: 'write', run: (store) => runWriteChainFull(store, steps, params) };
+    return { kind: 'write', run: (store) => runWriteChainFull(store, steps, params, sideEffects) };
 
   const addEIdx = steps.findIndex((s) => s.name === 'addE');
   const cluster = parseEdgeCluster(steps, addEIdx);
@@ -434,7 +464,7 @@ function compileAddE(steps: PStep[], params: Record<string, any>): WritePlan {
   return {
     kind: 'write',
     run: (store) => store.query<any>(read.sql, read.binds).map((r) =>
-      applyEdgeCluster(store, cluster, new Map(aliasCols.map(([lbl, c]) => [lbl, r[c]])), r.id, params)),
+      applyEdgeCluster(store, cluster, new Map(aliasCols.map(([lbl, c]) => [lbl, r[c]])), r.id, params, sideEffects)),
   };
 }
 
@@ -449,22 +479,22 @@ function runWriteChainFull(store: GraphStore, steps: Step[], params: Record<stri
       const propSteps: Step[] = [];
       while (i + 1 < steps.length && steps[i + 1].name === 'property') propSteps.push(steps[++i]);
       const spec = parseVertexSpec(s, propSteps, sideEffects, params);
-      const v = insertVertex(store, spec);
-      currentV = v.id; last = { vertex: { id: v.extId, label: spec.label, props: readVertexProps(store, v.id) } };
+      const v = insertVertex(store, spec, params, sideEffects);
+      currentV = v.id; last = { vertex: { id: v.extId, label: v.label, props: readVertexProps(store, v.id) } };
     } else if (s.name === 'as') {
       if (currentV == null) throw new Error('as() before any vertex in write chain');
       for (const lbl of s.args) if (typeof lbl === 'string') aliases.set(lbl, currentV);
     } else if (s.name === 'addE') {
       const cluster = parseEdgeCluster(steps, i);
       i = cluster.next - 1;
-      last = applyEdgeCluster(store, cluster, aliases, currentV, params);
+      last = applyEdgeCluster(store, cluster, aliases, currentV, params, sideEffects);
     } else throw new Error(`write-chain step not supported: ${s.name}()`);
   }
   return last ? [last] : [];
 }
 
 // Resolve an addE from()/to() endpoint to a node rowid.
-function resolveEndpoint(store: GraphStore, spec: any, d: { aliases: Map<string, number> }, params: Record<string, any>): number {
+function resolveEndpoint(store: GraphStore, spec: any, d: { aliases: Map<string, number> }, params: Record<string, any>, sideEffects?: Map<string, any>): number {
   if (typeof spec === 'string') {
     const id = d.aliases.get(spec);
     if (id === undefined) throw new Error(`addE from/to("${spec}"): unknown as() label`);
@@ -602,7 +632,7 @@ function compileMergeV(steps: PStep[], params: Record<string, any>, sideEffects?
         } else {
           const label = onCreate?.label ?? matchSpec.label ?? 'vertex';
           const props = { ...matchSpec.props, ...(onCreate?.props ?? {}) };
-          const v = insertVertex(store, { label, props: singleProps(props), uid: matchSpec.id ?? onCreate?.id ?? null });
+          const v = insertVertex(store, { label, props: singleProps(props), uid: matchSpec.id ?? onCreate?.id ?? null }, params, sideEffects);
           out.push({ vertex: { id: v.extId, label, props } });
         }
       }
@@ -655,7 +685,7 @@ function compileMergeE(steps: PStep[], params: Record<string, any>, sideEffects?
           const label = matchSpec.label ?? onCreate?.label;
           if (!label) throw new Error('mergeE cannot create an edge without a label');
           const props = { ...matchSpec.props, ...(onCreate?.props ?? {}) };
-          out.push(insertEdge(store, { label, fromSpec: undefined, toSpec: undefined, edgeUid: matchSpec.id ?? onCreate?.id ?? null, props, propTypes: {}, next: 0 }, outV, inV));
+          out.push(insertEdge(store, { label, fromSpec: undefined, toSpec: undefined, edgeUid: matchSpec.id ?? onCreate?.id ?? null, props, propTypes: {}, next: 0 }, outV, inV, params, sideEffects));
         }
       }
       return out;
@@ -671,7 +701,7 @@ function compileMergeE(steps: PStep[], params: Record<string, any>, sideEffects?
 interface WriteRule { match: (steps: PStep[]) => boolean; compile: (steps: PStep[], params: Record<string, any>, sackInit?: SackSpec, sideEffects?: Map<string, any>) => WritePlan | Compiled; }
 
 const WRITE_RULES: WriteRule[] = [
-  { match: (s) => s.some((x) => x.name === 'addE'), compile: (s, p) => compileAddE(s, p) },
+  { match: (s) => s.some((x) => x.name === 'addE'), compile: (s, p, _sk, se) => compileAddE(s, p, se) },
   { match: (s) => s[0].name === 'addV', compile: (s, p, _sk, se) => compileAddV(s, p, se) },
   { match: (s) => s.some((x) => x.name === 'mergeV'), compile: (s, p, _sk, se) => compileMergeV(s, p, se) },
   { match: (s) => s.some((x) => x.name === 'mergeE'), compile: (s, p, _sk, se) => compileMergeE(s, p, se) },
