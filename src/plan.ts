@@ -1,6 +1,6 @@
 import { stepChain, flattenListArgs, type Step, type Pred } from './frontend.ts';
 import { q, list, values, paren, empty, value, raw, jsonExtract, type Expression, type Relation } from './q.ts';
-import { edges, nodes } from './schema.ts';
+import { edges, edgeProperties, nodes } from './schema.ts';
 import { normalizeTypeName } from './gremlin-types.ts';
 import { type ValueType } from './render.ts';
 
@@ -375,101 +375,89 @@ export const valueMapProps = (rel: Relation, elem: Elem): Expression =>
   elem === 'edge' ? edgeValueMapProps(rel.c.id) : vertexPropsAgg(rel.c.id);
 
 /**
- * Compile a nested traversal (the node inside by(__.…)/where(__.…)) to a
- * correlated SQL scalar expression. Focused on the proven step set — the L3
- * gate's key/value sub-traversals plus common where idioms:
- *   node ctx:  values(k) | label() | id() | out|in|both([lbl])…count()
- *   edge ctx:  outV|inV()[.values(k)|.label()|.id()] | values(k) | label() | id()
+ * Compile a property-group sub-traversal (the node inside group().by(__.…)) to a
+ * correlated SQL scalar. This is the ONE scalar-child shape with no generic pipeline
+ * home: a group() over a properties() stream has no live ElementStream parent, so its
+ * key/value reads can't go through the child seam (which roots at node/edge). Covered:
  *   prop ctx:  key() | value() | element()[.values(k)|.label()|.id()]
- * Anything past this throws clearly (never silently mis-executes).
+ * Every node/edge correlated scalar (movement count/aggregate, bare value/label/id) now
+ * lowers through the child seam or the correlatedReduce fast path — NOT here.
+ * Anything past this returns null (the caller throws a clear deferral); never mis-executes.
  */
 class InlineScalarMiss extends Error {}
 const inlineScalarMiss = (): never => { throw new InlineScalarMiss(); };
 
-/** Optional correlated-scalar optimization. Unsupported shapes return null so the
- * caller can use generic child lowering; this helper never defines language support. */
-export function tryInlineScalar(inner: Step[], ctx: ScalarCtx): Scalar | null {
-  try { return compileInlineScalar(inner, ctx); }
+/** Property-group scalar reader. Returns null for unsupported shapes; the property
+ * group has no generic child seam, so this is a genuine reader, not a fast path. */
+export function tryPropertyGroupScalar(inner: Step[], ctx: ScalarCtx): Scalar | null {
+  try { return compilePropertyGroupScalar(inner, ctx); }
   catch (error) {
     if (error instanceof InlineScalarMiss) return null;
     throw error;
   }
 }
 
-function compileInlineScalar(inner: Step[], ctx: ScalarCtx): Scalar {
+function compilePropertyGroupScalar(inner: Step[], ctx: ScalarCtx): Scalar {
+  if (ctx.elem !== 'property') return inlineScalarMiss();
   let steps = inner;
-  // A pointer to the "current NODE" (rowid) for terminal value/label/id reads. Once
-  // here the current element is always a node (edge values/label/id return above), so a
-  // values() terminal reads vertex_properties via nodePropScalar.
-  let nodeId: Expression;
-  let directLabelId: Expression | null; // label id readable inline, else null → subquery via nodes
-
   const head = steps[0]?.name;
   if (!head) return inlineScalarMiss();
-
-  if (ctx.elem === 'property') {
-    if (head === 'key') { requireTerminal(steps, 1); return { expr: ctx.pkExpr! }; }
-    if (head === 'value') { requireTerminal(steps, 1); return { expr: ctx.pvExpr! }; }
-    if (head === 'element') { nodeId = ctx.ownerExpr!; directLabelId = null; steps = steps.slice(1); }
-    else return inlineScalarMiss();
-  } else if (ctx.elem === 'edge') {
-    if (head === 'outV' || head === 'inV') { nodeId = head === 'outV' ? ctx.srcExpr! : ctx.tgtExpr!; directLabelId = null; steps = steps.slice(1); }
-    else if (head === 'label') { requireTerminal(steps, 1); return { expr: labelNameSub(ctx.labelIdExpr) }; }
-    else if (head === 'id') { requireTerminal(steps, 1); return { expr: ctx.idExpr }; }
-    else if (head === 'values') { requireTerminal(steps, 1); return { expr: scalarProp(ctx, steps[0].args[0]) }; }
-    // out()/in()/both() are NOT valid on an edge (must go through outV()/inV());
-    // routing them to edgeCountFrom here would compare edges.src to the edge's own
-    // id and silently mis-count, so let them hit the clear throw below.
-    else return inlineScalarMiss();
-  } else { // node
-    nodeId = ctx.idExpr; directLabelId = ctx.labelIdExpr;
-    if (MOVES.has(head)) return edgeAggFrom(steps, ctx.idExpr);
-  }
-
-  // Terminal projection on the resolved current node.
+  if (head === 'key') { requireTerminal(steps, 1); return { expr: ctx.pkExpr! }; }
+  if (head === 'value') { requireTerminal(steps, 1); return { expr: ctx.pvExpr! }; }
+  // element() re-roots on the owning node for a terminal values/label/id read.
+  if (head !== 'element') return inlineScalarMiss();
+  const nodeId = ctx.ownerExpr!;
+  steps = steps.slice(1);
   const s = steps[0];
-  if (!s) return inlineScalarMiss();
+  if (!s) return inlineScalarMiss(); // bare element() is not a scalar
   switch (s.name) {
     case 'values': requireTerminal(steps, 1); return { expr: nodePropScalar(nodeId, s.args[0]) };
-    case 'label':  requireTerminal(steps, 1); return { expr: labelNameSub(directLabelId ?? q`(SELECT label FROM nodes WHERE id=${nodeId})`) };
+    case 'label':  requireTerminal(steps, 1); return { expr: labelNameSub(q`(SELECT label FROM nodes WHERE id=${nodeId})`) };
     case 'id':     requireTerminal(steps, 1); return { expr: nodeId };
-    // constant(x): a fixed scalar per traverser — the common choose().option() body.
     case 'constant': requireTerminal(steps, 1); return { expr: value(s.args[0]) };
     default: return inlineScalarMiss();
   }
 }
 
-/** Vertex→edge/neighbour movement steps (count/EXISTS both key off these). */
+/** Vertex→edge/neighbour movement steps (correlatedReduce/correlatedExists key off these). */
 const MOVES = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE']);
 
 /** SQL aggregate for a terminal reducer over a correlated stream. */
 const AGG_FN: Record<string, string> = { count: 'COUNT', sum: 'SUM', min: 'MIN', max: 'MAX', mean: 'AVG' };
 
-/** out/in/both/outE/inE/bothE([label]) then either …count() or (E-forms only)
- *  …values(k).<sum|min|max|mean>() → a correlated aggregate over the incident
- *  edges on the outer node. The E-suffixed forms cover the same incident edges
- *  (1:1 with the neighbour hop), so direction is the un-suffixed base. */
-function edgeAggFrom(steps: Step[], nodeIdExpr: Expression): Scalar {
-  const mv = steps[0];
+/**
+ * The inline-correlated rendering of a movement reduction, seeded from `ctx.idExpr`:
+ * `<move>.count()` → `(SELECT COUNT(*) FROM edges WHERE incidence)`, or (E-forms only)
+ * `<moveE>.values(k).<sum|min|max|mean>()` → a correlated edge-property aggregate. The
+ * fast middle for count/reducer .is(P) predicates — built on the SAME shared builders as
+ * correlatedExists / the CTE movement StepFns (dirsFor / the typed edges,edgeProperties
+ * relations / labelIn), so it is not a second hand-rolled aggregate over the edge tables.
+ * Returns null for shapes it can't render (non-node ctx, bare-vertex neighbour aggregate
+ * needing a join) so the caller falls through to the generic reducer child.
+ */
+function correlatedReduce(body: Step[], ctx: ScalarCtx): Expression | null {
+  if (ctx.elem !== 'node') return null; // movement reduces from a vertex
+  const mv = body[0];
+  if (!mv || !MOVES.has(mv.name)) return null;
   const base = mv.name.endsWith('E') ? mv.name.slice(0, -1) : mv.name;
-  const dirs = dirsFor(base);
-  // Incidence: an incoming edge matches on any of the base directions' `from` cols
+  const e = edges.as('xe');
+  // Incidence: an incident edge matches any of the base directions' `from` cols
   // (both → src OR tgt). A self-loop matches once (acceptable — no weighted loops).
-  const incidence = paren(list(dirs.map(([from]) => q`${from}=${nodeIdExpr}`), ' OR '));
-  const lbl: Expression = mv.args.length ? q` AND ${labelIn('label', mv.args)}` : empty;
+  const incidence = paren(list(dirsFor(base).map(([from]) => q`${e.c[from]}=${ctx.idExpr}`), ' OR '));
+  const lbl: Expression = mv.args.length ? q` AND ${labelIn(e.c.label, mv.args)}` : empty;
 
-  if (steps[1]?.name === 'count' && steps.length === 2)
-    return { expr: q`(SELECT COUNT(*) FROM edges WHERE ${incidence}${lbl})` };
+  if (body[1]?.name === 'count' && body.length === 2)
+    return q`(SELECT COUNT(*) FROM ${e} WHERE ${incidence}${lbl})`;
 
   // …values(k).<reducer>() aggregates an edge property. E-forms only: on a bare
   // out()/in()/both() the value would come from the NEIGHBOUR vertex (a join),
-  // which is a separate, unimplemented shape.
-  if (mv.name.endsWith('E') && steps[1]?.name === 'values' && steps.length === 3 && steps[2].name in AGG_FN && steps[2].name !== 'count') {
-    // Aggregate an edge property over the incident edges — JOIN the normalized
-    // edge_properties table (was json_extract of the retired flat blob).
-    return { expr: q`(SELECT ${raw(AGG_FN[steps[2].name])}(ep.value) FROM edges JOIN edge_properties ep ON ep.edge=edges.id WHERE ${incidence}${lbl} AND ep.key=${value(steps[1].args[0])})` };
+  // a separate, unimplemented shape.
+  if (mv.name.endsWith('E') && body[1]?.name === 'values' && body.length === 3
+      && body[2].name in AGG_FN && body[2].name !== 'count') {
+    const ep = edgeProperties.as('xep');
+    return q`(SELECT ${raw(AGG_FN[body[2].name])}(${ep.c.value}) FROM ${e} JOIN ${ep} ON ${ep.c.edge}=${e.c.id} WHERE ${incidence}${lbl} AND ${ep.c.key}=${value(body[1].args[0])})`;
   }
-  return inlineScalarMiss();
+  return null;
 }
 
 const requireTerminal = (steps: Step[], n: number) => {
@@ -481,7 +469,7 @@ const requireTerminal = (steps: Step[], n: number) => {
 /**
  * Compile a where()/filter() nested traversal into a boolean SQL predicate
  * correlated on the current traverser (for `WHERE [NOT] <pred>`). Supported:
- *   __.<move>.count().is(P)   → correlated count compared (tries tryInlineScalar)
+ *   __.<move>.count().is(P)   → correlated count compared (correlatedReduce)
  *   __.values(k)[.is(P)]      → current-property predicate (bare → IS NOT NULL)
  *   __.has(k[,v]) / hasLabel  → current-element predicate
  *   __.<move>([label])        → EXISTS over incident edges (bare "has a neighbour")
@@ -564,12 +552,17 @@ function compileInlinePredicate(
   const term = body[body.length - 1]?.name;
 
   // A reducing scalar (count/sum) compared by is(P). Bare (no is) always yields
-  // one value → the traverser always passes, so it's a no-op filter.
+  // one value → the traverser always passes, so it's a no-op filter. The compared
+  // form is an index-only fast path: correlatedReduce renders the reduction as a
+  // correlated subquery (no materialized child). A shape it can't render returns null
+  // → the caller falls through to the generic reducer child (childExistenceGate over
+  // <move>.count().is), which is result-equivalent (an EXPLAIN/benchmark shows the
+  // correlated form is materially leaner — degree filtering is a hot idiom).
   if (term === 'count' || term === 'sum') {
     if (!hasIs) return q`1`;
-    const inline = tryInlineScalar(body, ctx);
-    if (!inline) throw new Error(`where()/filter() form not yet supported: __.${body.map((s) => s.name + '()').join('.')}`);
-    return predicateSql(inline.expr, isPred);
+    const reduced = correlatedReduce(body, ctx);
+    if (!reduced) throw new Error(`where()/filter() form not yet supported: __.${body.map((s) => s.name + '()').join('.')}`);
+    return predicateSql(reduced, isPred);
   }
 
   // Current-element predicates (no movement). ANY-match EXISTS over the element's

@@ -63,11 +63,15 @@ A specialized lowering is a **fast path only** when all of these hold:
 Fast paths are explicit per-compilation switches in `CompileOptions.fastPaths`; never add
 a mutable global flag. The independently disable-safe fast paths are currently
 `predicateInlining`, `singleHopOptional`, and `bulkRepeatCount`. Their equivalence test is
-in `test/compiler.test.ts`. Some `tryInline*` helpers are also still used as compatibility
-machinery where no generic fallback exists (notably predicate `choose`/`repeat` and
-property-group shapes): those uses are migration debt, **not fast paths**, must not be
-copied as extension patterns, and do not qualify for a new switch until a generic fallback
-exists. New fast paths require a switch, enabled-vs-disabled equivalence coverage, and
+in `test/compiler.test.ts`. `tryInlinePredicate`/`correlatedReduce` are the correlated
+predicate fast path under `predicateInlining`, all with generic fallbacks
+(`childExistenceGate`/`tryCombineByChildExistence`/the reducer child), so `where`/`filter`/
+`andOr`/`choose` fall through when disabled — `until()`'s recursive-CTE predicate is the one
+correlated-only consumer (a CTE can't reference the recursive term's outer row, so no generic
+form exists). The remaining `tryInline*` compatibility machinery is `tryPropertyGroupScalar`
+(property-group key/value reads, which have no live ElementStream parent hence no child seam):
+a genuine reader, **not a fast path** and not an extension point, unsupported means fallback.
+New fast paths require a switch, enabled-vs-disabled equivalence coverage, and
 performance evidence in the same change.
 
 Element-valued child `map`/origin-safe `flatMap` bodies now enter
@@ -147,9 +151,16 @@ ordinal, compiles each child independently (including re-rooting math variables 
 `as()` alias), and exposes both value and row-presence columns. `math`, `format`, and
 option-map `choose` use this seam; only the selected option body's presence is observed,
 while an empty choice routes to `Pick.none`. The old `compileNestedScalar` symbol is
-deleted. `tryInlineScalar` is a nullable correlated optimization used only by property
-groups and predicate fast paths; it is not an extension point and unsupported means
-fallback, never semantic rejection. Sack and every element-backed group path are generic.
+deleted. The node/edge correlated count/aggregate (`edgeAggFrom`) is gone: predicate
+`<move>.count()/<moveE>.values(k).<reducer>().is(P)` now lowers through `correlatedReduce`
+(`plan.ts`, an index-only fast path on the shared movement builders — dirsFor/typed
+edges,edgeProperties/labelIn, sibling to `correlatedExists`) with the generic reducer
+child as its `predicateInlining` fallback (`tryCompileCountValueRows` applies a trailing
+`is` as a HAVING, so `childExistenceGate` gates on existence-after-compare). What remains
+of the old inline scalar is `tryPropertyGroupScalar` (property ctx only): `group()` over a
+`properties()` stream has no live ElementStream parent, so its key()/value()/element()
+reads have NO generic child seam — a genuine reader, not a fast path or extension point.
+Sack and every element-backed group path are generic.
 Multi-modulator consumers push one outer parent ordinal, then pass a one-shot
 `reuseCurrentFrame` proof to each independent child. A direct or one-to-one re-rooted
 seed therefore keeps `o0` instead of assigning redundant `o1`; `pushChildScope` consumes
@@ -688,8 +699,9 @@ was 0). Key pieces:
 - Historical compatibility helper `compileNestedScalar(inner, ScalarCtx)` compiled a
   narrow nested traversal into a correlated scalar. Generic child streams have replaced
   it for map/local/project/select/group element sources/math/format/option-choose; the
-  remaining property-group/predicate cases now use nullable `tryInlineScalar`; sack has
-  no fallback. Do not extend the inline vocabulary.
+  predicate `count/reducer.is` case now uses `correlatedReduce` (fast path + generic
+  fallback), and the remaining property-group case uses nullable `tryPropertyGroupScalar`;
+  sack has no fallback. Do not extend the inline vocabulary.
 - `lowerGroup` — group() is a **barrier** → a rich GroupStream, root-framed as one Map. Dual-path
   (locked #3): scalar reducers (count/sum, `json_group_array` scalar-lists) →
   real SQL `GROUP BY`; element values (default list / `by(__.tail())`) →
