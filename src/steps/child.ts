@@ -446,7 +446,9 @@ function compileScalarChildRows(
     if (!classifyScalarChildRows('property', body)) return null;
     const pushed = pushChildScope(parent, scope);
     const stream = lowerSteps(pushed.seed, body, 0);
-    if (stream.kind !== 'scalar') return null;
+    // classify proved a scalar shape; a non-scalar here is an internal classify↔lowerSteps
+    // contradiction, not a fallback — fail loud (a silent null would orphan the CTEs above).
+    if (stream.kind !== 'scalar') throw new Error('property scalar child classified scalar but lowered to ' + stream.kind);
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
   }
 
@@ -460,7 +462,8 @@ function compileScalarChildRows(
   if (terminal.name !== 'constant' && suffix.every((step) => SHARED_SCALAR_CHILD_STEPS.has(step.name))) {
     const pushed = pushChildScope(parent, scope);
     const stream = lowerSteps(pushed.seed, body, 0);
-    if (stream.kind !== 'scalar') return null;
+    // As above: classify proved scalar, so a non-scalar is a contradiction — fail loud.
+    if (stream.kind !== 'scalar') throw new Error('scalar child classified scalar but lowered to ' + stream.kind);
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
   }
 
