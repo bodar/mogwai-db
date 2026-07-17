@@ -133,8 +133,7 @@ function elementRowParts(body: ReturnType<typeof stepChain>): { prefix: ReturnTy
 
 export function isElementChild(nested: any, params: Record<string, any>): boolean {
   if (!nested) return false;
-  const body = childSteps(nested, params);
-  return elementRowParts(body.at(-1)?.name === 'order' ? body.slice(0, -1) : body) !== null;
+  return classifyElementChildRows(childSteps(nested, params), undefined, true) !== null;
 }
 
 /** Syntax-only preflight for shape-aware dispatch. Unlike the tryCompile functions,
@@ -159,9 +158,8 @@ export function isScalarChild(nested: any, params: Record<string, any>): boolean
   const body = childSteps(nested, params);
   const terminal = body.at(-1);
   if (!terminal) return false;
-  if (terminal.name === 'count')
-    return terminal.args.length === 0 && body.slice(0, -1).every((s) => ELEMENT_CHILD_STEPS.has(s.name));
-  return scalarRowParts(body) !== null;
+  if (terminal.name === 'count') return classifyCountChild(body) !== null;
+  return classifyScalarChildRows('element', body)?.kind === 'element';
 }
 
 /** Syntax-only recognizer for a PROPERTY-parent scalar child. A property traverser's
@@ -189,27 +187,71 @@ export function propertyScalarBody(body: ReturnType<typeof stepChain>): ReturnTy
   return null;
 }
 
+/** The pure shape parts a child body classifies into (no CTE, no pushChildScope). These
+ * are the classify half of the classify/emit split: `is*Child` peeks decide dispatch
+ * without polluting the Query, and the compile functions consume the SAME result so the
+ * old preflight/compiler lockstep (and its dead-code mismatch throws) cannot diverge. */
+type ScalarRowParts = NonNullable<ReturnType<typeof scalarRowParts>>;
+type ElementRowParts = NonNullable<ReturnType<typeof elementRowParts>>;
+
+/** PURE. A terminal bare count() over a movement-only prefix — the total-count child
+ * (tryCompileCountChild) and the isTotalScalarChild/count arm of isScalarChild. */
+function classifyCountChild(body: ReturnType<typeof stepChain>): { prefix: ReturnType<typeof stepChain> } | null {
+  const terminal = body.at(-1);
+  if (!terminal || terminal.name !== 'count' || terminal.args.length) return null;
+  const prefix = body.slice(0, -1);
+  return prefix.some((s) => !ELEMENT_CHILD_STEPS.has(s.name)) ? null : { prefix };
+}
+
+/** PURE. The post-strip scalar-row shape decision shared by compileScalarChildRows and
+ * every scalar/property-scalar predicate: a property parent lowers key/value/element().…
+ * (propertyScalarBody), an element parent a values/id/label/constant projection
+ * (scalarRowParts). Callers strip a terminal fold() before calling. */
+function classifyScalarChildRows(
+  parentKind: 'element' | 'property',
+  body: ReturnType<typeof stepChain>,
+): { kind: 'property'; body: ReturnType<typeof stepChain> } | { kind: 'element'; parts: ScalarRowParts } | null {
+  if (parentKind === 'property') return propertyScalarBody(body) ? { kind: 'property', body } : null;
+  const parts = scalarRowParts(body);
+  return parts ? { kind: 'element', parts } : null;
+}
+
+/** PURE. The element-row shape decision shared by compileElementChildRows and the three
+ * element predicates. `firstPolicy` keeps a trailing order() as an explicit ordering
+ * modulator (map cardinality); otherwise a trailing BARE order() is stripped as redundant
+ * with the fold's natural id order. `stripTerminal` requires+drops a terminal step (fold)
+ * and lets an empty before-body qualify. Mirrors compileElementChildRows' L724-733 exactly,
+ * minus the emit-time parent-state guard (sack/fromV/property parent). */
+function classifyElementChildRows(
+  fullBody: ReturnType<typeof stepChain>,
+  stripTerminal: string | undefined,
+  firstPolicy: boolean,
+): { body: ReturnType<typeof stepChain>; parts: ElementRowParts; orderStep?: PStep } | null {
+  if (stripTerminal && fullBody.at(-1)?.name !== stripTerminal) return null;
+  const orderStep = firstPolicy && fullBody.at(-1)?.name === 'order' ? fullBody.at(-1) : undefined;
+  let body = stripTerminal || orderStep ? fullBody.slice(0, -1) : fullBody;
+  if (!firstPolicy && body.at(-1)?.name === 'order' && !(body.at(-1) as PStep).bys) body = body.slice(0, -1);
+  const parts = body.length ? elementRowParts(body) : stripTerminal ? { prefix: [], suffix: [] } : null;
+  return parts ? { body, parts, orderStep: orderStep as PStep | undefined } : null;
+}
+
 export function isPropertyScalarChild(nested: any, params: Record<string, any>): boolean {
   if (!nested) return false;
-  return propertyScalarBody(childSteps(nested, params)) !== null;
+  return classifyScalarChildRows('property', childSteps(nested, params)) !== null;
 }
 
 /** A property scalar child terminated by fold() — the group-value list form. */
 export function isPropertyScalarFoldChild(nested: any, params: Record<string, any>): boolean {
   if (!nested) return false;
   const body = childSteps(nested, params);
-  return body.at(-1)?.name === 'fold' && propertyScalarBody(body.slice(0, -1)) !== null;
+  return body.at(-1)?.name === 'fold' && classifyScalarChildRows('property', body.slice(0, -1)) !== null;
 }
 
 /** Child scalar forms proven to emit exactly one row per parent. They make
  * optional(child) equivalent to child because the identity fallback is unreachable. */
 export function isTotalScalarChild(nested: any, params: Record<string, any>): boolean {
   if (!nested) return false;
-  const body = childSteps(nested, params);
-  const terminal = body.at(-1);
-  return terminal?.name === 'count'
-    && terminal.args.length === 0
-    && body.slice(0, -1).every((s) => ELEMENT_CHILD_STEPS.has(s.name));
+  return classifyCountChild(childSteps(nested, params)) !== null;
 }
 
 export function isListChild(nested: any, params: Record<string, any>): boolean {
@@ -217,22 +259,18 @@ export function isListChild(nested: any, params: Record<string, any>): boolean {
   const body = childSteps(nested, params);
   if (body.at(-1)?.name !== 'fold') return false;
   const before = body.slice(0, -1);
-  return scalarRowParts(before) !== null || before.every((step) => ELEMENT_CHILD_STEPS.has(step.name));
+  return classifyScalarChildRows('element', before)?.kind === 'element' || before.every((step) => ELEMENT_CHILD_STEPS.has(step.name));
 }
 
 export function isScalarFoldChild(nested: any, params: Record<string, any>): boolean {
   if (!nested) return false;
   const body = childSteps(nested, params);
-  return body.at(-1)?.name === 'fold' && scalarRowParts(body.slice(0, -1)) !== null;
+  return body.at(-1)?.name === 'fold' && classifyScalarChildRows('element', body.slice(0, -1))?.kind === 'element';
 }
 
 export function isElementFoldChild(nested: any, params: Record<string, any>): boolean {
   if (!nested) return false;
-  const body = childSteps(nested, params);
-  if (body.at(-1)?.name !== 'fold') return false;
-  let before = body.slice(0, -1);
-  if (before.at(-1)?.name === 'order' && !(before.at(-1) as PStep).bys) before = before.slice(0, -1); // bare order = fold's id order
-  return before.length === 0 || elementRowParts(before) !== null;
+  return classifyElementChildRows(childSteps(nested, params), 'fold', false) !== null;
 }
 
 /** An element traversal used as a group VALUE with no terminal reducer/fold. Per
@@ -242,12 +280,7 @@ export function isElementFoldChild(nested: any, params: Record<string, any>): bo
  *  NOT (it would need key-ordered folding — deferred). */
 export function isElementImplicitFoldChild(nested: any, params: Record<string, any>): boolean {
   if (!nested) return false;
-  let body = childSteps(nested, params);
-  if (body.at(-1)?.name === 'order' && !(body.at(-1) as PStep).bys) body = body.slice(0, -1);
-  if (!body.length) return false;
-  const last = body.at(-1)!.name;
-  if (last === 'fold' || CHILD_SCALAR_REDUCERS.has(last)) return false; // reducer/fold have their own paths
-  return elementRowParts(body) !== null;
+  return classifyElementChildRows(childSteps(nested, params), undefined, false) !== null;
 }
 
 /** Compile a terminal child count as a true scope-aware barrier. The preserved
