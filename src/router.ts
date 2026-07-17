@@ -1,19 +1,27 @@
 // The shared top-level HTTP router — identical on Bun and Cloudflare, and the
 // EDGE that owns concerns A (wire parse) and C (HTTP response framing). It parses
-// `/gremlin/{g}`, dispatches by verb onto the injected `GraphManager`, and owns all
-// management HTTP framing (status codes, JSON). The gremlin data plane resolves the
-// graph id from the path (`/gremlin/{g}`) or, on the bare `/gremlin` endpoint a
-// stock TinkerPop client uses, from the request `g` field; it then parses the body
-// once, hands {gremlin, params} across the manager seam (concern B, run in the store
-// tier), and streams the returned framed buffers back out. Nothing routes on the
-// body: a path id is used directly, and the bare endpoint's body-peek only happens
-// when there is no path id to route on.
+// `/{prefix}/{g}` (prefix defaults to `gremlin`), dispatches by verb onto the injected
+// `GraphManager`, and owns all management HTTP framing (status codes, JSON). The
+// gremlin data plane resolves the graph id from the path (`/{prefix}/{g}`) or, on
+// the bare `/gremlin` endpoint a stock TinkerPop client uses, from the request `g`
+// field; it then parses the body once, hands {gremlin, params} across the manager
+// seam (concern B, run in the store tier), and streams the returned framed buffers
+// back out. Nothing routes on the body: a path id is used directly, and the bare
+// endpoint's body-peek only happens when there is no path id to route on.
+//
+// The graph-path prefix is configurable; `gremlin` is the default. The bare `/gremlin`
+// endpoint is NOT prefixed — it is a fixed TinkerPop HTTP convention (and the path
+// the official cucumber harness / stock GLVs POST to), so it stays regardless.
 import type { GraphManager } from './manager.ts';
 import { parseRequest } from './wire.ts';
 import { streamBuffers, errorResponse } from './http.ts';
-import { DOCS_HTML, OPENAPI_JSON } from './docs.ts';
+import { buildDocs } from './docs.ts';
 
-const GRAPH_PATH = /^\/gremlin\/([^/]+)\/?$/;
+/** The bare endpoint a stock TinkerPop client POSTs to (graph named in the body
+ *  `g` field). A fixed convention, independent of the configurable graph prefix. */
+const BARE_ENDPOINT = '/gremlin';
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -39,11 +47,17 @@ async function runQuery(mgr: GraphManager, pathId: string | null, req: Request):
   }
 }
 
-export function makeRouter(mgr: GraphManager): (req: Request) => Promise<Response> {
+export function makeRouter(
+  mgr: GraphManager,
+  pathPrefix = 'gremlin',
+): (req: Request) => Promise<Response> {
+  const graphPath = new RegExp(`^/${escapeRe(pathPrefix)}/([^/]+)/?$`);
+  const { DOCS_HTML, OPENAPI_JSON } = buildDocs(pathPrefix);
+
   return async function router(req: Request): Promise<Response> {
     const { pathname } = new URL(req.url);
 
-    // Docs surface (GET-only). Separate paths from /gremlin/{g}, so GLV traffic is untouched.
+    // Docs surface (GET-only). Separate paths from /{prefix}/{g}, so GLV traffic is untouched.
     if (req.method === 'GET') {
       if (pathname === '/') return Response.redirect(new URL('/docs', req.url).toString(), 302);
       if (pathname === '/docs')
@@ -54,9 +68,9 @@ export function makeRouter(mgr: GraphManager): (req: Request) => Promise<Respons
 
     // Bare gremlin endpoint: a stock TinkerPop client POSTs to one URL and names the
     // graph in the request `g` field. No path id → runQuery peeks the parsed body.
-    if (req.method === 'POST' && pathname === '/gremlin') return runQuery(mgr, null, req);
+    if (req.method === 'POST' && pathname === BARE_ENDPOINT) return runQuery(mgr, null, req);
 
-    const match = pathname.match(GRAPH_PATH);
+    const match = pathname.match(graphPath);
     if (!match) return new Response('Not found', { status: 404 });
     const id = decodeURIComponent(match[1]);
 

@@ -1,8 +1,13 @@
 // Self-describing HTTP surface: a hand-written OpenAPI 3.1 spec for the four
-// verbs on /gremlin/{id}, plus a tiny Scalar shell that renders it as an interactive
+// verbs on the graph path, plus a tiny Scalar shell that renders it as an interactive
 // reference. Both are served by the shared router (router.ts), so Bun and
 // Cloudflare expose the same docs. No build step, no npm dep — Scalar loads from
 // a CDN in the browser (pinned), so the Worker bundle is untouched.
+//
+// The graph-path prefix is configurable (router.ts owns the default, `gremlin`), so the
+// docs are BUILT from the prefix the router is running — `buildDocs(prefix)` — and
+// can never drift from the live route. The bare `/gremlin` endpoint is a fixed
+// TinkerPop convention, independent of the prefix.
 //
 // The management verbs (PUT/GET/DELETE) are plain JSON and fully interactive in
 // the "Test Request" panel. The gremlin POST accepts a JSON request body today,
@@ -15,21 +20,23 @@ const VERSION = '0.1.0';
 // Pinned so the rendered docs are reproducible; bump deliberately.
 const SCALAR_CDN = 'https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.62.5';
 
-export const OPENAPI_SPEC = {
+export function buildOpenApiSpec(pathPrefix: string) {
+ const graphPath = `/${pathPrefix}/{graphId}`;
+ return {
   openapi: '3.1.0',
   info: {
     title: 'mogwai-db',
     version: VERSION,
     description:
       'A TinkerPop 4 Gremlin server compiled onto SQLite. Each graph is addressed ' +
-      'at `/gremlin/{graphId}` and springs into existence on first access. `POST` runs a ' +
+      `at \`${graphPath}\` and springs into existence on first access. \`POST\` runs a ` +
       'Gremlin traversal; `PUT`/`GET`/`DELETE` manage the graph lifecycle. All ' +
       'management verbs are idempotent and create-on-demand. A stock TinkerPop client ' +
       'may also POST to the bare `/gremlin` endpoint, naming the graph in the `g` field.',
   },
   servers: [{ url: '/', description: 'This server' }],
   paths: {
-    '/gremlin/{graphId}': {
+    [graphPath]: {
       parameters: [
         {
           name: 'graphId',
@@ -147,13 +154,13 @@ export const OPENAPI_SPEC = {
       },
     },
   },
-} as const;
-
-export const OPENAPI_JSON = JSON.stringify(OPENAPI_SPEC);
+ } as const;
+}
 
 // Minimal Scalar shell. Same-origin, so no proxyUrl (requests hit this server
-// directly, never scalar.com's proxy).
-export const DOCS_HTML = `<!doctype html>
+// directly, never scalar.com's proxy). Prefix-independent — it just points at
+// /openapi.json, which the router serves for the running prefix.
+const DOCS_HTML = `<!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
@@ -169,3 +176,12 @@ export const DOCS_HTML = `<!doctype html>
   </body>
 </html>
 `;
+
+/** Build the self-describing surface for a given graph-path prefix. Returns the
+ *  JSON the router serves at `/openapi.json` and the Scalar shell for `/docs`. */
+export function buildDocs(pathPrefix: string) {
+  return {
+    OPENAPI_JSON: JSON.stringify(buildOpenApiSpec(pathPrefix)),
+    DOCS_HTML,
+  };
+}
