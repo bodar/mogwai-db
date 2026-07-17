@@ -251,7 +251,7 @@ function walkArgs(node: any, out: any[], params: Record<string, any>, types: (Ty
   // parameter (xx1) arrives after GraphBinary deserialization. Keys are tagged
   // ({token}/{direction}) or strings; values recurse via argOf. Do NOT fall
   // through to the generic recursion, which would flatten and drop pairing.
-  if (cls === 'GenericMapLiteralContext') { emit(mapLiteral(node, params), 'map'); return; }
+  if (cls === 'GenericMapLiteralContext') { emit(mapLiteral(node, params), mapLiteralType(node, params)); return; }
   // GType.STRING / bare STRING (P.typeOf(...), asNumber(...)) — a type-name enum,
   // captured as a tagged token so predicateSql can map it to a SQL type test.
   // Without this the generic recursion drops it and typeOf sees no argument.
@@ -318,6 +318,24 @@ function mapLiteral(node: any, params: Record<string, any>): Map<any, any> {
     m.set(mapKeyOf(entry.mapKey()), argOf(entry.genericLiteral(), params));
   }
   return m;
+}
+
+/** The recursively-captured TypeNode of a map literal — each entry value's parsed
+ *  subtype (UUID→uuid, 5L→long, a nested map → its own {t:'map'} node, a nested
+ *  traversal / non-scalar → null). Mirrors the wire's decodeTyped for a bound map, so a
+ *  literal `mergeV([gid: UUID(x)])` carries the same type truth a typed client would send.
+ *  The value type is read from the same walkArgs pass that produces the value, so nested
+ *  maps recurse through the GenericMapLiteral case automatically. */
+function mapLiteralType(node: any, params: Record<string, any>): TypeNode {
+  const entries: Record<string, TypeNode | null> = {};
+  for (const entry of node.mapEntry()) {
+    const out: any[] = [], types: (TypeNode | null)[] = [];
+    walkArgs(entry.genericLiteral(), out, params, types);
+    // A single scalar/map value carries its captured type; a multi-arg or empty walk
+    // (unusual) → null (infer at use).
+    entries[String(mapKeyOf(entry.mapKey()))] = out.length === 1 ? (types[0] ?? null) : null;
+  }
+  return { t: 'map', entries };
 }
 
 /** Classify a map key: T token → {token}, Direction → {direction}, else the
