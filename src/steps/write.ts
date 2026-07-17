@@ -493,15 +493,35 @@ function runWriteChainFull(store: GraphStore, steps: Step[], params: Record<stri
   return last ? [last] : [];
 }
 
-// Resolve an addE from()/to() endpoint to a node rowid.
+// Resolve an addE from()/to() endpoint to a node INTERNAL rowid. The authority for
+// every endpoint shape that appears:
+//   "lbl" / __.select("lbl")  → an as()-label rowid   (to(__.select('a')) ≡ to('a'))
+//   __.addV(...)              → a NEW vertex rowid     (nested write, correlated side effect)
+//   __.V()/__.E() read prefix → buildPrefix's rowid    (movement/filter only)
+// It returns rowids (NOT external ids) because edge src/tgt are internal — hence
+// buildPrefix, never runNested (which frames COALESCE(uid,id)). Past-prefix read tails
+// (order/limit) throw: no such endpoint appears in the corpus (fail-closed wall).
 function resolveEndpoint(store: GraphStore, spec: any, d: { aliases: Map<string, number> }, params: Record<string, any>, sideEffects?: Map<string, any>): number {
-  if (typeof spec === 'string') {
-    const id = d.aliases.get(spec);
-    if (id === undefined) throw new Error(`addE from/to("${spec}"): unknown as() label`);
+  const alias = (lbl: string, form: string): number => {
+    const id = d.aliases.get(lbl);
+    if (id === undefined) throw new Error(`addE from/to(${form}): unknown as() label`);
     return id;
-  }
-  if (spec && typeof spec === 'object' && spec.nested) {
+  };
+  if (typeof spec === 'string') return alias(spec, `"${spec}"`);
+  if (isNested(spec)) {
     const inner = stepChain(spec.nested, params);
+    // __.select("lbl") is exactly the bare as()-label string.
+    if (inner.length === 1 && inner[0].name === 'select' && typeof inner[0].args[0] === 'string')
+      return alias(inner[0].args[0], `select("${inner[0].args[0]}")`);
+    // __.addV(...) CREATES the endpoint vertex as a side effect of resolving it (from
+    // then to, once per driver, before insertEdge — see applyEdgeCluster). Reuses the
+    // #2 value/label resolver via the same insertVertex.
+    if (inner[0].name === 'addV') {
+      const tail = inner.slice(1);
+      if (tail.some((s) => s.name !== 'property')) throw new Error('addE endpoint __.addV(...) supports only trailing property() steps');
+      return insertVertex(store, parseVertexSpec(inner[0], tail, sideEffects, params), params, sideEffects).id;
+    }
+    // A V()/E()-rooted read: the movement/filter prefix's id-relation carries rowids.
     const { st, stop } = buildPrefix(inner, params);
     if (stop !== inner.length) throw new Error(`addE endpoint traversal not supported past ${inner[stop].name}()`);
     const sel = renderFrom(st.q, st.rel);
@@ -509,7 +529,7 @@ function resolveEndpoint(store: GraphStore, spec: any, d: { aliases: Map<string,
     if (!rows.length) throw new Error('addE endpoint traversal matched no vertex');
     return rows[0].id;
   }
-  throw new Error('addE from()/to() must be an as() label or a nested __.V(...) traversal');
+  throw new Error('addE from()/to() must be an as() label or a nested __.V(...)/__.addV()/__.select(...) traversal');
 }
 
 // ---------- mergeV / mergeE (upsert) ----------

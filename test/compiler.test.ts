@@ -3492,6 +3492,21 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V().has("name","clone").label()').map((r) => r.v)).toEqual(['person']);
   });
 
+  test('addE endpoint to(__.select("a")) ≡ to("a") (as()-label via nested select)', () => {
+    const store = seededStore();
+    run(store, 'g.V(1).as("a").out("created").addE("createdBy").to(__.select("a"))');
+    expect(run(store, 'g.V(3).out("createdBy").values("name")').map((r) => r.v)).toEqual(['marko']);
+  });
+
+  test('addE endpoint to(__.addV(...)) creates the target vertex as a side effect', () => {
+    const store = seededStore(); // modern: 6 vertices
+    run(store, 'g.addE("next").from(__.V(1)).to(__.addV("person").property("name","fresh"))');
+    expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([7]);
+    // marko now has a "next" edge to the freshly-created vertex
+    expect(run(store, 'g.V(1).out("next").values("name")').map((r) => r.v)).toEqual(['fresh']);
+    expect(run(store, 'g.V().has("name","fresh").label()').map((r) => r.v)).toEqual(['person']);
+  });
+
   test('mergeV creates when no match, matches when it exists (inline map)', () => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     const a = run(store, 'g.mergeV([(T.label): "person", name: "marko"])');
