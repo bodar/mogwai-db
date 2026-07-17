@@ -1,7 +1,7 @@
 import { q, list, empty, Relation, type Expression } from '../q.ts';
 import { edges } from '../schema.ts';
 import { stepChain, type Step } from '../frontend.ts';
-import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, predicateSql, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
+import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
 import { tryInlinePredicate } from './predicate.ts';
 import { advance, elemRel, prevRel, carryFrag, carriedCols, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { type AliasShape } from './alias.ts';
@@ -31,18 +31,16 @@ const unifyLists = (arms: readonly ListStream[]): ListStream['of'] => {
   throw new Error('list branch arms have incompatible item shapes');
 };
 
-/** Compile an until(<traversal>) modulator into `(id, depth) → boolean SQL`. A
- *  `loops().is(P)` body tests the depth counter; every other body is an element
- *  predicate over the current vertex (has/hasLabel/values/out…count().is/and/or),
- *  reusing the nullable predicate optimization on a correlated ctx. */
+/** Compile an until(<traversal>) modulator into `(id, depth) → boolean SQL`, routing the
+ *  WHOLE body through the shared predicate engine on a correlated walk ctx. loops() reads
+ *  the depth counter via ctx.loopsExpr; every other leaf is an element predicate over the
+ *  current vertex (has/hasLabel/values/out…count().is), and the infix/and/or machinery
+ *  composes them — so until(__.has('name','x').or().loops().is(3)) lowers as one boolean.
+ *  Movement leaves correlate through the same compileCorrelatedChild as where()/choose(). */
 function untilPredicate(untilStep: Step, params: Record<string, any>): (id: Expression, depth: Expression) => Expression {
   const nested = stepChain(untilStep.args[0]?.nested, params);
   if (!nested.length) throw new Error('until() requires a traversal predicate');
-  if (nested[0].name === 'loops') {
-    if (nested.length === 2 && nested[1].name === 'is') return (_id, depth) => predicateSql(depth, nested[1].args[0]);
-    throw new Error('until(__.loops()…) form not yet supported (only loops().is(P))');
-  }
-  return (id) => tryInlinePredicate(nested, walkNodeCtx(id), params)
+  return (id, depth) => tryInlinePredicate(nested, { ...walkNodeCtx(id), loopsExpr: depth }, params)
     ?? (() => { throw new Error('until() predicate not supported by inline lowering'); })();
 }
 

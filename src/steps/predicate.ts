@@ -225,6 +225,16 @@ function compileInlinePredicate(
   if (head === 'label' && body.length === 1)
     return predicateSql(labelNameSub(ctx.labelIdExpr), hasIs ? isPred : undefined);
 
+  // until(__.loops().is(P)) — the repeat-loop counter compared. loops() is only
+  // meaningful inside an until() predicate (ctx.loopsExpr = the walk depth); elsewhere
+  // it defers. It composes with element predicates through the infix/and/or split above,
+  // so until(__.has('name','x').or().loops().is(3)) lowers as one boolean.
+  if (head === 'loops' && body.length === 1) {
+    if (body[0].args.length) throw new Error('where()/filter() form not yet supported: loops(label) named-loop form');
+    if (!ctx.loopsExpr || !hasIs) throw new Error('where()/filter() form not yet supported: __.loops() requires until() context and .is(P)');
+    return predicateSql(ctx.loopsExpr, isPred);
+  }
+
   // where(__.not(t)) — negate an inner predicate; a NULL (missing) is kept (NOT COALESCE).
   if (head === 'not' && body.length === 1) {
     const arg = body[0].args.find((a: any) => a && typeof a === 'object' && 'nested' in a);

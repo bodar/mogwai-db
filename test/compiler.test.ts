@@ -2114,6 +2114,18 @@ describe('compiler SQL snapshots', () => {
     expect(p.shape).toEqual({ kind: 'pathGrouped', elem: 'vertex' });
   });
 
+  test('recursive path().by(key) projects each position to a scalar (not the whole element)', () => {
+    const p = read('g.V(1).repeat(__.out()).times(2).path().by("name")');
+    // each exploded position is the property scalar `v`, correlated on je.value
+    expect(p.sql).toContain('AS v FROM');
+    expect(p.sql).toContain('SELECT value FROM vertex_properties WHERE node=je.value AND key=?');
+    // no whole-element framing (no nodes/labels join for the position)
+    expect(p.sql).not.toContain('json_each(pp.path) je JOIN nodes n');
+    expect(p.shape).toEqual({ kind: 'pathGrouped', elem: 'vertex', byKey: true });
+    // a non-productive by(key) drops the whole path if any element lacks the property
+    expect(p.sql).toContain('WHERE NOT EXISTS (SELECT 1 FROM json_each');
+  });
+
   test('simplePath() inside repeat() folds into the recursive cycle guard', () => {
     const p = read('g.V().repeat(__.both().simplePath()).times(3).path()');
     expect(p.sql).toContain('NOT EXISTS (SELECT 1 FROM json_each(c1.path) je WHERE je.value=e.tgt)');
@@ -2159,6 +2171,17 @@ describe('compiler SQL snapshots', () => {
   test('until(loops().is(n)) tests the depth counter, not an element', () => {
     const p = read('g.V(1).repeat(__.out()).until(__.loops().is(2))');
     expect(p.sql).toContain('c1.depth + 1 = ?');     // done = (new depth) = 2
+  });
+
+  test('until() composes loops() with an element predicate via the shared infix machinery', () => {
+    // loops() lowers as a leaf (ctx.loopsExpr = the walk depth), so it combines with a
+    // has() through the SAME .or()/.and() split as where() — no bespoke until parser.
+    const orp = read("g.V(1).repeat(__.both().simplePath()).until(__.has('name','peter').or().loops().is(3)).has('name','peter').path().by('name')");
+    expect(orp.sql).toContain('c1.depth + 1 = ?');                 // loops() → depth compare
+    expect(orp.sql).toContain('vertex_properties');                // has() → property EXISTS
+    expect(orp.sql).toMatch(/EXISTS\([^)]*vertex_properties[^)]*\)\) OR \(/); // combined by OR
+    const andp = read("g.V(1).repeat(__.both().simplePath()).until(__.has('name','peter').and().loops().is(3)).path().by('name')");
+    expect(andp.sql).toContain(') AND (');
   });
 
   test('while-do (until before repeat) qualifies the seed id in the correlated predicate', () => {

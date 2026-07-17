@@ -88,7 +88,7 @@ export type Shape =
   | { kind: 'map'; entries: MapEntry[] }
   | { kind: 'group'; key: GroupKey; val: GroupVal }
   | { kind: 'path'; positions: PathPos[] }                 // linear: one row per path, per-position columns
-  | { kind: 'pathGrouped'; elem: ElemShape }               // recursive: N rows per path (pk, ord, element), grouped
+  | { kind: 'pathGrouped'; elem: ElemShape; byKey?: boolean } // recursive: N rows per path (pk, ord, element|value), grouped
   | { kind: 'discard' };
 
 export interface Compiled {
