@@ -26,6 +26,23 @@ const GLV = join(ROOT, 'vendor/tinkerpop/gremlin-js/gremlin-javascript');
 const FEATURES = join(ROOT, 'vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/');
 const CUCUMBER_BIN = join(ROOT, 'vendor/tinkerpop/gremlin-js/node_modules/.bin/cucumber-js');
 const BASELINE = new URL('./baseline.json', import.meta.url).pathname;
+const README = join(ROOT, 'README.md');
+
+// Keep the human-facing conformance number in README in sync with the ratchet,
+// so the prose can never drift from baseline.json. Markdown has no native
+// placeholder, so we use the universal HTML-comment-anchor convention: the count
+// lives between <!-- L3:passing --> … <!-- /L3:passing --> and we rewrite only
+// what's between the markers (idempotent, re-runnable). Grouped with commas by
+// hand — no ICU/locale dependency.
+function syncReadme(passing: number): boolean {
+  const grouped = String(passing).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const marker = /(<!-- L3:passing -->).*?(<!-- \/L3:passing -->)/s;
+  const readme = readFileSync(README, 'utf8');
+  const next = readme.replace(marker, `$1${grouped}$2`);
+  if (next === readme) return false;
+  writeFileSync(README, next);
+  return true;
+}
 
 // Provisioning (git clone + workspace install) and the cucumber run can each
 // take minutes; the default 5s hook/test timeout would abort them.
@@ -115,7 +132,8 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
     } else {
       const next = { ...baseline, passing };
       writeFileSync(BASELINE, JSON.stringify(next, null, 2) + '\n');
-      console.log(`L3 baseline auto-bumped ${baseline.passing} → ${passing}. Commit test/conformance/baseline.json.`);
+      const readmeSynced = syncReadme(passing);
+      console.log(`L3 baseline auto-bumped ${baseline.passing} → ${passing}. Commit test/conformance/baseline.json${readmeSynced ? ' + README.md' : ''}.`);
     }
   }
 }, LONG);
