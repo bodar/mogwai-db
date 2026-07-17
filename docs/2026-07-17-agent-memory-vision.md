@@ -333,16 +333,41 @@ usage cost at small scale.
 app-layer** (per-memory/per-op). That's where **90%+ gross margin** lives *while still undercutting
 every floor-priced incumbent 100×*. Undercut AND keep margin — both are available here.
 
-### Platform notes
+### Platform notes — two-tier isolation (the product shape)
 
-- **Workers for Platforms** (dispatch namespaces) = the multi-tenant-SaaS compute product ($25/mo,
-  1,000 scripts incl., unlimited isolated per-tenant Workers, dispatch Worker routes by tenant). **Not
-  needed for the base product** — DO-per-tenant gives data isolation on a plain $5 Worker. WfP earns
-  its keep only for **untrusted per-tenant code** = Code Mode Layer B (Worker Loader sandbox).
+The tenancy model is **two tiers**, isolating two different things:
+
+| Tier | Isolated | Mechanism |
+|---|---|---|
+| **Customer** (signup → "whole suite") | code + limits + observability | **WfP user Worker** in the dispatch namespace — untrusted mode, isolated cache, per-customer limits/tags, can run custom code |
+| **Agent** (unlimited per suite) | data (agent↔agent) | its own SQLite DB — a DO, or a **facet** |
+
+- **Workers for Platforms** ($25/mo base, **1,000 user Workers incl., +$0.02 each** after) = the
+  per-**customer** isolation boundary — each signup gets their own isolated deployment (the "suite"),
+  not a row in a shared table. This is isolation-as-a-product-feature + a home for per-customer custom
+  code. (Earlier draft said "WfP not needed" — wrong: it's not for data isolation, it's the customer
+  suite + custom-code story.)
+- **Durable Object facets** = the per-**agent** primitive. A supervisor DO = one customer's suite;
+  each agent = a facet (child DO) with its **own isolated SQLite** ("any number of facets… each its
+  own SQLite database"; "the application cannot read [the parent]'s database, only its own"). Unlimited
+  agents, colocated cheaply under one customer envelope, free-when-idle. **Open beta / Workers Paid** —
+  verify before betting on it; plain-DO-per-agent is the today-fallback.
+  Ref: blog.cloudflare.com/durable-object-facets-dynamic-workers.
+- **Security point:** do NOT give an untrusted customer Worker a raw account-level DO namespace binding
+  (it could `idFromName` another customer's DO). The supervisor/facet pattern enforces isolation via the
+  execution boundary — customer code runs as a facet child that only sees its own storage. (Per-Worker
+  unique-resource isolation is turnkey for D1/KV in WfP but **not** documented for DOs → facets are how
+  you isolate graph storage.)
+- **Cost:** ~**$0.02 marginal per customer** for a genuinely isolated deployment + unlimited near-free
+  agents. 10k customers ≈ $205/mo. Bang-for-buck holds.
+- **Composes with Code Mode Layer B:** the per-customer user Worker is the natural home for that
+  customer's Code Mode sandbox — their agents run custom retrieval/extraction TS in their own
+  untrusted-mode Worker against their own facet DBs.
 - **Vectorize isolation is logical** (namespace filter), capped **50k namespaces/index, 50k
-  indexes/account, topK≤50 w/ metadata** — a *second, weaker* isolation model beside the DO's. This is
-  the clincher for **in-DO vectors** (the cosine spike): isolation stays uniform/physical/uncapped, one
-  store, one bill. Vectorize only for corpora overflowing a DO.
+  indexes/account, topK≤50 w/ metadata** — a *second, weaker* isolation model beside the DO's, and it
+  does NOT compose with the facet-per-agent model (vectors would live outside the agent's isolated DB).
+  This is the clincher for **in-DO(/in-facet) vectors** (the cosine spike): isolation stays
+  uniform/physical/uncapped, one store per agent, one bill. Vectorize only for corpora overflowing a DO.
 
 ### Honest risks
 
