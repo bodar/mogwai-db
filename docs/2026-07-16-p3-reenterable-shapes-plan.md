@@ -82,7 +82,7 @@ Telemetry (post-P2, L3 1046) real terminal-island failures:
 falls out (SCOPE.md).** Lift `valueMap`/`elementMap` off the terminal ResultStream onto a
 **per-element `MapStream`** (`(mk,mv,o0)` rows: `mk`=key string, `mv`=value list; one map
 per input element via an origin ordinal, unlike group's one global map, when a follower
-exists — terminal valueMap keeps the byte-identical ResultStream). Consumers, all on
+exists — terminal valueMap keeps the same ResultStream). Consumers, all on
 existing rails:
 - `select(Column.keys/values)` — generalize `compileFromMap` to aggregate **per origin**
   (`GROUP BY o0`); keys→Set. `select(Column.values).unfold().<setop>` composes via the

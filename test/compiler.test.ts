@@ -1996,7 +1996,7 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('repeat() body generality: movement + has(), multi-hop, both()-cartesian', () => {
-    // bare single movement stays byte-identical (alias `e`, no per-hop suffix).
+    // bare single movement stays unchanged (alias `e`, no per-hop suffix).
     expect(read('g.V(1).repeat(__.out()).times(2)').sql).toContain('JOIN edges e ON e.src=');
     // movement + has() → a correlated EXISTS filter on the hop's landing node.
     const f = read('g.V(1).repeat(__.out().has("lang","java")).times(2)');
@@ -2067,7 +2067,7 @@ describe('compiler SQL snapshots', () => {
     expect(p.sql).toContain('SELECT id, id AS p0 FROM nodes');
     expect(p.sql).toContain('SELECT e.tgt AS id, p.p0, e.tgt AS p1 FROM edges');
     expect(p.sql).toContain('SELECT e.tgt AS id, p.p0, p.p1, e.tgt AS p2 FROM edges');
-    // Non-path queries stay byte-identical (no p-columns).
+    // Non-path queries stay unchanged (no p-columns).
     expect(read('g.V(1).out().out()').sql).not.toContain('p0');
     expect(p.shape).toEqual({ kind: 'path', positions: [
       { render: 'element', elem: 'vertex', prefix: 'x0' },
@@ -2184,7 +2184,7 @@ describe('compiler SQL snapshots', () => {
     expect(p.shape).toEqual({ kind: 'vertex' });                            // but output is plain vertices
   });
 
-  test('a non-path repeat() is byte-identical (no JSONB path column added)', () => {
+  test('a non-path repeat() has unchanged SQL (no JSONB path column added)', () => {
     expect(read('g.V(1).repeat(__.out()).times(2)').sql).not.toContain('path');
   });
 

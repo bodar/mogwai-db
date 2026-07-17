@@ -380,7 +380,7 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
  * element (an origin ordinal `o0`, unlike group's single global map). Each property is a
  * `(mk=key, mv=value-list)` entry row tagged with its element origin; compileFromMap then
  * aggregates per origin. Reached ONLY with a follower — terminal valueMap keeps the
- * byte-identical buildProjection ResultStream. Tokens (valueMap(true)/id/label) and a
+ * unchanged buildProjection ResultStream. Tokens (valueMap(true)/id/label) and a
  * carried alias/path/branch/sack state defer (the origin ordinal would collide / tokens
  * need extra entry keys).
  */
@@ -536,7 +536,7 @@ function propertyScalar(s: PropertyStream, col: 'vpid' | 'pk' | 'pv'): ScalarStr
   // In a child scope (a property-group by(__.key()/value())) the correlated cardinality
   // policy needs a per-origin encounter marker, exactly as lowerScalarProjection mints for
   // element().values(). key()/value() are 1:1 with the property, so any deterministic order
-  // suffices. At root (no live origin) the projection stays byte-identical.
+  // suffices. At root (no live origin) the projection stays unchanged.
   const origin = s.carried.origins.at(-1);
   const enc = origin ? q`, ROW_NUMBER() OVER (PARTITION BY ${p.c[origin]} ORDER BY ${p.c[origin]}) AS encounter` : empty;
   const rel = s.q.cte(

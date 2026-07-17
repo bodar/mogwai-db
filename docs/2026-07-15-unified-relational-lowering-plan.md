@@ -634,7 +634,8 @@ Before structural edits:
 5. Add property-element layout to `ElementStream`; initially bridge existing
    `compileProperties` output.
 
-This is primarily structural. Terminal SQL should remain byte-identical where practical.
+This is primarily structural. Terminal SQL should remain semantically equivalent (same
+result set + plan shape; exact bytes don't matter).
 
 ### Stage 2 — establish the one materialization boundary
 

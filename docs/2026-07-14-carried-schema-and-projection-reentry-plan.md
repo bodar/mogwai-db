@@ -120,8 +120,8 @@ internally. So **all 24 `advance()` call sites are untouched**; the churn is con
 (1) read sites `st.aliases` → `st.carried.aliases` (~40, mechanical), (2) the ~6
 `{...st, aliases: new Map(), …}` spread-seeds → a `withCarried(st, patch)` helper, and
 (3) `stream.ts` `carryOf` (now copies `q`/`params`/`sideEffects`/`carried`). The whole
-of Move A is a **pure refactor**: `bun test` + L3 baseline must be byte-identical after
-it. Land it as its own commit before touching branch semantics.
+of Move A is a **pure refactor**: `bun test` + L3 baseline must stay green with
+semantically-equivalent SQL after it. Land it as its own commit before touching branch semantics.
 
 ### Move B — the branch fix, as `Carried` methods
 
@@ -242,7 +242,7 @@ routed elsewhere).
    these already exist in the scalar tail vocabulary (`foldTailAcc` is shared).
 
 **Boundary with what already works:** a *terminal* scalar projection stays
-`buildProjection` (byte-identical — do not reroute). Only a projection *with a follower
+`buildProjection` (unchanged — do not reroute). Only a projection *with a follower
 that isn't its own value-tail modifier* retypes. The existing value-tail modifiers
 (`is`/`order`/`limit`/transforms/`inject`) must still fold onto the projection directly
 (they're cheaper as one query), so the retype trigger is: **follower is another
