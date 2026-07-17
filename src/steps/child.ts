@@ -213,7 +213,7 @@ type ElementRowParts = NonNullable<ReturnType<typeof elementRowParts>>;
 
 /** PURE. A terminal bare count() over a movement-only prefix — the total-count child
  * (tryCompileCountChild) and the isTotalScalarChild/count arm of isScalarChild. */
-function classifyCountChild(body: ReturnType<typeof stepChain>): { prefix: ReturnType<typeof stepChain> } | null {
+export function classifyCountChild(body: ReturnType<typeof stepChain>): { prefix: ReturnType<typeof stepChain> } | null {
   const terminal = body.at(-1);
   if (!terminal || terminal.name !== 'count' || terminal.args.length) return null;
   const prefix = body.slice(0, -1);
@@ -224,7 +224,7 @@ function classifyCountChild(body: ReturnType<typeof stepChain>): { prefix: Retur
  * every scalar/property-scalar predicate: a property parent lowers key/value/element().…
  * (propertyScalarBody), an element parent a values/id/label/constant projection
  * (scalarRowParts). Callers strip a terminal fold() before calling. */
-function classifyScalarChildRows(
+export function classifyScalarChildRows(
   parentKind: 'element' | 'property',
   body: ReturnType<typeof stepChain>,
 ): { kind: 'property'; body: ReturnType<typeof stepChain> } | { kind: 'element'; parts: ScalarRowParts } | null {
@@ -239,7 +239,7 @@ function classifyScalarChildRows(
  * with the fold's natural id order. `stripTerminal` requires+drops a terminal step (fold)
  * and lets an empty before-body qualify. Mirrors compileElementChildRows' L724-733 exactly,
  * minus the emit-time parent-state guard (sack/fromV/property parent). */
-function classifyElementChildRows(
+export function classifyElementChildRows(
   fullBody: ReturnType<typeof stepChain>,
   stripTerminal: string | undefined,
   firstPolicy: boolean,
@@ -662,8 +662,9 @@ export function tryCompileScalarRowsBeforeFold(
   parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
+  preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ScalarStream; frame: ChildFrame } | null {
-  return compileScalarChildRows(parent, nested, 'all', scope, true, 'fold');
+  return compileScalarChildRows(parent, nested, 'all', scope, true, 'fold', preParsed);
 }
 
 /** Productive element rows immediately before fold(), retaining the child origin so
@@ -672,8 +673,9 @@ export function tryCompileElementRowsBeforeFold(
   parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
+  preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ElementStream; frame: ChildFrame } | null {
-  return compileElementChildRows(parent, nested, scope, 'fold');
+  return compileElementChildRows(parent, nested, scope, 'fold', false, preParsed);
 }
 
 /** Element rows for an implicit-fold group value (no terminal fold — the whole body is
@@ -683,8 +685,9 @@ export function tryCompileElementImplicitFoldRows(
   parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
+  preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ElementStream; frame: ChildFrame } | null {
-  return compileElementChildRows(parent, nested, scope);
+  return compileElementChildRows(parent, nested, scope, undefined, false, preParsed);
 }
 
 /** Productive element rows with the child origin retained. Existence consumers use
@@ -858,17 +861,18 @@ export function tryCompileRowsBeforeReducer(
   parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
+  preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ScalarStream; frame: ChildFrame; reducer: ScalarReducer } | null {
   if (!nested) return null;
-  const body = childSteps(nested, parent.params);
+  const body = preParsed ?? childSteps(nested, parent.params);
   const reducer = body.at(-1)?.name as ScalarReducer | undefined;
   if (!reducer || !CHILD_SCALAR_REDUCERS.has(reducer)) return null;
 
-  const scalar = compileScalarChildRows(parent, nested, 'all', scope, true, reducer);
+  const scalar = compileScalarChildRows(parent, nested, 'all', scope, true, reducer, body);
   if (scalar) return { ...scalar, reducer };
   if (reducer !== 'count') return null;
 
-  const element = compileElementChildRows(parent, nested, scope, reducer);
+  const element = compileElementChildRows(parent, nested, scope, reducer, false, body);
   if (!element) return null;
   const e = element.stream.rel.as('er');
   const encounter = 'encounter';

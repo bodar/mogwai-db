@@ -10,7 +10,7 @@ import { carryFrag, carriedCols, carriedWith, elemRel, withoutCarried, type Carr
 import { carryOf, continueLowering, groupColumns, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream } from './stream.ts';
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
-import { childSteps, isElementFoldChild, isElementImplicitFoldChild, isPropertyScalarChild, isPropertyScalarFoldChild, isScalarChild, isScalarFoldChild, pushChildScope, reuseCurrentFrame, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, type ChildParent } from './child.ts';
+import { childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, pushChildScope, reuseCurrentFrame, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, type ChildParent } from './child.ts';
 
 /** The scalar reducers that terminate a numeric neighbourhood reduction (reused by the
  * nested-MAP group's inner reduce). */
@@ -124,43 +124,53 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   // key()/value()/element().… (isPropertyScalarChild). Element-valued (fold) children are
   // element-parent-only — a property has no adjacency to collect.
   const isProp = parent.kind === 'property';
-  const scalarChild = (nested: any) => isProp ? isPropertyScalarChild(nested, parent.params) : isScalarChild(nested, parent.params);
-  const scalarFoldChild = (nested: any) => isProp ? isPropertyScalarFoldChild(nested, parent.params) : isScalarFoldChild(nested, parent.params);
+  const pk = isProp ? 'property' : 'element';
+  const isByArg = (a: any) => a && typeof a === 'object' && 'nested' in a;
+  // Shape gates classify the NORMALIZED child body — the exact body tryCompile* compiles —
+  // so gating and emit share ONE parse (the body is threaded into emit as preParsed) and
+  // the old is*Child re-parse is gone. Raw stepChain still drives STRUCTURE detection
+  // (project() head, value terminal), which needs the un-normalized shape.
+  const scalarShape = (body: ReturnType<typeof stepChain>) => isProp
+    ? classifyScalarChildRows('property', body) !== null
+    : body.at(-1)?.name === 'count' ? classifyCountChild(body) !== null : classifyScalarChildRows('element', body) !== null;
+  const scalarFoldShape = (body: ReturnType<typeof stepChain>) =>
+    body.at(-1)?.name === 'fold' && classifyScalarChildRows(pk, body.slice(0, -1)) !== null;
+
   const keyArg = bys[0]?.[0];
   const valArg = bys[1]?.[0];
-  const genericKey = keyArg && typeof keyArg === 'object' && 'nested' in keyArg
-    && scalarChild(keyArg.nested);
-  const keySteps = keyArg && typeof keyArg === 'object' && 'nested' in keyArg
-    ? stepChain(keyArg.nested, parent.params)
-    : [];
+  const keySteps = isByArg(keyArg) ? stepChain(keyArg.nested, parent.params) : [];
+  const keyBody = isByArg(keyArg) ? childSteps(keyArg.nested, parent.params) : [];
+  const valSteps = isByArg(valArg) ? stepChain(valArg.nested, parent.params) : [];
+  const valBody = isByArg(valArg) ? childSteps(valArg.nested, parent.params) : [];
+  const valTerminal = valSteps.at(-1)?.name;
+
+  const genericKey = isByArg(keyArg) && scalarShape(keyBody);
+
   const projectStep = keySteps[0]?.name === 'project' ? keySteps[0] : undefined;
   const projectBys = projectStep ? keySteps.slice(1) : [];
   const projectKeys = projectStep?.args.filter((x: any): x is string => typeof x === 'string') ?? [];
+  const projectByNested = projectBys.map((step) => step.name === 'by'
+    ? step.args.find((x: any) => x && typeof x === 'object' && 'nested' in x)?.nested
+    : undefined);
+  const projectKeyBodies = projectByNested.map((n) => n ? childSteps(n, parent.params) : null);
   const genericProjectKey = !!projectStep
     && projectBys.length === projectKeys.length
-    && projectBys.every((step) => {
-      if (step.name !== 'by') return false;
-      const nested = step.args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
-      return !!nested && scalarChild(nested.nested);
-    });
-  const valSteps = valArg && typeof valArg === 'object' && 'nested' in valArg
-    ? stepChain(valArg.nested, parent.params)
-    : [];
+    && projectByNested.every((n, i) => !!n && scalarShape(projectKeyBodies[i]!));
+
   const genericVal = valSteps.length > 0
-    && !GROUP_VALUE_REDUCERS.has(valSteps.at(-1)!.name)
-    && scalarChild(valArg.nested);
+    && !GROUP_VALUE_REDUCERS.has(valTerminal!)
+    && scalarShape(valBody);
   const genericReducer = valSteps.length > 0
-    && GROUP_VALUE_REDUCERS.has(valSteps.at(-1)!.name)
-    && scalarChild(valArg.nested);
-  const genericFold = valSteps.at(-1)?.name === 'fold'
-    && scalarFoldChild(valArg.nested);
-  const genericElementFold = !isProp && valSteps.at(-1)?.name === 'fold'
-    && isElementFoldChild(valArg.nested, parent.params);
+    && GROUP_VALUE_REDUCERS.has(valTerminal!)
+    && scalarShape(valBody);
+  const genericFold = valTerminal === 'fold' && scalarFoldShape(valBody);
+  const genericElementFold = !isProp && valTerminal === 'fold'
+    && classifyElementChildRows(valBody, 'fold', false) !== null;
   // An unreduced element value traversal (by(__.out()), by(__.out().order())) collects
   // into a list — TinkerPop's implicit fold. Same relational path as genericElementFold.
   const genericElementImplicitFold = !isProp && !genericElementFold
     && valSteps.length > 0
-    && isElementImplicitFoldChild(valArg.nested, parent.params);
+    && classifyElementChildRows(valBody, undefined, false) !== null;
   if (!genericKey && !genericProjectKey && !genericVal && !genericReducer && !genericFold && !genericElementFold && !genericElementImplicitFold) return null;
 
   const outer = pushChildScope(parent);
@@ -174,33 +184,29 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   let valFold = false;
   let valOrder: Expression | undefined;
   let valElement: GroupSource['valElement'];
+  const reuse = () => reuseCurrentFrame(outer.scope, outer.frame);
   if (genericKey) {
-    const child = tryCompileScalarValueChild(outer.seed, keyArg.nested, 'first', reuseCurrentFrame(outer.scope, outer.frame));
-    if (!child) throw new Error('scalar group key failed after successful shape preflight');
+    const child = tryCompileScalarValueChild(outer.seed, keyArg.nested, 'first', reuse(), keyBody)!;
     const c = child.rel.as('gk');
     joins.push(q`${src.productiveBy ? ' LEFT JOIN ' : ' JOIN '}${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
     keyExpr = c.c.v;
   }
   if (genericProjectKey) {
     keyParts = projectKeys.map((key, i) => {
-      const nested = projectBys[i].args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
-      const child = tryCompileScalarValueChild(outer.seed, nested.nested, 'first', reuseCurrentFrame(outer.scope, outer.frame));
-      if (!child) throw new Error('composite group key failed after successful shape preflight');
+      const child = tryCompileScalarValueChild(outer.seed, projectByNested[i], 'first', reuse(), projectKeyBodies[i]!)!;
       const c = child.rel.as(`gkp${i}`);
       joins.push(q`${src.productiveBy ? ' LEFT JOIN ' : ' JOIN '}${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
       return { key, expr: c.c.v };
     });
   }
   if (genericVal) {
-    const child = tryCompileScalarValueChild(outer.seed, valArg.nested, 'all', reuseCurrentFrame(outer.scope, outer.frame));
-    if (!child) throw new Error('scalar group value failed after successful shape preflight');
+    const child = tryCompileScalarValueChild(outer.seed, valArg.nested, 'all', reuse(), valBody)!;
     const c = child.rel.as('gv');
     joins.push(q` JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
     valExpr = c.c.v;
   }
   if (genericReducer) {
-    const rows = tryCompileRowsBeforeReducer(outer.seed, valArg.nested, reuseCurrentFrame(outer.scope, outer.frame));
-    if (!rows) throw new Error('group reducer rows failed after successful shape preflight');
+    const rows = tryCompileRowsBeforeReducer(outer.seed, valArg.nested, reuse(), valBody)!;
     const c = rows.stream.rel.as('gr');
     const join = rows.reducer === 'count' ? ' LEFT JOIN ' : ' JOIN ';
     joins.push(q`${join}${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
@@ -209,8 +215,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     valReducer = rows.reducer;
   }
   if (genericFold) {
-    const rows = tryCompileScalarRowsBeforeFold(outer.seed, valArg.nested, reuseCurrentFrame(outer.scope, outer.frame));
-    if (!rows) throw new Error('group fold rows failed after successful shape preflight');
+    const rows = tryCompileScalarRowsBeforeFold(outer.seed, valArg.nested, reuse(), valBody)!;
     const c = rows.stream.rel.as('gf');
     joins.push(q` LEFT JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
     valExpr = c.c.v;
@@ -220,9 +225,8 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   }
   if (genericElementFold || genericElementImplicitFold) {
     const rows = (genericElementFold
-      ? tryCompileElementRowsBeforeFold(outer.seed, valArg.nested, reuseCurrentFrame(outer.scope, outer.frame))
-      : tryCompileElementImplicitFoldRows(outer.seed, valArg.nested, reuseCurrentFrame(outer.scope, outer.frame)));
-    if (!rows) throw new Error('group element fold rows failed after successful shape preflight');
+      ? tryCompileElementRowsBeforeFold(outer.seed, valArg.nested, reuse(), valBody)
+      : tryCompileElementImplicitFoldRows(outer.seed, valArg.nested, reuse(), valBody))!;
     const c = rows.stream.rel.as('gef');
     const e = (rows.stream.elem === 'edge' ? edges : nodes).as('gev');
     joins.push(q` LEFT JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]} LEFT JOIN ${e} ON ${e.c.id}=${c.c.id}`);
