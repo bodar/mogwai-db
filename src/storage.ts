@@ -39,8 +39,11 @@ const SCHEMA = [
   // subtype), nullable (NULL = infer from storage class, the legacy/raw-insert path) —
   // it is what lets typeOf and per-row framing recover byte-vs-long, datetime-vs-long,
   // uuid-vs-string, and collection values (see gremlin-types.ts). A collection value
-  // (list/map/set) is stored as JSONB here with vtype naming the shape. `meta` is a
-  // JSONB {metaKey: scalar} blob (meta-properties), nullable.
+  // (list/map/set) is stored as JSONB here — a self-describing typed tree (`ValueNode`):
+  // vtype names the OUTER shape, and every NESTED element/key/value carries its own {t,v}
+  // type tag, so list/set/map ELEMENTS + typed/non-string KEYS + arbitrary nesting round-trip
+  // with each leaf's exact gremlin type (gremlin-types.ts valueNodeOf; framed via
+  // execute.ts frameTypedNode). `meta` is a JSONB {metaKey: scalar} blob, nullable.
   `CREATE TABLE IF NOT EXISTS vertex_properties(
      id INTEGER PRIMARY KEY, node INTEGER NOT NULL REFERENCES nodes(id),
      key TEXT NOT NULL, value, vtype TEXT, meta BLOB)`,

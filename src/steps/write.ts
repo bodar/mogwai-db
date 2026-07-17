@@ -1,7 +1,7 @@
 import type { GraphStore } from '../storage.ts';
 import { q, value, list, empty, raw, render, type Expression } from '../q.ts';
 import { labelIn, nodeHasProp, edgeHasProp } from '../plan.ts';
-import { gremlinTypeOf, isCollectionType, storedScalar, flatType, mapEntryType, valueNodeOf, type CanonicalType, type TypeNode, type ValueNode } from '../gremlin-types.ts';
+import { gremlinTypeOf, isCollectionType, storedScalar, flatType, mapEntryType, valueNodeOf, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../gremlin-types.ts';
 import { stepChain, isNested, type Step, type SackSpec } from '../frontend.ts';
 import { normalize, type PStep } from '../strategies.ts';
 import { readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../render.ts';
@@ -323,14 +323,6 @@ function insertRow(store: GraphStore, table: string, baseCols: string[], baseVal
 const collectionValueJson = (val: any, typeNode: TypeNode | null): string =>
   JSON.stringify(valueNodeOf(val, typeNode).v);
 
-// A stored property VALUE as a self-describing {t,v} ValueNode for the write-response echo
-// (framed by execute.ts frameTypedNode via vertexBuffer/edgeBuffer). A collection arrives as
-// `json(value)` TEXT of the bare top-node `v` (see the SELECTs below) → its {t,v} item tree;
-// a scalar carries its raw storage value. Mirrors the read path's frameStoredValue so the
-// echoed element frames with the SAME full fidelity as a subsequent read.
-const storedNode = (value: any, vtype: string | null): ValueNode =>
-  ({ t: (vtype ?? null) as ValueNode['t'], v: isCollectionType(vtype) ? JSON.parse(value) : value });
-
 // Set/append ONE vertex property (W4). single = replace all rows for the key then insert
 // one; list = append; set = append unless an equal value already exists (then patch its
 // meta). Meta is a {metaKey:scalar} object stored as a JSONB blob. A single SQL statement
@@ -383,7 +375,7 @@ function readEdgeProps(store: GraphStore, edge: number): Record<string, ValueNod
   const out: Record<string, ValueNode> = {};
   for (const r of store.query<{ key: string; value: any; vtype: string | null }>(
     "SELECT key, CASE WHEN vtype IN ('list','map','set') THEN json(value) ELSE value END AS value, vtype FROM edge_properties WHERE edge=? ORDER BY id", [edge]))
-    out[r.key] = storedNode(r.value, r.vtype);
+    out[r.key] = valueNodeFromStored(r.value, r.vtype);
   return out;
 }
 
@@ -392,11 +384,11 @@ function readEdgeProps(store: GraphStore, edge: number): Record<string, ValueNod
 // response shape is flat; full multi framing is on the read path.
 function readVertexProps(store: GraphStore, node: number): Record<string, ValueNode> {
   const out: Record<string, ValueNode> = {};
-  // A collection value is a JSONB blob — return json() TEXT so storedNode can JSON.parse it
+  // A collection value is a JSONB blob — return json() TEXT so valueNodeFromStored can JSON.parse it
   // to its {t,v} item tree (a raw blob would frame as a byte Map).
   for (const r of store.query<{ key: string; value: any; vtype: string | null }>(
     "SELECT key, CASE WHEN vtype IN ('list','map','set') THEN json(value) ELSE value END AS value, vtype FROM vertex_properties WHERE node=? ORDER BY id", [node]))
-    if (!(r.key in out)) out[r.key] = storedNode(r.value, r.vtype);
+    if (!(r.key in out)) out[r.key] = valueNodeFromStored(r.value, r.vtype);
   return out;
 }
 
@@ -478,7 +470,7 @@ function insertEdge(store: GraphStore, c: EdgeCluster, src: number, tgt: number,
     const r = resolveSpecValue(store, sp, id, 'edge', params, sideEffects);
     if (r.has) insertEdgeProperty(store, id, k, r.value, r.vtype ?? gremlinTypeOf(r.value, null), r.typeNode);
   }
-  // Echo the RESOLVED props by reading them back typed (storedNode {t,v}), so the response
+  // Echo the RESOLVED props by reading them back typed (valueNodeFromStored {t,v}), so the response
   // frames with the same full fidelity as a read (execute.ts frameTypedNode).
   return { edge: { id: extId, label: c.label, src: nodeExtId(store, src), tgt: nodeExtId(store, tgt), props: readEdgeProps(store, id) } };
 }

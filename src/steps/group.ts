@@ -2,12 +2,12 @@ import { q, raw, value, list, empty, type Expression, type Relation } from '../q
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
 import {
   scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps, dirsFor,
-  storedValueExpr, type ScalarCtx,
+  storedValueExpr, bareValueMapProps, type ScalarCtx,
 } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, carriedWith, elemRel, withoutCarried, type Carry, type ElementStream } from './context.ts';
-import { carryOf, continueLowering, dispatchShapeTail, groupColumns, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from './stream.ts';
+import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from './stream.ts';
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, pushChildScope, reuseCurrentFrame, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, type ChildParent } from './child.ts';
@@ -398,16 +398,15 @@ export function lowerValueMap(st: ElementStream, proj: PStep): MapStream {
   const n = elemRel(st);
   const l = labels.as('l');
   const vlJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
-  // One row per element: its {key:[values]} JSON + a per-element origin ordinal.
-  const base = st.q.cte(q`SELECT ROW_NUMBER() OVER () AS o0, ${valueMapProps(n, st.elem)} AS props FROM ${vlJoin}`, ['o0', 'props']);
+  // One row per element: its {key:[values]} JSON + a per-element origin ordinal. This
+  // re-entry feeds the UNTYPED list substrate (select(Column.values) → set-ops/order/conjoin),
+  // so it uses the BARE props aggregation — each value embeds without the {t,v} envelope, so a
+  // collection-valued property round-trips as a real nested list (not the typed tree, and not a
+  // double-encoded string). Terminal valueMap() framing uses the typed valueMapProps instead.
+  const base = st.q.cte(q`SELECT ROW_NUMBER() OVER () AS o0, ${bareValueMapProps(n, st.elem)} AS props FROM ${vlJoin}`, ['o0', 'props']);
   const b = base.as('b');
   const keyFilter = keys.length ? q` WHERE je.key IN (${list(keys.map((k) => value(k)), ', ')})` : empty;
-  // props values are self-describing {t,v} nodes (plan.ts propNodeExpr, for whole-map framing).
-  // This re-entry treats a valueMap value list as BARE scalars (select(Column.values) feeds the
-  // untyped list substrate — set-ops/order/conjoin), so unwrap each element to its `v` payload
-  // (element-type re-tagging through select(values) is deferred, matching the list-op scope).
-  const mv = q`(SELECT json_group_array(x.value ->> '$.v' ORDER BY x.key) FROM json_each(je.value) x)`;
-  const rel = st.q.cte(q`SELECT je.key AS mk, ${mv} AS mv, ${b.c.o0} AS o0 FROM ${b}, json_each(${b.c.props}) je${keyFilter}`, ['mk', 'mv', 'o0']);
+  const rel = st.q.cte(q`SELECT je.key AS mk, je.value AS mv, ${b.c.o0} AS o0 FROM ${b}, json_each(${b.c.props}) je${keyFilter}`, ['mk', 'mv', 'o0']);
   const carry: Carry = { ...carryOf(st), carried: carriedWith(st.carried, { origins: ['o0'] }) };
   // key = a bare string; value = the property's value list (json array per entry).
   return toMapStream(carry, rel, { kind: 'scalar' }, { kind: 'list', of: { kind: 'scalar' } });
@@ -484,8 +483,6 @@ function deriveGroupEntries(s: GroupStream): { rel: Relation; keyOf: MapOf; valO
 }
 
 // ---------- properties() ----------
-
-const PROPERTY_PAYLOAD = ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pvtype', 'pmeta'] as const;
 
 /** properties()/properties(keys) is a genuine shape transition. The property row
  * stays relational so filters and projections can consume it one step at a time. */
