@@ -1,9 +1,23 @@
 # Compiler consolidation — the strategic map (2026-07-16)
 
 **Status:** research + plan. Telemetry harness LANDED; architecture bets scoped.
-**P1 (unify the tail) LANDED 2026-07-16** — see §3/§4d. **P2 (predicate seam + infix
-connectors) LANDED 2026-07-16** — see §4e. **Baseline at authorship:** L3 956, corpus
-2298/2298. **Now: L3 1046.**
+**Baseline at authorship:** L3 956, corpus 2298/2298. **Now: L3 1080.**
+
+> **Progress update (2026-07-17).** The refactoring spree since authorship went
+> *further* than this doc planned: it wasn't just P1/P2, it was a sustained migration
+> of special-case mini-compilers onto the generic spine. **LANDED since authorship:**
+> P1 (tail) · P2 (predicate seam + infix connectors) · **P3 (map/group/path are now
+> re-enterable streams, not terminal islands)** · **P4 (dynamic-tag VariantStream +
+> mixed-shape arms in all four branch steps)** · **nested-MAP-valued groups** (two-level
+> aggregation — the "recommended next bet" from §3, already shipped) · **first slices of
+> writes-through-the-read-spine** (`property(k, __.trav)` correlated values +
+> withSideEffect-const merge maps). **PARTIAL:** P5 (a live-parent generic child seam
+> `tryLowerGroupChildSource` now exists and element groups use it, but
+> `tryPropertyGroupScalar` remains for parentless cap()/property-group sources).
+> **STILL STANDING:** the `child.ts` double-parse (maintainability-only; P3 did not
+> retire it), the switch-vs-Map dispatch inconsistency, general merge/addE traversal
+> args, `until`'s inline-only predicate (structural wall, by design).
+> Per-section deltas are inline below; the surviving open work is collected in §6.
 
 **What this is.** A principled, code-grounded map of where the compiler carries
 duplication / locally-optimized mini-compilers, where it defers language and why,
@@ -29,22 +43,31 @@ moved there. The labels work is the exemplar — it replaced "three copy-pasted
 (`dispatchAlias`, `index.ts:253`).
 
 **The remaining duplication and the remaining deferred language are the same gap
-from two sides.** Three things never got lifted:
+from two sides.** Three things never got lifted — **as of 2026-07-17, two of the
+three are lifted:**
 
-1. **Three shapes stayed terminal islands** — `map` / `group` / `path`. They
+1. ~~**Three shapes stayed terminal islands** — `map` / `group` / `path`. They
    materialize at the root and cannot collapse into a carried value or re-enter
-   the tail. This gates the path-tail, Map-unfold, `valueMap().select()`,
-   element-value group maps, mixed `select(Column)`, and labels follow-up #3.
+   the tail.~~ **— LIFTED (P3, 2026-07-16).** `PathStream`/`MapStream`/`GroupStream`
+   are first-class re-enterable streams: `compileFromPath` (`select.ts`),
+   `compileFromMap` (`list.ts`), `compileFromGroup` (`group.ts` — derives a narrow
+   `(mk,mv)` MapStream via `deriveGroupEntries`) all re-enter the tail. Unblocked the
+   path-tail, Map-unfold, `valueMap().select()`, element-value group maps. Nested-MAP
+   group values (`GroupVal {kind:'nestedMap'}`, two-level aggregation) landed on top.
 2. ~~**The element tail** never moved onto the stepwise engine → a whole
    **duplicate value-tail compiler**~~ **— LIFTED (P1, 2026-07-16).** `renderProjection`
    + `wrapReducer` + the duplicate transform ladder are DELETED; `foldTailAcc` now only
    feeds the NON-scalar element tail (`buildProjection`). Every value tail routes through
    `lowerScalarProjection` → `scalar.ts`/`barrier.ts`.
-3. **Predicate lowering** got a generic fallback in one caller (`where`) but not
+3. ~~**Predicate lowering** got a generic fallback in one caller (`where`) but not
    the others (`choose`/`coalesce`/`until`), so those three *define* support
-   (throw) instead of falling through.
+   (throw) instead of falling through.~~ **— RESOLVED (P2, 2026-07-16).** `choose`
+   routes through the shared lazy `chooseGate` → `tryGateByChildExistence` (the same
+   generic child-existence engine `where`/`filter` use); `coalesce` takes traversal arms,
+   not a predicate. `until` alone stays inline-bound — a genuine structural wall (runs
+   inside `WITH RECURSIVE`, no materialized parent domain), not plumbing debt.
 
-Everything below hangs off those three observations.
+Those three observations drove the whole spree; §6 collects what survives them.
 
 ---
 
@@ -55,8 +78,8 @@ Everything below hangs off those three observations.
 | # | Debt | Nature | Blocks |
 |---|---|---|---|
 | ~~D1~~ | ~~**Dual value-tail engine**~~ **— RESOLVED (P1, 2026-07-16)** | `renderProjection`/`wrapReducer`/the duplicate transform ladder + `SCALAR_TX_NAMES` DELETED; `buildProjection` renders only the non-scalar element tail; every value tail routes through `lowerScalarProjection` → `scalar.ts`/`barrier.ts` | (unblocked `order().by(k).limit(n).values().count()`) |
-| D2 | **`tryInlinePredicate`/`compileInlinePredicate`** (`plan.ts:433-605`) | true fast-path in `where` (falls through to `tryFilterByChildExistence`); **support-definer** in `choose`/`coalesce`/`until` (throws — `branch.ts:44,565,597`) | complex predicates across the whole branch + repeat families |
-| D3 | **`tryInlineScalar`/`requireInlineScalar`** (`plan.ts:332-413`, `group.ts:22-26`) | support-definer — engages *only because* property-group / `cap('a')` group sources have **no live `ElementStream` parent** (`group.ts:136` returns null → forced onto the inline path) | property-group keys/values, group-over-`properties()`, `cap('a')` group |
+| ~~D2~~ | ~~**`tryInlinePredicate`/`compileInlinePredicate`** support-definer in `choose`/`coalesce`/`until`~~ **— RESOLVED (P2, 2026-07-16).** Relocated `plan.ts`→`src/steps/predicate.ts`; `choose` falls through to `tryGateByChildExistence`, `coalesce` takes traversal arms, `+ splitInfixConnectors` for infix `.and()`/`.or()`. Only `until` stays inline-bound (structural wall). | (resolved) |
+| D3 | **`tryPropertyGroupScalar`/`requireInlineScalar`** (`plan.ts:391`, `group.ts:22-26`) — **PARTIALLY REDUCED (P5-partial, 2026-07-16).** A live-parent generic child seam `tryLowerGroupChildSource` (`group.ts:134`) now handles element-backed groups; the inline path survives ONLY for parentless cap()/property-group sources (`group.ts:136` `if(!parent) return null`). | support-definer for the parentless residue | property-group keys/values, group-over-`properties()`, `cap('a')` group |
 
 ~~Concrete duplication evidence for D1~~ **(historical — D1 is resolved).** The scalar
 transform ladder was written twice (`renderProjection` vs `scalar.ts scalarTransform`),
@@ -67,6 +90,10 @@ deleted the `renderProjection`/`wrapReducer`/`SCALAR_TX_NAMES` copies; the stepw
 Scope.local stays, a genuinely distinct per-list aggregate).
 
 ### Maintainability-only (not feature-blocking)
+
+> **STILL STANDING (2026-07-17).** Both survived the spree. P3 was expected to retire the
+> `child.ts` double-parse by unifying the shape model; the substrate landed but the
+> double-parse did not go with it. These are the surviving maintainability debt — see §6.
 
 - **`child.ts` double-parse.** Each child shape is parsed twice — six
   `is*Child` preflights (`child.ts:118-182`) decide *which* dispatch branch runs,
@@ -115,21 +142,22 @@ Each fails closed with a clear message; none is an architectural gap.
 
 ### Gaps we own — the strategic targets, by leverage
 
-1. **Dynamic-tag VariantStream (widest).** `VariantStream` is deliberately narrow
-   (`null | scalar | one element-kind`). No general wide tagged row that root
-   materialization can frame by a runtime tag. One substrate — a gated wide
-   tagged row + tag-framing at `materializeRoot` — unblocks: mixed arms in *all
-   four* branch steps, record `fold`/`order`, element-value group maps, mixed
-   `select(Column.values)`, mixed element-kind path positions, static
-   `Pop.mixed`. Named blocker in matrix §3/§4/§5/§7/§9 — the broadest recurrence.
-2. **Path as a re-enterable stream (cleanest).** `PathStream` materializes
-   terminally. The proven template is `fold`/`unfold` (the list substrate).
-   Unblocks the entire "steps after `path()`" tail, set-ops-after-path,
-   `path().by()` through branches, `as()`-on-path. High ratio, self-contained.
-3. **Route write arguments through `lowerSteps` (Cluster 7).** The write chain is
-   a separate `WritePlan` interpreter that doesn't feed args through the read
-   child compiler. Unblocks nested merge maps, `addE` endpoint traversals,
-   `option(…, __.trav)`, traversal-valued `property()`.
+1. ~~**Dynamic-tag VariantStream (widest).**~~ **— LANDED (P4, 2026-07-16).**
+   `VariantStream` widened to a per-row payload-shape tag `vk` (null/scalar/node/edge/
+   list); `materializeVariantRoot` fans out to gated dual LEFT JOINs, CASE-framing per
+   row. Mixed-shape arms merge as a VariantStream in **all four** branch steps
+   (`union`/`choose`/`coalesce`, `+ tryLowerVariant*`). Remaining variant consumers
+   (record `fold`/`order`, mixed `select(Column.values)`, mixed path positions) were NOT
+   forced — they cash ~0–1 scenarios today and forcing them would be fake-case tuple-lists.
+2. ~~**Path as a re-enterable stream (cleanest).**~~ **— LANDED (P3, 2026-07-16).**
+   `PathStream` re-enters via `compileFromPath` (`select.ts`); `count()`/`is(typeOf(PATH))`
+   work. The `fold`/`unfold` template held as predicted.
+3. **Route write arguments through `lowerSteps` (Cluster 7) — PARTIALLY LANDED
+   (2026-07-16).** `write.ts` now compiles nested traversal write-args against the read
+   spine (`property(k, __.trav)` correlated values; withSideEffect-const merge maps).
+   **Still deferred (throws):** general merge traversal-args (`write.ts:519`), full `addE`
+   endpoint traversals past certain steps (`write.ts:476,482`). The `WRITE_RULES` imperative
+   interpreter remains (correctly — it is a deliberate write-path seam, not read debt).
 
 ### Deliberately parked (largest raw counts, lowest value/effort)
 
@@ -177,10 +205,14 @@ plumbing). The predicate-seam unification alone cashed +0 — the remaining choo
 predicates hit a *different, shared* wall: infix `.and()`/`.or()` connectors. See §4e.
 
 **P3 — Lift `map`/`group`/`path` to first-class re-enterable streams** *(the big
-substrate).* Do **path first** (clean; `fold`/`unfold` is the template), then the
-map-valued carried entry + group collapse (subsumes labels follow-up #3,
-Map-unfold, `valueMap().select()`, element-value group maps). Naturally retires
-the `child.ts` double-parse by unifying the shape model.
+substrate).* **LANDED 2026-07-16 (staged A→C, L3 →1066; + element-value fold →1067,
+nested-MAP group →1069).** Path first (clean; `fold`/`unfold` template held), then
+map-valued carried entry + group collapse — subsumed labels follow-up #3, Map-unfold,
+`valueMap().select()`, element-value group maps. `PathStream`/`MapStream`/`GroupStream`
+are first-class (`stream.ts`); `compileFromPath`/`compileFromMap`/`compileFromGroup`
+re-enter the tail; `deriveGroupEntries` gives the narrow `(mk,mv)` entry MapStream.
+**Caveat:** it did NOT retire the `child.ts` double-parse (the shape model was unified at
+the *stream* level, not the *child-parse* level) — that stays open (§6).
 
 **P4 — Dynamic-tag VariantStream** *(widest gate; pairs with P3).* Teach root
 materialization to frame by a runtime row tag. Unblocks mixed arms everywhere.
@@ -195,15 +227,18 @@ feature (`GroupVal {kind:'map'}` + two-level aggregation), NOT the variant row. 
 variant/list Map consumers cash ~0–1 scenarios today, so they were correctly not forced
 (no fake-case tuple-lists). Nested-map-valued groups = the recommended next dedicated bet.
 
-**P5 — Give group sources a live parent stream** *(debt removal).* So
-property-groups / `cap('a')` reach the generic child engine, retiring
-`tryInlineScalar` (D3).
+**P5 — Give group sources a live parent stream** *(debt removal).* **PARTIALLY LANDED
+2026-07-16.** `tryLowerGroupChildSource` (`group.ts:134`) gives element-backed groups a
+live-parent generic child seam; element groups now reject the old inline path
+(`group.ts:108` throws rather than falling back). **Residue:** parentless cap()/
+property-group sources still route through `tryPropertyGroupScalar`/`requireInlineScalar`
+(they have no live `ElementStream` parent to give — a genuine reader, not fast-path debt;
+CLAUDE.md already classes `tryPropertyGroupScalar` as migration debt, NOT an extension
+pattern). Full retirement needs a synthetic parent stream for stashed group sources.
 
-P1, P2, P5 are debt-removal that unlock features as a side effect. P3, P4 are new
-substrate. Sequencing rationale: clear the duplication (P1) and the predicate
-asymmetry (P2) first so the substrate work (P3/P4) is written once, on a clean
-spine, not forked across the accumulator and the stepwise engine. **P1 is done; P2/P3/
-P4/P5 remain.**
+Sequencing rationale (kept for the record): clear the duplication (P1) and the predicate
+asymmetry (P2) first so the substrate (P3/P4) is written once on a clean spine, not
+forked. **All of P1–P4 are done; P5 is partial; the remaining work is in §6.**
 
 ---
 
@@ -397,6 +432,34 @@ Subgraph-edges (~45). The bold/compounding pick is writes-through-`lowerSteps` (
 — reusable traversal-valued-argument seam). P3/P4 (terminal islands + mixed-arm
 VariantStream) remain the substrate for the choose/local/map arm-shape families (~38+29).
 
+## 4f. P3 + P4 + follow-ons LANDED — the substrate spree (L3 1046→1080, +34)
+
+The big substrate bets both shipped, plus two follow-ons the doc named as "next", plus
+the first writes-through-the-read-spine slices. Chronologically (see `git log`):
+
+- **P3 — map/group/path re-enterable (→1066).** Staged A→C: `PathStream` re-entry
+  (`compileFromPath`), `valueMap()`→`MapStream` (`compileFromMap`), scalar-groupCount over
+  the spine, `GroupStream` collapse (`compileFromGroup` + `deriveGroupEntries` narrow
+  `(mk,mv)` entry). Terminal islands #1 from §0 — gone. Root materialization:
+  `materializeGroupRoot`/`materializePathRoot`; MapStream is internal-only (cannot
+  materialize).
+- **P4 — dynamic-tag VariantStream (→1066).** `vk` per-row payload-shape tag +
+  `materializeVariantRoot` gated dual LEFT JOINs; `tryLowerVariant{Union,Choose,Coalesce}`
+  merge mixed-shape arms instead of throwing. See `docs/2026-07-16-p4-dynamic-variant-plan.md`.
+- **Element-value implicit fold (→1067)** and **nested-MAP-valued groups (→1069)** —
+  `tryLowerNestedMapGroup` → `GroupVal {kind:'nestedMap'}` two-level aggregation. This was
+  §3/§4's "recommended next dedicated bet"; already done.
+- **Writes-through-the-read-spine, first slices (→1069, →1079).** `property(k, __.trav)`
+  correlated values run against the read spine; withSideEffect-const merge maps +
+  `__.select(k)` constants resolve. General merge/addE traversal-args still deferred.
+- **Correlated fast-path fell out of the generic child pipeline** — the predicate/correlated
+  work landed as a generic-substrate lift (`compileCorrelatedChild`), NOT a new fast-path
+  switch. `fast-paths.ts` is unchanged (3 switches).
+
+**Meta-lesson confirmed:** every point of the +124 (956→1080) was a lift onto the generic
+spine or a mini-compiler deletion — never a new island. The bold/structural reading of
+each bet paid off; no minimal-slice version was needed.
+
 ## 5. What NOT to do
 
 - Do not chase the platform walls (§2) — they are correctly closed.
@@ -408,3 +471,34 @@ VariantStream) remain the substrate for the choose/local/map arm-shape families 
 - ~~Do not build P3/P4 while the dual tail (P1) still exists~~ — **P1 is done**
   (2026-07-16), so the dual tail is gone; P3/P4 substrate work now lands on the single
   spine without forking.
+
+## 6. Surviving open work (as of 2026-07-17)
+
+P1–P4 landed; P5 partial. What the spree did NOT close, ranked by leverage/appetite:
+
+1. **Writes-through-the-read-spine, remainder (§2 gap #3, ~46 scenarios).** The first
+   slices landed (`property(k, __.trav)`, withSideEffect-const merge maps). Still deferred:
+   general merge traversal-args (`write.ts:519`), full `addE` endpoint traversals past
+   certain steps (`write.ts:476,482`). The reusable traversal-valued-argument seam is the
+   compounding pick — same read spine, more write-arg call sites route through it.
+2. **SubgraphStrategy(edges) / strategy adjacency (~45, self-contained).** The
+   edge-criterion Subgraph injection (Cluster 9) — its own pass, untouched by the spree.
+3. **P5 residue — synthetic parent for stashed group sources.** Retire
+   `tryPropertyGroupScalar`/`requireInlineScalar` by giving parentless cap()/property-group
+   sources a live parent stream so they reach `tryLowerGroupChildSource` like element groups
+   do. Debt removal; CLAUDE.md already marks `tryPropertyGroupScalar` as migration debt.
+4. **`child.ts` double-parse + third `values/id/label` projector (maintainability).** Six
+   `is*Child` preflights + `compile*ChildRows` re-parse still run in lockstep, guarded by
+   dead-code mismatch invariants. P3 unified the shape model at the *stream* level, not the
+   *child-parse* level — this is the natural next unification. Not feature-blocking.
+5. **Switch-vs-Map dispatch inconsistency (maintainability).** `compileTail`/
+   `compileFromScalar`/`compileFromList`/`compileFromRecord` are still long
+   `if (steps[at].name === …)` chains while the prefix/tail-render use Maps. Convert to Map
+   dispatch (the CLAUDE.md "register in a Map, don't grow a switch" law applies).
+6. **`until`'s inline-only predicate — NOT debt, do not chase.** Runs inside
+   `WITH RECURSIVE` with no materialized parent domain; the same
+   `compileCorrelatedChild` correlated path where()/choose() use. Structural wall, faithful.
+
+**Doc-hygiene (done 2026-07-17):** `docs/feature-support-matrix.md` now carries the count
+inside the same `<!-- L3:passing -->…<!-- /L3:passing -->` markers as README, and the L3
+ratchet auto-syncs both (`SYNC_FILES` in `l3.test.ts`) — no more manual drift.

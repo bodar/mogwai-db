@@ -26,22 +26,27 @@ const GLV = join(ROOT, 'vendor/tinkerpop/gremlin-js/gremlin-javascript');
 const FEATURES = join(ROOT, 'vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/');
 const CUCUMBER_BIN = join(ROOT, 'vendor/tinkerpop/gremlin-js/node_modules/.bin/cucumber-js');
 const BASELINE = new URL('./baseline.json', import.meta.url).pathname;
-const README = join(ROOT, 'README.md');
+// Every human-facing file that quotes the conformance number, kept in lockstep
+// with the ratchet so the prose can never drift from baseline.json.
+const SYNC_FILES = [join(ROOT, 'README.md'), join(ROOT, 'docs/feature-support-matrix.md')];
 
-// Keep the human-facing conformance number in README in sync with the ratchet,
-// so the prose can never drift from baseline.json. Markdown has no native
-// placeholder, so we use the universal HTML-comment-anchor convention: the count
-// lives between <!-- L3:passing --> … <!-- /L3:passing --> and we rewrite only
-// what's between the markers (idempotent, re-runnable). Grouped with commas by
-// hand — no ICU/locale dependency.
-function syncReadme(passing: number): boolean {
+// Rewrite the count between the <!-- L3:passing --> … <!-- /L3:passing -->
+// markers in each synced file. Markdown has no native placeholder, so we use the
+// universal HTML-comment-anchor convention and rewrite only what's between the
+// markers (idempotent, re-runnable). Grouped with commas by hand — no ICU/locale
+// dependency. Returns the basenames actually changed (for the commit hint).
+function syncCountFiles(passing: number): string[] {
   const grouped = String(passing).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   const marker = /(<!-- L3:passing -->).*?(<!-- \/L3:passing -->)/s;
-  const readme = readFileSync(README, 'utf8');
-  const next = readme.replace(marker, `$1${grouped}$2`);
-  if (next === readme) return false;
-  writeFileSync(README, next);
-  return true;
+  const changed: string[] = [];
+  for (const file of SYNC_FILES) {
+    const text = readFileSync(file, 'utf8');
+    const next = text.replace(marker, `$1${grouped}$2`);
+    if (next === text) continue;
+    writeFileSync(file, next);
+    changed.push(file.slice(ROOT.length).replace(/^\/+/, ''));
+  }
+  return changed;
 }
 
 // Provisioning (git clone + workspace install) and the cucumber run can each
@@ -128,12 +133,13 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
 
   if (passing > baseline.passing) {
     if (process.env.CI) {
-      console.log(`L3 ahead of baseline by ${passing - baseline.passing} — run locally to auto-bump test/conformance/baseline.json (and the README count) to ${passing}, then commit both (CI does not rewrite them).`);
+      console.log(`L3 ahead of baseline by ${passing - baseline.passing} — run locally to auto-bump test/conformance/baseline.json (and the README + feature-support-matrix counts) to ${passing}, then commit all (CI does not rewrite them).`);
     } else {
       const next = { ...baseline, passing };
       writeFileSync(BASELINE, JSON.stringify(next, null, 2) + '\n');
-      const readmeSynced = syncReadme(passing);
-      console.log(`L3 baseline auto-bumped ${baseline.passing} → ${passing}. Commit test/conformance/baseline.json${readmeSynced ? ' + README.md' : ''}.`);
+      const synced = syncCountFiles(passing);
+      const also = synced.length ? ` + ${synced.join(' + ')}` : '';
+      console.log(`L3 baseline auto-bumped ${baseline.passing} → ${passing}. Commit test/conformance/baseline.json${also}.`);
     }
   }
 }, LONG);

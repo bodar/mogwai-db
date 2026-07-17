@@ -259,8 +259,10 @@ blobless+sparse (self-healed in the L3 test's `beforeAll`).
   host in-process and runs the official cucumber suite over GraphBinary. Parses the
   passing count, compares `baseline.json`: fewer → fail; more → auto-bump locally
   (`!CI`; commit it) so CI only reads it. The same local bump also rewrites the count in
-  `README.md` (fenced by `<!-- L3:passing -->…<!-- /L3:passing -->` — the prose can't drift
-  from the ratchet); commit README alongside baseline.json. Step scope =
+  every file in `SYNC_FILES` (`README.md` + `docs/feature-support-matrix.md`), each fenced
+  by `<!-- L3:passing -->…<!-- /L3:passing -->` so the prose can't drift from the ratchet;
+  commit them alongside baseline.json. Add a new consumer by giving it the marker + listing
+  it in `SYNC_FILES`. Step scope =
   `test/conformance/tags.ts` (widen as steps land; never narrow). Runbook:
   `test/conformance/README-cucumber.md`.
 - Every new step lands with SQL snapshot tests, its cucumber tag added to `tags.ts`, and
