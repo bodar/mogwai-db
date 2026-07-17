@@ -1926,6 +1926,21 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().repeat(__.out()).times(2)').sql).toContain('WHERE depth = 2');          // times only → final
   });
 
+  test('emit(predicate) carries an emit column tested per row (same engine as until)', () => {
+    // emit-after: the seed is never emitted (0 AS emit); each recursive row is tested.
+    const after = read('g.V(1).repeat(__.out()).emit(__.has("name","josh"))');
+    expect(after.sql).toContain('0 AS emit');                 // seed not emitted under emit-after
+    expect(after.sql).toContain('AS emit FROM');              // recursive rows tested
+    expect(after.sql).toContain('WHERE emit = 1');            // output = emitted rows
+    expect(after.sql).toContain('EXISTS(SELECT 1 FROM vertex_properties'); // has() predicate
+    // emit-before: the seed source is aliased (w) so the predicate's correlated nodes
+    // subquery references the seed id, not a self-match; loops() composes via .or().
+    const before = read('g.V(1).emit(__.has("name","marko").or().loops().is(2)).repeat(__.out())');
+    expect(before.sql).toContain('SELECT w.id AS id');        // seed aliased for the correlated test
+    expect(before.sql).toContain('c1.depth + 1 = ?');         // loops() → depth compare
+    expect(before.sql).toMatch(/\) OR \(/);                    // has() OR loops()
+  });
+
   test('both() repeat emits two recursive terms', () => {
     const p = read('g.V().repeat(__.both()).times(2)');
     expect(p.sql).toContain('e.tgt AS id, c1.depth + 1');
