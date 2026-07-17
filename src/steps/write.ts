@@ -20,6 +20,17 @@ import { compileInject } from './inject.ts';
 
 const isNested = (a: any): a is { nested: any } => a != null && typeof a === 'object' && 'nested' in a;
 
+// A nested `__.select(k)` where k is a withSideEffect(k, const) key resolves to the
+// constant at compile time (correct-by-construction — the value never changes). Returns
+// {has:false} for any other nested shape so the caller falls through to its own handling.
+function constFromSelect(nested: any, sideEffects: Map<string, any> | undefined, params: Record<string, any>): { has: boolean; value: any } {
+  if (!isNested(nested)) return { has: false, value: undefined };
+  const inner = stepChain(nested.nested, params);
+  if (inner.length === 1 && inner[0].name === 'select' && typeof inner[0].args[0] === 'string' && sideEffects?.has(inner[0].args[0]))
+    return { has: true, value: sideEffects.get(inner[0].args[0]) };
+  return { has: false, value: undefined };
+}
+
 // Compile a nested traversal (optionally seeded at a driver element) and run it against
 // the store, returning its raw result rows + the compiled shape. Seeding prepends a
 // V/E source on the driver's internal rowid so the child is anchored at that element.
@@ -58,8 +69,10 @@ function nestedScalar(store: GraphStore, nestedNode: any, params: Record<string,
 // inferred from the produced value, the honest fallback for an untyped channel). An empty
 // nested traversal → has:false (the property is not written), matching property(traversal)
 // on no result.
-function resolveSpecValue(store: GraphStore, sp: PropSpec, id: number, elem: 'node' | 'edge', params: Record<string, any>): { has: boolean; value: any; vtype: CanonicalType | null } {
+function resolveSpecValue(store: GraphStore, sp: PropSpec, id: number, elem: 'node' | 'edge', params: Record<string, any>, sideEffects?: Map<string, any>): { has: boolean; value: any; vtype: CanonicalType | null } {
   if (!isNested(sp.value)) return { has: true, value: sp.value, vtype: sp.vtype };
+  const c = constFromSelect(sp.value, sideEffects, params);
+  if (c.has) return { has: true, value: c.value, vtype: gremlinTypeOf(c.value, null) };
   const r = nestedScalar(store, sp.value.nested, params, { id, elem });
   return { has: r.has, value: r.value, vtype: r.vtype ?? (r.has ? gremlinTypeOf(r.value, null) : null) };
 }
@@ -108,7 +121,7 @@ function compileDrop(steps: PStep[]): WritePlan {
 
 // g.V(x).<filters>.property(k, v)[.property(...)] — set properties on the matched
 // existing element(s), single cardinality (last write wins).
-function compileSetProperty(steps: PStep[], params: Record<string, any>): WritePlan {
+function compileSetProperty(steps: PStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
   const firstProp = steps.findIndex((s) => s.name === 'property');
   const prefix = steps.slice(0, firstProp);
   const { st, stop } = buildPrefix(prefix, params);
@@ -138,7 +151,7 @@ function compileSetProperty(steps: PStep[], params: Record<string, any>): WriteP
       kind: 'write',
       run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
         for (const sp of specs) {
-          const r = resolveSpecValue(store, sp, id, 'edge', params);
+          const r = resolveSpecValue(store, sp, id, 'edge', params, sideEffects);
           if (r.has) insertEdgeProperty(store, id, sp.key, r.value, r.vtype);
         }
         const cur = store.query<any>(readCur, [id])[0];
@@ -152,7 +165,7 @@ function compileSetProperty(steps: PStep[], params: Record<string, any>): WriteP
     kind: 'write',
     run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
       for (const sp of specs) {
-        const r = resolveSpecValue(store, sp, id, 'node', params);
+        const r = resolveSpecValue(store, sp, id, 'node', params, sideEffects);
         if (r.has) applyVertexProperty(store, id, sp.key, r.value, r.vtype, sp.meta, sp.cardinality);
       }
       const cur = store.query<any>(readCur, [id])[0];
@@ -207,14 +220,17 @@ function metaOf(metaArgs: any[]): Record<string, any> | null {
 const singleProps = (rec: Record<string, any>): PropSpec[] =>
   Object.entries(rec).map(([key, value]) => ({ key, value, vtype: gremlinTypeOf(value, null), meta: null, cardinality: 'single' as Cardinality }));
 
-// An addV(...) step + its trailing property() steps → a vertex spec.
-function parseVertexSpec(addV: Step, propSteps: Step[]): VertexSpec {
+// An addV(...) step + its trailing property() steps → a vertex spec. A property key or
+// value that is __.select(k) of a withSideEffect constant resolves at parse time.
+function parseVertexSpec(addV: Step, propSteps: Step[], sideEffects?: Map<string, any>, params: Record<string, any> = {}): VertexSpec {
   let label = (typeof addV.args[0] === 'string' ? addV.args[0] : null) ?? 'vertex';
   const props: PropSpec[] = [];
   let uid: string | number | null = null;
   for (const s of propSteps) {
     const { cardinality, rest, off } = readCardinality(s.args);
-    const [key, val, ...metaArgs] = rest;
+    let [key, val, ...metaArgs] = rest;
+    { const ck = constFromSelect(key, sideEffects, params); if (ck.has) key = ck.value; }
+    { const cv = constFromSelect(val, sideEffects, params); if (cv.has) val = cv.value; }
     // property(null) / property([:]) / property([map]) — a null or map-form key adds
     // nothing (map-form property() is a no-op for now, matching TinkerPop's null/empty
     // cases; a populated map would add its entries, not yet implemented).
@@ -344,10 +360,10 @@ function insertVertex(store: GraphStore, spec: VertexSpec): { id: number; extId:
 }
 
 // g.addV('label').property(k, v)... — and multi-element chains (a graph initializer).
-function compileAddV(steps: PStep[]): WritePlan {
+function compileAddV(steps: PStep[], params: Record<string, any> = {}, sideEffects?: Map<string, any>): WritePlan {
   if (steps.some((s, i) => i > 0 && s.name !== 'property'))
-    return { kind: 'write', run: (store) => runWriteChainFull(store, steps, {}) };
-  const spec = parseVertexSpec(steps[0], steps.slice(1));
+    return { kind: 'write', run: (store) => runWriteChainFull(store, steps, params, sideEffects) };
+  const spec = parseVertexSpec(steps[0], steps.slice(1), sideEffects, params);
   return { kind: 'write', run: (store) => { const v = insertVertex(store, spec); return [{ vertex: { id: v.extId, label: spec.label, props: readVertexProps(store, v.id) } }]; } };
 }
 
@@ -423,7 +439,7 @@ function compileAddE(steps: PStep[], params: Record<string, any>): WritePlan {
 }
 
 // Interpret a linear write chain (addV/property/as/addE/from/to).
-function runWriteChainFull(store: GraphStore, steps: Step[], params: Record<string, any>): any[] {
+function runWriteChainFull(store: GraphStore, steps: Step[], params: Record<string, any>, sideEffects?: Map<string, any>): any[] {
   const aliases = new Map<string, number>();
   let currentV: number | null = null;
   let last: any = null;
@@ -432,7 +448,7 @@ function runWriteChainFull(store: GraphStore, steps: Step[], params: Record<stri
     if (s.name === 'addV') {
       const propSteps: Step[] = [];
       while (i + 1 < steps.length && steps[i + 1].name === 'property') propSteps.push(steps[++i]);
-      const spec = parseVertexSpec(s, propSteps);
+      const spec = parseVertexSpec(s, propSteps, sideEffects, params);
       const v = insertVertex(store, spec);
       currentV = v.id; last = { vertex: { id: v.extId, label: spec.label, props: readVertexProps(store, v.id) } };
     } else if (s.name === 'as') {
@@ -656,7 +672,7 @@ interface WriteRule { match: (steps: PStep[]) => boolean; compile: (steps: PStep
 
 const WRITE_RULES: WriteRule[] = [
   { match: (s) => s.some((x) => x.name === 'addE'), compile: (s, p) => compileAddE(s, p) },
-  { match: (s) => s[0].name === 'addV', compile: (s) => compileAddV(s) },
+  { match: (s) => s[0].name === 'addV', compile: (s, p, _sk, se) => compileAddV(s, p, se) },
   { match: (s) => s.some((x) => x.name === 'mergeV'), compile: (s, p, _sk, se) => compileMergeV(s, p, se) },
   { match: (s) => s.some((x) => x.name === 'mergeE'), compile: (s, p, _sk, se) => compileMergeE(s, p, se) },
   // inject is a scalar-stream READ, not a write — it lives here only because it's a
@@ -664,7 +680,7 @@ const WRITE_RULES: WriteRule[] = [
   // (withSack(x).inject(v).sack(...)) seeds its `sk` column like the V()/E() path.
   { match: (s) => s[0].name === 'inject', compile: (s, _p, sackInit) => compileInject(s, sackInit) },
   { match: (s) => s[s.length - 1].name === 'drop', compile: (s) => compileDrop(s) },
-  { match: (s) => s.some((x) => x.name === 'property'), compile: (s, p) => compileSetProperty(s, p) },
+  { match: (s) => s.some((x) => x.name === 'property'), compile: (s, p, _sk, se) => compileSetProperty(s, p, se) },
 ];
 
 /** Route a step chain to its write compiler, or null if it's a read. */

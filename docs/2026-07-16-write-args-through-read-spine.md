@@ -41,7 +41,14 @@ element relation's `id` — a different path. Hence:
   map-inject), mutating `option` bodies (`__.sideEffect(__.property…)`), the reducer form
   of `withSideEffect`. The registry is reusable — a future read `select(k)` can read it too
   (e.g. `union(__.select('map'))`).
-- **Stage 3:** `addE`/`mergeE` endpoint traversals past a movement/branch — resolve to the
+- **Stage 3 (done):** generalize the `withSideEffect` const registry to EVERY write arg, not
+  just merge — `property(k, __.select(constK))` value, `addV().property(__.select(constK), …)`
+  key, on existing elements and new vertices (`constFromSelect` in `resolveSpecValue` +
+  `parseVertexSpec`). +0 conformance (the suite scenarios that use it are blocked downstream —
+  read-tail after `addV().property()` — or untagged), but it's substrate: one mechanism
+  (`withSideEffect` constants resolve in any write arg) that real clients ride, not a fake-case
+  peephole. Substrate at +0 is a legitimate win (see memory `dan-design-disposition`).
+- **Later:** `addE`/`mergeE` endpoint traversals past a movement/branch — resolve to the
   bare element relation's rowid (buildPrefix/element-relation path, not the framed shape).
 
 Fail closed with a clear message on any shape the extractor does not yet consume.
