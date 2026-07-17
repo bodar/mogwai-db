@@ -6,7 +6,7 @@ import { stepChain } from '../frontend.ts';
 import { aliasElem, aliasIsElement, carryFrag, carriedCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
 import { aliasId, aliasPresent, aliasScalar, shapeElem } from './alias.ts';
 import { emptyElementLike, historyValues, popEnd, popIsListResult, selectOneFromAlias } from './labelselect.ts';
-import { carryOf, continueLowering, pathColumns, recordFieldColumns, toListStream, toPathStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type LoweringResult, type PathStream, type RecordField, type RecordStream, type ScalarStream, type Stream } from './stream.ts';
+import { carryOf, continueLowering, dispatchShapeTail, pathColumns, recordFieldColumns, toListStream, toPathStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type LoweringResult, type PathStream, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from './stream.ts';
 import { type Compiled, type PathPos } from '../render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
 import { lowerGlobalCount } from './barrier.ts';
@@ -474,13 +474,9 @@ function recordWhere(s: RecordStream, step: PStep, at: number): LoweringResult {
 /** Continue from a per-traverser record. Selecting a named field retypes it to the
  * ordinary scalar/element stream, while Column.keys/values produces one list value
  * per record. This is intentionally distinct from MapStream's whole-group columns. */
-export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): LoweringResult {
-  const step = steps[at];
-  if (step.name === 'where' || step.name === 'not' || step.name === 'filter')
-    return recordWhere(s, step, at);
-  if (step.name === 'count')
-    return continueLowering(lowerGlobalCount(s), at + 1);
-  if (step.name === 'order') {
+const recordFilter: ShapeTailFn<RecordStream> = (s, step, _steps, at) => recordWhere(s, step, at);
+
+const recordOrder: ShapeTailFn<RecordStream> = (s, step, steps, at) => {
     const r = s.rel.as('r');
     const names = s.rel.cols;
     const terms = recordOrderTerms(s, r, step.bys ?? []);
@@ -499,8 +495,9 @@ export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): 
     }
     const rel = s.q.cte(q`SELECT ${list(names.map((name) => r.c[name]), ', ')} FROM ${r} ORDER BY ${list(terms, ', ')}${suffix}`, names);
     return continueLowering(toRecordStream(carryOf(s), rel, s.fields), fuse ? at + 2 : at + 1);
-  }
-  if (step.name === 'limit' || step.name === 'range' || step.name === 'skip' || step.name === 'tail') {
+};
+
+const recordSlice: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
     const local = step.args.some((a: any) => a && typeof a === 'object' && a.scope === 'local');
     const nums = step.args.filter((a): a is number => typeof a === 'number').map(Number);
     if (local) {
@@ -530,9 +527,9 @@ export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): 
       names,
     );
     return continueLowering(toRecordStream(carryOf(s), rel, s.fields), at + 1);
-  }
-  if (step.name !== 'select') throw new Error(`${step.name}() on a record value not yet supported`);
+};
 
+const recordSelect: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
   const pop = step.args.find((a) => a && typeof a === 'object' && 'pop' in a) as { pop: string } | undefined;
   if (pop && pop.pop !== 'last') throw new Error(`select(Pop.${pop.pop}) on a record not yet supported`);
   const column = step.args.map((a: any) => a && typeof a === 'object' && a.column)
@@ -593,6 +590,20 @@ export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): 
     ['id', ...carriedCols(s.carried)],
   );
   return continueLowering({ ...carryOf(s), kind: 'elements', rel, elem: field.sub === 'edge' ? 'edge' : 'node' }, at + 1);
+};
+
+const RECORD_TAIL = new Map<string, ShapeTailFn<RecordStream>>([
+  ['where', recordFilter], ['not', recordFilter], ['filter', recordFilter],
+  ['count', (s, _step, _steps, at) => continueLowering(lowerGlobalCount(s), at + 1)],
+  ['order', recordOrder],
+  ['limit', recordSlice], ['range', recordSlice], ['skip', recordSlice], ['tail', recordSlice],
+  ['select', recordSelect],
+]);
+
+export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): LoweringResult {
+  return dispatchShapeTail(RECORD_TAIL, s, steps, at, () => {
+    throw new Error(`${steps[at].name}() on a record value not yet supported`);
+  });
 }
 
 // ---------- path() (linear regime) ----------

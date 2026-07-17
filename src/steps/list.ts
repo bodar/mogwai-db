@@ -9,7 +9,7 @@ import { q, value, raw, list, empty, type Expression, type Relation } from '../q
 import { predicateSql, scalarTx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { carryOf, continueLowering, toListStream, toResultStream, toScalarStream, mapOfToListOf, type ListStream, type LoweringResult, type ScalarStream, type MapStream } from './stream.ts';
+import { carryOf, continueLowering, dispatchShapeTail, toListStream, toResultStream, toScalarStream, mapOfToListOf, type ListStream, type LoweringResult, type ScalarStream, type MapStream, type ShapeTailFn } from './stream.ts';
 import { carryFrag, carriedCols, type ElementStream } from './context.ts';
 import { type Compiled } from '../render.ts';
 import { compileRead } from './index.ts';
@@ -276,60 +276,72 @@ const LIST_OPERAND_OPS = new Set(['combine', 'intersect', 'difference', 'disjunc
  * retypes and re-enters; Scope.local reductions/transforms reshape each list; the
  * set-op family reshapes the list (set/list/product) or reduces it (conjoin/all/any).
  */
-export function compileFromList(s: ListStream, steps: PStep[], at: number): LoweringResult {
-  const step = steps[at];
-  if (step.name === 'unfold') return continueLowering(compileUnfold(s), at + 1);
-  // none(pred): keep each list where NO element satisfies pred (a collection filter);
-  // stays a list stream, so downstream continues.
-  if (step.name === 'none') return continueLowering(listNoneFilter(s, step.args[0]), at + 1);
-  // Scope.local collection transforms (order/dedup/limit/skip/range/tail) — reshape
-  // each list and stay a ListStream, so downstream continues.
-  if (LIST_LOCAL_TX.has(step.name) && isLocal(step))
-    return continueLowering(listLocalTransform(s, step), at + 1);
-  // reverse() on a list reverses element order (no Scope arg — reverse of a list is
-  // always the whole collection).
-  if (step.name === 'reverse')
-    return continueLowering(listReverse(s), at + 1);
-  // Scope.local per-element string transforms (toUpper/trim/length/…) over a list.
-  if (STRING_LOCAL_TX.has(step.name)) {
-    // A string op on a list WITHOUT Scope.local is invalid (a list is not a string) —
-    // raise TinkerPop's exact message. WITH Scope.local it applies per element.
-    if (!isLocal(step)) throw new Error(`The ${step.name}() step can only take string as argument`);
-    return continueLowering(listStringTransform(s, step), at + 1);
-  }
-  // Scope.local per-list reducers (count/sum/min/max/mean) — reduce each list to a
-  // scalar stream, so a trailing filter/transform/reducer continues normally.
-  if (['count', 'sum', 'min', 'max', 'mean'].includes(step.name) && isLocal(step)) {
-    return continueLowering(lowerListReducer(s, step.name), at + 1);
-  }
+const LIST_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
+
+// Scope.local collection transforms (order/dedup/limit/skip/range/tail) — reshape each
+// list and stay a ListStream. Without Scope.local it isn't this step → fall to default.
+const listLocalTx: ShapeTailFn<ListStream> = (s, step, _steps, at) =>
+  isLocal(step) ? continueLowering(listLocalTransform(s, step), at + 1) : null;
+
+// Scope.local per-element string transforms (toUpper/trim/length/…) over a list. A string
+// op on a list WITHOUT Scope.local is invalid (a list is not a string) — raise
+// TinkerPop's exact message; WITH Scope.local it applies per element.
+const listStringTx: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
+  if (!isLocal(step)) throw new Error(`The ${step.name}() step can only take string as argument`);
+  return continueLowering(listStringTransform(s, step), at + 1);
+};
+
+// Scope.local per-list reducers (count/sum/min/max/mean) — reduce each list to a scalar
+// stream, so a trailing filter/transform/reducer continues normally.
+const listReducer: ShapeTailFn<ListStream> = (s, step, _steps, at) =>
+  isLocal(step) ? continueLowering(lowerListReducer(s, step.name), at + 1) : null;
+
+// conjoin(delim): join the incoming list into ONE string (nulls skipped), delimiter a
+// plain string arg → a scalar stream (so a trailing step composes; usually terminal).
+const listConjoin: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
+  const c = s.rel.as('c');
+  const delim = String(step.args[0] ?? '');
+  const joined = q`(SELECT COALESCE(group_concat(value, ${value(delim)}), '') FROM (SELECT value FROM json_each(${c.c.list}) WHERE value IS NOT NULL ORDER BY key))`;
+  const rel = s.q.cte(q`SELECT ${joined} AS v${carryFrag(s.carried, c)} FROM ${c}`, ['v', ...carriedCols(s.carried)]);
+  return continueLowering(toScalarStream(carryOf(s), rel, undefined), at + 1);
+};
+
+// set-op family (combine/intersect/difference/disjunct/product) over a list operand.
+const listSetOp: ShapeTailFn<ListStream> = (s, step, steps, at) => {
+  const c = s.rel.as('c');
+  const op = operandList(step.args[0], step.name, s.params);
+  const listExpr = setOpExpr(step.name, c.c.list, op);
+  const terminal = at + 1 >= steps.length;
+  // intersect/difference/disjunct return a Set: frame as a Set only when terminal. With a
+  // follower (order(Scope.local)/unfold) the deduped content is treated as a plain list
+  // (TinkerPop's order(local) on a set yields a List), matching the suite.
+  if (SET_RESULT.has(step.name) && terminal)
+    return continueLowering(toResultStream(s.q, q`SELECT json(${listExpr}) AS list FROM ${c}`, { kind: 'jsonbSet' }), at + 1);
+  // product yields a list of pair-lists; the others keep the element shape.
+  const of = step.name === 'product' ? { kind: 'list' as const, of: { kind: 'scalar' as const } } : s.of;
+  return continueLowering(listCte(s, c, listExpr, of), at + 1);
+};
+
+const LIST_TAIL = new Map<string, ShapeTailFn<ListStream>>([
+  ['unfold', (s, _step, _steps, at) => continueLowering(compileUnfold(s), at + 1)],
+  // none(pred): keep each list where NO element satisfies pred (a collection filter).
+  ['none', (s, step, _steps, at) => continueLowering(listNoneFilter(s, step.args[0]), at + 1)],
+  // reverse() reverses element order (no Scope arg — reverse of a list is the whole list).
+  ['reverse', (s, _step, _steps, at) => continueLowering(listReverse(s), at + 1)],
   // all(P)/any(P): keep the list if every/some element satisfies P (list filter).
-  if (step.name === 'all' || step.name === 'any')
-    return continueLowering(listAllAny(s, step), at + 1);
-  // conjoin(delim): join the incoming list into ONE string (nulls skipped), delimiter a
-  // plain string arg → a scalar stream (so a trailing step composes; usually terminal).
-  if (step.name === 'conjoin') {
-    const c = s.rel.as('c');
-    const delim = String(step.args[0] ?? '');
-    const joined = q`(SELECT COALESCE(group_concat(value, ${value(delim)}), '') FROM (SELECT value FROM json_each(${c.c.list}) WHERE value IS NOT NULL ORDER BY key))`;
-    const rel = s.q.cte(q`SELECT ${joined} AS v${carryFrag(s.carried, c)} FROM ${c}`, ['v', ...carriedCols(s.carried)]);
-    return continueLowering(toScalarStream(carryOf(s), rel, undefined), at + 1);
-  }
-  // set-op family (combine/intersect/difference/disjunct/product) over a list operand.
-  if (LIST_OPERAND_OPS.has(step.name)) {
-    const c = s.rel.as('c');
-    const op = operandList(step.args[0], step.name, s.params);
-    const listExpr = setOpExpr(step.name, c.c.list, op);
-    const terminal = at + 1 >= steps.length;
-    // intersect/difference/disjunct return a Set: frame as a Set only when terminal.
-    // With a follower (order(Scope.local)/unfold) the deduped content is treated as a
-    // plain list (TinkerPop's order(local) on a set yields a List), matching the suite.
-    if (SET_RESULT.has(step.name) && terminal)
-      return continueLowering(toResultStream(s.q, q`SELECT json(${listExpr}) AS list FROM ${c}`, { kind: 'jsonbSet' }), at + 1);
-    // product yields a list of pair-lists; the others keep the element shape.
-    const of = step.name === 'product' ? { kind: 'list' as const, of: { kind: 'scalar' as const } } : s.of;
-    return continueLowering(listCte(s, c, listExpr, of), at + 1);
-  }
-  throw new Error(`${step.name}() on a list value not yet supported`);
+  ['all', (s, step, _steps, at) => continueLowering(listAllAny(s, step), at + 1)],
+  ['any', (s, step, _steps, at) => continueLowering(listAllAny(s, step), at + 1)],
+  ['conjoin', listConjoin],
+  ...[...LIST_LOCAL_TX].map((n): [string, ShapeTailFn<ListStream>] => [n, listLocalTx]),
+  ...[...STRING_LOCAL_TX].map((n): [string, ShapeTailFn<ListStream>] => [n, listStringTx]),
+  ...[...LIST_REDUCERS].map((n): [string, ShapeTailFn<ListStream>] => [n, listReducer]),
+  ...[...LIST_OPERAND_OPS].map((n): [string, ShapeTailFn<ListStream>] => [n, listSetOp]),
+]);
+
+export function compileFromList(s: ListStream, steps: PStep[], at: number): LoweringResult {
+  return dispatchShapeTail(LIST_TAIL, s, steps, at, () => {
+    throw new Error(`${steps[at].name}() on a list value not yet supported`);
+  });
 }
 
 /** The single Column arg of a select() over a map, if any. */

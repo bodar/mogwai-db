@@ -7,7 +7,7 @@ import {
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, carriedWith, elemRel, withoutCarried, type Carry, type ElementStream } from './context.ts';
-import { carryOf, continueLowering, groupColumns, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream } from './stream.ts';
+import { carryOf, continueLowering, dispatchShapeTail, groupColumns, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from './stream.ts';
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, pushChildScope, reuseCurrentFrame, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, type ChildParent } from './child.ts';
@@ -552,51 +552,59 @@ function propertyScalar(s: PropertyStream, col: 'vpid' | 'pk' | 'pv'): ScalarStr
 
 /** Consume a PropertyStream. Only property-specific operations live here; once a
  * step changes shape it re-enters the same root dispatcher as every other stream. */
+const PROPERTY_SCALAR_COL = { key: 'pk', value: 'pv', id: 'vpid' } as const;
+
+const propertyFilter: ShapeTailFn<PropertyStream> = (s, step, _steps, at) =>
+  continueLowering(filterProperty(s, step), at + 1);
+
+const propertyScalarStep: ShapeTailFn<PropertyStream> = (s, step, _steps, at) =>
+  continueLowering(propertyScalar(s, PROPERTY_SCALAR_COL[step.name as keyof typeof PROPERTY_SCALAR_COL]), at + 1);
+
+const propertyGroup: ShapeTailFn<PropertyStream> = (s, step, _steps, at) => {
+  // A live property parent — its by() sub-traversals lower through the generic child
+  // seam (tryLowerGroupChildSource), exactly as an element group does.
+  const p = s.rel.as('p');
+  const src: GroupSource = { from: p, ctx: propertyCtx(p), elem: 'property', parent: s, productiveBy: step.productiveBy };
+  const isCount = step.name === 'groupCount';
+  return continueLowering(lowerGroup(s, isCount, step.bys ?? [], src), at + 1);
+};
+
+const propertyValueMap: ShapeTailFn<PropertyStream> = (s, _step, steps, at) => {
+  if (at + 1 < steps.length) throw new Error(`step not implemented after properties().valueMap(): ${steps[at + 1].name}()`);
+  const p = s.rel.as('p');
+  return continueLowering(toResultStream(s.q, q`SELECT ${p.c.pmeta} AS meta FROM ${p}`, { kind: 'metaMap' }), at + 1);
+};
+
+const propertyMetaProperties: ShapeTailFn<PropertyStream> = (s, step, steps, at) => {
+  if (at + 1 < steps.length) throw new Error(`step not implemented after properties().properties(): ${steps[at + 1].name}()`);
+  const mkeys = step.args.filter((a): a is string => typeof a === 'string');
+  const mkeyFilter = mkeys.length ? q` WHERE je.key IN (${list(mkeys.map(value), ',')})` : empty;
+  const p = s.rel.as('p');
+  return continueLowering(toResultStream(s.q, q`SELECT je.key AS mk, je.value AS mv FROM ${p}, json_each(COALESCE(${p.c.pmeta}, '{}')) je${mkeyFilter}`, { kind: 'metaProperty' }), at + 1);
+};
+
+const propertyElement: ShapeTailFn<PropertyStream> = (s, _step, _steps, at) => {
+  const p = s.rel.as('p');
+  const rel = s.q.cte(
+    q`SELECT ${p.c.owner} AS id${carryFrag(s.carried, p)} FROM ${p}`,
+    ['id', ...carriedCols(s.carried)],
+  );
+  const out: ElementStream = { ...carryOf(s), kind: 'elements', rel, elem: s.ownerElem };
+  return continueLowering(out, at + 1);
+};
+
+const PROPERTY_TAIL = new Map<string, ShapeTailFn<PropertyStream>>([
+  ['has', propertyFilter], ['hasKey', propertyFilter], ['hasValue', propertyFilter],
+  ['key', propertyScalarStep], ['value', propertyScalarStep], ['id', propertyScalarStep],
+  ['count', (s, _step, _steps, at) => continueLowering(lowerGlobalCount(s), at + 1)],
+  ['group', propertyGroup], ['groupCount', propertyGroup],
+  ['valueMap', propertyValueMap],
+  ['properties', propertyMetaProperties],
+  ['element', propertyElement],
+]);
+
 export function compileFromProperty(s: PropertyStream, steps: PStep[], at: number): LoweringResult {
-  const step = steps[at];
-
-  if (step.name === 'has' || step.name === 'hasKey' || step.name === 'hasValue')
-    return continueLowering(filterProperty(s, step), at + 1);
-
-  if (step.name === 'key' || step.name === 'value' || step.name === 'id') {
-    const col = step.name === 'key' ? 'pk' : step.name === 'value' ? 'pv' : 'vpid';
-    return continueLowering(propertyScalar(s, col), at + 1);
-  }
-
-  if (step.name === 'count') return continueLowering(lowerGlobalCount(s), at + 1);
-
-  if (step.name === 'group' || step.name === 'groupCount') {
-    // A live property parent — its by() sub-traversals lower through the generic child
-    // seam (tryLowerGroupChildSource), exactly as an element group does.
-    const p = s.rel.as('p');
-    const src: GroupSource = { from: p, ctx: propertyCtx(p), elem: 'property', parent: s, productiveBy: step.productiveBy };
-    const isCount = step.name === 'groupCount';
-    return continueLowering(lowerGroup(s, isCount, step.bys ?? [], src), at + 1);
-  }
-
-  if (step.name === 'valueMap') {
-    if (at + 1 < steps.length) throw new Error(`step not implemented after properties().valueMap(): ${steps[at + 1].name}()`);
-    const p = s.rel.as('p');
-    return continueLowering(toResultStream(s.q, q`SELECT ${p.c.pmeta} AS meta FROM ${p}`, { kind: 'metaMap' }), at + 1);
-  }
-
-  if (step.name === 'properties') {
-      if (at + 1 < steps.length) throw new Error(`step not implemented after properties().properties(): ${steps[at + 1].name}()`);
-      const mkeys = step.args.filter((a): a is string => typeof a === 'string');
-      const mkeyFilter = mkeys.length ? q` WHERE je.key IN (${list(mkeys.map(value), ',')})` : empty;
-      const p = s.rel.as('p');
-      return continueLowering(toResultStream(s.q, q`SELECT je.key AS mk, je.value AS mv FROM ${p}, json_each(COALESCE(${p.c.pmeta}, '{}')) je${mkeyFilter}`, { kind: 'metaProperty' }), at + 1);
-  }
-
-  if (step.name === 'element') {
-    const p = s.rel.as('p');
-    const rel = s.q.cte(
-      q`SELECT ${p.c.owner} AS id${carryFrag(s.carried, p)} FROM ${p}`,
-      ['id', ...carriedCols(s.carried)],
-    );
-    const out: ElementStream = { ...carryOf(s), kind: 'elements', rel, elem: s.ownerElem };
-    return continueLowering(out, at + 1);
-  }
-
-  throw new Error(`step not implemented after properties(): ${step.name}()`);
+  return dispatchShapeTail(PROPERTY_TAIL, s, steps, at, () => {
+    throw new Error(`step not implemented after properties(): ${steps[at].name}()`);
+  });
 }

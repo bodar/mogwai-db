@@ -124,10 +124,17 @@ Scope.local stays, a genuinely distinct per-list aggregate).
   projector (`compileScalarChildRows` `continueScalar`/`lowerScopedScalarReducer`) still
   survives for a scoped-reducer suffix + `constant()` terminal — folding it into generic
   `lowerSteps`/`PROJECTORS` needs `scalar.ts` reducer changes, a separate follow-up (§6).
-- **Switch-vs-Map inconsistency.** The prefix uses a `PREFIX` Map and the tail
-  render uses `MODIFIERS`/`PROJECTORS` Maps, but every *shape dispatcher* is a
-  long `if (steps[at].name === …)` chain: `compileTail`, `compileFromScalar`,
-  `compileFromProperty`, `compileFromList`, `compileFromRecord`.
+- ~~**Switch-vs-Map inconsistency.**~~ **RESOLVED (2026-07-17).** All five shape
+  dispatchers (`compileTail`, `compileFromScalar`, `compileFromProperty`,
+  `compileFromList`, `compileFromRecord`) now dispatch through one shared combinator
+  `dispatchShapeTail(table, s, steps, at, fallback)` (`stream.ts`) over a per-shape
+  `Map<stepName, ShapeTailFn>`. A handler returning `null` means "not mine — an internal
+  guard/fall-through declined" so dispatch runs the fallback (a clear throw, or — for the
+  element tail — the extracted `compileTailFold` projection path). Conditional recognition
+  (order().dedup() peek, Scope.local guards, mixed-shape arm fall-through) lives inside the
+  handler; a step family sharing one handler registers each name pointing at it. Same
+  "register in a Map, don't grow a switch" law as `PREFIX`/`MODIFIERS`/`PROJECTORS`. L3
+  held at 1086, corpus 100%, typecheck clean — pure debt removal.
 
 ### Justified — NOT removable (do not "simplify" these)
 
@@ -571,10 +578,12 @@ P1–P4 landed; P5 partial. What the spree did NOT close, ranked by leverage/app
    `PROJECTORS` — folding it needs `scalar.ts` reducer changes with their own byte-equivalence
    risk. The `index.ts` dispatch-peek ↔ branch/projection-emit parse is deliberately left
    (structurally distant; divergence already impossible via the shared classifier).
-5. **Switch-vs-Map dispatch inconsistency (maintainability).** `compileTail`/
-   `compileFromScalar`/`compileFromList`/`compileFromRecord` are still long
-   `if (steps[at].name === …)` chains while the prefix/tail-render use Maps. Convert to Map
-   dispatch (the CLAUDE.md "register in a Map, don't grow a switch" law applies).
+5. ~~**Switch-vs-Map dispatch inconsistency (maintainability).**~~ **DONE (2026-07-17).**
+   All five dispatchers (`compileTail`/`compileFromScalar`/`compileFromProperty`/
+   `compileFromList`/`compileFromRecord`) now share one `dispatchShapeTail` combinator
+   (`stream.ts`) over per-shape `Map<stepName, ShapeTailFn>` tables; null-return =
+   fall-to-fallback (the element tail's fallback is the extracted `compileTailFold`). L3
+   1086, corpus 100%. See §1 "Maintainability" for the detail.
 6. **`until`/`emit` correlated-only predicate — NOT debt, do not chase.** As of §4g both
    route through the shared `compileInlinePredicate`/`walkPredicate` engine (`loops()` a
    leaf, infix `.or()`/`.and()` composition) — no longer a bespoke parser. They stay
