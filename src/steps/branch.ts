@@ -31,17 +31,19 @@ const unifyLists = (arms: readonly ListStream[]): ListStream['of'] => {
   throw new Error('list branch arms have incompatible item shapes');
 };
 
-/** Compile an until(<traversal>) modulator into `(id, depth) → boolean SQL`, routing the
- *  WHOLE body through the shared predicate engine on a correlated walk ctx. loops() reads
- *  the depth counter via ctx.loopsExpr; every other leaf is an element predicate over the
- *  current vertex (has/hasLabel/values/out…count().is), and the infix/and/or machinery
+/** Compile an until()/emit() traversal modulator into `(id, depth) → boolean SQL`, routing
+ *  the WHOLE body through the shared predicate engine on a correlated walk ctx. loops()
+ *  reads the depth counter via ctx.loopsExpr; every other leaf is an element predicate over
+ *  the current vertex (has/hasLabel/values/out…count().is), and the infix/and/or machinery
  *  composes them — so until(__.has('name','x').or().loops().is(3)) lowers as one boolean.
- *  Movement leaves correlate through the same compileCorrelatedChild as where()/choose(). */
-function untilPredicate(untilStep: Step, params: Record<string, any>): (id: Expression, depth: Expression) => Expression {
-  const nested = stepChain(untilStep.args[0]?.nested, params);
-  if (!nested.length) throw new Error('until() requires a traversal predicate');
+ *  Movement leaves correlate through the same compileCorrelatedChild as where()/choose().
+ *  until() and emit() share this: the only difference is what the resulting column drives
+ *  (termination vs output). */
+function walkPredicate(step: Step, params: Record<string, any>, kind: 'until' | 'emit'): (id: Expression, depth: Expression) => Expression {
+  const nested = stepChain(step.args[0]?.nested, params);
+  if (!nested.length) throw new Error(`${kind}() requires a traversal predicate`);
   return (id, depth) => tryInlinePredicate(nested, { ...walkNodeCtx(id), loopsExpr: depth }, params)
-    ?? (() => { throw new Error('until() predicate not supported by inline lowering'); })();
+    ?? (() => { throw new Error(`${kind}() predicate not supported by inline lowering`); })();
 }
 
 // ---------- branch (union / optional / repeat) ----------
@@ -539,7 +541,7 @@ export const repeat: StepFn = (s, st) => {
   const rep = cluster.find((c) => c.name === 'repeat');
   if (!rep) throw new Error(`${s.name}() without repeat() not yet supported`);
   const emitStep = cluster.find((c) => c.name === 'emit');
-  if (emitStep?.args.length) throw new Error('emit(predicate) not yet supported');
+  const hasEmitPred = !!emitStep && emitStep.args.length > 0;
   const timesStep = cluster.find((c) => c.name === 'times');
   if (timesStep && typeof timesStep.args[0] !== 'number') throw new Error('times(predicate) not yet supported');
   const untilStep = cluster.find((c) => c.name === 'until');
@@ -591,11 +593,18 @@ export const repeat: StepFn = (s, st) => {
   // until(): `done` = does the stop predicate hold for this row? do-while (until
   // AFTER repeat) leaves the seed untested (body runs ≥1×); while-do (until BEFORE)
   // tests the seed too. Expansion continues only from done=0 rows; done=1 rows exit.
-  const untilFn = hasUntil ? untilPredicate(untilStep!, st.params) : null;
+  const untilFn = hasUntil ? walkPredicate(untilStep!, st.params, 'until') : null;
   const untilFirst = hasUntil && cluster.indexOf(untilStep!) < cluster.indexOf(rep);
   const doneCol = (id: Expression, depth: Expression): Expression => q`, CASE WHEN ${untilFn!(id, depth)} THEN 1 ELSE 0 END AS done`;
 
-  const walkCols = ['id', 'depth', ...(trackArray ? ['path'] : []), ...(hasUntil ? ['done'] : [])];
+  // emit(predicate): an `emit` column marks WHICH rows are output (vs until's `done`,
+  // which marks termination). The walk proceeds regardless. emit-before tests the seed
+  // (depth 0) too; emit-after only body results (depth ≥ 1) — so the seed's emit is 0
+  // under emit-after. Every recursive row is tested by the predicate in both positions.
+  const emitFn = hasEmitPred ? walkPredicate(emitStep!, st.params, 'emit') : null;
+  const emitCol = (id: Expression, depth: Expression): Expression => q`, CASE WHEN ${emitFn!(id, depth)} THEN 1 ELSE 0 END AS emit`;
+
+  const walkCols = ['id', 'depth', ...(trackArray ? ['path'] : []), ...(hasUntil ? ['done'] : []), ...(hasEmitPred ? ['emit'] : [])];
   const walk = st.q.recursiveCte(walkCols, (self: Relation) => {
     // One recursive-term SELECT: advance to `finalId`, bump depth, accumulate path/done,
     // and guard expansion — shared depth<times / done=0 guards FIRST, then the branch's
@@ -603,12 +612,13 @@ export const repeat: StepFn = (s, st) => {
     const mkRec = (finalId: Expression, from: Expression, branchGuards: Expression[]): Expression => {
       const pathAcc = trackArray ? q`, jsonb_insert(${self.c.path}, '$[#]', ${finalId}) AS path` : q``;
       const doneAcc = hasUntil ? doneCol(finalId, q`${self.c.depth} + 1`) : q``;
+      const emitAcc = hasEmitPred ? emitCol(finalId, q`${self.c.depth} + 1`) : q``;
       const guards: Expression[] = [];
       if (timesStep) guards.push(q`${self.c.depth} < ${maxDepth!}`); // maxDepth non-null when timesStep set
       if (hasUntil) guards.push(q`${self.c.done}=0`); // until() expands only from still-looping rows
       guards.push(...branchGuards);
       const where = guards.length ? q` WHERE ${list(guards, ' AND ')}` : q``;
-      return q`SELECT ${finalId} AS id, ${self.c.depth} + 1 AS depth${pathAcc}${doneAcc} FROM ${from}${where}`;
+      return q`SELECT ${finalId} AS id, ${self.c.depth} + 1 AS depth${pathAcc}${doneAcc}${emitAcc} FROM ${from}${where}`;
     };
     // simplePath()'s cycle guard: reject a finalId already on the accumulated path.
     const cycleGuard = (finalId: Expression): Expression[] =>
@@ -622,22 +632,28 @@ export const repeat: StepFn = (s, st) => {
           return mkRec(e.c[to], q`${self} JOIN ${e} ON ${e.c[from]}=${self.c.id}`, guards);
         })
       : expandRepeatBody(self, core).map(({ finalId, from, conds }) => mkRec(finalId, from, [...conds, ...cycleGuard(finalId)]));
-    // Only while-do (untilFirst) tests the SEED against until()'s correlated
-    // `(SELECT props FROM nodes WHERE id=<seed id>)`; a bare `id` there would bind
-    // BOTH sides to nodes.id (always true → wrong row), so alias the source (`w.id`).
-    // Every other seed uses bare `id` (no subquery) → byte-identical to before.
-    const seedSrc = untilFirst ? st.rel.as('w') : st.rel;
-    const seedId = untilFirst ? seedSrc.c.id : q`id`;
-    const seedSel = untilFirst ? q`${seedId} AS id` : q`id`; // do-while keeps bare `id` → byte-identical
+    // The SEED is tested by a correlated predicate in two cases: while-do until
+    // (untilFirst) and emit-before. A bare `id` inside that predicate's
+    // `(SELECT … FROM nodes WHERE id=<seed id>)` would bind BOTH sides to nodes.id
+    // (always true → wrong row), so alias the source (`w.id`). Every other seed uses
+    // bare `id` (no subquery) → byte-identical to before.
+    const seedTested = untilFirst || (hasEmitPred && emitBefore);
+    const seedSrc = seedTested ? st.rel.as('w') : st.rel;
+    const seedId = seedTested ? seedSrc.c.id : q`id`;
+    const seedSel = seedTested ? q`${seedId} AS id` : q`id`; // untested seed keeps bare `id` → byte-identical
     const seedPath = trackArray ? q`, jsonb_array(${seedId}) AS path` : q``;
     const seedDone = hasUntil ? (untilFirst ? doneCol(seedId, q`0`) : q`, 0 AS done`) : q``;
-    return q`SELECT ${seedSel}, 0 AS depth${seedPath}${seedDone} FROM ${seedSrc} UNION ALL ${list(rec, ' UNION ALL ')}`;
+    // emit-before tests+emits the seed (depth 0); emit-after never emits the seed.
+    const seedEmit = hasEmitPred ? (emitBefore ? emitCol(seedId, q`0`) : q`, 0 AS emit`) : q``;
+    return q`SELECT ${seedSel}, 0 AS depth${seedPath}${seedDone}${seedEmit} FROM ${seedSrc} UNION ALL ${list(rec, ' UNION ALL ')}`;
   });
-  // Output: until() → the rows that satisfied the stop predicate; emit() → every
-  // iteration (after → depth≥1; before → also the seed, depth≥0); times() without
+  // Output: until() → the rows that satisfied the stop predicate; emit(pred) → the rows
+  // whose emit column is set (the depth band is baked into that column); bare emit() →
+  // every iteration (after → depth≥1; before → also the seed, depth≥0); times() without
   // emit → the final depth band. maxDepth is non-null in the last case (times present
   // whenever neither until nor emit is).
   const outWhere = hasUntil ? 'done = 1'
+    : hasEmitPred ? 'emit = 1'
     : emitStep ? (emitBefore ? 'depth >= 0' : 'depth >= 1')
     : `depth = ${maxDepth}`;
   // Expose the path column iff a path() will frame it; else drop it (the array was
