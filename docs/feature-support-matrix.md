@@ -49,7 +49,7 @@ In a 🟡 cell, **✅** = supported form, **❌** = deferred shape.
 | Step | | Notes |
 |---|:--:|---|
 | `values(k…)`, `id()`, `label()`, `count()` | ✅ | ids frame as `COALESCE(uid,id)` |
-| `valueMap`, `elementMap` | 🟡 | custom vertex/edge framing; re-enterable as a per-element map, so `select(Column.keys/values)`, `count()`, `is(typeOf(MAP))`, `select(unbound-label)`→empty compose. ❌ heterogeneous element-value maps |
+| `valueMap`, `elementMap` | 🟡 | custom vertex/edge framing, each value framed by its stored type (uuid/datetime/long/collection — not JS-inferred); re-enterable as a per-element map, so `select(Column.keys/values)`, `count()`, `is(typeOf(MAP))`, `select(unbound-label)`→empty compose. ❌ heterogeneous element-value maps |
 | `properties(k…)` [`.key`/`.value`/`.element`/`.id`/`.label`/`.count`] | 🟡 | full property stream with owner/key/value/meta; `.key`/`.value`/`.id`→scalar, `.element()`→owner vertex/edge, all re-enterable; real VP id + meta, `has(metaKey)`/`hasKey`/`hasValue`/`valueMap`. ❌ `dedup()`/`order()` before a projection |
 | `select('a')`, multi-`select`, `project(…)` | 🟡 | column-threaded aliases; single-label select → scalar/element/typed-list; multi-`select`/`project` → per-traverser record (scalar/vertex/edge/scalar-list/element-list fields), each field re-enters; `limit`/`range`/`skip`/`tail` with `Scope.local` slice fields. ❌ record `order`/`dedup`/`fold`/`where` |
 | `select(Column.values/keys)` | 🟡 | over a group, scalar record, or per-element valueMap/elementMap (keys→Set); list-valued maps → list-of-lists. ❌ heterogeneous element-value lists, raw Map params |
@@ -118,8 +118,8 @@ mixed-shape arm.
 | Step | | Notes |
 |---|:--:|---|
 | `fold()` / `inject([…])` as a list value | ✅ | JSONB list, re-enters the tail; each bracket arg = one list |
-| `unfold()` | 🟡 | explode → elements/scalar/nested-list; Map-unfold → per-entry Map.Entry with `select(Column.keys/values)`. ❌ after a projection/modifier on an element stream; non-`select`/element-value on unfolded entries |
-| `is(typeOf(LIST))`, `is(typeOf(MAP))` | 🟡 | LIST retypes a stored-`vtype='list'` scalar to a list stream; MAP is identity on a valueMap/group map. ❌ SET retype; list-operation steps (`merge`/`split`/`index`/`order`/`project`/`where`/`asX`) |
+| `unfold()` | 🟡 | explode → elements/scalar/nested-list; a stored typed list carries each element's own vtype (frames exactly); Map-unfold → per-entry Map.Entry with `select(Column.keys/values)`. ❌ after a projection/modifier on an element stream; non-`select`/element-value on unfolded entries |
+| `is(typeOf(LIST))`, `is(typeOf(SET))`, `is(typeOf(MAP))` | 🟡 | LIST/SET retype a stored collection scalar to a (typed) list stream — SET frames as a GraphBinary Set; `unfold()` carries each element's own stored type; MAP is identity on a valueMap/group map (a bare stored map frames whole, typed, via `values()`). ❌ MAP→relational unfold; list-operation steps (`merge`/`split`/`index`/`order`/`project`/`where`/`asX`); typed-element `Scope.local` transforms (fail closed) |
 | `Scope.local` reducers (count/sum/min/max/mean) | ✅ | per-list aggregate → scalar; also degenerate scalar-local |
 | `none(P)`/`all(P)`/`any(P)` | ✅ | collection filters, null-aware |
 | `Scope.local` order/limit/range/skip/tail/dedup on a list | 🟡 | per-list `json_each` rebuild; `reverse()`; per-element string transforms; bare `order().fold()` sorts. ❌ `order(Scope.local).by(key/traversal)` |
@@ -144,7 +144,7 @@ mixed-shape arm.
 |---|:--:|---|
 | `addV()`, `.property(k,v)`, `property(T.id/T.label)` | ✅ | user-supplied ids (string→uid, int→rowid); inline property nested VALUES + nested-traversal LABEL (`addV(__.…)`) resolved at run time; nested property KEY that is a constant (`__.select(const)`/`__.constant()`). ❌ live-read nested property KEY (fails closed) |
 | `addE()`, `from`/`to` | 🟡 | endpoints: `as()` alias, `__.select(label)`, nested `__.V(…)` (incl. folded `repeat().times()`), or `__.addV(…)` (nested write); edge uid; inline property nested VALUES + constant nested KEY; multi-addE initializers. ❌ nested-traversal edge label; endpoint read tail past a movement (order/limit); live-read nested property KEY (fails closed); `addE` after some prefixes |
-| `mergeV`, `mergeE` | 🟡 | id-aware upsert, onCreate/onMatch, start + mid-chain; map label/id/VALUES may be nested traversals (`[k: __.trav]`) resolved correlated per driver; whole-arg `__.select(k)` of a `withSideEffect(k, map)` constant; prop VALUES keep their type (literal subtype / typed-client wire DataType / nested read shape — uuid/datetime/long honored, not JS-inferred). ❌ whole-arg traversals needing a map-valued driver (`__.identity()`/incoming-as-map) or nested-write bodies; nested map KEYS; bare `mergeV()`/`mergeE()`; typed collection ELEMENTS (JSONB storage floor) |
+| `mergeV`, `mergeE` | 🟡 | id-aware upsert, onCreate/onMatch, start + mid-chain; map label/id/VALUES may be nested traversals (`[k: __.trav]`) resolved correlated per driver; whole-arg `__.select(k)` of a `withSideEffect(k, map)` constant; prop VALUES keep their type (literal subtype / typed-client wire DataType / nested read shape — uuid/datetime/long honored, not JS-inferred). ❌ whole-arg traversals needing a map-valued driver (`__.identity()`/incoming-as-map) or nested-write bodies; nested map KEYS; bare `mergeV()`/`mergeE()` |
 | `property()` update | ✅ | vertex normalized rows single/list/set + meta; edge normalized UPSERT (single, no meta) |
 | `property(Cardinality.list/set,…)` | ✅ | list appends, set dedups by value |
 | `drop()` (vertices + edges) | 🟡 | after movement/filter/`where`, cascades props. ❌ after `properties()` / `order()` |
@@ -184,7 +184,7 @@ One home (`Carry`): a named registry (aggregate/cap/group('a')) and a carried co
 | User-supplied ids (string `uid`) | 🟡 | at `V('x')` seed, framing-out, `properties().element().id()`. ❌ scalar id via `by(__.outV().id())`/`group().by(__.id())`; edge uid via `addE` in some paths |
 | Multi-properties (list/set) | ✅ | normalized `vertex_properties`; `values()` flatMaps, `has()` ANY-matches, `valueMap` `{k:[…]}` |
 | Meta-properties | ✅ | JSONB `meta` per VP row |
-| Property types: primitives + list/map/set | ✅ | vertex + edge normalized (`value` keeps SQLite storage class → correct order/range); `vtype` stores the canonical type (→ `typeOf` §2, framing §10); collections as JSONB |
+| Property types: primitives + list/map/set | ✅ | vertex + edge normalized (`value` keeps SQLite storage class → correct order/range); `vtype` stores the canonical type (→ `typeOf` §2, framing §10). Collections store a self-describing typed-JSON `{t,v}` tree → list/set/map ELEMENTS, typed & non-string map KEYS, and arbitrary nesting round-trip with each leaf's exact gremlin type (uuid/datetime/long/…), incl. through valueMap/vertex/edge/`properties()` and the write-response echo |
 
 ## 15. Locked non-goals (🚫)
 
