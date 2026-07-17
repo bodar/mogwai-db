@@ -12,9 +12,9 @@ Corpus parse+chain 2298/2298. Live L3 count: see `README.md` / `baseline.json`
 > mixed-shape arms in all four branch steps)** · **nested-MAP-valued groups** (two-level
 > aggregation — the "recommended next bet" from §3, already shipped) · **first slices of
 > writes-through-the-read-spine** (`property(k, __.trav)` correlated values +
-> withSideEffect-const merge maps). **PARTIAL:** P5 (a live-parent generic child seam
-> `tryLowerGroupChildSource` now exists and element groups use it, but
-> `tryPropertyGroupScalar` remains for parentless cap()/property-group sources).
+> withSideEffect-const merge maps). **P5 now FULL (2026-07-17):** the child seam is
+> parent-shape-polymorphic (`ChildParent`), so `properties().group()` lowers its
+> by()-children through the generic dispatcher; `tryPropertyGroupScalar` DELETED.
 > **STILL STANDING:** the `child.ts` double-parse (maintainability-only; P3 did not
 > retire it), the switch-vs-Map dispatch inconsistency, general merge/addE traversal
 > args, `until`'s inline-only predicate (structural wall, by design).
@@ -80,7 +80,7 @@ Those three observations drove the whole spree; §6 collects what survives them.
 |---|---|---|---|
 | ~~D1~~ | ~~**Dual value-tail engine**~~ **— RESOLVED (P1, 2026-07-16)** | `renderProjection`/`wrapReducer`/the duplicate transform ladder + `SCALAR_TX_NAMES` DELETED; `buildProjection` renders only the non-scalar element tail; every value tail routes through `lowerScalarProjection` → `scalar.ts`/`barrier.ts` | (unblocked `order().by(k).limit(n).values().count()`) |
 | ~~D2~~ | ~~**`tryInlinePredicate`/`compileInlinePredicate`** support-definer in `choose`/`coalesce`/`until`~~ **— RESOLVED (P2, 2026-07-16).** Relocated `plan.ts`→`src/steps/predicate.ts`; `choose` falls through to `tryGateByChildExistence`, `coalesce` takes traversal arms, `+ splitInfixConnectors` for infix `.and()`/`.or()`. Only `until` stays inline-bound (structural wall). | (resolved) |
-| D3 | **`tryPropertyGroupScalar`/`requireInlineScalar`** (`plan.ts:391`, `group.ts:22-26`) — **PARTIALLY REDUCED (P5-partial, 2026-07-16).** A live-parent generic child seam `tryLowerGroupChildSource` (`group.ts:134`) now handles element-backed groups; the inline path survives ONLY for parentless cap()/property-group sources (`group.ts:136` `if(!parent) return null`). | support-definer for the parentless residue | property-group keys/values, group-over-`properties()`, `cap('a')` group |
+| ~~D3~~ | ~~**`tryPropertyGroupScalar`/`requireInlineScalar`**~~ **— RESOLVED (P5-full, 2026-07-17).** The child seam is now parent-shape-polymorphic (`ChildParent = ElementStream \| PropertyStream`; `pushChildScope<P>`): a `properties().group()` gives its by()-children a live PROPERTY parent, so `key()`/`value()`/`element().…` lower through the SAME `lowerSteps → compileFromProperty` dispatcher as any child. `tryPropertyGroupScalar`/`compilePropertyGroupScalar`/`requireInlineScalar` DELETED; L3 held at 1086 (+0, pure debt removal), corpus 100%, `by(__.value().fold())`-style value modulators unlocked. | (resolved) | (resolved) |
 
 ~~Concrete duplication evidence for D1~~ **(historical — D1 is resolved).** The scalar
 transform ladder was written twice (`renderProjection` vs `scalar.ts scalarTransform`),
@@ -228,14 +228,17 @@ feature (`GroupVal {kind:'map'}` + two-level aggregation), NOT the variant row. 
 variant/list Map consumers cash ~0–1 scenarios today, so they were correctly not forced
 (no fake-case tuple-lists). Nested-map-valued groups = the recommended next dedicated bet.
 
-**P5 — Give group sources a live parent stream** *(debt removal).* **PARTIALLY LANDED
-2026-07-16.** `tryLowerGroupChildSource` (`group.ts:134`) gives element-backed groups a
-live-parent generic child seam; element groups now reject the old inline path
-(`group.ts:108` throws rather than falling back). **Residue:** parentless cap()/
-property-group sources still route through `tryPropertyGroupScalar`/`requireInlineScalar`
-(they have no live `ElementStream` parent to give — a genuine reader, not fast-path debt;
-CLAUDE.md already classes `tryPropertyGroupScalar` as migration debt, NOT an extension
-pattern). Full retirement needs a synthetic parent stream for stashed group sources.
+**P5 — Give group sources a live parent stream** *(debt removal).* **FULLY LANDED
+(2026-07-17).** `tryLowerGroupChildSource` (`group.ts`) gives element-backed groups a
+live-parent generic child seam; element groups reject the old inline path. The **2026-07-17
+follow-through** made the child seam parent-shape-polymorphic (`ChildParent = ElementStream
+| PropertyStream`, `pushChildScope<P>` seeds a PropertyStream domain), so a
+`properties().group()` sets `parent: <PropertyStream>` and its `key()`/`value()`/
+`element().…` by()-children lower through the SAME `lowerSteps → compileFromProperty`
+dispatcher — no inline reader. `tryPropertyGroupScalar`/`compilePropertyGroupScalar`/
+`requireInlineScalar` DELETED. +0 L3 (pure debt removal, held at 1086), corpus 100%; the
+`by(__.value().fold())` value-modulator family is a bonus unlock. Only the element-only
+child cores (movement/count) fail closed for property parents — a property has no adjacency.
 
 Sequencing rationale (kept for the record): clear the duplication (P1) and the predicate
 asymmetry (P2) first so the substrate (P3/P4) is written once on a clean spine, not
@@ -484,10 +487,13 @@ P1–P4 landed; P5 partial. What the spree did NOT close, ranked by leverage/app
    compounding pick — same read spine, more write-arg call sites route through it.
 2. **SubgraphStrategy(edges) / strategy adjacency (~45, self-contained).** The
    edge-criterion Subgraph injection (Cluster 9) — its own pass, untouched by the spree.
-3. **P5 residue — synthetic parent for stashed group sources.** Retire
-   `tryPropertyGroupScalar`/`requireInlineScalar` by giving parentless cap()/property-group
-   sources a live parent stream so they reach `tryLowerGroupChildSource` like element groups
-   do. Debt removal; CLAUDE.md already marks `tryPropertyGroupScalar` as migration debt.
+3. ~~**P5 residue — synthetic parent for stashed group sources.**~~ **DONE (2026-07-17).**
+   The child seam is parent-shape-polymorphic (`ChildParent`; `pushChildScope<P>` seeds a
+   PropertyStream domain). `properties().group()` sets `parent: <PropertyStream>` so its
+   by()-children lower through `tryLowerGroupChildSource` → `lowerSteps → compileFromProperty`.
+   `tryPropertyGroupScalar`/`requireInlineScalar` deleted; +0 L3 (debt removal), corpus 100%.
+   (cap() group sources already carried an `ElementStream` parent — the doc's "parentless
+   cap()" was stale; property groups were the sole residue.)
 4. **`child.ts` double-parse + third `values/id/label` projector (maintainability).** Six
    `is*Child` preflights + `compile*ChildRows` re-parse still run in lockstep, guarded by
    dead-code mismatch invariants. P3 unified the shape model at the *stream* level, not the

@@ -105,7 +105,12 @@ traverser: `pushChildScope` gives each parent a multiset-safe ordinal + preserve
 domain; `reuseCurrentFrame` lets N siblings share one domain (the multi-modulator
 pattern). Element/scalar/list/fold children, existence gates
 (`tryFilterByChildExistence`/`tryCombineByChildExistence`), and reducers
-(`lowerScopedScalarReducer`) all lower through it.
+(`lowerScopedScalarReducer`) all lower through it. The seam is **parent-shape-polymorphic**
+(`ChildParent = ElementStream | PropertyStream`): a `properties().group().by(__.…)` folds
+over PROPERTY parents, and its `key()`/`value()`/`element().…` by()-children lower through
+the SAME `lowerSteps → compileFromProperty` dispatcher — there is no property-group inline
+reader (the old `tryPropertyGroupScalar` was retired). Element-valued property children
+(no adjacency) fail closed in the element-only cores.
 
 **Fast paths** are explicit per-compilation switches in `CompileOptions.fastPaths`
 (`src/fast-paths.ts`) — never a mutable global. A specialized lowering qualifies as a
@@ -127,13 +132,13 @@ walk-id can never bind to an intermediate `nodes n`/`edges e` the child introduc
 `xe`/`xn` renaming needed. The predicate compiler lives in `steps/` (not `plan.ts`)
 precisely so this movement branch can reach `lowerElementSteps`.
 
-**Migration debt, NOT extension patterns:** `tryPropertyGroupScalar` (property-group
-key/value reads — a `group()` over `properties()` has no live ElementStream parent, so
-no child seam; a genuine reader, not a fast path). `until()`'s predicate is the ONE
+**Migration debt, NOT extension patterns:** `until()`'s predicate is the ONE
 correlated-only consumer (a recursive-CTE term can't reference its outer row, so it has
 no materialized generic fallback) — but it is NOT debt: it correlates through the same
-`compileCorrelatedChild` as where()/choose(). Do not add a new fast-path switch without
-its generic fallback + equivalence test + perf evidence in the same change.
+`compileCorrelatedChild` as where()/choose(). (The former property-group inline reader
+`tryPropertyGroupScalar` is GONE — property groups now use the parent-polymorphic child
+seam above.) Do not add a new fast-path switch without its generic fallback + equivalence
+test + perf evidence in the same change.
 
 ## Management API + runtime parity
 

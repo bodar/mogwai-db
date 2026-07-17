@@ -1,7 +1,7 @@
 import { q, raw, value, list, empty, type Expression, type Relation } from '../q.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
 import {
-  tryPropertyGroupScalar, scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps, dirsFor,
+  scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps, dirsFor,
   type ScalarCtx,
 } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
@@ -10,20 +10,11 @@ import { carryFrag, carriedCols, carriedWith, elemRel, withoutCarried, type Carr
 import { carryOf, continueLowering, groupColumns, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream } from './stream.ts';
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
-import { childSteps, isElementFoldChild, isElementImplicitFoldChild, isScalarChild, isScalarFoldChild, pushChildScope, reuseCurrentFrame, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild } from './child.ts';
+import { childSteps, isElementFoldChild, isElementImplicitFoldChild, isPropertyScalarChild, isPropertyScalarFoldChild, isScalarChild, isScalarFoldChild, pushChildScope, reuseCurrentFrame, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, type ChildParent } from './child.ts';
 
-/** Movement heads whose property-group compatibility path can use a correlated
- * neighbourhood reduction, and the scalar reducers that terminate one. */
-const MOVES_ROOT = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE']);
+/** The scalar reducers that terminate a numeric neighbourhood reduction (reused by the
+ * nested-MAP group's inner reduce). */
 const SCALAR_REDUCERS = new Set(['sum', 'min', 'max', 'mean']);
-
-/** Property groups do not have a live ElementStream parent yet, so they explicitly
- * require the narrow inline compatibility path. Element-backed groups never call it. */
-const requireInlineScalar = (inner: ReturnType<typeof stepChain>, ctx: ScalarCtx, use: string) => {
-  const scalar = tryPropertyGroupScalar(inner, ctx);
-  if (!scalar) throw new Error(`${use} not supported by typed child lowering or the property compatibility path`);
-  return scalar;
-};
 
 // ---------- group()/groupCount() (barrier → one Map) ----------
 
@@ -51,9 +42,10 @@ export interface GroupSource {
   valOrder?: Expression;
   valElement?: { elem: 'vertex' | 'edge'; ctx: ScalarCtx };
   productiveBy?: boolean;
-  /** Present only for an inline element group whose source stream is still live.
-   * Stashed cap()/property sources omit it and retain their existing fast paths. */
-  parent?: ElementStream;
+  /** The live parent traverser stream the group folds over — an element (node/edge) OR
+   * a property (properties().group()). Its by() sub-traversals lower through the generic
+   * child seam (tryLowerGroupChildSource). Only stashed cap() group sources omit it. */
+  parent?: ChildParent;
 }
 
 /** Columns that frame one element (vertex/edge/property) under `prefix`. label
@@ -98,29 +90,22 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
     return { desc: scalarGroupKey(src.productiveBy), cols: q`${pe} AS gk`, group: 'gk' };
   }
   if (a && typeof a === 'object' && 'token' in a) { // by(T.label)/by(T.id)
-    const expr = a.token === 'label' ? labelNameSub(src.ctx.labelIdExpr) : a.token === 'id' ? src.ctx.idExpr : null;
+    // A VertexProperty's T.label is its key (pk); its T.id is vpid (ctx.idExpr). For an
+    // element, T.label resolves the interned label id to its name.
+    const expr = a.token === 'label'
+      ? (src.elem === 'property' ? src.ctx.pkExpr! : labelNameSub(src.ctx.labelIdExpr))
+      : a.token === 'id' ? src.ctx.idExpr : null;
     if (!expr) throw new Error(`group().by(T.${a.token}) not yet supported`);
     return { desc: scalarGroupKey(src.productiveBy), cols: q`${expr} AS gk`, group: 'gk' };
   }
   if (a && typeof a === 'object' && 'nested' in a) {
+    // A traversal key lowers through the generic child seam (tryLowerGroupChildSource →
+    // keyExpr/keyParts). Reaching here means it did not — a genuine deferral, not an
+    // inline reader fallback.
     const inner = stepChain(a.nested, params);
-    if (inner[0]?.name === 'project') { // composite Map key
-      if (src.parent) throw new Error('element group project key not supported by generic child lowering');
-      const keys = inner[0].args.filter((x: any): x is string => typeof x === 'string');
-      const partBys = inner.slice(1);
-      if (partBys.some((s) => s.name !== 'by')) throw new Error(`step not implemented in group().by(project): ${partBys.find((s) => s.name !== 'by')!.name}()`);
-      if (partBys.length !== keys.length) throw new Error('group().by(project) needs one by() per key');
-      const cols: Expression[] = [], group: string[] = [];
-      keys.forEach((k, idx) => {
-        const nb = partBys[idx].args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
-        if (!nb) throw new Error('group().by(project(...).by(x)) requires a traversal in each by()');
-        const sc = requireInlineScalar(stepChain(nb.nested, params), src.ctx, 'property group composite key');
-        cols.push(q`${sc.expr} AS ${`k${idx}_v`}`); group.push(`k${idx}_v`);
-      });
-      return { desc: { kind: 'map', parts: keys.map((k) => ({ key: k })) }, cols: list(cols, ', '), group: group.join(', ') };
-    }
-    const sc = requireInlineScalar(inner, src.ctx, 'property group key');
-    return { desc: scalarGroupKey(src.productiveBy), cols: q`${sc.expr} AS gk`, group: 'gk' };
+    if (inner[0]?.name === 'project')
+      throw new Error('group().by(project(...)) composite key not supported by generic child lowering');
+    throw new Error('group().by(traversal) key not supported by generic child lowering');
   }
   throw new Error('unsupported group().by() key modulator');
 }
@@ -134,10 +119,17 @@ const GROUP_VALUE_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
 function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource | null {
   const parent = src.parent;
   if (!parent) return null;
+  // The child-body vocabulary depends on the parent SHAPE: an element parent's children
+  // are movement/filter/values (isScalarChild); a property parent's children are
+  // key()/value()/element().… (isPropertyScalarChild). Element-valued (fold) children are
+  // element-parent-only — a property has no adjacency to collect.
+  const isProp = parent.kind === 'property';
+  const scalarChild = (nested: any) => isProp ? isPropertyScalarChild(nested, parent.params) : isScalarChild(nested, parent.params);
+  const scalarFoldChild = (nested: any) => isProp ? isPropertyScalarFoldChild(nested, parent.params) : isScalarFoldChild(nested, parent.params);
   const keyArg = bys[0]?.[0];
   const valArg = bys[1]?.[0];
   const genericKey = keyArg && typeof keyArg === 'object' && 'nested' in keyArg
-    && isScalarChild(keyArg.nested, parent.params);
+    && scalarChild(keyArg.nested);
   const keySteps = keyArg && typeof keyArg === 'object' && 'nested' in keyArg
     ? stepChain(keyArg.nested, parent.params)
     : [];
@@ -146,34 +138,33 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   const projectKeys = projectStep?.args.filter((x: any): x is string => typeof x === 'string') ?? [];
   const genericProjectKey = !!projectStep
     && projectBys.length === projectKeys.length
-    && projectBys.every((step, i) => {
+    && projectBys.every((step) => {
       if (step.name !== 'by') return false;
       const nested = step.args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
-      return !!nested && isScalarChild(nested.nested, parent.params);
+      return !!nested && scalarChild(nested.nested);
     });
   const valSteps = valArg && typeof valArg === 'object' && 'nested' in valArg
     ? stepChain(valArg.nested, parent.params)
     : [];
   const genericVal = valSteps.length > 0
     && !GROUP_VALUE_REDUCERS.has(valSteps.at(-1)!.name)
-    && isScalarChild(valArg.nested, parent.params);
+    && scalarChild(valArg.nested);
   const genericReducer = valSteps.length > 0
     && GROUP_VALUE_REDUCERS.has(valSteps.at(-1)!.name)
-    && isScalarChild(valArg.nested, parent.params);
+    && scalarChild(valArg.nested);
   const genericFold = valSteps.at(-1)?.name === 'fold'
-    && isScalarFoldChild(valArg.nested, parent.params);
-  const genericElementFold = valSteps.at(-1)?.name === 'fold'
+    && scalarFoldChild(valArg.nested);
+  const genericElementFold = !isProp && valSteps.at(-1)?.name === 'fold'
     && isElementFoldChild(valArg.nested, parent.params);
   // An unreduced element value traversal (by(__.out()), by(__.out().order())) collects
   // into a list — TinkerPop's implicit fold. Same relational path as genericElementFold.
-  const genericElementImplicitFold = !genericElementFold
+  const genericElementImplicitFold = !isProp && !genericElementFold
     && valSteps.length > 0
     && isElementImplicitFoldChild(valArg.nested, parent.params);
   if (!genericKey && !genericProjectKey && !genericVal && !genericReducer && !genericFold && !genericElementFold && !genericElementImplicitFold) return null;
 
   const outer = pushChildScope(parent);
   const p = outer.seed.rel.as('gp');
-  const n = elemRel(parent, 'gn');
   const joins: Expression[] = [];
   let keyExpr: Expression | undefined;
   let keyParts: GroupSource['keyParts'];
@@ -239,19 +230,18 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     valOrder = q`${p.c[outer.frame.ordinal]}, ${c.c.id}`;
     valElement = { elem: rows.stream.elem === 'edge' ? 'edge' : 'vertex', ctx: elemCtx(e, rows.stream.elem) };
   }
+  const common = { keyExpr, keyParts, valExpr, valReducer, valMarker, valFold, valOrder, valElement, productiveBy: src.productiveBy };
+  // Property parent: the pushed domain `p` already carries owner/pk/pv, so the source is
+  // `p` itself (plus the child joins) — no element table to rejoin. Element parent rejoins
+  // nodes/edges `n` on the domain id so key/value ctx reads its columns.
+  if (parent.kind === 'property')
+    return { from: q`${p}${list(joins, '')}`, ctx: propertyCtx(p), elem: 'property', ...common };
+  const n = elemRel(parent, 'gn');
   return {
     from: q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}${list(joins, '')}`,
     ctx: elemCtx(n, parent.elem),
     elem: parent.elem === 'edge' ? 'edge' : 'vertex',
-    keyExpr,
-    keyParts,
-    valExpr,
-    valReducer,
-    valMarker,
-    valFold,
-    valOrder,
-    valElement,
-    productiveBy: src.productiveBy,
+    ...common,
   };
 }
 
@@ -371,22 +361,11 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
       else if (names.length === 1 && names[0] === 'count') { val = { kind: 'count' }; valNode = q`COUNT(*) AS gv`; }
       else if (names[names.length - 1] === 'fold')
         throw new Error('this group fold shape is not yet supported by typed child lowering');
-      else if (src.parent)
-        throw new Error('element group value not supported by generic child lowering');
-      else if (MOVES_ROOT.has(names[0]) && SCALAR_REDUCERS.has(names[names.length - 1])) {
-        // A neighbourhood aggregate — e.g. by(__.bothE().values('weight').mean()).
-        // The compatibility inline path reduces the WHOLE chain to one scalar per
-        // group key; MAX() just satisfies GROUP BY (each such group is one vertex,
-        // so the scalar is constant within it). typeof() carries Int/Long/Double.
-        const sc = requireInlineScalar(inner, src.ctx, 'property group neighbourhood reducer');
-        val = { kind: 'sum' }; valNode = q`MAX(${sc.expr}) AS gv, typeof(MAX(${sc.expr})) AS gvt`;
-      } else if (names[names.length - 1] === 'sum') {
-        const sc = requireInlineScalar(inner.slice(0, -1), src.ctx, 'property group sum');
-        val = { kind: 'sum' }; valNode = q`SUM(${sc.expr}) AS gv, typeof(SUM(${sc.expr})) AS gvt`; // gvt → Int/Long vs Double
-      } else { // scalar projection folded to a list
-        const sc = requireInlineScalar(inner, src.ctx, 'property group scalar list');
-        val = { kind: 'scalarList' }; valNode = q`json_group_array(${sc.expr}) AS gv`;
-      }
+      else
+        // A scalar/reducer value traversal lowers through the generic child seam
+        // (tryLowerGroupChildSource → valExpr/valReducer/valFold); reaching here means it
+        // did not — a genuine deferral, not an inline reader fallback.
+        throw new Error('group().by(traversal) value not supported by generic child lowering');
     } else throw new Error('unsupported group().by() value modulator');
   }
 
@@ -524,14 +503,17 @@ export function lowerProperties(st: ElementStream, step: PStep): PropertyStream 
   return toPropertyStream(carryOf(st), rel, st.elem);
 }
 
-const propertyCtx = (s: PropertyStream): ScalarCtx => {
-  const p = s.rel.as('p');
-  return {
-    elem: 'property', idExpr: p.c.owner,
-    labelIdExpr: q`(SELECT label FROM nodes WHERE id=${p.c.owner})`,
-    ownerExpr: p.c.owner, pkExpr: p.c.pk, pvExpr: p.c.pv,
-  };
-};
+/** A property framing/scalar ctx built from an (already-aliased) PropertyStream/domain
+ *  relation. `idExpr` is the VertexProperty's OWN id (vpid) — its Gremlin T.id — NOT the
+ *  owner; `pk` is its T.label; `pmeta` backs by(String) meta-property reads. owner/pk/pv
+ *  frame the VertexProperty as a group value. (labelIdExpr resolves the owner's label,
+ *  retained only for the element-framing helpers; a property's T.label is pk, see
+ *  buildGroupKey.) */
+const propertyCtx = (p: Relation): ScalarCtx => ({
+  elem: 'property', idExpr: p.c.vpid,
+  labelIdExpr: q`(SELECT label FROM nodes WHERE id=${p.c.owner})`,
+  ownerExpr: p.c.owner, pkExpr: p.c.pk, pvExpr: p.c.pv, metaExpr: p.c.pmeta,
+});
 
 function filterProperty(s: PropertyStream, step: PStep): PropertyStream {
   const p = s.rel.as('p');
@@ -551,11 +533,17 @@ function filterProperty(s: PropertyStream, step: PStep): PropertyStream {
 
 function propertyScalar(s: PropertyStream, col: 'vpid' | 'pk' | 'pv'): ScalarStream {
   const p = s.rel.as('p');
+  // In a child scope (a property-group by(__.key()/value())) the correlated cardinality
+  // policy needs a per-origin encounter marker, exactly as lowerScalarProjection mints for
+  // element().values(). key()/value() are 1:1 with the property, so any deterministic order
+  // suffices. At root (no live origin) the projection stays byte-identical.
+  const origin = s.carried.origins.at(-1);
+  const enc = origin ? q`, ROW_NUMBER() OVER (PARTITION BY ${p.c[origin]} ORDER BY ${p.c[origin]}) AS encounter` : empty;
   const rel = s.q.cte(
-    q`SELECT ${p.c[col]} AS v${carryFrag(s.carried, p)} FROM ${p}`,
-    ['v', ...carriedCols(s.carried)],
+    q`SELECT ${p.c[col]} AS v${enc}${carryFrag(s.carried, p)} FROM ${p}`,
+    ['v', ...(origin ? ['encounter'] : []), ...carriedCols(s.carried)],
   );
-  return toScalarStream(carryOf(s), rel);
+  return toScalarStream(carryOf(s), rel, undefined, 'value', origin ? 'encounter' : undefined);
 }
 
 /** Consume a PropertyStream. Only property-specific operations live here; once a
@@ -574,8 +562,10 @@ export function compileFromProperty(s: PropertyStream, steps: PStep[], at: numbe
   if (step.name === 'count') return continueLowering(lowerGlobalCount(s), at + 1);
 
   if (step.name === 'group' || step.name === 'groupCount') {
-    const ctx = propertyCtx(s);
-    const src: GroupSource = { from: s.rel.as('p'), ctx, elem: 'property', productiveBy: step.productiveBy };
+    // A live property parent — its by() sub-traversals lower through the generic child
+    // seam (tryLowerGroupChildSource), exactly as an element group does.
+    const p = s.rel.as('p');
+    const src: GroupSource = { from: p, ctx: propertyCtx(p), elem: 'property', parent: s, productiveBy: step.productiveBy };
     const isCount = step.name === 'groupCount';
     return continueLowering(lowerGroup(s, isCount, step.bys ?? [], src), at + 1);
   }
