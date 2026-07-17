@@ -1,7 +1,22 @@
 # Full-fidelity recursive typed collection values — Option B (self-describing typed-JSON)
 
-**Status:** executing. Closes S2 ("typed collection ELEMENTS") from the typed-merge-values
-plan and the whole fidelity family. Chosen after A/B/C architecture bake-off (user picked B).
+**Status: DONE (2026-07-17)** — 3 stages landed (deep TypeNode capture + set literals →
+self-describing `{t,v}` storage cutover → full-fidelity whole-element framing). Closes S2
+("typed collection ELEMENTS") from the typed-merge-values plan and the whole fidelity family
+(#1–#6). L3 1146 held, zero regressions; e2e round-trip proves per-element wire types survive
+write→storage→read→frame across values/unfold/valueMap/vertex/edge/`properties()`/write-echo.
+
+**Deltas from the plan as written** (it predated commit `f6933b6`, the exact-primitive
+substrate): the lossy `normalizeLeaf`→number was superseded by reusing `storedScalar`
+(long/bigint>2^53, bigdecimal, duration → canonical decimal TEXT — lossless); `frameTypedNode`
+leaves reuse `frameValue`/`vtypeToValueType` (now complete for every canonical type); a
+`gremlinTypeOf` fix infers `long` for integers beyond int32 (a strict Int framer would
+overflow). `nodePropScalar`/`edgePropScalar` were left raw (collection-as-sort/group-KEY is a
+degenerate out-of-family shape) — only the materializing `values()` projector + whole-element
+aggs json()/`{t,v}`-wrap. Also landed: a per-scenario L3 ratchet (`l3-passing.txt`) that names
+regressions instead of only reporting a count.
+
+Chosen after A/B/C architecture bake-off (user picked B).
 
 ## Requirement (no compromise)
 
