@@ -3517,6 +3517,32 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V().hasLabel("person").has("name","marko").count()').map((r) => r.v)).toEqual([1]);
   });
 
+  test('mergeV map literal with a NESTED value ([k: __.trav]) resolves it', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    // a per-value traversal in the merge map — legal per grammar (mapEntry value is a
+    // genericLiteral, which includes nestedTraversal). __.constant('zed') → 'zed'.
+    run(store, 'g.mergeV([(T.label): "person", name: __.constant("zed")])');
+    expect(run(store, 'g.V().hasLabel("person").values("name")').map((r) => r.v)).toEqual(['zed']);
+    // matching against the same nested-valued map re-resolves and matches → still one
+    run(store, 'g.mergeV([(T.label): "person", name: __.constant("zed")])');
+    expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([1]);
+  });
+
+  test('mergeV nested map value is CORRELATED per driver (varies by incoming element)', () => {
+    const store = seededStore(); // modern: 4 person vertices
+    // per person, merge a "tag" vertex whose src = that person's name → correlation
+    // produces one distinct tag per person.
+    run(store, 'g.V().hasLabel("person").mergeV([(T.label): "tag", src: __.values("name")])');
+    expect(run(store, 'g.V().hasLabel("tag").values("src")').map((r) => r.v).sort())
+      .toEqual(['josh', 'marko', 'peter', 'vadas']);
+  });
+
+  test('mergeV whole-arg traversal beyond select-const fails CLOSED with a specific message', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    expect(() => run(store, 'g.inject(0).mergeV(__.identity())'))
+      .toThrow(/map-valued driver|not yet supported/);
+  });
+
   test('mergeV([:]) matches all; on empty graph creates one default-label vertex', () => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     run(store, 'g.mergeV([:])');
