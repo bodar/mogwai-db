@@ -200,7 +200,7 @@ primarily moves conformance or is a malleability/debt-removal win.
 `GraphManager` decorator in the test-only conformance host writes NDJSON
 `{g, gremlin, ok, error, steps}` (reusing the L1 corpus parse machinery); the L3
 test joins it with the cucumber report and prints a deferral-bucket view. Gated
-on `MOGWAI_L3_TELEMETRY`; default `bun test` is byte-identical → zero ratchet
+on `MOGWAI_L3_TELEMETRY`; default `bun test` is unchanged → zero ratchet
 risk. This turns every bet below from a guess into a measurement. See §4.
 
 **P1 — Unify the tail** *(debt removal; small feature unlock).* **LANDED 2026-07-16

@@ -272,6 +272,13 @@ blobless+sparse (self-healed in the L3 test's `beforeAll`).
   `test/conformance/README-cucumber.md`.
 - Every new step lands with SQL snapshot tests, its cucumber tag added to `tags.ts`, and
   corpus still 100%.
+- **SQL snapshots assert semantic equivalence, NOT byte-identity.** They mostly `.toContain`
+  the meaningful SQL fragments; whitespace, formatting, and incidental token spacing never
+  matter. When a change alters emitted SQL the bar is that it means the same thing (same
+  result set + plan shape) — do NOT chase byte-for-byte identical output, and do not treat a
+  refactor as "unsafe" because the string moved. Update the snapshot to the equivalent SQL.
+  (This is the canonical statement of the rule; other docs must not reintroduce a
+  byte-identical *requirement*.)
 
 The L3 harness (`test/conformance/conformance-server.ts`) is the SAME shared stack as the
 production Bun server, with toy graphs pre-seeded by running each graph's write traversals

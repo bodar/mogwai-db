@@ -121,7 +121,7 @@ export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop:
     // Stream (stream.ts) and yields back to lowerSteps (index.ts):
     //  · unfold — a list value → its element/scalar stream.
     //  · a NON-terminal fold — the stream → one list value (set-ops sit here later).
-    //    A TERMINAL fold (last step) stays the current reducer below, byte-identical.
+    //    A TERMINAL fold (last step) stays the current reducer below, unchanged.
     if (s.name === 'unfold') break;
     if (s.name === 'fold' && i !== steps.length - 1) break;
     // Scope.local on this ELEMENT tail (scalar tails run through lowerScalarRows): a
@@ -373,7 +373,7 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
 
   // valueMap()/elementMap() with a follower: re-enterable as a per-element MapStream
   // (select(Column)) or answered directly (count/is(typeOf(MAP))). Terminal keeps the
-  // buildProjection ResultStream below (byte-identical).
+  // buildProjection ResultStream below (unchanged).
   if (acc.projStep && (acc.projStep.name === 'valueMap' || acc.projStep.name === 'elementMap') && at < steps.length)
     return lowerValueMapTail(st, acc.projStep, acc, steps, at);
 
@@ -483,7 +483,7 @@ function lowerScalarProjection(st: ElementStream, projStep: PStep, acc: TailAcc)
  * projection folds its scalar. Bare form only: an inner order()/dedup()/limit()/is()/
  * transform before the fold, a non-scalar projection (valueMap/select/path), or
  * aliases/path/origin riding through the retype all defer (clear throws). A TERMINAL
- * fold never reaches here — it stays the reducer path (byte-identical). The wasteful
+ * fold never reaches here — it stays the reducer path (unchanged). The wasteful
  * roundtrip in fold().unfold() (materialize then json_each) is deliberate — correct
  * beats a peephole nobody's query needs (see the plan's decision log).
  */

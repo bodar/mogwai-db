@@ -557,7 +557,7 @@ export const repeat: StepFn = (s, st) => {
   const emitBefore = !!emitStep && cluster.indexOf(emitStep) < cluster.indexOf(rep);
 
   // Body: movements (out/in/both) + has() filters, optionally a trailing simplePath().
-  // A bare single movement keeps the original (byte-identical) term; anything more uses
+  // A bare single movement keeps the original (unchanged) term; anything more uses
   // the general JOIN-chain term (expandRepeatBody). Barrier/side-effect bodies defer.
   const body = stepChain(rep.args[0]?.nested, st.params);
   const simplePathInBody = body.length > 0 && body[body.length - 1].name === 'simplePath';
@@ -608,7 +608,7 @@ export const repeat: StepFn = (s, st) => {
   const walk = st.q.recursiveCte(walkCols, (self: Relation) => {
     // One recursive-term SELECT: advance to `finalId`, bump depth, accumulate path/done,
     // and guard expansion — shared depth<times / done=0 guards FIRST, then the branch's
-    // own guards, so the bare single-movement case is byte-identical to before.
+    // own guards, so the bare single-movement case is unchanged from before.
     const mkRec = (finalId: Expression, from: Expression, branchGuards: Expression[]): Expression => {
       const pathAcc = trackArray ? q`, jsonb_insert(${self.c.path}, '$[#]', ${finalId}) AS path` : q``;
       const doneAcc = hasUntil ? doneCol(finalId, q`${self.c.depth} + 1`) : q``;
@@ -623,7 +623,7 @@ export const repeat: StepFn = (s, st) => {
     // simplePath()'s cycle guard: reject a finalId already on the accumulated path.
     const cycleGuard = (finalId: Expression): Expression[] =>
       simplePathInBody ? [q`NOT EXISTS (SELECT 1 FROM json_each(${self.c.path}) je WHERE je.value=${finalId})`] : [];
-    // Bare single movement → the ORIGINAL term (alias `e`, label in WHERE), byte-identical.
+    // Bare single movement → the ORIGINAL term (alias `e`, label in WHERE), unchanged.
     // Everything else (movement + has(), or multi-hop) → the general JOIN-chain expansion.
     const rec = singleMove
       ? dirsFor(core[0].name).map(([from, to]) => {
@@ -636,11 +636,11 @@ export const repeat: StepFn = (s, st) => {
     // (untilFirst) and emit-before. A bare `id` inside that predicate's
     // `(SELECT … FROM nodes WHERE id=<seed id>)` would bind BOTH sides to nodes.id
     // (always true → wrong row), so alias the source (`w.id`). Every other seed uses
-    // bare `id` (no subquery) → byte-identical to before.
+    // bare `id` (no subquery) → unchanged from before.
     const seedTested = untilFirst || (hasEmitPred && emitBefore);
     const seedSrc = seedTested ? st.rel.as('w') : st.rel;
     const seedId = seedTested ? seedSrc.c.id : q`id`;
-    const seedSel = seedTested ? q`${seedId} AS id` : q`id`; // untested seed keeps bare `id` → byte-identical
+    const seedSel = seedTested ? q`${seedId} AS id` : q`id`; // untested seed keeps bare `id` → unchanged
     const seedPath = trackArray ? q`, jsonb_array(${seedId}) AS path` : q``;
     const seedDone = hasUntil ? (untilFirst ? doneCol(seedId, q`0`) : q`, 0 AS done`) : q``;
     // emit-before tests+emits the seed (depth 0); emit-after never emits the seed.

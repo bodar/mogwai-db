@@ -68,7 +68,7 @@ the P2/P3 spec, and this block is the truth for what shipped in P1:
    `plan.ts` edge twins `edgePropScalar`/`edgeHasProp`/`edgePropsAgg`/`edgeValueMapProps`,
    `write.ts` `insertEdgeProperty`/`readEdgeProps`, and the `select.ts`/`projection.ts`/
    `group.ts`/`child.ts` edge arms). Bonus correctness: edge-prop numeric order/range now
-   works (untyped `value` column keeps storage class). Output is byte-identical to the old
+   works (untyped `value` column keeps storage class). Output is unchanged from the old
    flat blob in P1 (typed edge reads are P2/P3).
 2. **"The wire is the truth", not infer-then-discard.** Open-question #2 → a bound param's
    canonical type is the GraphBinary DataType the client serialized it as, captured at

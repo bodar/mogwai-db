@@ -220,7 +220,7 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
   const by = byToEntry(proj.bys?.[0]);
   // A dynamically-bound label (bound inside a branch arm / repeat) may be UNBOUND on some
   // rows (a traverser through an arm that never bound it) → drop those (aliasPresent). A
-  // statically-bound linear label is always present, so no guard (byte-identical SQL).
+  // statically-bound linear label is always present, so no guard (same SQL).
   const present = selected.binds === undefined ? aliasPresent(p.c[selected.col]) : null;
   if (by.sub === 'vertex') {
     const rel = st.q.cte(

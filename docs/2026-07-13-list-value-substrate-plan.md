@@ -330,7 +330,7 @@ pack the entries into a `ListStream` instead of framing a Map:
    for existing bracket-literal args first** — ensure nothing currently passing regresses from
    "N args" to "1 array arg" (risk A-1).
 1. **Scaffolding, zero behavior change**: extract `Carry`/tag `St`; add `stream.ts` (unused);
-   `jsonbArrayOf`/`jsonbGroupArray` helpers in `plan.ts`. Full L1/L3 byte-identical.
+   `jsonbArrayOf`/`jsonbGroupArray` helpers in `plan.ts`. Full L1/L3 unchanged.
 2. **Dispatcher + decomposition, behavior-neutral**: `compileTail`→`compileFromElements`+
    `dispatchNext`; extract `compileFromScalar`/`scalar.ts` (`compileInject` = seed + dispatch);
    `foldTailAcc` returns `{acc,stop}` + stop-not-throw at reducer/unfold. **THE risky structural
@@ -409,11 +409,11 @@ execute B from `list.ts` primitives — commit 0 and the fact-base above carry o
 
 # Testing discipline (both approaches)
 
-- Every commit: SQL snapshot tests (assert the exact SQL) + an execution test (round-trip through
+- Every commit: SQL snapshot tests (assert the SQL is semantically equivalent) + an execution test (round-trip through
   the handler) + `bun test test/conformance/l3.test.ts` (baseline auto-bumps locally when
   `!process.env.CI`; commit it) + corpus stays 100% (`test/conformance/corpus.test.ts`).
 - Behavior-neutral commits (A-1 scaffolding, A-2 dispatcher) MUST leave L1 (2298/2298) and L3
-  byte-identical — if either moves, stop and investigate.
+  counts unchanged and SQL semantically equivalent — if a count moves, stop and investigate.
 - Widen `test/conformance/tags.ts` as each family lands (fold/unfold, Scope, Column) — never narrow.
 - Fail-closed everywhere: an unsupported retype/Scope form throws a clear "not yet supported"
   message, never silently truncates or goes-global. The Scope.local guard (A.6) ships with a
