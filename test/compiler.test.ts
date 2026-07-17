@@ -1558,14 +1558,16 @@ describe('compiler SQL snapshots', () => {
 
   test('where(__.movement) → EXISTS filter CTE; not() → NOT COALESCE', () => {
     const w = read('g.V().where(__.out("knows")).values("name")');
-    expect(w.sql).toContain('EXISTS(SELECT 1 FROM edges xe WHERE xe.src=n.id AND xe.label IN');
+    // The correlated child is the generic movement StepFn rendered as a nested derived
+    // subquery seeded from the outer n.id (index-only; no bespoke xe/xn scheme).
+    expect(w.sql).toContain('EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.src=p.id AND e.label IN');
     const n = read('g.V().not(__.out("created")).values("name")');
     expect(n.sql).toContain('WHERE NOT COALESCE((EXISTS(');
   });
 
   test('where(__.count().is(P)) → correlated scalar compare over incident edges', () => {
     const c = read('g.V().where(__.inE("knows").count().is(P.gte(1))).values("name")');
-    expect(c.sql).toContain('(SELECT COUNT(*) FROM edges xe WHERE (xe.tgt=n.id)');
+    expect(c.sql).toContain('(SELECT COUNT(*) FROM (SELECT e.id AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.tgt=p.id');
     expect(c.sql).toContain('>= ?');
   });
 
@@ -1601,20 +1603,25 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('where(__.<multi-hop chain>) → correlated EXISTS over the path', () => {
-    // 2-hop path existence
+    // 2-hop path existence: the child fold nests one derived subquery per hop.
     const two = read('g.V().where(__.out().out()).values("name")');
-    expect(two.sql).toContain('EXISTS(SELECT 1 FROM edges xe0 JOIN nodes xn0 ON xn0.id=xe0.tgt JOIN edges xe1 ON xe1.src=xn0.id JOIN nodes xn1 ON xn1.id=xe1.tgt WHERE xe0.src=n.id');
-    // terminal has() on the neighbour
+    expect(two.sql).toContain('EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT e.tgt AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.src=p.id) p ON e.src=p.id) c)');
+    // terminal has() on the neighbour — the has() StepFn is consumed by the child fold,
+    // correlating on the reached node (aliased n inside the child, isolated by the FROM
+    // boundary from the outer n).
     expect(read('g.V().where(__.out("knows").has("age", P.gt(30)))').sql)
-      .toContain("EXISTS(SELECT 1 FROM vertex_properties WHERE node=xn0.id AND key=? AND value > ?)");
+      .toContain("EXISTS(SELECT 1 FROM vertex_properties WHERE node=n.id AND key=? AND value > ?)");
     // terminal hasLabel()
-    expect(read('g.V().where(__.out("created").hasLabel("software"))').sql).toContain('xn0.label IN (SELECT id FROM labels');
-    // a lone bare movement keeps the leaner edge-only EXISTS (no node join)
-    expect(read('g.V().where(__.out()).count()').sql).toContain('EXISTS(SELECT 1 FROM edges xe WHERE xe.src=n.id))');
+    expect(read('g.V().where(__.out("created").hasLabel("software"))').sql).toContain('n.label IN (SELECT id FROM labels');
+    // a lone bare movement keeps the leaner single-hop EXISTS over the movement child
+    expect(read('g.V().where(__.out()).count()').sql).toContain('EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.src=p.id) c)');
   });
 
   test('where()/filter() deferred forms throw clearly', () => {
-    expect(read('g.V().where(__.both().both())').sql).toContain('EXISTS (SELECT 1');
+    // multi-hop both() now lowers inline through the correlated movement child (the
+    // generic StepFns handle both()'s two-direction fan-out) — a nested-derived EXISTS,
+    // not the materialized generic gate (`EXISTS (SELECT 1`, with a space).
+    expect(read('g.V().where(__.both().both())').sql).toContain('EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e');
     expect(() => compile('g.V().filter(P.gt(1))', {})).toThrow('filter(predicate) not supported');
   });
 
@@ -1631,7 +1638,7 @@ describe('compiler SQL snapshots', () => {
 
   test('and()/or() combine branch predicates; nested where(__.and)', () => {
     const a = read('g.V().and(__.out("knows"), __.out("created"))');
-    expect(a.sql).toContain('WHERE ((EXISTS(SELECT 1 FROM edges xe WHERE xe.src=n.id AND xe.label IN');
+    expect(a.sql).toContain('WHERE ((EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.src=p.id AND e.label IN');
     expect(a.sql).toContain(') AND (EXISTS(');
     expect(read('g.V().or(__.out("knows"), __.in("created"))').sql).toContain(') OR (EXISTS(');
     // <2 branches → clear throw
@@ -1846,7 +1853,7 @@ describe('compiler SQL snapshots', () => {
     expect(c.binds).toEqual(['name', 'vadas', 'knows', 'name', 'vadas', 'knows']);
     // count().is predicate rides as a correlated subquery; multi-hop arm folds
     expect(read('g.V().choose(__.out("knows").count().is(P.gt(0)), __.out("created").out())').sql)
-      .toContain('(SELECT COUNT(*) FROM edges xe WHERE (xe.src=n.id)');
+      .toContain('(SELECT COUNT(*) FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.src=p.id AND e.label IN');
     // 2-arg form: else absent → identity passthrough of the NOT-pred seed
     expect(read('g.V().choose(__.hasLabel("software"), __.in("created"))').sql).toContain('UNION ALL');
     const scalar = read('g.V().choose(__.hasLabel("person"), __.values("name"), __.constant("software")).count()');
@@ -2169,12 +2176,15 @@ describe('compiler SQL snapshots', () => {
     expect(p.shape).toEqual({ kind: 'pathGrouped', elem: 'vertex' });
   });
 
-  test('until(__.out()) correlates the EXISTS on the walk row, not itself (alias collision)', () => {
-    // The walk aliases its edges `e`; compileExists must NOT reuse `e` or its EXISTS
-    // would shadow to `e.src=e.tgt` (a self-loop test disconnected from the walk).
+  test('until(__.out()) correlates the EXISTS on the walk row via the FROM boundary', () => {
+    // until() has no generic (materialized) fallback — a CTE cannot reference the
+    // recursive term's outer row — so it correlates through the SAME inline movement
+    // child as where()/choose(). The walk aliases its edges `e`; the child's own movement
+    // also aliases `edges e`, but the seed `(SELECT e.tgt AS id)` is a FROM-clause derived
+    // table so the child's `e` is NOT laterally visible to it — the seed's `e.tgt` binds
+    // to the WALK's `e` through the WHERE-clause EXISTS boundary. No self-shadow, no xe.
     const p = read('g.V(1).repeat(__.out()).until(__.out())');
-    expect(p.sql).toContain('EXISTS(SELECT 1 FROM edges xe WHERE xe.src=e.tgt)');
-    expect(p.sql).not.toContain('xe.src=xe.tgt');
+    expect(p.sql).toContain('EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT e.tgt AS id) p ON e.src=p.id) c)');
   });
 
   test('until() defers the combinations not yet built', () => {
@@ -2210,9 +2220,12 @@ describe('compiler execution semantics', () => {
       const store = seededStore();
       const cases: Array<{ key: keyof NonNullable<CompileOptions['fastPaths']>; query: string; fastSql: string; genericSql: string }> = [
         {
+          // fast middle = the inline correlated movement child (a nested derived EXISTS,
+          // no CTE); generic middle = the materialized child-existence gate (ROW_NUMBER
+          // domain). Same filterCte plumbing either way.
           key: 'predicateInlining',
           query: 'g.V().where(__.out("knows")).values("name").order()',
-          fastSql: 'WHERE EXISTS(SELECT 1 FROM edges',
+          fastSql: 'WHERE EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e',
           genericSql: 'ROW_NUMBER() OVER () AS o0',
         },
         {
@@ -2220,16 +2233,16 @@ describe('compiler execution semantics', () => {
           // shared-domain combiner (both branches reuse one ordinal — `c.o0=d.o0`).
           key: 'predicateInlining',
           query: 'g.V().and(__.out("knows"), __.out("created")).values("name").order()',
-          fastSql: ') AND (EXISTS(SELECT 1 FROM edges xe WHERE xe.src=n.id',
+          fastSql: ') AND (EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e',
           genericSql: 'c.o0=d.o0',
         },
         {
-          // count().is(P): fast middle = correlatedReduce (a correlated COUNT subquery,
-          // no CTE); generic middle = the reducer child (COUNT ... GROUP BY o0 HAVING)
+          // count().is(P): fast middle = COUNT over the inline correlated movement child
+          // (no CTE); generic middle = the reducer child (COUNT ... GROUP BY o0 HAVING)
           // gated on existence. Same filterCte plumbing either way.
           key: 'predicateInlining',
           query: 'g.V().where(__.out().count().is(gt(1))).values("name").order()',
-          fastSql: 'WHERE (SELECT COUNT(*) FROM edges xe WHERE (xe.src=n.id)) > ?',
+          fastSql: 'WHERE (SELECT COUNT(*) FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.src=p.id) c) > ?',
           genericSql: 'HAVING COUNT(',
         },
         {
@@ -2252,6 +2265,30 @@ describe('compiler execution semantics', () => {
         expect(read(query, enabled).sql).toContain(fastSql);
         expect(read(query, disabled).sql).toContain(genericSql);
         expect(runWith(store, query, enabled)).toEqual(runWith(store, query, disabled));
+      }
+    });
+
+    test('the inline correlated predicate child stays index-only (no MATERIALIZE)', () => {
+      // The whole point of the inline-correlated rendering over the materialized generic
+      // gate: the movement child is a nested derived subquery the planner drives through
+      // the covering edge index, NOT a materialized domain + window. Guard both the
+      // EXISTS and the count().is forms against a regression to the heavy shape.
+      const store = seededStore();
+      const plan = (query: string, options: CompileOptions) => {
+        const p = compile(query, {}, options);
+        if (p.kind !== 'read') throw new Error('expected read plan');
+        return store.query('EXPLAIN QUERY PLAN ' + p.sql, p.binds).map((r: any) => r.detail).join('\n');
+      };
+      const enabled = { fastPaths: { predicateInlining: true } };
+      const disabled = { fastPaths: { predicateInlining: false } };
+      for (const query of [
+        'g.V().where(__.out("knows")).values("name")',
+        'g.V().where(__.out().count().is(gt(1))).values("name")',
+      ]) {
+        const fast = plan(query, enabled);
+        expect(fast).toContain('e_out'); // the correlated movement rides the covering index
+        expect(fast).not.toContain('MATERIALIZE');
+        expect(plan(query, disabled)).toContain('MATERIALIZE'); // generic gate materializes
       }
     });
 

@@ -1,7 +1,8 @@
 import { q, list, empty, Relation, type Expression } from '../q.ts';
 import { edges } from '../schema.ts';
 import { stepChain, type Step } from '../frontend.ts';
-import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, tryInlinePredicate, predicateSql, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
+import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, predicateSql, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
+import { tryInlinePredicate } from './predicate.ts';
 import { advance, elemRel, prevRel, carryFrag, carriedCols, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { type AliasShape } from './alias.ts';
 import { isElementChild, isListChild, isScalarChild, pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from './child.ts';
