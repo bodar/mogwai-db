@@ -3568,6 +3568,31 @@ describe('compiler execution semantics', () => {
       .toEqual(['josh', 'marko', 'peter', 'vadas']);
   });
 
+  test('mergeV literal map values keep their parsed type (uuid/long), not JS-inferred', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    run(store, "g.mergeV([(T.label):'person', gid: UUID('0263f28b-eff9-4c17-8e33-0b41c74b6d4c'), n: 5L])");
+    const rows = store.query("SELECT key, vtype FROM vertex_properties ORDER BY key").map((r: any) => [r.key, r.vtype]);
+    expect(rows).toEqual([['gid', 'uuid'], ['n', 'long']]);
+  });
+
+  test('mergeV nested map value keeps the read-shape type (uuid)', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    run(store, "g.mergeV([(T.label):'person', gid: __.constant(UUID('0263f28b-eff9-4c17-8e33-0b41c74b6d4c'))])");
+    expect(store.query("SELECT vtype FROM vertex_properties WHERE key='gid'").map((r: any) => r.vtype)).toEqual(['uuid']);
+  });
+
+  test('mergeV onCreate typed value is honored on create', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    run(store, "g.mergeV([(T.label):'person', name:'x']).option(Merge.onCreate, [gid: UUID('0263f28b-eff9-4c17-8e33-0b41c74b6d4c')])");
+    expect(store.query("SELECT vtype FROM vertex_properties WHERE key='gid'").map((r: any) => r.vtype)).toEqual(['uuid']);
+  });
+
+  test('mergeE literal edge property value keeps its parsed type (uuid)', () => {
+    const store = seededStore(); // modern: V(1)=marko, V(2)=vadas
+    run(store, "g.mergeE([(T.label):'rated', (Direction.OUT): 1, (Direction.IN): 2, gid: UUID('0263f28b-eff9-4c17-8e33-0b41c74b6d4c')])");
+    expect(store.query("SELECT vtype FROM edge_properties WHERE key='gid'").map((r: any) => r.vtype)).toEqual(['uuid']);
+  });
+
   test('mergeV whole-arg traversal beyond select-const fails CLOSED with a specific message', () => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     expect(() => run(store, 'g.inject(0).mergeV(__.identity())'))
