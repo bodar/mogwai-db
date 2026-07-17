@@ -10,7 +10,7 @@ import { carryOf, continueLowering, pathColumns, recordFieldColumns, toListStrea
 import { type Compiled, type PathPos } from '../render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
 import { lowerGlobalCount } from './barrier.ts';
-import { classifyElementChild, classifyListChild, classifyScalarChild, isElementChild, isListChild, isScalarChild, pushChildScope, reuseCurrentFrame, ROOT_SCOPE, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
+import { classifyElementChild, classifyListChild, classifyScalarChild, pushChildScope, reuseCurrentFrame, ROOT_SCOPE, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
 
 // ---------- select()/project() ----------
 
@@ -47,10 +47,19 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
   const specs = args.map((by) => by?.[0]);
   const nested = specs.map((a) => a && typeof a === 'object' && 'nested' in a ? a.nested : null);
   if (!nested.some(Boolean)) return null; // leave the mature all-direct path untouched
+  // Classify each traversal-valued field ONCE (scalar > list > element, matching the emit
+  // dispatch order), keeping the parsed body so emit reuses it — no separate is*Child re-parse.
+  const recordChildPlan = (n: any) => {
+    const s = classifyScalarChild(n, st.params);
+    if (s) return { kind: 'scalar' as const, body: s.body };
+    const l = classifyListChild(n, st.params);
+    if (l) return { kind: 'list' as const, body: l.body };
+    const e = classifyElementChild(n, st.params);
+    return e ? { kind: 'element' as const, body: e.body } : null;
+  };
+  const plans = nested.map((n) => n ? recordChildPlan(n) : null);
   if (specs.some((a, i) => {
-    if (nested[i]) return !isScalarChild(nested[i], st.params)
-      && !isListChild(nested[i], st.params)
-      && !isElementChild(nested[i], st.params);
+    if (nested[i]) return !plans[i];
     if (a === undefined) return false;
     if (typeof a === 'string') return false;
     return !(isProject && a && typeof a === 'object' && 'token' in a && (a.token === 'id' || a.token === 'label'));
@@ -69,9 +78,9 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
         })();
     if (nested[i]) {
       const seed = isProject ? outer.seed : reRootElement(outer.seed, p, source.id, source.elem);
-      if (isScalarChild(nested[i], st.params)) {
-        const child = tryCompileScalarValueChild(seed, nested[i], 'first', reuseCurrentFrame(outer.scope, outer.frame));
-        if (!child) throw new Error('scalar record child failed after successful shape preflight');
+      const plan = plans[i]!;
+      if (plan.kind === 'scalar') {
+        const child = tryCompileScalarValueChild(seed, nested[i], 'first', reuseCurrentFrame(outer.scope, outer.frame), plan.body)!;
         const rel = child.rel.as(`b${i}`);
         return {
           rel,
@@ -79,9 +88,8 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
           cols: [q`${rel.c.v} AS ${`${prefix}_v`}`],
         };
       }
-      if (isListChild(nested[i], st.params)) {
-        const child = tryCompileListChild(seed, nested[i], reuseCurrentFrame(outer.scope, outer.frame));
-        if (!child) throw new Error('list record child failed after successful shape preflight');
+      if (plan.kind === 'list') {
+        const child = tryCompileListChild(seed, nested[i], reuseCurrentFrame(outer.scope, outer.frame), plan.body)!;
         const rel = child.rel.as(`b${i}`);
         return {
           rel,
@@ -89,8 +97,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
           cols: [q`${rel.c.list} AS ${`${prefix}_list`}`],
         };
       }
-      const child = tryCompileElementChild(seed, nested[i], 'first', reuseCurrentFrame(outer.scope, outer.frame));
-      if (!child) throw new Error('element record child failed after successful shape preflight');
+      const child = tryCompileElementChild(seed, nested[i], 'first', reuseCurrentFrame(outer.scope, outer.frame), plan.body)!;
       const cp = child.stream.rel.as(`cp${i}`);
       const n = (child.stream.elem === 'edge' ? edges : nodes).as(`n${i}`);
       const l = labels.as(`l${i}`);
