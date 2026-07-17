@@ -7,6 +7,10 @@ import { DurableObjectSqlite } from './DurableObjectSqlite.ts';
 
 export interface Env {
   GRAPH: DurableObjectNamespace<GraphDatabase>;
+  /** Optional graph-path prefix (`/{PATH_PREFIX}/{id}`); defaults to `gremlin`. Set as
+   *  a Worker `var` in wrangler config to change it. The bare `/gremlin`
+   *  stock-client endpoint is fixed and unaffected. */
+  PATH_PREFIX?: string;
 }
 
 /** One Durable Object = one isolated graph database. The DO owns a
@@ -97,13 +101,17 @@ class CloudflareGraphManager implements GraphManager {
 }
 
 // Worker: wire the shared router over a Cloudflare-backed manager. The graph id
-// comes from the path (`/gremlin/{g}`) — never from body-parsing to route; the
-// bare `/gremlin` endpoint's `g`-field fallback is the one exception, and only for
-// a client that carries no path id. `POST` runs a gremlin query; `PUT`/`GET`/
-// `DELETE` are the management API, identical to the Bun server.
+// comes from the path (`/gremlin/{g}`, prefix configurable via `env.PATH_PREFIX`) —
+// never from body-parsing to route; the bare `/gremlin` endpoint's `g`-field
+// fallback is the one exception, and only for a client that carries no path id.
+// `POST` runs a gremlin query; `PUT`/`GET`/`DELETE` are the management API,
+// identical to the Bun server.
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const app = application({ manager: new CloudflareGraphManager(env.GRAPH) });
+    const app = application({
+      manager: new CloudflareGraphManager(env.GRAPH),
+      pathPrefix: env.PATH_PREFIX,
+    });
     return app.router(request);
   },
 };

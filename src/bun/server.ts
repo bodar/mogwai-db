@@ -4,14 +4,20 @@ import { BunGraphManager } from './BunGraphManager.ts';
 /** Bun entry point: build the multi-graph manager (in-memory by default, or a
  *  directory of files when `$MOGWAI_DB_DIR` is set), wire the shared router, and
  *  serve. Graphs are addressed by `/gremlin/{id}` — the same management API as the
- *  Cloudflare Worker, just running locally over `bun:sqlite`. */
-export function startServer(port = 8182, dir = process.env.MOGWAI_DB_DIR) {
+ *  Cloudflare Worker, just running locally over `bun:sqlite`. The graph-path
+ *  prefix can be overridden with `$MOGWAI_PATH_PREFIX` (defaults to `gremlin`). */
+export function startServer(
+  port = 8182,
+  dir = process.env.MOGWAI_DB_DIR,
+  pathPrefix = process.env.MOGWAI_PATH_PREFIX,
+) {
   const manager = new BunGraphManager(dir);
-  const app = application({ manager });
+  const app = application({ manager, pathPrefix });
   return Bun.serve({ port, fetch: app.router });
 }
 
 if (import.meta.main) {
   const server = startServer();
-  console.log(`mogwai-db listening on :${server.port} (graphs at /gremlin/{id})`);
+  const prefix = process.env.MOGWAI_PATH_PREFIX ?? 'gremlin';
+  console.log(`mogwai-db listening on :${server.port} (graphs at /${prefix}/{id})`);
 }

@@ -9,9 +9,13 @@ import { makeRouter } from './router.ts';
 // above (the shared HTTP router with the identical management API) is wired here
 // and used by both. As the server grows (auth, digest…) new services layer on
 // with `.set()`/`.decorate()`, mirroring the client's `application()`.
-export interface AppDependencies extends Dependency<'manager', GraphManager> {}
+export interface AppDependencies extends Dependency<'manager', GraphManager> {
+  /** Graph-path prefix (`/{pathPrefix}/{id}`). Defaults to `gremlin` in makeRouter.
+   *  The bare `/gremlin` stock-client endpoint is fixed and unaffected. */
+  pathPrefix?: string;
+}
 
 export function application(deps: AppDependencies) {
   return LazyMap.create(deps)
-    .set('router', ({ manager }) => makeRouter(manager));
+    .set('router', ({ manager }) => makeRouter(manager, deps.pathPrefix));
 }
