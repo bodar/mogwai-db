@@ -18,8 +18,7 @@ TinkerPop 4 GLV in any language connects over plain HTTP. Verified against unmod
 (`test/contract.ts`) passes over GraphBinary; 2298/2298 official corpus parse rate.
 
 The name: *mogwai* (魔怪) is Cantonese for a mischievous little devil — fitting for a
-pocket-sized graph that speaks **Gremlin**, the TinkerPop query language. npm name
-`mogwai-db` (bare `mogwai` is a dead 2013 OGM squat).
+pocket-sized graph that speaks **Gremlin**, the TinkerPop query language.
 
 ## Working rules
 
@@ -154,7 +153,7 @@ streams them. **No HTTP in the store tier / DO.**
 - Known limitation (both runtimes): a `DELETE` racing an in-flight `POST` on the same
   graph fails *safe* (a GraphBinary error, no corruption), not correct.
 - **Self-describing surface (GET-only, both runtimes):** `/openapi.json` (hand-written
-  OpenAPI 3.1, `src/docs.ts`), `/docs` (a pinned Scalar shell — zero npm dep), `/` → 302
+  OpenAPI 3.1, `src/docs.ts`), `/docs` (a pinned Scalar shell — zero-dependency), `/` → 302
   `/docs`.
 
 ## Hard-won wire-protocol facts (each cost debugging time)
