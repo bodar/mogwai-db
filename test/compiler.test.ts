@@ -2214,6 +2214,14 @@ describe('compiler execution semantics', () => {
           genericSql: 'ROW_NUMBER() OVER () AS o0',
         },
         {
+          // and()/or() honour the same switch: inline correlated EXISTS vs the generic
+          // shared-domain combiner (both branches reuse one ordinal — `c.o0=d.o0`).
+          key: 'predicateInlining',
+          query: 'g.V().and(__.out("knows"), __.out("created")).values("name").order()',
+          fastSql: ') AND (EXISTS(SELECT 1 FROM edges xe WHERE xe.src=n.id',
+          genericSql: 'c.o0=d.o0',
+        },
+        {
           key: 'singleHopOptional',
           query: 'g.V().optional(__.out("knows")).count()',
           fastSql: 'LEFT JOIN edges',
