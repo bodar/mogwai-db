@@ -1,7 +1,7 @@
 # mogwai-db — feature support matrix
 
 Scannable map of what the compiler supports, and where partial steps stop. Grouped
-by traversal concern. **L3 conformance: <!-- L3:passing -->1,139<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+by traversal concern. **L3 conformance: <!-- L3:passing -->1,142<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 Sourced from the dispatch maps (`src/steps/*.ts`) and the compiler `throw` sites — if
 the code defers a shape, it fails closed with a clear error and this file says so. Keep
@@ -40,7 +40,7 @@ In a 🟡 cell, **✅** = supported form, **❌** = deferred shape.
 | `P` (eq/neq/lt/gt/within/without/between/inside/outside) | ✅ | `between` is `[lo,hi)` |
 | TextP (startsWith/endsWith/containing + negations) | ✅ | bound `LIKE`, escaped |
 | TextP regex (`regex`/`notRegex`) | 🚫 | no SQLite `regexp()` UDF; DO blocks `create_function`/`load_extension` |
-| `typeOf(GType)` over a stored property | 🟡 | `is(typeOf(X))` / `has('k',typeOf(X))` over int/long/short/byte/bigint/float/double/string/boolean/datetime/uuid/list/map/set via the stored `vtype`. ❌ `bigdecimal`/`char`/`duration` detect but can't frame (no serializer) |
+| `typeOf(GType)` over a stored property | ✅ | `is(typeOf(X))` / `has('k',typeOf(X))` over every canonical type via the stored `vtype` — incl. `bigdecimal`/`char`/`duration` (now framed by the hand-rolled serializers, §10) |
 | `dedup()` | 🟡 | bare; `dedup().by(key/T.id/T.label/scalar traversal)` first-per-key window. ❌ `dedup(label)`, >1 `by()`, after `as()` / path tracking |
 | `identity()` | ✅ | |
 
@@ -135,7 +135,8 @@ mixed-shape arm.
 | `math("<formula>")` | 🟡 | full exp4j set → one SQL scalar, always Double; property / scalar-child `by()` vars. ❌ var with no `by()`; `withSideEffect` vars; `project()`/`select()` columns |
 | `asDate`, `dateAdd`, `dateDiff`, `datetime()`/`DateTime()` | 🟡 | epoch-millis, UTC-only, ms precision; `typeOf(DATETIME)` over stored props. ❌ `inject([…]).asDate()` |
 | `asNumber` + reducer (`fold`/`sum`) | ✅ | reducers carry runtime `vt` |
-| `bigdecimal` | ❌ | no client serializer |
+| `bigdecimal`, `char`, `duration` | 🟡 | hand-rolled serializers (`src/serializers.ts`); literals, exact-TEXT storage, framing, `typeOf`, numeric `order()`/range; `asNumber(GType.BIGDECIMAL)`. ❌ bigdecimal `math()`/`project` arithmetic; `min()`/`max()` over the TEXT-stored tail |
+| exact `long`/`bigint` > 2^53 | ✅ | BigInt end-to-end; decimal-TEXT storage; `coerceBindValue` lossless bind seam |
 
 ## 11. Writes
 

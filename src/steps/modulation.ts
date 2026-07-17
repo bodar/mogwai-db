@@ -6,7 +6,7 @@
 // is read. Traversal-valued modulators still go through child.ts.
 
 import { empty, list, q, type Expression, type Relation } from '../q.ts';
-import { elemCtx, labelNameSub, scalarProp } from '../plan.ts';
+import { elemCtx, labelNameSub, scalarProp, scalarPropSortKey } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { type ElementStream } from './context.ts';
 
@@ -39,7 +39,9 @@ export function elementOrderSql(st: ElementStream, n: Relation, order?: PStep): 
     const key = by.find((a: any) => typeof a === 'string');
     const dir = by.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
     if (dir === 'shuffle') return q`RANDOM()`;
-    const expr = key ? scalarProp(elemCtx(n, st.elem), key) : n.c.id;
+    // Sort key, not raw value: order().by(key) must sort a TEXT-stored big long /
+    // bigdecimal / duration NUMERICALLY (compareKey), not lexically.
+    const expr = key ? scalarPropSortKey(elemCtx(n, st.elem), key) : n.c.id;
     return q`${expr}${dir === 'desc' ? q` DESC` : q` ASC`}`;
   });
   return terms.length ? list(terms, ', ') : empty;

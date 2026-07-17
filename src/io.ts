@@ -21,4 +21,12 @@ import { Vertex, VertexProperty, Edge, Property } from '../node_modules/gremlin/
 // @ts-ignore - deep import, no shipped type declarations for this subpath
 import { t } from '../node_modules/gremlin/build/esm/process/traversal.js';
 
+// Extend the reused client ioc with the three GraphBinary serializers it leaves as
+// TODOs (BigDecimal/Char/Duration) — locked decision #4 reuse-FIRST allows fixing a
+// client deficiency in our wire layer. Registration mutates ioc.serializers[code] (so
+// inbound decode resolves them) + splices into anySerializer's ordered list. Done here,
+// right after the client module is imported, so every ioc consumer sees the full set.
+import { registerExtendedSerializers } from './serializers.ts';
+registerExtendedSerializers(ioc);
+
 export { ioc, Vertex, VertexProperty, Edge, Property, t };

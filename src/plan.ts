@@ -1,6 +1,6 @@
 import { flattenListArgs, type Pred } from './frontend.ts';
 import { q, list, values, empty, value, raw, jsonExtract, type Expression, type Relation } from './q.ts';
-import { normalizeTypeName } from './gremlin-types.ts';
+import { normalizeTypeName, BigDecimal, Duration } from './gremlin-types.ts';
 import { type ValueType } from './render.ts';
 
 // ---------- SQL node builders ----------
@@ -144,7 +144,7 @@ const GTYPE_SQL: Record<string, string | null> = {
 const AS_TO_CANONICAL: Record<ValueType, string> = {
   bool: 'boolean', date: 'datetime', byte: 'byte', short: 'short', int: 'int',
   long: 'long', bigint: 'bigint', float: 'float', double: 'double',
-  string: 'string', uuid: 'uuid',
+  string: 'string', uuid: 'uuid', bigdecimal: 'bigdecimal', char: 'char', duration: 'duration',
 };
 
 /** How to resolve the CURRENT scalar's type for a typeOf test:
@@ -183,21 +183,90 @@ function typeOfSql(expr: Expression, arg: any, ctx: TypeCtx = {}): Expression {
   return byStorage;
 }
 
+// ---------- vtype-aware compare/sort key (option b) ----------
+//
+// A stored value's SQLite storage class varies by type: int/double/small-long ride as
+// INTEGER/REAL (native, index-friendly), but the exact tail — long>2^53, bigint,
+// bigdecimal, duration — rides as TEXT (see storedScalar; the DO can't bind a big int64
+// numerically). Plain SQL comparison then orders those TEXT rows LEXICALLY ("10…" before
+// "9…") and, in a mixed key, after every numeric row (storage-class rank) — silently
+// wrong. Since a property key isn't statically typed, we can't pick "CAST or not" at
+// compile time — but the per-row `vtype` column tells us at run time. `compareKey` turns
+// (value, vtype) into a correctly-ordered SQLite value: numeric types cast to a numeric
+// storage class, strings/uuid/char stay TEXT (lexical = correct for those). CAST(v AS
+// INTEGER) is EXACT for the whole int family + long (a long is int64 by definition) +
+// datetime + normal durations; float/double are exact via REAL; bigdecimal and >int64
+// bigint are ordered via REAL/INTEGER = exact within f64/int64, approximate beyond (the
+// irreducible-in-pure-SQL residue, same wall regex hits — a post-SQL JS sort is the future
+// escape). Applied only where ORDER/range comparison happens (never in the equality/value
+// extraction path), and only inside the per-element correlated EXISTS / the ORDER BY scan
+// — neither uses a leading value-index range, so no index seek is lost.
+// The type-name IN-lists are fixed CONSTANTS (not user input), so splice them as SQL
+// literals rather than binds — otherwise every range predicate would carry ~20 wasted
+// type-name parameters. No injection surface (hardcoded vocabulary).
+const CMP_INT_IN = raw(`('byte','short','int','long','bigint','datetime','duration')`);
+const CMP_REAL_IN = raw(`('float','double','bigdecimal')`);
+export function compareKey(valueExpr: Expression, vtypeExpr: Expression): Expression {
+  return q`(CASE WHEN ${vtypeExpr} IN ${CMP_INT_IN} THEN CAST(${valueExpr} AS INTEGER) WHEN ${vtypeExpr} IN ${CMP_REAL_IN} THEN CAST(${valueExpr} AS REAL) ELSE ${valueExpr} END)`;
+}
+
+/** The comparison form of a predicate BOUND (the literal side of gt/lt/between/…). Unlike
+ *  the stored column, a bound's type is known at COMPILE time, so it needs no runtime CASE
+ *  (which would splice the bind three times) — just one cast matching the column's numeric
+ *  family: a bigint / Duration (total-nanos) → INTEGER, a BigDecimal → REAL, a plain
+ *  number/string binds raw (a JS number is ≤2^53 by construction — a bigger literal parses
+ *  as a bigint). Compared against the column's compareKey, numeric families line up. */
+export function compareBound(v: any): Expression {
+  if (typeof v === 'bigint' || v instanceof Duration) return q`CAST(${value(v)} AS INTEGER)`;
+  if (v instanceof BigDecimal) return q`CAST(${value(v)} AS REAL)`;
+  return value(v);
+}
+
+/** node: the vtype-aware sort key for `key` (order().by(key)/min/max), correlated. Same
+ *  first-under-multi row as nodePropScalar, but its value is the compareKey so ordering
+ *  is numeric for numeric types regardless of TEXT-vs-numeric storage class. */
+export const nodePropSortKey = (nodeIdExpr: Expression, key: string): Expression =>
+  q`(SELECT ${compareKey(raw('value'), raw('vtype'))} FROM vertex_properties WHERE node=${nodeIdExpr} AND key=${value(key)} ORDER BY id LIMIT 1)`;
+export const edgePropSortKey = (edgeIdExpr: Expression, key: string): Expression =>
+  q`(SELECT ${compareKey(raw('value'), raw('vtype'))} FROM edge_properties WHERE edge=${edgeIdExpr} AND key=${value(key)})`;
+
+/** The vtype-aware sort key for `key` on the current element — the order()/min/max twin of
+ *  scalarProp. Property (meta) elem falls back to the raw scalar (meta ordering is niche
+ *  and its values carry no vtype column). */
+export const scalarPropSortKey = (ctx: ScalarCtx, key: string): Expression =>
+  ctx.elem === 'property' ? scalarProp(ctx, key)
+  : ctx.elem === 'edge' ? edgePropSortKey(ctx.idExpr, key)
+  : nodePropSortKey(ctx.idExpr, key);
+
 export function predicateSql(expr: Expression, pred: any, typeCtx: TypeCtx = {}): Expression {
   if (pred === undefined) return q`${expr} is not null`;
   if (pred === null || typeof pred !== 'object' || !('op' in pred)) return q`${expr} = ${value(pred)}`;
   const { op, values: vals } = pred as Pred;
   if (op === 'not') return q`NOT (${predicateSql(expr, vals[0], typeCtx)})`;
   if (op === 'typeOf') return typeOfSql(expr, vals[0], typeCtx);
-  if (op in P_OPS) return q`${expr} ${P_OPS[op]} ${value(vals[0])}`;
+  // Ordering comparisons (gt/gte/lt/lte, between/inside) go through the vtype-aware
+  // compareKey (column) + compareBound (literal) so a TEXT-stored big long / bigdecimal /
+  // duration orders NUMERICALLY, not lexically. Only when a per-row vtype is in scope
+  // (has/is over a stored prop); without it (computed scalar) the value is already a native
+  // JS type → raw compare, byte-identical to before. Equality (eq/neq/within/without)
+  // stays a RAW compare: canonical text is exact (a big int / decimal matches itself) and
+  // it keeps the value-index usable for the common eq case.
+  const RANGE = new Set(['gt', 'gte', 'lt', 'lte']);
+  const col = () => compareKey(expr, typeCtx.vtypeExpr!);
+  if (op in P_OPS) return RANGE.has(op) && typeCtx.vtypeExpr
+    ? q`${col()} ${P_OPS[op]} ${compareBound(vals[0])}`
+    : q`${expr} ${P_OPS[op]} ${value(vals[0])}`;
   // SQLite rejects an empty `IN ()` list, so fold the degenerate sets to their
   // constant truth value: within nothing = never, without nothing = always.
   if (op === 'within') return vals.length ? q`${expr} in (${values(vals)})` : q`0`;
   if (op === 'without') return vals.length ? q`${expr} not in (${values(vals)})` : q`1`;
-  // between = [lo, hi) inclusive low; inside = (lo, hi) exclusive low. `expr` is
-  // shared into both bounds → its binds fall out twice in order (no double-splice).
-  if (op === 'between' || op === 'inside')
-    return q`(${expr} ${op === 'inside' ? '>' : '>='} ${value(vals[0])} and ${expr} < ${value(vals[1])})`;
+  // between = [lo, hi) inclusive low; inside = (lo, hi) exclusive low. With a stored vtype
+  // both bounds and the column go through the numeric-aware compare; otherwise raw.
+  if (op === 'between' || op === 'inside') {
+    const lowOp = op === 'inside' ? '>' : '>=';
+    if (!typeCtx.vtypeExpr) return q`(${expr} ${lowOp} ${value(vals[0])} and ${expr} < ${value(vals[1])})`;
+    return q`(${col()} ${lowOp} ${compareBound(vals[0])} and ${col()} < ${compareBound(vals[1])})`;
+  }
   const lp = likePattern(op, vals[0]);
   if (lp) return q`${expr} ${lp.neg ? 'not like' : 'like'} ${value(lp.pat)} escape ${value('\\')}`;
   throw new Error(`unsupported predicate: P.${op}`);

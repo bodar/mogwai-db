@@ -1,7 +1,7 @@
 import { CharStream, CommonTokenStream, BaseErrorListener, ParserRuleContext } from 'antlr4ng';
 import { GremlinLexer } from '../parser/GremlinLexer.ts';
 import { GremlinParser } from '../parser/GremlinParser.ts';
-import { flatType, type TypeNode, type CanonicalType } from './gremlin-types.ts';
+import { flatType, fitsSafeInteger, BigDecimal, Duration, type TypeNode, type CanonicalType } from './gremlin-types.ts';
 
 // ---------- parsing ----------
 //
@@ -215,9 +215,40 @@ function walkArgs(node: any, out: any[], params: Record<string, any>, types: (Ty
   const emit = (v: any, t: TypeNode | null = null) => { out.push(v); types.push(t); };
   const cls = node.constructor.name;
   if (cls === 'StringLiteralContext') { emit(unquote(node.getText()), 'string'); return; }
-  if (cls === 'IntegerLiteralContext') { emit(parseInt(node.getText().replace(/[lL]$/, ''), 10), intLitType(node.getText())); return; }
-  if (cls === 'FloatLiteralContext') { emit(parseFloat(node.getText()), floatLitType(node.getText())); return; }
+  // long/bigint carry EXACT via BigInt — parseInt would truncate past 2^53 (the
+  // pre-existing precision bug; see do-sqlite-bind-precision). byte/short/int fit a JS
+  // number, so they stay parseInt (numeric storage class + native index usage).
+  if (cls === 'IntegerLiteralContext') {
+    const text = node.getText(); const t = intLitType(text);
+    // long/bigint stay a JS number WHILE they fit ±2^53 exactly (keeps numeric storage
+    // class, native index usage, and existing V()/has()/id consumers that expect number);
+    // only the genuinely-big tail becomes BigInt (which every bind seam normalizes).
+    if (t === 'long' || t === 'bigint') {
+      const b = BigInt(text.replace(/[lnLN]$/, ''));
+      emit(fitsSafeInteger(b) ? Number(b) : b, t); return;
+    }
+    emit(parseInt(text.replace(/[lL]$/, ''), 10), t); return;
+  }
+  // bigdecimal (`m` suffix) carries EXACT via a BigDecimal parsed from the literal text —
+  // parseFloat would collapse it to a lossy f64. float/double stay parseFloat.
+  if (cls === 'FloatLiteralContext') {
+    const text = node.getText(); const t = floatLitType(text);
+    if (t === 'bigdecimal') { emit(BigDecimal.fromText(text.replace(/[mM]$/, '')), 'bigdecimal'); return; }
+    emit(parseFloat(text), t); return;
+  }
   if (cls === 'BooleanLiteralContext') { emit(node.getText() === 'true', 'boolean'); return; }
+  // 'x'c — a quoted single character with a `c` suffix. Strip the suffix, then unquote to
+  // the 1-codepoint string. Tagged `char` so the write records vtype=char and framing
+  // picks CharSerializer (a Char is storage-ambiguous with a String — vtype disambiguates).
+  if (cls === 'CharacterLiteralContext') { emit(unquote(node.getText().replace(/[cC]$/, '')), 'char'); return; }
+  // Duration(seconds, nanos [, negatedBool]) — a java.time Duration literal. Build the
+  // exact value (seconds carries the sign via total-nanos); normalized + tagged `duration`.
+  if (cls === 'DurationLiteralContext') {
+    const secs = BigInt(node.integerLiteral(0).getText().replace(/[lnLN]$/, ''));
+    const nanos = Number(node.integerLiteral(1).getText().replace(/[lnLN]$/, ''));
+    const total = secs * 1_000_000_000n + BigInt(nanos);
+    emit(Duration.fromTotalNanos(node.booleanLiteral()?.getText() === 'true' ? -total : total), 'duration'); return;
+  }
   // UUID('…') → the string form tagged `uuid` so a property write records it as a
   // UUID (indistinguishable from a plain string by JS value alone). Bare UUID() (a
   // random uuid) has no string child — it falls through (uncommon as a stored value).

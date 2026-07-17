@@ -1,5 +1,5 @@
-import { derived, empty, list, paren, q, value, type Expression, type Relation } from '../q.ts';
-import { predicateSql, rangeToOffsetLimit, scalarTx } from '../plan.ts';
+import { derived, empty, list, paren, q, raw, value, type Expression, type Relation } from '../q.ts';
+import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, withoutCarried, type Carry } from './context.ts';
@@ -406,7 +406,11 @@ export function lowerScalarRows(
       continue;
     }
     if (step.name === 'order') {
-      let order: Expression = q`p.v ASC`;
+      // Sort by the vtype-aware compare key when the stream carries a per-row vtype, so a
+      // TEXT-stored big long / bigdecimal / duration value sorts NUMERICALLY not lexically
+      // (values() of a typed prop). No vtype column → the value is already a native scalar.
+      const sortVal: Expression = stream.vtype ? compareKey(q`p.v`, raw(`p.${stream.vtype}`)) : q`p.v`;
+      let order: Expression = q`${sortVal} ASC`;
       const bys = step.bys ?? [];
       if (bys.length > 1) throw new Error('multiple order().by() modulators on a scalar stream not yet supported');
       if (bys.length === 1) {
@@ -414,7 +418,7 @@ export function lowerScalarRows(
         if (by.some((a: any) => typeof a === 'string' || (a && typeof a === 'object' && ('nested' in a || 'token' in a))))
           throw new Error('order().by(key/traversal) on a scalar stream not supported (no properties)');
         const dir = by.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
-        order = dir === 'shuffle' ? q`RANDOM()` : dir === 'desc' ? q`p.v DESC` : q`p.v ASC`;
+        order = dir === 'shuffle' ? q`RANDOM()` : dir === 'desc' ? q`${sortVal} DESC` : q`${sortVal} ASC`;
       }
       if (stream.carried.origins.length) {
         stream = partitionedOrder(stream, order);
