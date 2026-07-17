@@ -534,7 +534,11 @@ function resolveEndpoint(store: GraphStore, spec: any, d: { aliases: Map<string,
 
 // ---------- mergeV / mergeE (upsert) ----------
 
-interface MergeSpec { label: string | null; id: string | number | null; outV: any; inV: any; props: Record<string, any>; }
+// A MergeSpec's label/id/prop VALUES may each hold an unresolved nested traversal
+// ({nested}) — the grammar allows a map value to be a traversal (mapEntry : mapKey COLON
+// genericLiteral, and genericLiteral includes nestedTraversal). They are resolved per
+// driver (correlated) by resolveMergeSpec, NOT at compile time.
+interface MergeSpec { label: string | null | { nested: any }; id: any; outV: any; inV: any; props: Record<string, any>; }
 
 function classifyMergeKey(k: any): { kind: 'label' | 'id' | 'outV' | 'inV' | 'prop'; name?: string } {
   const enumName = (typeName: string) => k && typeof k === 'object' && k.typeName === typeName ? String(k.elementName).toLowerCase() : null;
@@ -554,10 +558,19 @@ function classifyMergeVal(v: any): any {
   return m ? { incoming: m } : v;
 }
 
-// Resolve a merge map argument that is a nested traversal to its constant value. A
-// withSideEffect(key, map) constant read back by __.select(key) is compile-time known, so
-// substitute it directly (correct-by-construction — the value never changes). Any other
-// traversal form (identity-on-incoming, a mutating body) defers with a clear message.
+// Resolve a WHOLE-ARG merge traversal (mergeV(__.…) / option(Merge.x, __.…)) to a
+// concrete map. A withSideEffect(key, map) constant read back by __.select(key) is a
+// per-driver-invariant constant, so substitute it directly (correct-by-construction).
+// The other legal whole-arg forms each need substrate this seam doesn't own — fail
+// CLOSED naming exactly what's missing (never mis-execute):
+//   - __.identity() / any traversal reading the incoming traverser AS the map needs a
+//     map-VALUED driver model (merge drivers are element rowids today).
+//   - a compound slice (__.select(k).limit(Scope.local,1).unfold()) needs local map
+//     ops in the resolver.
+//   - a side-effecting body (__.sideEffect(__.properties(k).drop()).select(m)) needs
+//     nested-WRITE execution (runNested runs reads only).
+// Per-VALUE nested traversals inside a map literal ([k: __.trav]) do NOT come here —
+// they stay in the map and resolveMergeSpec resolves them correlated per driver.
 function resolveMergeArg(raw: any, sideEffects: Map<string, any> | undefined, params: Record<string, any>): any {
   if (!isNested(raw)) return raw;
   const inner = stepChain(raw.nested, params);
@@ -566,7 +579,10 @@ function resolveMergeArg(raw: any, sideEffects: Map<string, any> | undefined, pa
     if (sideEffects?.has(k)) return sideEffects.get(k);
     throw new Error(`merge with select('${k}') needs a withSideEffect('${k}', map) constant`);
   }
-  throw new Error('merge with a traversal argument (e.g. __.select(...)) not yet supported');
+  const names = inner.map((s) => s.name).join('.');
+  if (inner[0].name === 'identity' || inner.some((s) => s.name === 'select'))
+    throw new Error(`merge whole-arg traversal __.${names} not yet supported (needs a map-valued driver / local-map / nested-write substrate; a map literal [k: __.trav] IS supported)`);
+  throw new Error(`merge whole-arg traversal __.${names} not yet supported`);
 }
 
 function normalizeMergeMap(raw: any, sideEffects?: Map<string, any>, params: Record<string, any> = {}): MergeSpec {
@@ -577,13 +593,53 @@ function normalizeMergeMap(raw: any, sideEffects?: Map<string, any>, params: Rec
     throw new Error('merge argument must be a map ([k:v] / bound Map), null, or empty ([:])');
   for (const [k, v] of raw) {
     const c = classifyMergeKey(k);
-    if (c.kind === 'label') spec.label = String(v);
+    // label/id/prop VALUES may be nested traversals — keep them UNRESOLVED (deferred to
+    // resolveMergeSpec, per driver). Only a non-nested label collapses to a string now.
+    if (c.kind === 'label') spec.label = isNested(v) ? v : String(v);
     else if (c.kind === 'id') spec.id = v;
     else if (c.kind === 'outV') spec.outV = classifyMergeVal(v);
     else if (c.kind === 'inV') spec.inV = classifyMergeVal(v);
     else spec.props[c.name!] = v;
   }
   return spec;
+}
+
+// The nested-value authority reused by merge (#3): a literal passes through; a nested
+// traversal resolves correlated at `seed` (constFromSelect first, then a seeded scalar).
+// Mirrors resolveSpecValue but standalone (merge has no PropSpec). null = infer vtype.
+function nestedScalarValue(store: GraphStore, nested: any, params: Record<string, any>, seed?: { id: number; elem: 'node' | 'edge' }, sideEffects?: Map<string, any>): { has: boolean; value: any; vtype: CanonicalType | null } {
+  const c = constFromSelect(nested, sideEffects, params);
+  if (c.has) return { has: true, value: c.value, vtype: gremlinTypeOf(c.value, null) };
+  // __.constant(v) is a source-LESS invariant: resolve it directly so it works even with
+  // no seed (a global mergeV has no driver element to prepend a V/E source at — the read
+  // spine requires a source, but a constant needs none).
+  if (isNested(nested)) {
+    const inner = stepChain(nested.nested, params);
+    if (inner.length === 1 && inner[0].name === 'constant')
+      return { has: true, value: inner[0].args[0], vtype: gremlinTypeOf(inner[0].args[0], null) };
+  }
+  const r = nestedScalar(store, nested.nested, params, seed);
+  return { has: r.has, value: r.value, vtype: r.vtype ?? (r.has ? gremlinTypeOf(r.value, null) : null) };
+}
+
+// Produce a concrete MergeSpec for ONE driver: every nested label/id/prop value is
+// resolved correlated at `seed` (the incoming traverser element, or undefined = global).
+// A non-nested spec passes through unchanged (the constant case stays bit-identical, so
+// mergeMatchQuery renders the same SQL+binds it did at compile time). Fails closed on a
+// nested map value that produces nothing (a match/create value must exist).
+function resolveMergeSpec(store: GraphStore, spec: MergeSpec, seed: { id: number; elem: 'node' | 'edge' } | undefined, params: Record<string, any>, sideEffects?: Map<string, any>): MergeSpec {
+  const rv = (v: any, what: string): any => {
+    if (!isNested(v)) return v;
+    const r = nestedScalarValue(store, v, params, seed, sideEffects);
+    if (!r.has) throw new Error(`merge map ${what} traversal produced no value`);
+    return r.value;
+  };
+  return {
+    label: isNested(spec.label) ? String(rv(spec.label, 'label')) : spec.label,
+    id: rv(spec.id, 'id'),
+    outV: spec.outV, inV: spec.inV,
+    props: Object.fromEntries(Object.entries(spec.props).map(([k, v]) => [k, rv(v, `value for '${k}'`)])),
+  };
 }
 
 // The label / id-or-uid / per-prop equality conditions shared by the vertex and
@@ -634,25 +690,32 @@ function compileMergeV(steps: PStep[], params: Record<string, any>, sideEffects?
   const mvIdx = steps.findIndex((s) => s.name === 'mergeV');
   if (steps[mvIdx].args.length === 0)
     throw new Error('mergeV() with no argument (uses the incoming traverser as the map) not yet supported');
-  const matchSpec = normalizeMergeMap(steps[mvIdx].args[0], sideEffects, params);
+  const matchSpecRaw = normalizeMergeMap(steps[mvIdx].args[0], sideEffects, params);
   const { onCreate, onMatch } = parseMergeOptions(steps.slice(mvIdx + 1), 'mergeV', sideEffects, params);
   const drivers = mergeDrivers(steps.slice(0, mvIdx), params);
-  const match = mergeMatchQuery(matchSpec);
   return {
     kind: 'write',
     run: (store) => {
       const out: any[] = [];
-      for (const _driver of drivers(store)) {
+      for (const driver of drivers(store)) {
+        // The merge map (match + onCreate/onMatch) is completed per incoming traverser:
+        // resolve nested values seeded at the driver, then build the match query from the
+        // resolved spec. A constant spec resolves to itself → identical SQL each iteration.
+        const seed = driver != null ? { id: driver, elem: 'node' as const } : undefined;
+        const matchSpec = resolveMergeSpec(store, matchSpecRaw, seed, params, sideEffects);
+        const oc = onCreate ? resolveMergeSpec(store, onCreate, seed, params, sideEffects) : null;
+        const om = onMatch ? resolveMergeSpec(store, onMatch, seed, params, sideEffects) : null;
+        const match = mergeMatchQuery(matchSpec);
         const matches = store.query<any>(match.sql, match.binds);
         if (matches.length) {
           for (const m of matches) {
-            if (onMatch) for (const [k, v] of Object.entries(onMatch.props)) applyVertexProperty(store, m.id, k, v, gremlinTypeOf(v, null), null, 'single');
+            if (om) for (const [k, v] of Object.entries(om.props)) applyVertexProperty(store, m.id, k, v, gremlinTypeOf(v, null), null, 'single');
             out.push({ vertex: { id: m.uid ?? m.id, label: m.label, props: readVertexProps(store, m.id) } });
           }
         } else {
-          const label = onCreate?.label ?? matchSpec.label ?? 'vertex';
-          const props = { ...matchSpec.props, ...(onCreate?.props ?? {}) };
-          const v = insertVertex(store, { label, props: singleProps(props), uid: matchSpec.id ?? onCreate?.id ?? null }, params, sideEffects);
+          const label = (oc?.label as string) ?? (matchSpec.label as string) ?? 'vertex';
+          const props = { ...matchSpec.props, ...(oc?.props ?? {}) };
+          const v = insertVertex(store, { label, props: singleProps(props), uid: matchSpec.id ?? oc?.id ?? null }, params, sideEffects);
           out.push({ vertex: { id: v.extId, label, props } });
         }
       }
@@ -679,7 +742,7 @@ function compileMergeE(steps: PStep[], params: Record<string, any>, sideEffects?
   const meIdx = steps.findIndex((s) => s.name === 'mergeE');
   if (steps[meIdx].args.length === 0)
     throw new Error('mergeE() with no argument (uses the incoming traverser as the map) not yet supported');
-  const matchSpec = normalizeMergeMap(steps[meIdx].args[0], sideEffects, params);
+  const matchSpecRaw = normalizeMergeMap(steps[meIdx].args[0], sideEffects, params);
   const { onCreate, onMatch } = parseMergeOptions(steps.slice(meIdx + 1), 'mergeE', sideEffects, params);
   const drivers = mergeDrivers(steps.slice(0, meIdx), params);
   return {
@@ -692,20 +755,26 @@ function compileMergeE(steps: PStep[], params: Record<string, any>, sideEffects?
       };
       const out: any[] = [];
       for (const cur of drivers(store)) {
-        const outV = endpoint(matchSpec.outV, onCreate?.outV, cur, 'outV');
-        const inV = endpoint(matchSpec.inV, onCreate?.inV, cur, 'inV');
+        // Complete the merge map per incoming traverser (nested values seeded at cur),
+        // then build the match query from the resolved spec.
+        const seed = cur != null ? { id: cur, elem: 'node' as const } : undefined;
+        const matchSpec = resolveMergeSpec(store, matchSpecRaw, seed, params, sideEffects);
+        const oc = onCreate ? resolveMergeSpec(store, onCreate, seed, params, sideEffects) : null;
+        const om = onMatch ? resolveMergeSpec(store, onMatch, seed, params, sideEffects) : null;
+        const outV = endpoint(matchSpec.outV, oc?.outV, cur, 'outV');
+        const inV = endpoint(matchSpec.inV, oc?.inV, cur, 'inV');
         const match = edgeMatchQuery(matchSpec, outV, inV);
         const matches = store.query<any>(match.sql, match.binds);
         if (matches.length) {
           for (const m of matches) {
-            if (onMatch) for (const [k, v] of Object.entries(onMatch.props)) insertEdgeProperty(store, m.id, k, v, gremlinTypeOf(v, null));
+            if (om) for (const [k, v] of Object.entries(om.props)) insertEdgeProperty(store, m.id, k, v, gremlinTypeOf(v, null));
             out.push({ edge: { id: m.uid ?? m.id, label: m.label, src: nodeExtId(store, m.src), tgt: nodeExtId(store, m.tgt), props: readEdgeProps(store, m.id) } });
           }
         } else {
-          const label = matchSpec.label ?? onCreate?.label;
+          const label = (matchSpec.label as string) ?? (oc?.label as string);
           if (!label) throw new Error('mergeE cannot create an edge without a label');
-          const props = { ...matchSpec.props, ...(onCreate?.props ?? {}) };
-          out.push(insertEdge(store, { label, fromSpec: undefined, toSpec: undefined, edgeUid: matchSpec.id ?? onCreate?.id ?? null, props, propTypes: {}, next: 0 }, outV, inV, params, sideEffects));
+          const props = { ...matchSpec.props, ...(oc?.props ?? {}) };
+          out.push(insertEdge(store, { label, fromSpec: undefined, toSpec: undefined, edgeUid: matchSpec.id ?? oc?.id ?? null, props, propTypes: {}, next: 0 }, outV, inV, params, sideEffects));
         }
       }
       return out;
