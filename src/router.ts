@@ -30,19 +30,34 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+// Per-query observability is a pluggable presentation seam (data capture is a
+// separate manager decorator — see test/conformance/telemetry.ts). The default is
+// the verbose one-line-per-query log both runtimes have always emitted (CF → wrangler
+// tail); the conformance host swaps in a compact `.`/`E` progress reporter.
+export type QueryLogger = (event: {
+  id: string;
+  gremlin: string;
+  ok: boolean;
+  results?: number;
+  error?: string;
+}) => void;
+
+const verboseLogger: QueryLogger = (e) =>
+  console.log(e.ok ? `OK   [${e.id}] ${e.gremlin} -> ${e.results} result(s)` : `ERR  ${e.error}`);
+
 // Parse the wire, resolve the graph id (path wins over body `g`, default 'g'), run
 // the traversal across the seam, and frame the response. All failure modes — a bad
 // body, a compile/SQL error — ride the GraphBinary trailer (HTTP 200) via errorResponse.
-async function runQuery(mgr: GraphManager, pathId: string | null, req: Request): Promise<Response> {
+async function runQuery(mgr: GraphManager, pathId: string | null, req: Request, log: QueryLogger): Promise<Response> {
   try {
     const raw = Buffer.from(await req.arrayBuffer());
     const { gremlin, params, paramTypes, g, batchSize } = parseRequest(raw);
     const id = pathId ?? g ?? 'g';
     const buffers = await mgr.query(id, gremlin, params, paramTypes);
-    console.log(`OK   [${id}] ${gremlin} -> ${buffers.length} result(s)`);
+    log({ id, gremlin, ok: true, results: buffers.length });
     return streamBuffers(buffers, batchSize);
   } catch (e: any) {
-    console.log(`ERR  ${e.message}`);
+    log({ id: pathId ?? 'g', gremlin: '', ok: false, error: e.message });
     return errorResponse(e.message);
   }
 }
@@ -50,6 +65,7 @@ async function runQuery(mgr: GraphManager, pathId: string | null, req: Request):
 export function makeRouter(
   mgr: GraphManager,
   pathPrefix = 'gremlin',
+  log: QueryLogger = verboseLogger,
 ): (req: Request) => Promise<Response> {
   const graphPath = new RegExp(`^/${escapeRe(pathPrefix)}/([^/]+)/?$`);
   const { DOCS_HTML, OPENAPI_JSON } = buildDocs(pathPrefix);
@@ -68,7 +84,7 @@ export function makeRouter(
 
     // Bare gremlin endpoint: a stock TinkerPop client POSTs to one URL and names the
     // graph in the request `g` field. No path id → runQuery peeks the parsed body.
-    if (req.method === 'POST' && pathname === BARE_ENDPOINT) return runQuery(mgr, null, req);
+    if (req.method === 'POST' && pathname === BARE_ENDPOINT) return runQuery(mgr, null, req, log);
 
     const match = pathname.match(graphPath);
     if (!match) return new Response('Not found', { status: 404 });
@@ -76,7 +92,7 @@ export function makeRouter(
 
     switch (req.method) {
       case 'POST': // gremlin query — graph id from the path
-        return runQuery(mgr, id, req);
+        return runQuery(mgr, id, req, log);
       case 'PUT': // create-if-absent (idempotent)
         await mgr.create(id);
         return json({ id, created: true }, 201);

@@ -59,7 +59,14 @@ export async function startConformanceServer(port = 45940) {
   const tpath = telemetryPath();
   if (tpath) clearTelemetry(tpath);
   const served = tpath ? new LoggingGraphManager(manager, tpath) : manager;
-  const app = application({ manager: served });
+  // Under telemetry, replace the verbose per-query log with a compact live progress
+  // line — `.` per query that ran, `E` per compile/exec throw (a wrong-answer still
+  // shows `.`, matching the NDJSON's ok:true). The test terminates the line before
+  // printing the aggregate report. Off telemetry, the default verbose log stands.
+  const log = tpath
+    ? (e: { ok: boolean }) => process.stdout.write(e.ok ? '.' : 'E')
+    : undefined;
+  const app = application({ manager: served, log });
   return Bun.serve({ port, fetch: app.router });
 }
 
