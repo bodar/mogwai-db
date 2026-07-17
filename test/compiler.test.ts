@@ -3464,6 +3464,34 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V().has("name","marko").outE("knows").values("weight")').map((r) => r.v)).toEqual([0.5]);
   });
 
+  test('addV inline property NESTED value routes through resolveSpecValue', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    // __.constant(v) as an inline property value — evaluated at the new vertex.
+    const res = run(store, 'g.addV("person").property("age", __.constant(29)).property("name", "marko")');
+    expect((res[0] as any).vertex).toMatchObject({ label: 'person', props: { name: 'marko', age: 29 } });
+    expect(run(store, 'g.V().has("person","age",29).values("name")').map((r) => r.v)).toEqual(['marko']);
+  });
+
+  test('addV nested property value seeds at the NEW (edge-less) vertex → out().count()=0', () => {
+    const store = seededStore();
+    run(store, 'g.addV("person").property("name","x").property("deg", __.out().count())');
+    expect(run(store, 'g.V().has("name","x").values("deg")').map((r) => r.v)).toEqual([0]);
+  });
+
+  test('addE inline property NESTED value resolves + response echoes the resolved value', () => {
+    const store = seededStore();
+    const res = run(store, 'g.addE("knows").from(__.V(1)).to(__.V(2)).property("w", __.constant(0.7))');
+    // the framed response carries the resolved scalar, never a {nested} blob
+    expect((res[0] as any).edge.props).toEqual({ w: 0.7 });
+    expect(run(store, 'g.V(1).outE("knows").values("w")').map((r) => r.v)).toEqual([0.7]);
+  });
+
+  test('addV nested-traversal LABEL is evaluated at run time (no silent "vertex" default)', () => {
+    const store = seededStore(); // modern: V(1)=marko/person
+    run(store, 'g.addV(__.V(1).label()).property("name","clone")');
+    expect(run(store, 'g.V().has("name","clone").label()').map((r) => r.v)).toEqual(['person']);
+  });
+
   test('mergeV creates when no match, matches when it exists (inline map)', () => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     const a = run(store, 'g.mergeV([(T.label): "person", name: "marko"])');
