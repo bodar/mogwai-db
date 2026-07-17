@@ -563,16 +563,23 @@ P1–P4 landed; P5 partial. What the spree did NOT close, ranked by leverage/app
    (`__.select(label)` alias + `__.addV()` nested write via `nestedElementRowid`), and
    merge map VALUES resolved correlated PER DRIVER (`resolveMergeSpec`; the grammar allows
    `[k: __.trav]` — mapEntry value is a `genericLiteral`, which includes `nestedTraversal`).
-   Fail-closed walls remain ONLY where genuinely other substrate is needed, each with a
-   specific message: whole-arg merge traversals beyond a `withSideEffect` select-const
-   (`__.identity()`/incoming-as-map needs a **map-valued driver model**; a side-effecting
-   body needs **nested-WRITE execution**), `addE` endpoint read tails past the movement
-   prefix (no corpus consumer), and nested property KEYS. No ratchet move (the corpus
-   scenarios for these shapes are gated by unrelated missing features — addV mid-chain,
-   read-tails-after-write, repeat-in-write-chain); targeted tests prove the primitives.
-   See `docs/2026-07-17-writes-through-read-spine-plan.md` (with its two corrected
-   premises: @StepWrite is io-serialization not data-writes; #3's general axis is the
-   whole map completed by traversals per driver, both legal per grammar).
+   Constant nested KEYS (`__.select(const)`/`__.constant()`) resolve; everything else fails
+   CLOSED with a specific message where genuinely other substrate is needed: whole-arg merge
+   traversals beyond a `withSideEffect` select-const (`__.identity()`/incoming-as-map needs a
+   **map-valued driver model**; a side-effecting body needs **nested-WRITE execution**),
+   `addE` endpoint read tails past the movement prefix (no corpus consumer), and LIVE-READ
+   nested property KEYS. No ratchet move (the corpus scenarios for these shapes are gated by
+   unrelated missing features — addV mid-chain, read-tails-after-write, repeat-in-write-chain);
+   targeted tests prove the primitives. See
+   `docs/2026-07-17-writes-through-read-spine-plan.md` (with its two corrected premises:
+   @StepWrite is io-serialization not data-writes; #3's general axis is the whole map
+   completed by traversals per driver, both legal per grammar). **Deferred follow-ons (each
+   unblocks reachable legal shapes):** (a) **typed merge VALUES** — merge props are
+   JS-type-inferred via `singleProps`, so a uuid/datetime/long merge value can mistype
+   (pre-existing; needs a typed prop pipeline through `singleProps`/`commonMergeConds`);
+   (b) **map-valued merge drivers** — unblocks `__.identity()`/incoming-as-map whole-arg;
+   (c) **addV mid-chain** + **read-tails-after-write** — unblock the corpus write scenarios
+   that seed a value/key/label at the incoming (not new) element.
 2. **SubgraphStrategy(edges) / strategy adjacency (~45, self-contained).** The
    edge-criterion Subgraph injection (Cluster 9) — its own pass, untouched by the spree.
 3. ~~**P5 residue — synthetic parent for stashed group sources.**~~ **DONE (2026-07-17).**

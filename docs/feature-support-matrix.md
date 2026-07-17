@@ -141,9 +141,9 @@ mixed-shape arm.
 
 | Step | | Notes |
 |---|:--:|---|
-| `addV()`, `.property(k,v)`, `property(T.id/T.label)` | ✅ | user-supplied ids (string→uid, int→rowid); inline property nested VALUES + nested-traversal LABEL (`addV(__.…)`) resolved at run time. ❌ nested property KEY |
-| `addE()`, `from`/`to` | 🟡 | endpoints: `as()` alias, `__.select(label)`, nested `__.V(…)`, or `__.addV(…)` (nested write); edge uid; inline property nested VALUES; multi-addE initializers. ❌ nested-traversal edge label; endpoint read tail past a movement; `addE` after some prefixes |
-| `mergeV`, `mergeE` | 🟡 | id-aware upsert, onCreate/onMatch, start + mid-chain; map VALUES may be nested traversals (`[k: __.trav]`) resolved correlated per driver; whole-arg `__.select(k)` of a `withSideEffect(k, map)` constant. ❌ whole-arg traversals needing a map-valued driver (`__.identity()`/incoming-as-map) or nested-write bodies; nested map KEYS; bare `mergeV()`/`mergeE()` |
+| `addV()`, `.property(k,v)`, `property(T.id/T.label)` | ✅ | user-supplied ids (string→uid, int→rowid); inline property nested VALUES + nested-traversal LABEL (`addV(__.…)`) resolved at run time; nested property KEY that is a constant (`__.select(const)`/`__.constant()`). ❌ live-read nested property KEY (fails closed) |
+| `addE()`, `from`/`to` | 🟡 | endpoints: `as()` alias, `__.select(label)`, nested `__.V(…)` (incl. folded `repeat().times()`), or `__.addV(…)` (nested write); edge uid; inline property nested VALUES + constant nested KEY; multi-addE initializers. ❌ nested-traversal edge label; endpoint read tail past a movement (order/limit); live-read nested property KEY (fails closed); `addE` after some prefixes |
+| `mergeV`, `mergeE` | 🟡 | id-aware upsert, onCreate/onMatch, start + mid-chain; map label/id/VALUES may be nested traversals (`[k: __.trav]`) resolved correlated per driver; whole-arg `__.select(k)` of a `withSideEffect(k, map)` constant. ❌ whole-arg traversals needing a map-valued driver (`__.identity()`/incoming-as-map) or nested-write bodies; nested map KEYS; bare `mergeV()`/`mergeE()`. 🟡 merge prop VALUES are JS-type-inferred (uuid/datetime/long may mistype — typed-merge-values is a separate feature) |
 | `property()` update | ✅ | vertex normalized rows single/list/set + meta; edge normalized UPSERT (single, no meta) |
 | `property(Cardinality.list/set,…)` | ✅ | list appends, set dedups by value |
 | `drop()` (vertices + edges) | 🟡 | after movement/filter/`where`, cascades props. ❌ after `properties()` / `order()` |
