@@ -807,6 +807,8 @@ function compileElementChildRows(
   if (!shape) return null;
   const { parts, orderStep } = shape;
   const pushed = pushChildScope(parent, scope);
+  // (trackFromV for an exploded otherV() body is derived inside lowerElementSteps, the single
+  // fold every scope passes through — see the note there.)
   const { stream: prefixed, next: stop } = lowerElementSteps(parts.prefix, pushed.seed);
   if (stop !== parts.prefix.length) return null;
 

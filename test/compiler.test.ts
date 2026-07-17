@@ -1075,8 +1075,9 @@ describe('compiler SQL snapshots', () => {
     // identity() is the no-op step (what IdentityRemovalStrategy elides) — compiles.
     expect(read('g.V().identity().out().values("name")')).toBeDefined();
     expect(() => compile('g.withStrategies(IdentityRemovalStrategy).V().identity().out()', {})).not.toThrow();
-    // withoutStrategies(anything) is a safe no-op: we apply NO strategy by default,
-    // so there is nothing to suppress — including for semantic strategies.
+    // withoutStrategies(X) is a safe no-op for any strategy we apply only on request (we
+    // apply none by default, so there is nothing to suppress) — the sole exception is an
+    // always-on strategy whose effect is unconditionally baked in (see ConnectiveStrategy).
     expect(() => compile('g.withoutStrategies(PartitionStrategy).V()', {})).not.toThrow();
     expect(() => compile('g.withoutStrategies(SubgraphStrategy, ProductiveByStrategy).V()', {})).not.toThrow();
   });
@@ -1197,39 +1198,74 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.withStrategies(EdgeLabelVerificationStrategy(throwException:true)).addE("knows").from(__.V(1)).to(__.V(2))', {})).not.toThrow();
   });
 
-  test('semantic/unknown strategies + deferred forms fail closed (never silently leak)', () => {
+  test('SubgraphStrategy edge criterion + adjacent-vertex checks + recursion (end-to-end)', () => {
+    const store = seededStore();
+    const vals = (q: string) => run(store, q).map((r: any) => r.v).sort();
+    const one = (q: string) => run(store, q).map((r: any) => r.v);
+    // An edge criterion filters which edges are traversable: marko has 2 knows + 1 created
+    // out-edges; hasLabel("knows") keeps only the two knows edges.
+    expect(vals('g.withStrategies(new SubgraphStrategy(edges: __.hasLabel("knows"))).V(1).outE().label()')).toEqual(['knows', 'knows']);
+    // out()/in()/both() EXPLODE to edge+vertex when an edge criterion is set, so the
+    // traversed edge itself is filtered — marko reaches only his knows-neighbours.
+    expect(vals('g.withStrategies(new SubgraphStrategy(edges: __.hasLabel("knows"))).V(1).out().values("name")')).toEqual(['josh', 'vadas']);
+    // checkAdjacentVertices: a visible edge needs BOTH endpoints in the subgraph. Of
+    // marko's out-edges only marko→josh has both endpoints in {marko,josh}.
+    expect(one('g.withStrategies(new SubgraphStrategy(vertices: __.has("name", P.within("marko","josh")))).V(1).outE().count()')).toEqual([1]);
+    // vertices AND edges together: created-only edges, and both endpoints in the vertex set.
+    expect(vals('g.withStrategies(new SubgraphStrategy(vertices: __.has("name", P.within("marko","josh","ripple","lop")), edges: __.hasLabel("created"))).V(1).out().values("name")')).toEqual(['lop']);
+    // Injection RECURSES into a nested local() body (previously a hard defer): josh's
+    // bothE, filtered so both endpoints ∈ {marko,josh}, leaves only josh↔marko.
+    expect(one('g.withStrategies(new SubgraphStrategy(vertices: __.has("name", P.within("marko","josh")))).V(4).local(__.bothE().limit(5)).count()')).toEqual([1]);
+    // checkAdjacentVertices:false keeps an edge visible even when an endpoint is outside the
+    // vertex criterion — honoured, not silently over-filtered. marko's 3 out-edges all
+    // survive (only the near endpoint marko must be in {marko}); with the default (true) the
+    // adjacency check would drop all 3 (no far endpoint is marko).
+    expect(one('g.withStrategies(new SubgraphStrategy(checkAdjacentVertices: false, vertices: __.has("name", P.within("marko")))).V(1).outE().count()')).toEqual([3]);
+    expect(one('g.withStrategies(new SubgraphStrategy(vertices: __.has("name", P.within("marko")))).V(1).outE().count()')).toEqual([0]);
+  });
+
+  test('complete taxonomy: OLAP/finalization/planning strategies are result-preserving no-ops', () => {
+    const store = seededStore();
+    const cnt = (q: string) => run(store, q).map((r: any) => r.v);
+    // Inert on our OLTP SQL engine — accepting as no-ops is correct-by-design (the query
+    // returns identically with/without). Covers the previously-rejected OLAP guards.
+    for (const s of ['ComputerFinalizationStrategy', 'GraphFilterStrategy', 'MessagePassingReductionStrategy',
+                     'ComputerVerificationStrategy', 'LambdaRestrictionStrategy', 'OptionsStrategy',
+                     'GValueReductionStrategy', 'RequirementsStrategy', 'ProfileStrategy', 'ConnectiveStrategy']) {
+      expect(cnt(`g.withStrategies(${s}).V().count()`)).toEqual([6]);
+    }
+  });
+
+  test('semantic/unknown strategies + genuinely-unsupported forms fail closed (never silently leak)', () => {
     // ProductiveByStrategy is a no-op when no by()-consumer exists, but unsupported
     // consumers still fail closed instead of silently using ordinary productivity.
     expect(() => compile('g.withStrategies(ProductiveByStrategy).V().values("name")', {})).not.toThrow();
     expect(() => compile('g.withStrategies(ProductiveByStrategy).V().dedup().by("age")', {})).not.toThrow();
     // A safe optimization alongside ProductiveBy does not suppress its null-key policy.
     expect(() => compile('g.withStrategies(CountStrategy, ProductiveByStrategy).V().dedup().by("age")', {})).not.toThrow();
-    // Deferred subsets throw clearly rather than under-filter:
-    expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.has("name","x"), edges: __.has("weight",1))).V()', {}))
-      .toThrow('SubgraphStrategy(edges) criterion not yet supported');
-    expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.has("name","x"))).V().outE("knows")', {}))
-      .toThrow('SubgraphStrategy with an edge step');
-    expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.has("name","x"))).V().repeat(__.out()).times(2)', {}))
-      .toThrow('SubgraphStrategy with a repeat() sub-traversal');
+    // Unknown / unlisted-semantic strategies fail closed (catch-all reject) — these would
+    // change results if silently ignored and are deliberately NOT laundered as no-ops.
+    for (const s of ['ElementIdStrategy', 'SackStrategy', 'EventStrategy', 'VertexProgramStrategy'])
+      expect(() => compile(`g.withStrategies(${s}).V()`, {})).toThrow('is a semantic or unknown strategy');
+    // vertexProperties criterion + a mutating traversal under Subgraph defer clearly.
+    expect(() => compile('g.withStrategies(new SubgraphStrategy(vertexProperties: __.has("a",1))).V()', {}))
+      .toThrow('vertexProperties');
+    expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.hasLabel("person"))).addV("person")', {}))
+      .toThrow('mutating traversal');
+    // PartitionStrategy mergeV/mergeE (partition-aware upsert) defers.
     expect(() => compile('g.withStrategies(new PartitionStrategy(partitionKey:"_p", writePartition:"a")).mergeV([(T.label):"person"])', {}))
-      .toThrow('PartitionStrategy with mergeV() not yet supported');
-    // Nested sub-traversals that PRODUCE elements would be computed unfiltered (leak)
-    // — must defer, not under-filter. map/group by-modulator movement, and/or nested
-    // inside a where() criterion, and an addE nested endpoint all fail closed.
-    expect(() => compile('g.withStrategies(new PartitionStrategy(partitionKey:"_p", readPartitions:["a"])).V().map(__.out().count())', {}))
-      .toThrow('element-producing sub-traversal inside map()');
-    expect(() => compile('g.withStrategies(new PartitionStrategy(partitionKey:"_p", readPartitions:["a"])).V().group().by(__.out().count())', {}))
-      .toThrow('element-producing sub-traversal inside by()');
-    expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.hasLabel("person"))).V().where(__.or(__.out("knows"), __.out("created")))', {}))
-      .toThrow('element-producing sub-traversal inside where()');
-    expect(() => compile('g.withStrategies(new PartitionStrategy(partitionKey:"_p", readPartitions:["a"], writePartition:"a")).V().as("x").addE("knows").from("x").to(__.V(2))', {}))
-      .toThrow('element-producing sub-traversal inside to()');
-    // ...but a NON-producing nested body (scalar map, has-only criterion, alias
-    // endpoint) still compiles — the guard is precise, not blanket.
-    expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.hasLabel("person"))).V().map(__.values("name"))', {})).not.toThrow();
+      .toThrow('mergeV()/mergeE() not yet supported');
+    // withoutStrategies of an always-on (unconditionally-baked) strategy is rejected —
+    // silently accepting it would return wrong rows (infix .or() is not disable-able).
+    expect(() => compile('g.withoutStrategies(ConnectiveStrategy).V()', {}))
+      .toThrow('cannot be disabled');
+    // Injection recurses into a repeat() body; the recursive-CTE body compiler then fails
+    // closed on movement+where — a clear deferral, NOT an unfiltered leak.
+    expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.hasLabel("person"))).V().repeat(__.out()).times(2)', {}))
+      .toThrow('not yet supported');
+    // A NON-movement nested criterion still compiles — recursion is precise, not blanket.
     expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.hasLabel("person"))).V().where(__.has("name","marko"))', {})).not.toThrow();
-    // withoutStrategies suppresses a co-named withStrategies (removal wins) — so a
-    // withoutStrategies(ProductiveBy) makes the otherwise-rejected call compile.
+    // withoutStrategies suppresses a co-named withStrategies (removal wins).
     expect(() => compile('g.withStrategies(ProductiveByStrategy).withoutStrategies(ProductiveByStrategy).V().values("name")', {})).not.toThrow();
   });
 
