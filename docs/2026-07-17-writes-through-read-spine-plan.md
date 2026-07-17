@@ -1,6 +1,37 @@
 # Writes-through-the-read-spine — the one nested-arg seam (2026-07-17)
 
-**Status:** plan, ready to execute cold. Closes the surviving §6.1 item of
+**Status: DONE (2026-07-17).** Landed in 4 commits (all green, L3 held at 1086/2041, no
+regression). Two premises in the original plan were WRONG and were corrected during
+execution — recorded here so the reasoning isn't lost:
+
+1. **Step 0 (§3) was mistaken.** `@StepWrite` is NOT the data-write steps — it tags the
+   `io().write()` graph-SERIALIZATION step (`sideEffect/Write.feature`, kryo/graphson to
+   file), which we deliberately don't support. The data-write steps (addV/addE/mergeV/
+   mergeE) carry `@StepAddV`/`@StepAddE`/`@StepMergeV`/`@StepMergeE`, are untagged, and were
+   ALREADY in the L3 suite and ratcheted. So there was no write ratchet to widen; the safety
+   net already existed. Step 0 became a one-line comment correction in `tags.ts`.
+2. **#3's premise was under-derived (and my first re-scope over-corrected).** The plan framed
+   #3 as "per-key correlated map VALUES `[k: __.trav]`" and I initially dismissed it as a
+   fake case (no corpus consumer). Both were wrong. The grammar (`mapEntry : mapKey COLON
+   genericLiteral`, and `genericLiteral` includes `nestedTraversal`) proves `[k: __.trav]` is
+   LEGAL — the corpus being silent doesn't define the support surface, legality does. The
+   general axis is: a merge map argument is **completed by traversal(s) evaluated correlated
+   per driver** — whole-arg producing a Map, or per-value traversals. Built the per-value
+   generalization (`resolveMergeSpec`); whole-arg beyond select-const fails closed naming the
+   missing substrate (map-valued drivers / nested-write execution).
+
+**What landed:** #2 addV/addE inline property nested VALUES + nested LABELS through
+`resolveSpecValue`/`insertVertex`/`insertEdge`; #1 addE endpoints (`__.select(label)` +
+`__.addV()`) via `resolveEndpoint`; #3 per-driver correlated merge map VALUES via
+`resolveMergeSpec` with match-query construction moved into the driver loop. Targeted tests
+cover each shape (corpus scenarios for them are gated by unrelated missing features —
+addV-mid-chain, read-tails-after-write, repeat-in-write-chain — so no ratchet move).
+
+---
+
+**Original plan below (kept for rationale; premises 1–2 above supersede §3 Step 0 and #3).**
+
+Closes the surviving §6.1 item of
 `docs/2026-07-16-compiler-consolidation-plan.md` ("Writes-through-the-read-spine,
 remainder"). Scope decided with the user: **do #1 + #2 + #3 together**, on one unified
 nested-traversal-argument seam, and **widen the L3 ratchet to cover write steps** so the

@@ -268,7 +268,10 @@ blobless+sparse (self-healed in the L3 test's `beforeAll`).
   by `<!-- L3:passing -->…<!-- /L3:passing -->` so the prose can't drift from the ratchet;
   commit them alongside baseline.json. Add a new consumer by giving it the marker + listing
   it in `SYNC_FILES`. Step scope =
-  `test/conformance/tags.ts` (widen as steps land; never narrow). Runbook:
+  `test/conformance/tags.ts` (widen as steps land; never narrow). NB `@StepWrite` tags
+  the `io().write()` graph-SERIALIZATION step (deliberately excluded), NOT the data-write
+  steps — addV/addE/mergeV/mergeE carry `@StepAddV`/`@StepAddE`/`@StepMergeV`/`@StepMergeE`,
+  are untagged in the exclusion list, and are already in scope + ratcheted. Runbook:
   `test/conformance/README-cucumber.md`.
 - Every new step lands with SQL snapshot tests, its cucumber tag added to `tags.ts`, and
   corpus still 100%.

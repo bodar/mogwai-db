@@ -556,11 +556,23 @@ not new islands. `until`/`emit`/`match` all now speak the pipeline's element voc
 
 P1–P4 landed; P5 partial. What the spree did NOT close, ranked by leverage/appetite:
 
-1. **Writes-through-the-read-spine, remainder (§2 gap #3, ~46 scenarios).** The first
-   slices landed (`property(k, __.trav)`, withSideEffect-const merge maps). Still deferred:
-   general merge traversal-args (`write.ts:519`), full `addE` endpoint traversals past
-   certain steps (`write.ts:476,482`). The reusable traversal-valued-argument seam is the
-   compounding pick — same read spine, more write-arg call sites route through it.
+1. ~~**Writes-through-the-read-spine, remainder (§2 gap #3).**~~ **DONE (2026-07-17).**
+   The nested-write-arg resolver is now the sole authority routed through by every site:
+   addV/addE inline property VALUES (`resolveSpecValue`), addV/addE nested-traversal
+   LABELS (evaluated at run time — no more silent `'vertex'` default), addE endpoints
+   (`__.select(label)` alias + `__.addV()` nested write via `nestedElementRowid`), and
+   merge map VALUES resolved correlated PER DRIVER (`resolveMergeSpec`; the grammar allows
+   `[k: __.trav]` — mapEntry value is a `genericLiteral`, which includes `nestedTraversal`).
+   Fail-closed walls remain ONLY where genuinely other substrate is needed, each with a
+   specific message: whole-arg merge traversals beyond a `withSideEffect` select-const
+   (`__.identity()`/incoming-as-map needs a **map-valued driver model**; a side-effecting
+   body needs **nested-WRITE execution**), `addE` endpoint read tails past the movement
+   prefix (no corpus consumer), and nested property KEYS. No ratchet move (the corpus
+   scenarios for these shapes are gated by unrelated missing features — addV mid-chain,
+   read-tails-after-write, repeat-in-write-chain); targeted tests prove the primitives.
+   See `docs/2026-07-17-writes-through-read-spine-plan.md` (with its two corrected
+   premises: @StepWrite is io-serialization not data-writes; #3's general axis is the
+   whole map completed by traversals per driver, both legal per grammar).
 2. **SubgraphStrategy(edges) / strategy adjacency (~45, self-contained).** The
    edge-criterion Subgraph injection (Cluster 9) — its own pass, untouched by the spree.
 3. ~~**P5 residue — synthetic parent for stashed group sources.**~~ **DONE (2026-07-17).**
