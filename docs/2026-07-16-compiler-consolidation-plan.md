@@ -1,7 +1,8 @@
 # Compiler consolidation — the strategic map (2026-07-16)
 
 **Status:** research + plan. Telemetry harness LANDED; architecture bets scoped.
-**Baseline at authorship:** L3 956, corpus 2298/2298. **Now: L3 1080.**
+Corpus parse+chain 2298/2298. Live L3 count: see `README.md` / `baseline.json`
+(auto-synced by the ratchet). The +124 spree this doc tracks ran 956→1080.
 
 > **Progress update (2026-07-17).** The refactoring spree since authorship went
 > *further* than this doc planned: it wasn't just P1/P2, it was a sustained migration

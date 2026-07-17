@@ -1,9 +1,8 @@
 # P4 — dynamic-tag VariantStream (2026-07-16)
 
 **Status:** substrate + branch consumers LANDED. Anchors P4 from
-`docs/2026-07-16-compiler-consolidation-plan.md` §3. **Baseline:** L3 1066.
-**Now: L3 1066** (P4 is behaviour-neutral spine + a fail-closed→works widening
-that the current L3 corpus barely exercises; see §4).
+`docs/2026-07-16-compiler-consolidation-plan.md` §3. Behaviour-neutral spine + a
+fail-closed→works widening that the L3 corpus at the time barely exercised (+0; see §4).
 
 ## What landed
 

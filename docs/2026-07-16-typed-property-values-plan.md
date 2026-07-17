@@ -3,8 +3,8 @@
 **Date:** 2026-07-16 · **Status:** P1 + P2 + P3a + **tail-unification + P3b LANDED &
 pushed** (all CI-green). Typed property values COMPLETE for the framing+detect scope;
 remaining is a separate list-OPERATIONS sub-project (merge/split/index/order on lists).
-Schema change APPROVED (alpha, no users, no data migration). **Baseline at authorship:**
-L3 1021, corpus 2298/2298. **Now: L3 1040.**
+Schema change APPROVED (alpha, no users, no data migration). Corpus 2298/2298; this work
+ran L3 1021→1040. Live L3 count: see `README.md` / `baseline.json`.
 This doc is written to be executed from a COLD (`/clear`ed) context — it restates
 everything needed. Sibling context: `docs/2026-07-16-compiler-consolidation-plan.md`
 (the value-streams work this builds on) and memory `w4-property-model`,
