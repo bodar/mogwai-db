@@ -26,9 +26,10 @@ Corpus parse+chain 2298/2298. Live L3 count: see `README.md` / `baseline.json`
 > re-roots an `ElementStream` and lowers through `lowerElementSteps`; +0 today, gated on
 > orthogonal downstream features, but the pattern vocabulary IS now the pipeline vocabulary).
 >
-> **STILL STANDING:** the `child.ts` double-parse (maintainability-only; P3 did not
-> retire it), the switch-vs-Map dispatch inconsistency, general merge/addE traversal
-> args. `until` is no longer a special-cased *parser* — it shares the predicate engine —
+> **STILL STANDING:** the switch-vs-Map dispatch inconsistency, general merge/addE traversal
+> args, and the third hand-rolled scalar-child projector (the `child.ts` double-parse +
+> its 11 lockstep throws were KILLED 2026-07-17, staged 0→5 — see §1). `until` is no longer
+> a special-cased *parser* — it shares the predicate engine —
 > but it stays **correlated-only** (a recursive-CTE term can't reference its outer row, so
 > no materialized generic fallback); that's a structural property, not debt.
 > Per-section deltas are inline below; the surviving open work is collected in §6.
@@ -107,18 +108,22 @@ Scope.local stays, a genuinely distinct per-list aggregate).
 
 ### Maintainability-only (not feature-blocking)
 
-> **STILL STANDING (2026-07-17).** Both survived the spree. P3 was expected to retire the
-> `child.ts` double-parse by unifying the shape model; the substrate landed but the
-> double-parse did not go with it. These are the surviving maintainability debt — see §6.
-
-- **`child.ts` double-parse.** Each child shape is parsed twice — six
-  `is*Child` preflights (`child.ts:118-182`) decide *which* dispatch branch runs,
-  then the `compile*ChildRows` re-parse (`childSteps` + `scalarRowParts`/
-  `elementRowParts`). They must stay in lockstep; the "preflight/compiler
-  mismatch" throws (`branch.ts:219,318,336`; `group.ts:183,192`) are dead-code
-  invariants asserting the two parses agree. Also a **third** `values/id/label`
-  projector is hand-rolled in `compileScalarChildRows` (`child.ts:310-337`)
-  instead of reusing the `PROJECTORS`.
+- ~~**`child.ts` double-parse.**~~ **RESOLVED (2026-07-17, staged 0→5).** Shape
+  classification is single-sourced in pure `classify*` helpers (`classifyCountChild`/
+  `classifyScalarChildRows`/`classifyElementChildRows` + the `classify{List,Scalar,Element,
+  TotalScalar}Child` wrappers); every `is*Child` predicate AND every `compile*ChildRows`
+  compiler now classify through the SAME helper, so preflight and compiler cannot diverge.
+  All **11** "preflight/compiler mismatch" / "…after successful shape preflight" dead-code
+  throws are DELETED. Each consumer (branch list/scalar, group key/value, select
+  record/single, projection optional) parses its child body ONCE and threads it into emit
+  as `preParsed`. L3 held at 1086, corpus 100% — pure debt removal. **Two residues, both
+  deliberate:** (a) the `index.ts` `lowerElementSteps` dispatch peek still parses the arm
+  bodies independently of the branch/projection emit (the structurally-distant peek↔emit
+  boundary; threading it needs a WeakMap/mutable-AST worse than a cheap re-parse — divergence
+  is gone regardless), and (b) the **third** hand-rolled `values/id/label/constant` scalar
+  projector (`compileScalarChildRows` `continueScalar`/`lowerScopedScalarReducer`) still
+  survives for a scoped-reducer suffix + `constant()` terminal — folding it into generic
+  `lowerSteps`/`PROJECTORS` needs `scalar.ts` reducer changes, a separate follow-up (§6).
 - **Switch-vs-Map inconsistency.** The prefix uses a `PREFIX` Map and the tail
   render uses `MODIFIERS`/`PROJECTORS` Maps, but every *shape dispatcher* is a
   long `if (steps[at].name === …)` chain: `compileTail`, `compileFromScalar`,
@@ -235,7 +240,8 @@ map-valued carried entry + group collapse — subsumed labels follow-up #3, Map-
 are first-class (`stream.ts`); `compileFromPath`/`compileFromMap`/`compileFromGroup`
 re-enter the tail; `deriveGroupEntries` gives the narrow `(mk,mv)` entry MapStream.
 **Caveat:** it did NOT retire the `child.ts` double-parse (the shape model was unified at
-the *stream* level, not the *child-parse* level) — that stays open (§6).
+the *stream* level, not the *child-parse* level) — that was closed separately 2026-07-17
+(staged 0→5: one shared `classify*` per child body, 11 lockstep throws deleted; §1).
 
 **P4 — Dynamic-tag VariantStream** *(widest gate; pairs with P3).* Teach root
 materialization to frame by a runtime row tag. Unblocks mixed arms everywhere.
@@ -555,10 +561,16 @@ P1–P4 landed; P5 partial. What the spree did NOT close, ranked by leverage/app
    `tryPropertyGroupScalar`/`requireInlineScalar` deleted; +0 L3 (debt removal), corpus 100%.
    (cap() group sources already carried an `ElementStream` parent — the doc's "parentless
    cap()" was stale; property groups were the sole residue.)
-4. **`child.ts` double-parse + third `values/id/label` projector (maintainability).** Six
-   `is*Child` preflights + `compile*ChildRows` re-parse still run in lockstep, guarded by
-   dead-code mismatch invariants. P3 unified the shape model at the *stream* level, not the
-   *child-parse* level — this is the natural next unification. Not feature-blocking.
+4. ~~**`child.ts` double-parse + dead-code mismatch invariants.**~~ **DONE (2026-07-17,
+   staged 0→5; §1 "Maintainability" has the detail).** One pure `classify*` per child body
+   shared by preflight AND compiler → all 11 lockstep throws deleted, each consumer parses
+   once (body threaded as `preParsed`). L3 held at 1086, corpus 100%. **Residual follow-up
+   (its own item):** the **third** hand-rolled `values/id/label/constant` scalar projector in
+   `compileScalarChildRows` (`continueScalar`/`lowerScopedScalarReducer`, survives for a
+   scoped-reducer suffix + `constant()` terminal) still bypasses generic `lowerSteps`/
+   `PROJECTORS` — folding it needs `scalar.ts` reducer changes with their own byte-equivalence
+   risk. The `index.ts` dispatch-peek ↔ branch/projection-emit parse is deliberately left
+   (structurally distant; divergence already impossible via the shared classifier).
 5. **Switch-vs-Map dispatch inconsistency (maintainability).** `compileTail`/
    `compileFromScalar`/`compileFromList`/`compileFromRecord` are still long
    `if (steps[at].name === …)` chains while the prefix/tail-render use Maps. Convert to Map
