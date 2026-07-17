@@ -67,7 +67,10 @@ export type PathPos =
 // Collections (list/map/set) are NOT ValueTypes: a list-valued property is reached via
 // is(typeOf(LIST)) which retypes the scalar stream to a ListStream (the JSONB value
 // becomes the `list` column), so it frames through the list substrate, not this tag.
-export type ValueType = 'bool' | 'byte' | 'short' | 'int' | 'long' | 'bigint' | 'float' | 'double' | 'date' | 'string' | 'uuid';
+// bigdecimal/char/duration frame from a stored TEXT value (canonical decimal / 1-char /
+// total-nanos) via our hand-rolled serializers (serializers.ts) — the value was stored
+// as text precisely so its precision survives (see storedScalar / do-sqlite-bind-precision).
+export type ValueType = 'bool' | 'byte' | 'short' | 'int' | 'long' | 'bigint' | 'float' | 'double' | 'date' | 'string' | 'uuid' | 'bigdecimal' | 'char' | 'duration';
 
 export type Shape =
   | { kind: 'vertex' }

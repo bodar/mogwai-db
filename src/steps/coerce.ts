@@ -44,6 +44,10 @@ const NUMERIC_GTYPES: Record<string, { as: ValueType; disp: string; int: boolean
   biginteger: { as: 'bigint', disp: 'BigInteger', int: true },
   float: { as: 'float', disp: 'Float', int: false },
   double: { as: 'double', disp: 'Double', int: false },
+  // bigdecimal completes the numeric asNumber family. Now that we ship a BigDecimal
+  // serializer + exact TEXT storage, a cast to BigDecimal is representable (framed via
+  // the value's canonical text; `int:false` skips the integer truncation/overflow path).
+  bigdecimal: { as: 'bigdecimal', disp: 'BigDecimal', int: false },
 };
 const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
 
@@ -78,17 +82,22 @@ export function asNumberConst(v: any, spec: NonNullable<ReturnType<typeof numeri
 }
 
 /** asNumber(GType.X) over a runtime scalar: a SQL CAST to the target's storage class
- *  (integer targets truncate; float/double stay real). Overflow isn't range-checked
- *  (unreachable for the runtime inputs the suite exercises). */
-export const asNumberSql = (spec: { int: boolean }, e: Expression): Expression =>
-  spec.int ? q`CAST(${e} AS INTEGER)` : q`CAST(${e} AS REAL)`;
+ *  (integer targets truncate; float/double stay real). BigDecimal keeps the value
+ *  unchanged — it is framed from its canonical TEXT by the BigDecimal serializer, so a
+ *  REAL cast would only risk formatting artifacts; the `as:'bigdecimal'` tag drives
+ *  framing. Overflow isn't range-checked (unreachable for the runtime inputs the suite
+ *  exercises). */
+export const asNumberSql = (spec: { int: boolean; as: ValueType }, e: Expression): Expression =>
+  spec.as === 'bigdecimal' ? e : spec.int ? q`CAST(${e} AS INTEGER)` : q`CAST(${e} AS REAL)`;
 
 /** Bare asNumber() over a constant: the output subtype is the INPUT literal's declared
  *  type (`subtype`, from Step.argTypes) — 5b→byte, 5l→long, 5.0→double, 5.75f→float.
  *  A numeric string parses to int/double by value; a non-numeric string / non-number
  *  throws. Returns the numeric value + its framing tag. */
-export function asNumberBare(v: any, subtype: string | null): { val: number; as: ValueType } {
-  if (subtype === 'bigdecimal') throw new Error('asNumber() to BigDecimal not yet supported'); // no GraphBinary serializer
+export function asNumberBare(v: any, subtype: string | null): { val: any; as: ValueType } {
+  // A bigdecimal input keeps its exact carrier (a BigDecimal instance / decimal text) —
+  // framed via the BigDecimal serializer's canonical text, no lossy numeric coercion.
+  if (subtype === 'bigdecimal') return { val: v, as: 'bigdecimal' };
   if (typeof v === 'number' || typeof v === 'bigint') {
     const n = Number(v);
     return { val: n, as: (subtype ?? (Number.isInteger(n) ? 'int' : 'double')) as ValueType };

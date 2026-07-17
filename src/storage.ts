@@ -4,6 +4,8 @@
 // in cursor mechanics, so the interface sits at the SQL transport — everything
 // above it (schema, label interning, the whole compiler) is runtime-agnostic.
 // (Deliberately synchronous, unlike an async D1-style adapter: DO SQL is sync.)
+import { coerceBindValue } from './gremlin-types.ts';
+
 export interface Sql {
   /** Execute a single DDL statement (no bindings, no result). */
   exec(sql: string): void;
@@ -80,12 +82,13 @@ export class GraphStore {
   }
 
   query<T = any>(sql: string, binds: readonly unknown[] = []): T[] {
-    // Normalize bind types at the one seam both runtimes cross. bun:sqlite
-    // accepts boolean/bigint binds; DO ctx.storage.sql (SqlStorageValue =
-    // ArrayBuffer|string|number|null) throws on them. Coerce here so a
-    // traversal like has('sold', true) behaves identically on both — and
-    // matches bun:sqlite's own boolean→1/0 coercion, so results are unchanged.
-    return this.sql.query<T>(sql, binds.map(coerceBind));
+    // Normalize bind types at the one seam both runtimes cross (coerceBindValue,
+    // gremlin-types). bun:sqlite accepts boolean/bigint; DO ctx.storage.sql
+    // (SqlStorageValue = ArrayBuffer|string|number|null) throws on them AND loses
+    // precision past 2^53. coerceBindValue makes every bind lossless: boolean→1/0,
+    // in-range bigint→number, big bigint / BigDecimal / Duration → canonical decimal
+    // text. So has('sold', true) and an exact 64-bit id behave identically on both.
+    return this.sql.query<T>(sql, binds.map(coerceBindValue));
   }
 
   labelId(name: string): number {
@@ -100,8 +103,3 @@ export class GraphStore {
   }
 }
 
-function coerceBind(value: unknown): unknown {
-  if (typeof value === 'boolean') return value ? 1 : 0;
-  if (typeof value === 'bigint') return Number(value);
-  return value;
-}

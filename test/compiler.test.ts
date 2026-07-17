@@ -162,19 +162,24 @@ describe('compiler SQL snapshots', () => {
 
   test('order().by(key[, dir]) folds ORDER BY into the projection select', () => {
     const asc = read('g.V().hasLabel("person").order().by("age").values("name")');
-    expect(asc.sql).toContain("ROW_NUMBER() OVER (ORDER BY (SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) ASC) AS encounter");
+    // the order key is the vtype-aware compareKey (numeric for a TEXT-stored big value)
+    expect(asc.sql).toContain("ROW_NUMBER() OVER (ORDER BY (SELECT (CASE WHEN vtype IN ('byte'");
+    expect(asc.sql).toContain("ELSE value END) FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) ASC) AS encounter");
     // order().by(key) before a scalar projection routes through the scalar pipeline: the
     // element order becomes the carried encounter (a ROW_NUMBER window). binds: label,
     // the order key (window), then the values() join key.
     expect(asc.binds).toEqual(['person', 'age', 'name']);
 
     const desc = read('g.V().hasLabel("person").order().by("age",desc).values("name")');
-    expect(desc.sql).toContain("ORDER BY (SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) DESC");
+    expect(desc.sql).toContain("ELSE value END) FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) DESC");
   });
 
   test('values().order() sorts the projected scalar', () => {
     const p = read('g.V().values("age").order()');
-    expect(p.sql).toContain('ORDER BY p.v ASC');
+    // scalar order sorts by the vtype-aware compareKey (numeric for a TEXT-stored big
+    // long/bigdecimal/duration, lexical for strings via the ELSE branch).
+    expect(p.sql).toContain('ORDER BY (CASE WHEN p.vtype');
+    expect(p.sql).toContain('ELSE p.v END) ASC');
     // values() carries the per-row stored type → framed by it (perRowType).
     expect(p.shape).toEqual({ kind: 'value', perRowType: true });
   });
@@ -583,7 +588,7 @@ describe('compiler SQL snapshots', () => {
     // through the old one-projection accumulator ceiling.
     const ordered = read('g.V().order().by("age").limit(2).values("name").count()');
     expect(ordered.shape).toEqual({ kind: 'count' });
-    expect(ordered.sql).toContain('ORDER BY (SELECT value FROM vertex_properties');
+    expect(ordered.sql).toContain('ORDER BY (SELECT (CASE WHEN vtype IN');
     expect(ordered.sql).toContain('LIMIT 2 OFFSET 0), c2(v) as (SELECT COUNT(*) AS v FROM c1)');
     expect(run(seededStore(), 'g.V().order().by("age").limit(2).values("name").count()').map((r) => r.v))
       .toEqual([2]);
@@ -1566,7 +1571,7 @@ describe('compiler SQL snapshots', () => {
     expect(fused.sql).not.toContain('FROM c2 p)');
 
     const ordered = read('g.V().values("age").order().range(1,3)');
-    expect(ordered.sql).toContain('ORDER BY p.v ASC LIMIT 2 OFFSET 1');
+    expect(ordered.sql).toContain('ELSE p.v END) ASC LIMIT 2 OFFSET 1');
 
     const typedSum = read('g.V().values("age").asNumber(GType.DOUBLE).sum().is(P.gt(100))');
     expect(typedSum.shape).toEqual({ kind: 'scalar' });
@@ -1594,7 +1599,8 @@ describe('compiler SQL snapshots', () => {
   test('is(P) folds a predicate onto the projected scalar', () => {
     const gt = read('g.V().values("age").is(P.gt(30))');
     expect(gt.shape).toEqual({ kind: 'value', perRowType: true });
-    expect(gt.sql).toContain("WHERE p.v > ?"); // the values() JOIN handles existence; is() adds a relational filter
+    // is(gt) folds through the vtype-aware compareKey (numeric-correct for the exact tail)
+    expect(gt.sql).toContain("ELSE p.v END) > ?"); // the values() JOIN handles existence; is() adds a relational filter
     expect(gt.binds).toContain(30);
     // bare literal → equality
     expect(read('g.V().values("age").is(29)').sql).toContain("p.v = ?");
@@ -1677,7 +1683,9 @@ describe('compiler SQL snapshots', () => {
     // correlating on the reached node (aliased n inside the child, isolated by the FROM
     // boundary from the outer n).
     expect(read('g.V().where(__.out("knows").has("age", P.gt(30)))').sql)
-      .toContain("EXISTS(SELECT 1 FROM vertex_properties WHERE node=n.id AND key=? AND value > ?)");
+      .toContain("AND (CASE WHEN vtype IN ('byte'");
+    expect(read('g.V().where(__.out("knows").has("age", P.gt(30)))').sql)
+      .toContain("ELSE value END) > ?");
     // terminal hasLabel()
     expect(read('g.V().where(__.out("created").hasLabel("software"))').sql).toContain('n.label IN (SELECT id FROM labels');
     // a lone bare movement keeps the leaner single-hop EXISTS over the movement child
@@ -1874,7 +1882,8 @@ describe('compiler SQL snapshots', () => {
     expect(localCount.sql).toContain('COUNT(c.id) AS v');
     expect(localCount.sql).toContain('LEFT JOIN');
     const localRows = read('g.V(1).local(__.out().values("name").order().limit(2))');
-    expect(localRows.sql).toContain('PARTITION BY p.o0 ORDER BY p.v ASC');
+    expect(localRows.sql).toContain('PARTITION BY p.o0 ORDER BY (CASE WHEN p.vtype');
+    expect(localRows.sql).toContain('ELSE p.v END) ASC');
     const carriedCount = read('g.V(1).as("a").local(__.out().count())');
     expect(carriedCount.sql).toContain('COUNT(c.id) AS v, d.a0');
     const childValue = read('g.V(1).map(__.values("name"))');
@@ -1883,7 +1892,7 @@ describe('compiler SQL snapshots', () => {
     expect(childValue.sql).toContain('ROW_NUMBER() OVER (PARTITION BY p.o0');
     expect(read('g.V(1).map(__.values("name").toUpper())').sql).toContain('upper(p.v) AS v');
     expect(read('g.V(1).map(__.out().values("name").order().by(Order.desc).limit(1))').sql)
-      .toContain('ROW_NUMBER() OVER (PARTITION BY p.o0 ORDER BY p.v DESC');
+      .toContain('ELSE p.v END) DESC');
     expect(read('g.V(1).local(__.out().values("name").tail(2))').sql)
       .toContain('PARTITION BY p.o0 ORDER BY p.encounter DESC');
     const reducedChild = read('g.V().map(__.out().values("name").is("lop").count())');
@@ -2052,9 +2061,9 @@ describe('compiler SQL snapshots', () => {
 
   test('P.inside is exclusive-low (distinct from between)', () => {
     // between = [lo,hi) ; inside = (lo,hi)
-    expect(read('g.V().has("age", P.between(29,35))').sql).toContain('>= ? and');
-    expect(read('g.V().has("age", P.inside(29,35))').sql).toContain('> ? and');
-    expect(read('g.V().has("age", P.inside(29,35))').sql).not.toContain('>= ?');
+    expect(read('g.V().has("age", P.between(29,35))').sql).toContain('END) >= ?');
+    expect(read('g.V().has("age", P.inside(29,35))').sql).toContain('END) > ?');
+    expect(read('g.V().has("age", P.inside(29,35))').sql).not.toContain('END) >= ?');
   });
 
   test('review-fix regressions: no silent mis-execution', () => {
@@ -2073,10 +2082,10 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('has() still compiles all predicate forms after the predicateSql refactor', () => {
-    expect(read('g.V().has("age", 30)').sql).toContain('= ?');
-    expect(read('g.V().has("age", P.gt(30))').sql).toContain('> ?');
+    expect(read('g.V().has("age", 30)').sql).toContain('= ?');            // eq stays a raw exact compare
+    expect(read('g.V().has("age", P.gt(30))').sql).toContain('END) > ?'); // range → vtype-aware compareKey
     expect(read('g.V().has("age", P.within(29,30))').sql).toContain('in (?, ?)');
-    expect(read('g.V().has("age", P.between(29,35))').sql).toContain('>= ? and');
+    expect(read('g.V().has("age", P.between(29,35))').sql).toContain('END) >= ?');
   });
 
   test('vertex property keys bind as parameters (static vp index, no literal splice)', () => {

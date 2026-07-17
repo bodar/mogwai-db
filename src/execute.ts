@@ -218,11 +218,20 @@ function sumBuffer(v: number, storageClass: string): Buffer {
 // string via stringSerializer. list/map/set are deliberately absent: a stored
 // collection value is a JSONB blob, reached through is(typeOf(LIST))→ListStream (which
 // json()s it in SQL and frames via the list substrate), never this per-row scalar tag.
-// bigdecimal/char/duration have no serializer → undefined → anySerializer (deferred).
+// bigdecimal/char/duration frame from their stored canonical TEXT via our serializers.
 const VTYPE_TO_VALUETYPE: Record<string, ValueType> = {
   datetime: 'date', boolean: 'bool', string: 'string', uuid: 'uuid',
   byte: 'byte', short: 'short', int: 'int', long: 'long', bigint: 'bigint', float: 'float', double: 'double',
+  bigdecimal: 'bigdecimal', char: 'char', duration: 'duration',
 };
+
+// Our three hand-rolled serializers (serializers.ts, registered onto ioc by io.ts). Each
+// serialize() accepts the stored canonical TEXT (BigDecimal.from / Duration.from / a
+// 1-char string) → the exact GraphBinary value, no precision lost through a JS number.
+const serializers = ioc.serializers as Record<number, { serialize(v: any, fq?: boolean): Buffer }>;
+const bigDecimalSerializer = serializers[ioc.DataType.BIGDECIMAL];
+const durationSerializer = serializers[ioc.DataType.DURATION];
+const charSerializer = serializers[ioc.DataType.CHAR];
 const vtypeToValueType = (vt: string | null): ValueType | undefined => (vt ? VTYPE_TO_VALUETYPE[vt] : undefined);
 
 function frameValue(v: any, as: ValueType | undefined): Buffer {
@@ -246,6 +255,11 @@ function frameValue(v: any, as: ValueType | undefined): Buffer {
     // pick String, but the stored vtype lets uuid win over a look-alike string).
     case 'string': return ioc.stringSerializer.serialize(String(v), true);
     case 'uuid': return ioc.uuidSerializer.serialize(String(v), true);
+    // The exact tail: the value is a stored canonical TEXT string. serialize() parses it
+    // (BigDecimal.fromText / Duration total-nanos / 1-codepoint char) → exact GraphBinary.
+    case 'bigdecimal': return bigDecimalSerializer.serialize(String(v), true);
+    case 'duration': return durationSerializer.serialize(String(v), true);
+    case 'char': return charSerializer.serialize(String(v), true);
   }
 }
 

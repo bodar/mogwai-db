@@ -1,7 +1,7 @@
 import type { GraphStore } from '../storage.ts';
 import { q, value, list, empty, raw, render, type Expression } from '../q.ts';
 import { labelIn, nodeHasProp, edgeHasProp } from '../plan.ts';
-import { gremlinTypeOf, isCollectionType, flatType, mapEntryType, type CanonicalType, type TypeNode } from '../gremlin-types.ts';
+import { gremlinTypeOf, isCollectionType, storedScalar, flatType, mapEntryType, type CanonicalType, type TypeNode } from '../gremlin-types.ts';
 import { stepChain, isNested, type Step, type SackSpec } from '../frontend.ts';
 import { normalize, type PStep } from '../strategies.ts';
 import { readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../render.ts';
@@ -334,7 +334,7 @@ export function applyVertexProperty(
   // JSON text, wrap jsonb(?)) — a raw JS array/Map bind would throw at the SQLite seam.
   // A scalar binds raw so it keeps its storage class (numeric order/range intact).
   const collection = isCollectionType(vtype);
-  const storedVal = collection ? collectionJson(val) : val;
+  const storedVal = collection ? collectionJson(val) : storedScalar(val, vtype);
   const valPh = collection ? 'jsonb(?)' : '?';
   if (cardinality === 'single') store.query('DELETE FROM vertex_properties WHERE node=? AND key=?', [node, key]);
   if (cardinality === 'set') {
@@ -356,7 +356,7 @@ export function applyVertexProperty(
 export function insertEdgeProperty(store: GraphStore, edge: number, key: string, val: any, vtype: CanonicalType | null): void {
   if (val && typeof val === 'object' && 'nested' in val) throw new Error('property() with a traversal value not yet supported');
   const collection = isCollectionType(vtype);
-  const storedVal = collection ? collectionJson(val) : val;
+  const storedVal = collection ? collectionJson(val) : storedScalar(val, vtype);
   const valPh = collection ? 'jsonb(?)' : '?';
   store.query(
     `INSERT INTO edge_properties(edge, key, value, vtype) VALUES(?, ?, ${valPh}, ?)

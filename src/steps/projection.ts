@@ -2,7 +2,7 @@ import { q, value, list, empty, raw, Relation, Query, type Expression } from '..
 import { labels, vertexProperties, edgeProperties } from '../schema.ts';
 import {
   predicateSql, rangeToOffsetLimit, elemCtx, extIdOf, jsonbGroupArray,
-  nodePropScalar, edgePropScalar, framedProps, valueMapProps,
+  nodePropScalar, edgePropScalar, nodePropSortKey, edgePropSortKey, framedProps, valueMapProps,
 } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, carriedWith, elemRel, withoutCarried, type ElementStream } from './context.ts';
@@ -689,10 +689,11 @@ const PROJECTORS = new Map<string, ProjFn>([
 
 /** An order().by(key) resolver over the current element (aliased `n`): node → the
  *  first-under-multi value from vertex_properties; edge → the single value from
- *  edge_properties. Shared by buildProjection and compileMath — both sort a value tail
- *  by an element prop. */
+ *  edge_properties. Uses the vtype-aware SORT KEY (compareKey) so a TEXT-stored big
+ *  long/bigdecimal/duration orders numerically, not lexically. Shared by buildProjection
+ *  and compileMath — both sort a value tail by an element prop. */
 export const nodePropOrderKey = (st: ElementStream) => (key: string): Expression =>
-  st.elem === 'edge' ? edgePropScalar(raw('n.id'), key) : nodePropScalar(raw('n.id'), key);
+  st.elem === 'edge' ? edgePropSortKey(raw('n.id'), key) : nodePropSortKey(raw('n.id'), key);
 
 /** Render the NON-scalar element tail — __element (vertex/edge), valueMap, elementMap,
  *  count, and element fold() — with only its element-shape modifiers (order().by(key)
