@@ -31,6 +31,23 @@ function constFromSelect(nested: any, sideEffects: Map<string, any> | undefined,
   return { has: false, value: undefined };
 }
 
+// A nested value that is a compile-time INVARIANT — no seed / no read spine needed:
+//   __.select(k) of a withSideEffect(k, const)  (via constFromSelect), or
+//   __.constant(v)  (source-less; the vtype comes from the constant's own parsed argType,
+//                    so UUID(..)/datetime(..) keep their type, not a JS-inferred string/int).
+// This is what lets a global mergeV (no driver to seed a V/E source at) resolve a nested
+// value, and what resolves a nested property KEY. {has:false} → fall through to a seeded read.
+function constFromNested(nested: any, sideEffects: Map<string, any> | undefined, params: Record<string, any>): { has: boolean; value: any; vtype: CanonicalType | null } {
+  const c = constFromSelect(nested, sideEffects, params);
+  if (c.has) return { has: true, value: c.value, vtype: gremlinTypeOf(c.value, null) };
+  if (isNested(nested)) {
+    const inner = stepChain(nested.nested, params);
+    if (inner.length === 1 && inner[0].name === 'constant')
+      return { has: true, value: inner[0].args[0], vtype: gremlinTypeOf(inner[0].args[0], (inner[0] as Step).argTypes?.[0] ?? null) };
+  }
+  return { has: false, value: undefined, vtype: null };
+}
+
 // Compile a nested traversal (optionally seeded at a driver element) and run it against
 // the store, returning its raw result rows + the compiled shape. Seeding prepends a
 // V/E source on the driver's internal rowid so the child is anchored at that element.
@@ -64,17 +81,23 @@ function nestedScalar(store: GraphStore, nestedNode: any, params: Record<string,
   return { has: true, value: rows[0].v, vtype: vt };
 }
 
+// The nested-value authority: a compile-time invariant (constFromNested), else a scalar
+// read seeded at `seed` (the correlated element, or undefined = global/source-less). An
+// empty nested traversal → has:false. vtype from the read shape, else inferred from the
+// produced value (the honest fallback for an untyped channel). Reused by property values
+// (resolveSpecValue), addV labels (insertVertex), and merge map values (resolveMergeSpec).
+function nestedScalarValue(store: GraphStore, nested: any, params: Record<string, any>, seed?: { id: number; elem: 'node' | 'edge' }, sideEffects?: Map<string, any>): { has: boolean; value: any; vtype: CanonicalType | null } {
+  const c = constFromNested(nested, sideEffects, params);
+  if (c.has) return c;
+  const r = nestedScalar(store, nested.nested, params, seed);
+  return { has: r.has, value: r.value, vtype: r.vtype ?? (r.has ? gremlinTypeOf(r.value, null) : null) };
+}
+
 // Resolve a PropSpec's value for one target element: a literal passes through with its
-// captured vtype; a nested traversal is evaluated correlated at the element (its vtype is
-// inferred from the produced value, the honest fallback for an untyped channel). An empty
-// nested traversal → has:false (the property is not written), matching property(traversal)
-// on no result.
+// captured vtype; a nested traversal is evaluated correlated at the element.
 function resolveSpecValue(store: GraphStore, sp: PropSpec, id: number, elem: 'node' | 'edge', params: Record<string, any>, sideEffects?: Map<string, any>): { has: boolean; value: any; vtype: CanonicalType | null } {
   if (!isNested(sp.value)) return { has: true, value: sp.value, vtype: sp.vtype };
-  const c = constFromSelect(sp.value, sideEffects, params);
-  if (c.has) return { has: true, value: c.value, vtype: gremlinTypeOf(c.value, null) };
-  const r = nestedScalar(store, sp.value.nested, params, { id, elem });
-  return { has: r.has, value: r.value, vtype: r.vtype ?? (r.has ? gremlinTypeOf(r.value, null) : null) };
+  return nestedScalarValue(store, sp.value, params, { id, elem }, sideEffects);
 }
 
 // ---------- write compilers ----------
@@ -131,7 +154,12 @@ function compileSetProperty(steps: PStep[], params: Record<string, any>, sideEff
   for (const s of steps.slice(firstProp)) {
     if (s.name !== 'property') throw new Error(`step not implemented after property(): ${s.name}()`);
     const { cardinality, rest, off } = readCardinality(s.args);
-    const [key, val, ...metaArgs] = rest;
+    let [key] = rest; const [, val, ...metaArgs] = rest;
+    { const ck = constFromNested(key, sideEffects, params); if (ck.has) key = ck.value; }
+    // A nested-traversal KEY that isn't a compile-time constant fails CLOSED (never a
+    // silent drop): the live-read key case (property(__.values(k), …)) needs addV-mid-chain
+    // and has no reachable consumer yet.
+    if (isNested(key)) throw new Error('property() with a nested-traversal key not yet supported (only __.select(const)/__.constant() keys resolve)');
     // null/map-form property() is a no-op (see parseVertexSpec).
     if (key == null || (typeof key === 'object' && !('token' in key))) continue;
     if (typeof key === 'object' && 'token' in key)
@@ -228,15 +256,18 @@ function parseVertexSpec(addV: Step, propSteps: Step[], sideEffects?: Map<string
   const a0 = addV.args[0];
   let label: string | { nested: any } =
     typeof a0 === 'string' ? a0
-    : isNested(a0) ? ((c) => c.has ? String(c.value) : a0)(constFromSelect(a0, sideEffects, params))
+    : isNested(a0) ? ((c) => c.has ? String(c.value) : a0)(constFromNested(a0, sideEffects, params))
     : 'vertex';
   const props: PropSpec[] = [];
   let uid: string | number | null = null;
   for (const s of propSteps) {
     const { cardinality, rest, off } = readCardinality(s.args);
     let [key, val, ...metaArgs] = rest;
-    { const ck = constFromSelect(key, sideEffects, params); if (ck.has) key = ck.value; }
+    { const ck = constFromNested(key, sideEffects, params); if (ck.has) key = ck.value; }
     { const cv = constFromSelect(val, sideEffects, params); if (cv.has) val = cv.value; }
+    // A nested-traversal KEY that isn't a compile-time constant fails CLOSED (never a
+    // silent drop): a live-read key (property(__.values(k), …)) needs addV-mid-chain.
+    if (isNested(key)) throw new Error('property() with a nested-traversal key not yet supported (only __.select(const)/__.constant() keys resolve)');
     // property(null) / property([:]) / property([map]) — a null or map-form key adds
     // nothing (map-form property() is a no-op for now, matching TinkerPop's null/empty
     // cases; a populated map would add its entries, not yet implemented).
@@ -368,7 +399,10 @@ function readVertexProps(store: GraphStore, node: number): Record<string, any> {
 function insertVertex(store: GraphStore, spec: VertexSpec, params: Record<string, any> = {}, sideEffects?: Map<string, any>): { id: number; extId: string | number; label: string } {
   let label: string;
   if (isNested(spec.label)) {
-    const r = nestedScalar(store, spec.label.nested, params);
+    // Unseeded: an addV label traversal is a standalone read / invariant (a source addV
+    // has no incoming element). Routes through the same value authority so __.constant(x)
+    // and __.select(const) labels resolve, not just seeded reads.
+    const r = nestedScalarValue(store, spec.label, params, undefined, sideEffects);
     if (!r.has) throw new Error('addV(traversal) label produced no value');
     label = String(r.value);
   } else label = spec.label;
@@ -406,6 +440,9 @@ function parseEdgeCluster(steps: Step[], addEIdx: number): EdgeCluster {
       if (cardinality !== 'single') throw new Error('Cardinality is not valid on an edge property');
       if (metaArgs.length) throw new Error('meta-properties are not valid on an edge property');
       if (k && typeof k === 'object' && 'token' in k) { if (k.token === 'id') edgeUid = v; else throw new Error(`property(T.${k.token}) on an edge not supported`); }
+      // A nested-traversal KEY fails CLOSED (a plain props[k]=v would coerce {nested} to
+      // the string "[object Object]" and write under a garbage key).
+      else if (isNested(k)) throw new Error('addE property() with a nested-traversal key not yet supported');
       else { props[k] = v; propTypes[k] = propVtype(m, v, off); }
     }
   }
@@ -509,7 +546,10 @@ function resolveEndpoint(store: GraphStore, spec: any, d: { aliases: Map<string,
   };
   if (typeof spec === 'string') return alias(spec, `"${spec}"`);
   if (isNested(spec)) {
-    const inner = stepChain(spec.nested, params);
+    // normalize() folds repeat/emit/times/until clusters (and by() modulators) so an
+    // endpoint like to(__.V().repeat(__.out()).times(2)) reaches buildPrefix as a
+    // canonical chain — same normalization runNested does for every other nested arg.
+    const inner = normalize(stepChain(spec.nested, params)).steps;
     // __.select("lbl") is exactly the bare as()-label string.
     if (inner.length === 1 && inner[0].name === 'select' && typeof inner[0].args[0] === 'string')
       return alias(inner[0].args[0], `select("${inner[0].args[0]}")`);
@@ -602,24 +642,6 @@ function normalizeMergeMap(raw: any, sideEffects?: Map<string, any>, params: Rec
     else spec.props[c.name!] = v;
   }
   return spec;
-}
-
-// The nested-value authority reused by merge (#3): a literal passes through; a nested
-// traversal resolves correlated at `seed` (constFromSelect first, then a seeded scalar).
-// Mirrors resolveSpecValue but standalone (merge has no PropSpec). null = infer vtype.
-function nestedScalarValue(store: GraphStore, nested: any, params: Record<string, any>, seed?: { id: number; elem: 'node' | 'edge' }, sideEffects?: Map<string, any>): { has: boolean; value: any; vtype: CanonicalType | null } {
-  const c = constFromSelect(nested, sideEffects, params);
-  if (c.has) return { has: true, value: c.value, vtype: gremlinTypeOf(c.value, null) };
-  // __.constant(v) is a source-LESS invariant: resolve it directly so it works even with
-  // no seed (a global mergeV has no driver element to prepend a V/E source at — the read
-  // spine requires a source, but a constant needs none).
-  if (isNested(nested)) {
-    const inner = stepChain(nested.nested, params);
-    if (inner.length === 1 && inner[0].name === 'constant')
-      return { has: true, value: inner[0].args[0], vtype: gremlinTypeOf(inner[0].args[0], null) };
-  }
-  const r = nestedScalar(store, nested.nested, params, seed);
-  return { has: r.has, value: r.value, vtype: r.vtype ?? (r.has ? gremlinTypeOf(r.value, null) : null) };
 }
 
 // Produce a concrete MergeSpec for ONE driver: every nested label/id/prop value is

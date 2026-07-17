@@ -3507,6 +3507,37 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.V().has("name","fresh").label()').map((r) => r.v)).toEqual(['person']);
   });
 
+  test('addE endpoint traversal with a repeat cluster resolves (normalize fix)', () => {
+    const store = seededStore(); // modern: V(1)=marko created lop(3)
+    // to(...) endpoint uses a folded repeat/times cluster — must normalize before buildPrefix
+    run(store, 'g.addE("x").from(__.V(2)).to(__.V(1).repeat(__.out("created")).times(1))');
+    expect(run(store, 'g.V(2).out("x").values("name")').map((r) => r.v)).toEqual(['lop']);
+  });
+
+  test('addV nested LABEL __.constant(...) resolves (shared value authority)', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    run(store, 'g.addV(__.constant("widget")).property("name","w")');
+    expect(run(store, 'g.V().has("name","w").label()').map((r) => r.v)).toEqual(['widget']);
+  });
+
+  test('property() with a __.constant(...) KEY resolves; a live-read key fails closed', () => {
+    const store = seededStore();
+    run(store, 'g.addV("person").property(__.constant("nick"), "bob")');
+    expect(run(store, 'g.V().has("nick","bob").count()').map((r) => r.v)).toEqual([1]);
+    // a non-constant nested key is fail-closed (never a silent drop / "[object Object]")
+    expect(() => run(store, 'g.V(1).property(__.union(__.constant("k")), "v")'))
+      .toThrow(/nested-traversal key not yet supported/);
+    expect(() => run(store, 'g.addE("knows").from(__.V(1)).to(__.V(2)).property(__.union(__.constant("k")), "v")'))
+      .toThrow(/nested-traversal key not yet supported/);
+  });
+
+  test('addV property value __.constant(UUID(...)) keeps the uuid vtype (not string)', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    run(store, 'g.addV("person").property("gid", __.constant(UUID("0263f28b-eff9-4c17-8e33-0b41c74b6d4c")))');
+    const vt = store.query("SELECT vtype FROM vertex_properties WHERE key='gid'").map((r: any) => r.vtype);
+    expect(vt).toEqual(['uuid']);
+  });
+
   test('mergeV creates when no match, matches when it exists (inline map)', () => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     const a = run(store, 'g.mergeV([(T.label): "person", name: "marko"])');
