@@ -293,11 +293,9 @@ export function tryCompileCountChild(
   scope: CompileScope = ROOT_SCOPE,
 ): ScalarStream | null {
   if (!nested || isPropertyParent(parent)) return null;
-  const body = childSteps(nested, parent.params);
-  const terminal = body.at(-1);
-  if (!terminal || terminal.name !== 'count' || terminal.args.length) return null;
-  const prefix = body.slice(0, -1);
-  if (prefix.some((s) => !ELEMENT_CHILD_STEPS.has(s.name))) return null;
+  const counted = classifyCountChild(childSteps(nested, parent.params));
+  if (!counted) return null;
+  const { prefix } = counted;
 
   const pushed = pushChildScope(parent, scope);
   const { stream: end, next: stop } = lowerElementSteps(prefix, pushed.seed);
@@ -332,11 +330,9 @@ function tryCompileCountValueRows(
   let cut = body.length;
   const isPreds: any[] = [];
   while (cut > 0 && body[cut - 1].name === 'is') { isPreds.unshift(body[cut - 1].args[0]); cut--; }
-  const reducerBody = body.slice(0, cut);
-  const terminal = reducerBody.at(-1);
-  if (!terminal || terminal.name !== 'count' || terminal.args.length) return null;
-  const prefix = reducerBody.slice(0, -1);
-  if (prefix.some((s) => !ELEMENT_CHILD_STEPS.has(s.name))) return null;
+  const counted = classifyCountChild(body.slice(0, cut));
+  if (!counted) return null;
+  const { prefix } = counted;
   const pushed = pushChildScope(parent, scope);
   const { stream: end, next: stop } = lowerElementSteps(prefix, pushed.seed);
   if (stop !== prefix.length) return null;
@@ -403,23 +399,23 @@ function compileScalarChildRows(
   if (stripTerminal && fullBody.at(-1)?.name !== stripTerminal) return null;
   const body = stripTerminal ? fullBody.slice(0, -1) : fullBody;
 
-  // Property parent: the child body (key/value/element().…/constant) lowers through the
-  // SAME generic dispatcher as a root traversal (lowerSteps → compileFromProperty), so a
-  // property group has no private inline reader. The scalar projection in a child scope
-  // mints the per-origin encounter the cardinality policy needs (element().values via
-  // lowerScalarProjection, key()/value() via propertyScalar). Non-scalar or unsupported
-  // bodies fall through to the caller's clear deferral — never mis-executed.
+  // ONE classification (shared with the is*Child preflight peeks — no divergent second
+  // parse). Property parent: the child body (key/value/element().…) lowers through the SAME
+  // generic dispatcher as a root traversal (lowerSteps → compileFromProperty), so a property
+  // group has no private inline reader; the scalar projection in a child scope mints the
+  // per-origin encounter the cardinality policy needs. Non-scalar bodies fall through to the
+  // caller's clear deferral. (The isPropertyParent guard also narrows `parent` below.)
   if (isPropertyParent(parent)) {
-    if (!propertyScalarBody(body)) return null;
+    if (!classifyScalarChildRows('property', body)) return null;
     const pushed = pushChildScope(parent, scope);
     const stream = lowerSteps(pushed.seed, body, 0);
     if (stream.kind !== 'scalar') return null;
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
   }
 
-  const parts = scalarRowParts(body);
-  if (!parts) return null;
-  const { prefix, projection: terminal, suffix } = parts;
+  const shape = classifyScalarChildRows('element', body);
+  if (!shape || shape.kind !== 'element') return null;
+  const { prefix, projection: terminal, suffix } = shape.parts;
 
   // The ordinary row pipeline now uses the exact same iterative lowering loop as a
   // root traversal. Scoped reducers/folds retain their explicit per-origin policies
@@ -752,18 +748,16 @@ function compileElementChildRows(
   // Element-valued children are element-parent-only: a property has no adjacency, and an
   // `element()` head that re-roots on the owner is a SCALAR-child concern (compileScalar
   // ChildRows). Property parents fail closed here; the group falls back to its deferral.
+  // Element-parent-only + no sack/fromV are emit-time PARENT-state guards (not shape):
+  // kept here, distinct from the shared shape classification below.
   if (isPropertyParent(parent)) return null;
   if (!nested || parent.carried.sack || parent.carried.fromV) return null;
-  const fullBody = childSteps(nested, parent.params);
-  if (stripTerminal && fullBody.at(-1)?.name !== stripTerminal) return null;
-  const orderStep = firstPolicy && fullBody.at(-1)?.name === 'order' ? fullBody.at(-1) : undefined;
-  let body = stripTerminal || orderStep ? fullBody.slice(0, -1) : fullBody;
-  // A bare (keyless) order() before a fold/collect is redundant with the fold's natural
-  // id ordering, so strip it here (non-first path): out().order()[.fold()] collects like
-  // out().fold(). order().by(key) is left intact — it would need key-ordered folding.
-  if (!firstPolicy && body.at(-1)?.name === 'order' && !(body.at(-1) as PStep).bys) body = body.slice(0, -1);
-  const parts = body.length ? elementRowParts(body) : stripTerminal ? { prefix: [], suffix: [] } : null;
-  if (!parts) return null;
+  // ONE shape classification (the same classifyElementChildRows the element preflight peeks
+  // use) — the bare-order strip, firstPolicy order modulator, and empty-before handling all
+  // live in the shared helper, so preflight and compiler cannot diverge.
+  const shape = classifyElementChildRows(childSteps(nested, parent.params), stripTerminal, firstPolicy);
+  if (!shape) return null;
+  const { parts, orderStep } = shape;
   const pushed = pushChildScope(parent, scope);
   const { stream: prefixed, next: stop } = lowerElementSteps(parts.prefix, pushed.seed);
   if (stop !== parts.prefix.length) return null;
