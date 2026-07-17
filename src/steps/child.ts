@@ -8,7 +8,7 @@ import { lowerElementSteps, lowerSteps, tryLowerElementSteps } from './index.ts'
 import { lowerScalarRows, SCALAR_TRANSFORMS } from './scalar.ts';
 import { normalize, type PStep } from '../strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
-import { rangeToOffsetLimit } from '../plan.ts';
+import { predicateSql, rangeToOffsetLimit } from '../plan.ts';
 import { elementOrderSql } from './modulation.ts';
 
 /** Root/child compilation context. A child frame retains the complete parent domain,
@@ -236,9 +236,20 @@ function tryCompileCountValueRows(
 ): { stream: ScalarStream; frame: ChildFrame } | null {
   if (!nested) return null;
   const body = childSteps(nested, parent.params);
-  const terminal = body.at(-1);
+  // A trailing is() run is a filter on the count value — `out().count().is(gt(1))`.
+  // It composes as a HAVING on the aggregate: the row (one per parent, incl. the
+  // LEFT-JOIN zero) survives only when the count satisfies every predicate, so an
+  // existence consumer reads row-present ⟺ the count comparison holds. This is the
+  // bare-movement counterpart to the values-based reducer path (compileScalarChildRows
+  // continueScalar already applies a trailing is), so `<move>.count().is(P)` lowers
+  // through the generic reducer machinery instead of a hand-rolled correlated aggregate.
+  let cut = body.length;
+  const isPreds: any[] = [];
+  while (cut > 0 && body[cut - 1].name === 'is') { isPreds.unshift(body[cut - 1].args[0]); cut--; }
+  const reducerBody = body.slice(0, cut);
+  const terminal = reducerBody.at(-1);
   if (!terminal || terminal.name !== 'count' || terminal.args.length) return null;
-  const prefix = body.slice(0, -1);
+  const prefix = reducerBody.slice(0, -1);
   if (prefix.some((s) => !ELEMENT_CHILD_STEPS.has(s.name))) return null;
   const pushed = pushChildScope(parent, scope);
   const { stream: end, next: stop } = lowerElementSteps(prefix, pushed.seed);
@@ -246,8 +257,12 @@ function tryCompileCountValueRows(
   const d = pushed.frame.domain.as('d');
   const c = end.rel.as('c');
   const encounter = 'encounter';
+  const count = q`COUNT(${c.c.id})`;
+  const having = isPreds.length
+    ? q` HAVING ${list(isPreds.map((p) => predicateSql(count, p)), ' AND ')}`
+    : empty;
   const rel = parent.q.cte(
-    q`SELECT COUNT(${c.c.id}) AS v, 1 AS ${encounter}${carryFrag(pushed.seed.carried, d)} FROM ${d} LEFT JOIN ${c} ON ${c.c[pushed.frame.ordinal]}=${d.c[pushed.frame.ordinal]} GROUP BY ${d.c[pushed.frame.ordinal]}`,
+    q`SELECT ${count} AS v, 1 AS ${encounter}${carryFrag(pushed.seed.carried, d)} FROM ${d} LEFT JOIN ${c} ON ${c.c[pushed.frame.ordinal]}=${d.c[pushed.frame.ordinal]} GROUP BY ${d.c[pushed.frame.ordinal]}${having}`,
     ['v', encounter, ...carriedCols(pushed.seed.carried)],
   );
   return { stream: toScalarStream(carryOf(pushed.seed), rel, 'long', 'value', encounter), frame: pushed.frame };

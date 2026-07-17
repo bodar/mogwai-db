@@ -1565,7 +1565,7 @@ describe('compiler SQL snapshots', () => {
 
   test('where(__.count().is(P)) → correlated scalar compare over incident edges', () => {
     const c = read('g.V().where(__.inE("knows").count().is(P.gte(1))).values("name")');
-    expect(c.sql).toContain('(SELECT COUNT(*) FROM edges WHERE (tgt=n.id)');
+    expect(c.sql).toContain('(SELECT COUNT(*) FROM edges xe WHERE (xe.tgt=n.id)');
     expect(c.sql).toContain('>= ?');
   });
 
@@ -1846,7 +1846,7 @@ describe('compiler SQL snapshots', () => {
     expect(c.binds).toEqual(['name', 'vadas', 'knows', 'name', 'vadas', 'knows']);
     // count().is predicate rides as a correlated subquery; multi-hop arm folds
     expect(read('g.V().choose(__.out("knows").count().is(P.gt(0)), __.out("created").out())').sql)
-      .toContain('(SELECT COUNT(*) FROM edges WHERE (src=n.id)');
+      .toContain('(SELECT COUNT(*) FROM edges xe WHERE (xe.src=n.id)');
     // 2-arg form: else absent → identity passthrough of the NOT-pred seed
     expect(read('g.V().choose(__.hasLabel("software"), __.in("created"))').sql).toContain('UNION ALL');
     const scalar = read('g.V().choose(__.hasLabel("person"), __.values("name"), __.constant("software")).count()');
@@ -1969,8 +1969,10 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('review-fix regressions: no silent mis-execution', () => {
-    // edge out().count() must throw (was silently mis-counting via edge id)
-    expect(() => compile('g.E().where(__.out().count().is(P.gt(0)))', {})).toThrow('not supported by inline predicate or generic child existence');
+    // edge out().count() must throw (was silently mis-counting via edge id). Now the
+    // generic child path recognizes count().is and compiles the child, so the movement
+    // itself rejects out() on an edge — a more precise fail-closed error than before.
+    expect(() => compile('g.E().where(__.out().count().is(P.gt(0)))', {})).toThrow('out() expects a vertex, not an edge');
     // where(__.move().is(P)) must not silently drop the is()
     expect(() => compile('g.V().where(__.out("knows").is(1))', {})).toThrow('not supported by inline predicate or generic child existence');
     // limit() then is() remains position-sensitive: only the first three values
@@ -2220,6 +2222,15 @@ describe('compiler execution semantics', () => {
           query: 'g.V().and(__.out("knows"), __.out("created")).values("name").order()',
           fastSql: ') AND (EXISTS(SELECT 1 FROM edges xe WHERE xe.src=n.id',
           genericSql: 'c.o0=d.o0',
+        },
+        {
+          // count().is(P): fast middle = correlatedReduce (a correlated COUNT subquery,
+          // no CTE); generic middle = the reducer child (COUNT ... GROUP BY o0 HAVING)
+          // gated on existence. Same filterCte plumbing either way.
+          key: 'predicateInlining',
+          query: 'g.V().where(__.out().count().is(gt(1))).values("name").order()',
+          fastSql: 'WHERE (SELECT COUNT(*) FROM edges xe WHERE (xe.src=n.id)) > ?',
+          genericSql: 'HAVING COUNT(',
         },
         {
           key: 'singleHopOptional',

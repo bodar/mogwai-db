@@ -1,7 +1,7 @@
 import { q, raw, value, list, empty, type Expression, type Relation } from '../q.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
 import {
-  tryInlineScalar, scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps, dirsFor,
+  tryPropertyGroupScalar, scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps, dirsFor,
   type ScalarCtx,
 } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
@@ -20,7 +20,7 @@ const SCALAR_REDUCERS = new Set(['sum', 'min', 'max', 'mean']);
 /** Property groups do not have a live ElementStream parent yet, so they explicitly
  * require the narrow inline compatibility path. Element-backed groups never call it. */
 const requireInlineScalar = (inner: ReturnType<typeof stepChain>, ctx: ScalarCtx, use: string) => {
-  const scalar = tryInlineScalar(inner, ctx);
+  const scalar = tryPropertyGroupScalar(inner, ctx);
   if (!scalar) throw new Error(`${use} not supported by typed child lowering or the property compatibility path`);
   return scalar;
 };

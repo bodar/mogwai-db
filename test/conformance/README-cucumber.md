@@ -84,9 +84,9 @@ over GraphBinary under bun.
 traversals — `g.V().group().by('name').by(__.tail())`, an `g.E().group()` with a
 `project(o,l,i)` composite key, and `g.V().properties().group()` with a
 `project(n,k,v)` key. All three now compile and frame (P2c-2's `compileGroup` +
-the correlated scalar fast path, now `tryInlineScalar`), so the runner gets past setup
-and scenarios execute. Generic child streams own language support; this helper is only
-an optional SQL optimization/property-group compatibility path.
+the property-group scalar reader, `tryPropertyGroupScalar`), so the runner gets past
+setup and scenarios execute. Generic child streams own language support; this reader
+is the property-group case, which has no live ElementStream parent (so no child seam).
 Before P2c-2 this blocked the entire suite at 0.
 
 The passing-scenario count is **THE conformance number** — publish it per commit
