@@ -99,8 +99,14 @@ export type CanonicalType =
  *  null = the channel said nothing (JSON path / a JS client that dropped the type). */
 export type TypeNode =
   | CanonicalType
-  | { t: 'map'; entries: Record<string, TypeNode | null> }
+  // A map entry carries BOTH its key and value type (needed for typed/non-string keys —
+  // a Map<UUID,Long> / Map<Int,…> round-trips through storage with full key fidelity).
+  // Keyed by String(key) for the merge by-name lookup; a same-stringify key collision is
+  // already collapsed by the JS Map itself, so the Record loses nothing the value doesn't.
+  | { t: 'map'; entries: Record<string, MapEntryType | null> }
   | { t: 'list' | 'set'; items: (TypeNode | null)[] };
+
+export interface MapEntryType { key: TypeNode | null; value: TypeNode | null; }
 
 /** The scalar/container KIND of a TypeNode as a flat name (a scalar node IS its name;
  *  a container node → its `t`). For the common "I just need a type string" consumer. */
@@ -109,7 +115,7 @@ export const flatType = (tn: TypeNode | null | undefined): CanonicalType | null 
 
 /** The value-type under a merge-map key, or null. */
 export const mapEntryType = (tn: TypeNode | null | undefined, key: string): TypeNode | null =>
-  tn != null && typeof tn === 'object' && tn.t === 'map' ? tn.entries[key] ?? null : null;
+  tn != null && typeof tn === 'object' && tn.t === 'map' ? tn.entries[key]?.value ?? null : null;
 
 /** GraphBinary DataType code → canonical name. Built from the client's own DataType
  *  enum so it stays byte-stable with the serializers (no magic numbers). Only the
@@ -242,4 +248,53 @@ export function gremlinTypeOf(jsValue: any, argType?: TypeNode | null): Canonica
     case 'number': return Number.isInteger(jsValue) ? 'int' : 'double';
     default: return null;
   }
+}
+
+// ---------- self-describing typed-JSON for stored COLLECTION values (Option B) ----------
+//
+// A collection property (list/set/map) stores a JSON tree of ValueNodes in the `value`
+// column. Only NESTED nodes carry the full {t,v} envelope; the write path stores the
+// TOP node's BARE `v` (the sibling `vtype` column already names the outer shape), so a
+// scalar `has`/`typeOf`/existence never touches the value internals. Leaves store the
+// SAME canonical form a scalar property does (storedScalar) so precision survives, and
+// read framing reuses frameValue(v, vtypeToValueType(t)) — one value spine, both paths.
+
+export type ValueNode =
+  | { t: CanonicalType | null; v: any }            // scalar leaf (t=null → infer on frame)
+  | { t: 'list' | 'set'; v: ValueNode[] }
+  | { t: 'map'; v: [ValueNode, ValueNode][] };      // ordered pairs → typed/non-string keys
+
+/** A collection leaf's JSON-safe canonical storage form, keyed on its canonical type.
+ *  Reuses storedScalar for the exact tail (long/bigint>2^53, bigdecimal, duration →
+ *  decimal TEXT; char → 1-char string); datetime → epoch-millis (a Date carrier off the
+ *  wire, or already-ms from a literal). storedScalar never returns a raw BigInt, so the
+ *  result is always JSON.stringify-safe (number | string | boolean | null). */
+function leafStore(val: any, t: CanonicalType | null): any {
+  if (t === 'datetime') return val instanceof Date ? val.getTime() : Number(val);
+  return t == null ? val : storedScalar(val, t);
+}
+
+/** Recursively tag a materialized JS value with its type tree (from the carrying
+ *  channel's TypeNode, falling back to JS inference per node) into a ValueNode. A list/set
+ *  recurses per element; a map recurses per key AND value (ordered pairs preserve typed,
+ *  non-string keys). The write path stores JSON.stringify(valueNodeOf(val, tn).v). */
+export function valueNodeOf(val: any, tn: TypeNode | null): ValueNode {
+  if (Array.isArray(val) || val instanceof Set) {
+    const items = tn != null && typeof tn === 'object' && 'items' in tn ? tn.items : [];
+    const arr = Array.isArray(val) ? val : [...val];
+    const t: 'list' | 'set' = val instanceof Set || flatType(tn) === 'set' ? 'set' : 'list';
+    return { t, v: arr.map((x, i) => valueNodeOf(x, items[i] ?? null)) };
+  }
+  if (val instanceof Map) {
+    const entries = tn != null && typeof tn === 'object' && 'entries' in tn ? tn.entries : {};
+    return {
+      t: 'map',
+      v: [...val].map(([k, vv]): [ValueNode, ValueNode] => {
+        const e = entries[String(k)] ?? null;
+        return [valueNodeOf(k, e?.key ?? null), valueNodeOf(vv, e?.value ?? null)];
+      }),
+    };
+  }
+  const t = gremlinTypeOf(val, tn);
+  return { t, v: leafStore(val, t) };
 }

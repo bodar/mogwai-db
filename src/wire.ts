@@ -5,7 +5,7 @@
 // carries none, and passes {gremlin, params} across the manager seam to the store
 // tier (concern B). No compilation, no store, no HTTP here.
 import { ioc } from './io.ts';
-import { WIRE_TYPE_TO_NAME, type TypeNode } from './gremlin-types.ts';
+import { WIRE_TYPE_TO_NAME, type TypeNode, type MapEntryType } from './gremlin-types.ts';
 
 // TinkerPop's default resultIterationBatchSize — governs only HTTP chunk pacing
 // (how many value buffers concat per stream pull), never a protocol boundary.
@@ -39,15 +39,17 @@ function decodeTyped(buf: Buffer): { value: any; type: TypeNode | null; len: num
   if (typeCode === ioc.DataType.MAP) {
     len += 1; cursor = cursor.subarray(1);
     const flag = cursor.readUInt8(); len += 1; cursor = cursor.subarray(1);
-    const entries: Record<string, TypeNode | null> = {};
+    const entries: Record<string, MapEntryType | null> = {};
     if (flag === 0x01) return { value: null, type: { t: 'map', entries }, len }; // null map
     const { v: count, len: clen } = ioc.intSerializer.deserialize(cursor, false);
     cursor = cursor.subarray(clen); len += clen;
     const map = new Map<any, any>();
     for (let i = 0; i < count; i++) {
-      const k = ioc.anySerializer.deserialize(cursor); cursor = cursor.subarray(k.len); len += k.len;
+      // Decode the KEY through decodeTyped too (was bare anySerializer) so a typed/
+      // non-string key (Map<UUID,…>, Map<Int,…>) keeps its type end-to-end (bug #3).
+      const k = decodeTyped(cursor); cursor = cursor.subarray(k.len); len += k.len;
       const v = decodeTyped(cursor); cursor = cursor.subarray(v.len); len += v.len;
-      map.set(k.v, v.value); entries[String(k.v)] = v.type;
+      map.set(k.value, v.value); entries[String(k.value)] = { key: k.type, value: v.type };
     }
     return { value: map, type: { t: 'map', entries }, len };
   }
@@ -88,7 +90,7 @@ function decodeFields(buf: Buffer): { fields: Map<any, any>; paramTypes: Record<
       const b = decodeTyped(cursor);
       fields.set(k.v, b.value);
       if (b.type && typeof b.type === 'object' && b.type.t === 'map')
-        for (const [key, tn] of Object.entries(b.type.entries)) if (tn != null) paramTypes[key] = tn;
+        for (const [key, e] of Object.entries(b.type.entries)) if (e?.value != null) paramTypes[key] = e.value;
       cursor = cursor.subarray(b.len); len += b.len;
     } else {
       const val = ioc.anySerializer.deserialize(cursor); cursor = cursor.subarray(val.len); len += val.len;
