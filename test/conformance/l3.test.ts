@@ -89,6 +89,10 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
   ]);
   await proc.exited;
 
+  // Terminate the in-process server's compact `.`/`E` progress line (telemetry mode)
+  // so the aggregate output below starts clean on its own line.
+  if (telemetryPath()) process.stdout.write('\n');
+
   if (!existsSync(report)) {
     throw new Error(`cucumber produced no report — the runner likely failed to start.\n--- stdout ---\n${out}\n--- stderr ---\n${err}`);
   }
