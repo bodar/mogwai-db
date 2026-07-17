@@ -2,7 +2,7 @@
 
 **Status:** research + plan. Telemetry harness LANDED; architecture bets scoped.
 Corpus parse+chain 2298/2298. Live L3 count: see `README.md` / `baseline.json`
-(auto-synced by the ratchet). The +124 spree this doc tracks ran 956→1080.
+(auto-synced by the ratchet). The +130 spree this doc tracks ran 956→1086.
 
 > **Progress update (2026-07-17).** The refactoring spree since authorship went
 > *further* than this doc planned: it wasn't just P1/P2, it was a sustained migration
@@ -12,12 +12,25 @@ Corpus parse+chain 2298/2298. Live L3 count: see `README.md` / `baseline.json`
 > mixed-shape arms in all four branch steps)** · **nested-MAP-valued groups** (two-level
 > aggregation — the "recommended next bet" from §3, already shipped) · **first slices of
 > writes-through-the-read-spine** (`property(k, __.trav)` correlated values +
-> withSideEffect-const merge maps). **P5 now FULL (2026-07-17):** the child seam is
-> parent-shape-polymorphic (`ChildParent`), so `properties().group()` lowers its
-> by()-children through the generic dispatcher; `tryPropertyGroupScalar` DELETED.
+> withSideEffect-const merge maps) · **P5 FULL** — child seam parent-shape-polymorphic
+> (`ChildParent`), `properties().group()` lowers by()-children through the generic
+> dispatcher, `tryPropertyGroupScalar` DELETED (D3 closed).
+>
+> **The 1080→1086 tail (§4g), all on the correlated substrate:** `until()`'s predicate
+> now routes through the SAME `compileInlinePredicate` as `where()` — `loops()` is a leaf
+> `loopsExpr`, so it composes with element/movement predicates via infix `.or()`/`.and()`
+> (the old code handled only pure-`loops()` OR pure-element); **`emit(predicate)`** now
+> compiles via the same shared `walkPredicate` engine (an `emit` column, twin of `until`'s
+> `done`); recursive `path().by(key)` frames scalars; and **`match()` folded onto the
+> shared StepFns** — the last big parallel movement/filter compiler DELETED (a pattern body
+> re-roots an `ElementStream` and lowers through `lowerElementSteps`; +0 today, gated on
+> orthogonal downstream features, but the pattern vocabulary IS now the pipeline vocabulary).
+>
 > **STILL STANDING:** the `child.ts` double-parse (maintainability-only; P3 did not
 > retire it), the switch-vs-Map dispatch inconsistency, general merge/addE traversal
-> args, `until`'s inline-only predicate (structural wall, by design).
+> args. `until` is no longer a special-cased *parser* — it shares the predicate engine —
+> but it stays **correlated-only** (a recursive-CTE term can't reference its outer row, so
+> no materialized generic fallback); that's a structural property, not debt.
 > Per-section deltas are inline below; the surviving open work is collected in §6.
 
 **What this is.** A principled, code-grounded map of where the compiler carries
@@ -65,8 +78,10 @@ three are lifted:**
    (throw) instead of falling through.~~ **— RESOLVED (P2, 2026-07-16).** `choose`
    routes through the shared lazy `chooseGate` → `tryGateByChildExistence` (the same
    generic child-existence engine `where`/`filter` use); `coalesce` takes traversal arms,
-   not a predicate. `until` alone stays inline-bound — a genuine structural wall (runs
-   inside `WITH RECURSIVE`, no materialized parent domain), not plumbing debt.
+   not a predicate. `until` now routes through the SAME `compileInlinePredicate` too
+   (2026-07-17) — `loops()` is a leaf, composing via infix `.or()`/`.and()` — it stays
+   **correlated-only** (runs inside `WITH RECURSIVE`, no materialized parent domain, so no
+   generic materialized fallback), a structural property, not plumbing debt.
 
 Those three observations drove the whole spree; §6 collects what survives them.
 
@@ -79,7 +94,7 @@ Those three observations drove the whole spree; §6 collects what survives them.
 | # | Debt | Nature | Blocks |
 |---|---|---|---|
 | ~~D1~~ | ~~**Dual value-tail engine**~~ **— RESOLVED (P1, 2026-07-16)** | `renderProjection`/`wrapReducer`/the duplicate transform ladder + `SCALAR_TX_NAMES` DELETED; `buildProjection` renders only the non-scalar element tail; every value tail routes through `lowerScalarProjection` → `scalar.ts`/`barrier.ts` | (unblocked `order().by(k).limit(n).values().count()`) |
-| ~~D2~~ | ~~**`tryInlinePredicate`/`compileInlinePredicate`** support-definer in `choose`/`coalesce`/`until`~~ **— RESOLVED (P2, 2026-07-16).** Relocated `plan.ts`→`src/steps/predicate.ts`; `choose` falls through to `tryGateByChildExistence`, `coalesce` takes traversal arms, `+ splitInfixConnectors` for infix `.and()`/`.or()`. Only `until` stays inline-bound (structural wall). | (resolved) |
+| ~~D2~~ | ~~**`tryInlinePredicate`/`compileInlinePredicate`** support-definer in `choose`/`coalesce`/`until`~~ **— RESOLVED (P2, 2026-07-16).** Relocated `plan.ts`→`src/steps/predicate.ts`; `choose` falls through to `tryGateByChildExistence`, `coalesce` takes traversal arms, `+ splitInfixConnectors` for infix `.and()`/`.or()`. `until` now shares `compileInlinePredicate` too (2026-07-17, §4g); it stays correlated-only (structural, not debt). | (resolved) |
 | ~~D3~~ | ~~**`tryPropertyGroupScalar`/`requireInlineScalar`**~~ **— RESOLVED (P5-full, 2026-07-17).** The child seam is now parent-shape-polymorphic (`ChildParent = ElementStream \| PropertyStream`; `pushChildScope<P>`): a `properties().group()` gives its by()-children a live PROPERTY parent, so `key()`/`value()`/`element().…` lower through the SAME `lowerSteps → compileFromProperty` dispatcher as any child. `tryPropertyGroupScalar`/`compilePropertyGroupScalar`/`requireInlineScalar` DELETED; L3 held at 1086 (+0, pure debt removal), corpus 100%, `by(__.value().fold())`-style value modulators unlocked. | (resolved) | (resolved) |
 
 ~~Concrete duplication evidence for D1~~ **(historical — D1 is resolved).** The scalar
@@ -114,8 +129,14 @@ Scope.local stays, a genuinely distinct per-list aggregate).
 - **`bulk.ts`** — a sanctioned fast path per the CLAUDE.md law (switch
   `fastPaths.bulkRepeatCount`, returns null to fall through, equivalence test).
   Its sibling-peeking / index arithmetic is the whole point.
-- **`match.ts`** — a declarative sub-language; SQLite offers no generic
-  join-planner seam to route it through. Isolated to the match family.
+- **`match.ts` conjunctive orchestration** — the declarative dependency-ordered
+  pattern *scheduling* stays match-specific (SQLite offers no generic join-planner
+  seam). **But the pattern-body compiler is GONE (231af3e, 2026-07-17):** each pattern
+  now re-roots a fresh `ElementStream` at its start var's rowid and lowers its body
+  through `lowerElementSteps` — the SAME StepFns as root/child. `both()`, multi-hop,
+  edge hops, `hasId`, and `where()` inside a pattern all work with zero match-specific
+  code; only the conjunctive dependency ordering remains bespoke. +0 today (newly
+  compilable shapes gated on orthogonal features), a substrate consolidation.
 - **repeat-body parser** (`expandRepeatBody`, `branch.ts:369-530`) — forced by
   SQLite's "recursive table appears once in FROM" constraint. Cannot be StepFns.
 - **`write.ts` interpreters** — a deliberately separate imperative seam
@@ -199,10 +220,11 @@ framing) as planned — the "so P3b isn't written twice" prerequisite.
 2026-07-16 (L3 1040→1046).** `choose` (element/scalar/list arms) now falls through to
 the same `tryFilterByChildExistence` engine `where`/`filter` use, via a shared lazy
 `chooseGate` factory (`tryGateByChildExistence` in `child.ts`). Support-definer (D2)
-removed. `until` left as-is — its predicate runs inside `WITH RECURSIVE` where there is
-no materialized parent domain for the child engine, and its failing cases are
-nested-repeat bodies the child engine can't compile either (genuine structural wall, not
-plumbing). The predicate-seam unification alone cashed +0 — the remaining choose
+removed. `until` was left as-is at P2 — its predicate runs inside `WITH RECURSIVE` where
+there is no materialized parent domain for the child engine — but the 2026-07-17 tail
+(§4g) *did* unify its predicate onto the shared `compileInlinePredicate` (correlated-only,
+no generic fallback; a structural property, not a parser fork). The predicate-seam
+unification alone cashed +0 — the remaining choose
 predicates hit a *different, shared* wall: infix `.and()`/`.or()` connectors. See §4e.
 
 **P3 — Lift `map`/`group`/`path` to first-class re-enterable streams** *(the big
@@ -413,8 +435,8 @@ Two changes, one commit, CI green:
    `tryFilterByChildExistence`). **Lazy on purpose** — the inline predicate Expression
    re-emits its binds at each interpolation, so building both gated seeds eagerly reorders
    binds vs the arm SQL (caught by a snapshot regression); the caller must build the
-   then-seed + compile its arm before the else-seed. `until` untouched (structural wall
-   above).
+   then-seed + compile its arm before the else-seed. `until` untouched *at P2* (later
+   unified onto the same predicate engine in §4g).
 2. **The actual +6: infix `.and()`/`.or()` connectors.** The remaining choose predicates
    (and a few `where`) all used zero-arg infix connectors — `hasLabel('person').and()
    .out('created')`, `values('age').is(gt(29)).and().values('age').is(lt(35))` — which
@@ -464,11 +486,50 @@ the first writes-through-the-read-spine slices. Chronologically (see `git log`):
 spine or a mini-compiler deletion — never a new island. The bold/structural reading of
 each bet paid off; no minimal-slice version was needed.
 
+## 4g. Correlated-substrate tail + match consolidation LANDED (L3 1080→1086, +6)
+
+Four commits, all on the `compileCorrelatedChild` substrate P4 left behind — the last
+big parallel movement/filter compilers folded onto the shared spine:
+
+- **`until()` predicate through the shared engine (→1084, `a4337c5`).** Collapsed the
+  special-cased `loops()` handling: `loops()` now lowers as a leaf predicate
+  (`ScalarCtx.loopsExpr` = walk depth) inside `compileInlinePredicate`, so it composes
+  with element/movement predicates through the SAME infix `.or()`/`.and()` machinery as
+  `where()`. `untilPredicate` is now one `tryInlinePredicate` call on a walk ctx —
+  `until(__.has('name','x').or().loops().is(3))` works where the old code handled only
+  pure `loops().is(P)` OR a pure element predicate. `until` stays correlated-only (no
+  materialized fallback), but it is no longer a bespoke *parser*.
+- **Recursive `path().by(key)` (same commit).** `compilePathArray` now projects each
+  exploded position to a scalar via `nodePropScalar`, carrying `byKey` through
+  `PathLayout`/`pathGrouped`. A non-productive `by(key)` drops the whole path (mirrors the
+  linear path's per-position guard). Multiple by()s over a dynamic-length path defer.
+- **`emit(predicate)` (→1086, `ffbe9d5`).** Was thrown as unsupported. Now the walk gains
+  an `emit` column (`CASE WHEN <pred> THEN 1 ELSE 0`) — the exact counterpart to `until`'s
+  `done` column — via the same `walkPredicate` engine (`untilPredicate` generalized to
+  `walkPredicate`, shared by both). emit-before tests+emits seed (depth 0) and every body
+  result; emit-after never emits the seed. Bare `emit()` unchanged (depth-band filter).
+  `emit()+path()` still deferred; nested-repeat-in-emit-predicate still separate.
+- **`match()` folded onto the shared StepFns (+0, `231af3e`).** The last big parallel
+  movement/filter implementation. `parsePattern`'s private `as(start).<out/in>*.as(end)`
+  vocabulary + `applyPattern`'s hand-rolled JOIN chain are GONE: each pattern re-roots a
+  fresh `ElementStream` at its start var's rowid (carrying every bound var as a carried
+  alias) and lowers its body through `lowerElementSteps`, then re-projects (restore root
+  rowid, bind-or-constrain the end var). `both()`, multi-hop, edge hops, `hasId`, `where()`
+  inside a pattern all work with no match-specific code; only the conjunctive
+  dependency-ordered scheduling stays bespoke. +0 today (newly-compilable shapes gated on
+  dedup(label)/MatchPredicateStrategy/scalar-var binding), net −15 lines — a substrate
+  consolidation, not a feature.
+
+**Meta-lesson holds through 1086:** these +6 were again deletions of parallel compilers,
+not new islands. `until`/`emit`/`match` all now speak the pipeline's element vocabulary.
+
 ## 5. What NOT to do
 
 - Do not chase the platform walls (§2) — they are correctly closed.
-- Do not "simplify" `bulk.ts`/`match.ts`/`expandRepeatBody`/`write.ts` — they are
-  architecturally forced, not debt.
+- Do not "simplify" `bulk.ts`/`expandRepeatBody`/`write.ts` — architecturally forced,
+  not debt. In `match.ts`, only the **conjunctive dependency-ordered scheduling** is now
+  forced; the pattern-body compiler already folded onto the shared StepFns (§4g) — do not
+  re-fork it.
 - Do not add a new mini-compiler or a private child-traversal parser to unblock a
   single scenario (the CLAUDE.md extension law). If a shape needs support, lift it
   onto the spine.
@@ -502,9 +563,13 @@ P1–P4 landed; P5 partial. What the spree did NOT close, ranked by leverage/app
    `compileFromScalar`/`compileFromList`/`compileFromRecord` are still long
    `if (steps[at].name === …)` chains while the prefix/tail-render use Maps. Convert to Map
    dispatch (the CLAUDE.md "register in a Map, don't grow a switch" law applies).
-6. **`until`'s inline-only predicate — NOT debt, do not chase.** Runs inside
-   `WITH RECURSIVE` with no materialized parent domain; the same
-   `compileCorrelatedChild` correlated path where()/choose() use. Structural wall, faithful.
+6. **`until`/`emit` correlated-only predicate — NOT debt, do not chase.** As of §4g both
+   route through the shared `compileInlinePredicate`/`walkPredicate` engine (`loops()` a
+   leaf, infix `.or()`/`.and()` composition) — no longer a bespoke parser. They stay
+   correlated-only because a recursive-CTE term can't reference its outer row (no
+   materialized generic fallback); the same `compileCorrelatedChild` path where()/choose()
+   use. A structural property, faithful. Remaining gaps (`emit()+path()`, nested-repeat in
+   an emit/until predicate, order-barrier repeat body) are separate features, not this wall.
 
 **Doc-hygiene (done 2026-07-17):** `docs/feature-support-matrix.md` now carries the count
 inside the same `<!-- L3:passing -->…<!-- /L3:passing -->` markers as README, and the L3
