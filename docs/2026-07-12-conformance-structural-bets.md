@@ -7,7 +7,7 @@ This doc groups them, sizes them, and weighs them by *what mogwai's actual users
 would use* — not raw scenario count. It is a map for choosing the next big
 investment, not a loop backlog.
 
-> **Status (2026-07-14): live L3 = 822.** Bets #1 (path), #2 (per-traverser branching +
+> **Status (2026-07-14).** Bets #1 (path), #2 (per-traverser branching +
 > `local`), #3 (side-effect state — `aggregate`/`cap`/`sack`/`group('a')`), #4 (types +
 > dates + `math`), #5 (match), #6 (the full collection-algebra tail — list substrate,
 > MapStream, string transforms, set-ops/list-algebra, `format`), and #7 (semantic
@@ -264,7 +264,7 @@ supported. Lowest priority.
 
 ## Recommended sequence
 
-**Status refresh (2026-07-14): live L3 = 822.** Every item in this sequence has landed
+**Status refresh (2026-07-14).** Every item in this sequence has landed
 (side-effect state, `local`, the whole collection-algebra tail incl. set-ops/`format`).
 The real remaining frontier is now traverser bulking + the design-heavy subsystems — see
 [feature-support-matrix.md](feature-support-matrix.md) "Where this points".

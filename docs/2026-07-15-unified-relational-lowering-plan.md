@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-15  
 **Status:** complete; Stages 0–8 landed
-**Baseline:** full suite 373/373, L1 2298/2298, L3 933/2041; 247 compiler tests
+**Baseline:** full suite 373/373, L1 2298/2298; 247 compiler tests
 
 ## Restart handoff — read this first after a context reset
 

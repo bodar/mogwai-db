@@ -5,7 +5,6 @@
 landed; L3 608→617. See "Implementation status" below and the CLAUDE.md section
 "List-value substrate + re-enterable tail". Remaining: inject-as-list, the rest of
 Scope.local, select(Column.values), set-ops.
-**Baseline at time of writing:** live L3 = 608 (trunk tip `e370560`).
 **Branch/worktree:** `worktree-with-strategies` (this is a git worktree — run everything here).
 
 ## Implementation status (2026-07-13)

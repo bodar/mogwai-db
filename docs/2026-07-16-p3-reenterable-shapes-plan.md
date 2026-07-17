@@ -1,8 +1,8 @@
 # P3 — lift the terminal islands to re-enterable streams (2026-07-16)
 
-**Status:** in progress. Anchors the multi-commit P3 from
-`docs/2026-07-16-compiler-consolidation-plan.md` §3. **Baseline at start:** L3 1046.
-**Now: L3 1066** (Stages A + B1 + B2 + C1 + C2 + C3, all CI-green on trunk — 8 commits).
+**Status:** LANDED. Anchors the multi-commit P3 from
+`docs/2026-07-16-compiler-consolidation-plan.md` §3. Ran L3 1046→1066 (Stages A + B1 +
+B2 + C1 + C2 + C3, all CI-green on trunk — 8 commits).
 
 - **Stage C2 LANDED** (1064, +0-but-correct): `count()`/`count(Scope.local)`/
   `is(typeOf(MAP))` re-enter a GroupStream (`COUNT(DISTINCT gk)` = entry count).
