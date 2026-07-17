@@ -266,13 +266,17 @@ blobless+sparse (self-healed in the L3 test's `beforeAll`).
 - **L1** (`test/conformance/corpus.test.ts`): 2,298 canonical traversals; parse+chain must
   stay 100%.
 - **L3** (`test/conformance/l3.test.ts`): a ratcheted `bun test` — boots the conformance
-  host in-process and runs the official cucumber suite over GraphBinary. Parses the
-  passing count, compares `baseline.json`: fewer → fail; more → auto-bump locally
-  (`!CI`; commit it) so CI only reads it. The same local bump also rewrites the count in
-  every file in `SYNC_FILES` (`README.md` + `docs/feature-support-matrix.md`), each fenced
-  by `<!-- L3:passing -->…<!-- /L3:passing -->` so the prose can't drift from the ratchet;
-  commit them alongside baseline.json. Add a new consumer by giving it the marker + listing
-  it in `SYNC_FILES`. Step scope =
+  host in-process and runs the official cucumber suite over GraphBinary. TWO gates: (1) the
+  committed passing-SET `test/conformance/l3-passing.txt` (scenario names) — ANY scenario
+  that passed at baseline and fails now is a REGRESSION → fail + name it (with its failing
+  step + error), no noise from the ~740 always-deferred; this catches a net-positive run
+  that silently breaks a green scenario, which the count alone would hide; (2) the count in
+  `baseline.json`: fewer → fail. A clean run (`!CI`) folds new passes into the set + bumps
+  the count, and rewrites the count in every file in `SYNC_FILES` (`README.md` +
+  `docs/feature-support-matrix.md`), each fenced by `<!-- L3:passing -->…<!-- /L3:passing -->`
+  so the prose can't drift; commit `l3-passing.txt` + `baseline.json` + synced files
+  together. CI never rewrites (it only reads). Add a new SYNC consumer by giving it the
+  marker + listing it in `SYNC_FILES`. Step scope =
   `test/conformance/tags.ts` (widen as steps land; never narrow). NB `@StepWrite` tags
   the `io().write()` graph-SERIALIZATION step (deliberately excluded), NOT the data-write
   steps — addV/addE/mergeV/mergeE carry `@StepAddV`/`@StepAddE`/`@StepMergeV`/`@StepMergeE`,
