@@ -3389,6 +3389,22 @@ describe('compiler execution semantics', () => {
       .toThrow("needs a withSideEffect('nope', map)");
   });
 
+  test('write-arg value/key from __.select(k) of a withSideEffect constant', () => {
+    // property() value on an existing element
+    const s1 = new GraphStore(new BunSqlite(':memory:'));
+    run(s1, 'g.addV("software").property("name","lop")');
+    run(s1, 'g.withSideEffect("a","test").V().hasLabel("software").property("temp",__.select("a"))');
+    expect(run(s1, 'g.V().values("temp")').map((r) => r.v)).toEqual(['test']);
+    // addV property() value
+    const s2 = new GraphStore(new BunSqlite(':memory:'));
+    run(s2, 'g.withSideEffect("a","marko").addV().property("name",__.select("a"))');
+    expect(run(s2, 'g.V().values("name")').map((r) => r.v)).toEqual(['marko']);
+    // property() KEY from a constant
+    const s3 = new GraphStore(new BunSqlite(':memory:'));
+    run(s3, 'g.withSideEffect("a","name").addV().property(__.select("a"),"marko")');
+    expect(run(s3, 'g.V().values("name")').map((r) => r.v)).toEqual(['marko']);
+  });
+
   test('mergeV accepts a bound Map parameter with EnumValue keys (wire path)', () => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     // mimic a GraphBinary-deserialized m[{"t[label]":"person","name":"stephen"}]
