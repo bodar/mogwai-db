@@ -25,6 +25,7 @@ test('parseRequest captures nested bound-map value types deeply (typed client)',
   expect(parsed.gremlin).toBe('g.mergeV(xx1)');
   expect(parsed.params.xx1 instanceof Map).toBe(true);
   expect((parsed.params.xx1 as Map<any, any>).get('gid')).toBe(uuid);
-  // the wire type survives one level deep into the map-valued binding
-  expect(parsed.paramTypes.xx1).toEqual({ t: 'map', entries: { gid: 'uuid' } });
+  // the wire type survives one level deep into the map-valued binding — now with the
+  // KEY type captured too (a typed/non-string key round-trips; here the key is a string).
+  expect(parsed.paramTypes.xx1).toEqual({ t: 'map', entries: { gid: { key: 'string', value: 'uuid' } } });
 });

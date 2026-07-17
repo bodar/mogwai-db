@@ -298,7 +298,9 @@ function verify(spec: StrategySpec, steps: Step[]): void {
   } else if (spec.name === 'ReservedKeysVerificationStrategy') {
     if (spec.config.throwException !== true) return; // default warns only → no-op
     const k = spec.config.keys;
-    const reserved = new Set<string>(k == null ? ['id', 'label'] : Array.isArray(k) ? k : [k]);
+    // keys is canonically a SET literal ({a,b}) → a JS Set; also accept a list or a bare
+    // scalar for leniency. (Before set-literal parsing landed, {a} arrived as a bare scalar.)
+    const reserved = new Set<string>(k == null ? ['id', 'label'] : k instanceof Set ? [...k] as string[] : Array.isArray(k) ? k : [k]);
     for (const s of steps)
       if (s.name === 'property' && typeof s.args[0] === 'string' && reserved.has(s.args[0]))
         throw new Error(`The provided traversal is setting a property key to a reserved word: ${s.args[0]}`);

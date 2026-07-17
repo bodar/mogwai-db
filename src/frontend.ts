@@ -1,7 +1,7 @@
 import { CharStream, CommonTokenStream, BaseErrorListener, ParserRuleContext } from 'antlr4ng';
 import { GremlinLexer } from '../parser/GremlinLexer.ts';
 import { GremlinParser } from '../parser/GremlinParser.ts';
-import { flatType, fitsSafeInteger, BigDecimal, Duration, type TypeNode, type CanonicalType } from './gremlin-types.ts';
+import { flatType, fitsSafeInteger, BigDecimal, Duration, type TypeNode, type CanonicalType, type MapEntryType } from './gremlin-types.ts';
 
 // ---------- parsing ----------
 //
@@ -331,7 +331,16 @@ function walkArgs(node: any, out: any[], params: Record<string, any>, types: (Ty
   // back to varargs in parsePredicate; a step consuming a real list value (inject,
   // Tier-1 list substrate) reads the array directly.
   if (cls === 'GenericCollectionLiteralContext') {
-    emit(node.genericLiteral().map((lit: any) => argOf(lit, params)), 'list');
+    const { values, items } = literalItems(node.genericLiteral(), params);
+    emit(values, { t: 'list', items });
+    return;
+  }
+  // A brace set literal {a, b, c} — a real JS Set + a {t:'set'} TypeNode. Without this
+  // case the generic recursion below flattened it to N varargs (set-ness + boundary lost),
+  // so a stored set was indistinguishable from a list. Mirrors the collection-literal case.
+  if (cls === 'GenericSetLiteralContext') {
+    const { values, items } = literalItems(node.genericLiteral(), params);
+    emit(new Set(values), { t: 'set', items });
     return;
   }
   if (cls === 'NestedTraversalContext') { emit({ nested: node }); return; }
@@ -355,6 +364,21 @@ function enumSuffix(node: any): string {
   return node.getText().split('.').pop().toLowerCase();
 }
 
+/** Walk a list/set literal's element nodes, capturing each element's value AND its
+ *  parsed TypeNode in lockstep (a nested list/map/set → its own container node; a typed
+ *  scalar → its subtype; a nested traversal / multi-arg → null). The per-element type is
+ *  what the collection storage tags each leaf with (full-fidelity elements). */
+function literalItems(nodes: any[], params: Record<string, any>): { values: any[]; items: (TypeNode | null)[] } {
+  const values: any[] = [], items: (TypeNode | null)[] = [];
+  for (const lit of nodes) {
+    const out: any[] = [], types: (TypeNode | null)[] = [];
+    walkArgs(lit, out, params, types);
+    values.push(out.length === 1 ? out[0] : out);
+    items.push(out.length === 1 ? (types[0] ?? null) : null);
+  }
+  return { values, items };
+}
+
 /** A `[k: v, …]` / `[:]` map literal → a JS Map, keyed by the classified map
  *  key ({token}/{direction} tag or a plain string), values via argOf so nested
  *  traversals/maps survive. Mirrors the shape of a bound map parameter. */
@@ -373,13 +397,19 @@ function mapLiteral(node: any, params: Record<string, any>): Map<any, any> {
  *  The value type is read from the same walkArgs pass that produces the value, so nested
  *  maps recurse through the GenericMapLiteral case automatically. */
 function mapLiteralType(node: any, params: Record<string, any>): TypeNode {
-  const entries: Record<string, TypeNode | null> = {};
+  const entries: Record<string, MapEntryType | null> = {};
   for (const entry of node.mapEntry()) {
     const out: any[] = [], types: (TypeNode | null)[] = [];
     walkArgs(entry.genericLiteral(), out, params, types);
     // A single scalar/map value carries its captured type; a multi-arg or empty walk
-    // (unusual) → null (infer at use).
-    entries[String(mapKeyOf(entry.mapKey()))] = out.length === 1 ? (types[0] ?? null) : null;
+    // (unusual) → null (infer at use). A literal map key is a string/identifier (or a
+    // T/Direction token → not a stored scalar), so its type is 'string' or null; a typed
+    // client's non-string keys arrive typed via the wire's decodeTyped instead.
+    const key = mapKeyOf(entry.mapKey());
+    entries[String(key)] = {
+      key: typeof key === 'string' ? 'string' : null,
+      value: out.length === 1 ? (types[0] ?? null) : null,
+    };
   }
   return { t: 'map', entries };
 }
