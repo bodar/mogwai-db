@@ -59,7 +59,7 @@ describe('compiler SQL snapshots', () => {
     const q = new Query();
     const parent = {
       kind: 'elements' as const, elem: 'node' as const, q, params: {},
-      rel: q.cte({} as any, ['id']), carried: { aliases: new Map(), origins: [] },
+      rel: q.cte({} as any, ['id']), carried: { aliases: new Map(), origins: [] as string[] },
     };
     const { frame, scope, seed } = pushChildScope(parent);
     expect(frame.domain).toBe(seed.rel);
@@ -1443,13 +1443,44 @@ describe('compiler SQL snapshots', () => {
     expect(p.sql).toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=gn.src) AS v_src'); // edge value framing → external endpoint id
   });
 
-  test('properties().group() over the property stream (vertex-property gate)', () => {
+  test('properties().group() lowers by() modulators through the generic child seam', () => {
+    // D3: the property group is a live parent stream (pushChildScope over the property
+    // payload), so its composite-key parts lower as ordinary scalar children — element()
+    // .values() and key()/value() — NOT a hand-rolled inline reader.
     const p = read('g.V().properties().group().by(__.project("n","k","v").by(__.element().values("name")).by(__.key()).by(__.value())).by(__.tail())');
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'map', parts: [{ key: 'n' }, { key: 'k' }, { key: 'v' }] }, val: { kind: 'elementLast', elem: 'property' } });
-    expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=p.owner AND key=? ORDER BY id LIMIT 1) AS k0_v"); // property-group ctx columns typed via the CTE relation
-    expect(p.sql).toContain('p.pk AS k1_v');
-    expect(p.sql).toContain('p.pv AS k2_v');
-    expect(p.sql).toContain('p.owner AS v_owner'); // property value framing
+    // The property parent's multiset-safe domain carries the full property payload.
+    expect(p.sql).toContain('p.pk AS pk, p.pv AS pv, p.pmeta AS pmeta, ROW_NUMBER() OVER () AS o0');
+    // element().values("name") → owner re-root + values, joined back as a composite key part.
+    expect(p.sql).toContain('gkp0.v AS k0_v, gkp1.v AS k1_v, gkp2.v AS k2_v');
+    expect(p.sql).toContain('SELECT p.pk AS v, ROW_NUMBER() OVER (PARTITION BY p.o0'); // key() child, per-origin encounter
+    expect(p.sql).toContain('gp.owner AS v_owner'); // the tail() value frames the property element from the domain
+    // Result: each vertex property grouped by {owner name, key, value}, value = the property.
+    const store = seededStore();
+    const rows = run(store, "g.V().hasLabel('person').properties().group().by(__.key()).by(__.value().fold())");
+    expect(rows).toEqual([
+      { gk: 'age', gv: JSON.stringify([29, 27, 32, 35]) },
+      { gk: 'name', gv: JSON.stringify(['marko', 'vadas', 'josh', 'peter']) },
+    ]);
+  });
+
+  test("properties() group keys use the VertexProperty's OWN T.id/T.label/by(String), not the owner's", () => {
+    // Regression guard: a property parent's ScalarCtx must resolve T.label→the property KEY
+    // (pk), T.id→the VertexProperty id (vpid), and by(String)→a meta-property — NOT the
+    // owning vertex's label/id/sibling-property. (The property ctx once reused the owner's
+    // idExpr/labelIdExpr, silently mis-executing these; see propertyCtx.)
+    const store = seededStore();
+    // by(T.label) groups by the property key.
+    expect(run(store, "g.V(1).properties().group().by(T.label).by(__.value().fold())")).toEqual([
+      { gk: 'age', gv: JSON.stringify([29]) },
+      { gk: 'name', gv: JSON.stringify(['marko']) },
+    ]);
+    // by(T.id) gives each VertexProperty its own group (distinct vpid per property).
+    const byId = run(store, "g.V(1).properties().group().by(T.id).by(__.key())") as Array<{ gk: number; gv: string }>;
+    expect(byId.length).toBe(2);
+    expect(new Set(byId.map((r) => r.gk)).size).toBe(2); // two distinct property ids, not one owner id
+    // T.label lowers to the key column, not an owner-label subquery.
+    expect(read("g.V().properties().group().by(T.label).by(__.value())").sql).toContain('p.pk AS gk');
   });
 
   test('fold() wraps the projection in a list shape (element or scalar)', () => {

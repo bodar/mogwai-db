@@ -108,6 +108,11 @@ export interface PropertyStream extends Carry {
   readonly ownerElem: Elem;
 }
 
+/** The physical payload columns of a PropertyStream relation, in order. One row per
+ *  VertexProperty/edge-Property instance: `vpid` the VertexProperty id (NULL for edge
+ *  props), `owner` the owning element rowid, `pk`/`pv` key/value, `pmeta` a meta bag. */
+export const PROPERTY_PAYLOAD = ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta'] as const;
+
 /** One field of a per-traverser select()/project() record. Unlike MapStream, whose
  * two columns describe an entry stream for a global group barrier, a RecordStream
  * is one wide row per incoming traverser and may have heterogeneous field shapes. */
@@ -221,7 +226,7 @@ export function streamColumns(s: Stream): readonly string[] {
     : s.kind === 'variant' ? ['vk', 'v', 'rid', ...(s.listOf ? ['list'] : [])]
     : s.kind === 'list' ? ['list']
     : s.kind === 'map' ? ['mk', 'mv']
-    : s.kind === 'property' ? ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta']
+    : s.kind === 'property' ? [...PROPERTY_PAYLOAD]
     : s.kind === 'record' ? s.fields.flatMap(recordFieldColumns)
     : s.kind === 'group' ? groupColumns(s)
     : pathColumns(s.layout);

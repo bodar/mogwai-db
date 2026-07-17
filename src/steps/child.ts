@@ -3,7 +3,7 @@ import { stepChain } from '../frontend.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
 import { advance, carriedWith, carryFrag, carriedCols, withCarried, type ElementStream } from './context.ts';
 import { aliasId } from './alias.ts';
-import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStream, type Stream } from './stream.ts';
+import { carryOf, toListStream, toScalarStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream } from './stream.ts';
 import { lowerElementSteps, lowerSteps, tryLowerElementSteps } from './index.ts';
 import { lowerScalarRows, SCALAR_TRANSFORMS } from './scalar.ts';
 import { normalize, type PStep } from '../strategies.ts';
@@ -38,6 +38,15 @@ export const reuseCurrentFrame = (scope: ChildScope, frame: ChildFrame): ChildSc
 
 export type ChildUse = 'all' | 'first';
 
+/** A correlated-child PARENT traverser. The child seam is parent-shape-agnostic: it
+ * gives each parent traverser a multiset-safe ordinal and lowers a per-parent child
+ * sub-traversal that rejoins on it. Both node/edge ELEMENTS and PROPERTIES (from
+ * `properties()`) can be parents — a property child body (`key()`/`value()`/`element()…`)
+ * lowers through the generic dispatcher (compileFromProperty), never a private reader. */
+export type ChildParent = ElementStream | PropertyStream;
+
+const isPropertyParent = (p: ChildParent): p is PropertyStream => p.kind === 'property';
+
 /** Child chains cross the same normalization seam as the root. In particular,
  * order().by() must arrive as one PStep before shape-aware scalar lowering. */
 export const childSteps = (nested: any, params: Record<string, any>) => {
@@ -49,10 +58,10 @@ export const childSteps = (nested: any, params: Record<string, any>) => {
 /** Give every parent traverser a multiset-safe identity and seed a correlated child.
  * Equal element ids deliberately get different ordinals. The domain is preserved in
  * the returned frame even when later child lowering produces no rows. */
-export function pushChildScope(
-  parent: ElementStream,
+export function pushChildScope<P extends ChildParent>(
+  parent: P,
   scope: CompileScope = ROOT_SCOPE,
-): { scope: ChildScope; frame: ChildFrame; seed: ElementStream } {
+): { scope: ChildScope; frame: ChildFrame; seed: P } {
   if (scope.kind === 'child' && scope.reuseFrame) {
     const ordinal = scope.reuseFrame.ordinal;
     if (parent.carried.origins.at(-1) !== ordinal)
@@ -64,9 +73,16 @@ export function pushChildScope(
   const p = parent.rel.as('p');
   const cols = carriedCols(parent.carried);
   const ordinal = `o${parent.carried.origins.length}`;
+  // The domain re-projects the parent's identity payload + a multiset-safe ordinal. An
+  // element parent carries a single `id`; a property parent carries the full property
+  // payload so the child body's compileFromProperty can read key/value/owner from it.
+  const payload = isPropertyParent(parent)
+    ? list(PROPERTY_PAYLOAD.map((c) => q`${p.c[c]} AS ${c}`), ', ')
+    : q`${p.c.id} AS id`;
+  const payloadCols = isPropertyParent(parent) ? [...PROPERTY_PAYLOAD] : ['id'];
   const domain = parent.q.cte(
-    q`SELECT ${p.c.id} AS id${carryFrag(parent.carried, p)}, ROW_NUMBER() OVER () AS ${ordinal} FROM ${p}`,
-    ['id', ...cols, ordinal],
+    q`SELECT ${payload}${carryFrag(parent.carried, p)}, ROW_NUMBER() OVER () AS ${ordinal} FROM ${p}`,
+    [...payloadCols, ...cols, ordinal],
   );
   const seed = withCarried(
     { ...parent, rel: domain },
@@ -148,6 +164,43 @@ export function isScalarChild(nested: any, params: Record<string, any>): boolean
   return scalarRowParts(body) !== null;
 }
 
+/** Syntax-only recognizer for a PROPERTY-parent scalar child. A property traverser's
+ * scalar sub-traversals are `key()`/`value()` (the property's own key/value), a bare
+ * `constant(x)`, or `element()` re-rooted on the owner followed by an ordinary element
+ * scalar child (values/id/label + transforms/reducers). The head is consumed by
+ * compileFromProperty; the element tail delegates to scalarRowParts. Returns the parsed
+ * body when it qualifies so the caller can lower it via the generic dispatcher. */
+export function propertyScalarBody(body: ReturnType<typeof stepChain>): ReturnType<typeof stepChain> | null {
+  const head = body[0]?.name;
+  if (!head) return null;
+  // key()/value() ARE the scalar projection; any following steps must be a valid scalar
+  // continuation (transforms/is/order/limit/reducers) — so value().sum(), key().toUpper()
+  // lower like an element values('x').<continuation>. The terminal reducer/fold is stripped
+  // by the group consumer before this gate; the rest are checked here.
+  if (head === 'key' || head === 'value')
+    return body.slice(1).every((s) => CHILD_SCALAR_ROW_STEPS.has(s.name)) ? body : null;
+  // element() re-roots on the owner; the tail is an ordinary element scalar child. constant()
+  // is excluded: lowerConstant defers inside a child scope (it loses the per-origin
+  // encounter), so a constant projection defers cleanly instead of failing the preflight.
+  if (head === 'element') {
+    const parts = scalarRowParts(body.slice(1));
+    return parts && parts.projection.name !== 'constant' ? body : null;
+  }
+  return null;
+}
+
+export function isPropertyScalarChild(nested: any, params: Record<string, any>): boolean {
+  if (!nested) return false;
+  return propertyScalarBody(childSteps(nested, params)) !== null;
+}
+
+/** A property scalar child terminated by fold() — the group-value list form. */
+export function isPropertyScalarFoldChild(nested: any, params: Record<string, any>): boolean {
+  if (!nested) return false;
+  const body = childSteps(nested, params);
+  return body.at(-1)?.name === 'fold' && propertyScalarBody(body.slice(0, -1)) !== null;
+}
+
 /** Child scalar forms proven to emit exactly one row per parent. They make
  * optional(child) equivalent to child because the identity fallback is unreachable. */
 export function isTotalScalarChild(nested: any, params: Record<string, any>): boolean {
@@ -202,11 +255,11 @@ export function isElementImplicitFoldChild(nested: any, params: Record<string, a
  * emits one Long zero for that parent. Grouping by the child ordinal (rather than
  * element id) keeps equal/duplicate parent traversers multiset-distinct. */
 export function tryCompileCountChild(
-  parent: ElementStream,
+  parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
 ): ScalarStream | null {
-  if (!nested) return null;
+  if (!nested || isPropertyParent(parent)) return null;
   const body = childSteps(nested, parent.params);
   const terminal = body.at(-1);
   if (!terminal || terminal.name !== 'count' || terminal.args.length) return null;
@@ -230,11 +283,11 @@ export function tryCompileCountChild(
  * Unlike tryCompileCountChild this does not pop the frame: one total row (including
  * zero) remains associated with each multiset-distinct parent. */
 function tryCompileCountValueRows(
-  parent: ElementStream,
+  parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
 ): { stream: ScalarStream; frame: ChildFrame } | null {
-  if (!nested) return null;
+  if (!nested || isPropertyParent(parent)) return null;
   const body = childSteps(nested, parent.params);
   // A trailing is() run is a filter on the count value — `out().count().is(gt(1))`.
   // It composes as a HAVING on the aggregate: the row (one per parent, incl. the
@@ -274,7 +327,7 @@ function tryCompileCountValueRows(
  * applies transforms and origin-partitioned row operators; only then does the
  * consumer apply its `first` or `all` cardinality policy. */
 function applyScalarChildCardinality(
-  parent: ElementStream,
+  parent: ChildParent,
   pushed: ReturnType<typeof pushChildScope>,
   lowered: ScalarStream,
   use: ChildUse,
@@ -305,7 +358,7 @@ function applyScalarChildCardinality(
 }
 
 function compileScalarChildRows(
-  parent: ElementStream,
+  parent: ChildParent,
   nested: any,
   use: ChildUse = 'first',
   scope: CompileScope = ROOT_SCOPE,
@@ -316,6 +369,21 @@ function compileScalarChildRows(
   const fullBody = childSteps(nested, parent.params);
   if (stripTerminal && fullBody.at(-1)?.name !== stripTerminal) return null;
   const body = stripTerminal ? fullBody.slice(0, -1) : fullBody;
+
+  // Property parent: the child body (key/value/element().…/constant) lowers through the
+  // SAME generic dispatcher as a root traversal (lowerSteps → compileFromProperty), so a
+  // property group has no private inline reader. The scalar projection in a child scope
+  // mints the per-origin encounter the cardinality policy needs (element().values via
+  // lowerScalarProjection, key()/value() via propertyScalar). Non-scalar or unsupported
+  // bodies fall through to the caller's clear deferral — never mis-executed.
+  if (isPropertyParent(parent)) {
+    if (!propertyScalarBody(body)) return null;
+    const pushed = pushChildScope(parent, scope);
+    const stream = lowerSteps(pushed.seed, body, 0);
+    if (stream.kind !== 'scalar') return null;
+    return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
+  }
+
   const parts = scalarRowParts(body);
   if (!parts) return null;
   const { prefix, projection: terminal, suffix } = parts;
@@ -397,7 +465,7 @@ function compileScalarChildRows(
 }
 
 export function tryCompileScalarChild(
-  parent: ElementStream,
+  parent: ChildParent,
   nested: any,
   use: ChildUse = 'first',
   scope: CompileScope = ROOT_SCOPE,
@@ -408,7 +476,7 @@ export function tryCompileScalarChild(
 /** One public scalar-valued child entry point. Consumers must not know whether a
  * scalar came from projected rows or a total scope-aware count barrier. */
 export function tryCompileScalarValueChild(
-  parent: ElementStream,
+  parent: ChildParent,
   nested: any,
   use: ChildUse = 'first',
   scope: CompileScope = ROOT_SCOPE,
@@ -479,7 +547,7 @@ export function tryCompileScalarModulations(
  * consumers use this form when THEY own first/all/productive-null cardinality;
  * keeping that decision out of the child parser is the central consumer-policy seam. */
 export function tryCompileScalarValueRows(
-  parent: ElementStream,
+  parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
 ): { stream: ScalarStream; frame: ChildFrame } | null {
@@ -521,7 +589,7 @@ export function tryCompileListChild(
  * this when the fold belongs to their final key domain rather than to each parent
  * independently. The child origin and encounter marker deliberately remain live. */
 export function tryCompileScalarRowsBeforeFold(
-  parent: ElementStream,
+  parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
 ): { stream: ScalarStream; frame: ChildFrame } | null {
@@ -531,7 +599,7 @@ export function tryCompileScalarRowsBeforeFold(
 /** Productive element rows immediately before fold(), retaining the child origin so
  * a group consumer can fold them over its final key rather than once per parent. */
 export function tryCompileElementRowsBeforeFold(
-  parent: ElementStream,
+  parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
 ): { stream: ElementStream; frame: ChildFrame } | null {
@@ -542,7 +610,7 @@ export function tryCompileElementRowsBeforeFold(
  * collected into a list). Same origin-retaining shape as tryCompileElementRowsBeforeFold;
  * a trailing bare order() is stripped inside compileElementChildRows. */
 export function tryCompileElementImplicitFoldRows(
-  parent: ElementStream,
+  parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
 ): { stream: ElementStream; frame: ChildFrame } | null {
@@ -642,12 +710,16 @@ function childExistenceGate(
  * Returns null when the body needs a not-yet-generic tail/barrier so scalar fast paths
  * and clear existing deferrals remain authoritative. */
 function compileElementChildRows(
-  parent: ElementStream,
+  parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
   stripTerminal?: string,
   firstPolicy = false,
 ): { stream: ElementStream; frame: ChildFrame } | null {
+  // Element-valued children are element-parent-only: a property has no adjacency, and an
+  // `element()` head that re-roots on the owner is a SCALAR-child concern (compileScalar
+  // ChildRows). Property parents fail closed here; the group falls back to its deferral.
+  if (isPropertyParent(parent)) return null;
   if (!nested || parent.carried.sack || parent.carried.fromV) return null;
   const fullBody = childSteps(nested, parent.params);
   if (stripTerminal && fullBody.at(-1)?.name !== stripTerminal) return null;
@@ -714,7 +786,7 @@ export function tryCompileFirstElementValueRows(
  * marker row per element. The child origin remains live so the group consumer can
  * join these rows to its shared parent domain before reducing by group key. */
 export function tryCompileRowsBeforeReducer(
-  parent: ElementStream,
+  parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
 ): { stream: ScalarStream; frame: ChildFrame; reducer: ScalarReducer } | null {

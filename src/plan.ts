@@ -1,4 +1,4 @@
-import { flattenListArgs, type Step, type Pred } from './frontend.ts';
+import { flattenListArgs, type Pred } from './frontend.ts';
 import { q, list, values, empty, value, raw, jsonExtract, type Expression, type Relation } from './q.ts';
 import { normalizeTypeName } from './gremlin-types.ts';
 import { type ValueType } from './render.ts';
@@ -249,16 +249,15 @@ export interface ScalarCtx {
   tgtExpr?: Expression;      // n.tgt  (edge)
   ownerExpr?: Expression;      // property: owning node id
   ownerPropsExpr?: Expression; // property: owner props (directly readable)
-  pkExpr?: Expression;         // property: key column
+  pkExpr?: Expression;         // property: key column (a VertexProperty's T.label)
   pvExpr?: Expression;         // property: value column
+  metaExpr?: Expression;       // property: the JSONB meta-property bag (by(String) → propExtract)
   // The repeat-loop counter, present ONLY inside an until() predicate (the recursive
   // walk's depth). Lets loops().is(P) lower as a leaf predicate that composes with the
   // element predicates through the same infix/and/or machinery — e.g.
   // until(__.has('name','x').or().loops().is(3)).
   loopsExpr?: Expression;
 }
-
-interface Scalar { expr: Expression }
 
 /** Build a node/edge ScalarCtx from the (aliased) element relation `n` — its
  *  typed columns become the correlated-scalar base exprs. src/tgt exist only on
@@ -350,7 +349,9 @@ export const edgeValueMapProps = (edgeIdExpr: Expression): Expression =>
 /** A single scalar value for `key` on the current element (order/group-key/by(key)):
  *  node → first-under-multi; edge → the single value. Both read their normalized table. */
 export const scalarProp = (ctx: ScalarCtx, key: string): Expression =>
-  ctx.elem === 'edge' ? edgePropScalar(ctx.idExpr, key) : nodePropScalar(ctx.idExpr, key);
+  ctx.elem === 'property' ? propExtract(ctx.metaExpr!, key).expr  // a VertexProperty's by(String) reads its meta-property
+  : ctx.elem === 'edge' ? edgePropScalar(ctx.idExpr, key)
+  : nodePropScalar(ctx.idExpr, key);
 
 /** A boolean predicate on `key` for the current element (has/where/is): node → ANY-match
  *  EXISTS over vertex_properties; edge → EXISTS over edge_properties. */
@@ -378,51 +379,3 @@ export const framedPropsCtx = (ctx: ScalarCtx): Expression =>
 export const valueMapProps = (rel: Relation, elem: Elem): Expression =>
   elem === 'edge' ? edgeValueMapProps(rel.c.id) : vertexPropsAgg(rel.c.id);
 
-/**
- * Compile a property-group sub-traversal (the node inside group().by(__.…)) to a
- * correlated SQL scalar. This is the ONE scalar-child shape with no generic pipeline
- * home: a group() over a properties() stream has no live ElementStream parent, so its
- * key/value reads can't go through the child seam (which roots at node/edge). Covered:
- *   prop ctx:  key() | value() | element()[.values(k)|.label()|.id()]
- * Every node/edge correlated scalar (movement count/aggregate, bare value/label/id) now
- * lowers through the child seam or the correlatedReduce fast path — NOT here.
- * Anything past this returns null (the caller throws a clear deferral); never mis-executes.
- */
-class InlineScalarMiss extends Error {}
-const inlineScalarMiss = (): never => { throw new InlineScalarMiss(); };
-
-/** Property-group scalar reader. Returns null for unsupported shapes; the property
- * group has no generic child seam, so this is a genuine reader, not a fast path. */
-export function tryPropertyGroupScalar(inner: Step[], ctx: ScalarCtx): Scalar | null {
-  try { return compilePropertyGroupScalar(inner, ctx); }
-  catch (error) {
-    if (error instanceof InlineScalarMiss) return null;
-    throw error;
-  }
-}
-
-function compilePropertyGroupScalar(inner: Step[], ctx: ScalarCtx): Scalar {
-  if (ctx.elem !== 'property') return inlineScalarMiss();
-  let steps = inner;
-  const head = steps[0]?.name;
-  if (!head) return inlineScalarMiss();
-  if (head === 'key') { requireTerminal(steps, 1); return { expr: ctx.pkExpr! }; }
-  if (head === 'value') { requireTerminal(steps, 1); return { expr: ctx.pvExpr! }; }
-  // element() re-roots on the owning node for a terminal values/label/id read.
-  if (head !== 'element') return inlineScalarMiss();
-  const nodeId = ctx.ownerExpr!;
-  steps = steps.slice(1);
-  const s = steps[0];
-  if (!s) return inlineScalarMiss(); // bare element() is not a scalar
-  switch (s.name) {
-    case 'values': requireTerminal(steps, 1); return { expr: nodePropScalar(nodeId, s.args[0]) };
-    case 'label':  requireTerminal(steps, 1); return { expr: labelNameSub(q`(SELECT label FROM nodes WHERE id=${nodeId})`) };
-    case 'id':     requireTerminal(steps, 1); return { expr: nodeId };
-    case 'constant': requireTerminal(steps, 1); return { expr: value(s.args[0]) };
-    default: return inlineScalarMiss();
-  }
-}
-
-const requireTerminal = (steps: Step[], n: number) => {
-  if (steps.length > n) inlineScalarMiss();
-};
