@@ -3232,10 +3232,19 @@ describe('compiler execution semantics', () => {
       .toEqual(['marko', 'marko']);
     // shared-var + has-filter patterns, count of solutions
     expect(run(store, 'g.V().match(__.as("a").out("knows").as("b")).count()').map((r) => r.v)).toEqual([2]);
+    // pattern bodies fold through the shared StepFns, so both()/multi-hop/where() work
+    // without a private movement/filter vocabulary. both() is bidirectional.
+    expect(run(store, 'g.V().match(__.as("a").both("knows").as("b")).select("a","b").by("name")')
+      .map((r: any) => `${r.e0_v}-${r.e1_v}`).sort())
+      .toEqual(['josh-marko', 'marko-josh', 'marko-vadas', 'vadas-marko']);
+    expect(run(store, 'g.V().match(__.as("a").out().out().as("b")).select("a","b").by("name")')
+      .map((r: any) => `${r.e0_v}-${r.e1_v}`).sort())
+      .toEqual(['marko-lop', 'marko-ripple']);
   });
 
   test('match() deferrals fail closed', () => {
-    expect(() => compile('g.V().match(__.as("a").both().as("b"))', {})).toThrow('both()');
+    // an edge-typed end var (the binding table carries node rowids)
+    expect(() => compile('g.V().match(__.as("a").outE("created").as("b"))', {})).toThrow('edge-typed pattern');
     // scalar-terminal pattern (count binds a scalar var)
     expect(() => compile('g.V().match(__.as("a").out("knows").count().as("b"))', {})).toThrow('count()');
     // mutual recursion → no single start-only root
