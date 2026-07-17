@@ -1,6 +1,7 @@
 import { q, value, list, Query } from '../q.ts';
 import { jsonbArrayOf } from '../plan.ts';
 import { flattenListArgs, type SackSpec } from '../frontend.ts';
+import { flatType } from '../gremlin-types.ts';
 import { type PStep } from '../strategies.ts';
 import { type Carry } from './context.ts';
 import { toListStream, toScalarStream } from './stream.ts';
@@ -41,7 +42,7 @@ function foldConstantCoercions(steps: PStep[], vals: any[]): { at: number; as?: 
         const argTypes = at === 1 ? (steps[0].argTypes ?? []) : [];
         let uniform: ValueType | undefined;
         for (let i = 0; i < vals.length; i++) {
-          const out = asNumberBare(vals[i], argTypes[i] ?? null);
+          const out = asNumberBare(vals[i], flatType(argTypes[i]));
           vals[i] = out.val;
           if (uniform === undefined) uniform = out.as;
           else if (uniform !== out.as)
@@ -53,7 +54,7 @@ function foldConstantCoercions(steps: PStep[], vals: any[]): { at: number; as?: 
     }
     if (step.name === 'asDate') {
       const argTypes = at === 1 ? (steps[0].argTypes ?? []) : [];
-      for (let i = 0; i < vals.length; i++) vals[i] = asDateConst(vals[i], argTypes[i] ?? null);
+      for (let i = 0; i < vals.length; i++) vals[i] = asDateConst(vals[i], flatType(argTypes[i]));
       as = 'date';
       continue;
     }
