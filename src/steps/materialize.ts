@@ -143,7 +143,7 @@ export function materializePathRoot(stream: PathStream): Compiled {
   const cols = pathColumns(stream.layout).map((name) => p.c[name]);
   const shape: Shape = stream.layout.kind === 'linear'
     ? { kind: 'path', positions: [...stream.layout.positions] }
-    : { kind: 'pathGrouped', elem: stream.layout.elem };
+    : { kind: 'pathGrouped', elem: stream.layout.elem, ...(stream.layout.byKey ? { byKey: true } : {}) };
   return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${p}`, shape);
 }
 

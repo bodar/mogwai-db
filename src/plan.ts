@@ -251,6 +251,11 @@ export interface ScalarCtx {
   ownerPropsExpr?: Expression; // property: owner props (directly readable)
   pkExpr?: Expression;         // property: key column
   pvExpr?: Expression;         // property: value column
+  // The repeat-loop counter, present ONLY inside an until() predicate (the recursive
+  // walk's depth). Lets loops().is(P) lower as a leaf predicate that composes with the
+  // element predicates through the same infix/and/or machinery — e.g.
+  // until(__.has('name','x').or().loops().is(3)).
+  loopsExpr?: Expression;
 }
 
 interface Scalar { expr: Expression }

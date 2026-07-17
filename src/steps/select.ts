@@ -621,7 +621,7 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   // seedSource, which handles V()/E()), so path tracking never starts. Mid-chain
   // union()/optional()/repeat() are caught earlier by their own path guards.
   if (!st.carried.path) throw new Error('path() over a union() source step is not yet supported');
-  if (st.carried.path.kind === 'array') return compilePathArray(st, acc);
+  if (st.carried.path.kind === 'array') return compilePathArray(st, proj, acc);
   const pathState = st.carried.path; // narrowed to 'cols'; held in a local so the .map closure keeps the narrowing
   if (acc.orders.length) throw new Error('order() after path() not yet supported');
   if (acc.reducer) throw new Error(`${acc.reducer}() after path() not yet supported`);
@@ -682,21 +682,44 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
  * PATH ELEMENT ordered by `(pk, ord)` — the handler folds each pk-run into one Path.
  * All elements are vertices (out/in/both bodies); edge-inclusive bodies defer.
  */
-function compilePathArray(st: ElementStream, acc: TailAcc): PathStream {
+function compilePathArray(st: ElementStream, proj: PStep, acc: TailAcc): PathStream {
   if (acc.orders.length || acc.reducer || acc.isPreds.length)
     throw new Error('order()/reducer/is() after a recursive repeat().path() not yet supported');
+  // path().by(key): every position projects the same property (a repeat path has dynamic
+  // length, so a single by() applies uniformly; multiple by()s would round-robin over an
+  // unknown length → defer). A by(traversal)/by(T.token) also defers via pathBy.
+  const bys = proj.bys ?? [];
+  if (bys.length > 1) throw new Error('path().by() with multiple modulators over a recursive repeat().path() not yet supported');
+  const key = pathBy(bys.length ? bys[0] : undefined);
+  const productive = proj.productiveBy === true;
   // dedup() must collapse equal paths BEFORE row-numbering: ROW_NUMBER() is computed
   // with the SELECT list, so a `SELECT DISTINCT path, ROW_NUMBER()…` never removes a
   // row (the unique pk defeats DISTINCT). Distinct-ify in a prior CTE, then number.
-  const src = acc.distinct ? st.q.cte(q`SELECT DISTINCT ${st.rel.c.path} AS path FROM ${st.rel}`, ['path']) : st.rel;
+  let src = acc.distinct ? st.q.cte(q`SELECT DISTINCT ${st.rel.c.path} AS path FROM ${st.rel}`, ['path']) : st.rel;
+  // A non-productive by(key) drops the WHOLE path if ANY element lacks the property
+  // (mirrors the linear path()'s per-position IS NOT NULL guard); ProductiveBy keeps it
+  // with an explicit NULL position.
+  if (key !== undefined && !productive) {
+    const fp = src.as('fp');
+    src = st.q.cte(
+      q`SELECT ${fp.c.path} AS path FROM ${fp} WHERE NOT EXISTS (SELECT 1 FROM json_each(${fp.c.path}) je WHERE ${nodePropScalar(q`je.value`, key)} IS NULL)`,
+      ['path'],
+    );
+  }
   // ROW_NUMBER over the surviving paths → a stable per-path key so equal-id paths
   // stay distinct (multiset) after the json_each explode.
   const limitSql = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
   const paths = st.q.cte(q`SELECT ${src.c.path} AS path, ROW_NUMBER() OVER (ORDER BY ${src.c.path}) AS pk FROM ${src}${limitSql}`, ['path', 'pk']);
-  const n = nodes.as('n');
-  const l = labels.as('l');
-  const node = q`SELECT pp.pk, je.key AS ord, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props FROM ${paths} pp, json_each(pp.path) je JOIN ${n} ON ${n.c.id}=je.value JOIN ${l} ON ${l.c.id}=${n.c.label} ORDER BY pp.pk, je.key`;
-  const layout = { kind: 'grouped' as const, elem: 'vertex' as const };
+  const layout = { kind: 'grouped' as const, elem: 'vertex' as const, byKey: key !== undefined };
+  // by(key) → one scalar `v` per position (correlated on the exploded id); otherwise the
+  // whole vertex framed from nodes/labels.
+  const node = key !== undefined
+    ? q`SELECT pp.pk, je.key AS ord, ${nodePropScalar(q`je.value`, key)} AS v FROM ${paths} pp, json_each(pp.path) je ORDER BY pp.pk, je.key`
+    : (() => {
+        const n = nodes.as('n');
+        const l = labels.as('l');
+        return q`SELECT pp.pk, je.key AS ord, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props FROM ${paths} pp, json_each(pp.path) je JOIN ${n} ON ${n.c.id}=je.value JOIN ${l} ON ${l.c.id}=${n.c.label} ORDER BY pp.pk, je.key`;
+      })();
   const rel = st.q.cte(node, pathColumns(layout));
   return toPathStream(withoutCarried(carryOf(st)), rel, layout);
 }

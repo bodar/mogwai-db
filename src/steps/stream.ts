@@ -131,7 +131,9 @@ export interface GroupStream extends Carry {
 
 export type PathLayout =
   | { readonly kind: 'linear'; readonly positions: readonly PathPos[] }
-  | { readonly kind: 'grouped'; readonly elem: ElemShape };
+  // A recursive repeat().path(): one row per path element. `byKey` (from a path().by(key)
+  // modulator) projects each position to a scalar `v` instead of the whole element.
+  | { readonly kind: 'grouped'; readonly elem: ElemShape; readonly byKey?: boolean };
 
 /** A fully lowered Path value. Linear paths carry one wide row per path; recursive
  * paths carry `(pk,ord,element...)` rows that root framing groups by path key. */
@@ -190,7 +192,7 @@ export const groupResultColumns = (s: Pick<GroupStream, 'key' | 'val'>): string[
   groupColumns(s).filter((name) => name !== 'k_rid');
 
 export const pathColumns = (layout: PathLayout): string[] => {
-  if (layout.kind === 'grouped') return ['pk', 'ord', ...elemColumns('', layout.elem).map((c) => c.slice(1))];
+  if (layout.kind === 'grouped') return layout.byKey ? ['pk', 'ord', 'v'] : ['pk', 'ord', ...elemColumns('', layout.elem).map((c) => c.slice(1))];
   return layout.positions.flatMap((p) => p.render === 'value'
     ? [`${p.prefix}_v`]
     : elemColumns(p.prefix, p.elem));

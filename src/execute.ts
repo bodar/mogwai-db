@@ -184,8 +184,10 @@ function pathBuffer(r: any, positions: PathPos[]): Buffer {
 
 // Recursive repeat().path(): rows arrive ORDER BY (pk, ord) — one row per path
 // element, runs of equal pk being one path. Fold each pk-run into a Path.
-function pathGroupedBuffers(rows: any[], elem: ElemShape): Buffer[] {
-  const frame = elem === 'edge' ? rowEdge : rowVertex;
+function pathGroupedBuffers(rows: any[], elem: ElemShape, byKey?: boolean): Buffer[] {
+  // by(key) projects each position to a scalar value (column `v`); otherwise each
+  // position is the whole element framed from its row.
+  const frame = byKey ? (r: any) => ioc.anySerializer.serialize(r.v) : elem === 'edge' ? rowEdge : rowVertex;
   const out: Buffer[] = [];
   let objs: Buffer[] = [];
   let curPk: any;
@@ -374,7 +376,7 @@ function* framedResults(store: GraphStore, gremlin: string, params: Record<strin
     case 'map': for (const r of rows) yield mapBuffer(r, shape.entries); return;
     case 'path': for (const r of rows) yield pathBuffer(r, shape.positions); return;
     // pathGrouped folds pk-runs into Paths — a bounded fold, so yield each completed Path.
-    case 'pathGrouped': yield* pathGroupedBuffers(rows, shape.elem); return;
+    case 'pathGrouped': yield* pathGroupedBuffers(rows, shape.elem, shape.byKey); return;
     // A VertexProperty with its real id + meta-properties framed (vpid null on edges → synthetic).
     case 'property': for (const r of rows) yield vertexPropertyBuffer(r.vpid ?? `${r.owner}:${r.pk}`, r.pk, r.pv, r.pmeta ? JSON.parse(r.pmeta) : null); return;
     // properties().properties(): meta-properties as Property elements.
