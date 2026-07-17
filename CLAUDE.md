@@ -115,17 +115,25 @@ through (never defines support or throws because its optimized vocabulary is exh
 enabled-vs-disabled are result-equivalent in a committed test; and an EXPLAIN/benchmark
 shows material benefit. Currently: `predicateInlining`, `singleHopOptional`,
 `bulkRepeatCount`. A fast path should reuse the surrounding plumbing and swap only the
-"middle" — e.g. the predicate family feeds one boolean `Expression` to the shared
-`filterCte`; the fast middle is a correlated subquery (`correlatedExists`/
-`correlatedReduce` on the shared movement builders — the inline-correlated rendering),
-the generic middle is a materialized child gated on existence.
+"middle" — e.g. the predicate family (`predicateInlining`, `src/steps/predicate.ts`)
+feeds one boolean `Expression` to the shared `filterCte`; the fast middle is the GENERIC
+movement/filter StepFns rendered in inline-correlated mode (`compileCorrelatedChild`,
+`src/steps/correlated.ts`) — a nested correlated `derived()` subquery seeded from the
+outer row's id, NOT a second hand-rolled movement/alias/EXISTS scheme — and the generic
+middle is a materialized child gated on existence. Alias safety is structural: each
+StepFn wraps the prev relation as a FROM-clause derived table (`(<prev>) p`), and FROM
+derived tables are not laterally visible, so the innermost seed's correlated `n.id`/
+walk-id can never bind to an intermediate `nodes n`/`edges e` the child introduces — no
+`xe`/`xn` renaming needed. The predicate compiler lives in `steps/` (not `plan.ts`)
+precisely so this movement branch can reach `lowerElementSteps`.
 
 **Migration debt, NOT extension patterns:** `tryPropertyGroupScalar` (property-group
 key/value reads — a `group()` over `properties()` has no live ElementStream parent, so
-no child seam; a genuine reader, not a fast path) and `until()`'s correlated predicate
-(a recursive-CTE term can't reference its outer row, so no generic form exists). Do not
-copy these; do not add a new fast-path switch without its generic fallback + equivalence
-test + perf evidence in the same change.
+no child seam; a genuine reader, not a fast path). `until()`'s predicate is the ONE
+correlated-only consumer (a recursive-CTE term can't reference its outer row, so it has
+no materialized generic fallback) — but it is NOT debt: it correlates through the same
+`compileCorrelatedChild` as where()/choose(). Do not add a new fast-path switch without
+its generic fallback + equivalence test + perf evidence in the same change.
 
 ## Management API + runtime parity
 

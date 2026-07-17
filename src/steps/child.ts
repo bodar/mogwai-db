@@ -559,9 +559,9 @@ export function tryCompileElementValueRows(
   return compileElementChildRows(parent, nested, scope);
 }
 
-/** Generic traversal-filter fallback. Fast correlated predicate forms stay in
- * plan.ts; when they decline a body, any typed child row is existence and no row is
- * non-existence. The preserved domain ordinal keeps duplicate parents distinct. */
+/** Generic traversal-filter fallback. The fast correlated predicate forms live in
+ * steps/predicate.ts; when they decline a body, any typed child row is existence and no
+ * row is non-existence. The preserved domain ordinal keeps duplicate parents distinct. */
 export function tryFilterByChildExistence(
   parent: ElementStream,
   nested: any,
@@ -587,7 +587,7 @@ export function tryGateByChildExistence(
 /** Generic boolean form of the existence gate for and()/or(): compile N predicate
  * branches against ONE shared parent domain (a single pushed ordinal, reused per
  * branch), then filter the domain on the branches' correlated EXISTS combined with
- * AND/OR. This is the child-lowering counterpart to plan.ts combineBranchPreds's
+ * AND/OR. This is the child-lowering counterpart to predicate.ts combineBranchPreds's
  * inline correlated form, so andOr falls through here instead of defining language
  * support when a branch is beyond the inline compiler. Returns null when any branch has
  * no generic child compilation. */

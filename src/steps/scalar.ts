@@ -240,7 +240,7 @@ function appendScalar(s: ScalarStream, step: PStep): ScalarStream {
 // traverser whose CURRENT OBJECT is the scalar `v`. The filter family (and/or/not/
 // filter/where) and constant() work on it exactly as on an element — the difference is
 // only what the "current object" is. Rather than fork the element predicate engine
-// (plan.ts compileInlinePredicate, which reads props/label/adjacency), this reuses the
+// (predicate.ts compileInlinePredicate, which reads props/label/adjacency), this reuses the
 // PREDICATE LEAF (predicateSql) + the scalar transform ladder (scalarTx) for the one
 // case the element engine can't express: a predicate directly over the current scalar.
 // Element-only bodies (values/has/out…) fail closed here — a scalar has no properties

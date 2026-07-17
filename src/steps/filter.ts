@@ -2,8 +2,9 @@ import { derived, q, list, raw, type Expression, type Relation } from '../q.ts';
 import { stepChain, type Pred } from '../frontend.ts';
 import {
   P_OPS, labelIn, predicateSql, nodePropScalar, hasProp, elemCtx, aliasCtx,
-  tryInlinePredicate, combineBranchPreds, idPredFromArgs, type Elem, type ScalarCtx,
+  idPredFromArgs, type Elem, type ScalarCtx,
 } from '../plan.ts';
+import { tryInlinePredicate, combineBranchPreds } from './predicate.ts';
 import { advance, aliasElem, carriedCols, carriedWith, carryFrag, elemRel, pathColsOf, prevRel, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from './context.ts';
 import { aliasAppend, aliasId, aliasSeed, elemEntry, elemShape } from './alias.ts';
 import { tryCombineByChildExistence, tryCompileScalarValueRows, tryFilterByChildExistence } from './child.ts';
