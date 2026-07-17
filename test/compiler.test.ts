@@ -31,7 +31,7 @@ describe('compiler SQL snapshots', () => {
     expect(() => toVariantStream(carry, q.cte({} as any, ['v', 'rid']), { node: true })).toThrow(
       'variant stream column mismatch',
     );
-    const propertyCols = ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta'];
+    const propertyCols = ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pvtype', 'pmeta'];
     expect(toPropertyStream(carry, q.cte({} as any, propertyCols), 'node').kind).toBe('property');
     expect(() => toPropertyStream(carry, q.cte({} as any, propertyCols.slice(1)), 'node')).toThrow(
       'property stream column mismatch',
@@ -1495,7 +1495,7 @@ describe('compiler SQL snapshots', () => {
     const p = read('g.V().properties().group().by(__.project("n","k","v").by(__.element().values("name")).by(__.key()).by(__.value())).by(__.tail())');
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'map', parts: [{ key: 'n' }, { key: 'k' }, { key: 'v' }] }, val: { kind: 'elementLast', elem: 'property' } });
     // The property parent's multiset-safe domain carries the full property payload.
-    expect(p.sql).toContain('p.pk AS pk, p.pv AS pv, p.pmeta AS pmeta, ROW_NUMBER() OVER () AS o0');
+    expect(p.sql).toContain('p.pk AS pk, p.pv AS pv, p.pvtype AS pvtype, p.pmeta AS pmeta, ROW_NUMBER() OVER () AS o0');
     // element().values("name") → owner re-root + values, joined back as a composite key part.
     expect(p.sql).toContain('gkp0.v AS k0_v, gkp1.v AS k1_v, gkp2.v AS k2_v');
     expect(p.sql).toContain('SELECT p.pk AS v, ROW_NUMBER() OVER (PARTITION BY p.o0'); // key() child, per-origin encounter
@@ -2325,6 +2325,15 @@ const run = (store: GraphStore, q: string) => {
   if (p.kind === 'write') return p.run(store);
   return store.query(p.sql, p.binds);
 };
+
+// A write-response echo now carries each prop value as a self-describing {t,v} typed node
+// (so the wire frames it exactly). Tests that assert the written VALUES (not their types)
+// unwrap the nodes to plain values with this recursive helper.
+const bare = (v: any): any =>
+  Array.isArray(v) ? v.map(bare)
+  : v && typeof v === 'object' && 't' in v && 'v' in v ? bare(v.v)
+  : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, bare(x)]))
+  : v;
 
 const runWith = (store: GraphStore, q: string, options: CompileOptions) => {
   const p = compile(q, {}, options);
@@ -3398,7 +3407,7 @@ describe('compiler execution semantics', () => {
     const store = seededStore();
     // overwrite marko's age, add a new key
     const res = run(store, 'g.V(1).property("age", 30).property("city", "London")');
-    expect((res[0] as any).vertex).toEqual({ id: 1, label: 'person', props: { name: 'marko', age: 30, city: 'London' } });
+    expect(bare((res[0] as any).vertex)).toEqual({ id: 1, label: 'person', props: { name: 'marko', age: 30, city: 'London' } });
     expect(run(store, 'g.V(1).values("age")').map((r) => r.v)).toEqual([30]);
     expect(run(store, 'g.V(1).values("city")').map((r) => r.v)).toEqual(['London']);
     // untouched vertices keep their props
@@ -3471,14 +3480,14 @@ describe('compiler execution semantics', () => {
   test('property() updates edges too (materialized on the wire via edgeBuffer)', () => {
     const store = seededStore();
     const res = run(store, 'g.V(1).outE("created").property("weight2", 0.9)');
-    expect((res[0] as any).edge.props).toEqual({ weight: 0.4, weight2: 0.9 });
+    expect(bare((res[0] as any).edge.props)).toEqual({ weight: 0.4, weight2: 0.9 });
     expect(run(store, 'g.V(1).outE("created").values("weight2")').map((r) => r.v)).toEqual([0.9]);
   });
 
   test('addE start-step: from()/to() nested traversals + edge property', () => {
     const store = seededStore();
     const res = run(store, 'g.addE("knows").from(__.V().has("name","marko")).to(__.V().has("name","vadas")).property("weight", 0.9)');
-    expect((res[0] as any).edge).toMatchObject({ label: 'knows', src: 1, tgt: 2, props: { weight: 0.9 } });
+    expect(bare((res[0] as any).edge)).toMatchObject({ label: 'knows', src: 1, tgt: 2, props: { weight: 0.9 } });
     // marko already knew vadas (edge 7); now a second knows edge exists → 2 paths to vadas
     expect(run(store, 'g.V(1).out("knows").has("name","vadas").count()').map((r) => r.v)).toEqual([2]);
     expect(run(store, 'g.V(1).outE("knows").count()').map((r) => r.v)).toEqual([3]);
@@ -3517,7 +3526,7 @@ describe('compiler execution semantics', () => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     // __.constant(v) as an inline property value — evaluated at the new vertex.
     const res = run(store, 'g.addV("person").property("age", __.constant(29)).property("name", "marko")');
-    expect((res[0] as any).vertex).toMatchObject({ label: 'person', props: { name: 'marko', age: 29 } });
+    expect(bare((res[0] as any).vertex)).toMatchObject({ label: 'person', props: { name: 'marko', age: 29 } });
     expect(run(store, 'g.V().has("person","age",29).values("name")').map((r) => r.v)).toEqual(['marko']);
   });
 
@@ -3531,7 +3540,7 @@ describe('compiler execution semantics', () => {
     const store = seededStore();
     const res = run(store, 'g.addE("knows").from(__.V(1)).to(__.V(2)).property("w", __.constant(0.7))');
     // the framed response carries the resolved scalar, never a {nested} blob
-    expect((res[0] as any).edge.props).toEqual({ w: 0.7 });
+    expect(bare((res[0] as any).edge.props)).toEqual({ w: 0.7 });
     expect(run(store, 'g.V(1).outE("knows").values("w")').map((r) => r.v)).toEqual([0.7]);
   });
 
@@ -3590,7 +3599,7 @@ describe('compiler execution semantics', () => {
   test('mergeV creates when no match, matches when it exists (inline map)', () => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     const a = run(store, 'g.mergeV([(T.label): "person", name: "marko"])');
-    expect((a[0] as any).vertex).toMatchObject({ label: 'person', props: { name: 'marko' } });
+    expect(bare((a[0] as any).vertex)).toMatchObject({ label: 'person', props: { name: 'marko' } });
     // second identical merge matches the first → still one vertex
     run(store, 'g.mergeV([(T.label): "person", name: "marko"])');
     expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([1]);
@@ -3847,7 +3856,8 @@ describe('compiler execution semantics', () => {
 
   // ---------- repeat().until() (modern-graph semantics) ----------
 
-  const uNames = (store: GraphStore, q: string) => (run(store, q) as any[]).map((r) => JSON.parse(r.props).name[0]);
+  // props JSON is now {key:[{t,v}]} (self-describing typed nodes) — read the leaf payload.
+  const uNames = (store: GraphStore, q: string) => (run(store, q) as any[]).map((r) => JSON.parse(r.props).name[0].v);
 
   test('do-while: repeat(out()).until(pred) runs the body then tests, multiset-correct', () => {
     const store = seededStore();
@@ -4006,9 +4016,13 @@ describe('typed property values (P1) — vtype capture + collection storage', ()
     executeQuery(store, parsed.gremlin, parsed.params, parsed.paramTypes);
     const got = Object.fromEntries(vprops(store, ['big', 'txt']).map((r) => [r.key, r.vtype]));
     expect(got).toEqual({ big: 'long', txt: 'string' });
-    // Without the wire types, the same write falls back to JS inference (int, not long).
+    // Without the wire types, the write infers from the JS value. 5e9 is out of int32 range,
+    // so magnitude-based inference correctly gives 'long' too (and, crucially, doesn't tag it
+    // 'int' — which would overflow the strict Int framer). The genuinely-lossy inference cases
+    // (a small long, a uuid, a datetime — indistinguishable from int/string by JS value) are
+    // covered elsewhere; the wire type is what recovers those.
     const store2 = fresh();
     executeQuery(store2, parsed.gremlin, parsed.params, {});
-    expect(store2.query<{ vtype: string }>("SELECT vtype FROM vertex_properties WHERE key='big'")[0].vtype).toBe('int');
+    expect(store2.query<{ vtype: string }>("SELECT vtype FROM vertex_properties WHERE key='big'")[0].vtype).toBe('long');
   });
 });

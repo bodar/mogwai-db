@@ -2,7 +2,7 @@ import { q, raw, value, list, empty, type Expression, type Relation } from '../q
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
 import {
   scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps, dirsFor,
-  type ScalarCtx,
+  storedValueExpr, type ScalarCtx,
 } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
@@ -402,7 +402,12 @@ export function lowerValueMap(st: ElementStream, proj: PStep): MapStream {
   const base = st.q.cte(q`SELECT ROW_NUMBER() OVER () AS o0, ${valueMapProps(n, st.elem)} AS props FROM ${vlJoin}`, ['o0', 'props']);
   const b = base.as('b');
   const keyFilter = keys.length ? q` WHERE je.key IN (${list(keys.map((k) => value(k)), ', ')})` : empty;
-  const rel = st.q.cte(q`SELECT je.key AS mk, je.value AS mv, ${b.c.o0} AS o0 FROM ${b}, json_each(${b.c.props}) je${keyFilter}`, ['mk', 'mv', 'o0']);
+  // props values are self-describing {t,v} nodes (plan.ts propNodeExpr, for whole-map framing).
+  // This re-entry treats a valueMap value list as BARE scalars (select(Column.values) feeds the
+  // untyped list substrate — set-ops/order/conjoin), so unwrap each element to its `v` payload
+  // (element-type re-tagging through select(values) is deferred, matching the list-op scope).
+  const mv = q`(SELECT json_group_array(x.value ->> '$.v' ORDER BY x.key) FROM json_each(je.value) x)`;
+  const rel = st.q.cte(q`SELECT je.key AS mk, ${mv} AS mv, ${b.c.o0} AS o0 FROM ${b}, json_each(${b.c.props}) je${keyFilter}`, ['mk', 'mv', 'o0']);
   const carry: Carry = { ...carryOf(st), carried: carriedWith(st.carried, { origins: ['o0'] }) };
   // key = a bare string; value = the property's value list (json array per entry).
   return toMapStream(carry, rel, { kind: 'scalar' }, { kind: 'list', of: { kind: 'scalar' } });
@@ -480,7 +485,7 @@ function deriveGroupEntries(s: GroupStream): { rel: Relation; keyOf: MapOf; valO
 
 // ---------- properties() ----------
 
-const PROPERTY_PAYLOAD = ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta'] as const;
+const PROPERTY_PAYLOAD = ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pvtype', 'pmeta'] as const;
 
 /** properties()/properties(keys) is a genuine shape transition. The property row
  * stays relational so filters and projections can consume it one step at a time. */
@@ -497,11 +502,11 @@ export function lowerProperties(st: ElementStream, step: PStep): PropertyStream 
   if (st.elem === 'edge') {
     const ep = edgeProperties.as('ep');
     const keyFilter: Expression = keys.length ? q` AND ${ep.c.key} IN (${list(keys.map(value), ',')})` : empty;
-    propBody = q`SELECT NULL AS vpid, ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, ${ep.c.key} AS pk, ${ep.c.value} AS pv, NULL AS pmeta${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label} JOIN ${ep} ON ${ep.c.edge}=${n.c.id}${keyFilter}`;
+    propBody = q`SELECT NULL AS vpid, ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, ${ep.c.key} AS pk, ${storedValueExpr(ep.c.value, ep.c.vtype)} AS pv, ${ep.c.vtype} AS pvtype, NULL AS pmeta${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label} JOIN ${ep} ON ${ep.c.edge}=${n.c.id}${keyFilter}`;
   } else {
     const vp = vertexProperties.as('vp');
     const keyFilter: Expression = keys.length ? q` AND ${vp.c.key} IN (${list(keys.map(value), ',')})` : empty;
-    propBody = q`SELECT ${vp.c.id} AS vpid, ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, ${vp.c.key} AS pk, ${vp.c.value} AS pv, json(${vp.c.meta}) AS pmeta${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label} JOIN ${vp} ON ${vp.c.node}=${n.c.id}${keyFilter}`;
+    propBody = q`SELECT ${vp.c.id} AS vpid, ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, ${vp.c.key} AS pk, ${storedValueExpr(vp.c.value, vp.c.vtype)} AS pv, ${vp.c.vtype} AS pvtype, json(${vp.c.meta}) AS pmeta${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label} JOIN ${vp} ON ${vp.c.node}=${n.c.id}${keyFilter}`;
   }
   const rel = st.q.cte(propBody, [...PROPERTY_PAYLOAD, ...carriedCols(st.carried)]);
   return toPropertyStream(carryOf(st), rel, st.elem);

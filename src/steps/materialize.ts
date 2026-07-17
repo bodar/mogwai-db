@@ -112,7 +112,7 @@ export function materializePropertyRoot(stream: PropertyStream): Compiled {
   const p = stream.rel.as('p');
   return materializeRoot(
     stream.q,
-    q`SELECT ${p.c.vpid}, ${p.c.owner}, ${p.c.pk}, ${p.c.pv}, ${p.c.pmeta} FROM ${p}`,
+    q`SELECT ${p.c.vpid}, ${p.c.owner}, ${p.c.pk}, ${p.c.pv}, ${p.c.pvtype}, ${p.c.pmeta} FROM ${p}`,
     { kind: 'property' },
   );
 }

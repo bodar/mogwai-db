@@ -118,8 +118,9 @@ export interface PropertyStream extends Carry {
 
 /** The physical payload columns of a PropertyStream relation, in order. One row per
  *  VertexProperty/edge-Property instance: `vpid` the VertexProperty id (NULL for edge
- *  props), `owner` the owning element rowid, `pk`/`pv` key/value, `pmeta` a meta bag. */
-export const PROPERTY_PAYLOAD = ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pmeta'] as const;
+ *  props), `owner` the owning element rowid, `pk`/`pv` key/value, `pvtype` the value's
+ *  canonical stored type (so materialization frames it exactly), `pmeta` a meta bag. */
+export const PROPERTY_PAYLOAD = ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pvtype', 'pmeta'] as const;
 
 /** One field of a per-traverser select()/project() record. Unlike MapStream, whose
  * two columns describe an entry stream for a global group barrier, a RecordStream

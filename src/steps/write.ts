@@ -323,30 +323,13 @@ function insertRow(store: GraphStore, table: string, baseCols: string[], baseVal
 const collectionValueJson = (val: any, typeNode: TypeNode | null): string =>
   JSON.stringify(valueNodeOf(val, typeNode).v);
 
-// Reconstruct a plain JS value from ONE stored ValueNode — leaves keep their stored form,
-// containers rebuild as array/Set/Map (typed, non-string keys preserved). Used by the
-// write-response echo (readVertexProps/readEdgeProps); the full-fidelity read + echo
-// framing routes through the unified framer (execute.ts frameTypedNode).
-function plainFromNode(n: ValueNode): any {
-  if (n == null || typeof n !== 'object') return n;
-  if (n.t === 'list') return (n.v as ValueNode[]).map(plainFromNode);
-  if (n.t === 'set') return new Set((n.v as ValueNode[]).map(plainFromNode));
-  if (n.t === 'map') return new Map((n.v as [ValueNode, ValueNode][]).map(([k, x]) => [plainFromNode(k), plainFromNode(x)]));
-  return n.v;
-}
-
-// Decode a stored property VALUE for a write-response echo: a collection arrives as
-// `json(value)` TEXT of the bare top-node `v` (see the SELECTs below); rebuild the plain
-// JS array/Set/Map so echo framing produces the right container. A scalar passes through.
-const decodeStoredValue = (value: any, vtype: string | null): any => {
-  if (!isCollectionType(vtype)) return value;
-  const bare = JSON.parse(value);
-  return vtype === 'map'
-    ? new Map((bare as [ValueNode, ValueNode][]).map(([k, x]) => [plainFromNode(k), plainFromNode(x)]))
-    : vtype === 'set'
-      ? new Set((bare as ValueNode[]).map(plainFromNode))
-      : (bare as ValueNode[]).map(plainFromNode);
-};
+// A stored property VALUE as a self-describing {t,v} ValueNode for the write-response echo
+// (framed by execute.ts frameTypedNode via vertexBuffer/edgeBuffer). A collection arrives as
+// `json(value)` TEXT of the bare top-node `v` (see the SELECTs below) → its {t,v} item tree;
+// a scalar carries its raw storage value. Mirrors the read path's frameStoredValue so the
+// echoed element frames with the SAME full fidelity as a subsequent read.
+const storedNode = (value: any, vtype: string | null): ValueNode =>
+  ({ t: (vtype ?? null) as ValueNode['t'], v: isCollectionType(vtype) ? JSON.parse(value) : value });
 
 // Set/append ONE vertex property (W4). single = replace all rows for the key then insert
 // one; list = append; set = append unless an equal value already exists (then patch its
@@ -396,24 +379,24 @@ export function insertEdgeProperty(store: GraphStore, edge: number, key: string,
 
 // Read an edge's properties back as a flat {key:value} bag for a write response
 // (single-valued per key), from the normalized edge_properties table.
-function readEdgeProps(store: GraphStore, edge: number): Record<string, any> {
-  const out: Record<string, any> = {};
+function readEdgeProps(store: GraphStore, edge: number): Record<string, ValueNode> {
+  const out: Record<string, ValueNode> = {};
   for (const r of store.query<{ key: string; value: any; vtype: string | null }>(
     "SELECT key, CASE WHEN vtype IN ('list','map','set') THEN json(value) ELSE value END AS value, vtype FROM edge_properties WHERE edge=? ORDER BY id", [edge]))
-    out[r.key] = decodeStoredValue(r.value, r.vtype);
+    out[r.key] = storedNode(r.value, r.vtype);
   return out;
 }
 
 // Read a vertex's properties back as a flat {key:value} bag (first value under a key)
 // for a write response. Multi-valued keys collapse to the first here — the write
 // response shape is flat; full multi framing is on the read path.
-function readVertexProps(store: GraphStore, node: number): Record<string, any> {
-  const out: Record<string, any> = {};
-  // A collection value is a JSONB blob — return json() TEXT so decodeStoredValue can
-  // JSON.parse it to a real array/object (a raw blob would frame as a byte Map).
+function readVertexProps(store: GraphStore, node: number): Record<string, ValueNode> {
+  const out: Record<string, ValueNode> = {};
+  // A collection value is a JSONB blob — return json() TEXT so storedNode can JSON.parse it
+  // to its {t,v} item tree (a raw blob would frame as a byte Map).
   for (const r of store.query<{ key: string; value: any; vtype: string | null }>(
     "SELECT key, CASE WHEN vtype IN ('list','map','set') THEN json(value) ELSE value END AS value, vtype FROM vertex_properties WHERE node=? ORDER BY id", [node]))
-    if (!(r.key in out)) out[r.key] = decodeStoredValue(r.value, r.vtype);
+    if (!(r.key in out)) out[r.key] = storedNode(r.value, r.vtype);
   return out;
 }
 
@@ -489,14 +472,15 @@ function insertEdge(store: GraphStore, c: EdgeCluster, src: number, tgt: number,
   // Each inline prop VALUE routes through resolveSpecValue (a nested value is evaluated
   // correlated at the new edge). The response echoes the RESOLVED values, never the raw
   // {nested} args.
-  const resolved: Record<string, any> = {};
   for (const [k, v] of Object.entries(c.props)) {
     const tn = c.propTypes[k] ?? null;
     const sp: PropSpec = { key: k, value: v, vtype: gremlinTypeOf(v, tn), typeNode: tn, meta: null, cardinality: 'single' };
     const r = resolveSpecValue(store, sp, id, 'edge', params, sideEffects);
-    if (r.has) { insertEdgeProperty(store, id, k, r.value, r.vtype ?? gremlinTypeOf(r.value, null), r.typeNode); resolved[k] = r.value; }
+    if (r.has) insertEdgeProperty(store, id, k, r.value, r.vtype ?? gremlinTypeOf(r.value, null), r.typeNode);
   }
-  return { edge: { id: extId, label: c.label, src: nodeExtId(store, src), tgt: nodeExtId(store, tgt), props: resolved } };
+  // Echo the RESOLVED props by reading them back typed (storedNode {t,v}), so the response
+  // frames with the same full fidelity as a read (execute.ts frameTypedNode).
+  return { edge: { id: extId, label: c.label, src: nodeExtId(store, src), tgt: nodeExtId(store, tgt), props: readEdgeProps(store, id) } };
 }
 
 // Resolve a cluster's from()/to() and insert the edge.
@@ -785,7 +769,8 @@ function compileMergeV(steps: PStep[], params: Record<string, any>, sideEffects?
           const props = { ...matchSpec.props, ...(oc?.props ?? {}) };
           const propTypes = { ...matchSpec.propTypes, ...(oc?.propTypes ?? {}) };
           const v = insertVertex(store, { label, props: singleProps(props, propTypes), uid: matchSpec.id ?? oc?.id ?? null }, params, sideEffects);
-          out.push({ vertex: { id: v.extId, label, props } });
+          // Echo typed props read back from storage ({t,v}), not the raw resolved values.
+          out.push({ vertex: { id: v.extId, label, props: readVertexProps(store, v.id) } });
         }
       }
       return out;

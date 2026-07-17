@@ -22,14 +22,20 @@ import { ioc, VertexProperty, Property, t } from './io.ts';
 // VertexPropertySerializer via the qualified list, which serializes correctly.
 // props is {key: [value, …]} — one VertexProperty per value (multi-property). The id
 // is synthetic (owner.ordinal); scenarios compare on key+value+owner, not this id.
-function vertexBuffer(id: number, label: string, props: Record<string, any[]>): Buffer {
+// props is {key: [{t,v}, …]} — each value a self-describing typed node (plan.ts
+// propNodeExpr). We hand-roll every VertexProperty (value via frameTypedNode → its EXACT
+// GraphBinary type) instead of routing through the client's VertexPropertySerializer, which
+// re-infers the value type from its JS runtime value (the #5 bug).
+function vertexBuffer(id: number, label: string, props: Record<string, ValueNode[]>): Buffer {
   let pid = 0;
-  const vprops = Object.entries(props).flatMap(([k, vs]) => vs.map((v) => new VertexProperty(`${id}.${pid++}`, k, v, [])));
+  const vprops: Buffer[] = [];
+  for (const [k, nodes] of Object.entries(props))
+    for (const node of nodes) vprops.push(vertexPropertyBuffer(`${id}.${pid++}`, k, frameTypedNode(node), null));
   return Buffer.concat([
     Buffer.from([ioc.DataType.VERTEX, 0x00]),
     ioc.anySerializer.serialize(id),            // {id}, fully qualified
     ioc.listSerializer.serialize([label], false), // {label}, bare list of one
-    ioc.listSerializer.serialize(vprops, true),   // {properties}, qualified list
+    listBuffer(vprops),                           // {properties}: qualified LIST of hand-framed VertexProperty
   ]);
 }
 
@@ -39,8 +45,11 @@ function vertexBuffer(id: number, label: string, props: Record<string, any[]>): 
 // list, outV(=src) id + bare label list, null parent, qualified property list.
 // Endpoint labels ride empty (as the addE write path does); readers that need
 // endpoint names traverse for them rather than read the embedded edge element.
-function edgeBuffer(id: number, label: string, src: number, tgt: number, props: Record<string, any>): Buffer {
-  const eprops = Object.entries(props).map(([k, v]) => new Property(k, v));
+// props is {key: {t,v}} — one typed node per key (edge Property is single). Each Property
+// is hand-rolled (value via frameTypedNode) so its GraphBinary type is exact, bypassing the
+// client's PropertySerializer value-inference.
+function edgeBuffer(id: number, label: string, src: number, tgt: number, props: Record<string, ValueNode>): Buffer {
+  const eprops = Object.entries(props).map(([k, node]) => propertyFrame(k, frameTypedNode(node)));
   return Buffer.concat([
     Buffer.from([ioc.DataType.EDGE, 0x00]),
     ioc.anySerializer.serialize(id),
@@ -50,7 +59,19 @@ function edgeBuffer(id: number, label: string, src: number, tgt: number, props: 
     ioc.anySerializer.serialize(src),          // outV id
     ioc.listSerializer.serialize([], false),   // outV label (omitted)
     ioc.unspecifiedNullSerializer.serialize(null), // parent
-    ioc.listSerializer.serialize(eprops, true),     // properties (qualified)
+    listBuffer(eprops),                             // properties: qualified LIST of hand-framed Property
+  ]);
+}
+
+// A GraphBinary Property (fq) with a PRE-FRAMED value buffer — mirrors the client
+// PropertySerializer layout ([PROPERTY,0x00], {key} bare string, {value} fq, {parent} null)
+// but takes an already-typed value so a typed/collection edge-property value frames exactly.
+function propertyFrame(key: string, valueBuf: Buffer): Buffer {
+  return Buffer.concat([
+    Buffer.from([ioc.DataType.PROPERTY, 0x00]),
+    ioc.stringSerializer.serialize(key, false),
+    valueBuf,
+    ioc.unspecifiedNullSerializer.serialize(null),
   ]);
 }
 
@@ -66,13 +87,13 @@ function propertyBuffer(owner: number, key: string, value: any): Buffer {
 // as Vertex/Edge), so routing through anySerializer would drop the meta. Layout mirrors
 // VertexPropertySerializer: id, {label}=[key] bare, value, null parent, qualified meta
 // list. `Property`'s own serializer is not buggy, so meta items frame via listSerializer.
-function vertexPropertyBuffer(id: any, key: string, value: any, meta: Record<string, any> | null): Buffer {
+function vertexPropertyBuffer(id: any, key: string, valueBuf: Buffer, meta: Record<string, any> | null): Buffer {
   const metaProps = meta ? Object.entries(meta).map(([k, v]) => new Property(k, v)) : [];
   return Buffer.concat([
     Buffer.from([ioc.DataType.VERTEXPROPERTY, 0x00]),
     ioc.anySerializer.serialize(id),
     ioc.listSerializer.serialize([key], false),
-    ioc.anySerializer.serialize(value),
+    valueBuf,                                       // PRE-FRAMED (typed): its GraphBinary type is exact
     ioc.unspecifiedNullSerializer.serialize(null), // parent
     ioc.listSerializer.serialize(metaProps, true), // {properties} = meta, qualified
   ]);
@@ -82,22 +103,35 @@ function vertexPropertyBuffer(id: any, key: string, value: any, meta: Record<str
 // prepend the T.id/T.label entries (T tokens ride as GraphBinary DataType.T).
 // props is {key:[values]} (multi-valued). valueMap → Map<key, [values]>; with tokens,
 // prepend the T.id/T.label entries (T tokens ride as GraphBinary DataType.T).
-function valueMapBuffer(id: number, label: string, props: Record<string, any[]>,
+// props is {key: [{t,v}, …]}. Hand-roll the MAP so each property value's List frames
+// through frameTypedNode (exact element types) instead of the client's MapSerializer →
+// listSerializer inferring them. Token entries (T.id/T.label) frame via anySerializer
+// (an EnumValue rides as DataType.T; id/label are plain int/string).
+function mapFromEntries(pairs: [Buffer, Buffer][]): Buffer {
+  const parts: Buffer[] = [Buffer.from([ioc.DataType.MAP, 0x00]), ioc.intSerializer.serialize(pairs.length, false)];
+  for (const [k, v] of pairs) { parts.push(k, v); }
+  return Buffer.concat(parts);
+}
+function valueMapBuffer(id: number, label: string, props: Record<string, ValueNode[]>,
                         keys: string[] | null, tokens: boolean): Buffer {
-  const m = new Map<any, any>();
-  if (tokens) { m.set(t.id, id); m.set(t.label, label); }
-  for (const key of keys ?? Object.keys(props)) if (key in props) m.set(key, props[key]);
-  return ioc.anySerializer.serialize(m);
+  const pairs: [Buffer, Buffer][] = [];
+  if (tokens) { pairs.push([ioc.anySerializer.serialize(t.id), ioc.anySerializer.serialize(id)]); pairs.push([ioc.anySerializer.serialize(t.label), ioc.anySerializer.serialize(label)]); }
+  for (const key of keys ?? Object.keys(props)) if (key in props)
+    pairs.push([ioc.anySerializer.serialize(key), listBuffer(props[key].map(frameTypedNode))]);
+  return mapFromEntries(pairs);
 }
 
 // elementMap(): flat Map with ONE value per key (first under multi); id/label tokens
-// are ALWAYS present.
-function elementMapBuffer(id: number, label: string, props: Record<string, any[]>,
+// are ALWAYS present. The single value frames typed via frameTypedNode.
+function elementMapBuffer(id: number, label: string, props: Record<string, ValueNode[]>,
                           keys: string[] | null): Buffer {
-  const m = new Map<any, any>();
-  m.set(t.id, id); m.set(t.label, label);
-  for (const key of keys ?? Object.keys(props)) if (key in props) m.set(key, props[key][0]);
-  return ioc.anySerializer.serialize(m);
+  const pairs: [Buffer, Buffer][] = [
+    [ioc.anySerializer.serialize(t.id), ioc.anySerializer.serialize(id)],
+    [ioc.anySerializer.serialize(t.label), ioc.anySerializer.serialize(label)],
+  ];
+  for (const key of keys ?? Object.keys(props)) if (key in props)
+    pairs.push([ioc.anySerializer.serialize(key), frameTypedNode(props[key][0])]);
+  return mapFromEntries(pairs);
 }
 
 // select(labels…)/project(keys…): one GraphBinary Map per row. Framed by hand
@@ -444,7 +478,7 @@ function* framedResults(store: GraphStore, gremlin: string, params: Record<strin
     // pathGrouped folds pk-runs into Paths — a bounded fold, so yield each completed Path.
     case 'pathGrouped': yield* pathGroupedBuffers(rows, shape.elem, shape.byKey); return;
     // A VertexProperty with its real id + meta-properties framed (vpid null on edges → synthetic).
-    case 'property': for (const r of rows) yield vertexPropertyBuffer(r.vpid ?? `${r.owner}:${r.pk}`, r.pk, r.pv, r.pmeta ? JSON.parse(r.pmeta) : null); return;
+    case 'property': for (const r of rows) yield vertexPropertyBuffer(r.vpid ?? `${r.owner}:${r.pk}`, r.pk, frameStoredValue(r.pv, r.pvtype ?? null), r.pmeta ? JSON.parse(r.pmeta) : null); return;
     // properties().properties(): meta-properties as Property elements.
     case 'metaProperty': for (const r of rows) yield ioc.anySerializer.serialize(new Property(r.mk, r.mv)); return;
     // properties(k).valueMap(): a VertexProperty's meta as a flat Map.

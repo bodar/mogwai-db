@@ -388,6 +388,14 @@ export const extIdOf = (rowid: Expression): Expression => q`(SELECT COALESCE(uid
 export const storedValueExpr = (valExpr: Expression, vtypeExpr: Expression): Expression =>
   q`CASE WHEN ${vtypeExpr} IN ('list','map','set') THEN json(${valExpr}) ELSE ${valExpr} END`;
 
+/** Wrap a stored property (value, vtype) as a self-describing {t,v} JSON node for
+ *  WHOLE-ELEMENT framing (valueMap/vertex/edge/properties): the aggregated props carry each
+ *  value's type so the framer frames it EXACTLY (execute.ts frameTypedNode) instead of the
+ *  client's serializers re-inferring it from the JS value (the #5 bug). A collection nests
+ *  via json() (embedded, not double-encoded); a scalar rides as its raw storage value. */
+export const propNodeExpr = (valExpr: Expression, vtypeExpr: Expression): Expression =>
+  q`json_object('t', ${vtypeExpr}, 'v', ${storedValueExpr(valExpr, vtypeExpr)})`;
+
 export const nodePropScalar = (nodeIdExpr: Expression, key: string): Expression =>
   q`(SELECT value FROM vertex_properties WHERE node=${nodeIdExpr} AND key=${value(key)} ORDER BY id LIMIT 1)`;
 
@@ -417,12 +425,12 @@ export const edgeHasProp = (edgeIdExpr: Expression, key: string, pred: any): Exp
  *  on the edge rowid. Empty → `{}`. Mirror of vertexPropsAgg (which nests `[values]`
  *  for multi-property vertices; edges are single so the value is bare). */
 export const edgePropsAgg = (edgeIdExpr: Expression): Expression =>
-  q`COALESCE((SELECT json_group_object(key, value) FROM edge_properties WHERE edge=${edgeIdExpr}), '{}')`;
+  q`COALESCE((SELECT json_group_object(key, ${propNodeExpr(raw('value'), raw('vtype'))}) FROM edge_properties WHERE edge=${edgeIdExpr}), '{}')`;
 
 /** edge: valueMap props as `{key:[value]}` (each value wrapped in a 1-list so the
  *  handler frames node + edge valueMaps uniformly). */
 export const edgeValueMapProps = (edgeIdExpr: Expression): Expression =>
-  q`COALESCE((SELECT json_group_object(key, json_array(value)) FROM edge_properties WHERE edge=${edgeIdExpr}), '{}')`;
+  q`COALESCE((SELECT json_group_object(key, json_array(${propNodeExpr(raw('value'), raw('vtype'))})) FROM edge_properties WHERE edge=${edgeIdExpr}), '{}')`;
 
 /** A single scalar value for `key` on the current element (order/group-key/by(key)):
  *  node → first-under-multi; edge → the single value. Both read their normalized table. */
@@ -440,7 +448,7 @@ export const hasProp = (ctx: ScalarCtx, key: string, pred: any): Expression =>
  *  insertion-ordered) from vertex_properties, correlated on the node rowid. Empty →
  *  `{}`. JSON text (not JSONB) — computed on the fly, so the handler JSON.parses it. */
 export const vertexPropsAgg = (nodeIdExpr: Expression): Expression =>
-  q`COALESCE((SELECT json_group_object(key, json(vs)) FROM (SELECT key, json_group_array(value ORDER BY id) AS vs FROM vertex_properties WHERE node=${nodeIdExpr} GROUP BY key ORDER BY MIN(id))), '{}')`;
+  q`COALESCE((SELECT json_group_object(key, json(vs)) FROM (SELECT key, json_group_array(${propNodeExpr(raw('value'), raw('vtype'))} ORDER BY id) AS vs FROM vertex_properties WHERE node=${nodeIdExpr} GROUP BY key ORDER BY MIN(id))), '{}')`;
 
 /** The props expression for framing a whole element out. Node: vertexPropsAgg
  *  ({key:[values]}); edge: edgePropsAgg ({key:value}), both over the rowid. */
