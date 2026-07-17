@@ -97,12 +97,12 @@ export function materializeListRoot(stream: ListStream): Compiled {
       { kind: 'jsonbElementList', elem: elem === 'edge' ? 'edge' : 'vertex' },
     );
   }
+  const typed = stream.of.kind === 'scalar' && stream.of.typed ? true : undefined;
   const as = stream.of.kind === 'scalar' ? stream.of.as : undefined;
-  return materializeRoot(
-    stream.q,
-    q`SELECT json(${c.c.list}) AS list FROM ${c}`,
-    as ? { kind: 'jsonbList', as } : { kind: 'jsonbList' },
-  );
+  const shape: Shape = stream.set
+    ? { kind: 'jsonbSet', typed }
+    : typed ? { kind: 'jsonbList', typed } : as ? { kind: 'jsonbList', as } : { kind: 'jsonbList' };
+  return materializeRoot(stream.q, q`SELECT json(${c.c.list}) AS list FROM ${c}`, shape);
 }
 
 /** Materialize a PropertyStream only at the root boundary. Edge Property rows use

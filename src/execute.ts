@@ -1,5 +1,5 @@
 import { compile, type ListOf, type MapEntry, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from './compiler.ts';
-import { type TypeNode } from './gremlin-types.ts';
+import { isCollectionType, type TypeNode, type ValueNode } from './gremlin-types.ts';
 import type { GraphStore } from './storage.ts';
 import { ioc, VertexProperty, Property, t } from './io.ts';
 
@@ -141,6 +141,51 @@ function listBuffer(items: Buffer[]): Buffer {
   ]);
 }
 
+// A GraphBinary SET framed by hand (same layout as LIST, DataType.SET) so its items go
+// through the typed framer instead of the client's element-type-inferring SetSerializer.
+function setBuffer(items: Buffer[]): Buffer {
+  return Buffer.concat([
+    Buffer.from([ioc.DataType.SET, 0x00]),
+    ioc.intSerializer.serialize(items.length, false),
+    ...items,
+  ]);
+}
+
+// ---- the unified typed-value framer (self-describing collection values) ----
+//
+// A stored collection value is a self-describing {t,v} tree (gremlin-types.valueNodeOf).
+// frameTypedNode frames ANY node — a container recurses through listBuffer/setBuffer/a
+// hand-rolled MAP; a leaf reuses the SAME scalar table as frameValue (vtypeToValueType(t)),
+// so a nested long/uuid/datetime/bigdecimal/char/duration frames EXACTLY (no client
+// JS-type inference — the bug this replaces). frameStoredValue is the entry from a raw
+// (value, vtype) column pair: a scalar frames straight; a collection JSON.parses the bare
+// top `v` (the vtype column names the outer shape) and frames the reconstructed node.
+
+function frameTypedNode(node: ValueNode): Buffer {
+  if (node == null) return frameValue(null, undefined);
+  if (node.t === 'list') return listBuffer((node.v as ValueNode[]).map(frameTypedNode));
+  if (node.t === 'set') return setBuffer((node.v as ValueNode[]).map(frameTypedNode));
+  if (node.t === 'map') return typedMapBuffer(node.v as [ValueNode, ValueNode][]);
+  return frameValue(node.v, vtypeToValueType(node.t));
+}
+
+// A GraphBinary MAP from ordered typed [key, value] node pairs — keys AND values framed
+// by the typed framer (so a non-string / typed key rides its true type). Layout mirrors
+// mapBuffer: [MAP, 0x00], bare int32 count, then key/value fully-qualified buffers.
+function typedMapBuffer(pairs: [ValueNode, ValueNode][]): Buffer {
+  const parts: Buffer[] = [Buffer.from([ioc.DataType.MAP, 0x00]), ioc.intSerializer.serialize(pairs.length, false)];
+  for (const [k, v] of pairs) { parts.push(frameTypedNode(k), frameTypedNode(v)); }
+  return Buffer.concat(parts);
+}
+
+// Frame a stored (value, vtype) column pair: a scalar via the compile-time table; a
+// collection by reconstructing its ValueNode from the bare stored `v` (JSON text of the
+// top node's payload — list/set → ValueNode[], map → [k,v] pairs) and framing the tree.
+function frameStoredValue(raw: any, vtype: string | null): Buffer {
+  if (!isCollectionType(vtype)) return frameValue(raw, vtypeToValueType(vtype));
+  return frameTypedNode({ t: vtype as ValueNode['t'], v: JSON.parse(raw) } as ValueNode);
+}
+
 // Frame a vertex/edge from a plain (unprefixed) result row — the id/label/props
 // (+ src/tgt) projection the vertex/edge/list shapes share.
 const propsOf = (props: any): Record<string, any> => typeof props === 'string' ? JSON.parse(props) : props;
@@ -269,7 +314,10 @@ function frameValue(v: any, as: ValueType | undefined): Buffer {
 function frameListOf(json: string, of: ListOf): Buffer {
   const items = JSON.parse(json);
   if (of.kind === 'elem') return listBuffer(items.map(of.elem === 'edge' ? rowEdge : rowVertex));
-  if (of.kind === 'scalar') return of.as ? listBuffer(items.map((x: any) => frameValue(x, of.as))) : ioc.listSerializer.serialize(items);
+  if (of.kind === 'scalar')
+    return of.typed ? listBuffer(items.map(frameTypedNode))
+      : of.as ? listBuffer(items.map((x: any) => frameValue(x, of.as)))
+        : ioc.listSerializer.serialize(items);
   return ioc.listSerializer.serialize(items); // list-of-lists: members already framed as JSON
 }
 
@@ -367,8 +415,11 @@ function* framedResults(store: GraphStore, gremlin: string, params: Record<strin
     case 'elementMap': for (const r of rows) yield elementMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys); return;
     case 'count': for (const r of rows) yield ioc.anySerializer.serialize(BigInt(r.v)); return;
     // Per-row framing: values() of a typed prop frames each row by its own stored vtype
-    // (like variant frames by vk); otherwise the single compile-time `as` applies.
-    case 'value': for (const r of rows) yield frameValue(r.v, shape.perRowType ? vtypeToValueType(r.vtype) : shape.as); return;
+    // (like variant frames by vk); a collection vtype frames the stored {t,v} tree via
+    // frameStoredValue (fixes bare values(collectionProp)); otherwise the single `as` applies.
+    case 'value': for (const r of rows) yield shape.perRowType && isCollectionType(r.vtype)
+      ? frameStoredValue(r.v, r.vtype)
+      : frameValue(r.v, shape.perRowType ? vtypeToValueType(r.vtype) : shape.as); return;
     // P4 dynamic-tag row: dispatch each row by its own `vk` — null / scalar / node /
     // edge / list — mirroring the per-row `vtype` dispatch of `case 'value'`.
     case 'variant': {
@@ -413,7 +464,9 @@ function* framedResults(store: GraphStore, gremlin: string, params: Record<strin
     // text via json(), so it JSON.parses; scalar elements frame via listSerializer).
     case 'jsonbList': for (const r of rows) {
       const items = JSON.parse(r.list);
-      yield shape.as ? listBuffer(items.map((v: any) => frameValue(v, shape.as))) : ioc.listSerializer.serialize(items);
+      yield shape.typed ? listBuffer(items.map(frameTypedNode))
+        : shape.as ? listBuffer(items.map((v: any) => frameValue(v, shape.as)))
+          : ioc.listSerializer.serialize(items);
     } return;
     // Relational element-list values materialize as ordered JSON object arrays in
     // SQL, then frame each member through the same property-preserving element
@@ -422,8 +475,12 @@ function* framedResults(store: GraphStore, gremlin: string, params: Record<strin
       const items = JSON.parse(r.list);
       yield listBuffer(items.map(shape.elem === 'edge' ? rowEdge : rowVertex));
     } return;
-    // A set-VALUE stream (intersect/difference/disjunct): frame each list column as a Set.
-    case 'jsonbSet': for (const r of rows) yield ioc.setSerializer.serialize(new Set(JSON.parse(r.list))); return;
+    // A set-VALUE stream (intersect/difference/disjunct, or a stored typed set): frame each
+    // list column as a Set — typed items via frameTypedNode (exact element types), else the
+    // client's element-inferring SetSerializer over the computed scalars.
+    case 'jsonbSet': for (const r of rows)
+      yield shape.typed ? setBuffer((JSON.parse(r.list) as ValueNode[]).map(frameTypedNode))
+        : ioc.setSerializer.serialize(new Set(JSON.parse(r.list))); return;
     case 'discard': return;
   }
 }

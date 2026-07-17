@@ -17,6 +17,18 @@ import { compileRead } from './index.ts';
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
 const isLocal = (s: PStep): boolean => (s.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local');
 
+/** A stored TYPED collection (of.typed) carries self-describing {t,v} element nodes. The
+ *  list rebuild/transform ops below read/rewrite each element as a BARE scalar (json_each
+ *  `value`), which would corrupt the envelope (double-encode) or mis-compare. They are
+ *  unreached for stored typed collections today, so fail CLOSED with a clear deferral rather
+ *  than misexecute — unfold() and count/sum/min/max/mean(Scope.local) ARE typed-aware. The
+ *  fidelity requirement is round-trip (write→read→frame); typed-element transforms are
+ *  deferred, matching the plan's declared scope. */
+const assertUntypedList = (s: ListStream, op: string): void => {
+  if (s.of.kind === 'scalar' && s.of.typed)
+    throw new Error(`${op}() over a stored typed collection not yet supported (element retagging deferred; unfold() + count/sum/min/max/mean(Scope.local) are supported)`);
+};
+
 /** A Scope.local reducer over a list value: reduce EACH list (row) to one scalar via a
  *  correlated json_each aggregate. count() counts elements (any list); sum/min/max/mean
  *  reduce the numeric elements (non-numeric filtered out, matching the global reducers).
@@ -32,10 +44,14 @@ function lowerListReducer(s: ListStream, name: string): ScalarStream {
     const rel = s.q.cte(q`SELECT (SELECT COUNT(*) FROM json_each(${c.c.list}) je) AS v${carry} FROM ${c}`, ['v', ...carried]);
     return toScalarStream(carryOf(s), rel, 'long', 'count');
   }
+  // A stored typed list carries {t,v} nodes; extract each element's payload (`->> '$.v'`)
+  // so the numeric typeof guard sees the underlying value (an INTEGER/REAL/TEXT), not the
+  // JSON object. A computed (untyped) list holds bare scalars — read je.value directly.
+  const elem = s.of.kind === 'scalar' && s.of.typed ? q`je.value ->> '$.v'` : q`je.value`;
   // Numeric aggregate over the list's numeric elements (typeof guard mirrors wrapReducer);
   // min/max also range over text (TinkerPop 4 Strings are Comparable), sum/mean stay numeric.
   const types = (name === 'min' || name === 'max') ? "('integer', 'real', 'text')" : "('integer', 'real')";
-  const agg = (fn: string): Expression => q`(SELECT ${fn}(je.value) FROM json_each(${c.c.list}) je WHERE typeof(je.value) in ${types})`;
+  const agg = (fn: string): Expression => q`(SELECT ${fn}(${elem}) FROM json_each(${c.c.list}) je WHERE typeof(${elem}) in ${types})`;
   if (name === 'mean') {
     const rel = s.q.cte(q`SELECT ${agg('AVG')} AS v, 'real' AS vt${carry} FROM ${c}`, ['v', 'vt', ...carried]);
     return toScalarStream(carryOf(s), rel, undefined, 'number', undefined, s.of.kind === 'scalar' && s.of.productiveNull);
@@ -71,6 +87,17 @@ export function compileUnfold(s: ListStream): ElementStream | ScalarStream | Lis
     const rel = explode('list');
     return toListStream(c, rel, s.of.of);
   }
+  // A stored TYPED list (of.typed): each element is a self-describing {t,v} node. Explode
+  // extracting the payload (`->> '$.v'`) AND the per-element type (`->> '$.t'`) into a
+  // vtype-carrying ScalarStream — reusing the P1–P3 typed-scalar spine, so each element
+  // frames by its own type (a nested list/map element frames whole via frameStoredValue).
+  if (s.of.kind === 'scalar' && s.of.typed) {
+    const rel = s.q.cte(
+      q`SELECT je.value ->> '$.v' AS v, je.value ->> '$.t' AS vtype${carryFrag(s.carried, p)} FROM ${p}, json_each(${p.c.list}) je ORDER BY je.key`,
+      ['v', 'vtype', ...carriedCols(s.carried)],
+    );
+    return toScalarStream(c, rel, undefined, 'value', undefined, undefined, 'vtype');
+  }
   const rel = explode('v');
   return toScalarStream(c, rel, s.of.as, 'value', undefined, s.of.productiveNull);
 }
@@ -87,6 +114,7 @@ function listCte(s: ListStream, c: Relation, listExpr: Expression, of: ListStrea
  *  filter) — stays a list stream. (SQL null semantics: an eq(null)/neq(null) predicate
  *  won't match a null element, so those edge forms may differ from TinkerPop.) */
 function listNoneFilter(s: ListStream, pred: any): ListStream {
+  assertUntypedList(s, 'none');
   const c = s.rel.as('c');
   return listCte(s, c, c.c.list, s.of, q` WHERE NOT EXISTS (SELECT 1 FROM json_each(${c.c.list}) je WHERE ${predicateSql(q`je.value`, pred)})`);
 }
@@ -105,6 +133,7 @@ const STRING_LOCAL_TX = new Set(['toUpper', 'toLower', 'trim', 'lTrim', 'rTrim',
  *  list applying scalarTx to every element, preserving position order. Null elements
  *  pass through (SQLite null propagation → the transformed element stays null). */
 function listStringTransform(s: ListStream, step: PStep): ListStream {
+  assertUntypedList(s, step.name);
   const c = s.rel.as('c');
   const elem = scalarTx(step.name, step.args ?? [], q`x.value`);
   if (!elem) throw new Error(`scalar transform ${step.name}() not supported`);
@@ -115,6 +144,7 @@ function listStringTransform(s: ListStream, step: PStep): ListStream {
 /** reverse() on a list value → reverse element order (json_each ordered by position
  *  DESC). Stays a list stream. */
 function listReverse(s: ListStream): ListStream {
+  assertUntypedList(s, 'reverse');
   const c = s.rel.as('c');
   const sub = q`(SELECT jsonb(COALESCE(json_group_array(x.value ORDER BY x.key DESC), json('[]'))) FROM json_each(${c.c.list}) x)`;
   return listCte(s, c, sub, s.of);
@@ -130,6 +160,7 @@ function listReverse(s: ListStream): ListStream {
  * (unfold / another list op / terminal) continues. by()/nested comparators defer.
  */
 function listLocalTransform(s: ListStream, step: PStep): ListStream {
+  assertUntypedList(s, step.name);
   const c = s.rel.as('c');
   const name = step.name;
   const nums = (step.args ?? []).filter((a: any) => typeof a === 'number') as number[];
@@ -256,6 +287,7 @@ function setOpExpr(name: string, self: Expression, op: Expression): Expression {
  *  null elements fail a predicate (all([null,x]) drops); an eq/neq(null) predicate is
  *  null-aware so all([null,null], eq(null)) keeps. */
 function listAllAny(s: ListStream, step: PStep): ListStream {
+  assertUntypedList(s, step.name);
   const c = s.rel.as('c');
   const pred = step.args[0];
   const je = q`json_each(${c.c.list})`;
@@ -299,6 +331,7 @@ const listReducer: ShapeTailFn<ListStream> = (s, step, _steps, at) =>
 // conjoin(delim): join the incoming list into ONE string (nulls skipped), delimiter a
 // plain string arg → a scalar stream (so a trailing step composes; usually terminal).
 const listConjoin: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
+  assertUntypedList(s, 'conjoin');
   const c = s.rel.as('c');
   const delim = String(step.args[0] ?? '');
   const joined = q`(SELECT COALESCE(group_concat(value, ${value(delim)}), '') FROM (SELECT value FROM json_each(${c.c.list}) WHERE value IS NOT NULL ORDER BY key))`;
@@ -308,6 +341,7 @@ const listConjoin: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
 
 // set-op family (combine/intersect/difference/disjunct/product) over a list operand.
 const listSetOp: ShapeTailFn<ListStream> = (s, step, steps, at) => {
+  assertUntypedList(s, step.name);
   const c = s.rel.as('c');
   const op = operandList(step.args[0], step.name, s.params);
   const listExpr = setOpExpr(step.name, c.c.list, op);

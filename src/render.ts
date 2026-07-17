@@ -12,7 +12,10 @@ import { q, type Expression, type Query, type Relation } from './q.ts';
  * both ListStream and map/record fields must agree on how GraphBinary frames it. */
 export type ListOf =
   | { kind: 'elem'; elem: 'node' | 'edge' }
-  | { kind: 'scalar'; as?: ValueType; productiveNull?: boolean }
+  // `typed`: items are self-describing {t,v} ValueNodes (a stored typed collection),
+  // so unfold carries each element's own vtype and framing routes through frameTypedNode
+  // (not the single `as` tag). A computed scalar list (fold of scalars) stays untyped.
+  | { kind: 'scalar'; as?: ValueType; productiveNull?: boolean; typed?: boolean }
   | { kind: 'list'; of: ListOf };
 
 // select(labels…)/project(keys…): a Map per row. Each entry names its result
@@ -78,14 +81,14 @@ export type Shape =
   | { kind: 'property' } // properties(): VertexProperty elements (vpid/owner/pk/pv/pmeta cols)
   | { kind: 'metaProperty' } // properties().properties(): meta-properties as Property elements (mk/mv cols)
   | { kind: 'metaMap' } // properties(k).valueMap(): a VertexProperty's meta as a flat Map (meta col, JSON text)
-  | { kind: 'value'; as?: ValueType; perRowType?: boolean } // perRowType: frame each row by its own stored `vtype` column (values() of typed props), not the single `as`
+  | { kind: 'value'; as?: ValueType; perRowType?: boolean } // perRowType: frame each row by its own stored `vtype` column (values() of typed props), not the single `as`; a collection vtype frames the stored {t,v} tree via frameStoredValue
   | { kind: 'variant'; scalarAs?: ValueType; node?: boolean; edge?: boolean; listOf?: ListOf; list?: boolean } // per-row tag: null/scalar/node/edge/list; `list` wraps ALL rows into one outer List (cap)
   | { kind: 'count' }
   | { kind: 'scalar'; productiveNull?: boolean } // numeric reducer; productive NULL may be a real result
   | { kind: 'list'; elem: ElemShape | 'scalar'; as?: ValueType } // legacy row-fold; scalar items may carry a uniform type
-  | { kind: 'jsonbList'; as?: ValueType } // list-VALUE rows; scalar items may carry a uniform type
+  | { kind: 'jsonbList'; as?: ValueType; typed?: boolean } // list-VALUE rows; `typed` → items are {t,v} nodes framed via frameTypedNode; else `as` is a uniform item type
   | { kind: 'jsonbElementList'; elem: Exclude<ElemShape, 'property'> } // one JSON object-array per relational element list
-  | { kind: 'jsonbSet' }    // a set-VALUE stream (intersect/difference/disjunct): one Set per row, from a JSONB `list` column
+  | { kind: 'jsonbSet'; typed?: boolean }    // a set-VALUE stream (intersect/difference/disjunct OR a stored typed set): one Set per row, from a JSONB `list` column
   | { kind: 'valueMap'; keys: string[] | null; tokens: boolean }
   | { kind: 'elementMap'; keys: string[] | null }
   | { kind: 'map'; entries: MapEntry[] }

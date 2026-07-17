@@ -8,32 +8,36 @@ import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, numericSpec } from '
 import { normalizeTypeName } from '../gremlin-types.ts';
 import { type ValueType } from '../render.ts';
 
-/** True iff `step` is `is(typeOf(GType.LIST))` — the one collection typeOf that RETYPES
- *  a scalar value stream into a ListStream (the stored JSONB list value becomes the
- *  `list` column) so the whole list substrate (unfold/count(local)/range/…) reuses it.
- *  MAP/SET stay a plain scalar vtype filter (no MapStream retype yet). */
-export function isListTypeOf(step: PStep): boolean {
-  if (step.name !== 'is') return false;
+/** If `step` is `is(typeOf(GType.X))` for a COLLECTION type, the canonical collection name
+ *  ('list'|'set'|'map'); else null. list/set RETYPE a scalar value stream into a ListStream
+ *  (the stored collection value becomes the `list` column) so the whole list substrate
+ *  (unfold/count(local)/range/…) reuses it — see scalarCollectionRetype. MAP stays a plain
+ *  scalar vtype filter (no MapStream relational unfold yet — deferred); a bare map value
+ *  still frames whole via the per-row vtype path (execute.ts case 'value' → frameStoredValue). */
+export function collectionTypeOf(step: PStep): 'list' | 'set' | 'map' | null {
+  if (step.name !== 'is') return null;
   const pred = (step.args ?? [])[0];
-  if (!pred || typeof pred !== 'object' || pred.op !== 'typeOf') return false;
+  if (!pred || typeof pred !== 'object' || pred.op !== 'typeOf') return null;
   const arg = pred.values?.[0];
   const name = (arg && typeof arg === 'object' && 'gtype' in arg) ? String(arg.gtype) : typeof arg === 'string' ? arg : null;
-  return !!name && normalizeTypeName(name) === 'list';
+  const c = name ? normalizeTypeName(name) : null;
+  return c === 'list' || c === 'set' || c === 'map' ? c : null;
 }
 
-/** Retype a scalar value stream at is(typeOf(LIST)): keep only rows whose stored vtype
- *  is 'list' and expose each JSONB list value as the ListStream `list` column (json() to
- *  text so unfold's json_each / list reducers / root framing consume it). Requires the
- *  per-row stored vtype column (values()/properties() of a stored prop); a computed
- *  scalar has no stored list → null (the generic is() static-folds it to empty). */
-export function scalarListRetype(s: ScalarStream): ListStream | null {
+/** Retype a scalar value stream at is(typeOf(LIST|SET)): keep only rows whose stored vtype
+ *  matches `kind` and expose each stored collection value as the ListStream `list` column
+ *  (json() to text so unfold's json_each / reducers / root framing consume the self-
+ *  describing {t,v} tree — of.typed). A SET marks the stream so it frames as a GraphBinary
+ *  Set. Requires the per-row stored vtype column (values()/properties() of a stored prop);
+ *  a computed scalar has no stored collection → null (the generic is() static-folds it). */
+export function scalarCollectionRetype(s: ScalarStream, kind: 'list' | 'set'): ListStream | null {
   if (!s.vtype) return null;
   const p = s.rel.as('p');
   const rel = s.q.cte(
-    q`SELECT json(${p.c.v}) AS list${carryFrag(s.carried, p)} FROM ${p} WHERE ${p.c[s.vtype]} = ${value('list')}`,
+    q`SELECT json(${p.c.v}) AS list${carryFrag(s.carried, p)} FROM ${p} WHERE ${p.c[s.vtype]} = ${value(kind)}`,
     ['list', ...carriedCols(s.carried)],
   );
-  return toListStream(carryOf(s), rel, { kind: 'scalar' });
+  return toListStream(carryOf(s), rel, { kind: 'scalar', typed: true }, kind === 'set');
 }
 
 export const SCALAR_TRANSFORMS = new Set([
@@ -383,7 +387,7 @@ export function lowerScalarRows(
     // is(typeOf(LIST)) over a stored-typed stream is a RETYPE (scalar→list), not a value
     // filter — stop so compileFromScalar builds the ListStream. Without a per-row stored
     // vtype (a computed scalar) it stays a fused is() that static-folds to empty.
-    if (step.name === 'is' && isListTypeOf(step) && stream.vtype) break;
+    if (step.name === 'is' && stream.vtype && (collectionTypeOf(step) === 'list' || collectionTypeOf(step) === 'set')) break;
     if (SCALAR_TRANSFORMS.has(step.name) || step.name === 'is') {
       const fused = fuseScalarSegment(stream, steps, i);
       stream = fused.stream;
