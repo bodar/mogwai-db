@@ -245,7 +245,11 @@ export function gremlinTypeOf(jsValue: any, argType?: TypeNode | null): Canonica
     case 'boolean': return 'boolean';
     case 'string': return 'string';
     case 'bigint': return 'bigint';
-    case 'number': return Number.isInteger(jsValue) ? 'int' : 'double';
+    // An integer beyond int32 range is a `long`, not an `int` — inferring `int` would both
+    // mis-type it AND overflow the strict Int framer (frameValue). This matches the client's
+    // own magnitude-based Number strategy and, for such values, agrees with the wire truth.
+    case 'number': return !Number.isInteger(jsValue) ? 'double'
+      : jsValue >= -2147483648 && jsValue <= 2147483647 ? 'int' : 'long';
     default: return null;
   }
 }

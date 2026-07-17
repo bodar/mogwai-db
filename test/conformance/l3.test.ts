@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startConformanceServer } from './conformance-server.ts';
 import { L3_TAGS } from './tags.ts';
-import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport } from './telemetry.ts';
+import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport, readPassingSet, writePassingSet, regressions, formatRegressions } from './telemetry.ts';
 
 // helper.js in the GLV hardcodes http://localhost:45940 — the port is not
 // configurable, so the host must own it for the duration of the run.
@@ -26,6 +26,10 @@ const GLV = join(ROOT, 'vendor/tinkerpop/gremlin-js/gremlin-javascript');
 const FEATURES = join(ROOT, 'vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/');
 const CUCUMBER_BIN = join(ROOT, 'vendor/tinkerpop/gremlin-js/node_modules/.bin/cucumber-js');
 const BASELINE = new URL('./baseline.json', import.meta.url).pathname;
+// The committed set of scenario NAMES passing at baseline — lets the ratchet name exactly
+// which scenarios regressed (vs only reporting that the count fell). Kept in lockstep with
+// baseline.json's count on every clean bump.
+const PASSING_SET = new URL('./l3-passing.txt', import.meta.url).pathname;
 // Every human-facing file that quotes the conformance number, kept in lockstep
 // with the ratchet so the prose can never drift from baseline.json.
 const SYNC_FILES = [join(ROOT, 'README.md'), join(ROOT, 'docs/feature-support-matrix.md')];
@@ -119,31 +123,45 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
   const baseline: { passing: number } = JSON.parse(readFileSync(BASELINE, 'utf8'));
   console.log(`L3 conformance: ${passing}/${total} scenarios pass (baseline ${baseline.passing})`);
 
-  // Ratchet.
-  expect(passing).toBeGreaterThanOrEqual(baseline.passing);
+  // Per-scenario ratchet. The passing SET names exactly what regressed — a scenario that
+  // passed at baseline and fails now — with no noise from the always-failing deferred set.
+  // This is a STRICTER gate than the count: a net-positive run that silently breaks a
+  // previously-green scenario still fails here (the count alone would hide it).
+  const rows = collectScenarios(json);
+  const passingNow = new Set(rows.filter((r) => r.passed).map((r) => r.name));
+  const baseSet = readPassingSet(PASSING_SET);
+  const regressed = regressions(baseSet, rows);
+  if (regressed.length) console.log(formatRegressions(regressed));
 
-  // Opt-in telemetry (MOGWAI_L3_TELEMETRY): join the server-side NDJSON (gremlin,
-  // clean deferral, step chain) with this report (scenario names, pass/fail) and
-  // print the systematic-gap view. Read-only — strictly after the ratchet above,
-  // so it cannot affect the count or the build.
+  // Opt-in telemetry (MOGWAI_L3_TELEMETRY): the systematic-gap view (deferral buckets +
+  // failing-step frequency), joined from the server NDJSON. Read-only.
   const tpath = telemetryPath();
   if (tpath) {
     const sum = summarize(readTelemetry(tpath));
-    console.log(formatReport(sum, collectScenarios(json)));
+    console.log(formatReport(sum, rows));
     const artifact = tpath.replace(/\.ndjson$/, '') + '.summary.json';
-    writeFileSync(artifact, JSON.stringify({ ...sum, scenarios: collectScenarios(json) }, null, 2) + '\n');
+    writeFileSync(artifact, JSON.stringify({ ...sum, scenarios: rows }, null, 2) + '\n');
     console.log(`L3 telemetry summary → ${artifact}`);
   }
 
-  if (passing > baseline.passing) {
+  // Gate 1: no scenario may regress (names them above). Gate 2: the count never falls.
+  expect(regressed).toHaveLength(0);
+  expect(passing).toBeGreaterThanOrEqual(baseline.passing);
+
+  // Clean run: fold any newly-passing scenarios into the committed set, and bump the count
+  // + synced prose. CI never rewrites (no push-back loop) — it only reports the delta.
+  const setChanged = passingNow.size !== baseSet.size || [...passingNow].some((n) => !baseSet.has(n));
+  if (passing > baseline.passing || setChanged) {
     if (process.env.CI) {
-      console.log(`L3 ahead of baseline by ${passing - baseline.passing} — run locally to auto-bump test/conformance/baseline.json (and the README + feature-support-matrix counts) to ${passing}, then commit all (CI does not rewrite them).`);
+      if (passing > baseline.passing)
+        console.log(`L3 ahead of baseline by ${passing - baseline.passing} — run locally to auto-bump baseline.json + l3-passing.txt (+ README + feature-support-matrix), then commit all (CI does not rewrite them).`);
     } else {
-      const next = { ...baseline, passing };
-      writeFileSync(BASELINE, JSON.stringify(next, null, 2) + '\n');
-      const synced = syncCountFiles(passing);
+      writeFileSync(BASELINE, JSON.stringify({ ...baseline, passing }, null, 2) + '\n');
+      writePassingSet(PASSING_SET, passingNow);
+      const synced = passing !== baseline.passing ? syncCountFiles(passing) : [];
+      const bump = passing !== baseline.passing ? `${baseline.passing} → ${passing}` : `set +${passingNow.size - baseSet.size}`;
       const also = synced.length ? ` + ${synced.join(' + ')}` : '';
-      console.log(`L3 baseline auto-bumped ${baseline.passing} → ${passing}. Commit test/conformance/baseline.json${also}.`);
+      console.log(`L3 baseline updated (${bump}). Commit test/conformance/baseline.json + test/conformance/l3-passing.txt${also}.`);
     }
   }
 }, LONG);

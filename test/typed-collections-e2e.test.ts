@@ -108,3 +108,70 @@ describe('typed collection values round-trip over GraphBinary', () => {
     expect(elementTypeCodes(buf)).toEqual([D.STRING, D.LONG]);
   });
 });
+
+// #5: whole-element framing (valueMap/vertex/edge/properties/write-echo) must carry each
+// property value's stored type, not let the client's serializers re-infer it from the JS
+// value. datetime→Date, long>2^53→BigInt, and a decimal-string double are JS-distinguishable
+// proofs the type survived the whole-element path.
+describe('#5 whole-element framing carries scalar property types', () => {
+  const UUID = '0263f28b-eff9-4c17-8e33-0b41c74b6d4c';
+  const seedTyped = (s: GraphStore) =>
+    executeQuery(s, `g.addV('t').property('when',datetime('2024-01-02T03:04:05Z')).property('gid',UUID('${UUID}')).property('big',9007199254740993L).property('w',0.5)`, {});
+  // Decode a Vertex/VertexProperty and pull {key: value} (first value per key).
+  const propsOf = (v: any): Record<string, any> => {
+    const out: Record<string, any> = {};
+    for (const p of v.properties ?? []) if (!(p.label in out)) out[p.label] = p.value;
+    return out;
+  };
+
+  test('g.V() (whole vertex) frames typed property values', () => {
+    const s = store(); seedTyped(s);
+    const v = dec(rawList(s, 'g.V()')) as any;
+    const p = propsOf(v);
+    expect(p.when instanceof Date).toBe(true);
+    expect(p.gid).toBe(UUID);
+    expect(p.big).toBe(9007199254740993n);
+    expect(p.w).toBe(0.5);
+  });
+
+  test('valueMap() frames typed property values', () => {
+    const s = store(); seedTyped(s);
+    const m = dec(rawList(s, 'g.V().valueMap()')) as Map<string, any[]>;
+    expect(m.get('when')![0] instanceof Date).toBe(true);
+    expect(m.get('gid')![0]).toBe(UUID);
+    expect(m.get('big')![0]).toBe(9007199254740993n);
+  });
+
+  test('elementMap() frames typed property values', () => {
+    const s = store(); seedTyped(s);
+    const m = dec(rawList(s, 'g.V().elementMap()')) as Map<string, any>;
+    expect(m.get('when') instanceof Date).toBe(true);
+    expect(m.get('big')).toBe(9007199254740993n);
+  });
+
+  test('properties() frames a typed VertexProperty value', () => {
+    const s = store(); seedTyped(s);
+    const vps = executeQuery(s, "g.V().properties('when','big')", {}).map(dec) as any[];
+    const byKey = Object.fromEntries(vps.map((vp) => [vp.label, vp.value]));
+    expect(byKey.when instanceof Date).toBe(true);
+    expect(byKey.big).toBe(9007199254740993n);
+  });
+
+  test('the write-response echo frames typed property values (same fidelity as a read)', () => {
+    const s = store();
+    const v = seedTyped(s).map(dec)[0] as any; // the addV echo
+    const p = propsOf(v);
+    expect(p.when instanceof Date).toBe(true);
+    expect(p.gid).toBe(UUID);
+    expect(p.big).toBe(9007199254740993n);
+  });
+
+  test('edge whole-element + valueMap frame a typed edge-property value', () => {
+    const s = store();
+    executeQuery(s, "g.addV('p').as('a').addV('p').as('b').addE('knows').from('a').to('b').property('since',datetime('2024-01-02T03:04:05Z'))", {});
+    const e = dec(rawList(s, 'g.E()')) as any;
+    expect(e.properties[0].value instanceof Date).toBe(true);
+    const m = dec(rawList(s, "g.E().valueMap()")) as Map<string, any[]>;
+    expect(m.get('since')![0] instanceof Date).toBe(true);
+  });
+});
