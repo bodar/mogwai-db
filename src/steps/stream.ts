@@ -14,6 +14,7 @@
 // inside a StepFn.
 
 import { type Expression, type Query, type Relation } from '../q.ts';
+import { type PStep } from '../strategies.ts';
 import { type Elem } from '../plan.ts';
 import { type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type PathPos, type Shape, type ValueType } from '../render.ts';
 import { carriedCols, type Carry, type ElementStream } from './context.ts';
@@ -174,6 +175,37 @@ export type LoweringResult = LoweringContinuation;
 
 export const continueLowering = (stream: Stream, at: number): LoweringContinuation =>
   ({ kind: 'continue-lowering', stream, at });
+
+/**
+ * A shape-tail handler for one step name: gets the current stream, the peeked step
+ * (`steps[at]`), and the whole chain + cursor (so a handler may look ahead — e.g.
+ * order().dedup()). Returning `null` means "not mine" — an internal guard/fall-through
+ * declined, so dispatch falls to the fallback. This is what lets one Map entry own a
+ * step whose recognition is conditional (a Scope.local guard, a mixed-shape peek).
+ */
+export type ShapeTailFn<S> = (s: S, step: PStep, steps: PStep[], at: number) => LoweringResult | null;
+
+/**
+ * Per-shape tail dispatch: a `Map<stepName, handler>` + a fallback. This is the CLAUDE.md
+ * "register in a Map, don't grow a switch" law applied to the shape dispatchers
+ * (compileTail / compileFromScalar / …). Look the step name up; if a handler matches and
+ * returns a result, use it; otherwise run the fallback (a clear throw, or — for the
+ * element tail — the foldTailAcc projection path).
+ */
+export function dispatchShapeTail<S>(
+  table: Map<string, ShapeTailFn<S>>,
+  s: S,
+  steps: PStep[],
+  at: number,
+  fallback: (s: S, steps: PStep[], at: number) => LoweringResult,
+): LoweringResult {
+  const handler = table.get(steps[at]?.name);
+  if (handler) {
+    const res = handler(s, steps[at], steps, at);
+    if (res) return res;
+  }
+  return fallback(s, steps, at);
+}
 
 const elemColumns = (prefix: string, elem: ElemShape): string[] => elem === 'edge'
   ? [`${prefix}_id`, `${prefix}_label`, `${prefix}_src`, `${prefix}_tgt`, `${prefix}_props`]
