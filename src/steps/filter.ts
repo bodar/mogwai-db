@@ -6,7 +6,7 @@ import {
 } from '../plan.ts';
 import { advance, aliasElem, carriedCols, carriedWith, carryFrag, elemRel, pathColsOf, prevRel, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from './context.ts';
 import { aliasAppend, aliasId, aliasSeed, elemEntry, elemShape } from './alias.ts';
-import { tryCompileScalarValueRows, tryFilterByChildExistence } from './child.ts';
+import { tryCombineByChildExistence, tryCompileScalarValueRows, tryFilterByChildExistence } from './child.ts';
 import { directElementModulation, elementOrderSql } from './modulation.ts';
 import { type PStep } from '../strategies.ts';
 
@@ -188,10 +188,20 @@ export const where: StepFn = (s, st) => {
   return filterCte(st, negate ? notCoalesce(testNode) : testNode);
 };
 
-/** and()/or(): keep the traverser when ALL / ANY branch predicates hold. */
+/** and()/or(): keep the traverser when ALL / ANY branch predicates hold. The inline
+ *  correlated predicate is a disable-safe fast path (honours predicateInlining);
+ *  when it's off or a branch is beyond inline lowering, fall through to the generic
+ *  shared-domain child-existence combiner — same result, no support-definer. */
 export const andOr: StepFn = (s, st) => {
-  const pred = combineBranchPreds(s, currentCtx(st), st.params, s.name === 'and' ? 'AND' : 'OR', aliasResolver(st));
-  return filterCte(st, pred);
+  const op = s.name === 'and' ? 'AND' : 'OR';
+  const branches = s.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  if (st.fastPaths?.predicateInlining !== false) {
+    const pred = combineBranchPreds(s, currentCtx(st), st.params, op, aliasResolver(st));
+    if (pred) return filterCte(st, pred);
+  }
+  const generic = tryCombineByChildExistence(st, branches.map((b: any) => b.nested), op);
+  if (generic) return generic;
+  throw new Error(`${s.name}() not supported by inline predicate or generic child existence lowering`);
 };
 
 /** dedup(): collapse the multiset on the current object. Label-scoped dedup and

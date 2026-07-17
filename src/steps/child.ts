@@ -1,4 +1,4 @@
-import { derived, empty, list, q, value, type Expression, type Relation } from '../q.ts';
+import { derived, empty, list, paren, q, value, type Expression, type Relation } from '../q.ts';
 import { stepChain } from '../frontend.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
 import { advance, carriedWith, carryFrag, carriedCols, withCarried, type ElementStream } from './context.ts';
@@ -567,6 +567,37 @@ export function tryGateByChildExistence(
 ): { then: ElementStream; else: ElementStream } | null {
   const gate = childExistenceGate(parent, nested, scope);
   return gate ? { then: gate(false), else: gate(true) } : null;
+}
+
+/** Generic boolean form of the existence gate for and()/or(): compile N predicate
+ * branches against ONE shared parent domain (a single pushed ordinal, reused per
+ * branch), then filter the domain on the branches' correlated EXISTS combined with
+ * AND/OR. This is the child-lowering counterpart to plan.ts combineBranchPreds's
+ * inline correlated form, so andOr falls through here instead of defining language
+ * support when a branch is beyond the inline compiler. Returns null when any branch has
+ * no generic child compilation. */
+export function tryCombineByChildExistence(
+  parent: ElementStream,
+  branches: readonly any[],
+  op: 'AND' | 'OR',
+  negate = false,
+): ElementStream | null {
+  if (!branches.length) return null;
+  const { scope, frame, seed } = pushChildScope(parent);
+  const d = frame.domain.as('d');
+  const terms: Expression[] = [];
+  for (const nested of branches) {
+    const reuse = reuseCurrentFrame(scope, frame);
+    const child = tryCompileElementValueRows(seed, nested, reuse)
+      ?? tryCompileScalarValueRows(seed, nested, reuse);
+    if (!child) return null;
+    const c = child.stream.rel.as('c');
+    terms.push(q`EXISTS (SELECT 1 FROM ${c} WHERE ${c.c[frame.ordinal]}=${d.c[frame.ordinal]})`);
+  }
+  const combined = paren(list(terms.map(paren), ` ${op} `));
+  return advance(parent,
+    q`SELECT ${d.c.id} AS id${carryFrag(parent.carried, d)} FROM ${d} WHERE ${negate ? q`NOT (${combined})` : combined}`,
+  );
 }
 
 /** The shared correlated-existence core: compile the child once, then return a

@@ -1,5 +1,6 @@
 import { stepChain, flattenListArgs, type Step, type Pred } from './frontend.ts';
 import { q, list, values, paren, empty, value, raw, jsonExtract, type Expression, type Relation } from './q.ts';
+import { edges, nodes } from './schema.ts';
 import { normalizeTypeName } from './gremlin-types.ts';
 import { type ValueType } from './render.ts';
 
@@ -554,8 +555,11 @@ function compileInlinePredicate(
 
   // and(t…)/or(t…) step-form: combine each branch's predicate. (The infix connector
   // form .and()/.or() was already split above by splitInfixConnectors.)
-  if ((head === 'and' || head === 'or') && body.length === 1)
-    return combineBranchPreds(body[0], ctx, params, head === 'and' ? 'AND' : 'OR', resolveAlias);
+  if ((head === 'and' || head === 'or') && body.length === 1) {
+    const combined = combineBranchPreds(body[0], ctx, params, head === 'and' ? 'AND' : 'OR', resolveAlias);
+    if (!combined) throw new Error(`where()/filter() form not yet supported: __.${body.map((s) => s.name + '()').join('.')}`);
+    return combined;
+  }
 
   const term = body[body.length - 1]?.name;
 
@@ -605,92 +609,110 @@ function compileInlinePredicate(
     return q`NOT COALESCE((${inner}), 0)`;
   }
 
-  if (MOVES.has(head))
-    // A movement chain → a correlated EXISTS over the path, with an optional terminal
-    // filter (has/hasLabel/values.is) on the last node. (count/sum handled above.)
-    return compileExistsChain(body, ctx, isPred, hasIs);
+  if (MOVES.has(head)) {
+    // A movement chain → a correlated EXISTS over the path. Movement is only valid on a
+    // vertex; on an edge the outer traverser can't out()/in() (a hard error, NOT a
+    // fallthrough). count/sum terminals are handled above.
+    if (ctx.elem !== 'node') throw new Error(`where(__.${head}()) expects a vertex, not an ${ctx.elem}`);
+    const exists = correlatedExists(body, ctx.idExpr, isPred, hasIs);
+    if (!exists) throw new Error(`where()/filter() form not yet supported: __.${body.map((s) => s.name + '()').join('.')}`);
+    return exists;
+  }
   throw new Error(`where()/filter() form not yet supported: __.${body.map((s) => s.name + '()').join('.')}`);
 }
 
 /** and(t…)/or(t…): each branch → a filter predicate node, joined by AND/OR
- *  (`((p0) AND (p1))`). Used both as a top-level filter step and inside where(__.and/or). */
+ *  (`((p0) AND (p1))`). Used both as a top-level filter step and inside where(__.and/or).
+ *  Returns null when ANY branch is beyond the inline predicate compiler, so the caller
+ *  can fall through to generic child-existence lowering (tryCombineByChildExistence). */
 export function combineBranchPreds(
   step: Step, ctx: ScalarCtx, params: Record<string, any>, op: 'AND' | 'OR',
   resolveAlias?: (label: string) => ScalarCtx,
-): Expression {
+): Expression | null {
   const branches = step.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 2) throw new Error(`${step.name}() needs at least two traversal branches`);
-  const parts = branches.map((b) => paren(compileInlinePredicate(stepChain(b.nested, params), ctx, params, resolveAlias)));
+  const parts: Expression[] = [];
+  for (const b of branches) {
+    const p = tryInlinePredicate(stepChain(b.nested, params), ctx, params, resolveAlias);
+    if (!p) return null;
+    parts.push(paren(p));
+  }
   return paren(list(parts, ` ${op} `));
 }
 
-/** EXISTS over a single incident-edge movement (out/in/both/outE/inE/bothE),
- *  correlated on the outer node, as a node. "Does this vertex have such a neighbour/edge." */
-function compileExists(mv: Step, ctx: ScalarCtx): Expression {
-  if (ctx.elem !== 'node') throw new Error(`where(__.${mv.name}()) expects a vertex, not an ${ctx.elem}`);
-  const dirs = dirsFor(mv.name.endsWith('E') ? mv.name.slice(0, -1) : mv.name);
-  // Alias the subquery's edges `xe`, NOT `e`: when this predicate correlates on an
-  // outer row that is ITSELF an `edges e` (e.g. until(__.out()) inside repeat()'s
-  // recursive term, where ctx.idExpr is `e.tgt`), a shared `e` would shadow the outer
-  // one and silently correlate the EXISTS on itself. `xe` can't collide.
-  const labelFilter = mv.args.length ? q` AND ${labelIn('xe.label', mv.args)}` : empty;
-  const terms = dirs.map(([from]) =>
-    q`EXISTS(SELECT 1 FROM edges xe WHERE xe.${from}=${ctx.idExpr}${labelFilter})`);
-  return terms.length === 1 ? terms[0] : paren(list(terms, ' OR '));
-}
-
 /**
- * A multi-hop vertex-movement chain → a correlated EXISTS over the path, with an
- * optional terminal filter on the last node. Handles out()/in() chains (single
- * direction per hop) plus a trailing has(k[,v])/hasLabel(l)/values(k)[.is(P)]; a lone
- * bare movement delegates to the leaner edge-only compileExists (which also does
- * both()). Multi-hop both(), edge-typed hops, and unknown terminals defer. Aliases
- * xe{k}/xn{k} can't collide with the outer `n`/`e`/`p`.
+ * THE single movement-as-correlated-subquery builder: a movement chain (out/in/both,
+ * plus an optional trailing node filter) rendered as a correlated EXISTS seeded from
+ * `fromId` (the outer row's id expr). Built on the SAME leaf fragment builders as the
+ * CTE movement StepFns (steps/movement.ts) — dirsFor / the typed `edges`,`nodes`
+ * relations / labelIn / nodeHasProp — so the correlated and CTE movement forms cannot
+ * diverge (there is no second, hand-rolled alias/label scheme).
+ *
+ * It is an index-only fast path (no domain materialization or ROW_NUMBER window,
+ * unlike the generic child-existence gate — see the EXPLAIN comparison in
+ * test/compiler.test.ts). where()/filter()/choose() fall through to that gate when this
+ * returns null; until()'s recursive-CTE predicate has NO generic equivalent (a CTE
+ * can't reference the recursive term's outer row) and reaches this through
+ * compileInlinePredicate.
+ *
+ * Returns null for shapes it doesn't cover (multi-hop both, edge-typed hops, a
+ * trailing step past the terminal, an unknown terminal) so the fall-through callers do.
+ * Aliases xe{k}/xn{k}/xe can't collide with an outer `n`/`e`/`p`.
  */
-function compileExistsChain(body: Step[], ctx: ScalarCtx, isPred: any, hasIs: boolean): Expression {
-  if (ctx.elem !== 'node') throw new Error(`where(__.${body[0].name}()) expects a vertex, not an ${ctx.elem}`);
+function correlatedExists(body: Step[], fromId: Expression, isPred: any, hasIs: boolean): Expression | null {
+  // A lone bare incident movement (incl. outE/inE/bothE) → the leanest single-edge
+  // EXISTS (index-only; both() = either direction).
+  if (body.length === 1 && !hasIs && MOVES.has(body[0].name)) return incidentExists(body[0], fromId);
 
-  // A lone bare movement (incl. the outE/inE/bothE edge forms) → the leaner edge-only
-  // EXISTS (index-only; both() ok). Must stay ahead of the vertex-chain builder below,
-  // which handles only out()/in() hops.
-  if (body.length === 1 && !hasIs && MOVES.has(body[0].name)) return compileExists(body[0], ctx);
-
+  // A multi-hop out/in vertex chain + an optional terminal node filter. A leading both()
+  // stops the loop → moves is empty → null (multi-hop both defers to the generic gate).
   const moves: Step[] = [];
   let i = 0;
-  for (; i < body.length && ['out', 'in', 'both'].includes(body[i].name); i++) moves.push(body[i]);
+  for (; i < body.length && (body[i].name === 'out' || body[i].name === 'in'); i++) moves.push(body[i]);
   const terminal = body[i];
-  if (body[i + 1]) throw new Error(`where()/filter() form not yet supported: __.${body.map((s) => s.name + '()').join('.')}`);
-  if (!moves.length) throw new Error(`where()/filter() form not yet supported: __.${body.map((s) => s.name + '()').join('.')}`);
-  if (moves.some((m) => m.name === 'both')) throw new Error('where(__.both()…) multi-hop / with a terminal filter not yet supported');
+  if (body[i + 1] || !moves.length) return null;
 
   // Correlated join chain: edges xe0 JOIN nodes xn0 … [JOIN edges xe1 … JOIN nodes xn1 …].
   const parts: Expression[] = [];
   const conds: Expression[] = [];
-  let prevId: Expression = ctx.idExpr;
+  let prevId: Expression = fromId;
+  let lastNode = nodes.as('xn0');
   moves.forEach((m, k) => {
     const [from, to] = dirsFor(m.name)[0];
-    const e = `xe${k}`, n = `xn${k}`;
+    const e = edges.as(`xe${k}`), n = nodes.as(`xn${k}`);
     parts.push(k === 0
-      ? q`edges ${e} JOIN nodes ${n} ON ${n}.id=${e}.${to}`
-      : q`JOIN edges ${e} ON ${e}.${from}=${prevId} JOIN nodes ${n} ON ${n}.id=${e}.${to}`);
-    if (k === 0) conds.push(q`${e}.${from}=${prevId}`);
-    if (m.args.length) conds.push(labelIn(`${e}.label`, m.args));
-    prevId = q`${n}.id`;
+      ? q`${e} JOIN ${n} ON ${n.c.id}=${e.c[to]}`
+      : q`JOIN ${e} ON ${e.c[from]}=${prevId} JOIN ${n} ON ${n.c.id}=${e.c[to]}`);
+    if (k === 0) conds.push(q`${e.c[from]}=${prevId}`);
+    if (m.args.length) conds.push(labelIn(e.c.label, m.args));
+    prevId = n.c.id;
+    lastNode = n;
   });
-  const last = `xn${moves.length - 1}`;
 
   if (terminal) {
     // The terminal element is a node (xn{k}); its props → an ANY-match EXISTS over
     // vertex_properties correlated on the joined node's rowid.
     if (terminal.name === 'has' && typeof terminal.args[0] === 'string')
-      conds.push(nodeHasProp(raw(`${last}.id`), terminal.args[0], terminal.args[1]));
+      conds.push(nodeHasProp(lastNode.c.id, terminal.args[0], terminal.args[1]));
     else if (terminal.name === 'hasLabel')
-      conds.push(labelIn(`${last}.label`, terminal.args));
+      conds.push(labelIn(lastNode.c.label, terminal.args));
     else if (terminal.name === 'values' && typeof terminal.args[0] === 'string')
-      conds.push(nodeHasProp(raw(`${last}.id`), terminal.args[0], hasIs ? isPred : undefined));
-    else throw new Error(`where() chain terminal __.${terminal.name}() not yet supported`);
+      conds.push(nodeHasProp(lastNode.c.id, terminal.args[0], hasIs ? isPred : undefined));
+    else return null;
   } else if (hasIs) {
-    throw new Error(`where(__.${moves.map((m) => m.name + '()').join('.')}.is(P)) not yet supported`);
+    return null;
   }
   return q`EXISTS(SELECT 1 FROM ${list(parts, ' ')} WHERE ${list(conds, ' AND ')})`;
+}
+
+/** A single incident-edge EXISTS (out/in/both/outE/inE/bothE) correlated on `fromId`:
+ *  "does this vertex have such an incident edge/neighbour". both() OR's the two
+ *  directions. Aliased `xe` so it can't shadow an outer `edges e`. */
+function incidentExists(mv: Step, fromId: Expression): Expression {
+  const dirs = dirsFor(mv.name.endsWith('E') ? mv.name.slice(0, -1) : mv.name);
+  const terms = dirs.map(([from]) => {
+    const e = edges.as('xe');
+    return q`EXISTS(SELECT 1 FROM ${e} WHERE ${e.c[from]}=${fromId}${mv.args.length ? q` AND ${labelIn(e.c.label, mv.args)}` : empty})`;
+  });
+  return terms.length === 1 ? terms[0] : paren(list(terms, ' OR '));
 }
