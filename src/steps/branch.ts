@@ -5,7 +5,7 @@ import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, elemCtx, type ScalarCtx
 import { tryInlinePredicate } from './predicate.ts';
 import { advance, elemRel, prevRel, carryFrag, carriedCols, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { type AliasShape } from './alias.ts';
-import { classifyListChild, isElementChild, isListChild, isScalarChild, pushChildScope, ROOT_SCOPE, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from './child.ts';
+import { classifyListChild, classifyScalarChild, isElementChild, isListChild, isScalarChild, pushChildScope, ROOT_SCOPE, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from './child.ts';
 import { carryOf, toListStream, toScalarStream, toVariantStream, type ListStream, type ScalarStream, type VariantArms, type VariantStream } from './stream.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
@@ -272,8 +272,9 @@ export const optional: StepFn = (s, st) => {
  * schema, while the child-only origin is consumed by the anti-existence arm. */
 export function tryLowerVariantOptional(s: Step, st: ElementStream): VariantStream | null {
   const nested = s.args[0]?.nested;
-  if (!nested || !isScalarChild(nested, st.params)) return null;
-  const rows = tryCompileScalarValueRows(st, nested);
+  const plan = classifyScalarChild(nested, st.params);
+  if (!plan) return null;
+  const rows = tryCompileScalarValueRows(st, nested, ROOT_SCOPE, plan.body);
   if (!rows) return null;
   const c = rows.stream.rel.as('c');
   const d = rows.frame.domain.as('d');
@@ -314,12 +315,13 @@ export const coalesce: StepFn = (s, st) => {
 export function tryLowerScalarCoalesce(s: Step, st: ElementStream): ScalarStream | null {
   assertForkSafe('coalesce', st);
   const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
-  if (!branches.length || !branches.every((b) => isScalarChild(b.nested, st.params))) return null;
+  if (!branches.length) return null;
+  const plans = branches.map((b) => classifyScalarChild(b.nested, st.params));
+  if (plans.some((p) => !p)) return null;
   const { seedSt, ord } = originSeed(st);
-  const arms = branches.map((branch) =>
-    tryCompileScalarChild(seedSt, branch.nested, 'all')
-      ?? tryCompileCountChild(seedSt, branch.nested)
-      ?? (() => { throw new Error('coalesce() scalar branch preflight/compiler mismatch'); })());
+  const arms = branches.map((branch, i) =>
+    (tryCompileScalarChild(seedSt, branch.nested, 'all', ROOT_SCOPE, plans[i]!.body)
+      ?? tryCompileCountChild(seedSt, branch.nested, ROOT_SCOPE, plans[i]!.body))!);
   const numeric = arms.every((arm) => arm.result === 'number');
   const parts = arms.map((arm, k) => {
     const a = arm.rel.as('a');
@@ -746,14 +748,15 @@ export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream |
   const args = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
   if (args.length !== 3) return null; // two-arg choose has an element identity else arm
   const [predArg, thenArg, elseArg] = args;
-  if (!isScalarChild(thenArg.nested, st.params) || !isScalarChild(elseArg.nested, st.params)) return null;
+  const thenPlan = classifyScalarChild(thenArg.nested, st.params);
+  const elsePlan = classifyScalarChild(elseArg.nested, st.params);
+  if (!thenPlan || !elsePlan) return null;
   const seedFor = chooseGate(st, predArg.nested);
-  const lowerArm = (arg: any, seed: ElementStream): ScalarStream =>
-    tryCompileScalarChild(seed, arg.nested, 'all')
-      ?? tryCompileCountChild(seed, arg.nested)
-      ?? (() => { throw new Error('choose() scalar branch preflight/compiler mismatch'); })();
-  const thenEnd = lowerArm(thenArg, seedFor(false));
-  const elseEnd = lowerArm(elseArg, seedFor(true));
+  const lowerArm = (arg: any, body: ReturnType<typeof stepChain>, seed: ElementStream): ScalarStream =>
+    (tryCompileScalarChild(seed, arg.nested, 'all', ROOT_SCOPE, body)
+      ?? tryCompileCountChild(seed, arg.nested, ROOT_SCOPE, body))!;
+  const thenEnd = lowerArm(thenArg, thenPlan.body, seedFor(false));
+  const elseEnd = lowerArm(elseArg, elsePlan.body, seedFor(true));
   const cols = carriedCols(st.carried);
   const numeric = thenEnd.result === 'number' && elseEnd.result === 'number';
   const parts = [thenEnd, elseEnd].map((arm) => {

@@ -15,7 +15,7 @@ import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleS
 import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerLegacyUnion } from './branch.ts';
 import { lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
-import { isScalarChild, isListChild, isTotalScalarChild, tryCompileCountChild, tryCompileListChild } from './child.ts';
+import { classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, tryCompileCountChild, tryCompileListChild } from './child.ts';
 import { lowerElementDedup } from './filter.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
@@ -262,10 +262,18 @@ export function compileTail(st: ElementStream, steps: PStep[], stop: number): Lo
   // scalar-or-original-element VariantStream.
   if (steps[stop]?.name === 'optional') {
     const nested = steps[stop].args[0]?.nested;
-    if (nested && isListChild(nested, st.params))
-      return continueLowering(tryCompileListChild(st, nested)!, stop + 1);
-    if (nested && isTotalScalarChild(nested, st.params))
-      return continueLowering(tryCompileCountChild(st, nested)!, stop + 1);
+    // classify once (pure) → emit reusing the parsed body; a list/total-count child is
+    // total per parent, so optional's identity-on-miss arm is statically unreachable.
+    const listPlan = classifyListChild(nested, st.params);
+    if (listPlan) {
+      const lowered = tryCompileListChild(st, nested, ROOT_SCOPE, listPlan.body);
+      if (lowered) return continueLowering(lowered, stop + 1);
+    }
+    const countPlan = classifyTotalScalarChild(nested, st.params);
+    if (countPlan) {
+      const lowered = tryCompileCountChild(st, nested, ROOT_SCOPE, countPlan.body);
+      if (lowered) return continueLowering(lowered, stop + 1);
+    }
     const variant = tryLowerVariantOptional(steps[stop], st);
     if (variant) return continueLowering(variant, stop + 1);
   }

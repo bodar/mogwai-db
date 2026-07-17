@@ -10,7 +10,7 @@ import { carryOf, continueLowering, pathColumns, recordFieldColumns, toListStrea
 import { type Compiled, type PathPos } from '../render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
 import { lowerGlobalCount } from './barrier.ts';
-import { isElementChild, isListChild, isScalarChild, pushChildScope, reuseCurrentFrame, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
+import { classifyElementChild, classifyListChild, classifyScalarChild, isElementChild, isListChild, isScalarChild, pushChildScope, reuseCurrentFrame, ROOT_SCOPE, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
 
 // ---------- select()/project() ----------
 
@@ -198,21 +198,14 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
   if (nested && typeof nested === 'object' && 'nested' in nested) {
     if (productive) throw new Error('ProductiveByStrategy with a traversal-valued single select is not yet supported');
     const seed = reRootElement(st, p, aliasId(p.c[selected.col], 'last'), aliasElem(selected));
-    if (isScalarChild(nested.nested, st.params)) {
-      const child = tryCompileScalarValueChild(seed, nested.nested, 'first');
-      if (!child) throw new Error('scalar select child failed after successful shape preflight');
-      return child;
-    }
-    if (isListChild(nested.nested, st.params)) {
-      const child = tryCompileListChild(seed, nested.nested);
-      if (!child) throw new Error('list select child failed after successful shape preflight');
-      return child;
-    }
-    if (isElementChild(nested.nested, st.params)) {
-      const child = tryCompileElementChild(seed, nested.nested, 'first');
-      if (!child) throw new Error('element select child failed after successful shape preflight');
-      return child.stream;
-    }
+    // Classify once (pure) → emit reusing the parsed body; each classify guarantees its
+    // emitter succeeds, so no preflight/compiler mismatch throw is possible.
+    const scalarPlan = classifyScalarChild(nested.nested, st.params);
+    if (scalarPlan) return tryCompileScalarValueChild(seed, nested.nested, 'first', ROOT_SCOPE, scalarPlan.body)!;
+    const listPlan = classifyListChild(nested.nested, st.params);
+    if (listPlan) return tryCompileListChild(seed, nested.nested, ROOT_SCOPE, listPlan.body)!;
+    const elemPlan = classifyElementChild(nested.nested, st.params);
+    if (elemPlan) return tryCompileElementChild(seed, nested.nested, 'first', ROOT_SCOPE, elemPlan.body)!.stream;
     throw new Error('by(traversal) child shape not yet supported');
   }
   const selElem = aliasElem(selected);

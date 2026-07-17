@@ -131,9 +131,17 @@ function elementRowParts(body: ReturnType<typeof stepChain>): { prefix: ReturnTy
   return { prefix, suffix };
 }
 
+/** PURE. A map-cardinality element child (used at use==='first' sites like single select):
+ * an element-rows body, keeping a trailing order() as the ordering modulator. Returns the
+ * parsed body so tryCompileElementChild reuses it. */
+export function classifyElementChild(nested: any, params: Record<string, any>): { body: ReturnType<typeof stepChain> } | null {
+  if (!nested) return null;
+  const body = childSteps(nested, params);
+  return classifyElementChildRows(body, undefined, true) ? { body } : null;
+}
+
 export function isElementChild(nested: any, params: Record<string, any>): boolean {
-  if (!nested) return false;
-  return classifyElementChildRows(childSteps(nested, params), undefined, true) !== null;
+  return classifyElementChild(nested, params) !== null;
 }
 
 /** Syntax-only preflight for shape-aware dispatch. Unlike the tryCompile functions,
@@ -153,13 +161,22 @@ function scalarRowParts(body: ReturnType<typeof stepChain>): { prefix: ReturnTyp
   return { prefix, projection, suffix };
 }
 
-export function isScalarChild(nested: any, params: Record<string, any>): boolean {
-  if (!nested) return false;
+/** PURE. An element-parent scalar child (the strict isScalarChild shape): a movement-only
+ * total count(), or a values/id/label/constant projection with a scalar-row tail. Returns
+ * the parsed body so the emitter reuses it — one parse per arm, classify-then-emit. */
+export function classifyScalarChild(nested: any, params: Record<string, any>): { body: ReturnType<typeof stepChain> } | null {
+  if (!nested) return null;
   const body = childSteps(nested, params);
   const terminal = body.at(-1);
-  if (!terminal) return false;
-  if (terminal.name === 'count') return classifyCountChild(body) !== null;
-  return classifyScalarChildRows('element', body)?.kind === 'element';
+  if (!terminal) return null;
+  const ok = terminal.name === 'count'
+    ? classifyCountChild(body) !== null
+    : classifyScalarChildRows('element', body)?.kind === 'element';
+  return ok ? { body } : null;
+}
+
+export function isScalarChild(nested: any, params: Record<string, any>): boolean {
+  return classifyScalarChild(nested, params) !== null;
 }
 
 /** Syntax-only recognizer for a PROPERTY-parent scalar child. A property traverser's
@@ -249,9 +266,16 @@ export function isPropertyScalarFoldChild(nested: any, params: Record<string, an
 
 /** Child scalar forms proven to emit exactly one row per parent. They make
  * optional(child) equivalent to child because the identity fallback is unreachable. */
+/** PURE. A total scope-aware count() child (movement-only prefix): optional(child) ≡ child
+ * because the identity fallback is unreachable. Returns the parsed body for reuse. */
+export function classifyTotalScalarChild(nested: any, params: Record<string, any>): { body: ReturnType<typeof stepChain> } | null {
+  if (!nested) return null;
+  const body = childSteps(nested, params);
+  return classifyCountChild(body) ? { body } : null;
+}
+
 export function isTotalScalarChild(nested: any, params: Record<string, any>): boolean {
-  if (!nested) return false;
-  return classifyCountChild(childSteps(nested, params)) !== null;
+  return classifyTotalScalarChild(nested, params) !== null;
 }
 
 /** PURE. A fold()-terminated list child (element parent): the strict shape the branch/list
@@ -301,9 +325,10 @@ export function tryCompileCountChild(
   parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
+  preParsed?: ReturnType<typeof stepChain>,
 ): ScalarStream | null {
   if (!nested || isPropertyParent(parent)) return null;
-  const counted = classifyCountChild(childSteps(nested, parent.params));
+  const counted = classifyCountChild(preParsed ?? childSteps(nested, parent.params));
   if (!counted) return null;
   const { prefix } = counted;
 
@@ -327,9 +352,10 @@ function tryCompileCountValueRows(
   parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
+  preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ScalarStream; frame: ChildFrame } | null {
   if (!nested || isPropertyParent(parent)) return null;
-  const body = childSteps(nested, parent.params);
+  const body = preParsed ?? childSteps(nested, parent.params);
   // A trailing is() run is a filter on the count value — `out().count().is(gt(1))`.
   // It composes as a HAVING on the aggregate: the row (one per parent, incl. the
   // LEFT-JOIN zero) survives only when the count satisfies every predicate, so an
@@ -509,8 +535,9 @@ export function tryCompileScalarChild(
   nested: any,
   use: ChildUse = 'first',
   scope: CompileScope = ROOT_SCOPE,
+  preParsed?: ReturnType<typeof stepChain>,
 ): ScalarStream | null {
-  return compileScalarChildRows(parent, nested, use, scope)?.stream ?? null;
+  return compileScalarChildRows(parent, nested, use, scope, false, undefined, preParsed)?.stream ?? null;
 }
 
 /** One public scalar-valued child entry point. Consumers must not know whether a
@@ -520,9 +547,10 @@ export function tryCompileScalarValueChild(
   nested: any,
   use: ChildUse = 'first',
   scope: CompileScope = ROOT_SCOPE,
+  preParsed?: ReturnType<typeof stepChain>,
 ): ScalarStream | null {
-  return tryCompileCountChild(parent, nested, scope)
-    ?? tryCompileScalarChild(parent, nested, use, scope);
+  return tryCompileCountChild(parent, nested, scope, preParsed)
+    ?? tryCompileScalarChild(parent, nested, use, scope, preParsed);
 }
 
 export interface ScalarModulationSpec {
@@ -590,9 +618,10 @@ export function tryCompileScalarValueRows(
   parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
+  preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ScalarStream; frame: ChildFrame } | null {
-  return tryCompileCountValueRows(parent, nested, scope)
-    ?? compileScalarChildRows(parent, nested, 'all', scope, true);
+  return tryCompileCountValueRows(parent, nested, scope, preParsed)
+    ?? compileScalarChildRows(parent, nested, 'all', scope, true, undefined, preParsed);
 }
 
 /** Scalar rows followed by fold() become one ListStream per parent. This is a true
@@ -859,8 +888,9 @@ export function tryCompileElementChild(
   nested: any,
   use: ChildUse,
   scope: CompileScope = ROOT_SCOPE,
+  preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ElementStream; scope: CompileScope } | null {
-  const lowered = compileElementChildRows(parent, nested, scope, undefined, use === 'first');
+  const lowered = compileElementChildRows(parent, nested, scope, undefined, use === 'first', preParsed);
   if (!lowered) return null;
   const { stream: end, frame } = lowered;
 
