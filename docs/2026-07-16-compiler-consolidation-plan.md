@@ -26,9 +26,11 @@ Corpus parse+chain 2298/2298. Live L3 count: see `README.md` / `baseline.json`
 > re-roots an `ElementStream` and lowers through `lowerElementSteps`; +0 today, gated on
 > orthogonal downstream features, but the pattern vocabulary IS now the pipeline vocabulary).
 >
-> **STILL STANDING:** the switch-vs-Map dispatch inconsistency, general merge/addE traversal
-> args, and the third hand-rolled scalar-child projector (the `child.ts` double-parse +
-> its 11 lockstep throws were KILLED 2026-07-17, staged 0→5 — see §1). `until` is no longer
+> **STILL STANDING:** general merge/addE traversal args, and the third hand-rolled
+> scalar-child projector. **KILLED 2026-07-17:** the `child.ts` double-parse + its 11
+> lockstep throws (staged 0→5 — see §1) AND the switch-vs-Map dispatch inconsistency (all
+> five shape dispatchers now share one `dispatchShapeTail` combinator — §1 / §6.5). `until`
+> is no longer
 > a special-cased *parser* — it shares the predicate engine —
 > but it stays **correlated-only** (a recursive-CTE term can't reference its outer row, so
 > no materialized generic fallback); that's a structural property, not debt.
