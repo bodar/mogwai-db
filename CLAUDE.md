@@ -210,7 +210,12 @@ storage class → correct numeric order/range for `has('age',gt(30))`/`order().b
 `vtype` = the canonical Gremlin type the write channel carried (`src/gremlin-types.ts` is
 the one type vocabulary), sourced from the truth channel (bound param's GraphBinary
 DataType captured in `wire.ts` and threaded through `query`→`compile`; inline literal's
-parsed subtype). NULL vtype = infer on read. A collection value stores as JSONB.
+parsed subtype). NULL vtype = infer on read. A collection value stores as JSONB — a
+**self-describing typed tree** (`ValueNode`): the sibling `vtype` names the OUTER shape and
+every nested element/key/value carries its own `{t,v}` tag, so collection ELEMENTS, typed &
+non-string map KEYS, and arbitrary nesting round-trip with each leaf's exact gremlin type
+(`valueNodeOf` on write; `frameTypedNode`/`propNodeExpr` on read/frame — the whole
+`docs/2026-07-17-full-fidelity-typed-collections-plan.md` family).
 
 **Static covering indexes** `vp_key_value(key,value)` + `vp_node_key(node,key)`, built at
 schema time. A property key BINDS as a parameter (`key=?`) — a plain B-tree column seeks

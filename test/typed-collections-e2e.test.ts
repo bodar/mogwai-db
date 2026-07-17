@@ -166,6 +166,18 @@ describe('#5 whole-element framing carries scalar property types', () => {
     expect(p.big).toBe(9007199254740993n);
   });
 
+  // Regression (review finding #1): a collection-VALUED property through the valueMap
+  // re-entry (select(Column.values)) must round-trip as a real nested list, not a
+  // double-encoded string. The re-entry uses the BARE props aggregation.
+  test('valueMap().select(values).unfold() of a collection-valued property → nested list', () => {
+    const s = store();
+    executeQuery(s, "g.addV('t').property('tags',['a','b'])", {});
+    const out = executeQuery(s, "g.V().valueMap('tags').select(Column.values).unfold()", {}).map(dec);
+    // unfold yields the tags key's value-list [ ['a','b'] ]; the inner ['a','b'] is a REAL
+    // nested List (not a double-encoded string) — the finding-#1 regression.
+    expect(out).toEqual([[['a', 'b']]]);
+  });
+
   test('edge whole-element + valueMap frame a typed edge-property value', () => {
     const s = store();
     executeQuery(s, "g.addV('p').as('a').addV('p').as('b').addE('knows').from('a').to('b').property('since',datetime('2024-01-02T03:04:05Z'))", {});

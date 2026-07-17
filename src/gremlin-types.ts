@@ -282,6 +282,13 @@ function leafStore(val: any, t: CanonicalType | null): any {
  *  channel's TypeNode, falling back to JS inference per node) into a ValueNode. A list/set
  *  recurses per element; a map recurses per key AND value (ordered pairs preserve typed,
  *  non-string keys). The write path stores JSON.stringify(valueNodeOf(val, tn).v). */
+/** The inverse of the on-disk convention: reconstruct a ValueNode from a stored (value,
+ *  vtype) pair — a collection's `value` is the bare top-node `v` as JSON text (→ its {t,v}
+ *  item tree), a scalar rides raw. The one place this rule lives; both the read framer
+ *  (execute.ts frameStoredValue) and the write-response echo (write.ts) consume it. */
+export const valueNodeFromStored = (value: any, vtype: string | null): ValueNode =>
+  ({ t: (vtype ?? null) as ValueNode['t'], v: isCollectionType(vtype) ? JSON.parse(value) : value });
+
 export function valueNodeOf(val: any, tn: TypeNode | null): ValueNode {
   if (Array.isArray(val) || val instanceof Set) {
     const items = tn != null && typeof tn === 'object' && 'items' in tn ? tn.items : [];

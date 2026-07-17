@@ -1,5 +1,5 @@
 import { compile, type ListOf, type MapEntry, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from './compiler.ts';
-import { isCollectionType, type TypeNode, type ValueNode } from './gremlin-types.ts';
+import { isCollectionType, valueNodeFromStored, type TypeNode, type ValueNode } from './gremlin-types.ts';
 import type { GraphStore } from './storage.ts';
 import { ioc, VertexProperty, Property, t } from './io.ts';
 
@@ -212,13 +212,9 @@ function typedMapBuffer(pairs: [ValueNode, ValueNode][]): Buffer {
   return Buffer.concat(parts);
 }
 
-// Frame a stored (value, vtype) column pair: a scalar via the compile-time table; a
-// collection by reconstructing its ValueNode from the bare stored `v` (JSON text of the
-// top node's payload — list/set → ValueNode[], map → [k,v] pairs) and framing the tree.
-function frameStoredValue(raw: any, vtype: string | null): Buffer {
-  if (!isCollectionType(vtype)) return frameValue(raw, vtypeToValueType(vtype));
-  return frameTypedNode({ t: vtype as ValueNode['t'], v: JSON.parse(raw) } as ValueNode);
-}
+// Frame a stored (value, vtype) column pair: reconstruct its ValueNode (the one rule, in
+// gremlin-types) and frame the tree — a scalar leaf routes to frameValue via frameTypedNode.
+const frameStoredValue = (raw: any, vtype: string | null): Buffer => frameTypedNode(valueNodeFromStored(raw, vtype));
 
 // Frame a vertex/edge from a plain (unprefixed) result row — the id/label/props
 // (+ src/tgt) projection the vertex/edge/list shapes share.
@@ -496,12 +492,9 @@ function* framedResults(store: GraphStore, gremlin: string, params: Record<strin
     }
     // A list-VALUE stream: one framed List per row (the `list` column arrives as JSON
     // text via json(), so it JSON.parses; scalar elements frame via listSerializer).
-    case 'jsonbList': for (const r of rows) {
-      const items = JSON.parse(r.list);
-      yield shape.typed ? listBuffer(items.map(frameTypedNode))
-        : shape.as ? listBuffer(items.map((v: any) => frameValue(v, shape.as)))
-          : ioc.listSerializer.serialize(items);
-    } return;
+    // A list-VALUE stream: frame each row's list by its item descriptor (shared with the
+    // variant list arm + record list fields) — typed {t,v} items, a uniform `as` tag, or infer.
+    case 'jsonbList': for (const r of rows) yield frameListOf(r.list, { kind: 'scalar', as: shape.as, typed: shape.typed }); return;
     // Relational element-list values materialize as ordered JSON object arrays in
     // SQL, then frame each member through the same property-preserving element
     // encoders as ordinary vertex/edge rows.

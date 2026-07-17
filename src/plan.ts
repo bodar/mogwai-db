@@ -461,7 +461,33 @@ export const framedPropsCtx = (ctx: ScalarCtx): Expression =>
   ctx.elem === 'edge' ? edgePropsAgg(ctx.idExpr) : vertexPropsAgg(ctx.idExpr);
 
 /** valueMap()'s props: ALWAYS {key:[values]} (values wrapped in a list) for both
- *  runtimes' handler. Node = vertexPropsAgg; edge = wrap each single value in a 1-list. */
+ *  runtimes' handler. Node = vertexPropsAgg; edge = wrap each single value in a 1-list.
+ *  Values are self-describing {t,v} nodes (propNodeExpr) so whole-element framing (§5)
+ *  frames each by its exact type. */
 export const valueMapProps = (rel: Relation, elem: Elem): Expression =>
   elem === 'edge' ? edgeValueMapProps(rel.c.id) : vertexPropsAgg(rel.c.id);
+
+// A stored value with the {t,v} envelope STRIPPED to a plain value, for the untyped
+// `select(Column.values)` re-entry (below): a scalar → raw; a list/set → a JSON array of
+// its elements' bare payloads (`-> '$.v'` preserves each element's JSON type, `json(…)`
+// re-embeds so it nests as an array, not a double-encoded string). One level deep — the
+// realistic shape (a list-of-scalars property value); deeper nesting or a map value falls
+// through as the typed tree (deferred, matching the typed-element-through-select(values)
+// scope — astronomically rare as a single stored property value). `v`/`vt` MUST be qualified
+// column refs (e.g. `p.value`) — a bare `value` inside the inner `json_each` would shadow to
+// json_each's own `value` column and iterate nothing.
+const bareStoredValueExpr = (v: Expression, vt: Expression): Expression =>
+  q`CASE WHEN ${vt} IN ('list','set')
+    THEN json((SELECT json_group_array(e.value -> '$.v' ORDER BY e.key) FROM json_each(${v}) e))
+    ELSE ${storedValueExpr(v, vt)} END`;
+
+/** valueMap props with BARE values (no {t,v} envelope) for the `select(Column.values)`
+ *  RE-ENTRY (group.ts lowerValueMap), which feeds the UNTYPED list substrate (set-ops/
+ *  order/conjoin). A scalar rides raw; a list/set value round-trips as a real nested JSON
+ *  array (not the typed tree, and not a double-encoded string). The TERMINAL valueMap
+ *  framing uses the TYPED valueMapProps above; only this re-entry drops element types. */
+export const bareValueMapProps = (rel: Relation, elem: Elem): Expression =>
+  elem === 'edge'
+    ? q`COALESCE((SELECT json_group_object(p.key, json_array(${bareStoredValueExpr(raw('p.value'), raw('p.vtype'))})) FROM edge_properties p WHERE p.edge=${rel.c.id}), '{}')`
+    : q`COALESCE((SELECT json_group_object(key, json(vs)) FROM (SELECT p.key AS key, json_group_array(${bareStoredValueExpr(raw('p.value'), raw('p.vtype'))} ORDER BY p.id) AS vs FROM vertex_properties p WHERE p.node=${rel.c.id} GROUP BY p.key ORDER BY MIN(p.id))), '{}')`;
 
