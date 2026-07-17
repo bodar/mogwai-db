@@ -1,7 +1,7 @@
 import type { GraphStore } from '../storage.ts';
 import { q, value, list, empty, raw, render, type Expression } from '../q.ts';
 import { labelIn, nodeHasProp, edgeHasProp } from '../plan.ts';
-import { gremlinTypeOf, isCollectionType, storedScalar, flatType, mapEntryType, type CanonicalType, type TypeNode } from '../gremlin-types.ts';
+import { gremlinTypeOf, isCollectionType, storedScalar, flatType, mapEntryType, valueNodeOf, type CanonicalType, type TypeNode, type ValueNode } from '../gremlin-types.ts';
 import { stepChain, isNested, type Step, type SackSpec } from '../frontend.ts';
 import { normalize, type PStep } from '../strategies.ts';
 import { readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../render.ts';
@@ -93,9 +93,13 @@ function nestedScalarValue(store: GraphStore, nested: any, params: Record<string
 
 // Resolve a PropSpec's value for one target element: a literal passes through with its
 // captured vtype; a nested traversal is evaluated correlated at the element.
-function resolveSpecValue(store: GraphStore, sp: PropSpec, id: number, elem: 'node' | 'edge', params: Record<string, any>, sideEffects?: Map<string, any>): { has: boolean; value: any; vtype: CanonicalType | null } {
-  if (!isNested(sp.value)) return { has: true, value: sp.value, vtype: sp.vtype };
-  return nestedScalarValue(store, sp.value, params, { id, elem }, sideEffects);
+function resolveSpecValue(store: GraphStore, sp: PropSpec, id: number, elem: 'node' | 'edge', params: Record<string, any>, sideEffects?: Map<string, any>): { has: boolean; value: any; vtype: CanonicalType | null; typeNode: TypeNode | null } {
+  // A literal keeps its full typeNode (collection element/key fidelity); a nested traversal
+  // resolves to a SCALAR (nested collection values are deferred), so its scalar vtype IS a
+  // valid TypeNode (a bare CanonicalType), used directly as typeNode.
+  if (!isNested(sp.value)) return { has: true, value: sp.value, vtype: sp.vtype, typeNode: sp.typeNode };
+  const r = nestedScalarValue(store, sp.value, params, { id, elem }, sideEffects);
+  return { ...r, typeNode: r.vtype };
 }
 
 // ---------- write compilers ----------
@@ -162,7 +166,7 @@ function compileSetProperty(steps: PStep[], params: Record<string, any>, sideEff
     if (key == null || (typeof key === 'object' && !('token' in key))) continue;
     if (typeof key === 'object' && 'token' in key)
       throw new Error(`property(T.${key.token}) on an existing element not yet supported`);
-    specs.push({ key, value: val, vtype: propVtype(s, val, off), meta: metaOf(metaArgs), cardinality });
+    specs.push({ key, value: val, vtype: propVtype(s, val, off), typeNode: propTypeNode(s, off), meta: metaOf(metaArgs), cardinality });
   }
   const target = renderFrom(st.q, st.rel);
   if (elem === 'edge') {
@@ -178,7 +182,7 @@ function compileSetProperty(steps: PStep[], params: Record<string, any>, sideEff
       run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
         for (const sp of specs) {
           const r = resolveSpecValue(store, sp, id, 'edge', params, sideEffects);
-          if (r.has) insertEdgeProperty(store, id, sp.key, r.value, r.vtype);
+          if (r.has) insertEdgeProperty(store, id, sp.key, r.value, r.vtype, r.typeNode);
         }
         const cur = store.query<any>(readCur, [id])[0];
         return { edge: { id: cur.uid ?? id, label: cur.label, src: nodeExtId(store, cur.src), tgt: nodeExtId(store, cur.tgt), props: readEdgeProps(store, id) } };
@@ -192,7 +196,7 @@ function compileSetProperty(steps: PStep[], params: Record<string, any>, sideEff
     run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
       for (const sp of specs) {
         const r = resolveSpecValue(store, sp, id, 'node', params, sideEffects);
-        if (r.has) applyVertexProperty(store, id, sp.key, r.value, r.vtype, sp.meta, sp.cardinality);
+        if (r.has) applyVertexProperty(store, id, sp.key, r.value, r.vtype, sp.meta, sp.cardinality, r.typeNode);
       }
       const cur = store.query<any>(readCur, [id])[0];
       return { vertex: { id: cur.uid ?? id, label: cur.label, props: readVertexProps(store, id) } };
@@ -205,7 +209,11 @@ function compileSetProperty(steps: PStep[], params: Record<string, any>, sideEff
 // only because it has no V/E source; see the import at the top of this file.
 
 type Cardinality = 'single' | 'list' | 'set';
-interface PropSpec { key: string; value: any; vtype: CanonicalType | null; meta: Record<string, any> | null; cardinality: Cardinality; }
+// `vtype` names the OUTER stored shape (the value column's sibling type); `typeNode` is
+// the FULL recursive type tree, threaded so a collection value tags each element/entry/key
+// losslessly (valueNodeOf). A scalar's typeNode is redundant with vtype; a nested-traversal
+// value has no literal typeNode (its type is resolved at run time as a scalar).
+interface PropSpec { key: string; value: any; vtype: CanonicalType | null; typeNode: TypeNode | null; meta: Record<string, any> | null; cardinality: Cardinality; }
 interface VertexSpec { label: string | { nested: any }; props: PropSpec[]; uid: string | number | null; }
 
 // A leading Cardinality token on property() args (default single). Returns it plus
@@ -222,6 +230,11 @@ function readCardinality(args: any[]): { cardinality: Cardinality; rest: any[]; 
  *  JS value. `off`+1 is the value's index in the original arg list (key is at off). */
 const propVtype = (step: Step, val: any, off: number): CanonicalType | null =>
   gremlinTypeOf(val, step.argTypes?.[off + 1] ?? null);
+
+/** The property()'s VALUE arg's full recursive TypeNode (Step.argTypes at the value's
+ *  position) — carried alongside vtype so a collection value's elements/keys are tagged
+ *  losslessly by valueNodeOf. null for an untyped channel (infer per element at storage). */
+const propTypeNode = (step: Step, off: number): TypeNode | null => step.argTypes?.[off + 1] ?? null;
 
 // Trailing property() args after (key, value) are meta-property key/value pairs
 // (VertexProperty meta-properties). A meta value must be a scalar (no traversal / no
@@ -244,8 +257,11 @@ function metaOf(metaArgs: any[]): Record<string, any> | null {
 // captured propTypes (the map's TypeNode: a literal subtype or a typed client's wire
 // DataType; a nested value's read-shape type), falling back to JS inference where the
 // channel said nothing (a JS client that dropped the type / an untyped bound map).
-const singleProps = (rec: Record<string, any>, types: Record<string, CanonicalType | null> = {}): PropSpec[] =>
-  Object.entries(rec).map(([key, value]) => ({ key, value, vtype: types[key] ?? gremlinTypeOf(value, null), meta: null, cardinality: 'single' as Cardinality }));
+const singleProps = (rec: Record<string, any>, types: Record<string, TypeNode | null> = {}): PropSpec[] =>
+  Object.entries(rec).map(([key, value]) => ({
+    key, value, typeNode: types[key] ?? null,
+    vtype: gremlinTypeOf(value, types[key] ?? null), meta: null, cardinality: 'single' as Cardinality,
+  }));
 
 // An addV(...) step + its trailing property() steps → a vertex spec. A property key or
 // value that is __.select(k) of a withSideEffect constant resolves at parse time.
@@ -278,7 +294,7 @@ function parseVertexSpec(addV: Step, propSteps: Step[], sideEffects?: Map<string
       else throw new Error(`property(T.${key.token}) not supported`);
       continue;
     }
-    props.push({ key, value: val, vtype: propVtype(s, val, off), meta: metaOf(metaArgs), cardinality });
+    props.push({ key, value: val, vtype: propVtype(s, val, off), typeNode: propTypeNode(s, off), meta: metaOf(metaArgs), cardinality });
   }
   return { label, props, uid };
 }
@@ -299,26 +315,38 @@ function insertRow(store: GraphStore, table: string, baseCols: string[], baseVal
   return { id: row.id, extId: row.uid ?? row.id };
 }
 
-// A collection property value (list/map/set) → JSON text for `jsonb(?)`. A JS Map/Set
-// must be converted first: JSON.stringify(new Map()/new Set()) is "{}" (no enumerable own
-// props), which would silently drop every entry. Map→object (string keys), Set→array,
-// recursively (a list can nest maps/sets). Read back via json() + JSON.parse (see
-// readVertexProps/readEdgeProps) so the round-trip and P3 framing see a real array/object.
-function collectionJson(val: any): string {
-  const jsonable = (v: any): any =>
-    Array.isArray(v) ? v.map(jsonable)
-    : v instanceof Set ? Array.from(v, jsonable)
-    : v instanceof Map ? Object.fromEntries(Array.from(v, ([k, x]) => [String(k), jsonable(x)]))
-    : v;
-  return JSON.stringify(jsonable(val));
+// The JSON text bound for a stored COLLECTION value: the self-describing {t,v} tree
+// (gremlin-types.valueNodeOf), stored as the TOP node's BARE `v` (the vtype column names
+// the outer shape). Leaves carry their canonical form (storedScalar) so precision + type
+// survive; nested nodes self-describe. Replaces the old flat collectionJson (which lost
+// element/key types, set-vs-list, and non-string keys).
+const collectionValueJson = (val: any, typeNode: TypeNode | null): string =>
+  JSON.stringify(valueNodeOf(val, typeNode).v);
+
+// Reconstruct a plain JS value from ONE stored ValueNode — leaves keep their stored form,
+// containers rebuild as array/Set/Map (typed, non-string keys preserved). Used by the
+// write-response echo (readVertexProps/readEdgeProps); the full-fidelity read + echo
+// framing routes through the unified framer (execute.ts frameTypedNode).
+function plainFromNode(n: ValueNode): any {
+  if (n == null || typeof n !== 'object') return n;
+  if (n.t === 'list') return (n.v as ValueNode[]).map(plainFromNode);
+  if (n.t === 'set') return new Set((n.v as ValueNode[]).map(plainFromNode));
+  if (n.t === 'map') return new Map((n.v as [ValueNode, ValueNode][]).map(([k, x]) => [plainFromNode(k), plainFromNode(x)]));
+  return n.v;
 }
 
-// Decode a stored property VALUE for a write-response echo: a collection (list/map/set)
-// arrives as `json(value)` TEXT (see the SELECTs below) → JSON.parse to a real array/
-// object so framing picks the list/map/set serializer, not a raw-blob byte Map. A scalar
-// passes through as its bound storage value.
-const decodeStoredValue = (value: any, vtype: string | null): any =>
-  isCollectionType(vtype) ? JSON.parse(value) : value;
+// Decode a stored property VALUE for a write-response echo: a collection arrives as
+// `json(value)` TEXT of the bare top-node `v` (see the SELECTs below); rebuild the plain
+// JS array/Set/Map so echo framing produces the right container. A scalar passes through.
+const decodeStoredValue = (value: any, vtype: string | null): any => {
+  if (!isCollectionType(vtype)) return value;
+  const bare = JSON.parse(value);
+  return vtype === 'map'
+    ? new Map((bare as [ValueNode, ValueNode][]).map(([k, x]) => [plainFromNode(k), plainFromNode(x)]))
+    : vtype === 'set'
+      ? new Set((bare as ValueNode[]).map(plainFromNode))
+      : (bare as ValueNode[]).map(plainFromNode);
+};
 
 // Set/append ONE vertex property (W4). single = replace all rows for the key then insert
 // one; list = append; set = append unless an equal value already exists (then patch its
@@ -326,15 +354,16 @@ const decodeStoredValue = (value: any, vtype: string | null): any =>
 // each (locked #3). A traversal-valued property defers to a later stage.
 export function applyVertexProperty(
   store: GraphStore, node: number, key: string, val: any, vtype: CanonicalType | null,
-  meta: Record<string, any> | null, cardinality: 'single' | 'list' | 'set',
+  meta: Record<string, any> | null, cardinality: 'single' | 'list' | 'set', typeNode: TypeNode | null = null,
 ): void {
   if (val && typeof val === 'object' && 'nested' in val) throw new Error('property() with a traversal value not yet supported');
   const metaJson = meta ? JSON.stringify(meta) : null;
-  // A collection value (list/map/set) is stored as JSONB in the value column (bind the
-  // JSON text, wrap jsonb(?)) — a raw JS array/Map bind would throw at the SQLite seam.
-  // A scalar binds raw so it keeps its storage class (numeric order/range intact).
+  // A collection value (list/map/set) is stored as a self-describing typed-JSON tree in the
+  // value column (bind the JSON text, wrap jsonb(?)) — a raw JS array/Map bind would throw at
+  // the SQLite seam. A scalar binds through storedScalar so it keeps its storage class /
+  // exact-tail TEXT (numeric order/range intact).
   const collection = isCollectionType(vtype);
-  const storedVal = collection ? collectionJson(val) : storedScalar(val, vtype);
+  const storedVal = collection ? collectionValueJson(val, typeNode) : storedScalar(val, vtype);
   const valPh = collection ? 'jsonb(?)' : '?';
   if (cardinality === 'single') store.query('DELETE FROM vertex_properties WHERE node=? AND key=?', [node, key]);
   if (cardinality === 'set') {
@@ -353,10 +382,10 @@ export function applyVertexProperty(
 // Set ONE edge property (single cardinality — edge Property has no meta/multi). One
 // row per (edge,key): UPSERT on the UNIQUE(edge,key) constraint. Collections serialize
 // to JSONB like vertex properties; scalars bind raw (storage class preserved).
-export function insertEdgeProperty(store: GraphStore, edge: number, key: string, val: any, vtype: CanonicalType | null): void {
+export function insertEdgeProperty(store: GraphStore, edge: number, key: string, val: any, vtype: CanonicalType | null, typeNode: TypeNode | null = null): void {
   if (val && typeof val === 'object' && 'nested' in val) throw new Error('property() with a traversal value not yet supported');
   const collection = isCollectionType(vtype);
-  const storedVal = collection ? collectionJson(val) : storedScalar(val, vtype);
+  const storedVal = collection ? collectionValueJson(val, typeNode) : storedScalar(val, vtype);
   const valPh = collection ? 'jsonb(?)' : '?';
   store.query(
     `INSERT INTO edge_properties(edge, key, value, vtype) VALUES(?, ?, ${valPh}, ?)
@@ -408,7 +437,7 @@ function insertVertex(store: GraphStore, spec: VertexSpec, params: Record<string
   const row = insertRow(store, 'nodes', ['label'], [store.labelId(label)], spec.uid);
   for (const p of spec.props) {
     const r = resolveSpecValue(store, p, row.id, 'node', params, sideEffects);
-    if (r.has) applyVertexProperty(store, row.id, p.key, r.value, r.vtype, p.meta, p.cardinality);
+    if (r.has) applyVertexProperty(store, row.id, p.key, r.value, r.vtype, p.meta, p.cardinality, r.typeNode);
   }
   return { ...row, label };
 }
@@ -421,13 +450,13 @@ function compileAddV(steps: PStep[], params: Record<string, any> = {}, sideEffec
   return { kind: 'write', run: (store) => { const v = insertVertex(store, spec, params, sideEffects); return [{ vertex: { id: v.extId, label: v.label, props: readVertexProps(store, v.id) } }]; } };
 }
 
-interface EdgeCluster { label: string; fromSpec: any; toSpec: any; edgeUid: string | number | null; props: Record<string, any>; propTypes: Record<string, CanonicalType | null>; next: number; }
+interface EdgeCluster { label: string; fromSpec: any; toSpec: any; edgeUid: string | number | null; props: Record<string, any>; propTypes: Record<string, TypeNode | null>; next: number; }
 function parseEdgeCluster(steps: Step[], addEIdx: number): EdgeCluster {
   const label = steps[addEIdx].args[0];
   if (typeof label !== 'string') throw new Error('addE(label): nested-traversal label not supported');
   let fromSpec: any, toSpec: any, edgeUid: string | number | null = null;
   const props: Record<string, any> = {};
-  const propTypes: Record<string, CanonicalType | null> = {};
+  const propTypes: Record<string, TypeNode | null> = {};
   let i = addEIdx + 1;
   for (; i < steps.length && (steps[i].name === 'from' || steps[i].name === 'to' || steps[i].name === 'property'); i++) {
     const m = steps[i];
@@ -442,7 +471,7 @@ function parseEdgeCluster(steps: Step[], addEIdx: number): EdgeCluster {
       // A nested-traversal KEY fails CLOSED (a plain props[k]=v would coerce {nested} to
       // the string "[object Object]" and write under a garbage key).
       else if (isNested(k)) throw new Error('addE property() with a nested-traversal key not yet supported');
-      else { props[k] = v; propTypes[k] = propVtype(m, v, off); }
+      else { props[k] = v; propTypes[k] = propTypeNode(m, off); }
     }
   }
   return { label, fromSpec, toSpec, edgeUid, props, propTypes, next: i };
@@ -462,9 +491,10 @@ function insertEdge(store: GraphStore, c: EdgeCluster, src: number, tgt: number,
   // {nested} args.
   const resolved: Record<string, any> = {};
   for (const [k, v] of Object.entries(c.props)) {
-    const sp: PropSpec = { key: k, value: v, vtype: c.propTypes[k] ?? null, meta: null, cardinality: 'single' };
+    const tn = c.propTypes[k] ?? null;
+    const sp: PropSpec = { key: k, value: v, vtype: gremlinTypeOf(v, tn), typeNode: tn, meta: null, cardinality: 'single' };
     const r = resolveSpecValue(store, sp, id, 'edge', params, sideEffects);
-    if (r.has) { insertEdgeProperty(store, id, k, r.value, r.vtype ?? gremlinTypeOf(r.value, null)); resolved[k] = r.value; }
+    if (r.has) { insertEdgeProperty(store, id, k, r.value, r.vtype ?? gremlinTypeOf(r.value, null), r.typeNode); resolved[k] = r.value; }
   }
   return { edge: { id: extId, label: c.label, src: nodeExtId(store, src), tgt: nodeExtId(store, tgt), props: resolved } };
 }
@@ -580,7 +610,7 @@ function resolveEndpoint(store: GraphStore, spec: any, d: { aliases: Map<string,
 // propTypes carries each prop VALUE's canonical type: from the map's TypeNode (a literal
 // subtype or a typed client's wire DataType) for a literal value, or from the read shape
 // for a nested value (filled by resolveMergeSpec). null = infer from the JS value.
-interface MergeSpec { label: string | null | { nested: any }; id: any; outV: any; inV: any; props: Record<string, any>; propTypes: Record<string, CanonicalType | null>; }
+interface MergeSpec { label: string | null | { nested: any }; id: any; outV: any; inV: any; props: Record<string, any>; propTypes: Record<string, TypeNode | null>; }
 
 function classifyMergeKey(k: any): { kind: 'label' | 'id' | 'outV' | 'inV' | 'prop'; name?: string } {
   const enumName = (typeName: string) => k && typeof k === 'object' && k.typeName === typeName ? String(k.elementName).toLowerCase() : null;
@@ -643,9 +673,10 @@ function normalizeMergeMap(raw: any, typeNode: TypeNode | null, sideEffects?: Ma
     else if (c.kind === 'inV') spec.inV = classifyMergeVal(v);
     else {
       spec.props[c.name!] = v;
-      // A literal value's type comes from the map's TypeNode (the parser subtype / the
-      // typed client's wire DataType); a nested value's type is filled per driver.
-      spec.propTypes[c.name!] = isNested(v) ? null : flatType(mapEntryType(typeNode, String(k)));
+      // A literal value's FULL type tree comes from the map's TypeNode (the parser subtype /
+      // the typed client's wire DataType) — kept whole so a collection value's elements/keys
+      // stay typed; a nested value's type is filled per driver (a scalar, in resolveMergeSpec).
+      spec.propTypes[c.name!] = isNested(v) ? null : mapEntryType(typeNode, String(k));
     }
   }
   return spec;
@@ -659,17 +690,17 @@ function normalizeMergeMap(raw: any, typeNode: TypeNode | null, sideEffects?: Ma
 function resolveMergeSpec(store: GraphStore, spec: MergeSpec, seed: { id: number; elem: 'node' | 'edge' } | undefined, params: Record<string, any>, sideEffects?: Map<string, any>): MergeSpec {
   // Resolve one value to {value, vtype}: a literal keeps its captured propType; a nested
   // traversal resolves correlated at the seed and carries the read shape's vtype.
-  const rv = (v: any, propKey: string | null, what: string): { value: any; vtype: CanonicalType | null } => {
-    if (!isNested(v)) return { value: v, vtype: propKey != null ? (spec.propTypes[propKey] ?? null) : null };
+  const rv = (v: any, propKey: string | null, what: string): { value: any; typeNode: TypeNode | null } => {
+    if (!isNested(v)) return { value: v, typeNode: propKey != null ? (spec.propTypes[propKey] ?? null) : null };
     const r = nestedScalarValue(store, v, params, seed, sideEffects);
     if (!r.has) throw new Error(`merge map ${what} traversal produced no value`);
-    return { value: r.value, vtype: r.vtype };
+    return { value: r.value, typeNode: r.vtype }; // a nested scalar's vtype IS a bare TypeNode
   };
   const props: Record<string, any> = {};
-  const propTypes: Record<string, CanonicalType | null> = {};
+  const propTypes: Record<string, TypeNode | null> = {};
   for (const [k, v] of Object.entries(spec.props)) {
     const r = rv(v, k, `value for '${k}'`);
-    props[k] = r.value; propTypes[k] = r.vtype;
+    props[k] = r.value; propTypes[k] = r.typeNode;
   }
   return {
     label: isNested(spec.label) ? String(rv(spec.label, null, 'label').value) : spec.label,
@@ -746,7 +777,7 @@ function compileMergeV(steps: PStep[], params: Record<string, any>, sideEffects?
         const matches = store.query<any>(match.sql, match.binds);
         if (matches.length) {
           for (const m of matches) {
-            if (om) for (const [k, v] of Object.entries(om.props)) applyVertexProperty(store, m.id, k, v, om.propTypes[k] ?? gremlinTypeOf(v, null), null, 'single');
+            if (om) for (const [k, v] of Object.entries(om.props)) applyVertexProperty(store, m.id, k, v, gremlinTypeOf(v, om.propTypes[k] ?? null), null, 'single', om.propTypes[k] ?? null);
             out.push({ vertex: { id: m.uid ?? m.id, label: m.label, props: readVertexProps(store, m.id) } });
           }
         } else {
@@ -805,7 +836,7 @@ function compileMergeE(steps: PStep[], params: Record<string, any>, sideEffects?
         const matches = store.query<any>(match.sql, match.binds);
         if (matches.length) {
           for (const m of matches) {
-            if (om) for (const [k, v] of Object.entries(om.props)) insertEdgeProperty(store, m.id, k, v, om.propTypes[k] ?? gremlinTypeOf(v, null));
+            if (om) for (const [k, v] of Object.entries(om.props)) insertEdgeProperty(store, m.id, k, v, gremlinTypeOf(v, om.propTypes[k] ?? null), om.propTypes[k] ?? null);
             out.push({ edge: { id: m.uid ?? m.id, label: m.label, src: nodeExtId(store, m.src), tgt: nodeExtId(store, m.tgt), props: readEdgeProps(store, m.id) } });
           }
         } else {

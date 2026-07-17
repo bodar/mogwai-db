@@ -2,7 +2,7 @@ import { q, value, list, empty, raw, Relation, Query, type Expression } from '..
 import { labels, vertexProperties, edgeProperties } from '../schema.ts';
 import {
   predicateSql, rangeToOffsetLimit, elemCtx, extIdOf, jsonbGroupArray,
-  nodePropScalar, edgePropScalar, nodePropSortKey, edgePropSortKey, framedProps, valueMapProps,
+  nodePropScalar, edgePropScalar, nodePropSortKey, edgePropSortKey, framedProps, valueMapProps, storedValueExpr,
 } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, carriedWith, elemRel, withoutCarried, type ElementStream } from './context.ts';
@@ -10,7 +10,7 @@ import { carryOf, continueLowering, dispatchShapeTail, toListStream, toResultStr
 import { tryLowerLocalAggregate } from './sideeffect.ts';
 import { type Shape } from '../render.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
-import { lowerScalarFilter, lowerConstant, lowerScalarSack, isListTypeOf, scalarListRetype } from './scalar.ts';
+import { lowerScalarFilter, lowerConstant, lowerScalarSack, collectionTypeOf, scalarCollectionRetype } from './scalar.ts';
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
 import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerLegacyUnion } from './branch.ts';
@@ -553,13 +553,16 @@ function compileFold(st: ElementStream, acc: TailAcc): ListStream {
 // reached on a scalar stream it raises TinkerPop's incoming-type error.
 const SCALAR_LIST_ONLY = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product', 'conjoin', 'all', 'any']);
 
-// is(typeOf(LIST)) RETYPES a scalar value stream into a ListStream: the stored JSONB list
-// value becomes the `list` column, so unfold/count(Scope.local)/range/project all reuse
-// the list substrate (List.feature). A stored non-list row is filtered out; a computed
-// scalar (no stored vtype) can't be a list, so it falls through to the generic is() fold.
+// is(typeOf(LIST|SET)) RETYPES a scalar value stream into a ListStream: the stored
+// collection value becomes the `list` column, so unfold/count(Scope.local)/range/project
+// all reuse the list substrate (List.feature). A stored non-matching row is filtered out; a
+// computed scalar (no stored vtype) can't be a collection, so it falls through to the
+// generic is() fold. MAP is NOT retyped (no MapStream unfold yet) → returns null so is()
+// stays a scalar vtype filter; a bare map value still frames whole via case 'value'.
 const scalarIsListRetype: ShapeTailFn<ScalarStream> = (s, step, _steps, at) => {
-  if (!isListTypeOf(step)) return null;
-  const listed = scalarListRetype(s);
+  const kind = collectionTypeOf(step);
+  if (kind !== 'list' && kind !== 'set') return null;
+  const listed = scalarCollectionRetype(s, kind);
   return listed ? continueLowering(listed, at + 1) : null;
 };
 
@@ -643,14 +646,17 @@ const PROJECTORS = new Map<string, ProjFn>([
     if (c.st.elem === 'edge') {
       const ep = edgeProperties.as('ep');
       return {
-        shape: { kind: 'value' }, colsNode: q`${ep.c.value} AS v`,
+        // A collection value → json() TEXT (so the framer JSON.parses the {t,v} tree);
+        // a scalar stays raw. scalarExpr (order key) keeps the raw column (collections
+        // as sort keys are degenerate either way).
+        shape: { kind: 'value' }, colsNode: q`${storedValueExpr(ep.c.value, ep.c.vtype)} AS v`,
         fromNode: q`${c.vJoin} JOIN ${ep} ON ${ep.c.edge}=${c.n.c.id} AND ${ep.c.key}=${value(key)}`,
         scalarExpr: ep.c.value, baseWhere: null, encounterKey: q`${c.p.c.id}, ${ep.c.id}`, vtypeExpr: ep.c.vtype,
       };
     }
     const vp = vertexProperties.as('vp');
     return {
-      shape: { kind: 'value' }, colsNode: q`${vp.c.value} AS v`,
+      shape: { kind: 'value' }, colsNode: q`${storedValueExpr(vp.c.value, vp.c.vtype)} AS v`,
       fromNode: q`${c.vJoin} JOIN ${vp} ON ${vp.c.node}=${c.n.c.id} AND ${vp.c.key}=${value(key)}`,
       scalarExpr: vp.c.value, baseWhere: null, encounterKey: q`${c.p.c.id}, ${vp.c.id}`, vtypeExpr: vp.c.vtype,
     };

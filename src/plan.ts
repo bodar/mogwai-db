@@ -379,6 +379,15 @@ export const extIdOf = (rowid: Expression): Expression => q`(SELECT COALESCE(uid
 
 /** node: the first value under `key` (ORDER BY id — insertion order), as a correlated
  *  scalar. Multi-valued keys collapse to the first, matching TinkerPop's by(key). */
+/** A stored property value projected for a READ (values() flatMap): a collection (vtype
+ *  list/map/set) is a JSONB blob → `json()` it to TEXT so the framer can JSON.parse the
+ *  self-describing {t,v} tree; a scalar passes through raw (keeps its SQLite storage class /
+ *  exact-tail TEXT). Used at the materializing values() projector. The scalarProp paths
+ *  below (by(key)/order/group-key) keep the raw column: a collection used AS a comparison /
+ *  sort / group KEY is a degenerate out-of-family shape, unchanged by this feature. */
+export const storedValueExpr = (valExpr: Expression, vtypeExpr: Expression): Expression =>
+  q`CASE WHEN ${vtypeExpr} IN ('list','map','set') THEN json(${valExpr}) ELSE ${valExpr} END`;
+
 export const nodePropScalar = (nodeIdExpr: Expression, key: string): Expression =>
   q`(SELECT value FROM vertex_properties WHERE node=${nodeIdExpr} AND key=${value(key)} ORDER BY id LIMIT 1)`;
 

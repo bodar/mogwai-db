@@ -244,12 +244,14 @@ describe('compiler SQL snapshots', () => {
     // is(typeOf(LIST)) is a RETYPE, not a value filter: the scalar value stream becomes a
     // ListStream whose `list` column is json() of the stored JSONB list value.
     const listed = read('g.V().values("list").is(typeOf(GType.LIST))');
-    expect(listed.shape).toEqual({ kind: 'jsonbList' });
+    // typed: items are self-describing {t,v} nodes → framed via frameTypedNode (full-fidelity).
+    expect(listed.shape).toEqual({ kind: 'jsonbList', typed: true });
     expect(listed.sql).toContain("json(p.v) AS list");
     expect(listed.sql).toContain("p.vtype = ?");
     expect(listed.binds).toContain('list');
     // once a ListStream, the list substrate composes: unfold/count(local)/range reuse it.
-    expect(read('g.V().values("list").is(typeOf(GType.LIST)).unfold()').shape).toEqual({ kind: 'value' });
+    // typed unfold carries each element's own stored vtype (perRowType framing).
+    expect(read('g.V().values("list").is(typeOf(GType.LIST)).unfold()').shape).toEqual({ kind: 'value', perRowType: true });
     expect(read('g.V().values("list").is(typeOf(GType.LIST)).count(Scope.local)').shape).toEqual({ kind: 'count' });
     expect(read('g.V().values("list").is(typeOf(GType.LIST)).unfold().range(1,3)').sql).toContain('json_each');
 
@@ -574,7 +576,9 @@ describe('compiler SQL snapshots', () => {
     const c = read('g.V().values("age").count()');
     expect(c.shape).toEqual({ kind: 'count' });
     expect(c.sql).toContain('SELECT COUNT(*) AS v FROM c1');
-    expect(c.sql).toContain('SELECT vp.value AS v, vp.vtype AS vtype FROM'); // the values() flatMap (now carrying per-row vtype) feeds the count
+    // the values() flatMap (now carrying per-row vtype; a collection value → json() text)
+    // feeds the count.
+    expect(c.sql).toContain("THEN json(vp.value) ELSE vp.value END AS v, vp.vtype AS vtype FROM");
     // intervening scalar-stream modifiers compose through the re-entry
     const dedupCount = read('g.V().values("age").dedup().count()').sql;
     expect(dedupCount).toContain('SELECT DISTINCT p.v AS v');
@@ -849,7 +853,7 @@ describe('compiler SQL snapshots', () => {
   test('union() as a source step UNION ALLs its vertex-rooted branches', () => {
     const p = read("g.union(__.V(2),__.V(4)).values('name')");
     expect(p.sql).toContain('UNION ALL');
-    expect(p.sql).toContain('vp.value AS v');
+    expect(p.sql).toContain('vp.value END AS v');
     // branches sharing the one WITH clause
     expect(read("g.union(__.V().hasLabel('software'),__.V().hasLabel('person')).count()").shape).toEqual({ kind: 'count' });
     // mid-chain union() still works (different code path)
@@ -3912,19 +3916,28 @@ describe('typed property values (P1) — vtype capture + collection storage', ()
     expect(got).toEqual({ b: 'boolean', d: 'double', gid: 'uuid', i: 'int', l: 'long', s: 'string', when: 'datetime' });
   });
 
-  test('a list-valued property is stored as JSONB (no bind crash) with vtype=list', () => {
+  test('a list-valued property stores a self-describing typed-JSON tree (vtype=list)', () => {
     const store = fresh();
-    // Was "Binding expected string…" before collections serialized to JSONB.
+    // Was "Binding expected string…" before collections serialized to JSONB; now the value
+    // column holds the top node's BARE `v` = per-element {t,v} nodes (full-fidelity elements).
     executeQuery(store, "g.addV('d').property('list',['a','b','c'])", {});
     const r = store.query<{ v: string; vtype: string }>("SELECT json(value) AS v, vtype FROM vertex_properties WHERE key='list'")[0];
-    expect([r.vtype, JSON.parse(r.v)]).toEqual(['list', ['a', 'b', 'c']]);
+    expect([r.vtype, JSON.parse(r.v)]).toEqual(['list', [
+      { t: 'string', v: 'a' }, { t: 'string', v: 'b' }, { t: 'string', v: 'c' },
+    ]]);
+    // round-trips back to the plain list value.
+    const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
+    expect(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST))", {}).map(dec)).toEqual([['a', 'b', 'c']]);
   });
 
-  test('a map-valued property keeps its entries (JSON.stringify(Map) would drop them)', () => {
+  test('a map-valued property stores ordered typed [key,value] pairs (non-string keys survive)', () => {
     const store = fresh();
     executeQuery(store, "g.addV('x').property('data',[a:1,b:2])", {});
     const r = store.query<{ v: string; vtype: string }>("SELECT json(value) AS v, vtype FROM vertex_properties WHERE key='data'")[0];
-    expect([r.vtype, JSON.parse(r.v)]).toEqual(['map', { a: 1, b: 2 }]);
+    expect([r.vtype, JSON.parse(r.v)]).toEqual(['map', [
+      [{ t: 'string', v: 'a' }, { t: 'int', v: 1 }],
+      [{ t: 'string', v: 'b' }, { t: 'int', v: 2 }],
+    ]]);
   });
 
   test('edge properties store into the normalized edge_properties table with vtype', () => {

@@ -83,7 +83,14 @@ export interface VariantArms {
 /** A single list value in a one-row relation with a JSONB `list` column (fold /
  *  inject-of-a-list / select(Column.values)), plus any carried columns. `of` says
  *  what the list holds so unfold/framing knows how to explode it. */
-export interface ListStream extends Carry { readonly kind: 'list'; readonly rel: Relation; readonly of: ListOf; }
+export interface ListStream extends Carry {
+  readonly kind: 'list';
+  readonly rel: Relation;
+  readonly of: ListOf;
+  /** This list value is a Set (from is(typeOf(SET)) or a set-op) — frames as a GraphBinary
+   *  SET, not a LIST. Purely a framing marker; the list substrate (unfold/reducers) is shared. */
+  readonly set?: boolean;
+}
 
 /** How a map stream's key/value columns are shaped. A key/value is a bare scalar
  *  (mk/mv hold the value, `as` its GraphBinary tag) or an element rowid (rejoined to
@@ -290,8 +297,8 @@ export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, result: 
   assertStreamColumns({ ...c, kind: 'scalar', rel, as, result, encounter, productiveNull, vtype });
 export const toVariantStream = (c: Carry, rel: Relation, arms: VariantArms, result: VariantStream['result'] = 'rows'): VariantStream =>
   assertStreamColumns({ ...c, kind: 'variant', rel, scalarAs: arms.scalarAs, node: arms.node, edge: arms.edge, listOf: arms.listOf, result });
-export const toListStream = (c: Carry, rel: Relation, of: ListOf): ListStream =>
-  assertStreamColumns({ ...c, kind: 'list', rel, of });
+export const toListStream = (c: Carry, rel: Relation, of: ListOf, set?: boolean): ListStream =>
+  assertStreamColumns({ ...c, kind: 'list', rel, of, set });
 export const toMapStream = (c: Carry, rel: Relation, keyOf: MapOf, valOf: MapOf, entries?: boolean): MapStream =>
   assertStreamColumns({ ...c, kind: 'map', rel, keyOf, valOf, entries });
 export const toPropertyStream = (c: Carry, rel: Relation, ownerElem: Elem): PropertyStream =>
