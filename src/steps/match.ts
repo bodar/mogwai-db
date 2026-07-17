@@ -1,27 +1,35 @@
-import { q, list, empty, raw, type Expression } from '../q.ts';
-import { labelIn, predicateSql, nodeHasProp, dirsFor } from '../plan.ts';
+import { q, list, empty, type Expression } from '../q.ts';
 import { stepChain, type Step } from '../frontend.ts';
-import { advance, aliasColsOf, prevRel, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from './context.ts';
+import { normalize, type PStep } from '../strategies.ts';
+import { advance, aliasColsOf, prevRel, type AliasEntry, type ElementStream, type StepFn } from './context.ts';
 import { aliasId, aliasSeed, nodeEntry } from './alias.ts';
+import { lowerElementSteps } from './index.ts';
 
 // ---------- match() — declarative conjunctive pattern join ----------
 //
 // match(p1, p2, …) finds all consistent bindings of its pattern variables. Each
-// pattern is `as(start).<out/in([label])>*[.has/hasLabel].as(end)`: navigate from a
-// bound var to bind (or constrain) another. We compile it as a prefix step that
-// JOIN-extends the carried alias columns — bind the root var (the one start that is
-// never an end) to the incoming id, then fold the patterns in dependency order, each
-// pattern one join CTE that adds its end column (or a WHERE equality when the end is
-// already bound). The result keeps `id` = the root's id and carries every bound var as
-// an alias column, so a downstream select/count/dedup consumes it via the usual rails.
+// pattern is `as(start).<element traversal>.as(end)`: navigate from a bound var to bind
+// (or constrain) another. We compile it as a prefix step that JOIN-extends the carried
+// alias columns — bind the root var (the one start that is never an end) to the incoming
+// id, then fold the patterns in dependency order. Each pattern re-roots a fresh element
+// stream at its start var's rowid (carrying every bound var column) and lowers its body
+// through the SHARED movement/filter StepFns (lowerElementSteps) — NOT a private
+// movement/filter compiler — so out/in/both/…E/…V + has/hasLabel/hasId/where all work
+// exactly as they do at root. It then re-projects: restore `id` to the root's rowid (an
+// invariant of the binding table, recoverable as the root var's last-history id) and
+// bind the end var (new col) or constrain it (WHERE equality when already bound). The
+// result keeps `id` = the root's id and carries every bound var as an alias column, so a
+// downstream select/count/dedup consumes it via the usual rails.
 //
-// Deferred (clear errors): both()/edge/scalar-terminal (count/values) patterns, or/
-// not/where/nested-match patterns, repeat/order/map in a pattern, and any shape with
-// other than exactly one start-only root variable (e.g. mutual a↔b recursion).
+// Deferred (clear errors): a scalar-terminal pattern (count/values binds a scalar var —
+// the binding table carries node rowids), an edge-typed end var, an intra-pattern as()
+// label, or/not/nested-match patterns, and any shape with other than exactly one
+// start-only root variable (e.g. mutual a↔b recursion).
 
-interface Pattern { start: string; hops: Step[]; filters: Step[]; end: string | null; }
+interface Pattern { start: string; body: PStep[]; end: string | null; }
 
-/** as(start).<out/in>*[.has/hasLabel].as(end) → its parts. */
+/** as(start).<body…>.[as(end)] → its parts. The body is normalized so it crosses the
+ *  same seam as a root/child chain before the StepFn fold. */
 function parsePattern(chain: Step[]): Pattern {
   if (!chain.length || chain[0].name !== 'as' || typeof chain[0].args[0] !== 'string')
     throw new Error('match() pattern must start with as("x")');
@@ -30,65 +38,42 @@ function parsePattern(chain: Step[]): Pattern {
   let end: string | null = null;
   const last = mid[mid.length - 1];
   if (last?.name === 'as' && typeof last.args[0] === 'string') { end = last.args[0]; mid = mid.slice(0, -1); }
-  const hops: Step[] = [];
-  let i = 0;
-  for (; i < mid.length && (mid[i].name === 'out' || mid[i].name === 'in'); i++) hops.push(mid[i]);
-  const filters = mid.slice(i);
-  const bad = filters.find((f) => f.name !== 'has' && f.name !== 'hasLabel');
-  if (bad) throw new Error(`match() pattern step __.${bad.name}() not yet supported`);
-  return { start, hops, filters, end };
+  return { start, body: normalize(mid).steps, end };
 }
 
-/** ` AND <alias>.label IN (…)` for a hop's edge-label filter (per-alias, unlike the
- *  fixed-`e` edgeLabelFilter). */
-const hopLabel = (e: string, args: any[]): Expression => (args.length ? q` AND ${labelIn(`${e}.label`, args)}` : empty);
-
-/** Apply one pattern as a join CTE extending the carried columns. */
-function applyPattern(st: ElementStream, p: Pattern, aliases: Map<string, AliasEntry>, bind: (v: string) => string): ElementStream {
+/** Apply one pattern: re-root a fresh element stream at the start var, fold its body
+ *  through the shared StepFns, then re-project the binding table with the end bound. */
+function applyPattern(st: ElementStream, p: Pattern, aliases: Map<string, AliasEntry>, rootCol: string, bind: (v: string) => string): ElementStream {
   const prev = prevRel(st, 'p');
-  const sCol = aliases.get(p.start)!.col;
-  const sId = aliasId(prev.c[sCol], 'last'); // match vars are nodes; read the rowid out of history
-  const carried: Expression[] = ['id', ...aliasColsOf(aliases)].map((c) => q`${prev.c[c]}`);
+  const startCol = aliases.get(p.start)!.col;
+  const varCols = aliasColsOf(aliases);
 
-  const joins: Expression[] = [];
+  // Seed: id = the start var's rowid, carrying every bound var column so movement/filter
+  // thread them through unchanged. The bound vars ARE the seed's carried aliases.
+  const seedRel = st.q.cte(
+    q`SELECT ${aliasId(prev.c[startCol], 'last')} AS id${list(varCols.map((c) => q`, ${prev.c[c]}`), '')} FROM ${prev}`,
+    ['id', ...varCols]);
+  const seed: ElementStream = { ...st, rel: seedRel, elem: 'node', carried: { aliases: new Map(aliases), origins: [] } };
+
+  const { stream: end, next } = lowerElementSteps(p.body, seed);
+  if (next !== p.body.length)
+    throw new Error(`match() pattern step __.${p.body[next].name}() not yet supported`);
+  if (end.elem !== 'node')
+    throw new Error('match() edge-typed pattern (end var is an edge) not yet supported');
+  if (end.carried.aliases.size !== aliases.size || end.carried.path || end.carried.origins.length)
+    throw new Error('match() pattern binding an intra-pattern label not yet supported');
+
+  // Re-project: restore id = the root's rowid (== aliasId(rootCol), the binding-table
+  // invariant), keep every var column, and bind/constrain the end var.
+  const f = end.rel.as('f');
+  const proj: Expression[] = [q`${aliasId(f.c[rootCol], 'last')} AS id`, ...varCols.map((c) => q`${f.c[c]}`)];
   const conds: Expression[] = [];
-  let lastNode: string;
-  if (p.hops.length === 0) {
-    lastNode = 'mn'; // filter-only constraint on the start var's element
-    joins.push(q`JOIN nodes mn ON mn.id=${sId}`);
-  } else {
-    let prevId: Expression = sId;
-    p.hops.forEach((h, k) => {
-      const [from, to] = dirsFor(h.name)[0];
-      const e = `me${k}`, n = `mn${k}`;
-      joins.push(q`JOIN edges ${e} ON ${e}.${from}=${prevId}${hopLabel(e, h.args)} JOIN nodes ${n} ON ${n}.id=${e}.${to}`);
-      prevId = q`${n}.id`;
-    });
-    lastNode = `mn${p.hops.length - 1}`;
-  }
-
-  for (const f of p.filters) {
-    if (f.name === 'hasLabel') { conds.push(labelIn(`${lastNode}.label`, f.args)); continue; }
-    let a = f.args; // has(label,key,value) 3-arg folds in a label filter
-    if (a.length === 3 && typeof a[0] === 'string') { conds.push(labelIn(`${lastNode}.label`, [a[0]])); a = a.slice(1); }
-    if (a[0] && typeof a[0] === 'object' && 'token' in a[0]) {
-      const expr = a[0].token === 'label' ? q`(SELECT name FROM labels WHERE id=${lastNode}.label)`
-        : a[0].token === 'id' ? q`COALESCE(${lastNode}.uid, ${lastNode}.id)`
-        : (() => { throw new Error(`match() pattern has(T.${a[0].token}) not yet supported`); })();
-      conds.push(predicateSql(expr, a[1]));
-    } else {
-      // has(key,val) on the pattern's node → ANY-match EXISTS over vertex_properties.
-      conds.push(nodeHasProp(raw(`${lastNode}.id`), a[0], a[1]));
-    }
-  }
-
-  const proj = [...carried];
   if (p.end) {
-    if (aliases.has(p.end)) conds.push(q`${lastNode}.id=${aliasId(prev.c[aliases.get(p.end)!.col], 'last')}`);
-    else { const col = bind(p.end); proj.push(q`${aliasSeed(nodeEntry(raw(`${lastNode}.id`)))} AS ${col}`); }
+    if (aliases.has(p.end)) conds.push(q`${f.c.id}=${aliasId(f.c[aliases.get(p.end)!.col], 'last')}`);
+    else proj.push(q`${aliasSeed(nodeEntry(f.c.id))} AS ${bind(p.end)}`); // bind() mutates `aliases`
   }
   const where = conds.length ? q` WHERE ${list(conds, ' AND ')}` : empty;
-  return advance(st, q`SELECT ${list(proj, ', ')} FROM ${prev} ${list(joins, ' ')}${where}`,
+  return advance(st, q`SELECT ${list(proj, ', ')} FROM ${f}${where}`,
     { aliases: new Map(aliases), cols: ['id', ...aliasColsOf(aliases)] });
 }
 
@@ -126,7 +111,7 @@ export const match: StepFn = (s, st) => {
     if (guard-- < 0) throw new Error('match() pattern dependency cycle not yet supported');
     const idx = pending.findIndex((p) => aliases.has(p.start));
     if (idx < 0) throw new Error('match() pattern with an unbound start variable not yet supported');
-    cur = applyPattern(cur, pending.splice(idx, 1)[0], aliases, bind);
+    cur = applyPattern(cur, pending.splice(idx, 1)[0], aliases, rootCol, bind);
   }
   return cur;
 };
