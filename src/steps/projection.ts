@@ -834,23 +834,43 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
 
   // order().by(key) sorts by an element property; a bare order() by n.id; else an upstream
   // carried encounter (an ordered dedup) fixes the result order.
-  let orderNode: Expression = empty;
+  let keyNodes: Expression[] = [];
   if (acc.orders.length) {
-    const keyNodes = acc.orders.map((o) => {
+    keyNodes = acc.orders.map((o) => {
       if (o.dir === 'shuffle') return q`RANDOM()`;
       const dir = o.dir === 'desc' ? ' DESC' : ' ASC';
       return o.key !== null ? q`${nodePropOrderKey(st)(o.key)}${dir}` : q`n.id${dir}`;
     });
-    orderNode = q` ORDER BY ${list(keyNodes, ', ')}`;
-  } else if (st.carried.encounter) orderNode = q` ORDER BY ${p.c[st.carried.encounter]}`;
+  } else if (st.carried.encounter) keyNodes = [q`${p.c[st.carried.encounter]}`];
+  const orderNode = keyNodes.length ? q` ORDER BY ${list(keyNodes, ', ')}` : empty;
   const limitNode = (limit !== null || offset > 0) ? q` LIMIT ${limit ?? -1} OFFSET ${offset}` : empty;
   // Under movementCollapse a bare vertex/edge leaf carries the collapsed multiplicity out to
   // the wire: emit the carried `bulk` column so framing reads it as the per-value multiplicity
   // (framedResults picks up a `bulk` column wherever present — bulk is orthogonal to shape, not
-  // a Shape variant). Only when collapse is active (chainCollapseSafe already excluded
-  // distinct/order/limit/fold, so it's a clean per-element count); else the projection is unchanged.
+  // a Shape variant). Only when collapse is active; else the projection is unchanged.
   const wantBulk = !!st.fastPaths?.movementCollapse && !!st.carried.bulk && !reducer && !distinct
     && (proj.shape.kind === 'vertex' || proj.shape.kind === 'edge');
+
+  // Bulk-aware limit/range: slicing a COLLAPSED leaf must count TRAVERSERS, not rows. A cumulative-
+  // bulk window over the sort order gives each row the count of traversers preceding it (`pre`); the
+  // row covers [pre, pre+bulk), clamped to the [offset, offset+limit) band, so the boundary rows'
+  // multiplicity is trimmed and out-of-band rows drop. chainCollapseSafe only admits limit/range
+  // AFTER an order, so keyNodes is populated. (order()-without-slice needs no window — the sorted
+  // (v, N) rows already frame correctly, the client expanding each in place.)
+  if (wantBulk && (limit !== null || offset > 0)) {
+    const b = p.c[st.carried.bulk!];
+    const lo = offset;
+    const hi = limit !== null ? offset + limit : null; // exclusive upper traverser index (null = unbounded)
+    const win = list(keyNodes.length ? keyNodes : [q`n.id`], ', ');
+    const inner = q`SELECT ${proj.colsNode}, ${b} AS bulk, SUM(${b}) OVER (ORDER BY ${win} ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) - ${b} AS pre FROM ${proj.fromNode}`;
+    const upper = hi !== null ? q`MIN(pre + bulk, ${hi})` : q`(pre + bulk)`;
+    const conds = [q`pre + bulk > ${lo}`];
+    if (hi !== null) conds.push(q`pre < ${hi}`);
+    const outCols = proj.shape.kind === 'edge' ? 'id, label, src, tgt, props' : 'id, label, props';
+    const windowed = q`SELECT ${raw(outCols)}, (${upper} - MAX(pre, ${lo})) AS bulk FROM (${inner}) WHERE ${list(conds, ' AND ')} ORDER BY pre`;
+    return toResultStream(st.q, windowed, proj.shape);
+  }
+
   const bulkCol = wantBulk ? q`, ${p.c[st.carried.bulk!]} AS bulk` : empty;
   const tailNode = q`SELECT ${distinct ? 'DISTINCT ' : ''}${proj.colsNode}${bulkCol} FROM ${proj.fromNode}${orderNode}${limitNode}`;
 

@@ -106,19 +106,29 @@ function chainCollapseSafe(steps: PStep[]): boolean {
   // sample/dedup/branch/re-entry) makes a GROUP BY-id merge wrong.
   let end = n; // exclusive bound of the movement/filter prefix
   const last = steps[n - 1];
-  if (COLLAPSE_REDUCERS.has(last.name) && (last.args?.length ?? 0) === 0) {
+  const reducerTerminal = COLLAPSE_REDUCERS.has(last.name) && (last.args?.length ?? 0) === 0;
+  if (reducerTerminal) {
     end = n - 1;
     if (end >= 2 && COLLAPSE_PROJ.has(steps[end - 1].name)) end -= 1; // one scalar projection before the reducer
   }
-  let sawMove = false;
+  let sawMove = false, sawOrder = false;
   for (let i = 1; i < end; i++) {
     const nm = steps[i].name;
     if (COLLAPSE_MOVES.has(nm)) { sawMove = true; continue; }
     if (COLLAPSE_FILTERS.has(nm)) continue;
-    // bare dedup() is safe: it resets bulk to 1 (one traverser per distinct id), so a GROUP
-    // BY-id merge before it is correct. dedup(label)/dedup().by() carry extra semantics → unsafe.
-    if (nm === 'dedup' && (steps[i].bys?.length ?? 0) === 0 && (steps[i].args?.length ?? 0) === 0) continue;
-    return false; // a non-movement/filter step in the prefix (order/limit/as/values-terminal/…) → unsafe
+    // A bare dedup() BEFORE any order() is a prefix step that resets bulk to 1 (one traverser per
+    // distinct id), so a GROUP BY-id merge around it is correct. After an order() it is instead a
+    // tail ordered-dedup (first-per-key), which does not compose with a collapsed bulk stream →
+    // unsafe. dedup(label)/dedup().by() carry extra semantics → unsafe.
+    if (nm === 'dedup' && !sawOrder && (steps[i].bys?.length ?? 0) === 0 && (steps[i].args?.length ?? 0) === 0) continue;
+    // Element-terminal only: order() by a property key (or bare) just sorts the collapsed (v, N)
+    // rows, and a limit/range/skip AFTER it is bulk-aware (the tail cumulative-bulk window). Both
+    // stay identity-free. A reducer terminal routes limit/count through the bulk-UNAWARE count
+    // branch, so those forms are left unsafe. order().by(traversal) is unsafe (nested sort).
+    if (!reducerTerminal && nm === 'order'
+      && (steps[i].bys ?? []).every((by: any[]) => by.length === 0 || typeof by[0] === 'string')) { sawOrder = true; continue; }
+    if (!reducerTerminal && sawOrder && (nm === 'limit' || nm === 'range' || nm === 'skip')) continue;
+    return false; // any other step in the prefix (as/sack/path/branch/re-entry/…) → unsafe
   }
   return sawMove;
 }
