@@ -1,7 +1,7 @@
 # mogwai-db — feature support matrix
 
 Scannable map of what the compiler supports, and where partial steps stop. Grouped
-by traversal concern. **L3 conformance: <!-- L3:passing -->1,174<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+by traversal concern. **L3 conformance: <!-- L3:passing -->1,179<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 Sourced from the dispatch maps (`src/steps/*.ts`) and the compiler `throw` sites — if
 the code defers a shape, it fails closed with a clear error and this file says so. Keep
@@ -22,7 +22,7 @@ In a 🟡 cell, **✅** = supported form, **❌** = deferred shape.
 
 | Step | | Notes |
 |---|:--:|---|
-| `V()`/`V(id…)`, `E()`/`E(id…)` | ✅ | `V` id resolves numeric rowid or string `uid` |
+| `V()`/`V(id…)`, `E()`/`E(id…)` | ✅ | `V` id resolves numeric rowid or string `uid`; **mid-traversal after a scalar** (`inject(x).V()`) re-sources the graph per traverser (a flatMap; carried as()-labels ride forward). ❌ mid-`V`/`E` when the scalar carries path/origins/sack |
 | `out`/`in`/`both`, `outE`/`inE`/`bothE`, `outV`/`inV`/`bothV` | ✅ | index-only covering-index hops |
 | `otherV` | ✅ | endpoint away from the entering vertex |
 | `inject(…)` | ✅ | ordinary args → scalar stream, all-array args → list stream (§9); later scalar injects append relationally. ❌ appending a list onto an existing scalar stream |
@@ -51,7 +51,7 @@ In a 🟡 cell, **✅** = supported form, **❌** = deferred shape.
 | `values(k…)`, `id()`, `label()`, `count()` | ✅ | ids frame as `COALESCE(uid,id)` |
 | `valueMap`, `elementMap` | 🟡 | custom vertex/edge framing, each value framed by its stored type (uuid/datetime/long/collection — not JS-inferred); re-enterable as a per-element map, so `select(Column.keys/values)`, `count()`, `is(typeOf(MAP))`, `select(unbound-label)`→empty compose. ❌ heterogeneous element-value maps |
 | `properties(k…)` [`.key`/`.value`/`.element`/`.id`/`.label`/`.count`] | 🟡 | full property stream with owner/key/value/meta; `.key`/`.value`/`.id`→scalar, `.element()`→owner vertex/edge, all re-enterable; real VP id + meta, `has(metaKey)`/`hasKey`/`hasValue`/`valueMap`. ❌ `dedup()`/`order()` before a projection |
-| `select('a')`, multi-`select`, `project(…)` | 🟡 | column-threaded aliases; single-label select → scalar/element/typed-list; multi-`select`/`project` → per-traverser record (scalar/vertex/edge/scalar-list/element-list fields), each field re-enters; `limit`/`range`/`skip`/`tail` with `Scope.local` slice fields. **`project(…)` over a scalar parent**: each field's `by()` runs against the value (bare `by()`/`identity`/transform/`math`/scoped reducer) → a record of scalar fields, via the pushChildScope substrate. ❌ record `order`/`dedup`/`fold`/`where`; scalar-parent `project` field needing element output |
+| `select('a')`, multi-`select`, `project(…)` | 🟡 | column-threaded aliases; single-label select → scalar/element/typed-list (a value-history label reads its value, incl. after a re-source `V()`); multi-`select`/`project` → per-traverser record (scalar/vertex/edge/scalar-list/element-list fields), each field re-enters; `limit`/`range`/`skip`/`tail` with `Scope.local` slice fields. **`project(…)` over a scalar parent**: each field's `by()` runs against the value (bare `by()`/`identity`/transform/`math`/scoped reducer) → a record of scalar fields, via the pushChildScope substrate. ❌ record `order`/`dedup`/`fold`/`where`; scalar-parent `project` field needing element output |
 | `select(Column.values/keys)` | 🟡 | over a group, scalar record, or per-element valueMap/elementMap (keys→Set); list-valued maps → list-of-lists. ❌ heterogeneous element-value lists, raw Map params |
 | chained projections (`values().count()`, `project().select()`, `valueMap().select()`) | 🟡 | scalar/record/map projections retype to a stream and re-enter one step at a time. ❌ heterogeneous structured values |
 | `order()` [`.by(key[,dir])`] | 🟡 | tail modifier. ❌ after `path()`; `by(key)` on a scalar stream |
@@ -131,7 +131,7 @@ mixed-shape arm.
 | Step | | Notes |
 |---|:--:|---|
 | `asBool`, `asNumber(GType.X)`, bare `asNumber()` | ✅ | typed-value carrier → GraphBinary framing; runtime casts compose |
-| string transforms (`trim`/`reverse`/`concat`/`format`/…) | 🟡 | SQL scalar; `concat` skips nulls; trim over Java whitespace; compose as `Scope.local` per-element after `fold()`; `format("…%{key}…%{_}…")` reads props / `by()`; **over a scalar parent** `format` supports literals + `%{_}` by()-modulator tokens (a `%{key}` property token defers — a scalar has none); **`split(sep)`** on a scalar string → a List (recursive CTE): a non-empty separator, `""` → characters, `null` → whitespace runs; a NULL value stays NULL; a non-string arg raises the spec error. ❌ `split(Scope.local)` on a scalar (needs a preceding `fold()`), element/map `asString`, reading `project()`/`select()` columns |
+| string transforms (`trim`/`reverse`/`concat`/`format`/…) | 🟡 | SQL scalar; `concat` skips nulls; trim over Java whitespace; compose as `Scope.local` per-element after `fold()`; `format("…%{key}…%{_}…")` reads props / `by()`, a named `%{key}` token falling back to an as()-label of the same name when the property is absent; **over a scalar parent** `format` supports literals + `%{_}` by()-modulator tokens (a `%{key}` property token defers — a scalar has none); **`split(sep)`** on a scalar string → a List (recursive CTE): a non-empty separator, `""` → characters, `null` → whitespace runs; a NULL value stays NULL; a non-string arg raises the spec error. ❌ `split(Scope.local)` on a scalar (needs a preceding `fold()`), element/map `asString`, reading `project()`/`select()` columns |
 | `math("<formula>")` | 🟡 | full exp4j set → one SQL scalar, always Double; property / scalar-child `by()` vars. **Over a scalar parent** (`values(…).math(…)`): `_` binds to the value; named vars resolve through by()-modulators run against the value. ❌ var with no `by()`; `withSideEffect` vars; `project()`/`select()` columns |
 | `asDate`, `dateAdd`, `dateDiff`, `datetime()`/`DateTime()` | 🟡 | epoch-millis, UTC-only, ms precision; `typeOf(DATETIME)` over stored props. ❌ `inject([…]).asDate()` |
 | `asNumber` + reducer (`fold`/`sum`) | ✅ | reducers carry runtime `vt` |

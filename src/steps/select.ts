@@ -215,13 +215,23 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
     if (elemPlan) return tryCompileElementChild(seed, nested.nested, 'first', ROOT_SCOPE, elemPlan.body)!.stream;
     throw new Error('by(traversal) child shape not yet supported');
   }
-  const selElem = aliasElem(selected);
-  const selId = aliasId(p.c[selected.col], 'last');
   const by = byToEntry(proj.bys?.[0]);
   // A dynamically-bound label (bound inside a branch arm / repeat) may be UNBOUND on some
   // rows (a traverser through an arm that never bound it) → drop those (aliasPresent). A
   // statically-bound linear label is always present, so no guard (same SQL).
   const present = selected.binds === undefined ? aliasPresent(p.c[selected.col]) : null;
+  // A VALUE-history label (a scalar bound with as(), e.g. inject(1).as('a')…V().select('a'))
+  // reads its value, not an element — the element path (aliasElem) would reject it.
+  if (!aliasIsElement(selected)) {
+    if (by.sub !== 'vertex' || by.key) throw new Error('select(value-label).by(key) not yet supported (the label holds a value, not an element)');
+    const rel = st.q.cte(
+      q`SELECT ${aliasScalar(p.c[selected.col], 'last')} AS v${carryFrag(st.carried, p)} FROM ${p}${present ? q` WHERE ${present}` : empty}`,
+      ['v', ...carriedCols(st.carried)],
+    );
+    return toScalarStream(carryOf(st), rel);
+  }
+  const selElem = aliasElem(selected);
+  const selId = aliasId(p.c[selected.col], 'last');
   if (by.sub === 'vertex') {
     const rel = st.q.cte(
       q`SELECT ${selId} AS id${carryFrag(st.carried, p)} FROM ${p}${present ? q` WHERE ${present}` : empty}`,

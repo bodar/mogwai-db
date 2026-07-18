@@ -1,5 +1,6 @@
 import { q, value, list, empty, raw, Relation, Query, type Expression } from '../q.ts';
-import { labels, vertexProperties, edgeProperties } from '../schema.ts';
+import { nodes, edges, labels, vertexProperties, edgeProperties } from '../schema.ts';
+import { flattenListArgs } from '../frontend.ts';
 import {
   predicateSql, rangeToOffsetLimit, elemCtx, extIdOf, jsonbGroupArray,
   nodePropScalar, edgePropScalar, nodePropSortKey, edgePropSortKey, framedProps, valueMapProps, storedValueExpr,
@@ -592,6 +593,37 @@ const scalarFold: ShapeTailFn<ScalarStream> = (s, step, _steps, at) =>
 const scalarGroupCount: ShapeTailFn<ScalarStream> = (s, step, _steps, at) =>
   (step.args ?? []).length === 0 && !(step.bys?.length) ? continueLowering(lowerScalarGroupCount(s), at + 1) : null;
 
+/**
+ * V()/E() after a SCALAR: a mid-traversal graph source. TinkerPop's GraphStep(isStart=false)
+ * discards the incoming value and re-sources the graph per traverser — V() all vertices, V(id…)
+ * the id-matched ones — so it is a flatMap (CROSS JOIN the scalar rows with the target table).
+ * The carried schema (as()-labels) rides forward on the join, so `inject(1).as('a').V()…` keeps
+ * its label. Defers (null → the clear generic message) when the scalar carries path/origins/
+ * sack/fromV, whose fork/merge through a re-source is not worked out.
+ */
+export function lowerScalarVE(s: ScalarStream, step: PStep): ElementStream | null {
+  if (s.carried.path || s.carried.origins.length || s.carried.sack || s.carried.fromV) return null;
+  const elem: 'node' | 'edge' = step.name === 'E' ? 'edge' : 'node';
+  const n = (elem === 'edge' ? edges : nodes).as('n');
+  const p = s.rel.as('p');
+  const cols = carriedCols(s.carried);
+  const rawIds = flattenListArgs(step.args ?? []);
+  let where: Expression = empty;
+  if (rawIds.length) {
+    const nums = rawIds.filter((a) => typeof a === 'number');
+    const strs = rawIds.filter((a) => typeof a === 'string');
+    const clauses: Expression[] = [];
+    if (nums.length) clauses.push(q`${n.c.id} IN (${list(nums.map(value), ',')})`);
+    if (strs.length) clauses.push(q`${n.c.uid} IN (${list(strs.map(value), ',')})`);
+    where = clauses.length ? q` WHERE ${list(clauses, ' OR ')}` : q` WHERE 0`; // only-null ids → no match
+  }
+  const rel = s.q.cte(
+    q`SELECT ${n.c.id} AS id${carryFrag(s.carried, p)} FROM ${p} CROSS JOIN ${n}${where}`,
+    ['id', ...cols],
+  );
+  return { ...carryOf(s), kind: 'elements', rel, elem };
+}
+
 /** Wrap a scalar-parent branch consumer (child.ts) as a ShapeTailFn: a produced stream
  *  continues lowering; a null (arm outside the scalar-arm vocabulary) falls through to the
  *  generic scalar deferral. */
@@ -616,6 +648,9 @@ const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
   // split(sep) retypes a scalar string → a List of substrings (recursive CTE). Throws
   // TinkerPop's error on a non-string separator (matches the spec).
   ['split', (s, step, _steps, at) => continueLowering(lowerScalarSplit(s, step), at + 1)],
+  // V()/E() after a scalar re-source the graph per traverser (a flatMap → ElementStream).
+  ['V', (s, step, _steps, at) => { const r = lowerScalarVE(s, step); return r ? continueLowering(r, at + 1) : null; }],
+  ['E', (s, step, _steps, at) => { const r = lowerScalarVE(s, step); return r ? continueLowering(r, at + 1) : null; }],
   // Branch/map over a scalar current object: each arm is a value sub-traversal lowered
   // through the same engine, gated + UNION-merged (child.ts tryScalar*Child). A miss
   // (arm outside the scalar-arm vocabulary) returns null → the clear generic deferral.
