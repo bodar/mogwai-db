@@ -41,15 +41,15 @@ export function lowerScopedScalarFold(
   input: ScalarStream,
   scope: ChildScope,
 ): ListStream {
-  const { domain, ordinal } = currentFrame(scope);
+  const { domain, ordinal, carried } = currentFrame(scope);
   if (!input.encounter) throw new Error('scoped scalar fold requires explicit encounter order');
   const d = domain.as('d');
   const s = input.rel.as('s');
   const rel = input.q.cte(
-    q`SELECT jsonb(COALESCE(json_group_array(${s.c.v} ORDER BY ${s.c[input.encounter]}) FILTER (WHERE ${s.c[input.encounter]} IS NOT NULL), json('[]'))) AS list${carryFrag(input.carried, d)} FROM ${d} LEFT JOIN ${s} ON ${s.c[ordinal]}=${d.c[ordinal]} GROUP BY ${d.c[ordinal]}`,
-    ['list', ...carriedCols(input.carried)],
+    q`SELECT jsonb(COALESCE(json_group_array(${s.c.v} ORDER BY ${s.c[input.encounter]}) FILTER (WHERE ${s.c[input.encounter]} IS NOT NULL), json('[]'))) AS list${carryFrag(carried, d)} FROM ${d} LEFT JOIN ${s} ON ${s.c[ordinal]}=${d.c[ordinal]} GROUP BY ${d.c[ordinal]}`,
+    ['list', ...carriedCols(carried)],
   );
-  return toListStream(carryOf(input), rel, { kind: 'scalar', as: input.as });
+  return toListStream({ ...carryOf(input), carried }, rel, { kind: 'scalar', as: input.as });
 }
 
 /** Element child fold stores rowids in encounter order; ListStream metadata retains
@@ -59,7 +59,7 @@ export function lowerScopedElementFold(
   input: ElementStream,
   scope: ChildScope,
 ): ListStream {
-  const { domain, ordinal } = currentFrame(scope);
+  const { domain, ordinal, carried } = currentFrame(scope);
   const c = input.rel.as('c');
   const r = derived(
     q`SELECT ${c.c.id} AS id, ${c.c[ordinal]} AS ${ordinal}, ROW_NUMBER() OVER (PARTITION BY ${c.c[ordinal]} ORDER BY ${c.c.id}) AS encounter FROM ${c}`,
@@ -68,10 +68,10 @@ export function lowerScopedElementFold(
   );
   const d = domain.as('d');
   const rel = input.q.cte(
-    q`SELECT jsonb(COALESCE(json_group_array(${r.c.id} ORDER BY ${r.c.encounter}) FILTER (WHERE ${r.c.encounter} IS NOT NULL), json('[]'))) AS list${carryFrag(input.carried, d)} FROM ${d} LEFT JOIN ${r} ON ${r.c[ordinal]}=${d.c[ordinal]} GROUP BY ${d.c[ordinal]}`,
-    ['list', ...carriedCols(input.carried)],
+    q`SELECT jsonb(COALESCE(json_group_array(${r.c.id} ORDER BY ${r.c.encounter}) FILTER (WHERE ${r.c.encounter} IS NOT NULL), json('[]'))) AS list${carryFrag(carried, d)} FROM ${d} LEFT JOIN ${r} ON ${r.c[ordinal]}=${d.c[ordinal]} GROUP BY ${d.c[ordinal]}`,
+    ['list', ...carriedCols(carried)],
   );
-  return toListStream(carryOf(input), rel, { kind: 'elem', elem: input.elem });
+  return toListStream({ ...carryOf(input), carried }, rel, { kind: 'elem', elem: input.elem });
 }
 
 export type NumericReducer = 'sum' | 'min' | 'max' | 'mean';
@@ -110,7 +110,7 @@ export function lowerScopedScalarReducer(
   reducer: ScalarReducer,
   scope: ChildScope,
 ): ScalarStream {
-  const { domain, ordinal } = currentFrame(scope);
+  const { domain, ordinal, carried } = currentFrame(scope);
   if (!input.encounter) throw new Error('scoped scalar reducer requires explicit encounter order');
   const d = domain.as('d');
   const s = input.rel.as('s');
@@ -135,10 +135,10 @@ export function lowerScopedScalarReducer(
   }
   const encounter = 'encounter';
   const rel = input.q.cte(
-    q`SELECT ${aggregate}, 1 AS ${encounter}${carryFrag(input.carried, d)} FROM ${join} GROUP BY ${d.c[ordinal]}`,
-    [...(result === 'number' ? ['v', 'vt'] : ['v']), encounter, ...carriedCols(input.carried)],
+    q`SELECT ${aggregate}, 1 AS ${encounter}${carryFrag(carried, d)} FROM ${join} GROUP BY ${d.c[ordinal]}`,
+    [...(result === 'number' ? ['v', 'vt'] : ['v']), encounter, ...carriedCols(carried)],
   );
-  return toScalarStream(carryOf(input), rel, as, result, encounter);
+  return toScalarStream({ ...carryOf(input), carried }, rel, as, result, encounter);
 }
 
 /** A numeric/comparable reduction carries SQLite's winning storage class as `vt`.

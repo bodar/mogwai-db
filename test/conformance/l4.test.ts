@@ -72,6 +72,19 @@ function parseFeature(featureName: string, text: string): Scenario[] {
 // value, so expected and actual compare directly. Numbers: d[n].i/.d/.f/.b/.s → number,
 // d[n].l/.n → long/bigint (BigInt); bd[…] BigDecimal, dt[…] datetime, du[…] Duration (our
 // nanos toString); l[…]/s[…] list/set (ordered within); null; anything else → a bare string.
+// A parsed `m[…]` map (or nested leaf) → the SAME canonical key canon() yields for a decoded
+// Map: string leaves reuse the typed notation (expectedCanon), arrays stay ordered, nested
+// objects sort by entry. Mirrors the official parseMapValue recursion.
+function canonMapExpected(v: unknown): string {
+  if (v === null) return 'null';
+  if (typeof v === 'string') return expectedCanon(v);
+  if (Array.isArray(v)) return '[' + v.map(canonMapExpected).join(',') + ']';
+  if (typeof v === 'object')
+    return 'm{' + Object.entries(v as Record<string, unknown>)
+      .map(([k, x]) => expectedCanon(k) + '=' + canonMapExpected(x)).sort().join(',') + '}';
+  return 'N' + v;
+}
+
 function expectedCanon(tok: string): string {
   const t = tok.trim();
   if (t === 'null') return 'null';
@@ -93,6 +106,9 @@ function expectedCanon(tok: string): string {
     const inner = t.slice(2, -1);
     return 'p[' + (inner === '' ? '' : splitTopLevel(inner).map(expectedCanon).join(',')) + ']';
   }
+  // m[{…}] — a Map (JSON object; values in typed-string notation, mirrors the official
+  // parseMapValue). Same canonical form as canon() of a decoded Map so the two compare.
+  if (t.startsWith('m[') && t.endsWith(']')) return canonMapExpected(JSON.parse(t.slice(2, -1)));
   return 'S' + t;
 }
 
@@ -120,6 +136,10 @@ function canon(v: unknown): string {
   if (v instanceof Date) return 'DT' + v.toISOString();
   if (v && typeof v === 'object' && Array.isArray((v as { objects?: unknown }).objects))
     return 'p[' + (v as { objects: unknown[] }).objects.map(canon).join(',') + ']';
+  // A decoded Map (group()/project()/valueMap() etc.) — entries key-sorted so compare is
+  // unordered by key, each key+value recursively canonicalized (lists stay ordered within).
+  if (v instanceof Map)
+    return 'm{' + [...v.entries()].map(([k, val]) => canon(k) + '=' + canon(val)).sort().join(',') + '}';
   if (Array.isArray(v)) return '[' + v.map(canon).join(',') + ']';
   return 'J' + JSON.stringify(v);
 }
