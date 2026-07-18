@@ -678,7 +678,9 @@ const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
     const r = tryScalarUnionChild(s, step) ?? tryScalarVariantUnion(s, step);
     return r ? continueLowering(r, at + 1) : null;
   }],
-  ['map', scalarBranch(tryScalarMapChild)],
+  // map() is first-result-only → no fan-out arm (a re-source projection / nested union would
+  // over-produce; it fails closed on those). flatMap/local emit all results.
+  ['map', (s, step, _steps, at) => { const r = tryScalarMapChild(s, step, false); return r ? continueLowering(r, at + 1) : null; }],
   // local: a value body per traverser; local(__.aggregate('x')) is a per-value side-effect
   // register that passes the value through — equivalent to a bare aggregate at this position.
   ['local', (s, step, _steps, at) => {

@@ -106,11 +106,20 @@ domain; `reuseCurrentFrame` lets N siblings share one domain (the multi-modulato
 pattern). Element/scalar/list/fold children, existence gates
 (`tryFilterByChildExistence`/`tryCombineByChildExistence`), and reducers
 (`lowerScopedScalarReducer`) all lower through it. The seam is **parent-shape-polymorphic**
-(`ChildParent = ElementStream | PropertyStream`): a `properties().group().by(__.…)` folds
-over PROPERTY parents, and its `key()`/`value()`/`element().…` by()-children lower through
+(`ChildParent = ElementStream | PropertyStream | ScalarStream`): a `properties().group().by(__.…)`
+folds over PROPERTY parents, and its `key()`/`value()`/`element().…` by()-children lower through
 the SAME `lowerSteps → compileFromProperty` dispatcher — there is no property-group inline
 reader (the old `tryPropertyGroupScalar` was retired). Element-valued property children
-(no adjacency) fail closed in the element-only cores.
+(no adjacency) fail closed in the element-only cores. A SCALAR parent's branch/map arms
+(`values(…).{choose,coalesce,union,map,flatMap,local}(__.…)`) route through the shared
+`tryCompileScalarArm` (the scalar twin of `tryCompileElementTraversal`): value/reducer/
+nested-branch bodies, plus a `V()`/`E()` **re-source** (`lowerScalarVE` carries the pushed
+ordinal through its CROSS JOIN, so a following scoped reducer/projection reduces per input).
+Mixed-shape scalar-parent arms (scalar + re-source-element + `fold()`-list) merge into the
+SAME `VariantStream` the element parent produces via the `Carry`-typed builders
+`variantArmSelect`/`variantArmsMeta`/`variantCols` (exported from `branch.ts`, shared by both
+parents — only the per-arm compiler differs). `coalesce`/`optional` mixed-shape over a scalar
+is the one documented follow-on.
 
 **Fast paths** are explicit per-compilation switches in `CompileOptions.fastPaths`
 (`src/fast-paths.ts`) — never a mutable global. A specialized lowering qualifies as a

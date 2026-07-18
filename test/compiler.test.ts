@@ -2588,6 +2588,28 @@ describe('scalar-parent branch/map (Stage 1)', () => {
     expect(executeQuery(store, "g.V(1).values('age').choose(__.is(gt(30)),__.V(),__.constant('young'))", {})).toHaveLength(1);
   });
 
+  // map() is first-result-only in TinkerPop, whereas flatMap/local emit every result. A ≤1
+  // arm body (transform/filter/choose/reducer) is identical under all three; a FAN-OUT body
+  // (a nested union, or a re-source projection) would make map over-produce, so map fails
+  // closed on it (correct first-of-many is a follow-on) while flatMap/local emit all.
+  test('map() is first-result-only: fan-out arm bodies fail closed (flatMap/local fan out)', () => {
+    // fan-out via a nested union: flatMap/local → all 8, map → deferred (not a wrong 8).
+    expect(vals("g.V().hasLabel('person').values('age').flatMap(__.union(__.constant('lo'),__.constant('hi')))"))
+      .toEqual(['hi', 'hi', 'hi', 'hi', 'lo', 'lo', 'lo', 'lo']);
+    expect(vals("g.V().hasLabel('person').values('age').local(__.union(__.constant('lo'),__.constant('hi')))"))
+      .toEqual(['hi', 'hi', 'hi', 'hi', 'lo', 'lo', 'lo', 'lo']);
+    expect(() => compile("g.V().values('age').map(__.union(__.constant('lo'),__.constant('hi')))", {}))
+      .toThrow('map() after a scalar stream not yet supported');
+    // fan-out via a re-source projection: flatMap → all names, map → deferred.
+    expect(vals("g.V(1).values('age').flatMap(__.V().hasLabel('person').values('name'))"))
+      .toEqual(['josh', 'marko', 'peter', 'vadas']);
+    expect(() => compile("g.V(1).values('age').map(__.V().values('name'))", {}))
+      .toThrow('map() after a scalar stream not yet supported');
+    // ≤1 bodies stay identical under map (transform, choose 1:1, re-source+reducer).
+    expect(vals("g.V().hasLabel('person').values('name').map(__.toUpper())")).toEqual(['JOSH', 'MARKO', 'PETER', 'VADAS']);
+    expect(vals("g.V().hasLabel('person').values('age').map(__.V().count())")).toEqual(['6', '6', '6', '6']);
+  });
+
   test('re-source arms compose in union/choose/coalesce', () => {
     expect(vals("g.V(1).values('age').union(__.constant('x'),__.V().count())")).toEqual(['6', 'x']);
     // choose: age 29 is not > 30 → the else (constant 0) wins.

@@ -9,12 +9,71 @@
 // They name only the physical column list and never inspect the per-row tag, so every
 // arm rides through unchanged.
 
-import { q, list, empty, type Expression } from '../q.ts';
+import { q, list, empty, type Expression, type Relation } from '../q.ts';
 import { rangeToOffsetLimit } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
-import { carryOf, continueLowering, dispatchShapeTail, toVariantStream, type LoweringResult, type ShapeTailFn, type VariantStream } from './stream.ts';
-import { carriedCols } from './context.ts';
+import { carryOf, continueLowering, dispatchShapeTail, toVariantStream, type ListStream, type LoweringResult, type ScalarStream, type ShapeTailFn, type VariantArms, type VariantStream } from './stream.ts';
+import { carryFrag, carriedCols, type Carry } from './context.ts';
 import { lowerGlobalCount } from './barrier.ts';
+
+// ---------- variant-arm merge builders (parent-agnostic; element- and scalar-parent share) ----------
+//
+// A branch (union/choose/coalesce) whose arms disagree on shape merges them into a VariantStream.
+// Each arm compiles to its natural shape (element/scalar/list) tagged `vk`, and these builders
+// stitch the tagged rows into one relation. They touch only a bare Carry (carried columns), so
+// an element parent (branch.ts) and a scalar parent (child.ts) reuse them verbatim — only the
+// per-arm compiler differs (a scalar re-sources rather than walks).
+
+/** The item-shape a set of list arms unify to (or throws if incompatible). */
+export const unifyLists = (arms: readonly ListStream[]): ListStream['of'] => {
+  const ofs = arms.map((arm) => arm.of);
+  if (ofs.every((of) => of.kind === 'scalar')) {
+    const tags = ofs.map((of) => of.kind === 'scalar' ? of.as : undefined);
+    return { kind: 'scalar', as: tags.every((tag) => tag === tags[0]) ? tags[0] : undefined };
+  }
+  if (ofs.every((of) => of.kind === 'elem')) {
+    const elems = ofs.map((of) => of.kind === 'elem' ? of.elem : undefined);
+    if (elems.every((elem) => elem === elems[0])) return { kind: 'elem', elem: elems[0]! };
+  }
+  throw new Error('list branch arms have incompatible item shapes');
+};
+
+/** One compiled branch arm tagged by its natural shape (vk 1 scalar / 2 node / 3 edge /
+ *  4 list). Parent-agnostic: an element-parent (branch.ts) and a scalar-parent (child.ts)
+ *  both build these, so the merge builders below take a bare Carry, not an ElementStream. */
+export interface VariantArm {
+  readonly rel: Relation;
+  readonly vk: 1 | 2 | 3 | 4;
+  readonly as?: ScalarStream['as'];
+  readonly listOf?: ListStream['of'];
+}
+
+/** The union of arm shapes → the widened stream's arm flags. */
+export function variantArmsMeta(arms: readonly VariantArm[]): VariantArms {
+  const scalarArms = arms.filter((a) => a.vk === 1);
+  const listArms = arms.filter((a) => a.vk === 4);
+  const scalarAs = scalarArms.length && scalarArms.every((a) => a.as === scalarArms[0].as) ? scalarArms[0].as : undefined;
+  const listOf = listArms.length ? unifyLists(listArms.map((a) => ({ of: a.listOf! } as ListStream))) : undefined;
+  return { scalarAs, node: arms.some((a) => a.vk === 2) || undefined, edge: arms.some((a) => a.vk === 3) || undefined, listOf };
+}
+
+/** One arm's variant-row SELECT: `vk, v, rid[, list]` + the outer carried columns.
+ *  `gate` (coalesce's not-in-prior / any per-arm filter) receives the aliased arm rel.
+ *  Takes a bare Carry so element- and scalar-parent merges share it. */
+export function variantArmSelect(arm: VariantArm, carry: Carry, hasList: boolean, gate?: (a: Relation) => Expression): Expression {
+  const a = arm.rel.as('a');
+  const cols: Expression[] = [
+    q`${arm.vk} AS vk`,
+    q`${arm.vk === 1 ? a.c.v : q`NULL`} AS v`,
+    q`${arm.vk === 2 || arm.vk === 3 ? a.c.id : q`NULL`} AS rid`,
+  ];
+  if (hasList) cols.push(q`${arm.vk === 4 ? a.c.list : q`NULL`} AS list`);
+  const where = gate ? q` WHERE ${gate(a)}` : empty;
+  return q`SELECT ${list(cols, ', ')}${carryFrag(carry.carried, a)} FROM ${a}${where}`;
+}
+
+export const variantCols = (carry: Carry, hasList: boolean): string[] =>
+  ['vk', 'v', 'rid', ...(hasList ? ['list'] : []), ...carriedCols(carry.carried)];
 
 const armsOf = (s: VariantStream) => ({ scalarAs: s.scalarAs, node: s.node, edge: s.edge, listOf: s.listOf });
 
