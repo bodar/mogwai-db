@@ -77,6 +77,23 @@ describe('C — streamBuffers chunk pacing', () => {
       .toEqual(new Set(flatParsed.result.data.map((v: any) => String(v.id))));
   });
 
+  test('movementCollapse element leaf: a collapsed traversal emits (v, N) — RLE on the wire', async () => {
+    const store = seededStore();
+    // both().both() reaches several vertices via many walks; collapse merges each into ONE
+    // (v, bulk) row instead of `bulk` duplicate vertex buffers.
+    const framed = executeFramed(store, 'g.V().both().both()', {});
+    const multiset = executeQuery(store, 'g.V().both().both()', {}).length; // the fully expanded count
+    const { buf } = await drainChunks(streamBuffers(framed, 64, true));
+    const parsed = ioc.graphBinaryReader.readResponse(buf);
+    expect(parsed.result.bulked).toBe(true);
+    // Fewer rows on the wire than traversers, and at least one carries a real multiplicity > 1.
+    expect(parsed.result.data.length).toBeLessThan(multiset);
+    expect(parsed.result.data.some((d: any) => d.bulk > 1)).toBe(true);
+    // The client expands Traverser(v, N): the multiplicities sum to the full multiset.
+    const total = parsed.result.data.reduce((s: number, d: any) => s + Number(d.bulk), 0);
+    expect(total).toBe(multiset);
+  });
+
   test('6 vertices at batch=2 ⇒ header + 3 value-batches + trailer = 5 discrete chunks', async () => {
     const { chunks } = await drainChunks(streamBuffers(executeFramed(seededStore(), 'g.V()', {}), 2));
     expect(chunks.length).toBe(5);

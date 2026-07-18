@@ -422,28 +422,43 @@ function groupBuffer(rows: any[], key: GroupKey, val: GroupVal): Buffer {
 // row array is fully drained up front by store.query(), a DO SQLite cursor being
 // unable to cross awaits). Any compile/SQL/framing error throws straight out of
 // executeQuery to the edge's one try/catch — there is no partial/streamed state.
-function* framedResults(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>): Generator<Buffer> {
+// A stored per-row multiplicity: the movementCollapse `bulk` column merged N convergent walks
+// into one (value, N) row. bulk is ORTHOGONAL to shape — the framer reads a `bulk` column
+// wherever a leaf carries one (only vertex/edge today), 1 otherwise; no Shape variant knows it.
+const bulkOf = (r: any): bigint => (r?.bulk != null ? BigInt(r.bulk) : 1n);
+
+// Element leaves may carry that per-row bulk; every other shape is a single-multiplicity value.
+// The write path and all non-element value shapes frame through frameValues (bulk 1); only the
+// element leaves read the column here, so the multiplicity plumbing touches exactly two cases.
+function* framedResults(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>): Generator<Framed> {
   const plan = compile(gremlin, params, undefined, paramTypes);
   if (plan.kind === 'write') {
     for (const r of plan.run(store)) {
       // Write responses carry a flat {key:value} prop bag; vertexBuffer wants
       // {key:[values]}, so wrap each value in a 1-list (single-cardinality write).
-      if (r.vertex) yield vertexBuffer(r.vertex.id, r.vertex.label,
-        Object.fromEntries(Object.entries(r.vertex.props as Record<string, any>).map(([k, v]) => [k, [v]])));
+      if (r.vertex) yield { buf: vertexBuffer(r.vertex.id, r.vertex.label,
+        Object.fromEntries(Object.entries(r.vertex.props as Record<string, any>).map(([k, v]) => [k, [v]]))), bulk: 1n };
       else {
         const e = r.edge;
         // Frame via edgeBuffer so edge properties materialize — routing through
         // anySerializer's EdgeSerializer drops them (same client bug edgeBuffer works around).
-        yield edgeBuffer(e.id, e.label, e.src, e.tgt, e.props ?? {});
+        yield { buf: edgeBuffer(e.id, e.label, e.src, e.tgt, e.props ?? {}), bulk: 1n };
       }
     }
     return;
   }
   const rows = store.query(plan.sql, plan.binds) as any[];
   const shape = plan.shape;
+  if (shape.kind === 'vertex') { for (const r of rows) yield { buf: rowVertex(r), bulk: bulkOf(r) }; return; }
+  if (shape.kind === 'edge') { for (const r of rows) yield { buf: rowEdge(r), bulk: bulkOf(r) }; return; }
+  for (const buf of frameValues(rows, shape)) yield { buf, bulk: 1n };
+}
+
+// Every non-element value shape → one Buffer per result, single multiplicity. Unchanged framing;
+// element leaves (vertex/edge) are handled in framedResults so they can carry a per-row bulk.
+function* frameValues(rows: any[], shape: import('./render.ts').Shape): Generator<Buffer> {
   switch (shape.kind) {
-    case 'vertex': for (const r of rows) yield rowVertex(r); return;
-    case 'edge': for (const r of rows) yield rowEdge(r); return;
+    case 'vertex': case 'edge': return; // framed in framedResults with per-row bulk
     case 'valueMap': for (const r of rows) yield valueMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys, shape.tokens); return;
     case 'elementMap': for (const r of rows) yield elementMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys); return;
     case 'count': for (const r of rows) yield ioc.anySerializer.serialize(BigInt(r.v)); return;
@@ -528,7 +543,11 @@ function* framedResults(store: GraphStore, gremlin: string, params: Record<strin
  * without wire types → infer from the JS value).
  */
 export function executeQuery(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Buffer[] {
-  return [...framedResults(store, gremlin, params, paramTypes)];
+  // The flat value list: EXPAND each collapsed (value, N) back to N copies so this API returns the
+  // full multiset its callers expect. Bulk is 1 everywhere except a movementCollapse element leaf,
+  // so this is a no-op there; the wire path (executeFramed) keeps the compact (value, N) pairs.
+  return [...framedResults(store, gremlin, params, paramTypes)].flatMap((f) =>
+    f.bulk === 1n ? [f.buf] : (Array(Number(f.bulk)).fill(f.buf) as Buffer[]));
 }
 
 /** One framed result value paired with its traverser multiplicity (the GraphBinary V4
@@ -537,10 +556,10 @@ export function executeQuery(store: GraphStore, gremlin: string, params: Record<
  *  N copies. bigint carries the full i64 range (SQLite raises `integer overflow` past it). */
 export type Framed = { buf: Buffer; bulk: bigint };
 
-/** The manager-seam entry point that carries per-value bulk to the edge (concern C's
- *  bulked framing appends it as a Long). `executeQuery` stays the flat `Buffer[]` API its
- *  many callers use; this is the one path that needs the multiplicity. Bulk is a uniform 1
- *  until movement collapse lands, so this is behaviour-identical to the flat frame today. */
+/** The manager-seam entry point that carries per-value bulk to the edge (concern C's bulked
+ *  framing appends it as a Long). `executeQuery` stays the flat `Buffer[]` API its many callers
+ *  use (it expands bulk back to the multiset); this keeps the compact (value, N) pairs so a
+ *  movementCollapse element leaf emits one row per element instead of N. */
 export function executeFramed(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Framed[] {
-  return [...framedResults(store, gremlin, params, paramTypes)].map((buf) => ({ buf, bulk: 1n }));
+  return [...framedResults(store, gremlin, params, paramTypes)];
 }

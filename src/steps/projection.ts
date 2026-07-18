@@ -844,7 +844,15 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
     orderNode = q` ORDER BY ${list(keyNodes, ', ')}`;
   } else if (st.carried.encounter) orderNode = q` ORDER BY ${p.c[st.carried.encounter]}`;
   const limitNode = (limit !== null || offset > 0) ? q` LIMIT ${limit ?? -1} OFFSET ${offset}` : empty;
-  const tailNode = q`SELECT ${distinct ? 'DISTINCT ' : ''}${proj.colsNode} FROM ${proj.fromNode}${orderNode}${limitNode}`;
+  // Under movementCollapse a bare vertex/edge leaf carries the collapsed multiplicity out to
+  // the wire: emit the carried `bulk` column so framing reads it as the per-value multiplicity
+  // (framedResults picks up a `bulk` column wherever present — bulk is orthogonal to shape, not
+  // a Shape variant). Only when collapse is active (chainCollapseSafe already excluded
+  // distinct/order/limit/fold, so it's a clean per-element count); else the projection is unchanged.
+  const wantBulk = !!st.fastPaths?.movementCollapse && !!st.carried.bulk && !reducer && !distinct
+    && (proj.shape.kind === 'vertex' || proj.shape.kind === 'edge');
+  const bulkCol = wantBulk ? q`, ${p.c[st.carried.bulk!]} AS bulk` : empty;
+  const tailNode = q`SELECT ${distinct ? 'DISTINCT ' : ''}${proj.colsNode}${bulkCol} FROM ${proj.fromNode}${orderNode}${limitNode}`;
 
   // fold() collapses an element projection into ONE List of vertices/edges (the handler's
   // `list` case folds the projected rows). valueMap/elementMap fold defer.
