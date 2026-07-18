@@ -360,6 +360,9 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().values("age").fold().intersect([27,29])').shape).toEqual({ kind: 'jsonbSet' });
     expect(read('g.V().values("age").fold().difference([27])').shape).toEqual({ kind: 'jsonbSet' });
     expect(read('g.V().values("age").fold().disjunct([27])').shape).toEqual({ kind: 'jsonbSet' });
+    // merge = set union of both operands → a Set (jsonbSet) when terminal.
+    expect(read('g.V().values("age").fold().merge([1,2])').shape).toEqual({ kind: 'jsonbSet' });
+    expect(read('g.inject(["a",null,"b"]).merge(["a","c"])').sql).toContain('UNION');
     // null-safe set membership (IS, not =) so null intersects/differs correctly.
     expect(read('g.inject(["a",null,"b"]).difference(["a","c"])').sql).toContain('o.value IS je.value');
     // a Set followed by a list op (order(Scope.local)) degrades to a List (not a Set).
@@ -2277,8 +2280,23 @@ describe('compiler SQL snapshots', () => {
     const t = read('g.V(1).out().out().path().is(typeOf(GType.PATH))');
     expect(t.shape.kind).toBe('path');
     // still-deferred followers fail closed
-    expect(() => compile('g.V(1).out().path().unfold()', {})).toThrow('not yet supported');
     expect(() => compile('g.V(1).out().path().select(Column.keys)', {})).toThrow('not yet supported');
+  });
+
+  test('P3 Stage B: path().by(key) retypes into the list engine (set-ops/reverse/unfold/conjoin)', () => {
+    // A homogeneous scalar path coerces to one list value per row, so the whole list-value
+    // engine composes: combine/reverse → List, merge/difference/intersect/disjunct → Set,
+    // conjoin → String, unfold → the exploded scalars.
+    expect(read('g.V().out().out().path().by("name").reverse()').shape).toEqual({ kind: 'jsonbList' });
+    expect(read('g.V().out().out().path().by("name").combine(["x"])').shape).toEqual({ kind: 'jsonbList' });
+    expect(read('g.V().out().out().path().by("name").merge(["x"])').shape).toEqual({ kind: 'jsonbSet' });
+    expect(read('g.V().out().out().path().by("name").difference(["x"])').shape).toEqual({ kind: 'jsonbSet' });
+    expect(read('g.V().out().out().path().by("name").conjoin("-")').shape).toEqual({ kind: 'value' });
+    // the retype builds one JSON array per path row from the position value columns.
+    expect(read('g.V().out().out().path().by("name").reverse()').sql).toContain('json_array');
+    // an element-position path (no by(key)) is NOT list-representable → still fails closed.
+    expect(() => compile('g.V(1).out().path().unfold()', {})).toThrow('not yet supported');
+    expect(() => compile('g.V(1).out().path().reverse()', {})).toThrow('not yet supported');
   });
 
   test('path() interleaves edge and vertex positions with the right element shape', () => {

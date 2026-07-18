@@ -1,7 +1,7 @@
 # mogwai-db — feature support matrix
 
 Scannable map of what the compiler supports, and where partial steps stop. Grouped
-by traversal concern. **L3 conformance: <!-- L3:passing -->1,180<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+by traversal concern. **L3 conformance: <!-- L3:passing -->1,209<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 Sourced from the dispatch maps (`src/steps/*.ts`) and the compiler `throw` sites — if
 the code defers a shape, it fails closed with a clear error and this file says so. Keep
@@ -106,9 +106,9 @@ mixed-shape arm.
 
 | Step | | Notes |
 |---|:--:|---|
-| `path()`, `path().by(key)` | 🟡 | linear or recursive layout; label-carry + handler assembly; `count()`/`is(typeOf(PATH))`/`unfold()` re-enter; through a branch (pad-to-max cols). ❌ `by(traversal)`/`by(T.x)`; `by()` through a branch; mixed element-kind at a position; dynamic-length (`repeat`) arm; spanning >1 movement/repeat; over a `union()` source |
+| `path()`, `path().by(key)` | 🟡 | linear or recursive layout; label-carry + handler assembly; `count()`/`is(typeOf(PATH))` re-enter; a `by(key)` (scalar) path coerces to a list so the collection ops (set-ops/`merge`/`reverse`/`conjoin`/`unfold`) compose; through a branch (pad-to-max cols). ❌ `by(traversal)`/`by(T.x)`; `by()` through a branch; mixed element-kind at a position; dynamic-length (`repeat`) arm; spanning >1 movement/repeat; over a `union()` source |
 | `simplePath()`, `cyclicPath()` | ✅ | all-pairs identity / `json_each` guard |
-| other steps after `path()` | ❌ | `order`/reducer/transform/`inject`/`select(Column.keys)` — need label history |
+| other steps after `path()` | 🟡 | collection ops (set-ops/`merge`/`reverse`/`conjoin`/`unfold`) compose over a `by(key)` path (coerced to a list). ❌ `order`/reducer/`inject`/`select(Column.keys)` — need label history |
 | `tree()` | 🚫 | JS GLV stubs it, 0 conformance |
 
 ## 8. Pattern matching
@@ -127,7 +127,7 @@ mixed-shape arm.
 | `Scope.local` reducers (count/sum/min/max/mean) | ✅ | per-list aggregate → scalar; also degenerate scalar-local |
 | `none(P)`/`all(P)`/`any(P)` | ✅ | collection filters, null-aware |
 | `Scope.local` order/limit/range/skip/tail/dedup on a list | 🟡 | per-list `json_each` rebuild; `reverse()`; per-element string transforms; bare `order().fold()` sorts. ❌ `order(Scope.local).by(key/traversal)` |
-| set-ops (`combine`/`intersect`/`difference`/`disjunct`/`product`/`conjoin`) | 🟡 | over a list; operand = literal list, `constant(c).fold()`, or a standalone scalar-fold traversal. ❌ element-fold operand; after `path()` |
+| set-ops (`combine`/`intersect`/`difference`/`disjunct`/`product`/`merge`/`conjoin`) | 🟡 | over a list; operand = literal list, `constant(c).fold()`, or a standalone scalar-fold traversal; `merge` = set union; compose after `path().by(key)` (the path coerces to a list). ❌ element-fold operand |
 | scalar-stream `none(P)` barrier | ❌ | whole-stream barrier (distinct from the per-list filter) |
 
 ## 10. Types, math & dates
