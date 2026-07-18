@@ -2351,11 +2351,14 @@ describe('compiler SQL snapshots', () => {
     const lbl = read('g.V().out().path().by(T.label)');
     expect(lbl.shape).toEqual({ kind: 'path', positions: [{ render: 'value', prefix: 'x0' }, { render: 'value', prefix: 'x1' }] });
     expect(read('g.V(1).out().path().by(T.id)').sql).toContain('COALESCE');
-    // by(__.values(k).transform): a value+transform chain rendered inline per position.
+    // by(__.trav) positions lower through the generic scalar child seam (pushChildScope +
+    // tryCompileScalarValueChild), re-rooted per position — the same seam select/dedup/order use.
+    // by(__.values(k).transform): a value+transform chain.
     expect(read('g.V().out().out().path().by(__.values("name").toUpper())').sql.toLowerCase()).toContain('upper(');
-    // by(__.<movement>.count()): a correlated scalar per position (reuses correlatedReduce).
-    expect(read('g.V().out().path().by(__.out().count())').sql).toContain('COUNT(*)');
-    // an unsupported by(traversal) shape fails closed.
+    // by(__.<movement>.count()): a per-position scalar child → one value column per position.
+    const cnt = read('g.V().out().path().by(__.out().count())');
+    expect(cnt.shape).toEqual({ kind: 'path', positions: [{ render: 'value', prefix: 'x0' }, { render: 'value', prefix: 'x1' }] });
+    // a by(traversal) shape the scalar child seam can't classify (a bare group barrier) fails closed.
     expect(() => compile('g.V().out().path().by(__.groupCount())', {})).toThrow('path().by(traversal)');
   });
 

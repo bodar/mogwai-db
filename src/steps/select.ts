@@ -1,7 +1,6 @@
 import { q, list, empty, value, type Expression, type Relation } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
-import { framedProps, labelNameSub, nodePropScalar, edgePropScalar, edgePropsAgg, predicateSql, propExtract, extIdOf, elemCtx, scalarProp, scalarTx, P_OPS, type Elem } from '../plan.ts';
-import { correlatedReduce } from './predicate.ts';
+import { framedProps, labelNameSub, nodePropScalar, edgePropScalar, edgePropsAgg, predicateSql, propExtract, extIdOf, elemCtx, P_OPS, type Elem } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { stepChain } from '../frontend.ts';
 import { aliasElem, aliasIsElement, carryFrag, carriedCols, scopePathCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
@@ -678,10 +677,10 @@ function pathBy(byArgs: any[] | undefined): string | undefined {
   throw new Error('unsupported path().by() modulator');
 }
 
-/** The value expression for one linear path position under its by() modulator, or
- *  undefined for a bare by()/no by() (→ the whole element). by('key') reads a property;
- *  by(T.label/T.id) projects the token; by(__.trav) compiles a per-position scalar. */
-function pathPositionValue(st: ElementStream, tbl: Relation, elem: Elem, byArgs: any[] | undefined): Expression | undefined {
+/** The inline value expression for one linear path position under a by('key')/by(T.token)
+ *  modulator, or undefined for a bare by()/no by() (→ the whole element). A by(__.trav)
+ *  position is NOT handled here — lowerPath lowers it through the generic scalar child seam. */
+function pathPositionValue(_st: ElementStream, tbl: Relation, elem: Elem, byArgs: any[] | undefined): Expression | undefined {
   if (!byArgs || byArgs.length === 0) return undefined; // the whole element
   const a = byArgs[0];
   if (typeof a === 'string') return elem === 'edge' ? edgePropScalar(tbl.c.id, a) : nodePropScalar(tbl.c.id, a);
@@ -690,38 +689,7 @@ function pathPositionValue(st: ElementStream, tbl: Relation, elem: Elem, byArgs:
     if (a.token === 'id') return elemCtx(tbl, elem).extIdExpr!;
     throw new Error(`path().by(T.${a.token}) modulator not yet supported`);
   }
-  if (a && typeof a === 'object' && 'nested' in a) {
-    const e = pathByTraversal(st, tbl, elem, a.nested);
-    if (!e) throw new Error('path().by(traversal) supports a value/transform chain or a <movement>.count()/edge-value reducer');
-    return e;
-  }
   throw new Error('unsupported path().by() modulator');
-}
-
-/** Compile a path().by(__.trav) body to ONE correlated scalar over the position element:
- *  a value-producer (values(k)/id/label) + scalar transforms, rendered inline; or a
- *  movement+reducer via the shared correlatedReduce (the where()/dedup() scalar-child
- *  helper). Returns null → the caller fails closed with a clear deferral. */
-function pathByTraversal(st: ElementStream, tbl: Relation, elem: Elem, nested: any): Expression | null {
-  const body = stepChain(nested, st.params);
-  if (!body.length) return null;
-  const ctx = elemCtx(tbl, elem);
-  const first = body[0];
-  if (first.name === 'values' || first.name === 'id' || first.name === 'label') {
-    let e: Expression;
-    if (first.name === 'values') {
-      if (first.args.length !== 1 || typeof first.args[0] !== 'string') return null;
-      e = scalarProp(ctx, first.args[0]);
-    } else if (first.name === 'id') e = ctx.extIdExpr!;
-    else e = labelNameSub(tbl.c.label);
-    for (let i = 1; i < body.length; i++) {
-      const tx = scalarTx(body[i].name, body[i].args ?? [], e);
-      if (!tx) return null;
-      e = tx;
-    }
-    return e;
-  }
-  return correlatedReduce(body, ctx, st.params);
 }
 
 /**
@@ -755,16 +723,42 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   // a padded NULL is indistinguishable from a missing property, so defer.
   const branched = scopedCols.some((c) => c.nullable);
   if (branched && bys.length) throw new Error('path().by() through a branch not yet supported (a padded position is indistinguishable from a missing property)');
-  const p = st.rel.as('p');
+  const byOf = (i: number) => (bys.length ? bys[i % bys.length] : undefined);
+  const isTraversalBy = (a: any) => a && typeof a === 'object' && 'nested' in a;
+  // A by(__.trav) position lowers through the SAME generic scalar child seam group/
+  // select/dedup/order use: push ONE child scope over the path rows, re-root each such
+  // position on its element, and join the child's FIRST value back by ordinal. Positions
+  // are then structurally a record of per-position children (tryLowerTraversalRecord's
+  // template). A path with no by(traversal) keeps the flat fast path — no scope, no ordinal.
+  const anyTraversal = scopedCols.some((_, i) => isTraversalBy(byOf(i)?.[0]));
+  const outer = anyTraversal ? pushChildScope(st) : null;
+  const p = (outer ? outer.seed.rel : st.rel).as('p');
   const joins: Expression[] = [];
   const cols: Expression[] = [];
   const whereParts: Expression[] = [];
   const positions: PathPos[] = scopedCols.map((pos, i) => {
     const prefix = `x${i}`;
+    const spec = byOf(i)?.[0];
+    // by(__.trav): re-root on this position's element and lower a scalar child via the seam.
+    if (isTraversalBy(spec)) {
+      const plan = classifyScalarChild(spec.nested, st.params);
+      if (!plan) throw new Error('path().by(traversal) position must be a scalar child (value/transform/reducer/choose/coalesce/union); other shapes not yet supported');
+      // The child computes ONE scalar for this position — it must NOT extend the outer path
+      // (its own movement would append a path column, corrupting the carried schema). Strip
+      // path from the child seed; the ordinal (for the reuseCurrentFrame join) is preserved.
+      const childParent = { ...outer!.seed, carried: { ...outer!.seed.carried, path: undefined } };
+      const seed = reRootElement(childParent, p, p.c[pos.col], pos.elem);
+      const child = tryCompileScalarValueChild(seed, spec.nested, 'first', reuseCurrentFrame(outer!.scope, outer!.frame), plan.body)!;
+      const b = child.rel.as(`b${i}`);
+      joins.push(q` LEFT JOIN ${b} ON ${b.c[outer!.frame.ordinal]}=${p.c[outer!.frame.ordinal]}`);
+      cols.push(q`${b.c.v} AS ${`${prefix}_v`}`);
+      if (!productive) whereParts.push(predicateSql(b.c.v, undefined));
+      return { render: 'value', prefix };
+    }
     const tbl = (pos.elem === 'edge' ? edges : nodes).as(`${prefix}n`);
     const jn = pos.nullable ? 'LEFT JOIN' : 'JOIN';
     joins.push(q` ${jn} ${tbl} ON ${tbl.c.id}=${p.c[pos.col]}`);
-    const pe = pathPositionValue(st, tbl, pos.elem, bys.length ? bys[i % bys.length] : undefined);
+    const pe = pathPositionValue(st, tbl, pos.elem, byOf(i));
     if (pe === undefined) {
       const l = labels.as(`${prefix}l`);
       joins.push(q` ${jn} ${l} ON ${l.c.id}=${tbl.c.label}`);
@@ -777,8 +771,8 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
       cols.push(q`${extId} AS ${`${prefix}_id`}, ${l.c.name} AS ${`${prefix}_label`}, ${framedProps(tbl, 'node')} AS ${`${prefix}_props`}`);
       return { render: 'element', elem: 'vertex', prefix };
     }
-    // by(key/T.token/traversal): one scalar per position. A missing value drops the whole
-    // path (ProductiveBy retains an explicit NULL position instead).
+    // by(key/T.token): one scalar per position. A missing value drops the whole path
+    // (ProductiveBy retains an explicit NULL position instead).
     cols.push(q`${pe} AS ${`${prefix}_v`}`);
     if (!productive) whereParts.push(predicateSql(pe, undefined));
     return { render: 'value', prefix };
