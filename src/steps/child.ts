@@ -3,7 +3,8 @@ import { stepChain } from '../frontend.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
 import { advance, carriedWith, carryFrag, carriedCols, withCarried, type ElementStream } from './context.ts';
 import { aliasId } from './alias.ts';
-import { carryOf, toListStream, toScalarStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream } from './stream.ts';
+import { carryOf, toListStream, toScalarStream, toVariantStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream } from './stream.ts';
+import { variantArmsMeta, variantArmSelect, variantCols, type VariantArm } from './branch.ts';
 import { lowerElementSteps, lowerSteps, tryLowerElementSteps } from './index.ts';
 import { lowerScalarRows, gateScalar, tryInlineScalarPredicate, unionScalarStreams, SCALAR_TRANSFORMS } from './scalar.ts';
 import { lowerScalarVE } from './projection.ts';
@@ -750,7 +751,7 @@ export function tryCompileScalarValueRows(
  * child barrier: empty children emit [], productive NULL remains [null], and only
  * the innermost origin is removed at the consumer boundary. */
 export function tryCompileListChild(
-  parent: ElementStream,
+  parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
   preParsed?: ReturnType<typeof stepChain>,
@@ -1317,6 +1318,111 @@ export function tryScalarCoalesceChild(s: ScalarStream, step: PStep): ScalarStre
     arms.push(end);
   }
   return unionScalarStreams(s, arms);
+}
+
+// ---------- scalar-PARENT mixed-shape arms → a VariantStream ----------
+//
+// When a scalar parent's branch arms disagree on shape — a scalar value arm next to a
+// re-source element arm (`__.V()`) or a fold list arm — no homogeneous merge applies
+// (unionScalarStreams assumes every arm has a `v`). They merge into the SAME VariantStream
+// the element parent produces: each arm compiles to its natural shape and the rows carry a
+// `vk` tag (1 scalar / 2 node / 3 edge / 4 list). The merge builders (variantArmSelect/
+// variantArmsMeta/variantCols) are parent-agnostic (Carry-typed, branch.ts) so this reuses
+// them verbatim; only the per-arm compiler differs (a scalar re-sources rather than walks).
+
+/** An element arm over a scalar: a re-source (`V()`/`E()`) then element movement/filter,
+ *  ending in element space. No gating (union), so it lowers over the parent value rows
+ *  directly — lowerScalarVE CROSS JOINs the graph per value, movement folds on top. */
+function tryScalarResourceElement(seed: ScalarStream, nested: any): ElementStream | null {
+  const body = childSteps(nested, seed.params);
+  if (!isResourceHead(body)) return null;
+  const after = body.slice(1);
+  if (!after.every((s) => ELEMENT_CHILD_STEPS.has(s.name))) return null;
+  const el = lowerScalarVE(seed, body[0]);
+  if (!el) return null;
+  const { stream, next } = lowerElementSteps(after, el);
+  return next === after.length ? stream : null;
+}
+
+/** PURE. A fold list arm over a scalar: a value-op body OR a re-source projection, then
+ *  fold(). The classify twin of tryCompileListChild's scalar path. */
+function scalarListArm(body: PStep[]): boolean {
+  if (body.at(-1)?.name !== 'fold') return false;
+  const before = body.slice(0, -1);
+  if (before.length > 0 && before.every(scalarChildPrefixOk)) return true;
+  if (isResourceHead(before)) {
+    const after = before.slice(1);
+    return after.length > 0 && classifyScalarChildRows('element', after)?.kind === 'element';
+  }
+  return false;
+}
+
+/** PURE. The natural shape of one scalar-parent arm: list (fold), scalar (value/reducer/
+ *  re-source-count/re-source-projection), or element (a movement-only re-source). Null =
+ *  unclassifiable → the caller defers. The scalar twin of branch.ts's armShape. */
+function scalarArmShape(nested: any, params: Record<string, any>): 'element' | 'scalar' | 'list' | null {
+  const body = childSteps(nested, params);
+  if (scalarListArm(body)) return 'list';
+  if (scalarArmClassifies(body, params)) return 'scalar';
+  if (isResourceHead(body) && body.slice(1).every((s) => ELEMENT_CHILD_STEPS.has(s.name))) return 'element';
+  return null;
+}
+
+/** Compile ONE scalar-parent arm to its natural variant shape (scalar/list/element). The
+ *  arms are shape-classified up front (scalarArmShape), so a classified arm always compiles;
+ *  the throw is an internal-contradiction guard, never the defer path. */
+function compileScalarVariantArm(seed: ScalarStream, nested: any): VariantArm {
+  const scalar = tryCompileScalarArm(seed, nested);
+  if (scalar) return { rel: scalar.rel, vk: 1, as: scalar.as };
+  const listArm = tryCompileListChild(seed, nested);
+  if (listArm) return { rel: listArm.rel, vk: 4, listOf: listArm.of };
+  const el = tryScalarResourceElement(seed, nested);
+  if (el) return { rel: el.rel, vk: el.elem === 'edge' ? 3 : 2 };
+  throw new Error('scalar variant arm classified but did not compile (internal contradiction)');
+}
+
+/** union(a, b, …) over a scalar with MIXED-shape arms → a VariantStream (plain UNION ALL, no
+ *  gating). Declines (null) when the arms are homogeneous (tryScalarUnionChild owns those) or
+ *  any arm is unclassifiable, or under carried path/sack/fromV (fork/merge unworked). */
+export function tryScalarVariantUnion(s: ScalarStream, step: PStep): VariantStream | null {
+  if (s.carried.path || s.carried.sack || s.carried.fromV) return null;
+  const branches = (step.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  if (branches.length < 2) return null;
+  const shapes = branches.map((b: any) => scalarArmShape(b.nested, s.params));
+  if (shapes.some((x) => x === null) || shapes.every((x) => x === shapes[0])) return null;
+  const arms = branches.map((b: any) => compileScalarVariantArm(s, b.nested));
+  const meta = variantArmsMeta(arms);
+  const hasList = !!meta.listOf;
+  const rel = s.q.cte(list(arms.map((a) => variantArmSelect(a, s, hasList)), ' UNION ALL '), variantCols(s, hasList));
+  return toVariantStream(carryOf(s), rel, meta);
+}
+
+/** choose(pred, then, else) over a scalar with MIXED-shape then/else → a VariantStream. The
+ *  gate partitions the value rows (pred / NOT pred) into disjoint then/else seeds — exactly
+ *  tryScalarChooseChild's gate — and each arm compiles to its natural variant shape over its
+ *  seed. Declines when the arms are the same shape (tryScalarChooseChild owns those), the 2-arg
+ *  identity-else form, or any arm is unclassifiable. */
+export function tryScalarVariantChoose(s: ScalarStream, step: PStep): VariantStream | null {
+  if (step.options) return null; // option-map form is the modulation seam
+  if (s.carried.path || s.carried.sack || s.carried.fromV) return null;
+  const args = step.args ?? [];
+  const nested = args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  const predIsTraversal = args[0] && typeof args[0] === 'object' && 'nested' in args[0];
+  const [thenArg, elseArg] = predIsTraversal ? nested.slice(1) : nested;
+  if (!thenArg || !elseArg) return null; // 2-arg (identity else) is not a mixed pair here
+  const thenShape = scalarArmShape(thenArg.nested, s.params);
+  const elseShape = scalarArmShape(elseArg.nested, s.params);
+  if (!thenShape || !elseShape || thenShape === elseShape) return null;
+  const gate = buildScalarGate(s, [predIsTraversal ? { nested: args[0].nested } : { p: args[0] }]);
+  if (!gate) return null;
+  const arms = [
+    compileScalarVariantArm(gate.seed((b) => b[0]), thenArg.nested),
+    compileScalarVariantArm(gate.seed((b) => q`NOT COALESCE((${b[0]}), 0)`), elseArg.nested),
+  ];
+  const meta = variantArmsMeta(arms);
+  const hasList = !!meta.listOf;
+  const rel = s.q.cte(list(arms.map((a) => variantArmSelect(a, s, hasList)), ' UNION ALL '), variantCols(s, hasList));
+  return toVariantStream(carryOf(s), rel, meta);
 }
 
 /**
