@@ -71,6 +71,10 @@ In a 🟡 cell, **✅** = supported form, **❌** = deferred shape.
 
 Common to all four branch steps: incoming `as()` and `path()` thread through element
 arms; **mixed-shape arms (scalar + element + list class) merge into a variant stream**.
+After a variant stream the **shape-agnostic** steps compose (`count`, `unfold` of a
+cap()'d aggregate, and the row-preserving `limit`/`skip`/`range` + `dedup`); steps that
+must look inside a heterogeneous row (movement, `order`, value filters) fail closed by
+construction — the union has no single shape to lower them from.
 ❌ across all: mixed element KIND (node+edge), a NEW `as()` inside an arm, path through a
 mixed-shape arm.
 
@@ -80,7 +84,7 @@ mixed-shape arm.
 | `choose(fn).option(k, body)…` | 🟡 | scalar option-map, composes as a scalar stream; **over a scalar parent** (`values(…).choose(fn).option(k, body)…`) the choice + option bodies run against the value via the modulation seam → a CASE. ❌ no `Pick.none` default; element/discard/identity/fail bodies; `Pick.unproductive`/`any`; T-token choice over a scalar parent |
 | `coalesce(…)` | 🟡 | first-productive over element/scalar/list arms (empty `fold()` is productive); element movement + `limit`/`skip`/`range`/`dedup`; nests in coalesce/optional. **Over a scalar parent**: first arm that produces a value per row (productivity = the scalar-arm predicate). ❌ scalar-parent arms needing movement/reducer/nested-branch |
 | `union(…)` | 🟡 | element multi-hop/nested arms; homogeneous scalar/list arms via `UNION ALL`. **Over a scalar parent**: every value arm `UNION ALL`-concatenated (multiset-faithful). ❌ source-branch tails; scalar-parent arms needing movement/reducer/nested-branch |
-| `optional(…)` | 🟡 | single-hop fast path + multi-hop; element `limit`/`skip`/`range`/`dedup`; non-total scalar child → variant stream (+ `count()` re-entry). ❌ element-kind change on miss; most steps after a variant stream |
+| `optional(…)` | 🟡 | single-hop fast path + multi-hop; element `limit`/`skip`/`range`/`dedup`; non-total scalar child → variant stream (+ shape-agnostic `count`/`unfold`/`limit`/`skip`/`range`/`dedup` re-entry). ❌ element-kind change on miss; per-row-shape steps (movement/`order`/value filters) after a variant stream |
 | `flatMap(__.…)` | 🟡 | movement/filter bodies + scalar tails (`all`); scalar or element `fold()` → list per parent. **Over a scalar parent**: value-arm body applied per value. ❌ record/group/path bodies; scalar-parent arms needing movement/reducer/nested-branch |
 | `map(__.…)` | 🟡 | scope-aware child barriers (`count/sum/min/max/mean`), scalar tails, `fold()` per parent, movement bodies (first-per-origin). **Over a scalar parent**: value-arm body applied per value (a filtering body drops non-productive inputs). ❌ alias/select/structured bodies; scalar-parent arms needing movement/reducer/nested-branch |
 | `local(…)` | 🟡 | one child `all` policy: movement, `limit`/`skip`/`range`/`dedup`, scalar transforms/reducers, `fold()`, `local(aggregate(...))`; outer `as()`/path/`otherV()` survive. **Over a scalar parent**: value-arm body applied per value. ❌ general `order()`; structured/record/group/path/match/union/nested bodies; sack; scalar-parent arms needing movement/reducer/nested-branch |

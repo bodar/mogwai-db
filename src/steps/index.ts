@@ -24,7 +24,7 @@ import { tryBulkRepeatCount } from './bulk.ts';
 import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../fast-paths.ts';
 import { lowerScalarRows } from './scalar.ts';
 import { materializeFinal } from './materialize.ts';
-import { lowerGlobalCount } from './barrier.ts';
+import { compileFromVariant } from './variant.ts';
 
 export { compileTail };
 
@@ -295,12 +295,7 @@ function lowerStream(s: Stream, steps: PStep[], at: number): LoweringResult {
     if (isAliasStep(steps[stop])) return continueLowering(stream, stop);
     return compileFromScalar(stream, steps, stop);
   }
-  if (s.kind === 'variant') {
-    if (s.result === 'list' && steps[at].name === 'unfold')
-      return continueLowering({ ...s, result: 'rows' }, at + 1);
-    if (steps[at].name === 'count') return continueLowering(lowerGlobalCount(s), at + 1);
-    throw new Error(`${steps[at].name}() on a variant value not yet supported`);
-  }
+  if (s.kind === 'variant') return compileFromVariant(s, steps, at);
   if (s.kind === 'property') return compileFromProperty(s, steps, at);
   if (s.kind === 'map') return compileFromMap(s, steps, at);
   if (s.kind === 'record') return compileFromRecord(s, steps, at);
