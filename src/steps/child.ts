@@ -5,7 +5,7 @@ import { advance, carriedWith, carryFrag, carriedCols, withCarried, type Element
 import { aliasId } from './alias.ts';
 import { carryOf, toListStream, toScalarStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream } from './stream.ts';
 import { lowerElementSteps, lowerSteps, tryLowerElementSteps } from './index.ts';
-import { lowerScalarRows, SCALAR_TRANSFORMS } from './scalar.ts';
+import { lowerScalarRows, gateScalar, scalarChildProduces, unionScalarStreams, SCALAR_TRANSFORMS } from './scalar.ts';
 import { normalize, type PStep } from '../strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
 import { predicateSql, rangeToOffsetLimit } from '../plan.ts';
@@ -925,4 +925,122 @@ export function tryCompileElementTraversal(
   if (parent.carried.origins.length && body.some((step) => step.name === 'repeat'))
     throw new Error('repeat() inside a correlated element child not yet supported (recursive walk does not carry the parent ordinal)');
   return tryLowerElementSteps(body, parent);
+}
+
+// ---------- scalar-PARENT branch consumers (map/local/flatMap/choose/union/coalesce) ----------
+//
+// When the CURRENT stream is a scalar (values()/count()/a projected value…), a child
+// sub-traversal starts from that value — its current object is `_` = the value `v`. Over a
+// scalar there is no adjacency/properties, so an arm is a cardinality-preserving VALUE
+// sub-traversal: scalar transforms, is()/and/or/not/filter/where predicates, and
+// constant(). Each arm lowers through the SAME lowerSteps → compileFromScalar engine (not a
+// private reader); the branch consumers gate the value rows and UNION ALL the arm outputs,
+// reusing scalarChildProduces as the per-row productivity oracle. This is the scalar twin of
+// branch.ts's element-parent choose/union/coalesce — the missing half is consuming a scalar
+// AS the parent. (Element re-entry V()/E(), reducer-bodied maps, and modulator consumers
+// math()/format()/project().by() need the pushChildScope substrate and land in later stages.)
+
+/** The Stage-1 scalar-arm vocabulary: value transforms, scalar row operators, and the
+ *  filter family (whose nested traversals must recursively be scalar-arm bodies). A body
+ *  outside this set (movement/properties, a nested branch, a shape-changing barrier) is
+ *  rejected so the consumer returns null and the existing clear deferral stays authoritative
+ *  — never a throw that would break the fall-through contract. */
+const SCALAR_ARM_LEAF = new Set([
+  ...SCALAR_TRANSFORMS, 'is', 'constant', 'identity',
+  'order', 'limit', 'skip', 'range', 'tail', 'dedup', 'unfold',
+]);
+const SCALAR_ARM_FILTER = new Set(['and', 'or', 'not', 'filter', 'where']);
+
+function scalarBranchArm(body: PStep[], params: Record<string, any>): boolean {
+  return body.length > 0 && body.every((s) => {
+    const kids = (s.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+    // The filter family lowers via lowerScalarFilter, which requires a nested traversal —
+    // the predicate-P form (where(gt(5))) throws, so require kids and recurse into each so
+    // an unsupported nested body defers here rather than throwing mid-lowering.
+    if (SCALAR_ARM_FILTER.has(s.name)) return kids.length > 0 && kids.every((a: any) => scalarBranchArm(childSteps(a.nested, params), params));
+    return SCALAR_ARM_LEAF.has(s.name) && kids.length === 0;
+  });
+}
+
+/** Lower one scalar arm body over the scalar parent, returning null (defer) if it falls
+ *  outside the Stage-1 vocabulary or does not stay scalar (e.g. a fold() → list). */
+function lowerScalarArm(s: ScalarStream, body: PStep[]): ScalarStream | null {
+  if (!scalarBranchArm(body, s.params)) return null;
+  const end = lowerSteps(s, body, 0);
+  return end.kind === 'scalar' ? end : null;
+}
+
+/** map()/local()/flatMap() over a scalar: apply the arm body per value. For the Stage-1
+ *  cardinality-preserving vocabulary map/local/flatMap coincide (one value per input, or
+ *  none when a filter drops it), so one continuation serves all three. */
+export function tryScalarMapChild(s: ScalarStream, step: PStep): ScalarStream | null {
+  const arg = step.args?.[0];
+  if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
+  return lowerScalarArm(s, childSteps(arg.nested, s.params));
+}
+
+/** choose(pred, then[, else]) over a scalar. The predicate is a P (applied to `v` via
+ *  predicateSql) or a nested scalar-predicate traversal (scalarChildProduces); it gates the
+ *  value rows into disjoint then/else seeds, each arm lowers over its seed, and the two
+ *  merge with UNION ALL. else absent → the value passes through unchanged (identity). */
+export function tryScalarChooseChild(s: ScalarStream, step: PStep): ScalarStream | null {
+  if (step.options) return null; // option-map form is a later stage (modulator consumer)
+  const args = step.args ?? [];
+  const nested = args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  const predIsTraversal = args[0] && typeof args[0] === 'object' && 'nested' in args[0];
+  const [thenArg, elseArg] = predIsTraversal ? nested.slice(1) : nested;
+  if (!thenArg) return null;
+  const predBody = predIsTraversal ? childSteps(args[0].nested, s.params) : null;
+  if (predBody && !scalarBranchArm(predBody, s.params)) return null;
+  const thenBody = childSteps(thenArg.nested, s.params);
+  if (!scalarBranchArm(thenBody, s.params)) return null;
+  const elseBody = elseArg ? childSteps(elseArg.nested, s.params) : null;
+  if (elseBody && !scalarBranchArm(elseBody, s.params)) return null;
+
+  const cond = (v: Expression) => predBody
+    ? scalarChildProduces(predBody, v, s.params)
+    : predicateSql(v, args[0]);
+  const thenEnd = lowerScalarArm(gateScalar(s, cond, false), thenBody);
+  if (!thenEnd) return null;
+  const elseSeed = gateScalar(s, cond, true);
+  const elseEnd = elseBody ? lowerScalarArm(elseSeed, elseBody) : elseSeed; // no else → identity value
+  if (!elseEnd) return null;
+  return unionScalarStreams(s, [thenEnd, elseEnd]);
+}
+
+/** union(a, b, …) over a scalar: every arm consumes the whole value stream; UNION ALL
+ *  concatenates their productive rows (multiset-faithful, so a value can appear per arm). */
+export function tryScalarUnionChild(s: ScalarStream, step: PStep): ScalarStream | null {
+  const branches = (step.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  if (branches.length < 2) return null;
+  const arms: ScalarStream[] = [];
+  for (const b of branches) {
+    const end = lowerScalarArm(s, childSteps(b.nested, s.params));
+    if (!end) return null;
+    arms.push(end);
+  }
+  return unionScalarStreams(s, arms);
+}
+
+/** coalesce(a, b, …) over a scalar: the first arm that PRODUCES a value, per input row.
+ *  Productivity is the scalarChildProduces boolean of each arm body, so arm k is gated by
+ *  "still unclaimed by every earlier arm AND this arm produces". No ordinal/child-scope is
+ *  needed because a scalar arm's productivity is a pure predicate over the value. */
+export function tryScalarCoalesceChild(s: ScalarStream, step: PStep): ScalarStream | null {
+  const branches = (step.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  if (branches.length < 1) return null;
+  const bodies = branches.map((b: any) => childSteps(b.nested, s.params));
+  if (bodies.some((body: PStep[]) => !scalarBranchArm(body, s.params))) return null;
+  const arms: ScalarStream[] = [];
+  let unclaimed = (_v: Expression) => q`1` as Expression;
+  for (const body of bodies) {
+    const produces = (v: Expression) => scalarChildProduces(body, v, s.params);
+    const prev = unclaimed;
+    const seed = gateScalar(s, (v) => q`(${prev(v)}) AND (${produces(v)})`, false);
+    const end = lowerScalarArm(seed, body);
+    if (!end) return null;
+    arms.push(end);
+    unclaimed = (v) => q`(${prev(v)}) AND NOT COALESCE((${produces(v)}), 0)`;
+  }
+  return unionScalarStreams(s, arms);
 }

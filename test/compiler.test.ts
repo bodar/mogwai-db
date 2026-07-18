@@ -2341,6 +2341,63 @@ const runWith = (store: GraphStore, q: string, options: CompileOptions) => {
   return store.query(p.sql, p.binds);
 };
 
+// Stage 1: branch/map consumers over a SCALAR parent (values()/a projected value…). Each
+// arm is a cardinality-preserving value sub-traversal lowered through the same engine; the
+// consumer gates the value rows and UNION-merges the arms (scalarChildProduces = the per-row
+// productivity oracle). See child.ts tryScalar*Child + scalar.ts gateScalar/unionScalarStreams.
+describe('scalar-parent branch/map (Stage 1)', () => {
+  const store = new GraphStore(new BunSqlite(':memory:'));
+  for (const q of MODERN_SEED) executeQuery(store, q, {});
+  const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
+  const vals = (g: string) => executeQuery(store, g, {}).map(dec).map((x) => x === null ? '∅' : String(x)).sort();
+
+  test('choose(P, then, else) over a scalar → gated UNION ALL (no inline CASE)', () => {
+    const p = read("g.V().hasLabel('person').values('age').choose(eq(29),__.constant('m'),__.constant('o'))");
+    expect(p.sql).toContain('UNION ALL');               // the then/else arm merge
+    expect(p.sql).toContain('WHERE p.v = ?');           // then-seed gated by the predicate over the value
+    expect(p.sql).toContain('WHERE NOT COALESCE((p.v = ?), 0)'); // else-seed is the complement
+    expect(vals("g.V().hasLabel('person').values('age').choose(eq(29),__.constant('m'),__.constant('o'))"))
+      .toEqual(['m', 'o', 'o', 'o']);
+  });
+
+  test('choose(P, then) with no else → identity passthrough of the value', () => {
+    expect(vals("g.V().hasLabel('person').values('age').choose(eq(29),__.constant('m'))"))
+      .toEqual(['27', '32', '35', 'm'].sort());
+  });
+
+  test('choose(traversal-predicate, then, else) over a scalar', () => {
+    expect(vals("g.V().hasLabel('person').values('age').choose(__.is(gt(30)),__.constant('big'),__.constant('small'))"))
+      .toEqual(['big', 'big', 'small', 'small']);
+  });
+
+  test('map()/local()/flatMap() over a scalar apply the value body', () => {
+    expect(vals("g.V().hasLabel('person').values('age').map(__.constant('x'))")).toEqual(['x', 'x', 'x', 'x']);
+    expect(vals("g.V().hasLabel('person').values('name').map(__.toUpper())")).toEqual(['JOSH', 'MARKO', 'PETER', 'VADAS']);
+    expect(vals("g.V().hasLabel('person').values('name').local(__.toUpper())")).toEqual(['JOSH', 'MARKO', 'PETER', 'VADAS']);
+  });
+
+  test('map() with a filtering body drops non-productive inputs', () => {
+    expect(vals("g.V().hasLabel('person').values('age').map(__.is(gt(30)))")).toEqual(['32', '35']);
+  });
+
+  test('union() over a scalar concatenates every arm (multiset-faithful)', () => {
+    const p = read("g.V().hasLabel('person').values('age').union(__.constant('a'),__.constant('b'))");
+    expect(p.sql).toContain('UNION ALL');
+    expect(vals("g.V().hasLabel('person').values('age').union(__.constant('a'),__.constant('b'))"))
+      .toEqual(['a', 'a', 'a', 'a', 'b', 'b', 'b', 'b']);
+  });
+
+  test('coalesce() over a scalar → first arm that produces, per row', () => {
+    expect(vals("g.V().hasLabel('person').values('age').coalesce(__.is(gt(30)),__.constant('lo'))"))
+      .toEqual(['32', '35', 'lo', 'lo'].sort());
+  });
+
+  test('a movement/property body over a scalar still fails closed (a scalar has no neighbours)', () => {
+    expect(() => compile("g.V().values('age').map(__.out())", {})).toThrow('map() after a scalar stream not yet supported');
+    expect(() => compile("g.V().values('age').union(__.out(),__.in())", {})).toThrow('union() after a scalar stream not yet supported');
+  });
+});
+
 describe('compiler execution semantics', () => {
   describe('unified lowering characterization', () => {
     test('every disable-safe fast path is result-equivalent to generic lowering', () => {

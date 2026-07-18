@@ -255,7 +255,7 @@ function appendScalar(s: ScalarStream, step: PStep): ScalarStream {
  *  value; constant(x) rebinds it (and is always productive); and/or/not/filter/where
  *  compose recursively. Every `is` along a linear body ANDs; a bare/constant body is
  *  always productive (`1`). Movement/property bodies throw (defer). */
-function scalarChildProduces(body: PStep[], current: Expression, params: Record<string, any>): Expression {
+export function scalarChildProduces(body: PStep[], current: Expression, params: Record<string, any>): Expression {
   let expr = current;
   const preds: Expression[] = [];
   const nestedOf = (s: PStep) => s.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
@@ -313,6 +313,41 @@ export function lowerScalarFilter(s: ScalarStream, step: PStep): ScalarStream {
   }
   const rel = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)} FROM ${p} WHERE ${cond}`, cols(s));
   return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
+}
+
+// ---------- scalar-parent branch primitives (gate + union) ----------
+//
+// The scalar analogue of branch.ts's element-parent choose/coalesce/union: over a scalar
+// current object every arm is a cardinality-preserving value sub-traversal, so the branch
+// consumers (child.ts tryScalar*Child) gate the value rows by a boolean over `v` and
+// UNION ALL the arm outputs — the SAME lowerSteps engine lowers each arm (no inline CASE,
+// no child-scope machinery). `buildCond` receives the value expression so a caller can
+// gate by a P (predicateSql) or by a nested scalar predicate (scalarChildProduces).
+
+/** Gate a scalar stream by a boolean over its value `v`, preserving the scalar shape/tag/
+ *  encounter/carried schema (only rows are dropped). `negate` treats a NULL predicate as
+ *  false (COALESCE→0) so the else side gets exactly the rows the then side did not. */
+export function gateScalar(s: ScalarStream, buildCond: (v: Expression) => Expression, negate: boolean): ScalarStream {
+  const p = s.rel.as('p');
+  const cond = buildCond(p.c.v);
+  const test = negate ? q`NOT COALESCE((${cond}), 0)` : cond;
+  const rel = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)} FROM ${p} WHERE ${test}`, cols(s));
+  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
+}
+
+/** UNION ALL a set of scalar arm streams that all descend from `base`'s carried schema
+ *  (choose/coalesce/union merge point). Numeric arms keep the `vt` storage-class column;
+ *  the framing tag survives only when every arm agrees. The physical encounter/vtype are
+ *  intentionally dropped at the merge — a following partitioned op re-establishes its own. */
+export function unionScalarStreams(base: ScalarStream, arms: readonly ScalarStream[]): ScalarStream {
+  const numeric = arms.every((a) => a.result === 'number');
+  const parts = arms.map((a) => {
+    const r = a.rel.as('a');
+    return q`SELECT ${r.c.v} AS v${numeric ? q`, ${r.c.vt} AS vt` : empty}${carryFrag(base.carried, r)} FROM ${r}`;
+  });
+  const rel = base.q.cte(list(parts, ' UNION ALL '), ['v', ...(numeric ? ['vt'] : []), ...carriedCols(base.carried)]);
+  const as = arms.every((a) => a.as === arms[0].as) ? arms[0].as : undefined;
+  return toScalarStream(carryOf(base), rel, as, numeric ? 'number' : 'value');
 }
 
 /** sack over a scalar stream. The mutate form sack(Operator.x) folds the CURRENT VALUE
