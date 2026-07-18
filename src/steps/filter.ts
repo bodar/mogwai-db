@@ -224,9 +224,12 @@ export function lowerElementDedup(st: ElementStream, s: PStep, order?: PStep): E
   if (bys.length > 1) throw new Error('dedup() supports at most one by() modulator');
   if (!order && !bys.length) {
     const p = prevRel(st, 'p');
-    // Carry bulk (and any other carried column) through the DISTINCT — bulk≡1 today, so
-    // DISTINCT is unaffected; a later stage resets bulk=1 rather than DISTINCT-ing over it.
-    return advance(st, q`SELECT DISTINCT ${p.c.id} AS id${carryFrag(st.carried, p)} FROM ${p}`);
+    // dedup yields ONE traverser per distinct id → RESET bulk to 1: a collapsed (v, N) becomes
+    // (v, 1). Every other carried column rides through unchanged. At bulk≡1 this is identical to
+    // carrying p.bulk, so a non-collapsed dedup is unaffected.
+    const cols = carriedCols(st.carried).map((c) => c === st.carried.bulk ? q`1 AS bulk` : q`${p.c[c]}`);
+    const cf = cols.length ? q`, ${list(cols, ', ')}` : q``;
+    return advance(st, q`SELECT DISTINCT ${p.c.id} AS id${cf} FROM ${p}`);
   }
 
   const p = prevRel(st, 'p');

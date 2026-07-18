@@ -2810,11 +2810,14 @@ describe('compiler execution semantics', () => {
       // legitimately DIFFER from the per-walk generic form. Equivalence is at the RLE-expanded
       // multiset — expand each row by its bulk and compare the id bags.
       expect(read('g.V().both().both()', { fastPaths: { movementCollapse: true } }).sql).toContain('AS props, p.bulk AS bulk FROM');
-      const idBag = (collapse: boolean) => {
-        const p = read('g.V().both().both()', { fastPaths: { movementCollapse: collapse } });
+      const idBag = (query: string, collapse: boolean) => {
+        const p = read(query, { fastPaths: { movementCollapse: collapse } });
         return store.query(p.sql, p.binds).flatMap((r: any) => Array(Number(r.bulk ?? 1)).fill(r.id)).sort();
       };
-      expect(idBag(true)).toEqual(idBag(false)); // collapsed (v,N) expands to the same vertex bag
+      expect(idBag('g.V().both().both()', true)).toEqual(idBag('g.V().both().both()', false)); // collapsed (v,N) expands to the same vertex bag
+      // bare dedup() is collapse-safe: it resets bulk to 1, so the collapsed frontier deduplicates
+      // to the same distinct-vertex set as the enumerated form.
+      expect(idBag('g.V().both().both().dedup()', true)).toEqual(idBag('g.V().both().both().dedup()', false));
     });
 
     test('the inline correlated predicate child stays index-only (no MATERIALIZE)', () => {

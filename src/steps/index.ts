@@ -115,6 +115,9 @@ function chainCollapseSafe(steps: PStep[]): boolean {
     const nm = steps[i].name;
     if (COLLAPSE_MOVES.has(nm)) { sawMove = true; continue; }
     if (COLLAPSE_FILTERS.has(nm)) continue;
+    // bare dedup() is safe: it resets bulk to 1 (one traverser per distinct id), so a GROUP
+    // BY-id merge before it is correct. dedup(label)/dedup().by() carry extra semantics → unsafe.
+    if (nm === 'dedup' && (steps[i].bys?.length ?? 0) === 0 && (steps[i].args?.length ?? 0) === 0) continue;
     return false; // a non-movement/filter step in the prefix (order/limit/as/values-terminal/…) → unsafe
   }
   return sawMove;
