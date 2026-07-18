@@ -22,7 +22,7 @@ combinations that were silently unsupported start working, L3 climbs.
 | # | Target | Kind | Substrate move | Confidence |
 |---|--------|------|----------------|------------|
 | 1 | Group / Map stream | ✅ done | nested values + element values through the generic seam | landed 2026-07-18 |
-| 2 | Traverser bulking | finish substrate | `bulk` as first-class carried column | high (specced, unwired) |
+| 2 | Traverser bulking | 🟡 re-arch for wire | Stage A landed (wire bulking); B/C queued | wire premise corrected 2026-07-18 |
 | 3 | Scalar-parent child arms | widen re-entry | scalar seed re-sources to elements | high (test bed exists) |
 | 4 | VariantStream | ✅ row-ops done | shape-agnostic tail; heterogeneity wall on the rest | landed 2026-07-18 |
 | 5 | PathStream breadth | fill + 1 piece | map-valued carried alias entry | mixed |
@@ -80,6 +80,14 @@ already specs this; plumbing exists, was never wired.
 graph unblocks), `sample(n)`/`coin(p)` (not implemented at all today), dedup
 weight. The deepest correctness debt — reducers are silently OK today only because
 big-repeat graphs are withheld from conformance.
+
+**UPDATE 2026-07-18 — re-architected for the wire.** The `2026-07-14` premise ("wire is a
+dead end") was wrong: GraphBinary V4's `{bulked}` response byte is real, the pinned beta.2
+client requests + decodes it, and it's backwards-compatible. So bulk now buys end-to-end
+tractability for element-returning big-`repeat` too, not just reducers. Staged A→B→C in
+`docs/2026-07-18-wire-bulking-rearchitecture.md`. **Stage A landed** (wire bulking, bulk≡1,
+contract/L3-verified). B (first-class `bulk` carried column, ≡1) + C (enable collapse, gated
+by path-freedom) queued — B+C are a paired delivery (B alone is valueless substrate).
 
 ## 3. Scalar-parent child arms — widen scalar re-entry into arms
 
