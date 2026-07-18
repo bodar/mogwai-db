@@ -1,7 +1,7 @@
 # mogwai-db — feature support matrix
 
 Scannable map of what the compiler supports, and where partial steps stop. Grouped
-by traversal concern. **L3 conformance: <!-- L3:passing -->1,146<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+by traversal concern. **L3 conformance: <!-- L3:passing -->1,154<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 Sourced from the dispatch maps (`src/steps/*.ts`) and the compiler `throw` sites — if
 the code defers a shape, it fails closed with a clear error and this file says so. Keep
@@ -76,14 +76,14 @@ mixed-shape arm.
 
 | Step | | Notes |
 |---|:--:|---|
-| `choose(pred, then[, else])` | 🟡 | gated dispatch; homogeneous scalar/list arms; predicate on the generic child-existence engine + infix connectors. ❌ 2-arg scalar-then + identity-else |
-| `choose(fn).option(k, body)…` | 🟡 | scalar option-map, composes as a scalar stream. ❌ no `Pick.none` default; element/discard/identity/fail bodies; `Pick.unproductive`/`any` |
-| `coalesce(…)` | 🟡 | first-productive over element/scalar/list arms (empty `fold()` is productive); element movement + `limit`/`skip`/`range`/`dedup`; nests in coalesce/optional |
-| `union(…)` | 🟡 | element multi-hop/nested arms; homogeneous scalar/list arms via `UNION ALL`. ❌ source-branch tails |
+| `choose(pred, then[, else])` | 🟡 | gated dispatch; homogeneous scalar/list arms; predicate on the generic child-existence engine + infix connectors. **Over a scalar parent** (`values(…).choose(P/traversal, then[, else])`): value-arm bodies gated by a predicate over the value + `UNION ALL`; no-else → identity passthrough. ❌ 2-arg scalar-then + identity-else; scalar-parent arms needing movement/reducer/nested-branch |
+| `choose(fn).option(k, body)…` | 🟡 | scalar option-map, composes as a scalar stream. ❌ no `Pick.none` default; element/discard/identity/fail bodies; `Pick.unproductive`/`any`; over a scalar parent |
+| `coalesce(…)` | 🟡 | first-productive over element/scalar/list arms (empty `fold()` is productive); element movement + `limit`/`skip`/`range`/`dedup`; nests in coalesce/optional. **Over a scalar parent**: first arm that produces a value per row (productivity = the scalar-arm predicate). ❌ scalar-parent arms needing movement/reducer/nested-branch |
+| `union(…)` | 🟡 | element multi-hop/nested arms; homogeneous scalar/list arms via `UNION ALL`. **Over a scalar parent**: every value arm `UNION ALL`-concatenated (multiset-faithful). ❌ source-branch tails; scalar-parent arms needing movement/reducer/nested-branch |
 | `optional(…)` | 🟡 | single-hop fast path + multi-hop; element `limit`/`skip`/`range`/`dedup`; non-total scalar child → variant stream (+ `count()` re-entry). ❌ element-kind change on miss; most steps after a variant stream |
-| `flatMap(__.…)` | 🟡 | movement/filter bodies + scalar tails (`all`); scalar or element `fold()` → list per parent. ❌ record/group/path bodies |
-| `map(__.…)` | 🟡 | scope-aware child barriers (`count/sum/min/max/mean`), scalar tails, `fold()` per parent, movement bodies (first-per-origin). ❌ alias/select/structured bodies |
-| `local(…)` | 🟡 | one child `all` policy: movement, `limit`/`skip`/`range`/`dedup`, scalar transforms/reducers, `fold()`, `local(aggregate(...))`; outer `as()`/path/`otherV()` survive. ❌ general `order()`; structured/record/group/path/match/union/nested bodies; sack |
+| `flatMap(__.…)` | 🟡 | movement/filter bodies + scalar tails (`all`); scalar or element `fold()` → list per parent. **Over a scalar parent**: value-arm body applied per value. ❌ record/group/path bodies; scalar-parent arms needing movement/reducer/nested-branch |
+| `map(__.…)` | 🟡 | scope-aware child barriers (`count/sum/min/max/mean`), scalar tails, `fold()` per parent, movement bodies (first-per-origin). **Over a scalar parent**: value-arm body applied per value (a filtering body drops non-productive inputs). ❌ alias/select/structured bodies; scalar-parent arms needing movement/reducer/nested-branch |
+| `local(…)` | 🟡 | one child `all` policy: movement, `limit`/`skip`/`range`/`dedup`, scalar transforms/reducers, `fold()`, `local(aggregate(...))`; outer `as()`/path/`otherV()` survive. **Over a scalar parent**: value-arm body applied per value. ❌ general `order()`; structured/record/group/path/match/union/nested bodies; sack; scalar-parent arms needing movement/reducer/nested-branch |
 
 ## 6. Recursion (`repeat`)
 

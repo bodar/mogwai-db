@@ -15,7 +15,7 @@ import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleS
 import { lowerMapScalar, lowerMath, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerLegacyUnion } from './branch.ts';
 import { lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
-import { classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, tryCompileCountChild, tryCompileListChild } from './child.ts';
+import { classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, tryCompileCountChild, tryCompileListChild, tryScalarChooseChild, tryScalarCoalesceChild, tryScalarMapChild, tryScalarUnionChild } from './child.ts';
 import { lowerElementDedup } from './filter.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
@@ -592,6 +592,12 @@ const scalarFold: ShapeTailFn<ScalarStream> = (s, step, _steps, at) =>
 const scalarGroupCount: ShapeTailFn<ScalarStream> = (s, step, _steps, at) =>
   (step.args ?? []).length === 0 && !(step.bys?.length) ? continueLowering(lowerScalarGroupCount(s), at + 1) : null;
 
+/** Wrap a scalar-parent branch consumer (child.ts) as a ShapeTailFn: a produced stream
+ *  continues lowering; a null (arm outside the scalar-arm vocabulary) falls through to the
+ *  generic scalar deferral. */
+const scalarBranch = (fn: (s: ScalarStream, step: PStep) => ScalarStream | null): ShapeTailFn<ScalarStream> =>
+  (s, step, _steps, at) => { const r = fn(s, step); return r ? continueLowering(r, at + 1) : null; };
+
 const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
   ['is', scalarIsListRetype],
   ['and', scalarFilter], ['or', scalarFilter], ['not', scalarFilter], ['filter', scalarFilter], ['where', scalarFilter],
@@ -602,9 +608,20 @@ const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
   ['count', scalarCount],
   ['fold', scalarFold],
   ['groupCount', scalarGroupCount],
+  // Branch/map over a scalar current object: each arm is a value sub-traversal lowered
+  // through the same engine, gated + UNION-merged (child.ts tryScalar*Child). A miss
+  // (arm outside the scalar-arm vocabulary) returns null → the clear generic deferral.
+  ['choose', scalarBranch(tryScalarChooseChild)],
+  ['map', scalarBranch(tryScalarMapChild)], ['local', scalarBranch(tryScalarMapChild)],
+  ['flatMap', scalarBranch(tryScalarMapChild)],
+  ['union', scalarBranch(tryScalarUnionChild)],
+  ['coalesce', scalarBranch(tryScalarCoalesceChild)],
   // unfold() on a scalar is identity (a scalar is not a collection) — continue past it,
   // exactly as unfold() on an element stream (lets cap().unfold() feed a following reducer).
   ['unfold', (s, _step, _steps, at) => continueLowering(s, at + 1)],
+  // identity() is a universal no-op — pass the scalar stream through unchanged (also the
+  // scalar-arm no-op body, e.g. choose(P, __.constant(x), __.identity())).
+  ['identity', (s, _step, _steps, at) => continueLowering(s, at + 1)],
   ...[...NUMERIC_REDUCERS].map((n): [string, ShapeTailFn<ScalarStream>] => [n, scalarNumericReducer]),
   ...[...SCALAR_LIST_ONLY].map((n): [string, ShapeTailFn<ScalarStream>] => [n, scalarListOnly]),
 ]);
