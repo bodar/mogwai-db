@@ -5,7 +5,7 @@ import {
   idPredFromArgs, type Elem, type ScalarCtx,
 } from '../plan.ts';
 import { tryInlinePredicate, combineBranchPreds } from './predicate.ts';
-import { advance, aliasElem, carriedCols, carriedWith, carryFrag, elemRel, pathColsOf, prevRel, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from './context.ts';
+import { advance, aliasElem, carriedCols, carriedWith, carryFrag, elemRel, pathColsOf, prevRel, scopePathCols, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from './context.ts';
 import { aliasAppend, aliasId, aliasSeed, elemEntry, elemShape } from './alias.ts';
 import { tryCombineByChildExistence, tryCompileScalarValueRows, tryFilterByChildExistence } from './child.ts';
 import { directElementModulation, elementOrderSql } from './modulation.ts';
@@ -55,12 +55,16 @@ export const as: StepFn = (s, st) => {
   const p = prevRel(st, 'p');
   const entry = elemEntry(st.elem, p.c.id); // the current object, tagged
   const setExpr = new Map<string, Expression>();
+  // On a linear tracked path, this as() attaches to the current element, whose position
+  // is the most-recently appended path column (statically known) — record it so
+  // path().from(l)/to(l) can resolve a label to a position slice (Piece A, path-history).
+  const pathPos = st.carried.path?.kind === 'cols' ? st.carried.path.cols.length - 1 : undefined;
   for (const lbl of labels) {
     const existing = aliases.get(lbl);
     const col = existing?.col ?? `a${aliases.size}`;
     // Rebind APPENDS to the label's path history (never overwrites); a fresh label
     // seeds a one-element array. shapes accumulates every binding's kind.
-    aliases.set(lbl, { col, shapes: withShape(existing?.shapes, shape), binds: (existing?.binds ?? 0) + 1 });
+    aliases.set(lbl, { col, shapes: withShape(existing?.shapes, shape), binds: (existing?.binds ?? 0) + 1, pathPos });
     setExpr.set(col, existing ? aliasAppend(p.c[col], entry) : aliasSeed(entry));
   }
   // Rebuild from the ONE carried schema so origins/sack/fromV/encounter/path cannot
@@ -79,9 +83,9 @@ export const as: StepFn = (s, st) => {
  *  least one repeat (the exact negation). Objects only, all pairs — and only pairs
  *  of the SAME element kind can be equal (a vertex rowid and an edge rowid collide
  *  numerically but are distinct objects), so cross-kind pairs are skipped. The path
- *  positions are known at compile time, so the test is a static conjunction. by()/
- *  from()/to() scoping is deferred (they arrive as their own steps → clear error). */
-function pathDistinctTest(st: ElementStream, simple: boolean): Expression {
+ *  positions are known at compile time, so the test is a static conjunction. from()/to()
+ *  scope the pair loop to the positions between two as() labels; by() scoping is deferred. */
+function pathDistinctTest(st: ElementStream, simple: boolean, from?: string, to?: string): Expression {
   const name = simple ? 'simplePath' : 'cyclicPath';
   if (!st.carried.path) throw new Error(`${name}() requires a tracked path`);
   // A standalone filter reads the linear per-position columns; over a recursive
@@ -89,7 +93,7 @@ function pathDistinctTest(st: ElementStream, simple: boolean): Expression {
   // cycle guard), not as a post-filter.
   if (st.carried.path.kind !== 'cols') throw new Error(`${name}() over a recursive repeat().path() is not yet supported (put simplePath() inside the repeat body)`);
   const p = prevRel(st, 'p');
-  const cols = st.carried.path.cols;
+  const cols = scopePathCols(st.carried.path.cols, from, to, st.carried.aliases);
   const pairs: Expression[] = [];
   for (let i = 0; i < cols.length; i++)
     for (let j = i + 1; j < cols.length; j++)
@@ -99,8 +103,8 @@ function pathDistinctTest(st: ElementStream, simple: boolean): Expression {
   return simple ? q`NOT (${anyEqual})` : q`(${anyEqual})`;
 }
 
-export const simplePath: StepFn = (_s, st) => filterCte(st, pathDistinctTest(st, true));
-export const cyclicPath: StepFn = (_s, st) => filterCte(st, pathDistinctTest(st, false));
+export const simplePath: StepFn = (s, st) => filterCte(st, pathDistinctTest(st, true, s.from, s.to));
+export const cyclicPath: StepFn = (s, st) => filterCte(st, pathDistinctTest(st, false, s.from, s.to));
 
 export const hasLabel: StepFn = (s, st) => filterCte(st, labelIn('n.label', s.args));
 
