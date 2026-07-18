@@ -185,6 +185,25 @@ function partitionedTail(s: ScalarStream, limit: number): ScalarStream {
   return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
 }
 
+/** Root-scope tail(N): the last N rows of the relation's natural order. Unlike a child scope
+ *  (partitionedTail, keyed on the explicit encounter), the root stream has no per-origin
+ *  partition, so `COUNT(*) OVER ()` + `ROW_NUMBER() OVER ()` select the trailing window
+ *  directly — no encounter column required (mirrors the root LIMIT/OFFSET of limit/skip). */
+function rootTail(s: ScalarStream, limit: number): ScalarStream {
+  const p = s.rel.as('p');
+  const r = derived(
+    q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER () AS rn, COUNT(*) OVER () AS cnt FROM ${p}`,
+    [...cols(s), 'rn', 'cnt'],
+    'r',
+  );
+  const rel = derived(
+    q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn} > ${r.c.cnt} - ${limit}`,
+    cols(s),
+    'tail_rows',
+  );
+  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
+}
+
 function partitionedOrder(s: ScalarStream, order: Expression): ScalarStream {
   if (!s.encounter) throw new Error('correlated scalar order requires explicit encounter order');
   const p = s.rel.as('p');
@@ -457,7 +476,8 @@ export function lowerScalarRows(
       continue;
     }
     if (step.name === 'tail') {
-      stream = partitionedTail(stream, Number(step.args.find((a: any) => typeof a === 'number') ?? 1));
+      const n = Number(step.args.find((a: any) => typeof a === 'number') ?? 1);
+      stream = stream.carried.origins.length ? partitionedTail(stream, n) : rootTail(stream, n);
       continue;
     }
     if (step.name === 'order') {

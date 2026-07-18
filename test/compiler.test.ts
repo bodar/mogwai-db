@@ -2467,6 +2467,21 @@ describe('scalar format (Stage 2)', () => {
   });
 });
 
+// Root-scope tail(N) on a scalar stream: the last N of the natural order, no encounter
+// column required (previously threw "scalar tail requires explicit encounter order").
+describe('scalar tail at root (Stage 2 fix)', () => {
+  const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
+  const vals = (g: string) => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    return executeQuery(store, g, {}).map(dec).map(String);
+  };
+  test('tail(N) takes the last N; bare tail() the last one', () => {
+    expect(vals('g.inject(1,2,3,4).tail(2)')).toEqual(['3', '4']);
+    expect(vals('g.inject(1,2,3,4).tail()')).toEqual(['4']);
+    expect(vals('g.inject(3,1,2).order().tail(1)')).toEqual(['3']);
+  });
+});
+
 // Stage 2 substrate: a SCALAR is a first-class child parent (ChildParent |= ScalarStream).
 // pushChildScope re-projects the value `_`=v + a minted encounter, so a reducer-bodied child
 // (map(__.count()/sum()/…)) lowers through the same scoped-reducer engine as an element child.
