@@ -119,7 +119,9 @@ switch compiles the same traversal generically; recognition failure returns `nul
 through (never defines support or throws because its optimized vocabulary is exhausted);
 enabled-vs-disabled are result-equivalent in a committed test; and an EXPLAIN/benchmark
 shows material benefit. Currently: `predicateInlining`, `singleHopOptional`,
-`bulkRepeatCount`. A fast path should reuse the surrounding plumbing and swap only the
+`bulkRepeatCount`, `scalarPredicateInlining` (the scalar-parent predicate gate: inline
+`WHERE` over the value vs a correlated EXISTS over a pushed scalar scope — used by
+`and`/`or`/`not`/`filter`/`where`/`choose`/`coalesce` over a scalar). A fast path should reuse the surrounding plumbing and swap only the
 "middle" — e.g. the predicate family (`predicateInlining`, `src/steps/predicate.ts`)
 feeds one boolean `Expression` to the shared `filterCte`; the fast middle is the GENERIC
 movement/filter StepFns rendered in inline-correlated mode (`compileCorrelatedChild`,
