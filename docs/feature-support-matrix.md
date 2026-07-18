@@ -1,7 +1,7 @@
 # mogwai-db — feature support matrix
 
 Scannable map of what the compiler supports, and where partial steps stop. Grouped
-by traversal concern. **L3 conformance: <!-- L3:passing -->1,220<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+by traversal concern. **L3 conformance: <!-- L3:passing -->1,224<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 Sourced from the dispatch maps (`src/steps/*.ts`) and the compiler `throw` sites — if
 the code defers a shape, it fails closed with a clear error and this file says so. Keep
@@ -41,7 +41,7 @@ In a 🟡 cell, **✅** = supported form, **❌** = deferred shape.
 | TextP (startsWith/endsWith/containing + negations) | ✅ | bound `LIKE`, escaped |
 | TextP regex (`regex`/`notRegex`) | 🚫 | no SQLite `regexp()` UDF; DO blocks `create_function`/`load_extension` |
 | `typeOf(GType)` over a stored property | ✅ | `is(typeOf(X))` / `has('k',typeOf(X))` over every canonical type via the stored `vtype` — incl. `bigdecimal`/`char`/`duration` (now framed by the hand-rolled serializers, §10) |
-| `dedup()` | 🟡 | bare; `dedup().by(key/T.id/T.label/scalar traversal)` first-per-key window. ❌ `dedup(label)`, >1 `by()`, after `as()` / path tracking |
+| `dedup()`, `dedup(labels)` | 🟡 | bare; `dedup().by(key/T.id/T.label/scalar traversal)` first-per-key window; `dedup(labels[,by(key/T.x)])` dedups by an `as()`-label tuple (well-defined under `as()`/path, composes with `path()`/`select()`). ❌ bare `dedup()` after `as()`/path tracking, >1 `by()`, `dedup(labels).by(traversal)` |
 | `identity()` | ✅ | |
 
 ## 3. Projections & element data
