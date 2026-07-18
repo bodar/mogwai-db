@@ -43,9 +43,10 @@ export type ChildUse = 'all' | 'first';
  * sub-traversal that rejoins on it. Both node/edge ELEMENTS and PROPERTIES (from
  * `properties()`) can be parents — a property child body (`key()`/`value()`/`element()…`)
  * lowers through the generic dispatcher (compileFromProperty), never a private reader. */
-export type ChildParent = ElementStream | PropertyStream;
+export type ChildParent = ElementStream | PropertyStream | ScalarStream;
 
 const isPropertyParent = (p: ChildParent): p is PropertyStream => p.kind === 'property';
+const isScalarParent = (p: ChildParent): p is ScalarStream => p.kind === 'scalar';
 
 /** Child chains cross the same normalization seam as the root. In particular,
  * order().by() must arrive as one PStep before shape-aware scalar lowering. */
@@ -73,13 +74,37 @@ export function pushChildScope<P extends ChildParent>(
   const p = parent.rel.as('p');
   const cols = carriedCols(parent.carried);
   const ordinal = `o${parent.carried.origins.length}`;
+  // A SCALAR parent re-projects its value payload `v` (+ vt/vtype) so the child body reads
+  // `_` = the value, and mints an explicit encounter column: the scoped reducer/fold and the
+  // `first` cardinality policy key productivity on it. A scalar traverser never fans out into
+  // its own child scope (each ordinal has exactly one value), so a constant marker suffices;
+  // a scalar parent already carrying an encounter reuses it. streamColumns order is
+  // [v, vt?, encounter, vtype?] so the projection matches the seed's declared schema.
+  if (isScalarParent(parent)) {
+    const enc = parent.encounter ?? 'enc';
+    const head = ['v', ...(parent.result === 'number' ? ['vt'] : [])];
+    const vtypeCols = parent.vtype ? [parent.vtype] : [];
+    const payload = list([
+      ...head.map((c) => q`${p.c[c]} AS ${c}`),
+      parent.encounter ? q`${p.c[enc]} AS ${enc}` : q`1 AS ${enc}`,
+      ...vtypeCols.map((c) => q`${p.c[c]} AS ${c}`),
+    ], ', ');
+    const domain = parent.q.cte(
+      q`SELECT ${payload}${carryFrag(parent.carried, p)}, ROW_NUMBER() OVER () AS ${ordinal} FROM ${p}`,
+      [...head, enc, ...vtypeCols, ...cols, ordinal],
+    );
+    const seed = { ...parent, rel: domain, encounter: enc, carried: { ...parent.carried, origins: [...parent.carried.origins, ordinal] } } as P;
+    const frame: ChildFrame = { ordinal, domain, parent };
+    const frames = scope.kind === 'child' ? [...scope.frames, frame] : [frame];
+    return { scope: { kind: 'child', frames }, frame, seed };
+  }
   // The domain re-projects the parent's identity payload + a multiset-safe ordinal. An
   // element parent carries a single `id`; a property parent carries the full property
   // payload so the child body's compileFromProperty can read key/value/owner from it.
-  const payload = isPropertyParent(parent)
-    ? list(PROPERTY_PAYLOAD.map((c) => q`${p.c[c]} AS ${c}`), ', ')
-    : q`${p.c.id} AS id`;
   const payloadCols = isPropertyParent(parent) ? [...PROPERTY_PAYLOAD] : ['id'];
+  const payload = isPropertyParent(parent)
+    ? list(payloadCols.map((c) => q`${p.c[c]} AS ${c}`), ', ')
+    : q`${p.c.id} AS id`;
   const domain = parent.q.cte(
     q`SELECT ${payload}${carryFrag(parent.carried, p)}, ROW_NUMBER() OVER () AS ${ordinal} FROM ${p}`,
     [...payloadCols, ...cols, ordinal],
@@ -327,7 +352,7 @@ export function tryCompileCountChild(
   scope: CompileScope = ROOT_SCOPE,
   preParsed?: ReturnType<typeof stepChain>,
 ): ScalarStream | null {
-  if (!nested || isPropertyParent(parent)) return null;
+  if (!nested || isPropertyParent(parent) || isScalarParent(parent)) return null;
   const counted = classifyCountChild(preParsed ?? childSteps(nested, parent.params));
   if (!counted) return null;
   const { prefix } = counted;
@@ -354,7 +379,7 @@ function tryCompileCountValueRows(
   scope: CompileScope = ROOT_SCOPE,
   preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ScalarStream; frame: ChildFrame } | null {
-  if (!nested || isPropertyParent(parent)) return null;
+  if (!nested || isPropertyParent(parent) || isScalarParent(parent)) return null;
   const body = preParsed ?? childSteps(nested, parent.params);
   // A trailing is() run is a filter on the count value — `out().count().is(gt(1))`.
   // It composes as a HAVING on the aggregate: the row (one per parent, incl. the
@@ -449,6 +474,27 @@ function compileScalarChildRows(
     // classify proved a scalar shape; a non-scalar here is an internal classify↔lowerSteps
     // contradiction, not a fallback — fail loud (a silent null would orphan the CTEs above).
     if (stream.kind !== 'scalar') throw new Error('property scalar child classified scalar but lowered to ' + stream.kind);
+    return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
+  }
+
+  // Scalar parent: the child body starts from the value `_` = v (no adjacency/props). An
+  // encounter-free value-op prefix (transforms/is/order/slice — the pushed seed carries the
+  // minted encounter) plus an optional terminal scoped reducer (count/sum/min/max/mean).
+  // fold() is stripped by the caller (stripTerminal), so it never appears here. constant()
+  // and any non-value body defer (return null → the caller's clear message).
+  if (isScalarParent(parent)) {
+    const last = body.at(-1);
+    const reducer = last && CHILD_SCALAR_REDUCERS.has(last.name) && last.name !== 'fold' ? last.name : undefined;
+    const prefix = reducer ? body.slice(0, -1) : body;
+    if (!body.length || !prefix.every(scalarChildPrefixOk)) return null;
+    const pushed = pushChildScope(parent, scope);
+    let stream: ScalarStream = pushed.seed;
+    if (prefix.length) {
+      const lowered = lowerScalarRows(pushed.seed, prefix, 0);
+      if (lowered.stop !== prefix.length) return null;
+      stream = lowered.stream;
+    }
+    if (reducer) stream = lowerScopedScalarReducer(stream, reducer as ScalarReducer, pushed.scope);
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
   }
 
@@ -968,6 +1014,14 @@ const scalarArmLeafOk = (s: PStep): boolean =>
   SCALAR_ARM_TX.has(s.name) || SCALAR_ARM_ROW.has(s.name)
   || (s.name === 'asNumber' && (s.args ?? []).length > 0);
 
+/** A value-op step allowed in the PREFIX of a scalar-parent CHILD body (before an optional
+ *  terminal reducer). Unlike the root-scope arm set, the pushed scalar seed carries an
+ *  encounter column, so the partitioned order/slice/tail/dedup paths are safe here; constant()
+ *  is excluded (it defers inside a child scope) and asBool has no scalarTx impl. */
+const SCALAR_CHILD_PREFIX = new Set([...SCALAR_ARM_TX, 'is', 'identity', 'unfold', 'order', 'limit', 'skip', 'range', 'tail', 'dedup']);
+const scalarChildPrefixOk = (s: PStep): boolean =>
+  SCALAR_CHILD_PREFIX.has(s.name) || (s.name === 'asNumber' && (s.args ?? []).length > 0);
+
 function scalarBranchArm(body: PStep[], params: Record<string, any>): boolean {
   return body.length > 0 && body.every((s) => {
     const kids = (s.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
@@ -993,7 +1047,10 @@ function lowerScalarArm(s: ScalarStream, body: PStep[]): ScalarStream | null {
 export function tryScalarMapChild(s: ScalarStream, step: PStep): ScalarStream | null {
   const arg = step.args?.[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
-  return lowerScalarArm(s, childSteps(arg.nested, s.params));
+  // Cardinality-preserving value bodies lower at root scope (the light path); a reducer body
+  // (map(__.count()/sum()/…)) needs the pushed scalar child scope to reduce per value.
+  return lowerScalarArm(s, childSteps(arg.nested, s.params))
+    ?? tryCompileScalarValueChild(s, arg.nested, 'all');
 }
 
 /** choose(pred, then[, else]) over a scalar. The predicate is a P (applied to `v` via
