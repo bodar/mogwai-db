@@ -1,7 +1,7 @@
-import { q, raw, value, list, empty, type Expression, type Relation } from '../q.ts';
+import { q, value, list, empty, type Expression, type Relation } from '../q.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
 import {
-  scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps, dirsFor,
+  scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps,
   storedValueExpr, bareValueMapProps, type ScalarCtx,
 } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
@@ -12,8 +12,7 @@ import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, pushChildScope, reuseCurrentFrame, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, type ChildParent } from './child.ts';
 
-/** The scalar reducers that terminate a numeric neighbourhood reduction (reused by the
- * nested-MAP group's inner reduce). */
+/** The numeric reducers that terminate a nested-group inner value `by(__.values(x).<r>())`. */
 const SCALAR_REDUCERS = new Set(['sum', 'min', 'max', 'mean']);
 
 // ---------- group()/groupCount() (barrier → one Map) ----------
@@ -46,6 +45,11 @@ export interface GroupSource {
    * a property (properties().group()). Its by() sub-traversals lower through the generic
    * child seam (tryLowerGroupChildSource). Only stashed cap() group sources omit it. */
   parent?: ChildParent;
+  /** A nested-group value `by(__.<move>.group()/groupCount())` — the inner key/value read
+   * off the child-expanded inner element/property ctx. lowerGroup emits a two-level
+   * aggregation (lvl1 groups by (outerKey, innerKey) + reduces; the outer json_group_object
+   * folds each outer key's entries into one Map). `from` already carries the inner joins. */
+  valNestedMap?: { innerKey: Expression; innerVal: Expression; innerKind: 'count' | 'number' };
 }
 
 /** Columns that frame one element (vertex/edge/property) under `prefix`. label
@@ -112,6 +116,35 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
 
 const GROUP_VALUE_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
 
+/** The inner key + reduced value of a nested-group value body `__.<move>.<group|groupCount>`,
+ *  read off the child-expanded inner element/property ctx. Returns null for shapes not yet
+ *  generic (element-valued inner keys, non-count/reducer inner values) — a clean deferral,
+ *  never a mis-execution. Mirrors buildGroupKey's key resolution for the inner level. */
+function nestedInnerKeyVal(
+  innerGroup: PStep,
+  ctx: ScalarCtx,
+  params: Record<string, any>,
+): { key: Expression; val: Expression; kind: 'count' | 'number' } | null {
+  const innerBys: any[][] = innerGroup.bys ?? [];
+  const keyArg = innerBys[0]?.[0];
+  let key: Expression | null = null;
+  if (keyArg && typeof keyArg === 'object' && 'token' in keyArg)
+    key = keyArg.token === 'label' ? (ctx.elem === 'property' ? ctx.pkExpr! : labelNameSub(ctx.labelIdExpr))
+      : keyArg.token === 'id' ? ctx.idExpr : null;
+  else if (typeof keyArg === 'string') key = scalarProp(ctx, keyArg);
+  if (!key) return null; // bare/element inner key deferred
+  if (innerGroup.name === 'groupCount') return { key, val: q`COUNT(*)`, kind: 'count' };
+  // group().by(ik).by(__.count()) or by(__.values(x).<numeric>())
+  const reduceArg = innerBys[1]?.[0];
+  if (!reduceArg || typeof reduceArg !== 'object' || !('nested' in reduceArg)) return null;
+  const rsteps = childSteps(reduceArg.nested, params);
+  const reducer = rsteps.at(-1)?.name;
+  if (rsteps.length === 1 && reducer === 'count') return { key, val: q`COUNT(*)`, kind: 'count' };
+  if (rsteps.length === 2 && rsteps[0].name === 'values' && SCALAR_REDUCERS.has(reducer!))
+    return { key, val: numericReducerAggregate(scalarProp(ctx, rsteps[0].args[0]), reducer as NumericReducer).value, kind: 'number' };
+  return null;
+}
+
 /** Lower generic scalar key/value children and join them back to the original
  * element through ONE shared parent origin. Keys consume `first`; non-reducing
  * values consume `all`; reducers expose their raw productive rows so the final
@@ -171,7 +204,22 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   const genericElementImplicitFold = !isProp && !genericElementFold
     && valSteps.length > 0
     && classifyElementChildRows(valBody, undefined, false) !== null;
-  if (!genericKey && !genericProjectKey && !genericVal && !genericReducer && !genericFold && !genericElementFold && !genericElementImplicitFold) return null;
+  // A nested-group value `by(__.<move>.group()/groupCount())`: the movement prefix expands
+  // to inner rows through the SAME generic child engine, and the inner group folds them per
+  // outer key (a two-level aggregation in lowerGroup). The prefix is either element movement
+  // (compiled via lowerElementSteps) or properties() (the outer element's VertexProperties).
+  // valTerminal is the RAW terminal ('by' when the inner group carries by() modulators); the
+  // normalized valBody has folded them, so the inner group is its last step.
+  const valBodyTerminal = valBody.at(-1)?.name;
+  const nestedGroup = parent.kind === 'elements' && (valBodyTerminal === 'group' || valBodyTerminal === 'groupCount') ? valBody.at(-1) : undefined;
+  const nestedPrefix = nestedGroup ? valBody.slice(0, -1) : [];
+  const nestedElementMove = !!nestedGroup && classifyElementChildRows(nestedPrefix, undefined, false) !== null;
+  const nestedPropertiesMove = !!nestedGroup && !nestedElementMove
+    && nestedPrefix.length === 1 && nestedPrefix[0].name === 'properties'
+    && ((nestedPrefix[0] as any).args ?? []).every((a: any) => typeof a === 'string')
+    && parent.kind === 'elements' && parent.elem !== 'edge';
+  const genericGroupVal = nestedElementMove || nestedPropertiesMove;
+  if (!genericKey && !genericProjectKey && !genericVal && !genericReducer && !genericFold && !genericElementFold && !genericElementImplicitFold && !genericGroupVal) return null;
 
   const outer = pushChildScope(parent);
   const p = outer.seed.rel.as('gp');
@@ -234,7 +282,35 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     valOrder = q`${p.c[outer.frame.ordinal]}, ${c.c.id}`;
     valElement = { elem: rows.stream.elem === 'edge' ? 'edge' : 'vertex', ctx: elemCtx(e, rows.stream.elem) };
   }
-  const common = { keyExpr, keyParts, valExpr, valReducer, valMarker, valFold, valOrder, valElement, productiveBy: src.productiveBy };
+  let valNestedMap: GroupSource['valNestedMap'];
+  if (genericGroupVal) {
+    let innerCtx: ScalarCtx;
+    if (nestedElementMove) {
+      // The movement prefix expands to inner element rows through lowerElementSteps — any
+      // valid movement/filter chain, not a hand-rolled adjacency join. Rejoin nodes/edges
+      // so the inner key/value ctx can read the inner element's label/props.
+      const rows = tryCompileElementImplicitFoldRows(outer.seed, valArg.nested, reuse(), nestedPrefix)!;
+      const c = rows.stream.rel.as('gng');
+      const e = (rows.stream.elem === 'edge' ? edges : nodes).as('gnge');
+      joins.push(q` JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]} JOIN ${e} ON ${e.c.id}=${c.c.id}`);
+      innerCtx = elemCtx(e, rows.stream.elem);
+    } else {
+      // properties() over the outer element: its VertexProperty rows joined off the pushed
+      // domain id. innerCtx reads the property's key (T.label) / value like propertyCtx.
+      const keys = ((nestedPrefix[0] as any).args ?? []).filter((a: any): a is string => typeof a === 'string');
+      const vp = vertexProperties.as('gnv');
+      const keyFilter = keys.length ? q` AND ${vp.c.key} IN (${list(keys.map(value), ', ')})` : empty;
+      joins.push(q` JOIN ${vp} ON ${vp.c.node}=${p.c.id}${keyFilter}`);
+      innerCtx = {
+        elem: 'property', idExpr: vp.c.id, labelIdExpr: q`(SELECT label FROM nodes WHERE id=${vp.c.node})`,
+        ownerExpr: vp.c.node, pkExpr: vp.c.key, pvExpr: storedValueExpr(vp.c.value, vp.c.vtype), metaExpr: q`json(${vp.c.meta})`,
+      };
+    }
+    const kv = nestedInnerKeyVal(nestedGroup as PStep, innerCtx, parent.params);
+    if (!kv) return null; // inner key/value shape not yet generic — clean deferral
+    valNestedMap = { innerKey: kv.key, innerVal: kv.val, innerKind: kv.kind };
+  }
+  const common = { keyExpr, keyParts, valExpr, valReducer, valMarker, valFold, valOrder, valElement, valNestedMap, productiveBy: src.productiveBy };
   // Property parent: the pushed domain `p` already carries owner/pk/pv, so the source is
   // `p` itself (plus the child joins) — no element table to rejoin. Element parent rejoins
   // nodes/edges `n` on the domain id so key/value ctx reads its columns.
@@ -256,82 +332,29 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
  * GROUP BY aggregate; an element value can't be aggregated in SQL (props must be
  * framed), so we emit rows ORDER BY the key and the handler folds runs into the Map.
  */
-/** Nested-MAP group value: group().by(k).by(__.<movement>.groupCount()/group().by(ik)
- *  .by(__.values(x).<reduce>())). An unreduced inner group is a Map per outer key.
- *  Compiled as a TWO-LEVEL aggregation reusing the ordinary key/reduce machinery:
- *  lvl1 groups the outer members' movement-expansion by (outerKey, innerKey) and reduces;
- *  the result json_group_object()s each outer key's (innerKey→value) pairs into one Map.
- *  Returns null (fall through) for shapes not yet covered — never a support-definer throw. */
-function tryLowerNestedMapGroup(st: Carry, isCount: boolean, bys: any[][], src: GroupSource): GroupStream | null {
-  if (isCount || !src.parent) return null;
-  const valArg = bys[1]?.[0];
-  if (!valArg || typeof valArg !== 'object' || !('nested' in valArg)) return null;
-  const vsteps = childSteps(valArg.nested, st.params);
-  const gi = vsteps.findIndex((s) => s.name === 'group' || s.name === 'groupCount');
-  if (gi < 0 || gi !== vsteps.length - 1) return null; // inner group must terminate the value
-  const innerGroup = vsteps[gi] as PStep;
-  const move = vsteps.slice(0, gi);
-  const innerBys: any[][] = innerGroup.bys ?? [];
-  const innerKeyArg = innerBys[0]?.[0];
-
-  // Outer key — scalar/token only (nested-map element keys deferred).
-  const outerKey = buildGroupKey(bys[0], src, st.params);
-  if (outerKey.desc.kind !== 'scalar') return null;
-
-  // Movement expansion off the outer element (aliased `n` in src.from) → the inner
-  // element rows + how to read the inner key. `properties()` rows ARE VertexProperties,
-  // whose T.label is the property key; edge movement joins edges for elemCtx-based keys.
-  const nId = raw('n.id');
-  let join: Expression;
-  let ik: Expression | null = null;      // T.label inner key
-  let innerCtx: ScalarCtx | null = null; // for a property-key / values() inner key/reduce
-  const head = move[0]?.name;
-  const bareMove = move.length === 1 && ((move[0] as any).args ?? []).length === 0;
-  if (bareMove && head === 'properties') {
-    const vp = vertexProperties.as('vpn');
-    join = q` JOIN ${vp} ON ${vp.c.node}=${nId}`;
-    if (innerKeyArg && typeof innerKeyArg === 'object' && innerKeyArg.token === 'label') ik = vp.c.key;
-  } else if (bareMove && (head === 'outE' || head === 'inE' || head === 'bothE')) {
-    const ie = edges.as('ie');
-    const dirs = dirsFor(head === 'outE' ? 'out' : head === 'inE' ? 'in' : 'both');
-    join = q` JOIN ${ie} ON (${list(dirs.map(([from]) => q`${ie.c[from]}=${nId}`), ' OR ')})`;
-    innerCtx = elemCtx(ie, 'edge');
-    if (innerKeyArg && typeof innerKeyArg === 'object' && innerKeyArg.token === 'label') ik = labelNameSub(ie.c.label);
-  } else return null;
-  if (!ik && innerCtx && typeof innerKeyArg === 'string') ik = scalarProp(innerCtx, innerKeyArg);
-  if (!ik) return null; // unsupported inner key shape
-
-  // Inner reduce: groupCount → COUNT(*); group().by().by(__.values(x).<reduce>()).
-  let iv: Expression, innerVal: 'count' | 'number';
-  if (innerGroup.name === 'groupCount') { iv = q`COUNT(*)`; innerVal = 'count'; }
-  else {
-    const reduceArg = innerBys[1]?.[0];
-    if (!reduceArg || typeof reduceArg !== 'object' || !('nested' in reduceArg) || !innerCtx) return null;
-    const rsteps = childSteps(reduceArg.nested, st.params);
-    const reducer = rsteps.at(-1)?.name;
-    if (rsteps.length !== 2 || rsteps[0].name !== 'values' || !SCALAR_REDUCERS.has(reducer!)) return null;
-    iv = numericReducerAggregate(scalarProp(innerCtx, rsteps[0].args[0]), reducer as NumericReducer).value;
-    innerVal = 'number';
-  }
-
-  const lvl1 = st.q.cte(
-    q`SELECT ${outerKey.cols}, ${ik} AS ik, ${iv} AS iv FROM ${src.from}${join} GROUP BY ${outerKey.group}, ik`,
-    ['gk', 'ik', 'iv'],
-  );
-  const l = lvl1.as('l');
-  const rel = st.q.cte(
-    q`SELECT ${l.c.gk} AS gk, json_group_object(${l.c.ik}, ${l.c.iv}) AS gv FROM ${l} WHERE ${l.c.ik} IS NOT NULL GROUP BY ${l.c.gk}`,
-    ['gk', 'gv'],
-  );
-  return toGroupStream(withoutCarried(st), rel, outerKey.desc, { kind: 'nestedMap', innerVal });
-}
-
 export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: GroupSource): GroupStream {
   if (bys.length > 2) throw new Error('group() with more than two by() modulators not yet supported');
-  const nestedMap = tryLowerNestedMapGroup(st, isCount, bys, src);
-  if (nestedMap) return nestedMap;
   src = tryLowerGroupChildSource(bys, src) ?? src;
   const key = buildGroupKey(bys[0], src, st.params);
+
+  // Nested-group value → a Map per outer key. The child seam has already joined the inner
+  // element/property expansion into src.from and read its inner key/value; here we finish
+  // the TWO-LEVEL aggregation: lvl1 groups (outerKey, innerKey) applying the inner reducer,
+  // then json_group_object folds each outer key's entries into one Map.
+  if (src.valNestedMap) {
+    if (key.desc.kind !== 'scalar') throw new Error('nested-group value requires a scalar/token outer key');
+    const { innerKey, innerVal, innerKind } = src.valNestedMap;
+    const lvl1 = st.q.cte(
+      q`SELECT ${key.cols}, ${innerKey} AS ik, ${innerVal} AS iv FROM ${src.from} GROUP BY ${key.group}, ik`,
+      ['gk', 'ik', 'iv'],
+    );
+    const l = lvl1.as('l');
+    const rel = st.q.cte(
+      q`SELECT ${l.c.gk} AS gk, json_group_object(${l.c.ik}, ${l.c.iv}) AS gv FROM ${l} WHERE ${l.c.ik} IS NOT NULL GROUP BY ${l.c.gk}`,
+      ['gk', 'gv'],
+    );
+    return toGroupStream(withoutCarried(st), rel, key.desc, { kind: 'nestedMap', innerVal: innerKind });
+  }
 
   let val: GroupVal, valNode: Expression, groupBy = true;
   const valArgs = bys[1];

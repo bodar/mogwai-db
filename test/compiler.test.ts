@@ -491,14 +491,32 @@ describe('compiler SQL snapshots', () => {
     // marko has name,age (single) → {name:1, age:1}. One outer Map, framed once.
     const c = read("g.V().hasLabel('person').group().by('name').by(__.properties().groupCount().by(T.label))");
     expect(c.shape).toEqual({ kind: 'group', key: { kind: 'scalar', as: undefined }, val: { kind: 'nestedMap', innerVal: 'count' } });
-    // two-level: json_group_object over a GROUP BY (outer key, inner key)
+    // two-level: json_group_object over a lvl1 GROUP BY (outer key, inner key); the inner
+    // key is now sourced generically from the properties() child (any alias), not hand-rolled.
     expect(c.sql).toContain('json_group_object');
-    expect(c.sql).toContain('vpn.key');
+    expect(c.sql).toContain('GROUP BY gk, ik');
+    expect(c.sql).toContain('vertex_properties');
     expect(executeQuery(store, "g.V().hasLabel('person').group().by('name').by(__.properties().groupCount().by(T.label))", {})).toHaveLength(1);
+    // correctness: marko → {name:1, age:1} (both single-cardinality property keys)
+    const marko = run(store, "g.V().hasLabel('person').group().by('name').by(__.properties().groupCount().by(T.label))")
+      .find((r: any) => r.gk === 'marko');
+    expect(JSON.parse(marko.gv)).toEqual({ name: 1, age: 1 });
     // edge movement + inner reducer: Map<label, Map<edgeLabel, sum(weight)>>
     const s = read("g.V().group().by(T.label).by(__.bothE().group().by(T.label).by(__.values('weight').sum()))");
     expect(s.shape).toEqual({ kind: 'group', key: { kind: 'scalar', as: undefined }, val: { kind: 'nestedMap', innerVal: 'number' } });
     expect(() => executeQuery(store, "g.V().group().by(T.label).by(__.bothE().group().by(T.label).by(__.values('weight').sum()))", {})).not.toThrow();
+    // NEW (generic seam unlock): the hand-rolled path only accepted a single BARE movement.
+    // The generic child engine composes ANY movement/filter chain in the nested value.
+    // (a) filtered movement: out().hasLabel('software').groupCount().by('name')
+    const nuA = read("g.V().group().by(T.label).by(__.out().hasLabel('software').groupCount().by('name'))");
+    expect(nuA.shape).toEqual({ kind: 'group', key: { kind: 'scalar', as: undefined }, val: { kind: 'nestedMap', innerVal: 'count' } });
+    const personA = run(store, "g.V().group().by(T.label).by(__.out().hasLabel('software').groupCount().by('name'))")
+      .find((r: any) => r.gk === 'person');
+    expect(JSON.parse(personA.gv)).toEqual({ lop: 3, ripple: 1 }); // marko/josh/peter→lop, josh→ripple
+    // (b) multi-hop movement: out().out().groupCount().by(T.label)
+    const personB = run(store, "g.V().group().by(T.label).by(__.out().out().groupCount().by(T.label))")
+      .find((r: any) => r.gk === 'person');
+    expect(JSON.parse(personB.gv)).toEqual({ software: 2 }); // marko→josh→{lop,ripple}
   });
 
   test("cap('a') of a group side-effect retypes to a MapStream on a follower", () => {
