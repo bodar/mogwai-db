@@ -240,6 +240,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   // nodes/edges `n` on the domain id so key/value ctx reads its columns.
   if (parent.kind === 'property')
     return { from: q`${p}${list(joins, '')}`, ctx: propertyCtx(p), elem: 'property', ...common };
+  if (parent.kind !== 'elements') throw new Error(`group() by-child over a ${parent.kind} parent not yet supported`);
   const n = elemRel(parent, 'gn');
   return {
     from: q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}${list(joins, '')}`,
