@@ -431,7 +431,10 @@ export function lowerValueMap(st: ElementStream, proj: PStep): MapStream {
   const b = base.as('b');
   const keyFilter = keys.length ? q` WHERE je.key IN (${list(keys.map((k) => value(k)), ', ')})` : empty;
   const rel = st.q.cte(q`SELECT je.key AS mk, je.value AS mv, ${b.c.o0} AS o0 FROM ${b}, json_each(${b.c.props}) je${keyFilter}`, ['mk', 'mv', 'o0']);
-  const carry: Carry = { ...carryOf(st), carried: carriedWith(st.carried, { origins: ['o0'] }) };
+  // The re-entry replaces per-traverser identity with a fresh per-element ordinal scope
+  // (o0 via ROW_NUMBER), so the element source's carried bulk is consumed here, not carried
+  // into the map rel — clear it (behaviour-identical: bulk was 1 per element).
+  const carry: Carry = { ...carryOf(st), carried: carriedWith(st.carried, { origins: ['o0'], bulk: null }) };
   // key = a bare string; value = the property's value list (json array per entry).
   return toMapStream(carry, rel, { kind: 'scalar' }, { kind: 'list', of: { kind: 'scalar' } });
 }
@@ -442,7 +445,10 @@ export function lowerValueMap(st: ElementStream, proj: PStep): MapStream {
  * compile-time tag (asNumber(BYTE).groupCount()) frames the key, else inference. */
 export function lowerScalarGroupCount(s: ScalarStream): GroupStream {
   const c = s.rel.as('c');
-  const rel = s.q.cte(q`SELECT ${c.c.v} AS gk, COUNT(*) AS gv FROM ${c} GROUP BY ${c.c.v}`, ['gk', 'gv']);
+  // Per-key count = SUM(bulk) when the scalar stream carries a multiplicity, else the row
+  // count (identical while bulk≡1) — matching values().count()'s weighting.
+  const gv = s.carried.bulk ? q`SUM(${c.c[s.carried.bulk]})` : q`COUNT(*)`;
+  const rel = s.q.cte(q`SELECT ${c.c.v} AS gk, ${gv} AS gv FROM ${c} GROUP BY ${c.c.v}`, ['gk', 'gv']);
   return toGroupStream(withoutCarried(carryOf(s)), rel, { kind: 'scalar', productive: true, as: s.as }, { kind: 'count' });
 }
 

@@ -51,7 +51,9 @@ const VARIANT_TAIL = new Map<string, ShapeTailFn<VariantStream>>([
   ['dedup', (s, step, _steps, at) => {
     if (step.args.length > 0) throw new Error('dedup(label) not yet supported');
     if ((step.bys ?? []).length) throw new Error('dedup().by() over a variant value not yet supported');
-    if (carriedCols(s.carried).length) throw new Error('dedup() over a variant with carried path/label state not yet supported (path-distinct semantics)');
+    // A carried bulk column rides through the DISTINCT re-projection (bulk≡1 today, so
+    // DISTINCT is unaffected); real path/label state still defers.
+    if (carriedCols(s.carried).some((c) => c !== s.carried.bulk)) throw new Error('dedup() over a variant with carried path/label state not yet supported (path-distinct semantics)');
     return continueLowering(reselect(s, { distinct: true }), at + 1);
   }],
 ]);

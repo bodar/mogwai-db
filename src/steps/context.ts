@@ -104,6 +104,7 @@ export interface Carried {
   readonly sack?: string;                // sack: the carried per-traverser scalar column (e.g. 'sk')
   readonly fromV?: string;               // edge context: the vertex an edge was entered from (for otherV())
   readonly encounter?: string;           // explicit provider order retained across a barrier/dedup boundary
+  readonly bulk?: string;                // traverser multiplicity (e.g. 'bulk'): SUM(bulk) is the RLE traverser count. Seeded =1 at an element source, carried unchanged across every hop, consumed (SUM) + dropped at a barrier
   readonly trackFromV?: boolean;         // seeded true iff the chain uses otherV() — gates fromV emission (hot-path: no extra column otherwise)
 }
 
@@ -144,18 +145,23 @@ export const prevRel = (st: ElementStream, alias?: string): Relation => alias ? 
 /** The current element's table aliased `n` (nodes/edges by elem). */
 export const elemRel = (st: ElementStream, alias = 'n'): Relation => (st.elem === 'edge' ? edges : nodes).as(alias);
 
-/** Every column carried UNCHANGED across a hop, in a STABLE order: alias columns,
- *  then origin/sack/fromV, then the path-position columns LAST. THE single source of
- *  truth for "what columns are on the id-relation" — movement/filter thread it, and a
- *  branch merge MUST reproduce it (armProjection).
+/** Every column carried UNCHANGED across a hop, in a STABLE order: alias columns and
+ *  source-seeded state (sack, bulk) first, then the columns a LATER hop appends
+ *  (origins pushed by a child scope, fromV/encounter set by movement/barriers), then the
+ *  path-position columns LAST. THE single source of truth for "what columns are on the
+ *  id-relation" — movement/filter thread it, and a branch merge MUST reproduce it
+ *  (armProjection).
  *
- *  Path MUST be last: movement physically APPENDS each new path position at the end of
- *  its SELECT (after carryFrag of the old carried set), so carriedCols(old) has to be a
- *  prefix of carriedCols(new) for the appended column to land in the right slot. Any
- *  carried column ordered AFTER path would desync the CTE's declared columns from its
- *  physical SELECT once a hop appends a position (the coalesce/optional+path() bug). */
+ *  ORDER RULE — a column appended later must sort later. `bulk` is seeded at the element
+ *  source (like sack), so it sits BEFORE origins: pushChildScope emits carryFrag(parent)
+ *  then appends the new ordinal at the very end, so the newest origin has to be the last
+ *  carried column of the child — which only holds if bulk precedes every origin. Path MUST
+ *  be last for the same reason: movement APPENDS each new path position after carryFrag of
+ *  the old set, so carriedCols(old) has to stay a prefix of carriedCols(new). Any column
+ *  ordered after the site that physically appends it desyncs declared vs physical columns
+ *  (the coalesce/optional+path() / +bulk bug). */
 export const carriedCols = (c: Carried): string[] =>
-  [...aliasColsOf(c.aliases), ...c.origins, ...(c.sack ? [c.sack] : []), ...(c.fromV ? [c.fromV] : []), ...(c.encounter ? [c.encounter] : []), ...pathColsOf(c.path)];
+  [...aliasColsOf(c.aliases), ...(c.sack ? [c.sack] : []), ...(c.bulk ? [c.bulk] : []), ...c.origins, ...(c.fromV ? [c.fromV] : []), ...(c.encounter ? [c.encounter] : []), ...pathColsOf(c.path)];
 
 /** `, p.a0, p.p0, …` — the carried columns qualified by `p`; empty when nothing is
  *  live. Movement/filter CTEs splice this after the moved id so labelled traversers
@@ -165,7 +171,7 @@ export function carryFrag(c: Carried, p: Relation): Expression {
   return cols.length ? list(cols.map((x) => q`, ${p.c[x]}`), '') : empty;
 }
 
-type CarriedOpts = { aliases?: AliasMap; path?: PathState; origins?: readonly string[]; sack?: string | null; fromV?: string | null; encounter?: string | null };
+type CarriedOpts = { aliases?: AliasMap; path?: PathState; origins?: readonly string[]; sack?: string | null; fromV?: string | null; encounter?: string | null; bulk?: string | null };
 
 /** Apply a carried-column patch: aliases/path/origins — a value overrides, undefined
  *  keeps; sack/fromV/encounter — `null` CLEARS, undefined keeps, a string sets. `origins` is the
@@ -179,6 +185,7 @@ export function carriedWith(c: Carried, o: CarriedOpts): Carried {
     sack: o.sack === null ? undefined : (o.sack ?? c.sack),
     fromV: o.fromV === null ? undefined : (o.fromV ?? c.fromV),
     encounter: o.encounter === null ? undefined : (o.encounter ?? c.encounter),
+    bulk: o.bulk === null ? undefined : (o.bulk ?? c.bulk),
     trackFromV: c.trackFromV,
   };
 }
@@ -191,7 +198,8 @@ export const withCarried = <T extends Carry>(st: T, patch: Partial<Carried>): T 
 
 /** Drop row-associated state at a global barrier while retaining ambient compile
  * context and chain requirements. A barrier result is a new traverser and cannot
- * honestly claim aliases/origins/path/sack/fromV/encounter from any one input row. */
+ * honestly claim aliases/origins/path/sack/fromV/encounter/bulk from any one input row
+ * (a barrier CONSUMES bulk via SUM, then emits one fresh bulk-1 traverser). */
 export const withoutCarried = <T extends Carry>(st: T): T => ({
   ...st,
   carried: { aliases: new Map(), origins: [], trackFromV: st.carried.trackFromV },

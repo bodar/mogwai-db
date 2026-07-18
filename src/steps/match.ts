@@ -74,7 +74,7 @@ function applyPattern(st: ElementStream, p: Pattern, aliases: Map<string, AliasE
   }
   const where = conds.length ? q` WHERE ${list(conds, ' AND ')}` : empty;
   return advance(st, q`SELECT ${list(proj, ', ')} FROM ${f}${where}`,
-    { aliases: new Map(aliases), cols: ['id', ...aliasColsOf(aliases)] });
+    { aliases: new Map(aliases), bulk: null, cols: ['id', ...aliasColsOf(aliases)] });
 }
 
 export const match: StepFn = (s, st) => {
