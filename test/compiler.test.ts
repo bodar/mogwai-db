@@ -2358,8 +2358,21 @@ describe('compiler SQL snapshots', () => {
     // by(__.<movement>.count()): a per-position scalar child → one value column per position.
     const cnt = read('g.V().out().path().by(__.out().count())');
     expect(cnt.shape).toEqual({ kind: 'path', positions: [{ render: 'value', prefix: 'x0' }, { render: 'value', prefix: 'x1' }] });
+    // by(__.choose(...))/by(__.coalesce(...)): a bare 1-to-1 branch at the position lowers
+    // through the element-parent scalar-branch compilers (one value per position, no first-
+    // collapse needed). Both stay value positions.
+    expect(read('g.V().out().path().by(__.choose(__.hasLabel("person"), __.constant("P"), __.constant("S")))').shape)
+      .toEqual({ kind: 'path', positions: [{ render: 'value', prefix: 'x0' }, { render: 'value', prefix: 'x1' }] });
+    expect(read('g.V().out().path().by(__.coalesce(__.values("lang"), __.constant("none")))').shape)
+      .toEqual({ kind: 'path', positions: [{ render: 'value', prefix: 'x0' }, { render: 'value', prefix: 'x1' }] });
     // a by(traversal) shape the scalar child seam can't classify (a bare group barrier) fails closed.
     expect(() => compile('g.V().out().path().by(__.groupCount())', {})).toThrow('path().by(traversal)');
+    // union() at a position FANS OUT (N values); a position holds one → fail closed (take-first
+    // needs an emission order, the same locked non-goal as map() over a fan-out arm).
+    expect(() => compile('g.V().out().path().by(__.union(__.values("name"), __.constant("x")))', {})).toThrow('fans out');
+    // a movement/filter PREFIX before the branch would make it multi-valued per position without
+    // the value seam's first-collapse → deferred (not mis-executed).
+    expect(() => compile('g.V().out().path().by(__.out().choose(__.hasLabel("person"), __.constant("P"), __.constant("S")))', {})).toThrow('path().by(traversal)');
   });
 
   test('path() interleaves edge and vertex positions with the right element shape', () => {
