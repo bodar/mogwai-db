@@ -1326,7 +1326,9 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().as("a").out().as("b").select("a","b").order()', {})).toThrow('order() on a record requires a by(field)');
     // order().by() deferred modulators must throw, not silently sort by id
     expect(() => compile('g.V().order().by(T.label)', {})).toThrow('by(T.label) modulator not yet supported');
-    expect(() => compile('g.V().order().by(__.values("age"))', {})).toThrow('by(traversal) modulator not yet supported');
+    // single order().by(traversal) is supported (see its own test); a MULTI-term order mixing
+    // a traversal still defers rather than silently sorting by id.
+    expect(() => compile('g.V().order().by("name").by(__.values("age"))', {})).toThrow('by(traversal) modulator not yet supported');
     // dedup: dedup(labels) is supported (see the dedup(labels) test); bare dedup after as()
     // stays deferred rather than answered wrongly (path-distinct semantics).
     expect(() => compile('g.V().as("a").out().dedup()', {})).toThrow('dedup() after as() not yet supported');
@@ -1348,6 +1350,17 @@ describe('compiler SQL snapshots', () => {
       .toEqual(['josh', 'marko', 'peter', 'vadas']);
     expect(run(store, 'g.V().both().both().dedup().by(T.label).count()').map((r) => r.v)).toEqual([2]);
     expect(run(store, 'g.V().both().both().dedup().by(__.outE().count()).count()').map((r) => r.v)).toEqual([4]);
+  });
+
+  test('order().by(__.traversal): sort via the generic scalar child seam (same as dedup)', () => {
+    const store = seededStore();
+    // sort by a per-traverser child scalar (out-degree), reusing tryCompileScalarValueRows.
+    expect(run(store, 'g.V().order().by(__.out().count(),desc).values("name")').map((r) => r.v))
+      .toEqual(['marko', 'josh', 'peter', 'vadas', 'lop', 'ripple']);
+    expect(run(store, 'g.V().has("age").order().by(__.values("age")).values("name")').map((r) => r.v))
+      .toEqual(['vadas', 'marko', 'josh', 'peter']);
+    // the SQL routes through the child seam (a correlated child rank + a fresh encounter).
+    expect(read('g.V().order().by(__.out().count()).values("name")').sql).toContain('ROW_NUMBER() OVER');
   });
 
   test('dedup(labels): dedup by an as()-label tuple (optional by()), composes with path()', () => {
