@@ -70,6 +70,57 @@ Feature: mogwai addendum — path() position scoping and per-position children
       | p[d[1].i,d[0].i] |
 
   @gap:path-position
+  Scenario: g_V_out_path_byXchooseXhasLabelXpersonX_constantXPX_constantXSXXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().out().path().by(__.choose(__.hasLabel("person"), __.constant("P"), __.constant("S")))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | p[P,P] |
+      | p[P,P] |
+      | p[P,S] |
+      | p[P,S] |
+      | p[P,S] |
+      | p[P,S] |
+
+  @gap:path-position
+  Scenario: g_V_out_path_byXcoalesceXvaluesXlangX_constantXnoneXXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().out().path().by(__.coalesce(__.values("lang"), __.constant("none")))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | p[none,none] |
+      | p[none,none] |
+      | p[none,java] |
+      | p[none,java] |
+      | p[none,java] |
+      | p[none,java] |
+
+  @gap:path-position
+  Scenario: g_V_out_path_byXchooseXout_constantXhasOutX_constantXleafXXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().out().path().by(__.choose(__.out(), __.constant("hasOut"), __.constant("leaf")))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | p[hasOut,leaf] |
+      | p[hasOut,leaf] |
+      | p[hasOut,leaf] |
+      | p[hasOut,leaf] |
+      | p[hasOut,hasOut] |
+      | p[hasOut,leaf] |
+
+  @gap:path-position
   Scenario: g_V_out_out_path_byXnameX_from_to_count
     Given the modern graph
     And the traversal of

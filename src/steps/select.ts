@@ -11,7 +11,8 @@ import { compileFromList } from './list.ts';
 import { type Compiled, type PathPos } from '../render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
 import { lowerGlobalCount } from './barrier.ts';
-import { classifyElementChild, classifyListChild, classifyScalarChild, pushChildScope, reuseCurrentFrame, ROOT_SCOPE, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
+import { childSteps, classifyElementChild, classifyListChild, classifyScalarChild, pushChildScope, reuseCurrentFrame, ROOT_SCOPE, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild, type ChildFrame, type ChildScope } from './child.ts';
+import { tryLowerScalarChoose, tryLowerScalarCoalesce } from './branch.ts';
 
 // ---------- select()/project() ----------
 
@@ -692,6 +693,44 @@ function pathPositionValue(_st: ElementStream, tbl: Relation, elem: Elem, byArgs
   throw new Error('unsupported path().by() modulator');
 }
 
+/** A `path().by(__.trav)` position → ONE scalar per position, joined back by ordinal. The
+ *  re-rooted, path-stripped position seed keeps the outer ordinal (`outer.frame.ordinal`) as
+ *  its innermost origin, carried through every route so the caller's ordinal join is identical:
+ *   - value/transform/reducer body → the generic scalar child seam, reusing the pushed frame.
+ *     Its `first` cardinality (encounter = ROW_NUMBER PARTITION BY ordinal) collapses a
+ *     fan-out prefix (`by(__.out().values(…))`) to one value per position.
+ *   - a bare choose()/coalesce() over the position → the element-parent scalar-branch
+ *     compilers. Both are 1-to-1 per input (choose merges disjoint then/else seeds; coalesce
+ *     fires exactly one arm), so each position yields exactly one value with NO first-collapse
+ *     needed — the branch itself guarantees the cardinality the position requires.
+ *  Deferred, fail-closed (never mis-executed):
+ *   - union() at a position FANS OUT (N arms → N values); one position holds one value, and
+ *     picking a deterministic first needs a first-of-fan-out emission order — the same locked
+ *     non-goal as map() over a fan-out arm (CLAUDE.md).
+ *   - a movement/filter PREFIX before the branch (`by(__.out().choose(…))`): a fan-out prefix
+ *     makes the branch multi-valued per position, which needs the same first-collapse the value
+ *     seam has but the branch compilers don't carry (an encounter-threaded follow-on). */
+function lowerPathPositionChild(
+  seed: ElementStream, nested: any, outer: { scope: ChildScope; frame: ChildFrame }, params: Record<string, any>,
+): ScalarStream {
+  const plan = classifyScalarChild(nested, params);
+  if (plan) return tryCompileScalarValueChild(seed, nested, 'first', reuseCurrentFrame(outer.scope, outer.frame), plan.body)!;
+  const body = childSteps(nested, params);
+  const armDesc = () => body.map((s) => s.name + '()').join('.');
+  const branch = body.length === 1 ? body[0] : undefined;
+  if (branch?.name === 'union')
+    throw new Error(`path().by(__.${armDesc()}): union() at a path position fans out to multiple values but a position holds one — take-first-of-fan-out is a deferred non-goal; use choose()/coalesce()`);
+  if (branch?.name === 'choose') {
+    const s = tryLowerScalarChoose(branch, seed);
+    if (s) return s;
+  }
+  if (branch?.name === 'coalesce') {
+    const s = tryLowerScalarCoalesce(branch, seed);
+    if (s) return s;
+  }
+  throw new Error(`path().by(traversal) position must be a scalar child (value/transform/reducer, or a bare choose()/coalesce()); __.${armDesc()} not yet supported`);
+}
+
 /**
  * path(): frame each tracked path position (p0..pN, seeded at V(), one appended per
  * hop) as one Path per row. Without by(), each position is the whole element (joined
@@ -741,14 +780,12 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
     const spec = byOf(i)?.[0];
     // by(__.trav): re-root on this position's element and lower a scalar child via the seam.
     if (isTraversalBy(spec)) {
-      const plan = classifyScalarChild(spec.nested, st.params);
-      if (!plan) throw new Error('path().by(traversal) position must be a scalar child (value/transform/reducer/choose/coalesce/union); other shapes not yet supported');
       // The child computes ONE scalar for this position — it must NOT extend the outer path
       // (its own movement would append a path column, corrupting the carried schema). Strip
-      // path from the child seed; the ordinal (for the reuseCurrentFrame join) is preserved.
+      // path from the child seed; the ordinal (for the ordinal join) is preserved.
       const childParent = { ...outer!.seed, carried: { ...outer!.seed.carried, path: undefined } };
       const seed = reRootElement(childParent, p, p.c[pos.col], pos.elem);
-      const child = tryCompileScalarValueChild(seed, spec.nested, 'first', reuseCurrentFrame(outer!.scope, outer!.frame), plan.body)!;
+      const child = lowerPathPositionChild(seed, spec.nested, outer!, st.params);
       const b = child.rel.as(`b${i}`);
       joins.push(q` LEFT JOIN ${b} ON ${b.c[outer!.frame.ordinal]}=${p.c[outer!.frame.ordinal]}`);
       cols.push(q`${b.c.v} AS ${`${prefix}_v`}`);

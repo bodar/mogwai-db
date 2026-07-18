@@ -1,10 +1,34 @@
 # path().by(__.trav): branch-body positions (union/choose/coalesce)
 
 **Date:** 2026-07-18
-**Status:** design / continuation — a follow-on to the path `by(traversal)` rework.
-**Baseline:** L3 1226. `path().by(__.trav)` already lowers value/transform/reducer/count
-children through the generic scalar child seam (`tryCompileScalarValueChild`), re-rooted per
-position (`src/steps/select.ts lowerPath`).
+**Status:** LANDED (choose/coalesce) — 2026-07-19. `union` (fan-out) + prefix-before-branch
+stay deferred, fail-closed. L3 held at 1226 (no corpus coverage; validated via L4 addendum
++ unit tests). `path().by(__.trav)` already lowered value/transform/reducer/count children
+through the generic scalar child seam (`tryCompileScalarValueChild`), re-rooted per position
+(`src/steps/select.ts lowerPath`).
+
+## What landed
+
+`lowerPathPositionChild` (`src/steps/select.ts`): when `classifyScalarChild` declines and the
+by-body is a **bare** `choose()`/`coalesce()`, it lowers through the element-parent scalar-branch
+compilers (`tryLowerScalarChoose`/`tryLowerScalarCoalesce`, `branch.ts`) over the re-rooted,
+path-stripped position seed. Both are 1-to-1 per input (choose = disjoint then/else UNION ALL;
+coalesce = exactly one arm fires), so each position yields exactly one value — the branch itself
+guarantees the cardinality, so NO `first`-collapse is needed. The result carries the outer ordinal
+(`outer.frame.ordinal`) exactly like the value route, so the caller's ordinal join is unchanged.
+The predicate-traversal choose form (`choose(__.out(), …)`) works too (routes through the generic
+child-existence gate). Tests: L4 `addendum/path-position.feature` (choose/coalesce/pred-choose),
+unit shapes + fail-closed asserts in `compiler.test.ts`.
+
+**Resolutions to the questions below:** (1) the branch compilers thread carried columns via
+`carriedCols`/`carryFrag`, so the outer ordinal survives — no arm-compiler change needed. (2)
+Confirmed: `union` (fan-out) is the deferred non-goal; a movement/filter **prefix** before the
+branch is ALSO deferred (a fan-out prefix makes the branch multi-valued per position, needing the
+value seam's encounter-threaded `first`-collapse the branch compilers don't carry). Both fail
+closed with clear messages, never mis-execute. (3) path is stripped from the child seed, so the
+child-scope-path-split concern doesn't apply.
+
+## Original design (for the record)
 
 ## What's left
 
