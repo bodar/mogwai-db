@@ -2579,6 +2579,30 @@ describe('scalar-parent branch/map (Stage 1)', () => {
       .toEqual({ kind: 'value', as: undefined, perRowType: undefined });
   });
 
+  test('optional() over a scalar: scalar arm restores the value on miss, element arm → variant', () => {
+    // scalar arm: a filter arm restores dropped inputs → identity; an always-productive arm wins.
+    expect(read("g.V().values('age').optional(__.is(gt(30)))").shape).toEqual({ kind: 'value', as: undefined, perRowType: undefined });
+    expect(vals("g.V().hasLabel('person').values('age').optional(__.is(gt(30)))")).toEqual(['27', '29', '32', '35']);
+    expect(vals("g.V().hasLabel('person').values('age').optional(__.constant('x'))")).toEqual(['x', 'x', 'x', 'x']);
+    expect(vals("g.V().hasLabel('person').values('age').optional(__.V().count())")).toEqual(['6', '6', '6', '6']);
+    // element arm → a VariantStream: arm rows where productive, else the value restored.
+    expect(read("g.V(1).values('age').optional(__.V())").shape).toEqual({ kind: 'variant', node: true });
+    expect(executeQuery(store, "g.V(1).values('age').optional(__.V())", {})).toHaveLength(6); // V() productive → 6 vertices
+    // arm unproductive for the input → the value is restored (vk 1).
+    expect(vals("g.V(1).values('age').optional(__.V().hasLabel('nope'))")).toEqual(['29']);
+  });
+
+  test('mixed-shape coalesce over a scalar → a VariantStream (ordinal-gated first-productive)', () => {
+    expect(read("g.V(1).values('age').coalesce(__.is(gt(100)),__.V())").shape).toEqual({ kind: 'variant', node: true });
+    // is(gt 100) never fires → every input falls to V() (6 vertices).
+    expect(vals("g.V(1).values('age').coalesce(__.is(gt(100)),__.V()).count()")).toEqual(['6']);
+    // is(gt 30) fires for 32/35 (their value passes) → 2 values; 29/27 fall to V() → 2×6.
+    expect(vals("g.V().hasLabel('person').values('age').coalesce(__.is(gt(30)),__.V()).count()")).toEqual(['14']);
+    // homogeneous arms stay scalar (the cascade only falls to variant when mixed).
+    expect(read("g.V().values('age').coalesce(__.is(gt(30)),__.constant(0))").shape)
+      .toEqual({ kind: 'value', as: undefined, perRowType: undefined });
+  });
+
   test('mixed-shape choose over a scalar → a VariantStream (gate partitions then/else)', () => {
     expect(read("g.V(1).values('age').choose(__.is(lt(30)),__.V(),__.constant('old'))").shape)
       .toEqual({ kind: 'variant', node: true });

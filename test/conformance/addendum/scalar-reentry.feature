@@ -211,6 +211,52 @@ Feature: mogwai addendum — scalar-stream re-entry
       | result |
       | d[7].l |
 
+  # Slice: mixed-shape coalesce over a scalar (a scalar predicate arm + a re-source element
+  # arm) → a VariantStream, ordinal-gated first-productive. is(gt 100) never fires for age 29,
+  # so the input falls to V() → 6 vertices; count() over the variant = 6.
+  @gap:scalar-position
+  Scenario: g_VX1X_valuesXageX_coalesceXisXgtX100XX_VX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).values("age").coalesce(__.is(gt(100)),__.V()).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  # Slice: optional() over a scalar with an element arm → a VariantStream (arm rows where
+  # productive, else the value restored). V() is productive → 6 vertices; count() = 6.
+  @gap:scalar-position
+  Scenario: g_VX1X_valuesXageX_optionalXVX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).values("age").optional(__.V()).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  # Slice: optional() with a SCALAR filter arm restores the dropped inputs → identity over the
+  # values (gt 30 pass through the arm; 27/29 miss and are restored).
+  @gap:scalar-position
+  Scenario: g_V_hasLabelXpersonX_valuesXageX_optionalXisXgtX30XXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").values("age").optional(__.is(gt(30)))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[27].i |
+      | d[29].i |
+      | d[32].i |
+      | d[35].i |
+
   @gap:scalar-position
   Scenario: g_V_hasLabelXpersonX_valuesXageX_aggregateXaX_capXaX_unfold
     Given the modern graph
