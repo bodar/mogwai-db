@@ -2872,6 +2872,24 @@ describe('compiler execution semantics', () => {
       // and the RLE-expanded multiset equals the generic recursive-CTE enumeration.
       expect(read('g.V(1).repeat(__.both()).times(2)', { fastPaths: { bulkRepeatCount: true } }).sql).toContain('AS props, c.bulk AS bulk FROM');
       expect(idBag('g.V(1).repeat(__.both()).times(2)', { bulkRepeatCount: true })).toEqual(idBag('g.V(1).repeat(__.both()).times(2)', { bulkRepeatCount: false }));
+
+      // Bulk-aware order()+limit/range/skip (element-terminal): the collapsed cumulative-bulk window
+      // yields the SAME ordered traverser slice as enumerate-then-sort-then-slice. Compare the
+      // EXPANDED ROW ORDER (not the multiset) — position is the whole point of order()/limit(). The
+      // modern graph's names are unique, so the sort is total and the slice deterministic.
+      const orderedBag = (query: string, collapse: boolean) => {
+        const p = read(query, { fastPaths: { movementCollapse: collapse } });
+        return store.query(p.sql, p.binds).flatMap((r: any) => Array(Number(r.bulk ?? 1)).fill(r.id)); // row order preserved
+      };
+      for (const query of [
+        'g.V().both().order().by("name").limit(4)',
+        'g.V().both().order().by("name", Order.desc).limit(3)',
+        'g.V().both().both().order().by("name").range(2, 6)',
+        'g.V().both().order().by("name").skip(5)',
+      ]) {
+        expect(read(query, { fastPaths: { movementCollapse: true } }).sql).toContain('OVER (ORDER BY'); // the cumulative-bulk window
+        expect(orderedBag(query, true)).toEqual(orderedBag(query, false));
+      }
     });
 
     test('the inline correlated predicate child stays index-only (no MATERIALIZE)', () => {
