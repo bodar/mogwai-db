@@ -5,7 +5,7 @@ import {
 import { mathToSql, mathVars } from '../math.ts';
 import { type PStep } from '../strategies.ts';
 import { aliasElem, carryFrag, carriedCols, elemRel, type ElementStream } from './context.ts';
-import { aliasId } from './alias.ts';
+import { aliasId, aliasScalar } from './alias.ts';
 import { carryOf, toScalarStream, type ListStream, type ScalarStream, type Stream } from './stream.ts';
 import { tryCompileElementChild, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, type ScalarModulationSpec } from './child.ts';
 
@@ -236,10 +236,20 @@ export function lowerFormat(st: ElementStream, steps: PStep[], stop: number): Sc
   const p = (mods?.rel ?? st.rel).as('p');
   const n = elemRel(st);
   const ctx = elemCtx(n, st.elem);
+  // A named token %{key} reads the current element's property, FALLING BACK to an as()-label
+  // of the same name when the property is absent (e.g. software have no `age` property, so
+  // `inject(1).as('age').V().format('…%{age}…')` yields the alias value 1). COALESCE gives the
+  // property precedence; with no such label it is just the property (a missing one → NULL →
+  // the traverser is filtered).
+  const namedToken = (key: string): Expression => {
+    const prop = scalarProp(ctx, key);
+    const entry = st.carried.aliases.get(key);
+    return entry ? q`COALESCE(${prop}, ${aliasScalar(p.c[entry.col], 'last')})` : prop;
+  };
   const pieces = parts.map((part): Expression => part.kind === 'literal'
     ? q`${value(part.text)}`
     : part.kind === 'property'
-      ? scalarProp(ctx, part.key)
+      ? namedToken(part.key)
       : p.c[mods!.values[part.index].value]);
   // A constant template (no tokens) is one string literal; concatenating a single
   // piece is fine. Cast the first piece to TEXT so a lone value token frames as string.

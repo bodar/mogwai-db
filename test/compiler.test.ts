@@ -2467,6 +2467,32 @@ describe('scalar format (Stage 2)', () => {
   });
 });
 
+// V()/E() after a scalar re-source the graph per traverser (a flatMap → ElementStream): a
+// value-alias survives the re-source, and format()'s named token falls back to an as()-label.
+describe('V()/E() after a scalar — mid-traversal re-source (Stage 4)', () => {
+  const store = new GraphStore(new BunSqlite(':memory:'));
+  executeQuery(store, "g.addV('person').property('name','marko').property('age',29)", {});
+  executeQuery(store, "g.addV('software').property('name','lop')", {});
+  const dec = (b: Buffer) => { const x = ioc.anySerializer.deserialize(b, true); return x?.v ?? x; };
+  const names = (g: string) => executeQuery(store, g, {}).map((b: Buffer) => ioc.anySerializer.deserialize(b, true).v).sort();
+
+  test('inject(x).V() produces all vertices per traverser (multiset), V(id) the id-matched', () => {
+    expect(executeQuery(store, 'g.inject(0).V().count()', {}).map(dec)).toEqual([2n]);
+    expect(executeQuery(store, 'g.inject(1,2).V().count()', {}).map(dec)).toEqual([4n]); // 2 traversers × 2
+    expect(names("g.inject(0).V(1).values('name')")).toEqual(['marko']);
+  });
+
+  test('a value-alias survives the re-source and reads as its value', () => {
+    expect(executeQuery(store, "g.inject(1).as('age').V().select('age')", {}).map(dec)).toEqual([1, 1]);
+  });
+
+  test("format()'s named token falls back to an as()-label when the property is absent", () => {
+    expect(names("g.inject(1).as('age').V().format('%{name} is %{age} years old')"))
+      .toEqual(['lop is 1 years old', 'marko is 29 years old']); // software has no age → alias 1
+    expect(names("g.V().format('%{name} is %{age} years old')")).toEqual(['marko is 29 years old']); // no alias → lop filtered
+  });
+});
+
 // split(sep) over a scalar string → a List (recursive CTE): separator / "" (chars) / null
 // (whitespace); a NULL value stays NULL; a non-string arg raises the spec error.
 describe('scalar split (Stage 2)', () => {
