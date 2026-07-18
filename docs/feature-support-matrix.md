@@ -131,8 +131,8 @@ mixed-shape arm.
 | Step | | Notes |
 |---|:--:|---|
 | `asBool`, `asNumber(GType.X)`, bare `asNumber()` | ✅ | typed-value carrier → GraphBinary framing; runtime casts compose |
-| string transforms (`trim`/`reverse`/`concat`/`format`/…) | 🟡 | SQL scalar; `concat` skips nulls; trim over Java whitespace; compose as `Scope.local` per-element after `fold()`; `format("…%{key}…%{_}…")` reads props / `by()`. ❌ `split`, element/map `asString`, reading `project()`/`select()` columns |
-| `math("<formula>")` | 🟡 | full exp4j set → one SQL scalar, always Double; property / scalar-child `by()` vars. **Over a scalar parent** (`values(…).math("_ …")`): `_` binds to the value, no `by()`. ❌ var with no `by()`; `withSideEffect` vars; `project()`/`select()` columns; named vars / by()-modulated math over a scalar parent |
+| string transforms (`trim`/`reverse`/`concat`/`format`/…) | 🟡 | SQL scalar; `concat` skips nulls; trim over Java whitespace; compose as `Scope.local` per-element after `fold()`; `format("…%{key}…%{_}…")` reads props / `by()`; **over a scalar parent** `format` supports literals + `%{_}` by()-modulator tokens (a `%{key}` property token defers — a scalar has none). ❌ `split`, element/map `asString`, reading `project()`/`select()` columns |
+| `math("<formula>")` | 🟡 | full exp4j set → one SQL scalar, always Double; property / scalar-child `by()` vars. **Over a scalar parent** (`values(…).math(…)`): `_` binds to the value; named vars resolve through by()-modulators run against the value. ❌ var with no `by()`; `withSideEffect` vars; `project()`/`select()` columns |
 | `asDate`, `dateAdd`, `dateDiff`, `datetime()`/`DateTime()` | 🟡 | epoch-millis, UTC-only, ms precision; `typeOf(DATETIME)` over stored props. ❌ `inject([…]).asDate()` |
 | `asNumber` + reducer (`fold`/`sum`) | ✅ | reducers carry runtime `vt` |
 | `bigdecimal`, `char`, `duration` | 🟡 | hand-rolled serializers (`src/serializers.ts`); literals, exact-TEXT storage, framing, `typeOf`, numeric `order()`/range; `asNumber(GType.BIGDECIMAL)`. ❌ bigdecimal `math()`/`project` arithmetic; `min()`/`max()` over the TEXT-stored tail |
