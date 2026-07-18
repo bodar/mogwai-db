@@ -121,7 +121,12 @@ enabled-vs-disabled are result-equivalent in a committed test; and an EXPLAIN/be
 shows material benefit. Currently: `predicateInlining`, `singleHopOptional`,
 `bulkRepeatCount`, `scalarPredicateInlining` (the scalar-parent predicate gate: inline
 `WHERE` over the value vs a correlated EXISTS over a pushed scalar scope — used by
-`and`/`or`/`not`/`filter`/`where`/`choose`/`coalesce` over a scalar). A fast path should reuse the surrounding plumbing and swap only the
+`and`/`or`/`not`/`filter`/`where`/`choose`/`coalesce` over a scalar), `movementCollapse`
+(frontier collapse: each movement folds convergent walks into `SELECT id, SUM(bulk) …
+GROUP BY id`, bounding the frontier by reachable |V| not the exponential walk count —
+gated by `chainCollapseSafe` in `index.ts` to reducer-terminal pure movement/filter
+chains where the terminal `SUM(bulk)` makes it result-equivalent; the traverser-`bulk`
+carried column is the substrate). A fast path should reuse the surrounding plumbing and swap only the
 "middle" — e.g. the predicate family (`predicateInlining`, `src/steps/predicate.ts`)
 feeds one boolean `Expression` to the shared `filterCte`; the fast middle is the GENERIC
 movement/filter StepFns rendered in inline-correlated mode (`compileCorrelatedChild`,

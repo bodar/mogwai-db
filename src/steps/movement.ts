@@ -1,7 +1,23 @@
 import { q, list, empty, type Expression } from '../q.ts';
 import { edges } from '../schema.ts';
 import { dirsFor, edgeLabelFilter, type Elem } from '../plan.ts';
-import { advance, appendPathPos, carryFrag, prevRel, type PathState, type ElementStream, type StepFn } from './context.ts';
+import { advance, appendPathPos, carryFrag, prevRel, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
+
+/** True iff the ONLY live carried column is bulk — no per-traverser identity (aliases/path/
+ *  sack/fromV) and no branch origin. Frontier collapse is result-preserving exactly here. */
+const isBulkOnly = (c: Carried): boolean =>
+  !!c.bulk && c.aliases.size === 0 && !c.path && c.origins.length === 0 && !c.sack && !c.fromV;
+
+/** Append a movement CTE, collapsing convergent walks when the movementCollapse fast path is
+ *  active and no identity is live: `SELECT id, SUM(bulk) … GROUP BY id` bounds the frontier by
+ *  reachable |V|. The moved body already carries `bulk` (parent multiplicity via carryFrag), so
+ *  this just merges rows landing on the same element — a downstream reducer's SUM(bulk) is
+ *  unchanged. Disabled (or identity live) → the plain UNION-ALL body, an identical result set. */
+function finishMove(st: ElementStream, body: Expression, opts: { elem?: Elem; fromV?: string | null; path?: PathState }): ElementStream {
+  if (st.fastPaths?.movementCollapse && isBulkOnly(st.carried) && !opts.fromV && !opts.path)
+    return advance(st, q`SELECT id, SUM(bulk) AS bulk FROM (${body}) mv GROUP BY id`, opts);
+  return advance(st, body, opts);
+}
 
 // ---------- movement (vertex ⇄ edge traversal) ----------
 //
@@ -34,7 +50,7 @@ export const move: StepFn = (s, st) => {
   const pa = pathAppend(st, 'node');
   const selects = dirsFor(s.name).map(([from, to]) =>
     q`SELECT ${e.c[to]} AS id${cf}${pa.frag(e.c[to])} FROM ${e} JOIN ${p} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(s.args)}`);
-  return advance(st, list(selects, ' UNION ALL '), pa.opts);
+  return finishMove(st, list(selects, ' UNION ALL '), pa.opts);
 };
 
 /** outE()/inE()/bothE(): vertex → incident edges. The new id is the EDGE id. Records
@@ -52,7 +68,7 @@ export const toEdge: StepFn = (s, st) => {
   const fvCol = (idExpr: Expression) => st.carried.trackFromV ? q`, ${idExpr} AS fv` : empty;
   const selects = froms.map((from) =>
     q`SELECT ${e.c.id} AS id${cf}${pa.frag(e.c.id)}${fvCol(p.c.id)} FROM ${e} JOIN ${p} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(s.args)}`);
-  return advance(st, list(selects, ' UNION ALL '), { elem: 'edge', fromV: st.carried.trackFromV ? 'fv' : null, ...pa.opts });
+  return finishMove(st, list(selects, ' UNION ALL '), { elem: 'edge', fromV: st.carried.trackFromV ? 'fv' : null, ...pa.opts });
 };
 
 /** outV()/inV()/bothV(): edge → endpoint vertices. The new id is the NODE id. Landing
@@ -66,7 +82,7 @@ export const toVertex: StepFn = (s, st) => {
   const pa = pathAppend(st, 'node');
   const selects = cols.map((col) =>
     q`SELECT ${e.c[col]} AS id${cf}${pa.frag(e.c[col])} FROM ${e} JOIN ${p} ON ${e.c.id}=${p.c.id}`);
-  return advance(st, list(selects, ' UNION ALL '), { elem: 'node', fromV: null, ...pa.opts });
+  return finishMove(st, list(selects, ' UNION ALL '), { elem: 'node', fromV: null, ...pa.opts });
 };
 
 /** otherV(): edge → the endpoint that ISN'T the one the traverser was on before the

@@ -83,6 +83,35 @@ const chainTracksPath = (steps: PStep[]): boolean => steps.some((s) => PATH_STEP
  *  chain naming otherV, so ordinary edge traversals stay index-only (no dead column). */
 const chainNeedsFromV = (steps: PStep[]): boolean => steps.some((s) => s.name === 'otherV');
 
+// Movement-collapse safety scan. Convergent-walk collapse (SELECT id, SUM(bulk) GROUP BY id
+// at each movement) is result-equivalent ONLY when the whole chain is a linear movement/filter
+// prefix ending in a global bulk-aware reducer: nothing carries per-traverser identity
+// (path/as/sack), nothing is bulk-unaware on rows (order/limit/range/sample), and no branch/
+// barrier/re-entry sits between the collapse and the reducer's SUM(bulk). Anything outside these
+// sets → not safe → the plain UNION-ALL movement (identical result, unbounded rows). otherV is
+// deliberately excluded (its fromV context is per-traverser identity).
+const COLLAPSE_MOVES = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'bothV']);
+const COLLAPSE_FILTERS = new Set(['has', 'hasLabel', 'hasId', 'where', 'filter', 'not', 'and', 'or']);
+const COLLAPSE_PROJ = new Set(['values', 'id', 'label']); // a scalar projection feeding a numeric reducer
+const COLLAPSE_REDUCERS = new Set(['count', 'sum', 'mean', 'min', 'max']);
+function chainCollapseSafe(steps: PStep[]): boolean {
+  const n = steps.length;
+  if (n < 3) return false; // need a source + ≥1 movement + the reducer
+  if (steps[0].name !== 'V' && steps[0].name !== 'E') return false;
+  const last = steps[n - 1];
+  if (!COLLAPSE_REDUCERS.has(last.name) || (last.args?.length ?? 0) > 0) return false; // global reducer only (no Scope.local/by)
+  let end = n - 1; // exclusive bound of the movement/filter prefix
+  if (COLLAPSE_PROJ.has(steps[end - 1].name)) end -= 1; // one scalar projection may precede the reducer
+  let sawMove = false;
+  for (let i = 1; i < end; i++) {
+    const nm = steps[i].name;
+    if (COLLAPSE_MOVES.has(nm)) { sawMove = true; continue; }
+    if (COLLAPSE_FILTERS.has(nm)) continue;
+    return false; // order/limit/range/as/sack/path/dedup/branch/repeat/… → unsafe
+  }
+  return sawMove;
+}
+
 /** Seed the source CTE (c0) from V(...)/E(...) and its optional id list. When the
  *  chain tracks a path, the source element is path position p0 (projected as the
  *  extra `p0` column). */
@@ -336,6 +365,10 @@ export function compileRead(steps: PStep[], params: Record<string, any> = {}, sa
   const bulked = fastPaths.bulkRepeatCount ? tryBulkRepeatCount(steps, params, sackInit) : null;
   if (bulked) return bulked;
 
-  const { st, stop } = buildPrefix(steps, params, new Query(), sackInit, fastPaths);
+  // Movement collapse is per-compilation: enabled only when the whole chain is collapse-safe
+  // (see chainCollapseSafe). A safe chain's movements fold convergent walks; anything else runs
+  // the plain UNION-ALL movement. Threaded via fastPaths so each movement StepFn reads one flag.
+  const fp: FastPathConfig = { ...fastPaths, movementCollapse: fastPaths.movementCollapse && chainCollapseSafe(steps) };
+  const { st, stop } = buildPrefix(steps, params, new Query(), sackInit, fp);
   return materializeFinal(lowerSteps(st, steps, stop));
 }
