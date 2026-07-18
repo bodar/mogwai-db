@@ -6,7 +6,8 @@ import { stepChain } from '../frontend.ts';
 import { aliasElem, aliasIsElement, carryFrag, carriedCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
 import { aliasId, aliasPresent, aliasScalar, shapeElem } from './alias.ts';
 import { emptyElementLike, historyValues, popEnd, popIsListResult, selectOneFromAlias } from './labelselect.ts';
-import { carryOf, continueLowering, dispatchShapeTail, pathColumns, recordFieldColumns, toListStream, toPathStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type LoweringResult, type PathStream, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from './stream.ts';
+import { carryOf, continueLowering, dispatchShapeTail, pathColumns, recordFieldColumns, toListStream, toPathStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type ListStream, type LoweringResult, type PathStream, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from './stream.ts';
+import { compileFromList } from './list.ts';
 import { type Compiled, type PathPos } from '../render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
 import { lowerGlobalCount } from './barrier.ts';
@@ -792,10 +793,33 @@ function compilePathArray(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   return toPathStream(withoutCarried(carryOf(st)), rel, layout);
 }
 
+/** Collection ops with unambiguous list semantics when applied to a Path: the Path is
+ *  coerced to its element sequence (a list) and the op reshapes/filters/explodes it.
+ *  order/dedup/limit/count are deliberately NOT here — those are whole-stream path ops
+ *  (count() handled below; order/reducer as whole-stream is a separate slice). */
+const PATH_LIST_OPS = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product', 'merge', 'reverse', 'conjoin', 'all', 'any', 'none', 'unfold']);
+
+/** Coerce a homogeneous scalar linear path (every position a by(key) value) into one
+ *  list value per row, so the list-value engine (set-ops / reverse / unfold / reducers)
+ *  composes over it. Returns null when the path isn't list-representable — element
+ *  positions or the recursive-repeat grouped layout — so the caller fails closed. */
+function linearScalarList(s: PathStream): ListStream | null {
+  if (s.layout.kind !== 'linear') return null;
+  if (!s.layout.positions.every((p) => p.render === 'value')) return null;
+  const p = s.rel.as('p');
+  const vals = s.layout.positions.map((pos) => p.c[`${pos.prefix}_v`]);
+  const rel = s.q.cte(
+    q`SELECT jsonb(json_array(${list(vals, ', ')})) AS list${carryFrag(s.carried, p)} FROM ${p}`,
+    ['list', ...carriedCols(s.carried)],
+  );
+  return toListStream(carryOf(s), rel, { kind: 'scalar' });
+}
+
 /** The path arm of lowerSteps — steps AFTER path() over a PathStream (P3 Stage A).
  * A PathStream is a terminal-island no longer: count()/is(typeOf(PATH)) re-enter the
- * loop. unfold()/select(Column) defer (they need internal rowid re-entry / the path's
- * as()-label history — separate slices). */
+ * loop, and a homogeneous scalar path (path().by(key)) retypes into the list-value
+ * engine for the collection ops (set-ops/reverse/unfold/…). select(Column)/whole-stream
+ * order still defer (they need the path's as()-label history — separate slices). */
 export function compileFromPath(s: PathStream, steps: PStep[], at: number): LoweringResult {
   const step = steps[at];
   if (step.name === 'count') {
@@ -820,5 +844,9 @@ export function compileFromPath(s: PathStream, steps: PStep[], at: number): Lowe
     }
     throw new Error('is() after path() supports only is(typeOf(GType.PATH))');
   }
+  // A homogeneous scalar path coerces to a list for the collection ops — reuse the
+  // whole list-value engine (set-ops, reverse, unfold, conjoin, all/any/none).
+  const listForm = PATH_LIST_OPS.has(step.name) ? linearScalarList(s) : null;
+  if (listForm) return compileFromList(listForm, steps, at);
   throw new Error(`${step.name}() on a path value not yet supported`);
 }

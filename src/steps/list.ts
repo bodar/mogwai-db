@@ -209,7 +209,7 @@ function listLocalTransform(s: ListStream, step: PStep): ListStream {
 // constant(c).fold() (a compile-time JSONB list) — a standalone-traversal operand
 // (__.V()…fold()) defers (needs fresh-root sub-traversal compilation).
 
-const SET_RESULT = new Set(['intersect', 'difference', 'disjunct']);
+const SET_RESULT = new Set(['intersect', 'difference', 'disjunct', 'merge']);
 const jsGtype = (v: any): string => (typeof v === 'number' ? (Number.isInteger(v) ? 'Integer' : 'Double') : typeof v === 'string' ? 'String' : typeof v === 'boolean' ? 'Boolean' : 'Object');
 
 /** Resolve a set-op operand argument to a JSONB list expression, raising TinkerPop's
@@ -278,6 +278,9 @@ function setOpExpr(name: string, self: Expression, op: Expression): Expression {
     // product = cartesian product → a list of [selfElem, opElem] pair-lists.
     case 'product':
       return q`(SELECT jsonb(COALESCE(json_group_array(jsonb(json_array(a.value, b.value)) ORDER BY a.key, b.key), json('[]'))) FROM ${q`json_each(${self})`} a, ${q`json_each(${op})`} b)`;
+    // merge = set union: every distinct element of self OR op (UNION dedups, nulls too).
+    case 'merge':
+      return q`(SELECT jsonb(COALESCE(json_group_array(value), json('[]'))) FROM (SELECT je.value AS value FROM ${se} je UNION SELECT o.value FROM ${oe} o))`;
   }
   throw new Error(`set-op ${name}() not implemented`);
 }
@@ -300,7 +303,7 @@ function listAllAny(s: ListStream, step: PStep): ListStream {
 }
 
 /** The set-op family names that consume a list operand + retype the stream. */
-const LIST_OPERAND_OPS = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product']);
+const LIST_OPERAND_OPS = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product', 'merge']);
 
 /**
  * The list arm of lowerSteps. A non-terminal fold always leaves a follower, so a
