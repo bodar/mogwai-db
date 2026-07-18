@@ -1,9 +1,46 @@
 # pushChildScope: split the body-seed from the frame-domain (path-in-child bug)
 
 **Date:** 2026-07-18
-**Status:** design — a core child-seam refactor. Fixes a pre-existing latent bug and
-removes the last place a child sub-traversal inherits state it must not.
+**Status:** IMPLEMENTED 2026-07-19 — but by a smaller, deeper fix than this doc proposed
+(see "What actually shipped" below). The design analysis here is kept as the investigation
+record; the "seed a path-free reprojection + migrate 4 consumers" plan was NOT the fix.
 **Baseline when written:** L3 1226, full suite 396+ green, trunk @ the path-history commits.
+
+## What actually shipped (2026-07-19)
+
+The root cause was narrower than "the child inherits path": `pushChildScope` appended the new
+child **ordinal** as the physically-LAST domain column, *after* the path columns — but
+`carriedCols` orders origins BEFORE path. So the seed's declared schema (ordinal-in-origins)
+disagreed with its physical layout (ordinal-last) whenever the outer chain also tracked a path.
+Harmless for `lowerElementSteps` (name-based, no assert — so branch/local arms always worked),
+fatal at `lowerSteps`'s `assertStreamColumns` (the group/scalar by-children).
+
+The fix is two localized changes, NO consumer migration, and path is **kept** (never stripped):
+
+1. **`pushChildScope` (child.ts):** build the domain's carried columns in `carriedCols` order —
+   the ordinal minted by `ROW_NUMBER()` lands in its origins slot, every other carried column
+   projected by name. The seed's declared schema now equals its physical layout. ~20 lines.
+2. **Scoped reduce barriers (barrier.ts `lowerScopedScalarFold`/`lowerScopedElementFold`/
+   `lowerScopedScalarReducer`):** a reduce barrier emits one row per origin and must carry the
+   **frame's** (parent domain) schema, not the child body's — the child's `out()` legitimately
+   extends the path *inside* the child (`p2`), and that extension collapses at the barrier by
+   definition. `ChildFrame` now carries the domain's `carried`; the three barriers use it.
+
+Why this is better than the split-seed plan: branch/local arms CONTINUE the traverser and MUST
+extend the outer path — a path-free seed broke them (union/optional/coalesce/choose/local
+`.path()` all regressed). Keeping path everywhere + fixing the ordinal position + the barrier
+carry handles both the reduce-children (group/project/aggregate/where/path.by) and the
+continuation arms with one honest invariant and zero per-consumer flags. `lowerPath`,
+`tryLowerTraversalRecord`, `lowerScalarProject`, `dedup`, `group` were NOT touched.
+
+Coverage: execution regression tests in `test/compiler.test.ts` (group/project/where/path.by +
+branch-arm path guards) and an L4 `@gap:child-path` family (`test/conformance/addendum/
+child-path.feature`) — which required teaching the L4 mini-parser the official `m[…]` Map
+notation (maps are pervasive in the L3 corpus; the parser just needed it).
+
+---
+
+_Original design analysis follows (superseded by the above)._
 
 ## The bug (pre-existing, reachable, fails closed)
 

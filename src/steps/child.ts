@@ -1,7 +1,7 @@
 import { derived, empty, list, paren, q, value, type Expression, type Relation } from '../q.ts';
 import { stepChain } from '../frontend.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
-import { advance, carriedWith, carryFrag, carriedCols, withCarried, type ElementStream } from './context.ts';
+import { advance, carriedWith, carryFrag, carriedCols, type Carried, type ElementStream } from './context.ts';
 import { aliasId } from './alias.ts';
 import { carryOf, toListStream, toScalarStream, toVariantStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream } from './stream.ts';
 import { variantArmsMeta, variantArmSelect, variantCols, type VariantArm } from './variant.ts';
@@ -22,6 +22,11 @@ export interface ChildFrame {
   readonly domain: Relation;
   readonly parent: Stream;
   readonly reused?: boolean;
+  /** The DOMAIN's carried schema (the parent's carried + this frame's ordinal). A scoped
+   *  reduce barrier (fold/reducer) emits one row per origin and MUST carry THIS — not the
+   *  child body's carried, which may have grown a path position / alias from movement inside
+   *  the child. The child's internal additions collapse at the barrier, by definition. */
+  readonly carried: Carried;
 }
 export interface ChildScope {
   readonly kind: 'child';
@@ -69,13 +74,25 @@ export function pushChildScope<P extends ChildParent>(
     const ordinal = scope.reuseFrame.ordinal;
     if (parent.carried.origins.at(-1) !== ordinal)
       throw new Error(`reused child scope mismatch: expected innermost ${ordinal}, got ${parent.carried.origins.at(-1) ?? 'none'}`);
-    const frame: ChildFrame = { ordinal, domain: parent.rel, parent, reused: true };
+    const frame: ChildFrame = { ordinal, domain: parent.rel, parent, reused: true, carried: parent.carried };
     const frames = [...scope.frames.slice(0, -1), frame];
     return { scope: { kind: 'child', frames }, frame, seed: parent };
   }
   const p = parent.rel.as('p');
-  const cols = carriedCols(parent.carried);
   const ordinal = `o${parent.carried.origins.length}`;
+  // The seed carries the parent's schema PLUS the pushed ordinal. Build the domain's carried
+  // columns in carriedCols ORDER — the ordinal in its origins slot, NOT appended physically
+  // last — so the seed's declared schema equals its physical layout. Otherwise, whenever the
+  // outer chain also tracks a path (or fromV/encounter, which carriedCols sorts AFTER origins),
+  // the ordinal-last domain desyncs from the ordinal-in-origins schema and any child body
+  // lowered via lowerSteps (assertStreamColumns) trips a column mismatch. The ordinal is minted
+  // by ROW_NUMBER; every other carried column is projected from `p` by name.
+  const seedCarried = carriedWith(parent.carried, { origins: [...parent.carried.origins, ordinal] });
+  const seedCols = carriedCols(seedCarried);
+  const carriedSelect = list(
+    seedCols.map((c) => (c === ordinal ? q`ROW_NUMBER() OVER () AS ${ordinal}` : q`${p.c[c]}`)),
+    ', ',
+  );
   // A SCALAR parent re-projects its value payload `v` (+ vt/vtype) so the child body reads
   // `_` = the value, and mints an explicit encounter column: the scoped reducer/fold and the
   // `first` cardinality policy key productivity on it. A scalar traverser never fans out into
@@ -92,11 +109,11 @@ export function pushChildScope<P extends ChildParent>(
       ...vtypeCols.map((c) => q`${p.c[c]} AS ${c}`),
     ], ', ');
     const domain = parent.q.cte(
-      q`SELECT ${payload}${carryFrag(parent.carried, p)}, ROW_NUMBER() OVER () AS ${ordinal} FROM ${p}`,
-      [...head, enc, ...vtypeCols, ...cols, ordinal],
+      q`SELECT ${payload}, ${carriedSelect} FROM ${p}`,
+      [...head, enc, ...vtypeCols, ...seedCols],
     );
-    const seed = { ...parent, rel: domain, encounter: enc, carried: { ...parent.carried, origins: [...parent.carried.origins, ordinal] } } as P;
-    const frame: ChildFrame = { ordinal, domain, parent };
+    const seed = { ...parent, rel: domain, encounter: enc, carried: seedCarried } as P;
+    const frame: ChildFrame = { ordinal, domain, parent, carried: seedCarried };
     const frames = scope.kind === 'child' ? [...scope.frames, frame] : [frame];
     return { scope: { kind: 'child', frames }, frame, seed };
   }
@@ -108,14 +125,11 @@ export function pushChildScope<P extends ChildParent>(
     ? list(payloadCols.map((c) => q`${p.c[c]} AS ${c}`), ', ')
     : q`${p.c.id} AS id`;
   const domain = parent.q.cte(
-    q`SELECT ${payload}${carryFrag(parent.carried, p)}, ROW_NUMBER() OVER () AS ${ordinal} FROM ${p}`,
-    [...payloadCols, ...cols, ordinal],
+    q`SELECT ${payload}, ${carriedSelect} FROM ${p}`,
+    [...payloadCols, ...seedCols],
   );
-  const seed = withCarried(
-    { ...parent, rel: domain },
-    { origins: [...parent.carried.origins, ordinal] },
-  );
-  const frame: ChildFrame = { ordinal, domain, parent };
+  const seed = { ...parent, rel: domain, carried: seedCarried } as P;
+  const frame: ChildFrame = { ordinal, domain, parent, carried: seedCarried };
   const frames = scope.kind === 'child' ? [...scope.frames, frame] : [frame];
   return { scope: { kind: 'child', frames }, frame, seed };
 }

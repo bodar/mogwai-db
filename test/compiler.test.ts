@@ -3351,6 +3351,47 @@ describe('compiler execution semantics', () => {
     expect([path[0].x0_id, path[0].x1_id]).toEqual([1, 2]);
   });
 
+  describe('child body with movement under path tracking (pushChildScope ordinal-order)', () => {
+    // A by()-modulator / reducer / existence child whose body contains movement, lowered while
+    // the outer chain tracks a path (simplePath/path/cyclicPath), previously failed CLOSED with a
+    // carried-column mismatch: pushChildScope appended the child ordinal physically LAST — after
+    // the path columns — desyncing the seed's declared schema (ordinal in its origins slot) from
+    // its physical layout, so any child lowered via lowerSteps (assertStreamColumns) threw. The
+    // ordinal now lands in its carriedCols position, so these compile and run. Continuation arms
+    // (branch/local) still EXTEND the path — the reorder keeps path, it does not strip it.
+    test('where(__.out()…) existence child under simplePath', () => {
+      // Only josh (id 4) has an out-neighbour named lop; the where child moves under path.
+      expect(run(seededStore(), 'g.V().out().simplePath().where(__.out().has("name","lop"))').map((r) => r.id))
+        .toEqual([4]);
+    });
+    test('project().by(__.out().count()) under simplePath', () => {
+      expect(run(seededStore(), 'g.V(1).out().simplePath().project("name","oc").by("name").by(__.out().count())'))
+        .toEqual([{ e0_v: 'vadas', e1_v: 0 }, { e0_v: 'josh', e1_v: 2 }, { e0_v: 'lop', e1_v: 0 }]);
+    });
+    test('group().by(T.label).by(__.out().values().fold()) under simplePath', () => {
+      expect(run(seededStore(), 'g.V().out().simplePath().group().by(T.label).by(__.out().values("name").fold())'))
+        .toEqual([{ gk: 'person', gv: '["lop","ripple"]' }, { gk: 'software', gv: '[]' }]);
+    });
+    test('project().by(__.out().values().fold()) under simplePath (scoped fold carries the domain path, not the child-extended one)', () => {
+      // Guards the scoped-barrier carry: the child fold reduces per origin and must carry the
+      // parent domain's path (p0,p1), NOT the child body's out()-extended path (p2).
+      expect(run(seededStore(), 'g.V(1).out().simplePath().project("outs").by(__.out().values("name").fold())'))
+        .toEqual([{ e0_list: '[]' }, { e0_list: '["lop","ripple"]' }, { e0_list: '[]' }]);
+    });
+    test('path().by(__.out().count()) — by(traversal) position child under path', () => {
+      expect(run(seededStore(), 'g.V(1).out().simplePath().path().by(__.out().count())'))
+        .toEqual([{ x0_v: 3, x1_v: 0 }, { x0_v: 3, x1_v: 2 }, { x0_v: 3, x1_v: 0 }]);
+    });
+    test('branch/local arms still extend the outer path (reorder keeps path, not strips)', () => {
+      for (const q of [
+        'g.V(1).union(__.out(), __.in()).path()',
+        'g.V(1).optional(__.out()).path()',
+        'g.V(1).coalesce(__.out(), __.in()).path()',
+        'g.V(1).local(__.out().limit(1)).path()',
+      ]) expect(() => compile(q, {})).not.toThrow();
+    });
+  });
+
   test('otherV() after local(bothE.limit) picks the end away from the input vertex', () => {
     const store = seededStore();
     // josh(4): bothE = marko-knows->josh, josh-created->ripple, josh-created->lop.
