@@ -10,7 +10,7 @@ import { carryOf, continueLowering, dispatchShapeTail, toListStream, toResultStr
 import { tryLowerLocalAggregate, lowerScalarAggregate } from './sideeffect.ts';
 import { type Shape } from '../render.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
-import { lowerScalarFilter, lowerConstant, lowerScalarConstant, lowerScalarSack, collectionTypeOf, scalarCollectionRetype } from './scalar.ts';
+import { lowerScalarFilter, lowerConstant, lowerScalarConstant, lowerScalarSack, lowerScalarSplit, collectionTypeOf, scalarCollectionRetype } from './scalar.ts';
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerScalarProject, lowerSingleSelect } from './select.ts';
 import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerLegacyUnion } from './branch.ts';
@@ -613,6 +613,9 @@ const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
   // registered side-effect (shape-agnostic list/variant). Both compose over a scalar stream.
   ['aggregate', (s, step, _steps, at) => { const r = lowerScalarAggregate(s, step); return r ? continueLowering(r, at + 1) : null; }],
   ['cap', (s, _step, steps, at) => compileCap(s, steps, at)],
+  // split(sep) retypes a scalar string → a List of substrings (recursive CTE). Throws
+  // TinkerPop's error on a non-string separator (matches the spec).
+  ['split', (s, step, _steps, at) => continueLowering(lowerScalarSplit(s, step), at + 1)],
   // Branch/map over a scalar current object: each arm is a value sub-traversal lowered
   // through the same engine, gated + UNION-merged (child.ts tryScalar*Child). A miss
   // (arm outside the scalar-arm vocabulary) returns null → the clear generic deferral.

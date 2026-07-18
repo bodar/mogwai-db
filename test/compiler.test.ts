@@ -2467,6 +2467,28 @@ describe('scalar format (Stage 2)', () => {
   });
 });
 
+// split(sep) over a scalar string → a List (recursive CTE): separator / "" (chars) / null
+// (whitespace); a NULL value stays NULL; a non-string arg raises the spec error.
+describe('scalar split (Stage 2)', () => {
+  const dec = (b: Buffer) => { const x = ioc.anySerializer.deserialize(b, true).v; return x === null ? null : (x as any[]).map((y: any) => y?.v ?? y); };
+  const lists = (g: string) => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    return executeQuery(store, g, {}).map(dec);
+  };
+  test('split(sep) splits on each occurrence', () => {
+    expect(lists('g.inject("marko","vadas","josh").split("a")')).toEqual([['m', 'rko'], ['v', 'd', 's'], ['josh']]);
+  });
+  test('split("") splits into characters; a null value stays null', () => {
+    expect(lists('g.inject("that","this","test",null).split("")')).toEqual([['t', 'h', 'a', 't'], ['t', 'h', 'i', 's'], ['t', 'e', 's', 't'], null]);
+  });
+  test('split(null) splits on whitespace runs', () => {
+    expect(lists('g.inject("hello world","marko").split(null)')).toEqual([['hello', 'world'], ['marko']]);
+  });
+  test('split(Scope.local) over a scalar needs a preceding fold()', () => {
+    expect(() => compile('g.inject("a").split(Scope.local, ",")', {})).toThrow('split(Scope.local) requires a preceding list-producing step');
+  });
+});
+
 // Root-scope tail(N) on a scalar stream: the last N of the natural order, no encounter
 // column required (previously threw "scalar tail requires explicit encounter order").
 describe('scalar tail at root (Stage 2 fix)', () => {
