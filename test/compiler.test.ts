@@ -2,7 +2,7 @@ import { test, expect, describe } from 'bun:test';
 import { compile, type CompileOptions } from '../src/compiler.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
-import { executeQuery } from '../src/execute.ts';
+import { executeQuery, executeFramed } from '../src/execute.ts';
 import { ioc } from '../src/io.ts';
 import { parseRequest } from '../src/wire.ts';
 import { MODERN_SEED } from './conformance/seed-modern.ts';
@@ -2094,6 +2094,42 @@ describe('compiler SQL snapshots', () => {
     const p = read('g.V().repeat(__.both()).times(2).emit()');
     expect(p.sql).toContain('e.tgt AS id, c1.depth + 1');
     expect(p.sql).toContain('e.src AS id, c1.depth + 1'); // both directions
+  });
+
+  test('bulk repeat stays tractable where enumerating every walk cannot', () => {
+    // K12 clique (66 edges, one per pair). repeat(both()).times(d) has ~22^d walks per start —
+    // ~5e10 at depth 8 — which the recursive enumerate-every-walk path cannot materialize. The bulk
+    // unroll keeps the frontier bounded by |V|, so a 2.5-billion-traverser count returns in ms.
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    for (let i = 0; i < 12; i++) executeQuery(store, "g.addV('n')", {});
+    const ids = store.query<{ id: number }>('SELECT id FROM nodes').map((r) => r.id);
+    for (const a of ids) for (const b of ids) if (a < b) store.query('INSERT INTO edges(src,label,tgt) VALUES (?,?,?)', [a, 0, b]);
+    store.query('INSERT OR IGNORE INTO labels(id,name) VALUES (0,?)', ['n']);
+
+    // times(4): recursive still finishes, so assert bulk == recursive (correctness).
+    const r4 = read('g.V().repeat(__.both()).times(4).count()', { fastPaths: { bulkRepeatCount: false } });
+    const b4 = read('g.V().repeat(__.both()).times(4).count()', { fastPaths: { bulkRepeatCount: true } });
+    expect(Number(store.query<{ v: number }>(b4.sql, b4.binds)[0].v)).toBe(Number(store.query<{ v: number }>(r4.sql, r4.binds)[0].v));
+
+    // times(8): only the bulk path can compute this — the exact total, in milliseconds.
+    const [c8] = executeQuery(store, 'g.V().repeat(__.both()).times(8).count()', {}).map((b: Buffer) => ioc.anySerializer.deserialize(b, true).v);
+    expect(c8).toBe(2572306572n);
+    // element form: a BOUNDED frontier — one framed vertex per reachable id (≤ |V|), not 2.5e9 rows —
+    // whose multiplicities sum to the full traverser count (the wire ships this as RLE).
+    const framed = executeFramed(store, 'g.V().repeat(__.both()).times(8)', {});
+    expect(framed.length).toBeLessThanOrEqual(12);
+    expect(framed.reduce((s, f) => s + f.bulk, 0n)).toBe(2572306572n);
+
+    // A flavour of the gap at a depth the recursive path still finishes (times(4) ≈ tens of ms):
+    // the bulk unroll is orders of magnitude faster. Loose bound (real gap ~170×) so a busy CI box
+    // never flakes; the numbers are logged for the record.
+    const ms = (bulk: boolean) => {
+      const p = read('g.V().repeat(__.both()).times(4).count()', { fastPaths: { bulkRepeatCount: bulk } });
+      const t = performance.now(); store.query(p.sql, p.binds); return performance.now() - t;
+    };
+    const bulkMs = ms(true), recursiveMs = ms(false);
+    console.log(`bulk repeat times(4) on K12: bulk ${bulkMs.toFixed(2)}ms vs recursive ${recursiveMs.toFixed(1)}ms (${(recursiveMs / bulkMs).toFixed(0)}×)`);
+    expect(recursiveMs).toBeGreaterThan(bulkMs * 5);
   });
 
   test('repeat requires an exit modulator; emit()/until() run unbounded; sequential repeats chain', () => {
