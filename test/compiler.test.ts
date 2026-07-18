@@ -2070,7 +2070,7 @@ describe('compiler SQL snapshots', () => {
   test('emit position controls the projected depth band', () => {
     expect(read('g.V().repeat(__.out()).times(2).emit()').sql).toContain('WHERE depth >= 1'); // after → iterations
     expect(read('g.V().emit().repeat(__.out()).times(2)').sql).toContain('WHERE depth >= 0'); // before → + seed
-    expect(read('g.V().repeat(__.out()).times(2)').sql).toContain('WHERE depth = 2');          // times only → final
+    expect(read('g.V().repeat(__.out()).times(2)').sql).toContain('SUM(b) AS bulk');           // times only, single move → the bulk unroll (bounded frontier, no recursion)
   });
 
   test('emit(predicate) carries an emit column tested per row (same engine as until)', () => {
@@ -2089,7 +2089,9 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('both() repeat emits two recursive terms', () => {
-    const p = read('g.V().repeat(__.both()).times(2)');
+    // emit forces the recursive engine (a times-only single-move repeat now takes the bulk unroll);
+    // both() expands to two directional recursive terms.
+    const p = read('g.V().repeat(__.both()).times(2).emit()');
     expect(p.sql).toContain('e.tgt AS id, c1.depth + 1');
     expect(p.sql).toContain('e.src AS id, c1.depth + 1'); // both directions
   });
@@ -2810,14 +2812,18 @@ describe('compiler execution semantics', () => {
       // legitimately DIFFER from the per-walk generic form. Equivalence is at the RLE-expanded
       // multiset — expand each row by its bulk and compare the id bags.
       expect(read('g.V().both().both()', { fastPaths: { movementCollapse: true } }).sql).toContain('AS props, p.bulk AS bulk FROM');
-      const idBag = (query: string, collapse: boolean) => {
-        const p = read(query, { fastPaths: { movementCollapse: collapse } });
+      const idBag = (query: string, fp: Partial<NonNullable<CompileOptions['fastPaths']>>) => {
+        const p = read(query, { fastPaths: fp });
         return store.query(p.sql, p.binds).flatMap((r: any) => Array(Number(r.bulk ?? 1)).fill(r.id)).sort();
       };
-      expect(idBag('g.V().both().both()', true)).toEqual(idBag('g.V().both().both()', false)); // collapsed (v,N) expands to the same vertex bag
+      expect(idBag('g.V().both().both()', { movementCollapse: true })).toEqual(idBag('g.V().both().both()', { movementCollapse: false })); // collapsed (v,N) expands to the same vertex bag
       // bare dedup() is collapse-safe: it resets bulk to 1, so the collapsed frontier deduplicates
       // to the same distinct-vertex set as the enumerated form.
-      expect(idBag('g.V().both().both().dedup()', true)).toEqual(idBag('g.V().both().both().dedup()', false));
+      expect(idBag('g.V().both().both().dedup()', { movementCollapse: true })).toEqual(idBag('g.V().both().both().dedup()', { movementCollapse: false }));
+      // Element-returning repeat also bulks: the frontier unroll frames each vertex as (v, bulk),
+      // and the RLE-expanded multiset equals the generic recursive-CTE enumeration.
+      expect(read('g.V(1).repeat(__.both()).times(2)', { fastPaths: { bulkRepeatCount: true } }).sql).toContain('AS props, c.bulk AS bulk FROM');
+      expect(idBag('g.V(1).repeat(__.both()).times(2)', { bulkRepeatCount: true })).toEqual(idBag('g.V(1).repeat(__.both()).times(2)', { bulkRepeatCount: false }));
     });
 
     test('the inline correlated predicate child stays index-only (no MATERIALIZE)', () => {

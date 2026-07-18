@@ -1,6 +1,6 @@
 import { q, list, Query, type Expression } from '../q.ts';
-import { edges } from '../schema.ts';
-import { dirsFor, edgeLabelFilter } from '../plan.ts';
+import { edges, nodes, labels } from '../schema.ts';
+import { dirsFor, edgeLabelFilter, framedProps } from '../plan.ts';
 import { stepChain, type SackSpec } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { type Compiled } from '../render.ts';
@@ -39,18 +39,20 @@ interface BulkPlan {
   labels: any[];               // the body movement's edge-label filter args
   times: number;               // the (compile-time) loop depth
   postMoves: { dirs: [string, string][]; labels: any[] }[];
-  reducer: 'count';
+  reducer: 'count' | null;     // 'count' → SUM(bulk); null → materialize the frontier as (v, bulk)
 }
 
-/** Recognize `V()<filters> repeat(<single out/in/both>).times(n) count()` with no
- *  path/as/sack live — the shape traverser bulking makes tractable. Returns the plan,
- *  or null to fall through to the normal (enumerate-walk) compile path. */
+/** Recognize `V()<filters> repeat(<single out/in/both>).times(n)` — either terminal in `count()`
+ *  (→ SUM(bulk)) or ELEMENT-terminal (→ the frontier framed as (vertex, bulk) on the wire) — with
+ *  no path/as/sack live. The shape traverser bulking makes tractable. Returns the plan, or null to
+ *  fall through to the normal (enumerate-every-walk) compile path. */
 function bulkPlan(steps: PStep[], params: Record<string, any>, sackInit?: SackSpec): BulkPlan | null {
   if (sackInit) return null;                              // sack is per-traverser identity
   const n = steps.length;
-  if (n < 3) return null;
+  if (n < 2) return null;                                 // need a source + the repeat cluster
   const last = steps[n - 1];
-  if (!BULKABLE_REDUCERS.has(last.name) || (last.args?.length ?? 0) > 0) return null;
+  // Terminal is count() (a reducer) or the repeat/movement frontier itself (element-returning).
+  const reducer: 'count' | null = (BULKABLE_REDUCERS.has(last.name) && (last.args?.length ?? 0) === 0) ? 'count' : null;
   const repAt = steps.findIndex((s) => s.name === 'repeat' && s.cluster);
   if (repAt < 1) return null;
   const rep = steps[repAt];
@@ -78,24 +80,27 @@ function bulkPlan(steps: PStep[], params: Record<string, any>, sackInit?: SackSp
   if (body.length !== 1 || !['out', 'in', 'both'].includes(body[0].name)) return null;
   const mv = body[0];
 
-  // Cardinality-only suffix accepted by the bulk engine:
-  //   as()* (out|in|both as*)* [select(bound labels...)] count()
-  // select must be the final pre-count step, bare (no by/Pop/Column), and reference
-  // labels actually bound in this suffix. This is deliberately narrow and fail-closed.
-  const suffix = steps.slice(repAt + 1, -1);
+  // Suffix accepted by the bulk engine:
+  //   count() :  as()* (out|in|both as*)* [select(bound labels...)] count()   — cardinality-only
+  //   element : (out|in|both)*                                                — bulk-preserving hops
+  // The count form may name/build values (as/select) that count() immediately discards; the
+  // element form must stay a plain frontier (as() would make identity live, a projection would
+  // change the shape). Both are deliberately narrow and fail-closed.
+  const suffix = steps.slice(repAt + 1, reducer === 'count' ? -1 : undefined);
   const bound = new Set<string>();
   const postMoves: BulkPlan['postMoves'] = [];
   let sawSelect = false;
   for (let i = 0; i < suffix.length; i++) {
     const s = suffix[i];
-    if (s.name === 'as') {
-      if (sawSelect || s.args.some((a) => typeof a !== 'string')) return null;
-      for (const a of s.args) bound.add(a);
-      continue;
-    }
     if (['out', 'in', 'both'].includes(s.name)) {
       if (sawSelect) return null;
       postMoves.push({ dirs: dirsFor(s.name), labels: s.args });
+      continue;
+    }
+    if (reducer !== 'count') return null; // element-terminal: only frontier hops in the suffix
+    if (s.name === 'as') {
+      if (sawSelect || s.args.some((a) => typeof a !== 'string')) return null;
+      for (const a of s.args) bound.add(a);
       continue;
     }
     if (s.name === 'select' && i === suffix.length - 1) {
@@ -106,15 +111,16 @@ function bulkPlan(steps: PStep[], params: Record<string, any>, sackInit?: SackSp
     return null;
   }
 
-  return { preLen: repAt, dirs: dirsFor(mv.name), labels: mv.args, times, postMoves, reducer: 'count' };
+  return { preLen: repAt, dirs: dirsFor(mv.name), labels: mv.args, times, postMoves, reducer };
 }
 
-/** Compile the bulkable repeat-count. Reuses buildPrefix for the source + leading
- *  filters (so `V().hasLabel('song').repeat(out()).times(n).count()` works — the seed
- *  is the filtered vertex set), then unrolls n GROUP-BY-SUM(bulk) CTEs and sums the
- *  final frontier's bulk. Returns null (falling back to the normal path) if the prefix
- *  turns out to carry alias/path/sack state or isn't vertex-typed. */
-export function tryBulkRepeatCount(steps: PStep[], params: Record<string, any>, sackInit?: SackSpec): Compiled | null {
+/** Compile the bulkable repeat. Reuses buildPrefix for the source + leading filters (so
+ *  `V().hasLabel('song').repeat(out()).times(n)…` works — the seed is the filtered vertex set),
+ *  then unrolls n GROUP-BY-SUM(bulk) CTEs. A count() terminal sums the final frontier's bulk; an
+ *  element terminal frames each frontier vertex as (v, bulk) — the RLE the wire expands, instead of
+ *  enumerating every (exponential) walk. Returns null (falling back to the normal path) if the
+ *  prefix carries alias/path/sack state or isn't vertex-typed. */
+export function tryBulkRepeat(steps: PStep[], params: Record<string, any>, sackInit?: SackSpec): Compiled | null {
   const plan = bulkPlan(steps, params, sackInit);
   if (!plan) return null;
 
@@ -151,5 +157,18 @@ export function tryBulkRepeatCount(steps: PStep[], params: Record<string, any>, 
   // count() = the total traverser count at the final depth = SUM(bulk). (SUM past i64
   // raises SQLite's native `integer overflow` — fail loud, matching TinkerPop's own
   // `long` bulk overflowing at the same point.)
-  return materializeRoot(query, q`SELECT COALESCE(SUM(bulk), 0) AS v FROM ${cur}`, { kind: 'count' });
+  if (plan.reducer === 'count')
+    return materializeRoot(query, q`SELECT COALESCE(SUM(bulk), 0) AS v FROM ${cur}`, { kind: 'count' });
+
+  // Element terminal: frame each frontier vertex ONCE, carrying its bulk column, so the wire
+  // emits (v, N) instead of N copies (framedResults reads the `bulk` column, the client expands).
+  // The frontier is bulk (out/in/both hops), so it is always vertices.
+  const c = cur.as('c');
+  const nn = nodes.as('n');
+  const ll = labels.as('l');
+  return materializeRoot(
+    query,
+    q`SELECT COALESCE(${nn.c.uid}, ${nn.c.id}) AS id, ${ll.c.name} AS label, ${framedProps(nn, 'node')} AS props, ${c.c.bulk} AS bulk FROM ${c} JOIN ${nn} ON ${nn.c.id}=${c.c.id} JOIN ${ll} ON ${ll.c.id}=${nn.c.label}`,
+    { kind: 'vertex' },
+  );
 }
