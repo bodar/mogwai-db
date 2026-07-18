@@ -15,6 +15,23 @@ import {
 
 const CONST_COERCIONS = new Set(['asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff']);
 
+// Types whose value rides as decimal/char TEXT (do-sqlite-bind-precision) — JS-value framing
+// would infer the wrong GraphBinary type (a long > 2^53 → a string). A bare inject of a uniform
+// literal of these tags the stream so it frames by the literal's declared type, not inference.
+const TEXT_STORED_TYPES = new Set<ValueType>(['long', 'bigint', 'bigdecimal', 'char', 'duration']);
+
+/** A bare inject(v1, v2, …) with no leading coercion carries no `as`, so a value stored as
+ *  TEXT (a big long/bigdecimal/…) would frame by JS inference — wrongly. Derive the framing tag
+ *  from a UNIFORM declared arg type for exactly those TEXT-stored types; mixed or other types
+ *  keep per-value inference (undefined). */
+function bareInjectTag(steps: PStep[], count: number): ValueType | undefined {
+  const argTypes = steps[0].argTypes ?? [];
+  if (!count) return undefined;
+  const names = Array.from({ length: count }, (_, i) => flatType(argTypes[i]));
+  const uniform = names.every((n) => n === names[0]) ? names[0] : undefined;
+  return uniform && TEXT_STORED_TYPES.has(uniform as ValueType) ? (uniform as ValueType) : undefined;
+}
+
 /** Apply the leading coercion prefix while the inject values are still JS constants.
  * These steps have TinkerPop parse/overflow errors SQL cannot reproduce faithfully.
  * The returned index is the first ordinary step, which enters the shared relational
@@ -100,5 +117,8 @@ export function compileInject(steps: PStep[], sackInit?: SackSpec): Compiled {
   const rel = vals.length
     ? Q.cte(q`VALUES ${list(vals.map(row), ', ')}`, cols)
     : Q.cte(sackInit ? q`SELECT NULL AS v, NULL AS sk WHERE 0` : q`SELECT NULL AS v WHERE 0`, cols);
-  return materializeFinal(lowerSteps(toScalarStream(sackCarry, rel, folded.as), steps, folded.at));
+  // A bare inject (no coercion consumed, folded.at===1) of a uniform TEXT-stored literal keeps
+  // its declared type so it frames correctly (e.g. a long > 2^53 as a Long, not a string).
+  const as = folded.as ?? (folded.at === 1 ? bareInjectTag(steps, vals.length) : undefined);
+  return materializeFinal(lowerSteps(toScalarStream(sackCarry, rel, as), steps, folded.at));
 }

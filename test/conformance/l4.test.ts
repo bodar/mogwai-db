@@ -75,6 +75,10 @@ function parseFeature(featureName: string, text: string): Scenario[] {
 function expectedCanon(tok: string): string {
   const t = tok.trim();
   if (t === 'null') return 'null';
+  // long (`.l`)/bigint (`.n`) → BigInt; int/double/float/byte/short → number. NB the JS decode
+  // repr is the client's, path-dependent (a small Long may arrive as Number, a count via
+  // BigInteger as BigInt); author each scenario's notation to match its actual decode. (A
+  // type-precise variant keyed on the GraphBinary type byte is a possible upgrade.)
   const num = t.match(/^d\[(-?[\d.eE+]+)\]\.([bsilfnd])$/);
   if (num) return num[2] === 'l' || num[2] === 'n' ? 'L' + BigInt(num[1]).toString() : 'N' + Number(num[1]);
   const bd = t.match(/^bd\[(.+)\]$/); if (bd) return 'BD' + bd[1];

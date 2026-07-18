@@ -150,3 +150,15 @@ Feature: mogwai addendum — scalar-stream re-entry
     Then the result should be unordered
       | result |
       | d[6].l |
+
+  @gap:scalar-typed
+  Scenario: g_injectXbiglongX
+    Given an empty graph
+    And the traversal of
+      """
+      g.inject(9007199254740993L)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[9007199254740993].l |
