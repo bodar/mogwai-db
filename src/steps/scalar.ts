@@ -342,6 +342,66 @@ export function lowerScalarFilter(s: ScalarStream, step: PStep): ScalarStream {
   return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
 }
 
+/**
+ * split(sep) over a SCALAR string → a List of substrings (a scalar→list retype). Three modes:
+ * a non-empty separator splits on each occurrence; `""` splits into individual characters;
+ * `null` splits on runs of whitespace (empties discarded). A NULL value stays NULL (no list),
+ * and a non-string separator raises TinkerPop's "can only take string as argument" error.
+ * One multi-row recursive CTE walks every value's string in parallel (keyed by a per-row
+ * ROW_NUMBER), collecting parts in order into a JSONB array; a LEFT JOIN restores NULL-value
+ * rows as a NULL list. The Scope.local form operates on a list (needs a preceding fold()).
+ */
+export function lowerScalarSplit(s: ScalarStream, step: PStep): ListStream {
+  const args = step.args ?? [];
+  if (args.some((a: any) => a && typeof a === 'object' && a.scope === 'local'))
+    throw new Error('split(Scope.local) requires a preceding list-producing step (e.g. fold())');
+  const sep = args[0];
+  if (sep !== null && sep !== undefined && typeof sep !== 'string')
+    throw new Error('The split() step can only take string as argument');
+  const charMode = sep === '';
+  const nullMode = sep === null || sep === undefined;
+
+  const rk = 'rk';
+  const cols = carriedCols(s.carried);
+  const p0 = s.rel.as('p0');
+  const src = s.q.cte(
+    q`SELECT ${p0.c.v} AS v${carryFrag(s.carried, p0)}, ROW_NUMBER() OVER () AS ${rk} FROM ${p0}`,
+    ['v', ...cols, rk],
+  );
+  const sa = src.as('s');
+  // Java whitespace → a single space, so split(null) is a space-split with empties dropped.
+  const wsNorm = (e: Expression) => q`replace(replace(replace(replace(replace(${e}, char(9), ' '), char(10), ' '), char(11), ' '), char(12), ' '), char(13), ' ')`;
+  const initRest = nullMode ? wsNorm(sa.c.v) : sa.c.v;
+
+  const parts = s.q.recursiveCte([rk, 'ord', 'part', 'rest'], (self: Relation) => {
+    const seed = q`SELECT ${sa.c[rk]} AS ${rk}, 0 AS ord, NULL AS part, ${initRest} AS rest FROM ${sa} WHERE ${sa.c.v} IS NOT NULL`;
+    let rec: Expression;
+    if (charMode) {
+      rec = q`SELECT ${self.c[rk]} AS ${rk}, ${self.c.ord}+1 AS ord, substr(${self.c.rest},1,1) AS part, substr(${self.c.rest},2) AS rest FROM ${self} WHERE ${self.c.rest} <> ''`;
+    } else {
+      const sepv = nullMode ? q`' '` : value(sep as string);
+      const pos = q`instr(${self.c.rest}, ${sepv})`;
+      const part = q`CASE WHEN ${pos}>0 THEN substr(${self.c.rest},1,${pos}-1) ELSE ${self.c.rest} END`;
+      const next = q`CASE WHEN ${pos}>0 THEN substr(${self.c.rest},${pos}+length(${sepv})) ELSE NULL END`;
+      rec = q`SELECT ${self.c[rk]} AS ${rk}, ${self.c.ord}+1 AS ord, ${part} AS part, ${next} AS rest FROM ${self} WHERE ${self.c.rest} IS NOT NULL`;
+    }
+    return q`${seed} UNION ALL ${rec}`;
+  });
+
+  const pa = parts.as('pa');
+  const keep = nullMode ? q` FILTER (WHERE ${pa.c.part} <> '')` : empty;
+  const grouped = s.q.cte(
+    q`SELECT ${pa.c[rk]} AS ${rk}, jsonb(json_group_array(${pa.c.part} ORDER BY ${pa.c.ord})${keep}) AS list FROM ${pa} WHERE ${pa.c.ord}>0 GROUP BY ${pa.c[rk]}`,
+    [rk, 'list'],
+  );
+  const g = grouped.as('g');
+  const rel = s.q.cte(
+    q`SELECT ${g.c.list} AS list${carryFrag(s.carried, sa)} FROM ${sa} LEFT JOIN ${g} ON ${g.c[rk]}=${sa.c[rk]}`,
+    ['list', ...cols],
+  );
+  return toListStream(carryOf(s), rel, { kind: 'scalar', as: 'string' });
+}
+
 // ---------- scalar-parent branch primitives (gate + union) ----------
 //
 // The scalar analogue of branch.ts's element-parent choose/coalesce/union: over a scalar

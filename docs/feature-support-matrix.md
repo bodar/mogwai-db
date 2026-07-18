@@ -1,7 +1,7 @@
 # mogwai-db — feature support matrix
 
 Scannable map of what the compiler supports, and where partial steps stop. Grouped
-by traversal concern. **L3 conformance: <!-- L3:passing -->1,170<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+by traversal concern. **L3 conformance: <!-- L3:passing -->1,174<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 Sourced from the dispatch maps (`src/steps/*.ts`) and the compiler `throw` sites — if
 the code defers a shape, it fails closed with a clear error and this file says so. Keep
@@ -131,7 +131,7 @@ mixed-shape arm.
 | Step | | Notes |
 |---|:--:|---|
 | `asBool`, `asNumber(GType.X)`, bare `asNumber()` | ✅ | typed-value carrier → GraphBinary framing; runtime casts compose |
-| string transforms (`trim`/`reverse`/`concat`/`format`/…) | 🟡 | SQL scalar; `concat` skips nulls; trim over Java whitespace; compose as `Scope.local` per-element after `fold()`; `format("…%{key}…%{_}…")` reads props / `by()`; **over a scalar parent** `format` supports literals + `%{_}` by()-modulator tokens (a `%{key}` property token defers — a scalar has none). ❌ `split`, element/map `asString`, reading `project()`/`select()` columns |
+| string transforms (`trim`/`reverse`/`concat`/`format`/…) | 🟡 | SQL scalar; `concat` skips nulls; trim over Java whitespace; compose as `Scope.local` per-element after `fold()`; `format("…%{key}…%{_}…")` reads props / `by()`; **over a scalar parent** `format` supports literals + `%{_}` by()-modulator tokens (a `%{key}` property token defers — a scalar has none); **`split(sep)`** on a scalar string → a List (recursive CTE): a non-empty separator, `""` → characters, `null` → whitespace runs; a NULL value stays NULL; a non-string arg raises the spec error. ❌ `split(Scope.local)` on a scalar (needs a preceding `fold()`), element/map `asString`, reading `project()`/`select()` columns |
 | `math("<formula>")` | 🟡 | full exp4j set → one SQL scalar, always Double; property / scalar-child `by()` vars. **Over a scalar parent** (`values(…).math(…)`): `_` binds to the value; named vars resolve through by()-modulators run against the value. ❌ var with no `by()`; `withSideEffect` vars; `project()`/`select()` columns |
 | `asDate`, `dateAdd`, `dateDiff`, `datetime()`/`DateTime()` | 🟡 | epoch-millis, UTC-only, ms precision; `typeOf(DATETIME)` over stored props. ❌ `inject([…]).asDate()` |
 | `asNumber` + reducer (`fold`/`sum`) | ✅ | reducers carry runtime `vt` |

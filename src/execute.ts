@@ -342,6 +342,9 @@ function frameValue(v: any, as: ValueType | undefined): Buffer {
 // variant's list (vk=4) arm. Element items arrive as {id,label,props[,src,tgt]} objects
 // (rowids already expanded to public payloads in SQL); scalars frame by their tag or infer.
 function frameListOf(json: string, of: ListOf): Buffer {
+  // A NULL list column is a genuine null traverser, not a list (e.g. split() of a null value)
+  // — frame it as null rather than mapping over a non-array.
+  if (json == null) return frameValue(null, undefined);
   const items = JSON.parse(json);
   if (of.kind === 'elem') return listBuffer(items.map(of.elem === 'edge' ? rowEdge : rowVertex));
   if (of.kind === 'scalar')
