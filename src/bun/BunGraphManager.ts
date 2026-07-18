@@ -3,7 +3,7 @@ import { type TypeNode } from '../gremlin-types.ts';
 import { join } from 'node:path';
 import { GraphStore } from '../storage.ts';
 import { type GraphManager, type GraphInfo, graphInfo } from '../manager.ts';
-import { executeQuery } from '../execute.ts';
+import { executeFramed, type Framed } from '../execute.ts';
 import { BunSqlite } from './BunSqlite.ts';
 
 /**
@@ -43,8 +43,8 @@ export class BunGraphManager implements GraphManager {
     return g;
   }
 
-  async query(id: string, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<Buffer[]> {
-    return executeQuery(this.resolve(id).store, gremlin, params, paramTypes);
+  async query(id: string, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<Framed[]> {
+    return executeFramed(this.resolve(id).store, gremlin, params, paramTypes);
   }
 
   async create(id: string): Promise<void> {

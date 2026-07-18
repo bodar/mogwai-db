@@ -530,3 +530,17 @@ function* framedResults(store: GraphStore, gremlin: string, params: Record<strin
 export function executeQuery(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Buffer[] {
   return [...framedResults(store, gremlin, params, paramTypes)];
 }
+
+/** One framed result value paired with its traverser multiplicity (the GraphBinary V4
+ *  bulked-response RLE count). `bulk` is 1 for an un-collapsed traverser; a movement
+ *  collapse (GROUP BY id, SUM(bulk)) yields >1, so the edge emits (value, N) instead of
+ *  N copies. bigint carries the full i64 range (SQLite raises `integer overflow` past it). */
+export type Framed = { buf: Buffer; bulk: bigint };
+
+/** The manager-seam entry point that carries per-value bulk to the edge (concern C's
+ *  bulked framing appends it as a Long). `executeQuery` stays the flat `Buffer[]` API its
+ *  many callers use; this is the one path that needs the multiplicity. Bulk is a uniform 1
+ *  until movement collapse lands, so this is behaviour-identical to the flat frame today. */
+export function executeFramed(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Framed[] {
+  return [...framedResults(store, gremlin, params, paramTypes)].map((buf) => ({ buf, bulk: 1n }));
+}

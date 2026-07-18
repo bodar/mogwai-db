@@ -3,7 +3,7 @@ import { type TypeNode } from '../gremlin-types.ts';
 import { GraphStore } from '../storage.ts';
 import { application } from '../application.ts';
 import { type GraphManager, type GraphInfo, graphInfo } from '../manager.ts';
-import { executeQuery } from '../execute.ts';
+import { executeFramed, type Framed } from '../execute.ts';
 import { DurableObjectSqlite } from './DurableObjectSqlite.ts';
 
 export interface Env {
@@ -53,9 +53,9 @@ export class GraphDatabase extends DurableObject<Env> {
    *  of the storage tier and avoids re-parsing GraphBinary here. The row array is
    *  drained up front regardless (a DO cursor can't cross awaits), so this holds no
    *  more than the fetch path did. */
-  query(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Buffer[] {
+  query(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Framed[] {
     this.ensureLive();
-    return executeQuery(this.store, gremlin, params, paramTypes);
+    return executeFramed(this.store, gremlin, params, paramTypes);
   }
 
   // ---- lifecycle RPC (called by CloudflareGraphManager) ----
@@ -87,8 +87,8 @@ export class GraphDatabase extends DurableObject<Env> {
 class CloudflareGraphManager implements GraphManager {
   constructor(private ns: DurableObjectNamespace<GraphDatabase>) {}
 
-  query(id: string, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<Buffer[]> {
-    return this.ns.getByName(id).query(gremlin, params, paramTypes) as Promise<Buffer[]>;
+  query(id: string, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<Framed[]> {
+    return this.ns.getByName(id).query(gremlin, params, paramTypes) as Promise<Framed[]>;
   }
   create(id: string): Promise<void> {
     return this.ns.getByName(id).create();
