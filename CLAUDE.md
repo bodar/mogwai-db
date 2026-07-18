@@ -120,9 +120,11 @@ SAME `VariantStream` the element parent produces via the `Carry`-typed builders
 `variantArmSelect`/`variantArmsMeta`/`variantCols` (in leaf `steps/variant.ts`, shared by both
 parents — only the per-arm compiler differs) — for `union`/`choose`/`coalesce`; `optional(t)` ≡
 `coalesce(t, identity)` (a scalar arm restores the value on miss, an element/list arm →
-variant). The one documented follow-on: `map()` first-of-many over a FAN-OUT arm (a re-source
-projection / nested `union`) needs deterministic emission ordering, so map fails closed on it
-(`armFansOut`) while `flatMap`/`local` fan out.
+variant). **🚫 Out of scope (not a gap):** `map()` is first-result-only, so over a FAN-OUT
+arm (a re-source projection / nested `union`) it fails closed (`armFansOut`) — first-of-many
+would need a deterministic emission-order column threaded through the fan-out (arm-index through
+`union`, id-order through re-source), which is not a natural fit for the set-oriented SQL engine
+and has zero corpus examples. `flatMap`/`local` fan out (all-results) and cover the need.
 
 **Fast paths** are explicit per-compilation switches in `CompileOptions.fastPaths`
 (`src/fast-paths.ts`) — never a mutable global. A specialized lowering qualifies as a
