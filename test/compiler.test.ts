@@ -2480,6 +2480,15 @@ describe('scalar tail at root (Stage 2 fix)', () => {
     expect(vals('g.inject(1,2,3,4).tail()')).toEqual(['4']);
     expect(vals('g.inject(3,1,2).order().tail(1)')).toEqual(['3']);
   });
+
+  test('where(P)/filter(P) over a scalar filters by a predicate on the value', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    for (const a of [29, 27, 35]) executeQuery(store, `g.addV('p').property('age',${a})`, {});
+    const d = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
+    const v = (g: string) => executeQuery(store, g, {}).map(d).map(String).sort();
+    expect(v("g.V().values('age').where(gt(30))")).toEqual(['35']);
+    expect(v("g.V().values('age').where(lte(29)).where(gt(27))")).toEqual(['29']);
+  });
 });
 
 // Stage 2 substrate: a SCALAR is a first-class child parent (ChildParent |= ScalarStream).
