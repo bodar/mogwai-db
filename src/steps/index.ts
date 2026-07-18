@@ -96,18 +96,26 @@ const COLLAPSE_PROJ = new Set(['values', 'id', 'label']); // a scalar projection
 const COLLAPSE_REDUCERS = new Set(['count', 'sum', 'mean', 'min', 'max']);
 function chainCollapseSafe(steps: PStep[]): boolean {
   const n = steps.length;
-  if (n < 3) return false; // need a source + ≥1 movement + the reducer
+  if (n < 2) return false; // need a source + ≥1 movement
   if (steps[0].name !== 'V' && steps[0].name !== 'E') return false;
+  // Two safe terminals: a GLOBAL reducer (count/sum/mean/min/max — its SUM(bulk) sums the
+  // multiplicities), optionally after one scalar projection; OR an ELEMENT leaf (the bare
+  // vertex/edge projection, which frames each element as (v, bulk) on the wire). Everything
+  // between the source and the terminal must be movement/filter — anything that carries
+  // per-traverser identity (path/as/sack) or reads rows bulk-unaware (order/limit/range/
+  // sample/dedup/branch/re-entry) makes a GROUP BY-id merge wrong.
+  let end = n; // exclusive bound of the movement/filter prefix
   const last = steps[n - 1];
-  if (!COLLAPSE_REDUCERS.has(last.name) || (last.args?.length ?? 0) > 0) return false; // global reducer only (no Scope.local/by)
-  let end = n - 1; // exclusive bound of the movement/filter prefix
-  if (COLLAPSE_PROJ.has(steps[end - 1].name)) end -= 1; // one scalar projection may precede the reducer
+  if (COLLAPSE_REDUCERS.has(last.name) && (last.args?.length ?? 0) === 0) {
+    end = n - 1;
+    if (end >= 2 && COLLAPSE_PROJ.has(steps[end - 1].name)) end -= 1; // one scalar projection before the reducer
+  }
   let sawMove = false;
   for (let i = 1; i < end; i++) {
     const nm = steps[i].name;
     if (COLLAPSE_MOVES.has(nm)) { sawMove = true; continue; }
     if (COLLAPSE_FILTERS.has(nm)) continue;
-    return false; // order/limit/range/as/sack/path/dedup/branch/repeat/… → unsafe
+    return false; // a non-movement/filter step in the prefix (order/limit/as/values-terminal/…) → unsafe
   }
   return sawMove;
 }

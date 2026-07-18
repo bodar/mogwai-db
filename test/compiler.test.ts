@@ -2804,6 +2804,17 @@ describe('compiler execution semantics', () => {
         expect(read(query, disabled).sql).toContain(genericSql);
         expect(runWith(store, query, enabled)).toEqual(runWith(store, query, disabled));
       }
+
+      // Element-terminal movementCollapse can't use the raw-row comparison above: the vertex leaf
+      // carries a `bulk` column and emits ONE (v, N) row per element (fastSql), so the rows
+      // legitimately DIFFER from the per-walk generic form. Equivalence is at the RLE-expanded
+      // multiset — expand each row by its bulk and compare the id bags.
+      expect(read('g.V().both().both()', { fastPaths: { movementCollapse: true } }).sql).toContain('AS props, p.bulk AS bulk FROM');
+      const idBag = (collapse: boolean) => {
+        const p = read('g.V().both().both()', { fastPaths: { movementCollapse: collapse } });
+        return store.query(p.sql, p.binds).flatMap((r: any) => Array(Number(r.bulk ?? 1)).fill(r.id)).sort();
+      };
+      expect(idBag(true)).toEqual(idBag(false)); // collapsed (v,N) expands to the same vertex bag
     });
 
     test('the inline correlated predicate child stays index-only (no MATERIALIZE)', () => {
