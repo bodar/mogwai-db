@@ -269,77 +269,105 @@ function appendScalar(s: ScalarStream, step: PStep): ScalarStream {
 // Element-only bodies (values/has/out…) fail closed here — a scalar has no properties
 // or neighbours.
 
-/** Does a child sub-traversal produce a result, evaluated against the current scalar
- *  `current`? A boolean SQL expression. is(P) filters; transforms rewrite the current
- *  value; constant(x) rebinds it (and is always productive); and/or/not/filter/where
- *  compose recursively. Every `is` along a linear body ANDs; a bare/constant body is
- *  always productive (`1`). Movement/property bodies throw (defer). */
-export function scalarChildProduces(body: PStep[], current: Expression, params: Record<string, any>): Expression {
+/**
+ * Inline a scalar predicate body → one boolean SQL expression over `current`, the scalar
+ * analogue of the element `tryInlinePredicate` (predicate.ts). `is(P)` filters; transforms
+ * rewrite the current value; `constant(x)` rebinds it (always productive); and/or/not/filter/
+ * where compose recursively. Every `is` ANDs; a bare/constant body is always productive (`1`).
+ * Returns `null` when the body is outside the inline vocabulary (a movement/property/branch/
+ * reducer step, or an unsupported transform like asBool) — the caller then falls through to the
+ * generic child-existence gate (never a throw defining support by vocab exhaustion).
+ */
+export function tryInlineScalarPredicate(body: PStep[], current: Expression, params: Record<string, any>, vtypeExpr?: Expression): Expression | null {
   let expr = current;
+  // The per-row stored type of the CURRENT value, so is(P) compares vtype-aware (a TEXT-stored
+  // big long/bigdecimal orders numerically) — matching the generic child path exactly. A
+  // transform or constant() changes the value's type, so the stored vtype no longer applies.
+  let vtype = vtypeExpr;
   const preds: Expression[] = [];
   const nestedOf = (s: PStep) => s.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
   for (const s of body) {
-    if (s.name === 'is') { preds.push(predicateSql(expr, s.args[0])); continue; }
+    if (s.name === 'is') { preds.push(predicateSql(expr, s.args[0], vtype ? { vtypeExpr: vtype } : undefined)); continue; }
     if (s.name === 'identity') continue;                 // always productive, no rebind
-    if (s.name === 'constant') { expr = value(s.args[0]); continue; } // rebind current
+    if (s.name === 'constant') { expr = value(s.args[0]); vtype = undefined; continue; } // rebind current
     if (s.name === 'and' || s.name === 'or') {
       const arms = nestedOf(s);
-      if (!arms.length) throw new Error(`${s.name}() needs a traversal branch`);
-      preds.push(paren(list(arms.map((a: any) => paren(scalarChildProduces(stepChain(a.nested, params), expr, params))), s.name === 'and' ? ' AND ' : ' OR ')));
+      if (!arms.length) return null;
+      const sub = arms.map((a: any) => tryInlineScalarPredicate(stepChain(a.nested, params), expr, params, vtype));
+      if (sub.some((x) => x === null)) return null;
+      preds.push(paren(list(sub.map((x) => paren(x!)), s.name === 'and' ? ' AND ' : ' OR ')));
       continue;
     }
     if (s.name === 'not') {
       const arg = nestedOf(s)[0];
-      if (!arg) throw new Error('not() requires a traversal');
-      preds.push(q`NOT COALESCE((${scalarChildProduces(stepChain(arg.nested, params), expr, params)}), 0)`);
+      if (!arg) return null;
+      const sub = tryInlineScalarPredicate(stepChain(arg.nested, params), expr, params, vtype);
+      if (sub === null) return null;
+      preds.push(q`NOT COALESCE((${sub}), 0)`);
       continue;
     }
     if (s.name === 'filter' || s.name === 'where') {
       const arg = nestedOf(s)[0];
-      if (!arg) throw new Error(`${s.name}(predicate) inside a scalar filter not yet supported (traversal only)`);
-      preds.push(paren(scalarChildProduces(stepChain(arg.nested, params), expr, params)));
+      if (!arg) return null;
+      const sub = tryInlineScalarPredicate(stepChain(arg.nested, params), expr, params, vtype);
+      if (sub === null) return null;
+      preds.push(paren(sub));
       continue;
     }
     if (SCALAR_TRANSFORMS.has(s.name)) {
-      expr = scalarTx(s.name, s.args ?? [], expr)
-        ?? (() => { throw new Error(`scalar filter transform ${s.name}() not supported`); })();
+      const tx = scalarTx(s.name, s.args ?? [], expr);
+      if (tx === null) return null; // asBool etc — outside the inline transform vocabulary
+      expr = tx;
+      vtype = undefined; // the value's type has changed; the stored vtype no longer describes it
       continue;
     }
-    throw new Error(`${s.name}() in a scalar filter body not yet supported (a scalar has no properties or neighbours)`);
+    return null; // movement/property/branch/reducer — no inline scalar form
   }
   return preds.length ? paren(list(preds, ' AND ')) : q`1`;
 }
 
-/** and/or/not/filter/where over a scalar stream → a WHERE on the value `v`. The arms are
- *  child predicates against the current scalar (scalarChildProduces). Row-preserving:
- *  the scalar shape/tag/encounter are unchanged, only rows are dropped. */
-export function lowerScalarFilter(s: ScalarStream, step: PStep): ScalarStream {
-  const p = s.rel.as('p');
-  const cur = p.c.v;
-  const nested = step.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
-  let cond: Expression;
-  if (step.name === 'and' || step.name === 'or') {
-    if (!nested.length) throw new Error(`${step.name}() needs at least one traversal branch`);
-    cond = paren(list(nested.map((a: any) => paren(scalarChildProduces(stepChain(a.nested, s.params), cur, s.params))), step.name === 'and' ? ' AND ' : ' OR '));
-  } else if (step.name === 'not') {
-    const arg = nested[0];
-    if (!arg) throw new Error('not() requires a traversal');
-    cond = q`NOT COALESCE((${scalarChildProduces(stepChain(arg.nested, s.params), cur, s.params)}), 0)`;
-  } else {
-    const arg = nested[0];
-    if (arg) {
-      cond = scalarChildProduces(stepChain(arg.nested, s.params), cur, s.params);
-    } else {
-      // where(P)/filter(P) over a scalar: the predicate applies directly to the value. A
-      // string-keyed where('a',P) is an element alias compare (no scalar meaning) → defer.
-      const pred = step.args.find((a: any) => a && typeof a === 'object' && 'op' in a);
-      if (!pred || step.args.some((a: any) => typeof a === 'string'))
-        throw new Error(`${step.name}(predicate) on a scalar stream not yet supported (traversal only)`);
-      cond = predicateSql(cur, pred);
-    }
-  }
+/** Row-preserving WHERE over the scalar value — the shared projection for a filter cond. */
+function filterScalarByCond(s: ScalarStream, p: ReturnType<ScalarStream['rel']['as']>, cond: Expression): ScalarStream {
   const rel = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)} FROM ${p} WHERE ${cond}`, cols(s));
   return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
+}
+
+/**
+ * and/or/not/filter/where over a scalar stream → a WHERE on the value `v` — the INLINE fast
+ * path (the scalar twin of the element inline predicate). Returns `null` to decline — when the
+ * `scalarPredicateInlining` switch is off, or a traversal arm is outside the inline vocabulary
+ * (tryInlineScalarPredicate) — so the caller (SCALAR_TAIL) falls through to the generic
+ * child-existence gate. A `where(P)`/`filter(P)` predicate over the value has no child form, so
+ * it is always inlined regardless of the switch (`where('a',P)` — an element alias compare —
+ * still declines). Row-preserving: only rows drop.
+ */
+export function lowerScalarFilter(s: ScalarStream, step: PStep): ScalarStream | null {
+  const p = s.rel.as('p');
+  const cur = p.c.v;
+  const vt = s.vtype ? p.c[s.vtype] : undefined; // per-row stored type → vtype-aware predicates
+  const nested = step.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  // where(P)/filter(P): a predicate directly on the value — no traversal child, always inline.
+  if ((step.name === 'where' || step.name === 'filter') && !nested.length) {
+    const pred = step.args.find((a: any) => a && typeof a === 'object' && 'op' in a);
+    if (!pred || step.args.some((a: any) => typeof a === 'string')) return null; // where('a',P) → alias compare, decline
+    return filterScalarByCond(s, p, predicateSql(cur, pred, vt ? { vtypeExpr: vt } : undefined));
+  }
+  // Traversal-child predicate — the disable-safe fast path.
+  if (s.fastPaths?.scalarPredicateInlining === false) return null;
+  let cond: Expression | null;
+  if (step.name === 'and' || step.name === 'or') {
+    if (!nested.length) return null;
+    const sub = nested.map((a: any) => tryInlineScalarPredicate(stepChain(a.nested, s.params), cur, s.params, vt));
+    cond = sub.some((x) => x === null) ? null : paren(list(sub.map((x) => paren(x!)), step.name === 'and' ? ' AND ' : ' OR '));
+  } else if (step.name === 'not') {
+    const arg = nested[0];
+    const sub = arg ? tryInlineScalarPredicate(stepChain(arg.nested, s.params), cur, s.params, vt) : null;
+    cond = sub === null ? null : q`NOT COALESCE((${sub}), 0)`;
+  } else {
+    const arg = nested[0];
+    cond = arg ? tryInlineScalarPredicate(stepChain(arg.nested, s.params), cur, s.params, vt) : null;
+  }
+  return cond === null ? null : filterScalarByCond(s, p, cond);
 }
 
 /**
@@ -409,7 +437,7 @@ export function lowerScalarSplit(s: ScalarStream, step: PStep): ListStream {
 // consumers (child.ts tryScalar*Child) gate the value rows by a boolean over `v` and
 // UNION ALL the arm outputs — the SAME lowerSteps engine lowers each arm (no inline CASE,
 // no child-scope machinery). `buildCond` receives the value expression so a caller can
-// gate by a P (predicateSql) or by a nested scalar predicate (scalarChildProduces).
+// gate by a P (predicateSql) or by a nested scalar predicate (tryInlineScalarPredicate).
 
 /** Gate a scalar stream by a boolean over its value `v`, preserving the scalar shape/tag/
  *  encounter/carried schema (only rows are dropped). `negate` treats a NULL predicate as

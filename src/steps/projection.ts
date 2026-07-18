@@ -16,7 +16,7 @@ import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerScalarP
 import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerLegacyUnion } from './branch.ts';
 import { lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
-import { childSteps, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, tryCompileCountChild, tryCompileListChild, tryScalarChooseChild, tryScalarCoalesceChild, tryScalarMapChild, tryScalarUnionChild } from './child.ts';
+import { childSteps, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, tryCompileCountChild, tryCompileListChild, tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarUnionChild } from './child.ts';
 import { lowerElementDedup } from './filter.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
@@ -574,8 +574,12 @@ const scalarListOnly: ShapeTailFn<ScalarStream> = (_s, step) => {
 // Filter family over a scalar current object: and/or/not/filter/where evaluate their child
 // predicate against `v` and drop rows. A scalar traverser is first-class — these are the
 // same steps as on an element, differing only in the current object.
-const scalarFilter: ShapeTailFn<ScalarStream> = (s, step, _steps, at) =>
-  continueLowering(lowerScalarFilter(s, step), at + 1);
+// and/or/not/filter/where over a scalar: the inline predicate fast path, falling back to the
+// generic child-existence gate when it declines (switch off, or a body beyond inline vocab).
+const scalarFilter: ShapeTailFn<ScalarStream> = (s, step, _steps, at) => {
+  const r = lowerScalarFilter(s, step) ?? tryScalarFilterByChildExistence(s, step);
+  return r ? continueLowering(r, at + 1) : null;
+};
 
 // count()/numeric-reducer()/fold() are barriers → another ScalarStream transition, not a
 // terminal rendering decision. Keeping them relational lets a following scalar

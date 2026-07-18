@@ -2343,7 +2343,7 @@ const runWith = (store: GraphStore, q: string, options: CompileOptions) => {
 
 // Stage 1: branch/map consumers over a SCALAR parent (values()/a projected value…). Each
 // arm is a cardinality-preserving value sub-traversal lowered through the same engine; the
-// consumer gates the value rows and UNION-merges the arms (scalarChildProduces = the per-row
+// consumer gates the value rows and UNION-merges the arms (tryInlineScalarPredicate = the per-row
 // productivity oracle). See child.ts tryScalar*Child + scalar.ts gateScalar/unionScalarStreams.
 describe('scalar-parent branch/map (Stage 1)', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
@@ -2686,6 +2686,22 @@ describe('compiler execution semantics', () => {
           query: 'g.V().repeat(__.out()).times(2).count()',
           fastSql: 'SUM(bulk)',
           genericSql: 'with recursive',
+        },
+        {
+          // scalar predicate: inline = one WHERE over the value (filters c1 directly); generic
+          // = a pushed child scope (ROW_NUMBER domain) gated on a correlated EXISTS. Equivalent.
+          key: 'scalarPredicateInlining',
+          query: "g.V().values('age').where(__.is(gt(30))).order()",
+          fastSql: 'FROM c1 p WHERE',
+          genericSql: 'EXISTS (SELECT 1 FROM',
+        },
+        {
+          // and() over a scalar honours the same switch (both arms inline in one WHERE vs both
+          // as correlated-existence terms sharing one pushed ordinal).
+          key: 'scalarPredicateInlining',
+          query: "g.V().values('age').and(__.is(gt(28)),__.is(lt(34))).order()",
+          fastSql: 'FROM c1 p WHERE',
+          genericSql: 'ROW_NUMBER() OVER () AS o0',
         },
       ];
 
