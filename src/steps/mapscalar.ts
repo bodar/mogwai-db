@@ -1,4 +1,4 @@
-import { q, list, value, type Expression } from '../q.ts';
+import { q, list, value, empty, type Expression } from '../q.ts';
 import {
   elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, type ScalarCtx,
 } from '../plan.ts';
@@ -129,6 +129,30 @@ export function lowerMath(st: ElementStream, steps: PStep[], stop: number): Scal
     ['v', ...carriedCols(st.carried)],
   );
   return toScalarStream(carryOf(st), rel, 'double');
+}
+
+/**
+ * math("<formula>") over a SCALAR parent: the current value `_` IS the scalar `v`, so the
+ * formula becomes one arithmetic expression over `v` (no element to read properties from,
+ * no by()-modulator). Result is a Double; a domain-error/NULL result drops the row (matching
+ * MathStep and the element lowerMath). Named variables (a bare identifier bound by an
+ * as()/by() modulator) and by()-modulated scalar math need the parent-polymorphic modulation
+ * seam and defer here (return null → the clear generic deferral). The encounter column is
+ * preserved so a child-scope scalar math still composes with partitioned followers.
+ */
+export function lowerMathScalar(s: ScalarStream, step: PStep): ScalarStream | null {
+  const formula = step.args[0];
+  if (typeof formula !== 'string') return null;
+  if ((step.bys ?? []).length) return null;                 // by()-modulated → modulation seam (later)
+  if (mathVars(formula).some((name) => name !== '_')) return null; // named var needs a binding (later)
+  const p = s.rel.as('p');
+  const mathExpr = mathToSql(formula, () => p.c.v);
+  const enc = s.encounter ? q`, ${p.c[s.encounter]} AS ${s.encounter}` : empty;
+  const rel = s.q.cte(
+    q`SELECT ${mathExpr} AS v${enc}${carryFrag(s.carried, p)} FROM ${p} WHERE ${predicateSql(mathExpr, undefined)}`,
+    ['v', ...(s.encounter ? [s.encounter] : []), ...carriedCols(s.carried)],
+  );
+  return toScalarStream(carryOf(s), rel, 'double', 'value', s.encounter);
 }
 
 // ---------- format() (per-traverser string templating) ----------

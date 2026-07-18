@@ -945,11 +945,28 @@ export function tryCompileElementTraversal(
  *  outside this set (movement/properties, a nested branch, a shape-changing barrier) is
  *  rejected so the consumer returns null and the existing clear deferral stays authoritative
  *  — never a throw that would break the fall-through contract. */
-const SCALAR_ARM_LEAF = new Set([
-  ...SCALAR_TRANSFORMS, 'is', 'constant', 'identity',
-  'order', 'limit', 'skip', 'range', 'tail', 'dedup', 'unfold',
+// Transforms proven to lower over a scalar WITHOUT throwing: the scalarTx string/value
+// family + the typed date coercions. Deliberately NOT the whole SCALAR_TRANSFORMS spread —
+// `asBool` has no scalarTx case (throws) and a bare `asNumber()` throws on a non-date value,
+// so both must DEFER as an arm body, never throw mid-lowering. `asNumber` is admitted below
+// only when it carries a type arg.
+const SCALAR_ARM_TX = new Set([
+  'concat', 'length', 'toUpper', 'toLower', 'asString', 'trim', 'lTrim', 'rTrim',
+  'reverse', 'replace', 'substring', 'asDate', 'dateAdd', 'dateDiff',
 ]);
+// Row ops with a throw-free non-origin (root-scope) path. `tail`/`dedup` are excluded on
+// purpose: tail() requires an encounter column (throws at root) and dedup() clears the
+// carried schema (withoutCarried), which would desync the union/choose merge that projects
+// the outer carried columns off every arm — both defer cleanly as an arm instead.
+const SCALAR_ARM_ROW = new Set(['is', 'constant', 'identity', 'order', 'limit', 'skip', 'range', 'unfold']);
 const SCALAR_ARM_FILTER = new Set(['and', 'or', 'not', 'filter', 'where']);
+
+/** A single scalar-arm leaf step the engine lowers without throwing. Kept in lockstep with
+ *  what lowerScalarRows/SCALAR_TAIL actually support so the recognizer never accepts a body
+ *  that would throw mid-lowering (breaking the return-null fall-through contract). */
+const scalarArmLeafOk = (s: PStep): boolean =>
+  SCALAR_ARM_TX.has(s.name) || SCALAR_ARM_ROW.has(s.name)
+  || (s.name === 'asNumber' && (s.args ?? []).length > 0);
 
 function scalarBranchArm(body: PStep[], params: Record<string, any>): boolean {
   return body.length > 0 && body.every((s) => {
@@ -958,7 +975,7 @@ function scalarBranchArm(body: PStep[], params: Record<string, any>): boolean {
     // the predicate-P form (where(gt(5))) throws, so require kids and recurse into each so
     // an unsupported nested body defers here rather than throwing mid-lowering.
     if (SCALAR_ARM_FILTER.has(s.name)) return kids.length > 0 && kids.every((a: any) => scalarBranchArm(childSteps(a.nested, params), params));
-    return SCALAR_ARM_LEAF.has(s.name) && kids.length === 0;
+    return scalarArmLeafOk(s) && kids.length === 0;
   });
 }
 

@@ -2396,6 +2396,46 @@ describe('scalar-parent branch/map (Stage 1)', () => {
     expect(() => compile("g.V().values('age').map(__.out())", {})).toThrow('map() after a scalar stream not yet supported');
     expect(() => compile("g.V().values('age').union(__.out(),__.in())", {})).toThrow('union() after a scalar stream not yet supported');
   });
+
+  // The recognizer must never accept an arm body the scalar engine would THROW on (that
+  // breaks the return-null fall-through). These arms all defer cleanly to the generic
+  // message rather than surfacing a raw mid-lowering throw.
+  test('arm bodies the scalar engine cannot lower defer cleanly (fall-through contract)', () => {
+    expect(() => compile("g.V().values('age').union(__.asBool(),__.identity())", {}))
+      .toThrow('union() after a scalar stream not yet supported');         // asBool has no scalarTx impl
+    expect(() => compile("g.V().values('name').choose(__.is(eq('marko')),__.asNumber(),__.identity())", {}))
+      .toThrow('choose() after a scalar stream not yet supported');        // bare asNumber() throws on a non-date value
+    expect(() => compile("g.V().values('age').union(__.tail(1),__.identity())", {}))
+      .toThrow('union() after a scalar stream not yet supported');         // tail() needs an encounter column
+    expect(() => compile("g.V().as('a').values('age').union(__.dedup(),__.identity())", {}))
+      .toThrow('union() after a scalar stream not yet supported');         // dedup() clears carried → merge desync
+    // but asNumber WITH a type arg is a real transform and still lowers
+    expect(() => compile("g.V().values('age').map(__.asNumber(GType.DOUBLE))", {})).not.toThrow();
+  });
+});
+
+// Stage 2: math("<formula>") over a scalar parent — `_` = the value, one arithmetic Double.
+describe('scalar math (Stage 2)', () => {
+  const store = new GraphStore(new BunSqlite(':memory:'));
+  executeQuery(store, "g.addV('t').property('age',29).property('d',2.5)", {});
+  executeQuery(store, "g.addV('t').property('age',27).property('d',1.2)", {});
+  const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
+  const vals = (g: string) => executeQuery(store, g, {}).map(dec).map(String).sort();
+
+  test('math over the scalar value binds `_` to v', () => {
+    expect(vals("g.V().values('age').math('_ * 2')")).toEqual(['54', '58']);
+    expect(vals("g.V().values('age').math('_ + 0.5')")).toEqual(['27.5', '29.5']);
+    expect(vals("g.V().values('d').math('ceil _')")).toEqual(['2', '3']);
+    expect(vals("g.V().values('age').math('_ + _')")).toEqual(['54', '58']);
+  });
+
+  test('math always yields a Double', () => {
+    expect(read("g.V().values('age').math('_ * 2')").shape).toEqual({ kind: 'value', as: 'double' });
+  });
+
+  test('named variables / by()-modulated math defer (need the modulation seam)', () => {
+    expect(() => compile("g.V().values('age').math('a + b')", {})).toThrow('math() after a scalar stream not yet supported');
+  });
 });
 
 describe('compiler execution semantics', () => {
