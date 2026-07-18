@@ -11,7 +11,7 @@ import { tryLowerLocalAggregate } from './sideeffect.ts';
 import { type Shape } from '../render.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
 import { lowerScalarFilter, lowerConstant, lowerScalarSack, collectionTypeOf, scalarCollectionRetype } from './scalar.ts';
-import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerSingleSelect } from './select.ts';
+import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerScalarProject, lowerSingleSelect } from './select.ts';
 import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerLegacyUnion } from './branch.ts';
 import { lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
@@ -619,6 +619,10 @@ const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
   // math("<formula>") over a scalar: `_` = the value `v`, one arithmetic Double. Named
   // vars / by()-modulated math defer (return null) to the generic message.
   ['math', scalarBranch(lowerMathScalar)],
+  // project('a','b').by(…) over a scalar: each field's by() runs against the value → a
+  // RecordStream of scalar fields (select.ts lowerScalarProject). A field needing element
+  // output (movement) returns null → the "requires element input" deferral.
+  ['project', (s, step, _steps, at) => { const r = lowerScalarProject(s, step); return r ? continueLowering(r, at + 1) : null; }],
   // unfold() on a scalar is identity (a scalar is not a collection) — continue past it,
   // exactly as unfold() on an element stream (lets cap().unfold() feed a following reducer).
   ['unfold', (s, _step, _steps, at) => continueLowering(s, at + 1)],
