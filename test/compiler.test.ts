@@ -2703,6 +2703,22 @@ describe('compiler execution semantics', () => {
           fastSql: 'FROM c1 p WHERE',
           genericSql: 'ROW_NUMBER() OVER () AS o0',
         },
+        {
+          // choose over a scalar honours the same switch: the predicate gate inlines as one WHERE
+          // over the value (then/else seeds) vs a correlated EXISTS over a pushed scalar scope.
+          key: 'scalarPredicateInlining',
+          query: "g.V().values('age').choose(__.is(gt(30)),__.constant(1),__.constant(0)).order()",
+          fastSql: 'FROM c1 p WHERE (',
+          genericSql: 'EXISTS (SELECT 1 FROM',
+        },
+        {
+          // coalesce over a scalar honours the same switch: each arm's productivity inlines as a
+          // WHERE over the value vs a correlated EXISTS over the arm's child (one shared ordinal).
+          key: 'scalarPredicateInlining',
+          query: "g.V().values('age').coalesce(__.is(gt(30)),__.constant(0)).order()",
+          fastSql: 'FROM c1 p WHERE (',
+          genericSql: 'EXISTS (SELECT 1 FROM',
+        },
       ];
 
       for (const { key, query, fastSql, genericSql } of cases) {
