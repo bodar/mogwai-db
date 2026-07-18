@@ -2,7 +2,7 @@ import { derived, q, list, raw, type Expression, type Relation } from '../q.ts';
 import { stepChain, type Pred } from '../frontend.ts';
 import {
   P_OPS, labelIn, predicateSql, nodePropScalar, hasProp, elemCtx, aliasCtx,
-  idPredFromArgs, type Elem, type ScalarCtx,
+  idPredFromArgs, scalarProp, labelNameSub, type Elem, type ScalarCtx,
 } from '../plan.ts';
 import { tryInlinePredicate, combineBranchPreds } from './predicate.ts';
 import { advance, aliasElem, carriedCols, carriedWith, carryFrag, elemRel, pathColsOf, prevRel, scopePathCols, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from './context.ts';
@@ -216,12 +216,48 @@ export const dedup: StepFn = (s, st) => {
   return lowerElementDedup(st, s);
 };
 
+/** dedup(labels[, by()]): keep the first traverser per distinct tuple of the labels'
+ *  current (Pop.last) values. Each label resolves to a correlated ScalarCtx (aliasResolver);
+ *  the optional single by() projects a property / T.token off each label's element (bare →
+ *  element identity). Carried state (path, other aliases) rides through, so
+ *  `as(a)…as(b)…dedup("a","b").path()` composes. */
+function dedupByLabels(st: ElementStream, s: PStep, labels: string[]): ElementStream {
+  const bys = s.bys ?? [];
+  if (bys.length > 1) throw new Error('dedup(labels) supports at most one by() modulator');
+  const by = bys[0]?.[0];
+  const resolve = aliasResolver(st);
+  const keyOf = (label: string): Expression => {
+    const ctx = resolve(label);
+    if (by === undefined) return ctx.idExpr; // dedup by element identity
+    if (typeof by === 'string') return scalarProp(ctx, by);
+    if (by && typeof by === 'object' && 'token' in by) {
+      if (by.token === 'label') return labelNameSub(ctx.labelIdExpr);
+      if (by.token === 'id') return ctx.extIdExpr!;
+      throw new Error(`dedup(labels).by(T.${by.token}) not yet supported`);
+    }
+    throw new Error('dedup(labels).by(traversal) not yet supported');
+  };
+  const p = prevRel(st, 'p');
+  const existing = carriedCols(st.carried);
+  const r = derived(
+    q`SELECT ${p.c.id} AS id${carryFrag(st.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${list(labels.map(keyOf), ', ')} ORDER BY ${p.c.id}) AS rn FROM ${p}`,
+    ['id', ...existing, 'rn'],
+    'r',
+  );
+  return advance(st, q`SELECT ${r.c.id} AS id${carryFrag(st.carried, r)} FROM ${r} WHERE ${r.c.rn}=1`);
+}
+
 /** Element dedup is a key-cardinality consumer. Ordinary by() drops an
  * unproductive modulation; ProductiveBy retains one NULL-key representative.
  * When preceded by order().barrier(), two windows encode both observations:
  * first row per dedup key and the retained stream's explicit encounter order. */
 export function lowerElementDedup(st: ElementStream, s: PStep, order?: PStep): ElementStream {
-  if (s.args.length > 0) throw new Error('dedup(label) not yet supported');
+  // dedup(labels): dedup by the tuple of the given as() labels' current values (optional
+  // single by() modulator applied to each). Explicit-scope, so unlike bare dedup it is
+  // well-defined under as()/path tracking — the kept traverser rides its carried state.
+  const labelArgs = s.args.filter((a): a is string => typeof a === 'string');
+  if (labelArgs.length) return dedupByLabels(st, s, labelArgs);
+  if (s.args.length > 0) throw new Error('dedup(Scope.local, …) over an element stream not yet supported');
   if (st.carried.aliases.size > 0) throw new Error('dedup() after as() not yet supported (path-distinct semantics)');
   if (st.carried.path) throw new Error('dedup() with path tracking not yet supported (path-distinct semantics)');
   const bys = s.bys ?? [];

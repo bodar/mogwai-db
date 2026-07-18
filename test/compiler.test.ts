@@ -1327,8 +1327,8 @@ describe('compiler SQL snapshots', () => {
     // order().by() deferred modulators must throw, not silently sort by id
     expect(() => compile('g.V().order().by(T.label)', {})).toThrow('by(T.label) modulator not yet supported');
     expect(() => compile('g.V().order().by(__.values("age"))', {})).toThrow('by(traversal) modulator not yet supported');
-    // dedup: label-scoped and dedup-after-as() deferred rather than answered wrongly
-    expect(() => compile('g.V().as("a").out().as("b").dedup("a","b")', {})).toThrow('dedup(label) not yet supported');
+    // dedup: dedup(labels) is supported (see the dedup(labels) test); bare dedup after as()
+    // stays deferred rather than answered wrongly (path-distinct semantics).
     expect(() => compile('g.V().as("a").out().dedup()', {})).toThrow('dedup() after as() not yet supported');
     expect(() => compile('g.V().dedup().by("age").by("name")', {})).toThrow('at most one by()');
   });
@@ -1348,6 +1348,20 @@ describe('compiler SQL snapshots', () => {
       .toEqual(['josh', 'marko', 'peter', 'vadas']);
     expect(run(store, 'g.V().both().both().dedup().by(T.label).count()').map((r) => r.v)).toEqual([2]);
     expect(run(store, 'g.V().both().both().dedup().by(__.outE().count()).count()').map((r) => r.v)).toEqual([4]);
+  });
+
+  test('dedup(labels): dedup by an as()-label tuple (optional by()), composes with path()', () => {
+    const store = seededStore();
+    // partition by the labels' current values; carried state (path/aliases) rides through.
+    const sql = read('g.V().as("a").out().as("b").in().as("c").dedup("a","b").path().by("name")').sql;
+    expect(sql).toContain('ROW_NUMBER() OVER (PARTITION BY');
+    // bare dedup(labels) partitions by element identity; by(key)/by(T) project each label.
+    expect(read('g.V().as("a").both().as("b").dedup("a","b").by(T.label).select("a","b").by("name")').sql)
+      .toContain('PARTITION BY');
+    // dedup(a,b) keeps one traverser per distinct (a,b) pair.
+    expect(run(store, 'g.V().as("a").out().as("b").in().as("c").dedup("a","b").count()').map((r) => r.v)).toEqual([6]);
+    // dedup(labels).by(traversal) fails closed.
+    expect(() => compile('g.V().as("a").both().as("b").dedup("a","b").by(__.out())', {})).toThrow('not yet supported');
   });
 
   test('E() sources the edges table; default projection is the edge shape', () => {
