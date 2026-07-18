@@ -159,6 +159,42 @@ Feature: mogwai addendum — scalar-stream re-entry
       | c |
       | c |
 
+  # Slice: a re-source arm (V()/E() head) CROSS JOINs the graph per value inside the pushed
+  # scalar child scope; a following count() reduces per input. Each age re-sources all 6
+  # vertices → count 6 per input. The value is discarded by the re-source (GraphStep isStart
+  # =false), exactly as at the tail.
+  @gap:scalar-position
+  Scenario: g_V_hasLabelXpersonX_valuesXageX_mapXV_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").values("age").map(__.V().count())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+
+  # Slice: a re-source arm ending in a projection yields the projected values per input (one
+  # input here, V(1) = marko), flat-mapped.
+  @gap:scalar-position
+  Scenario: g_VX1X_valuesXageX_flatMapXV_hasLabelXpersonX_valuesXnameXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).values("age").flatMap(__.V().hasLabel("person").values("name"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | marko |
+      | vadas |
+      | josh |
+      | peter |
+
   @gap:scalar-position
   Scenario: g_V_hasLabelXpersonX_valuesXageX_aggregateXaX_capXaX_unfold
     Given the modern graph
