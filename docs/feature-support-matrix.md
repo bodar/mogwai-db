@@ -1,7 +1,7 @@
 # mogwai-db — feature support matrix
 
 Scannable map of what the compiler supports, and where partial steps stop. Grouped
-by traversal concern. **L3 conformance: <!-- L3:passing -->1,224<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+by traversal concern. **L3 conformance: <!-- L3:passing -->1,226<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 Sourced from the dispatch maps (`src/steps/*.ts`) and the compiler `throw` sites — if
 the code defers a shape, it fails closed with a clear error and this file says so. Keep
@@ -54,7 +54,7 @@ In a 🟡 cell, **✅** = supported form, **❌** = deferred shape.
 | `select('a')`, multi-`select`, `project(…)` | 🟡 | column-threaded aliases; single-label select → scalar/element/typed-list (a value-history label reads its value, incl. after a re-source `V()`); multi-`select`/`project` → per-traverser record (scalar/vertex/edge/scalar-list/element-list fields), each field re-enters; `limit`/`range`/`skip`/`tail` with `Scope.local` slice fields. **`project(…)` over a scalar parent**: each field's `by()` runs against the value (bare `by()`/`identity`/transform/`math`/scoped reducer) → a record of scalar fields, via the pushChildScope substrate. ❌ record `order`/`dedup`/`fold`/`where`; scalar-parent `project` field needing element output |
 | `select(Column.values/keys)` | 🟡 | over a group, scalar record, or per-element valueMap/elementMap (keys→Set); list-valued maps → list-of-lists. ❌ heterogeneous element-value lists, raw Map params |
 | chained projections (`values().count()`, `project().select()`, `valueMap().select()`) | 🟡 | scalar/record/map projections retype to a stream and re-enter one step at a time. ❌ heterogeneous structured values |
-| `order()` [`.by(key[,dir])`] | 🟡 | tail modifier. ❌ after `path()`; `by(key)` on a scalar stream |
+| `order()` [`.by(key[,dir]\|__.trav)`] | 🟡 | tail modifier; a single `by(__.traversal)` sorts via the **generic scalar child seam** (`tryCompileScalarValueRows` — the same seam `dedup().by(traversal)` uses), minting a fresh encounter. ❌ after `path()`; `by(key)` on a scalar stream; a multi-term order mixing a traversal |
 | `limit`, `range`, `skip` | ✅ | CTE mid-chain / tail modifier after `order()`; `Scope.local` slices record fields |
 | `by(…)` modulator | ✅ | on `order`/`select`/`project`/`group`/`groupCount`/`path`/`math` |
 

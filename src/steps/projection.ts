@@ -6,7 +6,7 @@ import {
   nodePropScalar, edgePropScalar, nodePropSortKey, edgePropSortKey, framedProps, valueMapProps, storedValueExpr,
 } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
-import { carryFrag, carriedCols, carriedWith, elemRel, withoutCarried, type ElementStream } from './context.ts';
+import { advance, carryFrag, carriedCols, carriedWith, elemRel, withoutCarried, type ElementStream } from './context.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn } from './stream.ts';
 import { tryLowerLocalAggregate, lowerScalarAggregate } from './sideeffect.ts';
 import { type Shape } from '../render.ts';
@@ -16,7 +16,7 @@ import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerScalarP
 import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerLegacyUnion } from './branch.ts';
 import { lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
-import { childSteps, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, tryCompileCountChild, tryCompileListChild, tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './child.ts';
+import { childSteps, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, tryCompileCountChild, tryCompileListChild, tryCompileScalarValueRows, tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './child.ts';
 import { lowerElementDedup } from './filter.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
@@ -195,13 +195,50 @@ function lowerValueMapTail(st: ElementStream, proj: PStep, acc: TailAcc, steps: 
   throw new Error(`${step.name}() cannot consume the ${proj.name} result shape`);
 }
 
+/** order().by(__.trav): sort elements by a per-traverser scalar computed through the SAME
+ *  generic scalar child seam dedup().by(traversal) uses (tryCompileScalarValueRows +
+ *  pushChildScope) — NOT a bespoke reader. The child's first value per traverser becomes the
+ *  sort key; a fresh encounter (ROW_NUMBER over that key) rides forward, so materialization /
+ *  a following limit observe the order. Single by(traversal) term; mixed/multi-term and
+ *  path/encounter-tracking streams fall through to the key machinery (return null → defer). */
+function lowerElementOrderByTraversal(st: ElementStream, step: PStep): ElementStream | null {
+  const bys = step.bys ?? [];
+  if (bys.length !== 1) return null;
+  const nested = bys[0].find((a: any) => a && typeof a === 'object' && 'nested' in a)?.nested;
+  if (!nested) return null; // a key/bare/token order — the acc.orders machinery handles it
+  const dir = bys[0].find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
+  if (dir === 'shuffle') return null;
+  if (st.carried.encounter || st.carried.path)
+    throw new Error('order().by(traversal) while tracking a path/encounter not yet supported');
+  const rows = tryCompileScalarValueRows(st, nested);
+  if (!rows?.stream.encounter) throw new Error('order().by(traversal) requires a scalar child with encounter order');
+  const c = rows.stream.rel.as('c');
+  const ord = rows.frame.ordinal;
+  // First child value per traverser (child cardinality >1 → the first by child encounter).
+  const firstVal = st.q.cte(
+    q`SELECT ${c.c[ord]} AS ord, ${c.c.v} AS k, ROW_NUMBER() OVER (PARTITION BY ${c.c[ord]} ORDER BY ${c.c[rows.stream.encounter]}) AS rn FROM ${c}`,
+    ['ord', 'k', 'rn'],
+  );
+  const d = rows.frame.domain.as('d');
+  const f = firstVal.as('f');
+  const dirSql = dir === 'desc' ? 'DESC' : 'ASC';
+  return advance(
+    st,
+    q`SELECT ${d.c.id} AS id${carryFrag(st.carried, d)}, ROW_NUMBER() OVER (ORDER BY ${f.c.k} ${raw(dirSql)}, ${d.c.id}) AS encounter FROM ${d} LEFT JOIN ${f} ON ${f.c.ord}=${d.c[ord]} AND ${f.c.rn}=1`,
+    { encounter: 'encounter' },
+  );
+}
+
 // order().[barrier()].dedup().by(): lower both observations as one window policy so the
-// representative is chosen by explicit encounter order. A plain order() (no dedup follower)
-// returns null → the foldTailAcc fallback accumulates it.
+// representative is chosen by explicit encounter order. order().by(traversal) sorts via the
+// generic scalar child seam. A plain key/bare order() (no dedup follower) returns null → the
+// foldTailAcc fallback accumulates it.
 const tailOrder: ShapeTailFn<ElementStream> = (st, step, steps, stop) => {
   const dedupAt = steps[stop + 1]?.name === 'barrier' ? stop + 2 : stop + 1;
   if (steps[dedupAt]?.name === 'dedup')
     return continueLowering(lowerElementDedup(st, steps[dedupAt], step), dedupAt + 1);
+  const ordered = lowerElementOrderByTraversal(st, step);
+  if (ordered) return continueLowering(ordered, stop + 1);
   return null;
 };
 
