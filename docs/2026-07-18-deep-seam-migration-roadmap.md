@@ -22,7 +22,7 @@ combinations that were silently unsupported start working, L3 climbs.
 | # | Target | Kind | Substrate move | Confidence |
 |---|--------|------|----------------|------------|
 | 1 | Group / Map stream | ✅ done | nested values + element values through the generic seam | landed 2026-07-18 |
-| 2 | Traverser bulking | 🟡 re-arch for wire | Stage A landed (wire bulking); B/C queued | wire premise corrected 2026-07-18 |
+| 2 | Traverser bulking | ✅ mostly done | A+B+C landed; only `group`/`groupCount` weighting remains | landed 2026-07-18 |
 | 3 | Scalar-parent child arms | widen re-entry | scalar seed re-sources to elements | high (test bed exists) |
 | 4 | VariantStream | ✅ row-ops done | shape-agnostic tail; heterogeneity wall on the rest | landed 2026-07-18 |
 | 5 | PathStream breadth | fill + 1 piece | map-valued carried alias entry | mixed |
@@ -62,7 +62,18 @@ value re-entry.
 **Why first.** Proven playbook, one genuine bypass to delete, highest confidence.
 Shares its map-valued-alias piece with #5.
 
-## 2. Traverser bulking — finish the substrate move
+## 2. Traverser bulking — finish the substrate move ✅ (mostly landed 2026-07-18)
+
+**Done (A+B+C).** `bulk` is now a first-class `Carried` column; collapse auto-fires by query
+shape (pure movement/filter/bare-`dedup`/`order`/`limit`·`range`·`skip` → a reducer or a bare
+element leaf, plus element- and count-returning `repeat().times(n)`) — bounded frontier + `(v,N)`
+RLE on the wire, L3 1180 held. See the STATUS header of
+`docs/2026-07-18-wire-bulking-rearchitecture.md` for the landed map + the deviations from plan
+(bulk orthogonal to shape via `bulkOf`/`frameValues`; `movementCollapse` fast path; cumulative-bulk
+`order`/`limit` window). **ONE piece remains:** `group`/`groupCount` bulk-weighting (element-key
+forms use an unweighted `COUNT(*)`; needs bulk threaded through `GroupSource` + careful gating);
+`sample`/`coin` correctly never collapse (must unbulk) → left excluded. The original problem/move
+framing follows for reference.
 
 **Problem.** `bulk` exists ONLY inside the bespoke recognizer `bulk.ts` (one
 shape: `repeat(single-hop).times(n).count()`). It is NOT a carried column —
@@ -150,10 +161,12 @@ entry alongside #1 since they share it.
 ## Recommended order
 
 **1 → 2 → 3**, with **4** dropped in opportunistically and **5** landing its
-substrate piece alongside 1.
+substrate piece alongside 1. **#1, #2, #4 are ✅ landed (2026-07-18)** — #2 has only
+`group`/`groupCount` bulk-weighting left; #3 (scalar-parent child arms) and #5 (path breadth)
+are the live frontier.
 
 - #1: highest-confidence structural win, deletes a real bypass, shares a piece with #5.
-- #2: deepest substrate debt, correctness-critical.
+- #2: ✅ mostly landed (A+B+C) — the deepest substrate debt is paid; only `group`/`groupCount` bulk-weighting remains.
 - #3: widest row count but closest to surface — after the true substrate moves.
 - #4: ✅ landed — shape-agnostic row-ops only; full re-entry is impossible (heterogeneous union).
 - #5: substrate largely built; breadth fill + shared alias piece.
