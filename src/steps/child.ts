@@ -1451,6 +1451,73 @@ export function tryScalarVariantChoose(s: ScalarStream, step: PStep): VariantStr
   return toVariantStream(carryOf(s), rel, meta);
 }
 
+/** coalesce(a, b, …) over a scalar with MIXED-shape arms → a VariantStream. One pushed
+ *  ordinal-tagged seed feeds every arm (compiled to its natural variant shape); arm k emits
+ *  only for inputs no earlier arm produced a row for (`ord NOT IN prior`) — the first-productive
+ *  rule, exactly branch.ts's tryLowerVariantCoalesce, over a scalar seed. Declines for
+ *  homogeneous arms (tryScalarCoalesceChild owns those) or an unclassifiable arm. */
+export function tryScalarVariantCoalesce(s: ScalarStream, step: PStep): VariantStream | null {
+  if (s.carried.path || s.carried.sack || s.carried.fromV) return null;
+  const branches = (step.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  if (!branches.length) return null;
+  const shapes = branches.map((b: any) => scalarArmShape(b.nested, s.params));
+  if (shapes.some((x) => x === null) || shapes.every((x) => x === shapes[0])) return null;
+  const { frame, seed } = pushChildScope(s);
+  const ord = frame.ordinal;
+  const arms = branches.map((b: any) => compileScalarVariantArm(seed, b.nested));
+  const meta = variantArmsMeta(arms);
+  const hasList = !!meta.listOf;
+  const parts = arms.map((arm, k) => variantArmSelect(arm, s, hasList, k === 0 ? undefined
+    : (a) => list(arms.slice(0, k).map((pr) => q`${a.c[ord]} NOT IN (SELECT ${ord} FROM ${pr.rel})`), ' AND ')));
+  const rel = s.q.cte(list(parts, ' UNION ALL '), variantCols(s, hasList));
+  return toVariantStream(carryOf(s), rel, meta);
+}
+
+/** optional(t) over a scalar with a SCALAR arm ≡ coalesce(t, identity): the arm's value where
+ *  it produces, else the input value restored (a filter arm that drops a value → the original
+ *  passes through). Homogeneous → a scalar stream; an element/list arm takes the variant path. */
+export function tryScalarOptionalChild(s: ScalarStream, step: PStep): ScalarStream | null {
+  if (s.carried.sack || s.carried.fromV) return null;
+  const arg = step.args?.[0];
+  if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
+  if (!scalarArmClassifies(childSteps(arg.nested, s.params), s.params)) return null;
+  const { frame, seed } = pushChildScope(s);
+  const ord = frame.ordinal;
+  const arm = tryCompileScalarArm(seed, arg.nested);
+  if (!arm) return null;
+  const numeric = arm.result === 'number';
+  const cols = ['v', ...(numeric ? ['vt'] : []), ...carriedCols(s.carried)];
+  const a = arm.rel.as('a');
+  const d = frame.domain.as('d');
+  const am = arm.rel.as('am');
+  const hit = q`SELECT ${a.c.v} AS v${numeric ? q`, ${a.c.vt} AS vt` : empty}${carryFrag(s.carried, a)} FROM ${a}`;
+  const miss = q`SELECT ${d.c.v} AS v${numeric ? q`, NULL AS vt` : empty}${carryFrag(s.carried, d)} FROM ${d} WHERE NOT EXISTS (SELECT 1 FROM ${am} WHERE ${am.c[ord]}=${d.c[ord]})`;
+  const rel = s.q.cte(list([hit, miss], ' UNION ALL '), cols);
+  return toScalarStream(carryOf(s), rel, arm.as, numeric ? 'number' : 'value');
+}
+
+/** optional(t) over a scalar with an ELEMENT/LIST arm → a VariantStream: the arm's rows where it
+ *  produces (vk 2/3/4), else the input VALUE restored (vk 1). The scalar twin of branch.ts's
+ *  tryLowerVariantOptional (flipped: there the miss is an element, here the miss is the value). */
+export function tryScalarVariantOptional(s: ScalarStream, step: PStep): VariantStream | null {
+  if (s.carried.path || s.carried.sack || s.carried.fromV) return null;
+  const arg = step.args?.[0];
+  if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
+  const shape = scalarArmShape(arg.nested, s.params);
+  if (shape === null || shape === 'scalar') return null; // scalar arm → tryScalarOptionalChild
+  const { frame, seed } = pushChildScope(s);
+  const ord = frame.ordinal;
+  const arm = compileScalarVariantArm(seed, arg.nested);
+  const hasList = arm.vk === 4;
+  const d = frame.domain.as('d');
+  const am = arm.rel.as('am');
+  const listNull = hasList ? q`, NULL AS list` : empty;
+  const hit = variantArmSelect(arm, s, hasList);
+  const miss = q`SELECT 1 AS vk, ${d.c.v} AS v, NULL AS rid${listNull}${carryFrag(s.carried, d)} FROM ${d} WHERE NOT EXISTS (SELECT 1 FROM ${am} WHERE ${am.c[ord]}=${d.c[ord]})`;
+  const rel = s.q.cte(list([hit, miss], ' UNION ALL '), variantCols(s, hasList));
+  return toVariantStream(carryOf(s), rel, { ...variantArmsMeta([arm]), scalarAs: s.as });
+}
+
 /**
  * Generic child-existence gate for and/or/not/filter/where over a SCALAR stream — the
  * disable-safe fallback when the inline predicate (lowerScalarFilter) declines (switch off, or

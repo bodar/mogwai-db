@@ -117,9 +117,12 @@ nested-branch bodies, plus a `V()`/`E()` **re-source** (`lowerScalarVE` carries 
 ordinal through its CROSS JOIN, so a following scoped reducer/projection reduces per input).
 Mixed-shape scalar-parent arms (scalar + re-source-element + `fold()`-list) merge into the
 SAME `VariantStream` the element parent produces via the `Carry`-typed builders
-`variantArmSelect`/`variantArmsMeta`/`variantCols` (exported from `branch.ts`, shared by both
-parents — only the per-arm compiler differs). `coalesce`/`optional` mixed-shape over a scalar
-is the one documented follow-on.
+`variantArmSelect`/`variantArmsMeta`/`variantCols` (in leaf `steps/variant.ts`, shared by both
+parents — only the per-arm compiler differs) — for `union`/`choose`/`coalesce`; `optional(t)` ≡
+`coalesce(t, identity)` (a scalar arm restores the value on miss, an element/list arm →
+variant). The one documented follow-on: `map()` first-of-many over a FAN-OUT arm (a re-source
+projection / nested `union`) needs deterministic emission ordering, so map fails closed on it
+(`armFansOut`) while `flatMap`/`local` fan out.
 
 **Fast paths** are explicit per-compilation switches in `CompileOptions.fastPaths`
 (`src/fast-paths.ts`) — never a mutable global. A specialized lowering qualifies as a

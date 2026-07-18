@@ -16,7 +16,7 @@ import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerScalarP
 import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerLegacyUnion } from './branch.ts';
 import { lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
-import { childSteps, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, tryCompileCountChild, tryCompileListChild, tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantUnion } from './child.ts';
+import { childSteps, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, tryCompileCountChild, tryCompileListChild, tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './child.ts';
 import { lowerElementDedup } from './filter.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
@@ -696,7 +696,18 @@ const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
     return r ? continueLowering(r, at + 1) : null;
   }],
   ['flatMap', scalarBranch(tryScalarMapChild)],
-  ['coalesce', scalarBranch(tryScalarCoalesceChild)],
+  // optional(t) over a scalar ≡ coalesce(t, identity): a scalar arm → scalar (miss restores the
+  // value); an element/list arm → a VariantStream (arm rows where productive, else the value).
+  ['optional', (s, step, _steps, at) => {
+    const r = tryScalarOptionalChild(s, step) ?? tryScalarVariantOptional(s, step);
+    return r ? continueLowering(r, at + 1) : null;
+  }],
+  // coalesce over a scalar: homogeneous arms → first-productive scalar (tryScalarCoalesceChild);
+  // mixed-shape arms → a VariantStream, ordinal-gated first-productive (tryScalarVariantCoalesce).
+  ['coalesce', (s, step, _steps, at) => {
+    const r = tryScalarCoalesceChild(s, step) ?? tryScalarVariantCoalesce(s, step);
+    return r ? continueLowering(r, at + 1) : null;
+  }],
   // math("<formula>") over a scalar: `_` = the value `v`, one arithmetic Double. Named
   // vars / by()-modulated math defer (return null) to the generic message.
   ['math', scalarBranch(lowerMathScalar)],
