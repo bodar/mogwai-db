@@ -176,11 +176,16 @@ are the live frontier.
 🚫 rows are NOT candidates: regex TextP (needs UDFs), `tree()`, `store`, lambdas,
 OLAP, `withoutStrategies(ConnectiveStrategy)`, Sack/ElementId/Event strategies.
 
-🚫 **`map()` first-of-many over a scalar FAN-OUT arm** (a re-source projection /
-nested `union` under `map`): first-result-only would need a deterministic
-emission-order column threaded through the fan-out (arm-index through `union`,
-id-order through re-source) — not a natural fit for the set-oriented SQL engine,
-and zero corpus examples. Fails closed (`armFansOut`); `flatMap`/`local` cover the
-all-results need. (The other scalar-parent-arm shapes — reducer/nested-branch/
-re-source, and mixed-shape `union`/`choose`/`coalesce`/`optional` variants — all
-landed; see [[scalar-stream-reentry]].)
+🚫 **`map()` over a scalar arm that itself FANS OUT** — the take-first-and-discard
+case only, NOT `map` in general. `map(t)` is 1-to-1: it applies `t` per input and
+keeps `t`'s FIRST result. Over a scalar this WORKS for every one-result body —
+transforms (`map(__.toUpper())`), reducers (`map(__.count())`, `map(__.V().count())`),
+`choose`/`coalesce` — those all landed. The locked non-goal is ONLY when the inner
+`t` produces MANY per input (`map(__.V())` re-sources 6 vertices, `map(__.union(a,b))`
+yields 2) and map must silently drop all but the first: picking "first" needs a
+deterministic emission-order column threaded through the fan-out (arm-index through
+`union`, id-order through re-source), which is not a natural fit for the set-oriented
+SQL engine, and has zero corpus examples. Fails closed (`armFansOut`); use
+`flatMap`/`local` for the all-results intent. (Every other scalar-parent-arm shape —
+reducer/nested-branch/re-source, and mixed-shape `union`/`choose`/`coalesce`/`optional`
+variants — landed; see [[scalar-stream-reentry]].)
