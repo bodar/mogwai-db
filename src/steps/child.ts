@@ -4,7 +4,7 @@ import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schem
 import { advance, carriedWith, carryFrag, carriedCols, withCarried, type ElementStream } from './context.ts';
 import { aliasId } from './alias.ts';
 import { carryOf, toListStream, toScalarStream, toVariantStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream } from './stream.ts';
-import { variantArmsMeta, variantArmSelect, variantCols, type VariantArm } from './branch.ts';
+import { variantArmsMeta, variantArmSelect, variantCols, type VariantArm } from './variant.ts';
 import { lowerElementSteps, lowerSteps, tryLowerElementSteps } from './index.ts';
 import { lowerScalarRows, gateScalar, tryInlineScalarPredicate, unionScalarStreams, SCALAR_TRANSFORMS } from './scalar.ts';
 import { lowerScalarVE } from './projection.ts';
@@ -459,6 +459,18 @@ function isResourceHead(rest: PStep[]): boolean {
     && !(head.args ?? []).some((a: any) => a && typeof a === 'object' && 'nested' in a);
 }
 
+/** Re-source a scalar seed (`V()`/`E()`) then fold the element movement/filter remainder,
+ *  returning the ElementStream — or null if the remainder isn't fully element-lowerable.
+ *  Shared by the re-source reducer path (compileScalarChildRows) and the mixed-shape variant
+ *  element arm (tryScalarResourceElement); the value is discarded by the re-source (a flatMap
+ *  CROSS JOIN), and a pushed ordinal rides through it unchanged. */
+function resourceElement(seed: ScalarStream, head: PStep, after: PStep[]): ElementStream | null {
+  const el = lowerScalarVE(seed, head);
+  if (!el) return null;
+  const { stream, next } = lowerElementSteps(after, el);
+  return next === after.length ? stream : null;
+}
+
 /** Count the element rows of a re-sourced child per parent origin. Each row is marked with a
  *  per-origin encounter, then the SHARED scoped count barrier (LEFT JOIN domain → 0 for an
  *  empty child, bulk-weighted) reduces it — no bespoke aggregate, the same path an element
@@ -507,8 +519,8 @@ function compileScalarChildRows(
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
   }
 
-  // Scalar parent: the child body starts from the value `_` = v. Two families (recognized
-  // purely by scalarChildBodyOk, so classify-then-emit holds — no CTE before a decision):
+  // Scalar parent: the child body starts from the value `_` = v. Two families, each recognized
+  // by a pure inline check BEFORE pushChildScope (so a miss returns null with no orphaned CTE):
   //   (a) a value-op body (transforms/is/order/slice — the pushed seed carries the minted
   //       encounter) that stays scalar, plus an optional terminal scoped reducer; and
   //   (b) a RE-SOURCE body (`V()`/`E()` then element movement/filter, optional projection):
@@ -531,10 +543,8 @@ function compileScalarChildRows(
         // taking the projection path below). No reducer → element-ending mixed shape (slice 3).
         if (reducer !== 'count') return null;
         const pushed = pushChildScope(parent, scope);
-        const el = lowerScalarVE(pushed.seed, rest[0]);
-        if (!el) return null;
-        const { stream: moved, next } = lowerElementSteps(after, el);
-        if (next !== after.length) return null;
+        const moved = resourceElement(pushed.seed, rest[0], after);
+        if (!moved) return null;
         return applyScalarChildCardinality(parent, pushed, scopedElementCount(moved, pushed), use, retainChildScope);
       }
       // ends in a projection (values/id/label) → scalar; lowerSteps folds V→element→projection.
@@ -1168,12 +1178,31 @@ function lowerScalarArm(s: ScalarStream, body: PStep[]): ScalarStream | null {
   return end.kind === 'scalar' ? end : null;
 }
 
-/** map()/local()/flatMap() over a scalar: apply the arm body per value. For the Stage-1
- *  cardinality-preserving vocabulary map/local/flatMap coincide (one value per input, or
- *  none when a filter drops it), so one continuation serves all three. */
-export function tryScalarMapChild(s: ScalarStream, step: PStep): ScalarStream | null {
+/** PURE. Does this scalar arm body emit MORE than one value per input? A terminal reducer or
+ *  fold() collapses to one; a `V()`/`E()` re-source (bare or projecting) or a nested `union`
+ *  fans out; a nested choose/coalesce fans out only if a reachable arm does. Used to gate
+ *  `map()` (first-result-only) — it fails closed on a fan-out body it would otherwise
+ *  over-produce, rather than returning the wrong count. */
+function armFansOut(body: PStep[], params: Record<string, any>): boolean {
+  const last = body.at(-1);
+  if (last && (CHILD_SCALAR_REDUCERS.has(last.name) || last.name === 'fold')) return false;
+  if (isResourceHead(body)) return true;
+  return body.some((s) => {
+    if (s.name === 'union') return true;
+    const kids = (s.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+    return SCALAR_ARM_BRANCH.has(s.name) && kids.some((a: any) => armFansOut(childSteps(a.nested, params), params));
+  });
+}
+
+/** map()/local()/flatMap() over a scalar: apply the arm body per value. `flatMap`/`local` emit
+ *  every result (`allowFanout`); `map` is first-result-only, so a fan-out body (a re-source
+ *  projection or a nested `union`) would over-produce — map fails closed on it (correct
+ *  first-of-many needs deterministic emission ordering across the fan-out, a follow-on). A ≤1
+ *  body (transform/filter/choose/coalesce/reducer) is identical under map/flatMap/local. */
+export function tryScalarMapChild(s: ScalarStream, step: PStep, allowFanout = true): ScalarStream | null {
   const arg = step.args?.[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
+  if (!allowFanout && armFansOut(childSteps(arg.nested, s.params), s.params)) return null;
   return tryCompileScalarArm(s, arg.nested);
 }
 
@@ -1338,10 +1367,7 @@ function tryScalarResourceElement(seed: ScalarStream, nested: any): ElementStrea
   if (!isResourceHead(body)) return null;
   const after = body.slice(1);
   if (!after.every((s) => ELEMENT_CHILD_STEPS.has(s.name))) return null;
-  const el = lowerScalarVE(seed, body[0]);
-  if (!el) return null;
-  const { stream, next } = lowerElementSteps(after, el);
-  return next === after.length ? stream : null;
+  return resourceElement(seed, body[0], after);
 }
 
 /** PURE. A fold list arm over a scalar: a value-op body OR a re-source projection, then

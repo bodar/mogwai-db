@@ -3,10 +3,11 @@ import { edges } from '../schema.ts';
 import { stepChain, type Step } from '../frontend.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
 import { tryInlinePredicate } from './predicate.ts';
-import { advance, elemRel, prevRel, carryFrag, carriedCols, type AliasEntry, type AliasMap, type Carried, type Carry, type PathState, type ElementStream, type StepFn } from './context.ts';
+import { advance, elemRel, prevRel, carryFrag, carriedCols, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { type AliasShape } from './alias.ts';
 import { classifyListChild, classifyScalarChild, isElementChild, isListChild, isScalarChild, pushChildScope, ROOT_SCOPE, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from './child.ts';
-import { carryOf, toListStream, toScalarStream, toVariantStream, type ListStream, type ScalarStream, type VariantArms, type VariantStream } from './stream.ts';
+import { carryOf, toListStream, toScalarStream, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from './stream.ts';
+import { unifyLists, variantArmsMeta, variantArmSelect, variantCols, type VariantArm } from './variant.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
  *  read back from `nodes` by subquery (the walk row carries only the id). Lets
@@ -18,18 +19,6 @@ const walkNodeCtx = (idExpr: Expression): ScalarCtx => {
   return { elem: 'node', idExpr, extIdExpr: sub('COALESCE(uid, id)'), labelIdExpr: sub('label') };
 };
 
-const unifyLists = (arms: readonly ListStream[]): ListStream['of'] => {
-  const ofs = arms.map((arm) => arm.of);
-  if (ofs.every((of) => of.kind === 'scalar')) {
-    const tags = ofs.map((of) => of.kind === 'scalar' ? of.as : undefined);
-    return { kind: 'scalar', as: tags.every((tag) => tag === tags[0]) ? tags[0] : undefined };
-  }
-  if (ofs.every((of) => of.kind === 'elem')) {
-    const elems = ofs.map((of) => of.kind === 'elem' ? of.elem : undefined);
-    if (elems.every((elem) => elem === elems[0])) return { kind: 'elem', elem: elems[0]! };
-  }
-  throw new Error('list branch arms have incompatible item shapes');
-};
 
 /** Compile an until()/emit() traversal modulator into `(id, depth) → boolean SQL`, routing
  *  the WHOLE body through the shared predicate engine on a correlated walk ctx. loops()
@@ -366,16 +355,6 @@ const armShape = (nested: any, params: Record<string, any>): ArmShape | null =>
   : isListChild(nested, params) ? 'list'
   : null;
 
-/** One compiled branch arm tagged by its natural shape (vk 1 scalar / 2 node / 3 edge /
- *  4 list). Parent-agnostic: an element-parent (branch.ts) and a scalar-parent (child.ts)
- *  both build these, so the merge builders below take a bare Carry, not an ElementStream. */
-export interface VariantArm {
-  readonly rel: Relation;
-  readonly vk: 1 | 2 | 3 | 4;
-  readonly as?: ScalarStream['as'];
-  readonly listOf?: ListStream['of'];
-}
-
 /** Compile ONE branch body from `seed` to a variant-arm carrying seed's exact carried
  *  schema: element movement → node/edge, values/id/label/count → scalar, …fold() → list. */
 function compileVariantArm(seed: ElementStream, nested: any): VariantArm {
@@ -387,33 +366,6 @@ function compileVariantArm(seed: ElementStream, nested: any): VariantArm {
   if (listArm) return { rel: listArm.rel, vk: 4, listOf: listArm.of };
   throw new Error(`variant branch __.${armDescription(nested, seed.params)} not yet supported (shape not element/scalar/list)`);
 }
-
-/** The union of arm shapes → the widened stream's arm flags. */
-export function variantArmsMeta(arms: readonly VariantArm[]): VariantArms {
-  const scalarArms = arms.filter((a) => a.vk === 1);
-  const listArms = arms.filter((a) => a.vk === 4);
-  const scalarAs = scalarArms.length && scalarArms.every((a) => a.as === scalarArms[0].as) ? scalarArms[0].as : undefined;
-  const listOf = listArms.length ? unifyLists(listArms.map((a) => ({ of: a.listOf! } as ListStream))) : undefined;
-  return { scalarAs, node: arms.some((a) => a.vk === 2) || undefined, edge: arms.some((a) => a.vk === 3) || undefined, listOf };
-}
-
-/** One arm's variant-row SELECT: `vk, v, rid[, list]` + the outer carried columns.
- *  `gate` (coalesce's not-in-prior / any per-arm filter) receives the aliased arm rel.
- *  Takes a bare Carry so element- and scalar-parent merges share it. */
-export function variantArmSelect(arm: VariantArm, carry: Carry, hasList: boolean, gate?: (a: Relation) => Expression): Expression {
-  const a = arm.rel.as('a');
-  const cols: Expression[] = [
-    q`${arm.vk} AS vk`,
-    q`${arm.vk === 1 ? a.c.v : q`NULL`} AS v`,
-    q`${arm.vk === 2 || arm.vk === 3 ? a.c.id : q`NULL`} AS rid`,
-  ];
-  if (hasList) cols.push(q`${arm.vk === 4 ? a.c.list : q`NULL`} AS list`);
-  const where = gate ? q` WHERE ${gate(a)}` : empty;
-  return q`SELECT ${list(cols, ', ')}${carryFrag(carry.carried, a)} FROM ${a}${where}`;
-}
-
-export const variantCols = (carry: Carry, hasList: boolean): string[] =>
-  ['vk', 'v', 'rid', ...(hasList ? ['list'] : []), ...carriedCols(carry.carried)];
 
 /** Are these branch shapes genuinely mixed (not all one class, all classifiable)? */
 function branchesAreMixed(branches: readonly any[], params: Record<string, any>): boolean {
