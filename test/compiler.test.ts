@@ -2505,6 +2505,30 @@ describe('scalar project — modulation over the value (Stage 2)', () => {
   });
 });
 
+// Stage 2 consumer: option-map choose(fn).option(k, body)… over a scalar parent — the choice
+// and every option body run against the value through the modulation seam (a CASE over v).
+describe('scalar option-map choose (Stage 2)', () => {
+  const store = new GraphStore(new BunSqlite(':memory:'));
+  for (const age of [29, 27, 35]) executeQuery(store, `g.addV('p').property('age',${age})`, {});
+  const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
+  const vals = (g: string) => executeQuery(store, g, {}).map(dec).map(String).sort();
+
+  test('a predicate-keyed option-map over the value', () => {
+    expect(vals("g.V().values('age').choose(__.identity()).option(between(26,30),__.constant('young')).option(Pick.none,__.constant('old'))"))
+      .toEqual(['old', 'young', 'young']);
+  });
+
+  test('a literal-keyed option-map over the value', () => {
+    expect(vals("g.V().values('age').choose(__.identity()).option(29,__.constant('marko')).option(Pick.none,__.constant('other'))"))
+      .toEqual(['marko', 'other', 'other']);
+  });
+
+  test('no Pick.none default defers (unmatched pass-through is mixed-shape)', () => {
+    expect(() => compile("g.V().values('age').choose(__.identity()).option(29,__.constant('m'))", {}))
+      .toThrow('choose() after a scalar stream not yet supported');
+  });
+});
+
 describe('compiler execution semantics', () => {
   describe('unified lowering characterization', () => {
     test('every disable-safe fast path is result-equivalent to generic lowering', () => {
