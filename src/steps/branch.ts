@@ -3,7 +3,7 @@ import { edges } from '../schema.ts';
 import { stepChain, type Step } from '../frontend.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
 import { tryInlinePredicate } from './predicate.ts';
-import { advance, elemRel, prevRel, carryFrag, carriedCols, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
+import { advance, elemRel, prevRel, carryFrag, carriedCols, type AliasEntry, type AliasMap, type Carried, type Carry, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { type AliasShape } from './alias.ts';
 import { classifyListChild, classifyScalarChild, isElementChild, isListChild, isScalarChild, pushChildScope, ROOT_SCOPE, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from './child.ts';
 import { carryOf, toListStream, toScalarStream, toVariantStream, type ListStream, type ScalarStream, type VariantArms, type VariantStream } from './stream.ts';
@@ -366,7 +366,10 @@ const armShape = (nested: any, params: Record<string, any>): ArmShape | null =>
   : isListChild(nested, params) ? 'list'
   : null;
 
-interface VariantArm {
+/** One compiled branch arm tagged by its natural shape (vk 1 scalar / 2 node / 3 edge /
+ *  4 list). Parent-agnostic: an element-parent (branch.ts) and a scalar-parent (child.ts)
+ *  both build these, so the merge builders below take a bare Carry, not an ElementStream. */
+export interface VariantArm {
   readonly rel: Relation;
   readonly vk: 1 | 2 | 3 | 4;
   readonly as?: ScalarStream['as'];
@@ -386,7 +389,7 @@ function compileVariantArm(seed: ElementStream, nested: any): VariantArm {
 }
 
 /** The union of arm shapes → the widened stream's arm flags. */
-function variantArmsMeta(arms: readonly VariantArm[]): VariantArms {
+export function variantArmsMeta(arms: readonly VariantArm[]): VariantArms {
   const scalarArms = arms.filter((a) => a.vk === 1);
   const listArms = arms.filter((a) => a.vk === 4);
   const scalarAs = scalarArms.length && scalarArms.every((a) => a.as === scalarArms[0].as) ? scalarArms[0].as : undefined;
@@ -395,8 +398,9 @@ function variantArmsMeta(arms: readonly VariantArm[]): VariantArms {
 }
 
 /** One arm's variant-row SELECT: `vk, v, rid[, list]` + the outer carried columns.
- *  `gate` (coalesce's not-in-prior / any per-arm filter) receives the aliased arm rel. */
-function variantArmSelect(arm: VariantArm, st: ElementStream, hasList: boolean, gate?: (a: Relation) => Expression): Expression {
+ *  `gate` (coalesce's not-in-prior / any per-arm filter) receives the aliased arm rel.
+ *  Takes a bare Carry so element- and scalar-parent merges share it. */
+export function variantArmSelect(arm: VariantArm, carry: Carry, hasList: boolean, gate?: (a: Relation) => Expression): Expression {
   const a = arm.rel.as('a');
   const cols: Expression[] = [
     q`${arm.vk} AS vk`,
@@ -405,11 +409,11 @@ function variantArmSelect(arm: VariantArm, st: ElementStream, hasList: boolean, 
   ];
   if (hasList) cols.push(q`${arm.vk === 4 ? a.c.list : q`NULL`} AS list`);
   const where = gate ? q` WHERE ${gate(a)}` : empty;
-  return q`SELECT ${list(cols, ', ')}${carryFrag(st.carried, a)} FROM ${a}${where}`;
+  return q`SELECT ${list(cols, ', ')}${carryFrag(carry.carried, a)} FROM ${a}${where}`;
 }
 
-const variantCols = (st: ElementStream, hasList: boolean): string[] =>
-  ['vk', 'v', 'rid', ...(hasList ? ['list'] : []), ...carriedCols(st.carried)];
+export const variantCols = (carry: Carry, hasList: boolean): string[] =>
+  ['vk', 'v', 'rid', ...(hasList ? ['list'] : []), ...carriedCols(carry.carried)];
 
 /** Are these branch shapes genuinely mixed (not all one class, all classifiable)? */
 function branchesAreMixed(branches: readonly any[], params: Record<string, any>): boolean {

@@ -2561,6 +2561,33 @@ describe('scalar-parent branch/map (Stage 1)', () => {
     expect(vals("g.V(1).values('age').map(__.V().hasLabel('person').values('age').sum())")).toEqual(['123']);
   });
 
+  // Slice 3: a scalar-parent union whose arms disagree on shape (a scalar value arm + a
+  // re-source element arm, or + a fold list arm) merges into a VariantStream — the SAME
+  // dynamic-tag shape the element parent produces, via the parent-agnostic merge builders.
+  test('mixed-shape union over a scalar → a VariantStream', () => {
+    // scalar 'x' + element re-source (all 6 vertices) → 7 tagged rows.
+    expect(read("g.V(1).values('age').union(__.constant('x'),__.V())").shape).toEqual({ kind: 'variant', node: true });
+    expect(executeQuery(store, "g.V(1).values('age').union(__.constant('x'),__.V())", {})).toHaveLength(7);
+    // scalar + list arm (fold of re-sourced names).
+    expect(read("g.V(1).values('age').union(__.constant('x'),__.V().values('name').fold())").shape)
+      .toEqual({ kind: 'variant', listOf: { kind: 'scalar' } });
+    expect(executeQuery(store, "g.V(1).values('age').union(__.constant('x'),__.V().values('name').fold())", {})).toHaveLength(2);
+    // shape-agnostic count() composes over the variant (variant.ts VARIANT_TAIL).
+    expect(vals("g.V(1).values('age').union(__.constant('x'),__.V()).count()")).toEqual(['7']);
+    // homogeneous arms stay a scalar stream (the cascade only falls to variant when mixed).
+    expect(read("g.V().values('age').union(__.constant('a'),__.constant('b'))").shape)
+      .toEqual({ kind: 'value', as: undefined, perRowType: undefined });
+  });
+
+  test('mixed-shape choose over a scalar → a VariantStream (gate partitions then/else)', () => {
+    expect(read("g.V(1).values('age').choose(__.is(lt(30)),__.V(),__.constant('old'))").shape)
+      .toEqual({ kind: 'variant', node: true });
+    // age 29 < 30 → the then (re-source, 6 vertices) wins; else 'old' is unproductive here.
+    expect(executeQuery(store, "g.V(1).values('age').choose(__.is(lt(30)),__.V(),__.constant('old'))", {})).toHaveLength(6);
+    // age 29 not > 30 → the else scalar 'young' wins.
+    expect(executeQuery(store, "g.V(1).values('age').choose(__.is(gt(30)),__.V(),__.constant('young'))", {})).toHaveLength(1);
+  });
+
   test('re-source arms compose in union/choose/coalesce', () => {
     expect(vals("g.V(1).values('age').union(__.constant('x'),__.V().count())")).toEqual(['6', 'x']);
     // choose: age 29 is not > 30 → the else (constant 0) wins.

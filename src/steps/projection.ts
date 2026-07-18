@@ -16,7 +16,7 @@ import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerScalarP
 import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerLegacyUnion } from './branch.ts';
 import { lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
-import { childSteps, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, tryCompileCountChild, tryCompileListChild, tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarUnionChild } from './child.ts';
+import { childSteps, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, tryCompileCountChild, tryCompileListChild, tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantUnion } from './child.ts';
 import { lowerElementDedup } from './filter.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
@@ -667,7 +667,15 @@ const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
   // choose: predicate form → gated UNION arms; option-map form (choose(fn).option(k,body)…)
   // → a CASE over the value through the modulation seam.
   ['choose', (s, step, steps, at) => {
-    const r = step.options ? lowerChooseOptionsScalar(s, steps, at) : tryScalarChooseChild(s, step);
+    const r = step.options ? lowerChooseOptionsScalar(s, steps, at)
+      : (tryScalarChooseChild(s, step) ?? tryScalarVariantChoose(s, step));
+    return r ? continueLowering(r, at + 1) : null;
+  }],
+  // union over a scalar: homogeneous arms merge as a scalar UNION ALL (tryScalarUnionChild);
+  // mixed-shape arms (scalar + re-source element + fold list) merge as a VariantStream — the
+  // scalar→variant cascade, mirroring the element-parent tailUnion list→scalar→variant order.
+  ['union', (s, step, _steps, at) => {
+    const r = tryScalarUnionChild(s, step) ?? tryScalarVariantUnion(s, step);
     return r ? continueLowering(r, at + 1) : null;
   }],
   ['map', scalarBranch(tryScalarMapChild)],
@@ -686,7 +694,6 @@ const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
     return r ? continueLowering(r, at + 1) : null;
   }],
   ['flatMap', scalarBranch(tryScalarMapChild)],
-  ['union', scalarBranch(tryScalarUnionChild)],
   ['coalesce', scalarBranch(tryScalarCoalesceChild)],
   // math("<formula>") over a scalar: `_` = the value `v`, one arithmetic Double. Named
   // vars / by()-modulated math defer (return null) to the generic message.

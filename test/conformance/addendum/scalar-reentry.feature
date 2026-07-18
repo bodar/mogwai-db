@@ -195,6 +195,22 @@ Feature: mogwai addendum — scalar-stream re-entry
       | josh |
       | peter |
 
+  # Slice: mixed-shape arms over a scalar parent (a constant scalar arm + a re-source element
+  # arm) merge into a VariantStream — the same dynamic-tag shape the element parent produces.
+  # A count() tail is shape-agnostic over the variant and keeps the assertion deterministic:
+  # one input (V(1), age 29) → 1 scalar 'x' + 6 vertices = 7.
+  @gap:scalar-position
+  Scenario: g_VX1X_valuesXageX_unionXconstantXxX_VX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).values("age").union(__.constant("x"),__.V()).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[7].l |
+
   @gap:scalar-position
   Scenario: g_V_hasLabelXpersonX_valuesXageX_aggregateXaX_capXaX_unfold
     Given the modern graph
