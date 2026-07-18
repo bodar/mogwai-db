@@ -6,7 +6,7 @@
 import { test, expect, describe } from 'bun:test';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
-import { executeQuery } from '../src/execute.ts';
+import { executeQuery, executeFramed } from '../src/execute.ts';
 import { streamBuffers } from '../src/http.ts';
 import { ioc } from '../src/io.ts';
 import { BigDecimal, Duration } from '../src/gremlin-types.ts';
@@ -14,7 +14,7 @@ import { BigDecimal, Duration } from '../src/gremlin-types.ts';
 async function values(gremlin: string, writes: string[]): Promise<any[]> {
   const store = new GraphStore(new BunSqlite(':memory:'));
   for (const w of writes) executeQuery(store, w, {});
-  const buffers = executeQuery(store, gremlin, {});
+  const buffers = executeFramed(store, gremlin, {});
   const res = streamBuffers(buffers, 64);
   const reader = res.body!.getReader();
   const chunks: Buffer[] = [];

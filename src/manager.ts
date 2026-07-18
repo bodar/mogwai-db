@@ -12,6 +12,7 @@
 // PUT is create-if-absent, DELETE is a no-op when there's nothing to remove.
 import type { GraphStore } from './storage.ts';
 import { type TypeNode } from './gremlin-types.ts';
+import { type Framed } from './execute.ts';
 
 export interface GraphInfo {
   vertexCount: number;
@@ -23,8 +24,9 @@ export interface GraphManager {
    *  and return the framed GraphBinary result buffers (concern B — executeQuery,
    *  run in the store tier). The edge (router) has already parsed the wire and
    *  resolved `id`, and wraps the returned buffers into the HTTP response (concern
-   *  C). Throws on compile/SQL/framing failure — the edge frames the error. */
-  query(id: string, gremlin: string, params: Record<string, any>, paramTypes?: Record<string, TypeNode>): Promise<Buffer[]>;
+   *  C). Throws on compile/SQL/framing failure — the edge frames the error. Each result
+   *  carries its traverser multiplicity (`bulk`) for the GraphBinary bulked frame. */
+  query(id: string, gremlin: string, params: Record<string, any>, paramTypes?: Record<string, TypeNode>): Promise<Framed[]>;
   /** Create graph `id` if absent. Idempotent. */
   create(id: string): Promise<void>;
   /** Element counts for graph `id`, creating it on demand (fresh = 0, 0). */

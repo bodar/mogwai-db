@@ -8,17 +8,17 @@
 // surface as a thrown error the router turns into `errorResponse` — one buffered
 // HEADER + status trailer, HTTP always 200 with the error on the trailer.
 import { ioc } from './io.ts';
+import { type Framed } from './execute.ts';
 
 export const CONTENT_TYPE = 'application/vnd.graphbinary-v4.0';
 const HEADER = Buffer.from([0x84, 0x00]);         // version, bulked=false (flat frame)
 const HEADER_BULKED = Buffer.from([0x84, 0x01]);  // version, bulked=true
 
 /** The GraphBinary V4 bulked-response contract: when the client requested `bulkResults`,
- *  each value is followed by a fully-qualified `Long` multiplicity. Stage A emits a
- *  constant bulk of 1 (behaviour-identical to the flat frame — the client expands
- *  Traverser(v,1) back to v); a later stage threads the real per-value bulk from the store. */
-const BULK_ONE = ioc.longSerializer.serialize(1n, true);
-const withBulk = (value: Buffer): Buffer => Buffer.concat([value, BULK_ONE]);
+ *  each value is followed by a fully-qualified `Long` multiplicity (the store's per-value
+ *  bulk — the client expands Traverser(v,N) back to N copies). A bulk of 1 is byte-for-byte
+ *  the flat frame, so an un-collapsed stream is unchanged. */
+const withBulk = (f: Framed): Buffer => Buffer.concat([f.buf, ioc.longSerializer.serialize(f.bulk, true)]);
 
 function frameTrailer(status = 200, message: string | null = null): Buffer {
   const parts: Buffer[] = [
@@ -49,10 +49,10 @@ export function errorResponse(message: string): Response {
  * integer (resolved in wire.ts). Framing is complete before we start, so a value
  * can't throw here; a client disconnect just stops further pulls.
  */
-export function streamBuffers(buffers: Buffer[], batchSize: number, bulked = false): Response {
+export function streamBuffers(framed: Framed[], batchSize: number, bulked = false): Response {
   // A bulked frame appends a Long multiplicity to each value; batchSize still counts
   // VALUES (one value = value+bulk), so chunk pacing is unchanged.
-  const values = bulked ? buffers.map(withBulk) : buffers;
+  const values = bulked ? framed.map(withBulk) : framed.map((f) => f.buf);
   let i = 0;
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
