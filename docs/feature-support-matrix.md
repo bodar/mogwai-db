@@ -1,7 +1,7 @@
 # mogwai-db — feature support matrix
 
 Scannable map of what the compiler supports, and where partial steps stop. Grouped
-by traversal concern. **L3 conformance: <!-- L3:passing -->1,169<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+by traversal concern. **L3 conformance: <!-- L3:passing -->1,170<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 Sourced from the dispatch maps (`src/steps/*.ts`) and the compiler `throw` sites — if
 the code defers a shape, it fails closed with a clear error and this file says so. Keep
@@ -156,7 +156,7 @@ One home (`Carry`): a named registry (aggregate/cap/group('a')) and a carried co
 
 | Step | | Notes |
 |---|:--:|---|
-| `aggregate('x')` | 🟡 | pass-through barrier → list/variant relation; `by(key/scalar/ordered-element traversal)`; `local(aggregate(...))`; ProductiveBy NULL survives. ❌ on a scalar stream, token modulators, general element ordering |
+| `aggregate('x')` | 🟡 | pass-through barrier → list/variant relation; `by(key/scalar/ordered-element traversal)`; `local(aggregate(...))`; ProductiveBy NULL survives. **Over a scalar stream** `aggregate('x')`/`local(__.aggregate('x'))` collects the values into the bag (pass-through); `cap('x')` reads it (shape-agnostic). ❌ by()-modulated scalar aggregate, token modulators, general element ordering |
 | `cap('x')` | 🟡 | list/variant emits one collection (`unfold()` for members); group side-effect re-emits its GroupStream. ❌ multi-key `cap('x','y')` |
 | `sack()` / `withSack(…)` | 🟡 | carried column: `sack(Operator.x).by(key/T.label/nested)` mutate, bare `sack()` read, `withSack(init)` seed. ❌ inject-const numeric promotion; `repeat()`/`barrier`/`local`; split/merge-on-fork; `sack(BiFunction)` |
 | `group('a')`/`groupCount('a')` | 🟡 | pass-through barrier, `cap('a')` re-runs the group. ❌ after `as()`/`path()` (inherits §4 limits) |

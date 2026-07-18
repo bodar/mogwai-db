@@ -3,6 +3,7 @@ import { scalarProp, predicateSql, jsonbGroupArray, elemCtx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { normalize, type PStep } from '../strategies.ts';
 import { elemRel, type ElementStream, type StepFn, type SideEffectDef } from './context.ts';
+import { type ScalarStream } from './stream.ts';
 import { tryCompileFirstElementValueRows, tryCompileScalarValueRows } from './child.ts';
 
 // ---------- named side-effect collections (aggregate) ----------
@@ -98,6 +99,22 @@ export const aggregate: StepFn = (s, st) => {
 
 const register = (st: ElementStream, name: string, def: SideEffectDef): ElementStream =>
   ({ ...st, sideEffects: new Map([...(st.sideEffects ?? []), [name, def]]) });
+
+/**
+ * aggregate('x') over a SCALAR stream: collect the current values into the named side-effect
+ * bag (a JSONB list of the scalar values), read back by cap('x'). Pass-through — the scalar
+ * stream continues unchanged, so `values(k).aggregate('x').<more>…cap('x')` composes. A
+ * by()-modulator over a scalar aggregate re-projects each value and defers here (return null →
+ * the clear generic message) until wired through the modulation seam.
+ */
+export function lowerScalarAggregate(s: ScalarStream, step: PStep): ScalarStream | null {
+  const name = aggregateName(step);
+  if (((step as any).bys ?? []).length) return null;
+  const p = s.rel.as('p');
+  const rel = s.q.cte(q`SELECT ${jsonbGroupArray(p.c.v)} AS list FROM ${p}`, ['list']);
+  const def: SideEffectDef = { kind: 'list', rel, of: { kind: 'scalar', as: s.as } };
+  return { ...s, sideEffects: new Map([...(s.sideEffects ?? []), [name, def]]) };
+}
 
 // ---------- side-effecting group('a') / groupCount('a') ----------
 //
