@@ -22,6 +22,18 @@ import { executeQuery } from '../../src/execute.ts';
 import { ioc } from '../../src/io.ts';
 import { MODERN_SEED } from './seed-modern.ts';
 import { CREW_SEED } from './seed-crew.ts';
+import { BigDecimal, Duration } from '../../src/gremlin-types.ts';
+
+// A vertex carrying one property of each type our extended GraphBinary serializers cover, so a
+// `Given the typed graph` scenario can read each back and exercise serialize+decode end-to-end.
+const TYPED_SEED = [
+  'g.addV("typed")'
+  + '.property("n", 9007199254740993L)'                          // long > 2^53 (lossless via CAST-as-text)
+  + '.property("bd", 3.141592653589793238462643383279M)'          // BigDecimal beyond f64
+  + '.property("du", Duration(90, 500000000))'                    // Duration (90.5s)
+  + '.property("dt", datetime("2024-01-01T00:00:00Z"))'           // datetime
+  + '.property("u", UUID("0263f28b-eff9-4c17-8e33-0b41c74b6d4c"))', // uuid
+];
 
 const ADDENDUM = new URL('./addendum/', import.meta.url).pathname;
 
@@ -56,19 +68,23 @@ function parseFeature(featureName: string, text: string): Scenario[] {
   return out;
 }
 
-// TinkerPop typed-result notation → the JS value our GraphBinary decode produces. long → BigInt
-// (matching the client's Int64 decode), int/double/float → number, l[…] → array (ordered),
-// null → null, anything else → a bare string.
-function parseTyped(tok: string): unknown {
+// TinkerPop typed-result notation → the SAME canonical key `canon()` produces for the decoded
+// value, so expected and actual compare directly. Numbers: d[n].i/.d/.f/.b/.s → number,
+// d[n].l/.n → long/bigint (BigInt); bd[…] BigDecimal, dt[…] datetime, du[…] Duration (our
+// nanos toString); l[…]/s[…] list/set (ordered within); null; anything else → a bare string.
+function expectedCanon(tok: string): string {
   const t = tok.trim();
-  if (t === 'null') return null;
-  const num = t.match(/^d\[(-?[\d.eE+]+)\]\.([bsilfnmd])$/);
-  if (num) return num[2] === 'l' || num[2] === 'n' ? BigInt(num[1]) : Number(num[1]);
+  if (t === 'null') return 'null';
+  const num = t.match(/^d\[(-?[\d.eE+]+)\]\.([bsilfnd])$/);
+  if (num) return num[2] === 'l' || num[2] === 'n' ? 'L' + BigInt(num[1]).toString() : 'N' + Number(num[1]);
+  const bd = t.match(/^bd\[(.+)\]$/); if (bd) return 'BD' + bd[1];
+  const dt = t.match(/^dt\[(.+)\]$/); if (dt) return 'DT' + new Date(dt[1]).toISOString();
+  const du = t.match(/^du\[(.+)\]$/); if (du) return 'DU' + du[1];
   if ((t.startsWith('l[') || t.startsWith('s[')) && t.endsWith(']')) {
     const inner = t.slice(2, -1);
-    return inner === '' ? [] : splitTopLevel(inner).map(parseTyped);
+    return '[' + (inner === '' ? '' : splitTopLevel(inner).map(expectedCanon).join(',')) + ']';
   }
-  return t;
+  return 'S' + t;
 }
 
 // Split a comma list, not descending into nested […] brackets.
@@ -90,11 +106,14 @@ function canon(v: unknown): string {
   if (typeof v === 'bigint') return 'L' + v.toString();
   if (typeof v === 'number') return 'N' + v;
   if (typeof v === 'string') return 'S' + v;
+  if (v instanceof BigDecimal) return 'BD' + v.toString();
+  if (v instanceof Duration) return 'DU' + v.toString();
+  if (v instanceof Date) return 'DT' + v.toISOString();
   if (Array.isArray(v)) return '[' + v.map(canon).join(',') + ']';
   return 'J' + JSON.stringify(v);
 }
 
-const GRAPHS: Record<string, readonly string[]> = { modern: MODERN_SEED, crew: CREW_SEED, empty: [] };
+const GRAPHS: Record<string, readonly string[]> = { modern: MODERN_SEED, crew: CREW_SEED, typed: TYPED_SEED, empty: [] };
 
 function loadScenarios(): Scenario[] {
   return readdirSync(ADDENDUM)
@@ -113,7 +132,7 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
       for (const w of GRAPHS[s.graph]) executeQuery(store, w, {});
       const decoded = executeQuery(store, s.gremlin, {}).map((b: Buffer) => ioc.anySerializer.deserialize(b, true).v);
       const got = decoded.map(canon).sort();
-      const want = s.expected.map(parseTyped).map(canon).sort();
+      const want = s.expected.map(expectedCanon).sort();
       expect(got).toEqual(want);
     });
   }
