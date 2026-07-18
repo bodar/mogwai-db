@@ -7,7 +7,7 @@ import {
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carriedCols, carriedWith, elemRel, withoutCarried, type ElementStream } from './context.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn } from './stream.ts';
-import { tryLowerLocalAggregate } from './sideeffect.ts';
+import { tryLowerLocalAggregate, lowerScalarAggregate } from './sideeffect.ts';
 import { type Shape } from '../render.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
 import { lowerScalarFilter, lowerConstant, lowerScalarConstant, lowerScalarSack, collectionTypeOf, scalarCollectionRetype } from './scalar.ts';
@@ -15,7 +15,7 @@ import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerScalarP
 import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerLegacyUnion } from './branch.ts';
 import { lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
-import { classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, tryCompileCountChild, tryCompileListChild, tryScalarChooseChild, tryScalarCoalesceChild, tryScalarMapChild, tryScalarUnionChild } from './child.ts';
+import { childSteps, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, tryCompileCountChild, tryCompileListChild, tryScalarChooseChild, tryScalarCoalesceChild, tryScalarMapChild, tryScalarUnionChild } from './child.ts';
 import { lowerElementDedup } from './filter.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
@@ -609,6 +609,10 @@ const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
   ['count', scalarCount],
   ['fold', scalarFold],
   ['groupCount', scalarGroupCount],
+  // aggregate('x') collects the values into a named bag (pass-through); cap('x') reads any
+  // registered side-effect (shape-agnostic list/variant). Both compose over a scalar stream.
+  ['aggregate', (s, step, _steps, at) => { const r = lowerScalarAggregate(s, step); return r ? continueLowering(r, at + 1) : null; }],
+  ['cap', (s, _step, steps, at) => compileCap(s, steps, at)],
   // Branch/map over a scalar current object: each arm is a value sub-traversal lowered
   // through the same engine, gated + UNION-merged (child.ts tryScalar*Child). A miss
   // (arm outside the scalar-arm vocabulary) returns null → the clear generic deferral.
@@ -618,7 +622,21 @@ const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
     const r = step.options ? lowerChooseOptionsScalar(s, steps, at) : tryScalarChooseChild(s, step);
     return r ? continueLowering(r, at + 1) : null;
   }],
-  ['map', scalarBranch(tryScalarMapChild)], ['local', scalarBranch(tryScalarMapChild)],
+  ['map', scalarBranch(tryScalarMapChild)],
+  // local: a value body per traverser; local(__.aggregate('x')) is a per-value side-effect
+  // register that passes the value through — equivalent to a bare aggregate at this position.
+  ['local', (s, step, _steps, at) => {
+    const nested = (step.args ?? [])[0];
+    if (nested && typeof nested === 'object' && 'nested' in nested) {
+      const body = childSteps(nested.nested, s.params);
+      if (body.length === 1 && body[0].name === 'aggregate') {
+        const r = lowerScalarAggregate(s, body[0]);
+        return r ? continueLowering(r, at + 1) : null;
+      }
+    }
+    const r = tryScalarMapChild(s, step);
+    return r ? continueLowering(r, at + 1) : null;
+  }],
   ['flatMap', scalarBranch(tryScalarMapChild)],
   ['union', scalarBranch(tryScalarUnionChild)],
   ['coalesce', scalarBranch(tryScalarCoalesceChild)],
@@ -814,7 +832,10 @@ function lowerSackRead(st: ElementStream, step: PStep): ScalarStream {
  *  collection traverser; only an explicit following unfold() emits its members. A group
  *  side-effect (group('a')/groupCount('a')) re-runs lowerGroup over its stashed
  *  source → one GroupStream (steps/group.ts). Deferred: multi-key cap('x','y'). */
-function compileCap(st: ElementStream, steps: PStep[], stop: number): LoweringResult {
+// cap('x') reads a named side-effect. It only touches `sideEffects` + the shared carry, so it
+// is shape-agnostic (a scalar stream that registered an aggregate reads it identically); only
+// the group('a') re-emit needs the element parent that stashed it.
+function compileCap(st: ElementStream | ScalarStream, steps: PStep[], stop: number): LoweringResult {
   const names = (steps[stop].args ?? []).filter((a: any) => typeof a === 'string');
   if (names.length !== 1) throw new Error('cap() with multiple side-effect keys not yet supported');
   const def = st.sideEffects?.get(names[0]);
@@ -826,7 +847,8 @@ function compileCap(st: ElementStream, steps: PStep[], stop: number): LoweringRe
   if (def.kind === 'variant')
     return continueLowering(toVariantStream(carryOf(st), def.rel, { scalarAs: def.scalarAs, node: def.elem === 'node' || undefined, edge: def.elem === 'edge' || undefined }, 'list'), stop + 1);
   // group('a')/groupCount('a') side-effect → re-emit the same rich GroupStream as an
-  // inline group; terminal framing and Column consumers share its dispatch.
+  // inline group; terminal framing and Column consumers share its dispatch. The stashed
+  // def.parent carries the element source, so a scalar-stream cap of a group re-runs correctly.
   const src: GroupSource = { from: def.from, ctx: def.ctx, elem: def.elem, parent: def.parent, productiveBy: def.productiveBy };
-  return continueLowering(lowerGroup(st, def.isCount, def.bys, src), stop + 1);
+  return continueLowering(lowerGroup(def.parent, def.isCount, def.bys, src), stop + 1);
 }

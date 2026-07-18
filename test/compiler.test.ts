@@ -2489,6 +2489,20 @@ describe('scalar tail at root (Stage 2 fix)', () => {
     expect(v("g.V().values('age').where(gt(30))")).toEqual(['35']);
     expect(v("g.V().values('age').where(lte(29)).where(gt(27))")).toEqual(['29']);
   });
+
+  test('aggregate(x)/local(__.aggregate(x)) collect the values; cap(x) reads them', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    for (const n of ['marko', 'vadas', 'josh']) executeQuery(store, `g.addV('p').property('name','${n}')`, {});
+    const listOf = (g: string) => {
+      const [row] = executeQuery(store, g, {}).map((b: Buffer) => ioc.anySerializer.deserialize(b, true).v);
+      return (row as any[]).map((x: any) => String(x?.v ?? x)).sort();
+    };
+    expect(listOf("g.V().values('name').aggregate('a').cap('a')")).toEqual(['josh', 'marko', 'vadas']);
+    expect(listOf("g.V().values('name').local(__.aggregate('a')).cap('a')")).toEqual(['josh', 'marko', 'vadas']);
+    // pass-through: the values continue past aggregate()
+    const cnt = executeQuery(store, "g.V().values('name').aggregate('a').count()", {}).map((b: Buffer) => ioc.anySerializer.deserialize(b, true).v);
+    expect(cnt).toEqual([3n]);
+  });
 });
 
 // Stage 2 substrate: a SCALAR is a first-class child parent (ChildParent |= ScalarStream).
