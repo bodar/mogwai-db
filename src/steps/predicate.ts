@@ -54,7 +54,7 @@ const AGG_FN: Record<string, string> = { count: 'COUNT', sum: 'SUM', min: 'MIN',
  * (non-node ctx, an unrenderable movement) so the caller falls through to the generic
  * reducer child.
  */
-function correlatedReduce(body: Step[], ctx: ScalarCtx, params: Record<string, any>): Expression | null {
+export function correlatedReduce(body: Step[], ctx: ScalarCtx, params: Record<string, any>): Expression | null {
   if (ctx.elem !== 'node') return null; // movement reduces from a vertex
   const mv = body[0];
   if (!mv || !MOVES.has(mv.name)) return null;

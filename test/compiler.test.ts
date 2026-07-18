@@ -2319,6 +2319,19 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().as("a").repeat(__.out()).times(2).path().from("a")', {})).toThrow('not yet supported');
   });
 
+  test('path().by(T.token) and path().by(__.traversal): per-position scalar', () => {
+    // by(T.label)/by(T.id) project the token inline; both are value positions.
+    const lbl = read('g.V().out().path().by(T.label)');
+    expect(lbl.shape).toEqual({ kind: 'path', positions: [{ render: 'value', prefix: 'x0' }, { render: 'value', prefix: 'x1' }] });
+    expect(read('g.V(1).out().path().by(T.id)').sql).toContain('COALESCE');
+    // by(__.values(k).transform): a value+transform chain rendered inline per position.
+    expect(read('g.V().out().out().path().by(__.values("name").toUpper())').sql.toLowerCase()).toContain('upper(');
+    // by(__.<movement>.count()): a correlated scalar per position (reuses correlatedReduce).
+    expect(read('g.V().out().path().by(__.out().count())').sql).toContain('COUNT(*)');
+    // an unsupported by(traversal) shape fails closed.
+    expect(() => compile('g.V().out().path().by(__.groupCount())', {})).toThrow('path().by(traversal)');
+  });
+
   test('path() interleaves edge and vertex positions with the right element shape', () => {
     const p = read('g.V(1).outE("created").inV().path()');
     // edge position frames endpoints as external ids (COALESCE(uid,id)), not raw rowid
@@ -2349,8 +2362,11 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V(1).union(__.out(), __.out().out()).path().by("name")', {})).toThrow('path().by() through a branch not yet supported');
     // unchanged deferrals
     expect(() => compile('g.V(1).out().dedup().path()', {})).toThrow('dedup() with path tracking not yet supported');
-    expect(() => compile('g.V(1).out().path().by(__.values("name"))', {})).toThrow('path().by(traversal) modulator not yet supported');
-    expect(() => compile('g.V(1).out().path().by(T.id)', {})).toThrow('path().by(T.id) modulator not yet supported');
+    // by(__.values(k))/by(T.id) now compile to a per-position scalar; only an unrenderable
+    // by(traversal) shape defers.
+    expect(read('g.V(1).out().path().by(__.values("name"))').shape.kind).toBe('path');
+    expect(read('g.V(1).out().path().by(T.id)').shape.kind).toBe('path');
+    expect(() => compile('g.V(1).out().path().by(__.groupCount())', {})).toThrow('path().by(traversal)');
     expect(() => compile('g.V(1).out().path().order()', {})).toThrow('order() on a path value not yet supported');
   });
 
