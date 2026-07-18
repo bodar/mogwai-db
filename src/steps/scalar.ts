@@ -377,6 +377,22 @@ export function lowerScalarSack(s: ScalarStream, step: PStep): ScalarStream {
   return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
 }
 
+/** constant(x) over a SCALAR stream: rebind the value to the literal x while PRESERVING the
+ *  physical encounter column and carried schema (incl. child-scope origins). Unlike the
+ *  shape-agnostic lowerConstant, this composes inside a child scope — the scalar seed carries
+ *  a minted encounter, so a following partitioned reducer/cardinality policy still has its
+ *  order marker. This is what lets `choose(fn).option(k, __.constant(x))` / project fields /
+ *  modulation option bodies use constant per origin. */
+export function lowerScalarConstant(s: ScalarStream, args: any[]): ScalarStream {
+  const p = s.rel.as('p');
+  const enc = s.encounter ? q`, ${p.c[s.encounter]} AS ${s.encounter}` : empty;
+  const rel = s.q.cte(
+    q`SELECT ${value(args[0])} AS v${enc}${carryFrag(s.carried, p)} FROM ${p}`,
+    ['v', ...(s.encounter ? [s.encounter] : []), ...carriedCols(s.carried)],
+  );
+  return toScalarStream(carryOf(s), rel, undefined, 'value', s.encounter);
+}
+
 /** constant(x): replace the current object with the literal x, one per input row. Shape-
  *  agnostic — the source relation may be an element or a scalar; only row identity and
  *  the carried schema matter. A child scope (origins live) defers: constant loses the

@@ -617,6 +617,10 @@ export interface ScalarModulationSpec {
 export interface ScalarModulationDomain {
   readonly rel: Relation;
   readonly values: readonly { value: string; present: string }[];
+  /** The parent-identity column the rejoined rel projects: `id` for an element parent (the
+   *  consumer rejoins nodes/edges on it), `v` for a scalar parent (the value IS the current
+   *  object — no element table to join). Lets math/format/choose-option be parent-polymorphic. */
+  readonly idCol: 'id' | 'v';
 }
 
 /** Compile independent scalar traversal modulators against ONE multiset-safe parent
@@ -625,21 +629,26 @@ export interface ScalarModulationDomain {
  * is never confused with an unproductive child. This is the common relational seam
  * for multi-input consumers such as math(), format(), and option-map choose(). */
 export function tryCompileScalarModulations(
-  parent: ElementStream,
+  parent: ChildParent,
   specs: readonly ScalarModulationSpec[],
 ): ScalarModulationDomain | null {
-  if (!specs.length) return null;
+  if (!specs.length || isPropertyParent(parent)) return null;
+  const scalarParent = isScalarParent(parent);
   const outer = pushChildScope(parent);
   const children = specs.map((spec, i) => {
-    let seed = outer.seed;
-    if (spec.rootCol) {
-      const p = outer.seed.rel.as(`mr${i}`);
+    let seed: ElementStream | ScalarStream = outer.seed;
+    // as()-label re-root is an element concern (the label holds element ids); a scalar parent
+    // fields every by() against its value directly, so a rootCol over a scalar defers.
+    if (spec.rootCol && scalarParent) return null;
+    if (spec.rootCol && !scalarParent) {
+      const es = outer.seed as ElementStream;
+      const p = es.rel.as(`mr${i}`);
       // rootCol is an as()-label column: a JSONB history array. Re-root on its last id.
       const rel = parent.q.cte(
-        q`SELECT ${aliasId(p.c[spec.rootCol], 'last')} AS id${carryFrag(outer.seed.carried, p)} FROM ${p}`,
-        ['id', ...carriedCols(outer.seed.carried)],
+        q`SELECT ${aliasId(p.c[spec.rootCol], 'last')} AS id${carryFrag(es.carried, p)} FROM ${p}`,
+        ['id', ...carriedCols(es.carried)],
       );
-      seed = { ...outer.seed, rel, elem: spec.rootElem ?? outer.seed.elem };
+      seed = { ...es, rel, elem: spec.rootElem ?? es.elem };
     }
     const stream = tryCompileScalarValueChild(seed, spec.nested, 'first', reuseCurrentFrame(outer.scope, outer.frame));
     return stream ? { stream, required: spec.required !== false } : null;
@@ -656,11 +665,14 @@ export function tryCompileScalarModulations(
     q`${rel.c.v} AS ${values[i].value}`,
     q`CASE WHEN ${rel.c[outer.frame.ordinal]} IS NOT NULL THEN 1 END AS ${values[i].present}`,
   ]);
+  // The rejoined rel projects the parent identity: an element parent's `id` (consumers rejoin
+  // nodes/edges on it) or a scalar parent's value `v` (the current object itself).
+  const idCol = scalarParent ? 'v' : 'id';
   const rel = parent.q.cte(
-    q`SELECT ${d.c.id} AS id${carryFrag(parent.carried, d)}, ${list(payload, ', ')} FROM ${d}${list(joins, '')}`,
-    ['id', ...carriedCols(parent.carried), ...values.flatMap((x) => [x.value, x.present])],
+    q`SELECT ${d.c[idCol]} AS ${idCol}${carryFrag(parent.carried, d)}, ${list(payload, ', ')} FROM ${d}${list(joins, '')}`,
+    [idCol, ...carriedCols(parent.carried), ...values.flatMap((x) => [x.value, x.present])],
   );
-  return { rel, values };
+  return { rel, values, idCol };
 }
 
 /** Productive scalar rows with the child origin still live. Barrier/side-effect
@@ -1021,7 +1033,7 @@ const scalarArmLeafOk = (s: PStep): boolean =>
  *  terminal reducer). Unlike the root-scope arm set, the pushed scalar seed carries an
  *  encounter column, so the partitioned order/slice/tail/dedup paths are safe here; constant()
  *  is excluded (it defers inside a child scope) and asBool has no scalarTx impl. */
-const SCALAR_CHILD_PREFIX = new Set([...SCALAR_ARM_TX, 'is', 'identity', 'unfold', 'math', 'order', 'limit', 'skip', 'range', 'tail', 'dedup']);
+const SCALAR_CHILD_PREFIX = new Set([...SCALAR_ARM_TX, 'is', 'constant', 'identity', 'unfold', 'math', 'order', 'limit', 'skip', 'range', 'tail', 'dedup']);
 const scalarChildPrefixOk = (s: PStep): boolean =>
   SCALAR_CHILD_PREFIX.has(s.name) || (s.name === 'asNumber' && (s.args ?? []).length > 0);
 

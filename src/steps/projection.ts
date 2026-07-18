@@ -10,9 +10,9 @@ import { carryOf, continueLowering, dispatchShapeTail, toListStream, toResultStr
 import { tryLowerLocalAggregate } from './sideeffect.ts';
 import { type Shape } from '../render.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
-import { lowerScalarFilter, lowerConstant, lowerScalarSack, collectionTypeOf, scalarCollectionRetype } from './scalar.ts';
+import { lowerScalarFilter, lowerConstant, lowerScalarConstant, lowerScalarSack, collectionTypeOf, scalarCollectionRetype } from './scalar.ts';
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerScalarProject, lowerSingleSelect } from './select.ts';
-import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerChooseOptions, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
+import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerChooseOptions, lowerChooseOptionsScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerLegacyUnion } from './branch.ts';
 import { lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
 import { classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, tryCompileCountChild, tryCompileListChild, tryScalarChooseChild, tryScalarCoalesceChild, tryScalarMapChild, tryScalarUnionChild } from './child.ts';
@@ -601,8 +601,9 @@ const scalarBranch = (fn: (s: ScalarStream, step: PStep) => ScalarStream | null)
 const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
   ['is', scalarIsListRetype],
   ['and', scalarFilter], ['or', scalarFilter], ['not', scalarFilter], ['filter', scalarFilter], ['where', scalarFilter],
-  // constant(x) rebinds every traverser to the literal x (a fresh scalar stream).
-  ['constant', (s, step, _steps, at) => continueLowering(lowerConstant(carryOf(s), s.rel, step.args), at + 1)],
+  // constant(x) rebinds every traverser to the literal x — the scalar form preserves the
+  // encounter/origins so it composes inside a child scope (option/project/modulation bodies).
+  ['constant', (s, step, _steps, at) => continueLowering(lowerScalarConstant(s, step.args), at + 1)],
   // sack over a scalar: mutate (fold the current value into the carried sack) or bare read.
   ['sack', (s, step, _steps, at) => continueLowering(lowerScalarSack(s, step), at + 1)],
   ['count', scalarCount],
@@ -611,7 +612,12 @@ const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
   // Branch/map over a scalar current object: each arm is a value sub-traversal lowered
   // through the same engine, gated + UNION-merged (child.ts tryScalar*Child). A miss
   // (arm outside the scalar-arm vocabulary) returns null → the clear generic deferral.
-  ['choose', scalarBranch(tryScalarChooseChild)],
+  // choose: predicate form → gated UNION arms; option-map form (choose(fn).option(k,body)…)
+  // → a CASE over the value through the modulation seam.
+  ['choose', (s, step, steps, at) => {
+    const r = step.options ? lowerChooseOptionsScalar(s, steps, at) : tryScalarChooseChild(s, step);
+    return r ? continueLowering(r, at + 1) : null;
+  }],
   ['map', scalarBranch(tryScalarMapChild)], ['local', scalarBranch(tryScalarMapChild)],
   ['flatMap', scalarBranch(tryScalarMapChild)],
   ['union', scalarBranch(tryScalarUnionChild)],

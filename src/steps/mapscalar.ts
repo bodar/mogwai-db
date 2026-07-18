@@ -291,3 +291,56 @@ export function lowerChooseOptions(st: ElementStream, steps: PStep[], stop: numb
   );
   return toScalarStream(carryOf(st), rel);
 }
+
+/**
+ * option-map choose over a SCALAR parent: `values(…).choose(choiceFn).option(k, body)…`. The
+ * choice runs against the value `_`=v (a scalar sub-traversal — a T.label/id token has no
+ * scalar meaning and defers); each keyed option and the Pick.none default are scalar value
+ * bodies. Compiled through the same parent-polymorphic modulation seam as the element form
+ * (tryCompileScalarModulations over the scalar parent — no element join, the value is the
+ * domain). Returns null to DEFER (a scalar has no element/T-token choice, no Pick.none, a
+ * non-scalar option body) so the caller falls through to the clear generic message.
+ */
+export function lowerChooseOptionsScalar(s: ScalarStream, steps: PStep[], stop: number): ScalarStream | null {
+  const cs = steps[stop];
+  const a0 = cs.args[0];
+  const specs: ScalarModulationSpec[] = [];
+  if (!(a0 && typeof a0 === 'object' && 'nested' in a0)) return null; // scalar choice must be a traversal over the value
+  const choiceMod = specs.length;
+  specs.push({ nested: a0.nested, required: false });
+
+  const options: { key: any; mod: number; isNone: boolean }[] = [];
+  let sawNone = false;
+  for (const opt of cs.options ?? []) {
+    const bodyArg = opt.args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
+    if (!bodyArg) return null;
+    const keyArg = opt.args.find((x: any) => x !== bodyArg);
+    let isNone = false;
+    if (keyArg === undefined || (keyArg && typeof keyArg === 'object' && 'pick' in keyArg)) {
+      const pick = keyArg && typeof keyArg === 'object' && 'pick' in keyArg ? keyArg.pick : 'none';
+      if (pick !== 'none') return null;
+      isNone = true;
+      if (sawNone) continue; // first Pick.none wins
+      sawNone = true;
+    }
+    const mod = specs.length;
+    specs.push({ nested: bodyArg.nested, required: false });
+    options.push({ key: keyArg, mod, isNone });
+  }
+  if (!options.some((x) => !x.isNone) || !sawNone) return null; // need a keyed option AND a Pick.none default
+  const mods = tryCompileScalarModulations(s, specs);
+  if (!mods) return null;
+  const p = mods.rel.as('p');
+  const choice = p.c[mods.values[choiceMod].value];
+  const keyed = options.filter((x) => !x.isNone);
+  const fallback = options.find((x) => x.isNone)!;
+  const whens = keyed.map((x) => q`WHEN ${predicateSql(choice, x.key)} THEN ${p.c[mods.values[x.mod].value]}`);
+  const productiveWhens = keyed.map((x) => q`WHEN ${predicateSql(choice, x.key)} THEN ${p.c[mods.values[x.mod].present]}`);
+  const result = q`CASE ${list(whens, ' ')} ELSE ${p.c[mods.values[fallback.mod].value]} END`;
+  const productive = q`CASE ${list(productiveWhens, ' ')} ELSE ${p.c[mods.values[fallback.mod].present]} END`;
+  const rel = s.q.cte(
+    q`SELECT ${result} AS v${carryFrag(s.carried, p)} FROM ${p} WHERE ${predicateSql(productive, undefined)}`,
+    ['v', ...carriedCols(s.carried)],
+  );
+  return toScalarStream(carryOf(s), rel);
+}
