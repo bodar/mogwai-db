@@ -2755,6 +2755,15 @@ describe('compiler execution semantics', () => {
           genericSql: 'with recursive',
         },
         {
+          // frontier collapse: fast = each movement wraps its walks in SUM(bulk) GROUP BY id
+          // (bounded frontier); generic = the plain UNION-ALL movement CTE. The terminal count's
+          // SUM(bulk) makes them the same total either way.
+          key: 'movementCollapse',
+          query: 'g.V().both().both().count()',
+          fastSql: 'SUM(bulk) AS bulk FROM (SELECT e.tgt AS id',
+          genericSql: 'c1(id, bulk) as (SELECT e.tgt AS id',
+        },
+        {
           // scalar predicate: inline = one WHERE over the value (filters c1 directly); generic
           // = a pushed child scope (ROW_NUMBER domain) gated on a correlated EXISTS. Equivalent.
           key: 'scalarPredicateInlining',
