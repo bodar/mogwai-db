@@ -1,5 +1,15 @@
 # Traverser bulking — design investigation
 
+> **CORRECTION (2026-07-18):** the "BulkSet wire type is a dead end / beta.2 client has zero
+> bulk support / payoff is purely internal" claim below is **WRONG** (it grepped the source
+> tree, not the installed client). GraphBinary V4 has a `ResponseMessage` `{bulked}` byte +
+> per-value `Long`, the pinned `gremlin@4.0.0-beta.2` client both requests (`bulkResults`
+> default true) and decodes it, and it is backwards-compatible (opt-in, default off). Wire
+> bulking IS a forward direction to build toward. See
+> `docs/2026-07-18-wire-bulking-rearchitecture.md` for the corrected premise + staged plan.
+> The SQL findings below (recursive GROUP BY rejected → unroll only; overflow loud) still hold.
+
+
 *2026-07-14. Research + design scoping for the biggest remaining structural gap.
 Sources: TinkerPop 4 source (`gremlin-core`), the Sqlg codebase, TinkerPop upgrade
 docs + mailing list, and a full sweep of this repo's traverser representation.*

@@ -29,3 +29,19 @@ test('parseRequest captures nested bound-map value types deeply (typed client)',
   // KEY type captured too (a typed/non-string key round-trips; here the key is a string).
   expect(parsed.paramTypes.xx1).toEqual({ t: 'map', entries: { gid: { key: 'string', value: 'uuid' } } });
 });
+
+test('parseRequest reads the bulkResults request option (GraphBinary + JSON)', () => {
+  const fqBool = (b: boolean) => ioc.anySerializer.serialize(b);
+  const gremlin = ioc.stringSerializer.serialize('g.V()', false);
+  const build = (entries: [Buffer, Buffer][]) =>
+    Buffer.concat([Buffer.from([0x84]), bareInt(entries.length), ...entries.flatMap(([k, v]) => [k, v]), gremlin]);
+
+  // bulkResults=true → parsed.bulked true (the DriverRemoteConnection default the stock client sends).
+  expect(parseRequest(build([[fqStr('bulkResults'), fqBool(true)]])).bulked).toBe(true);
+  // bulkResults=false and absent both → false (flat frame, backwards-compatible default).
+  expect(parseRequest(build([[fqStr('bulkResults'), fqBool(false)]])).bulked).toBe(false);
+  expect(parseRequest(build([[fqStr('g'), fqStr('gmodern')]])).bulked).toBe(false);
+  // JSON request path honours it too.
+  expect(parseRequest(Buffer.from(JSON.stringify({ gremlin: 'g.V()', bulkResults: true }))).bulked).toBe(true);
+  expect(parseRequest(Buffer.from(JSON.stringify({ gremlin: 'g.V()' }))).bulked).toBe(false);
+});

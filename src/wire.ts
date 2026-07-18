@@ -24,6 +24,12 @@ export interface ParsedQuery {
   g?: string;
   /** Resolved positive integer — safe to hand straight to streamBuffers. */
   batchSize: number;
+  /** The client's `bulkResults` request option (GraphBinary V4). When true the client
+   *  expects a BULKED response: the `{bulked}` header byte set + each value followed by a
+   *  fully-qualified `Long` multiplicity. Stock DriverRemoteConnection sends true by default
+   *  and decodes the pairs back into Traverser(value, bulk); default false = today's flat
+   *  frame, byte-identical. */
+  bulked: boolean;
 }
 
 /** Decode a fully-qualified GraphBinary value AND its type, recursing through
@@ -106,6 +112,7 @@ export function parseRequest(raw: Buffer): ParsedQuery {
   let paramTypes: Record<string, TypeNode> = {};
   let g: string | undefined;
   let rawBatch: any;
+  let bulked = false;
   if (raw[0] === 0x84) {
     // GraphBinary request: 0x84, fields map (bare), gremlin string (bare).
     let cursor = raw.subarray(1);
@@ -117,14 +124,16 @@ export function parseRequest(raw: Buffer): ParsedQuery {
     params = bindings instanceof Map ? Object.fromEntries(bindings) : bindings;
     g = fields?.get?.('g');
     rawBatch = fields?.get?.('batchSize') ?? fields?.get?.('resultIterationBatchSize');
+    bulked = fields?.get?.('bulkResults') === true;
   } else {
     const msg = JSON.parse(raw.toString('utf8'));
     gremlin = msg.gremlin;
     params = msg.parameters ?? msg.bindings ?? {};
     g = msg.g;
     rawBatch = msg.batchSize ?? msg.resultIterationBatchSize;
+    bulked = msg.bulkResults === true;
   }
   // batchSize wins over resultIterationBatchSize; 0 / negative / non-numeric → default.
   const n = Number(rawBatch);
-  return { gremlin, params, paramTypes, g, batchSize: n > 0 ? n : DEFAULT_BATCH_SIZE };
+  return { gremlin, params, paramTypes, g, batchSize: n > 0 ? n : DEFAULT_BATCH_SIZE, bulked };
 }

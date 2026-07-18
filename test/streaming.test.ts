@@ -55,6 +55,28 @@ describe('C — streamBuffers chunk pacing', () => {
     expect(parsed.result.data.every((v: any) => v.constructor.name === 'Vertex')).toBe(true);
   });
 
+  test('bulked frame: header byte 0x01 + a Long multiplicity per value; client decodes Traversers', async () => {
+    const buffers = executeQuery(seededStore(), 'g.V()', {});
+    const flat = await drainChunks(streamBuffers(buffers, 64, false));
+    const bulked = await drainChunks(streamBuffers(buffers, 64, true));
+
+    // Header advertises bulking; the frame is strictly larger (a Long per value).
+    expect(bulked.chunks[0]).toEqual(Buffer.from([0x84, 0x01]));
+    expect(flat.chunks[0]).toEqual(Buffer.from([0x84, 0x00]));
+    expect(bulked.buf.length).toBeGreaterThan(flat.buf.length);
+
+    // The real client decodes the bulked frame as {v, bulk} pairs (Stage A: bulk ≡ 1).
+    const parsed = ioc.graphBinaryReader.readResponse(bulked.buf);
+    expect(parsed.status.code).toBe(200);
+    expect(parsed.result.bulked).toBe(true);
+    expect(parsed.result.data.length).toBe(6);
+    expect(parsed.result.data.every((d: any) => d.bulk === 1 && d.v.constructor.name === 'Vertex')).toBe(true);
+    // Same six vertices as the flat frame (bulk=1 is value-identical).
+    const flatParsed = ioc.graphBinaryReader.readResponse(flat.buf);
+    expect(new Set(parsed.result.data.map((d: any) => String(d.v.id))))
+      .toEqual(new Set(flatParsed.result.data.map((v: any) => String(v.id))));
+  });
+
   test('6 vertices at batch=2 ⇒ header + 3 value-batches + trailer = 5 discrete chunks', async () => {
     const { chunks } = await drainChunks(streamBuffers(executeQuery(seededStore(), 'g.V()', {}), 2));
     expect(chunks.length).toBe(5);
