@@ -440,13 +440,13 @@ export function lowerScalarSplit(s: ScalarStream, step: PStep): ListStream {
 // gate by a P (predicateSql) or by a nested scalar predicate (tryInlineScalarPredicate).
 
 /** Gate a scalar stream by a boolean over its value `v`, preserving the scalar shape/tag/
- *  encounter/carried schema (only rows are dropped). `negate` treats a NULL predicate as
- *  false (COALESCE→0) so the else side gets exactly the rows the then side did not. */
-export function gateScalar(s: ScalarStream, buildCond: (v: Expression) => Expression, negate: boolean): ScalarStream {
+ *  encounter/carried schema (only rows are dropped). `buildCond` receives the value expression
+ *  and its per-row stored-type column (if any) so the gate can be vtype-aware; the caller bakes
+ *  in any negation (e.g. `NOT COALESCE((cond), 0)` for a choose else side). */
+export function gateScalar(s: ScalarStream, buildCond: (v: Expression, vt: Expression | undefined) => Expression): ScalarStream {
   const p = s.rel.as('p');
-  const cond = buildCond(p.c.v);
-  const test = negate ? q`NOT COALESCE((${cond}), 0)` : cond;
-  const rel = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)} FROM ${p} WHERE ${test}`, cols(s));
+  const vt = s.vtype ? p.c[s.vtype] : undefined;
+  const rel = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)} FROM ${p} WHERE ${buildCond(p.c.v, vt)}`, cols(s));
   return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
 }
 

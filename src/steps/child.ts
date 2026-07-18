@@ -1068,10 +1068,86 @@ export function tryScalarMapChild(s: ScalarStream, step: PStep): ScalarStream | 
     ?? tryCompileScalarValueChild(s, arg.nested, 'all');
 }
 
+// ---------- scalar choose/coalesce gate: inline fast path ⟷ generic child-existence ----------
+//
+// choose/coalesce over a scalar partition the value rows by a predicate (choose) or per-arm
+// productivity (coalesce). The boolean per predicate is computed one of two RESULT-EQUIVALENT
+// ways, mirroring the scalar filter predicate fast path (scalar.ts lowerScalarFilter /
+// tryScalarFilterByChildExistence):
+//   - inline (fast): a WHERE over the value `v` (tryInlineScalarPredicate / predicateSql).
+//   - generic: each traversal predicate compiles over ONE pushed scalar child scope; its boolean
+//     is a correlated EXISTS keyed on the shared ordinal, and the seed filters the pushed domain.
+// scalarPredicateInlining:false forces the generic path, so DISABLING the switch compiles the
+// same traversal generically (the fast-path law — enabled≡disabled, proven in the equivalence
+// test). A traversal predicate with no scalar compilation → null (clean defer, never a throw).
+
+type ScalarGateSpec = { readonly p: any } | { readonly nested: any };
+
+/** Partitions a scalar parent's rows by one or more predicate specs. `seed(combine)` returns
+ *  the parent scalar stream keeping the rows for which `combine` (built from the per-spec
+ *  booleans) holds — the scalar shape/tag/encounter/carried schema is preserved, only rows drop. */
+interface ScalarGate {
+  seed(combine: (bools: readonly Expression[]) => Expression): ScalarStream;
+}
+
+/** Inline gate: every spec's boolean is a WHERE over the value. Declines (null) if a traversal
+ *  spec is outside the inline scalar-predicate vocabulary → the caller falls to the generic gate. */
+function inlineScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): ScalarGate | null {
+  const bodies = specs.map((sp) => 'nested' in sp ? childSteps(sp.nested, s.params) : null);
+  // Probe inlineability independent of the concrete value; a non-inline body → use the generic gate.
+  if (bodies.some((b) => b && tryInlineScalarPredicate(b, value(0), s.params) === null)) return null;
+  return {
+    seed: (combine) => gateScalar(s, (v, vt) =>
+      combine(specs.map((sp, i) => 'p' in sp
+        ? predicateSql(v, sp.p, vt ? { vtypeExpr: vt } : undefined)
+        : tryInlineScalarPredicate(bodies[i]!, v, s.params, vt)!))),
+  };
+}
+
+/** Generic gate: ONE pushed scalar child scope. A traversal spec's boolean is a correlated
+ *  EXISTS over its child rows (keyed on the shared ordinal); a P spec's boolean is a predicate
+ *  over the domain value. seed() filters the domain and restores the parent's exact scalar
+ *  payload (dropping the pushed ordinal). Null if a traversal spec has no scalar compilation. */
+function genericScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): ScalarGate | null {
+  const { scope, frame, seed: pushed } = pushChildScope(s);
+  const d = frame.domain.as('d');
+  const vt = s.vtype ? d.c[s.vtype] : undefined;
+  const bools: Expression[] = [];
+  for (const sp of specs) {
+    if ('p' in sp) { bools.push(predicateSql(d.c.v, sp.p, vt ? { vtypeExpr: vt } : undefined)); continue; }
+    const child = tryCompileScalarValueRows(pushed, sp.nested, reuseCurrentFrame(scope, frame));
+    if (!child) return null;
+    const c = child.stream.rel.as('c');
+    bools.push(q`EXISTS (SELECT 1 FROM ${c} WHERE ${c.c[frame.ordinal]}=${d.c[frame.ordinal]})`);
+  }
+  const payloadCols = ['v', ...(s.result === 'number' ? ['vt'] : []), ...(s.encounter ? [s.encounter] : []), ...(s.vtype ? [s.vtype] : [])];
+  return {
+    seed: (combine) => {
+      const proj = payloadCols.map((col) => q`${d.c[col]} AS ${col}`);
+      const rel = s.q.cte(
+        q`SELECT ${list(proj, ', ')}${carryFrag(s.carried, d)} FROM ${d} WHERE ${combine(bools)}`,
+        [...payloadCols, ...carriedCols(s.carried)],
+      );
+      return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
+    },
+  };
+}
+
+/** Pick the inline fast path unless scalarPredicateInlining is off, or a traversal predicate is
+ *  beyond the inline vocabulary; then use the generic child-existence gate. Result-equivalent. */
+function buildScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): ScalarGate | null {
+  if (s.fastPaths?.scalarPredicateInlining !== false) {
+    const inline = inlineScalarGate(s, specs);
+    if (inline) return inline;
+  }
+  return genericScalarGate(s, specs);
+}
+
 /** choose(pred, then[, else]) over a scalar. The predicate is a P (applied to `v` via
- *  predicateSql) or a nested scalar-predicate traversal (tryInlineScalarPredicate); it gates the
- *  value rows into disjoint then/else seeds, each arm lowers over its seed, and the two
- *  merge with UNION ALL. else absent → the value passes through unchanged (identity). */
+ *  predicateSql) or a nested traversal (buildScalarGate: inline over `v`, or a correlated
+ *  EXISTS when the switch is off / the body is beyond the inline vocabulary). It gates the
+ *  value rows into disjoint then/else seeds, each arm lowers over its seed, and the two merge
+ *  with UNION ALL. else absent → the value passes through unchanged (identity). */
 export function tryScalarChooseChild(s: ScalarStream, step: PStep): ScalarStream | null {
   if (step.options) return null; // option-map form is a later stage (modulator consumer)
   const args = step.args ?? [];
@@ -1079,22 +1155,16 @@ export function tryScalarChooseChild(s: ScalarStream, step: PStep): ScalarStream
   const predIsTraversal = args[0] && typeof args[0] === 'object' && 'nested' in args[0];
   const [thenArg, elseArg] = predIsTraversal ? nested.slice(1) : nested;
   if (!thenArg) return null;
-  const predBody = predIsTraversal ? childSteps(args[0].nested, s.params) : null;
-  if (predBody && !scalarBranchArm(predBody, s.params)) return null;
   const thenBody = childSteps(thenArg.nested, s.params);
   if (!scalarBranchArm(thenBody, s.params)) return null;
   const elseBody = elseArg ? childSteps(elseArg.nested, s.params) : null;
   if (elseBody && !scalarBranchArm(elseBody, s.params)) return null;
 
-  // The gate predicate must inline over the value (this consumer has no child-existence form);
-  // a non-inline predicate body (vocab-independent of the value) defers the whole choose.
-  if (predBody && tryInlineScalarPredicate(predBody, value(0), s.params) === null) return null;
-  const cond = (v: Expression) => predBody
-    ? tryInlineScalarPredicate(predBody, v, s.params)!
-    : predicateSql(v, args[0]);
-  const thenEnd = lowerScalarArm(gateScalar(s, cond, false), thenBody);
+  const gate = buildScalarGate(s, [predIsTraversal ? { nested: args[0].nested } : { p: args[0] }]);
+  if (!gate) return null;
+  const thenEnd = lowerScalarArm(gate.seed((b) => b[0]), thenBody);
   if (!thenEnd) return null;
-  const elseSeed = gateScalar(s, cond, true);
+  const elseSeed = gate.seed((b) => q`NOT COALESCE((${b[0]}), 0)`);
   const elseEnd = elseBody ? lowerScalarArm(elseSeed, elseBody) : elseSeed; // no else → identity value
   if (!elseEnd) return null;
   return unionScalarStreams(s, [thenEnd, elseEnd]);
@@ -1114,27 +1184,26 @@ export function tryScalarUnionChild(s: ScalarStream, step: PStep): ScalarStream 
   return unionScalarStreams(s, arms);
 }
 
-/** coalesce(a, b, …) over a scalar: the first arm that PRODUCES a value, per input row.
- *  Productivity is the tryInlineScalarPredicate boolean of each arm body, so arm k is gated by
- *  "still unclaimed by every earlier arm AND this arm produces". No ordinal/child-scope is
- *  needed because a scalar arm's productivity is a pure predicate over the value. */
+/** coalesce(a, b, …) over a scalar: the first arm that PRODUCES a value, per input row. Arm k is
+ *  gated by "still unclaimed by every earlier arm AND this arm produces"; productivity is each
+ *  arm body's gate boolean (buildScalarGate — inline over `v`, or a correlated EXISTS when the
+ *  switch is off / the body is beyond the inline vocabulary). All arms share ONE gate/scope. */
 export function tryScalarCoalesceChild(s: ScalarStream, step: PStep): ScalarStream | null {
   const branches = (step.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 1) return null;
   const bodies = branches.map((b: any) => childSteps(b.nested, s.params));
   if (bodies.some((body: PStep[]) => !scalarBranchArm(body, s.params))) return null;
-  // Each arm's productivity is an inline predicate over the value; a non-inline body defers.
-  if (bodies.some((body: PStep[]) => tryInlineScalarPredicate(body, value(0), s.params) === null)) return null;
+  const gate = buildScalarGate(s, branches.map((b: any) => ({ nested: b.nested })));
+  if (!gate) return null;
   const arms: ScalarStream[] = [];
-  let unclaimed = (_v: Expression) => q`1` as Expression;
-  for (const body of bodies) {
-    const produces = (v: Expression) => tryInlineScalarPredicate(body, v, s.params)!;
-    const prev = unclaimed;
-    const seed = gateScalar(s, (v) => q`(${prev(v)}) AND (${produces(v)})`, false);
-    const end = lowerScalarArm(seed, body);
+  for (let k = 0; k < bodies.length; k++) {
+    const seed = gate.seed((bools) => {
+      const prior = bools.slice(0, k).map((b) => q`NOT COALESCE((${b}), 0)`);
+      return list([...prior, paren(bools[k])], ' AND ');
+    });
+    const end = lowerScalarArm(seed, bodies[k]);
     if (!end) return null;
     arms.push(end);
-    unclaimed = (v) => q`(${prev(v)}) AND NOT COALESCE((${produces(v)}), 0)`;
   }
   return unionScalarStreams(s, arms);
 }
