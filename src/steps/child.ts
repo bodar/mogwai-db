@@ -488,11 +488,14 @@ function compileScalarChildRows(
     const prefix = reducer ? body.slice(0, -1) : body;
     if (!body.length || !prefix.every(scalarChildPrefixOk)) return null;
     const pushed = pushChildScope(parent, scope);
+    // Lower the value-op prefix through the FULL scalar dispatch (identity/unfold/transforms/
+    // math/is/order/slice all route correctly over the pushed seed), staying scalar; then
+    // apply the terminal scoped reducer per origin.
     let stream: ScalarStream = pushed.seed;
     if (prefix.length) {
-      const lowered = lowerScalarRows(pushed.seed, prefix, 0);
-      if (lowered.stop !== prefix.length) return null;
-      stream = lowered.stream;
+      const lowered = lowerSteps(pushed.seed, prefix, 0);
+      if (lowered.kind !== 'scalar') return null;
+      stream = lowered;
     }
     if (reducer) stream = lowerScopedScalarReducer(stream, reducer as ScalarReducer, pushed.scope);
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
@@ -1018,7 +1021,7 @@ const scalarArmLeafOk = (s: PStep): boolean =>
  *  terminal reducer). Unlike the root-scope arm set, the pushed scalar seed carries an
  *  encounter column, so the partitioned order/slice/tail/dedup paths are safe here; constant()
  *  is excluded (it defers inside a child scope) and asBool has no scalarTx impl. */
-const SCALAR_CHILD_PREFIX = new Set([...SCALAR_ARM_TX, 'is', 'identity', 'unfold', 'order', 'limit', 'skip', 'range', 'tail', 'dedup']);
+const SCALAR_CHILD_PREFIX = new Set([...SCALAR_ARM_TX, 'is', 'identity', 'unfold', 'math', 'order', 'limit', 'skip', 'range', 'tail', 'dedup']);
 const scalarChildPrefixOk = (s: PStep): boolean =>
   SCALAR_CHILD_PREFIX.has(s.name) || (s.name === 'asNumber' && (s.args ?? []).length > 0);
 

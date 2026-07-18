@@ -2468,6 +2468,43 @@ describe('scalar child scope — pushChildScope substrate (Stage 2)', () => {
   });
 });
 
+// Stage 2 consumer: project('a','b').by(…) over a scalar parent — each field's by() runs
+// against the value through the pushChildScope substrate (scalar value fields; no element
+// framing). Proves the substrate powers a real modulation consumer.
+describe('scalar project — modulation over the value (Stage 2)', () => {
+  const store = new GraphStore(new BunSqlite(':memory:'));
+  executeQuery(store, "g.addV('p').property('name','marko').property('age',29)", {});
+  executeQuery(store, "g.addV('p').property('name','vadas').property('age',27)", {});
+  const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true);
+  const recs = (g: string) => executeQuery(store, g, {}).map(dec).map((m: any) =>
+    m && m.v instanceof Map ? Object.fromEntries([...m.v].map(([k, v]: any) => [k?.v ?? k, v?.v ?? v])) : m?.v ?? m)
+    .sort((a: any, b: any) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+
+  test('by(__.identity()) and by(__.math()) field the value', () => {
+    expect(recs("g.V().hasLabel('p').values('age').project('orig','doubled').by(__.identity()).by(__.math('_ * 2'))"))
+      .toEqual([{ orig: 27, doubled: 54 }, { orig: 29, doubled: 58 }]);
+  });
+
+  test('a bare by() fields the value itself', () => {
+    expect(recs("g.V().hasLabel('p').values('age').project('a').by()")).toEqual([{ a: 27 }, { a: 29 }]);
+  });
+
+  test('a string-transform field', () => {
+    expect(recs("g.V().hasLabel('p').values('name').project('n','up').by(__.identity()).by(__.toUpper())"))
+      .toEqual([{ n: 'marko', up: 'MARKO' }, { n: 'vadas', up: 'VADAS' }]);
+  });
+
+  test('a reducer field lowers through the scalar child scope', () => {
+    expect(recs("g.V().hasLabel('p').values('age').project('v','c').by(__.identity()).by(__.count())"))
+      .toEqual([{ v: 27, c: 1 }, { v: 29, c: 1 }]);
+  });
+
+  test('a field needing element output over a scalar fails closed', () => {
+    expect(() => compile("g.V().values('age').project('x').by(__.out())", {}))
+      .toThrow('project() requires element input (a scalar stream has no project)');
+  });
+});
+
 describe('compiler execution semantics', () => {
   describe('unified lowering characterization', () => {
     test('every disable-safe fast path is result-equivalent to generic lowering', () => {

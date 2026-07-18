@@ -245,6 +245,53 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
  * traverser under freshly-named keys. by() modulators cycle across the keys. A
  * single-key select reuses the scalar vertex/value shape; anything else is a Map.
  */
+/** project('a','b')… over a SCALAR parent. The current object is the value `_`=v, and a
+ *  scalar has no adjacency/properties, so every field's by() is a scalar sub-traversal whose
+ *  result is a scalar value — no element framing (joins/labels/props/Pop/Column) is needed.
+ *  A bare by() (or no by()) is the value itself. A field body that needs element/list output
+ *  (movement) has no meaning here → tryCompileScalarValueChild returns null and the whole
+ *  project defers cleanly. Each field reuses ONE pushed scalar domain (reuseCurrentFrame), so
+ *  the sibling children rejoin on the shared ordinal into one RecordStream row per value.
+ *  (Multi-label select() is alias-based and dispatched before this, never reaching here.) */
+export function lowerScalarProject(s: ScalarStream, proj: PStep): RecordStream | null {
+  if (proj.name !== 'project') return null;
+  if (proj.args.some((a) => a && typeof a === 'object' && ('column' in a || 'pop' in a))) return null;
+  const keys = proj.args.filter((a): a is string => typeof a === 'string');
+  if (!keys.length) return null;
+  const bys = proj.bys ?? [];
+  const specs = keys.map((_, i) => (bys.length ? bys[i % bys.length]?.[0] : undefined));
+  // Only a bare by() (→ the value) or a nested scalar-value traversal; a string key / T-token
+  // has no scalar meaning (a scalar has no property/label/id) → defer the whole project.
+  if (specs.some((a) => a != null && !(typeof a === 'object' && 'nested' in a))) return null;
+
+  const outer = pushChildScope(s);
+  const ord = outer.frame.ordinal;
+  const branches = keys.map((key, i) => {
+    const spec = specs[i];
+    const nested = spec && typeof spec === 'object' && 'nested' in spec ? spec.nested : null;
+    // A nested field lowers as a scalar child reusing the shared domain; a bare by() is the
+    // value itself — the seed row already carries the value + ordinal + outer carried schema.
+    const child = nested
+      ? tryCompileScalarValueChild(outer.seed, nested, 'first', reuseCurrentFrame(outer.scope, outer.frame))
+      : outer.seed;
+    if (!child) return null;
+    const rel = child.rel.as(`b${i}`);
+    const field: RecordField = { key, prefix: `e${i}`, sub: 'value' };
+    return { rel, field, col: q`${rel.c.v} AS ${`e${i}_v`}` };
+  });
+  if (branches.some((b) => !b)) return null;
+  const bs = branches as { rel: Relation; field: RecordField; col: Expression }[];
+
+  const first = bs[0].rel;
+  const joins = bs.slice(1).map((b) => q` JOIN ${b.rel} ON ${b.rel.c[ord]}=${first.c[ord]}`);
+  const fields = bs.map((b) => b.field);
+  const rel = s.q.cte(
+    q`SELECT ${list(bs.map((b) => b.col), ', ')}${carryFrag(s.carried, first)} FROM ${first}${list(joins, '')}`,
+    [...fields.flatMap(recordFieldColumns), ...carriedCols(s.carried)],
+  );
+  return toRecordStream(carryOf(s), rel, fields);
+}
+
 export function lowerRecordSelectProject(st: ElementStream, proj: PStep): Stream {
   const bys = proj.bys ?? [];
   const isProject = proj.name === 'project';
