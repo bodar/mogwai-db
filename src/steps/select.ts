@@ -1,6 +1,7 @@
 import { q, list, empty, value, type Expression, type Relation } from '../q.ts';
 import { nodes, edges, labels } from '../schema.ts';
-import { framedProps, labelNameSub, nodePropScalar, edgePropScalar, edgePropsAgg, predicateSql, propExtract, extIdOf, P_OPS } from '../plan.ts';
+import { framedProps, labelNameSub, nodePropScalar, edgePropScalar, edgePropsAgg, predicateSql, propExtract, extIdOf, elemCtx, scalarProp, scalarTx, P_OPS, type Elem } from '../plan.ts';
+import { correlatedReduce } from './predicate.ts';
 import { type PStep } from '../strategies.ts';
 import { stepChain } from '../frontend.ts';
 import { aliasElem, aliasIsElement, carryFrag, carriedCols, scopePathCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
@@ -677,6 +678,52 @@ function pathBy(byArgs: any[] | undefined): string | undefined {
   throw new Error('unsupported path().by() modulator');
 }
 
+/** The value expression for one linear path position under its by() modulator, or
+ *  undefined for a bare by()/no by() (→ the whole element). by('key') reads a property;
+ *  by(T.label/T.id) projects the token; by(__.trav) compiles a per-position scalar. */
+function pathPositionValue(st: ElementStream, tbl: Relation, elem: Elem, byArgs: any[] | undefined): Expression | undefined {
+  if (!byArgs || byArgs.length === 0) return undefined; // the whole element
+  const a = byArgs[0];
+  if (typeof a === 'string') return elem === 'edge' ? edgePropScalar(tbl.c.id, a) : nodePropScalar(tbl.c.id, a);
+  if (a && typeof a === 'object' && 'token' in a) {
+    if (a.token === 'label') return labelNameSub(tbl.c.label);
+    if (a.token === 'id') return elemCtx(tbl, elem).extIdExpr!;
+    throw new Error(`path().by(T.${a.token}) modulator not yet supported`);
+  }
+  if (a && typeof a === 'object' && 'nested' in a) {
+    const e = pathByTraversal(st, tbl, elem, a.nested);
+    if (!e) throw new Error('path().by(traversal) supports a value/transform chain or a <movement>.count()/edge-value reducer');
+    return e;
+  }
+  throw new Error('unsupported path().by() modulator');
+}
+
+/** Compile a path().by(__.trav) body to ONE correlated scalar over the position element:
+ *  a value-producer (values(k)/id/label) + scalar transforms, rendered inline; or a
+ *  movement+reducer via the shared correlatedReduce (the where()/dedup() scalar-child
+ *  helper). Returns null → the caller fails closed with a clear deferral. */
+function pathByTraversal(st: ElementStream, tbl: Relation, elem: Elem, nested: any): Expression | null {
+  const body = stepChain(nested, st.params);
+  if (!body.length) return null;
+  const ctx = elemCtx(tbl, elem);
+  const first = body[0];
+  if (first.name === 'values' || first.name === 'id' || first.name === 'label') {
+    let e: Expression;
+    if (first.name === 'values') {
+      if (first.args.length !== 1 || typeof first.args[0] !== 'string') return null;
+      e = scalarProp(ctx, first.args[0]);
+    } else if (first.name === 'id') e = ctx.extIdExpr!;
+    else e = labelNameSub(tbl.c.label);
+    for (let i = 1; i < body.length; i++) {
+      const tx = scalarTx(body[i].name, body[i].args ?? [], e);
+      if (!tx) return null;
+      e = tx;
+    }
+    return e;
+  }
+  return correlatedReduce(body, ctx, st.params);
+}
+
 /**
  * path(): frame each tracked path position (p0..pN, seeded at V(), one appended per
  * hop) as one Path per row. Without by(), each position is the whole element (joined
@@ -717,8 +764,8 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
     const tbl = (pos.elem === 'edge' ? edges : nodes).as(`${prefix}n`);
     const jn = pos.nullable ? 'LEFT JOIN' : 'JOIN';
     joins.push(q` ${jn} ${tbl} ON ${tbl.c.id}=${p.c[pos.col]}`);
-    const key = pathBy(bys.length ? bys[i % bys.length] : undefined);
-    if (key === undefined) {
+    const pe = pathPositionValue(st, tbl, pos.elem, bys.length ? bys[i % bys.length] : undefined);
+    if (pe === undefined) {
       const l = labels.as(`${prefix}l`);
       joins.push(q` ${jn} ${l} ON ${l.c.id}=${tbl.c.label}`);
       const extId = q`COALESCE(${tbl.c.uid}, ${tbl.c.id})`;
@@ -730,11 +777,10 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
       cols.push(q`${extId} AS ${`${prefix}_id`}, ${l.c.name} AS ${`${prefix}_label`}, ${framedProps(tbl, 'node')} AS ${`${prefix}_props`}`);
       return { render: 'element', elem: 'vertex', prefix };
     }
-    // by(key): project the element's property (first-under-multi for a vertex); a missing
-    // key drops the whole path. Edge → the single value from edge_properties.
-    const pe = pos.elem === 'edge' ? edgePropScalar(tbl.c.id, key) : nodePropScalar(tbl.c.id, key);
+    // by(key/T.token/traversal): one scalar per position. A missing value drops the whole
+    // path (ProductiveBy retains an explicit NULL position instead).
     cols.push(q`${pe} AS ${`${prefix}_v`}`);
-    if (!productive) whereParts.push(predicateSql(pe, undefined)); // ProductiveBy retains an explicit NULL position
+    if (!productive) whereParts.push(predicateSql(pe, undefined));
     return { render: 'value', prefix };
   });
 
