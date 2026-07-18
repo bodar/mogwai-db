@@ -282,6 +282,15 @@ blobless+sparse (self-healed in the L3 test's `beforeAll`).
   steps — addV/addE/mergeV/mergeE carry `@StepAddV`/`@StepAddE`/`@StepMergeV`/`@StepMergeE`,
   are untagged in the exclusion list, and are already in scope + ratcheted. Runbook:
   `test/conformance/README-cucumber.md`.
+- **L4** (`test/conformance/l4.test.ts` + `test/conformance/addendum/*.feature`): OUR
+  addendum suite — valid traversals the official corpus doesn't cover (our combinatorial-
+  completeness work), authored in TinkerPop's exact Gherkin format. NOT cucumber-driven: the
+  official harness binds a scenario name to a vendored generated `gremlin.js`; we parse Gremlin
+  natively, so `l4.test.ts` reads each scenario's embedded string + `| result |` table and runs
+  it through the REAL stack (`executeQuery` → GraphBinary, decoded by the client `ioc` — so our
+  extended serializers are exercised both directions). Gate = **all pass** (ours; not a subset
+  like L3). `@gap:<area>` tags mark families for an upstream `gremlin-test` PR (the give-back).
+  Add a scenario = drop it in a `.feature`; no code change. See `addendum/README.md`.
 - Every new step lands with SQL snapshot tests, its cucumber tag added to `tags.ts`, and
   corpus still 100%.
 - **SQL snapshots assert semantic equivalence, NOT byte-identity.** They mostly `.toContain`
