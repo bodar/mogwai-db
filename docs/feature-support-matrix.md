@@ -23,7 +23,7 @@ In a 🟡 cell, **✅** = supported form, **❌** = deferred shape.
 | Step | | Notes |
 |---|:--:|---|
 | `V()`/`V(id…)`, `E()`/`E(id…)` | ✅ | `V` id resolves numeric rowid or string `uid`; **mid-traversal after a scalar** (`inject(x).V()`) re-sources the graph per traverser (a flatMap; carried as()-labels ride forward). ❌ mid-`V`/`E` when the scalar carries path/origins/sack |
-| `out`/`in`/`both`, `outE`/`inE`/`bothE`, `outV`/`inV`/`bothV` | ✅ | index-only covering-index hops |
+| `out`/`in`/`both`, `outE`/`inE`/`bothE`, `outV`/`inV`/`bothV` | ✅ | index-only covering-index hops. **Traverser bulking** auto-collapses convergent walks (`SELECT id, SUM(bulk) … GROUP BY id`) when the whole chain is identity-free — pure movement/filter/bare-`dedup`/`order`/`limit`·`range`·`skip`, ending in a reducer or a bare element leaf — so the frontier stays bounded by \|V\| not the walk count, and an element result ships as `(v, N)` RLE the client expands. Result-equivalent, automatic by shape, gated off under `path`/`as`/`sack` (`chainCollapseSafe`, `movementCollapse` fast path). ❌ `group`/`groupCount` weighting (still enumerates) |
 | `otherV` | ✅ | endpoint away from the entering vertex |
 | `inject(…)` | ✅ | ordinary args → scalar stream, all-array args → list stream (§9); later scalar injects append relationally. ❌ appending a list onto an existing scalar stream |
 
@@ -93,8 +93,8 @@ mixed-shape arm.
 
 | Step | | Notes |
 |---|:--:|---|
-| `repeat(__.<out/in/both>).times(n)` | ✅ | `WITH RECURSIVE`; `both` = two terms |
-| `…times(n).count()` | ✅ | traverser bulking — unrolled `GROUP-BY-SUM(bulk)` CTEs; propagates through post-repeat labels/movement/`select(labels).count()`. ❌ `groupCount`/`by(count)`, `sum`, aliases live across the walk, unbounded `until`/`emit` |
+| `repeat(__.<out/in/both>).times(n)` | ✅ | `WITH RECURSIVE`; `both` = two terms. Element- or count-terminal (single-move body, no path/as/sack) takes the **traverser-bulking** unroll instead — `GROUP-BY-SUM(bulk)` frontier bounded by \|V\|, framed as `(vertex, bulk)` RLE; a dense/deep walk that would enumerate quadrillions returns in ms (`src/steps/bulk.ts`, `bulkRepeatCount`). i64 overflow fails loud |
+| `…times(n).count()` | ✅ | the bulking count form — propagates through post-repeat labels/movement/`select(labels).count()`. ❌ `groupCount`/`by(count)`, `sum`, aliases live across the walk, unbounded `until`/`emit` |
 | `emit` (before/after, bare) | ✅ | runs to natural fixpoint |
 | `until(<pred>)`, `loops().is(n)` | 🟡 | do-while/while-do. ❌ `until(__.loops()…)` beyond `loops().is(P)` |
 | `repeat().path()`, `simplePath()` in body | ✅ | JSONB array walk + `json_each` cycle guard |
