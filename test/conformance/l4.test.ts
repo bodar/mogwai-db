@@ -88,6 +88,11 @@ function expectedCanon(tok: string): string {
     const inner = t.slice(2, -1);
     return '[' + (inner === '' ? '' : splitTopLevel(inner).map(expectedCanon).join(',')) + ']';
   }
+  // p[…] — a Path, framed by its ordered objects (each in typed notation).
+  if (t.startsWith('p[') && t.endsWith(']')) {
+    const inner = t.slice(2, -1);
+    return 'p[' + (inner === '' ? '' : splitTopLevel(inner).map(expectedCanon).join(',')) + ']';
+  }
   return 'S' + t;
 }
 
@@ -113,6 +118,8 @@ function canon(v: unknown): string {
   if (v instanceof BigDecimal) return 'BD' + v.toString();
   if (v instanceof Duration) return 'DU' + v.toString();
   if (v instanceof Date) return 'DT' + v.toISOString();
+  if (v && typeof v === 'object' && Array.isArray((v as { objects?: unknown }).objects))
+    return 'p[' + (v as { objects: unknown[] }).objects.map(canon).join(',') + ']';
   if (Array.isArray(v)) return '[' + v.map(canon).join(',') + ']';
   return 'J' + JSON.stringify(v);
 }
