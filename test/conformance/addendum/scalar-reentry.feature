@@ -112,6 +112,53 @@ Feature: mogwai addendum — scalar-stream re-entry
       | b |
       | b |
 
+  # Slice: a reducer arm (min/max/count/sum) lowers per input through the pushed scalar child
+  # scope — matching the element-parent branch convention. Each age is one traverser, so min
+  # and max of that single value are the value itself; the two arms UNION-concatenate.
+  @gap:scalar-position
+  Scenario: g_V_hasLabelXpersonX_valuesXageX_unionXminX_maxX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").values("age").union(__.min(),__.max())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[29].i |
+      | d[29].i |
+      | d[27].i |
+      | d[27].i |
+      | d[32].i |
+      | d[32].i |
+      | d[35].i |
+      | d[35].i |
+
+  # Slice: a nested value-branch inside an arm composes through the same consumer (lowerSteps
+  # recursion) — union nested in union.
+  @gap:scalar-position
+  Scenario: g_V_hasLabelXpersonX_valuesXageX_unionXconstantXaX_unionXconstantXbX_constantXcXXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").values("age").union(__.constant("a"),__.union(__.constant("b"),__.constant("c")))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | a |
+      | a |
+      | a |
+      | a |
+      | b |
+      | b |
+      | b |
+      | b |
+      | c |
+      | c |
+      | c |
+      | c |
+
   @gap:scalar-position
   Scenario: g_V_hasLabelXpersonX_valuesXageX_aggregateXaX_capXaX_unfold
     Given the modern graph

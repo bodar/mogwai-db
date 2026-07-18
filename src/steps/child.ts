@@ -1021,6 +1021,12 @@ const SCALAR_ARM_TX = new Set([
 // the outer carried columns off every arm — both defer cleanly as an arm instead.
 const SCALAR_ARM_ROW = new Set(['is', 'constant', 'identity', 'order', 'limit', 'skip', 'range', 'unfold']);
 const SCALAR_ARM_FILTER = new Set(['and', 'or', 'not', 'filter', 'where']);
+// Nested per-traverser branches whose own arms are recursively scalar-arm bodies: a value
+// branch inside a value arm lowers through lowerSteps→the same tryScalar*Child consumer, so
+// choose(P,__.union(__.constant('a'),__.constant('b')),…) composes. The option-map choose
+// form (step.options) carries its arm bodies off step.options, not step.args, so it is NOT
+// recursed here (defers cleanly rather than being under-checked).
+const SCALAR_ARM_BRANCH = new Set(['choose', 'union', 'coalesce', 'map', 'flatMap', 'local']);
 
 /** A single scalar-arm leaf step the engine lowers without throwing. Kept in lockstep with
  *  what lowerScalarRows/SCALAR_TAIL actually support so the recognizer never accepts a body
@@ -1044,8 +1050,39 @@ function scalarBranchArm(body: PStep[], params: Record<string, any>): boolean {
     // the predicate-P form (where(gt(5))) throws, so require kids and recurse into each so
     // an unsupported nested body defers here rather than throwing mid-lowering.
     if (SCALAR_ARM_FILTER.has(s.name)) return kids.length > 0 && kids.every((a: any) => scalarBranchArm(childSteps(a.nested, params), params));
+    // A nested value-branch: every arm must itself be a scalar value arm so the whole thing
+    // stays scalar and never throws mid-lowering. Option-map choose (s.options) is excluded.
+    if (SCALAR_ARM_BRANCH.has(s.name) && !(s as any).options)
+      return kids.length > 0 && kids.every((a: any) => scalarBranchArm(childSteps(a.nested, params), params));
     return scalarArmLeafOk(s) && kids.length === 0;
   });
+}
+
+/** PURE. A terminal scoped reducer (count/sum/min/max/mean) over a value-op prefix — the
+ *  child-scoped scalar arm that tryCompileScalarValueChild lowers per value. This is the
+ *  reducer half of scalarArmClassifies: scalarBranchArm covers value/nested-branch arms at
+ *  root scope, this covers the per-value reduction that needs the pushed child scope. */
+function scalarReducerArm(body: PStep[]): boolean {
+  const last = body.at(-1);
+  if (!last || !CHILD_SCALAR_REDUCERS.has(last.name)) return false;
+  return body.slice(0, -1).every(scalarChildPrefixOk);
+}
+
+/** PURE. Predicts tryCompileScalarArm success without appending CTEs — the classify half of
+ *  the gated consumers (choose/coalesce build a gate before lowering arms, so they must know
+ *  every arm lowers before committing CTEs, matching the element-parent classify-then-emit). */
+function scalarArmClassifies(body: PStep[], params: Record<string, any>): boolean {
+  return scalarBranchArm(body, params) || scalarReducerArm(body);
+}
+
+/** Lower one branch/map arm body over a scalar (gated) parent → a ScalarStream, or null to
+ *  defer. The scalar twin of tryCompileElementTraversal: a cardinality-preserving value body
+ *  lowers at root scope (lowerScalarArm — transforms/is/filter/nested value-branch); a body
+ *  whose terminal reduces per value (count/sum/min/max/mean) needs the pushed scalar child
+ *  scope (tryCompileScalarValueChild). Shared by map/flatMap/local AND union/choose/coalesce. */
+export function tryCompileScalarArm(parent: ScalarStream, nested: any, scope: CompileScope = ROOT_SCOPE): ScalarStream | null {
+  return lowerScalarArm(parent, childSteps(nested, parent.params))
+    ?? tryCompileScalarValueChild(parent, nested, 'all', scope);
 }
 
 /** Lower one scalar arm body over the scalar parent, returning null (defer) if it falls
@@ -1062,10 +1099,7 @@ function lowerScalarArm(s: ScalarStream, body: PStep[]): ScalarStream | null {
 export function tryScalarMapChild(s: ScalarStream, step: PStep): ScalarStream | null {
   const arg = step.args?.[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
-  // Cardinality-preserving value bodies lower at root scope (the light path); a reducer body
-  // (map(__.count()/sum()/…)) needs the pushed scalar child scope to reduce per value.
-  return lowerScalarArm(s, childSteps(arg.nested, s.params))
-    ?? tryCompileScalarValueChild(s, arg.nested, 'all');
+  return tryCompileScalarArm(s, arg.nested);
 }
 
 // ---------- scalar choose/coalesce gate: inline fast path ⟷ generic child-existence ----------
@@ -1155,17 +1189,19 @@ export function tryScalarChooseChild(s: ScalarStream, step: PStep): ScalarStream
   const predIsTraversal = args[0] && typeof args[0] === 'object' && 'nested' in args[0];
   const [thenArg, elseArg] = predIsTraversal ? nested.slice(1) : nested;
   if (!thenArg) return null;
+  // Classify-then-emit: prove both arms lower (value, reducer, or nested-branch) BEFORE the
+  // gate appends its CTEs, so a deferring arm never orphans gate SQL (mirrors branch.ts).
   const thenBody = childSteps(thenArg.nested, s.params);
-  if (!scalarBranchArm(thenBody, s.params)) return null;
+  if (!scalarArmClassifies(thenBody, s.params)) return null;
   const elseBody = elseArg ? childSteps(elseArg.nested, s.params) : null;
-  if (elseBody && !scalarBranchArm(elseBody, s.params)) return null;
+  if (elseBody && !scalarArmClassifies(elseBody, s.params)) return null;
 
   const gate = buildScalarGate(s, [predIsTraversal ? { nested: args[0].nested } : { p: args[0] }]);
   if (!gate) return null;
-  const thenEnd = lowerScalarArm(gate.seed((b) => b[0]), thenBody);
+  const thenEnd = tryCompileScalarArm(gate.seed((b) => b[0]), thenArg.nested);
   if (!thenEnd) return null;
   const elseSeed = gate.seed((b) => q`NOT COALESCE((${b[0]}), 0)`);
-  const elseEnd = elseBody ? lowerScalarArm(elseSeed, elseBody) : elseSeed; // no else → identity value
+  const elseEnd = elseArg ? tryCompileScalarArm(elseSeed, elseArg.nested) : elseSeed; // no else → identity value
   if (!elseEnd) return null;
   return unionScalarStreams(s, [thenEnd, elseEnd]);
 }
@@ -1177,7 +1213,7 @@ export function tryScalarUnionChild(s: ScalarStream, step: PStep): ScalarStream 
   if (branches.length < 2) return null;
   const arms: ScalarStream[] = [];
   for (const b of branches) {
-    const end = lowerScalarArm(s, childSteps(b.nested, s.params));
+    const end = tryCompileScalarArm(s, b.nested);
     if (!end) return null;
     arms.push(end);
   }
@@ -1192,7 +1228,8 @@ export function tryScalarCoalesceChild(s: ScalarStream, step: PStep): ScalarStre
   const branches = (step.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 1) return null;
   const bodies = branches.map((b: any) => childSteps(b.nested, s.params));
-  if (bodies.some((body: PStep[]) => !scalarBranchArm(body, s.params))) return null;
+  // Classify-then-emit: every arm must lower before the shared gate commits its CTEs.
+  if (bodies.some((body: PStep[]) => !scalarArmClassifies(body, s.params))) return null;
   const gate = buildScalarGate(s, branches.map((b: any) => ({ nested: b.nested })));
   if (!gate) return null;
   const arms: ScalarStream[] = [];
@@ -1201,7 +1238,7 @@ export function tryScalarCoalesceChild(s: ScalarStream, step: PStep): ScalarStre
       const prior = bools.slice(0, k).map((b) => q`NOT COALESCE((${b}), 0)`);
       return list([...prior, paren(bools[k])], ' AND ');
     });
-    const end = lowerScalarArm(seed, bodies[k]);
+    const end = tryCompileScalarArm(seed, branches[k].nested);
     if (!end) return null;
     arms.push(end);
   }

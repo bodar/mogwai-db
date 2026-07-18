@@ -2514,18 +2514,49 @@ describe('scalar-parent branch/map (Stage 1)', () => {
     expect(() => compile("g.V().values('age').union(__.out(),__.in())", {})).toThrow('union() after a scalar stream not yet supported');
   });
 
+  // Slice 1: reducer arms (count/sum/min/max/mean) lower per input through the pushed scalar
+  // child scope — matching the L3-ratcheted element-parent union/choose/coalesce, which also
+  // scope a reducer arm per incoming traverser (tryCompileScalarChild(...,'all')).
+  test('reducer arms lower per input (matches the element-parent branch convention)', () => {
+    // count()/sum() per input: each value is one traverser → count 1, sum = the value itself.
+    expect(vals("g.V().hasLabel('person').values('age').union(__.count(),__.constant(0))"))
+      .toEqual(['0', '0', '0', '0', '1', '1', '1', '1']);
+    expect(vals("g.V().hasLabel('person').values('age').union(__.sum(),__.constant(0))"))
+      .toEqual(['0', '0', '0', '0', '27', '29', '32', '35']);
+    // choose/coalesce reducer arms: only the gated subset flows into the arm.
+    expect(vals("g.V().hasLabel('person').values('age').choose(__.is(gt(30)),__.count(),__.constant(0))"))
+      .toEqual(['0', '0', '1', '1']);
+    expect(vals("g.V().hasLabel('person').values('age').coalesce(__.is(gt(30)),__.count())"))
+      .toEqual(['1', '1', '32', '35'].sort());
+  });
+
+  // Slice 1: a nested value-branch inside an arm composes through the same tryScalar*Child
+  // consumer (lowerSteps recursion), so choose/union/coalesce nest.
+  test('nested value-branch arms compose', () => {
+    expect(vals("g.V().hasLabel('person').values('age').union(__.constant('a'),__.union(__.constant('b'),__.constant('c')))"))
+      .toEqual(['a', 'a', 'a', 'a', 'b', 'b', 'b', 'b', 'c', 'c', 'c', 'c']);
+  });
+
+  // Slice 1: tail()/dedup() arms lower via the pushed child scope (the seed carries an
+  // encounter, so the partitioned tail/dedup paths are safe — no longer a root-scope throw).
+  test('tail()/dedup() arms lower per input via the child scope', () => {
+    expect(vals("g.V().hasLabel('person').values('age').union(__.tail(1),__.identity())"))
+      .toEqual(['27', '27', '29', '29', '32', '32', '35', '35']);
+    expect(vals("g.V().hasLabel('person').as('a').values('age').union(__.dedup(),__.identity())"))
+      .toEqual(['27', '27', '29', '29', '32', '32', '35', '35']);
+  });
+
   // The recognizer must never accept an arm body the scalar engine would THROW on (that
-  // breaks the return-null fall-through). These arms all defer cleanly to the generic
-  // message rather than surfacing a raw mid-lowering throw.
+  // breaks the return-null fall-through). These arms defer cleanly to the generic message
+  // rather than surfacing a raw mid-lowering throw.
   test('arm bodies the scalar engine cannot lower defer cleanly (fall-through contract)', () => {
     expect(() => compile("g.V().values('age').union(__.asBool(),__.identity())", {}))
       .toThrow('union() after a scalar stream not yet supported');         // asBool has no scalarTx impl
     expect(() => compile("g.V().values('name').choose(__.is(eq('marko')),__.asNumber(),__.identity())", {}))
       .toThrow('choose() after a scalar stream not yet supported');        // bare asNumber() throws on a non-date value
-    expect(() => compile("g.V().values('age').union(__.tail(1),__.identity())", {}))
-      .toThrow('union() after a scalar stream not yet supported');         // tail() needs an encounter column
-    expect(() => compile("g.V().as('a').values('age').union(__.dedup(),__.identity())", {}))
-      .toThrow('union() after a scalar stream not yet supported');         // dedup() clears carried → merge desync
+    // a genuine movement body (a scalar has no neighbours) still fails closed
+    expect(() => compile("g.V().values('age').union(__.out(),__.identity())", {}))
+      .toThrow('union() after a scalar stream not yet supported');
     // but asNumber WITH a type arg is a real transform and still lowers
     expect(() => compile("g.V().values('age').map(__.asNumber(GType.DOUBLE))", {})).not.toThrow();
   });
