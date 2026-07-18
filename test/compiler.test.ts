@@ -1833,6 +1833,36 @@ describe('compiler SQL snapshots', () => {
     expect(() => executeQuery(store, 'g.V().choose(__.out(), __.label(), __.values("name"))', {})).not.toThrow();
   });
 
+  test('variant tail: shape-agnostic row-ops (limit/skip/range/dedup) + fail-closed', () => {
+    const store = seededStore();
+    const base = 'g.V(1).union(__.values("name"), __.out())';
+    const full = run(store, base).length; // 4: name 'marko' + 3 out neighbours
+    expect(full).toBe(4);
+    // limit/skip/range re-project the variant relation, slicing rows without touching
+    // the per-row tag — the whole union (all arms) rides through the LIMIT/OFFSET.
+    const lim = read(`${base}.limit(2)`);
+    expect(lim.shape).toEqual({ kind: 'variant', scalarAs: undefined, node: true });
+    expect(lim.sql).toContain('SELECT p.vk, p.v, p.rid FROM'); // full column re-projection
+    expect(lim.sql).toContain('LIMIT 2');
+    expect(run(store, `${base}.limit(2)`).length).toBe(2);
+    expect(read(`${base}.skip(1)`).sql).toContain('LIMIT -1 OFFSET 1');
+    expect(run(store, `${base}.skip(1)`).length).toBe(full - 1);
+    expect(read(`${base}.range(1,3)`).sql).toContain('LIMIT 2 OFFSET 1');
+    expect(run(store, `${base}.range(1,3)`).length).toBe(2);
+    // count barrier over the union still collapses to one Long
+    expect(run(store, `${base}.count()`).map((r: any) => Number(r.v))).toEqual([full]);
+    // dedup collapses the multiset on the tagged (vk,v,rid) row
+    expect(read(`${base}.dedup()`).sql).toContain('SELECT DISTINCT p.vk, p.v, p.rid FROM');
+    expect(run(store, 'g.V(1).union(__.out(), __.out()).dedup()').length)
+      .toBeLessThan(run(store, 'g.V(1).union(__.out(), __.out())').length);
+    // fail closed: steps that must look inside a heterogeneous row cannot apply
+    expect(() => compile(`${base}.out()`, {})).toThrow('out() on a variant value not yet supported');
+    expect(() => compile(`${base}.order()`, {})).toThrow('order() on a variant value not yet supported');
+    // dedup with carried label state defers rather than over-collapsing
+    expect(() => compile(`g.V().as("a").union(__.values("name"), __.out()).dedup()`, {}))
+      .toThrow('dedup() over a variant with carried path/label state not yet supported');
+  });
+
   test('coalesce() → first non-empty branch per input via the ordinal', () => {
     const c = read('g.V(1).coalesce(__.out("knows"), __.out("created")).values("name")');
     expect(c.sql).toContain('ROW_NUMBER() OVER () AS o0');
