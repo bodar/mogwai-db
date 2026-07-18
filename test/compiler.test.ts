@@ -2438,6 +2438,36 @@ describe('scalar math (Stage 2)', () => {
   });
 });
 
+// Stage 2 substrate: a SCALAR is a first-class child parent (ChildParent |= ScalarStream).
+// pushChildScope re-projects the value `_`=v + a minted encounter, so a reducer-bodied child
+// (map(__.count()/sum()/…)) lowers through the same scoped-reducer engine as an element child.
+describe('scalar child scope — pushChildScope substrate (Stage 2)', () => {
+  const store = new GraphStore(new BunSqlite(':memory:'));
+  executeQuery(store, "g.addV('p').property('name','marko').property('age',29)", {});
+  executeQuery(store, "g.addV('p').property('name','vadas').property('age',27)", {});
+  const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
+  const vals = (g: string) => executeQuery(store, g, {}).map(dec).map(String).sort();
+
+  test('a reducer body reduces the single value per traverser', () => {
+    expect(vals("g.V().hasLabel('p').values('age').map(__.count())")).toEqual(['1', '1']);   // count of one value
+    expect(vals("g.V().hasLabel('p').values('age').local(__.sum())")).toEqual(['27', '29']); // sum of one value
+    expect(vals("g.V().hasLabel('p').values('age').map(__.max())")).toEqual(['27', '29']);
+    expect(vals("g.V().hasLabel('p').values('age').map(__.mean())")).toEqual(['27', '29']);
+  });
+
+  test('a value-op prefix composes before the scoped reducer', () => {
+    expect(vals("g.V().hasLabel('p').values('name').map(__.toUpper().count())")).toEqual(['1', '1']);
+  });
+
+  test('cardinality-preserving value bodies still take the light path', () => {
+    expect(vals("g.V().hasLabel('p').values('age').map(__.constant('x'))")).toEqual(['x', 'x']);
+  });
+
+  test('a movement body still fails closed (a scalar has no neighbours)', () => {
+    expect(() => compile("g.V().values('age').map(__.out())", {})).toThrow('map() after a scalar stream not yet supported');
+  });
+});
+
 describe('compiler execution semantics', () => {
   describe('unified lowering characterization', () => {
     test('every disable-safe fast path is result-equivalent to generic lowering', () => {
