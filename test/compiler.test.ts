@@ -2299,6 +2299,26 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V(1).out().path().reverse()', {})).toThrow('not yet supported');
   });
 
+  test('path().from(l)/to(l): scope positions to the static label range', () => {
+    // from("b").to("c") slices to positions [1..2] (b bound at hop 1, c at hop 2) — the
+    // path keeps only those two positions, framed by(name).
+    const ft = read('g.V().as("a").out().as("b").out().as("c").path().from("b").to("c").by("name")');
+    expect(ft.shape).toEqual({ kind: 'path', positions: [
+      { render: 'value', prefix: 'x0' },
+      { render: 'value', prefix: 'x1' },
+    ] });
+    // from() only → [1..end]; to() only → [0..that label].
+    expect((read('g.V().as("a").out().as("b").out().as("c").path().from("b")').shape as any).positions).toHaveLength(2);
+    expect((read('g.V().as("a").out().as("b").out().as("c").path().to("b")').shape as any).positions).toHaveLength(2);
+    // simplePath().from()/to() scopes the distinctness pair-loop (folds onto simplePath).
+    expect(read('g.V().both().as("a").both().as("b").simplePath().path().by("name").from("a").to("b")').shape.kind).toBe('path');
+    // an unbound from/to label fails closed.
+    expect(() => compile('g.V().as("a").out().path().from("z")', {})).toThrow('not bound to a path position');
+    // from()/to() over a recursive repeat().path() fails closed (a recursive path has no
+    // static per-position labels — here the as()-before-repeat deferral trips first).
+    expect(() => compile('g.V().as("a").repeat(__.out()).times(2).path().from("a")', {})).toThrow('not yet supported');
+  });
+
   test('path() interleaves edge and vertex positions with the right element shape', () => {
     const p = read('g.V(1).outE("created").inV().path()');
     // edge position frames endpoints as external ids (COALESCE(uid,id)), not raw rowid

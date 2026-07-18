@@ -24,12 +24,17 @@ import { stepChain, isNested, type Step, type StrategySpec, type StrategyUse } f
  * The compilers read these fields instead of re-scanning, so the whole read
  * dispatch is a peek-free fold over the step list.
  */
-export type PStep = Step & { cluster?: Step[]; bys?: any[][]; options?: Step[]; productiveBy?: boolean };
+export type PStep = Step & { cluster?: Step[]; bys?: any[][]; options?: Step[]; productiveBy?: boolean; from?: string; to?: string };
 
 const REPEAT_CLUSTER = new Set(['repeat', 'emit', 'times', 'until']);
 /** Steps that absorb trailing by() modulators. Alias-compare where()/not() also
  *  host a single by(key) but are detected structurally (see isAliasCompareWhere). */
 const BY_HOSTS = new Set(['order', 'select', 'project', 'group', 'groupCount', 'path', 'math', 'format', 'sack', 'aggregate', 'dedup']);
+/** Path-family steps additionally absorb from()/to() scoping modulators (a Path is scoped
+ *  to the positions between two as() labels). `simplePath`/`cyclicPath` are hosts here only
+ *  (not general BY_HOSTS) so their by()/from()/to() fold too. `to` also names a movement
+ *  step; the fold only fires when it immediately follows a path host, so no collision. */
+const PATH_MODULATOR_HOSTS = new Set(['path', 'simplePath', 'cyclicPath']);
 
 // ---------- withStrategies / withoutStrategies application ----------
 //
@@ -439,11 +444,23 @@ function foldByModulators(steps: PStep[]): PStep[] {
   const out: PStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
-    if (!BY_HOSTS.has(s.name) && !isAliasCompareWhere(s)) { out.push(s); continue; }
+    const pathHost = PATH_MODULATOR_HOSTS.has(s.name);
+    if (!BY_HOSTS.has(s.name) && !pathHost && !isAliasCompareWhere(s)) { out.push(s); continue; }
     const bys: any[][] = [];
+    let from: string | undefined, to: string | undefined;
     let j = i + 1;
-    for (; j < steps.length && steps[j].name === 'by'; j++) bys.push(steps[j].args);
-    out.push(bys.length ? { ...s, bys } : s);
+    for (; j < steps.length; j++) {
+      const m = steps[j];
+      if (m.name === 'by') { bys.push(m.args); continue; }
+      // from()/to() are path-scoping modulators only on a path-family host.
+      if (pathHost && m.name === 'from' && typeof m.args[0] === 'string') { from = m.args[0]; continue; }
+      if (pathHost && m.name === 'to' && typeof m.args[0] === 'string') { to = m.args[0]; continue; }
+      break;
+    }
+    const folded = bys.length || from !== undefined || to !== undefined
+      ? { ...s, ...(bys.length ? { bys } : {}), ...(from !== undefined ? { from } : {}), ...(to !== undefined ? { to } : {}) }
+      : s;
+    out.push(folded);
     i = j - 1;
   }
   return out;

@@ -3,7 +3,7 @@ import { nodes, edges, labels } from '../schema.ts';
 import { framedProps, labelNameSub, nodePropScalar, edgePropScalar, edgePropsAgg, predicateSql, propExtract, extIdOf, P_OPS } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { stepChain } from '../frontend.ts';
-import { aliasElem, aliasIsElement, carryFrag, carriedCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
+import { aliasElem, aliasIsElement, carryFrag, carriedCols, scopePathCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
 import { aliasId, aliasPresent, aliasScalar, shapeElem } from './alias.ts';
 import { emptyElementLike, historyValues, popEnd, popIsListResult, selectOneFromAlias } from './labelselect.ts';
 import { carryOf, continueLowering, dispatchShapeTail, pathColumns, recordFieldColumns, toListStream, toPathStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type ListStream, type LoweringResult, type PathStream, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from './stream.ts';
@@ -696,19 +696,23 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   if (acc.reducer) throw new Error(`${acc.reducer}() after path() not yet supported`);
   if (acc.isPreds.length) throw new Error('is() after path() not yet supported');
 
+  // from(l)/to(l): scope the Path to the positions between two as() labels, resolved to
+  // their static linear positions (recorded on the alias entry at bind time). Inclusive
+  // of both endpoints; an unbound label / empty range fails closed.
+  const scopedCols = scopePathCols(pathState.cols, proj.from, proj.to, st.carried.aliases);
   const bys = proj.bys ?? [];
   const productive = proj.productiveBy === true;
   // A branched path (pad-to-max cols) has nullable positions: a shorter arm left them
   // NULL. LEFT JOIN those (an INNER JOIN would drop the whole short-arm path), and the
   // handler (pathBuffer) omits a null-id position. by() can't ride a branched path —
   // a padded NULL is indistinguishable from a missing property, so defer.
-  const branched = pathState.cols.some((c) => c.nullable);
+  const branched = scopedCols.some((c) => c.nullable);
   if (branched && bys.length) throw new Error('path().by() through a branch not yet supported (a padded position is indistinguishable from a missing property)');
   const p = st.rel.as('p');
   const joins: Expression[] = [];
   const cols: Expression[] = [];
   const whereParts: Expression[] = [];
-  const positions: PathPos[] = pathState.cols.map((pos, i) => {
+  const positions: PathPos[] = scopedCols.map((pos, i) => {
     const prefix = `x${i}`;
     const tbl = (pos.elem === 'edge' ? edges : nodes).as(`${prefix}n`);
     const jn = pos.nullable ? 'LEFT JOIN' : 'JOIN';
@@ -754,6 +758,9 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
 function compilePathArray(st: ElementStream, proj: PStep, acc: TailAcc): PathStream {
   if (acc.orders.length || acc.reducer || acc.isPreds.length)
     throw new Error('order()/reducer/is() after a recursive repeat().path() not yet supported');
+  // from()/to() need static per-position labels; a recursive walk has dynamic length.
+  if (proj.from !== undefined || proj.to !== undefined)
+    throw new Error('path().from()/to() over a recursive repeat().path() not yet supported');
   // path().by(key): every position projects the same property (a repeat path has dynamic
   // length, so a single by() applies uniformly; multiple by()s would round-robin over an
   // unknown length → defer). A by(traversal)/by(T.token) also defers via pathBy.

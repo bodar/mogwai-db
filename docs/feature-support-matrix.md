@@ -1,7 +1,7 @@
 # mogwai-db — feature support matrix
 
 Scannable map of what the compiler supports, and where partial steps stop. Grouped
-by traversal concern. **L3 conformance: <!-- L3:passing -->1,209<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+by traversal concern. **L3 conformance: <!-- L3:passing -->1,213<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 Sourced from the dispatch maps (`src/steps/*.ts`) and the compiler `throw` sites — if
 the code defers a shape, it fails closed with a clear error and this file says so. Keep
@@ -106,8 +106,8 @@ mixed-shape arm.
 
 | Step | | Notes |
 |---|:--:|---|
-| `path()`, `path().by(key)` | 🟡 | linear or recursive layout; label-carry + handler assembly; `count()`/`is(typeOf(PATH))` re-enter; a `by(key)` (scalar) path coerces to a list so the collection ops (set-ops/`merge`/`reverse`/`conjoin`/`unfold`) compose; through a branch (pad-to-max cols). ❌ `by(traversal)`/`by(T.x)`; `by()` through a branch; mixed element-kind at a position; dynamic-length (`repeat`) arm; spanning >1 movement/repeat; over a `union()` source |
-| `simplePath()`, `cyclicPath()` | ✅ | all-pairs identity / `json_each` guard |
+| `path()`, `path().by(key)`, `path().from(l)/to(l)` | 🟡 | linear or recursive layout; label-carry + handler assembly; `count()`/`is(typeOf(PATH))` re-enter; a `by(key)` (scalar) path coerces to a list so the collection ops (set-ops/`merge`/`reverse`/`conjoin`/`unfold`) compose; `from(l)`/`to(l)` scope to the static position slice between two `as()` labels (linear); through a branch (pad-to-max cols). ❌ `by(traversal)`/`by(T.x)`; `by()` through a branch; mixed element-kind at a position; dynamic-length (`repeat`) arm; `from`/`to` over a recursive path; spanning >1 movement/repeat; over a `union()` source |
+| `simplePath()`, `cyclicPath()` [`.from(l)/.to(l)`] | ✅ | all-pairs identity / `json_each` guard; `from(l)`/`to(l)` scope the pair-loop to a static label range. ❌ `by(key/T)` scoping |
 | other steps after `path()` | 🟡 | collection ops (set-ops/`merge`/`reverse`/`conjoin`/`unfold`) compose over a `by(key)` path (coerced to a list). ❌ `order`/reducer/`inject`/`select(Column.keys)` — need label history |
 | `tree()` | 🚫 | JS GLV stubs it, 0 conformance |
 

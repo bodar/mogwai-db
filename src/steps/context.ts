@@ -30,6 +30,11 @@ export type AliasEntry = {
    *  where the count is only known at runtime and Pop must resolve via SQL. Lets Pop.all/
    *  mixed/first/last resolve statically for the common linear case. */
   binds?: number;
+  /** Linear path position index this label attached to (the current element's position
+   *  at bind time — `path.cols.length - 1`). Set only while path tracking is active on a
+   *  linear chain, so path().from(l)/to(l) can resolve a label to a static position slice.
+   *  A rebind overwrites with the latest; `undefined` = no path / dynamic position. */
+  pathPos?: number;
 };
 export type AliasMap = ReadonlyMap<string, AliasEntry>;
 
@@ -74,6 +79,26 @@ export function appendPathPos(p: PathState, elem: Elem): { path: PathState; col:
   if (p.kind !== 'cols') throw new Error('movement after recursive repeat().path() not yet supported');
   const col = `p${p.cols.length}`;
   return { path: { kind: 'cols', cols: [...p.cols, { col, elem }] }, col };
+}
+
+/** Scope a linear path's position columns to `path().from(l)/to(l)`: each label resolves
+ *  to the static position it was bound at (AliasEntry.pathPos), and the slice is inclusive
+ *  of both endpoints. Shared by path() (select.ts) and simplePath()/cyclicPath() distinctness
+ *  (filter.ts). No from/to → the full path. Unbound/non-path label or empty range → fail
+ *  closed with a clear deferral. */
+export function scopePathCols<C extends { col: string }>(
+  cols: readonly C[], from: string | undefined, to: string | undefined, aliases: AliasMap,
+): readonly C[] {
+  if (from === undefined && to === undefined) return cols;
+  const posOf = (lbl: string): number => {
+    const e = aliases.get(lbl);
+    if (!e || e.pathPos === undefined) throw new Error(`path().from()/to() label "${lbl}" is not bound to a path position`);
+    return e.pathPos;
+  };
+  const lo = from === undefined ? 0 : posOf(from);
+  const hi = to === undefined ? cols.length - 1 : posOf(to);
+  if (lo > hi || lo < 0 || hi >= cols.length) throw new Error('path().from()/to() scope is empty or out of range');
+  return cols.slice(lo, hi + 1);
 }
 
 /** A named side-effect collection (aggregate()/store()/group('a')) — the registry
