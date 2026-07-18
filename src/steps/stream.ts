@@ -225,16 +225,19 @@ export const groupColumns = (s: Pick<GroupStream, 'key' | 'val'>): string[] => {
   const key = s.key.kind === 'scalar' ? ['gk']
     : s.key.kind === 'map' ? s.key.parts.map((_, i) => `k${i}_v`)
     : ['k_rid', ...elemColumns('k', s.key.elem)];
+  // Node/edge element values carry an internal rowid (v_rid), mirroring the element key's
+  // k_rid, so a later select(Column.values)/unfold() can rejoin the value elements. A
+  // property element value has no rowid column (elementSelect emits none).
   const val = s.val.kind === 'elementList' || s.val.kind === 'elementLast'
-    ? elemColumns('v', s.val.elem)
+    ? [...(s.val.elem === 'property' ? [] : ['v_rid']), ...elemColumns('v', s.val.elem)]
     : s.val.kind === 'sum' ? ['gv', 'gvt'] : ['gv'];
   return [...key, ...val];
 };
 
-/** Root-visible group columns omit the internal element-key rowid used only when a
- * later Column.keys selection re-enters an ElementStream. */
+/** Root-visible group columns omit the internal element rowids (key k_rid / value v_rid)
+ * used only when a later Column.keys/values selection re-enters an ElementStream. */
 export const groupResultColumns = (s: Pick<GroupStream, 'key' | 'val'>): string[] =>
-  groupColumns(s).filter((name) => name !== 'k_rid');
+  groupColumns(s).filter((name) => name !== 'k_rid' && name !== 'v_rid');
 
 export const pathColumns = (layout: PathLayout): string[] => {
   if (layout.kind === 'grouped') return layout.byKey ? ['pk', 'ord', 'v'] : ['pk', 'ord', ...elemColumns('', layout.elem).map((c) => c.slice(1))];

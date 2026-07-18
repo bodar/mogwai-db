@@ -422,9 +422,10 @@ describe('compiler SQL snapshots', () => {
     // select(Column.values) → the entry's value (count → Long) per row
     expect(read("g.V().outE().values('weight').groupCount().unfold().select(Column.values).unfold()").shape)
       .toEqual({ kind: 'value', as: 'long' });
-    // element-valued group entries still defer (P4 wall)
-    expect(() => compile("g.V().group().by('name').by(__.out().fold()).unfold().select(Column.values)", {}))
-      .toThrow('over a group of element values not yet supported');
+    // element-valued group entries now re-enter via the list-of-element-rid substrate:
+    // each entry's value is a list of the out() vertices (json_group_array of v_rid).
+    const ev = read("g.V().group().by('name').by(__.out().fold()).unfold().select(Column.values)");
+    expect(ev.sql).toContain('json_group_array');
   });
 
   test('group()/groupCount() always lowers to GroupStream; Column selection derives MapStream', () => {
@@ -517,6 +518,24 @@ describe('compiler SQL snapshots', () => {
     const personB = run(store, "g.V().group().by(T.label).by(__.out().out().groupCount().by(T.label))")
       .find((r: any) => r.gk === 'person');
     expect(JSON.parse(personB.gv)).toEqual({ software: 2 }); // marko→josh→{lop,ripple}
+  });
+
+  test('element-valued group re-enters via the list-of-element-rid substrate (Stage 2)', () => {
+    const store = seededStore();
+    // group().by(label).by(__.out()) → Map<label, [vertices]>. The value rows carry v_rid;
+    // select(Column.values)/unfold collapse them into a list-of-element-rids per key that the
+    // list substrate rejoins to real vertices.
+    const ev = read("g.V().group().by(T.label).by(__.out()).select(Column.values)");
+    expect(ev.sql).toContain('json_group_array');
+    expect(ev.sql).toContain('v_rid');
+    // whole-map values → one list-of-lists; flatten to all out() vertices = 6 modern edges.
+    expect(run(store, "g.V().group().by(T.label).by(__.out()).select(Column.values).unfold().unfold().count()")
+      .map((r: any) => Number(r.v))).toEqual([6]);
+    // per-entry (unfold→entries): each person/software entry's value is its members' out() list;
+    // fold form composes identically. 6 distinct names → 6 entries.
+    expect(executeQuery(store, "g.V().group().by('name').by(__.out().fold()).unfold().select(Column.values)", {})).toHaveLength(6);
+    // element KEY (bare by() → the vertex) + element-list VALUE re-enters too (k_rid + v_rid).
+    expect(() => executeQuery(store, "g.V().group().by().by(__.out()).select(Column.values)", {})).not.toThrow();
   });
 
   test("cap('a') of a group side-effect retypes to a MapStream on a follower", () => {
@@ -1606,9 +1625,9 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('aggregation deferred forms throw clearly', () => {
-    // group() is now always a GroupStream: an element-VALUE layout cannot derive the
-    // narrow MapStream consumed by Column.values, and an unknown group consumer defers.
-    expect(() => compile('g.V().group().by("name").select(Column.values)', {})).toThrow('over a group of element values not yet supported');
+    // group() is now always a GroupStream. Element-LIST values (by(__.out())/bare) re-enter
+    // via the list-of-rid substrate; a single-element (tail) value entry still defers.
+    expect(() => compile('g.V().group().by("name").by(__.tail()).select(Column.values)', {})).toThrow('single-element (tail) values not yet supported');
     expect(() => compile('g.V().groupCount().by("name").cap("x")', {})).toThrow('cap() on a group value not yet supported');
     expect(() => compile('g.V().properties().group().by()', {})).toThrow('group().by() on a property element is not yet supported');
     expect(() => compile('g.V().group().by("name").by("age").by("x")', {})).toThrow('more than two by() modulators');
