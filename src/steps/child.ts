@@ -5,7 +5,7 @@ import { advance, carriedWith, carryFrag, carriedCols, withCarried, type Element
 import { aliasId } from './alias.ts';
 import { carryOf, toListStream, toScalarStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream } from './stream.ts';
 import { lowerElementSteps, lowerSteps, tryLowerElementSteps } from './index.ts';
-import { lowerScalarRows, gateScalar, scalarChildProduces, unionScalarStreams, SCALAR_TRANSFORMS } from './scalar.ts';
+import { lowerScalarRows, gateScalar, tryInlineScalarPredicate, unionScalarStreams, SCALAR_TRANSFORMS } from './scalar.ts';
 import { normalize, type PStep } from '../strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
 import { predicateSql, rangeToOffsetLimit } from '../plan.ts';
@@ -996,7 +996,7 @@ export function tryCompileElementTraversal(
 // sub-traversal: scalar transforms, is()/and/or/not/filter/where predicates, and
 // constant(). Each arm lowers through the SAME lowerSteps → compileFromScalar engine (not a
 // private reader); the branch consumers gate the value rows and UNION ALL the arm outputs,
-// reusing scalarChildProduces as the per-row productivity oracle. This is the scalar twin of
+// reusing tryInlineScalarPredicate as the per-row productivity oracle. This is the scalar twin of
 // branch.ts's element-parent choose/union/coalesce — the missing half is consuming a scalar
 // AS the parent. (Element re-entry V()/E(), reducer-bodied maps, and modulator consumers
 // math()/format()/project().by() need the pushChildScope substrate and land in later stages.)
@@ -1033,7 +1033,7 @@ const scalarArmLeafOk = (s: PStep): boolean =>
  *  terminal reducer). Unlike the root-scope arm set, the pushed scalar seed carries an
  *  encounter column, so the partitioned order/slice/tail/dedup paths are safe here; constant()
  *  is excluded (it defers inside a child scope) and asBool has no scalarTx impl. */
-const SCALAR_CHILD_PREFIX = new Set([...SCALAR_ARM_TX, 'is', 'constant', 'identity', 'unfold', 'math', 'order', 'limit', 'skip', 'range', 'tail', 'dedup']);
+const SCALAR_CHILD_PREFIX = new Set([...SCALAR_ARM_TX, 'is', 'and', 'or', 'not', 'filter', 'where', 'constant', 'identity', 'unfold', 'math', 'order', 'limit', 'skip', 'range', 'tail', 'dedup']);
 const scalarChildPrefixOk = (s: PStep): boolean =>
   SCALAR_CHILD_PREFIX.has(s.name) || (s.name === 'asNumber' && (s.args ?? []).length > 0);
 
@@ -1069,7 +1069,7 @@ export function tryScalarMapChild(s: ScalarStream, step: PStep): ScalarStream | 
 }
 
 /** choose(pred, then[, else]) over a scalar. The predicate is a P (applied to `v` via
- *  predicateSql) or a nested scalar-predicate traversal (scalarChildProduces); it gates the
+ *  predicateSql) or a nested scalar-predicate traversal (tryInlineScalarPredicate); it gates the
  *  value rows into disjoint then/else seeds, each arm lowers over its seed, and the two
  *  merge with UNION ALL. else absent → the value passes through unchanged (identity). */
 export function tryScalarChooseChild(s: ScalarStream, step: PStep): ScalarStream | null {
@@ -1086,8 +1086,11 @@ export function tryScalarChooseChild(s: ScalarStream, step: PStep): ScalarStream
   const elseBody = elseArg ? childSteps(elseArg.nested, s.params) : null;
   if (elseBody && !scalarBranchArm(elseBody, s.params)) return null;
 
+  // The gate predicate must inline over the value (this consumer has no child-existence form);
+  // a non-inline predicate body (vocab-independent of the value) defers the whole choose.
+  if (predBody && tryInlineScalarPredicate(predBody, value(0), s.params) === null) return null;
   const cond = (v: Expression) => predBody
-    ? scalarChildProduces(predBody, v, s.params)
+    ? tryInlineScalarPredicate(predBody, v, s.params)!
     : predicateSql(v, args[0]);
   const thenEnd = lowerScalarArm(gateScalar(s, cond, false), thenBody);
   if (!thenEnd) return null;
@@ -1112,7 +1115,7 @@ export function tryScalarUnionChild(s: ScalarStream, step: PStep): ScalarStream 
 }
 
 /** coalesce(a, b, …) over a scalar: the first arm that PRODUCES a value, per input row.
- *  Productivity is the scalarChildProduces boolean of each arm body, so arm k is gated by
+ *  Productivity is the tryInlineScalarPredicate boolean of each arm body, so arm k is gated by
  *  "still unclaimed by every earlier arm AND this arm produces". No ordinal/child-scope is
  *  needed because a scalar arm's productivity is a pure predicate over the value. */
 export function tryScalarCoalesceChild(s: ScalarStream, step: PStep): ScalarStream | null {
@@ -1120,10 +1123,12 @@ export function tryScalarCoalesceChild(s: ScalarStream, step: PStep): ScalarStre
   if (branches.length < 1) return null;
   const bodies = branches.map((b: any) => childSteps(b.nested, s.params));
   if (bodies.some((body: PStep[]) => !scalarBranchArm(body, s.params))) return null;
+  // Each arm's productivity is an inline predicate over the value; a non-inline body defers.
+  if (bodies.some((body: PStep[]) => tryInlineScalarPredicate(body, value(0), s.params) === null)) return null;
   const arms: ScalarStream[] = [];
   let unclaimed = (_v: Expression) => q`1` as Expression;
   for (const body of bodies) {
-    const produces = (v: Expression) => scalarChildProduces(body, v, s.params);
+    const produces = (v: Expression) => tryInlineScalarPredicate(body, v, s.params)!;
     const prev = unclaimed;
     const seed = gateScalar(s, (v) => q`(${prev(v)}) AND (${produces(v)})`, false);
     const end = lowerScalarArm(seed, body);
@@ -1132,4 +1137,37 @@ export function tryScalarCoalesceChild(s: ScalarStream, step: PStep): ScalarStre
     unclaimed = (v) => q`(${prev(v)}) AND NOT COALESCE((${produces(v)}), 0)`;
   }
   return unionScalarStreams(s, arms);
+}
+
+/**
+ * Generic child-existence gate for and/or/not/filter/where over a SCALAR stream — the
+ * disable-safe fallback when the inline predicate (lowerScalarFilter) declines (switch off, or
+ * a body beyond the inline vocabulary, e.g. a reducer arm). Each traversal arm compiles over ONE
+ * pushed scalar child scope; the parent value rows are filtered on the arms' correlated EXISTS
+ * (combined AND/OR, negated for not). The value schema is restored exactly from the pushed
+ * domain (only rows drop). Returns null if an arm has no generic scalar compilation, or for the
+ * predicate-P form (which has no traversal child — that path is inline-only).
+ */
+export function tryScalarFilterByChildExistence(s: ScalarStream, step: PStep): ScalarStream | null {
+  const nested = (step.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  if (!nested.length) return null;
+  const { scope, frame, seed } = pushChildScope(s);
+  const d = frame.domain.as('d');
+  const terms: Expression[] = [];
+  for (const arm of nested) {
+    const child = tryCompileScalarValueRows(seed, arm.nested, reuseCurrentFrame(scope, frame));
+    if (!child) return null;
+    const c = child.stream.rel.as('c');
+    terms.push(q`EXISTS (SELECT 1 FROM ${c} WHERE ${c.c[frame.ordinal]}=${d.c[frame.ordinal]})`);
+  }
+  const combined = paren(list(terms.map(paren), step.name === 'or' ? ' OR ' : ' AND '));
+  const cond = step.name === 'not' ? q`NOT (${combined})` : combined;
+  // Restore the parent's exact scalar payload from the pushed domain (drop the pushed ordinal).
+  const payloadCols = ['v', ...(s.result === 'number' ? ['vt'] : []), ...(s.encounter ? [s.encounter] : []), ...(s.vtype ? [s.vtype] : [])];
+  const proj = payloadCols.map((col) => q`${d.c[col]} AS ${col}`);
+  const rel = s.q.cte(
+    q`SELECT ${list(proj, ', ')}${carryFrag(s.carried, d)} FROM ${d} WHERE ${cond}`,
+    [...payloadCols, ...carriedCols(s.carried)],
+  );
+  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
 }

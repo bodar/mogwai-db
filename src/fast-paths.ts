@@ -4,6 +4,10 @@ export interface FastPathConfig {
   readonly predicateInlining: boolean;
   readonly singleHopOptional: boolean;
   readonly bulkRepeatCount: boolean;
+  /** Inline a scalar predicate body (and/or/not/filter/where over a scalar) to one boolean
+   *  `WHERE` over the value, instead of the generic child-existence gate (a correlated EXISTS
+   *  per parent row). Disabling routes through the generic path — result-equivalent. */
+  readonly scalarPredicateInlining: boolean;
 }
 
 export interface CompileOptions {
@@ -14,6 +18,7 @@ export const DEFAULT_FAST_PATHS: FastPathConfig = Object.freeze({
   predicateInlining: true,
   singleHopOptional: true,
   bulkRepeatCount: true,
+  scalarPredicateInlining: true,
 });
 
 export const resolveFastPaths = (options?: CompileOptions): FastPathConfig => ({
