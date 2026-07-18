@@ -2433,8 +2433,37 @@ describe('scalar math (Stage 2)', () => {
     expect(read("g.V().values('age').math('_ * 2')").shape).toEqual({ kind: 'value', as: 'double' });
   });
 
-  test('named variables / by()-modulated math defer (need the modulation seam)', () => {
+  test('named variables resolve through by()-modulators over the value', () => {
+    const store2 = new GraphStore(new BunSqlite(':memory:'));
+    for (const a of [29, 27]) executeQuery(store2, `g.addV('t').property('age',${a})`, {});
+    const d = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
+    const v = (g: string) => executeQuery(store2, g, {}).map(d).map(String).sort();
+    expect(v("g.V().values('age').math('_ + a').by(__.constant(100))")).toEqual(['127', '129']);
+    expect(v("g.V().values('age').math('a * b').by(__.identity()).by(__.constant(2))")).toEqual(['54', '58']);
+  });
+
+  test('a named variable with no by() defers', () => {
     expect(() => compile("g.V().values('age').math('a + b')", {})).toThrow('math() after a scalar stream not yet supported');
+  });
+});
+
+// Stage 2 consumer: format("…%{_}…") over a scalar — literals + by()-modulator tokens over the value.
+describe('scalar format (Stage 2)', () => {
+  const store = new GraphStore(new BunSqlite(':memory:'));
+  for (const n of ['marko', 'vadas']) executeQuery(store, `g.addV('p').property('name','${n}')`, {});
+  const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
+  const vals = (g: string) => executeQuery(store, g, {}).map(dec).map(String).sort();
+
+  test('a %{_} by()-modulator token + literals', () => {
+    expect(vals("g.V().values('name').format('Hi %{_}!').by(__.toUpper())")).toEqual(['Hi MARKO!', 'Hi VADAS!']);
+  });
+
+  test('a token-free template is a constant string', () => {
+    expect(vals("g.V().values('name').format('static')")).toEqual(['static', 'static']);
+  });
+
+  test('a %{key} property token has no scalar meaning and defers', () => {
+    expect(() => compile("g.V().values('name').format('%{name}')", {})).toThrow('format() after a scalar stream not yet supported');
   });
 });
 

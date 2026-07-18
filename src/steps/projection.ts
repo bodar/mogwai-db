@@ -12,7 +12,7 @@ import { type Shape } from '../render.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
 import { lowerScalarFilter, lowerConstant, lowerScalarConstant, lowerScalarSack, collectionTypeOf, scalarCollectionRetype } from './scalar.ts';
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerScalarProject, lowerSingleSelect } from './select.ts';
-import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerChooseOptions, lowerChooseOptionsScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
+import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerLegacyUnion } from './branch.ts';
 import { lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
 import { classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, tryCompileCountChild, tryCompileListChild, tryScalarChooseChild, tryScalarCoalesceChild, tryScalarMapChild, tryScalarUnionChild } from './child.ts';
@@ -625,6 +625,8 @@ const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
   // math("<formula>") over a scalar: `_` = the value `v`, one arithmetic Double. Named
   // vars / by()-modulated math defer (return null) to the generic message.
   ['math', scalarBranch(lowerMathScalar)],
+  // format("…%{_}…") over a scalar: literals + by()-modulator tokens over the value.
+  ['format', scalarBranch(lowerFormatScalar)],
   // project('a','b').by(…) over a scalar: each field's by() runs against the value → a
   // RecordStream of scalar fields (select.ts lowerScalarProject). A field needing element
   // output (movement) returns null → the "requires element input" deferral.

@@ -132,27 +132,58 @@ export function lowerMath(st: ElementStream, steps: PStep[], stop: number): Scal
 }
 
 /**
- * math("<formula>") over a SCALAR parent: the current value `_` IS the scalar `v`, so the
- * formula becomes one arithmetic expression over `v` (no element to read properties from,
- * no by()-modulator). Result is a Double; a domain-error/NULL result drops the row (matching
- * MathStep and the element lowerMath). Named variables (a bare identifier bound by an
- * as()/by() modulator) and by()-modulated scalar math need the parent-polymorphic modulation
- * seam and defer here (return null → the clear generic deferral). The encounter column is
- * preserved so a child-scope scalar math still composes with partitioned followers.
+ * math("<formula>") over a SCALAR parent. The current value `_` IS the scalar `v`; a named
+ * variable is bound by a by()-modulator that runs against the value (a scalar sub-traversal),
+ * resolved through the parent-polymorphic modulation seam — positional/round-robin over the
+ * by()s in first-seen order, matching the element form. Result is a Double; a domain-error/
+ * NULL (or a non-productive by()) drops the row. `_`-only formulae keep a fast path that
+ * preserves the encounter column so a child-scope scalar math (e.g. a project field
+ * `by(__.math('_*10'))`) composes with partitioned followers. Deferred (return null): a
+ * variable with no by(), a property-key by() (a scalar has no properties).
  */
 export function lowerMathScalar(s: ScalarStream, step: PStep): ScalarStream | null {
   const formula = step.args[0];
   if (typeof formula !== 'string') return null;
-  if ((step.bys ?? []).length) return null;                 // by()-modulated → modulation seam (later)
-  if (mathVars(formula).some((name) => name !== '_')) return null; // named var needs a binding (later)
-  const p = s.rel.as('p');
-  const mathExpr = mathToSql(formula, () => p.c.v);
-  const enc = s.encounter ? q`, ${p.c[s.encounter]} AS ${s.encounter}` : empty;
+  const bys = step.bys ?? [];
+  const varOrder = mathVars(formula);
+
+  // Fast path: `_`-only, no by() — one expression straight over the value, encounter preserved.
+  if (!bys.length && varOrder.every((name) => name === '_')) {
+    const p = s.rel.as('p');
+    const mathExpr = mathToSql(formula, () => p.c.v);
+    const enc = s.encounter ? q`, ${p.c[s.encounter]} AS ${s.encounter}` : empty;
+    const rel = s.q.cte(
+      q`SELECT ${mathExpr} AS v${enc}${carryFrag(s.carried, p)} FROM ${p} WHERE ${predicateSql(mathExpr, undefined)}`,
+      ['v', ...(s.encounter ? [s.encounter] : []), ...carriedCols(s.carried)],
+    );
+    return toScalarStream(carryOf(s), rel, 'double', 'value', s.encounter);
+  }
+
+  // Named variables → one scalar by()-child each, resolved against the value via the seam.
+  const specs: ScalarModulationSpec[] = [];
+  const resolved = new Map<string, number | undefined>(); // var → modulation index (undefined = `_`)
+  for (const name of varOrder) {
+    if (name === '_') { resolved.set(name, undefined); continue; }
+    if (!bys.length) return null;
+    const byArgs = bys[varOrder.indexOf(name) % bys.length];
+    const nested = byArgs.find((a: any) => a && typeof a === 'object' && 'nested' in a);
+    if (!nested) return null; // a property-key by() has no scalar meaning
+    resolved.set(name, specs.length);
+    specs.push({ nested: nested.nested, required: true });
+  }
+  const mods = specs.length ? tryCompileScalarModulations(s, specs) : null;
+  if (specs.length && !mods) return null;
+  const p = (mods?.rel ?? s.rel).as('p');
+  const resolveVar = (name: string): Expression => {
+    const mod = resolved.get(name);
+    return mod !== undefined ? p.c[mods!.values[mod].value] : p.c.v; // `_` = the value (idCol='v')
+  };
+  const mathExpr = mathToSql(formula, resolveVar);
   const rel = s.q.cte(
-    q`SELECT ${mathExpr} AS v${enc}${carryFrag(s.carried, p)} FROM ${p} WHERE ${predicateSql(mathExpr, undefined)}`,
-    ['v', ...(s.encounter ? [s.encounter] : []), ...carriedCols(s.carried)],
+    q`SELECT ${mathExpr} AS v${carryFrag(s.carried, p)} FROM ${p} WHERE ${predicateSql(mathExpr, undefined)}`,
+    ['v', ...carriedCols(s.carried)],
   );
-  return toScalarStream(carryOf(s), rel, 'double', 'value', s.encounter);
+  return toScalarStream(carryOf(s), rel, 'double');
 }
 
 // ---------- format() (per-traverser string templating) ----------
@@ -220,6 +251,51 @@ export function lowerFormat(st: ElementStream, steps: PStep[], stop: number): Sc
     ['v', ...carriedCols(st.carried)],
   );
   return toScalarStream(carryOf(st), rel);
+}
+
+/**
+ * format("…%{token}…") over a SCALAR parent. The value has no properties, so a `%{key}`
+ * named token has no meaning (defer); a `%{_}` placeholder pulls the next by()-modulator
+ * (a scalar sub-traversal over the value, round-robin/first-seen like the element form), and
+ * literals concatenate. A NULL operand makes the whole `||` NULL → the traverser is filtered
+ * (matching FormatStep). A token-free template is a constant string. Returns null to defer
+ * (a `%{key}` token, or a `%{_}` with no/property-key by()).
+ */
+export function lowerFormatScalar(s: ScalarStream, step: PStep): ScalarStream | null {
+  const tmpl = step.args[0];
+  if (typeof tmpl !== 'string') return null;
+  const bys = step.bys ?? [];
+  const re = /%\{([^}]*)\}/g;
+  const specs: ScalarModulationSpec[] = [];
+  const parts: ({ kind: 'literal'; text: string } | { kind: 'mod'; index: number })[] = [];
+  let last = 0, m: RegExpExecArray | null, u = 0, hadToken = false;
+  while ((m = re.exec(tmpl)) !== null) {
+    if (m.index > last) parts.push({ kind: 'literal', text: tmpl.slice(last, m.index) });
+    const tok = m[1];
+    hadToken = true;
+    if (tok !== '_') return null; // a %{key} token reads a property — a scalar has none
+    if (!bys.length) return null;
+    const byArgs = bys[u++ % bys.length];
+    const nested = byArgs.find((a: any) => a && typeof a === 'object' && 'nested' in a);
+    if (!nested) return null; // a property-key by() has no scalar meaning
+    parts.push({ kind: 'mod', index: specs.length });
+    specs.push({ nested: nested.nested, required: true });
+    last = m.index + m[0].length;
+  }
+  if (last < tmpl.length) parts.push({ kind: 'literal', text: tmpl.slice(last) });
+  const mods = specs.length ? tryCompileScalarModulations(s, specs) : null;
+  if (specs.length && !mods) return null;
+  const p = (mods?.rel ?? s.rel).as('p');
+  const pieces = parts.map((part): Expression => part.kind === 'literal'
+    ? q`${value(part.text)}`
+    : p.c[mods!.values[part.index].value]);
+  const expr = pieces.length ? q`CAST(${list(pieces, ' || ')} AS TEXT)` : q`${value('')}`;
+  const where = hadToken ? q` WHERE ${predicateSql(expr, undefined)}` : q``;
+  const rel = s.q.cte(
+    q`SELECT ${expr} AS v${carryFrag(s.carried, p)} FROM ${p}${where}`,
+    ['v', ...carriedCols(s.carried)],
+  );
+  return toScalarStream(carryOf(s), rel);
 }
 
 // ---------- option-map choose (scalar CASE projector) ----------
