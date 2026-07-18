@@ -100,7 +100,27 @@ tractability for element-returning big-`repeat` too, not just reducers. Staged A
 contract/L3-verified). B (first-class `bulk` carried column, ≡1) + C (enable collapse, gated
 by path-freedom) queued — B+C are a paired delivery (B alone is valueless substrate).
 
-## 3. Scalar-parent child arms — widen scalar re-entry into arms
+## 3. Scalar-parent child arms — widen scalar re-entry into arms ✅ (landed 2026-07-18)
+
+**Done (trunk @ 96db0f1, L3 held 1180, 6 commits + a 3-reviewer pass).** Arms over a
+scalar parent now compose the same as over an element parent, all through the shared
+`tryCompileScalarArm` (the scalar twin of `tryCompileElementTraversal`):
+- **reducer / nested-branch / tail / dedup** arms in `union`/`choose`/`coalesce` (per-input
+  child scope, matching the L3-ratcheted element-parent convention);
+- **`V()`/`E()` re-source** inside the child scope — `lowerScalarVE`'s origins-guard relaxed
+  (a pushed ordinal rides the CROSS JOIN), `compileScalarChildRows` re-source branch +
+  `scopedElementCount`/`resourceElement`; the value is discarded per `GraphStep(isStart=false)`;
+- **mixed-shape** arms → the SAME `VariantStream` the element parent produces, for
+  `union`/`choose`/`coalesce`, and `optional(t) ≡ coalesce(t, identity)` — via `Carry`-typed
+  builders relocated to leaf `steps/variant.ts` (`variantArmSelect`/`variantArmsMeta`/
+  `variantCols`/`VariantArm`/`unifyLists`), shared by both parents; only the per-arm compiler differs.
+
+Review-caught + fixed one real bug: `map()` is first-result-only, was hardcoded `'all'` →
+over-produced on a fan-out arm; `armFansOut` now fails it closed (see the 🚫 in Non-goals).
+Combinatorial completeness (not L3-visible — the official suite doesn't exercise these in scalar
+position, the `@gap:scalar-position` rationale); covered by the L4 addendum + compiler unit tests.
+
+The original problem/move framing follows for reference.
 
 **Problem.** Scalar re-entry at the **tail** is done, but child **arms** over a
 scalar parent are whitelisted. `SCALAR_CHILD_PREFIX` (`child.ts:1036`) is value-ops
