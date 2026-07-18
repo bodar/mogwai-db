@@ -844,7 +844,7 @@ function compileElementChildRows(
   // ChildRows). Property parents fail closed here; the group falls back to its deferral.
   // Element-parent-only + no sack/fromV are emit-time PARENT-state guards (not shape):
   // kept here, distinct from the shared shape classification below.
-  if (isPropertyParent(parent)) return null;
+  if (isPropertyParent(parent) || isScalarParent(parent)) return null;
   if (!nested || parent.carried.sack || parent.carried.fromV) return null;
   // ONE shape classification (the same classifyElementChildRows the element preflight peeks
   // use) — the bare-order strip, firstPolicy order modulator, and empty-before handling all
