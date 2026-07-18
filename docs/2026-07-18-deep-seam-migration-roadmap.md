@@ -21,7 +21,7 @@ combinations that were silently unsupported start working, L3 climbs.
 
 | # | Target | Kind | Substrate move | Confidence |
 |---|--------|------|----------------|------------|
-| 1 | Group / Map stream | delete bypass + polymorphic seam | child seam over GROUP/MAP parents | highest (proven playbook) |
+| 1 | Group / Map stream | ✅ done | nested values + element values through the generic seam | landed 2026-07-18 |
 | 2 | Traverser bulking | finish substrate | `bulk` as first-class carried column | high (specced, unwired) |
 | 3 | Scalar-parent child arms | widen re-entry | scalar seed re-sources to elements | high (test bed exists) |
 | 4 | VariantStream | ✅ row-ops done | shape-agnostic tail; heterogeneity wall on the rest | landed 2026-07-18 |
@@ -29,7 +29,16 @@ combinations that were silently unsupported start working, L3 climbs.
 
 ---
 
-## 1. GroupStream / MapStream — first-class re-entry, kill the last inline reader
+## 1. GroupStream / MapStream — first-class re-entry, kill the last inline reader ✅ (landed 2026-07-18)
+
+**Done.** Stage 1 deleted `tryLowerNestedMapGroup`; nested-group values lower through the
+generic child seam (any inner movement/filter + generic key/reducer). Stage 2 added the
+element-valued group entry (`v_rid` + `json_group_array` in `deriveGroupEntries`), closing
+group.ts:478 — `select(Column.values)`/`unfold()` over element values now re-enter. L3
+1179→1180. Details: `docs/2026-07-18-group-value-generic-seam-plan.md`. Remaining group
+deferrals (element-valued inner keys, single-element `tail` value entries, `by(traversal)`
+element keys) are distinct follow-ons, not this seam.
+
 
 **Problem.** `GroupStream` is near-terminal (`is(typeOf(MAP))`/`count`/`unfold`/
 `select(Column)` then materialize — `group.ts:429`); `MapStream` can't even
