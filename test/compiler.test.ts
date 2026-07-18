@@ -2132,6 +2132,18 @@ describe('compiler SQL snapshots', () => {
     expect(recursiveMs).toBeGreaterThan(bulkMs * 5);
   });
 
+  test('bulk overflowing i64 fails loud (native, matches TinkerPop long bulk)', () => {
+    // A traverser total past 2^63 must throw, not silently wrap or lose precision — the bulk column
+    // stays an INTEGER end to end (a regression to REAL would compute a wrong finite number). K20
+    // both().times(14) ≈ 38^14 ≈ 6e21 overflows; SQLite raises `integer overflow` mid-SUM.
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    for (let i = 0; i < 20; i++) executeQuery(store, "g.addV('n')", {});
+    const ids = store.query<{ id: number }>('SELECT id FROM nodes').map((r) => r.id);
+    for (const a of ids) for (const b of ids) if (a < b) store.query('INSERT INTO edges(src,label,tgt) VALUES (?,?,?)', [a, 0, b]);
+    store.query('INSERT OR IGNORE INTO labels(id,name) VALUES (0,?)', ['n']);
+    expect(() => executeQuery(store, 'g.V().repeat(__.both()).times(14).count()', {})).toThrow('integer overflow');
+  });
+
   test('repeat requires an exit modulator; emit()/until() run unbounded; sequential repeats chain', () => {
     // bare repeat() has no termination AND no output semantics → reject
     expect(() => compile('g.V().repeat(__.out())', {})).toThrow('repeat() requires times(), until(), or emit()');
