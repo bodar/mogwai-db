@@ -6,6 +6,7 @@ import { aliasId } from './alias.ts';
 import { carryOf, toListStream, toScalarStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream } from './stream.ts';
 import { lowerElementSteps, lowerSteps, tryLowerElementSteps } from './index.ts';
 import { lowerScalarRows, gateScalar, tryInlineScalarPredicate, unionScalarStreams, SCALAR_TRANSFORMS } from './scalar.ts';
+import { lowerScalarVE } from './projection.ts';
 import { normalize, type PStep } from '../strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
 import { predicateSql, rangeToOffsetLimit } from '../plan.ts';
@@ -447,6 +448,34 @@ function applyScalarChildCardinality(
   return { stream: toScalarStream(carryOf(parent), rel, lowered.as, lowered.result), frame: pushed.frame };
 }
 
+/** PURE. A scalar child body that RE-SOURCES the graph: a `V()`/`E()` head (with no
+ *  nested-traversal id argument, which is a different shape) over which the pushed scalar seed
+ *  CROSS JOINs per value. The head discards the value and re-enters element space — the one
+ *  way a scalar arm reaches movement/adjacency. */
+function isResourceHead(rest: PStep[]): boolean {
+  const head = rest[0];
+  return !!head && (head.name === 'V' || head.name === 'E')
+    && !(head.args ?? []).some((a: any) => a && typeof a === 'object' && 'nested' in a);
+}
+
+/** Count the element rows of a re-sourced child per parent origin. Each row is marked with a
+ *  per-origin encounter, then the SHARED scoped count barrier (LEFT JOIN domain → 0 for an
+ *  empty child, bulk-weighted) reduces it — no bespoke aggregate, the same path an element
+ *  count arm uses (tryCompileRowsBeforeReducer's count branch). */
+function scopedElementCount(el: ElementStream, pushed: ReturnType<typeof pushChildScope>): ScalarStream {
+  const c = el.rel.as('c');
+  const ord = pushed.frame.ordinal;
+  const marked = toScalarStream(
+    carryOf(el),
+    el.q.cte(
+      q`SELECT 1 AS v, ROW_NUMBER() OVER (PARTITION BY ${c.c[ord]} ORDER BY ${c.c.id}) AS encounter${carryFrag(el.carried, c)} FROM ${c}`,
+      ['v', 'encounter', ...carriedCols(el.carried)],
+    ),
+    undefined, 'value', 'encounter',
+  );
+  return lowerScopedScalarReducer(marked, 'count', pushed.scope);
+}
+
 function compileScalarChildRows(
   parent: ChildParent,
   nested: any,
@@ -477,27 +506,56 @@ function compileScalarChildRows(
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
   }
 
-  // Scalar parent: the child body starts from the value `_` = v (no adjacency/props). An
-  // encounter-free value-op prefix (transforms/is/order/slice — the pushed seed carries the
-  // minted encounter) plus an optional terminal scoped reducer (count/sum/min/max/mean).
-  // fold() is stripped by the caller (stripTerminal), so it never appears here. constant()
-  // and any non-value body defer (return null → the caller's clear message).
+  // Scalar parent: the child body starts from the value `_` = v. Two families (recognized
+  // purely by scalarChildBodyOk, so classify-then-emit holds — no CTE before a decision):
+  //   (a) a value-op body (transforms/is/order/slice — the pushed seed carries the minted
+  //       encounter) that stays scalar, plus an optional terminal scoped reducer; and
+  //   (b) a RE-SOURCE body (`V()`/`E()` then element movement/filter, optional projection):
+  //       the pushed scalar seed CROSS JOINs the graph per value (lowerScalarVE carries the
+  //       ordinal through), so a following scoped reducer/projection reduces per input.
+  // fold() is stripped by the caller (stripTerminal), so it never appears here.
   if (isScalarParent(parent)) {
     const last = body.at(-1);
-    const reducer = last && CHILD_SCALAR_REDUCERS.has(last.name) && last.name !== 'fold' ? last.name : undefined;
-    const prefix = reducer ? body.slice(0, -1) : body;
-    if (!body.length || !prefix.every(scalarChildPrefixOk)) return null;
+    const reducer = last && CHILD_SCALAR_REDUCERS.has(last.name) ? last.name as ScalarReducer : undefined;
+    const rest = reducer ? body.slice(0, -1) : body;
+    if (!body.length) return null;
+
+    // (b) re-source body: V()/E() head (no nested-traversal id arg) then an element remainder.
+    if (isResourceHead(rest)) {
+      const after = rest.slice(1);
+      const elementOnly = after.length === 0 || after.every((s) => ELEMENT_CHILD_STEPS.has(s.name));
+      if (elementOnly) {
+        // A movement-only re-source ends in element space; only count() reduces it back to a
+        // scalar per input (sum/min/max/mean need a value → the arm would project one first,
+        // taking the projection path below). No reducer → element-ending mixed shape (slice 3).
+        if (reducer !== 'count') return null;
+        const pushed = pushChildScope(parent, scope);
+        const el = lowerScalarVE(pushed.seed, rest[0]);
+        if (!el) return null;
+        const { stream: moved, next } = lowerElementSteps(after, el);
+        if (next !== after.length) return null;
+        return applyScalarChildCardinality(parent, pushed, scopedElementCount(moved, pushed), use, retainChildScope);
+      }
+      // ends in a projection (values/id/label) → scalar; lowerSteps folds V→element→projection.
+      if (classifyScalarChildRows('element', after)?.kind !== 'element') return null;
+      const pushed = pushChildScope(parent, scope);
+      const lowered = lowerSteps(pushed.seed, rest, 0);
+      if (lowered.kind !== 'scalar') return null;
+      const stream = reducer ? lowerScopedScalarReducer(lowered, reducer, pushed.scope) : lowered;
+      return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
+    }
+
+    // (a) value-op body: lower through the FULL scalar dispatch (identity/unfold/transforms/
+    // math/is/order/slice all route over the pushed seed), staying scalar; then reduce per origin.
+    if (!rest.every(scalarChildPrefixOk)) return null;
     const pushed = pushChildScope(parent, scope);
-    // Lower the value-op prefix through the FULL scalar dispatch (identity/unfold/transforms/
-    // math/is/order/slice all route correctly over the pushed seed), staying scalar; then
-    // apply the terminal scoped reducer per origin.
     let stream: ScalarStream = pushed.seed;
-    if (prefix.length) {
-      const lowered = lowerSteps(pushed.seed, prefix, 0);
+    if (rest.length) {
+      const lowered = lowerSteps(pushed.seed, rest, 0);
       if (lowered.kind !== 'scalar') return null;
       stream = lowered;
     }
-    if (reducer) stream = lowerScopedScalarReducer(stream, reducer as ScalarReducer, pushed.scope);
+    if (reducer) stream = lowerScopedScalarReducer(stream, reducer, pushed.scope);
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
   }
 
@@ -1068,11 +1126,27 @@ function scalarReducerArm(body: PStep[]): boolean {
   return body.slice(0, -1).every(scalarChildPrefixOk);
 }
 
+/** PURE. A re-source arm (`V()`/`E()` head then an element remainder) that reduces/projects
+ *  back to a scalar — the classify twin of compileScalarChildRows' re-source branch. A
+ *  movement-only re-source needs a terminal count(); a projecting one (values/id/label) needs
+ *  a valid element-child tail. Kept in lockstep with that branch so the recognizer never
+ *  accepts a body the child compiler would decline. */
+function scalarResourceArm(body: PStep[]): boolean {
+  const last = body.at(-1);
+  const reducer = last && CHILD_SCALAR_REDUCERS.has(last.name) ? last.name : undefined;
+  const rest = reducer ? body.slice(0, -1) : body;
+  if (!isResourceHead(rest)) return false;
+  const after = rest.slice(1);
+  return after.length === 0 || after.every((s) => ELEMENT_CHILD_STEPS.has(s.name))
+    ? reducer === 'count'
+    : classifyScalarChildRows('element', after)?.kind === 'element';
+}
+
 /** PURE. Predicts tryCompileScalarArm success without appending CTEs — the classify half of
  *  the gated consumers (choose/coalesce build a gate before lowering arms, so they must know
  *  every arm lowers before committing CTEs, matching the element-parent classify-then-emit). */
 function scalarArmClassifies(body: PStep[], params: Record<string, any>): boolean {
-  return scalarBranchArm(body, params) || scalarReducerArm(body);
+  return scalarBranchArm(body, params) || scalarReducerArm(body) || scalarResourceArm(body);
 }
 
 /** Lower one branch/map arm body over a scalar (gated) parent → a ScalarStream, or null to

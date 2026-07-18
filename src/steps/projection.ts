@@ -605,11 +605,14 @@ const scalarGroupCount: ShapeTailFn<ScalarStream> = (s, step, _steps, at) =>
  * discards the incoming value and re-sources the graph per traverser — V() all vertices, V(id…)
  * the id-matched ones — so it is a flatMap (CROSS JOIN the scalar rows with the target table).
  * The carried schema (as()-labels) rides forward on the join, so `inject(1).as('a').V()…` keeps
- * its label. Defers (null → the clear generic message) when the scalar carries path/origins/
- * sack/fromV, whose fork/merge through a re-source is not worked out.
+ * its label. A pushed child ordinal (origins) rides through the CROSS JOIN unchanged via
+ * carryFrag — so re-sourcing INSIDE a scalar child scope (a branch/map arm `__.V().count()`)
+ * is fine: the re-sourced elements carry the parent ordinal and a following scoped reducer/fold
+ * groups by it. Defers (null) only for path/sack/fromV, whose fork/merge through a re-source is
+ * not worked out.
  */
 export function lowerScalarVE(s: ScalarStream, step: PStep): ElementStream | null {
-  if (s.carried.path || s.carried.origins.length || s.carried.sack || s.carried.fromV) return null;
+  if (s.carried.path || s.carried.sack || s.carried.fromV) return null;
   const elem: 'node' | 'edge' = step.name === 'E' ? 'edge' : 'node';
   const n = (elem === 'edge' ? edges : nodes).as('n');
   const p = s.rel.as('p');

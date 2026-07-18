@@ -2546,6 +2546,30 @@ describe('scalar-parent branch/map (Stage 1)', () => {
       .toEqual(['27', '27', '29', '29', '32', '32', '35', '35']);
   });
 
+  // Slice 2: a re-source arm (V()/E() head) CROSS JOINs the graph per value inside the pushed
+  // scalar child scope; a following count()/reducer/projection reduces PER INPUT. The value is
+  // discarded by the re-source (GraphStep(isStart=false)), exactly as at the tail.
+  test('V()/E() re-source arms reduce per input', () => {
+    // bare re-source count: all 6 vertices per input age → 6 each.
+    expect(vals("g.V().hasLabel('person').values('age').map(__.V().count())")).toEqual(['6', '6', '6', '6']);
+    // movement then count: out() across all 6 vertices = 6 edges → 6 per input.
+    expect(vals("g.V().hasLabel('person').values('age').map(__.V().out().count())")).toEqual(['6', '6', '6', '6']);
+    // re-source + projection (multi-value per input), one input via V(1).
+    expect(vals("g.V(1).values('age').flatMap(__.V().hasLabel('person').values('name'))"))
+      .toEqual(['josh', 'marko', 'peter', 'vadas']);
+    // re-source + numeric reducer over the projected values.
+    expect(vals("g.V(1).values('age').map(__.V().hasLabel('person').values('age').sum())")).toEqual(['123']);
+  });
+
+  test('re-source arms compose in union/choose/coalesce', () => {
+    expect(vals("g.V(1).values('age').union(__.constant('x'),__.V().count())")).toEqual(['6', 'x']);
+    // choose: age 29 is not > 30 → the else (constant 0) wins.
+    expect(vals("g.V(1).values('age').choose(__.is(gt(30)),__.V().count(),__.constant(0))")).toEqual(['0']);
+    // coalesce: the first (impossible) predicate never fires → every input falls to V().count().
+    expect(vals("g.V().hasLabel('person').values('age').coalesce(__.is(gt(100)),__.V().count())"))
+      .toEqual(['6', '6', '6', '6']);
+  });
+
   // The recognizer must never accept an arm body the scalar engine would THROW on (that
   // breaks the return-null fall-through). These arms defer cleanly to the generic message
   // rather than surfacing a raw mid-lowering throw.
@@ -2554,9 +2578,14 @@ describe('scalar-parent branch/map (Stage 1)', () => {
       .toThrow('union() after a scalar stream not yet supported');         // asBool has no scalarTx impl
     expect(() => compile("g.V().values('name').choose(__.is(eq('marko')),__.asNumber(),__.identity())", {}))
       .toThrow('choose() after a scalar stream not yet supported');        // bare asNumber() throws on a non-date value
-    // a genuine movement body (a scalar has no neighbours) still fails closed
+    // out()/in() are adjacency, not a re-source — a scalar has no neighbours, still fails closed
     expect(() => compile("g.V().values('age').union(__.out(),__.identity())", {}))
       .toThrow('union() after a scalar stream not yet supported');
+    expect(() => compile("g.V().values('age').map(__.out())", {}))
+      .toThrow('map() after a scalar stream not yet supported');
+    // a bare re-source with no reducer ends in element space (mixed shape) → deferred to slice 3
+    expect(() => compile("g.V().values('age').map(__.V())", {}))
+      .toThrow('map() after a scalar stream not yet supported');
     // but asNumber WITH a type arg is a real transform and still lowers
     expect(() => compile("g.V().values('age').map(__.asNumber(GType.DOUBLE))", {})).not.toThrow();
   });
