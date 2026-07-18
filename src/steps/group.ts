@@ -359,7 +359,7 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
   let val: GroupVal, valNode: Expression, groupBy = true;
   const valArgs = bys[1];
   if (isCount) { val = { kind: 'count' }; valNode = q`COUNT(*) AS gv`; }
-  else if (!valArgs || valArgs.length === 0) { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx); }
+  else if (!valArgs || valArgs.length === 0) { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx, true); }
   else if (src.valReducer === 'count') { val = { kind: 'count' }; valNode = q`COUNT(${src.valMarker!}) AS gv`; }
   else if (src.valReducer) {
     const reduced = numericReducerAggregate(src.valExpr!, src.valReducer);
@@ -373,7 +373,7 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
   else if (src.valElement) {
     val = { kind: 'elementList', elem: src.valElement.elem };
     groupBy = false;
-    valNode = elementSelect(src.valElement.elem, 'v', src.valElement.ctx);
+    valNode = elementSelect(src.valElement.elem, 'v', src.valElement.ctx, true);
   }
   else if (src.valExpr) { val = { kind: 'scalarList' }; valNode = q`json_group_array(${src.valExpr}) AS gv`; }
   else {
@@ -384,8 +384,8 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
     } else if (a && typeof a === 'object' && 'nested' in a) {
       const inner = stepChain(a.nested, st.params);
       const names = inner.map((s) => s.name);
-      if (names.length === 1 && names[0] === 'tail') { val = { kind: 'elementLast', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx); }
-      else if (names.length === 1 && names[0] === 'fold') { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx); }
+      if (names.length === 1 && names[0] === 'tail') { val = { kind: 'elementLast', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx, true); }
+      else if (names.length === 1 && names[0] === 'fold') { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx, true); }
       else if (names.length === 1 && names[0] === 'count') { val = { kind: 'count' }; valNode = q`COUNT(*) AS gv`; }
       else if (names[names.length - 1] === 'fold')
         throw new Error('this group fold shape is not yet supported by typed child lowering');
@@ -486,22 +486,38 @@ export function compileFromGroup(s: GroupStream, steps: PStep[], at: number): Lo
  * whole-map select(Column) consumer (aggregate) and the per-entry unfold() consumer. */
 function deriveGroupEntries(s: GroupStream): { rel: Relation; keyOf: MapOf; valOf: MapOf } {
   const g = s.rel.as('g');
-  let mk: Expression, keyOf: MapOf;
-  if (s.key.kind === 'scalar') { mk = g.c.gk; keyOf = { kind: 'scalar', as: s.key.as }; }
+  let mk: Expression, keyOf: MapOf, groupKey: Expression;
+  if (s.key.kind === 'scalar') { mk = g.c.gk; keyOf = { kind: 'scalar', as: s.key.as }; groupKey = g.c.gk; }
   else if (s.key.kind === 'element') {
-    mk = g.c.k_rid;
+    mk = g.c.k_rid; groupKey = g.c.k_rid;
     keyOf = { kind: 'elem', elem: s.key.elem === 'edge' ? 'edge' : 'node' };
   } else throw new Error('select(Column)/unfold() over a composite project() group key not yet supported');
+  const where = s.key.kind === 'scalar' && !s.key.productive ? q` WHERE ${g.c.gk} IS NOT NULL` : empty;
+
+  // An element-valued group lays its values out as one framed row per member (groupBy=false).
+  // The rows carry an internal rowid (v_rid); re-entry collapses them into ONE list-of-element-
+  // rids entry per key — the same list-of-elem substrate fold() produces, so unfold()/framing
+  // rejoins nodes/edges by rowid.
+  if (s.val.kind === 'elementList') {
+    if (s.val.elem === 'property') throw new Error('select(Column)/unfold() over a group of property-element values not yet supported');
+    const elem = s.val.elem === 'edge' ? 'edge' : 'node';
+    // FILTER out the NULL v_rid rows a member with no value element contributes (the value
+    // layout LEFT JOINs), matching the handler's terminal fold which skips them.
+    const rel = s.q.cte(
+      q`SELECT ${mk} AS mk, jsonb(COALESCE(json_group_array(${g.c.v_rid}) FILTER (WHERE ${g.c.v_rid} IS NOT NULL), json('[]'))) AS mv FROM ${g}${where} GROUP BY ${groupKey}`,
+      ['mk', 'mv'],
+    );
+    return { rel, keyOf, valOf: { kind: 'list', of: { kind: 'elem', elem } } };
+  }
+  if (s.val.kind === 'elementLast')
+    throw new Error('select(Column)/unfold() over a group of single-element (tail) values not yet supported');
 
   let mv: Expression, valOf: MapOf;
   if (s.val.kind === 'count') { mv = g.c.gv; valOf = { kind: 'scalar', as: 'long' }; }
   else if (s.val.kind === 'sum') { mv = g.c.gv; valOf = { kind: 'scalar' }; }
   else if (s.val.kind === 'list' || s.val.kind === 'scalarList') { mv = g.c.gv; valOf = { kind: 'list', of: { kind: 'scalar' } }; }
-  else if (s.val.kind === 'elementList' || s.val.kind === 'elementLast')
-    throw new Error('select(Column)/unfold() over a group of element values not yet supported');
   else throw new Error('select(Column)/unfold() over this rich group value layout not yet supported');
 
-  const where = s.key.kind === 'scalar' && !s.key.productive ? q` WHERE ${g.c.gk} IS NOT NULL` : empty;
   const rel = s.q.cte(q`SELECT ${mk} AS mk, ${mv} AS mv FROM ${g}${where}`, ['mk', 'mv']);
   return { rel, keyOf, valOf };
 }
