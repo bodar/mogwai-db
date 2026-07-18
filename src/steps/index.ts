@@ -1,4 +1,4 @@
-import { q, value, list, empty, Query, type Expression } from '../q.ts';
+import { q, value, list, Query, type Expression } from '../q.ts';
 import { nodes, edges } from '../schema.ts';
 import { type Elem } from '../plan.ts';
 import { stepChain, flattenListArgs } from '../frontend.ts';
@@ -89,10 +89,17 @@ const chainNeedsFromV = (steps: PStep[]): boolean => steps.some((s) => s.name ==
 function seedSource(first: PStep, query: Query, params: Record<string, any>, trackPath: boolean, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS): ElementStream {
   const elem: Elem = first.name === 'E' ? 'edge' : 'node';
   const srcRel = elem === 'edge' ? edges : nodes;
-  const sel = trackPath ? 'id, id AS p0' : 'id';
-  // withSack() seeds every traverser's carried sack column with the initial value (a
-  // bound Value so a string init like "hello" escapes safely).
-  const sackCol: Expression = sackInit ? q`, ${value(sackInit.init)} AS sk` : empty;
+  // The source projection, assembled in carriedCols order (sack, bulk, path) so the
+  // physical SELECT matches the declared column list exactly. withSack() seeds the sack
+  // column (a bound Value so a string init escapes safely); every element source seeds a
+  // `bulk` multiplicity of 1 — the RLE traverser count SUM(bulk) reads at a reducer, and
+  // the substrate a movement collapse (GROUP BY id, SUM(bulk)) later merges convergent walks on.
+  const projections: Expression[] = [q`id`];
+  const cols: string[] = ['id'];
+  if (sackInit) { projections.push(q`${value(sackInit.init)} AS sk`); cols.push('sk'); }
+  projections.push(q`1 AS bulk`); cols.push('bulk');
+  if (trackPath) { projections.push(q`id AS p0`); cols.push('p0'); }
+  const sel = list(projections, ', ');
   // V(1,[2,3]) ≡ V(1,2,3): flatten any Collection id arg (collection literals + bound
   // list params render inline as [..] and parse as arrays).
   const ids = flattenListArgs(first.args);
@@ -106,13 +113,12 @@ function seedSource(first: PStep, query: Query, params: Record<string, any>, tra
     if (nums.length) clauses.push(q`id IN (${list(nums.map(value), ',')})`);
     if (strs.length) clauses.push(q`uid IN (${list(strs.map(value), ',')})`);
     if (!clauses.length) throw new Error('V()/E() ids must be numbers or strings');
-    body = q`SELECT ${sel}${sackCol} FROM ${srcRel} WHERE ${list(clauses, ' OR ')}`;
+    body = q`SELECT ${sel} FROM ${srcRel} WHERE ${list(clauses, ' OR ')}`;
   } else {
-    body = q`SELECT ${sel}${sackCol} FROM ${srcRel}`;
+    body = q`SELECT ${sel} FROM ${srcRel}`;
   }
-  const cols = [...(trackPath ? ['id', 'p0'] : ['id']), ...(sackInit ? ['sk'] : [])];
   const path = trackPath ? { kind: 'cols' as const, cols: [{ col: 'p0', elem }] } : undefined;
-  return { kind: 'elements', q: query, params, fastPaths, rel: query.cte(body, cols), elem, carried: { aliases: new Map(), origins: [], path, sack: sackInit ? 'sk' : undefined } };
+  return { kind: 'elements', q: query, params, fastPaths, rel: query.cte(body, cols), elem, carried: { aliases: new Map(), origins: [], path, sack: sackInit ? 'sk' : undefined, bulk: 'bulk' } };
 }
 
 /** union(b1, b2, …) as a SOURCE step: compile each branch's prefix into the SAME
@@ -132,8 +138,10 @@ function seedUnion(first: PStep, query: Query, params: Record<string, any>, sack
     if (st.carried.aliases.size > 0) throw new Error('union() source branch with as() not yet supported');
     return st.rel;
   });
-  const body = list(rels.map((r) => q`SELECT id FROM ${r}`), ' UNION ALL ');
-  return { kind: 'elements', q: query, params, fastPaths, rel: query.cte(body, ['id']), elem: 'node', carried: { aliases: new Map(), origins: [] } };
+  // Each branch prefix seeds its own bulk=1; UNION ALL keeps them per-row, so the merged
+  // source carries the branch multiplicity forward (a bulk-1 traverser per branch row).
+  const body = list(rels.map((r) => q`SELECT id, bulk FROM ${r}`), ' UNION ALL ');
+  return { kind: 'elements', q: query, params, fastPaths, rel: query.cte(body, ['id', 'bulk']), elem: 'node', carried: { aliases: new Map(), origins: [], bulk: 'bulk' } };
 }
 
 /**

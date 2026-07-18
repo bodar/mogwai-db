@@ -506,7 +506,10 @@ function compileFold(st: ElementStream, acc: TailAcc): ListStream {
     throw new Error('dedup()/limit()/range()/is() before a non-terminal fold() not yet supported');
   if (st.carried.aliases.size || st.carried.path || st.carried.origins.length)
     throw new Error('fold() carrying as()/path()/branch state into a list value not yet supported');
-  const carry = carryOf(st);
+  // A global fold is a barrier: every traverser collapses into ONE list value, so carried
+  // bulk (and any other per-traverser state) is consumed here — the list is a fresh bulk-1
+  // traverser (an unfold later re-enumerates its members).
+  const carry = withoutCarried(carryOf(st));
   const projName = acc.projStep?.name;
   // A single bare order() before the fold sorts the folded elements by their projected
   // scalar value (values('x').order().fold() → a sorted list). Only the by-nothing /
@@ -882,12 +885,14 @@ function compileCap(st: ElementStream | ScalarStream, steps: PStep[], stop: numb
   if (names.length !== 1) throw new Error('cap() with multiple side-effect keys not yet supported');
   const def = st.sideEffects?.get(names[0]);
   if (!def) throw new Error(`cap('${names[0]}') references an undefined side-effect`);
+  // cap() yields the accumulated side-effect COLLECTION as one fresh traverser — the
+  // barrier-built list/variant rel carries no per-traverser bulk, so reset the carry.
   if (def.kind === 'list') {
-    const ls = toListStream(carryOf(st), def.rel, def.of);
+    const ls = toListStream(withoutCarried(carryOf(st)), def.rel, def.of);
     return continueLowering(ls, stop + 1);
   }
   if (def.kind === 'variant')
-    return continueLowering(toVariantStream(carryOf(st), def.rel, { scalarAs: def.scalarAs, node: def.elem === 'node' || undefined, edge: def.elem === 'edge' || undefined }, 'list'), stop + 1);
+    return continueLowering(toVariantStream(withoutCarried(carryOf(st)), def.rel, { scalarAs: def.scalarAs, node: def.elem === 'node' || undefined, edge: def.elem === 'edge' || undefined }, 'list'), stop + 1);
   // group('a')/groupCount('a') side-effect → re-emit the same rich GroupStream as an
   // inline group; terminal framing and Column consumers share its dispatch. The stashed
   // def.parent carries the element source, so a scalar-stream cap of a group re-runs correctly.

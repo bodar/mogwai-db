@@ -246,13 +246,17 @@ function appendScalar(s: ScalarStream, step: PStep): ScalarStream {
   if (step.args.length === 0) return s;
   if (step.args.some(Array.isArray))
     throw new Error('inject(list) into a scalar stream needs a mixed-shape row discriminant');
-  if (s.result !== 'value' || s.as || carriedCols(s.carried).length)
+  // A carried bulk column is benign: thread it (existing rows keep their multiplicity, each
+  // appended constant is one bulk-1 traverser). Real carried state (aliases/path/origins/…)
+  // and a typed/reduced scalar still defer.
+  const bulk = s.carried.bulk;
+  if (s.result !== 'value' || s.as || carriedCols(s.carried).some((c) => c !== bulk))
     throw new Error('inject() after typed/reduced/carried scalar state not yet supported');
   const p = s.rel.as('p');
-  const appended = step.args.map((v) => q`SELECT ${value(v)} AS v`);
+  const appended = step.args.map((v) => q`SELECT ${value(v)} AS v${bulk ? q`, 1 AS bulk` : empty}`);
   const rel = s.q.cte(
-    q`SELECT ${p.c.v} AS v FROM ${p} UNION ALL ${list(appended, ' UNION ALL ')}`,
-    ['v'],
+    q`SELECT ${p.c.v} AS v${bulk ? q`, ${p.c[bulk]}` : empty} FROM ${p} UNION ALL ${list(appended, ' UNION ALL ')}`,
+    ['v', ...(bulk ? [bulk] : [])],
   );
   return toScalarStream(carryOf(s), rel);
 }

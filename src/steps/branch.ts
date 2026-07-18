@@ -663,10 +663,15 @@ export const repeat: StepFn = (s, st) => {
     : emitStep ? (emitBefore ? 'depth >= 0' : 'depth >= 1')
     : `depth = ${maxDepth}`;
   // Expose the path column iff a path() will frame it; else drop it (the array was
-  // internal to the walk, only there for simplePath's guard).
+  // internal to the walk, only there for simplePath's guard). The recursive walk is a
+  // barrier for carried bulk: its endpoints are freshly enumerated (one row per walk), so
+  // each carries a fresh bulk of 1 (re-seeded, not carried through the walk) — matching a
+  // sibling union arm's bulk so a branch merge agrees. A convergent-walk collapse that
+  // reweights bulk through an unrolled times(n) is a later stage (a recursive GROUP BY is
+  // rejected). `bulk` is the source-seeded carried column, always live here.
   if (wantsPathOutput)
-    return advance(st, q`SELECT id, path FROM ${walk} WHERE ${outWhere}`, { path: { kind: 'array', col: 'path', elem: 'node' } });
-  return advance(st, q`SELECT id FROM ${walk} WHERE ${outWhere}`);
+    return advance(st, q`SELECT id, 1 AS bulk, path FROM ${walk} WHERE ${outWhere}`, { path: { kind: 'array', col: 'path', elem: 'node' } });
+  return advance(st, q`SELECT id, 1 AS bulk FROM ${walk} WHERE ${outWhere}`);
 };
 
 // ---------- choose (predicate form) ----------

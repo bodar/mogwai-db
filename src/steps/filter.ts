@@ -222,7 +222,12 @@ export function lowerElementDedup(st: ElementStream, s: PStep, order?: PStep): E
   if (st.carried.path) throw new Error('dedup() with path tracking not yet supported (path-distinct semantics)');
   const bys = s.bys ?? [];
   if (bys.length > 1) throw new Error('dedup() supports at most one by() modulator');
-  if (!order && !bys.length) return advance(st, q`SELECT DISTINCT id FROM ${prevRel(st)}`);
+  if (!order && !bys.length) {
+    const p = prevRel(st, 'p');
+    // Carry bulk (and any other carried column) through the DISTINCT — bulk≡1 today, so
+    // DISTINCT is unaffected; a later stage resets bulk=1 rather than DISTINCT-ing over it.
+    return advance(st, q`SELECT DISTINCT ${p.c.id} AS id${carryFrag(st.carried, p)} FROM ${p}`);
+  }
 
   const p = prevRel(st, 'p');
   const n = elemRel(st);

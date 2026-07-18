@@ -10,9 +10,15 @@ const currentFrame = (scope: ChildScope) => {
 };
 
 /** Global count is a relational barrier: it consumes any shaped row stream and
- * returns exactly one Long scalar traverser. Row-associated state cannot cross it. */
+ * returns exactly one Long scalar traverser. Row-associated state cannot cross it.
+ * count() is the RLE traverser total: SUM(bulk) when the stream carries a multiplicity
+ * (a collapse merged convergent walks into (row, N) pairs), else the plain row COUNT
+ * (identical while bulk≡1). */
 export function lowerGlobalCount(input: RelationalStream): ScalarStream {
-  const rel = input.q.cte(q`SELECT COUNT(*) AS v FROM ${input.rel}`, ['v']);
+  const bulk = input.carried.bulk;
+  const s = input.rel.as('s');
+  const agg = bulk ? q`COALESCE(SUM(${s.c[bulk]}), 0)` : q`COUNT(*)`;
+  const rel = input.q.cte(q`SELECT ${agg} AS v FROM ${s}`, ['v']);
   return toScalarStream(withoutCarried(carryOf(input)), rel, 'long', 'count');
 }
 
@@ -73,14 +79,23 @@ export type ScalarReducer = 'count' | NumericReducer;
 
 /** One numeric/comparable reducer policy shared by root, child-scoped, and group-
  * scoped barriers. Callers decide the domain and productivity join; this helper owns
- * eligible SQLite storage classes and the dynamic GraphBinary result type. */
+ * eligible SQLite storage classes and the dynamic GraphBinary result type. When the
+ * stream carries a per-row `bulk` multiplicity, sum/mean weight by it (a value present
+ * with bulk N counts N times); min/max are bulk-invariant. Identical to the unweighted
+ * form while bulk≡1 (SUM(v*1)=SUM(v), the weighted mean = AVG). */
 export function numericReducerAggregate(
   value: Expression,
   reducer: NumericReducer,
+  bulk?: Expression,
 ): { value: Expression; type: Expression } {
   const eligible = reducer === 'min' || reducer === 'max'
     ? q`CASE WHEN typeof(${value}) in ('integer', 'real', 'text') THEN ${value} END`
     : q`CASE WHEN typeof(${value}) in ('integer', 'real') THEN ${value} END`;
+  if (bulk && reducer === 'sum')
+    return { value: q`SUM(${eligible} * ${bulk})`, type: q`typeof(SUM(${eligible} * ${bulk}))` };
+  if (bulk && reducer === 'mean')
+    // Weighted mean, forced to REAL (avoid integer division): Σ(v·bulk) / Σ(bulk over eligible rows).
+    return { value: q`SUM(${eligible} * ${bulk}) * 1.0 / SUM(CASE WHEN ${eligible} IS NOT NULL THEN ${bulk} END)`, type: q`'real'` };
   const fn = reducer === 'sum' ? 'SUM' : reducer === 'mean' ? 'AVG' : reducer === 'min' ? 'MIN' : 'MAX';
   const reduced = q`${fn}(${eligible})`;
   return { value: reduced, type: reducer === 'mean' ? q`'real'` : q`typeof(${reduced})` };
@@ -100,15 +115,20 @@ export function lowerScopedScalarReducer(
   const d = domain.as('d');
   const s = input.rel.as('s');
   const join = q`${d} LEFT JOIN ${s} ON ${s.c[ordinal]}=${d.c[ordinal]}`;
+  const bulk = input.carried.bulk ? s.c[input.carried.bulk] : undefined;
   let aggregate: Expression;
   let result: ScalarStream['result'];
   let as = input.as;
   if (reducer === 'count') {
-    aggregate = q`COUNT(${s.c[input.encounter]}) AS v`;
+    // Count the productive (non-null encounter) child rows, weighted by bulk when present
+    // — the LEFT JOIN's null-padded empty-child rows contribute 0.
+    aggregate = bulk
+      ? q`COALESCE(SUM(CASE WHEN ${s.c[input.encounter]} IS NOT NULL THEN ${bulk} END), 0) AS v`
+      : q`COUNT(${s.c[input.encounter]}) AS v`;
     result = 'count';
     as = 'long';
   } else {
-    const reduced = numericReducerAggregate(s.c.v, reducer);
+    const reduced = numericReducerAggregate(s.c.v, reducer, bulk);
     aggregate = q`${reduced.value} AS v, ${reduced.type} AS vt`;
     result = 'number';
     as = undefined;
@@ -126,11 +146,17 @@ export function lowerScopedScalarReducer(
  * can remain relational without losing GraphBinary numeric framing. */
 export function lowerGlobalNumericReducer(input: ScalarStream, reducer: NumericReducer): ScalarStream {
   const src = input.rel.as('s');
+  const bulk = input.carried.bulk ? src.c[input.carried.bulk] : undefined;
   let body;
   if (reducer === 'sum') {
-    body = q`SELECT SUM(${src.c.v}) AS v, typeof(SUM(${src.c.v})) AS vt FROM ${src}`;
+    const sum = bulk ? q`SUM(${src.c.v} * ${bulk})` : q`SUM(${src.c.v})`;
+    body = q`SELECT ${sum} AS v, typeof(${sum}) AS vt FROM ${src}`;
   } else if (reducer === 'mean') {
-    body = q`SELECT AVG(${src.c.v}) AS v, 'real' AS vt FROM ${src} WHERE typeof(${src.c.v}) in ('integer', 'real')`;
+    // Weighted mean over the numeric rows (WHERE already restricts to them): Σ(v·bulk)/Σbulk,
+    // forced REAL. bulk absent → AVG. Both = AVG while bulk≡1.
+    body = bulk
+      ? q`SELECT SUM(${src.c.v} * ${bulk}) * 1.0 / SUM(${bulk}) AS v, 'real' AS vt FROM ${src} WHERE typeof(${src.c.v}) in ('integer', 'real')`
+      : q`SELECT AVG(${src.c.v}) AS v, 'real' AS vt FROM ${src} WHERE typeof(${src.c.v}) in ('integer', 'real')`;
   } else {
     const fn = reducer === 'min' ? 'MIN' : 'MAX';
     body = q`SELECT ${fn}(${src.c.v}) AS v, typeof(${fn}(${src.c.v})) AS vt FROM ${src} WHERE typeof(${src.c.v}) in ('integer', 'real', 'text')`;

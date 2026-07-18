@@ -97,7 +97,7 @@ describe('compiler SQL snapshots', () => {
   test('window rank/filter boundaries use typed derived tables, not paired CTEs', () => {
     const project = read('g.V().project("a","b").by(__.out().values("name")).by(__.in().count())');
     expect(project.sql.split(' as (')).toHaveLength(8); // seven CTEs
-    expect(project.sql).toContain('FROM (SELECT r.v AS v, r.o0, ROW_NUMBER() OVER');
+    expect(project.sql).toContain('FROM (SELECT r.v AS v, r.bulk, r.o0, ROW_NUMBER() OVER');
 
     const local = read('g.V().local(__.out().values("name").order().limit(2))');
     expect(local.sql.split(' as (')).toHaveLength(6); // five CTEs
@@ -190,8 +190,8 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('range/skip/limit compose as CTEs when no order() is present', () => {
-    expect(read('g.V().range(1,3)').sql).toContain('SELECT p.id FROM c0 p LIMIT 2 OFFSET 1');
-    expect(read('g.V().skip(2)').sql).toContain('SELECT p.id FROM c0 p LIMIT -1 OFFSET 2');
+    expect(read('g.V().range(1,3)').sql).toContain('SELECT p.id, p.bulk FROM c0 p LIMIT 2 OFFSET 1');
+    expect(read('g.V().skip(2)').sql).toContain('SELECT p.id, p.bulk FROM c0 p LIMIT -1 OFFSET 2');
   });
 
   test('illegal range is rejected', () => {
@@ -277,7 +277,7 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().values("age").mean()').sql).toContain("typeof(s.v) in ('integer', 'real')");
     // mean is always a Double (forced vt='real')
     const avg = read('g.V().values("age").mean()');
-    expect(avg.sql).toContain('AVG(s.v)');
+    expect(avg.sql).toContain('SUM(s.v * s.bulk) * 1.0 / SUM(s.bulk)');
     expect(avg.sql).toContain("'real' AS vt");
     // min(Scope.local) after fold() reduces the folded list per-list (list phase).
     expect(read('g.V().values("age").fold().min(Scope.local)').shape).toEqual({ kind: 'scalar' });
@@ -388,7 +388,7 @@ describe('compiler SQL snapshots', () => {
     // V().values('name').groupCount() → GROUP BY the value → Map{value: count}.
     const g = read("g.V().out('created').values('name').groupCount()");
     expect(g.shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: true }, val: { kind: 'count' } });
-    expect(g.sql).toContain('COUNT(*) AS gv');
+    expect(g.sql).toContain('SUM(c.bulk) AS gv');
     expect(g.sql).toContain('GROUP BY');
     // a typed scalar (asNumber(X)) carries its tag so the key frames correctly (not inferred)
     expect(read('g.inject(15).asNumber(GType.BYTE).groupCount()').shape)
@@ -612,10 +612,10 @@ describe('compiler SQL snapshots', () => {
     // per-value, matching TinkerPop's values()-flatMap semantics).
     const c = read('g.V().values("age").count()');
     expect(c.shape).toEqual({ kind: 'count' });
-    expect(c.sql).toContain('SELECT COUNT(*) AS v FROM c1');
+    expect(c.sql).toContain('SELECT COALESCE(SUM(s.bulk), 0) AS v FROM c1 s');
     // the values() flatMap (now carrying per-row vtype; a collection value → json() text)
     // feeds the count.
-    expect(c.sql).toContain("THEN json(vp.value) ELSE vp.value END AS v, vp.vtype AS vtype FROM");
+    expect(c.sql).toContain("THEN json(vp.value) ELSE vp.value END AS v, vp.vtype AS vtype, p.bulk FROM");
     // intervening scalar-stream modifiers compose through the re-entry
     const dedupCount = read('g.V().values("age").dedup().count()').sql;
     expect(dedupCount).toContain('SELECT DISTINCT p.v AS v');
@@ -630,7 +630,7 @@ describe('compiler SQL snapshots', () => {
     const ordered = read('g.V().order().by("age").limit(2).values("name").count()');
     expect(ordered.shape).toEqual({ kind: 'count' });
     expect(ordered.sql).toContain('ORDER BY (SELECT (CASE WHEN vtype IN');
-    expect(ordered.sql).toContain('LIMIT 2 OFFSET 0), c2(v) as (SELECT COUNT(*) AS v FROM c1)');
+    expect(ordered.sql).toContain('LIMIT 2 OFFSET 0), c2(v) as (SELECT COALESCE(SUM(s.bulk), 0) AS v FROM c1 s)');
     expect(run(seededStore(), 'g.V().order().by("age").limit(2).values("name").count()').map((r) => r.v))
       .toEqual([2]);
     expect(() => compile('g.V().values("name").id()', {})).toThrow('id() requires element input');
@@ -639,7 +639,7 @@ describe('compiler SQL snapshots', () => {
   test('count is a relational scalar boundary and can continue lowering', () => {
     const filtered = read('g.V().values("age").count().is(P.gt(3))');
     expect(filtered.shape).toEqual({ kind: 'count' });
-    expect(filtered.sql).toContain('SELECT COUNT(*) AS v');
+    expect(filtered.sql).toContain('SELECT COALESCE(SUM(s.bulk), 0) AS v');
     expect(filtered.sql).toContain('WHERE p.v > ?');
 
     const countedAgain = read('g.V().values("age").count().count()');
@@ -688,7 +688,7 @@ describe('compiler SQL snapshots', () => {
     // is(P.typeOf(X)) after a cast is compile-time known (the cast's `as` tag) → the
     // typeOf STATIC-FOLDS to a constant instead of a runtime typeof() test.
     const castTypeOf = read('g.V().values("weight").asNumber(GType.FLOAT).is(P.typeOf(GType.FLOAT))');
-    expect(castTypeOf.sql).toContain('CAST(p.v AS REAL) AS v FROM c1 p WHERE 1');
+    expect(castTypeOf.sql).toContain('CAST(p.v AS REAL) AS v, p.bulk FROM c1 p WHERE 1');
     expect(castTypeOf.sql).not.toContain('typeof(');
     // overflow + non-numeric-token errors raise TinkerPop's exact messages
     expect(() => compile('g.inject(32768).asNumber(GType.SHORT)', {})).toThrow('Can\'t convert number of type Integer to Short due to overflow.');
@@ -879,7 +879,7 @@ describe('compiler SQL snapshots', () => {
   test('values(k).inject(c) appends constants to the value stream', () => {
     const p = read("g.V().values('age').inject(1000).sum()");
     expect(p.sql).toContain('UNION ALL');
-    expect(p.sql).toContain('SUM(s.v)');
+    expect(p.sql).toContain('SUM(s.v * s.bulk)');
     expect(p.binds).toContain(1000);
     // append before a min() reducer
     expect(read("g.V().values('foo').inject(42).min()").sql).toContain('UNION ALL');
@@ -901,8 +901,8 @@ describe('compiler SQL snapshots', () => {
 
   test('limit before count wraps the counted id-relation', () => {
     const sql = read('g.V().limit(2).count()').sql;
-    expect(sql).toContain('c1(id) as (SELECT p.id FROM c0 p LIMIT 2)');
-    expect(sql).toContain('SELECT COUNT(*) AS v FROM c1');
+    expect(sql).toContain('c1(id, bulk) as (SELECT p.id, p.bulk FROM c0 p LIMIT 2)');
+    expect(sql).toContain('SELECT COALESCE(SUM(s.bulk), 0) AS v FROM c1 s');
   });
 
   test('inject seeds a VALUES stream', () => {
@@ -917,10 +917,10 @@ describe('compiler SQL snapshots', () => {
   test('as() threads a synthetic alias column through subsequent CTEs', () => {
     const p = read('g.V().as("a").out("knows").select("a")');
     // as('a') appends the current id to label a0's JSONB history array; out() carries a0
-    expect(p.sql).toContain("jsonb_array(jsonb_object('k', ?, 'v', p.id)) AS a0 FROM c0");
-    expect(p.sql).toContain('SELECT e.tgt AS id, p.a0 FROM edges e');
+    expect(p.sql).toContain("jsonb_array(jsonb_object('k', ?, 'v', p.id)) AS a0, p.bulk FROM c0");
+    expect(p.sql).toContain('SELECT e.tgt AS id, p.a0, p.bulk FROM edges e');
     // select retypes the alias to a fresh element stream (last id out of history), then root framing rejoins it.
-    expect(p.sql).toContain('SELECT CAST(p.a0 ->> ? AS INTEGER) AS id, p.a0 FROM c2 p');
+    expect(p.sql).toContain('SELECT CAST(p.a0 ->> ? AS INTEGER) AS id, p.a0, p.bulk FROM c2 p');
     expect(p.sql).toContain('JOIN c3 p ON n.id=p.id');
     expect(p.shape).toEqual({ kind: 'vertex' });
   });
@@ -1078,7 +1078,7 @@ describe('compiler SQL snapshots', () => {
     const p = read("g.V().as('v').map(__.bothE().values('weight').fold()).sum(Scope.local).as('s').select('v','s')");
     expect(p.shape.kind).toBe('map');
     expect(p.sql).toContain('AS v, typeof('); // the reducer CTE
-    expect(p.sql).toContain(', c.a0 FROM'); // a0 carried through the reduce
+    expect(p.sql).toContain(', c.a0, c.bulk FROM'); // a0 carried through the reduce
     // record order by an element field's property: by(__.select(field).values(key))
     const ord = read("g.V().as('v').map(__.bothE().values('weight').fold()).sum(Scope.local).as('s').select('v','s').order().by(__.select('s'), Order.desc).by(__.select('v').values('name'))");
     expect(ord.sql).toContain('ORDER BY r.e1_v DESC');
@@ -1135,7 +1135,7 @@ describe('compiler SQL snapshots', () => {
     const sql = read('g.withStrategies(new SubgraphStrategy(vertices: __.has("name", P.within("a","b")))).V().values("name")').sql;
     expect(sql).toContain('EXISTS(SELECT 1 FROM vertex_properties WHERE node=n.id AND key=? AND value in (?, ?))'); // criterion applied
     // after V() the filter is c1 (source c0 → filtered c1)
-    expect(sql).toMatch(/c1\(id\) as \(SELECT n\.id FROM nodes n JOIN c0 p .* WHERE EXISTS\(SELECT 1 FROM vertex_properties WHERE node=n\.id AND key=\? AND value in/);
+    expect(sql).toMatch(/c1\(id, bulk\) as \(SELECT n\.id, p\.bulk FROM nodes n JOIN c0 p .* WHERE EXISTS\(SELECT 1 FROM vertex_properties WHERE node=n\.id AND key=\? AND value in/);
   });
 
   test('PartitionStrategy read-filter isolates partitions; write-stamp tags created elements', () => {
@@ -1349,7 +1349,7 @@ describe('compiler SQL snapshots', () => {
 
   test('E() sources the edges table; default projection is the edge shape', () => {
     const p = read('g.E()');
-    expect(p.sql).toContain('c0(id) as (SELECT id FROM edges)');
+    expect(p.sql).toContain('c0(id, bulk) as (SELECT id, 1 AS bulk FROM edges)');
     expect(p.shape).toEqual({ kind: 'edge' });
     // Endpoints resolve to the external id (COALESCE(uid,id)) so a materialized edge
     // reports the SAME endpoint ids as the write path — was raw rowid (n.src, n.tgt),
@@ -1377,12 +1377,12 @@ describe('compiler SQL snapshots', () => {
 
   test('outE/inE go vertex→edge; outV/inV go edge→vertex', () => {
     const oe = read('g.V(1).outE("knows")');
-    expect(oe.sql).toContain('SELECT e.id AS id FROM edges e JOIN c0 p ON e.src=p.id');
+    expect(oe.sql).toContain('SELECT e.id AS id, p.bulk FROM edges e JOIN c0 p ON e.src=p.id');
     expect(oe.shape).toEqual({ kind: 'edge' });
 
     const iv = read('g.V(1).outE("knows").inV()');
     // edge → target vertex; back to vertex shape
-    expect(iv.sql).toContain('SELECT e.tgt AS id FROM edges e JOIN c1 p ON e.id=p.id');
+    expect(iv.sql).toContain('SELECT e.tgt AS id, p.bulk FROM edges e JOIN c1 p ON e.id=p.id');
     expect(iv.shape).toEqual({ kind: 'vertex' });
   });
 
@@ -1472,7 +1472,7 @@ describe('compiler SQL snapshots', () => {
     const p = read('g.V().sack(assign).by("age").sack()');
     expect(p.shape).toEqual({ kind: 'value' });
     expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS sk");
-    expect(p.sql).toContain('SELECT p.sk AS v, p.sk FROM'); // scalar CTE reads + carries the sack
+    expect(p.sql).toContain('SELECT p.sk AS v, p.sk, p.bulk FROM'); // scalar CTE reads + carries the sack
     expect(read('g.withSack(1).V().sack().fold()').shape).toEqual({ kind: 'jsonbList' });
     // sum accumulator references the prior sk; div forces REAL division.
     expect(read('g.withSack(0.0d).V().sack(sum).by("age").sack()').sql).toContain('(p.sk + (SELECT value FROM vertex_properties WHERE node=n.id AND key=?');
@@ -1502,9 +1502,9 @@ describe('compiler SQL snapshots', () => {
 
   test('withSack() seeds the sk column at the source as a bound value', () => {
     const p = read('g.withSack(0.0d).V().outE().sack(sum).by("weight").inV().sack()');
-    expect(p.sql).toContain('? AS sk FROM nodes'); // seeded at V()
+    expect(p.sql).toContain('? AS sk, 1 AS bulk FROM nodes'); // seeded at V()
     expect(p.binds[0]).toBe(0);
-    expect(p.sql).toContain('p.sk FROM edges'); // carried through outE()/inV()
+    expect(p.sql).toContain('p.sk, p.bulk FROM edges'); // carried through outE()/inV()
   });
 
   test('groupCount() → count value; GROUP BY', () => {
@@ -1532,7 +1532,7 @@ describe('compiler SQL snapshots', () => {
     const p = read('g.V().properties().group().by(__.project("n","k","v").by(__.element().values("name")).by(__.key()).by(__.value())).by(__.tail())');
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'map', parts: [{ key: 'n' }, { key: 'k' }, { key: 'v' }] }, val: { kind: 'elementLast', elem: 'property' } });
     // The property parent's multiset-safe domain carries the full property payload.
-    expect(p.sql).toContain('p.pk AS pk, p.pv AS pv, p.pvtype AS pvtype, p.pmeta AS pmeta, ROW_NUMBER() OVER () AS o0');
+    expect(p.sql).toContain('p.pk AS pk, p.pv AS pv, p.pvtype AS pvtype, p.pmeta AS pmeta, p.bulk, ROW_NUMBER() OVER () AS o0');
     // element().values("name") → owner re-root + values, joined back as a composite key part.
     expect(p.sql).toContain('gkp0.v AS k0_v, gkp1.v AS k1_v, gkp2.v AS k2_v');
     expect(p.sql).toContain('SELECT p.pk AS v, ROW_NUMBER() OVER (PARTITION BY p.o0'); // key() child, per-origin encounter
@@ -1574,13 +1574,13 @@ describe('compiler SQL snapshots', () => {
   test('sum() wraps a value stream in SQL SUM → scalar shape', () => {
     const p = read('g.V().values("age").sum()');
     expect(p.shape).toEqual({ kind: 'scalar' });
-    expect(p.sql).toContain('SELECT SUM(s.v) AS v, typeof(SUM(s.v)) AS vt FROM');
+    expect(p.sql).toContain('SELECT SUM(s.v * s.bulk) AS v, typeof(SUM(s.v * s.bulk)) AS vt FROM');
   });
 
   test('numeric reducers are scalar streams and preserve dynamic type past filters', () => {
     const summed = read('g.V().values("age").sum().is(P.gt(100))');
     expect(summed.shape).toEqual({ kind: 'scalar' });
-    expect(summed.sql).toContain('SUM(s.v) AS v');
+    expect(summed.sql).toContain('SUM(s.v * s.bulk) AS v');
     expect(summed.sql).toContain('p.vt AS vt');
     expect(summed.sql).toContain('WHERE p.v > ?');
 
@@ -1617,7 +1617,7 @@ describe('compiler SQL snapshots', () => {
     const typedSum = read('g.V().values("age").asNumber(GType.DOUBLE).sum().is(P.gt(100))');
     expect(typedSum.shape).toEqual({ kind: 'scalar' });
     expect(typedSum.sql).toContain('CAST(p.v AS REAL) AS v');
-    expect(typedSum.sql).toContain('SUM(s.v) AS v');
+    expect(typedSum.sql).toContain('SUM(s.v * s.bulk) AS v');
 
     const store = seededStore();
     expect(run(store, 'g.V().values("name").toUpper().is("MARKO")').map((r) => r.v)).toEqual(['MARKO']);
@@ -1649,7 +1649,7 @@ describe('compiler SQL snapshots', () => {
 
   test('count().is(P) wraps the count in a value filter (0/1 rows)', () => {
     const p = read('g.V().count().is(P.gt(3))');
-    expect(p.sql).toContain('SELECT COUNT(*) AS v FROM c0');
+    expect(p.sql).toContain('SELECT COALESCE(SUM(s.bulk), 0) AS v FROM c0 s');
     expect(p.sql).toContain('WHERE p.v > ?');
     expect(p.shape).toEqual({ kind: 'count' });
   });
@@ -1783,10 +1783,10 @@ describe('compiler SQL snapshots', () => {
     const u = read('g.V(1).union(__.out("knows"), __.out("created")).values("name")');
     expect(u.sql).toContain('UNION ALL');
     expect(u.sql).toContain('ROW_NUMBER() OVER () AS o0');
-    expect(u.sql).toContain('SELECT e.tgt AS id, p.o0 FROM edges e JOIN');
+    expect(u.sql).toContain('SELECT e.tgt AS id, p.bulk, p.o0 FROM edges e JOIN');
     // multi-hop branch now folds through the dispatch (was single-hop only)
     expect(read('g.V().union(__.out().out(), __.in()).values("name")').sql)
-      .toContain('SELECT e.tgt AS id, p.o0 FROM edges e JOIN c2 p ON e.src=p.id');
+      .toContain('SELECT e.tgt AS id, p.bulk, p.o0 FROM edges e JOIN c2 p ON e.src=p.id');
     // Homogeneous scalar arms lower at the shape-aware dispatcher and re-enter the
     // scalar pipeline; this is not the element-only PREFIX union.
     const scalar = read('g.V(1).union(__.values("name"), __.constant("x")).count()');
@@ -1797,12 +1797,12 @@ describe('compiler SQL snapshots', () => {
     // as() before union now threads the alias column through the merge (carried-schema, Move B)
     const ua = read('g.V().as("a").union(__.out(), __.in()).select("a")');
     expect(ua.sql).toContain('UNION ALL');
-    expect(ua.sql).toContain('SELECT id, a0 FROM'); // the a0 alias column survives the branch merge
+    expect(ua.sql).toContain('SELECT id, a0, bulk FROM'); // the a0 alias column survives the branch merge
     // a NEW as() bound INSIDE one arm now forks/merges: the label unions into the merged
     // set and the arm that never bound it pads an empty (NULL) history.
     const divU = read('g.V().union(__.as("b").out(), __.in()).select("b")');
-    expect(divU.sql).toContain('SELECT id, a0 FROM'); // the binding arm carries its history
-    expect(divU.sql).toContain('SELECT id, NULL AS a0 FROM'); // the other arm pads it
+    expect(divU.sql).toContain('SELECT id, a0, bulk FROM'); // the binding arm carries its history
+    expect(divU.sql).toContain('SELECT id, NULL AS a0, bulk FROM'); // the other arm pads it
     // sack through a fork is fail-closed (split/merge-on-fork unverified — carried-schema didn't silently lift it)
     expect(() => compile('g.withSack(0.0d).V().sack(sum).by("age").union(__.out(), __.in())', {})).toThrow('sack() through union()');
     // mixed scalar+element arms now merge as a dynamic-tag VariantStream (P4)
@@ -1816,7 +1816,7 @@ describe('compiler SQL snapshots', () => {
 
   test('optional() → single-hop LEFT JOIN fast path; multi-hop via ordinal', () => {
     const o = read('g.V().optional(__.out("created")).values("name")');
-    expect(o.sql).toContain('SELECT COALESCE(e.tgt, p.id) AS id FROM c0 p LEFT JOIN edges e ON e.src=p.id');
+    expect(o.sql).toContain('SELECT COALESCE(e.tgt, p.id) AS id, p.bulk FROM c0 p LEFT JOIN edges e ON e.src=p.id');
     // both()/multi-hop now compile via the coalesce(t, identity) ordinal shape
     const b = read('g.V().optional(__.both()).count()');
     expect(b.sql).toContain('ROW_NUMBER() OVER () AS o0');
@@ -1826,7 +1826,7 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().optional(__.outE())', {})).toThrow('changing element kind');
     // as() before optional threads the alias through the fast path (carryFrag from the input)
     expect(read('g.V().as("a").optional(__.out()).select("a")').sql)
-      .toContain('SELECT COALESCE(e.tgt, p.id) AS id, p.a0 FROM');
+      .toContain('SELECT COALESCE(e.tgt, p.id) AS id, p.a0, p.bulk FROM');
     // NESTED optional/coalesce: each mints a UNIQUE ordinal (o0 outer, o1 inner) and
     // carries the outer through — so they compose (unlocks optional(out().optional(out())).path()).
     expect(read('g.V().optional(__.out().optional(__.out())).path()').sql).toContain('AS o1');
@@ -1879,7 +1879,7 @@ describe('compiler SQL snapshots', () => {
     // the per-row tag — the whole union (all arms) rides through the LIMIT/OFFSET.
     const lim = read(`${base}.limit(2)`);
     expect(lim.shape).toEqual({ kind: 'variant', scalarAs: undefined, node: true });
-    expect(lim.sql).toContain('SELECT p.vk, p.v, p.rid FROM'); // full column re-projection
+    expect(lim.sql).toContain('SELECT p.vk, p.v, p.rid, p.bulk FROM'); // full column re-projection
     expect(lim.sql).toContain('LIMIT 2');
     expect(run(store, `${base}.limit(2)`).length).toBe(2);
     expect(read(`${base}.skip(1)`).sql).toContain('LIMIT -1 OFFSET 1');
@@ -1889,7 +1889,7 @@ describe('compiler SQL snapshots', () => {
     // count barrier over the union still collapses to one Long
     expect(run(store, `${base}.count()`).map((r: any) => Number(r.v))).toEqual([full]);
     // dedup collapses the multiset on the tagged (vk,v,rid) row
-    expect(read(`${base}.dedup()`).sql).toContain('SELECT DISTINCT p.vk, p.v, p.rid FROM');
+    expect(read(`${base}.dedup()`).sql).toContain('SELECT DISTINCT p.vk, p.v, p.rid, p.bulk FROM');
     expect(run(store, 'g.V(1).union(__.out(), __.out()).dedup()').length)
       .toBeLessThan(run(store, 'g.V(1).union(__.out(), __.out())').length);
     // fail closed: steps that must look inside a heterogeneous row cannot apply
@@ -1919,20 +1919,20 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().coalesce(__.out(), __.outE())', {})).toThrow('different element kinds');
     // dedup now preserves both the branch ordinal and its inner child ordinal.
     const dedup = read('g.V().coalesce(__.out().dedup(), __.in())');
-    expect(dedup.sql).toContain('SELECT DISTINCT p.id AS id, p.o0, p.o1');
+    expect(dedup.sql).toContain('SELECT DISTINCT p.id AS id, p.bulk, p.o0, p.o1');
     // union() inside coalesce threads the ordinal through → valid
     expect(read('g.V().coalesce(__.union(__.out(),__.in()), __.both())').sql).toContain('ROW_NUMBER() OVER () AS o0');
     // as() before coalesce: originSeed projects the alias alongside the ordinal, the
     // merge outputs it (dropping the internal `o`) → select("a") resolves (Move B)
     const ca = read('g.V().as("a").coalesce(__.out(), __.in()).select("a")');
     expect(ca.sql).toContain('ROW_NUMBER() OVER () AS o0');
-    expect(ca.sql).toContain('SELECT id, a0 FROM');
+    expect(ca.sql).toContain('SELECT id, a0, bulk FROM');
   });
 
   test('flatMap() consumes every productive element or scalar child row', () => {
     const sql = read('g.V().flatMap(__.out().out()).values("name")').sql;
-    expect(sql).toContain('SELECT e.tgt AS id, p.o0 FROM edges e');
-    expect(sql).toContain('SELECT p.id AS id FROM c3 p'); // `all` consumes the child origin
+    expect(sql).toContain('SELECT e.tgt AS id, p.bulk, p.o0 FROM edges e');
+    expect(sql).toContain('SELECT p.id AS id, p.bulk FROM c3 p'); // `all` consumes the child origin
     const scalar = read('g.V().flatMap(__.values("name"))');
     expect(scalar.shape).toEqual({ kind: 'value', as: undefined });
     expect(scalar.sql).toContain('JOIN vertex_properties vp');
@@ -1967,7 +1967,7 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V(1).local(__.out().values("name").tail(2))').sql)
       .toContain('PARTITION BY p.o0 ORDER BY p.encounter DESC');
     const reducedChild = read('g.V().map(__.out().values("name").is("lop").count())');
-    expect(reducedChild.sql).toContain('COUNT(s.encounter) AS v');
+    expect(reducedChild.sql).toContain('COALESCE(SUM(CASE WHEN s.encounter IS NOT NULL THEN s.bulk END), 0) AS v');
     expect(reducedChild.sql).toContain('LEFT JOIN');
     const foldedChild = read('g.V().map(__.out().values("name").fold()).count(Scope.local)');
     expect(foldedChild.sql).toContain('json_group_array(s.v ORDER BY s.encounter) FILTER');
@@ -2022,11 +2022,11 @@ describe('compiler SQL snapshots', () => {
     // as() before choose now threads the alias column through the gated arms + merge (Move B)
     const ca = read('g.V().as("a").choose(__.has("x"), __.out(), __.in()).select("a")');
     expect(ca.sql).toContain('UNION ALL');
-    expect(ca.sql).toContain('SELECT id, a0 FROM'); // a0 preserved across the gated-arm merge
+    expect(ca.sql).toContain('SELECT id, a0, bulk FROM'); // a0 preserved across the gated-arm merge
     // a NEW as() inside one arm now forks/merges: the non-binding arm pads an empty history.
     const divC = read('g.V().choose(__.has("x"), __.as("b").out(), __.in()).select("b")');
-    expect(divC.sql).toContain('SELECT id, a0 FROM');
-    expect(divC.sql).toContain('SELECT id, NULL AS a0 FROM');
+    expect(divC.sql).toContain('SELECT id, a0, bulk FROM');
+    expect(divC.sql).toContain('SELECT id, NULL AS a0, bulk FROM');
   });
 
   test('option-map choose → CASE over the choice scalar (value shape)', () => {
@@ -2180,9 +2180,9 @@ describe('compiler SQL snapshots', () => {
     const p = read('g.V(1).out().out().path()');
     // V() seeds p0; each hop appends a new position holding the moved id, carrying
     // the earlier positions unchanged.
-    expect(p.sql).toContain('SELECT id, id AS p0 FROM nodes');
-    expect(p.sql).toContain('SELECT e.tgt AS id, p.p0, e.tgt AS p1 FROM edges');
-    expect(p.sql).toContain('SELECT e.tgt AS id, p.p0, p.p1, e.tgt AS p2 FROM edges');
+    expect(p.sql).toContain('SELECT id, 1 AS bulk, id AS p0 FROM nodes');
+    expect(p.sql).toContain('SELECT e.tgt AS id, p.bulk, p.p0, e.tgt AS p1 FROM edges');
+    expect(p.sql).toContain('SELECT e.tgt AS id, p.bulk, p.p0, p.p1, e.tgt AS p2 FROM edges');
     // Non-path queries stay unchanged (no p-columns).
     expect(read('g.V(1).out().out()').sql).not.toContain('p0');
     expect(p.shape).toEqual({ kind: 'path', positions: [
