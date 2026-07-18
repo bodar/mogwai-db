@@ -175,3 +175,12 @@ are the live frontier.
 
 🚫 rows are NOT candidates: regex TextP (needs UDFs), `tree()`, `store`, lambdas,
 OLAP, `withoutStrategies(ConnectiveStrategy)`, Sack/ElementId/Event strategies.
+
+🚫 **`map()` first-of-many over a scalar FAN-OUT arm** (a re-source projection /
+nested `union` under `map`): first-result-only would need a deterministic
+emission-order column threaded through the fan-out (arm-index through `union`,
+id-order through re-source) — not a natural fit for the set-oriented SQL engine,
+and zero corpus examples. Fails closed (`armFansOut`); `flatMap`/`local` cover the
+all-results need. (The other scalar-parent-arm shapes — reducer/nested-branch/
+re-source, and mixed-shape `union`/`choose`/`coalesce`/`optional` variants — all
+landed; see [[scalar-stream-reentry]].)
