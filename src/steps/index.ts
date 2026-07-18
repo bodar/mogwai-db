@@ -20,7 +20,7 @@ import { compileFromRecord, compileFromPath, selectRecordFromAlias } from './sel
 import { asOnStream, selectOneFromAlias } from './labelselect.ts';
 import { assertStreamColumns, continueLowering, type LoweringResult, type Stream } from './stream.ts';
 import { type Compiled } from '../render.ts';
-import { tryBulkRepeatCount } from './bulk.ts';
+import { tryBulkRepeat } from './bulk.ts';
 import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../fast-paths.ts';
 import { lowerScalarRows } from './scalar.ts';
 import { materializeFinal } from './materialize.ts';
@@ -373,7 +373,7 @@ export function compileRead(steps: PStep[], params: Record<string, any> = {}, sa
   // unrolled GROUP-BY-SUM(bulk) CTEs instead of an enumerate-every-walk recursion, so a
   // dense/deep count (grateful times(8) ≈ 2.5e15 walks) stays tractable. Null → not the
   // bulkable shape; fall through to the normal fold. See steps/bulk.ts.
-  const bulked = fastPaths.bulkRepeatCount ? tryBulkRepeatCount(steps, params, sackInit) : null;
+  const bulked = fastPaths.bulkRepeatCount ? tryBulkRepeat(steps, params, sackInit) : null;
   if (bulked) return bulked;
 
   // Movement collapse is per-compilation: enabled only when the whole chain is collapse-safe
