@@ -2,6 +2,19 @@
 
 **Date:** 2026-07-18
 
+**Status (2026-07-18): Stages A, B, and C LANDED on trunk, all CI-green.** Collapse auto-fires by
+query shape for pure movement/filter, bare `dedup`, `order`+`limit`/`range`/`skip`, terminating in a
+reducer or a bare element leaf, plus element- and count-returning `repeat().times(n)` — bounded
+frontier (compute) + `(v, N)` RLE on the wire, L3 1180 held throughout. Deviations from the plan
+below, worth noting: (1) **bulk is a column the framer reads, orthogonal to shape** — no `bulk` flag
+on `Shape` variants (`execute.ts` `bulkOf`/`frameValues` split; `executeQuery` expands, `executeFramed`
+keeps `(v,N)`); the element-terminal materialize "island" needed no `render.ts` change. (2) collapse
+is a **`movementCollapse` fast path** gated by `chainCollapseSafe`, not a global flag. (3) `order`/
+`limit`/`range` use a cumulative-bulk window in `buildProjection`; `sample`/`coin` correctly never
+collapse (must unbulk) → left excluded. **ONE piece remains:** `group`/`groupCount` bulk-weighting
+(element-key forms route through an unweighted `COUNT(*)`; needs bulk threaded through `GroupSource`
++ careful gating) — its own focused effort. The staged plan as originally written follows.
+
 ## The premise correction
 
 The `2026-07-14-traverser-bulking.md` investigation concluded *"BulkSet wire type is a
