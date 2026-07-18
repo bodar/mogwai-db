@@ -35,7 +35,7 @@ In a 🟡 cell, **✅** = supported form, **❌** = deferred shape.
 | `hasId(…)` | ✅ | flattens list args |
 | `is(P)` | 🟡 | scalar filter, incl. after transforms/reducers/`limit`/`range`/`skip`. ❌ after `path()` |
 | `where(__.…)` | ✅ | single- & multi-hop incl. `both()` and edge-typed hops; `label()`/`not()`; alias-rooted `where(__.as('x')…)` |
-| `where(P)` / `where('a',P)` | 🟡 | alias-column compare. ❌ some `where(P.op)` forms; `by(key)` on an edge-typed label |
+| `where(P)` / `where('a',P)` | 🟡 | alias-column compare; **over a scalar stream** `where(P)`/`filter(P)` applies the predicate directly to the value. ❌ some `where(P.op)` forms; `by(key)` on an edge-typed label; `where('a',P)` over a scalar |
 | `and`, `or`, `not`, `filter(__.…)` | ✅ | incl. infix `.and()`/`.or()` connectors. ❌ `filter(predicate)` — use a traversal |
 | `P` (eq/neq/lt/gt/within/without/between/inside/outside) | ✅ | `between` is `[lo,hi)` |
 | TextP (startsWith/endsWith/containing + negations) | ✅ | bound `LIKE`, escaped |

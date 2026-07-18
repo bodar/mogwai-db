@@ -327,8 +327,16 @@ export function lowerScalarFilter(s: ScalarStream, step: PStep): ScalarStream {
     cond = q`NOT COALESCE((${scalarChildProduces(stepChain(arg.nested, s.params), cur, s.params)}), 0)`;
   } else {
     const arg = nested[0];
-    if (!arg) throw new Error(`${step.name}(predicate) on a scalar stream not yet supported (traversal only)`);
-    cond = scalarChildProduces(stepChain(arg.nested, s.params), cur, s.params);
+    if (arg) {
+      cond = scalarChildProduces(stepChain(arg.nested, s.params), cur, s.params);
+    } else {
+      // where(P)/filter(P) over a scalar: the predicate applies directly to the value. A
+      // string-keyed where('a',P) is an element alias compare (no scalar meaning) → defer.
+      const pred = step.args.find((a: any) => a && typeof a === 'object' && 'op' in a);
+      if (!pred || step.args.some((a: any) => typeof a === 'string'))
+        throw new Error(`${step.name}(predicate) on a scalar stream not yet supported (traversal only)`);
+      cond = predicateSql(cur, pred);
+    }
   }
   const rel = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)} FROM ${p} WHERE ${cond}`, cols(s));
   return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
