@@ -121,6 +121,40 @@ Feature: mogwai addendum — path() position scoping and per-position children
       | p[hasOut,leaf] |
 
   @gap:path-position
+  Scenario: g_V_out_path_byXcoalesceXchooseXhasLabelXpersonX_constantXPX_constantXSWXX_constantXnoneXXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().out().path().by(__.coalesce(__.choose(__.hasLabel("person"), __.constant("P"), __.constant("SW")), __.constant("none")))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | p[P,P] |
+      | p[P,P] |
+      | p[P,SW] |
+      | p[P,SW] |
+      | p[P,SW] |
+      | p[P,SW] |
+
+  @gap:path-position
+  Scenario: g_V_out_path_byXchooseXhasLabelXpersonX_coalesceXvaluesXlangX_constantXnoLangXX_constantXSWXXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().out().path().by(__.choose(__.hasLabel("person"), __.coalesce(__.values("lang"), __.constant("noLang")), __.constant("SW")))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | p[noLang,noLang] |
+      | p[noLang,noLang] |
+      | p[noLang,SW] |
+      | p[noLang,SW] |
+      | p[noLang,SW] |
+      | p[noLang,SW] |
+
+  @gap:path-position
   Scenario: g_V_out_out_path_byXnameX_from_to_count
     Given the modern graph
     And the traversal of

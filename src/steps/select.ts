@@ -694,6 +694,7 @@ function pathPositionValue(_st: ElementStream, tbl: Relation, elem: Elem, byArgs
 }
 
 const POSITION_MOVEMENTS = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'bothV']);
+const ELEMENT_POSITION_BRANCH = new Set(['choose', 'coalesce', 'union']);
 
 /** PURE. Does this branch-arm body produce MORE than one value per input element? A path
  *  position holds exactly ONE value, so the branch route (which has no `first`-collapse — the
@@ -739,19 +740,33 @@ function positionArmFansOut(body: PStep[], params: Record<string, any>): boolean
 function lowerPathPositionChild(
   seed: ElementStream, nested: any, outer: { scope: ChildScope; frame: ChildFrame }, params: Record<string, any>,
 ): ScalarStream {
-  const plan = classifyScalarChild(nested, params);
-  if (plan) return tryCompileScalarValueChild(seed, nested, 'first', reuseCurrentFrame(outer.scope, outer.frame), plan.body)!;
   const body = childSteps(nested, params);
   const armDesc = () => body.map((s) => s.name + '()').join('.');
-  const branch = body.length === 1 ? body[0] : undefined;
-  if (branch?.name === 'union')
-    throw new Error(`path().by(__.${armDesc()}): union() at a path position fans out to multiple values but a position holds one — take-first-of-fan-out is a deferred non-goal; use choose()/coalesce()`);
-  if (branch?.name === 'choose' || branch?.name === 'coalesce') {
+  // A branch body (choose/coalesce/union — incl. one nested in an arm) must use the branch route,
+  // NOT the value route: the branch compilers have no `first`-collapse, so the fan-out guard is
+  // the position's 1-to-1 safety. (classifyScalarChild now ACCEPTS nested-branch bodies, so the
+  // value route below would grab them and hit applyScalarChildCardinality's encounter throw.)
+  const hasBranch = body.some((s) => ELEMENT_POSITION_BRANCH.has(s.name) && !(s as any).options);
+  const branch = body.length === 1 && hasBranch ? body[0] : undefined;
+  if (branch) {
+    if (branch.name === 'union')
+      throw new Error(`path().by(__.${armDesc()}): union() at a path position fans out to multiple values but a position holds one — take-first-of-fan-out is a deferred non-goal; use choose()/coalesce()`);
     if (positionArmFansOut(body, params))
       throw new Error(`path().by(__.${armDesc()}): a ${branch.name}() arm fans out (movement/re-source/union) but a path position holds one value — take-first-of-fan-out is a deferred non-goal`);
     const s = branch.name === 'choose' ? tryLowerScalarChoose(branch, seed) : tryLowerScalarCoalesce(branch, seed);
     if (s) return s;
+    throw new Error(`path().by(traversal) position ${branch.name}() not yet supported (arms must be scalar children)`);
   }
+  // A branch with a movement/filter prefix or suffix (`by(__.out().choose(…))`) isn't a bare
+  // position branch: a fan-out prefix makes it multi-valued and needs the value seam's
+  // encounter-threaded first-collapse the branch route lacks. Defer cleanly (classifyScalarChild
+  // would otherwise accept it and hit applyScalarChildCardinality's encounter throw).
+  if (hasBranch)
+    throw new Error(`path().by(traversal): a branch (choose/coalesce/union) at a path position must be the whole by() body; a movement/filter around it is not yet supported (needs first-collapse)`);
+  // Flat value/transform/reducer body → the generic scalar child seam with `first` cardinality
+  // (encounter = ROW_NUMBER PARTITION BY ordinal) collapses a fan-out prefix to one value.
+  const plan = classifyScalarChild(nested, params);
+  if (plan) return tryCompileScalarValueChild(seed, nested, 'first', reuseCurrentFrame(outer.scope, outer.frame), plan.body)!;
   throw new Error(`path().by(traversal) position must be a scalar child (value/transform/reducer, or a bare choose()/coalesce()); __.${armDesc()} not yet supported`);
 }
 

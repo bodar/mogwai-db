@@ -10,7 +10,7 @@ import { carryFrag, carriedCols, carriedWith, elemRel, withoutCarried, type Carr
 import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from './stream.ts';
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
-import { childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, pushChildScope, reuseCurrentFrame, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, type ChildParent } from './child.ts';
+import { childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, pushChildScope, reuseCurrentFrame, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, type ChildParent } from './child.ts';
 
 /** The numeric reducers that terminate a nested-group inner value `by(__.values(x).<r>())`. */
 const SCALAR_REDUCERS = new Set(['sum', 'min', 'max', 'mean']);
@@ -190,9 +190,14 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     && projectBys.length === projectKeys.length
     && projectByNested.every((n, i) => !!n && scalarShape(projectKeyBodies[i]!));
 
+  // An unreduced scalar value: the flat shape OR (element parent only) a nested scalar-armed
+  // branch (choose/coalesce/union). group is fan-out-tolerant — values fold into the per-key
+  // list — so it shares the scalar seam's arm vocabulary; the emit (tryCompileScalarValueChild
+  // 'all') already lowers nested branches. Only genericVal widens here: a nested branch is not a
+  // reducer/fold terminal, and a group KEY uses 'first' (no encounter for a branch) so keys stay flat.
   const genericVal = valSteps.length > 0
     && !GROUP_VALUE_REDUCERS.has(valTerminal!)
-    && scalarShape(valBody);
+    && (scalarShape(valBody) || (!isProp && elementScalarBranchArm(valBody, parent.params)));
   const genericReducer = valSteps.length > 0
     && GROUP_VALUE_REDUCERS.has(valTerminal!)
     && scalarShape(valBody);
