@@ -15,5 +15,6 @@ build/
 test/conformance/l3-telemetry.ndjson
 test/conformance/*.summary.json
 
-# Local Claude Code worktrees / state
-.claude/
+# Local Claude Code worktrees / state (but track shared project settings)
+.claude/*
+!.claude/settings.json
