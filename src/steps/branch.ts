@@ -3,11 +3,12 @@ import { edges } from '../schema.ts';
 import { stepChain, type Step } from '../frontend.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
 import { tryInlinePredicate } from './predicate.ts';
-import { advance, elemRel, prevRel, carryFrag, carriedCols, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
+import { advance, elemRel, prevRel, carryFrag, carryFragMint, carriedCols, partitionOver, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { type AliasShape } from './alias.ts';
 import { classifyListChild, classifyScalarChild, isElementChild, isListChild, isScalarChild, pushChildScope, ROOT_SCOPE, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from './child.ts';
-import { carryOf, toListStream, toScalarStream, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from './stream.ts';
-import { unifyLists, variantArmsMeta, variantArmSelect, variantCols, type VariantArm } from './variant.ts';
+import { carryOf, toListStream, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from './stream.ts';
+import { mergeVariantArms, unifyLists, variantArmsMeta, type VariantArm } from './variant.ts';
+import { unionScalarStreams } from './scalar.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
  *  read back from `nodes` by subquery (the walk row carries only the id). Lets
@@ -141,7 +142,7 @@ function mergeBranchCarried(seed: Carried, arms: Carried[]): Carried {
  *  names can differ → alias with `AS`); a label the arm never bound is padded with a NULL
  *  history (drop-not-throw: select() of it drops the traverser). Trailing path positions a
  *  shorter arm lacks are likewise NULL-padded. */
-function armProjection(arm: ElementStream, out: Carried): string {
+function armProjection(arm: ElementStream, out: Carried, armIdx?: number): string {
   const parts = ['id'];
   for (const [label, entry] of out.aliases) {
     const got = arm.carried.aliases.get(label);
@@ -152,7 +153,25 @@ function armProjection(arm: ElementStream, out: Carried): string {
     const armLen = arm.carried.path?.kind === 'cols' ? arm.carried.path.cols.length : 0;
     out.path.cols.forEach((pos, j) => parts.push(j < armLen ? pos.col : `NULL AS ${pos.col}`));
   }
+  // When emission order is live, tag the arm with its index so the merge can re-mint a
+  // canonical encounter (arm a before arm b) — each arm carried its OWN 1..k encounter, which
+  // is meaningless across arms until re-numbered.
+  if (armIdx !== undefined) parts.push(`${armIdx} AS arm_idx`);
   return parts.join(', ');
+}
+
+/** Merge the element arms' UNION ALL. When emission order is live, re-mint the encounter as
+ *  ROW_NUMBER() OVER (<partition> ORDER BY arm_idx, arm_encounter) — arm 0 fully before arm 1,
+ *  matching TinkerPop's union/coalesce/choose emission order — superseding the per-arm
+ *  encounters `armProjection` tagged. Otherwise a plain UNION ALL (hot path unchanged). `parts`
+ *  are the per-arm SELECTs (each already carrying `arm_idx` when `out.encounter` is live). */
+function finishElementMerge(st: ElementStream, out: Carried, parts: Expression[], opts: { elem: Elem; aliases: AliasMap; origins?: readonly string[]; path?: PathState }): ElementStream {
+  if (!out.encounter) return advance(st, list(parts, ' UNION ALL '), opts);
+  const inner = st.q.cte(list(parts, ' UNION ALL '), ['id', ...carriedCols(out), 'arm_idx']);
+  const m = inner.as('m');
+  const over = partitionOver(out, m, q`${m.c.arm_idx}, ${m.c[out.encounter]}`);
+  const body = q`SELECT ${m.c.id} AS id${carryFragMint(out, m, out.encounter, q`ROW_NUMBER() OVER (${over})`)} FROM ${m}`;
+  return advance(st, body, opts);
 }
 
 /** union(): UNION ALL of each branch, each folded from the CURRENT relation (so the
@@ -171,8 +190,8 @@ export const union: StepFn = (s, st) => {
   const elem = ends[0].elem;
   if (ends.some((e) => e.elem !== elem)) throw new Error('union() branches produce different element kinds (mixed-shape) not yet supported');
   const out = mergeBranchCarried(st.carried, ends.map((e) => e.carried)); // merges alias sets, pads ragged path arms
-  const selects = ends.map((e) => q`SELECT ${armProjection(e, out)} FROM ${e.rel}`);
-  return advance(st, list(selects, ' UNION ALL '), { elem, aliases: out.aliases, path: out.path });
+  const selects = ends.map((e, k) => q`SELECT ${armProjection(e, out, out.encounter ? k : undefined)} FROM ${e.rel}`);
+  return finishElementMerge(st, out, selects, { elem, aliases: out.aliases, path: out.path });
 };
 
 /** Homogeneous scalar union through the generic child compiler. Every arm applies
@@ -190,15 +209,7 @@ export function tryLowerScalarUnion(s: Step, st: ElementStream): ScalarStream | 
     if (!arm) return null;
     arms.push(arm);
   }
-  const cols = carriedCols(st.carried);
-  const numeric = arms.every((arm) => arm.result === 'number');
-  const parts = arms.map((arm) => {
-    const a = arm.rel.as('a');
-    return q`SELECT ${a.c.v} AS v${numeric ? q`, ${a.c.vt} AS vt` : empty}${carryFrag(st.carried, a)} FROM ${a}`;
-  });
-  const rel = st.q.cte(list(parts, ' UNION ALL '), ['v', ...(numeric ? ['vt'] : []), ...cols]);
-  const as = arms.every((arm) => arm.as === arms[0].as) ? arms[0].as : undefined;
-  return toScalarStream(carryOf(st), rel, as, { result: numeric ? 'number' : 'value' });
+  return unionScalarStreams(st, arms);
 }
 
 export function tryLowerListUnion(s: Step, st: ElementStream): ListStream | null {
@@ -251,9 +262,9 @@ export const optional: StepFn = (s, st) => {
   const merged = mergeBranchCarried(seedSt.carried, [end.carried, seedSt.carried]);
   const out: Carried = { ...merged, origins: st.carried.origins };
   const baseSt: ElementStream = { ...seedSt, rel: base };
-  const hit = q`SELECT ${armProjection(end, out)} FROM ${end.rel}`;
-  const miss = q`SELECT ${armProjection(baseSt, out)} FROM ${base} WHERE ${ord} NOT IN (SELECT ${ord} FROM ${end.rel})`;
-  return advance(st, list([hit, miss], ' UNION ALL '), { elem: end.elem, aliases: out.aliases, origins: st.carried.origins, path: out.path });
+  const hit = q`SELECT ${armProjection(end, out, out.encounter ? 0 : undefined)} FROM ${end.rel}`;
+  const miss = q`SELECT ${armProjection(baseSt, out, out.encounter ? 1 : undefined)} FROM ${base} WHERE ${ord} NOT IN (SELECT ${ord} FROM ${end.rel})`;
+  return finishElementMerge(st, out, [hit, miss], { elem: end.elem, aliases: out.aliases, origins: st.carried.origins, path: out.path });
 };
 
 /** Shape-changing optional: productive scalar child rows win; an unproductive
@@ -290,12 +301,12 @@ export const coalesce: StepFn = (s, st) => {
   const merged = mergeBranchCarried(seedSt.carried, ends.map((e) => e.carried));
   const out: Carried = { ...merged, origins: st.carried.origins };
   const parts = ends.map((end, k) => {
-    const sel = armProjection(end, out);
+    const sel = armProjection(end, out, out.encounter ? k : undefined);
     if (k === 0) return q`SELECT ${sel} FROM ${end.rel}`;
     const notPrior = list(ends.slice(0, k).map((pr) => q`${ord} NOT IN (SELECT ${ord} FROM ${pr.rel})`), ' AND ');
     return q`SELECT ${sel} FROM ${end.rel} WHERE ${notPrior}`;
   });
-  return advance(st, list(parts, ' UNION ALL '), { elem, aliases: out.aliases, origins: st.carried.origins, path: out.path });
+  return finishElementMerge(st, out, parts, { elem, aliases: out.aliases, origins: st.carried.origins, path: out.path });
 };
 
 /** Homogeneous scalar coalesce: compile every arm from one ordinal-tagged seed, then
@@ -311,15 +322,8 @@ export function tryLowerScalarCoalesce(s: Step, st: ElementStream): ScalarStream
   const arms = branches.map((branch, i) =>
     (tryCompileScalarChild(seedSt, branch.nested, 'all', ROOT_SCOPE, plans[i]!.body)
       ?? tryCompileCountChild(seedSt, branch.nested, ROOT_SCOPE, plans[i]!.body))!);
-  const numeric = arms.every((arm) => arm.result === 'number');
-  const parts = arms.map((arm, k) => {
-    const a = arm.rel.as('a');
-    const prior = k === 0 ? empty : q` WHERE ${list(arms.slice(0, k).map((p) => q`${a.c[ord]} NOT IN (SELECT ${ord} FROM ${p.rel})`), ' AND ')}`;
-    return q`SELECT ${a.c.v} AS v${numeric ? q`, ${a.c.vt} AS vt` : empty}${carryFrag(st.carried, a)} FROM ${a}${prior}`;
-  });
-  const rel = st.q.cte(list(parts, ' UNION ALL '), ['v', ...(numeric ? ['vt'] : []), ...carriedCols(st.carried)]);
-  const as = arms.every((arm) => arm.as === arms[0].as) ? arms[0].as : undefined;
-  return toScalarStream(carryOf(st), rel, as, { result: numeric ? 'number' : 'value' });
+  return unionScalarStreams(st, arms, (a, k) =>
+    k === 0 ? undefined : list(arms.slice(0, k).map((p) => q`${a.c[ord]} NOT IN (SELECT ${ord} FROM ${p.rel})`), ' AND '));
 }
 
 export function tryLowerListCoalesce(s: Step, st: ElementStream): ListStream | null {
@@ -380,10 +384,7 @@ export function tryLowerVariantUnion(s: Step, st: ElementStream): VariantStream 
   if (branches.length < 2 || !branchesAreMixed(branches, st.params)) return null;
   if (st.carried.path) throw new Error('path() through a mixed-shape union() not yet supported');
   const arms = branches.map((b) => compileVariantArm(st, b.nested));
-  const meta = variantArmsMeta(arms);
-  const hasList = !!meta.listOf;
-  const rel = st.q.cte(list(arms.map((a) => variantArmSelect(a, st, hasList)), ' UNION ALL '), variantCols(st, hasList));
-  return toVariantStream(carryOf(st), rel, meta);
+  return mergeVariantArms(st, arms, variantArmsMeta(arms));
 }
 
 /** coalesce() over mixed-shape arms → a VariantStream. One ordinal-tagged seed feeds
@@ -395,12 +396,8 @@ export function tryLowerVariantCoalesce(s: Step, st: ElementStream): VariantStre
   if (st.carried.path) throw new Error('path() through a mixed-shape coalesce() not yet supported');
   const { seedSt, ord } = originSeed(st);
   const arms = branches.map((b) => compileVariantArm(seedSt, b.nested));
-  const meta = variantArmsMeta(arms);
-  const hasList = !!meta.listOf;
-  const parts = arms.map((arm, k) => variantArmSelect(arm, st, hasList, k === 0 ? undefined
-    : (a) => list(arms.slice(0, k).map((pr) => q`${a.c[ord]} NOT IN (SELECT ${ord} FROM ${pr.rel})`), ' AND ')));
-  const rel = st.q.cte(list(parts, ' UNION ALL '), variantCols(st, hasList));
-  return toVariantStream(carryOf(st), rel, meta);
+  return mergeVariantArms(st, arms, variantArmsMeta(arms), (a, k) => k === 0 ? undefined
+    : list(arms.slice(0, k).map((pr) => q`${a.c[ord]} NOT IN (SELECT ${ord} FROM ${pr.rel})`), ' AND '));
 }
 
 /** choose(pred, then, else) with mixed-shape then/else → a VariantStream. The gate
@@ -419,10 +416,7 @@ export function tryLowerVariantChoose(s: Step, st: ElementStream): VariantStream
   const thenArm = compileVariantArm(seedFor(false), thenArg.nested); // then before else (lazy gate bind order)
   const elseArm = compileVariantArm(seedFor(true), elseArg.nested);
   const arms = [thenArm, elseArm];
-  const meta = variantArmsMeta(arms);
-  const hasList = !!meta.listOf;
-  const rel = st.q.cte(list(arms.map((a) => variantArmSelect(a, st, hasList)), ' UNION ALL '), variantCols(st, hasList));
-  return toVariantStream(carryOf(st), rel, meta);
+  return mergeVariantArms(st, arms, variantArmsMeta(arms));
 }
 
 /** flatMap(t): apply t per traverser, flatten all results — for element bodies this
@@ -696,8 +690,11 @@ export const choose: StepFn = (s, st) => {
     throw new Error('choose() branches produce different element kinds (mixed-shape) not yet supported');
 
   const out = mergeBranchCarried(st.carried, [thenEnd.carried, elseEnd.carried]); // merges alias sets, pads ragged path arms
-  const merged = list([q`SELECT ${armProjection(thenEnd, out)} FROM ${thenEnd.rel}`, q`SELECT ${armProjection(elseEnd, out)} FROM ${elseEnd.rel}`], ' UNION ALL ');
-  return advance(st, merged, { elem: thenEnd.elem, aliases: out.aliases, path: out.path });
+  const parts = [
+    q`SELECT ${armProjection(thenEnd, out, out.encounter ? 0 : undefined)} FROM ${thenEnd.rel}`,
+    q`SELECT ${armProjection(elseEnd, out, out.encounter ? 1 : undefined)} FROM ${elseEnd.rel}`,
+  ];
+  return finishElementMerge(st, out, parts, { elem: thenEnd.elem, aliases: out.aliases, path: out.path });
 };
 
 /** Predicate choose with two homogeneous scalar result arms. The predicate gates
@@ -718,15 +715,7 @@ export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream |
       ?? tryCompileCountChild(seed, arg.nested, ROOT_SCOPE, body))!;
   const thenEnd = lowerArm(thenArg, thenPlan.body, seedFor(false));
   const elseEnd = lowerArm(elseArg, elsePlan.body, seedFor(true));
-  const cols = carriedCols(st.carried);
-  const numeric = thenEnd.result === 'number' && elseEnd.result === 'number';
-  const parts = [thenEnd, elseEnd].map((arm) => {
-    const a = arm.rel.as('a');
-    return q`SELECT ${a.c.v} AS v${numeric ? q`, ${a.c.vt} AS vt` : empty}${carryFrag(st.carried, a)} FROM ${a}`;
-  });
-  const rel = st.q.cte(list(parts, ' UNION ALL '), ['v', ...(numeric ? ['vt'] : []), ...cols]);
-  const as = thenEnd.as === elseEnd.as ? thenEnd.as : undefined;
-  return toScalarStream(carryOf(st), rel, as, { result: numeric ? 'number' : 'value' });
+  return unionScalarStreams(st, [thenEnd, elseEnd]);
 }
 
 export function tryLowerListChoose(s: Step, st: ElementStream): ListStream | null {

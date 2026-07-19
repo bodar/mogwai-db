@@ -56,3 +56,19 @@ Feature: mogwai addendum — positional determinism (canonical emission order, S
     Then the result should be ordered
       | result |
       | l[d[35].i,d[32].i,d[29].i,d[27].i] |
+
+  # union emits arm 0 fully before arm 1 (TinkerPop's contract); limit after a mixed/element
+  # union must not interleave arms. josh(4): out={lop,ripple} (arm 0), in={marko} (arm 1);
+  # limit(2) is the two out-neighbours, never marko. Guards the branch-merge encounter re-mint.
+  @gap:emission-order
+  Scenario: g_V4_unionXout_inX_limitX2X_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(4).union(__.out(), __.in()).limit(2).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | lop |
+      | ripple |

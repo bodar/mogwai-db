@@ -1642,11 +1642,10 @@ describe('compiler SQL snapshots', () => {
     expect(fused.sql).toContain('WHERE lower(p.v) != ?');
     expect(fused.sql).not.toContain('FROM c2 p)');
 
-    // order() before a slice mints a durable emission encounter (ROW_NUMBER over the sort);
-    // range() then slices by it (canonical emission order — deterministic subset after a fan-out).
+    // A keyed/bare order() re-establishes determinism, so the following slice needs no emission
+    // encounter — order()+range() fuse into one ORDER BY … LIMIT … OFFSET (demand pass resets).
     const ordered = read('g.V().values("age").order().range(1,3)');
-    expect(ordered.sql).toContain('ELSE p.v END) ASC, p.encounter) AS encounter');
-    expect(ordered.sql).toContain('ORDER BY p.encounter LIMIT 2 OFFSET 1');
+    expect(ordered.sql).toContain('ELSE p.v END) ASC LIMIT 2 OFFSET 1');
 
     const typedSum = read('g.V().values("age").asNumber(GType.DOUBLE).sum().is(P.gt(100))');
     expect(typedSum.shape).toEqual({ kind: 'scalar' });
