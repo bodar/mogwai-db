@@ -94,22 +94,42 @@ const COLLAPSE_MOVES = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE', 'ou
 const COLLAPSE_FILTERS = new Set(['has', 'hasLabel', 'hasId', 'where', 'filter', 'not', 'and', 'or']);
 const COLLAPSE_PROJ = new Set(['values', 'id', 'label']); // a scalar projection feeding a numeric reducer
 const COLLAPSE_REDUCERS = new Set(['count', 'sum', 'mean', 'min', 'max']);
+
+/** A `groupCount()` terminal whose key does NOT fan out is a bulk-mergeable barrier: it
+ *  weights every group by SUM(bulk) (see lowerGroup's isCount), so collapsing convergent
+ *  walks into (element, N) before it is result-equivalent — the exact "groupCount after a
+ *  big fan-out/repeat" correctness+tractability case. A bare key (the element identity), a
+ *  property key `by('name')`, or a token key `by(T.label)` all follow the element's identity,
+ *  so merging same-id rows keeps every key intact. A by(traversal) key can fan out (one
+ *  traverser → many keys), which a GROUP BY-id merge would corrupt → left unsafe. group()
+ *  (element/list values) and group().by().by(reducer) are NOT admitted here: their weighting
+ *  is correct-by-construction but their collapse gating is deferred (see the wire-bulking doc). */
+function groupCountCollapseTerminal(step: PStep): boolean {
+  if (step.name !== 'groupCount' || (step.args?.length ?? 0) !== 0) return false;
+  const bys = step.bys ?? [];
+  if (bys.length === 0) return true;
+  if (bys.length !== 1) return false;
+  const a = bys[0]?.[0];
+  return a === undefined || typeof a === 'string' || (a && typeof a === 'object' && 'token' in a);
+}
+
 function chainCollapseSafe(steps: PStep[]): boolean {
   const n = steps.length;
   if (n < 2) return false; // need a source + ≥1 movement
   if (steps[0].name !== 'V' && steps[0].name !== 'E') return false;
-  // Two safe terminals: a GLOBAL reducer (count/sum/mean/min/max — its SUM(bulk) sums the
-  // multiplicities), optionally after one scalar projection; OR an ELEMENT leaf (the bare
-  // vertex/edge projection, which frames each element as (v, bulk) on the wire). Everything
-  // between the source and the terminal must be movement/filter — anything that carries
-  // per-traverser identity (path/as/sack) or reads rows bulk-unaware (order/limit/range/
-  // sample/dedup/branch/re-entry) makes a GROUP BY-id merge wrong.
+  // Three safe terminals: a GLOBAL reducer (count/sum/mean/min/max — its SUM(bulk) sums the
+  // multiplicities), optionally after one scalar projection; a non-fan-out `groupCount()`
+  // (SUM(bulk) per key); OR an ELEMENT leaf (the bare vertex/edge projection, which frames each
+  // element as (v, bulk) on the wire). Everything between the source and the terminal must be
+  // movement/filter — anything that carries per-traverser identity (path/as/sack) or reads rows
+  // bulk-unaware (order/limit/range/sample/dedup/branch/re-entry) makes a GROUP BY-id merge wrong.
   let end = n; // exclusive bound of the movement/filter prefix
   const last = steps[n - 1];
   const reducerTerminal = COLLAPSE_REDUCERS.has(last.name) && (last.args?.length ?? 0) === 0;
-  if (reducerTerminal) {
+  const groupCountTerminal = groupCountCollapseTerminal(last);
+  if (reducerTerminal || groupCountTerminal) {
     end = n - 1;
-    if (end >= 2 && COLLAPSE_PROJ.has(steps[end - 1].name)) end -= 1; // one scalar projection before the reducer
+    if (reducerTerminal && end >= 2 && COLLAPSE_PROJ.has(steps[end - 1].name)) end -= 1; // one scalar projection before the reducer
   }
   let sawMove = false, sawOrder = false;
   for (let i = 1; i < end; i++) {
@@ -125,9 +145,9 @@ function chainCollapseSafe(steps: PStep[]): boolean {
     // rows, and a limit/range/skip AFTER it is bulk-aware (the tail cumulative-bulk window). Both
     // stay identity-free. A reducer terminal routes limit/count through the bulk-UNAWARE count
     // branch, so those forms are left unsafe. order().by(traversal) is unsafe (nested sort).
-    if (!reducerTerminal && nm === 'order'
+    if (!reducerTerminal && !groupCountTerminal && nm === 'order'
       && (steps[i].bys ?? []).every((by: any[]) => by.length === 0 || typeof by[0] === 'string')) { sawOrder = true; continue; }
-    if (!reducerTerminal && sawOrder && (nm === 'limit' || nm === 'range' || nm === 'skip')) continue;
+    if (!reducerTerminal && !groupCountTerminal && sawOrder && (nm === 'limit' || nm === 'range' || nm === 'skip')) continue;
     return false; // any other step in the prefix (as/sack/path/branch/re-entry/…) → unsafe
   }
   return sawMove;

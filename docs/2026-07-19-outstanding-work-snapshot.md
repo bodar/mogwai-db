@@ -17,11 +17,17 @@ fail-closed today, or cosmetic/debt).
 
 ## P1 — highest leverage (correctness + cluster-unblockers)
 
-1. **Element-key `group()`/`groupCount()` bulk-weighting** — *correctness debt, not just
-   a missing feature*: element-key group forms still emit unweighted `COUNT(*)`, so a
-   `groupCount()` after a big `repeat()` on a dense graph is wrong. Scalar-key forms
-   already weight by `SUM(bulk)`. **High.**
-   → [wire-bulking-rearchitecture](./2026-07-18-wire-bulking-rearchitecture.md),
+1. **Element-key `group()`/`groupCount()` bulk-weighting** — ✅ *mostly landed 2026-07-19*.
+   Bulk is threaded through `GroupSource` (`bulk`/`valBulk`): `groupCount()` and
+   `group().by(k).by(reducer)` now weight by `SUM(bulk)` like the scalar-key forms (behavior-
+   identical while bulk≡1), and `movementCollapse` is enabled for non-fan-out-key `groupCount()`
+   terminals so dense-fan-out groupCount is tractable+correct (equivalence + weighted tests
+   committed). **Narrower follow-ons remain (Low-Medium):** collapse gating for
+   `group().by(k).by(reducer)` terminals (weighting is correct-by-construction, only the
+   `chainCollapseSafe` admission is deferred); `repeat().times(n).groupCount()` tractability
+   (needs repeat-level frontier collapse feeding the group stream — `tryBulkRepeat` only feeds
+   `count()`/element leaves); nested-map inner reducer weighting.
+   → [wire-bulking-rearchitecture](./2026-07-18-wire-bulking-rearchitecture.md) (2026-07-19 update),
    [deep-seam-migration-roadmap](./2026-07-18-deep-seam-migration-roadmap.md) #2,
    [traverser-bulking](./2026-07-14-traverser-bulking.md)
 

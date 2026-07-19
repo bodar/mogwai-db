@@ -343,7 +343,7 @@ const tailGroup: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
   const isCount = step.name === 'groupCount';
   const tbl = st.elem === 'edge' ? 'edges' : 'nodes';
   const ctx = elemCtx(elemRel(st), st.elem);
-  const src: GroupSource = { from: `${tbl} n JOIN ${st.rel.name} p ON n.id=p.id`, ctx, elem: st.elem === 'edge' ? 'edge' : 'vertex', parent: st, productiveBy: step.productiveBy };
+  const src: GroupSource = { from: `${tbl} n JOIN ${st.rel.name} p ON n.id=p.id`, ctx, elem: st.elem === 'edge' ? 'edge' : 'vertex', parent: st, productiveBy: step.productiveBy, bulk: st.carried.bulk ? st.rel.as('p').c[st.carried.bulk] : undefined };
   return continueLowering(lowerGroup(st, isCount, step.bys ?? [], src), stop + 1);
 };
 
@@ -996,6 +996,6 @@ function compileCap(st: ElementStream | ScalarStream, steps: PStep[], stop: numb
   // group('a')/groupCount('a') side-effect → re-emit the same rich GroupStream as an
   // inline group; terminal framing and Column consumers share its dispatch. The stashed
   // def.parent carries the element source, so a scalar-stream cap of a group re-runs correctly.
-  const src: GroupSource = { from: def.from, ctx: def.ctx, elem: def.elem, parent: def.parent, productiveBy: def.productiveBy };
+  const src: GroupSource = { from: def.from, ctx: def.ctx, elem: def.elem, parent: def.parent, productiveBy: def.productiveBy, bulk: def.parent.carried.bulk ? def.parent.rel.as('p').c[def.parent.carried.bulk] : undefined };
   return continueLowering(lowerGroup(def.parent, def.isCount, def.bys, src), stop + 1);
 }
