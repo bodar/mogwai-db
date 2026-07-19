@@ -374,6 +374,9 @@ export function demandsEncounterOrder(steps: PStep[]): boolean {
   for (const s of steps) {
     if (s.name === 'repeat' || s.name === 'match') return false;
     if (sawFanout && POSITIONAL_CONSUMERS.has(s.name)) return true;
+    // dedup(labels) keeps the FIRST traverser per key — first-in-emission, so it needs the
+    // encounter. Bare dedup() collapses a multiset regardless of order (never triggers).
+    if (sawFanout && s.name === 'dedup' && (s.args ?? []).some((a: any) => typeof a === 'string')) return true;
     if (FANOUT_STEPS.has(s.name)) sawFanout = true;
   }
   return false;

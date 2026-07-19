@@ -239,8 +239,11 @@ function dedupByLabels(st: ElementStream, s: PStep, labels: string[]): ElementSt
   };
   const p = prevRel(st, 'p');
   const existing = carriedCols(st.carried);
+  // "First per key" = first-in-emission when the chain carries a canonical encounter
+  // (Stage C), else lowest id (a deterministic fallback).
+  const firstBy = st.carried.encounter ? p.c[st.carried.encounter] : p.c.id;
   const r = derived(
-    q`SELECT ${p.c.id} AS id${carryFrag(st.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${list(labels.map(keyOf), ', ')} ORDER BY ${p.c.id}) AS rn FROM ${p}`,
+    q`SELECT ${p.c.id} AS id${carryFrag(st.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${list(labels.map(keyOf), ', ')} ORDER BY ${firstBy}) AS rn FROM ${p}`,
     ['id', ...existing, 'rn'],
     'r',
   );

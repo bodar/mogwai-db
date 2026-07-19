@@ -67,7 +67,7 @@ so. Kept in sync in the commit that changes support.
 | `select(Column.values/keys)` | ✅ | over a group, scalar record, or per-element valueMap/elementMap. ❌ heterogeneous element-value lists; raw Map params |
 | chained projections (`values().count()`, `project().select()`, `valueMap().select()`) | ✅ | projections retype and re-enter one step at a time. ❌ heterogeneous structured values |
 | `order()` [`.by(key[,dir]\|__.trav)`] | ✅ | `by(key)` and `by(__.traversal)`. ❌ after `path()`; `by(key)` on a scalar stream; a multi-term order mixing a traversal |
-| `limit`, `range`, `skip` | ✅ | mid-chain or tail; `Scope.local` slices record fields |
+| `limit`, `range`, `skip`, `tail` | ✅ | mid-chain or tail; `Scope.local` slices record fields. After a fan-out they pick a DETERMINISTIC subset via the canonical emission order (a demand pre-pass seeds it; order-free chains stay order-free) |
 | `by(…)` modulator | ✅ | on `order`/`select`/`project`/`group`/`groupCount`/`path`/`math` |
 
 ## 4. Aggregation & barriers
@@ -75,7 +75,7 @@ so. Kept in sync in the commit that changes support.
 | Step | | Notes |
 |---|:--:|---|
 | `group`, `groupCount` | ✅ | scalar/`T.id`/`T.label`/composite-`project` keys; scalar reducers, element values, unreduced value traversals, and nested-map values (`by(__.<movement>.group())`) all compose through the generic child seam; group-scoped `count/sum/min/max/mean`/`fold()`; scalar-stream `groupCount()`. ❌ more than two `by()`; non-scalar / element-valued inner keys; `order().by(key)` inside a value; `select(Column)`/`unfold()` over a nested-map value |
-| `fold()` | ✅ | scalar or element list, re-enterable; empty lists and element metadata preserved |
+| `fold()` | ✅ | scalar or element list, re-enterable; empty lists and element metadata preserved. After a fan-out the list is ordered by the canonical emission order (deterministic) |
 | `sum`, `min`, `max`, `mean` | ✅ | `min`/`max` over any Comparable incl. Strings |
 | `group('a')`/`groupCount('a')` (side-effecting) | 🟡 | see §12 |
 
@@ -94,7 +94,7 @@ Across all four branch steps, mixed-shape arms (scalar + element + list) merge i
 | `union(…)` | ✅ | element multi-hop/nested arms; scalar/list arms; over a scalar parent. ❌ full-`V()`/`E()` source-branch tails |
 | `optional(…)` | ✅ | `optional(t)` ≡ `coalesce(t, identity)`; single- and multi-hop; over a scalar parent restores the value on a miss. ❌ an element-kind change on a miss; per-row-shape steps after a mixed-shape result |
 | `flatMap(__.…)` | ✅ | movement/filter/scalar/`fold()` bodies; over a scalar parent incl. a `V()`/`E()` re-source. ❌ record/group/path bodies |
-| `map(__.…)` | ✅ | 1-to-1: movement (first-per-origin), scalar tails, reducers, `fold()`, `choose`/`coalesce`, a reducing `V()`/`E()` re-source. For an inner traversal that **fans out**, use `flatMap`/`local` (🚫 `map` would have to pick a first-of-many). ❌ alias/select/structured bodies |
+| `map(__.…)` | ✅ | 1-to-1, first-EMITTED result. Over a scalar parent it takes first even when the inner traversal **fans out** (`map(__.union(a,b))` → arm 0; `map(__.V().values('k'))` → element-id order) via the canonical emission-order substrate. `flatMap`/`local` emit all. 🚫 residual take-first (fail-closed): a fan-out arm at a `path().by()` position; ❌ alias/select/structured bodies |
 | `choose(fn).option(k, body)…` | 🟡 | scalar option-map. ❌ no `Pick.none` default; element/identity/discard/fail bodies; `Pick.unproductive`/`any`; a `T`-token choice over a scalar parent |
 | `local(…)` | 🟡 | one-child `all` policy: movement, slices, `dedup`, scalar transforms/reducers, `fold()`; over a scalar parent. ❌ `order()`; nested-traversal/record/group/path/match/union bodies; sack |
 
