@@ -129,11 +129,15 @@ const GROUP_VALUE_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
 /** The inner key + reduced value of a nested-group value body `__.<move>.<group|groupCount>`,
  *  read off the child-expanded inner element/property ctx. Returns null for shapes not yet
  *  generic (element-valued inner keys, non-count/reducer inner values) — a clean deferral,
- *  never a mis-execution. Mirrors buildGroupKey's key resolution for the inner level. */
+ *  never a mis-execution. Mirrors buildGroupKey's key resolution for the inner level. The
+ *  inner rows carry the OUTER traverser's `bulk` (propagated through the child scope), so the
+ *  inner reducer weights by it exactly like the outer level — a bulked outer traverser folds
+ *  each inner contribution its multiplicity of times (identical while bulk≡1). */
 function nestedInnerKeyVal(
   innerGroup: PStep,
   ctx: ScalarCtx,
   params: Record<string, any>,
+  bulk?: Expression,
 ): { key: Expression; val: Expression; kind: 'count' | 'number' } | null {
   const innerBys: any[][] = innerGroup.bys ?? [];
   const keyArg = innerBys[0]?.[0];
@@ -143,15 +147,16 @@ function nestedInnerKeyVal(
       : keyArg.token === 'id' ? ctx.idExpr : null;
   else if (typeof keyArg === 'string') key = scalarProp(ctx, keyArg);
   if (!key) return null; // bare/element inner key deferred
-  if (innerGroup.name === 'groupCount') return { key, val: q`COUNT(*)`, kind: 'count' };
+  const countVal = bulk ? q`SUM(${bulk})` : q`COUNT(*)`;
+  if (innerGroup.name === 'groupCount') return { key, val: countVal, kind: 'count' };
   // group().by(ik).by(__.count()) or by(__.values(x).<numeric>())
   const reduceArg = innerBys[1]?.[0];
   if (!reduceArg || typeof reduceArg !== 'object' || !('nested' in reduceArg)) return null;
   const rsteps = childSteps(reduceArg.nested, params);
   const reducer = rsteps.at(-1)?.name;
-  if (rsteps.length === 1 && reducer === 'count') return { key, val: q`COUNT(*)`, kind: 'count' };
+  if (rsteps.length === 1 && reducer === 'count') return { key, val: countVal, kind: 'count' };
   if (rsteps.length === 2 && rsteps[0].name === 'values' && SCALAR_REDUCERS.has(reducer!))
-    return { key, val: numericReducerAggregate(scalarProp(ctx, rsteps[0].args[0]), reducer as NumericReducer).value, kind: 'number' };
+    return { key, val: numericReducerAggregate(scalarProp(ctx, rsteps[0].args[0]), reducer as NumericReducer, bulk).value, kind: 'number' };
   return null;
 }
 
@@ -305,6 +310,9 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   let valNestedMap: GroupSource['valNestedMap'];
   if (genericGroupVal) {
     let innerCtx: ScalarCtx;
+    // The inner rows carry the outer traverser's bulk — from the child-expanded element rows
+    // (nestedElementMove) or, for a properties() expansion, straight off the pushed domain `p`.
+    let innerBulk: Expression | undefined;
     if (nestedElementMove) {
       // The movement prefix expands to inner element rows through lowerElementSteps — any
       // valid movement/filter chain, not a hand-rolled adjacency join. Rejoin nodes/edges
@@ -314,6 +322,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
       const e = (rows.stream.elem === 'edge' ? edges : nodes).as('gnge');
       joins.push(q` JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]} JOIN ${e} ON ${e.c.id}=${c.c.id}`);
       innerCtx = elemCtx(e, rows.stream.elem);
+      innerBulk = rows.stream.carried.bulk ? c.c[rows.stream.carried.bulk] : undefined;
     } else {
       // properties() over the outer element: its VertexProperty rows joined off the pushed
       // domain id. innerCtx reads the property's key (T.label) / value like propertyCtx.
@@ -325,8 +334,9 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
         elem: 'property', idExpr: vp.c.id, labelIdExpr: q`(SELECT label FROM nodes WHERE id=${vp.c.node})`,
         ownerExpr: vp.c.node, pkExpr: vp.c.key, pvExpr: storedValueExpr(vp.c.value, vp.c.vtype), metaExpr: q`json(${vp.c.meta})`,
       };
+      innerBulk = parent.carried.bulk ? p.c[parent.carried.bulk] : undefined;
     }
-    const kv = nestedInnerKeyVal(nestedGroup as PStep, innerCtx, parent.params);
+    const kv = nestedInnerKeyVal(nestedGroup as PStep, innerCtx, parent.params, innerBulk);
     if (!kv) return null; // inner key/value shape not yet generic — clean deferral
     valNestedMap = { innerKey: kv.key, innerVal: kv.val, innerKind: kv.kind };
   }

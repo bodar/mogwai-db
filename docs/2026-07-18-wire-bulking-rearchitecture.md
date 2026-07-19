@@ -21,12 +21,15 @@ convention `lowerScalarGroupCount` already used, and the barrier reducers'. All 
 bulk≡1, so L3 held. `chainCollapseSafe` now admits a **non-fan-out-key `groupCount()` terminal** (bare/
 `by('k')`/`by(T.x)` — a by(traversal) key can fan out, left unsafe), so `V()…out()…groupCount()` collapses
 convergent walks and stays correct on a dense fan-out (equivalence + weighted-count tests committed).
-**Remaining (narrower):** (a) collapse gating for `group().by(k).by(reducer)` terminals — the weighting
-substrate is in place (correct-by-construction), only the `chainCollapseSafe` admission is deferred; (b)
-`repeat().times(n).groupCount()` tractability needs repeat-level frontier collapse feeding the group
-stream (today `tryBulkRepeat` only feeds `count()`/element leaves, and SQLite forbids GROUP BY in a
-recursive term); (c) nested-map inner reducer weighting (`by(__.<move>.groupCount())`). The staged plan
-as originally written follows.
+Weighting reaches all the way down the same substrate: the outer bare/`by(count)`/`by(reducer)` forms,
+the child-scope value reducers (`by(__.out().count()/sum())` weight by the child rows' carried `gr.bulk`),
+AND the nested-map inner reducer (`by(__.<move>.group()/groupCount())` weights by the outer traverser's
+bulk propagated through the child scope). **Remaining (narrower):** (a) collapse gating for
+`group().by(k).by(reducer)` terminals — the weighting substrate is in place (correct-by-construction),
+only the `chainCollapseSafe` admission is deferred; (b) `repeat().times(n).groupCount()` tractability
+needs repeat-level frontier collapse feeding the group stream (today `tryBulkRepeat` only feeds
+`count()`/element leaves, and SQLite forbids GROUP BY in a recursive term). The staged plan as originally
+written follows.
 
 ## The premise correction
 
