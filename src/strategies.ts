@@ -373,6 +373,11 @@ export function demandsEncounterOrder(steps: PStep[]): boolean {
   let sawFanout = false;
   for (const s of steps) {
     if (s.name === 'repeat' || s.name === 'match') return false;
+    // A keyed/bare order() re-establishes a deterministic total order, so a following slice needs
+    // no emission encounter — clear the fan-out (mirrors chainCollapseSafe's sawOrder gate, so the
+    // two scans agree and movementCollapse stays enabled for <movement>.order().by(key).limit()).
+    // order().by(traversal) is NOT reset — it mints its own encounter and is handled downstream.
+    if (s.name === 'order' && (s.bys ?? []).every((by: any[]) => by.length === 0 || typeof by[0] === 'string')) { sawFanout = false; continue; }
     if (sawFanout && POSITIONAL_CONSUMERS.has(s.name)) return true;
     // dedup(labels) keeps the FIRST traverser per key — first-in-emission, so it needs the
     // encounter. Bare dedup() collapses a multiset regardless of order (never triggers).

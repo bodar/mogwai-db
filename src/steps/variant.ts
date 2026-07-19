@@ -13,7 +13,7 @@ import { q, list, empty, type Expression, type Relation } from '../q.ts';
 import { rangeToOffsetLimit } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toVariantStream, type ListStream, type LoweringResult, type ScalarStream, type ShapeTailFn, type VariantArms, type VariantStream } from './stream.ts';
-import { carryFrag, carriedCols, type Carry } from './context.ts';
+import { carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, type Carry } from './context.ts';
 import { lowerGlobalCount } from './barrier.ts';
 
 // ---------- variant-arm merge builders (parent-agnostic; element- and scalar-parent share) ----------
@@ -60,7 +60,7 @@ export function variantArmsMeta(arms: readonly VariantArm[]): VariantArms {
 /** One arm's variant-row SELECT: `vk, v, rid[, list]` + the outer carried columns.
  *  `gate` (coalesce's not-in-prior / any per-arm filter) receives the aliased arm rel.
  *  Takes a bare Carry so element- and scalar-parent merges share it. */
-export function variantArmSelect(arm: VariantArm, carry: Carry, hasList: boolean, gate?: (a: Relation) => Expression): Expression {
+export function variantArmSelect(arm: VariantArm, carry: Carry, hasList: boolean, gate?: (a: Relation) => Expression | undefined): Expression {
   const a = arm.rel.as('a');
   const cols: Expression[] = [
     q`${arm.vk} AS vk`,
@@ -68,12 +68,57 @@ export function variantArmSelect(arm: VariantArm, carry: Carry, hasList: boolean
     q`${arm.vk === 2 || arm.vk === 3 ? a.c.id : q`NULL`} AS rid`,
   ];
   if (hasList) cols.push(q`${arm.vk === 4 ? a.c.list : q`NULL`} AS list`);
-  const where = gate ? q` WHERE ${gate(a)}` : empty;
-  return q`SELECT ${list(cols, ', ')}${carryFrag(carry.carried, a)} FROM ${a}${where}`;
+  const g = gate?.(a);
+  return q`SELECT ${list(cols, ', ')}${carryFrag(carry.carried, a)} FROM ${a}${g ? q` WHERE ${g}` : empty}`;
 }
 
 export const variantCols = (carry: Carry, hasList: boolean): string[] =>
   ['vk', 'v', 'rid', ...(hasList ? ['list'] : []), ...carriedCols(carry.carried)];
+
+const carryWith = (base: Carry, carried: Carry['carried']): Carry =>
+  ({ q: base.q, params: base.params, fastPaths: base.fastPaths, sideEffects: base.sideEffects, carried });
+
+/** Merge a set of variant arms (mixed-shape branch) into one VariantStream. Parent-agnostic
+ *  (element- and scalar-parent share it). When emission order is live, SYNTHESIZE the canonical
+ *  encounter: tag arm k `arm_idx=k`, keep its own encounter as `arm_encounter`, then re-mint
+ *  `encounter = ROW_NUMBER() OVER (<partition> ORDER BY arm_idx, arm_encounter)` in the carried
+ *  slot — arm a before arm b, matching TinkerPop union/coalesce/choose order. Without a live
+ *  encounter it is a plain UNION ALL. `gateFor` supplies a per-arm WHERE (coalesce's not-in-prior). */
+export function mergeVariantArms(base: Carry, arms: readonly VariantArm[], meta: VariantArms, gateFor?: (a: Relation, k: number) => Expression | undefined): VariantStream {
+  const hasList = !!meta.listOf;
+  const enc = base.carried.encounter;
+  if (!enc) {
+    const rel = base.q.cte(
+      list(arms.map((arm, k) => variantArmSelect(arm, base, hasList, gateFor && ((a: Relation) => gateFor(a, k)))), ' UNION ALL '),
+      variantCols(base, hasList),
+    );
+    return toVariantStream(base, rel, meta);
+  }
+  const baseNoEnc = carriedWith(base.carried, { encounter: null });
+  const payloadCols = ['vk', 'v', 'rid', ...(hasList ? ['list'] : [])];
+  const parts = arms.map((arm, k) => {
+    const a = arm.rel.as('a');
+    const cols: Expression[] = [
+      q`${arm.vk} AS vk`,
+      q`${arm.vk === 1 ? a.c.v : q`NULL`} AS v`,
+      q`${arm.vk === 2 || arm.vk === 3 ? a.c.id : q`NULL`} AS rid`,
+    ];
+    if (hasList) cols.push(q`${arm.vk === 4 ? a.c.list : q`NULL`} AS list`);
+    cols.push(q`${k} AS arm_idx`, q`${a.c[enc]} AS arm_encounter`);
+    const gate = gateFor?.(a, k);
+    return q`SELECT ${list(cols, ', ')}${carryFrag(baseNoEnc, a)} FROM ${a}${gate ? q` WHERE ${gate}` : empty}`;
+  });
+  const inner = base.q.cte(list(parts, ' UNION ALL '), [...payloadCols, 'arm_idx', 'arm_encounter', ...carriedCols(baseNoEnc)]);
+  const m = inner.as('m');
+  const over = partitionOver(base.carried, m, q`${m.c.arm_idx}, ${m.c.arm_encounter}`);
+  const outCarried = carriedWith(baseNoEnc, { encounter: 'encounter' });
+  const proj = list(payloadCols.map((c) => q`${m.c[c]} AS ${c}`), ', ');
+  const rel = base.q.cte(
+    q`SELECT ${proj}${carryFragMint(outCarried, m, 'encounter', q`ROW_NUMBER() OVER (${over})`)} FROM ${m}`,
+    [...payloadCols, ...carriedCols(outCarried)],
+  );
+  return toVariantStream(carryWith(base, outCarried), rel, meta);
+}
 
 const armsOf = (s: VariantStream) => ({ scalarAs: s.scalarAs, node: s.node, edge: s.edge, listOf: s.listOf });
 
