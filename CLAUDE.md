@@ -120,13 +120,21 @@ SAME `VariantStream` the element parent produces via the `Carry`-typed builders
 `variantArmSelect`/`variantArmsMeta`/`variantCols` (in leaf `steps/variant.ts`, shared by both
 parents — only the per-arm compiler differs) — for `union`/`choose`/`coalesce`; `optional(t)` ≡
 `coalesce(t, identity)` (a scalar arm restores the value on miss, an element/list arm →
-variant). `map(t)` is 1-to-1 (keeps `t`'s FIRST result) and works for every one-result body
-(transforms/reducers/`choose`/`coalesce`/re-source-then-reduce). **🚫 Out of scope (not a gap,
-the take-first-and-discard case ONLY):** when the inner `t` FANS OUT (`map(__.V())` → 6,
-`map(__.union(a,b))` → 2) map must silently drop all but the first — picking "first" needs a
-deterministic emission-order column threaded through the fan-out (arm-index through `union`,
-id-order through re-source), not a natural fit for the set-oriented SQL engine, zero corpus
-examples. Fails closed (`armFansOut`); use `flatMap`/`local` for all-results.
+variant). `map(t)` is 1-to-1 (keeps `t`'s FIRST EMITTED result). Over a SCALAR parent it takes
+first even when `t` FANS OUT (`map(__.union(a,b))` → arm 0, `map(__.V().values('k'))` →
+element-id order): the **canonical emission order** substrate
+(`docs/2026-07-19-canonical-emission-order.md`) mints a per-origin `encounter` at the branch
+merge (`unionScalarStreams`: `ROW_NUMBER() OVER (ORDER BY arm_idx, arm_encounter)`) and the
+`'first'` child cardinality collapses to it. Emission order is ONE unified `Carried.encounter`
+slot (root-global or per-origin child; movement re-mints over `(prev_encounter, new_id)`); a
+demand pre-pass (`demandsEncounterOrder`, `strategies.ts`) seeds it only when a positional
+consumer (limit/range/skip/tail/fold/dedup(labels)) follows a fan-out, so order-free chains and
+`movementCollapse` are untouched. **Residual take-first (fail-closed, correct-by-design, NOT
+mis-executed):** a fan-out arm at a `path().by(__.trav)` position, and a mixed-shape
+(`VariantStream`) branch take-first — both need the ELEMENT-parent branch merges
+(`tryLowerScalarUnion/Choose/Coalesce`, branch.ts) and the variant merge builders to synthesize
+the arm-merge encounter too (they don't yet; only the scalar-PARENT `unionScalarStreams` does).
+Use `flatMap`/`local` for all-results.
 
 **Fast paths** are explicit per-compilation switches in `CompileOptions.fastPaths`
 (`src/fast-paths.ts`) — never a mutable global. A specialized lowering qualifies as a
