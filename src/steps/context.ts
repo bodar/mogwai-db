@@ -207,6 +207,16 @@ export function carryFragMint(c: Carried, p: Relation, col: string, mint: Expres
   return cols.length ? list(cols.map((x) => (x === col ? q`, ${mint} AS ${col}` : q`, ${p.c[x]}`)), '') : empty;
 }
 
+/** The window frame for minting an emission-order encounter: a GLOBAL sequence at root
+ *  scope (`ORDER BY <key>`), or a PER-ORIGIN sequence inside a child scope
+ *  (`PARTITION BY <ordinal stack> ORDER BY <key>`). The full origins stack partitions
+ *  correctly under nested child scopes. Shared by every fan-out mint (branch merges,
+ *  movement refine, re-source). `p` qualifies the origin columns. */
+export function partitionOver(c: Carried, p: Relation, orderKey: Expression): Expression {
+  const parts = c.origins.map((o) => p.c[o]);
+  return parts.length ? q`PARTITION BY ${list(parts, ', ')} ORDER BY ${orderKey}` : q`ORDER BY ${orderKey}`;
+}
+
 type CarriedOpts = { aliases?: AliasMap; path?: PathState; origins?: readonly string[]; sack?: string | null; fromV?: string | null; encounter?: string | null; bulk?: string | null };
 
 /** Apply a carried-column patch: aliases/path/origins — a value overrides, undefined

@@ -2,7 +2,7 @@ import { derived, empty, list, paren, q, raw, value, type Expression, type Relat
 import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { carryFrag, carryFragMint, carriedCols, withoutCarried, type Carry } from './context.ts';
+import { carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, withoutCarried, type Carry } from './context.ts';
 import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStream } from './stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, numericSpec } from './coerce.ts';
 import { normalizeTypeName } from '../gremlin-types.ts';
@@ -462,17 +462,33 @@ export function gateScalar(s: ScalarStream, buildCond: (v: Expression, vt: Expre
 
 /** UNION ALL a set of scalar arm streams that all descend from `base`'s carried schema
  *  (choose/coalesce/union merge point). Numeric arms keep the `vt` storage-class column;
- *  the framing tag survives only when every arm agrees. The physical encounter/vtype are
- *  intentionally dropped at the merge — a following partitioned op re-establishes its own. */
+ *  the framing tag survives only when every arm agrees. The merge SYNTHESIZES the canonical
+ *  emission order: arm k is tagged `arm_idx=k` and keeps its own encounter (`arm_encounter`,
+ *  or 1 if the arm has none), then a fresh `encounter = ROW_NUMBER() OVER (… ORDER BY
+ *  arm_idx, arm_encounter)` is minted into the carried slot (per-origin inside a child scope).
+ *  This matches TinkerPop's union order (arm a before arm b) and unblocks take-first after a
+ *  branch (map/path() fan-out arm). */
 export function unionScalarStreams(base: ScalarStream, arms: readonly ScalarStream[]): ScalarStream {
   const numeric = arms.every((a) => a.result === 'number');
-  const parts = arms.map((a) => {
-    const r = a.rel.as('a');
-    return q`SELECT ${r.c.v} AS v${numeric ? q`, ${r.c.vt} AS vt` : empty}${carryFrag(base.carried, r)} FROM ${r}`;
-  });
-  const rel = base.q.cte(list(parts, ' UNION ALL '), ['v', ...(numeric ? ['vt'] : []), ...carriedCols(base.carried)]);
+  // Forward the base carried EXCEPT any prior encounter — the merge supersedes it.
+  const baseNoEnc = carriedWith(base.carried, { encounter: null });
+  const inner = base.q.cte(
+    list(arms.map((a, k) => {
+      const r = a.rel.as('a');
+      const armEnc = a.carried.encounter ? r.c[a.carried.encounter] : q`1`;
+      return q`SELECT ${r.c.v} AS v${numeric ? q`, ${r.c.vt} AS vt` : empty}, ${value(k)} AS arm_idx, ${armEnc} AS arm_encounter${carryFrag(baseNoEnc, r)} FROM ${r}`;
+    }), ' UNION ALL '),
+    ['v', ...(numeric ? ['vt'] : []), 'arm_idx', 'arm_encounter', ...carriedCols(baseNoEnc)],
+  );
+  const m = inner.as('m');
+  const outCarried = carriedWith(baseNoEnc, { encounter: 'encounter' });
+  const over = partitionOver(outCarried, m, q`${m.c.arm_idx}, ${m.c.arm_encounter}`);
+  const rel = base.q.cte(
+    q`SELECT ${m.c.v} AS v${numeric ? q`, ${m.c.vt} AS vt` : empty}${carryFragMint(outCarried, m, 'encounter', q`ROW_NUMBER() OVER (${over})`)} FROM ${m}`,
+    ['v', ...(numeric ? ['vt'] : []), ...carriedCols(outCarried)],
+  );
   const as = arms.every((a) => a.as === arms[0].as) ? arms[0].as : undefined;
-  return toScalarStream(carryOf(base), rel, as, { result: numeric ? 'number' : 'value' });
+  return toScalarStream({ ...carryOf(base), carried: outCarried }, rel, as, { result: numeric ? 'number' : 'value' });
 }
 
 /** sack over a scalar stream. The mutate form sack(Operator.x) folds the CURRENT VALUE

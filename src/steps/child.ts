@@ -577,6 +577,20 @@ function compileScalarChildRows(
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
   }
 
+  // Nested scalar-armed branch (choose/coalesce/union) as the WHOLE body: parent-agnostic —
+  // lowerSteps re-dispatches the branch step to the branch compilers, which recurse back here
+  // per arm. Lowered over a pushed scope, the branch merge (unionScalarStreams) mints the
+  // per-origin emission encounter, so the 'first' cardinality policy can take the first emitted
+  // result (map(__.union(...)) / by(__.choose(...))). Checked before the scalar-parent families
+  // below (a bare branch body is neither a value-op nor a re-source). elementScalarBranchArm is
+  // precise (all arms scalar), so a non-scalar result is a contradiction.
+  if (elementScalarBranchArm(body, parent.params)) {
+    const pushed = pushChildScope(parent, scope);
+    const stream = lowerSteps(pushed.seed, body, 0);
+    if (stream.kind !== 'scalar') throw new Error('scalar-branch child classified scalar but lowered to ' + stream.kind);
+    return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
+  }
+
   // Scalar parent: the child body starts from the value `_` = v. Two families, each recognized
   // by a pure inline check BEFORE pushChildScope (so a miss returns null with no orphaned CTE):
   //   (a) a value-op body (transforms/is/order/slice — the pushed seed carries the minted
@@ -625,18 +639,6 @@ function compileScalarChildRows(
       stream = lowered;
     }
     if (reducer) stream = lowerScopedScalarReducer(stream, reducer, pushed.scope);
-    return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
-  }
-
-  // Nested scalar-armed branch (choose/coalesce/union): the flat scalarRowParts grammar can't
-  // see it, but lowerSteps re-dispatches the branch step to the element-parent branch compilers,
-  // which recurse back here per arm (the scalar-parent scalarBranchArm move, one shape up). Lower
-  // over a pushed scope + apply cardinality exactly like the clean-suffix flat case below.
-  // elementScalarBranchArm is precise (all arms scalar), so a non-scalar result is a contradiction.
-  if (elementScalarBranchArm(body, parent.params)) {
-    const pushed = pushChildScope(parent, scope);
-    const stream = lowerSteps(pushed.seed, body, 0);
-    if (stream.kind !== 'scalar') throw new Error('scalar-branch child classified scalar but lowered to ' + stream.kind);
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
   }
 
@@ -1268,14 +1270,17 @@ function armFansOut(body: PStep[], params: Record<string, any>): boolean {
 }
 
 /** map()/local()/flatMap() over a scalar: apply the arm body per value. `flatMap`/`local` emit
- *  every result (`allowFanout`); `map` is first-result-only, so a fan-out body (a re-source
- *  projection or a nested `union`) would over-produce — map fails closed on it (correct
- *  first-of-many needs deterministic emission ordering across the fan-out, a follow-on). A ≤1
- *  body (transform/filter/choose/coalesce/reducer) is identical under map/flatMap/local. */
+ *  every result (`allowFanout`); `map` is first-result-only. A fan-out body (a nested `union`/
+ *  fan-out `choose`/`coalesce`) takes the FIRST emitted result per input — a pushed child scope
+ *  + the 'first' cardinality policy, keyed on the branch merge's synthesized emission encounter
+ *  (unionScalarStreams). A bare re-source (V()/E()) fan-out carries no encounter yet (Stage B),
+ *  so it still fails closed inside the 'first' policy. A ≤1 body (transform/filter/choose/
+ *  coalesce/reducer) is identical under map/flatMap/local. */
 export function tryScalarMapChild(s: ScalarStream, step: PStep, allowFanout = true): ScalarStream | null {
   const arg = step.args?.[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
-  if (!allowFanout && armFansOut(childSteps(arg.nested, s.params), s.params)) return null;
+  if (!allowFanout && armFansOut(childSteps(arg.nested, s.params), s.params))
+    return tryCompileScalarValueChild(s, arg.nested, 'first');
   return tryCompileScalarArm(s, arg.nested);
 }
 
