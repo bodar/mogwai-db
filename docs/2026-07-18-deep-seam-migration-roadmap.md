@@ -22,7 +22,7 @@ combinations that were silently unsupported start working, L3 climbs.
 | # | Target | Kind | Substrate move | Confidence |
 |---|--------|------|----------------|------------|
 | 1 | Group / Map stream | ✅ done | nested values + element values through the generic seam | landed 2026-07-18 |
-| 2 | Traverser bulking | ✅ mostly done | A+B+C landed; only `group`/`groupCount` weighting remains | landed 2026-07-18 |
+| 2 | Traverser bulking | ✅ done | A+B+C + `group`/`groupCount` key-form weighting landed | landed 2026-07-18/19 |
 | 3 | Scalar-parent child arms | widen re-entry | scalar seed re-sources to elements | high (test bed exists) |
 | 4 | VariantStream | ✅ row-ops done | shape-agnostic tail; heterogeneity wall on the rest | landed 2026-07-18 |
 | 5 | PathStream breadth | fill + 1 piece | map-valued carried alias entry | mixed |
@@ -62,7 +62,7 @@ value re-entry.
 **Why first.** Proven playbook, one genuine bypass to delete, highest confidence.
 Shares its map-valued-alias piece with #5.
 
-## 2. Traverser bulking — finish the substrate move ✅ (mostly landed 2026-07-18)
+## 2. Traverser bulking — finish the substrate move ✅ (landed 2026-07-18/19)
 
 **Done (A+B+C).** `bulk` is now a first-class `Carried` column; collapse auto-fires by query
 shape (pure movement/filter/bare-`dedup`/`order`/`limit`·`range`·`skip` → a reducer or a bare
@@ -70,10 +70,13 @@ element leaf, plus element- and count-returning `repeat().times(n)`) — bounded
 RLE on the wire, L3 1180 held. See the STATUS header of
 `docs/2026-07-18-wire-bulking-rearchitecture.md` for the landed map + the deviations from plan
 (bulk orthogonal to shape via `bulkOf`/`frameValues`; `movementCollapse` fast path; cumulative-bulk
-`order`/`limit` window). **ONE piece remains:** `group`/`groupCount` bulk-weighting (element-key
-forms use an unweighted `COUNT(*)`; needs bulk threaded through `GroupSource` + careful gating);
-`sample`/`coin` correctly never collapse (must unbulk) → left excluded. The original problem/move
-framing follows for reference.
+`order`/`limit` window). **`group`/`groupCount` key-form weighting landed 2026-07-19:** bulk is
+threaded through `GroupSource` (`bulk`/`valBulk`), so `groupCount()` and `group().by(k).by(reducer)`
+weight by `SUM(bulk)` (behavior-identical while bulk≡1), and `chainCollapseSafe` admits a non-fan-out-
+key `groupCount()` terminal → dense fan-out groupCount is tractable+correct. `sample`/`coin` correctly
+never collapse (must unbulk) → left excluded. Narrower follow-ons remain (collapse gating for
+`group().by(k).by(reducer)`, `repeat()→groupCount()` frontier collapse, nested-map inner weighting) —
+see the wire-bulking doc's 2026-07-19 update. The original problem/move framing follows for reference.
 
 **Problem.** `bulk` exists ONLY inside the bespoke recognizer `bulk.ts` (one
 shape: `repeat(single-hop).times(n).count()`). It is NOT a carried column —
@@ -186,7 +189,7 @@ substrate piece alongside 1. **#1, #2, #4 are ✅ landed (2026-07-18)** — #2 h
 are the live frontier.
 
 - #1: highest-confidence structural win, deletes a real bypass, shares a piece with #5.
-- #2: ✅ mostly landed (A+B+C) — the deepest substrate debt is paid; only `group`/`groupCount` bulk-weighting remains.
+- #2: ✅ landed (A+B+C + `group`/`groupCount` key-form weighting) — the deepest substrate debt is paid; only narrow follow-ons (group-by-reducer collapse gating, repeat→groupCount frontier collapse, nested-map weighting) remain.
 - #3: widest row count but closest to surface — after the true substrate moves.
 - #4: ✅ landed — shape-agnostic row-ops only; full re-entry is impossible (heterogeneous union).
 - #5: substrate largely built; breadth fill + shared alias piece.

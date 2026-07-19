@@ -35,6 +35,16 @@ export interface GroupSource {
    * never independently per source parent. */
   valReducer?: 'count' | NumericReducer;
   valMarker?: Expression;
+  /** The per-source-traverser multiplicity (a carried `bulk` column, qualified to the
+   * group's source relation) that weights a DIRECT source-level aggregation — bare
+   * `groupCount()` sums it instead of `COUNT(*)`. Absent (bulk≡1) → the unweighted form,
+   * identical result. Matches lowerScalarGroupCount's scalar-key weighting. */
+  bulk?: Expression;
+  /** The per-CHILD-ROW multiplicity that weights a value reducer over child rows
+   * (`by(__.count())` → SUM(bulk); `by(__.values(x).sum())` → SUM(v·bulk)). The child rows
+   * inherit the source traverser's bulk through the child scope, so a fanned-out reducer
+   * counts each contribution the right number of times. */
+  valBulk?: Expression;
   /** Raw rows folded once per final group key. `valOrder` is parent encounter then
    * child encounter, so folding never relies on incidental join order. */
   valFold?: boolean;
@@ -237,6 +247,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   let valFold = false;
   let valOrder: Expression | undefined;
   let valElement: GroupSource['valElement'];
+  let valBulk: Expression | undefined;
   const reuse = () => reuseCurrentFrame(outer.scope, outer.frame);
   if (genericKey) {
     const child = tryCompileScalarValueChild(outer.seed, keyArg.nested, 'first', reuse(), keyBody)!;
@@ -266,6 +277,10 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     valExpr = c.c.v;
     valMarker = c.c[rows.stream.carried.encounter!];
     valReducer = rows.reducer;
+    // The child rows inherit the source traverser's bulk through the child scope; a value
+    // reducer weights by it so a bulked (collapsed/repeat) parent counts each contribution
+    // its multiplicity of times (identical while bulk≡1).
+    valBulk = rows.stream.carried.bulk ? c.c[rows.stream.carried.bulk] : undefined;
   }
   if (genericFold) {
     const rows = tryCompileScalarRowsBeforeFold(outer.seed, valArg.nested, reuse(), valBody)!;
@@ -315,7 +330,10 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     if (!kv) return null; // inner key/value shape not yet generic — clean deferral
     valNestedMap = { innerKey: kv.key, innerVal: kv.val, innerKind: kv.kind };
   }
-  const common = { keyExpr, keyParts, valExpr, valReducer, valMarker, valFold, valOrder, valElement, valNestedMap, productiveBy: src.productiveBy };
+  // The pushed domain `p` re-projects the parent traverser's bulk, so a source-level count
+  // (bare groupCount() over a by(traversal) key) weights by it just like the direct path.
+  const bulk = parent.carried.bulk ? p.c[parent.carried.bulk] : undefined;
+  const common = { keyExpr, keyParts, valExpr, valReducer, valMarker, valFold, valOrder, valElement, valNestedMap, valBulk, bulk, productiveBy: src.productiveBy };
   // Property parent: the pushed domain `p` already carries owner/pk/pv, so the source is
   // `p` itself (plus the child joins) — no element table to rejoin. Element parent rejoins
   // nodes/edges `n` on the domain id so key/value ctx reads its columns.
@@ -363,11 +381,21 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
 
   let val: GroupVal, valNode: Expression, groupBy = true;
   const valArgs = bys[1];
-  if (isCount) { val = { kind: 'count' }; valNode = q`COUNT(*) AS gv`; }
+  // groupCount() (and group().by(k).by(count)) count TRAVERSERS per key: SUM(bulk) when the
+  // stream carries a multiplicity (a movement collapse merged convergent walks into (row, N)),
+  // else the plain COUNT — identical while bulk≡1, correct after a big fan-out/repeat.
+  if (isCount) { val = { kind: 'count' }; valNode = src.bulk ? q`SUM(${src.bulk}) AS gv` : q`COUNT(*) AS gv`; }
   else if (!valArgs || valArgs.length === 0) { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx, true); }
-  else if (src.valReducer === 'count') { val = { kind: 'count' }; valNode = q`COUNT(${src.valMarker!}) AS gv`; }
+  else if (src.valReducer === 'count') {
+    // Count the productive (non-null marker) child rows, weighted by their carried bulk. The
+    // reducer LEFT-JOINs the child rows, so an empty child's null-padded marker contributes 0.
+    val = { kind: 'count' };
+    valNode = src.valBulk
+      ? q`COALESCE(SUM(CASE WHEN ${src.valMarker!} IS NOT NULL THEN ${src.valBulk} END), 0) AS gv`
+      : q`COUNT(${src.valMarker!}) AS gv`;
+  }
   else if (src.valReducer) {
-    const reduced = numericReducerAggregate(src.valExpr!, src.valReducer);
+    const reduced = numericReducerAggregate(src.valExpr!, src.valReducer, src.valBulk);
     val = { kind: 'sum' };
     valNode = q`${reduced.value} AS gv, ${reduced.type} AS gvt`;
   }
@@ -391,7 +419,7 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
       const names = inner.map((s) => s.name);
       if (names.length === 1 && names[0] === 'tail') { val = { kind: 'elementLast', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx, true); }
       else if (names.length === 1 && names[0] === 'fold') { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx, true); }
-      else if (names.length === 1 && names[0] === 'count') { val = { kind: 'count' }; valNode = q`COUNT(*) AS gv`; }
+      else if (names.length === 1 && names[0] === 'count') { val = { kind: 'count' }; valNode = src.bulk ? q`SUM(${src.bulk}) AS gv` : q`COUNT(*) AS gv`; } // per-key traverser count (weighted like isCount)
       else if (names[names.length - 1] === 'fold')
         throw new Error('this group fold shape is not yet supported by typed child lowering');
       else
@@ -622,7 +650,7 @@ const propertyGroup: ShapeTailFn<PropertyStream> = (s, step, _steps, at) => {
   // A live property parent — its by() sub-traversals lower through the generic child
   // seam (tryLowerGroupChildSource), exactly as an element group does.
   const p = s.rel.as('p');
-  const src: GroupSource = { from: p, ctx: propertyCtx(p), elem: 'property', parent: s, productiveBy: step.productiveBy };
+  const src: GroupSource = { from: p, ctx: propertyCtx(p), elem: 'property', parent: s, productiveBy: step.productiveBy, bulk: s.carried.bulk ? p.c[s.carried.bulk] : undefined };
   const isCount = step.name === 'groupCount';
   return continueLowering(lowerGroup(s, isCount, step.bys ?? [], src), at + 1);
 };

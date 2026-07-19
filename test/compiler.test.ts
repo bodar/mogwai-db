@@ -837,11 +837,12 @@ describe('compiler SQL snapshots', () => {
   test('group-scoped reducers aggregate generic child rows at the final group boundary', () => {
     const p = read("g.V().hasLabel('software').group().by('name').by(__.bothE().values('weight').mean())");
     // Movement and values() become ordinary child relations retaining the parent
-    // origin. AVG runs once over every raw row in the final key, never once per
-    // parent with a MAX() papering over the intermediate result.
+    // origin. The reducer runs once over every raw row in the final key (weighted by the
+    // child rows' carried bulk — a bulk-weighted mean), never once per parent with a MAX()
+    // papering over the intermediate result.
     expect(p.sql).toContain('JOIN c');
     expect(p.sql).toContain('ON gr.o0=gp.o0');
-    expect(p.sql).toContain('AVG(CASE WHEN typeof(gr.v)');
+    expect(p.sql).toContain('SUM(CASE WHEN typeof(gr.v) in (\'integer\', \'real\') THEN gr.v END * gr.bulk) * 1.0 / SUM(');
     expect(p.sql).toContain("'real' AS gvt");
     expect(p.sql).not.toContain('MAX((SELECT AVG(');
     expect(read("g.V().group().by('name').by(__.bothE().values('weight').sum())").sql)
@@ -1541,7 +1542,8 @@ describe('compiler SQL snapshots', () => {
   test('groupCount() → count value; GROUP BY', () => {
     const p = read('g.V().groupCount().by("name")');
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
-    expect(p.sql).toContain('COUNT(*) AS gv');
+    // count is the traverser total per key — SUM(bulk) (≡ COUNT while bulk is 1, correct after a fan-out)
+    expect(p.sql).toContain('SUM(p.bulk) AS gv');
     expect(p.sql).toContain('GROUP BY gk');
   });
 
@@ -2175,6 +2177,48 @@ describe('compiler SQL snapshots', () => {
     for (const a of ids) for (const b of ids) if (a < b) store.query('INSERT INTO edges(src,label,tgt) VALUES (?,?,?)', [a, 0, b]);
     store.query('INSERT OR IGNORE INTO labels(id,name) VALUES (0,?)', ['n']);
     expect(() => executeQuery(store, 'g.V().repeat(__.both()).times(14).count()', {})).toThrow('integer overflow');
+  });
+
+  test('P1.1 groupCount() weights by bulk; movementCollapse stays result-equivalent', () => {
+    // Diamond: a→b, a→c, b→d, c→d. The two 2-hop walks a→b→d and a→c→d converge on d, so
+    // groupCount() over a fan-out must count 2 for d — the case a per-key COUNT(*) gets wrong
+    // once movement collapses convergent walks into (element, N) frontier rows.
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    for (let i = 0; i < 4; i++) executeQuery(store, "g.addV('n')", {});
+    const [a, b, c, d] = store.query<{ id: number }>('SELECT id FROM nodes ORDER BY id').map((r) => r.id);
+    store.query('INSERT OR IGNORE INTO labels(id,name) VALUES (0,?)', ['n']);
+    for (const [s, t] of [[a, b], [a, c], [b, d], [c, d]]) store.query('INSERT INTO edges(src,label,tgt) VALUES (?,?,?)', [s, 0, t]);
+
+    const gq = `g.V(${a}).out().out().groupCount().by(T.id)`;
+    const asMap = (rows: any[]) => Object.fromEntries(rows.map((r: any) => [String(r.gk), Number(r.gv)]));
+    // Enabled (default) vs disabled movementCollapse are result-equivalent — the fast path's bar.
+    expect(asMap(runWith(store, gq, { fastPaths: { movementCollapse: true } }))).toEqual({ [String(d)]: 2 });
+    expect(asMap(runWith(store, gq, { fastPaths: { movementCollapse: false } }))).toEqual({ [String(d)]: 2 });
+
+    // The enabled form actually collapses the frontier (SUM(bulk)) and weights the group by it;
+    // the disabled form enumerates every walk (plain UNION ALL) but still emits the SUM(bulk)
+    // weighting (≡ COUNT while bulk is 1). Both correct — one is bounded, one is not.
+    const sqlOf = (opts: CompileOptions) => { const p = compile(gq, {}, opts); if (p.kind !== 'read') throw new Error('read'); return p.sql; };
+    const on = sqlOf({ fastPaths: { movementCollapse: true } });
+    const off = sqlOf({ fastPaths: { movementCollapse: false } });
+    expect(on).toContain('SUM(bulk) AS bulk');       // convergent-walk frontier collapse
+    expect(on).toContain('SUM(p.bulk) AS gv');        // bulk-weighted group count
+    expect(off).not.toContain('SUM(bulk) AS bulk');   // no collapse when disabled
+    expect(off).toContain('SUM(p.bulk) AS gv');       // weighting is always emitted
+
+    // A by(traversal) KEY can map one traverser to many keys — a GROUP BY-id merge would
+    // corrupt it, so that shape must NOT enable collapse (stays the enumerated path) even with
+    // movement present. (The token/string/bare keys above DO collapse; see `on` asserting it.)
+    const fanKey = compile("g.V().out().groupCount().by(__.values('name'))", {}, {});
+    if (fanKey.kind !== 'read') throw new Error('read');
+    expect(fanKey.sql).not.toContain('SUM(bulk) AS bulk');
+
+    // Equivalence holds on a real fan-in graph too (modern: several starts converge on lop).
+    for (const mg of ['g.V().out().groupCount().by(T.label)', 'g.V().both().both().groupCount().by(T.label)']) {
+      const seeded = seededStore();
+      expect(asMap(runWith(seeded, mg, { fastPaths: { movementCollapse: true } })))
+        .toEqual(asMap(runWith(seeded, mg, { fastPaths: { movementCollapse: false } })));
+    }
   });
 
   test('repeat requires an exit modulator; emit()/until() run unbounded; sequential repeats chain', () => {

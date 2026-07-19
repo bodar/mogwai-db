@@ -11,9 +11,22 @@ on `Shape` variants (`execute.ts` `bulkOf`/`frameValues` split; `executeQuery` e
 keeps `(v,N)`); the element-terminal materialize "island" needed no `render.ts` change. (2) collapse
 is a **`movementCollapse` fast path** gated by `chainCollapseSafe`, not a global flag. (3) `order`/
 `limit`/`range` use a cumulative-bulk window in `buildProjection`; `sample`/`coin` correctly never
-collapse (must unbulk) → left excluded. **ONE piece remains:** `group`/`groupCount` bulk-weighting
-(element-key forms route through an unweighted `COUNT(*)`; needs bulk threaded through `GroupSource`
-+ careful gating) — its own focused effort. The staged plan as originally written follows.
+collapse (must unbulk) → left excluded.
+
+**UPDATE 2026-07-19 — `group`/`groupCount` bulk-weighting LANDED (element/scalar/property key).** Bulk
+is now threaded through `GroupSource` (`bulk` = per-source-traverser multiplicity, `valBulk` = per-child-
+row multiplicity): bare `groupCount()` weights `SUM(bulk)` instead of `COUNT(*)`; a value reducer
+(`by(__.count())`/`by(__.values(x).sum()/mean())`) weights `SUM(...·bulk)` — the exact scalar-key
+convention `lowerScalarGroupCount` already used, and the barrier reducers'. All behavior-identical while
+bulk≡1, so L3 held. `chainCollapseSafe` now admits a **non-fan-out-key `groupCount()` terminal** (bare/
+`by('k')`/`by(T.x)` — a by(traversal) key can fan out, left unsafe), so `V()…out()…groupCount()` collapses
+convergent walks and stays correct on a dense fan-out (equivalence + weighted-count tests committed).
+**Remaining (narrower):** (a) collapse gating for `group().by(k).by(reducer)` terminals — the weighting
+substrate is in place (correct-by-construction), only the `chainCollapseSafe` admission is deferred; (b)
+`repeat().times(n).groupCount()` tractability needs repeat-level frontier collapse feeding the group
+stream (today `tryBulkRepeat` only feeds `count()`/element leaves, and SQLite forbids GROUP BY in a
+recursive term); (c) nested-map inner reducer weighting (`by(__.<move>.groupCount())`). The staged plan
+as originally written follows.
 
 ## The premise correction
 
