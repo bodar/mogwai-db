@@ -202,9 +202,42 @@ function scalarRowParts(body: ReturnType<typeof stepChain>): { prefix: ReturnTyp
   return { prefix, projection, suffix };
 }
 
+/** Nested per-traverser branches whose own arms are recursively element-parent scalar children:
+ * a value branch inside a value arm lowers through lowerSteps → the same tryLowerScalar* consumer
+ * (which recurses back here per arm), so `choose(P, __.union(__.constant('a'), __.constant('b')),
+ * __.values('x'))` composes. The scalar-parent SCALAR_ARM_BRANCH move, one shape up. map/flatMap/
+ * local are element steps here (not scalar-producing directly) and stay out. */
+const ELEMENT_ARM_BRANCH = new Set(['choose', 'coalesce', 'union']);
+
+/** PURE. An element-parent scalar child whose value comes from a nested branch step — the
+ * recursive extension of classifyScalarChild. Grammar: an ELEMENT_CHILD_STEPS prefix, a branch
+ * step (choose/coalesce/union, predicate-form choose only) whose VALUE arms are each recursively
+ * classifyScalarChild-compatible, then a scalar-row suffix. When true, lowerSteps re-dispatches
+ * the branch to the element-parent branch compilers, which recurse per arm — so the emitter needs
+ * no bespoke reader. Precise (all arms scalar) so it never claims a list/variant-armed branch. */
+export function elementScalarBranchArm(body: ReturnType<typeof stepChain>, params: Record<string, any>): boolean {
+  const at = body.findIndex((s) => ELEMENT_ARM_BRANCH.has(s.name) && !(s as PStep).options);
+  if (at < 0) return false;
+  const prefix = body.slice(0, at);
+  const branch = body[at];
+  const suffix = body.slice(at + 1);
+  if (prefix.some((s) => !ELEMENT_CHILD_STEPS.has(s.name))) return false;
+  if (suffix.some((s) => !CHILD_SCALAR_ROW_STEPS.has(s.name))) return false;
+  const kids = (branch.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  if (branch.name === 'choose') {
+    // predicate-form choose(pred, then, else): only the two value arms must be scalar (the
+    // predicate is a gate). Other arities defer to tryLowerScalarChoose's own decline.
+    if (kids.length !== 3) return false;
+    return classifyScalarChild(kids[1].nested, params) !== null && classifyScalarChild(kids[2].nested, params) !== null;
+  }
+  const min = branch.name === 'union' ? 2 : 1; // union needs ≥2 arms; coalesce ≥1
+  return kids.length >= min && kids.every((a: any) => classifyScalarChild(a.nested, params) !== null);
+}
+
 /** PURE. An element-parent scalar child (the strict isScalarChild shape): a movement-only
- * total count(), or a values/id/label/constant projection with a scalar-row tail. Returns
- * the parsed body so the emitter reuses it — one parse per arm, classify-then-emit. */
+ * total count(), a values/id/label/constant projection with a scalar-row tail, or a nested
+ * scalar-armed branch (elementScalarBranchArm). Returns the parsed body so the emitter reuses
+ * it — one parse per arm, classify-then-emit. */
 export function classifyScalarChild(nested: any, params: Record<string, any>): { body: ReturnType<typeof stepChain> } | null {
   if (!nested) return null;
   const body = childSteps(nested, params);
@@ -212,7 +245,8 @@ export function classifyScalarChild(nested: any, params: Record<string, any>): {
   if (!terminal) return null;
   const ok = terminal.name === 'count'
     ? classifyCountChild(body) !== null
-    : classifyScalarChildRows('element', body)?.kind === 'element';
+    : classifyScalarChildRows('element', body)?.kind === 'element'
+      || elementScalarBranchArm(body, params);
   return ok ? { body } : null;
 }
 
@@ -581,6 +615,18 @@ function compileScalarChildRows(
       stream = lowered;
     }
     if (reducer) stream = lowerScopedScalarReducer(stream, reducer, pushed.scope);
+    return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
+  }
+
+  // Nested scalar-armed branch (choose/coalesce/union): the flat scalarRowParts grammar can't
+  // see it, but lowerSteps re-dispatches the branch step to the element-parent branch compilers,
+  // which recurse back here per arm (the scalar-parent scalarBranchArm move, one shape up). Lower
+  // over a pushed scope + apply cardinality exactly like the clean-suffix flat case below.
+  // elementScalarBranchArm is precise (all arms scalar), so a non-scalar result is a contradiction.
+  if (elementScalarBranchArm(body, parent.params)) {
+    const pushed = pushChildScope(parent, scope);
+    const stream = lowerSteps(pushed.seed, body, 0);
+    if (stream.kind !== 'scalar') throw new Error('scalar-branch child classified scalar but lowered to ' + stream.kind);
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
   }
 
