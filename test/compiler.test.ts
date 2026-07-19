@@ -509,6 +509,10 @@ describe('compiler SQL snapshots', () => {
     // edge movement + inner reducer: Map<label, Map<edgeLabel, sum(weight)>>
     const s = read("g.V().group().by(T.label).by(__.bothE().group().by(T.label).by(__.values('weight').sum()))");
     expect(s.shape).toEqual({ kind: 'group', key: { kind: 'scalar', as: undefined }, val: { kind: 'nestedMap', innerVal: 'number' } });
+    // the INNER reducer weights by the outer traverser's bulk carried through the child scope
+    // (same substrate all the way down — ≡ unweighted while bulk is 1, so results are unchanged).
+    expect(s.sql).toContain('* gng.bulk');
+    expect(read("g.V().group().by('name').by(__.properties().groupCount().by(T.label))").sql).toContain('SUM(gp.bulk) AS iv');
     expect(() => executeQuery(store, "g.V().group().by(T.label).by(__.bothE().group().by(T.label).by(__.values('weight').sum()))", {})).not.toThrow();
     // NEW (generic seam unlock): the hand-rolled path only accepted a single BARE movement.
     // The generic child engine composes ANY movement/filter chain in the nested value.

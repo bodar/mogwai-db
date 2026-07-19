@@ -73,10 +73,11 @@ RLE on the wire, L3 1180 held. See the STATUS header of
 `order`/`limit` window). **`group`/`groupCount` key-form weighting landed 2026-07-19:** bulk is
 threaded through `GroupSource` (`bulk`/`valBulk`), so `groupCount()` and `group().by(k).by(reducer)`
 weight by `SUM(bulk)` (behavior-identical while bulk≡1), and `chainCollapseSafe` admits a non-fan-out-
-key `groupCount()` terminal → dense fan-out groupCount is tractable+correct. `sample`/`coin` correctly
-never collapse (must unbulk) → left excluded. Narrower follow-ons remain (collapse gating for
-`group().by(k).by(reducer)`, `repeat()→groupCount()` frontier collapse, nested-map inner weighting) —
-see the wire-bulking doc's 2026-07-19 update. The original problem/move framing follows for reference.
+key `groupCount()` terminal → dense fan-out groupCount is tractable+correct. Weighting reaches every
+level (outer, child-scope reducer, nested-map inner). `sample`/`coin` correctly never collapse (must
+unbulk) → left excluded. Narrower follow-ons remain (collapse gating for `group().by(k).by(reducer)`,
+`repeat()→groupCount()` frontier collapse) — see the wire-bulking doc's 2026-07-19 update. The original
+problem/move framing follows for reference.
 
 **Problem.** `bulk` exists ONLY inside the bespoke recognizer `bulk.ts` (one
 shape: `repeat(single-hop).times(n).count()`). It is NOT a carried column —
@@ -189,7 +190,7 @@ substrate piece alongside 1. **#1, #2, #4 are ✅ landed (2026-07-18)** — #2 h
 are the live frontier.
 
 - #1: highest-confidence structural win, deletes a real bypass, shares a piece with #5.
-- #2: ✅ landed (A+B+C + `group`/`groupCount` key-form weighting) — the deepest substrate debt is paid; only narrow follow-ons (group-by-reducer collapse gating, repeat→groupCount frontier collapse, nested-map weighting) remain.
+- #2: ✅ landed (A+B+C + `group`/`groupCount` weighting: outer, child-scope reducer, AND nested-map inner) — the deepest substrate debt is paid; only narrow follow-ons (group-by-reducer collapse gating, repeat→groupCount frontier collapse) remain.
 - #3: widest row count but closest to surface — after the true substrate moves.
 - #4: ✅ landed — shape-agnostic row-ops only; full re-entry is impossible (heterogeneous union).
 - #5: substrate largely built; breadth fill + shared alias piece.
