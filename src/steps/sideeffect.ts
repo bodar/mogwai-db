@@ -57,7 +57,7 @@ export const aggregate: StepFn = (s, st) => {
       const rows = tryCompileScalarValueRows(st, a.nested);
       if (rows) {
         const r = rows.stream.rel.as('r');
-        const encounter = rows.stream.encounter;
+        const encounter = rows.stream.carried.encounter;
         if (!encounter) throw new Error('aggregate().by(traversal) requires child encounter order');
         // by(traversal) is a map-style modulator: retain its FIRST productive result
         // per input. ProductiveBy then LEFT-restores parents whose child had no row.

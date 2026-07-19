@@ -54,9 +54,9 @@ export const sack: StepFn = (s, st) => {
     const rows = tryCompileScalarValueRows(st, nested.nested);
     if (rows) {
       const r = rows.stream.rel.as('r');
-      if (!rows.stream.encounter) throw new Error('sack().by(traversal) requires child encounter order');
+      if (!rows.stream.carried.encounter) throw new Error('sack().by(traversal) requires child encounter order');
       const f = derived(
-        q`SELECT ${r.c.v} AS v, ${r.c[rows.frame.ordinal]} AS ${rows.frame.ordinal}, ROW_NUMBER() OVER (PARTITION BY ${r.c[rows.frame.ordinal]} ORDER BY ${r.c[rows.stream.encounter]}) AS rn FROM ${r}`,
+        q`SELECT ${r.c.v} AS v, ${r.c[rows.frame.ordinal]} AS ${rows.frame.ordinal}, ROW_NUMBER() OVER (PARTITION BY ${r.c[rows.frame.ordinal]} ORDER BY ${r.c[rows.stream.carried.encounter]}) AS rn FROM ${r}`,
         ['v', rows.frame.ordinal, 'rn'],
         'f',
       );

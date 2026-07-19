@@ -951,7 +951,7 @@ export function compileFromPath(s: PathStream, steps: PStep[], at: number): Lowe
     const p = s.rel.as('p');
     const countExpr = s.layout.kind === 'grouped' ? q`COUNT(DISTINCT ${p.c.pk})` : q`COUNT(*)`;
     const rel = s.q.cte(q`SELECT ${countExpr} AS v FROM ${p}`, ['v']);
-    return continueLowering(toScalarStream(withoutCarried(carryOf(s)), rel, 'long', 'count'), at + 1);
+    return continueLowering(toScalarStream(withoutCarried(carryOf(s)), rel, 'long', { result: 'count' }), at + 1);
   }
   if (step.name === 'is') {
     const pred = (step.args ?? [])[0];

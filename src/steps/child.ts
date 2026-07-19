@@ -1,7 +1,7 @@
 import { derived, empty, list, paren, q, value, type Expression, type Relation } from '../q.ts';
 import { stepChain } from '../frontend.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
-import { advance, carriedWith, carryFrag, carriedCols, type Carried, type ElementStream } from './context.ts';
+import { advance, carriedWith, carryFrag, carryFragMint, carriedCols, type Carried, type ElementStream } from './context.ts';
 import { aliasId } from './alias.ts';
 import { carryOf, toListStream, toScalarStream, toVariantStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream } from './stream.ts';
 import { variantArmsMeta, variantArmSelect, variantCols, type VariantArm } from './variant.ts';
@@ -80,39 +80,45 @@ export function pushChildScope<P extends ChildParent>(
   }
   const p = parent.rel.as('p');
   const ordinal = `o${parent.carried.origins.length}`;
-  // The seed carries the parent's schema PLUS the pushed ordinal. Build the domain's carried
-  // columns in carriedCols ORDER — the ordinal in its origins slot, NOT appended physically
-  // last — so the seed's declared schema equals its physical layout. Otherwise, whenever the
-  // outer chain also tracks a path (or fromV/encounter, which carriedCols sorts AFTER origins),
-  // the ordinal-last domain desyncs from the ordinal-in-origins schema and any child body
-  // lowered via lowerSteps (assertStreamColumns) trips a column mismatch. The ordinal is minted
-  // by ROW_NUMBER; every other carried column is projected from `p` by name.
-  const seedCarried = carriedWith(parent.carried, { origins: [...parent.carried.origins, ordinal] });
+  // A SCALAR parent needs a CARRIED encounter (the per-origin order marker the scoped
+  // reducer/fold and the `first` cardinality policy key productivity on). Reuse the parent's
+  // if it already carries one; otherwise mint a constant (a scalar traverser never fans out
+  // into its own child scope — each ordinal has exactly one value). Element/property parents
+  // add no encounter here.
+  const needEnc = isScalarParent(parent) && !parent.carried.encounter;
+  // The seed carries the parent's schema PLUS the pushed ordinal (+ a minted scalar encounter
+  // when needed). Build the domain's carried columns in carriedCols ORDER — the ordinal in its
+  // origins slot, NOT appended physically last — so the seed's declared schema equals its
+  // physical layout. Otherwise, whenever the outer chain also tracks a path (or fromV/encounter,
+  // which carriedCols sorts AFTER origins), the ordinal-last domain desyncs from the
+  // ordinal-in-origins schema and any child body lowered via lowerSteps (assertStreamColumns)
+  // trips a column mismatch. Minted columns (ordinal by ROW_NUMBER, a new encounter by a
+  // constant) are computed fresh; every other carried column is projected from `p` by name.
+  const base = carriedWith(parent.carried, { origins: [...parent.carried.origins, ordinal] });
+  const seedCarried = needEnc ? carriedWith(base, { encounter: 'encounter' }) : base;
   const seedCols = carriedCols(seedCarried);
   const carriedSelect = list(
-    seedCols.map((c) => (c === ordinal ? q`ROW_NUMBER() OVER () AS ${ordinal}` : q`${p.c[c]}`)),
+    seedCols.map((c) =>
+      c === ordinal ? q`ROW_NUMBER() OVER () AS ${ordinal}`
+        : (needEnc && c === 'encounter') ? q`1 AS ${c}`
+        : q`${p.c[c]}`),
     ', ',
   );
   // A SCALAR parent re-projects its value payload `v` (+ vt/vtype) so the child body reads
-  // `_` = the value, and mints an explicit encounter column: the scoped reducer/fold and the
-  // `first` cardinality policy key productivity on it. A scalar traverser never fans out into
-  // its own child scope (each ordinal has exactly one value), so a constant marker suffices;
-  // a scalar parent already carrying an encounter reuses it. streamColumns order is
-  // [v, vt?, encounter, vtype?] so the projection matches the seed's declared schema.
+  // `_` = the value. streamColumns order is [v, vt?, vtype?, ...carried] so the projection
+  // matches the seed's declared schema (the encounter now rides in the carried tail).
   if (isScalarParent(parent)) {
-    const enc = parent.encounter ?? 'enc';
     const head = ['v', ...(parent.result === 'number' ? ['vt'] : [])];
     const vtypeCols = parent.vtype ? [parent.vtype] : [];
     const payload = list([
       ...head.map((c) => q`${p.c[c]} AS ${c}`),
-      parent.encounter ? q`${p.c[enc]} AS ${enc}` : q`1 AS ${enc}`,
       ...vtypeCols.map((c) => q`${p.c[c]} AS ${c}`),
     ], ', ');
     const domain = parent.q.cte(
       q`SELECT ${payload}, ${carriedSelect} FROM ${p}`,
-      [...head, enc, ...vtypeCols, ...seedCols],
+      [...head, ...vtypeCols, ...seedCols],
     );
-    const seed = { ...parent, rel: domain, encounter: enc, carried: seedCarried } as P;
+    const seed = { ...parent, rel: domain, carried: seedCarried } as P;
     const frame: ChildFrame = { ordinal, domain, parent, carried: seedCarried };
     const frames = scope.kind === 'child' ? [...scope.frames, frame] : [frame];
     return { scope: { kind: 'child', frames }, frame, seed };
@@ -449,16 +455,17 @@ function tryCompileCountValueRows(
   if (stop !== prefix.length) return null;
   const d = pushed.frame.domain.as('d');
   const c = end.rel.as('c');
-  const encounter = 'encounter';
   const count = q`COUNT(${c.c.id})`;
   const having = isPreds.length
     ? q` HAVING ${list(isPreds.map((p) => predicateSql(count, p)), ' AND ')}`
     : empty;
+  // One count row per origin — mint a constant encounter into its carried slot.
+  const outCarried = carriedWith(pushed.seed.carried, { encounter: 'encounter' });
   const rel = parent.q.cte(
-    q`SELECT ${count} AS v, 1 AS ${encounter}${carryFrag(pushed.seed.carried, d)} FROM ${d} LEFT JOIN ${c} ON ${c.c[pushed.frame.ordinal]}=${d.c[pushed.frame.ordinal]} GROUP BY ${d.c[pushed.frame.ordinal]}${having}`,
-    ['v', encounter, ...carriedCols(pushed.seed.carried)],
+    q`SELECT ${count} AS v${carryFragMint(outCarried, d, 'encounter', q`1`)} FROM ${d} LEFT JOIN ${c} ON ${c.c[pushed.frame.ordinal]}=${d.c[pushed.frame.ordinal]} GROUP BY ${d.c[pushed.frame.ordinal]}${having}`,
+    ['v', ...carriedCols(outCarried)],
   );
-  return { stream: toScalarStream(carryOf(pushed.seed), rel, 'long', 'value', encounter), frame: pushed.frame };
+  return { stream: toScalarStream({ ...carryOf(pushed.seed), carried: outCarried }, rel, 'long', { result: 'value' }), frame: pushed.frame };
 }
 
 /** Compile a scalar-producing child as rows, so productivity is represented by row
@@ -480,11 +487,12 @@ function applyScalarChildCardinality(
   const resultCols = lowered.result === 'number' ? ['v', 'vt'] : ['v'];
   if (use === 'all') {
     const rel = derived(q`SELECT ${r.c.v} AS v${typeCol}${carryFrag(parent.carried, r)} FROM ${r}`, [...resultCols, ...parentCols], 'all_rows');
-    return { stream: toScalarStream(carryOf(parent), rel, lowered.as, lowered.result), frame: pushed.frame };
+    return { stream: toScalarStream(carryOf(parent), rel, lowered.as, { result: lowered.result }), frame: pushed.frame };
   }
-  if (!lowered.encounter) throw new Error('child first cardinality requires explicit encounter order');
+  if (!lowered.carried.encounter) throw new Error('child first cardinality requires explicit encounter order');
+  const loweredEnc = lowered.carried.encounter;
   const first = derived(
-    q`SELECT ${r.c.v} AS v${typeCol}${carryFrag(parent.carried, r)}, ROW_NUMBER() OVER (PARTITION BY ${r.c[pushed.frame.ordinal]} ORDER BY ${r.c[lowered.encounter]}) AS rn FROM ${r}`,
+    q`SELECT ${r.c.v} AS v${typeCol}${carryFrag(parent.carried, r)}, ROW_NUMBER() OVER (PARTITION BY ${r.c[pushed.frame.ordinal]} ORDER BY ${r.c[loweredEnc]}) AS rn FROM ${r}`,
     [...resultCols, ...parentCols, 'rn'],
     'f',
   );
@@ -494,7 +502,7 @@ function applyScalarChildCardinality(
     [...resultCols, ...parentCols],
     'first_row',
   );
-  return { stream: toScalarStream(carryOf(parent), rel, lowered.as, lowered.result), frame: pushed.frame };
+  return { stream: toScalarStream(carryOf(parent), rel, lowered.as, { result: lowered.result }), frame: pushed.frame };
 }
 
 /** PURE. A scalar child body that RE-SOURCES the graph: a `V()`/`E()` head (with no
@@ -526,13 +534,15 @@ function resourceElement(seed: ScalarStream, head: PStep, after: PStep[]): Eleme
 function scopedElementCount(el: ElementStream, pushed: ReturnType<typeof pushChildScope>): ScalarStream {
   const c = el.rel.as('c');
   const ord = pushed.frame.ordinal;
+  const mc = carriedWith(el.carried, { encounter: 'encounter' });
+  const mint = q`ROW_NUMBER() OVER (PARTITION BY ${c.c[ord]} ORDER BY ${c.c.id})`;
   const marked = toScalarStream(
-    carryOf(el),
+    { ...carryOf(el), carried: mc },
     el.q.cte(
-      q`SELECT 1 AS v, ROW_NUMBER() OVER (PARTITION BY ${c.c[ord]} ORDER BY ${c.c.id}) AS encounter${carryFrag(el.carried, c)} FROM ${c}`,
-      ['v', 'encounter', ...carriedCols(el.carried)],
+      q`SELECT 1 AS v${carryFragMint(mc, c, 'encounter', mint)} FROM ${c}`,
+      ['v', ...carriedCols(mc)],
     ),
-    undefined, 'value', 'encounter',
+    undefined, { result: 'value' },
   );
   return lowerScopedScalarReducer(marked, 'count', pushed.scope);
 }
@@ -684,8 +694,9 @@ function compileScalarChildRows(
     }
   }
 
-  const childCols = carriedCols(end.carried);
-  const encounter = 'encounter';
+  // Mint the per-origin encounter into the child's carried slot (superseding none — end is an
+  // element child with no encounter yet).
+  const outCarried = carriedWith(end.carried, { encounter: 'encounter' });
   const continueScalar = (base: ScalarStream): ScalarStream => {
     let stream = base;
     let at = 0;
@@ -703,11 +714,12 @@ function compileScalarChildRows(
     }
     return stream;
   };
+  const encMint = q`ROW_NUMBER() OVER (PARTITION BY ${c.c[pushed.frame.ordinal]} ORDER BY ${order})`;
   const rows = parent.q.cte(
-    q`SELECT ${scalar} AS v, ROW_NUMBER() OVER (PARTITION BY ${c.c[pushed.frame.ordinal]} ORDER BY ${order}) AS ${encounter}${carryFrag(end.carried, c)} FROM ${from}`,
-    ['v', encounter, ...childCols],
+    q`SELECT ${scalar} AS v${carryFragMint(outCarried, c, 'encounter', encMint)} FROM ${from}`,
+    ['v', ...carriedCols(outCarried)],
   );
-  const lowered = continueScalar(toScalarStream(carryOf(end), rows, undefined, 'value', encounter));
+  const lowered = continueScalar(toScalarStream({ ...carryOf(end), carried: outCarried }, rows, undefined, { result: 'value' }));
   return applyScalarChildCardinality(parent, pushed, lowered, use, retainChildScope);
 }
 
@@ -1070,13 +1082,14 @@ export function tryCompileRowsBeforeReducer(
   const element = compileElementChildRows(parent, nested, scope, reducer, false, body);
   if (!element) return null;
   const e = element.stream.rel.as('er');
-  const encounter = 'encounter';
+  const outCarried = carriedWith(element.stream.carried, { encounter: 'encounter' });
+  const encMint = q`ROW_NUMBER() OVER (PARTITION BY ${e.c[element.frame.ordinal]} ORDER BY ${e.c.id})`;
   const rel = parent.q.cte(
-    q`SELECT 1 AS v, ROW_NUMBER() OVER (PARTITION BY ${e.c[element.frame.ordinal]} ORDER BY ${e.c.id}) AS ${encounter}${carryFrag(element.stream.carried, e)} FROM ${e}`,
-    ['v', encounter, ...carriedCols(element.stream.carried)],
+    q`SELECT 1 AS v${carryFragMint(outCarried, e, 'encounter', encMint)} FROM ${e}`,
+    ['v', ...carriedCols(outCarried)],
   );
   return {
-    stream: toScalarStream(carryOf(element.stream), rel, undefined, 'value', encounter),
+    stream: toScalarStream({ ...carryOf(element.stream), carried: outCarried }, rel, undefined, { result: 'value' }),
     frame: element.frame,
     reducer,
   };
@@ -1318,7 +1331,10 @@ function genericScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): S
     const c = child.stream.rel.as('c');
     bools.push(q`EXISTS (SELECT 1 FROM ${c} WHERE ${c.c[frame.ordinal]}=${d.c[frame.ordinal]})`);
   }
-  const payloadCols = ['v', ...(s.result === 'number' ? ['vt'] : []), ...(s.encounter ? [s.encounter] : []), ...(s.vtype ? [s.vtype] : [])];
+  // encounter now rides in carried (carryFrag), so it's NOT listed in the payload — the
+  // transient pushed frame's ordinal is dropped; the parent's carried (incl. its encounter)
+  // is restored verbatim from the domain.
+  const payloadCols = ['v', ...(s.result === 'number' ? ['vt'] : []), ...(s.vtype ? [s.vtype] : [])];
   return {
     seed: (combine) => {
       const proj = payloadCols.map((col) => q`${d.c[col]} AS ${col}`);
@@ -1326,7 +1342,7 @@ function genericScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): S
         q`SELECT ${list(proj, ', ')}${carryFrag(s.carried, d)} FROM ${d} WHERE ${combine(bools)}`,
         [...payloadCols, ...carriedCols(s.carried)],
       );
-      return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
+      return toScalarStream(carryOf(s), rel, s.as, { result: s.result, productiveNull: s.productiveNull, vtype: s.vtype });
     },
   };
 }
@@ -1553,7 +1569,7 @@ export function tryScalarOptionalChild(s: ScalarStream, step: PStep): ScalarStre
   const hit = q`SELECT ${a.c.v} AS v${numeric ? q`, ${a.c.vt} AS vt` : empty}${carryFrag(s.carried, a)} FROM ${a}`;
   const miss = q`SELECT ${d.c.v} AS v${numeric ? q`, NULL AS vt` : empty}${carryFrag(s.carried, d)} FROM ${d} WHERE NOT EXISTS (SELECT 1 FROM ${am} WHERE ${am.c[ord]}=${d.c[ord]})`;
   const rel = s.q.cte(list([hit, miss], ' UNION ALL '), cols);
-  return toScalarStream(carryOf(s), rel, arm.as, numeric ? 'number' : 'value');
+  return toScalarStream(carryOf(s), rel, arm.as, { result: numeric ? 'number' : 'value' });
 }
 
 /** optional(t) over a scalar with an ELEMENT/LIST arm → a VariantStream: the arm's rows where it
@@ -1602,11 +1618,12 @@ export function tryScalarFilterByChildExistence(s: ScalarStream, step: PStep): S
   const combined = paren(list(terms.map(paren), step.name === 'or' ? ' OR ' : ' AND '));
   const cond = step.name === 'not' ? q`NOT (${combined})` : combined;
   // Restore the parent's exact scalar payload from the pushed domain (drop the pushed ordinal).
-  const payloadCols = ['v', ...(s.result === 'number' ? ['vt'] : []), ...(s.encounter ? [s.encounter] : []), ...(s.vtype ? [s.vtype] : [])];
+  // encounter rides in carried (carryFrag), so it is NOT listed in the payload.
+  const payloadCols = ['v', ...(s.result === 'number' ? ['vt'] : []), ...(s.vtype ? [s.vtype] : [])];
   const proj = payloadCols.map((col) => q`${d.c[col]} AS ${col}`);
   const rel = s.q.cte(
     q`SELECT ${list(proj, ', ')}${carryFrag(s.carried, d)} FROM ${d} WHERE ${cond}`,
     [...payloadCols, ...carriedCols(s.carried)],
   );
-  return toScalarStream(carryOf(s), rel, s.as, s.result, s.encounter, s.productiveNull, s.vtype);
+  return toScalarStream(carryOf(s), rel, s.as, { result: s.result, productiveNull: s.productiveNull, vtype: s.vtype });
 }

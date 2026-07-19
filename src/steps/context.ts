@@ -196,6 +196,17 @@ export function carryFrag(c: Carried, p: Relation): Expression {
   return cols.length ? list(cols.map((x) => q`, ${p.c[x]}`), '') : empty;
 }
 
+/** Like carryFrag, but ONE named carried column is computed fresh (`mint`) rather than
+ *  projected unchanged from `p` — the generalization of the ordinal special-case already
+ *  inline in pushChildScope's carriedSelect. Used at every encounter mint/supersede site
+ *  so the replacement lands in its DECLARED carriedCols slot, never duplicated or
+ *  reordered. `col` MUST already be present in carriedCols(c) (i.e. the patched carried
+ *  that declares it) — the mint replaces the forward, it does not add a column. */
+export function carryFragMint(c: Carried, p: Relation, col: string, mint: Expression): Expression {
+  const cols = carriedCols(c);
+  return cols.length ? list(cols.map((x) => (x === col ? q`, ${mint} AS ${col}` : q`, ${p.c[x]}`)), '') : empty;
+}
+
 type CarriedOpts = { aliases?: AliasMap; path?: PathState; origins?: readonly string[]; sack?: string | null; fromV?: string | null; encounter?: string | null; bulk?: string | null };
 
 /** Apply a carried-column patch: aliases/path/origins — a value overrides, undefined

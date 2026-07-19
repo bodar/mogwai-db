@@ -6,7 +6,7 @@ import {
 } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { carryFrag, carriedCols, carriedWith, elemRel, withoutCarried, type Carry, type ElementStream } from './context.ts';
+import { carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, withoutCarried, type Carry, type ElementStream } from './context.ts';
 import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from './stream.ts';
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
@@ -264,7 +264,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     const join = rows.reducer === 'count' ? ' LEFT JOIN ' : ' JOIN ';
     joins.push(q`${join}${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
     valExpr = c.c.v;
-    valMarker = c.c[rows.stream.encounter!];
+    valMarker = c.c[rows.stream.carried.encounter!];
     valReducer = rows.reducer;
   }
   if (genericFold) {
@@ -272,7 +272,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     const c = rows.stream.rel.as('gf');
     joins.push(q` LEFT JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
     valExpr = c.c.v;
-    valMarker = c.c[rows.stream.encounter!];
+    valMarker = c.c[rows.stream.carried.encounter!];
     valFold = true;
     valOrder = q`${p.c[outer.frame.ordinal]}, ${valMarker}`;
   }
@@ -477,7 +477,7 @@ export function compileFromGroup(s: GroupStream, steps: PStep[], at: number): Lo
     if (s.key.kind !== 'scalar') throw new Error('count() over a non-scalar-key group not yet supported');
     const g = s.rel.as('g');
     const rel = s.q.cte(q`SELECT COUNT(DISTINCT ${g.c.gk}) AS v FROM ${g}`, ['v']);
-    return continueLowering(toScalarStream(withoutCarried(carryOf(s)), rel, 'long', 'count'), at + 1);
+    return continueLowering(toScalarStream(withoutCarried(carryOf(s)), rel, 'long', { result: 'count' }), at + 1);
   }
   // unfold() → Map.Entry stream: the SAME (mk,mv) entry rows, but per-entry (a following
   // select(Column.keys/values) projects one row's key/value, not the aggregate).
@@ -595,12 +595,17 @@ function propertyScalar(s: PropertyStream, col: 'vpid' | 'pk' | 'pv'): ScalarStr
   // element().values(). key()/value() are 1:1 with the property, so any deterministic order
   // suffices. At root (no live origin) the projection stays unchanged.
   const origin = s.carried.origins.at(-1);
-  const enc = origin ? q`, ROW_NUMBER() OVER (PARTITION BY ${p.c[origin]} ORDER BY ${p.c[origin]}) AS encounter` : empty;
+  if (!origin) {
+    const rel = s.q.cte(q`SELECT ${p.c[col]} AS v${carryFrag(s.carried, p)} FROM ${p}`, ['v', ...carriedCols(s.carried)]);
+    return toScalarStream(carryOf(s), rel, undefined, { result: 'value' });
+  }
+  const carried = carriedWith(s.carried, { encounter: 'encounter' });
+  const mint = q`ROW_NUMBER() OVER (PARTITION BY ${p.c[origin]} ORDER BY ${p.c[origin]})`;
   const rel = s.q.cte(
-    q`SELECT ${p.c[col]} AS v${enc}${carryFrag(s.carried, p)} FROM ${p}`,
-    ['v', ...(origin ? ['encounter'] : []), ...carriedCols(s.carried)],
+    q`SELECT ${p.c[col]} AS v${carryFragMint(carried, p, 'encounter', mint)} FROM ${p}`,
+    ['v', ...carriedCols(carried)],
   );
-  return toScalarStream(carryOf(s), rel, undefined, 'value', origin ? 'encounter' : undefined);
+  return toScalarStream({ ...carryOf(s), carried }, rel, undefined, { result: 'value' });
 }
 
 /** Consume a PropertyStream. Only property-specific operations live here; once a

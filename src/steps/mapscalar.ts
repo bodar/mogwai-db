@@ -1,4 +1,4 @@
-import { q, list, value, empty, type Expression } from '../q.ts';
+import { q, list, value, type Expression } from '../q.ts';
 import {
   elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, type ScalarCtx,
 } from '../plan.ts';
@@ -151,12 +151,11 @@ export function lowerMathScalar(s: ScalarStream, step: PStep): ScalarStream | nu
   if (!bys.length && varOrder.every((name) => name === '_')) {
     const p = s.rel.as('p');
     const mathExpr = mathToSql(formula, () => p.c.v);
-    const enc = s.encounter ? q`, ${p.c[s.encounter]} AS ${s.encounter}` : empty;
     const rel = s.q.cte(
-      q`SELECT ${mathExpr} AS v${enc}${carryFrag(s.carried, p)} FROM ${p} WHERE ${predicateSql(mathExpr, undefined)}`,
-      ['v', ...(s.encounter ? [s.encounter] : []), ...carriedCols(s.carried)],
+      q`SELECT ${mathExpr} AS v${carryFrag(s.carried, p)} FROM ${p} WHERE ${predicateSql(mathExpr, undefined)}`,
+      ['v', ...carriedCols(s.carried)],
     );
-    return toScalarStream(carryOf(s), rel, 'double', 'value', s.encounter);
+    return toScalarStream(carryOf(s), rel, 'double', { result: 'value' });
   }
 
   // Named variables → one scalar by()-child each, resolved against the value via the seam.
