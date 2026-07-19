@@ -693,23 +693,49 @@ function pathPositionValue(_st: ElementStream, tbl: Relation, elem: Elem, byArgs
   throw new Error('unsupported path().by() modulator');
 }
 
+const POSITION_MOVEMENTS = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'bothV']);
+
+/** PURE. Does this branch-arm body produce MORE than one value per input element? A path
+ *  position holds exactly ONE value, so the branch route (which has no `first`-collapse — the
+ *  value route's `tryCompileScalarValueChild('first')` does, the element-parent branch compilers
+ *  do NOT) must reject any fan-out arm or it would silently multiply whole path rows through the
+ *  ordinal LEFT JOIN. Fan-out inducers: element movement (>1 neighbour), a `V()`/`E()` re-source,
+ *  a `union()` (every arm emits), or a nested `choose`/`coalesce` whose own THEN/ELSE (choose) or
+ *  any arm (coalesce) fans out. A terminal reducer/`fold()` collapses the body back to one. A
+ *  choose predicate is a gate (collapses to a boolean), so it is NOT recursed — only the value
+ *  arms are. `values()` is treated as ≤1 here (single-cardinality is the norm; a genuinely
+ *  multi-value property in a branch arm is the residual take-first case, matching the value
+ *  route/by(key) which both take first). */
+function positionArmFansOut(body: PStep[], params: Record<string, any>): boolean {
+  const last = body.at(-1);
+  if (last && (last.name === 'count' || last.name === 'sum' || last.name === 'min' || last.name === 'max' || last.name === 'mean' || last.name === 'fold')) return false;
+  return body.some((s) => {
+    if (POSITION_MOVEMENTS.has(s.name) || s.name === 'V' || s.name === 'E' || s.name === 'union') return true;
+    if ((s.name === 'choose' || s.name === 'coalesce') && !(s as any).options) {
+      const kids = (s.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+      // choose(pred, then, else): the predicate (kids[0]) gates, only then/else can fan out.
+      const arms = s.name === 'choose' && kids.length === 3 ? kids.slice(1) : kids;
+      return arms.some((a: any) => positionArmFansOut(childSteps(a.nested, params), params));
+    }
+    return false;
+  });
+}
+
 /** A `path().by(__.trav)` position → ONE scalar per position, joined back by ordinal. The
  *  re-rooted, path-stripped position seed keeps the outer ordinal (`outer.frame.ordinal`) as
  *  its innermost origin, carried through every route so the caller's ordinal join is identical:
  *   - value/transform/reducer body → the generic scalar child seam, reusing the pushed frame.
  *     Its `first` cardinality (encounter = ROW_NUMBER PARTITION BY ordinal) collapses a
  *     fan-out prefix (`by(__.out().values(…))`) to one value per position.
- *   - a bare choose()/coalesce() over the position → the element-parent scalar-branch
- *     compilers. Both are 1-to-1 per input (choose merges disjoint then/else seeds; coalesce
- *     fires exactly one arm), so each position yields exactly one value with NO first-collapse
- *     needed — the branch itself guarantees the cardinality the position requires.
- *  Deferred, fail-closed (never mis-executed):
- *   - union() at a position FANS OUT (N arms → N values); one position holds one value, and
- *     picking a deterministic first needs a first-of-fan-out emission order — the same locked
- *     non-goal as map() over a fan-out arm (CLAUDE.md).
- *   - a movement/filter PREFIX before the branch (`by(__.out().choose(…))`): a fan-out prefix
- *     makes the branch multi-valued per position, which needs the same first-collapse the value
- *     seam has but the branch compilers don't carry (an encounter-threaded follow-on). */
+ *   - a bare choose()/coalesce() over the position → the element-parent scalar-branch compilers.
+ *     These have NO first-collapse, so a fan-out arm (movement/re-source/union/nested-fan-out)
+ *     would multiply the path row — `positionArmFansOut` rejects those up front (fail-closed,
+ *     matching the locked take-first-of-fan-out non-goal). Non-fan-out arms (value/constant/
+ *     reducer) yield exactly one value per position, which the ordinal LEFT JOIN needs.
+ *  Deferred, fail-closed (never mis-executed): union() at a position (always fan-out); any
+ *  branch whose arms fan out; a movement/filter PREFIX before the branch (a fan-out prefix
+ *  makes the branch multi-valued and needs the value seam's encounter-threaded first-collapse
+ *  the branch compilers don't carry). */
 function lowerPathPositionChild(
   seed: ElementStream, nested: any, outer: { scope: ChildScope; frame: ChildFrame }, params: Record<string, any>,
 ): ScalarStream {
@@ -720,12 +746,10 @@ function lowerPathPositionChild(
   const branch = body.length === 1 ? body[0] : undefined;
   if (branch?.name === 'union')
     throw new Error(`path().by(__.${armDesc()}): union() at a path position fans out to multiple values but a position holds one — take-first-of-fan-out is a deferred non-goal; use choose()/coalesce()`);
-  if (branch?.name === 'choose') {
-    const s = tryLowerScalarChoose(branch, seed);
-    if (s) return s;
-  }
-  if (branch?.name === 'coalesce') {
-    const s = tryLowerScalarCoalesce(branch, seed);
+  if (branch?.name === 'choose' || branch?.name === 'coalesce') {
+    if (positionArmFansOut(body, params))
+      throw new Error(`path().by(__.${armDesc()}): a ${branch.name}() arm fans out (movement/re-source/union) but a path position holds one value — take-first-of-fan-out is a deferred non-goal`);
+    const s = branch.name === 'choose' ? tryLowerScalarChoose(branch, seed) : tryLowerScalarCoalesce(branch, seed);
     if (s) return s;
   }
   throw new Error(`path().by(traversal) position must be a scalar child (value/transform/reducer, or a bare choose()/coalesce()); __.${armDesc()} not yet supported`);

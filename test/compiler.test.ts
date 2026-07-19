@@ -2370,6 +2370,10 @@ describe('compiler SQL snapshots', () => {
     // union() at a position FANS OUT (N values); a position holds one → fail closed (take-first
     // needs an emission order, the same locked non-goal as map() over a fan-out arm).
     expect(() => compile('g.V().out().path().by(__.union(__.values("name"), __.constant("x")))', {})).toThrow('fans out');
+    // a choose()/coalesce() ARM that fans out (movement/re-source) would multiply the path row
+    // (the branch route has no first-collapse) → fail closed, same non-goal.
+    expect(() => compile('g.V().out().path().by(__.coalesce(__.out().values("name"), __.constant("x")))', {})).toThrow('fans out');
+    expect(() => compile('g.V().out().path().by(__.choose(__.hasLabel("person"), __.out().values("name"), __.constant("x")))', {})).toThrow('fans out');
     // a movement/filter PREFIX before the branch would make it multi-valued per position without
     // the value seam's first-collapse → deferred (not mis-executed).
     expect(() => compile('g.V().out().path().by(__.out().choose(__.hasLabel("person"), __.constant("P"), __.constant("S")))', {})).toThrow('path().by(traversal)');
