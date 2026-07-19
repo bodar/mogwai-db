@@ -64,6 +64,34 @@ Feature: mogwai addendum — nested branch arms (a branch inside a branch arm)
       | Z |
       | Z |
 
+  # Mixed-shape (variant) branches whose ARM is a nested scalar-armed branch: the element arm
+  # + the nested-branch scalar arm merge into one variant stream (Layer 1's scalar-arm handler
+  # feeds compileVariantArm). Counts are terminal so the assertions stay row-order-independent.
+
+  @gap:nested-branch
+  Scenario: g_V_hasXname_markoX_unionXout__chooseXhasLabelXpersonX_constantXPX_constantXSXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name", "marko").union(__.out(), __.choose(__.hasLabel("person"), __.constant("P"), __.constant("S"))).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[4].l |
+
+  @gap:nested-branch
+  Scenario: g_V_out_chooseXhasLabelXpersonX_out__coalesceXvaluesXlangX_constantXSWXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().out().choose(__.hasLabel("person"), __.out(), __.coalesce(__.values("lang"), __.constant("SW"))).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
   @gap:nested-branch
   Scenario: g_V_groupXbyXTlabelX_byXcoalesceXvaluesXlangX_constantXnaXXX
     Given the modern graph
