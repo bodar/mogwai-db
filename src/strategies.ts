@@ -348,6 +348,37 @@ export function normalize(steps: Step[]): { steps: PStep[]; discard: boolean } {
   return { steps: dropRedundantOrder(collapseFoldCountLocal(foldChooseOptions(foldByModulators(foldRepeatClusters(stripped.steps))))), discard: stripped.discard };
 }
 
+// ---------- emission-order demand pre-pass (canonical emission order, Stage B) ----------
+//
+// A traversal needs a threaded emission-order `encounter` ONLY when it contains a positional
+// consumer (limit/range/skip/tail/root-fold) DOWNSTREAM of a fan-out — those pick/order a
+// deterministic subset. Order-free chains (reducers, existence gates, bare dedup) never seed
+// it, so the hot path (index-only movement, movementCollapse) stays untouched. This is the
+// COARSE chain-level flag: seed once at the source, and from there each site keys on the
+// carried encounter's presence (like trackPath → carried.path), never re-scanning.
+
+/** Steps that fan a traverser out to >1 result per input (so a following slice is
+ *  order-sensitive). `values` is conservative — a property MAY be multi-valued. */
+const FANOUT_STEPS = new Set([
+  'out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'bothV', 'otherV',
+  'values', 'union', 'choose', 'coalesce', 'optional', 'local', 'flatMap',
+]);
+/** Positional consumers whose result depends on emission order once a fan-out precedes. */
+const POSITIONAL_CONSUMERS = new Set(['limit', 'range', 'skip', 'tail', 'fold']);
+
+/** Does this chain need a threaded emission-order encounter? True iff a positional consumer
+ *  appears after a fan-out. repeat()/match() are opaque boundaries this substrate doesn't
+ *  cross yet — return false there (preserving today's behaviour, never a silent mis-order). */
+export function demandsEncounterOrder(steps: PStep[]): boolean {
+  let sawFanout = false;
+  for (const s of steps) {
+    if (s.name === 'repeat' || s.name === 'match') return false;
+    if (sawFanout && POSITIONAL_CONSUMERS.has(s.name)) return true;
+    if (FANOUT_STEPS.has(s.name)) sawFanout = true;
+  }
+  return false;
+}
+
 /** `fold().count(Scope.local)` counts the one folded list's size = the number of upstream
  *  elements = `count()`. A provable identity that also unblocks group value children like
  *  by(__.out().order().fold().count(Scope.local)) (then dropRedundantOrder removes the

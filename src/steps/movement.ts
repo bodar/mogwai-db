@@ -1,12 +1,12 @@
-import { q, list, empty, type Expression } from '../q.ts';
+import { q, list, empty, derived, type Expression } from '../q.ts';
 import { edges } from '../schema.ts';
 import { dirsFor, edgeLabelFilter, type Elem } from '../plan.ts';
-import { advance, appendPathPos, carryFrag, prevRel, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
+import { advance, appendPathPos, carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, prevRel, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 
 /** True iff the ONLY live carried column is bulk — no per-traverser identity (aliases/path/
  *  sack/fromV) and no branch origin. Frontier collapse is result-preserving exactly here. */
 const isBulkOnly = (c: Carried): boolean =>
-  !!c.bulk && c.aliases.size === 0 && !c.path && c.origins.length === 0 && !c.sack && !c.fromV;
+  !!c.bulk && c.aliases.size === 0 && !c.path && c.origins.length === 0 && !c.sack && !c.fromV && !c.encounter;
 
 /** Append a movement CTE, collapsing convergent walks when the movementCollapse fast path is
  *  active and no identity is live: `SELECT id, SUM(bulk) … GROUP BY id` bounds the frontier by
@@ -16,7 +16,19 @@ const isBulkOnly = (c: Carried): boolean =>
 function finishMove(st: ElementStream, body: Expression, opts: { elem?: Elem; fromV?: string | null; path?: PathState }): ElementStream {
   if (st.fastPaths?.movementCollapse && isBulkOnly(st.carried) && !opts.fromV && !opts.path)
     return advance(st, q`SELECT id, SUM(bulk) AS bulk FROM (${body}) mv GROUP BY id`, opts);
-  return advance(st, body, opts);
+  if (!st.carried.encounter) return advance(st, body, opts);
+  // Emission-order refine: a movement fans a traverser out to several neighbours/edges, so the
+  // encounter must be recomputed — a fresh ROW_NUMBER over (the traverser's prior encounter,
+  // then the new element id as the local tiebreak, an implementation-defined but deterministic
+  // movement order). A window can't span the body's UNION-ALL direction arms, so wrap the whole
+  // body as a derived table and number over it (per-origin inside a child scope via partitionOver).
+  const carried = carriedWith(st.carried, opts as { fromV?: string | null; path?: PathState });
+  const enc = carried.encounter!;
+  const cols = ['id', ...carriedCols(carried)];
+  const mv = derived(body, cols, 'mv');
+  const over = partitionOver(carried, mv, q`${mv.c[enc]}, ${mv.c.id}`);
+  const outBody = q`SELECT ${mv.c.id} AS id${carryFragMint(carried, mv, enc, q`ROW_NUMBER() OVER (${over})`)} FROM ${mv}`;
+  return { ...st, carried, elem: opts.elem ?? st.elem, rel: st.q.cte(outBody, cols) };
 }
 
 // ---------- movement (vertex ⇄ edge traversal) ----------

@@ -1,4 +1,4 @@
-import { derived, q, type Expression } from '../q.ts';
+import { derived, empty, q, type Expression } from '../q.ts';
 import { carryOf, toListStream, toScalarStream, type ListStream, type RelationalStream, type ScalarStream } from './stream.ts';
 import { carriedCols, carryFrag, carryFragMint, carriedWith, withoutCarried, type ElementStream } from './context.ts';
 import { type ChildScope } from './child.ts';
@@ -27,8 +27,11 @@ export function lowerGlobalCount(input: RelationalStream): ScalarStream {
  * terminal list and a later unfold both retain GraphBinary scalar typing. */
 export function lowerGlobalFold(input: ScalarStream): ListStream {
   const src = input.rel.as('s');
+  // Order the folded list by the carried emission encounter when the chain tracks one
+  // (canonical emission order, Stage B); otherwise the list keeps incidental row order.
+  const order = input.carried.encounter ? q` ORDER BY ${src.c[input.carried.encounter]}` : empty;
   const rel = input.q.cte(
-    q`SELECT jsonb(COALESCE(json_group_array(${src.c.v}), json('[]'))) AS list FROM ${src}`,
+    q`SELECT jsonb(COALESCE(json_group_array(${src.c.v}${order}), json('[]'))) AS list FROM ${src}`,
     ['list'],
   );
   return toListStream(withoutCarried(carryOf(input)), rel, { kind: 'scalar', as: input.as });

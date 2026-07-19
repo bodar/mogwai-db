@@ -2,7 +2,7 @@ import { q, value, list, Query, type Expression } from '../q.ts';
 import { nodes, edges } from '../schema.ts';
 import { type Elem } from '../plan.ts';
 import { stepChain, flattenListArgs } from '../frontend.ts';
-import { type PStep } from '../strategies.ts';
+import { demandsEncounterOrder, type PStep } from '../strategies.ts';
 import { withCarried, type ElementStream, type StepFn } from './context.ts';
 import { move, toEdge, toVertex, otherV } from './movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from './filter.ts';
@@ -136,18 +136,20 @@ function chainCollapseSafe(steps: PStep[]): boolean {
 /** Seed the source CTE (c0) from V(...)/E(...) and its optional id list. When the
  *  chain tracks a path, the source element is path position p0 (projected as the
  *  extra `p0` column). */
-function seedSource(first: PStep, query: Query, params: Record<string, any>, trackPath: boolean, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS): ElementStream {
+function seedSource(first: PStep, query: Query, params: Record<string, any>, trackPath: boolean, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, wantsEncounter = false): ElementStream {
   const elem: Elem = first.name === 'E' ? 'edge' : 'node';
   const srcRel = elem === 'edge' ? edges : nodes;
-  // The source projection, assembled in carriedCols order (sack, bulk, path) so the
+  // The source projection, assembled in carriedCols order (sack, bulk, encounter, path) so the
   // physical SELECT matches the declared column list exactly. withSack() seeds the sack
   // column (a bound Value so a string init escapes safely); every element source seeds a
   // `bulk` multiplicity of 1 — the RLE traverser count SUM(bulk) reads at a reducer, and
   // the substrate a movement collapse (GROUP BY id, SUM(bulk)) later merges convergent walks on.
+  // The emission-order `encounter` is seeded (= rowid order) only when the chain demands it.
   const projections: Expression[] = [q`id`];
   const cols: string[] = ['id'];
   if (sackInit) { projections.push(q`${value(sackInit.init)} AS sk`); cols.push('sk'); }
   projections.push(q`1 AS bulk`); cols.push('bulk');
+  if (wantsEncounter) { projections.push(q`id AS encounter`); cols.push('encounter'); }
   if (trackPath) { projections.push(q`id AS p0`); cols.push('p0'); }
   const sel = list(projections, ', ');
   // V(1,[2,3]) ≡ V(1,2,3): flatten any Collection id arg (collection literals + bound
@@ -168,7 +170,7 @@ function seedSource(first: PStep, query: Query, params: Record<string, any>, tra
     body = q`SELECT ${sel} FROM ${srcRel}`;
   }
   const path = trackPath ? { kind: 'cols' as const, cols: [{ col: 'p0', elem }] } : undefined;
-  return { kind: 'elements', q: query, params, fastPaths, rel: query.cte(body, cols), elem, carried: { aliases: new Map(), origins: [], path, sack: sackInit ? 'sk' : undefined, bulk: 'bulk' } };
+  return { kind: 'elements', q: query, params, fastPaths, rel: query.cte(body, cols), elem, carried: { aliases: new Map(), origins: [], path, sack: sackInit ? 'sk' : undefined, bulk: 'bulk', encounter: wantsEncounter ? 'encounter' : undefined } };
 }
 
 /** union(b1, b2, …) as a SOURCE step: compile each branch's prefix into the SAME
@@ -176,8 +178,9 @@ function seedSource(first: PStep, query: Query, params: Record<string, any>, tra
  *  into one seed. Branches must be vertex-rooted prefixes with no leftover tail or
  *  as() (those defer); the shared-Query recursion also lets a branch be a nested
  *  union. This is the reusable sub-traversal-into-query seam local/map/choose build on. */
-function seedUnion(first: PStep, query: Query, params: Record<string, any>, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS): ElementStream {
+function seedUnion(first: PStep, query: Query, params: Record<string, any>, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, wantsEncounter = false): ElementStream {
   if (sackInit) throw new Error('withSack() with a union() source not yet supported');
+  if (wantsEncounter) throw new Error('emission-order encounter over a union() source not yet supported');
   const branches = first.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 1) throw new Error('union() needs at least one branch');
   const rels = branches.map((b: any) => {
@@ -283,11 +286,11 @@ export function tryLowerElementSteps(steps: PStep[], seed: ElementStream): Eleme
   return lowered.next === steps.length ? lowered.stream : null;
 }
 
-export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, query: Query = new Query(), sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS): { st: ElementStream; stop: number } {
+export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, query: Query = new Query(), sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, wantsEncounter = false): { st: ElementStream; stop: number } {
   const first = steps[0];
   const trackPath = chainTracksPath(steps);
-  const seeded = first.name === 'union' ? seedUnion(first, query, params, sackInit, fastPaths)
-    : (first.name === 'V' || first.name === 'E') ? seedSource(first, query, params, trackPath, sackInit, fastPaths)
+  const seeded = first.name === 'union' ? seedUnion(first, query, params, sackInit, fastPaths, wantsEncounter)
+    : (first.name === 'V' || first.name === 'E') ? seedSource(first, query, params, trackPath, sackInit, fastPaths, wantsEncounter)
     : (() => { throw new Error(`unsupported source step: ${first.name}`); })();
   // Gate the otherV() entering-vertex tracking on the chain; local()'s body inherits
   // the flag through its {...st} seed, so an inner edge step records it too.
@@ -386,10 +389,15 @@ export function compileRead(steps: PStep[], params: Record<string, any> = {}, sa
   const bulked = fastPaths.bulkRepeatCount ? tryBulkRepeat(steps, params, sackInit) : null;
   if (bulked) return bulked;
 
+  // Emission-order demand: seed + thread a canonical `encounter` only when a positional
+  // consumer sits downstream of a fan-out (see demandsEncounterOrder). Movement collapse
+  // discards per-row identity, so it is mutually exclusive with a live encounter.
+  const wantsEncounter = demandsEncounterOrder(steps);
+
   // Movement collapse is per-compilation: enabled only when the whole chain is collapse-safe
   // (see chainCollapseSafe). A safe chain's movements fold convergent walks; anything else runs
   // the plain UNION-ALL movement. Threaded via fastPaths so each movement StepFn reads one flag.
-  const fp: FastPathConfig = { ...fastPaths, movementCollapse: fastPaths.movementCollapse && chainCollapseSafe(steps) };
-  const { st, stop } = buildPrefix(steps, params, new Query(), sackInit, fp);
+  const fp: FastPathConfig = { ...fastPaths, movementCollapse: fastPaths.movementCollapse && chainCollapseSafe(steps) && !wantsEncounter };
+  const { st, stop } = buildPrefix(steps, params, new Query(), sackInit, fp, wantsEncounter);
   return materializeFinal(lowerSteps(st, steps, stop));
 }
