@@ -6,7 +6,7 @@ import {
   nodePropScalar, edgePropScalar, nodePropSortKey, edgePropSortKey, framedProps, valueMapProps, storedValueExpr,
 } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
-import { advance, carryFrag, carriedCols, carriedWith, elemRel, withoutCarried, type ElementStream } from './context.ts';
+import { advance, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, withoutCarried, type ElementStream } from './context.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn } from './stream.ts';
 import { tryLowerLocalAggregate, lowerScalarAggregate } from './sideeffect.ts';
 import { type Shape } from '../render.ts';
@@ -211,12 +211,12 @@ function lowerElementOrderByTraversal(st: ElementStream, step: PStep): ElementSt
   if (st.carried.encounter || st.carried.path)
     throw new Error('order().by(traversal) while tracking a path/encounter not yet supported');
   const rows = tryCompileScalarValueRows(st, nested);
-  if (!rows?.stream.encounter) throw new Error('order().by(traversal) requires a scalar child with encounter order');
+  if (!rows?.stream.carried.encounter) throw new Error('order().by(traversal) requires a scalar child with encounter order');
   const c = rows.stream.rel.as('c');
   const ord = rows.frame.ordinal;
   // First child value per traverser (child cardinality >1 → the first by child encounter).
   const firstVal = st.q.cte(
-    q`SELECT ${c.c[ord]} AS ord, ${c.c.v} AS k, ROW_NUMBER() OVER (PARTITION BY ${c.c[ord]} ORDER BY ${c.c[rows.stream.encounter]}) AS rn FROM ${c}`,
+    q`SELECT ${c.c[ord]} AS ord, ${c.c.v} AS k, ROW_NUMBER() OVER (PARTITION BY ${c.c[ord]} ORDER BY ${c.c[rows.stream.carried.encounter]}) AS rn FROM ${c}`,
     ['ord', 'k', 'rn'],
   );
   const d = rows.frame.domain.as('d');
@@ -492,12 +492,13 @@ function lowerScalarProjection(st: ElementStream, projStep: PStep, acc: TailAcc)
   if (origin) {
     if (acc.orders.length || acc.limit !== null || acc.offset > 0 || acc.distinct)
       throw new Error('order()/limit()/dedup() before a projection inside a child scope not yet supported');
-    const encounterExpr = q`, ROW_NUMBER() OVER (PARTITION BY ${p.c[origin]} ORDER BY ${proj.encounterKey ?? p.c.id}) AS encounter`;
+    const carried = carriedWith(st.carried, { encounter: 'encounter' });
+    const mint = q`ROW_NUMBER() OVER (PARTITION BY ${p.c[origin]} ORDER BY ${proj.encounterKey ?? p.c.id})`;
     const rel = st.q.cte(
-      q`SELECT ${proj.colsNode}${encounterExpr}${vtypeCol}${carryFrag(st.carried, p)} FROM ${proj.fromNode}${where}`,
-      ['v', 'encounter', ...(vt ? ['vtype'] : []), ...carriedCols(st.carried)],
+      q`SELECT ${proj.colsNode}${vtypeCol}${carryFragMint(carried, p, 'encounter', mint)} FROM ${proj.fromNode}${where}`,
+      ['v', ...(vt ? ['vtype'] : []), ...carriedCols(carried)],
     );
-    return toScalarStream(carryOf(st), rel, asTag, 'value', 'encounter', undefined, vt);
+    return toScalarStream({ ...carryOf(st), carried }, rel, asTag, { result: 'value', vtype: vt });
   }
 
   // Root scope. An explicit order().by(key) mints the carried encounter; LIMIT/OFFSET
@@ -518,13 +519,21 @@ function lowerScalarProjection(st: ElementStream, projStep: PStep, acc: TailAcc)
   // encounter); an outer ORDER BY is only needed so LIMIT/OFFSET picks the right slice.
   const orderNode = hasNewEncounter && hasLimit ? q` ORDER BY ${list(orderExprs, ', ')}` : empty;
   const limitNode = hasLimit ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
-  const encounterExpr = hasNewEncounter ? q`, ROW_NUMBER() OVER (ORDER BY ${list(orderExprs, ', ')}) AS encounter` : empty;
-  const carried = hasNewEncounter ? carriedWith(st.carried, { encounter: 'encounter' }) : st.carried;
+  if (hasNewEncounter) {
+    // order().by(key) SUPERSEDES the carried encounter (fresh ROW_NUMBER) in its declared slot.
+    const carried = carriedWith(st.carried, { encounter: 'encounter' });
+    const mint = q`ROW_NUMBER() OVER (ORDER BY ${list(orderExprs, ', ')})`;
+    const rel = st.q.cte(
+      q`SELECT ${proj.colsNode}${vtypeCol}${carryFragMint(carried, p, 'encounter', mint)} FROM ${proj.fromNode}${where}${orderNode}${limitNode}`,
+      ['v', ...(vt ? ['vtype'] : []), ...carriedCols(carried)],
+    );
+    return toScalarStream({ ...carryOf(st), carried }, rel, asTag, { result: 'value', vtype: vt });
+  }
   const rel = st.q.cte(
-    q`SELECT ${proj.colsNode}${vtypeCol}${carryFrag(st.carried, p)}${encounterExpr} FROM ${proj.fromNode}${where}${orderNode}${limitNode}`,
-    ['v', ...(vt ? ['vtype'] : []), ...carriedCols(st.carried), ...(hasNewEncounter ? ['encounter'] : [])],
+    q`SELECT ${proj.colsNode}${vtypeCol}${carryFrag(st.carried, p)} FROM ${proj.fromNode}${where}${orderNode}${limitNode}`,
+    ['v', ...(vt ? ['vtype'] : []), ...carriedCols(st.carried)],
   );
-  return toScalarStream({ ...carryOf(st), carried }, rel, asTag, 'value', undefined, undefined, vt);
+  return toScalarStream(carryOf(st), rel, asTag, { result: 'value', vtype: vt });
 }
 
 /**

@@ -42,7 +42,7 @@ function lowerListReducer(s: ListStream, name: string): ScalarStream {
   const carried = carriedCols(s.carried);
   if (name === 'count') {
     const rel = s.q.cte(q`SELECT (SELECT COUNT(*) FROM json_each(${c.c.list}) je) AS v${carry} FROM ${c}`, ['v', ...carried]);
-    return toScalarStream(carryOf(s), rel, 'long', 'count');
+    return toScalarStream(carryOf(s), rel, 'long', { result: 'count' });
   }
   // A stored typed list carries {t,v} nodes; extract each element's payload (`->> '$.v'`)
   // so the numeric typeof guard sees the underlying value (an INTEGER/REAL/TEXT), not the
@@ -54,11 +54,11 @@ function lowerListReducer(s: ListStream, name: string): ScalarStream {
   const agg = (fn: string): Expression => q`(SELECT ${fn}(${elem}) FROM json_each(${c.c.list}) je WHERE typeof(${elem}) in ${types})`;
   if (name === 'mean') {
     const rel = s.q.cte(q`SELECT ${agg('AVG')} AS v, 'real' AS vt${carry} FROM ${c}`, ['v', 'vt', ...carried]);
-    return toScalarStream(carryOf(s), rel, undefined, 'number', undefined, s.of.kind === 'scalar' && s.of.productiveNull);
+    return toScalarStream(carryOf(s), rel, undefined, { result: 'number', productiveNull: s.of.kind === 'scalar' && s.of.productiveNull });
   }
   const fn = name === 'sum' ? 'SUM' : name === 'min' ? 'MIN' : 'MAX';
   const rel = s.q.cte(q`SELECT ${agg(fn)} AS v, typeof(${agg(fn)}) AS vt${carry} FROM ${c}`, ['v', 'vt', ...carried]);
-  return toScalarStream(carryOf(s), rel, undefined, 'number', undefined, s.of.kind === 'scalar' && s.of.productiveNull);
+  return toScalarStream(carryOf(s), rel, undefined, { result: 'number', productiveNull: s.of.kind === 'scalar' && s.of.productiveNull });
 }
 
 /**
@@ -96,10 +96,10 @@ export function compileUnfold(s: ListStream): ElementStream | ScalarStream | Lis
       q`SELECT je.value ->> '$.v' AS v, je.value ->> '$.t' AS vtype${carryFrag(s.carried, p)} FROM ${p}, json_each(${p.c.list}) je ORDER BY je.key`,
       ['v', 'vtype', ...carriedCols(s.carried)],
     );
-    return toScalarStream(c, rel, undefined, 'value', undefined, undefined, 'vtype');
+    return toScalarStream(c, rel, undefined, { result: 'value', vtype: 'vtype' });
   }
   const rel = explode('v');
-  return toScalarStream(c, rel, s.of.as, 'value', undefined, s.of.productiveNull);
+  return toScalarStream(c, rel, s.of.as, { result: 'value', productiveNull: s.of.productiveNull });
 }
 
 /** Build a per-row list CTE that PRESERVES the carried schema (origin/aliases). A

@@ -101,7 +101,8 @@ describe('compiler SQL snapshots', () => {
 
     const local = read('g.V().local(__.out().values("name").order().limit(2))');
     expect(local.sql.split(' as (')).toHaveLength(6); // five CTEs
-    expect(local.sql).toContain('FROM (SELECT p.v AS v, p.encounter AS encounter');
+    // The child order()+limit() slice keys off the per-origin carried encounter.
+    expect(local.sql).toContain('ROW_NUMBER() OVER (PARTITION BY p.o0 ORDER BY p.encounter) AS rn');
   });
 
   test('traverser bulking: times(n).count() unrolls to GROUP-BY-SUM(bulk) CTEs, not a recursion', () => {
@@ -1565,7 +1566,7 @@ describe('compiler SQL snapshots', () => {
     expect(p.sql).toContain('p.pk AS pk, p.pv AS pv, p.pvtype AS pvtype, p.pmeta AS pmeta, p.bulk, ROW_NUMBER() OVER () AS o0');
     // element().values("name") → owner re-root + values, joined back as a composite key part.
     expect(p.sql).toContain('gkp0.v AS k0_v, gkp1.v AS k1_v, gkp2.v AS k2_v');
-    expect(p.sql).toContain('SELECT p.pk AS v, ROW_NUMBER() OVER (PARTITION BY p.o0'); // key() child, per-origin encounter
+    expect(p.sql).toContain('SELECT p.pk AS v, p.bulk, p.o0, ROW_NUMBER() OVER (PARTITION BY p.o0'); // key() child, per-origin encounter (carried slot)
     expect(p.sql).toContain('gp.owner AS v_owner'); // the tail() value frames the property element from the domain
     // Result: each vertex property grouped by {owner name, key, value}, value = the property.
     const store = seededStore();

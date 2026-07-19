@@ -198,7 +198,7 @@ export function tryLowerScalarUnion(s: Step, st: ElementStream): ScalarStream | 
   });
   const rel = st.q.cte(list(parts, ' UNION ALL '), ['v', ...(numeric ? ['vt'] : []), ...cols]);
   const as = arms.every((arm) => arm.as === arms[0].as) ? arms[0].as : undefined;
-  return toScalarStream(carryOf(st), rel, as, numeric ? 'number' : 'value');
+  return toScalarStream(carryOf(st), rel, as, { result: numeric ? 'number' : 'value' });
 }
 
 export function tryLowerListUnion(s: Step, st: ElementStream): ListStream | null {
@@ -319,7 +319,7 @@ export function tryLowerScalarCoalesce(s: Step, st: ElementStream): ScalarStream
   });
   const rel = st.q.cte(list(parts, ' UNION ALL '), ['v', ...(numeric ? ['vt'] : []), ...carriedCols(st.carried)]);
   const as = arms.every((arm) => arm.as === arms[0].as) ? arms[0].as : undefined;
-  return toScalarStream(carryOf(st), rel, as, numeric ? 'number' : 'value');
+  return toScalarStream(carryOf(st), rel, as, { result: numeric ? 'number' : 'value' });
 }
 
 export function tryLowerListCoalesce(s: Step, st: ElementStream): ListStream | null {
@@ -726,7 +726,7 @@ export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream |
   });
   const rel = st.q.cte(list(parts, ' UNION ALL '), ['v', ...(numeric ? ['vt'] : []), ...cols]);
   const as = thenEnd.as === elseEnd.as ? thenEnd.as : undefined;
-  return toScalarStream(carryOf(st), rel, as, numeric ? 'number' : 'value');
+  return toScalarStream(carryOf(st), rel, as, { result: numeric ? 'number' : 'value' });
 }
 
 export function tryLowerListChoose(s: Step, st: ElementStream): ListStream | null {

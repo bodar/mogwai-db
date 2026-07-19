@@ -281,10 +281,11 @@ export function lowerElementDedup(st: ElementStream, s: PStep, order?: PStep): E
   if (!key) {
     const nested = bys[0]?.[0]?.nested;
     const rows = nested ? tryCompileScalarValueRows(st, nested) : null;
-    if (!rows?.stream.encounter) throw new Error('dedup().by(traversal) requires a scalar child with encounter order');
+    if (!rows?.stream.carried.encounter) throw new Error('dedup().by(traversal) requires a scalar child with encounter order');
+    const childEnc = rows.stream.carried.encounter;
     const c = rows.stream.rel.as('c');
     const childRank = st.q.cte(
-      q`SELECT ${c.c.v} AS k, ${c.c[rows.frame.ordinal]} AS ${rows.frame.ordinal}, ROW_NUMBER() OVER (PARTITION BY ${c.c[rows.frame.ordinal]} ORDER BY ${c.c[rows.stream.encounter]}) AS child_rn FROM ${c}`,
+      q`SELECT ${c.c.v} AS k, ${c.c[rows.frame.ordinal]} AS ${rows.frame.ordinal}, ROW_NUMBER() OVER (PARTITION BY ${c.c[rows.frame.ordinal]} ORDER BY ${c.c[childEnc]}) AS child_rn FROM ${c}`,
       ['k', rows.frame.ordinal, 'child_rn'],
     );
     const d = rows.frame.domain.as('d');

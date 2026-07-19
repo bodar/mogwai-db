@@ -34,9 +34,6 @@ export interface ScalarStream extends Carry {
   /** Root framing semantics carried by the reducer, rather than reconstructed from
    * where the stream happens to become terminal. */
   readonly result?: 'value' | 'count' | 'number';
-  /** Optional physical encounter-order column. Child traversal barriers use this
-   * instead of relying on SQLite relation order, which is not preserved across CTEs. */
-  readonly encounter?: string;
   /** A NULL row is a real traverser rather than an empty numeric reduction. Set by
    * ProductiveBy-backed list streams and preserved through their reducers. */
   readonly productiveNull?: boolean;
@@ -265,7 +262,7 @@ export const recordResultColumns = (f: RecordField): string[] =>
 export function streamColumns(s: Stream): readonly string[] {
   if (s.kind === 'result') return [];
   const payload = s.kind === 'elements' ? ['id']
-    : s.kind === 'scalar' ? [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...(s.encounter ? [s.encounter] : []), ...(s.vtype ? [s.vtype] : [])]
+    : s.kind === 'scalar' ? [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...(s.vtype ? [s.vtype] : [])]
     : s.kind === 'variant' ? ['vk', 'v', 'rid', ...(s.listOf ? ['list'] : [])]
     : s.kind === 'list' ? ['list']
     : s.kind === 'map' ? ['mk', 'mv']
@@ -297,8 +294,16 @@ export const carryOf = (s: Stream): Carry =>
 export const toResultStream = (q: Query, tail: Expression, shape: Shape): ResultStream =>
   ({ kind: 'result', q, tail, shape });
 
-export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, result: ScalarStream['result'] = 'value', encounter?: string, productiveNull?: boolean, vtype?: string): ScalarStream =>
-  assertStreamColumns({ ...c, kind: 'scalar', rel, as, result, encounter, productiveNull, vtype });
+/** The non-payload scalar-stream facets, as an options bag. Emission order is NOT here —
+ *  it lives in `carried.encounter` (the one unified slot), threaded via carryFrag like every
+ *  other carried column. */
+export interface ScalarOpts {
+  readonly result?: ScalarStream['result'];
+  readonly productiveNull?: boolean;
+  readonly vtype?: string;
+}
+export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, opts: ScalarOpts = {}): ScalarStream =>
+  assertStreamColumns({ ...c, kind: 'scalar', rel, as, result: opts.result ?? 'value', productiveNull: opts.productiveNull, vtype: opts.vtype });
 export const toVariantStream = (c: Carry, rel: Relation, arms: VariantArms, result: VariantStream['result'] = 'rows'): VariantStream =>
   assertStreamColumns({ ...c, kind: 'variant', rel, scalarAs: arms.scalarAs, node: arms.node, edge: arms.edge, listOf: arms.listOf, result });
 export const toListStream = (c: Carry, rel: Relation, of: ListOf, set?: boolean): ListStream =>
