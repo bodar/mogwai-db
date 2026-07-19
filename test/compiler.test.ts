@@ -1642,8 +1642,11 @@ describe('compiler SQL snapshots', () => {
     expect(fused.sql).toContain('WHERE lower(p.v) != ?');
     expect(fused.sql).not.toContain('FROM c2 p)');
 
+    // order() before a slice mints a durable emission encounter (ROW_NUMBER over the sort);
+    // range() then slices by it (canonical emission order — deterministic subset after a fan-out).
     const ordered = read('g.V().values("age").order().range(1,3)');
-    expect(ordered.sql).toContain('ELSE p.v END) ASC LIMIT 2 OFFSET 1');
+    expect(ordered.sql).toContain('ELSE p.v END) ASC, p.encounter) AS encounter');
+    expect(ordered.sql).toContain('ORDER BY p.encounter LIMIT 2 OFFSET 1');
 
     const typedSum = read('g.V().values("age").asNumber(GType.DOUBLE).sum().is(P.gt(100))');
     expect(typedSum.shape).toEqual({ kind: 'scalar' });
@@ -1910,7 +1913,7 @@ describe('compiler SQL snapshots', () => {
     // the per-row tag — the whole union (all arms) rides through the LIMIT/OFFSET.
     const lim = read(`${base}.limit(2)`);
     expect(lim.shape).toEqual({ kind: 'variant', scalarAs: undefined, node: true });
-    expect(lim.sql).toContain('SELECT p.vk, p.v, p.rid, p.bulk FROM'); // full column re-projection
+    expect(lim.sql).toContain('SELECT p.vk, p.v, p.rid, p.bulk, p.encounter FROM'); // full column re-projection (encounter seeded: union fan-out + limit)
     expect(lim.sql).toContain('LIMIT 2');
     expect(run(store, `${base}.limit(2)`).length).toBe(2);
     expect(read(`${base}.skip(1)`).sql).toContain('LIMIT -1 OFFSET 1');

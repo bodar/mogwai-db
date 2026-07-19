@@ -512,8 +512,11 @@ function lowerScalarProjection(st: ElementStream, projStep: PStep, acc: TailAcc)
     return q`${proj.scalarExpr ?? p.c.id}${dir}`;
   });
   const hasNewEncounter = orderExprs.length > 0;
-  if (hasNewEncounter && (st.carried.path || st.carried.encounter))
-    throw new Error('order() before a projection while tracking a path/encounter not yet supported');
+  // A pre-existing carried encounter (seeded by the emission-order demand pass) is SUPERSEDED
+  // by order().by(key) — carryFragMint re-mints it in its declared slot below. Only a live path
+  // still defers (order() before a projection while tracking a path is not yet supported).
+  if (hasNewEncounter && st.carried.path)
+    throw new Error('order() before a projection while tracking a path not yet supported');
   const hasLimit = acc.limit !== null || acc.offset > 0;
   // The ROW_NUMBER window already captures order (materializeScalarRoot sorts by the
   // encounter); an outer ORDER BY is only needed so LIMIT/OFFSET picks the right slice.

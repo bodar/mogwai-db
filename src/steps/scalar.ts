@@ -78,9 +78,12 @@ const payload = (s: ScalarStream, p: ReturnType<ScalarStream['rel']['as']>): Exp
 const cols = (s: ScalarStream): string[] =>
   [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...(s.vtype ? [s.vtype] : []), ...carriedCols(s.carried)];
 
-function rowPreserving(s: ScalarStream, suffix: Expression): ScalarStream {
+function rowPreserving(s: ScalarStream, suffix: Expression, orderByEnc = false): ScalarStream {
   const p = s.rel.as('p');
-  const rel = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)} FROM ${p}${suffix}`, cols(s));
+  // A root slice (limit/skip/range) picks a DETERMINISTIC window only when the chain carries
+  // emission order (Stage B); otherwise it stays order-free over incidental row order.
+  const order = orderByEnc && s.carried.encounter ? q` ORDER BY ${p.c[s.carried.encounter]}` : empty;
+  const rel = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)} FROM ${p}${order}${suffix}`, cols(s));
   return toScalarStream(carryOf(s), rel, s.as, { result: s.result, productiveNull: s.productiveNull, vtype: s.vtype });
 }
 
@@ -195,8 +198,11 @@ function partitionedTail(s: ScalarStream, limit: number): ScalarStream {
  *  directly — no encounter column required (mirrors the root LIMIT/OFFSET of limit/skip). */
 function rootTail(s: ScalarStream, limit: number): ScalarStream {
   const p = s.rel.as('p');
+  // With emission order (Stage B) the trailing window is the last N BY encounter; otherwise it
+  // is the last N of the relation's incidental order (an empty window).
+  const over = s.carried.encounter ? q`ORDER BY ${p.c[s.carried.encounter]}` : empty;
   const r = derived(
-    q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER () AS rn, COUNT(*) OVER () AS cnt FROM ${p}`,
+    q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER (${over}) AS rn, COUNT(*) OVER () AS cnt FROM ${p}`,
     [...cols(s), 'rn', 'cnt'],
     'r',
   );
@@ -253,16 +259,23 @@ function appendScalar(s: ScalarStream, step: PStep): ScalarStream {
   if (step.args.some(Array.isArray))
     throw new Error('inject(list) into a scalar stream needs a mixed-shape row discriminant');
   // A carried bulk column is benign: thread it (existing rows keep their multiplicity, each
-  // appended constant is one bulk-1 traverser). Real carried state (aliases/path/origins/…)
-  // and a typed/reduced scalar still defer.
+  // appended constant is one bulk-1 traverser). An emission-order encounter is likewise benign:
+  // inject() prepends its values, so each gets a NEGATIVE encounter (sorts before every existing
+  // row) — no MAX() subquery needed. Real carried state (aliases/path/origins/…) and a
+  // typed/reduced scalar still defer.
   const bulk = s.carried.bulk;
-  if (s.result !== 'value' || s.as || carriedCols(s.carried).some((c) => c !== bulk))
+  const enc = s.carried.encounter;
+  const benign = new Set([bulk, enc].filter(Boolean) as string[]);
+  if (s.result !== 'value' || s.as || carriedCols(s.carried).some((c) => !benign.has(c)))
     throw new Error('inject() after typed/reduced/carried scalar state not yet supported');
   const p = s.rel.as('p');
-  const appended = step.args.map((v) => q`SELECT ${value(v)} AS v${bulk ? q`, 1 AS bulk` : empty}`);
+  const n = step.args.length;
+  const appended = step.args.map((v, k) =>
+    q`SELECT ${value(v)} AS v${bulk ? q`, 1 AS bulk` : empty}${enc ? q`, ${value(k - n)} AS ${enc}` : empty}`);
+  const carryCols = [...(bulk ? [bulk] : []), ...(enc ? [enc] : [])];
   const rel = s.q.cte(
-    q`SELECT ${p.c.v} AS v${bulk ? q`, ${p.c[bulk]}` : empty} FROM ${p} UNION ALL ${list(appended, ' UNION ALL ')}`,
-    ['v', ...(bulk ? [bulk] : [])],
+    q`SELECT ${p.c.v} AS v${bulk ? q`, ${p.c[bulk]}` : empty}${enc ? q`, ${p.c[enc]}` : empty} FROM ${p} UNION ALL ${list(appended, ' UNION ALL ')}`,
+    ['v', ...carryCols],
   );
   return toScalarStream(carryOf(s), rel);
 }
@@ -593,7 +606,7 @@ export function lowerScalarRows(
           : rangeToOffsetLimit(step.args);
       stream = stream.carried.origins.length
         ? partitionedSlice(stream, offset, limit)
-        : rowPreserving(stream, q` LIMIT ${limit ?? -1} OFFSET ${offset}`);
+        : rowPreserving(stream, q` LIMIT ${limit ?? -1} OFFSET ${offset}`, true);
       continue;
     }
     if (step.name === 'tail') {
@@ -616,7 +629,11 @@ export function lowerScalarRows(
         const dir = by.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
         order = dir === 'shuffle' ? q`RANDOM()` : dir === 'desc' ? q`${sortVal} DESC` : q`${sortVal} ASC`;
       }
-      if (stream.carried.origins.length) {
+      // A child scope OR a demanded root chain (carried.encounter live) mints a fresh encounter
+      // via partitionedOrder (empty partition at root), so a following fold/limit/tail/materialize
+      // orders by THIS sort rather than the stale seed. Each positional consumer then reads
+      // carried.encounter on its own iteration.
+      if (stream.carried.origins.length || stream.carried.encounter) {
         stream = partitionedOrder(stream, order);
         continue;
       }
