@@ -255,7 +255,7 @@ So this phase is a performance + coverage step, not a semantics change:
   the `tinker.search` service **and** the `has(k, containing/startingWith/endingWith(x))` predicate
   — index-only, no scan. A length guard that throws; no <3-char code path to maintain.
 - `regex` (service param or `has(k, regex(x))`) and `typeOf` → deferral. No index-only path; we do
-  not scan or drop to JS. Supersedes the CLAUDE.md "regex … filtered post-SQL in JS" note, which
-  should be updated to the no-JS rule.
+  not scan or drop to JS. (CLAUDE.md's wire-protocol note has been corrected to this no-JS rule —
+  it previously said the opposite.)
 - Non-constant per-traverser call params → deferral until the barrier param-eval path lands.
 - `type: VertexProperty` meta-property search → empty on the reference graphs (documented).
