@@ -10,7 +10,7 @@
 // in its BARE form: a bare BigInteger IS `bigIntegerSerializer.serialize(v,false)`, a
 // bare int32 is `intSerializer.serialize(v,false)`, a bare int64 is
 // `longSerializer.serialize(v,false)`. Wire-verified against the gremlin-test
-// `*-v4.gbin` vectors (see test/unit/serializers.test.ts).
+// `*-v4.gbin` vectors (see test/serializers.test.ts).
 //
 // TODO(upstream): these are apache/tinkerpop gremlin-js TODOs — file a PR adding them.
 // Once released, drop this module and the values land through the client's own ioc.

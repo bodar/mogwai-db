@@ -31,7 +31,7 @@ function json(body: unknown, status = 200): Response {
 }
 
 // Per-query observability is a pluggable presentation seam (data capture is a
-// separate manager decorator — see test/conformance/telemetry.ts). The default is
+// separate manager decorator — see test/L3-conformance/telemetry.ts). The default is
 // the verbose one-line-per-query log both runtimes have always emitted (CF → wrangler
 // tail); the conformance host swaps in a compact `.`/`E` progress reporter.
 export type QueryLogger = (event: {

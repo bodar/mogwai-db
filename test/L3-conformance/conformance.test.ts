@@ -4,7 +4,7 @@
 // graph plus an empty-graph write/reset cycle. This proves the named-graph
 // routing and the P1 step set over the exact GraphBinary wire path the full
 // cucumber suite uses. The full suite (164 feature files) runs externally; see
-// test/conformance/README-cucumber.md for the command and current tag set.
+// test/L3-conformance/README-cucumber.md for the command and current tag set.
 import { test, expect, describe, beforeAll, afterAll } from 'bun:test';
 import gremlin from 'gremlin';
 import { startConformanceServer } from './conformance-server.ts';

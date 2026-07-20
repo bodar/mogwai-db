@@ -1,7 +1,7 @@
 import { test, expect, describe } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { ioc as iocTyped } from '../../src/io.ts';
-import { BigDecimal, Duration } from '../../src/gremlin-types.ts';
+import { ioc as iocTyped } from '../src/io.ts';
+import { BigDecimal, Duration } from '../src/gremlin-types.ts';
 
 // The client ioc ships no type declarations (see io.ts) — index it loosely in the test.
 const ioc = iocTyped as any;

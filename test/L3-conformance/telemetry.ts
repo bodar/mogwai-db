@@ -208,7 +208,7 @@ export interface L3State {
 
 const STATE_COMMENT =
   'L3 conformance last-known run: the passing/failing scenario sets of the official ' +
-  'TinkerPop cucumber suite (scoped by test/conformance/tags.ts). `bun test` FAILS if a ' +
+  'TinkerPop cucumber suite (scoped by test/L3-conformance/tags.ts). `bun test` FAILS if a ' +
   'scenario in `passed` now fails (a regression) or the count drops; it auto-records the ' +
   'current run here on a clean local run (CI never rewrites). `passing` = passed.length is ' +
   'the ratchet floor. Commit this file with every bump. Never hand-edit `passed` to hide a ' +

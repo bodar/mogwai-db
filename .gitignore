@@ -12,9 +12,9 @@ build/
 .wrangler/
 
 # L3 telemetry artifacts (always on; transient per-run capture — the durable
-# cross-run state lives in the committed test/conformance/l3-state.json)
-test/conformance/l3-telemetry.ndjson
-test/conformance/*.summary.json
+# cross-run state lives in the committed test/L3-conformance/l3-state.json)
+test/L3-conformance/l3-telemetry.ndjson
+test/L3-conformance/*.summary.json
 
 # Local Claude Code worktrees / state (but track shared project settings)
 .claude/*
