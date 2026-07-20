@@ -117,11 +117,15 @@ that reproduces TinkerPop's `.*(term).*` semantics exactly (verified: `ada`→`v
 `MARKO`≠`marko`). `.element()` walks the matched `Property` to its owner (reuses the existing
 `PropertyStream` `element()` tail). `type` ∈ {Vertex, Edge, VertexProperty} selects the row scope.
 
-- **Fail closed on short terms:** trigram cannot index terms < 3 chars, so a `search`/`regex` term
-  < 3 chars throws a clear deferral rather than silently scanning. Search is **index-only** by
-  contract — no O(n) fallback.
-- **Raw `regex` param:** arbitrary regex isn't FTS-expressible → JS post-filter over FTS candidates,
-  or deferral (decide in the search phase). Not needed by conformance.
+- **Index-only contract → fail closed when not index-expressible.** The `tinker.search` *service*
+  is index-backed by design: anything the FTS index can't answer fails closed with a clear deferral
+  rather than silently scanning — i.e. a `search` term < 3 chars (below the trigram floor) *and* a
+  raw `regex` param (arbitrary regex isn't FTS-expressible). No O(n) fallback in the service.
+- **This differs deliberately from the `TextP` predicate**, which is required-correct and therefore
+  *does* get the fallbacks (case-sensitive scan for short terms; the JS-filter barrier for
+  `regex`). So `has(k, regex(x))` is implemented, while `call("tinker.search", {regex})` fails
+  closed — the service keeps a hard index-only guarantee, the filter keeps correctness. (Flag if
+  you'd rather the service also fall back to the JS barrier; neither is needed by conformance.)
 
 ### Federated DO graph call — **built last, on the generic seams** (async, Barrier)
 
@@ -182,16 +186,27 @@ index could quietly encode search-service assumptions; making `has(k, containing
 forces the write-path maintenance, the ValueNode-aware indexing, and the trigram semantics to be
 correct for a plain filter predicate too.
 
-Route the currently-deferred `has(k, containing/startingWith/endingWith/regex(x))` through the
-index where sound (closes real L3 gaps — the "Binding expected string…" bucket + `regex` throw):
+**Current reality (do not assume these are unimplemented):** `containing`/`startingWith`/
+`endingWith` (and `not*`) already compile today — to `LIKE` (`plan.ts:271,281-283`). But SQLite
+`LIKE` is **case-insensitive** for ASCII, whereas TinkerPop's `containing`/`startingWith`/
+`endingWith` are **case-sensitive** (`String.contains`/`startsWith`/`endsWith`). So the current
+impl is a **latent case bug** — `LIKE 'M%'` matches both `marko` and `MARKO` — masked only because
+the reference graphs are single-case. Only `regex`/`typeOf` actually throw today.
 
-- `containing(x)` = substring → FTS trigram `MATCH` for `|x| ≥ 3`.
-- `startingWith`/`endingWith` = anchored substring → trigram `MATCH` + a boundary check.
-- **Correctness fallback (distinct from the search service policy):** a *predicate* must return
-  correct results, so for `|x| < 3` it **falls back to a correct SQL scan** (`instr`/`LIKE`-with-
-  case-handling), *not* fail-closed. (The `tinker.search` service fails closed on short terms; a
-  `has(...)` filter does not — different contracts.)
-- `regex(x)` = arbitrary regex → JS post-filter over FTS/scan candidates, or deferral.
+So this phase is two things, correctness first:
+
+1. **Fix case-sensitivity** of the substring predicates:
+   - `|x| ≥ 3` → FTS trigram `MATCH` (`case_sensitive 1`) — exact *and* indexed;
+     `startingWith`/`endingWith` add an anchor/boundary check on the candidate.
+   - `|x| < 3` (below the trigram floor) → a **case-sensitive** SQL scan — `instr(x, needle) > 0`
+     for `containing`, `substr(...)=needle` for `startingWith`/`endingWith`. **Not plain `LIKE`**
+     (that is the bug). A predicate must be correct, so it falls back to a scan, never fail-closed —
+     unlike the `tinker.search` *service*, which is index-only and fails closed on short terms.
+2. **Implement `regex(x)` (no longer deferred)** via a **synchronous JS-filter barrier** — the
+   Phase-1 machinery: materialize candidate rows, apply `new RegExp(pat)` in JS, re-source. This is
+   the mechanism CLAUDE.md already names ("regex … filtered post-SQL in JS inside the DO"). FTS
+   narrows candidates only when a ≥3-char literal is extractable from the pattern; otherwise it is a
+   full scan + JS filter. (`typeOf` remains its own separate concern.)
 
 ## Conformance + L4
 
@@ -212,7 +227,7 @@ index where sound (closes real L3 gaps — the "Binding expected string…" buck
 | 2 | `--list` reading the live registry (+ filter/verbose) | 7 scenarios |
 | 3 | `tinker.degree.centrality` via the child-scope reducer seam + `project()`-over-scalar | 6 scenarios; exercises per-parent merge |
 | 4 | `tinker.search` on FTS5 trigram + ValueNode-aware JSON write-path indexing + fail-closed + `element()` | 7 scenarios; builds the real search index |
-| 5 | `TextP` (`containing`/`startingWith`/`endingWith`/`regex`) on the FTS5 index + fallback | closes the TextP deferral bucket |
+| 5 | `TextP`: **fix case-sensitivity** of `containing`/`startingWith`/`endingWith` (LIKE→FTS/`instr`/`substr`) + **implement `regex`** via the JS-filter barrier | corrects a latent case bug + closes the `regex` throw |
 | 6 | **Federated DO graph call** — async barrier service on the Phase-1 seams: projection via `query()`, foreign-element materialization, parent-ordinal merge, Barrier/ChunkSize batching | last; additive, no engine rewrite |
 
 ## Semantics & hard parts (honest)
@@ -228,7 +243,8 @@ index where sound (closes real L3 gaps — the "Binding expected string…" buck
 
 ## Fail-closed edges (correct-by-design, never mis-execute)
 
-- `tinker.search` term < 3 chars → deferral (index-only contract).
-- Raw `regex` service param / non-constant per-traverser call params → deferral until the barrier
-  param-eval path lands.
-- `type: VertexProperty` meta-property search → empty on the toy reference graphs (documented).
+- `tinker.search` service: term < 3 chars **or** a raw `regex` param → deferral (index-only
+  contract). NB `has(k, regex(x))` is *not* here — the TextP predicate implements regex via the
+  JS-filter barrier (Phase 5); only the *service* fails closed.
+- Non-constant per-traverser call params → deferral until the barrier param-eval path lands.
+- `type: VertexProperty` meta-property search → empty on the reference graphs (documented).
