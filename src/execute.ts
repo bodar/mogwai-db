@@ -1,4 +1,4 @@
-import { compile, type ListOf, type MapEntry, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from './compiler.ts';
+import { compile, type ListOf, type MapEntry, type MapOf, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from './compiler.ts';
 import { isCollectionType, valueNodeFromStored, type TypeNode, type ValueNode } from './gremlin-types.ts';
 import type { GraphStore } from './storage.ts';
 import { ioc, VertexProperty, Property, t } from './io.ts';
@@ -156,6 +156,23 @@ function mapBuffer(row: any, entries: MapEntry[]): Buffer {
           : elementBuffer(row, e.prefix, e.sub));
   }
   return Buffer.concat(parts);
+}
+
+// One side (key/value) of a Map.Entry row → a fully-qualified GraphBinary buffer, per
+// its MapOf shape. A scalar frames by its tag (or infers); an element arrives as a JSON
+// object string (SQL elementValueResult) and routes through vertexBuffer/edgeBuffer to
+// keep props; a list arrives as JSON text and frames via frameListOf.
+function mapSideBuffer(raw: any, of: MapOf): Buffer {
+  if (of.kind === 'elem') return raw == null ? frameValue(null, undefined) : (of.elem === 'edge' ? rowEdge : rowVertex)(JSON.parse(raw));
+  if (of.kind === 'list') return frameListOf(raw, of.of);
+  return of.as ? frameValue(raw, of.as) : ioc.anySerializer.serialize(raw);
+}
+
+// A Map.Entry (group()/valueMap()/is(typeOf(MAP)).unfold()) frames as a one-entry MAP —
+// the settled GraphBinary v4 wire form (TinkerPop MapEntrySerializer transforms an entry
+// into a size-1 Map; TINKERPOP-3104). key/value each frame by their MapOf.
+function mapEntryBuffer(row: any, keyOf: MapOf, valOf: MapOf): Buffer {
+  return mapFromEntries([[mapSideBuffer(row.mk, keyOf), mapSideBuffer(row.mv, valOf)]]);
 }
 
 function listFieldBuffer(json: string, of: import('./render.ts').ListOf): Buffer {
@@ -488,6 +505,8 @@ function* frameValues(rows: any[], shape: import('./render.ts').Shape): Generato
     case 'scalar': for (const r of rows) if (r.v !== null || shape.productiveNull)
       yield r.v === null ? frameValue(null, undefined) : sumBuffer(r.v, r.vt); return;
     case 'map': for (const r of rows) yield mapBuffer(r, shape.entries); return;
+    // A Map.Entry stream (map unfold): one size-1 MAP per row.
+    case 'mapEntry': for (const r of rows) yield mapEntryBuffer(r, shape.keyOf, shape.valOf); return;
     case 'path': for (const r of rows) yield pathBuffer(r, shape.positions); return;
     // pathGrouped folds pk-runs into Paths — a bounded fold, so yield each completed Path.
     case 'pathGrouped': yield* pathGroupedBuffers(rows, shape.elem, shape.byKey); return;

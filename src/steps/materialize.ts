@@ -11,7 +11,7 @@ import { readCompiled, type Compiled, type ListOf, type Shape } from '../render.
 import { list, q } from '../q.ts';
 import { framedProps, extIdOf } from '../plan.ts';
 import { edges, labels, nodes } from '../schema.ts';
-import { groupResultColumns, pathColumns, recordResultColumns, type GroupStream, type ListStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream, type Stream, type VariantStream } from './stream.ts';
+import { groupResultColumns, pathColumns, recordResultColumns, type GroupStream, type ListStream, type MapOf, type MapStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream, type Stream, type VariantStream } from './stream.ts';
 
 export function materializeRoot(query: Query, tail: Expression, shape: Shape): Compiled {
   return readCompiled(query, tail, shape);
@@ -105,6 +105,40 @@ export function materializeListRoot(stream: ListStream): Compiled {
   return materializeRoot(stream.q, q`SELECT json(${c.c.list}) AS list FROM ${c}`, shape);
 }
 
+/** Expand one internal element rowid into a JSON object carrying the public element
+ * payload (id/label/props[/src/tgt]) — the single-value twin of elementListResult, for a
+ * Map.Entry key/value that holds an element. json_object over a correlated join to
+ * nodes/edges + labels; NULL rowid → SQL NULL (framed as a null value). */
+function elementValueResult(ridExpr: Expression, elem: 'node' | 'edge'): Expression {
+  const n = (elem === 'edge' ? edges : nodes).as('en');
+  const l = labels.as('el');
+  const object = elem === 'edge'
+    ? q`json_object('id', COALESCE(${n.c.uid}, ${n.c.id}), 'label', ${l.c.name}, 'src', ${extIdOf(n.c.src)}, 'tgt', ${extIdOf(n.c.tgt)}, 'props', json(${framedProps(n, elem)}))`
+    : q`json_object('id', COALESCE(${n.c.uid}, ${n.c.id}), 'label', ${l.c.name}, 'props', json(${framedProps(n, elem)}))`;
+  return q`(SELECT ${object} FROM ${n} JOIN ${l} ON ${l.c.id}=${n.c.label} WHERE ${n.c.id}=${ridExpr})`;
+}
+
+/** One side (key/value) of a Map.Entry row projected to a wire-ready column. A scalar
+ * rides raw; a single element rowid expands to its public payload JSON; a list is expanded
+ * via listResult (an element list's rowids become full payload objects, like elsewhere). */
+const mapSideResult = (col: Expression, of: MapOf): Expression =>
+  of.kind === 'elem' ? elementValueResult(col, of.elem) : of.kind === 'list' ? listResult(col, of.of) : col;
+
+/** Materialize a MapStream at the root as a stream of Map.Entry values — each row frames
+ * as a size-1 GraphBinary MAP (the settled v4 wire form: TinkerPop's MapEntrySerializer
+ * transforms an entry into a one-entry Map, TINKERPOP-3104). Only an `entries` MapStream
+ * (group()/valueMap()/is(typeOf(MAP)).unfold()) is a terminal value; an aggregate map
+ * (select(Column.*) source) always retypes to a ListStream before the root. */
+export function materializeMapRoot(stream: MapStream): Compiled {
+  if (!stream.entries) throw new Error('a non-entry map value cannot be materialized directly');
+  const c = stream.rel.as('c');
+  return materializeRoot(
+    stream.q,
+    q`SELECT ${mapSideResult(c.c.mk, stream.keyOf)} AS mk, ${mapSideResult(c.c.mv, stream.valOf)} AS mv FROM ${c}`,
+    { kind: 'mapEntry', keyOf: stream.keyOf, valOf: stream.valOf },
+  );
+}
+
 /** Materialize a PropertyStream only at the root boundary. Edge Property rows use
  * the same payload shape (with a null vpid/meta) as the historical properties()
  * compiler; VertexProperty rows retain their real id and meta-properties. */
@@ -150,8 +184,9 @@ export function materializePathRoot(stream: PathStream): Compiled {
 /** The single terminal dispatch for every fully-typed relational stream. ElementStream
  * still passes through compileTail because its historical projection accumulator can
  * produce a terminal expression; migrating that compatibility island is the final
- * materialization-boundary slice. MapStream is an internal entry relation and cannot
- * itself be a Gremlin result value yet. */
+ * materialization-boundary slice. An `entries` MapStream materializes as a Map.Entry
+ * stream (each row → a size-1 MAP); a non-entry (aggregate) MapStream always retypes to
+ * a ListStream before the root, so it is not a terminal value. */
 export function materializeStream(stream: Exclude<Stream, import('./context.ts').ElementStream>): Compiled {
   switch (stream.kind) {
     case 'result': return materializeRoot(stream.q, stream.tail, stream.shape);
@@ -162,7 +197,7 @@ export function materializeStream(stream: Exclude<Stream, import('./context.ts')
     case 'record': return materializeRecordRoot(stream);
     case 'group': return materializeGroupRoot(stream);
     case 'path': return materializePathRoot(stream);
-    case 'map': throw new Error('a map entry stream cannot be materialized directly');
+    case 'map': return materializeMapRoot(stream);
   }
 }
 

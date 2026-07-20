@@ -131,7 +131,7 @@ Across all four branch steps, mixed-shape arms (scalar + element + list) merge i
 | Step | | Notes |
 |---|:--:|---|
 | `fold()` / `inject([…])` as a list value | ✅ | JSONB list, re-enters the tail |
-| `unfold()` | ✅ | explode → elements/scalar/nested-list; a stored typed list frames each element by its own type; Map-unfold → per-entry Map.Entry. ❌ after a projection/modifier on an element stream; non-`select`/element-value on unfolded entries |
+| `unfold()` | ✅ | explode → elements/scalar/nested-list; a stored typed list frames each element by its own type; `group()`/`groupCount().unfold()` → a terminal Map.Entry stream (each frames as a size-1 MAP) or a per-entry `select(Column.keys/values)`. ❌ after a projection/modifier on an element stream |
 | `Scope.local` reducers (count/sum/min/max/mean) | ✅ | per-list aggregate → scalar |
 | `none(P)`/`all(P)`/`any(P)` | ✅ | collection filters, null-aware |
 | `Scope.local` order/limit/range/skip/tail/dedup on a list | ✅ | per-list `json_each` rebuild; `reverse()`; per-element string transforms. ❌ `order(Scope.local).by(key/traversal)` |

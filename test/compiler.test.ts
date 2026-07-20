@@ -432,6 +432,23 @@ describe('compiler SQL snapshots', () => {
     expect(ev.sql).toContain('json_group_array');
   });
 
+  test('Commit B: a bare terminal Map.Entry stream materializes (size-1 MAP per entry)', () => {
+    // group()/groupCount().unfold() with NO following select is now a terminal value:
+    // each (mk,mv) entry row frames as a size-1 GraphBinary MAP (mapEntry shape).
+    expect(read('g.V().groupCount().by(T.label).unfold()').shape)
+      .toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar', as: 'long' } });
+    // scalar key + scalar-reducer value
+    expect(read('g.V().group().by(T.label).by(__.count()).unfold()').shape.kind).toBe('mapEntry');
+    // scalar key + scalar-LIST value (by('name') → json_group_array of values)
+    const sl = read("g.V().group().by(T.label).by('name').unfold()");
+    expect(sl.shape).toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' }, valOf: { kind: 'list', of: { kind: 'scalar' } } });
+    // an ELEMENT-list value: the value column expands its rowids to full element payloads
+    // at the root (json_group_array + json_object over nodes), like the list substrate.
+    const ev = read("g.V().hasLabel('software').group().by('name').unfold()");
+    expect(ev.shape.kind).toBe('mapEntry');
+    expect(ev.sql).toContain('json_object');
+  });
+
   test('group()/groupCount() always lowers to GroupStream; Column selection derives MapStream', () => {
     // A terminal GroupStream reaches the existing row-folding groupBuffer Map.
     expect(read('g.V().groupCount().by("name")').shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });

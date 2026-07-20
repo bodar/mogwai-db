@@ -18,6 +18,15 @@ export type ListOf =
   | { kind: 'scalar'; as?: ValueType; productiveNull?: boolean; typed?: boolean }
   | { kind: 'list'; of: ListOf };
 
+// How a map stream's key/value column is shaped — kept at the render boundary (like
+// ListOf/MapEntry) so a MapStream's mapEntry Shape can name it. A key/value is a bare
+// scalar (mk/mv hold the value, `as` its GraphBinary tag), an element rowid (rejoined to
+// nodes/edges when framed out), or a JSONB list (framed via frameListOf).
+export type MapOf =
+  | { kind: 'scalar'; as?: ValueType }
+  | { kind: 'elem'; elem: 'node' | 'edge' }
+  | { kind: 'list'; of: ListOf };
+
 // select(labels…)/project(keys…): a Map per row. Each entry names its result
 // key plus the SQL column prefix carrying its typed payload.
 export type MapEntry =
@@ -92,6 +101,7 @@ export type Shape =
   | { kind: 'valueMap'; keys: string[] | null; tokens: boolean }
   | { kind: 'elementMap'; keys: string[] | null }
   | { kind: 'map'; entries: MapEntry[] }
+  | { kind: 'mapEntry'; keyOf: MapOf; valOf: MapOf } // one Map.Entry per row (group()/valueMap()/is(typeOf(MAP)).unfold()) → each frames as a size-1 GraphBinary MAP
   | { kind: 'group'; key: GroupKey; val: GroupVal }
   | { kind: 'path'; positions: PathPos[] }                 // linear: one row per path, per-position columns
   | { kind: 'pathGrouped'; elem: ElemShape; byKey?: boolean } // recursive: N rows per path (pk, ord, element|value), grouped
