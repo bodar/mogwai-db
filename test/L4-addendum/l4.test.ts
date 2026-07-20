@@ -1,5 +1,5 @@
 // L4 — the mogwai ADDENDUM conformance suite. Our own scenarios, authored in TinkerPop's exact
-// Gherkin `.feature` format (test/conformance/addendum/*.feature), for VALID traversals the
+// Gherkin `.feature` format (test/L4-addendum/*.feature), for VALID traversals the
 // official corpus doesn't cover. Each is a combination we implemented for combinatorial
 // completeness; @gap:<area> tags the family for a possible gremlin-test PR (the give-back).
 //
@@ -11,7 +11,7 @@
 // The expected `| result |` table is parsed in TinkerPop's typed notation (d[32].i / d[1].l /
 // l[…] / null). Every scenario must pass (these are OURS); a failure is named with its diff.
 //
-// Add a scenario: drop it into an addendum/*.feature — no code change here. Because they are
+// Add a scenario: drop it into a *.feature — no code change here. Because they are
 // real Gherkin, the @gap set harvests directly into an upstream PR.
 
 import { test, expect, describe } from 'bun:test';
@@ -20,8 +20,8 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../../src/execute.ts';
 import { ioc } from '../../src/io.ts';
-import { MODERN_SEED } from './seed-modern.ts';
-import { CREW_SEED } from './seed-crew.ts';
+import { MODERN_SEED } from '../fixtures/seed-modern.ts';
+import { CREW_SEED } from '../fixtures/seed-crew.ts';
 import { BigDecimal, Duration } from '../../src/gremlin-types.ts';
 
 // A vertex carrying one property of each type our extended GraphBinary serializers cover, so a
@@ -41,7 +41,7 @@ const MAPDATA_SEED = [
   'g.addV("data").property("name", "test").property("m", ["a": 1, "b": 2, "c": 3])',
 ];
 
-const ADDENDUM = new URL('./addendum/', import.meta.url).pathname;
+const ADDENDUM = new URL('./', import.meta.url).pathname;
 
 interface Scenario { feature: string; name: string; graph: string; gremlin: string; expected: string[]; }
 

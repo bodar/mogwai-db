@@ -14,7 +14,7 @@ import { executeQuery, executeFramed } from '../src/execute.ts';
 import { streamBuffers, errorResponse } from '../src/http.ts';
 import { parseRequest } from '../src/wire.ts';
 import { ioc } from '../src/io.ts';
-import { MODERN_SEED } from './conformance/seed-modern.ts';
+import { MODERN_SEED } from './fixtures/seed-modern.ts';
 
 function seededStore() {
   const store = new GraphStore(new BunSqlite(':memory:'));

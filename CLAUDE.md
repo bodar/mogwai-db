@@ -281,10 +281,30 @@ bind diverges across runtimes — see the bind-type gotcha below).
 
 ## Testing (the build discipline)
 
-Everything runs under bare `bun test` (scoped to `test/` by `bunfig.toml`). The
-`vendor/tinkerpop` submodule (pinned at 4.0.0-beta.2 = the published npm) supplies the
-grammar, Gherkin features, and JS cucumber runner; `mise run submodule` provisions it
-blobless+sparse (self-healed in the L3 test's `beforeAll`).
+Everything runs under bare `bun test` (scoped to `test/` by `bunfig.toml` — this stops
+discovery recursing into `vendor/tinkerpop`). The `vendor/tinkerpop` submodule (pinned at
+4.0.0-beta.2 = the published npm) supplies the grammar, Gherkin features, and JS cucumber
+runner; `mise run submodule` provisions it blobless+sparse (self-healed in the L3 test's
+`beforeAll`).
+
+**Test layout — the conformance ladder lives in one folder per level;** each level's
+harness/data sits IN its folder, except the reference graph seeds shared by L3+L4, which
+live in `test/fixtures/`:
+- `test/L1-corpus/` — `corpus.test.ts` + `corpus.txt` + `regen-corpus.ts`
+- `test/L2-sql/` — `sql-snapshots.test.ts` (the compile-to-SQL contract)
+- `test/L3-conformance/` — `l3.test.ts`, `conformance.test.ts`, `conformance-server.ts`,
+  `telemetry.ts`, `tags.ts`, `l3-state.json`, `README-cucumber.md`
+- `test/L4-addendum/` — `l4.test.ts` + `*.feature`
+- `test/fixtures/` — `seed-{modern,crew,uid}.ts` + `seed-graphson.ts` (imported by L3's
+  `conformance-server.ts`, L4's `l4.test.ts`, and a few L2/root tests)
+- `test/` (root) — the non-ladder tests: `compiler.test.ts` (compiler EXECUTION semantics —
+  the behavioural twin of L2's SQL snapshots), `contract.ts`, `wire`/`streaming`/
+  `exact-values`/`typed-collections-e2e`/`performance`/`bun`/`cloudflare`/`serializers`/
+  `typed-collections` `.test.ts`.
+
+**Invoke one level directly:** `mise run L1` / `L2` / `L3` / `L4` (each is `bun test
+test/L{n}-…`; L1/L2 skip the submodule, L3/L4 depend on it). `mise run test` still runs the
+whole suite.
 
 **Version split — DO NOT collapse (cost a full investigation):**
 - **Parser + corpus track `origin/master`** (a strict superset of beta.2 — adds
@@ -294,14 +314,14 @@ blobless+sparse (self-healed in the L3 test's `beforeAll`).
   its GraphBinary wire). Pinning L3 to master breaks it (master's cucumber harness hits a
   bun+cucumber dual-instance load issue) for zero gain. Bump the pin only when a new
   `gremlin` npm ships.
-- **L1** (`test/conformance/corpus.test.ts`): 2,298 canonical traversals; parse+chain must
+- **L1** (`test/L1-corpus/corpus.test.ts`): 2,298 canonical traversals; parse+chain must
   stay 100%.
-- **L3** (`test/conformance/l3.test.ts`): a ratcheted `bun test` — boots the conformance
+- **L3** (`test/L3-conformance/l3.test.ts`): a ratcheted `bun test` — boots the conformance
   host in-process and runs the official cucumber suite over GraphBinary. **Telemetry is
   always on** (no env flag): a live compact progress line (`.` per query, `E` per
   compile/exec throw) prints during the run, then the systematic-gap summary (deferral
   buckets + failing-step frequency) after. **One committed state file,
-  `test/conformance/l3-state.json`**, records the last-known run — `{passing, total,
+  `test/L3-conformance/l3-state.json`**, records the last-known run — `{passing, total,
   passed[], failed[]}` — and is the SINGLE ratchet source of truth (`passing` =
   `passed.length`; there is no separate `baseline.json`/`l3-passing.txt`). Every run diffs
   this run against it and prints the **DELTA**: `✅ NEWLY PASSING` (fixes) and `❌ REGRESSED`
@@ -316,12 +336,12 @@ blobless+sparse (self-healed in the L3 test's `beforeAll`).
   (`l3-telemetry.ndjson`) + `*.summary.json` are transient/gitignored — only `l3-state.json`
   is durable. CI never rewrites (it only reads). Add a new SYNC consumer by giving it the
   marker + listing it in `SYNC_FILES`. Step scope =
-  `test/conformance/tags.ts` (widen as steps land; never narrow). NB `@StepWrite` tags
+  `test/L3-conformance/tags.ts` (widen as steps land; never narrow). NB `@StepWrite` tags
   the `io().write()` graph-SERIALIZATION step (deliberately excluded), NOT the data-write
   steps — addV/addE/mergeV/mergeE carry `@StepAddV`/`@StepAddE`/`@StepMergeV`/`@StepMergeE`,
   are untagged in the exclusion list, and are already in scope + ratcheted. Runbook:
-  `test/conformance/README-cucumber.md`.
-- **L4** (`test/conformance/l4.test.ts` + `test/conformance/addendum/*.feature`): OUR
+  `test/L3-conformance/README-cucumber.md`.
+- **L4** (`test/L4-addendum/l4.test.ts` + `test/L4-addendum/*.feature`): OUR
   addendum suite — valid traversals the official corpus doesn't cover (our combinatorial-
   completeness work), authored in TinkerPop's exact Gherkin format. NOT cucumber-driven: the
   official harness binds a scenario name to a vendored generated `gremlin.js`; we parse Gremlin
@@ -329,7 +349,7 @@ blobless+sparse (self-healed in the L3 test's `beforeAll`).
   it through the REAL stack (`executeQuery` → GraphBinary, decoded by the client `ioc` — so our
   extended serializers are exercised both directions). Gate = **all pass** (ours; not a subset
   like L3). `@gap:<area>` tags mark families for an upstream `gremlin-test` PR (the give-back).
-  Add a scenario = drop it in a `.feature`; no code change. See `addendum/README.md`.
+  Add a scenario = drop it in a `.feature`; no code change. See `test/L4-addendum/README.md`.
 - Every new step lands with SQL snapshot tests, its cucumber tag added to `tags.ts`, and
   corpus still 100%.
 - **SQL snapshots assert semantic equivalence, NOT byte-identity.** They mostly `.toContain`
@@ -340,7 +360,7 @@ blobless+sparse (self-healed in the L3 test's `beforeAll`).
   (This is the canonical statement of the rule; other docs must not reintroduce a
   byte-identical *requirement*.)
 
-The L3 harness (`test/conformance/conformance-server.ts`) is the SAME shared stack as the
+The L3 harness (`test/L3-conformance/conformance-server.ts`) is the SAME shared stack as the
 production Bun server, with toy graphs pre-seeded by running each graph's write traversals
 through the normal query path (`seed-*.ts`).
 

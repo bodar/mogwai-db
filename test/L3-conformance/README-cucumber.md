@@ -4,7 +4,7 @@ The conformance number. TinkerPop's own JS cucumber runner drives the official
 Gherkin feature files over GraphBinary against a live mogwai-db.
 
 **This now runs automatically as a ratchet under `bun test`** —
-`test/conformance/l3.test.ts` boots the host in-process, runs the cucumber suite
+`test/L3-conformance/l3.test.ts` boots the host in-process, runs the cucumber suite
 against the pinned `vendor/tinkerpop` submodule, and diffs this run against the
 last-known run committed in `l3-state.json` (`{passing, total, passed[], failed[]}`).
 Telemetry is **always on**: a live `.`/`E` progress line during the run, then the
@@ -18,7 +18,7 @@ suite manually** (e.g. to inspect individual failures).
 ## 1. Start the conformance host
 
 ```bash
-bun run test/conformance/conformance-server.ts     # listens on :45940/gremlin
+bun run test/L3-conformance/conformance-server.ts     # listens on :45940/gremlin
 ```
 
 Hosts the named toy graphs the runner opens, selected by traversal-source name
@@ -42,12 +42,12 @@ query path, so seeding is identical on both runtimes.
 In the pinned submodule runner (`vendor/tinkerpop/gremlin-js/gremlin-javascript`);
 `mise run submodule` has already `bun install`ed the workspace (bun runs the GLV's
 TS source and the cucumber step defs natively — no `npm install`, no ts-node).
-The `--tags` scope is the single source of truth in `test/conformance/tags.ts`
+The `--tags` scope is the single source of truth in `test/L3-conformance/tags.ts`
 (the ratchet lever). Read it from there so this command never drifts:
 
 ```bash
 # from the mogwai-db repo root:
-TAGS="$(bun -e 'import{L3_TAGS}from"./test/conformance/tags.ts";console.log(L3_TAGS)')"
+TAGS="$(bun -e 'import{L3_TAGS}from"./test/L3-conformance/tags.ts";console.log(L3_TAGS)')"
 
 cd vendor/tinkerpop/gremlin-js/gremlin-javascript
 CLIENT_MIMETYPE='application/vnd.graphbinary-v4.0' \

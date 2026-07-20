@@ -160,7 +160,7 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
       const synced = passing !== prev.passing ? syncCountFiles(passing) : [];
       const bump = passing !== prev.passing ? `${prev.passing} → ${passing}` : `+${d.gained.length}/-${d.regressed.length}`;
       const also = synced.length ? ` + ${synced.join(' + ')}` : '';
-      console.log(`L3 state recorded (${bump}). Commit test/conformance/l3-state.json${also}.`);
+      console.log(`L3 state recorded (${bump}). Commit test/L3-conformance/l3-state.json${also}.`);
     }
   }
 }, LONG);

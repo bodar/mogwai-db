@@ -24,7 +24,7 @@ just the compiler.
 
 Drop it into any `*.feature` here — no code change. Use a seeded graph (`Given the modern
 graph` / `the crew graph`) or build data inline (`Given an empty graph` + `inject(...)`/`addV`).
-Author the expected `| result |` in TinkerPop typed notation. Then `bun test test/conformance/l4.test.ts`.
+Author the expected `| result |` in TinkerPop typed notation. Then `bun test test/L4-addendum/l4.test.ts`.
 
 Supported result notations today: `d[n].i` (int), `d[n].l` (long → BigInt), `d[n].d`/`.f`
 (double/float), `l[…]`/`s[…]` (list/set, ordered within), bare strings, `null`. Add more in

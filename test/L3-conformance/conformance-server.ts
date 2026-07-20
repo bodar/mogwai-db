@@ -13,10 +13,10 @@
 import { BunGraphManager } from '../../src/bun/BunGraphManager.ts';
 import { application } from '../../src/application.ts';
 import { LoggingGraphManager, telemetryPath, clearTelemetry } from './telemetry.ts';
-import { MODERN_SEED } from './seed-modern.ts';
-import { CREW_SEED } from './seed-crew.ts';
-import { UID_SEED } from './seed-uid.ts';
-import { graphsonSeed } from './seed-graphson.ts';
+import { MODERN_SEED } from '../fixtures/seed-modern.ts';
+import { CREW_SEED } from '../fixtures/seed-crew.ts';
+import { UID_SEED } from '../fixtures/seed-uid.ts';
+import { graphsonSeed } from '../fixtures/seed-graphson.ts';
 
 // Reference graphs load from their canonical GraphSON v3 files in the pinned submodule
 // (sink 3 vertices) — turned into write traversals so the integer ids land exactly
