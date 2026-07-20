@@ -1,12 +1,12 @@
-// L3 telemetry — opt-in, test-only, zero ratchet risk.
+// L3 telemetry — always on, test-only, zero ratchet risk.
 //
-// THE PROBLEM. l3.test.ts extracts only per-scenario pass/fail and throws away
-// the gremlin string, the step chain, and the compiler's clean deferral message
-// (see the trace in README-cucumber.md). So a rising baseline tells us the count
-// moved but never WHICH step-chains fail or WHY — the systematic view is blind.
-// The truncation is NOT cucumber's: the clean throw survives end-to-end (the
-// server logs `ERR <msg>` at router.ts; feature-steps.js prints it clean to
-// stderr) and the JSON report is on disk — the test just does not read it.
+// THE PROBLEM. Bare cucumber pass/fail throws away the gremlin string, the step
+// chain, and the compiler's clean deferral message (see the trace in
+// README-cucumber.md). So a rising count tells us the number moved but never
+// WHICH step-chains fail or WHY — the systematic view is blind. The truncation is
+// NOT cucumber's: the clean throw survives end-to-end (the server logs `ERR <msg>`
+// at router.ts; feature-steps.js prints it clean to stderr) and the JSON report is
+// on disk — the harness just has to read it.
 //
 // THE CAPTURE. Two independent signals, joined by the gremlin string:
 //  - SERVER SIDE: a pass-through GraphManager decorator logs every query the
@@ -20,8 +20,10 @@
 //  - CUCUMBER SIDE: the JSON report already on disk gives scenario names and
 //    pass/fail (read-only, after the ratchet assertion).
 //
-// Gated on MOGWAI_L3_TELEMETRY (a path, or "1" → a default file). Unset = the
-// harness runs exactly as before; nothing here executes.
+// THE STATE. l3-state.json (committed) records the last known run: the count and
+// the exact PASSED/FAILED scenario-name sets. Every local run diffs against it to
+// print the DELTA (gains + regressions), then rewrites it on a clean run. It is
+// the single source of truth for the ratchet — no separate baseline.json.
 import { appendFileSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { parseGremlin, stepChain } from '../../src/frontend.ts';
 import type { GraphManager, GraphInfo } from '../../src/manager.ts';
@@ -45,13 +47,11 @@ export function stepNames(gremlin: string, params: Record<string, any>): string[
   }
 }
 
-/** Resolve the telemetry file from MOGWAI_L3_TELEMETRY: a path, or "1"/"true" → a
- *  default file beside this module. Undefined = telemetry off. */
-export function telemetryPath(): string | undefined {
-  const v = process.env.MOGWAI_L3_TELEMETRY;
-  if (!v) return undefined;
-  if (v === '1' || v === 'true') return new URL('./l3-telemetry.ndjson', import.meta.url).pathname;
-  return v;
+/** The per-run NDJSON capture file (always on): a transient, gitignored artifact
+ *  beside this module. Cleared at the start of each run so a summary reflects only
+ *  the current run; the durable cross-run state is l3-state.json. */
+export function telemetryPath(): string {
+  return new URL('./l3-telemetry.ndjson', import.meta.url).pathname;
 }
 
 /** A pass-through GraphManager that appends one NDJSON QueryRecord per query and
@@ -180,38 +180,90 @@ export function collectScenarios(cucumberJson: any[]): ScenarioRow[] {
   return rows;
 }
 
-// ---------- per-scenario ratchet: name regressions, not just a count ----------
+// ---------- l3-state.json: the committed last-known-run + the delta ----------
 //
-// The count ratchet alone is blind two ways: it can't say WHICH scenario broke, and a
-// net-positive run (more gained than lost) hides a real regression. The committed
-// passing-SET fixes both — the exact set of scenario names that passed at baseline. A run
-// diffs against it: any name that passed then and fails now is a REGRESSION (fail + name it,
-// with no noise from the hundreds of always-failing deferred scenarios); names that newly
-// pass are GAINS (fold into the set on a clean run). Scenario names are globally unique in
-// the TinkerPop gherkin corpus, so a bare name is a stable key.
+// The count alone is blind two ways: it can't say WHICH scenario broke, and a
+// net-positive run (more gained than lost) hides a real regression. l3-state.json
+// records the exact PASSED and FAILED scenario-name sets from the last committed
+// run (plus the derived count). Every run diffs against it:
+//   - GAINS      — passed now, was NOT passing before (a fix landed).
+//   - REGRESSIONS — was passing before, fails now (something broke → FAIL the build).
+// Scenario names are globally unique in the TinkerPop gherkin corpus, so a bare
+// name is a stable key. On a clean local run the state is rewritten to the current
+// run (CI never rewrites). This is the single ratchet source of truth — the count
+// is `passed.length`, so there is no separate baseline file.
 
-export function readPassingSet(file: string): Set<string> {
-  if (!existsSync(file)) return new Set();
-  return new Set(readFileSync(file, 'utf8').split('\n').filter(Boolean));
+export interface L3State {
+  /** Passing-scenario count = passed.length. Kept explicit for greppability + the
+   *  cucumber-summary cross-check. */
+  passing: number;
+  /** Total scenarios in scope at record time. */
+  total: number;
+  /** Sorted scenario names that passed. */
+  passed: string[];
+  /** Sorted scenario names that were in scope and failed. */
+  failed: string[];
+  _comment?: string;
 }
 
-export function writePassingSet(file: string, names: Iterable<string>): void {
-  writeFileSync(file, [...names].sort().join('\n') + '\n');
+const STATE_COMMENT =
+  'L3 conformance last-known run: the passing/failing scenario sets of the official ' +
+  'TinkerPop cucumber suite (scoped by test/conformance/tags.ts). `bun test` FAILS if a ' +
+  'scenario in `passed` now fails (a regression) or the count drops; it auto-records the ' +
+  'current run here on a clean local run (CI never rewrites). `passing` = passed.length is ' +
+  'the ratchet floor. Commit this file with every bump. Never hand-edit `passed` to hide a ' +
+  'regression.';
+
+export function readState(file: string): L3State {
+  if (!existsSync(file)) return { passing: 0, total: 0, passed: [], failed: [] };
+  const s = JSON.parse(readFileSync(file, 'utf8')) as L3State;
+  return { passing: s.passing ?? 0, total: s.total ?? 0, passed: s.passed ?? [], failed: s.failed ?? [] };
 }
 
-/** Scenarios that passed at baseline but fail now (the true regressions), with the step
- *  and error that broke them — the noise-free signal for "what did I just break?". */
-export function regressions(baseline: Set<string>, rows: ScenarioRow[]): ScenarioRow[] {
-  const failingNow = new Map(rows.filter((r) => !r.passed).map((r) => [r.name, r]));
-  return [...baseline].filter((n) => failingNow.has(n)).map((n) => failingNow.get(n)!);
+export function writeState(file: string, rows: ScenarioRow[]): void {
+  const passed = rows.filter((r) => r.passed).map((r) => r.name).sort();
+  const failed = rows.filter((r) => !r.passed).map((r) => r.name).sort();
+  const state: L3State = { passing: passed.length, total: rows.length, passed, failed, _comment: STATE_COMMENT };
+  writeFileSync(file, JSON.stringify(state, null, 2) + '\n');
 }
 
-export function formatRegressions(rows: ScenarioRow[]): string {
-  const L = ['', `❌ L3 REGRESSION — ${rows.length} scenario(s) passed at baseline but fail now:`, ''];
-  for (const r of rows) {
-    L.push(`  • ${r.name}`);
-    if (r.firstFailingStep) L.push(`      step:  ${r.firstFailingStep}`);
-    if (r.errorMessage) L.push(`      error: ${r.errorMessage}`);
+export interface L3Delta {
+  /** Passed now, was not passing in committed state (fixes that landed). */
+  gained: ScenarioRow[];
+  /** Was passing in committed state, fails now (the true regressions). */
+  regressed: ScenarioRow[];
+}
+
+/** Diff the committed state against this run's scenario rows. */
+export function delta(prev: L3State, rows: ScenarioRow[]): L3Delta {
+  const wasPassing = new Set(prev.passed);
+  const byName = new Map(rows.map((r) => [r.name, r]));
+  const gained = rows.filter((r) => r.passed && !wasPassing.has(r.name));
+  const regressed = [...wasPassing]
+    .filter((n) => byName.has(n) && !byName.get(n)!.passed)
+    .map((n) => byName.get(n)!);
+  return { gained, regressed };
+}
+
+/** The human-facing before/after: gains (green) then regressions (red, with the
+ *  step + error that broke them). Empty string when nothing changed. */
+export function formatDelta(d: L3Delta): string {
+  if (!d.gained.length && !d.regressed.length) return '';
+  const L: string[] = [''];
+  L.push(`──── L3 delta vs last committed run: +${d.gained.length} gained, -${d.regressed.length} regressed ────`);
+  if (d.gained.length) {
+    L.push('');
+    L.push(`✅ NEWLY PASSING (${d.gained.length}):`);
+    for (const r of d.gained) L.push(`  + ${r.name}`);
+  }
+  if (d.regressed.length) {
+    L.push('');
+    L.push(`❌ REGRESSED — passed at last run, fails now (${d.regressed.length}):`);
+    for (const r of d.regressed) {
+      L.push(`  - ${r.name}`);
+      if (r.firstFailingStep) L.push(`      step:  ${r.firstFailingStep}`);
+      if (r.errorMessage) L.push(`      error: ${r.errorMessage}`);
+    }
   }
   L.push('');
   return L.join('\n');

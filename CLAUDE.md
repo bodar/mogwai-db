@@ -297,16 +297,24 @@ blobless+sparse (self-healed in the L3 test's `beforeAll`).
 - **L1** (`test/conformance/corpus.test.ts`): 2,298 canonical traversals; parse+chain must
   stay 100%.
 - **L3** (`test/conformance/l3.test.ts`): a ratcheted `bun test` — boots the conformance
-  host in-process and runs the official cucumber suite over GraphBinary. TWO gates: (1) the
-  committed passing-SET `test/conformance/l3-passing.txt` (scenario names) — ANY scenario
-  that passed at baseline and fails now is a REGRESSION → fail + name it (with its failing
-  step + error), no noise from the ~740 always-deferred; this catches a net-positive run
-  that silently breaks a green scenario, which the count alone would hide; (2) the count in
-  `baseline.json`: fewer → fail. A clean run (`!CI`) folds new passes into the set + bumps
-  the count, and rewrites the count in every file in `SYNC_FILES` (`README.md` +
-  `docs/feature-support-matrix.md`), each fenced by `<!-- L3:passing -->…<!-- /L3:passing -->`
-  so the prose can't drift; commit `l3-passing.txt` + `baseline.json` + synced files
-  together. CI never rewrites (it only reads). Add a new SYNC consumer by giving it the
+  host in-process and runs the official cucumber suite over GraphBinary. **Telemetry is
+  always on** (no env flag): a live compact progress line (`.` per query, `E` per
+  compile/exec throw) prints during the run, then the systematic-gap summary (deferral
+  buckets + failing-step frequency) after. **One committed state file,
+  `test/conformance/l3-state.json`**, records the last-known run — `{passing, total,
+  passed[], failed[]}` — and is the SINGLE ratchet source of truth (`passing` =
+  `passed.length`; there is no separate `baseline.json`/`l3-passing.txt`). Every run diffs
+  this run against it and prints the **DELTA**: `✅ NEWLY PASSING` (fixes) and `❌ REGRESSED`
+  (a scenario in committed `passed[]` that fails now, with its failing step + error). TWO
+  gates: (1) any regression → fail + name it (no noise from the ~800 always-deferred; catches
+  a net-positive run that silently breaks a green scenario, which the count alone would
+  hide); (2) the count falls below `passing` → fail. A clean run (`!CI`) re-records
+  `l3-state.json` (both sets, so `passed[]` grows AND `failed[]` shrinks) and rewrites the
+  count in every file in `SYNC_FILES` (`README.md` + `docs/feature-support-matrix.md`), each
+  fenced by `<!-- L3:passing -->…<!-- /L3:passing -->` so the prose can't drift; commit
+  `l3-state.json` + synced files together. The per-run NDJSON capture
+  (`l3-telemetry.ndjson`) + `*.summary.json` are transient/gitignored — only `l3-state.json`
+  is durable. CI never rewrites (it only reads). Add a new SYNC consumer by giving it the
   marker + listing it in `SYNC_FILES`. Step scope =
   `test/conformance/tags.ts` (widen as steps land; never narrow). NB `@StepWrite` tags
   the `io().write()` graph-SERIALIZATION step (deliberately excluded), NOT the data-write

@@ -11,7 +11,8 @@ build/
 *.tsbuildinfo
 .wrangler/
 
-# L3 telemetry artifacts (opt-in via MOGWAI_L3_TELEMETRY)
+# L3 telemetry artifacts (always on; transient per-run capture — the durable
+# cross-run state lives in the committed test/conformance/l3-state.json)
 test/conformance/l3-telemetry.ndjson
 test/conformance/*.summary.json
 

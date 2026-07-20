@@ -13,8 +13,8 @@ export interface AppDependencies extends Dependency<'manager', GraphManager> {
   /** Graph-path prefix (`/{pathPrefix}/{id}`). Defaults to `gremlin` in makeRouter.
    *  The bare `/gremlin` stock-client endpoint is fixed and unaffected. */
   pathPrefix?: string;
-  /** Per-query stdout reporter. Defaults to the verbose one-line log; the conformance
-   *  host injects a compact `.`/`E` progress reporter under MOGWAI_L3_TELEMETRY. */
+  /** Per-query stdout reporter. Defaults to the verbose one-line log; the L3 conformance
+   *  host injects a compact `.`/`E` progress reporter. */
   log?: QueryLogger;
 }
 
