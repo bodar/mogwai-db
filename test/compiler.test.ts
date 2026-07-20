@@ -161,6 +161,21 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().valueMap(true).select(Column.keys)', {})).toThrow('valueMap(true)/token re-entry not yet supported');
   });
 
+  test('Commit A: valueMap().unfold() → per-element Map.Entry stream', () => {
+    // unfold() retypes to a per-element entries MapStream (each property row = one entry),
+    // terminal → a mapEntry stream (each frames a size-1 MAP: key=scalar, value=scalar list).
+    const t = read('g.V().valueMap().unfold()');
+    expect(t.shape).toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' }, valOf: { kind: 'list', of: { kind: 'scalar' } } });
+    expect(t.sql).toContain('json_each'); // explode {k:[v]} into entry rows
+    // select(keys)/select(values) per entry: key → scalar, value → its (list) value
+    expect(read('g.V().valueMap().unfold().select(keys)').shape).toEqual({ kind: 'value' });
+    expect(read('g.V().valueMap().unfold().select(values)').shape.kind).toBe('jsonbList');
+    // map(__.select(keys)) is the 1-to-1 form — unwrapped to the same per-entry key select
+    expect(read('g.V().valueMap().unfold().map(__.select(keys))').shape).toEqual({ kind: 'value' });
+    // elementMap().unfold() fails CLOSED (token entries + single values deferred)
+    expect(() => compile('g.V().elementMap().unfold()', {})).toThrow('elementMap() re-entry not yet supported');
+  });
+
   test('order().by(key[, dir]) folds ORDER BY into the projection select', () => {
     const asc = read('g.V().hasLabel("person").order().by("age").values("name")');
     // the order key is the vtype-aware compareKey (numeric for a TEXT-stored big value)

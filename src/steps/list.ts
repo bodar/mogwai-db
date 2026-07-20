@@ -385,6 +385,16 @@ export function compileFromList(s: ListStream, steps: PStep[], at: number): Lowe
 const columnOf = (step: PStep): 'keys' | 'values' | undefined =>
   (step.args ?? []).map((a: any) => a && typeof a === 'object' && a.column).find((c: any) => c === 'keys' || c === 'values');
 
+/** map(__.select(Column)) over a Map.Entry is the 1-to-1 form of a per-entry column
+ *  select — unwrap its single-step body to that select() step (else null → deferral). */
+function mapOfSelect(step: PStep, params: Record<string, any>): PStep | null {
+  if (step.name !== 'map') return null;
+  const arg = (step.args ?? [])[0];
+  if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
+  const body = stepChain((arg as any).nested, params);
+  return body.length === 1 && body[0].name === 'select' && columnOf(body[0]) ? body[0] : null;
+}
+
 /**
  * The map arm of lowerSteps. A MapStream (stream.ts) is a `(mk, mv)` row relation
  * reached only when a follower consumes a group()/groupCount(). select(Column.values)/
@@ -401,8 +411,13 @@ export function compileFromMap(s: MapStream, steps: PStep[], at: number): Loweri
   // Unfolded map (group().unfold()): each row IS one Map.Entry, so select(Column.keys/
   // values) projects THIS entry's key/value per row (not the whole-map aggregate below).
   if (s.entries) {
-    if (step.name !== 'select') throw new Error(`${step.name}() on unfolded map entries not yet supported`);
-    const col = columnOf(step);
+    // Each row IS one Map.Entry. select(Column.keys/values) projects THIS entry's key/value;
+    // map(__.select(Column)) is the 1-to-1 form (map/Unfold.feature g_V_valueMap_unfold_map…)
+    // — its single-step select() body reads the same column per entry. A bare terminal entry
+    // (no follower here) already materialized as a size-1 MAP (materializeMapRoot).
+    const sel = step.name === 'select' ? step : mapOfSelect(step, s.params);
+    if (!sel) throw new Error(`${step.name}() on unfolded map entries not yet supported`);
+    const col = columnOf(sel);
     if (!col) throw new Error('select() on a map entry requires Column.keys or Column.values');
     const c = s.rel.as('c');
     const [src, of] = col === 'values' ? [c.c.mv, s.valOf] : [c.c.mk, s.keyOf];

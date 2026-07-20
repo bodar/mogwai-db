@@ -51,3 +51,57 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
       | result |
       | m[{"person":"d[4].i"}] |
       | m[{"software":"d[2].i"}] |
+  # ---- Commit A: valueMap().unfold() → per-element Map.Entry stream ----
+
+  # The canonical driver (map/Unfold.feature g_V_valueMap_unfold_mapXselectXkeysXX): each
+  # vertex's valueMap is exploded to its entries, then select(keys) reads each entry's key.
+  @gap:map-unfold
+  Scenario: g_V_valueMap_unfold_mapXselectXkeysXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().valueMap().unfold().map(__.select(keys))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | name |
+      | age  |
+      | name |
+      | age  |
+      | name |
+      | lang |
+      | lang |
+      | name |
+      | age  |
+      | name |
+      | name |
+      | age  |
+
+  # Entry-level select(values) reads each entry's value (a valueMap value is a list).
+  @gap:map-unfold
+  Scenario: g_V_hasLabelXsoftwareX_valueMap_unfold_selectXvaluesX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("software").valueMap("name").unfold().select(values)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[lop] |
+      | l[ripple] |
+
+  # A bare terminal valueMap().unfold() materializes each entry as a size-1 MAP.
+  @gap:map-unfold
+  Scenario: g_V_hasLabelXsoftwareX_valueMapXnameX_unfold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("software").valueMap("name").unfold()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"name":"l[lop]"}] |
+      | m[{"name":"l[ripple]"}] |
