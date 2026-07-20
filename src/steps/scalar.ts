@@ -3,7 +3,7 @@ import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx } from '../plan.
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, withoutCarried, type Carry } from './context.ts';
-import { carryOf, toListStream, toScalarStream, type ListStream, type ScalarStream } from './stream.ts';
+import { carryOf, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from './stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, numericSpec } from './coerce.ts';
 import { normalizeTypeName } from '../gremlin-types.ts';
 import { type ValueType } from '../render.ts';
@@ -38,6 +38,21 @@ export function scalarCollectionRetype(s: ScalarStream, kind: 'list' | 'set'): L
     ['list', ...carriedCols(s.carried)],
   );
   return toListStream(carryOf(s), rel, { kind: 'scalar', typed: true }, kind === 'set');
+}
+
+/** Retype a scalar value stream at is(typeOf(MAP)): keep only rows whose stored vtype is 'map'
+ *  and expose each stored map value (a [[keyNode,valNode],…] {t,v}-node blob) as the MapStream
+ *  `map` column — so unfold()/count(local)/select(Column)/framing reuse the one blob substrate
+ *  (mapstream-blob-model). Requires the per-row stored vtype column (values() of a stored prop);
+ *  a computed scalar has no stored map → null (the generic is() static-folds it). */
+export function scalarMapRetype(s: ScalarStream): MapStream | null {
+  if (!s.vtype) return null;
+  const p = s.rel.as('p');
+  const rel = s.q.cte(
+    q`SELECT json(${p.c.v}) AS map${carryFrag(s.carried, p)} FROM ${p} WHERE ${p.c[s.vtype]} = ${value('map')}`,
+    ['map', ...carriedCols(s.carried)],
+  );
+  return toMapStream(carryOf(s), rel, { kind: 'scalar' }, { kind: 'scalar' });
 }
 
 export const SCALAR_TRANSFORMS = new Set([
@@ -592,7 +607,7 @@ export function lowerScalarRows(
     // is(typeOf(LIST)) over a stored-typed stream is a RETYPE (scalar→list), not a value
     // filter — stop so compileFromScalar builds the ListStream. Without a per-row stored
     // vtype (a computed scalar) it stays a fused is() that static-folds to empty.
-    if (step.name === 'is' && stream.vtype && (collectionTypeOf(step) === 'list' || collectionTypeOf(step) === 'set')) break;
+    if (step.name === 'is' && stream.vtype && collectionTypeOf(step) !== null) break;
     if (SCALAR_TRANSFORMS.has(step.name) || step.name === 'is') {
       const fused = fuseScalarSegment(stream, steps, i);
       stream = fused.stream;

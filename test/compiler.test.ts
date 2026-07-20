@@ -136,22 +136,22 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('P3 Stage B: valueMap() re-enterable — select(Column), count, is(typeOf(MAP))', () => {
-    // valueMap() → a per-element MapStream (json_each over the {k:[v]} JSON, tagged by a
-    // per-element origin o0); select(Column.keys) aggregates one list PER origin.
+    // valueMap() → a per-element whole-map blob MapStream (one `map` blob per element, folding
+    // {k:[v]} into [[{t,v},valueList],…]); select(Column.keys) aggregates one key-list per map.
     const keys = read('g.V().valueMap().select(Column.keys)');
     expect(keys.sql).toContain('json_each');
-    expect(keys.sql).toContain('ROW_NUMBER() OVER () AS o0');
-    expect(keys.sql).toContain('GROUP BY');
-    expect(keys.shape).toEqual({ kind: 'jsonbList' });
+    expect(keys.sql).toContain('json_group_array(json_array('); // per-element blob assembly
+    // the keys list holds typed {t,v} string nodes (uniform typed map encoding)
+    expect(keys.shape).toEqual({ kind: 'jsonbList', typed: true });
     // key subset filters at SQL level (je.key IN (?)); values().unfold() explodes per element
     const vals = read("g.V().valueMap('location').select(Column.values).unfold()");
     expect(vals.sql).toContain('je.key IN (?)');
     // count() over maps = one per element = count of elements; is(typeOf(MAP)) is identity
     expect(read('g.V().valueMap().count()').shape).toEqual({ kind: 'count' });
     expect(read('g.V().valueMap().is(typeOf(GType.MAP)).count()').shape).toEqual({ kind: 'count' });
-    // per-element list ops thread the origin (o0) through unfold + set-ops (was a crash)
+    // per-element list ops (unfold + set-ops) compose over the derived value list (was a crash)
     const combined = read("g.V().valueMap('location').select(Column.values).unfold().combine(['seattle'])");
-    expect(combined.sql).toContain('o0');
+    expect(combined.sql).toContain('json_each');
     // select(unbound-label) → empty (TinkerPop); a bound as()-label defers
     expect(read("g.V().valueMap().select('a')").sql).toContain('WHERE 0');
     expect(read("g.V().valueMap().select(Pop.first,'a')").sql).toContain('WHERE 0');
@@ -162,18 +162,40 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('Commit A: valueMap().unfold() → per-element Map.Entry stream', () => {
-    // unfold() retypes to a per-element entries MapStream (each property row = one entry),
-    // terminal → a mapEntry stream (each frames a size-1 MAP: key=scalar, value=scalar list).
+    // valueMap().unfold(): valueMap retypes to a per-element whole-map blob MapStream, unfold()
+    // explodes it to a per-entry MapEntryStream (key = typed {t,v} scalar, value = its list).
     const t = read('g.V().valueMap().unfold()');
     expect(t.shape).toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' }, valOf: { kind: 'list', of: { kind: 'scalar' } } });
-    expect(t.sql).toContain('json_each'); // explode {k:[v]} into entry rows
-    // select(keys)/select(values) per entry: key → scalar, value → its (list) value
-    expect(read('g.V().valueMap().unfold().select(keys)').shape).toEqual({ kind: 'value' });
+    expect(t.sql).toContain('json_each'); // explode the map blob into entry rows
+    // select(keys) per entry → the key, framed by its own stored type (a typed {t,v} node).
+    expect(read('g.V().valueMap().unfold().select(keys)').shape).toEqual({ kind: 'value', perRowType: true });
+    // select(values) per entry → the value (a valueMap value is a list) → a list value.
     expect(read('g.V().valueMap().unfold().select(values)').shape.kind).toBe('jsonbList');
     // map(__.select(keys)) is the 1-to-1 form — unwrapped to the same per-entry key select
-    expect(read('g.V().valueMap().unfold().map(__.select(keys))').shape).toEqual({ kind: 'value' });
+    expect(read('g.V().valueMap().unfold().map(__.select(keys))').shape).toEqual({ kind: 'value', perRowType: true });
     // elementMap().unfold() fails CLOSED (token entries + single values deferred)
     expect(() => compile('g.V().elementMap().unfold()', {})).toThrow('elementMap() re-entry not yet supported');
+  });
+
+  test('Commit C: is(typeOf(MAP)) over a stored map property → MapStream retype', () => {
+    // A stored map property (vtype='map') retypes to a whole-map blob MapStream: the stored
+    // value (a [[keyNode,valNode],…] {t,v}-node blob) becomes the `map` column, filtered to map rows.
+    const t = read("g.V().values('m').is(typeOf(GType.MAP))");
+    expect(t.shape).toEqual({ kind: 'mapValue' });      // terminal → frame each whole map
+    expect(t.sql).toContain("= ?");                      // WHERE vtype = 'map'
+    // count(Scope.local) → entry count (map size) via json_array_length
+    const cnt = read("g.V().values('m').is(typeOf(GType.MAP)).count(Scope.local)");
+    expect(cnt.shape).toEqual({ kind: 'count' });
+    expect(cnt.sql).toContain('json_array_length');
+    // select(values)/select(keys) → one list value (typed items); unfold() → per-entry MapEntryStream
+    expect(read("g.V().values('m').is(typeOf(GType.MAP)).select(values)").shape).toEqual({ kind: 'jsonbList', typed: true });
+    expect(read("g.V().values('m').is(typeOf(GType.MAP)).unfold()").shape.kind).toBe('mapEntry');
+    // richer followers fail CLOSED (correct-by-design deferral, not mis-execution)
+    expect(() => compile("g.V().values('m').is(typeOf(GType.MAP)).where(count(Scope.local).is(P.gt(1)))", {})).toThrow('where() on a map value not yet supported');
+    expect(() => compile("g.V().values('m').is(typeOf(GType.MAP)).fold()", {})).toThrow('fold() on a map value not yet supported');
+    // a stored scalar of another type (age=int) retypes+filters to EMPTY (WHERE vtype='map'
+    // matches no row) — exactly like is(typeOf(LIST)) on a non-list; a correct empty result.
+    expect(read("g.V().values('age').is(typeOf(GType.MAP))").shape.kind).toBe('mapValue');
   });
 
   test('order().by(key[, dir]) folds ORDER BY into the projection select', () => {
@@ -438,9 +460,9 @@ describe('compiler SQL snapshots', () => {
     // key per row (scalar), not the whole-map aggregate. Trailing unfold() is scalar-identity.
     const keys = read("g.V().outE().values('weight').groupCount().unfold().select(Column.keys).unfold()");
     expect(keys.shape.kind).toBe('value');
-    // select(Column.values) → the entry's value (count → Long) per row
+    // select(Column.values) → the entry's value framed by its own stored type (typed {t,v} node)
     expect(read("g.V().outE().values('weight').groupCount().unfold().select(Column.values).unfold()").shape)
-      .toEqual({ kind: 'value', as: 'long' });
+      .toEqual({ kind: 'value', perRowType: true });
     // element-valued group entries now re-enter via the list-of-element-rid substrate:
     // each entry's value is a list of the out() vertices (json_group_array of v_rid).
     const ev = read("g.V().group().by('name').by(__.out().fold()).unfold().select(Column.values)");
@@ -448,20 +470,23 @@ describe('compiler SQL snapshots', () => {
   });
 
   test('Commit B: a bare terminal Map.Entry stream materializes (size-1 MAP per entry)', () => {
-    // group()/groupCount().unfold() with NO following select is now a terminal value:
-    // each (mk,mv) entry row frames as a size-1 GraphBinary MAP (mapEntry shape).
+    // group()/groupCount().unfold() with NO following select is a terminal value: the group
+    // becomes a whole-map blob (MapStream), unfold() explodes it to a per-entry MapEntryStream,
+    // and each entry row frames as a size-1 GraphBinary MAP. Scalar sides are typed {t,v} nodes.
     expect(read('g.V().groupCount().by(T.label).unfold()').shape)
-      .toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar', as: 'long' } });
+      .toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } });
     // scalar key + scalar-reducer value
     expect(read('g.V().group().by(T.label).by(__.count()).unfold()').shape.kind).toBe('mapEntry');
-    // scalar key + scalar-LIST value (by('name') → json_group_array of values)
+    // scalar key + scalar-LIST value (by('name') → the value side is a list)
     const sl = read("g.V().group().by(T.label).by('name').unfold()");
     expect(sl.shape).toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' }, valOf: { kind: 'list', of: { kind: 'scalar' } } });
     // an ELEMENT-list value: the value column expands its rowids to full element payloads
-    // at the root (json_group_array + json_object over nodes), like the list substrate.
+    // at the root (json_object over nodes), like the list substrate.
     const ev = read("g.V().hasLabel('software').group().by('name').unfold()");
     expect(ev.shape.kind).toBe('mapEntry');
     expect(ev.sql).toContain('json_object');
+    // the group is assembled as ONE whole-map blob before unfold explodes it
+    expect(read('g.V().groupCount().by(T.label).unfold()').sql).toContain('json_group_array');
   });
 
   test('group()/groupCount() always lowers to GroupStream; Column selection derives MapStream', () => {
@@ -470,15 +495,16 @@ describe('compiler SQL snapshots', () => {
     // A Column consumer derives MapStream; select(Column.values) aggregates the
     // value column into a list value (one row), unfold() explodes it. Count → Long tag.
     const gv = read('g.V().groupCount().by("name").select(Column.values)');
-    expect(gv.shape).toEqual({ kind: 'jsonbList', as: 'long' });
+    // the value list holds self-describing {t,v} nodes (each count typed), so it frames typed.
+    expect(gv.shape).toEqual({ kind: 'jsonbList', typed: true });
     expect(gv.sql).toContain('json_group_array');
-    expect(read('g.V().groupCount().by("name").select(Column.values).unfold()').shape).toEqual({ kind: 'value', as: 'long' });
-    // select(Column.keys) over a scalar key → a scalar stream on unfold.
-    expect(read('g.V().groupCount().by("name").select(Column.keys).unfold()').shape).toEqual({ kind: 'value' });
+    expect(read('g.V().groupCount().by("name").select(Column.values).unfold()').shape).toEqual({ kind: 'value', perRowType: true });
+    // select(Column.keys) over a scalar key → a typed scalar stream on unfold.
+    expect(read('g.V().groupCount().by("name").select(Column.keys).unfold()').shape).toEqual({ kind: 'value', perRowType: true });
     // Element keys (bare groupCount()) carry their rowid → unfold rejoins vertices.
     expect(read('g.V().groupCount().select(Column.keys).unfold()').shape).toEqual({ kind: 'vertex' });
-    // group().by(k).by(__.count()) → same scalar-valued map path.
-    expect(read('g.V().group().by("name").by(__.count()).select(Column.values).unfold()').shape).toEqual({ kind: 'value', as: 'long' });
+    // group().by(k).by(__.count()) → same scalar-valued map path (typed count node → per-row type).
+    expect(read('g.V().group().by("name").by(__.count()).select(Column.values).unfold()').shape).toEqual({ kind: 'value', perRowType: true });
     const childKey = read('g.V().groupCount().by(__.out().count())');
     expect(childKey.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
     expect(childKey.sql).toContain('ROW_NUMBER() OVER () AS o0');
@@ -581,7 +607,7 @@ describe('compiler SQL snapshots', () => {
   test("cap('a') of a group side-effect retypes to a MapStream on a follower", () => {
     // A group('a')/groupCount('a') side-effect, re-emitted by cap('a'), is re-enterable
     // too: select(Column.values)/unfold compose exactly like an inline group().
-    expect(read('g.V().groupCount("a").by("name").cap("a").select(Column.values).unfold()').shape).toEqual({ kind: 'value', as: 'long' });
+    expect(read('g.V().groupCount("a").by("name").cap("a").select(Column.values).unfold()').shape).toEqual({ kind: 'value', perRowType: true });
     expect(read('g.V().group("a").by().by(__.out().label().fold()).cap("a").select(Column.values).unfold()').shape).toEqual({ kind: 'jsonbList' });
   });
 

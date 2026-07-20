@@ -35,6 +35,12 @@ const TYPED_SEED = [
   + '.property("u", UUID("0263f28b-eff9-4c17-8e33-0b41c74b6d4c"))', // uuid
 ];
 
+// A vertex carrying a stored MAP property (the official Map.feature @AllowMapPropertyValues
+// graphs), so is(typeOf(GType.MAP)) → MapStream retype scenarios can read it back end-to-end.
+const MAPDATA_SEED = [
+  'g.addV("data").property("name", "test").property("m", ["a": 1, "b": 2, "c": 3])',
+];
+
 const ADDENDUM = new URL('./addendum/', import.meta.url).pathname;
 
 interface Scenario { feature: string; name: string; graph: string; gremlin: string; expected: string[]; }
@@ -144,7 +150,7 @@ function canon(v: unknown): string {
   return 'J' + JSON.stringify(v);
 }
 
-const GRAPHS: Record<string, readonly string[]> = { modern: MODERN_SEED, crew: CREW_SEED, typed: TYPED_SEED, empty: [] };
+const GRAPHS: Record<string, readonly string[]> = { modern: MODERN_SEED, crew: CREW_SEED, typed: TYPED_SEED, mapdata: MAPDATA_SEED, empty: [] };
 
 function loadScenarios(): Scenario[] {
   return readdirSync(ADDENDUM)

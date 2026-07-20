@@ -95,10 +95,21 @@ export interface ListStream extends Carry {
  *  projected out via select(Column) → unfold, or framed out at a terminal Map.Entry). */
 export type { MapOf };
 
-/** A map value as a `(mk, mv)` row relation — one row per entry. A simple GroupStream
- * derives this layout when select(Column.values/keys) consumes it; Map-unfold will
- * eventually use the same form. `keyOf`/`valOf` describe re-entry shape. */
-export interface MapStream extends Carry { readonly kind: 'map'; readonly rel: Relation; readonly keyOf: MapOf; readonly valOf: MapOf; readonly entries?: boolean; }
+/** A map VALUE — one whole map per row, in a single JSONB `map` column holding an ordered
+ * `[[keyNode, valNode], …]` pairs array (the same self-describing shape a stored map property
+ * uses). This mirrors ListStream (one `list` blob per row): the map stays a first-class value
+ * through the core, and the conversion to a per-entry Map.Entry stream (+ its size-1-MAP wire
+ * framing) is pushed to unfold() / the root, never baked into the stream. Every producer
+ * (group/groupCount/valueMap/is(typeOf(MAP))) builds this one shape. `keyOf`/`valOf` describe
+ * each side's shape (scalar/element/list) so unfold/select(Column)/framing know how to read it. */
+export interface MapStream extends Carry { readonly kind: 'map'; readonly rel: Relation; readonly keyOf: MapOf; readonly valOf: MapOf; }
+
+/** The per-entry stream unfold() produces FROM a MapStream — a `(mk, mv)` row relation, one
+ * row per Map.Entry. It exists only between unfold() and its consumer (select(Column.keys/
+ * values), map(__.select(…)), or the root, where each entry frames as a size-1 MAP). Keeping
+ * it distinct from MapStream is the point: a map is a blob VALUE in the core; entries are a
+ * near-wire shape that appears only once you explode the map. `keyOf`/`valOf` carry over. */
+export interface MapEntryStream extends Carry { readonly kind: 'mapEntry'; readonly rel: Relation; readonly keyOf: MapOf; readonly valOf: MapOf; }
 
 /** The traverser stream shapes a compile phase can be in. */
 /** A stream of Property/VertexProperty traversers. Properties are element-like at
@@ -162,7 +173,7 @@ export interface ResultStream {
   readonly shape: Shape;
 }
 
-export type RelationalStream = ElementStream | ScalarStream | VariantStream | ListStream | MapStream | PropertyStream | RecordStream | GroupStream | PathStream;
+export type RelationalStream = ElementStream | ScalarStream | VariantStream | ListStream | MapStream | MapEntryStream | PropertyStream | RecordStream | GroupStream | PathStream;
 export type Stream = RelationalStream | ResultStream;
 
 /** A shape compiler yields this token when lowering should continue with a new
@@ -263,7 +274,8 @@ export function streamColumns(s: Stream): readonly string[] {
     : s.kind === 'scalar' ? [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...(s.vtype ? [s.vtype] : [])]
     : s.kind === 'variant' ? ['vk', 'v', 'rid', ...(s.listOf ? ['list'] : [])]
     : s.kind === 'list' ? ['list']
-    : s.kind === 'map' ? ['mk', 'mv']
+    : s.kind === 'map' ? ['map']
+    : s.kind === 'mapEntry' ? ['mk', 'mv']
     : s.kind === 'property' ? [...PROPERTY_PAYLOAD]
     : s.kind === 'record' ? s.fields.flatMap(recordFieldColumns)
     : s.kind === 'group' ? groupColumns(s)
@@ -306,8 +318,10 @@ export const toVariantStream = (c: Carry, rel: Relation, arms: VariantArms, resu
   assertStreamColumns({ ...c, kind: 'variant', rel, scalarAs: arms.scalarAs, node: arms.node, edge: arms.edge, listOf: arms.listOf, result });
 export const toListStream = (c: Carry, rel: Relation, of: ListOf, set?: boolean): ListStream =>
   assertStreamColumns({ ...c, kind: 'list', rel, of, set });
-export const toMapStream = (c: Carry, rel: Relation, keyOf: MapOf, valOf: MapOf, entries?: boolean): MapStream =>
-  assertStreamColumns({ ...c, kind: 'map', rel, keyOf, valOf, entries });
+export const toMapStream = (c: Carry, rel: Relation, keyOf: MapOf, valOf: MapOf): MapStream =>
+  assertStreamColumns({ ...c, kind: 'map', rel, keyOf, valOf });
+export const toMapEntryStream = (c: Carry, rel: Relation, keyOf: MapOf, valOf: MapOf): MapEntryStream =>
+  assertStreamColumns({ ...c, kind: 'mapEntry', rel, keyOf, valOf });
 export const toPropertyStream = (c: Carry, rel: Relation, ownerElem: Elem): PropertyStream =>
   assertStreamColumns({ ...c, kind: 'property', rel, ownerElem });
 export const toRecordStream = (c: Carry, rel: Relation, fields: readonly RecordField[]): RecordStream =>
@@ -321,4 +335,4 @@ export const toPathStream = (c: Carry, rel: Relation, layout: PathLayout): PathS
  *  aggregates it: a scalar carries its type tag, an element rejoins on unfold, a
  *  list-valued column becomes a list-of-lists (one nesting level deeper). */
 export const mapOfToListOf = (m: MapOf): ListOf =>
-  m.kind === 'elem' ? { kind: 'elem', elem: m.elem } : m.kind === 'list' ? { kind: 'list', of: m.of } : { kind: 'scalar', as: m.as };
+  m.kind === 'elem' ? { kind: 'elem', elem: m.elem } : m.kind === 'list' ? { kind: 'list', of: m.of } : { kind: 'scalar', typed: true };

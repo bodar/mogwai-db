@@ -2,7 +2,7 @@ import { q, value, list, empty, type Expression, type Relation } from '../q.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
 import {
   scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps,
-  storedValueExpr, bareValueMapProps, type ScalarCtx,
+  storedValueExpr, bareValueMapProps, typedScalarNode, type ScalarCtx,
 } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
@@ -455,7 +455,7 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
  * carried alias/path/branch/sack state defer (the origin ordinal would collide / tokens
  * need extra entry keys).
  */
-export function lowerValueMap(st: ElementStream, proj: PStep, entries = false): MapStream {
+export function lowerValueMap(st: ElementStream, proj: PStep): MapStream {
   if (proj.name === 'elementMap') throw new Error('elementMap() re-entry not yet supported');
   if (proj.args.includes(true)) throw new Error('valueMap(true)/token re-entry not yet supported');
   if (st.carried.aliases.size || st.carried.path || st.carried.origins.length || st.carried.sack || st.carried.fromV)
@@ -465,23 +465,24 @@ export function lowerValueMap(st: ElementStream, proj: PStep, entries = false): 
   const n = elemRel(st);
   const l = labels.as('l');
   const vlJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
-  // One row per element: its {key:[values]} JSON + a per-element origin ordinal. This
-  // re-entry feeds the UNTYPED list substrate (select(Column.values) → set-ops/order/conjoin),
-  // so it uses the BARE props aggregation — each value embeds without the {t,v} envelope, so a
-  // collection-valued property round-trips as a real nested list (not the typed tree, and not a
-  // double-encoded string). Terminal valueMap() framing uses the typed valueMapProps instead.
-  const base = st.q.cte(q`SELECT ROW_NUMBER() OVER () AS o0, ${bareValueMapProps(n, st.elem)} AS props FROM ${vlJoin}`, ['o0', 'props']);
+  // One WHOLE-MAP blob per element (mapstream-blob-model): fold its {key:[values]} props into an
+  // ordered [[keyNode, valueList], …] pairs array. The key is a string → a self-describing {t,v}
+  // scalar node (the uniform typed encoding); the value is the property's value list (a JSON
+  // array, embedded via json() — a collection value round-trips as a real nested list, not the
+  // typed tree, matching the UNTYPED list substrate the value side feeds). Terminal valueMap()
+  // framing uses the typed valueMapProps instead (this path is the re-enterable follower form).
+  const base = st.q.cte(q`SELECT ${bareValueMapProps(n, st.elem)} AS props FROM ${vlJoin}`, ['props']);
   const b = base.as('b');
   const keyFilter = keys.length ? q` WHERE je.key IN (${list(keys.map((k) => value(k)), ', ')})` : empty;
-  const rel = st.q.cte(q`SELECT je.key AS mk, je.value AS mv, ${b.c.o0} AS o0 FROM ${b}, json_each(${b.c.props}) je${keyFilter}`, ['mk', 'mv', 'o0']);
-  // The re-entry replaces per-traverser identity with a fresh per-element ordinal scope
-  // (o0 via ROW_NUMBER), so the element source's carried bulk is consumed here, not carried
-  // into the map rel — clear it (behaviour-identical: bulk was 1 per element).
-  const carry: Carry = { ...carryOf(st), carried: carriedWith(st.carried, { origins: ['o0'], bulk: null }) };
-  // key = a bare string; value = the property's value list (json array per entry). entries:true
-  // for unfold() (each row is one Map.Entry, materialized/selected per row); false for
-  // select(Column.*) (compileFromMap aggregates the rows into one list per origin).
-  return toMapStream(carry, rel, { kind: 'scalar' }, { kind: 'list', of: { kind: 'scalar' } }, entries);
+  const pair = q`json_array(json_object('t', 'string', 'v', je.key), json(je.value))`;
+  const rel = st.q.cte(
+    q`SELECT jsonb(COALESCE((SELECT json_group_array(${pair} ORDER BY je.key) FROM json_each(${b.c.props}) je${keyFilter}), json('[]'))) AS map FROM ${b}`,
+    ['map'],
+  );
+  // A fresh per-element scope: the element source's carried bulk is consumed here (was 1 per
+  // element), and no origin ordinal is needed now that each element is its own blob row.
+  const carry: Carry = { ...carryOf(st), carried: carriedWith(st.carried, { bulk: null }) };
+  return toMapStream(carry, rel, { kind: 'scalar' }, { kind: 'list', of: { kind: 'scalar' } });
 }
 
 /** groupCount() over a SCALAR value stream — a barrier grouping by the value itself:
@@ -519,57 +520,52 @@ export function compileFromGroup(s: GroupStream, steps: PStep[], at: number): Lo
     const rel = s.q.cte(q`SELECT COUNT(DISTINCT ${g.c.gk}) AS v FROM ${g}`, ['v']);
     return continueLowering(toScalarStream(withoutCarried(carryOf(s)), rel, 'long', { result: 'count' }), at + 1);
   }
-  // unfold() → Map.Entry stream: the SAME (mk,mv) entry rows, but per-entry (a following
-  // select(Column.keys/values) projects one row's key/value, not the aggregate).
-  if (step.name === 'unfold') {
-    const { rel, keyOf, valOf } = deriveGroupEntries(s);
-    return continueLowering(toMapStream(carryOf(s), rel, keyOf, valOf, true), at + 1);
-  }
-  const column = step.name === 'select'
-    ? step.args.map((a: any) => a && typeof a === 'object' && a.column).find((c: any) => c === 'keys' || c === 'values')
-    : undefined;
-  if (!column) throw new Error(`${step.name}() on a group value not yet supported`);
-  const { rel, keyOf, valOf } = deriveGroupEntries(s);
+  // unfold() and select(Column.keys/values) consume the group AS a map VALUE → derive the
+  // whole-map blob and re-enter as a MapStream (compileFromMap then unfolds / selects / frames).
+  if (step.name !== 'unfold' && step.name !== 'select') throw new Error(`${step.name}() on a group value not yet supported`);
+  const { rel, keyOf, valOf } = deriveGroupMap(s);
   return continueLowering(toMapStream(carryOf(s), rel, keyOf, valOf), at);
 }
 
-/** Derive the `(mk, mv)` entry relation of a rich group barrier — shared by the
- * whole-map select(Column) consumer (aggregate) and the per-entry unfold() consumer. */
-function deriveGroupEntries(s: GroupStream): { rel: Relation; keyOf: MapOf; valOf: MapOf } {
+/** Derive the whole-map VALUE blob of a rich group barrier: ONE JSONB `map` column per group
+ * (a global group → one row; unused origins would group per-origin), holding an ordered
+ * `[[keyNode, valNode], …]` pairs array. Scalar key/value sides are self-describing {t,v}
+ * nodes (the uniform typed encoding, mapstream-blob-model); an element key or element-list
+ * value keeps bare rowids for downstream rejoin. Shared by unfold()/select(Column)/is(MAP). */
+function deriveGroupMap(s: GroupStream): { rel: Relation; keyOf: MapOf; valOf: MapOf } {
   const g = s.rel.as('g');
-  let mk: Expression, keyOf: MapOf, groupKey: Expression;
-  if (s.key.kind === 'scalar') { mk = g.c.gk; keyOf = { kind: 'scalar', as: s.key.as }; groupKey = g.c.gk; }
+  let keyNode: Expression, keyOf: MapOf, groupKey: Expression;
+  if (s.key.kind === 'scalar') { keyNode = typedScalarNode(g.c.gk, s.key.as); keyOf = { kind: 'scalar' }; groupKey = g.c.gk; }
   else if (s.key.kind === 'element') {
-    mk = g.c.k_rid; groupKey = g.c.k_rid;
+    keyNode = g.c.k_rid; groupKey = g.c.k_rid;
     keyOf = { kind: 'elem', elem: s.key.elem === 'edge' ? 'edge' : 'node' };
   } else throw new Error('select(Column)/unfold() over a composite project() group key not yet supported');
   const where = s.key.kind === 'scalar' && !s.key.productive ? q` WHERE ${g.c.gk} IS NOT NULL` : empty;
 
-  // An element-valued group lays its values out as one framed row per member (groupBy=false).
-  // The rows carry an internal rowid (v_rid); re-entry collapses them into ONE list-of-element-
-  // rids entry per key — the same list-of-elem substrate fold() produces, so unfold()/framing
-  // rejoins nodes/edges by rowid.
+  // An element-valued group lays its values out as one framed row per member (groupBy=false),
+  // carrying an internal rowid (v_rid). Per key, fold the member rowids into ONE list-of-elem
+  // entry — the same list-of-elem substrate fold() produces (unfold()/framing rejoins by rowid).
+  let valNode: Expression, valOf: MapOf;
   if (s.val.kind === 'elementList') {
     if (s.val.elem === 'property') throw new Error('select(Column)/unfold() over a group of property-element values not yet supported');
     const elem = s.val.elem === 'edge' ? 'edge' : 'node';
-    // FILTER out the NULL v_rid rows a member with no value element contributes (the value
-    // layout LEFT JOINs), matching the handler's terminal fold which skips them.
-    const rel = s.q.cte(
-      q`SELECT ${mk} AS mk, jsonb(COALESCE(json_group_array(${g.c.v_rid}) FILTER (WHERE ${g.c.v_rid} IS NOT NULL), json('[]'))) AS mv FROM ${g}${where} GROUP BY ${groupKey}`,
-      ['mk', 'mv'],
-    );
-    return { rel, keyOf, valOf: { kind: 'list', of: { kind: 'elem', elem } } };
-  }
-  if (s.val.kind === 'elementLast')
+    valNode = q`jsonb(COALESCE(json_group_array(${g.c.v_rid}) FILTER (WHERE ${g.c.v_rid} IS NOT NULL), json('[]')))`;
+    valOf = { kind: 'list', of: { kind: 'elem', elem } };
+  } else if (s.val.kind === 'elementLast') {
     throw new Error('select(Column)/unfold() over a group of single-element (tail) values not yet supported');
-
-  let mv: Expression, valOf: MapOf;
-  if (s.val.kind === 'count') { mv = g.c.gv; valOf = { kind: 'scalar', as: 'long' }; }
-  else if (s.val.kind === 'sum') { mv = g.c.gv; valOf = { kind: 'scalar' }; }
-  else if (s.val.kind === 'list' || s.val.kind === 'scalarList') { mv = g.c.gv; valOf = { kind: 'list', of: { kind: 'scalar' } }; }
+  } else if (s.val.kind === 'count') { valNode = typedScalarNode(g.c.gv, 'long'); valOf = { kind: 'scalar' }; }
+  else if (s.val.kind === 'sum') { valNode = typedScalarNode(g.c.gv); valOf = { kind: 'scalar' }; }
+  else if (s.val.kind === 'list' || s.val.kind === 'scalarList') { valNode = q`json(${g.c.gv})`; valOf = { kind: 'list', of: { kind: 'scalar' } }; }
   else throw new Error('select(Column)/unfold() over this rich group value layout not yet supported');
 
-  const rel = s.q.cte(q`SELECT ${mk} AS mk, ${mv} AS mv FROM ${g}${where}`, ['mk', 'mv']);
+  // One pair per group key. An element-list value already aggregates member rows (GROUP BY key);
+  // a scalar/count/sum value is one row per key. Both fold into a single `map` blob per group.
+  const pair = q`json_array(${keyNode}, ${valNode})`;
+  const perKey = s.val.kind === 'elementList'
+    ? s.q.cte(q`SELECT ${pair} AS pair FROM ${g}${where} GROUP BY ${groupKey}`, ['pair'])
+    : s.q.cte(q`SELECT ${pair} AS pair FROM ${g}${where}`, ['pair']);
+  const pk = perKey.as('pk');
+  const rel = s.q.cte(q`SELECT jsonb(COALESCE(json_group_array(json(${pk.c.pair})), json('[]'))) AS map FROM ${pk}`, ['map']);
   return { rel, keyOf, valOf };
 }
 

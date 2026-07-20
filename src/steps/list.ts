@@ -9,7 +9,7 @@ import { q, value, raw, list, empty, type Expression, type Relation } from '../q
 import { predicateSql, scalarTx } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { carryOf, continueLowering, dispatchShapeTail, toListStream, toResultStream, toScalarStream, mapOfToListOf, type ListStream, type LoweringResult, type ScalarStream, type MapStream, type ShapeTailFn } from './stream.ts';
+import { carryOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toResultStream, toScalarStream, mapOfToListOf, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type ScalarStream, type MapStream, type ShapeTailFn } from './stream.ts';
 import { carryFrag, carriedCols, type ElementStream } from './context.ts';
 import { type Compiled } from '../render.ts';
 import { compileRead } from './index.ts';
@@ -395,59 +395,83 @@ function mapOfSelect(step: PStep, params: Record<string, any>): PStep | null {
   return body.length === 1 && body[0].name === 'select' && columnOf(body[0]) ? body[0] : null;
 }
 
+/** Is this an is(typeOf(GType.MAP)) identity assert? (A map value IS a map.) */
+function isMapTypeOf(step: PStep): boolean {
+  if (step.name !== 'is') return false;
+  const pred = (step.args ?? [])[0];
+  if (!pred || typeof pred !== 'object' || pred.op !== 'typeOf') return false;
+  const arg = pred.values?.[0];
+  const name = (arg && typeof arg === 'object' && 'gtype' in arg) ? String(arg.gtype) : typeof arg === 'string' ? arg : null;
+  return !!name && name.toUpperCase() === 'MAP';
+}
+
+/** Extract one side (key=$[0] / value=$[1]) of a blob pair `je.value`. A scalar side is a
+ *  {t,v} node kept as JSON (`->`, framed via frameTypedNode); an element side is a bare rowid
+ *  (`->>`, rejoined downstream); a list side is a JSON array kept as JSON. */
+const pairSide = (pair: Expression, idx: 0 | 1, of: MapOf): Expression =>
+  of.kind === 'elem' ? q`${pair} ->> ${raw(`'$[${idx}]'`)}` : q`${pair} -> ${raw(`'$[${idx}]'`)}`;
+
 /**
- * The map arm of lowerSteps. A MapStream (stream.ts) is a `(mk, mv)` row relation
- * reached only when a follower consumes a group()/groupCount(). select(Column.values)/
- * select(Column.keys) aggregate one column into a single list value (mirroring how
- * fold() builds a list), which unfold()/framing then handles — so
- * group().select(Column.values).unfold() flows map→list→scalar. Map-unfold (→ Map.Entry)
- * and select(Column) with a trailing key defer with a clear message.
+ * The map arm of lowerSteps. A MapStream is a whole-map VALUE per row (a JSONB `map` blob of
+ * ordered [[keyNode,valNode],…] pairs). is(typeOf(MAP)) is identity; count(Scope.local) is the
+ * entry count; select(Column.keys/values) aggregates one side into a list VALUE; unfold()
+ * explodes the pairs into a per-entry MapEntryStream; a bare terminal frames each blob as a
+ * whole MAP (materializeMapRoot). fold()/where and richer followers defer with a clear message.
  */
 export function compileFromMap(s: MapStream, steps: PStep[], at: number): LoweringResult {
-  // Terminal is unreachable: a group() only retypes to a MapStream when a follower
-  // exists (else it stays the row-folding groupBuffer path).
   if (at >= steps.length) throw new Error('a map value at end of chain should not be a MapStream');
   const step = steps[at];
-  // Unfolded map (group().unfold()): each row IS one Map.Entry, so select(Column.keys/
-  // values) projects THIS entry's key/value per row (not the whole-map aggregate below).
-  if (s.entries) {
-    // Each row IS one Map.Entry. select(Column.keys/values) projects THIS entry's key/value;
-    // map(__.select(Column)) is the 1-to-1 form (map/Unfold.feature g_V_valueMap_unfold_map…)
-    // — its single-step select() body reads the same column per entry. A bare terminal entry
-    // (no follower here) already materialized as a size-1 MAP (materializeMapRoot).
-    const sel = step.name === 'select' ? step : mapOfSelect(step, s.params);
-    if (!sel) throw new Error(`${step.name}() on unfolded map entries not yet supported`);
-    const col = columnOf(sel);
-    if (!col) throw new Error('select() on a map entry requires Column.keys or Column.values');
-    const c = s.rel.as('c');
-    const [src, of] = col === 'values' ? [c.c.mv, s.valOf] : [c.c.mk, s.keyOf];
-    if (of.kind === 'elem') throw new Error('select(Column) of an element key/value on unfolded entries not yet supported');
-    if (of.kind === 'list')
-      return continueLowering(toListStream(carryOf(s), s.q.cte(q`SELECT json(${src}) AS list${carryFrag(s.carried, c)} FROM ${c}`, ['list', ...carriedCols(s.carried)]), of.of), at + 1);
-    return continueLowering(toScalarStream(carryOf(s), s.q.cte(q`SELECT ${src} AS v${carryFrag(s.carried, c)} FROM ${c}`, ['v', ...carriedCols(s.carried)]), of.as), at + 1);
+  const c = s.rel.as('c');
+  // is(typeOf(MAP)) — a map IS a map → identity.
+  if (isMapTypeOf(step)) return continueLowering(s, at + 1);
+  // count(Scope.local) → number of entries (map size).
+  if (step.name === 'count' && isLocal(step)) {
+    const rel = s.q.cte(q`SELECT json_array_length(json(${c.c.map})) AS v${carryFrag(s.carried, c)} FROM ${c}`, ['v', ...carriedCols(s.carried)]);
+    return continueLowering(toScalarStream(carryOf(s), rel, 'long', { result: 'count' }), at + 1);
   }
+  // unfold() → a per-entry Map.Entry stream (explode the pairs; each side extracted per its shape).
+  if (step.name === 'unfold') {
+    const je = q`json_each(json(${c.c.map})) je`;
+    const rel = s.q.cte(
+      q`SELECT ${pairSide(q`je.value`, 0, s.keyOf)} AS mk, ${pairSide(q`je.value`, 1, s.valOf)} AS mv${carryFrag(s.carried, c)} FROM ${c}, ${je} ORDER BY je.key`,
+      ['mk', 'mv', ...carriedCols(s.carried)],
+    );
+    return continueLowering(toMapEntryStream(carryOf(s), rel, s.keyOf, s.valOf), at + 1);
+  }
+  // select(Column.keys/values) → aggregate one side of every entry into a single list VALUE.
   if (step.name === 'select') {
     const col = columnOf(step);
     if (!col) throw new Error('select() on a map value requires Column.keys or Column.values');
-    const c = s.rel.as('c');
-    // Column.values → all values as one list; Column.keys → all keys as one list.
-    // COALESCE to '[]' so an empty map still yields one (empty) list, not NULL.
-    const [srcCol, of, nested] = col === 'values'
-      ? [c.c.mv, mapOfToListOf(s.valOf), s.valOf.kind === 'list']
-      : [c.c.mk, mapOfToListOf(s.keyOf), s.keyOf.kind === 'list'];
-    const item = nested ? q`json(${srcCol})` : srcCol;
-    // A per-element map (valueMap: one map per input element, tagged by an origin ordinal)
-    // aggregates one list PER origin; a single global group map has no origin → one list.
-    const origins = s.carried.origins;
-    if (origins.length) {
-      const rel = s.q.cte(
-        q`SELECT jsonb(COALESCE(json_group_array(${item}), json('[]'))) AS list${carryFrag(s.carried, c)} FROM ${c} GROUP BY ${list(origins.map((o) => c.c[o]), ', ')}`,
-        ['list', ...carriedCols(s.carried)],
-      );
-      return continueLowering(toListStream(carryOf(s), rel, of), at + 1);
-    }
-    const rel = s.q.cte(q`SELECT jsonb(COALESCE(json_group_array(${item}), json('[]'))) AS list FROM ${c}`, ['list']);
-    return continueLowering(toListStream(carryOf(s), rel, of), at + 1);
+    const [idx, of] = col === 'values' ? [1 as const, s.valOf] : [0 as const, s.keyOf];
+    const side = pairSide(q`je.value`, idx, of);
+    const rel = s.q.cte(
+      q`SELECT jsonb(COALESCE((SELECT json_group_array(${side} ORDER BY je.key) FROM json_each(json(${c.c.map})) je), json('[]'))) AS list${carryFrag(s.carried, c)} FROM ${c}`,
+      ['list', ...carriedCols(s.carried)],
+    );
+    return continueLowering(toListStream(carryOf(s), rel, mapOfToListOf(of)), at + 1);
   }
   throw new Error(`${step.name}() on a map value not yet supported`);
+}
+
+/**
+ * The Map.Entry arm of lowerSteps — a `(mk, mv)` row relation unfold() produced from a
+ * MapStream. select(Column.keys/values) (or its 1-to-1 map(__.select(…)) form) projects THIS
+ * entry's key/value per row; a bare terminal frames each entry as a size-1 MAP.
+ */
+export function compileFromMapEntry(s: MapEntryStream, steps: PStep[], at: number): LoweringResult {
+  if (at >= steps.length) throw new Error('a map entry at end of chain should not be a MapEntryStream');
+  const step = steps[at];
+  const sel = step.name === 'select' ? step : mapOfSelect(step, s.params);
+  if (!sel) throw new Error(`${step.name}() on unfolded map entries not yet supported`);
+  const col = columnOf(sel);
+  if (!col) throw new Error('select() on a map entry requires Column.keys or Column.values');
+  const c = s.rel.as('c');
+  const [src, of] = col === 'values' ? [c.c.mv, s.valOf] : [c.c.mk, s.keyOf];
+  if (of.kind === 'elem') throw new Error('select(Column) of an element key/value on unfolded entries not yet supported');
+  if (of.kind === 'list')
+    return continueLowering(toListStream(carryOf(s), s.q.cte(q`SELECT json(${src}) AS list${carryFrag(s.carried, c)} FROM ${c}`, ['list', ...carriedCols(s.carried)]), of.of), at + 1);
+  // A typed {t,v} scalar side → a typed single-value list is wrong; re-enter as a typed scalar
+  // stream (each entry's key/value, its own type via the vtype carried in the {t,v} node).
+  const rel = s.q.cte(q`SELECT ${src} ->> '$.v' AS v, ${src} ->> '$.t' AS vtype${carryFrag(s.carried, c)} FROM ${c}`, ['v', 'vtype', ...carriedCols(s.carried)]);
+  return continueLowering(toScalarStream(carryOf(s), rel, undefined, { result: 'value', vtype: 'vtype' }), at + 1);
 }
