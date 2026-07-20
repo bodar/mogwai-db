@@ -19,7 +19,10 @@ MISE_BIN="$HOME/.local/bin"
 command -v mise >/dev/null 2>&1 || curl -fsSL https://mise.run | sh
 export PATH="$MISE_BIN:$PATH"
 
-# 2. Point mise at the pre-installed bun instead of downloading it. Link it under the
+# 2. Trust the repo config so every mise command below reads it non-interactively.
+mise trust "$CLAUDE_PROJECT_DIR" >/dev/null 2>&1 || true
+
+# 3. Point mise at the pre-installed bun instead of downloading it. Link it under the
 #    version mise.toml pins so the [tools] requirement is satisfied.
 BUN_BIN="$(command -v bun || true)"
 if [ -n "$BUN_BIN" ]; then
@@ -27,9 +30,6 @@ if [ -n "$BUN_BIN" ]; then
   BUN_PIN="$(sed -n 's/^[[:space:]]*bun[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' "$CLAUDE_PROJECT_DIR/mise.toml" | head -1)"
   [ -n "$BUN_PIN" ] && mise link --force "bun@$BUN_PIN" "$BUN_PREFIX" >/dev/null
 fi
-
-# 3. Trust the repo config so mise reads it non-interactively.
-mise trust "$CLAUDE_PROJECT_DIR" >/dev/null 2>&1 || true
 
 # 4. Install project dependencies.
 mise run install
