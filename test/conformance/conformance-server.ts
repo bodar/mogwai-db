@@ -53,19 +53,16 @@ export async function startConformanceServer(port = 45940) {
   for (const [g, queries] of Object.entries(SEEDS)) {
     for (const q of queries) await manager.query(g, q, {});
   }
-  // Opt-in L3 telemetry (MOGWAI_L3_TELEMETRY): wrap the SERVED manager only — seed
-  // writes above go through the raw manager, so they never pollute the capture.
-  // The decorator re-throws unchanged, so the ratchet count is byte-identical.
+  // L3 telemetry (always on): wrap the SERVED manager only — seed writes above go
+  // through the raw manager, so they never pollute the capture. The decorator
+  // re-throws unchanged, so the ratchet count is byte-identical.
   const tpath = telemetryPath();
-  if (tpath) clearTelemetry(tpath);
-  const served = tpath ? new LoggingGraphManager(manager, tpath) : manager;
-  // Under telemetry, replace the verbose per-query log with a compact live progress
-  // line — `.` per query that ran, `E` per compile/exec throw (a wrong-answer still
-  // shows `.`, matching the NDJSON's ok:true). The test terminates the line before
-  // printing the aggregate report. Off telemetry, the default verbose log stands.
-  const log = tpath
-    ? (e: { ok: boolean }) => process.stdout.write(e.ok ? '.' : 'E')
-    : undefined;
+  clearTelemetry(tpath);
+  const served = new LoggingGraphManager(manager, tpath);
+  // A compact live progress line — `.` per query that ran, `E` per compile/exec throw
+  // (a wrong-answer still shows `.`, matching the NDJSON's ok:true). The test
+  // terminates the line before printing the aggregate report.
+  const log = (e: { ok: boolean }) => process.stdout.write(e.ok ? '.' : 'E');
   const app = application({ manager: served, log });
   return Bun.serve({ port, fetch: app.router });
 }
