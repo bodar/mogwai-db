@@ -4,8 +4,9 @@
 **Status:** proposed
 **L3 gap addressed:** deferral bucket #2 — `unsupported source step: call` (14) +
 `step not implemented: call()` (5). Feature: `map/Call.feature` (20 scenarios). Also closes the
-`TextP` string-predicate deferrals (`containing`/`startingWith`/`endingWith`, the "Binding
-expected string…" bucket + `regex`).
+`TextP` substring predicates (`containing`/`startingWith`/`endingWith`) — index-backed by the same
+FTS5 index. (`regex` stays deferred — no index-only implementation exists and we do not scan or drop
+to JS.)
 
 > This is **not** a toy layer. `call()` is the extensibility seam for mogwai-db: services register
 > into a `ServiceRegistry` and range from *pure, SQL-expressible* (list, degree, search) to
@@ -112,20 +113,19 @@ field emits a path-history *element* alongside the scalar degree — a self-cont
 
 ### `tinker.search` — full-text search over property values (pure, Start, **FTS5-backed**)
 
-Backed by a real **FTS5 trigram (`case_sensitive 1`)** index — case-sensitive substring matching
-that reproduces TinkerPop's `.*(term).*` semantics exactly (verified: `ada`→`vadas` mid-string;
-`MARKO`≠`marko`). `.element()` walks the matched `Property` to its owner (reuses the existing
-`PropertyStream` `element()` tail). `type` ∈ {Vertex, Edge, VertexProperty} selects the row scope.
+Backed by a real **FTS5 trigram index, `case_sensitive 0`** (the default). Matching is done with the
+`LIKE`/`MATCH` the trigram index accelerates (query plan verified: a `case_sensitive 0` trigram index
+serves `LIKE '%term%'` from the index — `idxStr L0` — whereas `case_sensitive 1` only serves `GLOB`).
+`.element()` walks the matched `Property` to its owner (reuses the existing `PropertyStream`
+`element()` tail). `type` ∈ {Vertex, Edge, VertexProperty} selects the row scope.
 
-- **Index-only contract → fail closed when not index-expressible.** The `tinker.search` *service*
-  is index-backed by design: anything the FTS index can't answer fails closed with a clear deferral
-  rather than silently scanning — i.e. a `search` term < 3 chars (below the trigram floor) *and* a
-  raw `regex` param (arbitrary regex isn't FTS-expressible). No O(n) fallback in the service.
-- **This differs deliberately from the `TextP` predicate**, which is required-correct and therefore
-  *does* get the fallbacks (case-sensitive scan for short terms; the JS-filter barrier for
-  `regex`). So `has(k, regex(x))` is implemented, while `call("tinker.search", {regex})` fails
-  closed — the service keeps a hard index-only guarantee, the filter keeps correctness. (Flag if
-  you'd rather the service also fall back to the JS barrier; neither is needed by conformance.)
+- **Case-insensitive — a documented divergence.** TinkerPop's `.*(term).*` is case-sensitive; ours
+  is case-insensitive, because that is what lets the trigram index serve `LIKE`. It still passes
+  conformance (the reference graphs are single-case) and is consistent with our `TextP` behavior
+  (below). We document the divergence rather than chase case-sensitivity into a `GLOB` rewrite.
+- **Index-only contract → fail closed when the index can't answer.** No scans, no JS. So a `search`
+  term < 3 chars (below the trigram floor) and a raw `regex` param both **fail closed** with a clear
+  deferral. There is no O(n) fallback anywhere in the service.
 
 ### Federated DO graph call — **built last, on the generic seams** (async, Barrier)
 
@@ -157,7 +157,7 @@ CREATE VIRTUAL TABLE property_fts USING fts5(
   owner UNINDEXED, owner_elem UNINDEXED, vpid UNINDEXED, pk UNINDEXED,
   kind UNINDEXED,          -- 'value' | 'jsonkey' | 'jsonleaf'
   text,                    -- the searchable text
-  tokenize='trigram case_sensitive 1');
+  tokenize='trigram');   -- case_sensitive 0 (default): required so LIKE (not just GLOB) uses the index
 ```
 
 - **Values are the `{t,v}` ValueNode encoding.** A naive `json_tree` over the stored JSONB would
@@ -187,35 +187,38 @@ forces the write-path maintenance, the ValueNode-aware indexing, and the trigram
 correct for a plain filter predicate too.
 
 **Current reality (do not assume these are unimplemented):** `containing`/`startingWith`/
-`endingWith` (and `not*`) already compile today — to `LIKE` (`plan.ts:271,281-283`). But SQLite
-`LIKE` is **case-insensitive** for ASCII, whereas TinkerPop's `containing`/`startingWith`/
-`endingWith` are **case-sensitive** (`String.contains`/`startsWith`/`endsWith`). So the current
-impl is a **latent case bug** — `LIKE 'M%'` matches both `marko` and `MARKO` — masked only because
-the reference graphs are single-case. Only `regex`/`typeOf` actually throw today.
+`endingWith` (and `not*`) already compile today — to `LIKE` (`plan.ts:271,281-283`), which is
+**case-insensitive** (SQLite `LIKE` folds ASCII case; `LIKE 'M%'` matches both `marko` and `MARKO`).
+That diverges from TinkerPop's case-sensitive `String.contains`/`startsWith`/`endsWith`, but it is
+masked because the reference graphs are single-case. **We keep the case-insensitive behavior and
+document it** — it is not a bug we chase, and it is exactly what makes the FTS index usable. Only
+`regex`/`typeOf` actually throw today.
 
-So this phase is two things, correctness first:
+So this phase is a performance + coverage step, not a semantics change:
 
-1. **Fix case-sensitivity** of the substring predicates:
-   - `|x| ≥ 3` → FTS trigram `MATCH` (`case_sensitive 1`) — exact *and* indexed;
-     `startingWith`/`endingWith` add an anchor/boundary check on the candidate.
-   - `|x| < 3` (below the trigram floor) → a **case-sensitive** SQL scan — `instr(x, needle) > 0`
-     for `containing`, `substr(...)=needle` for `startingWith`/`endingWith`. **Not plain `LIKE`**
-     (that is the bug). A predicate must be correct, so it falls back to a scan, never fail-closed —
-     unlike the `tinker.search` *service*, which is index-only and fails closed on short terms.
-2. **Implement `regex(x)` (no longer deferred)** via a **synchronous JS-filter barrier** — the
-   Phase-1 machinery: materialize candidate rows, apply `new RegExp(pat)` in JS, re-source. This is
-   the mechanism CLAUDE.md already names ("regex … filtered post-SQL in JS inside the DO"). FTS
-   narrows candidates only when a ≥3-char literal is extractable from the pattern; otherwise it is a
-   full scan + JS filter. (`typeOf` remains its own separate concern.)
+1. **Index-back the substring predicates.** Route `containing`/`startingWith`/`endingWith` at the
+   same `LIKE` they already emit through the `case_sensitive 0` trigram index (rewrite the predicate
+   to select against `property_fts`). For `|x| ≥ 3` this is served *from the index* — no scan. The
+   emitted operator and its case-insensitive result are unchanged; it just stops being a base-table
+   scan. This shares the exact index `tinker.search` uses, which is the point of keeping the phase
+   here.
+2. **The <3-char floor is the one hard edge.** Trigram cannot index a pattern with < 3 non-wildcard
+   chars — independent of case. Given "no table scans," a substring predicate whose term is < 3 chars
+   has no index-only answer, so it **fails closed** (a clear deferral), the same rule as the search
+   service. (Open question flagged in chat: relax this for <3-char predicates and accept the scan, or
+   truly fail closed. Default here is fail closed, to honor the no-scan rule.)
+3. **`regex(x)` stays deferred.** No index-only implementation exists, and we do not scan or drop to
+   JS — so it remains a clear throw, documented. (`typeOf` is a separate concern, also unchanged.)
 
 ## Conformance + L4
 
 - **L3:** `map/Call.feature` (20) + the TextP string-predicate scenarios. `call` is already in L3
   scope (runs+fails, not skipped) — no `tags.ts` change.
-- **L4 (our addendum — we author scenarios for everything we build):** FTS substring + case-
-  sensitivity fidelity; nested-JSON key/value search; short-term **fail-closed** behavior; TextP
-  short-term fallback correctness; the federated-call merge (`@gap:` tagged for the upstream
-  give-back where the official corpus has no coverage).
+- **L4 (our addendum — we author scenarios for everything we build):** FTS substring matching and
+  its **documented case-insensitivity**; nested-JSON key/value search; **<3-char fail-closed**
+  behavior (service and predicate); index-backed `containing`/`startingWith`/`endingWith`; the
+  federated-call merge (`@gap:` tagged for the upstream give-back where the official corpus has no
+  coverage).
 - **L2 SQL snapshots** + **`compiler.test.ts`** execution semantics for each new emitted shape.
 - **L1** stays 100% (no grammar change). Clean L3 run re-records `l3-state.json` + syncs the count.
 
@@ -227,7 +230,7 @@ So this phase is two things, correctness first:
 | 2 | `--list` reading the live registry (+ filter/verbose) | 7 scenarios |
 | 3 | `tinker.degree.centrality` via the child-scope reducer seam + `project()`-over-scalar | 6 scenarios; exercises per-parent merge |
 | 4 | `tinker.search` on FTS5 trigram + ValueNode-aware JSON write-path indexing + fail-closed + `element()` | 7 scenarios; builds the real search index |
-| 5 | `TextP`: **fix case-sensitivity** of `containing`/`startingWith`/`endingWith` (LIKE→FTS/`instr`/`substr`) + **implement `regex`** via the JS-filter barrier | corrects a latent case bug + closes the `regex` throw |
+| 5 | `TextP`: **index-back** `containing`/`startingWith`/`endingWith` (same case-insensitive `LIKE`, now served by the trigram index) | shares the search index; <3-char fails closed; `regex` stays deferred |
 | 6 | **Federated DO graph call** — async barrier service on the Phase-1 seams: projection via `query()`, foreign-element materialization, parent-ordinal merge, Barrier/ChunkSize batching | last; additive, no engine rewrite |
 
 ## Semantics & hard parts (honest)
@@ -243,8 +246,12 @@ So this phase is two things, correctness first:
 
 ## Fail-closed edges (correct-by-design, never mis-execute)
 
-- `tinker.search` service: term < 3 chars **or** a raw `regex` param → deferral (index-only
-  contract). NB `has(k, regex(x))` is *not* here — the TextP predicate implements regex via the
-  JS-filter barrier (Phase 5); only the *service* fails closed.
+- Any substring match with a term < 3 chars (below the trigram floor) → deferral. Applies to both
+  the `tinker.search` service **and** the `has(k, containing/startingWith/endingWith(x))` predicate
+  — index-only, no scan. (Relaxable to a scan for the predicate if you decide correctness beats the
+  no-scan rule there.)
+- `regex` (service param or `has(k, regex(x))`) and `typeOf` → deferral. No index-only path; we do
+  not scan or drop to JS. Supersedes the CLAUDE.md "regex … filtered post-SQL in JS" note, which
+  should be updated to the no-JS rule.
 - Non-constant per-traverser call params → deferral until the barrier param-eval path lands.
 - `type: VertexProperty` meta-property search → empty on the reference graphs (documented).
