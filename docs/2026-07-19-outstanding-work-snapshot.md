@@ -132,6 +132,14 @@ Worth doing only when a concrete scenario demands them.
   → [group-value-generic-seam](./2026-07-18-group-value-generic-seam-plan.md),
   [p3-reenterable-shapes](./2026-07-16-p3-reenterable-shapes-plan.md),
   [p4-dynamic-variant](./2026-07-16-p4-dynamic-variant-plan.md)
+  - ✅ *Terminal `select(Column.values)` over an element-LIST-valued group* — was NOT a
+    fail-closed deferral like the rest of this bucket but a **correctness bug** (leaked
+    internal SQLite rowids as bare integers instead of framing the vertices/edges; the
+    `.unfold()` variants were always correct). **Fixed 2026-07-20**: a framing-layer gap —
+    `listResult`/`frameListOf` now recurse through a nested list, expanding the leaf
+    element rowids to full payloads at any depth (`materialize.ts` `nestedListResult` +
+    `execute.ts` `frameListOf`; `jsonbList` shape carries its nested `of`). Equivalence +
+    id-leak regression test in `compiler.test.ts`; CI green, L3 baseline held.
 - **Mixed-shape branch corners** — mixed element-KIND (node+edge) in one branch,
   `path()` through a mixed branch, new `as()` bound inside a variant arm, mixed-record
   `select(Column.values)` tuple lists. *Low.*

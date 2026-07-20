@@ -99,7 +99,7 @@ export type Shape =
   | { kind: 'count' }
   | { kind: 'scalar'; productiveNull?: boolean } // numeric reducer; productive NULL may be a real result
   | { kind: 'list'; elem: ElemShape | 'scalar'; as?: ValueType } // legacy row-fold; scalar items may carry a uniform type
-  | { kind: 'jsonbList'; as?: ValueType; typed?: boolean } // list-VALUE rows; `typed` → items are {t,v} nodes framed via frameTypedNode; else `as` is a uniform item type
+  | { kind: 'jsonbList'; as?: ValueType; typed?: boolean; of?: ListOf } // list-VALUE rows; `typed` → items are {t,v} nodes framed via frameTypedNode; `as` is a uniform item type; `of` (a nested list whose leaf is an element list) frames each member by its own descriptor via frameListOf
   | { kind: 'jsonbElementList'; elem: Exclude<ElemShape, 'property'> } // one JSON object-array per relational element list
   | { kind: 'jsonbSet'; typed?: boolean }    // a set-VALUE stream (intersect/difference/disjunct OR a stored typed set): one Set per row, from a JSONB `list` column
   | { kind: 'valueMap'; keys: string[] | null; tokens: boolean }

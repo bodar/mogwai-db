@@ -370,7 +370,12 @@ function frameListOf(json: string, of: ListOf): Buffer {
     return of.typed ? listBuffer(items.map(frameTypedNode))
       : of.as ? listBuffer(items.map((x: any) => frameValue(x, of.as)))
         : ioc.listSerializer.serialize(items);
-  return ioc.listSerializer.serialize(items); // list-of-lists: members already framed as JSON
+  // A list-of-lists: frame each inner member by its own descriptor so an element leaf
+  // (e.g. terminal select(Column.values) over an element-list-valued group) frames its
+  // members as Vertex/Edge, not the client's JS-inferred maps. SQL already expanded the
+  // leaf rowids into element payload objects (materialize.nestedListResult); recursing
+  // here descends the same nesting the descriptor records.
+  return listBuffer(items.map((inner: any) => frameListOf(JSON.stringify(inner), of.of)));
 }
 
 // The GraphBinary key + a canonical string (JS Map dedup key) for one group row.
@@ -536,7 +541,7 @@ function* frameValues(rows: any[], shape: import('./render.ts').Shape): Generato
     // text via json(), so it JSON.parses; scalar elements frame via listSerializer).
     // A list-VALUE stream: frame each row's list by its item descriptor (shared with the
     // variant list arm + record list fields) — typed {t,v} items, a uniform `as` tag, or infer.
-    case 'jsonbList': for (const r of rows) yield frameListOf(r.list, { kind: 'scalar', as: shape.as, typed: shape.typed }); return;
+    case 'jsonbList': for (const r of rows) yield frameListOf(r.list, shape.of ?? { kind: 'scalar', as: shape.as, typed: shape.typed }); return;
     // Relational element-list values materialize as ordered JSON object arrays in
     // SQL, then frame each member through the same property-preserving element
     // encoders as ordinary vertex/edge rows.

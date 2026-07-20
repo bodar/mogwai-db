@@ -525,9 +525,42 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().group().by().by(__.out().label().dedup().fold()).select(Column.values).unfold()').shape).toEqual({ kind: 'jsonbList' });
     // A scalar key now works too: the fold owns the complete final key domain, so
     // there is no per-parent list for MAX() to pick arbitrarily.
+    // Terminal select(Column.values) is a list-of-lists; the shape carries its nested
+    // `of` so each inner list frames by its own descriptor (here scalar; an element leaf
+    // expands its rowids — see materialize.nestedListResult).
     const scalarKey = read('g.V().group().by("name").by(__.out().label().fold()).select(Column.values)');
-    expect(scalarKey.shape).toEqual({ kind: 'jsonbList' });
+    expect(scalarKey.shape).toEqual({ kind: 'jsonbList', of: { kind: 'list', of: { kind: 'scalar' } } });
     expect(scalarKey.sql).toContain('GROUP BY gk');
+  });
+
+  // Regression: a TERMINAL select(Column.values) over an element-LIST-valued group is a
+  // list-of-lists whose leaf holds internal rowids. It used to frame the leaf as
+  // json(expr) — a raw rowid array (a wrong result AND an internal-id leak). The leaf
+  // rowids must expand to full Vertex/Edge payloads, matching the .unfold() variants
+  // (which hit the top-level element case directly and were always correct).
+  test('terminal select(Column.values) over an element-list group frames full elements, not rowids', () => {
+    const store = seededStore();
+    const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
+    for (const [q, ctor] of [
+      ['g.V().group().by(T.label).by(__.out().fold()).select(Column.values)', 'Vertex'],
+      ['g.V().group().by(T.label).by(__.outE().fold()).select(Column.values)', 'Edge'],
+    ] as const) {
+      // Terminal form: ONE buffer = the outer List of inner element lists (a list-of-lists).
+      const outer = dec(executeQuery(store, q, {})[0]) as any[][];
+      const flat = outer.flat();
+      // The leaked-rowid bug produced bare JS numbers here; assert real elements instead.
+      expect(flat.length).toBeGreaterThan(0);
+      for (const item of flat) {
+        expect(item?.constructor?.name).toBe(ctor);
+        expect(typeof item.id).toBe('number'); // an external id, on a real element — not a bare rowid scalar
+      }
+      // Equivalence with the always-correct .unfold() twin: appending .unfold() explodes
+      // the SAME outer list into one buffer per inner list. Each inner list must be
+      // identical (element by element, in order) to its position in the terminal result.
+      const unfoldedInner = executeQuery(store, `${q}.unfold()`, {}).map((b) => dec(b) as any[]);
+      const idsOf = (lists: any[][]) => lists.map((l) => l.map((v) => v.id));
+      expect(idsOf(unfoldedInner)).toEqual(idsOf(outer));
+    }
   });
 
   test('element-value group: unreduced value traversal implicitly folds to a list', () => {
