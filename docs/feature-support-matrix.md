@@ -3,7 +3,7 @@
 What you can rely on. Each step gets one mark based on how much of it works and how
 freely it composes — a ✅ step works **anywhere in a traversal**, however deeply nested,
 not just at the top. Notes call out **only the cases that don't work yet**; if a row has
-no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,233<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,234<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 | Mark | Meaning |
 |---|---|
@@ -74,7 +74,7 @@ so. Kept in sync in the commit that changes support.
 
 | Step | | Notes |
 |---|:--:|---|
-| `group`, `groupCount` | ✅ | scalar/`T.id`/`T.label`/composite-`project` keys; scalar reducers, element values, unreduced value traversals, and nested-map values (`by(__.<movement>.group())`) all compose through the generic child seam; group-scoped `count/sum/min/max/mean`/`fold()`; scalar-stream `groupCount()`; `unfold()`/`select(Column.keys/values)` re-enter the map (via the whole-map blob stream); a **terminal** `select(Column.values)` over an element-LIST value frames the full vertices/edges (the nested-element-list framing recurses through `listResult`/`frameListOf`, matching the `.unfold()` variants). ❌ more than two `by()`; non-scalar / element-valued inner keys; `order().by(key)` inside a value; `select(Column)`/`unfold()` over a nested-map value |
+| `group`, `groupCount` | ✅ | scalar/`T.id`/`T.label`/composite-`project` keys; scalar reducers, element values, unreduced value traversals, and nested-map values (`by(__.<movement>.group())`) all compose through the generic child seam; group-scoped `count/sum/min/max/mean`/`fold()`; scalar-stream `groupCount()`; `unfold()`/`select(Column.keys/values)`/`order(Scope.local).by(Column.keys/values[, Order])` re-enter the map (via the whole-map blob stream; the local order re-sorts the pairs array in place, type-correctly via `compareKey`, and composes with a following `unfold()`/`select`); a **terminal** `select(Column.values)` over an element-LIST value frames the full vertices/edges (the nested-element-list framing recurses through `listResult`/`frameListOf`, matching the `.unfold()` variants). ❌ more than two `by()`; non-scalar / element-valued inner keys; `order().by(key)` inside a value; `order(Scope.local)` over an element/list-valued map side; `select(Column)`/`unfold()` over a nested-map value |
 | `fold()` | ✅ | scalar or element list, re-enterable; empty lists and element metadata preserved. After a fan-out the list is ordered by the canonical emission order (deterministic) |
 | `sum`, `min`, `max`, `mean` | ✅ | `min`/`max` over any Comparable incl. Strings |
 | `group('a')`/`groupCount('a')` (side-effecting) | 🟡 | see §12 |
@@ -134,7 +134,7 @@ Across all four branch steps, mixed-shape arms (scalar + element + list) merge i
 | `unfold()` | ✅ | explode → elements/scalar/nested-list; a stored typed list frames each element by its own type; a MAP (`group`/`groupCount`/`valueMap`/a stored `is(typeOf(MAP))` map) → a per-entry Map.Entry stream — each entry frames as a size-1 MAP (the v4 wire form) or feeds a per-entry `select(Column.keys/values)` / `map(__.select(…))`. ❌ after a projection/modifier on an element stream |
 | `Scope.local` reducers (count/sum/min/max/mean) | ✅ | per-list aggregate → scalar |
 | `none(P)`/`all(P)`/`any(P)` | ✅ | collection filters, null-aware |
-| `Scope.local` order/limit/range/skip/tail/dedup on a list | ✅ | per-list `json_each` rebuild; `reverse()`; per-element string transforms. ❌ `order(Scope.local).by(key/traversal)` |
+| `Scope.local` order/limit/range/skip/tail/dedup on a list | ✅ | per-list `json_each` rebuild; `reverse()`; per-element string transforms; `order(Scope.local).by(Column.keys/values)` over a **map** value (group/groupCount/valueMap/stored map — re-sorts the pairs blob). ❌ `order(Scope.local).by(key/traversal)` on a list |
 | set-ops (`combine`/`intersect`/`difference`/`disjunct`/`product`/`merge`/`conjoin`) | ✅ | operand = a literal list, `constant(c).fold()`, or a standalone scalar-fold traversal. ❌ an element-fold operand |
 | `is(typeOf(LIST))`, `is(typeOf(SET))`, `is(typeOf(MAP))` | ✅ | LIST/SET retype a stored collection to a typed list stream (SET frames as a GraphBinary Set); MAP retypes a stored map / group / valueMap to a whole-map blob stream, so `count(Scope.local)`/`select(Column.keys/values)`/`unfold()` (→ per-entry size-1 MAPs) compose. ❌ `where`/`fold`/list-ops after the MAP retype; the list-operation steps (`merge`/`split`/`index`/`order`/`project`) after the LIST retype; typed-element `Scope.local` transforms |
 | scalar-stream `none(P)` barrier | ❌ | whole-stream barrier (distinct from the per-list filter) |

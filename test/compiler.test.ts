@@ -161,6 +161,27 @@ describe('compiler SQL snapshots', () => {
     expect(() => compile('g.V().valueMap(true).select(Column.keys)', {})).toThrow('valueMap(true)/token re-entry not yet supported');
   });
 
+  test('order(Scope.local).by(Column.keys/values) re-sorts a map blob in place', () => {
+    // group().by(k).by(reducer).order(local).by(values): the pairs array is re-sorted by the
+    // value side, type-correctly (compareKey → numeric values sort numerically). Same-shape
+    // MapStream out (ordering is a blob transform), so a following unfold()/select re-enters it.
+    const byVals = read('g.V().hasLabel("person").group().by("name").by(__.outE().values("weight").sum()).order(Scope.local).by(Column.values)');
+    expect(byVals.sql).toContain('json_each');
+    expect(byVals.sql).toContain('ORDER BY'); // the in-place re-sort of the pairs
+    expect(byVals.sql).toContain('CASE WHEN'); // compareKey numeric/text discrimination
+    expect(byVals.shape).toEqual({ kind: 'mapValue' });
+    // by(Column.keys) sorts the key side; desc flips direction; both re-enter through unfold().
+    const keysUnfold = read('g.V().valueMap().order(Scope.local).by(Column.keys).unfold()');
+    expect(keysUnfold.sql).toContain('ORDER BY');
+    expect(keysUnfold.shape).toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' }, valOf: { kind: 'list', of: { kind: 'scalar' } } });
+    const desc = read('g.V().values("age").groupCount().order(Scope.local).by(Column.values, Order.desc)');
+    expect(desc.sql).toContain('DESC');
+    // Fail closed: an element/list-valued map side has no total order → clear deferral.
+    expect(() => compile('g.V().groupCount().order(Scope.local).by(Column.keys)', {}))
+      .toThrow('order(Scope.local).by(Column.keys) over an element/list map key not yet supported');
+    // shuffle-local and multi-term/by(key) orders are not Column-local orders → defer elsewhere.
+  });
+
   test('Commit A: valueMap().unfold() → per-element Map.Entry stream', () => {
     // valueMap().unfold(): valueMap retypes to a per-element whole-map blob MapStream, unfold()
     // explodes it to a per-entry MapEntryStream (key = typed {t,v} scalar, value = its list).
