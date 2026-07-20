@@ -5,6 +5,7 @@ import {
   storedValueExpr, bareValueMapProps, typedScalarNode, type ScalarCtx,
 } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
+import { isMapLocalOrder } from './list.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, withoutCarried, type Carry, type ElementStream } from './context.ts';
 import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from './stream.ts';
@@ -520,9 +521,11 @@ export function compileFromGroup(s: GroupStream, steps: PStep[], at: number): Lo
     const rel = s.q.cte(q`SELECT COUNT(DISTINCT ${g.c.gk}) AS v FROM ${g}`, ['v']);
     return continueLowering(toScalarStream(withoutCarried(carryOf(s)), rel, 'long', { result: 'count' }), at + 1);
   }
-  // unfold() and select(Column.keys/values) consume the group AS a map VALUE → derive the
-  // whole-map blob and re-enter as a MapStream (compileFromMap then unfolds / selects / frames).
-  if (step.name !== 'unfold' && step.name !== 'select') throw new Error(`${step.name}() on a group value not yet supported`);
+  // unfold(), select(Column.keys/values), and order(Scope.local).by(Column.*) all consume the
+  // group AS a map VALUE → derive the whole-map blob and re-enter as a MapStream (compileFromMap
+  // then orders / unfolds / selects / frames the pairs).
+  if (step.name !== 'unfold' && step.name !== 'select' && !isMapLocalOrder(step))
+    throw new Error(`${step.name}() on a group value not yet supported`);
   const { rel, keyOf, valOf } = deriveGroupMap(s);
   return continueLowering(toMapStream(carryOf(s), rel, keyOf, valOf), at);
 }

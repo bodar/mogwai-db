@@ -6,10 +6,10 @@
 // and, later, inject-of-a-list / select(Column.values).
 
 import { q, value, raw, list, empty, type Expression, type Relation } from '../q.ts';
-import { predicateSql, scalarTx } from '../plan.ts';
+import { predicateSql, scalarTx, compareKey } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { carryOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toResultStream, toScalarStream, mapOfToListOf, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type ScalarStream, type MapStream, type ShapeTailFn } from './stream.ts';
+import { carryOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toResultStream, toScalarStream, mapOfToListOf, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type ScalarStream, type MapStream, type ShapeTailFn } from './stream.ts';
 import { carryFrag, carriedCols, type ElementStream } from './context.ts';
 import { type Compiled } from '../render.ts';
 import { compileRead } from './index.ts';
@@ -385,6 +385,25 @@ export function compileFromList(s: ListStream, steps: PStep[], at: number): Lowe
 const columnOf = (step: PStep): 'keys' | 'values' | undefined =>
   (step.args ?? []).map((a: any) => a && typeof a === 'object' && a.column).find((c: any) => c === 'keys' || c === 'values');
 
+/** order(Scope.local).by(Column.keys|values [, Order]) over a map value — the ONE by()
+ *  modulator being a single Column term (± direction). Returns {col, dir} or null (any
+ *  other order shape — bare, by(key), by(traversal), multi-term — is not a map-local
+ *  Column order and defers). Shared by compileFromMap and compileFromGroup (via the
+ *  re-exported isMapLocalOrder) so group/groupCount/valueMap/elementMap/stored maps all
+ *  route one implementation. */
+export function mapLocalOrder(step: PStep): { col: 'keys' | 'values'; dir: 'asc' | 'desc' } | null {
+  if (step.name !== 'order' || !isLocal(step)) return null;
+  const bys = step.bys ?? [];
+  if (bys.length !== 1) return null;
+  const by = bys[0];
+  const col = by.map((a: any) => a && typeof a === 'object' && a.column).find((c: any) => c === 'keys' || c === 'values') as 'keys' | 'values' | undefined;
+  if (!col) return null;
+  const order = by.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
+  if (order === 'shuffle') return null; // shuffle-local over a map defers (no worked-out form)
+  return { col, dir: order === 'desc' ? 'desc' : 'asc' };
+}
+export const isMapLocalOrder = (step: PStep): boolean => mapLocalOrder(step) !== null;
+
 /** map(__.select(Column)) over a Map.Entry is the 1-to-1 form of a per-entry column
  *  select — unwrap its single-step body to that select() step (else null → deferral). */
 function mapOfSelect(step: PStep, params: Record<string, any>): PStep | null {
@@ -424,6 +443,26 @@ export function compileFromMap(s: MapStream, steps: PStep[], at: number): Loweri
   const c = s.rel.as('c');
   // is(typeOf(MAP)) — a map IS a map → identity.
   if (isMapTypeOf(step)) return continueLowering(s, at + 1);
+  // order(Scope.local).by(Column.keys|values [, Order]) — re-sort the pairs array of THIS
+  // whole-map blob by one side, in place. A scalar side sorts type-correctly via compareKey
+  // (numeric values numerically, strings lexically); an element/list value side has no
+  // total order → defer. The result is another MapStream (ordering is a same-shape blob
+  // transform); a following unfold() then emits entries in the new order.
+  const localOrder = mapLocalOrder(step);
+  if (localOrder) {
+    const of = localOrder.col === 'values' ? s.valOf : s.keyOf;
+    if (of.kind !== 'scalar')
+      throw new Error(`order(Scope.local).by(Column.${localOrder.col}) over an element/list map ${localOrder.col === 'values' ? 'value' : 'key'} not yet supported`);
+    const idx = localOrder.col === 'values' ? 1 : 0;
+    const side = q`je.value -> ${raw(`'$[${idx}]'`)}`; // the {t,v} node on that side
+    const sortKey = compareKey(q`${side} ->> '$.v'`, q`${side} ->> '$.t'`);
+    const dir = raw(localOrder.dir === 'desc' ? 'DESC' : 'ASC');
+    const rel = s.q.cte(
+      q`SELECT jsonb(COALESCE((SELECT json_group_array(je.value ORDER BY ${sortKey} ${dir}, je.key) FROM json_each(json(${c.c.map})) je), json('[]'))) AS map${carryFrag(s.carried, c)} FROM ${c}`,
+      ['map', ...carriedCols(s.carried)],
+    );
+    return continueLowering(toMapStream(carryOf(s), rel, s.keyOf, s.valOf), at + 1);
+  }
   // count(Scope.local) → number of entries (map size).
   if (step.name === 'count' && isLocal(step)) {
     const rel = s.q.cte(q`SELECT json_array_length(json(${c.c.map})) AS v${carryFrag(s.carried, c)} FROM ${c}`, ['v', ...carriedCols(s.carried)]);
