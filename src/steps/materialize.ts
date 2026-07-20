@@ -82,8 +82,25 @@ function elementListResult(listExpr: Expression, elem: 'node' | 'edge'): Express
   return q`json(COALESCE((SELECT json_group_array(${object} ORDER BY j.key) FROM ${expanded}), json('[]')))`;
 }
 
-const listResult = (expr: Expression, of: ListOf): Expression =>
-  of.kind === 'elem' ? elementListResult(expr, of.elem) : q`json(${expr})`;
+/** A list-of-lists whose LEAF is an element list — e.g. a terminal
+ * `select(Column.values)` over an element-list-valued group produces
+ * `{list, of:{list, of:{elem}}}`. Each outer array element is itself a JSON list of
+ * internal rowids, so we `json_each` the outer array and recurse listResult() over each
+ * inner value, expanding the leaf rowids to full element payloads. Without this the outer
+ * list would frame as `json(expr)` — the raw inner rowid arrays, an internal-id leak.
+ * Ordering matches elementListResult (by the json_each key). The `depth` names a unique
+ * iterator alias per nesting level (`jj0`, `jj1`, …) so an inner elementListResult's own
+ * `json_each … AS j` never shadows this level's iterator. */
+function nestedListResult(listExpr: Expression, of: ListOf, depth: number): Expression {
+  const it = `jj${depth}`;
+  const inner = listResult(q`${it}.value`, of, depth + 1);
+  return q`json(COALESCE((SELECT json_group_array(${inner} ORDER BY ${it}.key) FROM json_each(json(${listExpr})) AS ${it}), json('[]')))`;
+}
+
+const listResult = (expr: Expression, of: ListOf, depth = 0): Expression =>
+  of.kind === 'elem' ? elementListResult(expr, of.elem)
+    : of.kind === 'list' ? nestedListResult(expr, of.of, depth)
+    : q`json(${expr})`;
 
 /** Materialize one list value per relation row. Scalar lists retain a uniform item
  * tag; element/nested lists continue through the existing JSONB framing path. */
@@ -97,6 +114,12 @@ export function materializeListRoot(stream: ListStream): Compiled {
       { kind: 'jsonbElementList', elem: elem === 'edge' ? 'edge' : 'vertex' },
     );
   }
+  // A nested list whose leaf is an element list (e.g. a terminal select(Column.values)
+  // over an element-list-valued group) must expand its leaf rowids to element payloads;
+  // listResult recurses and only the leaf join hits nodes/edges. The `of` descriptor rides
+  // on the jsonbList shape so frameListOf recurses the same nesting on the framing side.
+  if (stream.of.kind === 'list')
+    return materializeRoot(stream.q, q`SELECT ${listResult(c.c.list, stream.of)} AS list FROM ${c}`, { kind: 'jsonbList', of: stream.of });
   const typed = stream.of.kind === 'scalar' && stream.of.typed ? true : undefined;
   const as = stream.of.kind === 'scalar' ? stream.of.as : undefined;
   const shape: Shape = stream.set
