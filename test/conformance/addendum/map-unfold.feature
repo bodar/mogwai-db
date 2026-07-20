@@ -1,0 +1,53 @@
+Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family)
+
+  # unfold() over a Map (group()/groupCount()/valueMap()/a stored map property via
+  # is(typeOf(MAP))) explodes it into a stream of Map.Entry values. On GraphBinary v4 an
+  # entry has no dedicated DataType — TinkerPop's MapEntrySerializer transforms it into a
+  # one-entry Map (TINKERPOP-3104, "A Note on Maps"), so each entry frames as a size-1 MAP.
+  # The official corpus only ever consumes these entries via select(Column.*) / map(select),
+  # never materializes a bare entry — these scenarios pin the terminal + consumer shapes.
+  # @gap:map-unfold marks the family for a gremlin-test PR.
+
+  # ---- Commit B: bare terminal Map.Entry (group / groupCount unfold) ----
+
+  @gap:map-unfold
+  Scenario: g_V_groupCount_byXlabelX_unfold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().groupCount().by(T.label).unfold()
+      """
+    When iterated to list
+    Then the result should be unordered
+      # count frames as a typed GraphBinary long; the JS client decodes a small long as a
+      # Number (d[..].l would assert BigInt — see the notation note in l4.test.ts).
+      | result |
+      | m[{"person":"d[4].i"}] |
+      | m[{"software":"d[2].i"}] |
+
+  @gap:map-unfold
+  Scenario: g_V_group_byXlabelX_byXnameX_unfold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().group().by(T.label).by("name").unfold()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"person":"l[marko,vadas,josh,peter]"}] |
+      | m[{"software":"l[lop,ripple]"}] |
+
+  # group().by(k).by(reducer) unfolded → one entry per key, value a scalar reduction.
+  @gap:map-unfold
+  Scenario: g_V_group_byXlabelX_byXcountX_unfold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().group().by(T.label).by(__.count()).unfold()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"person":"d[4].i"}] |
+      | m[{"software":"d[2].i"}] |

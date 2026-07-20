@@ -6,7 +6,7 @@ import { routeWrite } from './steps/write.ts';
 import { type Compiled, type WritePlan } from './render.ts';
 import { resolveFastPaths, type CompileOptions } from './fast-paths.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
-export type { Compiled, WritePlan, Shape, ValueType, ListOf, MapEntry, ElemShape, GroupKey, GroupVal, PathPos } from './render.ts';
+export type { Compiled, WritePlan, Shape, ValueType, ListOf, MapEntry, MapOf, ElemShape, GroupKey, GroupVal, PathPos } from './render.ts';
 export type { CompileOptions, FastPathConfig } from './fast-paths.ts';
 
 // ---------- compilation orchestrator ----------

@@ -16,7 +16,7 @@
 import { type Expression, type Query, type Relation } from '../q.ts';
 import { type PStep } from '../strategies.ts';
 import { type Elem } from '../plan.ts';
-import { type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type PathPos, type Shape, type ValueType } from '../render.ts';
+import { type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type Shape, type ValueType } from '../render.ts';
 import { carriedCols, type Carry, type ElementStream } from './context.ts';
 
 /** What a list stream holds — i.e. the shape `unfold` produces from it. `elem` → bare
@@ -89,13 +89,11 @@ export interface ListStream extends Carry {
   readonly set?: boolean;
 }
 
-/** How a map stream's key/value columns are shaped. A key/value is a bare scalar
- *  (mk/mv hold the value, `as` its GraphBinary tag) or an element rowid (rejoined to
- *  nodes/edges when the column is projected out via select(Column) → unfold). */
-export type MapOf =
-  | { kind: 'scalar'; as?: ValueType }
-  | { kind: 'elem'; elem: Elem }
-  | { kind: 'list'; of: ListOf };
+/** How a map stream's key/value columns are shaped (defined at the render boundary so a
+ *  mapEntry Shape can name it). A key/value is a bare scalar (mk/mv hold the value, `as`
+ *  its GraphBinary tag) or an element rowid (rejoined to nodes/edges when the column is
+ *  projected out via select(Column) → unfold, or framed out at a terminal Map.Entry). */
+export type { MapOf };
 
 /** A map value as a `(mk, mv)` row relation — one row per entry. A simple GroupStream
  * derives this layout when select(Column.values/keys) consumes it; Map-unfold will
