@@ -123,6 +123,12 @@ serves `LIKE '%term%'` from the index — `idxStr L0` — whereas `case_sensitiv
   is case-insensitive, because that is what lets the trigram index serve `LIKE`. It still passes
   conformance (the reference graphs are single-case) and is consistent with our `TextP` behavior
   (below). We document the divergence rather than chase case-sensitivity into a `GLOB` rewrite.
+  - *Why not GLOB / `case_sensitive 1`?* Its only gain is case-*sensitive* matching (TinkerPop
+    fidelity) — the very thing we chose to drop. It costs more: one trigram index serves *either*
+    `LIKE` *or* `GLOB` (case settings are mutually exclusive, so both would need two indexes); `GLOB`
+    has **no `ESCAPE` clause**, so literal `*`/`?`/`[` must be escaped as char classes (`[*]`) vs the
+    clean `LIKE … ESCAPE '\'` already in the code; and it doesn't help `regex` or the <3-char floor.
+    Not worth it.
 - **Index-only contract → fail closed when the index can't answer.** No scans, no JS. So a `search`
   term < 3 chars (below the trigram floor) and a raw `regex` param both **fail closed** with a clear
   deferral. There is no O(n) fallback anywhere in the service.
@@ -202,11 +208,10 @@ So this phase is a performance + coverage step, not a semantics change:
    emitted operator and its case-insensitive result are unchanged; it just stops being a base-table
    scan. This shares the exact index `tinker.search` uses, which is the point of keeping the phase
    here.
-2. **The <3-char floor is the one hard edge.** Trigram cannot index a pattern with < 3 non-wildcard
-   chars — independent of case. Given "no table scans," a substring predicate whose term is < 3 chars
-   has no index-only answer, so it **fails closed** (a clear deferral), the same rule as the search
-   service. (Open question flagged in chat: relax this for <3-char predicates and accept the scan, or
-   truly fail closed. Default here is fail closed, to honor the no-scan rule.)
+2. **The <3-char floor fails closed.** Trigram cannot index a pattern with < 3 non-wildcard chars —
+   independent of case. Given "no table scans," a substring predicate whose term is < 3 chars has no
+   index-only answer, so it **fails closed** (a clear deferral), the same rule as the search service.
+   This is also the least code: a length guard that throws, no separate <3-char path to build.
 3. **`regex(x)` stays deferred.** No index-only implementation exists, and we do not scan or drop to
    JS — so it remains a clear throw, documented. (`typeOf` is a separate concern, also unchanged.)
 
@@ -248,8 +253,7 @@ So this phase is a performance + coverage step, not a semantics change:
 
 - Any substring match with a term < 3 chars (below the trigram floor) → deferral. Applies to both
   the `tinker.search` service **and** the `has(k, containing/startingWith/endingWith(x))` predicate
-  — index-only, no scan. (Relaxable to a scan for the predicate if you decide correctness beats the
-  no-scan rule there.)
+  — index-only, no scan. A length guard that throws; no <3-char code path to maintain.
 - `regex` (service param or `has(k, regex(x))`) and `typeOf` → deferral. No index-only path; we do
   not scan or drop to JS. Supersedes the CLAUDE.md "regex … filtered post-SQL in JS" note, which
   should be updated to the no-JS rule.
