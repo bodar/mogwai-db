@@ -59,6 +59,20 @@ type Contribution =
   data-plane seam is already `query(id, gremlin, params) → Promise<Buffer[]>`, so nothing above the
   store tier moves.
 
+### Service naming convention
+
+TinkerPop namespaces services by **provider**: TinkerGraph registers `tinker.search` /
+`tinker.degree.centrality` (`provider.domain.verb`, dotted), with the directory service as the
+special `--list`. We follow the same rule:
+
+- **Standard services we implement for conformance keep their canonical names** — `--list`,
+  `tinker.search`, `tinker.degree.centrality` — verbatim, because `Call.feature` asserts those
+  literal strings and `--list` must return them. Here we are *emulating the reference provider*.
+- **Our own extension services are prefixed `mogwai.`** (we are the provider): the federated call is
+  `mogwai.graph.federate`; a future outbound HTTP service would be `mogwai.http.get`, etc. This
+  keeps our surface un-collidable with any `tinker.*` the corpus expects, and makes provenance
+  obvious in `--list`.
+
 **Why pure services still go through this seam (not a `normalize` desugar shortcut):** the seam is
 what the federated call needs. A desugar-only path for list/degree/search would be a dead end the
 federated case can't fit into. Instead, pure services implement `Contribution.kind:'stream'` (they
@@ -111,7 +125,7 @@ that reproduces TinkerPop's `.*(term).*` semantics exactly (verified: `ada`→`v
 
 ### Federated DO graph call — **built last, on the generic seams** (async, Barrier)
 
-`g.V().call("graph.federate", {graph, traversal}).…` projects a sub-traversal **down to a sibling
+`g.V().call("mogwai.graph.federate", {graph, traversal}).…` projects a sub-traversal **down to a sibling
 graph** and merges the results into the current tree. Implemented purely on the seams above:
 
 - Registers as a `Contribution.kind:'barrier'` service with an **async `apply`**.
@@ -159,6 +173,13 @@ CREATE VIRTUAL TABLE property_fts USING fts5(
   FTS5 trigram table matched nested content (`brav`→`brave` in `nested.tags[1]`; keys like `city`).
 
 ## TextP string predicates via the same FTS5 index
+
+This phase stays in **this** plan on purpose: `tinker.search` and `TextP` are two independent
+consumers of the *same* FTS5 index, so building both is what proves the index is a general
+capability rather than something shaped to a single caller. If only `tinker.search` used it, the
+index could quietly encode search-service assumptions; making `has(k, containing(x))` share it
+forces the write-path maintenance, the ValueNode-aware indexing, and the trigram semantics to be
+correct for a plain filter predicate too.
 
 Route the currently-deferred `has(k, containing/startingWith/endingWith/regex(x))` through the
 index where sound (closes real L3 gaps — the "Binding expected string…" bucket + `regex` throw):
