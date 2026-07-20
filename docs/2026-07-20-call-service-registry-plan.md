@@ -1,148 +1,212 @@
-# call() + the TinkerServiceRegistry — implementation plan
+# call() + the Service Registry — a first-class, extensible service layer
 
 **Date:** 2026-07-20
 **Status:** proposed
-**L3 gap addressed:** deferral bucket #2 — `unsupported source step: call` (14) + `step not
-implemented: call()` (5). Target feature: `map/Call.feature` (20 scenarios,
-`@StepClassMap @StepCall @TinkerServiceRegistry`).
+**L3 gap addressed:** deferral bucket #2 — `unsupported source step: call` (14) +
+`step not implemented: call()` (5). Feature: `map/Call.feature` (20 scenarios). Also closes the
+`TextP` string-predicate deferrals (`containing`/`startingWith`/`endingWith`, the "Binding
+expected string…" bucket + `regex`).
 
-## What `call()` is
+> This is **not** a toy layer. `call()` is the extensibility seam for mogwai-db: services register
+> into a `ServiceRegistry` and range from *pure, SQL-expressible* (list, degree, search) to
+> *async / effectful / federated* (a sub-query projected down to another Durable Object graph, or
+> an outbound `fetch`). The architecture is built **generic-first** so async and federated services
+> are additive — the earlier services exercise the exact seams the federated call later plugs into.
 
-`g.call(service, [map], [traversal]).with(k, v)…` invokes a **registered service** by name.
-TinkerPop's `ServiceRegistry` + `TinkerServiceRegistry` register exactly three "toy" services
-(confirmed against `origin/master` source — there are no other standard services):
+## The unifying execution model — segmented plans + a Service seam
 
-| service | source | kind | semantics |
-|---|---|---|---|
-| `--list` (`DirectoryService.NAME`) | `ServiceRegistry` | Start | list/describe registered services |
-| `tinker.search` | `TinkerTextSearchFactory` | Start | scan property values by regex, return the matching `Property` |
-| `tinker.degree.centrality` | `TinkerDegreeCentralityFactory` | Streaming | per-input-vertex edge count in a direction |
+Today a read traversal is *one CTE-chained SQL statement, run synchronously*. A service whose
+result comes from outside SQLite (a remote graph, an HTTP call) cannot live inside a single SQL
+statement — it arrives on a Promise. So the general model becomes a **plan of segments glued by
+service boundaries**:
 
-**Parameters** arrive three ways and merge into one param map: a static map literal arg, a
-traversal arg that produces a map (`__.project(k).by(__.constant(v))`), and `.with(k, value)`
-modulators where `value` is a literal, an enum, or a traversal (`__.constant(v)`). In **every**
-Call.feature scenario the param values are compile-time constants.
+```
+[ SQL segment ] → drain to a rowset → (service transforms it; may await) → materialize → [ SQL segment ] → …
+```
 
-### Exact service semantics (from TinkerPop source)
+- A **segment** is a complete, synchronous, compile-to-SQL traversal (the existing engine, unchanged).
+- A **service boundary** materializes the prior segment's rowset, applies the service (sync *or*
+  async), lands the output in a temp relation keyed by the originating parent ordinal, and
+  re-sources the next segment from it.
+- The async gap happens **only between segments** — never inside one. This is exactly what the DO
+  runtime already forces: you can't hold a SQLite cursor across an `await`, nor span
+  `transactionSync` across one. The segment-drain boundary satisfies both by construction.
+- A pure single-segment traversal (everything today) is the **degenerate case** — zero async
+  overhead. "Compile to SQL, never interpret" holds *within* every segment; a service is an opaque
+  transform between SQL-compiled stages, not a row-at-a-time interpreter.
 
-- **`--list`** — `ServiceRegistry.execute`: emit each registered service's *name* (verbose=false
-  default), filtered by the `service` param when present. The DirectoryService itself is **not**
-  listed. TinkerGraph → `["tinker.search", "tinker.degree.centrality"]` in registration order.
-- **`tinker.search`** — `TinkerHelper.search`: regex = `.*(search).*` (or a raw `regex` param);
-  scan elements of the requested `type` (default: vertices ∪ edges ∪ vertex-properties), flat-map
-  to their properties, keep properties whose `value.toString()` **fully matches** the regex (i.e.
-  substring containment for a metachar-free term). Returns `Property`/`VertexProperty` objects.
-  `type` ∈ {Vertex, Edge, VertexProperty}; VertexProperty searches *meta*-properties (empty on the
-  toy graphs). `.element()` then yields each property's owning element.
-- **`tinker.degree.centrality`** — per input vertex, `count(v.edges(direction))`; `direction`
-  default **IN**. Bulk-aware (emits `count` once per traverser bulk). Cannot start a traversal.
+### The `Service` seam (the spine everything hangs off)
 
-## Key realization — most of this reuses existing machinery
+```
+interface Service {
+  name: string;
+  type: 'start' | 'streaming' | 'barrier';   // TinkerPop Service.Type — load-bearing for batching
+  describeParams(): Map;                       // for --list --verbose
+  resolve(ctx): Contribution;                  // how this service contributes to the plan
+}
+type Contribution =
+  | { kind: 'stream';  build(input, params): Stream }         // pure: inline SQL lowering, no barrier
+  | { kind: 'barrier'; apply(rows, params, env): Promise<Rows> | Rows }  // materialize → (async?) → re-source
+```
 
-De-risked by running candidate equivalents against the seeded modern graph:
+- **`ServiceRegistry`** — a per-runtime DI seam, sibling to `GraphManager` (wired in
+  `application(deps)`). Holds the registered services; `--list` enumerates *it* (so a new service
+  shows up in `--list` automatically — no hardcoded list).
+- **`CallSpec { service, params, type }`** — produced once by the front-end from
+  `call`/`with`/map/traversal args, shared by every service and by the future async path.
+- **Executor** (`execute.ts`) — an async orchestrator over segments: run SQL → drain → apply the
+  service `Contribution` → materialize into a temp relation → seed the next segment. The outer
+  data-plane seam is already `query(id, gremlin, params) → Promise<Buffer[]>`, so nothing above the
+  store tier moves.
 
-- `--list` ≡ `g.inject("tinker.search", "tinker.degree.centrality")` (with the `service` filter
-  applied at compile time, since it is constant). ✔ verified: returns the two names.
-- `tinker.degree.centrality` (direction D) ≡ **`{in|out|both}E().count()`** per vertex:
-  - `g.V().where(__.inE().count().is(3)).values("name")` → `["lop"]` ✔
-  - `g.V().map(__.outE().count())` → `[3,0,2,1,0,0]` ✔ (correct per-vertex out-degrees)
-- `tinker.search` result is a `Property` stream, and **`PropertyStream` already has an
-  `element()` tail** (`propertyElement` in `PROPERTY_TAIL`, `group.ts`) that transitions to the
-  owning node/edge. So only the *source relation* is new.
+**Why pure services still go through this seam (not a `normalize` desugar shortcut):** the seam is
+what the federated call needs. A desugar-only path for list/degree/search would be a dead end the
+federated case can't fit into. Instead, pure services implement `Contribution.kind:'stream'` (they
+lower to SQL inline — same performance, same correctness), and the federated service implements
+`Contribution.kind:'barrier'` with an async `apply`. Same interface, same registry, same executor;
+only the contribution differs. `tinker.degree.centrality` (Streaming, per-parent) and
+`tinker.search` (a source builder) between them exercise the per-parent-merge and source/re-source
+machinery the federated call reuses — so the federated call is genuinely *additive*.
 
-So the only genuinely new lowerings are: (a) a `tinker.search` PropertyStream source, and (b)
-`project()` over a **scalar** stream with an element-valued path-label `by()` field (the degree
-`project(...).by(select("v")).by()` scenarios). Everything else is a front-end rewrite.
+## Constraints honored
 
-## Architecture — desugar in `normalize`, one new source builder
+- **Runtime parity:** FTS5 (incl. `fts5vocab`) and the JSON extension are confirmed available on
+  **both** Bun and Cloudflare DO — verified against CF docs and Bun empirically. No new dependency.
+- **Compile to SQL** within each segment; SQLite does the traversal.
+- **Cursor / transaction not held across `await`** → segment-drain boundaries (the async model
+  *requires* the drain the runtime already mandates).
+- **No triggers** (see FTS section): DO trigger support is unconfirmed *and* our value encoding
+  needs application-level awareness — index maintenance lives in the write path we already own.
 
-Per the compiler-extension law, `call` gets **no** private mini-compiler. It is resolved in the
-normalize seam and lowered through the existing engine.
+## The services
 
-### Seam A — `foldCall` in `src/strategies.ts` (new normalize pass)
+### `--list` — DirectoryService (pure, Start)
 
-Runs inside `normalize()` (so it applies to top-level **and** nested bodies uniformly — nested
-traversals are normalized via `child.ts:62 normalize(rawSteps)`). For each `call` step:
+Enumerate the `ServiceRegistry`: emit each registered service name (default), filtered by the
+`service` param; `verbose` → the JSON describe blob (`name` / supported types+requirements /
+params). The DirectoryService itself is not listed. Because it reads the live registry, adding the
+federated service later makes it appear in `--list` with no extra work.
 
-1. **Absorb trailing `with()`** modulators onto the `call` step (like `foldByModulators`); leave
-   non-`call` `with()` (e.g. `valueMap().with(token)`) untouched.
-2. **Resolve service name** (`call()` → `--list`) and **constant-fold params** from the map arg,
-   the traversal arg (`__.project(k).by(__.constant(v))` → `{k:v}`), and each `with(k, …)`
-   (literal / enum / `__.constant(v)`). Reuse `isNested`/`stepChain` for nested extraction.
-   Non-constant param traversals → **throw a clear deferral** (fail closed; no feature needs them).
-3. **Rewrite by service:**
-   - `--list` → replace the `call` step with `inject(<names filtered by the resolved `service`
-     param>)`. (Names are the fixed registry list — a module constant.)
-   - `tinker.degree.centrality` → replace with `map(__.{in|out|both}E().count())` chosen from the
-     resolved `direction` param (default IN). A nested `__.call("…centrality")` inside
-     `where()`/`by()` rewrites identically, so the child/where cases fall out for free.
-   - `tinker.search` → rewrite to a single synthetic source step `__search` carrying
-     `{regex, type}` (only meaningful as a Start step). This is the one case the engine can't
-     already express.
+### `tinker.degree.centrality` — per-vertex edge count (pure, Streaming)
 
-Guard: `tinker.degree.centrality` as a **source** (position 0) → throw `cannotStartTraversal`
-(spec-faithful; unused by the suite). `tinker.search`/`--list` mid-traversal → not in the suite;
-fail closed.
+Per input vertex, `count(v.edges(direction))`, `direction` default IN, bulk-aware. Lowers through
+the **scoped-count child-scope seam** (`pushChildScope` + `lowerScopedScalarReducer`) — i.e. the
+same per-parent-results-merged-by-ordinal substrate the federated barrier reuses. `where(call(…).is(n))`
+falls out of the child seam. The `project("vertex","degree").by(select("v")).by()` scenarios need a
+**`project()`-over-scalar** extension (`lowerScalarProject`, `select.ts`) so a `by(select(label))`
+field emits a path-history *element* alongside the scalar degree — a self-contained addition.
 
-### Seam B — `tinker.search` source builder in a new `src/steps/call.ts`
+### `tinker.search` — full-text search over property values (pure, Start, **FTS5-backed**)
 
-Add one rule to the source dispatcher (alongside `inject` in `write.ts`'s `WRITE_RULES`, which is
-where source-shaped scalar reads already live): `s[0].name === '__search'` →
-`compileSearchSource`. It builds a **`PropertyStream`** from a property-scan relation, then hands
-off to `lowerSteps` (so `.element()`, `.with("type",…)` already folded, etc. all reuse the tail):
+Backed by a real **FTS5 trigram (`case_sensitive 1`)** index — case-sensitive substring matching
+that reproduces TinkerPop's `.*(term).*` semantics exactly (verified: `ada`→`vadas` mid-string;
+`MARKO`≠`marko`). `.element()` walks the matched `Property` to its owner (reuses the existing
+`PropertyStream` `element()` tail). `type` ∈ {Vertex, Edge, VertexProperty} selects the row scope.
 
-- Relation = the property table(s) selected by `type`, projected to `PROPERTY_PAYLOAD`
-  (`vpid, owner, ownerLabel, pk, pv, pvtype, pmeta`), filtered by value containment.
-  - default / `Vertex` → `vertex_properties` (owner = node)
-  - `Edge` → `edge_properties` (owner = edge)
-  - `VertexProperty` → empty relation (meta-property search; empty on toy graphs — documented
-    limitation, matches expected results 13–14).
-  - default type is the UNION ALL of vertex + edge (+ empty meta) property rows.
-- Containment: `instr(pv, ?) > 0` (case-sensitive, literal — exactly `.*(term).*` for a
-  metachar-free term). A raw `regex` param, or a `search` term containing regex metacharacters →
-  **throw a deferral** (correct-by-design; a post-SQL JS regex filter is future work, noted below).
+- **Fail closed on short terms:** trigram cannot index terms < 3 chars, so a `search`/`regex` term
+  < 3 chars throws a clear deferral rather than silently scanning. Search is **index-only** by
+  contract — no O(n) fallback.
+- **Raw `regex` param:** arbitrary regex isn't FTS-expressible → JS post-filter over FTS candidates,
+  or deferral (decide in the search phase). Not needed by conformance.
 
-### Seam C — `project()` over a scalar stream with an element path-label field
+### Federated DO graph call — **built last, on the generic seams** (async, Barrier)
 
-Needed only for the 5 degree `project("vertex","degree").by(select("v")).by()` scenarios. Today
-`lowerScalarProject` (`select.ts:268`) returns `null` (→ `project() requires element input`) when
-a `by()` field needs element output. Extend it so a `by(select(label))` field that resolves to a
-**path-history element** is emitted as an element-id field in the `RecordStream`, while the
-identity `by()` field carries the scalar (the degree). This is a self-contained extension to the
-scalar-project path; the second (empty) `by()` = identity = the current scalar traverser.
+`g.V().call("graph.federate", {graph, traversal}).…` projects a sub-traversal **down to a sibling
+graph** and merges the results into the current tree. Implemented purely on the seams above:
 
-## Work breakdown & expected L3 delta
+- Registers as a `Contribution.kind:'barrier'` service with an **async `apply`**.
+- **Projection = the existing data-plane seam:** `query(siblingId, subGremlin, params) →
+  Promise<Buffer[]>` *is* "run a traversal on another graph." One graph = one DO, so cross-graph =
+  cross-DO. Per-runtime env: DO → sibling DO stub (`env.NS.get(idFromName)`), Bun → sibling
+  `GraphManager` entry. The `ServiceRegistry` DI hands `apply` this env.
+- **Batching:** `type:'barrier'` + `ChunkSize` — collect inputs, project one (or a few, bounded-
+  concurrency) sub-queries, not N serial calls.
+- **Merge into the tree:** decode the returned GraphBinary → **foreign-element materialization**
+  (land ids/props in a temp relation, exposed as an `ElementStream` of detached/reference elements,
+  or opaque maps if no local movement is wanted) → JOIN back on the originating parent ordinal so
+  path/`as()` linkage is preserved, exactly like a `flatMap`'s children.
+- **Recursion:** the sibling DO runs the *same* engine on the projected sub-traversal — genuine
+  federated query pushdown.
 
-| Phase | Scope | Call.feature scenarios | Notes |
-|---|---|---|---|
-| 1 | `foldCall` skeleton: `with()` fold + param constant-folding + service resolution | — | plumbing |
-| 2 | `--list` → `inject` | 7 (`g_call`, `g_callXlist*`) | reuse only |
-| 3 | `tinker.degree.centrality` → `{dir}E().count()` | 1 (`g_V_whereXcallXdcXX`) | reuse only |
-| 4 | `tinker.search` PropertyStream source + `element()` | 7 (`g_callXsearch*`) | one new builder |
-| 5 | `project()` over scalar with element path-label field | 5 (degree `project(...)`) | new capability; highest risk |
+## FTS5 + proper JSON handling (write-path maintained)
 
-Total: **20 scenarios** targeted. Phases 2–4 (15 scenarios) are low-risk reuse; Phase 5 (5
-scenarios) is the one genuine new traversal capability and can ship separately if it slips.
+The search index is a standalone FTS5 virtual table, maintained in the write path
+(`applyVertexProperty` / `insertEdgeProperty` / `drop` in `write.ts`) — **not** via triggers (DO
+trigger support unconfirmed, and our encoding needs application awareness). Proposed shape:
 
-## Test & discipline obligations (per CLAUDE.md)
+```
+CREATE VIRTUAL TABLE property_fts USING fts5(
+  owner UNINDEXED, owner_elem UNINDEXED, vpid UNINDEXED, pk UNINDEXED,
+  kind UNINDEXED,          -- 'value' | 'jsonkey' | 'jsonleaf'
+  text,                    -- the searchable text
+  tokenize='trigram case_sensitive 1');
+```
 
-- **L2 SQL snapshots** for each new emitted shape (`--list` inject, search property scan, degree
-  count) — semantic-equivalence `.toContain`, not byte-identity.
-- **`test/compiler.test.ts`** execution-semantics cases (results over the seeded modern graph) —
-  the behavioural twin of the snapshots.
-- **L1 corpus** must stay 100% (parser already accepts `call`/`with`; no grammar change).
-- **L3**: `call` is already in scope (it runs and fails, not skipped) — no `tags.ts` change. A
-  clean run re-records `l3-state.json` and syncs the passing count in `README.md` +
-  `docs/feature-support-matrix.md` (commit together).
-- **L4**: optionally add addendum scenarios for `with("regex", …)` / metachar terms marking the
-  post-SQL-regex give-back with `@gap:call-regex`.
-- Update `docs/feature-support-matrix.md` for `call`/`element` (❌→✅/🟡).
+- **Values are the `{t,v}` ValueNode encoding.** A naive `json_tree` over the stored JSONB would
+  index tag noise (`"t"`,`"v"`,`"map"`,`"str"`) and an indirected shape. So the write-path indexer
+  is **ValueNode-aware** (same logic as `frameTypedNode`/`propNodeExpr`), emitting:
+  - one `kind='value'` row = the value's *logical* `toString()` (faithful to
+    `p.value().toString()`, so a collection like `["a","brave"]` matches `search "brave"` via its
+    toString — matching TinkerPop, and covering `tinker.search` fully); plus
+  - `kind='jsonkey'` / `kind='jsonleaf'` rows from walking the logical tree (`json_tree` over the
+    *reconstructed* plain JSON) — so nested keys and typed leaves are individually searchable. This
+    is the "handle JSON properly" capability, beyond `tinker.search`.
+- **Backfill / migration:** existing graphs get the index built lazily (on first search) or at
+  schema-upgrade time; new writes maintain it incrementally.
+- **CF cost note:** virtual-table writes count against the DO row-write quota — property writes get
+  more expensive. Acceptable and intentional now that search is a first-class capability.
+- **Verified:** `json_tree` recursively walks nested objects/arrays; feeding leaves+keys into an
+  FTS5 trigram table matched nested content (`brav`→`brave` in `nested.tags[1]`; keys like `city`).
 
-## Known limitations (fail closed, correct-by-design)
+## TextP string predicates via the same FTS5 index
 
-- Raw `regex` param and regex-metacharacter `search` terms → deferral throw (a post-SQL JS regex
-  filter inside the store tier is the fidelity path, mirroring the DO's no-UDF regex-TextP story;
-  no feature needs it).
-- `type: VertexProperty` meta-property search → empty (matches the toy graphs).
-- Dynamic (per-traverser, non-constant) call params → deferral throw (no feature needs them).
-- `tinker.degree.centrality` as a start step / `tinker.search` mid-traversal → spec-faithful throw.
+Route the currently-deferred `has(k, containing/startingWith/endingWith/regex(x))` through the
+index where sound (closes real L3 gaps — the "Binding expected string…" bucket + `regex` throw):
+
+- `containing(x)` = substring → FTS trigram `MATCH` for `|x| ≥ 3`.
+- `startingWith`/`endingWith` = anchored substring → trigram `MATCH` + a boundary check.
+- **Correctness fallback (distinct from the search service policy):** a *predicate* must return
+  correct results, so for `|x| < 3` it **falls back to a correct SQL scan** (`instr`/`LIKE`-with-
+  case-handling), *not* fail-closed. (The `tinker.search` service fails closed on short terms; a
+  `has(...)` filter does not — different contracts.)
+- `regex(x)` = arbitrary regex → JS post-filter over FTS/scan candidates, or deferral.
+
+## Conformance + L4
+
+- **L3:** `map/Call.feature` (20) + the TextP string-predicate scenarios. `call` is already in L3
+  scope (runs+fails, not skipped) — no `tags.ts` change.
+- **L4 (our addendum — we author scenarios for everything we build):** FTS substring + case-
+  sensitivity fidelity; nested-JSON key/value search; short-term **fail-closed** behavior; TextP
+  short-term fallback correctness; the federated-call merge (`@gap:` tagged for the upstream
+  give-back where the official corpus has no coverage).
+- **L2 SQL snapshots** + **`compiler.test.ts`** execution semantics for each new emitted shape.
+- **L1** stays 100% (no grammar change). Clean L3 run re-records `l3-state.json` + syncs the count.
+
+## Phasing (federated is genuinely last, on shared seams)
+
+| Phase | Deliverable | Notes |
+|---|---|---|
+| 1 | **Generic spine:** `CallSpec` + `ServiceRegistry` DI + `Service`/`Contribution` interface + segment-ready plan type + executor loop (degenerate single-segment) | the foundation everything reuses |
+| 2 | `--list` reading the live registry (+ filter/verbose) | 7 scenarios |
+| 3 | `tinker.degree.centrality` via the child-scope reducer seam + `project()`-over-scalar | 6 scenarios; exercises per-parent merge |
+| 4 | `tinker.search` on FTS5 trigram + ValueNode-aware JSON write-path indexing + fail-closed + `element()` | 7 scenarios; builds the real search index |
+| 5 | `TextP` (`containing`/`startingWith`/`endingWith`/`regex`) on the FTS5 index + fallback | closes the TextP deferral bucket |
+| 6 | **Federated DO graph call** — async barrier service on the Phase-1 seams: projection via `query()`, foreign-element materialization, parent-ordinal merge, Barrier/ChunkSize batching | last; additive, no engine rewrite |
+
+## Semantics & hard parts (honest)
+
+- **No single-snapshot atomicity across a service await** — a segmented traversal reads the graph at
+  multiple points in time; concurrent writes between segments are visible. You cannot hold a
+  transaction across the fetch. Expected for a federated/effectful query; stated explicitly.
+- **Failure / timeout / partial-result policy** for async services (errors already ride the
+  GraphBinary status trailer; retries/timeouts are new policy).
+- **Foreign elements** are detached references, not local rows — no unbounded local graph movement
+  over them unless materialized.
+- **Non-determinism** — effectful services can't be treated as pure for replan/caching.
+
+## Fail-closed edges (correct-by-design, never mis-execute)
+
+- `tinker.search` term < 3 chars → deferral (index-only contract).
+- Raw `regex` service param / non-constant per-traverser call params → deferral until the barrier
+  param-eval path lands.
+- `type: VertexProperty` meta-property search → empty on the toy reference graphs (documented).
