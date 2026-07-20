@@ -220,8 +220,12 @@ streams them. **No HTTP in the store tier / DO.**
   suffixes are **lowercase** — the step name is the segment before the first underscore.
 - The client's vertex/edge/VP serializers **hardcode empty properties** — we hand-roll
   framing from ioc primitives (`execute.ts`).
-- DO SQLite has **no user-defined functions**: regex TextP and anything SQL can't express
-  is filtered post-SQL in JS inside the DO.
+- DO SQLite has **no user-defined functions** — and we do **NOT** work around that by filtering or
+  evaluating traversal predicates in JS. Compile-to-SQL is absolute (locked decision #3): anything
+  SQL can't express (`regex`/`typeOf` TextP) **fails closed** with a clear deferral, it is never
+  filtered post-SQL in JS. Text matching that SQL *can* express (`containing`/`startingWith`/
+  `endingWith`) stays in SQL (`LIKE`). (JS framing/serialization of already-computed rows is not
+  "filtering" and is unaffected.)
 
 ## Schema (src/storage.ts) — rationale
 
