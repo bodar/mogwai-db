@@ -9,6 +9,9 @@ corpus is heavily self-reported as `LANDED`; this snapshot only keeps what a cod
 check confirmed is still open). For live per-step capability, cross-check
 `feature-support-matrix.md`.
 
+Kept live as items land: a **✅** marks work completed *since this snapshot's first
+draft*, with its residual follow-ons left listed at their real (usually lower) priority.
+
 Impact tags: **High** (correctness gap, or unblocks a whole cluster/family) ·
 **Medium** (a real feature/conformance bucket) · **Low** (narrow matrix-fill,
 fail-closed today, or cosmetic/debt).
@@ -17,17 +20,19 @@ fail-closed today, or cosmetic/debt).
 
 ## P1 — highest leverage (correctness + cluster-unblockers)
 
-1. **Element-key `group()`/`groupCount()` bulk-weighting** — ✅ *mostly landed 2026-07-19*.
-   Bulk is threaded through `GroupSource` (`bulk`/`valBulk`): `groupCount()` and
-   `group().by(k).by(reducer)` now weight by `SUM(bulk)` like the scalar-key forms (behavior-
-   identical while bulk≡1), and `movementCollapse` is enabled for non-fan-out-key `groupCount()`
-   terminals so dense-fan-out groupCount is tractable+correct (equivalence + weighted tests
-   committed). Weighting reaches every level — outer, child-scope value reducers (`by(__.out().sum())`),
-   and the nested-map inner reducer (`by(__.<move>.groupCount())`). **Narrower follow-ons remain
-   (Low-Medium):** collapse gating for `group().by(k).by(reducer)` terminals (weighting is
-   correct-by-construction, only the `chainCollapseSafe` admission is deferred);
-   `repeat().times(n).groupCount()` tractability (needs repeat-level frontier collapse feeding the
-   group stream — `tryBulkRepeat` only feeds `count()`/element leaves).
+1. **Element-key `group()`/`groupCount()` bulk-weighting** — ✅ *core landed 2026-07-19*
+   (`b7d3c9c`, `c6fc71b`; CI green, L3 baseline held). Bulk is threaded through
+   `GroupSource` (`bulk`/`valBulk`): `groupCount()` and `group().by(k).by(reducer)` now
+   weight by `SUM(bulk)` like the scalar-key forms (behavior-identical while bulk≡1), and
+   `movementCollapse` is enabled for non-fan-out-key `groupCount()` terminals so
+   dense-fan-out groupCount is tractable+correct (equivalence + weighted tests committed).
+   Weighting reaches every level — outer, child-scope value reducers (`by(__.out().sum())`),
+   and the nested-map inner reducer (`by(__.<move>.groupCount())`). **Only narrower
+   follow-ons remain (Low-Medium) — no longer P1:** collapse gating for
+   `group().by(k).by(reducer)` terminals (weighting is correct-by-construction, only the
+   `chainCollapseSafe` admission is deferred); `repeat().times(n).groupCount()` tractability
+   (needs repeat-level frontier collapse feeding the group stream — `tryBulkRepeat` only
+   feeds `count()`/element leaves).
    → [wire-bulking-rearchitecture](./2026-07-18-wire-bulking-rearchitecture.md) (2026-07-19 update),
    [deep-seam-migration-roadmap](./2026-07-18-deep-seam-migration-roadmap.md) #2,
    [traverser-bulking](./2026-07-14-traverser-bulking.md)
