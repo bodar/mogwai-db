@@ -105,3 +105,85 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
       | result |
       | m[{"name":"l[lop]"}] |
       | m[{"name":"l[ripple]"}] |
+
+  # ---- Commit C: is(typeOf(MAP)) over a STORED map property → MapStream retype ----
+
+  # A stored map property, retyped by is(typeOf(MAP)), frames whole (terminal) and its
+  # followers (count(local)/select(values)/unfold) reuse the blob substrate.
+  @gap:map-unfold
+  Scenario: g_V_valuesXmX_isXtypeOfXGType_MAPXX
+    Given the mapdata graph
+    And the traversal of
+      """
+      g.V().values("m").is(typeOf(GType.MAP))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"a":"d[1].i","b":"d[2].i","c":"d[3].i"}] |
+
+  @gap:map-unfold
+  Scenario: g_V_valuesXmX_isXtypeOfXGType_MAPXX_countXlocalX
+    Given the mapdata graph
+    And the traversal of
+      """
+      g.V().values("m").is(typeOf(GType.MAP)).count(Scope.local)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+
+  @gap:map-unfold
+  Scenario: g_V_valuesXmX_isXtypeOfXGType_MAPXX_selectXvaluesX
+    Given the mapdata graph
+    And the traversal of
+      """
+      g.V().values("m").is(typeOf(GType.MAP)).select(values)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[d[1].i,d[2].i,d[3].i] |
+
+  @gap:map-unfold
+  Scenario: g_V_valuesXmX_isXtypeOfXGType_MAPXX_selectXkeysX
+    Given the mapdata graph
+    And the traversal of
+      """
+      g.V().values("m").is(typeOf(GType.MAP)).select(keys)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[a,b,c] |
+
+  # unfold() explodes the stored map into per-entry size-1 MAPs.
+  @gap:map-unfold
+  Scenario: g_V_valuesXmX_isXtypeOfXGType_MAPXX_unfold
+    Given the mapdata graph
+    And the traversal of
+      """
+      g.V().values("m").is(typeOf(GType.MAP)).unfold()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"a":"d[1].i"}] |
+      | m[{"b":"d[2].i"}] |
+      | m[{"c":"d[3].i"}] |
+
+  # unfold().select(keys) reads each entry's key.
+  @gap:map-unfold
+  Scenario: g_V_valuesXmX_isXtypeOfXGType_MAPXX_unfold_selectXkeysX
+    Given the mapdata graph
+    And the traversal of
+      """
+      g.V().values("m").is(typeOf(GType.MAP)).unfold().select(keys)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | a |
+      | b |
+      | c |

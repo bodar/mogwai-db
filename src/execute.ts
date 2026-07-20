@@ -159,13 +159,15 @@ function mapBuffer(row: any, entries: MapEntry[]): Buffer {
 }
 
 // One side (key/value) of a Map.Entry row → a fully-qualified GraphBinary buffer, per
-// its MapOf shape. A scalar frames by its tag (or infers); an element arrives as a JSON
-// object string (SQL elementValueResult) and routes through vertexBuffer/edgeBuffer to
-// keep props; a list arrives as JSON text and frames via frameListOf.
+// its MapOf shape. A TYPED scalar arrives as a self-describing {t,v} node (JSON text) and
+// frames via frameTypedNode (each entry its own exact type — stored heterogeneous maps); a
+// bare scalar frames by its uniform tag (or infers); an element arrives as a JSON object
+// string (SQL elementValueResult) → vertexBuffer/edgeBuffer to keep props; a list via frameListOf.
 function mapSideBuffer(raw: any, of: MapOf): Buffer {
   if (of.kind === 'elem') return raw == null ? frameValue(null, undefined) : (of.elem === 'edge' ? rowEdge : rowVertex)(JSON.parse(raw));
   if (of.kind === 'list') return frameListOf(raw, of.of);
-  return of.as ? frameValue(raw, of.as) : ioc.anySerializer.serialize(raw);
+  // scalar: always a self-describing {t,v} node (JSON text) → frame each its own exact type.
+  return frameTypedNode(raw == null ? null : (typeof raw === 'string' ? JSON.parse(raw) : raw));
 }
 
 // A Map.Entry (group()/valueMap()/is(typeOf(MAP)).unfold()) frames as a one-entry MAP —
@@ -505,6 +507,9 @@ function* frameValues(rows: any[], shape: import('./render.ts').Shape): Generato
     case 'scalar': for (const r of rows) if (r.v !== null || shape.productiveNull)
       yield r.v === null ? frameValue(null, undefined) : sumBuffer(r.v, r.vt); return;
     case 'map': for (const r of rows) yield mapBuffer(r, shape.entries); return;
+    // A whole-map VALUE per row: the `map` blob is [[keyNode,valNode],…] of self-describing
+    // {t,v} nodes → frame the reconstructed map tree (each key/value its own exact type).
+    case 'mapValue': for (const r of rows) yield frameTypedNode({ t: 'map', v: JSON.parse(r.map) }); return;
     // A Map.Entry stream (map unfold): one size-1 MAP per row.
     case 'mapEntry': for (const r of rows) yield mapEntryBuffer(r, shape.keyOf, shape.valOf); return;
     case 'path': for (const r of rows) yield pathBuffer(r, shape.positions); return;

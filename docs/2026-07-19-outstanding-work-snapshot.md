@@ -37,10 +37,17 @@ fail-closed today, or cosmetic/debt).
    [deep-seam-migration-roadmap](./2026-07-18-deep-seam-migration-roadmap.md) #2,
    [traverser-bulking](./2026-07-14-traverser-bulking.md)
 
-2. **`MapStream` relational unfold — `is(typeOf(MAP))` → MapStream** — the single most
-   depended-on gap: `MapStream` exists but has no SQL-side unfold, so the whole
-   `valueMap()`/`group().unfold()` / Map.Entry-stream family is blocked, and it gates
-   items 3, P2·9, and P2·10 below. **High.**
+2. **`MapStream` relational unfold — `is(typeOf(MAP))` → MapStream** — ✅ *landed 2026-07-20*.
+   `MapStream` is now a per-row JSONB **map blob** (one whole map per row, scalar sides a
+   self-describing `{t,v}` node — one uniform encoding); `unfold()` explodes it to a per-entry
+   `MapEntryStream` that frames each entry as a **size-1 MAP** (the settled v4 wire form —
+   TINKERPOP-3104, no dedicated Map.Entry DataType). All four producers unified on the blob:
+   `group`/`groupCount`/`valueMap`/stored-map `is(typeOf(MAP))`. Composes: `valueMap().unfold()
+   [.map(__.select(keys/values))]`, `group()/groupCount().unfold()` (terminal or `.select(Column.*)`),
+   `values('m').is(typeOf(MAP))` + `count(Scope.local)`/`select(keys/values)`/`unfold()`. L3
+   1231→1233; adversarially verified (heterogeneous + empty maps round-trip, no regression).
+   **Residual (Low, fail-closed):** `where`/`fold`/list-ops after the MAP retype;
+   `elementMap().unfold()` re-entry. Unblocks items 3, P2·9, P2·10.
    → [list-value-substrate](./2026-07-13-list-value-substrate-plan.md),
    [typed-property-values](./2026-07-16-typed-property-values-plan.md),
    [full-fidelity-typed-collections](./2026-07-17-full-fidelity-typed-collections-plan.md)

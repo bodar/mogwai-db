@@ -11,7 +11,7 @@ import { readCompiled, type Compiled, type ListOf, type Shape } from '../render.
 import { list, q } from '../q.ts';
 import { framedProps, extIdOf } from '../plan.ts';
 import { edges, labels, nodes } from '../schema.ts';
-import { groupResultColumns, pathColumns, recordResultColumns, type GroupStream, type ListStream, type MapOf, type MapStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream, type Stream, type VariantStream } from './stream.ts';
+import { groupResultColumns, pathColumns, recordResultColumns, type GroupStream, type ListStream, type MapEntryStream, type MapOf, type MapStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream, type Stream, type VariantStream } from './stream.ts';
 
 export function materializeRoot(query: Query, tail: Expression, shape: Shape): Compiled {
   return readCompiled(query, tail, shape);
@@ -118,19 +118,35 @@ function elementValueResult(ridExpr: Expression, elem: 'node' | 'edge'): Express
   return q`(SELECT ${object} FROM ${n} JOIN ${l} ON ${l.c.id}=${n.c.label} WHERE ${n.c.id}=${ridExpr})`;
 }
 
-/** One side (key/value) of a Map.Entry row projected to a wire-ready column. A scalar
- * rides raw; a single element rowid expands to its public payload JSON; a list is expanded
- * via listResult (an element list's rowids become full payload objects, like elsewhere). */
+/** One side (key/value) of a Map.Entry row projected to a wire-ready column. A scalar rides
+ * as its {t,v} node JSON; a single element rowid expands to its public payload JSON; a list
+ * is expanded via listResult (an element list's rowids become full payload objects). */
 const mapSideResult = (col: Expression, of: MapOf): Expression =>
   of.kind === 'elem' ? elementValueResult(col, of.elem) : of.kind === 'list' ? listResult(col, of.of) : col;
 
-/** Materialize a MapStream at the root as a stream of Map.Entry values — each row frames
- * as a size-1 GraphBinary MAP (the settled v4 wire form: TinkerPop's MapEntrySerializer
- * transforms an entry into a one-entry Map, TINKERPOP-3104). Only an `entries` MapStream
- * (group()/valueMap()/is(typeOf(MAP)).unfold()) is a terminal value; an aggregate map
- * (select(Column.*) source) always retypes to a ListStream before the root. */
+/** Materialize a MapStream at the root — each row is one whole map VALUE, framed as one
+ * GraphBinary MAP. The `map` blob is `[[keyNode,valNode],…]`; a scalar side is a self-
+ * describing {t,v} node, so the handler frames the whole blob via frameTypedNode-style
+ * decoding. An element/list side is expanded to its public payload here so the framer sees
+ * ready JSON (only when a side is elem/list — the common scalar case passes the blob through). */
 export function materializeMapRoot(stream: MapStream): Compiled {
-  if (!stream.entries) throw new Error('a non-entry map value cannot be materialized directly');
+  const c = stream.rel.as('c');
+  const plainScalar = stream.keyOf.kind === 'scalar' && stream.valOf.kind === 'scalar';
+  // All-scalar (the common case: stored map, groupCount, scalar-valued group) → the blob is
+  // already a frameable [[{t,v},{t,v}],…] tree; hand it straight to the map framer. A side that
+  // is an element/list needs per-pair expansion — deferred (rare; fails closed clearly below).
+  if (!plainScalar) throw new Error('a terminal map with element/list key or value not yet supported');
+  return materializeRoot(
+    stream.q,
+    q`SELECT json(${c.c.map}) AS map FROM ${c}`,
+    { kind: 'mapValue' },
+  );
+}
+
+/** Materialize a MapEntryStream (post-unfold) — each row is one Map.Entry, framed as a size-1
+ * GraphBinary MAP (the settled v4 wire form: a Map.Entry has no dedicated DataType; TinkerPop's
+ * MapEntrySerializer transforms it into a one-entry Map, TINKERPOP-3104). */
+export function materializeMapEntryRoot(stream: MapEntryStream): Compiled {
   const c = stream.rel.as('c');
   return materializeRoot(
     stream.q,
@@ -198,6 +214,7 @@ export function materializeStream(stream: Exclude<Stream, import('./context.ts')
     case 'group': return materializeGroupRoot(stream);
     case 'path': return materializePathRoot(stream);
     case 'map': return materializeMapRoot(stream);
+    case 'mapEntry': return materializeMapEntryRoot(stream);
   }
 }
 

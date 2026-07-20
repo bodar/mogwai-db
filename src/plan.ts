@@ -396,6 +396,23 @@ export const storedValueExpr = (valExpr: Expression, vtypeExpr: Expression): Exp
 export const propNodeExpr = (valExpr: Expression, vtypeExpr: Expression): Expression =>
   q`json_object('t', ${vtypeExpr}, 'v', ${storedValueExpr(valExpr, vtypeExpr)})`;
 
+/** Infer a canonical gremlin type from a value's SQLite storage class, mirroring the JS
+ *  value-inference the client would otherwise apply (execute.ts anySerializer): text→string,
+ *  real→double, integer→int if it fits a 32-bit range else long, null→null. Used to tag a
+ *  computed scalar (a group key/value) that carries no stored vtype, so a map VALUE built from
+ *  it self-describes as a {t,v} node (mapstream-blob-model) instead of being re-inferred later. */
+export const inferVtypeSql = (valExpr: Expression): Expression =>
+  q`CASE typeof(${valExpr})
+      WHEN 'text' THEN 'string' WHEN 'real' THEN 'double' WHEN 'null' THEN NULL
+      WHEN 'integer' THEN (CASE WHEN ${valExpr} BETWEEN -2147483648 AND 2147483647 THEN 'int' ELSE 'long' END)
+      ELSE 'string' END`;
+
+/** Build a self-describing {t,v} node for a COMPUTED scalar whose type is either statically
+ *  known (`staticType`, e.g. a count is always 'long') or inferred from storage class. The one
+ *  place a group/valueMap scalar side is tagged for the uniform typed map-blob encoding. */
+export const typedScalarNode = (valExpr: Expression, staticType?: string): Expression =>
+  propNodeExpr(valExpr, staticType ? value(staticType) : inferVtypeSql(valExpr));
+
 export const nodePropScalar = (nodeIdExpr: Expression, key: string): Expression =>
   q`(SELECT value FROM vertex_properties WHERE node=${nodeIdExpr} AND key=${value(key)} ORDER BY id LIMIT 1)`;
 

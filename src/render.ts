@@ -23,7 +23,11 @@ export type ListOf =
 // scalar (mk/mv hold the value, `as` its GraphBinary tag), an element rowid (rejoined to
 // nodes/edges when framed out), or a JSONB list (framed via frameListOf).
 export type MapOf =
-  | { kind: 'scalar'; as?: ValueType }
+  // The scalar side of a map is ALWAYS a self-describing {t,v} ValueNode (framed via
+  // frameTypedNode → each entry its own exact type; heterogeneous maps round-trip). Every
+  // producer (group/groupCount/valueMap/is(typeOf(MAP))) emits this one encoding. An element
+  // (rejoined from a rowid) or a list value can't be a scalar envelope → their own kinds.
+  | { kind: 'scalar' }
   | { kind: 'elem'; elem: 'node' | 'edge' }
   | { kind: 'list'; of: ListOf };
 
@@ -101,7 +105,8 @@ export type Shape =
   | { kind: 'valueMap'; keys: string[] | null; tokens: boolean }
   | { kind: 'elementMap'; keys: string[] | null }
   | { kind: 'map'; entries: MapEntry[] }
-  | { kind: 'mapEntry'; keyOf: MapOf; valOf: MapOf } // one Map.Entry per row (group()/valueMap()/is(typeOf(MAP)).unfold()) → each frames as a size-1 GraphBinary MAP
+  | { kind: 'mapValue' } // one whole map VALUE per row: a `map` JSONB column [[keyNode,valNode],…] with self-describing {t,v} scalar sides → one GraphBinary MAP (frameTypedNode)
+  | { kind: 'mapEntry'; keyOf: MapOf; valOf: MapOf } // one Map.Entry per row (a MapStream unfold) → each frames as a size-1 GraphBinary MAP
   | { kind: 'group'; key: GroupKey; val: GroupVal }
   | { kind: 'path'; positions: PathPos[] }                 // linear: one row per path, per-position columns
   | { kind: 'pathGrouped'; elem: ElemShape; byKey?: boolean } // recursive: N rows per path (pk, ord, element|value), grouped

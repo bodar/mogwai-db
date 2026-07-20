@@ -11,7 +11,7 @@ import { carryOf, continueLowering, dispatchShapeTail, toListStream, toResultStr
 import { tryLowerLocalAggregate, lowerScalarAggregate } from './sideeffect.ts';
 import { type Shape } from '../render.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
-import { lowerScalarFilter, lowerConstant, lowerScalarConstant, lowerScalarSack, lowerScalarSplit, collectionTypeOf, scalarCollectionRetype } from './scalar.ts';
+import { lowerScalarFilter, lowerConstant, lowerScalarConstant, lowerScalarSack, lowerScalarSplit, collectionTypeOf, scalarCollectionRetype, scalarMapRetype } from './scalar.ts';
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerScalarProject, lowerSingleSelect } from './select.ts';
 import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerLegacyUnion } from './branch.ts';
@@ -179,12 +179,10 @@ function lowerValueMapTail(st: ElementStream, proj: PStep, acc: TailAcc, steps: 
   const step = steps[i];
   if (step.name === 'count' && !isScopeLocalStep(step))
     return continueLowering(lowerGlobalCount(st), i + 1);
-  // unfold() → a per-element Map.Entry stream: each property becomes one entry row
-  // (entries:true), materialized as a size-1 MAP or consumed per-row by a following
-  // select(Column.keys/values) / map(__.select(keys)). Re-enter at unfold+1.
-  if (step.name === 'unfold')
-    return continueLowering(lowerValueMap(st, proj, true), i + 1);
-  if (step.name === 'select' && hasColumnArg(step))
+  // unfold() and select(Column.*) both consume valueMap AS a map value: retype to the
+  // per-element whole-map MapStream and re-enter at the SAME step, which compileFromMap
+  // then unfolds (→ Map.Entry stream) or aggregates (→ list value).
+  if (step.name === 'unfold' || (step.name === 'select' && hasColumnArg(step)))
     return continueLowering(lowerValueMap(st, proj), i);
   // select(label)/select(Pop, label): a valueMap has no as()-label of its own, so an
   // UNBOUND label selects nothing → empty (TinkerPop). A label bound earlier by as()
@@ -611,17 +609,22 @@ function compileFold(st: ElementStream, acc: TailAcc): ListStream {
 // reached on a scalar stream it raises TinkerPop's incoming-type error.
 const SCALAR_LIST_ONLY = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product', 'conjoin', 'all', 'any']);
 
-// is(typeOf(LIST|SET)) RETYPES a scalar value stream into a ListStream: the stored
-// collection value becomes the `list` column, so unfold/count(Scope.local)/range/project
-// all reuse the list substrate (List.feature). A stored non-matching row is filtered out; a
-// computed scalar (no stored vtype) can't be a collection, so it falls through to the
-// generic is() fold. MAP is NOT retyped (no MapStream unfold yet) → returns null so is()
-// stays a scalar vtype filter; a bare map value still frames whole via case 'value'.
-const scalarIsListRetype: ShapeTailFn<ScalarStream> = (s, step, _steps, at) => {
+// is(typeOf(LIST|SET|MAP)) RETYPES a scalar value stream into a ListStream / MapStream: the
+// stored collection value becomes the `list` / `map` column, so unfold/count(Scope.local)/
+// range/select(Column)/framing all reuse the collection substrate (List.feature / Map.feature).
+// A stored non-matching row is filtered out; a computed scalar (no stored vtype) can't be a
+// collection, so it falls through to the generic is() fold (which static-folds to empty).
+const scalarIsCollectionRetype: ShapeTailFn<ScalarStream> = (s, step, _steps, at) => {
   const kind = collectionTypeOf(step);
-  if (kind !== 'list' && kind !== 'set') return null;
-  const listed = scalarCollectionRetype(s, kind);
-  return listed ? continueLowering(listed, at + 1) : null;
+  if (kind === 'list' || kind === 'set') {
+    const listed = scalarCollectionRetype(s, kind);
+    return listed ? continueLowering(listed, at + 1) : null;
+  }
+  if (kind === 'map') {
+    const mapped = scalarMapRetype(s);
+    return mapped ? continueLowering(mapped, at + 1) : null;
+  }
+  return null;
 };
 
 const scalarListOnly: ShapeTailFn<ScalarStream> = (_s, step) => {
@@ -695,7 +698,7 @@ const scalarBranch = (fn: (s: ScalarStream, step: PStep) => ScalarStream | null)
   (s, step, _steps, at) => { const r = fn(s, step); return r ? continueLowering(r, at + 1) : null; };
 
 const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
-  ['is', scalarIsListRetype],
+  ['is', scalarIsCollectionRetype],
   ['and', scalarFilter], ['or', scalarFilter], ['not', scalarFilter], ['filter', scalarFilter], ['where', scalarFilter],
   // constant(x) rebinds every traverser to the literal x — the scalar form preserves the
   // encounter/origins so it composes inside a child scope (option/project/modulation bodies).
