@@ -384,7 +384,7 @@ function groupKey(r: any, key: GroupKey): { buf: Buffer; canon: string } {
   if (key.kind === 'map') {
     const m = new Map<any, any>();
     key.parts.forEach((p, i) => m.set(p.key, r[`k${i}_v`]));
-    return { buf: ioc.anySerializer.serialize(m), canon: 'm:' + key.parts.map((_, i) => JSON.stringify(r[`k${i}_v`])).join(' ') };
+    return { buf: ioc.anySerializer.serialize(m), canon: 'm:' + key.parts.map((_, i) => JSON.stringify(r[`k${i}_v`])).join('\x00') };
   }
   // A typed scalar key (asNumber(BYTE).groupCount() etc.) frames by its tag; an untagged
   // key infers from the JS value (correct for string/int/double).
