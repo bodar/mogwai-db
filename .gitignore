@@ -16,6 +16,6 @@ build/
 test/L3-conformance/l3-telemetry.ndjson
 test/L3-conformance/*.summary.json
 
-# Local Claude Code worktrees / state (but track shared project settings)
-.claude/*
-!.claude/settings.json
+# Local Claude Code overrides only — shared config, hooks, and skills are tracked
+.claude/settings.local.json
+mise.local.toml
