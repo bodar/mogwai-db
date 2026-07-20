@@ -165,8 +165,9 @@ CREATE VIRTUAL TABLE property_fts USING fts5(
   - `kind='jsonkey'` / `kind='jsonleaf'` rows from walking the logical tree (`json_tree` over the
     *reconstructed* plain JSON) — so nested keys and typed leaves are individually searchable. This
     is the "handle JSON properly" capability, beyond `tinker.search`.
-- **Backfill / migration:** existing graphs get the index built lazily (on first search) or at
-  schema-upgrade time; new writes maintain it incrementally.
+- **No backfill / migration:** mogwai-db has never been deployed, so there are no existing graphs.
+  The `property_fts` table is part of `initSchema` from the start and every write maintains it from
+  the first insert — no lazy rebuild or schema-upgrade path to carry.
 - **CF cost note:** virtual-table writes count against the DO row-write quota — property writes get
   more expensive. Acceptable and intentional now that search is a first-class capability.
 - **Verified:** `json_tree` recursively walks nested objects/arrays; feeding leaves+keys into an
