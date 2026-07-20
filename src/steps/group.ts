@@ -455,7 +455,7 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
  * carried alias/path/branch/sack state defer (the origin ordinal would collide / tokens
  * need extra entry keys).
  */
-export function lowerValueMap(st: ElementStream, proj: PStep): MapStream {
+export function lowerValueMap(st: ElementStream, proj: PStep, entries = false): MapStream {
   if (proj.name === 'elementMap') throw new Error('elementMap() re-entry not yet supported');
   if (proj.args.includes(true)) throw new Error('valueMap(true)/token re-entry not yet supported');
   if (st.carried.aliases.size || st.carried.path || st.carried.origins.length || st.carried.sack || st.carried.fromV)
@@ -478,8 +478,10 @@ export function lowerValueMap(st: ElementStream, proj: PStep): MapStream {
   // (o0 via ROW_NUMBER), so the element source's carried bulk is consumed here, not carried
   // into the map rel — clear it (behaviour-identical: bulk was 1 per element).
   const carry: Carry = { ...carryOf(st), carried: carriedWith(st.carried, { origins: ['o0'], bulk: null }) };
-  // key = a bare string; value = the property's value list (json array per entry).
-  return toMapStream(carry, rel, { kind: 'scalar' }, { kind: 'list', of: { kind: 'scalar' } });
+  // key = a bare string; value = the property's value list (json array per entry). entries:true
+  // for unfold() (each row is one Map.Entry, materialized/selected per row); false for
+  // select(Column.*) (compileFromMap aggregates the rows into one list per origin).
+  return toMapStream(carry, rel, { kind: 'scalar' }, { kind: 'list', of: { kind: 'scalar' } }, entries);
 }
 
 /** groupCount() over a SCALAR value stream — a barrier grouping by the value itself:

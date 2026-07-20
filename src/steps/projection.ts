@@ -179,6 +179,11 @@ function lowerValueMapTail(st: ElementStream, proj: PStep, acc: TailAcc, steps: 
   const step = steps[i];
   if (step.name === 'count' && !isScopeLocalStep(step))
     return continueLowering(lowerGlobalCount(st), i + 1);
+  // unfold() → a per-element Map.Entry stream: each property becomes one entry row
+  // (entries:true), materialized as a size-1 MAP or consumed per-row by a following
+  // select(Column.keys/values) / map(__.select(keys)). Re-enter at unfold+1.
+  if (step.name === 'unfold')
+    return continueLowering(lowerValueMap(st, proj, true), i + 1);
   if (step.name === 'select' && hasColumnArg(step))
     return continueLowering(lowerValueMap(st, proj), i);
   // select(label)/select(Pop, label): a valueMap has no as()-label of its own, so an
