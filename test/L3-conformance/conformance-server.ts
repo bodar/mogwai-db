@@ -11,6 +11,7 @@
 // graphs' write traversals through the normal query path (see seed-modern.ts), so
 // it is identical on Bun and Cloudflare — a graph is seeded by talking to it.
 import { BunGraphManager } from '../../src/bun/BunGraphManager.ts';
+import { standardRegistry } from '../../src/services/standard.ts';
 import { application } from '../../src/application.ts';
 import { LoggingGraphManager, telemetryPath, clearTelemetry } from './telemetry.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
@@ -47,11 +48,16 @@ const SEEDS: Record<string, string[]> = {
 };
 
 export async function startConformanceServer(port = 45940) {
-  const manager = new BunGraphManager();
+  // The conformance host emulates the REFERENCE provider exactly: only the tinker.* / --list
+  // services, NOT our mogwai.* extensions. The official g_call / g_callXlistX scenarios assert
+  // --list returns exactly the reference set, so registering our federated service (which --list
+  // enumerates live) would break them. Passing a federation-free `standardRegistry()` (no env)
+  // omits mogwai.graph.federate here; production Bun/CF keeps it. See docs feature matrix.
+  const manager = new BunGraphManager(undefined, standardRegistry);
   // Seed before serving so the first scenario sees a populated graph. Each write
   // traversal goes through the manager seam exactly as a client request would.
   for (const [g, queries] of Object.entries(SEEDS)) {
-    for (const q of queries) await manager.query(g, q, {});
+    for (const q of queries) manager.executor(g).framed(q, {}); // sync — seeds are non-federated writes
   }
   // L3 telemetry (always on): wrap the SERVED manager only — seed writes above go
   // through the raw manager, so they never pollute the capture. The decorator

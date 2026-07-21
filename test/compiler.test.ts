@@ -7,7 +7,7 @@ import { test, expect, describe } from 'bun:test';
 import { compile, type CompileOptions } from '../src/compiler.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
-import { executeQuery } from '../src/execute.ts';
+import { executeQuery } from './support/executor.ts';
 import { ioc } from '../src/io.ts';
 import { parseRequest } from '../src/wire.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';

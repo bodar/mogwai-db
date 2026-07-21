@@ -1,5 +1,6 @@
 import { application } from '../application.ts';
 import { BunGraphManager } from './BunGraphManager.ts';
+import { extendedRegistry } from '../services/standard.ts';
 
 /** Bun entry point: build the multi-graph manager (in-memory by default, or a
  *  directory of files when `$MOGWAI_DB_DIR` is set), wire the shared router, and
@@ -11,7 +12,9 @@ export function startServer(
   dir = process.env.MOGWAI_DB_DIR,
   pathPrefix = process.env.MOGWAI_PATH_PREFIX,
 ) {
-  const manager = new BunGraphManager(dir);
+  // Production injects the EXTENDED registry (federation on). The single place the registry
+  // choice is made; the conformance host injects standardRegistry at its own construction.
+  const manager = new BunGraphManager(dir, extendedRegistry);
   const app = application({ manager, pathPrefix });
   return Bun.serve({ port, fetch: app.router });
 }

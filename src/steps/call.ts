@@ -2,7 +2,8 @@ import { type Query } from '../q.ts';
 import { type PStep } from '../strategies.ts';
 import { type Stream } from './stream.ts';
 import { type ElementStream } from './context.ts';
-import { type ServiceRegistry, type ServiceCallCtx, type Contribution, type ForeignRow, type ServiceEnv, type CallParams } from '../services/types.ts';
+import { type ServiceRegistry, type ServiceCallCtx, type Contribution, type ForeignRow, type CallParams } from '../services/types.ts';
+import { type FederationSource } from '../segment.ts';
 import { parseCallSpec } from '../services/call-params.ts';
 import { type CompileScope } from './child.ts';
 
@@ -29,7 +30,7 @@ export interface BarrierPoint {
   readonly kind: 'barrier-point';
   readonly serviceName: string;
   readonly params: CallParams;
-  readonly apply: (rows: readonly ForeignRow[], env: ServiceEnv) => Promise<ForeignRow[]>;
+  readonly apply: (rows: readonly ForeignRow[], source: FederationSource) => Promise<ForeignRow[]>;
   /** The chain steps AFTER this call() — resumed against the landed foreign stream. */
   readonly restSteps: PStep[];
   /** Where restSteps begins in the original chain (the index the resumer lowers from). */
@@ -55,7 +56,7 @@ function resolveContribution(spec: ReturnType<typeof parseCallSpec>, registry: S
  *  service (Phase 6 federate) returns a BarrierPoint instead: its rows arrive from an awaited
  *  sibling call, so it cannot lower synchronously; compileRead surfaces it to the segment
  *  orchestrator, which resumes lowering from `restSteps` once the rows land. */
-export function seedCall(first: PStep, query: Query, params: Record<string, any>, registry: ServiceRegistry, steps: PStep[]): Stream | BarrierPoint {
+export function seedCall(first: PStep, query: Query, params: Record<string, any>, registry: ServiceRegistry, steps: PStep[], depth: number): Stream | BarrierPoint {
   const spec = parseCallSpec(first, params);
   const ctx: ServiceCallCtx = { params: spec.params, q: query, compileParams: params, registry };
   const contribution = resolveContribution(spec, registry, ctx);
@@ -64,7 +65,9 @@ export function seedCall(first: PStep, query: Query, params: Record<string, any>
     kind: 'barrier-point',
     serviceName: spec.serviceName,
     params: spec.params,
-    apply: (rows, env) => contribution.apply(rows, spec.params, env),
+    // depth is this compile's federation depth (request-scoped DI, captured from CompileOptions);
+    // the service's apply gets it so a recursive federate calls federateQuery(..., depth+1).
+    apply: (rows, env) => contribution.apply(rows, spec.params, env, depth),
     restSteps: steps,
     restAt: 1, // a source call() is steps[0]; the rest begins at 1
     compileParams: params,

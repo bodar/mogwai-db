@@ -11,30 +11,10 @@
 // So no verb 404s on a well-formed id — GET/POST auto-create an empty graph,
 // PUT is create-if-absent, DELETE is a no-op when there's nothing to remove.
 import type { GraphStore } from './storage.ts';
-import { type TypeNode } from './gremlin-types.ts';
-import { type Framed } from './execute.ts';
-
-export interface GraphInfo {
-  vertexCount: number;
-  edgeCount: number;
-}
-
-export interface GraphManager {
-  /** Run a compiled gremlin traversal against graph `id`, creating it on demand,
-   *  and return the framed GraphBinary result buffers (concern B — executeQuery,
-   *  run in the store tier). The edge (router) has already parsed the wire and
-   *  resolved `id`, and wraps the returned buffers into the HTTP response (concern
-   *  C). Throws on compile/SQL/framing failure — the edge frames the error. Each result
-   *  carries its traverser multiplicity (`bulk`) for the GraphBinary bulked frame. */
-  query(id: string, gremlin: string, params: Record<string, any>, paramTypes?: Record<string, TypeNode>): Promise<Framed[]>;
-  /** Create graph `id` if absent. Idempotent. */
-  create(id: string): Promise<void>;
-  /** Element counts for graph `id`, creating it on demand (fresh = 0, 0). */
-  info(id: string): Promise<GraphInfo>;
-  /** Destroy graph `id` and all its storage. Idempotent — destroying an absent
-   *  graph is a no-op, not an error. */
-  destroy(id: string): Promise<void>;
-}
+import type { GraphInfo } from './api.ts';
+// The GraphManager / GraphInfo / Executor seams now live in the API surface (src/api.ts).
+// Re-exported here so existing `import { GraphManager } from './manager.ts'` sites keep working.
+export type { GraphManager, GraphInfo, Executor, RemoteExecutor } from './api.ts';
 
 /** Element counts for a store. Shared by both runtimes (Bun reads its own
  *  store; the Cloudflare DO runs it inside itself over `ctx.storage.sql`). */

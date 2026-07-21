@@ -38,40 +38,23 @@ export interface ServiceCallCtx {
   readonly scope?: CompileScope;
 }
 
-/** One row of a sibling graph's result, decoded to plain JS values (NOT GraphBinary — a
- *  federated hop is an internal DO↔DO / in-process call, so it carries raw rows and frames
- *  to GraphBinary only at the client edge; see execute.ts rawQuery and the 2026-07-21
- *  federation addendum). Enough to build a TinkerPop DETACHED reference: id + label +
- *  a property snapshot. `props` is the SAME per-key {t,v}-node JSON the local element
- *  framer (vertexBuffer/edgeBuffer) already consumes, so landing needs no re-typing.
- *  A barrier service that returns a per-parent result stamps `ordinal` onto each row so the
- *  orchestrator can rejoin it to the originating traverser (mid-traversal V().call(...)); a
- *  source-form g.call(...) leaves it undefined. */
-export type ForeignRow =
-  | { readonly kind: 'vertex'; readonly id: string | number; readonly label: string; readonly props: Record<string, unknown>; readonly ordinal?: number }
-  | { readonly kind: 'edge'; readonly id: string | number; readonly label: string; readonly src: string | number; readonly tgt: string | number; readonly props: Record<string, unknown>; readonly ordinal?: number };
-
-/** The per-runtime environment a 'barrier' Contribution needs to reach OUTSIDE this graph.
- *  Federation's only requirement today — kept a narrow, generic capability so a future
- *  outbound service (e.g. mogwai.http.get) reuses the same slot. `federateQuery` is the
- *  existing data-plane seam (manager.ts's query) narrowed to the one method a sibling call
- *  needs, returning RAW rows (see ForeignRow). Injected at the store tier (Bun: the
- *  GraphManager itself, self-referential; Cloudflare: a sibling-DO stub), threaded to
- *  `apply` at EXECUTION time — compile time has no env. */
-export interface ServiceEnv {
-  federateQuery(id: string, gremlin: string, params: Record<string, unknown>): Promise<ForeignRow[]>;
-}
+/** ForeignRow lives in the outer API surface (src/api.ts) — it's a leaf data type on the
+ *  federated-transfer contract. Re-exported here so service-author code keeps one import. */
+export type { ForeignRow } from '../api.ts';
+import type { ForeignRow } from '../api.ts';
+import type { FederationSource } from '../segment.ts';
 
 /** How a Service contributes to the plan. 'stream' is a pure, inline-SQL contribution
  *  (Phases 1-5): it lowers to SQL synchronously and the generic engine takes over. 'barrier'
  *  is the Phase-6 async/federated shape: it does NOT lower to a Stream at compile time (its
  *  rows come from an awaited sibling call), so it yields no `build`; instead `apply` runs at
- *  EXECUTION time (the one await in execute.ts's orchestrator), taking the drained input rows
- *  (empty for a source-form call), the resolved params, and the per-runtime env, and returning
- *  the foreign rows the orchestrator lands + resumes from. */
+ *  EXECUTION time (the one await in the executor's segment loop), taking the drained input rows
+ *  (empty for a source-form call), the resolved params, the FederationSource (how to reach other
+ *  graphs), and this hop's federation depth, and returning the foreign rows the executor lands +
+ *  resumes from. */
 export type Contribution =
   | { readonly kind: 'stream'; build(ctx: ServiceCallCtx): Stream }
-  | { readonly kind: 'barrier'; apply(rows: readonly ForeignRow[], params: CallParams, env: ServiceEnv): Promise<ForeignRow[]> };
+  | { readonly kind: 'barrier'; apply(rows: readonly ForeignRow[], params: CallParams, source: FederationSource, depth: number): Promise<ForeignRow[]> };
 
 export interface Service {
   readonly name: string;

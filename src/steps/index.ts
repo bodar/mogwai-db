@@ -429,13 +429,13 @@ function segmentFromBarrier(bp: BarrierPoint, params: Record<string, any>, regis
 
 /** A read traversal: prefix fold + shaped lowering loop.
  *  `sackInit` (from withSack()) seeds the carried sack column at the source. */
-export function compileRead(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, registry: ServiceRegistry = EMPTY_REGISTRY): Compiled | SegmentPlan {
+export function compileRead(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, registry: ServiceRegistry = EMPTY_REGISTRY, federationDepth = 0): Compiled | SegmentPlan {
   // call() as a SOURCE (g.call(...)): the service seeds the initial Stream (of whatever
   // shape it produces — a list of names, a Property stream), and the generic shaped
   // lowering loop takes over from step 1. A peer of the buildPrefix (V/E/union) path, not
   // inside it, because a call() source is not necessarily element-shaped.
   if (steps[0].name === 'call') {
-    const seed = seedCall(steps[0], new Query(), params, registry, steps);
+    const seed = seedCall(steps[0], new Query(), params, registry, steps, federationDepth);
     // A barrier source (Phase 6 federate): its rows come from an awaited sibling call, so the
     // compile suspends into a SegmentPlan. resume lands the awaited ForeignRow[] as a fresh
     // foreign root stream and finishes lowering the rest of the chain synchronously — building

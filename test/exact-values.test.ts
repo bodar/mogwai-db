@@ -6,7 +6,7 @@
 import { test, expect, describe } from 'bun:test';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
-import { executeQuery, executeFramed } from '../src/execute.ts';
+import { executeQuery, executeFramed } from './support/executor.ts';
 import { streamBuffers } from '../src/http.ts';
 import { ioc } from '../src/io.ts';
 import { BigDecimal, Duration } from '../src/gremlin-types.ts';

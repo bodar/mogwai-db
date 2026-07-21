@@ -5,19 +5,10 @@
 // above it (schema, label interning, the whole compiler) is runtime-agnostic.
 // (Deliberately synchronous, unlike an async D1-style adapter: DO SQL is sync.)
 import { coerceBindValue } from './gremlin-types.ts';
-
-export interface Sql {
-  /** Execute a single DDL statement (no bindings, no result). */
-  exec(sql: string): void;
-  /** Run a query with positional `?` bindings and return all rows. Writes use
-   *  `RETURNING` to read back generated ids, so this covers reads and writes. */
-  query<T = any>(sql: string, binds?: readonly unknown[]): T[];
-  /** Release the underlying handle, if any. Bun closes its `bun:sqlite`
-   *  Database (so a file-backed graph can then be unlinked); the Durable Object
-   *  adapter owns no releasable handle (teardown there is `ctx.storage.deleteAll`),
-   *  so it omits this. Optional at the seam because only Bun's registry needs it. */
-  close?(): void;
-}
+import type { Sql } from './api.ts';
+// The `Sql` seam now lives in the API surface (src/api.ts). Re-exported here so the many
+// existing `import { Sql } from './storage.ts'` sites keep working.
+export type { Sql } from './api.ts';
 
 // One statement per entry: DO `ctx.storage.sql.exec` runs a single statement,
 // so we never rely on multi-statement exec.

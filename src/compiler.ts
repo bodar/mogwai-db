@@ -5,7 +5,7 @@ import { compileRead } from './steps/index.ts';
 import { routeWrite } from './steps/write.ts';
 import { type Compiled, type WritePlan } from './render.ts';
 import { type Plan } from './segment.ts';
-import { resolveFastPaths, resolveRegistry, type CompileOptions } from './fast-paths.ts';
+import { resolveFastPaths, resolveRegistry, resolveFederationDepth, type CompileOptions } from './fast-paths.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
 export type { Compiled, WritePlan, Shape, ValueType, ListOf, MapEntry, MapOf, ElemShape, GroupKey, GroupVal, PathPos } from './render.ts';
 export type { CompileOptions, FastPathConfig } from './fast-paths.ts';
@@ -46,7 +46,7 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   const write = routeWrite(steps, params, sackInit ?? undefined, sideEffects);
   if (write) return { kind: 'sql', compiled: discard ? applyDiscard(write) : write };
 
-  const read = compileRead(steps, params, sackInit ?? undefined, resolveFastPaths(options), resolveRegistry(options));
+  const read = compileRead(steps, params, sackInit ?? undefined, resolveFastPaths(options), resolveRegistry(options), resolveFederationDepth(options));
   if (read.kind === 'segment') {
     // A discard trailing a federated source (g.call(...).iterate()) applies to the RESUMED leaf,
     // so wrap resume rather than the segment itself (which carries no shape).
