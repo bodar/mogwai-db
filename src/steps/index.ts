@@ -22,6 +22,8 @@ import { assertStreamColumns, continueLowering, type LoweringResult, type Stream
 import { type Compiled } from '../render.ts';
 import { tryBulkRepeat } from './bulk.ts';
 import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../fast-paths.ts';
+import { defaultRegistry } from '../services/registry.ts';
+import type { ServiceRegistry } from '../services/types.ts';
 import { lowerScalarRows } from './scalar.ts';
 import { materializeFinal } from './materialize.ts';
 import { compileFromVariant } from './variant.ts';
@@ -156,7 +158,7 @@ function chainCollapseSafe(steps: PStep[]): boolean {
 /** Seed the source CTE (c0) from V(...)/E(...) and its optional id list. When the
  *  chain tracks a path, the source element is path position p0 (projected as the
  *  extra `p0` column). */
-function seedSource(first: PStep, query: Query, params: Record<string, any>, trackPath: boolean, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, wantsEncounter = false): ElementStream {
+function seedSource(first: PStep, query: Query, params: Record<string, any>, trackPath: boolean, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, wantsEncounter = false, registry: ServiceRegistry = defaultRegistry): ElementStream {
   const elem: Elem = first.name === 'E' ? 'edge' : 'node';
   const srcRel = elem === 'edge' ? edges : nodes;
   // The source projection, assembled in carriedCols order (sack, bulk, encounter, path) so the
@@ -190,7 +192,7 @@ function seedSource(first: PStep, query: Query, params: Record<string, any>, tra
     body = q`SELECT ${sel} FROM ${srcRel}`;
   }
   const path = trackPath ? { kind: 'cols' as const, cols: [{ col: 'p0', elem }] } : undefined;
-  return { kind: 'elements', q: query, params, fastPaths, rel: query.cte(body, cols), elem, carried: { aliases: new Map(), origins: [], path, sack: sackInit ? 'sk' : undefined, bulk: 'bulk', encounter: wantsEncounter ? 'encounter' : undefined } };
+  return { kind: 'elements', q: query, params, fastPaths, registry, rel: query.cte(body, cols), elem, carried: { aliases: new Map(), origins: [], path, sack: sackInit ? 'sk' : undefined, bulk: 'bulk', encounter: wantsEncounter ? 'encounter' : undefined } };
 }
 
 /** union(b1, b2, …) as a SOURCE step: compile each branch's prefix into the SAME
@@ -198,14 +200,14 @@ function seedSource(first: PStep, query: Query, params: Record<string, any>, tra
  *  into one seed. Branches must be vertex-rooted prefixes with no leftover tail or
  *  as() (those defer); the shared-Query recursion also lets a branch be a nested
  *  union. This is the reusable sub-traversal-into-query seam local/map/choose build on. */
-function seedUnion(first: PStep, query: Query, params: Record<string, any>, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, wantsEncounter = false): ElementStream {
+function seedUnion(first: PStep, query: Query, params: Record<string, any>, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, wantsEncounter = false, registry: ServiceRegistry = defaultRegistry): ElementStream {
   if (sackInit) throw new Error('withSack() with a union() source not yet supported');
   if (wantsEncounter) throw new Error('emission-order encounter over a union() source not yet supported');
   const branches = first.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
   if (branches.length < 1) throw new Error('union() needs at least one branch');
   const rels = branches.map((b: any) => {
     const bsteps = stepChain(b.nested, params);
-    const { st, stop } = buildPrefix(bsteps, params, query, undefined, fastPaths);
+    const { st, stop } = buildPrefix(bsteps, params, query, undefined, fastPaths, wantsEncounter, registry);
     if (stop !== bsteps.length) throw new Error(`union() source branch tail __.${bsteps[stop].name}() not yet supported`);
     if (st.elem !== 'node') throw new Error('union() source branch must be vertex-typed');
     if (st.carried.aliases.size > 0) throw new Error('union() source branch with as() not yet supported');
@@ -214,7 +216,7 @@ function seedUnion(first: PStep, query: Query, params: Record<string, any>, sack
   // Each branch prefix seeds its own bulk=1; UNION ALL keeps them per-row, so the merged
   // source carries the branch multiplicity forward (a bulk-1 traverser per branch row).
   const body = list(rels.map((r) => q`SELECT id, bulk FROM ${r}`), ' UNION ALL ');
-  return { kind: 'elements', q: query, params, fastPaths, rel: query.cte(body, ['id', 'bulk']), elem: 'node', carried: { aliases: new Map(), origins: [], bulk: 'bulk' } };
+  return { kind: 'elements', q: query, params, fastPaths, registry, rel: query.cte(body, ['id', 'bulk']), elem: 'node', carried: { aliases: new Map(), origins: [], bulk: 'bulk' } };
 }
 
 /**
@@ -306,11 +308,11 @@ export function tryLowerElementSteps(steps: PStep[], seed: ElementStream): Eleme
   return lowered.next === steps.length ? lowered.stream : null;
 }
 
-export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, query: Query = new Query(), sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, wantsEncounter = false): { st: ElementStream; stop: number } {
+export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, query: Query = new Query(), sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, wantsEncounter = false, registry: ServiceRegistry = defaultRegistry): { st: ElementStream; stop: number } {
   const first = steps[0];
   const trackPath = chainTracksPath(steps);
-  const seeded = first.name === 'union' ? seedUnion(first, query, params, sackInit, fastPaths, wantsEncounter)
-    : (first.name === 'V' || first.name === 'E') ? seedSource(first, query, params, trackPath, sackInit, fastPaths, wantsEncounter)
+  const seeded = first.name === 'union' ? seedUnion(first, query, params, sackInit, fastPaths, wantsEncounter, registry)
+    : (first.name === 'V' || first.name === 'E') ? seedSource(first, query, params, trackPath, sackInit, fastPaths, wantsEncounter, registry)
     : (() => { throw new Error(`unsupported source step: ${first.name}`); })();
   // Gate the otherV() entering-vertex tracking on the chain; local()'s body inherits
   // the flag through its {...st} seed, so an inner edge step records it too.
@@ -402,7 +404,7 @@ export function lowerSteps(initial: Stream, steps: PStep[], from: number): Strea
 
 /** A read traversal: prefix fold + shaped lowering loop.
  *  `sackInit` (from withSack()) seeds the carried sack column at the source. */
-export function compileRead(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS): Compiled {
+export function compileRead(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, registry: ServiceRegistry = defaultRegistry): Compiled {
   // Traverser bulking: a `repeat(...).times(n).count()` (path/as/sack-free) compiles to
   // unrolled GROUP-BY-SUM(bulk) CTEs instead of an enumerate-every-walk recursion, so a
   // dense/deep count (grateful times(8) ≈ 2.5e15 walks) stays tractable. Null → not the
@@ -419,6 +421,6 @@ export function compileRead(steps: PStep[], params: Record<string, any> = {}, sa
   // (see chainCollapseSafe). A safe chain's movements fold convergent walks; anything else runs
   // the plain UNION-ALL movement. Threaded via fastPaths so each movement StepFn reads one flag.
   const fp: FastPathConfig = { ...fastPaths, movementCollapse: fastPaths.movementCollapse && chainCollapseSafe(steps) && !wantsEncounter };
-  const { st, stop } = buildPrefix(steps, params, new Query(), sackInit, fp, wantsEncounter);
+  const { st, stop } = buildPrefix(steps, params, new Query(), sackInit, fp, wantsEncounter, registry);
   return materializeFinal(lowerSteps(st, steps, stop));
 }
