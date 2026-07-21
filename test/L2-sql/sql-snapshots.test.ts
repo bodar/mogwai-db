@@ -2353,7 +2353,7 @@ describe('compiler SQL snapshots', () => {
     expect(p.sql).toContain('e.src AS id, c1.depth + 1'); // both directions
   });
 
-  test('bulk repeat stays tractable where enumerating every walk cannot', () => {
+  test('bulk repeat stays tractable where enumerating every walk cannot', async () => {
     // K12 clique (66 edges, one per pair). repeat(both()).times(d) has ~22^d walks per start —
     // ~5e10 at depth 8 — which the recursive enumerate-every-walk path cannot materialize. The bulk
     // unroll keeps the frontier bounded by |V|, so a 2.5-billion-traverser count returns in ms.
@@ -2373,7 +2373,7 @@ describe('compiler SQL snapshots', () => {
     expect(c8).toBe(2572306572n);
     // element form: a BOUNDED frontier — one framed vertex per reachable id (≤ |V|), not 2.5e9 rows —
     // whose multiplicities sum to the full traverser count (the wire ships this as RLE).
-    const framed = executeFramed(store, 'g.V().repeat(__.both()).times(8)', {});
+    const framed = await executeFramed(store, 'g.V().repeat(__.both()).times(8)', {});
     expect(framed.length).toBeLessThanOrEqual(12);
     expect(framed.reduce((s, f) => s + f.bulk, 0n)).toBe(2572306572n);
 

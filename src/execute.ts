@@ -1,7 +1,8 @@
-import { compile, type ListOf, type MapEntry, type MapOf, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from './compiler.ts';
+import { compile, compilePlan, type Compiled, type WritePlan, type ListOf, type MapEntry, type MapOf, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from './compiler.ts';
 import { isCollectionType, valueNodeFromStored, type TypeNode, type ValueNode } from './gremlin-types.ts';
 import type { GraphStore } from './storage.ts';
-import type { ServiceRegistry, ForeignRow } from './services/types.ts';
+import type { ServiceRegistry, ForeignRow, ServiceEnv } from './services/types.ts';
+import { runPlan } from './segment.ts';
 import { ioc, VertexProperty, Property, t } from './io.ts';
 
 // ---- GraphBinary v4 result framing ----
@@ -455,8 +456,29 @@ const bulkOf = (r: any): bigint => (r?.bulk != null ? BigInt(r.bulk) : 1n);
 // Element leaves may carry that per-row bulk; every other shape is a single-multiplicity value.
 // The write path and all non-element value shapes frame through frameValues (bulk 1); only the
 // element leaves read the column here, so the multiplicity plumbing touches exactly two cases.
-function* framedResults(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>, registry?: ServiceRegistry): Generator<Framed> {
-  const plan = compile(gremlin, params, { registry }, paramTypes);
+/** Read a barrier segment's HEAD into the barrier's input rows. The head is an ordinary read
+ *  Compiled projecting the barrier's input traversers as vertex/edge rows (mid-traversal, 6b);
+ *  a source-form barrier has a null head and never calls this. Runs synchronously (no cursor
+ *  across an await — the row array is fully drained here, before any barrier await). */
+function readSegmentHead(store: GraphStore, head: Compiled): ForeignRow[] {
+  const rows = store.query(head.sql, head.binds) as any[];
+  if (head.shape.kind === 'edge')
+    return rows.map((r) => ({ kind: 'edge', id: r.id, label: r.label, src: r.src, tgt: r.tgt, props: propsOf(r.props), ordinal: r.o }));
+  return rows.map((r) => ({ kind: 'vertex', id: r.id, label: r.label, props: propsOf(r.props), ordinal: r.o }));
+}
+
+/** Resolve a (possibly segmented) Plan to a final synchronous Compiled/WritePlan — the ONE await
+ *  boundary. A pure single-segment traversal (all of Phases 1-5) returns immediately. A barrier
+ *  (Phase 6 federate) drives runPlan: read head → await the sibling call → land + resume. `env`
+ *  supplies the federated capability; a barrier with no env throws a clear "unavailable" error. */
+async function resolvePlan(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>, registry?: ServiceRegistry, env?: ServiceEnv): Promise<Compiled | WritePlan> {
+  const plan = compilePlan(gremlin, params, { registry }, paramTypes);
+  if (plan.kind === 'sql') return plan.compiled;
+  if (!env) throw new Error('call(): a barrier/federated service needs a federation env, which this runtime did not provide');
+  return runPlan(plan, env, (head) => readSegmentHead(store, head));
+}
+
+function* frameResolved(store: GraphStore, plan: Compiled | WritePlan): Generator<Framed> {
   if (plan.kind === 'write') {
     for (const r of plan.run(store)) {
       // Write responses carry a flat {key:value} prop bag; vertexBuffer wants
@@ -576,7 +598,13 @@ export function executeQuery(store: GraphStore, gremlin: string, params: Record<
   // The flat value list: EXPAND each collapsed (value, N) back to N copies so this API returns the
   // full multiset its callers expect. Bulk is 1 everywhere except a movementCollapse element leaf,
   // so this is a no-op there; the wire path (executeFramed) keeps the compact (value, N) pairs.
-  return [...framedResults(store, gremlin, params, paramTypes, registry)].flatMap((f) =>
+  //
+  // SYNCHRONOUS on purpose: executeQuery has ~100 call sites (tests, seeding) and handles only
+  // non-federated traversals (compile() throws clearly on a barrier). The async federated path
+  // goes through executeFramed (the manager seam, already Promise-typed). Keeping executeQuery
+  // sync avoids an await ripple across every seed loop / assertion.
+  const plan = compile(gremlin, params, { registry }, paramTypes);
+  return [...frameResolved(store, plan)].flatMap((f) =>
     f.bulk === 1n ? [f.buf] : (Array(Number(f.bulk)).fill(f.buf) as Buffer[]));
 }
 
@@ -589,9 +617,15 @@ export type Framed = { buf: Buffer; bulk: bigint };
 /** The manager-seam entry point that carries per-value bulk to the edge (concern C's bulked
  *  framing appends it as a Long). `executeQuery` stays the flat `Buffer[]` API its many callers
  *  use (it expands bulk back to the multiset); this keeps the compact (value, N) pairs so a
- *  movementCollapse element leaf emits one row per element instead of N. */
-export function executeFramed(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}, registry?: ServiceRegistry): Framed[] {
-  return [...framedResults(store, gremlin, params, paramTypes, registry)];
+ *  movementCollapse element leaf emits one row per element instead of N.
+ *
+ *  ASYNC (the seam's Promise, per manager.ts, gains substance in Phase 6): a federated call()
+ *  awaits a sibling graph between segments. `env` provides that federated capability; it is
+ *  absent for a plain query (the degenerate single-segment case resolves with zero async work).
+ *  Every non-barrier traversal completes without ever suspending. */
+export async function executeFramed(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}, registry?: ServiceRegistry, env?: ServiceEnv): Promise<Framed[]> {
+  const plan = await resolvePlan(store, gremlin, params, paramTypes, registry, env);
+  return [...frameResolved(store, plan)];
 }
 
 /** The INTERNAL (non-GraphBinary) row-producing sibling of executeQuery — the raw-row transfer

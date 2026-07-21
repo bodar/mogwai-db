@@ -6,12 +6,12 @@ import { DIRECTORY_SERVICE_NAME, type Service, type ServiceRegistry } from '../s
 import { parseGremlin, stepChain } from '../src/frontend.ts';
 import { normalize } from '../src/strategies.ts';
 import { parseCallSpec } from '../src/services/call-params.ts';
-import { compile } from '../src/compiler.ts';
+import { compile, compilePlan } from '../src/compiler.ts';
 import { runPlan, type Plan } from '../src/segment.ts';
 import type { ForeignRow, ServiceEnv } from '../src/services/types.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
-import { executeQuery } from '../src/execute.ts';
+import { executeQuery, executeFramed } from '../src/execute.ts';
 import { ioc } from '../src/io.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 
@@ -210,7 +210,7 @@ describe('call() routing (seedCall)', () => {
     expect(seenParams).toEqual({ service: 'tinker.search' });
   });
 
-  test('a barrier-kind service fails closed as not-yet-supported (Phase 6)', () => {
+  test('compile() on a barrier source throws — it needs the async segment executor', () => {
     const federate: Service = {
       name: 'mogwai.graph.federate',
       type: 'barrier',
@@ -218,8 +218,23 @@ describe('call() routing (seedCall)', () => {
       resolve: () => ({ kind: 'barrier', apply: async () => [] }),
     };
     const reg = createRegistry([federate]);
+    // compile() is synchronous and cannot resolve a barrier; the executor (executeFramed) drives
+    // the async segment plan. compilePlan yields a segment instead of throwing.
     expect(() => compile('g.call("mogwai.graph.federate")', {}, { registry: reg }))
-      .toThrow(/barrier\/async services are not yet supported/);
+      .toThrow(/segment executor/);
+  });
+
+  test('compilePlan() on a barrier source yields a segment plan (head=null for a source)', () => {
+    const federate: Service = {
+      name: 'mogwai.graph.federate',
+      type: 'barrier',
+      describeParams: () => ({}),
+      resolve: () => ({ kind: 'barrier', apply: async () => [] }),
+    };
+    const reg = createRegistry([federate]);
+    const plan = compilePlan('g.call("mogwai.graph.federate")', {}, { registry: reg });
+    expect(plan.kind).toBe('segment');
+    if (plan.kind === 'segment') expect(plan.head).toBeNull();
   });
 });
 
@@ -337,5 +352,47 @@ describe('tinker.degree.centrality — per-vertex edge count', () => {
         return v.properties?.find((p: any) => p.label === 'name')?.value;
       });
     expect(names('g.V().where(call("tinker.degree.centrality").with("direction", OUT).is(3))')).toEqual(['marko']);
+  });
+});
+
+describe('barrier source form end to end (executeFramed → runPlan → land → frame)', () => {
+  // A STUB barrier service + STUB env — proves the whole source-form path (compilePlan yields a
+  // segment → executeFramed awaits apply → lands rows → frames GraphBinary) BEFORE the real
+  // mogwai.graph.federate service / runtime env land. The env just returns synthetic rows.
+  const foreignVerts: ForeignRow[] = [
+    { kind: 'vertex', id: 1, label: 'person', props: { name: [{ t: 'string', v: 'alice' }] } },
+    { kind: 'vertex', id: 2, label: 'person', props: { name: [{ t: 'string', v: 'bob' }] } },
+  ];
+  const stubFederate: Service = {
+    name: 'mogwai.graph.federate',
+    type: 'barrier',
+    describeParams: () => ({}),
+    resolve: () => ({ kind: 'barrier', apply: async (_in, params, env) => env.federateQuery(String(params.graph), 'g.V()', {}) }),
+  };
+  const stubEnv = (rows: ForeignRow[]): ServiceEnv => ({ federateQuery: async () => rows });
+  const store = new GraphStore(new BunSqlite(':memory:')); // empty — foreign rows are literals
+  const reg = createRegistry([stubFederate]);
+  const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
+  const run = async (g: string) => (await executeFramed(store, g, {}, {}, reg, stubEnv(foreignVerts))).map((f) => dec(f.buf));
+
+  test('g.call(federate) lands the sibling vertices as detached references', async () => {
+    const vs: any[] = await run('g.call("mogwai.graph.federate").with("graph", "orders")');
+    expect(vs.map((v) => v.constructor.name)).toEqual(['Vertex', 'Vertex']);
+    expect(vs.map((v) => v.properties?.find((p: any) => p.label === 'name')?.value).sort()).toEqual(['alice', 'bob']);
+  });
+
+  test('a read tail on the federated result runs locally (values over the landed props)', async () => {
+    const names: any[] = await run('g.call("mogwai.graph.federate").with("graph", "orders").values("name")');
+    expect(names.sort()).toEqual(['alice', 'bob']);
+  });
+
+  test('id() over the federated result reads the landed id', async () => {
+    const ids: any[] = await run('g.call("mogwai.graph.federate").with("graph", "orders").id()');
+    expect(ids.map(String).sort()).toEqual(['1', '2']);
+  });
+
+  test('executeFramed without an env fails closed on a barrier', async () => {
+    await expect(executeFramed(store, 'g.call("mogwai.graph.federate").with("graph","x")', {}, {}, reg))
+      .rejects.toThrow(/federation env/);
   });
 });

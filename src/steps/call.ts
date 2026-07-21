@@ -2,7 +2,7 @@ import { type Query } from '../q.ts';
 import { type PStep } from '../strategies.ts';
 import { type Stream } from './stream.ts';
 import { type ElementStream } from './context.ts';
-import { type ServiceRegistry, type ServiceCallCtx, type Contribution } from '../services/types.ts';
+import { type ServiceRegistry, type ServiceCallCtx, type Contribution, type ForeignRow, type ServiceEnv, type CallParams } from '../services/types.ts';
 import { parseCallSpec } from '../services/call-params.ts';
 import { type CompileScope } from './child.ts';
 
@@ -17,25 +17,58 @@ import { type CompileScope } from './child.ts';
 // Stream through the ordinary q-kernel + stream constructors, and the generic
 // lowerSteps/materializeFinal engine takes it from there.
 
-/** Resolve the service + take its Contribution, rejecting the not-yet-supported barrier
- *  kind. Shared by the source and mid-traversal paths. */
-function resolveContribution(spec: ReturnType<typeof parseCallSpec>, registry: ServiceRegistry, ctx: ServiceCallCtx): Extract<Contribution, { kind: 'stream' }> {
-  const service = registry.get(spec.serviceName);
-  if (!service) throw new Error(`call(): unknown service '${spec.serviceName}'`);
-  const contribution = service.resolve(ctx);
-  if (contribution.kind === 'barrier')
-    throw new Error(`call("${spec.serviceName}"): barrier/async services are not yet supported (Phase 6)`);
-  return contribution;
+/** A compile SUSPENDED at a barrier call() (Phase 6). Unlike a 'stream' service (which lowers to
+ *  SQL synchronously), a barrier's rows arrive from an awaited external call — so instead of a
+ *  Stream, seedCall/lowerCall yield this descriptor: the service's `apply` pre-bound to the
+ *  resolved params (run at execution time with the per-runtime env) plus enough context to
+ *  RESUME lowering once the rows land. The consumer (compileRead, which owns lowerSteps /
+ *  materializeFinal / foreign landing) builds the SegmentPlan.resume closure from `restSteps` —
+ *  keeping the lowerSteps dependency OUT of call.ts (call.ts is imported by index.ts; importing
+ *  lowerSteps back would cycle). `params`/`compileParams` seed the resumed foreign root stream. */
+export interface BarrierPoint {
+  readonly kind: 'barrier-point';
+  readonly serviceName: string;
+  readonly params: CallParams;
+  readonly apply: (rows: readonly ForeignRow[], env: ServiceEnv) => Promise<ForeignRow[]>;
+  /** The chain steps AFTER this call() — resumed against the landed foreign stream. */
+  readonly restSteps: PStep[];
+  /** Where restSteps begins in the original chain (the index the resumer lowers from). */
+  readonly restAt: number;
+  /** The traversal's bound-param table, for the resumed lowering's Carry. */
+  readonly compileParams: Record<string, any>;
 }
 
-/** g.call(...) as a SOURCE: build the initial Stream from the service. Peer of
- *  seedSource/seedUnion — returns whatever Stream shape the service produces (a
- *  ListStream of names for --list, a PropertyStream for tinker.search), fed straight into
- *  the generic lowerSteps/materializeFinal by compileRead. */
-export function seedCall(first: PStep, query: Query, params: Record<string, any>, registry: ServiceRegistry): Stream {
+export const isBarrierPoint = (x: unknown): x is BarrierPoint =>
+  x != null && typeof x === 'object' && (x as any).kind === 'barrier-point';
+
+/** Resolve the service + take its Contribution. A 'stream' kind is returned for inline lowering;
+ *  a 'barrier' kind is returned as-is so the caller (seedCall/lowerCall) can build a BarrierPoint.
+ *  Shared by the source and mid-traversal paths. */
+function resolveContribution(spec: ReturnType<typeof parseCallSpec>, registry: ServiceRegistry, ctx: ServiceCallCtx): Contribution {
+  const service = registry.get(spec.serviceName);
+  if (!service) throw new Error(`call(): unknown service '${spec.serviceName}'`);
+  return service.resolve(ctx);
+}
+
+/** g.call(...) as a SOURCE. A pure 'stream' service builds its initial Stream inline (--list,
+ *  tinker.search) — fed straight into lowerSteps/materializeFinal by compileRead. A 'barrier'
+ *  service (Phase 6 federate) returns a BarrierPoint instead: its rows arrive from an awaited
+ *  sibling call, so it cannot lower synchronously; compileRead surfaces it to the segment
+ *  orchestrator, which resumes lowering from `restSteps` once the rows land. */
+export function seedCall(first: PStep, query: Query, params: Record<string, any>, registry: ServiceRegistry, steps: PStep[]): Stream | BarrierPoint {
   const spec = parseCallSpec(first, params);
   const ctx: ServiceCallCtx = { params: spec.params, q: query, compileParams: params, registry };
-  return resolveContribution(spec, registry, ctx).build(ctx);
+  const contribution = resolveContribution(spec, registry, ctx);
+  if (contribution.kind === 'stream') return contribution.build(ctx);
+  return {
+    kind: 'barrier-point',
+    serviceName: spec.serviceName,
+    params: spec.params,
+    apply: (rows, env) => contribution.apply(rows, spec.params, env),
+    restSteps: steps,
+    restAt: 1, // a source call() is steps[0]; the rest begins at 1
+    compileParams: params,
+  };
 }
 
 /** V().call(...) mid-traversal: a per-parent step. The service receives the parent
@@ -62,5 +95,11 @@ export function lowerCall(step: PStep, parent: ElementStream, scope: CompileScop
     parent,
     scope,
   };
-  return resolveContribution(spec, registry, ctx).build(ctx);
+  const contribution = resolveContribution(spec, registry, ctx);
+  // Mid-traversal V().call(barrier) — the segment orchestrator with per-parent ordinal rejoin —
+  // is Phase 6b. Until then a barrier mid-traversal fails closed clearly (a 'stream' service
+  // lowers inline as before).
+  if (contribution.kind === 'barrier')
+    throw new Error(`call("${spec.serviceName}"): mid-traversal barrier services are not yet supported (Phase 6b) — use g.call(...) at the source position`);
+  return contribution.build(ctx);
 }

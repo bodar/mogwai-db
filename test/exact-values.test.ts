@@ -14,7 +14,7 @@ import { BigDecimal, Duration } from '../src/gremlin-types.ts';
 async function values(gremlin: string, writes: string[]): Promise<any[]> {
   const store = new GraphStore(new BunSqlite(':memory:'));
   for (const w of writes) executeQuery(store, w, {});
-  const buffers = executeFramed(store, gremlin, {});
+  const buffers = await executeFramed(store, gremlin, {});
   const res = streamBuffers(buffers, 64);
   const reader = res.body!.getReader();
   const chunks: Buffer[] = [];
