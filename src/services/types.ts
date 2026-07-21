@@ -17,12 +17,28 @@ import type { Query } from '../q.ts';
  *  into one representation. A service reads it oblivious to how the value arrived. */
 export type CallParams = Record<string, unknown>;
 
+/** How a mid-traversal call()'s per-parent SCALAR value is projected — the classification of the
+ *  injection traversal (the THIRD positional arg of `V().call(name, params, __.values('k'))`).
+ *  Restricted to a DIRECT value read (Phase 6b): a property value, the element id, or its label —
+ *  each of which also lands on the returned foreign row (fprops/fid/flabel), so the federate
+ *  rejoin can match a result against the injected value in SQL. A computed injection
+ *  (math/format/transforms) is out of scope and fails closed with a clear deferral. */
+export type InjectionKind =
+  | { readonly kind: 'values'; readonly key: string }
+  | { readonly kind: 'id' }
+  | { readonly kind: 'label' };
+
 /** What a call() site parsed to before registry lookup — the service name plus its
  *  resolved constant params. Shared by the source form (g.call(...)) and the
- *  mid-traversal form (V().call(...)). */
+ *  mid-traversal form (V().call(...)). `injectionTraversal` is the raw (un-lowered) nested-
+ *  traversal AST of a mid-traversal call's per-parent injection arg (the third positional arg);
+ *  undefined for a source-form call or a mid call with no injection (a constant sub-traversal —
+ *  the service runs once, the degenerate collapse). Kept un-lowered so lowerCall can classify it
+ *  (→ InjectionKind) and push it against the correct CompileScope. */
 export interface CallSpec {
   readonly serviceName: string;
   readonly params: CallParams;
+  readonly injectionTraversal?: any;
 }
 
 /** Compile-time context handed to a Service. A superset the resolver reads selectively:

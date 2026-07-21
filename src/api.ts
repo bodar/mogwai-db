@@ -35,12 +35,19 @@ export interface Sql {
  *  federated hop is an internal DO↔DO / in-process call, so it carries raw rows and frames to
  *  GraphBinary only at the client edge; see the 2026-07-21 federation addendum). Enough to build
  *  a TinkerPop DETACHED reference: id + label + a property snapshot. `props` is the SAME per-key
- *  {t,v}-node JSON the local element framer consumes, so landing needs no re-typing. A per-parent
- *  result stamps `ordinal` so the orchestrator can rejoin it to the originating traverser
- *  (mid-traversal V().call(...)); a source-form g.call(...) leaves it undefined. */
+ *  {t,v}-node JSON the local element framer consumes, so landing needs no re-typing.
+ *
+ *  Two mid-traversal-only optional fields (both undefined for a source-form g.call(...), exactly
+ *  like `ordinal`'s existing convention):
+ *  - `ordinal` — a per-parent result can stamp its originating traverser's ordinal. NOTE (Phase
+ *    6b): the shipped mid-traversal rejoin is by VALUE (see below), not by ordinal, so this stays
+ *    reserved scaffolding for a future ordinal-based rejoin; the value path leaves it unset.
+ *  - `injectedValue` — set on a HEAD row (the barrier's INPUT side): the per-parent scalar
+ *    (values(key)/id()/label()) `apply` batches on. The federate rejoin then matches a returned
+ *    element's own property/id/label against this value in SQL (mid-traversal V().call(federate)). */
 export type ForeignRow =
-  | { readonly kind: 'vertex'; readonly id: string | number; readonly label: string; readonly props: Record<string, unknown>; readonly ordinal?: number }
-  | { readonly kind: 'edge'; readonly id: string | number; readonly label: string; readonly src: string | number; readonly tgt: string | number; readonly props: Record<string, unknown>; readonly ordinal?: number };
+  | { readonly kind: 'vertex'; readonly id: string | number; readonly label: string; readonly props: Record<string, unknown>; readonly ordinal?: number; readonly injectedValue?: unknown }
+  | { readonly kind: 'edge'; readonly id: string | number; readonly label: string; readonly src: string | number; readonly tgt: string | number; readonly props: Record<string, unknown>; readonly ordinal?: number; readonly injectedValue?: unknown };
 
 // ---- execution ----
 

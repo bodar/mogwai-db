@@ -208,10 +208,30 @@ export interface LoweringContinuation {
   readonly at: number;
 }
 
-export type LoweringResult = LoweringContinuation;
+/** A compile SUSPENDED mid-chain at a barrier call() (Phase 6b — the V().call(federate) twin of
+ *  a source-form BarrierPoint). Unlike a 'continue' (which hands the loop a fresh Stream), a
+ *  suspension says "this segment's rows arrive from an awaited external call; stop lowering here
+ *  and hand `point` back up to compileRead, which resumes once the rows land." lowerSteps RELAYS
+ *  it unchanged — it never interprets it, keeping the "no second orchestrator" invariant. `point`
+ *  is opaque here (stream.ts is a leaf and must not import call.ts's MidBarrierPoint — that would
+ *  cycle); compileRead (index.ts, which already imports call.ts) narrows it back. */
+export interface LoweringSuspension {
+  readonly kind: 'suspend-lowering';
+  readonly point: unknown;
+}
+
+/** A shape handler's outcome: continue with a new stream, or suspend at a barrier. A handler that
+ *  declines still returns `null` (dispatchShapeTail's fallback), unchanged. */
+export type LoweringResult = LoweringContinuation | LoweringSuspension;
 
 export const continueLowering = (stream: Stream, at: number): LoweringContinuation =>
   ({ kind: 'continue-lowering', stream, at });
+
+export const suspendLowering = (point: unknown): LoweringSuspension =>
+  ({ kind: 'suspend-lowering', point });
+
+export const isSuspension = (r: LoweringResult | Stream): r is LoweringSuspension =>
+  (r as { kind?: string }).kind === 'suspend-lowering';
 
 /**
  * A shape-tail handler for one step name: gets the current stream, the peeked step

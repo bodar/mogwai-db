@@ -18,7 +18,7 @@ import { compileFromGroup, compileFromProperty } from './group.ts';
 import { compileFromList, compileFromMap, compileFromMapEntry } from './list.ts';
 import { compileFromRecord, compileFromPath, selectRecordFromAlias } from './select.ts';
 import { asOnStream, selectOneFromAlias } from './labelselect.ts';
-import { assertStreamColumns, continueLowering, type LoweringResult, type Stream } from './stream.ts';
+import { assertStreamColumns, continueLowering, isSuspension, type LoweringResult, type LoweringSuspension, type Stream } from './stream.ts';
 import { type Compiled } from '../render.ts';
 import { tryBulkRepeat } from './bulk.ts';
 import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../fast-paths.ts';
@@ -395,17 +395,32 @@ function lowerStream(s: Stream, steps: PStep[], at: number): LoweringResult {
 }
 
 /** Iterative semantic orchestrator. It returns the final Stream and knows nothing
- * about Compiled/GraphBinary framing; root callers cross that boundary explicitly. */
-export function lowerSteps(initial: Stream, steps: PStep[], from: number): Stream {
+ * about Compiled/GraphBinary framing; root callers cross that boundary explicitly.
+ * A mid-chain barrier call() (Phase 6b V().call(federate)) makes a shape handler SUSPEND;
+ * lowerSteps RELAYS that suspension up unchanged (it never interprets it — the "no second
+ * orchestrator" invariant). Only compileRead (the sole ROOT caller) resumes it; every
+ * child-scope / inner-compile caller goes through lowerStepsStrict, which asserts a suspension
+ * never escapes (a barrier cannot legally occur inside a child scope — it fails closed earlier). */
+export function lowerSteps(initial: Stream, steps: PStep[], from: number): Stream | LoweringSuspension {
   let stream = initial;
   let at = from;
   for (;;) {
     assertStreamColumns(stream);
     if (at >= steps.length && stream.kind !== 'elements') return stream;
     const result = lowerStream(stream, steps, at);
+    if (isSuspension(result)) return result;
     stream = result.stream;
     at = result.at;
   }
+}
+
+/** lowerSteps for a scope that structurally cannot host a barrier (any child scope / inner
+ * sub-traversal compile). A barrier mid-child already fails closed upstream, so a suspension
+ * here is an internal contradiction — throw loudly rather than silently mis-type. */
+export function lowerStepsStrict(initial: Stream, steps: PStep[], from: number): Stream {
+  const out = lowerSteps(initial, steps, from);
+  if (isSuspension(out)) throw new Error('a barrier call() is not supported in this scope (child/nested sub-traversal)');
+  return out;
 }
 
 /** Build a SegmentPlan from a source-form BarrierPoint. head=null (a source call() has no local
@@ -422,7 +437,7 @@ function segmentFromBarrier(bp: BarrierPoint, params: Record<string, any>, regis
       const carry: Carry = { q: new Query(), params, registry, carried: { aliases: new Map(), origins: [] } };
       const elem = foreign[0]?.kind === 'edge' ? 'edge' : 'node';
       const seed = landForeignElements(carry, foreign, elem);
-      return { kind: 'sql', compiled: materializeFinal(lowerSteps(seed, bp.restSteps, bp.restAt)) };
+      return { kind: 'sql', compiled: materializeFinal(lowerStepsStrict(seed, bp.restSteps, bp.restAt)) };
     },
   };
 }
@@ -441,7 +456,7 @@ export function compileRead(steps: PStep[], params: Record<string, any> = {}, sa
     // foreign root stream and finishes lowering the rest of the chain synchronously — building
     // the lowerSteps closure HERE keeps that dependency out of call.ts (which index.ts imports).
     if (isBarrierPoint(seed)) return segmentFromBarrier(seed, params, registry);
-    return materializeFinal(lowerSteps(seed, steps, 1));
+    return materializeFinal(lowerStepsStrict(seed, steps, 1));
   }
 
   // Traverser bulking: a `repeat(...).times(n).count()` (path/as/sack-free) compiles to
@@ -461,7 +476,7 @@ export function compileRead(steps: PStep[], params: Record<string, any> = {}, sa
   // the plain UNION-ALL movement. Threaded via fastPaths so each movement StepFn reads one flag.
   const fp: FastPathConfig = { ...fastPaths, movementCollapse: fastPaths.movementCollapse && chainCollapseSafe(steps) && !wantsEncounter };
   const { st, stop } = buildPrefix(steps, params, new Query(), sackInit, fp, wantsEncounter, registry);
-  return materializeFinal(lowerSteps(st, steps, stop));
+  return materializeFinal(lowerStepsStrict(st, steps, stop));
 }
 
 /** compileRead narrowed to a synchronous Compiled — for INNER sub-traversal compiles (a

@@ -5,7 +5,7 @@ import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { landForeignElements } from '../src/steps/foreign.ts';
 import { executeQuery, exec } from './support/executor.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
-import { lowerSteps } from '../src/steps/index.ts';
+import { lowerStepsStrict } from '../src/steps/index.ts';
 import { materializeFinal } from '../src/steps/materialize.ts';
 import { normalize } from '../src/strategies.ts';
 import { stepChain, parseGremlin } from '../src/frontend.ts';
@@ -39,7 +39,7 @@ function landAndRun(rows: readonly ForeignRow[], elem: Elem, trailing = '') {
   const c = carry();
   const seed: ForeignStream = landForeignElements(c, rows, elem);
   const steps = trailing ? normalize(stepChain(parseGremlin(`g.V()${trailing}`), {})).steps.slice(1) : [];
-  const plan = materializeFinal(lowerSteps(seed, steps, 0));
+  const plan = materializeFinal(lowerStepsStrict(seed, steps, 0));
   if (plan.kind !== 'read') throw new Error('expected read plan');
   return { plan, rows: store.query(plan.sql, plan.binds) as any[] };
 }

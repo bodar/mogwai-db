@@ -5,7 +5,7 @@ import { advance, carriedWith, carryFrag, carryFragMint, carriedCols, type Carri
 import { aliasId } from './alias.ts';
 import { carryOf, toListStream, toScalarStream, toVariantStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream } from './stream.ts';
 import { variantArmsMeta, variantArmSelect, variantCols, type VariantArm } from './variant.ts';
-import { lowerElementSteps, lowerSteps, tryLowerElementSteps } from './index.ts';
+import { lowerElementSteps, lowerStepsStrict, tryLowerElementSteps } from './index.ts';
 import { lowerScalarRows, gateScalar, tryInlineScalarPredicate, unionScalarStreams, SCALAR_TRANSFORMS } from './scalar.ts';
 import { lowerScalarVE } from './projection.ts';
 import { normalize, type PStep } from '../strategies.ts';
@@ -598,7 +598,7 @@ function compileScalarChildRows(
   if (isPropertyParent(parent)) {
     if (!classifyScalarChildRows('property', body)) return null;
     const pushed = pushChildScope(parent, scope);
-    const stream = lowerSteps(pushed.seed, body, 0);
+    const stream = lowerStepsStrict(pushed.seed, body, 0);
     // classify proved a scalar shape; a non-scalar here is an internal classify↔lowerSteps
     // contradiction, not a fallback — fail loud (a silent null would orphan the CTEs above).
     if (stream.kind !== 'scalar') throw new Error('property scalar child classified scalar but lowered to ' + stream.kind);
@@ -614,7 +614,7 @@ function compileScalarChildRows(
   // precise (all arms scalar), so a non-scalar result is a contradiction.
   if (elementScalarBranchArm(body, parent.params)) {
     const pushed = pushChildScope(parent, scope);
-    const stream = lowerSteps(pushed.seed, body, 0);
+    const stream = lowerStepsStrict(pushed.seed, body, 0);
     if (stream.kind !== 'scalar') throw new Error('scalar-branch child classified scalar but lowered to ' + stream.kind);
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
   }
@@ -650,7 +650,7 @@ function compileScalarChildRows(
       // ends in a projection (values/id/label) → scalar; lowerSteps folds V→element→projection.
       if (classifyScalarChildRows('element', after)?.kind !== 'element') return null;
       const pushed = pushChildScope(parent, scope);
-      const lowered = lowerSteps(pushed.seed, rest, 0);
+      const lowered = lowerStepsStrict(pushed.seed, rest, 0);
       if (lowered.kind !== 'scalar') return null;
       const stream = reducer ? lowerScopedScalarReducer(lowered, reducer, pushed.scope) : lowered;
       return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
@@ -662,7 +662,7 @@ function compileScalarChildRows(
     const pushed = pushChildScope(parent, scope);
     let stream: ScalarStream = pushed.seed;
     if (rest.length) {
-      const lowered = lowerSteps(pushed.seed, rest, 0);
+      const lowered = lowerStepsStrict(pushed.seed, rest, 0);
       if (lowered.kind !== 'scalar') return null;
       stream = lowered;
     }
@@ -679,7 +679,7 @@ function compileScalarChildRows(
   // below; constant() still needs its child-only projector.
   if (terminal.name !== 'constant' && suffix.every((step) => SHARED_SCALAR_CHILD_STEPS.has(step.name))) {
     const pushed = pushChildScope(parent, scope);
-    const stream = lowerSteps(pushed.seed, body, 0);
+    const stream = lowerStepsStrict(pushed.seed, body, 0);
     // As above: classify proved scalar, so a non-scalar is a contradiction — fail loud.
     if (stream.kind !== 'scalar') throw new Error('scalar child classified scalar but lowered to ' + stream.kind);
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
@@ -1285,7 +1285,7 @@ export function tryCompileScalarArm(parent: ScalarStream, nested: any, scope: Co
  *  outside the Stage-1 vocabulary or does not stay scalar (e.g. a fold() → list). */
 function lowerScalarArm(s: ScalarStream, body: PStep[]): ScalarStream | null {
   if (!scalarBranchArm(body, s.params)) return null;
-  const end = lowerSteps(s, body, 0);
+  const end = lowerStepsStrict(s, body, 0);
   return end.kind === 'scalar' ? end : null;
 }
 
