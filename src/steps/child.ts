@@ -159,6 +159,15 @@ const ELEMENT_CHILD_STEPS = new Set([
   'out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'bothV',
   'has', 'hasLabel', 'hasId', 'where', 'filter', 'not', 'and', 'or', 'identity',
 ]);
+/** The scalar-producing projection vocabulary the element-parent classifier recognizes:
+ *  a step that, over an element prefix, lowers to one scalar per input. `values`/`id`/`label`
+ *  read the element; `constant` rebinds it; `call`/`math`/`sack`/`format` are the generalized
+ *  producers (a service, a formula, sack read, a string template) — each already lowers to a
+ *  ScalarStream at root via its own TAIL StepFn, so recognizing it here lets the generic emit
+ *  path (pushChildScope → lowerSteps) run it per parent WITHOUT a bespoke child reader.
+ *  Kept in lockstep with the scalar-producing TAIL entries in projection.ts (SCALAR_PROJ +
+ *  call/math/sack/format); count() is a reducer/barrier with its own classifyCountChild path. */
+const SCALAR_PRODUCER = new Set(['values', 'id', 'label', 'constant', 'call', 'math', 'sack', 'format']);
 const CHILD_SCALAR_ROW_STEPS = new Set([
   ...SCALAR_TRANSFORMS, 'is', 'order', 'limit', 'skip', 'range', 'tail', 'dedup',
   'count', 'sum', 'min', 'max', 'mean',
@@ -195,13 +204,17 @@ export function isElementChild(nested: any, params: Record<string, any>): boolea
  * this never appends CTEs, so the prefix fold can stop before a homogeneous scalar
  * union without speculatively mutating the Query. */
 function scalarRowParts(body: ReturnType<typeof stepChain>): { prefix: ReturnType<typeof stepChain>; projection: any; suffix: ReturnType<typeof stepChain> } | null {
-  const at = body.findIndex((s) => ['values', 'id', 'label', 'constant'].includes(s.name));
+  const at = body.findIndex((s) => SCALAR_PRODUCER.has(s.name));
   if (at < 0) return null;
   const prefix = body.slice(0, at);
   const projection = body[at];
   const suffix = body.slice(at + 1);
   if (prefix.some((s) => !ELEMENT_CHILD_STEPS.has(s.name))) return null;
   if (suffix.some((s) => !CHILD_SCALAR_ROW_STEPS.has(s.name))) return null;
+  // Per-projection arg shape for the bespoke values/id/label/constant SQL builder. The
+  // generalized producers (call/math/sack/format) carry their own args and route through the
+  // generic emit path (lowerSteps), so their arg validation lives in their own StepFns — here
+  // they only need the element-prefix + scalar-suffix shape above.
   if (projection.name === 'values' && (projection.args.length !== 1 || typeof projection.args[0] !== 'string')) return null;
   if ((projection.name === 'id' || projection.name === 'label') && projection.args.length) return null;
   if (projection.name === 'constant' && projection.args.length !== 1) return null;
@@ -671,6 +684,14 @@ function compileScalarChildRows(
     if (stream.kind !== 'scalar') throw new Error('scalar child classified scalar but lowered to ' + stream.kind);
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
   }
+
+  // The bespoke element-projection SQL builder below reads the element directly
+  // (values/id/label) or emits the literal (constant). The generalized producers
+  // (call/math/sack/format) have no element-projection SQL here — they only ever lower
+  // through the generic path above; a suffix that failed the generic gate (e.g. a terminal
+  // scoped reducer) defers cleanly so the caller's clear deferral stays authoritative,
+  // rather than mis-routing through the label branch of the builder.
+  if (!['values', 'id', 'label', 'constant'].includes(terminal.name)) return null;
 
   const pushed = pushChildScope(parent, scope);
   const { stream: end, next: stop } = lowerElementSteps(prefix, pushed.seed);

@@ -16,6 +16,7 @@ import { Query } from '../../src/q.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { assertStreamColumns, toGroupStream, toPathStream, toPropertyStream, toRecordStream, toScalarStream, toVariantStream } from '../../src/steps/stream.ts';
 import { popChildScope, pushChildScope, reuseCurrentFrame } from '../../src/steps/child.ts';
+import { standardRegistry } from '../../src/services/standard.ts';
 import { readdirSync, readFileSync } from 'node:fs';
 
 const read = (q: string, options?: CompileOptions) => {
@@ -1504,6 +1505,25 @@ describe('compiler SQL snapshots', () => {
       .toEqual(['vadas', 'marko', 'josh', 'peter']);
     // the SQL routes through the child seam (a correlated child rank + a fresh encounter).
     expect(read('g.V().order().by(__.out().count()).values("name")').sql).toContain('ROW_NUMBER() OVER');
+  });
+
+  test('a call() scalar body lowers through the generalized "lowers-to-scalar" child classifier', () => {
+    const store = seededStore();
+    const withReg: CompileOptions = { registry: standardRegistry };
+    // where(call(dc).is(3)): the classifier now recognizes call() (not just values/id/label) as a
+    // scalar producer, so it lowers via the generic child seam — a scoped-count LEFT JOIN over a
+    // pushed child ordinal, gated by a correlated EXISTS — with NO bespoke reader.
+    const wsql = read('g.V().where(call("tinker.degree.centrality").is(3))', withReg).sql;
+    expect(wsql).toContain('EXISTS');
+    expect(wsql).toContain('LEFT JOIN');
+    // The nested child scope rides the carried origin: only lop (IN-degree 3) survives. (Result
+    // shape/values are asserted end-to-end over GraphBinary in test/services.test.ts.)
+    const nameOf = (id: unknown) => (run(store, `g.V(${id}).values("name")`) as any[])[0]?.v;
+    const kept = runWith(store, 'g.V().where(call("tinker.degree.centrality").is(3))', withReg) as any[];
+    expect(kept.map((r) => nameOf(r.id))).toEqual(['lop']);
+    // group().by(call(dc)) also flows through the same generalized seam (a scalar group key).
+    expect(read('g.V().group().by(call("tinker.degree.centrality")).by("name")', withReg).sql)
+      .toContain('LEFT JOIN');
   });
 
   test('dedup(labels): dedup by an as()-label tuple (optional by()), composes with path()', () => {
