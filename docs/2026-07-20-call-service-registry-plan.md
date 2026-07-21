@@ -1,7 +1,8 @@
 # call() + the Service Registry — a first-class, extensible service layer
 
 **Date:** 2026-07-20
-**Status:** proposed
+**Status:** accepted — implementation in progress (design decisions ratified 2026-07-21; see
+"Design decisions & findings (2026-07-21)" at the foot of this doc)
 **L3 gap addressed:** deferral bucket #2 — `unsupported source step: call` (14) +
 `step not implemented: call()` (5). Feature: `map/Call.feature` (20 scenarios). Also closes the
 `TextP` substring predicates (`containing`/`startingWith`/`endingWith`) — index-backed by the same
@@ -160,11 +161,24 @@ trigger support unconfirmed, and our encoding needs application awareness). Prop
 
 ```
 CREATE VIRTUAL TABLE property_fts USING fts5(
-  owner UNINDEXED, owner_elem UNINDEXED, vpid UNINDEXED, pk UNINDEXED,
+  owner_elem UNINDEXED,    -- 'node' | 'edge' — which normalized table `pid` keys into
+  pid UNINDEXED,           -- vertex_properties.id OR edge_properties.id (the FK-shaped join key)
+  owner UNINDEXED,         -- the owning nodes.id / edges.id
+  pk UNINDEXED,            -- the property key (filter by key without a join)
   kind UNINDEXED,          -- 'value' | 'jsonkey' | 'jsonleaf'
-  text,                    -- the searchable text
-  tokenize='trigram');   -- case_sensitive 0 (default): required so LIKE (not just GLOB) uses the index
+  text,                    -- the ONLY indexed column (the searchable text)
+  tokenize="trigram case_sensitive 0");   -- case_sensitive 0 = default (LIKE served, not just GLOB)
 ```
+
+> **DDL correction (verified 2026-07-21):** the tokenizer options go INSIDE the `tokenize`
+> string (`tokenize="trigram case_sensitive 0"`). Writing `case_sensitive 0` as a *separate*
+> column option (as an earlier draft of this block did) errors with `unrecognized column option: 0`.
+> `pid` is a plain data column, NOT the FTS `rowid`: a collection property produces one `value`
+> row plus N `jsonkey`/`jsonleaf` rows that all share one `pid`, so they'd collide on rowid.
+> Delete-by-column (`DELETE FROM property_fts WHERE owner_elem=? AND pid=?`) works fine on an
+> FTS5 table (UNINDEXED columns are stored + filterable). Empirically confirmed on bun:sqlite:
+> `text LIKE '%sub%'` and `text MATCH '"sub"'` are both index-served (`… VIRTUAL TABLE INDEX 0:L0`
+> / `0:M…`), including inside a correlated `EXISTS(… WHERE f.owner=n.id AND f.text MATCH ?)`.
 
 - **Values are the `{t,v}` ValueNode encoding.** A naive `json_tree` over the stored JSONB would
   index tag noise (`"t"`,`"v"`,`"map"`,`"str"`) and an indirected shape. So the write-path indexer
@@ -251,11 +265,117 @@ So this phase is a performance + coverage step, not a semantics change:
 
 ## Fail-closed edges (correct-by-design, never mis-execute)
 
-- Any substring match with a term < 3 chars (below the trigram floor) → deferral. Applies to both
-  the `tinker.search` service **and** the `has(k, containing/startingWith/endingWith(x))` predicate
-  — index-only, no scan. A length guard that throws; no <3-char code path to maintain.
+- ~~Any substring match with a term < 3 chars (below the trigram floor) → deferral.~~ **SUPERSEDED
+  (2026-07-21) — see "Substring rule (final)" below.** A <3-char substring does NOT fail closed; it
+  falls back to a LIKE table scan, consistently everywhere (predicate + `tinker.search`), because
+  computed-scalar / injected-list substrings have no stored property to index and fail-closed would
+  regress TinkerPop's own <3-char corpus scenarios.
 - `regex` (service param or `has(k, regex(x))`) and `typeOf` → deferral. No index-only path; we do
   not scan or drop to JS. (CLAUDE.md's wire-protocol note has been corrected to this no-JS rule —
   it previously said the opposite.)
 - Non-constant per-traverser call params → deferral until the barrier param-eval path lands.
 - `type: VertexProperty` meta-property search → empty on the reference graphs (documented).
+
+## Design decisions & findings (2026-07-21)
+
+Ratified during the design phase, after a full codebase trace and empirical FTS5 verification on
+bun:sqlite. These pin down the choices the proposal left open; nothing here relitigates the
+proposal, it commits it.
+
+### Scope
+
+- **Build Phases 1–5. The async federated barrier (Phase 6) is deferred**, but the `Contribution`
+  type carries the `'barrier'` variant *now* so the seam is provably additive; its executor path
+  throws a clear Phase-6 deferral. This gets all 20 `Call.feature` scenarios + the TextP scenarios
+  green with **zero async** in the compiler.
+- **The whole compile → lower → materialize pipeline stays synchronous.** Every Phase-1–5 service
+  is `Contribution.kind:'stream'` and lowers to SQL inline. The `await` Phase 6 needs lives one
+  level up in `execute.ts` (`executeFramed` becoming a segment orchestrator) — `GraphManager.query`
+  is already `Promise`-typed, so that seam's contract doesn't move; today's vestigial Promise just
+  gains substance. **No async surface is added to `steps/*`, `plan.ts`, `q.ts`, or `render.ts`.**
+
+### Architecture
+
+- **New subsystem `src/services/`**, one file per service (mirrors `steps/*.ts`): `types.ts`,
+  `registry.ts`, `call-params.ts`, `directory.ts`, `degree-centrality.ts`, `search.ts`.
+- **`defaultRegistry` is baked into the `GraphManager` at construction — a store-tier concern, not
+  HTTP-edge DI.** `router.ts`/`application.ts` stay unaware of services (strictly smaller diff,
+  correctly scoped — services sit at the same tier as `Sql`). Phase 6's federated service is where a
+  per-runtime `env` (sibling-DO stub vs Bun `GraphManager` entry) gets injected at that construction
+  site. The registry rides on `Carry`/`CompileOptions` beside `fastPaths`, same threading precedent.
+- **`call()` routing reuses existing seams — no new orchestrator:**
+  - *Source* (`g.call(…)`): a peer branch to `buildPrefix` in `compileRead` (`seedCall`) returns a
+    `Stream` of whatever shape the service yields (`ListStream` for `--list`, `PropertyStream` for
+    `search`), fed straight into the existing `lowerSteps`/`materializeFinal`. `search`'s
+    `.element()` reuses the already-registered `propertyElement` tail — no new tail code.
+  - *Mid-traversal* (`V().call(…)`): `lowerCall` pushes a child scope; `degree.centrality` is
+    `scopedElementCount` (`child.ts:534`) + `lowerScopedScalarReducer` verbatim. Adding `'call'` to
+    `scalarRowParts`'s recognized set makes `where(call(…).is(n))` compose for free.
+  - `.with()` is a modulator folded onto the preceding `call` in `strategies.ts` (mirrors
+    `foldByModulators`). The 5 param-source forms (map literal / bound-param map /
+    `__.project().by(__.constant())` / `.with(k,str)` / `.with(k,__.constant())`) unify into one
+    `Record<string,unknown>` in `call-params.ts`. Non-constant per-traverser params fail closed.
+
+### Substring rule (final — settled 2026-07-21 after two revisions)
+
+**ONE consistent rule everywhere** — `has(k, substring)` on a stored property, `is(substring)` on a
+computed scalar, `all()`/`any()` on an injected list, AND `tinker.search`:
+
+- Substring matching (`containing`/`startingWith`/`endingWith` + `not*`) is **case-insensitive**.
+- **≥3 chars over a stored property** → the `property_fts` trigram **index** (a fast path over LIKE;
+  `ftsSubstringPredicate` toggle, equivalence-tested against the generic LIKE for the same result).
+- **<3 chars, OR a substring over a computed scalar / injected list** (no stored property exists to
+  index) → the generic **LIKE table scan** (same case-insensitive result, unindexed).
+- **No fail-closed.** An unindexed scan under 3 chars is a documented, *consistent* characteristic
+  — the same everywhere, so no surprise. This replaces the proposal's original "<3 → deferral":
+  fail-closed was rejected because (1) computed/injected substrings have no property to index so
+  LIKE is architecturally required there anyway, and (2) it would regress ~4–6 currently-green L3
+  scenarios that use TinkerPop's own <3-char terms (`endingWith('as')`, `notStartingWith('z')`,
+  `inject(...).all(startingWith('a'))`). The generic LIKE path therefore **stays** (it is both the
+  <3/computed path and the `ftsSubstringPredicate:false` equivalence fallback) — it is NOT ripped out.
+- `regex`/`typeOf` remain deferred (SQL-inexpressible, unchanged).
+
+### FTS5 + TextP (empirically verified on bun:sqlite 1.3.11; CF DO per docs)
+
+- Single `property_fts` trigram table (DDL above), maintained in the write path
+  (`applyVertexProperty`/`insertEdgeProperty`/`compileDrop`) — **not** triggers. The indexer is
+  ValueNode-aware and walks the **in-memory `{t,v}` tree** (not `json_tree` over stored JSONB) —
+  which sidesteps the tag-noise concern entirely, since the tree is a JS object before serialization.
+- TextP `containing`/`startingWith`/`endingWith` (+`not*`) route through the index via a gated fast
+  path (`ftsSubstringPredicate`) inside the existing `nodeHasProp`/`edgeHasProp` choke point; generic
+  `LIKE` stays the semantic authority + equivalence test. **Anchored ops = MATCH (index prefilter) +
+  the existing `likePattern` `LIKE` (position confirm)** — verified index-served and correctly
+  excluding mid-string false hits. The MATCH argument is FTS query syntax, so the user term is
+  wrapped as a literal phrase (`"term"`, internal `"` doubled) — this still substring-matches on a
+  trigram index even when the term is an operator word like `AND`; do **not** reuse `LIKE`'s
+  `%`/`_`/`\` escaping for the MATCH arg (different grammar).
+- `<3-char` floor: a 2-char `MATCH` returns **empty silently** — so the guard is an explicit throw
+  at compile time, shared by the service and the predicate. `merge`-match conds (`write.ts`) are
+  deliberately **not** rewritten (out of scope, no `fastPaths` in that closure). `regex`/`typeOf`
+  unchanged.
+
+### Capability gaps surfaced (extend the seam, never a bespoke one-off)
+
+- **GAP 1 (extending now, as its own tested step):** the degree scenario
+  `project("vertex","degree").by(select("v")).by()` runs `project()` over a **scalar** parent (the
+  degree) while `by(select("v"))` must emit a path-history **element**. `lowerScalarProject`
+  (`select.ts:277`) rejects alias/string-key fields today. Fix = add an element-alias field branch
+  to the scalar-parent project path, **reusing `tryLowerTraversalRecord`'s existing element-alias
+  framing** (`select.ts:77-79,104-121`: read `st.carried.aliases`, frame via `framedProps`). Lands
+  with its own SQL snapshot + execution test.
+- **GAP 2 (fail closed for now):** `tinker.search` with no `type` could mix vertex+edge properties,
+  but `PropertyStream` carries a single static `ownerElem` tag. Decision: **default to
+  `type=Vertex`** (matches TinkerGraph's reference impl and every `Call.feature` scenario); explicit
+  `type=Edge` uses a static `ownerElem='edge'`; a genuine mixed request fails closed. No
+  `PropertyStream` change — `property_fts.owner_elem` already carries what a future per-row-dynamic
+  variant would need, so it's additive.
+
+### Build order
+
+1. Spine (`types.ts`/`registry.ts`) + no-op `registry` threading. 2. `call`/`with` fold +
+`call-params` resolver. 3. `seedCall` routing + unknown-service throw. 4. `--list` (7 scenarios).
+5. `degree.centrality` + `lowerCall` + child scope + the GAP-1 scalar-project-alias extension
+(6 scenarios). 6. `property_fts` schema + write-path indexer (**tested in isolation first**).
+7. `tinker.search` consumer (7 scenarios). 8. TextP index-backing (equivalence + EXPLAIN test).
+9. L3 ratchet re-record + `SYNC_FILES`. Each step: L2 snapshot + `compiler.test.ts` execution +
+L4 addendum where applicable; L1 stays 100%.

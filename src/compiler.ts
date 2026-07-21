@@ -4,7 +4,7 @@ import { applyStrategies, normalize } from './strategies.ts';
 import { compileRead } from './steps/index.ts';
 import { routeWrite } from './steps/write.ts';
 import { type Compiled, type WritePlan } from './render.ts';
-import { resolveFastPaths, type CompileOptions } from './fast-paths.ts';
+import { resolveFastPaths, resolveRegistry, type CompileOptions } from './fast-paths.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
 export type { Compiled, WritePlan, Shape, ValueType, ListOf, MapEntry, MapOf, ElemShape, GroupKey, GroupVal, PathPos } from './render.ts';
 export type { CompileOptions, FastPathConfig } from './fast-paths.ts';
@@ -31,7 +31,7 @@ export function compile(gremlin: string, params: Record<string, any>, options?: 
   const sackInit = extractSack(tree, params);
   const sideEffects = extractSideEffects(tree, params);
   const plan: Compiled | WritePlan = routeWrite(steps, params, sackInit ?? undefined, sideEffects)
-    ?? compileRead(steps, params, sackInit ?? undefined, resolveFastPaths(options));
+    ?? compileRead(steps, params, sackInit ?? undefined, resolveFastPaths(options), resolveRegistry(options));
 
   if (discard) {
     // v4 iterate(): execute for effect, return nothing.

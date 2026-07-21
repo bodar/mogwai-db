@@ -143,6 +143,7 @@ export interface Carry {
   readonly q: Query;
   readonly params: Record<string, any>;
   readonly fastPaths?: FastPathConfig;
+  readonly registry?: import('../services/types.ts').ServiceRegistry;  // call() service lookup (threaded like fastPaths)
   readonly sideEffects?: SideEffectMap;  // named side-effect collections (aggregate/store/group('a'))
   readonly carried: Carried;             // the per-traverser carried column schema
 }
