@@ -33,6 +33,11 @@ export interface CompileOptions {
    *  → compile). When absent, the compiler defaults to EMPTY_REGISTRY — correct for every
    *  non-call() traversal; a call() then throws "unknown service". */
   readonly registry?: ServiceRegistry;
+  /** Federation recursion depth for THIS compile (request-scoped DI context, rides the same
+   *  channel as `registry` — read where a barrier's apply closure is built, so it captures the
+   *  starting depth and recurses at depth+1). 0 at the top-level query; each federated hop
+   *  re-compiles the sibling one deeper. Guarded against MAX_FEDERATION_DEPTH at each hop. */
+  readonly federationDepth?: number;
 }
 
 export const DEFAULT_FAST_PATHS: FastPathConfig = Object.freeze({
@@ -51,3 +56,7 @@ export const resolveFastPaths = (options?: CompileOptions): FastPathConfig => ({
 
 export const resolveRegistry = (options?: CompileOptions): ServiceRegistry =>
   options?.registry ?? EMPTY_REGISTRY;
+
+/** The federation depth for this compile (0 at the top level). */
+export const resolveFederationDepth = (options?: CompileOptions): number =>
+  options?.federationDepth ?? 0;

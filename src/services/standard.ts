@@ -3,15 +3,27 @@ import type { ServiceRegistry } from './types.ts';
 import { directoryService } from './directory.ts';
 import { degreeCentralityService } from './degree-centrality.ts';
 import { searchService } from './search.ts';
+import { federateService } from './federate.ts';
 
-// ---------- the standard, pre-seeded registry ----------
+// ---------- the standard + extended registries ----------
 //
-// The registry the DI layer injects in production. Kept SEPARATE from registry.ts (the
-// cycle-free mechanism) because it imports the service implementations, which import the
-// compiler's stream/q kernel — importing this from the compiler core would cycle. Only
-// application(deps) and the runtime entry points touch this module. Every Phase-1-5
-// service is pure SQL, identical on both runtimes; Phase 6's federated service will take a
-// per-runtime env, at which point this becomes a factory over that env.
+// Kept SEPARATE from registry.ts (the cycle-free mechanism) because it imports the service
+// implementations, which import the compiler's stream/q kernel — importing this from the
+// compiler core would cycle. Only the DI composition root (application) and the runtime entry
+// points touch this module.
+//
+// TWO named registries — both plain constants (the federated service gets its FederationSource
+// threaded to `apply` at EXECUTION time, so neither registry needs a construction-time env):
+//   • standardRegistry — the TinkerPop REFERENCE provider surface: --list + tinker.search +
+//     tinker.degree.centrality, exactly what the official corpus asserts, no extensions. The L3
+//     conformance host (reference-exact) uses THIS.
+//   • extendedRegistry — standard PLUS our mogwai.* extensions (the federated barrier). Production
+//     uses this. Because --list enumerates the live registry, mogwai.graph.federate shows up here
+//     — correct in production, absent in the reference host (so the official g_call/g_callXlistX
+//     scenarios, which assert the exact reference set, stay green there).
 
-/** The standard services, in --list enumeration order. Added as each phase lands. */
+/** The reference provider surface — the three canonical TinkerPop services. */
 export const standardRegistry: ServiceRegistry = createRegistry([directoryService, degreeCentralityService, searchService]);
+
+/** The reference services PLUS our mogwai.* extensions (federation). Production. */
+export const extendedRegistry: ServiceRegistry = createRegistry([directoryService, degreeCentralityService, searchService, federateService]);

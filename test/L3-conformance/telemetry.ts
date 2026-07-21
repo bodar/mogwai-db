@@ -27,6 +27,7 @@
 import { appendFileSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { parseGremlin, stepChain } from '../../src/frontend.ts';
 import type { GraphManager, GraphInfo } from '../../src/manager.ts';
+import type { RemoteExecutor } from '../../src/api.ts';
 
 export interface QueryRecord {
   g: string;
@@ -54,22 +55,29 @@ export function telemetryPath(): string {
   return new URL('./l3-telemetry.ndjson', import.meta.url).pathname;
 }
 
-/** A pass-through GraphManager that appends one NDJSON QueryRecord per query and
- *  re-throws unchanged. Only query() is instrumented; create/info/destroy delegate
- *  verbatim. Wrapping this around the served manager (AFTER seeding) is behaviour-
- *  neutral, so the L3 ratchet is unaffected. */
+/** A pass-through GraphManager that appends one NDJSON QueryRecord per query and re-throws
+ *  unchanged. Instruments the DATA PLANE — executor(id).framedAsync — by decorating the Executor
+ *  the inner manager hands back; create/info/destroy delegate verbatim. Wrapping this around the
+ *  served manager (AFTER seeding) is behaviour-neutral, so the L3 ratchet is unaffected. */
 export class LoggingGraphManager implements GraphManager {
   constructor(private readonly inner: GraphManager, private readonly file: string) {}
 
-  async query(id: string, gremlin: string, params: Record<string, any>): Promise<import('../../src/execute.ts').Framed[]> {
-    try {
-      const r = await this.inner.query(id, gremlin, params);
-      this.log({ g: id, gremlin, ok: true, steps: stepNames(gremlin, params) });
-      return r;
-    } catch (e: any) {
-      this.log({ g: id, gremlin, ok: false, error: e?.message ?? String(e), steps: stepNames(gremlin, params) });
-      throw e;
-    }
+  executor(id: string): RemoteExecutor {
+    const inner = this.inner.executor(id);
+    const log = (rec: QueryRecord) => this.log(rec);
+    return {
+      raw: (g, p, depth, t) => inner.raw(g, p, depth, t),
+      async framedAsync(gremlin, params, paramTypes) {
+        try {
+          const r = await inner.framedAsync(gremlin, params, paramTypes);
+          log({ g: id, gremlin, ok: true, steps: stepNames(gremlin, params) });
+          return r;
+        } catch (e: any) {
+          log({ g: id, gremlin, ok: false, error: e?.message ?? String(e), steps: stepNames(gremlin, params) });
+          throw e;
+        }
+      },
+    };
   }
   create(id: string): Promise<void> { return this.inner.create(id); }
   info(id: string): Promise<GraphInfo> { return this.inner.info(id); }

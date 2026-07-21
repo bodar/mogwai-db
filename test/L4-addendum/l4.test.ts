@@ -18,7 +18,7 @@ import { test, expect, describe } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
-import { executeQuery } from '../../src/execute.ts';
+import { executeQuery } from '../support/executor.ts';
 import { ioc } from '../../src/io.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { CREW_SEED } from '../fixtures/seed-crew.ts';

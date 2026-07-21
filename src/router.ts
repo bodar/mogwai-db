@@ -53,7 +53,7 @@ async function runQuery(mgr: GraphManager, pathId: string | null, req: Request, 
     const raw = Buffer.from(await req.arrayBuffer());
     const { gremlin, params, paramTypes, g, batchSize, bulked } = parseRequest(raw);
     const id = pathId ?? g ?? 'g';
-    const framed = await mgr.query(id, gremlin, params, paramTypes);
+    const framed = await mgr.executor(id).framedAsync(gremlin, params, paramTypes);
     log({ id, gremlin, ok: true, results: framed.length });
     return streamBuffers(framed, batchSize, bulked);
   } catch (e: any) {

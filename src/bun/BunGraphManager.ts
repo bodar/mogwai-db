@@ -1,10 +1,9 @@
 import { mkdirSync, rmSync } from 'node:fs';
-import { type TypeNode } from '../gremlin-types.ts';
 import { join } from 'node:path';
 import { GraphStore } from '../storage.ts';
 import { type GraphManager, type GraphInfo, graphInfo } from '../manager.ts';
-import { executeFramed, type Framed } from '../execute.ts';
-import { standardRegistry } from '../services/standard.ts';
+import { Executor } from '../execute.ts';
+import type { Executor as ExecutorApi } from '../api.ts';
 import type { ServiceRegistry } from '../services/types.ts';
 import { BunSqlite } from './BunSqlite.ts';
 
@@ -13,20 +12,34 @@ import { BunSqlite } from './BunSqlite.ts';
  * the Cloudflare Durable Object model. One `bun:sqlite` database = one isolated
  * graph, keyed by the `/gremlin/{id}` path exactly as one DO = one graph keyed by
  * `idFromName`. Graphs spring into existence on first access (create-on-demand),
- * matching CF's provisioning: the registry never reports "not found", it just
+ * matching CF's provisioning: the manager never reports "not found", it just
  * builds an empty graph.
  *
- * Persistence: in-memory by default (each graph a `:memory:` db — ephemeral,
- * fast, ideal for dev/tests). If `dir` is set, each graph is a file
- * `{dir}/{id}.sqlite` that survives restarts — the closest local analogue to a
- * DO's durable storage. The id is percent-encoded into the filename so an
- * arbitrary graph id (CF accepts any name) can never escape the directory.
+ * The manager is BOTH the graph-lifecycle seam AND the executor factory (executor(id) →
+ * a per-graph Executor). Being the executor factory makes it the federation source: a
+ * sibling is just another graph THIS manager resolves by id, so the federated service
+ * reaches other graphs through the very same executor(id) — no separate env type.
+ *
+ * Persistence: in-memory by default (each graph a `:memory:` db — ephemeral, fast, ideal
+ * for dev/tests). If `dir` is set, each graph is a file `{dir}/{id}.sqlite` that survives
+ * restarts. The id is percent-encoded into the filename so an arbitrary graph id can never
+ * escape the directory.
  */
 export class BunGraphManager implements GraphManager {
   private graphs = new Map<string, { store: GraphStore; sql: BunSqlite }>();
+  private readonly registry: ServiceRegistry;
 
-  constructor(private dir?: string, private registry: ServiceRegistry = standardRegistry) {
+  /**
+   * `registry` is INJECTED (DI single-source, no default): the entry point decides — production
+   * (bun/server.ts) injects the EXTENDED registry (federation on); the L3 conformance host injects
+   * `standardRegistry` (reference-exact, no mogwai.* extensions). To change the registry you change
+   * it at app construction, nowhere else. The federated service reaches sibling graphs through THIS
+   * manager (the FederationSource), threaded to its apply at execution time — no manager↔registry
+   * construction cycle, because executor(id) isn't CALLED until query time.
+   */
+  constructor(private dir: string | undefined, registry: ServiceRegistry) {
     if (dir) mkdirSync(dir, { recursive: true });
+    this.registry = registry;
   }
 
   private fileFor(id: string): string {
@@ -45,8 +58,10 @@ export class BunGraphManager implements GraphManager {
     return g;
   }
 
-  async query(id: string, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<Framed[]> {
-    return executeFramed(this.resolve(id).store, gremlin, params, paramTypes, this.registry);
+  /** The per-graph executor, bound to that graph's store + the registry + this manager as the
+   *  federation source. Created on demand; a sibling federated call reaches this same method. */
+  executor(id: string): ExecutorApi {
+    return new Executor(this.resolve(id).store, this.registry, this);
   }
 
   async create(id: string): Promise<void> {

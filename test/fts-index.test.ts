@@ -7,7 +7,7 @@
 import { test, expect, describe } from 'bun:test';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
-import { executeQuery } from '../src/execute.ts';
+import { executeQuery } from './support/executor.ts';
 
 interface Row { owner_elem: string; pid: number; owner: number; pk: string; kind: string; text: string; }
 

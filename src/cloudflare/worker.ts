@@ -2,9 +2,10 @@ import { DurableObject } from 'cloudflare:workers';
 import { type TypeNode } from '../gremlin-types.ts';
 import { GraphStore } from '../storage.ts';
 import { application } from '../application.ts';
-import { type GraphManager, type GraphInfo, graphInfo } from '../manager.ts';
-import { executeFramed, type Framed } from '../execute.ts';
-import { standardRegistry } from '../services/standard.ts';
+import { graphInfo } from '../manager.ts';
+import type { GraphManager, GraphInfo, Executor, RemoteExecutor, ForeignRow } from '../api.ts';
+import { Executor as ExecutorImpl, type Framed } from '../execute.ts';
+import { extendedRegistry } from '../services/standard.ts';
 import { DurableObjectSqlite } from './DurableObjectSqlite.ts';
 
 export interface Env {
@@ -47,20 +48,28 @@ export class GraphDatabase extends DurableObject<Env> {
     }
   }
 
-  /** Data-plane RPC: compile + run + frame inside the DO (concern B). The edge
-   *  Worker parsed the wire and resolved the graph; it wraps the returned framed
-   *  buffers into the HTTP response (concern C). Returning the materialized array
-   *  (bytes only) — not a Request/Response over an internal fetch — keeps HTTP out
-   *  of the storage tier and avoids re-parsing GraphBinary here. The row array is
-   *  drained up front regardless (a DO cursor can't cross awaits), so this holds no
-   *  more than the fetch path did. */
-  async query(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<Framed[]> {
+  /** This DO's per-graph Executor: its own store + the extended registry (federation on) + a
+   *  federation SOURCE that reaches SIBLING DOs through this DO's own namespace binding
+   *  (this.env.GRAPH). So a federated call() running inside this DO projects down to another DO
+   *  via the same executor(id) seam — genuine cross-DO pushdown, same shape as Bun in-process. */
+  private executor(): Executor {
     this.ensureLive();
-    // The call() service registry is resolved here in the store tier (where executeFramed
-    // runs), not passed across the Worker→DO RPC boundary. Phase-1-5 services are pure SQL
-    // with no env, so standardRegistry suffices; Phase 6's federated service builds a registry
-    // from this DO's own `env` — wired in the CF-parity step (a sibling-DO federation env).
-    return executeFramed(this.store, gremlin, params, paramTypes, standardRegistry);
+    return new ExecutorImpl(this.store, extendedRegistry, new CloudflareGraphManager(this.env.GRAPH));
+  }
+
+  /** Data-plane RPC: compile + run + FRAME inside the DO (concern B, client wire path). The edge
+   *  Worker parsed the wire and resolved the graph; it wraps the returned framed buffers into the
+   *  HTTP response (concern C). Returning the materialized array (bytes only) keeps HTTP out of
+   *  the storage tier. */
+  async framed(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<Framed[]> {
+    return this.executor().framedAsync(gremlin, params, paramTypes);
+  }
+
+  /** Data-plane RPC: the INTERNAL raw-row path — a federated hop FROM a sibling DO lands here.
+   *  Returns detached ForeignRow[] (no GraphBinary; the client edge frames only the final
+   *  result). `depth` is the federation recursion depth of this hop (guarded in the service). */
+  async raw(gremlin: string, params: Record<string, any>, depth: number): Promise<ForeignRow[]> {
+    return this.executor().raw(gremlin, params, depth);
   }
 
   // ---- lifecycle RPC (called by CloudflareGraphManager) ----
@@ -86,14 +95,23 @@ export class GraphDatabase extends DurableObject<Env> {
   }
 }
 
-/** The Cloudflare half of the graph-lifecycle seam. The DO namespace *is* the
- *  registry: `getByName` maps a graph id to its DO. `query` forwards the request
- *  into the DO (which runs the shared handler); lifecycle verbs are DO RPC. */
+/** The Cloudflare half of the graph-lifecycle seam AND the executor factory / federation source.
+ *  The DO namespace maps a graph id to its DO (`getByName`); `executor(id)` returns an adapter
+ *  whose framed/raw forward into that DO's RPCs (which run the in-DO Executor). Lifecycle verbs
+ *  are DO RPC. Being the executor factory makes it the FederationSource: a federated call inside
+ *  one DO reaches a sibling DO through exactly this executor(id). */
 class CloudflareGraphManager implements GraphManager {
   constructor(private ns: DurableObjectNamespace<GraphDatabase>) {}
 
-  query(id: string, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<Framed[]> {
-    return this.ns.getByName(id).query(gremlin, params, paramTypes) as Promise<Framed[]>;
+  executor(id: string): RemoteExecutor {
+    const stub = this.ns.getByName(id);
+    // Across a DO RPC boundary everything is async, so this adapter offers only the RemoteExecutor
+    // surface (framedAsync/raw). The sync framed()/buffers() need a local store and live on the
+    // DO's OWN in-process executor, not here.
+    return {
+      framedAsync: (gremlin, params, paramTypes = {}) => stub.framed(gremlin, params, paramTypes) as Promise<Framed[]>,
+      raw: (gremlin, params, depth) => stub.raw(gremlin, params, depth) as Promise<ForeignRow[]>,
+    };
   }
   create(id: string): Promise<void> {
     return this.ns.getByName(id).create();

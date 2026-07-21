@@ -3,7 +3,7 @@ import { Query } from '../src/q.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { landForeignElements } from '../src/steps/foreign.ts';
-import { rawQuery, executeQuery } from '../src/execute.ts';
+import { executeQuery, exec } from './support/executor.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { lowerSteps } from '../src/steps/index.ts';
 import { materializeFinal } from '../src/steps/materialize.ts';
@@ -99,39 +99,40 @@ describe('foreign read tail (no local join)', () => {
   });
 });
 
-describe('rawQuery — the internal raw-row transfer (no GraphBinary)', () => {
+describe('Executor.raw — the internal raw-row transfer (no GraphBinary)', () => {
   const seeded = new GraphStore(new BunSqlite(':memory:'));
   for (const g of MODERN_SEED) executeQuery(seeded, g, {});
+  const raw = (g: string) => exec(seeded).raw(g, {}, 0); // depth 0: a top-level raw read
 
-  test('g.V() returns detached vertex rows with decoded props', () => {
-    const rows = rawQuery(seeded, 'g.V()', {});
+  test('g.V() returns detached vertex rows with decoded props', async () => {
+    const rows = await raw('g.V()');
     expect(rows.every((r) => r.kind === 'vertex')).toBe(true);
     const marko = rows.find((r) => (r.props as any).name?.[0]?.v === 'marko')!;
     expect(marko.label).toBe('person');
     expect((marko.props as any).age?.[0]?.v).toBe(29);
   });
 
-  test('g.E() returns detached edge rows with src/tgt and props', () => {
-    const rows = rawQuery(seeded, 'g.E()', {});
+  test('g.E() returns detached edge rows with src/tgt and props', async () => {
+    const rows = await raw('g.E()');
     expect(rows.every((r) => r.kind === 'edge')).toBe(true);
     const r0 = rows[0] as Extract<ForeignRow, { kind: 'edge' }>;
     expect(r0.src).toBeDefined();
     expect(r0.tgt).toBeDefined();
   });
 
-  test('a filtered/moved traversal still yields elements', () => {
-    const rows = rawQuery(seeded, "g.V().has('name','marko').out('knows')", {});
+  test('a filtered/moved traversal still yields elements', async () => {
+    const rows = await raw("g.V().has('name','marko').out('knows')");
     expect(rows.length).toBe(2); // marko knows vadas + josh
     expect(rows.every((r) => r.kind === 'vertex')).toBe(true);
   });
 
-  test('a non-element terminal fails closed (detached ELEMENT references only)', () => {
-    expect(() => rawQuery(seeded, "g.V().values('name')", {})).toThrow(/must yield vertices or edges/);
-    expect(() => rawQuery(seeded, 'g.V().count()', {})).toThrow(/must yield vertices or edges/);
+  test('a non-element terminal fails closed (detached ELEMENT references only)', async () => {
+    await expect(raw("g.V().values('name')")).rejects.toThrow(/must yield vertices or edges/);
+    await expect(raw('g.V().count()')).rejects.toThrow(/must yield vertices or edges/);
   });
 
-  test('a write fails closed', () => {
-    expect(() => rawQuery(seeded, "g.addV('x')", {})).toThrow(/must be a read/);
+  test('a write fails closed', async () => {
+    await expect(raw("g.addV('x')")).rejects.toThrow(/must be a read/);
   });
 });
 

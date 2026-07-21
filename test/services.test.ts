@@ -7,11 +7,12 @@ import { parseGremlin, stepChain } from '../src/frontend.ts';
 import { normalize } from '../src/strategies.ts';
 import { parseCallSpec } from '../src/services/call-params.ts';
 import { compile, compilePlan } from '../src/compiler.ts';
-import { runPlan, type Plan } from '../src/segment.ts';
-import type { ForeignRow, ServiceEnv } from '../src/services/types.ts';
+import type { ForeignRow } from '../src/services/types.ts';
+import type { FederationSource } from '../src/segment.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
-import { executeQuery, executeFramed } from '../src/execute.ts';
+import { executeQuery } from './support/executor.ts';
+import { Executor } from '../src/execute.ts';
 import { ioc } from '../src/io.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 
@@ -62,64 +63,6 @@ describe('ServiceRegistry', () => {
     // --list itself is registered but excluded from list(); as more services land they
     // appear here. It is always resolvable by name.
     expect(standardRegistry.get('--list')?.name).toBe('--list');
-  });
-});
-
-describe('segment plan trampoline (runPlan)', () => {
-  // A stand-in Compiled — runPlan never inspects its internals, only the caller's readHead
-  // does, so a bare tagged object is enough to drive the trampoline in isolation.
-  const compiled = (tag: string): any => ({ kind: 'read', sql: tag, binds: [], shape: { kind: 'discard' } });
-  const noEnv: ServiceEnv = { federateQuery: async () => { throw new Error('unused'); } };
-  const vrow = (id: number, ordinal?: number): ForeignRow => ({ kind: 'vertex', id, label: 'x', props: {}, ordinal });
-
-  test('a plain sql Plan returns immediately, no async work', async () => {
-    const c = compiled('final');
-    const out = await runPlan({ kind: 'sql', compiled: c }, noEnv, () => { throw new Error('readHead must not run'); });
-    expect(out).toBe(c);
-  });
-
-  test('a single barrier segment: read head -> await apply -> resume to sql', async () => {
-    const final = compiled('resumed');
-    let sawRows: readonly ForeignRow[] | undefined;
-    const plan: Plan = {
-      kind: 'segment',
-      head: compiled('head'),
-      params: {},
-      apply: async (rows) => { sawRows = rows; return [vrow(1), vrow(2)]; },
-      resume: (foreign) => { expect(foreign.map((r) => r.id)).toEqual([1, 2]); return { kind: 'sql', compiled: final }; },
-    };
-    const out = await runPlan(plan, noEnv, (h) => { expect(h.sql).toBe('head'); return [vrow(9)]; });
-    expect(sawRows?.map((r) => r.id)).toEqual([9]); // head rows reached apply
-    expect(out).toBe(final);
-  });
-
-  test('a null head (source form) applies over an empty input, readHead never called', async () => {
-    const final = compiled('src');
-    let sawRows: readonly ForeignRow[] | undefined;
-    const plan: Plan = {
-      kind: 'segment', head: null, params: { graph: 'orders' },
-      apply: async (rows) => { sawRows = rows; return [vrow(7)]; },
-      resume: () => ({ kind: 'sql', compiled: final }),
-    };
-    const out = await runPlan(plan, noEnv, () => { throw new Error('readHead must not run for a null head'); });
-    expect(sawRows).toEqual([]);
-    expect(out).toBe(final);
-  });
-
-  test('chained segments: resume can itself yield another segment (multi-hop)', async () => {
-    const final = compiled('after-two-hops');
-    const hopB: Plan = {
-      kind: 'segment', head: null, params: {},
-      apply: async () => [vrow(2)],
-      resume: () => ({ kind: 'sql', compiled: final }),
-    };
-    const hopA: Plan = {
-      kind: 'segment', head: null, params: {},
-      apply: async () => [vrow(1)],
-      resume: () => hopB, // second call() in the chain
-    };
-    const out = await runPlan(hopA, noEnv, () => []);
-    expect(out).toBe(final);
   });
 });
 
@@ -355,10 +298,11 @@ describe('tinker.degree.centrality — per-vertex edge count', () => {
   });
 });
 
-describe('barrier source form end to end (executeFramed → runPlan → land → frame)', () => {
-  // A STUB barrier service + STUB env — proves the whole source-form path (compilePlan yields a
-  // segment → executeFramed awaits apply → lands rows → frames GraphBinary) BEFORE the real
-  // mogwai.graph.federate service / runtime env land. The env just returns synthetic rows.
+describe('barrier source form via Executor (stub source → drive → land → frame)', () => {
+  // A STUB barrier service + STUB FederationSource — exercises the Executor's segment drive
+  // (compilePlan yields a segment → framedAsync awaits apply → lands rows → frames GraphBinary)
+  // in ISOLATION, without a manager or real graphs. The source's executor(id).raw returns
+  // synthetic detached rows. (The REAL two-graph stack is federation.test.ts.)
   const foreignVerts: ForeignRow[] = [
     { kind: 'vertex', id: 1, label: 'person', props: { name: [{ t: 'string', v: 'alice' }] } },
     { kind: 'vertex', id: 2, label: 'person', props: { name: [{ t: 'string', v: 'bob' }] } },
@@ -367,13 +311,14 @@ describe('barrier source form end to end (executeFramed → runPlan → land →
     name: 'mogwai.graph.federate',
     type: 'barrier',
     describeParams: () => ({}),
-    resolve: () => ({ kind: 'barrier', apply: async (_in, params, env) => env.federateQuery(String(params.graph), 'g.V()', {}) }),
+    resolve: () => ({ kind: 'barrier', apply: async (_in, params, source, depth) => source.executor(String(params.graph)).raw('g.V()', {}, depth + 1) }),
   };
-  const stubEnv = (rows: ForeignRow[]): ServiceEnv => ({ federateQuery: async () => rows });
+  const stubSource: FederationSource = { executor: () => ({ raw: async () => foreignVerts }) };
   const store = new GraphStore(new BunSqlite(':memory:')); // empty — foreign rows are literals
   const reg = createRegistry([stubFederate]);
+  const ex = new Executor(store, reg, stubSource); // Executor bound directly to the stub source
   const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
-  const run = async (g: string) => (await executeFramed(store, g, {}, {}, reg, stubEnv(foreignVerts))).map((f) => dec(f.buf));
+  const run = async (g: string) => (await ex.framedAsync(g, {})).map((f: any) => dec(f.buf));
 
   test('g.call(federate) lands the sibling vertices as detached references', async () => {
     const vs: any[] = await run('g.call("mogwai.graph.federate").with("graph", "orders")');
@@ -391,8 +336,8 @@ describe('barrier source form end to end (executeFramed → runPlan → land →
     expect(ids.map(String).sort()).toEqual(['1', '2']);
   });
 
-  test('executeFramed without an env fails closed on a barrier', async () => {
-    await expect(executeFramed(store, 'g.call("mogwai.graph.federate").with("graph","x")', {}, {}, reg))
-      .rejects.toThrow(/federation env/);
+  test('the sync path fails closed on a barrier (use framedAsync)', () => {
+    expect(() => ex.framed('g.call("mogwai.graph.federate").with("graph","x")', {}))
+      .toThrow(/use the async path/);
   });
 });
