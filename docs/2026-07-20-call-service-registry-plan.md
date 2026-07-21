@@ -234,23 +234,30 @@ So this phase is a performance + coverage step, not a semantics change:
 - **L3:** `map/Call.feature` (20) + the TextP string-predicate scenarios. `call` is already in L3
   scope (runs+fails, not skipped) — no `tags.ts` change.
 - **L4 (our addendum — we author scenarios for everything we build):** FTS substring matching and
-  its **documented case-insensitivity**; nested-JSON key/value search; **<3-char fail-closed**
-  behavior (service and predicate); index-backed `containing`/`startingWith`/`endingWith`; the
-  federated-call merge (`@gap:` tagged for the upstream give-back where the official corpus has no
-  coverage).
+  its **documented case-insensitivity**; nested-JSON key/value search; the **<3-char / computed /
+  injected → LIKE-scan** fallback (service and predicate — see "Substring rule (final)", NOT
+  fail-closed); index-backed `containing`/`startingWith`/`endingWith`; the federated-call merge
+  (`@gap:` tagged for the upstream give-back where the official corpus has no coverage).
 - **L2 SQL snapshots** + **`compiler.test.ts`** execution semantics for each new emitted shape.
 - **L1** stays 100% (no grammar change). Clean L3 run re-records `l3-state.json` + syncs the count.
 
 ## Phasing (federated is genuinely last, on shared seams)
 
-| Phase | Deliverable | Notes |
-|---|---|---|
-| 1 | **Generic spine:** `CallSpec` + `ServiceRegistry` DI + `Service`/`Contribution` interface + segment-ready plan type + executor loop (degenerate single-segment) | the foundation everything reuses |
-| 2 | `--list` reading the live registry (+ filter/verbose) | 7 scenarios |
-| 3 | `tinker.degree.centrality` via the child-scope reducer seam + `project()`-over-scalar | 6 scenarios; exercises per-parent merge |
-| 4 | `tinker.search` on FTS5 trigram + ValueNode-aware JSON write-path indexing + fail-closed + `element()` | 7 scenarios; builds the real search index |
-| 5 | `TextP`: **index-back** `containing`/`startingWith`/`endingWith` (same case-insensitive `LIKE`, now served by the trigram index) | shares the search index; <3-char fails closed; `regex` stays deferred |
-| 6 | **Federated DO graph call** — async barrier service on the Phase-1 seams: projection via `query()`, foreign-element materialization, parent-ordinal merge, Barrier/ChunkSize batching | last; additive, no engine rewrite |
+**Implementation status (2026-07-21, trunk @ `001dfcd`, L3 = 1239):** Phases 1–3 landed (as
+commits over 6 steps — see below). Phases 4–6 remain. The build split Phase 3 into **5a**
+(`tinker.degree.centrality` + GAP-1 `project()`-over-scalar element-alias) and **5b** (the
+child-scalar-classifier generalization that made `where(call(...).is(n))` — and bonus `math()` in a
+child — compose). `--list`'s L3 scenarios stay red until `tinker.search` registers (Phase 4), since
+`--list` enumerates the *live* registry.
+
+| Phase | Deliverable | Status | Notes |
+|---|---|---|---|
+| 1 | **Generic spine:** `CallSpec` + `ServiceRegistry` DI + `Service`/`Contribution` interface (`'barrier'` variant present, deferred) | ✅ done | spine + DI (`registry.ts` cycle-free mechanism, `standard.ts` DI-only); pipeline stays synchronous |
+| 2 | `--list` reading the live registry (+ filter/verbose) | ✅ done | `ScalarStream` of names; 7 scenarios go green once Phase 4 registers search |
+| 3 | `tinker.degree.centrality` via the child-scope reducer seam + `project()`-over-scalar | ✅ done (5a+5b) | `scopedMovementCount` (generic primitive); GAP-1 alias field; GAP-2 `SCALAR_PRODUCER` classifier. +5 L3 |
+| 4 | `tinker.search` on FTS5 trigram + ValueNode-aware JSON write-path indexing + `element()` | ▢ next | 7 scenarios; builds the real search index. Split: **6** index+write-path (test in isolation), **7** the search consumer |
+| 5 | `TextP`: **index-back** `containing`/`startingWith`/`endingWith` (same case-insensitive `LIKE`, ≥3 chars now served by the trigram index) | ▢ | shares the search index; see "Substring rule (final)" above — <3/computed/injected → LIKE scan (NOT fail-closed); `regex` stays deferred |
+| 6 | **Federated DO graph call** — async barrier service on the Phase-1 seams | ▢ deferred | last; additive, no engine rewrite |
 
 ## Semantics & hard parts (honest)
 
