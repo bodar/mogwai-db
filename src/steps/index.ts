@@ -28,6 +28,7 @@ import { lowerScalarRows } from './scalar.ts';
 import { seedCall } from './call.ts';
 import { materializeFinal } from './materialize.ts';
 import { compileFromVariant } from './variant.ts';
+import { compileFromForeign } from './foreign.ts';
 
 export { compileTail };
 
@@ -386,6 +387,7 @@ function lowerStream(s: Stream, steps: PStep[], at: number): LoweringResult {
   if (s.kind === 'record') return compileFromRecord(s, steps, at);
   if (s.kind === 'group') return compileFromGroup(s, steps, at);
   if (s.kind === 'path') return compileFromPath(s, steps, at);
+  if (s.kind === 'foreign') return compileFromForeign(s, steps, at);
   return compileFromList(s, steps, at);
 }
 

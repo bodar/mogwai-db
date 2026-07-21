@@ -11,7 +11,7 @@ import { readCompiled, type Compiled, type ListOf, type Shape } from '../render.
 import { list, q } from '../q.ts';
 import { framedProps, extIdOf } from '../plan.ts';
 import { edges, labels, nodes } from '../schema.ts';
-import { groupResultColumns, pathColumns, recordResultColumns, type GroupStream, type ListStream, type MapEntryStream, type MapOf, type MapStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream, type Stream, type VariantStream } from './stream.ts';
+import { groupResultColumns, pathColumns, recordResultColumns, type ForeignStream, type GroupStream, type ListStream, type MapEntryStream, type MapOf, type MapStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream, type Stream, type VariantStream } from './stream.ts';
 
 export function materializeRoot(query: Query, tail: Expression, shape: Shape): Compiled {
   return readCompiled(query, tail, shape);
@@ -220,6 +220,20 @@ export function materializePathRoot(stream: PathStream): Compiled {
   return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${p}`, shape);
 }
 
+/** Materialize a foreign (detached) element stream — the result of a federated call().
+ * Reuses the ordinary vertex/edge Shape and framing; only the projection differs: the
+ * id/label/props (+ src/tgt) columns come straight off the landed VALUES CTE with NO
+ * framedProps join (a detached element has no local nodes/edges row). `fprops` is already
+ * JSON text in the per-key {t,v}-node shape rowVertex/rowEdge parse, so `json(...)` hands the
+ * framer ready payload. */
+export function materializeForeignRoot(stream: ForeignStream): Compiled {
+  const p = stream.rel.as('p');
+  const cols: Expression[] = [q`${p.c.fid} AS id`, q`${p.c.flabel} AS label`];
+  if (stream.elem === 'edge') cols.push(q`${p.c.fsrc} AS src`, q`${p.c.ftgt} AS tgt`);
+  cols.push(q`json(${p.c.fprops}) AS props`);
+  return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${p}`, { kind: stream.elem === 'edge' ? 'edge' : 'vertex' });
+}
+
 /** The single terminal dispatch for every fully-typed relational stream. ElementStream
  * still passes through compileTail because its historical projection accumulator can
  * produce a terminal expression; migrating that compatibility island is the final
@@ -238,6 +252,7 @@ export function materializeStream(stream: Exclude<Stream, import('./context.ts')
     case 'path': return materializePathRoot(stream);
     case 'map': return materializeMapRoot(stream);
     case 'mapEntry': return materializeMapEntryRoot(stream);
+    case 'foreign': return materializeForeignRoot(stream);
   }
 }
 
