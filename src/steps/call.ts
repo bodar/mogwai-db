@@ -4,7 +4,7 @@ import { type Stream } from './stream.ts';
 import { type ElementStream } from './context.ts';
 import { type ServiceRegistry, type ServiceCallCtx, type Contribution } from '../services/types.ts';
 import { parseCallSpec } from '../services/call-params.ts';
-import { pushChildScope, type ChildScope, type CompileScope } from './child.ts';
+import { type CompileScope } from './child.ts';
 
 // ---------- call() lowering ----------
 //
@@ -38,20 +38,21 @@ export function seedCall(first: PStep, query: Query, params: Record<string, any>
   return resolveContribution(spec, registry, ctx).build(ctx);
 }
 
-/** V().call(...) mid-traversal: a per-parent scalar-producing step. Pushes a child scope
- *  (so each input vertex gets a multiset-safe ordinal, exactly like a count()-child) and
- *  hands the pushed seed to the service; the service reduces per ordinal (e.g.
- *  tinker.degree.centrality → a scoped count). */
+/** V().call(...) mid-traversal: a per-parent step. The service receives the parent
+ *  ElementStream + the current CompileScope and pushes its OWN child scope (via the
+ *  child-seam helpers, e.g. scopedDegreeCount) so each input vertex gets a multiset-safe
+ *  ordinal — exactly like a count()-child. tinker.degree.centrality reduces to a scalar
+ *  per input. */
 export function lowerCall(step: PStep, parent: ElementStream, scope: CompileScope): Stream {
   const spec = parseCallSpec(step, parent.params);
-  const pushed = pushChildScope(parent, scope);
+  const registry = parent.registry ?? (() => { throw new Error('call(): no service registry in scope'); })();
   const ctx: ServiceCallCtx = {
     params: spec.params,
     q: parent.q,
     compileParams: parent.params,
-    registry: parent.registry ?? (() => { throw new Error('call(): no service registry in scope'); })(),
-    parent: pushed.seed,
-    scope: pushed.scope,
+    registry,
+    parent,
+    scope,
   };
-  return resolveContribution(spec, ctx.registry, ctx).build(ctx);
+  return resolveContribution(spec, registry, ctx).build(ctx);
 }

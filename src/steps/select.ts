@@ -265,6 +265,21 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
  *  project defers cleanly. Each field reuses ONE pushed scalar domain (reuseCurrentFrame), so
  *  the sibling children rejoin on the shared ordinal into one RecordStream row per value.
  *  (Multi-label select() is alias-based and dispatched before this, never reaching here.) */
+/** If a field's by() body is exactly `select(label)` reading an ELEMENT alias from path
+ *  history, return that (label, entry) — the one non-scalar field kind a scalar-parent
+ *  project supports (e.g. degree.centrality's project("vertex","degree").by(select("v")),
+ *  where the vertex is a path-history element and the degree is the scalar). Any other
+ *  nested body is a scalar child (handled by the scalar branch). */
+function scalarProjectAliasField(nested: any, s: ScalarStream, params: Record<string, any>): { label: string; entry: NonNullable<ReturnType<AliasMap['get']>> } | null {
+  if (!nested) return null;
+  const body = stepChain(nested, params);
+  if (body.length !== 1 || body[0].name !== 'select') return null;
+  const strs = body[0].args.filter((a: any): a is string => typeof a === 'string');
+  if (strs.length !== 1 || body[0].args.some((a: any) => a && typeof a === 'object' && ('column' in a || 'pop' in a))) return null;
+  const entry = s.carried.aliases.get(strs[0]);
+  return entry && aliasIsElement(entry) ? { label: strs[0], entry } : null;
+}
+
 export function lowerScalarProject(s: ScalarStream, proj: PStep): RecordStream | null {
   if (proj.name !== 'project') return null;
   if (proj.args.some((a) => a && typeof a === 'object' && ('column' in a || 'pop' in a))) return null;
@@ -272,8 +287,8 @@ export function lowerScalarProject(s: ScalarStream, proj: PStep): RecordStream |
   if (!keys.length) return null;
   const bys = proj.bys ?? [];
   const specs = keys.map((_, i) => (bys.length ? bys[i % bys.length]?.[0] : undefined));
-  // Only a bare by() (→ the value) or a nested scalar-value traversal; a string key / T-token
-  // has no scalar meaning (a scalar has no property/label/id) → defer the whole project.
+  // Only a bare by() (→ the value), a nested scalar-value traversal, or a by(select(elementLabel))
+  // reading a path-history ELEMENT alias; a string key / T-token has no scalar meaning → defer.
   if (specs.some((a) => a != null && !(typeof a === 'object' && 'nested' in a))) return null;
 
   const outer = pushChildScope(s);
@@ -281,6 +296,27 @@ export function lowerScalarProject(s: ScalarStream, proj: PStep): RecordStream |
   const branches = keys.map((key, i) => {
     const spec = specs[i];
     const nested = spec && typeof spec === 'object' && 'nested' in spec ? spec.nested : null;
+    // by(select(elementLabel)) — re-root the seed on the path-history element and frame it
+    // as an element record field (id/label/props), the SAME framing tryLowerTraversalRecord
+    // uses for an element-parent record. The alias column rides on the seed's carried schema.
+    const aliasField = nested ? scalarProjectAliasField(nested, s, s.params) : null;
+    if (aliasField) {
+      const elem = aliasElem(aliasField.entry);
+      const p = outer.seed.rel.as(`b${i}`);
+      const n = (elem === 'edge' ? edges : nodes).as(`n${i}`);
+      const l = labels.as(`l${i}`);
+      const idExpr = aliasId(p.c[aliasField.entry.col], 'last');
+      const payload = elem === 'edge'
+        ? q`${n.c.id} AS ${`e${i}_rid`}, COALESCE(${n.c.uid}, ${n.c.id}) AS ${`e${i}_id`}, ${l.c.name} AS ${`e${i}_label`}, ${extIdOf(n.c.src)} AS ${`e${i}_src`}, ${extIdOf(n.c.tgt)} AS ${`e${i}_tgt`}, ${framedProps(n, 'edge')} AS ${`e${i}_props`}`
+        : q`${n.c.id} AS ${`e${i}_rid`}, COALESCE(${n.c.uid}, ${n.c.id}) AS ${`e${i}_id`}, ${l.c.name} AS ${`e${i}_label`}, ${framedProps(n, 'node')} AS ${`e${i}_props`}`;
+      const field: RecordField = { key, prefix: `e${i}`, sub: elem === 'edge' ? 'edge' : 'vertex' };
+      const rel = s.q.cte(
+        q`SELECT ${p.c[ord]} AS ${ord}, ${payload}${carryFrag(s.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${idExpr} JOIN ${l} ON ${l.c.id}=${n.c.label}`,
+        [ord, ...recordFieldColumns(field), ...carriedCols(s.carried)],
+      ).as(`j${i}`);
+      // The element field's columns are already aliased on this branch's rel.
+      return { rel, field, cols: recordFieldColumns(field).map((name) => q`${rel.c[name]} AS ${name}`) };
+    }
     // A nested field lowers as a scalar child reusing the shared domain; a bare by() is the
     // value itself — the seed row already carries the value + ordinal + outer carried schema.
     const child = nested
@@ -289,16 +325,17 @@ export function lowerScalarProject(s: ScalarStream, proj: PStep): RecordStream |
     if (!child) return null;
     const rel = child.rel.as(`b${i}`);
     const field: RecordField = { key, prefix: `e${i}`, sub: 'value' };
-    return { rel, field, col: q`${rel.c.v} AS ${`e${i}_v`}` };
+    return { rel, field, cols: [q`${rel.c.v} AS ${`e${i}_v`}`] };
   });
   if (branches.some((b) => !b)) return null;
-  const bs = branches as { rel: Relation; field: RecordField; col: Expression }[];
+  const bs = branches as { rel: Relation; field: RecordField; cols: Expression[] }[];
 
   const first = bs[0].rel;
   const joins = bs.slice(1).map((b) => q` JOIN ${b.rel} ON ${b.rel.c[ord]}=${first.c[ord]}`);
   const fields = bs.map((b) => b.field);
+  const selectCols = bs.flatMap((b) => b.cols);
   const rel = s.q.cte(
-    q`SELECT ${list(bs.map((b) => b.col), ', ')}${carryFrag(s.carried, first)} FROM ${first}${list(joins, '')}`,
+    q`SELECT ${list(selectCols, ', ')}${carryFrag(s.carried, first)} FROM ${first}${list(joins, '')}`,
     [...fields.flatMap(recordFieldColumns), ...carriedCols(s.carried)],
   );
   return toRecordStream(carryOf(s), rel, fields);

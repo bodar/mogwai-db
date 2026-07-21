@@ -1,6 +1,7 @@
 import { createRegistry } from './registry.ts';
 import type { ServiceRegistry } from './types.ts';
 import { directoryService } from './directory.ts';
+import { degreeCentralityService } from './degree-centrality.ts';
 
 // ---------- the standard, pre-seeded registry ----------
 //
@@ -12,4 +13,4 @@ import { directoryService } from './directory.ts';
 // per-runtime env, at which point this becomes a factory over that env.
 
 /** The standard services, in --list enumeration order. Added as each phase lands. */
-export const standardRegistry: ServiceRegistry = createRegistry([directoryService]);
+export const standardRegistry: ServiceRegistry = createRegistry([directoryService, degreeCentralityService]);

@@ -11,6 +11,7 @@ import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { executeQuery } from '../src/execute.ts';
 import { ioc } from '../src/io.ts';
+import { MODERN_SEED } from './fixtures/seed-modern.ts';
 
 /** Parse a gremlin string, normalize, and return the (single) folded call PStep. */
 const callStep = (gremlin: string, params: Record<string, any> = {}) => {
@@ -198,5 +199,51 @@ describe('--list (DirectoryService) — end to end over GraphBinary', () => {
   test('verbose → a JSON describe blob per service', () => {
     const [blob] = run('g.call("--list").with("service", "tinker.search").with("verbose", true)');
     expect(JSON.parse(blob)).toMatchObject({ name: 'tinker.search', type: 'start' });
+  });
+});
+
+describe('tinker.degree.centrality — per-vertex edge count', () => {
+  const store = new GraphStore(new BunSqlite(':memory:'));
+  for (const g of MODERN_SEED) executeQuery(store, g, {});
+  const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
+  const run = (g: string) => executeQuery(store, g, {}, {}, standardRegistry).map(dec);
+  // Decode the project record into a name→degree map (TinkerPop results are UNORDERED, so
+  // assert as a map rather than a positional array — g.V() order is unspecified).
+  const projMap = (g: string, params: Record<string, any> = {}): Record<string, number> => {
+    const out: Record<string, number> = {};
+    for (const b of executeQuery(store, g, params, {}, standardRegistry)) {
+      const m: any = dec(b);
+      const name = m.get('vertex').properties?.find((p: any) => p.label === 'name')?.value;
+      out[name] = Number(m.get('degree'));
+    }
+    return out;
+  };
+  const IN = { marko: 0, vadas: 1, lop: 3, josh: 1, ripple: 1, peter: 0 };
+  const OUT = { marko: 3, vadas: 0, lop: 0, josh: 2, ripple: 0, peter: 1 };
+
+  test('g_V_callXdcX — IN degree per vertex, projected with its vertex', () => {
+    expect(projMap('g.V().as("v").call("tinker.degree.centrality").project("vertex","degree").by(select("v")).by()'))
+      .toEqual(IN);
+  });
+
+  test('g_V_callXdcX_withXdirection_OUTX — OUT degree', () => {
+    expect(projMap('g.V().as("v").call("tinker.degree.centrality").with("direction", OUT).project("vertex","degree").by(select("v")).by()'))
+      .toEqual(OUT);
+  });
+
+  test('g_V_callXdc_mapX_withXdirection_OUTX — a (ignored) map arg + with(direction) OUT', () => {
+    expect(projMap('g.V().as("v").call("tinker.degree.centrality", xx1).with("direction", OUT).project("vertex","degree").by(select("v")).by()',
+      { xx1: new Map([['x', 'y']]) })).toEqual(OUT);
+  });
+
+  test('g_V_callXdc_traversalX — direction via __.project(direction).by(__.constant(OUT))', () => {
+    expect(projMap('g.V().as("v").call("tinker.degree.centrality", __.project("direction").by(__.constant(OUT))).project("vertex","degree").by(select("v")).by()'))
+      .toEqual(OUT);
+  });
+
+  test('bare mid-traversal degree (no project) yields one scalar per vertex', () => {
+    // Order-independent: the multiset of degrees matches IN's values.
+    expect(run('g.V().call("tinker.degree.centrality")').map(Number).sort())
+      .toEqual(Object.values(IN).sort());
   });
 });
