@@ -1884,6 +1884,49 @@ describe('compiler SQL snapshots', () => {
     expect(esc.binds).toContain('%50\\%\\_x%');
   });
 
+  test('ftsSubstringPredicate: has(k, >=3-char substring) routes through property_fts, LIKE fallback equivalent', () => {
+    const store = seededStore();
+    const on = read('g.V().has("name", TextP.containing("ark"))');
+    // Fast path ON (default): a MATCH prefilter + LIKE position-confirm over the trigram index.
+    expect(on.sql).toContain('property_fts');
+    expect(on.sql).toContain('MATCH');
+    expect(on.sql).toContain('kind');
+    // The MATCH phrase (literal-quoted term) and the LIKE pattern are both bound, not spliced.
+    expect(on.binds).toContain('"ark"');
+    expect(on.binds).toContain('%ark%');
+    // Fast path OFF → the generic base-table LIKE scan (the semantic authority + equivalence
+    // fallback); no property_fts.
+    const off = read('g.V().has("name", TextP.containing("ark"))', { fastPaths: { ftsSubstringPredicate: false } });
+    expect(off.sql).not.toContain('property_fts');
+    expect(off.sql).toContain('like ? escape ?');
+    // Result-equivalent: both select the same vertices (marko, via 'ar' in 'marko'... 'ark' here).
+    const namesOn = (run(store, 'g.V().has("name", TextP.containing("ar")).values("name")') as any[]).map((r) => r.v).sort();
+    const namesOff = (runWith(store, 'g.V().has("name", TextP.containing("ar")).values("name")', { fastPaths: { ftsSubstringPredicate: false } }) as any[]).map((r) => r.v).sort();
+    expect(namesOn).toEqual(namesOff);
+    expect(namesOn).toEqual(['marko']);
+    // startingWith excludes a mid-string hit (the LIKE position-confirm): 'jo' floor-guarded,
+    // use a >=3 anchored term. 'jos' starts josh only.
+    expect((run(store, 'g.V().has("name", TextP.startingWith("jos")).values("name")') as any[]).map((r) => r.v)).toEqual(['josh']);
+    // The index is genuinely used (EXPLAIN shows the FTS virtual-table index, not a base scan).
+    const plan = store.query<{ detail: string }>('EXPLAIN QUERY PLAN ' + on.sql, on.binds).map((r) => r.detail).join(' | ');
+    expect(plan).toMatch(/property_fts.*VIRTUAL TABLE INDEX/);
+  });
+
+  test('ftsSubstringPredicate: <3-char and negated substrings stay on the generic LIKE path', () => {
+    const store = seededStore();
+    // A <3-char term has no index-only answer → generic LIKE scan (NOT fail-closed).
+    const short = read('g.V().has("name", TextP.containing("ar"))');
+    expect(short.sql).not.toContain('property_fts');
+    expect(short.sql).toContain('like ? escape ?');
+    // A negated op (notContaining) stays on LIKE: the trigram index finds MATCHES, not the
+    // "exists a value that does NOT match" the ANY-match negation needs.
+    const neg = read('g.V().has("name", TextP.notContaining("ark"))');
+    expect(neg.sql).not.toContain('property_fts');
+    expect(neg.sql).toContain('not like ? escape ?');
+    expect((run(store, 'g.V().has("name", TextP.notContaining("ark")).values("name")') as any[]).map((r) => r.v).sort())
+      .toEqual(['josh', 'lop', 'peter', 'ripple', 'vadas']);
+  });
+
   test('where(__.movement) → EXISTS filter CTE; not() → NOT COALESCE', () => {
     const w = read('g.V().where(__.out("knows")).values("name")');
     // The correlated child is the generic movement StepFn rendered as a nested derived

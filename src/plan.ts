@@ -284,6 +284,43 @@ function likePattern(op: string, value: unknown): { pat: string; neg: boolean } 
   return null;
 }
 
+// ---------- FTS-backed substring predicate (ftsSubstringPredicate fast path) ----------
+//
+// A POSITIVE substring predicate (containing/startingWith/endingWith) with a >= 3-char
+// literal term over a STORED property routes through the property_fts trigram index instead
+// of a base-table LIKE scan. The generic LIKE (nodeHasProp/edgeHasProp fall-through) stays
+// the semantic authority + equivalence fallback (ftsSubstringPredicate:false, or a term
+// too short / a computed-scalar context). See docs/2026-07-20-call-service-registry-plan.md
+// "Substring rule (final)". NEGATED ops (not*) stay on LIKE: the trigram index finds values
+// that MATCH, not the "exists a value that does NOT match" the ANY-match negation needs.
+
+const TRIGRAM_FLOOR = 3;
+
+/** Whether an FTS rewrite applies to this predicate: a positive containing/startingWith/
+ *  endingWith with a string literal term of >= 3 chars. Returns the pieces the EXISTS needs:
+ *  the MATCH phrase (FTS query syntax — a literal phrase, internal `"` doubled) that
+ *  prefilters via the index, and the LIKE pattern that confirms position for the anchored
+ *  ops. null → not eligible (caller uses the generic LIKE). */
+function ftsSubstringMatch(pred: any): { matchPhrase: string; likePat: string } | null {
+  if (!pred || typeof pred !== 'object' || !('op' in pred)) return null;
+  const op = (pred as Pred).op;
+  if (op !== 'containing' && op !== 'startingWith' && op !== 'endingWith') return null;
+  const term = (pred as Pred).values[0];
+  if (typeof term !== 'string' || term.length < TRIGRAM_FLOOR) return null;
+  const lp = likePattern(op, term)!;   // never null for these three ops
+  // The MATCH arg is FTS query syntax (AND/OR/*/"/^ are operators), so wrap the term as a
+  // literal phrase and double any internal `"`. It still substring-matches on a trigram index
+  // even when the term is an operator word. Do NOT reuse LIKE's %/_/\ escaping here.
+  return { matchPhrase: `"${term.replace(/"/g, '""')}"`, likePat: lp.pat };
+}
+
+/** An FTS-backed ANY-match EXISTS for a stored-property substring predicate: the owning
+ *  element has a property `key` whose VALUE (kind='value') matches. MATCH is the index
+ *  prefilter; the LIKE re-confirms position (so startingWith 'mar' excludes 'embarko'). */
+function ftsSubstringExists(ownerElem: 'node' | 'edge', ownerIdExpr: Expression, key: string, m: { matchPhrase: string; likePat: string }): Expression {
+  return q`EXISTS(SELECT 1 FROM property_fts WHERE owner_elem=${value(ownerElem)} AND owner=${ownerIdExpr} AND pk=${value(key)} AND kind=${value('value')} AND text MATCH ${value(m.matchPhrase)} AND text LIKE ${value(m.likePat)} escape ${value('\\')})`;
+}
+
 /** range(low, high) → SQL [offset, limit]. high < 0 means "no upper bound". */
 export function rangeToOffsetLimit(args: any[]): { offset: number; limit: number } {
   const [lo, hi] = args.map(Number);
@@ -418,7 +455,13 @@ export const nodePropScalar = (nodeIdExpr: Expression, key: string): Expression 
 
 /** node: does ANY value under `key` satisfy `pred` (undefined → the key exists at
  *  all). EXISTS over vertex_properties → multi-property has() semantics. */
-export const nodeHasProp = (nodeIdExpr: Expression, key: string, pred: any): Expression => {
+export const nodeHasProp = (nodeIdExpr: Expression, key: string, pred: any, fts = false): Expression => {
+  // ftsSubstringPredicate fast path: a >= 3-char positive substring op over this stored
+  // property routes through the property_fts trigram index (result-equivalent to the LIKE
+  // below — an equivalence test asserts it). Only the has()/where-property choke point that
+  // has a fastPaths config in scope opts in (fts=true); every other caller uses the generic
+  // LIKE. Recognition failure falls through — the fast path never defines support.
+  if (fts) { const m = ftsSubstringMatch(pred); if (m) return ftsSubstringExists('node', nodeIdExpr, key, m); }
   const base = q`SELECT 1 FROM vertex_properties WHERE node=${nodeIdExpr} AND key=${value(key)}`;
   // The row's own `vtype` column is in scope inside the EXISTS, so has('k',typeOf(X))
   // matches the stored canonical type (mode 2) instead of only storage class.
@@ -433,7 +476,8 @@ export const edgePropScalar = (edgeIdExpr: Expression, key: string): Expression 
 
 /** edge: does `key` satisfy `pred` (undefined → the key exists). EXISTS over
  *  edge_properties — mirror of nodeHasProp. */
-export const edgeHasProp = (edgeIdExpr: Expression, key: string, pred: any): Expression => {
+export const edgeHasProp = (edgeIdExpr: Expression, key: string, pred: any, fts = false): Expression => {
+  if (fts) { const m = ftsSubstringMatch(pred); if (m) return ftsSubstringExists('edge', edgeIdExpr, key, m); }
   const base = q`SELECT 1 FROM edge_properties WHERE edge=${edgeIdExpr} AND key=${value(key)}`;
   return pred === undefined ? q`EXISTS(${base})` : q`EXISTS(${base} AND ${predicateSql(raw('value'), pred, { vtypeExpr: raw('vtype') })})`;
 };
@@ -458,8 +502,8 @@ export const scalarProp = (ctx: ScalarCtx, key: string): Expression =>
 
 /** A boolean predicate on `key` for the current element (has/where/is): node → ANY-match
  *  EXISTS over vertex_properties; edge → EXISTS over edge_properties. */
-export const hasProp = (ctx: ScalarCtx, key: string, pred: any): Expression =>
-  ctx.elem === 'edge' ? edgeHasProp(ctx.idExpr, key, pred) : nodeHasProp(ctx.idExpr, key, pred);
+export const hasProp = (ctx: ScalarCtx, key: string, pred: any, fts = false): Expression =>
+  ctx.elem === 'edge' ? edgeHasProp(ctx.idExpr, key, pred, fts) : nodeHasProp(ctx.idExpr, key, pred, fts);
 
 /** node: assemble ALL properties as JSON text `{key:[value,…]}` (multi-valued,
  *  insertion-ordered) from vertex_properties, correlated on the node rowid. Empty →

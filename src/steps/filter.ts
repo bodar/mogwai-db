@@ -135,8 +135,11 @@ export const has: StepFn = (s, st) => {
   } else {
     // ANY-match EXISTS over the element's normalized properties table (vertex_properties
     // for a node, edge_properties for an edge). hasProp dispatches on elem (current
-    // traverser aliased `n`).
-    conds.push(hasProp(currentCtx(st), key, val));
+    // traverser aliased `n`). A >= 3-char positive substring predicate over this STORED
+    // property routes through the property_fts trigram index (ftsSubstringPredicate fast
+    // path, default on) — result-equivalent to the generic LIKE fall-through.
+    const fts = st.fastPaths?.ftsSubstringPredicate !== false;
+    conds.push(hasProp(currentCtx(st), key, val, fts));
   }
   return filterCte(st, list(conds, ' AND '));
 };
