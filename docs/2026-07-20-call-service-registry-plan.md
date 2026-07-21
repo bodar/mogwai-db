@@ -1,9 +1,13 @@
 # call() + the Service Registry — a first-class, extensible service layer
 
 **Date:** 2026-07-20
-**Status:** accepted — Phases 1–5 LANDED (trunk @ `03d7b06`, L3 = 1252); only the deferred
-federated barrier (Phase 6) remains. Design decisions ratified 2026-07-21; see "Design decisions
-& findings (2026-07-21)" and the phasing table at the foot of this doc.
+**Status:** accepted — Phases 1–5 LANDED; **Phase 6a (federated call, SOURCE form) LANDED
+2026-07-21** on both runtimes (Bun tested end-to-end; CF wired). **6b (mid-traversal
+`V().call(federate)`) remains.** The Phase-6 body below is the design AS PROPOSED; the built
+shape diverged materially (no `ServiceEnv`, no `standardRegistry(env)` factory, a per-graph
+`Executor` not an `executeFramed` orchestrator) — **see the "Phase 6 — as built (2026-07-21)"
+addendum at the very foot for the source of truth.** Design decisions ratified 2026-07-21; see
+"Design decisions & findings (2026-07-21)" and the phasing table.
 **L3 gap addressed:** deferral bucket #2 — `unsupported source step: call` (14) +
 `step not implemented: call()` (5). Feature: `map/Call.feature` (20 scenarios). Also closes the
 `TextP` substring predicates (`containing`/`startingWith`/`endingWith`) — index-backed by the same
@@ -258,7 +262,8 @@ green when `tinker.search` registered (step 7), since `--list` enumerates the *l
 | 3 | `tinker.degree.centrality` via the child-scope reducer seam + `project()`-over-scalar | ✅ done (5a+5b) | `scopedMovementCount` (generic primitive); GAP-1 alias field; GAP-2 `SCALAR_PRODUCER` classifier. +5 L3 |
 | 4 | `tinker.search` on FTS5 trigram + ValueNode-aware JSON write-path indexing + `element()` | ✅ done (steps 6+7) | step 6 `property_fts` schema + write-path indexer (`services/fts-index.ts`, tested in isolation, `test/fts-index.test.ts`); step 7 `services/search.ts` consumer. +13 L3 (search + `--list`). See PERF note below. |
 | 5 | `TextP`: **index-back** `containing`/`startingWith`/`endingWith` (same case-insensitive `LIKE`, ≥3 chars now served by the trigram index) | ✅ done (step 8) | `ftsSubstringPredicate` fast path in `nodeHasProp`/`edgeHasProp` (MATCH prefilter + LIKE position-confirm); opt-in only at the `has()` choke point. <3/computed/injected/`not*` → generic LIKE (NOT fail-closed); `regex` stays deferred. L3 stable (plan-shape change). |
-| 6 | **Federated DO graph call** — async barrier service on the Phase-1 seams | ▢ deferred | last; additive, no engine rewrite |
+| 6a | **Federated DO graph call — SOURCE form** `g.call(federate,…)` | ✅ done (2026-07-21) | landed via a per-graph `Executor` + `FederationSource`, NOT the proposed `executeFramed` orchestrator/`ServiceEnv`. Bun tested e2e; CF wired. Drove the api.ts/Executor/DI refactor. See the as-built addendum. |
+| 6b | **Federated call — MID-TRAVERSAL** `V().call(federate)…` | ▢ remaining | needs per-parent ordinal rejoin (`pushChildScope` → head projects parent id+ordinal → apply stamps ordinal → resume LEFT JOINs onto frame.domain). Fails closed today with a clear "use source position" deferral. The `head`/`readSegmentHead`/`ordinal` plumbing is already in place. |
 
 **PERF note (step 6, cost a debug cycle):** an FTS5 `DELETE` by an `UNINDEXED` column is an O(n)
 content scan (no index on UNINDEXED cols). An unconditional per-property-write delete made a bulk
@@ -394,3 +399,98 @@ computed scalar, `all()`/`any()` on an injected list, AND `tinker.search`:
 7. `tinker.search` consumer (7 scenarios). 8. TextP index-backing (equivalence + EXPLAIN test).
 9. L3 ratchet re-record + `SYNC_FILES`. Each step: L2 snapshot + `compiler.test.ts` execution +
 L4 addendum where applicable; L1 stays 100%.
+
+---
+
+# Phase 6 — as built (2026-07-21) — SOURCE OF TRUTH for the federated call
+
+The Phase-6 proposal above (the `## The unifying execution model` section, the `ServiceEnv`
+sketch, the "Executor = async orchestrator over segments in execute.ts") is **superseded** by
+what actually shipped. 6a surfaced a set of DI/abstraction smells; fixing them properly (with
+the user, in this session) reshaped the whole store tier. What landed:
+
+## The API surface — `src/api.ts` (NEW)
+
+The system's seams, gathered as one cycle-free contract instead of scattered next to their
+implementations (imports only leaf value-types): `Sql`, `GraphInfo`, `GraphManager`, `ForeignRow`,
+and the execution seam **split by boundary**:
+
+- **`RemoteExecutor`** — async-only: `framedAsync(g,p,types?) → Promise<Framed[]>` (client wire,
+  federation-capable) + `raw(g,p,depth,types?) → Promise<ForeignRow[]>` (federation hop, **depth
+  MANDATORY**). This is what crosses ANY boundary — a Cloudflare Worker→DO RPC is inherently async,
+  so a cross-DO adapter offers exactly this. It's what `GraphManager.executor(id)` returns and what
+  `FederationSource` needs.
+- **`Executor extends RemoteExecutor`** — adds the SYNC fast path: `framed(g,p,types?) → Framed[]`
+  and `buffers(g,p,types?) → Buffer[]`. A non-federated traversal is ONE SQL statement that never
+  suspends, so it pays NO async tax; the sync methods THROW on a barrier ("use framedAsync") —
+  fail-closed. Sync needs a LOCAL store, so only the in-process impl (`execute.ts` `Executor`)
+  offers them; a cross-RPC adapter does not.
+
+`storage.ts` / `manager.ts` re-export their seams from `api.ts`. The compiler-coupled service
+**SPI** (`Service`/`Contribution`/`ServiceCallCtx`/`CallSpec`/`CallParams`) deliberately stays in
+`services/types.ts` (it imports `Stream`/`Query`/`CompileScope`); api.ts is the outer *API*, that
+is the *SPI*.
+
+## Execution — a per-graph `Executor` (NOT an `executeFramed` orchestrator)
+
+`Executor` (`execute.ts`) is bound at construction to `(store, registry, source: FederationSource)`
+— one per graph. The free `executeQuery`/`executeFramed`/`rawQuery`/`runPlan` functions are **all
+deleted**. Private `drive()` is the one async segment loop (compilePlan → while segment: read head
+→ await `apply(source)` → resume); private `runSync()` compiles and rejects a barrier. Both share
+`compilePlan` + the framing tail; only the await-loop differs. `segment.ts` is TYPES ONLY now
+(`Plan`/`SegmentPlan`/`FederationSource`) — the loop moved onto the Executor (it needs the store +
+source, which are `this`).
+
+## DI — single source, no scattered defaults
+
+- **`GraphManager.executor(id)` IS the executor factory AND the federation source** (a sibling is
+  just another graph it resolves by id). **`ServiceEnv` is DELETED** — federation's "run raw on
+  sibling id" is `source.executor(siblingId).raw(g,p,depth)`, where `source` is the manager,
+  threaded to the barrier `apply(rows, params, source, depth)` at execution time.
+- **Two registries** (`standard.ts`), both plain CONSTANTS (no `(env)` factory — the source is
+  threaded at execution time, not baked in): `standardRegistry` (the 3 reference TinkerPop
+  services, reference-exact) and `extendedRegistry` (+ `federateService`).
+- **The registry is INJECTED at manager construction, no default:** `new BunGraphManager(dir,
+  registry)` — `bun/server.ts` injects `extendedRegistry`, the L3 conformance host injects
+  `standardRegistry` (so `--list` stays reference-exact and `g_call`/`g_callXlistX` stay green),
+  the CF DO uses `extendedRegistry`. Change the registry in ONE place. No `= EMPTY_REGISTRY`/`env?`
+  defaults down the call chain.
+- **`federationDepth`** rides `CompileOptions` beside `registry` (captured at compile into the
+  barrier's apply closure); `guardFederationDepth` enforces `MAX_FEDERATION_DEPTH`
+  (`federation-depth.ts`). Each hop `depth+1`, guarded before the sibling call.
+
+## The federated service + transfer
+
+- `src/services/federate.ts` — `mogwai.graph.federate` (barrier). Source form: runs a rooted
+  sub-traversal on the sibling via `source.executor(graph).raw(subGremlin, {}, depth+1)`, returns
+  detached rows.
+- `traversal` param: a nested `__.V()…` traversal, serialized to a canonical rooted Gremlin string
+  by the client's `Translator.CANONICAL` (reused, no hand-rolled un-parser — `traversal-param.ts`),
+  swapping the anonymous `__` root for `g`. Unrooted → fail closed. A bare Gremlin string is also
+  accepted.
+- **Detached elements** land via `ForeignStream` (`steps/foreign.ts`) — a DISTINCT stream kind, so
+  movement StepFns (which only see `ElementStream`) structurally never receive one → local movement
+  over a detached ref fails closed by construction. `id()`/`label()`/`values()` read the landed
+  VALUES-CTE columns with no local-table join; root framing reuses the vertex/edge Shape.
+- **Raw-row internal transfer** (no GraphBinary DO↔DO / in-process) confirmed as designed.
+
+## Cloudflare parity + tests
+
+- CF (`worker.ts`): the DO exposes `framed`/`raw` RPCs running its own in-DO `Executor` (source =
+  a `CloudflareGraphManager(this.env.GRAPH)` reaching sibling DOs); the Worker-side
+  `CloudflareGraphManager.executor(id)` returns a `RemoteExecutor` adapter over those RPCs. **Wired,
+  not yet tested against the DO harness** (part of the remaining CF-parity task).
+- Tests: `test/support/executor.ts` is the ONE fixture (sync `executeQuery`/`executeFramed`
+  drop-ins + `exec(store,reg?)`). Real two-graph federation in `test/federation.test.ts`;
+  Executor-drive-in-isolation (stub source) in `services.test.ts`; `ForeignStream` in isolation in
+  `foreign.test.ts`. 710 pass, tsc clean, L3 held at 1252.
+
+## Still remaining
+
+- **6b — mid-traversal `V().call(federate)`**: per-parent ordinal rejoin. `pushChildScope` mints
+  the ordinal; `head` projects each parent's id+ordinal; `apply` stamps the ordinal onto each
+  foreign row; `resume` LEFT JOINs the landed rows onto `frame.domain` on the ordinal (preserving
+  path()/as()), then `lowerSteps` continues `restSteps`. The `head`/`readSegmentHead`/`ordinal`
+  plumbing is already in place; today mid-traversal fails closed with a clear deferral.
+- **CF parity test** (mirror `federation.test.ts` on the DO harness) + **L3 re-record/docs sync** +
+  **feature-support-matrix** row for `call`/federation.
