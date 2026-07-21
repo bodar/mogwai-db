@@ -171,9 +171,19 @@ describe('call/with fold + param resolution', () => {
       .toEqual({ direction: { direction: 'out' } });
   });
 
-  test('a non-constant param-value traversal fails closed', () => {
-    expect(() => spec('g.call("tinker.search").with("search", __.out().values("name"))'))
-      .toThrow(/not yet supported/);
+  test('an unrooted nested-traversal param value fails closed (must be source-rooted)', () => {
+    // A nested traversal as a param VALUE is a sub-traversal (federate's `traversal`): it
+    // serializes to a rooted Gremlin string. An unrooted body (__.out()…) cannot become a
+    // valid g.-rooted query, so it fails closed — no silent guessed source.
+    expect(() => spec('g.call("mogwai.graph.federate").with("traversal", __.out().values("name"))'))
+      .toThrow(/source-rooted/);
+  });
+
+  test('a rooted nested-traversal param value serializes to a canonical Gremlin string', () => {
+    const s = spec('g.call("mogwai.graph.federate").with("graph", "orders").with("traversal", __.V().has("age", gt(30)))');
+    expect(s.serviceName).toBe('mogwai.graph.federate');
+    expect(s.params.graph).toBe('orders');
+    expect(s.params.traversal).toEqual({ kind: 'traversal', gremlin: 'g.V().has("age", P.gt(30))' });
   });
 });
 

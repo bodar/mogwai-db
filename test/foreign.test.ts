@@ -3,6 +3,8 @@ import { Query } from '../src/q.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { landForeignElements } from '../src/steps/foreign.ts';
+import { rawQuery, executeQuery } from '../src/execute.ts';
+import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { lowerSteps } from '../src/steps/index.ts';
 import { materializeFinal } from '../src/steps/materialize.ts';
 import { normalize } from '../src/strategies.ts';
@@ -94,6 +96,42 @@ describe('foreign read tail (no local join)', () => {
   test('edge values(k) reads the single-node edge prop', () => {
     const { rows } = landAndRun([erow(9, 'created', 1, 2, { weight: 1 })], 'edge', ".values('weight')");
     expect(rows.map((r) => r.v)).toEqual([1]);
+  });
+});
+
+describe('rawQuery — the internal raw-row transfer (no GraphBinary)', () => {
+  const seeded = new GraphStore(new BunSqlite(':memory:'));
+  for (const g of MODERN_SEED) executeQuery(seeded, g, {});
+
+  test('g.V() returns detached vertex rows with decoded props', () => {
+    const rows = rawQuery(seeded, 'g.V()', {});
+    expect(rows.every((r) => r.kind === 'vertex')).toBe(true);
+    const marko = rows.find((r) => (r.props as any).name?.[0]?.v === 'marko')!;
+    expect(marko.label).toBe('person');
+    expect((marko.props as any).age?.[0]?.v).toBe(29);
+  });
+
+  test('g.E() returns detached edge rows with src/tgt and props', () => {
+    const rows = rawQuery(seeded, 'g.E()', {});
+    expect(rows.every((r) => r.kind === 'edge')).toBe(true);
+    const r0 = rows[0] as Extract<ForeignRow, { kind: 'edge' }>;
+    expect(r0.src).toBeDefined();
+    expect(r0.tgt).toBeDefined();
+  });
+
+  test('a filtered/moved traversal still yields elements', () => {
+    const rows = rawQuery(seeded, "g.V().has('name','marko').out('knows')", {});
+    expect(rows.length).toBe(2); // marko knows vadas + josh
+    expect(rows.every((r) => r.kind === 'vertex')).toBe(true);
+  });
+
+  test('a non-element terminal fails closed (detached ELEMENT references only)', () => {
+    expect(() => rawQuery(seeded, "g.V().values('name')", {})).toThrow(/must yield vertices or edges/);
+    expect(() => rawQuery(seeded, 'g.V().count()', {})).toThrow(/must yield vertices or edges/);
+  });
+
+  test('a write fails closed', () => {
+    expect(() => rawQuery(seeded, "g.addV('x')", {})).toThrow(/must be a read/);
   });
 });
 

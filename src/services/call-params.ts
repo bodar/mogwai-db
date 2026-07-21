@@ -2,6 +2,29 @@ import { stepChain, isNested } from '../frontend.ts';
 import type { PStep } from '../strategies.ts';
 import { DIRECTORY_SERVICE_NAME } from './types.ts';
 import type { CallSpec, CallParams } from './types.ts';
+import { nestedTraversalToGremlin } from './traversal-param.ts';
+
+/** A call() param VALUE that is a nested traversal (`.with('traversal', __.V().out('x'))` or a
+ *  map entry), already serialized to a canonical rooted Gremlin string. Distinct from a plain
+ *  string so a service that expects a sub-traversal (mogwai.graph.federate) can tell it apart
+ *  from a literal string param, and a service that does NOT expect one can reject it rather than
+ *  silently mis-reading a serialized traversal as text. Kept generic (any service *could* take a
+ *  traversal param) — the resolver never hardcodes a service name. */
+export interface TraversalParam { readonly kind: 'traversal'; readonly gremlin: string; }
+export const isTraversalParam = (v: unknown): v is TraversalParam =>
+  v != null && typeof v === 'object' && (v as any).kind === 'traversal';
+
+/** Resolve a nested traversal used as a param VALUE. `__.constant(literal)` folds to its constant
+ *  (Phases 1-5 behavior, unchanged). ANY OTHER nested traversal serializes to a rooted Gremlin
+ *  string wrapped as a TraversalParam — the sub-traversal a barrier service (federate) runs
+ *  elsewhere. Serialization is verbatim structural (no execution), so a non-source-rooted body
+ *  fails closed inside nestedTraversalToGremlin. */
+function resolveValueTraversal(nested: any, params: Record<string, any>): unknown {
+  const body = stepChain(nested, params);
+  if (body.length === 1 && body[0].name === 'constant' && body[0].args.length === 1)
+    return body[0].args[0];
+  return { kind: 'traversal', gremlin: nestedTraversalToGremlin(nested) } satisfies TraversalParam;
+}
 
 // ---------- call() spec + param resolution ----------
 //
@@ -63,14 +86,17 @@ export function parseCallSpec(step: PStep, params: Record<string, any>): CallSpe
   const mapArg = rest.find((a) => a instanceof Map) as Map<any, any> | undefined;
   const travArg = rest.find((a) => isNested(a)) as { nested: any } | undefined;
   if (mapArg) {
-    for (const [k, v] of mapArg) merged[String(k)] = v;
+    // A map value may itself be a nested sub-traversal (federate's `traversal`) — resolve it
+    // the same way a .with() value is (constant fold or serialize), so both param-source forms
+    // agree; a plain value passes through.
+    for (const [k, v] of mapArg) merged[String(k)] = isNested(v) ? resolveValueTraversal(v.nested, params) : v;
   } else if (travArg) {
     Object.assign(merged, constMapFromTraversal(travArg.nested, params));
   }
 
   // Source 5: .with(k, v) pairs layer on top (with() wins over the call-arg map).
   for (const [k, v] of step.withArgs ?? []) {
-    merged[k] = isNested(v) ? constFromValueTraversal(v.nested, params) : v;
+    merged[k] = isNested(v) ? resolveValueTraversal(v.nested, params) : v;
   }
 
   return { serviceName, params: merged };

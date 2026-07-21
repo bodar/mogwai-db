@@ -1,7 +1,7 @@
 import { compile, type ListOf, type MapEntry, type MapOf, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from './compiler.ts';
 import { isCollectionType, valueNodeFromStored, type TypeNode, type ValueNode } from './gremlin-types.ts';
 import type { GraphStore } from './storage.ts';
-import type { ServiceRegistry } from './services/types.ts';
+import type { ServiceRegistry, ForeignRow } from './services/types.ts';
 import { ioc, VertexProperty, Property, t } from './io.ts';
 
 // ---- GraphBinary v4 result framing ----
@@ -592,4 +592,25 @@ export type Framed = { buf: Buffer; bulk: bigint };
  *  movementCollapse element leaf emits one row per element instead of N. */
 export function executeFramed(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}, registry?: ServiceRegistry): Framed[] {
   return [...framedResults(store, gremlin, params, paramTypes, registry)];
+}
+
+/** The INTERNAL (non-GraphBinary) row-producing sibling of executeQuery — the raw-row transfer
+ *  a federated call() uses (DO↔DO / in-process), so a sibling's result crosses as decoded JS
+ *  rows and frames to GraphBinary only at the CLIENT edge (never encode→decode→re-encode; see
+ *  the 2026-07-21 federation addendum). Compile + run exactly like executeQuery, but instead of
+ *  framing, map each vertex/edge row straight to a ForeignRow (a detached reference). The
+ *  federate contract is "detached ELEMENT references," so the sibling traversal MUST end in a
+ *  vertex/edge shape — any other terminal (values/count/…) fails closed with a clear error, not
+ *  a silent different answer. `props`/`src`/`tgt` arrive already in the shape rowVertex/rowEdge
+ *  read; propsOf parses the JSON props text into the per-key {t,v}-node object ForeignRow wants. */
+export function rawQuery(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}, registry?: ServiceRegistry): ForeignRow[] {
+  const plan = compile(gremlin, params, { registry }, paramTypes);
+  if (plan.kind === 'write')
+    throw new Error('federated traversal must be a read that yields vertices or edges, not a write');
+  const rows = store.query(plan.sql, plan.binds) as any[];
+  if (plan.shape.kind === 'vertex')
+    return rows.map((r) => ({ kind: 'vertex', id: r.id, label: r.label, props: propsOf(r.props) }));
+  if (plan.shape.kind === 'edge')
+    return rows.map((r) => ({ kind: 'edge', id: r.id, label: r.label, src: r.src, tgt: r.tgt, props: propsOf(r.props) }));
+  throw new Error(`federated traversal must yield vertices or edges (detached references), not a ${plan.shape.kind} result`);
 }
