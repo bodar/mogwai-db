@@ -246,4 +246,26 @@ describe('tinker.degree.centrality — per-vertex edge count', () => {
     expect(run('g.V().call("tinker.degree.centrality")').map(Number).sort())
       .toEqual(Object.values(IN).sort());
   });
+
+  // Step 5b: a call() body inside where() is recognized as a scalar child via the generalized
+  // "lowers-to-scalar" classifier (not a hardcoded values/id/label vocabulary). The child scope
+  // is derived from the parent stream so the service reduces per input vertex.
+  test('g_V_whereXcallXdcXX — where(call(dc).is(3)) keeps only IN-degree-3 vertices (lop)', () => {
+    const names = (g: string) =>
+      executeQuery(store, g, {}, {}, standardRegistry).map((b) => {
+        const v: any = dec(b);
+        return v.properties?.find((p: any) => p.label === 'name')?.value;
+      });
+    // Only `lop` has IN-degree 3 in the modern graph.
+    expect(names('g.V().where(call("tinker.degree.centrality").is(3))')).toEqual(['lop']);
+  });
+
+  test('where(call(dc).with(direction,OUT).is(3)) keeps only OUT-degree-3 vertices (marko)', () => {
+    const names = (g: string) =>
+      executeQuery(store, g, {}, {}, standardRegistry).map((b) => {
+        const v: any = dec(b);
+        return v.properties?.find((p: any) => p.label === 'name')?.value;
+      });
+    expect(names('g.V().where(call("tinker.degree.centrality").with("direction", OUT).is(3))')).toEqual(['marko']);
+  });
 });

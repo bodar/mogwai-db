@@ -40,9 +40,17 @@ export function seedCall(first: PStep, query: Query, params: Record<string, any>
 
 /** V().call(...) mid-traversal: a per-parent step. The service receives the parent
  *  ElementStream + the current CompileScope and pushes its OWN child scope (via the
- *  child-seam helpers, e.g. scopedDegreeCount) so each input vertex gets a multiset-safe
+ *  child-seam helpers, e.g. scopedMovementCount) so each input vertex gets a multiset-safe
  *  ordinal — exactly like a count()-child. tinker.degree.centrality reduces to a scalar
- *  per input. */
+ *  per input.
+ *
+ *  Scope is stream-carried, not a lowerSteps parameter (see child.ts). The TAIL dispatch hands
+ *  a nominal ROOT_SCOPE, but when call() appears INSIDE a child body (e.g.
+ *  where(call(...).is(3))) the parent stream already carries the outer ordinal(s) in
+ *  `carried.origins`; the service's pushChildScope reads those and mints a frame NESTED under
+ *  them (they are preserved in the seed's carried), so the scoped reducer emits one scalar per
+ *  outer origin. The scoped reducer keys on the innermost frame only, so the frames array the
+ *  nominal scope carries need not enumerate the outer frames — the nesting rides the carry. */
 export function lowerCall(step: PStep, parent: ElementStream, scope: CompileScope): Stream {
   const spec = parseCallSpec(step, parent.params);
   const registry = parent.registry ?? (() => { throw new Error('call(): no service registry in scope'); })();
