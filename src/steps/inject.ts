@@ -5,7 +5,7 @@ import { flatType } from '../gremlin-types.ts';
 import { type PStep } from '../strategies.ts';
 import { type Carry } from './context.ts';
 import { toListStream, toScalarStream } from './stream.ts';
-import { lowerSteps } from './index.ts';
+import { lowerStepsStrict } from './index.ts';
 import { materializeFinal } from './materialize.ts';
 import { type Compiled, type ValueType } from '../render.ts';
 import {
@@ -100,7 +100,7 @@ export function compileInject(steps: PStep[], sackInit?: SackSpec): Compiled {
     if (sackInit) throw new Error('withSack() with a list-valued inject() not yet supported');
     const rows = steps[0].args.map((a: any[]) => q`(${jsonbArrayOf(a)})`);
     const rel = Q.cte(q`VALUES ${list(rows, ', ')}`, ['list']);
-    return materializeFinal(lowerSteps(toListStream(carry, rel, { kind: 'scalar' }), steps, 1));
+    return materializeFinal(lowerStepsStrict(toListStream(carry, rel, { kind: 'scalar' }), steps, 1));
   }
 
   // Mixed list/scalar inject remains the historical flattened representation until
@@ -120,5 +120,5 @@ export function compileInject(steps: PStep[], sackInit?: SackSpec): Compiled {
   // A bare inject (no coercion consumed, folded.at===1) of a uniform TEXT-stored literal keeps
   // its declared type so it frames correctly (e.g. a long > 2^53 as a Long, not a string).
   const as = folded.as ?? (folded.at === 1 ? bareInjectTag(steps, vals.length) : undefined);
-  return materializeFinal(lowerSteps(toScalarStream(sackCarry, rel, as), steps, folded.at));
+  return materializeFinal(lowerStepsStrict(toScalarStream(sackCarry, rel, as), steps, folded.at));
 }
