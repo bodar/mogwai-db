@@ -69,6 +69,18 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS vp_key_value ON vertex_properties(key, value)`,
   `CREATE INDEX IF NOT EXISTS vp_node_key  ON vertex_properties(node, key)`,
   `CREATE INDEX IF NOT EXISTS ep_key_value ON edge_properties(key, value)`,
+  // A single FTS5 trigram index over property TEXT, maintained in the write path (see
+  // services/fts-index.ts) — the shared substrate for tinker.search and the TextP substring
+  // predicates. `text` is the ONLY tokenized column; the rest are UNINDEXED (stored +
+  // filterable so search can scope by owner/kind and delete-by-column works). trigram +
+  // case_sensitive 0 (the default) makes `text LIKE '%sub%'` index-served AND matches
+  // TinkerPop's single-case reference graphs; the tokenizer options live INSIDE the tokenize
+  // string (a separate `case_sensitive 0` column option errors — see fts5-trigram-runtime).
+  // `pid` is a plain data column, NOT the rowid: a collection property emits one 'value' row
+  // plus N 'jsonkey'/'jsonleaf' rows sharing one pid, which would collide on rowid.
+  `CREATE VIRTUAL TABLE IF NOT EXISTS property_fts USING fts5(
+     owner_elem UNINDEXED, pid UNINDEXED, owner UNINDEXED, pk UNINDEXED, kind UNINDEXED,
+     text, tokenize="trigram case_sensitive 0")`,
 ];
 
 export class GraphStore {

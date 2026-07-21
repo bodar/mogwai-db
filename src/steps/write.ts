@@ -7,6 +7,7 @@ import { normalize, type PStep } from '../strategies.ts';
 import { readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../render.ts';
 import { buildPrefix, compileRead } from './index.ts';
 import { compileInject } from './inject.ts';
+import { indexProperty, deleteFtsFor, deleteFtsForOwners } from '../services/fts-index.ts';
 
 // ---------- nested-traversal write arguments (read spine reuse) ----------
 //
@@ -129,11 +130,16 @@ function compileDrop(steps: PStep[]): WritePlan {
       if (!ids.length) return [];
       const ph = ids.map(() => '?').join(',');
       if (isEdge) {
+        deleteFtsForOwners(store, 'edge', ids);
         store.query(`DELETE FROM edge_properties WHERE edge IN (${ph})`, ids);
         store.query(`DELETE FROM edges WHERE id IN (${ph})`, ids);
       } else {
         // Drop the incident edges' properties first (they reference the soon-deleted
         // edges), then the edges, then this vertex's own properties, then the vertex.
+        // FTS rows for both the incident edges and this vertex's own props go with them.
+        const incidentEdges = store.query<{ id: number }>(`SELECT id FROM edges WHERE src IN (${ph}) OR tgt IN (${ph})`, [...ids, ...ids]).map((r) => r.id);
+        deleteFtsForOwners(store, 'edge', incidentEdges);
+        deleteFtsForOwners(store, 'node', ids);
         store.query(`DELETE FROM edge_properties WHERE edge IN (SELECT id FROM edges WHERE src IN (${ph}) OR tgt IN (${ph}))`, [...ids, ...ids]);
         store.query(`DELETE FROM edges WHERE src IN (${ph}) OR tgt IN (${ph})`, [...ids, ...ids]);
         store.query(`DELETE FROM vertex_properties WHERE node IN (${ph})`, ids);
@@ -340,18 +346,25 @@ export function applyVertexProperty(
   const collection = isCollectionType(vtype);
   const storedVal = collection ? collectionValueJson(val, typeNode) : storedScalar(val, vtype);
   const valPh = collection ? 'jsonb(?)' : '?';
-  if (cardinality === 'single') store.query('DELETE FROM vertex_properties WHERE node=? AND key=?', [node, key]);
+  if (cardinality === 'single') {
+    // single = replace all rows for the key: drop their FTS rows too, then the rows.
+    for (const r of store.query<{ id: number }>('SELECT id FROM vertex_properties WHERE node=? AND key=?', [node, key]))
+      deleteFtsFor(store, 'node', r.id);
+    store.query('DELETE FROM vertex_properties WHERE node=? AND key=?', [node, key]);
+  }
   if (cardinality === 'set') {
     const existing = store.query<{ id: number }>(`SELECT id FROM vertex_properties WHERE node=? AND key=? AND value=${valPh}`, [node, key, storedVal]);
     if (existing.length) {
+      // An equal value already exists: only meta may change (the FTS text is unchanged).
       if (metaJson !== null) store.query('UPDATE vertex_properties SET meta=jsonb(?) WHERE id=?', [metaJson, existing[0].id]);
       return;
     }
   }
-  store.query(
-    `INSERT INTO vertex_properties(node, key, value, vtype, meta) VALUES(?, ?, ${valPh}, ?, ${metaJson === null ? 'NULL' : 'jsonb(?)'})`,
+  const { id } = store.query<{ id: number }>(
+    `INSERT INTO vertex_properties(node, key, value, vtype, meta) VALUES(?, ?, ${valPh}, ?, ${metaJson === null ? 'NULL' : 'jsonb(?)'}) RETURNING id`,
     metaJson === null ? [node, key, storedVal, vtype] : [node, key, storedVal, vtype, metaJson],
-  );
+  )[0];
+  indexProperty(store, 'node', id, node, key, val, typeNode);
 }
 
 // Set ONE edge property (single cardinality — edge Property has no meta/multi). One
@@ -362,11 +375,19 @@ export function insertEdgeProperty(store: GraphStore, edge: number, key: string,
   const collection = isCollectionType(vtype);
   const storedVal = collection ? collectionValueJson(val, typeNode) : storedScalar(val, vtype);
   const valPh = collection ? 'jsonb(?)' : '?';
-  store.query(
+  // Was there already a row for (edge,key)? The UNIQUE(edge,key) index serves this cheaply.
+  // We ONLY delete stale FTS rows on a genuine overwrite — an FTS5 delete-by-UNINDEXED-column
+  // is an O(n) content scan (no index on UNINDEXED cols), so doing it on every fresh insert
+  // makes a bulk write O(n²). A first insert has nothing to delete, so it skips the scan.
+  const prior = store.query<{ id: number }>('SELECT id FROM edge_properties WHERE edge=? AND key=?', [edge, key]);
+  // UPSERT on UNIQUE(edge,key): one row per (edge,key), so id is stable across an overwrite.
+  const { id } = store.query<{ id: number }>(
     `INSERT INTO edge_properties(edge, key, value, vtype) VALUES(?, ?, ${valPh}, ?)
-     ON CONFLICT(edge, key) DO UPDATE SET value=excluded.value, vtype=excluded.vtype`,
+     ON CONFLICT(edge, key) DO UPDATE SET value=excluded.value, vtype=excluded.vtype RETURNING id`,
     [edge, key, storedVal, vtype],
-  );
+  )[0];
+  if (prior.length) deleteFtsFor(store, 'edge', id); // overwrite: drop the stale FTS text first
+  indexProperty(store, 'edge', id, edge, key, val, typeNode);
 }
 
 // Read an edge's properties back as a flat {key:value} bag for a write response
