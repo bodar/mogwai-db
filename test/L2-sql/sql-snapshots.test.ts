@@ -1526,6 +1526,24 @@ describe('compiler SQL snapshots', () => {
       .toContain('LEFT JOIN');
   });
 
+  test('tinker.search: a source PropertyStream backed by the property_fts trigram index', () => {
+    const store = seededStore();
+    const withReg: CompileOptions = { registry: standardRegistry };
+    // g.call("tinker.search",{search:"mar"}).element() → the matched properties' owner vertices.
+    // The SQL selects from property_fts (kind='value', a case-insensitive LIKE %term%) and joins
+    // back to vertex_properties + nodes + labels for the full PropertyStream payload.
+    const sql = read('g.call("tinker.search", ["search": "mar"]).element()', withReg).sql;
+    expect(sql).toContain('property_fts');
+    expect(sql).toContain("LIKE");            // substring match through the trigram index
+    expect(sql).toContain("ESCAPE");          // metachars in the user term are escaped
+    // element() walks each matched property to its owner (marko), reusing the propertyElement tail.
+    const names = runWith(store, 'g.call("tinker.search", ["search": "mar"]).element().values("name")', withReg) as any[];
+    expect(names.map((r) => r.v)).toEqual(['marko']);
+    // type=Edge searches edge properties (empty on the modern graph); VertexProperty → empty.
+    expect((runWith(store, 'g.call("tinker.search", ["search": "mar"]).with("type", "Edge").element()', withReg) as any[]).length).toBe(0);
+    expect((runWith(store, 'g.call("tinker.search", ["search": "mar"]).with("type", "VertexProperty").element()', withReg) as any[]).length).toBe(0);
+  });
+
   test('dedup(labels): dedup by an as()-label tuple (optional by()), composes with path()', () => {
     const store = seededStore();
     // partition by the labels' current values; carried state (path/aliases) rides through.
