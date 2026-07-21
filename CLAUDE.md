@@ -171,6 +171,47 @@ no materialized generic fallback) — but it is NOT debt: it correlates through 
 seam above.) Do not add a new fast-path switch without its generic fallback + equivalence
 test + perf evidence in the same change.
 
+## call() + the Service Registry (`src/services/`)
+
+`call()` is the extensibility seam. A `Service` registers into a `ServiceRegistry` (a
+per-runtime DI seam, sibling to `GraphManager`) and contributes to the compile. **Cycle-free
+structure — do not collapse:** `types.ts` (interfaces + `DIRECTORY_SERVICE_NAME`, a
+dependency-free leaf) ◂ `registry.ts` (cycle-free mechanism: `createRegistry`/`EMPTY_REGISTRY`,
+what the compiler core imports for its default) ◂ `standard.ts` (`standardRegistry`, imports the
+service impls → reached ONLY by the DI layer / entry points, NEVER the compiler core — this breaks
+the fast-paths→registry→directory→steps cycle). The registry rides on `Carry`/`CompileOptions`
+beside `fastPaths`; production injects `standardRegistry` at the store tier (`executeFramed`), a
+call() with no registry throws "unknown service". A `Contribution` is `'stream'` (pure, inline
+SQL — all of Phases 1–5) or `'barrier'` (async/federated, Phase 6 — variant present so the seam is
+additive, executor throws a deferral). `g.call(…)` is `seedCall` (a peer of `seedSource`, returns
+whatever `Stream` shape the service yields); `V().call(…)` is `lowerCall` (pushes a child scope).
+No new orchestrator — services build through the ordinary q-kernel + stream constructors and the
+generic `lowerSteps`/`materializeFinal` takes over. Standard services keep TinkerPop's canonical
+names (`--list`, `tinker.search`, `tinker.degree.centrality`); our own extensions would be
+`mogwai.*`. See `docs/2026-07-20-call-service-registry-plan.md`.
+
+## Full-text search — `property_fts` (`src/services/fts-index.ts`)
+
+A single FTS5 **trigram** virtual table (`tokenize="trigram case_sensitive 0"` — options go INSIDE
+the tokenize string) is the shared index behind `tinker.search` AND the TextP substring predicates.
+Maintained in the **write path** (`applyVertexProperty`/`insertEdgeProperty`/`compileDrop`), NOT
+triggers — the stored `{t,v}` ValueNode tree needs app awareness. The indexer walks the in-memory
+tree (no `json_tree`, no tag noise) emitting one `kind='value'` row (the logical `toString()`, what
+`tinker.search`/TextP match) + `kind='jsonkey'`/`'jsonleaf'` rows for nested collection content.
+Substring matching is **case-insensitive** (a documented divergence — it is what lets the trigram
+index serve `LIKE`; `regex` stays deferred, no index-only path, never JS-filtered).
+- **PERF TRAP (cost a debug cycle): an FTS5 `DELETE` by an `UNINDEXED` column is an O(n) content
+  scan** (UNINDEXED cols aren't indexed). An unconditional per-property-write delete makes a bulk
+  write O(n²) (the grateful-dead seed 743ms→5020ms, blowing the conformance host's 5s `beforeAll`).
+  Delete FTS rows ONLY on a genuine overwrite — vertex single-cardinality already probes existing
+  rows (empty on a fresh insert); edge UPSERT does a cheap `UNIQUE(edge,key)`-served prior probe.
+  Never put an unconditional FTS delete on a per-property write path.
+- The TextP fast path (`ftsSubstringPredicate`, `plan.ts`) routes a ≥3-char POSITIVE
+  `containing`/`startingWith`/`endingWith` over a STORED property through the index (MATCH prefilter
+  + the existing `LIKE` as a position confirm), opt-in ONLY at the `has()` choke point (`filter.ts`,
+  which has `st.fastPaths`). Generic `LIKE` stays the semantic authority + equivalence fallback;
+  `<3`-char / `not*` / computed-scalar / injected-list all stay on `LIKE` (NOT fail-closed).
+
 ## Management API + runtime parity
 
 Whole-graph lifecycle is a thin REST layer on the same `/gremlin/{g}` path, **identical
