@@ -23,6 +23,7 @@ import { ioc } from '../../src/io.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { CREW_SEED } from '../fixtures/seed-crew.ts';
 import { BigDecimal, Duration } from '../../src/gremlin-types.ts';
+import { standardRegistry } from '../../src/services/standard.ts';
 
 // A vertex carrying one property of each type our extended GraphBinary serializers cover, so a
 // `Given the typed graph` scenario can read each back and exercise serialize+decode end-to-end.
@@ -39,6 +40,14 @@ const TYPED_SEED = [
 // graphs), so is(typeOf(GType.MAP)) → MapStream retype scenarios can read it back end-to-end.
 const MAPDATA_SEED = [
   'g.addV("data").property("name", "test").property("m", ["a": 1, "b": 2, "c": 3])',
+];
+
+// A graph exercising tinker.search over collection + nested-JSON property values, so the
+// ValueNode-aware write-path indexer (Step 6) is proven end-to-end: a list value matches via
+// its toString AND via an element; a nested map value matches via a nested key/leaf.
+const SEARCH_SEED = [
+  'g.addV("doc").property("title", "chapter one").property("tags", ["brave", "bold"])',
+  'g.addV("doc").property("title", "chapter two").property("addr", ["city": "london", "zone": "central"])',
 ];
 
 const ADDENDUM = new URL('./', import.meta.url).pathname;
@@ -150,7 +159,7 @@ function canon(v: unknown): string {
   return 'J' + JSON.stringify(v);
 }
 
-const GRAPHS: Record<string, readonly string[]> = { modern: MODERN_SEED, crew: CREW_SEED, typed: TYPED_SEED, mapdata: MAPDATA_SEED, empty: [] };
+const GRAPHS: Record<string, readonly string[]> = { modern: MODERN_SEED, crew: CREW_SEED, typed: TYPED_SEED, mapdata: MAPDATA_SEED, search: SEARCH_SEED, empty: [] };
 
 function loadScenarios(): Scenario[] {
   return readdirSync(ADDENDUM)
@@ -167,7 +176,9 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
       if (!(s.graph in GRAPHS)) throw new Error(`unknown graph '${s.graph}' (add its seed to GRAPHS)`);
       const store = new GraphStore(new BunSqlite(':memory:'));
       for (const w of GRAPHS[s.graph]) executeQuery(store, w, {});
-      const decoded = executeQuery(store, s.gremlin, {}).map((b: Buffer) => ioc.anySerializer.deserialize(b, true).v);
+      // The standard service registry is injected so call() scenarios (tinker.search / degree)
+      // resolve; a non-call scenario is unaffected (it never looks a service up).
+      const decoded = executeQuery(store, s.gremlin, {}, {}, standardRegistry).map((b: Buffer) => ioc.anySerializer.deserialize(b, true).v);
       const got = decoded.map(canon).sort();
       const want = s.expected.map(expectedCanon).sort();
       expect(got).toEqual(want);
