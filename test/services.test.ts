@@ -1,10 +1,16 @@
 import { test, expect, describe } from 'bun:test';
-import { createRegistry, defaultRegistry, DIRECTORY_SERVICE_NAME } from '../src/services/registry.ts';
-import type { Service } from '../src/services/types.ts';
+import { createRegistry, EMPTY_REGISTRY } from '../src/services/registry.ts';
+import { standardRegistry } from '../src/services/standard.ts';
+import { directoryService } from '../src/services/directory.ts';
+import { DIRECTORY_SERVICE_NAME, type Service, type ServiceRegistry } from '../src/services/types.ts';
 import { parseGremlin, stepChain } from '../src/frontend.ts';
 import { normalize } from '../src/strategies.ts';
 import { parseCallSpec } from '../src/services/call-params.ts';
 import { compile } from '../src/compiler.ts';
+import { GraphStore } from '../src/storage.ts';
+import { BunSqlite } from '../src/bun/BunSqlite.ts';
+import { executeQuery } from '../src/execute.ts';
+import { ioc } from '../src/io.ts';
 
 /** Parse a gremlin string, normalize, and return the (single) folded call PStep. */
 const callStep = (gremlin: string, params: Record<string, any> = {}) => {
@@ -44,8 +50,15 @@ describe('ServiceRegistry', () => {
     expect(r.get(DIRECTORY_SERVICE_NAME)?.name).toBe(DIRECTORY_SERVICE_NAME);
   });
 
-  test('defaultRegistry exists and is enumerable (empty until services land)', () => {
-    expect(Array.isArray(defaultRegistry.list())).toBe(true);
+  test('EMPTY_REGISTRY is the cycle-free compiler default (no services)', () => {
+    expect(EMPTY_REGISTRY.list()).toEqual([]);
+    expect(EMPTY_REGISTRY.get('--list')).toBeUndefined();
+  });
+
+  test('standardRegistry lists the DirectoryService-excluded standard services', () => {
+    // --list itself is registered but excluded from list(); as more services land they
+    // appear here. It is always resolvable by name.
+    expect(standardRegistry.get('--list')?.name).toBe('--list');
   });
 });
 
@@ -136,5 +149,54 @@ describe('call() routing (seedCall)', () => {
     const reg = createRegistry([federate]);
     expect(() => compile('g.call("mogwai.graph.federate")', {}, { registry: reg }))
       .toThrow(/barrier\/async services are not yet supported/);
+  });
+});
+
+describe('--list (DirectoryService) — end to end over GraphBinary', () => {
+  // Register the real directoryService alongside stubs for the OTHER standard services, so
+  // --list enumerates realistic names (the actual tinker.* services land in later steps; the
+  // directory doesn't care what they do, only that they're registered).
+  const reg: ServiceRegistry = createRegistry([
+    directoryService, stubService('tinker.search'), stubService('tinker.degree.centrality'),
+  ]);
+  const store = new GraphStore(new BunSqlite(':memory:'));
+  const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v as string;
+  const run = (g: string, params: Record<string, any> = {}) =>
+    executeQuery(store, g, params, {}, reg).map(dec);
+
+  test('g_call — bare g.call() lists every service (directory excluded)', () => {
+    expect(run('g.call()').sort()).toEqual(['tinker.degree.centrality', 'tinker.search']);
+  });
+
+  test('g_callXlistX — explicit "--list" lists every service', () => {
+    expect(run('g.call("--list")').sort()).toEqual(['tinker.degree.centrality', 'tinker.search']);
+  });
+
+  test('g_callXlistX_withXstring_stringX — .with(service, name) filters', () => {
+    expect(run('g.call("--list").with("service", "tinker.search")')).toEqual(['tinker.search']);
+  });
+
+  test('g_callXlistX_withXstring_traversalX — .with(service, __.constant(name)) filters', () => {
+    expect(run('g.call("--list").with("service", __.constant("tinker.search"))')).toEqual(['tinker.search']);
+  });
+
+  test('g_callXlist_mapX — a map param filters', () => {
+    expect(run('g.call("--list", xx1)', { xx1: new Map([['service', 'tinker.search']]) }))
+      .toEqual(['tinker.search']);
+  });
+
+  test('g_callXlist_traversalX — a __.project(service).by(__.constant(name)) param filters', () => {
+    expect(run('g.call("--list", __.project("service").by(__.constant("tinker.search")))'))
+      .toEqual(['tinker.search']);
+  });
+
+  test('g_callXlist_map_traversalX — map wins when both given', () => {
+    expect(run('g.call("--list", xx1, __.project("service").by(__.constant("tinker.search")))',
+      { xx1: new Map([['service', 'tinker.search']]) })).toEqual(['tinker.search']);
+  });
+
+  test('verbose → a JSON describe blob per service', () => {
+    const [blob] = run('g.call("--list").with("service", "tinker.search").with("verbose", true)');
+    expect(JSON.parse(blob)).toMatchObject({ name: 'tinker.search', type: 'start' });
   });
 });

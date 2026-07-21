@@ -4,6 +4,7 @@ import { GraphStore } from '../storage.ts';
 import { application } from '../application.ts';
 import { type GraphManager, type GraphInfo, graphInfo } from '../manager.ts';
 import { executeFramed, type Framed } from '../execute.ts';
+import { standardRegistry } from '../services/standard.ts';
 import { DurableObjectSqlite } from './DurableObjectSqlite.ts';
 
 export interface Env {
@@ -55,7 +56,11 @@ export class GraphDatabase extends DurableObject<Env> {
    *  more than the fetch path did. */
   query(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Framed[] {
     this.ensureLive();
-    return executeFramed(this.store, gremlin, params, paramTypes);
+    // The call() service registry is resolved here in the store tier (where executeFramed
+    // runs), not passed across the Worker→DO RPC boundary. Phase-1-5 services are pure SQL
+    // with no env, so standardRegistry suffices; Phase 6's federated service will build a
+    // registry from this DO's own `env`.
+    return executeFramed(this.store, gremlin, params, paramTypes, standardRegistry);
   }
 
   // ---- lifecycle RPC (called by CloudflareGraphManager) ----

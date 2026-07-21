@@ -22,7 +22,7 @@ import { assertStreamColumns, continueLowering, type LoweringResult, type Stream
 import { type Compiled } from '../render.ts';
 import { tryBulkRepeat } from './bulk.ts';
 import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../fast-paths.ts';
-import { defaultRegistry } from '../services/registry.ts';
+import { EMPTY_REGISTRY } from '../services/registry.ts';
 import type { ServiceRegistry } from '../services/types.ts';
 import { lowerScalarRows } from './scalar.ts';
 import { seedCall } from './call.ts';
@@ -159,7 +159,7 @@ function chainCollapseSafe(steps: PStep[]): boolean {
 /** Seed the source CTE (c0) from V(...)/E(...) and its optional id list. When the
  *  chain tracks a path, the source element is path position p0 (projected as the
  *  extra `p0` column). */
-function seedSource(first: PStep, query: Query, params: Record<string, any>, trackPath: boolean, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, wantsEncounter = false, registry: ServiceRegistry = defaultRegistry): ElementStream {
+function seedSource(first: PStep, query: Query, params: Record<string, any>, trackPath: boolean, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, wantsEncounter = false, registry: ServiceRegistry = EMPTY_REGISTRY): ElementStream {
   const elem: Elem = first.name === 'E' ? 'edge' : 'node';
   const srcRel = elem === 'edge' ? edges : nodes;
   // The source projection, assembled in carriedCols order (sack, bulk, encounter, path) so the
@@ -201,7 +201,7 @@ function seedSource(first: PStep, query: Query, params: Record<string, any>, tra
  *  into one seed. Branches must be vertex-rooted prefixes with no leftover tail or
  *  as() (those defer); the shared-Query recursion also lets a branch be a nested
  *  union. This is the reusable sub-traversal-into-query seam local/map/choose build on. */
-function seedUnion(first: PStep, query: Query, params: Record<string, any>, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, wantsEncounter = false, registry: ServiceRegistry = defaultRegistry): ElementStream {
+function seedUnion(first: PStep, query: Query, params: Record<string, any>, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, wantsEncounter = false, registry: ServiceRegistry = EMPTY_REGISTRY): ElementStream {
   if (sackInit) throw new Error('withSack() with a union() source not yet supported');
   if (wantsEncounter) throw new Error('emission-order encounter over a union() source not yet supported');
   const branches = first.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
@@ -309,7 +309,7 @@ export function tryLowerElementSteps(steps: PStep[], seed: ElementStream): Eleme
   return lowered.next === steps.length ? lowered.stream : null;
 }
 
-export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, query: Query = new Query(), sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, wantsEncounter = false, registry: ServiceRegistry = defaultRegistry): { st: ElementStream; stop: number } {
+export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, query: Query = new Query(), sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, wantsEncounter = false, registry: ServiceRegistry = EMPTY_REGISTRY): { st: ElementStream; stop: number } {
   const first = steps[0];
   const trackPath = chainTracksPath(steps);
   const seeded = first.name === 'union' ? seedUnion(first, query, params, sackInit, fastPaths, wantsEncounter, registry)
@@ -405,7 +405,7 @@ export function lowerSteps(initial: Stream, steps: PStep[], from: number): Strea
 
 /** A read traversal: prefix fold + shaped lowering loop.
  *  `sackInit` (from withSack()) seeds the carried sack column at the source. */
-export function compileRead(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, registry: ServiceRegistry = defaultRegistry): Compiled {
+export function compileRead(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, registry: ServiceRegistry = EMPTY_REGISTRY): Compiled {
   // call() as a SOURCE (g.call(...)): the service seeds the initial Stream (of whatever
   // shape it produces — a list of names, a Property stream), and the generic shaped
   // lowering loop takes over from step 1. A peer of the buildPrefix (V/E/union) path, not
