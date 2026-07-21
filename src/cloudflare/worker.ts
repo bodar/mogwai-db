@@ -54,12 +54,12 @@ export class GraphDatabase extends DurableObject<Env> {
    *  of the storage tier and avoids re-parsing GraphBinary here. The row array is
    *  drained up front regardless (a DO cursor can't cross awaits), so this holds no
    *  more than the fetch path did. */
-  query(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Framed[] {
+  async query(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<Framed[]> {
     this.ensureLive();
     // The call() service registry is resolved here in the store tier (where executeFramed
     // runs), not passed across the Worker→DO RPC boundary. Phase-1-5 services are pure SQL
-    // with no env, so standardRegistry suffices; Phase 6's federated service will build a
-    // registry from this DO's own `env`.
+    // with no env, so standardRegistry suffices; Phase 6's federated service builds a registry
+    // from this DO's own `env` — wired in the CF-parity step (a sibling-DO federation env).
     return executeFramed(this.store, gremlin, params, paramTypes, standardRegistry);
   }
 

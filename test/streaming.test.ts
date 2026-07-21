@@ -37,7 +37,7 @@ async function drainChunks(res: Response): Promise<{ chunks: Buffer[]; buf: Buff
 
 describe('C — streamBuffers chunk pacing', () => {
   test('batchSize paces the chunks; every batchSize reassembles to the same frame', async () => {
-    const buffers = executeFramed(seededStore(), 'g.V()', {});
+    const buffers = await executeFramed(seededStore(), 'g.V()', {});
     const big = await drainChunks(streamBuffers(buffers, 64));   // whole result in fewest chunks
     const small = await drainChunks(streamBuffers(buffers, 1));  // same 6 vertices, more chunks
 
@@ -56,7 +56,7 @@ describe('C — streamBuffers chunk pacing', () => {
   });
 
   test('bulked frame: header byte 0x01 + a Long multiplicity per value; client decodes Traversers', async () => {
-    const buffers = executeFramed(seededStore(), 'g.V()', {});
+    const buffers = await executeFramed(seededStore(), 'g.V()', {});
     const flat = await drainChunks(streamBuffers(buffers, 64, false));
     const bulked = await drainChunks(streamBuffers(buffers, 64, true));
 
@@ -81,7 +81,7 @@ describe('C — streamBuffers chunk pacing', () => {
     const store = seededStore();
     // both().both() reaches several vertices via many walks; collapse merges each into ONE
     // (v, bulk) row instead of `bulk` duplicate vertex buffers.
-    const framed = executeFramed(store, 'g.V().both().both()', {});
+    const framed = await executeFramed(store, 'g.V().both().both()', {});
     const multiset = executeQuery(store, 'g.V().both().both()', {}).length; // the fully expanded count
     const { buf } = await drainChunks(streamBuffers(framed, 64, true));
     const parsed = ioc.graphBinaryReader.readResponse(buf);
@@ -95,12 +95,12 @@ describe('C — streamBuffers chunk pacing', () => {
   });
 
   test('6 vertices at batch=2 ⇒ header + 3 value-batches + trailer = 5 discrete chunks', async () => {
-    const { chunks } = await drainChunks(streamBuffers(executeFramed(seededStore(), 'g.V()', {}), 2));
+    const { chunks } = await drainChunks(streamBuffers(await executeFramed(seededStore(), 'g.V()', {}), 2));
     expect(chunks.length).toBe(5);
   });
 
   test('empty result streams a bare header + 200 trailer (no values)', async () => {
-    const buffers = executeFramed(seededStore(), "g.V().hasLabel('nonesuch')", {});
+    const buffers = await executeFramed(seededStore(), "g.V().hasLabel('nonesuch')", {});
     expect(buffers.length).toBe(0);
     const { chunks, buf } = await drainChunks(streamBuffers(buffers, 64));
     const parsed = ioc.graphBinaryReader.readResponse(buf);
@@ -111,7 +111,7 @@ describe('C — streamBuffers chunk pacing', () => {
   });
 
   test('cancel() mid-read stops the stream (client disconnect): no further values, no throw', async () => {
-    const res = streamBuffers(executeFramed(seededStore(), 'g.V()', {}), 1);
+    const res = streamBuffers(await executeFramed(seededStore(), 'g.V()', {}), 1);
     const reader = res.body!.getReader();
     const header = await reader.read(); // pull the header (first chunk)
     expect(Buffer.from(header.value!)).toEqual(Buffer.from([0x84, 0x00]));

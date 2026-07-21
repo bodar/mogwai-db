@@ -4,6 +4,7 @@ import { applyStrategies, normalize } from './strategies.ts';
 import { compileRead } from './steps/index.ts';
 import { routeWrite } from './steps/write.ts';
 import { type Compiled, type WritePlan } from './render.ts';
+import { type Plan } from './segment.ts';
 import { resolveFastPaths, resolveRegistry, type CompileOptions } from './fast-paths.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
 export type { Compiled, WritePlan, Shape, ValueType, ListOf, MapEntry, MapOf, ElemShape, GroupKey, GroupVal, PathPos } from './render.ts';
@@ -22,7 +23,19 @@ export type { CompileOptions, FastPathConfig } from './fast-paths.ts';
 // verification checks / fail-closed rejections — lives in strategies.ts
 // (extractStrategies front-end + applyStrategies). See that module's header.
 
-export function compile(gremlin: string, params: Record<string, any>, options?: CompileOptions, paramTypes: Record<string, TypeNode> = {}): Compiled | WritePlan {
+/** Apply v4 iterate()'s trailing discard: execute for effect, return nothing. Shared by the
+ *  sync (Compiled/WritePlan) and segment resume paths — a discard turns any read leaf's shape
+ *  into `discard` and empties a write's result. */
+function applyDiscard(plan: Compiled | WritePlan): Compiled | WritePlan {
+  if (plan.kind === 'write') { const inner = plan.run; return { kind: 'write', run: (s) => { inner(s); return []; } }; }
+  return { ...plan, shape: { kind: 'discard' } };
+}
+
+/** The full compile as a Plan: the ordinary synchronous case is `{kind:'sql', compiled}`; a
+ *  barrier call() at the source suspends into a SegmentPlan the executor resumes after an await
+ *  (segment.ts runPlan). Every non-barrier caller keeps using compile() below, whose type never
+ *  widened — only execute.ts's orchestrator consumes a Plan. */
+export function compilePlan(gremlin: string, params: Record<string, any>, options?: CompileOptions, paramTypes: Record<string, TypeNode> = {}): Plan {
   const tree = parseGremlin(gremlin);
   const rewritten = applyStrategies(stepChain(tree, params, paramTypes), extractStrategies(tree, params), params);
   const { steps, discard } = normalize(rewritten);
@@ -30,13 +43,25 @@ export function compile(gremlin: string, params: Record<string, any>, options?: 
 
   const sackInit = extractSack(tree, params);
   const sideEffects = extractSideEffects(tree, params);
-  const plan: Compiled | WritePlan = routeWrite(steps, params, sackInit ?? undefined, sideEffects)
-    ?? compileRead(steps, params, sackInit ?? undefined, resolveFastPaths(options), resolveRegistry(options));
+  const write = routeWrite(steps, params, sackInit ?? undefined, sideEffects);
+  if (write) return { kind: 'sql', compiled: discard ? applyDiscard(write) : write };
 
-  if (discard) {
-    // v4 iterate(): execute for effect, return nothing.
-    if (plan.kind === 'write') { const inner = plan.run; return { kind: 'write', run: (s) => { inner(s); return []; } }; }
-    return { ...plan, shape: { kind: 'discard' } };
+  const read = compileRead(steps, params, sackInit ?? undefined, resolveFastPaths(options), resolveRegistry(options));
+  if (read.kind === 'segment') {
+    // A discard trailing a federated source (g.call(...).iterate()) applies to the RESUMED leaf,
+    // so wrap resume rather than the segment itself (which carries no shape).
+    if (!discard) return read;
+    return { ...read, resume: (foreign) => {
+      const p = read.resume(foreign);
+      return p.kind === 'sql' ? { kind: 'sql', compiled: applyDiscard(p.compiled) } : p;
+    } };
   }
-  return plan;
+  return { kind: 'sql', compiled: discard ? applyDiscard(read) : read };
+}
+
+export function compile(gremlin: string, params: Record<string, any>, options?: CompileOptions, paramTypes: Record<string, TypeNode> = {}): Compiled | WritePlan {
+  const plan = compilePlan(gremlin, params, options, paramTypes);
+  if (plan.kind === 'segment')
+    throw new Error('call(): barrier/async services require the segment executor (executeFramed); compile() cannot resolve one synchronously');
+  return plan.compiled;
 }

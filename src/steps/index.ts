@@ -25,10 +25,13 @@ import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../fast-paths.ts';
 import { EMPTY_REGISTRY } from '../services/registry.ts';
 import type { ServiceRegistry } from '../services/types.ts';
 import { lowerScalarRows } from './scalar.ts';
-import { seedCall } from './call.ts';
+import { seedCall, isBarrierPoint, type BarrierPoint } from './call.ts';
 import { materializeFinal } from './materialize.ts';
 import { compileFromVariant } from './variant.ts';
-import { compileFromForeign } from './foreign.ts';
+import { compileFromForeign, landForeignElements } from './foreign.ts';
+import type { SegmentPlan } from '../segment.ts';
+import type { ForeignRow } from '../services/types.ts';
+import type { Carry } from './context.ts';
 
 export { compileTail };
 
@@ -405,15 +408,39 @@ export function lowerSteps(initial: Stream, steps: PStep[], from: number): Strea
   }
 }
 
+/** Build a SegmentPlan from a source-form BarrierPoint. head=null (a source call() has no local
+ *  input rows to drain); apply runs the service at execution time; resume lands the awaited
+ *  ForeignRow[] as a fresh foreign root stream and lowers the rest of the chain to a Compiled.
+ *  The landed element kind is inferred from the rows (first row's kind; vertex when empty). */
+function segmentFromBarrier(bp: BarrierPoint, params: Record<string, any>, registry: ServiceRegistry): SegmentPlan {
+  return {
+    kind: 'segment',
+    head: null,
+    params: bp.params,
+    apply: bp.apply,
+    resume: (foreign: ForeignRow[]) => {
+      const carry: Carry = { q: new Query(), params, registry, carried: { aliases: new Map(), origins: [] } };
+      const elem = foreign[0]?.kind === 'edge' ? 'edge' : 'node';
+      const seed = landForeignElements(carry, foreign, elem);
+      return { kind: 'sql', compiled: materializeFinal(lowerSteps(seed, bp.restSteps, bp.restAt)) };
+    },
+  };
+}
+
 /** A read traversal: prefix fold + shaped lowering loop.
  *  `sackInit` (from withSack()) seeds the carried sack column at the source. */
-export function compileRead(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, registry: ServiceRegistry = EMPTY_REGISTRY): Compiled {
+export function compileRead(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, registry: ServiceRegistry = EMPTY_REGISTRY): Compiled | SegmentPlan {
   // call() as a SOURCE (g.call(...)): the service seeds the initial Stream (of whatever
   // shape it produces — a list of names, a Property stream), and the generic shaped
   // lowering loop takes over from step 1. A peer of the buildPrefix (V/E/union) path, not
   // inside it, because a call() source is not necessarily element-shaped.
   if (steps[0].name === 'call') {
-    const seed = seedCall(steps[0], new Query(), params, registry);
+    const seed = seedCall(steps[0], new Query(), params, registry, steps);
+    // A barrier source (Phase 6 federate): its rows come from an awaited sibling call, so the
+    // compile suspends into a SegmentPlan. resume lands the awaited ForeignRow[] as a fresh
+    // foreign root stream and finishes lowering the rest of the chain synchronously — building
+    // the lowerSteps closure HERE keeps that dependency out of call.ts (which index.ts imports).
+    if (isBarrierPoint(seed)) return segmentFromBarrier(seed, params, registry);
     return materializeFinal(lowerSteps(seed, steps, 1));
   }
 
@@ -435,4 +462,14 @@ export function compileRead(steps: PStep[], params: Record<string, any> = {}, sa
   const fp: FastPathConfig = { ...fastPaths, movementCollapse: fastPaths.movementCollapse && chainCollapseSafe(steps) && !wantsEncounter };
   const { st, stop } = buildPrefix(steps, params, new Query(), sackInit, fp, wantsEncounter, registry);
   return materializeFinal(lowerSteps(st, steps, stop));
+}
+
+/** compileRead narrowed to a synchronous Compiled — for INNER sub-traversal compiles (a
+ *  within()/all() operand, a merge match/insert body) that structurally cannot be a barrier
+ *  source (only a TOP-LEVEL g.call(barrier) suspends). Asserts the invariant rather than
+ *  silently mis-typing. */
+export function compileReadCompiled(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec, fastPaths?: FastPathConfig, registry?: ServiceRegistry): Compiled {
+  const plan = compileRead(steps, params, sackInit, fastPaths, registry);
+  if (plan.kind === 'segment') throw new Error('a nested sub-traversal cannot be a barrier/federated source');
+  return plan;
 }

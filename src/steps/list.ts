@@ -12,7 +12,7 @@ import { type PStep } from '../strategies.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toResultStream, toScalarStream, mapOfToListOf, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type ScalarStream, type MapStream, type ShapeTailFn } from './stream.ts';
 import { carryFrag, carriedCols, type ElementStream } from './context.ts';
 import { type Compiled } from '../render.ts';
-import { compileRead } from './index.ts';
+import { compileReadCompiled } from './index.ts';
 
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
 const isLocal = (s: PStep): boolean => (s.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local');
@@ -238,7 +238,7 @@ function operandList(arg: any, op: string, params: Record<string, any>): Express
     // independent of the incoming traverser (a fresh V()/E() root), so compile it as a
     // separate read and aggregate its `v` column into one JSONB list, embedded as a
     // scalar subquery. Only a scalar-list fold is supported (values/id/label → v col).
-    const sub = compileRead(inner, params);
+    const sub = compileReadCompiled(inner, params);
     if (sub.shape.kind === 'jsonbList')
       return q`(SELECT jsonb(list) FROM (${embedSql(sub)}))`;
     if (sub.shape.kind !== 'list' || sub.shape.elem !== 'scalar')

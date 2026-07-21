@@ -5,7 +5,7 @@ import { gremlinTypeOf, isCollectionType, storedScalar, flatType, mapEntryType, 
 import { stepChain, isNested, type Step, type SackSpec } from '../frontend.ts';
 import { normalize, type PStep } from '../strategies.ts';
 import { readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../render.ts';
-import { buildPrefix, compileRead } from './index.ts';
+import { buildPrefix, compileReadCompiled } from './index.ts';
 import { compileInject } from './inject.ts';
 import { indexProperty, deleteFtsFor, deleteFtsForOwners } from '../services/fts-index.ts';
 
@@ -55,7 +55,7 @@ function runNested(store: GraphStore, nestedNode: any, params: Record<string, an
   // Seed at the driver element: a synthetic V/E source on the internal rowid (numeric
   // arg → rowid match). It borrows the nested node's parse ctx (no ctx of its own).
   if (seed) chain = [{ name: seed.elem === 'edge' ? 'E' : 'V', args: [seed.id], ctx: nestedNode } as PStep, ...chain];
-  const compiled = compileRead(chain, params);
+  const compiled = compileReadCompiled(chain, params);
   return { rows: store.query<any>(compiled.sql, compiled.binds), shape: compiled.shape };
 }
 
