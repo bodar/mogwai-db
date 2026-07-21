@@ -1,4 +1,5 @@
-import { defaultRegistry } from './services/registry.ts';
+import { EMPTY_REGISTRY } from './services/registry.ts';
+import type { ServiceRegistry } from './services/types.ts';
 
 /** Independently switchable optimized lowerings. The generic path remains the
  * semantic authority; these switches exist for equivalence tests and diagnostics. */
@@ -28,9 +29,10 @@ export interface FastPathConfig {
 
 export interface CompileOptions {
   readonly fastPaths?: Partial<FastPathConfig>;
-  /** The service registry for call(). Defaults to the shared, pre-seeded defaultRegistry
-   *  (Phases 1-5: every service is pure SQL, no runtime env needed). */
-  readonly registry?: import('./services/types.ts').ServiceRegistry;
+  /** The service registry for call(), injected via DI (application → manager → executeFramed
+   *  → compile). When absent, the compiler defaults to EMPTY_REGISTRY — correct for every
+   *  non-call() traversal; a call() then throws "unknown service". */
+  readonly registry?: ServiceRegistry;
 }
 
 export const DEFAULT_FAST_PATHS: FastPathConfig = Object.freeze({
@@ -47,5 +49,5 @@ export const resolveFastPaths = (options?: CompileOptions): FastPathConfig => ({
   ...options?.fastPaths,
 });
 
-export const resolveRegistry = (options?: CompileOptions): import('./services/types.ts').ServiceRegistry =>
-  options?.registry ?? defaultRegistry;
+export const resolveRegistry = (options?: CompileOptions): ServiceRegistry =>
+  options?.registry ?? EMPTY_REGISTRY;

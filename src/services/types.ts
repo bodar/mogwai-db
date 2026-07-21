@@ -59,3 +59,8 @@ export interface ServiceRegistry {
   /** Enumeration order for --list — EXCLUDES the directory service itself. */
   list(): readonly Service[];
 }
+
+/** The directory command name. A service registered under it is resolvable by name but
+ *  excluded from its own list() (TinkerPop's rule). Lives here (a dependency-free leaf) so
+ *  both registry.ts and directory.ts import it without a cycle. */
+export const DIRECTORY_SERVICE_NAME = '--list';

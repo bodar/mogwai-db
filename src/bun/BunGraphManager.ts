@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { GraphStore } from '../storage.ts';
 import { type GraphManager, type GraphInfo, graphInfo } from '../manager.ts';
 import { executeFramed, type Framed } from '../execute.ts';
+import { standardRegistry } from '../services/standard.ts';
+import type { ServiceRegistry } from '../services/types.ts';
 import { BunSqlite } from './BunSqlite.ts';
 
 /**
@@ -23,7 +25,7 @@ import { BunSqlite } from './BunSqlite.ts';
 export class BunGraphManager implements GraphManager {
   private graphs = new Map<string, { store: GraphStore; sql: BunSqlite }>();
 
-  constructor(private dir?: string) {
+  constructor(private dir?: string, private registry: ServiceRegistry = standardRegistry) {
     if (dir) mkdirSync(dir, { recursive: true });
   }
 
@@ -44,7 +46,7 @@ export class BunGraphManager implements GraphManager {
   }
 
   async query(id: string, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<Framed[]> {
-    return executeFramed(this.resolve(id).store, gremlin, params, paramTypes);
+    return executeFramed(this.resolve(id).store, gremlin, params, paramTypes, this.registry);
   }
 
   async create(id: string): Promise<void> {

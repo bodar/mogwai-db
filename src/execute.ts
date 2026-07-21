@@ -1,6 +1,7 @@
 import { compile, type ListOf, type MapEntry, type MapOf, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from './compiler.ts';
 import { isCollectionType, valueNodeFromStored, type TypeNode, type ValueNode } from './gremlin-types.ts';
 import type { GraphStore } from './storage.ts';
+import type { ServiceRegistry } from './services/types.ts';
 import { ioc, VertexProperty, Property, t } from './io.ts';
 
 // ---- GraphBinary v4 result framing ----
@@ -454,8 +455,8 @@ const bulkOf = (r: any): bigint => (r?.bulk != null ? BigInt(r.bulk) : 1n);
 // Element leaves may carry that per-row bulk; every other shape is a single-multiplicity value.
 // The write path and all non-element value shapes frame through frameValues (bulk 1); only the
 // element leaves read the column here, so the multiplicity plumbing touches exactly two cases.
-function* framedResults(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>): Generator<Framed> {
-  const plan = compile(gremlin, params, undefined, paramTypes);
+function* framedResults(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>, registry?: ServiceRegistry): Generator<Framed> {
+  const plan = compile(gremlin, params, { registry }, paramTypes);
   if (plan.kind === 'write') {
     for (const r of plan.run(store)) {
       // Write responses carry a flat {key:value} prop bag; vertexBuffer wants
@@ -571,11 +572,11 @@ function* frameValues(rows: any[], shape: import('./render.ts').Shape): Generato
  * so the compiler can record typed property writes; defaults to {} (JSON path / callers
  * without wire types → infer from the JS value).
  */
-export function executeQuery(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Buffer[] {
+export function executeQuery(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}, registry?: ServiceRegistry): Buffer[] {
   // The flat value list: EXPAND each collapsed (value, N) back to N copies so this API returns the
   // full multiset its callers expect. Bulk is 1 everywhere except a movementCollapse element leaf,
   // so this is a no-op there; the wire path (executeFramed) keeps the compact (value, N) pairs.
-  return [...framedResults(store, gremlin, params, paramTypes)].flatMap((f) =>
+  return [...framedResults(store, gremlin, params, paramTypes, registry)].flatMap((f) =>
     f.bulk === 1n ? [f.buf] : (Array(Number(f.bulk)).fill(f.buf) as Buffer[]));
 }
 
@@ -589,6 +590,6 @@ export type Framed = { buf: Buffer; bulk: bigint };
  *  framing appends it as a Long). `executeQuery` stays the flat `Buffer[]` API its many callers
  *  use (it expands bulk back to the multiset); this keeps the compact (value, N) pairs so a
  *  movementCollapse element leaf emits one row per element instead of N. */
-export function executeFramed(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Framed[] {
-  return [...framedResults(store, gremlin, params, paramTypes)];
+export function executeFramed(store: GraphStore, gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}, registry?: ServiceRegistry): Framed[] {
+  return [...framedResults(store, gremlin, params, paramTypes, registry)];
 }

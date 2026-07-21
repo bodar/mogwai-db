@@ -1,6 +1,6 @@
 import { stepChain, isNested } from '../frontend.ts';
 import type { PStep } from '../strategies.ts';
-import { DIRECTORY_SERVICE_NAME } from './registry.ts';
+import { DIRECTORY_SERVICE_NAME } from './types.ts';
 import type { CallSpec, CallParams } from './types.ts';
 
 // ---------- call() spec + param resolution ----------
