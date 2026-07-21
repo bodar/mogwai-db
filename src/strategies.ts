@@ -24,7 +24,7 @@ import { stepChain, isNested, type Step, type StrategySpec, type StrategyUse } f
  * The compilers read these fields instead of re-scanning, so the whole read
  * dispatch is a peek-free fold over the step list.
  */
-export type PStep = Step & { cluster?: Step[]; bys?: any[][]; options?: Step[]; productiveBy?: boolean; from?: string; to?: string };
+export type PStep = Step & { cluster?: Step[]; bys?: any[][]; options?: Step[]; productiveBy?: boolean; from?: string; to?: string; withArgs?: [string, any][] };
 
 const REPEAT_CLUSTER = new Set(['repeat', 'emit', 'times', 'until']);
 /** Steps that absorb trailing by() modulators. Alias-compare where()/not() also
@@ -343,9 +343,33 @@ export function applyStrategies(steps: Step[], use: StrategyUse, params: Record<
 
 /** Run every normalization pass. `discard` rides out-of-band — it's an output
  *  shape (iterate() → return nothing), not a step the compiler dispatches. */
+/** Absorb every `with(key, value)` step immediately following a `call` onto that call's
+ *  `withArgs`, mirroring foldByModulators — so the call() compiler reads its modulators
+ *  without peeking at siblings. `value` may be a string/literal OR a `{nested}` traversal
+ *  (`__.constant(...)`); both are carried verbatim and resolved to a constant later
+ *  (call-params.ts). A `with()` NOT preceded by a call() is left untouched (it is not a
+ *  supported step elsewhere, so it will fail closed at dispatch if it ever appears). */
+function foldCallWith(steps: PStep[]): PStep[] {
+  const out: PStep[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    if (s.name !== 'call') { out.push(s); continue; }
+    const withArgs: [string, any][] = [];
+    let j = i + 1;
+    for (; j < steps.length && steps[j].name === 'with'; j++) {
+      const [k, v] = steps[j].args;
+      if (typeof k !== 'string') throw new Error('call().with() key must be a string');
+      withArgs.push([k, v]);
+    }
+    out.push(withArgs.length ? { ...s, withArgs } : s);
+    i = j - 1;
+  }
+  return out;
+}
+
 export function normalize(steps: Step[]): { steps: PStep[]; discard: boolean } {
   const stripped = stripTerminal(steps);
-  return { steps: dropRedundantOrder(collapseFoldCountLocal(foldChooseOptions(foldByModulators(foldRepeatClusters(stripped.steps))))), discard: stripped.discard };
+  return { steps: dropRedundantOrder(collapseFoldCountLocal(foldCallWith(foldChooseOptions(foldByModulators(foldRepeatClusters(stripped.steps)))))), discard: stripped.discard };
 }
 
 // ---------- emission-order demand pre-pass (canonical emission order, Stage B) ----------
