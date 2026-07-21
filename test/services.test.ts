@@ -4,6 +4,7 @@ import type { Service } from '../src/services/types.ts';
 import { parseGremlin, stepChain } from '../src/frontend.ts';
 import { normalize } from '../src/strategies.ts';
 import { parseCallSpec } from '../src/services/call-params.ts';
+import { compile } from '../src/compiler.ts';
 
 /** Parse a gremlin string, normalize, and return the (single) folded call PStep. */
 const callStep = (gremlin: string, params: Record<string, any> = {}) => {
@@ -99,5 +100,41 @@ describe('call/with fold + param resolution', () => {
   test('a non-constant param-value traversal fails closed', () => {
     expect(() => spec('g.call("tinker.search").with("search", __.out().values("name"))'))
       .toThrow(/not yet supported/);
+  });
+});
+
+describe('call() routing (seedCall)', () => {
+  test('an unknown service throws a clear error (end-to-end parse→fold→spec→registry)', () => {
+    // defaultRegistry is empty until services land, so --list is unknown here.
+    expect(() => compile('g.call("--list")', {})).toThrow(/unknown service '--list'/);
+  });
+
+  test('a registered service is reached with its resolved params', () => {
+    let seenParams: unknown;
+    const probe: Service = {
+      name: '--list',
+      type: 'start',
+      describeParams: () => ({}),
+      resolve: (ctx) => ({
+        kind: 'stream',
+        build: (c) => { seenParams = c.params; throw new Error('probe-reached'); },
+      }),
+    };
+    const reg = createRegistry([probe]);
+    expect(() => compile('g.call("--list").with("service", "tinker.search")', {}, { registry: reg }))
+      .toThrow(/probe-reached/);
+    expect(seenParams).toEqual({ service: 'tinker.search' });
+  });
+
+  test('a barrier-kind service fails closed as not-yet-supported (Phase 6)', () => {
+    const federate: Service = {
+      name: 'mogwai.graph.federate',
+      type: 'barrier',
+      describeParams: () => ({}),
+      resolve: () => ({ kind: 'barrier', apply: () => [] }),
+    };
+    const reg = createRegistry([federate]);
+    expect(() => compile('g.call("mogwai.graph.federate")', {}, { registry: reg }))
+      .toThrow(/barrier\/async services are not yet supported/);
   });
 });

@@ -25,6 +25,7 @@ import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../fast-paths.ts';
 import { defaultRegistry } from '../services/registry.ts';
 import type { ServiceRegistry } from '../services/types.ts';
 import { lowerScalarRows } from './scalar.ts';
+import { seedCall } from './call.ts';
 import { materializeFinal } from './materialize.ts';
 import { compileFromVariant } from './variant.ts';
 
@@ -405,6 +406,15 @@ export function lowerSteps(initial: Stream, steps: PStep[], from: number): Strea
 /** A read traversal: prefix fold + shaped lowering loop.
  *  `sackInit` (from withSack()) seeds the carried sack column at the source. */
 export function compileRead(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, registry: ServiceRegistry = defaultRegistry): Compiled {
+  // call() as a SOURCE (g.call(...)): the service seeds the initial Stream (of whatever
+  // shape it produces — a list of names, a Property stream), and the generic shaped
+  // lowering loop takes over from step 1. A peer of the buildPrefix (V/E/union) path, not
+  // inside it, because a call() source is not necessarily element-shaped.
+  if (steps[0].name === 'call') {
+    const seed = seedCall(steps[0], new Query(), params, registry);
+    return materializeFinal(lowerSteps(seed, steps, 1));
+  }
+
   // Traverser bulking: a `repeat(...).times(n).count()` (path/as/sack-free) compiles to
   // unrolled GROUP-BY-SUM(bulk) CTEs instead of an enumerate-every-walk recursion, so a
   // dense/deep count (grateful times(8) ≈ 2.5e15 walks) stays tractable. Null → not the
