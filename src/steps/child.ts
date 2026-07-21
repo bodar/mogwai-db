@@ -531,6 +531,21 @@ function resourceElement(seed: ScalarStream, head: PStep, after: PStep[]): Eleme
  *  per-origin encounter, then the SHARED scoped count barrier (LEFT JOIN domain → 0 for an
  *  empty child, bulk-weighted) reduces it — no bespoke aggregate, the same path an element
  *  count arm uses (tryCompileRowsBeforeReducer's count branch). */
+/** GENERIC child-seam primitive: the per-parent neighbour count in a direction, bulk-aware —
+ *  pushChildScope → one movement over the pushed seed → scopedElementCount (LEFT JOIN domain,
+ *  so a parent with no such edges scores 0). Not service-specific: it is "scoped movement
+ *  count", the substrate a bare `both().count()` child also is. tinker.degree.centrality is
+ *  its first caller; it composes this from the service, keeping child-seam internals here. */
+export function scopedMovementCount(parent: ElementStream, scope: CompileScope, direction: 'out' | 'in' | 'both'): ScalarStream {
+  if (parent.elem !== 'node') throw new Error(`${direction}() degree expects a vertex input`);
+  const pushed = pushChildScope(parent, scope);
+  // A synthetic movement step — the StepFn reads only name/args, never .ctx.
+  const moveStep = { name: direction, args: [], ctx: null as any } as PStep;
+  const { stream: moved, next } = lowerElementSteps([moveStep], pushed.seed);
+  if (next !== 1) throw new Error(`could not lower ${direction}()`);
+  return scopedElementCount(moved, pushed);
+}
+
 function scopedElementCount(el: ElementStream, pushed: ReturnType<typeof pushChildScope>): ScalarStream {
   const c = el.rel.as('c');
   const ord = pushed.frame.ordinal;

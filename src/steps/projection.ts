@@ -18,6 +18,7 @@ import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap a
 import { lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
 import { childSteps, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, tryCompileCountChild, tryCompileListChild, tryCompileScalarValueRows, tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './child.ts';
 import { lowerElementDedup } from './filter.ts';
+import { lowerCall } from './call.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
 //
@@ -395,6 +396,10 @@ const TAIL = new Map<string, ShapeTailFn<ElementStream>>([
   ['cap', (st, _step, steps, stop) => compileCap(st, steps, stop)],
   ['group', tailGroup], ['groupCount', tailGroup],
   ['select', tailSelectProject], ['project', tailSelectProject],
+  // call(service, …) mid-traversal: the service produces a per-parent Stream (e.g.
+  // tinker.degree.centrality → a scalar per input). lowerCall pushes the child scope via
+  // the service; the resulting stream re-enters the generic lowering loop.
+  ['call', (st, step, _steps, stop) => continueLowering(lowerCall(step, st, ROOT_SCOPE), stop + 1)],
   ...[...SCALAR_PROJ].map((n): [string, ShapeTailFn<ElementStream>] => [n, tailScalarProj]),
 ]);
 
