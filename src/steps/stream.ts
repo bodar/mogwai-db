@@ -139,6 +139,29 @@ export interface RecordStream extends Carry {
   readonly fields: readonly RecordField[];
 }
 
+/** A stream of DETACHED foreign elements — the result of a federated call() that merged a
+ * sibling graph's rows back into this traversal. Deliberately NOT an ElementStream: a foreign
+ * element has NO local nodes/edges row (its id/label/props are pre-landed as literal columns
+ * on a VALUES CTE, id being the sibling's EXTERNAL id, not a local rowid), so the movement/
+ * filter StepFns — which only ever see ElementStream and join local tables on a rowid — must
+ * never receive one. Being a distinct kind is the fail-closed mechanism: movement over a
+ * detached reference is structurally unreachable (no StepFn is handed a ForeignStream), and
+ * compileFromForeign's fallback turns any unsupported follow-on into a clear deferral rather
+ * than a silent local-table join. Reads that need only the landed columns — id()/label()/
+ * values()/valueMap() and root framing — read them directly, no join. `elem` says which
+ * element kind the landed rows are (so root framing picks vertex vs edge). */
+export interface ForeignStream extends Carry {
+  readonly kind: 'foreign';
+  readonly rel: Relation;
+  readonly elem: Elem;
+}
+
+/** The physical payload columns of a ForeignStream relation, in order. `fid`/`flabel`/`fprops`
+ *  for a vertex; edges add `fsrc`/`ftgt`. `fprops` is JSON text in the SAME per-key {t,v}-node
+ *  shape vertexBuffer/edgeBuffer consume, so root framing reuses the vertex/edge path verbatim. */
+export const foreignPayload = (elem: Elem): string[] =>
+  elem === 'edge' ? ['fid', 'flabel', 'fsrc', 'ftgt', 'fprops'] : ['fid', 'flabel', 'fprops'];
+
 /** The rich relational result of a global group()/groupCount() barrier. This keeps
  * terminal element/composite/list layouts honest; simple key/value layouts may later
  * derive the narrow `(mk,mv)` MapStream used by select(Column.*). */
@@ -173,7 +196,7 @@ export interface ResultStream {
   readonly shape: Shape;
 }
 
-export type RelationalStream = ElementStream | ScalarStream | VariantStream | ListStream | MapStream | MapEntryStream | PropertyStream | RecordStream | GroupStream | PathStream;
+export type RelationalStream = ElementStream | ScalarStream | VariantStream | ListStream | MapStream | MapEntryStream | PropertyStream | RecordStream | GroupStream | PathStream | ForeignStream;
 export type Stream = RelationalStream | ResultStream;
 
 /** A shape compiler yields this token when lowering should continue with a new
@@ -279,6 +302,7 @@ export function streamColumns(s: Stream): readonly string[] {
     : s.kind === 'property' ? [...PROPERTY_PAYLOAD]
     : s.kind === 'record' ? s.fields.flatMap(recordFieldColumns)
     : s.kind === 'group' ? groupColumns(s)
+    : s.kind === 'foreign' ? foreignPayload(s.elem)
     : pathColumns(s.layout);
   return [...payload, ...carriedCols(s.carried)];
 }
