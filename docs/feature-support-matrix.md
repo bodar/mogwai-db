@@ -25,6 +25,15 @@ so. Kept in sync in the commit that changes support.
 | `out`/`in`/`both`, `outE`/`inE`/`bothE`, `outV`/`inV`/`bothV` | ✅ | index-only covering-index hops; convergent walks auto-collapse so dense/deep traversals stay fast |
 | `otherV` | ✅ | |
 | `inject(…)` | ✅ | ❌ appending a list onto an existing scalar stream |
+| `call(service[, params])`, `.with(k,v)` | 🟡 | source (`g.call`) + mid-traversal (`V().call`). Services below. ❌ async/federated (`'barrier'`) — deferred (Phase 6) |
+
+**Services** (the `call()` registry — a per-runtime DI seam; `--list` enumerates the live registry):
+
+| Service | | Notes |
+|---|:--:|---|
+| `--list` | ✅ | enumerates registered services; `.with("service",…)` filter, `verbose` describe blob |
+| `tinker.degree.centrality` | ✅ | per-vertex incident-edge count via the child-scope reducer seam; `direction` OUT/IN/BOTH (default IN); composes in `where(call(…).is(n))`, `group`/`order`/`project` by() |
+| `tinker.search` | 🟡 | FTS5-trigram search over property values (`property_fts`); `.element()` walks to the owner. `type` Vertex (default) / Edge; **case-insensitive** (documented). ❌ `type=VertexProperty` (empty), `<3`-char term & `regex` (fail closed) |
 
 ## 2. Filters & predicates
 
@@ -48,13 +57,19 @@ so. Kept in sync in the commit that changes support.
 
 `between` is `[lo,hi)` (inclusive low), `inside` is `(lo,hi)` (exclusive both).
 
-**Text predicates (`TextP`)** — bound, escaped `LIKE`:
+**Text predicates (`TextP`)** — bound, escaped `LIKE`; a ≥3-char positive substring over a stored
+property is served by the `property_fts` trigram index (`ftsSubstringPredicate` fast path):
 
 | | startingWith | endingWith | containing | notStartingWith | notEndingWith | notContaining | regex / notRegex |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
 | | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🚫 |
 
-`regex` is a platform wall: no SQLite `regexp()` UDF, and Durable Objects block `create_function`/`load_extension`.
+Substring matching is **case-insensitive** (a documented divergence from TinkerPop's case-sensitive
+`String.contains` — it is what lets the trigram index serve `LIKE`; reference graphs are single-case).
+A ≥3-char positive `containing`/`startingWith`/`endingWith` over a *stored* property is index-served;
+a `<3`-char term, a negated op (`not*`), or a substring over a computed scalar / injected list falls
+back to a (correct, unindexed) `LIKE` scan — never fail-closed. `regex` is a platform wall: no SQLite
+`regexp()` UDF, and Durable Objects block `create_function`/`load_extension`.
 
 ## 3. Projections & element data
 

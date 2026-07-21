@@ -1,8 +1,9 @@
 # call() + the Service Registry — a first-class, extensible service layer
 
 **Date:** 2026-07-20
-**Status:** accepted — implementation in progress (design decisions ratified 2026-07-21; see
-"Design decisions & findings (2026-07-21)" at the foot of this doc)
+**Status:** accepted — Phases 1–5 LANDED (trunk @ `03d7b06`, L3 = 1252); only the deferred
+federated barrier (Phase 6) remains. Design decisions ratified 2026-07-21; see "Design decisions
+& findings (2026-07-21)" and the phasing table at the foot of this doc.
 **L3 gap addressed:** deferral bucket #2 — `unsupported source step: call` (14) +
 `step not implemented: call()` (5). Feature: `map/Call.feature` (20 scenarios). Also closes the
 `TextP` substring predicates (`containing`/`startingWith`/`endingWith`) — index-backed by the same
@@ -243,21 +244,28 @@ So this phase is a performance + coverage step, not a semantics change:
 
 ## Phasing (federated is genuinely last, on shared seams)
 
-**Implementation status (2026-07-21, trunk @ `001dfcd`, L3 = 1239):** Phases 1–3 landed (as
-commits over 6 steps — see below). Phases 4–6 remain. The build split Phase 3 into **5a**
-(`tinker.degree.centrality` + GAP-1 `project()`-over-scalar element-alias) and **5b** (the
-child-scalar-classifier generalization that made `where(call(...).is(n))` — and bonus `math()` in a
-child — compose). `--list`'s L3 scenarios stay red until `tinker.search` registers (Phase 4), since
-`--list` enumerates the *live* registry.
+**Implementation status (2026-07-21, trunk @ `03d7b06`, L3 = 1252):** Phases 1–5 landed (as
+commits over 8 steps — see below). Only the deferred federated barrier (Phase 6) remains. The
+build split Phase 3 into **5a** (`tinker.degree.centrality` + GAP-1 `project()`-over-scalar
+element-alias) and **5b** (the child-scalar-classifier generalization that made
+`where(call(...).is(n))` — and bonus `math()` in a child — compose). `--list`'s L3 scenarios went
+green when `tinker.search` registered (step 7), since `--list` enumerates the *live* registry.
 
 | Phase | Deliverable | Status | Notes |
 |---|---|---|---|
 | 1 | **Generic spine:** `CallSpec` + `ServiceRegistry` DI + `Service`/`Contribution` interface (`'barrier'` variant present, deferred) | ✅ done | spine + DI (`registry.ts` cycle-free mechanism, `standard.ts` DI-only); pipeline stays synchronous |
-| 2 | `--list` reading the live registry (+ filter/verbose) | ✅ done | `ScalarStream` of names; 7 scenarios go green once Phase 4 registers search |
+| 2 | `--list` reading the live registry (+ filter/verbose) | ✅ done | `ScalarStream` of names; went green once step 7 registered search |
 | 3 | `tinker.degree.centrality` via the child-scope reducer seam + `project()`-over-scalar | ✅ done (5a+5b) | `scopedMovementCount` (generic primitive); GAP-1 alias field; GAP-2 `SCALAR_PRODUCER` classifier. +5 L3 |
-| 4 | `tinker.search` on FTS5 trigram + ValueNode-aware JSON write-path indexing + `element()` | ▢ next | 7 scenarios; builds the real search index. Split: **6** index+write-path (test in isolation), **7** the search consumer |
-| 5 | `TextP`: **index-back** `containing`/`startingWith`/`endingWith` (same case-insensitive `LIKE`, ≥3 chars now served by the trigram index) | ▢ | shares the search index; see "Substring rule (final)" above — <3/computed/injected → LIKE scan (NOT fail-closed); `regex` stays deferred |
+| 4 | `tinker.search` on FTS5 trigram + ValueNode-aware JSON write-path indexing + `element()` | ✅ done (steps 6+7) | step 6 `property_fts` schema + write-path indexer (`services/fts-index.ts`, tested in isolation, `test/fts-index.test.ts`); step 7 `services/search.ts` consumer. +13 L3 (search + `--list`). See PERF note below. |
+| 5 | `TextP`: **index-back** `containing`/`startingWith`/`endingWith` (same case-insensitive `LIKE`, ≥3 chars now served by the trigram index) | ✅ done (step 8) | `ftsSubstringPredicate` fast path in `nodeHasProp`/`edgeHasProp` (MATCH prefilter + LIKE position-confirm); opt-in only at the `has()` choke point. <3/computed/injected/`not*` → generic LIKE (NOT fail-closed); `regex` stays deferred. L3 stable (plan-shape change). |
 | 6 | **Federated DO graph call** — async barrier service on the Phase-1 seams | ▢ deferred | last; additive, no engine rewrite |
+
+**PERF note (step 6, cost a debug cycle):** an FTS5 `DELETE` by an `UNINDEXED` column is an O(n)
+content scan (no index on UNINDEXED cols). An unconditional per-property-write delete made a bulk
+seed O(n²) (grateful-dead: 743ms→5020ms, blowing the 5s conformance `beforeAll`). Fix: delete FTS
+rows ONLY on a genuine overwrite — vertex single already probes existing rows; edge UPSERT now does
+a cheap `UNIQUE(edge,key)`-served prior probe. Fresh inserts skip the scan → seed back to 812ms.
+Never put an unconditional FTS delete on a per-property write path.
 
 ## Semantics & hard parts (honest)
 
