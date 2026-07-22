@@ -25,7 +25,7 @@ so. Kept in sync in the commit that changes support.
 | `out`/`in`/`both`, `outE`/`inE`/`bothE`, `outV`/`inV`/`bothV` | ✅ | index-only covering-index hops; convergent walks auto-collapse so dense/deep traversals stay fast |
 | `otherV` | ✅ | |
 | `inject(…)` | ✅ | ❌ appending a list onto an existing scalar stream |
-| `call(service[, params])`, `.with(k,v)` | 🟡 | source (`g.call`) + mid-traversal (`V().call`). Services below. ❌ async/federated (`'barrier'`) — deferred (Phase 6) |
+| `call(service[, params])`, `.with(k,v)` | ✅ | source (`g.call`) + mid-traversal (`V().call`); pure (`'stream'`) + async/federated (`'barrier'`) contributions. Services below. |
 
 **Services** (the `call()` registry — a per-runtime DI seam; `--list` enumerates the live registry):
 
@@ -34,6 +34,7 @@ so. Kept in sync in the commit that changes support.
 | `--list` | ✅ | enumerates registered services; `.with("service",…)` filter, `verbose` describe blob |
 | `tinker.degree.centrality` | ✅ | per-vertex incident-edge count via the child-scope reducer seam; `direction` OUT/IN/BOTH (default IN); composes in `where(call(…).is(n))`, `group`/`order`/`project` by() |
 | `tinker.search` | 🟡 | FTS5-trigram search over property values (`property_fts`); `.element()` walks to the owner. `type` Vertex (default) / Edge; **case-insensitive** (documented). ❌ `type=VertexProperty` (empty), `<3`-char term & `regex` (fail closed) |
+| `mogwai.graph.federate` | 🟡 | cross-graph query pushdown (async barrier). Source form `g.call(federate,{graph,traversal})` runs a rooted sub-traversal on a sibling graph → detached refs. Mid-traversal `V().call(federate,…,__.values('k'))` injects each parent's scalar (`values`/`id`/`label`) via the GLV-native `T.value` marker, batched one hop, value-rejoined per parent (flatMap). ❌ local movement over a detached result (fail closed); `path()`/`as()` spanning the call (deferred); n-ary/map injection & traversable-subgraph return (future) |
 
 ## 2. Filters & predicates
 

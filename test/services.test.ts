@@ -5,7 +5,7 @@ import { directoryService } from '../src/services/directory.ts';
 import { DIRECTORY_SERVICE_NAME, type Service, type ServiceRegistry } from '../src/services/types.ts';
 import { parseGremlin, stepChain } from '../src/frontend.ts';
 import { normalize } from '../src/strategies.ts';
-import { parseCallSpec } from '../src/services/call-params.ts';
+import { parseCallSpec, injectionKindOf } from '../src/services/call-params.ts';
 import { compile, compilePlan } from '../src/compiler.ts';
 import type { ForeignRow } from '../src/services/types.ts';
 import type { FederationSource } from '../src/segment.ts';
@@ -128,6 +128,36 @@ describe('call/with fold + param resolution', () => {
     expect(s.params.graph).toBe('orders');
     expect(s.params.traversal).toEqual({ kind: 'traversal', gremlin: 'g.V().has("age", P.gt(30))' });
   });
+
+  // ---- mid-traversal per-parent INJECTION (the 3rd positional arg) ----
+
+  test('a values(k)/id()/label() 3rd arg (beside a map) is captured as the injection', () => {
+    for (const inj of ['__.values("name")', '__.id()', '__.label()']) {
+      const s = spec(`g.call("mogwai.graph.federate", ["graph":"crew"], ${inj})`);
+      expect(s.injectionTraversal).toBeDefined();          // captured
+      expect(s.params).toEqual({ graph: 'crew' });         // map still wins as params
+    }
+  });
+
+  test('injectionKindOf classifies the supported direct value reads and rejects others', () => {
+    const kind = (inj: string) => injectionKindOf(callStep(`g.call("s", ["a":"b"], ${inj})`).args[2].nested, {});
+    expect(kind('__.values("name")')).toEqual({ kind: 'values', key: 'name' });
+    expect(kind('__.id()')).toEqual({ kind: 'id' });
+    expect(kind('__.label()')).toEqual({ kind: 'label' });
+    // Computed / non-direct → null (the caller fails closed with a clear deferral).
+    expect(kind('__.values("name").fold()')).toBeNull();
+    expect(kind('__.out().count()')).toBeNull();
+    expect(kind('__.constant(1)')).toBeNull();
+  });
+
+  test('a NON-injection traversal beside a map is NOT captured (the --list dynamic-params form)', () => {
+    // call(name, map, project-traversal) is TinkerPop's call_string_map_traversal: the map wins,
+    // the traversal is ordinary dynamic params — NEVER an injection (and never retains the cyclic
+    // antlr node, which a toEqual on the spec would choke on).
+    const s = spec('g.call("--list", ["service":"tinker.search"], __.project("x").by(__.constant("y")))');
+    expect(s.injectionTraversal).toBeUndefined();
+    expect(s.params).toEqual({ service: 'tinker.search' });
+  });
 });
 
 describe('call() routing (seedCall)', () => {
@@ -178,6 +208,35 @@ describe('call() routing (seedCall)', () => {
     const plan = compilePlan('g.call("mogwai.graph.federate")', {}, { registry: reg });
     expect(plan.kind).toBe('segment');
     if (plan.kind === 'segment') expect(plan.head).toBeNull();
+  });
+
+  test('compilePlan() on a MID-TRAVERSAL barrier yields a segment with a per-parent head (o + injVal)', () => {
+    const federate: Service = {
+      name: 'mogwai.graph.federate', type: 'barrier', describeParams: () => ({}),
+      resolve: () => ({ kind: 'barrier', apply: async () => [] }),
+    };
+    const reg = createRegistry([federate]);
+    const plan = compilePlan(
+      'g.V().call("mogwai.graph.federate", ["graph":"crew"], __.values("name"))', {}, { registry: reg });
+    expect(plan.kind).toBe('segment');
+    if (plan.kind === 'segment') {
+      expect(plan.head).not.toBeNull();
+      // The head projects the rejoin ordinal `o` and the per-parent injected value `injVal`
+      // alongside the ordinary element payload, so readSegmentHead can drain them.
+      expect(plan.head!.sql).toContain(' AS o');
+      expect(plan.head!.sql).toContain('injVal');
+    }
+  });
+
+  test('a mid-traversal barrier with an UNSUPPORTED injection fails closed', () => {
+    const federate: Service = {
+      name: 'mogwai.graph.federate', type: 'barrier', describeParams: () => ({}),
+      resolve: () => ({ kind: 'barrier', apply: async () => [] }),
+    };
+    const reg = createRegistry([federate]);
+    expect(() => compilePlan(
+      'g.V().call("mogwai.graph.federate", ["graph":"crew"], __.values("name").fold())', {}, { registry: reg }))
+      .toThrow(/injection must be a direct value read/);
   });
 });
 
