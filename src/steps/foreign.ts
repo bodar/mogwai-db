@@ -1,7 +1,7 @@
 import { q, value, list, empty, type Relation, type Expression } from '../q.ts';
 import { type Elem } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
-import type { ForeignRow } from '../services/types.ts';
+import type { ForeignRow, InjectionKind } from '../services/types.ts';
 import {
   carriedCols, carryFrag, type Carry,
 } from './context.ts';
@@ -103,4 +103,69 @@ export function compileFromForeign(s: ForeignStream, steps: PStep[], at: number)
   return dispatchShapeTail(FOREIGN_TAIL, s, steps, at, () => {
     throw new Error(`step not supported on a detached federated element: ${steps[at].name}() — federated results are detached references; push the traversal into the sub-query instead`);
   });
+}
+
+// ---- mid-traversal (V().call(federate)) rejoin ----
+//
+// A batched mid-traversal federate ran the sibling ONCE over the DISTINCT injected values and got
+// back a flat POOL of foreign elements (each matching SOME injected value, but the sibling does not
+// echo WHICH). resumeMidBarrier scatters that pool back over the parents by re-matching each foreign
+// element's OWN value — the property/id/label the injection named — against each parent's injected
+// value, in SQL. A parent that matched nothing contributes no row (flatMap semantics — call() is a
+// flatMap-shaped step). The rejoin is a value INNER JOIN, so N parents sharing a value AND the
+// all-distinct batched case fan out identically; the const/no-injection case degenerates to a
+// cross-join (every parent × the whole pool), which the caller handles as the no-injection branch.
+
+/** The SQL expression for a landed foreign row's OWN value under the injection kind — what the
+ *  parent's injected value is matched against. `p` is the landed-pool relation aliased. */
+function foreignMatchExpr(inj: InjectionKind, p: Relation): Expression {
+  if (inj.kind === 'id') return p.c.fid;
+  if (inj.kind === 'label') return p.c.flabel;
+  // values(key): fprops is key -> [{t,v},…] (vertex) or key -> {t,v} (edge). Read the logical
+  // value at that key. json_extract over the first array element's $.v (vertex) or the node's $.v
+  // (edge). A missing key yields NULL → no match (correct: the element lacks the injected property).
+  const keyPath = `$."${inj.key.replace(/"/g, '""')}"`;
+  return q`COALESCE(json_extract(${p.c.fprops}, ${value(keyPath + '[0].v')}), json_extract(${p.c.fprops}, ${value(keyPath + '.v')}))`;
+}
+
+/** Rejoin a batched federate's pooled results back over the parents (Phase 6b mid-traversal).
+ *  `foreign` is the sibling's flat pool; `headRows` are the parents (each carrying its injectedValue).
+ *  Lands the pool, builds a parent-value VALUES CTE, INNER JOINs on the injected value (or cross-
+ *  joins when there is no injection), and returns a ForeignStream of the per-parent-fanned results. */
+export function resumeMidBarrier(
+  c: Carry,
+  foreign: readonly ForeignRow[],
+  headRows: readonly ForeignRow[],
+  elem: Elem,
+  injection: InjectionKind | undefined,
+): ForeignStream {
+  const landed = landForeignElements(c, foreign, elem);
+  // No injection (constant sub-traversal): every parent gets the whole pool — a cross join. One
+  // row per (parent, pooled element). Represented by re-landing the pool once per parent.
+  if (!injection) {
+    if (headRows.length <= 1) return landed; // 0/1 parent → the pool as-is (n=1 collapse)
+    const p = landed.rel.as('p');
+    const payload = foreignPayload(elem);
+    // Cross join the pool with a parents count relation (VALUES of 1s) — one pool copy per parent.
+    const parentRows = list(headRows.map(() => q`(1)`), ', ');
+    const parents = c.q.cte(q`VALUES ${parentRows}`, ['one']);
+    const pr = parents.as('pr');
+    const rel = c.q.cte(
+      q`SELECT ${list(payload.map((k) => q`${p.c[k]} AS ${k}`), ', ')} FROM ${p}, ${pr}`,
+      [...payload],
+    );
+    return { ...landed, rel };
+  }
+  // Injection: INNER JOIN the pool against the parents' injected values on the element's own value.
+  const p = landed.rel.as('p');
+  const match = foreignMatchExpr(injection, p);
+  const parentVals = list(headRows.map((r) => q`(${value(r.injectedValue as any)})`), ', ');
+  const parents = c.q.cte(q`VALUES ${parentVals}`, ['pv']);
+  const d = parents.as('d');
+  const payload = foreignPayload(elem);
+  const rel = c.q.cte(
+    q`SELECT ${list(payload.map((k) => q`${p.c[k]} AS ${k}`), ', ')} FROM ${p} JOIN ${d} ON ${match}=${d.c.pv}`,
+    [...payload],
+  );
+  return { ...landed, rel };
 }

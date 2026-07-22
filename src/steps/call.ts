@@ -1,11 +1,13 @@
 import { type Query } from '../q.ts';
 import { type PStep } from '../strategies.ts';
-import { type Stream } from './stream.ts';
+import { type Stream, type LoweringResult, continueLowering, suspendLowering } from './stream.ts';
 import { type ElementStream } from './context.ts';
-import { type ServiceRegistry, type ServiceCallCtx, type Contribution, type ForeignRow, type CallParams } from '../services/types.ts';
+import { type ServiceRegistry, type ServiceCallCtx, type Contribution, type ForeignRow, type CallParams, type InjectionKind } from '../services/types.ts';
 import { type FederationSource } from '../segment.ts';
-import { parseCallSpec } from '../services/call-params.ts';
-import { type CompileScope } from './child.ts';
+import { parseCallSpec, injectionKindOf } from '../services/call-params.ts';
+import { type ChildFrame, type CompileScope } from './child.ts';
+import { buildCallHead } from './call-head.ts';
+import { type Compiled } from '../render.ts';
 
 // ---------- call() lowering ----------
 //
@@ -41,6 +43,34 @@ export interface BarrierPoint {
 
 export const isBarrierPoint = (x: unknown): x is BarrierPoint =>
   x != null && typeof x === 'object' && (x as any).kind === 'barrier-point';
+
+/** A compile SUSPENDED at a MID-TRAVERSAL barrier call() (Phase 6b) — the V().call(federate) twin
+ *  of BarrierPoint. Unlike the source form (head=null, resume lands a fresh root), this carries:
+ *  - `head` — a COMPLETE Compiled projecting each parent's (id, label, props[, src, tgt], o, injVal);
+ *    the executor drains it before the await and hands the rows to `apply`.
+ *  - `injection` — the injected scalar's classification (values(k)/id()/label()), so resume knows
+ *    which landed column to value-match on for the rejoin.
+ *  - `frame` — the pushed child frame (its `domain` is the preserved parent, carrying path/as); resume
+ *    JOINs landed foreign rows back onto it by the injected value.
+ *  bubbled up through lowerSteps (as a LoweringSuspension) to compileRead, which builds the SegmentPlan. */
+export interface MidBarrierPoint {
+  readonly kind: 'mid-barrier-point';
+  readonly serviceName: string;
+  readonly params: CallParams;
+  readonly head: Compiled;
+  readonly apply: (rows: readonly ForeignRow[], source: FederationSource) => Promise<ForeignRow[]>;
+  readonly injection?: InjectionKind;
+  readonly frame: ChildFrame;
+  readonly parent: ElementStream;
+  /** The chain steps AFTER this call() — resumed against the rejoined foreign stream. */
+  readonly restSteps: PStep[];
+  readonly restAt: number;
+  readonly compileParams: Record<string, any>;
+  readonly registry: ServiceRegistry;
+}
+
+export const isMidBarrierPoint = (x: unknown): x is MidBarrierPoint =>
+  x != null && typeof x === 'object' && (x as any).kind === 'mid-barrier-point';
 
 /** Resolve the service + take its Contribution. A 'stream' kind is returned for inline lowering;
  *  a 'barrier' kind is returned as-is so the caller (seedCall/lowerCall) can build a BarrierPoint.
@@ -86,8 +116,13 @@ export function seedCall(first: PStep, query: Query, params: Record<string, any>
  *  `carried.origins`; the service's pushChildScope reads those and mints a frame NESTED under
  *  them (they are preserved in the seed's carried), so the scoped reducer emits one scalar per
  *  outer origin. The scoped reducer keys on the innermost frame only, so the frames array the
- *  nominal scope carries need not enumerate the outer frames — the nesting rides the carry. */
-export function lowerCall(step: PStep, parent: ElementStream, scope: CompileScope): Stream {
+ *  nominal scope carries need not enumerate the outer frames — the nesting rides the carry.
+ *
+ *  A 'barrier' contribution (mid-traversal federate) SUSPENDS: it builds the per-parent head
+ *  (buildCallHead) and returns a MidBarrierPoint wrapped as a LoweringSuspension, which lowerSteps
+ *  relays to compileRead. `steps`/`stop` are the caller's chain + cursor so restSteps/restAt name
+ *  what resumes after the call(). */
+export function lowerCall(step: PStep, parent: ElementStream, scope: CompileScope, steps: PStep[], stop: number): LoweringResult {
   const spec = parseCallSpec(step, parent.params);
   const registry = parent.registry ?? (() => { throw new Error('call(): no service registry in scope'); })();
   const ctx: ServiceCallCtx = {
@@ -99,10 +134,26 @@ export function lowerCall(step: PStep, parent: ElementStream, scope: CompileScop
     scope,
   };
   const contribution = resolveContribution(spec, registry, ctx);
-  // Mid-traversal V().call(barrier) — the segment orchestrator with per-parent ordinal rejoin —
-  // is Phase 6b. Until then a barrier mid-traversal fails closed clearly (a 'stream' service
-  // lowers inline as before).
-  if (contribution.kind === 'barrier')
-    throw new Error(`call("${spec.serviceName}"): mid-traversal barrier services are not yet supported (Phase 6b) — use g.call(...) at the source position`);
-  return contribution.build(ctx);
+  if (contribution.kind === 'stream') return continueLowering(contribution.build(ctx), stop + 1);
+
+  // A mid-traversal barrier (federate): build the per-parent head + suspend. The head projects
+  // (id, label, props[, src, tgt], o, injVal); apply (bound to this compile's federation depth)
+  // runs the sibling once per distinct injected value; resume rejoins by that value.
+  const injection = spec.injectionTraversal ? injectionKindOf(spec.injectionTraversal, parent.params) ?? undefined : undefined;
+  if (spec.injectionTraversal && !injection)
+    throw new Error(`call("${spec.serviceName}"): injection must be a direct value read — __.values(key), __.id(), or __.label()`);
+  const { head, frame } = buildCallHead(parent, scope, spec.injectionTraversal);
+  const depth = parent.federationDepth ?? 0;
+  const apply = (rows: readonly ForeignRow[], src: FederationSource) => contribution.apply(rows, spec.params, src, depth);
+  const point: MidBarrierPoint = {
+    kind: 'mid-barrier-point',
+    serviceName: spec.serviceName,
+    params: spec.params,
+    head, apply, injection, frame, parent,
+    restSteps: steps,
+    restAt: stop + 1,
+    compileParams: parent.params,
+    registry,
+  };
+  return suspendLowering(point);
 }

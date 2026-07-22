@@ -3,6 +3,7 @@ import type { ForeignRow } from '../api.ts';
 import type { FederationSource } from '../segment.ts';
 import { isTraversalParam } from './call-params.ts';
 import { guardFederationDepth } from './federation-depth.ts';
+import { INJECT_VALUES_KEY } from '../injection.ts';
 
 // ---------- mogwai.graph.federate — cross-graph query pushdown (async, Barrier) ----------
 //
@@ -53,13 +54,27 @@ export const federateService: Service = {
   }),
   resolve: () => ({
     kind: 'barrier',
-    // A source-form g.call(...) ignores the (empty) input rows and runs the sub-traversal once on
-    // the sibling, returning its detached rows. (Mid-traversal per-parent dispatch is 6b.) The
-    // sibling hop is depth + 1, guarded before the call so a cyclic/too-deep chain fails closed.
-    apply: async (_rows: readonly ForeignRow[], params: CallParams, source: FederationSource, depth: number): Promise<ForeignRow[]> => {
+    apply: async (rows: readonly ForeignRow[], params: CallParams, source: FederationSource, depth: number): Promise<ForeignRow[]> => {
       const graph = graphOf(params);
       guardFederationDepth(depth + 1, graph);
-      return source.executor(graph).raw(traversalOf(params), {}, depth + 1);
+      const gremlin = traversalOf(params);
+      const ex = source.executor(graph);
+
+      // SOURCE form (g.call(...)): no local input rows — run the sub-traversal ONCE, unbound.
+      if (rows.length === 0) return ex.raw(gremlin, {}, depth + 1);
+
+      // MID-TRAVERSAL form (V().call(...)): each head row carries a per-parent injected scalar
+      // (values(k)/id()/label()) — the value the sub-traversal's `T.value` marker operand stands in
+      // for (e.g. __.V().has('sku', T.value)). BATCH: supply the DISTINCT injected values under the
+      // reserved INJECT_VALUES_KEY params entry and run the sibling ONCE; the sibling's has()/is()
+      // compile substitutes a within(<distinct>) for the marker (see injection.ts). The const/single-
+      // value case is the natural degenerate collapse (a 1- or 0-element set). Results are then
+      // SCATTERED back over the parents: each returned element re-matches the injected value it
+      // satisfies (by property /
+      // id / label — see the resume rejoin), so apply returns the sibling's flat pool and the
+      // per-parent fan-out happens in resume's SQL. Here apply just runs the one batched hop.
+      const distinct = [...new Map(rows.map((r) => [JSON.stringify(r.injectedValue), r.injectedValue])).values()];
+      return ex.raw(gremlin, { [INJECT_VALUES_KEY]: distinct }, depth + 1);
     },
   }),
 };

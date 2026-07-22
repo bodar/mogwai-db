@@ -648,7 +648,7 @@ export class Executor implements ExecutorApi {
     while (p.kind === 'segment') {
       const rows = p.head ? this.readSegmentHead(p.head) : [];
       const foreign = await p.apply(rows, this.source);
-      p = p.resume(foreign);
+      p = p.resume(foreign, rows);
     }
     return p.compiled;
   }
@@ -658,8 +658,12 @@ export class Executor implements ExecutorApi {
    *  the row array is fully drained before any barrier await (no cursor across an await). */
   private readSegmentHead(head: Compiled): ForeignRow[] {
     const rows = this.store.query(head.sql, head.binds) as any[];
+    // The mid-traversal head projects `o` (rejoin ordinal) and `injVal` (the per-parent injected
+    // scalar) alongside the ordinary element payload; both free-ride outside the Shape (read here,
+    // not framed). `injVal` is absent on a source-form head (which never reaches this method).
+    const inj = (r: any) => ('injVal' in r ? { injectedValue: r.injVal } : {});
     if (head.shape.kind === 'edge')
-      return rows.map((r) => ({ kind: 'edge', id: r.id, label: r.label, src: r.src, tgt: r.tgt, props: propsOf(r.props), ordinal: r.o }));
-    return rows.map((r) => ({ kind: 'vertex', id: r.id, label: r.label, props: propsOf(r.props), ordinal: r.o }));
+      return rows.map((r) => ({ kind: 'edge', id: r.id, label: r.label, src: r.src, tgt: r.tgt, props: propsOf(r.props), ordinal: r.o, ...inj(r) }));
+    return rows.map((r) => ({ kind: 'vertex', id: r.id, label: r.label, props: propsOf(r.props), ordinal: r.o, ...inj(r) }));
   }
 }

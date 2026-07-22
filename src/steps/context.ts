@@ -144,6 +144,7 @@ export interface Carry {
   readonly params: Record<string, any>;
   readonly fastPaths?: FastPathConfig;
   readonly registry?: import('../services/types.ts').ServiceRegistry;  // call() service lookup (threaded like fastPaths)
+  readonly federationDepth?: number;     // this compile's federation depth (threaded like registry); a mid-traversal barrier call()'s apply hops the sibling at depth+1
   readonly sideEffects?: SideEffectMap;  // named side-effect collections (aggregate/store/group('a'))
   readonly carried: Carried;             // the per-traverser carried column schema
 }

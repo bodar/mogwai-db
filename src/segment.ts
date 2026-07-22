@@ -45,7 +45,11 @@ export interface SegmentPlan {
   readonly head: Compiled | null;
   readonly apply: (rows: readonly ForeignRow[], source: FederationSource) => Promise<ForeignRow[]>;
   readonly params: CallParams;
-  readonly resume: (foreign: ForeignRow[]) => Plan;
+  /** Turn the barrier's awaited OUTPUT (`foreign`) into the next Plan. `headRows` is the drained
+   *  head INPUT (empty for a source-form call) — a mid-traversal rejoin needs it to reconstruct the
+   *  parent domain (per-parent identity + carried path/as) and JOIN the ordinal-stamped foreign rows
+   *  back onto it; a source-form resume ignores it. */
+  readonly resume: (foreign: ForeignRow[], headRows: readonly ForeignRow[]) => Plan;
 }
 
 /** A fully-planned traversal: either a single synchronous SQL/write compile (everything in
