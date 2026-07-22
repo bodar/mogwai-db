@@ -2050,6 +2050,12 @@ describe('compiler SQL snapshots', () => {
       .toEqual(['marko']);
   });
 
+  test('nested local() reuses child ordinals and ordered movement rows', () => {
+    const nested = read('g.V(1).local(__.out().local(__.out().order().by("name").limit(1)))');
+    expect(nested.sql.match(/PARTITION BY/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+    expect(nested.sql).toContain('ORDER BY');
+  });
+
   // ---- P2 tail: and/or/union/optional ----
 
   test('and()/or() combine branch predicates; nested where(__.and)', () => {

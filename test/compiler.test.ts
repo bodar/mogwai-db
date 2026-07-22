@@ -918,6 +918,10 @@ describe('compiler execution semantics', () => {
     expect(() => compile('g.V().local(__.out().in().simplePath()).path()', {})).toThrow('not yet supported');
     expect(run(seededStore(), 'g.V(1).local(__.out()).values("name")').map((r) => r.v).sort())
       .toEqual(['josh', 'lop', 'vadas']);
+    // Nested local() re-enters the same child compiler and restores each inner
+    // child scope before the outer local emits its rows.
+    expect(run(seededStore(), 'g.V(1).local(__.out().local(__.out().order().by("name").limit(1))).values("name")').map((r) => r.v))
+      .toEqual(['lop']);
   });
 
   test('sack with two by() modulators throws TinkerPop message', () => {
