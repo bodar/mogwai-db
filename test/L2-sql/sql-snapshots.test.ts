@@ -2040,6 +2040,16 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V().filter(__.out().id()).count()').sql).toContain('EXISTS (SELECT 1');
   });
 
+  test('where child order is per-parent and precedes range/limit before EXISTS', () => {
+    const ordered = read('g.V().where(__.out().hasLabel("person").order().by("name").range(1,2))');
+    expect(ordered.sql).toContain('ROW_NUMBER() OVER (PARTITION BY');
+    expect(ordered.sql).toContain('ORDER BY');
+    expect(ordered.sql).toContain('EXISTS (SELECT 1');
+    const store = seededStore();
+    expect(run(store, 'g.V().where(__.out().hasLabel("person").order().by("name").range(1,2)).values("name")').map((r) => r.v))
+      .toEqual(['marko']);
+  });
+
   // ---- P2 tail: and/or/union/optional ----
 
   test('and()/or() combine branch predicates; nested where(__.and)', () => {

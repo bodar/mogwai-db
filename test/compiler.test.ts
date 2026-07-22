@@ -676,6 +676,8 @@ describe('compiler execution semantics', () => {
       const store = seededStore();
       expect(run(store, 'g.V(1).local(__.outE().limit(1)).inV().values("name")')
         .map((r) => r.v)).toEqual(['vadas']); // edge id 7 precedes edge ids 8 and 9
+      expect(run(store, 'g.V(1).local(__.out().order().by("name").limit(1)).values("name")')
+        .map((r) => r.v)).toEqual(['josh']);
       expect(run(store, 'g.V(1).flatMap(__.out().range(1,3)).values("name")')
         .map((r) => r.v).sort()).toEqual(['josh', 'lop']);
       expect(run(store, 'g.V(1).map(__.out().skip(1)).values("name")')
@@ -712,12 +714,13 @@ describe('compiler execution semantics', () => {
         .toEqual([0, 0, 0, 1, 2, 3]);
     });
 
-    test('remaining child barriers stay explicit deferrals until their generic lowering lands', () => {
+    test('ordered child existence uses the generic child row pipeline', () => {
       expect(read('g.V().local(__.outE().fold())').shape).toEqual({ kind: 'jsonbElementList', elem: 'edge' });
       const lists = run(seededStore(), 'g.V(1).local(__.out().fold())').map((r) => JSON.parse(r.list));
       expect(lists).toHaveLength(1);
       expect(lists[0].map((v: any) => v.id)).toEqual([2, 3, 4]);
-      expect(() => compile('g.V().local(__.out().order().by("name").limit(1))', {})).toThrow('not yet supported');
+      expect(run(seededStore(), 'g.V().where(__.out().order().by("name").limit(1)).values("name")').map((r) => r.v))
+        .toEqual(['josh', 'marko', 'peter']);
     });
 
     test('as() labels a scalar stream; select() reads it back with Pop semantics', () => {
@@ -1299,6 +1302,11 @@ describe('compiler execution semantics', () => {
     // people known by someone
     expect(run(store, 'g.V().hasLabel("person").where(__.inE("knows").count().is(P.gte(1))).values("name")').map((r) => r.v).sort()).toEqual(['josh', 'vadas']);
     expect(run(store, 'g.V().filter(__.out("created")).values("name")').map((r) => r.v).sort()).toEqual(['josh', 'marko', 'peter']);
+    // Child order and slicing are scoped to each parent before EXISTS is tested.
+    expect(run(store, 'g.V().where(__.out().hasLabel("person").order().by("name").range(1,2)).values("name")').map((r) => r.v))
+      .toEqual(['marko']);
+    expect(run(store, 'g.V().not(__.out().hasLabel("person").order().by("name").limit(1)).values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'lop', 'peter', 'ripple', 'vadas']);
   });
 
   test('multi-hop where executes: correlated EXISTS over the path', () => {
