@@ -1173,6 +1173,18 @@ describe('compiler execution semantics', () => {
       .toEqual([35, 32, 29, 27]);
   });
 
+  test('properties().order().by(traversal) sorts numerically, not lexically (TEXT-stored numbers)', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    // bigdecimal rides as TEXT storage class (see compareKey), so a plain ORDER BY sorts it
+    // lexically ("200.0" < "3.0" < "35.0" < "9.0") — the by(traversal) branch must apply
+    // compareKey like the token branch does, giving true numeric order.
+    for (const n of ['9.0', '35.0', '3.0', '200.0']) executeQuery(store, `g.addV('m').property('n',${n}M)`, {});
+    expect(run(store, 'g.V().properties("n").order().by(__.value()).value()').map((r) => r.v))
+      .toEqual(['3.0', '9.0', '35.0', '200.0']);
+    expect(run(store, 'g.V().properties("n").order().by(__.value(), Order.desc).value()').map((r) => r.v))
+      .toEqual(['200.0', '35.0', '9.0', '3.0']);
+  });
+
   test('property aliases select directly or project T.key/T.value/T.id', () => {
     const store = seededStore();
     expect(run(store, 'g.E(11).properties("weight").as("a").select("a").by(T.key)').map((r) => r.v))
