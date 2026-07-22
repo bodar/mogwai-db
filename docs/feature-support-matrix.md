@@ -3,7 +3,7 @@
 What you can rely on. Each step gets one mark based on how much of it works and how
 freely it composes — a ✅ step works **anywhere in a traversal**, however deeply nested,
 not just at the top. Notes call out **only the cases that don't work yet**; if a row has
-no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,263<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,264<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 | Mark | Meaning |
 |---|---|
@@ -43,7 +43,7 @@ so. Kept in sync in the commit that changes support.
 | `hasLabel`, `has(k)`, `has(k,v)`, `has(k,P)`, `has(label,k,v)`, `has(T.label/T.id,…)` | ✅ | |
 | `hasId(…)` | ✅ | |
 | `is(P)` | ✅ | ❌ after `path()` |
-| `where(__.…)` | ✅ | single- & multi-hop, edge-typed hops, `label()`/`not()`, alias-rooted `where(__.as('x')…)` |
+| `where(__.…)` | ✅ | single- & multi-hop, edge-typed hops, alias-rooted `where(__.as('x')…)`, and generic per-parent `order().by(key)` before `limit`/`range`/`skip` in existence children. `not()` shares the same gate. ❌ ordered children using traversal-valued `by()` or path-sensitive forms |
 | `where(P)` / `where('a',P)` | 🟡 | value-compare over a scalar stream works, as does alias-column compare; ❌ some `where(P.op)` forms, `by(key)` on an edge-typed label, `where('a',P)` over a scalar |
 | `and`, `or`, `not`, `filter(__.…)` | ✅ | incl. infix `.and()`/`.or()`. ❌ `filter(rawPredicate)` — use a traversal |
 | `dedup()`, `dedup(labels)` | ✅ | bare, `dedup().by(key/T.id/T.label/scalar traversal)`, `dedup(labels)` by an `as()`-label tuple. ❌ bare `dedup()` after `as()`/path tracking; more than one `by()`; `dedup(labels).by(traversal)` |
@@ -112,7 +112,7 @@ Across all four branch steps, mixed-shape arms (scalar + element + list) merge i
 | `flatMap(__.…)` | ✅ | movement/filter/scalar/`fold()` bodies; over a scalar parent incl. a `V()`/`E()` re-source. ❌ record/group/path bodies |
 | `map(__.…)` | ✅ | 1-to-1, first-EMITTED result. Over a scalar parent it takes first even when the inner traversal **fans out** (`map(__.union(a,b))` → arm 0; `map(__.V().values('k'))` → element-id order) via the canonical emission-order substrate. `flatMap`/`local` emit all. 🚫 residual take-first (fail-closed): a fan-out arm at a `path().by()` position; ❌ alias/select/structured bodies |
 | `choose(fn).option(k, body)…` | 🟡 | scalar option-map, including nested scalar-valued option maps inside `map`/`local`/`flatMap` child traversals. ❌ no `Pick.none` default; list/element/mixed-shape bodies; identity/discard/fail bodies; `Pick.unproductive`/`any`; a `T`-token choice over a scalar parent |
-| `local(…)` | 🟡 | one-child `all` policy: movement, slices, `dedup`, scalar transforms/reducers, `fold()`; over a scalar parent. ❌ `order()`; nested-traversal/record/group/path/match/union bodies; sack |
+| `local(…)` | 🟡 | one-child `all` policy: movement, slices, per-parent `order().by(key)`, `dedup`, scalar transforms/reducers, `fold()`; over a scalar parent. ❌ traversal-valued `order().by()`, nested-traversal/record/group/path/match/union bodies; sack |
 
 ## 6. Recursion (`repeat`)
 

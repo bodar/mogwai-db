@@ -173,7 +173,11 @@ const CHILD_SCALAR_ROW_STEPS = new Set([
   'count', 'sum', 'min', 'max', 'mean',
 ]);
 const CHILD_SCALAR_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
-const CHILD_ELEMENT_ROW_STEPS = new Set(['limit', 'skip', 'range', 'dedup']);
+// Row operators that can be scoped to one parent. `order()` is included here so
+// an existence consumer can observe the same ordered/sliced child rows as a
+// normal child cardinality consumer; the emitter mints the per-parent encounter
+// before applying the following slice.
+const CHILD_ELEMENT_ROW_STEPS = new Set(['order', 'limit', 'skip', 'range', 'dedup']);
 const SHARED_SCALAR_CHILD_STEPS = new Set([
   ...SCALAR_TRANSFORMS, 'is', 'order', 'limit', 'skip', 'range', 'tail', 'dedup',
 ]);
@@ -1089,6 +1093,17 @@ function compileElementChildRows(
   let end = prefixed;
   for (const step of parts.suffix) {
     const p = end.rel.as('p');
+    if (step.name === 'order') {
+      const n = (end.elem === 'edge' ? edges : nodes).as('n');
+      const ordered = carriedWith(end.carried, { encounter: 'encounter' });
+      const orderExpr = elementOrderSql(end, n, step);
+      const rank = q`ROW_NUMBER() OVER (PARTITION BY ${p.c[pushed.frame.ordinal]} ORDER BY ${orderExpr}, ${p.c.id})`;
+      end = advance(end,
+        q`SELECT ${p.c.id} AS id${carryFragMint(ordered, p, 'encounter', rank)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`,
+        { encounter: 'encounter' },
+      );
+      continue;
+    }
     if (step.name === 'dedup') {
       end = advance(end, q`SELECT DISTINCT ${p.c.id} AS id${carryFrag(end.carried, p)} FROM ${p}`);
       continue;
@@ -1098,7 +1113,7 @@ function compileElementChildRows(
       : { offset: 0, limit: Number(step.args[0]) };
     const cols = carriedCols(end.carried);
     const r = derived(
-      q`SELECT ${p.c.id} AS id${carryFrag(end.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${p.c[pushed.frame.ordinal]} ORDER BY ${p.c.id}) AS rn FROM ${p}`,
+      q`SELECT ${p.c.id} AS id${carryFrag(end.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${p.c[pushed.frame.ordinal]} ORDER BY ${end.carried.encounter ? p.c[end.carried.encounter] : p.c.id}) AS rn FROM ${p}`,
       ['id', ...cols, 'rn'],
       'r',
     );
