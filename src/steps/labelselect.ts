@@ -113,7 +113,7 @@ export function popIsListResult(entry: AliasEntry, pop: string): boolean {
 export const historyValues = (col: Expression): Expression =>
   q`(SELECT jsonb_group_array(je.value ->> '$.v') FROM json_each(${col}) je)`;
 
-const historyPropertyValues = (col: Expression): Expression =>
+export const historyPropertyValues = (col: Expression): Expression =>
   q`json(COALESCE((SELECT json_group_array(json(je.value -> '$.v') ORDER BY je.key) FROM json_each(${col}) je), json('[]')))`;
 
 const propertyAliasField = (entry: Expression, field: string): Expression =>
@@ -170,13 +170,13 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
   }
 
   if (isList) {
-    // Pop.all (any label) / Pop.mixed with >1 binding → a List value.
+    // Pop.all (any label) / Pop.mixed with >1 binding → a List value. A pure-property label
+    // is fully handled by the property block above, so this path never sees 'property'.
     if (entry.shapes.size !== 1) throw new Error('select(Pop.all/mixed) over a mixed-shape label history not yet supported');
     const shape = [...entry.shapes][0] as AliasShape;
-      const of: ListOf = shape === 'value' ? { kind: 'scalar', as: entry.as }
-        : (shape === 'node' || shape === 'edge') ? { kind: 'elem', elem: shapeElem(shape) }
-        : shape === 'property' ? { kind: 'property', elem: entry.propertyElem! }
-        : (() => { throw new Error(`select(Pop.all) over a ${shape} label not yet supported`); })();
+    const of: ListOf = shape === 'value' ? { kind: 'scalar', as: entry.as }
+      : (shape === 'node' || shape === 'edge') ? { kind: 'elem', elem: shapeElem(shape) }
+      : (() => { throw new Error(`select(Pop.all) over a ${shape} label not yet supported`); })();
     const rel = s.q.cte(
       q`SELECT ${historyValues(col)} AS list${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,
       ['list', ...carriedCols(carried)],

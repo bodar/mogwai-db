@@ -5,7 +5,7 @@ import { type PStep } from '../strategies.ts';
 import { stepChain } from '../frontend.ts';
 import { aliasElem, aliasIsElement, carryFrag, carriedCols, scopePathCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
 import { aliasId, aliasPresent, aliasScalar, shapeElem } from './alias.ts';
-import { emptyElementLike, historyValues, popEnd, popIsListResult, selectOneFromAlias } from './labelselect.ts';
+import { emptyElementLike, historyPropertyValues, historyValues, popEnd, popIsListResult, selectOneFromAlias } from './labelselect.ts';
 import { carryOf, continueLowering, dispatchShapeTail, pathColumns, recordFieldColumns, toListStream, toPathStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type ListStream, type LoweringResult, type PathStream, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from './stream.ts';
 import { compileFromList } from './list.ts';
 import { type Compiled, type PathPos } from '../render.ts';
@@ -428,7 +428,10 @@ export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, st
         : (shape === 'node' || shape === 'edge') ? { kind: 'elem', elem: shapeElem(shape) }
         : shape === 'property' ? { kind: 'property', elem: entry.propertyElem! }
         : (() => { throw new Error(`select(Pop.all) over a ${shape} label not yet supported`); })();
-      cols.push(q`${historyValues(col)} AS ${`${prefix}_list`}`);
+      // A property list must retain each member's full JSON object (historyPropertyValues,
+      // -> extraction) — the scalar historyValues (->> text) would stringify each property so
+      // framing reads undefined vpid/pk/pv. Mirrors selectOneFromAlias's single-label path.
+      cols.push(q`${(shape === 'property' ? historyPropertyValues : historyValues)(col)} AS ${`${prefix}_list`}`);
       return { key: k, prefix, sub: 'list', of };
     }
     const end = popEnd(pop);
