@@ -11,7 +11,7 @@ import { carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, partitionO
 import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from './stream.ts';
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
-import { childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, pushChildScope, reuseCurrentFrame, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, type ChildParent } from './child.ts';
+import { childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, pushChildScope, reuseCurrentFrame, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows, type ChildParent } from './child.ts';
 
 /** The numeric reducers that terminate a nested-group inner value `by(__.values(x).<r>())`. */
 const SCALAR_REDUCERS = new Set(['sum', 'min', 'max', 'mean']);
@@ -693,8 +693,33 @@ function propertyOrder(s: PropertyStream, step: PStep): PropertyStream {
   if (bys.length > 1) throw new Error('properties().order() supports at most one by() modulator');
   const by = bys[0] ?? [];
   const token = by.find((a: any) => a && typeof a === 'object' && 'token' in a)?.token;
-  const bad = by.find((a: any) => a && typeof a === 'object' && 'nested' in a);
-  if (bad) throw new Error('properties().order().by(traversal) not yet supported');
+  const nested = by.find((a: any) => a && typeof a === 'object' && 'nested' in a)?.nested;
+  if (nested) {
+    const dir = by.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
+    if (dir === 'shuffle') throw new Error('properties().order().by(shuffle) not yet supported');
+    const rows = tryCompileScalarValueRows(s, nested);
+    if (!rows?.stream.carried.encounter) throw new Error('properties().order().by(traversal) requires a scalar child with encounter order');
+    const c = rows.stream.rel.as('c');
+    const ord = rows.frame.ordinal;
+    const firstVal = s.q.cte(
+      q`SELECT ${c.c[ord]} AS ord, ${c.c.v} AS k, ROW_NUMBER() OVER (PARTITION BY ${c.c[ord]} ORDER BY ${c.c[rows.stream.carried.encounter]}) AS rn FROM ${c}`,
+      ['ord', 'k', 'rn'],
+    );
+    const d = rows.frame.domain.as('d');
+    const f = firstVal.as('f');
+    const carried = carriedWith(s.carried, { encounter: 'encounter' });
+    const sortKey = dir === 'desc' ? q`${f.c.k} DESC` : q`${f.c.k} ASC`;
+    const propertyTie = s.ownerElem === 'node'
+      ? [q`${d.c.vpid} ASC`]
+      : [q`${d.c.owner} ASC`, q`${d.c.pk} ASC`, q`${d.c.pvtype} ASC`, q`${d.c.pv} ASC`];
+    const orderKey = list([sortKey, ...propertyTie], ', ');
+    const mint = q`ROW_NUMBER() OVER (${partitionOver(carried, d, orderKey)})`;
+    const rel = s.q.cte(
+      q`SELECT ${list(PROPERTY_PAYLOAD.map((col) => d.c[col]), ', ')}${carryFragMint(carried, d, 'encounter', mint)} FROM ${d} LEFT JOIN ${f} ON ${f.c.ord}=${d.c[ord]} AND ${f.c.rn}=1`,
+      [...PROPERTY_PAYLOAD, ...carriedCols(carried)],
+    );
+    return toPropertyStream({ ...carryOf(s), carried }, rel, s.ownerElem);
+  }
   if (token && token !== 'key' && token !== 'value') throw new Error(`properties().order().by(T.${token}) not yet supported`);
   if (by.some((a: any) => typeof a === 'string')) throw new Error('properties().order().by(key) not yet supported');
   const dir = by.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;

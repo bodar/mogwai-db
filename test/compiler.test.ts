@@ -1165,6 +1165,14 @@ describe('compiler execution semantics', () => {
       .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
   });
 
+  test('properties().order().by(traversal) uses the generic property child scope', () => {
+    const store = seededStore();
+    expect(run(store, 'g.V().hasLabel("person").properties("name").order().by(__.value()).value()').map((r) => r.v))
+      .toEqual(['josh', 'marko', 'peter', 'vadas']);
+    expect(run(store, 'g.V().hasLabel("person").properties("age").order().by(__.value(), Order.desc).value()').map((r) => r.v))
+      .toEqual([35, 32, 29, 27]);
+  });
+
   test('property aliases select directly or project T.key/T.value/T.id', () => {
     const store = seededStore();
     expect(run(store, 'g.E(11).properties("weight").as("a").select("a").by(T.key)').map((r) => r.v))

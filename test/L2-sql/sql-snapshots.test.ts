@@ -1668,6 +1668,13 @@ describe('compiler SQL snapshots', () => {
     expect(natural.sql).toContain('ORDER BY p.pk ASC');
   });
 
+  test('PropertyStream order by traversal uses a per-property scalar child and LEFT JOIN', () => {
+    const ordered = read('g.V().properties("name").order().by(__.value())');
+    expect(ordered.sql).toContain('ROW_NUMBER() OVER (PARTITION BY');
+    expect(ordered.sql).toContain('LEFT JOIN');
+    expect(ordered.sql).toContain('ORDER BY');
+  });
+
   test('property aliases rehydrate PropertyStream or project typed fields', () => {
     const direct = read('g.E(11).properties("weight").as("a").select("a").value()');
     expect(direct.sql).toContain("json_object('vpid'");
