@@ -12,6 +12,7 @@ import { q, type Expression, type Query, type Relation } from './q.ts';
  * both ListStream and map/record fields must agree on how GraphBinary frames it. */
 export type ListOf =
   | { kind: 'elem'; elem: 'node' | 'edge' }
+  | { kind: 'property'; elem: 'node' | 'edge' }
   // `typed`: items are self-describing {t,v} ValueNodes (a stored typed collection),
   // so unfold carries each element's own vtype and framing routes through frameTypedNode
   // (not the single `as` tag). A computed scalar list (fold of scalars) stays untyped.

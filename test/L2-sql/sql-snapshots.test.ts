@@ -1686,6 +1686,12 @@ describe('compiler SQL snapshots', () => {
     expect(value.shape).toEqual({ kind: 'value', as: undefined, perRowType: true });
   });
 
+  test('property alias Pop.all becomes a re-enterable property list', () => {
+    const all = read('g.E(11).properties("weight").as("a").select(Pop.all,"a")');
+    expect(all.sql).toContain("json_group_array(json(je.value -> '$.v')");
+    expect(all.shape).toEqual({ kind: 'jsonbList', of: { kind: 'property', elem: 'edge' } });
+  });
+
   // ---- P2c-2 aggregation: group/groupCount + nested by() ----
 
   test('group().by(key).by(__.tail()) → element-last, ORDER BY key (assembly path)', () => {

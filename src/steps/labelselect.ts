@@ -113,6 +113,9 @@ export function popIsListResult(entry: AliasEntry, pop: string): boolean {
 export const historyValues = (col: Expression): Expression =>
   q`(SELECT jsonb_group_array(je.value ->> '$.v') FROM json_each(${col}) je)`;
 
+const historyPropertyValues = (col: Expression): Expression =>
+  q`json(COALESCE((SELECT json_group_array(json(je.value -> '$.v') ORDER BY je.key) FROM json_each(${col}) je), json('[]')))`;
+
 const propertyAliasField = (entry: Expression, field: string): Expression =>
   q`json_extract(${entry}, ${value(`$.v.${field}`)})`;
 
@@ -146,7 +149,13 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
   const end = pop === 'first' ? 'first' : 'last';
 
   if (entry.shapes.size === 1 && entry.shapes.has('property')) {
-    if (isList) throw new Error('select(Pop.all/mixed) over a property label not yet supported');
+    if (isList) {
+      const rel = s.q.cte(
+        q`SELECT ${historyPropertyValues(col)} AS list${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,
+        ['list', ...carriedCols(carried)],
+      );
+      return toListStream(carry, rel, { kind: 'property', elem: entry.propertyElem! });
+    }
     const by = step.bys?.[0]?.[0];
     if (by === undefined) return selectPropertyAlias(s, entry, col, end);
     if (!(by && typeof by === 'object' && 'token' in by && (by.token === 'key' || by.token === 'value' || by.token === 'id')))
@@ -164,9 +173,10 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
     // Pop.all (any label) / Pop.mixed with >1 binding → a List value.
     if (entry.shapes.size !== 1) throw new Error('select(Pop.all/mixed) over a mixed-shape label history not yet supported');
     const shape = [...entry.shapes][0] as AliasShape;
-    const of: ListOf = shape === 'value' ? { kind: 'scalar', as: entry.as }
-      : (shape === 'node' || shape === 'edge') ? { kind: 'elem', elem: shapeElem(shape) }
-      : (() => { throw new Error(`select(Pop.all) over a ${shape} label not yet supported`); })();
+      const of: ListOf = shape === 'value' ? { kind: 'scalar', as: entry.as }
+        : (shape === 'node' || shape === 'edge') ? { kind: 'elem', elem: shapeElem(shape) }
+        : shape === 'property' ? { kind: 'property', elem: entry.propertyElem! }
+        : (() => { throw new Error(`select(Pop.all) over a ${shape} label not yet supported`); })();
     const rel = s.q.cte(
       q`SELECT ${historyValues(col)} AS list${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,
       ['list', ...carriedCols(carried)],

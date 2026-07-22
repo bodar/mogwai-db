@@ -124,6 +124,7 @@ export function materializeListRoot(stream: ListStream): Compiled {
   const as = stream.of.kind === 'scalar' ? stream.of.as : undefined;
   const shape: Shape = stream.set
     ? { kind: 'jsonbSet', typed }
+    : stream.of.kind === 'property' ? { kind: 'jsonbList', of: stream.of }
     : typed ? { kind: 'jsonbList', typed } : as ? { kind: 'jsonbList', as } : { kind: 'jsonbList' };
   return materializeRoot(stream.q, q`SELECT json(${c.c.list}) AS list FROM ${c}`, shape);
 }

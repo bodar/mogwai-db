@@ -9,7 +9,7 @@ import { q, value, raw, list, empty, type Expression, type Relation } from '../q
 import { predicateSql, scalarTx, compareKey } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { carryOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toResultStream, toScalarStream, mapOfToListOf, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type ScalarStream, type MapStream, type ShapeTailFn } from './stream.ts';
+import { carryOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, mapOfToListOf, PROPERTY_PAYLOAD, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type PropertyStream, type ScalarStream, type MapStream, type ShapeTailFn } from './stream.ts';
 import { carryFrag, carriedCols, type ElementStream } from './context.ts';
 import { type Compiled } from '../render.ts';
 import { compileReadCompiled } from './index.ts';
@@ -70,7 +70,7 @@ function lowerListReducer(s: ListStream, name: string): ScalarStream {
  * list row's carried schema; global folds simply have an empty schema, while child
  * folds and record fields preserve their parent traverser identity through re-entry.
  */
-export function compileUnfold(s: ListStream): ElementStream | ScalarStream | ListStream {
+export function compileUnfold(s: ListStream): ElementStream | PropertyStream | ScalarStream | ListStream {
   const c = carryOf(s);
   const p = s.rel.as('c');
   const explode = (col: string): Relation => s.q.cte(
@@ -86,6 +86,13 @@ export function compileUnfold(s: ListStream): ElementStream | ScalarStream | Lis
   if (s.of.kind === 'list') {
     const rel = explode('list');
     return toListStream(c, rel, s.of.of);
+  }
+  if (s.of.kind === 'property') {
+    const rel = s.q.cte(
+      q`SELECT json_extract(je.value, '$.vpid') AS vpid, json_extract(je.value, '$.owner') AS owner, json_extract(je.value, '$.ownerLabel') AS ownerLabel, json_extract(je.value, '$.pk') AS pk, json_extract(je.value, '$.pv') AS pv, json_extract(je.value, '$.pvtype') AS pvtype, json_extract(je.value, '$.pmeta') AS pmeta${carryFrag(s.carried, p)} FROM ${p}, json_each(${p.c.list}) je ORDER BY je.key`,
+      [...PROPERTY_PAYLOAD, ...carriedCols(s.carried)],
+    );
+    return toPropertyStream(c, rel, s.of.elem);
   }
   // A stored TYPED list (of.typed): each element is a self-describing {t,v} node. Explode
   // extracting the payload (`->> '$.v'`) AND the per-element type (`->> '$.t'`) into a

@@ -183,6 +183,7 @@ function mapEntryBuffer(row: any, keyOf: MapOf, valOf: MapOf): Buffer {
 function listFieldBuffer(json: string, of: import('./render.ts').ListOf): Buffer {
   const items = JSON.parse(json);
   if (of.kind === 'elem') return listBuffer(items.map(of.elem === 'edge' ? rowEdge : rowVertex));
+  if (of.kind === 'property') return listBuffer(items.map((x: any) => vertexPropertyBuffer(x.vpid ?? `${x.owner}:${x.pk}`, x.pk, frameStoredValue(x.pv, x.pvtype ?? null), x.pmeta ? (typeof x.pmeta === 'string' ? JSON.parse(x.pmeta) : x.pmeta) : null)));
   return ioc.listSerializer.serialize(items);
 }
 
@@ -369,6 +370,7 @@ function frameListOf(json: string, of: ListOf): Buffer {
   if (json == null) return frameValue(null, undefined);
   const items = JSON.parse(json);
   if (of.kind === 'elem') return listBuffer(items.map(of.elem === 'edge' ? rowEdge : rowVertex));
+  if (of.kind === 'property') return listBuffer(items.map((x: any) => vertexPropertyBuffer(x.vpid ?? `${x.owner}:${x.pk}`, x.pk, frameStoredValue(x.pv, x.pvtype ?? null), x.pmeta ? (typeof x.pmeta === 'string' ? JSON.parse(x.pmeta) : x.pmeta) : null)));
   if (of.kind === 'scalar')
     return of.typed ? listBuffer(items.map(frameTypedNode))
       : of.as ? listBuffer(items.map((x: any) => frameValue(x, of.as)))
