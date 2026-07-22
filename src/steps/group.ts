@@ -647,6 +647,40 @@ function propertyScalar(s: PropertyStream, col: 'vpid' | 'pk' | 'pv'): ScalarStr
   return toScalarStream({ ...carryOf(s), carried }, rel, undefined, { result: 'value' });
 }
 
+/** Deduplicate property traversers while retaining one complete property row.
+ * VertexProperty identity is its real vpid. Edge Property has no id and its equality is
+ * key/value-based, so repeated edge properties with the same key and value collapse even
+ * when they belong to different edges. `by(value)` deliberately changes the key to the
+ * property value, matching dedup().by() on the property object. */
+function propertyDedup(s: PropertyStream, step: PStep): PropertyStream {
+  if (s.carried.aliases.size > 0 || s.carried.path)
+    throw new Error('properties().dedup() after as()/path() not yet supported (property-distinct semantics)');
+  const bys = step.bys ?? [];
+  if (bys.length > 1) throw new Error('properties().dedup() supports at most one by() modulator');
+  const by = bys[0]?.[0];
+  let key: Expression;
+  if (by === undefined) {
+    key = s.ownerElem === 'node' ? q`p.vpid` : q`p.pk, p.pv`;
+  } else if (by && typeof by === 'object' && 'token' in by && by.token === 'value') {
+    key = q`p.pv`;
+  } else {
+    throw new Error('properties().dedup().by() supports only value');
+  }
+  const p = s.rel.as('p');
+  const partition = key;
+  const ranked = s.q.cte(
+    q`SELECT ${list(PROPERTY_PAYLOAD.map((c) => p.c[c]), ', ')}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${partition} ORDER BY ${p.c.owner}, ${p.c.pk}, ${p.c.vpid}) AS rn FROM ${p}`,
+    [...PROPERTY_PAYLOAD, ...carriedCols(s.carried), 'rn'],
+  );
+  const r = ranked.as('r');
+  const carried = carriedCols(s.carried).map((c) => c === s.carried.bulk ? q`1 AS ${c}` : q`${r.c[c]}`);
+  const rel = s.q.cte(
+    q`SELECT ${list(PROPERTY_PAYLOAD.map((c) => r.c[c]), ', ')}${carried.length ? q`, ${list(carried, ', ')}` : empty} FROM ${r} WHERE ${r.c.rn}=1`,
+    [...PROPERTY_PAYLOAD, ...carriedCols(s.carried)],
+  );
+  return toPropertyStream(carryOf(s), rel, s.ownerElem);
+}
+
 /** Consume a PropertyStream. Only property-specific operations live here; once a
  * step changes shape it re-enters the same root dispatcher as every other stream. */
 const PROPERTY_SCALAR_COL = { key: 'pk', value: 'pv', id: 'vpid' } as const;
@@ -656,6 +690,9 @@ const propertyFilter: ShapeTailFn<PropertyStream> = (s, step, _steps, at) =>
 
 const propertyScalarStep: ShapeTailFn<PropertyStream> = (s, step, _steps, at) =>
   continueLowering(propertyScalar(s, PROPERTY_SCALAR_COL[step.name as keyof typeof PROPERTY_SCALAR_COL]), at + 1);
+
+const propertyDedupStep: ShapeTailFn<PropertyStream> = (s, step, _steps, at) =>
+  continueLowering(propertyDedup(s, step), at + 1);
 
 const propertyGroup: ShapeTailFn<PropertyStream> = (s, step, _steps, at) => {
   // A live property parent — its by() sub-traversals lower through the generic child
@@ -692,6 +729,7 @@ const propertyElement: ShapeTailFn<PropertyStream> = (s, _step, _steps, at) => {
 
 const PROPERTY_TAIL = new Map<string, ShapeTailFn<PropertyStream>>([
   ['has', propertyFilter], ['hasKey', propertyFilter], ['hasValue', propertyFilter],
+  ['dedup', propertyDedupStep],
   ['key', propertyScalarStep], ['value', propertyScalarStep], ['id', propertyScalarStep],
   ['count', (s, _step, _steps, at) => continueLowering(lowerGlobalCount(s), at + 1)],
   ['group', propertyGroup], ['groupCount', propertyGroup],
