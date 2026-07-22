@@ -103,3 +103,23 @@ Feature: mogwai addendum — nested branch arms (a branch inside a branch arm)
     Then the result should be unordered
       | result |
       | m[{"person":"l[n/a,n/a,n/a,n/a]","software":"l[java,java]"}] |
+
+  # Option-map choose() is scalar-valued, but it must also be recognized when nested
+  # inside the generic child scope used by map()/local()/flatMap().
+
+  @gap:nested-branch
+  Scenario: g_V_mapXchooseXvaluesXageX_optionXbetweenX26_30X_valuesXnameXX_optionXnone_constantXunknownXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().map(__.choose(__.values("age")).option(between(26,30), __.values("name")).option(Pick.none, __.constant("unknown")))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | marko |
+      | vadas |
+      | unknown |
+      | unknown |
+      | unknown |
+      | unknown |

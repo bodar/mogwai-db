@@ -2301,6 +2301,11 @@ describe('compiler SQL snapshots', () => {
       .toContain('COUNT(c.id) AS v');
     expect(read('g.V().choose(T.label).option("person", __.constant("p")).option(Pick.none, __.constant("o")).fold()').shape)
       .toEqual({ kind: 'jsonbList' });
+
+    const nested = read('g.V().map(__.choose(__.values("age")).option(P.between(26,30), __.values("name")).option(Pick.none, __.constant("unknown")))');
+    expect(nested.sql).toContain('CASE WHEN');
+    expect(nested.sql).toContain('PARTITION BY');
+    expect(nested.sql).toContain('m0_present');
   });
 
   test('option-map choose deferrals fail closed', () => {
