@@ -25,10 +25,10 @@ import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../fast-paths.ts';
 import { EMPTY_REGISTRY } from '../services/registry.ts';
 import type { ServiceRegistry } from '../services/types.ts';
 import { lowerScalarRows } from './scalar.ts';
-import { seedCall, isBarrierPoint, type BarrierPoint } from './call.ts';
+import { seedCall, isBarrierPoint, type BarrierPoint, type MidBarrierPoint } from './call.ts';
 import { materializeFinal } from './materialize.ts';
 import { compileFromVariant } from './variant.ts';
-import { compileFromForeign, landForeignElements } from './foreign.ts';
+import { compileFromForeign, landForeignElements, resumeMidBarrier } from './foreign.ts';
 import type { SegmentPlan } from '../segment.ts';
 import type { ForeignRow } from '../services/types.ts';
 import type { Carry } from './context.ts';
@@ -442,6 +442,34 @@ function segmentFromBarrier(bp: BarrierPoint, params: Record<string, any>, regis
   };
 }
 
+/** Build a SegmentPlan from a MID-traversal barrier call() (V().call(federate, …)). Unlike the
+ *  source form, `head` is a real Compiled (each parent's id/label/props + ordinal + injected value);
+ *  the executor drains it and hands the rows to apply, which runs the sibling once per DISTINCT
+ *  injected value (batched) and fans the results back over the sharing parents (stamping each
+ *  returned row's `ordinal`). resume then just lands that already-per-parent-fanned pool as a
+ *  foreign root and continues restSteps — the fan-out + zero-match filtering happened in apply's
+ *  JS (a parent that matched nothing simply contributes no rows → flatMap semantics). path()/as()
+ *  that SPANS the call is deferred: the parent's carried alias/path columns are not yet threaded
+ *  through the segment boundary, so a parent carrying them fails closed with a clear deferral. */
+function segmentFromMidBarrier(bp: MidBarrierPoint, federationDepth: number): SegmentPlan {
+  if (bp.parent.carried.aliases.size > 0 || bp.parent.carried.path)
+    throw new Error('path()/as() spanning a mid-traversal federated call() is not yet supported (Phase 6b) — the federated result is a detached reference; select the value before the call or run it at the source position');
+  return {
+    kind: 'segment',
+    head: bp.head,
+    params: bp.params,
+    apply: bp.apply,
+    resume: (foreign: ForeignRow[], headRows: readonly ForeignRow[]) => {
+      const carry: Carry = { q: new Query(), params: bp.compileParams, registry: bp.registry, federationDepth, carried: { aliases: new Map(), origins: [] } };
+      const elem = foreign[0]?.kind === 'edge' ? 'edge' : bp.parent.elem;
+      // Scatter the batched pool back over the parents by the injected value (flatMap: a parent
+      // that matched nothing drops), then continue the chain from the rejoined foreign stream.
+      const seed = resumeMidBarrier(carry, foreign, headRows, elem, bp.injection);
+      return { kind: 'sql', compiled: materializeFinal(lowerStepsStrict(seed, bp.restSteps, bp.restAt)) };
+    },
+  };
+}
+
 /** A read traversal: prefix fold + shaped lowering loop.
  *  `sackInit` (from withSack()) seeds the carried sack column at the source. */
 export function compileRead(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS, registry: ServiceRegistry = EMPTY_REGISTRY, federationDepth = 0): Compiled | SegmentPlan {
@@ -476,7 +504,14 @@ export function compileRead(steps: PStep[], params: Record<string, any> = {}, sa
   // the plain UNION-ALL movement. Threaded via fastPaths so each movement StepFn reads one flag.
   const fp: FastPathConfig = { ...fastPaths, movementCollapse: fastPaths.movementCollapse && chainCollapseSafe(steps) && !wantsEncounter };
   const { st, stop } = buildPrefix(steps, params, new Query(), sackInit, fp, wantsEncounter, registry);
-  return materializeFinal(lowerStepsStrict(st, steps, stop));
+  // Thread this compile's federation depth onto the seed (a Carry field, propagated by every
+  // StepFn's {...st} spread like registry/fastPaths) so a mid-traversal barrier call()'s apply
+  // hops the sibling at depth+1.
+  const seeded = federationDepth ? { ...st, federationDepth } : st;
+  const lowered = lowerSteps(seeded, steps, stop);
+  // A mid-traversal barrier call() (V().call(federate)) suspended the fold — build its SegmentPlan.
+  if (isSuspension(lowered)) return segmentFromMidBarrier(lowered.point as MidBarrierPoint, federationDepth);
+  return materializeFinal(lowered);
 }
 
 /** compileRead narrowed to a synchronous Compiled — for INNER sub-traversal compiles (a

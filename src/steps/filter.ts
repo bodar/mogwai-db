@@ -10,6 +10,7 @@ import { aliasAppend, aliasId, aliasSeed, elemEntry, elemShape } from './alias.t
 import { tryCombineByChildExistence, tryCompileScalarValueRows, tryFilterByChildExistence } from './child.ts';
 import { directElementModulation, elementOrderSql } from './modulation.ts';
 import { type PStep } from '../strategies.ts';
+import { isInjectionMarker, injectedValues } from '../injection.ts';
 
 // ---------- filter (predicates over the current traverser) ----------
 
@@ -123,7 +124,17 @@ export const has: StepFn = (s, st) => {
     conds.push(labelIn('n.label', [a[0]]));
     a = a.slice(1);
   }
-  const [key, val] = a;
+  let [key, val] = a;
+  // Mid-traversal federate injection: a `T.value` marker in the VALUE-operand position of
+  // has(key, T.value) is replaced by a within() over the distinct injected values supplied in
+  // params (federate.ts's sibling hop). The marker is inert as a real value operand, so this is
+  // zero-cost for every ordinary query; only a federate hop supplies INJECT_VALUES_KEY. Missing
+  // values (marker present but no injection) falls through to the generic path → no match, a clear
+  // (empty) result rather than a mis-execution.
+  if (isInjectionMarker(val)) {
+    const vals = injectedValues(st.params);
+    if (vals) val = { op: 'within', values: vals } as Pred;
+  }
   if (key && typeof key === 'object' && 'token' in key) {
     // has(T.label|T.id, v|P): predicate over the label name / external id. Routing
     // through predicateSql accepts both a bare value (→ equality) and a P/TextP.

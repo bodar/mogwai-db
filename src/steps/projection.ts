@@ -399,7 +399,11 @@ const TAIL = new Map<string, ShapeTailFn<ElementStream>>([
   // call(service, …) mid-traversal: the service produces a per-parent Stream (e.g.
   // tinker.degree.centrality → a scalar per input). lowerCall pushes the child scope via
   // the service; the resulting stream re-enters the generic lowering loop.
-  ['call', (st, step, _steps, stop) => continueLowering(lowerCall(step, st, ROOT_SCOPE), stop + 1)],
+  // lowerCall returns a LoweringResult directly: continueLowering for a 'stream' service (it
+  // advances past the call), or a LoweringSuspension for a mid-traversal 'barrier' (federate) —
+  // relayed unchanged up through lowerSteps to compileRead. The stop+1 advance lives inside
+  // lowerCall now (it knows whether it consumed the step or suspended).
+  ['call', (st, step, steps, stop) => lowerCall(step, st, ROOT_SCOPE, steps, stop)],
   ...[...SCALAR_PROJ].map((n): [string, ShapeTailFn<ElementStream>] => [n, tailScalarProj]),
 ]);
 

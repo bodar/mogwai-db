@@ -51,8 +51,8 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
     // A discard trailing a federated source (g.call(...).iterate()) applies to the RESUMED leaf,
     // so wrap resume rather than the segment itself (which carries no shape).
     if (!discard) return read;
-    return { ...read, resume: (foreign) => {
-      const p = read.resume(foreign);
+    return { ...read, resume: (foreign, headRows) => {
+      const p = read.resume(foreign, headRows);
       return p.kind === 'sql' ? { kind: 'sql', compiled: applyDiscard(p.compiled) } : p;
     } };
   }
