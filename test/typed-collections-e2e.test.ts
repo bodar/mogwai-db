@@ -3,6 +3,7 @@ import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { executeQuery } from './support/executor.ts';
 import { ioc } from '../src/io.ts';
+import { MODERN_SEED } from './fixtures/seed-modern.ts';
 
 // End-to-end fidelity: write a typed collection property, read it back over GraphBinary,
 // and assert every element/key survived write→storage→read→frame. Two lenses:
@@ -185,5 +186,26 @@ describe('#5 whole-element framing carries scalar property types', () => {
     expect(e.properties[0].value instanceof Date).toBe(true);
     const m = dec(rawList(s, "g.E().valueMap()")) as Map<string, any[]>;
     expect(m.get('since')![0] instanceof Date).toBe(true);
+  });
+});
+
+// Review finding B1: a RECORD select (>1 distinct label) whose property label is read at
+// Pop.all must frame each member as a real VertexProperty, exactly like the single-label
+// path. The record path formerly reused the scalar `historyValues` (->> text extraction),
+// which coerced each property object to a JSON STRING → framing read undefined vpid/pk/pv.
+describe('property alias Pop.all in a record select frames real VertexProperties', () => {
+  const seeded = () => {
+    const s = store();
+    for (const q of MODERN_SEED) executeQuery(s, q, {});
+    return s;
+  };
+  test('select(Pop.all, propLabel, otherLabel) frames the property list, not string garbage', () => {
+    const s = seeded();
+    // marko (V(1)) name property aliased at 'p'; a second label 'q' makes it a record select.
+    const rec = one(s, "g.V(1).as('q').properties('name').as('p').select(Pop.all, 'p', 'q')") as Map<string, any>;
+    const vps = rec.get('p') as any[];
+    expect(vps.length).toBe(1);
+    expect(vps[0].label).toBe('name');
+    expect(vps[0].value).toBe('marko');
   });
 });
