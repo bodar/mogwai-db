@@ -3,7 +3,7 @@
 What you can rely on. Each step gets one mark based on how much of it works and how
 freely it composes — a ✅ step works **anywhere in a traversal**, however deeply nested,
 not just at the top. Notes call out **only the cases that don't work yet**; if a row has
-no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,252<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,258<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 | Mark | Meaning |
 |---|---|
@@ -78,7 +78,7 @@ back to a (correct, unindexed) `LIKE` scan — never fail-closed. `regex` is a p
 |---|:--:|---|
 | `values(k…)`, `id()`, `label()`, `count()` | ✅ | ids frame as `COALESCE(uid,id)` |
 | `valueMap`, `elementMap` | ✅ | each value framed by its stored type; re-enterable as a per-element map (`select(Column.keys/values)`, `count()`, `is(typeOf(MAP))`, and `valueMap().unfold()` → a per-entry Map.Entry stream, incl. `map(__.select(keys/values))`, compose). ❌ `elementMap().unfold()` re-entry; heterogeneous element-value maps |
-| `properties(k…)` [`.key`/`.value`/`.element`/`.id`/`.label`/`.count`] | ✅ | full property stream with owner/key/value/meta, all re-enterable; real VP id + meta. ❌ `dedup()`/`order()` before a projection |
+| `properties(k…)` [`.key`/`.value`/`.element`/`.id`/`.label`/`.count`] | ✅ | full property stream with owner/key/value/meta, all re-enterable; `dedup()` keeps VertexProperty identity (`vpid`) and edge key/value identity; `dedup().by(value)` deduplicates property values. ❌ `order()` before a projection; `dedup()` after `as()`/path tracking; other `by()` modulators |
 | `select('a')`, multi-`select`, `project(…)` | ✅ | single-label select → scalar/element/typed-list; multi-`select`/`project` → per-traverser record whose fields each re-enter; `limit`/`range`/`skip`/`tail` with `Scope.local` slice fields; `project(…)` over a scalar parent. ❌ record-level `order`/`dedup`/`fold`/`where`; a scalar-parent `project` field needing element output |
 | `select(Column.values/keys)` | ✅ | over a group, scalar record, or per-element valueMap/elementMap. ❌ heterogeneous element-value lists; raw Map params |
 | chained projections (`values().count()`, `project().select()`, `valueMap().select()`) | ✅ | projections retype and re-enter one step at a time. ❌ heterogeneous structured values |

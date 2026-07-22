@@ -1133,6 +1133,19 @@ describe('compiler execution semantics', () => {
     expect(run(store, 'g.E(7).properties().element().count()').map((r) => r.v)).toEqual([1]);
   });
 
+  test('properties().dedup() uses property identity and by(value) uses the value key', () => {
+    const store = seededStore();
+    // both() repeats owners, but each physical vertex property remains one traverser.
+    expect(run(store, 'g.V().both().properties().dedup().count()').map((r) => r.v)).toEqual([12]);
+    // Edge Property has no vpid; equal key/value properties collapse across edges.
+    expect(run(store, 'g.V().bothE().properties().dedup().count()').map((r) => r.v)).toEqual([4]);
+
+    const duplicate = new GraphStore(new BunSqlite(':memory:'));
+    executeQuery(duplicate, "g.addV('person').property('name','josh').addV('person').property('name','josh').addV('person').property('name','josh')", {});
+    expect(run(duplicate, 'g.V().properties("name").dedup().count()').map((r) => r.v)).toEqual([3]);
+    expect(run(duplicate, 'g.V().properties("name").dedup().by(value).count()').map((r) => r.v)).toEqual([1]);
+  });
+
   test('group().by(name).by(tail) yields one vertex per name (gate #1 rows)', () => {
     const store = seededStore();
     const rows = run(store, 'g.V().group().by("name").by(__.tail())');

@@ -1646,6 +1646,17 @@ describe('compiler SQL snapshots', () => {
     expect(read('g.V(1).as("a").properties().element().select("a")').shape).toEqual({ kind: 'vertex' });
   });
 
+  test('PropertyStream dedup partitions physical identity or property value', () => {
+    const bare = read('g.V().properties().dedup().count()');
+    expect(bare.sql).toContain('ROW_NUMBER() OVER (PARTITION BY p.vpid');
+    expect(bare.sql).toContain('WHERE r.rn=1');
+    const byValue = read('g.V().properties().dedup().by(value).count()');
+    expect(byValue.sql).toContain('ROW_NUMBER() OVER (PARTITION BY p.pv');
+    expect(byValue.sql).toContain('ROW_NUMBER() OVER (PARTITION BY p.pv');
+    const edge = read('g.E().properties().dedup().count()');
+    expect(edge.sql).toContain('PARTITION BY p.pk, p.pv');
+  });
+
   // ---- P2c-2 aggregation: group/groupCount + nested by() ----
 
   test('group().by(key).by(__.tail()) → element-last, ORDER BY key (assembly path)', () => {
