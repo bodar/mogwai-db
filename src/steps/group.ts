@@ -629,22 +629,27 @@ function filterProperty(s: PropertyStream, step: PStep): PropertyStream {
 
 function propertyScalar(s: PropertyStream, col: 'vpid' | 'pk' | 'pv'): ScalarStream {
   const p = s.rel.as('p');
+  // value() carries the value's stored type (pvtype) as the scalar's vtype, so a downstream
+  // numeric comparison/order over a TEXT-stored number (long/bigdecimal/…) can compareKey it.
+  // key()/id() are plain strings/ids — no vtype needed.
+  const vtag = col === 'pv' ? { vtype: 'vtype' } : {};
+  const vsel = col === 'pv' ? q`, ${p.c.pvtype} AS vtype` : empty;
   // In a child scope (a property-group by(__.key()/value())) the correlated cardinality
   // policy needs a per-origin encounter marker, exactly as lowerScalarProjection mints for
   // element().values(). key()/value() are 1:1 with the property, so any deterministic order
   // suffices. At root (no live origin) the projection stays unchanged.
   const origin = s.carried.origins.at(-1);
   if (!origin) {
-    const rel = s.q.cte(q`SELECT ${p.c[col]} AS v${carryFrag(s.carried, p)} FROM ${p}`, ['v', ...carriedCols(s.carried)]);
-    return toScalarStream(carryOf(s), rel, undefined, { result: 'value' });
+    const rel = s.q.cte(q`SELECT ${p.c[col]} AS v${vsel}${carryFrag(s.carried, p)} FROM ${p}`, ['v', ...(col === 'pv' ? ['vtype'] : []), ...carriedCols(s.carried)]);
+    return toScalarStream(carryOf(s), rel, undefined, { result: 'value', ...vtag });
   }
   const carried = carriedWith(s.carried, { encounter: 'encounter' });
   const mint = q`ROW_NUMBER() OVER (PARTITION BY ${p.c[origin]} ORDER BY ${p.c[origin]})`;
   const rel = s.q.cte(
-    q`SELECT ${p.c[col]} AS v${carryFragMint(carried, p, 'encounter', mint)} FROM ${p}`,
-    ['v', ...carriedCols(carried)],
+    q`SELECT ${p.c[col]} AS v${vsel}${carryFragMint(carried, p, 'encounter', mint)} FROM ${p}`,
+    ['v', ...(col === 'pv' ? ['vtype'] : []), ...carriedCols(carried)],
   );
-  return toScalarStream({ ...carryOf(s), carried }, rel, undefined, { result: 'value' });
+  return toScalarStream({ ...carryOf(s), carried }, rel, undefined, { result: 'value', ...vtag });
 }
 
 /** Deduplicate property traversers while retaining one complete property row.
@@ -701,14 +706,19 @@ function propertyOrder(s: PropertyStream, step: PStep): PropertyStream {
     if (!rows?.stream.carried.encounter) throw new Error('properties().order().by(traversal) requires a scalar child with encounter order');
     const c = rows.stream.rel.as('c');
     const ord = rows.frame.ordinal;
+    // Carry the child value's stored type so the sort key can compareKey it — a numeric
+    // property that rides as TEXT (long/bigdecimal/…) must sort numerically, exactly as the
+    // token branch below does; without it a mixed-width value ("9" vs "35") sorts lexically.
+    const vt = rows.stream.vtype;
     const firstVal = s.q.cte(
-      q`SELECT ${c.c[ord]} AS ord, ${c.c.v} AS k, ROW_NUMBER() OVER (PARTITION BY ${c.c[ord]} ORDER BY ${c.c[rows.stream.carried.encounter]}) AS rn FROM ${c}`,
-      ['ord', 'k', 'rn'],
+      q`SELECT ${c.c[ord]} AS ord, ${c.c.v} AS k${vt ? q`, ${c.c[vt]} AS kt` : empty}, ROW_NUMBER() OVER (PARTITION BY ${c.c[ord]} ORDER BY ${c.c[rows.stream.carried.encounter]}) AS rn FROM ${c}`,
+      ['ord', 'k', ...(vt ? ['kt'] : []), 'rn'],
     );
     const d = rows.frame.domain.as('d');
     const f = firstVal.as('f');
     const carried = carriedWith(s.carried, { encounter: 'encounter' });
-    const sortKey = dir === 'desc' ? q`${f.c.k} DESC` : q`${f.c.k} ASC`;
+    const cmpVal = vt ? q`(${compareKey(f.c.k, f.c.kt)})` : q`${f.c.k}`;
+    const sortKey = dir === 'desc' ? q`${cmpVal} DESC` : q`${cmpVal} ASC`;
     const propertyTie = s.ownerElem === 'node'
       ? [q`${d.c.vpid} ASC`]
       : [q`${d.c.owner} ASC`, q`${d.c.pk} ASC`, q`${d.c.pvtype} ASC`, q`${d.c.pv} ASC`];
