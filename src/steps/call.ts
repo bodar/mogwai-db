@@ -140,7 +140,15 @@ export function lowerCall(step: PStep, parent: ElementStream, scope: CompileScop
   // (id, label, props[, src, tgt], o, injVal); apply (bound to this compile's federation depth)
   // runs the sibling once per distinct injected value; resume rejoins by that value.
   const injection = spec.injectionTraversal ? injectionKindOf(spec.injectionTraversal, parent.params) ?? undefined : undefined;
-  if (spec.injectionTraversal && !injection)
+  // Fail closed on an UNSUPPORTED injection attempt: a 3rd-arg nested traversal was given alongside
+  // the params map (the injection slot), but it did not classify as a direct value read. parseCallSpec
+  // only captures a CLASSIFYING traversal as spec.injectionTraversal (to avoid retaining a cyclic
+  // node), so detect the unsupported case from the raw args here — never silently degrade to a
+  // no-injection (Cartesian) run, which would answer a different question.
+  const rawArgs = step.args.slice(1);
+  const hasMap = rawArgs.some((a: any) => a instanceof Map);
+  const thirdTrav = hasMap && rawArgs.some((a: any) => a && typeof a === 'object' && 'nested' in a);
+  if (thirdTrav && !injection)
     throw new Error(`call("${spec.serviceName}"): injection must be a direct value read — __.values(key), __.id(), or __.label()`);
   const { head, frame } = buildCallHead(parent, scope, spec.injectionTraversal);
   const depth = parent.federationDepth ?? 0;

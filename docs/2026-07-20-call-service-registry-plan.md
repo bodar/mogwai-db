@@ -2,8 +2,10 @@
 
 **Date:** 2026-07-20
 **Status:** accepted — Phases 1–5 LANDED; **Phase 6a (federated call, SOURCE form) LANDED
-2026-07-21** on both runtimes (Bun tested end-to-end; CF wired). **6b (mid-traversal
-`V().call(federate)`) remains.** The Phase-6 body below is the design AS PROPOSED; the built
+2026-07-21**; **Phase 6b (mid-traversal `V().call(federate)` with per-parent value injection)
+LANDED 2026-07-22** on Bun (end-to-end tested; CF parity + L3/docs sync in progress) — see the
+"Phase 6b — as built" addendum at the very foot for the source of truth. The Phase-6 body below is
+the design AS PROPOSED; the built
 shape diverged materially (no `ServiceEnv`, no `standardRegistry(env)` factory, a per-graph
 `Executor` not an `executeFramed` orchestrator) — **see the "Phase 6 — as built (2026-07-21)"
 addendum at the very foot for the source of truth.** Design decisions ratified 2026-07-21; see
@@ -263,7 +265,7 @@ green when `tinker.search` registered (step 7), since `--list` enumerates the *l
 | 4 | `tinker.search` on FTS5 trigram + ValueNode-aware JSON write-path indexing + `element()` | ✅ done (steps 6+7) | step 6 `property_fts` schema + write-path indexer (`services/fts-index.ts`, tested in isolation, `test/fts-index.test.ts`); step 7 `services/search.ts` consumer. +13 L3 (search + `--list`). See PERF note below. |
 | 5 | `TextP`: **index-back** `containing`/`startingWith`/`endingWith` (same case-insensitive `LIKE`, ≥3 chars now served by the trigram index) | ✅ done (step 8) | `ftsSubstringPredicate` fast path in `nodeHasProp`/`edgeHasProp` (MATCH prefilter + LIKE position-confirm); opt-in only at the `has()` choke point. <3/computed/injected/`not*` → generic LIKE (NOT fail-closed); `regex` stays deferred. L3 stable (plan-shape change). |
 | 6a | **Federated DO graph call — SOURCE form** `g.call(federate,…)` | ✅ done (2026-07-21) | landed via a per-graph `Executor` + `FederationSource`, NOT the proposed `executeFramed` orchestrator/`ServiceEnv`. Bun tested e2e; CF wired. Drove the api.ts/Executor/DI refactor. See the as-built addendum. |
-| 6b | **Federated call — MID-TRAVERSAL** `V().call(federate)…` | ▢ remaining | needs per-parent ordinal rejoin (`pushChildScope` → head projects parent id+ordinal → apply stamps ordinal → resume LEFT JOINs onto frame.domain). Fails closed today with a clear "use source position" deferral. The `head`/`readSegmentHead`/`ordinal` plumbing is already in place. |
+| 6b | **Federated call — MID-TRAVERSAL** `V().call(federate)…` | ✅ done (2026-07-22, Bun) | per-parent VALUE injection via the GLV-native `T.value` marker + batched sibling hop + value-JOIN scatter-back (NOT the proposed ordinal rejoin). `MidBarrierPoint`/`LoweringSuspension` → `segmentFromMidBarrier`; `buildCallHead`; `injection.ts`. See the as-built addendum. CF parity + L3/docs sync remaining. |
 
 **PERF note (step 6, cost a debug cycle):** an FTS5 `DELETE` by an `UNINDEXED` column is an O(n)
 content scan (no index on UNINDEXED cols). An unconditional per-property-write delete made a bulk
@@ -487,10 +489,77 @@ source, which are `this`).
 
 ## Still remaining
 
-- **6b — mid-traversal `V().call(federate)`**: per-parent ordinal rejoin. `pushChildScope` mints
-  the ordinal; `head` projects each parent's id+ordinal; `apply` stamps the ordinal onto each
-  foreign row; `resume` LEFT JOINs the landed rows onto `frame.domain` on the ordinal (preserving
-  path()/as()), then `lowerSteps` continues `restSteps`. The `head`/`readSegmentHead`/`ordinal`
-  plumbing is already in place; today mid-traversal fails closed with a clear deferral.
 - **CF parity test** (mirror `federation.test.ts` on the DO harness) + **L3 re-record/docs sync** +
   **feature-support-matrix** row for `call`/federation.
+
+---
+
+# Phase 6b — as built (2026-07-22) — SOURCE OF TRUTH for the mid-traversal federated call
+
+The proposed 6b above ("per-parent ORDINAL rejoin: apply stamps the ordinal, resume LEFT JOINs on
+`frame.domain`") is **superseded** — the built shape rejoins by VALUE, not ordinal, and injects the
+per-parent value through a GLV-native marker rather than a bound-var hole. What landed:
+
+## The shape
+
+`V().call("mogwai.graph.federate", {graph, traversal}, __.values('k'))` — for each parent, its scalar
+(`values(k)`/`id()`/`label()`, the 3rd positional arg) is injected into the sibling sub-traversal,
+which runs ONCE over the DISTINCT injected values (batched, SPARQL bound-join style), and the pooled
+results are scattered back per-parent by VALUE match. flatMap semantics: a parent that matched nothing
+contributes no traverser. `path()`/`as()` spanning the call fails closed (deferred).
+
+## Injection marker = `T.value` (GLV-native, positional)
+
+The per-parent value flows in via the **shipped enum token `T.value`** placed in a `has()`/`is()`
+**operand** position — `__.V().has('sku', T.value)`. Empirically the stock JS GLV serializes
+`__.V().has('name', t.value)` → `g.V().has('name', T.value)` verbatim (no custom binding, no raw
+string, cross-language). We DETECT the marker structurally (a `{token:'value'}` operand of
+`has`/`is`/`within`/`P.*`, NEVER a `by()`/`order()` modulator — a different IR field, so collision-free)
+and the sibling's `has()` compile substitutes `within(<distinct injected values>)`, supplied under the
+reserved `INJECT_VALUES_KEY` params entry (`src/injection.ts`). No string surgery — TinkerPop's
+Translator serializes the sub-traversal; `apply` only supplies a params value.
+
+Rejected alternatives (empirically): a bound-var hole (`xx1`/`_v`) — GLVs auto-name bindings and can't
+leave a hole without an actual JS variable; a value sentinel — TinkerPop has NO value-sentinel (its only
+per-traverser mechanism is a child traversal, which IS our 3rd-arg injection).
+
+## Mechanism (the segment executor, reused)
+
+`lowerCall` suspends a barrier contribution into a `MidBarrierPoint` wrapped as a `LoweringSuspension`,
+relayed by `lowerSteps` → `compileRead` → `segmentFromMidBarrier` (peer of `segmentFromBarrier`). The
+`head` (`buildCallHead`, `steps/call-head.ts`) projects each parent's `(id, label, props, o, injVal)`
+via `pushChildScope` + `tryCompileScalarValueChild` — the generic child-scalar seam. `federate.apply`
+batches the distinct values into one sibling hop; `resumeMidBarrier` (`foreign.ts`) VALUE-JOINs the pool
+back onto parents on property/id/label. `SegmentPlan.resume` widened to `(foreign, headRows)`;
+`ForeignRow.injectedValue`; `Carry.federationDepth`. `Executor.drive` UNCHANGED.
+
+## Comparison to SPARQL `SERVICE` (honest scope)
+
+SPARQL federation is more powerful because RDF is a join algebra over triples with GLOBAL identifiers:
+`SERVICE` returns variable BINDINGS that join structurally on shared variables (n-ary, relational, and
+the remote IRIs stay traversable). Ours returns DETACHED element references (isolated-graph rowids are
+locally meaningless), a SINGLE injected scalar, and a single-key equijoin rejoin. So today we deliver
+"SPARQL `SERVICE` with one bound value + detached-only results" — the correlated-lookup/enrichment core,
+not relational-join-grade federation. This is the correct-and-honest limit for isolated-graph traversal,
+not a shortcut.
+
+## Future directions (design intent, NOT built)
+
+1. **Map-valued injection instead of `T.value2`** — n-ary correlation with ZERO GLV work: the injection
+   traversal produces a MAP per parent (`__.project('city','role').by(values('city')).by(values('role'))`),
+   carried by the SAME single `T.value` marker; the sibling destructures it (map access, standard Gremlin);
+   the rejoin generalizes to a multi-key equijoin (the same `resumeMidBarrier` value-JOIN with N columns),
+   and batching uses distinct TUPLES. Strictly better than adding `T.value2` markers (which re-opens the
+   GLV question + per-key marker detection). The natural next increment on what's committed.
+2. **Import-a-graph** — a foundational capability (bulk load / snapshot / clone a subgraph into a local
+   namespace with local identity). Useful on its own; prerequisite for (3).
+3. **Graph both ways** — send a subgraph to the sibling to query against, and (the valuable one) return a
+   TRAVERSABLE subgraph. With import working, materialize the sibling's result into a local scratch
+   namespace so you can KEEP TRAVERSING it locally and join it against the local graph. This BREAKS the
+   detached-reference ceiling — turning "federated lookup" into "federated TRAVERSAL" (multi-hop across
+   graphs, SPARQL-grade richness). Hard parts deliberately punted today: id remapping (sibling rowids are
+   locally meaningless), scratch-namespace lifecycle, transfer cost, snapshot-vs-live. A substantial phase,
+   not an extension — but the right north star if cross-graph TRAVERSAL becomes a product need.
+
+Sequencing: (1) is cheap + GLV-free; (2) is foundational; (3) builds on both. Each is independently
+valuable, so the endgame need not be committed to reap step 1.

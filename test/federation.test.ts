@@ -5,6 +5,8 @@ import { ioc } from '../src/io.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { CREW_SEED } from './fixtures/seed-crew.ts';
 import { MAX_FEDERATION_DEPTH, guardFederationDepth } from '../src/services/federation-depth.ts';
+import { federateService } from '../src/services/federate.ts';
+import { INJECT_VALUES_KEY } from '../src/injection.ts';
 
 // End-to-end federation on the REAL stack: two graphs owned by one BunGraphManager, one
 // federating into the other via mogwai.graph.federate — the real service, real env, real depth
@@ -48,6 +50,62 @@ describe('mogwai.graph.federate — source form, real stack', () => {
   test('federating to an empty/absent sibling graph yields no rows (create-on-demand, empty)', async () => {
     const fed = await runNames('g.call("mogwai.graph.federate").with("graph", "never-seeded").with("traversal", __.V())');
     expect(fed).toEqual([]);
+  });
+});
+
+describe('mogwai.graph.federate — MID-TRAVERSAL per-parent value injection (Phase 6b)', () => {
+  // home persons = {marko, vadas, josh, peter}; crew persons = {marko, stephen, matthias, daniel}.
+  // Only "marko" is shared, so a per-parent name match returns exactly marko.
+  const mid = (inj: string) =>
+    `g.V().hasLabel("person").call("mogwai.graph.federate", ["graph":"crew", "traversal": __.V().has("name", T.value)], ${inj})`;
+
+  test('for each home person, fetch same-named crew vertices (values injection)', async () => {
+    const res = await runNames(mid('__.values("name")'));
+    expect(res).toEqual(['marko']);                 // only the shared name matches
+  });
+
+  test('a parent that matches nothing on the sibling contributes no traverser (flatMap)', async () => {
+    // vadas/josh/peter have no crew namesake → they drop; only marko survives. (Covered by the
+    // count above, asserted explicitly here: exactly one result, not four.)
+    const res = (await mgr.executor('home').framedAsync(mid('__.values("name")'), {})).map(dec);
+    expect(res.length).toBe(1);
+  });
+
+  test('BATCHED: N distinct injected values → exactly ONE sibling hop (apply, spy source)', async () => {
+    // Unit-test apply directly with a spy FederationSource: 4 distinct parent values must produce
+    // exactly ONE raw() call (the batched hop binding the distinct-value array), not one per value.
+    const contribution: any = federateService.resolve({} as any);
+    let rawCalls = 0; let boundValues: any = null;
+    const spySource: any = {
+      executor: () => ({
+        raw: (_g: string, params: Record<string, any>) => {
+          rawCalls++;
+          boundValues = params[INJECT_VALUES_KEY];
+          return Promise.resolve([]);
+        },
+      }),
+    };
+    const head = [
+      { kind: 'vertex', id: 1, label: 'person', props: {}, ordinal: 1, injectedValue: 'marko' },
+      { kind: 'vertex', id: 2, label: 'person', props: {}, ordinal: 2, injectedValue: 'vadas' },
+      { kind: 'vertex', id: 3, label: 'person', props: {}, ordinal: 3, injectedValue: 'marko' }, // dup
+      { kind: 'vertex', id: 4, label: 'person', props: {}, ordinal: 4, injectedValue: 'josh' },
+    ] as const;
+    await contribution.apply(head, { graph: 'crew', traversal: { kind: 'traversal', gremlin: 'g.V().has("name", T.value)' } }, spySource, 0);
+    expect(rawCalls).toBe(1);                         // ONE batched hop
+    expect([...boundValues].sort()).toEqual(['josh', 'marko', 'vadas']); // DISTINCT values only
+  });
+
+  test('id() injection matches on the sibling element id', async () => {
+    // No shared external ids across the two toy graphs → empty, but must not error (exercises the
+    // id() injection kind + its rejoin JOIN on fid).
+    const res = (await mgr.executor('home').framedAsync(mid('__.id()'), {})).map(dec);
+    expect(Array.isArray(res)).toBe(true);
+  });
+
+  test('an unsupported injection (computed scalar) fails closed with a clear deferral', async () => {
+    await expect(mgr.executor('home').framedAsync(mid('__.values("name").fold()'), {}))
+      .rejects.toThrow(/injection must be a direct value read/);
   });
 });
 
