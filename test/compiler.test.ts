@@ -924,6 +924,19 @@ describe('compiler execution semantics', () => {
       .toEqual(['lop']);
   });
 
+  test('dedup() after order() in a child still collapses duplicates', () => {
+    const store = seededStore();
+    // out().in() from marko revisits marko 3× (via lop/josh/vadas co-authors). order() before
+    // dedup() must not defeat the collapse — the minted encounter is per-row unique, so a
+    // naive SELECT DISTINCT that carried it would never dedup.
+    expect(run(store, 'g.V(1).local(__.out().in().dedup()).values("name")').map((r) => r.v))
+      .toEqual(['josh', 'marko', 'peter']);
+    expect(run(store, 'g.V(1).local(__.out().in().order().by("name").dedup()).values("name")').map((r) => r.v))
+      .toEqual(['josh', 'marko', 'peter']);
+    expect(run(store, 'g.V(1).local(__.out().in().order().by("name").dedup()).count()').map((r) => r.v))
+      .toEqual([3]);
+  });
+
   test('sack with two by() modulators throws TinkerPop message', () => {
     expect(() => compile('g.V().sack(assign).by("age").by("name").sack()', {}))
       .toThrow('Sack step can only have one by modulator');

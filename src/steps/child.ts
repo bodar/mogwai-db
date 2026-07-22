@@ -1112,7 +1112,13 @@ function compileElementChildRows(
       continue;
     }
     if (step.name === 'dedup') {
-      end = advance(end, q`SELECT DISTINCT ${p.c.id} AS id${carryFrag(end.carried, p)} FROM ${p}`);
+      // A preceding order() mints a per-row-unique encounter into carried; keeping it in the
+      // DISTINCT projection would defeat the collapse (every row stays distinct). dedup()
+      // re-establishes set semantics and legitimately discards the prior emission order, so
+      // drop encounter here — a following slice then falls back to ORDER BY id (the ternary
+      // below already handles the cleared case).
+      const deduped = carriedWith(end.carried, { encounter: null });
+      end = advance(end, q`SELECT DISTINCT ${p.c.id} AS id${carryFrag(deduped, p)} FROM ${p}`, { encounter: null });
       continue;
     }
     const slice = step.name === 'range' ? rangeToOffsetLimit(step.args)
