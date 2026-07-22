@@ -1146,6 +1146,18 @@ describe('compiler execution semantics', () => {
     expect(run(duplicate, 'g.V().properties("name").dedup().by(value).count()').map((r) => r.v)).toEqual([1]);
   });
 
+  test('properties().order() sorts by natural property order, key, and typed value', () => {
+    const store = seededStore();
+    expect(run(store, 'g.V().properties().order().by(T.key, desc).key()').map((r) => r.v))
+      .toEqual(['name', 'name', 'name', 'name', 'name', 'name', 'lang', 'lang', 'age', 'age', 'age', 'age']);
+    expect(run(store, 'g.E().properties().order().value()').map((r) => r.v))
+      .toEqual([0.2, 0.4, 0.4, 0.5, 1.0, 1.0]);
+    expect(run(store, 'g.E().properties().order().by(desc).value()').map((r) => r.v))
+      .toEqual([1.0, 1.0, 0.5, 0.4, 0.4, 0.2]);
+    expect(run(store, 'g.V().properties().order().id()').map((r) => r.v))
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  });
+
   test('group().by(name).by(tail) yields one vertex per name (gate #1 rows)', () => {
     const store = seededStore();
     const rows = run(store, 'g.V().group().by("name").by(__.tail())');

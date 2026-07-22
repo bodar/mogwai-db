@@ -1657,6 +1657,17 @@ describe('compiler SQL snapshots', () => {
     expect(edge.sql).toContain('PARTITION BY p.pk, p.pv');
   });
 
+  test('PropertyStream order mints typed encounter order for key/value/property ids', () => {
+    const key = read('g.V().properties().order().by(T.key,desc).key()');
+    expect(key.sql).toContain('ROW_NUMBER() OVER (ORDER BY p.pk DESC');
+    expect(key.sql).toContain('AS encounter');
+    const value = read('g.E().properties().order().by(T.value).value()');
+    expect(value.sql).toContain('CASE WHEN p.pvtype IN');
+    expect(value.sql).toContain('ORDER BY ((CASE WHEN p.pvtype IN');
+    const natural = read('g.E().properties().order().value()');
+    expect(natural.sql).toContain('ORDER BY p.pk ASC');
+  });
+
   // ---- P2c-2 aggregation: group/groupCount + nested by() ----
 
   test('group().by(key).by(__.tail()) → element-last, ORDER BY key (assembly path)', () => {

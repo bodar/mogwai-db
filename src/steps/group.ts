@@ -2,12 +2,12 @@ import { q, value, list, empty, type Expression, type Relation } from '../q.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
 import {
   scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps,
-  storedValueExpr, bareValueMapProps, typedScalarNode, type ScalarCtx,
+  storedValueExpr, bareValueMapProps, typedScalarNode, compareKey, type ScalarCtx,
 } from '../plan.ts';
 import { stepChain } from '../frontend.ts';
 import { isMapLocalOrder } from './list.ts';
 import { type PStep } from '../strategies.ts';
-import { carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, withoutCarried, type Carry, type ElementStream } from './context.ts';
+import { carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, partitionOver, withoutCarried, type Carry, type ElementStream } from './context.ts';
 import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from './stream.ts';
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
@@ -681,6 +681,47 @@ function propertyDedup(s: PropertyStream, step: PStep): PropertyStream {
   return toPropertyStream(carryOf(s), rel, s.ownerElem);
 }
 
+/** Order a PropertyStream and retain the provider order as the shared encounter column.
+ * Bare order follows Property's natural order: VertexProperty id, or edge key/value.
+ * T.key/T.value select one component; a direction-only by(desc) reverses the natural
+ * composite key. Stored property values use compareKey so exact long/decimal/duration
+ * values sort numerically even when SQLite stores them as TEXT. */
+function propertyOrder(s: PropertyStream, step: PStep): PropertyStream {
+  if (s.carried.aliases.size > 0 || s.carried.path)
+    throw new Error('properties().order() after as()/path() not yet supported (property order semantics)');
+  const bys = step.bys ?? [];
+  if (bys.length > 1) throw new Error('properties().order() supports at most one by() modulator');
+  const by = bys[0] ?? [];
+  const token = by.find((a: any) => a && typeof a === 'object' && 'token' in a)?.token;
+  const bad = by.find((a: any) => a && typeof a === 'object' && 'nested' in a);
+  if (bad) throw new Error('properties().order().by(traversal) not yet supported');
+  if (token && token !== 'key' && token !== 'value') throw new Error(`properties().order().by(T.${token}) not yet supported`);
+  if (by.some((a: any) => typeof a === 'string')) throw new Error('properties().order().by(key) not yet supported');
+  const dir = by.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
+  if (dir === 'shuffle') throw new Error('properties().order().by(shuffle) not yet supported');
+  const suffix = dir === 'desc' ? ' DESC' : ' ASC';
+  const p = s.rel.as('p');
+  const valueKey = q`(${compareKey(p.c.pv, p.c.pvtype)})`;
+  const primary = token === 'key'
+    ? [q`${p.c.pk}${suffix}`]
+    : token === 'value'
+      ? [q`${valueKey}${suffix}`]
+      : s.ownerElem === 'node'
+        ? [q`${p.c.vpid}${suffix}`]
+        : [q`${p.c.pk}${suffix}`, q`${valueKey}${suffix}`];
+  const ties = s.ownerElem === 'node'
+    ? [q`${p.c.vpid} ASC`]
+    : [q`${p.c.owner} ASC`, q`${p.c.pk} ASC`, q`${p.c.pvtype} ASC`, q`${p.c.pv} ASC`];
+  const orderKey = list([...primary, ...ties], ', ');
+  const carried = carriedWith(s.carried, { encounter: 'encounter' });
+  const mint = q`ROW_NUMBER() OVER (${partitionOver(carried, p, orderKey)})`;
+  const rel = s.q.cte(
+    q`SELECT ${list(PROPERTY_PAYLOAD.map((c) => p.c[c]), ', ')}${carryFragMint(carried, p, 'encounter', mint)} FROM ${p}`,
+    [...PROPERTY_PAYLOAD, ...carriedCols(carried)],
+  );
+  return toPropertyStream({ ...carryOf(s), carried }, rel, s.ownerElem);
+}
+
 /** Consume a PropertyStream. Only property-specific operations live here; once a
  * step changes shape it re-enters the same root dispatcher as every other stream. */
 const PROPERTY_SCALAR_COL = { key: 'pk', value: 'pv', id: 'vpid' } as const;
@@ -693,6 +734,9 @@ const propertyScalarStep: ShapeTailFn<PropertyStream> = (s, step, _steps, at) =>
 
 const propertyDedupStep: ShapeTailFn<PropertyStream> = (s, step, _steps, at) =>
   continueLowering(propertyDedup(s, step), at + 1);
+
+const propertyOrderStep: ShapeTailFn<PropertyStream> = (s, step, _steps, at) =>
+  continueLowering(propertyOrder(s, step), at + 1);
 
 const propertyGroup: ShapeTailFn<PropertyStream> = (s, step, _steps, at) => {
   // A live property parent — its by() sub-traversals lower through the generic child
@@ -730,6 +774,7 @@ const propertyElement: ShapeTailFn<PropertyStream> = (s, _step, _steps, at) => {
 const PROPERTY_TAIL = new Map<string, ShapeTailFn<PropertyStream>>([
   ['has', propertyFilter], ['hasKey', propertyFilter], ['hasValue', propertyFilter],
   ['dedup', propertyDedupStep],
+  ['order', propertyOrderStep],
   ['key', propertyScalarStep], ['value', propertyScalarStep], ['id', propertyScalarStep],
   ['count', (s, _step, _steps, at) => continueLowering(lowerGlobalCount(s), at + 1)],
   ['group', propertyGroup], ['groupCount', propertyGroup],
