@@ -426,6 +426,7 @@ export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, st
       const shape = [...entry.shapes][0];
       const of: ListOf = shape === 'value' ? { kind: 'scalar', as: entry.as }
         : (shape === 'node' || shape === 'edge') ? { kind: 'elem', elem: shapeElem(shape) }
+        : shape === 'property' ? { kind: 'property', elem: entry.propertyElem! }
         : (() => { throw new Error(`select(Pop.all) over a ${shape} label not yet supported`); })();
       cols.push(q`${historyValues(col)} AS ${`${prefix}_list`}`);
       return { key: k, prefix, sub: 'list', of };

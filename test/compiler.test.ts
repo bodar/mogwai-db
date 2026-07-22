@@ -1185,6 +1185,14 @@ describe('compiler execution semantics', () => {
       .toEqual([1]);
   });
 
+  test('property aliases support Pop.all and multi-bound Pop.mixed through unfold()', () => {
+    const store = seededStore();
+    expect(run(store, 'g.E(11).properties("weight").as("p").select(Pop.all, "p").unfold().value()').map((r) => r.v))
+      .toEqual([0.4]);
+    expect(run(store, 'g.E(11).properties("weight").as("p").as("p").select(Pop.mixed, "p").unfold().value()').map((r) => r.v))
+      .toEqual([0.4, 0.4]);
+  });
+
   test('group().by(name).by(tail) yields one vertex per name (gate #1 rows)', () => {
     const store = seededStore();
     const rows = run(store, 'g.V().group().by("name").by(__.tail())');
