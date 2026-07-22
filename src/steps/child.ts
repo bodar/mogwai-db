@@ -177,7 +177,7 @@ const CHILD_SCALAR_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
 // an existence consumer can observe the same ordered/sliced child rows as a
 // normal child cardinality consumer; the emitter mints the per-parent encounter
 // before applying the following slice.
-const CHILD_ELEMENT_ROW_STEPS = new Set(['order', 'limit', 'skip', 'range', 'dedup']);
+const CHILD_ELEMENT_ROW_STEPS = new Set(['order', 'limit', 'skip', 'range', 'dedup', 'local']);
 const SHARED_SCALAR_CHILD_STEPS = new Set([
   ...SCALAR_TRANSFORMS, 'is', 'order', 'limit', 'skip', 'range', 'tail', 'dedup',
 ]);
@@ -1093,6 +1093,13 @@ function compileElementChildRows(
   let end = prefixed;
   for (const step of parts.suffix) {
     const p = end.rel.as('p');
+    if (step.name === 'local') {
+      const nested = step.args[0]?.nested;
+      const lowered = nested ? tryCompileElementChild(end, nested, 'all') : null;
+      if (!lowered) return null;
+      end = lowered.stream;
+      continue;
+    }
     if (step.name === 'order') {
       const n = (end.elem === 'edge' ? edges : nodes).as('n');
       const ordered = carriedWith(end.carried, { encounter: 'encounter' });

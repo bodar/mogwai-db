@@ -112,7 +112,7 @@ Across all four branch steps, mixed-shape arms (scalar + element + list) merge i
 | `flatMap(__.…)` | ✅ | movement/filter/scalar/`fold()` bodies; over a scalar parent incl. a `V()`/`E()` re-source. ❌ record/group/path bodies |
 | `map(__.…)` | ✅ | 1-to-1, first-EMITTED result. Over a scalar parent it takes first even when the inner traversal **fans out** (`map(__.union(a,b))` → arm 0; `map(__.V().values('k'))` → element-id order) via the canonical emission-order substrate. `flatMap`/`local` emit all. 🚫 residual take-first (fail-closed): a fan-out arm at a `path().by()` position; ❌ alias/select/structured bodies |
 | `choose(fn).option(k, body)…` | 🟡 | scalar option-map, including nested scalar-valued option maps inside `map`/`local`/`flatMap` child traversals. ❌ no `Pick.none` default; list/element/mixed-shape bodies; identity/discard/fail bodies; `Pick.unproductive`/`any`; a `T`-token choice over a scalar parent |
-| `local(…)` | 🟡 | one-child `all` policy: movement, slices, per-parent `order().by(key)`, `dedup`, scalar transforms/reducers, `fold()`; over a scalar parent. ❌ traversal-valued `order().by()`, nested-traversal/record/group/path/match/union bodies; sack |
+| `local(…)` | 🟡 | one-child `all` policy: movement, slices, per-parent `order().by(key)`, `dedup`, scalar transforms/reducers, `fold()`; nested `local()` re-enters the same child scope and restores inner cardinality; over a scalar parent. ❌ traversal-valued `order().by()`, nested record/group/path/match/union bodies; sack |
 
 ## 6. Recursion (`repeat`)
 
