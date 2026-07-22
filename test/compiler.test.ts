@@ -1540,6 +1540,18 @@ describe('compiler execution semantics', () => {
       .toEqual(['vadas']);
   });
 
+  test('nested option-map choose composes through map/local/flatMap child lowering', () => {
+    const store = seededStore();
+    const option = "__.choose(__.values('age')).option(P.between(26,30), __.values('name')).option(Pick.none, __.constant('unknown'))";
+
+    expect(run(store, `g.V().map(${option})`).map((r) => r.v).sort())
+      .toEqual(['marko', 'unknown', 'unknown', 'unknown', 'unknown', 'vadas']);
+    expect(run(store, `g.V().local(${option})`).map((r) => r.v).sort())
+      .toEqual(['marko', 'unknown', 'unknown', 'unknown', 'unknown', 'vadas']);
+    expect(run(store, `g.V().flatMap(${option})`).map((r) => r.v).sort())
+      .toEqual(['marko', 'unknown', 'unknown', 'unknown', 'unknown', 'vadas']);
+  });
+
   test('scalar-producing leaves re-enter common lowering', () => {
     const store = seededStore();
     expect(run(store, 'g.V().math("_").by("age").is(P.gt(30)).count()').map((r) => r.v)).toEqual([2]);

@@ -228,6 +228,37 @@ function scalarRowParts(body: ReturnType<typeof stepChain>): { prefix: ReturnTyp
  * local are element steps here (not scalar-producing directly) and stay out. */
 const ELEMENT_ARM_BRANCH = new Set(['choose', 'coalesce', 'union']);
 
+/** PURE. The option-map form of choose() is scalar-valued when its choice and every
+ * option body can be compiled by the existing scalar-child seam. The emitter already
+ * owns this form (lowerChooseOptions); this recognizer only keeps the classify/emit
+ * contract intact when the choose lives inside map()/local()/flatMap(). */
+function elementOptionMapScalarBranch(branch: PStep, params: Record<string, any>): boolean {
+  if (branch.name !== 'choose' || !branch.options) return false;
+
+  const choice = branch.args[0];
+  const choiceIsScalar = choice && typeof choice === 'object' && 'nested' in choice
+    ? classifyScalarChild(choice.nested, params) !== null
+    : choice && typeof choice === 'object' && 'token' in choice
+      && (choice.token === 'label' || choice.token === 'id');
+  if (!choiceIsScalar) return false;
+
+  let keyed = false;
+  let fallback = false;
+  for (const option of branch.options) {
+    const body = option.args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
+    if (!body || !classifyScalarChild(body.nested, params)) return false;
+    const key = option.args.find((x: any) => x !== body);
+    if (key === undefined || (key && typeof key === 'object' && 'pick' in key)) {
+      const pick = key && typeof key === 'object' && 'pick' in key ? key.pick : 'none';
+      if (pick !== 'none') return false;
+      fallback = true;
+    } else {
+      keyed = true;
+    }
+  }
+  return keyed && fallback;
+}
+
 /** PURE. An element-parent scalar child whose value comes from a nested branch step — the
  * recursive extension of classifyScalarChild. Grammar: an ELEMENT_CHILD_STEPS prefix, a branch
  * step (choose/coalesce/union, predicate-form choose only) whose VALUE arms are each recursively
@@ -235,13 +266,16 @@ const ELEMENT_ARM_BRANCH = new Set(['choose', 'coalesce', 'union']);
  * the branch to the element-parent branch compilers, which recurse per arm — so the emitter needs
  * no bespoke reader. Precise (all arms scalar) so it never claims a list/variant-armed branch. */
 export function elementScalarBranchArm(body: ReturnType<typeof stepChain>, params: Record<string, any>): boolean {
-  const at = body.findIndex((s) => ELEMENT_ARM_BRANCH.has(s.name) && !(s as PStep).options);
+  const at = body.findIndex((s) => ELEMENT_ARM_BRANCH.has(s.name)
+    && (!(s as PStep).options || elementOptionMapScalarBranch(s as PStep, params)));
   if (at < 0) return false;
   const prefix = body.slice(0, at);
   const branch = body[at];
   const suffix = body.slice(at + 1);
   if (prefix.some((s) => !ELEMENT_CHILD_STEPS.has(s.name))) return false;
   if (suffix.some((s) => !CHILD_SCALAR_ROW_STEPS.has(s.name))) return false;
+  if (branch.name === 'choose' && (branch as PStep).options)
+    return elementOptionMapScalarBranch(branch as PStep, params);
   const kids = (branch.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
   if (branch.name === 'choose') {
     // predicate-form choose(pred, then, else): only the two value arms must be scalar (the

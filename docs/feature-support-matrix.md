@@ -111,7 +111,7 @@ Across all four branch steps, mixed-shape arms (scalar + element + list) merge i
 | `optional(…)` | ✅ | `optional(t)` ≡ `coalesce(t, identity)`; single- and multi-hop; over a scalar parent restores the value on a miss. ❌ an element-kind change on a miss; per-row-shape steps after a mixed-shape result |
 | `flatMap(__.…)` | ✅ | movement/filter/scalar/`fold()` bodies; over a scalar parent incl. a `V()`/`E()` re-source. ❌ record/group/path bodies |
 | `map(__.…)` | ✅ | 1-to-1, first-EMITTED result. Over a scalar parent it takes first even when the inner traversal **fans out** (`map(__.union(a,b))` → arm 0; `map(__.V().values('k'))` → element-id order) via the canonical emission-order substrate. `flatMap`/`local` emit all. 🚫 residual take-first (fail-closed): a fan-out arm at a `path().by()` position; ❌ alias/select/structured bodies |
-| `choose(fn).option(k, body)…` | 🟡 | scalar option-map. ❌ no `Pick.none` default; element/identity/discard/fail bodies; `Pick.unproductive`/`any`; a `T`-token choice over a scalar parent |
+| `choose(fn).option(k, body)…` | 🟡 | scalar option-map, including nested scalar-valued option maps inside `map`/`local`/`flatMap` child traversals. ❌ no `Pick.none` default; list/element/mixed-shape bodies; identity/discard/fail bodies; `Pick.unproductive`/`any`; a `T`-token choice over a scalar parent |
 | `local(…)` | 🟡 | one-child `all` policy: movement, slices, `dedup`, scalar transforms/reducers, `fold()`; over a scalar parent. ❌ `order()`; nested-traversal/record/group/path/match/union bodies; sack |
 
 ## 6. Recursion (`repeat`)

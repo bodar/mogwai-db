@@ -4,7 +4,7 @@ import {
 } from '../plan.ts';
 import { mathToSql, mathVars } from '../math.ts';
 import { type PStep } from '../strategies.ts';
-import { aliasElem, carryFrag, carriedCols, elemRel, type ElementStream } from './context.ts';
+import { aliasElem, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, type ElementStream } from './context.ts';
 import { aliasId, aliasScalar } from './alias.ts';
 import { carryOf, toScalarStream, type ListStream, type ScalarStream, type Stream } from './stream.ts';
 import { tryCompileElementChild, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, type ScalarModulationSpec } from './child.ts';
@@ -370,11 +370,24 @@ export function lowerChooseOptions(st: ElementStream, steps: PStep[], stop: numb
   const productiveWhens = keyed.map((x) => q`WHEN ${predicateSql(choice, x.key)} THEN ${p.c[mods.values[x.mod].present]}`);
   const result = q`CASE ${list(whens, ' ')} ELSE ${p.c[mods.values[fallback.mod].value]} END`;
   const productive = q`CASE ${list(productiveWhens, ' ')} ELSE ${p.c[mods.values[fallback.mod].present]} END`;
+  // A nested option-map child is still one scalar row per parent, but the generic
+  // child cardinality policy needs an explicit per-origin encounter. Root option-map
+  // choose() remains order-free; only mint when an active child scope needs first/all
+  // semantics downstream.
+  const origin = st.carried.origins.at(-1);
+  const carried = origin && !st.carried.encounter
+    ? carriedWith(st.carried, { encounter: 'encounter' })
+    : st.carried;
+  const encounter = carried.encounter && carried.encounter !== st.carried.encounter
+    ? q`ROW_NUMBER() OVER (PARTITION BY ${p.c[origin!]} ORDER BY ${p.c.id})`
+    : undefined;
   const rel = st.q.cte(
-    q`SELECT ${result} AS v${carryFrag(st.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id} WHERE ${predicateSql(productive, undefined)}`,
-    ['v', ...carriedCols(st.carried)],
+    q`SELECT ${result} AS v${encounter
+      ? carryFragMint(carried, p, 'encounter', encounter)
+      : carryFrag(carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id} WHERE ${predicateSql(productive, undefined)}`,
+    ['v', ...carriedCols(carried)],
   );
-  return toScalarStream(carryOf(st), rel);
+  return toScalarStream(carryOf({ ...st, carried }), rel);
 }
 
 /**
