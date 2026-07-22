@@ -1652,7 +1652,6 @@ describe('compiler SQL snapshots', () => {
     expect(bare.sql).toContain('WHERE r.rn=1');
     const byValue = read('g.V().properties().dedup().by(value).count()');
     expect(byValue.sql).toContain('ROW_NUMBER() OVER (PARTITION BY p.pv');
-    expect(byValue.sql).toContain('ROW_NUMBER() OVER (PARTITION BY p.pv');
     const edge = read('g.E().properties().dedup().count()');
     expect(edge.sql).toContain('PARTITION BY p.pk, p.pv');
   });
