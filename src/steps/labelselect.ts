@@ -1,4 +1,4 @@
-import { q, list, raw, type Expression } from '../q.ts';
+import { q, list, raw, empty, value, type Expression } from '../q.ts';
 import { type PStep } from '../strategies.ts';
 import { aliasElem, aliasIsElement, carriedCols, carryFrag, withShape, type AliasEntry, type Carried, type ElementStream } from './context.ts';
 import {
@@ -7,7 +7,7 @@ import {
 } from './alias.ts';
 import {
   assertStreamColumns, carryOf, streamColumns, toListStream, toScalarStream,
-  type ListOf, type Stream,
+  type ListOf, type PropertyStream, type Stream,
 } from './stream.ts';
 import { type ValueType } from '../render.ts';
 
@@ -43,6 +43,11 @@ function currentEntry(s: Exclude<Stream, { kind: 'result' }>, p: any): { entry: 
         shape: 'value',
       };
     }
+    case 'property':
+      return {
+        entry: aliasEntry('property', q`json_object('vpid', ${p.c.vpid}, 'owner', ${p.c.owner}, 'ownerLabel', ${p.c.ownerLabel}, 'pk', ${p.c.pk}, 'pv', ${p.c.pv}, 'pvtype', ${p.c.pvtype}, 'pmeta', ${p.c.pmeta}, 'elem', ${value(s.ownerElem)})`),
+        shape: 'property',
+      };
     default:
       throw new Error(`as() on a ${s.kind} stream not yet supported`);
   }
@@ -64,6 +69,7 @@ export function asOnStream(s: Exclude<Stream, { kind: 'result' | 'elements' }>, 
       shapes: withShape(existing?.shapes, shape),
       as: existing && existing.as !== as ? undefined : as,
       binds: (existing?.binds ?? 0) + 1,
+      propertyElem: shape === 'property' && s.kind === 'property' ? s.ownerElem : existing?.propertyElem,
     });
     setExpr.set(col, existing ? aliasAppend(p.c[col], entry) : aliasSeed(entry));
   }
@@ -107,6 +113,24 @@ export function popIsListResult(entry: AliasEntry, pop: string): boolean {
 export const historyValues = (col: Expression): Expression =>
   q`(SELECT jsonb_group_array(je.value ->> '$.v') FROM json_each(${col}) je)`;
 
+const propertyAliasField = (entry: Expression, field: string): Expression =>
+  q`json_extract(${entry}, ${value(`$.v.${field}`)})`;
+
+/** Rehydrate a property alias into the ordinary PropertyStream shape. The alias history
+ * stores one tagged JSON object, so direct select() keeps using the same property tail
+ * (value/key/element/order/dedup) as an unaliased properties() traversal. */
+function selectPropertyAlias(s: Exclude<Stream, { kind: 'result' }>, entry: AliasEntry, col: Expression, pop: string): PropertyStream {
+  if (pop !== 'first' && pop !== 'last') throw new Error(`select(Pop.${pop}) over a property label not yet supported`);
+  if (!entry.propertyElem) throw new Error('property alias has no owner element kind');
+  const p = s.rel.as('p');
+  const selected = pop === 'first' ? q`${col} -> '$[0]'` : q`${col} -> '$[#-1]'`;
+  const rel = s.q.cte(
+    q`SELECT ${propertyAliasField(selected, 'vpid')} AS vpid, ${propertyAliasField(selected, 'owner')} AS owner, ${propertyAliasField(selected, 'ownerLabel')} AS ownerLabel, ${propertyAliasField(selected, 'pk')} AS pk, ${propertyAliasField(selected, 'pv')} AS pv, ${propertyAliasField(selected, 'pvtype')} AS pvtype, ${propertyAliasField(selected, 'pmeta')} AS pmeta${carryFrag(s.carried, p)} FROM ${p} WHERE ${aliasPresent(col)}`,
+    ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pvtype', 'pmeta', ...carriedCols(s.carried)],
+  );
+  return { ...carryOf(s), kind: 'property', rel, ownerElem: entry.propertyElem };
+}
+
 /** select(label) / select(Pop, label) with ONE label, over any stream shape. Reads the
  *  label's history column (dropping traversers where it is unbound) and re-emits it as a
  *  scalar / element / list stream per its shape and the Pop mode. */
@@ -120,6 +144,21 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
   const present = aliasPresent(col);
   const isList = popIsListResult(entry, pop);
   const end = pop === 'first' ? 'first' : 'last';
+
+  if (entry.shapes.size === 1 && entry.shapes.has('property')) {
+    if (isList) throw new Error('select(Pop.all/mixed) over a property label not yet supported');
+    const by = step.bys?.[0]?.[0];
+    if (by === undefined) return selectPropertyAlias(s, entry, col, end);
+    if (!(by && typeof by === 'object' && 'token' in by && (by.token === 'key' || by.token === 'value' || by.token === 'id')))
+      throw new Error('select(property).by() supports only T.key, T.value, or T.id');
+    const selected = end === 'first' ? q`${col} -> '$[0]'` : q`${col} -> '$[#-1]'`;
+    const field = by.token === 'key' ? 'pk' : by.token === 'value' ? 'pv' : 'vpid';
+    const rel = s.q.cte(
+      q`SELECT ${propertyAliasField(selected, field)} AS v${by.token === 'value' ? q`, ${propertyAliasField(selected, 'pvtype')} AS vtype` : empty}${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,
+      ['v', ...(by.token === 'value' ? ['vtype'] : []), ...carriedCols(carried)],
+    );
+    return toScalarStream(carry, rel, undefined, by.token === 'value' ? { vtype: 'vtype' } : {});
+  }
 
   if (isList) {
     // Pop.all (any label) / Pop.mixed with >1 binding → a List value.

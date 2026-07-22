@@ -16,10 +16,10 @@ import { type Elem } from '../plan.ts';
 //   k=3 list   {"k":3,"v":<json array>}
 //   k=4 map    {"k":4,"v":<json object>}
 
-export type AliasShape = 'node' | 'edge' | 'value' | 'list' | 'map';
+export type AliasShape = 'node' | 'edge' | 'value' | 'list' | 'map' | 'property';
 
-const SHAPE_K: Record<AliasShape, number> = { node: 0, edge: 1, value: 2, list: 3, map: 4 };
-const K_SHAPE: Record<number, AliasShape> = { 0: 'node', 1: 'edge', 2: 'value', 3: 'list', 4: 'map' };
+const SHAPE_K: Record<AliasShape, number> = { node: 0, edge: 1, value: 2, list: 3, map: 4, property: 5 };
+const K_SHAPE: Record<number, AliasShape> = { 0: 'node', 1: 'edge', 2: 'value', 3: 'list', 4: 'map', 5: 'property' };
 
 export const elemShape = (elem: Elem): AliasShape => (elem === 'edge' ? 'edge' : 'node');
 export const shapeElem = (shape: AliasShape): Elem => (shape === 'edge' ? 'edge' : 'node');
@@ -31,7 +31,7 @@ export const isElementShape = (shape: AliasShape): boolean => shape === 'node' |
  *  a JSON structure via json() so SQLite stores it AS json (not a quoted string). */
 export function aliasEntry(shape: AliasShape, valueExpr: Expression, typeTag?: string | null): Expression {
   const k = SHAPE_K[shape];
-  const val = shape === 'list' || shape === 'map' ? q`json(${valueExpr})` : valueExpr;
+  const val = shape === 'list' || shape === 'map' || shape === 'property' ? q`json(${valueExpr})` : valueExpr;
   const t = typeTag ? q`, 't', ${value(typeTag)}` : empty;
   return q`jsonb_object('k', ${value(k)}, 'v', ${val}${t})`;
 }

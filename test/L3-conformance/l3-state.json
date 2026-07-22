@@ -1,5 +1,5 @@
 {
-  "passing": 1261,
+  "passing": 1263,
   "total": 2041,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -113,6 +113,8 @@
     "g_E",
     "g_EX11X",
     "g_EX11X_outV_outE_hasXid_10X",
+    "g_EX11X_propertiesXweightX_asXaX_selectXaX_byXkeyX",
+    "g_EX11X_propertiesXweightX_asXaX_selectXaX_byXvalueX",
     "g_EX11_nullX",
     "g_EX7X_hasLabelXknowsX",
     "g_EX_properties_element",
@@ -1288,8 +1290,6 @@
     "g_EX11X_E",
     "g_EX11X_elementMap",
     "g_EX11X_outV_outE_hasXid_10AsStringX",
-    "g_EX11X_propertiesXweightX_asXaX_selectXaX_byXkeyX",
-    "g_EX11X_propertiesXweightX_asXaX_selectXaX_byXvalueX",
     "g_EXlistXnullXX",
     "g_EXnullX",
     "g_E_asString",

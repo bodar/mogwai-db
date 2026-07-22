@@ -1158,6 +1158,18 @@ describe('compiler execution semantics', () => {
       .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
   });
 
+  test('property aliases select directly or project T.key/T.value/T.id', () => {
+    const store = seededStore();
+    expect(run(store, 'g.E(11).properties("weight").as("a").select("a").by(T.key)').map((r) => r.v))
+      .toEqual(['weight']);
+    expect(run(store, 'g.E(11).properties("weight").as("a").select("a").by(T.value)').map((r) => r.v))
+      .toEqual([0.4]);
+    expect(run(store, 'g.E(11).properties("weight").as("a").select("a").value()').map((r) => r.v))
+      .toEqual([0.4]);
+    expect(run(store, 'g.V(1).properties("name").as("p").select("p").by(T.id)').map((r) => r.v))
+      .toEqual([1]);
+  });
+
   test('group().by(name).by(tail) yields one vertex per name (gate #1 rows)', () => {
     const store = seededStore();
     const rows = run(store, 'g.V().group().by("name").by(__.tail())');

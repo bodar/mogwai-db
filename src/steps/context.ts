@@ -35,6 +35,8 @@ export type AliasEntry = {
    *  linear chain, so path().from(l)/to(l) can resolve a label to a static position slice.
    *  A rebind overwrites with the latest; `undefined` = no path / dynamic position. */
   pathPos?: number;
+  /** Owner element kind when the label holds a PropertyStream payload. */
+  propertyElem?: Elem;
 };
 export type AliasMap = ReadonlyMap<string, AliasEntry>;
 

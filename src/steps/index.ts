@@ -338,7 +338,7 @@ export function buildPrefix(steps: PStep[], params: Record<string, any> = {}, qu
 /** A value-shaped stream (scalar/list/variant) whose current object can be labelled and
  *  whose select("label") reads a path-history alias — as opposed to record/map/group
  *  whose select consumes a field/column and is owned by their own dispatchers. */
-const isValueShape = (s: Stream): boolean => s.kind === 'scalar' || s.kind === 'list' || s.kind === 'variant';
+const isValueShape = (s: Stream): boolean => s.kind === 'scalar' || s.kind === 'list' || s.kind === 'variant' || s.kind === 'property';
 
 /** select(label…) reading path-history labels (string args), not select(Column). */
 const isLabelSelect = (step: PStep): boolean =>
