@@ -1668,6 +1668,17 @@ describe('compiler SQL snapshots', () => {
     expect(natural.sql).toContain('ORDER BY p.pk ASC');
   });
 
+  test('property aliases rehydrate PropertyStream or project typed fields', () => {
+    const direct = read('g.E(11).properties("weight").as("a").select("a").value()');
+    expect(direct.sql).toContain("json_object('vpid'");
+    expect(direct.sql).toContain("json_extract(p.a0 -> '$[#-1]', ?)");
+    const key = read('g.E(11).properties("weight").as("a").select("a").by(T.key)');
+    expect(key.sql).toContain("json_extract(p.a0 -> '$[#-1]', ?)");
+    const value = read('g.E(11).properties("weight").as("a").select("a").by(T.value)');
+    expect(value.sql).toContain('AS vtype');
+    expect(value.shape).toEqual({ kind: 'value', as: undefined, perRowType: true });
+  });
+
   // ---- P2c-2 aggregation: group/groupCount + nested by() ----
 
   test('group().by(key).by(__.tail()) → element-last, ORDER BY key (assembly path)', () => {
