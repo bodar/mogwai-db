@@ -2066,6 +2066,9 @@ describe('compiler SQL snapshots', () => {
     const nested = read('g.V(1).local(__.out().local(__.out().order().by("name").limit(1)))');
     expect(nested.sql.match(/PARTITION BY/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
     expect(nested.sql).toContain('ORDER BY');
+    // The inner order() windows over the FULL origin stack (partitionOver), not just the
+    // innermost ordinal — equivalent here (o1 is globally unique) but robust under nesting.
+    expect(nested.sql).toContain('PARTITION BY p.o0, p.o1');
   });
 
   // ---- P2 tail: and/or/union/optional ----

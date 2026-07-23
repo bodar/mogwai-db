@@ -1,7 +1,7 @@
 import { derived, empty, list, paren, q, value, type Expression, type Relation } from '../q.ts';
 import { stepChain } from '../frontend.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
-import { advance, carriedWith, carryFrag, carryFragMint, carriedCols, type Carried, type ElementStream } from './context.ts';
+import { advance, carriedWith, carryFrag, carryFragMint, carriedCols, partitionOver, type Carried, type ElementStream } from './context.ts';
 import { aliasId } from './alias.ts';
 import { carryOf, toListStream, toScalarStream, toVariantStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream } from './stream.ts';
 import { variantArmsMeta, variantArmSelect, variantCols, type VariantArm } from './variant.ts';
@@ -1090,6 +1090,12 @@ function compileElementChildRows(
   const { stream: prefixed, next: stop } = lowerElementSteps(parts.prefix, pushed.seed);
   if (stop !== parts.prefix.length) return null;
 
+  // Rank rows per parent traverser: order/slice/first all window over the child's origin
+  // stack (partitionOver — equivalent to the innermost ordinal, which is globally unique,
+  // and robust to nesting). One shared window builder so the three sites can't drift.
+  const rankPerParent = (carried: Carried, p: Relation, orderKey: Expression): Expression =>
+    q`ROW_NUMBER() OVER (${partitionOver(carried, p, orderKey)})`;
+
   let end = prefixed;
   for (const step of parts.suffix) {
     const p = end.rel.as('p');
@@ -1104,7 +1110,7 @@ function compileElementChildRows(
       const n = (end.elem === 'edge' ? edges : nodes).as('n');
       const ordered = carriedWith(end.carried, { encounter: 'encounter' });
       const orderExpr = elementOrderSql(end, n, step);
-      const rank = q`ROW_NUMBER() OVER (PARTITION BY ${p.c[pushed.frame.ordinal]} ORDER BY ${orderExpr}, ${p.c.id})`;
+      const rank = rankPerParent(end.carried, p, q`${orderExpr}, ${p.c.id}`);
       end = advance(end,
         q`SELECT ${p.c.id} AS id${carryFragMint(ordered, p, 'encounter', rank)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`,
         { encounter: 'encounter' },
@@ -1126,7 +1132,7 @@ function compileElementChildRows(
       : { offset: 0, limit: Number(step.args[0]) };
     const cols = carriedCols(end.carried);
     const r = derived(
-      q`SELECT ${p.c.id} AS id${carryFrag(end.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${p.c[pushed.frame.ordinal]} ORDER BY ${end.carried.encounter ? p.c[end.carried.encounter] : p.c.id}) AS rn FROM ${p}`,
+      q`SELECT ${p.c.id} AS id${carryFrag(end.carried, p)}, ${rankPerParent(end.carried, p, end.carried.encounter ? p.c[end.carried.encounter] : p.c.id)} AS rn FROM ${p}`,
       ['id', ...cols, 'rn'],
       'r',
     );
@@ -1140,7 +1146,7 @@ function compileElementChildRows(
     const orderExpr = elementOrderSql(end, n, orderStep as PStep | undefined);
     const cols = carriedCols(end.carried);
     const r = derived(
-      q`SELECT ${p.c.id} AS id${carryFrag(end.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${p.c[pushed.frame.ordinal]} ORDER BY ${orderExpr}, ${p.c.id}) AS rn FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`,
+      q`SELECT ${p.c.id} AS id${carryFrag(end.carried, p)}, ${rankPerParent(end.carried, p, q`${orderExpr}, ${p.c.id}`)} AS rn FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`,
       ['id', ...cols, 'rn'],
       'r',
     );
