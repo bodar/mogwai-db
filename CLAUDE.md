@@ -54,8 +54,8 @@ pocket-sized graph that speaks **Gremlin**, the TinkerPop query language.
 ## SQL generation — the `q` kernel
 
 The compiler builds SQL with a template-first `q` kernel + typed `Relation` handles:
-`src/q.ts` (`q`/`Relation`/`Query`/`list`/`empty`) + `src/schema.ts` (nodes/edges/labels
-relation constants). **Only `src/q.ts` may import raw lazyrecords `Text`/`Compound`**;
+`src/sql/kernel/q.ts` (`q`/`Relation`/`Query`/`list`/`empty`) + `src/sql/schema.ts` (nodes/edges/labels
+relation constants). **Only `src/sql/kernel/q.ts` may import raw lazyrecords `Text`/`Compound`**;
 every step module builds through the kernel. Do NOT reintroduce ansi builders
 (`select`/`from`/`join`/`cte`/…) — retired. The kernel renders an aliased relation as
 `edges e` (no `AS`) and `rel.c.x` as `qualifier.x`.
@@ -67,15 +67,15 @@ intentional materialization boundary.
 
 ## Compiler architecture
 
-`compile()` (`src/compiler.ts`) is a thin orchestrator: `parse → normalize → dispatch`.
+`compile()` (`src/compiler/compiler.ts`) is a thin orchestrator: `parse → normalize → dispatch`.
 Three seams:
 
-- **Seam 3 — `src/strategies.ts`:** pure `Step[]→Step[]` normalization passes run once
+- **Seam 3 — `src/compiler/ir/strategies.ts`:** pure `Step[]→Step[]` normalization passes run once
   up front (strip terminal, fold repeat clusters, fold by() modulators, apply
   `withStrategies`) so dispatch sees a canonical, peek-free chain. No index arithmetic
   in step compilers; multi-step modulator consumption belongs in a strategies fold.
-- **Seam 2 — `src/steps/*.ts`:** the read prefix is a functional fold of `StepFn`s over
-  an immutable typed **`Stream`** (`context.ts`/`stream.ts`). The union:
+- **Seam 2 — `src/steps/{context,prefix,tail,write}/`:** the read prefix is a functional fold of
+  `StepFn`s over an immutable typed **`Stream`** (`context/context.ts`/`context/stream.ts`). The union:
   `ElementStream`/`ScalarStream`/`VariantStream`/`ListStream`/`PropertyStream`/
   `RecordStream`/`GroupStream`/`PathStream` (+ internal `MapStream`). `lowerSteps` is the
   one iterative shape orchestrator; a retype yields a `LoweringContinuation` back to it,
@@ -84,7 +84,7 @@ Three seams:
   (`write.ts`), the tail split per step-family (`projection.ts` dispatcher +
   `coerce`/`inject`/`select`/`mapscalar`/`group`). To add a step: write a `StepFn`,
   register it in the right Map — do NOT grow a switch.
-- **Root materialization (`steps/materialize.ts`):** read leaves never frame themselves.
+- **Root materialization (`steps/tail/materialize.ts`):** read leaves never frame themselves.
   `materializeFinal`'s exhaustive `materializeStream` switch is the only read caller of
   `readCompiled`. Do not add a terminal `Compiled` branch in a leaf.
 
@@ -93,14 +93,14 @@ Three seams:
 `lowerSteps(Stream, steps, at)` is the semantic authority for read traversals at root
 and child scope. To implement a step: normalize sibling/modulator structure in
 `strategies.ts`; lower from the appropriate typed `Stream`; for a child, push a
-`ChildScope` (`steps/child.ts`) and run the same engine; materialize only at the root.
+`ChildScope` (`steps/tail/child.ts`) and run the same engine; materialize only at the root.
 
 **Do NOT add** a private child-traversal parser or supported-step vocabulary, a
 `compileNested*` mini-compiler, sibling/index scanning inside a step compiler, a second
 movement/filter/projection implementation, direct materialization from a read leaf, or
 loose domain/ordinal arguments where `CompileScope` owns that state.
 
-The generic child seam (`steps/child.ts`) is how one traversal runs per parent
+The generic child seam (`steps/tail/child.ts`) is how one traversal runs per parent
 traverser: `pushChildScope` gives each parent a multiset-safe ordinal + preserved
 domain; `reuseCurrentFrame` lets N siblings share one domain (the multi-modulator
 pattern). Element/scalar/list/fold children, existence gates
@@ -117,7 +117,7 @@ nested-branch bodies, plus a `V()`/`E()` **re-source** (`lowerScalarVE` carries 
 ordinal through its CROSS JOIN, so a following scoped reducer/projection reduces per input).
 Mixed-shape scalar-parent arms (scalar + re-source-element + `fold()`-list) merge into the
 SAME `VariantStream` the element parent produces via the `Carry`-typed builders
-`variantArmSelect`/`variantArmsMeta`/`variantCols` (in leaf `steps/variant.ts`, shared by both
+`variantArmSelect`/`variantArmsMeta`/`variantCols` (in leaf `steps/tail/variant.ts`, shared by both
 parents — only the per-arm compiler differs) — for `union`/`choose`/`coalesce`; `optional(t)` ≡
 `coalesce(t, identity)` (a scalar arm restores the value on miss, an element/list arm →
 variant). `map(t)` is 1-to-1 (keeps `t`'s FIRST EMITTED result). Over a SCALAR parent it takes
@@ -136,8 +136,38 @@ mis-executed):** a fan-out arm at a `path().by(__.trav)` position, and a mixed-s
 the arm-merge encounter too (they don't yet; only the scalar-PARENT `unionScalarStreams` does).
 Use `flatMap`/`local` for all-results.
 
+### Dependencies vs state — the DI object model (do not conflate)
+
+The lowering CORE is a **dependency-injected object**, not free functions that read their
+dependencies off the traverser. Two things are kept strictly apart:
+
+- **Dependencies** — ambient capabilities fixed for a whole compilation: `registry`, `fastPaths`,
+  `federationDepth`, the recursive-lowering engine itself, the store `source`. Grouped by
+  LIFECYCLE into named DI scopes (`src/scopes.ts`, backed by `@bodar/yadic` `LazyMap`, but
+  downstream depends only on the `AppScope`/`CompilerScope` **interfaces** — the container is
+  hidden): **`AppScope`** (per process — registry/fastPaths/source; built once by the `Executor`)
+  and **`CompilerScope`** (per `compile()`, a child of an app scope — `q`/`params`/`federationDepth`).
+  Nested sub-compiles mint a FRESH compiler scope (fresh `Query`) off the SAME app scope.
+- **State** — `Carry` (`steps/context/context.ts`) is now PURE per-query lowering state:
+  `q`/`params`/`carried`/`sideEffects`. Dependencies do NOT ride `Carry` and are NOT threaded
+  through function signatures.
+
+The dispatcher is the **`LoweringEngine`** class (`src/compiler/engine/engine.ts`), built once per
+compile from the `CompilerScope`. It holds the ambient deps + the whole recursive surface
+(`PREFIX` fold, `seedSource`/`seedUnion`, `buildPrefix`, `lowerElementSteps`, `lowerSteps`,
+`lowerStream`, `compileRead`, segment builders, the collapse scan). The step families
+(`prefix/`, `tail/`, `write/`) stay **free functions** that reach lowering + deps through
+`engineOf(stream)` (= `stream.q.engine` — the Engine rides the per-compile `Query`, which already
+threads through every `Stream`, so nothing is signature-threaded). They import ONLY the leaf
+interface `src/compiler/engine/deps.ts` (`Engine` + `engineOf`, erased at runtime); the concrete
+`LoweringEngine` imports the families. **This is what dissolves the former
+`index.ts ⇄ child.ts ⇄ projection.ts` import cycle** into a DAG: `deps.ts` (interface) ◂ family
+impls ◂ `engine.ts` (concrete) ◂ `compiler.ts`. There is NO barrel (`steps/index.ts` is gone).
+Adding a dependency = a scope field + an `Engine` accessor, never a new `Carry` field or a new
+parameter on the StepFns. See `docs/2026-07-23-directory-restructure-plan.md`.
+
 **Fast paths** are explicit per-compilation switches in `CompileOptions.fastPaths`
-(`src/fast-paths.ts`) — never a mutable global. A specialized lowering qualifies as a
+(`src/compiler/options/fast-paths.ts`) — never a mutable global. A specialized lowering qualifies as a
 fast path only when: the generic path stays the semantic authority and disabling the
 switch compiles the same traversal generically; recognition failure returns `null`/falls
 through (never defines support or throws because its optimized vocabulary is exhausted);
@@ -148,13 +178,13 @@ shows material benefit. Currently: `predicateInlining`, `singleHopOptional`,
 `and`/`or`/`not`/`filter`/`where`/`choose`/`coalesce` over a scalar), `movementCollapse`
 (frontier collapse: each movement folds convergent walks into `SELECT id, SUM(bulk) …
 GROUP BY id`, bounding the frontier by reachable |V| not the exponential walk count —
-gated by `chainCollapseSafe` in `index.ts` to reducer-terminal pure movement/filter
+gated by `chainCollapseSafe` in `engine.ts` to reducer-terminal pure movement/filter
 chains where the terminal `SUM(bulk)` makes it result-equivalent; the traverser-`bulk`
 carried column is the substrate). A fast path should reuse the surrounding plumbing and swap only the
-"middle" — e.g. the predicate family (`predicateInlining`, `src/steps/predicate.ts`)
+"middle" — e.g. the predicate family (`predicateInlining`, `src/steps/prefix/predicate.ts`)
 feeds one boolean `Expression` to the shared `filterCte`; the fast middle is the GENERIC
 movement/filter StepFns rendered in inline-correlated mode (`compileCorrelatedChild`,
-`src/steps/correlated.ts`) — a nested correlated `derived()` subquery seeded from the
+`src/steps/tail/correlated.ts`) — a nested correlated `derived()` subquery seeded from the
 outer row's id, NOT a second hand-rolled movement/alias/EXISTS scheme — and the generic
 middle is a materialized child gated on existence. Alias safety is structural: each
 StepFn wraps the prev relation as a FROM-clause derived table (`(<prev>) p`), and FROM
@@ -175,13 +205,14 @@ test + perf evidence in the same change.
 
 `call()` is the extensibility seam. A `Service` registers into a `ServiceRegistry` (a
 per-runtime DI seam, sibling to `GraphManager`) and contributes to the compile. **Cycle-free
-structure — do not collapse:** `types.ts` (interfaces + `DIRECTORY_SERVICE_NAME`, a
-dependency-free leaf) ◂ `registry.ts` (cycle-free mechanism: `createRegistry`/`EMPTY_REGISTRY`,
+structure — do not collapse:** `spi/types.ts` (interfaces + `DIRECTORY_SERVICE_NAME`, a
+dependency-free leaf) ◂ `spi/registry.ts` (cycle-free mechanism: `createRegistry`/`EMPTY_REGISTRY`,
 what the compiler core imports for its default) ◂ `standard.ts` (`standardRegistry`, imports the
-service impls → reached ONLY by the DI layer / entry points, NEVER the compiler core — this breaks
-the fast-paths→registry→directory→steps cycle). The registry rides on `Carry`/`CompileOptions`
-beside `fastPaths`; production injects `standardRegistry` at the store tier (`executeFramed`), a
-call() with no registry throws "unknown service". A `Contribution` is `'stream'` (pure, inline
+`catalog/` service impls → reached ONLY by the DI layer / entry points, NEVER the compiler core —
+this breaks the fast-paths→registry→directory→steps cycle). The registry is an **app-scope
+dependency** (`src/scopes.ts` `AppScope`, see the DI section below): it is held by the `LoweringEngine`
+(reached via `engineOf(stream).registry`), NOT a `Carry` field. Production injects `standardRegistry`
+at the store tier (`executeFramed`), a call() with no registry throws "unknown service". A `Contribution` is `'stream'` (pure, inline
 SQL — all of Phases 1–5) or `'barrier'` (async/federated, Phase 6 — variant present so the seam is
 additive, executor throws a deferral). `g.call(…)` is `seedCall` (a peer of `seedSource`, returns
 whatever `Stream` shape the service yields); `V().call(…)` is `lowerCall` (pushes a child scope).
@@ -283,7 +314,7 @@ JSONB `edges.props` blob is retired.
 
 `value` has **no declared type** (BLOB affinity) so it keeps the bound value's SQLite
 storage class → correct numeric order/range for `has('age',gt(30))`/`order().by('age')`.
-`vtype` = the canonical Gremlin type the write channel carried (`src/gremlin-types.ts` is
+`vtype` = the canonical Gremlin type the write channel carried (`src/gremlin/types.ts` is
 the one type vocabulary), sourced from the truth channel (bound param's GraphBinary
 DataType captured in `wire.ts` and threaded through `query`→`compile`; inline literal's
 parsed subtype). NULL vtype = infer on read. A collection value stores as JSONB — a
@@ -297,13 +328,13 @@ non-string map KEYS, and arbitrary nesting round-trip with each leaf's exact gre
 schema time. A property key BINDS as a parameter (`key=?`) — a plain B-tree column seeks
 fine bound, so no literal splice and no injection surface.
 
-**The read seam (`src/plan.ts`).** Nodes AND edges read props via `idExpr` into their own
+**The read seam (`src/compiler/plan/plan.ts`).** Nodes AND edges read props via `idExpr` into their own
 normalized table (no `propsExpr`). `hasProp`/`scalarProp`/`framedProps` dispatch on elem,
 each with an edge twin (`edgeHasProp`/`edgePropScalar`/`edgePropsAgg`). `framedProps`/
 `valueMapProps` read only at leaf materialization (never inside movement/filter CTEs, so
 the hot path stays index-only). `values('k')` is a flatMap JOIN (one row per multi-value).
 
-**Writes (`src/steps/write.ts`).** `applyVertexProperty` (single=delete-then-insert,
+**Writes (`src/steps/write/write.ts`).** `applyVertexProperty` (single=delete-then-insert,
 list=append, set=append-unless-equal); `insertEdgeProperty` (UPSERT, single cardinality).
 `drop()` cascades both property tables. JSONB is available on both runtimes (DO 3.47.0,
 Bun 3.53.0): bind JSON *text* + wrap `jsonb(?)`, read back via `json(col)` (a raw Buffer
@@ -336,16 +367,19 @@ runner; `mise run submodule` provisions it blobless+sparse (self-healed in the L
 harness/data sits IN its folder, except the reference graph seeds shared by L3+L4, which
 live in `test/fixtures/`:
 - `test/L1-corpus/` — `corpus.test.ts` + `corpus.txt` + `regen-corpus.ts`
-- `test/L2-sql/` — `sql-snapshots.test.ts` (the compile-to-SQL contract)
+- `test/L2-sql/` — the compile-to-SQL contract, split by step family (mirrors `src/steps/`):
+  `{movement,filter,branch,repeat-path,group,scalar,call,write,plumbing}.sql.test.ts`
 - `test/L3-conformance/` — `l3.test.ts`, `conformance.test.ts`, `conformance-server.ts`,
   `telemetry.ts`, `tags.ts`, `l3-state.json`, `README-cucumber.md`
 - `test/L4-addendum/` — `l4.test.ts` + `*.feature`
 - `test/fixtures/` — `seed-{modern,crew,uid}.ts` + `seed-graphson.ts` (imported by L3's
   `conformance-server.ts`, L4's `l4.test.ts`, and a few L2/root tests)
-- `test/` (root) — the non-ladder tests: `compiler.test.ts` (compiler EXECUTION semantics —
-  the behavioural twin of L2's SQL snapshots), `contract.ts`, `wire`/`streaming`/
+- `test/compiler/` — compiler EXECUTION semantics (the behavioural twin of L2's SQL snapshots),
+  split by family 1:1 with `test/L2-sql/`: `{scalar,unified-lowering,movement-filter,branch,
+  select-project,group-properties,repeat-path,writes,typed-properties}.exec.test.ts`
+- `test/` (root) — the remaining non-ladder tests: `contract.ts`, `wire`/`streaming`/
   `exact-values`/`typed-collections-e2e`/`performance`/`bun`/`cloudflare`/`serializers`/
-  `typed-collections` `.test.ts`.
+  `typed-collections`/`scopes`/`services`/`federation`/`foreign`/`fts-index` `.test.ts`.
 
 **Invoke one level directly:** `mise run L1` / `L2` / `L3` / `L4` (each is `bun test
 test/L{n}-…`; L1/L2 skip the submodule, L3/L4 depend on it). `mise run test` still runs the
