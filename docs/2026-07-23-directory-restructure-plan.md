@@ -1,326 +1,261 @@
-# Directory restructure — mirror the compiler's real hierarchy
+# Compiler rearchitecture — dependency objects + directory hierarchy
 
-**Status:** planned (2026-07-23). A large, intentional refactor. No behaviour change; the
-L1/L3/L4 gates and L2 semantic-equivalence must hold at every landing point.
+**Status:** planned (2026-07-23, revised). A large, intentional refactor in two movements:
+first a **dependency/state separation** that turns the lowering core into dependency-injected
+objects, then a **directory restructure** that mirrors the resulting hierarchy. No behaviour
+change; the L1/L3/L4 gates and L2 semantic-equivalence hold at every landing point.
 
-## Goal & principles
+L3 passing floor (ratchet, must not drop): **1264**.
 
-Reshape `src/` and `test/` so the **directory structure maps to the actual functional
-hierarchy** of the compiler (ship → engine-room → engine → cylinder). Concretely:
+## Why this shape (the governing idea)
 
-- A package should mostly import **from within itself**. Lift a folder out and only a few
-  imports would need changing.
-- Group by **domain concept**, never by file-type/arbitrary bucket.
-- Names come from the **existing code vocabulary** (Stream shapes, step families, the `q`
-  kernel, the IR Step chain, strategies, fast-paths, services/call(), writes, the wire/edge/
-  store tiers, Bun/Cloudflare adapters). No invented names.
-- Prefer **deeper nesting** wherever it introduces no import cycle. Smaller, independent
-  files. **But no solo-file directories** — a directory earns its existence with ≥2 cohesive
-  files.
-- Tests mirror the source split 1:1 where it makes sense.
+When DI was introduced to the *outer* compile (the `Executor` holding `registry`/`source` as
+constructor dependencies, `execute.ts`), it immediately simplified things — because it
+**separated real dependencies from per-call arguments**. This refactor pushes that separation
+all the way down into the lowering core.
 
-## The one hard constraint: the compiler-engine cycle
+The core distinction:
 
-`src/steps/` is a **mesh, not a stack**. There is a real strongly-connected component:
+- **Dependencies** — ambient capabilities fixed for a whole compilation: the service
+  `registry`, the `fastPaths` config, the recursive-lowering engine itself, the store
+  `source`, `federationDepth`. They do not vary per traverser, per step, or per stream shape.
+- **State** — the actual per-query lowering state: `q` (the CTE accumulator), `params`,
+  `carried` (aliases/path/sack/bulk/origins/encounter), `sideEffects`.
 
-```
-steps/index.ts  ⇄  steps/child.ts  ⇄  steps/projection.ts
-```
+Today `Carry` conflates both, so every dependency is threaded through the state object *and*
+through every function signature that builds a fresh stream (`correlated.ts`, `predicate.ts`,
+`bulk.ts`, …). That threading is the pain. The fix:
 
-plus one-directional back-edges into `index.ts`:
+> **Functions that need dependencies become objects that hold those dependencies as fields;
+> their methods take only per-call arguments. Functions that need no dependencies stay pure
+> free functions. `Carry` reverts to pure per-query state.**
 
-| Caller | pulls from index.ts |
-| --- | --- |
-| child.ts | lowerElementSteps, lowerStepsStrict, tryLowerElementSteps |
-| match.ts | lowerElementSteps |
-| correlated.ts | lowerElementSteps |
-| inject.ts | lowerStepsStrict |
-| bulk.ts | buildPrefix |
-| list.ts | compileReadCompiled |
-| write.ts | buildPrefix, compileReadCompiled |
+Wiring is **yadic scoped containers** (`@bodar/yadic`, already the outer DI) — the container
+*is* the typed dependency object for the next scope, so nothing is threaded.
 
-`index.ts` is two things: a **barrel** (`export { compileTail }` + the fact everyone imports
-the dispatcher through it) and the **dispatcher engine** (the `PREFIX` table,
-`lowerElementSteps`/`lowerSteps`/`lowerStepsStrict`/`buildPrefix`/`compileRead`/
-`compileReadCompiled`, `seedSource`/`seedUnion`, `chainCollapseSafe`).
+## Principles for the directory shape (unchanged)
 
-`child.ts` (1738 lines) and `projection.ts` (1018 lines) **stay whole** — splitting them by
-parent-shape recreates the "second movement/filter/projection implementation" the extension
-law forbids.
+- A package should mostly import **from within itself**.
+- Group by **domain concept**, never file-type/arbitrary bucket.
+- Names from the **existing code vocabulary** (Stream shapes, step families, the `q` kernel,
+  the IR Step chain, strategies, fast-paths, services/call(), writes, wire/edge/store tiers,
+  Bun/Cloudflare adapters). No invented names.
+- Prefer **deeper nesting** where it introduces no import cycle; smaller independent files;
+  **no solo-file directories** (a directory earns its keep with ≥2 cohesive files).
+- Tests mirror the source 1:1 where sensible; the L1/L3/L4 ladder + fixtures stay put.
 
-### The fix: a `LowerEngine` seam carried on the existing `Carry` channel
+---
 
-The 5 recursive functions become an interface:
+## Movement 1 — dependency objects (the fundamental change)
+
+### The three dependency lifecycles → three yadic scopes
+
+`@bodar/yadic` `LazyMap.create(parent)` gives parent-child containers whose entries resolve
+lazily (and cache as read-only on first access). Three tiers:
+
+1. **App scope** — created once per process/runtime. Holds `registry` (which services exist),
+   `fastPaths` (which optimizations are on), the store `source` (federation reach). This is
+   where `application.ts` already lives; it grows these entries.
+2. **Compile scope** — a child container created per `compile()` call, with the app container
+   as its typed parent. Holds the per-compilation collaborators: `q` (a fresh `Query`),
+   `params`, `federationDepth`, and — built here, closing over both scopes — the **lowering
+   objects** (the engine and its family compilers).
+3. **Per-step/traverser state** — NOT in a container. This is `carried`/`rel`/`elem`, passed
+   as method arguments and folded/replaced as the compile proceeds.
+
+Because container entries are lazy, the lowering objects can reference **each other** (the
+engine needs the child-scope compiler; the child compiler needs the engine; projection needs
+both) — each `.set('x', deps => new X(deps))` factory reads `deps.otherObject`, and the first
+access resolves the graph. This is what dissolves the `index⇄child⇄projection` cycle: the
+objects depend on each other **through the container**, wired once, lazily — there is no
+source-level import cycle because each object imports only the *interfaces* it needs, and the
+concrete graph is assembled in the compile-scope container.
+
+### `Carry` becomes pure state
 
 ```ts
-interface LowerEngine {
-  lowerElementSteps(steps, seed, from?): { stream: ElementStream; next: number };
-  tryLowerElementSteps(steps, seed): ElementStream | null;
-  lowerSteps(initial, steps, from): Stream | LoweringSuspension;
-  lowerStepsStrict(initial, steps, from): Stream;
-  buildPrefix(steps, params, query, sackInit?, fastPaths?, wantsEncounter?, registry?): { st; stop };
+// steps/context.ts — after
+export interface Carry {
+  readonly q: Query;                 // the CTE accumulator (per-compilation collaborator)
+  readonly params: Record<string, any>;
+  readonly carried: Carried;         // per-traverser column schema
+  readonly sideEffects?: SideEffectMap;
 }
 ```
 
-**Wiring — the key decision.** The compiler already has a per-compilation DI seam: `registry`,
-`fastPaths`, and `federationDepth` ride on `CompileOptions` and are threaded onto every
-`Stream` via `Carry` (the `{...st}` spread every StepFn does). **The `LowerEngine` rides the
-same channel** — it is added to `Carry` beside `registry`/`fastPaths`.
+Gone from `Carry`: `fastPaths`, `registry`, `engine`, `federationDepth`. (`q`/`params` stay:
+they are genuinely the query being lowered, and they're already on every stream; treating
+them as ambient would be a larger churn for little gain. They are supplied by the compile-scope
+container when the root stream is seeded, then ride the stream like today.)
 
-- **Deep recursive callers** (`child`, `match`, `correlated`, `inject`, `projection`) always
-  hold a `Stream`/`Carry` at their call sites → they call `carry.engine.lowerElementSteps(…)`.
-  Verified: every one of the ~20 deep call sites has a stream in hand.
-- **Seed-level callers** (`bulk`, `write`, `list` — they *build* a fresh prefix from steps,
-  no stream yet) take the engine as an argument, exactly like they already take
-  `params`/`query`/`registry`.
-- `root.ts` (`compileRead`) seeds `carry.engine` once when it builds the initial stream; it
-  propagates for free thereafter.
+### StepFns become methods on a per-compile `Lowerer`
 
-**Why not the alternatives.** A mutable module-level `installLowerEngine`/`getLowerEngine`
-global (both architects' first instinct) conflicts with the codebase's own "never a mutable
-global" rule for fast-paths. `@bodar/yadic` (used in `application.ts`) is the right tool at the
-**app/HTTP tier** (request-lifetime, runtime-selected `GraphManager`) but the wrong altitude
-here — the engine cycle is a compile-time module-graph problem inside the per-query hot path;
-a `LazyMap` lookup through thousands of recursive `lowerElementSteps` calls is cost with no
-benefit. The `Carry` channel is the project's *native* compiler-DI idiom and already proven.
+The ~20 movement/filter/branch/passthrough StepFns read `fastPaths` (a dependency). They become
+**methods on a `Lowerer` object** constructed with the compile-scope deps; the `PREFIX` dispatch
+table maps a step name to a bound method:
 
-**Why this is a DAG.** `child.ts` (and peers) import only the `LowerEngine` *type* (from the
-substrate layer, a leaf) and read the concrete engine off the `Carry` they already receive.
-Nothing they import points back at the dispatcher module. `root.ts` imports the concrete
-prefix/lower functions and seeds them onto the carry — and nothing imports `root.ts` except
-`compiler.ts`, an outer caller. Topological order: substrate → families → prefix/lower →
-root → compiler. No cycle.
+```ts
+// compiler/engine/lowerer.ts (illustrative)
+class Lowerer {
+  constructor(private readonly deps: CompileDeps) {}       // { fastPaths, registry, engine, q-factory… }
+  // movement
+  move(step: PStep, st: ElementStream): ElementStream { /* …this.deps.fastPaths… */ }
+  toEdge(step: PStep, st: ElementStream): ElementStream { /* … */ }
+  // filter
+  has(step: PStep, st: ElementStream): ElementStream { /* … */ }
+  where(step: PStep, st: ElementStream): ElementStream { /* …this.deps.engine.lowerElementSteps… */ }
+  // …
+  private readonly PREFIX = new Map<string, StepFn>([
+    ['out', this.move], ['in', this.move], ['has', this.has], /* … */
+  ]);
+}
+```
 
-### `index.ts` dissolves into three files
+The recursive callers (`child`, `match`, `correlated`, `inject`, `projection`, `bulk`, `list`,
+`write`) that today import `lowerElementSteps`/`buildPrefix`/… from `index.ts` instead call
+`this.engine.lowerElementSteps(…)` on their injected engine reference — no import of the
+dispatcher module, no parameter threading, no `Carry.engine`.
 
-Removing the barrel means the dispatcher moves into real, domain-named modules (more testable
-than one big `engine.ts`):
+The genuinely **pure** files stay free functions (no object, no deps): the `q` kernel, most of
+`plan.ts` (`predicateSql`/`hasProp`/`labelIn`/…), `context.ts`'s `carriedCols`/`carryFrag`/
+`partitionOver`/`advance`, `alias.ts`, `coerce.ts`, `materialize.ts`'s pure framing,
+`variant.ts`'s arm builders, `strategies.ts`, `frontend.ts`, `gremlin-types.ts`. They operate
+only on their arguments, so they need no injection.
 
-- **`prefix.ts`** — the `PREFIX` dispatch table, `lowerElementSteps`/`tryLowerElementSteps`/
-  `buildPrefix`, `seedSource`/`seedUnion`, `chainCollapseSafe` + its `COLLAPSE_*` sets, the
-  `isSackMutate`/`isSideEffectGroup`/`isShapedLocal` guards, `PATH_STEPS`/`chainTracksPath`/
-  `chainNeedsFromV`.
-- **`lower.ts`** — the shape-dispatch loop (`lowerStream`/`lowerSteps`/`lowerStepsStrict`,
-  `dispatchAlias`/`isAliasStep`/`isValueShape`) + the `LowerEngine` **interface** definition.
-- **`root.ts`** — `compileRead`/`compileReadCompiled`, `segmentFromBarrier`/
-  `segmentFromMidBarrier`, and the wiring that seeds the concrete engine onto the carry.
+### What the objects are (first cut — refined during build)
 
-## Target `src/` tree
+Grouped by the family boundaries that already exist, each constructed with the deps it needs:
+
+- **`Lowerer`** — the PREFIX StepFn methods (movement/filter/branch/passthrough/sack/
+  sideeffect) + the `lowerElementSteps`/`lowerSteps`/`lowerStepsStrict` orchestration (was the
+  bulk of `index.ts`). Needs `fastPaths`, `registry`, `q`, and a reference to the child-scope
+  compiler + tail/projection compiler.
+- **`ChildCompiler`** — the parent-polymorphic child seam (was `child.ts`). Needs the engine
+  (to lower child bodies) + `fastPaths`.
+- **`TailCompiler`** — the tail/projection dispatcher (was `projection.ts` + the shape
+  compilers it routes to). Needs the engine + child compiler.
+- **`CorrelatedCompiler`** — the correlated fast-path middle (was `correlated.ts` +
+  `predicate.ts`). Needs the engine (it folds real StepFns in inline mode).
+- **`CallCompiler`** — `call()` seeding/lowering (was `call.ts`/`call-head.ts`). Needs the
+  registry + engine.
+- **`WriteRouter`** — the write path (was `write.ts`/`inject.ts`). Needs the engine + the FTS
+  indexer.
+
+The exact object boundaries are confirmed as each family is converted (the guiding rule: an
+object per cohesive family that shares a dependency set; do not over-fragment — `child.ts`/
+`projection.ts` stay single cohesive units as established earlier).
+
+### How this dissolves the cycle (the DAG proof)
+
+Today: `index.ts → child.ts → index.ts` is a literal import cycle. After: `ChildCompiler`
+imports the **`Engine` interface** (a leaf type); the concrete `Lowerer` (which *is* the
+engine) is handed to `ChildCompiler` at construction, out of the compile-scope container. The
+container's factories reference each other lazily. Source imports: `ChildCompiler` →
+`Engine`-interface; `Lowerer` → `ChildCompiler`-interface + `TailCompiler`-interface; the
+container module → all concrete classes. No class imports a class that imports it back — only
+interfaces, which are leaves. Topological order: interfaces → concrete classes → container →
+`compile()`. A DAG.
+
+---
+
+## Movement 2 — the directory tree (after the objects exist)
+
+Once dependencies are injected rather than threaded, relocation is mechanical. Target:
 
 ```
 src/
   sql/
-    kernel/
-      q.ts                # q/Relation/list/empty/derived/render — ZERO imports (the leaf)
-      query.ts            # the Query CTE-accumulator class (split from q.ts — optional, only if clean)
-      render.ts           # Compiled/Shape/WritePlan + readCompiled/renderFrom
-    schema.ts             # nodes/edges/labels/vertexProperties/edgeProperties/propertyFts
-
+    kernel/{q.ts, query.ts?, render.ts}   # q: zero-import leaf; query.ts split optional
+    schema.ts
   gremlin/
-    types.ts              # (was gremlin-types.ts) TypeNode/ValueNode/BigDecimal/Duration/coercions
-    frontend.ts           # parseGremlin/stepChain/extract* — Step[] IR
-    math.ts               # mathToSql/mathVars (frontend micro-DSL for math()/format())
-    # NOTE: the generated parser/ stays where it is (generated, never edited).
-
+    types.ts        # was gremlin-types.ts
+    frontend.ts
+    math.ts
   compiler/
-    ir/
-      strategies.ts       # PStep + Step[]→Step[] normalization (Seam 3)
-    options/
-      fast-paths.ts       # FastPathConfig/CompileOptions/resolve* — carries registry+engine DI
-    plan/
-      plan.ts             # the read seam (hasProp/scalarProp/framedProps/predicateSql/…)
-    segment.ts            # SegmentPlan/FederationSource
+    ir/strategies.ts
+    options/fast-paths.ts       # FastPathConfig/CompileOptions/resolvers (the dep descriptors)
+    plan/plan.ts                # the read seam (pure — stays free functions)
+    segment.ts
     engine/
-      prefix.ts           # PREFIX table + prefix fold + seedSource/seedUnion + chainCollapseSafe
-      lower.ts            # shape-dispatch loop + the LowerEngine interface
-      root.ts             # compileRead + segment plumbing + seeds the engine onto the carry
-    compiler.ts           # parse → normalize → dispatch (imports engine/root.ts)
-
-  steps/
-    context/
-      context.ts          # Carry/Carried/ElementStream/StepFn substrate (+ carries `engine`)
-      alias.ts            # AliasShape/aliasId/… (as()/label bookkeeping)
-      stream.ts           # the Stream union + LoweringResult/continuation/suspension
-    prefix/               # the PREFIX StepFn families (movement/filter/branch/passthrough/…)
-      movement.ts
-      filter.ts
-      predicate.ts        # predicateInlining fast path (a filter-family helper)
-      branch.ts
-      match.ts
-      passthrough.ts
-      sideeffect.ts
-      sack.ts
-    tail/                 # the re-enterable tail: shape retyping, child seam, projection
-      projection.ts       # compileTail dispatcher + compileFromScalar (stays whole)
-      child.ts            # the parent-polymorphic child seam (stays whole)
-      scalar.ts
-      variant.ts
-      barrier.ts
-      list.ts
-      group.ts
-      select.ts
-      labelselect.ts
-      mapscalar.ts
-      modulation.ts
-      coerce.ts
-      correlated.ts       # the correlated fast-path middle
-      bulk.ts             # tryBulkRepeat fast path
-      materialize.ts      # the one root materialization boundary
-      foreign.ts
-      call.ts
-      call-head.ts
-    write/
-      write.ts            # addV/addE/mergeV/mergeE/drop/property + routeWrite
-      inject.ts           # compileInject (a source constructor routed via write)
-    injection.ts          # INJECT_VALUES_KEY marker (steps-only vocabulary)
-
+      engine.ts                 # the Engine interface (+ ChildCompiler/TailCompiler interfaces)
+      lowerer.ts                # the Lowerer class: PREFIX methods + lower* orchestration
+      container.ts              # the compile-scope yadic container: wires the objects
+    compiler.ts                 # compile(): builds the compile-scope container, drives it
+  steps/                        # the lowering-object implementations + pure step helpers
+    context/{context.ts, alias.ts, stream.ts}
+    prefix/{movement.ts, filter.ts, predicate.ts, branch.ts, match.ts, passthrough.ts, sideeffect.ts, sack.ts}
+    tail/{projection.ts, child.ts, scalar.ts, variant.ts, barrier.ts, list.ts, group.ts,
+          select.ts, labelselect.ts, mapscalar.ts, modulation.ts, coerce.ts, correlated.ts,
+          bulk.ts, materialize.ts, foreign.ts, call.ts, call-head.ts}
+    write/{write.ts, inject.ts}
+    injection.ts
   services/
-    spi/
-      types.ts            # Service/Contribution/ServiceCallCtx/CallSpec + DIRECTORY_SERVICE_NAME
-      registry.ts         # createRegistry/EMPTY_REGISTRY
-    params/               # call() argument PARSING (a frontend concern, not a Service)
-      call-params.ts
-      traversal-param.ts
-      federation-depth.ts
-    catalog/              # the real callable Services
-      directory.ts        # --list
-      search.ts           # tinker.search
-      degree-centrality.ts# tinker.degree.centrality
-      federate.ts         # mogwai.graph.federate (barrier)
-    standard.ts           # standardRegistry/extendedRegistry (DI composition; imports catalog/*)
-    fts-index.ts          # FTS5 write-path indexer (NOT a Service — kept here; low-value to move)
-
-  # --- the outer tiers stay at src/ root (already a clean foundation→edge layering) ---
-  storage.ts              # GraphStore over the Sql interface
-  execute.ts              # Executor: compile+run+frame
-  api.ts                  # Sql/Executor/GraphManager/ForeignRow — the cross-layer contract (stays shallow)
-  manager.ts              # GraphManager helpers
-  serializers.ts          # registerExtendedSerializers (GraphBinary extensions)
-  io.ts                   # ioc reuse (relative import into gremlin's binary serializers)
-  wire.ts                 # parseRequest (request decode)
-  http.ts                 # streamBuffers/errorResponse (response framing/pacing)
-  router.ts               # makeRouter — the HTTP edge
-  docs.ts                 # OpenAPI + /docs
-  application.ts          # DI wiring via @bodar/yadic
-
-  bun/
-    BunSqlite.ts
-    BunGraphManager.ts
-    server.ts
-  cloudflare/
-    DurableObjectSqlite.ts
-    graph-store-do.ts     # NEW — the DO class + ensureLive/destroy (split from worker.ts)
-    cloudflare-graph-manager.ts  # NEW — the GraphManager adapter (split from worker.ts)
-    worker.ts             # thinned to the fetch entry point (matches Bun's 3-file split)
+    spi/{types.ts, registry.ts}
+    params/{call-params.ts, traversal-param.ts, federation-depth.ts}
+    catalog/{directory.ts, search.ts, degree-centrality.ts, federate.ts}
+    standard.ts
+    fts-index.ts
+  storage.ts  execute.ts  api.ts  manager.ts  serializers.ts  io.ts
+  wire.ts  http.ts  router.ts  docs.ts  application.ts   # app-scope DI container lives here
+  bun/{BunSqlite.ts, BunGraphManager.ts, server.ts}
+  cloudflare/{DurableObjectSqlite.ts, graph-store-do.ts, cloudflare-graph-manager.ts, worker.ts}
 ```
 
-Notes:
-- **The outer tiers (`storage`/`execute`/`api`/`wire`/`http`/`router`/…) stay at `src/` root.**
-  They already form a clean foundation→edge layering with no cycles; nesting them would add
-  import churn for no cohesion gain. Deeper nesting is spent where it buys something: the
-  compiler internals and services.
-- **`injection.ts`** moves under `steps/` (it is steps-only vocabulary, imported by
-  `steps/prefix/filter.ts` and `services/catalog/federate.ts`).
-- **`fts-index.ts`** stays in `services/` — it has exactly 2 imports and no other `services/`
-  file depends on it; moving it buys no DAG improvement. (Candidate for a future `write/`
-  consolidation, not forced now.)
-- The `q.ts` → `q.ts`+`query.ts` split is **optional polish** — only if it proves clean during
-  the move; `q.ts` is the literal zero-import foundation, so touch it with care.
+(The exact home of the `Lowerer`/family classes — `compiler/engine/` vs `steps/` — is settled
+during Movement 1: the *interfaces* and the container live in `compiler/engine/`; the family
+*implementations* live under `steps/` beside the pure helpers they use. The precise split
+falls out of which imports keep each package self-contained.)
 
-## Target `test/` tree
+### Tests
 
-Ladder (`L1-corpus/`, `L3-conformance/`, `L4-addendum/`) + `fixtures/` + `support/` **stay
-put** (locked by CLAUDE.md; the ladder organizes by conformance level, not domain). Only the
-two monoliths split, along the step-family taxonomy already present in their banner comments;
-they pair 1:1 (SQL-shape twin ↔ execution-semantics twin), so split along identical boundaries.
+Ladder (L1/L3/L4) + `fixtures/` + `support/` stay put. The two monoliths split by the
+step-family taxonomy already in their banner comments, pairing 1:1:
+`test/L2-sql/{movement,filter,branch,repeat-path,group,scalar,call,write,plumbing}.sql.test.ts`
+and `test/compiler/{…}.exec.test.ts`. Root single-file domain tests
+(wire/streaming/serializers/services/federation/foreign/typed-collections/…) already named by
+concept — left as single files, not wrapped in solo dirs.
 
-```
-test/
-  L1-corpus/            # unchanged
-  L3-conformance/       # unchanged
-  L4-addendum/          # unchanged
-  fixtures/             # unchanged (shared L3+L4 seeds)
-  support/executor.ts   # unchanged (shared exec fixture)
-  contract.ts           # unchanged
+---
 
-  L2-sql/               # was one 2869-line file → split by step family, mirroring steps/
-    movement.sql.test.ts
-    filter.sql.test.ts        # has/where/dedup/simplePath + is/where/not/TextP
-    branch.sql.test.ts        # union/optional/choose/coalesce + and/or
-    repeat-path.sql.test.ts   # repeat/times/emit + path (linear + recursive JSONB regimes)
-    group.sql.test.ts         # group/groupCount + nested by()
-    scalar.sql.test.ts        # scalar-parent projection/math/format/split/choose
-    call.sql.test.ts          # call()/service snapshots
-    write.sql.test.ts         # addV/addE/mergeV/mergeE/drop
-    plumbing.sql.test.ts      # stream physical schema, CTE/derived-table shape, bulking
+## Migration order (CI green + trunk push at every landing point)
 
-  compiler/             # was root compiler.test.ts (2393 lines) — split 1:1 with L2-sql above
-    scalar-branch.exec.test.ts
-    scalar-math-format.exec.test.ts
-    scalar-resource.exec.test.ts
-    scalar-split-tail.exec.test.ts
-    child-scope.exec.test.ts
-    scalar-project-choose.exec.test.ts
-    unified-lowering.exec.test.ts   # the big "unified lowering characterization" block
-    writes.exec.test.ts
-    repeat-path.exec.test.ts
-    typed-properties.exec.test.ts
+`mise run ci` is the gate. Stages are not locked — fold where splitting causes churn; the
+object-conversion of a family + its cycle edge should land atomically.
 
-  # root single-file domain tests — already named by concept, NOT wrapped in solo dirs:
-  wire.test.ts  streaming.test.ts  serializers.test.ts  exact-values.test.ts
-  typed-collections.test.ts  typed-collections-e2e.test.ts  performance.test.ts
-  services.test.ts  federation.test.ts  foreign.test.ts  fts-index.test.ts
-  bun.test.ts  cloudflare.test.ts
-```
+**Movement 1 — object model, in place (files where they are today):**
 
-The exact per-file section allocation for the two splits is decided when the files are opened
-(the banner comments are the guide); the boundaries above are the intended shape.
+1. **Introduce the compile-scope container + `Carry` slimming, engine interface first.** Define
+   the `Engine`/`ChildCompiler`/`TailCompiler` interfaces. Build the compile-scope yadic
+   container in `compiler.ts` (child of the app container that `execute.ts` already has via the
+   Executor's `registry`). This is the highest-risk landing — verify the full suite green with
+   the container wired but before removing the old threading, if that intermediate compiles.
+2. **Convert the PREFIX StepFns to `Lowerer` methods**; move `lowerElementSteps`/`lowerSteps`/
+   `lowerStepsStrict`/`buildPrefix`/`compileRead` onto/around the `Lowerer`. Drop the
+   `index.ts` barrel. Recursive callers switch to `this.engine.*`.
+3. **Convert the family compilers** (`ChildCompiler`, `TailCompiler`, `CorrelatedCompiler`,
+   `CallCompiler`, `WriteRouter`) to objects taking their deps; remove `fastPaths`/`registry`/
+   `engine`/`federationDepth` from `Carry`. Each family + its cycle edge lands atomically.
+4. Full suite green; the compiler core is now dependency-injected with a pure `Carry`.
 
-## Self-containment (the "lift a folder out" test)
+**Movement 2 — directory relocation (mechanical, deps no longer threaded):**
 
-- `sql/` — imports nothing upward (`q.ts` has zero imports; `schema`/`render` import only `q`).
-- `gremlin/` — imports only the generated parser + itself.
-- `compiler/` — imports `sql/`, `gremlin/`, `steps/`, `services/spi` (types).
-- `steps/` — 27 of 28 files import only other `steps/*` + the foundation (`sql`/`compiler/plan`/
-  `compiler/ir`/`compiler/options`/`gremlin`); the only cross-edges to `services/` are the SPI
-  **types** and `EMPTY_REGISTRY` (thin, documented, load-bearing — not accidental coupling).
-- `services/` — imports *from* `steps/` (stream/context/child types) but nothing in `steps/`
-  imports a concrete service; this one-directional edge is why `services/spi/types.ts` is placed
-  to avoid a cycle, and it stays one-directional.
+5. `sql/` (q/render/schema). 6. `gremlin/`. 7. `compiler/{ir,options,plan,segment,engine}`.
+8. `services/{spi,params,catalog}`. 9. `steps/{context,prefix,tail,write}`. 10. Cloudflare
+worker 3-way split. 11. Test monolith split. 12. Docs (CLAUDE.md paths + the DI/object-model
+section; feature-support-matrix; docs refs).
 
-## Migration order (CI green at every landing point; stages are NOT locked)
+Each Movement-2 stage is a pure path-rename (no behaviour change — Movement 1 did and verified
+the semantic change). Commit + push trunk after each green landing.
 
-`mise run ci` is the gate. Run `mise run L1 L2` for fast feedback during a stage; full
-`mise run test` (adds L3/L4) before closing one. Fold stages together wherever splitting causes
-churn (a half-moved set of mutually-referencing files won't compile — move those atomically).
+---
 
-1. **Break the cycle in place (highest risk, cheapest to verify — no files moved yet).**
-   Add the `engine` field to `Carry`. Change the deep recursive callers to read
-   `carry.engine.*`; give the seed-level callers (`bulk`/`write`/`list`) an engine argument.
-   `compileRead` seeds `carry.engine`. `steps/index.ts` still exists and still exports the
-   concrete functions (now assigned into the seeded engine object). **Verify the full suite
-   green here** — this is the one behaviour-relevant change, and with no files moved a
-   regression is unambiguously attributable to the seam.
-2. **Foundation:** `q`/`render`/`schema` → `sql/`. Pure path-rename (q.ts has zero imports).
-3. **Front-end:** `gremlin-types`/`frontend`/`math` → `gremlin/`.
-4. **Compiler leaves:** `strategies`/`fast-paths`/`plan`/`segment` → `compiler/{ir,options,plan}`.
-5. **Services SPI + params:** `types`/`registry` → `services/spi/`; `call-params`/
-   `traversal-param`/`federation-depth` → `services/params/`.
-6. **Steps substrate + leaves (atomic):** `context`/`alias`/`stream` → `steps/context/`;
-   the pure-leaf families → `steps/prefix/` and `steps/tail/`.
-7. **The former-cycle members + remaining tail (atomic):** `child`/`projection`/`scalar`/
-   `variant`/`barrier`/`list`/`group`/`select`/`labelselect`/`mapscalar`/`correlated`/`bulk`/
-   `foreign`/`call`/`call-head`/`materialize` → `steps/tail/`; `write`/`inject` → `steps/write/`.
-8. **Dissolve `index.ts`** → `compiler/engine/{prefix,lower,root}.ts`; delete the barrel; point
-   `compiler.ts` at `engine/root.ts`. (Fold with step 7 if that reduces churn.)
-9. **Services catalog:** `directory`/`search`/`degree-centrality`/`federate` → `services/catalog/`.
-10. **Cloudflare worker split** into 3 files (independent; validate against `cloudflare.test.ts`).
-11. **Test split** (last, against stable `src/` paths): extract one `describe`/section per file,
-    delete from the monolith, run the level, repeat — suite stays green after each extraction.
-12. **Docs:** update `CLAUDE.md` file-path references (`src/steps/*` → new homes; document the
-    `LowerEngine` seam beside the "Compiler extension law"), `docs/feature-support-matrix.md`,
-    and any other `docs/` reference to old paths.
+## Open sub-decisions (resolve with code in hand, not up front)
 
-Steps 2–10 are pure mechanical path renames (no behaviour change — step 1 already did and
-verified the only semantic change). Step 11 is test-only churn.
+- **`q`/`params` on `Carry` vs in the container.** Kept on `Carry` for now (genuine query
+  state, already on every stream). Revisit only if it reads awkwardly once objects exist.
+- **One `Lowerer` object vs per-family objects** (`MovementSteps`/`FilterSteps`/…). Start with
+  the family grouping that matches the target directories; collapse or split as the shared
+  dependency-set dictates.
+- **`compiler/engine/` vs `steps/` home for the concrete classes.** Interfaces + container in
+  `compiler/engine/`; implementations under `steps/`. Firm up when imports are drawn.
 ```
