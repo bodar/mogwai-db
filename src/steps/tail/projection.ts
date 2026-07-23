@@ -617,9 +617,9 @@ function compileFold(st: ElementStream, acc: TailAcc): ListStream {
  * same engine compileInject's tail runs, factored out so both consume one modifier
  * vocabulary. count() is the only projection valid on a scalar stream.
  */
-// A list-collection step (set-op / conjoin / all / any) requires a list traverser;
+// A list-collection step (set-op / conjoin / merge / all / any) requires a list/map traverser;
 // reached on a scalar stream it raises TinkerPop's incoming-type error.
-const SCALAR_LIST_ONLY = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product', 'conjoin', 'all', 'any']);
+const SCALAR_LIST_ONLY = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product', 'conjoin', 'merge', 'all', 'any']);
 
 // is(typeOf(LIST|SET|MAP)) RETYPES a scalar value stream into a ListStream / MapStream: the
 // stored collection value becomes the `list` / `map` column, so unfold/count(Scope.local)/
@@ -639,7 +639,8 @@ const scalarIsCollectionRetype: ShapeTailFn<ScalarStream> = (s, step, _steps, at
   return null;
 };
 
-const scalarListOnly: ShapeTailFn<ScalarStream> = (_s, step) => {
+const scalarListOnly: ShapeTailFn<ScalarStream> = (s, step) => {
+  if (s.literalNull) throw new Error(`Incoming traverser for ${step.name} step can't be null`);
   throw new Error(`${step.name} step can only take an array or an Iterable type for incoming traversers, encountered a scalar`);
 };
 

@@ -414,9 +414,11 @@ whole suite.
   stay 100%.
 - **L3** (`test/L3-conformance/l3.test.ts`): a ratcheted `bun test` — boots the conformance
   host in-process and runs the official cucumber suite over GraphBinary. **Telemetry is
-  always on** (no env flag): a live compact progress line (`.` per query, `E` per
-  compile/exec throw) prints during the run, then the systematic-gap summary (deferral
-  buckets + failing-step frequency) after. **One committed state file,
+  always on** (no env flag): a live compact progress line (`.` per query, `·` per EXPECTED
+  throw — a message that satisfies a negative scenario's `raise an error … text of "…"`
+  assertion, keyed off the corpus's own strings so a real bug throwing a canonical-looking
+  error still shows `E` — and `E` per real compile/exec gap) prints during the run, then the
+  systematic-gap summary (deferral buckets + failing-step frequency) after. **One committed state file,
   `test/L3-conformance/l3-state.json`**, records the last-known run — `{passing, total,
   passed[], failed[]}` — and is the SINGLE ratchet source of truth (`passing` =
   `passed.length`; there is no separate `baseline.json`/`l3-passing.txt`). Every run diffs

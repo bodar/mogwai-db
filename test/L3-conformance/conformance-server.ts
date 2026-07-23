@@ -13,7 +13,7 @@
 import { BunGraphManager } from '../../src/bun/BunGraphManager.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
 import { application } from '../../src/application.ts';
-import { LoggingGraphManager, telemetryPath, clearTelemetry } from './telemetry.ts';
+import { LoggingGraphManager, telemetryPath, clearTelemetry, expectedErrorSubstrings, progressMark } from './telemetry.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { CREW_SEED } from '../fixtures/seed-crew.ts';
 import { UID_SEED } from '../fixtures/seed-uid.ts';
@@ -65,10 +65,15 @@ export async function startConformanceServer(port = 45940) {
   const tpath = telemetryPath();
   clearTelemetry(tpath);
   const served = new LoggingGraphManager(manager, tpath);
-  // A compact live progress line — `.` per query that ran, `E` per compile/exec throw
-  // (a wrong-answer still shows `.`, matching the NDJSON's ok:true). The test
-  // terminates the line before printing the aggregate report.
-  const log = (e: { ok: boolean }) => process.stdout.write(e.ok ? '.' : 'E');
+  // A compact live progress line — `.` a query that ran, `·` an EXPECTED throw (its message
+  // satisfies a negative scenario's assertion, so the scenario passes), `E` a real compile/exec
+  // gap. A wrong-answer still shows `.`, matching the NDJSON's ok:true. Keying `·` off the
+  // corpus's own expected-error strings (not our message shape) keeps a real bug that throws a
+  // canonical-looking error as `E`. The test terminates the line before the aggregate report.
+  const expected = expectedErrorSubstrings(
+    new URL('../../vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/', import.meta.url).pathname,
+  );
+  const log = (e: { ok: boolean; error?: string }) => process.stdout.write(progressMark(e, expected));
   const app = application({ manager: served, log });
   return Bun.serve({ port, fetch: app.router });
 }
