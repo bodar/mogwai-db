@@ -183,7 +183,7 @@ function mapEntryBuffer(row: any, keyOf: MapOf, valOf: MapOf): Buffer {
 function listFieldBuffer(json: string, of: import('./render.ts').ListOf): Buffer {
   const items = JSON.parse(json);
   if (of.kind === 'elem') return listBuffer(items.map(of.elem === 'edge' ? rowEdge : rowVertex));
-  if (of.kind === 'property') return listBuffer(items.map((x: any) => vertexPropertyBuffer(x.vpid ?? `${x.owner}:${x.pk}`, x.pk, frameStoredValue(x.pv, x.pvtype ?? null), x.pmeta ? (typeof x.pmeta === 'string' ? JSON.parse(x.pmeta) : x.pmeta) : null)));
+  if (of.kind === 'property') return listBuffer(items.map(framePropertyRow));
   return ioc.listSerializer.serialize(items);
 }
 
@@ -238,6 +238,16 @@ function typedMapBuffer(pairs: [ValueNode, ValueNode][]): Buffer {
 // Frame a stored (value, vtype) column pair: reconstruct its ValueNode (the one rule, in
 // gremlin-types) and frame the tree — a scalar leaf routes to frameValue via frameTypedNode.
 const frameStoredValue = (raw: any, vtype: string | null): Buffer => frameTypedNode(valueNodeFromStored(raw, vtype));
+
+// Frame one VertexProperty from a property-payload row ({vpid,owner,pk,pv,pvtype,pmeta}) —
+// shared by the top-level property stream and the two list-of-property paths. Edge Property
+// has no vpid → synthesise `owner:pk`. pmeta may arrive as a JSON string (list paths) or an
+// already-parsed object (row path); normalise both.
+const framePropertyRow = (x: any): Buffer =>
+  vertexPropertyBuffer(
+    x.vpid ?? `${x.owner}:${x.pk}`, x.pk, frameStoredValue(x.pv, x.pvtype ?? null),
+    x.pmeta ? (typeof x.pmeta === 'string' ? JSON.parse(x.pmeta) : x.pmeta) : null,
+  );
 
 // Frame a vertex/edge from a plain (unprefixed) result row — the id/label/props
 // (+ src/tgt) projection the vertex/edge/list shapes share.
@@ -370,7 +380,7 @@ function frameListOf(json: string, of: ListOf): Buffer {
   if (json == null) return frameValue(null, undefined);
   const items = JSON.parse(json);
   if (of.kind === 'elem') return listBuffer(items.map(of.elem === 'edge' ? rowEdge : rowVertex));
-  if (of.kind === 'property') return listBuffer(items.map((x: any) => vertexPropertyBuffer(x.vpid ?? `${x.owner}:${x.pk}`, x.pk, frameStoredValue(x.pv, x.pvtype ?? null), x.pmeta ? (typeof x.pmeta === 'string' ? JSON.parse(x.pmeta) : x.pmeta) : null)));
+  if (of.kind === 'property') return listBuffer(items.map(framePropertyRow));
   if (of.kind === 'scalar')
     return of.typed ? listBuffer(items.map(frameTypedNode))
       : of.as ? listBuffer(items.map((x: any) => frameValue(x, of.as)))
@@ -525,7 +535,7 @@ function* frameValues(rows: any[], shape: import('./render.ts').Shape): Generato
     // pathGrouped folds pk-runs into Paths — a bounded fold, so yield each completed Path.
     case 'pathGrouped': yield* pathGroupedBuffers(rows, shape.elem, shape.byKey); return;
     // A VertexProperty with its real id + meta-properties framed (vpid null on edges → synthetic).
-    case 'property': for (const r of rows) yield vertexPropertyBuffer(r.vpid ?? `${r.owner}:${r.pk}`, r.pk, frameStoredValue(r.pv, r.pvtype ?? null), r.pmeta ? JSON.parse(r.pmeta) : null); return;
+    case 'property': for (const r of rows) yield framePropertyRow(r); return;
     // properties().properties(): meta-properties as Property elements.
     case 'metaProperty': for (const r of rows) yield ioc.anySerializer.serialize(new Property(r.mk, r.mv)); return;
     // properties(k).valueMap(): a VertexProperty's meta as a flat Map.
