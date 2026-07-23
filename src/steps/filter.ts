@@ -3,15 +3,15 @@ import { stepChain, type Pred } from '../gremlin/frontend.ts';
 import {
   P_OPS, labelIn, predicateSql, nodePropScalar, hasProp, elemCtx, aliasCtx,
   idPredFromArgs, scalarProp, labelNameSub, type Elem, type ScalarCtx,
-} from '../plan.ts';
+} from '../compiler/plan/plan.ts';
 import { tryInlinePredicate, combineBranchPreds } from './predicate.ts';
 import { advance, aliasElem, carriedCols, carriedWith, carryFrag, elemRel, pathColsOf, prevRel, scopePathCols, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from './context.ts';
 import { aliasAppend, aliasId, aliasSeed, elemEntry, elemShape } from './alias.ts';
 import { tryCombineByChildExistence, tryCompileScalarValueRows, tryFilterByChildExistence } from './child.ts';
 import { directElementModulation, elementOrderSql } from './modulation.ts';
-import { type PStep } from '../strategies.ts';
+import { type PStep } from '../compiler/ir/strategies.ts';
 import { isInjectionMarker, injectedValues } from '../injection.ts';
-import { engineOf } from './deps.ts';
+import { engineOf } from '../compiler/engine/deps.ts';
 
 // ---------- filter (predicates over the current traverser) ----------
 

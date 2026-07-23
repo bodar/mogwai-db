@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeAll } from 'bun:test';
-import { compile, type Compiled } from '../src/compiler.ts';
+import { compile, type Compiled } from '../src/compiler/compiler.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 

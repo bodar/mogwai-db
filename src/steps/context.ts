@@ -1,8 +1,8 @@
 import { q, list, empty, Query, Relation, type Expression } from '../sql/kernel/q.ts';
 import { nodes, edges } from '../sql/schema.ts';
-import { type Elem } from '../plan.ts';
+import { type Elem } from '../compiler/plan/plan.ts';
 import { type AliasShape } from './alias.ts';
-import { type PStep } from '../strategies.ts';
+import { type PStep } from '../compiler/ir/strategies.ts';
 
 // ---------- prefix-compilation state (Seam 2) ----------
 //
@@ -111,7 +111,7 @@ export function scopePathCols<C extends { col: string }>(
 export type SideEffectDef =
   | { kind: 'list'; rel: Relation; of: import('../sql/kernel/render.ts').ListOf }
   | { kind: 'variant'; rel: Relation; scalarAs?: import('../sql/kernel/render.ts').ValueType; elem?: Elem }
-  | { kind: 'group'; from: string; ctx: import('../plan.ts').ScalarCtx; elem: import('../sql/kernel/render.ts').ElemShape; isCount: boolean; bys: any[][]; parent: ElementStream; productiveBy?: boolean };
+  | { kind: 'group'; from: string; ctx: import('../compiler/plan/plan.ts').ScalarCtx; elem: import('../sql/kernel/render.ts').ElemShape; isCount: boolean; bys: any[][]; parent: ElementStream; productiveBy?: boolean };
 export type SideEffectMap = ReadonlyMap<string, SideEffectDef>;
 
 /** The per-traverser CARRIED SCHEMA: the columns physically present on the id-relation

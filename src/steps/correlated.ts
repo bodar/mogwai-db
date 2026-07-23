@@ -1,9 +1,9 @@
 import { Query, derived, q, type Expression, type Relation } from '../sql/kernel/q.ts';
 import { type Step } from '../gremlin/frontend.ts';
-import { type Elem } from '../plan.ts';
-import { normalize } from '../strategies.ts';
+import { type Elem } from '../compiler/plan/plan.ts';
+import { normalize } from '../compiler/ir/strategies.ts';
 import { type ElementStream } from './context.ts';
-import type { Engine } from './deps.ts';
+import type { Engine } from '../compiler/engine/deps.ts';
 
 // ---------- correlated inline-child rendering ----------
 //

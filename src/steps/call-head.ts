@@ -1,5 +1,5 @@
 import { q, list, empty, type Expression } from '../sql/kernel/q.ts';
-import { framedProps, extIdOf } from '../plan.ts';
+import { framedProps, extIdOf } from '../compiler/plan/plan.ts';
 import { edges, labels, nodes } from '../sql/schema.ts';
 import { type Compiled } from '../sql/kernel/render.ts';
 import { materializeRoot } from './materialize.ts';

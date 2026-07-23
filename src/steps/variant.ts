@@ -10,8 +10,8 @@
 // arm rides through unchanged.
 
 import { q, list, empty, type Expression, type Relation } from '../sql/kernel/q.ts';
-import { rangeToOffsetLimit } from '../plan.ts';
-import { type PStep } from '../strategies.ts';
+import { rangeToOffsetLimit } from '../compiler/plan/plan.ts';
+import { type PStep } from '../compiler/ir/strategies.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toVariantStream, type ListStream, type LoweringResult, type ScalarStream, type ShapeTailFn, type VariantArms, type VariantStream } from './stream.ts';
 import { carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, type Carry } from './context.ts';
 import { lowerGlobalCount } from './barrier.ts';

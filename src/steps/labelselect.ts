@@ -1,5 +1,5 @@
 import { q, list, raw, empty, value, type Expression } from '../sql/kernel/q.ts';
-import { type PStep } from '../strategies.ts';
+import { type PStep } from '../compiler/ir/strategies.ts';
 import { aliasElem, aliasIsElement, carriedCols, carryFrag, withShape, type AliasEntry, type Carried, type ElementStream } from './context.ts';
 import {
   aliasAppend, aliasEntry, aliasId, aliasPresent, aliasScalar, aliasSeed, elemEntry, shapeElem,

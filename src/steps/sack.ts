@@ -1,5 +1,5 @@
 import { derived, q, list, type Expression } from '../sql/kernel/q.ts';
-import { scalarProp, labelNameSub, predicateSql, elemCtx } from '../plan.ts';
+import { scalarProp, labelNameSub, predicateSql, elemCtx } from '../compiler/plan/plan.ts';
 import { advance, elemRel, prevRel, carriedCols, type ElementStream, type StepFn } from './context.ts';
 import { tryCompileScalarValueRows } from './child.ts';
 import { SACK_OPS, combineSack } from './scalar.ts';

@@ -21,9 +21,9 @@
 // executor's collaborators (store + the federation source). This module is TYPES ONLY: the
 // cycle-free description of a plan, importing only leaf types, never the store / framing / engine.
 
-import type { Compiled, WritePlan } from './sql/kernel/render.ts';
-import type { ForeignRow } from './api.ts';
-import type { CallParams } from './services/types.ts';
+import type { Compiled, WritePlan } from '../sql/kernel/render.ts';
+import type { ForeignRow } from '../api.ts';
+import type { CallParams } from '../services/types.ts';
 
 /** The capability a barrier's `apply` needs to reach OTHER graphs: get an executor for a graph
  *  id and run a raw (detached-row) traversal on it at a given federation depth. A minimal view of

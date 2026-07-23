@@ -19,15 +19,15 @@
 // lets the families reach lowering + deps without any parameter threading, while Carry stays PURE
 // per-query state (q/params/carried/sideEffects).
 
-import type { Query } from '../sql/kernel/q.ts';
-import type { FastPathConfig } from '../fast-paths.ts';
-import type { ServiceRegistry } from '../services/types.ts';
-import type { SackSpec } from '../gremlin/frontend.ts';
-import type { PStep } from '../strategies.ts';
-import type { Compiled } from '../sql/kernel/render.ts';
+import type { Query } from '../../sql/kernel/q.ts';
+import type { FastPathConfig } from '../options/fast-paths.ts';
+import type { ServiceRegistry } from '../../services/types.ts';
+import type { SackSpec } from '../../gremlin/frontend.ts';
+import type { PStep } from '../ir/strategies.ts';
+import type { Compiled } from '../../sql/kernel/render.ts';
 import type { SegmentPlan } from '../segment.ts';
-import type { Carry, ElementStream } from './context.ts';
-import type { Stream, LoweringSuspension } from './stream.ts';
+import type { Carry, ElementStream } from '../../steps/context.ts';
+import type { Stream, LoweringSuspension } from '../../steps/stream.ts';
 
 /** The lowering engine: the recursive-traversal authority (dispatcher + prefix fold + shaped
  *  lowering loop) plus the ambient compile dependencies. Built per-compile from a CompilerScope

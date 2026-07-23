@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { createAppScope, createCompilerScope } from '../src/scopes.ts';
-import { DEFAULT_FAST_PATHS } from '../src/fast-paths.ts';
+import { DEFAULT_FAST_PATHS } from '../src/compiler/options/fast-paths.ts';
 import { EMPTY_REGISTRY, createRegistry } from '../src/services/registry.ts';
 
 // The DI scopes (src/scopes.ts) separate compiler DEPENDENCIES from per-query state. A

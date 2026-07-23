@@ -127,7 +127,7 @@ export class Query {
    *  `Engine` interface (steps/deps.ts, a type-only import — no runtime cycle: q.ts stays a
    *  leaf). Optional so a bare `new Query()` (tests, the SQL kernel in isolation) is still valid;
    *  a lowering call on an engine-less Query is a wiring bug and throws where it is read. */
-  engine?: import('../../steps/deps.ts').Engine;
+  engine?: import('../../compiler/engine/deps.ts').Engine;
 
   /** Append a plain CTE; returns its Relation handle. `cols` names the projection
    *  (so `rel.c.x` is typed) — omit for a single implicit `id`. */

@@ -1,11 +1,11 @@
 import { q, list, type Expression } from '../sql/kernel/q.ts';
 import { edges, nodes, labels } from '../sql/schema.ts';
-import { dirsFor, edgeLabelFilter, framedProps } from '../plan.ts';
+import { dirsFor, edgeLabelFilter, framedProps } from '../compiler/plan/plan.ts';
 import { stepChain, type SackSpec } from '../gremlin/frontend.ts';
-import { type PStep } from '../strategies.ts';
+import { type PStep } from '../compiler/ir/strategies.ts';
 import { type Compiled } from '../sql/kernel/render.ts';
 import { materializeRoot } from './materialize.ts';
-import type { Engine } from './deps.ts';
+import type { Engine } from '../compiler/engine/deps.ts';
 
 // ---------- traverser bulking: repeat(...).times(n).count() ----------
 //

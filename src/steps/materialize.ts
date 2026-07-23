@@ -9,7 +9,7 @@
 import { type Expression, type Query } from '../sql/kernel/q.ts';
 import { readCompiled, type Compiled, type ListOf, type Shape } from '../sql/kernel/render.ts';
 import { list, q } from '../sql/kernel/q.ts';
-import { framedProps, extIdOf } from '../plan.ts';
+import { framedProps, extIdOf } from '../compiler/plan/plan.ts';
 import { edges, labels, nodes } from '../sql/schema.ts';
 import { groupResultColumns, pathColumns, recordResultColumns, type ForeignStream, type GroupStream, type ListStream, type MapEntryStream, type MapOf, type MapStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream, type Stream, type VariantStream } from './stream.ts';
 

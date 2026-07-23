@@ -5,12 +5,12 @@ import { advance, carriedWith, carryFrag, carryFragMint, carriedCols, partitionO
 import { aliasId } from './alias.ts';
 import { carryOf, toListStream, toScalarStream, toVariantStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream } from './stream.ts';
 import { variantArmsMeta, variantArmSelect, variantCols, type VariantArm } from './variant.ts';
-import { engineOf } from './deps.ts';
+import { engineOf } from '../compiler/engine/deps.ts';
 import { lowerScalarRows, gateScalar, tryInlineScalarPredicate, unionScalarStreams, SCALAR_TRANSFORMS } from './scalar.ts';
 import { lowerScalarVE } from './projection.ts';
-import { normalize, type PStep } from '../strategies.ts';
+import { normalize, type PStep } from '../compiler/ir/strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
-import { predicateSql, rangeToOffsetLimit } from '../plan.ts';
+import { predicateSql, rangeToOffsetLimit } from '../compiler/plan/plan.ts';
 import { elementOrderSql } from './modulation.ts';
 
 /** Root/child compilation context. A child frame retains the complete parent domain,

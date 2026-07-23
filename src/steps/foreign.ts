@@ -1,6 +1,6 @@
 import { q, value, list, empty, type Relation, type Expression } from '../sql/kernel/q.ts';
-import { type Elem } from '../plan.ts';
-import { type PStep } from '../strategies.ts';
+import { type Elem } from '../compiler/plan/plan.ts';
+import { type PStep } from '../compiler/ir/strategies.ts';
 import type { ForeignRow, InjectionKind } from '../services/types.ts';
 import {
   carriedCols, carryFrag, type Carry,

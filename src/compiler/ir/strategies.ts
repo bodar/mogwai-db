@@ -1,4 +1,4 @@
-import { stepChain, isNested, type Step, type StrategySpec, type StrategyUse } from './gremlin/frontend.ts';
+import { stepChain, isNested, type Step, type StrategySpec, type StrategyUse } from '../../gremlin/frontend.ts';
 
 // ---------- normalization passes (Seam 3) ----------
 //

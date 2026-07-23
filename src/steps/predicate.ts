@@ -4,9 +4,9 @@ import { edgeProperties } from '../sql/schema.ts';
 import {
   predicateSql, labelIn, hasProp, idPredFromArgs, labelNameSub, aliasCtx,
   type ScalarCtx,
-} from '../plan.ts';
+} from '../compiler/plan/plan.ts';
 import { compileCorrelatedChild } from './correlated.ts';
-import type { Engine } from './deps.ts';
+import type { Engine } from '../compiler/engine/deps.ts';
 
 // ---------- where()/not()/filter(__.…) → a boolean filter predicate ----------
 //
