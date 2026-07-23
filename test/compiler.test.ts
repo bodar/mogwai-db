@@ -11,8 +11,8 @@ import { executeQuery } from './support/executor.ts';
 import { ioc } from '../src/io.ts';
 import { parseRequest } from '../src/wire.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
-import { assertStreamColumns } from '../src/steps/stream.ts';
-import { pushChildScope } from '../src/steps/child.ts';
+import { assertStreamColumns } from '../src/steps/context/stream.ts';
+import { pushChildScope } from '../src/steps/tail/child.ts';
 
 const read = (q: string, options?: CompileOptions) => {
   const p = compile(q, {}, options);

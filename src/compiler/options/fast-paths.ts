@@ -1,5 +1,5 @@
-import { EMPTY_REGISTRY } from '../../services/registry.ts';
-import type { ServiceRegistry } from '../../services/types.ts';
+import { EMPTY_REGISTRY } from '../../services/spi/registry.ts';
+import type { ServiceRegistry } from '../../services/spi/types.ts';
 
 /** Independently switchable optimized lowerings. The generic path remains the
  * semantic authority; these switches exist for equivalence tests and diagnostics. */

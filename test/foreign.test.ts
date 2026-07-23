@@ -1,18 +1,18 @@
 import { test, expect, describe } from 'bun:test';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
-import { landForeignElements } from '../src/steps/foreign.ts';
+import { landForeignElements } from '../src/steps/tail/foreign.ts';
 import { executeQuery, exec } from './support/executor.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { LoweringEngine } from '../src/compiler/engine/engine.ts';
 import { createAppScope, createCompilerScope } from '../src/scopes.ts';
-import { materializeFinal } from '../src/steps/materialize.ts';
+import { materializeFinal } from '../src/steps/tail/materialize.ts';
 import { normalize } from '../src/compiler/ir/strategies.ts';
 import { stepChain, parseGremlin } from '../src/gremlin/frontend.ts';
-import type { ForeignRow } from '../src/services/types.ts';
-import type { Carry } from '../src/steps/context.ts';
+import type { ForeignRow } from '../src/services/spi/types.ts';
+import type { Carry } from '../src/steps/context/context.ts';
 import type { Elem } from '../src/compiler/plan/plan.ts';
-import type { ForeignStream } from '../src/steps/stream.ts';
+import type { ForeignStream } from '../src/steps/context/stream.ts';
 
 // Foreign (detached) element stream, tested in ISOLATION — no federation plumbing yet.
 // A federated call() will feed landForeignElements the sibling's rows; here we hand it

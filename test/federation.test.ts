@@ -4,9 +4,9 @@ import { extendedRegistry } from '../src/services/standard.ts';
 import { ioc } from '../src/io.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { CREW_SEED } from './fixtures/seed-crew.ts';
-import { MAX_FEDERATION_DEPTH, guardFederationDepth } from '../src/services/federation-depth.ts';
-import { federateService } from '../src/services/federate.ts';
-import { INJECT_VALUES_KEY } from '../src/injection.ts';
+import { MAX_FEDERATION_DEPTH, guardFederationDepth } from '../src/services/params/federation-depth.ts';
+import { federateService } from '../src/services/catalog/federate.ts';
+import { INJECT_VALUES_KEY } from '../src/steps/injection.ts';
 
 // End-to-end federation on the REAL stack: two graphs owned by one BunGraphManager, one
 // federating into the other via mogwai.graph.federate — the real service, real env, real depth

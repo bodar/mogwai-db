@@ -21,13 +21,13 @@
 
 import type { Query } from '../../sql/kernel/q.ts';
 import type { FastPathConfig } from '../options/fast-paths.ts';
-import type { ServiceRegistry } from '../../services/types.ts';
+import type { ServiceRegistry } from '../../services/spi/types.ts';
 import type { SackSpec } from '../../gremlin/frontend.ts';
 import type { PStep } from '../ir/strategies.ts';
 import type { Compiled } from '../../sql/kernel/render.ts';
 import type { SegmentPlan } from '../segment.ts';
-import type { Carry, ElementStream } from '../../steps/context.ts';
-import type { Stream, LoweringSuspension } from '../../steps/stream.ts';
+import type { Carry, ElementStream } from '../../steps/context/context.ts';
+import type { Stream, LoweringSuspension } from '../../steps/context/stream.ts';
 
 /** The lowering engine: the recursive-traversal authority (dispatcher + prefix fold + shaped
  *  lowering loop) plus the ambient compile dependencies. Built per-compile from a CompilerScope

@@ -4,7 +4,7 @@ import { GraphStore } from '../storage.ts';
 import { type GraphManager, type GraphInfo, graphInfo } from '../manager.ts';
 import { Executor } from '../execute.ts';
 import type { Executor as ExecutorApi } from '../api.ts';
-import type { ServiceRegistry } from '../services/types.ts';
+import type { ServiceRegistry } from '../services/spi/types.ts';
 import { BunSqlite } from './BunSqlite.ts';
 
 /**

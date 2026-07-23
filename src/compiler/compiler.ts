@@ -2,7 +2,7 @@ import { parseGremlin, stepChain, extractStrategies, extractSack, extractSideEff
 import { type TypeNode } from '../gremlin/types.ts';
 import { applyStrategies, normalize } from './ir/strategies.ts';
 import { LoweringEngine, collapseSafeFastPaths } from './engine/engine.ts';
-import { routeWrite } from '../steps/write.ts';
+import { routeWrite } from '../steps/write/write.ts';
 import { type Compiled, type WritePlan } from '../sql/kernel/render.ts';
 import { type Plan } from './segment.ts';
 import { resolveFastPaths, resolveRegistry, resolveFederationDepth, type CompileOptions } from './options/fast-paths.ts';
