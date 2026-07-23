@@ -1,0 +1,371 @@
+// L2 — SQL snapshots: the "compile to SQL, never interpret" contract.
+//
+// Each test compiles a canonical Gremlin string and asserts the emitted SQL (via
+// `.toContain` of the meaningful fragments — semantic equivalence, NOT byte
+// identity; see CLAUDE.md "SQL snapshots assert semantic equivalence"). Some tests
+// additionally run the compiled SQL against a seeded in-memory store to pin the
+// result shape. The execution-semantics half of the old compiler.test.ts lives at
+// test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
+import { test, expect, describe } from 'bun:test';
+import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
+import { GraphStore } from '../../src/storage.ts';
+import { BunSqlite } from '../../src/bun/BunSqlite.ts';
+import { executeQuery, executeFramed } from '../support/executor.ts';
+import { ioc } from '../../src/io.ts';
+import { Query } from '../../src/sql/kernel/q.ts';
+import { MODERN_SEED } from '../fixtures/seed-modern.ts';
+import { assertStreamColumns, toGroupStream, toPathStream, toPropertyStream, toRecordStream, toScalarStream, toVariantStream } from '../../src/steps/context/stream.ts';
+import { popChildScope, pushChildScope, reuseCurrentFrame } from '../../src/steps/tail/child.ts';
+import { standardRegistry } from '../../src/services/standard.ts';
+import { readdirSync, readFileSync } from 'node:fs';
+
+const read = (q: string, options?: CompileOptions) => {
+  const p = compile(q, {}, options);
+  if (p.kind !== 'read') throw new Error('expected read plan');
+  return p;
+};
+
+// A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
+// it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
+function seededStore() {
+  const store = new GraphStore(new BunSqlite(':memory:'));
+  for (const q of MODERN_SEED) executeQuery(store, q, {}); // seed by running the write traversals
+  return store;
+}
+
+const run = (store: GraphStore, q: string) => {
+  const p = compile(q, {});
+  if (p.kind === 'write') return p.run(store);
+  return store.query(p.sql, p.binds);
+};
+
+const runWith = (store: GraphStore, q: string, options: CompileOptions) => {
+  const p = compile(q, {}, options);
+  if (p.kind === 'write') return p.run(store);
+  return store.query(p.sql, p.binds);
+};
+
+describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () => {
+  test('union() as a source step UNION ALLs its vertex-rooted branches', () => {
+    const p = read("g.union(__.V(2),__.V(4)).values('name')");
+    expect(p.sql).toContain('UNION ALL');
+    expect(p.sql).toContain('vp.value END AS v');
+    // branches sharing the one WITH clause
+    expect(read("g.union(__.V().hasLabel('software'),__.V().hasLabel('person')).count()").shape).toEqual({ kind: 'count' });
+    // mid-chain union() still works (different code path)
+    expect(read("g.V().union(__.out(),__.in()).values('name')").sql).toContain('UNION ALL');
+    // non-vertex / unsupported branch defers with a clear error
+    expect(() => compile('g.union(__.inject(1),__.inject(2))', {})).toThrow('unsupported source step: inject');
+  });
+
+  test('and()/or() combine branch predicates; nested where(__.and)', () => {
+    const a = read('g.V().and(__.out("knows"), __.out("created"))');
+    expect(a.sql).toContain('WHERE ((EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.src=p.id AND e.label IN');
+    expect(a.sql).toContain(') AND (EXISTS(');
+    expect(read('g.V().or(__.out("knows"), __.in("created"))').sql).toContain(') OR (EXISTS(');
+    // <2 branches → clear throw
+    expect(() => compile('g.V().and(__.out())', {})).toThrow('needs at least two traversal branches');
+  });
+
+  test('infix .and()/.or() connectors split a predicate body (where/choose/until)', () => {
+    // where(has().and().has()) → ((p0) AND (p1))
+    const a = read('g.V().where(__.has("name","x").and().has("age",P.gt(1)))');
+    expect(a.sql).toContain(' AND ');
+    expect(a.binds).toEqual(['name', 'x', 'age', 1]);
+    // or() → ((p0) OR (p1)); OR binds looser so mixed a.and().b.or().c groups as ((a AND b) OR c)
+    expect(read('g.V().where(__.has("name","x").or().has("age",P.gt(1)))').sql).toContain(') OR (');
+    const mixed = read('g.V().where(__.hasLabel("person").and().out("created").or().hasLabel("software"))');
+    expect(mixed.sql).toMatch(/\(\(.*AND.*\).*OR.*\)/s);
+    // choose() infix predicate now routes through the same split (movement conjunct →
+    // correlated EXISTS), then the arms fold — D2 support-definer removed.
+    const c = read('g.V().choose(__.hasLabel("person").and().out("created"), __.out("knows"), __.identity())');
+    expect(c.sql).toContain('UNION ALL');
+    expect(c.shape).toEqual({ kind: 'vertex' });
+    // malformed (leading/trailing/empty operand) → clear throw
+    expect(() => compile('g.V().where(__.and().has("name","x"))', {})).toThrow('empty operand');
+  });
+
+  test('union() → UNION ALL of branch id-relations, multi-hop bodies fold', () => {
+    const u = read('g.V(1).union(__.out("knows"), __.out("created")).values("name")');
+    expect(u.sql).toContain('UNION ALL');
+    expect(u.sql).toContain('ROW_NUMBER() OVER () AS o0');
+    expect(u.sql).toContain('SELECT e.tgt AS id, p.bulk, p.o0 FROM edges e JOIN');
+    // multi-hop branch now folds through the dispatch (was single-hop only)
+    expect(read('g.V().union(__.out().out(), __.in()).values("name")').sql)
+      .toContain('SELECT e.tgt AS id, p.bulk, p.o0 FROM edges e JOIN c2 p ON e.src=p.id');
+    // Homogeneous scalar arms lower at the shape-aware dispatcher and re-enter the
+    // scalar pipeline; this is not the element-only PREFIX union.
+    const scalar = read('g.V(1).union(__.values("name"), __.constant("x")).count()');
+    expect(scalar.shape).toEqual({ kind: 'count' });
+    expect(scalar.sql).toContain(' AS v FROM');
+    expect(scalar.sql).toContain('UNION ALL');
+    expect(() => compile('g.V().union(__.out())', {})).toThrow('needs at least two branches');
+    // as() before union now threads the alias column through the merge (carried-schema, Move B)
+    const ua = read('g.V().as("a").union(__.out(), __.in()).select("a")');
+    expect(ua.sql).toContain('UNION ALL');
+    expect(ua.sql).toContain('SELECT id, a0, bulk FROM'); // the a0 alias column survives the branch merge
+    // a NEW as() bound INSIDE one arm now forks/merges: the label unions into the merged
+    // set and the arm that never bound it pads an empty (NULL) history.
+    const divU = read('g.V().union(__.as("b").out(), __.in()).select("b")');
+    expect(divU.sql).toContain('SELECT id, a0, bulk FROM'); // the binding arm carries its history
+    expect(divU.sql).toContain('SELECT id, NULL AS a0, bulk FROM'); // the other arm pads it
+    // sack through a fork is fail-closed (split/merge-on-fork unverified — carried-schema didn't silently lift it)
+    expect(() => compile('g.withSack(0.0d).V().sack(sum).by("age").union(__.out(), __.in())', {})).toThrow('sack() through union()');
+    // mixed scalar+element arms now merge as a dynamic-tag VariantStream (P4)
+    const mixedU = read('g.V().union(__.values("name"), __.out())');
+    expect(mixedU.shape).toEqual({ kind: 'variant', scalarAs: undefined, node: true });
+    expect(mixedU.sql).toContain('1 AS vk'); // scalar arm
+    expect(mixedU.sql).toContain('2 AS vk'); // node arm
+    // mixed element kinds across branches (both element-class) stays the legacy defer
+    expect(() => compile('g.V().union(__.out(), __.outE())', {})).toThrow('different element kinds');
+  });
+
+  test('optional() → single-hop LEFT JOIN fast path; multi-hop via ordinal', () => {
+    const o = read('g.V().optional(__.out("created")).values("name")');
+    expect(o.sql).toContain('SELECT COALESCE(e.tgt, p.id) AS id, p.bulk FROM c0 p LEFT JOIN edges e ON e.src=p.id');
+    // both()/multi-hop now compile via the coalesce(t, identity) ordinal shape
+    const b = read('g.V().optional(__.both()).count()');
+    expect(b.sql).toContain('ROW_NUMBER() OVER () AS o0');
+    expect(b.sql).toContain('WHERE o0 NOT IN (SELECT o0 FROM'); // self-on-miss
+    expect(read('g.V().optional(__.out().out()).count()').sql).toContain('ROW_NUMBER() OVER () AS o0');
+    // a body that flips element kind would make self-on-miss mixed-shape → defer
+    expect(() => compile('g.V().optional(__.outE())', {})).toThrow('changing element kind');
+    // as() before optional threads the alias through the fast path (carryFrag from the input)
+    expect(read('g.V().as("a").optional(__.out()).select("a")').sql)
+      .toContain('SELECT COALESCE(e.tgt, p.id) AS id, p.a0, p.bulk FROM');
+    // NESTED optional/coalesce: each mints a UNIQUE ordinal (o0 outer, o1 inner) and
+    // carries the outer through — so they compose (unlocks optional(out().optional(out())).path()).
+    expect(read('g.V().optional(__.out().optional(__.out())).path()').sql).toContain('AS o1');
+    expect(read('g.V(1).coalesce(__.coalesce(__.out(), __.in()), __.both())').sql).toContain('AS o1');
+  });
+
+  test('optional total scalar/list children retype without a phantom identity arm', () => {
+    const store = seededStore();
+    expect(run(store, 'g.V().optional(__.out().count())').map((r) => Number(r.v)).sort((a, b) => a - b))
+      .toEqual([0, 0, 0, 1, 2, 3]);
+    expect(run(store, 'g.V().optional(__.out().values("name").fold()).count(Scope.local)').map((r) => Number(r.v)).sort((a, b) => a - b))
+      .toEqual([0, 0, 0, 1, 2, 3]);
+  });
+
+  test('optional non-total scalar child lowers to a scalar-or-element VariantStream', () => {
+    const store = seededStore();
+    const plan = read('g.V().optional(__.values("age"))');
+    expect(plan.shape).toEqual({ kind: 'variant', scalarAs: undefined, node: true });
+    const rows = run(store, 'g.V().optional(__.values("age"))');
+    expect(rows.filter((r) => r.vk === 1).map((r) => r.v).sort((a, b) => a - b)).toEqual([27, 29, 32, 35]);
+    expect(rows.filter((r) => r.vk === 2).map((r) => r.label)).toEqual(['software', 'software']);
+    expect(executeQuery(store, 'g.V().optional(__.values("age"))', {})).toHaveLength(6);
+    expect(run(store, 'g.V().optional(__.values("age")).count()').map((r) => r.v)).toEqual([6]);
+  });
+
+  test('mixed-shape branch arms merge as a dynamic-tag VariantStream (P4)', () => {
+    const store = seededStore();
+    // union: scalar arm (name) + element arm (out) — vk 1 vs 2, framing yields all rows
+    const uRows = run(store, 'g.V(1).union(__.values("name"), __.out())');
+    expect(uRows.filter((r) => r.vk === 1).map((r) => r.v)).toEqual(['marko']);
+    expect(uRows.filter((r) => r.vk === 2).length).toBe(3); // marko created lop, knows vadas+josh
+    expect(executeQuery(store, 'g.V(1).union(__.values("name"), __.out())', {})).toHaveLength(4);
+    // union with an EDGE arm exercises vk=3 + the src/tgt columns
+    expect(executeQuery(store, 'g.V(1).union(__.outE(), __.values("age"))', {})).toHaveLength(4);
+    // coalesce: element arm wins per input, scalar fallback where empty; gated by ordinal
+    const cRows = run(store, 'g.V().coalesce(__.out(), __.values("name"))');
+    expect(cRows.some((r) => r.vk === 1)).toBe(true);  // leaves fall back to name
+    expect(cRows.some((r) => r.vk === 2)).toBe(true);  // marko/josh have out()
+    expect(() => executeQuery(store, 'g.V().coalesce(__.out(), __.values("name"))', {})).not.toThrow();
+    // choose: predicate splits, then=element / else=scalar
+    expect(() => executeQuery(store, 'g.V().choose(__.out(), __.label(), __.values("name"))', {})).not.toThrow();
+  });
+
+  test('variant tail: shape-agnostic row-ops (limit/skip/range/dedup) + fail-closed', () => {
+    const store = seededStore();
+    const base = 'g.V(1).union(__.values("name"), __.out())';
+    const full = run(store, base).length; // 4: name 'marko' + 3 out neighbours
+    expect(full).toBe(4);
+    // limit/skip/range re-project the variant relation, slicing rows without touching
+    // the per-row tag — the whole union (all arms) rides through the LIMIT/OFFSET.
+    const lim = read(`${base}.limit(2)`);
+    expect(lim.shape).toEqual({ kind: 'variant', scalarAs: undefined, node: true });
+    expect(lim.sql).toContain('SELECT p.vk, p.v, p.rid, p.bulk, p.encounter FROM'); // full column re-projection (encounter seeded: union fan-out + limit)
+    expect(lim.sql).toContain('LIMIT 2');
+    expect(run(store, `${base}.limit(2)`).length).toBe(2);
+    expect(read(`${base}.skip(1)`).sql).toContain('LIMIT -1 OFFSET 1');
+    expect(run(store, `${base}.skip(1)`).length).toBe(full - 1);
+    expect(read(`${base}.range(1,3)`).sql).toContain('LIMIT 2 OFFSET 1');
+    expect(run(store, `${base}.range(1,3)`).length).toBe(2);
+    // count barrier over the union still collapses to one Long
+    expect(run(store, `${base}.count()`).map((r: any) => Number(r.v))).toEqual([full]);
+    // dedup collapses the multiset on the tagged (vk,v,rid) row
+    expect(read(`${base}.dedup()`).sql).toContain('SELECT DISTINCT p.vk, p.v, p.rid, p.bulk FROM');
+    expect(run(store, 'g.V(1).union(__.out(), __.out()).dedup()').length)
+      .toBeLessThan(run(store, 'g.V(1).union(__.out(), __.out())').length);
+    // fail closed: steps that must look inside a heterogeneous row cannot apply
+    expect(() => compile(`${base}.out()`, {})).toThrow('out() on a variant value not yet supported');
+    expect(() => compile(`${base}.order()`, {})).toThrow('order() on a variant value not yet supported');
+    // dedup with carried label state defers rather than over-collapsing
+    expect(() => compile(`g.V().as("a").union(__.values("name"), __.out()).dedup()`, {}))
+      .toThrow('dedup() over a variant with carried path/label state not yet supported');
+  });
+
+  test('coalesce() → first non-empty branch per input via the ordinal', () => {
+    const c = read('g.V(1).coalesce(__.out("knows"), __.out("created")).values("name")');
+    expect(c.sql).toContain('ROW_NUMBER() OVER () AS o0');
+    // branch 2 emits only for inputs branch 1 produced nothing for
+    expect(c.sql).toContain('WHERE o0 NOT IN (SELECT o0 FROM');
+    expect(c.shape).toEqual({ kind: 'value', perRowType: true });
+    const scalar = read('g.V().coalesce(__.values("age"), __.constant(0)).count()');
+    expect(scalar.shape).toEqual({ kind: 'count' });
+    expect(scalar.sql).toContain('a.o0 NOT IN (SELECT o0 FROM');
+    expect(read('g.V().coalesce(__.values("missing").fold(), __.values("name").fold()).unfold().count()').shape)
+      .toEqual({ kind: 'count' });
+    // mixed element+scalar arms now merge as a dynamic-tag VariantStream (P4), gated
+    // per input ordinal like the homogeneous coalesce.
+    const mixedC = read('g.V().coalesce(__.out(), __.values("name"))');
+    expect(mixedC.shape).toEqual({ kind: 'variant', scalarAs: undefined, node: true });
+    expect(mixedC.sql).toContain('o0 NOT IN (SELECT o0 FROM'); // second arm gated
+    expect(() => compile('g.V().coalesce(__.out(), __.outE())', {})).toThrow('different element kinds');
+    // dedup now preserves both the branch ordinal and its inner child ordinal.
+    const dedup = read('g.V().coalesce(__.out().dedup(), __.in())');
+    expect(dedup.sql).toContain('SELECT DISTINCT p.id AS id, p.bulk, p.o0, p.o1');
+    // union() inside coalesce threads the ordinal through → valid
+    expect(read('g.V().coalesce(__.union(__.out(),__.in()), __.both())').sql).toContain('ROW_NUMBER() OVER () AS o0');
+    // as() before coalesce: originSeed projects the alias alongside the ordinal, the
+    // merge outputs it (dropping the internal `o`) → select("a") resolves (Move B)
+    const ca = read('g.V().as("a").coalesce(__.out(), __.in()).select("a")');
+    expect(ca.sql).toContain('ROW_NUMBER() OVER () AS o0');
+    expect(ca.sql).toContain('SELECT id, a0, bulk FROM');
+  });
+
+  test('flatMap() consumes every productive element or scalar child row', () => {
+    const sql = read('g.V().flatMap(__.out().out()).values("name")').sql;
+    expect(sql).toContain('SELECT e.tgt AS id, p.bulk, p.o0 FROM edges e');
+    expect(sql).toContain('SELECT p.id AS id, p.bulk FROM c3 p'); // `all` consumes the child origin
+    const scalar = read('g.V().flatMap(__.values("name"))');
+    expect(scalar.shape).toEqual({ kind: 'value', as: undefined });
+    expect(scalar.sql).toContain('JOIN vertex_properties vp');
+    // Every scalar child records provider encounter order explicitly. `all` drops
+    // the child ordinal without applying map's second first-per-parent window.
+    expect(scalar.sql.match(/PARTITION BY/g)?.length).toBe(1);
+  });
+
+  test('map(__.<scalar>) → per-traverser scalar projection (value shape)', () => {
+    const m = read('g.V().map(__.out().count())');
+    expect(m.shape).toEqual({ kind: 'value', as: 'long' }); // count() is a Long
+    // count() is a child-scope barrier, not a correlated scalar fast path: the
+    // preserved domain makes an empty child an explicit zero row per origin.
+    expect(m.sql).toContain('COUNT(c.id) AS v');
+    expect(m.sql).toContain('LEFT JOIN');
+    expect(m.sql).toContain('GROUP BY d.o0');
+    const localCount = read('g.V().local(__.out().count())');
+    expect(localCount.sql).toContain('COUNT(c.id) AS v');
+    expect(localCount.sql).toContain('LEFT JOIN');
+    const localRows = read('g.V(1).local(__.out().values("name").order().limit(2))');
+    expect(localRows.sql).toContain('PARTITION BY p.o0 ORDER BY (CASE WHEN p.vtype');
+    expect(localRows.sql).toContain('ELSE p.v END) ASC');
+    const carriedCount = read('g.V(1).as("a").local(__.out().count())');
+    expect(carriedCount.sql).toContain('COUNT(c.id) AS v, d.a0');
+    const childValue = read('g.V(1).map(__.values("name"))');
+    expect(childValue.shape).toEqual({ kind: 'value', as: undefined });
+    expect(childValue.sql).toContain('JOIN vertex_properties vp');
+    expect(childValue.sql).toContain('ROW_NUMBER() OVER (PARTITION BY p.o0');
+    expect(read('g.V(1).map(__.values("name").toUpper())').sql).toContain('upper(p.v) AS v');
+    expect(read('g.V(1).map(__.out().values("name").order().by(Order.desc).limit(1))').sql)
+      .toContain('ELSE p.v END) DESC');
+    expect(read('g.V(1).local(__.out().values("name").tail(2))').sql)
+      .toContain('PARTITION BY p.o0 ORDER BY p.encounter DESC');
+    const reducedChild = read('g.V().map(__.out().values("name").is("lop").count())');
+    expect(reducedChild.sql).toContain('COALESCE(SUM(CASE WHEN s.encounter IS NOT NULL THEN s.bulk END), 0) AS v');
+    expect(reducedChild.sql).toContain('LEFT JOIN');
+    const foldedChild = read('g.V().map(__.out().values("name").fold()).count(Scope.local)');
+    expect(foldedChild.sql).toContain('json_group_array(s.v ORDER BY s.encounter) FILTER');
+    expect(foldedChild.sql).toContain("json('[]')");
+    expect(read('g.V().map(__.out().fold()).unfold().values("name")').shape).toEqual({ kind: 'value', perRowType: true });
+    expect(() => compile('g.V().map(__.constant(1).discard())', {})).toThrow();
+    // record/list-valued child bodies still defer; element bodies use generic child scope below.
+    expect(() => compile('g.V().map(__.select("a"))', {})).toThrow('not supported by generic scalar lowering');
+    expect(() => compile('g.V().map(__.values("name")).map(__.values("age"))', {})).toThrow('map() after a scalar stream not yet supported');
+    // The leaf now returns a ScalarStream instead of materializing terminal SQL.
+    expect(read('g.V().map(__.out().count()).is(P.gt(0)).count()').shape).toEqual({ kind: 'count' });
+  });
+
+  test('map(__.<element body>) uses child scope + first-per-parent cardinality', () => {
+    const p = read('g.V().map(__.out()).values("name")');
+    expect(p.shape).toEqual({ kind: 'value', perRowType: true });
+    expect(p.sql).toContain('ROW_NUMBER() OVER (PARTITION BY');
+    expect(p.sql).toContain('WHERE r.rn=1');
+    expect(read('g.V(1).map(__.outE("knows")).inV().values("name")').shape).toEqual({ kind: 'value', perRowType: true });
+  });
+
+  test('choose(pred, then, else) → gated-seed UNION ALL, arms fold from their seed', () => {
+    const c = read('g.V().choose(__.has("name","vadas"), __.out("knows"), __.in("knows"))');
+    // two gated seeds off the same source (c0): pred and NOT-pred
+    expect(c.sql).toContain("WHERE EXISTS(SELECT 1 FROM vertex_properties WHERE node=n.id AND key=? AND value = ?)");
+    expect(c.sql).toContain("WHERE NOT COALESCE((EXISTS(SELECT 1 FROM vertex_properties WHERE node=n.id AND key=? AND value = ?)), 0)");
+    // arms fold through movement; the two element id-relations merge UNION ALL
+    expect(c.sql).toContain('UNION ALL');
+    expect(c.shape).toEqual({ kind: 'vertex' });
+    expect(c.binds).toEqual(['name', 'vadas', 'knows', 'name', 'vadas', 'knows']);
+    // count().is predicate rides as a correlated subquery; multi-hop arm folds
+    expect(read('g.V().choose(__.out("knows").count().is(P.gt(0)), __.out("created").out())').sql)
+      .toContain('(SELECT COUNT(*) FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.src=p.id AND e.label IN');
+    // 2-arg form: else absent → identity passthrough of the NOT-pred seed
+    expect(read('g.V().choose(__.hasLabel("software"), __.in("created"))').sql).toContain('UNION ALL');
+    const scalar = read('g.V().choose(__.hasLabel("person"), __.values("name"), __.constant("software")).count()');
+    expect(scalar.shape).toEqual({ kind: 'count' });
+    expect(scalar.sql).toContain(' AS v FROM');
+    expect(scalar.sql).toContain('UNION ALL');
+  });
+
+  test('choose() deferrals fail closed', () => {
+    // a bare choice traversal with no then/else and no option() isn't a supported form
+    expect(() => compile('g.V().choose(__.out())', {}))
+      .toThrow('predicate form');
+    // mixed element+scalar then/else now merge as a dynamic-tag VariantStream (P4)
+    const mixedCh = read('g.V().choose(__.has("x"), __.out(), __.values("name"))');
+    expect(mixedCh.shape).toEqual({ kind: 'variant', scalarAs: undefined, node: true });
+    // mixed element kinds across arms (both element-class) stays the legacy defer
+    expect(() => compile('g.V().choose(__.has("x"), __.out(), __.outE())', {}))
+      .toThrow('different element kinds');
+    // as() before choose now threads the alias column through the gated arms + merge (Move B)
+    const ca = read('g.V().as("a").choose(__.has("x"), __.out(), __.in()).select("a")');
+    expect(ca.sql).toContain('UNION ALL');
+    expect(ca.sql).toContain('SELECT id, a0, bulk FROM'); // a0 preserved across the gated-arm merge
+    // a NEW as() inside one arm now forks/merges: the non-binding arm pads an empty history.
+    const divC = read('g.V().choose(__.has("x"), __.as("b").out(), __.in()).select("b")');
+    expect(divC.sql).toContain('SELECT id, a0, bulk FROM');
+    expect(divC.sql).toContain('SELECT id, NULL AS a0, bulk FROM');
+  });
+
+  test('option-map choose → CASE over the choice scalar (value shape)', () => {
+    const c = read('g.V().choose(__.values("age")).option(P.between(26,30), __.constant("x")).option(Pick.none, __.constant("z"))');
+    expect(c.shape).toEqual({ kind: 'value' });
+    expect(c.sql).toContain('LEFT JOIN');
+    expect(c.sql).toContain('m0_present');
+    expect(c.sql).toContain('CASE WHEN (p.m0 >= ? and p.m0 < ?) THEN p.m1 ELSE p.m2 END AS v');
+    expect(c.binds).toEqual(['age', 'x', 'z', 26, 30, 26, 30]);
+    // T.label choice, literal-equality keys
+    expect(read('g.V().choose(T.label).option("person", __.constant("p")).option(Pick.none, __.constant("o"))').sql)
+      .toContain('CASE WHEN (SELECT name FROM labels WHERE id=n.label) = ? THEN p.m0 ELSE p.m1 END');
+    // count() choice is a total generic child barrier
+    expect(read('g.V().choose(__.out().count()).option(1, __.values("name")).option(Pick.none, __.values("age"))').sql)
+      .toContain('COUNT(c.id) AS v');
+    expect(read('g.V().choose(T.label).option("person", __.constant("p")).option(Pick.none, __.constant("o")).fold()').shape)
+      .toEqual({ kind: 'jsonbList' });
+
+    const nested = read('g.V().map(__.choose(__.values("age")).option(P.between(26,30), __.values("name")).option(Pick.none, __.constant("unknown")))');
+    expect(nested.sql).toContain('CASE WHEN');
+    expect(nested.sql).toContain('PARTITION BY');
+    expect(nested.sql).toContain('m0_present');
+  });
+
+  test('option-map choose deferrals fail closed', () => {
+    // no Pick.none → unmatched pass-through is mixed vertex/scalar
+    expect(() => compile('g.V().choose(__.out().count()).option(1, __.values("name")).option(2, __.values("age"))', {}))
+      .toThrow('without a Pick.none default');
+    // an element option body is rejected by scalar child shape dispatch
+    expect(() => compile('g.V().choose(T.label).option("person", __.out("knows")).option(Pick.none, __.constant("x"))', {}))
+      .toThrow('not supported by generic scalar child lowering');
+    // Pick.unproductive semantics
+    expect(() => compile('g.V().choose(__.values("age")).option(P.gt(30), __.constant("x")).option(Pick.unproductive, __.constant("u")).option(Pick.none, __.constant("z"))', {}))
+      .toThrow('Pick.unproductive');
+  });
+});
