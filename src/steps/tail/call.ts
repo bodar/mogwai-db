@@ -5,7 +5,7 @@ import { type ElementStream } from '../context/context.ts';
 import { type ServiceRegistry, type ServiceCallCtx, type Contribution, type ForeignRow, type CallParams, type InjectionKind } from '../../services/spi/types.ts';
 import { type FederationSource } from '../../compiler/segment.ts';
 import { parseCallSpec, injectionKindOf } from '../../services/params/call-params.ts';
-import { type ChildFrame, type CompileScope } from './child.ts';
+import { type ChildFrame, type CompileScope } from './child-shape.ts';
 import { buildCallHead } from './call-head.ts';
 import { type Compiled } from '../../sql/kernel/render.ts';
 import { engineOf } from '../../compiler/engine/deps.ts';

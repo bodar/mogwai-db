@@ -5,7 +5,8 @@ import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, elemCtx, type ScalarCtx
 import { tryInlinePredicate } from './predicate.ts';
 import { advance, elemRel, prevRel, carryFrag, carryFragMint, carriedCols, partitionOver, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn } from '../context/context.ts';
 import { type AliasShape } from '../context/alias.ts';
-import { classifyListChild, classifyScalarChild, isElementChild, isListChild, isScalarChild, pushChildScope, ROOT_SCOPE, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
+import { pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
+import { classifyListChild, classifyScalarChild, isElementChild, isListChild, isScalarChild, ROOT_SCOPE } from '../tail/child-shape.ts';
 import { carryOf, toListStream, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
 import { mergeVariantArms, unifyLists, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
 import { unionScalarStreams } from '../tail/scalar.ts';
