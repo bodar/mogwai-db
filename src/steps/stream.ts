@@ -343,7 +343,7 @@ export function assertStreamColumns<T extends Stream>(s: T): T {
 export const carryOf = (s: Stream): Carry =>
   s.kind === 'result'
     ? (() => { throw new Error('a terminal result stream has no traverser carry'); })()
-    : ({ q: s.q, params: s.params, fastPaths: s.fastPaths, sideEffects: s.sideEffects, carried: s.carried });
+    : ({ q: s.q, params: s.params, sideEffects: s.sideEffects, carried: s.carried });
 
 export const toResultStream = (q: Query, tail: Expression, shape: Shape): ResultStream =>
   ({ kind: 'result', q, tail, shape });

@@ -2,9 +2,8 @@ import { Query, derived, q, type Expression, type Relation } from '../q.ts';
 import { type Step } from '../frontend.ts';
 import { type Elem } from '../plan.ts';
 import { normalize } from '../strategies.ts';
-import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../fast-paths.ts';
 import { type ElementStream } from './context.ts';
-import { lowerElementSteps } from './index.ts';
+import type { Engine } from './deps.ts';
 
 // ---------- correlated inline-child rendering ----------
 //
@@ -58,22 +57,24 @@ class InlineQuery extends Query {
  * identically to where()/filter()/choose().
  */
 export function compileCorrelatedChild(
+  engine: Engine,
   idExpr: Expression,
   body: Step[],
   params: Record<string, any> = {},
-  fastPaths: FastPathConfig = DEFAULT_FAST_PATHS,
 ): { rel: Relation; elem: Elem } | null {
   const steps = normalize(body).steps;
+  // A variant engine bound to a fresh InlineQuery (nested derived subqueries, not shared CTEs),
+  // sharing the parent engine's fastPaths — so the movement/filter StepFns read the right config.
+  const inlineEngine = engine.withQuery(new InlineQuery());
   const seed: ElementStream = {
     kind: 'elements',
-    q: new InlineQuery(),
+    q: inlineEngine.q,
     params,
-    fastPaths,
     rel: derived(q`SELECT ${idExpr} AS id`, ['id'], 'x0'),
     elem: 'node',
     carried: { aliases: new Map(), origins: [] },
   };
-  const { stream, next } = lowerElementSteps(steps, seed);
+  const { stream, next } = inlineEngine.lowerElementSteps(steps, seed);
   if (next !== steps.length) return null;
   // The correlated form carries no per-traverser schema (a bare id relation); a body that
   // bound an alias / path / origin is not a pure movement+filter chain → fall through.

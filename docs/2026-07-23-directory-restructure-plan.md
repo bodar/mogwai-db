@@ -18,16 +18,26 @@ Auto mode: bigger-bang landings are fine (over-fragmenting hurts); worst case = 
   scope, passes it via `CompileOptions.app`; `compilePlan` mints a compiler scope. Required a
   **yadic parent-chaining fix** (bumped to `@bodar/yadic@0.495.349`): a child container now
   exposes inherited parent deps by DIRECT access. Guard: `test/scopes.test.ts`.
-- ⏳ **M1.2+3** (in progress) — engine core → dependency-injected OBJECTS, one atomic landing:
-  `Engine` (dispatcher: PREFIX + lower*/buildPrefix/compileRead) + family compilers
-  (`ChildCompiler`/`TailCompiler`/`CallCompiler`/`WriteRouter`) as separate classes, each built
-  from the compiler scope. Remove `fastPaths`/`registry`/`federationDepth`/`engine` from `Carry`
-  (→ pure state: q/params/carried/sideEffects). Dissolve the `index.ts` barrel. Classes stay
-  FLAT in `steps/` for now (M2 relocates). Dependency-read surface to migrate (verified):
-  fastPaths at `movement.ts:17`, `filter.ts:152/163/217`, `projection.ts:940`, `branch.ts:243`,
-  `scalar.ts:394`, `child.ts:1462`; registry/depth at `call.ts:127/154`; `carryOf`-style copies
-  of fastPaths at `labelselect.ts:96`, `scalar.ts:520`, `variant.ts:79`, `stream.ts:346` (drop
-  the field once off Carry). `src/steps/deps.ts` holds the `Engine`/`EngineDeps` interfaces.
+- ✅ **M1.2+3** — engine core → a dependency-injected OBJECT, one atomic landing. Landed shape
+  (a DELIBERATE merge, endorsed by the plan's "collapse where splitting causes churn"): a SINGLE
+  `LoweringEngine` class (`src/steps/engine.ts`) holds the ambient deps (fastPaths/registry/
+  federationDepth) + the whole dispatcher (PREFIX + seedSource/seedUnion + buildPrefix +
+  lowerElementSteps/tryLowerElementSteps + lowerSteps/lowerStepsStrict + lowerStream +
+  compileRead/compileReadCompiled + the collapse-safety scan + the segment builders). The family
+  files (child/projection/scalar/branch/match/correlated/bulk/write/list/inject/call) STAY free
+  functions; they reach lowering + deps through `stream.q.engine` (the Engine rides the per-compile
+  `Query`), via the leaf interface `src/steps/deps.ts` (`Engine` + `engineOf`, all `import type`).
+  Why not per-family classes: child.ts (1739 lines) et al. mutually recurse through dozens of
+  functions; wrapping each in a class would churn hundreds of call sites for no correctness gain —
+  a single Engine + the `q.engine` carrier dissolves the cycle with a bounded, low-risk diff.
+  `fastPaths`/`registry`/`federationDepth` removed from `Carry` (→ pure state q/params/carried/
+  sideEffects); the `index.ts` barrel dissolved (its logic moved into engine.ts). Recursive callers
+  route through `engineOf(<stream>).*`; predicate/correlated take an explicit `engine` param (a
+  correlated child mints a variant engine on its InlineQuery via `engine.withQuery`). Nested
+  sub-compiles (compileReadCompiled/buildPrefixFresh/subEngine) mint a FRESH child engine (fresh
+  Query, SAME app scope) — fixing the latent bug where the old free-function nested compiles dropped
+  registry/fastPaths. Gate: `mise run ci` green (753 pass, L3=1264, build ok); ZERO L2 snapshot
+  changes (byte-identical SQL). Classes stay FLAT in `steps/` (M2 relocates).
 - ⬜ **M2** — directory relocation (mechanical, deps no longer threaded): sql/ · gremlin/ ·
   compiler/{ir,options,plan,segment,engine} · services/{spi,params,catalog} ·
   steps/{context,prefix,tail,write} · cloudflare worker 3-way split · test monolith split ·

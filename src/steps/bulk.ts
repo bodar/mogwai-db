@@ -1,11 +1,11 @@
-import { q, list, Query, type Expression } from '../q.ts';
+import { q, list, type Expression } from '../q.ts';
 import { edges, nodes, labels } from '../schema.ts';
 import { dirsFor, edgeLabelFilter, framedProps } from '../plan.ts';
 import { stepChain, type SackSpec } from '../frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { type Compiled } from '../render.ts';
 import { materializeRoot } from './materialize.ts';
-import { buildPrefix } from './index.ts';
+import type { Engine } from './deps.ts';
 
 // ---------- traverser bulking: repeat(...).times(n).count() ----------
 //
@@ -120,13 +120,17 @@ function bulkPlan(steps: PStep[], params: Record<string, any>, sackInit?: SackSp
  *  element terminal frames each frontier vertex as (v, bulk) — the RLE the wire expands, instead of
  *  enumerating every (exponential) walk. Returns null (falling back to the normal path) if the
  *  prefix carries alias/path/sack state or isn't vertex-typed. */
-export function tryBulkRepeat(steps: PStep[], params: Record<string, any>, sackInit?: SackSpec): Compiled | null {
+export function tryBulkRepeat(engine: Engine, steps: PStep[], params: Record<string, any>, sackInit?: SackSpec): Compiled | null {
   const plan = bulkPlan(steps, params, sackInit);
   if (!plan) return null;
 
-  const query = new Query();
+  // A fresh child engine owns the Query the unrolled GROUP-BY CTEs accumulate into; its buildPrefix
+  // seeds the source + leading filters onto that same Query, and the seed stream reaches the engine
+  // via q.engine.
+  const eng = engine.subEngine(params);
+  const query = eng.q;
   const pre = steps.slice(0, plan.preLen);
-  const { st, stop } = buildPrefix(pre, params, query);
+  const { st, stop } = eng.buildPrefix(pre, params);
   // The prefix must fold completely to a bare vertex id-relation. Anything else
   // (an unconsumed tail, an edge type, or live alias/path/sack) is not bulkable —
   // fall back rather than emit wrong SQL.

@@ -5,7 +5,7 @@ import { advance, carriedWith, carryFrag, carryFragMint, carriedCols, partitionO
 import { aliasId } from './alias.ts';
 import { carryOf, toListStream, toScalarStream, toVariantStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream } from './stream.ts';
 import { variantArmsMeta, variantArmSelect, variantCols, type VariantArm } from './variant.ts';
-import { lowerElementSteps, lowerStepsStrict, tryLowerElementSteps } from './index.ts';
+import { engineOf } from './deps.ts';
 import { lowerScalarRows, gateScalar, tryInlineScalarPredicate, unionScalarStreams, SCALAR_TRANSFORMS } from './scalar.ts';
 import { lowerScalarVE } from './projection.ts';
 import { normalize, type PStep } from '../strategies.ts';
@@ -465,7 +465,7 @@ export function tryCompileCountChild(
   const { prefix } = counted;
 
   const pushed = pushChildScope(parent, scope);
-  const { stream: end, next: stop } = lowerElementSteps(prefix, pushed.seed);
+  const { stream: end, next: stop } = engineOf(pushed.seed).lowerElementSteps(prefix, pushed.seed);
   if (stop !== prefix.length) return null;
 
   const d = pushed.frame.domain.as('d');
@@ -502,7 +502,7 @@ function tryCompileCountValueRows(
   if (!counted) return null;
   const { prefix } = counted;
   const pushed = pushChildScope(parent, scope);
-  const { stream: end, next: stop } = lowerElementSteps(prefix, pushed.seed);
+  const { stream: end, next: stop } = engineOf(pushed.seed).lowerElementSteps(prefix, pushed.seed);
   if (stop !== prefix.length) return null;
   const d = pushed.frame.domain.as('d');
   const c = end.rel.as('c');
@@ -574,7 +574,7 @@ function isResourceHead(rest: PStep[]): boolean {
 function resourceElement(seed: ScalarStream, head: PStep, after: PStep[]): ElementStream | null {
   const el = lowerScalarVE(seed, head);
   if (!el) return null;
-  const { stream, next } = lowerElementSteps(after, el);
+  const { stream, next } = engineOf(el).lowerElementSteps(after, el);
   return next === after.length ? stream : null;
 }
 
@@ -592,7 +592,7 @@ export function scopedMovementCount(parent: ElementStream, scope: CompileScope, 
   const pushed = pushChildScope(parent, scope);
   // A synthetic movement step — the StepFn reads only name/args, never .ctx.
   const moveStep = { name: direction, args: [], ctx: null as any } as PStep;
-  const { stream: moved, next } = lowerElementSteps([moveStep], pushed.seed);
+  const { stream: moved, next } = engineOf(pushed.seed).lowerElementSteps([moveStep], pushed.seed);
   if (next !== 1) throw new Error(`could not lower ${direction}()`);
   return scopedElementCount(moved, pushed);
 }
@@ -636,7 +636,7 @@ function compileScalarChildRows(
   if (isPropertyParent(parent)) {
     if (!classifyScalarChildRows('property', body)) return null;
     const pushed = pushChildScope(parent, scope);
-    const stream = lowerStepsStrict(pushed.seed, body, 0);
+    const stream = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, body, 0);
     // classify proved a scalar shape; a non-scalar here is an internal classify↔lowerSteps
     // contradiction, not a fallback — fail loud (a silent null would orphan the CTEs above).
     if (stream.kind !== 'scalar') throw new Error('property scalar child classified scalar but lowered to ' + stream.kind);
@@ -652,7 +652,7 @@ function compileScalarChildRows(
   // precise (all arms scalar), so a non-scalar result is a contradiction.
   if (elementScalarBranchArm(body, parent.params)) {
     const pushed = pushChildScope(parent, scope);
-    const stream = lowerStepsStrict(pushed.seed, body, 0);
+    const stream = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, body, 0);
     if (stream.kind !== 'scalar') throw new Error('scalar-branch child classified scalar but lowered to ' + stream.kind);
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
   }
@@ -688,7 +688,7 @@ function compileScalarChildRows(
       // ends in a projection (values/id/label) → scalar; lowerSteps folds V→element→projection.
       if (classifyScalarChildRows('element', after)?.kind !== 'element') return null;
       const pushed = pushChildScope(parent, scope);
-      const lowered = lowerStepsStrict(pushed.seed, rest, 0);
+      const lowered = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, rest, 0);
       if (lowered.kind !== 'scalar') return null;
       const stream = reducer ? lowerScopedScalarReducer(lowered, reducer, pushed.scope) : lowered;
       return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
@@ -700,7 +700,7 @@ function compileScalarChildRows(
     const pushed = pushChildScope(parent, scope);
     let stream: ScalarStream = pushed.seed;
     if (rest.length) {
-      const lowered = lowerStepsStrict(pushed.seed, rest, 0);
+      const lowered = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, rest, 0);
       if (lowered.kind !== 'scalar') return null;
       stream = lowered;
     }
@@ -717,7 +717,7 @@ function compileScalarChildRows(
   // below; constant() still needs its child-only projector.
   if (terminal.name !== 'constant' && suffix.every((step) => SHARED_SCALAR_CHILD_STEPS.has(step.name))) {
     const pushed = pushChildScope(parent, scope);
-    const stream = lowerStepsStrict(pushed.seed, body, 0);
+    const stream = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, body, 0);
     // As above: classify proved scalar, so a non-scalar is a contradiction — fail loud.
     if (stream.kind !== 'scalar') throw new Error('scalar child classified scalar but lowered to ' + stream.kind);
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
@@ -732,7 +732,7 @@ function compileScalarChildRows(
   if (!['values', 'id', 'label', 'constant'].includes(terminal.name)) return null;
 
   const pushed = pushChildScope(parent, scope);
-  const { stream: end, next: stop } = lowerElementSteps(prefix, pushed.seed);
+  const { stream: end, next: stop } = engineOf(pushed.seed).lowerElementSteps(prefix, pushed.seed);
   if (stop !== prefix.length) return null;
 
   const c = end.rel.as('c');
@@ -1087,7 +1087,7 @@ function compileElementChildRows(
   const pushed = pushChildScope(parent, scope);
   // (trackFromV for an exploded otherV() body is derived inside lowerElementSteps, the single
   // fold every scope passes through — see the note there.)
-  const { stream: prefixed, next: stop } = lowerElementSteps(parts.prefix, pushed.seed);
+  const { stream: prefixed, next: stop } = engineOf(pushed.seed).lowerElementSteps(parts.prefix, pushed.seed);
   if (stop !== parts.prefix.length) return null;
 
   // Rank rows per parent traverser: order/slice/first all window over the child's origin
@@ -1233,7 +1233,7 @@ export function tryCompileElementTraversal(
   const body = childSteps(nested, parent.params);
   if (parent.carried.origins.length && body.some((step) => step.name === 'repeat'))
     throw new Error('repeat() inside a correlated element child not yet supported (recursive walk does not carry the parent ordinal)');
-  return tryLowerElementSteps(body, parent);
+  return engineOf(parent).tryLowerElementSteps(body, parent);
 }
 
 // ---------- scalar-PARENT branch consumers (map/local/flatMap/choose/union/coalesce) ----------
@@ -1353,7 +1353,7 @@ export function tryCompileScalarArm(parent: ScalarStream, nested: any, scope: Co
  *  outside the Stage-1 vocabulary or does not stay scalar (e.g. a fold() → list). */
 function lowerScalarArm(s: ScalarStream, body: PStep[]): ScalarStream | null {
   if (!scalarBranchArm(body, s.params)) return null;
-  const end = lowerStepsStrict(s, body, 0);
+  const end = engineOf(s).lowerStepsStrict(s, body, 0);
   return end.kind === 'scalar' ? end : null;
 }
 
@@ -1459,7 +1459,7 @@ function genericScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): S
 /** Pick the inline fast path unless scalarPredicateInlining is off, or a traversal predicate is
  *  beyond the inline vocabulary; then use the generic child-existence gate. Result-equivalent. */
 function buildScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): ScalarGate | null {
-  if (s.fastPaths?.scalarPredicateInlining !== false) {
+  if (engineOf(s).fastPaths.scalarPredicateInlining !== false) {
     const inline = inlineScalarGate(s, specs);
     if (inline) return inline;
   }

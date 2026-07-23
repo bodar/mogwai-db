@@ -19,6 +19,7 @@ import { lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type
 import { childSteps, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, tryCompileCountChild, tryCompileListChild, tryCompileScalarValueRows, tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './child.ts';
 import { lowerElementDedup } from './filter.ts';
 import { lowerCall } from './call.ts';
+import { engineOf } from './deps.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
 //
@@ -937,7 +938,7 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
   // the wire: emit the carried `bulk` column so framing reads it as the per-value multiplicity
   // (framedResults picks up a `bulk` column wherever present — bulk is orthogonal to shape, not
   // a Shape variant). Only when collapse is active; else the projection is unchanged.
-  const wantBulk = !!st.fastPaths?.movementCollapse && !!st.carried.bulk && !reducer && !distinct
+  const wantBulk = !!engineOf(st).fastPaths.movementCollapse && !!st.carried.bulk && !reducer && !distinct
     && (proj.shape.kind === 'vertex' || proj.shape.kind === 'edge');
 
   // Bulk-aware limit/range: slicing a COLLAPSED leaf must count TRAVERSERS, not rows. A cumulative-

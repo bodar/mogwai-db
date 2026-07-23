@@ -11,6 +11,7 @@ import { tryCombineByChildExistence, tryCompileScalarValueRows, tryFilterByChild
 import { directElementModulation, elementOrderSql } from './modulation.ts';
 import { type PStep } from '../strategies.ts';
 import { isInjectionMarker, injectedValues } from '../injection.ts';
+import { engineOf } from './deps.ts';
 
 // ---------- filter (predicates over the current traverser) ----------
 
@@ -149,7 +150,7 @@ export const has: StepFn = (s, st) => {
     // traverser aliased `n`). A >= 3-char positive substring predicate over this STORED
     // property routes through the property_fts trigram index (ftsSubstringPredicate fast
     // path, default on) — result-equivalent to the generic LIKE fall-through.
-    const fts = st.fastPaths?.ftsSubstringPredicate !== false;
+    const fts = engineOf(st).fastPaths.ftsSubstringPredicate !== false;
     conds.push(hasProp(currentCtx(st), key, val, fts));
   }
   return filterCte(st, list(conds, ' AND '));
@@ -160,9 +161,9 @@ export const has: StepFn = (s, st) => {
 export const where: StepFn = (s, st) => {
   const arg0 = s.args[0];
   if (arg0 && typeof arg0 === 'object' && 'nested' in arg0) {
-    const pred = st.fastPaths?.predicateInlining === false
+    const pred = engineOf(st).fastPaths.predicateInlining === false
       ? null
-      : tryInlinePredicate(stepChain(arg0.nested, st.params), currentCtx(st), st.params, aliasResolver(st));
+      : tryInlinePredicate(engineOf(st), stepChain(arg0.nested, st.params), currentCtx(st), st.params, aliasResolver(st));
     if (pred)
       return filterCte(st, s.name === 'not' ? notCoalesce(pred) : pred);
     const generic = tryFilterByChildExistence(st, arg0.nested, s.name === 'not');
@@ -214,8 +215,8 @@ export const where: StepFn = (s, st) => {
 export const andOr: StepFn = (s, st) => {
   const op = s.name === 'and' ? 'AND' : 'OR';
   const branches = s.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
-  if (st.fastPaths?.predicateInlining !== false) {
-    const pred = combineBranchPreds(s, currentCtx(st), st.params, op, aliasResolver(st));
+  if (engineOf(st).fastPaths.predicateInlining !== false) {
+    const pred = combineBranchPreds(engineOf(st), s, currentCtx(st), st.params, op, aliasResolver(st));
     if (pred) return filterCte(st, pred);
   }
   const generic = tryCombineByChildExistence(st, branches.map((b: any) => b.nested), op);

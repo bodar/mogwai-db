@@ -7,6 +7,7 @@ import { carryOf, toListStream, toMapStream, toScalarStream, type ListStream, ty
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, numericSpec } from './coerce.ts';
 import { normalizeTypeName } from '../gremlin-types.ts';
 import { type ValueType } from '../render.ts';
+import { engineOf } from './deps.ts';
 
 /** If `step` is `is(typeOf(GType.X))` for a COLLECTION type, the canonical collection name
  *  ('list'|'set'|'map'); else null. list/set RETYPE a scalar value stream into a ListStream
@@ -391,7 +392,7 @@ export function lowerScalarFilter(s: ScalarStream, step: PStep): ScalarStream | 
     return filterScalarByCond(s, p, predicateSql(cur, pred, vt ? { vtypeExpr: vt } : undefined));
   }
   // Traversal-child predicate — the disable-safe fast path.
-  if (s.fastPaths?.scalarPredicateInlining === false) return null;
+  if (engineOf(s).fastPaths.scalarPredicateInlining === false) return null;
   let cond: Expression | null;
   if (step.name === 'and' || step.name === 'or') {
     if (!nested.length) return null;
@@ -517,7 +518,7 @@ export function unionScalarStreams(base: Carry, arms: readonly ScalarStream[], g
     ['v', ...(numeric ? ['vt'] : []), ...carriedCols(outCarried)],
   );
   const as = arms.every((a) => a.as === arms[0].as) ? arms[0].as : undefined;
-  return toScalarStream({ q: base.q, params: base.params, fastPaths: base.fastPaths, sideEffects: base.sideEffects, carried: outCarried }, rel, as, { result: numeric ? 'number' : 'value' });
+  return toScalarStream({ q: base.q, params: base.params, sideEffects: base.sideEffects, carried: outCarried }, rel, as, { result: numeric ? 'number' : 'value' });
 }
 
 /** sack over a scalar stream. The mutate form sack(Operator.x) folds the CURRENT VALUE

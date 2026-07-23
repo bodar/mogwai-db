@@ -12,7 +12,7 @@ import { type PStep } from '../strategies.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, mapOfToListOf, PROPERTY_PAYLOAD, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type PropertyStream, type ScalarStream, type MapStream, type ShapeTailFn } from './stream.ts';
 import { carryFrag, carriedCols, type ElementStream } from './context.ts';
 import { type Compiled } from '../render.ts';
-import { compileReadCompiled } from './index.ts';
+import { engineOf, type Engine } from './deps.ts';
 
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
 const isLocal = (s: PStep): boolean => (s.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local');
@@ -223,7 +223,7 @@ const jsGtype = (v: any): string => (typeof v === 'number' ? (Number.isInteger(v
 /** Resolve a set-op operand argument to a JSONB list expression, raising TinkerPop's
  *  exact argument errors. Literal array / constant(c).fold() only; a standalone
  *  traversal operand defers. */
-function operandList(arg: any, op: string, params: Record<string, any>): Expression {
+function operandList(engine: Engine, arg: any, op: string, params: Record<string, any>): Expression {
   if (arg === null || arg === undefined) throw new Error(`Argument provided for ${op} step can't be null`);
   if (Array.isArray(arg)) return q`jsonb(${value(JSON.stringify(arg))})`;
   if (typeof arg === 'object' && 'nested' in arg) {
@@ -246,7 +246,7 @@ function operandList(arg: any, op: string, params: Record<string, any>): Express
     // independent of the incoming traverser (a fresh V()/E() root), so compile it as a
     // separate read and aggregate its `v` column into one JSONB list, embedded as a
     // scalar subquery. Only a scalar-list fold is supported (values/id/label → v col).
-    const sub = compileReadCompiled(inner, params);
+    const sub = engine.compileReadCompiled(inner, params);
     if (sub.shape.kind === 'jsonbList')
       return q`(SELECT jsonb(list) FROM (${embedSql(sub)}))`;
     if (sub.shape.kind !== 'list' || sub.shape.elem !== 'scalar')
@@ -354,7 +354,7 @@ const listConjoin: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
 const listSetOp: ShapeTailFn<ListStream> = (s, step, steps, at) => {
   assertUntypedList(s, step.name);
   const c = s.rel.as('c');
-  const op = operandList(step.args[0], step.name, s.params);
+  const op = operandList(engineOf(s), step.args[0], step.name, s.params);
   const listExpr = setOpExpr(step.name, c.c.list, op);
   const terminal = at + 1 >= steps.length;
   // intersect/difference/disjunct return a Set: frame as a Set only when terminal. With a
