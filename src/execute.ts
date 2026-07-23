@@ -4,6 +4,7 @@ import type { GraphStore } from './storage.ts';
 import type { ServiceRegistry } from './services/types.ts';
 import type { Executor as ExecutorApi, ForeignRow } from './api.ts';
 import type { Plan, FederationSource } from './segment.ts';
+import { createAppScope, type AppScope } from './scopes.ts';
 import { ioc, VertexProperty, Property, t } from './io.ts';
 
 // ---- GraphBinary v4 result framing ----
@@ -590,11 +591,17 @@ export type Framed = { buf: Buffer; bulk: bigint };
  * edge frames the error.
  */
 export class Executor implements ExecutorApi {
+  /** The app-scope DI: this graph's ambient compile dependencies (registry + fastPaths +
+   *  federation source), built once. Passed into every compile as CompileOptions.app so the
+   *  compiler reads its dependencies from one scope rather than loose per-call arguments. */
+  private readonly app: AppScope;
   constructor(
     private readonly store: GraphStore,
     private readonly registry: ServiceRegistry,
     private readonly source: FederationSource,
-  ) {}
+  ) {
+    this.app = createAppScope({ registry, source });
+  }
 
   /** SYNC GraphBinary buffers with per-value bulk (concern C appends it as a Long). A
    *  non-federated traversal compiles to ONE SQL statement and never suspends, so this pays no
@@ -643,7 +650,7 @@ export class Executor implements ExecutorApi {
    *  (the sync API cannot honestly run federation). Shares compilePlan + the framing tail with the
    *  async path; only the await-loop differs. */
   private runSync(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>): Compiled | WritePlan {
-    const plan = compilePlan(gremlin, params, { registry: this.registry, federationDepth: 0 }, paramTypes);
+    const plan = compilePlan(gremlin, params, { app: this.app, federationDepth: 0 }, paramTypes);
     if (plan.kind === 'segment')
       throw new Error('this traversal contains a federated call() — use the async path (framedAsync / raw), not the sync framed()/buffers()');
     return plan.compiled;
@@ -656,7 +663,7 @@ export class Executor implements ExecutorApi {
    *  CompileOptions beside the registry so the barrier's apply closure captures it (a recursive
    *  federate hops at depth+1). */
   private async drive(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>, federationDepth: number): Promise<Compiled | WritePlan> {
-    let p: Plan = compilePlan(gremlin, params, { registry: this.registry, federationDepth }, paramTypes);
+    let p: Plan = compilePlan(gremlin, params, { app: this.app, federationDepth }, paramTypes);
     while (p.kind === 'segment') {
       const rows = p.head ? this.readSegmentHead(p.head) : [];
       const foreign = await p.apply(rows, this.source);

@@ -38,6 +38,11 @@ export interface CompileOptions {
    *  starting depth and recurses at depth+1). 0 at the top-level query; each federated hop
    *  re-compiles the sibling one deeper. Guarded against MAX_FEDERATION_DEPTH at each hop. */
   readonly federationDepth?: number;
+  /** The app-scope dependencies (registry + fastPaths + federation source), as a DI scope.
+   *  When present it is the source of truth for registry/fastPaths — the loose fields above
+   *  are the legacy path (still honoured for callers that haven't adopted the scope). The
+   *  store tier builds this once per Executor; see src/scopes.ts. */
+  readonly app?: import('./scopes.ts').AppScope;
 }
 
 export const DEFAULT_FAST_PATHS: FastPathConfig = Object.freeze({
@@ -50,12 +55,12 @@ export const DEFAULT_FAST_PATHS: FastPathConfig = Object.freeze({
 });
 
 export const resolveFastPaths = (options?: CompileOptions): FastPathConfig => ({
-  ...DEFAULT_FAST_PATHS,
+  ...(options?.app?.fastPaths ?? DEFAULT_FAST_PATHS),
   ...options?.fastPaths,
 });
 
 export const resolveRegistry = (options?: CompileOptions): ServiceRegistry =>
-  options?.registry ?? EMPTY_REGISTRY;
+  options?.registry ?? options?.app?.registry ?? EMPTY_REGISTRY;
 
 /** The federation depth for this compile (0 at the top level). */
 export const resolveFederationDepth = (options?: CompileOptions): number =>

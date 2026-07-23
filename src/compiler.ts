@@ -6,6 +6,7 @@ import { routeWrite } from './steps/write.ts';
 import { type Compiled, type WritePlan } from './render.ts';
 import { type Plan } from './segment.ts';
 import { resolveFastPaths, resolveRegistry, resolveFederationDepth, type CompileOptions } from './fast-paths.ts';
+import { createAppScope, createCompilerScope } from './scopes.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
 export type { Compiled, WritePlan, Shape, ValueType, ListOf, MapEntry, MapOf, ElemShape, GroupKey, GroupVal, PathPos } from './render.ts';
 export type { CompileOptions, FastPathConfig } from './fast-paths.ts';
@@ -46,7 +47,13 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   const write = routeWrite(steps, params, sackInit ?? undefined, sideEffects);
   if (write) return { kind: 'sql', compiled: discard ? applyDiscard(write) : write };
 
-  const read = compileRead(steps, params, sackInit ?? undefined, resolveFastPaths(options), resolveRegistry(options), resolveFederationDepth(options));
+  // The per-compilation DI scope: an app scope (from options, or a default one for callers
+  // that pass loose fields / nothing) plus this compile's collaborators. Movement 1.2+ hands
+  // the scope to the lowering objects; for now compileRead still takes resolved values, which
+  // we derive from the scope so it is already the single source of truth at this boundary.
+  const app = options?.app ?? createAppScope({ registry: resolveRegistry(options), fastPaths: resolveFastPaths(options) });
+  const scope = createCompilerScope(app, { params, federationDepth: resolveFederationDepth(options) });
+  const read = compileRead(steps, scope.params, sackInit ?? undefined, scope.fastPaths, scope.registry, scope.federationDepth);
   if (read.kind === 'segment') {
     // A discard trailing a federated source (g.call(...).iterate()) applies to the RESUMED leaf,
     // so wrap resume rather than the segment itself (which carries no shape).
