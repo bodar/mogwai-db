@@ -38,13 +38,19 @@ Auto mode: bigger-bang landings are fine (over-fragmenting hurts); worst case = 
   Query, SAME app scope) — fixing the latent bug where the old free-function nested compiles dropped
   registry/fastPaths. Gate: `mise run ci` green (753 pass, L3=1264, build ok); ZERO L2 snapshot
   changes (byte-identical SQL). Classes stay FLAT in `steps/` (M2 relocates).
-- ⬜ **M2** — directory relocation (mechanical, deps no longer threaded): sql/ · gremlin/ ·
-  compiler/{ir,options,plan,segment,engine} · services/{spi,params,catalog} ·
-  steps/{context,prefix,tail,write} · cloudflare worker 3-way split · test monolith split ·
-  docs (CLAUDE.md paths + DI/object-model section).
+- ✅ **M2** — directory relocation, all landed green (753 pass, L3=1264 throughout):
+  - M2.1 `sql/` (kernel/{q,render}, schema) + `gremlin/` (types,frontend,math).
+  - M2.2 `compiler/{ir/strategies, options/fast-paths, plan/plan, segment, engine/{engine,deps}, compiler}`.
+  - M2.3 `steps/{context,prefix,tail,write}/` regroup + `injection.ts`; `services/{spi,params,catalog}/`.
+  - M2.4 cloudflare `worker.ts` → `graph-store-do.ts` + `cloudflare-graph-manager.ts` + thin `worker.ts`.
+  - M2.5 test monoliths split 1:1 with source: `test/L2-sql/*.sql.test.ts` (182 tests) +
+    `test/compiler/*.exec.test.ts` (209 tests, title-set verified byte-identical).
+  - M2.6 docs: CLAUDE.md paths + new "Dependencies vs state — the DI object model" section;
+    test-layout section; this plan. (Older dated docs/*.md left as historical record.)
 
-**To resume:** `git log --oneline -5` for the last landing; `git status` for uncommitted work;
-`mise run L2` for the fastest red/green signal; this doc's stage list for what's next.
+**REFACTOR COMPLETE.** The mechanical mover used for M2.1–2.3 (git mv + reverse-map import
+rewrite handling `from`/`import`/inline `import()`) is in this doc's git history if needed again.
+**To resume/extend:** `git log --oneline` for landings; `mise run ci` is the gate (753 pass, L3=1264).
 
 ## Why this shape (the governing idea)
 
