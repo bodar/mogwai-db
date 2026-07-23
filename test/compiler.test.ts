@@ -4,7 +4,7 @@
 // is the behavioural twin — it proves the emitted SQL actually computes the right
 // answers over a real graph.
 import { test, expect, describe } from 'bun:test';
-import { compile, type CompileOptions } from '../src/compiler.ts';
+import { compile, type CompileOptions } from '../src/compiler/compiler.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { executeQuery } from './support/executor.ts';

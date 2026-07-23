@@ -1,9 +1,9 @@
 import { q, list, value, type Expression } from '../sql/kernel/q.ts';
 import {
   elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, type ScalarCtx,
-} from '../plan.ts';
+} from '../compiler/plan/plan.ts';
 import { mathToSql, mathVars } from '../gremlin/math.ts';
-import { type PStep } from '../strategies.ts';
+import { type PStep } from '../compiler/ir/strategies.ts';
 import { aliasElem, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, type ElementStream } from './context.ts';
 import { aliasId, aliasScalar } from './alias.ts';
 import { carryOf, toScalarStream, type ListStream, type ScalarStream, type Stream } from './stream.ts';

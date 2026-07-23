@@ -21,10 +21,10 @@
 import { LazyMap, instance } from '@bodar/yadic/LazyMap.ts';
 import type { Dependency } from '@bodar/yadic/types.ts';
 import { Query } from './sql/kernel/q.ts';
-import { DEFAULT_FAST_PATHS, type FastPathConfig } from './fast-paths.ts';
+import { DEFAULT_FAST_PATHS, type FastPathConfig } from './compiler/options/fast-paths.ts';
 import type { ServiceRegistry } from './services/types.ts';
 import { EMPTY_REGISTRY } from './services/registry.ts';
-import type { FederationSource } from './segment.ts';
+import type { FederationSource } from './compiler/segment.ts';
 
 /** The process/runtime-scoped dependency contract. */
 export type AppScope =

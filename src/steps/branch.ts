@@ -1,7 +1,7 @@
 import { q, list, empty, Relation, type Expression } from '../sql/kernel/q.ts';
 import { edges } from '../sql/schema.ts';
 import { stepChain, type Step } from '../gremlin/frontend.ts';
-import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
+import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, elemCtx, type ScalarCtx, type Elem } from '../compiler/plan/plan.ts';
 import { tryInlinePredicate } from './predicate.ts';
 import { advance, elemRel, prevRel, carryFrag, carryFragMint, carriedCols, partitionOver, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { type AliasShape } from './alias.ts';
@@ -9,7 +9,7 @@ import { classifyListChild, classifyScalarChild, isElementChild, isListChild, is
 import { carryOf, toListStream, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from './stream.ts';
 import { mergeVariantArms, unifyLists, variantArmsMeta, type VariantArm } from './variant.ts';
 import { unionScalarStreams } from './scalar.ts';
-import { engineOf, type Engine } from './deps.ts';
+import { engineOf, type Engine } from '../compiler/engine/deps.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
  *  read back from `nodes` by subquery (the walk row carries only the id). Lets

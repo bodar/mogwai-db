@@ -1,6 +1,6 @@
 import { q, value, raw, type Relation } from '../sql/kernel/q.ts';
 import { propertyFts, vertexProperties, edgeProperties, nodes, edges, labels } from '../sql/schema.ts';
-import { storedValueExpr } from '../plan.ts';
+import { storedValueExpr } from '../compiler/plan/plan.ts';
 import { PROPERTY_PAYLOAD, toPropertyStream, type PropertyStream } from '../steps/stream.ts';
 import type { Carried } from '../steps/context.ts';
 import type { Service, ServiceCallCtx, CallParams } from './types.ts';

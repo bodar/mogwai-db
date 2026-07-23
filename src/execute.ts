@@ -1,9 +1,9 @@
-import { compilePlan, type Compiled, type WritePlan, type ListOf, type MapEntry, type MapOf, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from './compiler.ts';
+import { compilePlan, type Compiled, type WritePlan, type ListOf, type MapEntry, type MapOf, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from './compiler/compiler.ts';
 import { isCollectionType, valueNodeFromStored, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import type { GraphStore } from './storage.ts';
 import type { ServiceRegistry } from './services/types.ts';
 import type { Executor as ExecutorApi, ForeignRow } from './api.ts';
-import type { Plan, FederationSource } from './segment.ts';
+import type { Plan, FederationSource } from './compiler/segment.ts';
 import { createAppScope, type AppScope } from './scopes.ts';
 import { ioc, VertexProperty, Property, t } from './io.ts';
 

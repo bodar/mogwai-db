@@ -1,9 +1,9 @@
 import { q, list, empty, type Expression } from '../sql/kernel/q.ts';
 import { stepChain, type Step } from '../gremlin/frontend.ts';
-import { normalize, type PStep } from '../strategies.ts';
+import { normalize, type PStep } from '../compiler/ir/strategies.ts';
 import { advance, aliasColsOf, prevRel, type AliasEntry, type ElementStream, type StepFn } from './context.ts';
 import { aliasId, aliasSeed, nodeEntry } from './alias.ts';
-import { engineOf } from './deps.ts';
+import { engineOf } from '../compiler/engine/deps.ts';
 
 // ---------- match() — declarative conjunctive pattern join ----------
 //

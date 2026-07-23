@@ -1,6 +1,6 @@
 import type { Service, CallParams } from './types.ts';
 import type { ForeignRow } from '../api.ts';
-import type { FederationSource } from '../segment.ts';
+import type { FederationSource } from '../compiler/segment.ts';
 import { isTraversalParam } from './call-params.ts';
 import { guardFederationDepth } from './federation-depth.ts';
 import { INJECT_VALUES_KEY } from '../injection.ts';

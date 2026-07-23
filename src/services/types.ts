@@ -58,7 +58,7 @@ export interface ServiceCallCtx {
  *  federated-transfer contract. Re-exported here so service-author code keeps one import. */
 export type { ForeignRow } from '../api.ts';
 import type { ForeignRow } from '../api.ts';
-import type { FederationSource } from '../segment.ts';
+import type { FederationSource } from '../compiler/segment.ts';
 
 /** How a Service contributes to the plan. 'stream' is a pure, inline-SQL contribution
  *  (Phases 1-5): it lowers to SQL synchronously and the generic engine takes over. 'barrier'

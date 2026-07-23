@@ -1,5 +1,5 @@
 import { q, empty, type Expression } from '../sql/kernel/q.ts';
-import { rangeToOffsetLimit } from '../plan.ts';
+import { rangeToOffsetLimit } from '../compiler/plan/plan.ts';
 import { advance, carryFrag, prevRel, type StepFn } from './context.ts';
 
 // ---------- passthrough range/limit/skip (prefix phase) ----------

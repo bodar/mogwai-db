@@ -1,5 +1,5 @@
 import { stepChain, isNested } from '../gremlin/frontend.ts';
-import type { PStep } from '../strategies.ts';
+import type { PStep } from '../compiler/ir/strategies.ts';
 import { DIRECTORY_SERVICE_NAME } from './types.ts';
 import type { CallSpec, CallParams, InjectionKind } from './types.ts';
 import { nestedTraversalToGremlin } from './traversal-param.ts';

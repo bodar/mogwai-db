@@ -1,8 +1,8 @@
 import { q, list, empty, derived, type Expression } from '../sql/kernel/q.ts';
 import { edges } from '../sql/schema.ts';
-import { dirsFor, edgeLabelFilter, type Elem } from '../plan.ts';
+import { dirsFor, edgeLabelFilter, type Elem } from '../compiler/plan/plan.ts';
 import { advance, appendPathPos, carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, prevRel, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
-import { engineOf } from './deps.ts';
+import { engineOf } from '../compiler/engine/deps.ts';
 
 /** True iff the ONLY live carried column is bulk — no per-traverser identity (aliases/path/
  *  sack/fromV) and no branch origin. Frontier collapse is result-preserving exactly here. */

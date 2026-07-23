@@ -3,10 +3,10 @@ import { edges, labels, nodes, vertexProperties, edgeProperties } from '../sql/s
 import {
   scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps,
   storedValueExpr, bareValueMapProps, typedScalarNode, compareKey, type ScalarCtx,
-} from '../plan.ts';
+} from '../compiler/plan/plan.ts';
 import { stepChain } from '../gremlin/frontend.ts';
 import { isMapLocalOrder } from './list.ts';
-import { type PStep } from '../strategies.ts';
+import { type PStep } from '../compiler/ir/strategies.ts';
 import { carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, partitionOver, withoutCarried, type Carry, type ElementStream } from './context.ts';
 import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from './stream.ts';
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../sql/kernel/render.ts';

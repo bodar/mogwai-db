@@ -7,7 +7,7 @@
 // result shape. The execution-semantics half of the old compiler.test.ts lives at
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
-import { compile, type CompileOptions } from '../../src/compiler.ts';
+import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery, executeFramed } from '../support/executor.ts';

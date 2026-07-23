@@ -1,5 +1,5 @@
 import { q, value, empty, type Expression } from '../sql/kernel/q.ts';
-import { type Elem } from '../plan.ts';
+import { type Elem } from '../compiler/plan/plan.ts';
 
 // ---------- as() label encoding: per-traverser path history ----------
 //

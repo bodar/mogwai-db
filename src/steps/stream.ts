@@ -14,8 +14,8 @@
 // inside a StepFn.
 
 import { type Expression, type Query, type Relation } from '../sql/kernel/q.ts';
-import { type PStep } from '../strategies.ts';
-import { type Elem } from '../plan.ts';
+import { type PStep } from '../compiler/ir/strategies.ts';
+import { type Elem } from '../compiler/plan/plan.ts';
 import { type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type Shape, type ValueType } from '../sql/kernel/render.ts';
 import { carriedCols, type Carry, type ElementStream } from './context.ts';
 

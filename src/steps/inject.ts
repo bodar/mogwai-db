@@ -1,11 +1,11 @@
 import { q, value, list } from '../sql/kernel/q.ts';
-import { jsonbArrayOf } from '../plan.ts';
+import { jsonbArrayOf } from '../compiler/plan/plan.ts';
 import { flattenListArgs, type SackSpec } from '../gremlin/frontend.ts';
 import { flatType } from '../gremlin/types.ts';
-import { type PStep } from '../strategies.ts';
+import { type PStep } from '../compiler/ir/strategies.ts';
 import { type Carry } from './context.ts';
 import { toListStream, toScalarStream } from './stream.ts';
-import type { Engine } from './deps.ts';
+import type { Engine } from '../compiler/engine/deps.ts';
 import { materializeFinal } from './materialize.ts';
 import { type Compiled, type ValueType } from '../sql/kernel/render.ts';
 import {

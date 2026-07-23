@@ -6,8 +6,8 @@
 // is read. Traversal-valued modulators still go through child.ts.
 
 import { empty, list, q, type Expression, type Relation } from '../sql/kernel/q.ts';
-import { elemCtx, labelNameSub, scalarProp, scalarPropSortKey } from '../plan.ts';
-import { type PStep } from '../strategies.ts';
+import { elemCtx, labelNameSub, scalarProp, scalarPropSortKey } from '../compiler/plan/plan.ts';
+import { type PStep } from '../compiler/ir/strategies.ts';
 import { type ElementStream } from './context.ts';
 
 export function directElementModulation(

@@ -1,5 +1,5 @@
-import { EMPTY_REGISTRY } from './services/registry.ts';
-import type { ServiceRegistry } from './services/types.ts';
+import { EMPTY_REGISTRY } from '../../services/registry.ts';
+import type { ServiceRegistry } from '../../services/types.ts';
 
 /** Independently switchable optimized lowerings. The generic path remains the
  * semantic authority; these switches exist for equivalence tests and diagnostics. */
@@ -42,7 +42,7 @@ export interface CompileOptions {
    *  When present it is the source of truth for registry/fastPaths — the loose fields above
    *  are the legacy path (still honoured for callers that haven't adopted the scope). The
    *  store tier builds this once per Executor; see src/scopes.ts. */
-  readonly app?: import('./scopes.ts').AppScope;
+  readonly app?: import('../../scopes.ts').AppScope;
 }
 
 export const DEFAULT_FAST_PATHS: FastPathConfig = Object.freeze({

@@ -4,8 +4,8 @@ import { flattenListArgs } from '../gremlin/frontend.ts';
 import {
   predicateSql, rangeToOffsetLimit, elemCtx, extIdOf, jsonbGroupArray,
   nodePropScalar, edgePropScalar, nodePropSortKey, edgePropSortKey, framedProps, valueMapProps, storedValueExpr,
-} from '../plan.ts';
-import { type PStep } from '../strategies.ts';
+} from '../compiler/plan/plan.ts';
+import { type PStep } from '../compiler/ir/strategies.ts';
 import { advance, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, withoutCarried, type ElementStream } from './context.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn } from './stream.ts';
 import { tryLowerLocalAggregate, lowerScalarAggregate } from './sideeffect.ts';
@@ -19,7 +19,7 @@ import { lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type
 import { childSteps, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, tryCompileCountChild, tryCompileListChild, tryCompileScalarValueRows, tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './child.ts';
 import { lowerElementDedup } from './filter.ts';
 import { lowerCall } from './call.ts';
-import { engineOf } from './deps.ts';
+import { engineOf } from '../compiler/engine/deps.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
 //
