@@ -97,6 +97,26 @@ const CHILD_SCALAR_ROW_STEPS = new Set([
 // before applying the following slice.
 const CHILD_ELEMENT_ROW_STEPS = new Set(['order', 'limit', 'skip', 'range', 'dedup', 'local']);
 
+// The scalar VALUE-transform vocabulary a scalar arm/child may carry without throwing (the
+// scalarTx string/value family + typed date coercions). Deliberately NOT the whole
+// SCALAR_TRANSFORMS spread — `asBool` has no scalarTx case and a bare `asNumber()` throws on a
+// non-date value, so both DEFER as an arm body rather than throw mid-lowering (`asNumber` is
+// admitted by scalarChildPrefixOk only when it carries a type arg). Shared classify vocabulary:
+// scalar-arm.ts (root-scope arm leaves) and child.ts (compileScalarChildRows' pushed prefix).
+export const SCALAR_ARM_TX = new Set([
+  'concat', 'length', 'toUpper', 'toLower', 'asString', 'trim', 'lTrim', 'rTrim',
+  'reverse', 'replace', 'substring', 'asDate', 'dateAdd', 'dateDiff',
+]);
+
+/** A value-op step allowed in the PREFIX of a scalar-parent CHILD body (before an optional
+ *  terminal reducer). The pushed scalar seed carries an encounter column, so the partitioned
+ *  order/slice/tail/dedup paths are safe here; constant() defers inside a child scope and asBool
+ *  has no scalarTx impl. PURE — shared by compileScalarChildRows (child.ts) + the scalar
+ *  reducer/list arm recognizers (scalar-arm.ts). */
+const SCALAR_CHILD_PREFIX = new Set([...SCALAR_ARM_TX, 'is', 'and', 'or', 'not', 'filter', 'where', 'constant', 'identity', 'unfold', 'math', 'order', 'limit', 'skip', 'range', 'tail', 'dedup']);
+export const scalarChildPrefixOk = (s: PStep): boolean =>
+  SCALAR_CHILD_PREFIX.has(s.name) || (s.name === 'asNumber' && (s.args ?? []).length > 0);
+
 function elementRowParts(body: ReturnType<typeof stepChain>): { prefix: ReturnType<typeof stepChain>; suffix: ReturnType<typeof stepChain> } | null {
   const at = body.findIndex((s) => CHILD_ELEMENT_ROW_STEPS.has(s.name));
   const prefix = at < 0 ? body : body.slice(0, at);
