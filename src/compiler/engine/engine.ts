@@ -7,7 +7,7 @@ import { withCarried, type Carry, type ElementStream, type StepFn } from '../../
 import { move, toEdge, toVertex, otherV } from '../../steps/prefix/movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from '../../steps/prefix/filter.ts';
 import { union, optional, repeat, choose, coalesce } from '../../steps/prefix/branch.ts';
-import { isElementChild, isListChild, isScalarChild } from '../../steps/tail/child.ts';
+import { isElementChild, isListChild, isScalarChild } from '../../steps/tail/child-shape.ts';
 import { match } from '../../steps/prefix/match.ts';
 import { identity, limit, range, skip } from '../../steps/prefix/passthrough.ts';
 import { sack } from '../../steps/prefix/sack.ts';

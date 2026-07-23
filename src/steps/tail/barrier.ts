@@ -1,7 +1,7 @@
 import { derived, empty, q, type Expression } from '../../sql/kernel/q.ts';
 import { carryOf, toListStream, toScalarStream, type ListStream, type RelationalStream, type ScalarStream } from '../context/stream.ts';
 import { carriedCols, carryFrag, carryFragMint, carriedWith, withoutCarried, type ElementStream } from '../context/context.ts';
-import { type ChildScope } from './child.ts';
+import { type ChildScope } from './child-shape.ts';
 
 const currentFrame = (scope: ChildScope) => {
   const frame = scope.frames.at(-1);

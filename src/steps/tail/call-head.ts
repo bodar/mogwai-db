@@ -4,7 +4,8 @@ import { edges, labels, nodes } from '../../sql/schema.ts';
 import { type Compiled } from '../../sql/kernel/render.ts';
 import { materializeRoot } from './materialize.ts';
 import { type ElementStream } from '../context/context.ts';
-import { pushChildScope, tryCompileScalarValueChild, type ChildFrame, type CompileScope } from './child.ts';
+import { pushChildScope, tryCompileScalarValueChild } from './child.ts';
+import { type ChildFrame, type CompileScope } from './child-shape.ts';
 
 // ---------- the mid-traversal barrier call() HEAD (Phase 6b) ----------
 //

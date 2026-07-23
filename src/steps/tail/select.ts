@@ -11,7 +11,8 @@ import { compileFromList } from './list.ts';
 import { type Compiled, type PathPos } from '../../sql/kernel/render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
 import { lowerGlobalCount } from './barrier.ts';
-import { childSteps, classifyElementChild, classifyListChild, classifyScalarChild, pushChildScope, reuseCurrentFrame, ROOT_SCOPE, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild, type ChildFrame, type ChildScope } from './child.ts';
+import { pushChildScope, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
+import { childSteps, classifyElementChild, classifyListChild, classifyScalarChild, reuseCurrentFrame, ROOT_SCOPE, type ChildFrame, type ChildScope } from './child-shape.ts';
 import { tryLowerScalarChoose, tryLowerScalarCoalesce } from '../prefix/branch.ts';
 
 // ---------- select()/project() ----------

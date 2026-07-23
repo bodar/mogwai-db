@@ -1,5 +1,5 @@
 import type { Stream } from '../../steps/context/stream.ts';
-import type { CompileScope, ChildParent } from '../../steps/tail/child.ts';
+import type { CompileScope, ChildParent } from '../../steps/tail/child-shape.ts';
 import type { Query } from '../../sql/kernel/q.ts';
 
 // ---------- the call() service seam ----------
