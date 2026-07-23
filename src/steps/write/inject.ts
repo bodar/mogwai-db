@@ -124,5 +124,8 @@ export function compileInject(engine: Engine, steps: PStep[], sackInit?: SackSpe
   // A bare inject (no coercion consumed, folded.at===1) of a uniform TEXT-stored literal keeps
   // its declared type so it frames correctly (e.g. a long > 2^53 as a Long, not a string).
   const as = folded.as ?? (folded.at === 1 ? bareInjectTag(steps, vals.length) : undefined);
-  return materializeFinal(eng.lowerStepsStrict(toScalarStream(sackCarry, rel, as), steps, folded.at));
+  // A bare inject(null) seeds a single compile-time-known null traverser. Flag it so a following
+  // collection step raises TinkerPop's null-incoming message rather than the scalar-incoming one.
+  const literalNull = vals.length === 1 && vals[0] === null;
+  return materializeFinal(eng.lowerStepsStrict(toScalarStream(sackCarry, rel, as, { literalNull }), steps, folded.at));
 }

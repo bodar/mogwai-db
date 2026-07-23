@@ -37,6 +37,11 @@ export interface ScalarStream extends Carry {
   /** A NULL row is a real traverser rather than an empty numeric reduction. Set by
    * ProductiveBy-backed list streams and preserved through their reducers. */
   readonly productiveNull?: boolean;
+  /** The stream's sole traverser is a compile-time literal null (a bare `inject(null)`), as
+   * opposed to a runtime scalar of unknown value. Lets a collection step (intersect/merge/…)
+   * distinguish TinkerPop's "Incoming traverser … can't be null" from its "encountered a
+   * scalar" message. Neutral fact set at the inject seed; only the set-step handler reads it. */
+  readonly literalNull?: boolean;
   /** Optional physical per-row stored-type column (its name, conventionally 'vtype')
    * carrying the canonical Gremlin type of each value (from values()/properties() reading
    * vertex_properties/edge_properties.vtype). typeOf tests it per row; row-preserving ops
@@ -355,9 +360,10 @@ export interface ScalarOpts {
   readonly result?: ScalarStream['result'];
   readonly productiveNull?: boolean;
   readonly vtype?: string;
+  readonly literalNull?: boolean;
 }
 export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, opts: ScalarOpts = {}): ScalarStream =>
-  assertStreamColumns({ ...c, kind: 'scalar', rel, as, result: opts.result ?? 'value', productiveNull: opts.productiveNull, vtype: opts.vtype });
+  assertStreamColumns({ ...c, kind: 'scalar', rel, as, result: opts.result ?? 'value', productiveNull: opts.productiveNull, vtype: opts.vtype, literalNull: opts.literalNull });
 export const toVariantStream = (c: Carry, rel: Relation, arms: VariantArms, result: VariantStream['result'] = 'rows'): VariantStream =>
   assertStreamColumns({ ...c, kind: 'variant', rel, scalarAs: arms.scalarAs, node: arms.node, edge: arms.edge, listOf: arms.listOf, result });
 export const toListStream = (c: Carry, rel: Relation, of: ListOf, set?: boolean): ListStream =>

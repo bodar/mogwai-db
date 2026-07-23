@@ -24,7 +24,8 @@
 // the exact PASSED/FAILED scenario-name sets. Every local run diffs against it to
 // print the DELTA (gains + regressions), then rewrites it on a clean run. It is
 // the single source of truth for the ratchet — no separate baseline.json.
-import { appendFileSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync, existsSync, rmSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import type { GraphManager, GraphInfo } from '../../src/manager.ts';
 import type { RemoteExecutor } from '../../src/api.ts';
@@ -98,6 +99,42 @@ export function readTelemetry(file: string): QueryRecord[] {
 /** Start each run from a clean file, so a summary reflects only this run. */
 export function clearTelemetry(file: string): void {
   if (existsSync(file)) rmSync(file);
+}
+
+// ---------- expected-error classification (the compact progress line) ----------
+//
+// A negative scenario asserts `... the traversal will raise an error with message <cmp>
+// text of "<substr>"`. When our compiler throws a message CONTAINING that literal substring
+// it is SATISFYING that assertion — an EXPECTED error, not a gap — so the scenario passes.
+// Extracting those literals from the feature tree lets the progress line distinguish an
+// expected throw (a quiet `·`) from a real compile/exec gap (`E`). This is deliberately keyed
+// on the corpus's OWN assertion strings, not on our message shape: a real bug that throws a
+// canonical-looking error (e.g. a bad bind, an unexpected parse error) is NOT in this set, so
+// it still shows as `E`. (The ~9 message-agnostic `will raise an error` scenarios can't be
+// matched by text and stay `E` — a small, honest residual, still caught by the ratchet.)
+
+/** The literal expected-error message substrings asserted across the feature tree. Scanned
+ *  once; returns [] if the dir is absent (telemetry must never perturb a run). */
+export function expectedErrorSubstrings(featuresDir: string): string[] {
+  try {
+    const out = new Set<string>();
+    for (const f of readdirSync(featuresDir, { recursive: true, encoding: 'utf8' })) {
+      if (typeof f !== 'string' || !f.endsWith('.feature')) continue;
+      const text = readFileSync(join(featuresDir, f), 'utf8');
+      for (const m of text.matchAll(/raise an error with message \w+ text of "([^"]*)"/g)) out.add(m[1]);
+    }
+    return [...out];
+  } catch {
+    return [];
+  }
+}
+
+/** The compact progress mark for one query outcome: `.` ran, `·` an expected throw (its
+ *  message matches a negative scenario's assertion), `E` a real compile/exec gap. */
+export function progressMark(ev: { ok: boolean; error?: string }, expected: readonly string[]): '.' | '·' | 'E' {
+  if (ev.ok) return '.';
+  const msg = ev.error ?? '';
+  return expected.some((s) => msg.includes(s)) ? '·' : 'E';
 }
 
 // ---------- aggregation: the systematic-gap view ----------
