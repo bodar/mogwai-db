@@ -3,7 +3,7 @@ import { createRegistry, EMPTY_REGISTRY } from '../src/services/registry.ts';
 import { standardRegistry } from '../src/services/standard.ts';
 import { directoryService } from '../src/services/directory.ts';
 import { DIRECTORY_SERVICE_NAME, type Service, type ServiceRegistry } from '../src/services/types.ts';
-import { parseGremlin, stepChain } from '../src/frontend.ts';
+import { parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { normalize } from '../src/strategies.ts';
 import { parseCallSpec, injectionKindOf } from '../src/services/call-params.ts';
 import { compile, compilePlan } from '../src/compiler.ts';

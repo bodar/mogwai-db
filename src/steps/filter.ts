@@ -1,5 +1,5 @@
-import { derived, q, list, raw, type Expression, type Relation } from '../q.ts';
-import { stepChain, type Pred } from '../frontend.ts';
+import { derived, q, list, raw, type Expression, type Relation } from '../sql/kernel/q.ts';
+import { stepChain, type Pred } from '../gremlin/frontend.ts';
 import {
   P_OPS, labelIn, predicateSql, nodePropScalar, hasProp, elemCtx, aliasCtx,
   idPredFromArgs, scalarProp, labelNameSub, type Elem, type ScalarCtx,

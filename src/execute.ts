@@ -1,5 +1,5 @@
 import { compilePlan, type Compiled, type WritePlan, type ListOf, type MapEntry, type MapOf, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from './compiler.ts';
-import { isCollectionType, valueNodeFromStored, type TypeNode, type ValueNode } from './gremlin-types.ts';
+import { isCollectionType, valueNodeFromStored, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import type { GraphStore } from './storage.ts';
 import type { ServiceRegistry } from './services/types.ts';
 import type { Executor as ExecutorApi, ForeignRow } from './api.ts';
@@ -181,7 +181,7 @@ function mapEntryBuffer(row: any, keyOf: MapOf, valOf: MapOf): Buffer {
   return mapFromEntries([[mapSideBuffer(row.mk, keyOf), mapSideBuffer(row.mv, valOf)]]);
 }
 
-function listFieldBuffer(json: string, of: import('./render.ts').ListOf): Buffer {
+function listFieldBuffer(json: string, of: import('./sql/kernel/render.ts').ListOf): Buffer {
   const items = JSON.parse(json);
   if (of.kind === 'elem') return listBuffer(items.map(of.elem === 'edge' ? rowEdge : rowVertex));
   if (of.kind === 'property') return listBuffer(items.map(framePropertyRow));
@@ -495,7 +495,7 @@ function* frameResolved(store: GraphStore, plan: Compiled | WritePlan): Generato
 
 // Every non-element value shape → one Buffer per result, single multiplicity. Unchanged framing;
 // element leaves (vertex/edge) are handled in framedResults so they can carry a per-row bulk.
-function* frameValues(rows: any[], shape: import('./render.ts').Shape): Generator<Buffer> {
+function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape): Generator<Buffer> {
   switch (shape.kind) {
     case 'vertex': case 'edge': return; // framed in framedResults with per-row bulk
     case 'valueMap': for (const r of rows) yield valueMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys, shape.tokens); return;

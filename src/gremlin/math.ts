@@ -12,7 +12,7 @@
 // division (SQLite's `/` is integer division on integer operands) and `^`/`%` fall
 // out via `POW`/`MOD` with no per-operator special-casing.
 
-import { q, raw, type Expression } from './q.ts';
+import { q, raw, type Expression } from '../sql/kernel/q.ts';
 
 /** exp4j's built-in functions → SQL. All unary. `log` = natural log (→ `LN`);
  *  `signum`/`cbrt` have no SQLite builtin, so they expand inline. The math

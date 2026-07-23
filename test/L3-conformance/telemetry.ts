@@ -25,7 +25,7 @@
 // print the DELTA (gains + regressions), then rewrites it on a clean run. It is
 // the single source of truth for the ratchet — no separate baseline.json.
 import { appendFileSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
-import { parseGremlin, stepChain } from '../../src/frontend.ts';
+import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import type { GraphManager, GraphInfo } from '../../src/manager.ts';
 import type { RemoteExecutor } from '../../src/api.ts';
 

@@ -11,7 +11,7 @@
 // It is stored on write (vertex_properties.vtype / edge_properties.vtype) and
 // consumed on read (typeOf filter + per-row framing).
 
-import { ioc } from './io.ts';
+import { ioc } from '../io.ts';
 
 // ---------- exact big-value carriers (BigDecimal / Duration) ----------
 //

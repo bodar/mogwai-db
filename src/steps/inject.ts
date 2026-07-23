@@ -1,13 +1,13 @@
-import { q, value, list } from '../q.ts';
+import { q, value, list } from '../sql/kernel/q.ts';
 import { jsonbArrayOf } from '../plan.ts';
-import { flattenListArgs, type SackSpec } from '../frontend.ts';
-import { flatType } from '../gremlin-types.ts';
+import { flattenListArgs, type SackSpec } from '../gremlin/frontend.ts';
+import { flatType } from '../gremlin/types.ts';
 import { type PStep } from '../strategies.ts';
 import { type Carry } from './context.ts';
 import { toListStream, toScalarStream } from './stream.ts';
 import type { Engine } from './deps.ts';
 import { materializeFinal } from './materialize.ts';
-import { type Compiled, type ValueType } from '../render.ts';
+import { type Compiled, type ValueType } from '../sql/kernel/render.ts';
 import {
   numericSpec, asBoolConst, asNumberConst, asNumberBare, asDateConst,
   dtFactor, dateDiffOtherMs,

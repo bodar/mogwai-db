@@ -8,7 +8,7 @@ import { LoweringEngine } from '../src/steps/engine.ts';
 import { createAppScope, createCompilerScope } from '../src/scopes.ts';
 import { materializeFinal } from '../src/steps/materialize.ts';
 import { normalize } from '../src/strategies.ts';
-import { stepChain, parseGremlin } from '../src/frontend.ts';
+import { stepChain, parseGremlin } from '../src/gremlin/frontend.ts';
 import type { ForeignRow } from '../src/services/types.ts';
 import type { Carry } from '../src/steps/context.ts';
 import type { Elem } from '../src/plan.ts';

@@ -1,10 +1,10 @@
 import type { GraphStore } from '../storage.ts';
-import { q, value, list, empty, raw, render, type Expression } from '../q.ts';
+import { q, value, list, empty, raw, render, type Expression } from '../sql/kernel/q.ts';
 import { labelIn, nodeHasProp, edgeHasProp } from '../plan.ts';
-import { gremlinTypeOf, isCollectionType, storedScalar, flatType, mapEntryType, valueNodeOf, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../gremlin-types.ts';
-import { stepChain, isNested, type Step, type SackSpec } from '../frontend.ts';
+import { gremlinTypeOf, isCollectionType, storedScalar, flatType, mapEntryType, valueNodeOf, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../gremlin/types.ts';
+import { stepChain, isNested, type Step, type SackSpec } from '../gremlin/frontend.ts';
 import { normalize, type PStep } from '../strategies.ts';
-import { readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../render.ts';
+import { readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../sql/kernel/render.ts';
 import type { Engine } from './deps.ts';
 import { compileInject } from './inject.ts';
 import { indexProperty, deleteFtsFor, deleteFtsForOwners } from '../services/fts-index.ts';

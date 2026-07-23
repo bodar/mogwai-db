@@ -3,7 +3,7 @@ import { standardRegistry } from '../../src/services/standard.ts';
 import type { GraphStore } from '../../src/storage.ts';
 import type { ServiceRegistry } from '../../src/services/types.ts';
 import type { FederationSource } from '../../src/segment.ts';
-import type { TypeNode } from '../../src/gremlin-types.ts';
+import type { TypeNode } from '../../src/gremlin/types.ts';
 
 // Shared test fixture — the ONE place tests get an Executor. Most tests run non-federated
 // traversals against a single in-memory store, so they use the SYNC path (framed/buffers) and

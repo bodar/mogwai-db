@@ -13,7 +13,7 @@
 // file is "how you WIRE and DRIVE the system"; the SPI is "how you AUTHOR a service."
 
 import type { Framed } from './execute.ts';
-import type { TypeNode } from './gremlin-types.ts';
+import type { TypeNode } from './gremlin/types.ts';
 
 // ---- storage transport ----
 

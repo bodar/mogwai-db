@@ -22,7 +22,7 @@ import { executeQuery } from '../support/executor.ts';
 import { ioc } from '../../src/io.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { CREW_SEED } from '../fixtures/seed-crew.ts';
-import { BigDecimal, Duration } from '../../src/gremlin-types.ts';
+import { BigDecimal, Duration } from '../../src/gremlin/types.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
 
 // A vertex carrying one property of each type our extended GraphBinary serializers cover, so a

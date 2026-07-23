@@ -20,7 +20,7 @@
 
 import { LazyMap, instance } from '@bodar/yadic/LazyMap.ts';
 import type { Dependency } from '@bodar/yadic/types.ts';
-import { Query } from './q.ts';
+import { Query } from './sql/kernel/q.ts';
 import { DEFAULT_FAST_PATHS, type FastPathConfig } from './fast-paths.ts';
 import type { ServiceRegistry } from './services/types.ts';
 import { EMPTY_REGISTRY } from './services/registry.ts';

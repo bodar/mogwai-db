@@ -1,4 +1,4 @@
-import { q, value, list } from '../q.ts';
+import { q, value, list } from '../sql/kernel/q.ts';
 import { toScalarStream } from '../steps/stream.ts';
 import type { Carry } from '../steps/context.ts';
 import type { Service, ServiceCallCtx } from './types.ts';

@@ -1,9 +1,9 @@
-import { q, list, type Expression } from '../q.ts';
-import { edges, nodes, labels } from '../schema.ts';
+import { q, list, type Expression } from '../sql/kernel/q.ts';
+import { edges, nodes, labels } from '../sql/schema.ts';
 import { dirsFor, edgeLabelFilter, framedProps } from '../plan.ts';
-import { stepChain, type SackSpec } from '../frontend.ts';
+import { stepChain, type SackSpec } from '../gremlin/frontend.ts';
 import { type PStep } from '../strategies.ts';
-import { type Compiled } from '../render.ts';
+import { type Compiled } from '../sql/kernel/render.ts';
 import { materializeRoot } from './materialize.ts';
 import type { Engine } from './deps.ts';
 

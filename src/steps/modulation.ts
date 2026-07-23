@@ -5,7 +5,7 @@
 // here so consumers differ only in cardinality/productivity policy, not in how a key
 // is read. Traversal-valued modulators still go through child.ts.
 
-import { empty, list, q, type Expression, type Relation } from '../q.ts';
+import { empty, list, q, type Expression, type Relation } from '../sql/kernel/q.ts';
 import { elemCtx, labelNameSub, scalarProp, scalarPropSortKey } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { type ElementStream } from './context.ts';

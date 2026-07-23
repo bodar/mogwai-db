@@ -21,7 +21,7 @@
 // executor's collaborators (store + the federation source). This module is TYPES ONLY: the
 // cycle-free description of a plan, importing only leaf types, never the store / framing / engine.
 
-import type { Compiled, WritePlan } from './render.ts';
+import type { Compiled, WritePlan } from './sql/kernel/render.ts';
 import type { ForeignRow } from './api.ts';
 import type { CallParams } from './services/types.ts';
 

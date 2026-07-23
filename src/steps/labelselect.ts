@@ -1,4 +1,4 @@
-import { q, list, raw, empty, value, type Expression } from '../q.ts';
+import { q, list, raw, empty, value, type Expression } from '../sql/kernel/q.ts';
 import { type PStep } from '../strategies.ts';
 import { aliasElem, aliasIsElement, carriedCols, carryFrag, withShape, type AliasEntry, type Carried, type ElementStream } from './context.ts';
 import {
@@ -9,7 +9,7 @@ import {
   assertStreamColumns, carryOf, streamColumns, toListStream, toScalarStream, PROPERTY_PAYLOAD,
   type ListOf, type PropertyStream, type Stream,
 } from './stream.ts';
-import { type ValueType } from '../render.ts';
+import { type ValueType } from '../sql/kernel/render.ts';
 
 // ---------- as()/select() over path-history labels, any stream shape ----------
 //

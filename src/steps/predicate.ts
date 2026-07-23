@@ -1,6 +1,6 @@
-import { q, list, paren, value, raw, type Expression } from '../q.ts';
-import { stepChain, type Step } from '../frontend.ts';
-import { edgeProperties } from '../schema.ts';
+import { q, list, paren, value, raw, type Expression } from '../sql/kernel/q.ts';
+import { stepChain, type Step } from '../gremlin/frontend.ts';
+import { edgeProperties } from '../sql/schema.ts';
 import {
   predicateSql, labelIn, hasProp, idPredFromArgs, labelNameSub, aliasCtx,
   type ScalarCtx,

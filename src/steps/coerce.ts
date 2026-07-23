@@ -1,6 +1,6 @@
-import { q, value, type Expression } from '../q.ts';
-import { type ValueType } from '../render.ts';
-import { parseIsoMs, stepChain } from '../frontend.ts';
+import { q, value, type Expression } from '../sql/kernel/q.ts';
+import { type ValueType } from '../sql/kernel/render.ts';
+import { parseIsoMs, stepChain } from '../gremlin/frontend.ts';
 
 // ---------- scalar value coercion (asBool / asNumber / asDate + date arithmetic) ----------
 //

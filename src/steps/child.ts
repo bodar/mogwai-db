@@ -1,6 +1,6 @@
-import { derived, empty, list, paren, q, value, type Expression, type Relation } from '../q.ts';
-import { stepChain } from '../frontend.ts';
-import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
+import { derived, empty, list, paren, q, value, type Expression, type Relation } from '../sql/kernel/q.ts';
+import { stepChain } from '../gremlin/frontend.ts';
+import { edges, labels, nodes, vertexProperties, edgeProperties } from '../sql/schema.ts';
 import { advance, carriedWith, carryFrag, carryFragMint, carriedCols, partitionOver, type Carried, type ElementStream } from './context.ts';
 import { aliasId } from './alias.ts';
 import { carryOf, toListStream, toScalarStream, toVariantStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream } from './stream.ts';

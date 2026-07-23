@@ -9,7 +9,7 @@ import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { executeQuery, executeFramed } from './support/executor.ts';
 import { streamBuffers } from '../src/http.ts';
 import { ioc } from '../src/io.ts';
-import { BigDecimal, Duration } from '../src/gremlin-types.ts';
+import { BigDecimal, Duration } from '../src/gremlin/types.ts';
 
 async function values(gremlin: string, writes: string[]): Promise<any[]> {
   const store = new GraphStore(new BunSqlite(':memory:'));

@@ -1,5 +1,5 @@
-import { q, list, empty, type Expression } from '../q.ts';
-import { stepChain, type Step } from '../frontend.ts';
+import { q, list, empty, type Expression } from '../sql/kernel/q.ts';
+import { stepChain, type Step } from '../gremlin/frontend.ts';
 import { normalize, type PStep } from '../strategies.ts';
 import { advance, aliasColsOf, prevRel, type AliasEntry, type ElementStream, type StepFn } from './context.ts';
 import { aliasId, aliasSeed, nodeEntry } from './alias.ts';

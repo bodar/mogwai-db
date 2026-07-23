@@ -1,15 +1,15 @@
-import { q, value, list, empty, type Expression, type Relation } from '../q.ts';
-import { edges, labels, nodes, vertexProperties, edgeProperties } from '../schema.ts';
+import { q, value, list, empty, type Expression, type Relation } from '../sql/kernel/q.ts';
+import { edges, labels, nodes, vertexProperties, edgeProperties } from '../sql/schema.ts';
 import {
   scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps,
   storedValueExpr, bareValueMapProps, typedScalarNode, compareKey, type ScalarCtx,
 } from '../plan.ts';
-import { stepChain } from '../frontend.ts';
+import { stepChain } from '../gremlin/frontend.ts';
 import { isMapLocalOrder } from './list.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, partitionOver, withoutCarried, type Carry, type ElementStream } from './context.ts';
 import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from './stream.ts';
-import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../render.ts';
+import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../sql/kernel/render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, pushChildScope, reuseCurrentFrame, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows, type ChildParent } from './child.ts';
 
