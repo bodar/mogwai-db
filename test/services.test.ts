@@ -1,13 +1,13 @@
 import { test, expect, describe } from 'bun:test';
-import { createRegistry, EMPTY_REGISTRY } from '../src/services/registry.ts';
+import { createRegistry, EMPTY_REGISTRY } from '../src/services/spi/registry.ts';
 import { standardRegistry } from '../src/services/standard.ts';
-import { directoryService } from '../src/services/directory.ts';
-import { DIRECTORY_SERVICE_NAME, type Service, type ServiceRegistry } from '../src/services/types.ts';
+import { directoryService } from '../src/services/catalog/directory.ts';
+import { DIRECTORY_SERVICE_NAME, type Service, type ServiceRegistry } from '../src/services/spi/types.ts';
 import { parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { normalize } from '../src/compiler/ir/strategies.ts';
-import { parseCallSpec, injectionKindOf } from '../src/services/call-params.ts';
+import { parseCallSpec, injectionKindOf } from '../src/services/params/call-params.ts';
 import { compile, compilePlan } from '../src/compiler/compiler.ts';
-import type { ForeignRow } from '../src/services/types.ts';
+import type { ForeignRow } from '../src/services/spi/types.ts';
 import type { FederationSource } from '../src/compiler/segment.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';

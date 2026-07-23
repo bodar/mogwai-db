@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { createAppScope, createCompilerScope } from '../src/scopes.ts';
 import { DEFAULT_FAST_PATHS } from '../src/compiler/options/fast-paths.ts';
-import { EMPTY_REGISTRY, createRegistry } from '../src/services/registry.ts';
+import { EMPTY_REGISTRY, createRegistry } from '../src/services/spi/registry.ts';
 
 // The DI scopes (src/scopes.ts) separate compiler DEPENDENCIES from per-query state. A
 // compiler scope is a CHILD of an app scope and must expose the app scope's entries by DIRECT

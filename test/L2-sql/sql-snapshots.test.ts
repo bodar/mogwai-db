@@ -14,8 +14,8 @@ import { executeQuery, executeFramed } from '../support/executor.ts';
 import { ioc } from '../../src/io.ts';
 import { Query } from '../../src/sql/kernel/q.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
-import { assertStreamColumns, toGroupStream, toPathStream, toPropertyStream, toRecordStream, toScalarStream, toVariantStream } from '../../src/steps/stream.ts';
-import { popChildScope, pushChildScope, reuseCurrentFrame } from '../../src/steps/child.ts';
+import { assertStreamColumns, toGroupStream, toPathStream, toPropertyStream, toRecordStream, toScalarStream, toVariantStream } from '../../src/steps/context/stream.ts';
+import { popChildScope, pushChildScope, reuseCurrentFrame } from '../../src/steps/tail/child.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
 import { readdirSync, readFileSync } from 'node:fs';
 

@@ -1,9 +1,9 @@
-import { createRegistry } from './registry.ts';
-import type { ServiceRegistry } from './types.ts';
-import { directoryService } from './directory.ts';
-import { degreeCentralityService } from './degree-centrality.ts';
-import { searchService } from './search.ts';
-import { federateService } from './federate.ts';
+import { createRegistry } from './spi/registry.ts';
+import type { ServiceRegistry } from './spi/types.ts';
+import { directoryService } from './catalog/directory.ts';
+import { degreeCentralityService } from './catalog/degree-centrality.ts';
+import { searchService } from './catalog/search.ts';
+import { federateService } from './catalog/federate.ts';
 
 // ---------- the standard + extended registries ----------
 //

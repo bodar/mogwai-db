@@ -23,7 +23,7 @@
 
 import type { Compiled, WritePlan } from '../sql/kernel/render.ts';
 import type { ForeignRow } from '../api.ts';
-import type { CallParams } from '../services/types.ts';
+import type { CallParams } from '../services/spi/types.ts';
 
 /** The capability a barrier's `apply` needs to reach OTHER graphs: get an executor for a graph
  *  id and run a raw (detached-row) traversal on it at a given federation depth. A minimal view of
