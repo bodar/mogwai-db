@@ -7,6 +7,35 @@ change; the L1/L3/L4 gates and L2 semantic-equivalence hold at every landing poi
 
 L3 passing floor (ratchet, must not drop): **1264**.
 
+## Progress & resume protocol
+
+Gate: `mise run ci` (check + test + build). Commit + push trunk after each green landing.
+Auto mode: bigger-bang landings are fine (over-fragmenting hurts); worst case = revert.
+
+- ✅ **Stage 0** — baseline green (750 pass), L3 floor 1264 recorded.
+- ✅ **M1.1** (committed `5c2af31`) — DI scopes `src/scopes.ts`: `AppScope` (registry/fastPaths/
+  source) + `CompilerScope` (q/params/federationDepth, child of app). Executor builds an app
+  scope, passes it via `CompileOptions.app`; `compilePlan` mints a compiler scope. Required a
+  **yadic parent-chaining fix** (bumped to `@bodar/yadic@0.495.349`): a child container now
+  exposes inherited parent deps by DIRECT access. Guard: `test/scopes.test.ts`.
+- ⏳ **M1.2+3** (in progress) — engine core → dependency-injected OBJECTS, one atomic landing:
+  `Engine` (dispatcher: PREFIX + lower*/buildPrefix/compileRead) + family compilers
+  (`ChildCompiler`/`TailCompiler`/`CallCompiler`/`WriteRouter`) as separate classes, each built
+  from the compiler scope. Remove `fastPaths`/`registry`/`federationDepth`/`engine` from `Carry`
+  (→ pure state: q/params/carried/sideEffects). Dissolve the `index.ts` barrel. Classes stay
+  FLAT in `steps/` for now (M2 relocates). Dependency-read surface to migrate (verified):
+  fastPaths at `movement.ts:17`, `filter.ts:152/163/217`, `projection.ts:940`, `branch.ts:243`,
+  `scalar.ts:394`, `child.ts:1462`; registry/depth at `call.ts:127/154`; `carryOf`-style copies
+  of fastPaths at `labelselect.ts:96`, `scalar.ts:520`, `variant.ts:79`, `stream.ts:346` (drop
+  the field once off Carry). `src/steps/deps.ts` holds the `Engine`/`EngineDeps` interfaces.
+- ⬜ **M2** — directory relocation (mechanical, deps no longer threaded): sql/ · gremlin/ ·
+  compiler/{ir,options,plan,segment,engine} · services/{spi,params,catalog} ·
+  steps/{context,prefix,tail,write} · cloudflare worker 3-way split · test monolith split ·
+  docs (CLAUDE.md paths + DI/object-model section).
+
+**To resume:** `git log --oneline -5` for the last landing; `git status` for uncommitted work;
+`mise run L2` for the fastest red/green signal; this doc's stage list for what's next.
+
 ## Why this shape (the governing idea)
 
 When DI was introduced to the *outer* compile (the `Executor` holding `registry`/`source` as
