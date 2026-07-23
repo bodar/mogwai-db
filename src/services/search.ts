@@ -64,7 +64,7 @@ function emptyProperties(ctx: ServiceCallCtx, ownerElem: 'node' | 'edge'): Prope
   // so a raw `NULL AS <col>` projection with a WHERE 0 guard yields the empty relation.
   const proj = raw(PROPERTY_PAYLOAD.map((c) => `NULL AS ${c}`).join(', '));
   const rel = ctx.q.cte(q`SELECT ${proj} WHERE 0`, [...PROPERTY_PAYLOAD]);
-  return toPropertyStream({ q: ctx.q, params: ctx.compileParams, registry: ctx.registry, carried }, rel, ownerElem);
+  return toPropertyStream({ q: ctx.q, params: ctx.compileParams, carried }, rel, ownerElem);
 }
 
 /** Build the matched-properties PropertyStream for a node/edge scope. Joins property_fts
@@ -92,7 +92,7 @@ function searchProperties(ctx: ServiceCallCtx, ownerElem: 'node' | 'edge', patte
       FROM ${f} JOIN ${ep} ON ${ep.c.id}=${f.c.pid} JOIN ${ed} ON ${ed.c.id}=${ep.c.edge} JOIN ${l} ON ${l.c.id}=${ed.c.label} WHERE ${scope}`;
   }
   const rel: Relation = ctx.q.cte(body, [...PROPERTY_PAYLOAD]);
-  return toPropertyStream({ q: ctx.q, params: ctx.compileParams, registry: ctx.registry, carried }, rel, ownerElem);
+  return toPropertyStream({ q: ctx.q, params: ctx.compileParams, carried }, rel, ownerElem);
 }
 
 export const searchService: Service = {

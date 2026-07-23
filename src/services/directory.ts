@@ -15,7 +15,7 @@ import { DIRECTORY_SERVICE_NAME } from './types.ts';
 /** Build a scalar-string stream from a list of already-computed string rows, seeded from
  *  a VALUES CTE exactly like inject() does. An empty list yields the empty stream. */
 function scalarStrings(ctx: ServiceCallCtx, rows: string[]) {
-  const carry: Carry = { q: ctx.q, params: ctx.compileParams, registry: ctx.registry, carried: { aliases: new Map(), origins: [] } };
+  const carry: Carry = { q: ctx.q, params: ctx.compileParams, carried: { aliases: new Map(), origins: [] } };
   const rel = rows.length
     ? ctx.q.cte(q`VALUES ${list(rows.map((r) => q`(${value(r)})`), ', ')}`, ['v'])
     : ctx.q.cte(q`SELECT NULL AS v WHERE 0`, ['v']);

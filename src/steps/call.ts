@@ -8,6 +8,7 @@ import { parseCallSpec, injectionKindOf } from '../services/call-params.ts';
 import { type ChildFrame, type CompileScope } from './child.ts';
 import { buildCallHead } from './call-head.ts';
 import { type Compiled } from '../render.ts';
+import { engineOf } from './deps.ts';
 
 // ---------- call() lowering ----------
 //
@@ -124,7 +125,7 @@ export function seedCall(first: PStep, query: Query, params: Record<string, any>
  *  what resumes after the call(). */
 export function lowerCall(step: PStep, parent: ElementStream, scope: CompileScope, steps: PStep[], stop: number): LoweringResult {
   const spec = parseCallSpec(step, parent.params);
-  const registry = parent.registry ?? (() => { throw new Error('call(): no service registry in scope'); })();
+  const registry = engineOf(parent).registry;
   const ctx: ServiceCallCtx = {
     params: spec.params,
     q: parent.q,
@@ -151,7 +152,7 @@ export function lowerCall(step: PStep, parent: ElementStream, scope: CompileScop
   if (thirdTrav && !injection)
     throw new Error(`call("${spec.serviceName}"): injection must be a direct value read — __.values(key), __.id(), or __.label()`);
   const { head, frame } = buildCallHead(parent, scope, spec.injectionTraversal);
-  const depth = parent.federationDepth ?? 0;
+  const depth = engineOf(parent).federationDepth;
   const apply = (rows: readonly ForeignRow[], src: FederationSource) => contribution.apply(rows, spec.params, src, depth);
   const point: MidBarrierPoint = {
     kind: 'mid-barrier-point',

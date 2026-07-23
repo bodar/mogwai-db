@@ -76,7 +76,7 @@ export const variantCols = (carry: Carry, hasList: boolean): string[] =>
   ['vk', 'v', 'rid', ...(hasList ? ['list'] : []), ...carriedCols(carry.carried)];
 
 const carryWith = (base: Carry, carried: Carry['carried']): Carry =>
-  ({ q: base.q, params: base.params, fastPaths: base.fastPaths, sideEffects: base.sideEffects, carried });
+  ({ q: base.q, params: base.params, sideEffects: base.sideEffects, carried });
 
 /** Merge a set of variant arms (mixed-shape branch) into one VariantStream. Parent-agnostic
  *  (element- and scalar-parent share it). When emission order is live, SYNTHESIZE the canonical

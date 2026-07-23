@@ -1,11 +1,11 @@
 import { test, expect, describe } from 'bun:test';
-import { Query } from '../src/q.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { landForeignElements } from '../src/steps/foreign.ts';
 import { executeQuery, exec } from './support/executor.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
-import { lowerStepsStrict } from '../src/steps/index.ts';
+import { LoweringEngine } from '../src/steps/engine.ts';
+import { createAppScope, createCompilerScope } from '../src/scopes.ts';
 import { materializeFinal } from '../src/steps/materialize.ts';
 import { normalize } from '../src/strategies.ts';
 import { stepChain, parseGremlin } from '../src/frontend.ts';
@@ -20,7 +20,10 @@ import type { ForeignStream } from '../src/steps/stream.ts';
 // that local movement over a detached element fails closed.
 
 const store = new GraphStore(new BunSqlite(':memory:')); // empty — foreign rows are literals, no join
-const carry = (): Carry => ({ q: new Query(), params: {}, carried: { aliases: new Map(), origins: [] } });
+// A fresh lowering engine per call — it attaches itself to its Query, which the carry rides, so
+// landForeignElements' seed reaches lowering via q.engine (the object-model wiring).
+const freshEngine = (): LoweringEngine =>
+  new LoweringEngine(createAppScope(), createCompilerScope(createAppScope(), { params: {} }));
 
 // The {t,v} node shape vertexBuffer/edgeBuffer consume (one per key; vertex is multi-valued).
 const vprops = (o: Record<string, unknown>) =>
@@ -36,10 +39,11 @@ const erow = (id: number, label: string, src: number, tgt: number, props: Record
 // Land rows, run the given trailing gremlin steps (empty = terminal element), materialize,
 // execute against the empty store, return raw rows.
 function landAndRun(rows: readonly ForeignRow[], elem: Elem, trailing = '') {
-  const c = carry();
+  const engine = freshEngine();
+  const c: Carry = { q: engine.q, params: {}, carried: { aliases: new Map(), origins: [] } };
   const seed: ForeignStream = landForeignElements(c, rows, elem);
   const steps = trailing ? normalize(stepChain(parseGremlin(`g.V()${trailing}`), {})).steps.slice(1) : [];
-  const plan = materializeFinal(lowerStepsStrict(seed, steps, 0));
+  const plan = materializeFinal(engine.lowerStepsStrict(seed, steps, 0));
   if (plan.kind !== 'read') throw new Error('expected read plan');
   return { plan, rows: store.query(plan.sql, plan.binds) as any[] };
 }

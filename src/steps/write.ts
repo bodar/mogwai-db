@@ -5,7 +5,7 @@ import { gremlinTypeOf, isCollectionType, storedScalar, flatType, mapEntryType, 
 import { stepChain, isNested, type Step, type SackSpec } from '../frontend.ts';
 import { normalize, type PStep } from '../strategies.ts';
 import { readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../render.ts';
-import { buildPrefix, compileReadCompiled } from './index.ts';
+import type { Engine } from './deps.ts';
 import { compileInject } from './inject.ts';
 import { indexProperty, deleteFtsFor, deleteFtsForOwners } from '../services/fts-index.ts';
 
@@ -50,12 +50,12 @@ function constFromNested(nested: any, sideEffects: Map<string, any> | undefined,
 // Compile a nested traversal (optionally seeded at a driver element) and run it against
 // the store, returning its raw result rows + the compiled shape. Seeding prepends a
 // V/E source on the driver's internal rowid so the child is anchored at that element.
-function runNested(store: GraphStore, nestedNode: any, params: Record<string, any>, seed?: { id: number; elem: 'node' | 'edge' }): { rows: any[]; shape: Shape } {
+function runNested(engine: Engine, store: GraphStore, nestedNode: any, params: Record<string, any>, seed?: { id: number; elem: 'node' | 'edge' }): { rows: any[]; shape: Shape } {
   let chain: PStep[] = normalize(stepChain(nestedNode, params)).steps;
   // Seed at the driver element: a synthetic V/E source on the internal rowid (numeric
   // arg → rowid match). It borrows the nested node's parse ctx (no ctx of its own).
   if (seed) chain = [{ name: seed.elem === 'edge' ? 'E' : 'V', args: [seed.id], ctx: nestedNode } as PStep, ...chain];
-  const compiled = compileReadCompiled(chain, params);
+  const compiled = engine.compileReadCompiled(chain, params);
   return { rows: store.query<any>(compiled.sql, compiled.binds), shape: compiled.shape };
 }
 
@@ -70,8 +70,8 @@ const VT_TO_CANON: Record<string, CanonicalType> = {
 // value (single-cardinality write), or has:false for an empty traversal (→ no property).
 // The stored vtype comes from the read spine's own type (count→long, a typed value→its
 // `as`), else null → inferred from the value. Fails closed on a non-scalar result shape.
-function nestedScalar(store: GraphStore, nestedNode: any, params: Record<string, any>, seed?: { id: number; elem: 'node' | 'edge' }): { has: boolean; value: any; vtype: CanonicalType | null } {
-  const { rows, shape } = runNested(store, nestedNode, params, seed);
+function nestedScalar(engine: Engine, store: GraphStore, nestedNode: any, params: Record<string, any>, seed?: { id: number; elem: 'node' | 'edge' }): { has: boolean; value: any; vtype: CanonicalType | null } {
+  const { rows, shape } = runNested(engine, store, nestedNode, params, seed);
   if (shape.kind !== 'value' && shape.kind !== 'scalar' && shape.kind !== 'count')
     throw new Error(`property() traversal value producing a ${shape.kind} not yet supported`);
   if (!rows.length || rows[0].v == null) return { has: false, value: undefined, vtype: null };
@@ -85,21 +85,21 @@ function nestedScalar(store: GraphStore, nestedNode: any, params: Record<string,
 // empty nested traversal → has:false. vtype from the read shape, else inferred from the
 // produced value (the honest fallback for an untyped channel). Reused by property values
 // (resolveSpecValue), addV labels (insertVertex), and merge map values (resolveMergeSpec).
-function nestedScalarValue(store: GraphStore, nested: any, params: Record<string, any>, seed?: { id: number; elem: 'node' | 'edge' }, sideEffects?: Map<string, any>): { has: boolean; value: any; vtype: CanonicalType | null } {
+function nestedScalarValue(engine: Engine, store: GraphStore, nested: any, params: Record<string, any>, seed?: { id: number; elem: 'node' | 'edge' }, sideEffects?: Map<string, any>): { has: boolean; value: any; vtype: CanonicalType | null } {
   const c = constFromNested(nested, sideEffects, params);
   if (c.has) return c;
-  const r = nestedScalar(store, nested.nested, params, seed);
+  const r = nestedScalar(engine, store, nested.nested, params, seed);
   return { has: r.has, value: r.value, vtype: r.vtype ?? (r.has ? gremlinTypeOf(r.value, null) : null) };
 }
 
 // Resolve a PropSpec's value for one target element: a literal passes through with its
 // captured vtype; a nested traversal is evaluated correlated at the element.
-function resolveSpecValue(store: GraphStore, sp: PropSpec, id: number, elem: 'node' | 'edge', params: Record<string, any>, sideEffects?: Map<string, any>): { has: boolean; value: any; vtype: CanonicalType | null; typeNode: TypeNode | null } {
+function resolveSpecValue(engine: Engine, store: GraphStore, sp: PropSpec, id: number, elem: 'node' | 'edge', params: Record<string, any>, sideEffects?: Map<string, any>): { has: boolean; value: any; vtype: CanonicalType | null; typeNode: TypeNode | null } {
   // A literal keeps its full typeNode (collection element/key fidelity); a nested traversal
   // resolves to a SCALAR (nested collection values are deferred), so its scalar vtype IS a
   // valid TypeNode (a bare CanonicalType), used directly as typeNode.
   if (!isNested(sp.value)) return { has: true, value: sp.value, vtype: sp.vtype, typeNode: sp.typeNode };
-  const r = nestedScalarValue(store, sp.value, params, { id, elem }, sideEffects);
+  const r = nestedScalarValue(engine, store, sp.value, params, { id, elem }, sideEffects);
   return { ...r, typeNode: r.vtype };
 }
 
@@ -115,8 +115,8 @@ function resolveSpecValue(store: GraphStore, sp: PropSpec, id: number, elem: 'no
 // drop() — remove the target elements. Vertices (g.V()…drop()) take their
 // incident edges with them; edges (g.E()…drop(), g.V().outE()…drop()) delete
 // only the matched edge rows.
-function compileDrop(steps: PStep[]): WritePlan {
-  const { st, stop } = buildPrefix(steps.slice(0, -1));
+function compileDrop(engine: Engine, steps: PStep[]): WritePlan {
+  const { st, stop } = engine.buildPrefixFresh(steps.slice(0, -1));
   if (stop !== steps.length - 1) throw new Error(`drop() after ${steps[stop].name}() not yet supported`);
   const isEdge = st.elem === 'edge';
   const target = renderFrom(st.q, st.rel);
@@ -152,10 +152,10 @@ function compileDrop(steps: PStep[]): WritePlan {
 
 // g.V(x).<filters>.property(k, v)[.property(...)] — set properties on the matched
 // existing element(s), single cardinality (last write wins).
-function compileSetProperty(steps: PStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
+function compileSetProperty(engine: Engine, steps: PStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
   const firstProp = steps.findIndex((s) => s.name === 'property');
   const prefix = steps.slice(0, firstProp);
-  const { st, stop } = buildPrefix(prefix, params);
+  const { st, stop } = engine.buildPrefixFresh(prefix, params);
   if (stop !== prefix.length) throw new Error(`property() after ${steps[stop].name}() not yet supported`);
   const elem = st.elem;
   const specs: PropSpec[] = [];
@@ -187,7 +187,7 @@ function compileSetProperty(steps: PStep[], params: Record<string, any>, sideEff
       kind: 'write',
       run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
         for (const sp of specs) {
-          const r = resolveSpecValue(store, sp, id, 'edge', params, sideEffects);
+          const r = resolveSpecValue(engine, store, sp, id, 'edge', params, sideEffects);
           if (r.has) insertEdgeProperty(store, id, sp.key, r.value, r.vtype, r.typeNode);
         }
         const cur = store.query<any>(readCur, [id])[0];
@@ -201,7 +201,7 @@ function compileSetProperty(steps: PStep[], params: Record<string, any>, sideEff
     kind: 'write',
     run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
       for (const sp of specs) {
-        const r = resolveSpecValue(store, sp, id, 'node', params, sideEffects);
+        const r = resolveSpecValue(engine, store, sp, id, 'node', params, sideEffects);
         if (r.has) applyVertexProperty(store, id, sp.key, r.value, r.vtype, sp.meta, sp.cardinality, r.typeNode);
       }
       const cur = store.query<any>(readCur, [id])[0];
@@ -420,30 +420,30 @@ function readVertexProps(store: GraphStore, node: number): Record<string, ValueN
 // value (__.constant/__.values/__.out().count()) is evaluated correlated at the NEW
 // vertex (fresh + edge-less → __.out().count() = 0, per TinkerPop). An empty nested
 // value writes no property (r.has=false).
-function insertVertex(store: GraphStore, spec: VertexSpec, params: Record<string, any> = {}, sideEffects?: Map<string, any>): { id: number; extId: string | number; label: string } {
+function insertVertex(engine: Engine, store: GraphStore, spec: VertexSpec, params: Record<string, any> = {}, sideEffects?: Map<string, any>): { id: number; extId: string | number; label: string } {
   let label: string;
   if (isNested(spec.label)) {
     // Unseeded: an addV label traversal is a standalone read / invariant (a source addV
     // has no incoming element). Routes through the same value authority so __.constant(x)
     // and __.select(const) labels resolve, not just seeded reads.
-    const r = nestedScalarValue(store, spec.label, params, undefined, sideEffects);
+    const r = nestedScalarValue(engine, store, spec.label, params, undefined, sideEffects);
     if (!r.has) throw new Error('addV(traversal) label produced no value');
     label = String(r.value);
   } else label = spec.label;
   const row = insertRow(store, 'nodes', ['label'], [store.labelId(label)], spec.uid);
   for (const p of spec.props) {
-    const r = resolveSpecValue(store, p, row.id, 'node', params, sideEffects);
+    const r = resolveSpecValue(engine, store, p, row.id, 'node', params, sideEffects);
     if (r.has) applyVertexProperty(store, row.id, p.key, r.value, r.vtype, p.meta, p.cardinality, r.typeNode);
   }
   return { ...row, label };
 }
 
 // g.addV('label').property(k, v)... — and multi-element chains (a graph initializer).
-function compileAddV(steps: PStep[], params: Record<string, any> = {}, sideEffects?: Map<string, any>): WritePlan {
+function compileAddV(engine: Engine, steps: PStep[], params: Record<string, any> = {}, sideEffects?: Map<string, any>): WritePlan {
   if (steps.some((s, i) => i > 0 && s.name !== 'property'))
-    return { kind: 'write', run: (store) => runWriteChainFull(store, steps, params, sideEffects) };
+    return { kind: 'write', run: (store) => runWriteChainFull(engine, store, steps, params, sideEffects) };
   const spec = parseVertexSpec(steps[0], steps.slice(1), sideEffects, params);
-  return { kind: 'write', run: (store) => { const v = insertVertex(store, spec, params, sideEffects); return [{ vertex: { id: v.extId, label: v.label, props: readVertexProps(store, v.id) } }]; } };
+  return { kind: 'write', run: (store) => { const v = insertVertex(engine, store, spec, params, sideEffects); return [{ vertex: { id: v.extId, label: v.label, props: readVertexProps(store, v.id) } }]; } };
 }
 
 interface EdgeCluster { label: string; fromSpec: any; toSpec: any; edgeUid: string | number | null; props: Record<string, any>; propTypes: Record<string, TypeNode | null>; next: number; }
@@ -480,7 +480,7 @@ function nodeExtId(store: GraphStore, rowid: number): any {
 // Insert one edge from a cluster + resolved endpoints; returns the framed result. The
 // edge row carries no props (retired flat blob) — each property becomes an
 // edge_properties row, typed via the cluster's captured argTypes (else JS-inferred).
-function insertEdge(store: GraphStore, c: EdgeCluster, src: number, tgt: number, params: Record<string, any> = {}, sideEffects?: Map<string, any>): any {
+function insertEdge(engine: Engine, store: GraphStore, c: EdgeCluster, src: number, tgt: number, params: Record<string, any> = {}, sideEffects?: Map<string, any>): any {
   const { id, extId } = insertRow(store, 'edges', ['src', 'label', 'tgt'], [src, store.labelId(c.label), tgt], c.edgeUid);
   // Each inline prop VALUE routes through resolveSpecValue (a nested value is evaluated
   // correlated at the new edge). The response echoes the RESOLVED values, never the raw
@@ -488,7 +488,7 @@ function insertEdge(store: GraphStore, c: EdgeCluster, src: number, tgt: number,
   for (const [k, v] of Object.entries(c.props)) {
     const tn = c.propTypes[k] ?? null;
     const sp: PropSpec = { key: k, value: v, vtype: gremlinTypeOf(v, tn), typeNode: tn, meta: null, cardinality: 'single' };
-    const r = resolveSpecValue(store, sp, id, 'edge', params, sideEffects);
+    const r = resolveSpecValue(engine, store, sp, id, 'edge', params, sideEffects);
     if (r.has) insertEdgeProperty(store, id, k, r.value, r.vtype ?? gremlinTypeOf(r.value, null), r.typeNode);
   }
   // Echo the RESOLVED props by reading them back typed (valueNodeFromStored {t,v}), so the response
@@ -497,27 +497,27 @@ function insertEdge(store: GraphStore, c: EdgeCluster, src: number, tgt: number,
 }
 
 // Resolve a cluster's from()/to() and insert the edge.
-function applyEdgeCluster(store: GraphStore, c: EdgeCluster, aliases: Map<string, number>, fallback: number | null, params: Record<string, any>, sideEffects?: Map<string, any>): any {
+function applyEdgeCluster(engine: Engine, store: GraphStore, c: EdgeCluster, aliases: Map<string, number>, fallback: number | null, params: Record<string, any>, sideEffects?: Map<string, any>): any {
   // Resolve endpoints from-then-to, once per driver row, BEFORE inserting the edge —
   // a to(__.addV()) endpoint CREATES a vertex as a side effect (see nestedElementRowid).
-  const src = c.fromSpec !== undefined ? resolveEndpoint(store, c.fromSpec, { aliases }, params, sideEffects) : fallback;
-  const tgt = c.toSpec !== undefined ? resolveEndpoint(store, c.toSpec, { aliases }, params, sideEffects) : fallback;
+  const src = c.fromSpec !== undefined ? resolveEndpoint(engine, store, c.fromSpec, { aliases }, params, sideEffects) : fallback;
+  const tgt = c.toSpec !== undefined ? resolveEndpoint(engine, store, c.toSpec, { aliases }, params, sideEffects) : fallback;
   if (src == null || tgt == null) throw new Error('addE needs both endpoints — supply from()/to() or an incoming traverser');
-  return insertEdge(store, c, src, tgt, params, sideEffects);
+  return insertEdge(engine, store, c, src, tgt, params, sideEffects);
 }
 
 // addE — general form. A pure write chain goes to the sequential interpreter;
 // otherwise a single addE with a V()-rooted prefix, one edge per resulting traverser.
-function compileAddE(steps: PStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
+function compileAddE(engine: Engine, steps: PStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
   const CHAIN = new Set(['addV', 'as', 'addE', 'from', 'to', 'property']);
   if (steps.every((s) => CHAIN.has(s.name)))
-    return { kind: 'write', run: (store) => runWriteChainFull(store, steps, params, sideEffects) };
+    return { kind: 'write', run: (store) => runWriteChainFull(engine, store, steps, params, sideEffects) };
 
   const addEIdx = steps.findIndex((s) => s.name === 'addE');
   const cluster = parseEdgeCluster(steps, addEIdx);
   if (cluster.next !== steps.length) throw new Error(`step not implemented after addE(): ${steps[cluster.next].name}()`);
   const prefix = steps.slice(0, addEIdx);
-  const { st, stop } = buildPrefix(prefix, params);
+  const { st, stop } = engine.buildPrefixFresh(prefix, params);
   if (stop !== prefix.length) throw new Error(`addE after ${prefix[stop].name}() not yet supported`);
   // as() labels are JSONB history arrays; an addE endpoint is the label's last element
   // (a vertex). Extract its rowid in SQL so resolveEndpoint sees a plain id.
@@ -527,12 +527,12 @@ function compileAddE(steps: PStep[], params: Record<string, any>, sideEffects?: 
   return {
     kind: 'write',
     run: (store) => store.query<any>(read.sql, read.binds).map((r) =>
-      applyEdgeCluster(store, cluster, new Map(aliasCols.map(([lbl, c]) => [lbl, r[c]])), r.id, params, sideEffects)),
+      applyEdgeCluster(engine, store, cluster, new Map(aliasCols.map(([lbl, c]) => [lbl, r[c]])), r.id, params, sideEffects)),
   };
 }
 
 // Interpret a linear write chain (addV/property/as/addE/from/to).
-function runWriteChainFull(store: GraphStore, steps: Step[], params: Record<string, any>, sideEffects?: Map<string, any>): any[] {
+function runWriteChainFull(engine: Engine, store: GraphStore, steps: Step[], params: Record<string, any>, sideEffects?: Map<string, any>): any[] {
   const aliases = new Map<string, number>();
   let currentV: number | null = null;
   let last: any = null;
@@ -542,7 +542,7 @@ function runWriteChainFull(store: GraphStore, steps: Step[], params: Record<stri
       const propSteps: Step[] = [];
       while (i + 1 < steps.length && steps[i + 1].name === 'property') propSteps.push(steps[++i]);
       const spec = parseVertexSpec(s, propSteps, sideEffects, params);
-      const v = insertVertex(store, spec, params, sideEffects);
+      const v = insertVertex(engine, store, spec, params, sideEffects);
       currentV = v.id; last = { vertex: { id: v.extId, label: v.label, props: readVertexProps(store, v.id) } };
     } else if (s.name === 'as') {
       if (currentV == null) throw new Error('as() before any vertex in write chain');
@@ -550,7 +550,7 @@ function runWriteChainFull(store: GraphStore, steps: Step[], params: Record<stri
     } else if (s.name === 'addE') {
       const cluster = parseEdgeCluster(steps, i);
       i = cluster.next - 1;
-      last = applyEdgeCluster(store, cluster, aliases, currentV, params, sideEffects);
+      last = applyEdgeCluster(engine, store, cluster, aliases, currentV, params, sideEffects);
     } else throw new Error(`write-chain step not supported: ${s.name}()`);
   }
   return last ? [last] : [];
@@ -564,7 +564,7 @@ function runWriteChainFull(store: GraphStore, steps: Step[], params: Record<stri
 // It returns rowids (NOT external ids) because edge src/tgt are internal — hence
 // buildPrefix, never runNested (which frames COALESCE(uid,id)). Past-prefix read tails
 // (order/limit) throw: no such endpoint appears in the corpus (fail-closed wall).
-function resolveEndpoint(store: GraphStore, spec: any, d: { aliases: Map<string, number> }, params: Record<string, any>, sideEffects?: Map<string, any>): number {
+function resolveEndpoint(engine: Engine, store: GraphStore, spec: any, d: { aliases: Map<string, number> }, params: Record<string, any>, sideEffects?: Map<string, any>): number {
   const alias = (lbl: string, form: string): number => {
     const id = d.aliases.get(lbl);
     if (id === undefined) throw new Error(`addE from/to(${form}): unknown as() label`);
@@ -585,10 +585,10 @@ function resolveEndpoint(store: GraphStore, spec: any, d: { aliases: Map<string,
     if (inner[0].name === 'addV') {
       const tail = inner.slice(1);
       if (tail.some((s) => s.name !== 'property')) throw new Error('addE endpoint __.addV(...) supports only trailing property() steps');
-      return insertVertex(store, parseVertexSpec(inner[0], tail, sideEffects, params), params, sideEffects).id;
+      return insertVertex(engine, store, parseVertexSpec(inner[0], tail, sideEffects, params), params, sideEffects).id;
     }
     // A V()/E()-rooted read: the movement/filter prefix's id-relation carries rowids.
-    const { st, stop } = buildPrefix(inner, params);
+    const { st, stop } = engine.buildPrefixFresh(inner, params);
     if (stop !== inner.length) throw new Error(`addE endpoint traversal not supported past ${inner[stop].name}()`);
     const sel = renderFrom(st.q, st.rel);
     const rows = store.query<{ id: number }>(sel.sql, sel.binds);
@@ -684,12 +684,12 @@ function normalizeMergeMap(raw: any, typeNode: TypeNode | null, sideEffects?: Ma
 // A non-nested spec passes through unchanged (the constant case stays bit-identical, so
 // mergeMatchQuery renders the same SQL+binds it did at compile time). Fails closed on a
 // nested map value that produces nothing (a match/create value must exist).
-function resolveMergeSpec(store: GraphStore, spec: MergeSpec, seed: { id: number; elem: 'node' | 'edge' } | undefined, params: Record<string, any>, sideEffects?: Map<string, any>): MergeSpec {
+function resolveMergeSpec(engine: Engine, store: GraphStore, spec: MergeSpec, seed: { id: number; elem: 'node' | 'edge' } | undefined, params: Record<string, any>, sideEffects?: Map<string, any>): MergeSpec {
   // Resolve one value to {value, vtype}: a literal keeps its captured propType; a nested
   // traversal resolves correlated at the seed and carries the read shape's vtype.
   const rv = (v: any, propKey: string | null, what: string): { value: any; typeNode: TypeNode | null } => {
     if (!isNested(v)) return { value: v, typeNode: propKey != null ? (spec.propTypes[propKey] ?? null) : null };
-    const r = nestedScalarValue(store, v, params, seed, sideEffects);
+    const r = nestedScalarValue(engine, store, v, params, seed, sideEffects);
     if (!r.has) throw new Error(`merge map ${what} traversal produced no value`);
     return { value: r.value, typeNode: r.vtype }; // a nested scalar's vtype IS a bare TypeNode
   };
@@ -741,23 +741,23 @@ function parseMergeOptions(mods: Step[], step: string, sideEffects: Map<string, 
 }
 
 // The incoming traversers a merge runs once per, evaluated at run time.
-function mergeDrivers(prefix: PStep[], params: Record<string, any>): (store: GraphStore) => (number | null)[] {
+function mergeDrivers(engine: Engine, prefix: PStep[], params: Record<string, any>): (store: GraphStore) => (number | null)[] {
   if (prefix.length === 0) return () => [null];
   if (prefix.length === 1 && prefix[0].name === 'inject') { const nulls = prefix[0].args.map(() => null); return () => nulls; }
-  const { st, stop } = buildPrefix(prefix, params);
+  const { st, stop } = engine.buildPrefixFresh(prefix, params);
   if (stop !== prefix.length) throw new Error(`merge after ${prefix[stop].name}() not yet supported`);
   const sel = renderFrom(st.q, st.rel);
   return (store) => store.query<{ id: number }>(sel.sql, sel.binds).map((r) => r.id);
 }
 
 // g.mergeV(map) [.option(Merge.onCreate, map)] [.option(Merge.onMatch, map)]
-function compileMergeV(steps: PStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
+function compileMergeV(engine: Engine, steps: PStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
   const mvIdx = steps.findIndex((s) => s.name === 'mergeV');
   if (steps[mvIdx].args.length === 0)
     throw new Error('mergeV() with no argument (uses the incoming traverser as the map) not yet supported');
   const matchSpecRaw = normalizeMergeMap(steps[mvIdx].args[0], steps[mvIdx].argTypes?.[0] ?? null, sideEffects, params);
   const { onCreate, onMatch } = parseMergeOptions(steps.slice(mvIdx + 1), 'mergeV', sideEffects, params);
-  const drivers = mergeDrivers(steps.slice(0, mvIdx), params);
+  const drivers = mergeDrivers(engine, steps.slice(0, mvIdx), params);
   return {
     kind: 'write',
     run: (store) => {
@@ -767,9 +767,9 @@ function compileMergeV(steps: PStep[], params: Record<string, any>, sideEffects?
         // resolve nested values seeded at the driver, then build the match query from the
         // resolved spec. A constant spec resolves to itself → identical SQL each iteration.
         const seed = driver != null ? { id: driver, elem: 'node' as const } : undefined;
-        const matchSpec = resolveMergeSpec(store, matchSpecRaw, seed, params, sideEffects);
-        const oc = onCreate ? resolveMergeSpec(store, onCreate, seed, params, sideEffects) : null;
-        const om = onMatch ? resolveMergeSpec(store, onMatch, seed, params, sideEffects) : null;
+        const matchSpec = resolveMergeSpec(engine, store, matchSpecRaw, seed, params, sideEffects);
+        const oc = onCreate ? resolveMergeSpec(engine, store, onCreate, seed, params, sideEffects) : null;
+        const om = onMatch ? resolveMergeSpec(engine, store, onMatch, seed, params, sideEffects) : null;
         const match = mergeMatchQuery(matchSpec);
         const matches = store.query<any>(match.sql, match.binds);
         if (matches.length) {
@@ -781,7 +781,7 @@ function compileMergeV(steps: PStep[], params: Record<string, any>, sideEffects?
           const label = (oc?.label as string) ?? (matchSpec.label as string) ?? 'vertex';
           const props = { ...matchSpec.props, ...(oc?.props ?? {}) };
           const propTypes = { ...matchSpec.propTypes, ...(oc?.propTypes ?? {}) };
-          const v = insertVertex(store, { label, props: singleProps(props, propTypes), uid: matchSpec.id ?? oc?.id ?? null }, params, sideEffects);
+          const v = insertVertex(engine, store, { label, props: singleProps(props, propTypes), uid: matchSpec.id ?? oc?.id ?? null }, params, sideEffects);
           // Echo typed props read back from storage ({t,v}), not the raw resolved values.
           out.push({ vertex: { id: v.extId, label, props: readVertexProps(store, v.id) } });
         }
@@ -805,13 +805,13 @@ function edgeMatchQuery(spec: MergeSpec, outV: number, inV: number): { sql: stri
 }
 
 // g.mergeE(map) [.option(Merge.onCreate, map)] [.option(Merge.onMatch, map)]
-function compileMergeE(steps: PStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
+function compileMergeE(engine: Engine, steps: PStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
   const meIdx = steps.findIndex((s) => s.name === 'mergeE');
   if (steps[meIdx].args.length === 0)
     throw new Error('mergeE() with no argument (uses the incoming traverser as the map) not yet supported');
   const matchSpecRaw = normalizeMergeMap(steps[meIdx].args[0], steps[meIdx].argTypes?.[0] ?? null, sideEffects, params);
   const { onCreate, onMatch } = parseMergeOptions(steps.slice(meIdx + 1), 'mergeE', sideEffects, params);
-  const drivers = mergeDrivers(steps.slice(0, meIdx), params);
+  const drivers = mergeDrivers(engine, steps.slice(0, meIdx), params);
   return {
     kind: 'write',
     run: (store) => {
@@ -825,9 +825,9 @@ function compileMergeE(steps: PStep[], params: Record<string, any>, sideEffects?
         // Complete the merge map per incoming traverser (nested values seeded at cur),
         // then build the match query from the resolved spec.
         const seed = cur != null ? { id: cur, elem: 'node' as const } : undefined;
-        const matchSpec = resolveMergeSpec(store, matchSpecRaw, seed, params, sideEffects);
-        const oc = onCreate ? resolveMergeSpec(store, onCreate, seed, params, sideEffects) : null;
-        const om = onMatch ? resolveMergeSpec(store, onMatch, seed, params, sideEffects) : null;
+        const matchSpec = resolveMergeSpec(engine, store, matchSpecRaw, seed, params, sideEffects);
+        const oc = onCreate ? resolveMergeSpec(engine, store, onCreate, seed, params, sideEffects) : null;
+        const om = onMatch ? resolveMergeSpec(engine, store, onMatch, seed, params, sideEffects) : null;
         const outV = endpoint(matchSpec.outV, oc?.outV, cur, 'outV');
         const inV = endpoint(matchSpec.inV, oc?.inV, cur, 'inV');
         const match = edgeMatchQuery(matchSpec, outV, inV);
@@ -842,7 +842,7 @@ function compileMergeE(steps: PStep[], params: Record<string, any>, sideEffects?
           if (!label) throw new Error('mergeE cannot create an edge without a label');
           const props = { ...matchSpec.props, ...(oc?.props ?? {}) };
           const propTypes = { ...matchSpec.propTypes, ...(oc?.propTypes ?? {}) };
-          out.push(insertEdge(store, { label, fromSpec: undefined, toSpec: undefined, edgeUid: matchSpec.id ?? oc?.id ?? null, props, propTypes, next: 0 }, outV, inV, params, sideEffects));
+          out.push(insertEdge(engine, store, { label, fromSpec: undefined, toSpec: undefined, edgeUid: matchSpec.id ?? oc?.id ?? null, props, propTypes, next: 0 }, outV, inV, params, sideEffects));
         }
       }
       return out;
@@ -855,23 +855,26 @@ function compileMergeE(steps: PStep[], params: Record<string, any>, sideEffects?
 // Ordered rules: the first whose `match` fires compiles the chain. Order matters
 // (addE before addV; drop must be the terminal step) — hence a rule list, not a
 // name→fn Map. Returns null when the chain is a read (compiler falls to compileRead).
-interface WriteRule { match: (steps: PStep[]) => boolean; compile: (steps: PStep[], params: Record<string, any>, sackInit?: SackSpec, sideEffects?: Map<string, any>) => WritePlan | Compiled; }
+interface WriteRule { match: (steps: PStep[]) => boolean; compile: (engine: Engine, steps: PStep[], params: Record<string, any>, sackInit?: SackSpec, sideEffects?: Map<string, any>) => WritePlan | Compiled; }
 
 const WRITE_RULES: WriteRule[] = [
-  { match: (s) => s.some((x) => x.name === 'addE'), compile: (s, p, _sk, se) => compileAddE(s, p, se) },
-  { match: (s) => s[0].name === 'addV', compile: (s, p, _sk, se) => compileAddV(s, p, se) },
-  { match: (s) => s.some((x) => x.name === 'mergeV'), compile: (s, p, _sk, se) => compileMergeV(s, p, se) },
-  { match: (s) => s.some((x) => x.name === 'mergeE'), compile: (s, p, _sk, se) => compileMergeE(s, p, se) },
+  { match: (s) => s.some((x) => x.name === 'addE'), compile: (e, s, p, _sk, se) => compileAddE(e, s, p, se) },
+  { match: (s) => s[0].name === 'addV', compile: (e, s, p, _sk, se) => compileAddV(e, s, p, se) },
+  { match: (s) => s.some((x) => x.name === 'mergeV'), compile: (e, s, p, _sk, se) => compileMergeV(e, s, p, se) },
+  { match: (s) => s.some((x) => x.name === 'mergeE'), compile: (e, s, p, _sk, se) => compileMergeE(e, s, p, se) },
   // inject is a scalar-stream READ, not a write — it lives here only because it's a
   // source constructor. It threads withSack() so a sack-carrying value stream
   // (withSack(x).inject(v).sack(...)) seeds its `sk` column like the V()/E() path.
-  { match: (s) => s[0].name === 'inject', compile: (s, _p, sackInit) => compileInject(s, sackInit) },
-  { match: (s) => s[s.length - 1].name === 'drop', compile: (s) => compileDrop(s) },
-  { match: (s) => s.some((x) => x.name === 'property'), compile: (s, p, _sk, se) => compileSetProperty(s, p, se) },
+  { match: (s) => s[0].name === 'inject', compile: (e, s, _p, sackInit) => compileInject(e, s, sackInit) },
+  { match: (s) => s[s.length - 1].name === 'drop', compile: (e, s) => compileDrop(e, s) },
+  { match: (s) => s.some((x) => x.name === 'property'), compile: (e, s, p, _sk, se) => compileSetProperty(e, s, p, se) },
 ];
 
-/** Route a step chain to its write compiler, or null if it's a read. */
-export function routeWrite(steps: PStep[], params: Record<string, any>, sackInit?: SackSpec, sideEffects?: Map<string, any>): WritePlan | Compiled | null {
-  for (const rule of WRITE_RULES) if (rule.match(steps)) return rule.compile(steps, params, sackInit, sideEffects);
+/** Route a step chain to its write compiler, or null if it's a read. The lowering Engine (built by
+ *  the compiler for this compilation) is threaded so write compilers reach the read spine (a nested
+ *  value/endpoint read, a target-id prefix) through it — each such sub-compile mints its own fresh
+ *  child engine (buildPrefixFresh / compileReadCompiled). */
+export function routeWrite(engine: Engine, steps: PStep[], params: Record<string, any>, sackInit?: SackSpec, sideEffects?: Map<string, any>): WritePlan | Compiled | null {
+  for (const rule of WRITE_RULES) if (rule.match(steps)) return rule.compile(engine, steps, params, sackInit, sideEffects);
   return null;
 }

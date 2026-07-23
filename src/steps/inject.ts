@@ -1,11 +1,11 @@
-import { q, value, list, Query } from '../q.ts';
+import { q, value, list } from '../q.ts';
 import { jsonbArrayOf } from '../plan.ts';
 import { flattenListArgs, type SackSpec } from '../frontend.ts';
 import { flatType } from '../gremlin-types.ts';
 import { type PStep } from '../strategies.ts';
 import { type Carry } from './context.ts';
 import { toListStream, toScalarStream } from './stream.ts';
-import { lowerStepsStrict } from './index.ts';
+import type { Engine } from './deps.ts';
 import { materializeFinal } from './materialize.ts';
 import { type Compiled, type ValueType } from '../render.ts';
 import {
@@ -91,8 +91,12 @@ function foldConstantCoercions(steps: PStep[], vals: any[]): { at: number; as?: 
 /** g.inject(v1, v2, …) is now only a shaped source constructor. List literals seed
  * ListStream rows; ordinary values seed ScalarStream rows. Every following step is
  * handled by lowerSteps, the same lowering engine used after values()/unfold(). */
-export function compileInject(steps: PStep[], sackInit?: SackSpec): Compiled {
-  const Q = new Query();
+export function compileInject(engine: Engine, steps: PStep[], sackInit?: SackSpec): Compiled {
+  // A fresh child engine (fresh Query, same app scope): inject() is a SOURCE constructor, so it
+  // seeds its own relation on this Query and lowers the chain through the same engine — which the
+  // seed stream reaches via `q.engine`.
+  const eng = engine.subEngine({});
+  const Q = eng.q;
   const carry: Carry = { q: Q, params: {}, carried: { aliases: new Map(), origins: [] } };
 
   // Each all-array argument is one list traverser, not scalar varargs.
@@ -100,7 +104,7 @@ export function compileInject(steps: PStep[], sackInit?: SackSpec): Compiled {
     if (sackInit) throw new Error('withSack() with a list-valued inject() not yet supported');
     const rows = steps[0].args.map((a: any[]) => q`(${jsonbArrayOf(a)})`);
     const rel = Q.cte(q`VALUES ${list(rows, ', ')}`, ['list']);
-    return materializeFinal(lowerStepsStrict(toListStream(carry, rel, { kind: 'scalar' }), steps, 1));
+    return materializeFinal(eng.lowerStepsStrict(toListStream(carry, rel, { kind: 'scalar' }), steps, 1));
   }
 
   // Mixed list/scalar inject remains the historical flattened representation until
@@ -120,5 +124,5 @@ export function compileInject(steps: PStep[], sackInit?: SackSpec): Compiled {
   // A bare inject (no coercion consumed, folded.at===1) of a uniform TEXT-stored literal keeps
   // its declared type so it frames correctly (e.g. a long > 2^53 as a Long, not a string).
   const as = folded.as ?? (folded.at === 1 ? bareInjectTag(steps, vals.length) : undefined);
-  return materializeFinal(lowerStepsStrict(toScalarStream(sackCarry, rel, as), steps, folded.at));
+  return materializeFinal(eng.lowerStepsStrict(toScalarStream(sackCarry, rel, as), steps, folded.at));
 }

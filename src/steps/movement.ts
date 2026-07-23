@@ -2,6 +2,7 @@ import { q, list, empty, derived, type Expression } from '../q.ts';
 import { edges } from '../schema.ts';
 import { dirsFor, edgeLabelFilter, type Elem } from '../plan.ts';
 import { advance, appendPathPos, carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, prevRel, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
+import { engineOf } from './deps.ts';
 
 /** True iff the ONLY live carried column is bulk — no per-traverser identity (aliases/path/
  *  sack/fromV) and no branch origin. Frontier collapse is result-preserving exactly here. */
@@ -14,7 +15,7 @@ const isBulkOnly = (c: Carried): boolean =>
  *  this just merges rows landing on the same element — a downstream reducer's SUM(bulk) is
  *  unchanged. Disabled (or identity live) → the plain UNION-ALL body, an identical result set. */
 function finishMove(st: ElementStream, body: Expression, opts: { elem?: Elem; fromV?: string | null; path?: PathState }): ElementStream {
-  if (st.fastPaths?.movementCollapse && isBulkOnly(st.carried) && !opts.fromV && !opts.path)
+  if (engineOf(st).fastPaths.movementCollapse && isBulkOnly(st.carried) && !opts.fromV && !opts.path)
     return advance(st, q`SELECT id, SUM(bulk) AS bulk FROM (${body}) mv GROUP BY id`, opts);
   if (!st.carried.encounter) return advance(st, body, opts);
   // Emission-order refine: a movement fans a traverser out to several neighbours/edges, so the

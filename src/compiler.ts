@@ -1,7 +1,7 @@
 import { parseGremlin, stepChain, extractStrategies, extractSack, extractSideEffects } from './frontend.ts';
 import { type TypeNode } from './gremlin-types.ts';
 import { applyStrategies, normalize } from './strategies.ts';
-import { compileRead } from './steps/index.ts';
+import { LoweringEngine, collapseSafeFastPaths } from './steps/engine.ts';
 import { routeWrite } from './steps/write.ts';
 import { type Compiled, type WritePlan } from './render.ts';
 import { type Plan } from './segment.ts';
@@ -44,16 +44,22 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
 
   const sackInit = extractSack(tree, params);
   const sideEffects = extractSideEffects(tree, params);
-  const write = routeWrite(steps, params, sackInit ?? undefined, sideEffects);
-  if (write) return { kind: 'sql', compiled: discard ? applyDiscard(write) : write };
 
-  // The per-compilation DI scope: an app scope (from options, or a default one for callers
-  // that pass loose fields / nothing) plus this compile's collaborators. Movement 1.2+ hands
-  // the scope to the lowering objects; for now compileRead still takes resolved values, which
-  // we derive from the scope so it is already the single source of truth at this boundary.
+  // The per-compilation DI scope: an app scope (from options, or a default one for callers that
+  // pass loose fields / nothing) plus this compile's collaborators. The lowering Engine (the
+  // dependency object that replaced the free-function dispatcher barrel) is built HERE from the
+  // scope, with movementCollapse gated to this chain's result-safety, and drives read AND write;
+  // it rides its own Query (`scope.q`) so every step family reaches lowering + deps through the
+  // stream without any parameter threading. The write path only ever mints fresh child engines
+  // off it (buildPrefixFresh / compileReadCompiled), so building it before the write check is safe.
   const app = options?.app ?? createAppScope({ registry: resolveRegistry(options), fastPaths: resolveFastPaths(options) });
   const scope = createCompilerScope(app, { params, federationDepth: resolveFederationDepth(options) });
-  const read = compileRead(steps, scope.params, sackInit ?? undefined, scope.fastPaths, scope.registry, scope.federationDepth);
+  const engine = new LoweringEngine(app, scope, collapseSafeFastPaths(scope.fastPaths, steps));
+
+  const write = routeWrite(engine, steps, params, sackInit ?? undefined, sideEffects);
+  if (write) return { kind: 'sql', compiled: discard ? applyDiscard(write) : write };
+
+  const read = engine.compileRead(steps, scope.params, sackInit ?? undefined);
   if (read.kind === 'segment') {
     // A discard trailing a federated source (g.call(...).iterate()) applies to the RESUMED leaf,
     // so wrap resume rather than the segment itself (which carries no shape).

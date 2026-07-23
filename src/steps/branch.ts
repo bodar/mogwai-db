@@ -9,6 +9,7 @@ import { classifyListChild, classifyScalarChild, isElementChild, isListChild, is
 import { carryOf, toListStream, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from './stream.ts';
 import { mergeVariantArms, unifyLists, variantArmsMeta, type VariantArm } from './variant.ts';
 import { unionScalarStreams } from './scalar.ts';
+import { engineOf, type Engine } from './deps.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
  *  read back from `nodes` by subquery (the walk row carries only the id). Lets
@@ -29,10 +30,10 @@ const walkNodeCtx = (idExpr: Expression): ScalarCtx => {
  *  Movement leaves correlate through the same compileCorrelatedChild as where()/choose().
  *  until() and emit() share this: the only difference is what the resulting column drives
  *  (termination vs output). */
-function walkPredicate(step: Step, params: Record<string, any>, kind: 'until' | 'emit'): (id: Expression, depth: Expression) => Expression {
+function walkPredicate(engine: Engine, step: Step, params: Record<string, any>, kind: 'until' | 'emit'): (id: Expression, depth: Expression) => Expression {
   const nested = stepChain(step.args[0]?.nested, params);
   if (!nested.length) throw new Error(`${kind}() requires a traversal predicate`);
-  return (id, depth) => tryInlinePredicate(nested, { ...walkNodeCtx(id), loopsExpr: depth }, params)
+  return (id, depth) => tryInlinePredicate(engine, nested, { ...walkNodeCtx(id), loopsExpr: depth }, params)
     ?? (() => { throw new Error(`${kind}() predicate not supported by inline lowering`); })();
 }
 
@@ -240,7 +241,7 @@ export const optional: StepFn = (s, st) => {
   if (!body.length) throw new Error('optional(traversal) required');
   // Fast path only WITHOUT path tracking: with a path, hit extends it and miss doesn't,
   // so the two are ragged and must go through the padded general path below.
-  if (st.fastPaths?.singleHopOptional !== false && !st.carried.origins.length && !st.carried.path && body.length === 1 && (body[0].name === 'out' || body[0].name === 'in') && st.elem === 'node') {
+  if (engineOf(st).fastPaths.singleHopOptional !== false && !st.carried.origins.length && !st.carried.path && body.length === 1 && (body[0].name === 'out' || body[0].name === 'in') && st.elem === 'node') {
     const [from, to] = dirsFor(body[0].name)[0];
     const e = edges.as('e');
     const p = prevRel(st, 'p');
@@ -549,7 +550,7 @@ export const repeat: StepFn = (s, st) => {
   // until(): `done` = does the stop predicate hold for this row? do-while (until
   // AFTER repeat) leaves the seed untested (body runs ≥1×); while-do (until BEFORE)
   // tests the seed too. Expansion continues only from done=0 rows; done=1 rows exit.
-  const untilFn = hasUntil ? walkPredicate(untilStep!, st.params, 'until') : null;
+  const untilFn = hasUntil ? walkPredicate(engineOf(st), untilStep!, st.params, 'until') : null;
   const untilFirst = hasUntil && cluster.indexOf(untilStep!) < cluster.indexOf(rep);
   const doneCol = (id: Expression, depth: Expression): Expression => q`, CASE WHEN ${untilFn!(id, depth)} THEN 1 ELSE 0 END AS done`;
 
@@ -557,7 +558,7 @@ export const repeat: StepFn = (s, st) => {
   // which marks termination). The walk proceeds regardless. emit-before tests the seed
   // (depth 0) too; emit-after only body results (depth ≥ 1) — so the seed's emit is 0
   // under emit-after. Every recursive row is tested by the predicate in both positions.
-  const emitFn = hasEmitPred ? walkPredicate(emitStep!, st.params, 'emit') : null;
+  const emitFn = hasEmitPred ? walkPredicate(engineOf(st), emitStep!, st.params, 'emit') : null;
   const emitCol = (id: Expression, depth: Expression): Expression => q`, CASE WHEN ${emitFn!(id, depth)} THEN 1 ELSE 0 END AS emit`;
 
   const walkCols = ['id', 'depth', ...(trackArray ? ['path'] : []), ...(hasUntil ? ['done'] : []), ...(hasEmitPred ? ['emit'] : [])];
@@ -639,7 +640,7 @@ const notCoalesce = (e: Expression): Expression => q`NOT COALESCE((${e}), 0)`;
  *  the else-seed to keep bind order interleaved with the arm SQL. Same gated-seed shape
  *  either way, so the arm compilers are unchanged. */
 function chooseGate(st: ElementStream, predNested: any): (negate: boolean) => ElementStream {
-  const inline = tryInlinePredicate(stepChain(predNested, st.params), elemCtx(elemRel(st), st.elem), st.params);
+  const inline = tryInlinePredicate(engineOf(st), stepChain(predNested, st.params), elemCtx(elemRel(st), st.elem), st.params);
   if (inline) return (negate) => gate(st, negate ? notCoalesce(inline) : inline);
   const gated = tryGateByChildExistence(st, predNested)
     ?? (() => { throw new Error('choose() predicate not supported by inline predicate or generic child existence lowering'); })();

@@ -93,7 +93,7 @@ export function asOnStream(s: Exclude<Stream, { kind: 'result' | 'elements' }>, 
 export function emptyElementLike(s: Exclude<Stream, { kind: 'result' }>): ElementStream {
   const rel = s.q.cte(q`SELECT 1 AS id WHERE 0`, ['id']);
   return {
-    q: s.q, params: s.params, fastPaths: s.fastPaths, sideEffects: s.sideEffects,
+    q: s.q, params: s.params, sideEffects: s.sideEffects,
     carried: { aliases: new Map(), origins: [] }, kind: 'elements', rel, elem: 'node',
   };
 }

@@ -3,7 +3,6 @@ import { nodes, edges } from '../schema.ts';
 import { type Elem } from '../plan.ts';
 import { type AliasShape } from './alias.ts';
 import { type PStep } from '../strategies.ts';
-import { type FastPathConfig } from '../fast-paths.ts';
 
 // ---------- prefix-compilation state (Seam 2) ----------
 //
@@ -137,16 +136,15 @@ export interface Carried {
 
 /** The context every traverser stream carries, independent of its shape (elements vs a
  *  scalar/list value stream — see stream.ts). Carved out of `ElementStream` so a retype at a tail
- *  boundary (fold→list, unfold→elements/scalar) preserves the shared state. Three
- *  DELIBERATELY-distinguished kinds of thing: ambient compile context (`q`/`params`),
- *  the named side-effect registry (`sideEffects` — CTEs that OUTLIVE the traverser), and
- *  the per-traverser carried column schema (`carried`). */
+ *  boundary (fold→list, unfold→elements/scalar) preserves the shared state. PURE per-query STATE:
+ *  the CTE-accumulator `q` + bound `params`, the named side-effect registry (`sideEffects` — CTEs
+ *  that OUTLIVE the traverser), and the per-traverser carried column schema (`carried`). The
+ *  ambient compile DEPENDENCIES (fastPaths/registry/federationDepth) are NOT here — they live on
+ *  the lowering Engine (steps/engine.ts), reached via `q.engine`; keeping them off Carry is what
+ *  separates dependency from state (see docs/2026-07-23-directory-restructure-plan.md, Movement 1). */
 export interface Carry {
   readonly q: Query;
   readonly params: Record<string, any>;
-  readonly fastPaths?: FastPathConfig;
-  readonly registry?: import('../services/types.ts').ServiceRegistry;  // call() service lookup (threaded like fastPaths)
-  readonly federationDepth?: number;     // this compile's federation depth (threaded like registry); a mid-traversal barrier call()'s apply hops the sibling at depth+1
   readonly sideEffects?: SideEffectMap;  // named side-effect collections (aggregate/store/group('a'))
   readonly carried: Carried;             // the per-traverser carried column schema
 }

@@ -3,7 +3,7 @@ import { stepChain, type Step } from '../frontend.ts';
 import { normalize, type PStep } from '../strategies.ts';
 import { advance, aliasColsOf, prevRel, type AliasEntry, type ElementStream, type StepFn } from './context.ts';
 import { aliasId, aliasSeed, nodeEntry } from './alias.ts';
-import { lowerElementSteps } from './index.ts';
+import { engineOf } from './deps.ts';
 
 // ---------- match() — declarative conjunctive pattern join ----------
 //
@@ -55,7 +55,7 @@ function applyPattern(st: ElementStream, p: Pattern, aliases: Map<string, AliasE
     ['id', ...varCols]);
   const seed: ElementStream = { ...st, rel: seedRel, elem: 'node', carried: { aliases: new Map(aliases), origins: [] } };
 
-  const { stream: end, next } = lowerElementSteps(p.body, seed);
+  const { stream: end, next } = engineOf(seed).lowerElementSteps(p.body, seed);
   if (next !== p.body.length)
     throw new Error(`match() pattern step __.${p.body[next].name}() not yet supported`);
   if (end.elem !== 'node')
