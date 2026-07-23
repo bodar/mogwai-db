@@ -166,6 +166,23 @@ impls ◂ `engine.ts` (concrete) ◂ `compiler.ts`. There is NO barrel (`steps/i
 Adding a dependency = a scope field + an `Engine` accessor, never a new `Carry` field or a new
 parameter on the StepFns. See `docs/2026-07-23-directory-restructure-plan.md`.
 
+**The families stay FREE FUNCTIONS reaching one Engine — this is deliberate, not unfinished.**
+The original plan floated per-concern dependency *objects* (`ChildCompiler`/`TailCompiler`/…). We
+evaluated that and did NOT build them: the Engine does NOT call the child compilers (the dependency
+is one-way, families→Engine), and the ~40 child compilers mutually recurse as a flat peer-set (≈107
+internal cross-calls + ≈135 external). Wrapping them in an object would convert ~240 call sites to
+`this.`/`.children.` to eliminate only ~15 `engineOf(stream).*` hops — net MORE to read, the exact
+mechanical churn the design forbids. So the win came from **file cohesion, not objects**: the child
+seam is THREE files — **`tail/child-shape.ts`** (the PURE classify leaf: `is*Child`/`classify*Child`,
+`childSteps`, the shape `Set`s + shared scalar vocab `SCALAR_ARM_TX`/`scalarChildPrefixOk`; zero
+`engineOf`, zero SQL — the ~40 dispatch-time classifier importers depend on this leaf, not the
+compiler file), **`tail/child.ts`** (the compilers: `pushChildScope`/`popChildScope` + the element/
+scalar/property child lowerers), and **`tail/scalar-arm.ts`** (the scalar-PARENT branch/map/filter
+compilers, called only from `projection.ts`'s `compileFromScalar`). Dependency flows one way:
+`child-shape.ts` (leaf) ◂ `child.ts` ◂ `scalar-arm.ts`; `child.ts` does NOT import `scalar-arm.ts`.
+To add a child form: extend the classifier in `child-shape.ts`, the compiler in `child.ts` (or
+`scalar-arm.ts` if it's a scalar-parent arm) — do NOT reach for an object.
+
 **Fast paths** are explicit per-compilation switches in `CompileOptions.fastPaths`
 (`src/compiler/options/fast-paths.ts`) — never a mutable global. A specialized lowering qualifies as a
 fast path only when: the generic path stays the semantic authority and disabling the

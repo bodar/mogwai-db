@@ -52,6 +52,32 @@ Auto mode: bigger-bang landings are fine (over-fragmenting hurts); worst case = 
 rewrite handling `from`/`import`/inline `import()`) is in this doc's git history if needed again.
 **To resume/extend:** `git log --oneline` for landings; `mise run ci` is the gate (753 pass, L3=1264).
 
+## Movement 1 follow-up — dependency-object extraction, EVALUATED & CONCLUDED (2026-07-23)
+
+The plan deferred extracting per-concern dependency objects (`ChildCompiler`/`TailCompiler`/…)
+from the merged `LoweringEngine`. Revisited with the code in hand. **Verdict: the objects do NOT
+earn their place; the real win was FILE cohesion.** Two landings, both green (753 pass, L3=1264):
+
+- ✅ **child-shape.ts** (committed `34d7ac6`) — split the PURE child-shape classifiers
+  (`is*`/`classify*Child`, `childSteps`, the shape `Set`s) out of `child.ts` into a
+  dependency-free leaf. The ~40 external classifier importers (engine/branch/filter/sack/
+  sideeffect/group/select/projection/call/barrier/spi) now depend on the leaf, not the 1738-line
+  compiler file. DAG: `child-shape.ts` (leaf) ◂ `child.ts` (compiler).
+- ✅ **scalar-arm.ts** (committed `2c42302`) — extracted the scalar-PARENT branch/map/filter
+  compilers (~500 lines, called only from `projection.ts`) into their own file as free functions.
+  `child.ts` 1738 → 912 lines. Shared pure vocab (`SCALAR_ARM_TX`/`scalarChildPrefixOk`) moved to
+  the shape leaf. One-way: `child-shape.ts` ◂ `child.ts` ◂ `scalar-arm.ts`.
+
+**Why NOT a `ChildCompiler` object (the analysis that settled it):** the Engine does NOT call the
+child compilers (dependency is one-way, families→Engine), and the ~40 child compilers mutually
+recurse as a flat peer-set — ≈107 internal cross-calls + ≈135 external call sites. An object would
+convert all ~240 to `this.`/`.children.` to eliminate ~15 `engineOf(stream).*` hops: net MORE to
+read at every call site, the exact mechanical `foo()→this.foo()` churn the bar forbids. Recorded in
+CLAUDE.md's "Dependencies vs state" section. `projection.ts`/`select.ts`/`group.ts` were candidate
+files too but have ≤2 `engineOf` hops each — they read fine as free functions reaching one Engine;
+no extraction. The `LoweringEngine` stays a single class (its recursive surface is genuinely one
+cohesive dispatcher). **This follow-up is closed: extend by adding files/free-functions, not objects.**
+
 ## Why this shape (the governing idea)
 
 When DI was introduced to the *outer* compile (the `Executor` holding `registry`/`source` as
