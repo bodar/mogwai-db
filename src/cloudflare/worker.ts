@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { type TypeNode } from '../gremlin-types.ts';
+import { type TypeNode } from '../gremlin/types.ts';
 import { GraphStore } from '../storage.ts';
 import { application } from '../application.ts';
 import { graphInfo } from '../manager.ts';

@@ -1,6 +1,6 @@
-import { derived, q } from '../q.ts';
+import { derived, q } from '../sql/kernel/q.ts';
 import { scalarProp, predicateSql, jsonbGroupArray, elemCtx } from '../plan.ts';
-import { stepChain } from '../frontend.ts';
+import { stepChain } from '../gremlin/frontend.ts';
 import { normalize, type PStep } from '../strategies.ts';
 import { elemRel, type ElementStream, type StepFn, type SideEffectDef } from './context.ts';
 import { type ScalarStream } from './stream.ts';

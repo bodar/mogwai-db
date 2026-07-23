@@ -1,6 +1,6 @@
-import { q, list, empty, Relation, type Expression } from '../q.ts';
-import { edges } from '../schema.ts';
-import { stepChain, type Step } from '../frontend.ts';
+import { q, list, empty, Relation, type Expression } from '../sql/kernel/q.ts';
+import { edges } from '../sql/schema.ts';
+import { stepChain, type Step } from '../gremlin/frontend.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, elemCtx, type ScalarCtx, type Elem } from '../plan.ts';
 import { tryInlinePredicate } from './predicate.ts';
 import { advance, elemRel, prevRel, carryFrag, carryFragMint, carriedCols, partitionOver, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';

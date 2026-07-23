@@ -1,7 +1,7 @@
-import { flattenListArgs, type Pred } from './frontend.ts';
-import { q, list, values, empty, value, raw, jsonExtract, type Expression, type Relation } from './q.ts';
-import { normalizeTypeName, BigDecimal, Duration } from './gremlin-types.ts';
-import { type ValueType } from './render.ts';
+import { flattenListArgs, type Pred } from './gremlin/frontend.ts';
+import { q, list, values, empty, value, raw, jsonExtract, type Expression, type Relation } from './sql/kernel/q.ts';
+import { normalizeTypeName, BigDecimal, Duration } from './gremlin/types.ts';
+import { type ValueType } from './sql/kernel/render.ts';
 
 // ---------- SQL node builders ----------
 //

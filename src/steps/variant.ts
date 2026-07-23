@@ -9,7 +9,7 @@
 // They name only the physical column list and never inspect the per-row tag, so every
 // arm rides through unchanged.
 
-import { q, list, empty, type Expression, type Relation } from '../q.ts';
+import { q, list, empty, type Expression, type Relation } from '../sql/kernel/q.ts';
 import { rangeToOffsetLimit } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toVariantStream, type ListStream, type LoweringResult, type ScalarStream, type ShapeTailFn, type VariantArms, type VariantStream } from './stream.ts';

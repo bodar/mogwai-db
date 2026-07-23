@@ -1,5 +1,5 @@
-import { q, list, empty, Query, Relation, type Expression } from '../q.ts';
-import { nodes, edges } from '../schema.ts';
+import { q, list, empty, Query, Relation, type Expression } from '../sql/kernel/q.ts';
+import { nodes, edges } from '../sql/schema.ts';
 import { type Elem } from '../plan.ts';
 import { type AliasShape } from './alias.ts';
 import { type PStep } from '../strategies.ts';
@@ -23,7 +23,7 @@ import { type PStep } from '../strategies.ts';
 export type AliasEntry = {
   col: string;
   shapes: ReadonlySet<AliasShape>;
-  as?: import('../render.ts').ValueType;
+  as?: import('../sql/kernel/render.ts').ValueType;
   /** Compile-time binding count along the traverser's path: 1 for a once-bound label,
    *  >1 after rebinds. `undefined` = dynamic depth (bound inside repeat()/a branch arm),
    *  where the count is only known at runtime and Pop must resolve via SQL. Lets Pop.all/
@@ -109,9 +109,9 @@ export function scopePathCols<C extends { col: string }>(
  *  group-spec re-run by cap (see steps/group.ts, Stage 3). Unlike the id-relation,
  *  this state outlives the current traverser stream. */
 export type SideEffectDef =
-  | { kind: 'list'; rel: Relation; of: import('../render.ts').ListOf }
-  | { kind: 'variant'; rel: Relation; scalarAs?: import('../render.ts').ValueType; elem?: Elem }
-  | { kind: 'group'; from: string; ctx: import('../plan.ts').ScalarCtx; elem: import('../render.ts').ElemShape; isCount: boolean; bys: any[][]; parent: ElementStream; productiveBy?: boolean };
+  | { kind: 'list'; rel: Relation; of: import('../sql/kernel/render.ts').ListOf }
+  | { kind: 'variant'; rel: Relation; scalarAs?: import('../sql/kernel/render.ts').ValueType; elem?: Elem }
+  | { kind: 'group'; from: string; ctx: import('../plan.ts').ScalarCtx; elem: import('../sql/kernel/render.ts').ElemShape; isCount: boolean; bys: any[][]; parent: ElementStream; productiveBy?: boolean };
 export type SideEffectMap = ReadonlyMap<string, SideEffectDef>;
 
 /** The per-traverser CARRIED SCHEMA: the columns physically present on the id-relation

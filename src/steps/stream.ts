@@ -13,17 +13,17 @@
 // StepFns only ever see `ElementStream`. The union lives at the ORCHESTRATION layer, never
 // inside a StepFn.
 
-import { type Expression, type Query, type Relation } from '../q.ts';
+import { type Expression, type Query, type Relation } from '../sql/kernel/q.ts';
 import { type PStep } from '../strategies.ts';
 import { type Elem } from '../plan.ts';
-import { type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type Shape, type ValueType } from '../render.ts';
+import { type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type Shape, type ValueType } from '../sql/kernel/render.ts';
 import { carriedCols, type Carry, type ElementStream } from './context.ts';
 
 /** What a list stream holds — i.e. the shape `unfold` produces from it. `elem` → bare
  *  rowids (rejoin nodes/edges on unfold) → a fresh `ElementStream`; `scalar` → typed scalars → a
  *  `ScalarStream`; `list` → nested lists (list-of-lists, e.g. select(Column.values) of a
  *  list-valued map) → a ListStream of the inner shape. ('entry' reserved for Map-unfold.) */
-export type { ListOf } from '../render.ts';
+export type { ListOf } from '../sql/kernel/render.ts';
 
 /** A stream of scalars in a one-column relation `v` (values/id/label/inject/unfold-
  *  of-scalars). `as` is the compile-time GraphBinary type tag (render.ts ValueType). */

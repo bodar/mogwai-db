@@ -1,7 +1,7 @@
-import { q, list, empty, type Expression } from '../q.ts';
+import { q, list, empty, type Expression } from '../sql/kernel/q.ts';
 import { framedProps, extIdOf } from '../plan.ts';
-import { edges, labels, nodes } from '../schema.ts';
-import { type Compiled } from '../render.ts';
+import { edges, labels, nodes } from '../sql/schema.ts';
+import { type Compiled } from '../sql/kernel/render.ts';
 import { materializeRoot } from './materialize.ts';
 import { type ElementStream } from './context.ts';
 import { pushChildScope, tryCompileScalarValueChild, type ChildFrame, type CompileScope } from './child.ts';

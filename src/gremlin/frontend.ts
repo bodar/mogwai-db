@@ -1,7 +1,7 @@
 import { CharStream, CommonTokenStream, BaseErrorListener, ParserRuleContext } from 'antlr4ng';
-import { GremlinLexer } from '../parser/GremlinLexer.ts';
-import { GremlinParser } from '../parser/GremlinParser.ts';
-import { flatType, fitsSafeInteger, BigDecimal, Duration, type TypeNode, type CanonicalType, type MapEntryType } from './gremlin-types.ts';
+import { GremlinLexer } from '../../parser/GremlinLexer.ts';
+import { GremlinParser } from '../../parser/GremlinParser.ts';
+import { flatType, fitsSafeInteger, BigDecimal, Duration, type TypeNode, type CanonicalType, type MapEntryType } from './types.ts';
 
 // ---------- parsing ----------
 //

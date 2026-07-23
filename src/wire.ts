@@ -5,7 +5,7 @@
 // carries none, and passes {gremlin, params} across the manager seam to the store
 // tier (concern B). No compilation, no store, no HTTP here.
 import { ioc } from './io.ts';
-import { WIRE_TYPE_TO_NAME, type TypeNode, type MapEntryType } from './gremlin-types.ts';
+import { WIRE_TYPE_TO_NAME, type TypeNode, type MapEntryType } from './gremlin/types.ts';
 
 // TinkerPop's default resultIterationBatchSize — governs only HTTP chunk pacing
 // (how many value buffers concat per stream pull), never a protocol boundary.

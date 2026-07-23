@@ -19,12 +19,12 @@
 // lets the families reach lowering + deps without any parameter threading, while Carry stays PURE
 // per-query state (q/params/carried/sideEffects).
 
-import type { Query } from '../q.ts';
+import type { Query } from '../sql/kernel/q.ts';
 import type { FastPathConfig } from '../fast-paths.ts';
 import type { ServiceRegistry } from '../services/types.ts';
-import type { SackSpec } from '../frontend.ts';
+import type { SackSpec } from '../gremlin/frontend.ts';
 import type { PStep } from '../strategies.ts';
-import type { Compiled } from '../render.ts';
+import type { Compiled } from '../sql/kernel/render.ts';
 import type { SegmentPlan } from '../segment.ts';
 import type { Carry, ElementStream } from './context.ts';
 import type { Stream, LoweringSuspension } from './stream.ts';

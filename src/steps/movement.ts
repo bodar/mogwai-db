@@ -1,5 +1,5 @@
-import { q, list, empty, derived, type Expression } from '../q.ts';
-import { edges } from '../schema.ts';
+import { q, list, empty, derived, type Expression } from '../sql/kernel/q.ts';
+import { edges } from '../sql/schema.ts';
 import { dirsFor, edgeLabelFilter, type Elem } from '../plan.ts';
 import { advance, appendPathPos, carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, prevRel, type Carried, type PathState, type ElementStream, type StepFn } from './context.ts';
 import { engineOf } from './deps.ts';

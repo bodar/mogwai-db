@@ -4,7 +4,7 @@
 // in cursor mechanics, so the interface sits at the SQL transport — everything
 // above it (schema, label interning, the whole compiler) is runtime-agnostic.
 // (Deliberately synchronous, unlike an async D1-style adapter: DO SQL is sync.)
-import { coerceBindValue } from './gremlin-types.ts';
+import { coerceBindValue } from './gremlin/types.ts';
 import type { Sql } from './api.ts';
 // The `Sql` seam now lives in the API surface (src/api.ts). Re-exported here so the many
 // existing `import { Sql } from './storage.ts'` sites keep working.

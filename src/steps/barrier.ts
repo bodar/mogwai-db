@@ -1,4 +1,4 @@
-import { derived, empty, q, type Expression } from '../q.ts';
+import { derived, empty, q, type Expression } from '../sql/kernel/q.ts';
 import { carryOf, toListStream, toScalarStream, type ListStream, type RelationalStream, type ScalarStream } from './stream.ts';
 import { carriedCols, carryFrag, carryFragMint, carriedWith, withoutCarried, type ElementStream } from './context.ts';
 import { type ChildScope } from './child.ts';

@@ -1,12 +1,12 @@
-import { derived, empty, list, paren, q, raw, value, type Expression, type Relation } from '../q.ts';
+import { derived, empty, list, paren, q, raw, value, type Expression, type Relation } from '../sql/kernel/q.ts';
 import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx } from '../plan.ts';
-import { stepChain } from '../frontend.ts';
+import { stepChain } from '../gremlin/frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, withoutCarried, type Carry } from './context.ts';
 import { carryOf, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from './stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, numericSpec } from './coerce.ts';
-import { normalizeTypeName } from '../gremlin-types.ts';
-import { type ValueType } from '../render.ts';
+import { normalizeTypeName } from '../gremlin/types.ts';
+import { type ValueType } from '../sql/kernel/render.ts';
 import { engineOf } from './deps.ts';
 
 /** If `step` is `is(typeOf(GType.X))` for a COLLECTION type, the canonical collection name

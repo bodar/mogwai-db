@@ -6,11 +6,11 @@
 // expression directly; keeping that compatibility behind this function prevents new
 // readCompiled islands while those leaves are converted to Stream -> Stream lowerers.
 
-import { type Expression, type Query } from '../q.ts';
-import { readCompiled, type Compiled, type ListOf, type Shape } from '../render.ts';
-import { list, q } from '../q.ts';
+import { type Expression, type Query } from '../sql/kernel/q.ts';
+import { readCompiled, type Compiled, type ListOf, type Shape } from '../sql/kernel/render.ts';
+import { list, q } from '../sql/kernel/q.ts';
 import { framedProps, extIdOf } from '../plan.ts';
-import { edges, labels, nodes } from '../schema.ts';
+import { edges, labels, nodes } from '../sql/schema.ts';
 import { groupResultColumns, pathColumns, recordResultColumns, type ForeignStream, type GroupStream, type ListStream, type MapEntryStream, type MapOf, type MapStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream, type Stream, type VariantStream } from './stream.ts';
 
 export function materializeRoot(query: Query, tail: Expression, shape: Shape): Compiled {

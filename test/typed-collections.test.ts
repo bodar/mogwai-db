@@ -1,5 +1,5 @@
 import { test, expect, describe } from 'bun:test';
-import { valueNodeOf, BigDecimal, Duration, type TypeNode } from '../src/gremlin-types.ts';
+import { valueNodeOf, BigDecimal, Duration, type TypeNode } from '../src/gremlin/types.ts';
 
 // Stage 1 of full-fidelity typed collections: valueNodeOf recursively tags a materialized
 // JS value with its type tree into a self-describing ValueNode. The write path stores the

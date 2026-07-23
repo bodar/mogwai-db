@@ -1,4 +1,4 @@
-import type { GraphStore } from './storage.ts';
+import type { GraphStore } from '../../storage.ts';
 import { q, type Expression, type Query, type Relation } from './q.ts';
 
 // ---------- compile output contract ----------

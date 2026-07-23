@@ -1,6 +1,6 @@
-import { q, value, list, empty, raw, Relation, Query, type Expression } from '../q.ts';
-import { nodes, edges, labels, vertexProperties, edgeProperties } from '../schema.ts';
-import { flattenListArgs } from '../frontend.ts';
+import { q, value, list, empty, raw, Relation, Query, type Expression } from '../sql/kernel/q.ts';
+import { nodes, edges, labels, vertexProperties, edgeProperties } from '../sql/schema.ts';
+import { flattenListArgs } from '../gremlin/frontend.ts';
 import {
   predicateSql, rangeToOffsetLimit, elemCtx, extIdOf, jsonbGroupArray,
   nodePropScalar, edgePropScalar, nodePropSortKey, edgePropSortKey, framedProps, valueMapProps, storedValueExpr,
@@ -9,7 +9,7 @@ import { type PStep } from '../strategies.ts';
 import { advance, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, withoutCarried, type ElementStream } from './context.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn } from './stream.ts';
 import { tryLowerLocalAggregate, lowerScalarAggregate } from './sideeffect.ts';
-import { type Shape } from '../render.ts';
+import { type Shape } from '../sql/kernel/render.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
 import { lowerScalarFilter, lowerConstant, lowerScalarConstant, lowerScalarSack, lowerScalarSplit, collectionTypeOf, scalarCollectionRetype, scalarMapRetype } from './scalar.ts';
 import { compileSelectProject, lowerPath, lowerRecordSelectProject, lowerScalarProject, lowerSingleSelect } from './select.ts';

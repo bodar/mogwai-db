@@ -5,13 +5,13 @@
 // re-enterable tail (compileFromList). The producers live in projection.ts (compileFold)
 // and, later, inject-of-a-list / select(Column.values).
 
-import { q, value, raw, list, empty, type Expression, type Relation } from '../q.ts';
+import { q, value, raw, list, empty, type Expression, type Relation } from '../sql/kernel/q.ts';
 import { predicateSql, scalarTx, compareKey } from '../plan.ts';
-import { stepChain } from '../frontend.ts';
+import { stepChain } from '../gremlin/frontend.ts';
 import { type PStep } from '../strategies.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, mapOfToListOf, PROPERTY_PAYLOAD, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type PropertyStream, type ScalarStream, type MapStream, type ShapeTailFn } from './stream.ts';
 import { carryFrag, carriedCols, type ElementStream } from './context.ts';
-import { type Compiled } from '../render.ts';
+import { type Compiled } from '../sql/kernel/render.ts';
 import { engineOf, type Engine } from './deps.ts';
 
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */

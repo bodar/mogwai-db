@@ -1,4 +1,4 @@
-import { q, empty, type Expression } from '../q.ts';
+import { q, empty, type Expression } from '../sql/kernel/q.ts';
 import { rangeToOffsetLimit } from '../plan.ts';
 import { advance, carryFrag, prevRel, type StepFn } from './context.ts';
 

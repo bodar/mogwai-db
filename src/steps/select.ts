@@ -1,14 +1,14 @@
-import { q, list, empty, value, type Expression, type Relation } from '../q.ts';
-import { nodes, edges, labels } from '../schema.ts';
+import { q, list, empty, value, type Expression, type Relation } from '../sql/kernel/q.ts';
+import { nodes, edges, labels } from '../sql/schema.ts';
 import { framedProps, labelNameSub, nodePropScalar, edgePropScalar, edgePropsAgg, predicateSql, propExtract, extIdOf, elemCtx, P_OPS, type Elem } from '../plan.ts';
 import { type PStep } from '../strategies.ts';
-import { stepChain } from '../frontend.ts';
+import { stepChain } from '../gremlin/frontend.ts';
 import { aliasElem, aliasIsElement, carryFrag, carriedCols, scopePathCols, withoutCarried, type AliasMap, type ElementStream } from './context.ts';
 import { aliasId, aliasPresent, aliasScalar, shapeElem } from './alias.ts';
 import { emptyElementLike, historyPropertyValues, historyValues, popEnd, popIsListResult, selectOneFromAlias } from './labelselect.ts';
 import { carryOf, continueLowering, dispatchShapeTail, pathColumns, recordFieldColumns, toListStream, toPathStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type ListStream, type LoweringResult, type PathStream, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from './stream.ts';
 import { compileFromList } from './list.ts';
-import { type Compiled, type PathPos } from '../render.ts';
+import { type Compiled, type PathPos } from '../sql/kernel/render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
 import { lowerGlobalCount } from './barrier.ts';
 import { childSteps, classifyElementChild, classifyListChild, classifyScalarChild, pushChildScope, reuseCurrentFrame, ROOT_SCOPE, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild, type ChildFrame, type ChildScope } from './child.ts';

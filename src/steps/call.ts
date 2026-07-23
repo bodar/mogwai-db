@@ -1,4 +1,4 @@
-import { type Query } from '../q.ts';
+import { type Query } from '../sql/kernel/q.ts';
 import { type PStep } from '../strategies.ts';
 import { type Stream, type LoweringResult, continueLowering, suspendLowering } from './stream.ts';
 import { type ElementStream } from './context.ts';
@@ -7,7 +7,7 @@ import { type FederationSource } from '../segment.ts';
 import { parseCallSpec, injectionKindOf } from '../services/call-params.ts';
 import { type ChildFrame, type CompileScope } from './child.ts';
 import { buildCallHead } from './call-head.ts';
-import { type Compiled } from '../render.ts';
+import { type Compiled } from '../sql/kernel/render.ts';
 import { engineOf } from './deps.ts';
 
 // ---------- call() lowering ----------

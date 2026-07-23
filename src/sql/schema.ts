@@ -7,7 +7,7 @@
 // Relation shape (minted via `Query`), so a table and a CTE are indistinguishable
 // at the use site — see src/q.ts.
 
-import { relation } from './q.ts';
+import { relation } from './kernel/q.ts';
 
 export const nodes = relation('nodes', ['id', 'uid', 'label']);
 export const vertexProperties = relation('vertex_properties', ['id', 'node', 'key', 'value', 'vtype', 'meta']);

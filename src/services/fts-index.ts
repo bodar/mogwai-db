@@ -19,7 +19,7 @@
 //
 // See docs/2026-07-20-call-service-registry-plan.md ("FTS5 + proper JSON handling").
 import type { GraphStore } from '../storage.ts';
-import { valueNodeOf, type TypeNode, type ValueNode } from '../gremlin-types.ts';
+import { valueNodeOf, type TypeNode, type ValueNode } from '../gremlin/types.ts';
 
 /** Which normalized property table `pid` keys into — 'node' for vertex_properties,
  *  'edge' for edge_properties. Stored UNINDEXED so search can scope by element kind and
