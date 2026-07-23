@@ -652,6 +652,15 @@ function propertyScalar(s: PropertyStream, col: 'vpid' | 'pk' | 'pv'): ScalarStr
   return toScalarStream({ ...carryOf(s), carried }, rel, undefined, { result: 'value', ...vtag });
 }
 
+/** The canonical property tie-break ORDER BY terms (all ASC), qualified to `p`. A node
+ * property is uniquely identified by its vpid; an edge Property has no id, so its full
+ * (owner,key,type,value) tuple is the stable key. Shared by dedup (survivor selection) and
+ * order (encounter tie-break) so "which row wins" is consistent across both. */
+const propertyTieBreak = (p: Relation, ownerElem: 'node' | 'edge'): Expression[] =>
+  ownerElem === 'node'
+    ? [q`${p.c.vpid} ASC`]
+    : [q`${p.c.owner} ASC`, q`${p.c.pk} ASC`, q`${p.c.pvtype} ASC`, q`${p.c.pv} ASC`];
+
 /** Deduplicate property traversers while retaining one complete property row.
  * VertexProperty identity is its real vpid. Edge Property has no id and its equality is
  * key/value-based, so repeated edge properties with the same key and value collapse even
@@ -674,7 +683,7 @@ function propertyDedup(s: PropertyStream, step: PStep): PropertyStream {
   const p = s.rel.as('p');
   const partition = key;
   const ranked = s.q.cte(
-    q`SELECT ${list(PROPERTY_PAYLOAD.map((c) => p.c[c]), ', ')}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${partition} ORDER BY ${p.c.owner}, ${p.c.pk}, ${p.c.vpid}) AS rn FROM ${p}`,
+    q`SELECT ${list(PROPERTY_PAYLOAD.map((c) => p.c[c]), ', ')}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${partition} ORDER BY ${list(propertyTieBreak(p, s.ownerElem), ', ')}) AS rn FROM ${p}`,
     [...PROPERTY_PAYLOAD, ...carriedCols(s.carried), 'rn'],
   );
   const r = ranked.as('r');
@@ -719,10 +728,7 @@ function propertyOrder(s: PropertyStream, step: PStep): PropertyStream {
     const carried = carriedWith(s.carried, { encounter: 'encounter' });
     const cmpVal = vt ? q`(${compareKey(f.c.k, f.c.kt)})` : q`${f.c.k}`;
     const sortKey = dir === 'desc' ? q`${cmpVal} DESC` : q`${cmpVal} ASC`;
-    const propertyTie = s.ownerElem === 'node'
-      ? [q`${d.c.vpid} ASC`]
-      : [q`${d.c.owner} ASC`, q`${d.c.pk} ASC`, q`${d.c.pvtype} ASC`, q`${d.c.pv} ASC`];
-    const orderKey = list([sortKey, ...propertyTie], ', ');
+    const orderKey = list([sortKey, ...propertyTieBreak(d, s.ownerElem)], ', ');
     const mint = q`ROW_NUMBER() OVER (${partitionOver(carried, d, orderKey)})`;
     const rel = s.q.cte(
       q`SELECT ${list(PROPERTY_PAYLOAD.map((col) => d.c[col]), ', ')}${carryFragMint(carried, d, 'encounter', mint)} FROM ${d} LEFT JOIN ${f} ON ${f.c.ord}=${d.c[ord]} AND ${f.c.rn}=1`,
@@ -744,10 +750,7 @@ function propertyOrder(s: PropertyStream, step: PStep): PropertyStream {
       : s.ownerElem === 'node'
         ? [q`${p.c.vpid}${suffix}`]
         : [q`${p.c.pk}${suffix}`, q`${valueKey}${suffix}`];
-  const ties = s.ownerElem === 'node'
-    ? [q`${p.c.vpid} ASC`]
-    : [q`${p.c.owner} ASC`, q`${p.c.pk} ASC`, q`${p.c.pvtype} ASC`, q`${p.c.pv} ASC`];
-  const orderKey = list([...primary, ...ties], ', ');
+  const orderKey = list([...primary, ...propertyTieBreak(p, s.ownerElem)], ', ');
   const carried = carriedWith(s.carried, { encounter: 'encounter' });
   const mint = q`ROW_NUMBER() OVER (${partitionOver(carried, p, orderKey)})`;
   const rel = s.q.cte(

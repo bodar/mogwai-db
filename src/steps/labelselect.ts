@@ -6,7 +6,7 @@ import {
   type AliasShape,
 } from './alias.ts';
 import {
-  assertStreamColumns, carryOf, streamColumns, toListStream, toScalarStream,
+  assertStreamColumns, carryOf, streamColumns, toListStream, toScalarStream, PROPERTY_PAYLOAD,
   type ListOf, type PropertyStream, type Stream,
 } from './stream.ts';
 import { type ValueType } from '../render.ts';
@@ -43,11 +43,16 @@ function currentEntry(s: Exclude<Stream, { kind: 'result' }>, p: any): { entry: 
         shape: 'value',
       };
     }
-    case 'property':
+    case 'property': {
+      // The alias JSON mirrors the property payload key-for-key (single-sourced from
+      // PROPERTY_PAYLOAD) plus an 'elem' tag recording the owner element kind for rehydration.
+      // Field names are a fixed vocabulary → splice as SQL literals (no bind, no injection).
+      const pairs = list(PROPERTY_PAYLOAD.map((f) => q`'${f}', ${p.c[f]}`), ', ');
       return {
-        entry: aliasEntry('property', q`json_object('vpid', ${p.c.vpid}, 'owner', ${p.c.owner}, 'ownerLabel', ${p.c.ownerLabel}, 'pk', ${p.c.pk}, 'pv', ${p.c.pv}, 'pvtype', ${p.c.pvtype}, 'pmeta', ${p.c.pmeta}, 'elem', ${value(s.ownerElem)})`),
+        entry: aliasEntry('property', q`json_object(${pairs}, 'elem', ${value(s.ownerElem)})`),
         shape: 'property',
       };
+    }
     default:
       throw new Error(`as() on a ${s.kind} stream not yet supported`);
   }
@@ -127,9 +132,10 @@ function selectPropertyAlias(s: Exclude<Stream, { kind: 'result' }>, entry: Alia
   if (!entry.propertyElem) throw new Error('property alias has no owner element kind');
   const p = s.rel.as('p');
   const selected = pop === 'first' ? q`${col} -> '$[0]'` : q`${col} -> '$[#-1]'`;
+  const fields = list(PROPERTY_PAYLOAD.map((f) => q`${propertyAliasField(selected, f)} AS ${f}`), ', ');
   const rel = s.q.cte(
-    q`SELECT ${propertyAliasField(selected, 'vpid')} AS vpid, ${propertyAliasField(selected, 'owner')} AS owner, ${propertyAliasField(selected, 'ownerLabel')} AS ownerLabel, ${propertyAliasField(selected, 'pk')} AS pk, ${propertyAliasField(selected, 'pv')} AS pv, ${propertyAliasField(selected, 'pvtype')} AS pvtype, ${propertyAliasField(selected, 'pmeta')} AS pmeta${carryFrag(s.carried, p)} FROM ${p} WHERE ${aliasPresent(col)}`,
-    ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pvtype', 'pmeta', ...carriedCols(s.carried)],
+    q`SELECT ${fields}${carryFrag(s.carried, p)} FROM ${p} WHERE ${aliasPresent(col)}`,
+    [...PROPERTY_PAYLOAD, ...carriedCols(s.carried)],
   );
   return { ...carryOf(s), kind: 'property', rel, ownerElem: entry.propertyElem };
 }

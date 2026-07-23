@@ -88,8 +88,9 @@ export function compileUnfold(s: ListStream): ElementStream | PropertyStream | S
     return toListStream(c, rel, s.of.of);
   }
   if (s.of.kind === 'property') {
+    const cols = list(PROPERTY_PAYLOAD.map((col) => q`json_extract(je.value, ${value(`$.${col}`)}) AS ${col}`), ', ');
     const rel = s.q.cte(
-      q`SELECT json_extract(je.value, '$.vpid') AS vpid, json_extract(je.value, '$.owner') AS owner, json_extract(je.value, '$.ownerLabel') AS ownerLabel, json_extract(je.value, '$.pk') AS pk, json_extract(je.value, '$.pv') AS pv, json_extract(je.value, '$.pvtype') AS pvtype, json_extract(je.value, '$.pmeta') AS pmeta${carryFrag(s.carried, p)} FROM ${p}, json_each(${p.c.list}) je ORDER BY je.key`,
+      q`SELECT ${cols}${carryFrag(s.carried, p)} FROM ${p}, json_each(${p.c.list}) je ORDER BY je.key`,
       [...PROPERTY_PAYLOAD, ...carriedCols(s.carried)],
     );
     return toPropertyStream(c, rel, s.of.elem);
