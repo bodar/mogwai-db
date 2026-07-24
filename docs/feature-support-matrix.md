@@ -3,7 +3,7 @@
 What you can rely on. Each step gets one mark based on how much of it works and how
 freely it composes — a ✅ step works **anywhere in a traversal**, however deeply nested,
 not just at the top. Notes call out **only the cases that don't work yet**; if a row has
-no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,274<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,275<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 | Mark | Meaning |
 |---|---|
@@ -203,7 +203,7 @@ each staying one SQL statement.
 |---|:--:|---|
 | `aggregate('x')` | 🟡 | pass-through barrier → list/variant relation; `by(key/scalar/ordered-element traversal)`; `local(aggregate(...))`; over a scalar stream too. ❌ a `by()`-modulated scalar aggregate; token modulators; general element ordering |
 | `cap('x')` | 🟡 | emits one collection; group side-effect re-emits its group. ❌ multi-key `cap('x','y')` |
-| `sack()` / `withSack(…)` | 🟡 | carried column: `sack(Operator.x).by(key/T.label/nested)` mutate, bare `sack()` read, `withSack(init)` seed. **Folds through `repeat()`**: a body `sack(op).by(key/T.label/constant)` folds the accumulator per iteration, and `where(__.sack().is(P))` guards the walk on the freshly-folded value. **Clones through a branch fork** (`union`/`optional`/`coalesce`/`choose`/`flatMap`, TinkerPop split-only): the incoming sack rides into every arm and projects through the merge unchanged. **Folds inside `local()`** (and after a no-op `barrier()`): a mutate `sack(op).by(…)` is an element-preserving child step, folded per parent through the same engine. ❌ inject-const numeric promotion; a mutate `sack(op)` INSIDE a branch arm (child-body vocabulary); `withSack()` at a `union()` SOURCE; a fan-out `by(traversal)` or edge-step movement (`outE().inV()`) in a repeat body; sack after `as()`/`path()`; `sack(BiFunction)` |
+| `sack()` / `withSack(…)` | 🟡 | carried column: `sack(Operator.x).by(key/T.label/nested)` mutate, bare `sack()` read, `withSack(init)` seed. **Folds through `repeat()`**: a body `sack(op).by(key/T.label/constant)` folds the accumulator per iteration, a `where(__.sack().is(P))` guards the walk on the freshly-folded value, and an **edge-step body** (`outE().sack(op).by(edgeKey).inV()`) folds the traversed EDGE's property — path-weight accumulation. **Clones through a branch fork** (`union`/`optional`/`coalesce`/`choose`/`flatMap`, TinkerPop split-only): the incoming sack rides into every arm and projects through the merge unchanged. **Folds inside `local()`** (and after a no-op `barrier()`): a mutate `sack(op).by(…)` is an element-preserving child step, folded per parent through the same engine. ❌ inject-const numeric promotion; a mutate `sack(op)` INSIDE a branch arm (child-body vocabulary); `withSack()` at a `union()` SOURCE; a fan-out `by(traversal)` in a repeat body; `path()`/`simplePath()` over an edge-step repeat body; sack after `as()`/`path()`; `sack(BiFunction)` |
 | `group('a')`/`groupCount('a')` | 🟡 | pass-through barrier, `cap('a')` re-runs the group. ❌ after `as()`/`path()` (inherits §4 limits) |
 | `store('x')` | 🚫 | dropped in v4 — use `aggregate(Scope.local)` |
 | `within('x')`/`without('x')` readback | ❌ | mid-chain side-effect read |
