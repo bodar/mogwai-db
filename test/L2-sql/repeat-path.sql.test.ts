@@ -196,7 +196,7 @@ describe('repeat / path SQL', () => {
     expect(em.sql).not.toContain('depth <');       // no depth cap in the recursion
     expect(em.sql).toContain('WHERE depth >= 1');   // emit-after band
     // a barrier body step (order/dedup/limit/…) can't live in a recursive term → defers.
-    expect(() => compile('g.V().repeat(__.out().order()).times(2)', {})).toThrow('movements + has()');
+    expect(() => compile('g.V().repeat(__.out().order()).times(2)', {})).toThrow('not yet supported');
     expect(() => compile('g.V().emit().times(2)', {})).toThrow('without repeat()');
     // a second repeat is NOT swallowed — it compiles as a chained cluster (two walks)
     const chained = read('g.V().repeat(__.out()).times(1).repeat(__.out()).times(1).values("name")');
@@ -215,9 +215,9 @@ describe('repeat / path SQL', () => {
     // both() + has() → cartesian over both directions = 2 recursive SELECTs.
     const b = read('g.V().repeat(__.both().has("age",P.lt(30))).times(2)');
     expect((b.sql.match(/EXISTS\(SELECT 1 FROM vertex_properties/g) || []).length).toBe(2);
-    // barrier/side-effect + edge-step bodies still defer (can't live in a recursive term).
-    expect(() => compile('g.V().repeat(__.out().dedup()).times(2)', {})).toThrow('movements + has()');
-    expect(() => compile('g.V().repeat(__.local(__.out())).times(2)', {})).toThrow('movements + has()');
+    // barrier/collection body steps (order/dedup/limit/…) still defer (can't live in a recursive term).
+    expect(() => compile('g.V().repeat(__.out().dedup()).times(2)', {})).toThrow('not yet supported');
+    expect(() => compile('g.V().repeat(__.local(__.out())).times(2)', {})).toThrow('not yet supported');
     // multi-hop body + path() defers (intermediate positions lost).
     expect(() => compile('g.V(1).repeat(__.in().out()).times(2).path()', {})).toThrow('multi-hop repeat() body');
   });
@@ -421,7 +421,8 @@ describe('repeat / path SQL', () => {
 
   test('recursive path() defers mixed/edge/emit forms with clear errors', () => {
     expect(() => compile('g.V(1).out().repeat(__.out()).times(2).path()', {})).toThrow('path() spanning more than one repeat()/movement is not yet supported');
-    expect(() => compile('g.V().repeat(__.outE().inV()).times(2).path()', {})).toThrow('movements + has()'); // edge-step body deferred
+    // an edge-step body now COMPILES; only path()/simplePath() OVER it is deferred (edge-aware path regime).
+    expect(() => compile('g.V().repeat(__.outE().inV()).times(2).path()', {})).toThrow('edge steps (outE()/inV()) in a repeat() body not yet supported');
     expect(() => compile('g.V().repeat(__.out()).emit().times(2).path()', {})).toThrow('emit() with path() not yet supported');
     // A SECOND repeat cluster after an array-tracked path() would reseed the walk and
     // silently drop the first walk's segment — fail closed instead.
@@ -519,5 +520,17 @@ describe('repeat / path SQL', () => {
   test('repeat body sack defers a fan-out by(traversal) with a clear throw', () => {
     expect(() => compile('g.withSack(0L).V().repeat(__.sack(sum).by(__.out().values("age"))).times(2)', {}))
       .toThrow('sack().by(traversal) in a repeat() body not yet supported');
+  });
+
+  test('edge-step body outE().sack(op).by(edgeKey).inV() folds the EDGE property along the walk', () => {
+    // path-weight accumulation: pause ON the edge to read its weight, then land back on the vertex.
+    const p = read("g.withSack(0.0d).V(1).repeat(__.outE().sack(sum).by('weight').inV()).times(2).sack()");
+    expect(p.sql).toMatch(/\(c\d+\.sk \+ \(SELECT value FROM edge_properties WHERE edge=re\d+\.id AND key=\?\)\)/); // reads edge_properties, not vertex
+    expect(p.sql).toContain('re1.tgt AS id'); // inV() lands back on the edge's target vertex
+  });
+
+  test('a repeat() body left ON an edge (no closing inV()) is rejected', () => {
+    expect(() => compile("g.withSack(0.0d).V(1).repeat(__.outE().sack(sum).by('weight')).times(2)", {}))
+      .toThrow('a repeat() body must end on a vertex');
   });
 });

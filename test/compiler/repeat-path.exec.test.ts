@@ -261,4 +261,14 @@ test('sack folds independently per fork (split-only): out() fan-out keeps each w
   const sacks = (run(store, 'g.withSack(0L).V(1).repeat(__.out().sack(sum).by("age")).times(1).sack()') as any[]).map((r) => r.v).sort((a, b) => (a ?? -1) - (b ?? -1));
   expect(sacks).toEqual([null, 27, 32]);
 });
+
+test('edge-step body accumulates EDGE weights along a walk (path-weight, the agent-memory primitive)', () => {
+  const store = seededStore();
+  // marko's out-edge weights: →vadas 0.5, →josh 1.0, →lop 0.4. 1 hop = each edge's own weight.
+  expect((run(store, "g.withSack(0.0d).V(1).repeat(__.outE().sack(sum).by('weight').inV()).times(1).sack()") as any[]).map((r) => r.v).sort())
+    .toEqual([0.4, 0.5, 1.0]);
+  // 2 hops from marko: →josh(1.0)→ripple(1.0)=2.0 and →josh(1.0)→lop(0.4)=1.4 (only josh has out-edges).
+  expect((run(store, "g.withSack(0.0d).V(1).repeat(__.outE().sack(sum).by('weight').inV()).times(2).sack()") as any[]).map((r) => r.v).sort((a, b) => a - b))
+    .toEqual([1.4, 2.0]);
+});
 });

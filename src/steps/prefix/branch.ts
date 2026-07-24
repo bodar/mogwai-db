@@ -2,7 +2,7 @@ import { q, list, empty, value, raw, Relation, type Expression } from '../../sql
 import { edges } from '../../sql/schema.ts';
 import { stepChain, type Step } from '../../gremlin/frontend.ts';
 import { foldByModulators } from '../../compiler/ir/strategies.ts';
-import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, type ScalarCtx, type Elem } from '../../compiler/plan/plan.ts';
+import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, type ScalarCtx, type Elem } from '../../compiler/plan/plan.ts';
 import { tryInlinePredicate } from './predicate.ts';
 import { advance, elemRel, prevRel, carryFrag, carryFragMint, carriedCols, partitionOver, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn } from '../context/context.ts';
 import { type AliasShape } from '../context/alias.ts';
@@ -448,18 +448,24 @@ export const flatMap: StepFn = (s, st) => {
 // through the walk, and a where(__.sack().is(P)) guard reads the freshly-folded value.
 
 const REPEAT_MOVES = new Set(['out', 'in', 'both']);
+// Vertex→edge steps (land on an edge) and edge→vertex steps (land on an endpoint vertex).
+// Together with REPEAT_MOVES these are the walk's movement vocabulary; edge steps let a body
+// pause ON an edge to fold its property (path-weight accumulation: outE().sack().by('weight').inV()).
+const TO_EDGE = new Set(['outE', 'inE', 'bothE']);
+const TO_VERTEX = new Set(['outV', 'inV', 'bothV']);
+const REPEAT_MOVE_ALL = new Set([...REPEAT_MOVES, ...TO_EDGE, ...TO_VERTEX]);
 
 /** A body's sack fold, threaded through the walk left-to-right: `combineSack` applied at
  *  the body position where the sack(op) step sits (so its by() reads the element the
- *  traverser is on THEN). One SQL expression over `self.c.sk` + a correlated by-value —
- *  no per-row JS, no self-reference twice. Only a mutate sack (has an operator) produces
- *  one; a bare sack() read inside the body is not a fold. */
-export function repeatSackByValue(byArgs: any[] | undefined, curId: Expression): Expression {
+ *  traverser is on THEN — a vertex OR an edge). One SQL expression over `self.c.sk` + a
+ *  correlated by-value — no per-row JS, no self-reference twice. Only a mutate sack (has an
+ *  operator) produces one; a bare sack() read inside the body is not a fold. */
+export function repeatSackByValue(byArgs: any[] | undefined, curId: Expression, curElem: Elem): Expression {
   const a = byArgs?.[0];
   if (a === undefined) throw new Error('sack(Operator.x) in a repeat() body requires a by() modulator');
-  if (typeof a === 'string') return scalarProp(aliasCtx(curId, 'node'), a);
+  if (typeof a === 'string') return scalarProp(aliasCtx(curId, curElem), a);
   if (a && typeof a === 'object' && 'token' in a) {
-    if (a.token === 'label') return labelNameSub(aliasCtx(curId, 'node').labelIdExpr);
+    if (a.token === 'label') return labelNameSub(aliasCtx(curId, curElem).labelIdExpr);
     if (a.token === 'id') return curId;
     throw new Error(`sack().by(T.${a.token}) in a repeat() body not yet supported`);
   }
@@ -484,45 +490,71 @@ export function sackWhereGuard(step: Step): any | null {
   return null;
 }
 
-/** Cartesian product of each movement's (from,to) direction pairs. */
+/** The per-movement direction choices, as (from,to) endpoint-column pairs. Vertex movements
+ *  (out/in/both) and vertex→edge steps (outE/inE/bothE) both join a NEW edge on `from`; a
+ *  bothX forks into two. Edge→vertex steps (outV/inV/bothV) read the CURRENT edge's endpoint,
+ *  so they carry the endpoint column choice(s) but add no join (handled in the expander). */
+function moveDirs(name: string): [string, string][] {
+  if (name === 'out' || name === 'outE') return [['src', 'tgt']];
+  if (name === 'in' || name === 'inE') return [['tgt', 'src']];
+  if (name === 'both' || name === 'bothE') return [['src', 'tgt'], ['tgt', 'src']];
+  if (name === 'outV') return [['src', 'src']];
+  if (name === 'inV') return [['tgt', 'tgt']];
+  return [['src', 'src'], ['tgt', 'tgt']]; // bothV
+}
+
+/** Cartesian product of each movement's direction choices (both/bothE/bothV fork into two). */
 function dirCombos(moves: Step[]): [string, string][][] {
   let combos: [string, string][][] = [[]];
-  for (const m of moves) combos = combos.flatMap((c) => dirsFor(m.name).map((d) => [...c, d] as [string, string][]));
+  for (const m of moves) combos = combos.flatMap((c) => moveDirs(m.name).map((d) => [...c, d] as [string, string][]));
   return combos;
 }
 
 /** Expand a movement+has()+sack() body into one {finalId, from, conds, sackExpr} per
- *  direction combo. Threads `curId` (element position) AND `sackExpr` (the accumulator)
- *  left-to-right, so each sack(op).by() folds using the position the traverser holds THEN
- *  and each where(__.sack().is(P)) guards on the sack value at that point. `sackExpr` is
- *  null when the incoming stream has no sack and the body folds none. */
+ *  direction combo. Threads `curId`/`curElem` (element position + kind) AND `sackExpr` (the
+ *  accumulator) left-to-right, so each sack(op).by() folds using the position/kind the
+ *  traverser holds THEN and each where(__.sack().is(P)) guards on the sack value at that point.
+ *  Vertex→edge steps land ON the joined edge (so a following sack().by('weight') reads it);
+ *  edge→vertex steps read the current edge's endpoint (no new join). `sackExpr` is null when
+ *  the incoming stream has no sack and the body folds none. `finalElem` is the walk endpoint
+ *  kind — always 'node' (the walk id is a vertex rowid; a body ending on an edge is rejected). */
 function expandRepeatBody(
   self: Relation, core: Step[], sackCol: string | undefined,
-): { finalId: Expression; from: Expression; conds: Expression[]; sackExpr: Expression | null }[] {
-  const moves = core.filter((c) => REPEAT_MOVES.has(c.name));
+): { finalId: Expression; from: Expression; conds: Expression[]; sackExpr: Expression | null; finalElem: Elem }[] {
+  const moves = core.filter((c) => REPEAT_MOVE_ALL.has(c.name));
   return dirCombos(moves).map((dirs) => {
     let curId: Expression = self.c.id;
+    let curElem: Elem = 'node';
+    let curEdge: Relation | null = null; // the edge alias we're currently ON (after a vertex→edge step)
     let sackExpr: Expression | null = sackCol ? self.c[sackCol] : null;
     const joins: Expression[] = [];
     const conds: Expression[] = [];
     let mi = 0;
     for (const step of core) {
-      if (REPEAT_MOVES.has(step.name)) {
+      if (REPEAT_MOVES.has(step.name) || TO_EDGE.has(step.name)) {
+        // Vertex movement (lands on the far vertex) or vertex→edge step (lands on the edge).
         const [from, to] = dirs[mi++];
         const e = edges.as(`re${mi}`);
         joins.push(q` JOIN ${e} ON ${e.c[from]}=${curId}${step.args.length ? q` AND ${labelIn(`${e.name}.label`, step.args)}` : empty}`);
-        curId = e.c[to];
+        if (TO_EDGE.has(step.name)) { curId = e.c.id; curElem = 'edge'; curEdge = e; }
+        else { curId = e.c[to]; curElem = 'node'; curEdge = null; }
+      } else if (TO_VERTEX.has(step.name)) {
+        // Edge→vertex: read the current edge's endpoint column (no new join). Requires being
+        // on an edge (a body starting/continuing off an edge is a compile error, guarded here).
+        if (!curEdge) throw new Error(`${step.name}() in a repeat() body requires being on an edge (a preceding outE()/inE()/bothE())`);
+        const [, to] = dirs[mi++];
+        curId = curEdge.c[to]; curElem = 'node'; curEdge = null;
       } else if (step.name === 'has') {
-        // has() only (hasLabel/complex has deferred at validation): a correlated EXISTS
-        // over vertex_properties on the current node id.
-        conds.push(nodeHasProp(curId, step.args[0], step.args[1]));
+        // has() only (hasLabel/complex has deferred at validation): a correlated EXISTS on the
+        // current element (a vertex, or an edge when paused on one after outE()/inE()).
+        conds.push(hasProp(aliasCtx(curId, curElem), step.args[0], step.args[1]));
       } else if (step.name === 'sack') {
-        // Mutate sack(op).by(v): fold the by-value (over the current position) into the
+        // Mutate sack(op).by(v): fold the by-value (over the current position/kind) into the
         // accumulator. Reuses combineSack verbatim (boundary-agnostic operator semantics).
         const op = (step.args ?? []).find((a: any) => a && typeof a === 'object' && 'operator' in a)?.operator;
         if (!op) throw new Error('bare sack() (read) inside a repeat() body is not a fold — use where(__.sack()...) to guard');
         if (!SACK_OPS.has(op)) throw new Error(`sack(Operator.${op}) not yet supported`);
-        sackExpr = combineSack(op, repeatSackByValue((step as any).bys?.[0], curId), sackExpr);
+        sackExpr = combineSack(op, repeatSackByValue((step as any).bys?.[0], curId, curElem), sackExpr);
       } else {
         // where(__.sack().is(P)): expand only from rows whose current sack satisfies P.
         const pred = sackWhereGuard(step);
@@ -531,7 +563,10 @@ function expandRepeatBody(
         conds.push(predicateSql(sackExpr, pred));
       }
     }
-    return { finalId: curId, from: q`${self}${list(joins, '')}`, conds, sackExpr };
+    // The walk id is a vertex rowid; a body must net back to a vertex (outE()…inV()). A body
+    // left ON an edge (outE() with no closing …V()) is rejected — the walk can't carry an edge id.
+    if (curElem !== 'node') throw new Error('a repeat() body must end on a vertex (an edge step needs a closing inV()/outV()/otherV())');
+    return { finalId: curId, from: q`${self}${list(joins, '')}`, conds, sackExpr, finalElem: curElem };
   });
 }
 
@@ -579,21 +614,24 @@ export const repeat: StepFn = (s, st) => {
   const body = foldByModulators(stepChain(rep.args[0]?.nested, st.params));
   const simplePathInBody = body.length > 0 && body[body.length - 1].name === 'simplePath';
   const core = simplePathInBody ? body.slice(0, -1) : body;
-  const moves = core.filter((c) => REPEAT_MOVES.has(c.name));
+  // Vertex→edge steps land ON an edge (so a following sack().by(edgeKey) reads it); each edge
+  // step counts as a movement for progress. `moves` gates path tracking (a net vertex hop count).
+  const moves = core.filter((c) => REPEAT_MOVES.has(c.name) || TO_EDGE.has(c.name));
+  const hasEdgeStep = core.some((c) => TO_EDGE.has(c.name) || TO_VERTEX.has(c.name));
   // A body sack fold is a mutate sack(op) step; a sack-reading where guard is where(__.sack().is(P)).
   const isSackFold = (c: Step): boolean => c.name === 'sack' && (c.args ?? []).some((a: any) => a && typeof a === 'object' && 'operator' in a);
   const bodyFoldsSack = core.some(isSackFold);
-  const REPEAT_BODY_OK = (c: Step): boolean => REPEAT_MOVES.has(c.name) || c.name === 'has' || isSackFold(c) || sackWhereGuard(c) !== null;
+  const REPEAT_BODY_OK = (c: Step): boolean => REPEAT_MOVE_ALL.has(c.name) || c.name === 'has' || isSackFold(c) || sackWhereGuard(c) !== null;
   const badStep = core.find((c) => !REPEAT_BODY_OK(c));
   // A movement-free body is valid ONLY when it folds a sack (TinkerPop's on-the-spot
   // accumulate, Repeat.feature:664); otherwise a body with no movement never progresses.
   if ((!moves.length && !bodyFoldsSack) || badStep)
-    throw new Error(`repeat(__.${body.map((c) => c.name + '()').join('.')}) not yet supported (movements + has() + sack(op).by() + where(__.sack()...), optional trailing simplePath(); barrier/collection bodies deferred)`);
+    throw new Error(`repeat(__.${body.map((c) => c.name + '()').join('.')}) not yet supported (movements incl. outE()/inV() + has() + sack(op).by() + where(__.sack()...), optional trailing simplePath(); barrier/collection bodies deferred)`);
   // has() in a repeat body: only has(key, value|P) — a 3-arg or T-token form defers.
   const badHas = core.find((c) => c.name === 'has' && (typeof c.args[0] !== 'string' || c.args.length > 2));
   if (badHas) throw new Error('complex has() (3-arg / T-token) in a repeat() body not yet supported');
-  // The single-movement fast path only applies to a bare movement with no sack fold; any
-  // sack-folding body routes through the general expansion (it threads the accumulator).
+  // The single-movement fast path only applies to a bare VERTEX movement with no sack fold /
+  // edge step; any sack-folding or edge-step body routes through the general expansion.
   const singleMove = core.length === 1 && REPEAT_MOVES.has(core[0].name);
   // The carried sack column: live if the incoming stream has one (withSack()/prior sack(op))
   // or the body folds one. A body fold with no prior sack seeds fresh at the base term.
@@ -617,6 +655,9 @@ export const repeat: StepFn = (s, st) => {
   // path()/simplePath() record ONE position per iteration = one movement; a multi-MOVEMENT
   // body loses its intermediate(s), so defer there. A single movement + has() filters is fine.
   if (trackArray && moves.length > 1) throw new Error('path()/simplePath() with a multi-hop repeat() body not yet supported');
+  // path()/simplePath() with edge steps in the body (which visit edges AND vertices) needs the
+  // edge-aware path regime — a separate piece. Defer rather than record only the vertices.
+  if (trackArray && hasEdgeStep) throw new Error('path()/simplePath() with edge steps (outE()/inV()) in a repeat() body not yet supported');
 
   // until(): `done` = does the stop predicate hold for this row? do-while (until
   // AFTER repeat) leaves the seed untested (body runs ≥1×); while-do (until BEFORE)

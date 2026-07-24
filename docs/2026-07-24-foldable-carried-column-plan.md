@@ -179,15 +179,16 @@ none is in scope for the prototype.
    of the walk work — narrow completeness (a lambda has no `Operator` name to dispatch on;
    inject-const skips numeric-subtype coercion). Lower priority; not on the compounding path.
 
-5. **Edge-step movements (`outE()`/`inV()`/`bothE()`…) in a `repeat()` body** (discovered during
-   Stage 1). Today `REPEAT_MOVES = {out, in, both}` — vertex movements only; a body like
-   `repeat(outE().sack(sum).by('weight').inV())` (accumulate the *edge's* weight along a walk)
-   defers with a clear throw because the traverser must be ON the edge to read its property.
-   This is a `expandRepeatBody` movement-vocabulary extension (independent of sack), but it is the
-   natural shape for **path-weight accumulation** (the most common sack-in-repeat memory query), so
-   it pairs with follow-on #1/#3. Not in Stage 1 scope — Stage 1 folds vertex-property /
-   `T.label` / `constant` by-values, which covers spreading-activation decay
-   (`sack(mult).by(constant(k))`) and on-the-spot accumulate (`sack(sum).by('age')`).
+5. **Edge-step movements (`outE()`/`inV()`/`bothE()`…) in a `repeat()` body. ✅ DONE** (Stage 4,
+   the naturally-discovered scope increase). `expandRepeatBody` now threads element *kind* as well
+   as id: a vertex→edge step (`outE`/`inE`/`bothE`) joins a new edge and lands ON it (curElem=edge);
+   an edge→vertex step (`outV`/`inV`/`bothV`) reads the current edge's endpoint (no new join). So
+   `repeat(outE().sack(sum).by('weight').inV())` folds the traversed EDGE's `weight` while paused on
+   it — **path-weight accumulation**, the most common sack-in-repeat memory query and the largest
+   confirmed L3 cluster. `repeatSackByValue`/the body `has()` are now element-kind-aware
+   (`aliasCtx(curId, curElem)`). A body left ON an edge (no closing `…V()`) is rejected (the walk id
+   is a vertex rowid). `path()`/`simplePath()` OVER an edge-step body stays deferred (edge-aware path
+   regime is a separate piece). **L3 1274 → 1275, 0 regressions.**
 
 **Compounding order:** Stage 1 (walk carries+folds ONE column) → follow-on #1 (bulk is the SECOND
 foldable column, proves multi-column fold) → #2 (aggregate is the THIRD, a non-scalar fold) → #3
