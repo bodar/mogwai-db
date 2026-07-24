@@ -134,11 +134,17 @@ branch/local/barrier boundaries (Stages 2–3).
   `seedUnion` merges only `id,bulk`; seeding + threading a source sack is a small separate piece).
   L3 unchanged (1273) — no official corpus scenario is unblocked by fork-clone alone (they also need
   edge-step-in-repeat etc.) — but the capability is proven by committed exec tests. 0 regressions.
-- **Stage 3 — `local()`/barrier.** Thread the sack through the child scope
-  (`pushChildScope`/`popChildScope`) so `local(sack(sum).by('age'))` folds within the child and
-  restores to the parent (anchor: `branch/Local.feature:224`). Barrier: a barrier consumes bulk but
-  should preserve a carried sack (currently `withoutCarried` drops it — verify against TinkerPop's
-  `barrier().local(sack(...))` scenario).
+- **Stage 3 — `local()`/barrier. ✅ DONE.** A mutate `sack(op)` is an element-PRESERVING child
+  step, so it belongs in the element-child prefix vocabulary (`isElementChildStep`), not as a
+  scalar producer (only a bare read `sack()` is). With that classification fix, `local(__.sack(op)
+  .by(...))` folds through the SAME `lowerElementSteps` engine per pushed parent — `pushChildScope`
+  already threads the parent's sack into the child domain via `carriedCols`. Two conservative guards
+  relaxed to enable it: (1) the sack StepFn blocked ALL `origins` (`sack.ts`) — but a pushed
+  child-scope ordinal is safely copied through by the carriedCols re-projection, so only
+  `aliases`/`path` stay gated; (2) `compileElementChildRows` blocked a parent sack (`child.ts`) —
+  but the domain threads it correctly, so only `fromV` stays gated. `barrier()` is already an
+  `identity` no-op on the SQL engine, so `V().in().barrier().local(...)` works. Anchor
+  `branch/Local.feature:224` passes: `[29,29,29,32,32,35]`. **L3 1273 → 1274, 0 regressions.**
 
 ---
 

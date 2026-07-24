@@ -486,6 +486,12 @@ describe('group / properties SQL', () => {
     // for the pre-existing bug where sk silently got the fromV rowid.
     expect(read('g.withSack(0).V(1).outE().sack(assign).by(T.label).otherV().sack()').sql)
       .toContain('(SELECT name FROM labels WHERE id=n.label) AS sk'); // sk = the label, not the fv rowid
+    // local(__.sack(op).by(...)) folds the sack inside a child scope: a mutate sack is an
+    // element-preserving child step, so it lowers through the same engine per pushed parent.
+    const localSack = read('g.withSack(0L).V().local(__.sack(sum).by("age")).sack()');
+    expect(localSack.shape).toEqual({ kind: 'value' });
+    expect(localSack.sql).toContain('ROW_NUMBER() OVER ()'); // the child-scope ordinal
+    expect(localSack.sql).toContain('AS sk'); // the fold lands in the sk slot within the scope
   });
 
   test('side-effecting group(a)/groupCount(a) → registered spec re-emitted by cap(a)', () => {

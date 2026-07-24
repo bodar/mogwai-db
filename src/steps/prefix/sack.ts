@@ -44,8 +44,12 @@ export const sack: StepFn = (s, st) => {
   if (!SACK_OPS.has(op)) throw new Error(`sack(Operator.${op}) not yet supported`);
   const bys = (s as any).bys ?? [];
   if (bys.length > 1) throw new Error('Sack step can only have one by modulator');
-  if (st.carried.aliases.size || st.carried.path || st.carried.origins.length)
-    throw new Error('sack(Operator.x) after as()/path()/branch state not yet supported');
+  // aliases/path + a mutable sack still defer (fork/merge over as()/path history unverified).
+  // A pushed child-scope ORIGIN is fine: the carriedCols-ordered re-projection below copies
+  // every origin column through unchanged, so a scoped sack (local(__.sack(op).by(...))) folds
+  // correctly per parent traverser — the origin is bookkeeping, not branch state.
+  if (st.carried.aliases.size || st.carried.path)
+    throw new Error('sack(Operator.x) after as()/path() state not yet supported');
 
   const combine = (byVal: Expression, oldSack: Expression | null): Expression => combineSack(op, byVal, oldSack);
 

@@ -751,7 +751,11 @@ function compileElementChildRows(
   // Element-parent-only + no sack/fromV are emit-time PARENT-state guards (not shape):
   // kept here, distinct from the shared shape classification below.
   if (isPropertyParent(parent) || isScalarParent(parent)) return null;
-  if (!nested || parent.carried.sack || parent.carried.fromV) return null;
+  // A parent sack rides through the child scope unchanged — pushChildScope projects the full
+  // carriedCols (sack included) into the domain, and lowerElementSteps threads it — so a scoped
+  // sack fold (local(__.sack(op).by(...))) folds per parent correctly. fromV stays gated (an
+  // edge's entering-vertex is undefined inside a child scope that may move off the edge).
+  if (!nested || parent.carried.fromV) return null;
   // ONE shape classification (the same classifyElementChildRows the element preflight peeks
   // use) — the bare-order strip, firstPolicy order modulator, and empty-before handling all
   // live in the shared helper, so preflight and compiler cannot diverge.

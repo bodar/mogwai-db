@@ -407,6 +407,15 @@ test('withSack(2) + sack(div).by(__.constant(4.0)) → real division per vertex'
     .toEqual([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]);
 });
 
+test('local(__.sack(sum).by(age)) folds the sack per-traverser inside a child scope (Local.feature:224)', () => {
+  // V().in() → the incoming-neighbour multiset; barrier() is a no-op on the SQL engine; the
+  // local() runs sack(sum).by('age') per traverser (seed 0 + own age) and sack() reads it.
+  // A mutate sack(op) is an element-preserving child step, folded through the same engine.
+  const store = seededStore();
+  expect(run(store, 'g.withSack(0L).V().in().barrier().local(__.sack(sum).by("age")).sack()').map((r) => r.v).sort((a, b) => a - b))
+    .toEqual([29, 29, 29, 32, 32, 35]);
+});
+
 test('aggregate(x).by(key).cap(x) is one list; explicit unfold emits scalar members', () => {
   const store = seededStore();
   expect(executeQuery(store, 'g.V().aggregate("x").by("name").cap("x")', {})).toHaveLength(1);
