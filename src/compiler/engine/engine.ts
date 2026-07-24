@@ -2,7 +2,8 @@ import { q, value, list, Query, type Expression } from '../../sql/kernel/q.ts';
 import { nodes, edges } from '../../sql/schema.ts';
 import { type Elem } from '../plan/plan.ts';
 import { stepChain, flattenListArgs } from '../../gremlin/frontend.ts';
-import { demandsEncounterOrder, type PStep } from '../ir/strategies.ts';
+import { type PStep } from '../ir/strategies.ts';
+import { analyze, type ChainFacts } from '../ir/analyze.ts';
 import { withCarried, type Carry, type ElementStream, type StepFn } from '../../steps/context/context.ts';
 import { move, toEdge, toVertex, otherV } from '../../steps/prefix/movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from '../../steps/prefix/filter.ts';
@@ -69,83 +70,12 @@ const isShapedLocal = (s: PStep, params: Record<string, any>): boolean => {
   return !!nested && (isElementChild(nested, params) || isScalarChild(nested, params) || isListChild(nested, params));
 };
 
-/** Steps that need the linear path threaded through the fold: the source vertex
- *  becomes path position p0 and every hop appends a position. */
-const PATH_STEPS = new Set(['path', 'simplePath', 'cyclicPath']);
-const chainTracksPath = (steps: PStep[]): boolean => steps.some((s) => PATH_STEPS.has(s.name));
 /** otherV() needs each edge step to record its entering vertex — gate that on the
- *  chain naming otherV, so ordinary edge traversals stay index-only (no dead column). */
+ *  chain naming otherV, so ordinary edge traversals stay index-only (no dead column).
+ *  This is chain-global at the root but ALSO re-derived per-scope at lowerElementSteps
+ *  over each child scope's own step slice, so it is a local predicate here — NOT a
+ *  ChainFact (see ir/analyze.ts's header for why the fromV/trackFromV split stays). */
 const chainNeedsFromV = (steps: PStep[]): boolean => steps.some((s) => s.name === 'otherV');
-
-// Movement-collapse safety scan. Convergent-walk collapse (SELECT id, SUM(bulk) GROUP BY id
-// at each movement) is result-equivalent ONLY when the whole chain is a linear movement/filter
-// prefix ending in a global bulk-aware reducer: nothing carries per-traverser identity
-// (path/as/sack), nothing is bulk-unaware on rows (order/limit/range/sample), and no branch/
-// barrier/re-entry sits between the collapse and the reducer's SUM(bulk). Anything outside these
-// sets → not safe → the plain UNION-ALL movement (identical result, unbounded rows). otherV is
-// deliberately excluded (its fromV context is per-traverser identity).
-const COLLAPSE_MOVES = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'bothV']);
-const COLLAPSE_FILTERS = new Set(['has', 'hasLabel', 'hasId', 'where', 'filter', 'not', 'and', 'or']);
-const COLLAPSE_PROJ = new Set(['values', 'id', 'label']); // a scalar projection feeding a numeric reducer
-const COLLAPSE_REDUCERS = new Set(['count', 'sum', 'mean', 'min', 'max']);
-
-/** A `groupCount()` terminal whose key does NOT fan out is a bulk-mergeable barrier: it
- *  weights every group by SUM(bulk) (see lowerGroup's isCount), so collapsing convergent
- *  walks into (element, N) before it is result-equivalent — the exact "groupCount after a
- *  big fan-out/repeat" correctness+tractability case. A bare key (the element identity), a
- *  property key `by('name')`, or a token key `by(T.label)` all follow the element's identity,
- *  so merging same-id rows keeps every key intact. A by(traversal) key can fan out (one
- *  traverser → many keys), which a GROUP BY-id merge would corrupt → left unsafe. group()
- *  (element/list values) and group().by().by(reducer) are NOT admitted here: their weighting
- *  is correct-by-construction but their collapse gating is deferred (see the wire-bulking doc). */
-function groupCountCollapseTerminal(step: PStep): boolean {
-  if (step.name !== 'groupCount' || (step.args?.length ?? 0) !== 0) return false;
-  const bys = step.bys ?? [];
-  if (bys.length === 0) return true;
-  if (bys.length !== 1) return false;
-  const a = bys[0]?.[0];
-  return a === undefined || typeof a === 'string' || (a && typeof a === 'object' && 'token' in a);
-}
-
-function chainCollapseSafe(steps: PStep[]): boolean {
-  const n = steps.length;
-  if (n < 2) return false; // need a source + ≥1 movement
-  if (steps[0].name !== 'V' && steps[0].name !== 'E') return false;
-  // Three safe terminals: a GLOBAL reducer (count/sum/mean/min/max — its SUM(bulk) sums the
-  // multiplicities), optionally after one scalar projection; a non-fan-out `groupCount()`
-  // (SUM(bulk) per key); OR an ELEMENT leaf (the bare vertex/edge projection, which frames each
-  // element as (v, bulk) on the wire). Everything between the source and the terminal must be
-  // movement/filter — anything that carries per-traverser identity (path/as/sack) or reads rows
-  // bulk-unaware (order/limit/range/sample/dedup/branch/re-entry) makes a GROUP BY-id merge wrong.
-  let end = n; // exclusive bound of the movement/filter prefix
-  const last = steps[n - 1];
-  const reducerTerminal = COLLAPSE_REDUCERS.has(last.name) && (last.args?.length ?? 0) === 0;
-  const groupCountTerminal = groupCountCollapseTerminal(last);
-  if (reducerTerminal || groupCountTerminal) {
-    end = n - 1;
-    if (reducerTerminal && end >= 2 && COLLAPSE_PROJ.has(steps[end - 1].name)) end -= 1; // one scalar projection before the reducer
-  }
-  let sawMove = false, sawOrder = false;
-  for (let i = 1; i < end; i++) {
-    const nm = steps[i].name;
-    if (COLLAPSE_MOVES.has(nm)) { sawMove = true; continue; }
-    if (COLLAPSE_FILTERS.has(nm)) continue;
-    // A bare dedup() BEFORE any order() is a prefix step that resets bulk to 1 (one traverser per
-    // distinct id), so a GROUP BY-id merge around it is correct. After an order() it is instead a
-    // tail ordered-dedup (first-per-key), which does not compose with a collapsed bulk stream →
-    // unsafe. dedup(label)/dedup().by() carry extra semantics → unsafe.
-    if (nm === 'dedup' && !sawOrder && (steps[i].bys?.length ?? 0) === 0 && (steps[i].args?.length ?? 0) === 0) continue;
-    // Element-terminal only: order() by a property key (or bare) just sorts the collapsed (v, N)
-    // rows, and a limit/range/skip AFTER it is bulk-aware (the tail cumulative-bulk window). Both
-    // stay identity-free. A reducer terminal routes limit/count through the bulk-UNAWARE count
-    // branch, so those forms are left unsafe. order().by(traversal) is unsafe (nested sort).
-    if (!reducerTerminal && !groupCountTerminal && nm === 'order'
-      && (steps[i].bys ?? []).every((by: any[]) => by.length === 0 || typeof by[0] === 'string')) { sawOrder = true; continue; }
-    if (!reducerTerminal && !groupCountTerminal && sawOrder && (nm === 'limit' || nm === 'range' || nm === 'skip')) continue;
-    return false; // any other step in the prefix (as/sack/path/branch/re-entry/…) → unsafe
-  }
-  return sawMove;
-}
 
 /** A value-shaped stream (scalar/list/variant) whose current object can be labelled and
  *  whose select("label") reads a path-history alias — as opposed to record/map/group
@@ -237,7 +167,7 @@ export class LoweringEngine implements Engine {
    *  → carry the base fastPaths (a resume closure whose chain is already lowered). */
   private child(params: Record<string, any>, steps?: PStep[], q?: Query): LoweringEngine {
     const scope = createCompilerScope(this.app, { params, federationDepth: this.federationDepth, q });
-    const fp = steps ? collapseSafeFastPaths(scope.fastPaths, steps) : scope.fastPaths;
+    const fp = steps ? collapseSafeFastPaths(scope.fastPaths, analyze(steps)) : scope.fastPaths;
     return new LoweringEngine(this.app, scope, fp);
   }
 
@@ -295,7 +225,9 @@ export class LoweringEngine implements Engine {
     if (branches.length < 1) throw new Error('union() needs at least one branch');
     const rels = branches.map((b: any) => {
       const bsteps = stepChain(b.nested, params);
-      const { st, stop } = this.buildPrefix(bsteps, params, undefined, wantsEncounter);
+      // wantsEncounter is always false here (a union source encounter throws above); a branch
+      // still tracks its own path, so honour tracksPath but force the encounter off.
+      const { st, stop } = this.buildPrefix(bsteps, params, undefined, { ...analyze(bsteps), demandsEncounter: false });
       if (stop !== bsteps.length) throw new Error(`union() source branch tail __.${bsteps[stop].name}() not yet supported`);
       if (st.elem !== 'node') throw new Error('union() source branch must be vertex-typed');
       if (st.carried.aliases.size > 0) throw new Error('union() source branch with as() not yet supported');
@@ -390,11 +322,11 @@ export class LoweringEngine implements Engine {
     return lowered.next === steps.length ? lowered.stream : null;
   }
 
-  buildPrefix(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec, wantsEncounter = false): { st: ElementStream; stop: number } {
+  buildPrefix(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec, facts: ChainFacts = analyze(steps)): { st: ElementStream; stop: number } {
     const first = steps[0];
-    const trackPath = chainTracksPath(steps);
+    const wantsEncounter = facts.demandsEncounter;
     const seeded = first.name === 'union' ? this.seedUnion(first, params, sackInit, wantsEncounter)
-      : (first.name === 'V' || first.name === 'E') ? this.seedSource(first, params, trackPath, sackInit, wantsEncounter)
+      : (first.name === 'V' || first.name === 'E') ? this.seedSource(first, params, facts.tracksPath, sackInit, wantsEncounter)
       : (() => { throw new Error(`unsupported source step: ${first.name}`); })();
     // Gate the otherV() entering-vertex tracking on the chain; local()'s body inherits
     // the flag through its {...st} seed, so an inner edge step records it too.
@@ -544,11 +476,12 @@ export class LoweringEngine implements Engine {
     const bulked = this.fastPaths.bulkRepeatCount ? tryBulkRepeat(this, steps, params, sackInit) : null;
     if (bulked) return bulked;
 
-    // Emission-order demand: seed + thread a canonical `encounter` only when a positional
-    // consumer sits downstream of a fan-out (see demandsEncounterOrder). Movement collapse
-    // discards per-row identity, so it is mutually exclusive with a live encounter.
-    const wantsEncounter = demandsEncounterOrder(steps);
-    const { st, stop } = this.buildPrefix(steps, params, sackInit, wantsEncounter);
+    // Whole-chain facts, computed ONCE here (analyze): tracksPath + demandsEncounter feed the
+    // prefix seed, and the movementCollapse gate already read collapseSafe at engine construction
+    // (collapseSafeFastPaths). Movement collapse discards per-row identity, so it is mutually
+    // exclusive with a live encounter — analyze folds that into collapseSafe && !demandsEncounter.
+    const facts = analyze(steps);
+    const { st, stop } = this.buildPrefix(steps, params, sackInit, facts);
     const lowered = this.lowerSteps(st, steps, stop);
     // A mid-traversal barrier call() (V().call(federate)) suspended the fold — build its SegmentPlan.
     if (isSuspension(lowered)) return this.segmentFromMidBarrier(lowered.point as MidBarrierPoint);
@@ -560,7 +493,9 @@ export class LoweringEngine implements Engine {
    *  WITH and its own engine attached to the returned stream's Query (so a nested movement/filter
    *  reaches deps). Collapse is gated off (a write prefix is not a reducer-terminal read chain). */
   buildPrefixFresh(steps: PStep[], params: Record<string, any> = {}): { st: ElementStream; stop: number } {
-    return this.child(params, steps).buildPrefix(steps, params);
+    // A write prefix is not a reducer-terminal read chain: collapse is gated off (via child()'s
+    // fastPaths) and the emission encounter is forced off — honour the chain's own path tracking.
+    return this.child(params, steps).buildPrefix(steps, params, undefined, { ...analyze(steps), demandsEncounter: false });
   }
 
   /** A FRESH child engine (fresh Query, same app scope) — see the interface. */
@@ -587,9 +522,9 @@ export class LoweringEngine implements Engine {
   }
 }
 
-/** Whether movement collapse is result-safe for this whole chain (see chainCollapseSafe).
- *  Exposed so the compile-scope wiring can gate the fastPaths flag once per compilation. */
-export function collapseSafeFastPaths(base: FastPathConfig, steps: PStep[]): FastPathConfig {
-  const wantsEncounter = demandsEncounterOrder(steps);
-  return { ...base, movementCollapse: base.movementCollapse && chainCollapseSafe(steps) && !wantsEncounter };
+/** Whether movement collapse is result-safe for this whole chain (see ChainFacts.collapseSafe).
+ *  Exposed so the compile-scope wiring can gate the fastPaths flag once per compilation. Takes
+ *  ChainFacts (not steps) so the caller's single analyze() serves both this gate and the seed. */
+export function collapseSafeFastPaths(base: FastPathConfig, facts: ChainFacts): FastPathConfig {
+  return { ...base, movementCollapse: base.movementCollapse && facts.collapseSafe && !facts.demandsEncounter };
 }
