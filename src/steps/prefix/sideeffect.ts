@@ -6,6 +6,7 @@ import { normalize } from '../../compiler/ir/passes.ts';
 import { elemRel, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type ScalarStream } from '../context/stream.ts';
 import { tryCompileFirstElementValueRows, tryCompileScalarValueRows } from '../tail/child.ts';
+import { classifyBy } from '../tail/child-shape.ts';
 
 // ---------- named side-effect collections (aggregate) ----------
 //
@@ -33,19 +34,18 @@ export const aggregate: StepFn = (s, st) => {
   const name = aggregateName(s);
   const bys = (s as any).bys ?? [];
   if (bys.length > 1) throw new Error('aggregate() with more than one by() modulator not yet supported');
-  const by = bys[0];
+  const by = classifyBy(bys[0]);
   let def: SideEffectDef;
-  if (!by || by.length === 0) {
+  if (by.kind === 'none') {
     // Element bag: store the rowids; cap('x') rejoins nodes/edges when framing.
     const rel = st.q.cte(q`SELECT ${jsonbGroupArray(q`p.id`)} AS list FROM ${st.rel.as('p')}`, ['list']);
     def = { kind: 'list', rel, of: { kind: 'elem', elem: st.elem } };
   } else {
-    const a = by[0];
     const productive = (s as PStep).productiveBy === true;
-    if (typeof a === 'string') {
+    if (by.kind === 'key') {
       const n = elemRel(st);
       const p = st.rel.as('p');
-      const pe = scalarProp(elemCtx(n, st.elem), a); // first-under-multi for a node
+      const pe = scalarProp(elemCtx(n, st.elem), by.key); // first-under-multi for a node
       // ProductiveBy makes a missing modulation one explicit NULL member. Ordinary
       // aggregate keeps values()-style productivity and drops that parent.
       const where = productive ? q`` : q` WHERE ${predicateSql(pe, undefined)}`;
@@ -54,8 +54,8 @@ export const aggregate: StepFn = (s, st) => {
         ['list'],
       );
       def = { kind: 'list', rel, of: { kind: 'scalar', productiveNull: productive } };
-    } else if (a && typeof a === 'object' && 'nested' in a) {
-      const rows = tryCompileScalarValueRows(st, a.nested);
+    } else if (by.kind === 'nested') {
+      const rows = tryCompileScalarValueRows(st, by.nested);
       if (rows) {
         const r = rows.stream.rel.as('r');
         const encounter = rows.stream.carried.encounter;
@@ -74,7 +74,7 @@ export const aggregate: StepFn = (s, st) => {
         const rel = st.q.cte(q`SELECT ${jsonbGroupArray(first.c.v)} AS list FROM ${source}${filter}`, ['list']);
         def = { kind: 'list', rel, of: { kind: 'scalar', as: rows.stream.as, productiveNull: productive } };
       } else {
-        const elements = tryCompileFirstElementValueRows(st, a.nested);
+        const elements = tryCompileFirstElementValueRows(st, by.nested);
         if (!elements)
           throw new Error('aggregate().by(traversal) child shape not yet supported by generic child lowering');
         const c = elements.stream.rel.as('c');

@@ -12,7 +12,7 @@ import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PA
 import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../../sql/kernel/render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { pushChildScope, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows } from './child.ts';
-import { childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, reuseCurrentFrame, type ChildParent } from './child-shape.ts';
+import { childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, reuseCurrentFrame, type ChildParent } from './child-shape.ts';
 
 /** The numeric reducers that terminate a nested-group inner value `by(__.values(x).<r>())`. */
 const SCALAR_REDUCERS = new Set(['sum', 'min', 'max', 'mean']);
@@ -96,34 +96,33 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
       group: src.keyParts.map((_, i) => `k${i}_v`).join(', '),
     };
   }
-  if (!keyArgs || keyArgs.length === 0) { // bare by() → the element itself is the key
+  const by = classifyBy(keyArgs);
+  if (by.kind === 'none') { // bare by() → the element itself is the key
     if (src.elem === 'property') throw new Error('group().by() on a property element is not yet supported');
     return { desc: { kind: 'element', elem: src.elem }, cols: elementSelect(src.elem, 'k', src.ctx, true), group: elementIdExpr(src.elem, src.ctx) };
   }
-  const a = keyArgs[0];
-  if (typeof a === 'string') { // by('name') — first-under-multi for a node
-    const pe = scalarProp(src.ctx, a);
+  if (by.kind === 'key') { // by('name') — first-under-multi for a node
+    const pe = scalarProp(src.ctx, by.key);
     return { desc: scalarGroupKey(src.productiveBy), cols: q`${pe} AS gk`, group: 'gk' };
   }
-  if (a && typeof a === 'object' && 'token' in a) { // by(T.label)/by(T.id)
+  if (by.kind === 'token') { // by(T.label)/by(T.id)
     // A VertexProperty's T.label is its key (pk); its T.id is vpid (ctx.idExpr). For an
     // element, T.label resolves the interned label id to its name.
-    const expr = a.token === 'label'
+    const expr = by.token === 'label'
       ? (src.elem === 'property' ? src.ctx.pkExpr! : labelNameSub(src.ctx.labelIdExpr))
-      : a.token === 'id' ? src.ctx.idExpr : null;
-    if (!expr) throw new Error(`group().by(T.${a.token}) not yet supported`);
+      : by.token === 'id' ? src.ctx.idExpr : null;
+    if (!expr) throw new Error(`group().by(T.${by.token}) not yet supported`);
     return { desc: scalarGroupKey(src.productiveBy), cols: q`${expr} AS gk`, group: 'gk' };
   }
-  if (a && typeof a === 'object' && 'nested' in a) {
+  {
     // A traversal key lowers through the generic child seam (tryLowerGroupChildSource →
     // keyExpr/keyParts). Reaching here means it did not — a genuine deferral, not an
     // inline reader fallback.
-    const inner = stepChain(a.nested, params);
+    const inner = stepChain(by.nested, params);
     if (inner[0]?.name === 'project')
       throw new Error('group().by(project(...)) composite key not supported by generic child lowering');
     throw new Error('group().by(traversal) key not supported by generic child lowering');
   }
-  throw new Error('unsupported group().by() key modulator');
 }
 
 const GROUP_VALUE_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
@@ -422,12 +421,12 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
   }
   else if (src.valExpr) { val = { kind: 'scalarList' }; valNode = q`json_group_array(${src.valExpr}) AS gv`; }
   else {
-    const a = valArgs[0];
-    if (typeof a === 'string') { // by('age') → list of scalars (first-under-multi per member)
-      const pe = scalarProp(src.ctx, a);
+    const by = classifyBy(valArgs);
+    if (by.kind === 'key') { // by('age') → list of scalars (first-under-multi per member)
+      const pe = scalarProp(src.ctx, by.key);
       val = { kind: 'scalarList' }; valNode = q`json_group_array(${pe}) AS gv`;
-    } else if (a && typeof a === 'object' && 'nested' in a) {
-      const inner = stepChain(a.nested, st.params);
+    } else if (by.kind === 'nested') {
+      const inner = stepChain(by.nested, st.params);
       const names = inner.map((s) => s.name);
       if (names.length === 1 && names[0] === 'tail') { val = { kind: 'elementLast', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx, true); }
       else if (names.length === 1 && names[0] === 'fold') { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx, true); }

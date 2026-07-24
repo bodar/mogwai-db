@@ -11,18 +11,17 @@ import { type Compiled } from '../../sql/kernel/render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
 import { lowerGlobalCount } from './barrier.ts';
 import { pushChildScope, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
-import { classifyElementChild, classifyListChild, classifyScalarChild, reuseCurrentFrame, ROOT_SCOPE } from './child-shape.ts';
+import { byAt, classifyBy, classifyElementChild, classifyListChild, classifyScalarChild, reuseCurrentFrame, ROOT_SCOPE } from './child-shape.ts';
 
 // ---------- select()/project() ----------
 
 /** Interpret one by() modulator's args into a projected sub-value kind. */
 function byToEntry(byArgs: any[] | undefined): { sub: 'vertex' | 'value'; key?: string } {
-  if (!byArgs || byArgs.length === 0) return { sub: 'vertex' }; // no by() / bare by() → the element itself
-  const a = byArgs[0];
-  if (typeof a === 'string') return { sub: 'value', key: a };
-  if (a && typeof a === 'object' && 'nested' in a) throw new Error('by(traversal) modulator not yet supported');
-  if (a && typeof a === 'object' && 'token' in a) throw new Error(`by(T.${a.token}) modulator not yet supported`);
-  throw new Error('unsupported by() modulator');
+  const by = classifyBy(byArgs);
+  if (by.kind === 'none') return { sub: 'vertex' }; // no by() / bare by() → the element itself
+  if (by.kind === 'key') return { sub: 'value', key: by.key };
+  if (by.kind === 'nested') throw new Error('by(traversal) modulator not yet supported');
+  throw new Error(`by(T.${by.token}) modulator not yet supported`);
 }
 
 /** Re-root the current traverser on an element id held in one of its carried alias
@@ -45,9 +44,9 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
   if ((proj.name !== 'project' && proj.name !== 'select') || !proj.bys?.length) return null;
   const isProject = proj.name === 'project';
   const productive = proj.productiveBy === true;
-  const args = keys.map((_, i) => proj.bys![i % proj.bys!.length]);
+  const args = keys.map((_, i) => byAt(proj.bys, i));
   const specs = args.map((by) => by?.[0]);
-  const nested = specs.map((a) => a && typeof a === 'object' && 'nested' in a ? a.nested : null);
+  const nested = args.map((by) => { const c = classifyBy(by); return c.kind === 'nested' ? c.nested : null; });
   if (!nested.some(Boolean)) return null; // leave the mature all-direct path untouched
   // Classify each traversal-valued field ONCE (scalar > list > element, matching the emit
   // dispatch order), keeping the parsed body so emit reuses it — no separate is*Child re-parse.
@@ -286,16 +285,16 @@ export function lowerScalarProject(s: ScalarStream, proj: PStep): RecordStream |
   const keys = proj.args.filter((a): a is string => typeof a === 'string');
   if (!keys.length) return null;
   const bys = proj.bys ?? [];
-  const specs = keys.map((_, i) => (bys.length ? bys[i % bys.length]?.[0] : undefined));
+  const byClasses = keys.map((_, i) => classifyBy(byAt(bys, i)));
   // Only a bare by() (→ the value), a nested scalar-value traversal, or a by(select(elementLabel))
   // reading a path-history ELEMENT alias; a string key / T-token has no scalar meaning → defer.
-  if (specs.some((a) => a != null && !(typeof a === 'object' && 'nested' in a))) return null;
+  if (byClasses.some((c) => c.kind === 'key' || c.kind === 'token')) return null;
 
   const outer = pushChildScope(s);
   const ord = outer.frame.ordinal;
   const branches = keys.map((key, i) => {
-    const spec = specs[i];
-    const nested = spec && typeof spec === 'object' && 'nested' in spec ? spec.nested : null;
+    const c = byClasses[i];
+    const nested = c.kind === 'nested' ? c.nested : null;
     // by(select(elementLabel)) — re-root the seed on the path-history element and frame it
     // as an element record field (id/label/props), the SAME framing tryLowerTraversalRecord
     // uses for an element-parent record. The alias column rides on the seed's carried schema.
@@ -372,7 +371,7 @@ export function lowerRecordSelectProject(st: ElementStream, proj: PStep): Stream
     if (!entry) throw new Error(`select("${k}"): no such label — as("${k}") was not seen`);
     return { expr: aliasId(st.rel.as('p').c[entry.col], 'last'), elem: aliasElem(entry) };
   };
-  const entryKind = (i: number) => byToEntry(bys.length ? bys[i % bys.length] : undefined);
+  const entryKind = (i: number) => byToEntry(byAt(bys, i));
   const p = st.rel.as('p');
 
   // Multi-key select / any project → a Map per row.
@@ -420,7 +419,7 @@ export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, st
     const prefix = `e${i}`;
     const col = p.c[entry.col];
     presents.push(aliasPresent(col));
-    const by = byToEntry(bys.length ? bys[i % bys.length] : undefined);
+    const by = byToEntry(byAt(bys, i));
     if (popIsListResult(entry, pop)) {
       if (entry.shapes.size !== 1) throw new Error('select(Pop.all/mixed) over a mixed-shape label history not yet supported');
       const shape = [...entry.shapes][0];
