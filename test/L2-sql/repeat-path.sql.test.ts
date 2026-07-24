@@ -533,4 +533,10 @@ describe('repeat / path SQL', () => {
     expect(() => compile("g.withSack(0.0d).V(1).repeat(__.outE().sack(sum).by('weight')).times(2)", {}))
       .toThrow('a repeat() body must end on a vertex');
   });
+
+  test('until(__.sack().is(P)) reads the accumulated sack in the done column', () => {
+    const p = read("g.withSack(0L).V(1).repeat(__.sack(sum).by('age')).until(__.sack().is(gte(50))).sack()");
+    // the done column tests the freshly-folded sack against the predicate.
+    expect(p.sql).toMatch(/CASE WHEN \(c\d+\.sk \+ \(SELECT value FROM vertex_properties[^)]*\)\) >= \? THEN 1 ELSE 0 END AS done/);
+  });
 });

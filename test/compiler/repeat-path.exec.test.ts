@@ -271,4 +271,19 @@ test('edge-step body accumulates EDGE weights along a walk (path-weight, the age
   expect((run(store, "g.withSack(0.0d).V(1).repeat(__.outE().sack(sum).by('weight').inV()).times(2).sack()") as any[]).map((r) => r.v).sort((a, b) => a - b))
     .toEqual([1.4, 2.0]);
 });
+
+test('until(__.sack().is(P)) loops until the ACCUMULATED sack crosses a threshold', () => {
+  const store = seededStore();
+  // marko folds its own age (29) each iteration: 29 (<50, keep going), 58 (≥50, stop). → [58].
+  // This is the spreading-activation-with-threshold primitive (loop until relevance crosses a bound).
+  expect((run(store, "g.withSack(0L).V(1).repeat(__.sack(sum).by('age')).until(__.sack().is(gte(50))).sack()") as any[]).map((r) => r.v))
+    .toEqual([58]);
+});
+
+test('emit(__.sack().is(P)) emits the iterations whose accumulated sack matches', () => {
+  const store = seededStore();
+  // fold age 29 up to 3× → 29, 58, 87; emit those ≥40 → [58, 87].
+  expect((run(store, "g.withSack(0L).V(1).repeat(__.sack(sum).by('age')).times(3).emit(__.sack().is(gte(40))).sack()") as any[]).map((r) => r.v).sort((a, b) => a - b))
+    .toEqual([58, 87]);
+});
 });
