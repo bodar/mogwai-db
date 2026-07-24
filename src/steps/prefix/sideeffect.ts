@@ -133,12 +133,11 @@ const groupSideEffect = (isCount: boolean): StepFn => (s, st) => {
   if (typeof name !== 'string') throw new Error(`${isCount ? 'groupCount' : 'group'}() side-effect key must be a string`);
   if (st.carried.aliases.size || st.carried.path)
     throw new Error(`${isCount ? 'groupCount' : 'group'}('${name}') after as()/path() not yet supported`);
-  const tbl = st.elem === 'edge' ? 'edges' : 'nodes';
+  // The source shape (element table JOIN parent CTE + ctx + elem) is rebuilt from `parent`
+  // by cap('a') via elementGroupSource — the SAME kernel builder the terminal group() tail
+  // uses — so nothing here hand-builds a raw SQL string.
   const def: SideEffectDef = {
     kind: 'group',
-    from: `${tbl} n JOIN ${st.rel.name} p ON n.id=p.id`,
-    ctx: elemCtx(elemRel(st), st.elem),
-    elem: st.elem === 'edge' ? 'edge' : 'vertex',
     isCount,
     bys: (s as any).bys ?? [],
     parent: st,
