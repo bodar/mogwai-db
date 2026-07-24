@@ -55,6 +55,20 @@ test('order().by(key) then id() (n.props alias must be in scope)', () => {
     .toEqual([2, 1, 4, 6]); // vadas,marko,josh,peter by age 27,29,32,35
 });
 
+test('multi-term order().by() mixing property keys and traversals (shared modulation seam)', () => {
+  const store = seededStore();
+  // by(__.out().count()).by('name'): out-degrees vadas0,peter1,josh2,marko3 (all distinct)
+  expect(run(store, 'g.V().hasLabel("person").order().by(__.out().count()).by("name").values("name")').map((r) => r.v))
+    .toEqual(['vadas', 'peter', 'josh', 'marko']);
+  // by('age').by(__.out().count()): ages all distinct → age drives it entirely
+  expect(run(store, 'g.V().hasLabel("person").order().by("age").by(__.out().count()).values("name")').map((r) => r.v))
+    .toEqual(['vadas', 'marko', 'josh', 'peter']);
+  // by(__.in().count()).by(__.out().count()): in {marko0,peter0,vadas1,josh1}; tie-break out
+  // asc → peter(out1)<marko(out3); vadas(out0)<josh(out2)
+  expect(run(store, 'g.V().hasLabel("person").order().by(__.in().count()).by(__.out().count()).values("name")').map((r) => r.v))
+    .toEqual(['peter', 'marko', 'vadas', 'josh']);
+});
+
 test('outE().inV() equals out(); outV/inV recover edge endpoints', () => {
   const store = seededStore();
   // marko(1) outE knows → 2 edges → inV → vadas+josh (== out('knows'))

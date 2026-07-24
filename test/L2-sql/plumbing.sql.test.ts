@@ -379,11 +379,15 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     expect(run(seededStore(), 'g.V().select("x")')).toEqual([]);
     expect(() => compile('g.V().as("a").select("a").by(T.id)', {})).toThrow('by(T.id) modulator not yet supported');
     expect(() => compile('g.V().as("a").out().as("b").select("a","b").order()', {})).toThrow('order() on a record requires a by(field)');
-    // order().by() deferred modulators must throw, not silently sort by id
+    // order().by() deferred modulators must throw, not silently sort by id. A pure
+    // key/token order() with a T-token still defers (no traversal term → the acc.orders
+    // machinery, which has no token support yet).
     expect(() => compile('g.V().order().by(T.label)', {})).toThrow('by(T.label) modulator not yet supported');
-    // single order().by(traversal) is supported (see its own test); a MULTI-term order mixing
-    // a traversal still defers rather than silently sorting by id.
-    expect(() => compile('g.V().order().by("name").by(__.values("age"))', {})).toThrow('by(traversal) modulator not yet supported');
+    // single AND multi-term order().by(traversal) are now supported (mixing keys/traversals),
+    // lowered through the shared multi-modulator seam — see order-traversal-multi.feature (L4)
+    // and the order().by() SQL tests. They must NOT throw.
+    expect(() => compile('g.V().order().by("name").by(__.values("age"))', {})).not.toThrow();
+    expect(() => compile('g.V().order().by(__.in().count()).by(__.out().count())', {})).not.toThrow();
     // dedup: dedup(labels) is supported (see the dedup(labels) test); bare dedup after as()
     // stays deferred rather than answered wrongly (path-distinct semantics).
     expect(() => compile('g.V().as("a").out().dedup()', {})).toThrow('dedup() after as() not yet supported');

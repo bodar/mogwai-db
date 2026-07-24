@@ -3,7 +3,7 @@ import { nodes, edges, labels, vertexProperties, edgeProperties } from '../../sq
 import { flattenListArgs } from '../../gremlin/frontend.ts';
 import {
   predicateSql, rangeToOffsetLimit, elemCtx, extIdOf, jsonbGroupArray,
-  nodePropScalar, edgePropScalar, nodePropSortKey, edgePropSortKey, framedProps, valueMapProps, storedValueExpr,
+  nodePropScalar, edgePropScalar, nodePropSortKey, edgePropSortKey, scalarPropSortKey, compareKey, labelNameSub, framedProps, valueMapProps, storedValueExpr,
 } from '../../compiler/plan/plan.ts';
 import { type PStep } from '../../compiler/ir/strategies.ts';
 import { advance, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, withoutCarried, type ElementStream } from '../context/context.ts';
@@ -17,9 +17,9 @@ import { lowerPath } from './path.ts';
 import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerLegacyUnion } from '../prefix/branch.ts';
 import { lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
-import { tryCompileCountChild, tryCompileListChild, tryCompileScalarValueRows } from './child.ts';
+import { tryCompileCountChild, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueRows } from './child.ts';
 import { tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './scalar-arm.ts';
-import { childSteps, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE } from './child-shape.ts';
+import { childSteps, classifyBy, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, type ByClass } from './child-shape.ts';
 import { lowerElementDedup } from '../prefix/filter.ts';
 import { lowerCall } from './call.ts';
 import { engineOf } from '../../compiler/engine/deps.ts';
@@ -203,36 +203,53 @@ function lowerValueMapTail(st: ElementStream, proj: PStep, acc: TailAcc, steps: 
   throw new Error(`${step.name}() cannot consume the ${proj.name} result shape`);
 }
 
-/** order().by(__.trav): sort elements by a per-traverser scalar computed through the SAME
- *  generic scalar child seam dedup().by(traversal) uses (tryCompileScalarValueRows +
- *  pushChildScope) — NOT a bespoke reader. The child's first value per traverser becomes the
- *  sort key; a fresh encounter (ROW_NUMBER over that key) rides forward, so materialization /
- *  a following limit observe the order. Single by(traversal) term; mixed/multi-term and
- *  path/encounter-tracking streams fall through to the key machinery (return null → defer). */
+/** order() with AT LEAST ONE by(__.trav) term: sort elements by a composite key whose
+ *  traversal terms are per-traverser scalars computed through the SAME generic scalar child
+ *  seam dedup().by(traversal) uses (tryCompileScalarValueRows + pushChildScope) — NOT a
+ *  bespoke reader. Each traversal term contributes a LEFT JOIN of its first-value-per-traverser
+ *  column; each key/token term reads directly off the element table; the terms combine into one
+ *  ORDER BY (round-robin over the bys, matching every other by()-host). A fresh encounter
+ *  (ROW_NUMBER over the composite key) rides forward, so materialization / a following limit
+ *  observe the order. Returns null when NO term is a traversal (the acc.orders key machinery
+ *  handles the all-direct case) or a term is shuffle; throws for path/encounter-tracking
+ *  streams (a fresh encounter would collide) and unsupported child shapes. */
 function lowerElementOrderByTraversal(st: ElementStream, step: PStep): ElementStream | null {
   const bys = step.bys ?? [];
-  if (bys.length !== 1) return null;
-  const nested = bys[0].find((a: any) => a && typeof a === 'object' && 'nested' in a)?.nested;
-  if (!nested) return null; // a key/bare/token order — the acc.orders machinery handles it
-  const dir = bys[0].find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
-  if (dir === 'shuffle') return null;
+  if (!bys.length) return null;
+  const classes = bys.map(classifyBy);
+  if (!classes.some((c) => c.kind === 'nested')) return null; // all-direct → acc.orders machinery
+  if (classes.some((c) => c.dir === 'shuffle')) return null;   // shuffle has no composite meaning
   if (st.carried.encounter || st.carried.path)
     throw new Error('order().by(traversal) while tracking a path/encounter not yet supported');
-  const rows = tryCompileScalarValueRows(st, nested);
-  if (!rows?.stream.carried.encounter) throw new Error('order().by(traversal) requires a scalar child with encounter order');
-  const c = rows.stream.rel.as('c');
-  const ord = rows.frame.ordinal;
-  // First child value per traverser (child cardinality >1 → the first by child encounter).
-  const firstVal = st.q.cte(
-    q`SELECT ${c.c[ord]} AS ord, ${c.c.v} AS k, ROW_NUMBER() OVER (PARTITION BY ${c.c[ord]} ORDER BY ${c.c[rows.stream.carried.encounter]}) AS rn FROM ${c}`,
-    ['ord', 'k', 'rn'],
-  );
-  const d = rows.frame.domain.as('d');
-  const f = firstVal.as('f');
-  const dirSql = dir === 'desc' ? 'DESC' : 'ASC';
+
+  // Compile ALL traversal terms against ONE shared parent domain through the proven
+  // multi-modulator seam (tryCompileScalarModulations — the same substrate math()/format()/
+  // choose() use): one pushed scope, each child reuses the frame, and the returned domain rel
+  // exposes an `m{i}` value column per traversal term already joined back per traverser. Its
+  // `id` column rejoins the element table for the direct (key/token/bare) terms. Optional
+  // modulation (a non-productive traversal term → NULL) sorts NULLs first, matching TinkerPop's
+  // "an element with no such value sorts before ones that have it" for a comparator key.
+  const travSpecs = classes.flatMap((by) => by.kind === 'nested' ? [{ nested: by.nested, required: false }] : []);
+  const mods = tryCompileScalarModulations(st, travSpecs);
+  if (!mods) throw new Error('order().by(traversal) child shape not yet supported by generic child lowering');
+  const d = mods.rel.as('d');
+  const n = elemRel(st);
+  let travIdx = 0;
+  const orderExprs = classes.map((by: ByClass): Expression => {
+    const dirSql = by.dir === 'desc' ? q` DESC` : q` ASC`;
+    if (by.kind === 'nested') return q`${d.c[mods.values[travIdx++].value]}${dirSql}`;
+    if (by.kind === 'token') {
+      if (by.token === 'label') return q`${labelNameSub(n.c.label)}${dirSql}`;
+      if (by.token === 'id') return q`${elemCtx(n, st.elem).extIdExpr!}${dirSql}`;
+      throw new Error(`order().by(T.${by.token}) not yet supported`);
+    }
+    if (by.kind === 'key') return q`${scalarPropSortKey(elemCtx(n, st.elem), by.key)}${dirSql}`;
+    return q`${n.c.id}${dirSql}`; // bare by()
+  });
+  const orderKey = list([...orderExprs, q`${d.c.id}`], ', ');
   return advance(
     st,
-    q`SELECT ${d.c.id} AS id${carryFrag(st.carried, d)}, ROW_NUMBER() OVER (ORDER BY ${f.c.k} ${raw(dirSql)}, ${d.c.id}) AS encounter FROM ${d} LEFT JOIN ${f} ON ${f.c.ord}=${d.c[ord]} AND ${f.c.rn}=1`,
+    q`SELECT ${d.c.id} AS id${carryFrag(st.carried, d)}, ROW_NUMBER() OVER (ORDER BY ${orderKey}) AS encounter FROM ${d} JOIN ${n} ON ${n.c.id}=${d.c.id}`,
     { encounter: 'encounter' },
   );
 }
