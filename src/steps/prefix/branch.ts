@@ -260,7 +260,7 @@ export function tryLowerListUnion(s: Step, st: ElementStream): ListStream | null
  *  padded general path. tryLower emits a single LEFT JOIN — on a hit id = the neighbour, on a miss
  *  COALESCE keeps the input id; the carried columns come from `p` (the input) either way. Declines
  *  → the general originSeed/coalesce path below (result-equivalent). */
-export const SingleHopOptionalFastPath: FastPath<[ElementStream, PStep[]], ElementStream> = {
+export const SingleHopOptionalFastPath: FastPath<[ElementStream, Step[]], ElementStream> = {
   name: 'singleHopOptional',
   equivalentWhen: 'every disable-safe fast path is result-equivalent to generic lowering',
   appliesWhen: (ctx, st, body) =>

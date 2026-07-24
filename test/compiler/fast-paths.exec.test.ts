@@ -23,7 +23,7 @@ const ALL: FastPath<any, any>[] = [
 describe('FastPath registry completeness', () => {
   test('every FastPathConfig flag has exactly one FastPath', () => {
     const flagNames = Object.keys(DEFAULT_FAST_PATHS).sort();
-    const pathNames = ALL.map((p) => p.name).sort();
+    const pathNames = ALL.map((p) => p.name as string).sort();
     // Exact cover: no flag without a FastPath, no FastPath without a flag, no duplicates.
     expect(pathNames).toEqual(flagNames);
     expect(new Set(pathNames).size).toBe(pathNames.length);
