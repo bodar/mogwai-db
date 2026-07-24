@@ -1,7 +1,8 @@
 import { derived, q } from '../../sql/kernel/q.ts';
 import { scalarProp, predicateSql, jsonbGroupArray, elemCtx } from '../../compiler/plan/plan.ts';
 import { stepChain } from '../../gremlin/frontend.ts';
-import { normalize, type PStep } from '../../compiler/ir/strategies.ts';
+import { type PStep } from '../../compiler/ir/strategies.ts';
+import { normalize } from '../../compiler/ir/passes.ts';
 import { elemRel, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type ScalarStream } from '../context/stream.ts';
 import { tryCompileFirstElementValueRows, tryCompileScalarValueRows } from '../tail/child.ts';

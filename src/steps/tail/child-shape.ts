@@ -21,7 +21,8 @@ import type { Relation } from '../../sql/kernel/q.ts';
 import { stepChain } from '../../gremlin/frontend.ts';
 import type { Carried, ElementStream } from '../context/context.ts';
 import type { PropertyStream, ScalarStream, Stream } from '../context/stream.ts';
-import { normalize, type PStep } from '../../compiler/ir/strategies.ts';
+import { type PStep } from '../../compiler/ir/strategies.ts';
+import { normalize } from '../../compiler/ir/passes.ts';
 import { SCALAR_TRANSFORMS } from './scalar.ts';
 
 /** Root/child compilation context. A child frame retains the complete parent domain,

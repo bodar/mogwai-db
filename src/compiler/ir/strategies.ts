@@ -341,15 +341,13 @@ export function applyStrategies(steps: Step[], use: StrategyUse, params: Record<
   return out;
 }
 
-/** Run every normalization pass. `discard` rides out-of-band — it's an output
- *  shape (iterate() → return nothing), not a step the compiler dispatches. */
 /** Absorb every `with(key, value)` step immediately following a `call` onto that call's
  *  `withArgs`, mirroring foldByModulators — so the call() compiler reads its modulators
  *  without peeking at siblings. `value` may be a string/literal OR a `{nested}` traversal
  *  (`__.constant(...)`); both are carried verbatim and resolved to a constant later
  *  (call-params.ts). A `with()` NOT preceded by a call() is left untouched (it is not a
  *  supported step elsewhere, so it will fail closed at dispatch if it ever appears). */
-function foldCallWith(steps: PStep[]): PStep[] {
+export function foldCallWith(steps: PStep[]): PStep[] {
   const out: PStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
@@ -367,16 +365,12 @@ function foldCallWith(steps: PStep[]): PStep[] {
   return out;
 }
 
-export function normalize(steps: Step[]): { steps: PStep[]; discard: boolean } {
-  const stripped = stripTerminal(steps);
-  return { steps: dropRedundantOrder(collapseFoldCountLocal(foldCallWith(foldChooseOptions(foldByModulators(foldRepeatClusters(stripped.steps)))))), discard: stripped.discard };
-}
 
 /** `fold().count(Scope.local)` counts the one folded list's size = the number of upstream
  *  elements = `count()`. A provable identity that also unblocks group value children like
  *  by(__.out().order().fold().count(Scope.local)) (then dropRedundantOrder removes the
  *  order). Runs before dropRedundantOrder so the resulting order().count() is caught. */
-function collapseFoldCountLocal(steps: PStep[]): PStep[] {
+export function collapseFoldCountLocal(steps: PStep[]): PStep[] {
   const out: PStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
@@ -401,7 +395,7 @@ const ORDER_INSENSITIVE_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean'
  *  is left intact). Runs after foldByModulators so an order carrying a by() has its `.bys`
  *  set and is skipped. Unblocks group value children like by(__.out().order().count())
  *  and is a general optimization for root chains too. */
-function dropRedundantOrder(steps: PStep[]): PStep[] {
+export function dropRedundantOrder(steps: PStep[]): PStep[] {
   const out: PStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
@@ -414,7 +408,7 @@ function dropRedundantOrder(steps: PStep[]): PStep[] {
 /** v4 iterate() appends a trailing discard() (or bare none()): execute, return
  *  nothing. Pop the marker and flag it. A `none(pred)` with a predicate is NOT the
  *  discard marker — it's the NoneStep collection filter (kept for compilation). */
-function stripTerminal(steps: Step[]): { steps: Step[]; discard: boolean } {
+export function stripTerminal(steps: Step[]): { steps: Step[]; discard: boolean } {
   const last = steps[steps.length - 1];
   if (last && (last.name === 'discard' || (last.name === 'none' && last.args.length === 0)))
     return { steps: steps.slice(0, -1), discard: true };
@@ -431,7 +425,7 @@ function stripTerminal(steps: Step[]): { steps: Step[]; discard: boolean } {
  * repeat() still reaches its "without repeat()" throw). Validation and SQL build
  * stay in the branch compiler — this pass only removes the index arithmetic.
  */
-function foldRepeatClusters(steps: Step[]): PStep[] {
+export function foldRepeatClusters(steps: Step[]): PStep[] {
   const out: PStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     if (!REPEAT_CLUSTER.has(steps[i].name)) { out.push(steps[i]); continue; }
@@ -494,7 +488,7 @@ export function foldByModulators(steps: PStep[]): PStep[] {
  *  — the option-map form choose(choiceFn).option(key, traversal)…. A choose with no
  *  trailing option() is the predicate form (untouched → the prefix branch compiler).
  *  The compiler reads `.options` and never scans siblings. */
-function foldChooseOptions(steps: PStep[]): PStep[] {
+export function foldChooseOptions(steps: PStep[]): PStep[] {
   const out: PStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];

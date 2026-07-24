@@ -1,7 +1,7 @@
 import { Query, derived, q, type Expression, type Relation } from '../../sql/kernel/q.ts';
 import { type Step } from '../../gremlin/frontend.ts';
 import { type Elem } from '../../compiler/plan/plan.ts';
-import { normalize } from '../../compiler/ir/strategies.ts';
+import { normalize } from '../../compiler/ir/passes.ts';
 import { type ElementStream } from '../context/context.ts';
 import type { Engine } from '../../compiler/engine/deps.ts';
 

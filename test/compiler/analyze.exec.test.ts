@@ -4,7 +4,7 @@
 // what a plain order() does — the drift risk the shared isPlainOrder() predicate removes.
 import { test, expect, describe } from 'bun:test';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
-import { normalize } from '../../src/compiler/ir/strategies.ts';
+import { normalize } from '../../src/compiler/ir/passes.ts';
 import { analyze } from '../../src/compiler/ir/analyze.ts';
 
 /** Parse + normalize (so order().by() has its .bys folded, exactly as the compiler sees it),

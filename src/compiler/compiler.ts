@@ -1,6 +1,7 @@
 import { parseGremlin, stepChain, extractStrategies, extractSack, extractSideEffects } from '../gremlin/frontend.ts';
 import { type TypeNode } from '../gremlin/types.ts';
-import { applyStrategies, normalize } from './ir/strategies.ts';
+import { applyStrategies } from './ir/strategies.ts';
+import { runPasses, EMPTY_STRATEGY_USE } from './ir/passes.ts';
 import { LoweringEngine, collapseSafeFastPaths } from './engine/engine.ts';
 import { analyze } from './ir/analyze.ts';
 import { routeWrite } from '../steps/write/write.ts';
@@ -40,7 +41,7 @@ function applyDiscard(plan: Compiled | WritePlan): Compiled | WritePlan {
 export function compilePlan(gremlin: string, params: Record<string, any>, options?: CompileOptions, paramTypes: Record<string, TypeNode> = {}): Plan {
   const tree = parseGremlin(gremlin);
   const rewritten = applyStrategies(stepChain(tree, params, paramTypes), extractStrategies(tree, params), params);
-  const { steps, discard } = normalize(rewritten);
+  const { steps, discard } = runPasses(rewritten, EMPTY_STRATEGY_USE, params);
   if (steps.length === 0) throw new Error('empty traversal');
 
   const sackInit = extractSack(tree, params);
