@@ -78,6 +78,11 @@ export const ELEMENT_CHILD_STEPS = new Set([
   'out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'bothV',
   'has', 'hasLabel', 'hasId', 'where', 'filter', 'not', 'and', 'or', 'identity',
 ]);
+/** An element-PRESERVING child step: the ELEMENT_CHILD_STEPS movement/filter vocabulary PLUS a
+ *  mutate sack(op) (element→element, folds the carried sack). Both lower through the SAME
+ *  lowerElementSteps engine per parent, so a scoped sack (local(__.sack(op).by(...))) reuses the
+ *  root sack StepFn — no bespoke child reader. Bare read sack() is NOT here (it's a scalar producer). */
+export const isElementChildStep = (s: PStep): boolean => ELEMENT_CHILD_STEPS.has(s.name) || isSackMutate(s);
 /** The scalar-producing projection vocabulary the element-parent classifier recognizes:
  *  a step that, over an element prefix, lowers to one scalar per input. `values`/`id`/`label`
  *  read the element; `constant` rebinds it; `call`/`math`/`sack`/`format` are the generalized
@@ -87,6 +92,15 @@ export const ELEMENT_CHILD_STEPS = new Set([
  *  Kept in lockstep with the scalar-producing TAIL entries in projection.ts (SCALAR_PROJ +
  *  call/math/sack/format); count() is a reducer/barrier with its own classifyCountChild path. */
 const SCALAR_PRODUCER = new Set(['values', 'id', 'label', 'constant', 'call', 'math', 'sack', 'format']);
+
+/** A sack step in its MUTATE form (`sack(Operator.x)` — carries an operator arg). This is
+ *  element-PRESERVING (element→element, folds the carried sack), so it belongs in an element
+ *  prefix, NOT as a scalar producer. Only the BARE read form `sack()` produces a scalar. Mirror
+ *  of engine.ts isSackMutate, kept here so this pure leaf has no engine dependency. */
+export const isSackMutate = (s: PStep): boolean =>
+  s.name === 'sack' && (s.args ?? []).some((a: any) => a && typeof a === 'object' && 'operator' in a);
+/** A bare read `sack()` — the scalar-producing form (rebinds the value to the carried sack). */
+const isSackRead = (s: PStep): boolean => s.name === 'sack' && !isSackMutate(s);
 const CHILD_SCALAR_ROW_STEPS = new Set([
   ...SCALAR_TRANSFORMS, 'is', 'order', 'limit', 'skip', 'range', 'tail', 'dedup',
   'count', 'sum', 'min', 'max', 'mean',
@@ -121,7 +135,9 @@ function elementRowParts(body: ReturnType<typeof stepChain>): { prefix: ReturnTy
   const at = body.findIndex((s) => CHILD_ELEMENT_ROW_STEPS.has(s.name));
   const prefix = at < 0 ? body : body.slice(0, at);
   const suffix = at < 0 ? [] : body.slice(at);
-  if (!prefix.length || prefix.some((s) => !ELEMENT_CHILD_STEPS.has(s.name))) return null;
+  // A mutate sack(op) is element-preserving → allowed in the prefix (isElementChildStep), so
+  // local(__.sack(op).by(...)) folds the sack per parent through the same lowerElementSteps engine.
+  if (!prefix.length || prefix.some((s) => !isElementChildStep(s))) return null;
   if (suffix.some((s) => !CHILD_ELEMENT_ROW_STEPS.has(s.name))) return null;
   return { prefix, suffix };
 }
@@ -143,12 +159,15 @@ export function isElementChild(nested: any, params: Record<string, any>): boolea
  * this never appends CTEs, so the prefix fold can stop before a homogeneous scalar
  * union without speculatively mutating the Query. */
 function scalarRowParts(body: ReturnType<typeof stepChain>): { prefix: ReturnType<typeof stepChain>; projection: any; suffix: ReturnType<typeof stepChain> } | null {
-  const at = body.findIndex((s) => SCALAR_PRODUCER.has(s.name));
+  // A mutate sack(op) is element-preserving, not a scalar producer — skip it here so the
+  // projection is the FIRST genuine scalar producer (a bare read sack(), values, …); a mutate
+  // sack in the run before it is part of the element prefix (isElementChildStep admits it).
+  const at = body.findIndex((s) => SCALAR_PRODUCER.has(s.name) && !isSackMutate(s));
   if (at < 0) return null;
   const prefix = body.slice(0, at);
   const projection = body[at];
   const suffix = body.slice(at + 1);
-  if (prefix.some((s) => !ELEMENT_CHILD_STEPS.has(s.name))) return null;
+  if (prefix.some((s) => !isElementChildStep(s))) return null;
   if (suffix.some((s) => !CHILD_SCALAR_ROW_STEPS.has(s.name))) return null;
   // Per-projection arg shape for the bespoke values/id/label/constant SQL builder. The
   // generalized producers (call/math/sack/format) carry their own args and route through the
