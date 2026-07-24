@@ -19,11 +19,17 @@ import type { PStep } from './strategies.ts';
 /** Fixed topological order — lower ordinal runs first. The ordinal is the ONLY thing that fixes
  *  cross-category order; ties within a category are broken by declaration position in that
  *  category's own array (see passes.ts assembly). */
-export const PASS_CATEGORIES = ['extract', 'fold', 'decoration', 'simplify', 'verify'] as const;
+export const PASS_CATEGORIES = ['extract', 'decoration', 'fold', 'simplify', 'verify'] as const;
 export type PassCategory = typeof PASS_CATEGORIES[number];
 // extract    — stripTerminal: pull out-of-band flags (discard). Runs first.
-// fold       — repeat/by/choose/callWith clustering: canonicalize multi-step shapes.
-// decoration — Subgraph/Partition/ProductiveBy: inject filters/stamps (external, config-driven).
+// decoration — Subgraph/Partition/ProductiveBy: inject filters/stamps into the RAW chain (external,
+//              config-driven). MUST run before fold: the injectors recurse into raw `{nested}` args
+//              (recurseInject), which foldRepeatClusters/foldChooseOptions move into `.cluster`/
+//              `.options` — decorating after fold would silently miss a repeat()/choose() body (a
+//              subgraph/partition criterion NOT injected = an unfiltered leak, the fail-closed hole).
+// fold       — repeat/by/choose/callWith clustering: canonicalize multi-step shapes. Injected
+//              has()/where()/property() steps carry no by()/cluster, so folding them is a no-op —
+//              running fold after decoration canonicalises the injected steps like any parsed one.
 // simplify   — dropRedundantOrder/collapseFoldCountLocal: provable no-op removals.
 // verify     — ReadOnly/EdgeLabel/ReservedKeys: assert legality, throw. Runs LAST.
 

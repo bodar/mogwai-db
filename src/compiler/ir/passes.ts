@@ -3,6 +3,8 @@ import { PASS_CATEGORIES, type Pass, type PassContext } from './pass.ts';
 import {
   stripTerminal, foldRepeatClusters, foldByModulators, foldChooseOptions, foldCallWith,
   collapseFoldCountLocal, dropRedundantOrder,
+  injectSubgraphRec, injectPartitionRec, markProductiveBy, verify,
+  NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
   type PStep,
 } from './strategies.ts';
 
@@ -45,13 +47,54 @@ const SIMPLIFY: Pass[] = [
   { name: 'dropRedundantOrder', category: 'simplify', run: (steps) => dropRedundantOrder(steps) },
 ];
 
-/** The ordered pipeline. Declaration order across groups fixes cross-category order; the Stage 3
- *  test checks THIS array against PASS_CATEGORIES so a future append to the wrong group fails
- *  loudly. (Decoration + verify groups arrive in Stage 2, when applyStrategies folds in here.) */
-export const PASSES: Pass[] = [...EXTRACT, ...FOLD, ...SIMPLIFY];
+// ---------- decoration (external withStrategies; config-gated) ----------
+// Each `applies` is a linear scan of ctx.strategies.with (typically 0-2 entries), never the step
+// chain — withoutStrategies suppression + the no-op filter are resolved ONCE in runPasses before
+// any pass runs, so `applies` here only asks "is this named". Decoration runs on the RAW chain
+// (before fold): the injectors recurse into raw `{nested}` args, so a repeat()/choose() body must
+// still be an arg, not yet folded into `.cluster`/`.options`. The injected has()/where()/property()
+// steps are then folded + simplified like any parsed step (they carry no by()/cluster of their own).
+const specNamed = (name: string) => (_steps: readonly PStep[], ctx: PassContext) =>
+  ctx.strategies.with.some((s) => s.name === name);
+const specFor = (name: string, ctx: PassContext) => ctx.strategies.with.find((s) => s.name === name)!;
+
+const DECORATION: Pass[] = [
+  {
+    name: 'SubgraphStrategy', category: 'decoration', applies: specNamed('SubgraphStrategy'),
+    run: (steps, ctx) => injectSubgraphRec(steps, specFor('SubgraphStrategy', ctx), ctx.params) as PStep[],
+  },
+  {
+    name: 'PartitionStrategy', category: 'decoration', applies: specNamed('PartitionStrategy'),
+    run: (steps, ctx) => injectPartitionRec(steps, specFor('PartitionStrategy', ctx), ctx.params) as PStep[],
+  },
+  {
+    name: 'ProductiveByStrategy', category: 'decoration', applies: specNamed('ProductiveByStrategy'),
+    run: (steps) => markProductiveBy(steps) as PStep[],
+  },
+];
+
+// ---------- verify (assert legality against ctx.originalChain; never rewrites) ----------
+// A verify pass IGNORES its `steps` argument (the live, possibly-decorated chain) and asserts
+// against ctx.originalChain — the user's authored chain, folded but not injected. This is correct,
+// not legacy mimicry: a PartitionStrategy write-stamp (property(key,val) after addV) must not trip
+// ReservedKeysVerificationStrategy, and a SubgraphStrategy out()→outE().inV() explosion must not
+// change what EdgeLabelVerification sees. verify() throws the spec's canonical message on a
+// violation; a passing traversal returns the chain unchanged.
+const VERIFY: Pass[] = [...VERIFICATION_STRATEGIES].map((name) => ({
+  name, category: 'verify' as const,
+  applies: specNamed(name),
+  run: (steps: PStep[], ctx: PassContext) => { verify(specFor(name, ctx), ctx.originalChain as PStep[]); return steps; },
+}));
+
+/** The ordered pipeline. Declaration order across groups fixes cross-category order (extract <
+ *  fold < decoration < simplify < verify); the Stage 3 test checks THIS array against
+ *  PASS_CATEGORIES so a future append to the wrong group fails loudly. */
+export const PASSES: Pass[] = [...EXTRACT, ...DECORATION, ...FOLD, ...SIMPLIFY, ...VERIFY];
 
 /** The empty strategy use — for callers/tests that run only the internal folds. */
 export const EMPTY_STRATEGY_USE: StrategyUse = { with: [], without: [] };
+
+const DECORATION_ORDINAL = PASS_CATEGORIES.indexOf('decoration');
 
 /** Canonicalise a chain through the internal FOLD passes only (no external withStrategies) — the
  *  entry point every NESTED sub-chain uses (child bodies, match patterns, write targets, correlated
@@ -61,21 +104,39 @@ export function normalize(steps: Step[]): { steps: PStep[]; discard: boolean } {
   return runPasses(steps, EMPTY_STRATEGY_USE);
 }
 
-/** Fold PASSES over the chain in category order. Replaces the old inside-out normalize() nesting;
- *  it does NOT yet apply external withStrategies (that is still applyStrategies, called before this
- *  in compiler.ts — Stage 2 folds it in). `discard` rides out-of-band on ctx.out (iterate()). */
+/** Fold PASSES over the chain in category order — the SINGLE pre-lowering rewrite entry, replacing
+ *  both the inside-out normalize() nesting AND the applyStrategies if/else ladder.
+ *
+ *  Strategy resolution (identical semantics to the old applyStrategies :322-339): reject a
+ *  withoutStrategies() of an always-on strategy; filter `with` down to the strategies that actually
+ *  do something (drop withoutStrategies-suppressed + no-op entries); then require every remaining
+ *  named strategy to be claimed by SOME pass's `applies` — the fail-closed catch-all, now a pipeline
+ *  invariant instead of a ladder `else throw`. `discard` rides out-of-band on ctx.out. */
 export function runPasses(steps: Step[], use: StrategyUse, params: Record<string, any> = {}): { steps: PStep[]; discard: boolean } {
-  const ctx: PassContext = { params, strategies: use, originalChain: [], out: { discard: false } };
+  for (const name of use.without)
+    if (ALWAYS_ON_STRATEGIES.has(name))
+      throw new Error(`withoutStrategies(${name}) is not supported: its effect (infix .and()/.or() folding) is unconditionally applied by this compiler and cannot be disabled.`);
+  const removed = new Set(use.without);
+  const active = use.with.filter((s) => !removed.has(s.name) && !NO_OP_STRATEGIES.has(s.name));
+  const ctx: PassContext = { params, strategies: { with: active, without: use.without }, originalChain: [], out: { discard: false } };
+
+  // Fail-closed invariant: every active (non-suppressed, non-no-op) strategy must be claimed by a
+  // decoration/verify pass of the same name, else it is a semantic/unknown strategy that would
+  // change results if silently ignored (the old ladder's catch-all `else throw`, now an invariant).
+  for (const spec of active)
+    if (!PASSES.some((p) => (p.category === 'decoration' || p.category === 'verify') && p.name === spec.name))
+      throw new Error(rejectMsg(spec.name));
+
   let chain = steps as PStep[];
-  let lastCategory = -1;
+  let lastOrdinal = -1;
   for (const pass of PASSES) {
-    const cat = PASS_CATEGORIES.indexOf(pass.category);
-    // Snapshot the folded-but-undecorated chain at the fold→decoration boundary, unconditionally
-    // (verify passes assert against it). No decoration/verify passes exist until Stage 2, but the
-    // boundary is fixed by category order now so the driver need not change when they arrive.
-    if (lastCategory < PASS_CATEGORIES.indexOf('decoration') && cat >= PASS_CATEGORIES.indexOf('decoration'))
-      ctx.originalChain = chain;
-    lastCategory = cat;
+    const ordinal = PASS_CATEGORIES.indexOf(pass.category);
+    // Snapshot the raw pre-decoration chain (extract-only: trailing discard stripped, nothing
+    // injected/folded) at the boundary into decoration, unconditionally — every compile crosses it
+    // in category order whether or not a decoration pass fires. Verify passes assert against THIS,
+    // the user's authored chain, so an injected partition stamp / exploded edge step is invisible.
+    if (lastOrdinal < DECORATION_ORDINAL && ordinal >= DECORATION_ORDINAL) ctx.originalChain = chain;
+    lastOrdinal = ordinal;
     if (pass.applies && !pass.applies(chain, ctx)) continue;
     chain = pass.run(chain, ctx);
   }

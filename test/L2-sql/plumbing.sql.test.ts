@@ -284,6 +284,15 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     expect(() => compile('g.withStrategies(ReservedKeysVerificationStrategy(throwException:true, keys:{"age"})).addV("person").property("age",29)', {}))
       .toThrow('is setting a property key to a reserved word: age');
     expect(() => compile('g.withStrategies(ReservedKeysVerificationStrategy(throwException:true)).addV("person").property("name","marko")', {})).not.toThrow();
+    // Verify runs against the user's ORIGINAL (pre-decoration) chain, not the injected one:
+    // PartitionStrategy(partitionKey:"label") injects property("label", ...) after addV as a write
+    // stamp. That injected stamp must NOT trip ReservedKeysVerificationStrategy (default {id,label})
+    // — the user's authored addV("person") sets no reserved key. Verifying the rewritten chain would
+    // spuriously reject a strategy combination TinkerPop itself allows.
+    expect(() => compile('g.withStrategies(new PartitionStrategy(partitionKey:"label", writePartition:"a"), ReservedKeysVerificationStrategy(throwException:true)).addV("person")', {})).not.toThrow();
+    // A user-written property("label", ...) DOES trip it (the stamp exemption is only for the injected one).
+    expect(() => compile('g.withStrategies(ReservedKeysVerificationStrategy(throwException:true)).addV("person").property("label","x")', {}))
+      .toThrow('is setting a property key to a reserved word: label');
     // `to` is only a vertex step in the to(Direction) form — an addE().to(__.V(...))
     // endpoint modulator must NOT trip EdgeLabel verification.
     expect(() => compile('g.withStrategies(EdgeLabelVerificationStrategy(throwException:true)).addE("knows").from(__.V(1)).to(__.V(2))', {})).not.toThrow();

@@ -1,7 +1,6 @@
 import { parseGremlin, stepChain, extractStrategies, extractSack, extractSideEffects } from '../gremlin/frontend.ts';
 import { type TypeNode } from '../gremlin/types.ts';
-import { applyStrategies } from './ir/strategies.ts';
-import { runPasses, EMPTY_STRATEGY_USE } from './ir/passes.ts';
+import { runPasses } from './ir/passes.ts';
 import { LoweringEngine, collapseSafeFastPaths } from './engine/engine.ts';
 import { analyze } from './ir/analyze.ts';
 import { routeWrite } from '../steps/write/write.ts';
@@ -17,14 +16,16 @@ export type { CompileOptions, FastPathConfig } from './options/fast-paths.ts';
 //
 // The compiler is three stages, each in its own module:
 //   1. front-end (frontend.ts)   — parse → Step[] IR
-//   2. normalize (strategies.ts) — Seam 3: pure Step[]→Step[] passes so the
-//                                   dispatch sees a canonical, peek-free chain
+//   2. rewrite   (ir/passes.ts)  — Seam 3: ONE categorized, ordered Pass pipeline (runPasses) —
+//                                   internal folds AND external withStrategies decoration/
+//                                   verification — so the dispatch sees a canonical, peek-free,
+//                                   policy-honoured chain. Chain-global facts come from ir/analyze.ts.
 //   3. dispatch  (steps/*.ts)    — Seam 2: prefix fold (buildPrefix) + tail
 //                                   (compileTail) for reads; routeWrite for writes
-// This file is just the wiring. Traversal-strategy handling — parsing the
-// withStrategies/withoutStrategies specs and applying them as step rewrites /
-// verification checks / fail-closed rejections — lives in strategies.ts
-// (extractStrategies front-end + applyStrategies). See that module's header.
+// This file is just the wiring. Traversal-strategy handling — parsing the withStrategies/
+// withoutStrategies specs (extractStrategies front-end) and applying them as decoration/verify
+// Passes with a fail-closed reject invariant — lives in the Pass pipeline (ir/passes.ts); the
+// concrete inject/verify/fold bodies + classification Sets stay in ir/strategies.ts.
 
 /** Apply v4 iterate()'s trailing discard: execute for effect, return nothing. Shared by the
  *  sync (Compiled/WritePlan) and segment resume paths — a discard turns any read leaf's shape
@@ -40,8 +41,7 @@ function applyDiscard(plan: Compiled | WritePlan): Compiled | WritePlan {
  *  widened — only execute.ts's orchestrator consumes a Plan. */
 export function compilePlan(gremlin: string, params: Record<string, any>, options?: CompileOptions, paramTypes: Record<string, TypeNode> = {}): Plan {
   const tree = parseGremlin(gremlin);
-  const rewritten = applyStrategies(stepChain(tree, params, paramTypes), extractStrategies(tree, params), params);
-  const { steps, discard } = runPasses(rewritten, EMPTY_STRATEGY_USE, params);
+  const { steps, discard } = runPasses(stepChain(tree, params, paramTypes), extractStrategies(tree, params), params);
   if (steps.length === 0) throw new Error('empty traversal');
 
   const sackInit = extractSack(tree, params);
