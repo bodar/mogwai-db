@@ -1,6 +1,7 @@
 import { q, list, empty, type Expression } from '../../sql/kernel/q.ts';
 import { stepChain, type Step } from '../../gremlin/frontend.ts';
-import { normalize, type PStep } from '../../compiler/ir/strategies.ts';
+import { type PStep } from '../../compiler/ir/strategies.ts';
+import { normalize } from '../../compiler/ir/passes.ts';
 import { advance, aliasColsOf, prevRel, type AliasEntry, type ElementStream, type StepFn } from '../context/context.ts';
 import { aliasId, aliasSeed, nodeEntry } from '../context/alias.ts';
 import { engineOf } from '../../compiler/engine/deps.ts';

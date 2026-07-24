@@ -3,7 +3,8 @@ import { q, value, list, empty, raw, render, type Expression } from '../../sql/k
 import { labelIn, nodeHasProp, edgeHasProp } from '../../compiler/plan/plan.ts';
 import { gremlinTypeOf, isCollectionType, storedScalar, flatType, mapEntryType, valueNodeOf, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { stepChain, isNested, type Step, type SackSpec } from '../../gremlin/frontend.ts';
-import { normalize, type PStep } from '../../compiler/ir/strategies.ts';
+import { type PStep } from '../../compiler/ir/strategies.ts';
+import { normalize } from '../../compiler/ir/passes.ts';
 import { readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../../sql/kernel/render.ts';
 import type { Engine } from '../../compiler/engine/deps.ts';
 import { compileInject } from './inject.ts';

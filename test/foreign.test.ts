@@ -7,7 +7,7 @@ import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { LoweringEngine } from '../src/compiler/engine/engine.ts';
 import { createAppScope, createCompilerScope } from '../src/scopes.ts';
 import { materializeFinal } from '../src/steps/tail/materialize.ts';
-import { normalize } from '../src/compiler/ir/strategies.ts';
+import { normalize } from '../src/compiler/ir/passes.ts';
 import { stepChain, parseGremlin } from '../src/gremlin/frontend.ts';
 import type { ForeignRow } from '../src/services/spi/types.ts';
 import type { Carry } from '../src/steps/context/context.ts';
