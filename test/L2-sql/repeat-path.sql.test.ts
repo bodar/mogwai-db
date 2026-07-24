@@ -490,4 +490,34 @@ describe('repeat / path SQL', () => {
     expect(() => compile('g.V(1).repeat(__.out()).emit().until(__.has("name","x"))', {})).toThrow('until() together with emit() not yet supported');
     expect(() => compile('g.V(1).repeat(__.out())', {})).toThrow('repeat() requires times(), until(), or emit()');
   });
+
+  // ---------- sack folded through the recursive walk (foldable carried column) ----------
+
+  test('sack(op).by() in a repeat body carries + folds a sk column through the walk', () => {
+    // movement-free accumulate + a sack-reading where guard (TinkerPop Repeat.feature:664).
+    const p = read('g.withSack(0L).V().repeat(__.sack(sum).by("age").where(__.sack().is(lt(59)))).times(2)');
+    // the recursive CTE declares `sk`, seeds it from the outer sack, folds per iteration…
+    expect(p.sql).toContain(', sk, bulk)'); // walk output carries sk before bulk (carriedCols order)
+    expect(p.sql).toContain('AS sk FROM c0'); // base term seeds sk from the source sack col
+    expect(p.sql).toMatch(/\(c\d+\.sk \+ \(SELECT value FROM vertex_properties/); // fold: prev.sk + by('age')
+    // …and the where(__.sack().is(lt(59))) guard reads the freshly-folded sack in the term.
+    expect(p.sql).toMatch(/\(c\d+\.sk \+ \(SELECT value FROM vertex_properties WHERE node=c\d+\.id AND key=\? ORDER BY id LIMIT 1\)\) < \?/);
+  });
+
+  test('sack(mult).by(constant) folds a per-hop decay factor across a movement walk', () => {
+    // spreading-activation decay: relevance × factor per hop — the agent-memory primitive.
+    const p = read('g.withSack(1.0d).V(1).repeat(__.out().sack(mult).by(__.constant(0.5d))).times(2).sack()');
+    expect(p.sql).toMatch(/\(c\d+\.sk \* CAST\(\? AS REAL\)\) AS sk/); // fold on the walked edge's target
+    expect(p.sql).toContain('re1.tgt AS id'); // movement + sack fold in ONE flat recursive term
+  });
+
+  test('bare movement repeat (no sack) is unchanged — no sk column threaded', () => {
+    const p = read('g.V(1).repeat(__.out()).times(2)');
+    expect(p.sql).not.toContain('AS sk');
+  });
+
+  test('repeat body sack defers a fan-out by(traversal) with a clear throw', () => {
+    expect(() => compile('g.withSack(0L).V().repeat(__.sack(sum).by(__.out().values("age"))).times(2)', {}))
+      .toThrow('sack().by(traversal) in a repeat() body not yet supported');
+  });
 });

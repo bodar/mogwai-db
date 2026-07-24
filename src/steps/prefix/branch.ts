@@ -1,7 +1,8 @@
-import { q, list, empty, Relation, type Expression } from '../../sql/kernel/q.ts';
+import { q, list, empty, value, raw, Relation, type Expression } from '../../sql/kernel/q.ts';
 import { edges } from '../../sql/schema.ts';
 import { stepChain, type Step } from '../../gremlin/frontend.ts';
-import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, elemCtx, type ScalarCtx, type Elem } from '../../compiler/plan/plan.ts';
+import { foldByModulators } from '../../compiler/ir/strategies.ts';
+import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, type ScalarCtx, type Elem } from '../../compiler/plan/plan.ts';
 import { tryInlinePredicate } from './predicate.ts';
 import { advance, elemRel, prevRel, carryFrag, carryFragMint, carriedCols, partitionOver, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn } from '../context/context.ts';
 import { type AliasShape } from '../context/alias.ts';
@@ -9,7 +10,7 @@ import { pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCo
 import { classifyListChild, classifyScalarChild, isElementChild, isListChild, isScalarChild, ROOT_SCOPE } from '../tail/child-shape.ts';
 import { carryOf, toListStream, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
 import { mergeVariantArms, unifyLists, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
-import { unionScalarStreams } from '../tail/scalar.ts';
+import { unionScalarStreams, SACK_OPS, combineSack } from '../tail/scalar.ts';
 import { engineOf, type Engine } from '../../compiler/engine/deps.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
@@ -440,11 +441,48 @@ export const flatMap: StepFn = (s, st) => {
 // a sub-CTE/subquery), so a multi-step body must compile to a SINGLE flat SELECT: a chain
 // of edge JOINs off `self`, plus has() filters as correlated WHERE conds. Movements
 // out/in/both fork by direction, so the body expands to the cartesian product of each
-// movement's directions (both() = 2) — one recursive SELECT per combo. Barrier/side-effect
-// bodies (limit/dedup/order/local/union/sack/groupCount/nested-repeat) can't live in a
-// recursive term and stay deferred; so does hasLabel()/complex has() (own follow-up).
+// movement's directions (both() = 2) — one recursive SELECT per combo. Bodies still
+// deferred here (can't live in one flat recursive term): barrier/collection steps
+// (limit/dedup/order/local/union/groupCount/nested-repeat), hasLabel()/complex has(). A
+// mutate sack(op).by(v) IS supported — it folds a carried accumulator (context.ts sack)
+// through the walk, and a where(__.sack().is(P)) guard reads the freshly-folded value.
 
 const REPEAT_MOVES = new Set(['out', 'in', 'both']);
+
+/** A body's sack fold, threaded through the walk left-to-right: `combineSack` applied at
+ *  the body position where the sack(op) step sits (so its by() reads the element the
+ *  traverser is on THEN). One SQL expression over `self.c.sk` + a correlated by-value —
+ *  no per-row JS, no self-reference twice. Only a mutate sack (has an operator) produces
+ *  one; a bare sack() read inside the body is not a fold. */
+export function repeatSackByValue(byArgs: any[] | undefined, curId: Expression): Expression {
+  const a = byArgs?.[0];
+  if (a === undefined) throw new Error('sack(Operator.x) in a repeat() body requires a by() modulator');
+  if (typeof a === 'string') return scalarProp(aliasCtx(curId, 'node'), a);
+  if (a && typeof a === 'object' && 'token' in a) {
+    if (a.token === 'label') return labelNameSub(aliasCtx(curId, 'node').labelIdExpr);
+    if (a.token === 'id') return curId;
+    throw new Error(`sack().by(T.${a.token}) in a repeat() body not yet supported`);
+  }
+  if (a && typeof a === 'object' && 'nested' in a) {
+    // A constant by() folds a fixed step (decay factor, per-hop increment); anything that
+    // reads the graph and could fan out can't live in a single flat recursive SELECT.
+    const inner = stepChain(a.nested, {});
+    if (inner.length === 1 && inner[0].name === 'constant') return q`CAST(${value(inner[0].args[0])} AS REAL)`;
+    throw new Error('sack().by(traversal) in a repeat() body not yet supported (only by(key)/by(T)/by(constant); a fan-out traversal cannot live in a recursive term)');
+  }
+  throw new Error('unsupported sack().by() modulator in a repeat() body');
+}
+
+/** The predicate `P` of a `where(__.sack().is(P))` body guard, or null if the where is
+ *  not that exact shape (a sack-reading loop guard). Lets the walk expand only from rows
+ *  whose freshly-folded sack still satisfies P — TinkerPop's Repeat.feature:664. */
+export function sackWhereGuard(step: Step): any | null {
+  if (step.name !== 'where') return null;
+  const inner = stepChain(step.args[0]?.nested, {});
+  if (inner.length === 2 && inner[0].name === 'sack' && (inner[0].args ?? []).length === 0 && inner[1].name === 'is')
+    return inner[1].args[0];
+  return null;
+}
 
 /** Cartesian product of each movement's (from,to) direction pairs. */
 function dirCombos(moves: Step[]): [string, string][][] {
@@ -453,13 +491,18 @@ function dirCombos(moves: Step[]): [string, string][][] {
   return combos;
 }
 
-/** Expand a movement+has() body into one {finalId, from, conds} per direction combo:
- *  each movement adds `JOIN edges reN ON reN.<from>=<curId> [AND label]`, advancing curId
- *  to `reN.<to>`; each has() adds a correlated predicate on the current node. */
-function expandRepeatBody(self: Relation, core: Step[]): { finalId: Expression; from: Expression; conds: Expression[] }[] {
+/** Expand a movement+has()+sack() body into one {finalId, from, conds, sackExpr} per
+ *  direction combo. Threads `curId` (element position) AND `sackExpr` (the accumulator)
+ *  left-to-right, so each sack(op).by() folds using the position the traverser holds THEN
+ *  and each where(__.sack().is(P)) guards on the sack value at that point. `sackExpr` is
+ *  null when the incoming stream has no sack and the body folds none. */
+function expandRepeatBody(
+  self: Relation, core: Step[], sackCol: string | undefined,
+): { finalId: Expression; from: Expression; conds: Expression[]; sackExpr: Expression | null }[] {
   const moves = core.filter((c) => REPEAT_MOVES.has(c.name));
   return dirCombos(moves).map((dirs) => {
     let curId: Expression = self.c.id;
+    let sackExpr: Expression | null = sackCol ? self.c[sackCol] : null;
     const joins: Expression[] = [];
     const conds: Expression[] = [];
     let mi = 0;
@@ -469,13 +512,26 @@ function expandRepeatBody(self: Relation, core: Step[]): { finalId: Expression; 
         const e = edges.as(`re${mi}`);
         joins.push(q` JOIN ${e} ON ${e.c[from]}=${curId}${step.args.length ? q` AND ${labelIn(`${e.name}.label`, step.args)}` : empty}`);
         curId = e.c[to];
-      } else {
+      } else if (step.name === 'has') {
         // has() only (hasLabel/complex has deferred at validation): a correlated EXISTS
         // over vertex_properties on the current node id.
         conds.push(nodeHasProp(curId, step.args[0], step.args[1]));
+      } else if (step.name === 'sack') {
+        // Mutate sack(op).by(v): fold the by-value (over the current position) into the
+        // accumulator. Reuses combineSack verbatim (boundary-agnostic operator semantics).
+        const op = (step.args ?? []).find((a: any) => a && typeof a === 'object' && 'operator' in a)?.operator;
+        if (!op) throw new Error('bare sack() (read) inside a repeat() body is not a fold — use where(__.sack()...) to guard');
+        if (!SACK_OPS.has(op)) throw new Error(`sack(Operator.${op}) not yet supported`);
+        sackExpr = combineSack(op, repeatSackByValue((step as any).bys?.[0], curId), sackExpr);
+      } else {
+        // where(__.sack().is(P)): expand only from rows whose current sack satisfies P.
+        const pred = sackWhereGuard(step);
+        if (pred === null) throw new Error(`repeat() body step ${step.name}() not yet supported`);
+        if (!sackExpr) throw new Error('where(__.sack()...) in a repeat() body requires a sack (withSack() or a body sack(op))');
+        conds.push(predicateSql(sackExpr, pred));
       }
     }
-    return { finalId: curId, from: q`${self}${list(joins, '')}`, conds };
+    return { finalId: curId, from: q`${self}${list(joins, '')}`, conds, sackExpr };
   });
 }
 
@@ -514,20 +570,34 @@ export const repeat: StepFn = (s, st) => {
   if (!timesStep && !hasUntil && !emitStep) throw new Error('repeat() requires times(), until(), or emit()');
   const emitBefore = !!emitStep && cluster.indexOf(emitStep) < cluster.indexOf(rep);
 
-  // Body: movements (out/in/both) + has() filters, optionally a trailing simplePath().
-  // A bare single movement keeps the original (unchanged) term; anything more uses
-  // the general JOIN-chain term (expandRepeatBody). Barrier/side-effect bodies defer.
-  const body = stepChain(rep.args[0]?.nested, st.params);
+  // Body: movements (out/in/both) + has() filters + a mutate sack(op).by() fold +
+  // a where(__.sack().is(P)) loop guard, optionally a trailing simplePath(). A bare single
+  // movement keeps the original (unchanged) term; anything more uses the general JOIN-chain
+  // term (expandRepeatBody). Barrier/collection bodies still defer.
+  // Fold trailing by() onto their host (sack(op).by(v) → sack with .bys) so the body sees
+  // the same canonical shape as any chain — the body is a sub-traversal, not a special case.
+  const body = foldByModulators(stepChain(rep.args[0]?.nested, st.params));
   const simplePathInBody = body.length > 0 && body[body.length - 1].name === 'simplePath';
   const core = simplePathInBody ? body.slice(0, -1) : body;
   const moves = core.filter((c) => REPEAT_MOVES.has(c.name));
-  const badStep = core.find((c) => !REPEAT_MOVES.has(c.name) && c.name !== 'has');
-  if (!moves.length || badStep)
-    throw new Error(`repeat(__.${body.map((c) => c.name + '()').join('.')}) not yet supported (movements + has(), optional trailing simplePath(); barrier/side-effect bodies deferred)`);
+  // A body sack fold is a mutate sack(op) step; a sack-reading where guard is where(__.sack().is(P)).
+  const isSackFold = (c: Step): boolean => c.name === 'sack' && (c.args ?? []).some((a: any) => a && typeof a === 'object' && 'operator' in a);
+  const bodyFoldsSack = core.some(isSackFold);
+  const REPEAT_BODY_OK = (c: Step): boolean => REPEAT_MOVES.has(c.name) || c.name === 'has' || isSackFold(c) || sackWhereGuard(c) !== null;
+  const badStep = core.find((c) => !REPEAT_BODY_OK(c));
+  // A movement-free body is valid ONLY when it folds a sack (TinkerPop's on-the-spot
+  // accumulate, Repeat.feature:664); otherwise a body with no movement never progresses.
+  if ((!moves.length && !bodyFoldsSack) || badStep)
+    throw new Error(`repeat(__.${body.map((c) => c.name + '()').join('.')}) not yet supported (movements + has() + sack(op).by() + where(__.sack()...), optional trailing simplePath(); barrier/collection bodies deferred)`);
   // has() in a repeat body: only has(key, value|P) — a 3-arg or T-token form defers.
   const badHas = core.find((c) => c.name === 'has' && (typeof c.args[0] !== 'string' || c.args.length > 2));
   if (badHas) throw new Error('complex has() (3-arg / T-token) in a repeat() body not yet supported');
+  // The single-movement fast path only applies to a bare movement with no sack fold; any
+  // sack-folding body routes through the general expansion (it threads the accumulator).
   const singleMove = core.length === 1 && REPEAT_MOVES.has(core[0].name);
+  // The carried sack column: live if the incoming stream has one (withSack()/prior sack(op))
+  // or the body folds one. A body fold with no prior sack seeds fresh at the base term.
+  const sackCol = st.carried.sack ?? (bodyFoldsSack ? 'sk' : undefined);
   // times() → its fixed depth (the ONLY depth bound). until()/emit() have none —
   // they terminate at the natural fixpoint (see the docstring). null = no bound.
   const maxDepth = timesStep ? Number(timesStep.args[0]) : null;
@@ -562,12 +632,14 @@ export const repeat: StepFn = (s, st) => {
   const emitFn = hasEmitPred ? walkPredicate(engineOf(st), emitStep!, st.params, 'emit') : null;
   const emitCol = (id: Expression, depth: Expression): Expression => q`, CASE WHEN ${emitFn!(id, depth)} THEN 1 ELSE 0 END AS emit`;
 
-  const walkCols = ['id', 'depth', ...(trackArray ? ['path'] : []), ...(hasUntil ? ['done'] : []), ...(hasEmitPred ? ['emit'] : [])];
+  const walkCols = ['id', 'depth', ...(sackCol ? [sackCol] : []), ...(trackArray ? ['path'] : []), ...(hasUntil ? ['done'] : []), ...(hasEmitPred ? ['emit'] : [])];
   const walk = st.q.recursiveCte(walkCols, (self: Relation) => {
-    // One recursive-term SELECT: advance to `finalId`, bump depth, accumulate path/done,
-    // and guard expansion — shared depth<times / done=0 guards FIRST, then the branch's
-    // own guards, so the bare single-movement case is unchanged from before.
-    const mkRec = (finalId: Expression, from: Expression, branchGuards: Expression[]): Expression => {
+    // One recursive-term SELECT: advance to `finalId`, bump depth, fold the sack, accumulate
+    // path/done, and guard expansion — shared depth<times / done=0 guards FIRST, then the
+    // branch's own guards, so the bare single-movement case is unchanged from before.
+    // `sackExpr` (null for a sack-free walk) is the accumulator AFTER this iteration's folds.
+    const mkRec = (finalId: Expression, from: Expression, sackExpr: Expression | null, branchGuards: Expression[]): Expression => {
+      const sackAcc = sackCol ? q`, ${sackExpr ?? self.c[sackCol]} AS ${sackCol}` : q``;
       const pathAcc = trackArray ? q`, jsonb_insert(${self.c.path}, '$[#]', ${finalId}) AS path` : q``;
       const doneAcc = hasUntil ? doneCol(finalId, q`${self.c.depth} + 1`) : q``;
       const emitAcc = hasEmitPred ? emitCol(finalId, q`${self.c.depth} + 1`) : q``;
@@ -576,20 +648,21 @@ export const repeat: StepFn = (s, st) => {
       if (hasUntil) guards.push(q`${self.c.done}=0`); // until() expands only from still-looping rows
       guards.push(...branchGuards);
       const where = guards.length ? q` WHERE ${list(guards, ' AND ')}` : q``;
-      return q`SELECT ${finalId} AS id, ${self.c.depth} + 1 AS depth${pathAcc}${doneAcc}${emitAcc} FROM ${from}${where}`;
+      return q`SELECT ${finalId} AS id, ${self.c.depth} + 1 AS depth${sackAcc}${pathAcc}${doneAcc}${emitAcc} FROM ${from}${where}`;
     };
     // simplePath()'s cycle guard: reject a finalId already on the accumulated path.
     const cycleGuard = (finalId: Expression): Expression[] =>
       simplePathInBody ? [q`NOT EXISTS (SELECT 1 FROM json_each(${self.c.path}) je WHERE je.value=${finalId})`] : [];
-    // Bare single movement → the ORIGINAL term (alias `e`, label in WHERE), unchanged.
-    // Everything else (movement + has(), or multi-hop) → the general JOIN-chain expansion.
+    // Bare single movement → the ORIGINAL term (alias `e`, label in WHERE), unchanged
+    // (a sack-folding body always routes through expandRepeatBody, never here).
+    // Everything else (movement + has()/sack(), or multi-hop) → the general expansion.
     const rec = singleMove
       ? dirsFor(core[0].name).map(([from, to]) => {
           const e = edges.as('e');
           const guards = [...cycleGuard(e.c[to]), ...(core[0].args.length ? [labelIn('e.label', core[0].args)] : [])];
-          return mkRec(e.c[to], q`${self} JOIN ${e} ON ${e.c[from]}=${self.c.id}`, guards);
+          return mkRec(e.c[to], q`${self} JOIN ${e} ON ${e.c[from]}=${self.c.id}`, sackCol ? self.c[sackCol] : null, guards);
         })
-      : expandRepeatBody(self, core).map(({ finalId, from, conds }) => mkRec(finalId, from, [...conds, ...cycleGuard(finalId)]));
+      : expandRepeatBody(self, core, sackCol).map(({ finalId, from, conds, sackExpr }) => mkRec(finalId, from, sackExpr, [...conds, ...cycleGuard(finalId)]));
     // The SEED is tested by a correlated predicate in two cases: while-do until
     // (untilFirst) and emit-before. A bare `id` inside that predicate's
     // `(SELECT … FROM nodes WHERE id=<seed id>)` would bind BOTH sides to nodes.id
@@ -599,11 +672,15 @@ export const repeat: StepFn = (s, st) => {
     const seedSrc = seedTested ? st.rel.as('w') : st.rel;
     const seedId = seedTested ? seedSrc.c.id : q`id`;
     const seedSel = seedTested ? q`${seedId} AS id` : q`id`; // untested seed keeps bare `id` → unchanged
+    // Seed the sack from the outer row (withSack()/prior sack(op)); NULL when the body
+    // folds fresh with no prior seed (assign overwrites; a numeric fold with no seed is
+    // undefined per TinkerPop and yields NULL → the row drops, matching the linear path).
+    const seedSack = sackCol ? q`, ${st.carried.sack ? seedSrc.c[st.carried.sack] : q`NULL`} AS ${sackCol}` : q``;
     const seedPath = trackArray ? q`, jsonb_array(${seedId}) AS path` : q``;
     const seedDone = hasUntil ? (untilFirst ? doneCol(seedId, q`0`) : q`, 0 AS done`) : q``;
     // emit-before tests+emits the seed (depth 0); emit-after never emits the seed.
     const seedEmit = hasEmitPred ? (emitBefore ? emitCol(seedId, q`0`) : q`, 0 AS emit`) : q``;
-    return q`SELECT ${seedSel}, 0 AS depth${seedPath}${seedDone}${seedEmit} FROM ${seedSrc} UNION ALL ${list(rec, ' UNION ALL ')}`;
+    return q`SELECT ${seedSel}, 0 AS depth${seedSack}${seedPath}${seedDone}${seedEmit} FROM ${seedSrc} UNION ALL ${list(rec, ' UNION ALL ')}`;
   });
   // Output: until() → the rows that satisfied the stop predicate; emit(pred) → the rows
   // whose emit column is set (the depth band is baked into that column); bare emit() →
@@ -621,9 +698,14 @@ export const repeat: StepFn = (s, st) => {
   // sibling union arm's bulk so a branch merge agrees. A convergent-walk collapse that
   // reweights bulk through an unrolled times(n) is a later stage (a recursive GROUP BY is
   // rejected). `bulk` is the source-seeded carried column, always live here.
+  // The folded sack rides out of the walk as the carried `sk` column (bare `sack()` reads
+  // it downstream). advance() declares `sack: 'sk'` so carriedCols threads it forward.
+  // Column ORDER on the SELECT must match carriedCols(out): sack before bulk before path.
+  // The walk names its accumulator `sackCol`; the outbound carried name is always `sk`.
+  const sackOut = sackCol ? q`, ${raw(sackCol)} AS sk` : empty;
   if (wantsPathOutput)
-    return advance(st, q`SELECT id, 1 AS bulk, path FROM ${walk} WHERE ${outWhere}`, { path: { kind: 'array', col: 'path', elem: 'node' } });
-  return advance(st, q`SELECT id, 1 AS bulk FROM ${walk} WHERE ${outWhere}`);
+    return advance(st, q`SELECT id${sackOut}, 1 AS bulk, path FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, path: { kind: 'array', col: 'path', elem: 'node' } });
+  return advance(st, q`SELECT id${sackOut}, 1 AS bulk FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null });
 };
 
 // ---------- choose (predicate form) ----------
