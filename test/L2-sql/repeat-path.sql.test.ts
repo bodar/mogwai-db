@@ -144,6 +144,41 @@ describe('repeat / path SQL', () => {
     expect(() => executeQuery(store, 'g.V().repeat(__.both()).times(14).count()', {})).toThrow('integer overflow');
   });
 
+  test('bulk repeat feeds groupCount()/sum/group().by(count()) — bounded where enumerating explodes', () => {
+    // Same K12 clique. A groupCount()/sum after repeat().times(8) has the same ~2.5e9-traverser
+    // blow-up as count(); the bulk unroll re-enters generic lowering as a collapsed (id, bulk)
+    // frontier, so the bulk-aware barrier (SUM(bulk) per key / SUM(v·bulk)) stays bounded by |V|.
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    for (let i = 0; i < 12; i++) executeQuery(store, "g.addV('n').property('w', 2)", {});
+    const ids = store.query<{ id: number }>('SELECT id FROM nodes').map((r) => r.id);
+    for (const a of ids) for (const b of ids) if (a < b) store.query('INSERT INTO edges(src,label,tgt) VALUES (?,?,?)', [a, 0, b]);
+
+    // The compiled SQL must NOT recurse (the recursive term cannot host an aggregate) and must
+    // carry the unrolled GROUP-BY-SUM frontier — proof it is the bulk path, not enumeration.
+    for (const gq of [
+      'g.V().repeat(__.both()).times(8).groupCount()',
+      'g.V().repeat(__.both()).times(8).groupCount().by(T.label)',
+      'g.V().repeat(__.both()).times(8).values("w").sum()',
+      'g.V().repeat(__.both()).times(8).group().by(T.label).by(__.count())',
+    ]) {
+      const p = compile(gq, {}); if (p.kind !== 'read') throw new Error('read');
+      expect(p.sql).not.toContain('recursive');
+      expect(p.sql).toContain('SUM(b) AS bulk'); // the unrolled per-hop frontier collapse
+    }
+
+    // Correctness: groupCount() per vertex sums to the full traverser total (each of 12 ids gets
+    // its multiplicity), and values('w').sum() = w·(total) with w=2. All computed in ms.
+    const gc = Object.fromEntries(
+      store.query<{ gk: any; gv: number }>(...(() => { const p = compile('g.V().repeat(__.both()).times(8).groupCount().by(T.id)', {}); if (p.kind !== 'read') throw new Error('read'); return [p.sql, p.binds] as const; })())
+        .map((r) => [String(r.gk), Number(r.gv)]));
+    const total = Object.values(gc).reduce((s, n) => s + n, 0);
+    expect(total).toBe(2572306572);
+    expect(Object.keys(gc).length).toBe(12); // one bounded key per reachable vertex, not 2.5e9 rows
+
+    const [sum] = executeQuery(store, 'g.V().repeat(__.both()).times(8).values("w").sum()', {}).map((b: Buffer) => ioc.anySerializer.deserialize(b, true).v);
+    expect(Number(sum)).toBe(2 * 2572306572);
+  });
+
   test('P1.1 groupCount() weights by bulk; movementCollapse stays result-equivalent', () => {
     // Diamond: a→b, a→c, b→d, c→d. The two 2-hop walks a→b→d and a→c→d converge on d, so
     // groupCount() over a fan-out must count 2 for d — the case a per-key COUNT(*) gets wrong

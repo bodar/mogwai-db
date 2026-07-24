@@ -59,8 +59,10 @@ export interface Engine {
   buildPrefixFresh(steps: PStep[], params?: Record<string, any>): { st: ElementStream; stop: number };
 
   /** A FRESH child engine (fresh Query, same app scope). For a source constructor (inject()) that
-   *  builds its own seed relation on the fresh Query and then lowers the chain through it. */
-  subEngine(params?: Record<string, any>): Engine;
+   *  builds its own seed relation on the fresh Query and then lowers the chain through it.
+   *  `fastPaths` overrides the inherited config for this sub-compile — the bulk-repeat handoff
+   *  forces movementCollapse on, since its unrolled frontier is a collapsed (id, bulk) stream. */
+  subEngine(params?: Record<string, any>, fastPaths?: FastPathConfig): Engine;
 
   /** A variant engine sharing THIS engine's dependencies but bound to `q` — for the correlated
    *  inline child, which lowers movement/filter over a special InlineQuery (nested derived

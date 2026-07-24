@@ -154,17 +154,24 @@ These are **independent features unblocked by Stage 1's foldable-walk-state prim
 here so they are designed-for now, not retrofitted. Each is a separate change with its own tests;
 none is in scope for the prototype.
 
-1. **Bulk reweight through `times(n)`** (`branch.ts:621-623`, `engine.ts:541`) — **REASSESSED: NOT a
-   correctness gap, a tractability optimization only.** Investigation showed `groupCount`/`sum`/
-   `group().by(count())` after `times(n)` are ALREADY correct today: the generic recursive walk
-   enumerates every walk as its own row, and enumerate-then-group is result-equivalent to
-   bulk-then-sum (verified: `repeat(both()).times(2).count()` = 30 and `.groupCount()` totals 30).
-   The real gap is purely PERFORMANCE — the generic walk enumerates exponentially, so a deep dense
-   `groupCount`/`sum` intractably enumerates where `count()` collapses via `tryBulkRepeat`. So this is
-   a fast-path extension (extend `tryBulkRepeat`'s GROUP-BY-SUM collapse to feed group/reducer tails),
-   with the full fast-path burden (equivalence test + EXPLAIN/benchmark). Deferred as lower value —
-   results are already correct, only scale improves. The matrix §5 "❌ groupCount/sum" means
-   "not bulk-collapsed" (intractable at scale), NOT "wrong answer".
+1. **Bulk reweight through `times(n)`. ✅ DONE.** `tryBulkRepeat` (`src/steps/tail/bulk.ts`) no
+   longer hand-rolls its terminal: it builds the unrolled GROUP-BY-SUM collapsed frontier `(id, bulk)`
+   and hands it BACK to generic lowering as a bulk-carrying `ElementStream` (via a sub-engine with
+   `movementCollapse` forced on — its frontier IS collapsed). Every bulk-aware terminal the generic
+   tail already weights — `count()` (SUM(bulk)), `groupCount()`/`group().by(k).by(count())`
+   (SUM(bulk) per key), `sum()`/`min()`/`max()`/`mean()` (SUM(v·bulk)), and the bare element leaf
+   (framed (v, bulk)) — finishes off the collapsed relation with NO bulk arithmetic in `bulk.ts`. The
+   `suffixBulkSafe` gate admits `(out|in|both)* <bulk terminal>` plus the count-terminal
+   cardinality-only form (`as`/`select` count discards). The hand-rolled element/count materializers
+   in `bulk.ts` and the `movementCollapse`-only element-leaf bulk gate's coupling are GONE — one
+   generic path serves both collapse producers. Fast-path burden met: equivalence test
+   (`unified-lowering.exec.test.ts` — group/groupCount/sum/count/element enabled≡disabled on a
+   convergent graph) + tractability evidence (`repeat-path.sql.test.ts` — K12 `times(8)` groupCount/sum
+   stay non-recursive and |V|-bounded, computing the exact 2.5e9-traverser totals in ms). **L3
+   unchanged (1276)** — the official corpus's groupCount scenarios don't sit behind a `repeat().times(n)`
+   (they're direct / post-plain-movement, already served by `movementCollapse`) — but the capability is
+   proven by committed exec + L2 tests. The matrix §5 "❌ groupCount/sum" now holds for
+   `repeat().times(n)` chains too (bulk-collapsed, tractable).
 
 2. **`aggregate('x')` / side-effect inside a `repeat()` body. ✅ DONE** (Stage 6). A body-terminal
    `aggregate('x')` (bare or `local(__.aggregate('x'))`) collects every vertex the body emits — the

@@ -941,7 +941,10 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
   // Under movementCollapse a bare vertex/edge leaf carries the collapsed multiplicity out to
   // the wire: emit the carried `bulk` column so framing reads it as the per-value multiplicity
   // (framedResults picks up a `bulk` column wherever present — bulk is orthogonal to shape, not
-  // a Shape variant). Only when collapse is active; else the projection is unchanged.
+  // a Shape variant). Only when collapse is active; else the projection is unchanged. The
+  // bulkRepeatCount fast path reaches this leaf through a sub-engine with movementCollapse forced
+  // on (its unrolled frontier IS a collapsed stream), so the SAME gate serves both producers with
+  // no bulkRepeatCount coupling here — an uncollapsed compile's projection stays untouched.
   const wantBulk = !!engineOf(st).fastPaths.movementCollapse && !!st.carried.bulk && !reducer && !distinct
     && (proj.shape.kind === 'vertex' || proj.shape.kind === 'edge');
 
