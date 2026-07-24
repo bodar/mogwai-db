@@ -20,10 +20,11 @@
 // per-query state (q/params/carried/sideEffects).
 
 import type { Query } from '../../sql/kernel/q.ts';
-import type { FastPathConfig } from '../options/fast-paths.ts';
+import { fastPathContext, type FastPathConfig, type FastPathContext } from '../options/fast-paths.ts';
 import type { ServiceRegistry } from '../../services/spi/types.ts';
 import type { SackSpec } from '../../gremlin/frontend.ts';
 import type { PStep } from '../ir/strategies.ts';
+import type { ChainFacts } from '../ir/analyze.ts';
 import type { Compiled } from '../../sql/kernel/render.ts';
 import type { SegmentPlan } from '../segment.ts';
 import type { Carry, ElementStream } from '../../steps/context/context.ts';
@@ -48,8 +49,9 @@ export interface Engine {
   tryLowerElementSteps(steps: PStep[], seed: ElementStream): ElementStream | null;
 
   /** Seed the source (V/E/union) + fold its prefix; returns the stream and where the prefix ends.
-   *  Uses THIS engine's Query — one prefix per engine. */
-  buildPrefix(steps: PStep[], params?: Record<string, any>, sackInit?: SackSpec, wantsEncounter?: boolean): { st: ElementStream; stop: number };
+   *  Uses THIS engine's Query — one prefix per engine. `facts` supplies tracksPath +
+   *  demandsEncounter for the seed; omitted → the impl computes analyze(steps) itself. */
+  buildPrefix(steps: PStep[], params?: Record<string, any>, sackInit?: SackSpec, facts?: ChainFacts): { st: ElementStream; stop: number };
 
   /** buildPrefix on a FRESH child engine (fresh Query, same app scope) — for the write path, which
    *  materializes several independent target-id relations in one traversal (each needs its own WITH,
@@ -91,3 +93,8 @@ export function engineOf(c: Carry): Engine {
   if (!e) throw new Error('no lowering engine on this Query — a stream was built outside a compile scope');
   return e;
 }
+
+/** The FastPathContext for a stream/Carry — the two-hop `fastPathContext(engineOf(c).fastPaths)`
+ *  named once, since every family fast-path site needs exactly this. (facts stays out: the only
+ *  chain-fact a FastPath reads, movementCollapse's collapseSafe, is already folded into the flag.) */
+export const fastPathContextOf = (c: Carry): FastPathContext => fastPathContext(engineOf(c).fastPaths);

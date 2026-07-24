@@ -2,8 +2,8 @@ import { q, list, empty, derived, type Expression } from '../../sql/kernel/q.ts'
 import { edges } from '../../sql/schema.ts';
 import { dirsFor, edgeLabelFilter, type Elem } from '../../compiler/plan/plan.ts';
 import { advance, appendPathPos, carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, prevRel, type Carried, type PathState, type ElementStream, type StepFn } from '../context/context.ts';
-import { engineOf } from '../../compiler/engine/deps.ts';
-import { runFastPath, fastPathContext, type FastPath } from '../../compiler/options/fast-paths.ts';
+import { fastPathContextOf } from '../../compiler/engine/deps.ts';
+import { runFastPath, type FastPath } from '../../compiler/options/fast-paths.ts';
 
 /** True iff the ONLY live carried column is bulk — no per-traverser identity (aliases/path/
  *  sack/fromV) and no branch origin. Frontier collapse is result-preserving exactly here. */
@@ -29,7 +29,7 @@ export const MovementCollapseFastPath: FastPath<[ElementStream, Expression, Move
  *  is live; otherwise the plain UNION-ALL body (identical result set), refined for emission order
  *  when an encounter is live. */
 function finishMove(st: ElementStream, body: Expression, opts: MoveOpts): ElementStream {
-  const collapsed = runFastPath(MovementCollapseFastPath, fastPathContext(engineOf(st).fastPaths), st, body, opts);
+  const collapsed = runFastPath(MovementCollapseFastPath, fastPathContextOf(st), st, body, opts);
   if (collapsed) return collapsed;
   if (!st.carried.encounter) return advance(st, body, opts);
   // Emission-order refine: a movement fans a traverser out to several neighbours/edges, so the

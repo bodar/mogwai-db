@@ -87,7 +87,7 @@ const VERIFY: Pass[] = [...VERIFICATION_STRATEGIES].map((name) => ({
 }));
 
 /** The ordered pipeline. Declaration order across groups fixes cross-category order (extract <
- *  fold < decoration < simplify < verify); the Stage 3 test checks THIS array against
+ *  decoration < fold < simplify < verify); the Stage 3 test checks THIS array against
  *  PASS_CATEGORIES so a future append to the wrong group fails loudly. */
 export const PASSES: Pass[] = [...EXTRACT, ...DECORATION, ...FOLD, ...SIMPLIFY, ...VERIFY];
 

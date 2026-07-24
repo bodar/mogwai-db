@@ -25,8 +25,8 @@ import { empty, list, paren, q, value, type Expression } from '../../sql/kernel/
 import { carriedCols, carryFrag, type ElementStream } from '../context/context.ts';
 import { carryOf, toScalarStream, toVariantStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
 import { variantArmSelect, variantArmsMeta, variantCols, type VariantArm } from './variant.ts';
-import { engineOf } from '../../compiler/engine/deps.ts';
-import { runFastPath, fastPathContext, type FastPath } from '../../compiler/options/fast-paths.ts';
+import { engineOf, fastPathContextOf } from '../../compiler/engine/deps.ts';
+import { runFastPath, type FastPath } from '../../compiler/options/fast-paths.ts';
 import { gateScalar, tryInlineScalarPredicate, unionScalarStreams } from './scalar.ts';
 import { predicateSql } from '../../compiler/plan/plan.ts';
 import { type PStep } from '../../compiler/ir/strategies.ts';
@@ -261,7 +261,7 @@ export const ScalarPredicateInliningFastPath: FastPath<[ScalarStream, readonly S
 /** Pick the inline fast path unless scalarPredicateInlining is off, or a traversal predicate is
  *  beyond the inline vocabulary; then use the generic child-existence gate. Result-equivalent. */
 function buildScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): ScalarGate | null {
-  return runFastPath(ScalarPredicateInliningFastPath, fastPathContext(engineOf(s).fastPaths), s, specs)
+  return runFastPath(ScalarPredicateInliningFastPath, fastPathContextOf(s), s, specs)
     ?? genericScalarGate(s, specs);
 }
 

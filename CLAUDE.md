@@ -417,9 +417,11 @@ live in `test/fixtures/`:
 - `test/L4-addendum/` — `l4.test.ts` + `*.feature`
 - `test/fixtures/` — `seed-{modern,crew,uid}.ts` + `seed-graphson.ts` (imported by L3's
   `conformance-server.ts`, L4's `l4.test.ts`, and a few L2/root tests)
-- `test/compiler/` — compiler EXECUTION semantics (the behavioural twin of L2's SQL snapshots),
-  split by family 1:1 with `test/L2-sql/`: `{scalar,unified-lowering,movement-filter,branch,
-  select-project,group-properties,repeat-path,writes,typed-properties}.exec.test.ts`
+- `test/compiler/` — compiler EXECUTION semantics (the behavioural twin of L2's SQL snapshots):
+  the per-family files mirror `test/L2-sql/` (`{scalar,unified-lowering,movement-filter,branch,
+  select-project,group-properties,repeat-path,writes,typed-properties}.exec.test.ts`), PLUS the
+  pre-lowering IR-layer tests that have no L2 twin (`analyze`/`passes`/`fast-paths`.exec.test.ts —
+  ChainFacts, the Pass-pipeline ordering invariants, the FastPath registry-completeness check)
 - `test/` (root) — the remaining non-ladder tests: `contract.ts`, `wire`/`streaming`/
   `exact-values`/`typed-collections-e2e`/`performance`/`bun`/`cloudflare`/`serializers`/
   `typed-collections`/`scopes`/`services`/`federation`/`foreign`/`fts-index` `.test.ts`.
