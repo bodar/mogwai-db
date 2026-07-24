@@ -418,7 +418,10 @@ whole suite.
   throw — a message that satisfies a negative scenario's `raise an error … text of "…"`
   assertion, keyed off the corpus's own strings so a real bug throwing a canonical-looking
   error still shows `E` — and `E` per real compile/exec gap) prints during the run, then the
-  systematic-gap summary (deferral buckets + failing-step frequency) after. The summary counts
+  systematic-gap summary (deferral buckets + failing-step frequency + **failure clusters**:
+  `clusterGaps` groups contiguous real-gap throws into coherent areas — cucumber runs scenarios
+  in feature-file order — so a big cluster whose "biggest" type ≈ its size flags a high-leverage
+  single fix the frequency-sorted buckets can't show) after. The summary counts
   the same way: `summarize(records, expectedErrorSubstrings(FEATURES))` excludes expected
   negative-test throws entirely, so `uniqueFailed`, the buckets, and the failing-step frequency
   are ALL real gaps only (an expected throw is a pass, not a gap — it never appears in a count). **One committed state file,
