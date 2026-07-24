@@ -499,9 +499,13 @@ export class LoweringEngine implements Engine {
     return this.child(params, steps).buildPrefix(steps, params, undefined, { ...analyze(steps), demandsEncounter: false });
   }
 
-  /** A FRESH child engine (fresh Query, same app scope) — see the interface. */
-  subEngine(params: Record<string, any> = {}): LoweringEngine {
-    return this.child(params);
+  /** A FRESH child engine (fresh Query, same app scope) — see the interface. An explicit
+   *  `fastPaths` overrides the inherited config (used by the bulk-repeat handoff to force
+   *  movementCollapse on for its already-collapsed frontier). */
+  subEngine(params: Record<string, any> = {}, fastPaths?: FastPathConfig): LoweringEngine {
+    if (!fastPaths) return this.child(params);
+    const scope = createCompilerScope(this.app, { params, federationDepth: this.federationDepth });
+    return new LoweringEngine(this.app, scope, fastPaths);
   }
 
   /** A variant engine sharing THIS engine's deps but bound to `q` — for the correlated inline

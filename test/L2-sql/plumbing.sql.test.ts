@@ -139,15 +139,19 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     expect(c.sql).not.toContain('recursive');
     expect(c.sql).toContain('SUM(b) AS bulk');
     expect(c.sql).toContain('GROUP BY nb');
-    expect(c.sql).toContain('COALESCE(SUM(bulk), 0) AS v');
+    expect(c.sql).toContain('COALESCE(SUM(s.bulk), 0) AS v');
     // times(3) → f0 (seed) + three hop CTEs.
     expect((c.sql.match(/GROUP BY nb/g) ?? []).length).toBe(3);
-    // A post-repeat as()/movement/select() chain discarded by count remains bulkable:
-    // naming/building the final record does not change cardinality, and the extra hop
-    // propagates multiplicity with one more grouped frontier.
+    // A post-repeat as()/movement/select() chain discarded by count remains bulkable: the
+    // collapsed frontier re-enters generic lowering, and count() sums bulk regardless of the
+    // identity as()/select() name (cardinality is unchanged). The times(5) unroll is five
+    // GROUP-BY-SUM frontiers; the post-as() out("writtenBy") hop rides bulk forward as a plain
+    // UNION-ALL movement (per-hop collapse is off once an alias is live) — still bounded from the
+    // |V|-bounded frontier, never the exponential walk count, and never a recursion.
     const selected = read('g.V().repeat(__.out()).times(5).as("a").out("writtenBy").as("b").select("a","b").count()');
     expect(selected.sql).not.toContain('recursive');
-    expect((selected.sql.match(/GROUP BY nb/g) ?? []).length).toBe(6);
+    expect((selected.sql.match(/GROUP BY nb/g) ?? []).length).toBe(5);
+    expect(selected.shape).toEqual({ kind: 'count' });
     // A NON-bulkable repeat (path/emit/complex body) stays the enumerate-walk
     // recursion — bulking must not hijack it. emit() has no compile-time depth.
     expect(read('g.V(1).repeat(__.out()).emit().times(2).count()').sql).toContain('recursive');

@@ -119,7 +119,7 @@ Across all four branch steps, mixed-shape arms (scalar + element + list) merge i
 | Step | | Notes |
 |---|:--:|---|
 | `repeat(__.<out/in/both>).times(n)` | ✅ | `WITH RECURSIVE`; convergent walks collapse so a dense/deep walk returns in ms; i64 overflow fails loud |
-| `…times(n).count()` | ✅ | propagates through post-repeat labels/movement/`select(labels).count()`. ❌ `groupCount`/`by(count)`, `sum`, aliases live across the walk, unbounded `until`/`emit` |
+| `…times(n).<reducer>` | ✅ | the unrolled bulk frontier re-enters generic lowering, so `count()`, non-fan-out `groupCount()` (bare/`by('k')`/`by(T.*)`), `group().by(k).by(__.count())`, and `values('k').sum()`/`min`/`max`/`mean` all stay bulk-collapsed (|V|-bounded); `count()` also propagates through post-repeat labels/movement/`select(labels)`. ❌ aliases live across the walk (except discarded by `count()`), `by(traversal)` group keys, unbounded `until`/`emit` |
 | `emit` (before/after, bare) | ✅ | runs to the natural fixpoint |
 | `until(<pred>)`, `loops().is(n)` | ✅ | do-while / while-do. ❌ `until(__.loops()…)` beyond `loops().is(P)` |
 | `repeat().path()`, `simplePath()` in body | ✅ | JSONB array walk + `json_each` cycle guard |

@@ -95,9 +95,12 @@ describe('unified lowering characterization', () => {
         genericSql: 'UNION ALL SELECT id',
       },
       {
+        // fast = the unrolled GROUP-BY-SUM(bulk) frontier CTEs, whose collapsed (id,bulk) relation
+        // re-enters generic lowering; count() finishes via lowerGlobalCount's COALESCE(SUM(bulk)).
+        // generic = the enumerate-every-walk recursive CTE. Same total either way.
         key: 'bulkRepeatCount',
         query: 'g.V().repeat(__.out()).times(2).count()',
-        fastSql: 'SUM(bulk)',
+        fastSql: 'SUM(s.bulk)',
         genericSql: 'with recursive',
       },
       {
@@ -164,9 +167,11 @@ describe('unified lowering characterization', () => {
     // bare dedup() is collapse-safe: it resets bulk to 1, so the collapsed frontier deduplicates
     // to the same distinct-vertex set as the enumerated form.
     expect(idBag('g.V().both().both().dedup()', { movementCollapse: true })).toEqual(idBag('g.V().both().both().dedup()', { movementCollapse: false }));
-    // Element-returning repeat also bulks: the frontier unroll frames each vertex as (v, bulk),
-    // and the RLE-expanded multiset equals the generic recursive-CTE enumeration.
-    expect(read('g.V(1).repeat(__.both()).times(2)', { fastPaths: { bulkRepeatCount: true } }).sql).toContain('AS props, c.bulk AS bulk FROM');
+    // Element-returning repeat also bulks: the frontier unroll re-enters generic lowering as a
+    // bulk-carrying element stream, and the element leaf frames each vertex as (v, bulk) — the same
+    // p.bulk projection movementCollapse uses — so the RLE-expanded multiset equals the generic
+    // recursive-CTE enumeration.
+    expect(read('g.V(1).repeat(__.both()).times(2)', { fastPaths: { bulkRepeatCount: true } }).sql).toContain('AS props, p.bulk AS bulk FROM');
     expect(idBag('g.V(1).repeat(__.both()).times(2)', { bulkRepeatCount: true })).toEqual(idBag('g.V(1).repeat(__.both()).times(2)', { bulkRepeatCount: false }));
 
     // Bulk-aware order()+limit/range/skip (element-terminal): the collapsed cumulative-bulk window
@@ -186,6 +191,30 @@ describe('unified lowering characterization', () => {
       expect(read(query, { fastPaths: { movementCollapse: true } }).sql).toContain('OVER (ORDER BY'); // the cumulative-bulk window
       expect(orderedBag(query, true)).toEqual(orderedBag(query, false));
     }
+
+    // groupCount() / sum / group().by(k).by(count()) after repeat().times(n): the collapsed
+    // frontier feeds the generic bulk-aware barrier (SUM(bulk) per key / SUM(v·bulk)), so a
+    // dense/deep repeat stays bounded by |V| yet gives the SAME reduction as the enumerate-every-
+    // walk recursive form. group/groupCount rows carry (gk, gv); a scalar reducer carries (v). Both
+    // are order-independent aggregates → compare sorted rows. This is the equivalence obligation the
+    // bulkRepeatCount FastPath's equivalentWhen names.
+    const rows = (query: string, on: boolean) => runWith(store, query, { fastPaths: { bulkRepeatCount: on } })
+      .map((r: any) => JSON.stringify(bare(r))).sort();
+    for (const query of [
+      'g.V().repeat(__.both()).times(2).groupCount()',                 // bare element key
+      'g.V().repeat(__.both()).times(2).groupCount().by(T.label)',     // token key
+      'g.V().repeat(__.out()).times(2).groupCount().by("name")',       // property key
+      'g.V().repeat(__.both()).times(2).count()',                      // global count
+      'g.V().repeat(__.out()).times(2).values("age").sum()',           // numeric reducer after a scalar projection
+      'g.V().repeat(__.both()).times(2).group().by(T.label).by(__.count())', // group value-count
+      'g.V(1).repeat(__.both()).times(3).both().groupCount()',         // a bulk-preserving post-repeat movement then groupCount
+    ]) {
+      expect(rows(query, true)).toEqual(rows(query, false));
+    }
+    // The fast form genuinely collapses (no recursive walk); the generic form enumerates.
+    expect(read('g.V().repeat(__.both()).times(2).groupCount()', { fastPaths: { bulkRepeatCount: true } }).sql).not.toContain('with recursive');
+    expect(read('g.V().repeat(__.both()).times(2).groupCount()', { fastPaths: { bulkRepeatCount: false } }).sql).toContain('with recursive');
+    expect(read('g.V().repeat(__.out()).times(2).values("age").sum()', { fastPaths: { bulkRepeatCount: true } }).sql).not.toContain('with recursive');
   });
 
   test('the inline correlated predicate child stays index-only (no MATERIALIZE)', () => {
