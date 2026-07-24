@@ -158,21 +158,19 @@ const dedupKey = (r: QueryRecord) => `${r.g}\x00${r.gremlin}`;
 export interface TelemetrySummary {
   totalQueries: number;
   uniqueQueries: number;
+  /** Unique REAL-GAP failures: throws that don't satisfy a negative scenario's assertion.
+   *  Expected negative-test throws (the scenario passes) are not gaps and aren't counted here. */
   uniqueFailed: number;
-  /** Of `uniqueFailed`, how many threw a message that SATISFIES a negative scenario's
-   *  assertion — an expected error, not a gap. Excluded from `buckets`/`failingSteps` so the
-   *  ranking reflects only real gaps (0 when no expected-error set is supplied). */
-  expectedThrows: number;
-  /** Deferral buckets over the REAL gaps (expected throws removed), most frequent first. */
+  /** Deferral buckets over the real gaps, most frequent first. */
   buckets: { key: string; count: number; example: string; exampleSteps: string[] }[];
   /** Step names appearing in real-gap failing chains, most frequent first. */
   failingSteps: { step: string; count: number }[];
 }
 
 /** Summarize the run's telemetry into the systematic-gap view. `expected` (the corpus's own
- *  expected-error substrings, from expectedErrorSubstrings) partitions failures: a throw whose
- *  message contains one is an EXPECTED negative-test error (the scenario passes) and is kept out
- *  of the buckets so they rank only real gaps. Omit it (or pass []) to bucket every failure. */
+ *  expected-error substrings, from expectedErrorSubstrings) drops the noise: a throw whose
+ *  message contains one is an EXPECTED negative-test error (the scenario passes), not a gap, so
+ *  it's excluded from every count and ranking. Omit it (or pass []) to treat every throw as a gap. */
 export function summarize(records: QueryRecord[], expected: readonly string[] = []): TelemetrySummary {
   // Dedup by (graph, gremlin): re-runs (e.g. "count of" re-queries) and the
   // per-graph BeforeAll aggregations would otherwise inflate every bucket.
@@ -202,8 +200,7 @@ export function summarize(records: QueryRecord[], expected: readonly string[] = 
   return {
     totalQueries: records.length,
     uniqueQueries: all.length,
-    uniqueFailed: failed.length,
-    expectedThrows: failed.length - gaps.length,
+    uniqueFailed: gaps.length,
     buckets: [...buckets.entries()].map(([key, v]) => ({ key, ...v })).sort((a, b) => b.count - a.count),
     failingSteps: [...stepCounts.entries()].map(([step, count]) => ({ step, count })).sort((a, b) => b.count - a.count),
   };
@@ -332,12 +329,10 @@ export function formatReport(sum: TelemetrySummary, scenarios: ScenarioRow[]): s
   const passed = scenarios.filter((s) => s.passed).length;
   L.push('');
   L.push('════════ L3 TELEMETRY ════════');
-  const gaps = sum.uniqueFailed - sum.expectedThrows;
-  const split = sum.expectedThrows ? ` — ${sum.expectedThrows} expected throws (negative tests), ${gaps} real gaps` : '';
-  L.push(`queries: ${sum.totalQueries} total, ${sum.uniqueQueries} unique, ${sum.uniqueFailed} unique failed (compile/exec throw)${split}`);
+  L.push(`queries: ${sum.totalQueries} total, ${sum.uniqueQueries} unique, ${sum.uniqueFailed} real gaps (expected negative-test throws excluded)`);
   L.push(`scenarios: ${passed}/${scenarios.length} passed`);
   L.push('');
-  L.push('── deferral buckets (real gaps, expected throws excluded, most frequent first) ──');
+  L.push('── deferral buckets (real gaps, most frequent first) ──');
   for (const b of sum.buckets.slice(0, 30)) {
     L.push(`  ${String(b.count).padStart(4)}  ${b.key}`);
     L.push(`        e.g. ${b.example.slice(0, 110)}`);
