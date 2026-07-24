@@ -1,0 +1,166 @@
+import { type PStep } from './strategies.ts';
+
+// ---------- whole-chain analysis (Layer C1: annotation, not rewrite) ----------
+//
+// The chain-global properties the lowering Engine needs to know BEFORE it starts folding
+// steps: does the chain track a path? does it need a threaded emission-order encounter? is
+// movement-collapse result-safe here? Each was previously a separate re-walk of `steps`
+// scattered across engine.ts + strategies.ts; two of them re-scanned the SAME array (the
+// `demandsEncounterOrder` double-call), and two shared an order()-neutralizes-fanout
+// predicate that had to be kept in sync by a prose comment. `analyze(steps)` computes all
+// three in one place, with the shared predicate (`isPlainOrder`) defined ONCE so the two
+// scans that consume it cannot drift.
+//
+// This is DATA, no behavior — an immutable record, like FastPathConfig (and unlike the
+// LoweringEngine class, which has injected deps + behavior). It is NOT a Pass (it never
+// rewrites the chain) and NOT per-step (each field is one value for the whole chain, read
+// at one seeding site). `chainNeedsFromV`/`trackFromV` is deliberately NOT here — it is a
+// PER-SCOPE derivation (re-computed at lowerElementSteps over each child scope's own,
+// narrower step slice) and lives on `carried`, not on a chain-level record.
+
+/** Whole-chain properties derived once, before lowering. Read-only DATA (no methods); the
+ *  Engine consults it instead of re-scanning. */
+export interface ChainFacts {
+  /** was chainTracksPath        → seedSource: add the p0 path column? */
+  readonly tracksPath: boolean;
+  /** was demandsEncounterOrder  → seedSource: seed + thread the emission-order encounter? */
+  readonly demandsEncounter: boolean;
+  /** was chainCollapseSafe      → gate the movementCollapse fast path for this chain */
+  readonly collapseSafe: boolean;
+}
+
+/** Steps that need the linear path threaded through the fold: the source vertex becomes path
+ *  position p0 and every hop appends a position. */
+const PATH_STEPS = new Set(['path', 'simplePath', 'cyclicPath']);
+
+/** A bare/keyed `order()` (no by(traversal)) re-establishes a deterministic total order. It
+ *  is THE shared hinge of the two scans below: such an order() both clears "needs an emission
+ *  encounter" (a following slice sorts deterministically without one) AND is exactly the
+ *  order() after which movementCollapse's post-order limit/range/skip stay result-safe. Both
+ *  scans call this one predicate so they cannot disagree on what an order() does — the drift
+ *  risk the old two-file prose "must agree" comment carried. order().by(traversal) is NOT
+ *  plain (it mints its own encounter / is a nested sort) and returns false. */
+function isPlainOrder(step: PStep): boolean {
+  return step.name === 'order' && (step.bys ?? []).every((by: any[]) => by.length === 0 || typeof by[0] === 'string');
+}
+
+// ---------- demandsEncounter (moved verbatim from strategies.ts demandsEncounterOrder) ----------
+//
+// A traversal needs a threaded emission-order `encounter` ONLY when it contains a positional
+// consumer (limit/range/skip/tail/root-fold) DOWNSTREAM of a fan-out — those pick/order a
+// deterministic subset. Order-free chains (reducers, existence gates, bare dedup) never seed
+// it, so the hot path (index-only movement, movementCollapse) stays untouched. This is the
+// COARSE chain-level flag: seed once at the source, and from there each site keys on the
+// carried encounter's presence (like trackPath → carried.path), never re-scanning.
+
+/** Steps that fan a traverser out to >1 result per input (so a following slice is
+ *  order-sensitive). `values` is conservative — a property MAY be multi-valued. */
+const FANOUT_STEPS = new Set([
+  'out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'bothV', 'otherV',
+  'values', 'union', 'choose', 'coalesce', 'optional', 'local', 'flatMap',
+]);
+/** Positional consumers whose result depends on emission order once a fan-out precedes. */
+const POSITIONAL_CONSUMERS = new Set(['limit', 'range', 'skip', 'tail', 'fold']);
+
+/** Does this chain need a threaded emission-order encounter? True iff a positional consumer
+ *  appears after a fan-out. repeat()/match() are opaque boundaries this substrate doesn't
+ *  cross yet — return false there (preserving today's behaviour, never a silent mis-order). */
+function computeDemandsEncounter(steps: PStep[]): boolean {
+  let sawFanout = false;
+  for (const s of steps) {
+    if (s.name === 'repeat' || s.name === 'match') return false;
+    // A keyed/bare order() re-establishes a deterministic total order, so a following slice needs
+    // no emission encounter — clear the fan-out (the same predicate collapseSafe's sawOrder gate
+    // uses, so the two agree and movementCollapse stays enabled for <movement>.order().by(key).limit()).
+    if (isPlainOrder(s)) { sawFanout = false; continue; }
+    if (sawFanout && POSITIONAL_CONSUMERS.has(s.name)) return true;
+    // dedup(labels) keeps the FIRST traverser per key — first-in-emission, so it needs the
+    // encounter. Bare dedup() collapses a multiset regardless of order (never triggers).
+    if (sawFanout && s.name === 'dedup' && (s.args ?? []).some((a: any) => typeof a === 'string')) return true;
+    if (FANOUT_STEPS.has(s.name)) sawFanout = true;
+  }
+  return false;
+}
+
+// ---------- collapseSafe (moved verbatim from engine.ts chainCollapseSafe) ----------
+//
+// Convergent-walk collapse (SELECT id, SUM(bulk) GROUP BY id at each movement) is
+// result-equivalent ONLY when the whole chain is a linear movement/filter prefix ending in a
+// global bulk-aware reducer: nothing carries per-traverser identity (path/as/sack), nothing
+// is bulk-unaware on rows (order/limit/range/sample), and no branch/barrier/re-entry sits
+// between the collapse and the reducer's SUM(bulk). Anything outside these sets → not safe →
+// the plain UNION-ALL movement (identical result, unbounded rows). otherV is deliberately
+// excluded (its fromV context is per-traverser identity).
+const COLLAPSE_MOVES = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'bothV']);
+const COLLAPSE_FILTERS = new Set(['has', 'hasLabel', 'hasId', 'where', 'filter', 'not', 'and', 'or']);
+const COLLAPSE_PROJ = new Set(['values', 'id', 'label']); // a scalar projection feeding a numeric reducer
+const COLLAPSE_REDUCERS = new Set(['count', 'sum', 'mean', 'min', 'max']);
+
+/** A `groupCount()` terminal whose key does NOT fan out is a bulk-mergeable barrier: it
+ *  weights every group by SUM(bulk) (see lowerGroup's isCount), so collapsing convergent
+ *  walks into (element, N) before it is result-equivalent — the exact "groupCount after a
+ *  big fan-out/repeat" correctness+tractability case. A bare key (the element identity), a
+ *  property key `by('name')`, or a token key `by(T.label)` all follow the element's identity,
+ *  so merging same-id rows keeps every key intact. A by(traversal) key can fan out (one
+ *  traverser → many keys), which a GROUP BY-id merge would corrupt → left unsafe. group()
+ *  (element/list values) and group().by().by(reducer) are NOT admitted here: their weighting
+ *  is correct-by-construction but their collapse gating is deferred (see the wire-bulking doc). */
+function groupCountCollapseTerminal(step: PStep): boolean {
+  if (step.name !== 'groupCount' || (step.args?.length ?? 0) !== 0) return false;
+  const bys = step.bys ?? [];
+  if (bys.length === 0) return true;
+  if (bys.length !== 1) return false;
+  const a = bys[0]?.[0];
+  return a === undefined || typeof a === 'string' || (a && typeof a === 'object' && 'token' in a);
+}
+
+function computeCollapseSafe(steps: PStep[]): boolean {
+  const n = steps.length;
+  if (n < 2) return false; // need a source + ≥1 movement
+  if (steps[0].name !== 'V' && steps[0].name !== 'E') return false;
+  // Three safe terminals: a GLOBAL reducer (count/sum/mean/min/max — its SUM(bulk) sums the
+  // multiplicities), optionally after one scalar projection; a non-fan-out `groupCount()`
+  // (SUM(bulk) per key); OR an ELEMENT leaf (the bare vertex/edge projection, which frames each
+  // element as (v, bulk) on the wire). Everything between the source and the terminal must be
+  // movement/filter — anything that carries per-traverser identity (path/as/sack) or reads rows
+  // bulk-unaware (order/limit/range/sample/dedup/branch/re-entry) makes a GROUP BY-id merge wrong.
+  let end = n; // exclusive bound of the movement/filter prefix
+  const last = steps[n - 1];
+  const reducerTerminal = COLLAPSE_REDUCERS.has(last.name) && (last.args?.length ?? 0) === 0;
+  const groupCountTerminal = groupCountCollapseTerminal(last);
+  if (reducerTerminal || groupCountTerminal) {
+    end = n - 1;
+    if (reducerTerminal && end >= 2 && COLLAPSE_PROJ.has(steps[end - 1].name)) end -= 1; // one scalar projection before the reducer
+  }
+  let sawMove = false, sawOrder = false;
+  for (let i = 1; i < end; i++) {
+    const nm = steps[i].name;
+    if (COLLAPSE_MOVES.has(nm)) { sawMove = true; continue; }
+    if (COLLAPSE_FILTERS.has(nm)) continue;
+    // A bare dedup() BEFORE any order() is a prefix step that resets bulk to 1 (one traverser per
+    // distinct id), so a GROUP BY-id merge around it is correct. After an order() it is instead a
+    // tail ordered-dedup (first-per-key), which does not compose with a collapsed bulk stream →
+    // unsafe. dedup(label)/dedup().by() carry extra semantics → unsafe.
+    if (nm === 'dedup' && !sawOrder && (steps[i].bys?.length ?? 0) === 0 && (steps[i].args?.length ?? 0) === 0) continue;
+    // Element-terminal only: order() by a property key (or bare) just sorts the collapsed (v, N)
+    // rows, and a limit/range/skip AFTER it is bulk-aware (the tail cumulative-bulk window). Both
+    // stay identity-free. A reducer terminal routes limit/count through the bulk-UNAWARE count
+    // branch, so those forms are left unsafe. order().by(traversal) is unsafe (nested sort).
+    if (!reducerTerminal && !groupCountTerminal && isPlainOrder(steps[i])) { sawOrder = true; continue; }
+    if (!reducerTerminal && !groupCountTerminal && sawOrder && (nm === 'limit' || nm === 'range' || nm === 'skip')) continue;
+    return false; // any other step in the prefix (as/sack/path/branch/re-entry/…) → unsafe
+  }
+  return sawMove;
+}
+
+/** One cohesive analysis of the whole chain → the three chain-global facts. demandsEncounter
+ *  and collapseSafe run as separate loops (their state machines track different things), but
+ *  both call `isPlainOrder`, so they cannot disagree on how an order() neutralizes a fan-out.
+ *  One call site per distinct chain replaces up to three separate re-scans. */
+export function analyze(steps: PStep[]): ChainFacts {
+  return {
+    tracksPath: steps.some((s) => PATH_STEPS.has(s.name)),
+    demandsEncounter: computeDemandsEncounter(steps),
+    collapseSafe: computeCollapseSafe(steps),
+  };
+}
