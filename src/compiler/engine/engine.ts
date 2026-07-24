@@ -21,8 +21,8 @@ import { compileFromRecord, compileFromPath, selectRecordFromAlias } from '../..
 import { asOnStream, selectOneFromAlias } from '../../steps/tail/labelselect.ts';
 import { assertStreamColumns, continueLowering, isSuspension, type LoweringResult, type LoweringSuspension, type Stream } from '../../steps/context/stream.ts';
 import { type Compiled } from '../../sql/kernel/render.ts';
-import { tryBulkRepeat } from '../../steps/tail/bulk.ts';
-import { type FastPathConfig } from '../options/fast-paths.ts';
+import { BulkRepeatCountFastPath } from '../../steps/tail/bulk.ts';
+import { runFastPath, fastPathContext, type FastPathConfig } from '../options/fast-paths.ts';
 import type { ServiceRegistry } from '../../services/spi/types.ts';
 import { lowerScalarRows } from '../../steps/tail/scalar.ts';
 import { seedCall, isBarrierPoint, type BarrierPoint, type MidBarrierPoint } from '../../steps/tail/call.ts';
@@ -473,7 +473,7 @@ export class LoweringEngine implements Engine {
     // unrolled GROUP-BY-SUM(bulk) CTEs instead of an enumerate-every-walk recursion, so a
     // dense/deep count (grateful times(8) ≈ 2.5e15 walks) stays tractable. Null → not the
     // bulkable shape; fall through to the normal fold. See steps/bulk.ts.
-    const bulked = this.fastPaths.bulkRepeatCount ? tryBulkRepeat(this, steps, params, sackInit) : null;
+    const bulked = runFastPath(BulkRepeatCountFastPath, fastPathContext(this.fastPaths), this, steps, params, sackInit);
     if (bulked) return bulked;
 
     // Whole-chain facts, computed ONCE here (analyze): tracksPath + demandsEncounter feed the

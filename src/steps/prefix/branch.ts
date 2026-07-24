@@ -3,7 +3,7 @@ import { edges } from '../../sql/schema.ts';
 import { stepChain, type Step } from '../../gremlin/frontend.ts';
 import { foldByModulators } from '../../compiler/ir/strategies.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem } from '../../compiler/plan/plan.ts';
-import { tryInlinePredicate } from './predicate.ts';
+import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
 import { advance, elemRel, prevRel, carryFrag, carryFragMint, carriedCols, partitionOver, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type AliasShape } from '../context/alias.ts';
 import { pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
@@ -12,6 +12,7 @@ import { carryOf, toListStream, toVariantStream, type ListStream, type ScalarStr
 import { mergeVariantArms, unifyLists, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
 import { unionScalarStreams, SACK_OPS, combineSack } from '../tail/scalar.ts';
 import { engineOf, type Engine } from '../../compiler/engine/deps.ts';
+import { runFastPath, fastPathContext, type FastPath } from '../../compiler/options/fast-paths.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
  *  read back from `nodes` by subquery (the walk row carries only the id). Lets
@@ -42,6 +43,10 @@ function walkPredicate(engine: Engine, step: Step, params: Record<string, any>, 
   // decayed relevance crosses a bound. A mixed sack+element predicate stays deferred.
   const sackPred = nested.length === 2 && nested[0].name === 'sack' && (nested[0].args ?? []).length === 0 && nested[1].name === 'is'
     ? nested[1].args[0] : undefined;
+  // NB until()/emit() deliberately do NOT gate on PredicateInliningFastPath: a recursive-CTE term
+  // can't correlate to its outer row, so there is no generic (materialized) fallback here —
+  // disabling inlining would leave nothing to fall back to. So inline unconditionally, and if the
+  // body is beyond inline lowering, fail closed (a clear deferral), never silently mis-execute.
   return (id, depth, sackExpr) => {
     if (sackPred !== undefined) {
       if (!sackExpr) throw new Error(`${kind}(__.sack()...) requires a sack (withSack() or a body sack(op))`);
@@ -250,21 +255,31 @@ export function tryLowerListUnion(s: Step, st: ElementStream): ListStream | null
  *  window). General path: optional(t) = coalesce(t, identity) via the input ordinal
  *  — emit t's results, plus each input unchanged where t produced nothing. Same-shape
  *  only: the self-on-miss fallback is the input element, so t must not flip the kind. */
+/** The singleHopOptional fast path. Applies ONLY without path tracking or a live branch origin:
+ *  with a path, a hit extends it and a miss does not, so the two are ragged and must take the
+ *  padded general path. tryLower emits a single LEFT JOIN — on a hit id = the neighbour, on a miss
+ *  COALESCE keeps the input id; the carried columns come from `p` (the input) either way. Declines
+ *  → the general originSeed/coalesce path below (result-equivalent). */
+export const SingleHopOptionalFastPath: FastPath<[ElementStream, PStep[]], ElementStream> = {
+  name: 'singleHopOptional',
+  equivalentWhen: 'every disable-safe fast path is result-equivalent to generic lowering',
+  appliesWhen: (ctx, st, body) =>
+    ctx.enabled.singleHopOptional && !st.carried.origins.length && !st.carried.path
+    && body.length === 1 && (body[0].name === 'out' || body[0].name === 'in') && st.elem === 'node',
+  tryLower: (_ctx, st, body) => {
+    const [from, to] = dirsFor(body[0].name)[0];
+    const e = edges.as('e');
+    const p = prevRel(st, 'p');
+    return advance(st, q`SELECT COALESCE(${e.c[to]}, ${p.c.id}) AS id${carryFrag(st.carried, p)} FROM ${p} LEFT JOIN ${e} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(body[0].args)}`);
+  },
+};
+
 export const optional: StepFn = (s, st) => {
   assertForkSafe('optional', st);
   const body = stepChain(s.args[0]?.nested, st.params);
   if (!body.length) throw new Error('optional(traversal) required');
-  // Fast path only WITHOUT path tracking: with a path, hit extends it and miss doesn't,
-  // so the two are ragged and must go through the padded general path below.
-  if (engineOf(st).fastPaths.singleHopOptional !== false && !st.carried.origins.length && !st.carried.path && body.length === 1 && (body[0].name === 'out' || body[0].name === 'in') && st.elem === 'node') {
-    const [from, to] = dirsFor(body[0].name)[0];
-    const e = edges.as('e');
-    const p = prevRel(st, 'p');
-    // On a hit id = the neighbour; on a miss COALESCE keeps the input id. The carried
-    // columns (aliases) come from `p` (the input) either way — the label bindings are
-    // the input traverser's, correct in both cases.
-    return advance(st, q`SELECT COALESCE(${e.c[to]}, ${p.c.id}) AS id${carryFrag(st.carried, p)} FROM ${p} LEFT JOIN ${e} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(body[0].args)}`);
-  }
+  const fast = runFastPath(SingleHopOptionalFastPath, fastPathContext(engineOf(st).fastPaths), st, body);
+  if (fast) return fast;
   // Nesting is supported: originSeed mints a UNIQUE ordinal (o0, o1, …) per depth and
   // carries the outer ordinals through, so optional()/coalesce() compose.
   const { base, seedSt, ord } = originSeed(st);
@@ -820,7 +835,11 @@ const notCoalesce = (e: Expression): Expression => q`NOT COALESCE((${e}), 0)`;
  *  the else-seed to keep bind order interleaved with the arm SQL. Same gated-seed shape
  *  either way, so the arm compilers are unchanged. */
 function chooseGate(st: ElementStream, predNested: any): (negate: boolean) => ElementStream {
-  const inline = tryInlinePredicate(engineOf(st), stepChain(predNested, st.params), elemCtx(elemRel(st), st.elem), st.params);
+  // choose()'s predicate honours predicateInlining (unlike until()/emit(), it HAS a generic
+  // fallback below — tryGateByChildExistence — so disabling inlining compiles the same choose()
+  // generically). The flag gates the attempt; recognition failure also falls through to generic.
+  const inline = runFastPath(PredicateInliningFastPath, fastPathContext(engineOf(st).fastPaths),
+    () => tryInlinePredicate(engineOf(st), stepChain(predNested, st.params), elemCtx(elemRel(st), st.elem), st.params));
   if (inline) return (negate) => gate(st, negate ? notCoalesce(inline) : inline);
   const gated = tryGateByChildExistence(st, predNested)
     ?? (() => { throw new Error('choose() predicate not supported by inline predicate or generic child existence lowering'); })();

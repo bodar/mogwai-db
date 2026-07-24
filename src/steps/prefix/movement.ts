@@ -3,20 +3,34 @@ import { edges } from '../../sql/schema.ts';
 import { dirsFor, edgeLabelFilter, type Elem } from '../../compiler/plan/plan.ts';
 import { advance, appendPathPos, carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, prevRel, type Carried, type PathState, type ElementStream, type StepFn } from '../context/context.ts';
 import { engineOf } from '../../compiler/engine/deps.ts';
+import { runFastPath, fastPathContext, type FastPath } from '../../compiler/options/fast-paths.ts';
 
 /** True iff the ONLY live carried column is bulk — no per-traverser identity (aliases/path/
  *  sack/fromV) and no branch origin. Frontier collapse is result-preserving exactly here. */
 const isBulkOnly = (c: Carried): boolean =>
   !!c.bulk && c.aliases.size === 0 && !c.path && c.origins.length === 0 && !c.sack && !c.fromV && !c.encounter;
 
-/** Append a movement CTE, collapsing convergent walks when the movementCollapse fast path is
- *  active and no identity is live: `SELECT id, SUM(bulk) … GROUP BY id` bounds the frontier by
- *  reachable |V|. The moved body already carries `bulk` (parent multiplicity via carryFrag), so
- *  this just merges rows landing on the same element — a downstream reducer's SUM(bulk) is
- *  unchanged. Disabled (or identity live) → the plain UNION-ALL body, an identical result set. */
-function finishMove(st: ElementStream, body: Expression, opts: { elem?: Elem; fromV?: string | null; path?: PathState }): ElementStream {
-  if (engineOf(st).fastPaths.movementCollapse && isBulkOnly(st.carried) && !opts.fromV && !opts.path)
-    return advance(st, q`SELECT id, SUM(bulk) AS bulk FROM (${body}) mv GROUP BY id`, opts);
+type MoveOpts = { elem?: Elem; fromV?: string | null; path?: PathState };
+
+/** The movementCollapse fast path. The CHAIN-level gate (chainCollapseSafe) is already folded into
+ *  ctx.enabled.movementCollapse by collapseSafeFastPaths, so appliesWhen only does the PER-MOVE
+ *  live-state check: collapse is result-preserving exactly when no per-traverser identity rides the
+ *  carried columns (isBulkOnly) and this hop mints neither fromV nor a path position. tryLower emits
+ *  `SELECT id, SUM(bulk) … GROUP BY id`, bounding the frontier by reachable |V|; a downstream
+ *  reducer's SUM(bulk) is unchanged. Declines → the plain UNION-ALL body, an identical result set. */
+export const MovementCollapseFastPath: FastPath<[ElementStream, Expression, MoveOpts], ElementStream> = {
+  name: 'movementCollapse',
+  equivalentWhen: 'every disable-safe fast path is result-equivalent to generic lowering',
+  appliesWhen: (ctx, st, _body, opts) => ctx.enabled.movementCollapse && isBulkOnly(st.carried) && !opts.fromV && !opts.path,
+  tryLower: (_ctx, st, body, opts) => advance(st, q`SELECT id, SUM(bulk) AS bulk FROM (${body}) mv GROUP BY id`, opts),
+};
+
+/** Append a movement CTE. The movementCollapse fast path merges convergent walks when no identity
+ *  is live; otherwise the plain UNION-ALL body (identical result set), refined for emission order
+ *  when an encounter is live. */
+function finishMove(st: ElementStream, body: Expression, opts: MoveOpts): ElementStream {
+  const collapsed = runFastPath(MovementCollapseFastPath, fastPathContext(engineOf(st).fastPaths), st, body, opts);
+  if (collapsed) return collapsed;
   if (!st.carried.encounter) return advance(st, body, opts);
   // Emission-order refine: a movement fans a traverser out to several neighbours/edges, so the
   // encounter must be recomputed — a fresh ROW_NUMBER over (the traverser's prior encounter,

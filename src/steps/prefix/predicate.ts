@@ -7,6 +7,7 @@ import {
 } from '../../compiler/plan/plan.ts';
 import { compileCorrelatedChild } from '../tail/correlated.ts';
 import type { Engine } from '../../compiler/engine/deps.ts';
+import type { FastPath } from '../../compiler/options/fast-paths.ts';
 
 // ---------- where()/not()/filter(__.…) → a boolean filter predicate ----------
 //
@@ -108,6 +109,25 @@ function correlatedExists(engine: Engine, body: Step[], fromId: Expression, isPr
   if (valuesKey === undefined) return q`EXISTS(SELECT 1 FROM ${c})`;
   return q`EXISTS(SELECT 1 FROM ${c} WHERE ${hasProp(aliasCtx(c.c.id, child.elem), valuesKey, hasIs ? isPred : undefined)})`;
 }
+
+/** The predicateInlining fast path. Its recognizer VARIES by call site — where()/filter()/until()/
+ *  emit()/choose() inline via tryInlinePredicate, and()/or() via combineBranchPreds — so tryLower
+ *  takes the site's recognizer as a thunk and the FastPath contributes the uniform flag gate + the
+ *  contract declaration. appliesWhen is the flag alone; the shape recognition stays inside each
+ *  thunk (a two-stage recognizer that returns null when the body is beyond inline lowering, so a
+ *  consumer falls back to the generic child-existence gate — the semantic authority).
+ *
+ *  NB two of the five call sites do NOT gate on the flag, by design: choose()'s predicate DOES gate
+ *  (it has a generic fallback, tryGateByChildExistence); until()/emit() do NOT (a recursive-CTE term
+ *  can't correlate to its outer row, so there is no generic fallback — disabling inlining there
+ *  would have nothing to fall back to). Those two sites call tryInlinePredicate directly rather than
+ *  through this FastPath's appliesWhen — see branch.ts walkPredicate. */
+export const PredicateInliningFastPath: FastPath<[() => Expression | null], Expression> = {
+  name: 'predicateInlining',
+  equivalentWhen: 'every disable-safe fast path is result-equivalent to generic lowering',
+  appliesWhen: (ctx) => ctx.enabled.predicateInlining,
+  tryLower: (_ctx, recognize) => recognize(),
+};
 
 /** Optional correlated predicate optimization. Unsupported shapes return null so an
  * element consumer can fall back to generic child-existence lowering. */

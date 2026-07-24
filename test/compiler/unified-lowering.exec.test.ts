@@ -79,6 +79,16 @@ describe('unified lowering characterization', () => {
         genericSql: 'HAVING COUNT(',
       },
       {
+        // choose(pred, then[, else]) honours predicateInlining too (the gating-fix: chooseGate has
+        // a generic fallback — tryGateByChildExistence — unlike until()/emit(), so disabling inlining
+        // compiles the same choose() generically). Fast = the inline correlated EXISTS gate; generic
+        // = the materialized child-existence gate. Result-equivalent.
+        key: 'predicateInlining',
+        query: 'g.V().choose(__.out("knows"),__.values("name"),__.constant("none")).order()',
+        fastSql: 'EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e',
+        genericSql: 'ROW_NUMBER() OVER () AS o0',
+      },
+      {
         key: 'singleHopOptional',
         query: 'g.V().optional(__.out("knows")).count()',
         fastSql: 'LEFT JOIN edges',
