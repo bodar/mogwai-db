@@ -159,13 +159,21 @@ export interface TelemetrySummary {
   totalQueries: number;
   uniqueQueries: number;
   uniqueFailed: number;
-  /** Deferral buckets, most frequent first. */
+  /** Of `uniqueFailed`, how many threw a message that SATISFIES a negative scenario's
+   *  assertion — an expected error, not a gap. Excluded from `buckets`/`failingSteps` so the
+   *  ranking reflects only real gaps (0 when no expected-error set is supplied). */
+  expectedThrows: number;
+  /** Deferral buckets over the REAL gaps (expected throws removed), most frequent first. */
   buckets: { key: string; count: number; example: string; exampleSteps: string[] }[];
-  /** Step names appearing in unique failing chains, most frequent first. */
+  /** Step names appearing in real-gap failing chains, most frequent first. */
   failingSteps: { step: string; count: number }[];
 }
 
-export function summarize(records: QueryRecord[]): TelemetrySummary {
+/** Summarize the run's telemetry into the systematic-gap view. `expected` (the corpus's own
+ *  expected-error substrings, from expectedErrorSubstrings) partitions failures: a throw whose
+ *  message contains one is an EXPECTED negative-test error (the scenario passes) and is kept out
+ *  of the buckets so they rank only real gaps. Omit it (or pass []) to bucket every failure. */
+export function summarize(records: QueryRecord[], expected: readonly string[] = []): TelemetrySummary {
   // Dedup by (graph, gremlin): re-runs (e.g. "count of" re-queries) and the
   // per-graph BeforeAll aggregations would otherwise inflate every bucket.
   const uniq = new Map<string, QueryRecord>();
@@ -177,9 +185,11 @@ export function summarize(records: QueryRecord[]): TelemetrySummary {
   }
   const all = [...uniq.values()];
   const failed = all.filter((r) => !r.ok);
+  const isExpected = (r: QueryRecord) => expected.some((s) => (r.error ?? '').includes(s));
+  const gaps = failed.filter((r) => !isExpected(r));
 
   const buckets = new Map<string, { count: number; example: string; exampleSteps: string[] }>();
-  for (const r of failed) {
+  for (const r of gaps) {
     const key = bucketKey(r.error ?? '(no message)');
     const b = buckets.get(key);
     if (b) b.count++;
@@ -187,12 +197,13 @@ export function summarize(records: QueryRecord[]): TelemetrySummary {
   }
 
   const stepCounts = new Map<string, number>();
-  for (const r of failed) for (const s of new Set(r.steps)) stepCounts.set(s, (stepCounts.get(s) ?? 0) + 1);
+  for (const r of gaps) for (const s of new Set(r.steps)) stepCounts.set(s, (stepCounts.get(s) ?? 0) + 1);
 
   return {
     totalQueries: records.length,
     uniqueQueries: all.length,
     uniqueFailed: failed.length,
+    expectedThrows: failed.length - gaps.length,
     buckets: [...buckets.entries()].map(([key, v]) => ({ key, ...v })).sort((a, b) => b.count - a.count),
     failingSteps: [...stepCounts.entries()].map(([step, count]) => ({ step, count })).sort((a, b) => b.count - a.count),
   };
@@ -321,10 +332,12 @@ export function formatReport(sum: TelemetrySummary, scenarios: ScenarioRow[]): s
   const passed = scenarios.filter((s) => s.passed).length;
   L.push('');
   L.push('════════ L3 TELEMETRY ════════');
-  L.push(`queries: ${sum.totalQueries} total, ${sum.uniqueQueries} unique, ${sum.uniqueFailed} unique failed (compile/exec throw)`);
+  const gaps = sum.uniqueFailed - sum.expectedThrows;
+  const split = sum.expectedThrows ? ` — ${sum.expectedThrows} expected throws (negative tests), ${gaps} real gaps` : '';
+  L.push(`queries: ${sum.totalQueries} total, ${sum.uniqueQueries} unique, ${sum.uniqueFailed} unique failed (compile/exec throw)${split}`);
   L.push(`scenarios: ${passed}/${scenarios.length} passed`);
   L.push('');
-  L.push('── deferral buckets (systematic walls, most frequent first) ──');
+  L.push('── deferral buckets (real gaps, expected throws excluded, most frequent first) ──');
   for (const b of sum.buckets.slice(0, 30)) {
     L.push(`  ${String(b.count).padStart(4)}  ${b.key}`);
     L.push(`        e.g. ${b.example.slice(0, 110)}`);
