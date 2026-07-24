@@ -175,20 +175,16 @@ none is in scope for the prototype.
    is BulkSet-multiset-unioned (json_each of the prior bag `UNION ALL` the walk rows). Reuses the
    linear aggregate's `{kind:'list', of:{elem}}` def verbatim, so `cap('x')`/`unfold()` need no new
    path. **Delivers the reasoning-trace `:TOUCHED` provenance the memory vision wants.** Verified
-   correct via exec tests (raw rows) incl. the canonical `Aggregate.feature:627`. A mid-body
-   aggregate (`out().aggregate().out()`) and a by()-modulated aggregate-in-repeat stay deferred.
-   **L3 unchanged (1275): the validating scenario is blocked by a SEPARATE pre-existing bug —
-   `groupCount()` over a scalar-value stream frames as an empty `{}` Map at the wire (the compiled
-   SQL rows `gk/gv` are correct; `groupBuffer`/the group-frame path drops them). That defect is in
-   the group-materialization subsystem, independent of this work — recorded as its own follow-on.**
+   correct via exec tests incl. the canonical `Aggregate.feature:627` (which frames to
+   `{marko:1,vadas:2,josh:2,lop:5,ripple:3,peter:1}` end-to-end). A mid-body aggregate
+   (`out().aggregate().out()`) and a by()-modulated aggregate-in-repeat stay deferred.
+   **L3 1275 → 1276** (`g_V_repeatXaggregateXaXX_timesX2X_capXaX_unfold`, the movement-free form).
 
-**Discovered defect (own follow-on, NOT introduced here): `groupCount()` scalar-stream framing.**
-`g.V().values('name').groupCount()` (and `fold().unfold().groupCount()`, `inject([…]).unfold().
-groupCount()`) compile to correct `gk/gv` rows but frame as an empty `{}` Map at the GraphBinary wire.
-The shape is `{group, key:scalar-productive, val:count}` and the rows are populated, so the bug is in
-the group frame path (`execute.ts groupBuffer` / `materializeGroupRoot`), not the compiler. Blocks any
-L3 scenario ending in a scalar `groupCount` (incl. `Aggregate.feature:627`). Small-looking but sits in
-a different subsystem; surfaced rather than folded into the aggregate change.
+*(Retracted: an earlier draft claimed a `groupCount()` scalar-stream framing bug blocked
+`Aggregate.feature:627`. FALSE ALARM — it was a `JSON.stringify(Map)` inspection artifact in a
+throwaway debug harness (`JSON.stringify(new Map(...))` returns `"{}"` because a Map has no
+enumerable own properties). Decoding the actual GraphBinary wire via `[...map.entries()]` shows scalar
+`groupCount()` frames correctly; L3 confirms it. No code change was warranted and none was made.)*
 
 3. **`until`/`emit` predicates that read the accumulated sack. ✅ DONE** (Stage 5). `walkPredicate`
    now recognizes a pure `sack().is(P)` until/emit predicate (mirror of `sackWhereGuard`) and compares
