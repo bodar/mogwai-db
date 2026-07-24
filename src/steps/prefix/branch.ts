@@ -32,11 +32,24 @@ const walkNodeCtx = (idExpr: Expression): ScalarCtx => {
  *  Movement leaves correlate through the same compileCorrelatedChild as where()/choose().
  *  until() and emit() share this: the only difference is what the resulting column drives
  *  (termination vs output). */
-function walkPredicate(engine: Engine, step: Step, params: Record<string, any>, kind: 'until' | 'emit'): (id: Expression, depth: Expression) => Expression {
+function walkPredicate(engine: Engine, step: Step, params: Record<string, any>, kind: 'until' | 'emit'): (id: Expression, depth: Expression, sackExpr: Expression | null) => Expression {
   const nested = stepChain(step.args[0]?.nested, params);
   if (!nested.length) throw new Error(`${kind}() requires a traversal predicate`);
-  return (id, depth) => tryInlinePredicate(engine, nested, { ...walkNodeCtx(id), loopsExpr: depth }, params)
-    ?? (() => { throw new Error(`${kind}() predicate not supported by inline lowering`); })();
+  // A pure sack-reading predicate — until(__.sack().is(P)) / emit(__.sack().is(P)) — reads the
+  // walk's ACCUMULATED sack, not an element property, so it can't route through the element
+  // ScalarCtx. Recognize the exact shape (mirror of sackWhereGuard) and compare the freshly-folded
+  // sack against P. This is the spreading-activation-with-threshold primitive: loop until the
+  // decayed relevance crosses a bound. A mixed sack+element predicate stays deferred.
+  const sackPred = nested.length === 2 && nested[0].name === 'sack' && (nested[0].args ?? []).length === 0 && nested[1].name === 'is'
+    ? nested[1].args[0] : undefined;
+  return (id, depth, sackExpr) => {
+    if (sackPred !== undefined) {
+      if (!sackExpr) throw new Error(`${kind}(__.sack()...) requires a sack (withSack() or a body sack(op))`);
+      return predicateSql(sackExpr, sackPred);
+    }
+    return tryInlinePredicate(engine, nested, { ...walkNodeCtx(id), loopsExpr: depth }, params)
+      ?? (() => { throw new Error(`${kind}() predicate not supported by inline lowering`); })();
+  };
 }
 
 // ---------- branch (union / optional / repeat) ----------
@@ -664,14 +677,16 @@ export const repeat: StepFn = (s, st) => {
   // tests the seed too. Expansion continues only from done=0 rows; done=1 rows exit.
   const untilFn = hasUntil ? walkPredicate(engineOf(st), untilStep!, st.params, 'until') : null;
   const untilFirst = hasUntil && cluster.indexOf(untilStep!) < cluster.indexOf(rep);
-  const doneCol = (id: Expression, depth: Expression): Expression => q`, CASE WHEN ${untilFn!(id, depth)} THEN 1 ELSE 0 END AS done`;
+  // `sackAt` is the accumulated sack at the row being tested (post-fold in the recursive term,
+  // the seed value on the seed) — passed so a sack-reading until/emit predicate can read it.
+  const doneCol = (id: Expression, depth: Expression, sackAt: Expression | null): Expression => q`, CASE WHEN ${untilFn!(id, depth, sackAt)} THEN 1 ELSE 0 END AS done`;
 
   // emit(predicate): an `emit` column marks WHICH rows are output (vs until's `done`,
   // which marks termination). The walk proceeds regardless. emit-before tests the seed
   // (depth 0) too; emit-after only body results (depth ≥ 1) — so the seed's emit is 0
   // under emit-after. Every recursive row is tested by the predicate in both positions.
   const emitFn = hasEmitPred ? walkPredicate(engineOf(st), emitStep!, st.params, 'emit') : null;
-  const emitCol = (id: Expression, depth: Expression): Expression => q`, CASE WHEN ${emitFn!(id, depth)} THEN 1 ELSE 0 END AS emit`;
+  const emitCol = (id: Expression, depth: Expression, sackAt: Expression | null): Expression => q`, CASE WHEN ${emitFn!(id, depth, sackAt)} THEN 1 ELSE 0 END AS emit`;
 
   const walkCols = ['id', 'depth', ...(sackCol ? [sackCol] : []), ...(trackArray ? ['path'] : []), ...(hasUntil ? ['done'] : []), ...(hasEmitPred ? ['emit'] : [])];
   const walk = st.q.recursiveCte(walkCols, (self: Relation) => {
@@ -680,10 +695,11 @@ export const repeat: StepFn = (s, st) => {
     // branch's own guards, so the bare single-movement case is unchanged from before.
     // `sackExpr` (null for a sack-free walk) is the accumulator AFTER this iteration's folds.
     const mkRec = (finalId: Expression, from: Expression, sackExpr: Expression | null, branchGuards: Expression[]): Expression => {
-      const sackAcc = sackCol ? q`, ${sackExpr ?? self.c[sackCol]} AS ${sackCol}` : q``;
+      const sackNow = sackCol ? (sackExpr ?? self.c[sackCol]) : null; // the sack AFTER this iteration's folds
+      const sackAcc = sackCol ? q`, ${sackNow!} AS ${sackCol}` : q``;
       const pathAcc = trackArray ? q`, jsonb_insert(${self.c.path}, '$[#]', ${finalId}) AS path` : q``;
-      const doneAcc = hasUntil ? doneCol(finalId, q`${self.c.depth} + 1`) : q``;
-      const emitAcc = hasEmitPred ? emitCol(finalId, q`${self.c.depth} + 1`) : q``;
+      const doneAcc = hasUntil ? doneCol(finalId, q`${self.c.depth} + 1`, sackNow) : q``;
+      const emitAcc = hasEmitPred ? emitCol(finalId, q`${self.c.depth} + 1`, sackNow) : q``;
       const guards: Expression[] = [];
       if (timesStep) guards.push(q`${self.c.depth} < ${maxDepth!}`); // maxDepth non-null when timesStep set
       if (hasUntil) guards.push(q`${self.c.done}=0`); // until() expands only from still-looping rows
@@ -716,11 +732,12 @@ export const repeat: StepFn = (s, st) => {
     // Seed the sack from the outer row (withSack()/prior sack(op)); NULL when the body
     // folds fresh with no prior seed (assign overwrites; a numeric fold with no seed is
     // undefined per TinkerPop and yields NULL → the row drops, matching the linear path).
-    const seedSack = sackCol ? q`, ${st.carried.sack ? seedSrc.c[st.carried.sack] : q`NULL`} AS ${sackCol}` : q``;
+    const seedSackExpr = sackCol ? (st.carried.sack ? seedSrc.c[st.carried.sack] : q`NULL`) : null;
+    const seedSack = sackCol ? q`, ${seedSackExpr!} AS ${sackCol}` : q``;
     const seedPath = trackArray ? q`, jsonb_array(${seedId}) AS path` : q``;
-    const seedDone = hasUntil ? (untilFirst ? doneCol(seedId, q`0`) : q`, 0 AS done`) : q``;
+    const seedDone = hasUntil ? (untilFirst ? doneCol(seedId, q`0`, seedSackExpr) : q`, 0 AS done`) : q``;
     // emit-before tests+emits the seed (depth 0); emit-after never emits the seed.
-    const seedEmit = hasEmitPred ? (emitBefore ? emitCol(seedId, q`0`) : q`, 0 AS emit`) : q``;
+    const seedEmit = hasEmitPred ? (emitBefore ? emitCol(seedId, q`0`, seedSackExpr) : q`, 0 AS emit`) : q``;
     return q`SELECT ${seedSel}, 0 AS depth${seedSack}${seedPath}${seedDone}${seedEmit} FROM ${seedSrc} UNION ALL ${list(rec, ' UNION ALL ')}`;
   });
   // Output: until() → the rows that satisfied the stop predicate; emit(pred) → the rows

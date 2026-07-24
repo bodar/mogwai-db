@@ -168,12 +168,15 @@ none is in scope for the prototype.
    list) is additive. **Unlocks:** collecting a walk's touched elements (the reasoning-trace
    `:TOUCHED` provenance the memory vision wants).
 
-3. **`until`/`emit` predicates that read the accumulated sack.** Stage 1 proves a term can read
-   freshly-folded state in a `where()` guard; extending that to the `until`/`emit` predicate columns
-   (`doneCol`/`emitCol`, `branch.ts:556-563`) gives "loop until this accumulated value crosses a
-   threshold" — e.g. spreading activation that stops when decayed relevance drops below ε. **This is
-   the direct memory-ranking primitive:** `withSack(1.0).repeat(out().sack(mult).by(constant(0.8)))
-   .until(sack().is(lt(0.1)))`.
+3. **`until`/`emit` predicates that read the accumulated sack. ✅ DONE** (Stage 5). `walkPredicate`
+   now recognizes a pure `sack().is(P)` until/emit predicate (mirror of `sackWhereGuard`) and compares
+   the walk row's accumulated sack against P; `doneCol`/`emitCol` thread the sack expression at the
+   tested row (post-fold in the recursive term, the seed value on the seed). Gives "loop until this
+   accumulated value crosses a threshold" — the direct memory-ranking primitive: `withSack(1.0)
+   .repeat(out().sack(mult).by(constant(0.8))).until(sack().is(lt(0.1)))`, and the on-the-spot form
+   `repeat(sack(sum).by('age')).until(sack().is(gte(50)))`. A MIXED sack+element until/emit predicate
+   stays deferred (the element `ScalarCtx` can't carry the sack). **L3 unchanged (1275; not in the
+   official corpus) — proven by exec tests. 0 regressions.**
 
 4. **`sack(BiFunction)` lambda + T-token/inject-const gaps** (matrix §12 `sack()` row). Independent
    of the walk work — narrow completeness (a lambda has no `Operator` name to dispatch on;
