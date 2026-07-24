@@ -109,8 +109,12 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     const divU = read('g.V().union(__.as("b").out(), __.in()).select("b")');
     expect(divU.sql).toContain('SELECT id, a0, bulk FROM'); // the binding arm carries its history
     expect(divU.sql).toContain('SELECT id, NULL AS a0, bulk FROM'); // the other arm pads it
-    // sack through a fork is fail-closed (split/merge-on-fork unverified — carried-schema didn't silently lift it)
-    expect(() => compile('g.withSack(0.0d).V().sack(sum).by("age").union(__.out(), __.in())', {})).toThrow('sack() through union()');
+    // sack CLONES through a fork (TinkerPop split-only): the incoming sk column rides into
+    // every arm via carryFrag, passes through unchanged, and armProjection/rigidCols project
+    // it through the merge — so a following sack() reads the pre-fork accumulator per arm.
+    const sackU = read('g.withSack(0.0d).V().sack(sum).by("age").union(__.out(), __.in()).sack()');
+    expect(sackU.sql).toContain('sk'); // the sack column survives the branch merge
+    expect(sackU.sql).toContain('UNION ALL');
     // mixed scalar+element arms now merge as a dynamic-tag VariantStream (P4)
     const mixedU = read('g.V().union(__.values("name"), __.out())');
     expect(mixedU.shape).toEqual({ kind: 'variant', scalarAs: undefined, node: true });

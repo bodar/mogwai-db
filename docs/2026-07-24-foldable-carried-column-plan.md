@@ -123,10 +123,17 @@ branch/local/barrier boundaries (Stages 2–3).
 
 ## Stages 2–3 (after the spike proves the walk carry)
 
-- **Stage 2 — branch fork-clone.** Remove the sack arm of `assertForkSafe` (`branch.ts:65`) and
-  teach `mergeBranchCarried` to clone the sack column into each arm (split-only: no reconciliation,
-  each arm keeps its own folded value). The SAME change frees `fromV` through branch (identical
-  guard, line 66). Also lift the `withSack()`-with-`union()`-source throw (`engine.ts:292`).
+- **Stage 2 — branch fork-clone. ✅ DONE.** Removed the sack arm of `assertForkSafe` (`branch.ts`):
+  the sack was ALREADY threaded correctly — it rides into every arm via `carryFrag`, passes through
+  unchanged, and `armProjection`/`rigidCols` project it through the merge. The guard was purely
+  conservative; split-only fork-clone is correct by construction (no reconciliation, each arm keeps
+  its clone). `union`/`optional`/`coalesce`/`choose`/`flatMap` all covered. `fromV` stays gated
+  (an edge's entering-vertex has no meaning after a fork moves off the edge). Still deferred (own
+  follow-ons): a mutate `sack(op)` INSIDE an arm (the child-body vocabulary doesn't admit it — same
+  root as the `local()` gap in Stage 3), and `withSack()` at a `union()` SOURCE (`engine.ts`
+  `seedUnion` merges only `id,bulk`; seeding + threading a source sack is a small separate piece).
+  L3 unchanged (1273) — no official corpus scenario is unblocked by fork-clone alone (they also need
+  edge-step-in-repeat etc.) — but the capability is proven by committed exec tests. 0 regressions.
 - **Stage 3 — `local()`/barrier.** Thread the sack through the child scope
   (`pushChildScope`/`popChildScope`) so `local(sack(sum).by('age'))` folds within the child and
   restores to the parent (anchor: `branch/Local.feature:224`). Barrier: a barrier consumes bulk but
