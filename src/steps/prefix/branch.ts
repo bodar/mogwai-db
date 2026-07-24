@@ -11,8 +11,8 @@ import { classifyListChild, classifyScalarChild, isElementChild, isListChild, is
 import { carryOf, toListStream, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
 import { mergeVariantArms, unifyLists, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
 import { unionScalarStreams, SACK_OPS, combineSack } from '../tail/scalar.ts';
-import { engineOf, type Engine } from '../../compiler/engine/deps.ts';
-import { runFastPath, fastPathContext, type FastPath } from '../../compiler/options/fast-paths.ts';
+import { engineOf, fastPathContextOf, type Engine } from '../../compiler/engine/deps.ts';
+import { runFastPath, type FastPath } from '../../compiler/options/fast-paths.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
  *  read back from `nodes` by subquery (the walk row carries only the id). Lets
@@ -278,7 +278,7 @@ export const optional: StepFn = (s, st) => {
   assertForkSafe('optional', st);
   const body = stepChain(s.args[0]?.nested, st.params);
   if (!body.length) throw new Error('optional(traversal) required');
-  const fast = runFastPath(SingleHopOptionalFastPath, fastPathContext(engineOf(st).fastPaths), st, body);
+  const fast = runFastPath(SingleHopOptionalFastPath, fastPathContextOf(st), st, body);
   if (fast) return fast;
   // Nesting is supported: originSeed mints a UNIQUE ordinal (o0, o1, …) per depth and
   // carries the outer ordinals through, so optional()/coalesce() compose.
@@ -838,7 +838,7 @@ function chooseGate(st: ElementStream, predNested: any): (negate: boolean) => El
   // choose()'s predicate honours predicateInlining (unlike until()/emit(), it HAS a generic
   // fallback below — tryGateByChildExistence — so disabling inlining compiles the same choose()
   // generically). The flag gates the attempt; recognition failure also falls through to generic.
-  const inline = runFastPath(PredicateInliningFastPath, fastPathContext(engineOf(st).fastPaths),
+  const inline = runFastPath(PredicateInliningFastPath, fastPathContextOf(st),
     () => tryInlinePredicate(engineOf(st), stepChain(predNested, st.params), elemCtx(elemRel(st), st.elem), st.params));
   if (inline) return (negate) => gate(st, negate ? notCoalesce(inline) : inline);
   const gated = tryGateByChildExistence(st, predNested)

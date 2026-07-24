@@ -4,7 +4,7 @@ import {
   P_OPS, labelIn, predicateSql, nodePropScalar, hasProp, elemCtx, aliasCtx,
   idPredFromArgs, scalarProp, labelNameSub, FtsSubstringFastPath, type Elem, type ScalarCtx,
 } from '../../compiler/plan/plan.ts';
-import { runFastPath, fastPathContext } from '../../compiler/options/fast-paths.ts';
+import { runFastPath } from '../../compiler/options/fast-paths.ts';
 import { tryInlinePredicate, combineBranchPreds, PredicateInliningFastPath } from './predicate.ts';
 import { advance, aliasElem, carriedCols, carriedWith, carryFrag, elemRel, pathColsOf, prevRel, scopePathCols, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from '../context/context.ts';
 import { aliasAppend, aliasId, aliasSeed, elemEntry, elemShape } from '../context/alias.ts';
@@ -12,7 +12,7 @@ import { tryCombineByChildExistence, tryCompileScalarValueRows, tryFilterByChild
 import { directElementModulation, elementOrderSql } from '../tail/modulation.ts';
 import { type PStep } from '../../compiler/ir/strategies.ts';
 import { isInjectionMarker, injectedValues } from '../injection.ts';
-import { engineOf } from '../../compiler/engine/deps.ts';
+import { engineOf, fastPathContextOf } from '../../compiler/engine/deps.ts';
 
 // ---------- filter (predicates over the current traverser) ----------
 
@@ -152,7 +152,7 @@ export const has: StepFn = (s, st) => {
     // property routes through the property_fts trigram index (FtsSubstringFastPath, default
     // on) — result-equivalent to the generic LIKE hasProp fall-through.
     const ctx = currentCtx(st);
-    const fts = runFastPath(FtsSubstringFastPath, fastPathContext(engineOf(st).fastPaths), ctx, key, val);
+    const fts = runFastPath(FtsSubstringFastPath, fastPathContextOf(st), ctx, key, val);
     conds.push(fts ?? hasProp(ctx, key, val));
   }
   return filterCte(st, list(conds, ' AND '));
@@ -163,7 +163,7 @@ export const has: StepFn = (s, st) => {
 export const where: StepFn = (s, st) => {
   const arg0 = s.args[0];
   if (arg0 && typeof arg0 === 'object' && 'nested' in arg0) {
-    const pred = runFastPath(PredicateInliningFastPath, fastPathContext(engineOf(st).fastPaths),
+    const pred = runFastPath(PredicateInliningFastPath, fastPathContextOf(st),
       () => tryInlinePredicate(engineOf(st), stepChain(arg0.nested, st.params), currentCtx(st), st.params, aliasResolver(st)));
     if (pred)
       return filterCte(st, s.name === 'not' ? notCoalesce(pred) : pred);
@@ -216,7 +216,7 @@ export const where: StepFn = (s, st) => {
 export const andOr: StepFn = (s, st) => {
   const op = s.name === 'and' ? 'AND' : 'OR';
   const branches = s.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
-  const pred = runFastPath(PredicateInliningFastPath, fastPathContext(engineOf(st).fastPaths),
+  const pred = runFastPath(PredicateInliningFastPath, fastPathContextOf(st),
     () => combineBranchPreds(engineOf(st), s, currentCtx(st), st.params, op, aliasResolver(st)));
   if (pred) return filterCte(st, pred);
   const generic = tryCombineByChildExistence(st, branches.map((b: any) => b.nested), op);
