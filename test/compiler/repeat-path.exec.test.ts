@@ -286,4 +286,31 @@ test('emit(__.sack().is(P)) emits the iterations whose accumulated sack matches'
   expect((run(store, "g.withSack(0L).V(1).repeat(__.sack(sum).by('age')).times(3).emit(__.sack().is(gte(40))).sack()") as any[]).map((r) => r.v).sort((a, b) => a - b))
     .toEqual([58, 87]);
 });
+
+test('a body aggregate() collects every vertex the walk visits (the :TOUCHED provenance primitive)', () => {
+  const store = seededStore();
+  // marko out → {vadas,josh,lop} (depth 1); josh out → {ripple,lop} (depth 2). The bag is a
+  // BulkSet multiset, so lop appears twice. cap('x').unfold() explodes it to elements.
+  const names = (run(store, "g.V(1).repeat(__.out().aggregate('x')).times(2).cap('x').unfold().values('name')") as any[]).map((r) => r.v).sort();
+  expect(names).toEqual(['josh', 'lop', 'lop', 'ripple', 'vadas']);
+});
+
+test('a pre-repeat aggregate multiset-unions with the in-repeat body aggregate (Aggregate.feature:627)', () => {
+  const store = seededStore();
+  // V().local(aggregate('a')) collects all 6 vertices; then repeat(out().local(aggregate('a'))).times(2)
+  // appends the walk's depth-1 and depth-2 rows. groupCount by name over the whole BulkSet.
+  // (Asserted on the raw gk/gv rows — a separate pre-existing groupCount scalar-FRAMING bug
+  // returns {} at the wire for values(k).groupCount(); the DATA the aggregate produces is correct.)
+  const rows = run(store, `g.V().local(__.aggregate('a')).repeat(__.out().local(__.aggregate('a'))).times(2).cap('a').unfold().values('name').groupCount()`);
+  const counts = Object.fromEntries(rows.map((r: any) => [r.gk, Number(r.gv)]));
+  expect(counts).toEqual({ marko: 1, vadas: 2, josh: 2, lop: 5, ripple: 3, peter: 1 });
+});
+
+test('a movement-free repeat(aggregate(a)) revisits the seed each iteration', () => {
+  const store = seededStore();
+  // no movement → each of the 6 vertices stays put and is collected once per iteration; times(2) → 12.
+  const names = (run(store, "g.V().repeat(__.aggregate('a')).times(2).cap('a').unfold().values('name')") as any[]).map((r) => r.v).sort();
+  expect(names.length).toBe(12);
+  expect(names.filter((n) => n === 'marko')).toEqual(['marko', 'marko']);
+});
 });

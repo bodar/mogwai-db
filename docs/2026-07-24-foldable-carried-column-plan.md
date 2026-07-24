@@ -154,19 +154,41 @@ These are **independent features unblocked by Stage 1's foldable-walk-state prim
 here so they are designed-for now, not retrofitted. Each is a separate change with its own tests;
 none is in scope for the prototype.
 
-1. **Bulk reweight through `times(n)`** (`branch.ts:621-623`, `engine.ts:541`). Today the recursive
-   walk re-seeds `bulk=1` per endpoint because bulk is a carried counter the walk can't fold; a
-   convergent-walk collapse (`GROUP BY id, SUM(bulk)`) through an unrolled `times(n)` is explicitly
-   deferred as "a recursive GROUP BY is rejected". `bulk` is a foldable carried column (fold =
-   `SUM`), so the Stage-1 primitive is precisely its missing substrate. **Unlocks:** correct
-   traverser multiplicity for `repeat().times(n).groupCount()`/`sum` (matrix §5 `…times(n).count()`
-   ❌ row: "groupCount/by(count), sum ... across the walk").
+1. **Bulk reweight through `times(n)`** (`branch.ts:621-623`, `engine.ts:541`) — **REASSESSED: NOT a
+   correctness gap, a tractability optimization only.** Investigation showed `groupCount`/`sum`/
+   `group().by(count())` after `times(n)` are ALREADY correct today: the generic recursive walk
+   enumerates every walk as its own row, and enumerate-then-group is result-equivalent to
+   bulk-then-sum (verified: `repeat(both()).times(2).count()` = 30 and `.groupCount()` totals 30).
+   The real gap is purely PERFORMANCE — the generic walk enumerates exponentially, so a deep dense
+   `groupCount`/`sum` intractably enumerates where `count()` collapses via `tryBulkRepeat`. So this is
+   a fast-path extension (extend `tryBulkRepeat`'s GROUP-BY-SUM collapse to feed group/reducer tails),
+   with the full fast-path burden (equivalence test + EXPLAIN/benchmark). Deferred as lower value —
+   results are already correct, only scale improves. The matrix §5 "❌ groupCount/sum" means
+   "not bulk-collapsed" (intractable at scale), NOT "wrong answer".
 
-2. **`aggregate('x')` / side-effect inside a `repeat()` body** (`branch.ts:443-444`). "Accumulate
-   into a named collection along a walk" is the same fold shape as sack (fold = list append instead
-   of a scalar op). Once the walk can carry+fold one column, a second foldable column (the aggregate
-   list) is additive. **Unlocks:** collecting a walk's touched elements (the reasoning-trace
-   `:TOUCHED` provenance the memory vision wants).
+2. **`aggregate('x')` / side-effect inside a `repeat()` body. ✅ DONE** (Stage 6). A body-terminal
+   `aggregate('x')` (bare or `local(__.aggregate('x'))`) collects every vertex the body emits — the
+   walk rows at depth ≥ 1 — into the named bag, registered as a post-walk JSONB-list side-effect CTE
+   sourced from the walk (SQLite rejects a recursive aggregate, so we collect AFTER the walk, not
+   inside the recursive term — the walk already enumerates every visited row). A movement-free
+   `repeat(aggregate('a'))` revisits the seed each iteration; a pre-repeat `local(aggregate('a'))` bag
+   is BulkSet-multiset-unioned (json_each of the prior bag `UNION ALL` the walk rows). Reuses the
+   linear aggregate's `{kind:'list', of:{elem}}` def verbatim, so `cap('x')`/`unfold()` need no new
+   path. **Delivers the reasoning-trace `:TOUCHED` provenance the memory vision wants.** Verified
+   correct via exec tests (raw rows) incl. the canonical `Aggregate.feature:627`. A mid-body
+   aggregate (`out().aggregate().out()`) and a by()-modulated aggregate-in-repeat stay deferred.
+   **L3 unchanged (1275): the validating scenario is blocked by a SEPARATE pre-existing bug —
+   `groupCount()` over a scalar-value stream frames as an empty `{}` Map at the wire (the compiled
+   SQL rows `gk/gv` are correct; `groupBuffer`/the group-frame path drops them). That defect is in
+   the group-materialization subsystem, independent of this work — recorded as its own follow-on.**
+
+**Discovered defect (own follow-on, NOT introduced here): `groupCount()` scalar-stream framing.**
+`g.V().values('name').groupCount()` (and `fold().unfold().groupCount()`, `inject([…]).unfold().
+groupCount()`) compile to correct `gk/gv` rows but frame as an empty `{}` Map at the GraphBinary wire.
+The shape is `{group, key:scalar-productive, val:count}` and the rows are populated, so the bug is in
+the group frame path (`execute.ts groupBuffer` / `materializeGroupRoot`), not the compiler. Blocks any
+L3 scenario ending in a scalar `groupCount` (incl. `Aggregate.feature:627`). Small-looking but sits in
+a different subsystem; surfaced rather than folded into the aggregate change.
 
 3. **`until`/`emit` predicates that read the accumulated sack. ✅ DONE** (Stage 5). `walkPredicate`
    now recognizes a pure `sack().is(P)` until/emit predicate (mirror of `sackWhereGuard`) and compares
