@@ -503,7 +503,7 @@ function isAliasCompareWhere(s: Step): boolean {
  *  single by(key) all become a field on their host, so the tail dispatch reads
  *  `.bys` and never looks at the next step. by() validation (token/traversal
  *  modulators still unsupported) stays in the compilers that read `.bys`. */
-function foldByModulators(steps: PStep[]): PStep[] {
+export function foldByModulators(steps: PStep[]): PStep[] {
   const out: PStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];

@@ -232,4 +232,33 @@ test('until() has NO depth cap: reaches a target deeper than the retired 32-hop 
   for (let i = 0; i < N; i++) store.query(edge, [100 + i, i + 1, knows, i + 2]); // n0→n1→…→n40
   expect(uNames(store, `g.V(1).repeat(__.out()).until(__.has("name","n${N}"))`)).toEqual([`n${N}`]);
 });
+
+// ---------- sack folded through the recursive walk ----------
+
+test('sack(sum).by(age).where(sack.lt(59)) accumulates on the spot, guard exits (Repeat.feature:664)', () => {
+  // withSack(0) then fold age twice; the guard drops a traverser once its running total
+  // reaches ≥59. marko 29→58<59 survives, josh 32→64 exits after iter 1. Software vertices
+  // have no age → NULL fold → dropped. TinkerPop's canonical answer: [marko, vadas].
+  const store = seededStore();
+  expect(uNames(store, 'g.withSack(0L).V().repeat(__.sack(sum).by("age").where(__.sack().is(lt(59)))).times(2)').sort())
+    .toEqual(['marko', 'vadas']);
+});
+
+test('sack(mult).by(constant(0.5)) decays relevance per hop across a movement walk', () => {
+  // spreading-activation: each hop multiplies the carried score by 0.5. 2 hops → 0.25 at
+  // every reachable 2-hop endpoint. The agent-memory path-decayed-relevance primitive.
+  const store = seededStore();
+  const sacks = (run(store, 'g.withSack(1.0d).V(1).repeat(__.out().sack(mult).by(__.constant(0.5d))).times(2).sack()') as any[]).map((r) => r.v);
+  expect(sacks.length).toBeGreaterThan(0);
+  expect(sacks.every((v) => v === 0.25)).toBe(true);
+});
+
+test('sack folds independently per fork (split-only): out() fan-out keeps each walk separate', () => {
+  // marko out() fans to vadas(27)/josh(32)/lop(no age). A fork clones the sack into each
+  // arm; the arms never recombine (TinkerPop split-only), so each endpoint's sack is its
+  // OWN age folded onto the seed, never a sum across siblings. lop has no age → NULL fold.
+  const store = seededStore();
+  const sacks = (run(store, 'g.withSack(0L).V(1).repeat(__.out().sack(sum).by("age")).times(1).sack()') as any[]).map((r) => r.v).sort((a, b) => (a ?? -1) - (b ?? -1));
+  expect(sacks).toEqual([null, 27, 32]);
+});
 });
