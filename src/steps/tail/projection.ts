@@ -16,7 +16,7 @@ import { compileSelectProject, lowerRecordSelectProject, lowerScalarProject, low
 import { lowerPath } from './path.ts';
 import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerLegacyUnion } from '../prefix/branch.ts';
-import { lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
+import { elementGroupSource, lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
 import { tryCompileCountChild, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueRows } from './child.ts';
 import { tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './scalar-arm.ts';
 import { childSteps, classifyBy, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, type ByClass } from './child-shape.ts';
@@ -366,9 +366,7 @@ const tailCoalesce: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
 // it directly; supported Column consumers derive a narrow MapStream.
 const tailGroup: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
   const isCount = step.name === 'groupCount';
-  const tbl = st.elem === 'edge' ? 'edges' : 'nodes';
-  const ctx = elemCtx(elemRel(st), st.elem);
-  const src: GroupSource = { from: `${tbl} n JOIN ${st.rel.name} p ON n.id=p.id`, ctx, elem: st.elem === 'edge' ? 'edge' : 'vertex', parent: st, productiveBy: step.productiveBy, bulk: st.carried.bulk ? st.rel.as('p').c[st.carried.bulk] : undefined };
+  const src = elementGroupSource(st, step.productiveBy);
   return continueLowering(lowerGroup(st, isCount, step.bys ?? [], src), stop + 1);
 };
 
@@ -1037,7 +1035,8 @@ function compileCap(st: ElementStream | ScalarStream, steps: PStep[], stop: numb
     return continueLowering(toVariantStream(withoutCarried(carryOf(st)), def.rel, { scalarAs: def.scalarAs, node: def.elem === 'node' || undefined, edge: def.elem === 'edge' || undefined }, 'list'), stop + 1);
   // group('a')/groupCount('a') side-effect → re-emit the same rich GroupStream as an
   // inline group; terminal framing and Column consumers share its dispatch. The stashed
-  // def.parent carries the element source, so a scalar-stream cap of a group re-runs correctly.
-  const src: GroupSource = { from: def.from, ctx: def.ctx, elem: def.elem, parent: def.parent, productiveBy: def.productiveBy, bulk: def.parent.carried.bulk ? def.parent.rel.as('p').c[def.parent.carried.bulk] : undefined };
+  // def.parent carries the element source, so the SAME elementGroupSource that built the
+  // terminal group() tail rebuilds the source here — no re-derived from/ctx to drift.
+  const src = elementGroupSource(def.parent, def.productiveBy);
   return continueLowering(lowerGroup(def.parent, def.isCount, def.bys, src), stop + 1);
 }

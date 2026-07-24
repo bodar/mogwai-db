@@ -111,7 +111,7 @@ export function scopePathCols<C extends { col: string }>(
 export type SideEffectDef =
   | { kind: 'list'; rel: Relation; of: import('../../sql/kernel/render.ts').ListOf }
   | { kind: 'variant'; rel: Relation; scalarAs?: import('../../sql/kernel/render.ts').ValueType; elem?: Elem }
-  | { kind: 'group'; from: string; ctx: import('../../compiler/plan/plan.ts').ScalarCtx; elem: import('../../sql/kernel/render.ts').ElemShape; isCount: boolean; bys: any[][]; parent: ElementStream; productiveBy?: boolean };
+  | { kind: 'group'; isCount: boolean; bys: any[][]; parent: ElementStream; productiveBy?: boolean };
 export type SideEffectMap = ReadonlyMap<string, SideEffectDef>;
 
 /** The per-traverser CARRIED SCHEMA: the columns physically present on the id-relation

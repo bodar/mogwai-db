@@ -22,7 +22,7 @@ const SCALAR_REDUCERS = new Set(['sum', 'min', 'max', 'mean']);
 /** Describes the row source a group() folds over: the FROM (rows aliased `n`),
  *  the scalar context for nested key/value sub-traversals, and the element kind. */
 export interface GroupSource {
-  from: string | Expression;
+  from: Expression;
   ctx: ScalarCtx;
   elem: ElemShape;
   /** A generic child-key result already joined one-to-one with each productive
@@ -62,6 +62,26 @@ export interface GroupSource {
    * aggregation (lvl1 groups by (outerKey, innerKey) + reduces; the outer json_group_object
    * folds each outer key's entries into one Map). `from` already carries the inner joins. */
   valNestedMap?: { innerKey: Expression; innerVal: Expression; innerKind: 'count' | 'number' };
+}
+
+/** The GROUP source over a live element stream: the element table JOINed to the parent
+ *  CTE on identity, plus the matching scalar ctx / elem kind / bulk weight. ONE kernel-built
+ *  home for the shape every group entry point needs — the terminal group() tail, the
+ *  side-effecting group('a')/groupCount('a'), and cap('a')'s re-run — so none of them
+ *  hand-builds a raw SQL string (the former reason GroupSource.from carried a `string` arm).
+ *  Aliases are fixed (`n` element table, `p` parent rel) so the returned `ctx` — built over
+ *  `n` — lines up with the FROM. */
+export function elementGroupSource(st: ElementStream, productiveBy?: boolean): GroupSource {
+  const n = elemRel(st, 'n');
+  const p = st.rel.as('p');
+  return {
+    from: q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`,
+    ctx: elemCtx(n, st.elem),
+    elem: st.elem === 'edge' ? 'edge' : 'vertex',
+    parent: st,
+    productiveBy,
+    bulk: st.carried.bulk ? p.c[st.carried.bulk] : undefined,
+  };
 }
 
 /** Columns that frame one element (vertex/edge/property) under `prefix`. label
