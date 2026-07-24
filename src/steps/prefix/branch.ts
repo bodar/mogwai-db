@@ -56,14 +56,14 @@ function originSeed(st: ElementStream): { base: Relation; seedSt: ElementStream;
 const armDescription = (nested: any, params: Record<string, any>): string =>
   stepChain(nested, params).map((step) => step.name + '()').join('.');
 
-/** A branch forks a traverser into arms. as() aliases + path positions are pure
- *  labels that copy cleanly into each arm, but the sack (a MUTABLE per-traverser
- *  accumulator) and the otherV() entering-vertex (fromV) have split/merge-on-fork
- *  semantics we haven't verified — so fail closed rather than let carriedCols carry
- *  them silently through the merge (CLAUDE.md/the matrix defer 'split/merge-on-fork').
- *  Aliases/path deliberately pass; only these two are gated here. */
+/** A branch forks a traverser into arms. TinkerPop split-only semantics: each arm gets a
+ *  CLONE of the incoming per-traverser state and the arms never recombine. as() aliases,
+ *  path positions AND the sack all clone cleanly — the incoming sack column rides into every
+ *  arm via carryFrag, passes through unchanged (a mutate sack(op) inside an arm is separately
+ *  deferred — it isn't in the child-body vocabulary), and armProjection/rigidCols project it
+ *  through the merge. Only fromV stays gated: an edge's otherV() entering-vertex has no
+ *  defined meaning once a fork moves off the edge, so fail closed rather than carry a stale id. */
 function assertForkSafe(name: string, st: ElementStream): void {
-  if (st.carried.sack) throw new Error(`sack() through ${name}() not yet supported (split/merge-on-fork)`);
   if (st.carried.fromV) throw new Error(`otherV() context through ${name}() not yet supported`);
 }
 

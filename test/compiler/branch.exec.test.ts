@@ -248,4 +248,25 @@ test('scalar-producing leaves re-enter common lowering', () => {
   expect(run(store, 'g.withSack(7).V().sack().is(7).count()').map((r) => r.v)).toEqual([6]);
 });
 
+test('sack clones through a union() fork (TinkerPop split-only, no merge)', () => {
+  const store = seededStore();
+  // withSack(5) then union(out, out): each arm gets a CLONE of sack=5; the arms never
+  // recombine, so every one of marko's 3×2 endpoints carries the pre-fork value 5.
+  expect(run(store, 'g.withSack(5L).V(1).union(__.out(), __.out()).sack()').map((r) => r.v))
+    .toEqual([5, 5, 5, 5, 5, 5]);
+  // a sack assigned BEFORE the fork rides into both arms unchanged.
+  expect(run(store, "g.withSack(0L).V(1).sack(assign).by('age').union(__.identity(), __.identity()).sack()").map((r) => r.v))
+    .toEqual([29, 29]); // marko's age, cloned into each identity arm
+});
+
+test('sack clones through coalesce()/optional()/choose() forks', () => {
+  const store = seededStore();
+  // coalesce takes the first productive arm; the cloned sack rides through it.
+  expect(run(store, "g.withSack(9L).V(1).coalesce(__.out('knows'), __.out()).sack()").map((r) => r.v).sort())
+    .toEqual([9, 9]); // marko knows vadas+josh; sack=9 cloned into the taken arm
+  // optional: hit keeps the moved traverser, miss keeps the input — both carry the clone.
+  expect(run(store, 'g.withSack(3L).V(1).optional(__.out()).sack()').map((r) => r.v))
+    .toEqual([3, 3, 3]); // 3 out-neighbours, each carrying sack=3
+});
+
 });
