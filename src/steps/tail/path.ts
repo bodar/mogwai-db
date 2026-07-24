@@ -9,7 +9,7 @@ import { type PathPos } from '../../sql/kernel/render.ts';
 import { type TailAcc } from './projection.ts';
 import { reRootElement } from './select.ts';
 import { pushChildScope, tryCompileScalarValueChild } from './child.ts';
-import { childSteps, classifyScalarChild, reuseCurrentFrame, type ChildFrame, type ChildScope } from './child-shape.ts';
+import { byAt, classifyBy, childSteps, classifyScalarChild, reuseCurrentFrame, type ChildFrame, type ChildScope } from './child-shape.ts';
 import { tryLowerScalarChoose, tryLowerScalarCoalesce } from '../prefix/branch.ts';
 
 // ---------- path() (linear regime) ----------
@@ -17,25 +17,24 @@ import { tryLowerScalarChoose, tryLowerScalarCoalesce } from '../prefix/branch.t
 /** Interpret one path().by() modulator: undefined → the whole element; a string →
  *  a property-key projection; token/traversal by()s defer. */
 function pathBy(byArgs: any[] | undefined): string | undefined {
-  if (!byArgs || byArgs.length === 0) return undefined; // no by()/bare by() → the element
-  const a = byArgs[0];
-  if (typeof a === 'string') return a;
-  if (a && typeof a === 'object' && 'nested' in a) throw new Error('path().by(traversal) modulator not yet supported');
-  if (a && typeof a === 'object' && 'token' in a) throw new Error(`path().by(T.${a.token}) modulator not yet supported`);
-  throw new Error('unsupported path().by() modulator');
+  const by = classifyBy(byArgs);
+  if (by.kind === 'none') return undefined; // no by()/bare by() → the element
+  if (by.kind === 'key') return by.key;
+  if (by.kind === 'nested') throw new Error('path().by(traversal) modulator not yet supported');
+  throw new Error(`path().by(T.${by.token}) modulator not yet supported`);
 }
 
 /** The inline value expression for one linear path position under a by('key')/by(T.token)
  *  modulator, or undefined for a bare by()/no by() (→ the whole element). A by(__.trav)
  *  position is NOT handled here — lowerPath lowers it through the generic scalar child seam. */
 function pathPositionValue(_st: ElementStream, tbl: Relation, elem: Elem, byArgs: any[] | undefined): Expression | undefined {
-  if (!byArgs || byArgs.length === 0) return undefined; // the whole element
-  const a = byArgs[0];
-  if (typeof a === 'string') return elem === 'edge' ? edgePropScalar(tbl.c.id, a) : nodePropScalar(tbl.c.id, a);
-  if (a && typeof a === 'object' && 'token' in a) {
-    if (a.token === 'label') return labelNameSub(tbl.c.label);
-    if (a.token === 'id') return elemCtx(tbl, elem).extIdExpr!;
-    throw new Error(`path().by(T.${a.token}) modulator not yet supported`);
+  const by = classifyBy(byArgs);
+  if (by.kind === 'none') return undefined; // the whole element
+  if (by.kind === 'key') return elem === 'edge' ? edgePropScalar(tbl.c.id, by.key) : nodePropScalar(tbl.c.id, by.key);
+  if (by.kind === 'token') {
+    if (by.token === 'label') return labelNameSub(tbl.c.label);
+    if (by.token === 'id') return elemCtx(tbl, elem).extIdExpr!;
+    throw new Error(`path().by(T.${by.token}) modulator not yet supported`);
   }
   throw new Error('unsupported path().by() modulator');
 }
@@ -148,14 +147,13 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   // a padded NULL is indistinguishable from a missing property, so defer.
   const branched = scopedCols.some((c) => c.nullable);
   if (branched && bys.length) throw new Error('path().by() through a branch not yet supported (a padded position is indistinguishable from a missing property)');
-  const byOf = (i: number) => (bys.length ? bys[i % bys.length] : undefined);
-  const isTraversalBy = (a: any) => a && typeof a === 'object' && 'nested' in a;
+  const byOf = (i: number) => byAt(bys, i);
   // A by(__.trav) position lowers through the SAME generic scalar child seam group/
   // select/dedup/order use: push ONE child scope over the path rows, re-root each such
   // position on its element, and join the child's FIRST value back by ordinal. Positions
   // are then structurally a record of per-position children (tryLowerTraversalRecord's
   // template). A path with no by(traversal) keeps the flat fast path — no scope, no ordinal.
-  const anyTraversal = scopedCols.some((_, i) => isTraversalBy(byOf(i)?.[0]));
+  const anyTraversal = scopedCols.some((_, i) => classifyBy(byOf(i)).kind === 'nested');
   const outer = anyTraversal ? pushChildScope(st) : null;
   const p = (outer ? outer.seed.rel : st.rel).as('p');
   const joins: Expression[] = [];
@@ -163,15 +161,15 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   const whereParts: Expression[] = [];
   const positions: PathPos[] = scopedCols.map((pos, i) => {
     const prefix = `x${i}`;
-    const spec = byOf(i)?.[0];
+    const byClass = classifyBy(byOf(i));
     // by(__.trav): re-root on this position's element and lower a scalar child via the seam.
-    if (isTraversalBy(spec)) {
+    if (byClass.kind === 'nested') {
       // The child computes ONE scalar for this position — it must NOT extend the outer path
       // (its own movement would append a path column, corrupting the carried schema). Strip
       // path from the child seed; the ordinal (for the ordinal join) is preserved.
       const childParent = { ...outer!.seed, carried: { ...outer!.seed.carried, path: undefined } };
       const seed = reRootElement(childParent, p, p.c[pos.col], pos.elem);
-      const child = lowerPathPositionChild(seed, spec.nested, outer!, st.params);
+      const child = lowerPathPositionChild(seed, byClass.nested, outer!, st.params);
       const b = child.rel.as(`b${i}`);
       joins.push(q` LEFT JOIN ${b} ON ${b.c[outer!.frame.ordinal]}=${p.c[outer!.frame.ordinal]}`);
       cols.push(q`${b.c.v} AS ${`${prefix}_v`}`);

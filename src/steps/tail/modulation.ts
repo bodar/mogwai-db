@@ -9,22 +9,22 @@ import { empty, list, q, type Expression, type Relation } from '../../sql/kernel
 import { elemCtx, labelNameSub, scalarProp, scalarPropSortKey } from '../../compiler/plan/plan.ts';
 import { type PStep } from '../../compiler/ir/strategies.ts';
 import { type ElementStream } from '../context/context.ts';
+import { classifyBy } from './child-shape.ts';
 
 export function directElementModulation(
   st: ElementStream,
   n: Relation,
   args: readonly any[] | undefined,
 ): Expression | null {
-  if (!args?.length) return n.c.id;
-  const arg = args[0];
-  if (typeof arg === 'string') return scalarProp(elemCtx(n, st.elem), arg);
-  if (arg && typeof arg === 'object' && 'token' in arg) {
-    if (arg.token === 'id') return elemCtx(n, st.elem).extIdExpr!;
-    if (arg.token === 'label') return labelNameSub(n.c.label);
-    throw new Error(`by(T.${arg.token}) element modulation not yet supported`);
+  const by = classifyBy(args);
+  if (by.kind === 'none') return n.c.id;
+  if (by.kind === 'key') return scalarProp(elemCtx(n, st.elem), by.key);
+  if (by.kind === 'token') {
+    if (by.token === 'id') return elemCtx(n, st.elem).extIdExpr!;
+    if (by.token === 'label') return labelNameSub(n.c.label);
+    throw new Error(`by(T.${by.token}) element modulation not yet supported`);
   }
-  if (arg && typeof arg === 'object' && 'nested' in arg) return null;
-  throw new Error('unsupported element by() modulator');
+  return null; // nested → the caller lowers it through the generic child seam
 }
 
 /** SQL ordering terms for an element order() host. A stable internal rowid tie-break
@@ -33,16 +33,15 @@ export function elementOrderSql(st: ElementStream, n: Relation, order?: PStep): 
   if (!order) return n.c.id;
   const bys = order.bys ?? [];
   if (!bys.length) return q`${n.c.id} ASC`;
-  const terms = bys.map((by) => {
-    const bad = by.find((a: any) => a && typeof a === 'object' && ('nested' in a || 'token' in a));
-    if (bad) throw new Error('token' in bad ? `order().by(T.${bad.token}) not yet supported` : 'order().by(traversal) not yet supported');
-    const key = by.find((a: any) => typeof a === 'string');
-    const dir = by.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
-    if (dir === 'shuffle') return q`RANDOM()`;
+  const terms = bys.map((byArgs) => {
+    const by = classifyBy(byArgs);
+    if (by.kind === 'nested') throw new Error('order().by(traversal) not yet supported');
+    if (by.kind === 'token') throw new Error(`order().by(T.${by.token}) not yet supported`);
+    if (by.dir === 'shuffle') return q`RANDOM()`;
     // Sort key, not raw value: order().by(key) must sort a TEXT-stored big long /
     // bigdecimal / duration NUMERICALLY (compareKey), not lexically.
-    const expr = key ? scalarPropSortKey(elemCtx(n, st.elem), key) : n.c.id;
-    return q`${expr}${dir === 'desc' ? q` DESC` : q` ASC`}`;
+    const expr = by.kind === 'key' ? scalarPropSortKey(elemCtx(n, st.elem), by.key) : n.c.id;
+    return q`${expr}${by.dir === 'desc' ? q` DESC` : q` ASC`}`;
   });
   return terms.length ? list(terms, ', ') : empty;
 }

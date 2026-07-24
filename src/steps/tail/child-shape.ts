@@ -401,3 +401,47 @@ export function isElementImplicitFoldChild(nested: any, params: Record<string, a
   if (!nested) return false;
   return classifyElementChildRows(childSteps(nested, params), undefined, false) !== null;
 }
+
+// ---------- by() modulator argument triage (the pure shell every host shares) ----------
+//
+// A `by(...)` modulator's argument group is one of a small closed set of shapes: a nested
+// traversal `{nested}`, a property-key string, a T-token `{token}`, a direction `{order}`,
+// or empty (bare `by()`). Every consumer (group/select/project/path/math/format/order/dedup/
+// aggregate) previously re-derived this triage inline with copy-pasted `byArgs.find(...)`
+// scans, then drifted. This is the ONE syntax-only classifier they now share; the leaf SQL
+// builders (scalarProp/scalarPropSortKey in plan.ts) and the child seam (tryCompile*) stay
+// the emit half — this only names the shape. A direction (`order`) can ride alongside any of
+// the value shapes (`order().by('age', desc)`), so it is a sibling field, not a variant.
+
+export type ByDirection = 'asc' | 'desc' | 'shuffle';
+
+export type ByClass =
+  | { readonly kind: 'nested'; readonly nested: any; readonly dir?: ByDirection }
+  | { readonly kind: 'key'; readonly key: string; readonly dir?: ByDirection }
+  | { readonly kind: 'token'; readonly token: string; readonly dir?: ByDirection }
+  | { readonly kind: 'none'; readonly dir?: ByDirection };
+
+/** PURE. Classify ONE `by(...)` argument group into its closed-set shape. The value shape
+ *  (nested/key/token/none) and an optional direction are read independently, so a
+ *  `by('age', desc)` yields `{kind:'key', key:'age', dir:'desc'}`. This is the single
+ *  triage every by()-consuming host shares — no host should re-scan `byArgs` inline. */
+export function classifyBy(byArgs: readonly any[] | undefined): ByClass {
+  const dir = byArgs?.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order as ByDirection | undefined;
+  const nested = byArgs?.find((a: any) => a && typeof a === 'object' && 'nested' in a);
+  if (nested) return { kind: 'nested', nested: nested.nested, dir };
+  const token = byArgs?.find((a: any) => a && typeof a === 'object' && 'token' in a);
+  if (token) return { kind: 'token', token: token.token, dir };
+  const key = byArgs?.find((a: any) => typeof a === 'string');
+  if (key !== undefined) return { kind: 'key', key, dir };
+  return { kind: 'none', dir };
+}
+
+/** PURE. The round-robin `by()` accessor: modulators cycle positionally in first-seen
+ *  order, so a single by() feeds every position and N by()s feed N positions (project()/
+ *  math()/format()/select() all share this). Returns undefined when there are no bys. */
+export const byAt = (bys: readonly any[][] | undefined, i: number): any[] | undefined =>
+  bys && bys.length ? bys[i % bys.length] : undefined;
+
+/** PURE. Classify the i-th round-robin by() group — the common `classifyBy(byAt(...))`. */
+export const classifyByAt = (bys: readonly any[][] | undefined, i: number): ByClass =>
+  classifyBy(byAt(bys, i));

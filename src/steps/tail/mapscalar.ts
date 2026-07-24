@@ -8,6 +8,7 @@ import { aliasElem, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel,
 import { aliasId, aliasScalar } from '../context/alias.ts';
 import { carryOf, toScalarStream, type ListStream, type ScalarStream, type Stream } from '../context/stream.ts';
 import { tryCompileElementChild, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, type ScalarModulationSpec } from './child.ts';
+import { classifyByAt } from './child-shape.ts';
 
 // ---------- map (scalar body → per-traverser scalar projector) ----------
 
@@ -91,7 +92,7 @@ export function lowerMath(st: ElementStream, steps: PStep[], stop: number): Scal
   const resolved = new Map<string, { key?: string; mod?: number; col?: string; elem: ElementStream['elem'] }>();
   for (const name of varOrder) {
     if (!bys.length) throw new Error(`math("${formula}"): variable "${name}" needs a by() modulator`);
-    const byArgs = bys[varOrder.indexOf(name) % bys.length];
+    const by = classifyByAt(bys, varOrder.indexOf(name));
     let col: string | undefined;
     let elem = st.elem;
     if (name !== '_') {
@@ -100,13 +101,11 @@ export function lowerMath(st: ElementStream, steps: PStep[], stop: number): Scal
       col = entry.col;
       elem = aliasElem(entry);
     }
-    const nested = byArgs.find((a: any) => a && typeof a === 'object' && 'nested' in a);
-    const strKey = byArgs.find((a: any) => typeof a === 'string');
-    if (nested) {
+    if (by.kind === 'nested') {
       const mod = specs.length;
-      specs.push({ nested: nested.nested, rootCol: col, rootElem: elem, required: true });
+      specs.push({ nested: by.nested, rootCol: col, rootElem: elem, required: true });
       resolved.set(name, { mod, col, elem });
-    } else if (strKey !== undefined) resolved.set(name, { key: strKey, col, elem });
+    } else if (by.kind === 'key') resolved.set(name, { key: by.key, col, elem });
     else throw new Error(`math("${formula}"): by() modulator must be a property key or a traversal`);
   }
 
@@ -164,11 +163,10 @@ export function lowerMathScalar(s: ScalarStream, step: PStep): ScalarStream | nu
   for (const name of varOrder) {
     if (name === '_') { resolved.set(name, undefined); continue; }
     if (!bys.length) return null;
-    const byArgs = bys[varOrder.indexOf(name) % bys.length];
-    const nested = byArgs.find((a: any) => a && typeof a === 'object' && 'nested' in a);
-    if (!nested) return null; // a property-key by() has no scalar meaning
+    const by = classifyByAt(bys, varOrder.indexOf(name));
+    if (by.kind !== 'nested') return null; // a property-key by() has no scalar meaning
     resolved.set(name, specs.length);
-    specs.push({ nested: nested.nested, required: true });
+    specs.push({ nested: by.nested, required: true });
   }
   const mods = specs.length ? tryCompileScalarModulations(s, specs) : null;
   if (specs.length && !mods) return null;
@@ -214,14 +212,12 @@ export function lowerFormat(st: ElementStream, steps: PStep[], stop: number): Sc
     hadToken = true;
     if (tok === '_') {
       if (!bys.length) throw new Error(`format("${tmpl}"): a %{_} placeholder needs a by() modulator`);
-      const byArgs = bys[u++ % bys.length];
-      const nested = byArgs.find((a: any) => a && typeof a === 'object' && 'nested' in a);
-      const strKey = byArgs.find((a: any) => typeof a === 'string');
-      if (nested) {
+      const by = classifyByAt(bys, u++);
+      if (by.kind === 'nested') {
         const index = specs.length;
-        specs.push({ nested: nested.nested, required: true });
+        specs.push({ nested: by.nested, required: true });
         parts.push({ kind: 'mod', index });
-      } else if (strKey !== undefined) parts.push({ kind: 'property', key: strKey });
+      } else if (by.kind === 'key') parts.push({ kind: 'property', key: by.key });
       else throw new Error(`format("${tmpl}"): a by() modulator must be a property key or a traversal`);
     } else {
       // A named token → the current element's property (first-under-multi for a node).
@@ -284,11 +280,10 @@ export function lowerFormatScalar(s: ScalarStream, step: PStep): ScalarStream | 
     hadToken = true;
     if (tok !== '_') return null; // a %{key} token reads a property — a scalar has none
     if (!bys.length) return null;
-    const byArgs = bys[u++ % bys.length];
-    const nested = byArgs.find((a: any) => a && typeof a === 'object' && 'nested' in a);
-    if (!nested) return null; // a property-key by() has no scalar meaning
+    const by = classifyByAt(bys, u++);
+    if (by.kind !== 'nested') return null; // a property-key by() has no scalar meaning
     parts.push({ kind: 'mod', index: specs.length });
-    specs.push({ nested: nested.nested, required: true });
+    specs.push({ nested: by.nested, required: true });
     last = m.index + m[0].length;
   }
   if (last < tmpl.length) parts.push({ kind: 'literal', text: tmpl.slice(last) });
