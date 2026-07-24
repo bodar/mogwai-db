@@ -298,9 +298,8 @@ test('a body aggregate() collects every vertex the walk visits (the :TOUCHED pro
 test('a pre-repeat aggregate multiset-unions with the in-repeat body aggregate (Aggregate.feature:627)', () => {
   const store = seededStore();
   // V().local(aggregate('a')) collects all 6 vertices; then repeat(out().local(aggregate('a'))).times(2)
-  // appends the walk's depth-1 and depth-2 rows. groupCount by name over the whole BulkSet.
-  // (Asserted on the raw gk/gv rows — a separate pre-existing groupCount scalar-FRAMING bug
-  // returns {} at the wire for values(k).groupCount(); the DATA the aggregate produces is correct.)
+  // appends the walk's depth-1 and depth-2 rows. groupCount by name over the whole BulkSet — asserted
+  // on the raw gk/gv rows (the wire-framed Map is verified equivalent by the L3 conformance run).
   const rows = run(store, `g.V().local(__.aggregate('a')).repeat(__.out().local(__.aggregate('a'))).times(2).cap('a').unfold().values('name').groupCount()`);
   const counts = Object.fromEntries(rows.map((r: any) => [r.gk, Number(r.gv)]));
   expect(counts).toEqual({ marko: 1, vadas: 2, josh: 2, lop: 5, ripple: 3, peter: 1 });
