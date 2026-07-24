@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startConformanceServer } from './conformance-server.ts';
 import { L3_TAGS } from './tags.ts';
-import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport, readState, writeState, delta, formatDelta } from './telemetry.ts';
+import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport, readState, writeState, delta, formatDelta, expectedErrorSubstrings } from './telemetry.ts';
 
 // helper.js in the GLV hardcodes http://localhost:45940 — the port is not
 // configurable, so the host must own it for the duration of the run.
@@ -138,7 +138,10 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
   // server NDJSON captured this run. Always on. The NDJSON + summary are gitignored
   // transient artifacts; only l3-state.json carries durable cross-run state.
   const tpath = telemetryPath();
-  const sum = summarize(readTelemetry(tpath));
+  // Partition failures with the corpus's own expected-error strings: a throw satisfying a
+  // negative scenario's assertion is an expected error (scenario passes), kept out of the
+  // buckets so the ranking reflects only real gaps.
+  const sum = summarize(readTelemetry(tpath), expectedErrorSubstrings(FEATURES));
   console.log(formatReport(sum, rows));
   const artifact = tpath.replace(/\.ndjson$/, '') + '.summary.json';
   writeFileSync(artifact, JSON.stringify({ ...sum, scenarios: rows }, null, 2) + '\n');

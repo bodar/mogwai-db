@@ -418,7 +418,10 @@ whole suite.
   throw — a message that satisfies a negative scenario's `raise an error … text of "…"`
   assertion, keyed off the corpus's own strings so a real bug throwing a canonical-looking
   error still shows `E` — and `E` per real compile/exec gap) prints during the run, then the
-  systematic-gap summary (deferral buckets + failing-step frequency) after. **One committed state file,
+  systematic-gap summary (deferral buckets + failing-step frequency) after. The summary
+  partitions failures the same way: `summarize(records, expectedErrorSubstrings(FEATURES))`
+  excludes expected negative-test throws so the buckets rank ONLY real gaps (the header still
+  reports the expected-throw count). **One committed state file,
   `test/L3-conformance/l3-state.json`**, records the last-known run — `{passing, total,
   passed[], failed[]}` — and is the SINGLE ratchet source of truth (`passing` =
   `passed.length`; there is no separate `baseline.json`/`l3-passing.txt`). Every run diffs
