@@ -2,9 +2,10 @@ import { derived, q, list, raw, type Expression, type Relation } from '../../sql
 import { stepChain, type Pred } from '../../gremlin/frontend.ts';
 import {
   P_OPS, labelIn, predicateSql, nodePropScalar, hasProp, elemCtx, aliasCtx,
-  idPredFromArgs, scalarProp, labelNameSub, type Elem, type ScalarCtx,
+  idPredFromArgs, scalarProp, labelNameSub, FtsSubstringFastPath, type Elem, type ScalarCtx,
 } from '../../compiler/plan/plan.ts';
-import { tryInlinePredicate, combineBranchPreds } from './predicate.ts';
+import { runFastPath, fastPathContext } from '../../compiler/options/fast-paths.ts';
+import { tryInlinePredicate, combineBranchPreds, PredicateInliningFastPath } from './predicate.ts';
 import { advance, aliasElem, carriedCols, carriedWith, carryFrag, elemRel, pathColsOf, prevRel, scopePathCols, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from '../context/context.ts';
 import { aliasAppend, aliasId, aliasSeed, elemEntry, elemShape } from '../context/alias.ts';
 import { tryCombineByChildExistence, tryCompileScalarValueRows, tryFilterByChildExistence } from '../tail/child.ts';
@@ -148,10 +149,11 @@ export const has: StepFn = (s, st) => {
     // ANY-match EXISTS over the element's normalized properties table (vertex_properties
     // for a node, edge_properties for an edge). hasProp dispatches on elem (current
     // traverser aliased `n`). A >= 3-char positive substring predicate over this STORED
-    // property routes through the property_fts trigram index (ftsSubstringPredicate fast
-    // path, default on) — result-equivalent to the generic LIKE fall-through.
-    const fts = engineOf(st).fastPaths.ftsSubstringPredicate !== false;
-    conds.push(hasProp(currentCtx(st), key, val, fts));
+    // property routes through the property_fts trigram index (FtsSubstringFastPath, default
+    // on) — result-equivalent to the generic LIKE hasProp fall-through.
+    const ctx = currentCtx(st);
+    const fts = runFastPath(FtsSubstringFastPath, fastPathContext(engineOf(st).fastPaths), ctx, key, val);
+    conds.push(fts ?? hasProp(ctx, key, val));
   }
   return filterCte(st, list(conds, ' AND '));
 };
@@ -161,9 +163,8 @@ export const has: StepFn = (s, st) => {
 export const where: StepFn = (s, st) => {
   const arg0 = s.args[0];
   if (arg0 && typeof arg0 === 'object' && 'nested' in arg0) {
-    const pred = engineOf(st).fastPaths.predicateInlining === false
-      ? null
-      : tryInlinePredicate(engineOf(st), stepChain(arg0.nested, st.params), currentCtx(st), st.params, aliasResolver(st));
+    const pred = runFastPath(PredicateInliningFastPath, fastPathContext(engineOf(st).fastPaths),
+      () => tryInlinePredicate(engineOf(st), stepChain(arg0.nested, st.params), currentCtx(st), st.params, aliasResolver(st)));
     if (pred)
       return filterCte(st, s.name === 'not' ? notCoalesce(pred) : pred);
     const generic = tryFilterByChildExistence(st, arg0.nested, s.name === 'not');
@@ -215,10 +216,9 @@ export const where: StepFn = (s, st) => {
 export const andOr: StepFn = (s, st) => {
   const op = s.name === 'and' ? 'AND' : 'OR';
   const branches = s.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
-  if (engineOf(st).fastPaths.predicateInlining !== false) {
-    const pred = combineBranchPreds(engineOf(st), s, currentCtx(st), st.params, op, aliasResolver(st));
-    if (pred) return filterCte(st, pred);
-  }
+  const pred = runFastPath(PredicateInliningFastPath, fastPathContext(engineOf(st).fastPaths),
+    () => combineBranchPreds(engineOf(st), s, currentCtx(st), st.params, op, aliasResolver(st)));
+  if (pred) return filterCte(st, pred);
   const generic = tryCombineByChildExistence(st, branches.map((b: any) => b.nested), op);
   if (generic) return generic;
   throw new Error(`${s.name}() not supported by inline predicate or generic child existence lowering`);

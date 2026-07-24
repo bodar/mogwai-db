@@ -1,5 +1,6 @@
 import { EMPTY_REGISTRY } from '../../services/spi/registry.ts';
 import type { ServiceRegistry } from '../../services/spi/types.ts';
+import type { ChainFacts } from '../ir/analyze.ts';
 
 /** Independently switchable optimized lowerings. The generic path remains the
  * semantic authority; these switches exist for equivalence tests and diagnostics. */
@@ -65,3 +66,56 @@ export const resolveRegistry = (options?: CompileOptions): ServiceRegistry =>
 /** The federation depth for this compile (0 at the top level). */
 export const resolveFederationDepth = (options?: CompileOptions): number =>
   options?.federationDepth ?? 0;
+
+// ---------- the FastPath contract (Layer C2: select a SQL lowering) ----------
+//
+// The prose contract CLAUDE.md states for a fast path, turned into a TYPE. A FastPath recognizes a
+// sub-shape and lowers it to specialized SQL, with the generic path as the fallback + semantic
+// authority. ONE verb: SELECT a lowering (or decline via appliesWhen=false / tryLower=null). It is
+// NOT a Pass (it does not rewrite Step[]) and NOT a ChainFacts (it does not annotate) — the third
+// sibling. Dispatch stays FAMILY-LOCAL: each FastPath object is defined in its own family file next
+// to its tryLower body, and fires at its own natural lowering site. This interface + the shared
+// FastPathContext give the six a common SHAPE, not a single call point.
+//
+// R is generic because the six lower to genuinely different artifacts (an Expression, a terminal
+// Compiled, a ScalarGate builder, an ElementStream) — forcing one result type would be the false
+// unification. `appliesWhen` is the HOME for a fast path's recognition logic (its enable-flag check
+// AND its structural/shape gate), so a fast path that today welds "does it match" to "emit the SQL"
+// gets those two concerns pulled into two methods.
+
+/** Ambient info every FastPath consults, beyond its own explicit per-site args. Kept minimal and
+ *  structural — the Engine/Stream/carried a site needs are passed as tryLower/appliesWhen varargs,
+ *  not smuggled here. */
+export interface FastPathContext {
+  readonly enabled: FastPathConfig;
+  /** Present only where chain-level facts are in scope (the movementCollapse chain gate is already
+   *  folded into `enabled.movementCollapse` via collapseSafeFastPaths, so most sites omit this). */
+  readonly facts?: ChainFacts;
+}
+
+export interface FastPath<Args extends unknown[], R> {
+  /** Matches the FastPathConfig flag this path is switched by. */
+  readonly name: keyof FastPathConfig;
+  /** Cheap structural gate: reads ctx.enabled[name] AND the shape test this path's recognition
+   *  performs. Pure; builds no SQL. false → skip straight to the generic middle. */
+  appliesWhen(ctx: FastPathContext, ...args: Args): boolean;
+  /** Try the specialized lowering. Called only when appliesWhen held. May STILL return null when a
+   *  two-stage recognizer fails on an internal "not yet supported" leaf after the shape gate passed
+   *  (e.g. predicate inlining) — recognition failure is ALWAYS null, never a throw, never a support
+   *  boundary. null → fall through to the generic path. */
+  tryLower(ctx: FastPathContext, ...args: Args): R | null;
+  /** The equivalence obligation as a machine-checkable reference: the name of the committed test
+   *  proving enabled ≡ disabled. Required — a FastPath without it fails the registry test. This is
+   *  the "prove it's result-equivalent" law turned into a declaration a reviewer can check. */
+  readonly equivalentWhen: string;
+}
+
+/** The shared dispatch shape: try the fast path at its OWN site, else null-to-generic. This is the
+ *  common shape, NOT a central dispatcher — each family calls it for its own FastPath at the site
+ *  that already owns that lowering (family-locality is the hard constraint). */
+export function runFastPath<Args extends unknown[], R>(fp: FastPath<Args, R>, ctx: FastPathContext, ...args: Args): R | null {
+  return fp.appliesWhen(ctx, ...args) ? fp.tryLower(ctx, ...args) : null;
+}
+
+/** Build the ambient FastPathContext from a resolved FastPathConfig (+ optional ChainFacts). */
+export const fastPathContext = (enabled: FastPathConfig, facts?: ChainFacts): FastPathContext => ({ enabled, facts });

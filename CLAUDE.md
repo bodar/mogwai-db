@@ -67,13 +67,26 @@ intentional materialization boundary.
 
 ## Compiler architecture
 
-`compile()` (`src/compiler/compiler.ts`) is a thin orchestrator: `parse → normalize → dispatch`.
+`compile()` (`src/compiler/compiler.ts`) is a thin orchestrator: `parse → runPasses → analyze → dispatch`.
 Three seams:
 
-- **Seam 3 — `src/compiler/ir/strategies.ts`:** pure `Step[]→Step[]` normalization passes run once
-  up front (strip terminal, fold repeat clusters, fold by() modulators, apply
-  `withStrategies`) so dispatch sees a canonical, peek-free chain. No index arithmetic
-  in step compilers; multi-step modulator consumption belongs in a strategies fold.
+- **Seam 3 — the Pass pipeline (`src/compiler/ir/pass.ts` + `passes.ts`):** ONE categorized, ordered
+  `Step[]→Step[]` rewrite pipeline (`runPasses`) replaces both the old inside-out `normalize()` and the
+  `applyStrategies` ladder. Categories run in fixed order `extract < decoration < fold < simplify <
+  verify` (`PASS_CATEGORIES`); each rewrite is a `Pass` object in the right category group of the flat
+  `PASSES` array — add one there, never grow a switch. The concrete fold/inject/verify BODIES + the
+  strategy-classification Sets stay in `ir/strategies.ts` (wrapped as Passes); `normalize()` survives as
+  `runPasses(steps, EMPTY_STRATEGY_USE)`, the entry every NESTED sub-chain uses (child bodies, match
+  patterns, write targets, correlated predicates). **decoration runs BEFORE fold on purpose** — the
+  Subgraph/Partition injectors recurse into raw `{nested}` args that `foldRepeatClusters`/
+  `foldChooseOptions` would move into `.cluster`/`.options` (decorating after fold silently skips a
+  repeat()/choose() body = an unfiltered leak). **verify asserts against the raw pre-decoration chain**
+  (`ctx.originalChain`, snapshotted at the extract→decoration boundary) so an injected Partition stamp /
+  exploded edge step is invisible to it. The ordering invariants are a committed test
+  (`test/compiler/passes.exec.test.ts`). Whole-chain FACTS (path/encounter/collapse-safety) are a
+  separate annotation, not a rewrite — `ChainFacts` + `analyze(steps)` in `src/compiler/ir/analyze.ts`
+  (one cohesive walk; `isPlainOrder` shared by the encounter + collapse scans so they can't drift).
+  No index arithmetic in step compilers; multi-step modulator consumption belongs in a fold Pass.
 - **Seam 2 — `src/steps/{context,prefix,tail,write}/`:** the read prefix is a functional fold of
   `StepFn`s over an immutable typed **`Stream`** (`context/context.ts`/`context/stream.ts`). The union:
   `ElementStream`/`ScalarStream`/`VariantStream`/`ListStream`/`PropertyStream`/
@@ -91,8 +104,8 @@ Three seams:
 ### Compiler extension law — mandatory
 
 `lowerSteps(Stream, steps, at)` is the semantic authority for read traversals at root
-and child scope. To implement a step: normalize sibling/modulator structure in
-`strategies.ts`; lower from the appropriate typed `Stream`; for a child, push a
+and child scope. To implement a step: normalize sibling/modulator structure as a fold Pass
+(`ir/passes.ts`, body in `ir/strategies.ts`); lower from the appropriate typed `Stream`; for a child, push a
 `ChildScope` (`steps/tail/child.ts`) and run the same engine; materialize only at the root.
 
 **Do NOT add** a private child-traversal parser or supported-step vocabulary, a
@@ -127,7 +140,7 @@ element-id order): the **canonical emission order** substrate
 merge (`unionScalarStreams`: `ROW_NUMBER() OVER (ORDER BY arm_idx, arm_encounter)`) and the
 `'first'` child cardinality collapses to it. Emission order is ONE unified `Carried.encounter`
 slot (root-global or per-origin child; movement re-mints over `(prev_encounter, new_id)`); a
-demand pre-pass (`demandsEncounterOrder`, `strategies.ts`) seeds it only when a positional
+demand pre-pass (`ChainFacts.demandsEncounter`, `ir/analyze.ts`) seeds it only when a positional
 consumer (limit/range/skip/tail/fold/dedup(labels)) follows a fan-out, so order-free chains and
 `movementCollapse` are untouched. **Residual take-first (fail-closed, correct-by-design, NOT
 mis-executed):** a fan-out arm at a `path().by(__.trav)` position, and a mixed-shape
@@ -184,20 +197,33 @@ To add a child form: extend the classifier in `child-shape.ts`, the compiler in 
 `scalar-arm.ts` if it's a scalar-parent arm) — do NOT reach for an object.
 
 **Fast paths** are explicit per-compilation switches in `CompileOptions.fastPaths`
-(`src/compiler/options/fast-paths.ts`) — never a mutable global. A specialized lowering qualifies as a
-fast path only when: the generic path stays the semantic authority and disabling the
-switch compiles the same traversal generically; recognition failure returns `null`/falls
-through (never defines support or throws because its optimized vocabulary is exhausted);
-enabled-vs-disabled are result-equivalent in a committed test; and an EXPLAIN/benchmark
-shows material benefit. Currently: `predicateInlining`, `singleHopOptional`,
-`bulkRepeatCount`, `scalarPredicateInlining` (the scalar-parent predicate gate: inline
-`WHERE` over the value vs a correlated EXISTS over a pushed scalar scope — used by
-`and`/`or`/`not`/`filter`/`where`/`choose`/`coalesce` over a scalar), `movementCollapse`
-(frontier collapse: each movement folds convergent walks into `SELECT id, SUM(bulk) …
-GROUP BY id`, bounding the frontier by reachable |V| not the exponential walk count —
-gated by `chainCollapseSafe` in `engine.ts` to reducer-terminal pure movement/filter
-chains where the terminal `SUM(bulk)` makes it result-equivalent; the traverser-`bulk`
-carried column is the substrate). A fast path should reuse the surrounding plumbing and swap only the
+(`src/compiler/options/fast-paths.ts`) — never a mutable global. Each switch has ONE `FastPath`
+object (same file, `interface FastPath<Args, R>`): `appliesWhen(ctx, …)` is the recognition home
+(enable flag + structural/shape gate), `tryLower(ctx, …)` emits the specialized SQL or returns
+`null` to fall through (generic R per path — `Expression`/`Compiled`/`ScalarGate`/`ElementStream`),
+and `equivalentWhen` NAMES the committed enabled≡disabled test — the qualification contract turned
+into a required, checkable field (asserted by `test/compiler/fast-paths.exec.test.ts`). Dispatch stays
+FAMILY-LOCAL: each object is defined in its family file next to its `tryLower` body and fired at its own
+site via `runFastPath(FP, fastPathContext(fp), …)` — the shared SHAPE, never a central dispatch loop.
+A specialized lowering qualifies as a fast path only when: the generic path stays the semantic
+authority and disabling the switch compiles the same traversal generically; recognition failure
+returns `null`/falls through (never defines support or throws because its optimized vocabulary is
+exhausted); enabled-vs-disabled are result-equivalent in the committed test `equivalentWhen` names;
+and an EXPLAIN/benchmark shows material benefit. Currently: `predicateInlining`
+(`PredicateInliningFastPath`, `predicate.ts`; its recognizer varies per site so `tryLower` takes a
+thunk — gates where/filter/and/or/choose, but NOT until()/emit(), which have no generic fallback and
+inline unconditionally), `singleHopOptional` (`branch.ts`),
+`bulkRepeatCount` (`bulk.ts`), `scalarPredicateInlining` (`ScalarPredicateInliningFastPath`,
+`scalar-arm.ts` — the scalar-parent predicate gate: inline `WHERE` over the value vs a correlated
+EXISTS over a pushed scalar scope — used by `and`/`or`/`not`/`filter`/`where`/`choose`/`coalesce`
+over a scalar; `scalar.ts`'s twin site reads the enable flag directly to avoid a scalar◂scalar-arm
+cycle), `ftsSubstringPredicate` (`FtsSubstringFastPath`, `plan.ts`), `movementCollapse`
+(`MovementCollapseFastPath`, `movement.ts`: frontier collapse — each movement folds convergent walks
+into `SELECT id, SUM(bulk) … GROUP BY id`, bounding the frontier by reachable |V| not the exponential
+walk count. Its CHAIN-level gate is `ChainFacts.collapseSafe` (`src/compiler/ir/analyze.ts`, folded
+into the enable flag by `collapseSafeFastPaths`); `appliesWhen` does the per-move `isBulkOnly`
+live-state check; the terminal `SUM(bulk)` makes it result-equivalent; the traverser-`bulk` carried
+column is the substrate). A fast path should reuse the surrounding plumbing and swap only the
 "middle" — e.g. the predicate family (`predicateInlining`, `src/steps/prefix/predicate.ts`)
 feeds one boolean `Expression` to the shared `filterCte`; the fast middle is the GENERIC
 movement/filter StepFns rendered in inline-correlated mode (`compileCorrelatedChild`,

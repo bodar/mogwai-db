@@ -26,6 +26,7 @@ import { carriedCols, carryFrag, type ElementStream } from '../context/context.t
 import { carryOf, toScalarStream, toVariantStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
 import { variantArmSelect, variantArmsMeta, variantCols, type VariantArm } from './variant.ts';
 import { engineOf } from '../../compiler/engine/deps.ts';
+import { runFastPath, fastPathContext, type FastPath } from '../../compiler/options/fast-paths.ts';
 import { gateScalar, tryInlineScalarPredicate, unionScalarStreams } from './scalar.ts';
 import { predicateSql } from '../../compiler/plan/plan.ts';
 import { type PStep } from '../../compiler/ir/strategies.ts';
@@ -246,14 +247,22 @@ function genericScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): S
   };
 }
 
+/** The scalarPredicateInlining fast path: inline a scalar predicate body as one WHERE over the
+ *  value, vs the generic correlated child-existence gate. appliesWhen is the flag; tryLower runs
+ *  inlineScalarGate (null when the body is beyond the inline vocabulary → generic fallback). Both
+ *  scalar-parent predicate sites (buildScalarGate here, filterScalar in scalar.ts) share it. */
+export const ScalarPredicateInliningFastPath: FastPath<[ScalarStream, readonly ScalarGateSpec[]], ScalarGate> = {
+  name: 'scalarPredicateInlining',
+  equivalentWhen: 'every disable-safe fast path is result-equivalent to generic lowering',
+  appliesWhen: (ctx) => ctx.enabled.scalarPredicateInlining,
+  tryLower: (_ctx, s, specs) => inlineScalarGate(s, specs),
+};
+
 /** Pick the inline fast path unless scalarPredicateInlining is off, or a traversal predicate is
  *  beyond the inline vocabulary; then use the generic child-existence gate. Result-equivalent. */
 function buildScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): ScalarGate | null {
-  if (engineOf(s).fastPaths.scalarPredicateInlining !== false) {
-    const inline = inlineScalarGate(s, specs);
-    if (inline) return inline;
-  }
-  return genericScalarGate(s, specs);
+  return runFastPath(ScalarPredicateInliningFastPath, fastPathContext(engineOf(s).fastPaths), s, specs)
+    ?? genericScalarGate(s, specs);
 }
 
 /** choose(pred, then[, else]) over a scalar. The predicate is a P (applied to `v` via

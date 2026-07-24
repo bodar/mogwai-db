@@ -1,5 +1,6 @@
 import { flattenListArgs, type Pred } from '../../gremlin/frontend.ts';
 import { q, list, values, empty, value, raw, jsonExtract, type Expression, type Relation } from '../../sql/kernel/q.ts';
+import type { FastPath } from '../options/fast-paths.ts';
 import { normalizeTypeName, BigDecimal, Duration } from '../../gremlin/types.ts';
 import { type ValueType } from '../../sql/kernel/render.ts';
 
@@ -321,6 +322,21 @@ function ftsSubstringExists(ownerElem: 'node' | 'edge', ownerIdExpr: Expression,
   return q`EXISTS(SELECT 1 FROM property_fts WHERE owner_elem=${value(ownerElem)} AND owner=${ownerIdExpr} AND pk=${value(key)} AND kind=${value('value')} AND text MATCH ${value(m.matchPhrase)} AND text LIKE ${value(m.likePat)} escape ${value('\\')})`;
 }
 
+/** The ftsSubstringPredicate fast path. Recognition (ftsSubstringMatch: a >=3-char positive
+ *  substring op) and the enable flag are consolidated here in appliesWhen — the boolean no longer
+ *  threads through hasProp/nodeHasProp/edgeHasProp. tryLower emits the property_fts trigram EXISTS
+ *  (result-equivalent to the generic LIKE, which stays the fallback + semantic authority). Fires at
+ *  the has() choke point (the one site with a fastPaths config in scope); every other has-prop
+ *  caller uses the generic LIKE. */
+export const FtsSubstringFastPath: FastPath<[ScalarCtx, string, any], Expression> = {
+  name: 'ftsSubstringPredicate',
+  equivalentWhen: 'ftsSubstringPredicate: has(k, >=3-char substring) routes through property_fts, LIKE fallback equivalent',
+  appliesWhen: (ctx, scalarCtx, _key, pred) =>
+    ctx.enabled.ftsSubstringPredicate && (scalarCtx.elem === 'node' || scalarCtx.elem === 'edge') && ftsSubstringMatch(pred) !== null,
+  tryLower: (_ctx, scalarCtx, key, pred) =>
+    ftsSubstringExists(scalarCtx.elem as 'node' | 'edge', scalarCtx.idExpr, key, ftsSubstringMatch(pred)!),
+};
+
 /** range(low, high) → SQL [offset, limit]. high < 0 means "no upper bound". */
 export function rangeToOffsetLimit(args: any[]): { offset: number; limit: number } {
   const [lo, hi] = args.map(Number);
@@ -454,14 +470,10 @@ export const nodePropScalar = (nodeIdExpr: Expression, key: string): Expression 
   q`(SELECT value FROM vertex_properties WHERE node=${nodeIdExpr} AND key=${value(key)} ORDER BY id LIMIT 1)`;
 
 /** node: does ANY value under `key` satisfy `pred` (undefined → the key exists at
- *  all). EXISTS over vertex_properties → multi-property has() semantics. */
-export const nodeHasProp = (nodeIdExpr: Expression, key: string, pred: any, fts = false): Expression => {
-  // ftsSubstringPredicate fast path: a >= 3-char positive substring op over this stored
-  // property routes through the property_fts trigram index (result-equivalent to the LIKE
-  // below — an equivalence test asserts it). Only the has()/where-property choke point that
-  // has a fastPaths config in scope opts in (fts=true); every other caller uses the generic
-  // LIKE. Recognition failure falls through — the fast path never defines support.
-  if (fts) { const m = ftsSubstringMatch(pred); if (m) return ftsSubstringExists('node', nodeIdExpr, key, m); }
+ *  all). EXISTS over vertex_properties → multi-property has() semantics. The generic LIKE
+ *  path is the semantic authority; the ftsSubstringPredicate fast path (FtsSubstringFastPath)
+ *  is applied one level up, at the has() choke point, and only replaces this when it fires. */
+export const nodeHasProp = (nodeIdExpr: Expression, key: string, pred: any): Expression => {
   const base = q`SELECT 1 FROM vertex_properties WHERE node=${nodeIdExpr} AND key=${value(key)}`;
   // The row's own `vtype` column is in scope inside the EXISTS, so has('k',typeOf(X))
   // matches the stored canonical type (mode 2) instead of only storage class.
@@ -476,8 +488,7 @@ export const edgePropScalar = (edgeIdExpr: Expression, key: string): Expression 
 
 /** edge: does `key` satisfy `pred` (undefined → the key exists). EXISTS over
  *  edge_properties — mirror of nodeHasProp. */
-export const edgeHasProp = (edgeIdExpr: Expression, key: string, pred: any, fts = false): Expression => {
-  if (fts) { const m = ftsSubstringMatch(pred); if (m) return ftsSubstringExists('edge', edgeIdExpr, key, m); }
+export const edgeHasProp = (edgeIdExpr: Expression, key: string, pred: any): Expression => {
   const base = q`SELECT 1 FROM edge_properties WHERE edge=${edgeIdExpr} AND key=${value(key)}`;
   return pred === undefined ? q`EXISTS(${base})` : q`EXISTS(${base} AND ${predicateSql(raw('value'), pred, { vtypeExpr: raw('vtype') })})`;
 };
@@ -502,8 +513,8 @@ export const scalarProp = (ctx: ScalarCtx, key: string): Expression =>
 
 /** A boolean predicate on `key` for the current element (has/where/is): node → ANY-match
  *  EXISTS over vertex_properties; edge → EXISTS over edge_properties. */
-export const hasProp = (ctx: ScalarCtx, key: string, pred: any, fts = false): Expression =>
-  ctx.elem === 'edge' ? edgeHasProp(ctx.idExpr, key, pred, fts) : nodeHasProp(ctx.idExpr, key, pred, fts);
+export const hasProp = (ctx: ScalarCtx, key: string, pred: any): Expression =>
+  ctx.elem === 'edge' ? edgeHasProp(ctx.idExpr, key, pred) : nodeHasProp(ctx.idExpr, key, pred);
 
 /** node: assemble ALL properties as JSON text `{key:[value,…]}` (multi-valued,
  *  insertion-ordered) from vertex_properties, correlated on the node rowid. Empty →

@@ -6,6 +6,7 @@ import { type PStep } from '../../compiler/ir/strategies.ts';
 import { type Compiled } from '../../sql/kernel/render.ts';
 import { materializeRoot } from './materialize.ts';
 import type { Engine } from '../../compiler/engine/deps.ts';
+import type { FastPath, FastPathContext } from '../../compiler/options/fast-paths.ts';
 
 // ---------- traverser bulking: repeat(...).times(n).count() ----------
 //
@@ -120,7 +121,7 @@ function bulkPlan(steps: PStep[], params: Record<string, any>, sackInit?: SackSp
  *  element terminal frames each frontier vertex as (v, bulk) — the RLE the wire expands, instead of
  *  enumerating every (exponential) walk. Returns null (falling back to the normal path) if the
  *  prefix carries alias/path/sack state or isn't vertex-typed. */
-export function tryBulkRepeat(engine: Engine, steps: PStep[], params: Record<string, any>, sackInit?: SackSpec): Compiled | null {
+function tryBulkRepeat(engine: Engine, steps: PStep[], params: Record<string, any>, sackInit?: SackSpec): Compiled | null {
   const plan = bulkPlan(steps, params, sackInit);
   if (!plan) return null;
 
@@ -176,3 +177,14 @@ export function tryBulkRepeat(engine: Engine, steps: PStep[], params: Record<str
     { kind: 'vertex' },
   );
 }
+
+/** The bulkRepeatCount fast path. Recognition (bulkPlan) and lowering are intertwined — the
+ *  definitive gate requires building the prefix (see tryBulkRepeat's stop/elem/identity check) —
+ *  so the shape test lives inside tryLower (null = not the bulkable shape), and appliesWhen is the
+ *  flag alone, exactly as compileRead dispatched it before. Fires at compileRead, before buildPrefix. */
+export const BulkRepeatCountFastPath: FastPath<[Engine, PStep[], Record<string, any>, SackSpec | undefined], Compiled> = {
+  name: 'bulkRepeatCount',
+  equivalentWhen: 'every disable-safe fast path is result-equivalent to generic lowering',
+  appliesWhen: (ctx) => ctx.enabled.bulkRepeatCount,
+  tryLower: (_ctx, engine, steps, params, sackInit) => tryBulkRepeat(engine, steps, params, sackInit),
+};

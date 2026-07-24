@@ -391,7 +391,9 @@ export function lowerScalarFilter(s: ScalarStream, step: PStep): ScalarStream | 
     if (!pred || step.args.some((a: any) => typeof a === 'string')) return null; // where('a',P) → alias compare, decline
     return filterScalarByCond(s, p, predicateSql(cur, pred, vt ? { vtypeExpr: vt } : undefined));
   }
-  // Traversal-child predicate — the disable-safe fast path.
+  // Traversal-child predicate — the scalarPredicateInlining fast path (ScalarPredicateInliningFastPath
+  // is its canonical dispatch, in scalar-arm.ts; this leaf reads the same enable flag directly to
+  // avoid a scalar ◂ scalar-arm import cycle). Off → decline so the caller falls back to generic.
   if (engineOf(s).fastPaths.scalarPredicateInlining === false) return null;
   let cond: Expression | null;
   if (step.name === 'and' || step.name === 'or') {
