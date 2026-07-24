@@ -1,5 +1,5 @@
 {
-  "passing": 1276,
+  "passing": 1277,
   "total": 2041,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -572,6 +572,7 @@
     "g_V_order_byXnameX_name",
     "g_V_order_byXname_ascX_name",
     "g_V_order_byXname_descX_barrier_dedup_age_name",
+    "g_V_order_byXoutE_count_descX_byXnameX",
     "g_V_outE_drop",
     "g_V_outE_hasXweight_1X_outV",
     "g_V_outE_mathX0_minus_itX_byXweightX",
@@ -1663,7 +1664,6 @@
     "g_V_order_byXname_descX_repeatXboth_simplePath_order_byXname_descXX_timesX2X_path",
     "g_V_order_byXname_descX_repeatXlocalXout_order_byXnameXXX_timesX1X",
     "g_V_order_byXnoX_count",
-    "g_V_order_byXoutE_count_descX_byXnameX",
     "g_V_outEXnoexistX_subgraphXsgXcapXsgX",
     "g_V_outE_asXeX_inV_asXvX_selectXeX_order_byXweight_ascX_selectXvX_valuesXnameX_dedup",
     "g_V_outE_propertyXweight_nullX",
