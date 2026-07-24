@@ -539,4 +539,19 @@ describe('repeat / path SQL', () => {
     // the done column tests the freshly-folded sack against the predicate.
     expect(p.sql).toMatch(/CASE WHEN \(c\d+\.sk \+ \(SELECT value FROM vertex_properties[^)]*\)\) >= \? THEN 1 ELSE 0 END AS done/);
   });
+
+  test('a body-terminal aggregate() collects the walk rows (depth ≥ 1) into a bag CTE', () => {
+    const p = read("g.V(1).repeat(__.out().aggregate('x')).times(2).cap('x')");
+    // the aggregate bag is a post-walk jsonb list sourced from the walk's non-seed rows.
+    expect(p.sql).toContain('AS m FROM');
+    expect(p.sql).toContain('WHERE w.depth >= 1');
+    // local(__.aggregate('x')) folds the same way (local scopes the side-effect per traverser).
+    expect(read("g.V(1).repeat(__.out().local(__.aggregate('x'))).times(2).cap('x')").sql).toContain('WHERE w.depth >= 1');
+  });
+
+  test('a pre-repeat aggregate bag is multiset-unioned with the in-repeat rows (BulkSet)', () => {
+    const p = read("g.V().local(__.aggregate('a')).repeat(__.out().local(__.aggregate('a'))).times(2).cap('a')");
+    expect(p.sql).toContain('json_each'); // prior bag's members unioned first
+    expect(p.sql).toContain('UNION ALL SELECT'); // then the walk's depth≥1 rows
+  });
 });

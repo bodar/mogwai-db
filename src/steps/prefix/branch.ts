@@ -2,9 +2,9 @@ import { q, list, empty, value, raw, Relation, type Expression } from '../../sql
 import { edges } from '../../sql/schema.ts';
 import { stepChain, type Step } from '../../gremlin/frontend.ts';
 import { foldByModulators } from '../../compiler/ir/strategies.ts';
-import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, type ScalarCtx, type Elem } from '../../compiler/plan/plan.ts';
+import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem } from '../../compiler/plan/plan.ts';
 import { tryInlinePredicate } from './predicate.ts';
-import { advance, elemRel, prevRel, carryFrag, carryFragMint, carriedCols, partitionOver, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn } from '../context/context.ts';
+import { advance, elemRel, prevRel, carryFrag, carryFragMint, carriedCols, partitionOver, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type AliasShape } from '../context/alias.ts';
 import { pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
 import { classifyListChild, classifyScalarChild, isElementChild, isListChild, isScalarChild, ROOT_SCOPE } from '../tail/child-shape.ts';
@@ -626,7 +626,27 @@ export const repeat: StepFn = (s, st) => {
   // the same canonical shape as any chain — the body is a sub-traversal, not a special case.
   const body = foldByModulators(stepChain(rep.args[0]?.nested, st.params));
   const simplePathInBody = body.length > 0 && body[body.length - 1].name === 'simplePath';
-  const core = simplePathInBody ? body.slice(0, -1) : body;
+  // A body-TERMINAL aggregate('x') (bare or local(__.aggregate('x'))) collects every vertex the
+  // body emits — i.e. every walk row at depth ≥ 1 — into the named bag, read back by cap('x').
+  // It's a pass-through (no movement/filter), so it's stripped from the movement expansion and
+  // registered as a post-walk side-effect CTE sourced from the walk (reuses the linear aggregate's
+  // JSONB-list machinery). Only the terminal position is supported (the common repeat(out().aggregate)
+  // shape); a mid-body aggregate (out().aggregate().out()) would collect an intermediate frontier and
+  // stays deferred. by()-modulated aggregate-in-repeat also defers (collect element rowids only).
+  const bodyAggName = (c: Step): string | null => {
+    if (c.name === 'aggregate' && (c.args ?? []).length === 1 && typeof c.args[0] === 'string' && !(c as any).bys?.length) return c.args[0];
+    if (c.name === 'local') {
+      const inner = stepChain(c.args[0]?.nested, st.params);
+      if (inner.length === 1 && inner[0].name === 'aggregate' && typeof inner[0].args[0] === 'string' && !(inner[0] as any).bys?.length) return inner[0].args[0];
+    }
+    return null;
+  };
+  const preAgg = simplePathInBody ? body.slice(0, -1) : body;
+  const aggName = preAgg.length >= 1 ? bodyAggName(preAgg[preAgg.length - 1]) : null;
+  // Strip a terminal aggregate from the core so the movement expander never sees it. A body that
+  // is ONLY aggregate (repeat(aggregate('a')), no movement) stays on the same vertex each iteration
+  // (depth 1..n all the seed) — the walk still emits those rows, so the bag collects the seed n times.
+  const core = aggName ? preAgg.slice(0, -1) : preAgg;
   // Vertex→edge steps land ON an edge (so a following sack().by(edgeKey) reads it); each edge
   // step counts as a movement for progress. `moves` gates path tracking (a net vertex hop count).
   const moves = core.filter((c) => REPEAT_MOVES.has(c.name) || TO_EDGE.has(c.name));
@@ -636,9 +656,10 @@ export const repeat: StepFn = (s, st) => {
   const bodyFoldsSack = core.some(isSackFold);
   const REPEAT_BODY_OK = (c: Step): boolean => REPEAT_MOVE_ALL.has(c.name) || c.name === 'has' || isSackFold(c) || sackWhereGuard(c) !== null;
   const badStep = core.find((c) => !REPEAT_BODY_OK(c));
-  // A movement-free body is valid ONLY when it folds a sack (TinkerPop's on-the-spot
-  // accumulate, Repeat.feature:664); otherwise a body with no movement never progresses.
-  if ((!moves.length && !bodyFoldsSack) || badStep)
+  // A movement-free body is valid when it folds a sack (TinkerPop's on-the-spot accumulate,
+  // Repeat.feature:664) OR collects a body aggregate (repeat(aggregate('a')) revisits the seed each
+  // iteration); otherwise a body with no movement never progresses.
+  if ((!moves.length && !bodyFoldsSack && !aggName) || badStep)
     throw new Error(`repeat(__.${body.map((c) => c.name + '()').join('.')}) not yet supported (movements incl. outE()/inV() + has() + sack(op).by() + where(__.sack()...), optional trailing simplePath(); barrier/collection bodies deferred)`);
   // has() in a repeat body: only has(key, value|P) — a 3-arg or T-token form defers.
   const badHas = core.find((c) => c.name === 'has' && (typeof c.args[0] !== 'string' || c.args.length > 2));
@@ -761,9 +782,27 @@ export const repeat: StepFn = (s, st) => {
   // Column ORDER on the SELECT must match carriedCols(out): sack before bulk before path.
   // The walk names its accumulator `sackCol`; the outbound carried name is always `sk`.
   const sackOut = sackCol ? q`, ${raw(sackCol)} AS sk` : empty;
-  if (wantsPathOutput)
-    return advance(st, q`SELECT id${sackOut}, 1 AS bulk, path FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, path: { kind: 'array', col: 'path', elem: 'node' } });
-  return advance(st, q`SELECT id${sackOut}, 1 AS bulk FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null });
+  const out = wantsPathOutput
+    ? advance(st, q`SELECT id${sackOut}, 1 AS bulk, path FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, path: { kind: 'array', col: 'path', elem: 'node' } })
+    : advance(st, q`SELECT id${sackOut}, 1 AS bulk FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null });
+  if (!aggName) return out;
+  // A body-terminal aggregate('x'): collect every vertex the body emitted — the walk rows at
+  // depth ≥ 1 (the seed is the pre-body input, not a body output). If the name already holds a
+  // bag (a pre-repeat local(aggregate('x'))), UNION ALL its members (BulkSet multiset union). The
+  // bag stores element rowids; cap('x') rejoins nodes when framing — reusing the linear aggregate's
+  // `{kind:'list', of:{kind:'elem'}}` def, so cap/unfold need no new path.
+  const w = walk.as('w');
+  const prior = out.sideEffects?.get(aggName);
+  // BulkSet multiset union: a pre-repeat local(aggregate('x')) bag's members come FIRST (their
+  // json_each value aliased `m` to match the walk leg's column), then the walk's depth≥1 rows.
+  const priorMembers = prior && prior.kind === 'list' && prior.of.kind === 'elem'
+    ? q`SELECT value AS m FROM json_each((SELECT list FROM ${prior.rel})) UNION ALL ` : empty;
+  const bagRel = out.q.cte(
+    q`SELECT ${jsonbGroupArray(q`m`)} AS list FROM (${priorMembers}SELECT ${w.c.id} AS m FROM ${w} WHERE ${raw('w.depth')} >= 1)`,
+    ['list'],
+  );
+  const def: SideEffectDef = { kind: 'list', rel: bagRel, of: { kind: 'elem', elem: 'node' } };
+  return { ...out, sideEffects: new Map([...(out.sideEffects ?? []), [aggName, def]]) };
 };
 
 // ---------- choose (predicate form) ----------
