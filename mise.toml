@@ -25,31 +25,34 @@ run = "bunx tsc --noEmit"
 description = "Provision the pinned tinkerpop submodule (blobless+sparse) + cucumber runner deps"
 run = "bash scripts/init-submodule.sh"
 
+# Every test task depends on `check` (tsc --noEmit): `bun test` runs TS WITHOUT type-checking,
+# so a test run must gate on the type-check first — else a type error ships green under a bare
+# `bun test` (which is how the build once went red after a refactor passed its tests).
 [tasks.test]
 description = "Full suite: corpus + contract + L3 conformance (both runtimes)"
-depends = ["install", "submodule"]
+depends = ["install", "check", "submodule"]
 run = "bun test"
 
 # Conformance ladder — invoke a single level directly. L1/L2 are pure (no submodule);
 # L3/L4 drive the vendored cucumber corpus + reference graphs, so they depend on it.
 [tasks.L1]
 description = "L1 — corpus parse+chain (2,298 canonical traversals; no submodule)"
-depends = ["install"]
+depends = ["install", "check"]
 run = "bun test test/L1-corpus"
 
 [tasks.L2]
 description = "L2 — SQL snapshots (compile-to-SQL contract; no submodule)"
-depends = ["install"]
+depends = ["install", "check"]
 run = "bun test test/L2-sql"
 
 [tasks.L3]
 description = "L3 — official TinkerPop cucumber conformance over GraphBinary (ratcheted)"
-depends = ["install", "submodule"]
+depends = ["install", "check", "submodule"]
 run = "bun test test/L3-conformance"
 
 [tasks.L4]
 description = "L4 — our addendum Gherkin suite (gap coverage; all must pass)"
-depends = ["install", "submodule"]
+depends = ["install", "check", "submodule"]
 run = "bun test test/L4-addendum"
 
 [tasks.generate]
