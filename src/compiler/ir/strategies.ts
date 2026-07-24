@@ -1,18 +1,21 @@
-import { stepChain, isNested, type Step, type StrategySpec, type StrategyUse } from '../../gremlin/frontend.ts';
+import { stepChain, isNested, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
 
-// ---------- normalization passes (Seam 3) ----------
+// ---------- pass BODIES: the concrete Step[]→Step[] rewrites (Seam 3) ----------
 //
-// TinkerPop's TraversalStrategy analogue: pure Step[]→Step[] rewrites applied
-// once, up front, so the step compilers see a *canonical* chain and never do
-// index arithmetic to gather a multi-step cluster. Keeping these as pure
-// transforms (rather than inline rewrites scattered through the compiler) means
-// each is independently testable and the compiler's dispatch stays a flat loop.
+// This module holds the concrete rewrite functions + the strategy-classification Sets. The
+// ORCHESTRATION — the categorized, ordered pipeline that sequences them (folds AND external
+// withStrategies) with a fail-closed reject invariant — lives in ir/passes.ts, which wraps each
+// function below as a Pass. There is no longer an internal/external seam here (the two used to be
+// separate mechanisms in this file "sharing a name"); both are Passes, differing only by category.
 //
-// The range/limit-before-vs-after-order() split is NOT a rewrite — it's the
-// dispatch stop-boundary: range/limit/skip are prefix (CTE) steps until the
-// prefix loop hits order()/a projection (a name absent from the prefix table),
-// after which they fall to the tail as ORDER BY/LIMIT modifiers. So it lives in
-// the dispatch itself (src/steps/index.ts), not here.
+// The folds are pure Step[]→Step[] rewrites applied once, up front, so the step compilers see a
+// *canonical* chain and never do index arithmetic to gather a multi-step cluster. Keeping them as
+// pure, independently testable transforms is what lets the dispatch stay a flat loop.
+//
+// The range/limit-before-vs-after-order() split is NOT a rewrite — it's the dispatch stop-boundary:
+// range/limit/skip are prefix (CTE) steps until the prefix loop hits order()/a projection (a name
+// absent from the prefix table), after which they fall to the tail as ORDER BY/LIMIT modifiers. So
+// it lives in the dispatch itself, not here.
 
 /**
  * A Step optionally carrying folded modulator data, so no step compiler ever
@@ -36,15 +39,14 @@ const BY_HOSTS = new Set(['order', 'select', 'project', 'group', 'groupCount', '
  *  step; the fold only fires when it immediately follows a path host, so no collision. */
 const PATH_MODULATOR_HOSTS = new Set(['path', 'simplePath', 'cyclicPath']);
 
-// ---------- withStrategies / withoutStrategies application ----------
+// ---------- withStrategies / withoutStrategies: the decoration + verify bodies ----------
 //
-// The REAL TinkerPop TraversalStrategy layer (distinct from the internal
-// normalization above, which is only named after it). Every strategy TinkerPop
-// implements as a decoration is, for us, a Step[]→Step[] rewrite that emits
-// *synthetic steps the ordinary dispatch already compiles* — no new SQL machinery.
-// The tree→spec extraction lives in frontend.ts (extractStrategies); this applies
-// the specs. Runs BEFORE normalize() so injected has()/where() are canonicalised
-// like any other step.
+// The external TinkerPop TraversalStrategy layer. Every strategy TinkerPop implements as a
+// decoration is, for us, a Step[]→Step[] rewrite that emits *synthetic steps the ordinary dispatch
+// already compiles* — no new SQL machinery. The tree→spec extraction lives in frontend.ts
+// (extractStrategies); the injectors/verifiers below are wrapped as decoration/verify Passes in
+// ir/passes.ts. Decoration runs on the RAW chain (before the folds), so injected has()/where() are
+// then canonicalised like any parsed step; verification asserts against the user's original chain.
 //
 // Split by whether ignoring a strategy could change the result set:
 //  - Optimization strategies (below) are result-preserving by TinkerPop's own
@@ -69,7 +71,7 @@ const PATH_MODULATOR_HOSTS = new Set(['path', 'simplePath', 'cyclicPath']);
 //
 // NO-OP — result-preserving on our SQL-compiled OLTP engine (proven identical with/without
 // by TinkerPop's own suite for the optimization set; inert-by-construction for the rest):
-const NO_OP_STRATEGIES = new Set([
+export const NO_OP_STRATEGIES = new Set([
   // Optimization strategies: SQLite's planner + our covering indexes do this work.
   'CountStrategy', 'IdentityRemovalStrategy', 'FilterRankingStrategy',
   'LazyBarrierStrategy', 'EarlyLimitStrategy', 'OrderLimitStrategy',
@@ -98,13 +100,13 @@ const NO_OP_STRATEGIES = new Set([
 // Strategies whose effect we apply unconditionally, so withoutStrategies() of them cannot be
 // honored (rejecting fail-closed beats silently returning wrong rows — e.g.
 // withoutStrategies(ConnectiveStrategy) expects infix .or() to become a no-op filter).
-const ALWAYS_ON_STRATEGIES = new Set(['ConnectiveStrategy']);
+export const ALWAYS_ON_STRATEGIES = new Set(['ConnectiveStrategy']);
 // NOT no-ops, deliberately absent so they hit the catch-all reject (fail closed): SackStrategy,
 // SideEffectStrategy, EventStrategy (need a Java Supplier/listener — unreachable via string, but
 // never laundered as safe), ElementIdStrategy (changes generated ids), ReferenceElementStrategy
 // (property stripping — harmless only by our framing coincidence, not by contract),
 // VertexProgramStrategy (OLAP). Each would change results if silently ignored.
-const VERIFICATION_STRATEGIES = new Set([
+export const VERIFICATION_STRATEGIES = new Set([
   'ReadOnlyStrategy', 'EdgeLabelVerificationStrategy', 'ReservedKeysVerificationStrategy',
 ]);
 const PRODUCTIVE_BY_HOSTS = new Set(['group', 'groupCount', 'project', 'select', 'aggregate', 'order', 'path', 'where', 'not', 'dedup']);
@@ -112,7 +114,7 @@ const PRODUCTIVE_BY_HOSTS = new Set(['group', 'groupCount', 'project', 'select',
 /** ProductiveBy is semantic only at by()-consumers. Mark the supported hosts so they
  * choose a LEFT-domain/null policy explicitly; reject any other host rather than
  * pretending a traversal-wide strategy was honoured. */
-function markProductiveBy(steps: Step[]): Step[] {
+export function markProductiveBy(steps: Step[]): Step[] {
   let host: string | undefined;
   for (const s of steps) {
     if (BY_HOSTS.has(s.name) || isAliasCompareWhere(s)) host = s.name;
@@ -147,7 +149,7 @@ const EDGE_TRAVERSAL_STEPS = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE
  *  endpoints aren't a post-hoc read filter). Add a new write step here, not in two places. */
 const MUTATING_STEPS = new Set(['addV', 'addE', 'mergeV', 'mergeE', 'property', 'drop']);
 
-const rejectMsg = (name: string) =>
+export const rejectMsg = (name: string) =>
   `withStrategies(...) is not supported: '${name}' is a semantic or unknown strategy that would change results if ignored ` +
   `(e.g. PartitionStrategy/SubgraphStrategy filtering, ProductiveByStrategy null semantics). Rejected to fail closed.`;
 
@@ -194,7 +196,7 @@ function recurseInject(steps: Step[], params: Record<string, any>, applyLevel: (
  * outE.inV / inE.outV / bothE.otherV so the traversed edge itself can be filtered. Recurses
  * into nested bodies; criterion bodies are used verbatim (never re-subgraphed).
  */
-function injectSubgraphRec(steps: Step[], spec: StrategySpec, params: Record<string, any>): Step[] {
+export function injectSubgraphRec(steps: Step[], spec: StrategySpec, params: Record<string, any>): Step[] {
   if (spec.config.vertexProperties !== undefined)
     throw new Error('SubgraphStrategy(vertexProperties) criterion not yet supported');
   const vArg = spec.config.vertices;
@@ -253,7 +255,7 @@ function injectSubgraphRec(steps: Step[], spec: StrategySpec, params: Record<str
  *  element-producing step (read visibility) and property(partitionKey, writePartition)
  *  after every addV/addE (write stamping), at every nesting depth. Read and write
  *  partitions are independent (TinkerPop allows writing to a partition you cannot read). */
-function injectPartitionRec(steps: Step[], spec: StrategySpec, params: Record<string, any>): Step[] {
+export function injectPartitionRec(steps: Step[], spec: StrategySpec, params: Record<string, any>): Step[] {
   const key = spec.config.partitionKey;
   if (typeof key !== 'string')
     throw new Error('PartitionStrategy requires a string partitionKey');
@@ -285,7 +287,7 @@ function injectPartitionRec(steps: Step[], spec: StrategySpec, params: Record<st
 
 /** Verification strategies assert legality against the user's (pre-injection) chain
  *  and throw the spec's canonical message; a passing traversal is a no-op. */
-function verify(spec: StrategySpec, steps: Step[]): void {
+export function verify(spec: StrategySpec, steps: Step[]): void {
   if (spec.name === 'ReadOnlyStrategy') {
     const m = steps.find((s) => MUTATING_STEPS.has(s.name));
     if (m) throw new Error(`The provided traversal has a mutating step and thus is not read only: ${m.name}`);
@@ -312,34 +314,11 @@ function verify(spec: StrategySpec, steps: Step[]): void {
   }
 }
 
-/**
- * Apply the extracted strategy specs to the step chain, returning the rewritten
- * chain (with any injected filters / write stamps). Verification runs against the
- * user's original chain. Order: `withoutStrategies` first suppresses any matching
- * `withStrategies` entry (the only case removal matters, since we apply no default).
- */
-export function applyStrategies(steps: Step[], use: StrategyUse, params: Record<string, any> = {}): Step[] {
-  // A bare withoutStrategies(X) is a no-op when X is applied only on request (nothing to
-  // remove, since we apply no strategy by default) — EXCEPT for an always-on strategy whose
-  // effect is unconditionally baked in and cannot be turned off. Reject those fail-closed.
-  for (const name of use.without)
-    if (ALWAYS_ON_STRATEGIES.has(name))
-      throw new Error(`withoutStrategies(${name}) is not supported: its effect (infix .and()/.or() folding) is unconditionally applied by this compiler and cannot be disabled.`);
-  const removed = new Set(use.without);
-  const verifiers: StrategySpec[] = [];
-  let out = steps;
-  for (const spec of use.with) {
-    if (removed.has(spec.name)) continue;                 // withoutStrategies suppresses it
-    if (NO_OP_STRATEGIES.has(spec.name)) continue;        // result-preserving / inert → no-op
-    else if (spec.name === 'SubgraphStrategy') out = injectSubgraphRec(out, spec, params);
-    else if (spec.name === 'PartitionStrategy') out = injectPartitionRec(out, spec, params);
-    else if (spec.name === 'ProductiveByStrategy') out = markProductiveBy(out);
-    else if (VERIFICATION_STRATEGIES.has(spec.name)) verifiers.push(spec);
-    else throw new Error(rejectMsg(spec.name));
-  }
-  for (const spec of verifiers) verify(spec, steps);
-  return out;
-}
+// Strategy application (withoutStrategies suppression, no-op filtering, decoration injection,
+// verification, and the fail-closed reject) now lives in the unified Pass pipeline — see
+// ir/passes.ts (DECORATION + VERIFY groups + runPasses). This module keeps the concrete
+// inject/verify/fold BODIES + the classification Sets those passes wrap; it no longer owns the
+// orchestration.
 
 /** Absorb every `with(key, value)` step immediately following a `call` onto that call's
  *  `withArgs`, mirroring foldByModulators — so the call() compiler reads its modulators
