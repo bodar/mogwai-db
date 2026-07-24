@@ -155,6 +155,10 @@ export function bucketKey(msg: string): string {
 
 const dedupKey = (r: QueryRecord) => `${r.g}\x00${r.gremlin}`;
 
+/** A throw whose message satisfies a negative scenario's assertion — an expected error, not a gap. */
+const matchesExpected = (error: string | undefined, expected: readonly string[]) =>
+  expected.some((s) => (error ?? '').includes(s));
+
 export interface TelemetrySummary {
   totalQueries: number;
   uniqueQueries: number;
@@ -165,6 +169,56 @@ export interface TelemetrySummary {
   buckets: { key: string; count: number; example: string; exampleSteps: string[] }[];
   /** Step names appearing in real-gap failing chains, most frequent first. */
   failingSteps: { step: string; count: number }[];
+  /** Contiguous runs of real-gap throws (a coherent feature/area), largest first. */
+  clusters: GapCluster[];
+}
+
+/** A contiguous run of real-gap throws in execution order. Because the cucumber suite runs
+ *  scenarios in feature-file order, a run is a coherent AREA (usually one feature): its `size`
+ *  and error-type spread say how much a single root-cause fix would unlock — the signal the
+ *  frequency-sorted buckets lose by scattering one area's failures across many small buckets. */
+export interface GapCluster {
+  /** Distinct (graph, gremlin) real-gap throws in the run. */
+  size: number;
+  /** The run's error composition (bucketed), most frequent first. One type + a big size = the
+   *  highest-leverage target; many types = a heterogeneous stretch worth less. */
+  buckets: { key: string; count: number }[];
+  /** A representative failing traversal from the run. */
+  example: string;
+}
+
+/** Cluster the raw (ordered) telemetry into contiguous real-gap runs. A run tolerates up to
+ *  `gap` intervening non-gap records (a passing/expected-throw scenario between two failing ones)
+ *  so a near-solid block stays one cluster; `min` drops incidental singletons. Sizes dedup by
+ *  (graph, gremlin), so a cluster's size is comparable to the bucket counts. */
+export function clusterGaps(records: QueryRecord[], expected: readonly string[] = [], gap = 2, min = 4): GapCluster[] {
+  const isGap = (r: QueryRecord) => !r.ok && !matchesExpected(r.error, expected);
+  const clusters: GapCluster[] = [];
+  let i = 0;
+  while (i < records.length) {
+    if (!isGap(records[i])) { i++; continue; }
+    // Extend the run while no more than `gap` consecutive non-gap records interrupt it.
+    let end = i, since = 0;
+    for (let k = i; k < records.length; k++) {
+      if (isGap(records[k])) { end = k; since = 0; }
+      else if (++since > gap) break;
+    }
+    const seen = new Set<string>();
+    const bk = new Map<string, number>();
+    let example = '';
+    for (let k = i; k <= end; k++) {
+      const r = records[k];
+      if (!isGap(r) || seen.has(dedupKey(r))) continue;
+      seen.add(dedupKey(r));
+      if (!example) example = r.gremlin;
+      const key = bucketKey(r.error ?? '(no message)');
+      bk.set(key, (bk.get(key) ?? 0) + 1);
+    }
+    if (seen.size >= min)
+      clusters.push({ size: seen.size, example, buckets: [...bk.entries()].map(([key, count]) => ({ key, count })).sort((a, b) => b.count - a.count) });
+    i = end + 1;
+  }
+  return clusters.sort((a, b) => b.size - a.size);
 }
 
 /** Summarize the run's telemetry into the systematic-gap view. `expected` (the corpus's own
@@ -183,8 +237,7 @@ export function summarize(records: QueryRecord[], expected: readonly string[] = 
   }
   const all = [...uniq.values()];
   const failed = all.filter((r) => !r.ok);
-  const isExpected = (r: QueryRecord) => expected.some((s) => (r.error ?? '').includes(s));
-  const gaps = failed.filter((r) => !isExpected(r));
+  const gaps = failed.filter((r) => !matchesExpected(r.error, expected));
 
   const buckets = new Map<string, { count: number; example: string; exampleSteps: string[] }>();
   for (const r of gaps) {
@@ -203,6 +256,7 @@ export function summarize(records: QueryRecord[], expected: readonly string[] = 
     uniqueFailed: gaps.length,
     buckets: [...buckets.entries()].map(([key, v]) => ({ key, ...v })).sort((a, b) => b.count - a.count),
     failingSteps: [...stepCounts.entries()].map(([step, count]) => ({ step, count })).sort((a, b) => b.count - a.count),
+    clusters: clusterGaps(records, expected),
   };
 }
 
@@ -341,6 +395,20 @@ export function formatReport(sum: TelemetrySummary, scenarios: ScenarioRow[]): s
   L.push('');
   L.push('── steps present in failing chains (frequency) ──');
   L.push('  ' + sum.failingSteps.slice(0, 30).map((s) => `${s.step}:${s.count}`).join('  '));
+  L.push('');
+  // Contiguous real-gap runs = coherent areas (cucumber runs scenarios in feature-file order).
+  // The leading number is the clump size (what the E-run in the progress line shows); "biggest
+  // K×" is how many share the top error type — a high K near the clump size means ONE fix clears
+  // the clump (high leverage), while many types with a small "biggest" is a fragmented stretch.
+  // This is the signal the buckets above lose by scattering one area's failures across messages.
+  L.push('── failure clusters (contiguous areas; high "biggest" near the size = one fix clears it) ──');
+  for (const c of sum.clusters.slice(0, 12)) {
+    const dom = c.buckets[0];
+    const nt = c.buckets.length;
+    L.push(`  ${String(c.size).padStart(4)}  ${nt} type${nt === 1 ? '' : 's'}, biggest ${dom.count}×  ·  ${dom.key.slice(0, 58)}`);
+    L.push(`        e.g. ${c.example.slice(0, 96)}`);
+  }
+  if (sum.clusters.length > 12) L.push(`  … ${sum.clusters.length - 12} more clusters`);
   L.push('══════════════════════════════');
   return L.join('\n');
 }
