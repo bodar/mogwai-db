@@ -1,9 +1,17 @@
 # Unified rewrite passes + chain analysis — plan
 
 **Date:** 2026-07-24
-**Status:** PLAN (not started). Sequenced, behavior-preserving. Every stage lands green
-against the L2 SQL snapshots and the L3 ratchet (`l3-state.json`) with **no delta** — this
-is a *structural* refactor, not a semantics change.
+**Status:** LANDED (2026-07-24, commits `5b2dc0c`→`d33eac2`). All five stages shipped green;
+full suite 778 pass, L3 `l3-state.json` 1273/2041 no delta throughout — a *structural* refactor,
+not a semantics change. **Two deviations from this plan, both correct (see §7 risk 1):**
+(1) decoration runs BEFORE fold, not after — the Subgraph/Partition injectors recurse into raw
+`{nested}` args that the folds move into `.cluster`/`.options`, so decorating after fold silently
+skipped a repeat()/choose() body (an unfiltered leak, caught by an existing L2 fail-closed test);
+category order is `extract < decoration < fold < simplify < verify`, and `verify` asserts against
+the raw pre-decoration chain snapshotted at the extract→decoration boundary. (2) `normalize()`
+survives as `runPasses(steps, EMPTY_STRATEGY_USE)` — it is the entry 7 nested-sub-chain callers
+use (child bodies, match, write targets, correlated predicates), which §4's root-only view missed.
+Stage 4 shipped the full `FastPath<Args,R>` object registry (chosen over a lighter descriptor).
 
 **Reading order:** sits alongside `docs/2026-07-13-with-strategies-exploration.md` (the
 *external* `withStrategies` feature — SETTLED) and the compiler-architecture section of
