@@ -258,7 +258,7 @@ materialization to frame by a runtime row tag. Unblocks mixed arms everywhere.
 per-row payload-shape tag (null/scalar/node/edge/list); `materializeVariantRoot` fans
 out to gated dual LEFT JOINs; handler + `labelselect` dispatch per-row by `vk`;
 `union`/`choose`/`coalesce` **mixed-shape arms** now merge as a VariantStream instead of
-throwing. See `docs/2026-07-16-p4-dynamic-variant-plan.md`. **Scope correction (§4 of that
+throwing. See `docs/archive/2026-07-16-p4-dynamic-variant-plan.md`. **Scope correction (§4 of that
 doc):** the "P3 Map defers" P4 was meant to pair with are dominated by **nested-MAP-valued
 groups** (`group().by().by(__.…groupCount())`, 11 scenarios) — a separate nested-aggregation
 feature (`GroupVal {kind:'map'}` + two-level aggregation), NOT the variant row. The genuine
@@ -433,7 +433,7 @@ The scalar value tail + all per-row framing now live in exactly one place
 (`scalar.ts`/`barrier.ts`/`materializeScalarRoot`) — the "so P3b isn't written twice"
 prerequisite. Bonus unlock: `order().by(k).limit(n).values().count()`. P3b (typed
 property framing + `is(typeOf(LIST))→ListStream`) then landed on top, 1037→1040. See
-memory `typed-property-values` + `docs/2026-07-16-typed-property-values-plan.md`.
+memory `typed-property-values` + `docs/archive/2026-07-16-typed-property-values-plan.md`.
 
 **Refreshed remaining bets:** P2 (one predicate seam), P3 (map/group/path re-enterable),
 P4 (dynamic-tag VariantStream), P5 (group live parent) — all still open, now on a
@@ -486,7 +486,7 @@ the first writes-through-the-read-spine slices. Chronologically (see `git log`):
   materialize).
 - **P4 — dynamic-tag VariantStream (→1066).** `vk` per-row payload-shape tag +
   `materializeVariantRoot` gated dual LEFT JOINs; `tryLowerVariant{Union,Choose,Coalesce}`
-  merge mixed-shape arms instead of throwing. See `docs/2026-07-16-p4-dynamic-variant-plan.md`.
+  merge mixed-shape arms instead of throwing. See `docs/archive/2026-07-16-p4-dynamic-variant-plan.md`.
 - **Element-value implicit fold (→1067)** and **nested-MAP-valued groups (→1069)** —
   `tryLowerNestedMapGroup` → `GroupVal {kind:'nestedMap'}` two-level aggregation. This was
   §3/§4's "recommended next dedicated bet"; already done.
@@ -571,11 +571,11 @@ P1–P4 landed; P5 partial. What the spree did NOT close, ranked by leverage/app
    nested property KEYS. No ratchet move (the corpus scenarios for these shapes are gated by
    unrelated missing features — addV mid-chain, read-tails-after-write, repeat-in-write-chain);
    targeted tests prove the primitives. See
-   `docs/2026-07-17-writes-through-read-spine-plan.md` (with its two corrected premises:
+   `docs/archive/2026-07-17-writes-through-read-spine-plan.md` (with its two corrected premises:
    @StepWrite is io-serialization not data-writes; #3's general axis is the whole map
    completed by traversals per driver, both legal per grammar). **Deferred follow-ons (each
    unblocks reachable legal shapes):** (a) ~~**typed merge VALUES**~~ **DONE (2026-07-17,
-   `docs/2026-07-17-typed-merge-values-plan.md`)** — merge props now keep their type from
+   `docs/archive/2026-07-17-typed-merge-values-plan.md`)** — merge props now keep their type from
    the map's `TypeNode` (recursive wire capture + literal subtype + nested read shape);
    (b) **map-valued merge drivers** — unblocks `__.identity()`/incoming-as-map whole-arg;
    (c) **addV mid-chain** + **read-tails-after-write** — unblock the corpus write scenarios

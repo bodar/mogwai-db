@@ -2,7 +2,7 @@
 
 **Status: research only when written. Now planned** — the `call("federate", …)` sketch
 here became Phase 6 of
-[2026-07-20-call-service-registry-plan.md](./2026-07-20-call-service-registry-plan.md);
+[2026-07-20-call-service-registry-plan.md](./archive/2026-07-20-call-service-registry-plan.md);
 see the **2026-07-21 addendum** at the foot for the concrete mechanic + an `ATTACH`
 correction. Originally captured the answer to
 "is there prior art for distributed/heterogeneous joins in graph query land, and
@@ -152,7 +152,7 @@ and the novel contribution would be the **missing open standard**, not the plumb
 # Addendum (2026-07-21) — transfer format + bulk import/export, and an `ATTACH` correction
 
 Written while scoping **Phase 6** of the call-service-registry plan
-([2026-07-20-call-service-registry-plan.md](./2026-07-20-call-service-registry-plan.md)),
+([2026-07-20-call-service-registry-plan.md](./archive/2026-07-20-call-service-registry-plan.md)),
 which promotes this research note's `call("federate", …)` sketch into a concrete
 `mogwai.graph.federate` barrier service. Origin question: *for the worst case — a
 federated sub-traversal returning most/all of a graph — is GraphBinary an efficient

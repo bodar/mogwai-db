@@ -115,7 +115,7 @@ ecosystem has it), so upstreaming it later is a real give-back, not a fork.
 - [x] **Seam 2 + Seam 3 done (2026-07-12).** Step-family dispatch (`src/steps/*.ts`, functional
   `StepFn = (step, St) => St` fold over an immutable `St`) + normalization passes
   (`src/strategies.ts`). See the "Decomposition complete" note in
-  `docs/2026-07-11-lazyrecords-cutover-plan.md`. `compiler.ts` is now a 51-line orchestrator.
+  `docs/archive/2026-07-11-lazyrecords-cutover-plan.md`. `compiler.ts` is now a 51-line orchestrator.
 - [x] **ScalarCtx typed (2026-07-12).** `ScalarCtx`'s fields are now `Expression`, not raw SQL
   strings — built from typed `Relation` columns (`elemCtx(elemRel(st), elem)` for node/edge; the
   properties CTE's `Relation` for the property ctx). `propExtract`/`propAt`/`labelIn` accept

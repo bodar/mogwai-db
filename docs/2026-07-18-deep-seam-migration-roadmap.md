@@ -68,7 +68,7 @@ Shares its map-valued-alias piece with #5.
 shape (pure movement/filter/bare-`dedup`/`order`/`limit`·`range`·`skip` → a reducer or a bare
 element leaf, plus element- and count-returning `repeat().times(n)`) — bounded frontier + `(v,N)`
 RLE on the wire, L3 1180 held. See the STATUS header of
-`docs/2026-07-18-wire-bulking-rearchitecture.md` for the landed map + the deviations from plan
+`docs/archive/2026-07-18-wire-bulking-rearchitecture.md` for the landed map + the deviations from plan
 (bulk orthogonal to shape via `bulkOf`/`frameValues`; `movementCollapse` fast path; cumulative-bulk
 `order`/`limit` window). **`group`/`groupCount` key-form weighting landed 2026-07-19:** bulk is
 threaded through `GroupSource` (`bulk`/`valBulk`), so `groupCount()` and `group().by(k).by(reducer)`
@@ -88,7 +88,7 @@ Everything else is pure UNION-ALL row duplication.
 sack/origin rails**: field in `Carried`, into `carriedCols`/`carryFrag`, seeded in
 `seedSource`, tri-stated in `advance`. Teach three semantics once —
 movement-collapse `SUM(bulk)`, `dedup → bulk=1`, reducers weight by `bulk`; force
-unbulk at `order/range/limit/sample`. `docs/2026-07-14-traverser-bulking.md:145-165`
+unbulk at `order/range/limit/sample`. `docs/archive/2026-07-14-traverser-bulking.md:145-165`
 already specs this; plumbing exists, was never wired.
 
 **Unlocks.** Correct graph-wide `count/sum/groupCount` after any repeat (grateful
@@ -100,7 +100,7 @@ big-repeat graphs are withheld from conformance.
 dead end") was wrong: GraphBinary V4's `{bulked}` response byte is real, the pinned beta.2
 client requests + decodes it, and it's backwards-compatible. So bulk now buys end-to-end
 tractability for element-returning big-`repeat` too, not just reducers. Staged A→B→C in
-`docs/2026-07-18-wire-bulking-rearchitecture.md`. **Stage A landed** (wire bulking, bulk≡1,
+`docs/archive/2026-07-18-wire-bulking-rearchitecture.md`. **Stage A landed** (wire bulking, bulk≡1,
 contract/L3-verified). B (first-class `bulk` carried column, ≡1) + C (enable collapse, gated
 by path-freedom) queued — B+C are a paired delivery (B alone is valueless substrate).
 

@@ -24,7 +24,7 @@ import type { FastPath } from '../../options/fast-paths.ts';
 // `WITH RECURSIVE`. Instead a compile-time-known `times(n)` UNROLLS to n plain
 // (non-recursive) GROUP-BY CTEs, each `SELECT tgt, SUM(prev.bulk) … GROUP BY tgt` — the
 // SQL mirror of the traverser-merge — producing a bulk-collapsed FRONTIER relation
-// (id, bulk). See docs/2026-07-14-traverser-bulking.md.
+// (id, bulk). See docs/archive/2026-07-14-traverser-bulking.md.
 //
 // The collapsed frontier is then handed BACK to the generic lowering engine as an
 // ElementStream carrying its `bulk` multiplicity. Every bulk-aware terminal the generic

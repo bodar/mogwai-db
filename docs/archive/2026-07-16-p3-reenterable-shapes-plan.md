@@ -15,7 +15,7 @@ scattered small bits (elementMap re-entry with heterogeneous followers, keys→S
 `as()`/`order()` on a group, named `groupCount('a')`-over-scalar). Next major bet = P4.
 
 **P4 LANDED (2026-07-16, substrate + branch arms) — and corrected a mislabel.** See
-`docs/2026-07-16-p4-dynamic-variant-plan.md`. The dynamic-tag VariantStream (per-row
+`docs/archive/2026-07-16-p4-dynamic-variant-plan.md`. The dynamic-tag VariantStream (per-row
 `vk`: null/scalar/node/edge/list) + its **mixed-shape branch-arm** consumers landed
 (L3 1066, behaviour-neutral + fail-closed→works). Key finding: the "element-VALUE group
 maps" defer above is **NOT** the variant row — the 11-scenario bucket is

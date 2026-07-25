@@ -1,6 +1,6 @@
 // ---------- the one canonical Gremlin type vocabulary ----------
 //
-// Typed property values (docs/2026-07-16-typed-property-values-plan.md) unify what
+// Typed property values (docs/archive/2026-07-16-typed-property-values-plan.md) unify what
 // used to be three disconnected type vocabularies (frontend numeric argTypes,
 // render.ts ValueType, plan.ts GTYPE_SQL) into ONE lowercased canonical name set.
 // The type of a stored value is produced by whichever channel CARRIED it — never a

@@ -18,7 +18,7 @@ import { indexProperty, deleteFtsFor, deleteFtsForOwners } from '../../../servic
 // via extractNestedValue — the inverse of execute.ts's framing switch (no GraphBinary).
 // A CORRELATED arg (its value depends on the current element) is seeded at the driver
 // element by prepending a V(<rowid>)/E(<rowid>) source (numeric arg → rowid match), then
-// compiled + run + extracted per driver row. See docs/2026-07-16-write-args-through-read-spine.md.
+// compiled + run + extracted per driver row. See docs/archive/2026-07-16-write-args-through-read-spine.md.
 
 // A nested `__.select(k)` where k is a withSideEffect(k, const) key resolves to the
 // constant at compile time (correct-by-construction — the value never changes). Returns

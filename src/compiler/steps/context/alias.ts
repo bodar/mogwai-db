@@ -8,7 +8,7 @@ import { type Elem } from '../../plan/plan.ts';
 // tagged object so a label can hold — and accumulate across rebindings — values of
 // ANY shape (vertex/edge/scalar/list/map), possibly heterogeneous. This is exactly
 // TinkerPop's Path label history: as() APPENDS the current object; select(Pop,…)
-// reads first/last/all/mixed off the array. See docs/2026-07-16-labels-as-path-history.md.
+// reads first/last/all/mixed off the array. See docs/archive/2026-07-16-labels-as-path-history.md.
 //
 //   k=0 node   {"k":0,"v":<rowid>}
 //   k=1 edge   {"k":1,"v":<rowid>}

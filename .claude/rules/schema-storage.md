@@ -22,4 +22,4 @@ flat `edges.props` JSONB blob is retired).
 - **Property reads stay index-only in the hot path.** `framedProps`/`valueMapProps` read only at
   leaf materialization, never inside movement/filter CTEs.
 - **Known debt:** `write.ts` reads row-at-a-time (`runNested`/`nestedScalar`) — an acknowledged
-  imperative surface, tracked in `docs/2026-07-19-outstanding-work-snapshot.md`.
+  imperative surface, tracked in `docs/outstanding-work.md`.

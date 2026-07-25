@@ -7,7 +7,7 @@ investigation to establish. Not a plan; nothing here is in-flight.
 These are the facts you'd otherwise have to re-derive from the TinkerPop source + spec every
 time you touch map framing or the `MapStream` shape. For live per-step capability, cross-check
 `feature-support-matrix.md`; for the typed-collection substrate rationale, see
-`2026-07-17-full-fidelity-typed-collections-plan.md`.
+`archive/2026-07-17-full-fidelity-typed-collections-plan.md`.
 
 ---
 
@@ -79,5 +79,5 @@ cleaner encoding would be a discriminated union, e.g.
 `frame: { mode: 'static'; as?: ValueType } | { mode: 'perRow' }`. **Low priority, purely a
 maintainability/clarity refactor with no behavior change** — only worth doing if the `value`
 Shape gets touched again for other reasons. (Also tracked in the P3/debt section of
-`2026-07-19-outstanding-work-snapshot.md`.) Not debt from the MapStream consolidation — it
+`outstanding-work.md`.) Not debt from the MapStream consolidation — it
 pre-dates it.

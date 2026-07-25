@@ -11,7 +11,7 @@ matters.
 > rewrite to the same services — so we are backwards-compatible with stock TinkerPop clients AND a
 > superset of them, with a single implementation.
 
-This builds directly on `docs/2026-07-20-call-service-registry-plan.md` (the `call()` + Service
+This builds directly on `docs/archive/2026-07-20-call-service-registry-plan.md` (the `call()` + Service
 Registry seam, LANDED) — read that first. Nothing here changes the compiler core; it adds services
 and rewrite Passes.
 
@@ -175,7 +175,7 @@ shape.
 | `pageRank()` | `_Empty`, `_double` (damping α) | `mogwai.pageRank` | decorate vertex w/ score under `gremlin.pageRankVertexProgram.pageRank`, pass through |
 | `connectedComponent()` | `_Empty` | `mogwai.wcc` | decorate vertex w/ component id under `gremlin.connectedComponentVertexProgram.component`, pass through |
 | `peerPressure()` | `_Empty` | `mogwai.peerPressure` | decorate vertex w/ cluster id, pass through (same template as WCC) |
-| `shortestPath()` | (check grammar for `with()` config) | `mogwai.shortestPath` | **path-shaped** — emits paths, not decorated vertices; the recursive-CTE special case flagged in `docs/2026-07-19-outstanding-work-snapshot.md` |
+| `shortestPath()` | (check grammar for `with()` config) | `mogwai.shortestPath` | **path-shaped** — emits paths, not decorated vertices; the recursive-CTE special case flagged in `docs/outstanding-work.md` |
 
 **Template A (pageRank / connectedComponent / peerPressure):** global barrier compute → `id→value`
 temp table → per-traverser join, element-preserving, decorate under the canonical key.

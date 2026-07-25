@@ -69,7 +69,7 @@ Key questions to resolve during implementation:
    may put it in the same locked-non-goal bucket. `choose`/`coalesce` are 1-to-1 (a single arm
    fires) so they're clean; `union` (fan-out) may be the deferred edge.
 3. Depends on / composes cleanly with the child-scope path split
-   (`docs/2026-07-18-child-scope-path-split.md`) — do that FIRST if the arm bodies contain
+   (`docs/archive/2026-07-18-child-scope-path-split.md`) — do that FIRST if the arm bodies contain
    movement under path tracking (same latent bug).
 
 ## Recommendation
