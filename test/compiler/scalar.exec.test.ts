@@ -313,8 +313,8 @@ describe('V()/E() after a scalar — mid-traversal re-source (Stage 4)', () => {
   const names = (g: string) => executeQuery(store, g, {}).map((b: Buffer) => ioc.anySerializer.deserialize(b, true).v).sort();
 
   test('inject(x).V() produces all vertices per traverser (multiset), V(id) the id-matched', () => {
-    expect(executeQuery(store, 'g.inject(0).V().count()', {}).map(dec)).toEqual([2n]);
-    expect(executeQuery(store, 'g.inject(1,2).V().count()', {}).map(dec)).toEqual([4n]); // 2 traversers × 2
+    expect(executeQuery(store, 'g.inject(0).V().count()', {}).map(dec)).toEqual([2]);
+    expect(executeQuery(store, 'g.inject(1,2).V().count()', {}).map(dec)).toEqual([4]); // 2 traversers × 2
     expect(names("g.inject(0).V(1).values('name')")).toEqual(['marko']);
   });
 
@@ -385,7 +385,7 @@ describe('scalar tail at root (Stage 2 fix)', () => {
     expect(listOf("g.V().values('name').local(__.aggregate('a')).cap('a')")).toEqual(['josh', 'marko', 'vadas']);
     // pass-through: the values continue past aggregate()
     const cnt = executeQuery(store, "g.V().values('name').aggregate('a').count()", {}).map((b: Buffer) => ioc.anySerializer.deserialize(b, true).v);
-    expect(cnt).toEqual([3n]);
+    expect(cnt).toEqual([3]);
   });
 });
 

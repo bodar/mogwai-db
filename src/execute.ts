@@ -317,6 +317,14 @@ function sumBuffer(v: number, storageClass: string): Buffer {
   return storageClass === 'real' ? ioc.doubleSerializer.serialize(v, true) : ioc.anySerializer.serialize(v);
 }
 
+// count()/groupCount() results are Java Longs → GraphBinary Int64 (0x02), which the client decodes
+// to a JS Number for safe-range values (what TinkerPop emits and the conformance harness's
+// parseFloat expects). Passing a JS bigint to anySerializer instead selects BigInteger (0x23 →
+// decodes to a JS BigInt), which mismatches every `d[n].l` count assertion — so frame counts
+// explicitly as Int64. (sumBuffer passes a plain Number, so anySerializer already picks Int/Long
+// by magnitude there; only the BigInt-carrying count sites need this.)
+const countBuffer = (v: any): Buffer => ioc.longSerializer.serialize(BigInt(v), true);
+
 // A scalar value(), framed by its compile-time type tag (Shape `as`) when set — the
 // GraphBinary type comes from the producing step, not the SQLite storage class. No
 // tag → infer from the JS value (anySerializer). 'bool': SQLite carries the boolean
@@ -433,7 +441,7 @@ function groupBuffer(rows: any[], key: GroupKey, val: GroupVal): Buffer {
     switch (val.kind) {
       case 'elementList': return listBuffer(g.members);
       case 'elementLast': return g.members[g.members.length - 1];
-      case 'count': return ioc.anySerializer.serialize(BigInt(g.gv));
+      case 'count': return countBuffer(g.gv);
       case 'sum': return sumBuffer(g.gv, g.gvt);
       case 'list': return ioc.listSerializer.serialize(JSON.parse(g.gv));
       // by('age')/by(__.values) filters members missing the property (values
@@ -500,7 +508,7 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
     case 'vertex': case 'edge': return; // framed in framedResults with per-row bulk
     case 'valueMap': for (const r of rows) yield valueMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys, shape.tokens); return;
     case 'elementMap': for (const r of rows) yield elementMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys); return;
-    case 'count': for (const r of rows) yield ioc.anySerializer.serialize(BigInt(r.v)); return;
+    case 'count': for (const r of rows) yield countBuffer(r.v); return;
     // Per-row framing: values() of a typed prop frames each row by its own stored vtype
     // (like variant frames by vk); a collection vtype frames the stored {t,v} tree via
     // frameStoredValue (fixes bare values(collectionProp)); otherwise the single `as` applies.

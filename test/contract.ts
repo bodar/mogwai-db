@@ -99,7 +99,7 @@ function gremlinContract(getOrigin: () => string) {
     });
 
     test('count vertices', async () => {
-      expect((await g.V().count().next()).value).toBe(3n);
+      expect((await g.V().count().next()).value).toBe(3);
     });
 
     test('hasLabel + values', async () => {
@@ -125,7 +125,7 @@ function gremlinContract(getOrigin: () => string) {
     });
 
     test('both + dedup', async () => {
-      expect((await g.V(zig.id).both().dedup().count().next()).value).toBe(2n);
+      expect((await g.V(zig.id).both().dedup().count().next()).value).toBe(2);
     });
 
     test('two hops', async () => {
@@ -137,7 +137,7 @@ function gremlinContract(getOrigin: () => string) {
     });
 
     test('limit', async () => {
-      expect((await g.V().limit(2).count().next()).value).toBe(2n);
+      expect((await g.V().limit(2).count().next()).value).toBe(2);
     });
 
     test('chunked streaming round-trips: raw JSON-in, batchSize-paced GraphBinary out', async () => {
@@ -219,7 +219,7 @@ function gremlinContract(getOrigin: () => string) {
       const doomed = (await g.addV('temp').property('name', 'doomed').next()).value;
       await g.V(dan.id).addE('knows').to(__.V(doomed.id)).iterate();
       await g.V(doomed.id).drop().iterate();
-      expect((await g.V().has('name', 'doomed').count().next()).value).toBe(0n);
+      expect((await g.V().has('name', 'doomed').count().next()).value).toBe(0);
       // incident edge is gone: dan still only knows ada
       expect(await g.V(dan.id).out('knows').values('name').toList()).toEqual(['ada']);
     });

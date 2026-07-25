@@ -113,7 +113,7 @@ describe('repeat / path SQL', () => {
 
     // times(8): only the bulk path can compute this — the exact total, in milliseconds.
     const [c8] = executeQuery(store, 'g.V().repeat(__.both()).times(8).count()', {}).map((b: Buffer) => ioc.anySerializer.deserialize(b, true).v);
-    expect(c8).toBe(2572306572n);
+    expect(c8).toBe(2572306572);
     // element form: a BOUNDED frontier — one framed vertex per reachable id (≤ |V|), not 2.5e9 rows —
     // whose multiplicities sum to the full traverser count (the wire ships this as RLE).
     const framed = await executeFramed(store, 'g.V().repeat(__.both()).times(8)', {});

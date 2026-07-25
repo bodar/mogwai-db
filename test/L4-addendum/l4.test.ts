@@ -103,12 +103,20 @@ function canonMapExpected(v: unknown): string {
 function expectedCanon(tok: string): string {
   const t = tok.trim();
   if (t === 'null') return 'null';
-  // long (`.l`)/bigint (`.n`) → BigInt; int/double/float/byte/short → number. NB the JS decode
-  // repr is the client's, path-dependent (a small Long may arrive as Number, a count via
-  // BigInteger as BigInt); author each scenario's notation to match its actual decode. (A
-  // type-precise variant keyed on the GraphBinary type byte is a possible upgrade.)
+  // Match the JS client's actual GraphBinary decode: a bigint (`.n`, BigInteger 0x23) is ALWAYS a
+  // JS BigInt; a long (`.l`, Int64 0x02) decodes to a Number within ±2^53 and a BigInt beyond
+  // (the client's Long deserializer is magnitude-dependent) — so count()/groupCount() longs, which
+  // are small, compare as Numbers, exactly as TinkerPop's own harness (parseFloat) treats `.l`.
+  // int/double/float/byte/short → number.
   const num = t.match(/^d\[(-?[\d.eE+]+)\]\.([bsilfnd])$/);
-  if (num) return num[2] === 'l' || num[2] === 'n' ? 'L' + BigInt(num[1]).toString() : 'N' + Number(num[1]);
+  if (num) {
+    if (num[2] === 'n') return 'L' + BigInt(num[1]).toString();
+    if (num[2] === 'l') {
+      const b = BigInt(num[1]);
+      return b >= -9007199254740991n && b <= 9007199254740991n ? 'N' + Number(b) : 'L' + b.toString();
+    }
+    return 'N' + Number(num[1]);
+  }
   const bd = t.match(/^bd\[(.+)\]$/); if (bd) return 'BD' + bd[1];
   const dt = t.match(/^dt\[(.+)\]$/); if (dt) return 'DT' + new Date(dt[1]).toISOString();
   const du = t.match(/^du\[(.+)\]$/); if (du) return 'DU' + du[1];
