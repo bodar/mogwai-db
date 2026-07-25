@@ -173,12 +173,22 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
     meta-properties + partition-aware upsert (`mergeV`/`mergeE`), nested-body descent. **Medium/Low.**
     → [with-strategies-exploration](./2026-07-13-with-strategies-exploration.md)
 
-13. **`with(...)` / `OptionsStrategy` sugar** — e.g. `valueMap().with(WithOptions.tokens)`; dies as
-    "step not implemented". **Low-Medium.**
+13. **`with(...)` / `OptionsStrategy` sugar.** ✅ **The `valueMap().with(WithOptions.tokens)` form
+    LANDED 2026-07-25**: `foldValueMapWith` (`ir/strategies.ts`, a fold Pass) desugars the all-tokens
+    form — `with('~tinkerpop.valueMap.tokens')` (the wire string the JS GLV resolves the enum to),
+    optionally `+ 15`/`all`, or the raw `{withOption}` enum the frontend now captures
+    (`WithOptionsConstants_*`) — to the existing `valueMap(true)` tokens flag. **L3 1281 → 1284.**
+    **Still open:** the SELECTIVE token subsets `with(tokens, ids|labels)` (a proper subset paired
+    with `by(unfold)` that also flattens the value lists — no `valueMap(true)` equivalent; fails
+    closed today), `index().with(WithOptions.indexer, WithOptions.map)` (needs item 14), and any
+    other `with()`/OptionsStrategy host. **Low-Medium.**
     → [with-strategies-exploration](./2026-07-13-with-strategies-exploration.md) §0
 
-14. **`format()` and `index()` steps** — both unimplemented. **Low-Medium.**
-    → [seam-reuse-audit](./2026-07-13-seam-reuse-audit.md)
+14. **`index()` step** — unimplemented (`index() on a list value not yet supported`). Default (list)
+    indexer turns a collection `[e0,e1,…]` into `[[e0,0],[e1,1],…]`; a `with(WithOptions.indexer,
+    map)` variant produces a Map (needs item 13's `with` selector). `format()` is **already landed**
+    (8 L3 scenarios pass; the doc's "both unimplemented" was stale) — only `index()` remains here.
+    **Low-Medium.** → [seam-reuse-audit](./2026-07-13-seam-reuse-audit.md)
 
 15. **Multi-key `cap('x','y')` + cap-of-group unfold.** **Low-Medium.**
     → [side-effect-state](./2026-07-13-side-effect-state-plan.md)

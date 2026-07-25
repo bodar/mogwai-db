@@ -2,7 +2,7 @@ import type { Step, StrategyUse } from '../../gremlin/frontend.ts';
 import { PASS_CATEGORIES, type Pass, type PassContext } from './pass.ts';
 import {
   stripTerminal, foldRepeatClusters, foldByModulators, foldChooseOptions, foldCallWith,
-  collapseFoldCountLocal, dropRedundantOrder,
+  foldValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
   injectSubgraphRec, injectPartitionRec, markProductiveBy, verify,
   NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
   type PStep,
@@ -33,6 +33,9 @@ const EXTRACT: Pass[] = [
 // load-bearing (fold before simplify) as a guard.
 const FOLD: Pass[] = [
   { name: 'foldRepeatClusters', category: 'fold', run: (steps) => foldRepeatClusters(steps) },
+  // Desugar valueMap().with(WithOptions.tokens) → valueMap(true) BEFORE foldByModulators, so a
+  // following by() (e.g. the selective-token form's by(unfold)) folds onto the host once landed.
+  { name: 'foldValueMapWith', category: 'fold', run: (steps) => foldValueMapWith(steps) },
   { name: 'foldByModulators', category: 'fold', run: (steps) => foldByModulators(steps) },
   { name: 'foldChooseOptions', category: 'fold', run: (steps) => foldChooseOptions(steps) },
   { name: 'foldCallWith', category: 'fold', run: (steps) => foldCallWith(steps) },
