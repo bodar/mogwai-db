@@ -26,9 +26,9 @@ describe('conformance host — modern graph (official ids/results)', () => {
   });
   afterAll(async () => { await drc?.close(); server?.stop(); });
 
-  test('g_V_count', async () => expect((await g.V().count().next()).value).toBe(6n));
+  test('g_V_count', async () => expect((await g.V().count().next()).value).toBe(6));
   test('g_V_hasLabelXpersonX_count', async () =>
-    expect((await g.V().hasLabel('person').count().next()).value).toBe(4n));
+    expect((await g.V().hasLabel('person').count().next()).value).toBe(4));
 
   test('g_VX1X_outXknowsX_name', async () =>
     // bare values() has no guaranteed order (TinkerPop); compare as a set
@@ -94,7 +94,7 @@ describe('conformance host — modern graph (official ids/results)', () => {
   // P2c-1: edge traversal over the real wire — proves the edge shape / edgeBuffer
   // (materialised edge props) round-trips through the unmodified GLV.
   test('g_E_count / g_VX1X_outEXknowsX_inV_name', async () => {
-    expect((await g.E().count().next()).value).toBe(6n);
+    expect((await g.E().count().next()).value).toBe(6);
     expect((await g.V(1).outE('knows').inV().values('name').toList()).sort())
       .toEqual(['josh', 'vadas']);
   });
@@ -134,8 +134,8 @@ describe('conformance host — modern graph (official ids/results)', () => {
 
   test('g_V_groupCount_byXlabelX (Map<label, Long>)', async () => {
     const m = (await g.V().groupCount().by(__.label()).next()).value;
-    expect(m.get('person')).toBe(4n);
-    expect(m.get('software')).toBe(2n);
+    expect(m.get('person')).toBe(4);
+    expect(m.get('software')).toBe(2);
   });
 
   test('g_V_group_byXnameX_byXageX (Map<name, List<Int>>; software → [])', async () => {
@@ -161,7 +161,7 @@ describe('conformance host — modern graph (official ids/results)', () => {
   // P2b: is/where/not/TextP over the real wire.
   test('g_V_valuesXageX_isXgt30X / count_is (is over the wire)', async () => {
     expect((await g.V().values('age').is(gt(30)).toList()).sort()).toEqual([32, 35]);
-    expect((await g.V().hasLabel('person').count().is(gt(3)).next()).value).toBe(4n);
+    expect((await g.V().hasLabel('person').count().is(gt(3)).next()).value).toBe(4);
   });
 
   test('g_V_whereXoutXknowsXX / not / TextP (filters over the wire)', async () => {
@@ -253,17 +253,17 @@ describe('conformance host — empty graph write/reset (ggraph)', () => {
     const a = (await g.addV('person').property('name', 'a').next()).value;
     const b = (await g.addV('person').property('name', 'b').next()).value;
     await g.V(a.id).addE('knows').to(__.V(b.id)).iterate();
-    expect((await g.V().count().next()).value).toBe(2n);
+    expect((await g.V().count().next()).value).toBe(2);
 
     await g.V().drop().iterate();
-    expect((await g.V().count().next()).value).toBe(0n);
+    expect((await g.V().count().next()).value).toBe(0);
   });
 
   test('modern and empty are isolated graphs', async () => {
     // ggraph was just emptied; gmodern is untouched.
     const modern = traversal().with_(
       new DriverRemoteConnection(`http://localhost:${server.port}/gremlin`, { traversalSource: 'gmodern' }));
-    expect((await modern.V().count().next()).value).toBe(6n);
+    expect((await modern.V().count().next()).value).toBe(6);
   });
 
   // W1: user-supplied string ids round-trip through the real GLV.

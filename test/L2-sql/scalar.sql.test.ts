@@ -109,7 +109,7 @@ describe('scalar-parent / projection SQL', () => {
     const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
     expect(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST))", {}).map(dec)).toEqual([['a', 'b', 'c']]);
     expect(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST)).unfold()", {}).map(dec)).toEqual(['a', 'b', 'c']);
-    expect(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST)).count(Scope.local)", {}).map(dec)).toEqual([3n]);
+    expect(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST)).count(Scope.local)", {}).map(dec)).toEqual([3]);
     expect(executeQuery(store, "g.V().values('uuid')", {}).map(dec)).toEqual(['0263f28b-eff9-4c17-8e33-0b41c74b6d4c']);
   });
 
