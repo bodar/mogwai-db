@@ -141,6 +141,49 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    conformance cluster. **Medium.**
    → [path-history-substrate](./2026-07-18-path-history-substrate.md)
 
+7. **One type channel — collapse `as` + `vtype` into a single scalar `type`.** Investigated and
+   partly landed 2026-07-25; the design is settled and the dead end is recorded, so this is
+   scoped, not exploratory. → [type-channel-unification](./2026-07-25-type-channel-unification.md)
+
+   **The defect.** A scalar's Gremlin type rides on TWO channels: `ScalarStream.as` (one
+   compile-time tag, from a cast) and `ScalarStream.vtype` (the NAME of a per-row column holding
+   the type the write channel recorded — the only channel that can describe a heterogeneous
+   stream). Every container barrier propagates `as` and drops `vtype`, so a stored
+   datetime/uuid/long collapses to its storage class on entering one: `values('when').fold()`
+   frames `LIST[LONG]` (epoch millis), uuid→`STRING`, bigint→`INT`. Same for
+   `aggregate().cap()` and a `groupCount()` KEY. Drop sites: `steps/tail/barrier.ts:37,56`,
+   `steps/prefix/sideeffect.ts:~111`, `steps/tail/group.ts:~519`. Pinned as `test.todo` in
+   `test/typed-collections-e2e.test.ts`.
+
+   **Corrects the previous entry, which was wrong in a way that cost a session.** It claimed the
+   root cause was "`ListOf`/`AliasEntry` carry no per-element vtype slot" and called it
+   cross-cutting. The slot EXISTS and is faithfully propagated —
+   `values('age').asNumber(BIGINT).fold()` compiles to `{"kind":"jsonbList","as":"bigint"}`.
+   Only the per-row channel is lost. It also listed `project().by(count(local))`, which is not
+   affected (a count has no member type to lose), and missed `dedup()`, which was.
+
+   **Do NOT re-try the barrier-local fix.** Wrapping folded members as `{t,v}` + `ListOf.typed`
+   (the encoding a STORED typed collection uses) was implemented and reverted: the list
+   rebuild/transform ops (`order`/`dedup`/`limit` under `Scope.local`, the set-op family) read
+   members as BARE SQL values and fail closed on a `typed` list (`assertUntypedList`,
+   `steps/tail/list.ts`), so always-wrapping turned working traversals into deferrals (15 tests).
+   Wrapping only the rows that need it mixes encodings within one list, which the typed readers
+   don't handle — `compileUnfold` does `je.value ->> '$.v'` unconditionally. A uniform per-list
+   encoding needs a runtime, per-list decision, which is this item.
+
+   **The direction** (agreed with the user, 2026-07-25): one field, a discriminated union —
+   `{static: CanonicalType} | {perRow: column} | {unknown}` — so the compiler FORCES every step
+   to handle all three instead of silently forgetting one of two optional fields. `unknown` is
+   reachable only from the JS-client seam (a JS client cannot distinguish UUID from string, so
+   the type is genuinely unknown, not absent); if the upstream client is fixed it becomes
+   unreachable and deletable. Physical encoding stays a per-site choice derived from the type —
+   bare when the SQLite storage class already determines it (string/int/long/double, exactly what
+   `inferVtypeSql` recovers), a sibling column for row-preserving ops, `{t,v}` only inside a JSON
+   blob where there is no room for a sibling column. **Absorbs** the `Scope.local` typed-element
+   transforms (a transform retypes its output — not a special case once the type is uniform) and
+   `assertUntypedList`, which exists only to guard the two-encoding split. **Unblocks** ~8–14 L3
+   scenarios plus the whole class of "a new barrier forgot a channel" bugs. **Medium-High.**
+
 ---
 
 ## P2 — feature / conformance buckets
@@ -226,26 +269,11 @@ Each fails closed (clear error, never mis-executes). Do only when a concrete sce
 - **Write fail-closed walls** — `addE`/`mergeE` endpoint traversals past a movement/branch (need the
   bare rowid, not the framed external id), map-valued merge drivers, nested keys/values. *Low.*
   → [writes-through-read-spine](./archive/2026-07-17-writes-through-read-spine-plan.md)
-- **Typed-value tails** — `Scope.local` STRING transforms over typed list elements,
-  `has(k, eq(collectionLiteral))`, meta-property typing. *Low.*
+- **`has(k, eq(collectionLiteral))` + meta-property typing** — two remaining typed-value tails.
+  (`Scope.local` STRING transforms over typed list elements moved into the unification item
+  below — it is the same root cause, not an independent gap.) *Low.*
   → [full-fidelity-typed-collections](./archive/2026-07-17-full-fidelity-typed-collections-plan.md),
   [typed-merge-values](./archive/2026-07-17-typed-merge-values-plan.md)
-- **Typed scalar loses its type through a collecting barrier / group key** (diagnosed 2026-07-25
-  while hunting wire type-fidelity bugs after the count→Int64 fix). A typed scalar
-  (`values('datetime')`, `asNumber(GType.BIGINT)`, uuid) survives `is(typeOf(X))` with its type
-  intact, but `aggregate('a')…cap('a')`, `fold()`, `project().by(count(local))`, and a
-  `groupCount()` **key** all frame the member/key as its BARE value — datetime→epoch-millis Number,
-  uuid→string. Root cause is the SAME "list members / group keys carry no per-element vtype" gap as
-  item 1's residual (`AliasEntry`/list `of` records no member shape) — a cross-cutting substrate
-  change, not a localized frame fix. Clusters: `data/*.feature` (BigInt/DateTime/UUID/Set) `groupCount`
-  + `aggregate_cap` + `project_by(count(local))`, ~10–14 scenarios. *Med.*
-- **`asNumber(GType.BIGINT)` of a small value decodes as BigInt, not Number.** We frame every
-  `bigint` ValueType via `bigIntegerSerializer` (GraphBinary BigInteger 0x23 → always BigInt in the
-  client); TinkerPop's `NumberSerializationStrategy` instead downcasts a small BigInteger to Int/Long
-  on the wire (→ Number), which is what `d[n].n`'s `parseFloat` expects. Fixing means replicating that
-  magnitude-downcast for the `bigint` tag — a type-fidelity POLICY call (does a bigint stay a bigint
-  on the wire?), so decide deliberately, not piecemeal. ~2–3 scenarios (`asNumber(BIGINT).is(typeOf/eq)`).
-  Contrast: count()/groupCount() Longs ARE fixed (Int64, `wire-protocol.md`). *Low.*
 - **`sideEffect(__.…)` + `withSideEffect(...)`** and **`branch()`** — distinct families, no consumer
   yet. *Low.*
   → [side-effect-state](./2026-07-13-side-effect-state-plan.md),
@@ -290,11 +318,20 @@ All → [phased-roadmap](./2026-07-11-phased-roadmap-plan.md) unless noted.
 - **Review-fix duplication residue (C1/C2/C3 + D)** — property-list framing / tie-break / `PARTITION
   BY ordinal` dups; the `execute.ts` pre-parsed-`pmeta` divergence is latent-correctness. Status
   unconfirmed — treat as open. → [review-fix-plan](./2026-07-22-review-fix-plan.md)
-- **`value` Shape `as?` xor `perRowType?`** — discriminated union would read cleaner; touch only if
-  that Shape changes. → [wire-and-storage-facts](./2026-07-25-wire-and-storage-facts.md)
-- **Upstream `q`-kernel surface to lazyrecords** and **JS-client GraphBinary type-preservation PR**
-  (+ non-conformant-client UUID shim). → [q-kernel-sql-builder](./2026-07-12-q-kernel-sql-builder.md),
-  [typed-merge-values](./archive/2026-07-17-typed-merge-values-plan.md)
+- **`value` Shape `as?` xor `perRowType?`** — the render-boundary twin of P1·7's two channels; fold
+  it into that discriminated union rather than doing it alone.
+  → [type-channel-unification](./2026-07-25-type-channel-unification.md),
+  [wire-and-storage-facts](./2026-07-25-wire-and-storage-facts.md)
+- **Upstream `q`-kernel surface to lazyrecords**.
+  → [q-kernel-sql-builder](./2026-07-12-q-kernel-sql-builder.md)
+- **Fork TinkerPop as our vendor submodule + upstream the harness fixes.** Agreed 2026-07-25.
+  Points `vendor/tinkerpop` at our own fork so test-harness defects can be fixed locally and
+  offered upstream without blocking on them. First payload: the dead-code `toNumeric` BigInteger
+  branch (see won't-do below). Also the intended home for the flaky hard-coded cucumber PORT that
+  intermittently fails CI, and for the **non-conformant-client UUID/ISO-date shim** (a JS client
+  cannot send a UUID's type, so sniff the obvious string shapes — **opt-in**, never default: a
+  string that merely looks like a uuid is not one, and silently retyping user data is worse than
+  not typing it). → [typed-merge-values](./archive/2026-07-17-typed-merge-values-plan.md)
 
 ---
 
@@ -314,6 +351,23 @@ All → [phased-roadmap](./2026-07-11-phased-roadmap-plan.md) unless noted.
 - **Platform walls** — regex UDFs, `typeOf` over some stored props, bigdecimal, lambdas,
   OLAP/GraphComputer → architectural limits, fail-closed by design.
 - **Child-scope split-seed + 4-consumer migration** → superseded by the smaller carried-cols fix.
+- **"`asNumber(GType.BIGINT)` of a small value should downcast to Int/Long on the wire"** → **our
+  framing is already correct; the blocker is a vendored-harness defect.** Verified 2026-07-25
+  against source, correcting a P3 entry that had the causality backwards:
+  · TinkerPop's `NumberSerializationStrategy` does magnitude-dispatch ONLY for
+    `typeof item === 'number'`; for `bigint` it is unconditional
+    (`return this.ioc.bigIntegerSerializer.serialize(item, …)`). There is no BigInteger downcast
+    to replicate — `execute.ts`'s `case 'bigint'` already does exactly what TinkerPop does.
+  · `data/BigInt.feature` expects `d[456].n` — BigInteger — for the value 456, i.e. the suite
+    requires the declared type to be PRESERVED, not narrowed. Emitting Int would contradict it.
+  · The real cause is `gremlin-js`'s cucumber `feature-steps.js`:
+    `function toNumeric(s) { try { return parseFloat(s) } catch { return BigInt(s) } }` —
+    `parseFloat` never throws, so the `BigInt` branch is unreachable and `d[456].n` becomes the
+    JS Number 456, which our correct `456n` can never deep-equal.
+  · 5 sibling scenarios in that file PASS today (`math(mul)`/`sum`/`min`/`max`/`project`) because
+    `math()`/`sum()` coerce away from BigInteger — a blanket downcast would REGRESS them.
+  Route: fix it in our TinkerPop fork's harness and offer it upstream (debt item above), not by
+  changing our serializer. ~3 scenarios, net L3 gain likely ≤0 if "fixed" our side.
 
 Sources: [lazyrecords-cutover](./archive/2026-07-11-lazyrecords-cutover-plan.md),
 [phased-roadmap](./2026-07-11-phased-roadmap-plan.md),
