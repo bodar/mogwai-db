@@ -69,6 +69,27 @@ test('multi-term order().by() mixing property keys and traversals (shared modula
     .toEqual(['peter', 'marko', 'vadas', 'josh']);
 });
 
+test('order().by(key) survives a following movement/branch (item 5b: ordered element re-entry)', () => {
+  const store = seededStore();
+  // order() is a barrier: it re-establishes a total order that must survive the following out().
+  // Ages asc: vadas27,marko29,josh32,peter35 (software lop/ripple have no age → sort first). out()
+  // then fans each source in that order — the result is grouped by the source's age rank. marko→
+  // {lop,vadas,josh} (by neighbour id), josh→{ripple,lop}, peter→{lop}; the age-less/childless
+  // sources contribute nothing. Threading the minted encounter through out() yields exactly this.
+  expect(run(store, 'g.V().order().by("age").out().values("name")').map((r) => r.v))
+    .toEqual(['vadas', 'lop', 'josh', 'lop', 'ripple', 'lop']);
+  // Order.desc flips the source order: peter→lop, josh→{lop,ripple}, marko→{vadas,lop,josh}.
+  expect(run(store, 'g.V().order().by("age", Order.desc).out().values("name")').map((r) => r.v))
+    .toEqual(['lop', 'lop', 'ripple', 'vadas', 'lop', 'josh']);
+  // A limit after the movement observes the ordered stream (the encounter threads through out()).
+  expect(run(store, 'g.V().order().by("age").out().limit(2).values("name")').map((r) => r.v))
+    .toEqual(['vadas', 'lop']);
+  // A branch (coalesce) after order() re-enters too — the exact TinkerPop Coalesce scenario
+  // g_V_outXcreatedX_order_byXnameX_coalesceXname_constantXxXX (asserted unordered upstream).
+  expect(run(store, 'g.V().out("created").order().by("name").coalesce(__.values("name"), __.constant("x"))').map((r) => r.v).sort())
+    .toEqual(['lop', 'lop', 'lop', 'ripple']);
+});
+
 test('outE().inV() equals out(); outV/inV recover edge endpoints', () => {
   const store = seededStore();
   // marko(1) outE knows → 2 edges → inV → vadas+josh (== out('knows'))
