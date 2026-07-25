@@ -31,5 +31,17 @@ fails closed is better than a special-case that entrenches the non-generic path.
   dispatcher) and lives in three cohesive files — `tail/child-shape.ts` (pure classify leaf) ◂
   `tail/child.ts` (compilers) ◂ `tail/scalar-arm.ts` (scalar-parent arms). Extend by adding to the
   classifier + the compiler — never by reaching for a per-concern object (evaluated and rejected).
+- **The branch family (`union`/`choose`/`coalesce`/`optional`) has ONE arm triage and FOUR merge
+  builders. Never add a fifth of either.** `classifyBranchArms` + `BRANCH_SHAPE_ORDER`
+  (`tail/child-shape.ts`) is the single shape decision — the prefix fold's `break`
+  (`engine/engine.ts`), the tail cascades (`tail/projection.ts` `BRANCH_LOWERERS`) and the arm
+  compilers all read it; computing shape a second time is how those three drifted before.
+  The merges are `finishElementMerge` (`prefix/branch.ts`), `unionScalarStreams` (`tail/scalar.ts`),
+  `mergeVariantArms`/`mergeVariantParts` and `finishListMerge` (`tail/variant.ts`) — all
+  parent-agnostic (a bare `Carry`), so an element parent and a scalar parent share them verbatim.
+  **Every one mints the arm-merge `encounter`** when `carried.encounter` is live; hand-rolling a
+  UNION ALL instead is precisely the bug that silently dropped arm ordering from the scalar-parent
+  mixed-shape merges. A merge whose arms are heterogeneous (an `optional` hit/miss pair) takes
+  `mergeVariantParts`/`finishElementMerge`'s pre-built-`parts` form — it does not get its own copy.
 - **Fail closed, never mis-execute.** An unsupported shape throws a clear deferral or falls through
   to the generic path; it never silently answers a different question.

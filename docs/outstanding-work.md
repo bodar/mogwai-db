@@ -10,6 +10,13 @@ over-reports `LANDED`; this keeps only what a code check confirms open). Live pe
 recur legitimately, see `test/CLAUDE.md`). Path pointers assume the 2026-07-23 restructure
 (`src/compiler/steps/{context,prefix,tail,write}/`, `src/compiler/{ir,plan,engine}/`).
 
+> **Before picking an item, verify its premise against the code — this index has been stale in BOTH
+> directions.** The corpus over-reports `LANDED`, but item 1 also over-reported *open*: it named a
+> duplication that had already been consolidated and an `encounter` mint that already existed, which
+> cost a full re-investigation. The cheapest check is usually a 10-line probe that compiles the
+> traversals the item claims are broken and greps the emitted SQL — do that before designing.
+> When an item turns out to be partly landed, rewrite the line rather than closing it silently.
+
 **Ordering — floor vs ceiling.** L3 is the floor (scenarios that pass); the ceiling is generic
 lowering that composes the full nested grammar at any depth/combination (see
 `src/compiler/steps/CLAUDE.md`). P1 raises the ceiling — each item unblocks a *family*; one-off
@@ -20,14 +27,40 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-1. **Unify the branch-merge family onto the `VariantStream`/`variantArm*` substrate.** `union`/
-   `choose`/`coalesce`/`optional` are hand-rolled ~7× (element vs scalar parent × scalar/list/
-   variant arms) instead of routing through the parent-agnostic merge builders that already exist.
-   The single largest duplication surface. **Unblocks:** item 4 (the arm-merge `encounter` mint
-   lands once instead of per-copy), and thereby `path().by(__.union)` fan-out + mixed-shape
-   take-first. Start: `steps/prefix/branch.ts`, `steps/tail/{scalar-arm,variant}.ts`,
-   `engine/engine.ts` (arm-shape probes ~L258–312). **High.**
-   → [canonical-emission-order](./2026-07-19-canonical-emission-order.md)
+1. ~~**Unify the branch-merge family onto the `VariantStream`/`variantArm*` substrate.**~~
+   ✅ **LANDED 2026-07-25.** The premise was already half-stale when written: the three merge
+   *builders* (`finishElementMerge`, `unionScalarStreams`, `mergeVariantArms`) were consolidated
+   AND each already minted the arm-merge `encounter` — i.e. **Stage A of canonical-emission-order
+   had landed**, so this item's "unblocks item 4" was already discharged. What was genuinely
+   duplicated was the dispatch **head**, now fixed:
+   - `classifyBranchArms` + `BRANCH_SHAPE_ORDER` (`steps/tail/child-shape.ts`) is the ONE arm
+     triage. It replaced ten ad-hoc booleans in `engine/engine.ts`'s prefix fold, three hardcoded
+     `list→scalar→variant→element` cascades in `steps/tail/projection.ts`, and a third
+     re-classification inside each `tryLower*`. Pinned by `test/compiler/branch-triage.exec.test.ts`,
+     which keeps the old ten-boolean predicate as an oracle and asserts equivalence over 44 branch
+     steps — that test caught a real bug during the change (an unclassifiable `optional()` body
+     routed to the tail reports `step not implemented: optional()`, so unclassifiable splits by
+     kind: `optional`→element, multi-arm→variant).
+   - `finishListMerge` replaced 3 verbatim list-merge copies; `mergeVariantParts` was split out of
+     `mergeVariantArms` for the heterogeneous hit/miss `optional` merges.
+   - **A real wrong answer was fixed**: the four scalar-parent mixed-shape merges hand-inlined
+     `mergeVariantArms`' no-encounter branch, so with a live encounter (any positional consumer
+     downstream of a fan-out — `values('age').union(constant('x'),V()).limit(2)`) arm ordering was
+     silently dropped and the slice picked rows in incidental SQLite order.
+   - `lowerLegacy*` → `lowerElement*`: those are the authoritative element-homogeneous compilers
+     and the fail-closed backstop, not legacy. The name drove much of this item's apparent size.
+
+   **Residual (small, real):** `as()` inside a scalar/list arm. Admitting it to the arm vocabulary
+   is a one-line change that COMPILES and emits the alias column, but `select('a')` then returns
+   `[]` **even when every arm binds** — a silent wrong answer. Root cause is pinned:
+   `values('age').as('a').select('a')` works correctly OUTSIDE a branch, so the scalar as()/select()
+   readback is sound; it breaks only when the bind is inside an arm, because
+   `unionScalarStreams`/`mergeVariantArms` project the OUTER carried and the arm-grown alias column
+   never reaches the merged relation's schema in a form `select()` resolves. Fix = make those two
+   builders alias-aware (apply `mergeAliasMaps` at the merge, arm-column remap + NULL-pad exactly as
+   `armProjection` already does for element arms — needs `mergeAliasMaps` moved out of `branch.ts`
+   to a leaf to avoid a `variant.ts`↔`branch.ts` cycle), THEN admit `as` to the vocabulary. Do not
+   admit the vocabulary without the merge fix. *Low-Med.*
 
 2. **Universal child-seam acceptance.** The generic child seam still throws for whole child-body
    families — `local`, `where(__.trav)`, `choose().option`, `map(__.trav)`, `by(__.trav)`,
@@ -45,16 +78,41 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    [path-history-substrate](./2026-07-18-path-history-substrate.md),
    [foldable-carried-column](./2026-07-24-foldable-carried-column-plan.md)
 
-4. **Canonical-emission-order Stage C.** Branch merges don't mint the arm-merge `encounter`, so
-   element-parent take-first and emission ordering across arms is unspecified. Becomes mostly free
-   once item 1 unifies the merge. **Unblocks:** `path().by(__.union)`, mixed-shape take-first,
-   `dedup(labels)` ordering. **Medium.**
+4. **Canonical-emission-order Stage C — residual only.** The headline premise ("branch merges don't
+   mint the arm-merge `encounter`") is **false and has been for some time**: every merge family mints
+   it (Stage A landed), and as of 2026-07-25 that includes the four scalar-parent mixed-shape merges
+   (item 1). `dedup(labels)` first-in-emission also landed (`filter.ts`). Stage B landed for movement,
+   source seed, element-prefix `limit`/`range`/`skip`, root `fold`, child `first`, and `values()`.
+   What actually remains:
+   - **`union()` as a SOURCE form** — `engine/engine.ts` `seedUnion` throws outright
+     (`emission-order encounter over a union() source not yet supported`).
+   - **A bare re-source `V()`/`E()` arm carries no encounter**, so the take-first guards that depend
+     on one still fail closed: `armFansOut` (`steps/tail/scalar-arm.ts`) and `positionArmFansOut`
+     (`steps/tail/path.ts`). `map()` over a `union`/`choose` fan-out arm ALREADY works (those carry
+     an encounter); only the re-source arm is left. Minting `encounter = new element id` at a
+     re-source is the one missing primitive.
+   - **`repeat()`/`match()`** stay deliberately outside (a recursive CTE can't window across
+     iterations) — `analyze.ts` returns `demandsEncounter: false` for them by design.
+   Do NOT re-derive the "two encounters" reconciliation: there is one slot, `Carried.encounter`;
+   `ScalarStream` has no separate field. **Low-Med.**
    → [canonical-emission-order](./2026-07-19-canonical-emission-order.md)
 
 5. **Map/non-element re-entry.** `valueMap().select()` into a retyped `MapStream`, and `as()`/
    `select(label)` over group/map/path/property streams. **Medium.**
    → [carried-schema-and-projection-reentry](./2026-07-14-carried-schema-and-projection-reentry-plan.md),
    [deep-seam-migration-roadmap](./2026-07-18-deep-seam-migration-roadmap.md) #5
+
+5b. **Re-enter the PREFIX after a value-tail barrier — `…order().by(k).out()`.** Diagnosed
+   2026-07-25 (same family as #5, but a distinct and *very* cheap-to-reproduce wall): **nothing**
+   resumes after a root `order().by()`. `g.V().order().by('age').out()` dies with
+   `step not implemented: out()`, and so does every branch (`union`/`choose`/`coalesce`/`optional`)
+   in that position — the error names the step, which reads like a missing step impl and sent at
+   least one investigation down the wrong path. Cause is structural, not a missing case:
+   `foldTailAcc` (`steps/tail/projection.ts`) is a TERMINAL accumulator — once the chain enters the
+   value tail, `order()` folds into `acc.orders` and only `MODIFIERS` may follow, so any
+   movement/branch hits the `step not implemented` throw. The fix is a retype boundary out of
+   `TailAcc` back to an `ElementStream` (an ordered element stream is still elements), which is the
+   same seam #5 needs. Worth doing WITH #5, not separately. **Medium.**
 
 6. **`order().by()` of paths (path natural-order comparability).** Unlocks the Orderability
    conformance cluster. **Medium.**
@@ -123,7 +181,14 @@ Each fails closed (clear error, never mis-executes). Do only when a concrete sce
   → [group-value-generic-seam](./2026-07-18-group-value-generic-seam-plan.md),
   [p3-reenterable-shapes](./archive/2026-07-16-p3-reenterable-shapes-plan.md)
 - **Mixed-shape branch corners** — node+edge in one branch, `path()` through it, `as()` inside an
-  arm. Closed as a family by items 1+4. *Low.*
+  arm. Items 1+4 did NOT close these as a family (that claim was aspirational); they are each an
+  independent wall, and all four now fail closed with an error naming the branch:
+  · node+edge in one branch → the element lowerer's mixed-element-kind defer.
+  · `path()` through a mixed-shape branch → all four mixed-shape lowerers now throw, including
+    `optional` (that one silently rode `path` through `carryFrag` unpadded until 2026-07-25 —
+    a hit arm is a scalar row with no path position, a miss arm keeps the element's).
+  · `as()` inside a non-element arm → see item 1's residual (needs alias-aware merges FIRST; the
+    naive vocabulary change returns `[]` from `select()`). *Low.*
   → [p4-dynamic-variant](./archive/2026-07-16-p4-dynamic-variant-plan.md)
 - **Write fail-closed walls** — `addE`/`mergeE` endpoint traversals past a movement/branch (need the
   bare rowid, not the framed external id), map-valued merge drivers, nested keys/values. *Low.*

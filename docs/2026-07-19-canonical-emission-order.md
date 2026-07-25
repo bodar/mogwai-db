@@ -1,9 +1,29 @@
 # Canonical emission order (traverser sequence) as an on-demand substrate
 
 **Date:** 2026-07-19
-**Status:** design — approved scope ("canonical emission order substrate"), staging + crux
-decisions pending.
-**Baseline:** L3 1227.
+**Status:** ⚠️ **LARGELY LANDED — this doc is the original DESIGN, not current state.** Read the
+status table below before planning from it; the prose that follows describes the pre-build world
+and states as open several things that now work. Stale readings of it have twice caused work to be
+re-picked (see `outstanding-work.md` items 1 and 4).
+**Baseline at writing:** L3 1227 (now 1277).
+
+## Status as of 2026-07-25 (code is ground truth, not the prose below)
+
+| Stage | State | Evidence |
+|---|---|---|
+| **A — branch-merge encounter** | ✅ **Landed**, all four merge families | `finishElementMerge` (`steps/prefix/branch.ts`), `unionScalarStreams` (`steps/tail/scalar.ts`), `mergeVariantArms`/`mergeVariantParts` + `finishListMerge` (`steps/tail/variant.ts`). The four scalar-parent mixed-shape merges were the last hole — they hand-inlined the no-encounter branch and silently dropped arm order; fixed 2026-07-25. |
+| **B — positional determinism** | ✅ Landed for movement refine, source seed, element-prefix `limit`/`range`/`skip`, scalar root `tail`, root + scoped `fold`, child `first`, `values()`/`id()`/`label()` | `movement.ts` `finishMove`, `engine.ts` `seedSource`, `passthrough.ts`, `scalar.ts`, `barrier.ts`, `child.ts` |
+| **B — the demand pre-pass** | ✅ Landed as a ChainFact, not a strategies Pass | `ir/analyze.ts` `computeDemandsEncounter`; shares `isPlainOrder` with `collapseSafe` so the two cannot disagree (`test/compiler/analyze.exec.test.ts`) |
+| **B — `union()` as a SOURCE** | ❌ Not started — explicit throw | `engine.ts` `seedUnion` |
+| **B — bare re-source `V()`/`E()` arm** | ❌ No encounter minted, so the take-first guards still fail closed | `armFansOut` (`scalar-arm.ts`), `positionArmFansOut` (`path.ts`). `map()` over a `union`/`choose` arm already works. |
+| **C — `dedup(labels)` first-in-emission** | ✅ Landed | `filter.ts` |
+| **C — reconcile the "two encounters"** | ✅ Moot — there is ONE slot | `Carried.encounter`; `ScalarStream` has no separate field (`context/stream.ts` says so explicitly). Do not re-litigate this. |
+| **C — lift the take-first guards** | ❌ Blocked only on the re-source mint above | |
+| **`repeat()`/`match()`** | Deliberately outside, as designed | `analyze.ts` returns false for them |
+
+**Risks 1–6 below are resolved or moot**: the `carriedCols` ORDER RULE holds (encounter keeps its
+slot); `movementCollapse` is gated on `demandsEncounter`; `inject()` handles encounter as benign;
+the two-encounter question collapsed to one slot.
 
 ## Why
 
