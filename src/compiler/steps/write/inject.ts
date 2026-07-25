@@ -1,7 +1,7 @@
 import { q, value, list } from '../../../sql/kernel/q.ts';
 import { jsonbArrayOf } from '../../plan/plan.ts';
 import { flattenListArgs, type SackSpec } from '../../../gremlin/frontend.ts';
-import { flatType } from '../../../gremlin/types.ts';
+import { flatType, CANONICAL_TO_VALUETYPE, type CanonicalType } from '../../../gremlin/types.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { type Carry } from '../context/context.ts';
 import { toListStream, toScalarStream } from '../context/stream.ts';
@@ -15,21 +15,32 @@ import {
 
 const CONST_COERCIONS = new Set(['asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff']);
 
-// Types whose value rides as decimal/char TEXT (do-sqlite-bind-precision) — JS-value framing
-// would infer the wrong GraphBinary type (a long > 2^53 → a string). A bare inject of a uniform
-// literal of these tags the stream so it frames by the literal's declared type, not inference.
-const TEXT_STORED_TYPES = new Set<ValueType>(['long', 'bigint', 'bigdecimal', 'char', 'duration']);
+// Canonical types whose stored form does NOT determine their Gremlin type, so JS-value
+// framing would infer the wrong one. Two reasons, both needing the declared type:
+//   - it rides as decimal/char TEXT (do-sqlite-bind-precision): a long > 2^53 would frame
+//     as a string, a bigdecimal/char/duration likewise;
+//   - it is storage-ambiguous with another type: a datetime is epoch-millis (→ Long) and a
+//     uuid is TEXT (→ String), so neither is recoverable from the value alone.
+// NOTE this set is CanonicalType (the `flatType`/argTypes vocabulary), not render.ts's
+// ValueType — they spell datetime/boolean differently, and comparing across the two is
+// exactly the bug this replaced: 'datetime' never matched a Set<ValueType>, so a bare
+// inject(datetime(…)) lost its type and a following is(typeOf(DATETIME)) filtered it out.
+const DECLARED_TYPE_REQUIRED = new Set<CanonicalType>([
+  'long', 'bigint', 'bigdecimal', 'char', 'duration', 'datetime', 'uuid',
+]);
 
-/** A bare inject(v1, v2, …) with no leading coercion carries no `as`, so a value stored as
- *  TEXT (a big long/bigdecimal/…) would frame by JS inference — wrongly. Derive the framing tag
- *  from a UNIFORM declared arg type for exactly those TEXT-stored types; mixed or other types
- *  keep per-value inference (undefined). */
+/** A bare inject(v1, v2, …) with no leading coercion carries no `as`, so a value whose stored
+ *  form is ambiguous (a big long, a datetime, a uuid, …) would frame by JS inference — wrongly.
+ *  Derive the framing tag from a UNIFORM declared arg type for exactly those types, translating
+ *  the canonical name into the framing vocabulary. Mixed types keep per-value inference
+ *  (undefined): inject has no per-row vtype column to carry a heterogeneous type on, and the
+ *  client hands over plain JS values, so per-value inference is the honest floor there. */
 function bareInjectTag(steps: PStep[], count: number): ValueType | undefined {
   const argTypes = steps[0].argTypes ?? [];
   if (!count) return undefined;
   const names = Array.from({ length: count }, (_, i) => flatType(argTypes[i]));
   const uniform = names.every((n) => n === names[0]) ? names[0] : undefined;
-  return uniform && TEXT_STORED_TYPES.has(uniform as ValueType) ? (uniform as ValueType) : undefined;
+  return uniform && DECLARED_TYPE_REQUIRED.has(uniform) ? CANONICAL_TO_VALUETYPE[uniform] : undefined;
 }
 
 /** Apply the leading coercion prefix while the inject values are still JS constants.

@@ -1,5 +1,5 @@
 {
-  "passing": 1345,
+  "passing": 1347,
   "total": 2041,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -1043,6 +1043,8 @@
     "g_injectXbX_reverse",
     "g_injectXbcd_bcdX_noneXeqXabcXX",
     "g_injectXbool_trueX_asBool",
+    "g_injectXdatetimeX_isXtypeOfXGType_DATETIMEXX_aggregateXaX_capXaX",
+    "g_injectXdatetimeX_isXtypeOfXGType_DATETIMEXX_groupCount",
     "g_injectXdatetimeXstr1XX_dateDiffXconstantXdatetimeXstr2XXX",
     "g_injectXdatetimeXstr1XX_dateDiffXdatetimeXstr2XX",
     "g_injectXdatetimeXstrXX_dateAddXDT_hour_2X",
@@ -1869,8 +1871,6 @@
     "g_injectXa_bX_concat_Xinject_c_dX",
     "g_injectXabc_bcdX_anyXeqXbcdXX",
     "g_injectXbcd_bcdX_allXeqXbcdXX",
-    "g_injectXdatetimeX_isXtypeOfXGType_DATETIMEXX_aggregateXaX_capXaX",
-    "g_injectXdatetimeX_isXtypeOfXGType_DATETIMEXX_groupCount",
     "g_injectXdatetimeXstr1XX_dateDiffXinjectXdatetimeXstr2XXX",
     "g_injectXhello_hiX_concatXV_values_order_byXnameX_valuesXnameXX",
     "g_injectXlabel_person_name_marko_label_person_name_stephenX_mergeV",

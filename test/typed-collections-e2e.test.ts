@@ -189,6 +189,126 @@ describe('#5 whole-element framing carries scalar property types', () => {
   });
 });
 
+// A COMPUTED container (fold/aggregate/dedup/groupCount key) must carry each member's stored
+// type exactly like a STORED collection does. The value rides with its per-row `vtype` column
+// up to the barrier; before this the barrier kept only the compile-time `as` tag, so a stored
+// datetime/uuid/long collapsed to its bare storage class (epoch-millis Long / a look-alike
+// String / an Int) the moment it entered a container. Same {t,v} typed-node encoding as a
+// stored collection — render.ts MapOf already declares that law for map values.
+describe('computed containers preserve each member\'s stored type', () => {
+  const UUID = '0263f28b-eff9-4c17-8e33-0b41c74b6d4c';
+  // Two vertices so a fold has >1 member; `big` is >2^53 to prove LONG (not INT) framing.
+  const seed = (s: GraphStore) => {
+    executeQuery(s, `g.addV('t').property('when',datetime('2024-01-02T03:04:05Z')).property('gid',UUID('${UUID}')).property('big',9007199254740993L)`, {});
+    executeQuery(s, `g.addV('t').property('when',datetime('2025-06-07T08:09:10Z')).property('gid',UUID('11111111-2222-3333-4444-555555555555')).property('big',9007199254740995L)`, {});
+  };
+
+  test('fold() of a datetime property keeps DATETIME per element', () => {
+    const s = store(); seed(s);
+    const buf = rawList(s, "g.V().values('when').fold()");
+    expect(elementTypeCodes(buf)).toEqual([D.DATETIME, D.DATETIME]);
+    expect((dec(buf) as any[]).every((d) => d instanceof Date)).toBe(true);
+  });
+
+  test('fold() of a uuid property keeps UUID (not a look-alike String)', () => {
+    const s = store(); seed(s);
+    expect(elementTypeCodes(rawList(s, "g.V().values('gid').fold()"))).toEqual([D.UUID, D.UUID]);
+  });
+
+  test('fold() of a long property keeps LONG (not Int) and stays lossless', () => {
+    const s = store(); seed(s);
+    const buf = rawList(s, "g.V().values('big').fold()");
+    expect(elementTypeCodes(buf)).toEqual([D.LONG, D.LONG]);
+    expect(dec(buf)).toEqual([9007199254740993n, 9007199254740995n]);
+  });
+
+  test('fold().unfold() round-trips the element type back onto the scalar stream', () => {
+    const s = store(); seed(s);
+    const bufs = executeQuery(s, "g.V().values('when').fold().unfold()", {});
+    expect(bufs.map((b) => b[0])).toEqual([D.DATETIME, D.DATETIME]);
+  });
+
+  test('aggregate().cap() keeps the member type', () => {
+    const s = store(); seed(s);
+    expect(elementTypeCodes(rawList(s, "g.V().values('when').aggregate('a').cap('a')"))).toEqual([D.DATETIME, D.DATETIME]);
+  });
+
+  test('dedup() keeps the per-row stored type', () => {
+    const s = store(); seed(s);
+    const bufs = executeQuery(s, "g.V().values('when').dedup()", {});
+    expect(bufs.map((b) => b[0])).toEqual([D.DATETIME, D.DATETIME]);
+  });
+
+  test('dedup() does NOT collapse equal values of different stored types', () => {
+    const s = store();
+    // the same digits stored as a long and as a string are distinct Gremlin values
+    executeQuery(s, "g.addV('t').property('k',5L)", {});
+    executeQuery(s, "g.addV('t').property('k','5')", {});
+    const bufs = executeQuery(s, "g.V().values('k').dedup()", {});
+    expect(bufs.map((b) => b[0]).sort()).toEqual([D.STRING, D.LONG].sort());
+  });
+
+  test('groupCount() frames a datetime KEY as DATETIME', () => {
+    const s = store(); seed(s);
+    const m = dec(rawList(s, "g.V().values('when').groupCount()")) as Map<any, any>;
+    expect([...m.keys()].every((k) => k instanceof Date)).toBe(true);
+    expect([...m.values()]).toEqual([1n, 1n]);
+  });
+
+  test('groupCount() frames a uuid KEY as UUID', () => {
+    const s = store(); seed(s);
+    const m = dec(rawList(s, "g.V().values('gid').groupCount()")) as Map<any, any>;
+    expect([...m.keys()].sort()).toEqual([UUID, '11111111-2222-3333-4444-555555555555'].sort());
+  });
+
+  test('a HETEROGENEOUS fold keeps each member its own exact type', () => {
+    const s = store();
+    executeQuery(s, `g.addV('t').property('mixed',UUID('${UUID}'))`, {});
+    executeQuery(s, "g.addV('t').property('mixed',7)", {});
+    executeQuery(s, "g.addV('t').property('mixed',datetime('2024-01-02T03:04:05Z'))", {});
+    const codes = elementTypeCodes(rawList(s, "g.V().values('mixed').fold()"));
+    expect(codes.sort()).toEqual([D.UUID, D.INT, D.DATETIME].sort());
+  });
+
+  test('an untyped computed scalar still folds unchanged (no vtype → old path)', () => {
+    const s = store(); seed(s);
+    // count() is a computed long with no stored vtype column; must stay a plain Long list.
+    expect(elementTypeCodes(rawList(s, 'g.V().count().fold()'))).toEqual([D.LONG]);
+  });
+});
+
+// The typed-literal SEED: a bare inject() of a datetime/uuid must carry its declared type, or
+// is(typeOf(X)) filters every row out and the traversal silently returns []. The declared type
+// arrives as a CanonicalType ('datetime'), which must be translated to the framing ValueType
+// ('date') — the two vocabularies differ for exactly this type.
+describe('bare inject() of a typed literal keeps its declared type', () => {
+  const UUID = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
+
+  test('inject(datetime) frames as DATETIME', () => {
+    const buf = executeQuery(store(), `g.inject(datetime('2023-08-08T00:00:00Z'))`, {})[0];
+    expect(buf[0]).toBe(D.DATETIME);
+    expect(dec(buf) instanceof Date).toBe(true);
+  });
+
+  test('inject(datetime).is(typeOf(DATETIME)) is not silently empty', () => {
+    const out = executeQuery(store(), `g.inject(datetime('2023-08-08T00:00:00Z')).is(typeOf(GType.DATETIME))`, {});
+    expect(out.length).toBe(1);
+    expect(dec(out[0]) instanceof Date).toBe(true);
+  });
+
+  test('inject(UUID).is(typeOf(UUID)) is not silently empty', () => {
+    const out = executeQuery(store(), `g.inject(UUID('${UUID}')).is(typeOf(GType.UUID))`, {});
+    expect(out.length).toBe(1);
+    expect(out[0][0]).toBe(D.UUID);
+    expect(dec(out[0])).toBe(UUID);
+  });
+
+  test('a MIXED-type bare inject stays per-value inferred (unchanged)', () => {
+    const out = executeQuery(store(), `g.inject(datetime('2023-08-08T00:00:00Z'), 'x')`, {});
+    expect(out.length).toBe(2);
+  });
+});
+
 // Review finding B1: a RECORD select (>1 distinct label) whose property label is read at
 // Pop.all must frame each member as a real VertexProperty, exactly like the single-label
 // path. The record path formerly reused the scalar `historyValues` (->> text extraction),
