@@ -1,7 +1,7 @@
 import { q, value, list, Query, type Expression } from '../../sql/kernel/q.ts';
 import { nodes, edges } from '../../sql/schema.ts';
 import { type Elem } from '../plan/plan.ts';
-import { stepChain, flattenListArgs } from '../../gremlin/frontend.ts';
+import { isNested, stepChain, flattenListArgs } from '../../gremlin/frontend.ts';
 import { type PStep } from '../ir/strategies.ts';
 import { analyze, type ChainFacts } from '../ir/analyze.ts';
 import { withCarried, type Carry, type ElementStream, type StepFn } from '../steps/context/context.ts';
@@ -222,7 +222,7 @@ export class LoweringEngine implements Engine {
     const query = this.q;
     if (sackInit) throw new Error('withSack() with a union() source not yet supported');
     if (wantsEncounter) throw new Error('emission-order encounter over a union() source not yet supported');
-    const branches = first.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+    const branches = first.args.filter(isNested);
     if (branches.length < 1) throw new Error('union() needs at least one branch');
     const rels = branches.map((b: any) => {
       const bsteps = stepChain(b.nested, params);

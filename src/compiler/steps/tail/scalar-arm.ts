@@ -21,6 +21,7 @@
 // child.ts <-> projection.ts already is (every reference is inside a function body, never at
 // module top level), so it is resolution-safe.
 
+import { isNested } from '../../../gremlin/frontend.ts';
 import { empty, list, paren, q, value, type Expression } from '../../../sql/kernel/q.ts';
 import { carriedCols, carriedWith, carryFrag, type ElementStream } from '../context/context.ts';
 import { carryOf, toScalarStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
@@ -84,7 +85,7 @@ const scalarArmLeafOk = (s: PStep): boolean =>
 
 function scalarBranchArm(body: PStep[], params: Record<string, any>): boolean {
   return body.length > 0 && body.every((s) => {
-    const kids = (s.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+    const kids = (s.args ?? []).filter(isNested);
     // The filter family lowers via lowerScalarFilter, which requires a nested traversal —
     // the predicate-P form (where(gt(5))) throws, so require kids and recurse into each so
     // an unsupported nested body defers here rather than throwing mid-lowering.
@@ -159,7 +160,7 @@ function armFansOut(body: PStep[], params: Record<string, any>): boolean {
   if (isResourceHead(body)) return true;
   return body.some((s) => {
     if (s.name === 'union') return true;
-    const kids = (s.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+    const kids = (s.args ?? []).filter(isNested);
     return SCALAR_ARM_BRANCH.has(s.name) && kids.some((a: any) => armFansOut(childSteps(a.nested, params), params));
   });
 }
@@ -273,7 +274,7 @@ function buildScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): Sca
 export function tryScalarChooseChild(s: ScalarStream, step: PStep): ScalarStream | null {
   if (step.options) return null; // option-map form is a later stage (modulator consumer)
   const args = step.args ?? [];
-  const nested = args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  const nested = args.filter(isNested);
   const predIsTraversal = args[0] && typeof args[0] === 'object' && 'nested' in args[0];
   const [thenArg, elseArg] = predIsTraversal ? nested.slice(1) : nested;
   if (!thenArg) return null;
@@ -297,7 +298,7 @@ export function tryScalarChooseChild(s: ScalarStream, step: PStep): ScalarStream
 /** union(a, b, …) over a scalar: every arm consumes the whole value stream; UNION ALL
  *  concatenates their productive rows (multiset-faithful, so a value can appear per arm). */
 export function tryScalarUnionChild(s: ScalarStream, step: PStep): ScalarStream | null {
-  const branches = (step.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  const branches = (step.args ?? []).filter(isNested);
   if (branches.length < 2) return null;
   const arms: ScalarStream[] = [];
   for (const b of branches) {
@@ -313,7 +314,7 @@ export function tryScalarUnionChild(s: ScalarStream, step: PStep): ScalarStream 
  *  arm body's gate boolean (buildScalarGate — inline over `v`, or a correlated EXISTS when the
  *  switch is off / the body is beyond the inline vocabulary). All arms share ONE gate/scope. */
 export function tryScalarCoalesceChild(s: ScalarStream, step: PStep): ScalarStream | null {
-  const branches = (step.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  const branches = (step.args ?? []).filter(isNested);
   if (branches.length < 1) return null;
   const bodies = branches.map((b: any) => childSteps(b.nested, s.params));
   // Classify-then-emit: every arm must lower before the shared gate commits its CTEs.
@@ -397,7 +398,7 @@ function compileScalarVariantArm(seed: ScalarStream, nested: any): VariantArm {
  *  any arm is unclassifiable, or under carried path/sack/fromV (fork/merge unworked). */
 export function tryScalarVariantUnion(s: ScalarStream, step: PStep): VariantStream | null {
   if (s.carried.path || s.carried.sack || s.carried.fromV) return null;
-  const branches = (step.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  const branches = (step.args ?? []).filter(isNested);
   if (branches.length < 2) return null;
   const shapes = branches.map((b: any) => scalarArmShape(b.nested, s.params));
   if (shapes.some((x) => x === null) || shapes.every((x) => x === shapes[0])) return null;
@@ -414,7 +415,7 @@ export function tryScalarVariantChoose(s: ScalarStream, step: PStep): VariantStr
   if (step.options) return null; // option-map form is the modulation seam
   if (s.carried.path || s.carried.sack || s.carried.fromV) return null;
   const args = step.args ?? [];
-  const nested = args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  const nested = args.filter(isNested);
   const predIsTraversal = args[0] && typeof args[0] === 'object' && 'nested' in args[0];
   const [thenArg, elseArg] = predIsTraversal ? nested.slice(1) : nested;
   if (!thenArg || !elseArg) return null; // 2-arg (identity else) is not a mixed pair here
@@ -437,7 +438,7 @@ export function tryScalarVariantChoose(s: ScalarStream, step: PStep): VariantStr
  *  homogeneous arms (tryScalarCoalesceChild owns those) or an unclassifiable arm. */
 export function tryScalarVariantCoalesce(s: ScalarStream, step: PStep): VariantStream | null {
   if (s.carried.path || s.carried.sack || s.carried.fromV) return null;
-  const branches = (step.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  const branches = (step.args ?? []).filter(isNested);
   if (!branches.length) return null;
   const shapes = branches.map((b: any) => scalarArmShape(b.nested, s.params));
   if (shapes.some((x) => x === null) || shapes.every((x) => x === shapes[0])) return null;
@@ -517,7 +518,7 @@ export function tryScalarVariantOptional(s: ScalarStream, step: PStep): VariantS
  * predicate-P form (which has no traversal child — that path is inline-only).
  */
 export function tryScalarFilterByChildExistence(s: ScalarStream, step: PStep): ScalarStream | null {
-  const nested = (step.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  const nested = (step.args ?? []).filter(isNested);
   if (!nested.length) return null;
   const { scope, frame, seed } = pushChildScope(s);
   const d = frame.domain.as('d');

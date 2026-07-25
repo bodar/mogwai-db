@@ -1,5 +1,5 @@
 import { derived, empty, list, paren, q, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { stepChain } from '../../../gremlin/frontend.ts';
+import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
 import { advance, carriedWith, carryFrag, carryFragMint, carriedCols, partitionOver, type Carried, type ElementStream } from '../context/context.ts';
 import { aliasId } from '../context/alias.ts';
@@ -237,7 +237,7 @@ function applyScalarChildCardinality(
 export function isResourceHead(rest: PStep[]): boolean {
   const head = rest[0];
   return !!head && (head.name === 'V' || head.name === 'E')
-    && !(head.args ?? []).some((a: any) => a && typeof a === 'object' && 'nested' in a);
+    && !(head.args ?? []).some(isNested);
 }
 
 /** Re-source a scalar seed (`V()`/`E()`) then fold the element movement/filter remainder,

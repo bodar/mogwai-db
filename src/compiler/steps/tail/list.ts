@@ -7,7 +7,7 @@
 
 import { q, value, raw, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { predicateSql, scalarTx, compareKey } from '../../plan/plan.ts';
-import { stepChain } from '../../../gremlin/frontend.ts';
+import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, mapOfToListOf, PROPERTY_PAYLOAD, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type PropertyStream, type ScalarStream, type MapStream, type ShapeTailFn } from '../context/stream.ts';
 import { carryFrag, carriedCols, type ElementStream } from '../context/context.ts';
@@ -184,7 +184,7 @@ function listLocalTransform(s: ListStream, step: PStep): ListStream {
     // by(Order.desc/asc) flips it; a by(key)/by(traversal)/shuffle defers.
     let desc = false;
     for (const by of step.bys ?? []) {
-      if (by.some((a: any) => typeof a === 'string' || (a && typeof a === 'object' && 'nested' in a)))
+      if (by.some((a: any) => typeof a === 'string' || (isNested(a))))
         throw new Error('order(Scope.local).by(key/traversal) not yet supported');
       const ord = by.find((a: any) => a && typeof a === 'object' && 'order' in a);
       if (ord?.order === 'shuffle') throw new Error('order(Scope.local) shuffle not yet supported');

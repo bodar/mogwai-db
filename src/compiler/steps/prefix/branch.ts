@@ -1,6 +1,6 @@
 import { q, list, empty, value, raw, Relation, type Expression } from '../../../sql/kernel/q.ts';
 import { edges } from '../../../sql/schema.ts';
-import { stepChain, type Step } from '../../../gremlin/frontend.ts';
+import { isNested, stepChain, type Step } from '../../../gremlin/frontend.ts';
 import { foldByModulators } from '../../ir/strategies.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem } from '../../plan/plan.ts';
 import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
@@ -204,7 +204,7 @@ function finishElementMerge(st: ElementStream, out: Carried, parts: Expression[]
  *  branch (1b) still defers. */
 export const union: StepFn = (s, st) => {
   assertForkSafe('union', st);
-  const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  const branches = s.args.filter(isNested);
   if (branches.length < 2) throw new Error('union() needs at least two branches');
   const ends = branches.map((b) => tryCompileElementTraversal(st, b.nested)
     ?? (() => { throw new Error(`union() branch __.${armDescription(b.nested, st.params)} not yet supported (scalar/projection body)`); })());
@@ -221,7 +221,7 @@ export const union: StepFn = (s, st) => {
  * element union emits its existing fail-closed mixed-shape error. */
 export function tryLowerScalarUnion(s: Step, st: ElementStream): ScalarStream | null {
   assertForkSafe('union', st);
-  const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  const branches = s.args.filter(isNested);
   if (branches.length < 2) throw new Error('union() needs at least two branches');
   const arms: ScalarStream[] = [];
   for (const branch of branches) {
@@ -235,7 +235,7 @@ export function tryLowerScalarUnion(s: Step, st: ElementStream): ScalarStream | 
 
 export function tryLowerListUnion(s: Step, st: ElementStream): ListStream | null {
   assertForkSafe('union', st);
-  const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  const branches = s.args.filter(isNested);
   if (branches.length < 2) return null;
   // classify every arm once (pure, no CTE); emit only if ALL qualify, reusing each parsed
   // body — so a partly-list union never emits arm0's CTEs before a later arm disqualifies.
@@ -328,7 +328,7 @@ export function tryLowerVariantOptional(s: Step, st: ElementStream): VariantStre
  *  branches only; scalar-body defers. Nests inside coalesce/optional (unique ordinal per depth). */
 export const coalesce: StepFn = (s, st) => {
   assertForkSafe('coalesce', st);
-  const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  const branches = s.args.filter(isNested);
   if (branches.length < 1) throw new Error('coalesce() needs at least one branch');
   const { seedSt, ord } = originSeed(st); // unique ordinal — nests inside optional/coalesce
   const ends = branches.map((b) => tryCompileElementTraversal(seedSt, b.nested)
@@ -352,7 +352,7 @@ export const coalesce: StepFn = (s, st) => {
  * internal ordinal is removed at the merge boundary while outer carried state stays. */
 export function tryLowerScalarCoalesce(s: Step, st: ElementStream): ScalarStream | null {
   assertForkSafe('coalesce', st);
-  const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  const branches = s.args.filter(isNested);
   if (!branches.length) return null;
   const plans = branches.map((b) => classifyScalarChild(b.nested, st.params));
   if (plans.some((p) => !p)) return null;
@@ -366,7 +366,7 @@ export function tryLowerScalarCoalesce(s: Step, st: ElementStream): ScalarStream
 
 export function tryLowerListCoalesce(s: Step, st: ElementStream): ListStream | null {
   assertForkSafe('coalesce', st);
-  const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  const branches = s.args.filter(isNested);
   if (!branches.length) return null;
   const plans = branches.map((b) => classifyListChild(b.nested, st.params));
   if (plans.some((p) => !p)) return null;
@@ -415,7 +415,7 @@ function branchesAreMixed(branches: readonly any[], params: Record<string, any>)
 /** union() over mixed-shape arms → a VariantStream (plain UNION ALL, no gating). */
 export function tryLowerVariantUnion(s: Step, st: ElementStream): VariantStream | null {
   assertForkSafe('union', st);
-  const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  const branches = s.args.filter(isNested);
   if (branches.length < 2 || !branchesAreMixed(branches, st.params)) return null;
   if (st.carried.path) throw new Error('path() through a mixed-shape union() not yet supported');
   const arms = branches.map((b) => compileVariantArm(st, b.nested));
@@ -426,7 +426,7 @@ export function tryLowerVariantUnion(s: Step, st: ElementStream): VariantStream 
  *  every arm; arm k emits only for parents no earlier arm produced a row for. */
 export function tryLowerVariantCoalesce(s: Step, st: ElementStream): VariantStream | null {
   assertForkSafe('coalesce', st);
-  const branches = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  const branches = s.args.filter(isNested);
   if (!branches.length || !branchesAreMixed(branches, st.params)) return null;
   if (st.carried.path) throw new Error('path() through a mixed-shape coalesce() not yet supported');
   const { seedSt, ord } = originSeed(st);
@@ -440,7 +440,7 @@ export function tryLowerVariantCoalesce(s: Step, st: ElementStream): VariantStre
 export function tryLowerVariantChoose(s: Step, st: ElementStream): VariantStream | null {
   if ((s as any).options) return null;
   assertForkSafe('choose', st);
-  const args = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  const args = s.args.filter(isNested);
   if (args.length !== 3) return null; // two-arg choose has an element identity else arm
   const [predArg, thenArg, elseArg] = args;
   const thenShape = armShape(thenArg.nested, st.params);
@@ -501,7 +501,7 @@ export function repeatSackByValue(byArgs: any[] | undefined, curId: Expression, 
     if (a.token === 'id') return curId;
     throw new Error(`sack().by(T.${a.token}) in a repeat() body not yet supported`);
   }
-  if (a && typeof a === 'object' && 'nested' in a) {
+  if (isNested(a)) {
     // A constant by() folds a fixed step (decay factor, per-hop increment); anything that
     // reads the graph and could fan out can't live in a single flat recursive SELECT.
     const inner = stepChain(a.nested, {});
@@ -873,7 +873,7 @@ function gate(st: ElementStream, test: Expression): ElementStream {
  */
 export const choose: StepFn = (s, st) => {
   assertForkSafe('choose', st);
-  const args = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  const args = s.args.filter(isNested);
   if (args.length < 2 || args.length > 3)
     throw new Error('choose(): only the predicate form choose(pred, then[, else]) is supported (option-map form not yet supported)');
   const [predArg, thenArg, elseArg] = args;
@@ -907,7 +907,7 @@ export const choose: StepFn = (s, st) => {
 export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream | null {
   if ((s as any).options) return null;
   assertForkSafe('choose', st);
-  const args = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  const args = s.args.filter(isNested);
   if (args.length !== 3) return null; // two-arg choose has an element identity else arm
   const [predArg, thenArg, elseArg] = args;
   const thenPlan = classifyScalarChild(thenArg.nested, st.params);
@@ -925,7 +925,7 @@ export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream |
 export function tryLowerListChoose(s: Step, st: ElementStream): ListStream | null {
   if ((s as any).options) return null;
   assertForkSafe('choose', st);
-  const args = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  const args = s.args.filter(isNested);
   if (args.length !== 3) return null;
   const [predArg, thenArg, elseArg] = args;
   const thenPlan = classifyListChild(thenArg.nested, st.params);

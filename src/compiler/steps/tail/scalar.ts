@@ -1,6 +1,6 @@
 import { derived, empty, list, paren, q, raw, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx } from '../../plan/plan.ts';
-import { stepChain } from '../../../gremlin/frontend.ts';
+import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, withoutCarried, type Carry } from '../context/context.ts';
 import { carryOf, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
@@ -324,7 +324,7 @@ export function tryInlineScalarPredicate(body: PStep[], current: Expression, par
   // transform or constant() changes the value's type, so the stored vtype no longer applies.
   let vtype = vtypeExpr;
   const preds: Expression[] = [];
-  const nestedOf = (s: PStep) => s.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  const nestedOf = (s: PStep) => s.args.filter(isNested);
   for (const s of body) {
     if (s.name === 'is') { preds.push(predicateSql(expr, s.args[0], vtype ? { vtypeExpr: vtype } : undefined)); continue; }
     if (s.name === 'identity') continue;                 // always productive, no rebind
@@ -384,7 +384,7 @@ export function lowerScalarFilter(s: ScalarStream, step: PStep): ScalarStream | 
   const p = s.rel.as('p');
   const cur = p.c.v;
   const vt = s.vtype ? p.c[s.vtype] : undefined; // per-row stored type → vtype-aware predicates
-  const nested = step.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  const nested = step.args.filter(isNested);
   // where(P)/filter(P): a predicate directly on the value — no traversal child, always inline.
   if ((step.name === 'where' || step.name === 'filter') && !nested.length) {
     const pred = step.args.find((a: any) => a && typeof a === 'object' && 'op' in a);

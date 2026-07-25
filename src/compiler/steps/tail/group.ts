@@ -4,7 +4,7 @@ import {
   scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps,
   storedValueExpr, bareValueMapProps, typedScalarNode, compareKey, type ScalarCtx,
 } from '../../plan/plan.ts';
-import { stepChain } from '../../../gremlin/frontend.ts';
+import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { isMapLocalOrder } from './list.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, partitionOver, withoutCarried, type Carry, type ElementStream } from '../context/context.ts';
@@ -194,7 +194,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   // element-parent-only — a property has no adjacency to collect.
   const isProp = parent.kind === 'property';
   const pk = isProp ? 'property' : 'element';
-  const isByArg = (a: any) => a && typeof a === 'object' && 'nested' in a;
+  const isByArg = (a: any) => isNested(a);
   // Shape gates classify the NORMALIZED child body — the exact body tryCompile* compiles —
   // so gating and emit share ONE parse (the body is threaded into emit as preParsed) and
   // the old is*Child re-parse is gone. Raw stepChain still drives STRUCTURE detection
@@ -727,7 +727,7 @@ function propertyOrder(s: PropertyStream, step: PStep): PropertyStream {
   if (bys.length > 1) throw new Error('properties().order() supports at most one by() modulator');
   const by = bys[0] ?? [];
   const token = by.find((a: any) => a && typeof a === 'object' && 'token' in a)?.token;
-  const nested = by.find((a: any) => a && typeof a === 'object' && 'nested' in a)?.nested;
+  const nested = by.find(isNested)?.nested;
   if (nested) {
     const dir = by.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
     if (dir === 'shuffle') throw new Error('properties().order().by(shuffle) not yet supported');

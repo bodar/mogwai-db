@@ -18,7 +18,7 @@
 // in child.ts.
 
 import type { Relation } from '../../../sql/kernel/q.ts';
-import { stepChain } from '../../../gremlin/frontend.ts';
+import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import type { Carried, ElementStream } from '../context/context.ts';
 import type { PropertyStream, ScalarStream, Stream } from '../context/stream.ts';
 import { type PStep } from '../../ir/strategies.ts';
@@ -235,7 +235,7 @@ export function elementScalarBranchArm(body: ReturnType<typeof stepChain>, param
   if (suffix.some((s) => !CHILD_SCALAR_ROW_STEPS.has(s.name))) return false;
   if (branch.name === 'choose' && (branch as PStep).options)
     return elementOptionMapScalarBranch(branch as PStep, params);
-  const kids = (branch.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  const kids = (branch.args ?? []).filter(isNested);
   if (branch.name === 'choose') {
     // predicate-form choose(pred, then, else): only the two value arms must be scalar (the
     // predicate is a gate). Other arities defer to tryLowerScalarChoose's own decline.
@@ -453,7 +453,7 @@ export interface BranchArms {
  *  error message (fail closed, one authority). */
 function branchValueArgs(kind: BranchKind, step: PStep): readonly any[] | null {
   if (kind === 'choose' && (step as any).options) return null; // option-map form: a tail CASE projector
-  const nested = (step.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  const nested = (step.args ?? []).filter(isNested);
   if (kind === 'union') return nested.length >= 2 ? nested : null;
   if (kind === 'coalesce') return nested.length >= 1 ? nested : null;
   if (kind === 'choose') return nested.length === 3 ? nested.slice(1) : null; // drop the predicate
@@ -534,7 +534,7 @@ export type ByClass =
  *  triage every by()-consuming host shares — no host should re-scan `byArgs` inline. */
 export function classifyBy(byArgs: readonly any[] | undefined): ByClass {
   const dir = byArgs?.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order as ByDirection | undefined;
-  const nested = byArgs?.find((a: any) => a && typeof a === 'object' && 'nested' in a);
+  const nested = byArgs?.find(isNested);
   if (nested) return { kind: 'nested', nested: nested.nested, dir };
   const token = byArgs?.find((a: any) => a && typeof a === 'object' && 'token' in a);
   if (token) return { kind: 'token', token: token.token, dir };

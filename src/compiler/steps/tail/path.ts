@@ -1,3 +1,4 @@
+import { isNested } from '../../../gremlin/frontend.ts';
 import { q, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { nodes, edges, labels } from '../../../sql/schema.ts';
 import { framedProps, labelNameSub, nodePropScalar, edgePropScalar, predicateSql, extIdOf, elemCtx, type Elem } from '../../plan/plan.ts';
@@ -59,7 +60,7 @@ function positionArmFansOut(body: PStep[], params: Record<string, any>): boolean
   return body.some((s) => {
     if (POSITION_MOVEMENTS.has(s.name) || s.name === 'V' || s.name === 'E' || s.name === 'union') return true;
     if ((s.name === 'choose' || s.name === 'coalesce') && !(s as any).options) {
-      const kids = (s.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+      const kids = (s.args ?? []).filter(isNested);
       // choose(pred, then, else): the predicate (kids[0]) gates, only then/else can fan out.
       const arms = s.name === 'choose' && kids.length === 3 ? kids.slice(1) : kids;
       return arms.some((a: any) => positionArmFansOut(childSteps(a.nested, params), params));

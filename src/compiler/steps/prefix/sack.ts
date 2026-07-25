@@ -1,3 +1,4 @@
+import { isNested } from '../../../gremlin/frontend.ts';
 import { derived, q, list, type Expression } from '../../../sql/kernel/q.ts';
 import { scalarProp, labelNameSub, predicateSql, elemCtx } from '../../plan/plan.ts';
 import { advance, elemRel, prevRel, carriedCols, type ElementStream, type StepFn } from '../context/context.ts';
@@ -29,7 +30,7 @@ function sackByValue(byArgs: any[] | undefined, st: ElementStream): Expression {
     if (a.token === 'id') return ctx.idExpr;
     throw new Error(`sack().by(T.${a.token}) not yet supported`);
   }
-  if (a && typeof a === 'object' && 'nested' in a)
+  if (isNested(a))
     throw new Error('sack().by(traversal) not supported by generic scalar child lowering');
   throw new Error('unsupported sack().by() modulator');
 }
@@ -53,7 +54,7 @@ export const sack: StepFn = (s, st) => {
 
   const combine = (byVal: Expression, oldSack: Expression | null): Expression => combineSack(op, byVal, oldSack);
 
-  const nested = bys[0]?.find((a: any) => a && typeof a === 'object' && 'nested' in a);
+  const nested = bys[0]?.find(isNested);
   if (nested) {
     const rows = tryCompileScalarValueRows(st, nested.nested);
     if (rows) {
