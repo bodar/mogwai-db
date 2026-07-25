@@ -1,5 +1,5 @@
 import type { Service, ServiceCallCtx } from '../spi/types.ts';
-import { scopedMovementCount } from '../../steps/tail/child.ts';
+import { scopedMovementCount } from '../../compiler/steps/tail/child.ts';
 
 // ---------- tinker.degree.centrality — per-vertex edge count (pure, Streaming) ----------
 //

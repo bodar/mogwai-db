@@ -1,6 +1,6 @@
 # src/compiler — architecture
 
-_Scope: `src/compiler/**`. The lowering surface it dispatches to is `src/steps/CLAUDE.md`; the SQL
+_Scope: `src/compiler/**`. The lowering surface it dispatches to is `src/compiler/steps/CLAUDE.md`; the SQL
 kernel is `src/sql/CLAUDE.md`. Root `CLAUDE.md` holds cross-cutting rules._
 
 `compile()` = `parse → runPasses → analyze → dispatch`. Detailed rationale:

@@ -3,7 +3,7 @@ import { type TypeNode } from '../gremlin/types.ts';
 import { runPasses } from './ir/passes.ts';
 import { LoweringEngine, collapseSafeFastPaths } from './engine/engine.ts';
 import { analyze } from './ir/analyze.ts';
-import { routeWrite } from '../steps/write/write.ts';
+import { routeWrite } from './steps/write/write.ts';
 import { type Compiled, type WritePlan } from '../sql/kernel/render.ts';
 import { type Plan } from './segment.ts';
 import { resolveFastPaths, resolveRegistry, resolveFederationDepth, type CompileOptions } from './options/fast-paths.ts';

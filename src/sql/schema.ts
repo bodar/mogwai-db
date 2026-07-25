@@ -5,7 +5,7 @@
 // object everywhere (`nodes.c.id`, not the string 'n.id'). Rename in one place;
 // typos are compile errors; find-references works. Generated CTEs use the SAME
 // Relation shape (minted via `Query`), so a table and a CTE are indistinguishable
-// at the use site — see src/q.ts.
+// at the use site — see src/sql/kernel/q.ts.
 
 import { relation } from './kernel/q.ts';
 

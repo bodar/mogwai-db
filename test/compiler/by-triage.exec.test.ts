@@ -1,11 +1,11 @@
-// classifyBy / byAt (src/steps/tail/child-shape.ts): the ONE pure by()-modulator argument
+// classifyBy / byAt (src/compiler/steps/tail/child-shape.ts): the ONE pure by()-modulator argument
 // triage every host (group/select/project/path/math/format/order/dedup/aggregate) shares.
 // These lock the closed-set shape mapping + the round-robin accessor so the ~9 former inline
 // copies cannot drift once they route through here.
 import { test, expect, describe } from 'bun:test';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import { normalize } from '../../src/compiler/ir/passes.ts';
-import { classifyBy, byAt, classifyByAt } from '../../src/steps/tail/child-shape.ts';
+import { classifyBy, byAt, classifyByAt } from '../../src/compiler/steps/tail/child-shape.ts';
 
 /** Normalize a traversal and return the folded `.bys` of its first host step carrying them
  *  (order/group/select/project/dedup — whichever appears). */

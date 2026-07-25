@@ -27,8 +27,8 @@ import type { PStep } from '../ir/strategies.ts';
 import type { ChainFacts } from '../ir/analyze.ts';
 import type { Compiled } from '../../sql/kernel/render.ts';
 import type { SegmentPlan } from '../segment.ts';
-import type { Carry, ElementStream } from '../../steps/context/context.ts';
-import type { Stream, LoweringSuspension } from '../../steps/context/stream.ts';
+import type { Carry, ElementStream } from '../steps/context/context.ts';
+import type { Stream, LoweringSuspension } from '../steps/context/stream.ts';
 
 /** The lowering engine: the recursive-traversal authority (dispatcher + prefix fold + shaped
  *  lowering loop) plus the ambient compile dependencies. Built per-compile from a CompilerScope

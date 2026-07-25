@@ -38,7 +38,7 @@ const SEEDS: Record<string, string[]> = {
   // ggrateful (808 v / 8049 e): now seeded. Its blocker was the whole-graph
   // `repeat(out()).times(N).count()` scenarios whose answers are astronomically large
   // (times(8) → 2.5e15); mogwai used to materialize each traverser as a UNION-ALL row
-  // and would hang building quadrillions of rows. TRAVERSER BULKING (src/steps/bulk.ts,
+  // and would hang building quadrillions of rows. TRAVERSER BULKING (src/compiler/steps/tail/bulk.ts,
   // docs/2026-07-14-traverser-bulking.md) compiles those to unrolled GROUP-BY-SUM(bulk)
   // CTEs — times(8).count() now returns 2505037961767380 in ~10ms. Every other grateful
   // scenario either works, or fails closed at compile with a clear "not yet supported"

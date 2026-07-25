@@ -4,32 +4,32 @@ import { type Elem } from '../plan/plan.ts';
 import { stepChain, flattenListArgs } from '../../gremlin/frontend.ts';
 import { type PStep } from '../ir/strategies.ts';
 import { analyze, type ChainFacts } from '../ir/analyze.ts';
-import { withCarried, type Carry, type ElementStream, type StepFn } from '../../steps/context/context.ts';
-import { move, toEdge, toVertex, otherV } from '../../steps/prefix/movement.ts';
-import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from '../../steps/prefix/filter.ts';
-import { union, optional, repeat, choose, coalesce } from '../../steps/prefix/branch.ts';
-import { isElementChild, isListChild, isScalarChild } from '../../steps/tail/child-shape.ts';
-import { match } from '../../steps/prefix/match.ts';
-import { identity, limit, range, skip } from '../../steps/prefix/passthrough.ts';
-import { sack } from '../../steps/prefix/sack.ts';
-import { aggregate, group as groupSE, groupCount as groupCountSE } from '../../steps/prefix/sideeffect.ts';
+import { withCarried, type Carry, type ElementStream, type StepFn } from '../steps/context/context.ts';
+import { move, toEdge, toVertex, otherV } from '../steps/prefix/movement.ts';
+import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from '../steps/prefix/filter.ts';
+import { union, optional, repeat, choose, coalesce } from '../steps/prefix/branch.ts';
+import { isElementChild, isListChild, isScalarChild } from '../steps/tail/child-shape.ts';
+import { match } from '../steps/prefix/match.ts';
+import { identity, limit, range, skip } from '../steps/prefix/passthrough.ts';
+import { sack } from '../steps/prefix/sack.ts';
+import { aggregate, group as groupSE, groupCount as groupCountSE } from '../steps/prefix/sideeffect.ts';
 import { type SackSpec } from '../../gremlin/frontend.ts';
-import { compileTail, compileFromScalar } from '../../steps/tail/projection.ts';
-import { compileFromGroup, compileFromProperty } from '../../steps/tail/group.ts';
-import { compileFromList, compileFromMap, compileFromMapEntry } from '../../steps/tail/list.ts';
-import { compileFromRecord, selectRecordFromAlias } from '../../steps/tail/select.ts';
-import { compileFromPath } from '../../steps/tail/path.ts';
-import { asOnStream, selectOneFromAlias } from '../../steps/tail/labelselect.ts';
-import { assertStreamColumns, continueLowering, isSuspension, type LoweringResult, type LoweringSuspension, type Stream } from '../../steps/context/stream.ts';
+import { compileTail, compileFromScalar } from '../steps/tail/projection.ts';
+import { compileFromGroup, compileFromProperty } from '../steps/tail/group.ts';
+import { compileFromList, compileFromMap, compileFromMapEntry } from '../steps/tail/list.ts';
+import { compileFromRecord, selectRecordFromAlias } from '../steps/tail/select.ts';
+import { compileFromPath } from '../steps/tail/path.ts';
+import { asOnStream, selectOneFromAlias } from '../steps/tail/labelselect.ts';
+import { assertStreamColumns, continueLowering, isSuspension, type LoweringResult, type LoweringSuspension, type Stream } from '../steps/context/stream.ts';
 import { type Compiled } from '../../sql/kernel/render.ts';
-import { BulkRepeatCountFastPath } from '../../steps/tail/bulk.ts';
+import { BulkRepeatCountFastPath } from '../steps/tail/bulk.ts';
 import { runFastPath, fastPathContext, type FastPathConfig } from '../options/fast-paths.ts';
 import type { ServiceRegistry } from '../../services/spi/types.ts';
-import { lowerScalarRows } from '../../steps/tail/scalar.ts';
-import { seedCall, isBarrierPoint, type BarrierPoint, type MidBarrierPoint } from '../../steps/tail/call.ts';
-import { materializeFinal } from '../../steps/tail/materialize.ts';
-import { compileFromVariant } from '../../steps/tail/variant.ts';
-import { compileFromForeign, landForeignElements, resumeMidBarrier } from '../../steps/tail/foreign.ts';
+import { lowerScalarRows } from '../steps/tail/scalar.ts';
+import { seedCall, isBarrierPoint, type BarrierPoint, type MidBarrierPoint } from '../steps/tail/call.ts';
+import { materializeFinal } from '../steps/tail/materialize.ts';
+import { compileFromVariant } from '../steps/tail/variant.ts';
+import { compileFromForeign, landForeignElements, resumeMidBarrier } from '../steps/tail/foreign.ts';
 import type { SegmentPlan } from '../segment.ts';
 import type { ForeignRow } from '../../services/spi/types.ts';
 import type { AppScope, CompilerScope } from '../../scopes.ts';
@@ -473,7 +473,7 @@ export class LoweringEngine implements Engine {
     // Traverser bulking: a `repeat(...).times(n).count()` (path/as/sack-free) compiles to
     // unrolled GROUP-BY-SUM(bulk) CTEs instead of an enumerate-every-walk recursion, so a
     // dense/deep count (grateful times(8) ≈ 2.5e15 walks) stays tractable. Null → not the
-    // bulkable shape; fall through to the normal fold. See steps/bulk.ts.
+    // bulkable shape; fall through to the normal fold. See steps/tail/bulk.ts.
     const bulked = runFastPath(BulkRepeatCountFastPath, fastPathContext(this.fastPaths), this, steps, params, sackInit);
     if (bulked) return bulked;
 
