@@ -1,5 +1,5 @@
 import { q, list, paren, value, raw, type Expression } from '../../../sql/kernel/q.ts';
-import { stepChain, type Step } from '../../../gremlin/frontend.ts';
+import { isNested, stepChain, type Step } from '../../../gremlin/frontend.ts';
 import { edgeProperties } from '../../../sql/schema.ts';
 import {
   predicateSql, labelIn, hasProp, idPredFromArgs, labelNameSub, aliasCtx,
@@ -150,7 +150,7 @@ export function tryInlinePredicate(
  *  higher-precedence connectors. Null when the body has no infix connector. */
 function splitInfixConnectors(steps: Step[]): { op: 'AND' | 'OR'; segments: Step[][] } | null {
   const isConn = (s: Step, n: string) => s.name === n
-    && !s.args.some((a: any) => a && typeof a === 'object' && 'nested' in a);
+    && !s.args.some(isNested);
   const op: 'AND' | 'OR' = steps.some((s) => isConn(s, 'or')) ? 'OR'
     : steps.some((s) => isConn(s, 'and')) ? 'AND' : (null as any);
   if (op === null) return null;
@@ -258,7 +258,7 @@ function compileInlinePredicate(
 
   // where(__.not(t)) — negate an inner predicate; a NULL (missing) is kept (NOT COALESCE).
   if (head === 'not' && body.length === 1) {
-    const arg = body[0].args.find((a: any) => a && typeof a === 'object' && 'nested' in a);
+    const arg = body[0].args.find(isNested);
     if (!arg) throw new Error('not() requires a traversal');
     const inner = compileInlinePredicate(engine, stepChain(arg.nested, params), ctx, params, resolveAlias);
     return q`NOT COALESCE((${inner}), 0)`;
@@ -284,7 +284,7 @@ export function combineBranchPreds(
   engine: Engine, step: Step, ctx: ScalarCtx, params: Record<string, any>, op: 'AND' | 'OR',
   resolveAlias?: (label: string) => ScalarCtx,
 ): Expression | null {
-  const branches = step.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  const branches = step.args.filter(isNested);
   if (branches.length < 2) throw new Error(`${step.name}() needs at least two traversal branches`);
   const parts: Expression[] = [];
   for (const b of branches) {

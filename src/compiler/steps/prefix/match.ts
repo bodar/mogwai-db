@@ -1,5 +1,5 @@
 import { q, list, empty, type Expression } from '../../../sql/kernel/q.ts';
-import { stepChain, type Step } from '../../../gremlin/frontend.ts';
+import { isNested, stepChain, type Step } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { advance, aliasColsOf, prevRel, type AliasEntry, type ElementStream, type StepFn } from '../context/context.ts';
@@ -81,7 +81,7 @@ function applyPattern(st: ElementStream, p: Pattern, aliases: Map<string, AliasE
 export const match: StepFn = (s, st) => {
   if (st.elem !== 'node') throw new Error('match() on edges not yet supported');
   if (st.carried.path) throw new Error('path tracking through match() not yet supported');
-  const patArgs = s.args.filter((a) => a && typeof a === 'object' && 'nested' in a);
+  const patArgs = s.args.filter(isNested);
   if (!patArgs.length) throw new Error('match() needs at least one pattern');
   const pats = patArgs.map((a) => parsePattern(stepChain(a.nested, st.params)));
 

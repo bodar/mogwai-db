@@ -1,3 +1,4 @@
+import { isNested } from '../../../gremlin/frontend.ts';
 import { type Query } from '../../../sql/kernel/q.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { type Stream, type LoweringResult, continueLowering, suspendLowering } from '../context/stream.ts';
@@ -148,7 +149,7 @@ export function lowerCall(step: PStep, parent: ElementStream, scope: CompileScop
   // no-injection (Cartesian) run, which would answer a different question.
   const rawArgs = step.args.slice(1);
   const hasMap = rawArgs.some((a: any) => a instanceof Map);
-  const thirdTrav = hasMap && rawArgs.some((a: any) => a && typeof a === 'object' && 'nested' in a);
+  const thirdTrav = hasMap && rawArgs.some(isNested);
   if (thirdTrav && !injection)
     throw new Error(`call("${spec.serviceName}"): injection must be a direct value read — __.values(key), __.id(), or __.label()`);
   const { head, frame } = buildCallHead(parent, scope, spec.injectionTraversal);

@@ -1,5 +1,5 @@
 import { derived, q, list, raw, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { stepChain, type Pred } from '../../../gremlin/frontend.ts';
+import { isNested, stepChain, type Pred } from '../../../gremlin/frontend.ts';
 import {
   P_OPS, labelIn, predicateSql, nodePropScalar, hasProp, elemCtx, aliasCtx,
   idPredFromArgs, scalarProp, labelNameSub, FtsSubstringFastPath, type Elem, type ScalarCtx,
@@ -215,7 +215,7 @@ export const where: StepFn = (s, st) => {
  *  shared-domain child-existence combiner — same result, no support-definer. */
 export const andOr: StepFn = (s, st) => {
   const op = s.name === 'and' ? 'AND' : 'OR';
-  const branches = s.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  const branches = s.args.filter(isNested);
   const pred = runFastPath(PredicateInliningFastPath, fastPathContextOf(st),
     () => combineBranchPreds(engineOf(st), s, currentCtx(st), st.params, op, aliasResolver(st)));
   if (pred) return filterCte(st, pred);

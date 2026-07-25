@@ -2,7 +2,7 @@ import { q, list, empty, value, type Expression, type Relation } from '../../../
 import { nodes, edges, labels } from '../../../sql/schema.ts';
 import { framedProps, labelNameSub, nodePropScalar, edgePropScalar, edgePropsAgg, predicateSql, propExtract, extIdOf, P_OPS } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { stepChain } from '../../../gremlin/frontend.ts';
+import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { aliasElem, aliasIsElement, carryFrag, carriedCols, type AliasMap, type ElementStream } from '../context/context.ts';
 import { aliasId, aliasPresent, aliasScalar, shapeElem } from '../context/alias.ts';
 import { emptyElementLike, historyPropertyValues, historyValues, popEnd, popIsListResult, selectOneFromAlias } from './labelselect.ts';
@@ -493,7 +493,7 @@ function recordOrderTerms(s: RecordStream, r: Relation, bys: any[][]): Expressio
   return bys.map((by) => {
     const dir = by.find((a) => a && typeof a === 'object' && 'order' in a)?.order;
     if (dir === 'shuffle') return q`RANDOM()`;
-    const nested = by.find((a) => a && typeof a === 'object' && 'nested' in a)?.nested;
+    const nested = by.find(isNested)?.nested;
     let key: string;
     let valuesKey: string | undefined; // by(__.select(field).values(key)) → order by that prop
     if (nested) {
