@@ -4,12 +4,12 @@ import { stepChain, type Step } from '../../../gremlin/frontend.ts';
 import { foldByModulators } from '../../ir/strategies.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem } from '../../plan/plan.ts';
 import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
-import { advance, elemRel, prevRel, carryFrag, carryFragMint, carriedCols, partitionOver, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
+import { advance, elemRel, prevRel, carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type AliasShape } from '../context/alias.ts';
 import { pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
 import { classifyListChild, classifyScalarChild, isElementChild, isListChild, isScalarChild, ROOT_SCOPE } from '../tail/child-shape.ts';
 import { carryOf, toListStream, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
-import { mergeVariantArms, unifyLists, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
+import { mergeVariantArms, mergeVariantParts, unifyLists, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
 import { unionScalarStreams, SACK_OPS, combineSack } from '../tail/scalar.ts';
 import { engineOf, fastPathContextOf, type Engine } from '../../engine/deps.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
@@ -305,14 +305,26 @@ export function tryLowerVariantOptional(s: Step, st: ElementStream): VariantStre
   const nested = s.args[0]?.nested;
   const plan = classifyScalarChild(nested, st.params);
   if (!plan) return null;
+  // Same fail-closed wall as the three mixed-shape siblings (union/coalesce/choose above): the
+  // hit arm is a scalar row (no path position) and the miss arm the original element (keeps
+  // its positions), so the merged rows are ragged in a way the array regime would have to
+  // reconcile. Consuming path() off a variant already throws in the variant tail; guarding HERE
+  // names the real cause (the branch) instead of the downstream symptom.
+  if (st.carried.path) throw new Error('path() through a mixed-shape optional() not yet supported');
   const rows = tryCompileScalarValueRows(st, nested, ROOT_SCOPE, plan.body);
   if (!rows) return null;
+  const meta = { scalarAs: rows.stream.as, ...(st.elem === 'edge' ? { edge: true } : { node: true }) } as const;
   const c = rows.stream.rel.as('c');
   const d = rows.frame.domain.as('d');
-  const hit = q`SELECT 1 AS vk, ${c.c.v} AS v, NULL AS rid${carryFrag(st.carried, c)} FROM ${c}`;
-  const miss = q`SELECT 2 AS vk, NULL AS v, ${d.c.id} AS rid${carryFrag(st.carried, d)} FROM ${d} WHERE NOT EXISTS (SELECT 1 FROM ${c} WHERE ${c.c[rows.frame.ordinal]}=${d.c[rows.frame.ordinal]})`;
-  const rel = st.q.cte(list([hit, miss], ' UNION ALL '), ['vk', 'v', 'rid', ...carriedCols(st.carried)]);
-  return toVariantStream(carryOf(st), rel, { scalarAs: rows.stream.as, ...(st.elem === 'edge' ? { edge: true } : { node: true }) });
+  // Hit (the scalar child rows) before miss (the unproductive parent, restored) — optional() IS
+  // coalesce(t, identity), so arm order is the take-first order. Tag both arms when emission
+  // order is live so mergeVariantParts re-mints the canonical encounter once.
+  const enc = st.carried.encounter;
+  const baseNoEnc = enc ? carriedWith(st.carried, { encounter: null }) : st.carried;
+  const armTag = (k: number, r: Relation) => enc ? q`, ${k} AS arm_idx, ${r.c[enc]} AS arm_encounter` : empty;
+  const hit = q`SELECT 1 AS vk, ${c.c.v} AS v, NULL AS rid${armTag(0, c)}${carryFrag(baseNoEnc, c)} FROM ${c}`;
+  const miss = q`SELECT 2 AS vk, NULL AS v, ${d.c.id} AS rid${armTag(1, d)}${carryFrag(baseNoEnc, d)} FROM ${d} WHERE NOT EXISTS (SELECT 1 FROM ${c} WHERE ${c.c[rows.frame.ordinal]}=${d.c[rows.frame.ordinal]})`;
+  return mergeVariantParts(carryOf(st), [hit, miss], meta);
 }
 
 /** coalesce(t1, …, tn): the first branch that yields output, per input traverser.

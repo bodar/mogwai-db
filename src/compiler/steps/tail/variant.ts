@@ -88,14 +88,13 @@ export function mergeVariantArms(base: Carry, arms: readonly VariantArm[], meta:
   const hasList = !!meta.listOf;
   const enc = base.carried.encounter;
   if (!enc) {
-    const rel = base.q.cte(
-      list(arms.map((arm, k) => variantArmSelect(arm, base, hasList, gateFor && ((a: Relation) => gateFor(a, k)))), ' UNION ALL '),
-      variantCols(base, hasList),
+    return mergeVariantParts(
+      base,
+      arms.map((arm, k) => variantArmSelect(arm, base, hasList, gateFor && ((a: Relation) => gateFor(a, k)))),
+      meta,
     );
-    return toVariantStream(base, rel, meta);
   }
   const baseNoEnc = carriedWith(base.carried, { encounter: null });
-  const payloadCols = ['vk', 'v', 'rid', ...(hasList ? ['list'] : [])];
   const parts = arms.map((arm, k) => {
     const a = arm.rel.as('a');
     const cols: Expression[] = [
@@ -108,6 +107,23 @@ export function mergeVariantArms(base: Carry, arms: readonly VariantArm[], meta:
     const gate = gateFor?.(a, k);
     return q`SELECT ${list(cols, ', ')}${carryFrag(baseNoEnc, a)} FROM ${a}${gate ? q` WHERE ${gate}` : empty}`;
   });
+  return mergeVariantParts(base, parts, meta);
+}
+
+/** The merge CORE, over per-arm SELECTs already built by the caller: a plain UNION ALL when
+ *  emission order is not live, else re-mint the canonical `encounter` from the arms'
+ *  `arm_idx`/`arm_encounter` tags. Split out (the `finishElementMerge` precedent, branch.ts) so a
+ *  merge whose arms are HETEROGENEOUS — optional()'s hit row from the arm vs miss row from the
+ *  pushed DOMAIN — reuses the identical mint rather than hand-rolling a second copy. When the
+ *  encounter is live, every `part` MUST carry trailing `arm_idx, arm_encounter` columns (the
+ *  no-encounter form must not); a mismatch trips assertStreamColumns immediately. */
+export function mergeVariantParts(base: Carry, parts: readonly Expression[], meta: VariantArms): VariantStream {
+  const hasList = !!meta.listOf;
+  const payloadCols = ['vk', 'v', 'rid', ...(hasList ? ['list'] : [])];
+  if (!base.carried.encounter) {
+    return toVariantStream(base, base.q.cte(list(parts, ' UNION ALL '), variantCols(base, hasList)), meta);
+  }
+  const baseNoEnc = carriedWith(base.carried, { encounter: null });
   const inner = base.q.cte(list(parts, ' UNION ALL '), [...payloadCols, 'arm_idx', 'arm_encounter', ...carriedCols(baseNoEnc)]);
   const m = inner.as('m');
   const over = partitionOver(base.carried, m, q`${m.c.arm_idx}, ${m.c.arm_encounter}`);

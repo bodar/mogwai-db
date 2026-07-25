@@ -22,9 +22,9 @@
 // module top level), so it is resolution-safe.
 
 import { empty, list, paren, q, value, type Expression } from '../../../sql/kernel/q.ts';
-import { carriedCols, carryFrag, type ElementStream } from '../context/context.ts';
-import { carryOf, toScalarStream, toVariantStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
-import { variantArmSelect, variantArmsMeta, variantCols, type VariantArm } from './variant.ts';
+import { carriedCols, carriedWith, carryFrag, type ElementStream } from '../context/context.ts';
+import { carryOf, toScalarStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
+import { mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm } from './variant.ts';
 import { engineOf, fastPathContextOf } from '../../engine/deps.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
 import { gateScalar, tryInlineScalarPredicate, unionScalarStreams } from './scalar.ts';
@@ -401,10 +401,7 @@ export function tryScalarVariantUnion(s: ScalarStream, step: PStep): VariantStre
   const shapes = branches.map((b: any) => scalarArmShape(b.nested, s.params));
   if (shapes.some((x) => x === null) || shapes.every((x) => x === shapes[0])) return null;
   const arms = branches.map((b: any) => compileScalarVariantArm(s, b.nested));
-  const meta = variantArmsMeta(arms);
-  const hasList = !!meta.listOf;
-  const rel = s.q.cte(list(arms.map((a) => variantArmSelect(a, s, hasList)), ' UNION ALL '), variantCols(s, hasList));
-  return toVariantStream(carryOf(s), rel, meta);
+  return mergeVariantArms(s, arms, variantArmsMeta(arms));
 }
 
 /** choose(pred, then, else) over a scalar with MIXED-shape then/else → a VariantStream. The
@@ -429,10 +426,7 @@ export function tryScalarVariantChoose(s: ScalarStream, step: PStep): VariantStr
     compileScalarVariantArm(gate.seed((b) => b[0]), thenArg.nested),
     compileScalarVariantArm(gate.seed((b) => q`NOT COALESCE((${b[0]}), 0)`), elseArg.nested),
   ];
-  const meta = variantArmsMeta(arms);
-  const hasList = !!meta.listOf;
-  const rel = s.q.cte(list(arms.map((a) => variantArmSelect(a, s, hasList)), ' UNION ALL '), variantCols(s, hasList));
-  return toVariantStream(carryOf(s), rel, meta);
+  return mergeVariantArms(s, arms, variantArmsMeta(arms));
 }
 
 /** coalesce(a, b, …) over a scalar with MIXED-shape arms → a VariantStream. One pushed
@@ -449,12 +443,8 @@ export function tryScalarVariantCoalesce(s: ScalarStream, step: PStep): VariantS
   const { frame, seed } = pushChildScope(s);
   const ord = frame.ordinal;
   const arms = branches.map((b: any) => compileScalarVariantArm(seed, b.nested));
-  const meta = variantArmsMeta(arms);
-  const hasList = !!meta.listOf;
-  const parts = arms.map((arm, k) => variantArmSelect(arm, s, hasList, k === 0 ? undefined
-    : (a) => list(arms.slice(0, k).map((pr) => q`${a.c[ord]} NOT IN (SELECT ${ord} FROM ${pr.rel})`), ' AND ')));
-  const rel = s.q.cte(list(parts, ' UNION ALL '), variantCols(s, hasList));
-  return toVariantStream(carryOf(s), rel, meta);
+  return mergeVariantArms(s, arms, variantArmsMeta(arms), (a, k) => k === 0 ? undefined
+    : list(arms.slice(0, k).map((pr) => q`${a.c[ord]} NOT IN (SELECT ${ord} FROM ${pr.rel})`), ' AND '));
 }
 
 /** optional(t) over a scalar with a SCALAR arm ≡ coalesce(t, identity): the arm's value where
@@ -493,13 +483,27 @@ export function tryScalarVariantOptional(s: ScalarStream, step: PStep): VariantS
   const ord = frame.ordinal;
   const arm = compileScalarVariantArm(seed, arg.nested);
   const hasList = arm.vk === 4;
+  const meta = { ...variantArmsMeta([arm]), scalarAs: s.as };
   const d = frame.domain.as('d');
   const am = arm.rel.as('am');
   const listNull = hasList ? q`, NULL AS list` : empty;
-  const hit = variantArmSelect(arm, s, hasList);
-  const miss = q`SELECT 1 AS vk, ${d.c.v} AS v, NULL AS rid${listNull}${carryFrag(s.carried, d)} FROM ${d} WHERE NOT EXISTS (SELECT 1 FROM ${am} WHERE ${am.c[ord]}=${d.c[ord]})`;
-  const rel = s.q.cte(list([hit, miss], ' UNION ALL '), variantCols(s, hasList));
-  return toVariantStream(carryOf(s), rel, { ...variantArmsMeta([arm]), scalarAs: s.as });
+  // Two ragged arms: the HIT (the arm's own rows) and the MISS (the input value restored from
+  // the pushed domain). When emission order is live both must carry the arm tags so
+  // mergeVariantParts can re-mint the canonical encounter — hit before miss, matching
+  // coalesce(t, identity), which is what optional() IS.
+  const enc = s.carried.encounter;
+  const baseNoEnc = enc ? carriedWith(s.carried, { encounter: null }) : s.carried;
+  const armTag = (k: number, r: typeof d) => enc ? q`, ${k} AS arm_idx, ${r.c[enc]} AS arm_encounter` : empty;
+  const a = arm.rel.as('a');
+  const hitCols: Expression[] = [
+    q`${arm.vk} AS vk`,
+    q`${arm.vk === 1 ? a.c.v : q`NULL`} AS v`,
+    q`${arm.vk === 2 || arm.vk === 3 ? a.c.id : q`NULL`} AS rid`,
+  ];
+  if (hasList) hitCols.push(q`${arm.vk === 4 ? a.c.list : q`NULL`} AS list`);
+  const hit = q`SELECT ${list(hitCols, ', ')}${armTag(0, a)}${carryFrag(baseNoEnc, a)} FROM ${a}`;
+  const miss = q`SELECT 1 AS vk, ${d.c.v} AS v, NULL AS rid${listNull}${armTag(1, d)}${carryFrag(baseNoEnc, d)} FROM ${d} WHERE NOT EXISTS (SELECT 1 FROM ${am} WHERE ${am.c[ord]}=${d.c[ord]})`;
+  return mergeVariantParts(s, [hit, miss], meta);
 }
 
 /**
