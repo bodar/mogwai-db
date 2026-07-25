@@ -7,7 +7,7 @@ import {
 } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { advance, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, withoutCarried, type ElementStream } from '../context/context.ts';
-import { carryOf, continueLowering, dispatchShapeTail, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
+import { carryOf, continueLowering, dispatchShapeTail, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
 import { tryLowerLocalAggregate, lowerScalarAggregate } from '../prefix/sideeffect.ts';
 import { type Shape } from '../../../sql/kernel/render.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
@@ -15,11 +15,11 @@ import { lowerScalarFilter, lowerConstant, lowerScalarConstant, lowerScalarSack,
 import { compileSelectProject, lowerRecordSelectProject, lowerScalarProject, lowerSingleSelect } from './select.ts';
 import { lowerPath } from './path.ts';
 import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
-import { choose as lowerLegacyChoose, coalesce as lowerLegacyCoalesce, flatMap as lowerLegacyFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerLegacyUnion } from '../prefix/branch.ts';
+import { choose as lowerElementChoose, coalesce as lowerElementCoalesce, flatMap as lowerElementFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerElementUnion } from '../prefix/branch.ts';
 import { elementGroupSource, lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
 import { tryCompileCountChild, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueRows } from './child.ts';
 import { tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './scalar-arm.ts';
-import { childSteps, classifyBy, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, type ByClass } from './child-shape.ts';
+import { BRANCH_SHAPE_ORDER, childSteps, classifyBy, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, type BranchKind, type ByClass } from './child-shape.ts';
 import { lowerElementDedup } from '../prefix/filter.ts';
 import { lowerCall } from './call.ts';
 import { engineOf } from '../../engine/deps.ts';
@@ -304,7 +304,7 @@ const tailLocal: ShapeTailFn<ElementStream> = (st, step, steps, stop) => {
 const tailFlatMap: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
   const generic = tryLowerFlatMap(st, step);
   if (generic) return continueLowering(generic, stop + 1);
-  return continueLowering(lowerLegacyFlatMap(step, st), stop + 1);
+  return continueLowering(lowerElementFlatMap(step, st), stop + 1);
 };
 
 // A fold/count child is total per parent, so optional's identity-on-miss arm is statically
@@ -326,41 +326,50 @@ const tailOptional: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
   return variant ? continueLowering(variant, stop + 1) : null;
 };
 
-// A union/choose/coalesce may change shape when arms are scalar/list/mixed. Homogeneous
-// scalar arms concatenate as ScalarStream rows; otherwise the established element-only
-// legacy lowerer remains authoritative and rejects mixed shapes.
-const tailUnion: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
-  const list = tryLowerListUnion(step, st);
-  if (list) return continueLowering(list, stop + 1);
-  const scalar = tryLowerScalarUnion(step, st);
-  if (scalar) return continueLowering(scalar, stop + 1);
-  const variant = tryLowerVariantUnion(step, st);
-  if (variant) return continueLowering(variant, stop + 1);
-  return continueLowering(lowerLegacyUnion(step, st), stop + 1);
-};
+// A union/choose/coalesce may change shape when its arms are scalar/list/mixed. The per-shape
+// lowerers are registered here, ONE row per branch kind, and tried in BRANCH_SHAPE_ORDER
+// (child-shape.ts) — the canonical fall-through sequence, declared once there rather than restated
+// as three hand-written cascades. Each try* returns null to fall through; the ELEMENT lowerer is
+// last and unconditional. That element lowerer is NOT legacy — it is the homogeneous-element
+// compiler AND the fail-closed backstop, reached both from the PREFIX map (engine.ts, the hot
+// path, when classifyBranchArms says every arm is an element) and here as the final fallback, and
+// it is the only one that throws.
+interface BranchLowerers {
+  readonly list: (step: PStep, st: ElementStream) => Stream | null;
+  readonly scalar: (step: PStep, st: ElementStream) => Stream | null;
+  readonly variant: (step: PStep, st: ElementStream) => Stream | null;
+  readonly element: (step: PStep, st: ElementStream) => Stream;
+}
 
-// choose(): option-map form (choose().option()…) → a CASE over a correlated choice scalar;
-// predicate form → the list/scalar/variant/legacy branch merge.
-const tailChoose: ShapeTailFn<ElementStream> = (st, step, steps, stop) => {
-  if (step.options) return continueLowering(lowerChooseOptions(st, steps, stop), stop + 1);
-  const list = tryLowerListChoose(step, st);
-  if (list) return continueLowering(list, stop + 1);
-  const scalar = tryLowerScalarChoose(step, st);
-  if (scalar) return continueLowering(scalar, stop + 1);
-  const variant = tryLowerVariantChoose(step, st);
-  if (variant) return continueLowering(variant, stop + 1);
-  return continueLowering(lowerLegacyChoose(step, st), stop + 1);
-};
+const BRANCH_LOWERERS = new Map<BranchKind, BranchLowerers>([
+  ['union', { list: tryLowerListUnion, scalar: tryLowerScalarUnion, variant: tryLowerVariantUnion, element: lowerElementUnion }],
+  ['choose', { list: tryLowerListChoose, scalar: tryLowerScalarChoose, variant: tryLowerVariantChoose, element: lowerElementChoose }],
+  ['coalesce', { list: tryLowerListCoalesce, scalar: tryLowerScalarCoalesce, variant: tryLowerVariantCoalesce, element: lowerElementCoalesce }],
+]);
 
-const tailCoalesce: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
-  const list = tryLowerListCoalesce(step, st);
-  if (list) return continueLowering(list, stop + 1);
-  const scalar = tryLowerScalarCoalesce(step, st);
-  if (scalar) return continueLowering(scalar, stop + 1);
-  const variant = tryLowerVariantCoalesce(step, st);
-  if (variant) return continueLowering(variant, stop + 1);
-  return continueLowering(lowerLegacyCoalesce(step, st), stop + 1);
-};
+/** Try each shape in BRANCH_SHAPE_ORDER; the element lowerer terminates the cascade. */
+function lowerBranchByShape(kind: BranchKind, st: ElementStream, step: PStep): Stream {
+  const l = BRANCH_LOWERERS.get(kind)!;
+  for (const shape of BRANCH_SHAPE_ORDER) {
+    if (shape === 'element') return l.element(step, st);
+    const lowered = l[shape](step, st);
+    if (lowered) return lowered;
+  }
+  return l.element(step, st); // unreachable (BRANCH_SHAPE_ORDER ends in 'element')
+}
+
+const tailUnion: ShapeTailFn<ElementStream> = (st, step, _steps, stop) =>
+  continueLowering(lowerBranchByShape('union', st, step), stop + 1);
+
+// choose(): the option-map form (choose().option()…) is a CASE over a correlated choice scalar,
+// not an arm merge; the predicate form takes the shape cascade.
+const tailChoose: ShapeTailFn<ElementStream> = (st, step, steps, stop) =>
+  step.options
+    ? continueLowering(lowerChooseOptions(st, steps, stop), stop + 1)
+    : continueLowering(lowerBranchByShape('choose', st, step), stop + 1);
+
+const tailCoalesce: ShapeTailFn<ElementStream> = (st, step, _steps, stop) =>
+  continueLowering(lowerBranchByShape('coalesce', st, step), stop + 1);
 
 // group()/groupCount() always lowers to one rich GroupStream. Root materialization frames
 // it directly; supported Column consumers derive a narrow MapStream.
