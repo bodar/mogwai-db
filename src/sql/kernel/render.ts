@@ -51,7 +51,12 @@ export type ElemShape = 'vertex' | 'edge' | 'property';
 // group: a list of elements, a single element (tail/last), a list of scalars
 // (json_group_array), or a scalar aggregate (count/sum).
 export type GroupKey =
-  | { kind: 'scalar'; productive?: boolean; as?: ValueType } // by('name')/by(T.label)/by(__.scalar)/scalar-group → gk; `as` frames a typed key (asNumber(BYTE).groupCount())
+  // by('name')/by(T.label)/by(__.scalar)/scalar-group → gk; `as` frames a typed key
+  // (asNumber(BYTE).groupCount()). `vtypeCol` names a SIBLING per-row stored-vtype column (gkt)
+  // when the key came from a stored property — the truth channel, preferred over `as`. It is a
+  // column name (like ScalarStream.vtype), not a type: a bare groupCount() never becomes a
+  // MapStream, so its key has no {t,v} blob to ride inside and needs the real column.
+  | { kind: 'scalar'; productive?: boolean; as?: ValueType; vtypeCol?: string }
   | { kind: 'element'; elem: ElemShape }                 // bare by() → the element itself, columns k_*
   | { kind: 'map'; parts: { key: string }[] };           // by(__.project(...)) → columns k0_,k1_,…
 export type GroupVal =

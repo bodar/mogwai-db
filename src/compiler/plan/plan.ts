@@ -460,11 +460,20 @@ export const inferVtypeSql = (valExpr: Expression): Expression =>
       WHEN 'integer' THEN (CASE WHEN ${valExpr} BETWEEN -2147483648 AND 2147483647 THEN 'int' ELSE 'long' END)
       ELSE 'string' END`;
 
-/** Build a self-describing {t,v} node for a COMPUTED scalar whose type is either statically
- *  known (`staticType`, e.g. a count is always 'long') or inferred from storage class. The one
- *  place a group/valueMap scalar side is tagged for the uniform typed map-blob encoding. */
-export const typedScalarNode = (valExpr: Expression, staticType?: string): Expression =>
-  propNodeExpr(valExpr, staticType ? value(staticType) : inferVtypeSql(valExpr));
+/** Build a self-describing {t,v} node for a scalar, from the BEST type channel available:
+ *  `vtypeExpr` (a per-row stored-vtype column — the exact type the write channel recorded),
+ *  else `staticType` (statically known, e.g. a count is always 'long'), else inferred from
+ *  storage class. The one place a group/valueMap/folded scalar side is tagged for the uniform
+ *  typed blob encoding. A per-row column beats a static tag because it is the truth channel
+ *  rather than a compile-time approximation; today no call site supplies both. */
+export const typedScalarNode = (
+  valExpr: Expression,
+  opts?: { staticType?: string; vtypeExpr?: Expression },
+): Expression =>
+  propNodeExpr(
+    valExpr,
+    opts?.vtypeExpr ?? (opts?.staticType ? value(opts.staticType) : inferVtypeSql(valExpr)),
+  );
 
 export const nodePropScalar = (nodeIdExpr: Expression, key: string): Expression =>
   q`(SELECT value FROM vertex_properties WHERE node=${nodeIdExpr} AND key=${value(key)} ORDER BY id LIMIT 1)`;
