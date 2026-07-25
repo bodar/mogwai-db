@@ -8,6 +8,16 @@ The read prefix is a functional fold of `StepFn`s over an immutable typed **`Str
 orchestrator; retypes flow it back through itself (`V().fold().unfold().out()` = elements→list→
 elements). Emission-order and child-scope rationale: the dated design docs in `docs/`.
 
+## Extend the generic seam, don't special-case the scenario
+
+The goal is *generic lowering that composes the full nested Gremlin grammar at any valid depth or
+combination* — every child body admitted at every position, every branch/loop/scope carrying every
+shape (the "ceiling" — see `test/CLAUDE.md` for the L3-floor-vs-ceiling framing). So when a gap can
+be closed two ways — a one-off "implement step X for exactly the scenario that's failing" or
+extending the **generic seam** so a whole family of nested compositions lowers at once — close it
+generically, even when the narrower fix would pass the failing scenario sooner. A `throw` that
+fails closed is better than a special-case that entrenches the non-generic path.
+
 ## Guardrails
 
 - **`lowerSteps` is the single semantic authority for read traversals**, at root and child scope.

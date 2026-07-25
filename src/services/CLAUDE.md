@@ -1,7 +1,7 @@
 # src/services — call() + Service Registry + full-text search
 
 _Scope: `src/services/**` (+ the `ftsSubstringPredicate` fast path in `compiler/plan/plan.ts`).
-Design: `docs/2026-07-20-call-service-registry-plan.md`._
+Design: `docs/archive/2026-07-20-call-service-registry-plan.md`._
 
 `call()` is the extensibility seam: a `Service` registers into a `ServiceRegistry` and contributes
 to the compile. `g.call(…)` sources a stream; `V().call(…)` pushes a child scope. Services build

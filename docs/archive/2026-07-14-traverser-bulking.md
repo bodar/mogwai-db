@@ -6,7 +6,7 @@
 > per-value `Long`, the pinned `gremlin@4.0.0-beta.2` client both requests (`bulkResults`
 > default true) and decodes it, and it is backwards-compatible (opt-in, default off). Wire
 > bulking IS a forward direction to build toward. See
-> `docs/2026-07-18-wire-bulking-rearchitecture.md` for the corrected premise + staged plan.
+> `docs/archive/2026-07-18-wire-bulking-rearchitecture.md` for the corrected premise + staged plan.
 > The SQL findings below (recursive GROUP BY rejected → unroll only; overflow loud) still hold.
 
 

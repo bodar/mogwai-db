@@ -6,7 +6,7 @@ a subsystem fact changes, edit it in its own file — don't pull it back here. P
 direction over mechanism: if a detail is re-derivable from the code, cite the code instead.
 
 - **Step support / edges** → `docs/feature-support-matrix.md` (keep in sync per step).
-- **Future work** → `docs/2026-07-19-outstanding-work-snapshot.md`. Dated `docs/` are design
+- **Future work** → `docs/outstanding-work.md`. Dated `docs/` are design
   rationale — consult, but this file must not depend on an in-flight plan.
 
 ## What this is

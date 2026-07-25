@@ -3,8 +3,9 @@
 _Scope: `src/compiler/**`. The lowering surface it dispatches to is `src/compiler/steps/CLAUDE.md`; the SQL
 kernel is `src/sql/CLAUDE.md`. Root `CLAUDE.md` holds cross-cutting rules._
 
-`compile()` = `parse → runPasses → analyze → dispatch`. Detailed rationale:
-`docs/2026-07-24-unified-rewrite-passes-plan.md` and `-directory-restructure-plan.md`.
+`compile()` = `parse → runPasses → analyze → dispatch`. Detailed rationale (both landed, archived):
+`docs/archive/2026-07-24-unified-rewrite-passes-plan.md` and
+`docs/archive/2026-07-23-directory-restructure-plan.md`.
 
 ## Guardrails
 

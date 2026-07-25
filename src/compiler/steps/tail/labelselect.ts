@@ -16,7 +16,7 @@ import { type ValueType } from '../../../sql/kernel/render.ts';
 // as() APPENDS the current object (tagged) to each named label's JSONB history column,
 // preserving the stream's shape. select(Pop, label) reads that history back. Element
 // streams bind through the PREFIX `as` StepFn (filter.ts); every OTHER shape binds here.
-// See docs/2026-07-16-labels-as-path-history.md.
+// See docs/archive/2026-07-16-labels-as-path-history.md.
 
 /** Payload columns of a stream (everything before the carried schema). */
 const payloadOf = (s: Exclude<Stream, { kind: 'result' }>): string[] => {

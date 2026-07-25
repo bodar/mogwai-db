@@ -77,7 +77,7 @@ split; path presence kills bulking (walk-cardinality). Don't build a CSR operato
 
 ### 2. Per-traverser sub-traversal engine — `local` / `map` / `choose` / `flatMap` / complex `where`  (~90–100)
 **✅ LARGELY DONE (2026-07-13, live L3 455 → 473).** See
-`docs/2026-07-13-per-traverser-branching.md`. Landed: `choose` (predicate + option-map
+`docs/archive/2026-07-13-per-traverser-branching.md`. Landed: `choose` (predicate + option-map
 scalar CASE), `coalesce`, multi-hop `union`/`optional`, `flatMap`, scalar `map`,
 multi-hop `where` (correlated EXISTS chain) + `where(label/not)`, and the
 alias-threading foundation (`aliasCtx`/`resolveAlias`). The engine split into **two
@@ -207,7 +207,7 @@ de-risking ONE runtime-specific feature, a targeted probe (as done for math) bea
 pattern join built directly on #2's alias-threading foundation (`aliasCtx`/
 `resolveAlias`): each `as(start).<out/in>*[.has].as(end)` pattern folds in dependency
 order, binding or constraining vars as alias columns; downstream select/count/dedup
-consume them through the existing rails. See `docs/2026-07-13-per-traverser-branching.md`
+consume them through the existing rails. See `docs/archive/2026-07-13-per-traverser-branching.md`
 Phase H. **Deferred, fail-closed:** `both()`/edge/scalar-terminal patterns, `or`/`not`/
 nested-`match`, `>1`/`0` root vars, `match`-inside-`where`, select-then-movement.
 **Real-world: MEDIUM-LOW.** Powerful declarative pattern matching, but many users
@@ -216,7 +216,7 @@ write explicit traversals instead — which is why the deferred tail is low-prio
 ### 6. Collection algebra — `unfold` + `combine`/`product`/`intersect`/`difference`/`disjunct`/`conjoin`, `Scope.local` reductions  (~100+)
 **✅ SUBSTRATE DONE (2026-07-13, L3 608→618).** The core bet — "make a list a
 first-class traverser value" — landed as the list-value substrate + re-enterable tail
-(`docs/2026-07-13-list-value-substrate-plan.md`, Approach A): `fold()` as a real JSONB
+(`docs/archive/2026-07-13-list-value-substrate-plan.md`, Approach A): `fold()` as a real JSONB
 list value, `unfold()` re-entering the tail, `Scope.local` reducers (count/sum/min/max/
 mean), inject-as-list, and the scalar-local semantics — all SQL-native (`json_each`/
 JSONB), no interpreter. This also structurally dissolved the "only one projection per
@@ -271,13 +271,13 @@ The real remaining frontier is now traverser bulking + the design-heavy subsyste
 
 1. ~~**Path** (#1)~~ — **DONE (2026-07-12/13)**, see bet #1 above.
 2. ~~**Per-traverser sub-traversal engine** (#2)~~ — **LARGELY DONE (2026-07-13, L3
-   455→473)**, see bet #2 above + `docs/2026-07-13-per-traverser-branching.md`. `local`
+   455→473)**, see bet #2 above + `docs/archive/2026-07-13-per-traverser-branching.md`. `local`
    (per-element scope) is the one structural piece of #2 still open.
 3. ~~**`match`** (#5)~~ — **DONE (2026-07-13, Phase H, L3 473→474)**, see bet #5 above.
 4. ~~**types** (#4) + **collection-algebra substrate** (#6 core)~~ — **DONE**: the
    typed-value carrier + asBool/asNumber/asDate/math (L3 496→608), and the list-value
    substrate + re-enterable tail + Scope.local reducers + unfold (L3 608→618, see
-   `docs/2026-07-13-list-value-substrate-plan.md`).
+   `docs/archive/2026-07-13-list-value-substrate-plan.md`).
 5. **Strategies** (#7) — **semantic support DONE** (Subgraph/Partition/verification,
    L3 495→582). Deferred tails only.
 

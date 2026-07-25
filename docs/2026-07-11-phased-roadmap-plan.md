@@ -170,7 +170,7 @@ The P2/P3 read compiler is largely done, W2 writes have landed, the path
 family (path/simplePath/cyclicPath, recursive repeat().path(), repeat().until())
 landed under W5, the **per-traverser branching family + multi-hop/alias where + match**
 landed 2026-07-13 (choose/coalesce/union/optional/flatMap/map/where/match — see
-docs/2026-07-13-per-traverser-branching.md), the **type/value family** (asBool/asNumber/
+docs/archive/2026-07-13-per-traverser-branching.md), the **type/value family** (asBool/asNumber/
 asDate/math + typed-value carrier) landed, the **semantic strategies** (Subgraph/
 Partition/verification) landed, the **list-value substrate + re-enterable tail**
 (fold-as-value/unfold/Scope.local reducers/inject-as-list), `local`, side-effects
@@ -365,7 +365,7 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
   - **`coalesce`. DONE (2026-07-13, Phase B).** First-non-empty-branch-per-traverser
     via the child-scope input-ordinal column threaded through shared element lowering
     (`SELECT … WHERE o NOT IN (earlier arms)`). `optional` = `coalesce(t, identity)`.
-    See `docs/2026-07-13-per-traverser-branching.md`.
+    See `docs/archive/2026-07-13-per-traverser-branching.md`.
   - **`path()`. DONE (W5, 2026-07-13).** NOT the originally-sketched "JSON-array
     through movement" — that was overturned. Two regimes (see
     `docs/2026-07-12-path-tracking-prior-art.md`): linear `path()` carries per-position
@@ -420,7 +420,7 @@ P1 — see the greedy set-cover analysis; `as`+`select` is the single biggest
 **P5 — stretch.**
 - `match()` → **DONE (2026-07-13, Phase H).** A conjunctive pattern join on the alias
   seam (`src/steps/match.ts`), not a full where/select lowering — see
-  `docs/2026-07-13-per-traverser-branching.md`. Deferred tail (both/or/not/nested).
+  `docs/archive/2026-07-13-per-traverser-branching.md`. Deferred tail (both/or/not/nested).
 - `sack()` as an arithmetic column; `aggregate/cap` via staged execution. **← the next
   big structural bet (side-effect state); still open.**
 - `shortestPath` special-cased recursive CTE.
