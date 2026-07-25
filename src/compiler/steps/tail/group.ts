@@ -558,7 +558,13 @@ export function compileFromGroup(s: GroupStream, steps: PStep[], at: number): Lo
 function deriveGroupMap(s: GroupStream): { rel: Relation; keyOf: MapOf; valOf: MapOf } {
   const g = s.rel.as('g');
   let keyNode: Expression, keyOf: MapOf, groupKey: Expression;
-  if (s.key.kind === 'scalar') { keyNode = typedScalarNode(g.c.gk, s.key.as); keyOf = { kind: 'scalar' }; groupKey = g.c.gk; }
+  if (s.key.kind === 'scalar') {
+    // A per-row stored vtype (gkt, from a bare values() key) is the truth channel; `as` is the
+    // compile-time tag a cast left behind. typedScalarNode prefers the column when present.
+    const vtypeExpr = s.key.vtypeCol ? g.c[s.key.vtypeCol] : undefined;
+    keyNode = typedScalarNode(g.c.gk, { staticType: s.key.as, vtypeExpr });
+    keyOf = { kind: 'scalar' }; groupKey = g.c.gk;
+  }
   else if (s.key.kind === 'element') {
     keyNode = g.c.k_rid; groupKey = g.c.k_rid;
     keyOf = { kind: 'elem', elem: s.key.elem === 'edge' ? 'edge' : 'node' };
@@ -576,7 +582,7 @@ function deriveGroupMap(s: GroupStream): { rel: Relation; keyOf: MapOf; valOf: M
     valOf = { kind: 'list', of: { kind: 'elem', elem } };
   } else if (s.val.kind === 'elementLast') {
     throw new Error('select(Column)/unfold() over a group of single-element (tail) values not yet supported');
-  } else if (s.val.kind === 'count') { valNode = typedScalarNode(g.c.gv, 'long'); valOf = { kind: 'scalar' }; }
+  } else if (s.val.kind === 'count') { valNode = typedScalarNode(g.c.gv, { staticType: 'long' }); valOf = { kind: 'scalar' }; }
   else if (s.val.kind === 'sum') { valNode = typedScalarNode(g.c.gv); valOf = { kind: 'scalar' }; }
   else if (s.val.kind === 'list' || s.val.kind === 'scalarList') { valNode = q`json(${g.c.gv})`; valOf = { kind: 'list', of: { kind: 'scalar' } }; }
   else throw new Error('select(Column)/unfold() over this rich group value layout not yet supported');
