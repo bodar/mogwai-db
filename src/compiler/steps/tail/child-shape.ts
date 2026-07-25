@@ -446,6 +446,18 @@ export interface BranchArms {
   readonly merge: BranchMerge;
 }
 
+/** PURE. ONE arm body's shape class — the single per-arm probe. `classifyBranchArms` folds it over
+ *  a branch's arms, and the mixed-shape lowerers (branch.ts `armShape`) call it directly for one
+ *  arm, so a single arm and a whole branch can never classify differently. The ORDER is
+ *  significant: element first, so a homogeneous element branch stays on the prefix-fold hot path
+ *  even though an element body can also satisfy the scalar/list classifiers. */
+export function classifyArmShape(nested: any, params: Record<string, any>): BranchArmShape {
+  return isElementChild(nested, params) ? 'element'
+    : isScalarChild(nested, params) ? 'scalar'
+    : isListChild(nested, params) ? 'list'
+    : null;
+}
+
 /** The arity a branch kind needs before any shape talk: union ≥2 arms, coalesce ≥1, choose
  *  exactly 3 args (pred, then, else — the 2-arg form's else is an element identity, so it stays
  *  with the element lowerer), optional exactly 1. `null` = "no shape question to ask", which
@@ -467,11 +479,7 @@ function branchValueArgs(kind: BranchKind, step: PStep): readonly any[] | null {
 export function classifyBranchArms(kind: BranchKind, step: PStep, params: Record<string, any>): BranchArms {
   const args = branchValueArgs(kind, step);
   if (!args) return { kind, shapes: [], args: [], merge: 'element' };
-  const shapes: BranchArmShape[] = args.map((a: any) =>
-    isElementChild(a.nested, params) ? 'element'
-    : isScalarChild(a.nested, params) ? 'scalar'
-    : isListChild(a.nested, params) ? 'list'
-    : null);
+  const shapes: BranchArmShape[] = args.map((a: any) => classifyArmShape(a.nested, params));
   // An element arm can ALSO satisfy the scalar/list classifiers in principle; the order above
   // (element first) is why a homogeneous element branch stays on the prefix-fold hot path.
   //

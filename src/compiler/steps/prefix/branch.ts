@@ -7,7 +7,7 @@ import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
 import { advance, elemRel, prevRel, carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type AliasShape } from '../context/alias.ts';
 import { pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
-import { classifyListChild, classifyScalarChild, isElementChild, isListChild, isScalarChild, ROOT_SCOPE } from '../tail/child-shape.ts';
+import { classifyArmShape, classifyListChild, classifyScalarChild, ROOT_SCOPE } from '../tail/child-shape.ts';
 import { carryOf, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
 import { finishListMerge, mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
 import { unionScalarStreams, SACK_OPS, combineSack } from '../tail/scalar.ts';
@@ -387,12 +387,10 @@ export function tryLowerListCoalesce(s: Step, st: ElementStream): ListStream | n
 // arms keep their richer per-shape handlers (path/aliases); mixed element KIND
 // (node+edge, both element-class) stays with the legacy element compiler's clear defer.
 
-type ArmShape = 'element' | 'scalar' | 'list';
-const armShape = (nested: any, params: Record<string, any>): ArmShape | null =>
-  isElementChild(nested, params) ? 'element'
-  : isScalarChild(nested, params) ? 'scalar'
-  : isListChild(nested, params) ? 'list'
-  : null;
+/** ONE arm's shape, from the canonical classifier (child-shape.ts) — never a second
+ *  element/scalar/list if-chain. `classifyArmShape` is the same per-arm probe
+ *  `classifyBranchArms` folds over, so a single arm and a whole branch can't disagree. */
+const armShape = classifyArmShape;
 
 /** Compile ONE branch body from `seed` to a variant-arm carrying seed's exact carried
  *  schema: element movement → node/edge, values/id/label/count → scalar, …fold() → list. */
@@ -406,7 +404,9 @@ function compileVariantArm(seed: ElementStream, nested: any): VariantArm {
   throw new Error(`variant branch __.${armDescription(nested, seed.params)} not yet supported (shape not element/scalar/list)`);
 }
 
-/** Are these branch shapes genuinely mixed (not all one class, all classifiable)? */
+/** Are these branch shapes genuinely mixed (not all one class, all classifiable)? The
+ *  `merge === 'variant'` verdict of the canonical triage, expressed over a bare arm list (the
+ *  mixed-shape lowerers below receive the arms already extracted). */
 function branchesAreMixed(branches: readonly any[], params: Record<string, any>): boolean {
   const shapes = branches.map((b) => armShape(b.nested, params));
   return !shapes.some((x) => x === null) && !shapes.every((x) => x === shapes[0]);

@@ -180,6 +180,27 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(() => executeQuery(store, 'g.V().choose(__.out(), __.label(), __.values("name"))', {})).not.toThrow();
   });
 
+  test('SCALAR-parent mixed-shape merges re-mint the arm-ordered encounter', () => {
+    // These four merges (tryScalarVariant{Union,Choose,Coalesce,Optional}) used to hand-roll
+    // their UNION ALL, replicating mergeVariantArms' NO-encounter branch — so with a LIVE
+    // encounter (a positional consumer downstream of a fan-out) the arm ordering was silently
+    // dropped and the slice picked rows in incidental SQLite order. Routing them through the
+    // shared builder mints `ROW_NUMBER() OVER (… ORDER BY arm_idx, arm_encounter)`, i.e. arm 0
+    // fully before arm 1 — TinkerPop's union/coalesce/choose emission order.
+    //
+    // Asserted at the SQL level deliberately: a RESULT-level scenario cannot distinguish the two
+    // (with these arm shapes incidental row order coincides with arm order), so only the emitted
+    // window function proves the ordering is specified rather than accidental.
+    const mixedUnion = read('g.V().values("age").union(__.constant("x"), __.V()).limit(2)');
+    expect(mixedUnion.sql).toContain('arm_idx');
+    expect(mixedUnion.sql).toMatch(/ROW_NUMBER\(\) OVER \(ORDER BY [\w.]*arm_idx, [\w.]*arm_encounter\)/);
+    const mixedCoalesce = read('g.V().values("name").coalesce(__.V(), __.constant("z")).limit(1)');
+    expect(mixedCoalesce.sql).toMatch(/ROW_NUMBER\(\) OVER \(ORDER BY [\w.]*arm_idx, [\w.]*arm_encounter\)/);
+    // …and NOT minted when no consumer demands emission order (the hot path is untouched:
+    // no window, no arm tags).
+    expect(read('g.V().values("age").union(__.constant("x"), __.V())').sql).not.toContain('arm_idx');
+  });
+
   test('variant tail: shape-agnostic row-ops (limit/skip/range/dedup) + fail-closed', () => {
     const store = seededStore();
     const base = 'g.V(1).union(__.values("name"), __.out())';

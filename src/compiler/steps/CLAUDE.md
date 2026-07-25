@@ -32,10 +32,15 @@ fails closed is better than a special-case that entrenches the non-generic path.
   `tail/child.ts` (compilers) ◂ `tail/scalar-arm.ts` (scalar-parent arms). Extend by adding to the
   classifier + the compiler — never by reaching for a per-concern object (evaluated and rejected).
 - **The branch family (`union`/`choose`/`coalesce`/`optional`) has ONE arm triage and FOUR merge
-  builders. Never add a fifth of either.** `classifyBranchArms` + `BRANCH_SHAPE_ORDER`
-  (`tail/child-shape.ts`) is the single shape decision — the prefix fold's `break`
-  (`engine/engine.ts`), the tail cascades (`tail/projection.ts` `BRANCH_LOWERERS`) and the arm
-  compilers all read it; computing shape a second time is how those three drifted before.
+  builders. Never add a fifth of either.** `classifyArmShape` (one arm) and `classifyBranchArms` +
+  `BRANCH_SHAPE_ORDER` (a whole branch) in `tail/child-shape.ts` are the shape decision — the
+  prefix fold's `break` (`engine/engine.ts`), the tail cascades (`tail/projection.ts`
+  `BRANCH_LOWERERS`) and the mixed-shape lowerers' `armShape` all route through them; computing
+  shape with a fresh element/scalar/list if-chain is how those sites drifted before.
+  The ONE deliberate exception is `scalar-arm.ts`'s `scalarArmShape`: over a scalar parent an
+  "element arm" is a `V()`/`E()` **re-source**, not a movement body, and list must be probed before
+  scalar — different predicates and different priority, so it stays separate. It shares the
+  `BranchArmShape` return type to keep the parallel visible.
   The merges are `finishElementMerge` (`prefix/branch.ts`), `unionScalarStreams` (`tail/scalar.ts`),
   `mergeVariantArms`/`mergeVariantParts` and `finishListMerge` (`tail/variant.ts`) — all
   parent-agnostic (a bare `Carry`), so an element parent and a scalar parent share them verbatim.
