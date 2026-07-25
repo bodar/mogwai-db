@@ -402,6 +402,113 @@ export function isElementImplicitFoldChild(nested: any, params: Record<string, a
   return classifyElementChildRows(childSteps(nested, params), undefined, false) !== null;
 }
 
+// ---------- branch-family arm triage (the ONE canonical shape decision) ----------
+//
+// union/choose/coalesce/optional all ask the same question — "what SHAPE are this branch's
+// arms?" — and the answer picks the merge: all-element → the element StepFn (branch.ts, inside
+// the prefix fold); all-scalar → unionScalarStreams; all-list → finishListMerge; genuinely mixed
+// → mergeVariantArms. That decision used to be computed THREE times per branch step, in three
+// files, each with its own encoding of the fall-through order: ten ad-hoc booleans in
+// engine.ts's prefix fold (to decide whether to `break`), a hardcoded list→scalar→variant→element
+// cascade in projection.ts's tail dispatchers, and a third re-classification inside each
+// tryLower*. Nothing was canonical, so the three could drift.
+//
+// `classifyBranchArms` is now that single source of truth. It is PURE (syntax-only, like every
+// classifier in this leaf — no Query, no CTE), so the prefix fold can consult it before
+// speculatively mutating anything, and the tail dispatchers + arm compilers read the SAME answer.
+// The MERGE order (which shape wins when a body could satisfy two classifiers) lives in
+// BRANCH_SHAPE_ORDER below — written down once, not restated per call site.
+
+/** The four steps that fork a traverser into arms and merge the results. */
+export type BranchKind = 'union' | 'choose' | 'coalesce' | 'optional';
+
+/** One arm's shape class. `null` = unclassifiable by any of the three child classifiers. */
+export type BranchArmShape = 'element' | 'scalar' | 'list' | null;
+
+/** THE canonical fall-through order: the shape a branch is tried as, first match wins. Read by
+ *  projection.ts's tail cascades so the sequence is declared here, not restated there. `element`
+ *  is LAST because its lowerer is also the fail-closed backstop (it throws rather than
+ *  returning null). */
+export const BRANCH_SHAPE_ORDER = ['list', 'scalar', 'variant', 'element'] as const;
+export type BranchMerge = typeof BRANCH_SHAPE_ORDER[number];
+
+export interface BranchArms {
+  readonly kind: BranchKind;
+  /** Each VALUE arm's shape, in argument order. For choose() the leading predicate arg is
+   *  excluded (it is a gate, not an arm); for optional() there is exactly one (the implicit
+   *  identity/self arm is never classified — it is the parent's own shape by construction). */
+  readonly shapes: readonly BranchArmShape[];
+  /** The nested arg objects the shapes were read from, so the caller reuses them rather than
+   *  re-filtering `step.args` (that filter had ~31 copies across three files). */
+  readonly args: readonly any[];
+  /** Which merge this branch routes to — the first entry of BRANCH_SHAPE_ORDER that fits.
+   *  'element' doubles as "no shape-changing merge applies" (the prefix-fold hot path). */
+  readonly merge: BranchMerge;
+}
+
+/** The arity a branch kind needs before any shape talk: union ≥2 arms, coalesce ≥1, choose
+ *  exactly 3 args (pred, then, else — the 2-arg form's else is an element identity, so it stays
+ *  with the element lowerer), optional exactly 1. `null` = "no shape question to ask", which
+ *  classifyBranchArms reports as merge 'element' so the element lowerer owns the arity/option-map
+ *  error message (fail closed, one authority). */
+function branchValueArgs(kind: BranchKind, step: PStep): readonly any[] | null {
+  if (kind === 'choose' && (step as any).options) return null; // option-map form: a tail CASE projector
+  const nested = (step.args ?? []).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+  if (kind === 'union') return nested.length >= 2 ? nested : null;
+  if (kind === 'coalesce') return nested.length >= 1 ? nested : null;
+  if (kind === 'choose') return nested.length === 3 ? nested.slice(1) : null; // drop the predicate
+  return nested.length >= 1 ? nested.slice(0, 1) : null; // optional: the single body
+}
+
+/** PURE. Classify a branch step's arms once. `merge` folds the whole decision: every arm the
+ *  same shape → that shape's homogeneous merge; every arm classifiable but NOT all the same →
+ *  'variant'; anything else (an unclassifiable arm, wrong arity, the option-map choose form) →
+ *  'element', where the element lowerer either handles it or throws the authoritative error. */
+export function classifyBranchArms(kind: BranchKind, step: PStep, params: Record<string, any>): BranchArms {
+  const args = branchValueArgs(kind, step);
+  if (!args) return { kind, shapes: [], args: [], merge: 'element' };
+  const shapes: BranchArmShape[] = args.map((a: any) =>
+    isElementChild(a.nested, params) ? 'element'
+    : isScalarChild(a.nested, params) ? 'scalar'
+    : isListChild(a.nested, params) ? 'list'
+    : null);
+  // An element arm can ALSO satisfy the scalar/list classifiers in principle; the order above
+  // (element first) is why a homogeneous element branch stays on the prefix-fold hot path.
+  //
+  // Only all-element keeps the prefix fold; a homogeneous scalar/list set routes to that shape's
+  // merge, and a genuinely MIXED (but fully classified) set to the variant merge.
+  //
+  // An UNCLASSIFIABLE arm splits by kind, and the asymmetry is load-bearing:
+  //   · optional() — one arm, and its miss arm is the parent element itself, so an unclassified
+  //     body (e.g. a NESTED optional/coalesce: `optional(out().optional(out()))`) is still an
+  //     ELEMENT branch and MUST stay in the prefix fold, where the optional StepFn's originSeed
+  //     path compiles it. Routing it to the tail would strand it — nothing there claims it and
+  //     the error would name optional() as unimplemented.
+  //   · union/choose/coalesce — a multi-arm merge cannot know an unclassified arm's shape, so it
+  //     routes to the tail cascade: each tryLower* declines in turn and the element lowerer
+  //     throws the authoritative deferral naming the offending arm body.
+  const unclassified = shapes.some((s) => s === null);
+  const merge: BranchMerge =
+    shapes.every((s) => s === 'element') ? 'element'
+    : unclassified ? (kind === 'optional' ? 'element' : 'variant')
+    : shapes.every((s) => s === 'list') ? 'list'
+    : shapes.every((s) => s === 'scalar') ? 'scalar'
+    : 'variant';
+  return { kind, shapes, args, merge };
+}
+
+/** PURE. The prefix fold's ONLY question: must this branch leave the element StepFn path so the
+ *  tail dispatch can pick a shape-changing merge? True iff the arms are not uniformly element.
+ *  Derived from classifyBranchArms, so the fold's `break` and the tail's cascade cannot disagree
+ *  — the drift the ten ad-hoc booleans invited. */
+export function branchNeedsShapeDispatch(kind: BranchKind, step: PStep, params: Record<string, any>): boolean {
+  return classifyBranchArms(kind, step, params).merge !== 'element';
+}
+
+export const BRANCH_KINDS = new Set<string>(['union', 'choose', 'coalesce', 'optional']);
+export const asBranchKind = (name: string): BranchKind | null =>
+  BRANCH_KINDS.has(name) ? name as BranchKind : null;
+
 // ---------- by() modulator argument triage (the pure shell every host shares) ----------
 //
 // A `by(...)` modulator's argument group is one of a small closed set of shapes: a nested

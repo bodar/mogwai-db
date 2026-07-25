@@ -1,0 +1,175 @@
+// classifyBranchArms (src/compiler/steps/tail/child-shape.ts): the ONE canonical branch-family
+// arm triage, consolidated from the ten ad-hoc booleans the prefix fold used to build inline
+// (engine.ts) plus the shape re-classification each tryLower* did for itself. These assert the
+// shape verdict per branch kind AND — the drift risk this consolidation removes — that
+// branchNeedsShapeDispatch reproduces the old ten-boolean `break` predicate EXACTLY, so the
+// prefix fold's break and the tail cascade's fall-through can never disagree.
+import { test, expect, describe } from 'bun:test';
+import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
+import { normalize } from '../../src/compiler/ir/passes.ts';
+import {
+  asBranchKind, branchNeedsShapeDispatch, classifyBranchArms,
+  isElementChild, isListChild, isScalarChild, type BranchKind,
+} from '../../src/compiler/steps/tail/child-shape.ts';
+import { type PStep } from '../../src/compiler/ir/strategies.ts';
+
+/** Every branch-family step in a traversal, as the compiler sees it (parsed + normalized, so a
+ *  folded order().by()/repeat cluster is already canonical). */
+const branchSteps = (gremlin: string): PStep[] =>
+  normalize(stepChain(parseGremlin(gremlin), {})).steps.filter((s) => asBranchKind(s.name));
+
+const planOf = (gremlin: string) => {
+  const [step] = branchSteps(gremlin);
+  return classifyBranchArms(asBranchKind(step.name)!, step, {});
+};
+
+describe('classifyBranchArms — the shape verdict', () => {
+  test('homogeneous element arms stay on the prefix-fold hot path', () => {
+    expect(planOf('g.V().union(__.out(), __.in())').merge).toBe('element');
+    expect(planOf('g.V().union(__.out(), __.in(), __.both())').merge).toBe('element');
+    // mixed element KIND (node + edge) is still all-element: the element lowerer owns that defer
+    expect(planOf('g.V().union(__.outE(), __.out())').merge).toBe('element');
+    expect(planOf('g.V().coalesce(__.out(), __.in())').merge).toBe('element');
+    expect(planOf('g.V().choose(__.has("age"), __.out(), __.in())').merge).toBe('element');
+    expect(planOf('g.V().optional(__.out())').merge).toBe('element');
+  });
+
+  test('homogeneous scalar / list arms route to their own merge', () => {
+    expect(planOf('g.V().union(__.values("name"), __.values("age"))').merge).toBe('scalar');
+    expect(planOf('g.V().coalesce(__.values("name"), __.values("age"))').merge).toBe('scalar');
+    expect(planOf('g.V().union(__.out().values("n").fold(), __.in().values("n").fold())').merge).toBe('list');
+    expect(planOf('g.V().choose(__.has("age"), __.out().values("n").fold(), __.in().values("n").fold())').merge).toBe('list');
+  });
+
+  test('genuinely mixed arms route to the variant merge', () => {
+    expect(planOf('g.V().union(__.out(), __.values("name"))').merge).toBe('variant');
+    expect(planOf('g.V().union(__.values("name"), __.out())').merge).toBe('variant');
+    expect(planOf('g.V().union(__.out().values("n").fold(), __.values("age"))').merge).toBe('variant');
+    expect(planOf('g.V().coalesce(__.out(), __.values("name"))').merge).toBe('variant');
+  });
+
+  test('the predicate arg is not an arm; choose arity below 3 keeps the element lowerer', () => {
+    // choose(pred, then, else) → exactly the two VALUE arms are classified
+    expect(planOf('g.V().choose(__.has("age"), __.out(), __.in())').shapes).toEqual(['element', 'element']);
+    // the 2-arg form's else is an element identity → element lowerer, no shape question
+    expect(planOf('g.V().choose(__.has("age"), __.out())').merge).toBe('element');
+    // the option-map form is a tail CASE projector, not a prefix branch
+    expect(planOf('g.V().choose(__.values("age")).option(29, __.out()).option(35, __.in())').merge).toBe('element');
+  });
+
+  test('below-arity union/coalesce defer to the element lowerer for the authoritative error', () => {
+    expect(planOf('g.V().union(__.out())').merge).toBe('element'); // union needs >= 2
+    expect(planOf('g.V().coalesce(__.out())').merge).toBe('element'); // coalesce needs >= 1 — this IS 1
+    expect(planOf('g.V().coalesce(__.out())').shapes).toEqual(['element']);
+  });
+
+  // The asymmetry that a naive "unclassifiable → element" or "→ variant" rule gets WRONG in one
+  // direction or the other. Both directions are pinned here because each was a real bug during
+  // the consolidation: optional() stranded in the tail reported "step not implemented: optional()".
+  test('an UNCLASSIFIABLE arm splits by kind — optional stays, multi-arm merges route out', () => {
+    // optional()'s miss arm is the parent element itself, so an unclassified body is still an
+    // ELEMENT branch: the optional StepFn's originSeed path compiles it inside the prefix fold.
+    const nestedOptional = planOf('g.V().optional(__.out().optional(__.out())).path()');
+    expect(nestedOptional.shapes).toEqual([null]);
+    expect(nestedOptional.merge).toBe('element');
+    expect(planOf('g.V().optional(__.repeat(__.out()).times(2))').merge).toBe('element');
+    // a multi-arm merge cannot know an unclassified arm's shape → tail cascade, where each
+    // tryLower* declines and the element lowerer throws the deferral naming the arm body.
+    expect(planOf('g.V().union(__.repeat(__.out()).times(2), __.in())').merge).toBe('variant');
+    expect(planOf('g.V().coalesce(__.repeat(__.out()).times(2), __.in())').merge).toBe('variant');
+  });
+});
+
+// ---------- the equivalence that makes the consolidation safe ----------
+
+/** The ORIGINAL ten-boolean break predicate, transcribed verbatim from the pre-consolidation
+ *  lowerElementSteps (engine.ts). Kept as the reference oracle: branchNeedsShapeDispatch must
+ *  agree with it for every branch shape, or the prefix fold and the tail cascade have drifted. */
+function tenBooleanBreak(step: PStep, params: Record<string, any>): boolean {
+  const nested = (a: any) => a && typeof a === 'object' && 'nested' in a;
+  const unionBranches = step.name === 'union' ? step.args.filter(nested) : [];
+  const scalarUnion = unionBranches.length >= 2 && unionBranches.every((a: any) => isScalarChild(a.nested, params));
+  const listUnion = unionBranches.length >= 2 && unionBranches.every((a: any) => isListChild(a.nested, params));
+  const chooseArgs = step.name === 'choose' && !(step as any).options ? step.args.filter(nested) : [];
+  const scalarChoose = chooseArgs.length === 3
+    && isScalarChild(chooseArgs[1].nested, params) && isScalarChild(chooseArgs[2].nested, params);
+  const listChoose = chooseArgs.length === 3
+    && isListChild(chooseArgs[1].nested, params) && isListChild(chooseArgs[2].nested, params);
+  const coalesceArgs = step.name === 'coalesce' ? step.args.filter(nested) : [];
+  const scalarCoalesce = coalesceArgs.length > 0 && coalesceArgs.every((a: any) => isScalarChild(a.nested, params));
+  const listCoalesce = coalesceArgs.length > 0 && coalesceArgs.every((a: any) => isListChild(a.nested, params));
+  const optionalNested = step.name === 'optional' ? step.args[0]?.nested : null;
+  const shapedOptional = !!optionalNested
+    && (isListChild(optionalNested, params) || isScalarChild(optionalNested, params));
+  const mixedUnion = unionBranches.length >= 2 && unionBranches.some((a: any) => !isElementChild(a.nested, params));
+  const mixedChoose = chooseArgs.length === 3 && chooseArgs.slice(1).some((a: any) => !isElementChild(a.nested, params));
+  const mixedCoalesce = coalesceArgs.length > 0 && coalesceArgs.some((a: any) => !isElementChild(a.nested, params));
+  return scalarUnion || listUnion || scalarChoose || listChoose || scalarCoalesce || listCoalesce
+    || mixedUnion || mixedChoose || mixedCoalesce || shapedOptional;
+}
+
+/** Branch shapes spanning every class the triage must separate: homogeneous element/scalar/list,
+ *  mixed, unclassifiable (repeat/group/nested-branch bodies), below-arity, option-map choose, and
+ *  nesting in both the arm and the parent position. */
+const CORPUS = [
+  'g.V().union(__.out(), __.in())',
+  'g.V().union(__.out(), __.in(), __.both())',
+  'g.V().union(__.outE(), __.out())',
+  'g.V().union(__.values("name"), __.values("age"))',
+  'g.V().union(__.out().values("name").fold(), __.in().values("name").fold())',
+  'g.V().union(__.out(), __.values("name"))',
+  'g.V().union(__.values("name"), __.out())',
+  'g.V().union(__.out().values("name").fold(), __.values("age"))',
+  'g.V().union(__.out())',
+  'g.V().union(__.out().order().by("name"), __.in())',
+  'g.V().union(__.repeat(__.out()).times(2), __.in())',
+  'g.V().union(__.group().by("name"), __.in())',
+  'g.V().union(__.union(__.out(), __.in()), __.both())',
+  'g.V().union(__.constant("x"), __.constant("y"))',
+  'g.V().union(__.count(), __.values("age"))',
+  'g.V().union(__.out().optional(__.in()), __.both())',
+  'g.V().coalesce(__.out(), __.in())',
+  'g.V().coalesce(__.values("name"), __.values("age"))',
+  'g.V().coalesce(__.out().values("name").fold(), __.in().values("x").fold())',
+  'g.V().coalesce(__.out(), __.values("name"))',
+  'g.V().coalesce(__.out())',
+  'g.V().coalesce(__.values("name"))',
+  'g.V().coalesce(__.repeat(__.out()).times(2), __.in())',
+  'g.V().coalesce(__.out().optional(__.in()), __.both())',
+  'g.V(1).coalesce(__.coalesce(__.out(), __.in()), __.both())',
+  'g.V().choose(__.has("age"), __.out(), __.in())',
+  'g.V().choose(__.has("age"), __.values("name"), __.values("age"))',
+  'g.V().choose(__.has("age"), __.out().values("n").fold(), __.in().values("n").fold())',
+  'g.V().choose(__.has("age"), __.out(), __.values("name"))',
+  'g.V().choose(__.has("age"), __.out())',
+  'g.V().choose(__.has("age"), __.out().optional(__.in()), __.both())',
+  'g.V().choose(__.values("age")).option(29, __.out()).option(35, __.in())',
+  'g.V().optional(__.out())',
+  'g.V().optional(__.values("name"))',
+  'g.V().optional(__.out().values("name").fold())',
+  'g.V().optional(__.out().out())',
+  'g.V().optional(__.count())',
+  'g.V().optional(__.out("created")).values("name")',
+  'g.V().optional(__.both()).count()',
+  'g.V().as("a").optional(__.out()).select("a")',
+  'g.V().optional(__.out().optional(__.out())).path()',
+  'g.V().optional(__.repeat(__.out()).times(2))',
+  'g.V().optional(__.group().by("name"))',
+  'g.V().optional(__.union(__.out(), __.in()))',
+];
+
+describe('branchNeedsShapeDispatch === the ten-boolean predicate it replaced', () => {
+  test('agrees for every branch step in the corpus', () => {
+    let checked = 0;
+    for (const src of CORPUS) {
+      for (const step of branchSteps(src)) {
+        const kind = asBranchKind(step.name) as BranchKind;
+        expect({ src, step: step.name, breaks: branchNeedsShapeDispatch(kind, step, {}) })
+          .toEqual({ src, step: step.name, breaks: tenBooleanBreak(step, {}) });
+        checked++;
+      }
+    }
+    // guards against the corpus silently emptying (a parse change that stops yielding branch steps)
+    expect(checked).toBeGreaterThanOrEqual(44);
+  });
+});

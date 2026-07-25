@@ -8,7 +8,7 @@ import { withCarried, type Carry, type ElementStream, type StepFn } from '../ste
 import { move, toEdge, toVertex, otherV } from '../steps/prefix/movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from '../steps/prefix/filter.ts';
 import { union, optional, repeat, choose, coalesce } from '../steps/prefix/branch.ts';
-import { isElementChild, isListChild, isScalarChild } from '../steps/tail/child-shape.ts';
+import { asBranchKind, branchNeedsShapeDispatch, isElementChild, isListChild, isScalarChild } from '../steps/tail/child-shape.ts';
 import { match } from '../steps/prefix/match.ts';
 import { identity, limit, range, skip } from '../steps/prefix/passthrough.ts';
 import { sack } from '../steps/prefix/sack.ts';
@@ -261,51 +261,16 @@ export class LoweringEngine implements Engine {
     let i = from;
     for (; i < steps.length; i++) {
       const fn = this.PREFIX.get(steps[i].name);
-      // Option-map choose (choose().option()…) is a tail CASE projector, not a prefix
-      // branch — stop so compileTail handles it (predicate-form choose has no .options).
-      const unionBranches = steps[i].name === 'union'
-        ? steps[i].args.filter((a: any) => a && typeof a === 'object' && 'nested' in a)
-        : [];
-      const scalarUnion = unionBranches.length >= 2
-        && unionBranches.every((a: any) => isScalarChild(a.nested, seedSt.params));
-      const listUnion = unionBranches.length >= 2
-        && unionBranches.every((a: any) => isListChild(a.nested, seedSt.params));
-      const chooseArgs = steps[i].name === 'choose' && !steps[i].options
-        ? steps[i].args.filter((a: any) => a && typeof a === 'object' && 'nested' in a)
-        : [];
-      const scalarChoose = chooseArgs.length === 3
-        && isScalarChild(chooseArgs[1].nested, seedSt.params)
-        && isScalarChild(chooseArgs[2].nested, seedSt.params);
-      const listChoose = chooseArgs.length === 3
-        && isListChild(chooseArgs[1].nested, seedSt.params)
-        && isListChild(chooseArgs[2].nested, seedSt.params);
-      const coalesceArgs = steps[i].name === 'coalesce'
-        ? steps[i].args.filter((a: any) => a && typeof a === 'object' && 'nested' in a)
-        : [];
-      const scalarCoalesce = coalesceArgs.length > 0
-        && coalesceArgs.every((a: any) => isScalarChild(a.nested, seedSt.params));
-      const listCoalesce = coalesceArgs.length > 0
-        && coalesceArgs.every((a: any) => isListChild(a.nested, seedSt.params));
-      const optionalNested = steps[i].name === 'optional' ? steps[i].args[0]?.nested : null;
-      const shapedOptional = !!optionalNested
-        && (isListChild(optionalNested, seedSt.params) || isScalarChild(optionalNested, seedSt.params));
-      // Mixed-shape arms (some non-element) can't be an element StepFn — break so the
-      // shape dispatch tries the list/scalar/variant lowerers (P4). All-element (incl.
-      // mixed node/edge) stays with the element StepFn and its own defer.
-      const mixedUnion = unionBranches.length >= 2 && unionBranches.some((a: any) => !isElementChild(a.nested, seedSt.params));
-      const mixedChoose = chooseArgs.length === 3 && chooseArgs.slice(1).some((a: any) => !isElementChild(a.nested, seedSt.params));
-      const mixedCoalesce = coalesceArgs.length > 0 && coalesceArgs.some((a: any) => !isElementChild(a.nested, seedSt.params));
+      // A branch (union/choose/coalesce/optional) whose arms are not uniformly ELEMENT can't be an
+      // element StepFn — break so the tail shape dispatch picks the list/scalar/variant merge.
+      // All-element (incl. mixed node/edge) stays here with the element StepFn and its own defer.
+      // The decision is classifyBranchArms' (child-shape.ts) — the ONE canonical arm triage the
+      // tail cascades read too, so the fold's `break` and the cascade cannot drift. Option-map
+      // choose (choose().option()…) is a tail CASE projector, not a prefix branch, and reports
+      // as needing dispatch from there.
+      const branchKind = asBranchKind(steps[i].name);
       if (!fn
-        || scalarUnion
-        || listUnion
-        || scalarChoose
-        || listChoose
-        || scalarCoalesce
-        || listCoalesce
-        || mixedUnion
-        || mixedChoose
-        || mixedCoalesce
-        || shapedOptional
+        || (branchKind && branchNeedsShapeDispatch(branchKind, steps[i], seedSt.params))
         || (steps[i].name === 'choose' && steps[i].options)
         || (steps[i].name === 'sack' && !isSackMutate(steps[i]))
         || ((steps[i].name === 'group' || steps[i].name === 'groupCount') && !isSideEffectGroup(steps[i]))
