@@ -691,10 +691,12 @@ export function lowerScalarRows(
       }
       const clean = withoutCarried(carryOf(stream));
       const p = stream.rel.as('p');
-      const typeCol = stream.result === 'number' ? q`, ${p.c.vt} AS vt` : empty;
-      const rel = stream.q.cte(q`SELECT DISTINCT ${p.c.v} AS v${typeCol} FROM ${p}`,
-        stream.result === 'number' ? ['v', 'vt'] : ['v']);
-      stream = toScalarStream(clean, rel, stream.as, { result: stream.result });
+      // payload/cols (not a hand-rolled projection) so the per-row stored vtype survives the
+      // dedup like it does every other row-preserving op. DISTINCT over (v, vtype) is also the
+      // correct multiset semantics: equal values of DIFFERENT stored types are distinct
+      // Gremlin values and must not collapse into one traverser.
+      const rel = stream.q.cte(q`SELECT DISTINCT ${payload(stream, p)} FROM ${p}`, cols({ ...stream, carried: clean.carried }));
+      stream = toScalarStream(clean, rel, stream.as, { result: stream.result, vtype: stream.vtype });
       continue;
     }
     break;
