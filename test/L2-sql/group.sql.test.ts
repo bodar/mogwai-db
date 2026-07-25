@@ -53,6 +53,25 @@ describe('group / properties SQL', () => {
     expect(read('g.V().elementMap()').shape).toEqual({ kind: 'elementMap', keys: null });
   });
 
+  test('valueMap().with(WithOptions.tokens) desugars to valueMap(true) (item 13)', () => {
+    // The JS GLV resolves WithOptions.tokens/.all to the wire strings/ints '~tinkerpop.valueMap.
+    // tokens'/15 before sending, so the real conformance query is with('~…tokens'). The tokens
+    // option with no selector (or + all) IS valueMap(true): the fold Pass sets the tokens flag,
+    // so the shape matches its valueMap(true) equivalent exactly. Both wire and enum forms fold.
+    expect(read('g.V().valueMap().with("~tinkerpop.valueMap.tokens")').shape)
+      .toEqual(read('g.V().valueMap(true)').shape);
+    expect(read('g.V().valueMap("name","age").with("~tinkerpop.valueMap.tokens")').shape)
+      .toEqual(read('g.V().valueMap(true,"name","age")').shape);
+    expect(read('g.V().valueMap().with("~tinkerpop.valueMap.tokens", 15)').shape)
+      .toEqual({ kind: 'valueMap', keys: null, tokens: true });
+    expect(read('g.V().valueMap().with(WithOptions.tokens)').shape) // enum form (typed at our server)
+      .toEqual({ kind: 'valueMap', keys: null, tokens: true });
+    // A SELECTIVE token subset (labels=2) has no valueMap(true) equivalent yet → fail closed,
+    // never silently widened to all-tokens.
+    expect(() => read('g.V().valueMap("name","age").with("~tinkerpop.valueMap.tokens", 2).by(__.unfold())'))
+      .toThrow('with() cannot consume the valueMap result shape');
+  });
+
   test('P3 Stage B: valueMap() re-enterable — select(Column), count, is(typeOf(MAP))', () => {
     // valueMap() → a per-element whole-map blob MapStream (one `map` blob per element, folding
     // {k:[v]} into [[{t,v},valueList],…]); select(Column.keys) aggregates one key-list per map.

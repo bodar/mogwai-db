@@ -345,6 +345,43 @@ export function foldCallWith(steps: PStep[]): PStep[] {
 }
 
 
+// The OptionsStrategy tokens key + selector values. The JS GLV resolves WithOptions.tokens to the
+// STRING '~tinkerpop.valueMap.tokens' and WithOptions.all/.ids/.labels to the INTEGER bitmask
+// 15/1/2 before it serializes the query, so the wire form is with('~…tokens'[, 15]); a query typed
+// straight at our server may instead carry the {withOption} enum the frontend captures. Both are
+// recognised here. `all` (15) selects id+label = valueMap(true); a proper subset (ids/labels/…)
+// has no valueMap(true) equivalent yet.
+const VALUEMAP_TOKENS_KEY = '~tinkerpop.valueMap.tokens';
+const WITH_ALL = 15;
+const isTokensArg = (a: any): boolean =>
+  a === VALUEMAP_TOKENS_KEY || (a && typeof a === 'object' && a.withOption === 'tokens');
+const isAllArg = (a: any): boolean =>
+  a === WITH_ALL || (a && typeof a === 'object' && a.withOption === 'all');
+
+/** Desugar `valueMap().with(WithOptions.tokens)` onto the valueMap step. The tokens option with no
+ *  selector (or the all selector) is exactly `valueMap(true)`: include the id+label tokens, which
+ *  the valueMap projector already reads off a `true` arg. So append the `true` flag and drop the
+ *  with(). SELECTIVE token subsets (with(tokens, ids|labels|…), which pick a proper token subset and
+ *  pair with a by(unfold) that also flattens the value lists) have no valueMap(true) equivalent yet,
+ *  so they are LEFT in place to fail closed at dispatch — never silently widened to all-tokens. A
+ *  with() on any other host is untouched (call().with() folds in foldCallWith; every other with()
+ *  falls through to its clear "cannot consume" deferral). */
+export function foldValueMapWith(steps: PStep[]): PStep[] {
+  const out: PStep[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    const w = steps[i + 1];
+    const wargs: any[] = s.name === 'valueMap' && w?.name === 'with' ? (w.args ?? []) : [];
+    // Desugar only the all-tokens forms: with(tokens) or with(tokens, all).
+    const allTokens = wargs.length >= 1 && isTokensArg(wargs[0])
+      && (wargs.length === 1 || (wargs.length === 2 && isAllArg(wargs[1])));
+    if (!allTokens) { out.push(s); continue; }
+    out.push(s.args.includes(true) ? s : { ...s, args: [true, ...s.args] });
+    i += 1; // consume the with()
+  }
+  return out;
+}
+
 /** `fold().count(Scope.local)` counts the one folded list's size = the number of upstream
  *  elements = `count()`. A provable identity that also unblocks group value children like
  *  by(__.out().order().fold().count(Scope.local)) (then dropRedundantOrder removes the
