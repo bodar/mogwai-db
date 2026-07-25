@@ -172,6 +172,22 @@ describe('group / properties SQL', () => {
     expect(() => compile("g.V().values('name').groupCount('a').cap('a')", {})).toThrow();
   });
 
+  test('count values decode as Number (Int64), including inside a nested groupCount map', () => {
+    // count()/groupCount() are Java Longs → Int64, which the client decodes to a Number (a
+    // bigint would arrive as BigInt — the fidelity bug). Assert the decoded JS TYPE at every
+    // depth: a top-level groupCount value AND a groupCount nested as a group's by()-value.
+    const store = seededStore();
+    const dec = (q: string) => executeQuery(store, q, {}).map((b: Buffer) => ioc.anySerializer.deserialize(b, true).v);
+    const top = dec('g.V().groupCount().by(T.label)')[0] as Map<string, unknown>;
+    expect(typeof top.get('person')).toBe('number');
+    expect(top.get('person')).toBe(4);
+    // nested: group().by('name').by(out().groupCount().by(T.label)) → Map{name: Map{label: count}}.
+    const nested = dec("g.V().hasLabel('person').group().by('name').by(__.out().groupCount().by(T.label))")[0] as Map<string, Map<string, unknown>>;
+    expect(typeof nested.get('marko')!.get('person')).toBe('number');
+    expect(nested.get('marko')!.get('person')).toBe(2);
+    expect(nested.get('josh')!.get('software')).toBe(2);
+  });
+
   test('P3 Stage C2: count()/is(typeOf(MAP)) re-enter a group value', () => {
     // count() over a group = number of entries (distinct keys) → COUNT(DISTINCT gk)
     const c = read('g.V().group().by(T.label).count()');
