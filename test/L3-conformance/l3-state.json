@@ -1,5 +1,5 @@
 {
-  "passing": 1344,
+  "passing": 1345,
   "total": 2041,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -850,6 +850,7 @@
     "g_V_valuesXnameX_fold_intersectX2X",
     "g_V_valuesXnameX_fold_intersectXV_valuesXnonexistantX_foldX",
     "g_V_valuesXnameX_fold_intersectXnullX",
+    "g_V_valuesXnameX_fold_isXtypeOfXGType_LISTXX_count",
     "g_V_valuesXnameX_fold_mergeX2X",
     "g_V_valuesXnameX_fold_mergeXV_valuesXnonexistantX_foldX",
     "g_V_valuesXnameX_fold_mergeXnullX",
@@ -1806,7 +1807,6 @@
     "g_V_valuesXmapX_isXtypeOfXGType_MAPXX_foldX",
     "g_V_valuesXmapX_isXtypeOfXGType_MAPXX_whereX_countXlocalX_isXgtX1XXX",
     "g_V_valuesXnameX_flatMapXsplitXaX_unfoldX",
-    "g_V_valuesXnameX_fold_isXtypeOfXGType_LISTXX_count",
     "g_V_valuesXname_age_nullX",
     "g_V_valuesXsetX_isXtypeOfXGType_SETXX_whereXcountXlocalX_isXeqX3XXX",
     "g_V_valuesXstrX_repeatXsplitXabcX_conjoinX_timesX2X",

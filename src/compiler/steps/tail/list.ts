@@ -13,6 +13,8 @@ import { carryOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryS
 import { carryFrag, carriedCols, type ElementStream } from '../context/context.ts';
 import { type Compiled } from '../../../sql/kernel/render.ts';
 import { engineOf, type Engine } from '../../engine/deps.ts';
+import { lowerGlobalCount } from './barrier.ts';
+import { collectionTypeOf } from './scalar.ts';
 
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
 const isLocal = (s: PStep): boolean => (s.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local');
@@ -339,6 +341,23 @@ const listStringTx: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
 const listReducer: ShapeTailFn<ListStream> = (s, step, _steps, at) =>
   isLocal(step) ? continueLowering(lowerListReducer(s, step.name), at + 1) : null;
 
+// count() on a list stream: Scope.local is the per-list LENGTH (listReducer); the GLOBAL form
+// counts the list TRAVERSERS (one per fold/aggregate result) via the shared relational barrier —
+// so values().fold().count() / is(typeOf(LIST)).count() report 1, not "count() on a list value".
+const listCount: ShapeTailFn<ListStream> = (s, step, _steps, at) =>
+  isLocal(step) ? continueLowering(lowerListReducer(s, 'count'), at + 1)
+                : continueLowering(lowerGlobalCount(s), at + 1);
+
+// is(typeOf(LIST|SET)) on a list value is an identity type-assert — a list IS a list (a set IS a
+// set) — so pass the stream through unchanged, matching is(typeOf(MAP)) on a MapStream. The
+// stream's own `set` marker decides which token matches; a non-matching token / any other is()
+// predicate would filter to empty and has no worked-out list form yet, so it defers (fail closed).
+const listIs: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
+  const kind = collectionTypeOf(step);
+  if ((kind === 'list' && !s.set) || (kind === 'set' && s.set)) return continueLowering(s, at + 1);
+  return null;
+};
+
 // conjoin(delim): join the incoming list into ONE string (nulls skipped), delimiter a
 // plain string arg → a scalar stream (so a trailing step composes; usually terminal).
 const listConjoin: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
@@ -381,6 +400,10 @@ const LIST_TAIL = new Map<string, ShapeTailFn<ListStream>>([
   ...[...STRING_LOCAL_TX].map((n): [string, ShapeTailFn<ListStream>] => [n, listStringTx]),
   ...[...LIST_REDUCERS].map((n): [string, ShapeTailFn<ListStream>] => [n, listReducer]),
   ...[...LIST_OPERAND_OPS].map((n): [string, ShapeTailFn<ListStream>] => [n, listSetOp]),
+  // Overrides the LIST_REDUCERS 'count' entry above (Map keeps the last) so a GLOBAL count()
+  // counts list traversers instead of falling through to the "not yet supported" throw.
+  ['count', listCount],
+  ['is', listIs],
 ]);
 
 export function compileFromList(s: ListStream, steps: PStep[], at: number): LoweringResult {

@@ -113,6 +113,25 @@ describe('scalar-parent / projection SQL', () => {
     expect(executeQuery(store, "g.V().values('uuid')", {}).map(dec)).toEqual(['0263f28b-eff9-4c17-8e33-0b41c74b6d4c']);
   });
 
+  test('global count() + is(typeOf(LIST)) identity on a fold() list value', () => {
+    // A fold() collapses the stream into ONE list traverser. A GLOBAL count() counts the list
+    // TRAVERSERS (1), distinct from count(Scope.local) which is the list LENGTH — so it routes
+    // through the shared relational barrier, not the per-list reducer.
+    expect(read("g.V().values('name').fold().count()").shape).toEqual({ kind: 'count' });
+    // is(typeOf(LIST)) on a list value is an identity type-assert (a list IS a list) — the
+    // terminal stream stays a list, then count() reports 1.
+    expect(read("g.V().values('name').fold().is(typeOf(GType.LIST)).count()").shape).toEqual({ kind: 'count' });
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    for (const w of MODERN_SEED) executeQuery(store, w, {});
+    const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
+    // one list of 6 names → count 1 (a Long that decodes to a Number after the Int64 fix).
+    expect(executeQuery(store, "g.V().values('name').fold().count()", {}).map(dec)).toEqual([1]);
+    expect(executeQuery(store, "g.V().values('name').fold().is(typeOf(GType.LIST)).count()", {}).map(dec)).toEqual([1]);
+    // the identity assert leaves the list intact (6 names) when terminal.
+    expect((executeQuery(store, "g.V().values('name').fold().is(typeOf(GType.LIST))", {}).map(dec)[0] as any[]).sort())
+      .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+  });
+
   test('min/max range over comparables (incl. text); mean/sum numeric only', () => {
     const mn = read('g.V().values("age").min()');
     // TinkerPop 4 Strings are Comparable, so min/max include text (numbers order first).
