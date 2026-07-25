@@ -125,7 +125,7 @@ Worth doing only when a concrete scenario demands them.
   recursive-regime `from()`/`to()` and multi-bind from/to. *Low-Medium.*
   Includes **`path().by(__.trav)` / `by(T.token)` in the array/recursive regime**: the LINEAR
   regime supports these via the generic child seam (`tryCompileScalarValueChild`), but the array
-  regime (`compilePathArray` / `pathBy`, `src/steps/tail/path.ts`) hard-throws (lines ~23/37/99–116).
+  regime (`compilePathArray` / `pathBy`, `src/compiler/steps/tail/path.ts`) hard-throws (lines ~23/37/99–116).
   Not a mechanical lift onto the seam — path is a dynamic-length JSONB array exploded via
   `json_each`, so pushing a child scope over `json_each` positions needs a NEW positional-child
   substrate. Revisit only if that substrate gets built.
@@ -205,7 +205,7 @@ Independent of conformance; needed before a real multi-tenant deployment.
 - **Fold the third scalar-child projector residue** (`compileScalarChildRows`/`continueScalar`)
   onto the generic `PROJECTORS` — maintainability only.
   → [compiler-consolidation](./2026-07-16-compiler-consolidation-plan.md) §1
-- **`write.ts` row-at-a-time nested read** — `runNested`/`nestedScalar` (`src/steps/write/write.ts`
+- **`write.ts` row-at-a-time nested read** — `runNested`/`nestedScalar` (`src/compiler/steps/write/write.ts`
   ~L54–81) re-compile + `store.query(...)` once per target per spec and take `rows[0].v`. An
   acknowledged/declared-imperative surface (the write path is not a pure fold like the read spine).
   Could materialize the correlated value column once via the generic child seam instead. Scoped;

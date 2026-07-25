@@ -1,7 +1,7 @@
 ---
 paths:
   - "src/storage.ts"
-  - "src/steps/write/**"
+  - "src/compiler/steps/write/**"
   - "src/compiler/plan/**"
 ---
 

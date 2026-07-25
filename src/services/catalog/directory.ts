@@ -1,6 +1,6 @@
 import { q, value, list } from '../../sql/kernel/q.ts';
-import { toScalarStream } from '../../steps/context/stream.ts';
-import type { Carry } from '../../steps/context/context.ts';
+import { toScalarStream } from '../../compiler/steps/context/stream.ts';
+import type { Carry } from '../../compiler/steps/context/context.ts';
 import type { Service, ServiceCallCtx } from '../spi/types.ts';
 import { DIRECTORY_SERVICE_NAME } from '../spi/types.ts';
 

@@ -1,8 +1,8 @@
 import { q, value, raw, type Relation } from '../../sql/kernel/q.ts';
 import { propertyFts, vertexProperties, edgeProperties, nodes, edges, labels } from '../../sql/schema.ts';
 import { storedValueExpr } from '../../compiler/plan/plan.ts';
-import { PROPERTY_PAYLOAD, toPropertyStream, type PropertyStream } from '../../steps/context/stream.ts';
-import type { Carried } from '../../steps/context/context.ts';
+import { PROPERTY_PAYLOAD, toPropertyStream, type PropertyStream } from '../../compiler/steps/context/stream.ts';
+import type { Carried } from '../../compiler/steps/context/context.ts';
 import type { Service, ServiceCallCtx, CallParams } from '../spi/types.ts';
 
 // ---------- tinker.search — full-text search over property values (pure, Start) ----------

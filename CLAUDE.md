@@ -20,7 +20,7 @@ connects over plain HTTP. Verified against unmodified `gremlin@4.0.0-beta.2` on 
 
 - `src/sql/CLAUDE.md` — the `q` SQL kernel
 - `src/compiler/CLAUDE.md` — IR passes, the DI object model, fast paths
-- `src/steps/CLAUDE.md` — the lowering surface + child seam
+- `src/compiler/steps/CLAUDE.md` — the lowering surface + child seam
 - `src/services/CLAUDE.md` — `call()` + Service Registry + full-text search
 - `test/CLAUDE.md` — the L1–L4 ladder + version split
 - `.claude/rules/{wire-protocol,schema-storage,management-api}.md` — glob-scoped, fire on the

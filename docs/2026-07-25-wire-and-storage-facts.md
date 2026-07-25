@@ -40,7 +40,7 @@ to a JS **Number** (not BigInt) — so L4 notation uses `d[n].i` for map-entry c
 
 ## `MapStream` is a per-row JSONB map blob (not an entry relation)
 
-A `MapStream` (`src/steps/context/stream.ts`) is a **per-row whole-map VALUE** — one JSONB `map`
+A `MapStream` (`src/compiler/steps/context/stream.ts`) is a **per-row whole-map VALUE** — one JSONB `map`
 column holding an ordered `[[keyNode, valNode], …]` pairs array, mirroring `ListStream`'s single
 `list` blob. It is **NOT** an entry relation.
 

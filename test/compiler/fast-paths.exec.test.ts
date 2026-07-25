@@ -5,11 +5,11 @@
 // test fails HERE, at review time.
 import { test, expect, describe } from 'bun:test';
 import { DEFAULT_FAST_PATHS, type FastPath } from '../../src/compiler/options/fast-paths.ts';
-import { BulkRepeatCountFastPath } from '../../src/steps/tail/bulk.ts';
-import { MovementCollapseFastPath } from '../../src/steps/prefix/movement.ts';
-import { SingleHopOptionalFastPath } from '../../src/steps/prefix/branch.ts';
-import { PredicateInliningFastPath } from '../../src/steps/prefix/predicate.ts';
-import { ScalarPredicateInliningFastPath } from '../../src/steps/tail/scalar-arm.ts';
+import { BulkRepeatCountFastPath } from '../../src/compiler/steps/tail/bulk.ts';
+import { MovementCollapseFastPath } from '../../src/compiler/steps/prefix/movement.ts';
+import { SingleHopOptionalFastPath } from '../../src/compiler/steps/prefix/branch.ts';
+import { PredicateInliningFastPath } from '../../src/compiler/steps/prefix/predicate.ts';
+import { ScalarPredicateInliningFastPath } from '../../src/compiler/steps/tail/scalar-arm.ts';
 import { FtsSubstringFastPath } from '../../src/compiler/plan/plan.ts';
 
 // The six FastPath objects, gathered here purely for the completeness assertions below. This is NOT

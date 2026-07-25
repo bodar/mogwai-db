@@ -6,7 +6,7 @@ import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { CREW_SEED } from './fixtures/seed-crew.ts';
 import { MAX_FEDERATION_DEPTH, guardFederationDepth } from '../src/services/params/federation-depth.ts';
 import { federateService } from '../src/services/catalog/federate.ts';
-import { INJECT_VALUES_KEY } from '../src/steps/injection.ts';
+import { INJECT_VALUES_KEY } from '../src/compiler/steps/injection.ts';
 
 // End-to-end federation on the REAL stack: two graphs owned by one BunGraphManager, one
 // federating into the other via mogwai.graph.federate — the real service, real env, real depth
