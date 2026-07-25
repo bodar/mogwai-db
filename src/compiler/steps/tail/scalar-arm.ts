@@ -339,9 +339,10 @@ export function tryScalarCoalesceChild(s: ScalarStream, step: PStep): ScalarStre
 // re-source element arm (`__.V()`) or a fold list arm — no homogeneous merge applies
 // (unionScalarStreams assumes every arm has a `v`). They merge into the SAME VariantStream
 // the element parent produces: each arm compiles to its natural shape and the rows carry a
-// `vk` tag (1 scalar / 2 node / 3 edge / 4 list). The merge builders (variantArmSelect/
-// variantArmsMeta/variantCols) are parent-agnostic (Carry-typed, branch.ts) so this reuses
-// them verbatim; only the per-arm compiler differs (a scalar re-sources rather than walks).
+// `vk` tag (1 scalar / 2 node / 3 edge / 4 list). The merge builders (mergeVariantArms/
+// mergeVariantParts/variantArmsMeta, variant.ts) are parent-agnostic (Carry-typed) so this reuses
+// them verbatim — including the arm-merge encounter mint; only the per-arm compiler differs (a
+// scalar re-sources rather than walks).
 
 /** An element arm over a scalar: a re-source (`V()`/`E()`) then element movement/filter,
  *  ending in element space. No gating (union), so it lowers over the parent value rows

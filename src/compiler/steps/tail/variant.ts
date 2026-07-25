@@ -12,7 +12,7 @@
 import { q, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { rangeToOffsetLimit } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { carryOf, continueLowering, dispatchShapeTail, toVariantStream, type ListStream, type LoweringResult, type ScalarStream, type ShapeTailFn, type VariantArms, type VariantStream } from '../context/stream.ts';
+import { carryOf, continueLowering, dispatchShapeTail, toListStream, toVariantStream, type ListStream, type LoweringResult, type ScalarStream, type ShapeTailFn, type VariantArms, type VariantStream } from '../context/stream.ts';
 import { carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, type Carry } from '../context/context.ts';
 import { lowerGlobalCount } from './barrier.ts';
 
@@ -23,6 +23,9 @@ import { lowerGlobalCount } from './barrier.ts';
 // stitch the tagged rows into one relation. They touch only a bare Carry (carried columns), so
 // an element parent (branch.ts) and a scalar parent (child.ts) reuse them verbatim — only the
 // per-arm compiler differs (a scalar re-sources rather than walks).
+
+const carryWith = (base: Carry, carried: Carry['carried']): Carry =>
+  ({ q: base.q, params: base.params, sideEffects: base.sideEffects, carried });
 
 /** The item-shape a set of list arms unify to (or throws if incompatible). */
 export const unifyLists = (arms: readonly ListStream[]): ListStream['of'] => {
@@ -37,6 +40,52 @@ export const unifyLists = (arms: readonly ListStream[]): ListStream['of'] => {
   }
   throw new Error('list branch arms have incompatible item shapes');
 };
+
+/** Merge a set of HOMOGENEOUS list arms (union/coalesce/choose over `…fold()` bodies) into one
+ *  ListStream — the list twin of finishElementMerge/unionScalarStreams/mergeVariantArms, which
+ *  the three element-parent list branches previously hand-rolled verbatim. Parent-agnostic (a
+ *  bare Carry) so a future scalar-parent homogeneous-list branch reuses it rather than growing a
+ *  fourth copy. `gateFor` supplies a per-arm WHERE (coalesce's not-in-prior).
+ *
+ *  EMISSION ORDER: each arm's fold() already collapsed its own multiset to ONE row per input, so
+ *  a merge emits ≤1 row per arm per input and arm order IS observable in principle — but no
+ *  positional consumer can reach it today (`limit()` on a list value throws), so there is nothing
+ *  to order and minting would be dead SQL. The mint is therefore gated on a live carried
+ *  encounter exactly like the siblings: the day a list-valued limit/range lands, this merge
+ *  re-mints `ROW_NUMBER() OVER (… ORDER BY arm_idx, arm_encounter)` and is correct by
+ *  construction rather than a silent take-first bug. */
+export function finishListMerge(
+  base: Carry, arms: readonly ListStream[], gateFor?: (a: Relation, k: number) => Expression | undefined,
+): ListStream {
+  const of = unifyLists(arms);
+  const enc = base.carried.encounter;
+  const armSelect = (arm: ListStream, k: number, carried: Carry['carried'], tag: boolean): Expression => {
+    const a = arm.rel.as('a');
+    const armEnc = tag ? q`, ${k} AS arm_idx, ${arm.carried.encounter ? a.c[arm.carried.encounter] : q`1`} AS arm_encounter` : empty;
+    const gate = gateFor?.(a, k);
+    return q`SELECT ${a.c.list} AS list${armEnc}${carryFrag(carried, a)} FROM ${a}${gate ? q` WHERE ${gate}` : empty}`;
+  };
+  if (!enc) {
+    const rel = base.q.cte(
+      list(arms.map((arm, k) => armSelect(arm, k, base.carried, false)), ' UNION ALL '),
+      ['list', ...carriedCols(base.carried)],
+    );
+    return toListStream(base, rel, of);
+  }
+  const baseNoEnc = carriedWith(base.carried, { encounter: null });
+  const inner = base.q.cte(
+    list(arms.map((arm, k) => armSelect(arm, k, baseNoEnc, true)), ' UNION ALL '),
+    ['list', 'arm_idx', 'arm_encounter', ...carriedCols(baseNoEnc)],
+  );
+  const m = inner.as('m');
+  const over = partitionOver(base.carried, m, q`${m.c.arm_idx}, ${m.c.arm_encounter}`);
+  const outCarried = carriedWith(baseNoEnc, { encounter: 'encounter' });
+  const rel = base.q.cte(
+    q`SELECT ${m.c.list} AS list${carryFragMint(outCarried, m, 'encounter', q`ROW_NUMBER() OVER (${over})`)} FROM ${m}`,
+    ['list', ...carriedCols(outCarried)],
+  );
+  return toListStream(carryWith(base, outCarried), rel, of);
+}
 
 /** One compiled branch arm tagged by its natural shape (vk 1 scalar / 2 node / 3 edge /
  *  4 list). Parent-agnostic: an element-parent (branch.ts) and a scalar-parent (child.ts)
@@ -75,8 +124,6 @@ export function variantArmSelect(arm: VariantArm, carry: Carry, hasList: boolean
 export const variantCols = (carry: Carry, hasList: boolean): string[] =>
   ['vk', 'v', 'rid', ...(hasList ? ['list'] : []), ...carriedCols(carry.carried)];
 
-const carryWith = (base: Carry, carried: Carry['carried']): Carry =>
-  ({ q: base.q, params: base.params, sideEffects: base.sideEffects, carried });
 
 /** Merge a set of variant arms (mixed-shape branch) into one VariantStream. Parent-agnostic
  *  (element- and scalar-parent share it). When emission order is live, SYNTHESIZE the canonical

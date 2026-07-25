@@ -8,8 +8,8 @@ import { advance, elemRel, prevRel, carryFrag, carryFragMint, carriedCols, carri
 import { type AliasShape } from '../context/alias.ts';
 import { pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
 import { classifyListChild, classifyScalarChild, isElementChild, isListChild, isScalarChild, ROOT_SCOPE } from '../tail/child-shape.ts';
-import { carryOf, toListStream, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
-import { mergeVariantArms, mergeVariantParts, unifyLists, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
+import { carryOf, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
+import { finishListMerge, mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
 import { unionScalarStreams, SACK_OPS, combineSack } from '../tail/scalar.ts';
 import { engineOf, fastPathContextOf, type Engine } from '../../engine/deps.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
@@ -242,12 +242,7 @@ export function tryLowerListUnion(s: Step, st: ElementStream): ListStream | null
   const plans = branches.map((b) => classifyListChild(b.nested, st.params));
   if (plans.some((p) => !p)) return null;
   const arms = branches.map((branch, i) => tryCompileListChild(st, branch.nested, ROOT_SCOPE, plans[i]!.body)!);
-  const parts = arms.map((arm) => {
-    const a = arm.rel.as('a');
-    return q`SELECT ${a.c.list} AS list${carryFrag(st.carried, a)} FROM ${a}`;
-  });
-  const rel = st.q.cte(list(parts, ' UNION ALL '), ['list', ...carriedCols(st.carried)]);
-  return toListStream(carryOf(st), rel, unifyLists(arms));
+  return finishListMerge(carryOf(st), arms);
 }
 
 /** optional(t) = t where it yields output, else the traverser itself. Fast path: a
@@ -377,13 +372,10 @@ export function tryLowerListCoalesce(s: Step, st: ElementStream): ListStream | n
   if (plans.some((p) => !p)) return null;
   const { seedSt, ord } = originSeed(st);
   const arms = branches.map((branch, i) => tryCompileListChild(seedSt, branch.nested, ROOT_SCOPE, plans[i]!.body)!);
-  const parts = arms.map((arm, k) => {
-    const a = arm.rel.as('a');
-    const prior = k === 0 ? empty : q` WHERE ${list(arms.slice(0, k).map((p) => q`${a.c[ord]} NOT IN (SELECT ${ord} FROM ${p.rel})`), ' AND ')}`;
-    return q`SELECT ${a.c.list} AS list${carryFrag(st.carried, a)} FROM ${a}${prior}`;
-  });
-  const rel = st.q.cte(list(parts, ' UNION ALL '), ['list', ...carriedCols(st.carried)]);
-  return toListStream(carryOf(st), rel, unifyLists(arms));
+  // The merge projects the OUTER carried (st), not the seed's — the pushed ordinal is consumed by
+  // the not-in-prior gate and must not leak into the merged list stream's declared schema.
+  return finishListMerge(carryOf(st), arms, (a, k) => k === 0 ? undefined
+    : list(arms.slice(0, k).map((p) => q`${a.c[ord]} NOT IN (SELECT ${ord} FROM ${p.rel})`), ' AND '));
 }
 
 // ---------- mixed-shape branch arms → a dynamic-tag VariantStream (P4) ----------
@@ -942,10 +934,5 @@ export function tryLowerListChoose(s: Step, st: ElementStream): ListStream | nul
   const seedFor = chooseGate(st, predArg.nested);
   const thenEnd = tryCompileListChild(seedFor(false), thenArg.nested, ROOT_SCOPE, thenPlan.body)!;
   const elseEnd = tryCompileListChild(seedFor(true), elseArg.nested, ROOT_SCOPE, elsePlan.body)!;
-  const parts = [thenEnd, elseEnd].map((arm) => {
-    const a = arm.rel.as('a');
-    return q`SELECT ${a.c.list} AS list${carryFrag(st.carried, a)} FROM ${a}`;
-  });
-  const rel = st.q.cte(list(parts, ' UNION ALL '), ['list', ...carriedCols(st.carried)]);
-  return toListStream(carryOf(st), rel, unifyLists([thenEnd, elseEnd]));
+  return finishListMerge(carryOf(st), [thenEnd, elseEnd]);
 }
