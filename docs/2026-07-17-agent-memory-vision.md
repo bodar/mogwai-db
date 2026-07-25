@@ -104,7 +104,7 @@ in a DO) — a natural gate for *memory writes*.
 | Memory need | Neo4j-labs answer | mogwai answer |
 |---|---|---|
 | **Multi-tenant isolation** (one memory per agent/user) | `User{identifier}` nodes threaded through every query | **Free.** One DO per graph via `idFromName` — already a flat namespace, already isolated. |
-| **Provisioning** | Standing cluster; create schema | **Create-on-first-access** is already the whole story (decision #6). |
+| **Provisioning** | Standing cluster; create schema | **Create-on-first-access** is already the whole story (DO-on-first-access; see `.claude/rules/management-api.md`, "Graph selection"). |
 | **Idle cost** | Always-on cluster | **Scale-to-zero.** Idle graph = idle DO = ~$0. An abandoned memory stays GC-eligible. |
 | **Schema/enums for the model** | Sampled + `typeof` | **Exact + typed.** Catalog-backed labels, canonical `vtype`, true enum sets from `vp_key_value`. |
 | **Large result → context blowup** | Full `toArray()`, no pagination | **Chunked GraphBinary streaming** + `resultIterationBatchSize` already built. |
