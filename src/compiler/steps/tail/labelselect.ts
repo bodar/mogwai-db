@@ -2,11 +2,11 @@ import { q, list, raw, empty, value, type Expression } from '../../../sql/kernel
 import { type PStep } from '../../ir/strategies.ts';
 import { aliasElem, aliasIsElement, carriedCols, carryFrag, withShape, type AliasEntry, type Carried, type ElementStream } from '../context/context.ts';
 import {
-  aliasAppend, aliasEntry, aliasId, aliasPresent, aliasScalar, aliasSeed, elemEntry, shapeElem,
+  aliasAppend, aliasEntry, aliasId, aliasPop, aliasPresent, aliasScalar, aliasSeed, elemEntry, shapeElem,
   type AliasShape,
 } from '../context/alias.ts';
 import {
-  assertStreamColumns, carryOf, streamColumns, toListStream, toScalarStream, PROPERTY_PAYLOAD,
+  assertStreamColumns, carryOf, pathColumns, streamColumns, toListStream, toScalarStream, PROPERTY_PAYLOAD,
   type ListOf, type PropertyStream, type Stream,
 } from '../context/stream.ts';
 import { type ValueType } from '../../../sql/kernel/render.ts';
@@ -32,6 +32,20 @@ function currentEntry(s: Exclude<Stream, { kind: 'result' }>, p: any): { entry: 
       return { entry: aliasEntry('value', p.c.v, s.as ?? null), shape: 'value', as: s.as };
     case 'list':
       return { entry: aliasEntry('list', p.c.list), shape: 'list' };
+    case 'path': {
+      // A Path binds as a LIST entry — it IS an ordered sequence of its positions, and that is
+      // exactly what select(label) must yield (TinkerPop Select.feature
+      // g_V_…_path_asXaX_unionXidentity_identityX_selectXaX_unfold expects unfold() over the
+      // label to give back the path's elements). Encoding it as the existing 'list' shape rather
+      // than a new AliasShape keeps the read-back path (historyValues → toListStream) unchanged.
+      // Only the LINEAR layout reaches here: the grouped/recursive regime is not row-preserving,
+      // so lowerPath drops its aliases and as() never sees it (guarded below).
+      if (s.layout.kind !== 'linear')
+        throw new Error('as() over a recursive-repeat path() value not yet supported (the grouped layout is one row per position, not per path)');
+      const cols = (pathColumns(s.layout) as string[]).filter((c: string) => c.endsWith('_id') || c.endsWith('_v'));
+      if (!cols.length) throw new Error('as() over a path() with no framed positions not yet supported');
+      return { entry: aliasEntry('list', q`jsonb_array(${list(cols.map((c: string) => p.c[c]), ', ')})`), shape: 'list' };
+    }
     case 'variant': {
       // 0=null / 1=scalar / 2=node / 3=edge / 4=list (per-row tag)
       const arms: Expression[] = [];
@@ -145,7 +159,15 @@ function selectPropertyAlias(s: Exclude<Stream, { kind: 'result' }>, entry: Alia
  *  scalar / element / list stream per its shape and the Pop mode. */
 export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step: PStep, label: string, pop: string): Stream {
   const entry = s.carried.aliases.get(label);
-  if (!entry) return emptyElementLike(s); // label bound nowhere → drop every traverser
+  // No live binding → drop every traverser (an EMPTY result, never an error). TinkerPop pins this
+  // for both reachable cases, so the same answer is right for both:
+  //   · never bound at all           — Select.feature `g_V_selectXaX` → "the result should be empty"
+  //   · bound, then a REDUCING barrier (fold/count/sum/…) consumed the label: that barrier emits one
+  //     fresh traverser with an empty path, so nothing is bound on it either.
+  // `carried.consumedAliases` is what makes the second case PROVABLE rather than indistinguishable
+  // from a typo'd label — without it this line is a coin-flip that happens to land right. Keep them
+  // returning the same thing, but only because the spec says so, not because we can't tell.
+  if (!entry) return emptyElementLike(s);
   const p = s.rel.as('p');
   const col = p.c[entry.col];
   const carried = s.carried;
@@ -197,6 +219,21 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
       ['id', ...carriedCols(carried)],
     );
     return { ...(s as any), kind: 'elements', rel, elem: aliasElem(entry), carried } as ElementStream;
+  }
+  // A single LIST-shaped entry (a fold()ed list, or a path() bound whole) must come back OUT as a
+  // ListStream, not as its JSON text: the entry's `v` already holds a json array, so unwrap it to
+  // the `list` payload and let the list engine frame/unfold it. Falling through to the scalar
+  // branch below would hand the caller the string "[1,2]" instead of a list of members — the
+  // symptom that made `fold().as('b').select('b').unfold()` emit one text blob.
+  if (entry.shapes.size === 1 && entry.shapes.has('list')) {
+    const rel = s.q.cte(
+      q`SELECT json(${aliasPop(col, end)} ->> '$.v') AS list${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,
+      ['list', ...carriedCols(carried)],
+    );
+    // The member shape is not recorded on the entry (a list entry stores the array verbatim), so
+    // stay honest: an untyped scalar list. A path/element-list label that needs its members framed
+    // AS elements needs the member shape carried on AliasEntry — a separate, wider change.
+    return toListStream(carry, rel, { kind: 'scalar', as: undefined });
   }
   // A single scalar value.
   const rel = s.q.cte(

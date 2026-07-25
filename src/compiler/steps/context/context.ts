@@ -133,6 +133,13 @@ export interface Carried {
   readonly encounter?: string;           // explicit provider order retained across a barrier/dedup boundary
   readonly bulk?: string;                // traverser multiplicity (e.g. 'bulk'): SUM(bulk) is the RLE traverser count. Seeded =1 at an element source, carried unchanged across every hop, consumed (SUM) + dropped at a barrier
   readonly trackFromV?: boolean;         // seeded true iff the chain uses otherV() — gates fromV emission (hot-path: no extra column otherwise)
+  /** Labels a REDUCING barrier consumed (`fold`/`count`/`sum`/… collapsed N rows to 1, so no
+   *  single input row's binding survives). METADATA ONLY — never a physical column, so it cannot
+   *  affect carriedCols/carryFrag or any CTE schema. It exists so `select(label)` can tell
+   *  "this label was never bound" (TinkerPop's drop-every-traverser rule) apart from "this label
+   *  existed but a barrier ate it" (a deferral we must NOT answer as an empty result). Without it
+   *  both look like a missing alias entry and the second silently returns []. */
+  readonly consumedAliases?: readonly string[];
 }
 
 /** The context every traverser stream carries, independent of its shape (elements vs a
@@ -236,6 +243,9 @@ export function carriedWith(c: Carried, o: CarriedOpts): Carried {
     encounter: o.encounter === null ? undefined : (o.encounter ?? c.encounter),
     bulk: o.bulk === null ? undefined : (o.bulk ?? c.bulk),
     trackFromV: c.trackFromV,
+    // Diagnosis-only, never patched by a step: a barrier's consumed-label record must survive
+    // every carried patch downstream of it, or select() loses the ability to explain itself.
+    consumedAliases: c.consumedAliases,
   };
 }
 
@@ -248,11 +258,25 @@ export const withCarried = <T extends Carry>(st: T, patch: Partial<Carried>): T 
 /** Drop row-associated state at a global barrier while retaining ambient compile
  * context and chain requirements. A barrier result is a new traverser and cannot
  * honestly claim aliases/origins/path/sack/fromV/encounter/bulk from any one input row
- * (a barrier CONSUMES bulk via SUM, then emits one fresh bulk-1 traverser). */
-export const withoutCarried = <T extends Carry>(st: T): T => ({
-  ...st,
-  carried: { aliases: new Map(), origins: [], trackFromV: st.carried.trackFromV },
-});
+ * (a barrier CONSUMES bulk via SUM, then emits one fresh bulk-1 traverser).
+ *
+ * The dropped LABEL NAMES are remembered in `consumedAliases` (metadata, never a column) so a
+ * downstream `select(label)` throws a clear deferral instead of silently returning an empty
+ * result — the two are indistinguishable from the alias Map alone, and `selectOneFromAlias`'s
+ * drop-not-throw rule is only correct for a label that was genuinely never bound. Labels already
+ * consumed upstream stay recorded, so the diagnosis survives a second barrier. */
+export const withoutCarried = <T extends Carry>(st: T): T => {
+  const consumed = [...st.carried.consumedAliases ?? [], ...st.carried.aliases.keys()];
+  return {
+    ...st,
+    carried: {
+      aliases: new Map(),
+      origins: [],
+      trackFromV: st.carried.trackFromV,
+      ...(consumed.length ? { consumedAliases: [...new Set(consumed)] } : {}),
+    },
+  };
+};
 
 /**
  * Append `body` as the new id-relation and advance to it. Carried-column opts route
