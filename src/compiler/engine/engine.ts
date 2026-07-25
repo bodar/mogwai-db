@@ -81,7 +81,10 @@ const chainNeedsFromV = (steps: PStep[]): boolean => steps.some((s) => s.name ==
 /** A value-shaped stream (scalar/list/variant) whose current object can be labelled and
  *  whose select("label") reads a path-history alias — as opposed to record/map/group
  *  whose select consumes a field/column and is owned by their own dispatchers. */
-const isValueShape = (s: Stream): boolean => s.kind === 'scalar' || s.kind === 'list' || s.kind === 'variant' || s.kind === 'property';
+// `path` is here because a LINEAR path is row-preserving, so it carries the alias history and can
+// bind/read a label like any other value shape (the recursive/grouped layout declines inside
+// currentEntry — it is one row per position, not per path).
+const isValueShape = (s: Stream): boolean => s.kind === 'scalar' || s.kind === 'list' || s.kind === 'variant' || s.kind === 'property' || s.kind === 'path';
 
 /** select(label…) reading path-history labels (string args), not select(Column). */
 const isLabelSelect = (step: PStep): boolean =>

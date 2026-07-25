@@ -3,7 +3,7 @@ import { q, list, empty, type Expression, type Relation } from '../../../sql/ker
 import { nodes, edges, labels } from '../../../sql/schema.ts';
 import { framedProps, labelNameSub, nodePropScalar, edgePropScalar, predicateSql, extIdOf, elemCtx, type Elem } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { carryFrag, carriedCols, scopePathCols, withoutCarried, type ElementStream } from '../context/context.ts';
+import { carryFrag, carriedCols, scopePathCols, withoutCarried, type Carried, type ElementStream } from '../context/context.ts';
 import { carryOf, continueLowering, pathColumns, toListStream, toPathStream, toScalarStream, type ListStream, type LoweringResult, type PathStream, type ScalarStream } from '../context/stream.ts';
 import { compileFromList } from './list.ts';
 import { type PathPos } from '../../../sql/kernel/render.ts';
@@ -203,10 +203,23 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   const dist = acc.distinct ? 'DISTINCT ' : '';
   const whereNode = whereParts.length ? q` WHERE ${list(whereParts, ' AND ')}` : empty;
   const tailSql = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
-  const node = q`SELECT ${dist}${list(cols, ', ')} FROM ${p}${list(joins, '')}${whereNode}${tailSql}`;
+  // A LINEAR path is ROW-PRESERVING — one row in, one Path row out — so unlike a reducing
+  // barrier it can honestly carry the incoming as() label history forward, and `select(label)`
+  // after path() must resolve (TinkerPop Select.feature
+  // g_V_hasXperson_name_markoX_path_asXaX_unionXidentity_identityX_selectXaX_unfold). Only the
+  // path/origin state this barrier genuinely CONSUMES is dropped; the alias columns ride through
+  // via carryFrag. The recursive/grouped regime (compilePathArray) explodes one path into
+  // (pk, ord) rows and so is NOT row-preserving — it keeps dropping them.
+  const outCarried: Carried = {
+    aliases: st.carried.aliases, origins: [], trackFromV: st.carried.trackFromV,
+    ...(st.carried.consumedAliases ? { consumedAliases: st.carried.consumedAliases } : {}),
+  };
+  const aliasCols = carriedCols(outCarried);
+  const carryCols = aliasCols.length ? list(aliasCols.map((c) => q`, ${p.c[c]}`), '') : empty;
+  const node = q`SELECT ${dist}${list(cols, ', ')}${carryCols} FROM ${p}${list(joins, '')}${whereNode}${tailSql}`;
   const layout = { kind: 'linear' as const, positions };
-  const rel = st.q.cte(node, pathColumns(layout));
-  return toPathStream(withoutCarried(carryOf(st)), rel, layout);
+  const rel = st.q.cte(node, [...pathColumns(layout), ...aliasCols]);
+  return toPathStream({ ...carryOf(st), carried: outCarried }, rel, layout);
 }
 
 /**
