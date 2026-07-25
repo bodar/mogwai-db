@@ -2,7 +2,7 @@ import { derived, empty, list, paren, q, raw, value, type Expression, type Relat
 import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx } from '../../plan/plan.ts';
 import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, withoutCarried, type Carry } from '../context/context.ts';
+import { aliasArmProjection, carryFrag, carryFragMint, carriedCols, carriedWith, mergeAliasMaps, partitionOver, withoutCarried, type Carry } from '../context/context.ts';
 import { carryOf, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, numericSpec } from './coerce.ts';
 import { normalizeTypeName } from '../../../gremlin/types.ts';
@@ -501,14 +501,30 @@ export function gateScalar(s: ScalarStream, buildCond: (v: Expression, vt: Expre
  *  branch (map/path() fan-out arm). */
 export function unionScalarStreams(base: Carry, arms: readonly ScalarStream[], gateFor?: (a: Relation, k: number) => Expression | undefined): ScalarStream {
   const numeric = arms.every((a) => a.result === 'number');
+  // Merge the arms' LABEL SETS onto the base (an arm may bind a NEW as() label), exactly as the
+  // element-parent merge does. Without this an arm-grown alias column is absent from the merged
+  // relation's declared schema and a later select() reads nothing — a silent empty result. Each
+  // arm then projects the CANONICAL alias columns (its own physical column remapped, NULL where it
+  // never bound the label) instead of a flat carryFrag of the base's.
+  const mergedAliases = mergeAliasMaps(base.carried.aliases, arms.map((a) => a.carried));
+  const armsGrewAlias = mergedAliases.size !== base.carried.aliases.size;
   // Forward the base carried EXCEPT any prior encounter — the merge supersedes it.
-  const baseNoEnc = carriedWith(base.carried, { encounter: null });
+  const baseNoEnc = carriedWith(base.carried, { encounter: null, aliases: mergedAliases });
+  const nonAlias = carriedCols({ ...baseNoEnc, aliases: new Map() });
   const inner = base.q.cte(
     list(arms.map((a, k) => {
       const r = a.rel.as('a');
       const armEnc = a.carried.encounter ? r.c[a.carried.encounter] : q`1`;
       const gate = gateFor?.(r, k);
-      return q`SELECT ${r.c.v} AS v${numeric ? q`, ${r.c.vt} AS vt` : empty}, ${value(k)} AS arm_idx, ${armEnc} AS arm_encounter${carryFrag(baseNoEnc, r)} FROM ${r}${gate ? q` WHERE ${gate}` : empty}`;
+      // The alias columns come from the ARM (remapped/padded); every other carried column is
+      // per-traverser state the arms share with the base, so it rides straight through.
+      const aliasFrag = armsGrewAlias
+        ? list(aliasArmProjection(a.carried.aliases, mergedAliases, r).map((e: Expression) => q`, ${e}`), '')
+        : empty;
+      const restFrag = armsGrewAlias
+        ? (nonAlias.length ? list(nonAlias.map((c) => q`, ${r.c[c]}`), '') : empty)
+        : carryFrag(baseNoEnc, r);
+      return q`SELECT ${r.c.v} AS v${numeric ? q`, ${r.c.vt} AS vt` : empty}, ${value(k)} AS arm_idx, ${armEnc} AS arm_encounter${aliasFrag}${restFrag} FROM ${r}${gate ? q` WHERE ${gate}` : empty}`;
     }), ' UNION ALL '),
     ['v', ...(numeric ? ['vt'] : []), 'arm_idx', 'arm_encounter', ...carriedCols(baseNoEnc)],
   );

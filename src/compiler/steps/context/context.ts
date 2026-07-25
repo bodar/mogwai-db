@@ -1,4 +1,4 @@
-import { q, list, empty, Query, Relation, type Expression } from '../../../sql/kernel/q.ts';
+import { q, list, empty, raw, Query, Relation, type Expression } from '../../../sql/kernel/q.ts';
 import { nodes, edges } from '../../../sql/schema.ts';
 import { type Elem } from '../../plan/plan.ts';
 import { type AliasShape } from './alias.ts';
@@ -172,6 +172,50 @@ export type StepFn = (s: PStep, st: ElementStream) => ElementStream;
 
 /** The carried alias columns, in bind order (a0, a1, …). */
 export const aliasColsOf = (a: AliasMap): string[] => [...a.values()].map((x) => x.col);
+
+/** Union a set of branch ARMS' alias maps onto the shared pre-branch seed → the merged label set.
+ *  A label bound before the branch keeps its seed column (every arm inherited it); a label first
+ *  bound INSIDE an arm gets a fresh canonical column appended after the seed columns (arms mint
+ *  columns independently from the same seed size, so their raw a{n} collide — the caller's
+ *  per-arm projection remaps each arm's PHYSICAL column onto the canonical one and NULL-pads a
+ *  label the arm never bound). `shapes` unions across arms. `binds` stays static only when every
+ *  arm binds the label the same known number of times; a label bound in only some arms, a
+ *  differing count, or a dynamic (repeat/arm) bind → undefined, so Pop resolves at runtime off
+ *  the array.
+ *
+ *  Lives HERE, not in branch.ts, because every branch merge needs it — element (branch.ts),
+ *  scalar (tail/scalar.ts) and variant (tail/variant.ts) — and variant.ts cannot import from
+ *  branch.ts (branch.ts imports variant.ts; that direction would cycle). Pure Map algebra, no
+ *  SQL, so context.ts is the right leaf. */
+export function mergeAliasMaps(seed: AliasMap, arms: readonly Carried[]): AliasMap {
+  const order: string[] = [...seed.keys()];
+  for (const a of arms) for (const lbl of a.aliases.keys()) if (!order.includes(lbl)) order.push(lbl);
+  const merged = new Map<string, AliasEntry>();
+  order.forEach((lbl, i) => {
+    const col = seed.get(lbl)?.col ?? `a${i}`; // seed labels keep a{i} (== their mint order)
+    const perArm = arms.map((a) => a.aliases.get(lbl));
+    const shapes = new Set<AliasShape>();
+    for (const e of perArm) if (e) for (const sh of e.shapes) shapes.add(sh);
+    const counts = perArm.map((e) => e?.binds ?? 0); // absent in an arm → 0 bindings on that path
+    const defined = perArm.every((e) => !e || e.binds !== undefined);
+    const binds = defined && counts.every((c) => c === counts[0]) ? counts[0] : undefined;
+    merged.set(lbl, { col, shapes, binds });
+  });
+  return merged;
+}
+
+/** One arm's projection of the MERGED alias columns: the arm's own physical column aliased onto
+ *  the canonical name, or NULL where the arm never bound that label (a `select()` of it then
+ *  drops that arm's rows via aliasPresent — TinkerPop's drop-not-throw). The alias half of
+ *  branch.ts's armProjection, lifted so the scalar/variant/list merges share it verbatim. */
+export function aliasArmProjection(armAliases: AliasMap, out: AliasMap, p: Relation): Expression[] {
+  return [...out].map(([label, entry]) => {
+    const got = armAliases.get(label);
+    return !got ? q`NULL AS ${raw(entry.col)}`
+      : got.col === entry.col ? q`${p.c[entry.col]}`
+      : q`${p.c[got.col]} AS ${raw(entry.col)}`;
+  });
+}
 
 /** The current id-relation, optionally aliased. Its columns are id + every carried
  *  alias column, so `prevRel(st,'p').c.a0` resolves downstream. */

@@ -180,6 +180,25 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(() => executeQuery(store, 'g.V().choose(__.out(), __.label(), __.values("name"))', {})).not.toThrow();
   });
 
+  test('as() inside a SCALAR arm survives the merge and reads back', () => {
+    const store = seededStore();
+    const M = "g.V().has('name','marko').values('age')";
+    // A label bound INSIDE one arm used to be dropped at the merge: unionScalarStreams projected
+    // the OUTER carried, so the arm-grown alias column never reached the merged relation's
+    // declared schema and select() read nothing back — [] EVEN WHEN EVERY ARM BOUND IT. The merge
+    // now unions the arms' label sets (mergeAliasMaps) and each arm projects the canonical alias
+    // columns (its own physical column remapped, NULL where it never bound the label).
+    expect(run(store, `${M}.union(__.constant('x').as('a'), __.constant('y')).select('a')`).map((r) => r.v))
+      .toEqual(['x']); // arm 1 never bound 'a' → its row drops (aliasPresent), matching element arms
+    expect(run(store, `${M}.union(__.constant('x').as('a'), __.constant('y').as('a')).select('a')`).map((r) => r.v))
+      .toEqual(['x', 'y']); // both arms bind → both survive
+    // the un-selected merge is unaffected (both arms' values still flow)
+    expect(run(store, `${M}.union(__.constant('x').as('a'), __.constant('y'))`).map((r) => r.v))
+      .toEqual(['x', 'y']);
+    // and the ELEMENT-arm reference semantics are unchanged (the behaviour this now matches)
+    expect(run(store, "g.V().has('name','marko').union(__.out().as('a'), __.in()).select('a')").length).toBe(3);
+  });
+
   test('SCALAR-parent mixed-shape merges re-mint the arm-ordered encounter', () => {
     // These four merges (tryScalarVariant{Union,Choose,Coalesce,Optional}) used to hand-roll
     // their UNION ALL, replicating mergeVariantArms' NO-encounter branch — so with a LIVE
