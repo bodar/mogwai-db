@@ -37,7 +37,7 @@ import {
 } from './child.ts';
 import {
   childSteps, classifyScalarChildRows, ELEMENT_CHILD_STEPS, reuseCurrentFrame, ROOT_SCOPE,
-  SCALAR_ARM_TX, scalarChildPrefixOk, type CompileScope,
+  SCALAR_ARM_TX, scalarChildPrefixOk, type BranchArmShape, type CompileScope,
 } from './child-shape.ts';
 
 // ---------- scalar-PARENT branch consumers (map/local/flatMap/choose/union/coalesce) ----------
@@ -371,8 +371,15 @@ function scalarListArm(body: PStep[]): boolean {
 
 /** PURE. The natural shape of one scalar-parent arm: list (fold), scalar (value/reducer/
  *  re-source-count/re-source-projection), or element (a movement-only re-source). Null =
- *  unclassifiable → the caller defers. The scalar twin of branch.ts's armShape. */
-function scalarArmShape(nested: any, params: Record<string, any>): 'element' | 'scalar' | 'list' | null {
+ *  unclassifiable → the caller defers.
+ *
+ *  The scalar twin of `classifyArmShape` (child-shape.ts), and deliberately NOT a call to it:
+ *  over a scalar parent there is no adjacency, so "element arm" means a `V()`/`E()` RE-SOURCE
+ *  (isResourceHead) rather than a movement body, and the priority differs too (list is probed
+ *  FIRST here — a `…fold()` body would otherwise be claimed by the scalar classifier). Same
+ *  return type on purpose, so the two are visibly parallel and a reader can see the difference is
+ *  the predicates, not the protocol. */
+function scalarArmShape(nested: any, params: Record<string, any>): BranchArmShape {
   const body = childSteps(nested, params);
   if (scalarListArm(body)) return 'list';
   if (scalarArmClassifies(body, params)) return 'scalar';
