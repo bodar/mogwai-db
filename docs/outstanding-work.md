@@ -50,17 +50,32 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    - `lowerLegacy*` → `lowerElement*`: those are the authoritative element-homogeneous compilers
      and the fail-closed backstop, not legacy. The name drove much of this item's apparent size.
 
-   **Residual (small, real):** `as()` inside a scalar/list arm. Admitting it to the arm vocabulary
-   is a one-line change that COMPILES and emits the alias column, but `select('a')` then returns
-   `[]` **even when every arm binds** — a silent wrong answer. Root cause is pinned:
-   `values('age').as('a').select('a')` works correctly OUTSIDE a branch, so the scalar as()/select()
-   readback is sound; it breaks only when the bind is inside an arm, because
-   `unionScalarStreams`/`mergeVariantArms` project the OUTER carried and the arm-grown alias column
-   never reaches the merged relation's schema in a form `select()` resolves. Fix = make those two
-   builders alias-aware (apply `mergeAliasMaps` at the merge, arm-column remap + NULL-pad exactly as
-   `armProjection` already does for element arms — needs `mergeAliasMaps` moved out of `branch.ts`
-   to a leaf to avoid a `variant.ts`↔`branch.ts` cycle), THEN admit `as` to the vocabulary. Do not
-   admit the vocabulary without the merge fix. *Low-Med.*
+   **Residual — ✅ also LANDED 2026-07-25**, and it turned out to be the visible tip of a much
+   wider alias/barrier defect (widening the investigation was the right call — it produced the
+   only L3 gain of the whole effort):
+   - `as()` inside a **scalar arm** now survives the merge. `mergeAliasMaps` moved from
+     `branch.ts` to `context.ts` (+ a new `aliasArmProjection`) so the scalar/variant merges share
+     the element merge's remap/NULL-pad logic; `unionScalarStreams` unions the arms' label sets;
+     only then was `as` admitted to `SCALAR_ARM_ROW`. Semantics match the element-arm reference:
+     a label bound in one arm only drops the other arm's rows, both-bound keeps both.
+   - **A single LIST-shaped label read back as its JSON TEXT**, not as a list — so
+     `fold().as('b').select('b').unfold()` emitted one text blob instead of its members. Fixed;
+     this gained **L3 1277 → 1278** (`g_V_hasLabelXpersonX_aggregateXxX_byXageX_capXxX_asXyX_selectXyX`).
+   - **A LINEAR `path()` is row-preserving**, so it now threads the alias history instead of wiping
+     it (Piece C of [path-history-substrate](./2026-07-18-path-history-substrate.md)):
+     `path().as('a')` and `select('a')` after a path work. The recursive/grouped layout is one row
+     per position, not per path, so it still drops them and declines explicitly.
+   - **`Carried.consumedAliases`** (metadata, never a column) records the labels a REDUCING barrier
+     ate, so `select(label)` after `fold`/`count`/`sum` can PROVE the empty result is correct rather
+     than arriving there by accident. TinkerPop pins empty here (`Select.feature g_V_selectXaX`), and
+     `count().as('a')…select('a')` reads back fine because the label binds on the barrier's OUTPUT.
+     **7 of 10 barrier+select combinations previously returned `[]` indistinguishably from a typo.**
+
+   **Still open (smaller, now precisely scoped):** list members frame as bare values, not elements —
+   `AliasEntry` does not record the member shape, so a path/element-list label cannot frame its
+   members as vertices. Blocks
+   `g_V_hasXperson_name_markoX_path_asXaX_unionXidentity_identityX_selectXaX_unfold` (which also
+   needs `union()` over a path value). *Low-Med.*
 
 2. **Universal child-seam acceptance.** The generic child seam still throws for whole child-body
    families — `local`, `where(__.trav)`, `choose().option`, `map(__.trav)`, `by(__.trav)`,
