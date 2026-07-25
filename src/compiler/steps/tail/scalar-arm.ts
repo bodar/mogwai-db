@@ -67,7 +67,7 @@ import {
 // purpose: tail() requires an encounter column (throws at root) and dedup() clears the
 // carried schema (withoutCarried), which would desync the union/choose merge that projects
 // the outer carried columns off every arm — both defer cleanly as an arm instead.
-const SCALAR_ARM_ROW = new Set(['is', 'constant', 'identity', 'order', 'limit', 'skip', 'range', 'unfold']);
+const SCALAR_ARM_ROW = new Set(['as', 'is', 'constant', 'identity', 'order', 'limit', 'skip', 'range', 'unfold']);
 const SCALAR_ARM_FILTER = new Set(['and', 'or', 'not', 'filter', 'where']);
 // Nested per-traverser branches whose own arms are recursively scalar-arm bodies: a value
 // branch inside a value arm lowers through lowerSteps→the same tryScalar*Child consumer, so

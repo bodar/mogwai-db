@@ -4,7 +4,7 @@ import { isNested, stepChain, type Step } from '../../../gremlin/frontend.ts';
 import { foldByModulators } from '../../ir/strategies.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem } from '../../plan/plan.ts';
 import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
-import { advance, elemRel, prevRel, carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
+import { advance, elemRel, prevRel, carryFrag, carryFragMint, carriedCols, carriedWith, mergeAliasMaps, partitionOver, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type AliasShape } from '../context/alias.ts';
 import { pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
 import { classifyArmShape, classifyListChild, classifyScalarChild, ROOT_SCOPE } from '../tail/child-shape.ts';
@@ -99,31 +99,6 @@ function assertForkSafe(name: string, st: ElementStream): void {
  *  path). These are per-traverser physical state a branch cannot fork/merge, so they
  *  must be identical across arms; aliases fork/merge (mergeAliasMaps) and path pads. */
 const rigidCols = (c: Carried): string[] => carriedCols({ ...c, aliases: new Map(), path: undefined });
-
-/** Union the arms' alias maps onto the shared pre-branch seed → the merged label set.
- *  A label bound before the branch keeps its seed column (every arm inherited it); a
- *  label first bound INSIDE an arm gets a fresh canonical column appended after the seed
- *  columns (arms mint columns independently from the same seed size, so their raw a{n}
- *  collide — armProjection remaps each arm's physical column onto the canonical one).
- *  `shapes` unions across arms. `binds` stays static only when every arm binds the label
- *  the same known number of times; a label bound in only some arms, or a differing count,
- *  or a dynamic (repeat/arm) bind → undefined, so Pop resolves at runtime off the array. */
-function mergeAliasMaps(seed: AliasMap, arms: Carried[]): AliasMap {
-  const order: string[] = [...seed.keys()];
-  for (const a of arms) for (const lbl of a.aliases.keys()) if (!order.includes(lbl)) order.push(lbl);
-  const merged = new Map<string, AliasEntry>();
-  order.forEach((lbl, i) => {
-    const col = seed.get(lbl)?.col ?? `a${i}`; // seed labels keep a{i} (== their mint order)
-    const perArm = arms.map((a) => a.aliases.get(lbl));
-    const shapes = new Set<AliasShape>();
-    for (const e of perArm) if (e) for (const sh of e.shapes) shapes.add(sh);
-    const counts = perArm.map((e) => e?.binds ?? 0); // absent in an arm → 0 bindings on that path
-    const defined = perArm.every((e) => !e || e.binds !== undefined);
-    const binds = defined && counts.every((c) => c === counts[0]) ? counts[0] : undefined;
-    merged.set(lbl, { col, shapes, binds });
-  });
-  return merged;
-}
 
 /** Merge cols() PATH states by padding to the max length. */
 function mergePaths(arms: PathState[]): PathState {
