@@ -230,6 +230,22 @@ Each fails closed (clear error, never mis-executes). Do only when a concrete sce
   `has(k, eq(collectionLiteral))`, meta-property typing. *Low.*
   → [full-fidelity-typed-collections](./archive/2026-07-17-full-fidelity-typed-collections-plan.md),
   [typed-merge-values](./archive/2026-07-17-typed-merge-values-plan.md)
+- **Typed scalar loses its type through a collecting barrier / group key** (diagnosed 2026-07-25
+  while hunting wire type-fidelity bugs after the count→Int64 fix). A typed scalar
+  (`values('datetime')`, `asNumber(GType.BIGINT)`, uuid) survives `is(typeOf(X))` with its type
+  intact, but `aggregate('a')…cap('a')`, `fold()`, `project().by(count(local))`, and a
+  `groupCount()` **key** all frame the member/key as its BARE value — datetime→epoch-millis Number,
+  uuid→string. Root cause is the SAME "list members / group keys carry no per-element vtype" gap as
+  item 1's residual (`AliasEntry`/list `of` records no member shape) — a cross-cutting substrate
+  change, not a localized frame fix. Clusters: `data/*.feature` (BigInt/DateTime/UUID/Set) `groupCount`
+  + `aggregate_cap` + `project_by(count(local))`, ~10–14 scenarios. *Med.*
+- **`asNumber(GType.BIGINT)` of a small value decodes as BigInt, not Number.** We frame every
+  `bigint` ValueType via `bigIntegerSerializer` (GraphBinary BigInteger 0x23 → always BigInt in the
+  client); TinkerPop's `NumberSerializationStrategy` instead downcasts a small BigInteger to Int/Long
+  on the wire (→ Number), which is what `d[n].n`'s `parseFloat` expects. Fixing means replicating that
+  magnitude-downcast for the `bigint` tag — a type-fidelity POLICY call (does a bigint stay a bigint
+  on the wire?), so decide deliberately, not piecemeal. ~2–3 scenarios (`asNumber(BIGINT).is(typeOf/eq)`).
+  Contrast: count()/groupCount() Longs ARE fixed (Int64, `wire-protocol.md`). *Low.*
 - **`sideEffect(__.…)` + `withSideEffect(...)`** and **`branch()`** — distinct families, no consumer
   yet. *Low.*
   → [side-effect-state](./2026-07-13-side-effect-state-plan.md),
