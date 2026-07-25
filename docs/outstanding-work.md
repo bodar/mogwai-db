@@ -117,17 +117,25 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    → [carried-schema-and-projection-reentry](./2026-07-14-carried-schema-and-projection-reentry-plan.md),
    [deep-seam-migration-roadmap](./2026-07-18-deep-seam-migration-roadmap.md) #5
 
-5b. **Re-enter the PREFIX after a value-tail barrier — `…order().by(k).out()`.** Diagnosed
-   2026-07-25 (same family as #5, but a distinct and *very* cheap-to-reproduce wall): **nothing**
-   resumes after a root `order().by()`. `g.V().order().by('age').out()` dies with
-   `step not implemented: out()`, and so does every branch (`union`/`choose`/`coalesce`/`optional`)
-   in that position — the error names the step, which reads like a missing step impl and sent at
-   least one investigation down the wrong path. Cause is structural, not a missing case:
-   `foldTailAcc` (`steps/tail/projection.ts`) is a TERMINAL accumulator — once the chain enters the
-   value tail, `order()` folds into `acc.orders` and only `MODIFIERS` may follow, so any
-   movement/branch hits the `step not implemented` throw. The fix is a retype boundary out of
-   `TailAcc` back to an `ElementStream` (an ordered element stream is still elements), which is the
-   same seam #5 needs. Worth doing WITH #5, not separately. **Medium.**
+5b. ~~**Re-enter the PREFIX after a value-tail barrier — `…order().by(k).out()`.**~~
+   ✅ **LANDED 2026-07-25** (the prescribed retype boundary; the `WITH #5` coupling turned out not
+   to bind — a keyed/bare order re-enters as an ordered *element* stream, which never needs #5's
+   non-element re-typing). A plain `order()` whose FOLLOWER is a step outside the value-tail
+   vocabulary (`VALUE_TAIL_STEPS` = every projection + modifier `foldTailAcc` folds) is no longer a
+   terminal accumulator: `tailOrder` (`steps/tail/projection.ts`) mints a fresh emission `encounter`
+   (ROW_NUMBER over the composite order key, `lowerElementOrderReenter`) that SUPERSEDES any
+   demand-pass encounter in its declared slot, and re-enters generic lowering. The order then
+   survives the follower through the *existing* substrate — `finishMove` re-mints the encounter
+   across each hop, the branch merges mint the arm-merge encounter — so `order().by(k)` followed by
+   movement (`out`/`in`/`both`/…), a branch (`union`/`choose`/`coalesce`/`optional`), `as()`, or a
+   post-movement `limit` all order correctly. Direct-key order-expr building was factored to
+   `directOrderExpr`, shared with `lowerElementOrderByTraversal` (no second copy). Pinned by
+   `test/compiler/movement-filter.exec.test.ts`; **L3 1278 → 1281** (incl. the Coalesce scenario
+   `g_V_outXcreatedX_order_byXnameX_coalesceXname_constantXxXX` and an `order().by().as().outV()`
+   chain).
+   **Residual (deferred, fail-closed):** `order()` before a movement/branch while a **path** is live
+   throws `order() before a movement/branch while tracking a path not yet supported` (a fresh
+   encounter would collide with the path's positional ordering) — that IS #6/path-history territory.
 
 6. **`order().by()` of paths (path natural-order comparability).** Unlocks the Orderability
    conformance cluster. **Medium.**

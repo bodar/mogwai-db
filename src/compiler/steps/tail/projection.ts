@@ -6,7 +6,7 @@ import {
   nodePropScalar, edgePropScalar, nodePropSortKey, edgePropSortKey, scalarPropSortKey, compareKey, labelNameSub, framedProps, valueMapProps, storedValueExpr,
 } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { advance, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, withoutCarried, type ElementStream } from '../context/context.ts';
+import { advance, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, partitionOver, withoutCarried, type ElementStream } from '../context/context.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
 import { tryLowerLocalAggregate, lowerScalarAggregate } from '../prefix/sideeffect.ts';
 import { type Shape } from '../../../sql/kernel/render.ts';
@@ -102,6 +102,14 @@ const MODIFIERS = new Map<string, ModFn>([
   ['mean', reducerMod('mean')],
   ['by', () => { throw new Error('by() is only supported as an order() or select()/project() modulator'); }],
 ]);
+
+// The steps the value-tail accumulator (foldTailAcc) folds without a throw: every projection
+// plus every value modifier, plus the unfold retype boundary. A plain order() FOLLOWED by a step
+// OUTSIDE this set is not a value tail at all — it is an ordered element stream re-entering a
+// movement/branch/re-source (item 5b), so tailOrder mints an encounter and re-enters rather than
+// letting foldTailAcc throw `step not implemented`. Derived from the two vocabularies so it cannot
+// drift from what foldTailAcc actually accepts.
+const VALUE_TAIL_STEPS = new Set<string>([...PROJECTION_NAMES, ...MODIFIERS.keys(), 'unfold']);
 
 function reducerMod(name: NonNullable<TailAcc['reducer']>): ModFn {
   return (_s, acc, at) => {
@@ -235,23 +243,58 @@ function lowerElementOrderByTraversal(st: ElementStream, step: PStep): ElementSt
   const d = mods.rel.as('d');
   const n = elemRel(st);
   let travIdx = 0;
-  const orderExprs = classes.map((by: ByClass): Expression => {
-    const dirSql = by.dir === 'desc' ? q` DESC` : q` ASC`;
-    if (by.kind === 'nested') return q`${d.c[mods.values[travIdx++].value]}${dirSql}`;
-    if (by.kind === 'token') {
-      if (by.token === 'label') return q`${labelNameSub(n.c.label)}${dirSql}`;
-      if (by.token === 'id') return q`${elemCtx(n, st.elem).extIdExpr!}${dirSql}`;
-      throw new Error(`order().by(T.${by.token}) not yet supported`);
-    }
-    if (by.kind === 'key') return q`${scalarPropSortKey(elemCtx(n, st.elem), by.key)}${dirSql}`;
-    return q`${n.c.id}${dirSql}`; // bare by()
-  });
+  const orderExprs = classes.map((by: ByClass): Expression =>
+    by.kind === 'nested'
+      ? q`${d.c[mods.values[travIdx++].value]}${by.dir === 'desc' ? q` DESC` : q` ASC`}`
+      : directOrderExpr(by, n, st));
   const orderKey = list([...orderExprs, q`${d.c.id}`], ', ');
   return advance(
     st,
     q`SELECT ${d.c.id} AS id${carryFrag(st.carried, d)}, ROW_NUMBER() OVER (ORDER BY ${orderKey}) AS encounter FROM ${d} JOIN ${n} ON ${n.c.id}=${d.c.id}`,
     { encounter: 'encounter' },
   );
+}
+
+/** The ORDER BY term for a DIRECT (key/token/bare) by() over the current element (aliased `n`).
+ *  The one place a direct order key is built — shared by lowerElementOrderByTraversal's non-nested
+ *  terms and lowerElementOrderReenter, so the composite-key math stays identical across the two. */
+function directOrderExpr(by: ByClass, n: Relation, st: ElementStream): Expression {
+  const dirSql = by.dir === 'desc' ? q` DESC` : q` ASC`;
+  if (by.kind === 'token') {
+    if (by.token === 'label') return q`${labelNameSub(n.c.label)}${dirSql}`;
+    if (by.token === 'id') return q`${elemCtx(n, st.elem).extIdExpr!}${dirSql}`;
+    throw new Error(`order().by(T.${by.token}) not yet supported`);
+  }
+  if (by.kind === 'key') return q`${scalarPropSortKey(elemCtx(n, st.elem), by.key)}${dirSql}`;
+  return q`${n.c.id}${dirSql}`; // bare by()
+}
+
+/** A plain (key/token/bare) order() FOLLOWED by a step that moves/branches/re-sources the element
+ *  stream — a step OUTSIDE the value-tail vocabulary the acc machinery folds (VALUE_TAIL_STEPS).
+ *  order() is a barrier: it re-establishes a total order, and that order must survive the follower.
+ *  So retype back to an ElementStream (an ordered element stream is still elements — item 5b's
+ *  TailAcc→ElementStream boundary) by minting a fresh emission `encounter` (ROW_NUMBER over the
+ *  composite order key). The mint SUPERSEDES any encounter seeded by the demand pass, in its
+ *  declared carried slot (carryFragMint), so a downstream limit/branch observes THIS order. The
+ *  same encounter substrate then threads through movement (finishMove) and the branch merges. The
+ *  caller re-enters generic lowering; final materialization sorts by the carried encounter.
+ *  Returns null for a shuffle order (no stable re-mint) or a traversal term (that is
+ *  lowerElementOrderByTraversal's job); defers a live path (a fresh encounter would collide with
+ *  the path's positional ordering). */
+function lowerElementOrderReenter(st: ElementStream, step: PStep): ElementStream | null {
+  const bys = step.bys ?? [];
+  const classes: ByClass[] = bys.length ? bys.map(classifyBy) : [{ kind: 'none' }];
+  if (classes.some((c) => c.kind === 'nested')) return null; // → lowerElementOrderByTraversal
+  if (classes.some((c) => c.dir === 'shuffle')) return null;  // shuffle has no stable encounter
+  if (st.carried.path)
+    throw new Error('order() before a movement/branch while tracking a path not yet supported');
+  const n = elemRel(st);
+  const p = st.rel.as('p');
+  const orderKey = list([...classes.map((by) => directOrderExpr(by, n, st)), q`${p.c.id}`], ', ');
+  const carried = carriedWith(st.carried, { encounter: 'encounter' });
+  const mint = q`ROW_NUMBER() OVER (${partitionOver(carried, p, orderKey)})`;
+  const body = q`SELECT ${p.c.id} AS id${carryFragMint(carried, p, 'encounter', mint)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`;
+  return { ...st, carried, rel: st.q.cte(body, ['id', ...carriedCols(carried)]) };
 }
 
 // order().[barrier()].dedup().by(): lower both observations as one window policy so the
@@ -264,6 +307,14 @@ const tailOrder: ShapeTailFn<ElementStream> = (st, step, steps, stop) => {
     return continueLowering(lowerElementDedup(st, steps[dedupAt], step), dedupAt + 1);
   const ordered = lowerElementOrderByTraversal(st, step);
   if (ordered) return continueLowering(ordered, stop + 1);
+  // A plain order() whose FOLLOWER is a movement/branch/re-source (not a value-tail step the
+  // acc machinery folds) retypes to an ordered element stream and re-enters — otherwise
+  // foldTailAcc would throw `step not implemented` on that follower (item 5b).
+  const next = steps[stop + 1];
+  if (next && !VALUE_TAIL_STEPS.has(next.name)) {
+    const reentered = lowerElementOrderReenter(st, step);
+    if (reentered) return continueLowering(reentered, stop + 1);
+  }
   return null;
 };
 
