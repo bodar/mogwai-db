@@ -12,6 +12,7 @@
 // consumed on read (typeOf filter + per-row framing).
 
 import { ioc } from '../io.ts';
+import type { ValueType } from '../sql/kernel/render.ts';
 
 // ---------- exact big-value carriers (BigDecimal / Duration) ----------
 //
@@ -140,6 +141,26 @@ export const WIRE_TYPE_TO_NAME: Record<number, CanonicalType> = {
   [ioc.DataType.MAP]: 'map',
   [ioc.DataType.SET]: 'set',
 };
+
+/** CanonicalType ⇄ render.ts `ValueType` — the SAME vocabulary in two spellings. Every
+ *  scalar ValueType is a CanonicalType except two: `bool`/`boolean` and `date`/`datetime`.
+ *  The collection types (list/map/set) have no ValueType: a collection is reached through
+ *  the list/map substrate, never framed by a per-row scalar tag.
+ *
+ *  These two directions used to be hand-written per consumer (write.ts VT_TO_CANON,
+ *  plan.ts AS_TO_CANONICAL, and an implicit `as CanonicalType` cast in inject.ts that
+ *  silently mismatched for datetime/uuid). They live here, derived from one another, so a
+ *  new type cannot be added to one direction and forgotten in the other. */
+export const VALUETYPE_TO_CANONICAL = {
+  bool: 'boolean', date: 'datetime', byte: 'byte', short: 'short', int: 'int',
+  long: 'long', bigint: 'bigint', float: 'float', double: 'double',
+  string: 'string', uuid: 'uuid', bigdecimal: 'bigdecimal', char: 'char', duration: 'duration',
+} as const satisfies Record<ValueType, CanonicalType>;
+
+export const CANONICAL_TO_VALUETYPE: Partial<Record<CanonicalType, ValueType>> =
+  Object.fromEntries(
+    Object.entries(VALUETYPE_TO_CANONICAL).map(([vt, canon]) => [canon, vt as ValueType]),
+  ) as Partial<Record<CanonicalType, ValueType>>;
 
 /** typeOf/GType-token spelling → canonical name. `integer`→`int`, `biginteger`→
  *  `bigint`, and the vertex-property token aliases. Names already canonical map to

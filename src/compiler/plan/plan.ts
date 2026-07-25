@@ -1,7 +1,7 @@
 import { flattenListArgs, type Pred } from '../../gremlin/frontend.ts';
 import { q, list, values, empty, value, raw, jsonExtract, type Expression, type Relation } from '../../sql/kernel/q.ts';
 import type { FastPath } from '../options/fast-paths.ts';
-import { normalizeTypeName, BigDecimal, Duration } from '../../gremlin/types.ts';
+import { normalizeTypeName, BigDecimal, Duration, VALUETYPE_TO_CANONICAL } from '../../gremlin/types.ts';
 import { type ValueType } from '../../sql/kernel/render.ts';
 
 // ---------- SQL node builders ----------
@@ -139,14 +139,9 @@ const GTYPE_SQL: Record<string, string | null> = {
   duration: null, list: null, map: null, set: null,
 };
 
-// A compile-time scalar `as` tag (ValueType, render.ts) → canonical Gremlin type name,
-// for the static-fold typeOf mode. ValueType spells two names differently ('bool',
-// 'date'); the rest are already canonical.
-const AS_TO_CANONICAL: Record<ValueType, string> = {
-  bool: 'boolean', date: 'datetime', byte: 'byte', short: 'short', int: 'int',
-  long: 'long', bigint: 'bigint', float: 'float', double: 'double',
-  string: 'string', uuid: 'uuid', bigdecimal: 'bigdecimal', char: 'char', duration: 'duration',
-};
+// A compile-time scalar `as` tag (ValueType, render.ts) → canonical Gremlin type name, for
+// the static-fold typeOf mode. The one vocabulary correspondence lives in gremlin/types.ts.
+const AS_TO_CANONICAL = VALUETYPE_TO_CANONICAL;
 
 /** How to resolve the CURRENT scalar's type for a typeOf test:
  *  - `staticAs`  — the value's GraphBinary type is known at compile time (inject literal,

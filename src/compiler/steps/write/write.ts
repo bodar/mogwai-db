@@ -1,7 +1,7 @@
 import type { GraphStore } from '../../../storage.ts';
 import { q, value, list, empty, raw, render, type Expression } from '../../../sql/kernel/q.ts';
 import { labelIn, nodeHasProp, edgeHasProp } from '../../plan/plan.ts';
-import { gremlinTypeOf, isCollectionType, storedScalar, flatType, mapEntryType, valueNodeOf, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
+import { gremlinTypeOf, isCollectionType, storedScalar, flatType, mapEntryType, valueNodeOf, valueNodeFromStored, VALUETYPE_TO_CANONICAL, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
 import { stepChain, isNested, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
@@ -61,11 +61,9 @@ function runNested(engine: Engine, store: GraphStore, nestedNode: any, params: R
 }
 
 // A compile-time scalar ValueType → the stored CanonicalType vocab (they overlap except
-// bool/date). null = infer from the JS value.
-const VT_TO_CANON: Record<string, CanonicalType> = {
-  bool: 'boolean', byte: 'byte', short: 'short', int: 'int', long: 'long', bigint: 'bigint',
-  float: 'float', double: 'double', string: 'string', uuid: 'uuid', date: 'datetime',
-};
+// bool/date). null = infer from the JS value. The correspondence lives in gremlin/types.ts —
+// this local copy used to omit bigdecimal/char/duration, so those wrote an inferred vtype.
+const VT_TO_CANON: Record<string, CanonicalType> = VALUETYPE_TO_CANONICAL;
 
 // The scalar value a nested property()-value traversal produces: the FIRST result row's
 // value (single-cardinality write), or has:false for an empty traversal (→ no property).
