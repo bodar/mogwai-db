@@ -123,6 +123,12 @@ Worth doing only when a concrete scenario demands them.
 - **Recursive-path tails** — `path().by()` on the walk, `cyclicPath` in-repeat,
   `until`/`emit(pred)` with path, edge-inclusive bodies, mixed linear+repeat paths;
   recursive-regime `from()`/`to()` and multi-bind from/to. *Low-Medium.*
+  Includes **`path().by(__.trav)` / `by(T.token)` in the array/recursive regime**: the LINEAR
+  regime supports these via the generic child seam (`tryCompileScalarValueChild`), but the array
+  regime (`compilePathArray` / `pathBy`, `src/steps/tail/path.ts`) hard-throws (lines ~23/37/99–116).
+  Not a mechanical lift onto the seam — path is a dynamic-length JSONB array exploded via
+  `json_each`, so pushing a child scope over `json_each` positions needs a NEW positional-child
+  substrate. Revisit only if that substrate gets built.
   → [path-tracking-prior-art](./2026-07-12-path-tracking-prior-art.md),
   [path-history-substrate](./2026-07-18-path-history-substrate.md)
 - **Group re-entry matrix-fill** — element-valued inner keys, property-element group
@@ -199,6 +205,17 @@ Independent of conformance; needed before a real multi-tenant deployment.
 - **Fold the third scalar-child projector residue** (`compileScalarChildRows`/`continueScalar`)
   onto the generic `PROJECTORS` — maintainability only.
   → [compiler-consolidation](./2026-07-16-compiler-consolidation-plan.md) §1
+- **`write.ts` row-at-a-time nested read** — `runNested`/`nestedScalar` (`src/steps/write/write.ts`
+  ~L54–81) re-compile + `store.query(...)` once per target per spec and take `rows[0].v`. An
+  acknowledged/declared-imperative surface (the write path is not a pure fold like the read spine).
+  Could materialize the correlated value column once via the generic child seam instead. Scoped;
+  bigger architectural lift than a mechanical route-through. *Low.* (Was #5 in a 2026-07-24
+  generic-lifting pass; #1/#2/#4 of that pass landed, this and the path array-regime item above
+  did not.)
+- **`value` Shape `as?` xor `perRowType?`** — the framing Shape in `src/execute.ts` (`case 'value'`)
+  has two mutually-exclusive optional flags where exactly one applies; a discriminated union would
+  read cleaner. No behavior change; do only if that Shape is touched again.
+  → [wire-and-storage-facts](./2026-07-25-wire-and-storage-facts.md)
 
 ---
 
