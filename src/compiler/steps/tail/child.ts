@@ -135,7 +135,7 @@ export function tryCompileCountChild(
   preParsed?: ReturnType<typeof stepChain>,
 ): ScalarStream | null {
   if (!nested || isPropertyParent(parent) || isScalarParent(parent)) return null;
-  const counted = classifyCountChild(preParsed ?? childSteps(nested, parent.params));
+  const counted = classifyCountChild(preParsed ?? childSteps(nested, parent.params), parent.params);
   if (!counted) return null;
   const { prefix } = counted;
 
@@ -173,7 +173,7 @@ function tryCompileCountValueRows(
   let cut = body.length;
   const isPreds: any[] = [];
   while (cut > 0 && body[cut - 1].name === 'is') { isPreds.unshift(body[cut - 1].args[0]); cut--; }
-  const counted = classifyCountChild(body.slice(0, cut));
+  const counted = classifyCountChild(body.slice(0, cut), parent.params);
   if (!counted) return null;
   const { prefix } = counted;
   const pushed = pushChildScope(parent, scope);
@@ -365,7 +365,7 @@ function compileScalarChildRows(
         return applyScalarChildCardinality(parent, pushed, scopedElementCount(moved, pushed), use, retainChildScope);
       }
       // ends in a projection (values/id/label) → scalar; lowerSteps folds V→element→projection.
-      if (classifyScalarChildRows('element', after)?.kind !== 'element') return null;
+      if (classifyScalarChildRows('element', after, parent.params)?.kind !== 'element') return null;
       const pushed = pushChildScope(parent, scope);
       const lowered = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, rest, 0);
       if (lowered.kind !== 'scalar') return null;
@@ -387,7 +387,7 @@ function compileScalarChildRows(
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
   }
 
-  const shape = classifyScalarChildRows('element', body);
+  const shape = classifyScalarChildRows('element', body, parent.params);
   if (!shape || shape.kind !== 'element') return null;
   const { prefix, projection: terminal, suffix } = shape.parts;
 
@@ -764,7 +764,7 @@ function compileElementChildRows(
   // ONE shape classification (the same classifyElementChildRows the element preflight peeks
   // use) — the bare-order strip, firstPolicy order modulator, and empty-before handling all
   // live in the shared helper, so preflight and compiler cannot diverge.
-  const shape = classifyElementChildRows(preParsed ?? childSteps(nested, parent.params), stripTerminal, firstPolicy);
+  const shape = classifyElementChildRows(preParsed ?? childSteps(nested, parent.params), stripTerminal, firstPolicy, parent.params);
   if (!shape) return null;
   const { parts, orderStep } = shape;
   const pushed = pushChildScope(parent, scope);

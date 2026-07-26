@@ -67,11 +67,16 @@ describe('classifyBranchArms — the shape verdict', () => {
   // direction or the other. Both directions are pinned here because each was a real bug during
   // the consolidation: optional() stranded in the tail reported "step not implemented: optional()".
   test('an UNCLASSIFIABLE arm splits by kind — optional stays, multi-arm merges route out', () => {
-    // optional()'s miss arm is the parent element itself, so an unclassified body is still an
-    // ELEMENT branch: the optional StepFn's originSeed path compiles it inside the prefix fold.
+    // A nested uniform-element branch (optional/coalesce/union) IS a classifiable element child now
+    // (it folds through lowerElementSteps' prefix), so this arm is 'element', not unclassifiable —
+    // and the outer optional stays 'element' either way (the routing invariant this test pins).
     const nestedOptional = planOf('g.V().optional(__.out().optional(__.out())).path()');
-    expect(nestedOptional.shapes).toEqual([null]);
+    expect(nestedOptional.shapes).toEqual(['element']);
     expect(nestedOptional.merge).toBe('element');
+    // repeat() is still NOT an element child (its recursive walk carries no parent ordinal), so a
+    // genuinely-unclassifiable optional arm remains — and optional()'s miss arm is the parent
+    // element itself, so it stays an ELEMENT branch compiled by the optional StepFn's originSeed.
+    expect(planOf('g.V().optional(__.repeat(__.out()).times(2))').shapes).toEqual([null]);
     expect(planOf('g.V().optional(__.repeat(__.out()).times(2))').merge).toBe('element');
     // a multi-arm merge cannot know an unclassified arm's shape → tail cascade, where each
     // tryLower* declines and the element lowerer throws the deferral naming the arm body.
