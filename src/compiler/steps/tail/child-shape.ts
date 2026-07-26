@@ -406,6 +406,21 @@ export function classifyListChild(nested: any, params: Record<string, any>): { b
     ? { body } : null;
 }
 
+/** PURE. A bare branch step whose arms are UNIFORMLY list (each `…fold()`) — the list twin of
+ *  isUniformElementBranch. lowerStepsStrict lowers it to a ListStream over a pushed child scope
+ *  (finishListMerge is parent-agnostic). Deliberately NOT wired into classifyListChild (which feeds
+ *  the branch-arm triage): it is consumed ONLY by the all-cardinality child consumers (local/flatMap),
+ *  so a branch-of-lists composes there while map (first-of-a-multi-output body) stays fail-closed and
+ *  the arm triage is untouched. */
+export function isUniformListBranch(nested: any, params: Record<string, any>): boolean {
+  if (!nested) return false;
+  const body = childSteps(nested, params);
+  if (body.length !== 1) return false;
+  const kind = asBranchKind(body[0].name);
+  if (!kind || (body[0] as any).options) return false;
+  return classifyBranchArms(kind, body[0], params).merge === 'list';
+}
+
 export function isListChild(nested: any, params: Record<string, any>): boolean {
   return classifyListChild(nested, params) !== null;
 }

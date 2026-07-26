@@ -294,4 +294,20 @@ test('a uniform-element branch composes as a child-body value at every position'
     .toEqual(['a', 'b']);
 });
 
+test('a list-armed branch composes as an all-cardinality (local/flatMap) child body', () => {
+  const store = seededStore();
+  // union of two folded arms → one list per arm per input. flatMap/local emit both; sizes keep the
+  // assertion order-independent. marko(1): out has 3 neighbours, in has 0.
+  expect(run(store, 'g.V(1).flatMap(__.union(__.out().fold(), __.in().fold())).count(Scope.local)').map((r) => r.v))
+    .toEqual([3, 0]);
+  expect(run(store, 'g.V(1).local(__.union(__.out().values("name").fold(), __.in().values("name").fold())).count(Scope.local)').map((r) => r.v))
+    .toEqual([3, 0]);
+  // coalesce takes the FIRST productive arm — one list per input (marko knows vadas+josh → size 2).
+  expect(run(store, 'g.V(1).flatMap(__.coalesce(__.out("knows").fold(), __.out("created").fold())).count(Scope.local)').map((r) => r.v))
+    .toEqual([2]);
+  // map() over a multi-output list branch stays fail-closed (never a silent wrong count).
+  expect(() => run(store, 'g.V(1).map(__.union(__.out().fold(), __.in().fold()))'))
+    .toThrow(/not supported/);
+});
+
 });

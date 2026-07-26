@@ -14,7 +14,7 @@ import { predicateSql, rangeToOffsetLimit } from '../../plan/plan.ts';
 import { elementOrderSql } from './modulation.ts';
 import {
   childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm,
-  ELEMENT_CHILD_STEPS, reuseCurrentFrame, ROOT_SCOPE, scalarChildPrefixOk,
+  ELEMENT_CHILD_STEPS, isUniformListBranch, reuseCurrentFrame, ROOT_SCOPE, scalarChildPrefixOk,
   type ChildFrame, type ChildParent, type ChildScope, type ChildUse, type CompileScope,
 } from './child-shape.ts';
 // The scope-construction trio (pushChildScope/popChildScope below + reuseCurrentFrame) is the
@@ -582,6 +582,32 @@ export function tryCompileScalarValueRows(
 ): { stream: ScalarStream; frame: ChildFrame } | null {
   return tryCompileCountValueRows(parent, nested, scope, preParsed)
     ?? compileScalarChildRows(parent, nested, 'all', scope, true, undefined, preParsed);
+}
+
+/** A bare list-armed branch (union/coalesce/choose whose arms are all `…fold()`) as an
+ *  ALL-cardinality child body (local/flatMap). It lowers to a ListStream through lowerStepsStrict
+ *  over a pushed child scope — the branch's list merge is parent-agnostic and rides the pushed
+ *  ordinal — then each list row is re-projected to the parent's carried schema, dropping the child
+ *  ordinal. A branch has ≥2 arms, so it emits several list rows per parent (multiset-faithful, as
+ *  UNION ALL); local/flatMap emit them all. map() (first-of-a-multi-output body) is deliberately
+ *  NOT a caller — it falls through to its clear deferral rather than silently returning one list. */
+export function tryCompileListBranchChild(
+  parent: ChildParent,
+  nested: any,
+  scope: CompileScope = ROOT_SCOPE,
+): ListStream | null {
+  if (!nested || isPropertyParent(parent) || isScalarParent(parent)) return null;
+  if (!isUniformListBranch(nested, parent.params)) return null;
+  const body = childSteps(nested, parent.params);
+  const pushed = pushChildScope(parent, scope);
+  const lowered = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, body, 0);
+  if (lowered.kind !== 'list') return null;
+  const l = lowered.rel.as('l');
+  const rel = parent.q.cte(
+    q`SELECT ${l.c.list} AS list${carryFrag(parent.carried, l)} FROM ${l}`,
+    ['list', ...carriedCols(parent.carried)],
+  );
+  return toListStream(carryOf(parent), rel, lowered.of);
 }
 
 /** Scalar rows followed by fold() become one ListStream per parent. This is a true
