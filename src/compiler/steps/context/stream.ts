@@ -278,7 +278,8 @@ const elemColumns = (prefix: string, elem: ElemShape): string[] => elem === 'edg
     : [`${prefix}_id`, `${prefix}_label`, `${prefix}_props`];
 
 export const groupColumns = (s: Pick<GroupStream, 'key' | 'val'>): string[] => {
-  const key = s.key.kind === 'scalar' ? ['gk']
+  // A scalar key whose type rides in a sibling column declares it right after the key.
+  const key = s.key.kind === 'scalar' ? ['gk', ...(s.key.vtypeCol ? [s.key.vtypeCol] : [])]
     : s.key.kind === 'map' ? s.key.parts.map((_, i) => `k${i}_v`)
     : ['k_rid', ...elemColumns('k', s.key.elem)];
   // Node/edge element values carry an internal rowid (v_rid), mirroring the element key's

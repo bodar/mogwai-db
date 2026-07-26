@@ -160,7 +160,9 @@ describe('group / properties SQL', () => {
   test('P3 Stage C: bare groupCount() over a scalar stream groups by value', () => {
     // V().values('name').groupCount() → GROUP BY the value → Map{value: count}.
     const g = read("g.V().out('created').values('name').groupCount()");
-    expect(g.shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: true }, val: { kind: 'count' } });
+    // A stored-property key carries its per-row type in a sibling column (gkt), so a
+    // datetime/uuid key frames exactly instead of collapsing to its storage class.
+    expect(g.shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: true, vtypeCol: 'gkt' }, val: { kind: 'count' } });
     expect(g.sql).toContain('SUM(c.bulk) AS gv');
     expect(g.sql).toContain('GROUP BY');
     // a typed scalar (asNumber(X)) carries its tag so the key frames correctly (not inferred)

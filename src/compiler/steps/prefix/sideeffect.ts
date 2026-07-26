@@ -5,6 +5,8 @@ import { type PStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { elemRel, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type ScalarStream } from '../context/stream.ts';
+import { staticTypeOf } from '../../../sql/kernel/render.ts';
+import { foldMember } from '../tail/barrier.ts';
 import { tryCompileFirstElementValueRows, tryCompileScalarValueRows } from '../tail/child.ts';
 import { classifyBy } from '../tail/child-shape.ts';
 
@@ -71,8 +73,11 @@ export const aggregate: StepFn = (s, st) => {
           ? q`${rows.frame.domain.as('d')} LEFT JOIN ${first} ON ${first.c[rows.frame.ordinal]}=${q`d.${rows.frame.ordinal}`} AND ${first.c.rn}=1`
           : q`${first}`;
         const filter = productive ? q`` : q` WHERE ${first.c.rn}=1`;
+        // NB the `first` projection above narrows to (v, ordinal, rn) — it does not carry a
+        // per-row vtype column, so this by()-modulated path can only offer the static tag.
+        // Widening it to preserve the type channel is follow-on work, not a silent drop.
         const rel = st.q.cte(q`SELECT ${jsonbGroupArray(first.c.v)} AS list FROM ${source}${filter}`, ['list']);
-        def = { kind: 'list', rel, of: { kind: 'scalar', as: rows.stream.as, productiveNull: productive } };
+        def = { kind: 'list', rel, of: { kind: 'scalar', as: staticTypeOf(rows.stream.type), productiveNull: productive } };
       } else {
         const elements = tryCompileFirstElementValueRows(st, by.nested);
         if (!elements)
@@ -112,8 +117,11 @@ export function lowerScalarAggregate(s: ScalarStream, step: PStep): ScalarStream
   const name = aggregateName(step);
   if (((step as any).bys ?? []).length) return null;
   const p = s.rel.as('p');
-  const rel = s.q.cte(q`SELECT ${jsonbGroupArray(p.c.v)} AS list FROM ${p}`, ['list']);
-  const def: SideEffectDef = { kind: 'list', rel, of: { kind: 'scalar', as: s.as } };
+  // Same encoding decision as fold() — a per-row type channel becomes self-describing
+  // members, so cap() frames each one by its own stored type.
+  const { member, of } = foldMember(s, p);
+  const rel = s.q.cte(q`SELECT ${jsonbGroupArray(member)} AS list FROM ${p}`, ['list']);
+  const def: SideEffectDef = { kind: 'list', rel, of };
   return { ...s, sideEffects: new Map([...(s.sideEffects ?? []), [name, def]]) };
 }
 

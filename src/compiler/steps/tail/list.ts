@@ -6,12 +6,12 @@
 // and, later, inject-of-a-list / select(Column.values).
 
 import { q, value, raw, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { predicateSql, scalarTx, compareKey } from '../../plan/plan.ts';
+import { predicateSql, scalarTx, compareKey, inferVtypeSql } from '../../plan/plan.ts';
 import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, mapOfToListOf, PROPERTY_PAYLOAD, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type PropertyStream, type ScalarStream, type MapStream, type ShapeTailFn } from '../context/stream.ts';
 import { carryFrag, carriedCols, type ElementStream } from '../context/context.ts';
-import { STATIC, type Compiled, type ListOf, type ValueType } from '../../../sql/kernel/render.ts';
+import { PER_ROW, STATIC, type Compiled, type ListOf, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf, type Engine } from '../../engine/deps.ts';
 import { lowerGlobalCount } from './barrier.ts';
 import { collectionTypeOf } from './scalar.ts';
@@ -42,17 +42,28 @@ const isLocal = (s: PStep): boolean => (s.args ?? []).some((a: any) => a && type
 const isTyped = (of: ListOf): boolean => of.kind === 'scalar' && !!of.typed;
 
 /** The comparable/filterable PAYLOAD of a member — the underlying SQL value in both
- *  encodings. Use for ORDER BY, predicates, DISTINCT, numeric aggregates. */
-const memberValue = (of: ListOf, member: Expression = q`je.value`): Expression =>
-  isTyped(of) ? q`${member} ->> '$.v'` : member;
+ *  encodings. Use for ORDER BY, predicates, DISTINCT, numeric aggregates.
+ *
+ *  A `typed` list is self-describing IF the producer wrapped it: a fold whose members are
+ *  all storage-class-determined stays BARE (barrier.ts foldMember), uniformly per list. So
+ *  unwrap conditionally, discriminating on json_each's own `type` column — an envelope is
+ *  the only 'object' member. (NOT json_type() on the value: json_each already EXTRACTED it,
+ *  so a bare string is no longer valid JSON text and json_type() errors on it.) A stored
+ *  typed collection is always wrapped, so the CASE only bites for computed lists. */
+const memberValue = (of: ListOf, member: Expression = q`je.value`, type: Expression = q`je.type`): Expression =>
+  isTyped(of)
+    ? q`CASE WHEN ${type}='object' THEN ${member} ->> '$.v' ELSE ${member} END`
+    : member;
 
 /** The whole member as it must be written back into a rebuilt list — the {t,v} node for a
  *  typed list (so the element keeps its exact type), the bare value otherwise. Wrapped in
  *  `json()` when typed so json_group_array EMBEDS the object instead of re-encoding it as a
  *  JSON string (double-encoding is the corruption the old fail-closed guard existed to
  *  prevent; here it is simply handled). */
-const memberNode = (of: ListOf, member: Expression = q`je.value`): Expression =>
-  isTyped(of) ? q`json(${member})` : member;
+const memberNode = (of: ListOf, member: Expression = q`je.value`, type: Expression = q`je.type`): Expression =>
+  isTyped(of)
+    ? q`CASE WHEN ${type}='object' THEN json(${member}) ELSE ${member} END`
+    : member;
 
 /** Retype a list whose members a transform has REWRITTEN (a per-element string transform):
  *  the stored types no longer describe the new values, so the result is a bare list tagged
@@ -78,7 +89,7 @@ function lowerListReducer(s: ListStream, name: string): ScalarStream {
   // A stored typed list carries {t,v} nodes; extract each element's payload (`->> '$.v'`)
   // so the numeric typeof guard sees the underlying value (an INTEGER/REAL/TEXT), not the
   // JSON object. A computed (untyped) list holds bare scalars — read je.value directly.
-  const elem = s.of.kind === 'scalar' && s.of.typed ? q`je.value ->> '$.v'` : q`je.value`;
+  const elem = memberValue(s.of);
   // Numeric aggregate over the list's numeric elements (typeof guard mirrors wrapReducer);
   // min/max also range over text (TinkerPop 4 Strings are Comparable), sum/mean stay numeric.
   const types = (name === 'min' || name === 'max') ? "('integer', 'real', 'text')" : "('integer', 'real')";
@@ -131,11 +142,15 @@ export function compileUnfold(s: ListStream): ElementStream | PropertyStream | S
   // vtype-carrying ScalarStream — reusing the P1–P3 typed-scalar spine, so each element
   // frames by its own type (a nested list/map element frames whole via frameStoredValue).
   if (s.of.kind === 'scalar' && s.of.typed) {
+    // A bare member (a fold the producer left unwrapped because storage class suffices)
+    // recovers its type the same way the write channel would have recorded it.
+    const val = memberValue(s.of);
+    const vt = q`CASE WHEN je.type='object' THEN je.value ->> '$.t' ELSE ${inferVtypeSql(q`je.value`)} END`;
     const rel = s.q.cte(
-      q`SELECT je.value ->> '$.v' AS v, je.value ->> '$.t' AS vtype${carryFrag(s.carried, p)} FROM ${p}, json_each(${p.c.list}) je ORDER BY je.key`,
+      q`SELECT ${val} AS v, ${vt} AS vtype${carryFrag(s.carried, p)} FROM ${p}, json_each(${p.c.list}) je ORDER BY je.key`,
       ['v', 'vtype', ...carriedCols(s.carried)],
     );
-    return toScalarStream(c, rel, undefined, { result: 'value', vtype: 'vtype' });
+    return toScalarStream(c, rel, undefined, { type: PER_ROW('vtype'), result: 'value' });
   }
   const rel = explode('v');
   return toScalarStream(c, rel, s.of.as, { result: 'value', productiveNull: s.of.productiveNull });
@@ -177,7 +192,7 @@ function listStringTransform(s: ListStream, step: PStep): ListStream {
   // The transform REWRITES each member, so it reads the payload and emits a BARE value —
   // the stored type no longer describes the result. length() yields an int, the rest
   // strings; either way the output list is bare and re-tagged, never a stale {t,v}.
-  const elem = scalarTx(step.name, step.args ?? [], memberValue(s.of, q`x.value`));
+  const elem = scalarTx(step.name, step.args ?? [], memberValue(s.of, q`x.value`, q`x.type`));
   if (!elem) throw new Error(`scalar transform ${step.name}() not supported`);
   const sub = q`(SELECT jsonb(COALESCE(json_group_array(${elem} ORDER BY x.key), json('[]'))) FROM json_each(${c.c.list}) x)`;
   // Untagged, NOT tagged 'string': a uniform tag would force a null member through the
@@ -192,7 +207,7 @@ function listReverse(s: ListStream): ListStream {
   const c = s.rel.as('c');
   // Pure reordering — members are written back whole (json(...) keeps a {t,v} node an
   // embedded object rather than re-encoding it as a JSON string).
-  const sub = q`(SELECT jsonb(COALESCE(json_group_array(${memberNode(s.of, q`x.value`)} ORDER BY x.key DESC), json('[]'))) FROM json_each(${c.c.list}) x)`;
+  const sub = q`(SELECT jsonb(COALESCE(json_group_array(${memberNode(s.of, q`x.value`, q`x.type`)} ORDER BY x.key DESC), json('[]'))) FROM json_each(${c.c.list}) x)`;
   return listCte(s, c, sub, s.of);
 }
 
@@ -212,15 +227,19 @@ function listLocalTransform(s: ListStream, step: PStep): ListStream {
   const je = q`json_each(${c.c.list})`;
   // Compare on the payload, carry the whole member. For a bare list these are the same
   // expression, so the untyped SQL is unchanged.
-  const xVal = memberValue(s.of, q`x.value`);
-  const xNode = memberNode(s.of, q`x.value`);
+  const xVal = memberValue(s.of, q`x.value`, q`x.type`);
+  const xNode = memberNode(s.of, q`x.value`, q`x.type`);
   // Every branch re-aggregates with `json_group_array(value ORDER BY ord)` so the final
   // list order is explicit (never relying on subquery-order-into-aggregate). COALESCE to
   // '[]' keeps an empty result a list, not NULL.
   // The inner `value` column carries the WHOLE member (already json()-wrapped for a typed
   // list by the callers below), so re-aggregation preserves each element's envelope.
+  // The inner rows carry `value` AND (for a typed list) the json_each `type` beside it, so
+  // re-aggregation can tell an envelope from a bare member and re-embed only the former.
   const rebuild = (rows: Expression): Expression =>
-    q`(SELECT jsonb(COALESCE(json_group_array(${isTyped(s.of) ? q`json(value)` : raw('value')} ORDER BY ord), json('[]'))) FROM (${rows}))`;
+    q`(SELECT jsonb(COALESCE(json_group_array(${memberNode(s.of, raw('value'), raw('vtag'))} ORDER BY ord), json('[]'))) FROM (${rows}))`;
+  /** The `type` passthrough a rebuild subquery must select for memberNode to read. */
+  const tagCol = isTyped(s.of) ? q`, x.type AS vtag` : empty;
   let sub: Expression;
   if (name === 'order') {
     // Bare order(Scope.local) = ascending by element value. A direction-only
@@ -241,7 +260,7 @@ function listLocalTransform(s: ListStream, step: PStep): ListStream {
     // the WHOLE member (payload + type for a typed list) is the same rule root dedup() uses
     // — equal values of different stored types are distinct Gremlin values (a long 5 and a
     // string '5' are two members), so the envelope belongs in the grouping key.
-    sub = rebuild(q`SELECT x.value AS value, MIN(x.key) AS ord FROM ${je} x GROUP BY x.value`);
+    sub = rebuild(q`SELECT x.value AS value${isTyped(s.of) ? q`, MIN(x.type) AS vtag` : empty}, MIN(x.key) AS ord FROM ${je} x GROUP BY x.value`);
   } else {
     // Positional subset (limit/skip/range/tail): pick rows by original position, then
     // re-aggregate in ascending position order. tail selects the LAST n via DESC LIMIT
@@ -251,7 +270,7 @@ function listLocalTransform(s: ListStream, step: PStep): ListStream {
     else if (name === 'skip') off = nums[0];
     else if (name === 'range') { off = nums[0]; lim = nums[1] < 0 ? -1 : nums[1] - nums[0]; }
     else if (name === 'tail') { lim = nums[0] ?? 1; dir = 'DESC'; }
-    sub = rebuild(q`SELECT x.value AS value, x.key AS ord FROM ${je} x ORDER BY x.key ${dir} LIMIT ${lim} OFFSET ${off}`);
+    sub = rebuild(q`SELECT x.value AS value${tagCol}, x.key AS ord FROM ${je} x ORDER BY x.key ${dir} LIMIT ${lim} OFFSET ${off}`);
   }
   return listCte(s, c, sub, s.of);
 }
@@ -319,8 +338,11 @@ function embedSql(c: Compiled): Expression {
  *  `selfTyped` says the self side's members are {t,v} nodes: project them to their payloads
  *  first so both sides compare and emit in ONE vocabulary (the operand is always bare). */
 function setOpExpr(name: string, self: Expression, op: Expression, selfTyped = false): Expression {
+  // Project the self side down to payloads. Members may already be bare (a fold the producer
+  // left unwrapped), so discriminate per member rather than unwrapping unconditionally —
+  // a blind `->> '$.v'` would turn every bare member into NULL.
   const selfBare = selfTyped
-    ? q`(SELECT jsonb(COALESCE(json_group_array(je.value ->> '$.v' ORDER BY je.key), json('[]'))) FROM json_each(${self}) je)`
+    ? q`(SELECT jsonb(COALESCE(json_group_array(CASE WHEN je.type='object' THEN je.value ->> '$.v' ELSE je.value END ORDER BY je.key), json('[]'))) FROM json_each(${self}) je)`
     : self;
   const se = q`json_each(${selfBare})`, oe = q`json_each(${op})`;
   switch (name) {
@@ -415,7 +437,7 @@ const listConjoin: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
   const c = s.rel.as('c');
   const delim = String(step.args[0] ?? '');
   // Joins the PAYLOADS into one string — the result is a string whatever the members were.
-  const memberVal = memberValue(s.of, raw('value'));
+  const memberVal = memberValue(s.of, raw('value'), raw('type'));
   const joined = q`(SELECT COALESCE(group_concat(mv, ${value(delim)}), '') FROM (SELECT ${memberVal} AS mv FROM json_each(${c.c.list}) WHERE ${memberVal} IS NOT NULL ORDER BY key))`;
   const rel = s.q.cte(q`SELECT ${joined} AS v${carryFrag(s.carried, c)} FROM ${c}`, ['v', ...carriedCols(s.carried)]);
   return continueLowering(toScalarStream(carryOf(s), rel, undefined, { type: STATIC('string') }), at + 1);

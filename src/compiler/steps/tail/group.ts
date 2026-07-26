@@ -9,7 +9,7 @@ import { isMapLocalOrder } from './list.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, partitionOver, withoutCarried, type Carry, type ElementStream } from '../context/context.ts';
 import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
-import { type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
+import { perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { pushChildScope, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows } from './child.ts';
 import { childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, reuseCurrentFrame, type ChildParent } from './child-shape.ts';
@@ -515,8 +515,21 @@ export function lowerScalarGroupCount(s: ScalarStream): GroupStream {
   // Per-key count = SUM(bulk) when the scalar stream carries a multiplicity, else the row
   // count (identical while bulk≡1) — matching values().count()'s weighting.
   const gv = s.carried.bulk ? q`SUM(${c.c[s.carried.bulk]})` : q`COUNT(*)`;
+  // A per-row stored type rides through the barrier as a SIBLING column (gkt) rather than a
+  // {t,v} envelope: a bare groupCount() has no map blob for the key to ride inside, and the
+  // key is a GROUP BY term — an envelope would group by the JSON text. Grouping spans
+  // (value, type) for the same reason dedup() does: equal values of different stored types
+  // are distinct Gremlin keys.
+  const perRow = perRowColumnOf(s.type);
+  if (perRow) {
+    const rel = s.q.cte(
+      q`SELECT ${c.c.v} AS gk, ${c.c[perRow]} AS gkt, ${gv} AS gv FROM ${c} GROUP BY ${c.c.v}, ${c.c[perRow]}`,
+      ['gk', 'gkt', 'gv'],
+    );
+    return toGroupStream(withoutCarried(carryOf(s)), rel, { kind: 'scalar', productive: true, vtypeCol: 'gkt' }, { kind: 'count' });
+  }
   const rel = s.q.cte(q`SELECT ${c.c.v} AS gk, ${gv} AS gv FROM ${c} GROUP BY ${c.c.v}`, ['gk', 'gv']);
-  return toGroupStream(withoutCarried(carryOf(s)), rel, { kind: 'scalar', productive: true, as: s.as }, { kind: 'count' });
+  return toGroupStream(withoutCarried(carryOf(s)), rel, { kind: 'scalar', productive: true, as: staticTypeOf(s.type) }, { kind: 'count' });
 }
 
 /** Continue from the rich group barrier. Terminal framing consumes the same lowered

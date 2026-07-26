@@ -218,32 +218,32 @@ describe('computed containers preserve each member\'s stored type', () => {
     executeQuery(s, `g.addV('t').property('when',datetime('2025-06-07T08:09:10Z')).property('gid',UUID('11111111-2222-3333-4444-555555555555')).property('big',9007199254740995L)`, {});
   };
 
-  test.todo('fold() of a datetime property keeps DATETIME per element', async () => {
+  test('fold() of a datetime property keeps DATETIME per element', async () => {
     const s = store(); seed(s);
     const buf = rawList(s, "g.V().values('when').fold()");
     expect(await elementTypeCodes(buf)).toEqual([D.DATETIME, D.DATETIME]);
     expect((await dec(buf) as any[]).every((d) => d instanceof Date)).toBe(true);
   });
 
-  test.todo('fold() of a uuid property keeps UUID (not a look-alike String)', async () => {
+  test('fold() of a uuid property keeps UUID (not a look-alike String)', async () => {
     const s = store(); seed(s);
     expect(await elementTypeCodes(rawList(s, "g.V().values('gid').fold()"))).toEqual([D.UUID, D.UUID]);
   });
 
-  test.todo('fold() of a long property keeps LONG (not Int) and stays lossless', async () => {
+  test('fold() of a long property keeps LONG (not Int) and stays lossless', async () => {
     const s = store(); seed(s);
     const buf = rawList(s, "g.V().values('big').fold()");
     expect(await elementTypeCodes(buf)).toEqual([D.LONG, D.LONG]);
     expect(await dec(buf)).toEqual([9007199254740993n, 9007199254740995n]);
   });
 
-  test.todo('fold().unfold() round-trips the element type back onto the scalar stream', () => {
+  test('fold().unfold() round-trips the element type back onto the scalar stream', () => {
     const s = store(); seed(s);
     const bufs = executeQuery(s, "g.V().values('when').fold().unfold()", {});
     expect(bufs.map((b) => b[0])).toEqual([D.DATETIME, D.DATETIME]);
   });
 
-  test.todo('aggregate().cap() keeps the member type', async () => {
+  test('aggregate().cap() keeps the member type', async () => {
     const s = store(); seed(s);
     expect(await elementTypeCodes(rawList(s, "g.V().values('when').aggregate('a').cap('a')"))).toEqual([D.DATETIME, D.DATETIME]);
   });
@@ -263,11 +263,14 @@ describe('computed containers preserve each member\'s stored type', () => {
     expect(bufs.map((b) => b[0]).sort()).toEqual([D.STRING, D.LONG].sort());
   });
 
-  test.todo('groupCount() frames a datetime KEY as DATETIME', async () => {
+  test('groupCount() frames a datetime KEY as DATETIME', async () => {
     const s = store(); seed(s);
     const m = await dec(rawList(s, "g.V().values('when').groupCount()")) as Map<any, any>;
     expect([...m.keys()].every((k) => k instanceof Date)).toBe(true);
-    expect([...m.values()]).toEqual([1n, 1n]);
+    // A groupCount value is a Java Long → Int64 on the wire, which the client decodes to a
+    // JS Number in the safe range (see .claude/rules/wire-protocol.md — a BigInt here would
+    // mean we'd wrongly framed it as GraphBinary BigInteger).
+    expect([...m.values()]).toEqual([1, 1]);
   });
 
   test('groupCount() frames a uuid KEY as UUID', async () => {
@@ -276,7 +279,7 @@ describe('computed containers preserve each member\'s stored type', () => {
     expect([...m.keys()].sort()).toEqual([UUID, '11111111-2222-3333-4444-555555555555'].sort());
   });
 
-  test.todo('a HETEROGENEOUS fold keeps each member its own exact type', async () => {
+  test('a HETEROGENEOUS fold keeps each member its own exact type', async () => {
     const s = store();
     executeQuery(s, `g.addV('t').property('mixed',UUID('${UUID}'))`, {});
     executeQuery(s, "g.addV('t').property('mixed',7)", {});

@@ -221,6 +221,11 @@ function setBuffer(items: Buffer[]): Buffer {
 
 function frameTypedNode(node: ValueNode): Buffer {
   if (node == null) return frameValue(null, undefined);
+  // A BARE member: the producer omitted the envelope because the storage class already
+  // determines the type (a fold whose members are all string/int/long/double — see
+  // barrier.ts foldMember). Infer from the JS value, which is exactly what the envelope
+  // would have encoded. A node is always an OBJECT, so a primitive is unambiguous.
+  if (typeof node !== 'object') return frameValue(node, undefined);
   if (node.t === 'list') return listBuffer((node.v as ValueNode[]).map(frameTypedNode));
   if (node.t === 'set') return setBuffer((node.v as ValueNode[]).map(frameTypedNode));
   if (node.t === 'map') return typedMapBuffer(node.v as [ValueNode, ValueNode][]);
@@ -410,8 +415,15 @@ function groupKey(r: any, key: GroupKey): { buf: Buffer; canon: string } {
     key.parts.forEach((p, i) => m.set(p.key, r[`k${i}_v`]));
     return { buf: ioc.anySerializer.serialize(m), canon: 'm:' + key.parts.map((_, i) => JSON.stringify(r[`k${i}_v`])).join('\x00') };
   }
-  // A typed scalar key (asNumber(BYTE).groupCount() etc.) frames by its tag; an untagged
-  // key infers from the JS value (correct for string/int/double).
+  // The key's type, from the best channel available: a per-row stored vtype column (the
+  // truth channel — a datetime/uuid key keeps its exact type) beats the compile-time tag
+  // (asNumber(BYTE).groupCount()), and an untagged key infers from the JS value (correct
+  // for string/int/double, where the storage class already determines the type).
+  const perRow = key.vtypeCol ? r[key.vtypeCol] as string | null : null;
+  if (perRow) {
+    // Distinct stored types are distinct keys, so the type joins the canonical dedup key.
+    return { buf: frameStoredValue(r.gk, perRow), canon: `s:${perRow}:` + JSON.stringify(r.gk) };
+  }
   const buf = key.as ? frameValue(r.gk, key.as) : ioc.anySerializer.serialize(r.gk);
   return { buf, canon: `s:${key.as ?? ''}:` + JSON.stringify(r.gk) };
 }
