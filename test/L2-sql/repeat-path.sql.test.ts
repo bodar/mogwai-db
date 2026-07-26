@@ -320,7 +320,7 @@ describe('repeat / path SQL', () => {
     expect(read('g.V().out().out().path().by("name").combine(["x"])').shape).toEqual({ kind: 'jsonbList' });
     expect(read('g.V().out().out().path().by("name").merge(["x"])').shape).toEqual({ kind: 'jsonbSet' });
     expect(read('g.V().out().out().path().by("name").difference(["x"])').shape).toEqual({ kind: 'jsonbSet' });
-    expect(read('g.V().out().out().path().by("name").conjoin("-")').shape).toEqual({ kind: 'value' });
+    expect(read('g.V().out().out().path().by("name").conjoin("-")').shape).toEqual({ kind: 'value', as: 'string', perRowType: undefined });
     // the retype builds one JSON array per path row from the position value columns.
     expect(read('g.V().out().out().path().by("name").reverse()').sql).toContain('json_array');
     // an element-position path (no by(key)) is NOT list-representable → still fails closed.

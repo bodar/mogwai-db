@@ -11,7 +11,7 @@ import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, mapOfToListOf, PROPERTY_PAYLOAD, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type PropertyStream, type ScalarStream, type MapStream, type ShapeTailFn } from '../context/stream.ts';
 import { carryFrag, carriedCols, type ElementStream } from '../context/context.ts';
-import { type Compiled } from '../../../sql/kernel/render.ts';
+import { STATIC, type Compiled, type ListOf, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf, type Engine } from '../../engine/deps.ts';
 import { lowerGlobalCount } from './barrier.ts';
 import { collectionTypeOf } from './scalar.ts';
@@ -19,17 +19,46 @@ import { collectionTypeOf } from './scalar.ts';
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
 const isLocal = (s: PStep): boolean => (s.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local');
 
-/** A stored TYPED collection (of.typed) carries self-describing {t,v} element nodes. The
- *  list rebuild/transform ops below read/rewrite each element as a BARE scalar (json_each
- *  `value`), which would corrupt the envelope (double-encode) or mis-compare. They are
- *  unreached for stored typed collections today, so fail CLOSED with a clear deferral rather
- *  than misexecute — unfold() and count/sum/min/max/mean(Scope.local) ARE typed-aware. The
- *  fidelity requirement is round-trip (write→read→frame); typed-element transforms are
- *  deferred, matching the plan's declared scope. */
-const assertUntypedList = (s: ListStream, op: string): void => {
-  if (s.of.kind === 'scalar' && s.of.typed)
-    throw new Error(`${op}() over a stored typed collection not yet supported (element retagging deferred; unfold() + count/sum/min/max/mean(Scope.local) are supported)`);
-};
+// ---------- the member seam: one encoding decision, read in one place ----------
+//
+// A list's members ride in ONE of two physical encodings, uniformly per list (the
+// uniformity is the whole point — see the dead end in
+// docs/2026-07-25-type-channel-unification.md, where mixing them within a list broke the
+// typed readers):
+//
+//   bare      — the member IS the SQL value. Correct exactly when the SQLite storage class
+//               already determines the Gremlin type (string/int/long/double: what
+//               plan.ts inferVtypeSql can recover), so carrying a type would be redundant.
+//   typed     — the member is a self-describing {t,v} node. Required when the storage class
+//               is lossy (datetime/uuid/bigint/bigdecimal/char/duration/boolean/byte/…).
+//
+// `isTyped` is the single predicate; `memberValue`/`memberNode` are the only two ways to
+// read a member. A transform that COMPARES or FILTERS reads the payload (memberValue —
+// ORDER BY over a raw `{"t":"int","v":5}` would string-order JSON); a transform that
+// REBUILDS the list writes back the whole member (memberNode) so the envelope survives.
+// Every op below goes through these, which is what lets a typed list flow through the
+// same code as an untyped one instead of failing closed.
+
+const isTyped = (of: ListOf): boolean => of.kind === 'scalar' && !!of.typed;
+
+/** The comparable/filterable PAYLOAD of a member — the underlying SQL value in both
+ *  encodings. Use for ORDER BY, predicates, DISTINCT, numeric aggregates. */
+const memberValue = (of: ListOf, member: Expression = q`je.value`): Expression =>
+  isTyped(of) ? q`${member} ->> '$.v'` : member;
+
+/** The whole member as it must be written back into a rebuilt list — the {t,v} node for a
+ *  typed list (so the element keeps its exact type), the bare value otherwise. Wrapped in
+ *  `json()` when typed so json_group_array EMBEDS the object instead of re-encoding it as a
+ *  JSON string (double-encoding is the corruption the old fail-closed guard existed to
+ *  prevent; here it is simply handled). */
+const memberNode = (of: ListOf, member: Expression = q`je.value`): Expression =>
+  isTyped(of) ? q`json(${member})` : member;
+
+/** Retype a list whose members a transform has REWRITTEN (a per-element string transform):
+ *  the stored types no longer describe the new values, so the result is a bare list tagged
+ *  by whatever the transform statically produces. Mirrors the scalar tail's retype rule. */
+const retypedList = (of: ListOf, as?: ValueType): ListOf =>
+  of.kind === 'scalar' ? { kind: 'scalar', as, productiveNull: of.productiveNull } : of;
 
 /** A Scope.local reducer over a list value: reduce EACH list (row) to one scalar via a
  *  correlated json_each aggregate. count() counts elements (any list); sum/min/max/mean
@@ -124,9 +153,10 @@ function listCte(s: ListStream, c: Relation, listExpr: Expression, of: ListStrea
  *  filter) — stays a list stream. (SQL null semantics: an eq(null)/neq(null) predicate
  *  won't match a null element, so those edge forms may differ from TinkerPop.) */
 function listNoneFilter(s: ListStream, pred: any): ListStream {
-  assertUntypedList(s, 'none');
   const c = s.rel.as('c');
-  return listCte(s, c, c.c.list, s.of, q` WHERE NOT EXISTS (SELECT 1 FROM json_each(${c.c.list}) je WHERE ${predicateSql(q`je.value`, pred)})`);
+  // A whole-list filter: the list passes through byte-identical, so only the payload
+  // read has to know the encoding.
+  return listCte(s, c, c.c.list, s.of, q` WHERE NOT EXISTS (SELECT 1 FROM json_each(${c.c.list}) je WHERE ${predicateSql(memberValue(s.of), pred)})`);
 }
 
 /** The Scope.local collection transforms that keep a list a list (per-list, not a
@@ -143,20 +173,26 @@ const STRING_LOCAL_TX = new Set(['toUpper', 'toLower', 'trim', 'lTrim', 'rTrim',
  *  list applying scalarTx to every element, preserving position order. Null elements
  *  pass through (SQLite null propagation → the transformed element stays null). */
 function listStringTransform(s: ListStream, step: PStep): ListStream {
-  assertUntypedList(s, step.name);
   const c = s.rel.as('c');
-  const elem = scalarTx(step.name, step.args ?? [], q`x.value`);
+  // The transform REWRITES each member, so it reads the payload and emits a BARE value —
+  // the stored type no longer describes the result. length() yields an int, the rest
+  // strings; either way the output list is bare and re-tagged, never a stale {t,v}.
+  const elem = scalarTx(step.name, step.args ?? [], memberValue(s.of, q`x.value`));
   if (!elem) throw new Error(`scalar transform ${step.name}() not supported`);
   const sub = q`(SELECT jsonb(COALESCE(json_group_array(${elem} ORDER BY x.key), json('[]'))) FROM json_each(${c.c.list}) x)`;
-  return listCte(s, c, sub, s.of);
+  // Untagged, NOT tagged 'string': a uniform tag would force a null member through the
+  // string serializer (trim(local) over [.., null] must keep the null a null). The members
+  // are bare, so per-value inference at the wire is the right channel.
+  return listCte(s, c, sub, retypedList(s.of));
 }
 
 /** reverse() on a list value → reverse element order (json_each ordered by position
  *  DESC). Stays a list stream. */
 function listReverse(s: ListStream): ListStream {
-  assertUntypedList(s, 'reverse');
   const c = s.rel.as('c');
-  const sub = q`(SELECT jsonb(COALESCE(json_group_array(x.value ORDER BY x.key DESC), json('[]'))) FROM json_each(${c.c.list}) x)`;
+  // Pure reordering — members are written back whole (json(...) keeps a {t,v} node an
+  // embedded object rather than re-encoding it as a JSON string).
+  const sub = q`(SELECT jsonb(COALESCE(json_group_array(${memberNode(s.of, q`x.value`)} ORDER BY x.key DESC), json('[]'))) FROM json_each(${c.c.list}) x)`;
   return listCte(s, c, sub, s.of);
 }
 
@@ -170,16 +206,21 @@ function listReverse(s: ListStream): ListStream {
  * (unfold / another list op / terminal) continues. by()/nested comparators defer.
  */
 function listLocalTransform(s: ListStream, step: PStep): ListStream {
-  assertUntypedList(s, step.name);
   const c = s.rel.as('c');
   const name = step.name;
   const nums = (step.args ?? []).filter((a: any) => typeof a === 'number') as number[];
   const je = q`json_each(${c.c.list})`;
+  // Compare on the payload, carry the whole member. For a bare list these are the same
+  // expression, so the untyped SQL is unchanged.
+  const xVal = memberValue(s.of, q`x.value`);
+  const xNode = memberNode(s.of, q`x.value`);
   // Every branch re-aggregates with `json_group_array(value ORDER BY ord)` so the final
   // list order is explicit (never relying on subquery-order-into-aggregate). COALESCE to
   // '[]' keeps an empty result a list, not NULL.
+  // The inner `value` column carries the WHOLE member (already json()-wrapped for a typed
+  // list by the callers below), so re-aggregation preserves each element's envelope.
   const rebuild = (rows: Expression): Expression =>
-    q`(SELECT jsonb(COALESCE(json_group_array(value ORDER BY ord), json('[]'))) FROM (${rows}))`;
+    q`(SELECT jsonb(COALESCE(json_group_array(${isTyped(s.of) ? q`json(value)` : raw('value')} ORDER BY ord), json('[]'))) FROM (${rows}))`;
   let sub: Expression;
   if (name === 'order') {
     // Bare order(Scope.local) = ascending by element value. A direction-only
@@ -192,9 +233,14 @@ function listLocalTransform(s: ListStream, step: PStep): ListStream {
       if (ord?.order === 'shuffle') throw new Error('order(Scope.local) shuffle not yet supported');
       desc = ord?.order === 'desc';
     }
-    sub = q`(SELECT jsonb(COALESCE(json_group_array(x.value ORDER BY x.value ${desc ? 'DESC' : 'ASC'}), json('[]'))) FROM ${je} x)`;
+    // Order by the PAYLOAD (ordering raw {t,v} JSON text would sort by the type name),
+    // but emit the whole member so the element keeps its type.
+    sub = q`(SELECT jsonb(COALESCE(json_group_array(${xNode} ORDER BY ${xVal} ${desc ? 'DESC' : 'ASC'}), json('[]'))) FROM ${je} x)`;
   } else if (name === 'dedup') {
-    // First-occurrence order: group by value, order by earliest position.
+    // First-occurrence order: group by the member, order by earliest position. Grouping on
+    // the WHOLE member (payload + type for a typed list) is the same rule root dedup() uses
+    // — equal values of different stored types are distinct Gremlin values (a long 5 and a
+    // string '5' are two members), so the envelope belongs in the grouping key.
     sub = rebuild(q`SELECT x.value AS value, MIN(x.key) AS ord FROM ${je} x GROUP BY x.value`);
   } else {
     // Positional subset (limit/skip/range/tail): pick rows by original position, then
@@ -269,9 +315,14 @@ function embedSql(c: Compiled): Expression {
   return e;
 }
 
-/** Build the JSONB-list result of a set-op over the incoming list `self` and `op`. */
-function setOpExpr(name: string, self: Expression, op: Expression): Expression {
-  const se = q`json_each(${self})`, oe = q`json_each(${op})`;
+/** Build the JSONB-list result of a set-op over the incoming list `self` and `op`.
+ *  `selfTyped` says the self side's members are {t,v} nodes: project them to their payloads
+ *  first so both sides compare and emit in ONE vocabulary (the operand is always bare). */
+function setOpExpr(name: string, self: Expression, op: Expression, selfTyped = false): Expression {
+  const selfBare = selfTyped
+    ? q`(SELECT jsonb(COALESCE(json_group_array(je.value ->> '$.v' ORDER BY je.key), json('[]'))) FROM json_each(${self}) je)`
+    : self;
+  const se = q`json_each(${selfBare})`, oe = q`json_each(${op})`;
   switch (name) {
     // combine = concatenation: self elements then op elements, order + dups + nulls kept.
     case 'combine':
@@ -287,7 +338,7 @@ function setOpExpr(name: string, self: Expression, op: Expression): Expression {
       return q`(SELECT jsonb(COALESCE(json_group_array(value), json('[]'))) FROM (SELECT je.value AS value FROM ${se} je WHERE NOT EXISTS (SELECT 1 FROM ${oe} o WHERE o.value IS je.value) UNION SELECT o.value FROM ${oe} o WHERE NOT EXISTS (SELECT 1 FROM ${se} je WHERE je.value IS o.value)))`;
     // product = cartesian product → a list of [selfElem, opElem] pair-lists.
     case 'product':
-      return q`(SELECT jsonb(COALESCE(json_group_array(jsonb(json_array(a.value, b.value)) ORDER BY a.key, b.key), json('[]'))) FROM ${q`json_each(${self})`} a, ${q`json_each(${op})`} b)`;
+      return q`(SELECT jsonb(COALESCE(json_group_array(jsonb(json_array(a.value, b.value)) ORDER BY a.key, b.key), json('[]'))) FROM ${q`json_each(${selfBare})`} a, ${q`json_each(${op})`} b)`;
     // merge = set union: every distinct element of self OR op (UNION dedups, nulls too).
     case 'merge':
       return q`(SELECT jsonb(COALESCE(json_group_array(value), json('[]'))) FROM (SELECT je.value AS value FROM ${se} je UNION SELECT o.value FROM ${oe} o))`;
@@ -300,12 +351,12 @@ function setOpExpr(name: string, self: Expression, op: Expression): Expression {
  *  null elements fail a predicate (all([null,x]) drops); an eq/neq(null) predicate is
  *  null-aware so all([null,null], eq(null)) keeps. */
 function listAllAny(s: ListStream, step: PStep): ListStream {
-  assertUntypedList(s, step.name);
   const c = s.rel.as('c');
   const pred = step.args[0];
   const je = q`json_each(${c.c.list})`;
+  const val = memberValue(s.of);
   const isNullEq = pred && typeof pred === 'object' && (pred.op === 'eq' || pred.op === 'neq') && (pred.value === null || pred.value === undefined);
-  const elemPred = isNullEq ? (pred.op === 'eq' ? q`je.value IS NULL` : q`je.value IS NOT NULL`) : predicateSql(q`je.value`, pred);
+  const elemPred = isNullEq ? (pred.op === 'eq' ? q`${val} IS NULL` : q`${val} IS NOT NULL`) : predicateSql(val, pred);
   const keep = step.name === 'all'
     ? q`NOT EXISTS (SELECT 1 FROM ${je} je WHERE (${elemPred}) IS NOT TRUE)`
     : q`EXISTS (SELECT 1 FROM ${je} je WHERE (${elemPred}) IS TRUE)`;
@@ -361,28 +412,34 @@ const listIs: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
 // conjoin(delim): join the incoming list into ONE string (nulls skipped), delimiter a
 // plain string arg → a scalar stream (so a trailing step composes; usually terminal).
 const listConjoin: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
-  assertUntypedList(s, 'conjoin');
   const c = s.rel.as('c');
   const delim = String(step.args[0] ?? '');
-  const joined = q`(SELECT COALESCE(group_concat(value, ${value(delim)}), '') FROM (SELECT value FROM json_each(${c.c.list}) WHERE value IS NOT NULL ORDER BY key))`;
+  // Joins the PAYLOADS into one string — the result is a string whatever the members were.
+  const memberVal = memberValue(s.of, raw('value'));
+  const joined = q`(SELECT COALESCE(group_concat(mv, ${value(delim)}), '') FROM (SELECT ${memberVal} AS mv FROM json_each(${c.c.list}) WHERE ${memberVal} IS NOT NULL ORDER BY key))`;
   const rel = s.q.cte(q`SELECT ${joined} AS v${carryFrag(s.carried, c)} FROM ${c}`, ['v', ...carriedCols(s.carried)]);
-  return continueLowering(toScalarStream(carryOf(s), rel, undefined), at + 1);
+  return continueLowering(toScalarStream(carryOf(s), rel, undefined, { type: STATIC('string') }), at + 1);
 };
 
 // set-op family (combine/intersect/difference/disjunct/product) over a list operand.
 const listSetOp: ShapeTailFn<ListStream> = (s, step, steps, at) => {
-  assertUntypedList(s, step.name);
   const c = s.rel.as('c');
   const op = operandList(engineOf(s), step.args[0], step.name, s.params);
-  const listExpr = setOpExpr(step.name, c.c.list, op);
+  // A typed incoming list meets a BARE operand (a literal array / constant().fold()), so the
+  // two sides' encodings differ. Comparing and emitting on the payload puts both sides in
+  // one vocabulary; the result is therefore a bare list, uniformly (mixing a typed member
+  // with a bare operand member inside one list is precisely the corruption to avoid).
+  const listExpr = setOpExpr(step.name, c.c.list, op, isTyped(s.of));
   const terminal = at + 1 >= steps.length;
   // intersect/difference/disjunct return a Set: frame as a Set only when terminal. With a
   // follower (order(Scope.local)/unfold) the deduped content is treated as a plain list
   // (TinkerPop's order(local) on a set yields a List), matching the suite.
   if (SET_RESULT.has(step.name) && terminal)
     return continueLowering(toResultStream(s.q, q`SELECT json(${listExpr}) AS list FROM ${c}`, { kind: 'jsonbSet' }), at + 1);
-  // product yields a list of pair-lists; the others keep the element shape.
-  const of = step.name === 'product' ? { kind: 'list' as const, of: { kind: 'scalar' as const } } : s.of;
+  // product yields a list of pair-lists; the others keep the element shape — but a typed
+  // list that met a bare operand has been flattened to payloads, so it is bare now.
+  const of = step.name === 'product' ? { kind: 'list' as const, of: { kind: 'scalar' as const } }
+    : isTyped(s.of) ? retypedList(s.of) : s.of;
   return continueLowering(listCte(s, c, listExpr, of), at + 1);
 };
 
