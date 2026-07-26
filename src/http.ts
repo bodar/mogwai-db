@@ -51,21 +51,26 @@ export function errorResponse(message: string): Response {
  */
 export function streamBuffers(framed: Framed[], batchSize: number, bulked = false): Response {
   // A bulked frame appends a Long multiplicity to each value; batchSize still counts
-  // VALUES (one value = value+bulk), so chunk pacing is unchanged.
-  const values = bulked ? framed.map(withBulk) : framed.map((f) => f.buf);
+  // VALUES (one value = value+bulk), so chunk pacing is unchanged. Each value is encoded
+  // AS ITS BATCH IS PULLED rather than mapping the whole array up front: the encoded copy
+  // of the result set no longer coexists with the framed one, so peak memory is the input
+  // plus one batch instead of two full sets. (The input array itself is still fully
+  // materialized — GraphStore.query() returns T[] — so this bounds the copy, not the rows.)
+  const encode = bulked ? withBulk : (f: Framed) => f.buf;
   let i = 0;
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(bulked ? HEADER_BULKED : HEADER);
     },
     pull(controller) {
-      if (i >= values.length) {
+      if (i >= framed.length) {
         controller.enqueue(frameTrailer(200, null));
         controller.close();
         return;
       }
-      const batch = values.slice(i, i + batchSize);
-      i += batch.length;
+      const end = Math.min(i + batchSize, framed.length);
+      const batch: Buffer[] = [];
+      for (; i < end; i++) batch.push(encode(framed[i]));
       controller.enqueue(Buffer.concat(batch));
     },
   });
