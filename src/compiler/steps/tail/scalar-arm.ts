@@ -24,7 +24,7 @@
 import { isNested } from '../../../gremlin/frontend.ts';
 import { empty, list, paren, q, value, type Expression } from '../../../sql/kernel/q.ts';
 import { carriedCols, carriedWith, carryFrag, type ElementStream } from '../context/context.ts';
-import { carryOf, toScalarStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
+import { carryOf, rebuildScalar, toScalarStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
 import { mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm } from './variant.ts';
 import { engineOf, fastPathContextOf } from '../../engine/deps.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
@@ -243,7 +243,7 @@ function genericScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): S
         q`SELECT ${list(proj, ', ')}${carryFrag(s.carried, d)} FROM ${d} WHERE ${combine(bools)}`,
         [...payloadCols, ...carriedCols(s.carried)],
       );
-      return toScalarStream(carryOf(s), rel, s.as, { result: s.result, productiveNull: s.productiveNull, vtype: s.vtype });
+      return rebuildScalar(s, rel);
     },
   };
 }
@@ -546,5 +546,5 @@ export function tryScalarFilterByChildExistence(s: ScalarStream, step: PStep): S
     q`SELECT ${list(proj, ', ')}${carryFrag(s.carried, d)} FROM ${d} WHERE ${cond}`,
     [...payloadCols, ...carriedCols(s.carried)],
   );
-  return toScalarStream(carryOf(s), rel, s.as, { result: s.result, productiveNull: s.productiveNull, vtype: s.vtype });
+  return rebuildScalar(s, rel);
 }
