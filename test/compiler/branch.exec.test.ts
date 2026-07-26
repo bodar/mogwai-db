@@ -308,6 +308,13 @@ test('a list-armed branch composes as an all-cardinality (local/flatMap) child b
   // map() over a multi-output list branch stays fail-closed (never a silent wrong count).
   expect(() => run(store, 'g.V(1).map(__.union(__.out().fold(), __.in().fold()))'))
     .toThrow(/not supported/);
+  // a MIXED-shape branch (element + scalar arms) is likewise an all-cardinality child → a variant
+  // stream, equal to the flattened union. marko(1): out {vadas,josh,lop} + values('name') {marko} = 4.
+  const variant = (q: string) => run(store, q).map((r) => r.vk === 1 ? `s:${r.v}` : `e:${r.id}`).sort();
+  expect(variant('g.V(1).local(__.union(__.out(), __.values("name")))'))
+    .toEqual(variant('g.V(1).union(__.out(), __.values("name"))'));
+  expect(variant('g.V(1).flatMap(__.union(__.out(), __.values("name")))'))
+    .toEqual(['e:2', 'e:3', 'e:4', 's:marko']);
 });
 
 });

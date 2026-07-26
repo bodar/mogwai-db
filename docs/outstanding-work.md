@@ -93,13 +93,14 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
      block; L3 floor unchanged (ceiling raised, no named scenario). This also promoted several
      mixed→homogeneous branch classifications (`union(__.out().optional(in()), both())` is now an
      element union, not a variant).
-   - ✅ **Slice 2 LANDED 2026-07-26**: a **list-armed branch** (`union`/`coalesce`/`choose` whose arms
-     are all `…fold()`) now composes as an ALL-cardinality child body at `local`/`flatMap` —
-     `local(__.union(out().fold(), in().fold()))` lowers via `lowerStepsStrict` over a pushed scope,
-     re-projected to the parent's cardinality (`tryCompileListBranchChild`, `child.ts`). Deliberately
-     NOT wired into `map` (a multi-output body's first-cardinality would silently drop arms — fails
-     closed) nor into `classifyListChild` (which feeds the branch-arm triage — kept untouched). Pinned
-     by `test/L4-addendum/list-branch-child.feature`.
+   - ✅ **Slice 2 LANDED 2026-07-26**: a **list-armed OR mixed-shape (variant) branch**
+     (`union`/`coalesce`/`choose`) now composes as an ALL-cardinality child body at `local`/`flatMap`
+     — `local(__.union(out().fold(), in().fold()))` and `local(__.union(out(), values('name')))` lower
+     via `lowerStepsStrict` over a pushed scope to a List/VariantStream, re-projected to the parent's
+     cardinality (`tryCompileBranchChildAllCard`, `child.ts`). Deliberately NOT wired into `map` (a
+     multi-output body's first-cardinality would silently drop arms — fails closed) nor into
+     `classifyListChild` (which feeds the branch-arm triage — kept untouched). Pinned by
+     `test/L4-addendum/list-branch-child.feature`.
    - **Still open:** `as()`/`select(label)` bound inside a child body; `choose().option()` without a
      `Pick.none` default (mixed pass-through); child bodies producing map/group/record shapes (item 5
      territory); the `group().by(project(...))` composite key and non-scalar/non-count nested-group

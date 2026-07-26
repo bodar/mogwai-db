@@ -7,7 +7,7 @@ import { type PStep } from '../../ir/strategies.ts';
 import { aliasElem, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, type ElementStream } from '../context/context.ts';
 import { aliasId, aliasScalar } from '../context/alias.ts';
 import { carryOf, toScalarStream, type ListStream, type ScalarStream, type Stream } from '../context/stream.ts';
-import { tryCompileElementChild, tryCompileListBranchChild, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, type ScalarModulationSpec } from './child.ts';
+import { tryCompileElementChild, tryCompileBranchChildAllCard, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, type ScalarModulationSpec } from './child.ts';
 import { classifyByAt } from './child-shape.ts';
 
 // ---------- map (scalar body → per-traverser scalar projector) ----------
@@ -39,7 +39,7 @@ export function tryLowerFlatMap(st: ElementStream, step: PStep): Stream | null {
   return tryCompileElementChild(st, arg.nested, 'all')?.stream
     ?? tryCompileScalarValueChild(st, arg.nested, 'all')
     ?? tryCompileListChild(st, arg.nested)
-    ?? tryCompileListBranchChild(st, arg.nested); // a bare list-armed branch (all-cardinality)
+    ?? tryCompileBranchChildAllCard(st, arg.nested); // a bare list-armed / mixed-shape branch (all-cardinality)
 }
 
 export function tryLowerListChild(st: ElementStream, step: PStep): ListStream | null {

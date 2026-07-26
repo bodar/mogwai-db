@@ -406,19 +406,21 @@ export function classifyListChild(nested: any, params: Record<string, any>): { b
     ? { body } : null;
 }
 
-/** PURE. A bare branch step whose arms are UNIFORMLY list (each `…fold()`) — the list twin of
- *  isUniformElementBranch. lowerStepsStrict lowers it to a ListStream over a pushed child scope
- *  (finishListMerge is parent-agnostic). Deliberately NOT wired into classifyListChild (which feeds
- *  the branch-arm triage): it is consumed ONLY by the all-cardinality child consumers (local/flatMap),
- *  so a branch-of-lists composes there while map (first-of-a-multi-output body) stays fail-closed and
- *  the arm triage is untouched. */
-export function isUniformListBranch(nested: any, params: Record<string, any>): boolean {
+/** PURE. A bare branch step whose merge is LIST (uniform `…fold()` arms) or VARIANT (genuinely
+ *  mixed arms) — the shapes that lowerStepsStrict resolves to a List/VariantStream over a pushed
+ *  child scope (finishListMerge / mergeVariantArms are parent-agnostic). Element-armed and
+ *  scalar-armed branches are excluded here — they have their own cardinality-aware child paths.
+ *  Deliberately NOT wired into classifyListChild/the branch-arm triage: consumed ONLY by the
+ *  all-cardinality child consumers (local/flatMap), so a branch-of-lists / mixed branch composes
+ *  there while map (first-of-a-multi-output body) stays fail-closed and the triage is untouched. */
+export function isBareBranchChildAllCard(nested: any, params: Record<string, any>): boolean {
   if (!nested) return false;
   const body = childSteps(nested, params);
   if (body.length !== 1) return false;
   const kind = asBranchKind(body[0].name);
   if (!kind || (body[0] as any).options) return false;
-  return classifyBranchArms(kind, body[0], params).merge === 'list';
+  const merge = classifyBranchArms(kind, body[0], params).merge;
+  return merge === 'list' || merge === 'variant';
 }
 
 export function isListChild(nested: any, params: Record<string, any>): boolean {

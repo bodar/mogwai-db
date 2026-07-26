@@ -4,7 +4,7 @@ import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
 import { advance, carriedWith, carryFrag, carryFragMint, carriedCols, partitionOver, type Carried, type ElementStream } from '../context/context.ts';
 import { aliasId } from '../context/alias.ts';
-import { carryOf, toListStream, toScalarStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream } from '../context/stream.ts';
+import { carryOf, toListStream, toScalarStream, toVariantStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { lowerScalarRows, unionScalarStreams, SCALAR_TRANSFORMS } from './scalar.ts';
 import { lowerScalarVE } from './projection.ts';
@@ -14,7 +14,7 @@ import { predicateSql, rangeToOffsetLimit } from '../../plan/plan.ts';
 import { elementOrderSql } from './modulation.ts';
 import {
   childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm,
-  ELEMENT_CHILD_STEPS, isUniformListBranch, reuseCurrentFrame, ROOT_SCOPE, scalarChildPrefixOk,
+  ELEMENT_CHILD_STEPS, isBareBranchChildAllCard, reuseCurrentFrame, ROOT_SCOPE, scalarChildPrefixOk,
   type ChildFrame, type ChildParent, type ChildScope, type ChildUse, type CompileScope,
 } from './child-shape.ts';
 // The scope-construction trio (pushChildScope/popChildScope below + reuseCurrentFrame) is the
@@ -584,30 +584,47 @@ export function tryCompileScalarValueRows(
     ?? compileScalarChildRows(parent, nested, 'all', scope, true, undefined, preParsed);
 }
 
-/** A bare list-armed branch (union/coalesce/choose whose arms are all `…fold()`) as an
- *  ALL-cardinality child body (local/flatMap). It lowers to a ListStream through lowerStepsStrict
- *  over a pushed child scope — the branch's list merge is parent-agnostic and rides the pushed
- *  ordinal — then each list row is re-projected to the parent's carried schema, dropping the child
- *  ordinal. A branch has ≥2 arms, so it emits several list rows per parent (multiset-faithful, as
- *  UNION ALL); local/flatMap emit them all. map() (first-of-a-multi-output body) is deliberately
- *  NOT a caller — it falls through to its clear deferral rather than silently returning one list. */
-export function tryCompileListBranchChild(
+/** A bare branch (union/coalesce/choose) whose arms are uniformly LIST or genuinely MIXED
+ *  (variant) as an ALL-cardinality child body (local/flatMap). It lowers to a ListStream/
+ *  VariantStream through lowerStepsStrict over a pushed child scope — the branch's list/variant
+ *  merge is parent-agnostic and rides the pushed ordinal — then the payload rows are re-projected
+ *  to the parent's carried schema, dropping the child ordinal. A branch has ≥2 productive arm rows,
+ *  so it emits several payload rows per parent (multiset-faithful, as UNION ALL); local/flatMap emit
+ *  them all. map() (first-of-a-multi-output body) is deliberately NOT a caller — it falls through to
+ *  its clear deferral rather than silently returning one arm's value. Element/scalar-armed branch
+ *  children keep their own cardinality-aware paths (compileElementChildRows / compileScalarChildRows);
+ *  this covers only the two arm shapes those don't. */
+export function tryCompileBranchChildAllCard(
   parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
-): ListStream | null {
+): ListStream | VariantStream | null {
   if (!nested || isPropertyParent(parent) || isScalarParent(parent)) return null;
-  if (!isUniformListBranch(nested, parent.params)) return null;
+  if (!isBareBranchChildAllCard(nested, parent.params)) return null;
   const body = childSteps(nested, parent.params);
   const pushed = pushChildScope(parent, scope);
   const lowered = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, body, 0);
-  if (lowered.kind !== 'list') return null;
+  if (lowered.kind !== 'list' && lowered.kind !== 'variant') return null;
   const l = lowered.rel.as('l');
-  const rel = parent.q.cte(
-    q`SELECT ${l.c.list} AS list${carryFrag(parent.carried, l)} FROM ${l}`,
-    ['list', ...carriedCols(parent.carried)],
-  );
-  return toListStream(carryOf(parent), rel, lowered.of);
+  if (lowered.kind === 'list') {
+    const rel = parent.q.cte(
+      q`SELECT ${l.c.list} AS list${carryFrag(parent.carried, l)} FROM ${l}`,
+      ['list', ...carriedCols(parent.carried)],
+    );
+    return toListStream(carryOf(parent), rel, lowered.of);
+  }
+  if (lowered.kind === 'variant') {
+    // A VariantStream's payload columns (vk, v, rid, and list when a list arm is present) are
+    // re-projected verbatim; the pushed ordinal is dropped by projecting only the parent's carried.
+    const payload = ['vk', 'v', 'rid', ...(lowered.listOf ? ['list'] : [])];
+    const rel = parent.q.cte(
+      q`SELECT ${list(payload.map((c) => q`${l.c[c]} AS ${c}`), ', ')}${carryFrag(parent.carried, l)} FROM ${l}`,
+      [...payload, ...carriedCols(parent.carried)],
+    );
+    return toVariantStream(carryOf(parent), rel,
+      { scalarAs: lowered.scalarAs, node: lowered.node, edge: lowered.edge, listOf: lowered.listOf }, lowered.result);
+  }
+  return null;
 }
 
 /** Scalar rows followed by fold() become one ListStream per parent. This is a true

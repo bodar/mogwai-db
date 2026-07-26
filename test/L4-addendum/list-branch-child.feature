@@ -50,3 +50,17 @@ Feature: mogwai addendum — a list-armed branch as an all-cardinality child-bod
     Then the result should be unordered
       | result |
       | d[2].l |
+
+  # A MIXED-shape branch (element + scalar arms) is likewise an all-cardinality child — it lowers to
+  # a VariantStream. marko(1): out {vadas,josh,lop} + values('name') {marko} = 4 rows (global count).
+  @gap:list-branch-child
+  Scenario: g_V_1_localXunionXout__valuesXnameXXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).local(__.union(__.out(), __.values("name"))).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[4].l |
