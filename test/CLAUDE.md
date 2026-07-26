@@ -32,9 +32,17 @@
 
 ## Guardrails
 
-- **Version split — do not collapse.** Parser + corpus track tinkerpop `origin/master` (a
-  forward-compatible superset); L3 conformance tracks the pinned beta.2 checkout (matches the
-  `gremlin` npm wire). Pinning L3 to master breaks it for zero gain.
+- **Everything tracks tinkerpop `origin/master` — the version split is GONE** (2026-07-26). The
+  submodule, the L3 corpus, and the CLIENT itself are all master; `gremlin` resolves to the
+  submodule via `bun link` (`scripts/init-submodule.sh` builds + links it), because the server
+  must frame with the same client the suite tests it against. npm's newest v4 is still
+  4.0.0-beta.2, ~300 commits behind and without the `gremlin/io` export.
+  The old rule here said "pinning L3 to master breaks it for zero gain" — **measured, and it is
+  false**: master is L3 1363/2297 vs beta.2's 1347/2041 (+16 passing, +256 scenarios in scope).
+  What master actually needs is two runner details, each of which fails SILENTLY: cucumber 13
+  wants a **glob** for features and for `--import` step definitions (a bare directory matches
+  zero and reads as a total failure), and Bun's built-in `undici` shim lacks
+  `Agent.close()`/`destroy()` so every client teardown throws (`test/support/undici-shim.ts`).
 - **Every new step lands with** L2 SQL snapshots + its cucumber tag in `tags.ts`, L1 still 100%.
 - **SQL snapshots assert semantic equivalence, NOT byte-identity.** A refactor that moves the SQL
   string but means the same thing (same result set + plan shape) is fine — update the snapshot,

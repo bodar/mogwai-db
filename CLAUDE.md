@@ -13,7 +13,8 @@ direction over mechanism: if a detail is re-derivable from the code, cite the co
 
 A TinkerPop 4 Gremlin server compiled onto SQLite, targeting Cloudflare Durable Objects. One DO =
 one isolated graph (created on first request via `idFromName`); any TinkerPop 4 GLV in any language
-connects over plain HTTP. Verified against unmodified `gremlin@4.0.0-beta.2` on both Bun and CF DO.
+connects over plain HTTP. Verified against the unmodified `gremlin` JS client at tinkerpop
+`origin/master` (consumed from the submodule via `bun link`) on both Bun and CF DO.
 (*mogwai* 魔怪 — a mischievous little devil that speaks **Gremlin**.)
 
 ## Where subsystem detail lives (loaded on demand)
@@ -42,8 +43,8 @@ connects over plain HTTP. Verified against unmodified `gremlin@4.0.0-beta.2` on 
    `Gremlin.g4` by **`antlr-ng`** (the generator, `bunx antlr-ng -Dlanguage=TypeScript`, same
    tool upstream gremlin-js uses); the generated parser imports **`antlr4ng`** (the runtime
    library — different package, don't confuse them). Grammar source is the submodule's
-   **`origin/master`** ref, not the pinned beta.2 checkout (a forward-compatible superset — see
-   the parser/corpus-vs-conformance version split in `test/CLAUDE.md`). Track upstream by
+   **`origin/master`** ref — as is everything else now (the old beta.2 conformance pin is gone,
+   see `test/CLAUDE.md`). Track upstream by
    regenerating (`mise run generate`, byte-stable). If you find yourself editing generated files,
    stop.
 3. **Compile to SQL, never interpret.** Each read step lowers to CTE-chained SQL;
