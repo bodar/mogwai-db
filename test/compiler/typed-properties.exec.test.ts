@@ -11,6 +11,7 @@ import { parseRequest } from '../../src/wire.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { assertStreamColumns } from '../../src/compiler/steps/context/stream.ts';
 import { pushChildScope } from '../../src/compiler/steps/tail/child.ts';
+import { decode, decodeAll } from '../support/decode.ts';
 
 const read = (q: string, options?: CompileOptions) => {
   const p = compile(q, {}, options);
@@ -61,7 +62,7 @@ describe('typed property values (P1) — vtype capture + collection storage', ()
     expect(got).toEqual({ b: 'boolean', d: 'double', gid: 'uuid', i: 'int', l: 'long', s: 'string', when: 'datetime' });
   });
 
-  test('a list-valued property stores a self-describing typed-JSON tree (vtype=list)', () => {
+  test('a list-valued property stores a self-describing typed-JSON tree (vtype=list)', async () => {
     const store = fresh();
     // Was "Binding expected string…" before collections serialized to JSONB; now the value
     // column holds the top node's BARE `v` = per-element {t,v} nodes (full-fidelity elements).
@@ -71,8 +72,8 @@ describe('typed property values (P1) — vtype capture + collection storage', ()
       { t: 'string', v: 'a' }, { t: 'string', v: 'b' }, { t: 'string', v: 'c' },
     ]]);
     // round-trips back to the plain list value.
-    const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
-    expect(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST))", {}).map(dec)).toEqual([['a', 'b', 'c']]);
+    const dec = (b: Buffer) => decode(b);
+    expect(await decodeAll(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST))", {}))).toEqual([['a', 'b', 'c']]);
   });
 
   test('a map-valued property stores ordered typed [key,value] pairs (non-string keys survive)', () => {
@@ -135,7 +136,7 @@ describe('typed property values (P1) — vtype capture + collection storage', ()
     expect(executeQuery(store, "g.E().has('weight', typeOf(GType.LONG))", {})).toHaveLength(0);
   });
 
-  test('the wire is the truth: a bound param keeps its GraphBinary DataType', () => {
+  test('the wire is the truth: a bound param keeps its GraphBinary DataType', async () => {
     const store = fresh();
     // 5e9 is out of int32 range → the client serializes it as a GraphBinary Long. The
     // stored vtype must be 'long' (JS-value inference would wrongly guess 'int').
@@ -146,7 +147,7 @@ describe('typed property values (P1) — vtype capture + collection storage', ()
       ioc.mapSerializer.serialize(fields, false),
       ioc.stringSerializer.serialize("g.addV('t').property('big',n).property('txt',s)", false),
     ]);
-    const parsed = parseRequest(raw);
+    const parsed = await parseRequest(raw);
     expect(parsed.paramTypes).toEqual({ n: 'long', s: 'string' });
     executeQuery(store, parsed.gremlin, parsed.params, parsed.paramTypes);
     const got = Object.fromEntries(vprops(store, ['big', 'txt']).map((r) => [r.key, r.vtype]));

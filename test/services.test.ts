@@ -15,6 +15,7 @@ import { executeQuery } from './support/executor.ts';
 import { Executor } from '../src/execute.ts';
 import { ioc } from '../src/io.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
+import { decode, decodeAll } from './support/decode.ts';
 
 /** Parse a gremlin string, normalize, and return the (single) folded call PStep. */
 const callStep = (gremlin: string, params: Record<string, any> = {}) => {
@@ -248,43 +249,43 @@ describe('--list (DirectoryService) — end to end over GraphBinary', () => {
     directoryService, stubService('tinker.search'), stubService('tinker.degree.centrality'),
   ]);
   const store = new GraphStore(new BunSqlite(':memory:'));
-  const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v as string;
-  const run = (g: string, params: Record<string, any> = {}) =>
-    executeQuery(store, g, params, {}, reg).map(dec);
+  const dec = async (b: Buffer) => await decode(b) as string;
+  const run = async (g: string, params: Record<string, any> = {}) =>
+    decodeAll(executeQuery(store, g, params, {}, reg));
 
-  test('g_call — bare g.call() lists every service (directory excluded)', () => {
-    expect(run('g.call()').sort()).toEqual(['tinker.degree.centrality', 'tinker.search']);
+  test('g_call — bare g.call() lists every service (directory excluded)', async () => {
+    expect((await run('g.call()')).sort()).toEqual(['tinker.degree.centrality', 'tinker.search']);
   });
 
-  test('g_callXlistX — explicit "--list" lists every service', () => {
-    expect(run('g.call("--list")').sort()).toEqual(['tinker.degree.centrality', 'tinker.search']);
+  test('g_callXlistX — explicit "--list" lists every service', async () => {
+    expect((await run('g.call("--list")')).sort()).toEqual(['tinker.degree.centrality', 'tinker.search']);
   });
 
-  test('g_callXlistX_withXstring_stringX — .with(service, name) filters', () => {
-    expect(run('g.call("--list").with("service", "tinker.search")')).toEqual(['tinker.search']);
+  test('g_callXlistX_withXstring_stringX — .with(service, name) filters', async () => {
+    expect(await run('g.call("--list").with("service", "tinker.search")')).toEqual(['tinker.search']);
   });
 
-  test('g_callXlistX_withXstring_traversalX — .with(service, __.constant(name)) filters', () => {
-    expect(run('g.call("--list").with("service", __.constant("tinker.search"))')).toEqual(['tinker.search']);
+  test('g_callXlistX_withXstring_traversalX — .with(service, __.constant(name)) filters', async () => {
+    expect(await run('g.call("--list").with("service", __.constant("tinker.search"))')).toEqual(['tinker.search']);
   });
 
-  test('g_callXlist_mapX — a map param filters', () => {
-    expect(run('g.call("--list", xx1)', { xx1: new Map([['service', 'tinker.search']]) }))
+  test('g_callXlist_mapX — a map param filters', async () => {
+    expect(await run('g.call("--list", xx1)', { xx1: new Map([['service', 'tinker.search']]) }))
       .toEqual(['tinker.search']);
   });
 
-  test('g_callXlist_traversalX — a __.project(service).by(__.constant(name)) param filters', () => {
-    expect(run('g.call("--list", __.project("service").by(__.constant("tinker.search")))'))
+  test('g_callXlist_traversalX — a __.project(service).by(__.constant(name)) param filters', async () => {
+    expect(await run('g.call("--list", __.project("service").by(__.constant("tinker.search")))'))
       .toEqual(['tinker.search']);
   });
 
-  test('g_callXlist_map_traversalX — map wins when both given', () => {
-    expect(run('g.call("--list", xx1, __.project("service").by(__.constant("tinker.search")))',
+  test('g_callXlist_map_traversalX — map wins when both given', async () => {
+    expect(await run('g.call("--list", xx1, __.project("service").by(__.constant("tinker.search")))',
       { xx1: new Map([['service', 'tinker.search']]) })).toEqual(['tinker.search']);
   });
 
-  test('verbose → a JSON describe blob per service', () => {
-    const [blob] = run('g.call("--list").with("service", "tinker.search").with("verbose", true)');
+  test('verbose → a JSON describe blob per service', async () => {
+    const [blob] = await run('g.call("--list").with("service", "tinker.search").with("verbose", true)');
     expect(JSON.parse(blob)).toMatchObject({ name: 'tinker.search', type: 'start' });
   });
 });
@@ -292,14 +293,15 @@ describe('--list (DirectoryService) — end to end over GraphBinary', () => {
 describe('tinker.degree.centrality — per-vertex edge count', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
   for (const g of MODERN_SEED) executeQuery(store, g, {});
-  const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
-  const run = (g: string) => executeQuery(store, g, {}, {}, standardRegistry).map(dec);
+  const dec = (b: Buffer) => decode(b);
+  const run = async (g: string) =>
+    (await decodeAll(executeQuery(store, g, {}, {}, standardRegistry)));
   // Decode the project record into a name→degree map (TinkerPop results are UNORDERED, so
   // assert as a map rather than a positional array — g.V() order is unspecified).
-  const projMap = (g: string, params: Record<string, any> = {}): Record<string, number> => {
+  const projMap = async (g: string, params: Record<string, any> = {}): Promise<Record<string, number>> => {
     const out: Record<string, number> = {};
     for (const b of executeQuery(store, g, params, {}, standardRegistry)) {
-      const m: any = dec(b);
+      const m: any = await dec(b);
       const name = m.get('vertex').properties?.find((p: any) => p.label === 'name')?.value;
       out[name] = Number(m.get('degree'));
     }
@@ -308,52 +310,48 @@ describe('tinker.degree.centrality — per-vertex edge count', () => {
   const IN = { marko: 0, vadas: 1, lop: 3, josh: 1, ripple: 1, peter: 0 };
   const OUT = { marko: 3, vadas: 0, lop: 0, josh: 2, ripple: 0, peter: 1 };
 
-  test('g_V_callXdcX — IN degree per vertex, projected with its vertex', () => {
-    expect(projMap('g.V().as("v").call("tinker.degree.centrality").project("vertex","degree").by(select("v")).by()'))
+  test('g_V_callXdcX — IN degree per vertex, projected with its vertex', async () => {
+    expect(await projMap('g.V().as("v").call("tinker.degree.centrality").project("vertex","degree").by(select("v")).by()'))
       .toEqual(IN);
   });
 
-  test('g_V_callXdcX_withXdirection_OUTX — OUT degree', () => {
-    expect(projMap('g.V().as("v").call("tinker.degree.centrality").with("direction", OUT).project("vertex","degree").by(select("v")).by()'))
+  test('g_V_callXdcX_withXdirection_OUTX — OUT degree', async () => {
+    expect(await projMap('g.V().as("v").call("tinker.degree.centrality").with("direction", OUT).project("vertex","degree").by(select("v")).by()'))
       .toEqual(OUT);
   });
 
-  test('g_V_callXdc_mapX_withXdirection_OUTX — a (ignored) map arg + with(direction) OUT', () => {
-    expect(projMap('g.V().as("v").call("tinker.degree.centrality", xx1).with("direction", OUT).project("vertex","degree").by(select("v")).by()',
+  test('g_V_callXdc_mapX_withXdirection_OUTX — a (ignored) map arg + with(direction) OUT', async () => {
+    expect(await projMap('g.V().as("v").call("tinker.degree.centrality", xx1).with("direction", OUT).project("vertex","degree").by(select("v")).by()',
       { xx1: new Map([['x', 'y']]) })).toEqual(OUT);
   });
 
-  test('g_V_callXdc_traversalX — direction via __.project(direction).by(__.constant(OUT))', () => {
-    expect(projMap('g.V().as("v").call("tinker.degree.centrality", __.project("direction").by(__.constant(OUT))).project("vertex","degree").by(select("v")).by()'))
+  test('g_V_callXdc_traversalX — direction via __.project(direction).by(__.constant(OUT))', async () => {
+    expect(await projMap('g.V().as("v").call("tinker.degree.centrality", __.project("direction").by(__.constant(OUT))).project("vertex","degree").by(select("v")).by()'))
       .toEqual(OUT);
   });
 
-  test('bare mid-traversal degree (no project) yields one scalar per vertex', () => {
+  test('bare mid-traversal degree (no project) yields one scalar per vertex', async () => {
     // Order-independent: the multiset of degrees matches IN's values.
-    expect(run('g.V().call("tinker.degree.centrality")').map(Number).sort())
+    expect((await run('g.V().call("tinker.degree.centrality")')).map(Number).sort())
       .toEqual(Object.values(IN).sort());
   });
 
   // Step 5b: a call() body inside where() is recognized as a scalar child via the generalized
   // "lowers-to-scalar" classifier (not a hardcoded values/id/label vocabulary). The child scope
   // is derived from the parent stream so the service reduces per input vertex.
-  test('g_V_whereXcallXdcXX — where(call(dc).is(3)) keeps only IN-degree-3 vertices (lop)', () => {
-    const names = (g: string) =>
-      executeQuery(store, g, {}, {}, standardRegistry).map((b) => {
-        const v: any = dec(b);
-        return v.properties?.find((p: any) => p.label === 'name')?.value;
-      });
+  test('g_V_whereXcallXdcXX — where(call(dc).is(3)) keeps only IN-degree-3 vertices (lop)', async () => {
+    const names = async (g: string) =>
+      (await decodeAll(executeQuery(store, g, {}, {}, standardRegistry)))
+        .map((v: any) => v.properties?.find((p: any) => p.label === 'name')?.value);
     // Only `lop` has IN-degree 3 in the modern graph.
-    expect(names('g.V().where(call("tinker.degree.centrality").is(3))')).toEqual(['lop']);
+    expect(await names('g.V().where(call("tinker.degree.centrality").is(3))')).toEqual(['lop']);
   });
 
-  test('where(call(dc).with(direction,OUT).is(3)) keeps only OUT-degree-3 vertices (marko)', () => {
-    const names = (g: string) =>
-      executeQuery(store, g, {}, {}, standardRegistry).map((b) => {
-        const v: any = dec(b);
-        return v.properties?.find((p: any) => p.label === 'name')?.value;
-      });
-    expect(names('g.V().where(call("tinker.degree.centrality").with("direction", OUT).is(3))')).toEqual(['marko']);
+  test('where(call(dc).with(direction,OUT).is(3)) keeps only OUT-degree-3 vertices (marko)', async () => {
+    const names = async (g: string) =>
+      (await decodeAll(executeQuery(store, g, {}, {}, standardRegistry)))
+        .map((v: any) => v.properties?.find((p: any) => p.label === 'name')?.value);
+    expect(await names('g.V().where(call("tinker.degree.centrality").with("direction", OUT).is(3))')).toEqual(['marko']);
   });
 });
 
@@ -376,8 +374,8 @@ describe('barrier source form via Executor (stub source → drive → land → f
   const store = new GraphStore(new BunSqlite(':memory:')); // empty — foreign rows are literals
   const reg = createRegistry([stubFederate]);
   const ex = new Executor(store, reg, stubSource); // Executor bound directly to the stub source
-  const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
-  const run = async (g: string) => (await ex.framedAsync(g, {})).map((f: any) => dec(f.buf));
+  const dec = (b: Buffer) => decode(b);
+  const run = async (g: string) => decodeAll((await ex.framedAsync(g, {})).map((f: any) => f.buf));
 
   test('g.call(federate) lands the sibling vertices as detached references', async () => {
     const vs: any[] = await run('g.call("mogwai.graph.federate").with("graph", "orders")');

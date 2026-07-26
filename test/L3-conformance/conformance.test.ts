@@ -8,6 +8,7 @@
 import { test, expect, describe, beforeAll, afterAll } from 'bun:test';
 import gremlin from 'gremlin';
 import { startConformanceServer } from './conformance-server.ts';
+import '../support/undici-shim.ts'; // Bun's undici Agent lacks close() — see the shim's header
 
 const { DriverRemoteConnection } = gremlin.driver;
 const { traversal } = gremlin.process.AnonymousTraversalSource;

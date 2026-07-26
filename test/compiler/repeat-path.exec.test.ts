@@ -11,6 +11,7 @@ import { parseRequest } from '../../src/wire.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { assertStreamColumns } from '../../src/compiler/steps/context/stream.ts';
 import { pushChildScope } from '../../src/compiler/steps/tail/child.ts';
+import { decode, decodeAll } from '../support/decode.ts';
 
 const read = (q: string, options?: CompileOptions) => {
   const p = compile(q, {}, options);
@@ -52,7 +53,7 @@ describe('compiler execution semantics', () => {
 async function decodePaths(store: GraphStore, gremlin: string): Promise<any[]> {
   const { ioc } = await import('../../src/io.ts');
   const buffers = executeQuery(store, gremlin, {}); // one framed Path per result value
-  return buffers.map((b) => ioc.anySerializer.deserialize(b).v);
+  return decodeAll(buffers);
 }
 
 
@@ -137,7 +138,7 @@ test('path().by(key) projects each element; a missing key drops the whole path',
 test('path() interleaves edges and vertices with materialized props (via framing)', async () => {
   const { ioc } = await import('../../src/io.ts');
   const buffers = executeQuery(seededStore(), 'g.V(1).outE("created").inV().path()', {});
-  const { v: path } = ioc.anySerializer.deserialize(Buffer.concat(buffers)); // one framed Path value
+  const path = await decode(Buffer.concat(buffers)); // one framed Path value
   expect(path.constructor.name).toBe('Path');
   expect(path.objects.map((o: any) => o.constructor.name)).toEqual(['Vertex', 'Edge', 'Vertex']);
   expect(path.labels).toEqual([new Set(), new Set(), new Set()]); // labels-on-path deferred

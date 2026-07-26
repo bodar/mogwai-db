@@ -18,6 +18,7 @@ import { assertStreamColumns, toGroupStream, toPathStream, toPropertyStream, toR
 import { popChildScope, pushChildScope, reuseCurrentFrame } from '../../src/compiler/steps/tail/child.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
 import { readdirSync, readFileSync } from 'node:fs';
+import { decode, decodeAll } from '../support/decode.ts';
 
 const read = (q: string, options?: CompileOptions) => {
   const p = compile(q, {}, options);
@@ -172,17 +173,18 @@ describe('group / properties SQL', () => {
     expect(() => compile("g.V().values('name').groupCount('a').cap('a')", {})).toThrow();
   });
 
-  test('count values decode as Number (Int64), including inside a nested groupCount map', () => {
+  test('count values decode as Number (Int64), including inside a nested groupCount map', async () => {
     // count()/groupCount() are Java Longs → Int64, which the client decodes to a Number (a
     // bigint would arrive as BigInt — the fidelity bug). Assert the decoded JS TYPE at every
     // depth: a top-level groupCount value AND a groupCount nested as a group's by()-value.
     const store = seededStore();
-    const dec = (q: string) => executeQuery(store, q, {}).map((b: Buffer) => ioc.anySerializer.deserialize(b, true).v);
-    const top = dec('g.V().groupCount().by(T.label)')[0] as Map<string, unknown>;
+    const dec = async (q: string) =>
+    (await decodeAll(executeQuery(store, q, {})));
+    const top = (await dec('g.V().groupCount().by(T.label)'))[0] as Map<string, unknown>;
     expect(typeof top.get('person')).toBe('number');
     expect(top.get('person')).toBe(4);
     // nested: group().by('name').by(out().groupCount().by(T.label)) → Map{name: Map{label: count}}.
-    const nested = dec("g.V().hasLabel('person').group().by('name').by(__.out().groupCount().by(T.label))")[0] as Map<string, Map<string, unknown>>;
+    const nested = (await dec("g.V().hasLabel('person').group().by('name').by(__.out().groupCount().by(T.label))"))[0] as Map<string, Map<string, unknown>>;
     expect(typeof nested.get('marko')!.get('person')).toBe('number');
     expect(nested.get('marko')!.get('person')).toBe(2);
     expect(nested.get('josh')!.get('software')).toBe(2);
@@ -280,15 +282,15 @@ describe('group / properties SQL', () => {
     expect(scalarKey.sql).toContain('GROUP BY gk');
   });
 
-  test('terminal select(Column.values) over an element-list group frames full elements, not rowids', () => {
+  test('terminal select(Column.values) over an element-list group frames full elements, not rowids', async () => {
     const store = seededStore();
-    const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
+    const dec = (b: Buffer) => decode(b);
     for (const [q, ctor] of [
       ['g.V().group().by(T.label).by(__.out().fold()).select(Column.values)', 'Vertex'],
       ['g.V().group().by(T.label).by(__.outE().fold()).select(Column.values)', 'Edge'],
     ] as const) {
       // Terminal form: ONE buffer = the outer List of inner element lists (a list-of-lists).
-      const outer = dec(executeQuery(store, q, {})[0]) as any[][];
+      const outer = await dec(executeQuery(store, q, {})[0]) as any[][];
       const flat = outer.flat();
       // The leaked-rowid bug produced bare JS numbers here; assert real elements instead.
       expect(flat.length).toBeGreaterThan(0);
@@ -299,7 +301,7 @@ describe('group / properties SQL', () => {
       // Equivalence with the always-correct .unfold() twin: appending .unfold() explodes
       // the SAME outer list into one buffer per inner list. Each inner list must be
       // identical (element by element, in order) to its position in the terminal result.
-      const unfoldedInner = executeQuery(store, `${q}.unfold()`, {}).map((b) => dec(b) as any[]);
+      const unfoldedInner = await decodeAll(executeQuery(store, `${q}.unfold()`, {})) as any[][];
       const idsOf = (lists: any[][]) => lists.map((l) => l.map((v) => v.id));
       expect(idsOf(unfoldedInner)).toEqual(idsOf(outer));
     }

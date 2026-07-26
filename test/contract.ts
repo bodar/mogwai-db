@@ -1,5 +1,6 @@
 import { test, expect, describe, beforeAll, afterAll } from 'bun:test';
 import gremlin from 'gremlin';
+import './support/undici-shim.ts'; // Bun's undici Agent lacks close() — see the shim's header
 
 const { DriverRemoteConnection } = gremlin.driver;
 const { traversal } = gremlin.process.AnonymousTraversalSource;
@@ -156,7 +157,7 @@ function gremlinContract(getOrigin: () => string) {
       });
       expect(res.status).toBe(200);
       expect(res.headers.get('content-type')).toBe('application/vnd.graphbinary-v4.0');
-      const parsed = ioc.graphBinaryReader.readResponse(Buffer.from(await res.arrayBuffer()));
+      const parsed = await ioc.graphBinaryReader.readResponse(Buffer.from(await res.arrayBuffer()));
       expect(parsed.status.code).toBe(200);
       expect(parsed.result.data.map((x: any) => Number(x))).toEqual([1, 2, 3, 4, 5]);
     });

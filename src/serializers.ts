@@ -20,7 +20,15 @@ import { BigDecimal, Duration } from './gremlin/types.ts';
 
 // The client ioc has no shipped type declarations (see io.ts) — type it loosely.
 type Ioc = any;
-interface Decoded<T> { v: T | null; len: number; }
+
+// The client's async byte reader. Deserialization is pull-based and async since
+// apache/tinkerpop#3395 (response streaming), so these three serializers implement the same
+// contract as the client's own: `deserializeValue(reader, flag, code)` reads a BARE value,
+// `deserialize(reader)` reads the type byte first. SERIALIZATION stayed synchronous.
+type StreamReader = {
+  readUInt8(): Promise<number>;
+  readBytes(n: number): Promise<Buffer>;
+};
 
 // ---------- BigDecimal (0x22) ----------
 // Wire (FQ): [0x22, value_flag] {scale: int32 BE} {unscaled: BigInteger, bare}.
@@ -46,30 +54,18 @@ class BigDecimalSerializer {
     bufs.push(this.ioc.bigIntegerSerializer.serialize(bd.unscaled, false));
     return Buffer.concat(bufs);
   }
-  deserialize(buffer: Buffer, fullyQualifiedFormat = true): Decoded<BigDecimal> {
-    let len = 0;
-    let cursor = buffer;
-    try {
-      if (buffer === undefined || buffer === null || !(buffer instanceof Buffer)) throw new Error('buffer is missing');
-      if (buffer.length < 1) throw new Error('buffer is empty');
-      if (fullyQualifiedFormat) {
-        const type_code = cursor.readUInt8(); len++;
-        if (type_code !== this.ioc.DataType.BIGDECIMAL) throw new Error('unexpected {type_code}');
-        cursor = cursor.slice(1);
-        if (cursor.length < 1) throw new Error('{value_flag} is missing');
-        const value_flag = cursor.readUInt8(); len++;
-        if (value_flag === 1) return { v: null, len };
-        if (value_flag !== 0) throw new Error('unexpected {value_flag}');
-        cursor = cursor.slice(1);
-      }
-      const { v: scale, len: sl } = this.ioc.intSerializer.deserialize(cursor, false);
-      cursor = cursor.slice(sl); len += sl;
-      const { v: unscaled, len: ul } = this.ioc.bigIntegerSerializer.deserialize(cursor, false);
-      len += ul;
-      return { v: new BigDecimal(BigInt(unscaled), Number(scale)), len };
-    } catch (err) {
-      throw this.ioc.utils.des_error({ serializer: this, args: arguments, cursor, err });
-    }
+  async deserializeValue(reader: StreamReader, valueFlag: number): Promise<BigDecimal | null> {
+    if (valueFlag === 1) return null;
+    // intSerializer has a deserializeBare; bigInteger/long expose only the (reader, flag,
+    // code) form, so pass flag 0x00 = "present, bare" for those.
+    const scale = await this.ioc.intSerializer.deserializeBare(reader);
+    const unscaled = await this.ioc.bigIntegerSerializer.deserializeValue(reader, 0x00, this.ioc.DataType.BIGINTEGER);
+    return new BigDecimal(BigInt(unscaled), Number(scale));
+  }
+  async deserialize(reader: StreamReader): Promise<BigDecimal | null> {
+    const type_code = await reader.readUInt8();
+    if (type_code !== this.ioc.DataType.BIGDECIMAL) throw new Error('unexpected {type_code}');
+    return this.deserializeValue(reader, await reader.readUInt8());
   }
 }
 
@@ -97,30 +93,16 @@ class DurationSerializer {
     bufs.push(this.ioc.intSerializer.serialize(d.nanos, false));
     return Buffer.concat(bufs);
   }
-  deserialize(buffer: Buffer, fullyQualifiedFormat = true): Decoded<Duration> {
-    let len = 0;
-    let cursor = buffer;
-    try {
-      if (buffer === undefined || buffer === null || !(buffer instanceof Buffer)) throw new Error('buffer is missing');
-      if (buffer.length < 1) throw new Error('buffer is empty');
-      if (fullyQualifiedFormat) {
-        const type_code = cursor.readUInt8(); len++;
-        if (type_code !== this.ioc.DataType.DURATION) throw new Error('unexpected {type_code}');
-        cursor = cursor.slice(1);
-        if (cursor.length < 1) throw new Error('{value_flag} is missing');
-        const value_flag = cursor.readUInt8(); len++;
-        if (value_flag === 1) return { v: null, len };
-        if (value_flag !== 0) throw new Error('unexpected {value_flag}');
-        cursor = cursor.slice(1);
-      }
-      const { v: seconds, len: sl } = this.ioc.longSerializer.deserialize(cursor, false);
-      cursor = cursor.slice(sl); len += sl;
-      const { v: nanos, len: nl } = this.ioc.intSerializer.deserialize(cursor, false);
-      len += nl;
-      return { v: new Duration(BigInt(seconds), Number(nanos)), len };
-    } catch (err) {
-      throw this.ioc.utils.des_error({ serializer: this, args: arguments, cursor, err });
-    }
+  async deserializeValue(reader: StreamReader, valueFlag: number): Promise<Duration | null> {
+    if (valueFlag === 1) return null;
+    const seconds = await this.ioc.longSerializer.deserializeValue(reader, 0x00, this.ioc.DataType.LONG);
+    const nanos = await this.ioc.intSerializer.deserializeBare(reader);
+    return new Duration(BigInt(seconds), Number(nanos));
+  }
+  async deserialize(reader: StreamReader): Promise<Duration | null> {
+    const type_code = await reader.readUInt8();
+    if (type_code !== this.ioc.DataType.DURATION) throw new Error('unexpected {type_code}');
+    return this.deserializeValue(reader, await reader.readUInt8());
   }
 }
 
@@ -152,32 +134,19 @@ class CharSerializer {
     bufs.push(utf8);
     return Buffer.concat(bufs);
   }
-  deserialize(buffer: Buffer, fullyQualifiedFormat = true): Decoded<string> {
-    let len = 0;
-    let cursor = buffer;
-    try {
-      if (buffer === undefined || buffer === null || !(buffer instanceof Buffer)) throw new Error('buffer is missing');
-      if (buffer.length < 1) throw new Error('buffer is empty');
-      if (fullyQualifiedFormat) {
-        const type_code = cursor.readUInt8(); len++;
-        if (type_code !== this.ioc.DataType.CHAR) throw new Error('unexpected {type_code}');
-        cursor = cursor.slice(1);
-        if (cursor.length < 1) throw new Error('{value_flag} is missing');
-        const value_flag = cursor.readUInt8(); len++;
-        if (value_flag === 1) return { v: null, len };
-        if (value_flag !== 0) throw new Error('unexpected {value_flag}');
-        cursor = cursor.slice(1);
-      }
-      // UTF-8 length from the leading byte: 0xxxxxxx=1, 110x=2, 1110=3, 11110=4.
-      const b0 = cursor.readUInt8();
-      const n = b0 < 0x80 ? 1 : b0 < 0xe0 ? 2 : b0 < 0xf0 ? 3 : 4;
-      if (cursor.length < n) throw new Error('unexpected {value} length');
-      const v = cursor.slice(0, n).toString('utf8');
-      len += n;
-      return { v, len };
-    } catch (err) {
-      throw this.ioc.utils.des_error({ serializer: this, args: arguments, cursor, err });
-    }
+  async deserializeValue(reader: StreamReader, valueFlag: number): Promise<string | null> {
+    if (valueFlag === 1) return null;
+    // A char has NO length prefix — the UTF-8 width comes from the leading byte:
+    // 0xxxxxxx=1, 110xxxxx=2, 1110xxxx=3, 11110xxx=4. Read that byte, then the rest.
+    const b0 = await reader.readUInt8();
+    const n = b0 < 0x80 ? 1 : b0 < 0xe0 ? 2 : b0 < 0xf0 ? 3 : 4;
+    const rest = n > 1 ? await reader.readBytes(n - 1) : Buffer.alloc(0);
+    return Buffer.concat([Buffer.from([b0]), rest]).toString('utf8');
+  }
+  async deserialize(reader: StreamReader): Promise<string | null> {
+    const type_code = await reader.readUInt8();
+    if (type_code !== this.ioc.DataType.CHAR) throw new Error('unexpected {type_code}');
+    return this.deserializeValue(reader, await reader.readUInt8());
   }
 }
 

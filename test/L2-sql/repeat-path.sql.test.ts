@@ -18,6 +18,7 @@ import { assertStreamColumns, toGroupStream, toPathStream, toPropertyStream, toR
 import { popChildScope, pushChildScope, reuseCurrentFrame } from '../../src/compiler/steps/tail/child.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
 import { readdirSync, readFileSync } from 'node:fs';
+import { decode, decodeAll } from '../support/decode.ts';
 
 const read = (q: string, options?: CompileOptions) => {
   const p = compile(q, {}, options);
@@ -112,7 +113,7 @@ describe('repeat / path SQL', () => {
     expect(Number(store.query<{ v: number }>(b4.sql, b4.binds)[0].v)).toBe(Number(store.query<{ v: number }>(r4.sql, r4.binds)[0].v));
 
     // times(8): only the bulk path can compute this — the exact total, in milliseconds.
-    const [c8] = executeQuery(store, 'g.V().repeat(__.both()).times(8).count()', {}).map((b: Buffer) => ioc.anySerializer.deserialize(b, true).v);
+    const [c8] =await decodeAll( executeQuery(store, 'g.V().repeat(__.both()).times(8).count()', {}));
     expect(c8).toBe(2572306572);
     // element form: a BOUNDED frontier — one framed vertex per reachable id (≤ |V|), not 2.5e9 rows —
     // whose multiplicities sum to the full traverser count (the wire ships this as RLE).
@@ -144,7 +145,7 @@ describe('repeat / path SQL', () => {
     expect(() => executeQuery(store, 'g.V().repeat(__.both()).times(14).count()', {})).toThrow('integer overflow');
   });
 
-  test('bulk repeat feeds groupCount()/sum/group().by(count()) — bounded where enumerating explodes', () => {
+  test('bulk repeat feeds groupCount()/sum/group().by(count()) — bounded where enumerating explodes', async () => {
     // Same K12 clique. A groupCount()/sum after repeat().times(8) has the same ~2.5e9-traverser
     // blow-up as count(); the bulk unroll re-enters generic lowering as a collapsed (id, bulk)
     // frontier, so the bulk-aware barrier (SUM(bulk) per key / SUM(v·bulk)) stays bounded by |V|.
@@ -175,7 +176,7 @@ describe('repeat / path SQL', () => {
     expect(total).toBe(2572306572);
     expect(Object.keys(gc).length).toBe(12); // one bounded key per reachable vertex, not 2.5e9 rows
 
-    const [sum] = executeQuery(store, 'g.V().repeat(__.both()).times(8).values("w").sum()', {}).map((b: Buffer) => ioc.anySerializer.deserialize(b, true).v);
+    const [sum] =await decodeAll( executeQuery(store, 'g.V().repeat(__.both()).times(8).values("w").sum()', {}));
     expect(Number(sum)).toBe(2 * 2572306572);
   });
 

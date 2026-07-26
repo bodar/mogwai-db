@@ -25,7 +25,9 @@ import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport
 const PORT = 45940;
 const ROOT = new URL('../../', import.meta.url).pathname;
 const GLV = join(ROOT, 'vendor/tinkerpop/gremlin-js/gremlin-javascript');
-const FEATURES = join(ROOT, 'vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/');
+// A GLOB, not a bare directory: cucumber 13 (the submodule's runner since the master bump)
+// no longer walks a directory argument — a bare path matches 0 features, silently.
+const FEATURES = join(ROOT, 'vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/**/*.feature');
 const CUCUMBER_BIN = join(ROOT, 'vendor/tinkerpop/gremlin-js/node_modules/.bin/cucumber-js');
 // The single committed ratchet state: the last-known run's passing/failing scenario
 // sets + count. The delta is computed against it; a clean local run rewrites it. It
@@ -80,7 +82,9 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
       '--tags', L3_TAGS,
       '--format', `json:${report}`,
       '--format', 'summary',
-      '--import', 'test/cucumber',
+      // Also a glob: cucumber 13 does not expand a bare step-definition DIRECTORY either,
+      // so every step comes back `undefined` and the run reports 0 passing.
+      '--import', 'test/cucumber/*.js',
       FEATURES,
     ],
     cwd: GLV,

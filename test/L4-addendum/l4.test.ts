@@ -24,6 +24,7 @@ import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { CREW_SEED } from '../fixtures/seed-crew.ts';
 import { BigDecimal, Duration } from '../../src/gremlin/types.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
+import { decode, decodeAll } from '../support/decode.ts';
 
 // A vertex carrying one property of each type our extended GraphBinary serializers cover, so a
 // `Given the typed graph` scenario can read each back and exercise serialize+decode end-to-end.
@@ -180,13 +181,13 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
   test('the addendum is non-empty', () => expect(scenarios.length).toBeGreaterThan(0));
 
   for (const s of scenarios) {
-    test(`[${s.graph}] ${s.name}`, () => {
+    test(`[${s.graph}] ${s.name}`, async () => {
       if (!(s.graph in GRAPHS)) throw new Error(`unknown graph '${s.graph}' (add its seed to GRAPHS)`);
       const store = new GraphStore(new BunSqlite(':memory:'));
       for (const w of GRAPHS[s.graph]) executeQuery(store, w, {});
       // The standard service registry is injected so call() scenarios (tinker.search / degree)
       // resolve; a non-call scenario is unaffected (it never looks a service up).
-      const decoded = executeQuery(store, s.gremlin, {}, {}, standardRegistry).map((b: Buffer) => ioc.anySerializer.deserialize(b, true).v);
+      const decoded =await decodeAll( executeQuery(store, s.gremlin, {}, {}, standardRegistry));
       const got = decoded.map(canon).sort();
       const want = s.expected.map(expectedCanon).sort();
       expect(got).toEqual(want);
