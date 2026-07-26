@@ -123,7 +123,9 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
   test('window rank/filter boundaries use typed derived tables, not paired CTEs', () => {
     const project = read('g.V().project("a","b").by(__.out().values("name")).by(__.in().count())');
     expect(project.sql.split(' as (')).toHaveLength(8); // seven CTEs
-    expect(project.sql).toContain('FROM (SELECT r.v AS v, r.bulk, r.o0, ROW_NUMBER() OVER');
+    // the child's per-row vtype column rides through the first-row ranking too, so the
+    // projected value keeps its stored type.
+    expect(project.sql).toContain('FROM (SELECT r.v AS v, r.vtype AS vtype, r.bulk, r.o0, ROW_NUMBER() OVER');
 
     const local = read('g.V().local(__.out().values("name").order().limit(2))');
     expect(local.sql.split(' as (')).toHaveLength(6); // five CTEs

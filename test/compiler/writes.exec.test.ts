@@ -2,6 +2,7 @@
 // Runs compiled SQL against a seeded in-memory store, asserting RESULTS. Pure cut-
 // and-paste relocation; the SQL-string snapshots live at test/L2-sql/*.sql.test.ts.
 import { test, expect, describe } from 'bun:test';
+import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
@@ -157,7 +158,7 @@ test('meta-property read chains: has(metaKey) filter, properties().properties(),
   // properties(k).valueMap() shape is a flat meta map
   expect(read('g.V(1).properties("name").valueMap()').shape).toEqual({ kind: 'metaMap' });
   // properties().id() surfaces the real VertexProperty rowid
-  expect(read('g.V(1).properties("name").id()').shape).toEqual({ kind: 'value' });
+  expect(read('g.V(1).properties("name").id()').shape).toEqual({ kind: 'value', type: UNKNOWN });
 });
 
 test('property() updates edges too (materialized on the wire via edgeBuffer)', () => {

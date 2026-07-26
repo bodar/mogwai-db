@@ -7,6 +7,7 @@
 // result shape. The execution-semantics half of the old compiler.test.ts lives at
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
+import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
@@ -127,11 +128,11 @@ describe('group / properties SQL', () => {
     expect(t.shape).toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' }, valOf: { kind: 'list', of: { kind: 'scalar' } } });
     expect(t.sql).toContain('json_each'); // explode the map blob into entry rows
     // select(keys) per entry → the key, framed by its own stored type (a typed {t,v} node).
-    expect(read('g.V().valueMap().unfold().select(keys)').shape).toEqual({ kind: 'value', perRowType: true });
+    expect(read('g.V().valueMap().unfold().select(keys)').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // select(values) per entry → the value (a valueMap value is a list) → a list value.
     expect(read('g.V().valueMap().unfold().select(values)').shape.kind).toBe('jsonbList');
     // map(__.select(keys)) is the 1-to-1 form — unwrapped to the same per-entry key select
-    expect(read('g.V().valueMap().unfold().map(__.select(keys))').shape).toEqual({ kind: 'value', perRowType: true });
+    expect(read('g.V().valueMap().unfold().map(__.select(keys))').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // elementMap().unfold() fails CLOSED (token entries + single values deferred)
     expect(() => compile('g.V().elementMap().unfold()', {})).toThrow('elementMap() re-entry not yet supported');
   });
@@ -162,15 +163,15 @@ describe('group / properties SQL', () => {
     const g = read("g.V().out('created').values('name').groupCount()");
     // A stored-property key carries its per-row type in a sibling column (gkt), so a
     // datetime/uuid key frames exactly instead of collapsing to its storage class.
-    expect(g.shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: true, vtypeCol: 'gkt' }, val: { kind: 'count' } });
+    expect(g.shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: true, type: PER_ROW('gkt') }, val: { kind: 'count' } });
     expect(g.sql).toContain('SUM(c.bulk) AS gv');
     expect(g.sql).toContain('GROUP BY');
     // a typed scalar (asNumber(X)) carries its tag so the key frames correctly (not inferred)
     expect(read('g.inject(15).asNumber(GType.BYTE).groupCount()').shape)
-      .toEqual({ kind: 'group', key: { kind: 'scalar', productive: true, as: 'byte' }, val: { kind: 'count' } });
+      .toEqual({ kind: 'group', key: { kind: 'scalar', productive: true, type: STATIC('byte') }, val: { kind: 'count' } });
     // null keys are counted (groupCount is productive)
     expect(read('g.inject(10,20,null,20).groupCount()').shape)
-      .toEqual({ kind: 'group', key: { kind: 'scalar', productive: true }, val: { kind: 'count' } });
+      .toEqual({ kind: 'group', key: { kind: 'scalar', productive: true, type: UNKNOWN }, val: { kind: 'count' } });
     // named side-effect groupCount('a') over a scalar defers (needs side-effect state)
     expect(() => compile("g.V().values('name').groupCount('a').cap('a')", {})).toThrow();
   });
@@ -213,7 +214,7 @@ describe('group / properties SQL', () => {
     expect(keys.shape.kind).toBe('value');
     // select(Column.values) → the entry's value framed by its own stored type (typed {t,v} node)
     expect(read("g.V().outE().values('weight').groupCount().unfold().select(Column.values).unfold()").shape)
-      .toEqual({ kind: 'value', perRowType: true });
+      .toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // element-valued group entries now re-enter via the list-of-element-rid substrate:
     // each entry's value is a list of the out() vertices (json_group_array of v_rid).
     const ev = read("g.V().group().by('name').by(__.out().fold()).unfold().select(Column.values)");
@@ -249,13 +250,13 @@ describe('group / properties SQL', () => {
     // the value list holds self-describing {t,v} nodes (each count typed), so it frames typed.
     expect(gv.shape).toEqual({ kind: 'jsonbList', typed: true });
     expect(gv.sql).toContain('json_group_array');
-    expect(read('g.V().groupCount().by("name").select(Column.values).unfold()').shape).toEqual({ kind: 'value', perRowType: true });
+    expect(read('g.V().groupCount().by("name").select(Column.values).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // select(Column.keys) over a scalar key → a typed scalar stream on unfold.
-    expect(read('g.V().groupCount().by("name").select(Column.keys).unfold()').shape).toEqual({ kind: 'value', perRowType: true });
+    expect(read('g.V().groupCount().by("name").select(Column.keys).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // Element keys (bare groupCount()) carry their rowid → unfold rejoins vertices.
     expect(read('g.V().groupCount().select(Column.keys).unfold()').shape).toEqual({ kind: 'vertex' });
     // group().by(k).by(__.count()) → same scalar-valued map path (typed count node → per-row type).
-    expect(read('g.V().group().by("name").by(__.count()).select(Column.values).unfold()').shape).toEqual({ kind: 'value', perRowType: true });
+    expect(read('g.V().group().by("name").by(__.count()).select(Column.values).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     const childKey = read('g.V().groupCount().by(__.out().count())');
     expect(childKey.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
     expect(childKey.sql).toContain('ROW_NUMBER() OVER () AS o0');
@@ -314,7 +315,7 @@ describe('group / properties SQL', () => {
     const eq = (a: string, b: string) =>
       JSON.stringify(executeQuery(store, a, {}).map((x) => [...x])) === JSON.stringify(executeQuery(store, b, {}).map((x) => [...x]));
     // by(__.out()) ≡ by(__.out().fold()) — TinkerPop collects an unreduced group value.
-    expect(read('g.V().group().by(T.label).by(__.out())').shape).toEqual({ kind: 'group', key: { kind: 'scalar', as: undefined }, val: { kind: 'elementList', elem: 'vertex' } });
+    expect(read('g.V().group().by(T.label).by(__.out())').shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'elementList', elem: 'vertex' } });
     expect(eq('g.V().group().by(T.label).by(__.out())', 'g.V().group().by(T.label).by(__.out().fold())')).toBe(true);
     // a trailing bare order() is the fold's natural id order (no-op), incl. before fold()
     expect(eq('g.V().group().by(T.label).by(__.out().order())', 'g.V().group().by(T.label).by(__.out().fold())')).toBe(true);
@@ -332,7 +333,7 @@ describe('group / properties SQL', () => {
     // properties().groupCount().by(T.label): a Map<name, Map<propKey, count>> per person.
     // marko has name,age (single) → {name:1, age:1}. One outer Map, framed once.
     const c = read("g.V().hasLabel('person').group().by('name').by(__.properties().groupCount().by(T.label))");
-    expect(c.shape).toEqual({ kind: 'group', key: { kind: 'scalar', as: undefined }, val: { kind: 'nestedMap', innerVal: 'count' } });
+    expect(c.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'nestedMap', innerVal: 'count' } });
     // two-level: json_group_object over a lvl1 GROUP BY (outer key, inner key); the inner
     // key is now sourced generically from the properties() child (any alias), not hand-rolled.
     expect(c.sql).toContain('json_group_object');
@@ -345,7 +346,7 @@ describe('group / properties SQL', () => {
     expect(JSON.parse(marko.gv)).toEqual({ name: 1, age: 1 });
     // edge movement + inner reducer: Map<label, Map<edgeLabel, sum(weight)>>
     const s = read("g.V().group().by(T.label).by(__.bothE().group().by(T.label).by(__.values('weight').sum()))");
-    expect(s.shape).toEqual({ kind: 'group', key: { kind: 'scalar', as: undefined }, val: { kind: 'nestedMap', innerVal: 'number' } });
+    expect(s.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'nestedMap', innerVal: 'number' } });
     // the INNER reducer weights by the outer traverser's bulk carried through the child scope
     // (same substrate all the way down — ≡ unweighted while bulk is 1, so results are unchanged).
     expect(s.sql).toContain('* gng.bulk');
@@ -355,7 +356,7 @@ describe('group / properties SQL', () => {
     // The generic child engine composes ANY movement/filter chain in the nested value.
     // (a) filtered movement: out().hasLabel('software').groupCount().by('name')
     const nuA = read("g.V().group().by(T.label).by(__.out().hasLabel('software').groupCount().by('name'))");
-    expect(nuA.shape).toEqual({ kind: 'group', key: { kind: 'scalar', as: undefined }, val: { kind: 'nestedMap', innerVal: 'count' } });
+    expect(nuA.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'nestedMap', innerVal: 'count' } });
     const personA = run(store, "g.V().group().by(T.label).by(__.out().hasLabel('software').groupCount().by('name'))")
       .find((r: any) => r.gk === 'person');
     expect(JSON.parse(personA.gv)).toEqual({ lop: 3, ripple: 1 }); // marko/josh/peter→lop, josh→ripple
@@ -386,7 +387,7 @@ describe('group / properties SQL', () => {
   test("cap('a') of a group side-effect retypes to a MapStream on a follower", () => {
     // A group('a')/groupCount('a') side-effect, re-emitted by cap('a'), is re-enterable
     // too: select(Column.values)/unfold compose exactly like an inline group().
-    expect(read('g.V().groupCount("a").by("name").cap("a").select(Column.values).unfold()').shape).toEqual({ kind: 'value', perRowType: true });
+    expect(read('g.V().groupCount("a").by("name").cap("a").select(Column.values).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     expect(read('g.V().group("a").by().by(__.out().label().fold()).cap("a").select(Column.values).unfold()').shape).toEqual({ kind: 'jsonbList' });
   });
 
@@ -424,10 +425,10 @@ describe('group / properties SQL', () => {
   });
 
   test('PropertyStream projections re-enter scalar/element lowering', () => {
-    expect(read('g.V(1).properties().key().limit(1)').shape).toEqual({ kind: 'value', as: undefined });
+    expect(read('g.V(1).properties().key().limit(1)').shape).toEqual({ kind: 'value', type: UNKNOWN });
     expect(read('g.V(1).properties().element().values("name").count()').shape).toEqual({ kind: 'count' });
     // element() retypes to an ordinary owner stream, including edge materialization.
-    expect(read('g.E(7).properties().element().label()').shape).toEqual({ kind: 'value', as: undefined });
+    expect(read('g.E(7).properties().element().label()').shape).toEqual({ kind: 'value', type: STATIC('string') });
     expect(read('g.E(7).properties().element()').shape).toEqual({ kind: 'edge' });
     // Carried aliases survive the property payload and the owner retype.
     expect(read('g.V(1).as("a").properties().element().select("a")').shape).toEqual({ kind: 'vertex' });
@@ -469,7 +470,7 @@ describe('group / properties SQL', () => {
     expect(key.sql).toContain("json_extract(p.a0 -> '$[#-1]', ?)");
     const value = read('g.E(11).properties("weight").as("a").select("a").by(T.value)');
     expect(value.sql).toContain('AS vtype');
-    expect(value.shape).toEqual({ kind: 'value', as: undefined, perRowType: true });
+    expect(value.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
   });
 
   test('property alias Pop.all becomes a re-enterable property list', () => {
@@ -511,7 +512,7 @@ describe('group / properties SQL', () => {
 
   test('sack(op).by(key) mutates a carried sk column; bare sack() reads it', () => {
     const p = read('g.V().sack(assign).by("age").sack()');
-    expect(p.shape).toEqual({ kind: 'value' });
+    expect(p.shape).toEqual({ kind: 'value', type: UNKNOWN });
     expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS sk");
     expect(p.sql).toContain('SELECT p.sk AS v, p.sk, p.bulk FROM'); // scalar CTE reads + carries the sack
     expect(read('g.withSack(1).V().sack().fold()').shape).toEqual({ kind: 'jsonbList' });
@@ -528,7 +529,7 @@ describe('group / properties SQL', () => {
     // local(__.sack(op).by(...)) folds the sack inside a child scope: a mutate sack is an
     // element-preserving child step, so it lowers through the same engine per pushed parent.
     const localSack = read('g.withSack(0L).V().local(__.sack(sum).by("age")).sack()');
-    expect(localSack.shape).toEqual({ kind: 'value' });
+    expect(localSack.shape).toEqual({ kind: 'value', type: UNKNOWN });
     expect(localSack.sql).toContain('ROW_NUMBER() OVER ()'); // the child-scope ordinal
     expect(localSack.sql).toContain('AS sk'); // the fold lands in the sk slot within the scope
   });

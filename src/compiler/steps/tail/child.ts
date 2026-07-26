@@ -1,4 +1,5 @@
 import { derived, empty, list, paren, q, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
+import { perRowColumnOf, perRowCols } from '../../../sql/kernel/render.ts';
 import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
 import { advance, carriedWith, carryFrag, carryFragMint, carriedCols, partitionOver, type Carried, type ElementStream } from '../context/context.ts';
@@ -70,7 +71,7 @@ export function pushChildScope<P extends ChildParent>(
   // matches the seed's declared schema (the encounter now rides in the carried tail).
   if (isScalarParent(parent)) {
     const head = ['v', ...(parent.result === 'number' ? ['vt'] : [])];
-    const vtypeCols = parent.vtype ? [parent.vtype] : [];
+    const vtypeCols = perRowCols(parent.type);
     const payload = list([
       ...head.map((c) => q`${p.c[c]} AS ${c}`),
       ...vtypeCols.map((c) => q`${p.c[c]} AS ${c}`),
@@ -208,11 +209,15 @@ function applyScalarChildCardinality(
   if (retainChildScope) return { stream: lowered, frame: pushed.frame };
   const r = lowered.rel.as('r');
   const parentCols = carriedCols(parent.carried);
-  const typeCol = lowered.result === 'number' ? q`, ${r.c.vt} AS vt` : empty;
-  const resultCols = lowered.result === 'number' ? ['v', 'vt'] : ['v'];
+  // Carry the child's per-row type column through the re-projection so a child body over a
+  // stored property (out().values('when')) keeps each value's exact type instead of
+  // collapsing to its storage class at the child boundary.
+  const perRow = perRowColumnOf(lowered.type);
+  const typeCol = lowered.result === 'number' ? q`, ${r.c.vt} AS vt` : perRow ? q`, ${r.c[perRow]} AS ${perRow}` : empty;
+  const resultCols = lowered.result === 'number' ? ['v', 'vt'] : ['v', ...perRowCols(lowered.type)];
   if (use === 'all') {
     const rel = derived(q`SELECT ${r.c.v} AS v${typeCol}${carryFrag(parent.carried, r)} FROM ${r}`, [...resultCols, ...parentCols], 'all_rows');
-    return { stream: toScalarStream(carryOf(parent), rel, lowered.as, { result: lowered.result }), frame: pushed.frame };
+    return { stream: toScalarStream(carryOf(parent), rel, undefined, { type: lowered.type, result: lowered.result }), frame: pushed.frame };
   }
   if (!lowered.carried.encounter) throw new Error('child first cardinality requires explicit encounter order');
   const loweredEnc = lowered.carried.encounter;
@@ -221,13 +226,13 @@ function applyScalarChildCardinality(
     [...resultCols, ...parentCols, 'rn'],
     'f',
   );
-  const firstTypeCol = lowered.result === 'number' ? q`, ${first.c.vt} AS vt` : empty;
+  const firstTypeCol = lowered.result === 'number' ? q`, ${first.c.vt} AS vt` : perRow ? q`, ${first.c[perRow]} AS ${perRow}` : empty;
   const rel = derived(
     q`SELECT ${first.c.v} AS v${firstTypeCol}${carryFrag(parent.carried, first)} FROM ${first} WHERE ${first.c.rn}=1`,
     [...resultCols, ...parentCols],
     'first_row',
   );
-  return { stream: toScalarStream(carryOf(parent), rel, lowered.as, { result: lowered.result }), frame: pushed.frame };
+  return { stream: toScalarStream(carryOf(parent), rel, undefined, { type: lowered.type, result: lowered.result }), frame: pushed.frame };
 }
 
 /** PURE. A scalar child body that RE-SOURCES the graph: a `V()`/`E()` head (with no

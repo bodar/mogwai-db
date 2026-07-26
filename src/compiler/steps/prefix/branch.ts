@@ -1,4 +1,5 @@
 import { q, list, empty, value, raw, Relation, type Expression } from '../../../sql/kernel/q.ts';
+import { staticTypeOf } from '../../../sql/kernel/render.ts';
 import { edges } from '../../../sql/schema.ts';
 import { isNested, stepChain, type Step } from '../../../gremlin/frontend.ts';
 import { foldByModulators } from '../../ir/strategies.ts';
@@ -283,7 +284,7 @@ export function tryLowerVariantOptional(s: Step, st: ElementStream): VariantStre
   if (st.carried.path) throw new Error('path() through a mixed-shape optional() not yet supported');
   const rows = tryCompileScalarValueRows(st, nested, ROOT_SCOPE, plan.body);
   if (!rows) return null;
-  const meta = { scalarAs: rows.stream.as, ...(st.elem === 'edge' ? { edge: true } : { node: true }) } as const;
+  const meta = { scalarAs: staticTypeOf(rows.stream.type), ...(st.elem === 'edge' ? { edge: true } : { node: true }) } as const;
   const c = rows.stream.rel.as('c');
   const d = rows.frame.domain.as('d');
   // Hit (the scalar child rows) before miss (the unproductive parent, restored) — optional() IS
@@ -373,7 +374,7 @@ function compileVariantArm(seed: ElementStream, nested: any): VariantArm {
   const element = tryCompileElementTraversal(seed, nested);
   if (element) return { rel: element.rel, vk: element.elem === 'edge' ? 3 : 2 };
   const scalar = tryCompileScalarValueChild(seed, nested, 'all');
-  if (scalar) return { rel: scalar.rel, vk: 1, as: scalar.as };
+  if (scalar) return { rel: scalar.rel, vk: 1, as: staticTypeOf(scalar.type) };
   const listArm = tryCompileListChild(seed, nested);
   if (listArm) return { rel: listArm.rel, vk: 4, listOf: listArm.of };
   throw new Error(`variant branch __.${armDescription(nested, seed.params)} not yet supported (shape not element/scalar/list)`);

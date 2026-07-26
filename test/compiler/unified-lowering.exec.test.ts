@@ -2,6 +2,7 @@
 // Runs compiled SQL against a seeded in-memory store, asserting RESULTS. Pure cut-
 // and-paste relocation; the SQL-string snapshots live at test/L2-sql/*.sql.test.ts.
 import { test, expect, describe } from 'bun:test';
+import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
@@ -350,7 +351,7 @@ describe('unified lowering characterization', () => {
 
   test('multi-label select mixes a scalar label and an element label into one Map', () => {
     const record = read('g.V(1).values("name").as("a").select("a")');
-    expect(record.shape).toEqual({ kind: 'value' });
+    expect(record.shape).toEqual({ kind: 'value', type: UNKNOWN });
     // a → element (vertex), b → its name (scalar): a heterogeneous record
     const mixed = read('g.V(1).as("a").values("name").as("b").select("a","b")');
     expect(mixed.shape).toEqual({ kind: 'map', entries: [
@@ -488,7 +489,7 @@ test('local(scalar reduction) is a per-input scalar (zeros preserved; count is L
   // out-degree per vertex, incl 0 for the software/leaf vertices.
   expect(run(store, 'g.V().local(__.outE().count())').map((r) => r.v).sort((a, b) => a - b))
     .toEqual([0, 0, 0, 1, 2, 3]);
-  expect(read('g.V().local(__.outE().count())').shape).toEqual({ kind: 'value', as: 'long' });
+  expect(read('g.V().local(__.outE().count())').shape).toEqual({ kind: 'value', type: STATIC('long') });
 });
 
 test('local(edgeStep.limit(N)) scopes the limit PER input (window), not globally', () => {

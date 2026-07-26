@@ -10,6 +10,7 @@
 // arm rides through unchanged.
 
 import { q, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
+import { type ValueType } from '../../../sql/kernel/render.ts';
 import { rangeToOffsetLimit } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toListStream, toVariantStream, type ListStream, type LoweringResult, type ScalarStream, type ShapeTailFn, type VariantArms, type VariantStream } from '../context/stream.ts';
@@ -93,7 +94,7 @@ export function finishListMerge(
 export interface VariantArm {
   readonly rel: Relation;
   readonly vk: 1 | 2 | 3 | 4;
-  readonly as?: ScalarStream['as'];
+  readonly as?: ValueType;
   readonly listOf?: ListStream['of'];
 }
 

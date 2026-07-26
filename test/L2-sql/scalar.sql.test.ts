@@ -7,6 +7,7 @@
 // result shape. The execution-semantics half of the old compiler.test.ts lives at
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
+import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
@@ -68,7 +69,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(p.sql).toContain('ORDER BY (CASE WHEN p.vtype');
     expect(p.sql).toContain('ELSE p.v END) ASC');
     // values() carries the per-row stored type → framed by it (perRowType).
-    expect(p.shape).toEqual({ kind: 'value', perRowType: true });
+    expect(p.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
   });
 
   test('range/skip become LIMIT/OFFSET tail modifiers under order()', () => {
@@ -88,7 +89,7 @@ describe('scalar-parent / projection SQL', () => {
   test('P3b: uuid/list framing + is(typeOf(LIST)) retypes scalar→ListStream', async () => {
     // A stored TEXT value frames by its true vtype: uuid via UuidSerializer (storage-
     // ambiguous with string), so values('uuid') carries perRowType framing.
-    expect(read('g.V().values("uuid")').shape).toEqual({ kind: 'value', perRowType: true });
+    expect(read('g.V().values("uuid")').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // is(typeOf(LIST)) is a RETYPE, not a value filter: the scalar value stream becomes a
     // ListStream whose `list` column is json() of the stored JSONB list value.
     const listed = read('g.V().values("list").is(typeOf(GType.LIST))');
@@ -99,7 +100,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(listed.binds).toContain('list');
     // once a ListStream, the list substrate composes: unfold/count(local)/range reuse it.
     // typed unfold carries each element's own stored vtype (perRowType framing).
-    expect(read('g.V().values("list").is(typeOf(GType.LIST)).unfold()').shape).toEqual({ kind: 'value', perRowType: true });
+    expect(read('g.V().values("list").is(typeOf(GType.LIST)).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     expect(read('g.V().values("list").is(typeOf(GType.LIST)).count(Scope.local)').shape).toEqual({ kind: 'count' });
     expect(read('g.V().values("list").is(typeOf(GType.LIST)).unfold().range(1,3)').sql).toContain('json_each');
 
@@ -179,11 +180,11 @@ describe('scalar-parent / projection SQL', () => {
     expect(fu.sql).toContain('json_group_array');
     expect(fu.sql).toContain('json_each');
     // scalar list: values().fold().unfold() → a scalar `v` stream again.
-    expect(read('g.V().values("name").fold().unfold()').shape).toEqual({ kind: 'value', perRowType: true });
+    expect(read('g.V().values("name").fold().unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // unfold() directly on an element stream is identity (a vertex is not a collection).
     expect(read('g.V().unfold()').shape).toEqual({ kind: 'vertex' });
     // continuation after the roundtrip: movement/projection resume as a fresh phase.
-    expect(read('g.V().hasLabel("person").fold().unfold().values("name")').shape).toEqual({ kind: 'value', perRowType: true });
+    expect(read('g.V().hasLabel("person").fold().unfold().values("name")').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // Scope.local reducers reduce EACH folded list to one scalar (per-list, not global).
     expect(read('g.V().fold().count(Scope.local)').shape).toEqual({ kind: 'count' });
     expect(read('g.V().values("age").fold().sum(Scope.local)').shape).toEqual({ kind: 'scalar' });
@@ -212,7 +213,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.inject([1,3,100,300])').shape).toEqual({ kind: 'jsonbList' });
     expect(read('g.inject([1,2],[3,4])').shape).toEqual({ kind: 'jsonbList' });
     // unfold() explodes the list back to a scalar stream.
-    expect(read('g.inject([1,2,3]).unfold()').shape).toEqual({ kind: 'value' });
+    expect(read('g.inject([1,2,3]).unfold()').shape).toEqual({ kind: 'value', type: UNKNOWN });
     // Scope.local reducers act per-list (mean over the numeric elements → Double).
     expect(read('g.inject([null,10,20,null]).mean(Scope.local)').shape).toEqual({ kind: 'scalar' });
     // none(P) on a LIST keeps the list iff no element matches (collection filter).
@@ -248,7 +249,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().values("age").fold().product([1]).unfold()').shape).toEqual({ kind: 'jsonbList' });
     // conjoin joins the members into ONE string, whatever they were — a static 'string'
     // type, not per-value inference at the wire.
-    expect(read('g.V().values("name").order().fold().conjoin("_")').shape).toEqual({ kind: 'value', as: 'string', perRowType: undefined });
+    expect(read('g.V().values("name").order().fold().conjoin("_")').shape).toEqual({ kind: 'value', type: STATIC('string') });
     // all(P)/any(P) filter the list (IS TRUE / IS NOT TRUE null handling).
     expect(read('g.V().values("age").order().fold().all(P.gt(10))').sql).toContain('IS NOT TRUE');
     expect(read('g.V().values("age").order().fold().any(P.gt(10))').sql).toContain('IS TRUE');
@@ -263,14 +264,14 @@ describe('scalar-parent / projection SQL', () => {
     expect(o.shape).toEqual({ kind: 'jsonbList', typed: true });
     expect(o.sql).toContain('json_group_array');
     // order().by(Order.desc) — direction-only by() flips the sort.
-    expect(read('g.V().values("age").fold().order(Scope.local).by(Order.desc).unfold()').shape).toEqual({ kind: 'value', perRowType: true });
+    expect(read('g.V().values("age").fold().order(Scope.local).by(Order.desc).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // tail avoids a count() subquery (DESC LIMIT then re-sort asc) so it correlates once.
     const t = read('g.V().values("age").fold().tail(Scope.local,2).unfold()');
-    expect(t.shape).toEqual({ kind: 'value', perRowType: true });
+    expect(t.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     expect(t.sql).toContain('DESC');
-    expect(read('g.V().values("age").fold().dedup(Scope.local).unfold()').shape).toEqual({ kind: 'value', perRowType: true });
+    expect(read('g.V().values("age").fold().dedup(Scope.local).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // Transforms compose: order then skip, both per-list, then unfold.
-    expect(read('g.V().values("age").fold().order(Scope.local).skip(Scope.local,2).unfold()').shape).toEqual({ kind: 'value', perRowType: true });
+    expect(read('g.V().values("age").fold().order(Scope.local).skip(Scope.local,2).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // A by(key)/traversal comparator defers clearly.
     expect(() => compile('g.V().values("age").fold().order(Scope.local).by("age")', {})).toThrow('order(Scope.local).by(key/traversal) not yet supported');
   });
@@ -278,11 +279,11 @@ describe('scalar-parent / projection SQL', () => {
   test('Scope.local reducer on a SCALAR stream is per-element (degenerate 1-list)', () => {
     // A scalar's local sum/min/max is the value itself (identity); shape stays a value,
     // and the stored per-row type rides through the identity reducer (perRowType).
-    expect(read('g.V(1).values("age").sum(Scope.local)').shape).toEqual({ kind: 'value', perRowType: true });
-    expect(read('g.V(1).values("age").max(Scope.local)').shape).toEqual({ kind: 'value', perRowType: true });
+    expect(read('g.V(1).values("age").sum(Scope.local)').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
+    expect(read('g.V(1).values("age").max(Scope.local)').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // mean is ALWAYS Double, even of one value (d[29.0].d) → CAST to REAL, tagged double.
     const mn = read('g.V(1).values("age").mean(Scope.local)');
-    expect(mn.shape).toEqual({ kind: 'value', as: 'double' });
+    expect(mn.shape).toEqual({ kind: 'value', type: STATIC('double') });
     expect(mn.sql).toContain('CAST(');
     // a scalar TRANSFORM's Scope.local stays a no-op (per-element == per-list).
     expect(read('g.V().values("name").toLower(Scope.local)').sql).toContain('lower(');
@@ -291,7 +292,7 @@ describe('scalar-parent / projection SQL', () => {
   });
 
   test('inject() is a value stream that reducers/modifiers chain onto', () => {
-    expect(read('g.inject(1,2,3)').shape).toEqual({ kind: 'value' });
+    expect(read('g.inject(1,2,3)').shape).toEqual({ kind: 'value', type: UNKNOWN });
     expect(read('g.inject(1,2,3)').binds).toEqual([1, 2, 3]);
     // every inject() value across the chain folds into one VALUES seed (so the tail's
     // dedup/order/reducer see the whole stream)
@@ -362,7 +363,7 @@ describe('scalar-parent / projection SQL', () => {
 
   test('asBool() resolves inject constants at compile time + tags the value shape', () => {
     // The value shape carries `as:'bool'` so the handler frames the 0/1 as Boolean.
-    expect(read('g.inject(1).asBool()').shape).toEqual({ kind: 'value', as: 'bool' });
+    expect(read('g.inject(1).asBool()').shape).toEqual({ kind: 'value', type: STATIC('bool') });
     // TinkerPop truthiness: NaN/0/-0 → false, nonzero → true, "true"/"false"
     // (case-insensitive), bool → itself. Constants resolve to the bound values.
     expect(read('g.inject(1).asBool()').binds).toEqual([true]);
@@ -387,14 +388,14 @@ describe('scalar-parent / projection SQL', () => {
   test('asNumber(GType.X) tags the value shape with the target subtype', () => {
     // Target comes from the explicit GType arg (the frontend flattens numeric-literal
     // suffixes, so bare asNumber() can't recover the input subtype — it defers).
-    expect(read('g.inject(5).asNumber(GType.LONG)').shape).toEqual({ kind: 'value', as: 'long' });
-    expect(read('g.inject(12).asNumber(GType.BYTE)').shape).toEqual({ kind: 'value', as: 'byte' });
+    expect(read('g.inject(5).asNumber(GType.LONG)').shape).toEqual({ kind: 'value', type: STATIC('long') });
+    expect(read('g.inject(12).asNumber(GType.BYTE)').shape).toEqual({ kind: 'value', type: STATIC('byte') });
     // integer targets truncate toward zero; the converted constant is bound
     expect(read('g.inject(5.43).asNumber(GType.INT)').binds).toEqual([5]);
     expect(read("g.inject('5').asNumber(GType.BYTE)").binds).toEqual([5]);
     // runtime value → SQL CAST + tag (no compile-time constant)
     const f = read('g.V().values("weight").asNumber(GType.FLOAT)');
-    expect(f.shape).toEqual({ kind: 'value', as: 'float' });
+    expect(f.shape).toEqual({ kind: 'value', type: STATIC('float') });
     expect(f.sql).toContain('CAST(p.v AS REAL)');
     // is(P.typeOf(X)) after a cast is compile-time known (the cast's `as` tag) → the
     // typeOf STATIC-FOLDS to a constant instead of a runtime typeof() test.
@@ -419,19 +420,19 @@ describe('scalar-parent / projection SQL', () => {
   test('bare asNumber() recovers the input literal subtype (via Step.argTypes)', () => {
     // The frontend flattens numeric-literal values (5b/5l/5.0 → 5) but records the
     // declared subtype in argTypes; bare asNumber() reads it back to tag the shape.
-    expect(read('g.inject(5b).asNumber()').shape).toEqual({ kind: 'value', as: 'byte' });
-    expect(read('g.inject(5s).asNumber()').shape).toEqual({ kind: 'value', as: 'short' });
-    expect(read('g.inject(5i).asNumber()').shape).toEqual({ kind: 'value', as: 'int' });
-    expect(read('g.inject(5l).asNumber()').shape).toEqual({ kind: 'value', as: 'long' });
-    expect(read('g.inject(5n).asNumber()').shape).toEqual({ kind: 'value', as: 'bigint' });
-    expect(read('g.inject(5.0).asNumber()').shape).toEqual({ kind: 'value', as: 'double' });
-    expect(read('g.inject(5.75f).asNumber()').shape).toEqual({ kind: 'value', as: 'float' });
+    expect(read('g.inject(5b).asNumber()').shape).toEqual({ kind: 'value', type: STATIC('byte') });
+    expect(read('g.inject(5s).asNumber()').shape).toEqual({ kind: 'value', type: STATIC('short') });
+    expect(read('g.inject(5i).asNumber()').shape).toEqual({ kind: 'value', type: STATIC('int') });
+    expect(read('g.inject(5l).asNumber()').shape).toEqual({ kind: 'value', type: STATIC('long') });
+    expect(read('g.inject(5n).asNumber()').shape).toEqual({ kind: 'value', type: STATIC('bigint') });
+    expect(read('g.inject(5.0).asNumber()').shape).toEqual({ kind: 'value', type: STATIC('double') });
+    expect(read('g.inject(5.75f).asNumber()').shape).toEqual({ kind: 'value', type: STATIC('float') });
     // un-suffixed integer → int, un-suffixed decimal → double; numeric string → int
-    expect(read('g.inject(5).asNumber()').shape).toEqual({ kind: 'value', as: 'int' });
-    expect(read("g.inject('5').asNumber()").shape).toEqual({ kind: 'value', as: 'int' });
+    expect(read('g.inject(5).asNumber()').shape).toEqual({ kind: 'value', type: STATIC('int') });
+    expect(read("g.inject('5').asNumber()").shape).toEqual({ kind: 'value', type: STATIC('int') });
     // a numeric string is int vs double by its textual form, not its value ("5.0"→double)
-    expect(read("g.inject('5.0').asNumber()").shape).toEqual({ kind: 'value', as: 'double' });
-    expect(read("g.inject('5e2').asNumber()").shape).toEqual({ kind: 'value', as: 'double' });
+    expect(read("g.inject('5.0').asNumber()").shape).toEqual({ kind: 'value', type: STATIC('double') });
+    expect(read("g.inject('5e2').asNumber()").shape).toEqual({ kind: 'value', type: STATIC('double') });
     // non-numeric string raises the parse error
     expect(() => compile("g.inject('test').asNumber()", {})).toThrow("Can't parse string 'test' as number.");
     // a stream mixing subtypes can't share one tag → defer
@@ -441,7 +442,7 @@ describe('scalar-parent / projection SQL', () => {
   test('math("<formula>") compiles to one Double scalar; leaves coerced to REAL', () => {
     // `_` resolves through the by() modulator; result always tagged Double.
     const p = read('g.V().math("_+_").by("age")');
-    expect(p.shape).toEqual({ kind: 'value', as: 'double' });
+    expect(p.shape).toEqual({ kind: 'value', type: STATIC('double') });
     expect(p.sql).toContain("(CAST((SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS REAL) + CAST((SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS REAL)) AS v");
     // a missing by() value makes the arithmetic NULL → the traverser is filtered
     expect(p.sql).toContain('is not null');
@@ -464,7 +465,7 @@ describe('scalar-parent / projection SQL', () => {
 
   test('format("…%{token}…") templates a string from properties + by() modulators', () => {
     // a constant template → one string literal, no filter.
-    expect(read('g.V().format("Hello world")').shape).toEqual({ kind: 'value' });
+    expect(read('g.V().format("Hello world")').shape).toEqual({ kind: 'value', type: UNKNOWN });
     // named tokens read the element's property; the `||` chain NULLs (drops) on a miss.
     const f = read('g.V().format("%{name} is %{age}")');
     expect(f.sql).toContain(' || ');
@@ -489,7 +490,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(perVar.sql).toContain("node=CAST(p.a0 ->> ? AS INTEGER) AND key=?");      // a ← by("age")
     // math() composes with a trailing typed cast (result narrows to the cast's subtype)
     expect(read('g.V().as("a").out("knows").as("b").math("a + b").by("age").asNumber(GType.INT)').shape)
-      .toEqual({ kind: 'value', as: 'int' });
+      .toEqual({ kind: 'value', type: STATIC('int') });
     // defers: a variable with no by(), and an unbound identifier
     expect(() => compile('g.V().math("_+_")', {})).toThrow('needs a by() modulator');
     expect(() => compile('g.V().math("a + b").by("age")', {})).toThrow('no such variable "a"');
@@ -497,7 +498,7 @@ describe('scalar-parent / projection SQL', () => {
 
   test('asDate() casts to a date-tagged epoch-millis value (const-fold + runtime)', () => {
     // inject const-fold: ISO string / int / long epoch → millis, tagged date
-    expect(read('g.inject("2023-08-02T00:00:00Z").asDate()').shape).toEqual({ kind: 'value', as: 'date' });
+    expect(read('g.inject("2023-08-02T00:00:00Z").asDate()').shape).toEqual({ kind: 'value', type: STATIC('date') });
     expect(read('g.inject("2023-08-02T00:00:00Z").asDate()').binds).toEqual([Date.parse('2023-08-02T00:00:00Z')]);
     // an offset-bearing ISO string folds into the correct instant
     expect(read('g.inject("2023-08-02T00:00:00-07:00").asDate()').binds).toEqual([Date.parse('2023-08-02T07:00:00Z')]);
@@ -508,13 +509,13 @@ describe('scalar-parent / projection SQL', () => {
     expect(() => compile('g.inject(null).asDate()', {})).toThrow("Can't parse");
     // runtime: an ISO-text property → unixepoch()*1000; an integer/real is already millis
     const rt = read('g.V().values("birthday").asDate()');
-    expect(rt.shape).toEqual({ kind: 'value', as: 'date' });
+    expect(rt.shape).toEqual({ kind: 'value', type: STATIC('date') });
     expect(rt.sql).toContain("unixepoch(p.v) * 1000");
     // bare asNumber() over a date → its epoch-millis (Long, identity); asDate composes back
-    expect(read('g.V().values("birthday").asDate().asNumber().asDate()').shape).toEqual({ kind: 'value', as: 'date' });
+    expect(read('g.V().values("birthday").asDate().asNumber().asDate()').shape).toEqual({ kind: 'value', type: STATIC('date') });
     // bare asNumber() as the ms-string leg feeding asDate() is allowed; standalone it
     // can't recover a subtype from a runtime value → fail closed (not a silent CAST)
-    expect(read('g.V().values("birthday").asNumber().asDate()').shape).toEqual({ kind: 'value', as: 'date' });
+    expect(read('g.V().values("birthday").asNumber().asDate()').shape).toEqual({ kind: 'value', type: STATIC('date') });
     expect(() => compile('g.V().values("weight").asNumber()', {})).toThrow('non-date runtime value');
     // an offset-less datetime literal is UTC-normalized (not host-local) so Bun ≡ DO
     expect(read("g.inject(datetime('2023-08-02T00:00:00')).dateAdd(second, 0)").binds).toEqual([Date.parse('2023-08-02T00:00:00Z')]);
@@ -525,17 +526,17 @@ describe('scalar-parent / projection SQL', () => {
     const base = Date.parse('2023-08-02T00:00:00Z');
     expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(DT.hour, 2)").binds).toEqual([base + 2 * 3600000]);
     expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(hour, -1)").binds).toEqual([base - 3600000]);
-    expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(day, 11)").shape).toEqual({ kind: 'value', as: 'date' });
+    expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(day, 11)").shape).toEqual({ kind: 'value', type: STATIC('date') });
     // only second/minute/hour/day are valid DT units — the grammar rejects the rest
     expect(() => compile("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(month, 1)", {})).toThrow('parse error');
     // dateDiff = self − other → signed Long; literal / constant(datetime) / constant(null)→0
     const d = read("g.inject(datetime('2023-08-02T00:00:00Z')).dateDiff(datetime('2023-08-09T00:00:00Z'))");
-    expect(d.shape).toEqual({ kind: 'value', as: 'long' });
+    expect(d.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(d.binds).toEqual([-604800000]);
     expect(read("g.inject(datetime('2023-08-08T00:00:00Z')).dateDiff(constant(datetime('2023-08-01T00:00:00Z')))").binds).toEqual([604800000]);
     // runtime dateDiff against a literal → v − other_ms (the epoch bound as a value)
     const rd = read('g.V().values("birthday").asNumber().asDate().dateDiff(datetime("1970-01-01T00:00Z"))');
-    expect(rd.shape).toEqual({ kind: 'value', as: 'long' });
+    expect(rd.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(rd.binds).toEqual(['birthday', Date.parse('1970-01-01T00:00Z')]); // the values() join key, then the later dateDiff operand
     // nested inject() as the dateDiff operand defers (not a literal/constant)
     expect(() => compile("g.inject(datetime('2023-08-08T00:00:00Z')).dateDiff(inject(datetime('2023-10-11T00:00:00Z')))", {})).toThrow('datetime literal or constant');
@@ -612,11 +613,11 @@ describe('scalar-parent / projection SQL', () => {
 
   test('single-label select().by(key) → scalar value from the alias column', () => {
     const p = read('g.V().as("a").out().select("a").by("name")');
-    expect(p.shape).toEqual({ kind: 'value' });
+    expect(p.shape).toEqual({ kind: 'value', type: UNKNOWN });
     expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS v");
     expect(p.sql).toContain('ON n.id=CAST(p.a0 ->> ? AS INTEGER)');
     const child = read('g.V(1).as("a").out().select("a").by(__.out().count())');
-    expect(child.shape).toEqual({ kind: 'value', as: 'long' });
+    expect(child.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(child.sql).toContain('SELECT CAST(p.a0 ->> ? AS INTEGER) AS id');
     expect(child.sql).toContain('GROUP BY d.o0');
   });
@@ -670,7 +671,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(p.sql).toContain('JOIN c');
     expect(p.sql).toContain('ON b1.o0=b0.o0');
     expect(read('g.V().project("friend").by(__.out().values("name")).select("friend")').shape)
-      .toEqual({ kind: 'value', as: undefined });
+      .toEqual({ kind: 'value', type: UNKNOWN });
     const mixed = read('g.V().project("name","degree").by("name").by(__.out().count())');
     expect(mixed.sql).toContain('SELECT value FROM vertex_properties WHERE node=p0.id AND key=?');
     expect(mixed.sql).toContain('ON b1.o0=b0.o0');
@@ -706,7 +707,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V(1).project("friends","created").by(__.out().values("name").fold()).by(__.out("created").values("name").fold()).select(Column.values).unfold()').shape)
       .toEqual({ kind: 'jsonbList', typed: true });
     expect(read('g.V(1).as("a").out().select("a").by(__.out()).values("name")').shape)
-      .toEqual({ kind: 'value', perRowType: true });
+      .toEqual({ kind: 'value', type: PER_ROW('vtype') });
   });
 
   test('multi-select traversal fields re-root generic children on each labelled element', () => {
@@ -735,7 +736,7 @@ describe('scalar-parent / projection SQL', () => {
 
   test('order() on a record stream sorts by a by(__.select(field)) modulator', () => {
     const p = read("g.V().out('created').project('a','b').by('name').by(__.in('created').count()).order().by(__.select('b'), Order.desc).select('a')");
-    expect(p.shape).toEqual({ kind: 'value' });
+    expect(p.shape).toEqual({ kind: 'value', type: UNKNOWN });
     // the order CTE sorts the record rows by field b's value column, descending
     expect(p.sql).toContain('ORDER BY r.e1_v DESC');
     // a following limit fuses into the same ORDER BY query (LIMIT after the sort)

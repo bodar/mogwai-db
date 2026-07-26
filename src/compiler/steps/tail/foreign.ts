@@ -1,4 +1,5 @@
 import { q, value, list, empty, type Relation, type Expression } from '../../../sql/kernel/q.ts';
+import { PER_ROW } from '../../../sql/kernel/render.ts';
 import { type Elem } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import type { ForeignRow, InjectionKind } from '../../../services/spi/types.ts';
@@ -85,10 +86,12 @@ const foreignValues: ShapeTailFn<ForeignStream> = (s, step, steps, at) => {
   const keyFilter = keys.length ? q` AND je.key IN (${list(keys.map(value), ', ')})` : empty;
   const isEdge = s.elem === 'edge';
   // vertex: json_each over the array of nodes; edge: the value IS one node. Extract $.v.
+  // The landed props are {t,v} nodes, so the type is right there beside the value —
+  // project it as a sibling `vtype` column rather than dropping it and re-inferring.
   const body = isEdge
-    ? q`SELECT json_extract(je.value, '$.v') AS v FROM ${p}, json_each(${p.c.fprops}) je WHERE 1${keyFilter}`
-    : q`SELECT json_extract(node.value, '$.v') AS v FROM ${p}, json_each(${p.c.fprops}) je, json_each(je.value) node WHERE 1${keyFilter}`;
-  return continueLowering(toResultStream(s.q, body, { kind: 'value' }), at + 1);
+    ? q`SELECT json_extract(je.value, '$.v') AS v, json_extract(je.value, '$.t') AS vtype FROM ${p}, json_each(${p.c.fprops}) je WHERE 1${keyFilter}`
+    : q`SELECT json_extract(node.value, '$.v') AS v, json_extract(node.value, '$.t') AS vtype FROM ${p}, json_each(${p.c.fprops}) je, json_each(je.value) node WHERE 1${keyFilter}`;
+  return continueLowering(toResultStream(s.q, body, { kind: 'value', type: PER_ROW('vtype') }), at + 1);
 };
 
 const FOREIGN_TAIL = new Map<string, ShapeTailFn<ForeignStream>>([

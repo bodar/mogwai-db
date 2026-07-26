@@ -56,15 +56,14 @@ export function foldMember(input: ScalarStream, src: Relation): { member: Expres
   if (!perRow) return { member: src.c.v, of: { kind: 'scalar', as: staticTypeOf(input.type) } };
   // The types are per-ROW, so "is an envelope needed?" is a RUNTIME question about the whole
   // list — exactly the decision the reverted barrier-local fix could not make. Wrap iff SOME
-  // member's type is lossy under its storage class. The WINDOW is what makes it uniform:
-  // every row of one list sees the same aggregate, so a list is wholly typed or wholly bare,
-  // never mixed (mixing is what broke the reverted attempt). `typed` therefore means
-  // "self-describing IF wrapped", and the readers detect the envelope once per list.
-  // A window function cannot nest inside the json_group_array aggregate, so the per-list
-  // verdict is a correlated EXISTS over the same relation instead — one scan, same answer,
-  // and it composes inside an aggregate.
+  // member's type is lossy under its storage class, asked ONCE for the whole relation: that
+  // is what keeps the encoding uniform (a list is wholly typed or wholly bare, never mixed —
+  // mixing is what broke the reverted attempt). `typed` therefore means "self-describing IF
+  // wrapped", and the readers detect the envelope per member.
+  //
   // A SECOND alias over the same relation, so the EXISTS asks "does ANY row need an
-  // envelope?" rather than self-correlating to the current row.
+  // envelope?" rather than self-correlating to the current row. (A `MAX(…) OVER ()` window
+  // would say the same thing but cannot nest inside the json_group_array aggregate.)
   const probe = src.as(`${src.name}_vt`);
   const anyLossy = q`EXISTS (SELECT 1 FROM ${probe} WHERE ${probe.c[perRow]} IS NOT NULL AND ${probe.c[perRow]} NOT IN ${LOSSLESS_VTYPES})`;
   return {
@@ -176,7 +175,7 @@ export function lowerScopedScalarReducer(
   const bulk = input.carried.bulk ? s.c[input.carried.bulk] : undefined;
   let aggregate: Expression;
   let result: ScalarStream['result'];
-  let as = input.as;
+  let as = staticTypeOf(input.type);
   if (reducer === 'count') {
     // Count the productive (non-null encounter) child rows, weighted by bulk when present
     // — the LEFT JOIN's null-padded empty-child rows contribute 0.

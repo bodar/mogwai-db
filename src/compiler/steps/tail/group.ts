@@ -9,7 +9,7 @@ import { isMapLocalOrder } from './list.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, partitionOver, withoutCarried, type Carry, type ElementStream } from '../context/context.ts';
 import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
-import { perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
+import { PER_ROW, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { pushChildScope, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows } from './child.ts';
 import { childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, reuseCurrentFrame, type ChildParent } from './child-shape.ts';
@@ -526,10 +526,10 @@ export function lowerScalarGroupCount(s: ScalarStream): GroupStream {
       q`SELECT ${c.c.v} AS gk, ${c.c[perRow]} AS gkt, ${gv} AS gv FROM ${c} GROUP BY ${c.c.v}, ${c.c[perRow]}`,
       ['gk', 'gkt', 'gv'],
     );
-    return toGroupStream(withoutCarried(carryOf(s)), rel, { kind: 'scalar', productive: true, vtypeCol: 'gkt' }, { kind: 'count' });
+    return toGroupStream(withoutCarried(carryOf(s)), rel, { kind: 'scalar', productive: true, type: PER_ROW('gkt') }, { kind: 'count' });
   }
   const rel = s.q.cte(q`SELECT ${c.c.v} AS gk, ${gv} AS gv FROM ${c} GROUP BY ${c.c.v}`, ['gk', 'gv']);
-  return toGroupStream(withoutCarried(carryOf(s)), rel, { kind: 'scalar', productive: true, as: staticTypeOf(s.type) }, { kind: 'count' });
+  return toGroupStream(withoutCarried(carryOf(s)), rel, { kind: 'scalar', productive: true, type: s.type }, { kind: 'count' });
 }
 
 /** Continue from the rich group barrier. Terminal framing consumes the same lowered
@@ -574,8 +574,9 @@ function deriveGroupMap(s: GroupStream): { rel: Relation; keyOf: MapOf; valOf: M
   if (s.key.kind === 'scalar') {
     // A per-row stored vtype (gkt, from a bare values() key) is the truth channel; `as` is the
     // compile-time tag a cast left behind. typedScalarNode prefers the column when present.
-    const vtypeExpr = s.key.vtypeCol ? g.c[s.key.vtypeCol] : undefined;
-    keyNode = typedScalarNode(g.c.gk, { staticType: s.key.as, vtypeExpr });
+    const keyPerRow = perRowColumnOf(s.key.type);
+    const vtypeExpr = keyPerRow ? g.c[keyPerRow] : undefined;
+    keyNode = typedScalarNode(g.c.gk, { staticType: staticTypeOf(s.key.type), vtypeExpr });
     keyOf = { kind: 'scalar' }; groupKey = g.c.gk;
   }
   else if (s.key.kind === 'element') {
@@ -757,7 +758,7 @@ function propertyOrder(s: PropertyStream, step: PStep): PropertyStream {
     // Carry the child value's stored type so the sort key can compareKey it — a numeric
     // property that rides as TEXT (long/bigdecimal/…) must sort numerically, exactly as the
     // token branch below does; without it a mixed-width value ("9" vs "35") sorts lexically.
-    const vt = rows.stream.vtype;
+    const vt = perRowColumnOf(rows.stream.type);
     const firstVal = s.q.cte(
       q`SELECT ${c.c[ord]} AS ord, ${c.c.v} AS k${vt ? q`, ${c.c[vt]} AS kt` : empty}, ROW_NUMBER() OVER (PARTITION BY ${c.c[ord]} ORDER BY ${c.c[rows.stream.carried.encounter]}) AS rn FROM ${c}`,
       ['ord', 'k', ...(vt ? ['kt'] : []), 'rn'],

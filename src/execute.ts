@@ -1,4 +1,4 @@
-import { compilePlan, type Compiled, type WritePlan, type ListOf, type MapEntry, type MapOf, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from './compiler/compiler.ts';
+import { compilePlan, staticTypeOf, type Compiled, type WritePlan, type ListOf, type MapEntry, type MapOf, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from './compiler/compiler.ts';
 import { isCollectionType, valueNodeFromStored, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import type { GraphStore } from './storage.ts';
 import type { ServiceRegistry } from './services/spi/types.ts';
@@ -419,13 +419,15 @@ function groupKey(r: any, key: GroupKey): { buf: Buffer; canon: string } {
   // truth channel — a datetime/uuid key keeps its exact type) beats the compile-time tag
   // (asNumber(BYTE).groupCount()), and an untagged key infers from the JS value (correct
   // for string/int/double, where the storage class already determines the type).
-  const perRow = key.vtypeCol ? r[key.vtypeCol] as string | null : null;
+  const keyCol = key.type?.kind === 'perRow' ? key.type.column : undefined;
+  const perRow = keyCol ? r[keyCol] as string | null : null;
   if (perRow) {
     // Distinct stored types are distinct keys, so the type joins the canonical dedup key.
     return { buf: frameStoredValue(r.gk, perRow), canon: `s:${perRow}:` + JSON.stringify(r.gk) };
   }
-  const buf = key.as ? frameValue(r.gk, key.as) : ioc.anySerializer.serialize(r.gk);
-  return { buf, canon: `s:${key.as ?? ''}:` + JSON.stringify(r.gk) };
+  const staticAs = staticTypeOf(key.type);
+  const buf = staticAs ? frameValue(r.gk, staticAs) : ioc.anySerializer.serialize(r.gk);
+  return { buf, canon: `s:${staticAs ?? ''}:` + JSON.stringify(r.gk) };
 }
 
 // group()/groupCount(): fold ALL rows into ONE GraphBinary Map. Element-valued
@@ -528,9 +530,16 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
     // Per-row framing: values() of a typed prop frames each row by its own stored vtype
     // (like variant frames by vk); a collection vtype frames the stored {t,v} tree via
     // frameStoredValue (fixes bare values(collectionProp)); otherwise the single `as` applies.
-    case 'value': for (const r of rows) yield shape.perRowType && isCollectionType(r.vtype)
-      ? frameStoredValue(r.v, r.vtype)
-      : frameValue(r.v, shape.perRowType ? vtypeToValueType(r.vtype) : shape.as); return;
+    case 'value': {
+      const t = shape.type;
+      for (const r of rows) {
+        if (t.kind !== 'perRow') { yield frameValue(r.v, staticTypeOf(t)); continue; }
+        const vtype = r[t.column];
+        // A collection vtype names the OUTER shape, so frame the stored {t,v} tree.
+        yield isCollectionType(vtype) ? frameStoredValue(r.v, vtype) : frameValue(r.v, vtypeToValueType(vtype));
+      }
+      return;
+    }
     // P4 dynamic-tag row: dispatch each row by its own `vk` — null / scalar / node /
     // edge / list — mirroring the per-row `vtype` dispatch of `case 'value'`.
     case 'variant': {
