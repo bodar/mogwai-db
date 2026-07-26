@@ -1,0 +1,41 @@
+diff --git a/gremlin-js/gremlin-javascript/package.json b/gremlin-js/gremlin-javascript/package.json
+index c1d43a8245..19977a40c1 100644
+--- a/gremlin-js/gremlin-javascript/package.json
++++ b/gremlin-js/gremlin-javascript/package.json
+@@ -79,7 +79,8 @@
+     "prettier": "^3.0.0",
+     "ts-node": "^10.9.2",
+     "typedoc": "^0.28.18",
+-    "typescript": "~6.0.3"
++    "typescript": "~6.0.3",
++    "uuid": "^14.0.1"
+   },
+   "repository": {
+     "type": "git",
+diff --git a/gremlin-js/gremlin-javascript/scripts/groovy/generate.groovy b/gremlin-js/gremlin-javascript/scripts/groovy/generate.groovy
+index 74fb127730..63b52cd2df 100644
+--- a/gremlin-js/gremlin-javascript/scripts/groovy/generate.groovy
++++ b/gremlin-js/gremlin-javascript/scripts/groovy/generate.groovy
+@@ -57,6 +57,10 @@ radishGremlinFile.withWriter('UTF-8') { Writer writer ->
+                     'import * as graphTraversalModule from \'../../lib/process/graph-traversal.js\';\n' +
+                     'import * as traversalModule from \'../../lib/process/traversal.js\';\n' +
+                     'import { Buffer } from \'buffer\';\n' +
++                    // JavascriptTranslateVisitor emits uuid.parse(...)/uuid.v4() for UUID literals
++                    // ("Assumes use of the `uuid` npm library"), so the generated file must import
++                    // it or every UUID scenario dies with "uuid is not defined".
++                    'import * as uuid from \'uuid\';\n' +
+                     'import { TraversalStrategies, VertexProgramStrategy, OptionsStrategy, PartitionStrategy, \n' +
+                     '        ReadOnlyStrategy, GraphFilterStrategy, SeedStrategy, SubgraphStrategy, ProductiveByStrategy, \n' +
+                     '        LambdaRestrictionStrategy, StandardVerificationStrategy, VertexProgramRestrictionStrategy, \n' +
+diff --git a/gremlin-js/gremlin-javascript/test/cucumber/gremlin.js b/gremlin-js/gremlin-javascript/test/cucumber/gremlin.js
+index 69d1632c39..01252dfa19 100644
+--- a/gremlin-js/gremlin-javascript/test/cucumber/gremlin.js
++++ b/gremlin-js/gremlin-javascript/test/cucumber/gremlin.js
+@@ -27,6 +27,7 @@
+ import * as graphTraversalModule from '../../lib/process/graph-traversal.js';
+ import * as traversalModule from '../../lib/process/traversal.js';
+ import { Buffer } from 'buffer';
++import * as uuid from 'uuid';
+ import { TraversalStrategies, VertexProgramStrategy, OptionsStrategy, PartitionStrategy, 
+         ReadOnlyStrategy, GraphFilterStrategy, SeedStrategy, SubgraphStrategy, ProductiveByStrategy, 
+         LambdaRestrictionStrategy, StandardVerificationStrategy, VertexProgramRestrictionStrategy, 

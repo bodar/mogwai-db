@@ -141,48 +141,30 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    conformance cluster. **Medium.**
    → [path-history-substrate](./2026-07-18-path-history-substrate.md)
 
-7. **One type channel — collapse `as` + `vtype` into a single scalar `type`.** Investigated and
-   partly landed 2026-07-25; the design is settled and the dead end is recorded, so this is
-   scoped, not exploratory. → [type-channel-unification](./2026-07-25-type-channel-unification.md)
+7. **One type channel — collapse `as` + `vtype` into a single scalar `type`. ✅ DONE 2026-07-26.**
+   → [type-channel-unification](./2026-07-25-type-channel-unification.md)
 
-   **The defect.** A scalar's Gremlin type rides on TWO channels: `ScalarStream.as` (one
-   compile-time tag, from a cast) and `ScalarStream.vtype` (the NAME of a per-row column holding
-   the type the write channel recorded — the only channel that can describe a heterogeneous
-   stream). Every container barrier propagates `as` and drops `vtype`, so a stored
-   datetime/uuid/long collapses to its storage class on entering one: `values('when').fold()`
-   frames `LIST[LONG]` (epoch millis), uuid→`STRING`, bigint→`INT`. Same for
-   `aggregate().cap()` and a `groupCount()` KEY. Drop sites: `steps/tail/barrier.ts:37,56`,
-   `steps/prefix/sideeffect.ts:~111`, `steps/tail/group.ts:~519`. Pinned as `test.todo` in
-   `test/typed-collections-e2e.test.ts`.
+   Landed as four commits (`78e2508`, `bc212ca`, `6997533`, `715ba07`). All 7 `test.todo`s in
+   `test/typed-collections-e2e.test.ts` are green: **838 pass / 0 fail / 0 todo, L3 1364 (+1)**.
 
-   **Corrects the previous entry, which was wrong in a way that cost a session.** It claimed the
-   root cause was "`ListOf`/`AliasEntry` carry no per-element vtype slot" and called it
-   cross-cutting. The slot EXISTS and is faithfully propagated —
-   `values('age').asNumber(BIGINT).fold()` compiles to `{"kind":"jsonbList","as":"bigint"}`.
-   Only the per-row channel is lost. It also listed `project().by(count(local))`, which is not
-   affected (a count has no member type to lose), and missed `dedup()`, which was.
+   `ScalarType = {static}|{perRow}|{unknown}` lives at the render boundary and is the ONLY
+   spelling — the derived `as`/`vtype` accessors were deleted, so the compiler named every site
+   and each had to state which case it means. `Shape{kind:'value'}` and `GroupKey` scalar carry
+   the same union (this absorbed the `as?` xor `perRowType?` debt item and `GroupKey.vtypeCol`).
 
-   **Do NOT re-try the barrier-local fix.** Wrapping folded members as `{t,v}` + `ListOf.typed`
-   (the encoding a STORED typed collection uses) was implemented and reverted: the list
-   rebuild/transform ops (`order`/`dedup`/`limit` under `Scope.local`, the set-op family) read
-   members as BARE SQL values and fail closed on a `typed` list (`assertUntypedList`,
-   `steps/tail/list.ts`), so always-wrapping turned working traversals into deferrals (15 tests).
-   Wrapping only the rows that need it mixes encodings within one list, which the typed readers
-   don't handle — `compileUnfold` does `je.value ->> '$.v'` unconditionally. A uniform per-list
-   encoding needs a runtime, per-list decision, which is this item.
+   The runtime per-list decision the dead end was missing is `barrier.ts foldMember()`, shared by
+   every fold barrier: wrap members as `{t,v}` iff SOME member's type is lossy under its storage
+   class, asked once per relation so the encoding stays UNIFORM per list. `assertUntypedList` is
+   retired — the list transforms read members through one `memberValue`/`memberNode` seam, so a
+   typed list flows through the same code as a bare one.
 
-   **The direction** (agreed with the user, 2026-07-25): one field, a discriminated union —
-   `{static: CanonicalType} | {perRow: column} | {unknown}` — so the compiler FORCES every step
-   to handle all three instead of silently forgetting one of two optional fields. `unknown` is
-   reachable only from the JS-client seam (a JS client cannot distinguish UUID from string, so
-   the type is genuinely unknown, not absent); if the upstream client is fixed it becomes
-   unreachable and deletable. Physical encoding stays a per-site choice derived from the type —
-   bare when the SQLite storage class already determines it (string/int/long/double, exactly what
-   `inferVtypeSql` recovers), a sibling column for row-preserving ops, `{t,v}` only inside a JSON
-   blob where there is no room for a sibling column. **Absorbs** the `Scope.local` typed-element
-   transforms (a transform retypes its output — not a special case once the type is uniform) and
-   `assertUntypedList`, which exists only to guard the two-encoding split. **Unblocks** ~8–14 L3
-   scenarios plus the whole class of "a new barrier forgot a channel" bugs. **Medium-High.**
+   Two facts worth keeping:
+   - **Lossless ≠ what SQL can recover.** The bar is what the READER infers back identically, so
+     the lossless set is `string/double/int` — NOT `long`. SQL distinguishes int from long by the
+     int32 range; the framer's JS inference does not, so a bare long > 2^53 returns as INT.
+   - **A merge that cannot preserve a per-row type must say so.** The union/optional arm merges
+     project `(v[,vt])` with no vtype column, so they degrade to `unknown` rather than claim a
+     column the relation lacks — `assertStreamColumns` caught exactly that during the migration.
 
 ---
 
@@ -318,10 +300,6 @@ All → [phased-roadmap](./2026-07-11-phased-roadmap-plan.md) unless noted.
 - **Review-fix duplication residue (C1/C2/C3 + D)** — property-list framing / tie-break / `PARTITION
   BY ordinal` dups; the `execute.ts` pre-parsed-`pmeta` divergence is latent-correctness. Status
   unconfirmed — treat as open. → [review-fix-plan](./2026-07-22-review-fix-plan.md)
-- **`value` Shape `as?` xor `perRowType?`** — the render-boundary twin of P1·7's two channels; fold
-  it into that discriminated union rather than doing it alone.
-  → [type-channel-unification](./2026-07-25-type-channel-unification.md),
-  [wire-and-storage-facts](./2026-07-25-wire-and-storage-facts.md)
 - **Upstream `q`-kernel surface to lazyrecords**.
   → [q-kernel-sql-builder](./2026-07-12-q-kernel-sql-builder.md)
 - **Fork TinkerPop as our vendor submodule + upstream the harness fixes.** Agreed 2026-07-25;
@@ -334,16 +312,24 @@ All → [phased-roadmap](./2026-07-11-phased-roadmap-plan.md) unless noted.
      safe-integer range and BigInt outside it, matching `LongSerializer.deserializeValue`.
      **Not yet opened as a PR.** See the won't-do entry below for why our framing is already right.
   2. **The generated cucumber `gremlin.js` references an undefined `uuid`** — the JS translator
-     documents "Assumes use of the `uuid` npm library" (`JavascriptTranslateVisitor.ts:29`) and
-     emits `uuid.v4()`/`uuid.parse(…)`, but `test/cucumber/gremlin.js` never imports it and
-     `uuid` is not a devDependency, so every UUID scenario dies with `uuid is not defined`.
-     Costs us `g_injectXUUIDXXX` (dropped from the ratchet). NOTE the file is GENERATED during
-     the Maven build (`build/generate.groovy` is not in-tree for JS), so the fix is an import in
-     the generator template + a devDependency, not an edit to the output.
-  3. **The cucumber port is hard-coded** (`test/helper.js:33` → `http://localhost:45940/gremlin`,
-     no env override; docker-compose pins 45940/45941 too). This is the intermittent CI conflict
-     — it collides with our own conformance host, which must own that port because the client
-     offers no way to configure it. Fix: honour an env var, default 45940.
+     emits `uuid.v4()`/`uuid.parse(…)` (16 uses), but the file never imports it and `uuid` is in
+     neither deps nor devDeps, so every UUID scenario dies with `uuid is not defined`.
+     Costs us `g_injectXUUIDXXX` (dropped from the ratchet).
+     **CORRECTION (2026-07-26): the generator IS in-tree** — the old note said it wasn't. It is
+     `gremlin-js/gremlin-javascript/scripts/groovy/generate.groovy`, and since the generated
+     `test/cucumber/gremlin.js` is TRACKED, the fix touches all three: the template's import
+     block, the `uuid` devDependency, and the regenerated output.
+     **Patch ready** (verified to apply from a clean tree, `uuid@14` confirmed to export the
+     `parse`/`v4` the generated code calls): `docs/upstream-patches/01-cucumber-uuid-import.patch`.
+  3. **The cucumber port is hard-coded** (`gremlin-js/gremlin-javascript/test/helper.js`, no env
+     override; docker-compose pins 45940/45941 too). This is the intermittent CI conflict — it
+     collides with our own conformance host, which must own that port because the client offers
+     no way to configure it.
+     **Patch ready**: `docs/upstream-patches/02-cucumber-port-env-override.patch` —
+     `GREMLIN_SERVER_PORT` /
+     `GREMLIN_SERVER_AUTH_PORT`, defaults unchanged (verified byte-identical when unset). Also
+     drops a duplicate hard-coded copy in `test/integration/traversal-test.js`, which already
+     imports from `helper.js` and can just use its `serverUrl` export.
   4. **Bun's `undici` shim lacks `Agent.close()`/`destroy()`** — a BUN bug, not TinkerPop's
      (`close` is non-optional on undici's `Dispatcher`, and the real Agent inherits it via
      `DispatcherBase`). Worked around in `test/support/undici-shim.ts`; worth reporting to Bun.
