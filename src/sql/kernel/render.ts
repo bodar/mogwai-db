@@ -51,12 +51,11 @@ export type ElemShape = 'vertex' | 'edge' | 'property';
 // group: a list of elements, a single element (tail/last), a list of scalars
 // (json_group_array), or a scalar aggregate (count/sum).
 export type GroupKey =
-  // by('name')/by(T.label)/by(__.scalar)/scalar-group → gk; `as` frames a typed key
-  // (asNumber(BYTE).groupCount()). `vtypeCol` names a SIBLING per-row stored-vtype column (gkt)
-  // when the key came from a stored property — the truth channel, preferred over `as`. It is a
-  // column name (like ScalarStream.vtype), not a type: a bare groupCount() never becomes a
-  // MapStream, so its key has no {t,v} blob to ride inside and needs the real column.
-  | { kind: 'scalar'; productive?: boolean; as?: ValueType; vtypeCol?: string }
+  // by('name')/by(T.label)/by(__.scalar)/scalar-group → gk, its type in the ONE channel.
+  // A perRow type names a SIBLING column (gkt) rather than a {t,v} envelope: the key is a
+  // GROUP BY term (an envelope would group by JSON text), and a bare groupCount() never
+  // becomes a MapStream, so there is no blob for it to ride inside.
+  | { kind: 'scalar'; productive?: boolean; type?: ScalarType }
   | { kind: 'element'; elem: ElemShape }                 // bare by() → the element itself, columns k_*
   | { kind: 'map'; parts: { key: string }[] };           // by(__.project(...)) → columns k0_,k1_,…
 export type GroupVal =
@@ -138,13 +137,23 @@ export const staticTypeOf = (t: ScalarType | undefined): ValueType | undefined =
 export const perRowColumnOf = (t: ScalarType | undefined): string | undefined =>
   t?.kind === 'perRow' ? t.column : undefined;
 
+/** The physical columns a type channel adds to a relation: a per-row type needs its column
+ *  declared in the stream's projection; static/unknown need none. */
+export const perRowCols = (t: ScalarType | undefined): string[] =>
+  t?.kind === 'perRow' ? [t.column] : [];
+
 export type Shape =
   | { kind: 'vertex' }
   | { kind: 'edge' }
   | { kind: 'property' } // properties(): VertexProperty elements (vpid/owner/pk/pv/pmeta cols)
   | { kind: 'metaProperty' } // properties().properties(): meta-properties as Property elements (mk/mv cols)
   | { kind: 'metaMap' } // properties(k).valueMap(): a VertexProperty's meta as a flat Map (meta col, JSON text)
-  | { kind: 'value'; as?: ValueType; perRowType?: boolean } // perRowType: frame each row by its own stored `vtype` column (values() of typed props), not the single `as`; a collection vtype frames the stored {t,v} tree via frameStoredValue
+  // The ONE type channel at the render boundary (`type`), replacing the former `as?` xor
+  // `perRowType?` pair — the same two-optionals-plus-implicit-third trap ScalarStream had.
+  // perRow → frame each row by its own stored `vtype` column (values() of typed props; a
+  // collection vtype frames the stored {t,v} tree via frameStoredValue); static → one tag
+  // for every row; unknown → infer from the JS value.
+  | { kind: 'value'; type: ScalarType }
   | { kind: 'variant'; scalarAs?: ValueType; node?: boolean; edge?: boolean; listOf?: ListOf; list?: boolean } // per-row tag: null/scalar/node/edge/list; `list` wraps ALL rows into one outer List (cap)
   | { kind: 'count' }
   | { kind: 'scalar'; productiveNull?: boolean } // numeric reducer; productive NULL may be a real result

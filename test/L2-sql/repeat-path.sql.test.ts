@@ -7,6 +7,7 @@
 // result shape. The execution-semantics half of the old compiler.test.ts lives at
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
+import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
@@ -320,7 +321,7 @@ describe('repeat / path SQL', () => {
     expect(read('g.V().out().out().path().by("name").combine(["x"])').shape).toEqual({ kind: 'jsonbList' });
     expect(read('g.V().out().out().path().by("name").merge(["x"])').shape).toEqual({ kind: 'jsonbSet' });
     expect(read('g.V().out().out().path().by("name").difference(["x"])').shape).toEqual({ kind: 'jsonbSet' });
-    expect(read('g.V().out().out().path().by("name").conjoin("-")').shape).toEqual({ kind: 'value', as: 'string', perRowType: undefined });
+    expect(read('g.V().out().out().path().by("name").conjoin("-")').shape).toEqual({ kind: 'value', type: STATIC('string') });
     // the retype builds one JSON array per path row from the position value columns.
     expect(read('g.V().out().out().path().by("name").reverse()').sql).toContain('json_array');
     // an element-position path (no by(key)) is NOT list-representable → still fails closed.

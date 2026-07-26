@@ -9,7 +9,7 @@ import {
   assertStreamColumns, carryOf, pathColumns, streamColumns, toListStream, toScalarStream, PROPERTY_PAYLOAD,
   type ListOf, type PropertyStream, type Stream,
 } from '../context/stream.ts';
-import { type ValueType } from '../../../sql/kernel/render.ts';
+import { staticTypeOf, type ValueType } from '../../../sql/kernel/render.ts';
 
 // ---------- as()/select() over path-history labels, any stream shape ----------
 //
@@ -29,7 +29,8 @@ const payloadOf = (s: Exclude<Stream, { kind: 'result' }>): string[] => {
 function currentEntry(s: Exclude<Stream, { kind: 'result' }>, p: any): { entry: Expression; shape: AliasShape; as?: ValueType } {
   switch (s.kind) {
     case 'scalar':
-      return { entry: aliasEntry('value', p.c.v, s.as ?? null), shape: 'value', as: s.as };
+      const sAs = staticTypeOf(s.type);
+      return { entry: aliasEntry('value', p.c.v, sAs ?? null), shape: 'value', as: sAs };
     case 'list':
       return { entry: aliasEntry('list', p.c.list), shape: 'list' };
     case 'path': {

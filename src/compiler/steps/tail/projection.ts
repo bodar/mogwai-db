@@ -9,7 +9,7 @@ import { type PStep } from '../../ir/strategies.ts';
 import { advance, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, partitionOver, withoutCarried, type ElementStream } from '../context/context.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
 import { tryLowerLocalAggregate, lowerScalarAggregate } from '../prefix/sideeffect.ts';
-import { type Shape } from '../../../sql/kernel/render.ts';
+import { PER_ROW, STATIC, UNKNOWN, staticTypeOf, type Shape } from '../../../sql/kernel/render.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
 import { lowerScalarFilter, lowerConstant, lowerScalarConstant, lowerScalarSack, lowerScalarSplit, collectionTypeOf, scalarCollectionRetype, scalarMapRetype } from './scalar.ts';
 import { compileSelectProject, lowerRecordSelectProject, lowerScalarProject, lowerSingleSelect } from './select.ts';
@@ -534,7 +534,7 @@ function compileTailFold(st: ElementStream, steps: PStep[], stop: number): Lower
     const result = buildProjection(st, acc);
     if (result.shape.kind !== 'value') throw new Error(`${acc.projStep.name}() did not produce a scalar stream`);
     const rel = st.q.cte(result.tail, ['v']);
-    return continueLowering(toScalarStream(withoutCarried(carryOf(st)), rel, result.shape.as), at);
+    return continueLowering(toScalarStream(withoutCarried(carryOf(st)), rel, undefined, { type: result.shape.type }), at);
   }
   if (PROJECTION_NAMES.has(steps[at].name))
     throw new Error(`${steps[at].name}() cannot consume the ${acc.projStep?.name ?? 'element'} result shape`);
@@ -572,7 +572,7 @@ function lowerScalarProjection(st: ElementStream, projStep: PStep, acc: TailAcc)
   const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
   const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
   const proj = PROJECTORS.get(projStep.name)!({ st, n, p, l, extId, vJoin, vlJoin, projStep });
-  const asTag = proj.shape.kind === 'value' ? proj.shape.as : undefined;
+  const asTag = proj.shape.kind === 'value' ? staticTypeOf(proj.shape.type) : undefined;
   const vt = proj.vtypeExpr ? 'vtype' : undefined;
   const vtypeCol = proj.vtypeExpr ? q`, ${proj.vtypeExpr} AS vtype` : empty;
   const where = proj.baseWhere ? q` WHERE ${proj.baseWhere}` : empty;
@@ -913,14 +913,14 @@ const PROJECTORS = new Map<string, ProjFn>([
         // A collection value → json() TEXT (so the framer JSON.parses the {t,v} tree);
         // a scalar stays raw. scalarExpr (order key) keeps the raw column (collections
         // as sort keys are degenerate either way).
-        shape: { kind: 'value' }, colsNode: q`${storedValueExpr(ep.c.value, ep.c.vtype)} AS v`,
+        shape: { kind: 'value', type: PER_ROW('vtype') }, colsNode: q`${storedValueExpr(ep.c.value, ep.c.vtype)} AS v`,
         fromNode: q`${c.vJoin} JOIN ${ep} ON ${ep.c.edge}=${c.n.c.id} AND ${ep.c.key}=${value(key)}`,
         scalarExpr: ep.c.value, baseWhere: null, encounterKey: q`${c.p.c.id}, ${ep.c.id}`, vtypeExpr: ep.c.vtype,
       };
     }
     const vp = vertexProperties.as('vp');
     return {
-      shape: { kind: 'value' }, colsNode: q`${storedValueExpr(vp.c.value, vp.c.vtype)} AS v`,
+      shape: { kind: 'value', type: PER_ROW('vtype') }, colsNode: q`${storedValueExpr(vp.c.value, vp.c.vtype)} AS v`,
       fromNode: q`${c.vJoin} JOIN ${vp} ON ${vp.c.node}=${c.n.c.id} AND ${vp.c.key}=${value(key)}`,
       scalarExpr: vp.c.value, baseWhere: null, encounterKey: q`${c.p.c.id}, ${vp.c.id}`, vtypeExpr: vp.c.vtype,
     };
@@ -928,10 +928,10 @@ const PROJECTORS = new Map<string, ProjFn>([
   ['id', (c) => ({
     // Join the element table even though the id lives in `rel`, so a preceding
     // order().by(key) — which references n.props — has the alias in scope.
-    shape: { kind: 'value' }, colsNode: q`${c.extId} AS v`, fromNode: c.vJoin, scalarExpr: c.extId, encounterKey: c.p.c.id,
+    shape: { kind: 'value', type: UNKNOWN }, colsNode: q`${c.extId} AS v`, fromNode: c.vJoin, scalarExpr: c.extId, encounterKey: c.p.c.id,
   })],
   ['label', (c) => ({
-    shape: { kind: 'value' }, colsNode: q`${c.l.c.name} AS v`, fromNode: c.vlJoin, scalarExpr: c.l.c.name, encounterKey: c.p.c.id,
+    shape: { kind: 'value', type: STATIC('string') }, colsNode: q`${c.l.c.name} AS v`, fromNode: c.vlJoin, scalarExpr: c.l.c.name, encounterKey: c.p.c.id,
   })],
   ['valueMap', (c) => {
     const keys = c.projStep!.args.filter((a) => typeof a === 'string') as string[];

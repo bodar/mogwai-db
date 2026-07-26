@@ -6,8 +6,8 @@
 // expression directly; keeping that compatibility behind this function prevents new
 // readCompiled islands while those leaves are converted to Stream -> Stream lowerers.
 
-import { type Expression, type Query } from '../../../sql/kernel/q.ts';
-import { readCompiled, type Compiled, type ListOf, type Shape } from '../../../sql/kernel/render.ts';
+import { raw, type Expression, type Query } from '../../../sql/kernel/q.ts';
+import { perRowColumnOf, readCompiled, type Compiled, type ListOf, type Shape } from '../../../sql/kernel/render.ts';
 import { list, q } from '../../../sql/kernel/q.ts';
 import { framedProps, extIdOf } from '../../plan/plan.ts';
 import { edges, labels, nodes } from '../../../sql/schema.ts';
@@ -26,10 +26,11 @@ export function materializeScalarRoot(stream: ScalarStream): Compiled {
     ? { kind: 'count' }
     : stream.result === 'number'
       ? { kind: 'scalar', productiveNull: stream.productiveNull }
-    : { kind: 'value', as: stream.as, perRowType: stream.vtype ? true : undefined };
+    : { kind: 'value', type: stream.type };
   // A per-row stored vtype column (values() of a typed prop) rides alongside v so the
-  // handler frames each row by its own type, not the single compile-time `as`.
-  const cols = stream.result === 'number' ? q`v, vt` : stream.vtype ? q`v, ${stream.vtype}` : q`v`;
+  // handler frames each row by its own type, not one compile-time tag.
+  const perRow = perRowColumnOf(stream.type);
+  const cols = stream.result === 'number' ? q`v, vt` : perRow ? q`v, ${raw(perRow)}` : q`v`;
   if (!stream.carried.encounter) return materializeRoot(stream.q, q`SELECT ${cols} FROM ${stream.rel}`, shape);
   const s = stream.rel.as('s');
   return materializeRoot(stream.q, q`SELECT ${cols} FROM ${s} ORDER BY ${s.c[stream.carried.encounter]}`, shape);

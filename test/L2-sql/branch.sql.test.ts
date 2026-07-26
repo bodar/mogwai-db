@@ -7,6 +7,7 @@
 // result shape. The execution-semantics half of the old compiler.test.ts lives at
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
+import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
@@ -255,7 +256,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(c.sql).toContain('ROW_NUMBER() OVER () AS o0');
     // branch 2 emits only for inputs branch 1 produced nothing for
     expect(c.sql).toContain('WHERE o0 NOT IN (SELECT o0 FROM');
-    expect(c.shape).toEqual({ kind: 'value', perRowType: true });
+    expect(c.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     const scalar = read('g.V().coalesce(__.values("age"), __.constant(0)).count()');
     expect(scalar.shape).toEqual({ kind: 'count' });
     expect(scalar.sql).toContain('a.o0 NOT IN (SELECT o0 FROM');
@@ -284,7 +285,8 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(sql).toContain('SELECT e.tgt AS id, p.bulk, p.o0 FROM edges e');
     expect(sql).toContain('SELECT p.id AS id, p.bulk FROM c3 p'); // `all` consumes the child origin
     const scalar = read('g.V().flatMap(__.values("name"))');
-    expect(scalar.shape).toEqual({ kind: 'value', as: undefined });
+    // a child values() keeps its per-row stored type through the child boundary
+    expect(scalar.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     expect(scalar.sql).toContain('JOIN vertex_properties vp');
     // Every scalar child records provider encounter order explicitly. `all` drops
     // the child ordinal without applying map's second first-per-parent window.
@@ -293,7 +295,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
 
   test('map(__.<scalar>) → per-traverser scalar projection (value shape)', () => {
     const m = read('g.V().map(__.out().count())');
-    expect(m.shape).toEqual({ kind: 'value', as: 'long' }); // count() is a Long
+    expect(m.shape).toEqual({ kind: 'value', type: STATIC('long') }); // count() is a Long
     // count() is a child-scope barrier, not a correlated scalar fast path: the
     // preserved domain makes an empty child an explicit zero row per origin.
     expect(m.sql).toContain('COUNT(c.id) AS v');
@@ -308,7 +310,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     const carriedCount = read('g.V(1).as("a").local(__.out().count())');
     expect(carriedCount.sql).toContain('COUNT(c.id) AS v, d.a0');
     const childValue = read('g.V(1).map(__.values("name"))');
-    expect(childValue.shape).toEqual({ kind: 'value', as: undefined });
+    expect(childValue.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     expect(childValue.sql).toContain('JOIN vertex_properties vp');
     expect(childValue.sql).toContain('ROW_NUMBER() OVER (PARTITION BY p.o0');
     expect(read('g.V(1).map(__.values("name").toUpper())').sql).toContain('upper(p.v) AS v');
@@ -324,7 +326,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // ORDER BY / FILTER productivity contract is unchanged.
     expect(foldedChild.sql).toContain('ORDER BY s.encounter) FILTER (WHERE s.encounter IS NOT NULL)');
     expect(foldedChild.sql).toContain("json('[]')");
-    expect(read('g.V().map(__.out().fold()).unfold().values("name")').shape).toEqual({ kind: 'value', perRowType: true });
+    expect(read('g.V().map(__.out().fold()).unfold().values("name")').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     expect(() => compile('g.V().map(__.constant(1).discard())', {})).toThrow();
     // record/list-valued child bodies still defer; element bodies use generic child scope below.
     expect(() => compile('g.V().map(__.select("a"))', {})).toThrow('not supported by generic scalar lowering');
@@ -335,10 +337,10 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
 
   test('map(__.<element body>) uses child scope + first-per-parent cardinality', () => {
     const p = read('g.V().map(__.out()).values("name")');
-    expect(p.shape).toEqual({ kind: 'value', perRowType: true });
+    expect(p.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     expect(p.sql).toContain('ROW_NUMBER() OVER (PARTITION BY');
     expect(p.sql).toContain('WHERE r.rn=1');
-    expect(read('g.V(1).map(__.outE("knows")).inV().values("name")').shape).toEqual({ kind: 'value', perRowType: true });
+    expect(read('g.V(1).map(__.outE("knows")).inV().values("name")').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
   });
 
   test('choose(pred, then, else) → gated-seed UNION ALL, arms fold from their seed', () => {
@@ -383,7 +385,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
 
   test('option-map choose → CASE over the choice scalar (value shape)', () => {
     const c = read('g.V().choose(__.values("age")).option(P.between(26,30), __.constant("x")).option(Pick.none, __.constant("z"))');
-    expect(c.shape).toEqual({ kind: 'value' });
+    expect(c.shape).toEqual({ kind: 'value', type: UNKNOWN });
     expect(c.sql).toContain('LEFT JOIN');
     expect(c.sql).toContain('m0_present');
     expect(c.sql).toContain('CASE WHEN (p.m0 >= ? and p.m0 < ?) THEN p.m1 ELSE p.m2 END AS v');

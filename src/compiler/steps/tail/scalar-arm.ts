@@ -22,6 +22,7 @@
 // module top level), so it is resolution-safe.
 
 import { isNested } from '../../../gremlin/frontend.ts';
+import { UNKNOWN, staticTypeOf, perRowColumnOf, perRowCols } from '../../../sql/kernel/render.ts';
 import { empty, list, paren, q, value, type Expression } from '../../../sql/kernel/q.ts';
 import { carriedCols, carriedWith, carryFrag, type ElementStream } from '../context/context.ts';
 import { carryOf, rebuildScalar, toScalarStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
@@ -223,7 +224,8 @@ function inlineScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): Sc
 function genericScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): ScalarGate | null {
   const { scope, frame, seed: pushed } = pushChildScope(s);
   const d = frame.domain.as('d');
-  const vt = s.vtype ? d.c[s.vtype] : undefined;
+  const sPerRow = perRowColumnOf(s.type);
+  const vt = sPerRow ? d.c[sPerRow] : undefined;
   const bools: Expression[] = [];
   for (const sp of specs) {
     if ('p' in sp) { bools.push(predicateSql(d.c.v, sp.p, vt ? { vtypeExpr: vt } : undefined)); continue; }
@@ -235,7 +237,7 @@ function genericScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): S
   // encounter now rides in carried (carryFrag), so it's NOT listed in the payload — the
   // transient pushed frame's ordinal is dropped; the parent's carried (incl. its encounter)
   // is restored verbatim from the domain.
-  const payloadCols = ['v', ...(s.result === 'number' ? ['vt'] : []), ...(s.vtype ? [s.vtype] : [])];
+  const payloadCols = ['v', ...(s.result === 'number' ? ['vt'] : []), ...perRowCols(s.type)];
   return {
     seed: (combine) => {
       const proj = payloadCols.map((col) => q`${d.c[col]} AS ${col}`);
@@ -392,7 +394,7 @@ function scalarArmShape(nested: any, params: Record<string, any>): BranchArmShap
  *  the throw is an internal-contradiction guard, never the defer path. */
 function compileScalarVariantArm(seed: ScalarStream, nested: any): VariantArm {
   const scalar = tryCompileScalarArm(seed, nested);
-  if (scalar) return { rel: scalar.rel, vk: 1, as: scalar.as };
+  if (scalar) return { rel: scalar.rel, vk: 1, as: staticTypeOf(scalar.type) };
   const listArm = tryCompileListChild(seed, nested);
   if (listArm) return { rel: listArm.rel, vk: 4, listOf: listArm.of };
   const el = tryScalarResourceElement(seed, nested);
@@ -476,7 +478,11 @@ export function tryScalarOptionalChild(s: ScalarStream, step: PStep): ScalarStre
   const hit = q`SELECT ${a.c.v} AS v${numeric ? q`, ${a.c.vt} AS vt` : empty}${carryFrag(s.carried, a)} FROM ${a}`;
   const miss = q`SELECT ${d.c.v} AS v${numeric ? q`, NULL AS vt` : empty}${carryFrag(s.carried, d)} FROM ${d} WHERE NOT EXISTS (SELECT 1 FROM ${am} WHERE ${am.c[ord]}=${d.c[ord]})`;
   const rel = s.q.cte(list([hit, miss], ' UNION ALL '), cols);
-  return toScalarStream(carryOf(s), rel, arm.as, { result: numeric ? 'number' : 'value' });
+  // The merged projection is (v[, vt]) + carried — no vtype column — and the miss arm's
+  // values come from the parent anyway, so a per-row arm type cannot survive: degrade to
+  // `unknown` (inferred at the wire) rather than claim a column the relation lacks.
+  const merged = arm.type.kind === 'perRow' ? UNKNOWN : arm.type;
+  return toScalarStream(carryOf(s), rel, undefined, { type: merged, result: numeric ? 'number' : 'value' });
 }
 
 /** optional(t) over a scalar with an ELEMENT/LIST arm → a VariantStream: the arm's rows where it
@@ -492,7 +498,7 @@ export function tryScalarVariantOptional(s: ScalarStream, step: PStep): VariantS
   const ord = frame.ordinal;
   const arm = compileScalarVariantArm(seed, arg.nested);
   const hasList = arm.vk === 4;
-  const meta = { ...variantArmsMeta([arm]), scalarAs: s.as };
+  const meta = { ...variantArmsMeta([arm]), scalarAs: staticTypeOf(s.type) };
   const d = frame.domain.as('d');
   const am = arm.rel.as('am');
   const listNull = hasList ? q`, NULL AS list` : empty;
@@ -540,7 +546,7 @@ export function tryScalarFilterByChildExistence(s: ScalarStream, step: PStep): S
   const cond = step.name === 'not' ? q`NOT (${combined})` : combined;
   // Restore the parent's exact scalar payload from the pushed domain (drop the pushed ordinal).
   // encounter rides in carried (carryFrag), so it is NOT listed in the payload.
-  const payloadCols = ['v', ...(s.result === 'number' ? ['vt'] : []), ...(s.vtype ? [s.vtype] : [])];
+  const payloadCols = ['v', ...(s.result === 'number' ? ['vt'] : []), ...perRowCols(s.type)];
   const proj = payloadCols.map((col) => q`${d.c[col]} AS ${col}`);
   const rel = s.q.cte(
     q`SELECT ${list(proj, ', ')}${carryFrag(s.carried, d)} FROM ${d} WHERE ${cond}`,

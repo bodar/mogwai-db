@@ -2,6 +2,7 @@
 // Runs compiled SQL against a seeded in-memory store, asserting RESULTS. Pure cut-
 // and-paste relocation; the SQL-string snapshots live at test/L2-sql/*.sql.test.ts.
 import { test, expect, describe } from 'bun:test';
+import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
@@ -163,12 +164,12 @@ describe('scalar-parent branch/map (Stage 1)', () => {
     expect(await vals("g.V(1).values('age').union(__.constant('x'),__.V()).count()")).toEqual(['7']);
     // homogeneous arms stay a scalar stream (the cascade only falls to variant when mixed).
     expect(read("g.V().values('age').union(__.constant('a'),__.constant('b'))").shape)
-      .toEqual({ kind: 'value', as: undefined, perRowType: undefined });
+      .toEqual({ kind: 'value', type: UNKNOWN });
   });
 
   test('optional() over a scalar: scalar arm restores the value on miss, element arm → variant', async () => {
     // scalar arm: a filter arm restores dropped inputs → identity; an always-productive arm wins.
-    expect(read("g.V().values('age').optional(__.is(gt(30)))").shape).toEqual({ kind: 'value', as: undefined, perRowType: undefined });
+    expect(read("g.V().values('age').optional(__.is(gt(30)))").shape).toEqual({ kind: 'value', type: UNKNOWN });
     expect(await vals("g.V().hasLabel('person').values('age').optional(__.is(gt(30)))")).toEqual(['27', '29', '32', '35']);
     expect(await vals("g.V().hasLabel('person').values('age').optional(__.constant('x'))")).toEqual(['x', 'x', 'x', 'x']);
     expect(await vals("g.V().hasLabel('person').values('age').optional(__.V().count())")).toEqual(['6', '6', '6', '6']);
@@ -187,7 +188,7 @@ describe('scalar-parent branch/map (Stage 1)', () => {
     expect(await vals("g.V().hasLabel('person').values('age').coalesce(__.is(gt(30)),__.V()).count()")).toEqual(['14']);
     // homogeneous arms stay scalar (the cascade only falls to variant when mixed).
     expect(read("g.V().values('age').coalesce(__.is(gt(30)),__.constant(0))").shape)
-      .toEqual({ kind: 'value', as: undefined, perRowType: undefined });
+      .toEqual({ kind: 'value', type: UNKNOWN });
   });
 
   test('mixed-shape choose over a scalar → a VariantStream (gate partitions then/else)', () => {
@@ -269,7 +270,7 @@ describe('scalar math (Stage 2)', () => {
   });
 
   test('math always yields a Double', () => {
-    expect(read("g.V().values('age').math('_ * 2')").shape).toEqual({ kind: 'value', as: 'double' });
+    expect(read("g.V().values('age').math('_ * 2')").shape).toEqual({ kind: 'value', type: STATIC('double') });
   });
 
   test('named variables resolve through by()-modulators over the value', async () => {

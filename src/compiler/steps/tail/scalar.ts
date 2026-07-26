@@ -6,7 +6,7 @@ import { aliasArmProjection, carryFrag, carryFragMint, carriedCols, carriedWith,
 import { carryOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, numericSpec } from './coerce.ts';
 import { normalizeTypeName } from '../../../gremlin/types.ts';
-import { perRowColumnOf, scalarType, type ValueType } from '../../../sql/kernel/render.ts';
+import { perRowColumnOf, perRowCols, scalarType, staticTypeOf, UNKNOWN, type ScalarType, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf } from '../../engine/deps.ts';
 
 /** If `step` is `is(typeOf(GType.X))` for a COLLECTION type, the canonical collection name
@@ -32,10 +32,11 @@ export function collectionTypeOf(step: PStep): 'list' | 'set' | 'map' | null {
  *  Set. Requires the per-row stored vtype column (values()/properties() of a stored prop);
  *  a computed scalar has no stored collection → null (the generic is() static-folds it). */
 export function scalarCollectionRetype(s: ScalarStream, kind: 'list' | 'set'): ListStream | null {
-  if (!s.vtype) return null;
+  const vtype = perRowColumnOf(s.type);
+  if (!vtype) return null;
   const p = s.rel.as('p');
   const rel = s.q.cte(
-    q`SELECT json(${p.c.v}) AS list${carryFrag(s.carried, p)} FROM ${p} WHERE ${p.c[s.vtype]} = ${value(kind)}`,
+    q`SELECT json(${p.c.v}) AS list${carryFrag(s.carried, p)} FROM ${p} WHERE ${p.c[vtype]} = ${value(kind)}`,
     ['list', ...carriedCols(s.carried)],
   );
   return toListStream(carryOf(s), rel, { kind: 'scalar', typed: true }, kind === 'set');
@@ -47,10 +48,11 @@ export function scalarCollectionRetype(s: ScalarStream, kind: 'list' | 'set'): L
  *  (mapstream-blob-model). Requires the per-row stored vtype column (values() of a stored prop);
  *  a computed scalar has no stored map → null (the generic is() static-folds it). */
 export function scalarMapRetype(s: ScalarStream): MapStream | null {
-  if (!s.vtype) return null;
+  const vtype = perRowColumnOf(s.type);
+  if (!vtype) return null;
   const p = s.rel.as('p');
   const rel = s.q.cte(
-    q`SELECT json(${p.c.v}) AS map${carryFrag(s.carried, p)} FROM ${p} WHERE ${p.c[s.vtype]} = ${value('map')}`,
+    q`SELECT json(${p.c.v}) AS map${carryFrag(s.carried, p)} FROM ${p} WHERE ${p.c[vtype]} = ${value('map')}`,
     ['map', ...carriedCols(s.carried)],
   );
   return toMapStream(carryOf(s), rel, { kind: 'scalar' }, { kind: 'scalar' });
@@ -89,10 +91,10 @@ const isLocal = (step: PStep): boolean =>
 // Payload = the value/type projection columns; emission order (encounter) is a CARRIED
 // column now, so it rides via carryFrag alongside every other carried column (never here).
 const payload = (s: ScalarStream, p: ReturnType<ScalarStream['rel']['as']>): Expression =>
-  q`${s.result === 'number' ? q`${p.c.v} AS v, ${p.c.vt} AS vt` : q`${p.c.v} AS v`}${s.vtype ? q`, ${p.c[s.vtype]} AS ${s.vtype}` : empty}`;
+  q`${s.result === 'number' ? q`${p.c.v} AS v, ${p.c.vt} AS vt` : q`${p.c.v} AS v`}${perRowColumnOf(s.type) ? q`, ${p.c[perRowColumnOf(s.type)!]} AS ${perRowColumnOf(s.type)!}` : empty}`;
 
 const cols = (s: ScalarStream): string[] =>
-  [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...(s.vtype ? [s.vtype] : []), ...carriedCols(s.carried)];
+  [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...perRowCols(s.type), ...carriedCols(s.carried)];
 
 function rowPreserving(s: ScalarStream, suffix: Expression, orderByEnc = false): ScalarStream {
   const p = s.rel.as('p');
@@ -131,7 +133,7 @@ function scalarTransform(step: PStep, currentAs: ValueType | undefined, expr: Ex
 function fuseScalarSegment(s: ScalarStream, steps: readonly PStep[], from: number): { stream: ScalarStream; stop: number } {
   const p = s.rel.as('p');
   let expr: Expression = p.c.v;
-  let as = s.as;
+  let as = staticTypeOf(s.type);
   let transformed = false;
   const predicates: Expression[] = [];
   let i = from;
@@ -247,7 +249,8 @@ function partitionedOrder(s: ScalarStream, order: Expression): ScalarStream {
   // order SUPERSEDES the encounter column (a fresh ROW_NUMBER) in its declared carried slot
   // (carryFragMint), preserving each row's value + stored type. cols(s) = [v,(vt),(vtype),carried].
   const valuePayload = s.result === 'number' ? q`${p.c.v} AS v, ${p.c.vt} AS vt` : q`${p.c.v} AS v`;
-  const vtypeCol = s.vtype ? q`, ${p.c[s.vtype]} AS ${s.vtype}` : empty;
+  const sPerRow = perRowColumnOf(s.type);
+  const vtypeCol = sPerRow ? q`, ${p.c[sPerRow]} AS ${sPerRow}` : empty;
   const rel = s.q.cte(q`SELECT ${valuePayload}${vtypeCol}${carryFragMint(s.carried, p, enc, q`ROW_NUMBER() OVER (${over})`)} FROM ${p}`, cols(s));
   return rebuildScalar(s, rel);
 }
@@ -290,7 +293,7 @@ function appendScalar(s: ScalarStream, step: PStep): ScalarStream {
   const bulk = s.carried.bulk;
   const enc = s.carried.encounter;
   const benign = new Set([bulk, enc].filter(Boolean) as string[]);
-  if (s.result !== 'value' || s.as || carriedCols(s.carried).some((c) => !benign.has(c)))
+  if (s.result !== 'value' || s.type.kind === 'static' || carriedCols(s.carried).some((c) => !benign.has(c)))
     throw new Error('inject() after typed/reduced/carried scalar state not yet supported');
   const p = s.rel.as('p');
   const n = step.args.length;
@@ -391,7 +394,8 @@ function filterScalarByCond(s: ScalarStream, p: ReturnType<ScalarStream['rel']['
 export function lowerScalarFilter(s: ScalarStream, step: PStep): ScalarStream | null {
   const p = s.rel.as('p');
   const cur = p.c.v;
-  const vt = s.vtype ? p.c[s.vtype] : undefined; // per-row stored type → vtype-aware predicates
+  const vtPerRow = perRowColumnOf(s.type);
+  const vt = vtPerRow ? p.c[vtPerRow] : undefined; // per-row stored type → vtype-aware predicates
   const nested = step.args.filter(isNested);
   // where(P)/filter(P): a predicate directly on the value — no traversal child, always inline.
   if ((step.name === 'where' || step.name === 'filter') && !nested.length) {
@@ -494,7 +498,8 @@ export function lowerScalarSplit(s: ScalarStream, step: PStep): ListStream {
  *  in any negation (e.g. `NOT COALESCE((cond), 0)` for a choose else side). */
 export function gateScalar(s: ScalarStream, buildCond: (v: Expression, vt: Expression | undefined) => Expression): ScalarStream {
   const p = s.rel.as('p');
-  const vt = s.vtype ? p.c[s.vtype] : undefined;
+  const isPerRow = perRowColumnOf(s.type);
+  const vt = isPerRow ? p.c[isPerRow] : undefined;
   const rel = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)} FROM ${p} WHERE ${buildCond(p.c.v, vt)}`, cols(s));
   return rebuildScalar(s, rel);
 }
@@ -543,8 +548,13 @@ export function unionScalarStreams(base: Carry, arms: readonly ScalarStream[], g
     q`SELECT ${m.c.v} AS v${numeric ? q`, ${m.c.vt} AS vt` : empty}${carryFragMint(outCarried, m, 'encounter', q`ROW_NUMBER() OVER (${over})`)} FROM ${m}`,
     ['v', ...(numeric ? ['vt'] : []), ...carriedCols(outCarried)],
   );
-  const as = arms.every((a) => a.as === arms[0].as) ? arms[0].as : undefined;
-  return toScalarStream({ q: base.q, params: base.params, sideEffects: base.sideEffects, carried: outCarried }, rel, as, { result: numeric ? 'number' : 'value' });
+  // The merged relation projects only `v` (+ `vt`), so a per-row type column cannot cross
+  // the union — an arm carrying one degrades to `unknown` (inferred at the wire) rather than
+  // claiming a column that isn't there. A STATIC type survives only if every arm agrees.
+  const first = arms[0].type;
+  const merged: ScalarType = first.kind === 'static' && arms.every((a) => a.type.kind === 'static' && a.type.type === first.type)
+    ? first : UNKNOWN;
+  return toScalarStream({ q: base.q, params: base.params, sideEffects: base.sideEffects, carried: outCarried }, rel, undefined, { type: merged, result: numeric ? 'number' : 'value' });
 }
 
 /** sack over a scalar stream. The mutate form sack(Operator.x) folds the CURRENT VALUE
@@ -634,7 +644,7 @@ export function lowerScalarRows(
     // is(typeOf(LIST)) over a stored-typed stream is a RETYPE (scalar→list), not a value
     // filter — stop so compileFromScalar builds the ListStream. Without a per-row stored
     // vtype (a computed scalar) it stays a fused is() that static-folds to empty.
-    if (step.name === 'is' && stream.vtype && collectionTypeOf(step) !== null) break;
+    if (step.name === 'is' && perRowColumnOf(stream.type) && collectionTypeOf(step) !== null) break;
     if (SCALAR_TRANSFORMS.has(step.name) || step.name === 'is') {
       const fused = fuseScalarSegment(stream, steps, i);
       stream = fused.stream;
@@ -661,7 +671,8 @@ export function lowerScalarRows(
       // Sort by the vtype-aware compare key when the stream carries a per-row vtype, so a
       // TEXT-stored big long / bigdecimal / duration value sorts NUMERICALLY not lexically
       // (values() of a typed prop). No vtype column → the value is already a native scalar.
-      const sortVal: Expression = stream.vtype ? compareKey(q`p.v`, raw(`p.${stream.vtype}`)) : q`p.v`;
+      const streamPerRow = perRowColumnOf(stream.type);
+      const sortVal: Expression = streamPerRow ? compareKey(q`p.v`, raw(`p.${streamPerRow}`)) : q`p.v`;
       let order: Expression = q`${sortVal} ASC`;
       const bys = step.bys ?? [];
       if (bys.length > 1) throw new Error('multiple order().by() modulators on a scalar stream not yet supported');

@@ -7,6 +7,7 @@
 // result shape. The execution-semantics half of the old compiler.test.ts lives at
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
+import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
@@ -87,7 +88,7 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
 
   test('is(P) folds a predicate onto the projected scalar', () => {
     const gt = read('g.V().values("age").is(P.gt(30))');
-    expect(gt.shape).toEqual({ kind: 'value', perRowType: true });
+    expect(gt.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // is(gt) folds through the vtype-aware compareKey (numeric-correct for the exact tail)
     expect(gt.sql).toContain("ELSE p.v END) > ?"); // the values() JOIN handles existence; is() adds a relational filter
     expect(gt.binds).toContain(30);

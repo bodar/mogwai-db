@@ -5,7 +5,7 @@ import { gremlinTypeOf, isCollectionType, storedScalar, flatType, mapEntryType, 
 import { stepChain, isNested, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
-import { readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../../../sql/kernel/render.ts';
+import { staticTypeOf, readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../../../sql/kernel/render.ts';
 import type { Engine } from '../../engine/deps.ts';
 import { compileInject } from './inject.ts';
 import { indexProperty, deleteFtsFor, deleteFtsForOwners } from '../../../services/fts-index.ts';
@@ -75,7 +75,10 @@ function nestedScalar(engine: Engine, store: GraphStore, nestedNode: any, params
     throw new Error(`property() traversal value producing a ${shape.kind} not yet supported`);
   if (!rows.length || rows[0].v == null) return { has: false, value: undefined, vtype: null };
   if (shape.kind === 'count') return { has: true, value: Number(rows[0].v), vtype: 'long' };
-  const vt = shape.kind === 'value' && !shape.perRowType && shape.as ? VT_TO_CANON[shape.as] ?? null : null;
+  // Only a STATIC type can be written as the literal's vtype; a per-row/unknown type is
+  // not a compile-time fact, so the write channel records nothing and storage class rules.
+  const staticAs = shape.kind === 'value' ? staticTypeOf(shape.type) : undefined;
+  const vt = staticAs ? VT_TO_CANON[staticAs] ?? null : null;
   return { has: true, value: rows[0].v, vtype: vt };
 }
 
