@@ -94,6 +94,50 @@ export type PathPos =
 // as text precisely so its precision survives (see storedScalar / do-sqlite-bind-precision).
 export type ValueType = 'bool' | 'byte' | 'short' | 'int' | 'long' | 'bigint' | 'float' | 'double' | 'date' | 'string' | 'uuid' | 'bigdecimal' | 'char' | 'duration';
 
+// ---------- the ONE scalar type channel ----------
+//
+// Every scalar value has a type; the only question is WHERE that type is written down.
+// Historically that was two optional fields (`as` — one compile-time tag for the whole
+// stream — plus `vtype` — the NAME of a per-row column) and an implicit third case
+// ("neither is set, infer from the JS value at the wire"). Two optionals plus an implicit
+// third means a step author must remember three things, so they remember one: every bug in
+// this area is a barrier propagating `as` and dropping `vtype`. One total union with three
+// cases the compiler FORCES you to handle removes the class.
+//
+// `unknown` is reachable ONLY from the JS-client seam (a JS client cannot distinguish a UUID
+// from a string, so a bound param genuinely has no type). It is an UNKNOWN type, not an
+// ABSENT one — naming it keeps the model total. If the client is ever fixed, the variant
+// becomes unreachable and deletable.
+//
+// This is a COMPILE-TIME property; the physical encoding stays a per-site choice (bare when
+// the SQLite storage class already determines it, a sibling column for row-preserving ops,
+// a {t,v} envelope only inside a JSON blob). Conflating the two is what caused the dead end
+// recorded in docs/2026-07-25-type-channel-unification.md.
+export type ScalarType =
+  | { kind: 'static'; type: ValueType }   // a cast, a typed literal, count()→long
+  | { kind: 'perRow'; column: string }    // a stored-vtype column — the only heterogeneous-safe case
+  | { kind: 'unknown' };                  // the JS-client seam; infer from the JS value at framing
+
+export const STATIC = (type: ValueType): ScalarType => ({ kind: 'static', type });
+export const PER_ROW = (column: string): ScalarType => ({ kind: 'perRow', column });
+export const UNKNOWN: ScalarType = { kind: 'unknown' };
+
+/** The bridge from the old two-channel spelling. A per-row column is the TRUTH channel
+ *  (what the write channel actually recorded), so it beats a compile-time tag; a bare `as`
+ *  is a static tag; neither → genuinely unknown. */
+export const scalarType = (as?: ValueType, vtypeCol?: string): ScalarType =>
+  vtypeCol ? PER_ROW(vtypeCol) : as ? STATIC(as) : UNKNOWN;
+
+/** The static tag, when there is one — for the consumers that can only act on a
+ *  compile-time type (a uniform item tag, a serializer choice). A perRow/unknown type
+ *  yields undefined, which those consumers already read as "infer at the wire". */
+export const staticTypeOf = (t: ScalarType | undefined): ValueType | undefined =>
+  t?.kind === 'static' ? t.type : undefined;
+
+/** The per-row column name, when the type rides in one. */
+export const perRowColumnOf = (t: ScalarType | undefined): string | undefined =>
+  t?.kind === 'perRow' ? t.column : undefined;
+
 export type Shape =
   | { kind: 'vertex' }
   | { kind: 'edge' }

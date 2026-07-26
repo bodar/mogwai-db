@@ -16,7 +16,7 @@
 import { type Expression, type Query, type Relation } from '../../../sql/kernel/q.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { type Elem } from '../../plan/plan.ts';
-import { type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type Shape, type ValueType } from '../../../sql/kernel/render.ts';
+import { perRowColumnOf, scalarType, staticTypeOf, type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from '../../../sql/kernel/render.ts';
 import { carriedCols, type Carry, type ElementStream } from './context.ts';
 
 /** What a list stream holds — i.e. the shape `unfold` produces from it. `elem` → bare
@@ -26,10 +26,15 @@ import { carriedCols, type Carry, type ElementStream } from './context.ts';
 export type { ListOf } from '../../../sql/kernel/render.ts';
 
 /** A stream of scalars in a one-column relation `v` (values/id/label/inject/unfold-
- *  of-scalars). `as` is the compile-time GraphBinary type tag (render.ts ValueType). */
+ *  of-scalars). `type` is the ONE type channel (render.ts ScalarType): a static
+ *  compile-time tag, a per-row stored-vtype column, or genuinely unknown. `as`/`vtype`
+ *  are DERIVED accessors over it, kept only so the existing consumers still read; new
+ *  code should read `type` and handle all three cases. */
 export interface ScalarStream extends Carry {
   readonly kind: 'scalar';
   readonly rel: Relation;
+  readonly type: ScalarType;
+  /** @deprecated derived from `type` — the static tag, or undefined for perRow/unknown. */
   readonly as?: ValueType;
   /** Root framing semantics carried by the reducer, rather than reconstructed from
    * where the stream happens to become terminal. */
@@ -42,11 +47,8 @@ export interface ScalarStream extends Carry {
    * distinguish TinkerPop's "Incoming traverser … can't be null" from its "encountered a
    * scalar" message. Neutral fact set at the inject seed; only the set-step handler reads it. */
   readonly literalNull?: boolean;
-  /** Optional physical per-row stored-type column (its name, conventionally 'vtype')
-   * carrying the canonical Gremlin type of each value (from values()/properties() reading
-   * vertex_properties/edge_properties.vtype). typeOf tests it per row; row-preserving ops
-   * carry it; transforms/reducers that change the type drop it. Distinct from `as` (a
-   * single compile-time framing tag) and from the reducer `vt` (a storage-class string). */
+  /** @deprecated derived from `type` — the per-row stored-type column name, when the type
+   * rides in one. Distinct from the reducer `vt` (a storage-class string, not a Gremlin type). */
   readonly vtype?: string;
 }
 
@@ -359,11 +361,36 @@ export const toResultStream = (q: Query, tail: Expression, shape: Shape): Result
 export interface ScalarOpts {
   readonly result?: ScalarStream['result'];
   readonly productiveNull?: boolean;
+  /** The ONE type channel. When set it wins outright over the legacy `as`/`vtype` pair. */
+  readonly type?: ScalarType;
+  /** @deprecated the old per-row spelling — pass `type: PER_ROW(col)` instead. */
   readonly vtype?: string;
   readonly literalNull?: boolean;
 }
-export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, opts: ScalarOpts = {}): ScalarStream =>
-  assertStreamColumns({ ...c, kind: 'scalar', rel, as, result: opts.result ?? 'value', productiveNull: opts.productiveNull, vtype: opts.vtype, literalNull: opts.literalNull });
+/** Build a scalar stream. The type may be given as the ONE channel (`opts.type`) or, for
+ *  the not-yet-migrated callers, in the old two-field spelling (`as` + `opts.vtype`) — both
+ *  fold to a single `ScalarType`, and `as`/`vtype` are then DERIVED from it so the two can
+ *  never disagree. Once every caller passes `opts.type`, the `as` parameter and
+ *  `opts.vtype` go away and the accessors with them. */
+export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, opts: ScalarOpts = {}): ScalarStream => {
+  const type = opts.type ?? scalarType(as, opts.vtype);
+  return assertStreamColumns({
+    ...c, kind: 'scalar', rel, type,
+    as: staticTypeOf(type), vtype: perRowColumnOf(type),
+    result: opts.result ?? 'value', productiveNull: opts.productiveNull, literalNull: opts.literalNull,
+  });
+};
+/** A ROW-PRESERVING rebuild of a scalar stream: same traversers, same types, new relation
+ *  (a filter, an order, a slice, a carried-column reshuffle). This is the idiom that used to
+ *  be spelled out longhand at ~15 sites as `toScalarStream(carryOf(s), rel, s.as, {result:
+ *  s.result, productiveNull: s.productiveNull, vtype: s.vtype})` — and every barrier bug in
+ *  this area is one of those sites forgetting a field. Naming it means the preserving case
+ *  cannot drop a channel, and a site that DOESN'T preserve has to say so explicitly. */
+export const rebuildScalar = (s: ScalarStream, rel: Relation, over: Partial<ScalarOpts> = {}): ScalarStream =>
+  toScalarStream(carryOf(s), rel, undefined, {
+    type: s.type, result: s.result, productiveNull: s.productiveNull, literalNull: s.literalNull, ...over,
+  });
+
 export const toVariantStream = (c: Carry, rel: Relation, arms: VariantArms, result: VariantStream['result'] = 'rows'): VariantStream =>
   assertStreamColumns({ ...c, kind: 'variant', rel, scalarAs: arms.scalarAs, node: arms.node, edge: arms.edge, listOf: arms.listOf, result });
 export const toListStream = (c: Carry, rel: Relation, of: ListOf, set?: boolean): ListStream =>
