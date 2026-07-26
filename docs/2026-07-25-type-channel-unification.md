@@ -1,8 +1,10 @@
 # One type channel — collapsing `as` + `vtype` into a single scalar type
 
-**Status: designed, partly landed (2026-07-25).** Three fixes landed standalone (below); the
-unification itself is scoped and NOT started. Read the "dead end" section before writing code —
-the obvious fix was implemented and reverted, and the reason is structural.
+**Status: LANDED 2026-07-26.** The unification is complete — `ScalarType` is the only spelling,
+the derived accessors are deleted, and all 7 `test.todo`s are green (838 pass / 0 fail, L3 1364).
+Commits `78e2508`, `bc212ca`, `6997533`, `715ba07`. The design below stands as written; the
+"dead end" section is still the reason the obvious fix does not work, and the resolution is
+recorded at the end.
 
 ## The question that framed it
 
@@ -132,3 +134,34 @@ stopped rather than pushed through.
 
 Expect ~8–14 L3 scenarios from step 4 (the `test.todo`s in `test/typed-collections-e2e.test.ts`
 are the specification), plus the whole "a new barrier forgot a channel" class going away.
+
+
+## How the dead end was resolved (2026-07-26)
+
+The blocker was that a uniform per-list encoding needs a RUNTIME decision. Three pieces:
+
+1. **`barrier.ts foldMember()`** — the one place a scalar's type channel becomes a list's member
+   encoding, shared by every fold barrier (global / scoped / aggregate). A `perRow` type wraps
+   members as `{t,v}` **iff SOME member's type is lossy under its storage class**, asked once per
+   relation (a second alias + `EXISTS`, not a window — a window cannot nest inside
+   `json_group_array`). One verdict per relation is what keeps the encoding uniform.
+
+2. **The member seam** (`list.ts` `memberValue` / `memberNode`) — every transform reads the
+   payload for compare/filter and writes the whole member for rebuild, so a typed list flows
+   through the same code as a bare one. `assertUntypedList` is gone. Members are discriminated
+   with json_each's own `type` column — NOT `json_type()` on the value, which errors, because
+   json_each has already extracted it and a bare string is no longer valid JSON text.
+
+3. **A bare fallback in the readers** — `frameTypedNode` treats a non-object as a bare member;
+   the SQL readers use the same per-member CASE.
+
+**The correction to the "layering rule" above.** The doc says the lossless set is what
+`inferVtypeSql` recovers: `string`, `double`, `int`, `long`. That is the wrong bar. The right one
+is what the READER infers back identically, and `long` fails it — SQL distinguishes int from long
+by the int32 range, but the framer's JS inference does not, so a bare long > 2^53 comes back INT.
+The lossless set is therefore `('string', 'double', 'int')`.
+
+**A merge that cannot carry a per-row type must degrade explicitly.** The union/optional arm
+merges project `(v[,vt])` + carried, with no vtype column, so a `perRow` arm type becomes
+`unknown` rather than a claim on a column the relation lacks. `assertStreamColumns` caught this
+during the migration — the guard earned its keep.
