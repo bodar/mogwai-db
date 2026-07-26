@@ -7,6 +7,7 @@ import { CREW_SEED } from './fixtures/seed-crew.ts';
 import { MAX_FEDERATION_DEPTH, guardFederationDepth } from '../src/services/params/federation-depth.ts';
 import { federateService } from '../src/services/catalog/federate.ts';
 import { INJECT_VALUES_KEY } from '../src/compiler/steps/injection.ts';
+import { decode } from './support/decode.ts';
 
 // End-to-end federation on the REAL stack: two graphs owned by one BunGraphManager, one
 // federating into the other via mogwai.graph.federate — the real service, real env, real depth
@@ -14,7 +15,7 @@ import { INJECT_VALUES_KEY } from '../src/compiler/steps/injection.ts';
 // manager is the in-process mirror (sibling = another graph the same manager resolves by id).
 
 const mgr = new BunGraphManager(undefined, extendedRegistry);
-const dec = (f: { buf: Buffer }) => ioc.anySerializer.deserialize(f.buf, true).v;
+const dec = (f: { buf: Buffer }) => decode(f.buf);
 const names = (vs: any[]) => vs.map((v) => v.properties?.find((p: any) => p.label === 'name')?.value).sort();
 
 beforeAll(async () => {
@@ -22,28 +23,28 @@ beforeAll(async () => {
   for (const g of CREW_SEED) await mgr.executor('crew').framedAsync(g, {});     // the sibling graph
 });
 
-const runNames = async (g: string) => names((await mgr.executor('home').framedAsync(g, {})).map(dec));
+const runNames = async (g: string) => names(await Promise.all((await mgr.executor('home').framedAsync(g, {})).map(dec)));
 
 describe('mogwai.graph.federate — source form, real stack', () => {
   test('g.call(federate) runs a sub-traversal on the sibling and returns its vertices detached', async () => {
     // crew graph vertices, fetched from `home` via federation.
     const fed = await runNames('g.call("mogwai.graph.federate").with("graph", "crew").with("traversal", __.V())');
     const direct = await runNames('g.V()'); // crew, queried directly, for the expected set
-    const directCrew = names((await mgr.executor('crew').framedAsync('g.V()', {})).map(dec));
+    const directCrew = names(await Promise.all((await mgr.executor('crew').framedAsync('g.V()', {})).map(dec)));
     expect(fed).toEqual(directCrew);
     expect(fed).not.toEqual(direct); // it really came from crew, not home
   });
 
   test('a nested __.V().has(...) sub-traversal is pushed down and filtered on the sibling', async () => {
     const fed = await runNames('g.call("mogwai.graph.federate").with("graph", "crew").with("traversal", __.V().hasLabel("person"))');
-    const expected = names((await mgr.executor('crew').framedAsync('g.V().hasLabel("person")', {})).map(dec));
+    const expected = names(await Promise.all((await mgr.executor('crew').framedAsync('g.V().hasLabel("person")', {})).map(dec)));
     expect(fed).toEqual(expected);
     expect(fed.length).toBeGreaterThan(0);
   });
 
   test('a read tail runs LOCALLY over the detached results (values over landed props)', async () => {
-    const vals = (await mgr.executor('home').framedAsync('g.call("mogwai.graph.federate").with("graph", "crew").with("traversal", __.V().hasLabel("person")).values("name")', {})).map(dec);
-    const expected = names((await mgr.executor('crew').framedAsync('g.V().hasLabel("person")', {})).map(dec));
+    const vals = await Promise.all((await mgr.executor('home').framedAsync('g.call("mogwai.graph.federate").with("graph", "crew").with("traversal", __.V().hasLabel("person")).values("name")', {})).map(dec));
+    const expected = names(await Promise.all((await mgr.executor('crew').framedAsync('g.V().hasLabel("person")', {})).map(dec)));
     expect(vals.sort()).toEqual(expected);
   });
 
@@ -67,7 +68,7 @@ describe('mogwai.graph.federate — MID-TRAVERSAL per-parent value injection (Ph
   test('a parent that matches nothing on the sibling contributes no traverser (flatMap)', async () => {
     // vadas/josh/peter have no crew namesake → they drop; only marko survives. (Covered by the
     // count above, asserted explicitly here: exactly one result, not four.)
-    const res = (await mgr.executor('home').framedAsync(mid('__.values("name")'), {})).map(dec);
+    const res = await Promise.all((await mgr.executor('home').framedAsync(mid('__.values("name")'), {})).map(dec));
     expect(res.length).toBe(1);
   });
 
@@ -99,7 +100,7 @@ describe('mogwai.graph.federate — MID-TRAVERSAL per-parent value injection (Ph
   test('id() injection matches on the sibling element id', async () => {
     // No shared external ids across the two toy graphs → empty, but must not error (exercises the
     // id() injection kind + its rejoin JOIN on fid).
-    const res = (await mgr.executor('home').framedAsync(mid('__.id()'), {})).map(dec);
+    const res = await Promise.all((await mgr.executor('home').framedAsync(mid('__.id()'), {})).map(dec));
     expect(Array.isArray(res)).toBe(true);
   });
 

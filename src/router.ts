@@ -51,7 +51,7 @@ const verboseLogger: QueryLogger = (e) =>
 async function runQuery(mgr: GraphManager, pathId: string | null, req: Request, log: QueryLogger): Promise<Response> {
   try {
     const raw = Buffer.from(await req.arrayBuffer());
-    const { gremlin, params, paramTypes, g, batchSize, bulked } = parseRequest(raw);
+    const { gremlin, params, paramTypes, g, batchSize, bulked } = await parseRequest(raw);
     const id = pathId ?? g ?? 'g';
     const framed = await mgr.executor(id).framedAsync(gremlin, params, paramTypes);
     log({ id, gremlin, ok: true, results: framed.length });

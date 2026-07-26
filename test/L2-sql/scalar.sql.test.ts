@@ -18,6 +18,7 @@ import { assertStreamColumns, toGroupStream, toPathStream, toPropertyStream, toR
 import { popChildScope, pushChildScope, reuseCurrentFrame } from '../../src/compiler/steps/tail/child.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
 import { readdirSync, readFileSync } from 'node:fs';
+import { decode, decodeAll } from '../support/decode.ts';
 
 const read = (q: string, options?: CompileOptions) => {
   const p = compile(q, {}, options);
@@ -84,7 +85,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(() => compile('g.V().range(2,1)', {})).toThrow('Not a legal range: [2, 1]');
   });
 
-  test('P3b: uuid/list framing + is(typeOf(LIST)) retypes scalar→ListStream', () => {
+  test('P3b: uuid/list framing + is(typeOf(LIST)) retypes scalar→ListStream', async () => {
     // A stored TEXT value frames by its true vtype: uuid via UuidSerializer (storage-
     // ambiguous with string), so values('uuid') carries perRowType framing.
     expect(read('g.V().values("uuid")').shape).toEqual({ kind: 'value', perRowType: true });
@@ -106,14 +107,14 @@ describe('scalar-parent / projection SQL', () => {
     // round-trips through UuidSerializer.
     const store = new GraphStore(new BunSqlite(':memory:'));
     executeQuery(store, "g.addV('data').property('list',['a','b','c']).property('uuid', UUID('0263f28b-eff9-4c17-8e33-0b41c74b6d4c'))", {});
-    const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
-    expect(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST))", {}).map(dec)).toEqual([['a', 'b', 'c']]);
-    expect(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST)).unfold()", {}).map(dec)).toEqual(['a', 'b', 'c']);
-    expect(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST)).count(Scope.local)", {}).map(dec)).toEqual([3]);
-    expect(executeQuery(store, "g.V().values('uuid')", {}).map(dec)).toEqual(['0263f28b-eff9-4c17-8e33-0b41c74b6d4c']);
+    const dec = (b: Buffer) => decode(b);
+    expect(await decodeAll(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST))", {}))).toEqual([['a', 'b', 'c']]);
+    expect(await decodeAll(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST)).unfold()", {}))).toEqual(['a', 'b', 'c']);
+    expect(await decodeAll(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST)).count(Scope.local)", {}))).toEqual([3]);
+    expect(await decodeAll(executeQuery(store, "g.V().values('uuid')", {}))).toEqual(['0263f28b-eff9-4c17-8e33-0b41c74b6d4c']);
   });
 
-  test('global count() + is(typeOf(LIST)) identity on a fold() list value', () => {
+  test('global count() + is(typeOf(LIST)) identity on a fold() list value', async () => {
     // A fold() collapses the stream into ONE list traverser. A GLOBAL count() counts the list
     // TRAVERSERS (1), distinct from count(Scope.local) which is the list LENGTH — so it routes
     // through the shared relational barrier, not the per-list reducer.
@@ -123,12 +124,12 @@ describe('scalar-parent / projection SQL', () => {
     expect(read("g.V().values('name').fold().is(typeOf(GType.LIST)).count()").shape).toEqual({ kind: 'count' });
     const store = new GraphStore(new BunSqlite(':memory:'));
     for (const w of MODERN_SEED) executeQuery(store, w, {});
-    const dec = (b: Buffer) => ioc.anySerializer.deserialize(b, true).v;
+    const dec = (b: Buffer) => decode(b);
     // one list of 6 names → count 1 (a Long that decodes to a Number after the Int64 fix).
-    expect(executeQuery(store, "g.V().values('name').fold().count()", {}).map(dec)).toEqual([1]);
-    expect(executeQuery(store, "g.V().values('name').fold().is(typeOf(GType.LIST)).count()", {}).map(dec)).toEqual([1]);
+    expect(await decodeAll(executeQuery(store, "g.V().values('name').fold().count()", {}))).toEqual([1]);
+    expect(await decodeAll(executeQuery(store, "g.V().values('name').fold().is(typeOf(GType.LIST)).count()", {}))).toEqual([1]);
     // the identity assert leaves the list intact (6 names) when terminal.
-    expect((executeQuery(store, "g.V().values('name').fold().is(typeOf(GType.LIST))", {}).map(dec)[0] as any[]).sort())
+    expect(((await decode((executeQuery(store, "g.V().values('name').fold().is(typeOf(GType.LIST))", {}))[0])) as any[]).sort())
       .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
   });
 
@@ -199,11 +200,11 @@ describe('scalar-parent / projection SQL', () => {
     const doubles = executeQuery(seededStore(), 'g.V().values("age").asNumber(GType.DOUBLE).fold()', {})[0];
     // LIST header (type+flag) + bare length (4 bytes), then the first qualified item.
     expect(doubles[6]).toBe(ioc.DataType.DOUBLE);
-    expect(ioc.anySerializer.deserialize(doubles).v.sort((a: number, b: number) => a - b)).toEqual([27, 29, 32, 35]);
+    expect(((await decode(doubles)) as number[]).sort((a: number, b: number) => a - b)).toEqual([27, 29, 32, 35]);
 
     const ints = executeQuery(new GraphStore(new BunSqlite(':memory:')), 'g.inject("1",2,"3",4).asNumber().fold()', {})[0];
     expect(ints[6]).toBe(ioc.DataType.INT);
-    expect(ioc.anySerializer.deserialize(ints).v).toEqual([1, 2, 3, 4]);
+    expect(await decode(ints)).toEqual([1, 2, 3, 4]);
   });
 
   test('inject([...]) is a real list value (not flattened)', () => {

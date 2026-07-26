@@ -1,6 +1,6 @@
 // End-to-end exactness for the types that must NOT funnel through a JS number:
 // bigdecimal, char, duration, and long/bigint past 2^53. A value is written via a normal
-// traversal (parse → storedScalar → bind) and read back via values() over GraphBinary
+// traversal (parse → storedScalar → bind) and read back via await values() over GraphBinary
 // (frame → readResponse), then asserted EXACT. These would all lose precision under the
 // old parseInt/parseFloat + bigint→Number path (see do-sqlite-bind-precision).
 import { test, expect, describe } from 'bun:test';
@@ -19,7 +19,7 @@ async function values(gremlin: string, writes: string[]): Promise<any[]> {
   const reader = res.body!.getReader();
   const chunks: Buffer[] = [];
   for (;;) { const { done, value } = await reader.read(); if (done) break; chunks.push(Buffer.from(value)); }
-  const parsed = (ioc as any).graphBinaryReader.readResponse(Buffer.concat(chunks));
+  const parsed = await (ioc as any).graphBinaryReader.readResponse(Buffer.concat(chunks));
   expect(parsed.status.code).toBe(200);
   return parsed.result.data;
 }

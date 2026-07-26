@@ -49,7 +49,7 @@ describe('C — streamBuffers chunk pacing', () => {
     expect(big.chunks[0]).toEqual(Buffer.from([0x84, 0x00]));
 
     // The reassembled frame decodes as a well-formed 200 with all six vertices.
-    const parsed = ioc.graphBinaryReader.readResponse(small.buf);
+    const parsed = await ioc.graphBinaryReader.readResponse(small.buf);
     expect(parsed.status.code).toBe(200);
     expect(parsed.result.data.length).toBe(6);
     expect(parsed.result.data.every((v: any) => v.constructor.name === 'Vertex')).toBe(true);
@@ -66,13 +66,13 @@ describe('C — streamBuffers chunk pacing', () => {
     expect(bulked.buf.length).toBeGreaterThan(flat.buf.length);
 
     // The real client decodes the bulked frame as {v, bulk} pairs (Stage A: bulk ≡ 1).
-    const parsed = ioc.graphBinaryReader.readResponse(bulked.buf);
+    const parsed = await ioc.graphBinaryReader.readResponse(bulked.buf);
     expect(parsed.status.code).toBe(200);
     expect(parsed.result.bulked).toBe(true);
     expect(parsed.result.data.length).toBe(6);
     expect(parsed.result.data.every((d: any) => d.bulk === 1 && d.v.constructor.name === 'Vertex')).toBe(true);
     // Same six vertices as the flat frame (bulk=1 is value-identical).
-    const flatParsed = ioc.graphBinaryReader.readResponse(flat.buf);
+    const flatParsed = await ioc.graphBinaryReader.readResponse(flat.buf);
     expect(new Set(parsed.result.data.map((d: any) => String(d.v.id))))
       .toEqual(new Set(flatParsed.result.data.map((v: any) => String(v.id))));
   });
@@ -84,7 +84,7 @@ describe('C — streamBuffers chunk pacing', () => {
     const framed = await executeFramed(store, 'g.V().both().both()', {});
     const multiset = executeQuery(store, 'g.V().both().both()', {}).length; // the fully expanded count
     const { buf } = await drainChunks(streamBuffers(framed, 64, true));
-    const parsed = ioc.graphBinaryReader.readResponse(buf);
+    const parsed = await ioc.graphBinaryReader.readResponse(buf);
     expect(parsed.result.bulked).toBe(true);
     // Fewer rows on the wire than traversers, and at least one carries a real multiplicity > 1.
     expect(parsed.result.data.length).toBeLessThan(multiset);
@@ -103,7 +103,7 @@ describe('C — streamBuffers chunk pacing', () => {
     const buffers = await executeFramed(seededStore(), "g.V().hasLabel('nonesuch')", {});
     expect(buffers.length).toBe(0);
     const { chunks, buf } = await drainChunks(streamBuffers(buffers, 64));
-    const parsed = ioc.graphBinaryReader.readResponse(buf);
+    const parsed = await ioc.graphBinaryReader.readResponse(buf);
     expect(parsed.status.code).toBe(200);
     expect(parsed.result.data.length).toBe(0);
     // Header enqueued in start(), trailer in the terminal pull() — two chunks, no batch.
@@ -126,7 +126,7 @@ describe('B — executeQuery errors are buffered 500s (framing completes before 
   test('a compile failure throws → errorResponse is a well-formed 500, no values', async () => {
     expect(() => executeQuery(seededStore(), 'g.V().madeUpStep()', {})).toThrow();
     const buf = Buffer.from(await errorResponse('unknown step: madeUpStep').arrayBuffer());
-    const parsed = ioc.graphBinaryReader.readResponse(buf);
+    const parsed = await ioc.graphBinaryReader.readResponse(buf);
     expect(parsed.status.code).toBe(500);
     expect(parsed.result.data.length).toBe(0);
     expect(parsed.status.message).toBeTruthy();
@@ -149,25 +149,25 @@ describe('B — executeQuery errors are buffered 500s (framing completes before 
 describe('A — parseRequest', () => {
   const json = (body: Record<string, any>) => parseRequest(Buffer.from(JSON.stringify(body)));
 
-  test('absent / zero / negative / non-numeric batchSize falls back to the default (64)', () => {
-    expect(json({ gremlin: 'g.V()' }).batchSize).toBe(64);
-    for (const batchSize of [0, -5, 'nope']) expect(json({ gremlin: 'g.V()', batchSize }).batchSize).toBe(64);
+  test('absent / zero / negative / non-numeric batchSize falls back to the default (64)', async () => {
+    expect((await json({ gremlin: 'g.V()' })).batchSize).toBe(64);
+    for (const batchSize of [0, -5, 'nope']) expect((await json({ gremlin: 'g.V()', batchSize })).batchSize).toBe(64);
   });
 
-  test('honors batchSize / resultIterationBatchSize; batchSize wins', () => {
-    expect(json({ gremlin: 'g.V()', batchSize: 2 }).batchSize).toBe(2);
-    expect(json({ gremlin: 'g.V()', resultIterationBatchSize: 3 }).batchSize).toBe(3);
-    expect(json({ gremlin: 'g.V()', batchSize: 2, resultIterationBatchSize: 9 }).batchSize).toBe(2);
+  test('honors batchSize / resultIterationBatchSize; batchSize wins', async () => {
+    expect((await json({ gremlin: 'g.V()', batchSize: 2 })).batchSize).toBe(2);
+    expect((await json({ gremlin: 'g.V()', resultIterationBatchSize: 3 })).batchSize).toBe(3);
+    expect((await json({ gremlin: 'g.V()', batchSize: 2, resultIterationBatchSize: 9 })).batchSize).toBe(2);
   });
 
-  test('parses a GraphBinary request body (gremlin + g + resultIterationBatchSize)', () => {
+  test('parses a GraphBinary request body (gremlin + g + resultIterationBatchSize)', async () => {
     const fields = new Map<string, any>([['resultIterationBatchSize', 2], ['g', 'gmodern']]);
     const raw = Buffer.concat([
       Buffer.from([0x84]),
       ioc.mapSerializer.serialize(fields, false),
       ioc.stringSerializer.serialize('g.V()', false),
     ]);
-    const p = parseRequest(raw);
+    const p = await parseRequest(raw);
     expect(p.gremlin).toBe('g.V()');
     expect(p.batchSize).toBe(2);
     expect(p.g).toBe('gmodern');
