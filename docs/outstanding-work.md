@@ -324,14 +324,36 @@ All → [phased-roadmap](./2026-07-11-phased-roadmap-plan.md) unless noted.
   [wire-and-storage-facts](./2026-07-25-wire-and-storage-facts.md)
 - **Upstream `q`-kernel surface to lazyrecords**.
   → [q-kernel-sql-builder](./2026-07-12-q-kernel-sql-builder.md)
-- **Fork TinkerPop as our vendor submodule + upstream the harness fixes.** Agreed 2026-07-25.
-  Points `vendor/tinkerpop` at our own fork so test-harness defects can be fixed locally and
-  offered upstream without blocking on them. First payload: the dead-code `toNumeric` BigInteger
-  branch (see won't-do below). Also the intended home for the flaky hard-coded cucumber PORT that
-  intermittently fails CI, and for the **non-conformant-client UUID/ISO-date shim** (a JS client
-  cannot send a UUID's type, so sniff the obvious string shapes — **opt-in**, never default: a
-  string that merely looks like a uuid is not one, and silently retyping user data is worse than
-  not typing it). → [typed-merge-values](./archive/2026-07-17-typed-merge-values-plan.md)
+- **Fork TinkerPop as our vendor submodule + upstream the harness fixes.** Agreed 2026-07-25;
+  the submodule now tracks `origin/master` directly (2026-07-26) and the fork exists at
+  `danielbodart/tinkerpop` — what remains is landing the payloads. Four found so far, each
+  verified against source, in descending confidence:
+  1. **`toNumeric` cannot produce a BigInteger** — branch `fix-cucumber-bigint-numeric-parsing`
+     is written, self-verified and pushed; it captures the `d[…].<suffix>` type tag and
+     dispatches on it (mirroring gremlin-dotnet's `NumericParsers`), with `l` → Number inside the
+     safe-integer range and BigInt outside it, matching `LongSerializer.deserializeValue`.
+     **Not yet opened as a PR.** See the won't-do entry below for why our framing is already right.
+  2. **The generated cucumber `gremlin.js` references an undefined `uuid`** — the JS translator
+     documents "Assumes use of the `uuid` npm library" (`JavascriptTranslateVisitor.ts:29`) and
+     emits `uuid.v4()`/`uuid.parse(…)`, but `test/cucumber/gremlin.js` never imports it and
+     `uuid` is not a devDependency, so every UUID scenario dies with `uuid is not defined`.
+     Costs us `g_injectXUUIDXXX` (dropped from the ratchet). NOTE the file is GENERATED during
+     the Maven build (`build/generate.groovy` is not in-tree for JS), so the fix is an import in
+     the generator template + a devDependency, not an edit to the output.
+  3. **The cucumber port is hard-coded** (`test/helper.js:33` → `http://localhost:45940/gremlin`,
+     no env override; docker-compose pins 45940/45941 too). This is the intermittent CI conflict
+     — it collides with our own conformance host, which must own that port because the client
+     offers no way to configure it. Fix: honour an env var, default 45940.
+  4. **Bun's `undici` shim lacks `Agent.close()`/`destroy()`** — a BUN bug, not TinkerPop's
+     (`close` is non-optional on undici's `Dispatcher`, and the real Agent inherits it via
+     `DispatcherBase`). Worked around in `test/support/undici-shim.ts`; worth reporting to Bun.
+     Do NOT "fix" this by making the client call `close?.()` — that would silently skip real
+     connection-pool teardown wherever a dispatcher genuinely lacked it.
+
+  The fork is also the intended home for the **non-conformant-client UUID/ISO-date shim** (a JS
+  client cannot send a UUID's type, so sniff the obvious string shapes — **opt-in**, never
+  default: a string that merely looks like a uuid is not one, and silently retyping user data is
+  worse than not typing it). → [typed-merge-values](./archive/2026-07-17-typed-merge-values-plan.md)
 
 ---
 
