@@ -6,7 +6,7 @@ picking agent does the detailed validation and design. Landed work is excluded (
 over-reports `LANDED`; this keeps only what a code check confirms open). Live per-step capability:
 `feature-support-matrix.md`.
 
-**Refreshed** 2026-07-25 against L3 1275 unique / 2041 (`l3-state.json` shows 1277 — two names
+**Refreshed** 2026-07-26 against L3 1362 unique / 2297 (`l3-state.json` shows 1364 — two names
 recur legitimately, see `test/CLAUDE.md`). Path pointers assume the 2026-07-23 restructure
 (`src/compiler/steps/{context,prefix,tail,write}/`, `src/compiler/{ir,plan,engine}/`).
 
