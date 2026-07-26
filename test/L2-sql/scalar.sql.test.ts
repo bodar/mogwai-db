@@ -246,7 +246,9 @@ describe('scalar-parent / projection SQL', () => {
     expect(() => compile('g.V().fold().combine(null)', {})).toThrow("can't be null");
     // product → a list of pair-lists; conjoin → a scalar string.
     expect(read('g.V().values("age").fold().product([1]).unfold()').shape).toEqual({ kind: 'jsonbList' });
-    expect(read('g.V().values("name").order().fold().conjoin("_")').shape).toEqual({ kind: 'value' });
+    // conjoin joins the members into ONE string, whatever they were — a static 'string'
+    // type, not per-value inference at the wire.
+    expect(read('g.V().values("name").order().fold().conjoin("_")').shape).toEqual({ kind: 'value', as: 'string', perRowType: undefined });
     // all(P)/any(P) filter the list (IS TRUE / IS NOT TRUE null handling).
     expect(read('g.V().values("age").order().fold().all(P.gt(10))').sql).toContain('IS NOT TRUE');
     expect(read('g.V().values("age").order().fold().any(P.gt(10))').sql).toContain('IS TRUE');
