@@ -320,7 +320,9 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(reducedChild.sql).toContain('COALESCE(SUM(CASE WHEN s.encounter IS NOT NULL THEN s.bulk END), 0) AS v');
     expect(reducedChild.sql).toContain('LEFT JOIN');
     const foldedChild = read('g.V().map(__.out().values("name").fold()).count(Scope.local)');
-    expect(foldedChild.sql).toContain('json_group_array(s.v ORDER BY s.encounter) FILTER');
+    // The folded member now carries the per-list encoding decision (bare vs {t,v}); the
+    // ORDER BY / FILTER productivity contract is unchanged.
+    expect(foldedChild.sql).toContain('ORDER BY s.encounter) FILTER (WHERE s.encounter IS NOT NULL)');
     expect(foldedChild.sql).toContain("json('[]')");
     expect(read('g.V().map(__.out().fold()).unfold().values("name")').shape).toEqual({ kind: 'value', perRowType: true });
     expect(() => compile('g.V().map(__.constant(1).discard())', {})).toThrow();
