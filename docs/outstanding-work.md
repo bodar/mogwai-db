@@ -354,10 +354,52 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    - **Also still open:** a CORRELATED list operand (members varying per traverser), which the
      standalone sub-read cannot express by construction.
 
-5. **Map/non-element re-entry.** `valueMap().select()` into a retyped `MapStream`, and `as()`/
-   `select(label)` over group/map/path/property streams. **Medium.**
-   → [carried-schema-and-projection-reentry](./2026-07-14-carried-schema-and-projection-reentry-plan.md),
-   [deep-seam-migration-roadmap](./2026-07-18-deep-seam-migration-roadmap.md) #5
+5. **Non-element child bodies + map re-entry.** ✅ **The child-seam half is now generic (2026-07-27);
+   what remains is named below.** The dependency was that only 3 of 11 stream kinds could be a child
+   body, and four items pointed at it. Fixed by making the seam shape-agnostic rather than adding
+   shapes one at a time:
+   - **ONE cardinality rejoin for every shape.** `applyChildCardinality` derives the payload from
+     `streamPayloadCols` (split out of `streamColumns` — already the single authority per kind) and
+     re-homes the stream by spread (`{...child, ...carryOf(parent), rel}`), so metadata rides along.
+     The scalar-specific copy is retired. **Adding a shape now adds nothing here.**
+   - **ONE projection classifier.** `classifyProjectionChildRows` covers
+     `<element prefix>.<terminal projection>`, parameterized by which projection it accepts; map and
+     record are two predicates over it, in the pure classify leaf with their siblings.
+   - **MAP bodies** (`local`/`map`/`flatMap(__.valueMap(…))`) and **RECORD bodies**
+     (`project(k…)`/multi-label `select(k…)`) compile, verified elementwise against the ROOT form
+     through the real GraphBinary wire, with movement+filter prefixes. L3 1470 → 1471.
+   - Two builder-level fixes fell out: `lowerValueMap` refused a live origin and declared no carried
+     columns (so a map could never rejoin a parent), and it sorted map keys alphabetically —
+     destroying the property INSERTION order `bareValueMapProps` builds, invisible until a map could
+     be framed from a child. There is now ONE blob encoding: the framer treats a bare ARRAY as a
+     list of bare members, exactly as it already treats a bare scalar as an inferred value.
+
+   **Two premises that were FALSE — do not rebuild on them:** (a) "the element terminal needs a
+   relational form" — `local(__.out())` already worked, the element child has its own provider;
+   (b) "the remaining shapes are blocked on making the tail's terminal boundary relational" —
+   `project`/`group`/`path` already HAVE relational forms and were blocked only on having no child
+   PROVIDER. So no tail-boundary rewrite is needed for them.
+
+   **Still open, each precisely scoped:**
+   - **A GROUP child body** (`local(__.out().group().by(k))`). Design is settled — the wire frames
+     `group` as ONE Map from all rows (a barrier), so a scoped group must emit one map PER PARENT,
+     i.e. a `MapStream`, which the seam now supports. The work is threading an ORIGIN dimension
+     through `lowerGroup`/`GroupSource`, which has 6+ value modes (`valFold`, `valElement`,
+     `valNestedMap`, `valReducer`, composite keys) each needing its per-origin analogue. **NEEDS A
+     SCOPING DECISION: how many of those modes to take on vs fail closed.** *Medium.*
+   - **A PATH child body** (`local(__.path())`) — needs path tracking INSIDE a child scope, which is
+     path-history-substrate territory, not this seam's. *Low-Med.*
+   - **`valueMap(true)`/`elementMap` as a child body** — the ONE place the terminal boundary genuinely
+     bites, now isolated to ~13 corpus lines. Their token keys frame as T ENUMS mixed with string
+     property keys in one map (verified against `ValueMap.feature`: `t[id]`/`t[label]`), and the
+     `{t,v}` blob vocabulary cannot represent that. **NEEDS A TYPE-VOCABULARY DECISION** (a T-token
+     tag in `gremlin/types.ts`, vs a `MapOf` key-side variant, vs leaving these on the terminal
+     path). Excluded by the classifier meanwhile, so they fail closed. *Low-Med.*
+   - **`ChildShape` is deliberately NOT widened to 'map'.** It is `BranchArmShape` minus null, so
+     admitting 'map' would tell the branch triage a map ARM is mergeable when no merge covers a map
+     shape — converting a clean deferral into a wrong answer. A map ARM stays unclassifiable.
+   → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md),
+   [carried-schema-and-projection-reentry](./2026-07-14-carried-schema-and-projection-reentry-plan.md)
 
 5b. ~~**Re-enter the PREFIX after a value-tail barrier — `…order().by(k).out()`.**~~
    ✅ **LANDED 2026-07-25** (the prescribed retype boundary; the `WITH #5` coupling turned out not
