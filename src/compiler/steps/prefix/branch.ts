@@ -10,7 +10,7 @@ import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
 import { advance, aliasColsOf, elemRel, labelScope, prevRel, carryFrag, carryFragMint, carriedCols, carriedWith, mergeAliasMaps, partitionOver, type AliasEntry, type AliasMap, type Carried, type Carry, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type AliasShape } from '../context/alias.ts';
 import { pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarModulations, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
-import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, isElementChildStep, ROOT_SCOPE, type BranchArmShape, type ChildCtx } from '../tail/child-shape.ts';
+import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, isElementChildStep, optionMapMerge, optionMapNeedsPassthrough, readOptionMapArms, ROOT_SCOPE, type BranchArmShape, type ChildCtx } from '../tail/child-shape.ts';
 import { emptyElementLike } from '../tail/labelselect.ts';
 import { carryOf, toVariantStream, type ListStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
 import { finishListMerge, mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
@@ -1160,54 +1160,23 @@ export function sourceUnion(engine: Engine, step: PStep, params: Record<string, 
 // WHEN order), lower each option body from its gated seed, and route to the SAME arm triage +
 // merge family every other branch uses. No fifth merge, no second traversal implementation.
 
-/** One option of an option-map choose: its key (absent/`Pick.none` → the fallthrough arm), the
- *  parsed body, and its classified shape. A `__.discard()` body drops its rows, which is an
- *  OMITTED arm rather than a shape — the merge never sees it. */
-interface ChooseOption {
-  readonly key: any;
-  readonly nested: any;
-  readonly isNone: boolean;
-  readonly discard: boolean;
-}
-
-const isDiscardBody = (nested: any, params: Record<string, any>): boolean => {
-  const body = childSteps(nested, params);
-  return body.length === 1 && body[0].name === 'discard';
-};
-
-/** Read the option list, or null when a form outside the vocabulary appears (Pick.any/unproductive,
- *  a bodyless option, no keyed option at all) so the caller defers with its existing message. */
-function readChooseOptions(cs: PStep, params: Record<string, any>): ChooseOption[] | null {
-  const out: ChooseOption[] = [];
-  let sawNone = false;
-  for (const opt of cs.options ?? []) {
-    const bodyArg = opt.args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
-    if (!bodyArg) return null;
-    const keyArg = opt.args.find((x: any) => x !== bodyArg);
-    const pickArg = keyArg && typeof keyArg === 'object' && 'pick' in keyArg;
-    let isNone = false;
-    if (keyArg === undefined || pickArg) {
-      if ((pickArg ? keyArg.pick : 'none') !== 'none') return null; // Pick.any / Pick.unproductive
-      if (sawNone) continue; // first Pick.none wins
-      isNone = true;
-      sawNone = true;
-    }
-    out.push({ key: keyArg, nested: bodyArg.nested, isNone, discard: isDiscardBody(bodyArg.nested, params) });
-  }
-  return out.some((o) => !o.isNone) ? out : null;
-}
-
-/** The per-parent CHOICE value as a `ch` column on a relation carrying the parent's id + carried
- *  schema. A T token reads it off the element; a nested traversal goes through the SAME correlated
- *  modulation seam the CASE projector uses (so the two agree on what a choice can be). */
+/** The per-parent CHOICE as `ch` (its value) + `ch_at` (its PRESENCE) on a relation carrying the
+ *  parent's id + carried schema. Presence is what separates `Pick.unproductive` (the choice
+ *  traversal produced nothing) from `Pick.none` (it produced a value that matched no key) — the
+ *  modulation seam already computes it, so the distinction costs one extra column. A T token is
+ *  always productive (every element has a label/id), hence a constant 1.
+ *
+ *  A nested choice goes through the SAME correlated modulation seam the CASE projector uses, so
+ *  the two agree on what a choice can be. */
 function chooseChoiceDomain(st: ElementStream, a0: any): Relation | null {
-  const cols = ['id', 'ch', ...carriedCols(st.carried)];
+  const cols = ['id', 'ch', 'ch_at', ...carriedCols(st.carried)];
   if (a0 && typeof a0 === 'object' && 'nested' in a0) {
-    // Not `required`: an unproductive choice is routed to Pick.none, it does not drop the parent.
+    // Not `required`: an unproductive choice routes to Pick.unproductive/none, it never drops the
+    // parent — so the modulation is a LEFT join and `present` is the signal, not a filter.
     const mods = tryCompileScalarModulations(st, [{ nested: a0.nested, required: false }]);
     if (!mods) return null;
     const p = mods.rel.as('p');
-    return st.q.cte(q`SELECT ${p.c.id} AS id, ${p.c[mods.values[0].value]} AS ch${carryFrag(st.carried, p)} FROM ${p}`, cols);
+    return st.q.cte(q`SELECT ${p.c.id} AS id, ${p.c[mods.values[0].value]} AS ch, ${p.c[mods.values[0].present]} AS ch_at${carryFrag(st.carried, p)} FROM ${p}`, cols);
   }
   if (!(a0 && typeof a0 === 'object' && 'token' in a0)) return null;
   const n = elemRel(st);
@@ -1215,79 +1184,81 @@ function chooseChoiceDomain(st: ElementStream, a0: any): Relation | null {
   const ch = a0.token === 'label' ? labelNameSub(ctx.labelIdExpr) : a0.token === 'id' ? ctx.extIdExpr! : null;
   if (!ch) return null;
   const p = prevRel(st, 'p');
-  return st.q.cte(q`SELECT ${p.c.id} AS id, ${ch} AS ch${carryFrag(st.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`, cols);
+  return st.q.cte(q`SELECT ${p.c.id} AS id, ${ch} AS ch, 1 AS ch_at${carryFrag(st.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`, cols);
 }
 
 /** `choose(choiceFn).option(k, body)…` routed through the arm triage + merge family. Returns null
  *  to DEFER (an unsupported option form, a choice the modulation seam cannot compile, an
- *  unclassifiable body) so the caller keeps its existing clear message — never a throw that would
- *  break the CASE projector's fall-through. */
+ *  unclassifiable body) so the caller keeps its clear message — never a throw, which would break
+ *  the CASE projector's fall-through. */
 export function tryLowerOptionMapBranch(st: ElementStream, step: PStep): Stream | null {
   assertForkSafe('choose', st);
-  const opts = readChooseOptions(step, st.params);
-  if (!opts) return null;
+  const ctx = childCtx(st);
+  const opts = readOptionMapArms(step, st.params);
+  const merge = opts && optionMapMerge(step, ctx);
+  if (!opts || !merge) return null;
   const domain = chooseChoiceDomain(st, step.args[0]);
   if (!domain) return null;
   const d = domain.as('d');
-  const keyed = opts.filter((o) => !o.isNone);
+
+  // The gates. A keyed arm needs a PRODUCTIVE choice that matches its key and no earlier key
+  // (first match wins — the CASE projector's WHEN order, and a Map lookup's semantics; corpus keys
+  // are mutually exclusive, so this only pins an order that would otherwise be unspecified).
+  const productive = q`${d.c.ch_at} IS NOT NULL`;
+  const keyed = opts.filter((o) => o.pick === 'key');
   const matches = keyed.map((o) => predicateSql(d.c.ch, o.key));
-  // First match wins — the CASE projector's WHEN order, and a Map lookup's semantics. Corpus keys
-  // are mutually exclusive, so this only fixes an order that would otherwise be unspecified.
   const unmatched = matches.map(notCoalesce);
-  const testFor = (k: number) => k === 0 ? matches[0] : list([...unmatched.slice(0, k), paren(matches[k])], ' AND ');
+  const testFor = (k: number) =>
+    list([productive, ...unmatched.slice(0, k), paren(matches[k])], ' AND ');
+  // Pick.none: productive, but no key matched. Pick.unproductive: the choice produced nothing.
+  const noneTest = list([productive, ...unmatched], ' AND ');
+  const unproductiveTest = q`${d.c.ch_at} IS NULL`;
   const seedFor = (test: Expression): ElementStream =>
     advance(st, q`SELECT ${d.c.id} AS id${carryFrag(st.carried, d)} FROM ${d} WHERE ${test}`);
 
-  // The fallthrough arm: an explicit Pick.none body, or — with no Pick.none at all — the element
-  // ITSELF passing through (TinkerPop). A `discard()` body drops those rows, i.e. no arm.
-  const none = opts.find((o) => o.isNone);
-  const noneTest = unmatched.length ? list(unmatched, ' AND ') : q`1`;
-  const armBodies = keyed.filter((o) => !o.discard);
-  const shapes = armBodies.map((o) => classifyArmShape(o.nested, childCtx(st)));
-  if (shapes.some((s) => s === null)) return null;
-  const fallthroughShape: BranchArmShape | null = !none ? 'element'
-    : none.discard ? null
-    : classifyArmShape(none.nested, childCtx(st));
-  if (none && !none.discard && fallthroughShape === null) return null;
-  const allShapes = [...shapes, ...(fallthroughShape ? [fallthroughShape] : [])];
-  if (!allShapes.length) return null;
+  // Arm order = declaration order, then the implicit pass-through last. Seeds are built lazily in
+  // that order because an inline predicate re-emits its binds at each interpolation, and the
+  // merges tag `arm_idx` by position.
+  const plan: { nested: any; test: Expression }[] = [];
+  let k = 0;
+  for (const o of opts) {
+    const test = o.pick === 'key' ? testFor(k++) : o.pick === 'none' ? noneTest : unproductiveTest;
+    if (!o.discard) plan.push({ nested: o.nested, test }); // discard() drops its rows → no arm
+  }
+  // No Pick.none written → unmatched-but-productive inputs emit the ELEMENT itself (TinkerPop).
+  // No Pick.unproductive written → an unproductive choice falls to Pick.none, or, absent that too,
+  // to the same element pass-through; both are covered by widening the gate here.
+  const hasNone = opts.some((o) => o.pick === 'none');
+  const hasUnproductive = opts.some((o) => o.pick === 'unproductive');
+  const passthroughTest = hasNone ? unproductiveTest
+    : hasUnproductive ? noneTest
+    : q`${paren(noneTest)} OR ${paren(unproductiveTest)}`;
+  const needsPassthrough = optionMapNeedsPassthrough(step, opts, st.params); // shared with the triage
 
-  // Lower each arm from its gated seed, in arm order (the merges tag arm_idx by position).
-  const uniform = allShapes.every((s) => s === allShapes[0]) ? allShapes[0] : null;
-  const lower = (nested: any, seed: ElementStream): Stream | null =>
-    uniform === 'element' ? tryCompileElementTraversal(seed, nested)
-    : uniform === 'scalar' ? tryCompileScalarValueChild(seed, nested, 'all')
-    : uniform === 'list' ? tryCompileListChild(seed, nested)
-    : null;
-
-  if (uniform) {
+  if (merge !== 'variant') {
+    const lower = (nested: any, seed: ElementStream): Stream | null =>
+      merge === 'element' ? tryCompileElementTraversal(seed, nested)
+      : merge === 'scalar' ? tryCompileScalarValueChild(seed, nested, 'all')
+      : tryCompileListChild(seed, nested);
     const arms: Stream[] = [];
-    for (let k = 0; k < armBodies.length; k++) {
-      const got = lower(armBodies[k].nested, seedFor(testFor(k)));
+    for (const a of plan) {
+      const got = lower(a.nested, seedFor(a.test));
       if (!got) return null;
       arms.push(got);
     }
-    if (fallthroughShape) {
-      const seed = seedFor(noneTest);
-      const got = none && !none.discard ? lower(none.nested, seed) : seed;
-      if (!got) return null;
-      arms.push(got);
-    }
+    if (needsPassthrough) arms.push(seedFor(passthroughTest)); // element identity
     const base = carryOf(st);
-    if (uniform === 'element') return mergeElementArms(base, arms as ElementStream[]);
-    if (uniform === 'scalar') return unionScalarStreams(base, arms as ScalarStream[]);
+    if (merge === 'element') return mergeElementArms(base, arms as ElementStream[]);
+    if (merge === 'scalar') return unionScalarStreams(base, arms as ScalarStream[]);
     return finishListMerge(base, arms as ListStream[]);
   }
   // Genuinely mixed arms → the variant merge. Same wall as its siblings: a scalar/list arm holds
   // no path position, so a live path would make the merged rows ragged.
   if (st.carried.path) throw new Error('path() through a mixed-shape choose().option() not yet supported');
-  const vs: VariantArm[] = [];
-  for (let k = 0; k < armBodies.length; k++) vs.push(compileVariantArm(seedFor(testFor(k)), armBodies[k].nested));
-  if (fallthroughShape) {
-    const seed = seedFor(noneTest);
-    vs.push(none && !none.discard
-      ? compileVariantArm(seed, none.nested)
-      : { rel: seed.rel, vk: seed.elem === 'edge' ? 3 : 2 });
+  const vs: VariantArm[] = plan.map((a) => compileVariantArm(seedFor(a.test), a.nested));
+  if (needsPassthrough) {
+    const seed = seedFor(passthroughTest);
+    vs.push({ rel: seed.rel, vk: seed.elem === 'edge' ? 3 : 2 });
   }
   return mergeVariantArms(carryOf(st), vs, variantArmsMeta(vs));
 }

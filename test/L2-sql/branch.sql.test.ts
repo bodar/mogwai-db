@@ -399,12 +399,18 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
   });
 
   test('option-map choose → CASE over the choice scalar (value shape)', () => {
+    // The CASE serves an option map with exactly ONE fallthrough: a Pick.none and no
+    // Pick.unproductive. (See lowerChooseOptions for the known gap this leaves.)
     const c = read('g.V().choose(__.values("age")).option(P.between(26,30), __.constant("x")).option(Pick.none, __.constant("z"))');
     expect(c.shape).toEqual({ kind: 'value', type: UNKNOWN });
     expect(c.sql).toContain('LEFT JOIN');
     expect(c.sql).toContain('m0_present');
     expect(c.sql).toContain('CASE WHEN (p.m0 >= ? and p.m0 < ?) THEN p.m1 ELSE p.m2 END AS v');
     expect(c.binds).toEqual(['age', 'x', 'z', 26, 30, 26, 30]);
+    // A written Pick.unproductive is a SECOND fallthrough — keyed off the choice's PRESENCE, not
+    // its value — so it needs the merge's per-arm gating rather than an ELSE.
+    expect(read('g.V().choose(__.values("age")).option(P.between(26,30), __.constant("x")).option(Pick.none, __.constant("z")).option(Pick.unproductive, __.constant("u"))').sql)
+      .toContain('ch_at');
     // T.label choice, literal-equality keys
     expect(read('g.V().choose(T.label).option("person", __.constant("p")).option(Pick.none, __.constant("o"))').sql)
       .toContain('CASE WHEN (SELECT name FROM labels WHERE id=n.label) = ? THEN p.m0 ELSE p.m1 END');
@@ -433,13 +439,25 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // An ELEMENT option body is an arm, not a CASE branch → the element merge.
     expect(read('g.V().choose(T.label).option("person", __.out("knows")).option(Pick.none, __.identity()).values("name")').shape.kind)
       .toBe('value');
-    // A discard() body drops its rows, so it contributes no arm at all — leaving a homogeneous
-    // scalar merge rather than a mixed one.
+    // A discard() body drops its rows, contributing no arm of its own.
     expect(read('g.V().choose(__.out().count()).option(1, __.values("name")).option(Pick.none, __.discard())').shape.kind)
       .toBe('value');
+    // optionMapNeedsPassthrough is load-bearing, and precise about WHEN: an always-productive
+    // choice (count() is 0 on empty) can never reach the unproductive case, so no element arm is
+    // added and the merge stays scalar; a choice that CAN be unproductive with no Pick.none keeps
+    // the pass-through. Classify and emit share the predicate, so they cannot disagree.
+    expect(read('g.V().choose(__.out().count()).option(1, __.values("name")).option(2, __.values("name"))').shape.kind)
+      .toBe('variant');
+    // Pick.unproductive is the choice producing NOTHING, distinct from Pick.none (a value that
+    // matched no key) — the modulation seam's `present` column is what separates them.
+    expect(read('g.V().choose(__.values("age")).option(P.between(26,30), __.values("name")).option(Pick.none, __.values("name")).option(Pick.unproductive, __.label())').sql)
+      .toContain('ch_at');
     // ---- still fail-closed ----
-    // Pick.unproductive has its own semantics; both routes decline, so the dispatch throws.
-    expect(() => compile('g.V().choose(__.values("age")).option(P.gt(30), __.constant("x")).option(Pick.unproductive, __.constant("u")).option(Pick.none, __.constant("z"))', {}))
+    // Pick.any (only reachable via branch(), which is unimplemented) and a choice the correlated
+    // modulation seam cannot compile: both routes decline, so the dispatch throws.
+    expect(() => compile('g.V().choose(__.values("age")).option(P.gt(30), __.constant("x")).option(Pick.any, __.constant("u")).option(Pick.none, __.constant("z"))', {}))
+      .toThrow('choose().option() not yet supported by generic lowering');
+    expect(() => compile('g.V().choose(__.out()).option("x", __.constant("a")).option(Pick.none, __.constant("b"))', {}))
       .toThrow('choose().option() not yet supported by generic lowering');
   });
 });

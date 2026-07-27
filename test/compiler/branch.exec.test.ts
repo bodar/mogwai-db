@@ -179,9 +179,13 @@ test('branch fork/merge of DIVERGENT arm labels executes (union/coalesce/choose)
 
 test('option-map choose executes: choice scalar → matched option body', () => {
   const store = seededStore();
-  // age in [26,30) → "x" (marko 29, vadas 27), else "z"
+  // age in [26,30) → "x" (marko 29, vadas 27), else "z". NB the age-less lop/ripple also land in
+  // the ELSE here; TinkerPop would emit the ELEMENT for them (see lowerChooseOptions' KNOWN GAP).
   expect(run(store, 'g.V().choose(__.values("age")).option(P.between(26,30), __.constant("x")).option(Pick.none, __.constant("z"))').map((r) => r.v).sort())
     .toEqual(['x', 'x', 'z', 'z', 'z', 'z']);
+  // Write Pick.unproductive and the distinction is honoured: the two age-less vertices take it.
+  expect(run(store, 'g.V().choose(__.values("age")).option(P.between(26,30), __.constant("x")).option(Pick.none, __.constant("z")).option(Pick.unproductive, __.constant("u"))').map((r) => r.v).sort())
+    .toEqual(['u', 'u', 'x', 'x', 'z', 'z']);
   // T.label dispatch: person→P (4), software→S (2)
   expect(run(store, 'g.V().choose(T.label).option("person", __.constant("P")).option("software", __.constant("S")).option(Pick.none, __.constant("?"))').map((r) => r.v).sort())
     .toEqual(['P', 'P', 'P', 'P', 'S', 'S']);
@@ -484,6 +488,39 @@ test('a union() SOURCE carries as(), the path, emission order and the sack throu
   expect(run(store, 'g.withSack(1).union(__.V(1), __.V(2)).sack()').map((r: any) => r.v)).toEqual([1, 1]);
 });
 
+// ---------- option-map choose(): an arm merge, and its two implicit arms ----------
+//
+// The arms that have no body are the ones worth pinning as RESULTS: an input no written option
+// claims emits the ELEMENT itself, and Pick.unproductive/Pick.none split on whether the CHOICE
+// produced anything at all. Both are TinkerPop's, both are invisible in the SQL.
+test('option-map choose() routes every arm shape, incl. the implicit pass-through', () => {
+  const store = seededStore();
+  const vals = (rows: any[]) => rows.map((r: any) => r.vk === 2 || r.vk === 3 ? '(element)' : r.v ?? JSON.parse(r.list)).sort();
+  // No Pick.none: unmatched inputs pass through as the element (Choose.feature pins
+  // d[29].i, v[vadas], v[lop], josh, v[ripple], v[peter] for exactly this).
+  expect(vals(run(store, 'g.V().choose(__.out().count()).option(2, __.values("name")).option(3, __.values("age"))')))
+    .toEqual(['(element)', '(element)', '(element)', '(element)', 29, 'josh']);
+  // Pick.unproductive is the choice producing NOTHING — the age-less software vertices — which is
+  // a different question from Pick.none (a value that matched no key: josh 32, peter 35).
+  expect(vals(run(store, 'g.V().choose(__.values("age")).option(P.between(26,30), __.values("name")).option(Pick.none, __.values("name")).option(Pick.unproductive, __.label())')))
+    .toEqual(['josh', 'marko', 'peter', 'software', 'software', 'vadas']);
+  // Pick.unproductive claims the age-less vertices; without it they fall to the CASE's ELSE
+  // (the known gap — TinkerPop emits the element there).
+  expect(vals(run(store, 'g.V().choose(__.values("age")).option(P.between(26,30), __.values("name")).option(Pick.none, __.label()).option(Pick.unproductive, __.constant("none"))')))
+    .toEqual(['marko', 'none', 'none', 'person', 'person', 'vadas']);
+  // ELEMENT option bodies are arms, not CASE branches: the person arm walks out('knows') (only
+  // marko has any), and the software vertices fall to the identity arm.
+  expect(vals(run(store, 'g.V().choose(T.label).option("person", __.out("knows")).option(Pick.none, __.identity()).values("name")')))
+    .toEqual(['josh', 'lop', 'ripple', 'vadas']);
+  // A key that matches nothing sends every input to the identity arm (Choose.feature pins this).
+  expect(vals(run(store, 'g.V().choose(T.label).option("blah", __.out("knows")).option("bleep", __.out("created")).option(Pick.none, __.identity()).values("name")')))
+    .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+  // LIST bodies inside a local() child: the child classifier now admits the option-map form, and
+  // the body reaches the same list/variant merges through the ordinary generic lowering.
+  expect(run(store, 'g.V().hasLabel("person").local(__.choose(__.values("age")).option(P.between(26,30), __.values("name").fold()).option(Pick.none, __.values("name").fold()))')
+    .map((r: any) => JSON.parse(r.list))).toEqual([['marko'], ['vadas'], ['josh'], ['peter']]);
+});
+
 });
 
 test('choose().option() RESULTS across the arm shapes (the merge and the CASE agree)', () => {
@@ -503,7 +540,15 @@ test('choose().option() RESULTS across the arm shapes (the merge and the CASE ag
   // that as 0 reads as productive and leaks one null row per discarded traverser.
   expect(names('g.V().choose(__.label()).option("person",__.out("knows")).option(Pick.none,__.discard()).values("name")'))
     .toEqual(['josh', 'vadas']);
+  // …but discarding the Pick.none arm does NOT discard the UNPRODUCTIVE inputs. lop/ripple have no
+  // age, so no written option claims them and TinkerPop emits the element (`null` here — the v
+  // column of a variant element row). Choose.feature's
+  // g_V_chooseXageX_optionXbetweenX26_30X_nameX_optionXnone_discardX pins exactly
+  // `marko | vadas | v[lop] | v[ripple]`. Write option(Pick.unproductive, __.discard()) to drop
+  // them too — asserted below.
   expect(names('g.V().choose(__.values("age")).option(between(26,30),__.values("name")).option(Pick.none,__.discard())'))
+    .toEqual(['marko', 'vadas', null, null].sort());
+  expect(names('g.V().choose(__.values("age")).option(between(26,30),__.values("name")).option(Pick.none,__.discard()).option(Pick.unproductive,__.discard())'))
     .toEqual(['marko', 'vadas']);
   // marko has 3 out-edges → option(3) → age 29; josh has 2 → option(2) → name; the rest discard.
   expect(names('g.V().choose(__.out().count()).option(2,__.values("name")).option(3,__.values("age")).option(Pick.none,__.discard())'))

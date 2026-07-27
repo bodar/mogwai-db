@@ -412,22 +412,12 @@ function elementOptionMapScalarBranch(branch: PStep, ctx: ChildCtx): boolean {
     : choice && typeof choice === 'object' && 'token' in choice
       && (choice.token === 'label' || choice.token === 'id');
   if (!choiceIsScalar) return false;
-
-  let keyed = false;
-  let fallback = false;
-  for (const option of branch.options) {
-    const body = option.args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
-    if (!body || !classifyScalarChild(body.nested, ctx)) return false;
-    const key = option.args.find((x: any) => x !== body);
-    if (key === undefined || (key && typeof key === 'object' && 'pick' in key)) {
-      const pick = key && typeof key === 'object' && 'pick' in key ? key.pick : 'none';
-      if (pick !== 'none') return false;
-      fallback = true;
-    } else {
-      keyed = true;
-    }
-  }
-  return keyed && fallback;
+  // The shape question goes through the ONE option-map triage. Asking it per option body (which
+  // this used to do) misses the arms that have no body: an unclaimed input emits the ELEMENT, so
+  // a body whose options are all scalar can still merge to a VARIANT. The emitter follows the
+  // triage, so a private answer here is a lockstep break — and it was one: the classifier claimed
+  // 'scalar' and compileScalarChild's non-null assertion then tripped on a variant.
+  return optionMapMerge(branch, ctx) === 'scalar';
 }
 
 /** PURE. An element-parent scalar child whose value comes from a nested branch step — the
@@ -610,8 +600,14 @@ export function isBareBranchChildAllCard(nested: any, ctx: ChildCtx): boolean {
   const body = childSteps(nested, ctx.params);
   if (body.length !== 1) return false;
   const kind = asBranchKind(body[0].name);
-  if (!kind || (body[0] as any).options) return false;
-  const merge = classifyBranchArms(kind, body[0], ctx).merge;
+  if (!kind) return false;
+  // The option-map choose() reads its arms off `step.options`, so it has its own triage — same
+  // role, same vocabulary (optionMapMerge, below). It reaches the identical List/Variant merges,
+  // so a `local(__.choose(..).option(k, __.values('n').fold())..)` composes here like any other
+  // branch-of-lists; excluding it was the last thing keeping those bodies out.
+  const merge = (body[0] as any).options
+    ? optionMapMerge(body[0], ctx)
+    : classifyBranchArms(kind, body[0], ctx).merge;
   return merge === 'list' || merge === 'variant';
 }
 
@@ -798,3 +794,126 @@ export const byAt = (bys: readonly any[][] | undefined, i: number): any[] | unde
 /** PURE. Classify the i-th round-robin by() group — the common `classifyBy(byAt(...))`. */
 export const classifyByAt = (bys: readonly any[][] | undefined, i: number): ByClass =>
   classifyBy(byAt(bys, i));
+
+// ---------- the option-map choose() arm triage ----------
+//
+// `choose(fn).option(k, body)…` picks its arm by an N-way lookup on a choice scalar rather than by
+// position, so its arms hang off `step.options`, not `step.args` — which is exactly why
+// `branchValueArgs` returns null for it and `classifyBranchArms` cannot describe it. This is that
+// form's triage: the SAME role, different arm extraction, and read by BOTH the child-body
+// classifier (`isBareBranchChildAllCard`) and the emitter (`tryLowerOptionMapBranch`, branch.ts) so
+// classify and emit cannot drift. The second deliberate exception to "one arm triage", alongside
+// scalar-arm.ts's `scalarArmShape`; like it, it shares the `BranchArmShape`/`BranchMerge`
+// vocabulary so the parallel — and the difference — are visible.
+//
+// Two arms are IMPLICIT and have no body to classify, which is the whole reason this cannot be
+// folded into `branchValueArgs` (a `readonly any[]` of nested args):
+//   · no `Pick.none` at all → an unmatched input passes through as the ELEMENT itself (TinkerPop),
+//     so there is an element arm nobody wrote;
+//   · a `__.discard()` body drops its rows, so it contributes NO arm even though one is written.
+
+/** Which arm an `option()` key selects. `none` = the choice produced a value that matched no key;
+ *  `unproductive` = the choice traversal produced NOTHING (`__.values('age')` on a vertex with no
+ *  age). TinkerPop keeps those distinct, and the correlated choice already computes the signal
+ *  that separates them (its modulation `present` column). */
+export type OptionPick = 'key' | 'none' | 'unproductive';
+
+export interface ChooseOptionArm {
+  readonly key: any;            // undefined for the Pick arms
+  readonly nested: any;
+  readonly pick: OptionPick;
+  /** A `__.discard()` body: those rows are dropped, so this option contributes no merge arm. */
+  readonly discard: boolean;
+}
+
+const isDiscardBody = (nested: any, params: Record<string, any>): boolean => {
+  const body = childSteps(nested, params);
+  return body.length === 1 && body[0].name === 'discard';
+};
+
+/** PURE. Read an option-map choose's arms in declaration order, or null for a form outside the
+ *  vocabulary (`Pick.any`, a bodyless option, no keyed option at all). FIRST WINS per Pick token:
+ *  TinkerPop takes the first `Pick.none`/`Pick.unproductive` and ignores later duplicates, which is
+ *  what makes the corpus's trailing `option(Pick.none, __.fail())` unreachable rather than a wall. */
+export function readOptionMapArms(step: PStep, params: Record<string, any>): ChooseOptionArm[] | null {
+  const out: ChooseOptionArm[] = [];
+  const seen = new Set<OptionPick>();
+  for (const opt of step.options ?? []) {
+    const bodyArg = (opt.args ?? []).find((x: any) => x && typeof x === 'object' && 'nested' in x);
+    if (!bodyArg) return null;
+    const keyArg = (opt.args ?? []).find((x: any) => x !== bodyArg);
+    const token = keyArg && typeof keyArg === 'object' && 'pick' in keyArg ? keyArg.pick : undefined;
+    const pick: OptionPick = keyArg === undefined ? 'none' : token ?? 'key';
+    if (pick !== 'key') {
+      if (token !== undefined && token !== 'none' && token !== 'unproductive') return null; // Pick.any
+      if (seen.has(pick)) continue; // first wins
+      seen.add(pick);
+    }
+    out.push({ key: pick === 'key' ? keyArg : undefined, nested: bodyArg.nested, pick, discard: isDiscardBody(bodyArg.nested, params) });
+  }
+  return out.some((o) => o.pick === 'key') ? out : null;
+}
+
+/** PURE. Does this option map carry the implicit ELEMENT pass-through arm — an input that emits
+ *  the element itself because no written option claims it?
+ *
+ *  BOTH tokens must be written to cover every input. `Pick.none` claims a productive choice that
+ *  matched no key; `Pick.unproductive` claims a choice that produced nothing. Writing only one
+ *  leaves the other case to TinkerPop's pass-through, which the corpus pins directly:
+ *  `option(between(26,30), name).option(Pick.none, name)` over the modern graph yields
+ *  `v[lop]`/`v[ripple]` — the age-less vertices, unclaimed and emitted whole.
+ *
+ *  Shared by the triage and the emitter (branch.ts) precisely because getting it wrong is
+ *  invisible: the classifier would call a list-bodied option map a homogeneous LIST merge while
+ *  the emitter handed it an element arm. */
+export const optionMapNeedsPassthrough = (step: PStep, arms: readonly ChooseOptionArm[], params: Record<string, any>): boolean =>
+  !arms.some((o) => o.pick === 'none')
+  || (!arms.some((o) => o.pick === 'unproductive') && choiceCanBeUnproductive(step.args?.[0], params));
+
+/** PURE. Can this CHOICE yield nothing for some input? Only then is an unclaimed
+ *  `Pick.unproductive` case reachable — and being precise here is load-bearing in both
+ *  directions. Too coarse and a `choose(T.label)` gains an element arm it can never emit, widening
+ *  its result to a variant and fail-closing an `is()` that used to compose; too loose and an
+ *  unproductive input is silently answered with the `Pick.none` body.
+ *
+ *  Always productive: a `T` token (every element has a label/id), a `constant()`, and the two
+ *  reducers with an identity element — `count()` is 0 and `fold()` is `[]` over an empty stream.
+ *  `sum`/`min`/`max`/`mean` are deliberately NOT here: TinkerPop emits nothing for them on empty
+ *  input, so they can be unproductive. Anything else (a property read, a movement) can be empty. */
+const ALWAYS_PRODUCTIVE_TERMINAL = new Set(['count', 'fold', 'constant']);
+function choiceCanBeUnproductive(a0: any, params: Record<string, any>): boolean {
+  if (a0 && typeof a0 === 'object' && 'token' in a0) return false;
+  if (!isNested(a0)) return true; // no recognizable choice — assume the worst, the emitter defers anyway
+  const body = childSteps(a0.nested, params);
+  const last = body.at(-1);
+  return !last || !ALWAYS_PRODUCTIVE_TERMINAL.has(last.name);
+}
+
+/** PURE. The merge an option-map choose routes to, or null when an arm is unclassifiable (the
+ *  caller then defers). Folds `classifyArmShape` over the written arms exactly as
+ *  `classifyBranchArms` does, plus the implicit element pass-through when one is live. */
+export function optionMapMerge(step: PStep, ctx: ChildCtx): BranchMerge | null {
+  const arms = readOptionMapArms(step, ctx.params);
+  if (!arms) return null;
+  const bodies: BranchArmShape[] = arms.filter((o) => !o.discard).map((o) => classifyArmShape(o.nested, ctx));
+  if (bodies.some((s) => s === null)) return null;
+  // The dispatch tries the scalar CASE projector FIRST, and it collapses every option body into
+  // one value column. So a map this classifier would otherwise widen never reaches the merge at
+  // all — and must not be predicted as if it had. Modelling the route rather than just the shapes
+  // is what keeps classify and emit in lockstep here.
+  if (optionMapIsCase(arms) && bodies.every((s) => s === 'scalar')) return 'scalar';
+  const shapes = [...bodies];
+  if (optionMapNeedsPassthrough(step, arms, ctx.params)) shapes.push('element');
+  if (!shapes.length) return null;
+  return shapes.every((s) => s === shapes[0]) ? shapes[0] as BranchMerge : 'variant';
+}
+
+/** PURE. Does the scalar CASE projector serve this option map? It needs exactly one fallthrough —
+ *  a `Pick.none`, and no `Pick.unproductive` (a second one, keyed off the choice's PRESENCE) — and
+ *  every option must contribute a value for its CASE branch, which a `__.discard()` body does not
+ *  (it drops its rows; only the merge can express that, by omitting the arm).
+ *  Shared with `lowerChooseOptions`, which uses it as its own precondition — so the classifier's
+ *  prediction and the projector's own gate are one statement, not two that can drift. */
+export const optionMapIsCase = (arms: readonly ChooseOptionArm[]): boolean =>
+  arms.some((o) => o.pick === 'none') && !arms.some((o) => o.pick === 'unproductive')
+  && !arms.some((o) => o.discard);

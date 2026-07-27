@@ -168,10 +168,28 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
      order), lower each body from its gated seed, route to the ONE triage + the four merges. The
      CASE stays as the all-scalar specialization, tried first, and now DECLINES instead of throwing
      (the same fast-path-contract fix 7c needed). `__.discard()` drops its rows → no arm.
-     **Still open:** a LIST (`…fold()`) option body inside a `local()`/`map()` child — the arm merge
-     handles it, but the CHILD classifier (`isBareBranchChildAllCard` excludes the option-map form)
-     never admits the body, so `local()` declines before the merge is reached. 4 corpus queries.
-     Also `Pick.unproductive`/`any`.
+     ✅ **Follow-ups also LANDED 2026-07-27** (+5, L3 1456 → 1461): `Pick.unproductive` (the choice
+     produced NOTHING — distinct from `Pick.none`, a value matching no key; the correlated choice's
+     `present` column already carried the signal, so it cost one extra projected column), and LIST
+     (`…fold()`) option bodies inside a `local()` child (`isBareBranchChildAllCard` excluded the
+     option-map form; it now asks the same triage). The option-map triage
+     (`readOptionMapArms`/`optionMapMerge`/`optionMapIsCase`/`optionMapNeedsPassthrough`,
+     child-shape.ts) is the ONE place that answers "what does this option map do" — the second
+     deliberate exception to one-arm-triage after `scalarArmShape`, documented as such. It absorbed
+     two sites that had been answering privately, one of which was already a live lockstep break
+     (`elementOptionMapScalarBranch` claimed 'scalar' for a body the emitter widened to a variant,
+     tripping a non-null assertion). `optionMapMerge` models the DISPATCH ROUTE, not just the
+     shapes: the CASE is tried first, so a body it serves never reaches the merge.
+     **Still open — a real WRONG ANSWER, precisely scoped.** With only `Pick.none` written AND a
+     choice that can be unproductive, the CASE's single ELSE claims the unproductive inputs too;
+     TinkerPop emits the ELEMENT for them (`Choose.feature`
+     `g_V_chooseXageX_optionXbetweenX26_30X_nameX_optionXnone_nameX` pins `v[lop]`/`v[ripple]`).
+     Making the CASE decline there IS correct and the arm merge answers it properly — measured
+     **+1/−1**: the resulting `VariantStream` has no `group()`/`groupCount()` tail, which costs
+     `g_V_hasLabelXpersonX_chooseXageX…_groupCount` (whose `hasLabel` filter means the pass-through
+     could never fire at runtime anyway). **So this is gated on group/groupCount over a
+     VariantStream, not on the option map.** Also still open: `Pick.any` (only reachable via
+     `branch()`, unimplemented).
    - ✅ **`repeat()` in a child body LANDED 2026-07-27** (item 3): the walk now carries its origin
      column, so it composes at `local`/`map`/`where`/`group`/`order`/a branch arm — 1/7 → 7/7 probes.
      Same shape as the slices above: the emit substrate was ready, the classifier was the gate.

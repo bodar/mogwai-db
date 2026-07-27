@@ -8,7 +8,7 @@ import { aliasElem, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel,
 import { aliasId, aliasScalar } from '../context/alias.ts';
 import { carryOf, toScalarStream, type ListStream, type ScalarStream, type Stream } from '../context/stream.ts';
 import { tryCompileElementChild, tryCompileBranchChildAllCard, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, type ScalarModulationSpec } from './child.ts';
-import { classifyByAt } from './child-shape.ts';
+import { classifyByAt, optionMapIsCase, readOptionMapArms } from './child-shape.ts';
 
 // ---------- map (scalar body → per-traverser scalar projector) ----------
 
@@ -319,6 +319,23 @@ export function lowerFormatScalar(s: ScalarStream, step: PStep): ScalarStream | 
 export function lowerChooseOptions(st: ElementStream, steps: PStep[], stop: number): ScalarStream | null {
   const cs = steps[stop];
   const a0 = cs.args[0];
+  // A CASE has exactly ONE fallthrough (its ELSE), so it can serve an option map only when the
+  // map has exactly one too. Decline otherwise and the arm merge takes over.
+  const arms = readOptionMapArms(cs, st.params);
+  if (!arms) return null;
+  //   · no `Pick.none` → unmatched inputs emit the ELEMENT (TinkerPop pass-through), which no
+  //     single value column can carry;
+  //   · a written `Pick.unproductive` → a SECOND fallthrough, keyed off the choice's PRESENCE
+  //     rather than its value, which needs the merge's per-arm gating.
+  if (!optionMapIsCase(arms)) return null;
+  // KNOWN GAP, deliberately left here rather than fixed by declining more: when the choice can be
+  // unproductive and only `Pick.none` is written, TinkerPop still emits the ELEMENT for the
+  // unproductive inputs — `choose(values('age')).option(between(26,30),name).option(Pick.none,name)`
+  // pins `v[lop]`/`v[ripple]`, and this ELSE answers 'lop'/'ripple' instead. Declining here IS
+  // correct and the arm merge answers it properly, but the resulting VariantStream then has no
+  // group()/groupCount() tail, which costs a scenario that filters the unproductive inputs out
+  // anyway (`hasLabel('person').choose(age)…groupCount()`). Net zero, one regression — so the fix
+  // is gated on group-over-a-variant. See docs/outstanding-work.md item 2.
   const specs: ScalarModulationSpec[] = [];
   let choiceMod: number | undefined;
   if (a0 && typeof a0 === 'object' && 'nested' in a0) {
