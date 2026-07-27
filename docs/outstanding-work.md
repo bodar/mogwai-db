@@ -78,10 +78,33 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    needs `union()` over a path value). *Low-Med.*
 
 2. **Universal child-seam acceptance.** The generic child seam still throws for whole child-body
-   families — `local`, `where(__.trav)`, `choose().option`, `map(__.trav)`, `by(__.trav)`,
-   `group().by(__.trav)`. These are the top L3 deferral buckets by frequency; the fix is extending
-   the classifier+compiler so every body is admitted at every position, not one shape at a time.
-   Start: `steps/tail/{child-shape,child,scalar-arm}.ts`. **High.**
+   families — `as()` in a child body, `choose().option` pass-through, non-element `by(__.trav)`
+   (bodies producing map/group/project/valueMap shapes), `repeat()` in a child (item 3). The fix is
+   extending the classifier+compiler so every body is admitted at every position, not one shape at a
+   time. Start: `steps/tail/{child-shape,child,scalar-arm}.ts`. **High.**
+   - ✅ **Slice 1 LANDED 2026-07-26** (`1e15e75`): a **uniform-element branch**
+     (`union`/`choose`/`coalesce`/`optional`, all arms element) now composes as an element/scalar/
+     list/count child body at EVERY position — `map`/`local`/`flatMap`, `where()` existence, and
+     `group().by(value)` — so `map(__.union(out(),in()))`, `by(__.coalesce(out(),in()).count())`, etc.
+     lower. The emit substrate already threaded the child ordinal; the gate was the classifier, now
+     `isUniformElementBranch` (`child-shape.ts`) admitting the branch into the element-preserving
+     prefix via the ONE canonical arm triage (`classifyBranchArms`). A scalar/list-armed branch keeps
+     its own path. Pinned by `test/L4-addendum/element-branch-child.feature` + a `branch.exec.test.ts`
+     block; L3 floor unchanged (ceiling raised, no named scenario). This also promoted several
+     mixed→homogeneous branch classifications (`union(__.out().optional(in()), both())` is now an
+     element union, not a variant).
+   - ✅ **Slice 2 LANDED 2026-07-26**: a **list-armed OR mixed-shape (variant) branch**
+     (`union`/`coalesce`/`choose`) now composes as an ALL-cardinality child body at `local`/`flatMap`
+     — `local(__.union(out().fold(), in().fold()))` and `local(__.union(out(), values('name')))` lower
+     via `lowerStepsStrict` over a pushed scope to a List/VariantStream, re-projected to the parent's
+     cardinality (`tryCompileBranchChildAllCard`, `child.ts`). Deliberately NOT wired into `map` (a
+     multi-output body's first-cardinality would silently drop arms — fails closed) nor into
+     `classifyListChild` (which feeds the branch-arm triage — kept untouched). Pinned by
+     `test/L4-addendum/list-branch-child.feature`.
+   - **Still open:** `as()`/`select(label)` bound inside a child body; `choose().option()` without a
+     `Pick.none` default (mixed pass-through); child bodies producing map/group/record shapes (item 5
+     territory); the `group().by(project(...))` composite key and non-scalar/non-count nested-group
+     inner keys.
    → [carried-schema-and-projection-reentry](./2026-07-14-carried-schema-and-projection-reentry-plan.md),
    [group-value-generic-seam](./2026-07-18-group-value-generic-seam-plan.md)
 

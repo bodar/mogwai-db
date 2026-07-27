@@ -17,7 +17,7 @@ import { lowerPath } from './path.ts';
 import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerElementChoose, coalesce as lowerElementCoalesce, flatMap as lowerElementFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerElementUnion } from '../prefix/branch.ts';
 import { elementGroupSource, lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
-import { tryCompileCountChild, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueRows } from './child.ts';
+import { tryCompileCountChild, tryCompileBranchChildAllCard, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueRows } from './child.ts';
 import { tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './scalar-arm.ts';
 import { BRANCH_SHAPE_ORDER, childSteps, classifyBy, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, type BranchKind, type ByClass } from './child-shape.ts';
 import { lowerElementDedup } from '../prefix/filter.ts';
@@ -346,6 +346,10 @@ const tailLocal: ShapeTailFn<ElementStream> = (st, step, steps, stop) => {
   const nested = step.args[0]?.nested;
   if (nested && isScalarChild(nested, st.params))
     return continueLowering(lowerMapScalar(st, steps, stop), stop + 1);
+  // A bare list-armed (union(out().fold(), in().fold())) or mixed-shape (union(out(), values('name')))
+  // branch — local emits every arm's rows per input (all-cardinality).
+  const branchAllCard = tryCompileBranchChildAllCard(st, nested);
+  if (branchAllCard) return continueLowering(branchAllCard, stop + 1);
   throw new Error('local() child shape not yet supported by generic child lowering');
 };
 

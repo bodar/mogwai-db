@@ -201,9 +201,9 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   // (project() head, value terminal), which needs the un-normalized shape.
   const scalarShape = (body: ReturnType<typeof stepChain>) => isProp
     ? classifyScalarChildRows('property', body) !== null
-    : body.at(-1)?.name === 'count' ? classifyCountChild(body) !== null : classifyScalarChildRows('element', body) !== null;
+    : body.at(-1)?.name === 'count' ? classifyCountChild(body, parent.params) !== null : classifyScalarChildRows('element', body, parent.params) !== null;
   const scalarFoldShape = (body: ReturnType<typeof stepChain>) =>
-    body.at(-1)?.name === 'fold' && classifyScalarChildRows(pk, body.slice(0, -1)) !== null;
+    body.at(-1)?.name === 'fold' && classifyScalarChildRows(pk, body.slice(0, -1), parent.params) !== null;
 
   const keyArg = bys[0]?.[0];
   const valArg = bys[1]?.[0];
@@ -239,12 +239,12 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     && scalarShape(valBody);
   const genericFold = valTerminal === 'fold' && scalarFoldShape(valBody);
   const genericElementFold = !isProp && valTerminal === 'fold'
-    && classifyElementChildRows(valBody, 'fold', false) !== null;
+    && classifyElementChildRows(valBody, 'fold', false, parent.params) !== null;
   // An unreduced element value traversal (by(__.out()), by(__.out().order())) collects
   // into a list — TinkerPop's implicit fold. Same relational path as genericElementFold.
   const genericElementImplicitFold = !isProp && !genericElementFold
     && valSteps.length > 0
-    && classifyElementChildRows(valBody, undefined, false) !== null;
+    && classifyElementChildRows(valBody, undefined, false, parent.params) !== null;
   // A nested-group value `by(__.<move>.group()/groupCount())`: the movement prefix expands
   // to inner rows through the SAME generic child engine, and the inner group folds them per
   // outer key (a two-level aggregation in lowerGroup). The prefix is either element movement

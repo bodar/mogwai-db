@@ -83,7 +83,26 @@ export const ELEMENT_CHILD_STEPS = new Set([
  *  mutate sack(op) (element→element, folds the carried sack). Both lower through the SAME
  *  lowerElementSteps engine per parent, so a scoped sack (local(__.sack(op).by(...))) reuses the
  *  root sack StepFn — no bespoke child reader. Bare read sack() is NOT here (it's a scalar producer). */
-export const isElementChildStep = (s: PStep): boolean => ELEMENT_CHILD_STEPS.has(s.name) || isSackMutate(s);
+export const isElementChildStep = (s: PStep, params?: Record<string, any>): boolean =>
+  ELEMENT_CHILD_STEPS.has(s.name) || isSackMutate(s)
+  || (params !== undefined && isUniformElementBranch(s, params));
+
+/** PURE. A branch step (union/choose/coalesce/optional, NOT the option-map choose form) whose arms
+ *  are UNIFORMLY element — so it folds through lowerElementSteps' prefix as an element→element step,
+ *  exactly like a movement. This is what admits an element-valued branch child (`map(__.union(out(),
+ *  in()))`, `by(__.coalesce(out(),in()))`): the branch belongs in the element-preserving prefix, and
+ *  the emit path (compileElementChildRows → lowerElementSteps) already keeps a uniform-element branch
+ *  in the fold. Gated by the ONE canonical arm triage (classifyBranchArms) so a scalar/list-armed
+ *  branch stays on ITS path. Requires all arms classified element (not merely merge==='element',
+ *  which also covers optional's unclassified-arm fallback) — an unclassifiable arm defers cleanly to
+ *  the caller's deferral rather than admitting a body compile would throw on. Needs params to
+ *  classify the arms; a params-free caller conservatively rejects (backward-compatible). */
+export function isUniformElementBranch(s: PStep, params: Record<string, any>): boolean {
+  const kind = asBranchKind(s.name);
+  if (!kind || (s as any).options) return false;
+  const { shapes } = classifyBranchArms(kind, s, params);
+  return shapes.length > 0 && shapes.every((sh) => sh === 'element');
+}
 /** The scalar-producing projection vocabulary the element-parent classifier recognizes:
  *  a step that, over an element prefix, lowers to one scalar per input. `values`/`id`/`label`
  *  read the element; `constant` rebinds it; `call`/`math`/`sack`/`format` are the generalized
@@ -132,13 +151,15 @@ const SCALAR_CHILD_PREFIX = new Set([...SCALAR_ARM_TX, 'is', 'and', 'or', 'not',
 export const scalarChildPrefixOk = (s: PStep): boolean =>
   SCALAR_CHILD_PREFIX.has(s.name) || (s.name === 'asNumber' && (s.args ?? []).length > 0);
 
-function elementRowParts(body: ReturnType<typeof stepChain>): { prefix: ReturnType<typeof stepChain>; suffix: ReturnType<typeof stepChain> } | null {
+function elementRowParts(body: ReturnType<typeof stepChain>, params?: Record<string, any>): { prefix: ReturnType<typeof stepChain>; suffix: ReturnType<typeof stepChain> } | null {
   const at = body.findIndex((s) => CHILD_ELEMENT_ROW_STEPS.has(s.name));
   const prefix = at < 0 ? body : body.slice(0, at);
   const suffix = at < 0 ? [] : body.slice(at);
   // A mutate sack(op) is element-preserving → allowed in the prefix (isElementChildStep), so
   // local(__.sack(op).by(...)) folds the sack per parent through the same lowerElementSteps engine.
-  if (!prefix.length || prefix.some((s) => !isElementChildStep(s))) return null;
+  // With params, a uniform-element branch (union(out(),in())) is likewise element-preserving and
+  // rides the prefix fold — so an element-valued branch child composes at every position.
+  if (!prefix.length || prefix.some((s) => !isElementChildStep(s, params))) return null;
   if (suffix.some((s) => !CHILD_ELEMENT_ROW_STEPS.has(s.name))) return null;
   return { prefix, suffix };
 }
@@ -149,7 +170,7 @@ function elementRowParts(body: ReturnType<typeof stepChain>): { prefix: ReturnTy
 export function classifyElementChild(nested: any, params: Record<string, any>): { body: ReturnType<typeof stepChain> } | null {
   if (!nested) return null;
   const body = childSteps(nested, params);
-  return classifyElementChildRows(body, undefined, true) ? { body } : null;
+  return classifyElementChildRows(body, undefined, true, params) ? { body } : null;
 }
 
 export function isElementChild(nested: any, params: Record<string, any>): boolean {
@@ -159,7 +180,7 @@ export function isElementChild(nested: any, params: Record<string, any>): boolea
 /** Syntax-only preflight for shape-aware dispatch. Unlike the tryCompile functions,
  * this never appends CTEs, so the prefix fold can stop before a homogeneous scalar
  * union without speculatively mutating the Query. */
-function scalarRowParts(body: ReturnType<typeof stepChain>): { prefix: ReturnType<typeof stepChain>; projection: any; suffix: ReturnType<typeof stepChain> } | null {
+function scalarRowParts(body: ReturnType<typeof stepChain>, params?: Record<string, any>): { prefix: ReturnType<typeof stepChain>; projection: any; suffix: ReturnType<typeof stepChain> } | null {
   // A mutate sack(op) is element-preserving, not a scalar producer — skip it here so the
   // projection is the FIRST genuine scalar producer (a bare read sack(), values, …); a mutate
   // sack in the run before it is part of the element prefix (isElementChildStep admits it).
@@ -168,7 +189,10 @@ function scalarRowParts(body: ReturnType<typeof stepChain>): { prefix: ReturnTyp
   const prefix = body.slice(0, at);
   const projection = body[at];
   const suffix = body.slice(at + 1);
-  if (prefix.some((s) => !isElementChildStep(s))) return null;
+  // A uniform-element branch before the projection is element-preserving too (params-gated), so
+  // union(out(),in()).values('name') lowers as a scalar child — the branch folds elements, then
+  // the projection reads them.
+  if (prefix.some((s) => !isElementChildStep(s, params))) return null;
   if (suffix.some((s) => !CHILD_SCALAR_ROW_STEPS.has(s.name))) return null;
   // Per-projection arg shape for the bespoke values/id/label/constant SQL builder. The
   // generalized producers (call/math/sack/format) carry their own args and route through the
@@ -256,8 +280,8 @@ export function classifyScalarChild(nested: any, params: Record<string, any>): {
   const terminal = body.at(-1);
   if (!terminal) return null;
   const ok = terminal.name === 'count'
-    ? classifyCountChild(body) !== null
-    : classifyScalarChildRows('element', body)?.kind === 'element'
+    ? classifyCountChild(body, params) !== null
+    : classifyScalarChildRows('element', body, params)?.kind === 'element'
       || elementScalarBranchArm(body, params);
   return ok ? { body } : null;
 }
@@ -300,11 +324,13 @@ export type ElementRowParts = NonNullable<ReturnType<typeof elementRowParts>>;
 
 /** PURE. A terminal bare count() over a movement-only prefix — the total-count child
  * (tryCompileCountChild) and the isTotalScalarChild/count arm of isScalarChild. */
-export function classifyCountChild(body: ReturnType<typeof stepChain>): { prefix: ReturnType<typeof stepChain> } | null {
+export function classifyCountChild(body: ReturnType<typeof stepChain>, params?: Record<string, any>): { prefix: ReturnType<typeof stepChain> } | null {
   const terminal = body.at(-1);
   if (!terminal || terminal.name !== 'count' || terminal.args.length) return null;
   const prefix = body.slice(0, -1);
-  return prefix.some((s) => !ELEMENT_CHILD_STEPS.has(s.name)) ? null : { prefix };
+  // A uniform-element branch counts too (params-gated): union(out(),in()).count() folds elements
+  // through the prefix, then the scoped count barrier reduces them.
+  return prefix.some((s) => !isElementChildStep(s, params)) ? null : { prefix };
 }
 
 /** PURE. The post-strip scalar-row shape decision shared by compileScalarChildRows and
@@ -314,9 +340,10 @@ export function classifyCountChild(body: ReturnType<typeof stepChain>): { prefix
 export function classifyScalarChildRows(
   parentKind: 'element' | 'property',
   body: ReturnType<typeof stepChain>,
+  params?: Record<string, any>,
 ): { kind: 'property'; body: ReturnType<typeof stepChain> } | { kind: 'element'; parts: ScalarRowParts } | null {
   if (parentKind === 'property') return propertyScalarBody(body) ? { kind: 'property', body } : null;
-  const parts = scalarRowParts(body);
+  const parts = scalarRowParts(body, params);
   return parts ? { kind: 'element', parts } : null;
 }
 
@@ -330,12 +357,13 @@ export function classifyElementChildRows(
   fullBody: ReturnType<typeof stepChain>,
   stripTerminal: string | undefined,
   firstPolicy: boolean,
+  params?: Record<string, any>,
 ): { body: ReturnType<typeof stepChain>; parts: ElementRowParts; orderStep?: PStep } | null {
   if (stripTerminal && fullBody.at(-1)?.name !== stripTerminal) return null;
   const orderStep = firstPolicy && fullBody.at(-1)?.name === 'order' ? fullBody.at(-1) : undefined;
   let body = stripTerminal || orderStep ? fullBody.slice(0, -1) : fullBody;
   if (!firstPolicy && body.at(-1)?.name === 'order' && !(body.at(-1) as PStep).bys) body = body.slice(0, -1);
-  const parts = body.length ? elementRowParts(body) : stripTerminal ? { prefix: [], suffix: [] } : null;
+  const parts = body.length ? elementRowParts(body, params) : stripTerminal ? { prefix: [], suffix: [] } : null;
   return parts ? { body, parts, orderStep: orderStep as PStep | undefined } : null;
 }
 
@@ -356,7 +384,7 @@ export function isPropertyScalarFoldChild(nested: any, params: Record<string, an
 export function classifyTotalScalarChild(nested: any, params: Record<string, any>): { body: ReturnType<typeof stepChain> } | null {
   if (!nested) return null;
   const body = childSteps(nested, params);
-  return classifyCountChild(body) ? { body } : null;
+  return classifyCountChild(body, params) ? { body } : null;
 }
 
 export function isTotalScalarChild(nested: any, params: Record<string, any>): boolean {
@@ -373,8 +401,26 @@ export function classifyListChild(nested: any, params: Record<string, any>): { b
   const body = childSteps(nested, params);
   if (body.at(-1)?.name !== 'fold') return null;
   const before = body.slice(0, -1);
-  return classifyScalarChildRows('element', before)?.kind === 'element' || before.every((step) => ELEMENT_CHILD_STEPS.has(step.name))
+  return classifyScalarChildRows('element', before, params)?.kind === 'element'
+    || before.every((step) => isElementChildStep(step, params))
     ? { body } : null;
+}
+
+/** PURE. A bare branch step whose merge is LIST (uniform `…fold()` arms) or VARIANT (genuinely
+ *  mixed arms) — the shapes that lowerStepsStrict resolves to a List/VariantStream over a pushed
+ *  child scope (finishListMerge / mergeVariantArms are parent-agnostic). Element-armed and
+ *  scalar-armed branches are excluded here — they have their own cardinality-aware child paths.
+ *  Deliberately NOT wired into classifyListChild/the branch-arm triage: consumed ONLY by the
+ *  all-cardinality child consumers (local/flatMap), so a branch-of-lists / mixed branch composes
+ *  there while map (first-of-a-multi-output body) stays fail-closed and the triage is untouched. */
+export function isBareBranchChildAllCard(nested: any, params: Record<string, any>): boolean {
+  if (!nested) return false;
+  const body = childSteps(nested, params);
+  if (body.length !== 1) return false;
+  const kind = asBranchKind(body[0].name);
+  if (!kind || (body[0] as any).options) return false;
+  const merge = classifyBranchArms(kind, body[0], params).merge;
+  return merge === 'list' || merge === 'variant';
 }
 
 export function isListChild(nested: any, params: Record<string, any>): boolean {
@@ -384,12 +430,12 @@ export function isListChild(nested: any, params: Record<string, any>): boolean {
 export function isScalarFoldChild(nested: any, params: Record<string, any>): boolean {
   if (!nested) return false;
   const body = childSteps(nested, params);
-  return body.at(-1)?.name === 'fold' && classifyScalarChildRows('element', body.slice(0, -1))?.kind === 'element';
+  return body.at(-1)?.name === 'fold' && classifyScalarChildRows('element', body.slice(0, -1), params)?.kind === 'element';
 }
 
 export function isElementFoldChild(nested: any, params: Record<string, any>): boolean {
   if (!nested) return false;
-  return classifyElementChildRows(childSteps(nested, params), 'fold', false) !== null;
+  return classifyElementChildRows(childSteps(nested, params), 'fold', false, params) !== null;
 }
 
 /** An element traversal used as a group VALUE with no terminal reducer/fold. Per
@@ -399,7 +445,7 @@ export function isElementFoldChild(nested: any, params: Record<string, any>): bo
  *  NOT (it would need key-ordered folding — deferred). */
 export function isElementImplicitFoldChild(nested: any, params: Record<string, any>): boolean {
   if (!nested) return false;
-  return classifyElementChildRows(childSteps(nested, params), undefined, false) !== null;
+  return classifyElementChildRows(childSteps(nested, params), undefined, false, params) !== null;
 }
 
 // ---------- branch-family arm triage (the ONE canonical shape decision) ----------

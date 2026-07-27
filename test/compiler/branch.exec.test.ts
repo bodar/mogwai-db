@@ -269,4 +269,52 @@ test('sack clones through coalesce()/optional()/choose() forks', () => {
     .toEqual([3, 3, 3]); // 3 out-neighbours, each carrying sack=3
 });
 
+test('a uniform-element branch composes as a child-body value at every position', () => {
+  const store = seededStore();
+  // local()/flatMap() of an element branch == the flattened branch (all cardinality). The branch
+  // folds through lowerElementSteps in the pushed child scope, identical to inlining it.
+  expect(run(store, 'g.V().hasLabel("person").local(__.union(__.out(), __.in())).values("name")').map((r) => r.v).sort())
+    .toEqual(run(store, 'g.V().hasLabel("person").union(__.out(), __.in()).values("name")').map((r) => r.v).sort());
+  expect(run(store, 'g.V().flatMap(__.coalesce(__.out("knows"), __.out("created"))).values("name")').map((r) => r.v).sort())
+    .toEqual(run(store, 'g.V().coalesce(__.out("knows"), __.out("created")).values("name")').map((r) => r.v).sort());
+  // map() is first-cardinality; over a branch it counts one child result per input — every person
+  // has a neighbour, so a per-element count of union(out,in) is marko3/vadas1/josh3/peter1.
+  expect(run(store, 'g.V().hasLabel("person").map(__.union(__.out(), __.in()).count())').map((r) => r.v).sort((a, b) => a - b))
+    .toEqual([1, 1, 3, 3]);
+  // where(__.branch) becomes a correlated existence gate over the element-branch child rows.
+  expect(run(store, 'g.V().hasLabel("person").where(__.union(__.out(), __.in())).values("name")').map((r) => r.v).sort())
+    .toEqual(['josh', 'marko', 'peter', 'vadas']);
+  // group().by(value) reduces the element branch per key — the top "group().by(traversal) value"
+  // deferral bucket now composes for an element-armed branch.
+  expect(run(store, 'g.V().hasLabel("person").group().by("name").by(__.union(__.out(), __.in()).count())').map((r) => [r.gk, r.gv]).sort())
+    .toEqual([['josh', 3], ['marko', 3], ['peter', 1], ['vadas', 1]]);
+  // a scalar-armed branch (constants) keeps its OWN scalar path — no regression from the widening.
+  // local() is all-cardinality, so both constant arms survive (element widening never claimed it).
+  expect(run(store, 'g.V(1).local(__.union(__.constant("a"), __.constant("b")))').map((r) => r.v).sort())
+    .toEqual(['a', 'b']);
+});
+
+test('a list-armed branch composes as an all-cardinality (local/flatMap) child body', () => {
+  const store = seededStore();
+  // union of two folded arms → one list per arm per input. flatMap/local emit both; sizes keep the
+  // assertion order-independent. marko(1): out has 3 neighbours, in has 0.
+  expect(run(store, 'g.V(1).flatMap(__.union(__.out().fold(), __.in().fold())).count(Scope.local)').map((r) => r.v))
+    .toEqual([3, 0]);
+  expect(run(store, 'g.V(1).local(__.union(__.out().values("name").fold(), __.in().values("name").fold())).count(Scope.local)').map((r) => r.v))
+    .toEqual([3, 0]);
+  // coalesce takes the FIRST productive arm — one list per input (marko knows vadas+josh → size 2).
+  expect(run(store, 'g.V(1).flatMap(__.coalesce(__.out("knows").fold(), __.out("created").fold())).count(Scope.local)').map((r) => r.v))
+    .toEqual([2]);
+  // map() over a multi-output list branch stays fail-closed (never a silent wrong count).
+  expect(() => run(store, 'g.V(1).map(__.union(__.out().fold(), __.in().fold()))'))
+    .toThrow(/not supported/);
+  // a MIXED-shape branch (element + scalar arms) is likewise an all-cardinality child → a variant
+  // stream, equal to the flattened union. marko(1): out {vadas,josh,lop} + values('name') {marko} = 4.
+  const variant = (q: string) => run(store, q).map((r) => r.vk === 1 ? `s:${r.v}` : `e:${r.id}`).sort();
+  expect(variant('g.V(1).local(__.union(__.out(), __.values("name")))'))
+    .toEqual(variant('g.V(1).union(__.out(), __.values("name"))'));
+  expect(variant('g.V(1).flatMap(__.union(__.out(), __.values("name")))'))
+    .toEqual(['e:2', 'e:3', 'e:4', 's:marko']);
+});
+
 });
