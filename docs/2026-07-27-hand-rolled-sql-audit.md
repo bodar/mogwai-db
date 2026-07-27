@@ -379,7 +379,7 @@ than rooted, so it wants `lowerStepsStrict` over `applyPattern`'s existing seed,
 
 ---
 
-### 4. `path.ts` — two positional projectors, one of them stuck at `by(key)`
+### 4. `path.ts` — 🟡 **PARTLY CLOSED 2026-07-27.** One projector now; the child substrate is still open
 `steps/tail/path.ts:239-291` (`compilePathArray`, ~61 lines) vs `lowerPathPositionChild:87`
 
 The LINEAR regime (one column per position) runs a real child per position. The
@@ -398,7 +398,32 @@ FAIL  g.V().repeat(__.out()).times(2).path().by(T.id)
 work fixed `path()` over a union source); 14 attribute to path.ts overall. Already filed under P3
 recursive-path tails; this sweep adds the linear-vs-recursive asymmetry as the sharp framing.
 
-**The route, now measured (2026-07-27) — no new rendering mode, and simpler than the linear case.**
+**What landed.** The two hand-rolled by()-interpretation switches are now ONE (`positionScalar`),
+parameterized by a `ScalarCtx` — the linear regime passes `elemCtx` over its joined position table
+(direct columns), the grouped one `aliasCtx` over the exploded `je.value` (correlated reads). Same
+`by()` ⇒ same answer, where before the grouped side hardcoded `nodePropScalar(key)` and threw for
+everything else. So `by(T.id)`/`by(T.label)` work on a recursive path now, and the non-productive
+drop guard reuses the same projector instead of rebuilding the property read a second time. Linear
+output is unchanged (including edge positions, which read off `edges` — `scalarProp` already
+dispatched on `ctx.elem`, the hand-rolled switch was duplicating that dispatch).
+
+**A note on how this got ranked.** It was briefly demoted on measured CORPUS demand (~1 traversal).
+That was the wrong axis — this list ranks by (duplication × family unblock × reach at depth), none of
+which is a corpus count. The defect here is that the same modulator answered two different ways
+depending on how the path was built; a floor metric cannot see that at all.
+
+**Still open: `by(traversal)` over a recursive path.** It needs a positional child keyed back to the
+exploded element, which is the one thing the flat projector cannot express. The route below is
+verified; the reason it is not built yet is a real seam problem, worth writing down so the next
+attempt doesn't rediscover it: the explode is naturally `(pk, ord, id)`, but an ElementStream's
+physical schema is `['id', ...carriedCols]`, so `pk`/`ord` cannot ride alongside it and
+`pushChildScope`'s domain re-projection drops them. The workable shape is to carry the path key and
+position AS `origins` (they are literally the row's provenance, which is what that slot means), so
+the pushed frame appends its ordinal after them and the final projection reads `pk`/`ord` off the
+frame's domain. Note also that `keyedChildRelation` does NOT serve this as built: a `by()` needs a
+SCALAR child and that function is element-only, so this wants a scalar sibling rather than a reuse.
+
+**The route, measured (2026-07-27) — no new rendering mode, and simpler than the linear case.**
 Materialize the `json_each` explode as its own `(pk, ord, id)` relation, push ONE child scope over
 it, and `LEFT JOIN` the child back on the ordinal — structurally what `lowerPath` already does per
 position. It is *easier* than linear because `compilePathArray` already defers `bys.length > 1`, so

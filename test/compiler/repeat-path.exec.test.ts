@@ -167,6 +167,39 @@ test('path().by(key) projects each element; a missing key drops the whole path',
   expect(rows).toEqual([[29, 27], [29, 32]]); // three out-neighbours, only two survive
 });
 
+test('the SAME path().by() answers identically in both regimes (one position projector)', () => {
+  // The two regimes had two hand-rolled projectors and the grouped one hardcoded a property
+  // read, so by(T.id)/by(T.label) worked on a LINEAR path and threw on a RECURSIVE one — the
+  // same modulator, two answers. Both now go through one projector, parameterized by how the
+  // element is reached (joined table vs correlated read off the exploded id).
+  const store = seededStore();
+  const linear = (g: string) => run(store, g).map((r) => [r.x0_v, r.x1_v, r.x2_v]);
+  const grouped = (g: string) => run(store, g).map((r) => r.v);
+  // marko's 2-hop walks are [marko,josh,lop] and [marko,josh,ripple].
+  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by(T.id)')).toEqual([1, 4, 3, 1, 4, 5]);
+  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by(T.label)'))
+    .toEqual(['person', 'person', 'software', 'person', 'person', 'software']);
+  // by(key) unchanged in the grouped regime…
+  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by("name")'))
+    .toEqual(['marko', 'josh', 'lop', 'marko', 'josh', 'ripple']);
+  // …and the LINEAR regime is byte-for-byte unaffected, including an EDGE position (which
+  // reads its label/id off the joined edges table, not nodes).
+  expect(linear('g.V(1).out().path().by(T.id)')).toEqual([[1, 2, undefined], [1, 4, undefined], [1, 3, undefined]]);
+  expect(linear('g.V(1).outE("created").inV().path().by(T.label)')).toEqual([['person', 'created', 'software']]);
+});
+
+test('path().by(traversal) on a RECURSIVE path defers with the obstacle named', () => {
+  // Still open: a by(traversal) position needs a child keyed back to the exploded element. The
+  // linear regime has that substrate, the grouped one does not yet — so this fails CLOSED and
+  // says which regime is missing it, rather than reciting a vocabulary.
+  const store = seededStore();
+  expect(() => run(store, 'g.V(1).repeat(__.out()).times(2).path().by(__.values("name"))'))
+    .toThrow(/by\(traversal\) over a recursive repeat\(\)\.path\(\)/);
+  // The same body on a LINEAR path works — that contrast is the remaining asymmetry.
+  expect(run(store, 'g.V(1).out().path().by(__.values("name"))').map((r) => r.x1_v))
+    .toEqual(['vadas', 'josh', 'lop']);
+});
+
 test('path() interleaves edges and vertices with materialized props (via framing)', async () => {
   const { ioc } = await import('../../src/io.ts');
   const buffers = executeQuery(seededStore(), 'g.V(1).outE("created").inV().path()', {});

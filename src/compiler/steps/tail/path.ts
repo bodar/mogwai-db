@@ -1,7 +1,7 @@
 import { isNested } from '../../../gremlin/frontend.ts';
 import { q, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { nodes, edges, labels } from '../../../sql/schema.ts';
-import { framedProps, labelNameSub, nodePropScalar, edgePropScalar, predicateSql, extIdOf, elemCtx, type Elem } from '../../plan/plan.ts';
+import { framedProps, labelNameSub, predicateSql, extIdOf, elemCtx, aliasCtx, scalarProp, type Elem, type ScalarCtx } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { carryFrag, carriedCols, scopePathCols, withoutCarried, type Carried, type ElementStream } from '../context/context.ts';
 import { carryOf, continueLowering, pathColumns, toListStream, toPathStream, toScalarStream, type ListStream, type LoweringResult, type PathStream, type ScalarStream } from '../context/stream.ts';
@@ -15,26 +15,25 @@ import { tryLowerScalarChoose, tryLowerScalarCoalesce } from '../prefix/branch.t
 
 // ---------- path() (linear regime) ----------
 
-/** Interpret one path().by() modulator: undefined → the whole element; a string →
- *  a property-key projection; token/traversal by()s defer. */
-function pathBy(byArgs: any[] | undefined): string | undefined {
+/**
+ * The scalar value for ONE path position under a `by(key)`/`by(T.token)` modulator, or
+ * undefined for a bare/absent `by()` (→ the whole element). A `by(__.trav)` position is not
+ * handled here; each regime lowers it through the child seam.
+ *
+ * ONE projector for BOTH path regimes, which is the point: the LINEAR regime passes an
+ * `elemCtx` over its joined position table (values read as direct columns), the GROUPED
+ * regime an `aliasCtx` over the exploded `je.value` (values read back by correlated
+ * subquery). Same `by()` ⇒ same answer. Previously these were two hand-rolled switches and
+ * the grouped one hardcoded `nodePropScalar(key)`, so `by(T.id)`/`by(T.label)` worked on a
+ * linear path and threw on a recursive one — the same modulator, two answers.
+ */
+function positionScalar(ctx: ScalarCtx, byArgs: any[] | undefined): Expression | undefined {
   const by = classifyBy(byArgs);
   if (by.kind === 'none') return undefined; // no by()/bare by() → the element
-  if (by.kind === 'key') return by.key;
-  if (by.kind === 'nested') throw new Error('path().by(traversal) modulator not yet supported');
-  throw new Error(`path().by(T.${by.token}) modulator not yet supported`);
-}
-
-/** The inline value expression for one linear path position under a by('key')/by(T.token)
- *  modulator, or undefined for a bare by()/no by() (→ the whole element). A by(__.trav)
- *  position is NOT handled here — lowerPath lowers it through the generic scalar child seam. */
-function pathPositionValue(_st: ElementStream, tbl: Relation, elem: Elem, byArgs: any[] | undefined): Expression | undefined {
-  const by = classifyBy(byArgs);
-  if (by.kind === 'none') return undefined; // the whole element
-  if (by.kind === 'key') return elem === 'edge' ? edgePropScalar(tbl.c.id, by.key) : nodePropScalar(tbl.c.id, by.key);
+  if (by.kind === 'key') return scalarProp(ctx, by.key);
   if (by.kind === 'token') {
-    if (by.token === 'label') return labelNameSub(tbl.c.label);
-    if (by.token === 'id') return elemCtx(tbl, elem).extIdExpr!;
+    if (by.token === 'label') return labelNameSub(ctx.labelIdExpr);
+    if (by.token === 'id') return ctx.extIdExpr!;
     throw new Error(`path().by(T.${by.token}) modulator not yet supported`);
   }
   throw new Error('unsupported path().by() modulator');
@@ -185,7 +184,7 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
     const tbl = (pos.elem === 'edge' ? edges : nodes).as(`${prefix}n`);
     const jn = pos.nullable ? 'LEFT JOIN' : 'JOIN';
     joins.push(q` ${jn} ${tbl} ON ${tbl.c.id}=${p.c[pos.col]}`);
-    const pe = pathPositionValue(st, tbl, pos.elem, byOf(i));
+    const pe = positionScalar(elemCtx(tbl, pos.elem), byOf(i));
     if (pe === undefined) {
       const l = labels.as(`${prefix}l`);
       joins.push(q` ${jn} ${l} ON ${l.c.id}=${tbl.c.label}`);
@@ -247,7 +246,22 @@ function compilePathArray(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   // unknown length → defer). A by(traversal)/by(T.token) also defers via pathBy.
   const bys = proj.bys ?? [];
   if (bys.length > 1) throw new Error('path().by() with multiple modulators over a recursive repeat().path() not yet supported');
-  const key = pathBy(bys.length ? bys[0] : undefined);
+  const by = bys.length ? bys[0] : undefined;
+  // A by(traversal) position needs a real child keyed back to the exploded element; the flat
+  // scalar projector below cannot express it. Defer explicitly (see lowerPathPositionChild for
+  // the linear regime's route) rather than letting positionScalar throw a vaguer message.
+  if (classifyBy(by).kind === 'nested')
+    throw new Error('path().by(traversal) over a recursive repeat().path() not yet supported (a positional child over json_each — the linear regime has it, this regime does not yet)');
+  // Every position projects through the SAME projector the linear regime uses, over an
+  // `aliasCtx` on the exploded element id. `posValue` is a function of the id expression
+  // because it is needed at two sites over two different `je` scopes (here and the
+  // non-productive drop guard below) — one projector, no second hardcode.
+  const posValue = (idExpr: Expression) => positionScalar(aliasCtx(idExpr, 'node'), by);
+  // Whether this by() projects a SCALAR per position (key or T.token) or leaves the whole
+  // element. Drives both the emitted columns and the wire framing (pathColumns / execute.ts
+  // pathGroupedBuffers read `byKey` as exactly this question), so a T.token position needs no
+  // wire change — it is a scalar like any other.
+  const scalarPos = positionScalar(aliasCtx(q`je.value`, 'node'), by) !== undefined;
   const productive = proj.productiveBy === true;
   // dedup() must collapse equal paths BEFORE row-numbering: ROW_NUMBER() is computed
   // with the SELECT list, so a `SELECT DISTINCT path, ROW_NUMBER()…` never removes a
@@ -256,10 +270,10 @@ function compilePathArray(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   // A non-productive by(key) drops the WHOLE path if ANY element lacks the property
   // (mirrors the linear path()'s per-position IS NOT NULL guard); ProductiveBy keeps it
   // with an explicit NULL position.
-  if (key !== undefined && !productive) {
+  if (scalarPos && !productive) {
     const fp = src.as('fp');
     src = st.q.cte(
-      q`SELECT ${fp.c.path} AS path FROM ${fp} WHERE NOT EXISTS (SELECT 1 FROM json_each(${fp.c.path}) je WHERE ${nodePropScalar(q`je.value`, key)} IS NULL)`,
+      q`SELECT ${fp.c.path} AS path FROM ${fp} WHERE NOT EXISTS (SELECT 1 FROM json_each(${fp.c.path}) je WHERE ${posValue(q`je.value`)!} IS NULL)`,
       ['path'],
     );
   }
@@ -267,11 +281,11 @@ function compilePathArray(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   // stay distinct (multiset) after the json_each explode.
   const limitSql = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
   const paths = st.q.cte(q`SELECT ${src.c.path} AS path, ROW_NUMBER() OVER (ORDER BY ${src.c.path}) AS pk FROM ${src}${limitSql}`, ['path', 'pk']);
-  const layout = { kind: 'grouped' as const, elem: 'vertex' as const, byKey: key !== undefined };
-  // by(key) → one scalar `v` per position (correlated on the exploded id); otherwise the
-  // whole vertex framed from nodes/labels.
-  const node = key !== undefined
-    ? q`SELECT pp.pk, je.key AS ord, ${nodePropScalar(q`je.value`, key)} AS v FROM ${paths} pp, json_each(pp.path) je ORDER BY pp.pk, je.key`
+  const layout = { kind: 'grouped' as const, elem: 'vertex' as const, byKey: scalarPos };
+  // by(key)/by(T.token) → one scalar `v` per position (read back off the exploded id);
+  // otherwise the whole vertex framed from nodes/labels.
+  const node = scalarPos
+    ? q`SELECT pp.pk, je.key AS ord, ${posValue(q`je.value`)!} AS v FROM ${paths} pp, json_each(pp.path) je ORDER BY pp.pk, je.key`
     : (() => {
         const n = nodes.as('n');
         const l = labels.as('l');
