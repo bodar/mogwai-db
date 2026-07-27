@@ -7,7 +7,7 @@ over-reports `LANDED`; this keeps only what a code check confirms open). Live pe
 `feature-support-matrix.md`.
 
 **Refreshed** 2026-07-26 against L3 1362 unique / 2297 (`l3-state.json` shows 1364 — two names
-recur legitimately, see `test/CLAUDE.md`). A 2026-07-27 session took it to **1421**: item 2's
+recur legitimately, see `test/CLAUDE.md`). A 2026-07-27 session took it to **1425**: item 2's
 Slice 3 (child-body labels, +8), the constant predicate-operand fold (+29), read-only child
 verification (+14), re-sourced operand subqueries (+6), and correlated operands (+4).
 Path pointers assume the 2026-07-23 restructure
