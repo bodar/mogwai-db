@@ -4,7 +4,7 @@
 **Status:** ⚠️ **LARGELY LANDED — this doc is the original DESIGN, not current state.** Read the
 status table below before planning from it; the prose that follows describes the pre-build world
 and states as open several things that now work. Stale readings of it have twice caused work to be
-re-picked (see `outstanding-work.md` items 1 and 4).
+re-picked (see `outstanding-work.md` item 4).
 **Baseline at writing:** L3 1227 (now 1277).
 
 ## Status as of 2026-07-25 (code is ground truth, not the prose below)
