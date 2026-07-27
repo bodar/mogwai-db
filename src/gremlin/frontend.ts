@@ -265,6 +265,21 @@ function walkArgs(node: any, out: any[], params: Record<string, any>, types: (Ty
     // nothing (JSON request path), so the write seam infers from the JS value.
     emit(params[name], paramTypes[name] ?? null); return;
   }
+  // A COMPOSED predicate — `P.gt(20).and(P.lt(30))`, `TextP.startingWith('m').or(…)`,
+  // `P.gt(5).negate()`. The grammar's three infix alternatives
+  // (`traversalPredicate DOT K_AND|K_OR|K_NEGATE …`) carry no `#label`, so ANTLR folds them into
+  // `TraversalPredicateContext` itself rather than minting a `TraversalPredicate_<op>Context`. That
+  // is why this needs its own case ahead of the prefix test below: without it the generic recursion
+  // descended into the two operand children and emitted them as SEPARATE step args, so
+  // `has(k, P1.or(P2))` reached the compiler as `has(k, P1, P2)` — and every consumer reads args[1]
+  // and ignores args[2], silently dropping the second operand. Must stay BEFORE the
+  // `TraversalPredicate_` test: the composed node's own children match that prefix.
+  if (cls === 'TraversalPredicateContext') {
+    const composed = parseComposedPredicate(node, params);
+    if (composed) { emit(composed); return; }
+    // A plain (non-infix) predicate: one sub-rule child, handled by the prefix case below once
+    // the recursion steps into it.
+  }
   if (cls.startsWith('TraversalPredicate_')) {
     emit(parsePredicate(node, params)); return;
   }
@@ -432,6 +447,42 @@ function mapKeyOf(mk: any): any {
 }
 
 export interface Pred { op: string; values: any[]; }
+
+/**
+ * The three infix predicate combinators, or null if `node` is a plain predicate.
+ *
+ * Grammar (Gremlin.g4 `traversalPredicate`):
+ *   traversalPredicate DOT K_AND    LPAREN traversalPredicate RPAREN
+ *   traversalPredicate DOT K_OR     LPAREN traversalPredicate RPAREN
+ *   traversalPredicate DOT K_NEGATE LPAREN RPAREN
+ * All three are unlabeled, so they share `TraversalPredicateContext` with the plain form; a plain one
+ * has exactly ONE child (its sub-rule), an infix one has several. `negate()` reuses the existing
+ * `not` op — `predicateSql` already renders that — so only `and`/`or` are new ops downstream.
+ * Recurses, so `a.or(b).or(c)` and arbitrarily nested compositions build a left-leaning tree.
+ */
+function parseComposedPredicate(node: any, params: Record<string, any>): Pred | null {
+  if (node.getChildCount() <= 1) return null;
+  const left = node.traversalPredicate?.(0);
+  if (!left) return null;
+  // The combinator keyword sits between the operands; read it off the child tokens rather than
+  // positionally, so a grammar tweak to whitespace/parens handling can't silently shift the index.
+  const kw = (() => {
+    for (let i = 0; i < node.getChildCount(); i++) {
+      const t = node.getChild(i).getText?.();
+      if (t === 'and' || t === 'or' || t === 'negate') return t;
+    }
+    return null;
+  })();
+  if (!kw) return null;
+  const operand = (n: any): Pred => {
+    const composed = parseComposedPredicate(n, params);
+    return composed ?? parsePredicate(n.getChild(0), params);
+  };
+  if (kw === 'negate') return { op: 'not', values: [operand(left)] };
+  const right = node.traversalPredicate(1);
+  if (!right) return null;
+  return { op: kw, values: [operand(left), operand(right)] };
+}
 
 function parsePredicate(node: any, params: Record<string, any>): Pred {
   const m = node.constructor.name.match(/^TraversalPredicate_(\w+)Context$/);

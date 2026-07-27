@@ -42,26 +42,6 @@ export interface KnownDivergence {
 
 export const KNOWN: readonly KnownDivergence[] = [
   {
-    query: 'g.V().filter(__.has("name", TextP.startingWith("m").or(TextP.startingWith("p"))))',
-    fastPath: 'predicateInlining',
-    diagnosis:
-      'SILENT WRONG ANSWER. An infix-composed predicate (P/TextP `.or()`/`.and()`) is FLATTENED BY THE ' +
-      'FRONT-END into two sibling args: stepChain yields has("name", {op:startingWith,values:["m"]}, ' +
-      '{op:startingWith,values:["p"]}), so the connective is lost before the compiler ever sees it. ' +
-      '(parsePredicate, src/gremlin/frontend.ts, only matches TraversalPredicate_<op>Context; the ' +
-      "grammar's infix and/or production is not that shape, so extractArgs descends and emits its two " +
-      'children as separate args.) has() then reads args[1] and ignores args[2] — the traversal ' +
-      'silently means has("name", startingWith("m")), returning marko where marko+peter is correct. ' +
-      'With predicateInlining off, the generic path instead binds the stray Pred object and SQLite ' +
-      'throws "Binding expected string, …" — fails closed, but with a raw bind error rather than a ' +
-      'clear deferral. The same shape via a bare has() (no filter wrapper) throws on BOTH sides, so ' +
-      'only the filter()-wrapped form shows up as a divergence. `P.gt(20).and(P.lt(30))` flattens ' +
-      'identically — this is a family, not one traversal. ' +
-      'FIX (front-end, ~10 lines): parsePredicate emits {op:"and"|"or", values:[Pred,Pred]} for the ' +
-      'infix production; predicateSql (src/compiler/plan/plan.ts) renders those two ops as a SQL ' +
-      'conjunction/disjunction. Closes every P and TextP composition at any nesting depth.',
-  },
-  {
     // The MINIMAL reproduction, deliberately not the corpus traversal that first surfaced this. See
     // the "two wrongs" paragraph in the diagnosis: on the corpus traversal the fast path is
     // accidentally CORRECT, which makes it a badly misleading thing to write a fix against.

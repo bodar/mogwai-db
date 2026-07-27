@@ -256,6 +256,13 @@ export function predicateSql(expr: Expression, pred: any, typeCtx: TypeCtx = {})
   if (pred === null || typeof pred !== 'object' || !('op' in pred)) return q`${expr} = ${operandSql(pred)}`;
   const { op, values: vals } = pred as Pred;
   if (op === 'not') return q`NOT (${predicateSql(expr, vals[0], typeCtx)})`;
+  // Infix-composed predicates — `P.gt(20).and(P.lt(30))`, `TextP.startingWith('m').or(…)`. Both
+  // operands test the SAME expression, so this is a plain boolean combination of the two rendered
+  // predicates, and it nests to any depth because each operand recurses through here. The front-end
+  // (parseComposedPredicate) is what turns the grammar's infix production into these ops; before it
+  // existed the connective was lost and the second operand silently dropped.
+  if (op === 'and' || op === 'or')
+    return q`(${predicateSql(expr, vals[0], typeCtx)} ${raw(op.toUpperCase())} ${predicateSql(expr, vals[1], typeCtx)})`;
   if (op === 'typeOf') return typeOfSql(expr, vals[0], typeCtx);
   // Ordering comparisons (gt/gte/lt/lte, between/inside) go through the vtype-aware
   // compareKey (column) + compareBound (literal) so a TEXT-stored big long / bigdecimal /
