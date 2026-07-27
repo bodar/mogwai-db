@@ -381,12 +381,18 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    PROVIDER. So no tail-boundary rewrite is needed for them.
 
    **Still open, each precisely scoped:**
-   - **A GROUP child body** (`local(__.out().group().by(k))`). Design is settled — the wire frames
-     `group` as ONE Map from all rows (a barrier), so a scoped group must emit one map PER PARENT,
-     i.e. a `MapStream`, which the seam now supports. The work is threading an ORIGIN dimension
-     through `lowerGroup`/`GroupSource`, which has 6+ value modes (`valFold`, `valElement`,
-     `valNestedMap`, `valReducer`, composite keys) each needing its per-origin analogue. **NEEDS A
-     SCOPING DECISION: how many of those modes to take on vs fail closed.** *Medium.*
+   - **A GROUP child body.** Design is settled — the wire frames `group` as ONE Map from all rows (a
+     barrier), so a scoped group must emit one map PER PARENT, i.e. a `MapStream`, which the seam now
+     supports. Threading an ORIGIN dimension through `lowerGroup`/`GroupSource` means a per-origin
+     analogue for each of its 6+ value modes (`valFold`, `valElement`, `valNestedMap`, `valReducer`,
+     composite keys). **An earlier draft called the mode coverage a decision needing a human; that
+     was overstated — measured, there is almost no demand** (2 corpus traversals mention a group
+     inside a child body, and BOTH are `by(__.group()…)`, i.e. group at root with a group-shaped
+     KEY). So: build it when a scenario asks, and start with the cheap half — a bare `groupCount()`
+     child body has exactly ONE value mode (count → a scalar), so it sidesteps the matrix entirely.
+     Note only the SCALAR-key half is framable: a bare `groupCount()` over elements keys the map by
+     the ELEMENT, and `frameTypedNode` has no element case, so an element-keyed map blob cannot be
+     framed (the standing `materializeMapRoot` deferral). *Low-Med.*
    - **A PATH child body** (`local(__.path())`) — needs path tracking INSIDE a child scope, which is
      path-history-substrate territory, not this seam's. *Low-Med.*
    - **`valueMap(true)`/`elementMap` as a child body** — fails closed (excluded by the classifier);
@@ -403,6 +409,23 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    - **`ChildShape` is deliberately NOT widened to 'map'.** It is `BranchArmShape` minus null, so
      admitting 'map' would tell the branch triage a map ARM is mergeable when no merge covers a map
      shape — converting a clean deferral into a wrong answer. A map ARM stays unclassifiable.
+   **The group failure taxonomy, measured 2026-07-27** (128 corpus traversals mention group; 88
+   compile, 40 fail). Recorded because the causes are unrelated and the label "group" hides that —
+   most of these are NOT group-seam work:
+   - ✅ **2 — count/projection asymmetry in the value gate. FIXED** (see the give-back below).
+   - **3 — a SIDE-EFFECT `groupCount("a")` in a child scope** (`local(groupCount("a"))`). Not a group
+     problem at all: a string arg makes it the side-effecting form, a pass-through barrier dispatched
+     by `groupCountSE`. This is P3's `sideEffect`-in-a-child-scope item.
+   - **4 — `group()`/`groupCount()` over a SCALAR parent.** Needs a scalar group builder (no element
+     to project, and the default value mode `elementList` does not apply). One instance of the wider
+     parent-shape uniformity gap: ~67 corpus traversals fail as "X after a scalar stream / on a list
+     value / cannot consume the <MAP> result shape" across ~35 steps.
+   - **3 — a barrier `groupCount` inside a `repeat()` body.** That is item 3's `times(n)` unroll.
+   - **2 — `group().by(traversal)` KEY needing `fold()`/`sideEffect()` in the body** — child
+     vocabulary, item 2.
+   - **~2 — a bare `groupCount()` child body** (map per parent) — the cheap half of the item above.
+   - remainder: a nested group inside a value body, `sample()`, and one-offs.
+
    → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md),
    [carried-schema-and-projection-reentry](./2026-07-14-carried-schema-and-projection-reentry-plan.md)
 
@@ -660,6 +683,14 @@ All → [phased-roadmap](./2026-07-11-phased-roadmap-plan.md) unless noted.
 ---
 
 ## Internal debt / give-backs (Low)
+
+- ✅ **Group value gate: the two shape classifiers are now COMPLEMENTARY, not alternative**
+  (2026-07-27). `tryLowerGroupChildSource` picked ONE classifier by whether the value body's
+  terminal was `count` — `classifyCountChild` (no scalar projection) or `classifyScalarChildRows`
+  (`<prefix>.<projection>.<reducer>`). Neither subsumes the other, so a count-terminal body WITH a
+  projection matched neither: `by(__.label().count())` failed while `by(__.label().sum())` worked.
+  Both are tried now; emit needed nothing (a count-terminal body already routed to
+  `tryCompileRowsBeforeReducer`). Widens the KEY side by the same statement. L3 1471 → 1473.
 
 - ~~**Finish deleting `correlatedExists`/`correlatedReduce`**~~ (`steps/prefix/predicate.ts`) —
   **the premise was wrong and is now retired. ✅ The real work landed 2026-07-27.** Measured, the
