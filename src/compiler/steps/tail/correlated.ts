@@ -1,4 +1,4 @@
-import { Query, derived, q, list, raw, type Expression, type Relation } from '../../../sql/kernel/q.ts';
+import { DerivedQuery, derived, q, list, raw, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { type Step } from '../../../gremlin/frontend.ts';
 import { type Elem } from '../../plan/plan.ts';
 import { normalize } from '../../ir/passes.ts';
@@ -24,25 +24,6 @@ import { mentionsLabel } from './child-shape.ts';
 // reference resolves outward through the WHERE-clause EXISTS boundary to the true outer
 // scope. This is why the child needs no bespoke `xe`/`xn` alias scheme (the flat
 // hand-rolled EXISTS did, to avoid a self-shadow).
-
-/** A `Query`-shaped context for an inline correlated child: `.cte` returns a nested
- *  `derived()` subquery (alias `x0,x1,…`, distinct from the outer's `c*`/`n`/`p`/`e`)
- *  instead of registering a shared CTE, so the movement/filter fold emits nested
- *  correlated relations with no change to `advance`/`Carry`. A correlated child has no
- *  shared WITH and is never rendered standalone, and a recursive term cannot reference
- *  an outer row — so `.recursiveCte`/`.render` are unreachable here and fail closed. */
-class InlineQuery extends Query {
-  private k = 0;
-  override cte(body: Expression, cols: readonly string[] = ['id']): Relation {
-    return derived(body, cols, `x${++this.k}`);
-  }
-  override recursiveCte(): never {
-    throw new Error('correlated inline child cannot contain a recursive CTE (repeat())');
-  }
-  override render(): never {
-    throw new Error('correlated inline child is never rendered standalone');
-  }
-}
 
 /**
  * Compile a movement/filter child body as ONE nested correlated relation seeded from
@@ -80,9 +61,13 @@ export function compileCorrelatedChild(
   // it. WITH a scope the columns are really present, so an absent one is a genuinely unbound
   // label and the same drop-every-traverser answer is the correct one.
   if (!labels && mentionsLabel(steps, params)) return null;
-  // A variant engine bound to a fresh InlineQuery (nested derived subqueries, not shared CTEs),
+  // A variant engine bound to a fresh DerivedQuery (nested derived subqueries, not shared CTEs),
   // sharing the parent engine's fastPaths — so the movement/filter StepFns read the right config.
-  const inlineEngine = engine.withQuery(new InlineQuery());
+  // The kernel owns the whole `x*` namespace: the seed below draws its alias from the same
+  // counter the fold's relations do, so the two cannot drift apart. Its `recursiveCte`/`render`
+  // fail closed, which is what turns "a repeat() in a correlated body" into a clear error.
+  const inlineQ = new DerivedQuery();
+  const inlineEngine = engine.withQuery(inlineQ);
   const aliasCols = labels ? aliasColsOf(labels.aliases) : [];
   const carried: Carried = { aliases: labels?.aliases ?? new Map(), origins: [] };
   // The alias columns correlate OUTWARD exactly as `idExpr` does: a FROM-clause derived table is
@@ -95,7 +80,7 @@ export function compileCorrelatedChild(
     kind: 'elements',
     q: inlineEngine.q,
     params,
-    rel: derived(q`SELECT ${list(seedProj, ', ')}`, ['id', ...aliasCols], 'x0'),
+    rel: derived(q`SELECT ${list(seedProj, ', ')}`, ['id', ...aliasCols], inlineQ.alias()),
     elem: 'node',
     carried,
   };

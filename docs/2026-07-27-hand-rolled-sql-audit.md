@@ -18,15 +18,22 @@ which is not the same as ranking by lines._
 > | 4 | `path.ts` grouped positional projector | open |
 > | 5 | `write.ts` merge/endpoint | open (largest by count, but terminal — never composes at depth) |
 > | 7–9 | `child.ts` residue, `search.ts`, leaf dups | open, Low |
+> | — | mode C *(this doc's "one structural finding")* | ❌ **retired — measured unnecessary, see below** |
 >
-> **Two premises here are FALSE — do not rebuild on them:**
-> 1. *"Mode C (flat accumulation) is a missing rendering mode the compiler needs."* Avoidable. A
->    recursive term may reference a NON-recursive CTE, so the body compiles once through the ordinary
->    seam as a `(from_id, to_id)` relation the term joins. No new mode was added.
+> **Three premises here are FALSE — do not rebuild on them:**
+> 1. *"Mode C (flat accumulation) is a missing rendering mode the compiler needs."* Avoidable, and
+>    now measured avoidable at **every** site it was claimed for, not just #1 — see "the one
+>    structural finding" below, which is fully retracted. A recursive term may reference a
+>    NON-recursive CTE, so the body compiles once through the ordinary seam as a
+>    `(from_id, to_id)` relation the term joins. No new mode was added, and none should be.
 > 2. *"The remaining shapes are blocked on making the tail's terminal boundary relational."*
 >    `project`/`group`/`path` already HAVE relational forms; they were blocked on having no child
 >    PROVIDER. And `local(__.out())` already worked, so "the element terminal needs a relational form"
 >    was imaginary too.
+> 3. *"Mode B cannot stand in for mode C."* True only in **FROM-clause position**. A correlated
+>    scalar subquery in a recursive term's SELECT list *does* see the walk row (verified below), so
+>    mode B works inside recursion — just not for a body that FANS OUT. The fan-out, not the
+>    correlation, is what `expandRepeatBody` is really working around.
 >
 > **The biggest remaining ceiling gap is not in this list**: parent-shape uniformity (67 corpus
 > traversals, ~35 steps — the same step working over an element stream but not a scalar/list/path/map
@@ -59,27 +66,64 @@ fast path, move the capability to the generic machinery.** The perf was real (1.
 would have been a regression; extracting the load-bearing fold into a Pass made the flag honest,
 fixed 3 top-level scenarios it had never reached, and left the optimization untouched.
 
-## The one structural finding — ⚠️ **PARTLY SUPERSEDED, read this first**
+## The one structural finding — ❌ **RETRACTED. Mode C is not needed. Do not build it.**
 
-**The conclusion below ("the compiler needs a third rendering mode") is wrong for #1, which is the
-site it was written for.** #1 landed with **no new mode**: a recursive term may reference a
-NON-recursive CTE, so the body compiles once through the ordinary seam as a `(from_id, to_id)`
-relation the term joins. The `LATERAL` evidence in this section is still correct and still worth
-keeping — it explains *why* `expandRepeatBody` had to be hand-rolled — but "therefore we need mode C"
-does not follow, and the "#4 and #5 fall out of the same decision" claim is unproven: nobody has
-checked whether they have a CTE-reference route too. Check that before building a mode.
+_Checked 2026-07-27, as this section asked: 14 `bun:sqlite` probes over a seeded modern graph, one
+group per claimed site, each result verified against an expected value rather than "it ran".
+Conclusion: **no site needs a third rendering mode.** The kernel has two, and two is enough._
 
-Three of the remaining sites (#1, #4, #5) are the same missing primitive wearing different clothes.
-The compiler has **two** rendering modes and needs a third:
+The reasoning error was scoping the problem as *rendering* when it is *provisioning*. Mode C's
+unique capability is narrow and precise:
+
+> a child body can reference a row-source living in the **same FROM clause**.
+
+Mode A can't (each step wraps the previous as a subquery); mode B can't (correlation reaches
+OUTWARD through a WHERE/EXISTS boundary, never sideways into a sibling FROM item). So the real
+question is not "is mode C nice" but **which row-sources cannot first be materialized as their own
+relation and joined on a key** — and the measured answer is: in SQLite, only a recursive CTE's
+self-reference. Every other claimed site materializes fine.
 
 | mode | who owns it | shape | used by |
 |---|---|---|---|
 | A — materialized CTE | `Query.cte` (`sql/kernel/q.ts`) | `WITH c0 AS (…), c1 AS (SELECT … FROM c0)` | the root + child seam |
-| B — nested correlated derived | `InlineQuery` (`steps/tail/correlated.ts`) | `EXISTS(SELECT 1 FROM (SELECT … FROM (SELECT <outer.id>) x0) x1)` | `where`/`filter`/`and`/`or`/`choose`/`until` |
-| **C — flat accumulation** | **nobody** | one SELECT whose FROM/WHERE is appended to, correlating by JOIN | hand-rolled 3× |
+| B — nested correlated derived | **`DerivedQuery` (`sql/kernel/q.ts`)** | `EXISTS(SELECT 1 FROM (SELECT … FROM (SELECT <outer.id>) x0) x1)` | `where`/`filter`/`and`/`or`/`choose`/`until` |
+| ~~C — flat accumulation~~ | ~~nobody~~ | ~~one SELECT whose FROM/WHERE is appended to~~ | **retired: `expandRepeatBody`'s fast path is the only instance and stays one** |
 
-Mode B **cannot** stand in for mode C, and this is not a judgement call — SQLite has no `LATERAL`,
-so a FROM-clause derived table cannot reference the row being recursed over. Verified directly:
+Both modes now live in the kernel — mode B moved there as `DerivedQuery`, since "nest instead of
+name" is a property of `Query`, not of traversals. Correlation is what the *caller* seeds; the
+inline correlated child (`steps/tail/correlated.ts`) is the two composed.
+
+### What each site actually needs — the keyed child relation, not a mode
+
+The primitive all three sites share is already in the codebase **three times**: compile a child body
+ONCE over its whole domain, keyed by its origin, then JOIN on the key.
+`repeatBodyRelation` (#1's `(from_id, to_id)`), the LINEAR path regime's per-position child (keyed by
+ordinal, `LEFT JOIN … ON b.o0 = p.o0`), and both routes verified below. That idiom — not a rendering
+mode — is the thing worth naming.
+
+- **#4 `path.ts` grouped regime — no mode C.** SQLite gives table-valued functions the one
+  lateral-ish affordance it has, so `FROM paths pp, json_each(pp.path) je` already works; the
+  explode then materializes as `(pk, ord, id)` and the `by()` child keys off `id`. Pure mode A —
+  structurally identical to what the linear regime already does. Verified with a real child
+  traversal, not just a property: `by(__.out().count())` → `[3,2,0],[3,2,0]`, and
+  `by(__.out().has("name","lop").count())` → `[1,1,0],[1,1,0]`. Mode B over the exploded CTE works
+  too, so there are *two* routes and neither is new.
+- **#5 `write.ts` merge — not mode C at all.** `mergeMatchQuery` isn't correlating with anything:
+  the driver id is resolved in JS and bound as a literal. It is mode A with the correlation done by
+  a **round-trip**, which is a different defect (row-at-a-time execution) with a different fix.
+  Set-based `drivers ⋈ match` runs in one query; the genuinely per-driver part — a merge map whose
+  value is a traversal seeded at the driver — becomes a keyed `(driver, value)` relation. Both
+  verified.
+- **#1 `repeat` — the one real constraint, and it is about FAN-OUT.** Correlation inside a recursive
+  term is fine: a correlated scalar subquery in the recursive term's SELECT list *does* see the walk
+  row (verified — this falsifies the blanket "mode B cannot stand in for mode C"). What a scalar
+  subquery cannot do is return MANY rows per input row, and a movement fans out. Fan-out needs FROM
+  position; FROM position has no lateral. **That** is why `expandRepeatBody` is hand-rolled — and it
+  stays, as the recognized fast path, with the generic body relation as the fallback. Nothing to
+  build.
+
+The `LATERAL` evidence below is still correct and still worth keeping — it explains why
+`expandRepeatBody` exists. It just does not imply a third mode:
 
 ```
 FAIL  with recursive w(id,depth) as (select 1,0 union all
@@ -89,9 +133,30 @@ FAIL  with recursive w(id,depth) as (select 1,0 union all
 OK    … select e.tgt, w.depth+1 from w join edges e on e.src=w.id …     (mode C, flat join)
 ```
 
-So `expandRepeatBody` is not laziness — it is mode C, hand-written for one vocabulary. So is
-`path.ts`'s grouped positional projector, and so is `write.ts`'s merge-match. **Whoever closes #1
-should decide mode C deliberately**, because #4 and #5 fall out of the same decision.
+**What the re-measure ADDED, and why it flips the conclusion.** SQLite's lateral rule is not
+"none" — it is positional, and the three positions differ. This is the whole finding:
+
+```
+OK    from paths pp, json_each(pp.path) je                    -- table-valued fn: sees earlier FROM item
+FAIL  from paths pp, json_each(pp.path) je,
+        (select count(*) c from edges where src=je.value) x    -- derived table: no such column: je.value
+OK    select (select count(*) from edges e where e.src=je.value)
+        from paths pp, json_each(pp.path) je                   -- correlated scalar subquery: sees it
+OK    with recursive w(id,depth,deg) as (select 1,0,… union all
+        select e.tgt, w.depth+1, (select count(*) from edges e2 where e2.src=e.tgt)
+        from w join edges e on e.src=w.id where w.depth<2) …    -- ditto INSIDE recursion
+```
+
+So the constraint is **fan-out in FROM position**, not correlation. A scalar subquery correlates
+freely (even into a recursive term) but returns one row; a movement needs many. Everything that
+only needs one value per row — which is every `by()`, every merge-map value, every until/emit
+predicate — has a route today. `expandRepeatBody` keeps its flat join because a movement body is
+exactly the fan-out case, and it is a **fast path** with the generic body relation behind it.
+
+So `expandRepeatBody` is not laziness — it is a lazy frontier walk, kept for that reason.
+`path.ts`'s grouped positional projector and `write.ts`'s merge-match were filed alongside it on the
+assumption that they share the constraint; **measured, they do not** — neither one fans out inside a
+recursive term, so both reduce to a keyed relation plus a join.
 
 For #1 specifically there is a cheaper route that needs *no* new mode, verified to work: compile the
 body ONCE through the ordinary seam as a `(from_id, to_id)` relation over the whole vertex set, then
@@ -305,10 +370,20 @@ FAIL  g.V().repeat(__.out()).times(2).path().by(T.id)
 ```
 
 **Measured:** 7 / 42 `path().by(…)` corpus traversals fail (was 9 pre-merge — trunk's union-source
-work fixed `path()` over a union source); 14 attribute to path.ts overall. Needs a
-positional-child substrate over `json_each` — push a child scope per position — which is the
-mode-C question again. Already filed under P3 recursive-path tails; this sweep adds the
-linear-vs-recursive asymmetry as the sharp framing.
+work fixed `path()` over a union source); 14 attribute to path.ts overall. Already filed under P3
+recursive-path tails; this sweep adds the linear-vs-recursive asymmetry as the sharp framing.
+
+**The route, now measured (2026-07-27) — no new rendering mode, and simpler than the linear case.**
+Materialize the `json_each` explode as its own `(pk, ord, id)` relation, push ONE child scope over
+it, and `LEFT JOIN` the child back on the ordinal — structurally what `lowerPath` already does per
+position. It is *easier* than linear because `compilePathArray` already defers `bys.length > 1`, so
+a grouped path has exactly ONE `by()` body applied uniformly: one child lowering, not N. Verified
+end-to-end on a seeded graph — `by(__.out().count())` → `[3,2,0],[3,2,0]` and
+`by(__.out().has("name","lop").count())` → `[1,1,0],[1,1,0]`, both matching the expected values, and
+a mode-B correlated child over the exploded CTE gives the same answers. What must go with it:
+`nodePropScalar(key)` gives way to the generic projector (so `by(T.id)` stops being special), and
+the `bys.length > 1` deferral can stay — round-robin over a dynamic length is a real semantic wall,
+not a vocabulary gap.
 
 ---
 
@@ -331,6 +406,15 @@ Ranked below #4 despite the line count for one reason the user's criterion makes
 the write path, so fixing it unblocks a *cluster* but never composes at depth. It is the acknowledged
 `write.ts` row-at-a-time debt in `outstanding-work.md` and `.claude/rules/schema-storage.md`;
 this sweep confirms it open and sizes it.
+
+**Re-measured 2026-07-27: this is NOT a rendering-mode problem, so don't wait on one.** The driver
+id is resolved in JS and bound as a literal, so `mergeMatchQuery` correlates with nothing — it is
+mode A with the correlation done by a round-trip. Verified routes: `drivers ⋈ match` returns every
+driver's match in ONE query, and the genuinely per-driver part (a merge map whose value is a
+traversal seeded at the driver) compiles once as a keyed `(driver, value)` relation and joins. The
+residual difficulty here is not SQL shape at all — it is that `run` interleaves reads with INSERTs
+and reads back what it wrote, so the set-based form has to decide match-vs-create for the whole
+driver set before writing. That is the actual design question; rendering was never the blocker.
 
 ---
 

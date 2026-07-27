@@ -160,3 +160,38 @@ export class Query {
     return { sql: text, binds: args };
   }
 }
+
+/** A `Query` that NESTS instead of naming: `cte()` returns a `derived()` subquery
+ *  (`x0,x1,…`, a namespace distinct from the outer's `c*`) rather than registering a
+ *  shared CTE, so a fold that builds through the kernel renders as ONE nested-derived
+ *  expression instead of a chain of `WITH` heads. The kernel's own preference for
+ *  `derived` over a named CTE (see `src/sql/CLAUDE.md`) as a whole-query mode — which is
+ *  what makes it a `Query` subclass here rather than a per-site choice at each `derived`
+ *  call.
+ *
+ *  It is NOT inherently correlated: correlation comes from whatever the CALLER seeds the
+ *  fold with (an expression referencing an outer row). "Nest, don't name" and "seed from
+ *  an outer row" are separable; the correlated inline child (`steps/tail/correlated.ts`)
+ *  is the two composed.
+ *
+ *  Nesting means there is no shared `WITH` to hang a recursive term on, and no standalone
+ *  render — both fail closed rather than emitting something malformed. A caller that wants
+ *  a domain-specific deferral message should check before it gets here. */
+export class DerivedQuery extends Query {
+  private k = 0;
+  /** Mint the next alias in THIS query's nesting namespace. Public so a caller's SEED
+   *  relation draws from the same counter as the fold's — one owner for the namespace. */
+  alias(): string { return `x${this.k++}`; }
+  override cte(body: Expression, cols: readonly string[] = ['id']): Relation {
+    return derived(body, cols, this.alias());
+  }
+  // Signatures MATCH the base deliberately (rather than the arity-0 form TS would also
+  // accept): these are reachable calls that must fail with a clear message, not shapes a
+  // caller is prevented from writing.
+  override recursiveCte(_cols: readonly string[], _build: (self: Relation) => Expression): never {
+    throw new Error('a nested-derived Query has no shared WITH and cannot host a recursive CTE');
+  }
+  override render(_tail: Expression): never {
+    throw new Error('a nested-derived Query is never rendered standalone');
+  }
+}

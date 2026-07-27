@@ -12,7 +12,7 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery, executeFramed } from '../support/executor.ts';
 import { ioc } from '../../src/io.ts';
-import { Query } from '../../src/sql/kernel/q.ts';
+import { DerivedQuery, Query, q, render } from '../../src/sql/kernel/q.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { assertStreamColumns, toGroupStream, toPathStream, toPropertyStream, toRecordStream, toScalarStream, toVariantStream } from '../../src/compiler/steps/context/stream.ts';
 import { popChildScope, pushChildScope, reuseCurrentFrame } from '../../src/compiler/steps/tail/child.ts';
@@ -79,6 +79,30 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     expect(() => toPathStream(carry, q.cte({} as any, ['v']), pathLayout)).toThrow(
       'path stream column mismatch',
     );
+  });
+
+  // The kernel owns BOTH rendering modes: `Query` names relations (`WITH c0, c1, …`),
+  // `DerivedQuery` nests them (`(…) x0`, `(…) x1`). The correlated inline child
+  // (steps/tail/correlated.ts) is the nesting mode plus a seed that references an outer
+  // row — which is why the mode itself carries no traversal vocabulary and lives in q.ts.
+  test('DerivedQuery nests instead of naming, shares one alias namespace, and fails closed', () => {
+    const dq = new DerivedQuery();
+    // A caller's seed and the fold's own relations draw from the SAME counter, so the two
+    // can never drift into a collision (the seed used to be a hand-written 'x0' next to a
+    // pre-incrementing counter in another module).
+    expect(dq.alias()).toBe('x0');
+    const inner = dq.cte(q`SELECT 1 AS id`, ['id']);
+    expect(inner.name).toBe('x1');
+    expect(render(inner.from).sql).toBe('(SELECT 1 AS id) x1');
+    expect(render(dq.cte(q`SELECT id FROM ${inner}`, ['id']).from).sql)
+      .toBe('(SELECT id FROM (SELECT 1 AS id) x1) x2');
+    // Nesting means no shared WITH to hang a recursive term on, and no standalone render.
+    // Both throw rather than emitting something malformed — this is what turns "a repeat()
+    // inside a correlated body" into a clear deferral instead of broken SQL.
+    expect(() => dq.recursiveCte(['id'], () => q`SELECT 1`)).toThrow('cannot host a recursive CTE');
+    expect(() => dq.render(q`SELECT 1`)).toThrow('never rendered standalone');
+    // A plain Query is unaffected: it still names.
+    expect(new Query().cte(q`SELECT 1 AS id`, ['id']).name).toBe('c0');
   });
 
   test('child scope retains a parent domain and pushes/pops one physical ordinal', () => {

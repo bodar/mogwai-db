@@ -74,7 +74,7 @@ export interface Engine {
   subEngine(params?: Record<string, any>, fastPaths?: FastPathConfig): Engine;
 
   /** A variant engine sharing THIS engine's dependencies but bound to `q` — for the correlated
-   *  inline child, which lowers movement/filter over a special InlineQuery (nested derived
+   *  inline child, which lowers movement/filter over the kernel's `DerivedQuery` (nested derived
    *  subqueries, not shared CTEs). The returned engine attaches itself to `q`. */
   withQuery(q: Query): Engine;
 

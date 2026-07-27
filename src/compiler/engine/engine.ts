@@ -528,7 +528,7 @@ export class LoweringEngine implements Engine {
   }
 
   /** A variant engine sharing THIS engine's deps but bound to `q` — for the correlated inline
-   *  child's InlineQuery. Reuses this engine's (already collapse-gated) fastPaths. */
+   *  child's `DerivedQuery`. Reuses this engine's (already collapse-gated) fastPaths. */
   withQuery(q: Query): LoweringEngine {
     const scope = createCompilerScope(this.app, { params: this.params, federationDepth: this.federationDepth, q });
     return new LoweringEngine(this.app, scope, this.fastPaths);
