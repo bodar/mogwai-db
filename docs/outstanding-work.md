@@ -9,7 +9,7 @@ over-reports `LANDED`; this keeps only what a code check confirms open). Live pe
 **Refreshed** 2026-07-26 against L3 1362 unique / 2297 (`l3-state.json` shows 1364 — two names
 recur legitimately, see `test/CLAUDE.md`). A 2026-07-27 session took it to **1421**: item 2's
 Slice 3 (child-body labels, +8), the constant predicate-operand fold (+29), read-only child
-verification (+14), and re-sourced operand subqueries (+6).
+verification (+14), re-sourced operand subqueries (+6), and correlated operands (+4).
 Path pointers assume the 2026-07-23 restructure
 (`src/compiler/steps/{context,prefix,tail,write}/`, `src/compiler/{ir,plan,engine}/`).
 
@@ -249,20 +249,32 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    deliberately — 23 scenarios is a lot, but a bespoke second parser is exactly the kind of thing
    that decision exists to prevent. **Large.**
 
-7c. **Predicate operands that are TRAVERSALS — mostly landed 2026-07-27, one residual.**
-   TinkerPop compares against a traversal operand's FIRST result. Three of the four cases are done:
+7c. **Predicate operands that are TRAVERSALS — ✅ the four shapes landed 2026-07-27; narrow tails.**
+   TinkerPop compares against a traversal operand's FIRST result. All four shapes now lower:
    a `constant()` operand folds to a literal in the IR (`foldConstantPredicateOperands`, +29
    scenarios, and it reached hosts nobody enumerated — `hasLabel`, the `all()`/`none()` list
    predicates, `choose`); a RE-SOURCED (`V()`/`E()`-headed) operand compiles as a scalar subquery
    (`steps/tail/operand.ts`, +6); and a MUTATING operand is rejected by the read-only child
-   verification (+14). **Still open:** a TRAVERSER-DEPENDENT operand — `has('name',
-   __.values('other'))`, `is(__.out().count())` — needs a value correlated to the current row, so
-   it fails closed today with a clear deferral. The seam is ready: `predicateSql` accepts an
-   Expression operand (`value()` forwards nodes), so this is "build the correlated scalar and
-   substitute it", most likely through `tryCompileScalarModulations` or the inline correlated
-   child. Also open: `within`/`without` over a multi-value operand (`IN (SELECT …)` rather than
-   `LIMIT 1`), and the `union(...).fold()` operand forms, which are blocked on a *scalar-branch
-   union SOURCE*, not on the operand machinery. *Low-Med.*
+   verification (+14); and a TRAVERSER-DEPENDENT operand renders as a CORRELATED scalar subquery
+   (+4). That last one follows the child seam's usual split — `<element movement/filter
+   prefix>.<scalar projection>` — with the prefix going through `compileCorrelatedChild`, the SAME
+   inline renderer `where()`/`filter()` use (so movement inside an operand is not a second
+   implementation), the projection reading the reached element through `aliasCtx` exactly as
+   `correlatedExists` does, and a terminal reducer reusing `correlatedReduce`. An EMPTY prefix is
+   the degenerate case, not a special one: the element the operand lands on IS the traverser,
+   which is what keeps `has('name', __.values('k'))` on the same path as
+   `has('name', __.out().values('k'))` instead of being a `values(k)` special case. An
+   unproductive operand is SQL NULL — already TinkerPop's answer at both pinned hosts (`eq(NULL)`
+   drops the traverser; a NULL member contributes nothing to a `within` set while a sibling
+   constant still matches).
+
+   **Still open**, all narrow: `within`/`without` over a multi-value operand (`IN (SELECT …)`
+   rather than `LIMIT 1`); the `union(...).fold()` operand forms, blocked on a *scalar-branch
+   union SOURCE* rather than on the operand machinery; a `__.sack()` operand (it is just the
+   carried column — should be a one-liner); `hasId(__.V(id).id())` and the `none()` /
+   inline-predicate hosts, which simply do not call the resolver yet; and an operand with no
+   scalar to read (a filter body such as `__.not(__.identity())`). Correlation needs an element
+   ScalarCtx, so a scalar-parent `is()` also still defers. *Low.*
 
 8. **Graph-algorithms layer (new cluster).** Algorithms as `call()` services + OLAP step names
    (`pageRank`/`connectedComponent`/`peerPressure`/`shortestPath`) as desugar Passes. Nothing built.
