@@ -7,7 +7,7 @@ import {
 import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { isMapLocalOrder } from './list.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, partitionOver, withoutCarried, type Carry, type ElementStream } from '../context/context.ts';
+import { carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, partitionOver, withoutCarried, type Carried, type Carry, type ElementStream } from '../context/context.ts';
 import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
 import { PER_ROW, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
@@ -181,6 +181,18 @@ function nestedInnerKeyVal(
   return null;
 }
 
+/** The per-origin emission-order column on a retained child-rows stream. Every child-rows
+ *  producer mints one (the scalar projection windows ROW_NUMBER over the child ordinal), and the
+ *  group aggregates are built on it — it is both the ORDER BY of a folded value and the
+ *  productivity MARKER a LEFT-JOINed empty child is filtered by. Its absence is an internal
+ *  contradiction (a rows-retaining child that minted no order), so say so instead of emitting
+ *  `undefined` as a column name via a bare `!`. */
+const childEncounter = (rows: { carried: Carried }, site: string): string => {
+  const enc = rows.carried.encounter;
+  if (!enc) throw new Error(`${site}: child rows carry no emission-order encounter to fold/mark on`);
+  return enc;
+};
+
 /** Lower generic scalar key/value children and join them back to the original
  * element through ONE shared parent origin. Keys consume `first`; non-reducing
  * values consume `all`; reducers expose their raw productive rows so the final
@@ -290,10 +302,28 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     });
   }
   if (genericVal) {
-    const child = tryCompileScalarValueChild(outer.seed, valArg.nested, 'all', reuse(), valBody)!;
-    const c = child.rel.as('gv');
+    // An unreduced scalar group value collects its child rows into the key's list, so it shares
+    // the explicit fold's AGGREGATE: the child rows keep their scope (tryCompileScalarValueRows
+    // retains the frame, so the per-origin `encounter` survives) and the list is built ORDER BY
+    // that encounter. It used to pop the scope (tryCompileScalarValueChild 'all') and emit a bare
+    // json_group_array — no order at all. Member order merely HAPPENED to match the emission
+    // order, until any extra CTE in the body (say a select(label) re-root) permuted it.
+    //
+    // It keeps its own INNER join, and that is the one thing it must NOT borrow from the fold:
+    // an UNREDUCED value traversal that produces nothing FILTERS the traverser, while a fold is
+    // a barrier that always produces (an empty list), so the key survives. TinkerPop pins both
+    // halves on the same graph — Group.feature `g_V_hasXperson_name_withinXvadas_peterXX_group_
+    // by_byXout_foldX` keeps `v[vadas]: []`, and its unreduced twin `…_byXout_orderX` drops the
+    // vadas key entirely, annotated "validates that a collecting barrier produces a filtering
+    // effect if it is unproductive". So implicit-collect is NOT ≡ fold here; only the ordering
+    // is shared.
+    const rows = tryCompileScalarValueRows(outer.seed, valArg.nested, reuse(), valBody)!;
+    const c = rows.stream.rel.as('gv');
     joins.push(q` JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
     valExpr = c.c.v;
+    valMarker = c.c[childEncounter(rows.stream, 'group value')];
+    valFold = true;
+    valOrder = q`${p.c[outer.frame.ordinal]}, ${valMarker}`;
   }
   if (genericReducer) {
     const rows = tryCompileRowsBeforeReducer(outer.seed, valArg.nested, reuse(), valBody)!;
@@ -301,7 +331,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     const join = rows.reducer === 'count' ? ' LEFT JOIN ' : ' JOIN ';
     joins.push(q`${join}${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
     valExpr = c.c.v;
-    valMarker = c.c[rows.stream.carried.encounter!];
+    valMarker = c.c[childEncounter(rows.stream, 'group value reducer')];
     valReducer = rows.reducer;
     // The child rows inherit the source traverser's bulk through the child scope; a value
     // reducer weights by it so a bulked (collapsed/repeat) parent counts each contribution
@@ -313,7 +343,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     const c = rows.stream.rel.as('gf');
     joins.push(q` LEFT JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
     valExpr = c.c.v;
-    valMarker = c.c[rows.stream.carried.encounter!];
+    valMarker = c.c[childEncounter(rows.stream, 'group value fold')];
     valFold = true;
     valOrder = q`${p.c[outer.frame.ordinal]}, ${valMarker}`;
   }
@@ -439,7 +469,6 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
     groupBy = false;
     valNode = elementSelect(src.valElement.elem, 'v', src.valElement.ctx, true);
   }
-  else if (src.valExpr) { val = { kind: 'scalarList' }; valNode = q`json_group_array(${src.valExpr}) AS gv`; }
   else {
     const by = classifyBy(valArgs);
     if (by.kind === 'key') { // by('age') → list of scalars (first-under-multi per member)

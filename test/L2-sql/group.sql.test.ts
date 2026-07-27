@@ -501,10 +501,20 @@ describe('group / properties SQL', () => {
 
   test('non-reducing scalar group values lower through generic child-all productivity', () => {
     const p = read('g.V().group().by("name").by(__.out().values("name"))');
-    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'scalarList' } });
+    // `list`, not `scalarList`: the members are child ROWS, ordered and marked, so the SQL
+    // aggregate is authoritative — the wire layer no longer strips nulls in JS (which could
+    // not tell an unproductive child from a productive NULL member). `scalarList` remains the
+    // DIRECT by(key) projection, which has no child rows and does emit SQL NULLs.
+    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'list' } });
     expect(p.sql).toContain('ROW_NUMBER() OVER () AS o0');
     expect(p.sql).toContain('ON gv.o0=gp.o0');
-    expect(p.sql).toContain('json_group_array(gv.v) AS gv');
+    // The member list is EMISSION-ORDERED (per-origin encounter), not incidentally ordered by
+    // whatever the join produced — the whole point of routing this through the fold aggregate.
+    expect(p.sql).toMatch(/json_group_array\(gv\.v ORDER BY gp\.o0, gv\.encounter\)/);
+    // ...but it keeps the INNER join: an unreduced value traversal that produces nothing
+    // FILTERS the traverser (Group.feature g_V_hasXperson_name_withinXvadas_peterXX_group_by_
+    // byXout_orderX drops the empty key), unlike a fold(), which always produces [].
+    expect(p.sql).not.toContain('LEFT JOIN gv');
     const both = read('g.V().group().by(__.label()).by(__.values("name").substring(0,1))');
     expect(both.sql).toContain('ON gk.o0=gp.o0');
     expect(both.sql).toContain('ON gv.o0=gp.o0');

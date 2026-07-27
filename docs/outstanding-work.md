@@ -295,12 +295,26 @@ Each fails closed (clear error, never mis-executes). Do only when a concrete sce
 - **Group re-entry matrix-fill** — element/property-valued inner keys+values, composite `project()`
   keys, `elementMap()` followers, `keys→SET`, `as()`/`order()` on a group. `steps/tail/group.ts` is
   where the child seam most often bottoms out — extend it (item 2), don't dedup. *Low.*
-  · **An IMPLICIT-collect group value is not emission-ordered** (found 2026-07-27, pre-existing):
-    `by(__.out().values('n'))` builds its list with a bare `json_group_array` — no `ORDER BY` — so
-    the member order is incidental, while the EXPLICIT `by(__.out().values('n').fold())` orders by
-    the encounter (`valOrder`). Today the incidental order usually matches; any extra CTE in the
-    body (e.g. a `select(label)` re-root) permutes it. Fix = thread the encounter through
-    group.ts's `genericVal` path as the fold path already does. *Low.*
+  · ~~**An IMPLICIT-collect group value is not emission-ordered**~~ ✅ **FIXED 2026-07-27.**
+    `by(__.out().values('n'))` built its list with a bare `json_group_array` — no `ORDER BY` — so
+    member order was incidental (it happened to match the emission order until any extra CTE in
+    the body, e.g. a `select(label)` re-root, permuted it). It now shares the explicit fold's
+    AGGREGATE: `tryCompileScalarValueRows` retains the child frame so the per-origin `encounter`
+    survives, and the list is built `ORDER BY` it. This also retired the weaker
+    `val:'scalarList'` branch for child-seam values — with marked rows the SQL is authoritative,
+    so the wire layer no longer strips nulls in JS (which could not tell an unproductive child
+    from a productive NULL member). `scalarList` remains the DIRECT `by(key)` projection, which
+    has no child rows and does emit SQL NULLs.
+    **The correction worth keeping:** sharing the fold's aggregate must NOT import the fold's
+    PRODUCTIVITY. An unreduced value traversal that yields nothing FILTERS the traverser (inner
+    join, key vanishes); `fold()` is a barrier that always yields, so its key survives with `[]`.
+    TinkerPop pins both halves on one graph — `Group.feature`
+    `g_V_hasXperson_name_withinXvadas_peterXX_group_by_byXout_foldX` keeps `v[vadas]: []` while
+    its unreduced twin `…_byXout_orderX` drops the key, annotated *"validates that a collecting
+    barrier produces a filtering effect if it is unproductive"*. So the tempting
+    "implicit-collect ≡ fold" equivalence is TRUE for the aggregate and FALSE for productivity;
+    the element path (`genericElementImplicitFold`) already gets this right by a different
+    route (`groupBy=false` + element rows). Pinned by `group-properties.exec.test.ts`.
   → [group-value-generic-seam](./2026-07-18-group-value-generic-seam-plan.md),
   [p3-reenterable-shapes](./archive/2026-07-16-p3-reenterable-shapes-plan.md)
 - **Mixed-shape branch corners** — node+edge in one branch, `path()` through it, `as()` inside an

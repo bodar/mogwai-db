@@ -158,6 +158,32 @@ test('groupCount().by(label) counts per label', () => {
   ]);
 });
 
+test('an unreduced scalar group value is emission-ordered, and unproductive still filters', () => {
+  const store = seededStore();
+  const marko = (q: string) => JSON.parse(run(store, q).filter((r: any) => r.gk === 'marko')[0].gv);
+
+  // ORDER: the member list follows the child's emission order, not whatever order the join
+  // happened to produce. marko's out-neighbours are vadas(2), lop(3), josh(4) in edge order.
+  expect(marko('g.V().group().by("name").by(__.out().values("name"))')).toEqual(['vadas', 'lop', 'josh']);
+  // ...and it STAYS that way when the body grows a CTE. Before the value path was routed
+  // through the fold aggregate it emitted a bare json_group_array with no ORDER BY, so the
+  // order was incidental: a label re-root in the body silently permuted it.
+  expect(marko(`g.V().group().by("name").by(__.out().as("a").select("a").values("name"))`))
+    .toEqual(['vadas', 'lop', 'josh']);
+  expect(marko('g.V().group().by("name").by(__.out().values("name").fold())')).toEqual(['vadas', 'lop', 'josh']);
+
+  // FILTERING: sharing the fold's AGGREGATE must not import the fold's PRODUCTIVITY. An
+  // unreduced value traversal that yields nothing filters the traverser, so the key vanishes;
+  // fold() is a barrier that always yields (an empty list), so the key survives. TinkerPop pins
+  // both on the same graph (Group.feature …_group_by_byXout_foldX vs …_byXout_orderX).
+  const keys = (q: string) => run(store, q).map((r: any) => r.gk).sort();
+  expect(keys('g.V().group().by("name").by(__.out().values("name"))')).toEqual(['josh', 'marko', 'peter']);
+  expect(keys('g.V().group().by("name").by(__.out().values("name").fold())'))
+    .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+  // a wholly unproductive value traversal filters every traverser → no groups at all
+  expect(run(store, 'g.V().group().by("name").by(__.values("missing"))')).toEqual([]);
+});
+
 test('group scalar-list drops members missing the property (json_group_array + null filter is in handler)', () => {
   const store = seededStore();
   const rows = run(store, 'g.V().group().by("name").by("age")');

@@ -458,8 +458,11 @@ function groupBuffer(rows: any[], key: GroupKey, val: GroupVal): Buffer {
       case 'count': return countBuffer(g.gv);
       case 'sum': return sumBuffer(g.gv, g.gvt);
       case 'list': return ioc.listSerializer.serialize(JSON.parse(g.gv));
-      // by('age')/by(__.values) filters members missing the property (values
-      // semantics) → drop the SQL NULLs json_group_array emitted for them.
+      // The DIRECT by('age') projection only: it reads the property inline, so an element
+      // missing it contributes a SQL NULL that must be dropped (values semantics). A
+      // by(__.traversal) value no longer arrives here — it goes through the child seam, whose
+      // rows are marked and filtered in SQL ('list'), so it can distinguish an unproductive
+      // child from a productive NULL member instead of blanket-stripping both.
       case 'scalarList': return ioc.listSerializer.serialize(JSON.parse(g.gv).filter((x: any) => x !== null));
       // A nested groupCount/group value: gv is a JSON object {innerKey: innerVal}
       // framed as a Map. count values are Java Longs → Int64 (countBuffer), so they decode to a
