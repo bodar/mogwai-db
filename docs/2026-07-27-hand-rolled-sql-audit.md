@@ -4,9 +4,19 @@ _Swept 2026-07-27, then re-measured twice as trunk moved under it. Every count b
 not estimated: the method is at the bottom. Ranked by (duplication × family unblock × reach at depth),
 which is not the same as ranking by lines._
 
-> **STATUS 2026-07-27 (L3 1473, corpus-compile ~1700).** Four of the nine sites are closed and two
-> premises in this doc were **falsified by measurement** — read the note below before using the
-> rankings, because the original text still reflects the pre-fix state.
+> **STATUS 2026-07-27 (L3 1475).** SIX of the nine sites are closed, and THREE premises in this doc
+> were **falsified by measurement** — read the notes below before using the rankings, because the
+> original entry text still reflects the pre-fix state in each case.
+>
+> **The recurring lesson, now four times over: the abstraction usually already existed, and the site
+> was blocked on REACHING it.** #1 needed no new rendering mode (a recursive term may reference a
+> non-recursive CTE). #3 needed no new binding mechanism (the alias table was always shape-generic;
+> the element-only prefix fold was the wall) and no new reducer path (the child seam's scalar entry
+> points just demanded a parse tree a pattern body does not have). #4 needed no new positional-child
+> substrate (spelling the `json_each` explode as an ElementStream, via `origins`, let the LINEAR
+> regime's child compiler serve it unchanged). Predicting "this needs a new substrate" was wrong
+> every time; the cheap check is to ask what the existing seam cannot *express* versus what it merely
+> cannot be *handed*.
 >
 > | # | site | state |
 > |---|---|---|

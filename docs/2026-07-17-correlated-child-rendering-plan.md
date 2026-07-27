@@ -107,6 +107,13 @@ disable-safe fast path is result-equivalent to generic lowering") must keep pass
 inline-correlated rendering is the *enabled* branch, the materialized gate the *disabled*
 branch. `until` has no generic fallback (recursive correlation) — correlated-only, documented.
 
+> **Superseded 2026-07-27 (that last sentence only):** `until()`/`emit()` DO have a generic fallback
+> now — a row-local predicate compiles once over every vertex as a keyed relation
+> (`steps/tail/keyed.ts`) and the recursive term reads `id IN <origin set>`. Inline stays first
+> because it alone reads the walk's per-iteration state (`loops()`, the sack), which is why it is a
+> capability rather than a disable-safe FastPath. The rest of this plan stands as written; see
+> `2026-07-27-hand-rolled-sql-audit.md` #1.
+
 ## Test / verify
 
 - Enabled==disabled equivalence for `where(out())`, `where(out().out())`,

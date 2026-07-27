@@ -66,6 +66,18 @@ fails closed is better than a special-case that entrenches the non-generic path.
   costs |V|×fanout, so a caller with a lazy fast path keeps it and uses this as the fallback. Do NOT
   add a fourth, and do not confuse any of them with a *rendering* mode — there are exactly two of
   those and both live in the kernel (`src/sql/CLAUDE.md`).
+- **Before adding a substrate, separate "the seam cannot EXPRESS this" from "the seam cannot be
+  HANDED this."** Four times running, a site that looked like it needed new machinery needed only to
+  be able to reach what already existed, and predicting otherwise was wrong every time (see the
+  STATUS block in `docs/2026-07-27-hand-rolled-sql-audit.md`). The two tells, both cheap:
+  a SCHEMA mismatch — `path()`'s `json_each` explode is `(id, pk, ord)` but an element stream is
+  `['id', ...carriedCols]`, fixed by carrying `pk`/`ord` as `origins`, which is what that slot
+  already means; and an ARGUMENT-TYPE mismatch — the scalar-child entry points demanded a `nested`
+  parse tree, so `match()`, whose pattern body is a `Step[]` slice with no tree, could not call them
+  even though they already accepted a pre-parsed body. Both were one-line unlocks that let an
+  UNCHANGED compiler serve a second caller. A genuinely new substrate is justified only when the
+  existing seam would answer a DIFFERENT QUESTION — which is what a global barrier over a
+  per-binding/per-origin domain does, and why that one really does route elsewhere.
 - **Carry the labels or decline the body — never answer without them.** An absent alias column is
   indistinguishable from a never-bound label, so a renderer that reads one it does not physically
   have returns a silent `[]`. The inline correlated child is handed a `LabelScope` and seeds those

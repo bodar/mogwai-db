@@ -4,7 +4,7 @@ The de-duplicated index of open work across the `docs/` corpus. **Each line sets
 why, where to start — not a spec.** The linked doc holds the rationale; the picking agent does the
 detailed validation and design. Live per-step capability: `feature-support-matrix.md`.
 
-**Refreshed** 2026-07-27 against L3 1473 / 2297. Item numbers are stable IDs — landed items are
+**Refreshed** 2026-07-27 against L3 1475 / 2297. Item numbers are stable IDs — landed items are
 deleted and their numbers are not reused, because code comments and other docs cite them.
 
 > **Verify an item's premise against the code before picking it — this index has been stale in BOTH
@@ -56,7 +56,8 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 
 3. **`repeat()` residuals.** A walk carries loop-invariant alias + origin columns, and its body
    compiles once through the ordinary StepFns into a `(from_id, to_id)` relation the recursive term
-   joins (`repeatBodyRelation`); `expandRepeatBody` is now a fast path, not the vocabulary.
+   joins — now the extracted **keyed child relation** (`steps/tail/keyed.ts`, shared with
+   `until()`/`emit()`); `expandRepeatBody` is now a fast path, not the vocabulary.
    **The trap, pinned by a test:** the gate is NOT "whatever `lowerElementSteps` accepts". A
    per-iteration GLOBAL barrier (`dedup`/`order`/`limit`/`range`/`sample`/`tail`/`group`/`aggregate`/
    `local`) observes the whole frontier at one iteration; the generic StepFns would lower it
@@ -65,11 +66,11 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    - **A barrier body under a fixed `times(n)`** could be UNROLLED into n generic phases (that route
      hosts barriers; `bulk.ts` already unrolls a specialized version for the count case). The natural
      next slice. *Medium.*
-   - **`walkPredicate` (`until()`/`emit()`) has no generic fallback.** Same trick as the body:
-     compile an element-only predicate once as a `matching(id)` relation and read `id IN matching`
-     in the recursive term. This is the only thing keeping the inline predicate compiler's leaf
-     vocabulary load-bearing; a sack/`loops()`-dependent predicate still needs the inline form.
-     *Low-Med.*
+   - ~~**`walkPredicate` (`until()`/`emit()`) has no generic fallback.**~~ **LANDED.** A row-local
+     predicate compiles once over every vertex via `keyedChildRelation` (`steps/tail/keyed.ts`) and
+     the recursive term reads `id IN <origin set>` — until/emit are existence, so that is the whole
+     semantics. Inline is still tried FIRST because it alone reads the walk's per-iteration state
+     (`loops()`, the sack), which is why it is a capability rather than a declared FastPath.
    - **The named-loop form `repeat("a", …)`/`loops("a")` CRASHES** rather than failing closed
      (`undefined is not an object (evaluating 'node.constructor')`, 4 corpus cases). Cheap, isolated.
    - A label bound INSIDE the body (`repeat(__.out().as("b"))`) genuinely rebinds per iteration, so
@@ -164,9 +165,12 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 
 ## P2 — feature / conformance buckets
 
-7. **`match()` generic patterns.** 14 of the 35 `Match.feature` traversals compile today; the
-   remainder splits into nameable gaps rather than one wall — a pattern not starting with `as()` (6),
-   0-root-variable patterns (3), pattern steps `count`/`values`/`order`/`map` (6). **Medium.**
+7. **`match()` generic patterns.** The END-VAR shapes are done (see 7d): a variable holds an
+   element, an edge, or a scalar, and a reducer pattern binds per binding. What remains is
+   STRUCTURAL rather than shape: a pattern not starting with `as()` (6), 0-root-variable patterns
+   (3), `or`/`not`/nested-match patterns, a LIST-shaped end var (`fold()`), and `where(var,P)` on a
+   scalar-bound var — the last only became REACHABLE once scalar vars could be bound, and it is a
+   downstream alias-compare gap, not a match one. **Medium.**
    → [conformance-structural-bets](./2026-07-12-conformance-structural-bets.md)
 
 7b. **`g.match("MATCH (a:person)-[:knows]->(b:person)")` — the GQL pattern-STRING form. NEEDS A
@@ -189,14 +193,17 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      `__.not(__.identity())`); a scalar-parent `is()` (correlation needs an element ScalarCtx).
    *Low.*
 
-7d. **`match()`: lower each pattern through the FULL loop, not `lowerElementSteps`.** The pattern
-   BODY is already generic (`union` inside a pattern works); what is hand-rolled is the binding table
-   around it, which holds node rowids only — so a scalar (`values`), reduced (`count`) or edge-typed
-   end var defers. The machinery exists (`lowerRootedArm` + kind-dispatch): lower to a Stream of any
-   shape and bind on its `kind`. The one difference is that a pattern is SEEDED from a bound var, so
-   it wants `lowerStepsStrict` over `applyPattern`'s existing seed rather than a fresh source. Note
-   23 of match's 49 corpus failures are the MATCH-STRING form (7b); the real residual here ≈ 26.
-   **Medium.** → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md) #3
+7d. ~~**`match()`: lower each pattern through the FULL loop, not `lowerElementSteps`.**~~
+   **LANDED 2026-07-27.** And the premise above was wrong in a way worth keeping: the binding table
+   was never the limitation — `aliasEntry` has tagged node/edge/value/list/map since labels became
+   path histories. What walled it in was folding only the ELEMENT prefix, which stops at the first
+   non-element step. `applyPattern` now runs prefix fold → `lowerStepsStrict` and binds on the
+   result's `kind`; a var's SHAPE is recorded at bind time (an edge rowid read as a node id is
+   silently wrong, both being integers), which also lets an edge var START a pattern. A REDUCER body
+   is a separate defect — a global barrier over the binding table — and routes through the child
+   seam for per-binding scoping, verified equal to `map(__.<same body>)`.
+   Still open there: `fold()` (list-shaped end var) and the MATCH-string form (7b).
+   → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md) #3
 
 8. **Graph-algorithms layer (new cluster).** Algorithms as `call()` services + OLAP step names
    (`pageRank`/`connectedComponent`/`peerPressure`/`shortestPath`) as desugar Passes. Nothing built;
@@ -246,12 +253,15 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 
 Each fails closed (clear error, never mis-executes). Do only when a concrete scenario demands it.
 
-- **Recursive-path tails** — `path().by()` on the walk, `cyclicPath`/`until`/`emit(pred)` with path,
-  edge-inclusive bodies, mixed linear+repeat, recursive-regime `from()`/`to()`. Includes
-  `path().by(__.trav)`/`by(T.token)` in the array regime — needs a new *positional-child* substrate
-  over `json_each` (`steps/tail/path.ts` hard-throws). Also `order()` before a movement/branch while
-  a path is live (a fresh emission encounter would collide with the path's positional ordering).
-  *Low-Med.* → [path-history-substrate](./2026-07-18-path-history-substrate.md)
+- **Recursive-path tails** — `cyclicPath`/`until`/`emit(pred)` with path, edge-inclusive bodies,
+  mixed linear+repeat, recursive-regime `from()`/`to()`, multiple `by()`s (round-robin needs a known
+  length; a recursive path's is dynamic). Also `order()` before a movement/branch while a path is
+  live (a fresh emission encounter would collide with the path's positional ordering).
+  **`path().by()` in the array regime is DONE** — `by(key)`/`by(T.token)` share ONE position
+  projector with the linear regime, and `by(__.trav)` runs the SAME positional child compiler: the
+  `json_each` explode carries `(pk, ord)` as its `origins`, which makes it an ordinary element
+  stream, so no new substrate was needed. *Low-Med.*
+  → [path-history-substrate](./2026-07-18-path-history-substrate.md)
 - **Group re-entry matrix-fill** — element/property-valued inner keys+values, composite `project()`
   keys, `elementMap()` followers, `keys→SET`, `as()`/`order()` on a group. `steps/tail/group.ts` is
   where the child seam most often bottoms out — extend it (item 2), don't dedup. *Low.*
