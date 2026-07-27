@@ -530,6 +530,28 @@ export function classifyScalarChildRows(
   return parts ? { kind: 'element', parts } : null;
 }
 
+/** PURE. A MAP-producing child body: `<element movement/filter prefix>.valueMap(...)`. Lives here
+ *  with its siblings (classifyScalarChildRows / classifyElementChildRows / classifyCountChild) so
+ *  the classify/emit split holds for every shape — the emit half is tryCompileMapChild (group.ts,
+ *  where the one map builder lives) and it consumes exactly these parts.
+ *
+ *  NOTE this deliberately does NOT widen `ChildShape`. That union is `BranchArmShape` minus its
+ *  null, so admitting 'map' there would tell the branch triage a map arm is mergeable — and no
+ *  merge covers a map shape. A map body composes at the MAPPING positions; a map ARM stays
+ *  unclassifiable (and so fails closed) until a merge exists. */
+export function classifyMapChildRows(
+  body: ReturnType<typeof stepChain>,
+  ctx?: ChildCtx,
+): { prefix: PStep[]; proj: PStep } | null {
+  if (!body.length) return null;
+  const proj = body[body.length - 1];
+  // valueMap(true)/elementMap have no relational MapStream form yet (the builder's own deferral),
+  // so they are not a map child body — the terminal root path still answers them.
+  if (proj.name !== 'valueMap' || proj.args.includes(true)) return null;
+  const prefix = body.slice(0, -1);
+  return prefix.every((c) => isElementChildStep(c, ctx)) ? { prefix, proj } : null;
+}
+
 /** PURE. The element-row shape decision shared by compileElementChildRows and the three
  * element predicates. `firstPolicy` keeps a trailing order() as an explicit ordering
  * modulator (map cardinality); otherwise a trailing BARE order() is stripped as redundant

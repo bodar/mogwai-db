@@ -12,7 +12,7 @@ import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PA
 import { PER_ROW, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { applyChildCardinality, lowerElementBody, pushChildScope, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows } from './child.ts';
-import { childCtx, childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, isElementChildStep, reuseCurrentFrame, ROOT_SCOPE, type ChildParent, type ChildUse, type CompileScope } from './child-shape.ts';
+import { childCtx, childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyMapChildRows, classifyScalarChildRows, elementScalarBranchArm, reuseCurrentFrame, ROOT_SCOPE, type ChildParent, type ChildUse, type CompileScope } from './child-shape.ts';
 
 /** The numeric reducers that terminate a nested-group inner value `by(__.values(x).<r>())`. */
 const SCALAR_REDUCERS = new Set(['sum', 'min', 'max', 'mean']);
@@ -594,15 +594,11 @@ export function tryCompileMapChild(
   scope: CompileScope = ROOT_SCOPE,
 ): MapStream | null {
   if (!nested || parent.kind !== 'elements') return null;
-  const body = childSteps(nested, parent.params);
-  if (!body.length) return null;
-  // Split off the trailing valueMap(); everything before it must be the element-preserving
-  // vocabulary (the same predicate every other row-local consumer uses).
-  const proj = body[body.length - 1];
-  if (proj.name !== 'valueMap' || proj.args.includes(true)) return null;
-  const prefix = body.slice(0, -1);
-  const ctx = childCtx(parent);
-  if (!prefix.every((c) => isElementChildStep(c, ctx))) return null;
+  // ONE classification, in the pure classify leaf with its siblings — this compiler never decides
+  // shape itself, exactly as the scalar/element/count children don't.
+  const shape = classifyMapChildRows(childSteps(nested, parent.params), childCtx(parent));
+  if (!shape) return null;
+  const { prefix, proj } = shape;
 
   const pushed = pushChildScope(parent, scope);
   const end = lowerElementBody(pushed.seed, prefix);
