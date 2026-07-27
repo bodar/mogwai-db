@@ -7,7 +7,9 @@ over-reports `LANDED`; this keeps only what a code check confirms open). Live pe
 `feature-support-matrix.md`.
 
 **Refreshed** 2026-07-26 against L3 1362 unique / 2297 (`l3-state.json` shows 1364 — two names
-recur legitimately, see `test/CLAUDE.md`); item 2's Slice 3 took it to **1372** on 2026-07-27.
+recur legitimately, see `test/CLAUDE.md`). A 2026-07-27 session took it to **1421**: item 2's
+Slice 3 (child-body labels, +8), the constant predicate-operand fold (+29), read-only child
+verification (+14), and re-sourced operand subqueries (+6).
 Path pointers assume the 2026-07-23 restructure
 (`src/compiler/steps/{context,prefix,tail,write}/`, `src/compiler/{ir,plan,engine}/`).
 
@@ -229,9 +231,38 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
 
 ## P2 — feature / conformance buckets
 
-7. **`match()` generic patterns.** Largest single named L3 cluster; the compiler rejects patterns
-   not starting with `as(...)`. **Medium.**
+7. **`match()` generic patterns.** The compiler rejects patterns not starting with `as(...)`.
+   **Re-measured 2026-07-27: the Gremlin `match()` STEP is in better shape than this line implied
+   — 14 of the 35 `Match.feature` traversals compile today.** The remainder splits into small,
+   nameable gaps rather than one wall: a pattern not starting with `as()` (6), 0-root-variable
+   patterns (3), and pattern steps `count`/`values`/`order`/`map` (6). **Medium.**
    → [conformance-structural-bets](./2026-07-12-conformance-structural-bets.md)
+
+7b. **`g.match("MATCH (a:person)-[:knows]->(b:person)")` — the GQL pattern-STRING form. NEEDS A
+   DECISION, not just implementation** (found 2026-07-27; 23 scenarios, all of
+   `MatchString.feature`, and the single largest remaining L3 bucket: every one fails with
+   `unsupported source step: match`). This is NOT the `match()` step above — it is a second query
+   LANGUAGE embedded in a string argument (TinkerGQL / GQL patterns), so it needs a pattern parser
+   and a lowering from pattern → our IR. That collides with locked decision #2 (*the parser is
+   generated from TinkerPop's grammar, never hand-edited*): the MATCH-string grammar would be a
+   new hand-rolled front-end unless upstream ships one we can generate from. Worth answering
+   deliberately — 23 scenarios is a lot, but a bespoke second parser is exactly the kind of thing
+   that decision exists to prevent. **Large.**
+
+7c. **Predicate operands that are TRAVERSALS — mostly landed 2026-07-27, one residual.**
+   TinkerPop compares against a traversal operand's FIRST result. Three of the four cases are done:
+   a `constant()` operand folds to a literal in the IR (`foldConstantPredicateOperands`, +29
+   scenarios, and it reached hosts nobody enumerated — `hasLabel`, the `all()`/`none()` list
+   predicates, `choose`); a RE-SOURCED (`V()`/`E()`-headed) operand compiles as a scalar subquery
+   (`steps/tail/operand.ts`, +6); and a MUTATING operand is rejected by the read-only child
+   verification (+14). **Still open:** a TRAVERSER-DEPENDENT operand — `has('name',
+   __.values('other'))`, `is(__.out().count())` — needs a value correlated to the current row, so
+   it fails closed today with a clear deferral. The seam is ready: `predicateSql` accepts an
+   Expression operand (`value()` forwards nodes), so this is "build the correlated scalar and
+   substitute it", most likely through `tryCompileScalarModulations` or the inline correlated
+   child. Also open: `within`/`without` over a multi-value operand (`IN (SELECT …)` rather than
+   `LIMIT 1`), and the `union(...).fold()` operand forms, which are blocked on a *scalar-branch
+   union SOURCE*, not on the operand machinery. *Low-Med.*
 
 8. **Graph-algorithms layer (new cluster).** Algorithms as `call()` services + OLAP step names
    (`pageRank`/`connectedComponent`/`peerPressure`/`shortestPath`) as desugar Passes. Nothing built.
