@@ -389,12 +389,17 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
      SCOPING DECISION: how many of those modes to take on vs fail closed.** *Medium.*
    - **A PATH child body** (`local(__.path())`) — needs path tracking INSIDE a child scope, which is
      path-history-substrate territory, not this seam's. *Low-Med.*
-   - **`valueMap(true)`/`elementMap` as a child body** — the ONE place the terminal boundary genuinely
-     bites, now isolated to ~13 corpus lines. Their token keys frame as T ENUMS mixed with string
-     property keys in one map (verified against `ValueMap.feature`: `t[id]`/`t[label]`), and the
-     `{t,v}` blob vocabulary cannot represent that. **NEEDS A TYPE-VOCABULARY DECISION** (a T-token
-     tag in `gremlin/types.ts`, vs a `MapOf` key-side variant, vs leaving these on the terminal
-     path). Excluded by the classifier meanwhile, so they fail closed. *Low-Med.*
+   - **`valueMap(true)`/`elementMap` as a child body** — fails closed (excluded by the classifier);
+     **NO scenario demands it: zero corpus traversals use either as a child body**, so this is a
+     Low tail to revisit when one appears, per the standing rule. An earlier draft of this line
+     called it a type-vocabulary DECISION and posed "a T-token tag in the `{t,v}` tree vs a `MapOf`
+     key-side variant" — that was a false dilemma and is struck. The `{t,v}` codes are explicitly
+     the ones a property VALUE can carry, with element/token codes deliberately excluded
+     (`gremlin/types.ts`), and a T token is not a value — so that option is wrong, not a trade-off.
+     Token-ness belongs in SHAPE metadata, which is already how the terminal path does it
+     (`{kind:'valueMap', keys, tokens}`, the framer emitting the T enums from the flag). If a
+     scenario ever needs it, carry the same flag on `MapStream` — mechanical, no vocabulary change.
+     *Low.*
    - **`ChildShape` is deliberately NOT widened to 'map'.** It is `BranchArmShape` minus null, so
      admitting 'map' would tell the branch triage a map ARM is mergeable when no merge covers a map
      shape — converting a clean deferral into a wrong answer. A map ARM stays unclassifiable.
