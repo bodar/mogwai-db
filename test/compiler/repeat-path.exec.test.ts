@@ -188,16 +188,54 @@ test('the SAME path().by() answers identically in both regimes (one position pro
   expect(linear('g.V(1).outE("created").inV().path().by(T.label)')).toEqual([['person', 'created', 'software']]);
 });
 
-test('path().by(traversal) on a RECURSIVE path defers with the obstacle named', () => {
-  // Still open: a by(traversal) position needs a child keyed back to the exploded element. The
-  // linear regime has that substrate, the grouped one does not yet — so this fails CLOSED and
-  // says which regime is missing it, rather than reciting a vocabulary.
+test('path().by(traversal) works on a RECURSIVE path, via the SAME positional child', () => {
+  // The explode is (id, pk, ord) but an ElementStream's schema is ['id', ...carriedCols], so
+  // pk/ord ride as `origins` — which is what that slot means, and for a path element the answer
+  // literally is "path pk, position ord". That makes the exploded rows an ordinary element
+  // stream, so `lowerPathPositionChild` (fan-out guards, branch route, `first` collapse) is
+  // reused UNCHANGED rather than reimplemented for this regime.
   const store = seededStore();
-  expect(() => run(store, 'g.V(1).repeat(__.out()).times(2).path().by(__.values("name"))'))
-    .toThrow(/by\(traversal\) over a recursive repeat\(\)\.path\(\)/);
-  // The same body on a LINEAR path works — that contrast is the remaining asymmetry.
-  expect(run(store, 'g.V(1).out().path().by(__.values("name"))').map((r) => r.x1_v))
-    .toEqual(['vadas', 'josh', 'lop']);
+  const grouped = (g: string) => run(store, g).map((r) => r.v);
+  // marko's 2-hop walks: [marko,josh,lop] and [marko,josh,ripple].
+  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by(__.values("name"))'))
+    .toEqual(['marko', 'josh', 'lop', 'marko', 'josh', 'ripple']);
+  // by(key) and by(traversal) must agree — same modulator meaning, two routes.
+  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by(__.values("name"))'))
+    .toEqual(grouped('g.V(1).repeat(__.out()).times(2).path().by("name")'));
+  // A REAL child traversal per position, not just a property read. Out-degrees along the walk:
+  // marko 3, josh 2, lop/ripple 0. In-degrees: marko 0, josh 1, lop 3, ripple 1.
+  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by(__.out().count())')).toEqual([3, 2, 0, 3, 2, 0]);
+  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by(__.in().count())')).toEqual([0, 1, 3, 0, 1, 1]);
+  // …and the LINEAR regime gives the same answer for the same walk, which is the cross-regime
+  // equivalence the two hand-rolled projectors could not offer.
+  expect(run(store, 'g.V(1).out().out().path().by(__.out().count())').map((r: any) => [r.x0_v, r.x1_v, r.x2_v]))
+    .toEqual([[3, 2, 0], [3, 2, 0]]);
+});
+
+test('a recursive path().by(traversal) honours productive-by and the shared fan-out guard', () => {
+  const store = seededStore();
+  const grouped = (g: string) => run(store, g).map((r) => r.v);
+  // NON-PRODUCTIVE: lop and ripple have no age, so BOTH whole paths drop. The by(key) form
+  // applies that rule with a pre-numbering NOT EXISTS and by(traversal) group-wise after the
+  // child join — different pipeline points, same answer, which is the thing worth pinning.
+  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by(__.values("age"))')).toEqual([]);
+  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by("age")')).toEqual([]);
+  // A walk where every element HAS the property drops nothing, both forms.
+  expect(grouped('g.V(1).repeat(__.out("knows")).times(1).path().by(__.values("age"))')).toEqual([29, 27, 29, 32]);
+  expect(grouped('g.V(1).repeat(__.out("knows")).times(1).path().by("age")')).toEqual([29, 27, 29, 32]);
+  // ProductiveBy keeps the path with an explicit NULL position instead.
+  expect(grouped('g.withStrategies(ProductiveByStrategy).V(1).repeat(__.out()).times(2).path().by(__.values("age"))'))
+    .toEqual([29, 32, null, 29, 32, null]);
+  // The BRANCH route through the shared child compiler (no first-collapse, so non-fan-out arms).
+  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by(__.coalesce(__.values("age"),__.constant(-1)))'))
+    .toEqual([29, 32, -1, 29, 32, -1]);
+  // The shared fan-out guard still fires — a position holds ONE value, so union() is rejected
+  // rather than silently multiplying whole path rows through the ordinal join.
+  expect(() => run(store, 'g.V(1).repeat(__.out()).times(2).path().by(__.union(__.values("name"),__.values("name")))'))
+    .toThrow(/fans out/);
+  // Multiple by()s over a DYNAMIC length remains a real wall (round-robin needs a known length).
+  expect(() => run(store, 'g.V(1).repeat(__.out()).times(2).path().by("name").by("age")'))
+    .toThrow(/multiple modulators/);
 });
 
 test('path() interleaves edges and vertices with materialized props (via framing)', async () => {

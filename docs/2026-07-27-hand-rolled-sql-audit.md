@@ -14,8 +14,8 @@ which is not the same as ranking by lines._
 > | 2 | `seedUnion` | ✅ landed on trunk |
 > | 6 | `predicate.ts` infix connectives | ✅ extracted to `ConnectiveStrategy`, a fold Pass |
 > | — | the child seam's shape ceiling *(not originally a numbered site)* | ✅ now shape-generic: ONE rejoin, map + record bodies |
-> | 3 | `match()` binding table | 🟡 shape-generic now; a REDUCER pattern body still needs per-binding scoping |
-> | 4 | `path.ts` grouped positional projector | 🟡 one projector now; `by(traversal)` needs a positional child |
+> | 3 | `match()` binding table | ✅ shape-generic ends + per-binding reducers; residual is `fold()` and the MATCH-string form (7b) |
+> | 4 | `path.ts` grouped positional projector | ✅ one projector AND one positional child compiler; both regimes agree |
 > | 5 | `write.ts` merge/endpoint | open (largest by count, but terminal — never composes at depth) |
 > | 7–9 | `child.ts` residue, `search.ts`, leaf dups | open, Low |
 > | — | mode C *(this doc's "one structural finding")* | ❌ **retired — measured unnecessary, see below** |
@@ -352,7 +352,7 @@ residual as a side effect.
 
 ---
 
-### 3. `match.ts` — 🟡 **MOSTLY CLOSED 2026-07-27.** The binding table is shape-generic; reducers remain
+### 3. `match.ts` — ✅ **CLOSED 2026-07-27.** Shape-generic ends + per-binding reducers
 `steps/prefix/match.ts` (118 lines)
 
 **Now the top open site after #1** (#2 landed). Half-reformed already: `applyPattern:47` genuinely folds the pattern body through
@@ -393,12 +393,27 @@ Two things fell out that this entry did not predict:
   meaningless rather than narrower, so it must not emit SQL that quietly never matches). That is what
   makes an edge var usable as a pattern START —
   `as("a").outE().as("e"), as("e").inV().as("b")` — which was not on the wish list.
-- **The reducer case is a DIFFERENT defect** and does not close with the others. `count()` in a
-  pattern body is a GLOBAL barrier over what is here the binding table, so lowering it answers one
-  count across ALL bindings where the pattern asks for one per binding. That needs the child seam's
-  per-binding scoping. It now defers naming precisely that — and deferring it shared a vocabulary
-  rather than copying one: `REPEAT_BODY_BARRIERS` moved to `child-shape.ts` as `isGlobalBarrier`,
-  because `repeat()`'s body and a `match()` pattern defer on the identical fact.
+- **The reducer case is a DIFFERENT defect** — it does not close with the others, and it is now
+  closed on its own terms. `count()` in a pattern body is a GLOBAL barrier over what is here the
+  binding table, so lowering it at that scope answers one count across ALL bindings where the pattern
+  asks for one per binding. So a barrier body routes through the CHILD SEAM instead, whose
+  cardinality rejoin restores exactly one row per binding. Two routes, chosen by a real semantic
+  fact (`isGlobalBarrier` — the same predicate `repeat()` uses, moved out of `branch.ts` into
+  `child-shape.ts` rather than copied) instead of by a vocabulary.
+
+  **What had kept `match()` out of that seam was not the seam's shape — it was reachability.** The
+  scalar-child entry points required a `nested` PARSE TREE, and a pattern body is a `Step[]` SLICE
+  between its `as()` wrappers with no tree of its own, even though those entry points already
+  accepted a pre-parsed body. Changing the guard from "I have a tree" to "I have a body from
+  somewhere" made it reuse rather than a second reducer implementation. Same lesson as #4: reaching
+  an existing seam beat adding machinery.
+
+  **Measured:** every reducer form is verified EQUAL to `map(__.<same body>)` — `count`/`sum`/`max`
+  over `out`/`both`/`outE().values()` — so the per-binding semantics are pinned against an
+  established route, not against constants. `g.V().match(as("a").out("knows").count().as("b"))`
+  gives `[2,0,0,0,0,0]` where a global reduction would give one row of `2`. Residual: a LIST-shaped
+  end var (`fold()`), and `where(var,P)` on a scalar-bound var — a downstream alias-compare gap that
+  only became REACHABLE now that a scalar var can be bound at all.
 
 **Measured:** of the three named shapes, 2 now compile and 1 defers with the real obstacle named;
 match's real corpus bucket 17 → 14. `select()` on a scalar-bound var and on an edge-bound var both
@@ -407,7 +422,7 @@ into the entry). CI 915/0, L3 unmoved.
 
 ---
 
-### 4. `path.ts` — 🟡 **PARTLY CLOSED 2026-07-27.** One projector now; the child substrate is still open
+### 4. `path.ts` — ✅ **CLOSED 2026-07-27.** One projector, one positional child, both regimes agree
 `steps/tail/path.ts:239-291` (`compilePathArray`, ~61 lines) vs `lowerPathPositionChild:87`
 
 The LINEAR regime (one column per position) runs a real child per position. The
@@ -440,16 +455,29 @@ That was the wrong axis — this list ranks by (duplication × family unblock ×
 which is a corpus count. The defect here is that the same modulator answered two different ways
 depending on how the path was built; a floor metric cannot see that at all.
 
-**Still open: `by(traversal)` over a recursive path.** It needs a positional child keyed back to the
-exploded element, which is the one thing the flat projector cannot express. The route below is
-verified; the reason it is not built yet is a real seam problem, worth writing down so the next
-attempt doesn't rediscover it: the explode is naturally `(pk, ord, id)`, but an ElementStream's
-physical schema is `['id', ...carriedCols]`, so `pk`/`ord` cannot ride alongside it and
-`pushChildScope`'s domain re-projection drops them. The workable shape is to carry the path key and
-position AS `origins` (they are literally the row's provenance, which is what that slot means), so
-the pushed frame appends its ordinal after them and the final projection reads `pk`/`ord` off the
-frame's domain. Note also that `keyedChildRelation` does NOT serve this as built: a `by()` needs a
-SCALAR child and that function is element-only, so this wants a scalar sibling rather than a reuse.
+**`by(traversal)` over a recursive path — ✅ CLOSED, and the fix needed NO new abstraction.** The
+seam problem was real: the explode is naturally `(id, pk, ord)` while an ElementStream's physical
+schema is `['id', ...carriedCols]`, so `pk`/`ord` cannot just ride alongside. They ride as
+**`origins`** — which is exactly what that slot means ("which parent did this row come from"), and
+for a path element the answer literally is "path `pk`, position `ord`". That makes the exploded rows
+an ordinary element stream, so `pushChildScope` mints its ordinal after them and the rejoin is the
+same `LEFT JOIN … ON b.<ordinal> = d.<ordinal>` the linear regime already does.
+
+The child itself is `lowerPathPositionChild`, **unchanged and shared** — fan-out guards, the
+`choose`/`coalesce` branch route and the `first` collapse are ONE implementation for both regimes.
+A grouped path is in fact the easier case: `bys.length > 1` already defers, so a single uniform
+`by()` means one child rather than one per position.
+
+I had predicted this would want a "scalar sibling to `keyedChildRelation`". It did not, and that is
+worth recording: the child seam was already the right abstraction, and what kept this regime out of
+it was only that its explode could not be spelled as an ElementStream. **Reaching an existing seam
+beat adding a fourth provisioning strategy.**
+
+**Measured:** `by(__.values("name"))` on a recursive path equals `by("name")`; `by(__.out().count())`
+→ `[3,2,0],[3,2,0]` and the LINEAR regime gives the same; `by(__.in().count())` → `[0,1,3],[0,1,1]`;
+non-productive drop and ProductiveBy agree with the by(key) forms even though one filters
+pre-numbering and the other group-wise post-join; the shared fan-out guard still rejects `union()`
+at a position.
 
 **The route, measured (2026-07-27) — no new rendering mode, and simpler than the linear case.**
 Materialize the `json_each` explode as its own `(pk, ord, id)` relation, push ONE child scope over

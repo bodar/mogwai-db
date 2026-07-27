@@ -6,7 +6,8 @@ import { advance, aliasColsOf, prevRel, type AliasEntry, type Carried, type Elem
 import { aliasEntry, aliasId, aliasScalar, aliasSeed, elemEntry, elemShape, isElementShape, nodeEntry, shapeElem, type AliasShape } from '../context/alias.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { type Stream } from '../context/stream.ts';
-import { isGlobalBarrier } from '../tail/child-shape.ts';
+import { isGlobalBarrier, ROOT_SCOPE } from '../tail/child-shape.ts';
+import { tryCompileScalarValueChild } from '../tail/child.ts';
 import { staticTypeOf } from '../../../sql/kernel/render.ts';
 
 // ---------- match() — declarative conjunctive pattern join ----------
@@ -103,14 +104,6 @@ function applyPattern(st: ElementStream, p: Pattern, aliases: Map<string, AliasE
     throw new Error(`match() pattern starting from a non-element variable ("${p.start}" holds ${startShapes.join('|') || 'nothing'}) not yet supported`);
   const startElem = shapeElem(startShapes[0]);
 
-  // A GLOBAL barrier in a pattern body observes the whole stream, and here that stream IS the
-  // binding table — so `count()` would answer one count over ALL bindings where the pattern
-  // asks for one per binding. That needs per-binding scoping (the child seam), so defer rather
-  // than mis-execute. Same fact `repeat()` defers on, same predicate.
-  const barrier = p.body.find(isGlobalBarrier);
-  if (barrier)
-    throw new Error(`match() pattern with a ${barrier.name}() barrier not yet supported: it would reduce over the WHOLE binding table, not once per binding — that needs per-binding scoping`);
-
   // Seed: id = the start var's rowid, carrying every bound var column so movement/filter
   // thread them through unchanged. The bound vars ARE the seed's carried aliases.
   const seedRel = st.q.cte(
@@ -118,17 +111,36 @@ function applyPattern(st: ElementStream, p: Pattern, aliases: Map<string, AliasE
     ['id', ...varCols]);
   const seed: ElementStream = { ...st, rel: seedRel, elem: startElem, carried: { aliases: new Map(aliases), origins: [] } };
 
-  // The whole body, not just its element prefix. Folding ONLY the prefix is what stopped at the
-  // first non-element step and made "the end var must be a node" a vocabulary wall rather than a
-  // real boundary. This is `lowerRootedArm`'s exact shape — prefix fold, then the shared shaped
-  // loop for whatever follows, rejecting a terminal result — the difference being that a pattern
-  // is SEEDED from a bound var rather than rooted at a source. A pattern body structurally cannot
-  // host a barrier source, so the strict (non-suspending) loop is the right entry point.
+  // TWO routes, and which one is right is decided by a real semantic fact, not a vocabulary.
+  //
+  //  • A ROW-LOCAL body (movement/filter, or a scalar projection like values()) is evaluated
+  //    per binding by construction, and its fan-out is CORRECT — `a.out("knows").as("b")` should
+  //    produce one row per (a,b) pair. So it lowers at this scope: prefix fold, then the shared
+  //    shaped loop for whatever follows. That is `lowerRootedArm`'s shape, the difference being
+  //    that a pattern is SEEDED from a bound var rather than rooted at a source.
+  //  • A GLOBAL BARRIER body (count/fold/dedup/…) observes the whole stream — and here that
+  //    stream IS the binding table, so lowering it at this scope would answer ONE count across
+  //    ALL bindings where the pattern asks for one per binding. It needs per-binding scoping,
+  //    which is exactly what the child seam does: push a scope over the binding rows, compile
+  //    the body as a scalar child, and let the cardinality rejoin restore one row per binding.
+  //
+  // The child seam was already shape- and parent-generic enough for this; what kept match out of
+  // it was that its scalar entry points required a `nested` PARSE TREE, and a pattern body is a
+  // Step[] SLICE between the as() wrappers with no tree of its own. They now accept a pre-parsed
+  // body, so this is reuse rather than a second reducer implementation.
   const eng = engineOf(seed);
-  const lowered = eng.lowerElementSteps(p.body, seed);
-  const out: Stream = lowered.next >= p.body.length
-    ? lowered.stream
-    : eng.lowerStepsStrict(lowered.stream, p.body, lowered.next);
+  const out: Stream = ((): Stream => {
+    if (p.body.some(isGlobalBarrier)) {
+      const scoped = tryCompileScalarValueChild(seed, undefined, 'first', ROOT_SCOPE, p.body);
+      if (!scoped)
+        throw new Error(`match() pattern __.${p.body.map((b) => b.name + '()').join('.')} not yet supported: it reduces over the binding table and is not a scalar child the per-binding seam can compile`);
+      return scoped;
+    }
+    const lowered = eng.lowerElementSteps(p.body, seed);
+    return lowered.next >= p.body.length
+      ? lowered.stream
+      : eng.lowerStepsStrict(lowered.stream, p.body, lowered.next);
+  })();
   const bound = endBindingOf(out);
   if (!bound) throw new Error(`match() pattern binding a ${out.kind} result not yet supported (the end var can hold an element or a scalar)`);
   if (bound.carried.aliases.size !== aliases.size || bound.carried.path || bound.carried.origins.length)

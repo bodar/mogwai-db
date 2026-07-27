@@ -246,11 +246,34 @@ test('match() binds a variable of ANY shape, not just a node', () => {
     .map((r) => r.v).sort()).toEqual(['lop', 'ripple']);
 });
 
+test('match() reduces PER BINDING, agreeing with the per-parent child route', () => {
+  // A global barrier in a pattern body observes the whole stream, and here that stream IS the
+  // binding table — lowering it at that scope would answer ONE count across ALL bindings. So a
+  // barrier body routes through the child seam instead, which restores one row per binding.
+  // Pinned against `map(__.<same body>)` rather than against constants: same semantics, already
+  // established route, so a divergence is a real bug and not a fixture edit.
+  const store = seededStore();
+  const vals = (g: string) => run(store, g).map((r) => r.v);
+  for (const [m, ref] of [
+    ['g.V().match(__.as("a").out("knows").count().as("b")).select("b")', 'g.V().map(__.out("knows").count())'],
+    ['g.V().match(__.as("a").out("created").count().as("n")).select("n")', 'g.V().map(__.out("created").count())'],
+    ['g.V().match(__.as("a").both().count().as("n")).select("n")', 'g.V().map(__.both().count())'],
+    ['g.V().match(__.as("a").outE("created").values("weight").sum().as("w")).select("w")',
+     'g.V().map(__.outE("created").values("weight").sum())'],
+    ['g.V().match(__.as("a").out().values("name").max().as("m")).select("m")',
+     'g.V().map(__.out().values("name").max())'],
+  ] as [string, string][]) {
+    expect(vals(m)).toEqual(vals(ref));
+  }
+  // Only marko knows anyone, so a GLOBAL count would collapse this to a single row of 2.
+  expect(vals('g.V().match(__.as("a").out("knows").count().as("b")).select("b")')).toEqual([2, 0, 0, 0, 0, 0]);
+});
+
 test('match() deferrals fail closed', () => {
-  // A GLOBAL barrier in a pattern body would reduce over the whole BINDING TABLE rather than
-  // once per binding — a different question, so it defers. Same predicate repeat() uses.
-  expect(() => compile('g.V().match(__.as("a").out("knows").count().as("b"))', {})).toThrow('count()');
-  expect(() => compile('g.V().match(__.as("a").out("knows").count().as("b"))', {})).toThrow('not once per binding');
+  // A LIST-shaped end var (fold()) has no binding entry yet — the alias table can hold a list,
+  // but nothing reads one back as a match variable, so it defers instead of binding something
+  // downstream cannot consume.
+  expect(() => compile('g.V().match(__.as("a").out("knows").fold().as("b"))', {})).toThrow('not yet supported');
   // A pattern cannot START from a scalar var — there is no rowid to re-root on. Fails closed
   // rather than reading the value as an id.
   expect(() => compile('g.V().match(__.as("a").values("name").as("n"), __.as("n").out().as("c"))', {}))

@@ -235,6 +235,50 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
  * PATH ELEMENT ordered by `(pk, ord)` — the handler folds each pk-run into one Path.
  * All elements are vertices (out/in/both bodies); edge-inclusive bodies defer.
  */
+/**
+ * `path().by(__.trav)` over a RECURSIVE (grouped) path — the positional child the linear regime
+ * has always had, now over `json_each` instead of over static position columns.
+ *
+ * The trick that unlocks it: the explode is naturally `(id, pk, ord)`, and an ElementStream's
+ * physical schema is `['id', ...carriedCols]`, so `pk`/`ord` cannot just ride alongside. They ride
+ * as **`origins`** — which is precisely what that slot means ("which parent did this row come
+ * from"), and for a path element the answer literally is "path `pk`, position `ord`". So the
+ * exploded relation is an ordinary element stream, `pushChildScope` mints its ordinal after them,
+ * and the rejoin is the same `LEFT JOIN … ON b.<ordinal> = d.<ordinal>` the linear regime does.
+ *
+ * The child itself is `lowerPathPositionChild`, UNCHANGED and shared: the fan-out guards, the
+ * branch route (`choose`/`coalesce`) and the `first` collapse are one implementation for both
+ * regimes rather than two. That is the whole point — a grouped path is easier than a linear one
+ * here, because a single uniform `by()` means ONE child rather than one per position.
+ */
+function groupedPositionChild(st: ElementStream, paths: Relation, nested: any, productive: boolean): Expression {
+  const elemRows = st.q.cte(
+    q`SELECT je.value AS id, pp.pk AS pk, je.key AS ord FROM ${paths} pp, json_each(pp.path) je`,
+    ['id', 'pk', 'ord']);
+  // No aliases and no path: a position's child must not extend the walk's path (its movement
+  // would append a column and corrupt the carried schema), and the walk's label history is
+  // consumed by this barrier — the same reason the linear regime strips `path` from its child seed.
+  const elemStream: ElementStream = {
+    ...st, rel: elemRows, elem: 'node',
+    carried: { aliases: new Map(), origins: ['pk', 'ord'] },
+  };
+  const outer = pushChildScope(elemStream);
+  const child = lowerPathPositionChild(outer.seed, nested, outer, st.params);
+  const ord = outer.frame.ordinal;
+  const d = outer.frame.domain.as('d');
+  const b = child.rel.as('b');
+  const vals = st.q.cte(
+    q`SELECT ${d.c.pk} AS pk, ${d.c.ord} AS ord, ${b.c.v} AS v FROM ${d} LEFT JOIN ${b} ON ${b.c[ord]}=${d.c[ord]}`,
+    ['pk', 'ord', 'v']);
+  // Non-productive by(): a MISSING value drops the WHOLE path — the same rule the flat projector
+  // applies with a pre-numbering NOT EXISTS, expressed group-wise because the value only exists
+  // now. ProductiveBy keeps the path with an explicit NULL position.
+  const v = vals.as('v');
+  const drop = productive ? empty
+    : q` WHERE ${v.c.pk} NOT IN (SELECT ${vals.c.pk} FROM ${vals} WHERE ${vals.c.v} IS NULL)`;
+  return q`SELECT ${v.c.pk} AS pk, ${v.c.ord} AS ord, ${v.c.v} AS v FROM ${v}${drop} ORDER BY ${v.c.pk}, ${v.c.ord}`;
+}
+
 function compilePathArray(st: ElementStream, proj: PStep, acc: TailAcc): PathStream {
   if (acc.orders.length || acc.reducer || acc.isPreds.length)
     throw new Error('order()/reducer/is() after a recursive repeat().path() not yet supported');
@@ -247,21 +291,18 @@ function compilePathArray(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   const bys = proj.bys ?? [];
   if (bys.length > 1) throw new Error('path().by() with multiple modulators over a recursive repeat().path() not yet supported');
   const by = bys.length ? bys[0] : undefined;
-  // A by(traversal) position needs a real child keyed back to the exploded element; the flat
-  // scalar projector below cannot express it. Defer explicitly (see lowerPathPositionChild for
-  // the linear regime's route) rather than letting positionScalar throw a vaguer message.
-  if (classifyBy(by).kind === 'nested')
-    throw new Error('path().by(traversal) over a recursive repeat().path() not yet supported (a positional child over json_each — the linear regime has it, this regime does not yet)');
-  // Every position projects through the SAME projector the linear regime uses, over an
+  const nested = classifyBy(by).kind === 'nested' ? (classifyBy(by) as { nested: any }).nested : undefined;
+  // Every KEY/TOKEN position projects through the SAME projector the linear regime uses, over an
   // `aliasCtx` on the exploded element id. `posValue` is a function of the id expression
   // because it is needed at two sites over two different `je` scopes (here and the
-  // non-productive drop guard below) — one projector, no second hardcode.
+  // non-productive drop guard below) — one projector, no second hardcode. A by(TRAVERSAL)
+  // position is not a flat expression at all; it runs the positional child below.
   const posValue = (idExpr: Expression) => positionScalar(aliasCtx(idExpr, 'node'), by);
   // Whether this by() projects a SCALAR per position (key or T.token) or leaves the whole
   // element. Drives both the emitted columns and the wire framing (pathColumns / execute.ts
   // pathGroupedBuffers read `byKey` as exactly this question), so a T.token position needs no
   // wire change — it is a scalar like any other.
-  const scalarPos = positionScalar(aliasCtx(q`je.value`, 'node'), by) !== undefined;
+  const scalarPos = nested !== undefined || positionScalar(aliasCtx(q`je.value`, 'node'), by) !== undefined;
   const productive = proj.productiveBy === true;
   // dedup() must collapse equal paths BEFORE row-numbering: ROW_NUMBER() is computed
   // with the SELECT list, so a `SELECT DISTINCT path, ROW_NUMBER()…` never removes a
@@ -270,7 +311,10 @@ function compilePathArray(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   // A non-productive by(key) drops the WHOLE path if ANY element lacks the property
   // (mirrors the linear path()'s per-position IS NOT NULL guard); ProductiveBy keeps it
   // with an explicit NULL position.
-  if (scalarPos && !productive) {
+  // A by(TRAVERSAL) value does not exist until the path is exploded and the child joined, so its
+  // drop guard cannot run here — it runs group-wise inside groupedPositionChild instead. Same
+  // rule, different point in the pipeline.
+  if (scalarPos && !nested && !productive) {
     const fp = src.as('fp');
     src = st.q.cte(
       q`SELECT ${fp.c.path} AS path FROM ${fp} WHERE NOT EXISTS (SELECT 1 FROM json_each(${fp.c.path}) je WHERE ${posValue(q`je.value`)!} IS NULL)`,
@@ -282,9 +326,11 @@ function compilePathArray(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   const limitSql = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
   const paths = st.q.cte(q`SELECT ${src.c.path} AS path, ROW_NUMBER() OVER (ORDER BY ${src.c.path}) AS pk FROM ${src}${limitSql}`, ['path', 'pk']);
   const layout = { kind: 'grouped' as const, elem: 'vertex' as const, byKey: scalarPos };
-  // by(key)/by(T.token) → one scalar `v` per position (read back off the exploded id);
-  // otherwise the whole vertex framed from nodes/labels.
-  const node = scalarPos
+  // by(traversal) → a real positional CHILD per exploded element; by(key)/by(T.token) → one
+  // scalar `v` read back off the exploded id; otherwise the whole vertex framed from nodes/labels.
+  const node = nested
+    ? groupedPositionChild(st, paths, nested, productive)
+    : scalarPos
     ? q`SELECT pp.pk, je.key AS ord, ${posValue(q`je.value`)!} AS v FROM ${paths} pp, json_each(pp.path) je ORDER BY pp.pk, je.key`
     : (() => {
         const n = nodes.as('n');

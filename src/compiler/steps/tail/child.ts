@@ -141,7 +141,7 @@ export function tryCompileCountChild(
   scope: CompileScope = ROOT_SCOPE,
   preParsed?: ReturnType<typeof stepChain>,
 ): ScalarStream | null {
-  if (!nested || isPropertyParent(parent) || isScalarParent(parent)) return null;
+  if ((!nested && !preParsed) || isPropertyParent(parent) || isScalarParent(parent)) return null;
   const counted = classifyCountChild(preParsed ?? childSteps(nested, parent.params), childCtx(parent));
   if (!counted) return null;
   const { prefix } = counted;
@@ -168,7 +168,7 @@ function tryCompileCountValueRows(
   scope: CompileScope = ROOT_SCOPE,
   preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ScalarStream; frame: ChildFrame } | null {
-  if (!nested || isPropertyParent(parent) || isScalarParent(parent)) return null;
+  if ((!nested && !preParsed) || isPropertyParent(parent) || isScalarParent(parent)) return null;
   const body = preParsed ?? childSteps(nested, parent.params);
   // A trailing is() run is a filter on the count value — `out().count().is(gt(1))`.
   // It composes as a HAVING on the aggregate: the row (one per parent, incl. the
@@ -350,7 +350,10 @@ function compileScalarChildRows(
   stripTerminal?: string,
   preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ScalarStream; frame: ChildFrame } | null {
-  if (!nested) return null;
+  // `nested` is the parse tree to read the body FROM; `preParsed` is that body already in hand.
+  // Requiring the tree even when the body was supplied is what kept callers whose body is a
+  // Step[] SLICE — a match() pattern between its as() wrappers — out of this seam entirely.
+  if (!nested && !preParsed) return null;
   const fullBody = preParsed ?? childSteps(nested, parent.params);
   if (stripTerminal && fullBody.at(-1)?.name !== stripTerminal) return null;
   const body = stripTerminal ? fullBody.slice(0, -1) : fullBody;
