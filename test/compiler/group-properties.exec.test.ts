@@ -413,3 +413,50 @@ describe('a project()/select() child body', () => {
     expect((run(store, 'g.V(1).as("a").local(__.select("a"))') as any[]).length).toBe(1);
   });
 });
+
+// ---------- a group value body composes with EVERY reducer, not just some ----------
+//
+// tryLowerGroupChildSource's shape gate had two classifiers and chose ONE by whether the body's
+// terminal was `count`: classifyCountChild (a body with no scalar projection — `count()`,
+// `out().count()`) or classifyScalarChildRows (`<prefix>.<projection>.<reducer>`). They are
+// COMPLEMENTARY, so selecting one meant a count-terminal body WITH a projection matched neither,
+// and `count` was special for no semantic reason. Now both are tried. This test asserts the
+// UNIFORMITY, not the two scenarios that happened to expose it.
+describe('group().by(<value traversal>) — reducer/projection uniformity', () => {
+  const grouped = (store: GraphStore, g: string) =>
+    (run(store, g) as any[]).map((r) => [r.gk, Number(r.gv)])
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+
+  test('a projection composes with count exactly as it does with the other reducers', () => {
+    const store = seededStore();
+    // The grid that exposed the hole: a projection + count used to fail while the identical shape
+    // under sum/min/max/mean worked. Every cell must now compile.
+    for (const body of ['__.label().count()', '__.values("name").count()',
+                        '__.out().values("name").count()', '__.outE().values("weight").count()'])
+      expect(() => run(store, `g.V().group().by(__.label()).by(${body})`)).not.toThrow();
+  });
+
+  test('…and the ANSWERS are right, oracled against the bare count()', () => {
+    const store = seededStore();
+    // modern: 4 person + 2 software. `label` and `name` exist on EVERY vertex, so counting either
+    // per group is the member count — it must equal the bare count() form exactly.
+    const members = grouped(store, 'g.V().group().by(__.label()).by(__.count())');
+    expect(members).toEqual([['person', 4], ['software', 2]]);
+    for (const body of ['__.label().count()', '__.values("name").count()'])
+      expect(grouped(store, `g.V().group().by(__.label()).by(${body})`)).toEqual(members);
+    // A property only SOME members carry must differ — proving it counts values, not members.
+    expect(grouped(store, 'g.V().group().by(__.label()).by(__.values("age").count())'))
+      .toEqual([['person', 4], ['software', 0]]);
+    // A movement projection counts reached values, and agrees with the movement-only form.
+    expect(grouped(store, 'g.V().group().by(__.label()).by(__.out().values("name").count())'))
+      .toEqual(grouped(store, 'g.V().group().by(__.label()).by(__.out().count())'));
+  });
+
+  test('a reducer that is nonsense over elements still fails closed', () => {
+    const store = seededStore();
+    // sum/min/max over a body with NO scalar projection has nothing numeric to reduce. The fix
+    // widened `count`; it must not have widened these into answering a different question.
+    for (const body of ['__.sum()', '__.out().sum()', '__.min()'])
+      expect(() => run(store, `g.V().group().by(__.label()).by(${body})`)).toThrow();
+  });
+});

@@ -211,9 +211,19 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   // so gating and emit share ONE parse (the body is threaded into emit as preParsed) and
   // the old is*Child re-parse is gone. Raw stepChain still drives STRUCTURE detection
   // (project() head, value terminal), which needs the un-normalized shape.
+  // Two classifiers, COMPLEMENTARY rather than alternative — which is what this gate used to get
+  // wrong. classifyCountChild covers a body with no scalar projection (`count()`, `out().count()`);
+  // classifyScalarChildRows covers `<prefix>.<projection>.<reducer>`. Neither subsumes the other, so
+  // TRY BOTH. Selecting one by whether the terminal is `count` meant a count-terminal body with a
+  // projection matched neither: `by(__.label().count())` and `by(__.values("n").count())` failed
+  // while the identical shape under any OTHER reducer (`.sum()`, `.min()`, …) worked — `count` was
+  // special for no semantic reason. The emit side never needed changing: a count-terminal body
+  // already routes to genericReducer → tryCompileRowsBeforeReducer, the generic `<rows>.<reducer>`
+  // path, which is what lowers `out().count()` today.
   const scalarShape = (body: ReturnType<typeof stepChain>) => isProp
     ? classifyScalarChildRows('property', body) !== null
-    : body.at(-1)?.name === 'count' ? classifyCountChild(body, childCtx(parent)) !== null : classifyScalarChildRows('element', body, childCtx(parent)) !== null;
+    : classifyScalarChildRows('element', body, childCtx(parent)) !== null
+      || (body.at(-1)?.name === 'count' && classifyCountChild(body, childCtx(parent)) !== null);
   const scalarFoldShape = (body: ReturnType<typeof stepChain>) =>
     body.at(-1)?.name === 'fold' && classifyScalarChildRows(pk, body.slice(0, -1), childCtx(parent)) !== null;
 
