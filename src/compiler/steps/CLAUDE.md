@@ -27,6 +27,16 @@ fails closed is better than a special-case that entrenches the non-generic path.
   mini-compiler, no sibling/index scanning inside a step compiler, no second movement/filter/
   projection path, no materializing from a read leaf. If a step needs one of these, the design is
   wrong — reuse the generic seam instead.
+- **The child seam is RESULT-shape generic too: there is ONE cardinality rejoin.**
+  `applyChildCardinality` (`tail/child.ts`) restores parent cardinality for EVERY shape — it derives
+  the payload from `streamPayloadCols` (`context/stream.ts`, already the single authority on a kind's
+  own columns) and re-homes the stream by spread, so `type`/`result`, `keyOf`/`valOf`, `elem`, `of`,
+  `fields` and `layout` ride along untouched. **Adding a shape to the child seam must add nothing
+  here.** A shape-specific rejoin is how the scalar path grew its own copy (retired); if a new shape
+  seems to need one, the payload authority is what's missing, not the rejoin.
+  Likewise `classifyProjectionChildRows` (`tail/child-shape.ts`) is the ONE classifier for
+  `<element prefix>.<terminal projection>`, parameterized by which projection it accepts — map and
+  record are two predicates over it, not two classifiers.
 - **The child seam is parent-shape-polymorphic** (element/property/scalar parents share one
   dispatcher) and lives in three cohesive files — `tail/child-shape.ts` (pure classify leaf) ◂
   `tail/child.ts` (compilers) ◂ `tail/scalar-arm.ts` (scalar-parent arms). Extend by adding to the

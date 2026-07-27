@@ -1,9 +1,40 @@
 # Hand-rolled SQL audit — where a second implementation replaced the substrate
 
-_Swept 2026-07-27; **re-measured 2026-07-27 after merging trunk** (`611a4fc`), which landed the
-`union()` SOURCE consolidation and closed what this audit ranked #2 — see the struck entry. Every
-count below is **measured** against the merged tree, not estimated: the method is at the bottom.
-Ranked by (duplication × family unblock × reach at depth), which is not the same as ranking by lines._
+_Swept 2026-07-27, then re-measured twice as trunk moved under it. Every count below is **measured**,
+not estimated: the method is at the bottom. Ranked by (duplication × family unblock × reach at depth),
+which is not the same as ranking by lines._
+
+> **STATUS 2026-07-27 (L3 1473, corpus-compile ~1700).** Four of the nine sites are closed and two
+> premises in this doc were **falsified by measurement** — read the note below before using the
+> rankings, because the original text still reflects the pre-fix state.
+>
+> | # | site | state |
+> |---|---|---|
+> | 1 | `expandRepeatBody` — the repeat body mini-compiler | ✅ retired as the vocabulary; it is now a fast path |
+> | 2 | `seedUnion` | ✅ landed on trunk |
+> | 6 | `predicate.ts` infix connectives | ✅ extracted to `ConnectiveStrategy`, a fold Pass |
+> | — | the child seam's shape ceiling *(not originally a numbered site)* | ✅ now shape-generic: ONE rejoin, map + record bodies |
+> | 3 | `match()` binding table | open — top open site |
+> | 4 | `path.ts` grouped positional projector | open |
+> | 5 | `write.ts` merge/endpoint | open (largest by count, but terminal — never composes at depth) |
+> | 7–9 | `child.ts` residue, `search.ts`, leaf dups | open, Low |
+>
+> **Two premises here are FALSE — do not rebuild on them:**
+> 1. *"Mode C (flat accumulation) is a missing rendering mode the compiler needs."* Avoidable. A
+>    recursive term may reference a NON-recursive CTE, so the body compiles once through the ordinary
+>    seam as a `(from_id, to_id)` relation the term joins. No new mode was added.
+> 2. *"The remaining shapes are blocked on making the tail's terminal boundary relational."*
+>    `project`/`group`/`path` already HAVE relational forms; they were blocked on having no child
+>    PROVIDER. And `local(__.out())` already worked, so "the element terminal needs a relational form"
+>    was imaginary too.
+>
+> **The biggest remaining ceiling gap is not in this list**: parent-shape uniformity (67 corpus
+> traversals, ~35 steps — the same step working over an element stream but not a scalar/list/path/map
+> one). Logged as item 5c in `outstanding-work.md`.
+>
+> **Method note worth keeping:** twice in this effort I escalated a hypothetical to a "needs a human
+> decision" (a T-token tag in the `{t,v}` vocabulary; group's value-mode matrix). Both dissolved on
+> one grep for demand — zero and two corpus traversals respectively. Check demand before designing.
 
 > The kernel is not the problem. Every site here already builds through `q`/`Relation` — locked
 > decision "only `kernel/q.ts` touches lazyrecords" holds. What this audit hunts is the **second
@@ -28,7 +59,15 @@ fast path, move the capability to the generic machinery.** The perf was real (1.
 would have been a regression; extracting the load-bearing fold into a Pass made the flag honest,
 fixed 3 top-level scenarios it had never reached, and left the optimization untouched.
 
-## The one structural finding
+## The one structural finding — ⚠️ **PARTLY SUPERSEDED, read this first**
+
+**The conclusion below ("the compiler needs a third rendering mode") is wrong for #1, which is the
+site it was written for.** #1 landed with **no new mode**: a recursive term may reference a
+NON-recursive CTE, so the body compiles once through the ordinary seam as a `(from_id, to_id)`
+relation the term joins. The `LATERAL` evidence in this section is still correct and still worth
+keeping — it explains *why* `expandRepeatBody` had to be hand-rolled — but "therefore we need mode C"
+does not follow, and the "#4 and #5 fall out of the same decision" claim is unproven: nobody has
+checked whether they have a CTE-reference route too. Check that before building a mode.
 
 Three of the remaining sites (#1, #4, #5) are the same missing primitive wearing different clothes.
 The compiler has **two** rendering modes and needs a third:

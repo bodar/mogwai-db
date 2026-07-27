@@ -449,6 +449,30 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    throws `order() before a movement/branch while tracking a path not yet supported` (a fresh
    encounter would collide with the path's positional ordering) — that IS #6/path-history territory.
 
+5c. **PARENT-SHAPE uniformity — the same step works over an element stream but not over a
+   scalar/list/path/map one.** (Measured 2026-07-27; the largest remaining ceiling gap by breadth,
+   and logged as its own item because it was previously only a passing clause inside other lines.)
+   **67 corpus traversals across ~35 distinct steps**, in five families:
+   - `X after a scalar stream` — 22, over 13 steps (`none`, `group`, `groupCount`, `by`, `repeat`,
+     `match`, `choose`, `math`, `format`, `flatMap`, `index`, `coalesce`, `where`)
+   - `X on a list value` — 18, over 13 steps (`split`, `index`, `where`, `fold`, `group`, `order`,
+     `dedup`, `project`, `is`, `groupCount`, `asNumber`, `asBool`, `asDate`)
+   - `X cannot consume the <MAP> result shape` — 14 (`merge`, `math`, `by`, `with`, `format`, `as`,
+     `asString`, `order`, `match`, `project`)
+   - `X on a path value` — 7 (`order` ×4, `select`, `union`, `unfold`)
+   - `Scope.local needs a list producer` — 6 (`count`, `tail`, `range`, `sample`)
+
+   **The character of the gap matters for how to pick it up.** It is NOT one substrate fix: verified
+   by probe, some steps already compose over a scalar parent (`groupCount`, `choose`, `coalesce`,
+   `math`) while others do not (`group`, `none`, `repeat`, `order().by(traversal)`), so it is per-step
+   dispatch, ~2-3 scenarios each. **Do NOT treat the 67 as one item to "fix" — that is floor-chasing.**
+   The ceiling question worth answering is whether each non-element parent gets the FULL step
+   vocabulary, and the honest unit of work is one parent shape at a time (the scalar parent is the
+   biggest and has the most existing machinery: `SCALAR_TAIL`, `lowerScalarRows`, `scalar-arm.ts`).
+   Where a step needs a genuinely different builder over a scalar parent — `group()` has no element
+   to project and its default `elementList` value mode does not apply — that is real work, not a gate.
+   → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md)
+
 6. **`order().by()` of paths (path natural-order comparability).** Unlocks the Orderability
    conformance cluster. **Medium.**
    → [path-history-substrate](./2026-07-18-path-history-substrate.md)
