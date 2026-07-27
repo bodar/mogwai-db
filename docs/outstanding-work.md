@@ -193,13 +193,23 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    operands in 7c (those bodies ARE traverser-independent; they just cannot be compiled as a
    standalone read today).
 
-   **Where the reuse boundary sits:** the SEEDING genuinely differs — a mid-traversal arm folds
-   from the parent relation, a source arm is a rooted sub-traversal — so the shared part is the
-   MERGE, not the seed. Compile each branch to a Stream of any shape (full lowering, not just
-   `buildPrefix`), then classify and route through the same merge builders. Doing that closes
-   item 4's residual as a side effect rather than as separate work. **Medium** — modest L3 yield
-   (~8-12) for the size, but it deletes a duplicate implementation and removes four fail-closed
-   walls at once.
+   **Where the reuse boundary sits** (spiked 2026-07-27 — one half confirmed, the other
+   corrected):
+   - ✅ **The MERGES are reusable.** `unionScalarStreams` (`tail/scalar.ts`), `finishListMerge` and
+     `mergeVariantArms` (`tail/variant.ts`) all take a bare `base: Carry`, not a parent stream —
+     they are genuinely parent-agnostic, so a SOURCE can call them with a synthesized Carry
+     (the compile's `q` + params + an empty carried).
+   - ❌ **The TRIAGE is NOT reusable, which the earlier framing assumed.** `classifyBranchArms`
+     and the `is*Child` classifiers under it all describe a CHILD BODY hanging off a parent
+     traverser; a source branch is a fully ROOTED traversal (`__.V().values('name')`), so none of
+     those predicates apply to it. Dispatch instead on the KIND of each lowered branch Stream —
+     a post-hoc dispatch, not a syntactic one, and arguably the cleaner of the two.
+
+   So the shape is: lower each branch to a Stream of any shape through the FULL lowering loop
+   (not `buildPrefix`, which stops at the prefix), dispatch on the resulting kinds, and route to
+   the parent-agnostic merges. That closes item 4's residual as a side effect rather than as
+   separate work. **Medium** — modest L3 yield (~8-12) for the size, but it deletes a duplicate
+   implementation and removes four fail-closed walls at once.
 
 5. **Map/non-element re-entry.** `valueMap().select()` into a retyped `MapStream`, and `as()`/
    `select(label)` over group/map/path/property streams. **Medium.**
@@ -303,8 +313,11 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    never define support by vocabulary exhaustion; with the decline it reaches the generic path and
    one choose() scenario passes there.
 
-   **Genuinely left:** `within`/`without` over a MULTI-VALUE operand (`IN (SELECT …)` rather than
-   `LIMIT 1` — the `.fold()` operand forms end in a list shape, which `operandSubquery` declines);
+   **Genuinely left:** `within`/`without` over a MULTI-VALUE operand — and this one is NOT the
+   cheap wiring it looks like (checked 2026-07-27): `predicateSql` renders each operand as ONE
+   element of a comma list, so a SET-valued operand cannot be substituted in as an Expression the
+   way a scalar one can. It needs `expr IN (SELECT …)` / `IN (SELECT value FROM json_each(<list>))`,
+   i.e. a scalar-vs-set distinction in the pure SQL layer — a new concept there, not a new caller;
    the `union(...).fold()` operands, blocked on the union SOURCE (item 4b) rather than on the
    operand machinery — note `isReSourced` (`steps/tail/operand.ts`) is a narrow proxy for
    "traverser-independent" (it tests for a `V`/`E` head), so a union of independent branches needs
