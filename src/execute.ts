@@ -292,7 +292,12 @@ function pathBuffer(r: any, positions: PathPos[]): Buffer {
     if (pos.render === 'element') {
       if (r[`${pos.prefix}_id`] == null) continue;
       objs.push(elementBuffer(r, pos.prefix, pos.elem));
-    } else objs.push(ioc.anySerializer.serialize(r[`${pos.prefix}_v`]));
+    } else {
+      // A padded position of a branched path is ABSENT, not null-valued — its presence column
+      // says so (a by() value that is genuinely missing dropped the whole path back in SQL).
+      if (pos.optional && r[`${pos.prefix}_at`] == null) continue;
+      objs.push(ioc.anySerializer.serialize(r[`${pos.prefix}_v`]));
+    }
   }
   return framePath(objs);
 }

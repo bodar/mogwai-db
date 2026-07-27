@@ -41,16 +41,24 @@ fails closed is better than a special-case that entrenches the non-generic path.
   depth, rather than a per-position vocabulary patch. A ctx-free caller conservatively rejects.
 - **`as()` is element-preserving; a label re-root rides the same fold.** `as()` sits in
   `ELEMENT_CHILD_STEPS` because it preserves every shape; `select(label)` is a TAIL step, so the
-  element-body fold (`lowerElementBody`, child.ts) applies the ONE existing implementation
-  (`selectOneFromAlias`) and keeps folding — never a second select in the prefix table.
-  **Whether a bind ESCAPES the child is the consumer's boundary, not a rule to write down:** a
-  mapping consumer pops the child stream (`popChildScope` carries the child's own carried → the
-  label rides out), a filter/`by()` consumer re-projects the parent domain (→ confined). Both are
-  TinkerPop's semantics, so leave that asymmetry alone.
-- **A renderer that cannot carry alias columns must DECLINE a label-mentioning body, not answer
-  it.** The inline correlated child (`tail/correlated.ts`) seeds a bare id with no carried
-  schema, where an absent alias column is indistinguishable from a never-bound label — i.e. a
-  silent `[]`. It calls `mentionsLabel` up front and falls through to the materialized gate.
+  element-body fold applies the ONE existing `selectOneFromAlias` and keeps folding — never a
+  second select in the prefix table. That fold is **`Engine.tryLowerElementSteps`**, the single
+  whole-body fold for every child position, materialized and correlated alike. Don't grow a second.
+  **Whether a MID-BODY bind escapes the child is the consumer's boundary, not a rule to write
+  down:** a mapping consumer pops the child stream (the label rides out), a filter/`by()` consumer
+  re-projects the parent domain (confined). Both are TinkerPop's, so leave that asymmetry alone.
+- **Carry the labels or decline the body — never answer without them.** An absent alias column is
+  indistinguishable from a never-bound label, so a renderer that reads one it does not physically
+  have returns a silent `[]`. The inline correlated child is handed a `LabelScope` and seeds those
+  columns (`tail/correlated.ts`); a site with no relation to read them from (`until()`/`emit()`, on
+  a recursive walk row) declines the body to the materialized gate instead.
+- **In a FILTER body a label's POSITION decides its meaning** — TinkerPop routes `where(traversal)`
+  by variable location (`getVariableLocations`). First step: a re-root (`WhereStartStep`). Last
+  step: an equality CONSTRAINT (`WhereEndStep`), so `where(__.as("a").out("knows").as("b"))` means
+  "a knows b". Middle: an ordinary bind, and only this one is a bind. We don't implement the
+  constraint, so `predicate.ts` defers it — read that trailing `as()` as an inert bind and you
+  silently answer "a knows somebody", which is how it last went wrong. Open, with a Pass-shaped
+  fix: `docs/outstanding-work.md`.
 - **The branch family (`union`/`choose`/`coalesce`/`optional`) has ONE arm triage and FOUR merge
   builders. Never add a fifth of either.** `classifyArmShape` (one arm) and `classifyBranchArms` +
   `BRANCH_SHAPE_ORDER` (a whole branch) in `tail/child-shape.ts` are the shape decision — the
@@ -61,9 +69,16 @@ fails closed is better than a special-case that entrenches the non-generic path.
   "element arm" is a `V()`/`E()` **re-source**, not a movement body, and list must be probed before
   scalar — different predicates and different priority, so it stays separate. It shares the
   `BranchArmShape` return type to keep the parallel visible.
-  The merges are `finishElementMerge` (`prefix/branch.ts`), `unionScalarStreams` (`tail/scalar.ts`),
-  `mergeVariantArms`/`mergeVariantParts` and `finishListMerge` (`tail/variant.ts`) — all
-  parent-agnostic (a bare `Carry`), so an element parent and a scalar parent share them verbatim.
+  The merges are `finishElementMerge`/`mergeElementArms` (`prefix/branch.ts`), `unionScalarStreams`
+  (`tail/scalar.ts`), `mergeVariantArms`/`mergeVariantParts` and `finishListMerge`
+  (`tail/variant.ts`) — all parent-agnostic (a bare `Carry`), so an element parent, a scalar parent
+  and a SOURCE (which has no parent at all) share them verbatim.
+  **`union()` in SOURCE position is not a second branch implementation** (it was, and consolidating
+  it is what made `finishElementMerge` Carry-typed). `sourceUnion` (`prefix/branch.ts`) lowers each
+  branch — a fully ROOTED traversal — through `Engine.lowerRootedArm`, then dispatches on the
+  resulting Streams' KINDS to those same merges. It deliberately does NOT use `classifyBranchArms`:
+  that triage describes a child body under a parent traverser, which a rooted branch is not. Every
+  source form (`V`/`E`/`union`/`inject`/`call`) is recognized in ONE place, `Engine.seedRooted`.
   **Every one mints the arm-merge `encounter`** when `carried.encounter` is live; hand-rolling a
   UNION ALL instead is precisely the bug that silently dropped arm ordering from the scalar-parent
   mixed-shape merges. A merge whose arms are heterogeneous (an `optional` hit/miss pair) takes

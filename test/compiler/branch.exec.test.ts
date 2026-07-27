@@ -349,15 +349,40 @@ test('as()/select(label) compose inside a child body, at any depth', () => {
   expect(run(store, 'g.V().map(__.out().select("nope"))')).toEqual([]);
   expect(run(store, 'g.V().where(__.out().select("nope"))')).toEqual([]);
 
-  // The INLINE correlated predicate renderer has no alias columns to read, so it must DECLINE a
-  // label-mentioning body and let the materialized generic gate answer — otherwise the absent
-  // column reads as "never bound" and the filter silently returns []. The fast-path contract is
-  // enabled ≡ disabled, so assert exactly that on a body the inliner would otherwise claim.
-  const inlined = (on: boolean) =>
-    runWith(store, 'g.V().as("x").where(__.out("created").where(__.select("x"))).values("name")',
-      { fastPaths: { predicateInlining: on } }).map((r: any) => r.v).sort();
-  expect(inlined(true)).toEqual(['josh', 'marko', 'peter']);
-  expect(inlined(true)).toEqual(inlined(false));
+  // The INLINE correlated predicate renderer READS labels too: its seed projects the outer row's
+  // alias columns, so a label is physically present inside the correlated child exactly as
+  // pushChildScope makes it present inside a materialized one. The fast-path contract is
+  // enabled ≡ disabled, so assert that on the bodies the inliner now claims.
+  const inlined = (query: string, on: boolean) =>
+    runWith(store, query, { fastPaths: { predicateInlining: on } }).map((r: any) => r.v).sort();
+  for (const query of [
+    'g.V().as("x").where(__.out("created").where(__.select("x"))).values("name")',   // read, two scopes down
+    'g.V().as("x").where(__.as("x").out("created")).values("name")',                 // leading re-root
+    'g.V().where(__.out().as("z").select("z").has("name","lop")).values("name")',    // bind + read, mid-body
+    'g.V().where(__.out().select("nope")).values("name")',                           // never-bound → drop, not error
+  ]) expect(inlined(query, true)).toEqual(inlined(query, false));
+  expect(inlined('g.V().as("x").where(__.out("created").where(__.select("x"))).values("name")', true))
+    .toEqual(['josh', 'marko', 'peter']);
+  expect(inlined('g.V().where(__.out().select("nope")).values("name")', true)).toEqual([]);
+});
+
+test('a label on the LAST step of a filter body is an end constraint, not a bind', () => {
+  const store = seededStore();
+  // TinkerPop routes where(traversal) by variable location: a label on the first step is a
+  // WhereStartStep (re-root), one on the LAST step is a WhereEndStep — the object reached must
+  // BE the one the label already holds. So `where(__.as("a").out("knows").as("b"))` asks "does a
+  // know b", not "does a know somebody". We do not implement the end constraint, and the inliner
+  // must not quietly answer the weaker question: marko→lop is the witness (marko knows vadas and
+  // josh, but not lop), and it must not appear under either setting.
+  const pairs = (on: boolean) => runWith(store,
+    'g.V().as("a").out().as("b").where(__.as("a").out("knows").as("b")).select("a","b").by("name")',
+    { fastPaths: { predicateInlining: on } }).map((r: any) => `${r.e0_v}->${r.e1_v}`).sort();
+  expect(pairs(true)).not.toContain('marko->lop');
+  expect(pairs(true)).toEqual(pairs(false));
+  // A label in the MIDDLE has neither location and IS an ordinary bind, confined to the filter
+  // body — that one the inliner does claim (asserted equivalent in the block above).
+  expect(run(store, 'g.V().where(__.out("created").as("z").has("name","lop")).values("name")')
+    .map((r: any) => r.v).sort()).toEqual(['josh', 'marko', 'peter']);
 });
 
 test('a child body whose local() is not element-shaped defers cleanly (classify/emit lockstep)', () => {
@@ -368,6 +393,55 @@ test('a child body whose local() is not element-shaped defers cleanly (classify/
   // died with a null-deref instead of a deferral.
   expect(() => run(store, 'g.V().group().by("name").by(__.out().local(__.values("name")).fold())'))
     .toThrow(/not yet supported/);
+});
+
+// ---------- union() in SOURCE position: one branch implementation, not two ----------
+//
+// A source branch is a fully ROOTED traversal, so it lowers through the ordinary rooted lowering
+// and the merge is chosen from the arms' KINDS (never the child seam's syntactic arm triage, which
+// describes a body hanging off a parent traverser). These pin that the four axes the old
+// hand-rolled UNION-ALL seed rejected — arm SHAPE, as(), emission ORDER and sack — now behave
+// exactly as they do mid-traversal.
+test('a union() SOURCE reaches every arm shape the mid-traversal union does', () => {
+  const store = seededStore();
+  const vs = (rows: any[]) => rows.map((r) => r.v).sort();
+  // ELEMENT arms (the shape the old seed handled) — unchanged.
+  expect(vs(run(store, 'g.union(__.V().hasLabel("software"), __.V().hasLabel("person")).values("name")')))
+    .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+  // SCALAR arms → the scalar merge. One arm is legal too (nothing to disagree about).
+  expect(vs(run(store, 'g.union(__.V().values("name"))')))
+    .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+  expect(vs(run(store, 'g.union(__.V(1).values("name"), __.V(2).values("name"))'))).toEqual(['marko', 'vadas']);
+  // A branch rooted at something other than V()/E(): inject() seeds on the SHARED Query, so its
+  // relation lands in the same WITH as its siblings'.
+  expect(vs(run(store, 'g.union(__.inject(1), __.inject(2))'))).toEqual([1, 2]);
+  // LIST arms (…fold()) → the list merge.
+  expect(run(store, 'g.union(__.V(1).values("name").fold(), __.V(2).values("name").fold())').map((r: any) => JSON.parse(r.list)))
+    .toEqual([['marko'], ['vadas']]);
+  // MIXED arms → the variant merge (vk 1 = scalar, 2 = node).
+  expect(run(store, 'g.union(__.V(1).values("name"), __.V(2))').map((r: any) => r.vk).sort()).toEqual([1, 2]);
+  // No branches at all is a legal traversal that emits nothing — not an arity error.
+  expect(run(store, 'g.union()')).toEqual([]);
+  // An arm shape no merge in the family covers fails closed, naming that shape.
+  expect(() => run(store, 'g.union(__.V().group().by("name"), __.V())')).toThrow('producing a group value');
+});
+
+test('a union() SOURCE carries as(), the path, emission order and the sack through its merge', () => {
+  const store = seededStore();
+  // as() INSIDE a branch: the merge unions the arms' label sets and NULL-pads the arm that never
+  // bound it, so select() resolves (the old seed threw on any arm-bound label).
+  expect(run(store, 'g.union(__.V(1).as("a").out(), __.V(2)).select("a").values("name")').map((r: any) => r.v))
+    .toEqual(['marko', 'marko', 'marko']); // v2's arm never bound "a" → that traverser drops
+  // PATH: each rooted arm seeds its own p0; ragged arms pad, so a short arm's path is shorter.
+  const paths = run(store, 'g.union(__.V(1).out().out(), __.V().hasLabel("software")).path().by("name")');
+  expect(paths.map((r: any) => [r.x0_v, r.x1_at && r.x1_v, r.x2_at && r.x2_v].filter((x) => x != null)))
+    .toEqual([['marko', 'josh', 'lop'], ['marko', 'josh', 'ripple'], ['lop'], ['ripple']]);
+  // EMISSION ORDER: a positional consumer downstream of the fan-out mints the arm-merge
+  // encounter — arm 0 fully before arm 1, so limit() takes arm 0's first rows.
+  expect(run(store, 'g.union(__.V(2), __.V(4)).limit(1).values("name")').map((r: any) => r.v)).toEqual(['vadas']);
+  expect(run(store, 'g.union(__.V(4), __.V(2)).limit(1).values("name")').map((r: any) => r.v)).toEqual(['josh']);
+  // SACK: withSack() seeds every arm's traversers, and the merge projects the carried column.
+  expect(run(store, 'g.withSack(1).union(__.V(1), __.V(2)).sack()').map((r: any) => r.v)).toEqual([1, 1]);
 });
 
 });

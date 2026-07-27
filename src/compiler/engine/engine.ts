@@ -1,14 +1,15 @@
 import { q, value, list, Query, type Expression } from '../../sql/kernel/q.ts';
 import { nodes, edges } from '../../sql/schema.ts';
 import { type Elem } from '../plan/plan.ts';
-import { isNested, stepChain, flattenListArgs } from '../../gremlin/frontend.ts';
+import { flattenListArgs } from '../../gremlin/frontend.ts';
 import { type PStep } from '../ir/strategies.ts';
 import { analyze, type ChainFacts } from '../ir/analyze.ts';
 import { withCarried, type Carry, type ElementStream, type StepFn } from '../steps/context/context.ts';
 import { move, toEdge, toVertex, otherV } from '../steps/prefix/movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from '../steps/prefix/filter.ts';
-import { union, optional, repeat, choose, coalesce } from '../steps/prefix/branch.ts';
-import { asBranchKind, branchNeedsShapeDispatch, childCtx, isElementChild, isListChild, isScalarChild, type ChildCtx } from '../steps/tail/child-shape.ts';
+import { union, optional, repeat, choose, coalesce, sourceUnion } from '../steps/prefix/branch.ts';
+import { seedInject } from '../steps/write/inject.ts';
+import { asBranchKind, branchNeedsShapeDispatch, childCtx, isElementChild, isListChild, isScalarChild, labelSelectOf, type ChildCtx } from '../steps/tail/child-shape.ts';
 import { match } from '../steps/prefix/match.ts';
 import { identity, limit, range, skip } from '../steps/prefix/passthrough.ts';
 import { sack } from '../steps/prefix/sack.ts';
@@ -216,40 +217,57 @@ export class LoweringEngine implements Engine {
     return { kind: 'elements', q: query, params, rel: query.cte(body, cols), elem, carried: { aliases: new Map(), origins: [], path, sack: sackInit ? 'sk' : undefined, bulk: 'bulk', encounter: wantsEncounter ? 'encounter' : undefined } };
   }
 
-  /** union(b1, b2, …) as a SOURCE step: compile each branch's prefix into the SAME
-   *  Query (so its CTEs share the outer WITH) and UNION ALL the branch id-relations
-   *  into one seed. Branches must be vertex-rooted prefixes with no leftover tail or
-   *  as() (those defer); the shared-Query recursion also lets a branch be a nested
-   *  union. This is the reusable sub-traversal-into-query seam local/map/choose build on. */
-  private seedUnion(first: PStep, params: Record<string, any>, sackInit?: SackSpec, wantsEncounter = false): ElementStream {
-    const query = this.q;
-    if (sackInit) throw new Error('withSack() with a union() source not yet supported');
-    if (wantsEncounter) throw new Error('emission-order encounter over a union() source not yet supported');
-    const branches = first.args.filter(isNested);
-    if (branches.length < 1) throw new Error('union() needs at least one branch');
-    const rels = branches.map((b: any) => {
-      const bsteps = stepChain(b.nested, params);
-      // wantsEncounter is always false here (a union source encounter throws above); a branch
-      // still tracks its own path, so honour tracksPath but force the encounter off.
-      const { st, stop } = this.buildPrefix(bsteps, params, undefined, { ...analyze(bsteps), demandsEncounter: false });
-      if (stop !== bsteps.length) throw new Error(`union() source branch tail __.${bsteps[stop].name}() not yet supported`);
-      if (st.elem !== 'node') throw new Error('union() source branch must be vertex-typed');
-      if (st.carried.aliases.size > 0) throw new Error('union() source branch with as() not yet supported');
-      return st.rel;
-    });
-    // Each branch prefix seeds its own bulk=1; UNION ALL keeps them per-row, so the merged
-    // source carries the branch multiplicity forward (a bulk-1 traverser per branch row).
-    const body = list(rels.map((r) => q`SELECT id, bulk FROM ${r}`), ' UNION ALL ');
-    return { kind: 'elements', q: query, params, rel: query.cte(body, ['id', 'bulk']), elem: 'node', carried: { aliases: new Map(), origins: [], bulk: 'bulk' } };
+  /** Seed the SOURCE of a rooted chain → the initial Stream + the index of the first step after
+   *  it. THE one place a source step is recognized: compileRead, buildPrefix and a `union()`
+   *  SOURCE arm all come through here, so a source form added once is available to all three.
+   *  `V()`/`E()` and `inject()` build their own relation; a `union()` SOURCE lowers each rooted
+   *  branch and merges them (branch.ts `sourceUnion` — of ANY shape, hence `Stream` not
+   *  `ElementStream`); a `call()` service seeds whatever shape it produces. A BARRIER call()
+   *  source suspends into a SegmentPlan, which only compileRead can build — it intercepts that
+   *  form before reaching here, so a barrier arriving at this seam is out of position. */
+  private seedRooted(steps: PStep[], params: Record<string, any>, sackInit: SackSpec | undefined, facts: ChainFacts): { stream: Stream; at: number } {
+    const first = steps[0];
+    if (first.name === 'V' || first.name === 'E')
+      return { stream: this.seedSource(first, params, facts.tracksPath, sackInit, facts.demandsEncounter), at: 1 };
+    if (first.name === 'union')
+      return { stream: sourceUnion(this, first, params, sackInit, facts), at: 1 };
+    if (first.name === 'inject')
+      return seedInject({ q: this.q, params, carried: { aliases: new Map(), origins: [] } }, steps, sackInit);
+    if (first.name === 'call') {
+      const seed = seedCall(first, this.q, params, this.registry, steps, this.federationDepth);
+      if (isBarrierPoint(seed)) throw new Error('a barrier/federated call() source is only supported at the head of a traversal');
+      return { stream: seed, at: 1 };
+    }
+    throw new Error(`unsupported source step: ${first.name}`);
+  }
+
+  /** Lower a fully ROOTED chain to its relational Stream — the `union()` SOURCE arm compiler.
+   *  Same spine as compileRead (seed the source, run the ONE shaped lowering loop) with one
+   *  difference: a chain that ENDS on elements returns that element relation rather than running
+   *  the root element projection, because a branch merge consumes a relation, not a framed leaf.
+   *  `facts` lets the caller impose the OUTER chain's path/encounter demands, which the arm's own
+   *  text cannot show. */
+  lowerRootedArm(steps: PStep[], params: Record<string, any>, sackInit?: SackSpec, facts: ChainFacts = analyze(steps)): Stream {
+    const seeded = this.seedRooted(steps, params, sackInit, facts);
+    // An element seed folds its movement/filter prefix here so a pure element chain can stop
+    // before compileTail; every other shape goes straight to the shared loop.
+    const lowered = seeded.stream.kind === 'elements'
+      ? this.lowerElementSteps(steps, seeded.stream, seeded.at)
+      : { stream: seeded.stream as Stream, next: seeded.at };
+    if (lowered.next >= steps.length) return lowered.stream;
+    const end = this.lowerStepsStrict(lowered.stream, steps, lowered.next);
+    if (end.kind === 'result')
+      throw new Error(`union() source branch __.${steps.map((s) => s.name + '()').join('.')} not yet supported (it lowers to a terminal result, not a mergeable relation)`);
+    return end;
   }
 
   /**
    * Fold the PREFIX dispatch over `steps` from index `from`, threading ElementStream. Stops at
    * the first step absent from PREFIX (order/projection/write) and reports where. The shared
-   * primitive behind both buildPrefix (folding from a V/E/union source) and a branch body
-   * (folding from an already-seeded relation — choose()'s arms, see branch.ts). A body carries
-   * no strategies normalization (matching seedUnion), so a repeat/by cluster inside an arm defers
-   * via its own compiler's guards.
+   * primitive behind buildPrefix/lowerRootedArm (folding from a seeded source) and a branch body
+   * (folding from an already-seeded relation — choose()'s arms, see branch.ts). A body reached
+   * through the CHILD seam carries no strategies normalization, so a repeat/by cluster inside such
+   * an arm defers via its own compiler's guards.
    */
   lowerElementSteps(steps: PStep[], seedSt: ElementStream, from = 0): { stream: ElementStream; next: number } {
     // trackFromV is per-scope: a chain that lands via otherV() (e.g. an exploded
@@ -287,24 +305,51 @@ export class LoweringEngine implements Engine {
     return { stream: st, next: i };
   }
 
-  /** Lower a complete element-valued step sequence without materializing it. This is the shared
-   * nested/root seam: branch arms can compose element StepFns and retain their relational stream,
-   * while lowerSteps remains the sole outer materializer. */
+  /** Lower a complete element-valued step sequence without materializing it, CROSSING a
+   * `select(label)` re-root. This is the shared nested/root seam: branch arms can compose element
+   * StepFns and retain their relational stream, while lowerSteps remains the sole outer
+   * materializer.
+   *
+   * lowerElementSteps folds the movement/filter/as()/branch prefix but stops at select() — that is
+   * a TAIL step, not a prefix StepFn. Rather than teach the prefix table a second select
+   * implementation, apply the ONE that already exists (selectOneFromAlias, the same code the root
+   * tail runs) and keep folding. An element-shaped label re-roots the traverser and the body
+   * continues; anything else returns null, so every caller keeps its existing decline.
+   *
+   * Being the ONE whole-element-body fold is the point: admitting a label re-root here reaches
+   * every child position at once — map/local/flatMap, where()/and()/or() existence, by()
+   * modulators, branch arms, count children, AND the inline correlated predicate (correlated.ts)
+   * — at ANY nesting depth. Both seeds physically carry the parent's alias columns
+   * (pushChildScope projects them into each frame; the correlated seed projects them from its
+   * LabelScope), so the read the fold makes is always physically there to make. */
   tryLowerElementSteps(steps: PStep[], seed: ElementStream): ElementStream | null {
-    const lowered = this.lowerElementSteps(steps, seed);
-    return lowered.next === steps.length ? lowered.stream : null;
+    let st = seed;
+    let at = 0;
+    for (;;) {
+      const { stream, next } = this.lowerElementSteps(steps, st, at);
+      st = stream;
+      if (next === steps.length) return st;
+      at = next; // the fold stopped here — only a label re-root can carry the body forward
+      const label = labelSelectOf(steps[at]);
+      if (label === null) return null;
+      const selected = selectOneFromAlias(st, steps[at], label, popOf(steps[at]));
+      if (selected.kind !== 'elements') return null;
+      st = selected;
+      at++;
+    }
   }
 
+  /** Seed an ELEMENT source + fold its movement/filter prefix. The write path's entry into the
+   *  read spine (a target-id relation); a source whose merge is not element-shaped fails closed
+   *  here rather than being silently mis-typed. */
   buildPrefix(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec, facts: ChainFacts = analyze(steps)): { st: ElementStream; stop: number } {
-    const first = steps[0];
-    const wantsEncounter = facts.demandsEncounter;
-    const seeded = first.name === 'union' ? this.seedUnion(first, params, sackInit, wantsEncounter)
-      : (first.name === 'V' || first.name === 'E') ? this.seedSource(first, params, facts.tracksPath, sackInit, wantsEncounter)
-      : (() => { throw new Error(`unsupported source step: ${first.name}`); })();
+    const { stream, at } = this.seedRooted(steps, params, sackInit, facts);
+    if (stream.kind !== 'elements')
+      throw new Error(`${steps[0].name}() as a source produces a ${stream.kind} value, which is not an element prefix`);
     // Gate the otherV() entering-vertex tracking on the chain; local()'s body inherits
     // the flag through its {...st} seed, so an inner edge step records it too.
-    const st0 = chainNeedsFromV(steps) ? withCarried(seeded, { trackFromV: true }) : seeded;
-    const lowered = this.lowerElementSteps(steps, st0, 1);
+    const st0 = chainNeedsFromV(steps) ? withCarried(stream, { trackFromV: true }) : stream;
+    const lowered = this.lowerElementSteps(steps, st0, at);
     return { st: lowered.stream, stop: lowered.next };
   }
 
@@ -450,12 +495,12 @@ export class LoweringEngine implements Engine {
     if (bulked) return bulked;
 
     // Whole-chain facts, computed ONCE here (analyze): tracksPath + demandsEncounter feed the
-    // prefix seed, and the movementCollapse gate already read collapseSafe at engine construction
+    // source seed, and the movementCollapse gate already read collapseSafe at engine construction
     // (collapseSafeFastPaths). Movement collapse discards per-row identity, so it is mutually
     // exclusive with a live encounter — analyze folds that into collapseSafe && !demandsEncounter.
     const facts = analyze(steps);
-    const { st, stop } = this.buildPrefix(steps, params, sackInit, facts);
-    const lowered = this.lowerSteps(st, steps, stop);
+    const { stream, at } = this.seedRooted(steps, params, sackInit, facts);
+    const lowered = this.lowerSteps(stream, steps, at);
     // A mid-traversal barrier call() (V().call(federate)) suspended the fold — build its SegmentPlan.
     if (isSuspension(lowered)) return this.segmentFromMidBarrier(lowered.point as MidBarrierPoint);
     return materializeFinal(lowered);

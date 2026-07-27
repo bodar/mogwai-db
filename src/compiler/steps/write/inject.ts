@@ -4,7 +4,7 @@ import { flattenListArgs, type SackSpec } from '../../../gremlin/frontend.ts';
 import { flatType, CANONICAL_TO_VALUETYPE, type CanonicalType } from '../../../gremlin/types.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { type Carry } from '../context/context.ts';
-import { toListStream, toScalarStream } from '../context/stream.ts';
+import { toListStream, toScalarStream, type Stream } from '../context/stream.ts';
 import type { Engine } from '../../engine/deps.ts';
 import { materializeFinal } from '../tail/materialize.ts';
 import { type Compiled, type ValueType } from '../../../sql/kernel/render.ts';
@@ -99,23 +99,24 @@ function foldConstantCoercions(steps: PStep[], vals: any[]): { at: number; as?: 
   return { at, as };
 }
 
-/** g.inject(v1, v2, …) is now only a shaped source constructor. List literals seed
- * ListStream rows; ordinary values seed ScalarStream rows. Every following step is
- * handled by lowerSteps, the same lowering engine used after values()/unfold(). */
-export function compileInject(engine: Engine, steps: PStep[], sackInit?: SackSpec): Compiled {
-  // A fresh child engine (fresh Query, same app scope): inject() is a SOURCE constructor, so it
-  // seeds its own relation on this Query and lowers the chain through the same engine — which the
-  // seed stream reaches via `q.engine`.
-  const eng = engine.subEngine({});
-  const Q = eng.q;
-  const carry: Carry = { q: Q, params: {}, carried: { aliases: new Map(), origins: [] } };
+/** Seed `inject(v1, v2, …)` as a shaped SOURCE on `carry`'s Query → the initial Stream plus the
+ * index of the first step the generic lowering loop takes over at (a leading constant-coercion
+ * prefix is folded into the literals here, so it may be > 1). List literals seed ListStream rows;
+ * ordinary values seed ScalarStream rows.
+ *
+ * Takes a bare `Carry` rather than an Engine so the seed lands on whichever Query the caller is
+ * building: its own fresh one at the top of a traversal (compileInject, below), or the SHARED one
+ * when inject() heads a `union()` SOURCE branch (`g.union(__.inject(1), __.inject(2))`) — where
+ * the arm's relation has to sit in the same WITH as its siblings'. */
+export function seedInject(carry: Carry, steps: PStep[], sackInit?: SackSpec): { stream: Stream; at: number } {
+  const Q = carry.q;
 
   // Each all-array argument is one list traverser, not scalar varargs.
   if (steps[0].args.length >= 1 && steps[0].args.every((a: any) => Array.isArray(a))) {
     if (sackInit) throw new Error('withSack() with a list-valued inject() not yet supported');
     const rows = steps[0].args.map((a: any[]) => q`(${jsonbArrayOf(a)})`);
     const rel = Q.cte(q`VALUES ${list(rows, ', ')}`, ['list']);
-    return materializeFinal(eng.lowerStepsStrict(toListStream(carry, rel, { kind: 'scalar' }), steps, 1));
+    return { stream: toListStream(carry, rel, { kind: 'scalar' }), at: 1 };
   }
 
   // Mixed list/scalar inject remains the historical flattened representation until
@@ -138,5 +139,17 @@ export function compileInject(engine: Engine, steps: PStep[], sackInit?: SackSpe
   // A bare inject(null) seeds a single compile-time-known null traverser. Flag it so a following
   // collection step raises TinkerPop's null-incoming message rather than the scalar-incoming one.
   const literalNull = vals.length === 1 && vals[0] === null;
-  return materializeFinal(eng.lowerStepsStrict(toScalarStream(sackCarry, rel, as, { literalNull }), steps, folded.at));
+  return { stream: toScalarStream(sackCarry, rel, as, { literalNull }), at: folded.at };
+}
+
+/** g.inject(v1, v2, …) as a whole traversal: seed the source, then lower every following step
+ * through lowerSteps — the same lowering engine used after values()/unfold(). */
+export function compileInject(engine: Engine, steps: PStep[], sackInit?: SackSpec): Compiled {
+  // A fresh child engine (fresh Query, same app scope): inject() is a SOURCE constructor, so it
+  // seeds its own relation on this Query and lowers the chain through the same engine — which the
+  // seed stream reaches via `q.engine`.
+  const eng = engine.subEngine({});
+  const carry: Carry = { q: eng.q, params: {}, carried: { aliases: new Map(), origins: [] } };
+  const { stream, at } = seedInject(carry, steps, sackInit);
+  return materializeFinal(eng.lowerStepsStrict(stream, steps, at));
 }

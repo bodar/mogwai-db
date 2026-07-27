@@ -294,7 +294,7 @@ export const groupResultColumns = (s: Pick<GroupStream, 'key' | 'val'>): string[
 export const pathColumns = (layout: PathLayout): string[] => {
   if (layout.kind === 'grouped') return layout.byKey ? ['pk', 'ord', 'v'] : ['pk', 'ord', ...elemColumns('', layout.elem).map((c) => c.slice(1))];
   return layout.positions.flatMap((p) => p.render === 'value'
-    ? [`${p.prefix}_v`]
+    ? (p.optional ? [`${p.prefix}_v`, `${p.prefix}_at`] : [`${p.prefix}_v`])
     : elemColumns(p.prefix, p.elem));
 };
 

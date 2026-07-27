@@ -1,7 +1,7 @@
 import { q, list, empty, raw, Query, Relation, type Expression } from '../../../sql/kernel/q.ts';
 import { nodes, edges } from '../../../sql/schema.ts';
-import { type Elem } from '../../plan/plan.ts';
-import { type AliasShape } from './alias.ts';
+import { aliasCtx, type Elem, type ScalarCtx } from '../../plan/plan.ts';
+import { aliasId, aliasPresent, type AliasShape } from './alias.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import type { ValueType, ListOf } from '../../../sql/kernel/render.ts';
 
@@ -220,6 +220,43 @@ export function aliasArmProjection(armAliases: AliasMap, out: AliasMap, p: Relat
 /** The current id-relation, optionally aliased. Its columns are id + every carried
  *  alias column, so `prevRel(st,'p').c.a0` resolves downstream. */
 export const prevRel = (st: ElementStream, alias?: string): Relation => alias ? st.rel.as(alias) : st.rel;
+
+/** The outer row's path-history LABELS made readable from a CORRELATED sub-render: the label
+ *  map plus the relation whose columns physically hold those histories at the point the
+ *  correlated SQL is spliced in. It is what lets a correlated predicate re-root on a label
+ *  (`where(__.as("b").out())`) and lets the inline correlated child SEED real alias columns
+ *  instead of declining every label-mentioning body.
+ *
+ *  Supply it ONLY where `rel` is genuinely in scope at the splice point — a site that has no
+ *  such relation (until()/emit(), whose predicate rides a recursive term's walk row) passes
+ *  nothing, and the label-mentioning bodies there keep failing closed. */
+export interface LabelScope {
+  readonly aliases: AliasMap;
+  readonly rel: Relation;
+}
+
+/** The LabelScope of a site that joins `prevRel(st,'p')` alongside the current element — the
+ *  `SELECT n.id … FROM <elem> n JOIN <prev> p … WHERE <test>` shape shared by filter.ts's
+ *  filterCte and branch.ts's choose() gate, which is where every correlated predicate lands. */
+export const labelScope = (st: ElementStream): LabelScope => ({ aliases: st.carried.aliases, rel: prevRel(st, 'p') });
+
+/** RE-ROOT on a label: the ScalarCtx of the element it currently (Pop.last) holds, correlating
+ *  on the carried alias column. This is how `where(__.as("b").out())`, `dedup("a","b")` and any
+ *  other label-rooted correlated read resolve — one reading, so they cannot drift. */
+export function labelCtx(labels: LabelScope, label: string): ScalarCtx {
+  const entry = labels.aliases.get(label);
+  if (!entry) throw new Error(`no such label "${label}" — as("${label}") was not seen`);
+  return aliasCtx(aliasId(labels.rel.c[entry.col], 'last'), aliasElem(entry));
+}
+
+/** Is `label` bound on this row at all? Note this is a DIFFERENT question from labelCtx's, and
+ *  unbound resolves differently at each: a re-root has no element to correlate on, so it is a
+ *  clear deferral, while a bound-test is simply false — TinkerPop drops the traverser for a
+ *  label bound nowhere, never errors. */
+export const labelIsBound = (labels: LabelScope, label: string): Expression => {
+  const entry = labels.aliases.get(label);
+  return entry ? aliasPresent(labels.rel.c[entry.col]) : q`0`;
+};
 
 /** The current element's table aliased `n` (nodes/edges by elem). */
 export const elemRel = (st: ElementStream, alias = 'n'): Relation => (st.elem === 'edge' ? edges : nodes).as(alias);

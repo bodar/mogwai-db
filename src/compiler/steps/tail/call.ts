@@ -13,7 +13,8 @@ import { engineOf } from '../../engine/deps.ts';
 
 // ---------- call() lowering ----------
 //
-// call() is a new SOURCE (g.call(...) — seedCall, a peer of seedSource/seedUnion) and a
+// call() is a new SOURCE (g.call(...) — seedCall, a peer of seedSource/sourceUnion under
+// the engine's one source dispatch, seedRooted) and a
 // new mid-traversal SCALAR-producing step (V().call(...) — lowerCall). Both resolve the
 // CallSpec, look up the Service in the registry, and hand off to the service's
 // Contribution. A 'stream' Contribution (all of Phases 1-5) lowers to SQL inline; a

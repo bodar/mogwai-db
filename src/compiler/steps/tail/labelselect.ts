@@ -1,6 +1,6 @@
 import { q, list, raw, empty, value, type Expression } from '../../../sql/kernel/q.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { aliasElem, aliasIsElement, carriedCols, carryFrag, withShape, type AliasEntry, type Carried, type ElementStream } from '../context/context.ts';
+import { aliasElem, aliasIsElement, carriedCols, carryFrag, withShape, type AliasEntry, type Carried, type Carry, type ElementStream } from '../context/context.ts';
 import {
   aliasAppend, aliasEntry, aliasId, aliasPop, aliasPresent, aliasScalar, aliasSeed, elemEntry, shapeElem,
   type AliasShape,
@@ -104,14 +104,18 @@ export function asOnStream(s: Exclude<Stream, { kind: 'result' | 'elements' }>, 
 }
 
 /** An empty element stream (zero rows). select() of a label bound NOWHERE on the
- *  traversal drops every traverser → an empty result (TinkerPop drops, never errors).
+ *  traversal drops every traverser → an empty result (TinkerPop drops, never errors); a
+ *  branch with no arms (`g.union()`) is the same answer from the other direction.
  *
  *  It keeps the input's CARRIED SCHEMA (declared columns, zero rows). At root that is
  *  invisible — no rows either way — but inside a child scope it is the difference between a
  *  correct answer and a broken query: the consumer rejoins the child on its frame ordinal, and
  *  a relation without that column cannot be joined at all. Empty-but-well-typed makes "the
- *  label is unbound" behave exactly like "the child produced nothing" — which is what it is. */
-export function emptyElementLike(s: Exclude<Stream, { kind: 'result' }>): ElementStream {
+ *  label is unbound" behave exactly like "the child produced nothing" — which is what it is.
+ *
+ *  Takes a bare `Carry` (a Stream satisfies it): the shape being replaced is irrelevant, only
+ *  the schema the empty relation must still declare. */
+export function emptyElementLike(s: Carry): ElementStream {
   const cols = carriedCols(s.carried);
   const nulls = cols.length ? list(cols.map((c) => q`, NULL AS ${raw(c)}`), '') : empty;
   const rel = s.q.cte(q`SELECT 1 AS id${nulls} WHERE 0`, ['id', ...cols]);

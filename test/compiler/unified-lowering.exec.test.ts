@@ -90,6 +90,27 @@ describe('unified lowering characterization', () => {
         genericSql: 'ROW_NUMBER() OVER () AS o0',
       },
       {
+        // A body that MENTIONS a path-history label inlines like any other: the correlated seed
+        // projects the outer row's alias columns (`SELECT n.id AS id, p.a0 AS a0`), so the read
+        // two scopes down is physically there to make. Before that seeding the renderer had to
+        // decline every label-mentioning body — an absent alias column is indistinguishable from
+        // a never-bound label — and the whole family fell to the materialized gate.
+        key: 'predicateInlining',
+        query: 'g.V().as("x").where(__.out("created").where(__.select("x"))).values("name").order()',
+        fastSql: '(SELECT n.id AS id, p.a0 AS a0)',
+        genericSql: 'ROW_NUMBER() OVER () AS o0',
+      },
+      {
+        // A label bound mid-body and read back in the SAME body is the other half: the bind mints
+        // a fresh alias column INSIDE the correlated child (a1, after the seeded a0) and the
+        // select() re-root reads it — no second label mechanism, just the engine's one
+        // element-body fold running over the inline seed.
+        key: 'predicateInlining',
+        query: 'g.V().as("x").where(__.out().as("z").select("z").has("name","lop")).values("name").order()',
+        fastSql: 'AS a1 FROM',
+        genericSql: 'ROW_NUMBER() OVER () AS o0',
+      },
+      {
         key: 'singleHopOptional',
         query: 'g.V().optional(__.out("knows")).count()',
         fastSql: 'LEFT JOIN edges',
@@ -234,6 +255,9 @@ describe('unified lowering characterization', () => {
     for (const query of [
       'g.V().where(__.out("knows")).values("name")',
       'g.V().where(__.out().count().is(gt(1))).values("name")',
+      // A label-mentioning body is index-only on exactly the same terms: seeding the outer
+      // alias columns adds columns to the correlated relation, not a materialization.
+      'g.V().as("x").where(__.out("created").where(__.select("x"))).values("name")',
     ]) {
       const fast = plan(query, enabled);
       expect(fast).toContain('e_out'); // the correlated movement rides the covering index

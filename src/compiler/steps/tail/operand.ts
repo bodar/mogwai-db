@@ -7,7 +7,7 @@ import { aliasCtx, labelNameSub, scalarProp, type ScalarCtx } from '../../plan/p
 import { compileCorrelatedChild } from './correlated.ts';
 import { correlatedReduce } from '../prefix/predicate.ts';
 import type { PStep } from '../../ir/strategies.ts';
-import type { Carried, Carry } from '../context/context.ts';
+import type { Carried, Carry, LabelScope } from '../context/context.ts';
 
 // ---------- predicate operands that are TRAVERSALS ----------
 //
@@ -76,13 +76,13 @@ const OPERAND_PROJECTORS: Record<string, (ctx: ScalarCtx, s: PStep) => Expressio
  *  An unproductive operand yields SQL NULL, which is already the right answer at both hosts
  *  TinkerPop pins: `eq(NULL)` is falsy so the traverser drops, and a NULL member of a within()
  *  set contributes nothing while a sibling constant can still match. */
-function correlatedOperand(nested: any, deps: OperandDeps, ctx: ScalarCtx): Expression | null {
+function correlatedOperand(nested: any, deps: OperandDeps, ctx: ScalarCtx, labels?: LabelScope): Expression | null {
   const body = childSteps(nested, deps.params) as PStep[];
   if (!body.length) return null;
   const engine = deps.engine;
   // A terminal reducer over a movement (`__.out().count()`) is already a correlated subquery
   // builder — reuse it rather than growing a second aggregate path.
-  const reduced = correlatedReduce(engine, body as any, ctx, deps.params);
+  const reduced = correlatedReduce(engine, body as any, ctx, deps.params, labels);
   if (reduced) return reduced;
 
   const proj = body[body.length - 1];
@@ -90,7 +90,7 @@ function correlatedOperand(nested: any, deps: OperandDeps, ctx: ScalarCtx): Expr
   if (!projector) return null;
   const prefix = body.slice(0, -1);
   if (!prefix.length) return projector(ctx, proj) ?? null;
-  const child = compileCorrelatedChild(engine, ctx.idExpr, prefix as any, deps.params);
+  const child = compileCorrelatedChild(engine, ctx.idExpr, prefix as any, deps.params, labels);
   if (!child) return null;
   const c = child.rel.as('opc');
   const scalar = projector(aliasCtx(c.c.id, child.elem), proj);
@@ -98,8 +98,6 @@ function correlatedOperand(nested: any, deps: OperandDeps, ctx: ScalarCtx): Expr
   return scalar ? q`(SELECT ${scalar} FROM ${c} LIMIT 1)` : null;
 }
 
-/** What the HOST can offer an operand beyond the query itself. Both are optional: a host that has
- *  neither still resolves the re-sourced form, which needs no context at all. */
 /** What an operand needs from the compile, independent of the host's stream shape: the Engine (to
  *  build a sub-read) and the bound params (to parse the body). `carried` is present only when the
  *  host actually has a traverser schema — the inline predicate renderer does not. Taking this
@@ -115,12 +113,18 @@ export interface OperandDeps {
 export const operandDeps = (carry: Carry): OperandDeps =>
   ({ engine: engineOf(carry), params: carry.params, carried: carry.carried });
 
+/** What the HOST can offer an operand beyond the query itself. All optional: a host that offers
+ *  nothing still resolves the re-sourced form, which needs no context at all. */
 export interface OperandHost {
   /** The current ELEMENT, for a correlated operand (`__.values('k')`, `__.out().values('k')`). */
   readonly ctx?: ScalarCtx;
   /** The row relation the host's own SQL references, for an operand that reads CARRIED
    *  per-traverser state rather than the graph — today just `__.sack()`. */
   readonly row?: Relation;
+  /** The host's path-history labels, so an operand body reads them wherever a predicate body can
+   *  — the operand and filter halves of one has() see the same labels rather than one silently
+   *  deferring. Omitted where no relation holds the histories in scope. */
+  readonly labels?: LabelScope;
 }
 
 /** `__.sack()` as an operand: the carried sack column on the host's row. Not a subquery and not a
@@ -144,7 +148,7 @@ export function resolveTraversalOperands(pred: any, deps: OperandDeps, host: Ope
     // a host that could correlate), then the correlated form.
     return sackOperand(pred.nested, deps, host.row)
       ?? operandSubquery(pred.nested, deps)
-      ?? (host.ctx ? correlatedOperand(pred.nested, deps, host.ctx) : null)
+      ?? (host.ctx ? correlatedOperand(pred.nested, deps, host.ctx, host.labels) : null)
       ?? pred;
   }
   if (!pred || typeof pred !== 'object' || !('op' in pred) || !Array.isArray((pred as any).values)) return pred;

@@ -73,7 +73,12 @@ export type GroupVal =
 // deferred). See docs/2026-07-12-path-tracking-prior-art.md.
 export type PathPos =
   | { render: 'element'; elem: ElemShape; prefix: string }
-  | { render: 'value'; prefix: string };
+  // `optional` = a PADDED position of a branched path (a shorter arm left it NULL). The value
+  // column alone cannot say whether the position is absent or its by() value is missing, so an
+  // optional position carries a sibling `<prefix>_at` presence column (the raw position id) and
+  // the handler omits the position when it is NULL. An element position needs no such column —
+  // its own `_id` already answers it.
+  | { render: 'value'; prefix: string; optional?: true };
 
 // A compile-time type tag on a scalar value stream — the value's GraphBinary type
 // is known from the producing step (a typed literal, or an as*() cast's target), NOT

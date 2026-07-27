@@ -126,10 +126,11 @@ function lowerPathPositionChild(
  * ProductiveByStrategy would emit null). order()/reducers/from()/to() defer.
  */
 export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStream {
-  // Reachable only from a union() SOURCE step: seedUnion doesn't seed p0 (unlike
-  // seedSource, which handles V()/E()), so path tracking never starts. Mid-chain
+  // The chain reached path() with no path state carried. `analyze` seeds tracking at the SOURCE
+  // from the chain's own text, so this means the stream was re-typed by a barrier that consumed
+  // the positions (a cap()/unfold() re-entry) rather than walked to here. Mid-chain
   // union()/optional()/repeat() are caught earlier by their own path guards.
-  if (!st.carried.path) throw new Error('path() over a union() source step is not yet supported');
+  if (!st.carried.path) throw new Error('path() after a barrier that consumed the path positions is not yet supported');
   if (st.carried.path.kind === 'array') return compilePathArray(st, proj, acc);
   const pathState = st.carried.path; // narrowed to 'cols'; held in a local so the .map closure keeps the narrowing
   if (acc.orders.length) throw new Error('order() after path() not yet supported');
@@ -144,11 +145,14 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   const productive = proj.productiveBy === true;
   // A branched path (pad-to-max cols) has nullable positions: a shorter arm left them
   // NULL. LEFT JOIN those (an INNER JOIN would drop the whole short-arm path), and the
-  // handler (pathBuffer) omits a null-id position. by() can't ride a branched path —
-  // a padded NULL is indistinguishable from a missing property, so defer.
-  const branched = scopedCols.some((c) => c.nullable);
-  if (branched && bys.length) throw new Error('path().by() through a branch not yet supported (a padded position is indistinguishable from a missing property)');
+  // handler (pathBuffer) omits a null-id position. A by() over such a position needs one
+  // extra distinction, since its value column NULLs for two different reasons: the position
+  // is ABSENT (this arm's path is shorter — omit it) vs the by() value is MISSING (drop the
+  // whole path, TinkerPop's default). The raw position id decides, so an optional position
+  // projects it as a presence column and the drop predicate is gated on it.
   const byOf = (i: number) => byAt(bys, i);
+  const dropIfMissing = (pos: { col: string; nullable?: boolean }, v: Expression): Expression =>
+    pos.nullable ? q`(${p.c[pos.col]} IS NULL OR ${predicateSql(v, undefined)})` : predicateSql(v, undefined);
   // A by(__.trav) position lowers through the SAME generic scalar child seam group/
   // select/dedup/order use: push ONE child scope over the path rows, re-root each such
   // position on its element, and join the child's FIRST value back by ordinal. Positions
@@ -174,8 +178,9 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
       const b = child.rel.as(`b${i}`);
       joins.push(q` LEFT JOIN ${b} ON ${b.c[outer!.frame.ordinal]}=${p.c[outer!.frame.ordinal]}`);
       cols.push(q`${b.c.v} AS ${`${prefix}_v`}`);
-      if (!productive) whereParts.push(predicateSql(b.c.v, undefined));
-      return { render: 'value', prefix };
+      if (pos.nullable) cols.push(q`${p.c[pos.col]} AS ${`${prefix}_at`}`);
+      if (!productive) whereParts.push(dropIfMissing(pos, b.c.v));
+      return pos.nullable ? { render: 'value', prefix, optional: true } : { render: 'value', prefix };
     }
     const tbl = (pos.elem === 'edge' ? edges : nodes).as(`${prefix}n`);
     const jn = pos.nullable ? 'LEFT JOIN' : 'JOIN';
@@ -196,8 +201,9 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
     // by(key/T.token): one scalar per position. A missing value drops the whole path
     // (ProductiveBy retains an explicit NULL position instead).
     cols.push(q`${pe} AS ${`${prefix}_v`}`);
-    if (!productive) whereParts.push(predicateSql(pe, undefined));
-    return { render: 'value', prefix };
+    if (pos.nullable) cols.push(q`${p.c[pos.col]} AS ${`${prefix}_at`}`);
+    if (!productive) whereParts.push(dropIfMissing(pos, pe));
+    return pos.nullable ? { render: 'value', prefix, optional: true } : { render: 'value', prefix };
   });
 
   const dist = acc.distinct ? 'DISTINCT ' : '';

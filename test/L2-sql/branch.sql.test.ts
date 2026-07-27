@@ -47,16 +47,28 @@ const runWith = (store: GraphStore, q: string, options: CompileOptions) => {
 };
 
 describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () => {
-  test('union() as a source step UNION ALLs its vertex-rooted branches', () => {
+  test('union() as a source lowers each ROOTED branch and routes it to the shared merges', () => {
     const p = read("g.union(__.V(2),__.V(4)).values('name')");
     expect(p.sql).toContain('UNION ALL');
     expect(p.sql).toContain('vp.value END AS v');
     // branches sharing the one WITH clause
     expect(read("g.union(__.V().hasLabel('software'),__.V().hasLabel('person')).count()").shape).toEqual({ kind: 'count' });
-    // mid-chain union() still works (different code path)
+    // mid-chain union() still works (the element StepFn — same merge, a parent to fork from)
     expect(read("g.V().union(__.out(),__.in()).values('name')").sql).toContain('UNION ALL');
-    // non-vertex / unsupported branch defers with a clear error
-    expect(() => compile('g.union(__.inject(1),__.inject(2))', {})).toThrow('unsupported source step: inject');
+    // Each branch is a fully ROOTED traversal lowered to its natural shape, so the merge is
+    // picked from the arms' KINDS — every shape the mid-traversal union reaches, a source
+    // union now reaches too.
+    expect(read("g.union(__.V().values('name'))").shape.kind).toBe('value');              // scalar merge
+    expect(read('g.union(__.inject(1),__.inject(2))').shape.kind).toBe('value');          // non-V/E-rooted arms
+    expect(read("g.union(__.V().values('name').fold(),__.V().values('age').fold())").shape.kind).toBe('jsonbList');
+    expect(read("g.union(__.V().values('name'),__.V().hasLabel('person'))").shape.kind).toBe('variant'); // mixed
+    expect(read('g.union()').shape.kind).toBe('vertex');                                  // no branches → empty
+    // as() inside a branch resolves through the merge's alias union; a positional consumer
+    // downstream of the fan-out mints the arm-merge encounter (arm 0 fully before arm 1).
+    expect(read("g.union(__.V().as('a').out(),__.V()).select('a').values('name')").shape.kind).toBe('value');
+    expect(read('g.union(__.V(),__.V()).limit(3)').sql).toContain('ROW_NUMBER() OVER (ORDER BY m.arm_idx, m.encounter)');
+    // An arm whose shape no merge in the family covers fails closed, naming that shape.
+    expect(() => compile("g.union(__.V().group().by('name'),__.V())", {})).toThrow('union() source branch producing a group value');
   });
 
   test('and()/or() combine branch predicates; nested where(__.and)', () => {

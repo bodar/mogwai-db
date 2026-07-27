@@ -6,7 +6,7 @@ import {
 } from '../../plan/plan.ts';
 import { runFastPath } from '../../options/fast-paths.ts';
 import { tryInlinePredicate, combineBranchPreds, PredicateInliningFastPath } from './predicate.ts';
-import { advance, aliasElem, carriedCols, carriedWith, carryFrag, elemRel, pathColsOf, prevRel, scopePathCols, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from '../context/context.ts';
+import { advance, aliasElem, carriedCols, carriedWith, carryFrag, elemRel, labelCtx, labelScope, pathColsOf, prevRel, scopePathCols, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from '../context/context.ts';
 import { aliasAppend, aliasId, aliasSeed, elemEntry, elemShape } from '../context/alias.ts';
 import { tryCombineByChildExistence, tryCompileScalarValueRows, tryFilterByChildExistence } from '../tail/child.ts';
 import { operandDeps, resolveTraversalOperands } from '../tail/operand.ts';
@@ -32,17 +32,10 @@ function aliasIdExpr(label: string, aliases: AliasMap, p: Relation): { id: Expre
 /** The scalar context a current-element predicate correlates on (aliased `n`). */
 const currentCtx = (st: ElementStream) => elemCtx(elemRel(st), st.elem);
 
-/** Re-root a where()/and()/or() sub-traversal that begins with as('x')/select('x')
- *  onto the aliased traverser: its correlation becomes the carried alias column
- *  (`p.a{k}`), read back via aliasCtx. Throws for an unseen label. */
-const aliasResolver = (st: ElementStream) => (label: string): ScalarCtx => {
-  const entry = st.carried.aliases.get(label);
-  if (!entry) throw new Error(`where(__.as("${label}")): no such label — as("${label}") was not seen`);
-  return aliasCtx(aliasId(prevRel(st, 'p').c[entry.col], 'last'), aliasElem(entry));
-};
-
 /** `SELECT n.id<carry> FROM <elem> n JOIN prev p … WHERE <test>` — the filter CTE
- *  shape shared by has/hasLabel/where/and/or. */
+ *  shape shared by has/hasLabel/where/and/or. Note it joins `p`, which is what makes
+ *  `labelScope(st)` legitimate at every site below: the carried alias columns really are
+ *  in scope for the test expression these splice in. */
 function filterCte(st: ElementStream, test: Expression): ElementStream {
   const n = elemRel(st);
   const p = prevRel(st, 'p');
@@ -118,7 +111,7 @@ export const hasId: StepFn = (s, st) => {
   const n = elemRel(st);
   // hasId(__.V(id).id()) / hasId(P.eq(__.V(id).id())): idPredFromArgs wraps a bare arg into a
   // within(), so resolving operands on the RESULT covers both spellings in one place.
-  const pred = resolveTraversalOperands(idPredFromArgs(s.args), operandDeps(st), { ctx: currentCtx(st), row: prevRel(st, 'p') });
+  const pred = resolveTraversalOperands(idPredFromArgs(s.args), operandDeps(st), { ctx: currentCtx(st), row: prevRel(st, 'p'), labels: labelScope(st) });
   return filterCte(st, predicateSql(q`COALESCE(${n.c.uid}, ${n.c.id})`, pred));
 };
 
@@ -136,7 +129,7 @@ export const has: StepFn = (s, st) => {
   // current element's ScalarCtx also admits the TRAVERSER-DEPENDENT forms
   // (has('name', __.values('other')), has('name', __.out().values('name'))) as correlated
   // subqueries; without it only the re-sourced ones resolve.
-  val = resolveTraversalOperands(val, operandDeps(st), { ctx: currentCtx(st), row: prevRel(st, 'p') });
+  val = resolveTraversalOperands(val, operandDeps(st), { ctx: currentCtx(st), row: prevRel(st, 'p'), labels: labelScope(st) });
   // Mid-traversal federate injection: a `T.value` marker in the VALUE-operand position of
   // has(key, T.value) is replaced by a within() over the distinct injected values supplied in
   // params (federate.ts's sibling hop). The marker is inert as a real value operand, so this is
@@ -174,7 +167,7 @@ export const where: StepFn = (s, st) => {
   const arg0 = s.args[0];
   if (arg0 && typeof arg0 === 'object' && 'nested' in arg0) {
     const pred = runFastPath(PredicateInliningFastPath, fastPathContextOf(st),
-      () => tryInlinePredicate(engineOf(st), stepChain(arg0.nested, st.params), currentCtx(st), st.params, aliasResolver(st)));
+      () => tryInlinePredicate(engineOf(st), stepChain(arg0.nested, st.params), currentCtx(st), st.params, labelScope(st)));
     if (pred)
       return filterCte(st, s.name === 'not' ? notCoalesce(pred) : pred);
     const generic = tryFilterByChildExistence(st, arg0.nested, s.name === 'not');
@@ -227,7 +220,7 @@ export const andOr: StepFn = (s, st) => {
   const op = s.name === 'and' ? 'AND' : 'OR';
   const branches = s.args.filter(isNested);
   const pred = runFastPath(PredicateInliningFastPath, fastPathContextOf(st),
-    () => combineBranchPreds(engineOf(st), s, currentCtx(st), st.params, op, aliasResolver(st)));
+    () => combineBranchPreds(engineOf(st), s, currentCtx(st), st.params, op, labelScope(st)));
   if (pred) return filterCte(st, pred);
   const generic = tryCombineByChildExistence(st, branches.map((b: any) => b.nested), op);
   if (generic) return generic;
@@ -242,17 +235,17 @@ export const dedup: StepFn = (s, st) => {
 };
 
 /** dedup(labels[, by()]): keep the first traverser per distinct tuple of the labels'
- *  current (Pop.last) values. Each label resolves to a correlated ScalarCtx (aliasResolver);
- *  the optional single by() projects a property / T.token off each label's element (bare →
- *  element identity). Carried state (path, other aliases) rides through, so
- *  `as(a)…as(b)…dedup("a","b").path()` composes. */
+ *  current (Pop.last) values. Each label resolves to a correlated ScalarCtx through the shared
+ *  label re-root (labelCtx, the same reading where(__.as("b")…) uses); the optional single by()
+ *  projects a property / T.token off each label's element (bare → element identity). Carried
+ *  state (path, other aliases) rides through, so `as(a)…as(b)…dedup("a","b").path()` composes. */
 function dedupByLabels(st: ElementStream, s: PStep, labels: string[]): ElementStream {
   const bys = s.bys ?? [];
   if (bys.length > 1) throw new Error('dedup(labels) supports at most one by() modulator');
   const by = bys[0]?.[0];
-  const resolve = aliasResolver(st);
+  const scope = labelScope(st);
   const keyOf = (label: string): Expression => {
-    const ctx = resolve(label);
+    const ctx = labelCtx(scope, label);
     if (by === undefined) return ctx.idExpr; // dedup by element identity
     if (typeof by === 'string') return scalarProp(ctx, by);
     if (by && typeof by === 'object' && 'token' in by) {

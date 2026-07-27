@@ -403,13 +403,22 @@ describe('repeat / path SQL', () => {
     const r = read('g.V(1).union(__.out(), __.out().out()).path()');
     expect(r.sql).toContain('NULL AS p2');
     expect(r.sql).toContain('LEFT JOIN');
+    // A union() SOURCE tracks the path too: each rooted arm seeds its own p0 and the merge pads
+    // the shorter arm, so a short-arm path is genuinely shorter (not a dropped row).
+    const s = read('g.union(__.V().out().out(), __.V().hasLabel("software")).path()');
+    expect(s.sql).toContain('NULL AS p1');
+    expect((s.shape as any).positions).toHaveLength(3);
+    // by() over a PADDED position: the value column NULLs both when the position is absent and
+    // when its property is missing, so an optional position carries a presence column (`_at`)
+    // and only a present-but-missing value drops the whole path.
+    const b = read('g.V(1).union(__.out(), __.out().out()).path().by("name")');
+    expect(b.sql).toContain('AS x2_at');
+    expect(b.sql).toContain('p.p2 IS NULL OR');
+    expect((b.shape as any).positions[2]).toEqual({ render: 'value', prefix: 'x2', optional: true });
+    expect((b.shape as any).positions[0]).toEqual({ render: 'value', prefix: 'x0' }); // p0 is never padded
     // ---- still fail-closed ----
-    // union() as a SOURCE step never seeds p0 → its own clear deferral (not the mid-chain path).
-    expect(() => compile('g.union(__.V(),__.V()).path()', {})).toThrow('path() over a union() source step is not yet supported');
     // conflicting element kinds at one position (edge vs vertex) → deferred (needs tagged array).
     expect(() => compile('g.V(1).union(__.outE().inV(), __.out()).path()', {})).toThrow('conflicting element kinds');
-    // by() can't ride a branched (padded) path — a NULL is indistinguishable from a missing prop.
-    expect(() => compile('g.V(1).union(__.out(), __.out().out()).path().by("name")', {})).toThrow('path().by() through a branch not yet supported');
     // unchanged deferrals
     expect(() => compile('g.V(1).out().dedup().path()', {})).toThrow('dedup() with path tracking not yet supported');
     // by(__.values(k))/by(T.id) now compile to a per-position scalar; only an unrenderable

@@ -45,13 +45,22 @@ export interface Engine {
    *  ElementStream; stops at the first non-prefix step and reports where. */
   lowerElementSteps(steps: PStep[], seedSt: ElementStream, from?: number): { stream: ElementStream; next: number };
 
-  /** lowerElementSteps that must consume the WHOLE sequence — returns the stream or null. */
+  /** lowerElementSteps that must consume the WHOLE sequence — returns the stream or null. THE one
+   *  element-body fold for every child position (materialized and correlated alike): it crosses a
+   *  `select(label)` re-root by applying the root's own selectOneFromAlias and folding on. */
   tryLowerElementSteps(steps: PStep[], seed: ElementStream): ElementStream | null;
 
-  /** Seed the source (V/E/union) + fold its prefix; returns the stream and where the prefix ends.
-   *  Uses THIS engine's Query — one prefix per engine. `facts` supplies tracksPath +
-   *  demandsEncounter for the seed; omitted → the impl computes analyze(steps) itself. */
+  /** Seed an ELEMENT source (V/E, or a union whose arms merge to elements) + fold its prefix;
+   *  returns the stream and where the prefix ends. Uses THIS engine's Query — one prefix per
+   *  engine. `facts` supplies tracksPath + demandsEncounter for the seed; omitted → the impl
+   *  computes analyze(steps) itself. */
   buildPrefix(steps: PStep[], params?: Record<string, any>, sackInit?: SackSpec, facts?: ChainFacts): { st: ElementStream; stop: number };
+
+  /** Lower a fully ROOTED chain to its relational Stream, of whatever shape it produces — the
+   *  `union()` SOURCE arm compiler. compileRead's spine minus the root materialization (a branch
+   *  merge consumes a relation, not a framed leaf). `facts` imposes the OUTER chain's
+   *  path/encounter demands, which a branch's own text cannot show. */
+  lowerRootedArm(steps: PStep[], params: Record<string, any>, sackInit?: SackSpec, facts?: ChainFacts): Stream;
 
   /** buildPrefix on a FRESH child engine (fresh Query, same app scope) — for the write path, which
    *  materializes several independent target-id relations in one traversal (each needs its own WITH,

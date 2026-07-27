@@ -1,8 +1,8 @@
-import { Query, derived, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
+import { Query, derived, q, list, raw, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { type Step } from '../../../gremlin/frontend.ts';
 import { type Elem } from '../../plan/plan.ts';
 import { normalize } from '../../ir/passes.ts';
-import { type ElementStream } from '../context/context.ts';
+import { aliasColsOf, type Carried, type ElementStream, type LabelScope } from '../context/context.ts';
 import type { Engine } from '../../engine/deps.ts';
 import { mentionsLabel } from './child-shape.ts';
 
@@ -50,42 +50,63 @@ class InlineQuery extends Query {
  * recursive-walk row's id). The real StepFns fold over an `ElementStream` whose Query is
  * the inline shim, so the body's movement (out/in/both/…E/…V) and current-element filters
  * (has/hasLabel/hasId/where/…) render exactly as they do at root, just as nested
- * subqueries. Returns `{ rel, elem }` iff the WHOLE body consumed as pure movement +
- * current-element filter and introduced no carried columns (aliases/path/origin); returns
- * null otherwise, so the caller keeps its clear deferral / falls through to the
- * materialized generic gate. Depends ONLY on (idExpr, body, params) — never the outer
- * Query — so it serves until()'s recursive-CTE predicate (correlate on the walk id)
- * identically to where()/filter()/choose().
+ * subqueries. Returns `{ rel, elem }` iff the WHOLE body consumed through the engine's one
+ * element-body fold; null otherwise, so the caller keeps its clear deferral / falls through
+ * to the materialized generic gate.
+ *
+ * `labels` is the outer row's LABEL SCHEMA (its alias map + the relation physically holding
+ * the histories at the splice point). Supplied, its columns are PROJECTED INTO THE SEED, so
+ * the correlated child carries the same per-traverser alias schema a materialized child gets
+ * from pushChildScope — which is what lets as()/select(label)/where(label)/dedup(label)
+ * compose inside a correlated body at any depth, with no second label mechanism. Omitted (a
+ * site with no such relation in scope: until()/emit(), whose predicate rides the recursive
+ * term's walk row), the body must not MENTION a label at all — see the decline below.
+ *
+ * Otherwise depends only on (idExpr, body, params) — never the outer Query — so it serves
+ * until()'s recursive-CTE predicate identically to where()/filter()/choose().
  */
 export function compileCorrelatedChild(
   engine: Engine,
   idExpr: Expression,
   body: Step[],
   params: Record<string, any> = {},
+  labels?: LabelScope,
 ): { rel: Relation; elem: Elem } | null {
   const steps = normalize(body).steps;
-  // A label READ has no correlated rendering: the seed below is a bare id with no carried
-  // columns, so an alias column is physically absent here — and absent is exactly what
-  // selectOneFromAlias reads as "never bound → drop every traverser". Declining (rather than
-  // answering empty) hands the body to the materialized generic gate, which carries the whole
-  // schema. A label BIND is caught after the fold too (the carried check below), but a read
-  // binds nothing, so it has to be recognized up front.
-  if (mentionsLabel(steps, params)) return null;
+  // With no LabelScope the seed is a bare id, so an alias column is physically absent here — and
+  // absent is exactly what selectOneFromAlias reads as "never bound → drop every traverser". A
+  // label is then outside this renderer's vocabulary entirely, so decline the body (rather than
+  // answer it empty) and let the materialized generic gate, which carries the whole schema, have
+  // it. WITH a scope the columns are really present, so an absent one is a genuinely unbound
+  // label and the same drop-every-traverser answer is the correct one.
+  if (!labels && mentionsLabel(steps, params)) return null;
   // A variant engine bound to a fresh InlineQuery (nested derived subqueries, not shared CTEs),
   // sharing the parent engine's fastPaths — so the movement/filter StepFns read the right config.
   const inlineEngine = engine.withQuery(new InlineQuery());
+  const aliasCols = labels ? aliasColsOf(labels.aliases) : [];
+  const carried: Carried = { aliases: labels?.aliases ?? new Map(), origins: [] };
+  // The alias columns correlate OUTWARD exactly as `idExpr` does: a FROM-clause derived table is
+  // not laterally visible to its siblings, so `p.a0` here resolves through the EXISTS boundary to
+  // the true outer scope, never to an intermediate the child's own StepFns introduce. From the
+  // seed on they are ordinary carried columns — every movement/filter CTE threads them via
+  // carryFrag, with no change to `advance`/`Carry`.
+  const seedProj = [q`${idExpr} AS id`, ...aliasCols.map((c) => q`${labels!.rel.c[c]} AS ${raw(c)}`)];
   const seed: ElementStream = {
     kind: 'elements',
     q: inlineEngine.q,
     params,
-    rel: derived(q`SELECT ${idExpr} AS id`, ['id'], 'x0'),
+    rel: derived(q`SELECT ${list(seedProj, ', ')}`, ['id', ...aliasCols], 'x0'),
     elem: 'node',
-    carried: { aliases: new Map(), origins: [] },
+    carried,
   };
-  const { stream, next } = inlineEngine.lowerElementSteps(steps, seed);
-  if (next !== steps.length) return null;
-  // The correlated form carries no per-traverser schema (a bare id relation); a body that
-  // bound an alias / path / origin is not a pure movement+filter chain → fall through.
-  if (stream.carried.aliases.size || stream.carried.path || stream.carried.origins.length) return null;
+  const stream = inlineEngine.tryLowerElementSteps(steps, seed);
+  if (!stream) return null;
+  // Alias columns are INERT to every consumer of this relation — each one reduces it to a boolean
+  // or a scalar (EXISTS, COUNT, a projected LIMIT 1), so a seeded column riding through, or a
+  // bind inside the body appending another, cannot change the answer. TinkerPop confines a bind
+  // made inside a filter body anyway, which is precisely what dropping the relation does to it.
+  // path/origins are different: they mean the body was NOT a pure movement+filter chain, so fall
+  // through to the generic gate.
+  if (stream.carried.path || stream.carried.origins.length) return null;
   return { rel: stream.rel, elem: stream.elem };
 }

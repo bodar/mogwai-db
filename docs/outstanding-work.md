@@ -128,12 +128,25 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
      - **A renderer that cannot carry alias columns must DECLINE, not answer.** The inline
        correlated predicate child (`correlated.ts`) seeds a bare id with no carried schema, where
        an absent alias column is indistinguishable from a never-bound label — so
-       `where(__.out().where(__.select('x'))))` silently returned `[]`. It now calls
-       `mentionsLabel` up front and falls through to the materialized gate (the fast-path
+       `where(__.out().where(__.select('x'))))` silently returned `[]`. It called
+       `mentionsLabel` up front and fell through to the materialized gate (the fast-path
        contract: recognition-failure falls through). Fixed a live wrong answer.
+       **Superseded 2026-07-27:** the columns are now GIVEN to it (a `LabelScope`) rather than the
+       body declined, so label-mentioning predicate bodies inline again instead of paying the
+       materialized gate. Declining survives only where there is no relation to read them from.
      - `emptyElementLike` now keeps the input's carried COLUMNS (zero rows). At root that is
        invisible; in a child scope it is the difference between a correct answer and a relation
        the consumer cannot join to its frame ordinal.
+   - **Still open — `WhereEndStep` (found 2026-07-27; a live WRONG ANSWER, Impact: High).** A label
+     on the LAST step of a `where()`/`and()`/`or()` body is an equality CONSTRAINT, not a bind, so
+     `g.V().as("a").out().as("b").where(__.as("a").out("knows").as("b"))` asks "does a know b" and
+     should give `marko→vadas`, `marko→josh`; we answer `[]`. The inline path DEFERS the shape so
+     it cannot answer the weaker "a knows somebody" instead, but the generic gate's `[]` is still
+     wrong. **Where to start:** this is a `Step[]→Step[]` rewrite, so it wants a Pass, not a
+     lowering — `where(__.X.as('b'))` → `where(__.X.where(P.eq('b')))`, a form BOTH lowerings
+     already answer. Scope it to a label bound earlier in the enclosing chain (TinkerPop's own
+     scoping notion, and syntactic — a Pass can see it). Blocks at least
+     `g_V_asXaX_out_asXbX_whereXandXasXaX_outXknowsX_asXbX__…X_selectXa_bX`.
    - **Still open:** `choose().option()` without a `Pick.none` default (mixed pass-through); child
      bodies producing map/group/record shapes (item 5 territory); the `group().by(project(...))`
      composite key and non-scalar/non-count nested-group inner keys. Also still open, and
@@ -181,9 +194,8 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    (item 1). `dedup(labels)` first-in-emission also landed (`filter.ts`). Stage B landed for movement,
    source seed, element-prefix `limit`/`range`/`skip`, root `fold`, child `first`, and `values()`.
    What actually remains:
-   - **`union()` as a SOURCE form** — `engine/engine.ts` `seedUnion` throws outright
-     (`emission-order encounter over a union() source not yet supported`). This is ONE symptom of
-     a wider gap; see item 4b, which subsumes it.
+   - ~~**`union()` as a SOURCE form**~~ ✅ closed 2026-07-27 as a side effect of item 4b: the
+     source union now routes through the same merges, every one of which mints the encounter.
    - **A bare re-source `V()`/`E()` arm carries no encounter**, so the take-first guards that depend
      on one still fail closed: `armFansOut` (`steps/tail/scalar-arm.ts`) and `positionArmFansOut`
      (`steps/tail/path.ts`). `map()` over a `union`/`choose` fan-out arm ALREADY works (those carry
@@ -195,42 +207,32 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    `ScalarStream` has no separate field. **Low-Med.**
    → [canonical-emission-order](./2026-07-19-canonical-emission-order.md)
 
-4b. **The `union()` SOURCE is a second, weaker branch implementation — consolidate it onto the
-   mid-traversal one.** (Reframed 2026-07-27 after measuring; previously filed as a one-line tail of
-   item 4 and again as an operand tail of 7c, which both understated it.) `seedUnion`
-   (`engine/engine.ts`) hand-rolls a `UNION ALL` over vertex id-relations and rejects everything
-   else, so it is strictly weaker than the mid-traversal `union` on FOUR independent axes: arm
-   SHAPE (vertex-only — no scalar/list/mixed), ALIASES (`as()` in a branch throws), ENCOUNTER (the
-   item-4 line above), and SACK. The mid-traversal form already has all four — the ONE canonical
-   arm triage (`classifyBranchArms`) and the four merge builders (`finishElementMerge`,
-   `unionScalarStreams`, `finishListMerge`, `mergeVariantArms`), which are deliberately
-   parent-agnostic and so are reusable here.
-
-   **Measured:** of the 15 `g.union(...)`-rooted traversals in the corpus only 2 compile. The
-   failures span six distinct restrictions — a scalar branch (`g.union(__.V().values('name'))`),
-   `path()` over a union source (×3), a non-`V`/`E`-rooted branch
-   (`g.union(__.inject(1), __.inject(2))`), write branches (`g.union(__.addV('person')…)`), a
-   `mergeE` branch, and the empty `g.union()`. It also blocks the `union(...).fold()` predicate
-   operands in 7c (those bodies ARE traverser-independent; they just cannot be compiled as a
-   standalone read today).
-
-   **Where the reuse boundary sits** (spiked 2026-07-27 — one half confirmed, the other
-   corrected):
-   - ✅ **The MERGES are reusable.** `unionScalarStreams` (`tail/scalar.ts`), `finishListMerge` and
-     `mergeVariantArms` (`tail/variant.ts`) all take a bare `base: Carry`, not a parent stream —
-     they are genuinely parent-agnostic, so a SOURCE can call them with a synthesized Carry
-     (the compile's `q` + params + an empty carried).
-   - ❌ **The TRIAGE is NOT reusable, which the earlier framing assumed.** `classifyBranchArms`
-     and the `is*Child` classifiers under it all describe a CHILD BODY hanging off a parent
-     traverser; a source branch is a fully ROOTED traversal (`__.V().values('name')`), so none of
-     those predicates apply to it. Dispatch instead on the KIND of each lowered branch Stream —
-     a post-hoc dispatch, not a syntactic one, and arguably the cleaner of the two.
-
-   So the shape is: lower each branch to a Stream of any shape through the FULL lowering loop
-   (not `buildPrefix`, which stops at the prefix), dispatch on the resulting kinds, and route to
-   the parent-agnostic merges. That closes item 4's residual as a side effect rather than as
-   separate work. **Medium** — modest L3 yield (~8-12) for the size, but it deletes a duplicate
-   implementation and removes four fail-closed walls at once.
+4b. ~~**The `union()` SOURCE is a second, weaker branch implementation — consolidate it onto the
+   mid-traversal one.**~~ ✅ **LANDED 2026-07-27.** `seedUnion` is gone. The spiked boundary held
+   exactly: the MERGES were reusable, the TRIAGE was not.
+   - Each branch is a fully ROOTED traversal, so it lowers through `Engine.lowerRootedArm` —
+     compileRead's own spine (seed the source, run the ONE shaped loop) minus the root
+     materialization, since a merge consumes a relation, not a framed leaf. The merge is then
+     picked from the arms' **kinds**, never `classifyBranchArms` (which describes a child body
+     under a parent traverser — not what a rooted branch is).
+   - The four merges took it verbatim once `finishElementMerge` became `Carry`-typed like its
+     three siblings (`mergeElementArms` is the union-shaped wrapper; the gated coalesce/optional/
+     choose merges still call `finishElementMerge` directly). All four fail-closed walls fell out
+     at once: arm SHAPE (scalar/list/mixed/`inject`-rooted/nested-union), `as()` in a branch,
+     the emission `encounter` (closing item 4's residual), and `sack`.
+   - Every source form (`V`/`E`/`union`/`inject`/`call`) is now recognized in ONE place,
+     `Engine.seedRooted` — which is what let an `inject`-rooted branch seed on the SHARED Query
+     (`seedInject`, factored out of `compileInject`) instead of needing its own compile.
+   - `g.union()` (no branches) is legal and empty, not an arity error; one branch is legal too.
+   - **L3 1430 → 1436**, +6/−0: `g_unionXX`, `g_unionXV_name`, `g_unionXinjectX1X_injectX2X`, and
+     the three `path()` forms. The last two of those needed one adjacent generic lift, since a
+     source union is the first branched path a `by()` can reach: a PADDED path position now
+     carries a presence column (`PathPos.optional` + `<prefix>_at`), so "this arm's path is
+     shorter" (omit the position) stays distinct from "the `by()` value is missing" (drop the
+     whole path). That also un-defers `g.V().union(…).path().by(…)` mid-traversal.
+   - **Still deferred (fail-closed):** a WRITE branch (`g.union(__.addV('person')…)` — the merges
+     are read merges), and a branch whose shape no merge covers (map/group/record/path), which
+     throws naming that shape.
 
 5. **Map/non-element re-entry.** `valueMap().select()` into a retyped `MapStream`, and `as()`/
    `select(label)` over group/map/path/property streams. **Medium.**
@@ -339,10 +341,11 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    element of a comma list, so a SET-valued operand cannot be substituted in as an Expression the
    way a scalar one can. It needs `expr IN (SELECT …)` / `IN (SELECT value FROM json_each(<list>))`,
    i.e. a scalar-vs-set distinction in the pure SQL layer — a new concept there, not a new caller;
-   the `union(...).fold()` operands, blocked on the union SOURCE (item 4b) rather than on the
-   operand machinery — note `isReSourced` (`steps/tail/operand.ts`) is a narrow proxy for
-   "traverser-independent" (it tests for a `V`/`E` head), so a union of independent branches needs
-   it widened too; the `none()` host; and an operand with no scalar to read (a filter body such as
+   the `union(...).fold()` operands — the union-SOURCE half of that is no longer a blocker (item 4b
+   landed; such a body compiles as a standalone read now), so what is left is the set-valued
+   operand above PLUS widening `isReSourced` (`steps/tail/operand.ts`), a narrow proxy for
+   "traverser-independent" that tests for a `V`/`E` head and so still misses a union of independent
+   branches; the `none()` host; and an operand with no scalar to read (a filter body such as
    `__.not(__.identity())`). Correlation needs an element ScalarCtx, so a scalar-parent `is()`
    still defers. *Low.*
 

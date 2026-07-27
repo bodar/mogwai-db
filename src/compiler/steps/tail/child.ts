@@ -242,34 +242,13 @@ function applyScalarChildCardinality(
   return { stream: toScalarStream(carryOf(parent), rel, undefined, { type: lowered.type, result: lowered.result }), frame: pushed.frame };
 }
 
-/** Fold an ELEMENT-preserving child body, crossing a `select(label)` re-root. lowerElementSteps
- *  folds the movement/filter/as()/branch prefix but stops at select() — that is a TAIL step, not
- *  a prefix StepFn. Rather than teach the prefix table a second select implementation, apply the
- *  ONE that already exists (selectOneFromAlias, the same code the root tail runs) and keep
- *  folding. An element-shaped label re-roots the traverser and the body continues; anything else
- *  returns null, so every caller keeps its existing `stop !== length` decline.
- *
- *  This is the single element-body fold for the whole child seam, so admitting a label re-root
- *  here reaches every child position at once (map/local/flatMap, where()/and()/or() existence,
- *  by() modulators, branch arms, count children) at ANY nesting depth — pushChildScope projects
- *  the parent's alias columns into each frame, so a label bound anywhere up the chain is
- *  physically present in the innermost body. */
-function lowerElementBody(seed: ElementStream, steps: PStep[]): ElementStream | null {
-  let st = seed;
-  let at = 0;
-  for (;;) {
-    const { stream, next } = engineOf(st).lowerElementSteps(steps, st, at);
-    st = stream;
-    if (next === steps.length) return st;
-    at = next; // the fold stopped here — only a label re-root can carry the body forward
-    const label = labelSelectOf(steps[at]);
-    if (label === null) return null;
-    const selected = selectOneFromAlias(st, steps[at], label, popOf(steps[at]));
-    if (selected.kind !== 'elements') return null;
-    st = selected;
-    at++;
-  }
-}
+/** Fold an ELEMENT-preserving child body — the engine's ONE whole-body fold, which crosses a
+ *  `select(label)` re-root (see Engine.tryLowerElementSteps). Named here purely so the child
+ *  seam's five seeds read as one operation; it adds nothing of its own. The correlated inline
+ *  child (correlated.ts) reaches the SAME method, so a label re-root composes identically
+ *  whether the body materializes or renders as a nested correlated subquery. */
+const lowerElementBody = (seed: ElementStream, steps: PStep[]): ElementStream | null =>
+  engineOf(seed).tryLowerElementSteps(steps, seed);
 
 /** The Pop mode of a select(Pop, label) — default last, matching the root dispatch. */
 const popOf = (step: PStep): string =>
