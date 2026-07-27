@@ -128,10 +128,12 @@ export const has: StepFn = (s, st) => {
     a = a.slice(1);
   }
   let [key, val] = a;
-  // has(key, <traversal>) / has(key, P(<traversal>)): a re-sourced operand resolves to a scalar
-  // subquery here, where the Engine is reachable; predicateSql/hasProp then see an ordinary
-  // Expression operand. A traverser-dependent one is left alone to hit its clear deferral.
-  val = resolveTraversalOperands(val, st);
+  // has(key, <traversal>) / has(key, P(<traversal>)): the operand resolves to an Expression here,
+  // where the Engine is reachable; predicateSql/hasProp then see an ordinary operand. Passing the
+  // current element's ScalarCtx also admits the TRAVERSER-DEPENDENT forms
+  // (has('name', __.values('other')), has('name', __.out().values('name'))) as correlated
+  // subqueries; without it only the re-sourced ones resolve.
+  val = resolveTraversalOperands(val, st, currentCtx(st));
   // Mid-traversal federate injection: a `T.value` marker in the VALUE-operand position of
   // has(key, T.value) is replaced by a within() over the distinct injected values supplied in
   // params (federate.ts's sibling hop). The marker is inert as a real value operand, so this is

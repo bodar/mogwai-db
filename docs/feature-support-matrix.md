@@ -3,7 +3,7 @@
 What you can rely on. Each step gets one mark based on how much of it works and how
 freely it composes — a ✅ step works **anywhere in a traversal**, however deeply nested,
 not just at the top. Notes call out **only the cases that don't work yet**; if a row has
-no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,421<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,425<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 | Mark | Meaning |
 |---|---|
@@ -42,7 +42,7 @@ so. Kept in sync in the commit that changes support.
 |---|:--:|---|
 | `hasLabel`, `has(k)`, `has(k,v)`, `has(k,P)`, `has(label,k,v)`, `has(T.label/T.id,…)` | ✅ | |
 | `hasId(…)` | ✅ | |
-| `is(P)` | ✅ | a `constant()` traversal OPERAND folds to its literal, so `is(__.constant(29))` / `is(P.gt(__.constant(29)))` and the same forms on `has`/`hasLabel`/`where`/`all`/`none` all lower through the ordinary predicate path. A RE-SOURCED operand traversal (`has('name',__.V(1).values('name'))`, `is(P.gt(__.V(1).values('age')))`) compiles as a scalar subquery, compared against its FIRST result. ❌ after `path()`; a TRAVERSER-DEPENDENT operand (`has('name',__.values('other'))` — needs a correlated value, fails closed) |
+| `is(P)` | ✅ | a `constant()` traversal OPERAND folds to its literal, so `is(__.constant(29))` / `is(P.gt(__.constant(29)))` and the same forms on `has`/`hasLabel`/`where`/`all`/`none` all lower through the ordinary predicate path. An operand TRAVERSAL compiles to a value compared against its FIRST result: re-sourced (`has('name',__.V(1).values('name'))`) as a standalone scalar subquery, traverser-dependent (`has('name',__.values('other'))`, `has('name',__.out().values('name'))`) as a CORRELATED one over the shared inline child renderer. An unproductive operand is SQL NULL, which drops the traverser for `eq` and contributes nothing to a `within` set. ❌ after `path()`; an operand with no scalar to read (a filter body like `__.not(__.identity())`); a correlated operand at a host with no element context (a scalar-parent `is()`) |
 | `where(__.…)` | ✅ | single- & multi-hop, edge-typed hops, alias-rooted `where(__.as('x')…)`, label reads at any depth inside the body (`where(__.out().where(__.select('x')))` — the inline correlated renderer carries no alias columns, so a label-mentioning body falls through to the materialized gate), and generic per-parent `order().by(key)` before `limit`/`range`/`skip` in existence children. `not()` shares the same gate. ❌ ordered children using traversal-valued `by()` or path-sensitive forms |
 | `where(P)` / `where('a',P)` | 🟡 | value-compare over a scalar stream works, as does alias-column compare; ❌ some `where(P.op)` forms, `by(key)` on an edge-typed label, `where('a',P)` over a scalar |
 | `and`, `or`, `not`, `filter(__.…)` | ✅ | incl. infix `.and()`/`.or()`. ❌ `filter(rawPredicate)` — use a traversal |

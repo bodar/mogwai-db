@@ -149,10 +149,11 @@ test('a constant() predicate operand folds to its literal, at every predicate ho
   // would turn a filter into a comparison, so those hosts are deliberately excluded.
   expect(names('g.V().where(__.out("created"))')).toEqual([1, 4, 6]);
 
-  // A TRAVERSER-DEPENDENT operand still defers, and says so: it needs a value correlated to the
-  // current row. Before, the operand object reached SQLite as a bind and surfaced as an opaque
-  // driver error. (A RE-SOURCED operand — __.V(id)… — is a standalone subquery; see below.)
-  expect(() => run(store, 'g.V().has("name",__.values("nonexistent"))'))
+  // An operand shape with no scalar to read — a FILTER body rather than a value producer — still
+  // defers, and says so. Before, any unresolved operand object reached SQLite as a bind and
+  // surfaced as an opaque driver error. (Re-sourced and correlated operands both resolve now; see
+  // the two tests below.)
+  expect(() => run(store, 'g.V().has("name",__.not(__.identity()))'))
     .toThrow(/traversal as a predicate operand is not yet supported/);
 });
 
@@ -198,4 +199,27 @@ test('a re-sourced traversal operand becomes a scalar subquery (compared against
   expect(ids('g.V().has("name", __.V(1).out("knows").values("name").order())')).toEqual([4]);
   // A mutating operand is still rejected before any of this (read-only child verification).
   expect(() => run(store, 'g.V().has("name", __.V().drop().constant("x"))')).toThrow(/mutating step/);
+});
+
+test('a traverser-dependent operand becomes a CORRELATED scalar subquery', () => {
+  const store = seededStore();
+  const ids = (q: string) => run(store, q).map((r: any) => r.id).sort();
+
+  // The operand reads the CURRENT traverser, so it correlates rather than standing alone. The
+  // grammar is the child seam's usual split — <element movement/filter prefix>.<scalar projection>
+  // — and the prefix goes through compileCorrelatedChild, the same inline renderer where()/filter()
+  // use, so movement inside an operand is not a second implementation.
+  expect(ids('g.V().has("name", __.values("name"))')).toEqual([1, 2, 3, 4, 5, 6]); // name == own name
+  expect(ids('g.V().has("age", __.values("age"))')).toEqual([1, 2, 4, 6]);         // …only those with one
+  // an empty prefix is the degenerate case (the element IS the traverser); a movement prefix
+  // reaches the neighbour and takes its FIRST value
+  expect(ids('g.V().has("name", __.out().values("name"))')).toEqual([]);           // nobody is named as a neighbour
+  expect(ids('g.V().has("name", __.in().values("name"))')).toEqual([]);
+
+  // An UNPRODUCTIVE operand yields SQL NULL, which is already TinkerPop's answer at both hosts:
+  expect(ids('g.V().has("name", __.values("nonexistent"))')).toEqual([]);          // eq(NULL) → drop
+  expect(ids('g.V().has("age", P.eq(__.values("nonexistent")))')).toEqual([]);
+  // …and a NULL member of a within() set contributes nothing, while a sibling constant matches.
+  expect(ids('g.V().has("name", P.within(__.values("nonexistent"), __.constant("marko")))')).toEqual([1]);
+  expect(ids('g.V().has("name", P.within(__.values("nonexistent"), __.values("nonexistent2")))')).toEqual([]);
 });
