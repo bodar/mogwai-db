@@ -305,6 +305,19 @@ function elementRun(steps: readonly PStep[], ctx: ChildCtx | undefined): { ctx: 
 // an existence consumer can observe the same ordered/sliced child rows as a
 // normal child cardinality consumer; the emitter mints the per-parent encounter
 // before applying the following slice.
+/** PURE. A step that observes the WHOLE stream at once, so it cannot be evaluated per-row
+ *  without answering a different question. The canonical example is the one that made this
+ *  shared: a global `dedup()` drops a value two origins both reach, a per-origin one keeps
+ *  both. Two sites need exactly this fact and must not drift apart —
+ *  `repeat()`'s body (a barrier there observes the whole FRONTIER at one iteration) and a
+ *  `match()` pattern body (a barrier there reduces over the whole BINDING TABLE, not per
+ *  binding). Both defer on it rather than mis-execute. */
+export const GLOBAL_BARRIER_STEPS = new Set([
+  'dedup', 'order', 'limit', 'range', 'skip', 'tail', 'sample', 'barrier',
+  'group', 'groupCount', 'aggregate', 'local', 'fold', 'count', 'sum', 'min', 'max', 'mean',
+]);
+export const isGlobalBarrier = (s: PStep): boolean => GLOBAL_BARRIER_STEPS.has(s.name);
+
 const CHILD_ELEMENT_ROW_STEPS = new Set(['order', 'limit', 'skip', 'range', 'dedup', 'local']);
 
 // The scalar VALUE-transform vocabulary a scalar arm/child may carry without throwing (the

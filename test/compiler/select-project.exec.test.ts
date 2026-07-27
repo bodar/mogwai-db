@@ -218,11 +218,47 @@ test('match() — conjunctive pattern join over shared variables', () => {
     .toEqual(['marko-lop', 'marko-ripple']);
 });
 
+test('match() binds a variable of ANY shape, not just a node', () => {
+  // The binding table was never the limitation — aliasEntry has always tagged
+  // node/edge/value/list/map. What insisted on nodes was applyPattern folding only the ELEMENT
+  // prefix, so it stopped at the first non-element step. It now runs the full shaped loop
+  // (lowerRootedArm's shape, seeded from a bound var) and binds on the resulting stream's KIND.
+  const store = seededStore();
+  // SCALAR end var — b holds a name string. Same solution set as binding b as an element.
+  expect(run(store, 'g.V().match(__.as("a").out("knows").values("name").as("b")).select("b")').map((r) => r.v).sort())
+    .toEqual(['josh', 'vadas']);
+  expect(run(store, 'g.V().match(__.as("a").out("knows").as("b")).select("b").by("name")').map((r) => r.v).sort())
+    .toEqual(['josh', 'vadas']);
+  // The static type tag rides into the entry, so a numeric var comes back a NUMBER, not "27".
+  expect(run(store, 'g.V().match(__.as("a").values("age").as("x")).select("x")').map((r) => r.v).sort())
+    .toEqual([27, 29, 32, 35]);
+  // EDGE end var — b holds the edge itself, framed with its own props.
+  const edges = run(store, 'g.V().match(__.as("a").outE("knows").as("b")).select("b")');
+  expect(edges.map((r: any) => r.label)).toEqual(['knows', 'knows']);
+  expect(edges.map((r: any) => `${r.src}->${r.tgt}`).sort()).toEqual(['1->2', '1->4']);
+  // …and an edge var can then be a pattern's START: the seed re-roots on an edge rowid, which
+  // needs the var's recorded SHAPE (assuming 'node' would read the edge id as a node id).
+  expect(run(store, 'g.V().match(__.as("a").outE("created").as("e"), __.as("e").inV().as("b")).select("a","b").by("name")')
+    .map((r: any) => `${r.e0_v}-${r.e1_v}`).sort())
+    .toEqual(['josh-lop', 'josh-ripple', 'marko-lop', 'peter-lop']);
+  // A scalar var re-used across patterns CONSTRAINS by value. Only software carries `lang`.
+  expect(run(store, 'g.V().match(__.as("a").values("lang").as("n"), __.as("a").values("lang").as("n")).select("a").by("name")')
+    .map((r) => r.v).sort()).toEqual(['lop', 'ripple']);
+});
+
 test('match() deferrals fail closed', () => {
-  // an edge-typed end var (the binding table carries node rowids)
-  expect(() => compile('g.V().match(__.as("a").outE("created").as("b"))', {})).toThrow('edge-typed pattern');
-  // scalar-terminal pattern (count binds a scalar var)
+  // A GLOBAL barrier in a pattern body would reduce over the whole BINDING TABLE rather than
+  // once per binding — a different question, so it defers. Same predicate repeat() uses.
   expect(() => compile('g.V().match(__.as("a").out("knows").count().as("b"))', {})).toThrow('count()');
+  expect(() => compile('g.V().match(__.as("a").out("knows").count().as("b"))', {})).toThrow('not once per binding');
+  // A pattern cannot START from a scalar var — there is no rowid to re-root on. Fails closed
+  // rather than reading the value as an id.
+  expect(() => compile('g.V().match(__.as("a").values("name").as("n"), __.as("n").out().as("c"))', {}))
+    .toThrow('non-element variable');
+  // Re-binding a var at a DIFFERENT shape would compare a rowid against a value — meaningless
+  // rather than merely narrower, so it is rejected instead of silently never matching.
+  expect(() => compile('g.V().match(__.as("a").out("knows").as("b"), __.as("a").values("name").as("b"))', {}))
+    .toThrow('cross-shape constraint');
   // mutual recursion → no single start-only root
   expect(() => compile('g.V().match(__.as("a").out("created").as("b"), __.as("b").in("created").as("a"))', {})).toThrow('root variable');
   // or/and pattern

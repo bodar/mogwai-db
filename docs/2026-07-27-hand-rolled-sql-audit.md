@@ -14,8 +14,8 @@ which is not the same as ranking by lines._
 > | 2 | `seedUnion` | ✅ landed on trunk |
 > | 6 | `predicate.ts` infix connectives | ✅ extracted to `ConnectiveStrategy`, a fold Pass |
 > | — | the child seam's shape ceiling *(not originally a numbered site)* | ✅ now shape-generic: ONE rejoin, map + record bodies |
-> | 3 | `match()` binding table | open — top open site |
-> | 4 | `path.ts` grouped positional projector | open |
+> | 3 | `match()` binding table | 🟡 shape-generic now; a REDUCER pattern body still needs per-binding scoping |
+> | 4 | `path.ts` grouped positional projector | 🟡 one projector now; `by(traversal)` needs a positional child |
 > | 5 | `write.ts` merge/endpoint | open (largest by count, but terminal — never composes at depth) |
 > | 7–9 | `child.ts` residue, `search.ts`, leaf dups | open, Low |
 > | — | mode C *(this doc's "one structural finding")* | ❌ **retired — measured unnecessary, see below** |
@@ -352,7 +352,7 @@ residual as a side effect.
 
 ---
 
-### 3. `match.ts` — the binding table, and a pattern vocabulary narrower than the seam it calls
+### 3. `match.ts` — 🟡 **MOSTLY CLOSED 2026-07-27.** The binding table is shape-generic; reducers remain
 `steps/prefix/match.ts` (118 lines)
 
 **Now the top open site after #1** (#2 landed). Half-reformed already: `applyPattern:47` genuinely folds the pattern body through
@@ -376,6 +376,34 @@ Fix shape is #2's move, and #2 has now built the machinery: lower each pattern t
 loop and bind on the resulting Stream's `kind` rather than requiring element. `lowerRootedArm`'s
 kind-dispatch is the template; the difference is that a pattern is *seeded* from a bound var rather
 than rooted, so it wants `lowerStepsStrict` over `applyPattern`'s existing seed, not a fresh source.
+
+**What landed — exactly that, and the diagnosis above was wrong in an instructive way.** The binding
+table was **never** the limitation. `aliasEntry` has tagged node/edge/value/list/map since labels
+became path histories, so "the binding table can only hold node rowids" was describing
+`applyPattern`, not the table. What actually walled it in was folding only the ELEMENT prefix
+(`lowerElementSteps`), which stops at the first non-element step — which is why `values()` surfaced
+as "unsupported pattern step" rather than as a binding problem. Running the full loop (prefix fold →
+`lowerStepsStrict`, rejecting a terminal result) and dispatching on the result's `kind` removes both
+named walls at once, with no new SQL and no new binding mechanism.
+
+Two things fell out that this entry did not predict:
+- **A var's SHAPE must be recorded at bind time**, not assumed `'node'`. Two consumers need it:
+  re-rooting a later pattern on the var (an edge rowid read as a node id is silently wrong — both are
+  integers), and rejecting a re-bind at a different shape (comparing a rowid against a value is
+  meaningless rather than narrower, so it must not emit SQL that quietly never matches). That is what
+  makes an edge var usable as a pattern START —
+  `as("a").outE().as("e"), as("e").inV().as("b")` — which was not on the wish list.
+- **The reducer case is a DIFFERENT defect** and does not close with the others. `count()` in a
+  pattern body is a GLOBAL barrier over what is here the binding table, so lowering it answers one
+  count across ALL bindings where the pattern asks for one per binding. That needs the child seam's
+  per-binding scoping. It now defers naming precisely that — and deferring it shared a vocabulary
+  rather than copying one: `REPEAT_BODY_BARRIERS` moved to `child-shape.ts` as `isGlobalBarrier`,
+  because `repeat()`'s body and a `match()` pattern defer on the identical fact.
+
+**Measured:** of the three named shapes, 2 now compile and 1 defers with the real obstacle named;
+match's real corpus bucket 17 → 14. `select()` on a scalar-bound var and on an edge-bound var both
+return the right values, and `values("age")` round-trips as an INTEGER (the static type tag rides
+into the entry). CI 915/0, L3 unmoved.
 
 ---
 

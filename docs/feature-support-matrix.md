@@ -143,7 +143,7 @@ drops the other arm's rows).
 
 | Step | | Notes |
 |---|:--:|---|
-| `match(p1, p2, …)` | 🟡 | conjunctive `as(start).<element traversal>.as(end)` patterns, dependency-ordered, over the shared movement/filter engine. ❌ scalar-terminal binds (`count`/`values`), edge-typed end var, `or`/`not`/nested-match, more than one or zero root vars, `dedup(label)` downstream, path tracking |
+| `match(p1, p2, …)` | 🟡 | conjunctive `as(start).<traversal>.as(end)` patterns, dependency-ordered, over the shared lowering (prefix fold + the shaped loop — `lowerRootedArm`'s shape, seeded from a bound var). A variable holds **any shape**: an element, an EDGE (and an edge var can then START a pattern — `as("a").outE().as("e"), as("e").inV().as("b")`), or a SCALAR (`values("name").as("b")`, type-tagged so a numeric var returns a number). Re-using a var constrains it, by rowid or by value per its shape. ❌ a GLOBAL barrier in a pattern body (`count`/`fold`/`dedup` — it would reduce over the whole binding table, not once per binding; needs per-binding scoping); a pattern STARTING from a non-element var (no rowid to re-root on); a re-bind at a different shape; `or`/`not`/nested-match; the MATCH-string form; more than one or zero root vars; `dedup(label)` downstream; path tracking |
 
 ## 9. Lists & collections
 

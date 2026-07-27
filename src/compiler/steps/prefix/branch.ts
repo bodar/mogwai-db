@@ -11,7 +11,7 @@ import { advance, aliasColsOf, elemRel, labelScope, prevRel, carryFrag, carryFra
 import { type AliasShape } from '../context/alias.ts';
 import { keyedChildRelation, keyedKeySet } from '../tail/keyed.ts';
 import { pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarModulations, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
-import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, optionMapMerge, optionMapNeedsPassthrough, readOptionMapArms, ROOT_SCOPE, type BranchArmShape, type ChildCtx } from '../tail/child-shape.ts';
+import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, isGlobalBarrier, optionMapMerge, optionMapNeedsPassthrough, readOptionMapArms, ROOT_SCOPE, type BranchArmShape, type ChildCtx } from '../tail/child-shape.ts';
 import { emptyElementLike } from '../tail/labelselect.ts';
 import { carryOf, toVariantStream, type ListStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
 import { finishListMerge, mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
@@ -520,10 +520,7 @@ const REPEAT_MOVE_ALL = new Set([...REPEAT_MOVES, ...TO_EDGE, ...TO_VERTEX]);
  *  deferral can say WHICH one and why (see the repeatBodyRelation header); nothing dispatches on
  *  it. `local` is here because it re-scopes a barrier per traverser, which is the same problem
  *  seen from the other side. */
-const REPEAT_BODY_BARRIERS = new Set([
-  'dedup', 'order', 'limit', 'range', 'skip', 'tail', 'sample', 'barrier',
-  'group', 'groupCount', 'aggregate', 'local', 'fold', 'count', 'sum', 'min', 'max', 'mean',
-]);
+
 
 /** A body's sack fold, threaded through the walk left-to-right: `combineSack` applied at
  *  the body position where the sack(op) step sits (so its by() reads the element the
@@ -786,7 +783,7 @@ export const repeat: StepFn = (s, st) => {
     // Name the ACTUAL obstacle rather than reciting a vocabulary. A per-iteration global barrier is
     // a semantic wall (precomputing it per-origin would answer a different question — see the
     // keyed.ts header); anything else is a shape neither route recognizes.
-    const barrier = core.find((c) => REPEAT_BODY_BARRIERS.has(c.name));
+    const barrier = core.find(isGlobalBarrier);
     if (barrier) throw new Error(`repeat(__.${names}) not yet supported: ${barrier.name}() is a per-iteration GLOBAL barrier over the whole frontier, and a recursive CTE cannot window across iterations — precomputing it per-origin would answer a different question. A fixed times(n) body could be unrolled instead (not built).`);
     if (sackCol) throw new Error(`repeat(__.${names}) with a sack() fold not yet supported (the sack accumulator is per-iteration, so the body cannot be precompiled; the flat expansion takes movements + has() + sack(op).by() + where(__.sack()...))`);
     if (trackArray) throw new Error(`repeat(__.${names}) while tracking a path()/simplePath() not yet supported (path positions are recorded per iteration, so the body cannot be precompiled)`);
