@@ -130,6 +130,76 @@ export function markProductiveBy(steps: Step[]): Step[] {
     : s);
 }
 
+// ---------- non-productive by() → an explicit drop in the IR ----------
+//
+// TinkerPop's DEFAULT by()-modulator is NON-PRODUCTIVE: a traverser for which the modulator yields
+// nothing is DROPPED, not carried with a null. `ProductiveByStrategy` opts into the other policy
+// (keep it, null sorts first) — which is why the strategy exists at all.
+//
+// WHERE THAT POLICY BELONGS. `productiveBy` is read at ~8 lowering sites today (group, select, path,
+// dedup, aggregate…), each choosing its own JOIN-vs-LEFT-JOIN or its own WHERE. `order()` simply
+// forgot, and `g.V().order().by('age')` kept the two ageless software vertices where TinkerPop
+// returns four rows. Adding a ninth site would have been the small fix and the wrong one: it grows
+// the same duplicated policy by one more copy, and the next order() lowering path (there are four
+// already — the acc fold, the re-enter retype, the by(traversal) seam, the dedup window) would have
+// to remember it independently.
+//
+// So express it once, in the IR, where it is *derivable*: for a by(KEY) over an element, "unproductive"
+// means exactly "the property is absent", and dropping those traversers is exactly what `has(KEY)`
+// already does. `order().by('age')` becomes `has('age').order().by('age')` — the same answer, built
+// from a step that is already thoroughly tested, and every one of the four lowering paths inherits it
+// because they all read the rewritten chain.
+//
+// THE RULE THIS ESTABLISHES, so the next by()-host doesn't have to guess:
+//   • where unproductive means DROP → express it here as an injected filter; the lowering stays
+//     ignorant of productivity.
+//   • where unproductive means KEEP-WITH-NULL (group's null key, select's absent field, path's
+//     unproductive position) → the lowering owns it, because a pre-filter cannot express "keep".
+// order() is the first kind. Its ProductiveBy half needed no work: nulls already sort first, so the
+// strategy-on case was already correct and only the default drop was missing.
+//
+// Runs in `decoration` (not `simplify`) for one reason: it reuses `recurseInject`, so a nested
+// `repeat(__.order().by('age'))` gets the identical treatment, and pre-fold the chain is a flat
+// `order` + `by` pair rather than a `.bys` cluster. Declared AFTER ProductiveByStrategy in the
+// decoration array so a marked host is already visible here.
+
+/** by() args → the property key it projects, or null when productivity is not a key question:
+ *  a bare/direction-only by() (always productive), a `T.token` by() (every element has a label and
+ *  an id), or a by(traversal) (its productivity is the traversal's, a different question this does
+ *  not answer — and deliberately does not guess at). */
+function byKey(args: readonly any[]): string | null {
+  const first = args[0];
+  return typeof first === 'string' ? first : null;
+}
+
+/**
+ * Inject the non-productive drop for every key-projecting `by()` on a NON-productiveBy `order()`.
+ *
+ * Multi-term orders inject one `has()` per key, which is the same rule applied per comparator: every
+ * comparator is evaluated for every traverser, so a traverser missing any one of the keys has nothing
+ * to compare on and drops. Applying it per-key rather than only to the single-by() case keeps this
+ * arity-blind — there is no special case to get wrong.
+ */
+export function dropNonProductiveOrderBy(steps: Step[], params: Record<string, any>): Step[] {
+  return recurseInject(steps, params, (level) => {
+    const out: Step[] = [];
+    for (let i = 0; i < level.length; i++) {
+      const s = level[i];
+      // ProductiveByStrategy marked this host → the other policy applies; leave it to the lowering.
+      if (s.name !== 'order' || (s as PStep).productiveBy) { out.push(s); continue; }
+      // Pre-fold, the by()s are the steps immediately following their host.
+      const keys: string[] = [];
+      for (let j = i + 1; j < level.length && level[j].name === 'by'; j++) {
+        const k = byKey(level[j].args);
+        if (k !== null) keys.push(k);
+      }
+      for (const k of keys) out.push({ name: 'has', args: [k] } as Step);
+      out.push(s);
+    }
+    return out;
+  });
+}
+
 /** Steps whose output traverser is a vertex (a partition/subgraph vertex filter is
  *  injected after each). V()/E() are also the source step, at index 0. Includes otherV
  *  (an edge→endpoint landing) — TinkerPop's SubgraphStrategy filters EdgeOtherVertexStep

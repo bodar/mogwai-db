@@ -255,7 +255,20 @@ function compileInlinePredicate(
     return hasProp(ctx, body[0].args[0], hasIs ? isPred : undefined);
   }
   if (head === 'has' && body.length === 1) {
-    const [key, val] = body[0].args;
+    // has(LABEL, key, value) — the 3-arg overload folds in a label filter, exactly as the
+    // non-inline has() does (prefix/filter.ts `has`). Peeling it HERE is what was missing: the
+    // destructure below read args[0]/args[1] regardless of arity, so a 3-arg has() was lowered as
+    // has(key=LABEL, value=key) — "the property named 'software' equals 'name'", never true. That
+    // made the whole arm constant FALSE, and constant TRUE under not(). A silent wrong answer on a
+    // form the matrix advertises as working at any depth; found by L5's differential, because the
+    // generic gate got it right and only the inline path did not.
+    let args: any[] = [...body[0].args];
+    let labelCond: Expression | null = null;
+    if (args.length === 3 && typeof args[0] === 'string') {
+      labelCond = labelIn(ctx.labelIdExpr, [args[0]]);
+      args = args.slice(1);
+    }
+    const [key, val] = args;
     // has(T.label|T.id, v|P): predicate over the label name / external id (mirrors
     // filter.ts has()'s token branch, so choose(__.has(T.label,'person')) etc work).
     if (key && typeof key === 'object' && 'token' in key) {
@@ -265,7 +278,8 @@ function compileInlinePredicate(
       return predicateSql(expr, val);
     }
     if (typeof key === 'string') {
-      return hasProp(ctx, key, resolveTraversalOperands(val, deps, { ctx, labels }));
+      const prop = hasProp(ctx, key, resolveTraversalOperands(val, deps, { ctx, labels }));
+      return labelCond ? q`(${labelCond} AND ${prop})` : prop;
     }
   }
   if (head === 'hasLabel' && body.length === 1)

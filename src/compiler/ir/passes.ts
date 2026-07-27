@@ -5,7 +5,7 @@ import {
   foldConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
   verifyReadOnlyChildren,
   foldValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
-  injectSubgraphRec, injectPartitionRec, markProductiveBy, verify,
+  injectSubgraphRec, injectPartitionRec, markProductiveBy, dropNonProductiveOrderBy, verify,
   NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
   type PStep,
 } from './strategies.ts';
@@ -97,6 +97,15 @@ const DECORATION: Pass[] = [
   {
     name: 'ProductiveByStrategy', category: 'decoration', applies: specNamed('ProductiveByStrategy'),
     run: (steps) => markProductiveBy(steps) as PStep[],
+  },
+  {
+    // ALWAYS ON, and declared AFTER ProductiveByStrategy so a marked host is already visible: the
+    // non-productive drop is TinkerPop's DEFAULT by() policy, not an opt-in strategy. This is the
+    // one place order() learns it — see the long comment on dropNonProductiveOrderBy for why the
+    // policy lives in the IR rather than in the four order() lowering paths.
+    name: 'nonProductiveByDrop', category: 'decoration',
+    applies: (steps) => steps.some((s) => s.name === 'order'),
+    run: (steps, ctx) => dropNonProductiveOrderBy(steps, ctx.params) as PStep[],
   },
 ];
 

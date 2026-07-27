@@ -3,7 +3,7 @@
 What you can rely on. Each step gets one mark based on how much of it works and how
 freely it composes — a ✅ step works **anywhere in a traversal**, however deeply nested,
 not just at the top. Notes call out **only the cases that don't work yet**; if a row has
-no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,479<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,490<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 | Mark | Meaning |
 |---|---|
@@ -16,11 +16,11 @@ no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,479<!-- /L
 Grounded in the code: a deferred shape fails closed with a clear error, and this file says
 so. Kept in sync in the commit that changes support.
 
-**The one exception to "never mis-executes", stated plainly:** the 🐞 rows below are forms that
-silently answer a *different question* — the outcome CLAUDE.md rules out. They were found by L5's
-first run (`test/L5-properties/`), which was also the first time anything executed the compiler's
-generic lowering path, and they are recorded here rather than quietly tracked because this file is
-what a user relies on.
+**There are currently NO 🐞 rows** — no form is known to mis-execute. The mark is kept in the legend
+because that state is not guaranteed, and a discovered mis-execution belongs on the affected row
+where a user will see it, not only in a tracker. L5's first run (`test/L5-properties/`) found three
+such forms — it was the first thing ever to execute the compiler's generic lowering path — and all
+three are fixed.
 
 ---
 
@@ -47,7 +47,7 @@ what a user relies on.
 
 | Step | | Notes |
 |---|:--:|---|
-| `hasLabel`, `has(k)`, `has(k,v)`, `has(k,P)`, `has(label,k,v)`, `has(T.label/T.id,…)` | ✅ | 🐞 **`has(label,k,v)` INSIDE a predicate body silently answers wrong** — `filter`/`where`/`not`/`or(__.has(label,k,v))` evaluates the arm as constant false (so `not()` becomes constant true). The inline leaf reads only two of the three args. Found by L5; diagnosed with its fix in `test/L5-properties/known.ts`. Outside a predicate body all three arities are correct. |
+| `hasLabel`, `has(k)`, `has(k,v)`, `has(k,P)`, `has(label,k,v)`, `has(T.label/T.id,…)` | ✅ | every arity works in every position, including inside a predicate body (`filter`/`where`/`not`/`and`/`or(__.has(label,k,v))`) — the inline leaf peels the 3-arg label prefix exactly as the top-level `has()` does |
 | `hasId(…)` | ✅ | |
 | `is(P)` | ✅ | a `constant()` traversal OPERAND folds to its literal, so `is(__.constant(29))` / `is(P.gt(__.constant(29)))` and the same forms on `has`/`hasLabel`/`where`/`all`/`none` all lower through the ordinary predicate path. An operand TRAVERSAL compiles to a value compared against its FIRST result: re-sourced (`has('name',__.V(1).values('name'))`) as a standalone scalar subquery, traverser-dependent (`has('name',__.values('other'))`, `has('name',__.out().values('name'))`) as a CORRELATED one over the shared inline child renderer. An unproductive operand is SQL NULL, which drops the traverser for `eq` and contributes nothing to a `within` set. ❌ after `path()`; an operand with no scalar to read (a filter body like `__.not(__.identity())`); a correlated operand at a host with no element context (a scalar-parent `is()`) |
 | `where(__.…)` | ✅ | single- & multi-hop, edge-typed hops, alias-rooted `where(__.as('x')…)`, label reads at any depth inside the body (`where(__.out().where(__.select('x')))` — the inline correlated renderer carries no alias columns, so a label-mentioning body falls through to the materialized gate), and generic per-parent `order().by(key)` before `limit`/`range`/`skip` in existence children. `not()` shares the same gate. ❌ ordered children using traversal-valued `by()` or path-sensitive forms |
@@ -89,7 +89,7 @@ back to a (correct, unindexed) `LIKE` scan — never fail-closed. `regex` is a p
 | `select('a')`, multi-`select`, `project(…)` | ✅ | single-label select → scalar/element/property/typed-list; a single-label select also composes INSIDE a child body at any depth (`map`/`local`/`flatMap`, `where`/`and`/`or`, every `by()` host, branch arms) — the label may be bound anywhere up the chain or earlier in the same body, and an unbound one drops the traverser rather than erroring, exactly as at root; property aliases re-enter through `select().value()`/`key()`/`element()` and project `T.id`/`T.key`/`T.value`; property aliases support `Pop.all` and statically multi-bound `Pop.mixed` as re-enterable property lists; multi-`select`/`project` → per-traverser record whose fields each re-enter; `limit`/`range`/`skip`/`tail` with `Scope.local` slice fields; `project(…)` over a scalar parent. ❌ dynamic mixed-shape/mixed-depth histories, property aliases in path tracking, and property aliases with arbitrary `by()` traversals |
 | `select(Column.values/keys)` | ✅ | over a group, scalar record, or per-element valueMap/elementMap. ❌ heterogeneous element-value lists; raw Map params |
 | chained projections (`values().count()`, `project().select()`, `valueMap().select()`) | ✅ | projections retype and re-enter one step at a time. ❌ heterogeneous structured values |
-| `order()` [`.by(key[,dir]\|__.trav)`] | ✅ | at the tail/root of an element stream: `by(key)` and `by(__.traversal)`, including **multi-term** orders mixing property keys, `T.label`/`T.id` tokens, and traversal terms — each traversal term computes its per-traverser sort column through the shared multi-modulator seam (`tryCompileScalarModulations`) and the composite `ORDER BY` combines them round-robin. ❌ after `path()`/encounter tracking; `by(key)` on a scalar stream; `by(T.token)` as the SOLE key (no traversal term → the direct acc.orders path, no token support yet); shuffle mixed with other terms; a traversal-valued `by()` on an `order()` INSIDE a `where()`/existence child or a `dedup().by()` barrier (the correlated `elementOrderSql` path — key/direction only there); **non-productive drop** — `order().by(k)` KEEPS traversers lacking `k`, where TinkerPop drops them (`g.V().order().by('age')` → 6, TinkerPop → 4). One L3 scenario; see `docs/outstanding-work.md` item 0, and note it currently cancels the 3-arg-`has` defect below |
+| `order()` [`.by(key[,dir]\|__.trav)`] | ✅ | at the tail/root of an element stream: `by(key)` and `by(__.traversal)`, including **multi-term** orders mixing property keys, `T.label`/`T.id` tokens, and traversal terms — each traversal term computes its per-traverser sort column through the shared multi-modulator seam (`tryCompileScalarModulations`) and the composite `ORDER BY` combines them round-robin. ❌ after `path()`/encounter tracking; `by(key)` on a scalar stream; `by(T.token)` as the SOLE key (no traversal term → the direct acc.orders path, no token support yet); shuffle mixed with other terms; a traversal-valued `by()` on an `order()` INSIDE a `where()`/existence child or a `dedup().by()` barrier (the correlated `elementOrderSql` path — key/direction only there). **Non-productive `by(key)` drops** traversers lacking the key (TinkerPop's default; `ProductiveByStrategy` keeps them, nulls first) — expressed once in the IR as an injected `has(key)` (`dropNonProductiveOrderBy`), so every order() lowering path and every nesting depth inherits it |
 | `limit`, `range`, `skip`, `tail` | ✅ | mid-chain or tail; `Scope.local` slices record fields. After a fan-out they pick a DETERMINISTIC subset via the canonical emission order (a demand pre-pass seeds it; order-free chains stay order-free) |
 | `by(…)` modulator | ✅ | on `order`/`select`/`project`/`group`/`groupCount`/`path`/`math` |
 

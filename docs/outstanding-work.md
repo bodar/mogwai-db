@@ -22,31 +22,13 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-0. **The three L5 findings — two of them SILENT WRONG ANSWERS.** Found by the first run of
-   `test/L5-properties/` (the fast-path differential), all attributed to `predicateInlining`. Full
-   diagnosis + the fix for each is in `test/L5-properties/known.ts`; ratcheted, so nothing regresses
-   further, but two of these violate the "never silently answer a different question" guardrail and
-   should be fixed before more matrix-fill.
-   - **3-arg `has(LABEL,k,v)` inside any predicate body evaluates to constant FALSE.** The inline
-     leaf destructures only two args (`prefix/predicate.ts:252`), so `has('software','name','lop')`
-     is read as "the property *software* equals *name*". `filter`/`where` → `[]` where a vertex is
-     correct; `not()` → constant TRUE, admitting a vertex it must exclude. Matrix says ✅. ~4 lines.
-     *High.*
-   - **Infix-composed predicates lose their connective in the FRONT-END.** `P1.or(P2)` /
-     `P1.and(P2)` flatten to two sibling args (`parsePredicate` only matches
-     `TraversalPredicate_<op>Context`), so `has(k, P1.or(P2))` silently means `has(k, P1)`.
-     Fix: model the infix production as `{op:'and'|'or', values:[Pred,Pred]}` and render it in
-     `predicateSql`. Closes every P/TextP composition at any depth. ~10 lines. *High.*
-   - **Non-productive `by(key)` does not drop at `order()`.** `g.V().order().by('age')` returns all 6
-     vertices; TinkerPop returns 4, dropping the two software vertices that have no `age`
-     (`Order.feature`). **Not a fast-path divergence** — both configs answer 6 identically, so the L5
-     differential is structurally blind to it; found only by reading the Gherkin while diagnosing the
-     entry above. Narrow: exactly one L3 scenario
-     (`g_withStrategiesXProductiveByStrategyX_V_orX…X_order_byXageX`, in `failed[]`), and
-     ProductiveByStrategy is otherwise sound (28 scenarios pass). **Coupled to the 3-arg-`has` fix
-     above:** the two defects currently cancel on the non-strategy variant, which is why that one is
-     in `passed[]`. Fix either alone and that scenario goes red; fix both and both variants go green.
-     The matrix's `order()` row does not mention non-productive drop either way — add it. *Medium.*
+0. **The L5 findings — three of four LANDED, one open.** Found by the first run of
+   `test/L5-properties/` (the fast-path differential). The three silent-wrong-answer / semantics
+   defects are fixed (L3 1475 → 1490, +15, −0), each pinned in an L4 `.feature` so the floor holds:
+   infix-composed predicates (front-end `parseComposedPredicate` + two `predicateSql` ops),
+   3-arg `has(LABEL,k,v)` in the inline predicate leaf, and the non-productive `by(key)` drop at
+   `order()` (now one `decoration` Pass, `dropNonProductiveOrderBy`, instead of a policy each order()
+   lowering path had to remember). What remains:
    - **`predicateInlining` is not disable-safe** (fails closed, so no wrong answer). 16 of 17
      signatures in the first sweep: a predicate body ending in a reducer/projection
      (`valueMap().count()`, `path().count(local)`, `values(k).sum()`, `group().by(k).count()`, …) is
