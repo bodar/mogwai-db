@@ -88,10 +88,24 @@ two nested branches is unusable until minimised; fast-check shrinks the underlyi
 walking the traversal back to the smallest chain that still diverges. The first run shrank a 7-step
 nested counterexample to a 4-step one.
 
-## The ratchet
+## The ratchet — which runs the opposite way from L3's
 
-`known.ts`, in the spirit of `l3-state.json`: a committed floor, so a run fails on anything new while
-diagnosed gaps don't block the gate. Two rules:
+`known.ts` is a ratchet in the sense that it's a committed baseline a run cannot silently slip past,
+but it is **not** L3's kind and the difference matters:
+
+| | L3 (`l3-state.json`) | L5 (`known.ts`) |
+|---|---|---|
+| Shape | a **count** floor | an **exclusion list** |
+| Direction | ratchets **up** — more scenarios passing | ratchets **down** — fewer known defects |
+| Target state | maximal count | **empty list** |
+| Gate | count ≥ floor, no named regression | zero *unexplained* divergences (a fixed bar) |
+| Maintenance | machine-updated | hand-edited, diagnosis required |
+
+So "the L5 number went up" is never good news, and there is no number to go up: the bar is a constant
+zero, and the only thing that moves is how much of the world is exempted from it. Adding an exemption
+is a visible edit to a reviewed file, not a regenerated artifact.
+
+Two rules:
 
 - **One entry per root cause, not per traversal.** The first sweep produced 22 divergent traversals
   in 17 signature groups that reduce to 3 causes. Recording signatures would have buried the fact
@@ -104,12 +118,24 @@ An entry is always a bug we haven't fixed — never an acceptable divergence. Th
 here: the generic path is the authority. Emptying the list is the goal. A "stale entry" test fails if
 a KNOWN entry stops reproducing, so a fix can't leave dead weight behind.
 
-## Seeds
+## Seeds — and the honest limit of a fixed one
 
-CI runs a **fixed seed** (42). A property test that flakes is a property test people disable.
-`mise run L5-random` takes a random seed and a 10× sample for exploration; anything it finds gets
-diagnosed into `known.ts` or fixed, and then — per `test/CLAUDE.md` — promoted into an L4 `.feature`,
-so exploration permanently raises the floor. `L5_SEED` and `L5_RUNS` override both.
+CI runs a **fixed seed** (42), because a property test that flakes is a property test people disable.
+Be clear about what that buys and what it costs:
+
+Seed 42 + `numRuns: 300` is a **deterministic generated corpus** — the same 300 traversals every run.
+So in CI, L5 is a *regression gate over generated inputs*, not an explorer: after the first run it
+will not discover anything new on its own. Its value there is that it holds the fast-path equivalence
+property over inputs no human curated, and that it re-checks the whole L1 corpus (which *is* fresh
+work, since nothing else executes the generic lowering path).
+
+Discovery lives in `mise run L5-random` — random seed, 10× sample. **Nothing invokes it
+automatically**, so today discovery depends on someone remembering. The natural fix is a scheduled
+run that reports rather than blocks (a nightly job opening an issue on a new signature); until that
+exists, run it by hand after touching a fast path, the child seam, or the predicate layer.
+
+The six isolation tests use `SEED + i` rather than `SEED`, so they sample six *different* traversal
+sets instead of re-examining one. `L5_SEED` and `L5_RUNS` override everything.
 
 ## Files
 

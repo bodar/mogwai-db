@@ -106,7 +106,7 @@ describe('L5 — fast-path differential', () => {
   // Disabling exactly one isolates the culprit, and it is a strictly stronger check too: a pair of
   // fast paths whose errors cancel when both are off shows up here and nowhere else.
   describe('each fast path in isolation', () => {
-    for (const name of FAST_PATH_NAMES) {
+    FAST_PATH_NAMES.forEach((name, i) => {
       test(`${name} is equivalent to its generic fallback`, () => {
         const unknown: string[] = [];
         fc.assert(
@@ -116,11 +116,20 @@ describe('L5 — fast-path differential', () => {
             unknown.push(report(g.query, news));
             return false;
           }),
-          { seed: SEED, numRuns: Math.max(60, Math.floor(RUNS / 3)), verbose: true },
+          {
+            // SEED + i, not SEED: a shared seed would hand all six switches the IDENTICAL sample
+            // (same budget, same draws), so six tests would examine 100 traversals between them
+            // instead of 600. Offsetting costs nothing and stays fully deterministic. Verified over
+            // 800 samples per switch at six unrelated seeds before adopting it — no switch but
+            // predicateInlining diverges at all, so this widens coverage without moving the gate.
+            seed: SEED + i,
+            numRuns: Math.max(60, Math.floor(RUNS / 3)),
+            verbose: true,
+          },
         );
         expect(unknown).toEqual([]);
       }, 300_000);
-    }
+    });
   });
 
   // ---------- the ratchet's own hygiene ----------
