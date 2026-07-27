@@ -1,4 +1,4 @@
-import { compilePlan, staticTypeOf, type Compiled, type WritePlan, type ListOf, type MapEntry, type MapOf, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType } from './compiler/compiler.ts';
+import { compilePlan, staticTypeOf, type Compiled, type WritePlan, type ListOf, type MapEntry, type MapOf, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType, type FastPathConfig } from './compiler/compiler.ts';
 import { isCollectionType, valueNodeFromStored, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import type { GraphStore } from './storage.ts';
 import type { ServiceRegistry } from './services/spi/types.ts';
@@ -646,8 +646,14 @@ export class Executor implements ExecutorApi {
     private readonly store: GraphStore,
     private readonly registry: ServiceRegistry,
     private readonly source: FederationSource,
+    /** Override the ambient fast-path config for every compile on this executor. Omitted in
+     *  production (DEFAULT_FAST_PATHS). `createAppScope` has always accepted it; the Executor
+     *  simply never threaded it, which left the fast-path equivalence obligation declared
+     *  (`FastPath.equivalentWhen`) but unprovable through the real data plane — L5 flips these
+     *  off and asserts the generic lowering answers identically. */
+    fastPaths?: FastPathConfig,
   ) {
-    this.app = createAppScope({ registry, source });
+    this.app = createAppScope({ registry, source, fastPaths });
   }
 
   /** SYNC GraphBinary buffers with per-value bulk (concern C appends it as a Long). A

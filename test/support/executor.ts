@@ -4,6 +4,7 @@ import type { GraphStore } from '../../src/storage.ts';
 import type { ServiceRegistry } from '../../src/services/spi/types.ts';
 import type { FederationSource } from '../../src/compiler/segment.ts';
 import type { TypeNode } from '../../src/gremlin/types.ts';
+import type { FastPathConfig } from '../../src/compiler/compiler.ts';
 
 // Shared test fixture — the ONE place tests get an Executor. Most tests run non-federated
 // traversals against a single in-memory store, so they use the SYNC path (framed/buffers) and
@@ -21,9 +22,10 @@ const NO_SIBLINGS: FederationSource = {
 };
 
 /** An Executor bound to `store` + `registry` (default: the reference services) + a no-sibling
- *  source. The sync framed/buffers methods are the store-tier data plane for tests. */
-export const exec = (store: GraphStore, registry: ServiceRegistry = standardRegistry): Executor =>
-  new Executor(store, registry, NO_SIBLINGS);
+ *  source. The sync framed/buffers methods are the store-tier data plane for tests. `fastPaths`
+ *  overrides the ambient config (L5's differential runs the same traversal with them off). */
+export const exec = (store: GraphStore, registry: ServiceRegistry = standardRegistry, fastPaths?: FastPathConfig): Executor =>
+  new Executor(store, registry, NO_SIBLINGS, fastPaths);
 
 /** SYNC flat Buffer[] — the drop-in for the old `executeQuery(store, g, p)` (same signature,
  *  same synchronous result). Throws if the traversal federates (use a manager). */

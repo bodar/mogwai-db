@@ -355,7 +355,7 @@ function ftsSubstringExists(ownerElem: 'node' | 'edge', ownerIdExpr: Expression,
  *  caller uses the generic LIKE. */
 export const FtsSubstringFastPath: FastPath<[ScalarCtx, string, any], Expression> = {
   name: 'ftsSubstringPredicate',
-  equivalentWhen: 'ftsSubstringPredicate: has(k, >=3-char substring) routes through property_fts, LIKE fallback equivalent',
+  equivalentWhen: 'test/L5-properties/differential.test.ts — the fast-path differential; has(k, >=3-char substring) via property_fts vs. the LIKE fallback, both sides generated either side of the 3-char boundary',
   appliesWhen: (ctx, scalarCtx, _key, pred) =>
     ctx.enabled.ftsSubstringPredicate && (scalarCtx.elem === 'node' || scalarCtx.elem === 'edge') && ftsSubstringMatch(pred) !== null,
   tryLower: (_ctx, scalarCtx, key, pred) =>

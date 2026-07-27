@@ -11,9 +11,16 @@ no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,479<!-- /L
 | 🟡 | **Partial.** Either a real chunk of the step is missing, or it only works shallowly (near the top of a traversal, not deeply nested). The note says what's missing. |
 | ❌ | **Not yet.** Throws a clear error — never mis-executes. |
 | 🚫 | **Out of scope.** A deliberate non-goal. |
+| 🐞 | **Known defect — this form MIS-EXECUTES.** Not a gap, a bug: it returns a wrong answer instead of failing closed. Marked inline on the affected row rather than downgrading the whole step, because the rest of the step is sound. Each one is diagnosed, with its fix, in `test/L5-properties/known.ts`. |
 
 Grounded in the code: a deferred shape fails closed with a clear error, and this file says
 so. Kept in sync in the commit that changes support.
+
+**The one exception to "never mis-executes", stated plainly:** the 🐞 rows below are forms that
+silently answer a *different question* — the outcome CLAUDE.md rules out. They were found by L5's
+first run (`test/L5-properties/`), which was also the first time anything executed the compiler's
+generic lowering path, and they are recorded here rather than quietly tracked because this file is
+what a user relies on.
 
 ---
 
@@ -40,12 +47,12 @@ so. Kept in sync in the commit that changes support.
 
 | Step | | Notes |
 |---|:--:|---|
-| `hasLabel`, `has(k)`, `has(k,v)`, `has(k,P)`, `has(label,k,v)`, `has(T.label/T.id,…)` | ✅ | |
+| `hasLabel`, `has(k)`, `has(k,v)`, `has(k,P)`, `has(label,k,v)`, `has(T.label/T.id,…)` | ✅ | 🐞 **`has(label,k,v)` INSIDE a predicate body silently answers wrong** — `filter`/`where`/`not`/`or(__.has(label,k,v))` evaluates the arm as constant false (so `not()` becomes constant true). The inline leaf reads only two of the three args. Found by L5; diagnosed with its fix in `test/L5-properties/known.ts`. Outside a predicate body all three arities are correct. |
 | `hasId(…)` | ✅ | |
 | `is(P)` | ✅ | a `constant()` traversal OPERAND folds to its literal, so `is(__.constant(29))` / `is(P.gt(__.constant(29)))` and the same forms on `has`/`hasLabel`/`where`/`all`/`none` all lower through the ordinary predicate path. An operand TRAVERSAL compiles to a value compared against its FIRST result: re-sourced (`has('name',__.V(1).values('name'))`) as a standalone scalar subquery, traverser-dependent (`has('name',__.values('other'))`, `has('name',__.out().values('name'))`) as a CORRELATED one over the shared inline child renderer. An unproductive operand is SQL NULL, which drops the traverser for `eq` and contributes nothing to a `within` set. ❌ after `path()`; an operand with no scalar to read (a filter body like `__.not(__.identity())`); a correlated operand at a host with no element context (a scalar-parent `is()`) |
 | `where(__.…)` | ✅ | single- & multi-hop, edge-typed hops, alias-rooted `where(__.as('x')…)`, label reads at any depth inside the body (`where(__.out().where(__.select('x')))` — the inline correlated renderer carries no alias columns, so a label-mentioning body falls through to the materialized gate), and generic per-parent `order().by(key)` before `limit`/`range`/`skip` in existence children. `not()` shares the same gate. ❌ ordered children using traversal-valued `by()` or path-sensitive forms |
 | `where(P)` / `where('a',P)` | 🟡 | value-compare over a scalar stream works, as does alias-column compare; ❌ some `where(P.op)` forms, `by(key)` on an edge-typed label, `where('a',P)` over a scalar |
-| `and`, `or`, `not`, `filter(__.…)` | ✅ | incl. infix `.and()`/`.or()`. ❌ `filter(rawPredicate)` — use a traversal |
+| `and`, `or`, `not`, `filter(__.…)` | ✅ | incl. infix `.and()`/`.or()` on the STEPS. ❌ `filter(rawPredicate)` — use a traversal. 🐞 infix `.and()`/`.or()` composing two **predicates** (`has('name', TextP.startingWith('m').or(TextP.startingWith('p')))`, `has('age', P.gt(20).and(P.lt(30)))`) is mis-parsed: the front-end flattens the pair into sibling args and the connective is lost, so the second predicate is silently DROPPED (or, unwrapped, throws a raw bind error). Found by L5; fix in `test/L5-properties/known.ts` |
 | `dedup()`, `dedup(labels)` | ✅ | bare, `dedup().by(key/T.id/T.label/scalar traversal)`, `dedup(labels)` by an `as()`-label tuple. ❌ bare `dedup()` after `as()`/path tracking; more than one `by()`; `dedup(labels).by(traversal)` |
 | `identity()` | ✅ | |
 | `typeOf(GType)` over a stored property | ✅ | `is(typeOf(X))` / `has('k',typeOf(X))` over every canonical type, incl. `bigdecimal`/`char`/`duration` |

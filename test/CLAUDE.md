@@ -28,6 +28,15 @@
     unique names: `len(passed) > len(set(passed))` is expected and the count is correct.
 - **L4** (`test/L4-addendum/`) — our Gherkin addendum for gaps the official corpus misses; gate =
   all pass. Add a scenario by dropping it in a `.feature` — no code change.
+- **L5** (`test/L5-properties/`) — property-based, the only level whose inputs nobody wrote down.
+  Generates well-typed Gremlin by walking a shape lattice (state = stream shape, transition = step,
+  so `count().out()` is unreachable by construction) and asserts the fast-path differential:
+  **fast paths on ≡ fast paths off**, over the L1 corpus AND generated traversals, all-six-off and
+  one-at-a-time. Self-oracling — `FastPathConfig` declares the generic path the semantic authority,
+  so a disagreement is always a defect on the optimized side. Ratcheted like L3 (`known.ts`, one
+  entry per ROOT CAUSE with a diagnosis, never per traversal). Fixed seed in CI;
+  `mise run L5-random` explores. **L5 is the CEILING instrument** — it measures what composes, which
+  is the thing the L3 count structurally cannot. Runbook: `L5-properties/README.md`.
 - Shared reference-graph seeds live in `test/fixtures/`.
 
 ## Guardrails
@@ -44,6 +53,13 @@
   zero and reads as a total failure), and Bun's built-in `undici` shim lacks
   `Agent.close()`/`destroy()` so every client teardown throws (`test/support/undici-shim.ts`).
 - **Every new step lands with** L2 SQL snapshots + its cucumber tag in `tags.ts`, L1 still 100%.
+- **A new fast path lands with its L5 differential, not just a non-empty `equivalentWhen`.** The
+  registry test only checks that the field is a non-empty string; L5 is what checks the claim. Six
+  switches shipped before L5 existed and the generic path had never been executed under test — which
+  is how `predicateInlining` came to be not disable-safe (see `L5-properties/known.ts`).
+- **Anything L5 finds gets promoted into an L4 `.feature` once fixed.** Exploration is how the
+  ceiling gets measured; L4 is how it becomes floor. A finding that stays only in `known.ts` is
+  tracked, not defended.
 - **SQL snapshots assert semantic equivalence, NOT byte-identity.** A refactor that moves the SQL
   string but means the same thing (same result set + plan shape) is fine — update the snapshot,
   don't chase byte-for-byte output.

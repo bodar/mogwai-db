@@ -21,7 +21,7 @@ type MoveOpts = { elem?: Elem; fromV?: string | null; path?: PathState };
  *  reducer's SUM(bulk) is unchanged. Declines → the plain UNION-ALL body, an identical result set. */
 export const MovementCollapseFastPath: FastPath<[ElementStream, Expression, MoveOpts], ElementStream> = {
   name: 'movementCollapse',
-  equivalentWhen: 'every disable-safe fast path is result-equivalent to generic lowering',
+  equivalentWhen: 'test/L5-properties/differential.test.ts — the fast-path differential (this switch off vs. on, over the L1 corpus + generated traversals)',
   appliesWhen: (ctx, st, _body, opts) => ctx.enabled.movementCollapse && isBulkOnly(st.carried) && !opts.fromV && !opts.path,
   tryLower: (_ctx, st, body, opts) => advance(st, q`SELECT id, SUM(bulk) AS bulk FROM (${body}) mv GROUP BY id`, opts),
 };

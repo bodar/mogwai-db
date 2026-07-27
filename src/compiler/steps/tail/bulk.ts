@@ -235,7 +235,7 @@ function tryBulkRepeat(engine: Engine, steps: PStep[], params: Record<string, an
  *  flag alone, exactly as compileRead dispatched it before. Fires at compileRead, before buildPrefix. */
 export const BulkRepeatCountFastPath: FastPath<[Engine, PStep[], Record<string, any>, SackSpec | undefined], Compiled> = {
   name: 'bulkRepeatCount',
-  equivalentWhen: 'every disable-safe fast path is result-equivalent to generic lowering',
+  equivalentWhen: 'test/L5-properties/differential.test.ts — the fast-path differential (this switch off vs. on, over the L1 corpus + generated traversals)',
   appliesWhen: (ctx) => ctx.enabled.bulkRepeatCount,
   tryLower: (_ctx, engine, steps, params, sackInit) => tryBulkRepeat(engine, steps, params, sackInit),
 };

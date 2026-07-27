@@ -55,6 +55,20 @@ description = "L4 — our addendum Gherkin suite (gap coverage; all must pass)"
 depends = ["install", "check", "submodule"]
 run = "bun test test/L4-addendum"
 
+[tasks.L5]
+description = "L5 — property-based fast-path differential (fixed seed; no submodule)"
+depends = ["install", "check"]
+run = "bun test test/L5-properties"
+
+# Exploration, NOT a gate: a random seed and a much larger sample. Findings get diagnosed into
+# test/L5-properties/known.ts (or fixed), then promoted into an L4 .feature so the floor rises.
+# Deliberately not in `ci` — a random-seed property test that fails intermittently is one people
+# learn to ignore.
+[tasks.L5-random]
+description = "L5 exploration — random seed, 3000 generated traversals (not a CI gate)"
+depends = ["install", "check"]
+run = "L5_SEED=$RANDOM L5_RUNS=3000 bun test test/L5-properties"
+
 [tasks.generate]
 description = "Regenerate parser/ from the submodule's origin/master Gremlin grammar (antlr-ng)"
 depends = ["install", "submodule"]

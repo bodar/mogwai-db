@@ -135,7 +135,13 @@ function correlatedExists(engine: Engine, body: Step[], fromId: Expression, isPr
  *  through this FastPath's appliesWhen — see branch.ts walkPredicate. */
 export const PredicateInliningFastPath: FastPath<[() => Expression | null], Expression> = {
   name: 'predicateInlining',
-  equivalentWhen: 'every disable-safe fast path is result-equivalent to generic lowering',
+  // NOT currently equivalent, and this field says so rather than claiming a proof that does not
+  // exist. L5's first run found three divergences, all attributed to this switch — two SILENT WRONG
+  // ANSWERS (an infix-composed P/TextP, and the 3-arg has(LABEL,k,v) form in the inline leaf below)
+  // and one support asymmetry (reducer/projection predicate bodies that ONLY this fast path can
+  // lower, so disabling it narrows support instead of falling back). Each is diagnosed, with its
+  // fix, in test/L5-properties/known.ts.
+  equivalentWhen: 'test/L5-properties/differential.test.ts — DIVERGES TODAY: 3 defects ratcheted in test/L5-properties/known.ts (2 silent wrong answers + 1 support asymmetry)',
   appliesWhen: (ctx) => ctx.enabled.predicateInlining,
   tryLower: (_ctx, recognize) => recognize(),
 };

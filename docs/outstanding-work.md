@@ -22,6 +22,29 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 
 ## P1 — ceiling-raising generic-substrate lifts
 
+0. **The three L5 findings — two of them SILENT WRONG ANSWERS.** Found by the first run of
+   `test/L5-properties/` (the fast-path differential), all attributed to `predicateInlining`. Full
+   diagnosis + the fix for each is in `test/L5-properties/known.ts`; ratcheted, so nothing regresses
+   further, but two of these violate the "never silently answer a different question" guardrail and
+   should be fixed before more matrix-fill.
+   - **3-arg `has(LABEL,k,v)` inside any predicate body evaluates to constant FALSE.** The inline
+     leaf destructures only two args (`prefix/predicate.ts:252`), so `has('software','name','lop')`
+     is read as "the property *software* equals *name*". `filter`/`where` → `[]` where a vertex is
+     correct; `not()` → constant TRUE, admitting a vertex it must exclude. Matrix says ✅. ~4 lines.
+     *High.*
+   - **Infix-composed predicates lose their connective in the FRONT-END.** `P1.or(P2)` /
+     `P1.and(P2)` flatten to two sibling args (`parsePredicate` only matches
+     `TraversalPredicate_<op>Context`), so `has(k, P1.or(P2))` silently means `has(k, P1)`.
+     Fix: model the infix production as `{op:'and'|'or', values:[Pred,Pred]}` and render it in
+     `predicateSql`. Closes every P/TextP composition at any depth. ~10 lines. *High.*
+   - **`predicateInlining` is not disable-safe** (fails closed, so no wrong answer). 16 of 17
+     signatures in the first sweep: a predicate body ending in a reducer/projection
+     (`valueMap().count()`, `path().count(local)`, `values(k).sum()`, `group().by(k).count()`, …) is
+     lowerable ONLY by the fast path — with it off, neither it nor the generic child-existence gate
+     accepts the body, so support *narrows*. That inverts the contract in
+     `options/fast-paths.ts` (generic = the semantic authority). Decide which side is wrong before
+     coding: most likely the gate should accept a reducer-terminal body. *Medium.*
+
 1. **List members frame as bare values, not elements.** `AliasEntry` does not record the member
    shape, so a path/element-list label cannot frame its members as vertices. Blocks
    `g_V_hasXperson_name_markoX_path_asXaX_unionXidentity_identityX_selectXaX_unfold` (which also

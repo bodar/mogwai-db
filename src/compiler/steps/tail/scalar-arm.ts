@@ -256,7 +256,7 @@ function genericScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): S
  *  scalar-parent predicate sites (buildScalarGate here, filterScalar in scalar.ts) share it. */
 export const ScalarPredicateInliningFastPath: FastPath<[ScalarStream, readonly ScalarGateSpec[]], ScalarGate> = {
   name: 'scalarPredicateInlining',
-  equivalentWhen: 'every disable-safe fast path is result-equivalent to generic lowering',
+  equivalentWhen: 'test/L5-properties/differential.test.ts — the fast-path differential (this switch off vs. on, over the L1 corpus + generated traversals)',
   appliesWhen: (ctx) => ctx.enabled.scalarPredicateInlining,
   tryLower: (_ctx, s, specs) => inlineScalarGate(s, specs),
 };

@@ -286,7 +286,7 @@ export function tryLowerListUnion(s: Step, st: ElementStream): ListStream | null
  *  → the general originSeed/coalesce path below (result-equivalent). */
 export const SingleHopOptionalFastPath: FastPath<[ElementStream, Step[]], ElementStream> = {
   name: 'singleHopOptional',
-  equivalentWhen: 'every disable-safe fast path is result-equivalent to generic lowering',
+  equivalentWhen: 'test/L5-properties/differential.test.ts — the fast-path differential (this switch off vs. on, over the L1 corpus + generated traversals)',
   appliesWhen: (ctx, st, body) =>
     ctx.enabled.singleHopOptional && !st.carried.origins.length && !st.carried.path
     && body.length === 1 && (body[0].name === 'out' || body[0].name === 'in') && st.elem === 'node',
