@@ -149,9 +149,10 @@ test('a constant() predicate operand folds to its literal, at every predicate ho
   // would turn a filter into a comparison, so those hosts are deliberately excluded.
   expect(names('g.V().where(__.out("created"))')).toEqual([1, 4, 6]);
 
-  // A genuinely per-traverser operand still defers, and says so: it needs a correlated value.
-  // Before, the operand object reached SQLite as a bind and surfaced as an opaque driver error.
-  expect(() => run(store, 'g.V().has("name",__.V(1).out("knows").values("name"))'))
+  // A TRAVERSER-DEPENDENT operand still defers, and says so: it needs a value correlated to the
+  // current row. Before, the operand object reached SQLite as a bind and surfaced as an opaque
+  // driver error. (A RE-SOURCED operand — __.V(id)… — is a standalone subquery; see below.)
+  expect(() => run(store, 'g.V().has("name",__.values("nonexistent"))'))
     .toThrow(/traversal as a predicate operand is not yet supported/);
 });
 
@@ -178,4 +179,23 @@ test('a mutating step in a VALUE-argument child traversal is rejected (StandardV
   // Naming the strategy is a no-op — it is always on, exactly as in TinkerPop.
   expect(() => compile('g.withStrategies(StandardVerificationStrategy).V()', {})).not.toThrow();
   expect(() => compile('g.withoutStrategies(StandardVerificationStrategy).V()', {})).not.toThrow();
+});
+
+test('a re-sourced traversal operand becomes a scalar subquery (compared against its FIRST result)', () => {
+  const store = seededStore();
+  const ids = (q: string) => run(store, q).map((r: any) => r.id).sort();
+  const vals = (q: string) => run(store, q).map((r: any) => r.v).sort();
+
+  // A V()/E()-headed operand never reads the current traverser, so it is a standalone read —
+  // compiled as its own sub-read and embedded as a scalar subquery, the same way within()/all()
+  // already embed a folded list operand. No correlation, so it works over any parent shape.
+  expect(ids('g.V().has("name", __.V(1).values("name"))')).toEqual([1]);
+  expect(ids('g.V().has("age", P.gt(__.V(1).values("age")))')).toEqual([4, 6]);
+  expect(vals('g.V().values("age").is(__.V(1).values("age"))')).toEqual([29]);
+  expect(vals('g.V().values("age").is(P.gt(__.V(1).values("age")))')).toEqual([32, 35]);
+  // A multi-result operand compares against its FIRST result — TinkerPop's rule, which is why
+  // the spec scenario orders the operand to make "first" deterministic.
+  expect(ids('g.V().has("name", __.V(1).out("knows").values("name").order())')).toEqual([4]);
+  // A mutating operand is still rejected before any of this (read-only child verification).
+  expect(() => run(store, 'g.V().has("name", __.V().drop().constant("x"))')).toThrow(/mutating step/);
 });

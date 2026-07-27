@@ -9,6 +9,7 @@ import { tryInlinePredicate, combineBranchPreds, PredicateInliningFastPath } fro
 import { advance, aliasElem, carriedCols, carriedWith, carryFrag, elemRel, pathColsOf, prevRel, scopePathCols, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from '../context/context.ts';
 import { aliasAppend, aliasId, aliasSeed, elemEntry, elemShape } from '../context/alias.ts';
 import { tryCombineByChildExistence, tryCompileScalarValueRows, tryFilterByChildExistence } from '../tail/child.ts';
+import { resolveTraversalOperands } from '../tail/operand.ts';
 import { directElementModulation, elementOrderSql } from '../tail/modulation.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { isInjectionMarker, injectedValues } from '../injection.ts';
@@ -127,6 +128,10 @@ export const has: StepFn = (s, st) => {
     a = a.slice(1);
   }
   let [key, val] = a;
+  // has(key, <traversal>) / has(key, P(<traversal>)): a re-sourced operand resolves to a scalar
+  // subquery here, where the Engine is reachable; predicateSql/hasProp then see an ordinary
+  // Expression operand. A traverser-dependent one is left alone to hit its clear deferral.
+  val = resolveTraversalOperands(val, st);
   // Mid-traversal federate injection: a `T.value` marker in the VALUE-operand position of
   // has(key, T.value) is replaced by a within() over the distinct injected values supplied in
   // params (federate.ts's sibling hop). The marker is inert as a real value operand, so this is

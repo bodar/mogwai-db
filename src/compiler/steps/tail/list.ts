@@ -327,7 +327,7 @@ function operandList(engine: Engine, arg: any, op: string, params: Record<string
  *  can nest as a scalar subquery. The SQL has exactly one `?` per bind (every value is
  *  bound, never inlined), so splitting on `?` and re-interleaving `value()` tokens
  *  reconstructs the tree with its binds in order. */
-function embedSql(c: Compiled): Expression {
+export function embedSql(c: Compiled): Expression {
   const parts = c.sql.split('?');
   let e: Expression = raw(parts[0]);
   for (let i = 0; i < c.binds.length; i++) e = q`${e}${value(c.binds[i])}${raw(parts[i + 1] ?? '')}`;

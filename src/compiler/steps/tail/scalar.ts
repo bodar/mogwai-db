@@ -1,4 +1,5 @@
 import { derived, empty, list, paren, q, raw, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
+import { resolveTraversalOperands } from './operand.ts';
 import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx } from '../../plan/plan.ts';
 import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
@@ -155,7 +156,9 @@ function fuseScalarSegment(s: ScalarStream, steps: readonly PStep[], from: numbe
       // stored vtype column (if any) answers it, else a storage-class fallback.
       const perRow = transformed ? undefined : perRowColumnOf(s.type);
       const typeCtx = { staticAs: as, vtypeExpr: perRow ? p.c[perRow] : undefined };
-      predicates.push(predicateSql(expr, step.args[0], typeCtx));
+      // A re-sourced traversal operand (is(__.V(id).values('age'))) becomes a scalar subquery
+      // before the pure SQL layer sees it — see steps/tail/operand.ts.
+      predicates.push(predicateSql(expr, resolveTraversalOperands(step.args[0], s), typeCtx));
       continue;
     }
     break;
