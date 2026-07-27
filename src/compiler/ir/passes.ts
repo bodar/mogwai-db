@@ -3,6 +3,7 @@ import { PASS_CATEGORIES, type Pass, type PassContext } from './pass.ts';
 import {
   stripTerminal, foldRepeatClusters, foldByModulators, foldChooseOptions, foldCallWith,
   foldConstantPredicateOperands,
+  verifyReadOnlyChildren,
   foldValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
   injectSubgraphRec, injectPartitionRec, markProductiveBy, verify,
   NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
@@ -85,11 +86,19 @@ const DECORATION: Pass[] = [
 // ReservedKeysVerificationStrategy, and a SubgraphStrategy out()→outE().inV() explosion must not
 // change what EdgeLabelVerification sees. verify() throws the spec's canonical message on a
 // violation; a passing traversal returns the chain unchanged.
-const VERIFY: Pass[] = [...VERIFICATION_STRATEGIES].map((name) => ({
+const VERIFY: Pass[] = [
+  // ALWAYS ON (no `applies`), matching TinkerPop: StandardVerificationStrategy is a standard
+  // strategy, not opt-in. Naming it in withStrategies() is therefore a genuine no-op.
+  {
+    name: 'readOnlyChildTraversals', category: 'verify' as const,
+    run: (steps: PStep[], ctx: PassContext) => { verifyReadOnlyChildren(ctx.originalChain as PStep[], ctx.params); return steps; },
+  },
+  ...[...VERIFICATION_STRATEGIES].map((name) => ({
   name, category: 'verify' as const,
   applies: specNamed(name),
   run: (steps: PStep[], ctx: PassContext) => { verify(specFor(name, ctx), ctx.originalChain as PStep[]); return steps; },
-}));
+  })),
+];
 
 /** The ordered pipeline. Declaration order across groups fixes cross-category order (extract <
  *  decoration < fold < simplify < verify); the Stage 3 test checks THIS array against

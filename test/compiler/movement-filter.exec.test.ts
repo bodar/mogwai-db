@@ -154,3 +154,28 @@ test('a constant() predicate operand folds to its literal, at every predicate ho
   expect(() => run(store, 'g.V().has("name",__.V(1).out("knows").values("name"))'))
     .toThrow(/traversal as a predicate operand is not yet supported/);
 });
+
+test('a mutating step in a VALUE-argument child traversal is rejected (StandardVerificationStrategy)', () => {
+  const bad = (q: string) => expect(() => compile(q, {})).toThrow(/mutating step/);
+  // TinkerPop's read-only child rule: a child evaluated for a VALUE must not mutate. The spec
+  // pins the message text ("mutating step") across filter operands, V()/E() ids and property().
+  bad('g.V().has("name", __.addV("x").values("name"))');
+  bad('g.V().has("name", __.V().drop().constant("x"))');
+  bad('g.V().has("name", __.V().map(__.addV("x")).values("name"))');   // nested a level down
+  bad('g.V().has("name", P.eq(__.addV("x").values("name")))');          // wrapped in a P
+  bad('g.V().has("age", P.gt(__.addV("x").values("age")))');            // …incl. the range path
+  bad('g.V().values("age").is(__.addV("x").values("age"))');
+  bad('g.V().V(__.addV("x").id())');
+  bad('g.E(__.addV("x").id())');
+  bad('g.V().property(__.addV("temp").project("k").by("name"))');
+
+  // Scoped to VALUE arguments, NOT "every child traversal": a write is legal in a branch or
+  // side-effect body, and rejecting those would break working write traversals. These must fail
+  // (or not) for their own reasons — never with a mutating-step rejection.
+  for (const q of ['g.V().union(__.addV("x"), __.identity())', 'g.V().local(__.addV("x"))']) {
+    try { compile(q, {}); } catch (e: any) { expect(e.message).not.toMatch(/mutating step/); }
+  }
+  // Naming the strategy is a no-op — it is always on, exactly as in TinkerPop.
+  expect(() => compile('g.withStrategies(StandardVerificationStrategy).V()', {})).not.toThrow();
+  expect(() => compile('g.withoutStrategies(StandardVerificationStrategy).V()', {})).not.toThrow();
+});

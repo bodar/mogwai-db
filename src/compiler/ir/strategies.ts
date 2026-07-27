@@ -433,6 +433,72 @@ export function foldConstantPredicateOperands(steps: PStep[], params: Record<str
   });
 }
 
+/** Hosts BEYOND the predicate operands whose nested args are evaluated for a VALUE rather than
+ *  run as a traversal body: the `V(ids)`/`E(ids)` id argument and `property()`'s arguments. Only
+ *  the read-only verification uses these — the constant fold stays on the operand slots, where a
+ *  literal is unambiguously equivalent. */
+const READONLY_CHILD_HOSTS: Record<string, (args: readonly any[]) => readonly number[]> = {
+  V: (a) => a.map((_, i) => i),
+  E: (a) => a.map((_, i) => i),
+  property: (a) => a.map((_, i) => i),
+};
+
+/** Every nested traversal sitting in a VALUE-argument slot of `s` — the operand slots shared with
+ *  the constant fold, plus the id/property hosts above, plus operands nested inside a P. */
+function valueArgTraversals(s: Step): any[] {
+  const slots = [
+    ...(VALUE_OPERAND_SLOTS[s.name]?.(s.args ?? []) ?? []),
+    ...(READONLY_CHILD_HOSTS[s.name]?.(s.args ?? []) ?? []),
+  ];
+  const out: any[] = [];
+  (s.args ?? []).forEach((a: any, i: number) => {
+    if (slots.includes(i) && isNested(a)) out.push(a.nested);
+    // …and operands wrapped in a predicate: has("name", P.eq(__.addV(…))).
+    const preds: any[] = a && typeof a === 'object' && 'op' in a && Array.isArray(a.values) ? [a] : [];
+    while (preds.length) {
+      const pr = preds.pop();
+      for (const v of pr.values) {
+        if (isNested(v)) out.push(v.nested);
+        else if (v && typeof v === 'object' && 'op' in v && Array.isArray(v.values)) preds.push(v);
+      }
+    }
+  });
+  return out;
+}
+
+/** StandardVerificationStrategy's read-only child rule: a child traversal evaluated for a VALUE
+ *  must not mutate. TinkerPop rejects `has("name", __.addV("x").values("name"))`,
+ *  `is(P.gt(__.addV("x").values("age")))`, `V(__.addV("x").id())`, `property(__.addV("t")…)` and
+ *  friends with a message containing "mutating step" (StandardVerificationStrategy.feature).
+ *
+ *  Deliberately scoped to VALUE-argument positions, NOT "every child traversal": a write is
+ *  perfectly legal in a branch/side-effect body (`union(__.addV("person"), …)`,
+ *  `choose(p, __.addV(…), …)`), and rejecting those would break working write traversals. The
+ *  rule is about arguments that must resolve to a value, which is why it shares
+ *  VALUE_OPERAND_SLOTS with the constant fold — one declaration of "this slot holds a value".
+ *
+ *  ALWAYS ON, like TinkerPop's: it is a standard strategy, not opt-in, so the Pass carries no
+ *  `applies` gate. Naming it in withStrategies() stays a no-op (it is already applied). */
+export function verifyReadOnlyChildren(steps: PStep[], params: Record<string, any>): void {
+  const scan = (chain: Step[]) => {
+    for (const s of chain) {
+      for (const nested of valueArgTraversals(s)) {
+        let body: Step[];
+        try { body = stepChain(nested, params); } catch { continue; }
+        const m = body.find((x) => MUTATING_STEPS.has(x.name))
+          ?? (someStepDeep(body, params, (x) => MUTATING_STEPS.has(x.name)) ? { name: 'a nested write' } as Step : undefined);
+        if (m) throw new Error(`The child traversal of ${s.name}() contains a mutating step (${m.name}) and thus is not read only: a mutating step is not allowed in a value-argument child traversal`);
+      }
+      // recurse into every OTHER nested body so a bad operand nested deep still trips
+      for (const a of s.args ?? []) {
+        if (!isNested(a)) continue;
+        try { scan(stepChain(a.nested, params)); } catch { /* unparseable without params — skip */ }
+      }
+    }
+  };
+  scan(steps as Step[]);
+}
+
 /** Desugar `valueMap().with(WithOptions.tokens)` onto the valueMap step. The tokens option with no
  *  selector (or the all selector) is exactly `valueMap(true)`: include the id+label tokens, which
  *  the valueMap projector already reads off a `true` arg. So append the `true` flag and drop the

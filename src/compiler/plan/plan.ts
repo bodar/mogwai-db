@@ -215,7 +215,10 @@ export function compareKey(valueExpr: Expression, vtypeExpr: Expression): Expres
 export function compareBound(v: any): Expression {
   if (typeof v === 'bigint' || v instanceof Duration) return q`CAST(${value(v)} AS INTEGER)`;
   if (v instanceof BigDecimal) return q`CAST(${value(v)} AS REAL)`;
-  return value(v);
+  // operandSql, not value: this is the OTHER literal-rendering path a predicate operand can take
+  // (the vtype-aware range compare), so it needs the same traversal-operand guard. Missing it here
+  // let `has("age", P.gt(__.<traversal>))` compile and only fail at bind time.
+  return operandSql(v);
 }
 
 /** node: the vtype-aware sort key for `key` (order().by(key)/min/max), correlated. Same

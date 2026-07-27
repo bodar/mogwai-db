@@ -3,7 +3,7 @@
 What you can rely on. Each step gets one mark based on how much of it works and how
 freely it composes — a ✅ step works **anywhere in a traversal**, however deeply nested,
 not just at the top. Notes call out **only the cases that don't work yet**; if a row has
-no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,401<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,415<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 | Mark | Meaning |
 |---|---|
@@ -218,6 +218,7 @@ each staying one SQL statement.
 | SubgraphStrategy (vertex **and** edge criteria) | ✅ | recursive `where(criterion)` injection; edge criterion explodes `out/in/both`→`…E.…V`; `checkAdjacentVertices`. ❌ vertexProperties criterion; mutating traversals |
 | PartitionStrategy (read-filter + write-stamp) | ✅ | recursive `has(within)` + property stamp. ❌ `includeMetaProperties`; partition-aware `mergeV`/`mergeE` |
 | ReadOnly / EdgeLabel / ReservedKeys verification | ✅ | throw TinkerPop's canonical messages |
+| StandardVerification (read-only children) | ✅ | ALWAYS ON, not opt-in (as in TinkerPop): a mutating step (`addV`/`addE`/`mergeV`/`mergeE`/`property`/`drop`) inside a VALUE-argument child traversal — a predicate operand, a `V()`/`E()` id, a `property()` argument — is rejected with a "mutating step" error. A write in a branch/side-effect body (`union(__.addV(…))`) stays legal |
 | ProductiveByStrategy | ✅ | productive-NULL policy for every supported consumer |
 | `withoutStrategies(ConnectiveStrategy)` | 🚫 | its infix `.and()/.or()` folding is unconditionally baked in |
 | `with(…)` (OptionsStrategy sugar) | ❌ | not implemented (the `OptionsStrategy` class itself is a no-op) |
