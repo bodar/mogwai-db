@@ -62,7 +62,10 @@ export const KNOWN: readonly KnownDivergence[] = [
       'conjunction/disjunction. Closes every P and TextP composition at any nesting depth.',
   },
   {
-    query: 'g.V().or(hasLabel("person"),has("software","name","lop")).order().by("age")',
+    // The MINIMAL reproduction, deliberately not the corpus traversal that first surfaced this. See
+    // the "two wrongs" paragraph in the diagnosis: on the corpus traversal the fast path is
+    // accidentally CORRECT, which makes it a badly misleading thing to write a fix against.
+    query: "g.V().filter(__.has('software','name','lop'))",
     fastPath: 'predicateInlining',
     diagnosis:
       'SILENT WRONG ANSWER, on a form the support matrix marks ✅ ("works anywhere in a traversal, ' +
@@ -74,14 +77,30 @@ export const KNOWN: readonly KnownDivergence[] = [
       'V().filter(__.has("software","name","lop")) → [] (correct: [3]); ' +
       'V().where(__.has("software","name","lop")) → [] (correct: [3]); ' +
       'V().not(__.has("software","name","lop")) → all 6 vertices (correct: 5 — vertex 3 must be ' +
-      'excluded, and an always-false arm under not() becomes always-TRUE). ' +
-      'The corpus traversal above is the mildest presentation: 4 rows where 5 are correct. Outside an ' +
-      'inline predicate body the same has() works (filter.ts handles all three arities), so this is ' +
-      'purely the inline leaf. ' +
+      'excluded, and an always-false arm under not() becomes always-TRUE); ' +
+      'V().or(__.hasLabel("person"),__.has("software","name","lop")) → 4 (correct: 5). ' +
+      'None of these involves order()/by(), so the defect is isolated to the inline leaf. Outside a ' +
+      'predicate body the same has() is correct (filter.ts handles all three arities). ' +
+      'TWO WRONGS MAKE A RIGHT — why L3 never caught this. The traversal that first surfaced it, ' +
+      'g.V().or(hasLabel("person"),has("software","name","lop")).order().by("age"), is the one ' +
+      'presentation where this bug is INVISIBLE: TinkerPop expects 4 rows there (Order.feature — ' +
+      'a non-productive by("age") drops the software vertex, which has no age), and the fast path ' +
+      'returns 4 by dropping lop for the WRONG reason, at the or() instead of at the order(). The ' +
+      'generic path admits lop correctly and then fails to drop it, returning 5. So on that scenario ' +
+      'this defect exactly cancels a SECOND, unrelated one (non-productive drop is not applied at ' +
+      'order().by(key) — see docs/outstanding-work.md), and the scenario sits in l3-state.json\'s ' +
+      'passed[] list. Its @WithProductiveByStrategy twin, where the two do not cancel, is in ' +
+      'failed[] and tolerated under the ratchet floor. Do not use that traversal to validate a fix; ' +
+      'use the three minimal forms above. ' +
       'FIX (~4 lines): in that leaf, when body[0].args.length === 3, render labelIn(ctx.labelIdExpr, ' +
       '[args[0]]) AND hasProp(ctx, args[1], args[2]) — the conjunction filter.ts already means. ' +
       'Declining (decline(...) → fall through to the generic gate) is the smaller fail-closed ' +
-      'alternative, but handling it keeps the fast path applicable.',
+      'alternative, but handling it keeps the fast path applicable. Fixing this ALONE will turn the ' +
+      'passing L3 scenario red until the by() half is fixed too — expect that, and fix both.',
+    // A `has()` with three literal args, which is the 3-arg form wherever it appears. Keeps the
+    // corpus traversal covered (it does carry this defect, cancellation notwithstanding) without
+    // pinning the entry to it.
+    family: { query: /has\((?:'[^']*'|"[^"]*")\s*,\s*(?:'[^']*'|"[^"]*")\s*,\s*(?:'[^']*'|"[^"]*")\)/ },
   },
   {
     query: "g.V(2).not(__.valueMap().count())",

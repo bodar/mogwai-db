@@ -37,6 +37,16 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      `TraversalPredicate_<op>Context`), so `has(k, P1.or(P2))` silently means `has(k, P1)`.
      Fix: model the infix production as `{op:'and'|'or', values:[Pred,Pred]}` and render it in
      `predicateSql`. Closes every P/TextP composition at any depth. ~10 lines. *High.*
+   - **Non-productive `by(key)` does not drop at `order()`.** `g.V().order().by('age')` returns all 6
+     vertices; TinkerPop returns 4, dropping the two software vertices that have no `age`
+     (`Order.feature`). **Not a fast-path divergence** — both configs answer 6 identically, so the L5
+     differential is structurally blind to it; found only by reading the Gherkin while diagnosing the
+     entry above. Narrow: exactly one L3 scenario
+     (`g_withStrategiesXProductiveByStrategyX_V_orX…X_order_byXageX`, in `failed[]`), and
+     ProductiveByStrategy is otherwise sound (28 scenarios pass). **Coupled to the 3-arg-`has` fix
+     above:** the two defects currently cancel on the non-strategy variant, which is why that one is
+     in `passed[]`. Fix either alone and that scenario goes red; fix both and both variants go green.
+     The matrix's `order()` row does not mention non-productive drop either way — add it. *Medium.*
    - **`predicateInlining` is not disable-safe** (fails closed, so no wrong answer). 16 of 17
      signatures in the first sweep: a predicate body ending in a reducer/projection
      (`valueMap().count()`, `path().count(local)`, `values(k).sum()`, `group().by(k).count()`, …) is

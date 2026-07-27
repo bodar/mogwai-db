@@ -27,6 +27,21 @@ semantic authority, so any disagreement is a defect on the optimized side — th
 self-oracling. `differential.test.ts` also runs each of the six switches **in isolation**, which
 attributes a divergence to one path and catches pairs whose errors cancel when both are off.
 
+### The blind spot: a defect both paths share
+
+The differential compares the two lowerings against *each other*, so it can only ever see a
+**disagreement**. A bug present in both — or one whose two halves cancel — is invisible to it by
+construction. There is a live example: `g.V().order().by('age')` returns all 6 modern-graph vertices
+under both configs, where TinkerPop returns 4 (a non-productive `by(key)` drops traversers lacking the
+key). Both sides agree, so L5 reports nothing.
+
+Worse, that defect **cancels** one of the three findings on the traversal that first surfaced it, and
+the resulting L3 scenario *passes* — for entirely the wrong reason (see the second entry in
+`known.ts`). So: this oracle is strong evidence about the optimized lowerings and no evidence at all
+about shared semantics. The oracles in "Where this could go next" below — metamorphic laws in
+particular — are what cover that gap, because they compare against a *law* rather than against
+another implementation.
+
 ### What "equivalent" means
 
 A **bulk-weighted multiset**: `hex(GraphBinary value) → Σ bulk`. This is the only comparison that
