@@ -176,6 +176,25 @@ describe('unified lowering characterization', () => {
       expect(runWith(store, query, enabled)).toEqual(runWith(store, query, disabled));
     }
 
+    // INFIX .and()/.or() — the shape this suite could not see, and the reason predicateInlining's
+    // declared enabled≡disabled contract was FALSE until 2026-07-27. The fold lived inside the fast
+    // path, so flipping the flag off did not route the body generically, it lost the capability:
+    // 6 corpus traversals compiled only with inlining ON. Every case above happens to have a
+    // generic fallback, so the contract violation was invisible here. The fold is now
+    // ConnectiveStrategy (a `fold` Pass), which runs regardless of the flag — so these compile
+    // BOTH ways and agree, and the flag is a pure performance switch. Do not delete: this is the
+    // regression guard for putting a capability back inside a fast path.
+    for (const query of [
+      'g.V().has("name","marko").or().has("name","josh").values("name").order()',
+      'g.V().hasLabel("person").and().has("age",gte(32)).values("name").order()',
+      'g.V().where(__.out("created").and().out("knows").or().in("knows")).values("name").order()',
+      'g.V().hasLabel("person").choose(__.values("age").is(gt(29)).and().values("age").is(lt(35)),__.values("name"),__.constant("x")).order()',
+    ]) {
+      const on = { fastPaths: { predicateInlining: true } } as CompileOptions;
+      const off = { fastPaths: { predicateInlining: false } } as CompileOptions;
+      expect(runWith(store, query, on)).toEqual(runWith(store, query, off));
+    }
+
     // Element-terminal movementCollapse can't use the raw-row comparison above: the vertex leaf
     // carries a `bulk` column and emits ONE (v, N) row per element (fastSql), so the rows
     // legitimately DIFFER from the per-walk generic form. Equivalence is at the RLE-expanded

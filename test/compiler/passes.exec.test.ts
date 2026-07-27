@@ -5,6 +5,8 @@
 import { test, expect, describe } from 'bun:test';
 import { PASSES } from '../../src/compiler/ir/passes.ts';
 import { PASS_CATEGORIES } from '../../src/compiler/ir/pass.ts';
+import { foldConnectives } from '../../src/compiler/ir/strategies.ts';
+import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 
 const names = PASSES.map((p) => p.name);
 const ord = (name: string) => names.indexOf(name);
@@ -53,5 +55,67 @@ describe('Pass pipeline ordering invariants', () => {
     const verifyIdxs = PASSES.map((p, i) => (p.category === 'verify' ? i : -1)).filter((i) => i >= 0);
     const nonVerifyMax = PASSES.map((p, i) => (p.category !== 'verify' ? i : -1)).reduce((a, b) => Math.max(a, b), -1);
     for (const vi of verifyIdxs) expect(vi).toBeGreaterThan(nonVerifyMax);
+  });
+
+  test('ConnectiveStrategy is the FIRST fold — it restructures, the others canonicalize', () => {
+    // It is the only fold that MOVES steps into {nested} bodies (infix .and()/.or() → the step
+    // form), so every later fold and the whole simplify group must see the canonical shape.
+    const folds = PASSES.filter((p) => p.category === 'fold');
+    expect(folds[0].name).toBe('ConnectiveStrategy');
+  });
+});
+
+// ---------- ConnectiveStrategy (the infix .and()/.or() fold) ----------
+//
+// This fold lived inside the predicateInlining FAST PATH until 2026-07-27, where it was reachable
+// only in a child body and only while that flag was on. These pin the three properties that made
+// moving it to a Pass the right call; each one was a measured defect before.
+describe('ConnectiveStrategy: infix .and()/.or() folds to the step form', () => {
+  const fold = (g: string) => foldConnectives(stepChain(parseGremlin(g), {}), {});
+  const shape = (steps: any[]): string =>
+    steps.map((s) => {
+      const nested = s.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+      return nested.length ? `${s.name}(${nested.map((n: any) => shape(stepChain(n.nested, {}))).join(', ')})` : s.name;
+    }).join('.');
+
+  test('a SOURCE step is never absorbed into an operand', () => {
+    // TinkerPop's ConnectiveStrategy.legalCurrentStep excludes GraphStep for exactly this reason;
+    // swallowing V() would make the whole traversal one filter over an empty source.
+    expect(shape(fold('g.V().has("name","marko").or().has("name","josh")'))).toBe('V.or(has, has)');
+    expect(shape(fold('g.E().has("weight",0.5).and().has("weight",0.5)'))).toBe('E.and(has, has)');
+  });
+
+  test('an as() ON the source travels WITH it, not into the operand', () => {
+    // Our IR difference from TinkerPop, where a label is not a step at all: `as` labels whatever
+    // precedes it, so a bind sitting on V() must stay on the outer traverser. Folding it into the
+    // branch would confine it and a later select("a") would read an unbound label.
+    expect(shape(fold('g.V().as("a").out("knows").and().out("created")'))).toBe('V.as.and(out, out)');
+    // …but an as() further along belongs to ITS step and IS absorbed (TinkerPop does this too).
+    expect(shape(fold('g.V().out().as("a").and().out("created")'))).toBe('V.and(out.as, out)');
+  });
+
+  test('OR binds looser than AND', () => {
+    expect(shape(fold('g.V().out("created").and().out("knows").or().in("knows")')))
+      .toBe('V.or(and(out, out), in)');
+  });
+
+  test('the fold reaches a connective at ANY depth, by the same rule', () => {
+    expect(shape(fold('g.V().where(__.out("created").and().out("knows"))')))
+      .toBe('V.where(and(out, out))');
+    expect(shape(fold('g.V().choose(__.values("age").is(P.gt(29)).and().values("age").is(P.lt(35)), __.values("name"), __.constant("x"))')))
+      .toBe('V.choose(and(values.is, values.is), values, constant)');
+  });
+
+  test('an untouched chain is returned BY REFERENCE (parse trees survive)', () => {
+    // Load-bearing, and it was a real break: a {nested} arg may still be a raw parse tree, and
+    // services/params/traversal-param.ts un-parses one back to Gremlin via the client's
+    // TranslateVisitor (needs `tree.accept`). An unconditional pass that rebuilt every nested arg
+    // as a Step[] broke every federate `with("traversal", __.V())` param.
+    const steps = stepChain(parseGremlin('g.V().call("x").with("traversal", __.V().out())'), {});
+    expect(foldConnectives(steps, {})).toBe(steps);
+  });
+
+  test('an empty operand throws rather than silently dropping a conjunct', () => {
+    expect(() => fold('g.V().and().has("name","marko")')).toThrow(/malformed infix/);
   });
 });

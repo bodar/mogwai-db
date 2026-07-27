@@ -140,40 +140,34 @@ export const PredicateInliningFastPath: FastPath<[() => Expression | null], Expr
   tryLower: (_ctx, recognize) => recognize(),
 };
 
+/** "This fast path does not recognize the body" — the DECLINE signal, as a type rather than a
+ *  message prefix. The FastPath contract (options/fast-paths.ts) is explicit that recognition
+ *  failure is ALWAYS null and never a throw; the recognizer is recursive, so it needs to unwind,
+ *  and it used to do that by throwing a message `tryInlinePredicate` then sniffed for
+ *  (`includes('not yet supported')` AND `startsWith('where'|'filter')`). That sniff was a support
+ *  boundary defined by string shape: `empty where()/filter() traversal` matched neither clause, so
+ *  `g.V().filter(__.is(0))` escaped as a hard error instead of reaching the generic gate. A marker
+ *  class states the intent instead, and each site below now says which of the two it means. */
+class InlineDecline extends Error {}
+
+/** Unwind the recursive recognizer with "not recognized" — `tryInlinePredicate` turns this into
+ *  `null` so the caller falls through to the generic path (the semantic authority). `msg` is for
+ *  debugging only; no consumer reads it, because the caller's own deferral names the real gap. */
+const decline: (msg: string) => never = (msg) => { throw new InlineDecline(msg); };
+
 /** Optional correlated predicate optimization. Unsupported shapes return null so an
- * element consumer can fall back to generic child-existence lowering. */
+ * element consumer can fall back to generic child-existence lowering. A genuine ILLEGALITY
+ * (movement off an edge, a malformed connective) is a real Error and still propagates — that
+ * distinction is the whole point of the marker class. */
 export function tryInlinePredicate(
   engine: Engine, nested: Step[], ctx: ScalarCtx, params: Record<string, any> = {},
   labels?: LabelScope,
 ): Expression | null {
   try { return compileInlinePredicate(engine, nested, ctx, params, labels); }
   catch (error) {
-    if (error instanceof Error
-        && error.message.includes('not yet supported')
-        && (error.message.startsWith('where') || error.message.startsWith('filter'))) return null;
+    if (error instanceof InlineDecline) return null;
     throw error;
   }
-}
-
-/** Split a predicate body on infix .and()/.or() connectors (zero-arg `and`/`or`
- *  steps). Returns the lower-precedence operator present (OR looser than AND) and the
- *  segments between its connectors; each segment is recompiled and may still contain
- *  higher-precedence connectors. Null when the body has no infix connector. */
-function splitInfixConnectors(steps: Step[]): { op: 'AND' | 'OR'; segments: Step[][] } | null {
-  const isConn = (s: Step, n: string) => s.name === n
-    && !s.args.some(isNested);
-  const op: 'AND' | 'OR' = steps.some((s) => isConn(s, 'or')) ? 'OR'
-    : steps.some((s) => isConn(s, 'and')) ? 'AND' : (null as any);
-  if (op === null) return null;
-  const conn = op === 'OR' ? 'or' : 'and';
-  const segments: Step[][] = [[]];
-  for (const s of steps) {
-    if (isConn(s, conn)) segments.push([]);
-    else segments[segments.length - 1].push(s);
-  }
-  if (segments.some((seg) => seg.length === 0))
-    throw new Error('malformed infix .and()/.or() connector (empty operand)');
-  return { op, segments };
 }
 
 function compileInlinePredicate(
@@ -200,22 +194,17 @@ function compileInlinePredicate(
   // location and IS an ordinary confined bind, which the correlated child renders inline.
   const hLast = nested[nested.length - 1];
   if (hLast.name === 'as' && (hLast.args ?? []).some((a: any) => typeof a === 'string'))
-    throw new Error('where()/filter() form not yet supported: a trailing as(label) is an end-label constraint (WhereEndStep), not a bind');
+    decline('a trailing as(label) is an end-label constraint (WhereEndStep), not a bind');
   // A leading as('x')/select('x') re-roots the predicate on the aliased traverser:
   // where(__.as('b').out('created').has('name','ripple')) correlates on b's column.
   if (labels && soleLabel !== null && nested.length > 1 && (h0.name === 'as' || h0.name === 'select'))
     return compileInlinePredicate(engine, nested.slice(1), labelCtx(labels, soleLabel), params, labels);
 
-  // Infix .and()/.or() connectors — zero-arg `and`/`or` steps splitting the body into
-  // conjuncts/disjuncts (has('a').and().out('b'), values('x').is(P).or().values('y').is(Q)).
-  // OR binds looser than AND, so split on OR first; each segment recurses (inner AND, or
-  // a plain leaf). Distinct from the step-form and(t…)/or(t…) below, which carries nested
-  // traversal args and is one step. Shared by where/filter/choose/until (all route here).
-  const infix = splitInfixConnectors(nested);
-  if (infix) {
-    const parts = infix.segments.map((seg) => paren(compileInlinePredicate(engine, seg, ctx, params, labels)));
-    return paren(list(parts, ` ${infix.op} `));
-  }
+  // NB there is no infix `.and()`/`.or()` handling here any more. That fold is
+  // ConnectiveStrategy (a `fold` Pass, ir/strategies.ts foldConnectives), so by the time a body
+  // reaches this fast path the connectives are already the step form handled below — which is
+  // what makes this path genuinely disable-safe. It lived here until 2026-07-27, where it was
+  // reachable only in a child body and only while `predicateInlining` was on.
 
   let body = nested;
   let isPred: any = undefined, hasIs = false;
@@ -229,13 +218,13 @@ function compileInlinePredicate(
   if (hasIs) isPred = resolveTraversalOperands(isPred, deps, { ctx, labels });
 
   const head = body[0]?.name;
-  if (!head) throw new Error('empty where()/filter() traversal');
+  if (!head) decline('empty where()/filter() traversal');
 
   // and(t…)/or(t…) step-form: combine each branch's predicate. (The infix connector
   // form .and()/.or() was already split above by splitInfixConnectors.)
   if ((head === 'and' || head === 'or') && body.length === 1) {
     const combined = combineBranchPreds(engine, body[0], ctx, params, head === 'and' ? 'AND' : 'OR', labels);
-    if (!combined) throw new Error(`where()/filter() form not yet supported: __.${body.map((s) => s.name + '()').join('.')}`);
+    if (!combined) decline(`connective branch beyond inline lowering: __.${body.map((s) => s.name + '()').join('.')}`);
     return combined;
   }
 
@@ -250,7 +239,7 @@ function compileInlinePredicate(
   if (term === 'count' || term === 'sum') {
     if (!hasIs) return q`1`;
     const reduced = correlatedReduce(engine, body, ctx, params, labels);
-    if (!reduced) throw new Error(`where()/filter() form not yet supported: __.${body.map((s) => s.name + '()').join('.')}`);
+    if (!reduced) decline(`reduction beyond inline lowering: __.${body.map((s) => s.name + '()').join('.')}`);
     return predicateSql(reduced, isPred);
   }
 
@@ -267,7 +256,7 @@ function compileInlinePredicate(
     if (key && typeof key === 'object' && 'token' in key) {
       const expr: Expression = key.token === 'label' ? labelNameSub(ctx.labelIdExpr)
         : key.token === 'id' ? ctx.extIdExpr!
-        : (() => { throw new Error(`has(T.${key.token}) not supported`); })();
+        : decline(`has(T.${key.token}) has no inline form`);
       return predicateSql(expr, val);
     }
     if (typeof key === 'string') {
@@ -288,15 +277,15 @@ function compileInlinePredicate(
   // it defers. It composes with element predicates through the infix/and/or split above,
   // so until(__.has('name','x').or().loops().is(3)) lowers as one boolean.
   if (head === 'loops' && body.length === 1) {
-    if (body[0].args.length) throw new Error('where()/filter() form not yet supported: loops(label) named-loop form');
-    if (!ctx.loopsExpr || !hasIs) throw new Error('where()/filter() form not yet supported: __.loops() requires until() context and .is(P)');
+    if (body[0].args.length) decline('loops(label) named-loop form');
+    if (!ctx.loopsExpr || !hasIs) decline('__.loops() requires until() context and .is(P)');
     return predicateSql(ctx.loopsExpr, isPred);
   }
 
   // where(__.not(t)) — negate an inner predicate; a NULL (missing) is kept (NOT COALESCE).
   if (head === 'not' && body.length === 1) {
     const arg = body[0].args.find(isNested);
-    if (!arg) throw new Error('not() requires a traversal');
+    if (!arg) decline('not() without a traversal arg');
     const inner = compileInlinePredicate(engine, stepChain(arg.nested, params), ctx, params, labels);
     return q`NOT COALESCE((${inner}), 0)`;
   }
@@ -307,10 +296,10 @@ function compileInlinePredicate(
     // fallthrough). count/sum terminals are handled above.
     if (ctx.elem !== 'node') throw new Error(`where(__.${head}()) expects a vertex, not an ${ctx.elem}`);
     const exists = correlatedExists(engine, body, ctx.idExpr, isPred, hasIs, params, labels);
-    if (!exists) throw new Error(`where()/filter() form not yet supported: __.${body.map((s) => s.name + '()').join('.')}`);
+    if (!exists) decline(`movement beyond inline lowering: __.${body.map((s) => s.name + '()').join('.')}`);
     return exists;
   }
-  throw new Error(`where()/filter() form not yet supported: __.${body.map((s) => s.name + '()').join('.')}`);
+  return decline(`no inline form for __.${body.map((s) => s.name + '()').join('.')}`);
 }
 
 /** and(t…)/or(t…): each branch → a filter predicate node, joined by AND/OR

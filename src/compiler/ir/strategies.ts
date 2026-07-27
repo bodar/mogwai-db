@@ -92,9 +92,11 @@ export const NO_OP_STRATEGIES = new Set([
   // Metadata-only; we consult no provider hints. CAVEAT: OptionsStrategy/ProfileStrategy/
   // SeedStrategy stop being no-ops the day with()/profile()/coin()-sample() land — revisit then.
   'OptionsStrategy', 'ProfileStrategy', 'SeedStrategy',
-  // ConnectiveStrategy's effect (infix .and()/.or() folding) is unconditionally baked into
-  // our compiler (predicate.ts splitInfixConnectors), so requesting it is a no-op; DISABLING
-  // it (withoutStrategies) is rejected below — see ALWAYS_ON_STRATEGIES.
+  // ConnectiveStrategy's effect (infix .and()/.or() folding) is unconditionally applied as the
+  // `fold` Pass of the same name (foldConnectives, this file), so REQUESTING it is a genuine
+  // no-op; DISABLING it (withoutStrategies) is rejected — see ALWAYS_ON_STRATEGIES. Until
+  // 2026-07-27 this claim was false: the fold lived inside the predicateInlining fast path, so it
+  // applied only in a child body and only while that flag was on.
   'ConnectiveStrategy',
 ]);
 // Strategies whose effect we apply unconditionally, so withoutStrategies() of them cannot be
@@ -570,6 +572,118 @@ export function stripTerminal(steps: Step[]): { steps: Step[]; discard: boolean 
   if (last && (last.name === 'discard' || (last.name === 'none' && last.args.length === 0)))
     return { steps: steps.slice(0, -1), discard: true };
   return { steps, discard: false };
+}
+
+// ---------- ConnectiveStrategy: infix .and()/.or() → the step form ----------
+//
+// `has(a).and().has(b)` ≡ `and(__.has(a), __.has(b))`. TinkerPop does this in ConnectiveStrategy
+// (a DECORATION strategy — one apply() per traversal, recursing into every child), and the two
+// spellings must be indistinguishable downstream. Ours is a `fold` Pass because that is what the
+// category means here: canonicalize a multi-step shape so no compiler does index arithmetic.
+//
+// It used to live inside the predicateInlining FAST PATH (predicate.ts splitInfixConnectors), which
+// was wrong three ways and measurably so: the infix form only worked in a CHILD BODY (top-level
+// `g.V().has(x).and().has(y)` threw `and() needs at least two traversal branches`), it vanished when
+// the fast-path flag was flipped off (6 corpus traversals — so the flag's declared
+// enabled≡disabled contract was false), and NO_OP_STRATEGIES already claimed the effect was
+// "unconditionally baked into our compiler", which it was not. As a Pass it is unconditional and
+// flag-independent, so all three statements become true at once.
+//
+// Precedence: OR binds looser than AND, so split on OR first and let each segment recurse (an
+// inner AND folds inside it). Empty operand → throw, never a silent drop.
+
+/** A BARE connective — the infix `.and()`/`.or()` with no traversal args. The step FORM
+ *  `and(__.a, __.b)` carries nested args and is already canonical, so it is left alone. */
+const isBareConnective = (s: Step, name: 'and' | 'or'): boolean => s.name === name && !s.args.some(isNested);
+
+/** Steps a connective's LEFT operand must NOT absorb — mirroring TinkerPop's
+ *  `ConnectiveStrategy.legalCurrentStep`, which excludes GraphStep/StartStep so that
+ *  `g.V().has(a).or().has(b)` folds to `g.V().or(…)` rather than swallowing the source.
+ *  Ours is the same idea in IR terms: a SOURCE or a WRITE step anchors the chain and stays
+ *  outside the fold. (A child body has none of these, which is why the old child-only
+ *  implementation never needed the rule.) */
+const CONNECTIVE_ANCHORS = new Set(['V', 'E', 'inject', 'call', 'addV', 'addE', 'mergeV', 'mergeE']);
+
+/** How far the leading ANCHOR run extends — the steps held out of the fold and re-prepended.
+ *
+ *  It absorbs trailing `as()` steps, and that is a real semantic difference from TinkerPop rather
+ *  than a convenience: in TinkerPop a label is not a step at all (`g.V().as("a")` labels the
+ *  GraphStep), so its backward walk stops at `V()` with the label still attached to it. In OUR IR
+ *  `as` IS a step that labels whatever precedes it, so an `as` sitting on an anchor has to travel
+ *  with the anchor — otherwise `g.V().as("a").out("knows").and().out("created")` would fold the
+ *  bind INTO the filter branch, where it is confined, and a later `select("a")` would read a label
+ *  that is no longer bound on the outer traverser. An `as` further along (`out().as("a").and()…`)
+ *  is absorbed with ITS step, which is what TinkerPop does too. */
+function anchorRunLength(steps: Step[]): number {
+  let a = 0;
+  // `a > 0` so a body that merely STARTS with as() (a child body: `__.as("b").out()`) keeps it
+  // inside the fold — there is no anchor there for the label to belong to.
+  while (a < steps.length && (CONNECTIVE_ANCHORS.has(steps[a].name) || (a > 0 && steps[a].name === 'as'))) a++;
+  return a;
+}
+
+/** Split `steps` on the bare connective of the LOOSEST precedence present. Returns the operator,
+ *  the segments between its connectors, and the first connective step (whose parse context the
+ *  synthetic step borrows, so an error still points at the user's own `.and()`/`.or()`). Null when
+ *  there is no bare connective. */
+function splitOnConnective(steps: Step[]): { name: 'and' | 'or'; segments: Step[][]; at: Step } | null {
+  const name: 'and' | 'or' | null = steps.some((s) => isBareConnective(s, 'or')) ? 'or'
+    : steps.some((s) => isBareConnective(s, 'and')) ? 'and' : null;
+  if (name === null) return null;
+  const segments: Step[][] = [[]];
+  let at: Step | null = null;
+  for (const s of steps) {
+    if (isBareConnective(s, name)) { at ??= s; segments.push([]); }
+    else segments[segments.length - 1].push(s);
+  }
+  return { name, segments, at: at! };
+}
+
+/** One chain level: fold its bare connectives into the step form. The leading anchor run
+ *  (source/write steps) is held out and re-prepended, so the fold never swallows `V()`. */
+function foldConnectivesLevel(steps: Step[]): Step[] {
+  if (!steps.some((s) => isBareConnective(s, 'and') || isBareConnective(s, 'or'))) return steps;
+  const a = anchorRunLength(steps);
+  const anchors = steps.slice(0, a);
+  const split = splitOnConnective(steps.slice(a));
+  if (!split) return steps;
+  if (split.segments.some((seg) => seg.length === 0))
+    throw new Error('malformed infix .and()/.or() connector (empty operand)');
+  // Each segment may still hold a higher-precedence connective — recurse before wrapping.
+  const args = split.segments.map((seg) => nestedArg(foldConnectivesLevel(seg)));
+  return [...anchors, synth(split.name, args, split.at.ctx)];
+}
+
+/** ConnectiveStrategy, at EVERY nesting depth (postorder) — so a connective inside a
+ *  `where()`/`choose()`/`until()` body folds by the same rule as one at the root, with no
+ *  per-position vocabulary.
+ *
+ *  It does NOT use `recurseInject`, and the difference matters: that helper rebuilds EVERY nested
+ *  arg as a `{nested: Step[]}`, which is fine for a decoration pass (gated on a strategy the user
+ *  named) but not for an unconditional one. A `{nested}` arg may still be a raw PARSE TREE, and one
+ *  consumer needs it to stay that way — `services/params/traversal-param.ts` un-parses a
+ *  `call().with("traversal", __.V())` sub-traversal back to a Gremlin string via the client's
+ *  TranslateVisitor, which requires `tree.accept`. Rewriting untouched args to Step[] broke every
+ *  federate param with `tree.accept is not a function`. So this recursion is IDENTITY-PRESERVING:
+ *  an arg (and a whole level) the fold does not change is returned by reference, and only a branch
+ *  that genuinely folded is rebuilt. */
+export function foldConnectives(steps: Step[], params: Record<string, any>): PStep[] {
+  let anyChild = false;
+  const mapped = steps.map((s) => {
+    let changed = false;
+    const args = s.args.map((a) => {
+      if (!isNested(a)) return a;
+      const inner = stepChain(a.nested, params);
+      const folded = foldConnectives(inner, params);
+      if (folded === inner) return a; // untouched → keep the ORIGINAL arg, parse tree intact
+      changed = true;
+      return nestedArg(folded);
+    });
+    if (!changed) return s;
+    anyChild = true;
+    return { ...s, args };
+  });
+  return foldConnectivesLevel(anyChild ? mapped : steps) as PStep[];
 }
 
 /**

@@ -2,7 +2,7 @@ import type { Step, StrategyUse } from '../../gremlin/frontend.ts';
 import { PASS_CATEGORIES, type Pass, type PassContext } from './pass.ts';
 import {
   stripTerminal, foldRepeatClusters, foldByModulators, foldChooseOptions, foldCallWith,
-  foldConstantPredicateOperands,
+  foldConnectives, foldConstantPredicateOperands,
   verifyReadOnlyChildren,
   foldValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
   injectSubgraphRec, injectPartitionRec, markProductiveBy, verify,
@@ -34,6 +34,12 @@ const EXTRACT: Pass[] = [
 // historical composition order for review locality. The Stage 3 test pins the ordering that IS
 // load-bearing (fold before simplify) as a guard.
 const FOLD: Pass[] = [
+  // ConnectiveStrategy FIRST in the group: it is the only fold that RESTRUCTURES the chain
+  // (infix `.and()`/`.or()` → the step form, moving steps into `{nested}` bodies), so every
+  // later fold — and the `simplify` group after it — should see the canonical shape. Its own
+  // recursion visits every depth, and each body it mints is `normalize()`d again when compiled
+  // as a child, so a by()/repeat cluster inside a folded operand still canonicalizes.
+  { name: 'ConnectiveStrategy', category: 'fold', run: (steps, ctx) => foldConnectives(steps, ctx.params) },
   { name: 'foldRepeatClusters', category: 'fold', run: (steps) => foldRepeatClusters(steps) },
   // Desugar valueMap().with(WithOptions.tokens) → valueMap(true) BEFORE foldByModulators, so a
   // following by() (e.g. the selective-token form's by(unfold)) folds onto the host once landed.

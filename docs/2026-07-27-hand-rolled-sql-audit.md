@@ -11,6 +11,23 @@ Ranked by (duplication × family unblock × reach at depth), which is not the sa
 > `lowerSteps`/`lowerElementSteps`. That is the rule in `src/compiler/steps/CLAUDE.md` ("Never build
 > a second implementation"), and it is the thing that costs whole families rather than one scenario.
 
+## The lesson worth generalizing (from #6, the one that's now fixed)
+
+**A fast path is the wrong place to discover a capability.** `predicateInlining` declared itself
+disable-safe, its equivalence test passed, and it was still the only implementation of infix
+connective precedence — so the flag silently controlled *what the compiler could express*, not just
+how fast it did it. The tell was cheap and mechanical: **compile the whole corpus with the flag off
+and diff.** 6 regressions, all one shape. Every other flag came back 0/0.
+
+That check costs ~20 lines and is worth running for each of the remaining flags whenever one is
+touched — it is strictly stronger than the hand-picked-cases equivalence test, which by construction
+only covers shapes the author already knew had a fallback.
+
+The fix direction generalizes too, and it is what the rest of this audit is asking for: **keep the
+fast path, move the capability to the generic machinery.** The perf was real (1.2×–17×), so deleting
+would have been a regression; extracting the load-bearing fold into a Pass made the flag honest,
+fixed 3 top-level scenarios it had never reached, and left the optimization untouched.
+
 ## The one structural finding
 
 Three of the remaining sites (#1, #4, #5) are the same missing primitive wearing different clothes.
@@ -219,28 +236,63 @@ this sweep confirms it open and sizes it.
 
 ---
 
-### 6. `predicate.ts` — the biggest pure vocabulary duplication, and (almost) the cheapest to ignore
-`steps/prefix/predicate.ts:70-333` (~264 lines; trunk grew it by ~30 lines threading a `LabelScope`)
+### 6. `predicate.ts` — ✅ **FIXED 2026-07-27.** A fast path was hiding a capability
+`steps/prefix/predicate.ts` (~264 → ~240 lines)
 
-`compileInlinePredicate` is a parallel implementation of `has`/`hasLabel`/`hasId`/`values`/`label`/
-`loops`/`not`/`and`/`or`/`count`/`sum` plus infix connector precedence. On duplication alone it
-ranks second. On measured functionality it ranks near-last, and this corrected my initial read:
-**every shape I probed falls through cleanly to the generic child-existence gate.**
+The question this entry originally answered was "should `tryInlinePredicate` die?" **No — and that
+was the wrong question.** Two measurements settle it:
 
-```
-OK  g.V().where(__.out().out())                    OK  g.V().where(__.union(__.out(),__.in()))
-OK  g.V().where(__.out().dedup().count().is(gt(1)))  OK  g.V().where(__.out().order().by("name").limit(1))
-OK  g.V().where(__.out().fold().count(local).is(1))
-```
+- **The perf is real.** On a synthetic 20k-vertex / 160k-edge graph, inline vs generic is
+  **1.2×–17×** (the reducer case `where(__.out().count().is(gt(4)))`: 11.7ms vs 191.6ms), results
+  identical in every case. Deleting it would be a regression, not a cleanup.
+- **It was NOT disable-safe, which its own contract claimed it was.** Compiling the whole corpus
+  with `predicateInlining:false` regressed **exactly 6 traversals** — every one the infix
+  `.and()`/`.or()` connector form. The FastPath law (`compiler/CLAUDE.md`) is that "disabling it
+  compiles the same traversal generically"; `splitInfixConnectors` had no generic equivalent
+  anywhere, so flipping the flag lost a *capability*, not an optimization.
 
-So it is a **fast path doing its job** — the movement branch already delegates to
-`compileCorrelatedChild`, so movement is genuinely not duplicated; what is duplicated is the leaf
-predicate vocabulary. **Delete it when #1 lands, not before**: its only load-bearing use is
-`until()`/`emit()`, which has no fallback (see #1).
+So the module was **misclassified, not redundant** — a genuine fast path with one load-bearing
+capability welded inside it. Three things followed, all landed:
 
-One genuine leak, still present after the merge: `tryInlinePredicate:145` only swallows messages that *start with* `where`/`filter`,
-so `empty where()/filter() traversal` escapes as a hard error — `g.V().filter(__.is(0))` and
-`g.E().filter(__.is(0))` crash instead of routing generically. Two corpus lines, a one-line fix.
+1. **`splitInfixConnectors` → `ConnectiveStrategy`, a `fold` Pass** (`ir/strategies.ts
+   foldConnectives`). TinkerPop's own name for this rewrite is ConnectiveStrategy, and
+   `NO_OP_STRATEGIES` *already claimed* the effect was "unconditionally baked into our compiler" —
+   a false statement, now true. It belongs there by the project's own law: every `Step[]→Step[]`
+   rewrite is one Pass.
+   - **Disable-safety measured both ways: 0 regress, 0 newly-compile.** The flag is now a pure
+     performance switch.
+   - **+5 corpus compiles, L3 1,436 → 1,440.** Top-level infix
+     (`g.V().has("name","marko").and().has(…)`) threw `and() needs at least two traversal branches`
+     before — the fold only ever ran on child bodies. One of the three fixed scenarios is literally
+     tagged `withStrategies(ConnectiveStrategy)`.
+   - Two subtleties, both found by measurement rather than reasoning, both now pinned in
+     `passes.exec.test.ts`:
+     **(a)** a SOURCE step must not be absorbed into an operand (TinkerPop guards this with
+     `legalCurrentStep` excluding `GraphStep`) — and in OUR IR that extends to an `as()` sitting on
+     the source, because a label here *is* a step and folding it into the branch would confine a
+     bind the outer traverser still needs. Getting this wrong showed up as one traversal that
+     compiled only with the fast path OFF.
+     **(b)** the recursion must be **identity-preserving**. `recurseInject` rebuilds every
+     `{nested}` arg as a `Step[]`, which is fine for a strategy-gated decoration pass but not an
+     unconditional one: a `{nested}` arg may still be a raw parse tree, and
+     `services/params/traversal-param.ts` un-parses one back to Gremlin via the client's
+     TranslateVisitor. Using it broke every `federate` `with("traversal", __.V())` param with
+     `tree.accept is not a function`.
+2. **The decline signal is a type, not a message prefix.** `tryInlinePredicate` sniffed
+   `includes('not yet supported') && startsWith('where'|'filter')` — a support boundary defined by
+   string shape, so `empty where()/filter() traversal` escaped as a hard error and
+   `g.V().filter(__.is(0))` crashed. Now an `InlineDecline` marker class, and each of the 12 throw
+   sites states which of the two it means (10 decline, 2 stay genuine illegalities: movement off an
+   edge, a malformed connective).
+3. **The equivalence test could not see the violation** — its 6 hand-picked shapes all happened to
+   have fallbacks. It now carries the infix cases as a standing regression guard.
+
+**Still true:** the leaf vocabulary (`has`/`hasLabel`/`hasId`/`values`/`label`/`loops`/`not`) remains
+duplicated, and is now kept for exactly one reason — `until()`/`emit()`, where `walkPredicate` has no
+fallback. That is #1's territory, and #1's body-relation route discharges it too: compile an
+element-only until/emit predicate ONCE over all vertices as a `matching(id)` relation and the
+recursive term reads `id IN matching`. A sack- or `loops()`-dependent predicate still needs the
+inline form, so this shrinks the vocabulary rather than deleting it.
 
 ---
 

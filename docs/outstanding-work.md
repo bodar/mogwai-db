@@ -494,15 +494,26 @@ All → [phased-roadmap](./2026-07-11-phased-roadmap-plan.md) unless noted.
 
 ## Internal debt / give-backs (Low)
 
-- **Finish deleting `correlatedExists`/`correlatedReduce`** (`steps/prefix/predicate.ts`) — the
-  correlated-child refactor largely landed; these inline fast-paths remain (the "no second movement
-  impl" law). **Re-measured 2026-07-27: high duplication (~262 lines, a parallel `has`/`hasLabel`/
-  `hasId`/`values`/`label`/`loops`/`not`/`and`/`or` vocabulary) but near-ZERO functional cost —
-  every probed shape falls through cleanly to the generic child-existence gate.** Its one
-  load-bearing use is `until()`/`emit()`, which has no fallback, so **delete it when item 3 lands,
-  not before.** One genuine leak worth a one-line fix now: `tryInlinePredicate` only swallows
-  messages starting with `where`/`filter`, so `empty where()/filter() traversal` escapes as a hard
-  error — `g.V().filter(__.is(0))` crashes instead of routing generically.
+- ~~**Finish deleting `correlatedExists`/`correlatedReduce`**~~ (`steps/prefix/predicate.ts`) —
+  **the premise was wrong and is now retired. ✅ The real work landed 2026-07-27.** Measured, the
+  module was NOT redundant: the inline form is **1.2×–17× faster** than generic lowering (20k/160k
+  graph; the `count().is(P)` reducer 11.7ms vs 191.6ms, results identical), and its movement branch
+  already delegates to `compileCorrelatedChild`, so the "no second movement impl" law was already
+  satisfied. It was **misclassified**, not duplicated: a fast path with one load-bearing capability
+  welded inside it — `splitInfixConnectors`, the ONLY implementation of infix `.and()`/`.or()`
+  precedence, which made the declared `enabled≡disabled` contract false (compiling the corpus with
+  `predicateInlining:false` regressed exactly 6 traversals, all that shape).
+  Extracted to **`ConnectiveStrategy`, a `fold` Pass** (`ir/strategies.ts foldConnectives`) —
+  TinkerPop's own name for the rewrite, and `NO_OP_STRATEGIES` already (falsely) claimed we applied
+  it unconditionally. Disable-safety now measures **0 regress / 0 newly-compile** both ways;
+  **+5 corpus compiles, L3 1,436 → 1,440** (top-level infix threw `and() needs at least two
+  traversal branches` before — the fold only ever ran on child bodies). Also fixed: the decline
+  signal is now an `InlineDecline` type rather than a message-prefix sniff, so
+  `g.V().filter(__.is(0))` fails closed instead of crashing.
+  **Residual, narrow:** the leaf vocabulary is kept for `until()`/`emit()` alone, where
+  `walkPredicate` has no fallback — item 3's body-relation route discharges that too (compile an
+  element-only until/emit predicate once as a `matching(id)` relation; the recursive term reads
+  `id IN matching`). A sack/`loops()`-dependent predicate still needs the inline form.
   → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md) #6,
   [correlated-child-rendering](./2026-07-17-correlated-child-rendering-plan.md)
 - **Duplicate property→owner projection in `services/catalog/search.ts:73`** — `searchProperties`
