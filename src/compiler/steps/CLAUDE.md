@@ -57,11 +57,23 @@ fails closed is better than a special-case that entrenches the non-generic path.
   **Whether a MID-BODY bind escapes the child is the consumer's boundary, not a rule to write
   down:** a mapping consumer pops the child stream (the label rides out), a filter/`by()` consumer
   re-projects the parent domain (confined). Both are TinkerPop's, so leave that asymmetry alone.
+- **There are THREE ways to provision a child body, and provisioning is not rendering.** Where the
+  child's INPUT comes from: a PARENT STREAM (`pushChildScope` + `applyChildCardinality`, rejoined by
+  ordinal), an OUTER ROW (`tail/correlated.ts`, rejoined by correlation), or its WHOLE DOMAIN
+  compiled once and rejoined by a JOIN on a key (`tail/keyed.ts` — `keyedChildRelation`). The third
+  exists because a fan-out body inside a recursive term cannot be correlated at all (SQLite has no
+  `LATERAL`), and it is what makes `repeat()`'s body and `until()`/`emit()`'s predicate generic. It
+  costs |V|×fanout, so a caller with a lazy fast path keeps it and uses this as the fallback. Do NOT
+  add a fourth, and do not confuse any of them with a *rendering* mode — there are exactly two of
+  those and both live in the kernel (`src/sql/CLAUDE.md`).
 - **Carry the labels or decline the body — never answer without them.** An absent alias column is
   indistinguishable from a never-bound label, so a renderer that reads one it does not physically
   have returns a silent `[]`. The inline correlated child is handed a `LabelScope` and seeds those
   columns (`tail/correlated.ts`); a site with no relation to read them from (`until()`/`emit()`, on
-  a recursive walk row) declines the body to the materialized gate instead.
+  a recursive walk row) declines the body to the materialized gate instead. **The keyed relation is
+  the same rule from the other side:** its domain is every vertex, not the caller's rows, so it
+  declines any body that MENTIONS a label. Classifying with the caller's labels while seeding an
+  empty alias map is how this produced a silent `[]` for a whole body shape — see the audit doc.
 - **In a where() body a label's POSITION decides its meaning** — TinkerPop routes `where(traversal)`
   by variable location (`getVariableLocations`), and ONLY where(): first step = a re-root
   (`WhereStartStep`), last step = an equality CONSTRAINT (`WhereEndStep`), middle = an ordinary

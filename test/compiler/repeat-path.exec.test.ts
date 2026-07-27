@@ -417,6 +417,20 @@ describe('repeat() body: the generic body relation', () => {
     }
   });
 
+  test('a body MENTIONING a label fails closed instead of silently answering []', () => {
+    // The keyed relation's domain is every vertex, not the caller's rows, so there is no outer row
+    // to read an alias column FROM. An absent alias column is indistinguishable from a never-bound
+    // label, which select() answers as "drop every traverser" — so without this guard the body
+    // compiled and returned NOTHING. Measured before the fix: 0 rows here vs 6 for the same body
+    // outside repeat(). That asymmetry is the bug; declining is the fix.
+    const store = seededStore();
+    expect((run(store, 'g.V().as("a").out().where(__.select("a"))') as any[]).length).toBe(6);
+    expect(() => run(store, 'g.V().as("a").repeat(__.out().where(__.select("a"))).times(1)'))
+      .toThrow(/not yet supported/);
+    expect(() => run(store, 'g.V().as("a").repeat(__.select("a").out()).times(2)'))
+      .toThrow(/not yet supported/);
+  });
+
   test('sack and path bodies stay with the flat expansion', () => {
     const store = seededStore();
     // A sack fold is per-iteration (the accumulator depends on the running value), so it keeps the
@@ -425,6 +439,48 @@ describe('repeat() body: the generic body relation', () => {
     expect((run(store, 'g.withSack(0).V(1).repeat(__.out().sack(Operator.sum).by("age")).times(1).sack()') as any[]).length).toBe(3);
     // simplePath() in the body needs the walk's accumulated path array, so likewise.
     expect(names(store, 'g.V(1).repeat(__.both().simplePath()).times(2).values("name")').length).toBeGreaterThan(0);
+  });
+});
+
+// ---------- until()/emit(): the SECOND consumer of the keyed child relation ----------
+//
+// walkPredicate used to have no generic fallback: a predicate the inline compiler declined THREW,
+// which made the inline leaf vocabulary a hard ceiling here and nowhere else. The keyed relation
+// discharges it — an element-only predicate compiles ONCE over every vertex and the recursive term
+// reads `id IN <origins that produced a row>`, which is until()/emit()'s existence semantics.
+// Inline is still tried FIRST: it alone reaches the walk's per-iteration state (loops(), the sack).
+describe('until()/emit(): the keyed-relation fallback', () => {
+  const ids = (store: GraphStore, g: string) => (run(store, g) as any[]).map((r) => r.id).sort();
+
+  test('a predicate beyond inline lowering now compiles, and AGREES with the inline form', () => {
+    // Each pair is one predicate written two ways: the left routes through the inline compiler,
+    // the right declines it and takes the keyed relation. Same predicate ⇒ same answer, so this
+    // pins the fallback against the route that was already correct rather than against a constant.
+    const store = seededStore();
+    for (const [inline, keyed] of [
+      ['g.V().until(__.both()).repeat(__.out())',
+       'g.V().until(__.union(__.out(),__.in())).repeat(__.out())'],
+      ['g.V().until(__.both("created")).repeat(__.out())',
+       'g.V().until(__.union(__.out("created"),__.in("created"))).repeat(__.out())'],
+      // emit() shares walkPredicate — the only difference is which column the boolean drives.
+      // This pair also pins the MULTISET (a vertex emitted twice stays twice).
+      ['g.V().emit(__.both("knows")).repeat(__.out()).times(2)',
+       'g.V().emit(__.union(__.out("knows"),__.in("knows"))).repeat(__.out()).times(2)'],
+    ] as [string, string][]) {
+      expect(ids(store, keyed)).toEqual(ids(store, inline));
+    }
+  });
+
+  test('a PER-ITERATION predicate keeps the inline route and still fails closed beyond it', () => {
+    const store = seededStore();
+    // loops()/sack() read state that does not exist per-vertex, so they are outside the row-local
+    // vocabulary and keyedChildRelation declines them on its own — no separate guard needed.
+    // These work because INLINE serves them; the keyed route is never consulted.
+    expect(ids(store, 'g.V(1).until(__.loops().is(2)).repeat(__.out())').length).toBeGreaterThan(0);
+    // Beyond BOTH routes: a per-iteration body the inline compiler also declines. The deferral must
+    // name why rather than reciting a vocabulary.
+    expect(() => run(store, 'g.V(1).until(__.out().order().by("name").limit(1)).repeat(__.out())'))
+      .toThrow(/not yet supported/);
   });
 });
 

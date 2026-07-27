@@ -1,6 +1,6 @@
 import { q, list, empty, paren, value, raw, Relation, type Expression } from '../../../sql/kernel/q.ts';
 import { staticTypeOf } from '../../../sql/kernel/render.ts';
-import { edges, nodes } from '../../../sql/schema.ts';
+import { edges } from '../../../sql/schema.ts';
 import { isNested, stepChain, type SackSpec, type Step } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
@@ -9,8 +9,9 @@ import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, hasProp, elemCtx, scala
 import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
 import { advance, aliasColsOf, elemRel, labelScope, prevRel, carryFrag, carryFragMint, carriedCols, carriedWith, mergeAliasMaps, partitionOver, type AliasEntry, type AliasMap, type Carried, type Carry, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type AliasShape } from '../context/alias.ts';
+import { keyedChildRelation, keyedKeySet } from '../tail/keyed.ts';
 import { pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarModulations, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
-import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, isElementChildStep, optionMapMerge, optionMapNeedsPassthrough, readOptionMapArms, ROOT_SCOPE, type BranchArmShape, type ChildCtx } from '../tail/child-shape.ts';
+import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, optionMapMerge, optionMapNeedsPassthrough, readOptionMapArms, ROOT_SCOPE, type BranchArmShape, type ChildCtx } from '../tail/child-shape.ts';
 import { emptyElementLike } from '../tail/labelselect.ts';
 import { carryOf, toVariantStream, type ListStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
 import { finishListMerge, mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
@@ -36,8 +37,17 @@ const walkNodeCtx = (idExpr: Expression): ScalarCtx => {
  *  composes them — so until(__.has('name','x').or().loops().is(3)) lowers as one boolean.
  *  Movement leaves correlate through the same compileCorrelatedChild as where()/choose().
  *  until() and emit() share this: the only difference is what the resulting column drives
- *  (termination vs output). */
-function walkPredicate(engine: Engine, step: Step, params: Record<string, any>, kind: 'until' | 'emit'): (id: Expression, depth: Expression, sackExpr: Expression | null) => Expression {
+ *  (termination vs output).
+ *
+ *  TWO routes, inline FIRST. The inline compiler is the fast path AND the wider vocabulary
+ *  (it alone reaches loops()/sack()/reducers), so it is tried first and everything that
+ *  worked before is unchanged. When it declines, the KEYED CHILD RELATION is the generic
+ *  fallback: a row-local element predicate compiles ONCE over every vertex and the recursive
+ *  term reads `id IN <origins that produced a row>`. That is the same trick the repeat BODY
+ *  uses, which is why both live behind one module. */
+function walkPredicate(st: ElementStream, step: Step, kind: 'until' | 'emit'): (id: Expression, depth: Expression, sackExpr: Expression | null) => Expression {
+  const engine = engineOf(st);
+  const params = st.params;
   const nested = stepChain(step.args[0]?.nested, params);
   if (!nested.length) throw new Error(`${kind}() requires a traversal predicate`);
   // A pure sack-reading predicate — until(__.sack().is(P)) / emit(__.sack().is(P)) — reads the
@@ -47,17 +57,39 @@ function walkPredicate(engine: Engine, step: Step, params: Record<string, any>, 
   // decayed relevance crosses a bound. A mixed sack+element predicate stays deferred.
   const sackPred = nested.length === 2 && nested[0].name === 'sack' && (nested[0].args ?? []).length === 0 && nested[1].name === 'is'
     ? nested[1].args[0] : undefined;
-  // NB until()/emit() deliberately do NOT gate on PredicateInliningFastPath: a recursive-CTE term
-  // can't correlate to its outer row, so there is no generic (materialized) fallback here —
-  // disabling inlining would leave nothing to fall back to. So inline unconditionally, and if the
-  // body is beyond inline lowering, fail closed (a clear deferral), never silently mis-execute.
+  // NB until()/emit() deliberately do NOT gate on PredicateInliningFastPath. The inline route is
+  // the only one that can read the walk's PER-ITERATION state (loops(), the sack), so disabling it
+  // would lose a capability rather than just speed — which is exactly the fast-path law's
+  // "disable-safe" requirement failing, so it isn't declared as one.
+  //
+  // The keyed fallback below needs no separate guard against those per-iteration bodies: `loops` and
+  // a bare read `sack()` are both OUTSIDE the row-local vocabulary (`isElementChildStep`), so
+  // keyedChildRelation declines them on its own and we fail closed with a clear deferral. Built
+  // LAZILY and memoized — a CTE registered here would show up in the emitted SQL even when the
+  // inline route serves the predicate, and the closure is called more than once (seed + recursive
+  // term) for while-do until / emit-before.
+  let keySet: Relation | null | undefined;
+  const genericGate = (id: Expression): Expression | null => {
+    if (keySet === undefined) {
+      // Normalized with the SAME normalize() every other nested body uses — not a hand-picked
+      // fold — so a modulator inside the predicate folds as it would anywhere else.
+      const k = keyedChildRelation(st, normalize(nested as PStep[]).steps);
+      keySet = k ? keyedKeySet(st, k) : null;
+    }
+    // until(traversal)/emit(traversal) are EXISTENCE: "does the body produce a result for this
+    // traverser". So the gate is membership in the origin set, which is what keyedKeySet is.
+    return keySet ? q`${id} IN (SELECT ${keySet.c.id} FROM ${keySet})` : null;
+  };
   return (id, depth, sackExpr) => {
     if (sackPred !== undefined) {
       if (!sackExpr) throw new Error(`${kind}(__.sack()...) requires a sack (withSack() or a body sack(op))`);
       return predicateSql(sackExpr, sackPred);
     }
     return tryInlinePredicate(engine, nested, { ...walkNodeCtx(id), loopsExpr: depth }, params)
-      ?? (() => { throw new Error(`${kind}() predicate not supported by inline lowering`); })();
+      ?? genericGate(id)
+      ?? (() => {
+        throw new Error(`${kind}(__.${nested.map((n) => n.name + '()').join('.')}) not yet supported: beyond inline lowering, and not row-local enough to precompile as a keyed relation (a per-iteration body — loops()/sack() — or a global barrier)`);
+      })();
   };
 }
 
@@ -608,67 +640,21 @@ function expandRepeatBody(
   });
 }
 
-// ---------- the GENERIC repeat body: one (from_id, to_id) relation ----------
+// ---------- the GENERIC repeat body: a KEYED CHILD RELATION ----------
 //
 // `expandRepeatBody` above is a private movement/filter mini-compiler: its own direction table, its
 // own edge aliases, its own has() handling — a second implementation of what the StepFns already
 // do, and therefore a vocabulary wall (no hasLabel/hasId/where/not/filter/union/…). It exists for a
-// real reason, which is worth stating because it constrains every alternative: SQLite has NO
-// `LATERAL`, so the nested-derived correlated rendering that `compileCorrelatedChild` uses cannot
-// produce a FAN-OUT inside the recursive term's FROM — a derived table there cannot reference the
-// walk row. Hence a flat JOIN chain, hand-built.
+// real reason: SQLite has no `LATERAL`, so a FAN-OUT body inside the recursive term's FROM cannot
+// reference the walk row. Hence a flat JOIN chain, hand-built — and it stays, as the frontier-lazy
+// fast path.
 //
-// This is the way out that needs no new rendering mode. A recursive term MAY legally reference a
-// NON-recursive CTE, so compile the body ONCE through the ordinary seam — seeded from every vertex,
-// carrying its origin as a `carried` column, which is exactly the mechanism `pushChildScope` uses to
-// join a child body back to its parent — and reduce it to `(from_id, to_id)`. The recursive term
-// then just joins that relation. Any row-local element body composes, at any depth, with no
-// vocabulary here at all.
-//
-// The COST is the trade-off, not a defect: this materializes the body over the whole vertex set
-// (|V| x fanout) where the flat expansion walks the frontier lazily. So it is the FALLBACK — the
-// flat expansion stays the recognized fast path — and `repeat()` keeps its "compile to SQL, never
-// interpret" character either way.
-//
-// WHAT MUST STAY OUT, and why it is a semantic wall rather than a missing feature: a PER-ITERATION
-// GLOBAL BARRIER (dedup/limit/range/order/sample/tail/group/aggregate) operates on the whole
-// frontier at one iteration. Precomputing it per-origin answers a DIFFERENT question — a global
-// `dedup()` drops a vertex two origins both reach, a per-origin one keeps both. Note the generic
-// StepFns would happily lower it (bare `dedup` emits `SELECT DISTINCT id, <carried>`, and with an
-// origin column in the tuple that silently becomes per-origin), so the gate cannot be "whatever
-// lowerElementSteps accepts" — it is the ROW-LOCAL vocabulary, which already exists as
-// `isElementChildStep` (the same predicate the child seam uses for exactly this property).
-
-/** The body as a `(from_id, to_id)` relation over EVERY vertex, compiled through the generic seam.
- *  Null when the body is not row-local (a global barrier, a non-vertex landing, a label bind) — the
- *  caller then reports its own deferral. Registered in `st.q`, so it shares the outer WITH and the
- *  recursive term can join it. */
-function repeatBodyRelation(st: ElementStream, core: PStep[]): Relation | null {
-  // ROW-LOCAL only — see the header. `childCtx(st)` supplies the labels visible here so a
-  // `select(label)` body classifies against the real environment rather than being rejected blind.
-  const ctx = childCtx(st);
-  if (!core.length || !core.every((c) => isElementChildStep(c, ctx))) return null;
-  // Seed: one row per vertex, its own id doubling as the origin key. `origins` is the carried slot
-  // designed for "which traverser did this row come from" and rides through movement/filter/branch
-  // via carryFrag, so nothing here has to thread it by hand. Column ORDER must match carriedCols
-  // (aliases, sack, bulk, origins, …) or assertStreamColumns trips.
-  const seedCarried: Carried = { aliases: new Map(), origins: ['o'], bulk: 'bulk' };
-  const seed: ElementStream = {
-    kind: 'elements', q: st.q, params: st.params, elem: 'node',
-    rel: st.q.cte(q`SELECT id, 1 AS bulk, id AS o FROM ${nodes}`, ['id', 'bulk', 'o']),
-    carried: seedCarried,
-  };
-  const { stream, next } = engineOf(st).lowerElementSteps(core, seed);
-  if (next !== core.length) return null;                        // a step the prefix fold won't take
-  if (stream.elem !== 'node') return null;                      // the walk id is a vertex rowid
-  // A body that BINDS a label cannot be precompiled per-origin — the bind is per-iteration. (An
-  // INCOMING label is a different question and rides the walk fine; see the loop-invariant note.)
-  if (stream.carried.aliases.size) return null;
-  if (stream.carried.origins.length !== 1 || stream.carried.origins[0] !== 'o') return null;
-  const b = stream.rel.as('rb');
-  // No DISTINCT: traversers are a MULTISET, so two parallel edges must stay two rows.
-  return st.q.cte(q`SELECT ${b.c.o} AS from_id, ${b.c.id} AS to_id FROM ${b}`, ['from_id', 'to_id']);
-}
+// The way out needs no new rendering mode and no vocabulary here at all: it is the KEYED CHILD
+// RELATION (`tail/keyed.ts`), which compiles the body ONCE through the ordinary seam over every
+// vertex and hands back `(key, value)` for the recursive term to join. That module's header owns
+// the full rationale — the LATERAL constraint, the |V|×fanout cost that makes this the FALLBACK
+// rather than the replacement, and what must stay out (a per-iteration global barrier, a label, a
+// body-internal bind). Read it before changing the gate here.
 
 /** repeat(): the folded repeat/emit/times/until cluster (strategies.foldRepeat) →
  *  a WITH RECURSIVE walk. Termination is spec-faithful and structural, NOT a magic
@@ -793,12 +779,13 @@ export const repeat: StepFn = (s, st) => {
   // The generic route cannot carry the per-iteration sack fold (the accumulator depends on the
   // running value, not just the hop) nor the path array (positions are recorded per iteration), so
   // those stay with the flat expansion; a body needing both is a clean deferral.
-  const bodyRel = flatOk || sackCol || trackArray ? null : repeatBodyRelation(st, core);
+  // The walk id is a vertex rowid, so the body must net back to a vertex (outE()…inV()).
+  const bodyRel = flatOk || sackCol || trackArray ? null : keyedChildRelation(st, core, { landOn: 'node' });
   if (!flatOk && !bodyRel) {
     const names = body.map((c) => c.name + '()').join('.');
     // Name the ACTUAL obstacle rather than reciting a vocabulary. A per-iteration global barrier is
     // a semantic wall (precomputing it per-origin would answer a different question — see the
-    // repeatBodyRelation header); anything else is a shape neither route recognizes.
+    // keyed.ts header); anything else is a shape neither route recognizes.
     const barrier = core.find((c) => REPEAT_BODY_BARRIERS.has(c.name));
     if (barrier) throw new Error(`repeat(__.${names}) not yet supported: ${barrier.name}() is a per-iteration GLOBAL barrier over the whole frontier, and a recursive CTE cannot window across iterations — precomputing it per-origin would answer a different question. A fixed times(n) body could be unrolled instead (not built).`);
     if (sackCol) throw new Error(`repeat(__.${names}) with a sack() fold not yet supported (the sack accumulator is per-iteration, so the body cannot be precompiled; the flat expansion takes movements + has() + sack(op).by() + where(__.sack()...))`);
@@ -809,7 +796,7 @@ export const repeat: StepFn = (s, st) => {
   // until(): `done` = does the stop predicate hold for this row? do-while (until
   // AFTER repeat) leaves the seed untested (body runs ≥1×); while-do (until BEFORE)
   // tests the seed too. Expansion continues only from done=0 rows; done=1 rows exit.
-  const untilFn = hasUntil ? walkPredicate(engineOf(st), untilStep!, st.params, 'until') : null;
+  const untilFn = hasUntil ? walkPredicate(st, untilStep!, 'until') : null;
   const untilFirst = hasUntil && cluster.indexOf(untilStep!) < cluster.indexOf(rep);
   // `sackAt` is the accumulated sack at the row being tested (post-fold in the recursive term,
   // the seed value on the seed) — passed so a sack-reading until/emit predicate can read it.
@@ -819,7 +806,7 @@ export const repeat: StepFn = (s, st) => {
   // which marks termination). The walk proceeds regardless. emit-before tests the seed
   // (depth 0) too; emit-after only body results (depth ≥ 1) — so the seed's emit is 0
   // under emit-after. Every recursive row is tested by the predicate in both positions.
-  const emitFn = hasEmitPred ? walkPredicate(engineOf(st), emitStep!, st.params, 'emit') : null;
+  const emitFn = hasEmitPred ? walkPredicate(st, emitStep!, 'emit') : null;
   const emitCol = (id: Expression, depth: Expression, sackAt: Expression | null): Expression => q`, CASE WHEN ${emitFn!(id, depth, sackAt)} THEN 1 ELSE 0 END AS emit`;
 
   // LOOP-INVARIANT carried columns: the ones the walk neither reads nor rewrites, so they simply
@@ -870,8 +857,9 @@ export const repeat: StepFn = (s, st) => {
     // (movement + has()/sack(), or multi-hop) → expandRepeatBody.
     const rec = bodyRel
       ? [(() => {
-          const rb = bodyRel.as('rb');
-          return mkRec(rb.c.to_id, q`${self} JOIN ${rb} ON ${rb.c.from_id}=${self.c.id}`, null, cycleGuard(rb.c.to_id));
+          const rb = bodyRel.rel.as('rb');
+          const to = rb.c[bodyRel.value];
+          return mkRec(to, q`${self} JOIN ${rb} ON ${rb.c[bodyRel.key]}=${self.c.id}`, null, cycleGuard(to));
         })()]
       : singleMove
       ? dirsFor(core[0].name).map(([from, to]) => {

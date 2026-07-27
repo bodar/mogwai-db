@@ -95,11 +95,30 @@ inline correlated child (`steps/tail/correlated.ts`) is the two composed.
 
 ### What each site actually needs — the keyed child relation, not a mode
 
-The primitive all three sites share is already in the codebase **three times**: compile a child body
-ONCE over its whole domain, keyed by its origin, then JOIN on the key.
-`repeatBodyRelation` (#1's `(from_id, to_id)`), the LINEAR path regime's per-position child (keyed by
-ordinal, `LEFT JOIN … ON b.o0 = p.o0`), and both routes verified below. That idiom — not a rendering
-mode — is the thing worth naming.
+The primitive all three sites share was already in the codebase **three times**: compile a child body
+ONCE over its whole domain, keyed by its origin, then JOIN on the key. `repeatBodyRelation` (#1's
+`(from_id, to_id)`), the LINEAR path regime's per-position child (keyed by ordinal,
+`LEFT JOIN … ON b.o0 = p.o0`), and both routes verified below.
+
+✅ **Extracted 2026-07-27 as `steps/tail/keyed.ts` (`keyedChildRelation`/`keyedKeySet`)** — the third
+way to PROVISION a child body, sitting alongside the other two rather than being a fourth rendering
+mode. The distinction the module makes explicit, and the reason all three belong in one vocabulary:
+provisioning is about **where the child's input comes from**, not how SQL is rendered.
+
+| provisioning | input | rejoin | who |
+|---|---|---|---|
+| parent stream | the parent's rows | ordinal | `pushChildScope` + `applyChildCardinality` |
+| outer row | an expression naming the row being filtered | correlation | `compileCorrelatedChild` |
+| **keyed relation** | its WHOLE domain, once | **JOIN on the key** | **`keyedChildRelation`** |
+
+Two consumers today (`repeat()`'s body and `until()`/`emit()`'s predicate — the latter closed by the
+extraction, see #1), and the guards live in one place instead of being re-derived per site. That
+mattered immediately: the original had a **silent wrong answer** the extraction fixed. It classified
+bodies with the caller's labels but seeded an empty alias map, so a label-mentioning body compiled
+and returned NOTHING — `g.V().as("a").repeat(__.out().where(__.select("a"))).times(1)` gave 0 rows
+where the same body outside `repeat()` gives 6. The keyed domain is every vertex, so there is no
+outer row to read an alias column from; it now DECLINES such a body, exactly as the inline correlated
+renderer does when handed no `LabelScope`. Same guardrail, one place, two renderers.
 
 - **#4 `path.ts` grouped regime — no mode C.** SQLite gives table-valued functions the one
   lateral-ish affordance it has, so `FROM paths pp, json_each(pp.path) je` already works; the
@@ -283,12 +302,18 @@ recursive-path tails.
 
 </details>
 
-**Two things from the original entry are NOT closed and remain open items:**
-- **`walkPredicate` still has no generic fallback** — `until()`/`emit()` throws when the inline
-  predicate compiler declines, so #6's leaf vocabulary is still load-bearing there. The route is the
-  same trick as the body: compile an element-only until/emit predicate ONCE as a `matching(id)`
-  relation and have the recursive term read `id IN matching`. A sack- or `loops()`-dependent
-  predicate keeps the inline form.
+**One thing from the original entry is now CLOSED; one remains open:**
+- ✅ **`walkPredicate` has its generic fallback** (2026-07-27), and it is the SECOND consumer of the
+  extracted **keyed child relation** (`steps/tail/keyed.ts`) — which is what made the extraction
+  worth doing rather than a rename. A row-local until/emit predicate compiles ONCE over every vertex
+  and the recursive term reads `id IN <origin set>`; `until()`/`emit()` are existence, so that is the
+  whole semantics. Inline stays FIRST (it alone reads `loops()`/the sack, so it is a capability not
+  an optimization, which is why it is not declared a FastPath). Per-iteration bodies need no extra
+  guard: `loops` and bare `sack()` are outside the row-local vocabulary, so the keyed route declines
+  them itself. **Measured:** 3 of 9 until/emit probes moved FAIL→OK (all the branch predicates —
+  `until(__.union(…))`, `coalesce`), 0 regressions; corpus +1, **L3 1473 → 1474**, and the newly
+  passing scenario is exactly the nested case
+  `g_V_repeatXoutXknowsXX_untilXrepeatXoutXcreatedXX_emitXhasXname_lopXXX_path_byXnameX`.
 - **The named-loop form still crashes rather than deferring** —
   `g.V().emit().repeat("a", __.out("knows").filter(__.loops("a").is(0)))` →
   `undefined is not an object (evaluating 'node.constructor')`, 4 corpus cases. A cheap guard,
