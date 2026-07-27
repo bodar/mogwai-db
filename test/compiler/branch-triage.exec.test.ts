@@ -77,15 +77,20 @@ describe('classifyBranchArms — the shape verdict', () => {
     const nestedOptional = planOf('g.V().optional(__.out().optional(__.out())).path()');
     expect(nestedOptional.shapes).toEqual(['element']);
     expect(nestedOptional.merge).toBe('element');
-    // repeat() is still NOT an element child (its recursive walk carries no parent ordinal), so a
-    // genuinely-unclassifiable optional arm remains — and optional()'s miss arm is the parent
-    // element itself, so it stays an ELEMENT branch compiled by the optional StepFn's originSeed.
-    expect(planOf('g.V().optional(__.repeat(__.out()).times(2))').shapes).toEqual([null]);
-    expect(planOf('g.V().optional(__.repeat(__.out()).times(2))').merge).toBe('element');
+    // repeat() USED to be the example here ("its recursive walk carries no parent ordinal"). It now
+    // carries its origin column through the walk, so a repeat arm is a classifiable ELEMENT child
+    // and composes for real — pinned in repeat-path.exec.test.ts. A map/group/path-shaped body is
+    // still genuinely unclassifiable (item 5 territory), so it takes over as this test's example;
+    // the ROUTING asymmetry below is what is being pinned, not the choice of body.
+    expect(planOf('g.V().optional(__.repeat(__.out()).times(2))').shapes).toEqual(['element']);
+    // optional()'s miss arm is the parent element itself, so an unclassifiable arm keeps it an
+    // ELEMENT branch, compiled by the optional StepFn's originSeed.
+    expect(planOf('g.V().optional(__.valueMap())').shapes).toEqual([null]);
+    expect(planOf('g.V().optional(__.valueMap())').merge).toBe('element');
     // a multi-arm merge cannot know an unclassified arm's shape → tail cascade, where each
     // tryLower* declines and the element lowerer throws the deferral naming the arm body.
-    expect(planOf('g.V().union(__.repeat(__.out()).times(2), __.in())').merge).toBe('variant');
-    expect(planOf('g.V().coalesce(__.repeat(__.out()).times(2), __.in())').merge).toBe('variant');
+    expect(planOf('g.V().union(__.valueMap(), __.in())').merge).toBe('variant');
+    expect(planOf('g.V().coalesce(__.valueMap(), __.in())').merge).toBe('variant');
   });
 });
 

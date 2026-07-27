@@ -1,15 +1,16 @@
 import { q, list, empty, value, raw, Relation, type Expression } from '../../../sql/kernel/q.ts';
 import { staticTypeOf } from '../../../sql/kernel/render.ts';
-import { edges } from '../../../sql/schema.ts';
+import { edges, nodes } from '../../../sql/schema.ts';
 import { isNested, stepChain, type SackSpec, type Step } from '../../../gremlin/frontend.ts';
-import { foldByModulators, type PStep } from '../../ir/strategies.ts';
+import { type PStep } from '../../ir/strategies.ts';
+import { normalize } from '../../ir/passes.ts';
 import { analyze, type ChainFacts } from '../../ir/analyze.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem } from '../../plan/plan.ts';
 import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
 import { advance, elemRel, labelScope, prevRel, carryFrag, carryFragMint, carriedCols, carriedWith, mergeAliasMaps, partitionOver, type AliasEntry, type AliasMap, type Carried, type Carry, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type AliasShape } from '../context/alias.ts';
 import { pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
-import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, ROOT_SCOPE, type ChildCtx } from '../tail/child-shape.ts';
+import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, isElementChildStep, ROOT_SCOPE, type ChildCtx } from '../tail/child-shape.ts';
 import { emptyElementLike } from '../tail/labelselect.ts';
 import { carryOf, toVariantStream, type ListStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
 import { finishListMerge, mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
@@ -482,6 +483,15 @@ const REPEAT_MOVES = new Set(['out', 'in', 'both']);
 const TO_EDGE = new Set(['outE', 'inE', 'bothE']);
 const TO_VERTEX = new Set(['outV', 'inV', 'bothV']);
 const REPEAT_MOVE_ALL = new Set([...REPEAT_MOVES, ...TO_EDGE, ...TO_VERTEX]);
+/** Steps in a repeat() body that are PER-ITERATION GLOBAL barriers — they observe the whole
+ *  frontier at one iteration, which a recursive CTE cannot window across. Named only so the
+ *  deferral can say WHICH one and why (see the repeatBodyRelation header); nothing dispatches on
+ *  it. `local` is here because it re-scopes a barrier per traverser, which is the same problem
+ *  seen from the other side. */
+const REPEAT_BODY_BARRIERS = new Set([
+  'dedup', 'order', 'limit', 'range', 'skip', 'tail', 'sample', 'barrier',
+  'group', 'groupCount', 'aggregate', 'local', 'fold', 'count', 'sum', 'min', 'max', 'mean',
+]);
 
 /** A body's sack fold, threaded through the walk left-to-right: `combineSack` applied at
  *  the body position where the sack(op) step sits (so its by() reads the element the
@@ -598,6 +608,66 @@ function expandRepeatBody(
   });
 }
 
+// ---------- the GENERIC repeat body: one (from_id, to_id) relation ----------
+//
+// `expandRepeatBody` above is a private movement/filter mini-compiler: its own direction table, its
+// own edge aliases, its own has() handling — a second implementation of what the StepFns already
+// do, and therefore a vocabulary wall (no hasLabel/hasId/where/not/filter/union/…). It exists for a
+// real reason, which is worth stating because it constrains every alternative: SQLite has NO
+// `LATERAL`, so the nested-derived correlated rendering that `compileCorrelatedChild` uses cannot
+// produce a FAN-OUT inside the recursive term's FROM — a derived table there cannot reference the
+// walk row. Hence a flat JOIN chain, hand-built.
+//
+// This is the way out that needs no new rendering mode. A recursive term MAY legally reference a
+// NON-recursive CTE, so compile the body ONCE through the ordinary seam — seeded from every vertex,
+// carrying its origin as a `carried` column, which is exactly the mechanism `pushChildScope` uses to
+// join a child body back to its parent — and reduce it to `(from_id, to_id)`. The recursive term
+// then just joins that relation. Any row-local element body composes, at any depth, with no
+// vocabulary here at all.
+//
+// The COST is the trade-off, not a defect: this materializes the body over the whole vertex set
+// (|V| x fanout) where the flat expansion walks the frontier lazily. So it is the FALLBACK — the
+// flat expansion stays the recognized fast path — and `repeat()` keeps its "compile to SQL, never
+// interpret" character either way.
+//
+// WHAT MUST STAY OUT, and why it is a semantic wall rather than a missing feature: a PER-ITERATION
+// GLOBAL BARRIER (dedup/limit/range/order/sample/tail/group/aggregate) operates on the whole
+// frontier at one iteration. Precomputing it per-origin answers a DIFFERENT question — a global
+// `dedup()` drops a vertex two origins both reach, a per-origin one keeps both. Note the generic
+// StepFns would happily lower it (bare `dedup` emits `SELECT DISTINCT id, <carried>`, and with an
+// origin column in the tuple that silently becomes per-origin), so the gate cannot be "whatever
+// lowerElementSteps accepts" — it is the ROW-LOCAL vocabulary, which already exists as
+// `isElementChildStep` (the same predicate the child seam uses for exactly this property).
+
+/** The body as a `(from_id, to_id)` relation over EVERY vertex, compiled through the generic seam.
+ *  Null when the body is not row-local (a global barrier, a non-vertex landing, a label bind) — the
+ *  caller then reports its own deferral. Registered in `st.q`, so it shares the outer WITH and the
+ *  recursive term can join it. */
+function repeatBodyRelation(st: ElementStream, core: PStep[]): Relation | null {
+  // ROW-LOCAL only — see the header. `childCtx(st)` supplies the labels visible here so a
+  // `select(label)` body classifies against the real environment rather than being rejected blind.
+  const ctx = childCtx(st);
+  if (!core.length || !core.every((c) => isElementChildStep(c, ctx))) return null;
+  // Seed: one row per vertex, its own id doubling as the origin key. `origins` is the carried slot
+  // designed for "which traverser did this row come from" and rides through movement/filter/branch
+  // via carryFrag, so nothing here has to thread it by hand. Column ORDER must match carriedCols
+  // (aliases, sack, bulk, origins, …) or assertStreamColumns trips.
+  const seedCarried: Carried = { aliases: new Map(), origins: ['o'], bulk: 'bulk' };
+  const seed: ElementStream = {
+    kind: 'elements', q: st.q, params: st.params, elem: 'node',
+    rel: st.q.cte(q`SELECT id, 1 AS bulk, id AS o FROM ${nodes}`, ['id', 'bulk', 'o']),
+    carried: seedCarried,
+  };
+  const { stream, next } = engineOf(st).lowerElementSteps(core, seed);
+  if (next !== core.length) return null;                        // a step the prefix fold won't take
+  if (stream.elem !== 'node') return null;                      // the walk id is a vertex rowid
+  if (stream.carried.aliases.size) return null;                 // labels through the walk = its own item
+  if (stream.carried.origins.length !== 1 || stream.carried.origins[0] !== 'o') return null;
+  const b = stream.rel.as('rb');
+  // No DISTINCT: traversers are a MULTISET, so two parallel edges must stay two rows.
+  return st.q.cte(q`SELECT ${b.c.o} AS from_id, ${b.c.id} AS to_id FROM ${b}`, ['from_id', 'to_id']);
+}
+
 /** repeat(): the folded repeat/emit/times/until cluster (strategies.foldRepeat) →
  *  a WITH RECURSIVE walk. Termination is spec-faithful and structural, NOT a magic
  *  depth cap: times() is the only depth bound (emit before/after selects the band);
@@ -637,9 +707,12 @@ export const repeat: StepFn = (s, st) => {
   // a where(__.sack().is(P)) loop guard, optionally a trailing simplePath(). A bare single
   // movement keeps the original (unchanged) term; anything more uses the general JOIN-chain
   // term (expandRepeatBody). Barrier/collection bodies still defer.
-  // Fold trailing by() onto their host (sack(op).by(v) → sack with .bys) so the body sees
-  // the same canonical shape as any chain — the body is a sub-traversal, not a special case.
-  const body = foldByModulators(stepChain(rep.args[0]?.nested, st.params));
+  // The body is a sub-traversal, not a special case — so canonicalize it with the SAME `normalize()`
+  // every other nested body uses (match patterns, correlated predicates, write targets), not a
+  // hand-picked single fold. This used to be `foldByModulators` alone, which meant a NESTED
+  // repeat/times cluster in the body never folded: the inner `times()` stayed a separate step, so
+  // the inner repeat saw no cluster and reported `repeat() requires times(), until(), or emit()`.
+  const body = normalize(stepChain(rep.args[0]?.nested, st.params)).steps;
   const simplePathInBody = body.length > 0 && body[body.length - 1].name === 'simplePath';
   // A body-TERMINAL aggregate('x') (bare or local(__.aggregate('x'))) collects every vertex the
   // body emits — i.e. every walk row at depth ≥ 1 — into the named bag, read back by cap('x').
@@ -670,15 +743,14 @@ export const repeat: StepFn = (s, st) => {
   const isSackFold = (c: Step): boolean => c.name === 'sack' && (c.args ?? []).some((a: any) => a && typeof a === 'object' && 'operator' in a);
   const bodyFoldsSack = core.some(isSackFold);
   const REPEAT_BODY_OK = (c: Step): boolean => REPEAT_MOVE_ALL.has(c.name) || c.name === 'has' || isSackFold(c) || sackWhereGuard(c) !== null;
-  const badStep = core.find((c) => !REPEAT_BODY_OK(c));
-  // A movement-free body is valid when it folds a sack (TinkerPop's on-the-spot accumulate,
-  // Repeat.feature:664) OR collects a body aggregate (repeat(aggregate('a')) revisits the seed each
-  // iteration); otherwise a body with no movement never progresses.
-  if ((!moves.length && !bodyFoldsSack && !aggName) || badStep)
-    throw new Error(`repeat(__.${body.map((c) => c.name + '()').join('.')}) not yet supported (movements incl. outE()/inV() + has() + sack(op).by() + where(__.sack()...), optional trailing simplePath(); barrier/collection bodies deferred)`);
-  // has() in a repeat body: only has(key, value|P) — a 3-arg or T-token form defers.
+  // has() in the FLAT expansion: only has(key, value|P) — a 3-arg or T-token form is beyond it.
   const badHas = core.find((c) => c.name === 'has' && (typeof c.args[0] !== 'string' || c.args.length > 2));
-  if (badHas) throw new Error('complex has() (3-arg / T-token) in a repeat() body not yet supported');
+  // Does the FLAT expansion (expandRepeatBody) recognize this body? It is the fast path — it walks
+  // the frontier lazily instead of materializing the body over every vertex — so it is tried first
+  // and the generic body relation is the fallback. A movement-free body is valid only when it folds
+  // a sack (TinkerPop's on-the-spot accumulate, Repeat.feature:664) or collects a body aggregate
+  // (repeat(aggregate('a')) revisits the seed each iteration); otherwise it never progresses.
+  const flatOk = core.every(REPEAT_BODY_OK) && !badHas && (moves.length > 0 || bodyFoldsSack || !!aggName);
   // The single-movement fast path only applies to a bare VERTEX movement with no sack fold /
   // edge step; any sack-folding or edge-step body routes through the general expansion.
   const singleMove = core.length === 1 && REPEAT_MOVES.has(core[0].name);
@@ -708,6 +780,25 @@ export const repeat: StepFn = (s, st) => {
   // edge-aware path regime — a separate piece. Defer rather than record only the vertices.
   if (trackArray && hasEdgeStep) throw new Error('path()/simplePath() with edge steps (outE()/inV()) in a repeat() body not yet supported');
 
+  // Body strategy. The FLAT expansion is the fast path (frontier-lazy); when it does not recognize
+  // the body, fall back to the GENERIC body relation — the ordinary StepFns compiled once into a
+  // (from_id, to_id) relation the recursive term joins (see the header above repeatBodyRelation).
+  // The generic route cannot carry the per-iteration sack fold (the accumulator depends on the
+  // running value, not just the hop) nor the path array (positions are recorded per iteration), so
+  // those stay with the flat expansion; a body needing both is a clean deferral.
+  const bodyRel = flatOk || sackCol || trackArray ? null : repeatBodyRelation(st, core);
+  if (!flatOk && !bodyRel) {
+    const names = body.map((c) => c.name + '()').join('.');
+    // Name the ACTUAL obstacle rather than reciting a vocabulary. A per-iteration global barrier is
+    // a semantic wall (precomputing it per-origin would answer a different question — see the
+    // repeatBodyRelation header); anything else is a shape neither route recognizes.
+    const barrier = core.find((c) => REPEAT_BODY_BARRIERS.has(c.name));
+    if (barrier) throw new Error(`repeat(__.${names}) not yet supported: ${barrier.name}() is a per-iteration GLOBAL barrier over the whole frontier, and a recursive CTE cannot window across iterations — precomputing it per-origin would answer a different question. A fixed times(n) body could be unrolled instead (not built).`);
+    if (sackCol) throw new Error(`repeat(__.${names}) with a sack() fold not yet supported (the sack accumulator is per-iteration, so the body cannot be precompiled; the flat expansion takes movements + has() + sack(op).by() + where(__.sack()...))`);
+    if (trackArray) throw new Error(`repeat(__.${names}) while tracking a path()/simplePath() not yet supported (path positions are recorded per iteration, so the body cannot be precompiled)`);
+    throw new Error(`repeat(__.${names}) not yet supported (body must be row-local: movement, has/hasLabel/hasId/where/filter/not/and/or, or a uniform-element branch)`);
+  }
+
   // until(): `done` = does the stop predicate hold for this row? do-while (until
   // AFTER repeat) leaves the seed untested (body runs ≥1×); while-do (until BEFORE)
   // tests the seed too. Expansion continues only from done=0 rows; done=1 rows exit.
@@ -724,7 +815,17 @@ export const repeat: StepFn = (s, st) => {
   const emitFn = hasEmitPred ? walkPredicate(engineOf(st), emitStep!, st.params, 'emit') : null;
   const emitCol = (id: Expression, depth: Expression, sackAt: Expression | null): Expression => q`, CASE WHEN ${emitFn!(id, depth, sackAt)} THEN 1 ELSE 0 END AS emit`;
 
-  const walkCols = ['id', 'depth', ...(sackCol ? [sackCol] : []), ...(trackArray ? ['path'] : []), ...(hasUntil ? ['done'] : []), ...(hasEmitPred ? ['emit'] : [])];
+  // ORIGIN columns ride THROUGH the walk unchanged. A walk is row-local — each traverser walks
+  // independently — so the ordinal saying which parent it came from is just carried, exactly as
+  // movement carries it via carryFrag. Threading it is what lets `repeat()` be a CHILD body
+  // (`local`/`map`/`where`/`group`/`order` over a walk) and lets a repeat NEST inside another
+  // repeat's body: both are the same missing capability, and without it the walk silently dropped
+  // the column its consumer joins on (caught loudly by assertStreamColumns, never silently).
+  // ALIASES are deliberately NOT threaded here — an alias is a JSON history that a walk of unknown
+  // length would have to append to per hop, which is its own item; `repeat() after as()` still
+  // fails closed above.
+  const originCols = st.carried.origins;
+  const walkCols = ['id', 'depth', ...originCols, ...(sackCol ? [sackCol] : []), ...(trackArray ? ['path'] : []), ...(hasUntil ? ['done'] : []), ...(hasEmitPred ? ['emit'] : [])];
   const walk = st.q.recursiveCte(walkCols, (self: Relation) => {
     // One recursive-term SELECT: advance to `finalId`, bump depth, fold the sack, accumulate
     // path/done, and guard expansion — shared depth<times / done=0 guards FIRST, then the
@@ -741,15 +842,23 @@ export const repeat: StepFn = (s, st) => {
       if (hasUntil) guards.push(q`${self.c.done}=0`); // until() expands only from still-looping rows
       guards.push(...branchGuards);
       const where = guards.length ? q` WHERE ${list(guards, ' AND ')}` : q``;
-      return q`SELECT ${finalId} AS id, ${self.c.depth} + 1 AS depth${sackAcc}${pathAcc}${doneAcc}${emitAcc} FROM ${from}${where}`;
+      const originAcc = originCols.length ? list(originCols.map((c) => q`, ${self.c[c]}`), '') : empty;
+      return q`SELECT ${finalId} AS id, ${self.c.depth} + 1 AS depth${originAcc}${sackAcc}${pathAcc}${doneAcc}${emitAcc} FROM ${from}${where}`;
     };
     // simplePath()'s cycle guard: reject a finalId already on the accumulated path.
     const cycleGuard = (finalId: Expression): Expression[] =>
       simplePathInBody ? [q`NOT EXISTS (SELECT 1 FROM json_each(${self.c.path}) je WHERE je.value=${finalId})`] : [];
-    // Bare single movement → the ORIGINAL term (alias `e`, label in WHERE), unchanged
-    // (a sack-folding body always routes through expandRepeatBody, never here).
-    // Everything else (movement + has()/sack(), or multi-hop) → the general expansion.
-    const rec = singleMove
+    // Three body renderings, one recursive term. The GENERIC body relation comes first because it
+    // is the fallback the other two decline into (bodyRel is non-null only then): join the
+    // precompiled (from_id, to_id) on the walk row. Bare single movement → the ORIGINAL term
+    // (alias `e`, label in WHERE), unchanged. Everything else the flat expansion recognizes
+    // (movement + has()/sack(), or multi-hop) → expandRepeatBody.
+    const rec = bodyRel
+      ? [(() => {
+          const rb = bodyRel.as('rb');
+          return mkRec(rb.c.to_id, q`${self} JOIN ${rb} ON ${rb.c.from_id}=${self.c.id}`, null, cycleGuard(rb.c.to_id));
+        })()]
+      : singleMove
       ? dirsFor(core[0].name).map(([from, to]) => {
           const e = edges.as('e');
           const guards = [...cycleGuard(e.c[to]), ...(core[0].args.length ? [labelIn('e.label', core[0].args)] : [])];
@@ -774,7 +883,8 @@ export const repeat: StepFn = (s, st) => {
     const seedDone = hasUntil ? (untilFirst ? doneCol(seedId, q`0`, seedSackExpr) : q`, 0 AS done`) : q``;
     // emit-before tests+emits the seed (depth 0); emit-after never emits the seed.
     const seedEmit = hasEmitPred ? (emitBefore ? emitCol(seedId, q`0`, seedSackExpr) : q`, 0 AS emit`) : q``;
-    return q`SELECT ${seedSel}, 0 AS depth${seedSack}${seedPath}${seedDone}${seedEmit} FROM ${seedSrc} UNION ALL ${list(rec, ' UNION ALL ')}`;
+    const seedOrigin = originCols.length ? list(originCols.map((c) => q`, ${seedSrc.c[c]}`), '') : empty;
+    return q`SELECT ${seedSel}, 0 AS depth${seedOrigin}${seedSack}${seedPath}${seedDone}${seedEmit} FROM ${seedSrc} UNION ALL ${list(rec, ' UNION ALL ')}`;
   });
   // Output: until() → the rows that satisfied the stop predicate; emit(pred) → the rows
   // whose emit column is set (the depth band is baked into that column); bare emit() →
@@ -794,12 +904,13 @@ export const repeat: StepFn = (s, st) => {
   // rejected). `bulk` is the source-seeded carried column, always live here.
   // The folded sack rides out of the walk as the carried `sk` column (bare `sack()` reads
   // it downstream). advance() declares `sack: 'sk'` so carriedCols threads it forward.
-  // Column ORDER on the SELECT must match carriedCols(out): sack before bulk before path.
+  // Column ORDER on the SELECT must match carriedCols(out): sack, bulk, ORIGINS, then path.
   // The walk names its accumulator `sackCol`; the outbound carried name is always `sk`.
   const sackOut = sackCol ? q`, ${raw(sackCol)} AS sk` : empty;
+  const originOut = originCols.length ? list(originCols.map((c) => q`, ${raw(c)}`), '') : empty;
   const out = wantsPathOutput
-    ? advance(st, q`SELECT id${sackOut}, 1 AS bulk, path FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, path: { kind: 'array', col: 'path', elem: 'node' } })
-    : advance(st, q`SELECT id${sackOut}, 1 AS bulk FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null });
+    ? advance(st, q`SELECT id${sackOut}, 1 AS bulk${originOut}, path FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, path: { kind: 'array', col: 'path', elem: 'node' } })
+    : advance(st, q`SELECT id${sackOut}, 1 AS bulk${originOut} FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null });
   if (!aggName) return out;
   // A body-terminal aggregate('x'): collect every vertex the body emitted — the walk rows at
   // depth ≥ 1 (the seed is the pre-body input, not a body output). If the name already holds a

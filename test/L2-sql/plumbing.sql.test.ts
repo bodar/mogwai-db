@@ -365,10 +365,21 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     // silently accepting it would return wrong rows (infix .or() is not disable-able).
     expect(() => compile('g.withoutStrategies(ConnectiveStrategy).V()', {}))
       .toThrow('cannot be disabled');
-    // Injection recurses into a repeat() body; the recursive-CTE body compiler then fails
-    // closed on movement+where — a clear deferral, NOT an unfiltered leak.
-    expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.hasLabel("person"))).V().repeat(__.out()).times(2)', {}))
-      .toThrow('not yet supported');
+    // Injection recurses into a repeat() body. This used to assert a DEFERRAL — the recursive-CTE
+    // body compiler had no `where()` in its vocabulary, so the only safe answer was to throw. The
+    // generic body relation lowers it, so the guarded concern ("NOT an unfiltered leak") is now
+    // testable directly and asserted much more strongly: the criterion must actually FILTER inside
+    // the walk. On the modern graph the only person→person edges are marko→vadas and marko→josh, so
+    // one person-hop is exactly [josh, vadas] — the unfiltered walk would also yield lop×3/ripple —
+    // and two person-hops is empty.
+    const sg = 'g.withStrategies(new SubgraphStrategy(vertices: __.hasLabel("person")))';
+    const sgStore = seededStore();
+    expect(run(sgStore, `${sg}.V().repeat(__.out()).times(1).values("name")`).map((r: any) => r.v).sort())
+      .toEqual(['josh', 'vadas']);
+    expect(run(sgStore, `${sg}.V().repeat(__.out()).times(2).values("name")`)).toEqual([]);
+    // …and the contrast that makes the above meaningful: unfiltered, the same walk is much larger.
+    expect(run(sgStore, 'g.V().repeat(__.out()).times(1).values("name")').map((r: any) => r.v).sort())
+      .toEqual(['josh', 'lop', 'lop', 'lop', 'ripple', 'vadas']);
     // A NON-movement nested criterion still compiles — recursion is precise, not blanket.
     expect(() => compile('g.withStrategies(new SubgraphStrategy(vertices: __.hasLabel("person"))).V().where(__.has("name","marko"))', {})).not.toThrow();
     // withoutStrategies suppresses a co-named withStrategies (removal wins).

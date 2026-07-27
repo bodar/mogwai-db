@@ -82,7 +82,7 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
 
 2. **Universal child-seam acceptance.** The generic child seam still throws for whole child-body
    families — `as()` in a child body, `choose().option` pass-through, non-element `by(__.trav)`
-   (bodies producing map/group/project/valueMap shapes), `repeat()` in a child (item 3). The fix is
+   (bodies producing map/group/project/valueMap shapes). The fix is
    extending the classifier+compiler so every body is admitted at every position, not one shape at a
    time. Start: `steps/tail/{child-shape,child,scalar-arm}.ts`. **High.**
    - ✅ **Slice 1 LANDED 2026-07-26** (`1e15e75`): a **uniform-element branch**
@@ -147,6 +147,9 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
      already answer. Scope it to a label bound earlier in the enclosing chain (TinkerPop's own
      scoping notion, and syntactic — a Pass can see it). Blocks at least
      `g_V_asXaX_out_asXbX_whereXandXasXaX_outXknowsX_asXbX__…X_selectXa_bX`.
+   - ✅ **`repeat()` in a child body LANDED 2026-07-27** (item 3): the walk now carries its origin
+     column, so it composes at `local`/`map`/`where`/`group`/`order`/a branch arm — 1/7 → 7/7 probes.
+     Same shape as the slices above: the emit substrate was ready, the classifier was the gate.
    - **Still open:** `choose().option()` without a `Pick.none` default (mixed pass-through); child
      bodies producing map/group/record shapes (item 5 territory); the `group().by(project(...))`
      composite key and non-scalar/non-count nested-group inner keys. Also still open, and
@@ -159,32 +162,46 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    → [carried-schema-and-projection-reentry](./2026-07-14-carried-schema-and-projection-reentry-plan.md),
    [group-value-generic-seam](./2026-07-18-group-value-generic-seam-plan.md)
 
-3. **The `repeat()` recursive term is a private movement/filter mini-compiler — retire it onto the
-   seam.** (Widened 2026-07-27 from "alias columns through `repeat()`", which is one symptom of it;
-   measured in [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md), where it ranks #1.)
-   `expandRepeatBody` + `moveDirs`/`dirCombos` (`steps/prefix/branch.ts:505-801`, ~300 lines) is the
-   compiler's largest second implementation and the only one duplicating *movement* — its own
-   direction table, edge-alias scheme and `has()` handling, none of it reachable from
-   `lowerElementSteps`. **Measured: 43/135 `repeat()` corpus traversals compile.** The body admits 4
-   step kinds against the seam's ~25 (`hasLabel`/`hasId`/`where`/`not`/`filter`/`dedup`/`limit`/
-   `order`/`union`/`local`/`as` all throw), AND `repeat` is excluded from `ELEMENT_CHILD_STEPS`, so
-   the walk composes at exactly one nested position (a `union` arm) — walled in both directions.
-   It also owns the ONE site where the inline predicate compiler has no generic fallback:
-   `walkPredicate` throws for an `until()`/`emit()` body it cannot inline.
-   **The constraint is real and verified — SQLite has no `LATERAL`**, so the `InlineQuery`
-   nested-derived rendering CANNOT drive a fan-out in the recursive term's FROM. Two routes, and the
-   audit verifies the second executes correctly: (a) a third rendering mode — flat join accumulation;
-   (b) no new mode at all — compile the body ONCE through the ordinary seam as a
-   `(from_id, to_id)` relation and have the recursive term join it (a recursive term may legally
-   reference a non-recursive CTE), keeping today's flat expansion as the recognized fast path and
-   falling back generically. **Unblocks:** the body vocabulary, labels through the walk, `repeat()`
-   at depth, the `until()`/`emit()` ceiling, and most P3 recursive-path tails. **Medium/Large.**
-   *Also here, cheap and independent:* the named-loop form `repeat("a", …)`/`loops("a")` CRASHES
-   (`undefined is not an object (evaluating 'node.constructor')`, 4-5 corpus cases) rather than
-   failing closed. (The sibling capability — *foldable* carried state via `sack()` — ✅ landed
-   2026-07-24; its residuals are Low fail-closed tails in P3.)
-   → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md),
-   [deep-seam-migration-roadmap](./2026-07-18-deep-seam-migration-roadmap.md) #5,
+3. ~~**The `repeat()` recursive term is a private movement/filter mini-compiler**~~ — ✅ **the wall
+   came down 2026-07-27, both sides.** `expandRepeatBody` STAYS as the recognized fast path (it walks
+   the frontier lazily where the generic route materializes) but no longer defines the vocabulary.
+   Measured: repeat corpus **43 → 48**, total corpus 1,626 → 1,635, **L3 1,440 → 1,445**; the ceiling
+   moved much further — body vocabulary 2/12 → **9/12** probes, `repeat()` at a nested position
+   **1/7 → 7/7**, and a repeat now NESTS in another repeat's body.
+   Four pieces, all reuse rather than new SQL:
+   - **`repeatBodyRelation`** — a recursive term may legally reference a NON-recursive CTE, so the
+     body compiles ONCE through the ordinary StepFns (seeded from every vertex, carrying its origin
+     in the `carried` slot `pushChildScope` already uses) into `(from_id, to_id)`, which the
+     recursive term joins. **This is the way around SQLite having no `LATERAL` that needs no new
+     rendering mode** — the "mode C" framing in the audit turned out to be avoidable.
+   - **Origin columns ride THROUGH the walk** (a walk is row-local, so the ordinal just rides). That
+     was the only thing keeping `repeat` out of `ELEMENT_CHILD_STEPS`, and it is what admits the walk
+     at every child position AND inside another walk — the same capability from two sides.
+   - **`otherV` joined the row-local vocabulary** — the odd one out among the nine movements, gating
+     every exploded-edge body in EVERY child position; the emit side was already ready.
+   - **The body is normalized with the same `normalize()`** every other nested body uses. With
+     `foldByModulators` alone a nested `times()` never folded onto its `repeat()`.
+   **The trap, pinned by a test:** the gate is NOT "whatever `lowerElementSteps` accepts". A
+   per-iteration GLOBAL barrier (`dedup`/`order`/`limit`/`range`/`sample`/`tail`/`group`/`aggregate`/
+   `local`) observes the whole frontier at one iteration, and the generic StepFns would happily lower
+   it per-origin — bare `dedup` emits `SELECT DISTINCT id, <carried>`, which with an origin column in
+   the tuple silently becomes per-origin and answers a DIFFERENT question. The gate is the row-local
+   vocabulary (`isElementChildStep`); the deferral now names the offending step and says why.
+   **Still open, each now precisely scoped:**
+   - `as()` through the walk — an alias is a per-hop-appendable JSON history, not a column that
+     rides. Fails closed (`repeat() after as()`). *Low-Med.*
+   - A **barrier body under a fixed `times(n)`** could be UNROLLED into n generic phases (that route
+     hosts barriers; `bulk.ts` already unrolls a specialized version for the count case). The
+     natural next slice. *Medium.*
+   - `walkPredicate` (`until()`/`emit()`) still has NO generic fallback, which is what keeps the
+     inline predicate compiler's leaf vocabulary load-bearing (see the give-back below). Same trick
+     as the body: compile an element-only predicate once as a `matching(id)` relation and read
+     `id IN matching` in the recursive term. *Low-Med.*
+   - The named-loop form `repeat("a", …)`/`loops("a")` still **crashes** rather than failing closed
+     (`undefined is not an object (evaluating 'node.constructor')`, 4 corpus cases). Cheap, isolated.
+   - `path()`/`simplePath()` + `sack()` bodies stay with the flat expansion (both are per-iteration
+     state) — P3 recursive-path tails, unchanged.
+   → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md) #1,
    [path-history-substrate](./2026-07-18-path-history-substrate.md),
    [foldable-carried-column](./2026-07-24-foldable-carried-column-plan.md)
 

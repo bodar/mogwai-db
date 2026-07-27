@@ -78,9 +78,55 @@ repeat's vocabulary wall into a performance trade-off instead of a `throw`.
 
 ## The ranking
 
-### 1. `expandRepeatBody` + the `repeat` StepFn — the recursive term's private mini-compiler
-`steps/prefix/branch.ts:525-821` (~300 lines: `moveDirs:525`, `dirCombos:535`,
-`expandRepeatBody:549`, `repeat:614`)
+### 1. `expandRepeatBody` + the `repeat` StepFn — ✅ **the wall came down 2026-07-27** (both sides)
+`steps/prefix/branch.ts` — `expandRepeatBody` is now a *fast path*, not the vocabulary
+
+**What landed.** Not a rewrite of `expandRepeatBody` — it stays, unchanged, as the recognized fast
+path, because it walks the frontier lazily where the generic route materializes. What changed is
+that it is no longer the *only* route, so it no longer defines the vocabulary:
+
+- **The generic body relation** (`repeatBodyRelation`). A recursive term may legally reference a
+  NON-recursive CTE, so the body is compiled ONCE through the ordinary StepFns — seeded from every
+  vertex, carrying its origin in the `carried` slot `pushChildScope` already uses for exactly this —
+  and reduced to `(from_id, to_id)`. The recursive term joins it. **No new rendering mode**: this is
+  the way around SQLite's missing `LATERAL` (verified below) that needs no mode C at all.
+- **Origin columns ride through the walk.** A walk is row-local, so the parent ordinal just rides,
+  exactly as movement carries it via `carryFrag`. That was the *only* thing keeping `repeat` out of
+  `ELEMENT_CHILD_STEPS`.
+- **`otherV` joined the row-local vocabulary** — the odd one out among the nine movements, gating
+  every exploded-edge body in every child position. The emit side was already ready (the child
+  compiler's own comment points at it).
+- **The body is normalized with the same `normalize()` every other nested body uses**, not a
+  hand-picked single fold. With `foldByModulators` alone a nested `times()` never folded onto its
+  `repeat()`, so a nested walk reported `repeat() requires times(), until(), or emit()`.
+
+**Measured:** repeat corpus **43 → 48**, total corpus **1,626 → 1,635**, **L3 1,440 → 1,445**,
+`mise run ci` 890 pass / 0 fail. The ceiling moved much further than the floor, which is the point:
+
+| | before | after |
+|---|---|---|
+| body vocabulary (12 probes) | 2 OK | **9 OK** — the 3 left are *named semantic walls* |
+| `repeat()` at a nested position (7 probes) | 1 OK (a union arm) | **7 OK** — `local`/`map`/`where`/`group`/`order`/`union` |
+| nested `repeat` in a body | ✗ | **✓**, equal to the flattened equivalent |
+
+**What still defers, and why it is a wall rather than a gap.** A **per-iteration global barrier**
+(`dedup`/`order`/`limit`/`range`/`sample`/`tail`/`group`/`aggregate`/`local`) observes the whole
+frontier at one iteration; precomputing it per-origin answers a *different question* — a global
+`dedup()` drops a vertex two origins both reach, a per-origin one keeps both. The deferral now names
+the offending step and says this, instead of reciting a vocabulary. **This is the trap in the
+change**: the generic StepFns would happily lower it — bare `dedup` emits
+`SELECT DISTINCT id, <carried>`, and with an origin column in the tuple that silently becomes
+per-origin — so the gate cannot be "whatever `lowerElementSteps` accepts". It is the ROW-LOCAL
+vocabulary, which already existed as `isElementChildStep`. Pinned by a test.
+
+Also still deferred: `as()` through the walk (an alias is a per-hop-appendable JSON history, not a
+column that rides), and `path()`/`simplePath()` + `sack()` bodies, which stay with the flat
+expansion because both are per-iteration state. A fixed `times(n)` body could be **unrolled** into
+n generic phases — that route hosts barriers and is the natural next slice; not built.
+
+<details><summary>The original entry (the measurement that motivated all of the above)</summary>
+
+`steps/prefix/branch.ts` (~300 lines: `moveDirs`, `dirCombos`, `expandRepeatBody`, `repeat`)
 
 The largest second implementation in the compiler, and the only one that duplicates *movement*.
 It has its own direction table (`moveDirs`, a near-copy of `plan.ts dirsFor`), its own cartesian
@@ -130,6 +176,19 @@ Two measurement routes, same site.
 
 Subsumes outstanding-work **item 3** (alias columns through `repeat()`) and most of P3's
 recursive-path tails.
+
+</details>
+
+**Two things from the original entry are NOT closed and remain open items:**
+- **`walkPredicate` still has no generic fallback** — `until()`/`emit()` throws when the inline
+  predicate compiler declines, so #6's leaf vocabulary is still load-bearing there. The route is the
+  same trick as the body: compile an element-only until/emit predicate ONCE as a `matching(id)`
+  relation and have the recursive term read `id IN matching`. A sack- or `loops()`-dependent
+  predicate keeps the inline form.
+- **The named-loop form still crashes rather than deferring** —
+  `g.V().emit().repeat("a", __.out("knows").filter(__.loops("a").is(0)))` →
+  `undefined is not an object (evaluating 'node.constructor')`, 4 corpus cases. A cheap guard,
+  independent of everything above.
 
 ---
 

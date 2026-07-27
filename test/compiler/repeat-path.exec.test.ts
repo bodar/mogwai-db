@@ -314,3 +314,148 @@ test('a movement-free repeat(aggregate(a)) revisits the seed each iteration', ()
   expect(names.filter((n) => n === 'marko')).toEqual(['marko', 'marko']);
 });
 });
+
+// ---------- the GENERIC repeat body relation (branch.ts repeatBodyRelation) ----------
+//
+// `expandRepeatBody` is a private movement/filter mini-compiler and therefore a vocabulary wall.
+// The generic route compiles the body ONCE through the ordinary StepFns as a (from_id, to_id)
+// relation the recursive term joins — legal because a recursive term may reference a NON-recursive
+// CTE, which is the way around SQLite having no LATERAL (a derived table in the recursive term's
+// FROM cannot reference the walk row, so the correlated-child rendering cannot fan out there).
+describe('repeat() body: the generic body relation', () => {
+  const names = (store: GraphStore, g: string) => (run(store, g) as any[]).map((r) => r.v).sort();
+
+  test('bodies the FLAT expansion accepts are unchanged (it stays the fast path)', () => {
+    const store = seededStore();
+    expect(names(store, 'g.V(1).repeat(__.out()).times(2).values("name")')).toEqual(['lop', 'ripple']);
+    expect(names(store, 'g.V(1).repeat(__.out("knows")).times(1).values("name")')).toEqual(['josh', 'vadas']);
+    expect(names(store, 'g.V().repeat(__.out().has("name","lop")).times(1).values("name")')).toEqual(['lop', 'lop', 'lop']);
+    expect((run(store, 'g.V(1).repeat(__.both()).times(2).count()') as any[])[0].v).toBe(7);
+  });
+
+  test('the whole row-local filter vocabulary now composes in a body', () => {
+    // Each of these was a `repeat(__.…) not yet supported` vocabulary throw: the flat expander
+    // knows only movement + has(). None of them needed new SQL — they are the ordinary StepFns.
+    const store = seededStore();
+    expect(names(store, 'g.V(1).repeat(__.out().hasLabel("person")).times(1).values("name")')).toEqual(['josh', 'vadas']);
+    expect(names(store, 'g.V(1).repeat(__.out().hasId(3)).times(1).values("name")')).toEqual(['lop']);
+    expect(names(store, 'g.V(1).repeat(__.out().where(__.has("name","lop"))).times(1).values("name")')).toEqual(['lop']);
+    expect(names(store, 'g.V(1).repeat(__.out().not(__.has("name","lop"))).times(1).values("name")')).toEqual(['josh', 'vadas']);
+    expect(names(store, 'g.V(1).repeat(__.out().and(__.has("name","lop"),__.in())).times(1).values("name")')).toEqual(['lop']);
+    // A uniform-element BRANCH body — union/coalesce arms are element-shaped, so the branch folds
+    // through the element prefix exactly as a movement does.
+    expect(names(store, 'g.V(1).repeat(__.coalesce(__.out("knows"),__.out("created"))).times(1).values("name")')).toEqual(['josh', 'vadas']);
+    expect((run(store, 'g.V(1).repeat(__.union(__.out(),__.in())).times(1).count()') as any[])[0].v).toBe(3);
+  });
+
+  test('an exploded-edge body composes: bothE().otherV() ≡ both()', () => {
+    // otherV() was the one movement missing from ELEMENT_CHILD_STEPS (the row-local vocabulary),
+    // which gated it in EVERY child position, not just repeat — the emit side was already ready.
+    const store = seededStore();
+    expect(names(store, 'g.V(1).repeat(__.bothE().otherV()).times(1).values("name")'))
+      .toEqual(names(store, 'g.V(1).both().values("name")'));
+    expect(names(store, 'g.V(1).local(__.bothE().otherV()).values("name")')).toEqual(['josh', 'lop', 'vadas']);
+    expect((run(store, 'g.V(1).map(__.bothE().otherV().count())') as any[])[0].v).toBe(3);
+    expect(names(store, 'g.V(1).repeat(__.bothE().otherV().has("age",P.lt(30))).times(1).values("name")')).toEqual(['vadas']);
+  });
+
+  test('traversers stay a MULTISET through the body relation', () => {
+    // The relation must NOT be built with DISTINCT: two parallel edges are two traversers. josh
+    // reaches lop and ripple, and marko/josh/peter all reach lop, so a one-hop walk from every
+    // vertex keeps lop three times.
+    const store = seededStore();
+    expect(names(store, 'g.V().repeat(__.out().hasLabel("software")).times(1).values("name")'))
+      .toEqual(['lop', 'lop', 'lop', 'ripple']);
+  });
+
+  test('a PER-ITERATION GLOBAL barrier still fails closed, naming why', () => {
+    // Not a missing feature — a semantic wall. A global dedup()/limit() observes the whole frontier
+    // at one iteration; precomputing it per-origin answers a different question. The generic
+    // StepFns would happily lower it (bare dedup emits SELECT DISTINCT id, <carried>, and with an
+    // origin column in the tuple that silently becomes PER-ORIGIN), so the gate is the row-local
+    // vocabulary, not "whatever lowerElementSteps accepts". This test is that guard.
+    const store = seededStore();
+    for (const [g, step] of [
+      ['g.V(1).repeat(__.out().dedup()).times(2).count()', 'dedup'],
+      ['g.V(1).repeat(__.out().limit(1)).times(2).count()', 'limit'],
+      ['g.V(1).repeat(__.out().order().by("name")).times(2).count()', 'order'],
+      ['g.V(1).repeat(__.out().aggregate("x").out()).times(2).count()', 'aggregate'],
+    ] as [string, string][]) {
+      expect(() => run(store, g)).toThrow(new RegExp(`${step}\\(\\) is a per-iteration GLOBAL barrier`));
+    }
+  });
+
+  test('sack and path bodies stay with the flat expansion', () => {
+    const store = seededStore();
+    // A sack fold is per-iteration (the accumulator depends on the running value), so it keeps the
+    // flat route and keeps working; the generic relation is never consulted for it.
+    // marko's out() is vadas + josh (knows) + lop (created) = 3 traversers.
+    expect((run(store, 'g.withSack(0).V(1).repeat(__.out().sack(Operator.sum).by("age")).times(1).sack()') as any[]).length).toBe(3);
+    // simplePath() in the body needs the walk's accumulated path array, so likewise.
+    expect(names(store, 'g.V(1).repeat(__.both().simplePath()).times(2).values("name")').length).toBeGreaterThan(0);
+  });
+});
+
+// ---------- repeat() AT DEPTH: origin columns through the walk ----------
+//
+// The other half of repeat()'s wall. The walk was excluded from ELEMENT_CHILD_STEPS because it
+// dropped the parent ordinal its consumer joins on; threading `origins` through the recursive term
+// (they just ride, a walk being row-local) admits it at every child position AND inside another
+// repeat's body — the same capability seen from two sides.
+describe('repeat() as a child body', () => {
+  const names = (store: GraphStore, g: string) => (run(store, g) as any[]).map((r) => r.v).sort();
+  const one = (store: GraphStore, g: string) => (run(store, g) as any[])[0].v;
+
+  test('a walk composes at EVERY child position', () => {
+    // Before: only a union arm worked; local/map/where/group/order all reported a classify deferral.
+    const store = seededStore();
+    expect(names(store, 'g.V(1).local(__.repeat(__.out()).times(2)).values("name")')).toEqual(['lop', 'ripple']);
+    expect(one(store, 'g.V(1).map(__.repeat(__.out()).times(2).count())')).toBe(2);
+    expect(names(store, 'g.V(1).where(__.repeat(__.out()).times(2)).values("name")')).toEqual(['marko']);
+    // …and each parent gets its OWN walk — the point of carrying the ordinal. josh reaches
+    // {lop,ripple} in one hop and nothing in two; marko reaches 2 vertices in two hops.
+    expect(one(store, 'g.V(4).map(__.repeat(__.out()).times(1).count())')).toBe(2);
+    expect(one(store, 'g.V(4).map(__.repeat(__.out()).times(2).count())')).toBe(0);
+    // The sharpest form: one group per person, each value that person's OWN walk count. A walk
+    // that lost its origin column could not produce four different numbers here.
+    expect((run(store, 'g.V().hasLabel("person").group().by("name").by(__.repeat(__.out()).times(1).count())') as any[])
+      .map((r) => [r.gk, Number(r.gv)]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))))
+      .toEqual([['josh', 2], ['marko', 3], ['peter', 1], ['vadas', 0]]);
+  });
+
+  test('an ORDER by a walk count ranks parents by their own walks', () => {
+    const store = seededStore();
+    // marko reaches 3 in one hop, josh 2, peter 1, vadas 0 — so descending by that count is a
+    // total order over the persons, which is only correct if each walk is per-parent.
+    expect((run(store, 'g.V().hasLabel("person").order().by(__.repeat(__.out()).times(1).count(), desc).values("name")') as any[]).map((r) => r.v))
+      .toEqual(['marko', 'josh', 'peter', 'vadas']);
+  });
+
+  test('a repeat NESTS inside another repeat body', () => {
+    // Needs both halves: the body relation admits the inner walk as a row-local body, and the inner
+    // walk carries the outer body-relation's origin. Also needed normalizing the body with the same
+    // normalize() every other nested body uses — with only foldByModulators the inner times() never
+    // folded onto its repeat(), which reported `repeat() requires times(), until(), or emit()`.
+    const store = seededStore();
+    expect(names(store, 'g.V(1).repeat(__.out().repeat(__.out()).times(1)).times(1).values("name")'))
+      .toEqual(['lop', 'ripple']);
+    // …equal to the flattened three-hop-ish equivalent, which is the real assertion.
+    expect(names(store, 'g.V(1).repeat(__.out().repeat(__.out()).times(1)).times(1).values("name")'))
+      .toEqual(names(store, 'g.V(1).out().repeat(__.out()).times(1).values("name")'));
+  });
+
+  test('a repeat ARM in a branch composes (it is a classifiable element child now)', () => {
+    const store = seededStore();
+    expect(names(store, 'g.V(1).optional(__.repeat(__.out()).times(2)).values("name")')).toEqual(['lop', 'ripple']);
+    expect(names(store, 'g.V(1).coalesce(__.repeat(__.out()).times(2), __.in()).values("name")')).toEqual(['lop', 'ripple']);
+    expect(one(store, 'g.V(1).union(__.repeat(__.out()).times(2), __.in()).count()')).toBe(2);
+  });
+
+  test('ALIASES through a walk still fail closed — a JSON history is not just carried', () => {
+    // origins are a plain integer column that rides unchanged; an alias is a per-hop-appendable
+    // history, which is a different capability. Keep the deferral honest.
+    const store = seededStore();
+    expect(() => run(store, 'g.V().as("a").repeat(__.out()).times(2).select("a")'))
+      .toThrow(/repeat\(\) after as\(\)/);
+  });
+});

@@ -200,9 +200,22 @@ function selectShape(step: PStep, ctx: ChildCtx | undefined): ChildShape | undef
  * label rides out — TinkerPop's map/local/flatMap/branch-arm semantics), while a FILTER or by()
  * consumer re-projects the parent domain (carryFrag(parent.carried, …), so the label is confined
  * to the child — equally TinkerPop's). */
+// `otherV` belongs with the other eight movements and its absence here was the last gate on an
+// exploded-edge body: it is purely row-local (it reads the current edge's endpoint that ISN'T the
+// carried `fv`), and the emit side was already ready — `lowerElementSteps` derives `trackFromV`
+// per-scope, which the child compiler's own note points at. So a `bothE().otherV()` body composes
+// wherever any other movement does (`local`, `repeat`, a branch arm), rather than one position at a
+// time.
+// `repeat` (with its folded emit/times/until cluster) is here because a recursive walk IS row-local
+// — each traverser walks independently — and the walk now carries its origin column through, which
+// was the only thing missing. That admits it at every child position (`local`/`map`/`where`/`group`/
+// `order` over a walk) AND inside another repeat's body, which are the same capability seen from two
+// sides. Its own guards still fail closed for the parts that are not row-local (a live alias, a
+// path spanning the walk).
 export const ELEMENT_CHILD_STEPS = new Set([
-  'out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'bothV',
+  'out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'bothV', 'otherV',
   'has', 'hasLabel', 'hasId', 'where', 'filter', 'not', 'and', 'or', 'identity', 'as',
+  'repeat', 'emit', 'times', 'until',
 ]);
 /** An element-PRESERVING child step: the ELEMENT_CHILD_STEPS movement/filter/as() vocabulary,
  *  PLUS a mutate sack(op) (element→element, folds the carried sack), a `select(label)` that
