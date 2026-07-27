@@ -1,13 +1,13 @@
-import { q, type Expression } from '../../../sql/kernel/q.ts';
+import { q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { isNested } from '../../../gremlin/frontend.ts';
 import { childSteps } from './child-shape.ts';
 import { embedSql } from './list.ts';
-import { engineOf } from '../../engine/deps.ts';
+import { engineOf, type Engine } from '../../engine/deps.ts';
 import { aliasCtx, labelNameSub, scalarProp, type ScalarCtx } from '../../plan/plan.ts';
 import { compileCorrelatedChild } from './correlated.ts';
 import { correlatedReduce } from '../prefix/predicate.ts';
 import type { PStep } from '../../ir/strategies.ts';
-import type { Carry } from '../context/context.ts';
+import type { Carried, Carry } from '../context/context.ts';
 
 // ---------- predicate operands that are TRAVERSALS ----------
 //
@@ -43,10 +43,10 @@ const isReSourced = (body: readonly any[]): boolean => {
  *  standalone re-sourced read this can build. LIMIT 1 is TinkerPop's rule: a multi-result operand
  *  compares against its FIRST result (Has.feature pins `__.V(vid).out("knows").values("name")
  *  .order()` → the first of the ordered pair). */
-function operandSubquery(nested: any, carry: Carry): Expression | null {
-  const body = childSteps(nested, carry.params);
+function operandSubquery(nested: any, deps: OperandDeps): Expression | null {
+  const body = childSteps(nested, deps.params);
   if (!body.length || !isReSourced(body)) return null;
-  const sub = engineOf(carry).compileReadCompiled(body as any, carry.params);
+  const sub = deps.engine.compileReadCompiled(body as any, deps.params);
   // Only a VALUE-shaped read has a `v` column to compare against; an element/list/map read is a
   // different comparison entirely, so it declines rather than inventing one.
   if (sub.shape.kind !== 'value') return null;
@@ -76,13 +76,13 @@ const OPERAND_PROJECTORS: Record<string, (ctx: ScalarCtx, s: PStep) => Expressio
  *  An unproductive operand yields SQL NULL, which is already the right answer at both hosts
  *  TinkerPop pins: `eq(NULL)` is falsy so the traverser drops, and a NULL member of a within()
  *  set contributes nothing while a sibling constant can still match. */
-function correlatedOperand(nested: any, carry: Carry, ctx: ScalarCtx): Expression | null {
-  const body = childSteps(nested, carry.params) as PStep[];
+function correlatedOperand(nested: any, deps: OperandDeps, ctx: ScalarCtx): Expression | null {
+  const body = childSteps(nested, deps.params) as PStep[];
   if (!body.length) return null;
-  const engine = engineOf(carry);
+  const engine = deps.engine;
   // A terminal reducer over a movement (`__.out().count()`) is already a correlated subquery
   // builder — reuse it rather than growing a second aggregate path.
-  const reduced = correlatedReduce(engine, body as any, ctx, carry.params);
+  const reduced = correlatedReduce(engine, body as any, ctx, deps.params);
   if (reduced) return reduced;
 
   const proj = body[body.length - 1];
@@ -90,7 +90,7 @@ function correlatedOperand(nested: any, carry: Carry, ctx: ScalarCtx): Expressio
   if (!projector) return null;
   const prefix = body.slice(0, -1);
   if (!prefix.length) return projector(ctx, proj) ?? null;
-  const child = compileCorrelatedChild(engine, ctx.idExpr, prefix as any, carry.params);
+  const child = compileCorrelatedChild(engine, ctx.idExpr, prefix as any, deps.params);
   if (!child) return null;
   const c = child.rel.as('opc');
   const scalar = projector(aliasCtx(c.c.id, child.elem), proj);
@@ -98,24 +98,71 @@ function correlatedOperand(nested: any, carry: Carry, ctx: ScalarCtx): Expressio
   return scalar ? q`(SELECT ${scalar} FROM ${c} LIMIT 1)` : null;
 }
 
+/** What the HOST can offer an operand beyond the query itself. Both are optional: a host that has
+ *  neither still resolves the re-sourced form, which needs no context at all. */
+/** What an operand needs from the compile, independent of the host's stream shape: the Engine (to
+ *  build a sub-read) and the bound params (to parse the body). `carried` is present only when the
+ *  host actually has a traverser schema — the inline predicate renderer does not. Taking this
+ *  rather than a `Carry` is what lets predicate.ts, which never sees a Stream, resolve operands
+ *  through the same path as the StepFns. */
+export interface OperandDeps {
+  readonly engine: Engine;
+  readonly params: Record<string, any>;
+  readonly carried?: Carried;
+}
+
+/** The deps a Stream-holding host already has to hand. */
+export const operandDeps = (carry: Carry): OperandDeps =>
+  ({ engine: engineOf(carry), params: carry.params, carried: carry.carried });
+
+export interface OperandHost {
+  /** The current ELEMENT, for a correlated operand (`__.values('k')`, `__.out().values('k')`). */
+  readonly ctx?: ScalarCtx;
+  /** The row relation the host's own SQL references, for an operand that reads CARRIED
+   *  per-traverser state rather than the graph — today just `__.sack()`. */
+  readonly row?: Relation;
+}
+
+/** `__.sack()` as an operand: the carried sack column on the host's row. Not a subquery and not a
+ *  correlation — the value is already a column on the traverser, which is the whole point of the
+ *  sack. Declines when the body is anything else or no sack is carried (a bare `sack()` with no
+ *  `withSack()` is an error the sack step itself reports, not something to answer here). */
+function sackOperand(nested: any, deps: OperandDeps, row: Relation | undefined): Expression | null {
+  if (!row || !deps.carried?.sack) return null;
+  const body = childSteps(nested, deps.params);
+  if (body.length !== 1 || body[0].name !== 'sack' || (body[0].args ?? []).length) return null;
+  return row.c[deps.carried.sack];
+}
+
 /** Replace every resolvable traversal operand in `pred` with its subquery Expression, leaving
  *  everything else exactly as it was. Handles the bare-operand form (`is(__.V(…)…)`) and operands
  *  nested inside a P, recursively (`P.not(P.gt(…))`). Returns `pred` unchanged when nothing
  *  resolved, so a caller can stay on its existing path. */
-export function resolveTraversalOperands(pred: any, carry: Carry, ctx?: ScalarCtx): any {
+export function resolveTraversalOperands(pred: any, deps: OperandDeps, host: OperandHost = {}): any {
   if (isNested(pred)) {
-    // Re-sourced first: it needs no correlation, so it stays a plain subquery even at a host that
-    // could correlate. Then the correlated form, where the host gave us the current element.
-    return operandSubquery(pred.nested, carry)
-      ?? (ctx ? correlatedOperand(pred.nested, carry, ctx) : null)
+    // Cheapest first: a carried column, then a standalone subquery (no correlation needed even at
+    // a host that could correlate), then the correlated form.
+    return sackOperand(pred.nested, deps, host.row)
+      ?? operandSubquery(pred.nested, deps)
+      ?? (host.ctx ? correlatedOperand(pred.nested, deps, host.ctx) : null)
       ?? pred;
   }
   if (!pred || typeof pred !== 'object' || !('op' in pred) || !Array.isArray((pred as any).values)) return pred;
   let changed = false;
   const values = (pred as any).values.map((v: any) => {
-    const out = resolveTraversalOperands(v, carry, ctx);
+    const out = resolveTraversalOperands(v, deps, host);
     if (out !== v) changed = true;
     return out;
   });
   return changed ? { ...pred, values } : pred;
+}
+
+/** PURE. Does this predicate still hold a traversal operand nothing could resolve? A FAST PATH
+ *  must DECLINE on one rather than let the render throw: its contract is "return null and the
+ *  caller falls through to the generic gate", and a throw from inside it defines support by
+ *  vocabulary exhaustion instead. */
+export function hasUnresolvedOperand(pred: any): boolean {
+  if (isNested(pred)) return true;
+  if (!pred || typeof pred !== 'object' || !Array.isArray((pred as any).values)) return false;
+  return (pred as any).values.some(hasUnresolvedOperand);
 }

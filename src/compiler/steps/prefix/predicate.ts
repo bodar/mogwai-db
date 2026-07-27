@@ -6,6 +6,7 @@ import {
   type ScalarCtx,
 } from '../../plan/plan.ts';
 import { compileCorrelatedChild } from '../tail/correlated.ts';
+import { resolveTraversalOperands } from '../tail/operand.ts';
 import type { Engine } from '../../engine/deps.ts';
 import type { FastPath } from '../../options/fast-paths.ts';
 
@@ -190,6 +191,13 @@ function compileInlinePredicate(
   let body = nested;
   let isPred: any = undefined, hasIs = false;
   if (body[body.length - 1]?.name === 'is') { isPred = body[body.length - 1].args[0]; hasIs = true; body = body.slice(0, -1); }
+  // A traversal OPERAND resolves to an Expression before any of the branches below render it —
+  // the same resolver the has()/is() StepFns use, reached here through the engine+params bag
+  // rather than a Stream (this compiler never sees one). `ctx` is the current element, so the
+  // correlated form is available too. Anything it cannot resolve is left alone and the render
+  // reports the clear deferral.
+  const deps = { engine, params };
+  if (hasIs) isPred = resolveTraversalOperands(isPred, deps, { ctx });
 
   const head = body[0]?.name;
   if (!head) throw new Error('empty where()/filter() traversal');
@@ -234,7 +242,7 @@ function compileInlinePredicate(
       return predicateSql(expr, val);
     }
     if (typeof key === 'string') {
-      return hasProp(ctx, key, val);
+      return hasProp(ctx, key, resolveTraversalOperands(val, deps, { ctx }));
     }
   }
   if (head === 'hasLabel' && body.length === 1)

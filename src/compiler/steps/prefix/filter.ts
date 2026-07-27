@@ -9,7 +9,7 @@ import { tryInlinePredicate, combineBranchPreds, PredicateInliningFastPath } fro
 import { advance, aliasElem, carriedCols, carriedWith, carryFrag, elemRel, pathColsOf, prevRel, scopePathCols, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from '../context/context.ts';
 import { aliasAppend, aliasId, aliasSeed, elemEntry, elemShape } from '../context/alias.ts';
 import { tryCombineByChildExistence, tryCompileScalarValueRows, tryFilterByChildExistence } from '../tail/child.ts';
-import { resolveTraversalOperands } from '../tail/operand.ts';
+import { operandDeps, resolveTraversalOperands } from '../tail/operand.ts';
 import { directElementModulation, elementOrderSql } from '../tail/modulation.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { isInjectionMarker, injectedValues } from '../injection.ts';
@@ -116,7 +116,10 @@ export const hasLabel: StepFn = (s, st) => filterCte(st, labelIn('n.label', s.ar
  *  A lone predicate passes through; bare ids become a `within` set. */
 export const hasId: StepFn = (s, st) => {
   const n = elemRel(st);
-  return filterCte(st, predicateSql(q`COALESCE(${n.c.uid}, ${n.c.id})`, idPredFromArgs(s.args)));
+  // hasId(__.V(id).id()) / hasId(P.eq(__.V(id).id())): idPredFromArgs wraps a bare arg into a
+  // within(), so resolving operands on the RESULT covers both spellings in one place.
+  const pred = resolveTraversalOperands(idPredFromArgs(s.args), operandDeps(st), { ctx: currentCtx(st), row: prevRel(st, 'p') });
+  return filterCte(st, predicateSql(q`COALESCE(${n.c.uid}, ${n.c.id})`, pred));
 };
 
 export const has: StepFn = (s, st) => {
@@ -133,7 +136,7 @@ export const has: StepFn = (s, st) => {
   // current element's ScalarCtx also admits the TRAVERSER-DEPENDENT forms
   // (has('name', __.values('other')), has('name', __.out().values('name'))) as correlated
   // subqueries; without it only the re-sourced ones resolve.
-  val = resolveTraversalOperands(val, st, currentCtx(st));
+  val = resolveTraversalOperands(val, operandDeps(st), { ctx: currentCtx(st), row: prevRel(st, 'p') });
   // Mid-traversal federate injection: a `T.value` marker in the VALUE-operand position of
   // has(key, T.value) is replaced by a within() over the distinct injected values supplied in
   // params (federate.ts's sibling hop). The marker is inert as a real value operand, so this is

@@ -7,9 +7,9 @@ over-reports `LANDED`; this keeps only what a code check confirms open). Live pe
 `feature-support-matrix.md`.
 
 **Refreshed** 2026-07-26 against L3 1362 unique / 2297 (`l3-state.json` shows 1364 — two names
-recur legitimately, see `test/CLAUDE.md`). A 2026-07-27 session took it to **1425**: item 2's
+recur legitimately, see `test/CLAUDE.md`). A 2026-07-27 session took it to **1430**: item 2's
 Slice 3 (child-body labels, +8), the constant predicate-operand fold (+29), read-only child
-verification (+14), re-sourced operand subqueries (+6), and correlated operands (+4).
+verification (+14), re-sourced operand subqueries (+6), correlated operands (+4), and the operand tails (+5).
 Path pointers assume the 2026-07-23 restructure
 (`src/compiler/steps/{context,prefix,tail,write}/`, `src/compiler/{ir,plan,engine}/`).
 
@@ -296,15 +296,21 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    drops the traverser; a NULL member contributes nothing to a `within` set while a sibling
    constant still matches).
 
-   **Still open**, all narrow: `within`/`without` over a multi-value operand (`IN (SELECT …)`
-   rather than `LIMIT 1`); the `union(...).fold()` operand forms, blocked on the union SOURCE
-   (item 4b) rather than on the operand machinery — and note `isReSourced` in
-   `steps/tail/operand.ts` is a narrow proxy for "traverser-independent" (it tests for a `V`/`E`
-   head), so a union of independent branches would need it widened too; a `__.sack()` operand (it is just the
-   carried column — should be a one-liner); `hasId(__.V(id).id())` and the `none()` /
-   inline-predicate hosts, which simply do not call the resolver yet; and an operand with no
-   scalar to read (a filter body such as `__.not(__.identity())`). Correlation needs an element
-   ScalarCtx, so a scalar-parent `is()` also still defers. *Low.*
+   **Still open**, all narrow: ✅ the `__.sack()` operand (a carried column — it needs the host's row, not
+   a subquery), `hasId(__.V(id).id())` in both spellings, and the fast-path DECLINE all landed
+   2026-07-27 (+5). `tryInlineScalarPredicate` was THROWING on an operand it could not resolve,
+   which violates its own "return null and the caller falls through" contract — a fast path must
+   never define support by vocabulary exhaustion; with the decline it reaches the generic path and
+   one choose() scenario passes there.
+
+   **Genuinely left:** `within`/`without` over a MULTI-VALUE operand (`IN (SELECT …)` rather than
+   `LIMIT 1` — the `.fold()` operand forms end in a list shape, which `operandSubquery` declines);
+   the `union(...).fold()` operands, blocked on the union SOURCE (item 4b) rather than on the
+   operand machinery — note `isReSourced` (`steps/tail/operand.ts`) is a narrow proxy for
+   "traverser-independent" (it tests for a `V`/`E` head), so a union of independent branches needs
+   it widened too; the `none()` host; and an operand with no scalar to read (a filter body such as
+   `__.not(__.identity())`). Correlation needs an element ScalarCtx, so a scalar-parent `is()`
+   still defers. *Low.*
 
 8. **Graph-algorithms layer (new cluster).** Algorithms as `call()` services + OLAP step names
    (`pageRank`/`connectedComponent`/`peerPressure`/`shortestPath`) as desugar Passes. Nothing built.

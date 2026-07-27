@@ -223,3 +223,31 @@ test('a traverser-dependent operand becomes a CORRELATED scalar subquery', () =>
   expect(ids('g.V().has("name", P.within(__.values("nonexistent"), __.constant("marko")))')).toEqual([1]);
   expect(ids('g.V().has("name", P.within(__.values("nonexistent"), __.values("nonexistent2")))')).toEqual([]);
 });
+
+test('operands that are neither re-sourced nor correlated: a sack() read, and hasId', () => {
+  const store = seededStore();
+  const vals = (q: string) => run(store, q).map((r: any) => r.v).sort();
+  const ids = (q: string) => run(store, q).map((r: any) => r.id).sort();
+
+  // __.sack() as an operand is neither a subquery nor a correlation — the value is already a
+  // CARRIED column on the traverser, which is the whole point of the sack. It just needs the
+  // host's row relation.
+  expect(vals('g.withSack(30).V().values("age").is(P.gt(__.sack()))')).toEqual([32, 35]);
+  expect(vals('g.withSack(29).V().values("age").is(P.lte(__.sack()))')).toEqual([27, 29]);
+  expect(vals('g.withSack(29).V().has("age", P.gt(__.sack())).values("name")')).toEqual(['josh', 'peter']);
+
+  // hasId wraps a bare arg into a within(), so resolving operands on the RESULT of
+  // idPredFromArgs covers hasId(trav) and hasId(P.eq(trav)) in one place.
+  expect(ids('g.V().hasId(__.V(1).id())')).toEqual([1]);
+  expect(ids('g.V().hasId(P.eq(__.V(1).id()))')).toEqual([1]);
+});
+
+test('a fast path DECLINES an operand it cannot resolve, it does not throw', () => {
+  const store = seededStore();
+  // tryInlineScalarPredicate is a fast path with a generic fallback, and its contract is "return
+  // null so the caller falls through". Resolving an operand needs the Engine, which a pure
+  // inliner has none of — so it must decline rather than let the render throw, which would define
+  // support by vocabulary exhaustion. With the decline in place this reaches the generic path.
+  expect(run(store, 'g.inject("marko").choose(__.is(P.eq(__.V(9999).values("name"))), __.constant("matched"), __.constant("unmatched"))')
+    .map((r: any) => r.v)).toEqual(['unmatched']);
+});

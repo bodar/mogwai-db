@@ -1,5 +1,5 @@
 import { derived, empty, list, paren, q, raw, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { resolveTraversalOperands } from './operand.ts';
+import { hasUnresolvedOperand, operandDeps, resolveTraversalOperands } from './operand.ts';
 import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx } from '../../plan/plan.ts';
 import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
@@ -158,7 +158,7 @@ function fuseScalarSegment(s: ScalarStream, steps: readonly PStep[], from: numbe
       const typeCtx = { staticAs: as, vtypeExpr: perRow ? p.c[perRow] : undefined };
       // A re-sourced traversal operand (is(__.V(id).values('age'))) becomes a scalar subquery
       // before the pure SQL layer sees it — see steps/tail/operand.ts.
-      predicates.push(predicateSql(expr, resolveTraversalOperands(step.args[0], s), typeCtx));
+      predicates.push(predicateSql(expr, resolveTraversalOperands(step.args[0], operandDeps(s), { row: p }), typeCtx));
       continue;
     }
     break;
@@ -340,7 +340,14 @@ export function tryInlineScalarPredicate(body: PStep[], current: Expression, par
   const preds: Expression[] = [];
   const nestedOf = (s: PStep) => s.args.filter(isNested);
   for (const s of body) {
-    if (s.name === 'is') { preds.push(predicateSql(expr, s.args[0], vtype ? { vtypeExpr: vtype } : undefined)); continue; }
+    if (s.name === 'is') {
+      // An unresolved traversal operand is outside THIS inliner's vocabulary (resolving one needs
+      // the Engine, which a pure inliner has no access to). Decline so the caller falls through,
+      // per the contract above — never throw from inside a fast path.
+      if (hasUnresolvedOperand(s.args[0])) return null;
+      preds.push(predicateSql(expr, s.args[0], vtype ? { vtypeExpr: vtype } : undefined));
+      continue;
+    }
     if (s.name === 'identity') continue;                 // always productive, no rebind
     if (s.name === 'constant') { expr = value(s.args[0]); vtype = undefined; continue; } // rebind current
     if (s.name === 'and' || s.name === 'or') {
