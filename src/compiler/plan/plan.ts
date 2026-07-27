@@ -1,4 +1,4 @@
-import { flattenListArgs, type Pred } from '../../gremlin/frontend.ts';
+import { flattenListArgs, isNested, type Pred } from '../../gremlin/frontend.ts';
 import { q, list, values, empty, value, raw, jsonExtract, type Expression, type Relation } from '../../sql/kernel/q.ts';
 import type { FastPath } from '../options/fast-paths.ts';
 import { normalizeTypeName, BigDecimal, Duration, VALUETYPE_TO_CANONICAL } from '../../gremlin/types.ts';
@@ -234,9 +234,23 @@ export const scalarPropSortKey = (ctx: ScalarCtx, key: string): Expression =>
   : ctx.elem === 'edge' ? edgePropSortKey(ctx.idExpr, key)
   : nodePropSortKey(ctx.idExpr, key);
 
+/** A predicate OPERAND as SQL. A bare `constant(x)` operand was already folded to its literal by
+ *  the foldConstantPredicateOperands pass, so a traversal still here is one that reads the
+ *  traverser (`has("name", __.V(1).out("knows").values("name"))` — TinkerPop compares against its
+ *  first result). That needs a correlated per-traverser value, which this pure SQL layer cannot
+ *  build, so it DEFERS clearly. Without this it fell through to `value()` and the object reached
+ *  SQLite as a bind, surfacing as "Binding expected string, TypedArray, …" — an opaque driver error
+ *  a user cannot act on. An Expression operand passes through untouched (value() forwards nodes),
+ *  which is the seam a future correlated operand plugs into. */
+function operandSql(v: any): Expression {
+  if (isNested(v))
+    throw new Error('a traversal as a predicate operand is not yet supported unless it is a constant() — a per-traverser operand needs a correlated value');
+  return value(v);
+}
+
 export function predicateSql(expr: Expression, pred: any, typeCtx: TypeCtx = {}): Expression {
   if (pred === undefined) return q`${expr} is not null`;
-  if (pred === null || typeof pred !== 'object' || !('op' in pred)) return q`${expr} = ${value(pred)}`;
+  if (pred === null || typeof pred !== 'object' || !('op' in pred)) return q`${expr} = ${operandSql(pred)}`;
   const { op, values: vals } = pred as Pred;
   if (op === 'not') return q`NOT (${predicateSql(expr, vals[0], typeCtx)})`;
   if (op === 'typeOf') return typeOfSql(expr, vals[0], typeCtx);
@@ -251,16 +265,16 @@ export function predicateSql(expr: Expression, pred: any, typeCtx: TypeCtx = {})
   const col = () => compareKey(expr, typeCtx.vtypeExpr!);
   if (op in P_OPS) return RANGE.has(op) && typeCtx.vtypeExpr
     ? q`${col()} ${P_OPS[op]} ${compareBound(vals[0])}`
-    : q`${expr} ${P_OPS[op]} ${value(vals[0])}`;
+    : q`${expr} ${P_OPS[op]} ${operandSql(vals[0])}`;
   // SQLite rejects an empty `IN ()` list, so fold the degenerate sets to their
   // constant truth value: within nothing = never, without nothing = always.
-  if (op === 'within') return vals.length ? q`${expr} in (${values(vals)})` : q`0`;
-  if (op === 'without') return vals.length ? q`${expr} not in (${values(vals)})` : q`1`;
+  if (op === 'within') return vals.length ? q`${expr} in (${list(vals.map(operandSql), ', ')})` : q`0`;
+  if (op === 'without') return vals.length ? q`${expr} not in (${list(vals.map(operandSql), ', ')})` : q`1`;
   // between = [lo, hi) inclusive low; inside = (lo, hi) exclusive low. With a stored vtype
   // both bounds and the column go through the numeric-aware compare; otherwise raw.
   if (op === 'between' || op === 'inside') {
     const lowOp = op === 'inside' ? '>' : '>=';
-    if (!typeCtx.vtypeExpr) return q`(${expr} ${lowOp} ${value(vals[0])} and ${expr} < ${value(vals[1])})`;
+    if (!typeCtx.vtypeExpr) return q`(${expr} ${lowOp} ${operandSql(vals[0])} and ${expr} < ${operandSql(vals[1])})`;
     return q`(${col()} ${lowOp} ${compareBound(vals[0])} and ${col()} < ${compareBound(vals[1])})`;
   }
   const lp = likePattern(op, vals[0]);

@@ -3,7 +3,7 @@
 What you can rely on. Each step gets one mark based on how much of it works and how
 freely it composes — a ✅ step works **anywhere in a traversal**, however deeply nested,
 not just at the top. Notes call out **only the cases that don't work yet**; if a row has
-no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,372<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,401<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 | Mark | Meaning |
 |---|---|
@@ -42,7 +42,7 @@ so. Kept in sync in the commit that changes support.
 |---|:--:|---|
 | `hasLabel`, `has(k)`, `has(k,v)`, `has(k,P)`, `has(label,k,v)`, `has(T.label/T.id,…)` | ✅ | |
 | `hasId(…)` | ✅ | |
-| `is(P)` | ✅ | ❌ after `path()` |
+| `is(P)` | ✅ | a `constant()` traversal OPERAND folds to its literal, so `is(__.constant(29))` / `is(P.gt(__.constant(29)))` and the same forms on `has`/`hasLabel`/`where`/`all`/`none` all lower through the ordinary predicate path. ❌ after `path()`; a per-traverser operand traversal (`has('name',__.V(1).out('knows').values('name'))` — needs a correlated value, fails closed) |
 | `where(__.…)` | ✅ | single- & multi-hop, edge-typed hops, alias-rooted `where(__.as('x')…)`, label reads at any depth inside the body (`where(__.out().where(__.select('x')))` — the inline correlated renderer carries no alias columns, so a label-mentioning body falls through to the materialized gate), and generic per-parent `order().by(key)` before `limit`/`range`/`skip` in existence children. `not()` shares the same gate. ❌ ordered children using traversal-valued `by()` or path-sensitive forms |
 | `where(P)` / `where('a',P)` | 🟡 | value-compare over a scalar stream works, as does alias-column compare; ❌ some `where(P.op)` forms, `by(key)` on an edge-typed label, `where('a',P)` over a scalar |
 | `and`, `or`, `not`, `filter(__.…)` | ✅ | incl. infix `.and()`/`.or()`. ❌ `filter(rawPredicate)` — use a traversal |

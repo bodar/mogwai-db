@@ -358,6 +358,81 @@ const isTokensArg = (a: any): boolean =>
 const isAllArg = (a: any): boolean =>
   a === WITH_ALL || (a && typeof a === 'object' && a.withOption === 'all');
 
+// ---------- constant predicate operands ----------
+//
+// TinkerPop lets a predicate's right-hand OPERAND be a traversal, evaluated per traverser, and
+// compares against its first result: `is(__.constant(29))`, `has("age", P.gt(__.constant(29)))`,
+// `where(P.gt(__.constant(29)))`, `hasKey(__.constant("age"))`. A traversal that does not read the
+// traverser at all — a bare `constant(x)` — IS its value, so folding it to the literal here makes
+// every one of those forms lower through the ordinary predicate path, at every host at once.
+//
+// A Pass rather than per-host handling because the operand grammar is host-independent: `values`
+// inside a P nests identically wherever the P appears, and `normalize()` runs the pipeline over
+// every nested body (childSteps → normalize), so this reaches any depth for free.
+//
+// Only a bare constant folds. A genuinely per-traverser operand (`has("name",
+// __.V(1).out("knows").values("name"))`) is left in place and fails closed at render (predicateSql
+// rejects a traversal operand with a clear deferral) — never silently dropped or mis-bound.
+
+/** The literal a nested traversal is worth, or `undefined` when it is not a bare constant. A
+ *  parse needing params we do not have (a nested normalize runs param-free) simply declines. */
+function constantOperand(nested: any, params: Record<string, any>): { value: any } | undefined {
+  let body: Step[];
+  try { body = stepChain(nested, params); } catch { return undefined; }
+  if (body.length !== 1 || body[0].name !== 'constant') return undefined;
+  const args = body[0].args ?? [];
+  if (args.length !== 1) return undefined;
+  const v = args[0];
+  // Primitives only: a nested/objecty constant arg is not a comparable literal, and `undefined`
+  // means the parse resolved a placeholder we could not see.
+  if (v === null) return { value: null };
+  return ['string', 'number', 'boolean', 'bigint'].includes(typeof v) ? { value: v } : undefined;
+}
+
+/** Steps whose args are VALUES to compare against, never traversal predicates — so a nested
+ *  traversal in one of these slots is an operand. `where`/`filter`/`not`/`and`/`or` are absent on
+ *  purpose: a nested traversal there is a PREDICATE BODY (`where(__.out())`), and folding it would
+ *  turn a filter into a comparison. Their P-wrapped operands still fold, via `values` below. */
+const VALUE_OPERAND_SLOTS: Record<string, (args: readonly any[]) => readonly number[]> = {
+  is: () => [0],
+  hasKey: (a) => a.map((_, i) => i),
+  hasValue: (a) => a.map((_, i) => i),
+  hasId: (a) => a.map((_, i) => i),
+  hasLabel: (a) => a.map((_, i) => i),
+  // has(key, X) → slot 1; has(label, key, X) → slot 2. has(key) alone has no operand.
+  has: (a) => (a.length === 2 ? [1] : a.length === 3 ? [2] : []),
+};
+
+/** Fold constants inside a predicate object's `values`, recursively (P.not(P.gt(…)) nests). */
+function foldPredOperands(pred: any, params: Record<string, any>): any {
+  if (!pred || typeof pred !== 'object' || !('op' in pred) || !Array.isArray((pred as any).values)) return pred;
+  return {
+    ...pred,
+    values: (pred as any).values.map((v: any) => {
+      if (isNested(v)) { const c = constantOperand(v.nested, params); return c ? c.value : v; }
+      return foldPredOperands(v, params);
+    }),
+  };
+}
+
+export function foldConstantPredicateOperands(steps: PStep[], params: Record<string, any>): PStep[] {
+  return steps.map((s) => {
+    const slots = VALUE_OPERAND_SLOTS[s.name]?.(s.args ?? []) ?? [];
+    let changed = false;
+    const args = (s.args ?? []).map((a: any, i: number) => {
+      if (slots.includes(i) && isNested(a)) {
+        const c = constantOperand(a.nested, params);
+        if (c) { changed = true; return c.value; }
+        return a;
+      }
+      const folded = foldPredOperands(a, params);
+      if (folded !== a) changed = true;
+      return folded;
+    });
+    return changed ? { ...s, args } : s;
+  });
+}
+
 /** Desugar `valueMap().with(WithOptions.tokens)` onto the valueMap step. The tokens option with no
  *  selector (or the all selector) is exactly `valueMap(true)`: include the id+label tokens, which
  *  the valueMap projector already reads off a `true` arg. So append the `true` flag and drop the

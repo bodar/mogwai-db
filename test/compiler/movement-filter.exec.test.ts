@@ -125,3 +125,32 @@ test('user-supplied string ids: create, seed, traverse, expose (COALESCE uid,id)
   expect(r('g.V().has("name","lop").id()').map((x: any) => typeof x.v)).toEqual(['number']);
 });
 });
+
+test('a constant() predicate operand folds to its literal, at every predicate host', () => {
+  const store = seededStore();
+  const vals = (q: string) => run(store, q).map((r: any) => r.v).sort();
+  const names = (q: string) => run(store, q).map((r: any) => r.id).sort();
+
+  // TinkerPop lets a predicate's OPERAND be a traversal, compared against its first result. A
+  // bare constant() reads nothing from the traverser, so it IS its value — folded in the IR
+  // (foldConstantPredicateOperands) rather than handled per host, which is why one Pass covers
+  // is()/has()/where()/hasLabel() and the P-wrapped forms alike.
+  expect(vals('g.V().values("age").is(__.constant(29))')).toEqual([29]);
+  expect(vals('g.V().values("name").is(__.constant("marko"))')).toEqual(['marko']);
+  expect(vals('g.V().values("age").is(P.gt(__.constant(29)))')).toEqual([32, 35]);
+  expect(vals('g.V().values("age").where(P.gt(__.constant(29)))')).toEqual([32, 35]);
+  expect(names('g.V().has("name",__.constant("marko"))')).toEqual([1]);
+  expect(names('g.V().has("age",P.lte(__.constant(27)))')).toEqual([2]);
+  expect(names('g.V().hasLabel(__.constant("software"))')).toEqual([3, 5]);
+  // …including operands nested inside a multi-value P
+  expect(vals('g.V().values("age").is(P.without(__.constant(29), __.constant(32)))')).toEqual([27, 35]);
+
+  // A nested traversal in where()/filter() is a PREDICATE BODY, not an operand — folding one
+  // would turn a filter into a comparison, so those hosts are deliberately excluded.
+  expect(names('g.V().where(__.out("created"))')).toEqual([1, 4, 6]);
+
+  // A genuinely per-traverser operand still defers, and says so: it needs a correlated value.
+  // Before, the operand object reached SQLite as a bind and surfaced as an opaque driver error.
+  expect(() => run(store, 'g.V().has("name",__.V(1).out("knows").values("name"))'))
+    .toThrow(/traversal as a predicate operand is not yet supported/);
+});
