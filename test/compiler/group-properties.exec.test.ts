@@ -11,6 +11,7 @@ import { parseRequest } from '../../src/wire.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { assertStreamColumns } from '../../src/compiler/steps/context/stream.ts';
 import { pushChildScope } from '../../src/compiler/steps/tail/child.ts';
+import { decodeAll } from '../support/decode.ts';
 
 const read = (q: string, options?: CompileOptions) => {
   const p = compile(q, {}, options);
@@ -278,4 +279,98 @@ test('edge-gate composite key rows carry o/l/i + the edge (gate #2)', () => {
   expect(hit.v_id).toBe(9);
   expect(hit.v_src).toBe(1); expect(hit.v_tgt).toBe(3);
 });
+});
+
+// ---------- a MAP-shaped child body (the fourth child shape) ----------
+//
+// The child seam admitted element/scalar/list bodies; a map-producing body was inadmissible at
+// EVERY position, which is why four separate index items named it as their blocker. It needed no new
+// SQL — `lowerValueMap` is the ONE map builder and a MapStream is a one-column `map` blob plus
+// carried columns (structurally a scalar's `v`). What was missing: the builder REFUSED to run with a
+// live origin and declared no carried columns, so it could never rejoin a parent.
+describe('a valueMap() child body', () => {
+  // The oracle: a child map must decode to the SAME Map the root form does. Asserted through the
+  // real GraphBinary wire, not the SQL rows, because the terminal framing is the part that had no
+  // path for a list value side (properties are multi-valued).
+  //
+  // NB compared as a MULTISET, deliberately. Emission order through a child scope already differs
+  // from the root form for the LONG-STANDING scalar child — `g.V(1).local(__.out().values("name"))`
+  // yields [vadas,lop,josh] where `g.V(1).out().values("name")` yields [josh,lop,vadas] — so a map
+  // child matching the root's order would make it the ONLY shape that does. That divergence is real
+  // and pre-existing (canonical-emission-order territory, not this seam's), so these tests hold the
+  // map child to the same contract as its siblings and the order gap is recorded below, not hidden.
+  const framed = async (store: GraphStore, g: string) => {
+    const vs = await decodeAll(executeQuery(store, g, {}));
+    return vs.map((v: any) => JSON.stringify(v instanceof Map ? Object.fromEntries(v) : v)).sort();
+  };
+
+  test('a child map frames identically to the root form', async () => {
+    const store = seededStore();
+    for (const [child, root] of [
+      ['g.V(1).local(__.valueMap("name"))', 'g.V(1).valueMap("name")'],
+      ['g.V(1).map(__.valueMap("name"))', 'g.V(1).valueMap("name")'],
+      ['g.V(1).local(__.valueMap())', 'g.V(1).valueMap()'],
+      ['g.V().local(__.valueMap("name"))', 'g.V().valueMap("name")'],
+    ]) expect(await framed(store, child)).toEqual(await framed(store, root));
+  });
+
+  test('the body composes a movement/filter prefix, so it is the ordinary element fold', async () => {
+    const store = seededStore();
+    // One map per REACHED element, not per parent — the prefix fans out and the rejoin keeps it.
+    expect(await framed(store, 'g.V(1).local(__.out().valueMap("name"))'))
+      .toEqual(await framed(store, 'g.V(1).out().valueMap("name")'));
+    // …and a filtered prefix, proving the row-local vocabulary is the gate (not a map allow-list).
+    expect(await framed(store, 'g.V(1).local(__.out().hasLabel("person").valueMap("name"))'))
+      .toEqual(['{"name":["josh"]}', '{"name":["vadas"]}']);
+  });
+
+  test('one map per parent — the rejoin is per-origin, not global', async () => {
+    const store = seededStore();
+    // Every vertex yields exactly its own map: 6 vertices in, 6 maps out, each matching its root
+    // projection. A rejoin that lost the ordinal would cross-product these.
+    const child = await framed(seededStore(), 'g.V().local(__.valueMap("name"))');
+    expect(child.length).toBe(6);
+    expect(child).toEqual(await framed(store, 'g.V().valueMap("name")'));
+  });
+
+  test('KNOWN GAP, shared with every other child shape: emission order is not the root order', async () => {
+    // Documented rather than hidden. A child scope re-orders relative to the root form, and the
+    // long-standing SCALAR child does it identically — so this is the canonical-emission-order item,
+    // not a map-child defect. Pinned as an EQUALITY between the two shapes so that whenever the
+    // order gap is fixed, it must be fixed for both and this test tells us.
+    const store = seededStore();
+    const raw = async (g: string) => (await decodeAll(executeQuery(store, g, {})))
+      .map((v: any) => (v instanceof Map ? (Object.values(Object.fromEntries(v))[0] as any[])?.[0] : v));
+    expect(await raw('g.V(1).local(__.out().valueMap("name"))'))
+      .toEqual(await raw('g.V(1).local(__.out().values("name"))'));
+    // …and both differ from the root order, which is the gap itself.
+    expect(await raw('g.V(1).local(__.out().values("name"))'))
+      .not.toEqual(await raw('g.V(1).out().values("name")'));
+  });
+
+  test('the map blob keeps its typed shape (list values, typed keys)', () => {
+    const store = seededStore();
+    // The blob is [[{t:'string',v:key},[values]],…]; materialize wraps the value side as a typed
+    // {t:'list'} node at the ONE point that frames, leaving the re-entry consumers' bare contract
+    // (select(Column.values)/unfold feed the UNTYPED list substrate) untouched.
+    const rows = run(store, 'g.V(1).local(__.valueMap("name"))') as any[];
+    expect(JSON.parse(rows[0].map)).toEqual([[{ t: 'string', v: 'name' }, { t: 'list', v: ['marko'] }]]);
+  });
+
+  test('the re-entry consumers still see the BARE value side (contract unchanged)', () => {
+    const store = seededStore();
+    // select(Column.values)/unfold aggregate the value side as a plain nested array. If materialize
+    // had typed the blob in place instead, this would come back double-encoded.
+    expect((run(store, 'g.V(1).valueMap("name").select(Column.values)') as any[]).length).toBe(1);
+    expect((run(store, 'g.V(1).valueMap("name").unfold()') as any[]).length).toBe(1);
+  });
+
+  test('a retyping suffix and an element-valued map fail CLOSED', () => {
+    const store = seededStore();
+    // A suffix that retypes the map (unfold/select(Column)/count(local)) lands on a list/entry/
+    // scalar shape, so the consumer needs the matching rejoin — declined, not answered.
+    expect(() => run(store, 'g.V(1).local(__.valueMap().unfold())')).toThrow(/not yet supported/);
+    // valueMap(true) tokens re-entry keeps the builder's own deferral.
+    expect(() => run(store, 'g.V(1).local(__.valueMap(true))')).toThrow(/not yet supported/);
+  });
 });

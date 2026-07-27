@@ -2,10 +2,10 @@ import { derived, empty, list, paren, q, value, type Expression, type Relation }
 import { perRowColumnOf, perRowCols } from '../../../sql/kernel/render.ts';
 import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
-import { advance, carriedWith, carryFrag, carryFragMint, carriedCols, partitionOver, type Carried, type ElementStream } from '../context/context.ts';
+import { advance, carriedWith, carryFrag, carryFragMint, carriedCols, partitionOver, prevRel, withCarried, type Carried, type ElementStream } from '../context/context.ts';
 import { aliasId } from '../context/alias.ts';
 import { asOnStream, selectOneFromAlias } from './labelselect.ts';
-import { carryOf, toListStream, toScalarStream, toVariantStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
+import { carryOf, toListStream, toMapStream, toScalarStream, toVariantStream, PROPERTY_PAYLOAD, type ListStream, type MapStream, type PropertyStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { lowerScalarRows, unionScalarStreams, SCALAR_TRANSFORMS } from './scalar.ts';
 import { lowerReSource } from '../resource.ts';
@@ -15,7 +15,7 @@ import { predicateSql, rangeToOffsetLimit } from '../../plan/plan.ts';
 import { elementOrderSql } from './modulation.ts';
 import {
   childCtx, childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, labelSelectOf,
-  ELEMENT_CHILD_STEPS, isBareBranchChildAllCard, reuseCurrentFrame, ROOT_SCOPE, scalarChildPrefixOk,
+  ELEMENT_CHILD_STEPS, isBareBranchChildAllCard, isElementChildStep, reuseCurrentFrame, ROOT_SCOPE, scalarChildPrefixOk,
   type ChildFrame, type ChildParent, type ChildScope, type ChildUse, type CompileScope,
 } from './child-shape.ts';
 // The scope-construction trio (pushChildScope/popChildScope below + reuseCurrentFrame) is the
@@ -201,6 +201,48 @@ function tryCompileCountValueRows(
   return { stream: toScalarStream({ ...carryOf(pushed.seed), carried: outCarried }, rel, 'long', { result: 'value' }), frame: pushed.frame };
 }
 
+// ---------- the shape-agnostic cardinality rejoin ----------
+//
+// Restoring PARENT cardinality from child rows is one operation, and it does not depend on the
+// child's shape — only on which PAYLOAD columns to re-project and how to rebuild the stream. `all`
+// keeps every child row; `first` ranks per origin by the child's encounter and takes rn=1. The
+// scalar and map rejoins are the SAME window over different payloads, so they share this rather
+// than existing as two copies (a map is a one-column `map` blob in the core, exactly as a scalar is
+// a one-column `v` — see stream.ts streamColumns).
+
+/** Re-project child rows at parent cardinality. `payload(r)` names the shape's own columns off the
+ *  child relation `r`; `cols` declares them in the same order; `rebuild` mints the outgoing stream
+ *  from the parent's Carry + the re-projected relation. */
+export function applyChildCardinality<S>(
+  parent: ChildParent,
+  pushed: ReturnType<typeof pushChildScope>,
+  lowered: { rel: Relation; carried: Carried },
+  use: ChildUse,
+  shape: {
+    cols: readonly string[];
+    payload: (r: Relation) => Expression;
+    rebuild: (carry: ReturnType<typeof carryOf>, rel: Relation) => S;
+  },
+): { stream: S; frame: ChildFrame } {
+  const r = lowered.rel.as('r');
+  const parentCols = carriedCols(parent.carried);
+  if (use === 'all') {
+    const rel = derived(
+      q`SELECT ${shape.payload(r)}${carryFrag(parent.carried, r)} FROM ${r}`,
+      [...shape.cols, ...parentCols], 'all_rows');
+    return { stream: shape.rebuild(carryOf(parent), rel), frame: pushed.frame };
+  }
+  if (!lowered.carried.encounter) throw new Error('child first cardinality requires explicit encounter order');
+  const enc = lowered.carried.encounter;
+  const first = derived(
+    q`SELECT ${shape.payload(r)}${carryFrag(parent.carried, r)}, ROW_NUMBER() OVER (PARTITION BY ${r.c[pushed.frame.ordinal]} ORDER BY ${r.c[enc]}) AS rn FROM ${r}`,
+    [...shape.cols, ...parentCols, 'rn'], 'f');
+  const rel = derived(
+    q`SELECT ${shape.payload(first)}${carryFrag(parent.carried, first)} FROM ${first} WHERE ${first.c.rn}=1`,
+    [...shape.cols, ...parentCols], 'first_row');
+  return { stream: shape.rebuild(carryOf(parent), rel), frame: pushed.frame };
+}
+
 /** Compile a scalar-producing child as rows, so productivity is represented by row
  * existence rather than SQL NULL. Movement/filter uses the ordinary element fold;
  * projection adds an explicit provider encounter key; the shared scalar pipeline
@@ -247,7 +289,7 @@ function applyScalarChildCardinality(
  *  seam's five seeds read as one operation; it adds nothing of its own. The correlated inline
  *  child (correlated.ts) reaches the SAME method, so a label re-root composes identically
  *  whether the body materializes or renders as a nested correlated subquery. */
-const lowerElementBody = (seed: ElementStream, steps: PStep[]): ElementStream | null =>
+export const lowerElementBody = (seed: ElementStream, steps: PStep[]): ElementStream | null =>
   engineOf(seed).tryLowerElementSteps(steps, seed);
 
 /** The Pop mode of a select(Pop, label) — default last, matching the root dispatch. */

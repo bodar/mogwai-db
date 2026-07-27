@@ -7,12 +7,12 @@ import {
 import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { isMapLocalOrder } from './list.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, partitionOver, withoutCarried, type Carried, type Carry, type ElementStream } from '../context/context.ts';
+import { advance, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, partitionOver, prevRel, withCarried, withoutCarried, type Carried, type Carry, type ElementStream } from '../context/context.ts';
 import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
 import { PER_ROW, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
-import { pushChildScope, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows } from './child.ts';
-import { childCtx, childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, reuseCurrentFrame, type ChildParent } from './child-shape.ts';
+import { applyChildCardinality, lowerElementBody, pushChildScope, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows } from './child.ts';
+import { childCtx, childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, isElementChildStep, reuseCurrentFrame, ROOT_SCOPE, type ChildParent, type ChildUse, type CompileScope } from './child-shape.ts';
 
 /** The numeric reducers that terminate a nested-group inner value `by(__.values(x).<r>())`. */
 const SCALAR_REDUCERS = new Set(['sum', 'min', 'max', 'mean']);
@@ -508,31 +508,115 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
 export function lowerValueMap(st: ElementStream, proj: PStep): MapStream {
   if (proj.name === 'elementMap') throw new Error('elementMap() re-entry not yet supported');
   if (proj.args.includes(true)) throw new Error('valueMap(true)/token re-entry not yet supported');
-  if (st.carried.aliases.size || st.carried.path || st.carried.origins.length || st.carried.sack || st.carried.fromV)
-    throw new Error('valueMap() re-entry carrying as()/path()/branch/sack state not yet supported');
+  // ORIGINS are admitted (and threaded below): a map is ONE blob per element, so a per-parent
+  // ordinal rides it exactly as it rides a movement — which is what lets a valueMap() body be a
+  // CHILD (`local(__.valueMap())`) and rejoin its parent. The other carried kinds still defer:
+  // an alias/path history would have to be framed INTO the map, and sack/fromV are element state
+  // the blob has no slot for.
+  if (st.carried.aliases.size || st.carried.path || st.carried.sack || st.carried.fromV)
+    throw new Error('valueMap() re-entry carrying as()/path()/sack state not yet supported');
   const keys = proj.args.filter((a: any) => typeof a === 'string') as string[];
   const p = st.rel.as('p');
   const n = elemRel(st);
   const l = labels.as('l');
   const vlJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
+  // The carried columns the blob rides out with, declared once and used for both CTEs so each
+  // relation's declared schema equals its physical projection.
+  //
+  // BULK is dropped at the ROOT (the element source's bulk is consumed here — one blob per element)
+  // but KEPT inside a child scope, where the parent's rejoin re-projects the parent's carried
+  // columns off THIS relation and so needs every one of them present. Dropping it there produced a
+  // dangling `SELECT r.map AS map,  FROM` — the rejoin naming a column the child had discarded.
+  const inChild = st.carried.origins.length > 0;
+  const outCarried = inChild ? st.carried : carriedWith(st.carried, { bulk: null });
+  const outCols = carriedCols(outCarried);
   // One WHOLE-MAP blob per element (mapstream-blob-model): fold its {key:[values]} props into an
   // ordered [[keyNode, valueList], …] pairs array. The key is a string → a self-describing {t,v}
   // scalar node (the uniform typed encoding); the value is the property's value list (a JSON
   // array, embedded via json() — a collection value round-trips as a real nested list, not the
   // typed tree, matching the UNTYPED list substrate the value side feeds). Terminal valueMap()
   // framing uses the typed valueMapProps instead (this path is the re-enterable follower form).
-  const base = st.q.cte(q`SELECT ${bareValueMapProps(n, st.elem)} AS props FROM ${vlJoin}`, ['props']);
+  const base = st.q.cte(
+    q`SELECT ${bareValueMapProps(n, st.elem)} AS props${carryFrag(outCarried, p)} FROM ${vlJoin}`,
+    ['props', ...outCols],
+  );
   const b = base.as('b');
   const keyFilter = keys.length ? q` WHERE je.key IN (${list(keys.map((k) => value(k)), ', ')})` : empty;
   const pair = q`json_array(json_object('t', 'string', 'v', je.key), json(je.value))`;
+  // NO `ORDER BY je.key`. The props object `bareValueMapProps` builds is already in PROPERTY
+  // INSERTION order (`ORDER BY MIN(p.id)`), and `json_each` over an object yields document order —
+  // so leaving it alone preserves that, while sorting alphabetically destroyed it. That was
+  // invisible while this builder only fed the re-entry consumers (which re-aggregate one side), and
+  // became observable the moment a map could be FRAMED from here: the root form shows
+  // {name, age} and this showed {age, name} for the same vertex.
   const rel = st.q.cte(
-    q`SELECT jsonb(COALESCE((SELECT json_group_array(${pair} ORDER BY je.key) FROM json_each(${b.c.props}) je${keyFilter}), json('[]'))) AS map FROM ${b}`,
-    ['map'],
+    q`SELECT jsonb(COALESCE((SELECT json_group_array(${pair}) FROM json_each(${b.c.props}) je${keyFilter}), json('[]'))) AS map${carryFrag(outCarried, b)} FROM ${b}`,
+    ['map', ...outCols],
   );
-  // A fresh per-element scope: the element source's carried bulk is consumed here (was 1 per
-  // element), and no origin ordinal is needed now that each element is its own blob row.
-  const carry: Carry = { ...carryOf(st), carried: carriedWith(st.carried, { bulk: null }) };
+  // One blob row per element, carrying whatever the element carried (bar bulk, consumed here).
+  const carry: Carry = { ...carryOf(st), carried: outCarried };
   return toMapStream(carry, rel, { kind: 'scalar' }, { kind: 'list', of: { kind: 'scalar' } });
+}
+
+// ---------- a MAP-shaped child body ----------
+//
+// The child seam admitted element/scalar/list bodies; a map-producing body (`local(__.valueMap())`)
+// was inadmissible at EVERY position, which is why four separate items named it as their blocker —
+// item 2's residual, item 5's re-entry, the branch merges' uncovered shape, and the group re-entry
+// matrix. It needed no new SQL: `lowerValueMap` (group.ts) is the ONE map builder, and a MapStream
+// is a one-column `map` blob plus carried columns — structurally a scalar's `v`. The only thing
+// missing was that the builder refused to run with a live origin and declared no carried columns,
+// so it could not rejoin a parent. With those threaded, the body composes here through the SAME
+// pieces the scalar child uses: the element fold for the prefix, the one map builder for the
+// projection, and the shape-agnostic cardinality rejoin.
+
+/** Mint a per-origin `encounter` on an element child stream that carries none — the order the
+ *  `first` cardinality policy ranks on. Factored out because it is the same three lines every
+ *  child provider needs and the expression nests badly inline. */
+function mintChildEncounter(end: ElementStream): ElementStream {
+  const pe = prevRel(end, 'pe');
+  const carried = withCarried(end, { encounter: 'encounter' }).carried;
+  const mint = q`ROW_NUMBER() OVER (${partitionOver(carried, pe, pe.c.id)})`;
+  return advance(end, q`SELECT ${pe.c.id} AS id${carryFragMint(carried, pe, 'encounter', mint)} FROM ${pe}`,
+    { encounter: 'encounter' });
+}
+
+/** `<element movement/filter prefix>.valueMap(...)` as a child body → one map per parent.
+ *  Null when the body is not that shape, so the caller keeps its own deferral. A suffix that
+ *  RETYPES the map (`unfold`, `select(Column)`, `count(local)`) is declined for now rather than
+ *  answered: those land on a list/entry/scalar shape, so the consumer needs the matching rejoin —
+ *  the follow-up slice, not a different mechanism. */
+export function tryCompileMapChild(
+  parent: ChildParent,
+  nested: any,
+  use: ChildUse = 'first',
+  scope: CompileScope = ROOT_SCOPE,
+): MapStream | null {
+  if (!nested || parent.kind !== 'elements') return null;
+  const body = childSteps(nested, parent.params);
+  if (!body.length) return null;
+  // Split off the trailing valueMap(); everything before it must be the element-preserving
+  // vocabulary (the same predicate every other row-local consumer uses).
+  const proj = body[body.length - 1];
+  if (proj.name !== 'valueMap' || proj.args.includes(true)) return null;
+  const prefix = body.slice(0, -1);
+  const ctx = childCtx(parent);
+  if (!prefix.every((c) => isElementChildStep(c, ctx))) return null;
+
+  const pushed = pushChildScope(parent, scope);
+  const end = lowerElementBody(pushed.seed, prefix);
+  if (!end) return null;
+  // The `first` policy ranks per origin by an encounter, so mint one when the prefix carries
+  // none — the same ROW_NUMBER-over-the-origin-partition mint every other child provider makes.
+  const withEnc = end.carried.encounter ? end : mintChildEncounter(end);
+  let lowered: MapStream;
+  try { lowered = lowerValueMap(withEnc, proj); }
+  catch { return null; } // the builder's own carried/token deferrals stay authoritative
+  return applyChildCardinality(parent, pushed, lowered, use, {
+    cols: ['map'],
+    payload: (r) => q`${r.c.map} AS map`,
+    rebuild: (carry, rel) => toMapStream(carry, rel, lowered.keyOf, lowered.valOf),
+  }).stream;
 }
 
 /** groupCount() over a SCALAR value stream — a barrier grouping by the value itself:
