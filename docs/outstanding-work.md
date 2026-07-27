@@ -353,10 +353,12 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    2026-07-27, [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md) #3 — the sharper
    framing of item 7's "small nameable gaps".) The pattern BODY is already generic (`union` inside a
    pattern works); what is hand-rolled is the binding table around it, which holds node rowids only —
-   so a scalar (`values`), reduced (`count`) or edge-typed end var defers. Same move as 4b: lower to
-   a Stream of any shape, bind on its `kind`. Doing 4b and this together is cheaper than either
-   alone. Note **23 of match's 49 corpus failures are the MATCH-STRING form (7b), not this.**
-   Real residual here ≈ 26. **Medium.**
+   so a scalar (`values`), reduced (`count`) or edge-typed end var defers. **This is 4b's move, and
+   4b has now built the machinery** (`lowerRootedArm` + kind-dispatch): lower to a Stream of any
+   shape and bind on its `kind`. The one difference is that a pattern is SEEDED from a bound var, not
+   rooted, so it wants `lowerStepsStrict` over `applyPattern`'s existing seed rather than a fresh
+   source. Note **23 of match's 49 corpus failures are the MATCH-STRING form (7b), not this** —
+   `match()` compiles 17/66 and the real residual here ≈ 26. **Medium.**
 
 8. **Graph-algorithms layer (new cluster).** Algorithms as `call()` services + OLAP step names
    (`pageRank`/`connectedComponent`/`peerPressure`/`shortestPath`) as desugar Passes. Nothing built.

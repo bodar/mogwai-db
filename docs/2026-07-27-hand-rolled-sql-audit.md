@@ -1,8 +1,9 @@
 # Hand-rolled SQL audit — where a second implementation replaced the substrate
 
-_Swept 2026-07-27 against the working tree. Every count below is **measured**, not estimated: the
-method is at the bottom. Ranked by (duplication × family unblock × reach at depth), which is not
-the same as ranking by lines._
+_Swept 2026-07-27; **re-measured 2026-07-27 after merging trunk** (`611a4fc`), which landed the
+`union()` SOURCE consolidation and closed what this audit ranked #2 — see the struck entry. Every
+count below is **measured** against the merged tree, not estimated: the method is at the bottom.
+Ranked by (duplication × family unblock × reach at depth), which is not the same as ranking by lines._
 
 > The kernel is not the problem. Every site here already builds through `q`/`Relation` — locked
 > decision "only `kernel/q.ts` touches lazyrecords" holds. What this audit hunts is the **second
@@ -12,8 +13,8 @@ the same as ranking by lines._
 
 ## The one structural finding
 
-Three of the top five sites are the same missing primitive wearing different clothes. The compiler
-has **two** rendering modes and needs a third:
+Three of the remaining sites (#1, #4, #5) are the same missing primitive wearing different clothes.
+The compiler has **two** rendering modes and needs a third:
 
 | mode | who owns it | shape | used by |
 |---|---|---|---|
@@ -61,7 +62,8 @@ repeat's vocabulary wall into a performance trade-off instead of a `throw`.
 ## The ranking
 
 ### 1. `expandRepeatBody` + the `repeat` StepFn — the recursive term's private mini-compiler
-`steps/prefix/branch.ts:505-801` (~300 lines: `moveDirs`, `dirCombos`, `expandRepeatBody`, `repeat`)
+`steps/prefix/branch.ts:525-821` (~300 lines: `moveDirs:525`, `dirCombos:535`,
+`expandRepeatBody:549`, `repeat:614`)
 
 The largest second implementation in the compiler, and the only one that duplicates *movement*.
 It has its own direction table (`moveDirs`, a near-copy of `plan.ts dirsFor`), its own cartesian
@@ -92,7 +94,7 @@ FAIL  g.V().map(__.repeat(__.out()).times(2).count())    FAIL  g.V().group().by(
 FAIL  g.V().order().by(__.repeat(__.out()).times(2).count())
 ```
 
-**It also owns the only place #6 has no fallback.** `walkPredicate` (`branch.ts:37`) routes
+**It also owns the only place #6 has no fallback.** `walkPredicate` (`branch.ts:39`) routes
 `until()`/`emit()` through the inline predicate compiler and **throws** when it declines — unlike
 every other consumer, which falls through to the generic child-existence gate. So the inline
 compiler's vocabulary is the hard ceiling here and nowhere else:
@@ -103,38 +105,52 @@ compiler's vocabulary is the hard ceiling here and nowhere else:
 `undefined is not an object (evaluating 'node.constructor')`. 4–5 corpus cases. Worth a cheap
 guard independent of the rest.
 
+**Corroborated independently by the project's own L3 telemetry**, which was not the source for any of
+the above — a full `mise run test` on the merged tree surfaces
+`repeat(__.bothE().otherV().has()) not yet supported` as an 11-scenario / 7-type cluster in its top
+band, e.g. `g.withStrategies(RepeatUnrollStrategy).V().repeat(__.bothE().otherV().has('age',lt(30))).times(2)`.
+Two measurement routes, same site.
+
 Subsumes outstanding-work **item 3** (alias columns through `repeat()`) and most of P3's
 recursive-path tails.
 
 ---
 
-### 2. `seedUnion` — a strictly weaker copy of a family that is already generic
-`engine/engine.ts:224-244` (26 lines)
+### ~~2. `seedUnion` — a strictly weaker copy of a family that is already generic~~
+✅ **LANDED on trunk 2026-07-27** (`322e45c`), between this audit's first sweep and its re-measure.
+`seedUnion` is deleted; each branch now lowers through `Engine.lowerRootedArm`
+(`engine/engine.ts:250`) and the merge is picked from the arms' **kinds**. Kept here — not deleted —
+because it is now the audit's **worked example**, and it is worth reading before starting #1, #3 or #4:
 
-Best duplication-removed-per-line in the audit, and already correctly scoped as outstanding-work
-**item 4b**. This sweep confirms that item's spike rather than adding to it. Side by side, same arms,
-two implementations:
-
-| | mid-traversal | source |
+| same arms, two implementations | mid-traversal | source (before → after) |
 |---|---|---|
-| scalar arm | `g.V().union(__.values("name"), __.constant("x"))` ✅ | `g.union(__.V().values("name"))` ❌ |
-| list arm | `g.V().union(__.out().fold(), __.in().fold())` ✅ | `g.union(__.V().out().fold())` ❌ |
-| alias | `g.V().as("a").union(__.out(),__.in()).select("a")` ✅ | `g.union(__.V().as("a").out()).select("a")` ❌ |
-| path | `g.V().union(__.out(),__.in()).path()` ✅ | `g.union(__.V().out(),__.V().in()).path()` ❌ |
+| scalar arm | ✅ | `g.union(__.V().values("name"))` ❌ → **✅** |
+| alias | ✅ | `g.union(__.V().as("a").out()).select("a")` ❌ → **✅** |
+| path | ✅ | `g.union(__.V().out(),__.V().in()).path()` ❌ → **✅** |
+| list arm | ✅ | `g.union(__.V().out().fold())` ❌ → ❌ (a `fold()` arm lowers to a terminal result) |
 
-**Measured:** 2 / 15 `g.union(…)`-rooted corpus traversals compile.
+**Measured: 2/15 → 8/15** `g.union(…)`-rooted corpus traversals compile; the whole bucket left the
+failure table. 26 lines deleted bought four fail-closed walls and closed item 4's `encounter`
+residual as a side effect.
 
-The merges (`finishElementMerge`, `unionScalarStreams`, `finishListMerge`, `mergeVariantArms`) are
-already parent-agnostic and directly reusable; only the *triage* doesn't transfer, because a source
-arm is a rooted traversal, not a child body. Dispatch on the lowered Stream's `kind` instead. Closes
-item 4's residual as a side effect.
+**Three transferable lessons, all confirmed rather than assumed:**
+1. The **merges** were reusable verbatim (they take a bare `Carry`, not a parent stream); the
+   **triage** was not, because `classifyBranchArms` describes a child body under a parent traverser
+   and a source arm is a rooted traversal. **Dispatch on the lowered Stream's `kind`, not on syntax.**
+   That is the same move #3 (`match`) and #4 (`path`) need.
+2. Reach for **compileRead's own spine minus the root materialization** — the new `lowerRootedArm` —
+   rather than `buildPrefix`, which stops at the prefix. Most of these sites reach for the prefix
+   fold and inherit its element-only ceiling.
+3. The residual is honest and narrow: a `fold()` arm is a *terminal* result, not a relation a merge
+   can consume. That is a real boundary, not a vocabulary gap — exactly the shape a fail-closed
+   deferral should have.
 
 ---
 
 ### 3. `match.ts` — the binding table, and a pattern vocabulary narrower than the seam it calls
 `steps/prefix/match.ts` (118 lines)
 
-Half-reformed already: `applyPattern:59` genuinely folds the pattern body through
+**Now the top open site after #1** (#2 landed). Half-reformed already: `applyPattern:47` genuinely folds the pattern body through
 `lowerElementSteps`, so movement/filter inside a pattern is *not* duplicated (`union` inside a
 pattern works). What is hand-rolled is the re-projection around it — the binding table can only hold
 node rowids, so anything that isn't an element defers:
@@ -151,14 +167,15 @@ FAIL  g.V().match(__.as("a").outE("knows").as("b"))                 -- edge end 
 MATCH-*string* form** (`unsupported source step: match`) — that is outstanding-work **7b**, a
 separate language-level decision, not this site. Real residual here ≈ 26.
 
-Fix shape is the same move as #2: lower each pattern through the **full** loop (`lowerSteps`) and
-bind whatever kind it lands on, rather than requiring element. Doing #2 and #3 together is cheaper
-than either alone.
+Fix shape is #2's move, and #2 has now built the machinery: lower each pattern through the **full**
+loop and bind on the resulting Stream's `kind` rather than requiring element. `lowerRootedArm`'s
+kind-dispatch is the template; the difference is that a pattern is *seeded* from a bound var rather
+than rooted, so it wants `lowerStepsStrict` over `applyPattern`'s existing seed, not a fresh source.
 
 ---
 
 ### 4. `path.ts` — two positional projectors, one of them stuck at `by(key)`
-`steps/tail/path.ts:233-285` (`compilePathArray`, ~61 lines) vs `lowerPathPositionChild:87`
+`steps/tail/path.ts:239-291` (`compilePathArray`, ~61 lines) vs `lowerPathPositionChild:87`
 
 The LINEAR regime (one column per position) runs a real child per position. The
 RECURSIVE/grouped regime (a JSONB array walked by `json_each`) hard-codes `nodePropScalar(key)` and
@@ -172,7 +189,8 @@ FAIL  g.V().repeat(__.out()).times(2).path().by(__.values("name"))   -- path().b
 FAIL  g.V().repeat(__.out()).times(2).path().by(T.id)
 ```
 
-**Measured:** 9 / 42 `path().by(…)` corpus traversals fail; 14 attribute to path.ts overall. Needs a
+**Measured:** 7 / 42 `path().by(…)` corpus traversals fail (was 9 pre-merge — trunk's union-source
+work fixed `path()` over a union source); 14 attribute to path.ts overall. Needs a
 positional-child substrate over `json_each` — push a child scope per position — which is the
 mode-C question again. Already filed under P3 recursive-path tails; this sweep adds the
 linear-vs-recursive asymmetry as the sharp framing.
@@ -202,7 +220,7 @@ this sweep confirms it open and sizes it.
 ---
 
 ### 6. `predicate.ts` — the biggest pure vocabulary duplication, and (almost) the cheapest to ignore
-`steps/prefix/predicate.ts:60-305` (~262 lines)
+`steps/prefix/predicate.ts:70-333` (~264 lines; trunk grew it by ~30 lines threading a `LabelScope`)
 
 `compileInlinePredicate` is a parallel implementation of `has`/`hasLabel`/`hasId`/`values`/`label`/
 `loops`/`not`/`and`/`or`/`count`/`sum` plus infix connector precedence. On duplication alone it
@@ -220,14 +238,15 @@ So it is a **fast path doing its job** — the movement branch already delegates
 predicate vocabulary. **Delete it when #1 lands, not before**: its only load-bearing use is
 `until()`/`emit()`, which has no fallback (see #1).
 
-One genuine leak: `tryInlinePredicate:139` only swallows messages that *start with* `where`/`filter`,
+One genuine leak, still present after the merge: `tryInlinePredicate:145` only swallows messages that *start with* `where`/`filter`,
 so `empty where()/filter() traversal` escapes as a hard error — `g.V().filter(__.is(0))` and
 `g.E().filter(__.is(0))` crash instead of routing generically. Two corpus lines, a one-line fix.
 
 ---
 
 ### 7. `child.ts` — the third scalar-child projector residue
-`steps/tail/child.ts:498-540` (~60 lines), reached from `compileScalarChildRows:334`
+`steps/tail/child.ts:423-…` (the "bespoke element-projection SQL builder", ~60 lines), reached from
+`compileScalarChildRows:313`
 
 Already mostly reformed (the common path now runs `lowerStepsStrict`). What remains hard-codes
 `values`/`id`/`label`/`constant` against the generic `PROJECTORS` table's seven
@@ -270,11 +289,14 @@ philosophies; the second one is the model.
 ## Method
 
 `compile()` over all 2,298 L1 corpus traversals with a permissive param bag and the standard service
-registry; failures bucketed by message and attributed to a site. 1,620 compile / 678 fail.
-Composability claims are direct `compile()` probes of matched pairs (same body, different position),
-not inference. The SQLite `LATERAL` and body-relation results are `bun:sqlite` runs, quoted verbatim
-above. Scripts were scratch; the probe is ~40 lines and worth re-running after any of these land.
+registry; failures bucketed by message and attributed to a site. **1,626 compile / 672 fail**
+post-merge (1,620 / 678 before it). Composability claims are direct `compile()` probes of matched
+pairs (same body, different position), not inference. The SQLite `LATERAL` and body-relation results
+are `bun:sqlite` runs, quoted verbatim above. Scripts were scratch; the probe is ~40 lines and worth
+re-running after any of these land — doing exactly that is what caught #2 landing under this doc.
 
-**Two caveats on the numbers.** (1) Compiling is an upper bound on passing — corpus-compile 1,620 vs
-L3 1,430. (2) A traversal fails at its *first* wall, so a site's count is a lower bound on what it
+**Three caveats on the numbers.** (1) Compiling is an upper bound on passing — corpus-compile 1,626
+vs the L3 ratchet's 1,436. (2) A traversal fails at its *first* wall, so a site's count is a lower bound on what it
 gates; the 41 `mergeV(xx1)` lines are the one known artifact and are excluded from #5's figure.
+(3) Line anchors are as of the trunk merge (`545bb4b`) and drift — the function names are the stable
+handle, not the numbers.
