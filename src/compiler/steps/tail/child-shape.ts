@@ -172,9 +172,33 @@ const LABEL_STEPS = new Set(['as', 'select', 'where', 'dedup']);
  *  materialized generic gate, which carries the full schema. Exactly the fast-path contract:
  *  recognition-failure falls through, never mis-executes. */
 export function mentionsLabel(steps: readonly PStep[], params: Record<string, any>): boolean {
-  return steps.some((s) =>
-    (LABEL_STEPS.has(s.name) && (s.args ?? []).some((a: any) => typeof a === 'string'))
-    || (s.args ?? []).filter(isNested).some((a: any) => mentionsLabel(childSteps(a.nested, params), params)));
+  return labelsMentioned(steps, params).size > 0;
+}
+
+/** PURE. WHICH labels a body mentions, at any nesting depth — the set behind `mentionsLabel`.
+ *
+ *  The second consumer is match()'s scheduler (prefix/match.ts): a FILTER argument is ready to
+ *  apply once every variable it reads is bound, so it needs the names, not just whether there are
+ *  any. One scanner answers both questions — the boolean is this set being non-empty — so the two
+ *  can never disagree about what counts as mentioning a label. */
+export function labelsMentioned(steps: readonly PStep[], params: Record<string, any>): Set<string> {
+  const out = new Set<string>();
+  for (const s of steps) {
+    if (LABEL_STEPS.has(s.name)) {
+      for (const a of s.args ?? []) {
+        if (typeof a === 'string') out.add(a);
+        // `where("a", P.neq("c"))` compares two LABELS, and the second one rides inside the
+        // predicate rather than as a bare arg (filter.ts resolves it via aliasIdExpr, the same as
+        // the first). A scanner that read only bare args would miss it — which for match()'s
+        // scheduler means running the filter before "c" is bound.
+        else if (a && typeof a === 'object' && 'op' in a)
+          for (const v of ((a as any).values ?? [])) if (typeof v === 'string') out.add(v);
+      }
+    }
+    for (const a of (s.args ?? []).filter(isNested))
+      for (const l of labelsMentioned(childSteps((a as any).nested, params), params)) out.add(l);
+  }
+  return out;
 }
 
 /** PURE. The shape a `select(label)` yields here, or undefined when the child seam must decline

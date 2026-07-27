@@ -779,6 +779,27 @@ export function foldChooseOptions(steps: PStep[]): PStep[] {
 const asLabelsOf = (s: Step): string[] =>
   s.name === 'as' ? (s.args ?? []).filter((a: any): a is string => typeof a === 'string') : [];
 
+/** PURE. The labels a `match()` step binds — the `as(start)`/`as(end)` wrapping each of its pattern
+ *  arguments. A step's OWN `as()` is not the only way a label enters scope, and match() is the case
+ *  that matters here: it binds inside its arguments, so a chain that reads `where(__.as('c')…)`
+ *  after a match() sees a label this pass would otherwise call unbound and throw on — even though
+ *  the lowering carries the column perfectly well. Syntactic and shape-free, exactly like
+ *  `asLabelsOf`: the pattern body is re-read with the same `stepChain` primitive every other scanner
+ *  in this file uses, and a FILTER argument (`not(…)`/`where(…)`, which binds nothing — see
+ *  prefix/match.ts) contributes no label because it does not open with `as()`. */
+const matchLabelsOf = (s: Step, params: Record<string, any>): string[] => {
+  if (s.name !== 'match') return [];
+  const out: string[] = [];
+  for (const a of s.args ?? []) {
+    if (!isNested(a)) continue;
+    const chain = stepChain((a as any).nested, params);
+    if (chain[0]?.name !== 'as') continue;
+    out.push(...asLabelsOf(chain[0]));
+    if (chain.length > 1) out.push(...asLabelsOf(chain[chain.length - 1]));
+  }
+  return out;
+};
+
 /** The connective hosts TinkerPop's `WhereTraversalStep.configureStartAndEndSteps` recurses
  *  THROUGH when locating a where()-body's start and end: a ConnectiveStep (`and`/`or`) or a
  *  `not`. Their children are each configured in turn, so `where(__.and(__.as('a').out().as('b'),
@@ -786,6 +807,20 @@ const asLabelsOf = (s: Step): string[] =>
  *  nested body inside the where() is a traversal in its own right, and reaches this rewrite as
  *  its OWN where() host rather than as part of this one. */
 const WHERE_CONNECTIVES = new Set(['and', 'or', 'not']);
+
+/** The match() argument heads that are FILTERS: they constrain the binding table and bind nothing,
+ *  so their labels are variable REFERENCES and take the where()-style variable-location rewrite.
+ *
+ *  ONE definition, used by both halves — this pass (which rewrites the labels) and match()'s
+ *  lowering (which routes the argument to the `where` StepFn). An argument treated as a filter by
+ *  one and a pattern by the other would silently mis-execute, so they cannot be separate lists.
+ *
+ *  The conjunctions are deliberately absent: in match() position `and`/`or` are pattern GROUPS that
+ *  BIND their nested ends (the official corpus asserts `c`/`d` come back in the binding map for
+ *  `match(…, and(as("a").out("created").as("c"), …))`), so rewriting their labels to constraints
+ *  would answer a narrower question. `not()` binds nothing, and a two-arg `where("a", P.neq("c"))`
+ *  only compares two already-bound variables. */
+export const MATCH_FILTER_HEADS = new Set(['where', 'filter', 'not']);
 
 /**
  * TinkerPop routes `where(traversal)` by VARIABLE LOCATION (`GraphTraversal.where` →
@@ -876,19 +911,34 @@ export function rewriteWhereEndLabels(steps: PStep[], params: Record<string, any
     const out = chain.map((s) => {
       const isWhereHost = s.name === 'where';
       let stepChanged = false;
+      // A match()'s pattern arguments share ONE scope: the conjunction is solved together, so a
+      // `where(__.as('b')…)` argument may read a variable a SIBLING argument binds, regardless of
+      // the order they were written in. Every other host binds strictly left-to-right (line below),
+      // so seed match's own labels before descending rather than widening the general rule.
+      const inner = s.name === 'match' ? new Set([...bound, ...matchLabelsOf(s, params)]) : bound;
       const args = (s.args ?? []).map((a: any) => {
         if (!isNested(a)) return a;
         const body = stepChain(a.nested, params);
         // The variable-location rewrite first (it reads the labels visible at the HOST), then the
         // ordinary descent, so a nested where() inside the rewritten body is still visited.
-        const scoped = isWhereHost ? rewriteWhereVariables(body, bound, params) : body;
-        const walked = walk(scoped, bound);
+        //
+        // A match() FILTER argument gets the same treatment as a where() body, and for the same
+        // reason: its labels are variable REFERENCES, not binds. `match(…, not(as('a').out('created')
+        // .as('b')))` asks "is this (a,b) pair NOT created-connected", so both labels must
+        // canonicalize to select('a')/where(P.eq('b')) exactly as they do under where(). Left as
+        // binds they re-bind the columns to whatever the body walked to — an existence check that is
+        // always true, and negated, one that drops every row. A match PATTERN argument is untouched:
+        // there a trailing as() really does bind, which is why this keys on the filter heads.
+        const isFilterArg = s.name === 'match' && MATCH_FILTER_HEADS.has(body[0]?.name ?? '');
+        const scoped = isWhereHost || isFilterArg ? rewriteWhereVariables(body, inner, params) : body;
+        const walked = walk(scoped, inner);
         if (scoped === body && walked === null) return a;
         stepChanged = true;
         return nestedArg(walked ?? scoped);
       });
       // …then this step's own binds become visible to everything after it.
       for (const l of asLabelsOf(s)) bound.add(l);
+      for (const l of matchLabelsOf(s, params)) bound.add(l);
       if (!stepChanged) return s;
       chainChanged = true;
       return { ...s, args };

@@ -282,10 +282,17 @@ test('match() deferrals fail closed', () => {
   // rather than merely narrower, so it is rejected instead of silently never matching.
   expect(() => compile('g.V().match(__.as("a").out("knows").as("b"), __.as("a").values("name").as("b"))', {}))
     .toThrow('cross-shape constraint');
-  // mutual recursion → no single start-only root
-  expect(() => compile('g.V().match(__.as("a").out("created").as("b"), __.as("b").in("created").as("a"))', {})).toThrow('root variable');
-  // or/and pattern
+  // Mutual recursion: every start is also an end, so no pattern can go FIRST. Zero roots is now a
+  // legitimate shape (every start already bound before the match), so this is no longer caught by
+  // counting roots — it surfaces where the fold actually stalls, naming the variable.
+  expect(() => compile('g.V().match(__.as("a").out("created").as("b"), __.as("b").in("created").as("a"))', {})).toThrow('unbound start variable');
+  // TWO fresh roots — two disjoint components, and the binding table has one id.
+  expect(() => compile('g.V().match(__.as("a").out().as("b"), __.as("c").out().as("d"))', {})).toThrow('root variables');
+  // and/or in match position are pattern GROUPS that BIND their nested ends (the corpus asserts
+  // those variables come back), so they defer rather than lower as a filter that drops them.
   expect(() => compile('g.V().match(__.or(__.as("a").out().as("b")))', {})).toThrow('must start with as');
+  // A filter reading a variable no pattern ever binds cannot become ready.
+  expect(() => compile('g.V().match(__.as("a").out().as("b"), __.where("a", P.neq("zz")))', {})).toThrow('which no pattern binds');
 });
 
 test('alias-compare where — the co-creator idiom', () => {

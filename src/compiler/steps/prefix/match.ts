@@ -1,12 +1,14 @@
 import { q, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
+import { streamPayloadCols } from '../context/stream.ts';
+import { where } from './filter.ts';
 import { isNested, stepChain, type Step } from '../../../gremlin/frontend.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { MATCH_FILTER_HEADS, type PStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { advance, aliasColsOf, prevRel, type AliasEntry, type Carried, type ElementStream, type StepFn } from '../context/context.ts';
 import { aliasEntry, aliasId, aliasScalar, aliasSeed, elemEntry, elemShape, isElementShape, nodeEntry, shapeElem, type AliasShape } from '../context/alias.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { type Stream } from '../context/stream.ts';
-import { isGlobalBarrier, ROOT_SCOPE } from '../tail/child-shape.ts';
+import { isGlobalBarrier, labelsMentioned, ROOT_SCOPE } from '../tail/child-shape.ts';
 import { tryCompileScalarValueChild } from '../tail/child.ts';
 import { staticTypeOf } from '../../../sql/kernel/render.ts';
 
@@ -35,26 +37,76 @@ import { staticTypeOf } from '../../../sql/kernel/render.ts';
 // two things need it: re-rooting a later pattern on it (an edge rowid must not be read as a
 // node id — both are integers, so getting this wrong is silent) and shape-checking a re-bind.
 //
-// Deferred (clear errors): a GLOBAL barrier in a pattern body (count/fold/dedup — it would
-// reduce over the whole binding table rather than once per binding, which needs the child
-// seam's per-binding scoping); a pattern STARTING from a non-element var (no rowid to
-// re-root on); a re-bind at a different shape (comparing a rowid to a value is meaningless,
-// not merely narrower); an intra-pattern as() label; or/not/nested-match patterns; and any
-// shape with other than exactly one start-only root variable (e.g. mutual a↔b recursion).
+// An argument is not always a BINDING pattern: `not(…)`/`where(…)` constrain the binding table and
+// bind nothing (see Pattern/MATCH_FILTER_HEADS), and they are DELEGATED to the same `where` StepFn
+// the engine routes them to rather than re-implemented here. Both kinds share one readiness rule —
+// an argument runs once the variables it READS are bound — so argument order cannot change the
+// answer. The ROOT is optional for the same reason: when every start is already bound before the
+// match(), nothing needs seeding and `id` stays the incoming traverser.
+//
+// Deferred (clear errors): a bare match() as a TERMINAL — it must emit one binding MAP per row and
+// we emit the traverser, so every supported form ends in select(); a GLOBAL barrier in a pattern
+// body (count/fold/dedup — it would reduce over the whole binding table rather than once per
+// binding, which needs the child seam's per-binding scoping); a pattern STARTING from a non-element
+// var (no rowid to re-root on); a re-bind at a different shape (comparing a rowid to a value is
+// meaningless, not merely narrower); an intra-pattern as() label; `and`/`or` pattern GROUPS (in
+// match position they BIND their nested ends — the corpus asserts those variables come back — so
+// lowering them as filters would answer a narrower question) and nested-match; TWO fresh root
+// variables (the binding table has one id); and a true mutual a↔b cycle, where every start is also
+// an end so no pattern can go first (SQL expresses it fine — a self-join — but this fold needs an
+// anchor, and it reports as an unbound start rather than being silently mis-ordered).
 
-interface Pattern { start: string; body: PStep[]; end: string | null; }
+/** A match() argument is one of two kinds, decided by its first step.
+ *
+ *  A BIND navigates from one variable to bind or constrain another (`as(a).out().as(b)`) — it is
+ *  what extends the binding table. A FILTER (`not(…)`, `where(…)` — see MATCH_FILTER_HEADS for why the
+ *  conjunctions are not among them) binds nothing and only removes rows; TinkerPop admits it as an
+ *  ordinary argument alongside the binding patterns.
+ *
+ *  A filter needs no new machinery HERE because the binding table is already an ordinary element
+ *  stream carrying every bound variable as an alias column — which is precisely the parent the
+ *  registered `where` StepFn consumes (`labelScope`/`aliasIdExpr` read `carried.aliases`).
+ *  So a filter argument is DELEGATED to them verbatim; the only thing match() adds is scheduling it
+ *  after the variables it reads are bound. Building a private evaluator here would be a second
+ *  implementation of a filter path that already exists. */
+type Pattern =
+  | { kind: 'bind'; start: string; body: PStep[]; end: string | null }
+  | { kind: 'filter'; step: PStep; reads: readonly string[] };
 
-/** as(start).<body…>.[as(end)] → its parts. The body is normalized so it crosses the
- *  same seam as a root/child chain before the StepFn fold. */
-function parsePattern(chain: Step[]): Pattern {
+
+/** How a fold step recovers the TRAVERSER's id after a pattern has re-rooted the stream onto some
+ *  other variable's rowid. The binding table's `id` must always be what the traverser was when
+ *  match() started, because that is what a downstream out()/count()/select() consumes.
+ *
+ *  It is ALWAYS read from an alias column, never from the body relation's `id`: a pattern body may
+ *  end in a scalar (`as("a").out().count().as("c")` lowers to `(v, …varCols)` with no `id` at all),
+ *  and an alias column is the one thing every body kind carries through unchanged. So when match()
+ *  has no ROOT variable to read — every pattern start was already bound before it — the incoming id
+ *  is bound to an INTERNAL label and rides the fold as an ordinary var column, then is dropped on
+ *  the way out. Reading `f.c.id` instead renders as `SELECT  AS id` over a scalar body. */
+type IdSource = (f: Relation) => Expression;
+
+/** The internal label backing the traverser id when there is no root variable. Not a Gremlin label:
+ *  an as() argument is a quoted identifier the grammar never yields with a leading space, so this
+ *  cannot collide with a user's label, and it is stripped from the alias map before match() returns
+ *  so a downstream select()/where() never sees it. */
+const TRAVERSER_LABEL = ' traverser';
+
+/** as(start).<body…>.[as(end)] → its parts, or a FILTER argument (see Pattern). The body is
+ *  normalized so it crosses the same seam as a root/child chain before the StepFn fold. */
+function parsePattern(chain: Step[], params: Record<string, any>): Pattern {
+  if (chain.length === 1 && MATCH_FILTER_HEADS.has(chain[0].name)) {
+    const [step] = normalize(chain).steps;
+    return { kind: 'filter', step, reads: [...labelsMentioned([step], params)] };
+  }
   if (!chain.length || chain[0].name !== 'as' || typeof chain[0].args[0] !== 'string')
-    throw new Error('match() pattern must start with as("x")');
+    throw new Error('match() pattern must start with as("x") or be a where()/not() filter');
   const start = chain[0].args[0];
   let mid = chain.slice(1);
   let end: string | null = null;
   const last = mid[mid.length - 1];
   if (last?.name === 'as' && typeof last.args[0] === 'string') { end = last.args[0]; mid = mid.slice(0, -1); }
-  return { start, body: normalize(mid).steps, end };
+  return { kind: 'bind', start, body: normalize(mid).steps, end };
 }
 
 /** What a pattern's END holds, read off the lowered stream's KIND. The alias table has
@@ -67,6 +119,10 @@ interface EndBinding {
   /** The lowered body's carried state — read here rather than off the un-narrowed Stream, so
    *  the intra-pattern-label guard below works for every bindable kind. */
   readonly carried: Carried;
+  /** The body's OWN columns (`streamPayloadCols` for its kind) — the ones `entry`/`same` read.
+   *  Carried here for the same reason as `carried`: the Stream is un-narrowed by the time the
+   *  private-state guard below runs, and this is what tells a payload column apart from one. */
+  readonly payload: readonly string[];
   readonly shape: AliasShape;
   readonly entry: (f: Relation) => Expression;
   readonly same: (f: Relation, col: string) => Expression;
@@ -74,12 +130,12 @@ interface EndBinding {
 
 function endBindingOf(out: Stream): EndBinding | null {
   if (out.kind === 'elements') return {
-    rel: out.rel, carried: out.carried, shape: elemShape(out.elem),
+    rel: out.rel, carried: out.carried, payload: streamPayloadCols(out), shape: elemShape(out.elem),
     entry: (f) => elemEntry(out.elem, f.c.id),
     same: (f, col) => q`${f.c.id}=${aliasId(f.c[col], 'last')}`,
   };
   if (out.kind === 'scalar') return {
-    rel: out.rel, carried: out.carried, shape: 'value',
+    rel: out.rel, carried: out.carried, payload: streamPayloadCols(out), shape: 'value',
     // Carry the static type tag so a numeric/date-valued var reframes correctly on the way
     // out, exactly as a value label bound by as() does.
     entry: (f) => aliasEntry('value', f.c.v, staticTypeOf(out.type) ?? null),
@@ -88,9 +144,20 @@ function endBindingOf(out: Stream): EndBinding | null {
   return null;
 }
 
+/** Apply a FILTER argument: hand it to the very StepFn the engine routes its head to (`where`, which
+ *  serves where/filter/not), run against the binding table as it stands.
+ *
+ *  No re-rooting and no id restoration, unlike a bind — `filterCte` projects `n.id` joined on the
+ *  previous relation, so the traverser id and every var column ride through untouched; a filter only
+ *  removes rows. And no new machinery: the binding table is an ordinary element stream whose carried
+ *  aliases ARE the pattern variables, which is exactly what `labelScope`/`aliasIdExpr` read. */
+function applyFilter(st: ElementStream, step: PStep): ElementStream {
+  return where(step, st);
+}
+
 /** Apply one pattern: re-root a fresh stream at the start var, lower its body through the
  *  FULL shaped loop, then re-project the binding table with the end bound or constrained. */
-function applyPattern(st: ElementStream, p: Pattern, aliases: Map<string, AliasEntry>, rootCol: string, bind: (v: string, shape: AliasShape) => string): ElementStream {
+function applyPattern(st: ElementStream, p: Extract<Pattern, { kind: 'bind' }>, aliases: Map<string, AliasEntry>, restoreId: IdSource, bind: (v: string, shape: AliasShape) => string): ElementStream {
   const prev = prevRel(st, 'p');
   const startEntry = aliases.get(p.start)!;
   const startCol = startEntry.col;
@@ -145,11 +212,25 @@ function applyPattern(st: ElementStream, p: Pattern, aliases: Map<string, AliasE
   if (!bound) throw new Error(`match() pattern binding a ${out.kind} result not yet supported (the end var can hold an element or a scalar)`);
   if (bound.carried.aliases.size !== aliases.size || bound.carried.path || bound.carried.origins.length)
     throw new Error('match() pattern binding an intra-pattern label not yet supported');
+  // A body may MINT carried state of its own that the binding table does not forward: `repeat()`
+  // seeds a fresh `bulk` at its source (prefix/branch.ts, `1 AS bulk`), because any element source
+  // does. Dropping it is semantically right — a pattern's fan-out is already row multiplicity, the
+  // multiset invariant — but it must be dropped DELIBERATELY, naming the columns to keep rather
+  // than letting the body's extra value ride into a projection that never mentions it (an arity
+  // skew SQLite reports as "table cN has 3 values for 2 columns", and only at EXECUTION). What the
+  // re-projection legitimately consumes is the body's PAYLOAD (`id`, or `v`/`vt` for a scalar end —
+  // `streamPayloadCols` is the authority per kind) plus the var columns; anything else is private
+  // state, and only a re-seeded `bulk` is safe to drop. Asking the authority rather than listing
+  // `bulk` keeps this closed against the next carried field that rides out the same way.
+  const consumed = new Set<string>([...bound.payload, ...aliasColsOf(bound.carried.aliases)]);
+  const dropped = bound.rel.cols.filter((c) => !consumed.has(c));
+  if (dropped.some((c) => c !== bound.carried.bulk))
+    throw new Error(`match() pattern body carrying ${dropped.join('/')} not yet supported (the binding table forwards only the pattern variables)`);
 
-  // Re-project: restore id = the root's rowid (== aliasId(rootCol), the binding-table
-  // invariant), keep every var column, and bind/constrain the end var.
+  // Re-project: restore the traverser's id (`restoreId` — see IdSource), keep every var column,
+  // and bind/constrain the end var.
   const f = bound.rel.as('f');
-  const proj: Expression[] = [q`${aliasId(f.c[rootCol], 'last')} AS id`, ...varCols.map((c) => q`${f.c[c]}`)];
+  const proj: Expression[] = [q`${restoreId(f)} AS id`, ...varCols.map((c) => q`${f.c[c]}`)];
   const conds: Expression[] = [];
   if (p.end) {
     const prior = aliases.get(p.end);
@@ -174,14 +255,22 @@ export const match: StepFn = (s, st) => {
   if (st.carried.path) throw new Error('path tracking through match() not yet supported');
   const patArgs = s.args.filter(isNested);
   if (!patArgs.length) throw new Error('match() needs at least one pattern');
-  const pats = patArgs.map((a) => parsePattern(stepChain(a.nested, st.params)));
+  const pats = patArgs.map((a) => parsePattern(stepChain(a.nested, st.params), st.params));
 
-  // Root = a start var never used as an end (bound to the incoming traverser).
-  const ends = new Set(pats.map((p) => p.end).filter((e): e is string => !!e));
-  const roots = [...new Set(pats.map((p) => p.start))].filter((v) => !ends.has(v) && !st.carried.aliases.has(v));
-  if (roots.length !== 1)
-    throw new Error(`match() with ${roots.length} root variables not yet supported (needs exactly one start-only var)`);
-  const root = roots[0];
+  // Root = a start var never used as an end, bound to the incoming traverser. ZERO roots is a
+  // legitimate shape, not a failure: when every pattern start was already bound before the match()
+  // (`.as("a").out().as("b").match(as("a")…, as("b")…)`), there is nothing to seed — each pattern
+  // only constrains or extends columns that already exist, and `id` stays the incoming traverser.
+  // What is still unsupported is TWO fresh roots (two disjoint pattern components — the binding
+  // table has one `id`) and a true mutual cycle, where every start is also an end so no pattern can
+  // go first; the latter reports as an unbound start below rather than being silently mis-ordered.
+  // Only a BIND declares a start/end — a filter reads variables, so it can never supply a root.
+  const bindPats = pats.filter((p): p is Extract<Pattern, { kind: 'bind' }> => p.kind === 'bind');
+  const ends = new Set(bindPats.map((p) => p.end).filter((e): e is string => !!e));
+  const roots = [...new Set(bindPats.map((p) => p.start))].filter((v) => !ends.has(v) && !st.carried.aliases.has(v));
+  if (roots.length > 1)
+    throw new Error(`match() with ${roots.length} root variables not yet supported (needs at most one start-only var)`);
+  const root: string | undefined = roots[0];
 
   const aliases = new Map(st.carried.aliases);
   // `shape` is what the var actually holds — recorded rather than assumed 'node', so a later
@@ -192,20 +281,40 @@ export const match: StepFn = (s, st) => {
     return e.col;
   };
 
-  // Seed: carry the incoming id + any outer alias columns, and bind the root = id.
+  // Seed: carry the incoming id + any outer alias columns, and bind the traverser to a var column.
+  // That column is the ROOT variable when the patterns declare one, and the internal
+  // TRAVERSER_LABEL when they do not — either way `restoreId` reads an alias column, which is the
+  // only thing a scalar-ending pattern body carries through (see IdSource).
   const prev0 = prevRel(st, 'p');
-  const rootCol = bind(root, 'node');
-  const seedProj: Expression[] = [q`${prev0.c.id}`, ...aliasColsOf(st.carried.aliases).map((c) => q`${prev0.c[c]}`), q`${aliasSeed(nodeEntry(prev0.c.id))} AS ${rootCol}`];
+  const idCol = bind(root ?? TRAVERSER_LABEL, 'node');
+  const restoreId: IdSource = (f) => aliasId(f.c[idCol], 'last');
+  const seedProj: Expression[] = [q`${prev0.c.id}`, ...aliasColsOf(st.carried.aliases).map((c) => q`${prev0.c[c]}`),
+    q`${aliasSeed(nodeEntry(prev0.c.id))} AS ${idCol}`];
   let cur: ElementStream = advance(st, q`SELECT ${list(seedProj, ', ')} FROM ${prev0}`, { aliases: new Map(aliases), cols: ['id', ...aliasColsOf(aliases)] });
 
-  // Greedy dependency order: process a pattern whose start is bound; bind/constrain end.
+  // Greedy dependency order, one readiness rule for both argument kinds: an argument may run once
+  // the variables it READS are bound — the start var for a bind (its end is what it produces), every
+  // mentioned var for a filter (it produces nothing, so all of them must already exist).
+  const ready = (p: Pattern): boolean => p.kind === 'bind'
+    ? aliases.has(p.start)
+    : p.reads.every((v) => aliases.has(v));
   const pending = [...pats];
   let guard = pending.length * pending.length + 1;
   while (pending.length) {
     if (guard-- < 0) throw new Error('match() pattern dependency cycle not yet supported');
-    const idx = pending.findIndex((p) => aliases.has(p.start));
-    if (idx < 0) throw new Error('match() pattern with an unbound start variable not yet supported');
-    cur = applyPattern(cur, pending.splice(idx, 1)[0], aliases, rootCol, bind);
+    const idx = pending.findIndex(ready);
+    if (idx < 0) {
+      const p = pending[0];
+      throw new Error(p.kind === 'bind'
+        ? `match() pattern with an unbound start variable ("${p.start}") not yet supported`
+        : `match() filter reading ${p.reads.filter((v) => !aliases.has(v)).map((v) => `"${v}"`).join('/')}, which no pattern binds`);
+    }
+    const p = pending.splice(idx, 1)[0];
+    cur = p.kind === 'bind' ? applyPattern(cur, p, aliases, restoreId, bind) : applyFilter(cur, p.step);
   }
+  // The internal traverser binding is not a Gremlin label — drop it so a downstream select()/where()
+  // sees exactly the variables the patterns declared. Its COLUMN stays (id was restored from it).
+  if (root === undefined)
+    cur = { ...cur, carried: { ...cur.carried, aliases: new Map([...cur.carried.aliases].filter(([k]) => k !== TRAVERSER_LABEL)) } };
   return cur;
 };

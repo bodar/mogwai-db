@@ -912,9 +912,15 @@ export const repeat: StepFn = (s, st) => {
   // ride-groups are therefore NOT contiguous here (bulk sits between them), unlike inside the walk.
   const aliasOut = ride(aliasCols, null);
   const originOut = ride(originCols, null);
+  // The walk RE-SEEDS bulk (`1 AS bulk` above) rather than carrying it, so it must also DECLARE it:
+  // `advance` derives the CTE's column list from the carried state, and an emitted-but-undeclared
+  // column is an arity skew SQLite only reports at execution. An input that already carried bulk
+  // (every element source seeds it) made the declaration line up by luck; a caller whose input does
+  // NOT carry it — a match() pattern seed, whose multiplicity is its row count — hit the skew.
+  const bulkOut = { bulk: 'bulk' as const };
   const out = wantsPathOutput
-    ? advance(st, q`SELECT id${aliasOut}${sackOut}, 1 AS bulk${originOut}, path FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, path: { kind: 'array', col: 'path', elem: 'node' } })
-    : advance(st, q`SELECT id${aliasOut}${sackOut}, 1 AS bulk${originOut} FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null });
+    ? advance(st, q`SELECT id${aliasOut}${sackOut}, 1 AS bulk${originOut}, path FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, ...bulkOut, path: { kind: 'array', col: 'path', elem: 'node' } })
+    : advance(st, q`SELECT id${aliasOut}${sackOut}, 1 AS bulk${originOut} FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, ...bulkOut });
   if (!aggName) return out;
   // A body-terminal aggregate('x'): collect every vertex the body emitted — the walk rows at
   // depth ≥ 1 (the seed is the pre-body input, not a body output). If the name already holds a
