@@ -2,6 +2,10 @@
 
 Run with `mise run L5` (fixed seed, part of `bun test`). Explore with `mise run L5-random`.
 
+Both need the **submodule**, unlike L1/L2: the differential executes its traversals through the real
+`Executor`, which frames via `src/io.ts` → `gremlin/io`, an export only the submodule-linked client
+has. Parsing and compiling are submodule-free; running is not.
+
 L1–L4 assert things about traversals **someone wrote down**. L5 asserts things about traversals
 **nobody wrote down**: it generates well-typed Gremlin and checks a property that must hold for all
 of it. That makes it the instrument for the *ceiling* `test/CLAUDE.md` describes — "generic lowering

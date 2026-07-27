@@ -56,8 +56,12 @@ depends = ["install", "check", "submodule"]
 run = "bun test test/L4-addendum"
 
 [tasks.L5]
-description = "L5 — property-based fast-path differential (fixed seed; no submodule)"
-depends = ["install", "check"]
+description = "L5 — property-based fast-path differential (fixed seed)"
+# `submodule`, NOT just install/check like L1/L2: the differential EXECUTES its traversals through
+# the real Executor, which frames results via src/io.ts → `gremlin/io` — an export only the
+# submodule-linked client has (npm's newest v4 is beta.2, which lacks it). L1/L2 are genuinely
+# submodule-free because they only parse and compile; anything that runs a traversal is not.
+depends = ["install", "check", "submodule"]
 run = "bun test test/L5-properties"
 
 # Exploration, NOT a gate: a random seed and a much larger sample. Findings get diagnosed into
@@ -66,7 +70,7 @@ run = "bun test test/L5-properties"
 # learn to ignore.
 [tasks.L5-random]
 description = "L5 exploration — random seed, 3000 generated traversals (not a CI gate)"
-depends = ["install", "check"]
+depends = ["install", "check", "submodule"]
 run = "L5_SEED=$RANDOM L5_RUNS=3000 bun test test/L5-properties"
 
 [tasks.generate]
