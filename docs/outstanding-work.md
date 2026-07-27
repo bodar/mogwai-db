@@ -22,20 +22,32 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-0. **The L5 findings — three of four LANDED, one open.** Found by the first run of
-   `test/L5-properties/` (the fast-path differential). The three silent-wrong-answer / semantics
-   defects are fixed (L3 1475 → 1490, +15, −0), each pinned in an L4 `.feature` so the floor holds:
-   infix-composed predicates (front-end `parseComposedPredicate` + two `predicateSql` ops),
-   3-arg `has(LABEL,k,v)` in the inline predicate leaf, and the non-productive `by(key)` drop at
-   `order()` (now one `decoration` Pass, `dropNonProductiveOrderBy`, instead of a policy each order()
-   lowering path had to remember). What remains:
-   - **`predicateInlining` is not disable-safe** (fails closed, so no wrong answer). 16 of 17
-     signatures in the first sweep: a predicate body ending in a reducer/projection
-     (`valueMap().count()`, `path().count(local)`, `values(k).sum()`, `group().by(k).count()`, …) is
-     lowerable ONLY by the fast path — with it off, neither it nor the generic child-existence gate
-     accepts the body, so support *narrows*. That inverts the contract in
-     `options/fast-paths.ts` (generic = the semantic authority). Decide which side is wrong before
-     coding: most likely the gate should accept a reducer-terminal body. *Medium.*
+0. **The L5 findings — ALL LANDED; one adjacent defect still open.** The fast-path differential
+   (`test/L5-properties/`) found 22 divergent traversals in 17 signature groups, reducing to four
+   root causes, all fixed: infix-composed predicates (front-end `parseComposedPredicate`), 3-arg
+   `has(LABEL,k,v)` in the inline predicate leaf, always-producing filter bodies
+   (`alwaysProductiveFilterIsNoOp`, plus relaxing the bogus `and()/or() needs two branches` guard
+   that made the inline path narrower than the path it accelerates), and `bulkRepeatCount` seeding
+   its frontier with `COUNT(*)` instead of `SUM(bulk)`, losing the input multiplicity — a wrong
+   answer in the DEFAULT config. L3 1475 → 1490 (+15, −0); each pinned in an L4 `.feature`; the L5
+   ratchet is empty and the differential finds no disagreement over ~4,000 generated traversals with
+   every switch off and each one off alone. Fixed alongside: the non-productive `by(key)` drop at
+   `order()` — one shared policy (`orderProductivityFilter`) applied at each element-order route.
+   Worth knowing if you touch it: this was FIRST written as a `decoration` Pass injecting `has(key)`,
+   to centralise the policy, and that is wrong — the rewrite is only valid over an ELEMENT stream and
+   the IR layer has no shape information, so it broke all six non-element `order().by(key)` forms
+   (list/map/group/record/scalar/path). Shape is exactly what the lowering knows and the IR does not. Still open, from the same investigation:
+   - **An unproductive `sum()`/`min()`/`max()`/`mean()` body in a filter position wrongly KEEPS the
+     traverser.** `g.V().where(__.out().values('age').sum())` returns all 6 vertices; only marko has
+     an out-neighbour carrying an `age`, so TinkerPop returns 1. Those four reducers emit NOTHING
+     over empty input — exactly the distinction `ir/productivity.ts ALWAYS_PRODUCTIVE_TERMINAL`
+     draws against `count()`/`fold()` — so an empty body must DROP the traverser, and the natural fix
+     is the mirror of `alwaysProductiveFilterIsNoOp`: a NEVER-productive-on-empty body needs the
+     existence gate, not a constant. **Invisible to the L5 differential** (both configs answer
+     identically), found only by reading the semantics while diagnosing the four above. Same
+     blind-spot class as the `order().by()` defect, and the argument for L5's metamorphic-law oracle,
+     which compares against a law rather than another implementation. *Medium-High — silent wrong
+     answer.*
 
 1. **List members frame as bare values, not elements.** `AliasEntry` does not record the member
    shape, so a path/element-list label cannot frame its members as vertices. Blocks

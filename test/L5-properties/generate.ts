@@ -58,8 +58,11 @@ export const traversal = (budget: Budget): fc.Arbitrary<Generated> =>
       const n = gen(fc.nat, { max: Math.max(0, budgetLeft.steps) });
       for (let i = 0; i < n; i++) {
         // THE CONFINEMENT: only this shape's transitions are candidates. A step needing a child
-        // body is out of the running once the nesting budget is spent.
-        const legal = TRANSITIONS[shape].filter((t) => (t.bodies?.length ?? 0) === 0 || budgetLeft.depth > 0);
+        // body is out of the running once the nesting budget is spent, and a list transition that
+        // needs numeric members is out unless that is what was folded.
+        const legal = TRANSITIONS[shape].filter((t) =>
+          ((t.bodies?.length ?? 0) === 0 || budgetLeft.depth > 0)
+          && (t.requiresListOf === undefined || t.requiresListOf === folded));
         if (legal.length === 0) break;
         const t = pick(legal);
         const bodies = (t.bodies ?? []).map((bodyShape) => {

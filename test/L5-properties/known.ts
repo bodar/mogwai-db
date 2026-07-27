@@ -8,14 +8,36 @@
 // An entry here is a BUG WE HAVE NOT FIXED, never a case where divergence is acceptable. The
 // fast-path contract admits no acceptable divergence: `FastPathConfig`'s own doc comments promise
 // "Disabling routes through the generic path — result-equivalent", and the generic path is the
-// semantic authority, so a difference is always a defect in the optimized lowering (or, as in the
-// first entry, in a layer beneath both). Emptying this list is the goal.
+// semantic authority, so a difference is always a defect in the optimized lowering (or in a layer
+// beneath both).
 //
-// ONE ENTRY PER ROOT CAUSE, NOT PER TRAVERSAL. L5's first sweep (3,000 generated traversals + the
-// 2,298-traversal corpus) produced 22 divergent traversals in 17 distinct step-signature groups —
-// which all reduce to the three causes below, every one of them attributed to `predicateInlining`.
-// Recording signatures instead of causes would have written 17 near-identical entries and buried the
-// fact that two lines of one file explain most of them.
+// ****  THE LIST IS CURRENTLY EMPTY, AND THAT IS THE INTENDED STATE.  ****
+//
+// L5's first sweep produced 22 divergent traversals in 17 step-signature groups. They reduced to
+// FOUR root causes, all now fixed (L3 1475 → 1490, +15/−0, each pinned in an L4 `.feature`):
+//   1. infix-composed predicates flattened by the front-end          → parseComposedPredicate
+//   2. 3-arg has(LABEL,k,v) mis-read inside an inline predicate leaf  → prefix/predicate.ts
+//   3. an always-producing filter body neither path could agree on    → alwaysProductiveFilterIsNoOp
+//      (+ the artificial `and()/or() needs two branches` guard, which made the inline path
+//      narrower than the path it accelerates)
+//   4. bulkRepeatCount's seed frontier weighting by COUNT(*) instead of SUM(bulk), losing the
+//      input multiplicity — a wrong answer in the DEFAULT config                → tail/bulk.ts
+//
+// So do not read an empty list as "nothing is tested". Read it as: the differential currently finds
+// no disagreement over ~4,000 generated traversals and the 2,298-traversal corpus, with every
+// switch off and each one off alone. If you are adding an entry, you are recording a REGRESSION or a
+// newly-reached defect — say which, and diagnose it.
+//
+// ONE ENTRY PER ROOT CAUSE, NOT PER TRAVERSAL. Recording signatures instead of causes would have
+// written 17 near-identical entries for what turned out to be four bugs, and buried the fact that a
+// couple of lines in one file explained most of them.
+//
+// WHAT THIS ORACLE CANNOT SEE, so an empty list is not a claim of correctness: the differential
+// compares the two lowerings against each other, so a defect PRESENT IN BOTH is invisible to it.
+// Two such were found by hand while diagnosing these four, and both are recorded in
+// docs/outstanding-work.md rather than here (they are not divergences):
+// non-productive `by(key)` at `order()` (since fixed), and an unproductive `sum()`/`min()`/`max()`
+// body in a filter position, which still wrongly keeps the traverser.
 
 export interface KnownDivergence {
   /** The minimal reproduction, verbatim. Also what the stale-entry check re-runs. */
@@ -41,34 +63,6 @@ export interface KnownDivergence {
 }
 
 export const KNOWN: readonly KnownDivergence[] = [
-  {
-    query: "g.V(2).not(__.valueMap().count())",
-    fastPath: 'predicateInlining',
-    diagnosis:
-      'SUPPORT ASYMMETRY — fails closed, so no wrong answer, but it inverts the fast-path contract. ' +
-      'This is the big one by volume: 16 of the 17 signatures in the first sweep, all reporting the ' +
-      'same message, "<host>() traversal not supported by inline predicate or generic child existence ' +
-      'lowering". With predicateInlining ON these traversals run and are correct; with it OFF they are ' +
-      'REJECTED, because NEITHER the inline recognizer nor the generic child-existence gate can lower ' +
-      'the body. So a whole class of predicate bodies is reachable ONLY through the fast path, while ' +
-      'FastPathConfig documents the generic path as the semantic authority and the fast path as a ' +
-      'strictly optional accelerator. Equivalently: predicateInlining is not disable-safe. ' +
-      'The affected bodies are the ones ending in a reducer or a projection rather than a plain ' +
-      'existence test — valueMap().count(), path().count(local), dedup().count(), values(k).sum(), ' +
-      'project(a,b)….count(), group()/groupCount().by(k).count() — plus some multi-hop movement ' +
-      'bodies (not(__.in("created").limit(1).outE().outV())). Hosts: where/filter/not/and/or/local. ' +
-      'Same class, found while diagnosing: V().or(__.has("software","name","lop")) — a single-arm ' +
-      'or() — throws "or() needs at least two traversal branches" with fast paths ON but runs under ' +
-      'the generic path; the asymmetry points the other way there. ' +
-      'FIX: decide which side is wrong before writing code. Either the generic child-existence gate ' +
-      'should accept a reducer/projection-terminal body (it is the authority, so this is the ' +
-      'contract-honouring answer), or these bodies are genuinely beyond it and the inline recognizer ' +
-      'is over-reaching. Note this is INVISIBLE in production — the default config has every fast ' +
-      'path on — which is exactly why nothing caught it before: no test ran the generic path.',
-    // Keyed on the failure MODE, not on guessed query shapes: this message is emitted at one place
-    // and means exactly this defect.
-    family: { detail: /not supported by inline predicate or generic child existence lowering/ },
-  },
 ];
 
 /** Normalise the quote style / whitespace the corpus and the generator differ on. */

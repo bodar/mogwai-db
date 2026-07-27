@@ -47,6 +47,18 @@ export interface Transition {
   readonly render: (ctx: RenderCtx) => string;
   /** Input shape of each child body this step needs. Empty/absent = no child traversal. */
   readonly bodies?: readonly Shape[];
+  /**
+   * For a LIST transition: only legal when the list's MEMBERS have this shape.
+   *
+   * `list` is the one state that is not self-describing — a list of numbers and a list of vertices
+   * accept different steps. `sum(local)`/`min(local)`/`max(local)` need numbers; over
+   * `V().fold()` they are summing vertices, which is ill-typed Gremlin. Without this the generator
+   * emitted `filter(__.fold().sum(local))` and then blamed the compiler for handling it
+   * inconsistently — the same mistake as the first draft's `E().bothE()`, where one shape stood for
+   * two things. The walker already remembers what `fold()` consumed (for `unfold`'s retype), so
+   * this costs it nothing.
+   */
+  readonly requiresListOf?: Shape;
   /** A reducer: legal, but the generator stops after it rather than piling steps onto a scalar
    *  aggregate, which produces absurd rather than interesting traversals. */
   readonly terminal?: boolean;
@@ -186,11 +198,13 @@ const SCALAR: Transition[] = [
 // ---------- list / record / group / path ----------
 // Deliberately thin in v1: enough to be reached and re-typed out of, not full coverage of each.
 const LIST: Transition[] = [
+  // count(local) is arity, legal over a list of anything.
   { name: 'count', to: 'scalar', render: () => 'count(local)', terminal: true },
   { name: 'order', to: 'list', render: () => 'order(local)' },
-  { name: 'sum', to: 'scalar', render: () => 'sum(local)', terminal: true },
-  { name: 'min', to: 'scalar', render: () => 'min(local)', terminal: true },
-  { name: 'max', to: 'scalar', render: () => 'max(local)', terminal: true },
+  // The numeric local reducers need NUMBERS — see `requiresListOf`.
+  { name: 'sum', to: 'scalar', render: () => 'sum(local)', terminal: true, requiresListOf: 'scalar' },
+  { name: 'min', to: 'scalar', render: () => 'min(local)', terminal: true, requiresListOf: 'scalar' },
+  { name: 'max', to: 'scalar', render: () => 'max(local)', terminal: true, requiresListOf: 'scalar' },
   // the documented retype: unfold() restores whatever fold() consumed
   { name: 'unfold', to: 'inherit', render: () => 'unfold()' },
 ];

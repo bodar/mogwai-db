@@ -1,4 +1,5 @@
 import { stepChain, isNested, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
+import { bodyAlwaysProduces } from './productivity.ts';
 
 // ---------- pass BODIES: the concrete Step[]→Step[] rewrites (Seam 3) ----------
 //
@@ -130,70 +131,63 @@ export function markProductiveBy(steps: Step[]): Step[] {
     : s);
 }
 
-// ---------- non-productive by() → an explicit drop in the IR ----------
+// ---------- a filter whose body always produces is a no-op ----------
 //
-// TinkerPop's DEFAULT by()-modulator is NON-PRODUCTIVE: a traverser for which the modulator yields
-// nothing is DROPPED, not carried with a null. `ProductiveByStrategy` opts into the other policy
-// (keep it, null sorts first) — which is why the strategy exists at all.
+// `where(__.valueMap().count())` cannot reject anything: `count()` emits a row over any input, even
+// an empty one, and `where`/`filter`/`not` filter on WHETHER the body produced a traverser, not on
+// what it produced. So the step is provably inert, and the body never needs lowering at all.
 //
-// WHERE THAT POLICY BELONGS. `productiveBy` is read at ~8 lowering sites today (group, select, path,
-// dedup, aggregate…), each choosing its own JOIN-vs-LEFT-JOIN or its own WHERE. `order()` simply
-// forgot, and `g.V().order().by('age')` kept the two ageless software vertices where TinkerPop
-// returns four rows. Adding a ninth site would have been the small fix and the wrong one: it grows
-// the same duplicated policy by one more copy, and the next order() lowering path (there are four
-// already — the acc fold, the re-enter retype, the by(traversal) seam, the dedup window) would have
-// to remember it independently.
+// That distinction is why this is a Pass and not a new capability in the child-existence gate. The
+// gate declines these bodies because their PREFIX shape (a record from valueMap(), a group, a path)
+// is not something the generic child compilers can build rows for — `local(__.valueMap().count())`
+// fails the same way. But nothing here needs those rows: the answer is knowable from the body's
+// terminal alone. Teaching the gate to compile a shape purely to discard the result would be new
+// machinery serving no question (steps/CLAUDE.md: separate "the seam cannot EXPRESS this" from "the
+// seam cannot be HANDED this" — here it is neither; the seam is not NEEDED).
 //
-// So express it once, in the IR, where it is *derivable*: for a by(KEY) over an element, "unproductive"
-// means exactly "the property is absent", and dropping those traversers is exactly what `has(KEY)`
-// already does. `order().by('age')` becomes `has('age').order().by('age')` — the same answer, built
-// from a step that is already thoroughly tested, and every one of the four lowering paths inherits it
-// because they all read the rewritten chain.
+// It also closes the disable-safety hole properly rather than symmetrically. The alternative was to
+// give the generic gate the same answer the inline fast path already produces — two implementations
+// agreeing by inspection. Removing the step means NEITHER path sees it, so `predicateInlining` on and
+// off cannot diverge here by construction. That is the stronger guarantee, and it is what
+// `FastPathConfig` claims.
 //
-// THE RULE THIS ESTABLISHES, so the next by()-host doesn't have to guess:
-//   • where unproductive means DROP → express it here as an injected filter; the lowering stays
-//     ignorant of productivity.
-//   • where unproductive means KEEP-WITH-NULL (group's null key, select's absent field, path's
-//     unproductive position) → the lowering owns it, because a pre-filter cannot express "keep".
-// order() is the first kind. Its ProductiveBy half needed no work: nulls already sort first, so the
-// strategy-on case was already correct and only the default drop was missing.
-//
-// Runs in `decoration` (not `simplify`) for one reason: it reuses `recurseInject`, so a nested
-// `repeat(__.order().by('age'))` gets the identical treatment, and pre-fold the chain is a flat
-// `order` + `by` pair rather than a `.bys` cluster. Declared AFTER ProductiveByStrategy in the
-// decoration array so a marked host is already visible here.
+// Impurity is the one guard (ir/productivity.ts `isImpure`): a body that writes a side effect or
+// binds an `as()` is not inert even when it always produces, so those decline and keep their
+// existing behaviour.
 
-/** by() args → the property key it projects, or null when productivity is not a key question:
- *  a bare/direction-only by() (always productive), a `T.token` by() (every element has a label and
- *  an id), or a by(traversal) (its productivity is the traversal's, a different question this does
- *  not answer — and deliberately does not guess at). */
-function byKey(args: readonly any[]): string | null {
-  const first = args[0];
-  return typeof first === 'string' ? first : null;
-}
+/** Filter hosts whose whole meaning is "did the body produce a traverser?" — so an always-producing
+ *  body makes the step a constant. `not()` is the same test negated, hence the inverse rewrite. */
+const EXISTENCE_FILTER_HOSTS = new Set(['where', 'filter', 'not']);
 
 /**
- * Inject the non-productive drop for every key-projecting `by()` on a NON-productiveBy `order()`.
+ * Remove provably-inert existence filters; replace their negations with a drop-everything.
  *
- * Multi-term orders inject one `has()` per key, which is the same rule applied per comparator: every
- * comparator is evaluated for every traverser, so a traverser missing any one of the keys has nothing
- * to compare on and drops. Applying it per-key rather than only to the single-by() case keeps this
- * arity-blind — there is no special case to get wrong.
+ * `where`/`filter` over an always-producing body → the step vanishes. `not()` over one → nothing can
+ * ever pass, expressed as `limit(0)` (a step every lowering already handles, rather than a new
+ * "constant false" concept). `and`/`or` are handled by dropping always-true ARMS — for `or` a single
+ * true arm makes the whole step inert, for `and` the remaining arms still have to hold.
  */
-export function dropNonProductiveOrderBy(steps: Step[], params: Record<string, any>): Step[] {
+export function alwaysProductiveFilterIsNoOp(steps: Step[], params: Record<string, any>): Step[] {
   return recurseInject(steps, params, (level) => {
     const out: Step[] = [];
-    for (let i = 0; i < level.length; i++) {
-      const s = level[i];
-      // ProductiveByStrategy marked this host → the other policy applies; leave it to the lowering.
-      if (s.name !== 'order' || (s as PStep).productiveBy) { out.push(s); continue; }
-      // Pre-fold, the by()s are the steps immediately following their host.
-      const keys: string[] = [];
-      for (let j = i + 1; j < level.length && level[j].name === 'by'; j++) {
-        const k = byKey(level[j].args);
-        if (k !== null) keys.push(k);
+    for (const s of level) {
+      const nested = s.args.filter(isNested);
+      if (EXISTENCE_FILTER_HOSTS.has(s.name) && s.args.length === 1 && bodyAlwaysProduces(s.args[0], params)) {
+        if (s.name === 'not') out.push({ name: 'limit', args: [0] } as Step);
+        continue; // where()/filter(): inert, drop the step
       }
-      for (const k of keys) out.push({ name: 'has', args: [k] } as Step);
+      if ((s.name === 'and' || s.name === 'or') && nested.length > 0) {
+        const kept = nested.filter((b) => !bodyAlwaysProduces(b, params));
+        if (kept.length !== nested.length) {
+          // or(): one always-true arm satisfies the whole disjunction → inert.
+          // and(): the true arms contribute nothing; drop them and keep the rest. An empty
+          // remainder means every arm was true → inert. A single survivor is a legal 1-arm and()
+          // (both lowerings accept one now), so no arity special case is needed here.
+          if (s.name === 'or' || !kept.length) continue;
+          out.push({ ...s, args: kept } as Step);
+          continue;
+        }
+      }
       out.push(s);
     }
     return out;

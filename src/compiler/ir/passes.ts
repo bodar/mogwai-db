@@ -5,7 +5,7 @@ import {
   foldConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
   verifyReadOnlyChildren,
   foldValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
-  injectSubgraphRec, injectPartitionRec, markProductiveBy, dropNonProductiveOrderBy, verify,
+  injectSubgraphRec, injectPartitionRec, markProductiveBy, alwaysProductiveFilterIsNoOp, verify,
   NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
   type PStep,
 } from './strategies.ts';
@@ -72,6 +72,16 @@ const FOLD: Pass[] = [
 const SIMPLIFY: Pass[] = [
   { name: 'collapseFoldCountLocal', category: 'simplify', run: (steps) => collapseFoldCountLocal(steps) },
   { name: 'dropRedundantOrder', category: 'simplify', run: (steps) => dropRedundantOrder(steps) },
+  {
+    // An existence filter whose body ALWAYS produces a traverser cannot reject anything, so the step
+    // is provably inert — the same category of fact as the two above. Removing it here is also what
+    // makes `predicateInlining` disable-safe for this whole family: neither the inline path nor the
+    // generic gate ever sees the step, so they cannot answer differently. See
+    // alwaysProductiveFilterIsNoOp for why this is not a gap in the child-existence gate.
+    name: 'alwaysProductiveFilterIsNoOp', category: 'simplify',
+    applies: (steps) => steps.some((s) => ['where', 'filter', 'not', 'and', 'or'].includes(s.name)),
+    run: (steps, ctx) => alwaysProductiveFilterIsNoOp(steps, ctx.params) as PStep[],
+  },
 ];
 
 // ---------- decoration (external withStrategies; config-gated) ----------
@@ -97,15 +107,6 @@ const DECORATION: Pass[] = [
   {
     name: 'ProductiveByStrategy', category: 'decoration', applies: specNamed('ProductiveByStrategy'),
     run: (steps) => markProductiveBy(steps) as PStep[],
-  },
-  {
-    // ALWAYS ON, and declared AFTER ProductiveByStrategy so a marked host is already visible: the
-    // non-productive drop is TinkerPop's DEFAULT by() policy, not an opt-in strategy. This is the
-    // one place order() learns it — see the long comment on dropNonProductiveOrderBy for why the
-    // policy lives in the IR rather than in the four order() lowering paths.
-    name: 'nonProductiveByDrop', category: 'decoration',
-    applies: (steps) => steps.some((s) => s.name === 'order'),
-    run: (steps, ctx) => dropNonProductiveOrderBy(steps, ctx.params) as PStep[],
   },
 ];
 

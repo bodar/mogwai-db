@@ -23,7 +23,8 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
 - `src/compiler/CLAUDE.md` — IR passes, the DI object model, fast paths
 - `src/compiler/steps/CLAUDE.md` — the lowering surface + child seam
 - `src/services/CLAUDE.md` — `call()` + Service Registry + full-text search
-- `test/CLAUDE.md` — the L1–L4 ladder + version split
+- `test/CLAUDE.md` — the L1–L5 conformance ladder (L5 = property-based; everything tracks
+  tinkerpop `origin/master`, the old version split is gone)
 - `.claude/rules/{wire-protocol,schema-storage,management-api}.md` — glob-scoped, fire on the
   matching files
 - `docs/2026-07-25-wire-and-storage-facts.md` — Map.Entry wire framing + the `MapStream` model

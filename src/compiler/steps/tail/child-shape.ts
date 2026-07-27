@@ -17,6 +17,7 @@
 // SCALAR_TRANSFORMS set). It must never grow an `engineOf`, a `.cte(`, or a `q\`\`` — those belong
 // in child.ts.
 
+import { ALWAYS_PRODUCTIVE_TERMINAL } from '../../ir/productivity.ts';
 import type { Relation } from '../../../sql/kernel/q.ts';
 import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import type { AliasMap, Carried, ElementStream } from '../context/context.ts';
@@ -955,11 +956,11 @@ export const optionMapNeedsPassthrough = (step: PStep, arms: readonly ChooseOpti
  *  its result to a variant and fail-closing an `is()` that used to compose; too loose and an
  *  unproductive input is silently answered with the `Pick.none` body.
  *
- *  Always productive: a `T` token (every element has a label/id), a `constant()`, and the two
- *  reducers with an identity element — `count()` is 0 and `fold()` is `[]` over an empty stream.
- *  `sum`/`min`/`max`/`mean` are deliberately NOT here: TinkerPop emits nothing for them on empty
- *  input, so they can be unproductive. Anything else (a property read, a movement) can be empty. */
-const ALWAYS_PRODUCTIVE_TERMINAL = new Set(['count', 'fold', 'constant']);
+ *  Always productive: a `T` token (every element has a label/id), plus any terminal in
+ *  `ALWAYS_PRODUCTIVE_TERMINAL` — which now lives in `ir/productivity.ts` as the SHARED authority,
+ *  because the always-productive-filter Pass asks the identical question and two copies of this
+ *  reasoning would drift. The rationale for which terminals qualify is documented there.
+ *  Anything else (a property read, a movement) can be empty. */
 function choiceCanBeUnproductive(a0: any, params: Record<string, any>): boolean {
   if (a0 && typeof a0 === 'object' && 'token' in a0) return false;
   if (!isNested(a0)) return true; // no recognizable choice — assume the worst, the emitter defers anyway

@@ -12,7 +12,7 @@ import { lowerReSource } from '../resource.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
 import { predicateSql, rangeToOffsetLimit } from '../../plan/plan.ts';
-import { elementOrderSql } from './modulation.ts';
+import { elementOrderDrop, elementOrderSql } from './modulation.ts';
 import {
   childCtx, childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, labelSelectOf,
   ELEMENT_CHILD_STEPS, isBareBranchChildAllCard, isElementChildStep, reuseCurrentFrame, ROOT_SCOPE, scalarChildPrefixOk,
@@ -909,9 +909,12 @@ function compileElementChildRows(
       const n = (end.elem === 'edge' ? edges : nodes).as('n');
       const ordered = carriedWith(end.carried, { encounter: 'encounter' });
       const orderExpr = elementOrderSql(end, n, step);
+      // The non-productive by(key) drop applies inside a child body exactly as at the root — same
+      // policy function, so `local(__.order().by('age'))` and `order().by('age')` cannot disagree.
+      const drop = elementOrderDrop(end, n, step);
       const rank = rankPerParent(end.carried, p, q`${orderExpr}, ${p.c.id}`);
       end = advance(end,
-        q`SELECT ${p.c.id} AS id${carryFragMint(ordered, p, 'encounter', rank)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`,
+        q`SELECT ${p.c.id} AS id${carryFragMint(ordered, p, 'encounter', rank)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}${drop ? q` WHERE ${drop}` : empty}`,
         { encounter: 'encounter' },
       );
       continue;

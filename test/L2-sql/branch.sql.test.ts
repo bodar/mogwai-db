@@ -76,8 +76,12 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(a.sql).toContain('WHERE ((EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.src=p.id AND e.label IN');
     expect(a.sql).toContain(') AND (EXISTS(');
     expect(read('g.V().or(__.out("knows"), __.in("created"))').sql).toContain(') OR (EXISTS(');
-    // <2 branches → clear throw
-    expect(() => compile('g.V().and(__.out())', {})).toThrow('needs at least two traversal branches');
+    // A SINGLE arm is legal Gremlin — `and(t)`/`or(t)` is just "t must produce" — and the generic
+    // child-existence combiner always lowered it. The inline path used to THROW here, which made it
+    // NARROWER than the path it accelerates (V().or(__.out()) ran with predicateInlining off and
+    // failed with it on). Both paths now accept one arm; ZERO arms still throws.
+    expect(read('g.V().and(__.out("knows"))').sql).toContain('EXISTS(');
+    expect(read('g.V().or(__.out("knows"))').sql).toContain('EXISTS(');
   });
 
   test('infix .and()/.or() connectors split a predicate body (where/choose/until)', () => {

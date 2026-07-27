@@ -1,6 +1,7 @@
 import { q, value, list, empty, raw, Relation, Query, type Expression } from '../../../sql/kernel/q.ts';
 import { nodes, edges, labels, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
 import { flattenListArgs } from '../../../gremlin/frontend.ts';
+import { elementOrderDrop, orderProductivityFilter } from './modulation.ts';
 import {
   predicateSql, rangeToOffsetLimit, elemCtx, extIdOf, jsonbGroupArray,
   nodePropScalar, edgePropScalar, nodePropSortKey, edgePropSortKey, scalarPropSortKey, compareKey, labelNameSub, framedProps, valueMapProps, storedValueExpr,
@@ -42,13 +43,17 @@ export interface TailAcc {
   offset: number;
   limit: number | null;
   distinct: boolean;
+  /** Did a ProductiveByStrategy-marked order() contribute these clauses? Drives the non-productive
+   *  by(key) drop below (TinkerPop's DEFAULT is to DROP a traverser the modulator yields nothing
+   *  for; the strategy opts into keeping it with a null). */
+  productiveBy: boolean;
   reducer: 'fold' | 'sum' | 'min' | 'max' | 'mean' | null; // terminal element reducer (fold→List / count guard)
   isPreds: any[];                  // is(P) after count() (count().is(P))
 }
 
 /** A TailAcc with no modifiers — the bare scalar projection case (no preceding
  *  order/limit/dedup) routes through lowerScalarProjection with this. */
-const EMPTY_TAIL_ACC: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, reducer: null, isPreds: [] };
+const EMPTY_TAIL_ACC: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, productiveBy: false, reducer: null, isPreds: [] };
 
 const PROJECTION_NAMES = new Set(['values', 'id', 'label', 'count', 'valueMap', 'elementMap', 'select', 'project', 'path']);
 // Scalar-producing projections: one `v` value per row. foldTailAcc stops at one of these
@@ -73,6 +78,7 @@ const REENTERABLE_PROJ = new Set(['path', 'valueMap', 'elementMap']);
 const MODIFIERS = new Map<string, ModFn>([
   ['order', (s, acc) => {
     // Each folded by() → one order clause; a bare order() sorts by identity.
+    if ((s as any).productiveBy) acc.productiveBy = true;
     const bys = s.bys ?? [];
     if (bys.length === 0) { acc.orders.push({ key: null, dir: 'asc' }); return; }
     for (const byArgs of bys) {
@@ -128,7 +134,7 @@ function reducerMod(name: NonNullable<TailAcc['reducer']>): ModFn {
  *  Shared by compileTail (element-rooted) and compileInject (scalar-stream-rooted)
  *  so both consume one modifier vocabulary — add a value-tail step once, here. */
 export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop: number } {
-  const acc: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, reducer: null, isPreds: [] };
+  const acc: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, productiveBy: false, reducer: null, isPreds: [] };
   let i = from;
   for (; i < steps.length; i++) {
     const s = steps[i];
@@ -294,7 +300,10 @@ function lowerElementOrderReenter(st: ElementStream, step: PStep): ElementStream
   const orderKey = list([...classes.map((by) => directOrderExpr(by, n, st)), q`${p.c.id}`], ', ');
   const carried = carriedWith(st.carried, { encounter: 'encounter' });
   const mint = q`ROW_NUMBER() OVER (${partitionOver(carried, p, orderKey)})`;
-  const body = q`SELECT ${p.c.id} AS id${carryFragMint(carried, p, 'encounter', mint)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`;
+  // Same non-productive by(key) drop as the acc projection, same policy function — this is the
+  // order()-followed-by-a-movement route, so it needs it independently but must not restate it.
+  const drop = elementOrderDrop(st, n, step);
+  const body = q`SELECT ${p.c.id} AS id${carryFragMint(carried, p, 'encounter', mint)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}${drop ? q` WHERE ${drop}` : empty}`;
   return { ...st, carried, rel: st.q.cte(body, ['id', ...carriedCols(carried)]) };
 }
 
@@ -603,7 +612,16 @@ function lowerScalarProjection(st: ElementStream, projStep: PStep, acc: TailAcc)
   const asTag = proj.shape.kind === 'value' ? staticTypeOf(proj.shape.type) : undefined;
   const vt = proj.vtypeExpr ? 'vtype' : undefined;
   const vtypeCol = proj.vtypeExpr ? q`, ${proj.vtypeExpr} AS vtype` : empty;
-  const where = proj.baseWhere ? q` WHERE ${proj.baseWhere}` : empty;
+  // The non-productive by(key) drop rides in this projection's WHERE. TinkerPop's default by() is
+  // NON-productive: `g.V().order().by('age')` returns four rows on the modern graph, not six, because
+  // the two software vertices have no `age`. ONE policy (orderProductivityFilter) shared with
+  // lowerElementOrderReenter, fed this site's own sort-key builder so the drop tests exactly the
+  // expression the ORDER BY sorts on.
+  const orderDrop = orderProductivityFilter(acc.orders, acc.productiveBy, nodePropOrderKey(st));
+  const baseWhere = orderDrop
+    ? (proj.baseWhere ? q`${proj.baseWhere} AND ${orderDrop}` : orderDrop)
+    : proj.baseWhere;
+  const where = baseWhere ? q` WHERE ${baseWhere}` : empty;
   const origin = st.carried.origins.at(-1);
 
   // Child scope: a physical per-origin encounter partitions downstream scalar row ops.
@@ -979,7 +997,17 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
 
   // count folds any tail limit/offset/distinct into the counted id-relation.
   if (projName === 'count') {
-    const inner = q`SELECT ${distinct ? 'DISTINCT ' : ''}id FROM ${st.rel}`;
+    // The non-productive by(key) drop still applies even though count() discards the ORDER BY:
+    // dropping the traversers whose modulator is unproductive CHANGES THE COUNT. This branch has no
+    // `n` alias (it counts st.rel directly), so the key is built against the inner `id` column.
+    // The key must be QUALIFIED: bare `id` inside the correlated property subquery binds to
+    // vertex_properties' own column, not the counted relation's, and silently matched nothing.
+    const cd = st.rel.as('cd');
+    const countDrop = orderProductivityFilter(acc.orders, acc.productiveBy,
+      (key) => st.elem === 'edge' ? edgePropSortKey(cd.c.id, key) : nodePropSortKey(cd.c.id, key));
+    const inner = countDrop
+      ? q`SELECT ${distinct ? 'DISTINCT ' : ''}${cd.c.id} AS id FROM ${cd} WHERE ${countDrop}`
+      : q`SELECT ${distinct ? 'DISTINCT ' : ''}id FROM ${st.rel}`;
     const innerLim = (limit !== null || offset > 0) ? q` LIMIT ${limit ?? -1} OFFSET ${offset}` : empty;
     let countNode: Expression = q`SELECT COUNT(*) AS v FROM (${inner}${innerLim})`;
     // count().is(P): filter the single count value (0 or 1 result rows).
@@ -998,6 +1026,8 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
 
   // order().by(key) sorts by an element property; a bare order() by n.id; else an upstream
   // carried encounter (an ordered dedup) fixes the result order.
+  // Same policy as the two scalar-side sites, fed this site's own sort-key builder.
+  const elemDrop = orderProductivityFilter(acc.orders, acc.productiveBy, nodePropOrderKey(st));
   let keyNodes: Expression[] = [];
   if (acc.orders.length) {
     keyNodes = acc.orders.map((o) => {
@@ -1029,7 +1059,7 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
     const lo = offset;
     const hi = limit !== null ? offset + limit : null; // exclusive upper traverser index (null = unbounded)
     const win = list(keyNodes.length ? keyNodes : [q`n.id`], ', ');
-    const inner = q`SELECT ${proj.colsNode}, ${b} AS bulk, SUM(${b}) OVER (ORDER BY ${win} ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) - ${b} AS pre FROM ${proj.fromNode}`;
+    const inner = q`SELECT ${proj.colsNode}, ${b} AS bulk, SUM(${b}) OVER (ORDER BY ${win} ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) - ${b} AS pre FROM ${proj.fromNode}${elemDrop ? q` WHERE ${elemDrop}` : empty}`;
     const upper = hi !== null ? q`MIN(pre + bulk, ${hi})` : q`(pre + bulk)`;
     const conds = [q`pre + bulk > ${lo}`];
     if (hi !== null) conds.push(q`pre < ${hi}`);
@@ -1039,7 +1069,7 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
   }
 
   const bulkCol = wantBulk ? q`, ${p.c[st.carried.bulk!]} AS bulk` : empty;
-  const tailNode = q`SELECT ${distinct ? 'DISTINCT ' : ''}${proj.colsNode}${bulkCol} FROM ${proj.fromNode}${orderNode}${limitNode}`;
+  const tailNode = q`SELECT ${distinct ? 'DISTINCT ' : ''}${proj.colsNode}${bulkCol} FROM ${proj.fromNode}${elemDrop ? q` WHERE ${elemDrop}` : empty}${orderNode}${limitNode}`;
 
   // fold() collapses an element projection into ONE List of vertices/edges (the handler's
   // `list` case folds the projected rows). valueMap/elementMap fold defer.

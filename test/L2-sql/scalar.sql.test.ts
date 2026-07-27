@@ -55,8 +55,10 @@ describe('scalar-parent / projection SQL', () => {
     expect(asc.sql).toContain("ELSE value END) FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) ASC) AS encounter");
     // order().by(key) before a scalar projection routes through the scalar pipeline: the
     // element order becomes the carried encounter (a ROW_NUMBER window). binds: label,
-    // the order key (window), then the values() join key.
-    expect(asc.binds).toEqual(['person', 'age', 'name']);
+    // the order key (window), the values() join key, then the order key AGAIN for the
+    // NON-PRODUCTIVE by() drop — TinkerPop's default by() drops a traverser it yields nothing
+    // for, so the projection filters on `<key> IS NOT NULL` (orderProductivityFilter).
+    expect(asc.binds).toEqual(['person', 'age', 'name', 'age']);
 
     const desc = read('g.V().hasLabel("person").order().by("age",desc).values("name")');
     expect(desc.sql).toContain("ELSE value END) FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) DESC");

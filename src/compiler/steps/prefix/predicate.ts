@@ -135,13 +135,11 @@ function correlatedExists(engine: Engine, body: Step[], fromId: Expression, isPr
  *  through this FastPath's appliesWhen — see branch.ts walkPredicate. */
 export const PredicateInliningFastPath: FastPath<[() => Expression | null], Expression> = {
   name: 'predicateInlining',
-  // NOT currently equivalent, and this field says so rather than claiming a proof that does not
-  // exist. L5's first run found three divergences, all attributed to this switch — two SILENT WRONG
-  // ANSWERS (an infix-composed P/TextP, and the 3-arg has(LABEL,k,v) form in the inline leaf below)
-  // and one support asymmetry (reducer/projection predicate bodies that ONLY this fast path can
-  // lower, so disabling it narrows support instead of falling back). Each is diagnosed, with its
-  // fix, in test/L5-properties/known.ts.
-  equivalentWhen: 'test/L5-properties/differential.test.ts — DIVERGES TODAY: 3 defects ratcheted in test/L5-properties/known.ts (2 silent wrong answers + 1 support asymmetry)',
+  // L5's first run found three divergences here — two silent wrong answers (an infix-composed
+  // P/TextP, and the 3-arg has(LABEL,k,v) form in the inline leaf below) and one support asymmetry
+  // (predicate bodies only this fast path could lower). All three are fixed; the differential now
+  // finds no disagreement for this switch, on or off, over ~4,000 generated traversals.
+  equivalentWhen: 'test/L5-properties/differential.test.ts — the fast-path differential (this switch off vs. on, over the L1 corpus + generated traversals)',
   appliesWhen: (ctx) => ctx.enabled.predicateInlining,
   tryLower: (_ctx, recognize) => recognize(),
 };
@@ -330,7 +328,13 @@ export function combineBranchPreds(
   labels?: LabelScope,
 ): Expression | null {
   const branches = step.args.filter(isNested);
-  if (branches.length < 2) throw new Error(`${step.name}() needs at least two traversal branches`);
+  // A SINGLE arm is legal Gremlin — `and(t)`/`or(t)` is just "t must produce" — and the generic
+  // child-existence combiner has always lowered it. This used to THROW here, which made the inline
+  // path narrower than the path it is supposed to accelerate: `V().or(__.out())` ran with
+  // predicateInlining off and failed with it on. That is the fast-path contract inverted, and it also
+  // blocked the always-productive-arm reduction in the Pass layer from ever emitting a 1-arm and().
+  // ZERO arms stays a throw: there is no predicate to build, and no generic fallback either.
+  if (branches.length === 0) throw new Error(`${step.name}() needs at least one traversal branch`);
   const parts: Expression[] = [];
   for (const b of branches) {
     const p = tryInlinePredicate(engine, stepChain(b.nested, params), ctx, params, labels);

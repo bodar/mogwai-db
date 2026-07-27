@@ -205,9 +205,24 @@ function tryBulkRepeat(engine: Engine, steps: PStep[], params: Record<string, an
   // fall back rather than emit wrong SQL.
   if (stop !== pre.length || st.elem !== 'node' || st.carried.aliases.size > 0 || st.carried.path || st.carried.sack) return null;
 
-  // f0: the seed frontier, one row per distinct vertex with its multiplicity (a
-  // pre-movement multiset like V().out() collapses here — COUNT(*) per id = its bulk).
-  let cur = query.cte(q`SELECT id, CAST(COUNT(*) AS INTEGER) AS bulk FROM ${st.rel} GROUP BY id`, ['id', 'bulk']);
+  // f0: the seed frontier, one row per distinct vertex carrying HOW MANY TRAVERSERS sit on it.
+  //
+  // That weight is SUM(incoming bulk) when the prefix already carries one, and COUNT(*) only when it
+  // does not. The distinction is not cosmetic: this engine forces movementCollapse ON, so any prefix
+  // containing a movement arrives ALREADY collapsed — `E().outV()` hands us marko as ONE row with
+  // bulk=3, and COUNT(*) scored that as 1, silently dropping the input multiplicity. The result was
+  // an undercount in the DEFAULT config:
+  //   g.E().outV().repeat(__.both('knows')).times(2).count()  →  4, where the enumerated
+  //   multiset (and .values('age') on the same chain) shows 10.
+  // Weighting by SUM is also exactly what the f1..fn hop loop below already does, so the seed now
+  // states the same rule as every subsequent frontier rather than a special case for depth 0.
+  const s0 = st.rel.as('s0');
+  const inBulk = st.carried.bulk;
+  const weight = inBulk ? q`SUM(${s0.c[inBulk]})` : q`COUNT(*)`;
+  let cur = query.cte(
+    q`SELECT ${s0.c.id} AS id, CAST(${weight} AS INTEGER) AS bulk FROM ${s0} GROUP BY ${s0.c.id}`,
+    ['id', 'bulk'],
+  );
   // f1..fn: each hop merges all walks landing on a vertex into one (id, SUM(bulk)) row,
   // so the frontier stays bounded by reachable |V|, not the walk count.
   for (let d = 1; d <= plan.times; d++) {
