@@ -4,6 +4,7 @@ import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
 import { advance, carriedWith, carryFrag, carryFragMint, carriedCols, partitionOver, type Carried, type ElementStream } from '../context/context.ts';
 import { aliasId } from '../context/alias.ts';
+import { asOnStream, selectOneFromAlias } from './labelselect.ts';
 import { carryOf, toListStream, toScalarStream, toVariantStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { lowerScalarRows, unionScalarStreams, SCALAR_TRANSFORMS } from './scalar.ts';
@@ -13,7 +14,7 @@ import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer
 import { predicateSql, rangeToOffsetLimit } from '../../plan/plan.ts';
 import { elementOrderSql } from './modulation.ts';
 import {
-  childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm,
+  childCtx, childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, labelSelectOf,
   ELEMENT_CHILD_STEPS, isBareBranchChildAllCard, reuseCurrentFrame, ROOT_SCOPE, scalarChildPrefixOk,
   type ChildFrame, type ChildParent, type ChildScope, type ChildUse, type CompileScope,
 } from './child-shape.ts';
@@ -121,8 +122,14 @@ export const CHILD_SCALAR_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mea
 /** The scalar continuation a property/element scalar child may carry after its projection
  *  (compiler-side; the classify twin is CHILD_SCALAR_ROW_STEPS in child-shape.ts). */
 const SHARED_SCALAR_CHILD_STEPS = new Set([
-  ...SCALAR_TRANSFORMS, 'is', 'order', 'limit', 'skip', 'range', 'tail', 'dedup',
+  ...SCALAR_TRANSFORMS, 'is', 'order', 'limit', 'skip', 'range', 'tail', 'dedup', 'as',
 ]);
+/** A scalar continuation the GENERIC path (lowerStepsStrict) can lower: the shared vocabulary
+ *  plus a single-label select(), which re-types the row to the label's contents and is owned by
+ *  the engine's one alias dispatch. Kept a predicate rather than a name in the Set because
+ *  select(Column.*) / a multi-label select are different steps with different consumers. */
+const isSharedScalarChildStep = (s: PStep): boolean =>
+  SHARED_SCALAR_CHILD_STEPS.has(s.name) || labelSelectOf(s) !== null;
 
 /** Compile a terminal child count as a true scope-aware barrier. The preserved
  * parent domain is the left side of the aggregate, so an unproductive child still
@@ -135,13 +142,13 @@ export function tryCompileCountChild(
   preParsed?: ReturnType<typeof stepChain>,
 ): ScalarStream | null {
   if (!nested || isPropertyParent(parent) || isScalarParent(parent)) return null;
-  const counted = classifyCountChild(preParsed ?? childSteps(nested, parent.params), parent.params);
+  const counted = classifyCountChild(preParsed ?? childSteps(nested, parent.params), childCtx(parent));
   if (!counted) return null;
   const { prefix } = counted;
 
   const pushed = pushChildScope(parent, scope);
-  const { stream: end, next: stop } = engineOf(pushed.seed).lowerElementSteps(prefix, pushed.seed);
-  if (stop !== prefix.length) return null;
+  const end = lowerElementBody(pushed.seed, prefix);
+  if (!end) return null;
 
   const d = pushed.frame.domain.as('d');
   const c = end.rel.as('c');
@@ -173,12 +180,12 @@ function tryCompileCountValueRows(
   let cut = body.length;
   const isPreds: any[] = [];
   while (cut > 0 && body[cut - 1].name === 'is') { isPreds.unshift(body[cut - 1].args[0]); cut--; }
-  const counted = classifyCountChild(body.slice(0, cut), parent.params);
+  const counted = classifyCountChild(body.slice(0, cut), childCtx(parent));
   if (!counted) return null;
   const { prefix } = counted;
   const pushed = pushChildScope(parent, scope);
-  const { stream: end, next: stop } = engineOf(pushed.seed).lowerElementSteps(prefix, pushed.seed);
-  if (stop !== prefix.length) return null;
+  const end = lowerElementBody(pushed.seed, prefix);
+  if (!end) return null;
   const d = pushed.frame.domain.as('d');
   const c = end.rel.as('c');
   const count = q`COUNT(${c.c.id})`;
@@ -235,6 +242,39 @@ function applyScalarChildCardinality(
   return { stream: toScalarStream(carryOf(parent), rel, undefined, { type: lowered.type, result: lowered.result }), frame: pushed.frame };
 }
 
+/** Fold an ELEMENT-preserving child body, crossing a `select(label)` re-root. lowerElementSteps
+ *  folds the movement/filter/as()/branch prefix but stops at select() — that is a TAIL step, not
+ *  a prefix StepFn. Rather than teach the prefix table a second select implementation, apply the
+ *  ONE that already exists (selectOneFromAlias, the same code the root tail runs) and keep
+ *  folding. An element-shaped label re-roots the traverser and the body continues; anything else
+ *  returns null, so every caller keeps its existing `stop !== length` decline.
+ *
+ *  This is the single element-body fold for the whole child seam, so admitting a label re-root
+ *  here reaches every child position at once (map/local/flatMap, where()/and()/or() existence,
+ *  by() modulators, branch arms, count children) at ANY nesting depth — pushChildScope projects
+ *  the parent's alias columns into each frame, so a label bound anywhere up the chain is
+ *  physically present in the innermost body. */
+function lowerElementBody(seed: ElementStream, steps: PStep[]): ElementStream | null {
+  let st = seed;
+  let at = 0;
+  for (;;) {
+    const { stream, next } = engineOf(st).lowerElementSteps(steps, st, at);
+    st = stream;
+    if (next === steps.length) return st;
+    at = next; // the fold stopped here — only a label re-root can carry the body forward
+    const label = labelSelectOf(steps[at]);
+    if (label === null) return null;
+    const selected = selectOneFromAlias(st, steps[at], label, popOf(steps[at]));
+    if (selected.kind !== 'elements') return null;
+    st = selected;
+    at++;
+  }
+}
+
+/** The Pop mode of a select(Pop, label) — default last, matching the root dispatch. */
+const popOf = (step: PStep): string =>
+  (step.args.find((a: any) => a && typeof a === 'object' && 'pop' in a) as { pop: string } | undefined)?.pop ?? 'last';
+
 /** PURE. A scalar child body that RE-SOURCES the graph: a `V()`/`E()` head (with no
  *  nested-traversal id argument, which is a different shape) over which the pushed scalar seed
  *  CROSS JOINs per value. The head discards the value and re-enters element space — the one
@@ -253,8 +293,7 @@ export function isResourceHead(rest: PStep[]): boolean {
 export function resourceElement(seed: ScalarStream, head: PStep, after: PStep[]): ElementStream | null {
   const el = lowerScalarVE(seed, head);
   if (!el) return null;
-  const { stream, next } = engineOf(el).lowerElementSteps(after, el);
-  return next === after.length ? stream : null;
+  return lowerElementBody(el, after);
 }
 
 /** Count the element rows of a re-sourced child per parent origin. Each row is marked with a
@@ -329,7 +368,7 @@ function compileScalarChildRows(
   // result (map(__.union(...)) / by(__.choose(...))). Checked before the scalar-parent families
   // below (a bare branch body is neither a value-op nor a re-source). elementScalarBranchArm is
   // precise (all arms scalar), so a non-scalar result is a contradiction.
-  if (elementScalarBranchArm(body, parent.params)) {
+  if (elementScalarBranchArm(body, childCtx(parent))) {
     const pushed = pushChildScope(parent, scope);
     const stream = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, body, 0);
     if (stream.kind !== 'scalar') throw new Error('scalar-branch child classified scalar but lowered to ' + stream.kind);
@@ -365,7 +404,7 @@ function compileScalarChildRows(
         return applyScalarChildCardinality(parent, pushed, scopedElementCount(moved, pushed), use, retainChildScope);
       }
       // ends in a projection (values/id/label) → scalar; lowerSteps folds V→element→projection.
-      if (classifyScalarChildRows('element', after, parent.params)?.kind !== 'element') return null;
+      if (classifyScalarChildRows('element', after, childCtx(parent))?.kind !== 'element') return null;
       const pushed = pushChildScope(parent, scope);
       const lowered = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, rest, 0);
       if (lowered.kind !== 'scalar') return null;
@@ -387,14 +426,14 @@ function compileScalarChildRows(
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
   }
 
-  const shape = classifyScalarChildRows('element', body, parent.params);
+  const shape = classifyScalarChildRows('element', body, childCtx(parent));
   if (!shape || shape.kind !== 'element') return null;
   const { prefix, projection: terminal, suffix } = shape.parts;
 
   // The ordinary row pipeline now uses the exact same iterative lowering loop as a
   // root traversal. Scoped reducers/folds retain their explicit per-origin policies
   // below; constant() still needs its child-only projector.
-  if (terminal.name !== 'constant' && suffix.every((step) => SHARED_SCALAR_CHILD_STEPS.has(step.name))) {
+  if (terminal.name !== 'constant' && suffix.every(isSharedScalarChildStep)) {
     const pushed = pushChildScope(parent, scope);
     const stream = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, body, 0);
     // As above: classify proved scalar, so a non-scalar is a contradiction — fail loud.
@@ -411,8 +450,8 @@ function compileScalarChildRows(
   if (!['values', 'id', 'label', 'constant'].includes(terminal.name)) return null;
 
   const pushed = pushChildScope(parent, scope);
-  const { stream: end, next: stop } = engineOf(pushed.seed).lowerElementSteps(prefix, pushed.seed);
-  if (stop !== prefix.length) return null;
+  const end = lowerElementBody(pushed.seed, prefix);
+  if (!end) return null;
 
   const c = end.rel.as('c');
   let scalar: Expression;
@@ -461,6 +500,27 @@ function compileScalarChildRows(
       at = lowered.stop;
       if (at === suffix.length) break;
       const reducer = suffix[at].name;
+      // A scalar row-run deliberately stops at an as(): binding a label is shape-agnostic, so at
+      // root the engine's alias dispatch owns it. There is no engine loop here, so apply the ONE
+      // implementation it would have used (asOnStream) and keep going — the same reuse the
+      // element-body fold makes for select(). Without it the classifier (which admits as() in the
+      // scalar row vocabulary) would claim a body this builder then threw on, mid-CTE.
+      if (reducer === 'as') {
+        const bound = asOnStream(stream, suffix[at]);
+        if (bound.kind !== 'scalar') throw new Error('as() over a scalar child row did not stay scalar');
+        stream = bound;
+        at++;
+        continue;
+      }
+      const label = labelSelectOf(suffix[at]);
+      if (label !== null) {
+        const selected = selectOneFromAlias(stream, suffix[at], label, popOf(suffix[at]));
+        if (selected.kind !== 'scalar')
+          throw new Error(`select("${label}") in a scalar child continuation must hold a value`);
+        stream = selected;
+        at++;
+        continue;
+      }
       if (!CHILD_SCALAR_REDUCERS.has(reducer))
         throw new Error(`scalar child continuation ${reducer}() not yet supported`);
 
@@ -600,7 +660,7 @@ export function tryCompileBranchChildAllCard(
   scope: CompileScope = ROOT_SCOPE,
 ): ListStream | VariantStream | null {
   if (!nested || isPropertyParent(parent) || isScalarParent(parent)) return null;
-  if (!isBareBranchChildAllCard(nested, parent.params)) return null;
+  if (!isBareBranchChildAllCard(nested, childCtx(parent))) return null;
   const body = childSteps(nested, parent.params);
   const pushed = pushChildScope(parent, scope);
   const lowered = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, body, 0);
@@ -807,14 +867,14 @@ function compileElementChildRows(
   // ONE shape classification (the same classifyElementChildRows the element preflight peeks
   // use) — the bare-order strip, firstPolicy order modulator, and empty-before handling all
   // live in the shared helper, so preflight and compiler cannot diverge.
-  const shape = classifyElementChildRows(preParsed ?? childSteps(nested, parent.params), stripTerminal, firstPolicy, parent.params);
+  const shape = classifyElementChildRows(preParsed ?? childSteps(nested, parent.params), stripTerminal, firstPolicy, childCtx(parent));
   if (!shape) return null;
   const { parts, orderStep } = shape;
   const pushed = pushChildScope(parent, scope);
   // (trackFromV for an exploded otherV() body is derived inside lowerElementSteps, the single
   // fold every scope passes through — see the note there.)
-  const { stream: prefixed, next: stop } = engineOf(pushed.seed).lowerElementSteps(parts.prefix, pushed.seed);
-  if (stop !== parts.prefix.length) return null;
+  const prefixed = lowerElementBody(pushed.seed, parts.prefix);
+  if (!prefixed) return null;
 
   // Rank rows per parent traverser: order/slice/first all window over the child's origin
   // stack (partitionOver — equivalent to the innermost ordinal, which is globally unique,

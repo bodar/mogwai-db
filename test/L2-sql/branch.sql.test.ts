@@ -329,7 +329,10 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(read('g.V().map(__.out().fold()).unfold().values("name")').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     expect(() => compile('g.V().map(__.constant(1).discard())', {})).toThrow();
     // record/list-valued child bodies still defer; element bodies use generic child scope below.
-    expect(() => compile('g.V().map(__.select("a"))', {})).toThrow('not supported by generic scalar lowering');
+    // A label select in a child body is NOT a deferral: select("a") with no binding in scope
+    // drops every traverser, exactly as it does at root (TinkerPop Select.feature
+    // g_V_selectXaX pins the empty result), so the body compiles to a zero-row element child.
+    expect(read('g.V().map(__.select("a"))').sql).toContain('WHERE 0');
     expect(() => compile('g.V().map(__.values("name")).map(__.values("age"))', {})).toThrow('map() after a scalar stream not yet supported');
     // The leaf now returns a ScalarStream instead of materializing terminal SQL.
     expect(read('g.V().map(__.out().count()).is(P.gt(0)).count()').shape).toEqual({ kind: 'count' });

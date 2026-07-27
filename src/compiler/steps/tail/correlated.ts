@@ -4,6 +4,7 @@ import { type Elem } from '../../plan/plan.ts';
 import { normalize } from '../../ir/passes.ts';
 import { type ElementStream } from '../context/context.ts';
 import type { Engine } from '../../engine/deps.ts';
+import { mentionsLabel } from './child-shape.ts';
 
 // ---------- correlated inline-child rendering ----------
 //
@@ -63,6 +64,13 @@ export function compileCorrelatedChild(
   params: Record<string, any> = {},
 ): { rel: Relation; elem: Elem } | null {
   const steps = normalize(body).steps;
+  // A label READ has no correlated rendering: the seed below is a bare id with no carried
+  // columns, so an alias column is physically absent here — and absent is exactly what
+  // selectOneFromAlias reads as "never bound → drop every traverser". Declining (rather than
+  // answering empty) hands the body to the materialized generic gate, which carries the whole
+  // schema. A label BIND is caught after the fold too (the carried check below), but a read
+  // binds nothing, so it has to be recognized up front.
+  if (mentionsLabel(steps, params)) return null;
   // A variant engine bound to a fresh InlineQuery (nested derived subqueries, not shared CTEs),
   // sharing the parent engine's fastPaths — so the movement/filter StepFns read the right config.
   const inlineEngine = engine.withQuery(new InlineQuery());

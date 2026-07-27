@@ -7,7 +7,8 @@ over-reports `LANDED`; this keeps only what a code check confirms open). Live pe
 `feature-support-matrix.md`.
 
 **Refreshed** 2026-07-26 against L3 1362 unique / 2297 (`l3-state.json` shows 1364 — two names
-recur legitimately, see `test/CLAUDE.md`). Path pointers assume the 2026-07-23 restructure
+recur legitimately, see `test/CLAUDE.md`); item 2's Slice 3 took it to **1372** on 2026-07-27.
+Path pointers assume the 2026-07-23 restructure
 (`src/compiler/steps/{context,prefix,tail,write}/`, `src/compiler/{ir,plan,engine}/`).
 
 > **Before picking an item, verify its premise against the code — this index has been stale in BOTH
@@ -101,10 +102,45 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
      multi-output body's first-cardinality would silently drop arms — fails closed) nor into
      `classifyListChild` (which feeds the branch-arm triage — kept untouched). Pinned by
      `test/L4-addendum/list-branch-child.feature`.
-   - **Still open:** `as()`/`select(label)` bound inside a child body; `choose().option()` without a
-     `Pick.none` default (mixed pass-through); child bodies producing map/group/record shapes (item 5
-     territory); the `group().by(project(...))` composite key and non-scalar/non-count nested-group
-     inner keys.
+   - ✅ **Slice 3 LANDED 2026-07-27: `as()`/`select(label)` inside a child body**, at every
+     position and any depth. The gate was never the emit side — `pushChildScope` already projects
+     the parent's alias columns into every frame, so a label bound anywhere up the chain is
+     PHYSICALLY present in the innermost body. What was missing was that the pure classifiers had
+     no way to ask what a label holds, and `select(label)`'s shape IS the label's contents. They
+     now take a **`ChildCtx`** (bound params + a `LabelEnv`: label → element/scalar/list), seeded
+     from the parent's carried aliases and EXTENDED as a body is scanned — so a bind types the
+     selects after it, and a nested arm classifies against the labels visible where it sits. One
+     rule at every recursion, not a per-position vocabulary patch. `as()` joined
+     `ELEMENT_CHILD_STEPS` (it preserves every shape); `select(label)` is a tail step, so
+     `lowerElementBody` (`child.ts`) applies the ONE existing `selectOneFromAlias` and keeps
+     folding rather than adding a second select to the prefix table. **L3 1364 → 1372** (+8, all
+     label-in-child scenarios: `g_V_mapXselectXaXX`, `g_V_asXaX_flatMapXselectXaXX`, the
+     `and`/`or`/`choose` select forms, `g_V_hasLabelXpersonX_asXpX_outXcreatedX_group_byXnameX_
+     byXselectXpX_valuesXageX_sumX`, `g_withPath_V_asXaX_out_mapXselectXaX_valuesXnameXX`).
+     Pinned by `test/L4-addendum/child-body-labels.feature` + a `branch.exec.test.ts` block.
+     Three facts worth keeping:
+     - **Escape semantics fall out of the existing boundaries — do not add a per-position rule.**
+       A MAPPING consumer pops the child stream (`popChildScope` carries the child's own carried,
+       so a bind inside `map`/`local`/`flatMap`/an arm rides out); a FILTER or `by()` consumer
+       re-projects the parent domain (so it stays confined). Both are TinkerPop's.
+     - **A renderer that cannot carry alias columns must DECLINE, not answer.** The inline
+       correlated predicate child (`correlated.ts`) seeds a bare id with no carried schema, where
+       an absent alias column is indistinguishable from a never-bound label — so
+       `where(__.out().where(__.select('x'))))` silently returned `[]`. It now calls
+       `mentionsLabel` up front and falls through to the materialized gate (the fast-path
+       contract: recognition-failure falls through). Fixed a live wrong answer.
+     - `emptyElementLike` now keeps the input's carried COLUMNS (zero rows). At root that is
+       invisible; in a child scope it is the difference between a correct answer and a relation
+       the consumer cannot join to its frame ordinal.
+   - **Still open:** `choose().option()` without a `Pick.none` default (mixed pass-through); child
+     bodies producing map/group/record shapes (item 5 territory); the `group().by(project(...))`
+     composite key and non-scalar/non-count nested-group inner keys. Also still open, and
+     ORTHOGONAL to labels (it reproduces with none): a child-in-child body whose inner child is
+     not element-shaped — `local(__.local(__.out().values('n')))`, `map(__.out().map(...))`. That
+     family now DEFERS instead of crashing: `local` sits in the element-row suffix vocabulary but
+     emit recurses into an *element* child for it, so classify has to ask the same question —
+     until it did, `group().by(__.out().local(__.values('n')).fold())` died on a null-deref
+     through the caller's non-null assertion instead of failing closed.
    → [carried-schema-and-projection-reentry](./2026-07-14-carried-schema-and-projection-reentry-plan.md),
    [group-value-generic-seam](./2026-07-18-group-value-generic-seam-plan.md)
 
@@ -259,6 +295,12 @@ Each fails closed (clear error, never mis-executes). Do only when a concrete sce
 - **Group re-entry matrix-fill** — element/property-valued inner keys+values, composite `project()`
   keys, `elementMap()` followers, `keys→SET`, `as()`/`order()` on a group. `steps/tail/group.ts` is
   where the child seam most often bottoms out — extend it (item 2), don't dedup. *Low.*
+  · **An IMPLICIT-collect group value is not emission-ordered** (found 2026-07-27, pre-existing):
+    `by(__.out().values('n'))` builds its list with a bare `json_group_array` — no `ORDER BY` — so
+    the member order is incidental, while the EXPLICIT `by(__.out().values('n').fold())` orders by
+    the encounter (`valOrder`). Today the incidental order usually matches; any extra CTE in the
+    body (e.g. a `select(label)` re-root) permutes it. Fix = thread the encounter through
+    group.ts's `genericVal` path as the fold path already does. *Low.*
   → [group-value-generic-seam](./2026-07-18-group-value-generic-seam-plan.md),
   [p3-reenterable-shapes](./archive/2026-07-16-p3-reenterable-shapes-plan.md)
 - **Mixed-shape branch corners** — node+edge in one branch, `path()` through it, `as()` inside an
@@ -268,8 +310,9 @@ Each fails closed (clear error, never mis-executes). Do only when a concrete sce
   · `path()` through a mixed-shape branch → all four mixed-shape lowerers now throw, including
     `optional` (that one silently rode `path` through `carryFrag` unpadded until 2026-07-25 —
     a hit arm is a scalar row with no path position, a miss arm keeps the element's).
-  · `as()` inside a non-element arm → see item 1's residual (needs alias-aware merges FIRST; the
-    naive vocabulary change returns `[]` from `select()`). *Low.*
+  · ~~`as()` inside a non-element arm~~ → ✅ **closed 2026-07-27** by item 2's Slice 3: the
+    alias-aware merges landed first (item 1's residual), so admitting `as()` to the child
+    vocabulary was safe. Element and scalar arms both merge the binding. *Low.*
   → [p4-dynamic-variant](./archive/2026-07-16-p4-dynamic-variant-plan.md)
 - **Write fail-closed walls** — `addE`/`mergeE` endpoint traversals past a movement/branch (need the
   bare rowid, not the framed external id), map-valued merge drivers, nested keys/values. *Low.*

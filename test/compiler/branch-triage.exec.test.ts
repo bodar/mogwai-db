@@ -9,7 +9,7 @@ import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import { normalize } from '../../src/compiler/ir/passes.ts';
 import {
   asBranchKind, branchNeedsShapeDispatch, classifyBranchArms,
-  isElementChild, isListChild, isScalarChild, type BranchKind,
+  isElementChild, isListChild, isScalarChild, type BranchKind, type ChildCtx,
 } from '../../src/compiler/steps/tail/child-shape.ts';
 import { type PStep } from '../../src/compiler/ir/strategies.ts';
 
@@ -18,9 +18,13 @@ import { type PStep } from '../../src/compiler/ir/strategies.ts';
 const branchSteps = (gremlin: string): PStep[] =>
   normalize(stepChain(parseGremlin(gremlin), {})).steps.filter((s) => asBranchKind(s.name));
 
+/** A label-free classify context (no bound params, no as() in scope) — what a root-position
+ *  branch sees before anything is labelled. */
+const CTX: ChildCtx = { params: {}, labels: new Map() };
+
 const planOf = (gremlin: string) => {
   const [step] = branchSteps(gremlin);
-  return classifyBranchArms(asBranchKind(step.name)!, step, {});
+  return classifyBranchArms(asBranchKind(step.name)!, step, CTX);
 };
 
 describe('classifyBranchArms — the shape verdict', () => {
@@ -90,7 +94,7 @@ describe('classifyBranchArms — the shape verdict', () => {
 /** The ORIGINAL ten-boolean break predicate, transcribed verbatim from the pre-consolidation
  *  lowerElementSteps (engine.ts). Kept as the reference oracle: branchNeedsShapeDispatch must
  *  agree with it for every branch shape, or the prefix fold and the tail cascade have drifted. */
-function tenBooleanBreak(step: PStep, params: Record<string, any>): boolean {
+function tenBooleanBreak(step: PStep, params: ChildCtx): boolean {
   const nested = (a: any) => a && typeof a === 'object' && 'nested' in a;
   const unionBranches = step.name === 'union' ? step.args.filter(nested) : [];
   const scalarUnion = unionBranches.length >= 2 && unionBranches.every((a: any) => isScalarChild(a.nested, params));
@@ -169,8 +173,8 @@ describe('branchNeedsShapeDispatch === the ten-boolean predicate it replaced', (
     for (const src of CORPUS) {
       for (const step of branchSteps(src)) {
         const kind = asBranchKind(step.name) as BranchKind;
-        expect({ src, step: step.name, breaks: branchNeedsShapeDispatch(kind, step, {}) })
-          .toEqual({ src, step: step.name, breaks: tenBooleanBreak(step, {}) });
+        expect({ src, step: step.name, breaks: branchNeedsShapeDispatch(kind, step, CTX) })
+          .toEqual({ src, step: step.name, breaks: tenBooleanBreak(step, CTX) });
         checked++;
       }
     }

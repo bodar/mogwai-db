@@ -8,7 +8,7 @@ import { withCarried, type Carry, type ElementStream, type StepFn } from '../ste
 import { move, toEdge, toVertex, otherV } from '../steps/prefix/movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from '../steps/prefix/filter.ts';
 import { union, optional, repeat, choose, coalesce } from '../steps/prefix/branch.ts';
-import { asBranchKind, branchNeedsShapeDispatch, isElementChild, isListChild, isScalarChild } from '../steps/tail/child-shape.ts';
+import { asBranchKind, branchNeedsShapeDispatch, childCtx, isElementChild, isListChild, isScalarChild, type ChildCtx } from '../steps/tail/child-shape.ts';
 import { match } from '../steps/prefix/match.ts';
 import { identity, limit, range, skip } from '../steps/prefix/passthrough.ts';
 import { sack } from '../steps/prefix/sack.ts';
@@ -66,9 +66,9 @@ const isSideEffectGroup = (s: PStep): boolean => (s.args ?? []).some((a: any) =>
 /** Every recognized local() body belongs at shape-aware dispatch. The generic child
  * compiler applies `all` cardinality, so row operators and reducers partition by
  * parent without a prefix-local parser. */
-const isShapedLocal = (s: PStep, params: Record<string, any>): boolean => {
+const isShapedLocal = (s: PStep, ctx: ChildCtx): boolean => {
   const nested = (s.args ?? [])[0]?.nested;
-  return !!nested && (isElementChild(nested, params) || isScalarChild(nested, params) || isListChild(nested, params));
+  return !!nested && (isElementChild(nested, ctx) || isScalarChild(nested, ctx) || isListChild(nested, ctx));
 };
 
 /** otherV() needs each edge step to record its entering vertex — gate that on the
@@ -272,12 +272,16 @@ export class LoweringEngine implements Engine {
       // choose (choose().option()…) is a tail CASE projector, not a prefix branch, and reports
       // as needing dispatch from there.
       const branchKind = asBranchKind(steps[i].name);
+      // The classify context is the CURRENT stream, not the seed: an as() earlier in this very
+      // fold has already bound its label, so a branch arm / local() body here classifies against
+      // the labels actually visible at this position (V().as('a').local(__.select('a')...)).
+      const ctx = childCtx(st);
       if (!fn
-        || (branchKind && branchNeedsShapeDispatch(branchKind, steps[i], seedSt.params))
+        || (branchKind && branchNeedsShapeDispatch(branchKind, steps[i], ctx))
         || (steps[i].name === 'choose' && steps[i].options)
         || (steps[i].name === 'sack' && !isSackMutate(steps[i]))
         || ((steps[i].name === 'group' || steps[i].name === 'groupCount') && !isSideEffectGroup(steps[i]))
-        || (steps[i].name === 'local' && isShapedLocal(steps[i], seedSt.params))) break;
+        || (steps[i].name === 'local' && isShapedLocal(steps[i], ctx))) break;
       st = fn(steps[i], st);
     }
     return { stream: st, next: i };

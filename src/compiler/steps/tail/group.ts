@@ -12,7 +12,7 @@ import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PA
 import { PER_ROW, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { pushChildScope, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows } from './child.ts';
-import { childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, reuseCurrentFrame, type ChildParent } from './child-shape.ts';
+import { childCtx, childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, reuseCurrentFrame, type ChildParent } from './child-shape.ts';
 
 /** The numeric reducers that terminate a nested-group inner value `by(__.values(x).<r>())`. */
 const SCALAR_REDUCERS = new Set(['sum', 'min', 'max', 'mean']);
@@ -201,9 +201,9 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   // (project() head, value terminal), which needs the un-normalized shape.
   const scalarShape = (body: ReturnType<typeof stepChain>) => isProp
     ? classifyScalarChildRows('property', body) !== null
-    : body.at(-1)?.name === 'count' ? classifyCountChild(body, parent.params) !== null : classifyScalarChildRows('element', body, parent.params) !== null;
+    : body.at(-1)?.name === 'count' ? classifyCountChild(body, childCtx(parent)) !== null : classifyScalarChildRows('element', body, childCtx(parent)) !== null;
   const scalarFoldShape = (body: ReturnType<typeof stepChain>) =>
-    body.at(-1)?.name === 'fold' && classifyScalarChildRows(pk, body.slice(0, -1), parent.params) !== null;
+    body.at(-1)?.name === 'fold' && classifyScalarChildRows(pk, body.slice(0, -1), childCtx(parent)) !== null;
 
   const keyArg = bys[0]?.[0];
   const valArg = bys[1]?.[0];
@@ -233,18 +233,18 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   // reducer/fold terminal, and a group KEY uses 'first' (no encounter for a branch) so keys stay flat.
   const genericVal = valSteps.length > 0
     && !GROUP_VALUE_REDUCERS.has(valTerminal!)
-    && (scalarShape(valBody) || (!isProp && elementScalarBranchArm(valBody, parent.params)));
+    && (scalarShape(valBody) || (!isProp && elementScalarBranchArm(valBody, childCtx(parent))));
   const genericReducer = valSteps.length > 0
     && GROUP_VALUE_REDUCERS.has(valTerminal!)
     && scalarShape(valBody);
   const genericFold = valTerminal === 'fold' && scalarFoldShape(valBody);
   const genericElementFold = !isProp && valTerminal === 'fold'
-    && classifyElementChildRows(valBody, 'fold', false, parent.params) !== null;
+    && classifyElementChildRows(valBody, 'fold', false, childCtx(parent)) !== null;
   // An unreduced element value traversal (by(__.out()), by(__.out().order())) collects
   // into a list — TinkerPop's implicit fold. Same relational path as genericElementFold.
   const genericElementImplicitFold = !isProp && !genericElementFold
     && valSteps.length > 0
-    && classifyElementChildRows(valBody, undefined, false, parent.params) !== null;
+    && classifyElementChildRows(valBody, undefined, false, childCtx(parent)) !== null;
   // A nested-group value `by(__.<move>.group()/groupCount())`: the movement prefix expands
   // to inner rows through the SAME generic child engine, and the inner group folds them per
   // outer key (a two-level aggregation in lowerGroup). The prefix is either element movement

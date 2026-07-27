@@ -317,4 +317,57 @@ test('a list-armed branch composes as an all-cardinality (local/flatMap) child b
     .toEqual(['e:2', 'e:3', 'e:4', 's:marko']);
 });
 
+test('as()/select(label) compose inside a child body, at any depth', () => {
+  const store = seededStore();
+  const names = (q: string) => run(store, q).map((r: any) => r.v).sort();
+
+  // A label bound up the chain is VISIBLE inside a child body — pushChildScope already projects
+  // the alias columns into every frame, so the read is just a re-root on the carried column.
+  // map() is first-cardinality: one row per person who created something, re-rooted back to x.
+  expect(names('g.V().as("x").map(__.out("created").select("x")).values("name")'))
+    .toEqual(['josh', 'marko', 'peter']);
+  // ...and at DEPTH: the env threads through each nested classifier, so the label is still
+  // visible two child scopes down.
+  expect(names('g.V().as("x").where(__.out("created").where(__.select("x"))).values("name")'))
+    .toEqual(['josh', 'marko', 'peter']);
+
+  // A label bound INSIDE the body types the selects that follow it in the same body.
+  expect(names('g.V().local(__.out("created").as("a").select("a")).values("name")'))
+    .toEqual(['lop', 'lop', 'lop', 'ripple']);
+
+  // ESCAPE is decided by the consumer's boundary, and both directions are TinkerPop's:
+  //   a MAPPING child pops the child stream, so the bind rides out to the parent...
+  expect(names('g.V().hasLabel("person").map(__.out("created").as("a")).select("a").values("name")'))
+    .toEqual(['lop', 'lop', 'lop']);
+  //   ...a FILTER child re-projects the parent domain, so the bind stays confined (select() of it
+  //   is then an unbound label → drop every traverser, NOT an error).
+  expect(run(store, 'g.V().where(__.out("created").as("a")).select("a")')).toEqual([]);
+
+  // An unbound label reads as empty inside a child exactly as it does at root, and — the part
+  // that only matters in a child scope — the empty relation still carries the frame's ordinal,
+  // so the consumer's rejoin is well-typed instead of referencing a column that isn't there.
+  expect(run(store, 'g.V().map(__.out().select("nope"))')).toEqual([]);
+  expect(run(store, 'g.V().where(__.out().select("nope"))')).toEqual([]);
+
+  // The INLINE correlated predicate renderer has no alias columns to read, so it must DECLINE a
+  // label-mentioning body and let the materialized generic gate answer — otherwise the absent
+  // column reads as "never bound" and the filter silently returns []. The fast-path contract is
+  // enabled ≡ disabled, so assert exactly that on a body the inliner would otherwise claim.
+  const inlined = (on: boolean) =>
+    runWith(store, 'g.V().as("x").where(__.out("created").where(__.select("x"))).values("name")',
+      { fastPaths: { predicateInlining: on } }).map((r: any) => r.v).sort();
+  expect(inlined(true)).toEqual(['josh', 'marko', 'peter']);
+  expect(inlined(true)).toEqual(inlined(false));
+});
+
+test('a child body whose local() is not element-shaped defers cleanly (classify/emit lockstep)', () => {
+  const store = seededStore();
+  // `local` is in the element-row SUFFIX vocabulary, but the emitter recurses into an ELEMENT
+  // child for it. A scalar local() body must therefore be rejected at classify time — when it
+  // was not, the emitter returned null into the caller's non-null assertion and the compile
+  // died with a null-deref instead of a deferral.
+  expect(() => run(store, 'g.V().group().by("name").by(__.out().local(__.values("name")).fold())'))
+    .toThrow(/not yet supported/);
+});
+
 });

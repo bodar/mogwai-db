@@ -10,7 +10,7 @@ import { type PathPos } from '../../../sql/kernel/render.ts';
 import { type TailAcc } from './projection.ts';
 import { reRootElement } from './select.ts';
 import { pushChildScope, tryCompileScalarValueChild } from './child.ts';
-import { byAt, classifyBy, childSteps, classifyScalarChild, reuseCurrentFrame, type ChildFrame, type ChildScope } from './child-shape.ts';
+import { byAt, childCtx, classifyBy, childSteps, classifyScalarChild, reuseCurrentFrame, type ChildFrame, type ChildScope } from './child-shape.ts';
 import { tryLowerScalarChoose, tryLowerScalarCoalesce } from '../prefix/branch.ts';
 
 // ---------- path() (linear regime) ----------
@@ -112,7 +112,7 @@ function lowerPathPositionChild(
     throw new Error(`path().by(traversal): a branch (choose/coalesce/union) at a path position must be the whole by() body; a movement/filter around it is not yet supported (needs first-collapse)`);
   // Flat value/transform/reducer body → the generic scalar child seam with `first` cardinality
   // (encounter = ROW_NUMBER PARTITION BY ordinal) collapses a fan-out prefix to one value.
-  const plan = classifyScalarChild(nested, params);
+  const plan = classifyScalarChild(nested, childCtx(seed));
   if (plan) return tryCompileScalarValueChild(seed, nested, 'first', reuseCurrentFrame(outer.scope, outer.frame), plan.body)!;
   throw new Error(`path().by(traversal) position must be a scalar child (value/transform/reducer, or a bare choose()/coalesce()); __.${armDesc()} not yet supported`);
 }

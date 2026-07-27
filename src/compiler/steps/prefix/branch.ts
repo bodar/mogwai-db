@@ -8,7 +8,7 @@ import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
 import { advance, elemRel, prevRel, carryFrag, carryFragMint, carriedCols, carriedWith, mergeAliasMaps, partitionOver, type AliasEntry, type AliasMap, type Carried, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type AliasShape } from '../context/alias.ts';
 import { pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
-import { classifyArmShape, classifyListChild, classifyScalarChild, ROOT_SCOPE } from '../tail/child-shape.ts';
+import { childCtx, classifyArmShape, classifyListChild, classifyScalarChild, ROOT_SCOPE, type ChildCtx } from '../tail/child-shape.ts';
 import { carryOf, toVariantStream, type ListStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
 import { finishListMerge, mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
 import { unionScalarStreams, SACK_OPS, combineSack } from '../tail/scalar.ts';
@@ -215,7 +215,7 @@ export function tryLowerListUnion(s: Step, st: ElementStream): ListStream | null
   if (branches.length < 2) return null;
   // classify every arm once (pure, no CTE); emit only if ALL qualify, reusing each parsed
   // body — so a partly-list union never emits arm0's CTEs before a later arm disqualifies.
-  const plans = branches.map((b) => classifyListChild(b.nested, st.params));
+  const plans = branches.map((b) => classifyListChild(b.nested, childCtx(st)));
   if (plans.some((p) => !p)) return null;
   const arms = branches.map((branch, i) => tryCompileListChild(st, branch.nested, ROOT_SCOPE, plans[i]!.body)!);
   return finishListMerge(carryOf(st), arms);
@@ -274,7 +274,7 @@ export const optional: StepFn = (s, st) => {
  * schema, while the child-only origin is consumed by the anti-existence arm. */
 export function tryLowerVariantOptional(s: Step, st: ElementStream): VariantStream | null {
   const nested = s.args[0]?.nested;
-  const plan = classifyScalarChild(nested, st.params);
+  const plan = classifyScalarChild(nested, childCtx(st));
   if (!plan) return null;
   // Same fail-closed wall as the three mixed-shape siblings (union/coalesce/choose above): the
   // hit arm is a scalar row (no path position) and the miss arm the original element (keeps
@@ -330,7 +330,7 @@ export function tryLowerScalarCoalesce(s: Step, st: ElementStream): ScalarStream
   assertForkSafe('coalesce', st);
   const branches = s.args.filter(isNested);
   if (!branches.length) return null;
-  const plans = branches.map((b) => classifyScalarChild(b.nested, st.params));
+  const plans = branches.map((b) => classifyScalarChild(b.nested, childCtx(st)));
   if (plans.some((p) => !p)) return null;
   const { seedSt, ord } = originSeed(st);
   const arms = branches.map((branch, i) =>
@@ -344,7 +344,7 @@ export function tryLowerListCoalesce(s: Step, st: ElementStream): ListStream | n
   assertForkSafe('coalesce', st);
   const branches = s.args.filter(isNested);
   if (!branches.length) return null;
-  const plans = branches.map((b) => classifyListChild(b.nested, st.params));
+  const plans = branches.map((b) => classifyListChild(b.nested, childCtx(st)));
   if (plans.some((p) => !p)) return null;
   const { seedSt, ord } = originSeed(st);
   const arms = branches.map((branch, i) => tryCompileListChild(seedSt, branch.nested, ROOT_SCOPE, plans[i]!.body)!);
@@ -383,8 +383,8 @@ function compileVariantArm(seed: ElementStream, nested: any): VariantArm {
 /** Are these branch shapes genuinely mixed (not all one class, all classifiable)? The
  *  `merge === 'variant'` verdict of the canonical triage, expressed over a bare arm list (the
  *  mixed-shape lowerers below receive the arms already extracted). */
-function branchesAreMixed(branches: readonly any[], params: Record<string, any>): boolean {
-  const shapes = branches.map((b) => armShape(b.nested, params));
+function branchesAreMixed(branches: readonly any[], ctx: ChildCtx): boolean {
+  const shapes = branches.map((b) => armShape(b.nested, ctx));
   return !shapes.some((x) => x === null) && !shapes.every((x) => x === shapes[0]);
 }
 
@@ -392,7 +392,7 @@ function branchesAreMixed(branches: readonly any[], params: Record<string, any>)
 export function tryLowerVariantUnion(s: Step, st: ElementStream): VariantStream | null {
   assertForkSafe('union', st);
   const branches = s.args.filter(isNested);
-  if (branches.length < 2 || !branchesAreMixed(branches, st.params)) return null;
+  if (branches.length < 2 || !branchesAreMixed(branches, childCtx(st))) return null;
   if (st.carried.path) throw new Error('path() through a mixed-shape union() not yet supported');
   const arms = branches.map((b) => compileVariantArm(st, b.nested));
   return mergeVariantArms(st, arms, variantArmsMeta(arms));
@@ -403,7 +403,7 @@ export function tryLowerVariantUnion(s: Step, st: ElementStream): VariantStream 
 export function tryLowerVariantCoalesce(s: Step, st: ElementStream): VariantStream | null {
   assertForkSafe('coalesce', st);
   const branches = s.args.filter(isNested);
-  if (!branches.length || !branchesAreMixed(branches, st.params)) return null;
+  if (!branches.length || !branchesAreMixed(branches, childCtx(st))) return null;
   if (st.carried.path) throw new Error('path() through a mixed-shape coalesce() not yet supported');
   const { seedSt, ord } = originSeed(st);
   const arms = branches.map((b) => compileVariantArm(seedSt, b.nested));
@@ -419,8 +419,8 @@ export function tryLowerVariantChoose(s: Step, st: ElementStream): VariantStream
   const args = s.args.filter(isNested);
   if (args.length !== 3) return null; // two-arg choose has an element identity else arm
   const [predArg, thenArg, elseArg] = args;
-  const thenShape = armShape(thenArg.nested, st.params);
-  const elseShape = armShape(elseArg.nested, st.params);
+  const thenShape = armShape(thenArg.nested, childCtx(st));
+  const elseShape = armShape(elseArg.nested, childCtx(st));
   if (!thenShape || !elseShape || thenShape === elseShape) return null;
   if (st.carried.path) throw new Error('path() through a mixed-shape choose() not yet supported');
   const seedFor = chooseGate(st, predArg.nested);
@@ -886,8 +886,8 @@ export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream |
   const args = s.args.filter(isNested);
   if (args.length !== 3) return null; // two-arg choose has an element identity else arm
   const [predArg, thenArg, elseArg] = args;
-  const thenPlan = classifyScalarChild(thenArg.nested, st.params);
-  const elsePlan = classifyScalarChild(elseArg.nested, st.params);
+  const thenPlan = classifyScalarChild(thenArg.nested, childCtx(st));
+  const elsePlan = classifyScalarChild(elseArg.nested, childCtx(st));
   if (!thenPlan || !elsePlan) return null;
   const seedFor = chooseGate(st, predArg.nested);
   const lowerArm = (arg: any, body: ReturnType<typeof stepChain>, seed: ElementStream): ScalarStream =>
@@ -904,8 +904,8 @@ export function tryLowerListChoose(s: Step, st: ElementStream): ListStream | nul
   const args = s.args.filter(isNested);
   if (args.length !== 3) return null;
   const [predArg, thenArg, elseArg] = args;
-  const thenPlan = classifyListChild(thenArg.nested, st.params);
-  const elsePlan = classifyListChild(elseArg.nested, st.params);
+  const thenPlan = classifyListChild(thenArg.nested, childCtx(st));
+  const elsePlan = classifyListChild(elseArg.nested, childCtx(st));
   if (!thenPlan || !elsePlan) return null;
   const seedFor = chooseGate(st, predArg.nested);
   const thenEnd = tryCompileListChild(seedFor(false), thenArg.nested, ROOT_SCOPE, thenPlan.body)!;

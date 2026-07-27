@@ -19,7 +19,7 @@ import { choose as lowerElementChoose, coalesce as lowerElementCoalesce, flatMap
 import { elementGroupSource, lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
 import { tryCompileCountChild, tryCompileBranchChildAllCard, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueRows } from './child.ts';
 import { tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './scalar-arm.ts';
-import { BRANCH_SHAPE_ORDER, childSteps, classifyBy, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, type BranchKind, type ByClass } from './child-shape.ts';
+import { BRANCH_SHAPE_ORDER, childCtx, childSteps, classifyBy, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, type BranchKind, type ByClass } from './child-shape.ts';
 import { lowerElementDedup } from '../prefix/filter.ts';
 import { lowerCall } from './call.ts';
 import { engineOf } from '../../engine/deps.ts';
@@ -344,7 +344,7 @@ const tailLocal: ShapeTailFn<ElementStream> = (st, step, steps, stop) => {
   const element = tryLowerLocalElement(st, step);
   if (element) return continueLowering(element, stop + 1);
   const nested = step.args[0]?.nested;
-  if (nested && isScalarChild(nested, st.params))
+  if (nested && isScalarChild(nested, childCtx(st)))
     return continueLowering(lowerMapScalar(st, steps, stop), stop + 1);
   // A bare list-armed (union(out().fold(), in().fold())) or mixed-shape (union(out(), values('name')))
   // branch — local emits every arm's rows per input (all-cardinality).
@@ -367,12 +367,12 @@ const tailFlatMap: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
 // VariantStream. No match → null (the fallback foldTailAcc handles a plain element optional).
 const tailOptional: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
   const nested = step.args[0]?.nested;
-  const listPlan = classifyListChild(nested, st.params);
+  const listPlan = classifyListChild(nested, childCtx(st));
   if (listPlan) {
     const lowered = tryCompileListChild(st, nested, ROOT_SCOPE, listPlan.body);
     if (lowered) return continueLowering(lowered, stop + 1);
   }
-  const countPlan = classifyTotalScalarChild(nested, st.params);
+  const countPlan = classifyTotalScalarChild(nested, childCtx(st));
   if (countPlan) {
     const lowered = tryCompileCountChild(st, nested, ROOT_SCOPE, countPlan.body);
     if (lowered) return continueLowering(lowered, stop + 1);

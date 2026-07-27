@@ -31,6 +31,26 @@ fails closed is better than a special-case that entrenches the non-generic path.
   dispatcher) and lives in three cohesive files — `tail/child-shape.ts` (pure classify leaf) ◂
   `tail/child.ts` (compilers) ◂ `tail/scalar-arm.ts` (scalar-parent arms). Extend by adding to the
   classifier + the compiler — never by reaching for a per-concern object (evaluated and rejected).
+- **Classifiers take a `ChildCtx`, not bare params: bound params + the LABELS visible here.**
+  A body's shape is syntax-only with one exception — `select("a")` re-types the stream to
+  whatever the label holds — so the classifiers carry a `LabelEnv` (label → element/scalar/list;
+  `null` = bound but un-re-typable, ABSENT = never bound, which is TinkerPop's drop-every-
+  traverser case and must stay distinguishable from it). The env is seeded from the parent's
+  carried aliases and EXTENDED as a body is scanned, so a bind types the selects after it and a
+  nested arm classifies against the labels visible where it sits — one rule that holds at any
+  depth, rather than a per-position vocabulary patch. A ctx-free caller conservatively rejects.
+- **`as()` is element-preserving; a label re-root rides the same fold.** `as()` sits in
+  `ELEMENT_CHILD_STEPS` because it preserves every shape; `select(label)` is a TAIL step, so the
+  element-body fold (`lowerElementBody`, child.ts) applies the ONE existing implementation
+  (`selectOneFromAlias`) and keeps folding — never a second select in the prefix table.
+  **Whether a bind ESCAPES the child is the consumer's boundary, not a rule to write down:** a
+  mapping consumer pops the child stream (`popChildScope` carries the child's own carried → the
+  label rides out), a filter/`by()` consumer re-projects the parent domain (→ confined). Both are
+  TinkerPop's semantics, so leave that asymmetry alone.
+- **A renderer that cannot carry alias columns must DECLINE a label-mentioning body, not answer
+  it.** The inline correlated child (`tail/correlated.ts`) seeds a bare id with no carried
+  schema, where an absent alias column is indistinguishable from a never-bound label — i.e. a
+  silent `[]`. It calls `mentionsLabel` up front and falls through to the materialized gate.
 - **The branch family (`union`/`choose`/`coalesce`/`optional`) has ONE arm triage and FOUR merge
   builders. Never add a fifth of either.** `classifyArmShape` (one arm) and `classifyBranchArms` +
   `BRANCH_SHAPE_ORDER` (a whole branch) in `tail/child-shape.ts` are the shape decision — the
