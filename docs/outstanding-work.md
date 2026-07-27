@@ -161,7 +161,8 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    source seed, element-prefix `limit`/`range`/`skip`, root `fold`, child `first`, and `values()`.
    What actually remains:
    - **`union()` as a SOURCE form** — `engine/engine.ts` `seedUnion` throws outright
-     (`emission-order encounter over a union() source not yet supported`).
+     (`emission-order encounter over a union() source not yet supported`). This is ONE symptom of
+     a wider gap; see item 4b, which subsumes it.
    - **A bare re-source `V()`/`E()` arm carries no encounter**, so the take-first guards that depend
      on one still fail closed: `armFansOut` (`steps/tail/scalar-arm.ts`) and `positionArmFansOut`
      (`steps/tail/path.ts`). `map()` over a `union`/`choose` fan-out arm ALREADY works (those carry
@@ -172,6 +173,33 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    Do NOT re-derive the "two encounters" reconciliation: there is one slot, `Carried.encounter`;
    `ScalarStream` has no separate field. **Low-Med.**
    → [canonical-emission-order](./2026-07-19-canonical-emission-order.md)
+
+4b. **The `union()` SOURCE is a second, weaker branch implementation — consolidate it onto the
+   mid-traversal one.** (Reframed 2026-07-27 after measuring; previously filed as a one-line tail of
+   item 4 and again as an operand tail of 7c, which both understated it.) `seedUnion`
+   (`engine/engine.ts`) hand-rolls a `UNION ALL` over vertex id-relations and rejects everything
+   else, so it is strictly weaker than the mid-traversal `union` on FOUR independent axes: arm
+   SHAPE (vertex-only — no scalar/list/mixed), ALIASES (`as()` in a branch throws), ENCOUNTER (the
+   item-4 line above), and SACK. The mid-traversal form already has all four — the ONE canonical
+   arm triage (`classifyBranchArms`) and the four merge builders (`finishElementMerge`,
+   `unionScalarStreams`, `finishListMerge`, `mergeVariantArms`), which are deliberately
+   parent-agnostic and so are reusable here.
+
+   **Measured:** of the 15 `g.union(...)`-rooted traversals in the corpus only 2 compile. The
+   failures span six distinct restrictions — a scalar branch (`g.union(__.V().values('name'))`),
+   `path()` over a union source (×3), a non-`V`/`E`-rooted branch
+   (`g.union(__.inject(1), __.inject(2))`), write branches (`g.union(__.addV('person')…)`), a
+   `mergeE` branch, and the empty `g.union()`. It also blocks the `union(...).fold()` predicate
+   operands in 7c (those bodies ARE traverser-independent; they just cannot be compiled as a
+   standalone read today).
+
+   **Where the reuse boundary sits:** the SEEDING genuinely differs — a mid-traversal arm folds
+   from the parent relation, a source arm is a rooted sub-traversal — so the shared part is the
+   MERGE, not the seed. Compile each branch to a Stream of any shape (full lowering, not just
+   `buildPrefix`), then classify and route through the same merge builders. Doing that closes
+   item 4's residual as a side effect rather than as separate work. **Medium** — modest L3 yield
+   (~8-12) for the size, but it deletes a duplicate implementation and removes four fail-closed
+   walls at once.
 
 5. **Map/non-element re-entry.** `valueMap().select()` into a retyped `MapStream`, and `as()`/
    `select(label)` over group/map/path/property streams. **Medium.**
@@ -269,8 +297,10 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    constant still matches).
 
    **Still open**, all narrow: `within`/`without` over a multi-value operand (`IN (SELECT …)`
-   rather than `LIMIT 1`); the `union(...).fold()` operand forms, blocked on a *scalar-branch
-   union SOURCE* rather than on the operand machinery; a `__.sack()` operand (it is just the
+   rather than `LIMIT 1`); the `union(...).fold()` operand forms, blocked on the union SOURCE
+   (item 4b) rather than on the operand machinery — and note `isReSourced` in
+   `steps/tail/operand.ts` is a narrow proxy for "traverser-independent" (it tests for a `V`/`E`
+   head), so a union of independent branches would need it widened too; a `__.sack()` operand (it is just the
    carried column — should be a one-liner); `hasId(__.V(id).id())` and the `none()` /
    inline-predicate hosts, which simply do not call the resolver yet; and an operand with no
    scalar to read (a filter body such as `__.not(__.identity())`). Correlation needs an element
