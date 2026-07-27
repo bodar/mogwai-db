@@ -7,9 +7,11 @@ over-reports `LANDED`; this keeps only what a code check confirms open). Live pe
 `feature-support-matrix.md`.
 
 **Refreshed** 2026-07-26 against L3 1362 unique / 2297 (`l3-state.json` shows 1364 — two names
-recur legitimately, see `test/CLAUDE.md`). A 2026-07-27 session took it to **1430**: item 2's
+recur legitimately, see `test/CLAUDE.md`). A 2026-07-27 session took it to **1437**: item 2's
 Slice 3 (child-body labels, +8), the constant predicate-operand fold (+29), read-only child
-verification (+14), re-sourced operand subqueries (+6), correlated operands (+4), and the operand tails (+5).
+verification (+14), re-sourced operand subqueries (+6), correlated operands (+4), the operand
+tails (+5), the union() source consolidation (+6), where()'s scope variables (+1) and
+mid-traversal V()/E() (+12).
 Path pointers assume the 2026-07-23 restructure
 (`src/compiler/steps/{context,prefix,tail,write}/`, `src/compiler/{ir,plan,engine}/`).
 
@@ -137,20 +139,43 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
      - `emptyElementLike` now keeps the input's carried COLUMNS (zero rows). At root that is
        invisible; in a child scope it is the difference between a correct answer and a relation
        the consumer cannot join to its frame ordinal.
-   - **Still open — `WhereEndStep` (found 2026-07-27; a live WRONG ANSWER, Impact: High).** A label
-     on the LAST step of a `where()`/`and()`/`or()` body is an equality CONSTRAINT, not a bind, so
-     `g.V().as("a").out().as("b").where(__.as("a").out("knows").as("b"))` asks "does a know b" and
-     should give `marko→vadas`, `marko→josh`; we answer `[]`. The inline path DEFERS the shape so
-     it cannot answer the weaker "a knows somebody" instead, but the generic gate's `[]` is still
-     wrong. **Where to start:** this is a `Step[]→Step[]` rewrite, so it wants a Pass, not a
-     lowering — `where(__.X.as('b'))` → `where(__.X.where(P.eq('b')))`, a form BOTH lowerings
-     already answer. Scope it to a label bound earlier in the enclosing chain (TinkerPop's own
-     scoping notion, and syntactic — a Pass can see it). Blocks at least
-     `g_V_asXaX_out_asXbX_whereXandXasXaX_outXknowsX_asXbX__…X_selectXa_bX`.
+   - ✅ **`WhereEndStep`/`WhereStartStep` LANDED 2026-07-27.** A where() body's FIRST and LAST
+     labels are scope VARIABLES, not binds (`GraphTraversal.where` →
+     `TraversalHelper.getVariableLocations`): first = re-root, last = an equality constraint, so
+     `where(__.as("a").out("knows").as("b"))` means "a knows b". Both are now canonicalized by ONE
+     Pass (`rewriteWhereEndLabels`) into forms both lowerings already implement — `select(label)`
+     and `where(P.eq(label))` — rather than taught to either, which is what makes the inline fast
+     path and the materialized gate agree by construction. It recurses through and()/or()/not()
+     exactly as upstream's `configureStartAndEndSteps` does, and threads the labels visible where
+     each where() SITS, so it holds at any nesting depth. **Two live wrong answers fixed:** the end
+     constraint read as an inert bind (answering the far weaker "a knows somebody"), and a leading
+     `as()` re-rooting inside `filter()`/`choose()` predicates, which TinkerPop does NOT route by
+     variable location — that one also disagreed with itself depending on the fast-path flag.
+     L3 1436 → 1437.
+     - **Residual, pre-existing and separate:** a label REBOUND inside a `filter()` body over an
+       outer label of the same name drops rows TinkerPop keeps —
+       `g.V().as("a").out().as("b").filter(__.as("a").out("knows")).count()` is 0 for us, 1 for
+       TinkerPop (josh). Consistent across both lowerings, so it is a child-seam rebind question,
+       not a variable-location one. Pinned as an ON≡OFF equivalence in `branch.exec.test.ts`.
+       *Low-Med.*
+   - ✅ **`choose().option()` as an ARM MERGE — LANDED 2026-07-27** (+7). The premise "without a
+     `Pick.none` default (mixed pass-through)" was right about the semantics and wrong about the
+     blocker: unmatched inputs DO pass through as the element, but that mixed scalar/element result
+     stopped being unrepresentable when `VariantStream` landed. The real blocker was that option-map
+     choose was implemented ONLY as a scalar `CASE` projector, so an element body
+     (`option('x', __.out('knows'))`), a list body and the pass-through all deferred for the same
+     reason. It is now a branch: gate the parent per option (first match wins — the CASE's own WHEN
+     order), lower each body from its gated seed, route to the ONE triage + the four merges. The
+     CASE stays as the all-scalar specialization, tried first, and now DECLINES instead of throwing
+     (the same fast-path-contract fix 7c needed). `__.discard()` drops its rows → no arm.
+     **Still open:** a LIST (`…fold()`) option body inside a `local()`/`map()` child — the arm merge
+     handles it, but the CHILD classifier (`isBareBranchChildAllCard` excludes the option-map form)
+     never admits the body, so `local()` declines before the merge is reached. 4 corpus queries.
+     Also `Pick.unproductive`/`any`.
    - ✅ **`repeat()` in a child body LANDED 2026-07-27** (item 3): the walk now carries its origin
      column, so it composes at `local`/`map`/`where`/`group`/`order`/a branch arm — 1/7 → 7/7 probes.
      Same shape as the slices above: the emit substrate was ready, the classifier was the gate.
-   - **Still open:** `choose().option()` without a `Pick.none` default (mixed pass-through); child
+   - **Still open:** child
      bodies producing map/group/record shapes (item 5 territory); the `group().by(project(...))`
      composite key and non-scalar/non-count nested-group inner keys. Also still open, and
      ORTHOGONAL to labels (it reproduces with none): a child-in-child body whose inner child is
@@ -162,46 +187,65 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    → [carried-schema-and-projection-reentry](./2026-07-14-carried-schema-and-projection-reentry-plan.md),
    [group-value-generic-seam](./2026-07-18-group-value-generic-seam-plan.md)
 
-3. ~~**The `repeat()` recursive term is a private movement/filter mini-compiler**~~ — ✅ **the wall
-   came down 2026-07-27, both sides.** `expandRepeatBody` STAYS as the recognized fast path (it walks
-   the frontier lazily where the generic route materializes) but no longer defines the vocabulary.
-   Measured: repeat corpus **43 → 48**, total corpus 1,626 → 1,635, **L3 1,440 → 1,445**; the ceiling
-   moved much further — body vocabulary 2/12 → **9/12** probes, `repeat()` at a nested position
-   **1/7 → 7/7**, and a repeat now NESTS in another repeat's body.
-   Four pieces, all reuse rather than new SQL:
-   - **`repeatBodyRelation`** — a recursive term may legally reference a NON-recursive CTE, so the
-     body compiles ONCE through the ordinary StepFns (seeded from every vertex, carrying its origin
-     in the `carried` slot `pushChildScope` already uses) into `(from_id, to_id)`, which the
-     recursive term joins. **This is the way around SQLite having no `LATERAL` that needs no new
-     rendering mode** — the "mode C" framing in the audit turned out to be avoidable.
-   - **Origin columns ride THROUGH the walk** (a walk is row-local, so the ordinal just rides). That
-     was the only thing keeping `repeat` out of `ELEMENT_CHILD_STEPS`, and it is what admits the walk
-     at every child position AND inside another walk — the same capability from two sides.
-   - **`otherV` joined the row-local vocabulary** — the odd one out among the nine movements, gating
-     every exploded-edge body in EVERY child position; the emit side was already ready.
-   - **The body is normalized with the same `normalize()`** every other nested body uses. With
-     `foldByModulators` alone a nested `times()` never folded onto its `repeat()`.
+3. ~~**The `repeat()` recursive term: alias columns + the private movement/filter mini-compiler.**~~
+   ✅ **BOTH LANDED 2026-07-27** (independently, then reconciled — and reconciling them produced the
+   better framing, so it is recorded here rather than left as two bullets).
+
+   **The unifying fact: a walk carries LOOP-INVARIANT columns, and there are two kinds.** The walk
+   MOVES the traverser; it neither reads nor rewrites these, so they simply ride each iteration —
+   seeded from the outer row, passed through untouched, emitted in `carriedCols`' declared order.
+   One `ride()` helper in `branch.ts` now serves both:
+   - **ALIAS columns** — a label bound BEFORE the walk is invariant because the walk never rebinds an
+     existing label. The old framing ("teach the recursive term to carry them") over-stated it: it is
+     a projection, not a fold. What had been there was a blanket `carried.aliases.size > 0` refusal,
+     so ANY `as()` before a `repeat()` deferred the whole traversal whether or not the label was read.
+     Oracle: `times(n)` over a single-movement body IS the linear n-hop chain, so the carried label
+     must come out elementwise identical to the linear form — pinned that way in
+     `repeat-path.exec.test.ts` rather than against hand-written expectations.
+   - **ORIGIN columns** — a walk is row-local (each traverser walks independently), so the ordinal
+     saying which parent a row came from is just carried too. This was the ONLY thing keeping
+     `repeat` out of `ELEMENT_CHILD_STEPS`, and it is what admits the walk as a CHILD body
+     (`local`/`map`/`where`/`group`/`order`/a branch arm — **1/7 → 7/7** probes) AND inside another
+     repeat's body. Two capabilities, one column.
+
+   **`expandRepeatBody` is now a FAST PATH, not the vocabulary.** It stays unchanged — it walks the
+   frontier lazily where the generic route materializes — but no longer decides what a body may
+   contain. It existed for a real reason: SQLite has no `LATERAL`, so the nested-derived correlated
+   rendering cannot fan out inside the recursive term's FROM. The way around needs **no new rendering
+   mode**: a recursive term MAY reference a non-recursive CTE, so `repeatBodyRelation` compiles the
+   body ONCE through the ordinary StepFns — seeded from every vertex, carrying its origin in the slot
+   `pushChildScope` already uses — into `(from_id, to_id)` for the recursive term to join. Also
+   needed: `otherV` joined the row-local vocabulary (the odd one out among the nine movements, gating
+   every exploded-edge body in EVERY child position), and the body is now canonicalized with the same
+   `normalize()` every other nested body uses (with `foldByModulators` alone a nested `times()` never
+   folded onto its `repeat()`).
+
+   Measured: repeat corpus **43 → 48**, body vocabulary **2/12 → 9/12** probes, total corpus
+   1,626 → 1,635.
+
    **The trap, pinned by a test:** the gate is NOT "whatever `lowerElementSteps` accepts". A
    per-iteration GLOBAL barrier (`dedup`/`order`/`limit`/`range`/`sample`/`tail`/`group`/`aggregate`/
    `local`) observes the whole frontier at one iteration, and the generic StepFns would happily lower
    it per-origin — bare `dedup` emits `SELECT DISTINCT id, <carried>`, which with an origin column in
    the tuple silently becomes per-origin and answers a DIFFERENT question. The gate is the row-local
    vocabulary (`isElementChildStep`); the deferral now names the offending step and says why.
+
    **Still open, each now precisely scoped:**
-   - `as()` through the walk — an alias is a per-hop-appendable JSON history, not a column that
-     rides. Fails closed (`repeat() after as()`). *Low-Med.*
+   - A label bound INSIDE the body (`repeat(__.out().as("b"))`) genuinely rebinds per iteration, so
+     it is a fold, not a projection — `as` stays out of the body vocabulary (fails closed). *Low-Med.*
    - A **barrier body under a fixed `times(n)`** could be UNROLLED into n generic phases (that route
-     hosts barriers; `bulk.ts` already unrolls a specialized version for the count case). The
-     natural next slice. *Medium.*
+     hosts barriers; `bulk.ts` already unrolls a specialized version for the count case). The natural
+     next slice. *Medium.*
    - `walkPredicate` (`until()`/`emit()`) still has NO generic fallback, which is what keeps the
-     inline predicate compiler's leaf vocabulary load-bearing (see the give-back below). Same trick
-     as the body: compile an element-only predicate once as a `matching(id)` relation and read
+     inline predicate compiler's leaf vocabulary load-bearing (see the give-back below). Same trick as
+     the body: compile an element-only predicate once as a `matching(id)` relation and read
      `id IN matching` in the recursive term. *Low-Med.*
    - The named-loop form `repeat("a", …)`/`loops("a")` still **crashes** rather than failing closed
      (`undefined is not an object (evaluating 'node.constructor')`, 4 corpus cases). Cheap, isolated.
    - `path()`/`simplePath()` + `sack()` bodies stay with the flat expansion (both are per-iteration
      state) — P3 recursive-path tails, unchanged.
    → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md) #1,
+   [deep-seam-migration-roadmap](./2026-07-18-deep-seam-migration-roadmap.md) #5,
    [path-history-substrate](./2026-07-18-path-history-substrate.md),
    [foldable-carried-column](./2026-07-24-foldable-carried-column-plan.md)
 
@@ -250,6 +294,47 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    - **Still deferred (fail-closed):** a WRITE branch (`g.union(__.addV('person')…)` — the merges
      are read merges), and a branch whose shape no merge covers (map/group/record/path), which
      throws naming that shape.
+
+4c. ~~**Mid-traversal `V()`/`E()` — an untracked gap, not in this index at all.**~~
+   ✅ **LANDED 2026-07-27.** `step not implemented: V()` was the 3rd-largest deferral bucket (16
+   queries) while appearing nowhere here — worth remembering that the telemetry buckets find work
+   this index misses. TinkerPop's `GraphStep(isStart=false)` discards the current object and
+   re-sources the graph PER TRAVERSER, i.e. a flatMap. That CROSS JOIN already existed for the
+   SCALAR tail (`inject(1).as('a').V()`), and a re-source reads only the carried schema — never
+   the parent's payload, by definition — so it was parent-agnostic already in everything but its
+   type. Widened it (`lowerScalarVE` → `lowerReSource`) and registered `V`/`E` as prefix StepFns;
+   `seedRooted` consumes a SOURCE V()/E() before the prefix fold runs, so the StepFn only ever
+   sees the mid-chain position. **L3 1437 → 1449** (+12/−0), including
+   `g_VXvid1X_asXaX_V_hasXage_gtXselectXaX_valuesXageXXX_valuesXnameX`, the `E()` id forms, and two
+   `property(k, __.V(…)…)` write-operand scenarios.
+   - **Placement note worth keeping:** it lives at `steps/resource.ts`, the shared level, NOT under
+     `tail/`. Importing it into `prefix/movement.ts` from `tail/projection.ts` created a module-INIT
+     cycle — `child-shape.ts` builds a Set from `scalar.ts` at import time, and the new prefix→tail
+     edge reordered initialization into a TDZ error. A leaf both families need belongs beside them.
+   - **Still deferred (fail-closed):** a re-source after `path()`/`sack()`/`otherV()`, whose
+     carried fork through the CROSS JOIN is undefined.
+
+4d. **`within()`/`without()` over a folded traversal — LIST membership.** ✅ **Partly landed
+   2026-07-27.** A predicate operand had one reading: substitute a SCALAR and compare. But
+   `within(__.V(1).out('knows').values('age').fold())` is a LIST — "is the value among the members
+   that read produces" — so it is intercepted at the PRED level and re-minted as `withinList`/
+   `withoutList`, which predicateSql renders as a json_each scan over the folded sub-read. The
+   fold-to-JSONB core is now shared with the set-op operands (`foldedListSubquery`, list.ts) so the
+   two cannot disagree about which traversals qualify. **L3 1456 → 1457.**
+   - **Scoping trap worth keeping:** `json_each` exposes a column named `value`, and `hasProp`
+     passes the UNQUALIFIED `value` column of `vertex_properties`. Rendered as
+     `EXISTS (… WHERE je.value = value)` both sides bind to json_each, every row matches, and
+     `within` silently returns everything while `without` returns nothing. Keeping the operand on
+     the LEFT of `IN (SELECT …)` evaluates it in the outer scope. The `is()` host never showed
+     this — it passes a qualified column — so only the has() form exposed it.
+   - **Still open:** a UNION-rooted operand (`within(__.union(__.V(1)…, __.V(4)…).fold())`, ~4
+     queries). Widening the rooted test to admit a union whose arms are all rooted was tried and
+     REVERTED: it compiles, but returns unfiltered rows, so something in the source-union fold's
+     shape does not reach the list operand intact — diagnose that before re-widening. A
+     `constant()` arm additionally is not seedable as a source-union arm yet
+     (`unsupported source step: constant`). *Low-Med.*
+   - **Also still open:** a CORRELATED list operand (members varying per traverser), which the
+     standalone sub-read cannot express by construction.
 
 5. **Map/non-element re-entry.** `valueMap().select()` into a retyped `MapStream`, and `as()`/
    `select(label)` over group/map/path/property streams. **Medium.**

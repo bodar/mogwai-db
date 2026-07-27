@@ -183,21 +183,20 @@ function compileInlinePredicate(
   // mirror of this: it is a label on the last step, caught by the end-label rule below.)
   if (soleLabel !== null && nested.length === 1 && h0.name === 'select' && labels)
     return labelIsBound(labels, soleLabel);
-  // A LABEL ON THE LAST STEP is not a bind. TinkerPop routes where(traversal) by variable
-  // location (GraphTraversal.where → TraversalHelper.getVariableLocations): a label on the FIRST
-  // step is a WhereStartStep (the re-root below), one on the LAST step is a WhereEndStep — an
-  // EQUALITY CONSTRAINT that the object reached must be the one the label already holds, not a
-  // rebind. `where(__.as("a").out("knows").as("b"))` therefore means "a knows b", and compiling
-  // its trailing as() as an (inert, filter-confined) bind would answer the much weaker "a knows
-  // somebody". We do not implement the end constraint, so defer and let the generic gate keep the
-  // body — never inline a different question. A label in the MIDDLE of the body has neither
-  // location and IS an ordinary confined bind, which the correlated child renders inline.
-  const hLast = nested[nested.length - 1];
-  if (hLast.name === 'as' && (hLast.args ?? []).some((a: any) => typeof a === 'string'))
-    decline('a trailing as(label) is an end-label constraint (WhereEndStep), not a bind');
-  // A leading as('x')/select('x') re-roots the predicate on the aliased traverser:
-  // where(__.as('b').out('created').has('name','ripple')) correlates on b's column.
-  if (labels && soleLabel !== null && nested.length > 1 && (h0.name === 'as' || h0.name === 'select'))
+  // NB a where()-body's START and END labels are not binds — they are TinkerPop's WhereStartStep
+  // re-root and WhereEndStep equality constraint — but that is not decided here. The
+  // rewriteWhereEndLabels Pass (ir/strategies.ts) canonicalizes both into forms this compiler and
+  // the generic gate ALREADY implement (`select(label)` and `where(P.eq(label))`), so by the time a
+  // body reaches any lowering the distinction is gone and the two cannot answer differently. What
+  // arrives here as a trailing as() is therefore a genuine bind, confined to the filter.
+  //
+  // A leading select('x') re-roots the predicate on the aliased traverser:
+  // where(__.as('b').out('created').has('name','ripple')) correlates on b's column, having been
+  // canonicalized to select('b') by the Pass. Keyed on select() and NOT on as(), because only
+  // where() is routed by variable location: inside a filter()/choose() predicate a leading as()
+  // is an ordinary bind, and re-rooting on it there answered a different question entirely
+  // (`filter(__.as("a").out("knows"))` asked about a, not about the current traverser).
+  if (labels && soleLabel !== null && nested.length > 1 && h0.name === 'select')
     return compileInlinePredicate(engine, nested.slice(1), labelCtx(labels, soleLabel), params, labels);
 
   // NB there is no infix `.and()`/`.or()` handling here any more. That fold is

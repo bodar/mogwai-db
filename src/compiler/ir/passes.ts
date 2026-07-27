@@ -1,8 +1,8 @@
-import type { Step, StrategyUse } from '../../gremlin/frontend.ts';
+import { isNested, type Step, type StrategyUse } from '../../gremlin/frontend.ts';
 import { PASS_CATEGORIES, type Pass, type PassContext } from './pass.ts';
 import {
   stripTerminal, foldRepeatClusters, foldByModulators, foldChooseOptions, foldCallWith,
-  foldConnectives, foldConstantPredicateOperands,
+  foldConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
   verifyReadOnlyChildren,
   foldValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
   injectSubgraphRec, injectPartitionRec, markProductiveBy, verify,
@@ -34,11 +34,26 @@ const EXTRACT: Pass[] = [
 // historical composition order for review locality. The Stage 3 test pins the ordering that IS
 // load-bearing (fold before simplify) as a guard.
 const FOLD: Pass[] = [
-  // ConnectiveStrategy FIRST in the group: it is the only fold that RESTRUCTURES the chain
-  // (infix `.and()`/`.or()` → the step form, moving steps into `{nested}` bodies), so every
-  // later fold — and the `simplify` group after it — should see the canonical shape. Its own
-  // recursion visits every depth, and each body it mints is `normalize()`d again when compiled
-  // as a child, so a by()/repeat cluster inside a folded operand still canonicalizes.
+  // These two both need the RAW `{nested}` args (before foldRepeatClusters/foldChooseOptions move a
+  // body into `.cluster`/`.options`), so both lead the group. Their relative order follows
+  // TinkerPop: a where()'s variable LOCATIONS are resolved when the step is CONSTRUCTED
+  // (GraphTraversal.where → TraversalHelper.getVariableLocations), i.e. before any strategy runs,
+  // whereas ConnectiveStrategy is a strategy. Concretely it matters for
+  // `where(__.as("a").out().and().out().as("b"))`: folding the connective first would move the
+  // trailing as("b") inside the and()'s last operand, where the end-label rewrite can no longer
+  // see it as the body's last step.
+  {
+    name: 'rewriteWhereEndLabels', category: 'fold',
+    // Nothing to do without a label to bind or a child body to hold a where(): no as() and no
+    // nested arg at the top level means no where() host exists anywhere below either.
+    applies: (steps) => steps.some((s) => s.name === 'as' || (s.args ?? []).some(isNested)),
+    run: (steps, ctx) => rewriteWhereEndLabels(steps, ctx.params),
+  },
+  // ConnectiveStrategy is the only fold that RESTRUCTURES the chain (infix `.and()`/`.or()` → the
+  // step form, moving steps into `{nested}` bodies), so every later fold — and the `simplify` group
+  // after it — should see the canonical shape. Its own recursion visits every depth, and each body
+  // it mints is `normalize()`d again when compiled as a child, so a by()/repeat cluster inside a
+  // folded operand still canonicalizes.
   { name: 'ConnectiveStrategy', category: 'fold', run: (steps, ctx) => foldConnectives(steps, ctx.params) },
   { name: 'foldRepeatClusters', category: 'fold', run: (steps) => foldRepeatClusters(steps) },
   // Desugar valueMap().with(WithOptions.tokens) → valueMap(true) BEFORE foldByModulators, so a

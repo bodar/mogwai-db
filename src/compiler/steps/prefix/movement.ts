@@ -4,6 +4,7 @@ import { dirsFor, edgeLabelFilter, type Elem } from '../../plan/plan.ts';
 import { advance, appendPathPos, carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, prevRel, type Carried, type PathState, type ElementStream, type StepFn } from '../context/context.ts';
 import { fastPathContextOf } from '../../engine/deps.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
+import { lowerReSource } from '../resource.ts';
 
 /** True iff the ONLY live carried column is bulk — no per-traverser identity (aliases/path/
  *  sack/fromV) and no branch origin. Frontier collapse is result-preserving exactly here. */
@@ -127,4 +128,25 @@ export const otherV: StepFn = (s, st) => {
   const pa = pathAppend(st, 'node');
   const body = q`SELECT ${other} AS id${cf}${pa.frag(other)} FROM ${e} JOIN ${p} ON ${e.c.id}=${p.c.id}`;
   return advance(st, body, { elem: 'node', fromV: null, ...pa.opts });
+};
+
+/** V()/E() MID-TRAVERSAL: re-source the graph, discarding the current element.
+ *
+ *  Not movement — there is no edge to follow. It is a flatMap that CROSS JOINs the target table
+ *  onto each incoming traverser, which is precisely what `lowerReSource` already does for a
+ *  SCALAR parent (`inject(1).as('a').V()…`). The body reads only the carried schema, never the
+ *  parent's payload — a re-source discards that by definition — so the two parents share it
+ *  rather than growing a second CROSS JOIN.
+ *
+ *  Carrying the schema forward is the whole point of the step: `g.V(1).as('a').V().has('age',
+ *  gt(__.select('a').values('age')))` re-sources every vertex and compares each against the
+ *  label bound before the re-source.
+ *
+ *  Only reachable mid-chain: `seedRooted` consumes a SOURCE V()/E() before the prefix fold
+ *  begins, so this StepFn never sees the source position. Defers on path/sack/fromV, whose
+ *  fork through a re-source is not worked out (lowerReSource's own guard). */
+export const reSource: StepFn = (s, st) => {
+  const out = lowerReSource(st, s);
+  if (!out) throw new Error(`${s.name}() mid-traversal after path()/sack()/otherV() not yet supported (the carried fork through a re-source is undefined)`);
+  return out;
 };

@@ -10,6 +10,13 @@ import gremlin from 'gremlin';
 import { startConformanceServer } from './conformance-server.ts';
 import '../support/undici-shim.ts'; // Bun's undici Agent lacks close() — see the shim's header
 
+// Booting a server, seeding the modern graph over GraphBinary and tearing a real driver
+// connection back down does not reliably fit Bun's 5s default hook budget on a loaded machine —
+// this suite flaked at roughly two runs in three, and the failure reads as an unrelated
+// "(unnamed)" hook timeout that aborts every remaining describe. The work is legitimately slow,
+// not hung (it completes well inside this budget), so widen the budget rather than the default.
+const HOOK_TIMEOUT_MS = 30_000;
+
 const { DriverRemoteConnection } = gremlin.driver;
 const { traversal } = gremlin.process.AnonymousTraversalSource;
 const __ = gremlin.process.statics;
@@ -20,12 +27,12 @@ describe('conformance host — modern graph (official ids/results)', () => {
   let server: any, drc: any, g: any;
 
   beforeAll(async () => {
-    server = await startConformanceServer(0);
+    server = await startConformanceServer(0, ['gmodern']);
     const url = `http://localhost:${server.port}/gremlin`;
     drc = new DriverRemoteConnection(url, { traversalSource: 'gmodern' });
     g = traversal().with_(drc);
-  });
-  afterAll(async () => { await drc?.close(); server?.stop(); });
+  }, HOOK_TIMEOUT_MS);
+  afterAll(async () => { await drc?.close(); server?.stop(); }, HOOK_TIMEOUT_MS);
 
   test('g_V_count', async () => expect((await g.V().count().next()).value).toBe(6));
   test('g_V_hasLabelXpersonX_count', async () =>
@@ -244,11 +251,13 @@ describe('conformance host — empty graph write/reset (ggraph)', () => {
   let server: any, drc: any, g: any;
 
   beforeAll(async () => {
-    server = await startConformanceServer(0);
+    // ggraph itself is auto-created empty, but the isolation test below reads gmodern on the
+    // same server to prove the two graphs don't bleed — so gmodern is a real fixture here.
+    server = await startConformanceServer(0, ['gmodern']);
     drc = new DriverRemoteConnection(`http://localhost:${server.port}/gremlin`, { traversalSource: 'ggraph' });
     g = traversal().with_(drc);
-  });
-  afterAll(async () => { await drc?.close(); server?.stop(); });
+  }, HOOK_TIMEOUT_MS);
+  afterAll(async () => { await drc?.close(); server?.stop(); }, HOOK_TIMEOUT_MS);
 
   test('write then drop-reset (the runner cleans empty with g.V().drop())', async () => {
     const a = (await g.addV('person').property('name', 'a').next()).value;
@@ -289,11 +298,11 @@ describe('conformance host — read-path edge endpoints report external ids (gui
   let server: any, drc: any, g: any;
 
   beforeAll(async () => {
-    server = await startConformanceServer(0);
+    server = await startConformanceServer(0, ['guid']);
     drc = new DriverRemoteConnection(`http://localhost:${server.port}/gremlin`, { traversalSource: 'guid' });
     g = traversal().with_(drc);
-  });
-  afterAll(async () => { await drc?.close(); server?.stop(); });
+  }, HOOK_TIMEOUT_MS);
+  afterAll(async () => { await drc?.close(); server?.stop(); }, HOOK_TIMEOUT_MS);
 
   test('g.E(): edge id + outV/inV ids are the user-supplied ids', async () => {
     const e = (await g.E().next()).value;

@@ -75,6 +75,38 @@ test('repeat/times/emit execute (multiset + emit bands)', () => {
   expect(run(store, 'g.V(1).repeat(__.both()).times(1).count()').map((r) => r.v)).toEqual([3]);
 });
 
+test('a label bound before repeat() rides the walk (loop-invariant carried column)', () => {
+  const store = seededStore();
+  const names = (q: string) => (run(store, q) as any[]).map((r) => r.v).sort();
+  // The walk MOVES the traverser; it never rebinds an existing label, so an incoming alias column
+  // is loop-invariant — seeded from the outer row, passed through each iteration untouched. Any
+  // as() before repeat() used to defer the whole traversal, read or not.
+  expect(names('g.V(1).as("a").repeat(__.out()).times(2).select("a").values("name")'))
+    .toEqual(['marko', 'marko']); // two 2-hop walks from marko, each re-rooted back to marko
+
+  // times(n) over a single-movement body IS the linear n-hop chain, so the carried label must
+  // come out elementwise identical to the linear form — the sharpest available oracle.
+  for (const [walk, linear] of [
+    ['g.V().as("a").repeat(__.both()).times(1).select("a").values("name")', 'g.V().as("a").both().select("a").values("name")'],
+    ['g.V().as("a").repeat(__.out()).times(1).select("a").values("name")', 'g.V().as("a").out().select("a").values("name")'],
+    ['g.V().as("a").repeat(__.out()).times(2).select("a").values("name")', 'g.V().as("a").out().out().select("a").values("name")'],
+    ['g.V().as("a").repeat(__.out()).times(2).values("name")', 'g.V().as("a").out().out().values("name")'],
+  ]) expect(names(walk)).toEqual(names(linear));
+
+  // The label must not disturb what the walk itself produces, at any exit modulator…
+  expect(names('g.V(1).as("a").repeat(__.out()).times(2).values("name")')).toEqual(['lop', 'ripple']);
+  expect(run(store, 'g.V(1).as("a").repeat(__.out()).emit().times(2).count()').map((r: any) => r.v)).toEqual([5]);
+  // …nor the OTHER carried columns it rides beside — path (a separate array column, ordered
+  // after the aliases in carriedCols) and simplePath's cycle guard both still work.
+  expect(names('g.V(1).as("a").repeat(__.out()).times(2).path().by("name")').flat().length).toBe(6);
+  expect(run(store, 'g.V(1).as("a").repeat(__.out().simplePath()).times(2).count()').map((r: any) => r.v)).toEqual([2]);
+
+  // A label bound INSIDE the body is the genuinely recursive question (it rebinds per iteration),
+  // not this one — as() is absent from the repeat body vocabulary, so it still fails closed.
+  expect(() => run(store, 'g.V(1).repeat(__.out().as("b")).times(2).select("b")'))
+    .toThrow(/not yet supported/);
+});
+
 test('traverser bulking: repeat(...).times(n).count() == naive walk count (unroll path)', () => {
   const store = seededStore();
   // The bulked count (unrolled GROUP-BY-SUM(bulk) CTEs) must equal the exact walk
@@ -451,11 +483,22 @@ describe('repeat() as a child body', () => {
     expect(one(store, 'g.V(1).union(__.repeat(__.out()).times(2), __.in()).count()')).toBe(2);
   });
 
-  test('ALIASES through a walk still fail closed — a JSON history is not just carried', () => {
-    // origins are a plain integer column that rides unchanged; an alias is a per-hop-appendable
-    // history, which is a different capability. Keep the deferral honest.
+  test('an INCOMING alias and an origin ride the walk TOGETHER', () => {
+    // These landed as two separate pieces of work and are the same mechanism: loop-invariant
+    // carried columns the walk neither reads nor rewrites (one `ride()` helper serves both). This
+    // is the composition test — a walk inside a child scope, carrying BOTH an outer label and the
+    // parent ordinal, which neither piece exercised alone.
     const store = seededStore();
-    expect(() => run(store, 'g.V().as("a").repeat(__.out()).times(2).select("a")'))
-      .toThrow(/repeat\(\) after as\(\)/);
+    const names = (g: string) => (run(store, g) as any[]).map((r) => r.v).sort();
+    expect(names('g.V(1).as("a").local(__.repeat(__.out()).times(2)).select("a").values("name")'))
+      .toEqual(['marko', 'marko']); // two 2-hop walks, each re-rooted back to the outer label
+    // …and per-parent walk counts still hold with a label live beside the ordinal.
+    expect((run(store, 'g.V().hasLabel("person").as("a").group().by(__.select("a").values("name")).by(__.repeat(__.out()).times(1).count())') as any[])
+      .map((r) => [r.gk, Number(r.gv)]).sort((x, y) => String(x[0]).localeCompare(String(y[0]))))
+      .toEqual([['josh', 2], ['marko', 3], ['peter', 1], ['vadas', 0]]);
+    // A label bound INSIDE the body is the genuinely recursive question (it rebinds per iteration),
+    // so it is a fold rather than a projection and still fails closed.
+    expect(() => run(store, 'g.V(1).repeat(__.out().as("b")).times(2).select("b")'))
+      .toThrow(/not yet supported/);
   });
 });

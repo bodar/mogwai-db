@@ -15,12 +15,13 @@ import { lowerScalarFilter, lowerConstant, lowerScalarConstant, lowerScalarSack,
 import { compileSelectProject, lowerRecordSelectProject, lowerScalarProject, lowerSingleSelect } from './select.ts';
 import { lowerPath } from './path.ts';
 import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
-import { choose as lowerElementChoose, coalesce as lowerElementCoalesce, flatMap as lowerElementFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, union as lowerElementUnion } from '../prefix/branch.ts';
+import { choose as lowerElementChoose, coalesce as lowerElementCoalesce, flatMap as lowerElementFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, tryLowerOptionMapBranch, union as lowerElementUnion } from '../prefix/branch.ts';
 import { elementGroupSource, lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, type GroupSource } from './group.ts';
 import { tryCompileCountChild, tryCompileBranchChildAllCard, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueRows } from './child.ts';
 import { tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './scalar-arm.ts';
 import { BRANCH_SHAPE_ORDER, childCtx, childSteps, classifyBy, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, type BranchKind, type ByClass } from './child-shape.ts';
 import { lowerElementDedup } from '../prefix/filter.ts';
+import { lowerReSource } from '../resource.ts';
 import { lowerCall } from './call.ts';
 import { engineOf } from '../../engine/deps.ts';
 
@@ -416,12 +417,18 @@ function lowerBranchByShape(kind: BranchKind, st: ElementStream, step: PStep): S
 const tailUnion: ShapeTailFn<ElementStream> = (st, step, _steps, stop) =>
   continueLowering(lowerBranchByShape('union', st, step), stop + 1);
 
-// choose(): the option-map form (choose().option()…) is a CASE over a correlated choice scalar,
-// not an arm merge; the predicate form takes the shape cascade.
-const tailChoose: ShapeTailFn<ElementStream> = (st, step, steps, stop) =>
-  step.options
-    ? continueLowering(lowerChooseOptions(st, steps, stop), stop + 1)
-    : continueLowering(lowerBranchByShape('choose', st, step), stop + 1);
+// choose(): the option-map form (choose().option()…) is an ARM MERGE whose selection is an N-way
+// lookup on a choice scalar. When every option body yields ONE scalar per input, that merge
+// collapses to a single CASE over a correlated choice — lowerChooseOptions, tried first because it
+// is one CTE with no per-arm gating. It DECLINES (null) for an element/list body or the
+// no-Pick.none pass-through, and tryLowerOptionMapBranch then routes the arms through the ordinary
+// triage + merge family. The predicate form takes the shape cascade.
+const tailChoose: ShapeTailFn<ElementStream> = (st, step, steps, stop) => {
+  if (!step.options) return continueLowering(lowerBranchByShape('choose', st, step), stop + 1);
+  const lowered = lowerChooseOptions(st, steps, stop) ?? tryLowerOptionMapBranch(st, step);
+  if (!lowered) throw new Error('choose().option() not yet supported by generic lowering (an option body outside the element/scalar/list arm shapes, or a choice the correlated seam cannot compile)');
+  return continueLowering(lowered, stop + 1);
+};
 
 const tailCoalesce: ShapeTailFn<ElementStream> = (st, step, _steps, stop) =>
   continueLowering(lowerBranchByShape('coalesce', st, step), stop + 1);
@@ -750,39 +757,6 @@ const scalarFold: ShapeTailFn<ScalarStream> = (s, step, _steps, at) =>
 const scalarGroupCount: ShapeTailFn<ScalarStream> = (s, step, _steps, at) =>
   (step.args ?? []).length === 0 && !(step.bys?.length) ? continueLowering(lowerScalarGroupCount(s), at + 1) : null;
 
-/**
- * V()/E() after a SCALAR: a mid-traversal graph source. TinkerPop's GraphStep(isStart=false)
- * discards the incoming value and re-sources the graph per traverser — V() all vertices, V(id…)
- * the id-matched ones — so it is a flatMap (CROSS JOIN the scalar rows with the target table).
- * The carried schema (as()-labels) rides forward on the join, so `inject(1).as('a').V()…` keeps
- * its label. A pushed child ordinal (origins) rides through the CROSS JOIN unchanged via
- * carryFrag — so re-sourcing INSIDE a scalar child scope (a branch/map arm `__.V().count()`)
- * is fine: the re-sourced elements carry the parent ordinal and a following scoped reducer/fold
- * groups by it. Defers (null) only for path/sack/fromV, whose fork/merge through a re-source is
- * not worked out.
- */
-export function lowerScalarVE(s: ScalarStream, step: PStep): ElementStream | null {
-  if (s.carried.path || s.carried.sack || s.carried.fromV) return null;
-  const elem: 'node' | 'edge' = step.name === 'E' ? 'edge' : 'node';
-  const n = (elem === 'edge' ? edges : nodes).as('n');
-  const p = s.rel.as('p');
-  const cols = carriedCols(s.carried);
-  const rawIds = flattenListArgs(step.args ?? []);
-  let where: Expression = empty;
-  if (rawIds.length) {
-    const nums = rawIds.filter((a) => typeof a === 'number');
-    const strs = rawIds.filter((a) => typeof a === 'string');
-    const clauses: Expression[] = [];
-    if (nums.length) clauses.push(q`${n.c.id} IN (${list(nums.map(value), ',')})`);
-    if (strs.length) clauses.push(q`${n.c.uid} IN (${list(strs.map(value), ',')})`);
-    where = clauses.length ? q` WHERE ${list(clauses, ' OR ')}` : q` WHERE 0`; // only-null ids → no match
-  }
-  const rel = s.q.cte(
-    q`SELECT ${n.c.id} AS id${carryFrag(s.carried, p)} FROM ${p} CROSS JOIN ${n}${where}`,
-    ['id', ...cols],
-  );
-  return { ...carryOf(s), kind: 'elements', rel, elem };
-}
 
 /** Wrap a scalar-parent branch consumer (child.ts) as a ShapeTailFn: a produced stream
  *  continues lowering; a null (arm outside the scalar-arm vocabulary) falls through to the
@@ -809,8 +783,8 @@ const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
   // TinkerPop's error on a non-string separator (matches the spec).
   ['split', (s, step, _steps, at) => continueLowering(lowerScalarSplit(s, step), at + 1)],
   // V()/E() after a scalar re-source the graph per traverser (a flatMap → ElementStream).
-  ['V', (s, step, _steps, at) => { const r = lowerScalarVE(s, step); return r ? continueLowering(r, at + 1) : null; }],
-  ['E', (s, step, _steps, at) => { const r = lowerScalarVE(s, step); return r ? continueLowering(r, at + 1) : null; }],
+  ['V', (s, step, _steps, at) => { const r = lowerReSource(s, step); return r ? continueLowering(r, at + 1) : null; }],
+  ['E', (s, step, _steps, at) => { const r = lowerReSource(s, step); return r ? continueLowering(r, at + 1) : null; }],
   // Branch/map over a scalar current object: each arm is a value sub-traversal lowered
   // through the same engine, gated + UNION-merged (child.ts tryScalar*Child). A miss
   // (arm outside the scalar-arm vocabulary) returns null → the clear generic deferral.

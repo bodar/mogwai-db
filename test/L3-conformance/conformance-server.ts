@@ -47,7 +47,20 @@ const SEEDS: Record<string, string[]> = {
   ggrateful: graphsonSeed(relToRepo(`${GRAPHSON}/grateful-dead-v3.json`)),
 };
 
-export async function startConformanceServer(port = 45940) {
+/**
+ * Start the host, seeding `graphs` (default: ALL of SEEDS — what the official cucumber runner
+ * needs, since a scenario may select any reference graph).
+ *
+ * Seeding is the whole startup cost and it is dominated by ONE graph: ggrateful is 8,857 write
+ * traversals ≈ 4.4s of a ≈5.0s total, because a seed runs one parse→compile→execute per
+ * vertex/edge (the row-at-a-time write path — tracked debt, see docs/outstanding-work.md). A
+ * caller that only reads gmodern therefore pays 4.4s for a graph it never touches, and — since
+ * that put `beforeAll` within ~20ms of bun's DEFAULT 5000ms hook timeout — did so while flaking
+ * about half the time. Naming the graphs you need is the fix: it is the honest statement of the
+ * fixture a test depends on, and it removes the timing cliff rather than raising the ceiling
+ * over it.
+ */
+export async function startConformanceServer(port = 45940, graphs: readonly string[] = Object.keys(SEEDS)) {
   // The conformance host emulates the REFERENCE provider exactly: only the tinker.* / --list
   // services, NOT our mogwai.* extensions. The official g_call / g_callXlistX scenarios assert
   // --list returns exactly the reference set, so registering our federated service (which --list
@@ -56,7 +69,8 @@ export async function startConformanceServer(port = 45940) {
   const manager = new BunGraphManager(undefined, standardRegistry);
   // Seed before serving so the first scenario sees a populated graph. Each write
   // traversal goes through the manager seam exactly as a client request would.
-  for (const [g, queries] of Object.entries(SEEDS)) {
+  for (const g of graphs) {
+    const queries = SEEDS[g] ?? (() => { throw new Error(`unknown reference graph "${g}" (have: ${Object.keys(SEEDS).join(', ')})`); })();
     for (const q of queries) manager.executor(g).framed(q, {}); // sync — seeds are non-federated writes
   }
   // L3 telemetry (always on): wrap the SERVED manager only — seed writes above go

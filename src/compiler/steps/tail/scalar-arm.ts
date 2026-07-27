@@ -349,7 +349,7 @@ export function tryScalarCoalesceChild(s: ScalarStream, step: PStep): ScalarStre
 
 /** An element arm over a scalar: a re-source (`V()`/`E()`) then element movement/filter,
  *  ending in element space. No gating (union), so it lowers over the parent value rows
- *  directly — lowerScalarVE CROSS JOINs the graph per value, movement folds on top. */
+ *  directly — lowerReSource CROSS JOINs the graph per value, movement folds on top. */
 function tryScalarResourceElement(seed: ScalarStream, nested: any): ElementStream | null {
   const body = childSteps(nested, seed.params);
   if (!isResourceHead(body)) return null;

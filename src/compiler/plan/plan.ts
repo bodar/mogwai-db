@@ -273,6 +273,19 @@ export function predicateSql(expr: Expression, pred: any, typeCtx: TypeCtx = {})
   // constant truth value: within nothing = never, without nothing = always.
   if (op === 'within') return vals.length ? q`${expr} in (${list(vals.map(operandSql), ', ')})` : q`0`;
   if (op === 'without') return vals.length ? q`${expr} not in (${list(vals.map(operandSql), ', ')})` : q`1`;
+  // within/without whose operand is ONE list-valued traversal (`within(__.V()…fold())`) rather
+  // than a vararg set. The members are only known at run time, so membership is a json_each
+  // scan of the operand list, not an IN-list. Minted by the operand layer (steps/tail/operand.ts)
+  // once it has resolved the traversal to a JSONB list; `within` above stays the vararg form.
+  if (op === 'withinList' || op === 'withoutList') {
+    // `expr IN (SELECT …)`, NOT `EXISTS (… WHERE je.value = expr)`. json_each exposes a column
+    // literally named `value`, and hosts like hasProp hand us the UNQUALIFIED `value` column of
+    // vertex_properties — inside the subquery that binds to json_each's own `value`, making the
+    // test `je.value = je.value` and every row match. Keeping the operand on the left evaluates
+    // it in the outer scope, where it means what the caller intended.
+    const members = q`(SELECT je.value FROM json_each(${operandSql(vals[0])}) je)`;
+    return op === 'withinList' ? q`${expr} IN ${members}` : q`${expr} NOT IN ${members}`;
+  }
   // between = [lo, hi) inclusive low; inside = (lo, hi) exclusive low. With a stored vtype
   // both bounds and the column go through the numeric-aware compare; otherwise raw.
   if (op === 'between' || op === 'inside') {

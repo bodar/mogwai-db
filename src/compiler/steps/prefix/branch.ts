@@ -1,4 +1,4 @@
-import { q, list, empty, value, raw, Relation, type Expression } from '../../../sql/kernel/q.ts';
+import { q, list, empty, paren, value, raw, Relation, type Expression } from '../../../sql/kernel/q.ts';
 import { staticTypeOf } from '../../../sql/kernel/render.ts';
 import { edges, nodes } from '../../../sql/schema.ts';
 import { isNested, stepChain, type SackSpec, type Step } from '../../../gremlin/frontend.ts';
@@ -7,10 +7,10 @@ import { normalize } from '../../ir/passes.ts';
 import { analyze, type ChainFacts } from '../../ir/analyze.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem } from '../../plan/plan.ts';
 import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
-import { advance, elemRel, labelScope, prevRel, carryFrag, carryFragMint, carriedCols, carriedWith, mergeAliasMaps, partitionOver, type AliasEntry, type AliasMap, type Carried, type Carry, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
+import { advance, aliasColsOf, elemRel, labelScope, prevRel, carryFrag, carryFragMint, carriedCols, carriedWith, mergeAliasMaps, partitionOver, type AliasEntry, type AliasMap, type Carried, type Carry, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type AliasShape } from '../context/alias.ts';
-import { pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
-import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, isElementChildStep, ROOT_SCOPE, type ChildCtx } from '../tail/child-shape.ts';
+import { pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarModulations, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
+import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, isElementChildStep, ROOT_SCOPE, type BranchArmShape, type ChildCtx } from '../tail/child-shape.ts';
 import { emptyElementLike } from '../tail/labelselect.ts';
 import { carryOf, toVariantStream, type ListStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
 import { finishListMerge, mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
@@ -661,7 +661,9 @@ function repeatBodyRelation(st: ElementStream, core: PStep[]): Relation | null {
   const { stream, next } = engineOf(st).lowerElementSteps(core, seed);
   if (next !== core.length) return null;                        // a step the prefix fold won't take
   if (stream.elem !== 'node') return null;                      // the walk id is a vertex rowid
-  if (stream.carried.aliases.size) return null;                 // labels through the walk = its own item
+  // A body that BINDS a label cannot be precompiled per-origin — the bind is per-iteration. (An
+  // INCOMING label is a different question and rides the walk fine; see the loop-invariant note.)
+  if (stream.carried.aliases.size) return null;
   if (stream.carried.origins.length !== 1 || stream.carried.origins[0] !== 'o') return null;
   const b = stream.rel.as('rb');
   // No DISTINCT: traversers are a MULTISET, so two parallel edges must stay two rows.
@@ -683,7 +685,12 @@ function repeatBodyRelation(st: ElementStream, core: PStep[]): Relation | null {
  *  until+times/emit, complex body) throw — the fold gathered the cluster, not validated it. */
 export const repeat: StepFn = (s, st) => {
   if (st.elem !== 'node') throw new Error('repeat() on edges not yet supported');
-  if (st.carried.aliases.size > 0) throw new Error('repeat() after as() not yet supported');
+  // A label bound BEFORE the walk is LOOP-INVARIANT: the walk moves the traverser, it never
+  // rebinds an existing label, so the alias column's value is the same on every row of every
+  // iteration. Carrying it is therefore a projection, not a fold — seed it from the outer row and
+  // pass it through the recursive term unchanged (see aliasCols below). A label bound INSIDE the
+  // body is the different, genuinely-recursive question; `as` is not in REPEAT_BODY_OK, so those
+  // bodies still defer there rather than here.
   const cluster = s.cluster ?? [s];
   const rep = cluster.find((c) => c.name === 'repeat');
   if (!rep) throw new Error(`${s.name}() without repeat() not yet supported`);
@@ -815,17 +822,26 @@ export const repeat: StepFn = (s, st) => {
   const emitFn = hasEmitPred ? walkPredicate(engineOf(st), emitStep!, st.params, 'emit') : null;
   const emitCol = (id: Expression, depth: Expression, sackAt: Expression | null): Expression => q`, CASE WHEN ${emitFn!(id, depth, sackAt)} THEN 1 ELSE 0 END AS emit`;
 
-  // ORIGIN columns ride THROUGH the walk unchanged. A walk is row-local — each traverser walks
-  // independently — so the ordinal saying which parent it came from is just carried, exactly as
-  // movement carries it via carryFrag. Threading it is what lets `repeat()` be a CHILD body
-  // (`local`/`map`/`where`/`group`/`order` over a walk) and lets a repeat NEST inside another
-  // repeat's body: both are the same missing capability, and without it the walk silently dropped
-  // the column its consumer joins on (caught loudly by assertStreamColumns, never silently).
-  // ALIASES are deliberately NOT threaded here — an alias is a JSON history that a walk of unknown
-  // length would have to append to per hop, which is its own item; `repeat() after as()` still
-  // fails closed above.
+  // LOOP-INVARIANT carried columns: the ones the walk neither reads nor rewrites, so they simply
+  // ride each iteration untouched. Two kinds, same mechanism — worth stating once rather than
+  // twice, because they arrived as separate pieces of work and are the same fact:
+  //   • ALIAS columns — the walk MOVES the traverser, it never rebinds an existing label, so an
+  //     incoming `as()` binding is invariant (a label bound INSIDE the body is the genuinely
+  //     recursive question and still fails closed).
+  //   • ORIGIN columns — a walk is row-local (each traverser walks independently), so the ordinal
+  //     saying which parent a row came from is just carried, exactly as movement carries it via
+  //     carryFrag. Threading it is what lets `repeat()` be a CHILD body (`local`/`map`/`where`/
+  //     `group`/`order` over a walk) and lets a repeat NEST in another repeat's body.
+  // `ride` re-projects them from whichever relation the caller is selecting from — the outer row
+  // in the seed, the walk itself in the recursive term, bare at the output.
+  const aliasCols = aliasColsOf(st.carried.aliases);
   const originCols = st.carried.origins;
-  const walkCols = ['id', 'depth', ...originCols, ...(sackCol ? [sackCol] : []), ...(trackArray ? ['path'] : []), ...(hasUntil ? ['done'] : []), ...(hasEmitPred ? ['emit'] : [])];
+  const ride = (cols: readonly string[], r: Relation | null): Expression =>
+    cols.length ? list(cols.map((c) => (r ? q`, ${r.c[c]}` : q`, ${raw(c)}`)), '') : empty;
+  // Inside the walk the column order is only self-consistency, so the two groups sit together;
+  // the OUTPUT below must instead match carriedCols (aliases, sack, bulk, origins, path).
+  const throughCols = [...aliasCols, ...originCols];
+  const walkCols = ['id', 'depth', ...throughCols, ...(sackCol ? [sackCol] : []), ...(trackArray ? ['path'] : []), ...(hasUntil ? ['done'] : []), ...(hasEmitPred ? ['emit'] : [])];
   const walk = st.q.recursiveCte(walkCols, (self: Relation) => {
     // One recursive-term SELECT: advance to `finalId`, bump depth, fold the sack, accumulate
     // path/done, and guard expansion — shared depth<times / done=0 guards FIRST, then the
@@ -842,8 +858,7 @@ export const repeat: StepFn = (s, st) => {
       if (hasUntil) guards.push(q`${self.c.done}=0`); // until() expands only from still-looping rows
       guards.push(...branchGuards);
       const where = guards.length ? q` WHERE ${list(guards, ' AND ')}` : q``;
-      const originAcc = originCols.length ? list(originCols.map((c) => q`, ${self.c[c]}`), '') : empty;
-      return q`SELECT ${finalId} AS id, ${self.c.depth} + 1 AS depth${originAcc}${sackAcc}${pathAcc}${doneAcc}${emitAcc} FROM ${from}${where}`;
+      return q`SELECT ${finalId} AS id, ${self.c.depth} + 1 AS depth${ride(throughCols, self)}${sackAcc}${pathAcc}${doneAcc}${emitAcc} FROM ${from}${where}`;
     };
     // simplePath()'s cycle guard: reject a finalId already on the accumulated path.
     const cycleGuard = (finalId: Expression): Expression[] =>
@@ -883,8 +898,9 @@ export const repeat: StepFn = (s, st) => {
     const seedDone = hasUntil ? (untilFirst ? doneCol(seedId, q`0`, seedSackExpr) : q`, 0 AS done`) : q``;
     // emit-before tests+emits the seed (depth 0); emit-after never emits the seed.
     const seedEmit = hasEmitPred ? (emitBefore ? emitCol(seedId, q`0`, seedSackExpr) : q`, 0 AS emit`) : q``;
-    const seedOrigin = originCols.length ? list(originCols.map((c) => q`, ${seedSrc.c[c]}`), '') : empty;
-    return q`SELECT ${seedSel}, 0 AS depth${seedOrigin}${seedSack}${seedPath}${seedDone}${seedEmit} FROM ${seedSrc} UNION ALL ${list(rec, ' UNION ALL ')}`;
+    // The seed selects from ONE relation, so an untested seed keeps its columns unqualified
+    // (matching `seedSel`'s bare `id`); a tested seed aliases the source and qualifies through it.
+    return q`SELECT ${seedSel}, 0 AS depth${ride(throughCols, seedTested ? seedSrc : null)}${seedSack}${seedPath}${seedDone}${seedEmit} FROM ${seedSrc} UNION ALL ${list(rec, ' UNION ALL ')}`;
   });
   // Output: until() → the rows that satisfied the stop predicate; emit(pred) → the rows
   // whose emit column is set (the depth band is baked into that column); bare emit() →
@@ -907,10 +923,13 @@ export const repeat: StepFn = (s, st) => {
   // Column ORDER on the SELECT must match carriedCols(out): sack, bulk, ORIGINS, then path.
   // The walk names its accumulator `sackCol`; the outbound carried name is always `sk`.
   const sackOut = sackCol ? q`, ${raw(sackCol)} AS sk` : empty;
-  const originOut = originCols.length ? list(originCols.map((c) => q`, ${raw(c)}`), '') : empty;
+  // Column ORDER must match carriedCols(out) EXACTLY: aliases, sack, bulk, origins, path. The two
+  // ride-groups are therefore NOT contiguous here (bulk sits between them), unlike inside the walk.
+  const aliasOut = ride(aliasCols, null);
+  const originOut = ride(originCols, null);
   const out = wantsPathOutput
-    ? advance(st, q`SELECT id${sackOut}, 1 AS bulk${originOut}, path FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, path: { kind: 'array', col: 'path', elem: 'node' } })
-    : advance(st, q`SELECT id${sackOut}, 1 AS bulk${originOut} FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null });
+    ? advance(st, q`SELECT id${aliasOut}${sackOut}, 1 AS bulk${originOut}, path FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, path: { kind: 'array', col: 'path', elem: 'node' } })
+    : advance(st, q`SELECT id${aliasOut}${sackOut}, 1 AS bulk${originOut} FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null });
   if (!aggName) return out;
   // A body-terminal aggregate('x'): collect every vertex the body emitted — the walk rows at
   // depth ≥ 1 (the seed is the pre-body input, not a body output). If the name already holds a
@@ -1124,4 +1143,151 @@ export function sourceUnion(engine: Engine, step: PStep, params: Record<string, 
   if (base.carried.path) throw new Error('path() through a mixed-shape union() source not yet supported');
   const vs = (arms as ArmStream[]).map(sourceVariantArm);
   return mergeVariantArms(base, vs, variantArmsMeta(vs));
+}
+
+// ---------- choose (option-map form) as an ARM MERGE ----------
+//
+// `choose(choiceFn).option(k, body)…` is a BRANCH whose arm selection is an N-way lookup on a
+// choice scalar, not (only) a scalar CASE. The CASE projector (`lowerChooseOptions`, mapscalar.ts)
+// is the right lowering when every option body yields one scalar per input — one CTE, no per-arm
+// gating — and it stays the first thing tried. But it is a SPECIALIZATION, and treating it as the
+// whole implementation is what made three unrelated things defer: an ELEMENT option body
+// (`option('blah', __.out('knows'))`), a LIST one (`…fold()`), and the no-`Pick.none` form, whose
+// unmatched inputs pass through as the element itself (TinkerPop) — a genuinely mixed
+// scalar/element result that predates VariantStream and is now perfectly representable.
+//
+// So this is the generic route: gate the parent per option (first match wins, exactly the CASE's
+// WHEN order), lower each option body from its gated seed, and route to the SAME arm triage +
+// merge family every other branch uses. No fifth merge, no second traversal implementation.
+
+/** One option of an option-map choose: its key (absent/`Pick.none` → the fallthrough arm), the
+ *  parsed body, and its classified shape. A `__.discard()` body drops its rows, which is an
+ *  OMITTED arm rather than a shape — the merge never sees it. */
+interface ChooseOption {
+  readonly key: any;
+  readonly nested: any;
+  readonly isNone: boolean;
+  readonly discard: boolean;
+}
+
+const isDiscardBody = (nested: any, params: Record<string, any>): boolean => {
+  const body = childSteps(nested, params);
+  return body.length === 1 && body[0].name === 'discard';
+};
+
+/** Read the option list, or null when a form outside the vocabulary appears (Pick.any/unproductive,
+ *  a bodyless option, no keyed option at all) so the caller defers with its existing message. */
+function readChooseOptions(cs: PStep, params: Record<string, any>): ChooseOption[] | null {
+  const out: ChooseOption[] = [];
+  let sawNone = false;
+  for (const opt of cs.options ?? []) {
+    const bodyArg = opt.args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
+    if (!bodyArg) return null;
+    const keyArg = opt.args.find((x: any) => x !== bodyArg);
+    const pickArg = keyArg && typeof keyArg === 'object' && 'pick' in keyArg;
+    let isNone = false;
+    if (keyArg === undefined || pickArg) {
+      if ((pickArg ? keyArg.pick : 'none') !== 'none') return null; // Pick.any / Pick.unproductive
+      if (sawNone) continue; // first Pick.none wins
+      isNone = true;
+      sawNone = true;
+    }
+    out.push({ key: keyArg, nested: bodyArg.nested, isNone, discard: isDiscardBody(bodyArg.nested, params) });
+  }
+  return out.some((o) => !o.isNone) ? out : null;
+}
+
+/** The per-parent CHOICE value as a `ch` column on a relation carrying the parent's id + carried
+ *  schema. A T token reads it off the element; a nested traversal goes through the SAME correlated
+ *  modulation seam the CASE projector uses (so the two agree on what a choice can be). */
+function chooseChoiceDomain(st: ElementStream, a0: any): Relation | null {
+  const cols = ['id', 'ch', ...carriedCols(st.carried)];
+  if (a0 && typeof a0 === 'object' && 'nested' in a0) {
+    // Not `required`: an unproductive choice is routed to Pick.none, it does not drop the parent.
+    const mods = tryCompileScalarModulations(st, [{ nested: a0.nested, required: false }]);
+    if (!mods) return null;
+    const p = mods.rel.as('p');
+    return st.q.cte(q`SELECT ${p.c.id} AS id, ${p.c[mods.values[0].value]} AS ch${carryFrag(st.carried, p)} FROM ${p}`, cols);
+  }
+  if (!(a0 && typeof a0 === 'object' && 'token' in a0)) return null;
+  const n = elemRel(st);
+  const ctx = elemCtx(n, st.elem);
+  const ch = a0.token === 'label' ? labelNameSub(ctx.labelIdExpr) : a0.token === 'id' ? ctx.extIdExpr! : null;
+  if (!ch) return null;
+  const p = prevRel(st, 'p');
+  return st.q.cte(q`SELECT ${p.c.id} AS id, ${ch} AS ch${carryFrag(st.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`, cols);
+}
+
+/** `choose(choiceFn).option(k, body)…` routed through the arm triage + merge family. Returns null
+ *  to DEFER (an unsupported option form, a choice the modulation seam cannot compile, an
+ *  unclassifiable body) so the caller keeps its existing clear message — never a throw that would
+ *  break the CASE projector's fall-through. */
+export function tryLowerOptionMapBranch(st: ElementStream, step: PStep): Stream | null {
+  assertForkSafe('choose', st);
+  const opts = readChooseOptions(step, st.params);
+  if (!opts) return null;
+  const domain = chooseChoiceDomain(st, step.args[0]);
+  if (!domain) return null;
+  const d = domain.as('d');
+  const keyed = opts.filter((o) => !o.isNone);
+  const matches = keyed.map((o) => predicateSql(d.c.ch, o.key));
+  // First match wins — the CASE projector's WHEN order, and a Map lookup's semantics. Corpus keys
+  // are mutually exclusive, so this only fixes an order that would otherwise be unspecified.
+  const unmatched = matches.map(notCoalesce);
+  const testFor = (k: number) => k === 0 ? matches[0] : list([...unmatched.slice(0, k), paren(matches[k])], ' AND ');
+  const seedFor = (test: Expression): ElementStream =>
+    advance(st, q`SELECT ${d.c.id} AS id${carryFrag(st.carried, d)} FROM ${d} WHERE ${test}`);
+
+  // The fallthrough arm: an explicit Pick.none body, or — with no Pick.none at all — the element
+  // ITSELF passing through (TinkerPop). A `discard()` body drops those rows, i.e. no arm.
+  const none = opts.find((o) => o.isNone);
+  const noneTest = unmatched.length ? list(unmatched, ' AND ') : q`1`;
+  const armBodies = keyed.filter((o) => !o.discard);
+  const shapes = armBodies.map((o) => classifyArmShape(o.nested, childCtx(st)));
+  if (shapes.some((s) => s === null)) return null;
+  const fallthroughShape: BranchArmShape | null = !none ? 'element'
+    : none.discard ? null
+    : classifyArmShape(none.nested, childCtx(st));
+  if (none && !none.discard && fallthroughShape === null) return null;
+  const allShapes = [...shapes, ...(fallthroughShape ? [fallthroughShape] : [])];
+  if (!allShapes.length) return null;
+
+  // Lower each arm from its gated seed, in arm order (the merges tag arm_idx by position).
+  const uniform = allShapes.every((s) => s === allShapes[0]) ? allShapes[0] : null;
+  const lower = (nested: any, seed: ElementStream): Stream | null =>
+    uniform === 'element' ? tryCompileElementTraversal(seed, nested)
+    : uniform === 'scalar' ? tryCompileScalarValueChild(seed, nested, 'all')
+    : uniform === 'list' ? tryCompileListChild(seed, nested)
+    : null;
+
+  if (uniform) {
+    const arms: Stream[] = [];
+    for (let k = 0; k < armBodies.length; k++) {
+      const got = lower(armBodies[k].nested, seedFor(testFor(k)));
+      if (!got) return null;
+      arms.push(got);
+    }
+    if (fallthroughShape) {
+      const seed = seedFor(noneTest);
+      const got = none && !none.discard ? lower(none.nested, seed) : seed;
+      if (!got) return null;
+      arms.push(got);
+    }
+    const base = carryOf(st);
+    if (uniform === 'element') return mergeElementArms(base, arms as ElementStream[]);
+    if (uniform === 'scalar') return unionScalarStreams(base, arms as ScalarStream[]);
+    return finishListMerge(base, arms as ListStream[]);
+  }
+  // Genuinely mixed arms → the variant merge. Same wall as its siblings: a scalar/list arm holds
+  // no path position, so a live path would make the merged rows ragged.
+  if (st.carried.path) throw new Error('path() through a mixed-shape choose().option() not yet supported');
+  const vs: VariantArm[] = [];
+  for (let k = 0; k < armBodies.length; k++) vs.push(compileVariantArm(seedFor(testFor(k)), armBodies[k].nested));
+  if (fallthroughShape) {
+    const seed = seedFor(noneTest);
+    vs.push(none && !none.discard
+      ? compileVariantArm(seed, none.nested)
+      : { rel: seed.rel, vk: seed.elem === 'edge' ? 3 : 2 });
+  }
+  return mergeVariantArms(carryOf(st), vs, variantArmsMeta(vs));
 }

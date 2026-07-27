@@ -52,13 +52,16 @@ fails closed is better than a special-case that entrenches the non-generic path.
   have returns a silent `[]`. The inline correlated child is handed a `LabelScope` and seeds those
   columns (`tail/correlated.ts`); a site with no relation to read them from (`until()`/`emit()`, on
   a recursive walk row) declines the body to the materialized gate instead.
-- **In a FILTER body a label's POSITION decides its meaning** — TinkerPop routes `where(traversal)`
-  by variable location (`getVariableLocations`). First step: a re-root (`WhereStartStep`). Last
-  step: an equality CONSTRAINT (`WhereEndStep`), so `where(__.as("a").out("knows").as("b"))` means
-  "a knows b". Middle: an ordinary bind, and only this one is a bind. We don't implement the
-  constraint, so `predicate.ts` defers it — read that trailing `as()` as an inert bind and you
-  silently answer "a knows somebody", which is how it last went wrong. Open, with a Pass-shaped
-  fix: `docs/outstanding-work.md`.
+- **In a where() body a label's POSITION decides its meaning** — TinkerPop routes `where(traversal)`
+  by variable location (`getVariableLocations`), and ONLY where(): first step = a re-root
+  (`WhereStartStep`), last step = an equality CONSTRAINT (`WhereEndStep`), middle = an ordinary
+  bind. So `where(__.as("a").out("knows").as("b"))` means "a knows b", while the same body under
+  `filter()`/`choose()` is three binds. Both variables are canonicalized by ONE Pass
+  (`rewriteWhereEndLabels`) into `select(label)` and `where(P.eq(label))` — forms both lowerings
+  already implement — so no lowering knows the rule and the two cannot answer differently. Teaching
+  it to a lowering instead is how this produced two wrong answers at once: an end label read as an
+  inert bind ("a knows somebody"), and a start label re-rooted inside `filter()`, where it does not
+  belong, on the fast path only.
 - **The branch family (`union`/`choose`/`coalesce`/`optional`) has ONE arm triage and FOUR merge
   builders. Never add a fifth of either.** `classifyArmShape` (one arm) and `classifyBranchArms` +
   `BRANCH_SHAPE_ORDER` (a whole branch) in `tail/child-shape.ts` are the shape decision — the

@@ -5,7 +5,7 @@ import { flattenListArgs } from '../../gremlin/frontend.ts';
 import { type PStep } from '../ir/strategies.ts';
 import { analyze, type ChainFacts } from '../ir/analyze.ts';
 import { withCarried, type Carry, type ElementStream, type StepFn } from '../steps/context/context.ts';
-import { move, toEdge, toVertex, otherV } from '../steps/prefix/movement.ts';
+import { move, toEdge, toVertex, otherV, reSource } from '../steps/prefix/movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from '../steps/prefix/filter.ts';
 import { union, optional, repeat, choose, coalesce, sourceUnion } from '../steps/prefix/branch.ts';
 import { seedInject } from '../steps/write/inject.ts';
@@ -144,6 +144,8 @@ export class LoweringEngine implements Engine {
       ['out', move], ['in', move], ['both', move],
       ['outE', toEdge], ['inE', toEdge], ['bothE', toEdge],
       ['outV', toVertex], ['inV', toVertex], ['bothV', toVertex], ['otherV', otherV],
+      // MID-TRAVERSAL V()/E() only — seedRooted consumes a source V()/E() before this fold runs.
+      ['V', reSource], ['E', reSource],
       ['as', as], ['hasLabel', hasLabel], ['has', has], ['hasId', hasId],
       ['where', where], ['filter', where], ['not', where],
       ['and', andOr], ['or', andOr], ['dedup', dedup],

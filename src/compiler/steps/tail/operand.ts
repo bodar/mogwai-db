@@ -1,7 +1,7 @@
 import { q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { isNested } from '../../../gremlin/frontend.ts';
 import { childSteps } from './child-shape.ts';
-import { embedSql } from './list.ts';
+import { embedSql, foldedListSubquery } from './list.ts';
 import { engineOf, type Engine } from '../../engine/deps.ts';
 import { aliasCtx, labelNameSub, scalarProp, type ScalarCtx } from '../../plan/plan.ts';
 import { compileCorrelatedChild } from './correlated.ts';
@@ -38,6 +38,7 @@ const isReSourced = (body: readonly any[]): boolean => {
   const head = body[0];
   return !!head && (head.name === 'V' || head.name === 'E') && !(head.args ?? []).some(isNested);
 };
+
 
 /** One traversal operand → `(SELECT v FROM (<sub-read>) LIMIT 1)`, or null when it is not a
  *  standalone re-sourced read this can build. LIMIT 1 is TinkerPop's rule: a multi-result operand
@@ -143,6 +144,13 @@ function sackOperand(nested: any, deps: OperandDeps, row: Relation | undefined):
  *  nested inside a P, recursively (`P.not(P.gt(…))`). Returns `pred` unchanged when nothing
  *  resolved, so a caller can stay on its existing path. */
 export function resolveTraversalOperands(pred: any, deps: OperandDeps, host: OperandHost = {}): any {
+  // within/without over ONE traversal operand is a LIST membership, not a value comparison —
+  // `within(__.V(1).out('knows').values('age').fold())` asks whether the value is among the
+  // members that read produces. It is intercepted at the PRED level (the generic value walk
+  // below substitutes a scalar per operand, which is the wrong shape here) and re-minted as the
+  // list form predicateSql renders with a json_each scan.
+  const listPred = tryListMembership(pred, deps);
+  if (listPred) return listPred;
   if (isNested(pred)) {
     // Cheapest first: a carried column, then a standalone subquery (no correlation needed even at
     // a host that could correlate), then the correlated form.
@@ -169,4 +177,25 @@ export function hasUnresolvedOperand(pred: any): boolean {
   if (isNested(pred)) return true;
   if (!pred || typeof pred !== 'object' || !Array.isArray((pred as any).values)) return false;
   return (pred as any).values.some(hasUnresolvedOperand);
+}
+
+/** `within(<traversal>)` / `without(<traversal>)` whose single operand folds a re-sourced read
+ *  into a list → the `withinList`/`withoutList` pred predicateSql knows. Null for every other
+ *  shape (a vararg set, a non-fold body, a correlated body), so the caller's normal resolution
+ *  runs untouched. A CORRELATED list operand is a different problem — the members would vary per
+ *  traverser, which `foldedListSubquery`'s standalone sub-read cannot express — so it declines
+ *  and the existing deferral stands. */
+function tryListMembership(pred: any, deps: OperandDeps): any | null {
+  if (!pred || typeof pred !== 'object' || !('op' in pred)) return null;
+  if (pred.op !== 'within' && pred.op !== 'without') return null;
+  const vals = (pred as any).values;
+  if (!Array.isArray(vals) || vals.length !== 1 || !isNested(vals[0])) return null;
+  const body = childSteps(vals[0].nested, deps.params);
+  if (body[body.length - 1]?.name !== 'fold' || !isReSourced(body)) return null;
+  // A recognizer must DECLINE, never throw: the body is rooted by shape, but a source form the
+  // seed layer does not yet cover still has to fall through to the caller's clear deferral.
+  let listExpr: Expression | null = null;
+  try { listExpr = foldedListSubquery(deps.engine, body as PStep[], deps.params); } catch { return null; }
+  if (!listExpr) return null;
+  return { op: pred.op === 'within' ? 'withinList' : 'withoutList', values: [listExpr] };
 }

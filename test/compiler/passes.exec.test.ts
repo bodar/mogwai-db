@@ -57,11 +57,19 @@ describe('Pass pipeline ordering invariants', () => {
     for (const vi of verifyIdxs) expect(vi).toBeGreaterThan(nonVerifyMax);
   });
 
-  test('ConnectiveStrategy is the FIRST fold — it restructures, the others canonicalize', () => {
-    // It is the only fold that MOVES steps into {nested} bodies (infix .and()/.or() → the step
-    // form), so every later fold and the whole simplify group must see the canonical shape.
-    const folds = PASSES.filter((p) => p.category === 'fold');
-    expect(folds[0].name).toBe('ConnectiveStrategy');
+  test('the two RAW-nested-arg folds lead the group, end-labels before connectives', () => {
+    // Both rewriteWhereEndLabels and ConnectiveStrategy read the raw `{nested}` args (before
+    // foldRepeatClusters/foldChooseOptions move a body into .cluster/.options), so both lead.
+    // Their ORDER follows TinkerPop: a where()'s variable locations are resolved at step
+    // CONSTRUCTION, before any strategy runs, whereas ConnectiveStrategy is a strategy. It matters
+    // for `where(__.as("a").out().and().out().as("b"))` — folding the connective first would move
+    // the trailing as("b") inside the and()'s last operand, out of the end-label rewrite's sight.
+    const folds = PASSES.filter((p) => p.category === 'fold').map((p) => p.name);
+    expect(folds.slice(0, 2)).toEqual(['rewriteWhereEndLabels', 'ConnectiveStrategy']);
+    // ConnectiveStrategy is still the only fold that RESTRUCTURES the chain, so it must precede
+    // every remaining fold and the whole simplify group.
+    expect(ord('ConnectiveStrategy')).toBeLessThan(ord('foldRepeatClusters'));
+    expect(ord('ConnectiveStrategy')).toBeLessThan(ord('collapseFoldCountLocal'));
   });
 });
 

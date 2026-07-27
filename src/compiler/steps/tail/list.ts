@@ -309,18 +309,26 @@ function operandList(engine: Engine, arg: any, op: string, params: Record<string
       const c = pre[0].args[0];
       return q`jsonb(${value(JSON.stringify([c ?? null]))})`;
     }
-    // A standalone read traversal ending in fold() → its own scalar list. It is
-    // independent of the incoming traverser (a fresh V()/E() root), so compile it as a
-    // separate read and aggregate its `v` column into one JSONB list, embedded as a
-    // scalar subquery. Only a scalar-list fold is supported (values/id/label → v col).
-    const sub = engine.compileReadCompiled(inner, params);
-    if (sub.shape.kind === 'jsonbList')
-      return q`(SELECT jsonb(list) FROM (${embedSql(sub)}))`;
-    if (sub.shape.kind !== 'list' || sub.shape.elem !== 'scalar')
-      throw new Error(`${op}() operand traversal must fold a scalar list (values/id/label), got ${sub.shape.kind === 'list' ? sub.shape.elem : sub.shape.kind}`);
-    return q`(SELECT jsonb(COALESCE(json_group_array(v), json('[]'))) FROM (${embedSql(sub)}))`;
+    const folded = foldedListSubquery(engine, inner, params);
+    if (!folded) throw new Error(`${op}() operand traversal must fold a scalar list (values/id/label)`);
+    return folded;
   }
   throw new Error(`${op} step can only take an array or an Iterable as an argument, encountered ${jsGtype(arg)}`);
+}
+
+/** A standalone read traversal ending in `fold()` → its own scalar list, as a JSONB scalar
+ *  subquery. It is independent of the incoming traverser (a fresh `V()`/`E()` root), so it
+ *  compiles as a separate read and aggregates its `v` column into one list.
+ *
+ *  Shared by the set-op operands (above) and the PREDICATE operands (`within(__.V()…fold())`,
+ *  operand.ts) — the same "a folded re-sourced read is a list value" fact, so the two cannot
+ *  disagree about which traversals qualify. Returns null when the read is not a scalar list,
+ *  leaving the caller to raise its own vocabulary-appropriate error. */
+export function foldedListSubquery(engine: Engine, inner: PStep[], params: Record<string, any>): Expression | null {
+  const sub = engine.compileReadCompiled(inner, params);
+  if (sub.shape.kind === 'jsonbList') return q`(SELECT jsonb(list) FROM (${embedSql(sub)}))`;
+  if (sub.shape.kind !== 'list' || sub.shape.elem !== 'scalar') return null;
+  return q`(SELECT jsonb(COALESCE(json_group_array(v), json('[]'))) FROM (${embedSql(sub)}))`;
 }
 
 /** Embed a fully-rendered Compiled (its own `with … select …`) as an Expression, so it

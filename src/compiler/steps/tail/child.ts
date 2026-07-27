@@ -8,7 +8,7 @@ import { asOnStream, selectOneFromAlias } from './labelselect.ts';
 import { carryOf, toListStream, toScalarStream, toVariantStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { lowerScalarRows, unionScalarStreams, SCALAR_TRANSFORMS } from './scalar.ts';
-import { lowerScalarVE } from './projection.ts';
+import { lowerReSource } from '../resource.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
 import { predicateSql, rangeToOffsetLimit } from '../../plan/plan.ts';
@@ -270,7 +270,7 @@ export function isResourceHead(rest: PStep[]): boolean {
  *  element arm (tryScalarResourceElement); the value is discarded by the re-source (a flatMap
  *  CROSS JOIN), and a pushed ordinal rides through it unchanged. */
 export function resourceElement(seed: ScalarStream, head: PStep, after: PStep[]): ElementStream | null {
-  const el = lowerScalarVE(seed, head);
+  const el = lowerReSource(seed, head);
   if (!el) return null;
   return lowerElementBody(el, after);
 }
@@ -359,7 +359,7 @@ function compileScalarChildRows(
   //   (a) a value-op body (transforms/is/order/slice — the pushed seed carries the minted
   //       encounter) that stays scalar, plus an optional terminal scoped reducer; and
   //   (b) a RE-SOURCE body (`V()`/`E()` then element movement/filter, optional projection):
-  //       the pushed scalar seed CROSS JOINs the graph per value (lowerScalarVE carries the
+  //       the pushed scalar seed CROSS JOINs the graph per value (lowerReSource carries the
   //       ordinal through), so a following scoped reducer/projection reduces per input.
   // fold() is stripped by the caller (stripTerminal), so it never appears here.
   if (isScalarParent(parent)) {

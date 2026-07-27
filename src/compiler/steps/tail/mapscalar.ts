@@ -316,7 +316,7 @@ export function lowerFormatScalar(s: ScalarStream, step: PStep): ScalarStream | 
  * (through the shared child-row compiler); element bodies and
  * Pick.unproductive/any defer. The CASE result is a composable ScalarStream.
  */
-export function lowerChooseOptions(st: ElementStream, steps: PStep[], stop: number): ScalarStream {
+export function lowerChooseOptions(st: ElementStream, steps: PStep[], stop: number): ScalarStream | null {
   const cs = steps[stop];
   const a0 = cs.args[0];
   const specs: ScalarModulationSpec[] = [];
@@ -333,12 +333,12 @@ export function lowerChooseOptions(st: ElementStream, steps: PStep[], stop: numb
   let sawNone = false;
   for (const opt of cs.options!) {
     const bodyArg = opt.args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
-    if (!bodyArg) throw new Error('option() requires a traversal body');
+    if (!bodyArg) return null;
     const keyArg = opt.args.find((x: any) => x !== bodyArg);
     let isNone = false;
     if (keyArg === undefined || (keyArg && typeof keyArg === 'object' && 'pick' in keyArg)) {
       const pick = keyArg && typeof keyArg === 'object' && 'pick' in keyArg ? keyArg.pick : 'none';
-      if (pick !== 'none') throw new Error(`option(Pick.${pick}) not yet supported`);
+      if (pick !== 'none') return null;
       isNone = true;
       if (sawNone) continue; // first Pick.none wins
       sawNone = true;
@@ -348,10 +348,14 @@ export function lowerChooseOptions(st: ElementStream, steps: PStep[], stop: numb
     options.push({ key: keyArg, mod, isNone });
   }
   if (!options.some((x) => !x.isNone)) throw new Error('choose().option() needs at least one keyed option');
-  // No Pick.none → unmatched inputs are the element itself (mixed vertex/scalar): defer.
-  if (!sawNone) throw new Error('choose().option() without a Pick.none default not yet supported (unmatched pass-through is mixed-shape)');
+  // No Pick.none → unmatched inputs pass through as the ELEMENT itself (TinkerPop), so the result
+  // is mixed scalar/element and no CASE over one value column can carry it. DECLINE (never throw):
+  // the caller falls through to the generic arm-merge route, where the pass-through is simply an
+  // element arm of the variant merge. Same for an option body the scalar child seam can't compile
+  // (an element `__.out('knows')`, a `…fold()` list) — that is an arm, not a CASE branch.
+  if (!sawNone) return null;
   const mods = tryCompileScalarModulations(st, specs);
-  if (!mods) throw new Error('choose().option() traversal not supported by generic scalar child lowering');
+  if (!mods) return null;
   const p = mods.rel.as('p');
   const n = elemRel(st);
   const ctx = elemCtx(n, st.elem);

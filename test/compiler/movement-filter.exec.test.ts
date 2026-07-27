@@ -251,3 +251,54 @@ test('a fast path DECLINES an operand it cannot resolve, it does not throw', () 
   expect(run(store, 'g.inject("marko").choose(__.is(P.eq(__.V(9999).values("name"))), __.constant("matched"), __.constant("unmatched"))')
     .map((r: any) => r.v)).toEqual(['unmatched']);
 });
+
+test('V()/E() mid-traversal re-sources the graph, carrying the schema forward', () => {
+  const store = seededStore();
+  const names = (q: string) => (run(store, q) as any[]).map((r) => r.v).sort();
+  const count = (q: string) => (run(store, q) as any[]).map((r) => r.v);
+
+  // TinkerPop's GraphStep(isStart=false): discard the current object and re-source the graph
+  // PER TRAVERSER — a flatMap, so the row count multiplies. It reuses the very CROSS JOIN the
+  // scalar tail already had for `inject(1).V()`; a re-source reads only the carried schema and
+  // never the parent's payload, which is exactly why one implementation serves both parents.
+  expect(count('g.V(1).V().count()')).toEqual([6]);              // 1 traverser × 6 vertices
+  expect(count('g.V(1).E().count()')).toEqual([6]);              // …and the edge table
+  expect(count('g.V().hasLabel("person").V().hasLabel("software").count()')).toEqual([8]); // 4 × 2
+  expect(count('g.V(1).as("a").out().V().count()')).toEqual([18]);                          // 3 × 6
+  expect(names('g.V(1).V(2).values("name")')).toEqual(['vadas']); // id-scoped re-source
+
+  // Carrying the schema across the re-source is the POINT of the step: the label bound before
+  // it is what the re-sourced vertices are compared against. josh(32) and peter(35) are the two
+  // older than marko(29).
+  expect(names('g.V(1).as("a").V().has("age",gt(__.select("a").values("age"))).values("name")'))
+    .toEqual(['josh', 'peter']);
+  expect(names('g.V(1).as("a").V(2).select("a").values("name")')).toEqual(['marko']);
+
+  // path()/sack()/otherV() fork through a re-source in ways that are not worked out, so those
+  // fail closed rather than silently dropping the carried state.
+  expect(() => run(store, 'g.V(1).path().V().count()')).toThrow(/not yet supported/);
+});
+
+test('within()/without() over a folded re-sourced traversal is LIST membership', () => {
+  const store = seededStore();
+  const vals = (q: string) => (run(store, q) as any[]).map((r) => r.v).sort();
+  // `within(__.V(1).out('knows').values('age').fold())` asks whether the value is among the
+  // members that read produces — a list operand, not the vararg set `within(a, b)` compiles to an
+  // IN-list for. The members are only known at run time, so it renders as a json_each scan over
+  // the folded sub-read. marko knows vadas(27) and josh(32).
+  expect(vals("g.V().values('age').is(within(__.V(1).out('knows').values('age').fold()))")).toEqual([27, 32]);
+  expect(vals("g.V().values('age').is(without(__.V(1).out('knows').values('age').fold()))")).toEqual([29, 35]);
+
+  // The has() host is the one that catches the scoping trap: json_each exposes a column named
+  // `value`, and hasProp passes the UNQUALIFIED `value` column of vertex_properties. Rendered as
+  // `EXISTS (… WHERE je.value = value)` both sides bind to json_each and EVERY row matches —
+  // within returned all six vertices and without returned none. Keeping the operand on the left
+  // of `IN (SELECT …)` evaluates it in the outer scope, where it means what the caller intended.
+  expect(vals("g.V().has('name',within(__.V(1).out('knows').values('name').fold())).values('name')"))
+    .toEqual(['josh', 'vadas']);
+  expect(vals("g.V().has('name',without(__.V(1).out('knows').values('name').fold())).values('name')"))
+    .toEqual(['lop', 'marko', 'peter', 'ripple']);
+
+  // An empty operand list matches nothing, rather than degenerating to a true predicate.
+  expect(vals("g.V().values('age').is(within(__.V(9999).values('age').fold()))")).toEqual([]);
+});

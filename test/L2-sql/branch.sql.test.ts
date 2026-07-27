@@ -420,15 +420,26 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(nested.sql).toContain('m0_present');
   });
 
-  test('option-map choose deferrals fail closed', () => {
-    // no Pick.none → unmatched pass-through is mixed vertex/scalar
-    expect(() => compile('g.V().choose(__.out().count()).option(1, __.values("name")).option(2, __.values("age"))', {}))
-      .toThrow('without a Pick.none default');
-    // an element option body is rejected by scalar child shape dispatch
-    expect(() => compile('g.V().choose(T.label).option("person", __.out("knows")).option(Pick.none, __.constant("x"))', {}))
-      .toThrow('not supported by generic scalar child lowering');
-    // Pick.unproductive semantics
+  test('option-map choose is an ARM MERGE; the scalar CASE is its specialization', () => {
+    // The CASE projector owns the all-scalar-with-Pick.none form (one CTE, no per-arm gating) —
+    // asserted just above. Everything else DECLINES to the generic arm-merge route, which gates
+    // the parent per option (first match wins) and routes the arms to the ordinary merges.
+    //
+    // No Pick.none: TinkerPop passes unmatched inputs through as the ELEMENT, so the result is
+    // genuinely mixed scalar/element → the variant merge, not a deferral.
+    const passthrough = read('g.V().choose(__.out().count()).option(1, __.values("name")).option(2, __.values("age"))');
+    expect(passthrough.shape).toMatchObject({ kind: 'variant', node: true });
+    expect(passthrough.sql).toContain('NOT COALESCE'); // the unmatched (element) arm's gate
+    // An ELEMENT option body is an arm, not a CASE branch → the element merge.
+    expect(read('g.V().choose(T.label).option("person", __.out("knows")).option(Pick.none, __.identity()).values("name")').shape.kind)
+      .toBe('value');
+    // A discard() body drops its rows, so it contributes no arm at all — leaving a homogeneous
+    // scalar merge rather than a mixed one.
+    expect(read('g.V().choose(__.out().count()).option(1, __.values("name")).option(Pick.none, __.discard())').shape.kind)
+      .toBe('value');
+    // ---- still fail-closed ----
+    // Pick.unproductive has its own semantics; both routes decline, so the dispatch throws.
     expect(() => compile('g.V().choose(__.values("age")).option(P.gt(30), __.constant("x")).option(Pick.unproductive, __.constant("u")).option(Pick.none, __.constant("z"))', {}))
-      .toThrow('Pick.unproductive');
+      .toThrow('choose().option() not yet supported by generic lowering');
   });
 });

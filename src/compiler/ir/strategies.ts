@@ -772,3 +772,128 @@ export function foldChooseOptions(steps: PStep[]): PStep[] {
   }
   return out;
 }
+
+// ---------- WhereEndStep: a label on a where()-body's last step is a CONSTRAINT ----------
+
+/** PURE. The string labels an `as()` step binds (`as('a','b')` binds both). */
+const asLabelsOf = (s: Step): string[] =>
+  s.name === 'as' ? (s.args ?? []).filter((a: any): a is string => typeof a === 'string') : [];
+
+/** The connective hosts TinkerPop's `WhereTraversalStep.configureStartAndEndSteps` recurses
+ *  THROUGH when locating a where()-body's start and end: a ConnectiveStep (`and`/`or`) or a
+ *  `not`. Their children are each configured in turn, so `where(__.and(__.as('a').out().as('b'),
+ *  …))` gives every branch its own start/end treatment. Nothing else recurses — an ordinary
+ *  nested body inside the where() is a traversal in its own right, and reaches this rewrite as
+ *  its OWN where() host rather than as part of this one. */
+const WHERE_CONNECTIVES = new Set(['and', 'or', 'not']);
+
+/**
+ * TinkerPop routes `where(traversal)` by VARIABLE LOCATION (`GraphTraversal.where` →
+ * `TraversalHelper.getVariableLocations`): a label on the body's FIRST step is a `WhereStartStep`
+ * (re-root the predicate on what the label holds) and a label on its LAST step is a
+ * `WhereEndStep` — an equality CONSTRAINT that the object reached must BE what the label already
+ * holds. Only a label in the MIDDLE is an ordinary bind.
+ *
+ * So `where(__.as("a").out("knows").as("b"))` asks "does a know b", NOT "does a know somebody",
+ * and reading that trailing `as()` as a bind silently answers the weaker question. This rewrites
+ * the end label into a form both lowerings already implement — `__.X.as('b')` → `__.X.where(
+ * P.eq('b'))`, filter.ts's alias-compare — rather than teaching either one a new constraint.
+ * Doing it as a Pass is what keeps the inline fast path and the materialized child-existence gate
+ * answering identically: neither ever sees the end-label shape.
+ *
+ * SCOPED to a label bound earlier in the ENCLOSING chain — TinkerPop's own notion of a scope key,
+ * and syntactic, so a Pass can see it. A label bound nowhere is left alone: TinkerPop errors on it
+ * (the path lookup fails), while we keep the project-wide drop-not-throw reading of an unbound
+ * label rather than introducing a new throw here.
+ *
+ * The START half rides along for the same reason — see rewriteStartLabel.
+ */
+function rewriteWhereVariables(body: Step[], bound: ReadonlySet<string>, params: Record<string, any>): Step[] {
+  if (!body.length) return body;
+  const last = body[body.length - 1];
+  // Recurse THROUGH a connective: each branch carries its own start/end, exactly as upstream's
+  // configureStartAndEndSteps walks the ConnectiveStep/NotStep children.
+  if (WHERE_CONNECTIVES.has(last.name) && (last.args ?? []).some(isNested)) {
+    const rebuilt = { ...last, args: last.args.map((a: any) => (isNested(a)
+      ? nestedArg(rewriteWhereVariables(stepChain(a.nested, params), bound, params))
+      : a)) };
+    return [...body.slice(0, -1), rebuilt];
+  }
+  body = rewriteStartLabel(body, bound);
+  return rewriteEndLabel(body, bound);
+}
+
+/** START: a lone `as('a')` on the body's FIRST step re-roots the predicate on what `a` holds
+ *  (`StartStep.isVariableStartStep`, which requires exactly one label). `select('a')` IS that
+ *  re-root and BOTH lowerings already implement it — the inline compiler re-roots its ScalarCtx,
+ *  and the generic gate crosses it through the engine's one element-body fold. Rewriting to it
+ *  here is what keeps the two agreeing; before, only the inline path re-rooted and the generic
+ *  gate read the leading `as()` as a bind, so the same traversal answered two different things
+ *  depending on a fast-path flag. */
+function rewriteStartLabel(body: Step[], bound: ReadonlySet<string>): Step[] {
+  const [head] = body;
+  if (body.length < 2 || head.name !== 'as') return body;
+  const labels = asLabelsOf(head);
+  if (labels.length !== 1) return body;
+  // A start variable the enclosing chain never bound is the one case TinkerPop hard-errors on
+  // (WhereStartStep's path lookup fails), and it is the ONLY place this rule throws. It has to:
+  // the re-root is now expressed solely as `select(label)`, so leaving an unbound `as()` here
+  // would silently degrade the scope variable into a bind — the same class of wrong answer the
+  // end-label rule exists to prevent, and previously it only threw when the fast path happened
+  // to be on.
+  if (!bound.has(labels[0]))
+    throw new Error(`where(__.as("${labels[0]}")): no such label — as("${labels[0]}") was not seen`);
+  return [{ ...head, name: 'select' }, ...body.slice(1)];
+}
+
+/** END: see rewriteWhereVariables. */
+function rewriteEndLabel(body: Step[], bound: ReadonlySet<string>): Step[] {
+  const last = body[body.length - 1];
+  const labels = asLabelsOf(last).filter((l) => bound.has(l));
+  if (!labels.length) return body;
+  // The constraint is one `where(P.eq(label))` per end label (`as('a','b')` on the last step
+  // constrains BOTH). Any label the enclosing chain never bound stays a bind: drop only the ones
+  // consumed, and keep the as() itself when some remain.
+  const rest = asLabelsOf(last).filter((l) => !bound.has(l));
+  const head = rest.length ? [...body.slice(0, -1), { ...last, args: rest }] : body.slice(0, -1);
+  if (!head.length) return body; // nothing to constrain against — leave the bind alone
+  return [...head, ...labels.map((l) => synth('where', [{ op: 'eq', values: [l] }], last.ctx))];
+}
+
+/** Apply the end-label rewrite to every `where(traversal)` host in the tree, threading the labels
+ *  bound BEFORE each host. Walks left to right so an `as()` types only the where()s that follow
+ *  it, and descends into every nested body with the labels visible where that body sits — so the
+ *  rule holds at any nesting depth, not just on the root chain. */
+export function rewriteWhereEndLabels(steps: PStep[], params: Record<string, any>): PStep[] {
+  // IDENTITY-PRESERVING: an arg is rebuilt ONLY when the rewrite actually changed something below
+  // it. `nestedArg` swaps a raw parse tree for a Step[], which every ordinary consumer accepts
+  // (stepChain is idempotent on a Step[]) — but call()'s param path serializes a nested traversal
+  // back to canonical Gremlin and needs what it was handed. Rebuilding unconditionally imposes a
+  // whole-tree side effect for a rewrite that fires on almost nothing.
+  const walk = (chain: Step[], outer: ReadonlySet<string>): Step[] | null => {
+    const bound = new Set(outer);
+    let chainChanged = false;
+    const out = chain.map((s) => {
+      const isWhereHost = s.name === 'where';
+      let stepChanged = false;
+      const args = (s.args ?? []).map((a: any) => {
+        if (!isNested(a)) return a;
+        const body = stepChain(a.nested, params);
+        // The variable-location rewrite first (it reads the labels visible at the HOST), then the
+        // ordinary descent, so a nested where() inside the rewritten body is still visited.
+        const scoped = isWhereHost ? rewriteWhereVariables(body, bound, params) : body;
+        const walked = walk(scoped, bound);
+        if (scoped === body && walked === null) return a;
+        stepChanged = true;
+        return nestedArg(walked ?? scoped);
+      });
+      // …then this step's own binds become visible to everything after it.
+      for (const l of asLabelsOf(s)) bound.add(l);
+      if (!stepChanged) return s;
+      chainChanged = true;
+      return { ...s, args };
+    });
+    return chainChanged ? out : null;
+  };
+  return (walk(steps, new Set()) ?? steps) as PStep[];
+}

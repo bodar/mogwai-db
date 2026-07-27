@@ -366,23 +366,63 @@ test('as()/select(label) compose inside a child body, at any depth', () => {
   expect(inlined('g.V().where(__.out().select("nope")).values("name")', true)).toEqual([]);
 });
 
-test('a label on the LAST step of a filter body is an end constraint, not a bind', () => {
+test("a where() body's START and END labels are scope variables, not binds", () => {
   const store = seededStore();
-  // TinkerPop routes where(traversal) by variable location: a label on the first step is a
-  // WhereStartStep (re-root), one on the LAST step is a WhereEndStep — the object reached must
-  // BE the one the label already holds. So `where(__.as("a").out("knows").as("b"))` asks "does a
-  // know b", not "does a know somebody". We do not implement the end constraint, and the inliner
-  // must not quietly answer the weaker question: marko→lop is the witness (marko knows vadas and
-  // josh, but not lop), and it must not appear under either setting.
-  const pairs = (on: boolean) => runWith(store,
-    'g.V().as("a").out().as("b").where(__.as("a").out("knows").as("b")).select("a","b").by("name")',
+  // TinkerPop routes where(traversal) by variable location: a label on the FIRST step is a
+  // WhereStartStep (re-root on what it holds), one on the LAST step is a WhereEndStep (the object
+  // reached must BE what it holds). So `where(__.as("a").out("knows").as("b"))` asks "does a know
+  // b", not "does a know somebody" — marko→lop is the witness, since marko knows vadas and josh
+  // but not lop. The rewriteWhereEndLabels Pass canonicalizes both locations BEFORE lowering, so
+  // this holds under either fast-path setting rather than at one of them.
+  const pairs = (query: string, on: boolean) => runWith(store, query,
     { fastPaths: { predicateInlining: on } }).map((r: any) => `${r.e0_v}->${r.e1_v}`).sort();
-  expect(pairs(true)).not.toContain('marko->lop');
-  expect(pairs(true)).toEqual(pairs(false));
+  const q = 'g.V().as("a").out().as("b").where(__.as("a").out("knows").as("b")).select("a","b").by("name")';
+  expect(pairs(q, true)).toEqual(['marko->josh', 'marko->vadas']);
+  expect(pairs(q, true)).toEqual(pairs(q, false));
+
+  // The Pass recurses through and()/or()/not() exactly as TinkerPop's configureStartAndEndSteps
+  // does, so every branch gets its own start/end treatment — this is the shape L3 pins.
+  const conj = 'g.V().as("a").out().as("b").where(__.and(__.as("a").out("knows").as("b"),'
+    + '__.or(__.as("b").out("created").has("name","ripple"),__.as("b").in("knows").count().is(P.not(P.eq(0))))))'
+    + '.select("a","b").by("name")';
+  expect(pairs(conj, true)).toEqual(['marko->josh', 'marko->vadas']);
+  expect(pairs(conj, true)).toEqual(pairs(conj, false));
+
+  // …and at DEPTH: the Pass threads the labels visible where each where() SITS, so one inside a
+  // child body resolves against the outer binds rather than being skipped.
+  for (const host of ['map', 'local']) {
+    const deep = `g.V().as("a").out().as("b").${host}(__.where(__.as("a").out("knows").as("b"))).count()`;
+    expect(runWith(store, deep, { fastPaths: { predicateInlining: true } }).map((r: any) => r.v)).toEqual([2]);
+    expect(runWith(store, deep, { fastPaths: { predicateInlining: false } }).map((r: any) => r.v)).toEqual([2]);
+  }
+
   // A label in the MIDDLE has neither location and IS an ordinary bind, confined to the filter
-  // body — that one the inliner does claim (asserted equivalent in the block above).
+  // body. So is an END label the enclosing chain never bound — TinkerPop errors on that one (the
+  // path lookup fails); we keep the project-wide drop-not-throw reading rather than add a throw,
+  // so the Pass leaves it alone and it stays the bind it reads as.
   expect(run(store, 'g.V().where(__.out("created").as("z").has("name","lop")).values("name")')
     .map((r: any) => r.v).sort()).toEqual(['josh', 'marko', 'peter']);
+  expect(run(store, 'g.V().where(__.out("created").as("a")).values("name")')
+    .map((r: any) => r.v).sort()).toEqual(['josh', 'marko', 'peter']);
+  expect(run(store, 'g.V().where(__.out("created").as("a")).select("a")')).toEqual([]);
+
+  // where() re-roots on its start variable, so this asks "does a have an out-knows" — true for
+  // all three of marko's pairs — rather than asking about the current traverser.
+  expect(run(store, 'g.V().as("a").out().as("b").where(__.as("a").out("knows")).count()')
+    .map((r: any) => r.v)).toEqual([3]);
+
+  // filter() is NOT where(): TinkerPop routes only where() by variable location, so a leading
+  // as() in a filter() body is an ordinary bind and must NOT re-root. Only the inline path used
+  // to re-root here, which made the same filter() answer two different things depending on a
+  // fast-path flag; assert the agreement rather than the value, because the value itself is a
+  // separate known gap (we drop these rows; TinkerPop keeps josh's) tracked in outstanding-work.
+  for (const q of [
+    'g.V().as("a").out().as("b").filter(__.as("a").out("knows")).count()',
+    'g.V().as("a").out().as("b").filter(__.as("a").out("knows").as("b")).count()',
+  ]) {
+    expect(runWith(store, q, { fastPaths: { predicateInlining: true } }))
+      .toEqual(runWith(store, q, { fastPaths: { predicateInlining: false } }));
+  }
 });
 
 test('a child body whose local() is not element-shaped defers cleanly (classify/emit lockstep)', () => {
@@ -444,4 +484,38 @@ test('a union() SOURCE carries as(), the path, emission order and the sack throu
   expect(run(store, 'g.withSack(1).union(__.V(1), __.V(2)).sack()').map((r: any) => r.v)).toEqual([1, 1]);
 });
 
+});
+
+test('choose().option() RESULTS across the arm shapes (the merge and the CASE agree)', () => {
+  const store = seededStore();
+  const names = (q: string) => (run(store, q) as any[]).map((r) => r.v).sort();
+
+  // Which lowering runs is a property of the ARMS — a moving arm fans out and takes the gated
+  // arm merge, all-scalar arms stay on the CASE. The L2 snapshots pin the SQL each produces;
+  // these pin that the two agree on the ANSWER, which a snapshot cannot.
+  // marko knows josh+vadas; the other people know nobody; software falls to Pick.none identity.
+  for (const choice of ['__.label()', 'T.label']) {
+    expect(names(`g.V().choose(${choice}).option("person",__.out("knows")).option(Pick.none,__.identity()).values("name")`))
+      .toEqual(['josh', 'lop', 'ripple', 'vadas']);
+  }
+  // discard() is the empty arm at BOTH lowerings: the merge builds no arm for it, the CASE marks
+  // it never-productive. `present` is a 1-or-NULL marker tested with `is not null`, so encoding
+  // that as 0 reads as productive and leaks one null row per discarded traverser.
+  expect(names('g.V().choose(__.label()).option("person",__.out("knows")).option(Pick.none,__.discard()).values("name")'))
+    .toEqual(['josh', 'vadas']);
+  expect(names('g.V().choose(__.values("age")).option(between(26,30),__.values("name")).option(Pick.none,__.discard())'))
+    .toEqual(['marko', 'vadas']);
+  // marko has 3 out-edges → option(3) → age 29; josh has 2 → option(2) → name; the rest discard.
+  expect(names('g.V().choose(__.out().count()).option(2,__.values("name")).option(3,__.values("age")).option(Pick.none,__.discard())'))
+    .toEqual([29, 'josh']);
+  // All-scalar arms keep the CASE.
+  expect(names('g.V().hasLabel("person").choose(__.values("age")).option(between(26,30),__.constant("young")).option(Pick.none,__.constant("old"))'))
+    .toEqual(['old', 'old', 'young', 'young']);
+
+  // No Pick.none: TinkerPop passes an unmatched traverser through as the ELEMENT itself, so the
+  // result is genuinely mixed scalar/element — the variant merge. The two matched vertices come
+  // back as values, the four unmatched as vertices.
+  const mixed = run(store, 'g.V().choose(__.out().count()).option(2,__.values("name")).option(3,__.values("age"))') as any[];
+  expect(mixed.filter((r) => r.v !== null).map((r) => r.v).sort()).toEqual([29, 'josh']);
+  expect(mixed.filter((r) => r.id !== null).map((r) => r.label)).toEqual(['person', 'person', 'software', 'software']);
 });
