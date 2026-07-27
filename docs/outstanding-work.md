@@ -146,11 +146,32 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    → [carried-schema-and-projection-reentry](./2026-07-14-carried-schema-and-projection-reentry-plan.md),
    [group-value-generic-seam](./2026-07-18-group-value-generic-seam-plan.md)
 
-3. **Alias columns through `repeat()`.** Teach the recursive-CTE term to carry `as()`/`select(label)`
-   columns. (The sibling capability — *foldable* carried state via `sack()` — ✅ landed 2026-07-24;
-   its residuals are Low fail-closed tails in P3.) **Unblocks:** labels surviving a recursive walk.
-   Start: `steps/prefix/branch.ts` (recursive term). **Medium.**
-   → [deep-seam-migration-roadmap](./2026-07-18-deep-seam-migration-roadmap.md) #5,
+3. **The `repeat()` recursive term is a private movement/filter mini-compiler — retire it onto the
+   seam.** (Widened 2026-07-27 from "alias columns through `repeat()`", which is one symptom of it;
+   measured in [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md), where it ranks #1.)
+   `expandRepeatBody` + `moveDirs`/`dirCombos` (`steps/prefix/branch.ts:505-801`, ~300 lines) is the
+   compiler's largest second implementation and the only one duplicating *movement* — its own
+   direction table, edge-alias scheme and `has()` handling, none of it reachable from
+   `lowerElementSteps`. **Measured: 43/135 `repeat()` corpus traversals compile.** The body admits 4
+   step kinds against the seam's ~25 (`hasLabel`/`hasId`/`where`/`not`/`filter`/`dedup`/`limit`/
+   `order`/`union`/`local`/`as` all throw), AND `repeat` is excluded from `ELEMENT_CHILD_STEPS`, so
+   the walk composes at exactly one nested position (a `union` arm) — walled in both directions.
+   It also owns the ONE site where the inline predicate compiler has no generic fallback:
+   `walkPredicate` throws for an `until()`/`emit()` body it cannot inline.
+   **The constraint is real and verified — SQLite has no `LATERAL`**, so the `InlineQuery`
+   nested-derived rendering CANNOT drive a fan-out in the recursive term's FROM. Two routes, and the
+   audit verifies the second executes correctly: (a) a third rendering mode — flat join accumulation;
+   (b) no new mode at all — compile the body ONCE through the ordinary seam as a
+   `(from_id, to_id)` relation and have the recursive term join it (a recursive term may legally
+   reference a non-recursive CTE), keeping today's flat expansion as the recognized fast path and
+   falling back generically. **Unblocks:** the body vocabulary, labels through the walk, `repeat()`
+   at depth, the `until()`/`emit()` ceiling, and most P3 recursive-path tails. **Medium/Large.**
+   *Also here, cheap and independent:* the named-loop form `repeat("a", …)`/`loops("a")` CRASHES
+   (`undefined is not an object (evaluating 'node.constructor')`, 4-5 corpus cases) rather than
+   failing closed. (The sibling capability — *foldable* carried state via `sack()` — ✅ landed
+   2026-07-24; its residuals are Low fail-closed tails in P3.)
+   → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md),
+   [deep-seam-migration-roadmap](./2026-07-18-deep-seam-migration-roadmap.md) #5,
    [path-history-substrate](./2026-07-18-path-history-substrate.md),
    [foldable-carried-column](./2026-07-24-foldable-carried-column-plan.md)
 
@@ -325,6 +346,15 @@ step impls are matrix-fill, lower. Impact: **High** (correctness / whole-family 
    `__.not(__.identity())`). Correlation needs an element ScalarCtx, so a scalar-parent `is()`
    still defers. *Low.*
 
+7d. **`match()`: lower each pattern through the FULL loop, not `lowerElementSteps`.** (Found
+   2026-07-27, [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md) #3 — the sharper
+   framing of item 7's "small nameable gaps".) The pattern BODY is already generic (`union` inside a
+   pattern works); what is hand-rolled is the binding table around it, which holds node rowids only —
+   so a scalar (`values`), reduced (`count`) or edge-typed end var defers. Same move as 4b: lower to
+   a Stream of any shape, bind on its `kind`. Doing 4b and this together is cheaper than either
+   alone. Note **23 of match's 49 corpus failures are the MATCH-STRING form (7b), not this.**
+   Real residual here ≈ 26. **Medium.**
+
 8. **Graph-algorithms layer (new cluster).** Algorithms as `call()` services + OLAP step names
    (`pageRank`/`connectedComponent`/`peerPressure`/`shortestPath`) as desugar Passes. Nothing built.
    Build-first: PageRank as the proof-of-concept. Absorbs the old P3 `shortestPath()` line. Carries
@@ -461,7 +491,20 @@ All → [phased-roadmap](./2026-07-11-phased-roadmap-plan.md) unless noted.
 
 - **Finish deleting `correlatedExists`/`correlatedReduce`** (`steps/prefix/predicate.ts`) — the
   correlated-child refactor largely landed; these inline fast-paths remain (the "no second movement
-  impl" law). → [correlated-child-rendering](./2026-07-17-correlated-child-rendering-plan.md)
+  impl" law). **Re-measured 2026-07-27: high duplication (~262 lines, a parallel `has`/`hasLabel`/
+  `hasId`/`values`/`label`/`loops`/`not`/`and`/`or` vocabulary) but near-ZERO functional cost —
+  every probed shape falls through cleanly to the generic child-existence gate.** Its one
+  load-bearing use is `until()`/`emit()`, which has no fallback, so **delete it when item 3 lands,
+  not before.** One genuine leak worth a one-line fix now: `tryInlinePredicate` only swallows
+  messages starting with `where`/`filter`, so `empty where()/filter() traversal` escapes as a hard
+  error — `g.V().filter(__.is(0))` crashes instead of routing generically.
+  → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md) #6,
+  [correlated-child-rendering](./2026-07-17-correlated-child-rendering-plan.md)
+- **Duplicate property→owner projection in `services/catalog/search.ts:73`** — `searchProperties`
+  hand-builds the payload join its own comment says is "mirroring `lowerProperties`"
+  (`tail/group.ts:648`). Zero deferrals; a schema change lands twice. The contrast worth keeping:
+  `degree-centrality.ts` calls `scopedMovementCount` and gets `where(call(…).is(n))` at arbitrary
+  depth for free. → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md) #8
 - **Fold the third scalar-child projector residue** (`compileScalarChildRows`, `steps/tail/child.ts`)
   onto generic `PROJECTORS`. → [compiler-consolidation](./2026-07-16-compiler-consolidation-plan.md) §1
 - **Node/edge property-SQL duplication** (`plan/plan.ts` `nodeProp*`/`edgeProp*` pairs) — one
@@ -549,7 +592,8 @@ All → [phased-roadmap](./2026-07-11-phased-roadmap-plan.md) unless noted.
   Route: fix it in our TinkerPop fork's harness and offer it upstream (debt item above), not by
   changing our serializer. ~3 scenarios, net L3 gain likely ≤0 if "fixed" our side.
 
-Sources: [lazyrecords-cutover](./archive/2026-07-11-lazyrecords-cutover-plan.md),
+Sources: [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md),
+[lazyrecords-cutover](./archive/2026-07-11-lazyrecords-cutover-plan.md),
 [phased-roadmap](./2026-07-11-phased-roadmap-plan.md),
 [path-tracking-prior-art](./2026-07-12-path-tracking-prior-art.md),
 [seam-reuse-audit](./2026-07-13-seam-reuse-audit.md),
