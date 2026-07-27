@@ -5,7 +5,7 @@ import { edges, labels, nodes, vertexProperties, edgeProperties } from '../../..
 import { advance, carriedWith, carryFrag, carryFragMint, carriedCols, partitionOver, prevRel, withCarried, type Carried, type ElementStream } from '../context/context.ts';
 import { aliasId } from '../context/alias.ts';
 import { asOnStream, selectOneFromAlias } from './labelselect.ts';
-import { carryOf, toListStream, toMapStream, toScalarStream, toVariantStream, PROPERTY_PAYLOAD, type ListStream, type MapStream, type PropertyStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
+import { carryOf, streamPayloadCols, toListStream, toMapStream, toScalarStream, toVariantStream, PROPERTY_PAYLOAD, type ListStream, type MapStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { lowerScalarRows, unionScalarStreams, SCALAR_TRANSFORMS } from './scalar.ts';
 import { lowerReSource } from '../resource.ts';
@@ -201,53 +201,56 @@ function tryCompileCountValueRows(
   return { stream: toScalarStream({ ...carryOf(pushed.seed), carried: outCarried }, rel, 'long', { result: 'value' }), frame: pushed.frame };
 }
 
-// ---------- the shape-agnostic cardinality rejoin ----------
+// ---------- the cardinality rejoin: ONE operation, every shape ----------
 //
-// Restoring PARENT cardinality from child rows is one operation, and it does not depend on the
-// child's shape — only on which PAYLOAD columns to re-project and how to rebuild the stream. `all`
-// keeps every child row; `first` ranks per origin by the child's encounter and takes rn=1. The
-// scalar and map rejoins are the SAME window over different payloads, so they share this rather
-// than existing as two copies (a map is a one-column `map` blob in the core, exactly as a scalar is
-// a one-column `v` — see stream.ts streamColumns).
+// Restoring PARENT cardinality from child rows does not depend on the child's shape. `all` keeps
+// every child row; `first` ranks per origin by the child's encounter and takes rn=1 — the same
+// window either way. What used to differ per shape was only "which columns are the payload" and
+// "how do I rebuild the stream", and neither needs to be written by hand:
+//   • `streamPayloadCols` (stream.ts) is already the single authority on a kind's own columns.
+//   • a stream IS `{kind, rel, ...metadata}`, so re-homing it on a new relation under the PARENT's
+//     carry is a spread — the metadata (type/result, keyOf/valOf, elem, of, fields, layout) rides
+//     along untouched, which is exactly what a re-projection must preserve.
+// So there is one rejoin, and adding a shape to the child seam adds nothing here.
 
-/** Re-project child rows at parent cardinality. `payload(r)` names the shape's own columns off the
- *  child relation `r`; `cols` declares them in the same order; `rebuild` mints the outgoing stream
- *  from the parent's Carry + the re-projected relation. */
-export function applyChildCardinality<S>(
+/** Re-project child rows at parent cardinality, preserving the child's shape. */
+export function applyChildCardinality<S extends Exclude<Stream, { kind: 'result' }>>(
   parent: ChildParent,
   pushed: ReturnType<typeof pushChildScope>,
-  lowered: { rel: Relation; carried: Carried },
+  lowered: S,
   use: ChildUse,
-  shape: {
-    cols: readonly string[];
-    payload: (r: Relation) => Expression;
-    rebuild: (carry: ReturnType<typeof carryOf>, rel: Relation) => S;
-  },
 ): { stream: S; frame: ChildFrame } {
-  const r = lowered.rel.as('r');
+  const payload = streamPayloadCols(lowered);
   const parentCols = carriedCols(parent.carried);
-  if (use === 'all') {
-    const rel = derived(
-      q`SELECT ${shape.payload(r)}${carryFrag(parent.carried, r)} FROM ${r}`,
-      [...shape.cols, ...parentCols], 'all_rows');
-    return { stream: shape.rebuild(carryOf(parent), rel), frame: pushed.frame };
-  }
+  const cols = [...payload, ...parentCols];
+  const project = (r: Relation) => list(payload.map((c) => q`${r.c[c]} AS ${c}`), ', ');
+  const rehome = (rel: Relation): S => ({ ...lowered, ...carryOf(parent), rel });
+
+  const r = lowered.rel.as('r');
+  if (use === 'all')
+    return {
+      stream: rehome(derived(q`SELECT ${project(r)}${carryFrag(parent.carried, r)} FROM ${r}`, cols, 'all_rows')),
+      frame: pushed.frame,
+    };
   if (!lowered.carried.encounter) throw new Error('child first cardinality requires explicit encounter order');
-  const enc = lowered.carried.encounter;
   const first = derived(
-    q`SELECT ${shape.payload(r)}${carryFrag(parent.carried, r)}, ROW_NUMBER() OVER (PARTITION BY ${r.c[pushed.frame.ordinal]} ORDER BY ${r.c[enc]}) AS rn FROM ${r}`,
-    [...shape.cols, ...parentCols, 'rn'], 'f');
-  const rel = derived(
-    q`SELECT ${shape.payload(first)}${carryFrag(parent.carried, first)} FROM ${first} WHERE ${first.c.rn}=1`,
-    [...shape.cols, ...parentCols], 'first_row');
-  return { stream: shape.rebuild(carryOf(parent), rel), frame: pushed.frame };
+    q`SELECT ${project(r)}${carryFrag(parent.carried, r)}, ROW_NUMBER() OVER (PARTITION BY ${r.c[pushed.frame.ordinal]} ORDER BY ${r.c[lowered.carried.encounter]}) AS rn FROM ${r}`,
+    [...cols, 'rn'], 'f');
+  return {
+    stream: rehome(derived(q`SELECT ${project(first)}${carryFrag(parent.carried, first)} FROM ${first} WHERE ${first.c.rn}=1`, cols, 'first_row')),
+    frame: pushed.frame,
+  };
 }
 
 /** Compile a scalar-producing child as rows, so productivity is represented by row
  * existence rather than SQL NULL. Movement/filter uses the ordinary element fold;
  * projection adds an explicit provider encounter key; the shared scalar pipeline
  * applies transforms and origin-partitioned row operators; only then does the
- * consumer apply its `first` or `all` cardinality policy. */
+ * consumer apply its `first` or `all` cardinality policy.
+ *
+ * The cardinality step itself is NOT scalar-specific — it is `applyChildCardinality`, shared with
+ * every other shape. This wrapper exists only for `retainChildScope`, which is a scalar-consumer
+ * concern (a caller that keeps the child frame to join more columns onto it later). */
 function applyScalarChildCardinality(
   parent: ChildParent,
   pushed: ReturnType<typeof pushChildScope>,
@@ -256,32 +259,7 @@ function applyScalarChildCardinality(
   retainChildScope: boolean,
 ): { stream: ScalarStream; frame: ChildFrame } {
   if (retainChildScope) return { stream: lowered, frame: pushed.frame };
-  const r = lowered.rel.as('r');
-  const parentCols = carriedCols(parent.carried);
-  // Carry the child's per-row type column through the re-projection so a child body over a
-  // stored property (out().values('when')) keeps each value's exact type instead of
-  // collapsing to its storage class at the child boundary.
-  const perRow = perRowColumnOf(lowered.type);
-  const typeCol = lowered.result === 'number' ? q`, ${r.c.vt} AS vt` : perRow ? q`, ${r.c[perRow]} AS ${perRow}` : empty;
-  const resultCols = lowered.result === 'number' ? ['v', 'vt'] : ['v', ...perRowCols(lowered.type)];
-  if (use === 'all') {
-    const rel = derived(q`SELECT ${r.c.v} AS v${typeCol}${carryFrag(parent.carried, r)} FROM ${r}`, [...resultCols, ...parentCols], 'all_rows');
-    return { stream: toScalarStream(carryOf(parent), rel, undefined, { type: lowered.type, result: lowered.result }), frame: pushed.frame };
-  }
-  if (!lowered.carried.encounter) throw new Error('child first cardinality requires explicit encounter order');
-  const loweredEnc = lowered.carried.encounter;
-  const first = derived(
-    q`SELECT ${r.c.v} AS v${typeCol}${carryFrag(parent.carried, r)}, ROW_NUMBER() OVER (PARTITION BY ${r.c[pushed.frame.ordinal]} ORDER BY ${r.c[loweredEnc]}) AS rn FROM ${r}`,
-    [...resultCols, ...parentCols, 'rn'],
-    'f',
-  );
-  const firstTypeCol = lowered.result === 'number' ? q`, ${first.c.vt} AS vt` : perRow ? q`, ${first.c[perRow]} AS ${perRow}` : empty;
-  const rel = derived(
-    q`SELECT ${first.c.v} AS v${firstTypeCol}${carryFrag(parent.carried, first)} FROM ${first} WHERE ${first.c.rn}=1`,
-    [...resultCols, ...parentCols],
-    'first_row',
-  );
-  return { stream: toScalarStream(carryOf(parent), rel, undefined, { type: lowered.type, result: lowered.result }), frame: pushed.frame };
+  return applyChildCardinality(parent, pushed, lowered, use);
 }
 
 /** Fold an ELEMENT-preserving child body — the engine's ONE whole-body fold, which crosses a

@@ -523,12 +523,13 @@ export function lowerValueMap(st: ElementStream, proj: PStep): MapStream {
   // The carried columns the blob rides out with, declared once and used for both CTEs so each
   // relation's declared schema equals its physical projection.
   //
-  // BULK is dropped at the ROOT (the element source's bulk is consumed here — one blob per element)
-  // but KEPT inside a child scope, where the parent's rejoin re-projects the parent's carried
-  // columns off THIS relation and so needs every one of them present. Dropping it there produced a
-  // dangling `SELECT r.map AS map,  FROM` — the rejoin naming a column the child had discarded.
-  const inChild = st.carried.origins.length > 0;
-  const outCarried = inChild ? st.carried : carriedWith(st.carried, { bulk: null });
+  // The element's carried columns ride through UNCHANGED — no position-dependent behaviour here.
+  // An earlier cut dropped `bulk` (one blob per element consumes it) and then needed an "unless we
+  // are in a child" exception, because the parent's rejoin re-projects the parent's carried columns
+  // off THIS relation and so needs every one present. Keeping it is simpler AND more correct: a
+  // bulked element contributes its multiplicity to any downstream reducer, and the terminal framing
+  // selects `map` alone, so the extra column costs nothing at the root.
+  const outCarried = st.carried;
   const outCols = carriedCols(outCarried);
   // One WHOLE-MAP blob per element (mapstream-blob-model): fold its {key:[values]} props into an
   // ordered [[keyNode, valueList], …] pairs array. The key is a string → a self-describing {t,v}
@@ -612,11 +613,7 @@ export function tryCompileMapChild(
   let lowered: MapStream;
   try { lowered = lowerValueMap(withEnc, proj); }
   catch { return null; } // the builder's own carried/token deferrals stay authoritative
-  return applyChildCardinality(parent, pushed, lowered, use, {
-    cols: ['map'],
-    payload: (r) => q`${r.c.map} AS map`,
-    rebuild: (carry, rel) => toMapStream(carry, rel, lowered.keyOf, lowered.valOf),
-  }).stream;
+  return applyChildCardinality(parent, pushed, lowered, use).stream;
 }
 
 /** groupCount() over a SCALAR value stream — a barrier grouping by the value itself:

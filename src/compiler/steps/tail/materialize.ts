@@ -161,19 +161,13 @@ export function materializeMapRoot(stream: MapStream): Compiled {
   // already a frameable [[{t,v},{t,v}],…] tree; hand it straight to the map framer.
   if (stream.keyOf.kind === 'scalar' && stream.valOf.kind === 'scalar')
     return materializeRoot(stream.q, q`SELECT json(${c.c.map}) AS map FROM ${c}`, { kind: 'mapValue' });
-  // A LIST value side is what a valueMap-derived map carries (properties are multi-valued), and it
-  // became reachable here once a map body could be a CHILD (`local(__.valueMap())`) — a child map
-  // is terminal at the root by construction. The blob's value side is a BARE array on purpose: the
-  // re-entry consumers (select(Column.values)/unfold) feed the UNTYPED list substrate, so the
-  // contract stays theirs. Wrap it into a typed list NODE here instead, at the one point that
-  // frames — `frameTypedNode` recurses through {t:'list'} and infers a bare member from its
-  // storage class, which is exactly what the envelope would have encoded.
-  if (stream.keyOf.kind === 'scalar' && stream.valOf.kind === 'list') {
-    const typed = q`jsonb(COALESCE((SELECT json_group_array(
-        json_array(je.value -> '$[0]', json_object('t', 'list', 'v', je.value -> '$[1]')) ORDER BY je.key)
-      FROM json_each(json(${c.c.map})) je), json('[]')))`;
-    return materializeRoot(stream.q, q`SELECT json(${typed}) AS map FROM ${c}`, { kind: 'mapValue' });
-  }
+  // A LIST value side is what a valueMap-derived map carries (properties are multi-valued). It
+  // frames with NO conversion: the blob's value side is a naked array — the untyped list
+  // substrate's contract, which the re-entry consumers own — and the typed framer treats a bare
+  // array as a list of bare members, exactly as it treats a bare scalar as an inferred value.
+  // So there is ONE blob encoding, not two with a rebuild between them.
+  if (stream.keyOf.kind === 'scalar' && stream.valOf.kind === 'list')
+    return materializeRoot(stream.q, q`SELECT json(${c.c.map}) AS map FROM ${c}`, { kind: 'mapValue' });
   // An ELEMENT side still needs per-pair expansion — deferred, fails closed.
   throw new Error('a terminal map with an element key or value not yet supported');
 }

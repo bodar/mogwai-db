@@ -226,6 +226,12 @@ function frameTypedNode(node: ValueNode): Buffer {
   // barrier.ts foldMember). Infer from the JS value, which is exactly what the envelope
   // would have encoded. A node is always an OBJECT, so a primitive is unambiguous.
   if (typeof node !== 'object') return frameValue(node, undefined);
+  // A BARE ARRAY is a list whose members are themselves bare — the same principle as the bare
+  // member above, one level up: the producer omitted the {t:'list'} envelope because being an array
+  // already determines the type. This is what lets a map blob keep ONE encoding: a valueMap-derived
+  // map's value side is a naked array of property values (the untyped list substrate's contract),
+  // and it now frames without the blob being rebuilt into a typed tree first.
+  if (Array.isArray(node)) return listBuffer(node.map(frameTypedNode));
   if (node.t === 'list') return listBuffer((node.v as ValueNode[]).map(frameTypedNode));
   if (node.t === 'set') return setBuffer((node.v as ValueNode[]).map(frameTypedNode));
   if (node.t === 'map') return typedMapBuffer(node.v as [ValueNode, ValueNode][]);

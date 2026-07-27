@@ -316,7 +316,17 @@ export const recordResultColumns = (f: RecordField): string[] =>
  * may never claim a column that its Relation does not expose. */
 export function streamColumns(s: Stream): readonly string[] {
   if (s.kind === 'result') return [];
-  const payload = s.kind === 'elements' ? ['id']
+  return [...streamPayloadCols(s), ...carriedCols(s.carried)];
+}
+
+/** A stream's OWN columns — its shape payload, without the carried schema. Split out of
+ *  streamColumns because it is the one thing a shape-AGNOSTIC re-projection needs: anything that
+ *  wants to rebuild a stream over a new relation (the child seam's per-parent cardinality rejoin)
+ *  must name the payload to carry across, and this is the single authority for what that is per
+ *  kind. Keeping it here rather than letting each consumer hand-write a column list is what lets
+ *  ONE rejoin serve every shape. */
+export function streamPayloadCols(s: RelationalStream): readonly string[] {
+  return s.kind === 'elements' ? ['id']
     : s.kind === 'scalar' ? [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...perRowCols(s.type)]
     : s.kind === 'variant' ? ['vk', 'v', 'rid', ...(s.listOf ? ['list'] : [])]
     : s.kind === 'list' ? ['list']
@@ -327,7 +337,6 @@ export function streamColumns(s: Stream): readonly string[] {
     : s.kind === 'group' ? groupColumns(s)
     : s.kind === 'foreign' ? foreignPayload(s.elem)
     : pathColumns(s.layout);
-  return [...payload, ...carriedCols(s.carried)];
 }
 
 /** Development/test guard for the physical stream contract. Relation.cols is the

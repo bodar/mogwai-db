@@ -348,13 +348,15 @@ describe('a valueMap() child body', () => {
       .not.toEqual(await raw('g.V(1).out().values("name")'));
   });
 
-  test('the map blob keeps its typed shape (list values, typed keys)', () => {
+  test('there is ONE blob encoding: typed key, BARE value array', () => {
     const store = seededStore();
-    // The blob is [[{t:'string',v:key},[values]],…]; materialize wraps the value side as a typed
-    // {t:'list'} node at the ONE point that frames, leaving the re-entry consumers' bare contract
-    // (select(Column.values)/unfold feed the UNTYPED list substrate) untouched.
+    // The blob is [[{t:'string',v:key},[values]],…] — the value side a naked array, which is the
+    // untyped list substrate's contract that select(Column.values)/unfold own. It needs no rebuild
+    // to frame: the typed framer treats a bare ARRAY as a list of bare members, exactly as it
+    // treats a bare scalar as an inferred value. An earlier cut wrapped it into a typed
+    // {t:'list'} node at materialize time, which meant two encodings and a conversion.
     const rows = run(store, 'g.V(1).local(__.valueMap("name"))') as any[];
-    expect(JSON.parse(rows[0].map)).toEqual([[{ t: 'string', v: 'name' }, { t: 'list', v: ['marko'] }]]);
+    expect(JSON.parse(rows[0].map)).toEqual([[{ t: 'string', v: 'name' }, ['marko']]]);
   });
 
   test('the re-entry consumers still see the BARE value side (contract unchanged)', () => {
