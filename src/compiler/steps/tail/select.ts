@@ -10,8 +10,8 @@ import { carryOf, continueLowering, dispatchShapeTail, recordFieldColumns, toLis
 import { type Compiled } from '../../../sql/kernel/render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
 import { lowerGlobalCount } from './barrier.ts';
-import { pushChildScope, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
-import { byAt, childCtx, classifyBy, classifyElementChild, classifyListChild, classifyScalarChild, reuseCurrentFrame, ROOT_SCOPE } from './child-shape.ts';
+import { applyChildCardinality, lowerElementBody, mintChildEncounter, pushChildScope, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
+import { byAt, childCtx, childSteps, classifyBy, classifyElementChild, classifyListChild, classifyRecordChildRows, classifyScalarChild, reuseCurrentFrame, ROOT_SCOPE, type ChildParent, type ChildUse, type CompileScope } from './child-shape.ts';
 
 // ---------- select()/project() ----------
 
@@ -400,6 +400,33 @@ export function lowerRecordSelectProject(st: ElementStream, proj: PStep): Stream
   const relCols = [...fields.flatMap(recordFieldColumns), ...carriedCols(st.carried)];
   const rel = st.q.cte(q`SELECT ${list(cols, ', ')}${carryFrag(st.carried, p)} FROM ${p}${list(joins, '')}`, relCols);
   return toRecordStream(carryOf(st), rel, fields);
+}
+
+/** `<element movement/filter prefix>.project(k…)|select(k…)` as a child body → one record per
+ *  parent traverser. The third non-element child shape, and the cheapest: the record builder
+ *  already threaded its carried columns, so the classifier was the only gate, and the per-parent
+ *  cardinality rejoin is the shared shape-agnostic one. Null when the body is not that shape, so
+ *  the caller keeps its own deferral. */
+export function tryCompileRecordChild(
+  parent: ChildParent,
+  nested: any,
+  use: ChildUse = 'first',
+  scope: CompileScope = ROOT_SCOPE,
+): RecordStream | null {
+  if (!nested || parent.kind !== 'elements') return null;
+  const shape = classifyRecordChildRows(childSteps(nested, parent.params), childCtx(parent));
+  if (!shape) return null;
+  const pushed = pushChildScope(parent, scope);
+  const end = lowerElementBody(pushed.seed, shape.prefix);
+  if (!end) return null;
+  // `first` ranks per origin by an encounter; mint one when the prefix carries none (the same
+  // mint every other child provider makes).
+  const withEnc = end.carried.encounter ? end : mintChildEncounter(end);
+  let lowered: Stream;
+  try { lowered = lowerRecordSelectProject(withEnc, shape.proj); }
+  catch { return null; } // the builder's own deferrals stay authoritative
+  if (lowered.kind !== 'record') return null; // an unbound label → its own empty-stream answer
+  return applyChildCardinality(parent, pushed, lowered, use).stream;
 }
 
 /** Multi-label select(Pop, "a", "b", …) over a value-shaped stream (scalar/list/variant):

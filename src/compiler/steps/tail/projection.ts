@@ -12,7 +12,7 @@ import { tryLowerLocalAggregate, lowerScalarAggregate } from '../prefix/sideeffe
 import { PER_ROW, STATIC, UNKNOWN, staticTypeOf, type Shape } from '../../../sql/kernel/render.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
 import { lowerScalarFilter, lowerConstant, lowerScalarConstant, lowerScalarSack, lowerScalarSplit, collectionTypeOf, scalarCollectionRetype, scalarMapRetype } from './scalar.ts';
-import { compileSelectProject, lowerRecordSelectProject, lowerScalarProject, lowerSingleSelect } from './select.ts';
+import { compileSelectProject, tryCompileRecordChild, lowerRecordSelectProject, lowerScalarProject, lowerSingleSelect } from './select.ts';
 import { lowerPath } from './path.ts';
 import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerElementChoose, coalesce as lowerElementCoalesce, flatMap as lowerElementFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, tryLowerOptionMapBranch, union as lowerElementUnion } from '../prefix/branch.ts';
@@ -334,9 +334,12 @@ const tailMap: ShapeTailFn<ElementStream> = (st, step, steps, stop) => {
   if (element) return continueLowering(element, stop + 1);
   const list = tryLowerListChild(st, step);
   if (list) return continueLowering(list, stop + 1);
-  // map(__.valueMap()) — the body's FIRST map per parent (a map body is total, so first == the one).
+  // map(__.valueMap()) / map(__.project(…)) — the body's FIRST value per parent (both are total,
+  // so first == the one).
   const mapChild = tryCompileMapChild(st, step.args[0]?.nested, 'first');
   if (mapChild) return continueLowering(mapChild, stop + 1);
+  const recordChild = tryCompileRecordChild(st, step.args[0]?.nested, 'first');
+  if (recordChild) return continueLowering(recordChild, stop + 1);
   return continueLowering(lowerMapScalar(st, steps, stop), stop + 1);
 };
 
@@ -354,10 +357,13 @@ const tailLocal: ShapeTailFn<ElementStream> = (st, step, steps, stop) => {
   // branch — local emits every arm's rows per input (all-cardinality).
   const branchAllCard = tryCompileBranchChildAllCard(st, nested);
   if (branchAllCard) return continueLowering(branchAllCard, stop + 1);
-  // A MAP-shaped body (`local(__.valueMap())`) — one map per parent, so `all` cardinality is
-  // already one row each. The fourth child shape; see tryCompileMapChild (group.ts).
+  // The NON-ELEMENT child shapes — a map body (`local(__.valueMap())`) or a record body
+  // (`local(__.project("a").by("name"))`). Each is one row per parent, so `all` is already one
+  // each. Both go through the same classify + shared cardinality rejoin as their siblings.
   const mapChild = tryCompileMapChild(st, nested, 'all');
   if (mapChild) return continueLowering(mapChild, stop + 1);
+  const recordChild = tryCompileRecordChild(st, nested, 'all');
+  if (recordChild) return continueLowering(recordChild, stop + 1);
   throw new Error('local() child shape not yet supported by generic child lowering');
 };
 
@@ -369,6 +375,8 @@ const tailFlatMap: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
   if (generic) return continueLowering(generic, stop + 1);
   const mapChild = tryCompileMapChild(st, step.args[0]?.nested, 'all');
   if (mapChild) return continueLowering(mapChild, stop + 1);
+  const recordChild = tryCompileRecordChild(st, step.args[0]?.nested, 'all');
+  if (recordChild) return continueLowering(recordChild, stop + 1);
   return continueLowering(lowerElementFlatMap(step, st), stop + 1);
 };
 

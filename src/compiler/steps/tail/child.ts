@@ -242,6 +242,17 @@ export function applyChildCardinality<S extends Exclude<Stream, { kind: 'result'
   };
 }
 
+/** Mint a per-origin `encounter` on an element child stream that carries none — the order the
+ *  `first` cardinality policy ranks on. Factored out because it is the same three lines every
+ *  child provider needs and the expression nests badly inline. */
+export function mintChildEncounter(end: ElementStream): ElementStream {
+  const pe = prevRel(end, 'pe');
+  const carried = withCarried(end, { encounter: 'encounter' }).carried;
+  const mint = q`ROW_NUMBER() OVER (${partitionOver(carried, pe, pe.c.id)})`;
+  return advance(end, q`SELECT ${pe.c.id} AS id${carryFragMint(carried, pe, 'encounter', mint)} FROM ${pe}`,
+    { encounter: 'encounter' });
+}
+
 /** Compile a scalar-producing child as rows, so productivity is represented by row
  * existence rather than SQL NULL. Movement/filter uses the ordinary element fold;
  * projection adds an explicit provider encounter key; the shared scalar pipeline

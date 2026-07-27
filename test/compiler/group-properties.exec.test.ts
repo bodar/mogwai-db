@@ -376,3 +376,40 @@ describe('a valueMap() child body', () => {
     expect(() => run(store, 'g.V(1).local(__.valueMap(true))')).toThrow(/not yet supported/);
   });
 });
+
+// ---------- a RECORD-shaped child body ----------
+//
+// The cheapest of the non-element shapes, and the one that shows the substrate is right: the record
+// builder (lowerRecordSelectProject) ALREADY threaded its carried columns, so unlike the map builder
+// it needed no change at all — the classifier was the only gate, and the per-parent rejoin is the
+// shared shape-agnostic one. Adding this shape added no SQL and no rejoin code.
+describe('a project()/select() child body', () => {
+  const framed = async (store: GraphStore, g: string) =>
+    (await decodeAll(executeQuery(store, g, {})))
+      .map((v: any) => JSON.stringify(v instanceof Map ? Object.fromEntries(v) : v)).sort();
+
+  test('a record child frames identically to the root form', async () => {
+    const store = seededStore();
+    for (const [child, root] of [
+      ['g.V(1).local(__.project("a").by("name"))', 'g.V(1).project("a").by("name")'],
+      ['g.V(1).map(__.project("a","b").by("name").by("age"))', 'g.V(1).project("a","b").by("name").by("age")'],
+      ['g.V().local(__.project("a").by("name"))', 'g.V().project("a").by("name")'],
+    ]) expect(await framed(store, child)).toEqual(await framed(store, root));
+  });
+
+  test('a movement prefix composes — one record per REACHED element', async () => {
+    const store = seededStore();
+    expect(await framed(store, 'g.V(1).local(__.out().project("n").by("name"))'))
+      .toEqual(['{"n":"josh"}', '{"n":"lop"}', '{"n":"vadas"}']);
+    // …and a filter in the prefix, proving the gate is the row-local vocabulary, not an allow-list.
+    expect(await framed(store, 'g.V(1).local(__.out().hasLabel("person").project("n").by("name"))'))
+      .toEqual(['{"n":"josh"}', '{"n":"vadas"}']);
+  });
+
+  test('a single-label select() is NOT a record body (it re-types to the label)', () => {
+    const store = seededStore();
+    // Excluded deliberately: select("a") holds whatever the label holds, so it has its own
+    // consumer. Admitting it here would answer a different question.
+    expect((run(store, 'g.V(1).as("a").local(__.select("a"))') as any[]).length).toBe(1);
+  });
+});

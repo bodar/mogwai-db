@@ -530,27 +530,47 @@ export function classifyScalarChildRows(
   return parts ? { kind: 'element', parts } : null;
 }
 
-/** PURE. A MAP-producing child body: `<element movement/filter prefix>.valueMap(...)`. Lives here
- *  with its siblings (classifyScalarChildRows / classifyElementChildRows / classifyCountChild) so
- *  the classify/emit split holds for every shape — the emit half is tryCompileMapChild (group.ts,
- *  where the one map builder lives) and it consumes exactly these parts.
+/** PURE. A body that is `<element movement/filter prefix>.<one terminal projection>` — the shape
+ *  EVERY non-element child provider needs, parameterized only by which projection it accepts.
+ *  Map (valueMap) and record (project/select) share it verbatim; the projection-specific rules stay
+ *  in `accepts`, which is where they belong.
+ *
+ *  Lives here with its siblings (classifyScalarChildRows / classifyElementChildRows /
+ *  classifyCountChild) so the classify/emit split holds for every shape: classify is a syntax-only
+ *  peek with no Query, no engine and no SQL, and the emit half consumes exactly these parts. */
+export function classifyProjectionChildRows(
+  body: ReturnType<typeof stepChain>,
+  accepts: (proj: PStep) => boolean,
+  ctx?: ChildCtx,
+): { prefix: PStep[]; proj: PStep } | null {
+  if (!body.length) return null;
+  const proj = body[body.length - 1];
+  if (!accepts(proj)) return null;
+  const prefix = body.slice(0, -1);
+  return prefix.every((c) => isElementChildStep(c, ctx)) ? { prefix, proj } : null;
+}
+
+/** A MAP-producing child body. `valueMap(true)`/`elementMap` are excluded: neither has a relational
+ *  MapStream form (the builder's own deferral — their token keys frame as T ENUMS mixed with string
+ *  property keys, which the `{t,v}` blob vocabulary cannot represent), so the terminal root path
+ *  still answers them.
  *
  *  NOTE this deliberately does NOT widen `ChildShape`. That union is `BranchArmShape` minus its
  *  null, so admitting 'map' there would tell the branch triage a map arm is mergeable — and no
  *  merge covers a map shape. A map body composes at the MAPPING positions; a map ARM stays
  *  unclassifiable (and so fails closed) until a merge exists. */
-export function classifyMapChildRows(
-  body: ReturnType<typeof stepChain>,
-  ctx?: ChildCtx,
-): { prefix: PStep[]; proj: PStep } | null {
-  if (!body.length) return null;
-  const proj = body[body.length - 1];
-  // valueMap(true)/elementMap have no relational MapStream form yet (the builder's own deferral),
-  // so they are not a map child body — the terminal root path still answers them.
-  if (proj.name !== 'valueMap' || proj.args.includes(true)) return null;
-  const prefix = body.slice(0, -1);
-  return prefix.every((c) => isElementChildStep(c, ctx)) ? { prefix, proj } : null;
-}
+export const classifyMapChildRows = (body: ReturnType<typeof stepChain>, ctx?: ChildCtx) =>
+  classifyProjectionChildRows(body, (p) => p.name === 'valueMap' && !p.args.includes(true), ctx);
+
+/** A RECORD-producing child body: `project(k…)` / a multi-label `select(k…)`. The record builder
+ *  (select.ts lowerRecordSelectProject) already threads its carried columns, so — unlike the map
+ *  builder — it needed no change to work in a child scope; the classifier WAS the only gate. A
+ *  single-label select() is not a record (it re-types to whatever the label holds) and a
+ *  select(Column) has its own consumer, so both are excluded. */
+export const classifyRecordChildRows = (body: ReturnType<typeof stepChain>, ctx?: ChildCtx) =>
+  classifyProjectionChildRows(body, (p) =>
+    (p.name === 'project' || (p.name === 'select' && p.args.filter((a: any) => typeof a === 'string').length > 1))
+    && !p.args.some((a: any) => a && typeof a === 'object' && 'column' in a), ctx);
 
 /** PURE. The element-row shape decision shared by compileElementChildRows and the three
  * element predicates. `firstPolicy` keeps a trailing order() as an explicit ordering

@@ -11,7 +11,7 @@ import { advance, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, p
 import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
 import { PER_ROW, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
-import { applyChildCardinality, lowerElementBody, pushChildScope, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows } from './child.ts';
+import { applyChildCardinality, lowerElementBody, mintChildEncounter, pushChildScope, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows } from './child.ts';
 import { childCtx, childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyMapChildRows, classifyScalarChildRows, elementScalarBranchArm, reuseCurrentFrame, ROOT_SCOPE, type ChildParent, type ChildUse, type CompileScope } from './child-shape.ts';
 
 /** The numeric reducers that terminate a nested-group inner value `by(__.values(x).<r>())`. */
@@ -570,17 +570,6 @@ export function lowerValueMap(st: ElementStream, proj: PStep): MapStream {
 // so it could not rejoin a parent. With those threaded, the body composes here through the SAME
 // pieces the scalar child uses: the element fold for the prefix, the one map builder for the
 // projection, and the shape-agnostic cardinality rejoin.
-
-/** Mint a per-origin `encounter` on an element child stream that carries none — the order the
- *  `first` cardinality policy ranks on. Factored out because it is the same three lines every
- *  child provider needs and the expression nests badly inline. */
-function mintChildEncounter(end: ElementStream): ElementStream {
-  const pe = prevRel(end, 'pe');
-  const carried = withCarried(end, { encounter: 'encounter' }).carried;
-  const mint = q`ROW_NUMBER() OVER (${partitionOver(carried, pe, pe.c.id)})`;
-  return advance(end, q`SELECT ${pe.c.id} AS id${carryFragMint(carried, pe, 'encounter', mint)} FROM ${pe}`,
-    { encounter: 'encounter' });
-}
 
 /** `<element movement/filter prefix>.valueMap(...)` as a child body → one map per parent.
  *  Null when the body is not that shape, so the caller keeps its own deferral. A suffix that
