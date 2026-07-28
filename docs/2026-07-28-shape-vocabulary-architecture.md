@@ -275,11 +275,26 @@ perturbation. Two corrections the probe forced:
 Both gates were verified against a *real* injected regression, not a doctored artifact: an
 artifact edit can only simulate a gain, never a loss.
 
-**1 — Free deletions.** Drop `VTYPE_TO_VALUETYPE`; declare `ValueType = Exclude<CanonicalType,
-'list'|'map'|'set'>` and delete both bridge tables plus the two rename-aliases; delete
-`Shape{kind:'count'}` (byte-proven: `countBuffer` `execute.ts:342` ≡ `frameValue(v,'long')` `:379`
-**[verified]**); resolve `node`/`vertex`, keeping an `sqlElem()` at the one persisted seam
-(`property_fts.owner_elem`). ~200 lines net removed, each step reviewable by eye.
+**1 — Free deletions. ✅ LANDED** (`19f5b34`, `283453e`, `4c5ce5c`). All four, each verified by the
+census not moving from 1425/475/381/17:
+- `ValueType = Exclude<CanonicalType,'list'|'map'|'set'>`; all five adapter names deleted. Owning
+  it in `gremlin/types.ts` also broke the latent `types.ts → render.ts → storage.ts → types.ts`
+  cycle. One care point: a naive `vt as ValueType` in `vtypeToValueType` would let a stored
+  `'list'` reach `frameValue`, fall off its deliberately non-exhaustive switch and return
+  `undefined` as a `Buffer` — a corrupt frame with no throw. Guarded with `isCollectionType` +
+  `hasSerializer`.
+- `Shape{kind:'count'}` deleted, scoped to the Shape arm — `ScalarStream.result === 'count'` is
+  separable, and all five of its producers already pass `'long'`, which is *why* the arm was
+  redundant.
+- Element kind unified to `'vertex'|'edge'`, `ElemShape = Elem | 'property'`. 13 of the 17 bridge
+  ternaries were then identities and are gone; the 4 survivors are genuine narrowings.
+  **The persisted `property_fts.owner_elem` seam held** — minted only by `sqlElem()`, pinned by a
+  test written *before* the rename, because that failure mode (pre-existing rows say `node`, new
+  code queries `vertex`, every TextP predicate returns `[]` with no error) is invisible to the
+  census, which seeds a fresh graph each run.
+
+Two defects fixed in passing: `outV()`'s deferral read "not a node", and `group.ts`'s element-key
+path silently collapsed `ElemShape`'s `'property'` arm to a vertex rather than failing closed.
 
 **2 — Make `Carried` total.** The largest measured category (33%), still firing (`4cefade`,
 2026-07-28: `repeat()` emitting `1 AS bulk` without declaring it). **Its designated authority
