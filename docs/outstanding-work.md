@@ -69,6 +69,15 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    anchor on steps whose output shape is fixed by name. Same doc measures where the defects actually
    come from (carried-channel drops 33%, shape/vocabulary 8%) and names the higher-yield work.
 
+0b. **`concat(<traversal>)` silently drops its traversal arguments.** `concat(' knows ')` (the
+   STRING form) is correct; `concat(__.constant(' knows '))` and
+   `concat(__.constant('x'), __.constant('y'))` both return the receiver unchanged, and
+   `concat(__.select('a').by('name'))` likewise. Not a deferral — a **silent wrong answer**, so it
+   violates the fail-closed rule outright. Found 2026-07-28 while measuring the MATCH-string design
+   (7b); it is the ONE thing between that design and 25/25 on `MatchString.feature`
+   (`g_match_anyXknowsX_any_selectXaX_byXnameX_concatX…X`), but it has nothing to do with `match()`.
+   *Medium-High — silent wrong answer, and probably small.*
+
 1. **List members frame as bare values, not elements.** `AliasEntry` does not record the member
    shape, so a path/element-list label cannot frame its members as vertices. Blocks
    `g_V_hasXperson_name_markoX_path_asXaX_unionXidentity_identityX_selectXaX_unfold` (which also
@@ -230,12 +239,18 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    downstream alias-compare gap, not a match one. **Medium.**
    → [conformance-structural-bets](./2026-07-12-conformance-structural-bets.md)
 
-7b. **`g.match("MATCH (a:person)-[:knows]->(b:person)")` — the GQL pattern-STRING form. NEEDS A
-   DECISION, not just implementation.** 23 scenarios (all of `MatchString.feature`), the single
-   largest remaining L3 bucket, every one failing `unsupported source step: match`. This is a second
-   query LANGUAGE embedded in a string argument, so it needs a pattern parser and a pattern → IR
-   lowering — which collides with locked decision #2 (*the parser is generated, never hand-edited*)
-   unless upstream ships a grammar we can generate from. **Large.**
+7b. **`g.match("MATCH (a:person)-[:knows]->(b:person)")` — the GQL pattern-STRING form. DESIGNED
+   2026-07-28; no decision left, and it is not Large.** 25 scenarios (all of `MatchString.feature`),
+   **0 passing**, the single largest remaining L3 bucket, every one failing
+   `unsupported source step: match`. Both premises this item was filed on were falsified by
+   measurement: upstream DOES ship a grammar (`gql-gremlin/src/main/antlr4/GQL.g4` on
+   `origin/master`, generated cleanly by our own antlr-ng invocation — 21/21 corpus patterns parse),
+   so locked decision #2 is satisfied by the mechanism it already names; and the COMPILER needs no
+   change — hand-desugaring every scenario into Gremlin trunk compiles today reproduces **24 of 25**
+   expected result sets, the 25th blocked by an unrelated `concat()` defect. The work is: generate a
+   second parser (`parser/gql/`), add one front-end translator (`src/gremlin/gql.ts`, sitting where
+   `math.ts` sits), add one `extract`-category Pass. **Medium.**
+   → [match-string-frontend-design](./2026-07-28-match-string-frontend-design.md)
 
 7c. **Predicate operands that are TRAVERSALS — narrow tails only.** The four shapes (constant,
    re-sourced, mutating-rejected, correlated) lower. Left:
@@ -310,6 +325,14 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 
 Each fails closed (clear error, never mis-executes). Do only when a concrete scenario demands it.
 
+- **`hasNot(key)` is not implemented** — `step not implemented: hasNot()`. A one-step gap in a common
+  vocabulary; `not(__.has(key))` is the equivalent and is verified to give the same rows, which is
+  also the route the MATCH-string desugar (7b) takes for GQL's `{k: null}`. *Low.*
+- **`match()` cannot seed a CYCLE** — root detection is "a start var never used as an end", and a
+  cyclic pattern has none, so `g.V().match(as('a').out().as('b'), as('b').out().as('a'))` reports an
+  unbound start. Pre-binding the seed outside (`g.V().as('a').match(…)`) takes the supported
+  ZERO-ROOT path and answers correctly, which is what 7b's desugar does uniformly — so this is only
+  a gap for hand-written Gremlin. *Low.*
 - **Recursive-path tails** — `cyclicPath`/`until`/`emit(pred)` with path, edge-inclusive bodies,
   mixed linear+repeat, recursive-regime `from()`/`to()`, multiple `by()`s (round-robin needs a known
   length; a recursive path's is dynamic). Also `order()` before a movement/branch while a path is
