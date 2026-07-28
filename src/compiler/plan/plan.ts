@@ -142,19 +142,24 @@ const GTYPE_SQL: Record<string, string | null> = {
 // A compile-time scalar `as` tag (ValueType, render.ts) → canonical Gremlin type name, for
 // the static-fold typeOf mode. The one vocabulary correspondence lives in gremlin/types.ts.
 
-/** How to resolve the CURRENT scalar's type for a typeOf test:
- *  - `staticAs`  — the value's GraphBinary type is known at compile time (inject literal,
- *                  as*() cast, math→double) → fold to a constant.
- *  - `vtypeExpr` — a per-row stored `vtype` column (values()/properties()/a stored-prop
- *                  EXISTS) → match it, falling back to storage class for NULL-vtype rows.
- *  - neither     — no type info → the legacy storage-class test on the value. */
-type TypeCtx = { staticAs?: ValueType; vtypeExpr?: Expression };
+/** How an arbitrary SQL expression's scalar type is known to the planner. This is
+ * deliberately separate from render.ts's ScalarType: a stream's per-row case names
+ * a relation column, while this per-row case carries the expression currently in
+ * scope (which may be an alias or a computed subexpression). */
+export type TypeCtx =
+  | { kind: 'static'; type: ValueType }
+  | { kind: 'perRow'; expr: Expression }
+  | { kind: 'unknown' };
+
+export const TYPE_STATIC = (type: ValueType): TypeCtx => ({ kind: 'static', type });
+export const TYPE_PER_ROW = (expr: Expression): TypeCtx => ({ kind: 'perRow', expr });
+export const TYPE_UNKNOWN: TypeCtx = { kind: 'unknown' };
 
 /** P.typeOf(GType|"ClassName") → a SQL type test over `expr`, resolved by `ctx` (see
  *  TypeCtx). A recognized non-value GType (vertex/edge/tree/graph/…) can never match a
  *  stored scalar → folds to false; a truly unregistered name raises (spec: "traversal
  *  will raise an error"). */
-function typeOfSql(expr: Expression, arg: any, ctx: TypeCtx = {}): Expression {
+function typeOfSql(expr: Expression, arg: any, ctx: TypeCtx = TYPE_UNKNOWN): Expression {
   const rawName = (arg && typeof arg === 'object' && 'gtype' in arg) ? String(arg.gtype)
     : typeof arg === 'string' ? arg.toLowerCase()
     : (() => { throw new Error('typeOf() requires a GType argument'); })();
@@ -169,11 +174,11 @@ function typeOfSql(expr: Expression, arg: any, ctx: TypeCtx = {}): Expression {
     throw new Error(`typeOf(): unregistered type '${rawName}'`);
   }
   // Mode 1 — compile-time known type → constant fold.
-  if (ctx.staticAs !== undefined) return ctx.staticAs === canonical ? q`1` : q`0`;
+  if (ctx.kind === 'static') return ctx.type === canonical ? q`1` : q`0`;
   const storage = GTYPE_SQL[canonical];
   const byStorage = storage ? q`typeof(${expr}) = ${value(storage)}` : q`0`;
   // Mode 2 — per-row stored vtype, with a storage-class fallback for legacy NULL rows.
-  if (ctx.vtypeExpr) return q`(CASE WHEN ${ctx.vtypeExpr} IS NOT NULL THEN ${ctx.vtypeExpr} = ${value(canonical)} ELSE ${byStorage} END)`;
+  if (ctx.kind === 'perRow') return q`(CASE WHEN ${ctx.expr} IS NOT NULL THEN ${ctx.expr} = ${value(canonical)} ELSE ${byStorage} END)`;
   // Mode 3 — no type info → legacy storage-class test.
   return byStorage;
 }
@@ -250,7 +255,7 @@ function operandSql(v: any): Expression {
   return value(v);
 }
 
-export function predicateSql(expr: Expression, pred: any, typeCtx: TypeCtx = {}): Expression {
+export function predicateSql(expr: Expression, pred: any, typeCtx: TypeCtx = TYPE_UNKNOWN): Expression {
   if (pred === undefined) return q`${expr} is not null`;
   if (pred === null || typeof pred !== 'object' || !('op' in pred)) return q`${expr} = ${operandSql(pred)}`;
   const { op, values: vals } = pred as Pred;
@@ -271,8 +276,8 @@ export function predicateSql(expr: Expression, pred: any, typeCtx: TypeCtx = {})
   // stays a RAW compare: canonical text is exact (a big int / decimal matches itself) and
   // it keeps the value-index usable for the common eq case.
   const RANGE = new Set(['gt', 'gte', 'lt', 'lte']);
-  const col = () => compareKey(expr, typeCtx.vtypeExpr!);
-  if (op in P_OPS) return RANGE.has(op) && typeCtx.vtypeExpr
+  const col = () => compareKey(expr, (typeCtx as Extract<TypeCtx, { kind: 'perRow' }>).expr);
+  if (op in P_OPS) return RANGE.has(op) && typeCtx.kind === 'perRow'
     ? q`${col()} ${P_OPS[op]} ${compareBound(vals[0])}`
     : q`${expr} ${P_OPS[op]} ${operandSql(vals[0])}`;
   // SQLite rejects an empty `IN ()` list, so fold the degenerate sets to their
@@ -296,7 +301,7 @@ export function predicateSql(expr: Expression, pred: any, typeCtx: TypeCtx = {})
   // both bounds and the column go through the numeric-aware compare; otherwise raw.
   if (op === 'between' || op === 'inside') {
     const lowOp = op === 'inside' ? '>' : '>=';
-    if (!typeCtx.vtypeExpr) return q`(${expr} ${lowOp} ${operandSql(vals[0])} and ${expr} < ${operandSql(vals[1])})`;
+    if (typeCtx.kind !== 'perRow') return q`(${expr} ${lowOp} ${operandSql(vals[0])} and ${expr} < ${operandSql(vals[1])})`;
     return q`(${col()} ${lowOp} ${compareBound(vals[0])} and ${col()} < ${compareBound(vals[1])})`;
   }
   const lp = likePattern(op, vals[0]);
@@ -525,7 +530,7 @@ export const nodeHasProp = (nodeIdExpr: Expression, key: string, pred: any): Exp
   const base = q`SELECT 1 FROM vertex_properties WHERE node=${nodeIdExpr} AND key=${value(key)}`;
   // The row's own `vtype` column is in scope inside the EXISTS, so has('k',typeOf(X))
   // matches the stored canonical type (mode 2) instead of only storage class.
-  return pred === undefined ? q`EXISTS(${base})` : q`EXISTS(${base} AND ${predicateSql(raw('value'), pred, { vtypeExpr: raw('vtype') })})`;
+  return pred === undefined ? q`EXISTS(${base})` : q`EXISTS(${base} AND ${predicateSql(raw('value'), pred, TYPE_PER_ROW(raw('vtype')))})`;
 };
 
 /** edge: the value under `key` as a correlated scalar. Edge props are single-cardinality
@@ -538,7 +543,7 @@ export const edgePropScalar = (edgeIdExpr: Expression, key: string): Expression 
  *  edge_properties — mirror of nodeHasProp. */
 export const edgeHasProp = (edgeIdExpr: Expression, key: string, pred: any): Expression => {
   const base = q`SELECT 1 FROM edge_properties WHERE edge=${edgeIdExpr} AND key=${value(key)}`;
-  return pred === undefined ? q`EXISTS(${base})` : q`EXISTS(${base} AND ${predicateSql(raw('value'), pred, { vtypeExpr: raw('vtype') })})`;
+  return pred === undefined ? q`EXISTS(${base})` : q`EXISTS(${base} AND ${predicateSql(raw('value'), pred, TYPE_PER_ROW(raw('vtype')))})`;
 };
 
 /** edge: all props as flat JSON text `{key:value}` (single-valued per key), correlated
@@ -610,4 +615,3 @@ export const bareValueMapProps = (rel: Relation, elem: Elem): Expression =>
   elem === 'edge'
     ? q`COALESCE((SELECT json_group_object(p.key, json_array(${bareStoredValueExpr(raw('p.value'), raw('p.vtype'))})) FROM edge_properties p WHERE p.edge=${rel.c.id}), '{}')`
     : q`COALESCE((SELECT json_group_object(key, json(vs)) FROM (SELECT p.key AS key, json_group_array(${bareStoredValueExpr(raw('p.value'), raw('p.vtype'))} ORDER BY p.id) AS vs FROM vertex_properties p WHERE p.node=${rel.c.id} GROUP BY p.key ORDER BY MIN(p.id))), '{}')`;
-

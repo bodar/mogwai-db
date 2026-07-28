@@ -30,7 +30,7 @@ import { mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm }
 import { engineOf, fastPathContextOf } from '../../engine/deps.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
 import { gateScalar, tryInlineScalarPredicate, unionScalarStreams } from './scalar.ts';
-import { predicateSql } from '../../plan/plan.ts';
+import { predicateSql, TYPE_PER_ROW, TYPE_UNKNOWN } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import {
   CHILD_SCALAR_REDUCERS, isResourceHead, pushChildScope, resourceElement,
@@ -212,7 +212,7 @@ function inlineScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): Sc
   return {
     seed: (combine) => gateScalar(s, (v, vt) =>
       combine(specs.map((sp, i) => 'p' in sp
-        ? predicateSql(v, sp.p, vt ? { vtypeExpr: vt } : undefined)
+        ? predicateSql(v, sp.p, vt ? TYPE_PER_ROW(vt) : TYPE_UNKNOWN)
         : tryInlineScalarPredicate(bodies[i]!, v, s.params, vt)!))),
   };
 }
@@ -228,7 +228,7 @@ function genericScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): S
   const vt = sPerRow ? d.c[sPerRow] : undefined;
   const bools: Expression[] = [];
   for (const sp of specs) {
-    if ('p' in sp) { bools.push(predicateSql(d.c.v, sp.p, vt ? { vtypeExpr: vt } : undefined)); continue; }
+    if ('p' in sp) { bools.push(predicateSql(d.c.v, sp.p, vt ? TYPE_PER_ROW(vt) : TYPE_UNKNOWN)); continue; }
     const child = tryCompileScalarValueRows(pushed, sp.nested, reuseCurrentFrame(scope, frame));
     if (!child) return null;
     const c = child.stream.rel.as('c');

@@ -1,6 +1,6 @@
 import { derived, empty, list, paren, q, raw, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { hasUnresolvedOperand, operandDeps, resolveTraversalOperands } from './operand.ts';
-import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx } from '../../plan/plan.ts';
+import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx, TYPE_PER_ROW, TYPE_STATIC, TYPE_UNKNOWN } from '../../plan/plan.ts';
 import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { aliasArmProjection, carryFrag, carryFragMint, carriedCols, carriedWith, mergeAliasMaps, partitionOver, withoutCarried, type Carry } from '../context/context.ts';
@@ -155,7 +155,7 @@ function fuseScalarSegment(s: ScalarStream, steps: readonly PStep[], from: numbe
       // it compile-time-known (staticAs = the transformed `as`); otherwise the per-row
       // stored vtype column (if any) answers it, else a storage-class fallback.
       const perRow = transformed ? undefined : perRowColumnOf(s.type);
-      const typeCtx = { staticAs: as, vtypeExpr: perRow ? p.c[perRow] : undefined };
+      const typeCtx = as ? TYPE_STATIC(as) : perRow ? TYPE_PER_ROW(p.c[perRow]) : TYPE_UNKNOWN;
       // A re-sourced traversal operand (is(__.V(id).values('age'))) becomes a scalar subquery
       // before the pure SQL layer sees it — see steps/tail/operand.ts.
       predicates.push(predicateSql(expr, resolveTraversalOperands(step.args[0], operandDeps(s), { row: p }), typeCtx));
@@ -345,7 +345,7 @@ export function tryInlineScalarPredicate(body: PStep[], current: Expression, par
       // the Engine, which a pure inliner has no access to). Decline so the caller falls through,
       // per the contract above — never throw from inside a fast path.
       if (hasUnresolvedOperand(s.args[0])) return null;
-      preds.push(predicateSql(expr, s.args[0], vtype ? { vtypeExpr: vtype } : undefined));
+      preds.push(predicateSql(expr, s.args[0], vtype ? TYPE_PER_ROW(vtype) : TYPE_UNKNOWN));
       continue;
     }
     if (s.name === 'identity') continue;                 // always productive, no rebind
@@ -411,7 +411,7 @@ export function lowerScalarFilter(s: ScalarStream, step: PStep): ScalarStream | 
   if ((step.name === 'where' || step.name === 'filter') && !nested.length) {
     const pred = step.args.find((a: any) => a && typeof a === 'object' && 'op' in a);
     if (!pred || step.args.some((a: any) => typeof a === 'string')) return null; // where('a',P) → alias compare, decline
-    return filterScalarByCond(s, p, predicateSql(cur, pred, vt ? { vtypeExpr: vt } : undefined));
+    return filterScalarByCond(s, p, predicateSql(cur, pred, vt ? TYPE_PER_ROW(vt) : TYPE_UNKNOWN));
   }
   // Traversal-child predicate — the scalarPredicateInlining fast path (ScalarPredicateInliningFastPath
   // is its canonical dispatch, in scalar-arm.ts; this leaf reads the same enable flag directly to
