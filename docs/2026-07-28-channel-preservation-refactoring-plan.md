@@ -58,6 +58,17 @@ per-row stored type through the JSON history entry so a later `select()` can fra
 UUID/date/long values exactly. List-member shape/type preservation remains part of
 that alias tranche; do not treat a scalar-label fix as a complete alias migration.
 
+Completed alias checkpoint:
+
+- Scalar `as()` entries now carry either their static tag or their stored per-row
+  type in JSON history; `select()` reconstructs the channel for scalar output and
+  record fields. List aliases retain their member descriptor, including typed
+  scalar members. The focused UUID/datetime/Long, record, and folded-list tests
+  pass.
+- The census delta is two deliberate answers: a Long label surviving a `union()`
+  or a scalar-ending `match()` is now framed as GraphBinary Long rather than
+  inferred Int. Execution, deferral, and crash counts are unchanged.
+
 ## North star
 
 Every compiler boundary must make one of three outcomes explicit:

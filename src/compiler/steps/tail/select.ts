@@ -3,9 +3,9 @@ import { nodes, edges, labels } from '../../../sql/schema.ts';
 import { framedProps, labelNameSub, nodePropScalar, nodePropType, edgePropScalar, edgePropType, edgePropsAgg, predicateSql, propExtract, extIdOf, P_OPS, storedValueExpr } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { isNested, stepChain } from '../../../gremlin/frontend.ts';
-import { aliasElem, aliasIsElement, carryFrag, carriedCols, type AliasMap, type ElementStream } from '../context/context.ts';
-import { aliasId, aliasPresent, aliasScalar, shapeElem } from '../context/alias.ts';
-import { emptyElementLike, historyPropertyValues, historyValues, popEnd, popIsListResult, selectOneFromAlias } from './labelselect.ts';
+import { aliasElem, aliasIsElement, carryFrag, carriedCols, scalarTypeFromAlias, type AliasMap, type ElementStream } from '../context/context.ts';
+import { aliasId, aliasPop, aliasPresent, aliasScalar, entryTypeTag, shapeElem } from '../context/alias.ts';
+import { emptyElementLike, historyPropertyValues, historyScalarValues, historyValues, popEnd, popIsListResult, selectOneFromAlias } from './labelselect.ts';
 import { carryOf, continueLowering, dispatchShapeTail, recordFieldColumns, toElementStream, toListStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type ListStream, type LoweringResult, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
 import { PER_ROW, STATIC, UNKNOWN, perRowColumnOf, type Compiled, type ScalarType } from '../../../sql/kernel/render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
@@ -258,11 +258,13 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
   // reads its value, not an element — the element path (aliasElem) would reject it.
   if (!aliasIsElement(selected)) {
     if (by.sub !== 'vertex' || by.key) throw new Error('select(value-label).by(key) not yet supported (the label holds a value, not an element)');
+    const type = scalarTypeFromAlias(selected.scalarType);
+    const vtype = perRowColumnOf(type);
     const rel = st.q.cte(
-      q`SELECT ${aliasScalar(p.c[selected.col], 'last')} AS v${carryFrag(st.carried, p)} FROM ${p}${present ? q` WHERE ${present}` : empty}`,
-      ['v', ...carriedCols(st.carried)],
+      q`SELECT ${aliasScalar(p.c[selected.col], 'last')} AS v${vtype ? q`, ${entryTypeTag(aliasPop(p.c[selected.col], 'last'))} AS ${vtype}` : empty}${carryFrag(st.carried, p)} FROM ${p}${present ? q` WHERE ${present}` : empty}`,
+      ['v', ...(vtype ? [vtype] : []), ...carriedCols(st.carried)],
     );
-    return toScalarStream(carryOf(st), rel);
+    return toScalarStream(carryOf(st), rel, undefined, { type });
   }
   const selElem = aliasElem(selected);
   const selId = aliasId(p.c[selected.col], 'last');
@@ -485,14 +487,14 @@ export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, st
     if (popIsListResult(entry, pop)) {
       if (entry.shapes.size !== 1) throw new Error('select(Pop.all/mixed) over a mixed-shape label history not yet supported');
       const shape = [...entry.shapes][0];
-      const of: ListOf = shape === 'value' ? { kind: 'scalar', as: entry.as }
+      const of: ListOf = shape === 'value' ? { kind: 'scalar', typed: true }
         : (shape === 'vertex' || shape === 'edge') ? { kind: 'elem', elem: shapeElem(shape) }
         : shape === 'property' ? { kind: 'property', elem: entry.propertyElem! }
         : (() => { throw new Error(`select(Pop.all) over a ${shape} label not yet supported`); })();
       // A property list must retain each member's full JSON object (historyPropertyValues,
       // -> extraction) — the scalar historyValues (->> text) would stringify each property so
       // framing reads undefined vpid/pk/pv. Mirrors selectOneFromAlias's single-label path.
-      cols.push(q`${(shape === 'property' ? historyPropertyValues : historyValues)(col)} AS ${`${prefix}_list`}`);
+      cols.push(q`${(shape === 'property' ? historyPropertyValues : shape === 'value' ? historyScalarValues : historyValues)(col)} AS ${`${prefix}_list`}`);
       return { key: k, prefix, sub: 'list', of };
     }
     const end = popEnd(pop);
@@ -515,8 +517,10 @@ export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, st
       return { key: k, prefix, sub: elem };
     }
     // A scalar value label (by() does not apply to a non-element value).
-    cols.push(q`${aliasScalar(col, end)} AS ${`${prefix}_v`}`);
-    return scalarRecordField(k, prefix, entry.as ? STATIC(entry.as) : UNKNOWN);
+    const type = scalarTypeFromAlias(entry.scalarType, `${prefix}_vtype`);
+    const vtype = perRowColumnOf(type);
+    cols.push(q`${aliasScalar(col, end)} AS ${`${prefix}_v`}${vtype ? q`, ${entryTypeTag(aliasPop(col, end))} AS ${vtype}` : empty}`);
+    return scalarRecordField(k, prefix, type);
   });
   const where = presents.length ? q` WHERE ${list(presents, ' AND ')}` : empty;
   const relCols = [...fields.flatMap(recordFieldColumns), ...carriedCols(s.carried)];

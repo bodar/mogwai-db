@@ -107,7 +107,7 @@ test('project builds columns from the current traverser', () => {
 test('traversal-valued project fields use child productivity and preserve parent multiplicity', () => {
   const store = seededStore();
   expect(run(store, 'g.V(1).project("name","friend").by(__.values("name")).by(__.out().values("name"))'))
-    .toEqual([{ e0_v: 'marko', e1_v: 'vadas' }]);
+    .toEqual([{ e0_v: 'marko', e0_vtype: 'string', e1_v: 'vadas', e1_vtype: 'string' }]);
   // Vertices without an outgoing child are unproductive: the whole project row drops.
   expect(run(store, 'g.V().project("name","friend").by(__.values("name")).by(__.out().values("name"))')
     .map((r) => r.e0_v).sort()).toEqual(['josh', 'marko', 'peter']);
@@ -115,14 +115,14 @@ test('traversal-valued project fields use child productivity and preserve parent
   expect(run(store, 'g.V(1).project("x").by(__.constant(null))')).toEqual([{ e0_v: null }]);
   // Equal parents remain separate traversers through the outer by-origin join.
   expect(run(store, 'g.V(1).union(__.identity(),__.identity()).project("x").by(__.values("name"))'))
-    .toEqual([{ e0_v: 'marko' }, { e0_v: 'marko' }]);
+    .toEqual([{ e0_v: 'marko', e0_vtype: 'string' }, { e0_v: 'marko', e0_vtype: 'string' }]);
   expect(run(store, 'g.V().project("name","degree").by("name").by(__.out().count())')
     .map((r) => [r.e0_v, r.e1_v]).sort((a, b) => a[0].localeCompare(b[0])))
     .toEqual([
       ['josh', 2], ['lop', 0], ['marko', 3], ['peter', 1], ['ripple', 0], ['vadas', 0],
     ]);
   expect(run(store, 'g.V(1).project("id","kind","friend").by(T.id).by(T.label).by(__.out().values("name"))'))
-    .toEqual([{ e0_v: 1, e1_v: 'person', e2_v: 'vadas' }]);
+    .toEqual([{ e0_v: 1, e1_v: 'person', e2_v: 'vadas', e2_vtype: 'string' }]);
   expect(run(store, 'g.V(1).project("self","friend").by().by(__.out().values("name"))')[0])
     .toMatchObject({ e0_id: 1, e0_label: 'person', e1_v: 'vadas' });
   expect(run(store, 'g.V(1).project("self","friend").by().by(__.out().values("name")).select("self").out().count()')

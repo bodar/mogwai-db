@@ -4,13 +4,13 @@ import { where } from './filter.ts';
 import { isNested, stepChain, type Step } from '../../../gremlin/frontend.ts';
 import { MATCH_FILTER_HEADS, type PStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
-import { advance, aliasColsOf, prevRel, withCarried, type AliasEntry, type Carried, type ElementStream, type StepFn } from '../context/context.ts';
+import { advance, aliasColsOf, aliasScalarTypeOf, prevRel, withCarried, type AliasEntry, type Carried, type ElementStream, type StepFn } from '../context/context.ts';
 import { aliasEntry, aliasId, aliasScalar, aliasSeed, elemEntry, elemShape, isElementShape, nodeEntry, shapeElem, type AliasShape } from '../context/alias.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { type Stream } from '../context/stream.ts';
 import { isGlobalBarrier, labelsMentioned, ROOT_SCOPE } from '../tail/child-shape.ts';
 import { tryCompileScalarValueChild } from '../tail/child.ts';
-import { staticTypeOf } from '../../../sql/kernel/render.ts';
+import { perRowColumnOf, staticTypeOf } from '../../../sql/kernel/render.ts';
 
 // ---------- match() — declarative conjunctive pattern join ----------
 //
@@ -124,6 +124,7 @@ interface EndBinding {
    *  private-state guard below runs, and this is what tells a payload column apart from one. */
   readonly payload: readonly string[];
   readonly shape: AliasShape;
+  readonly scalarType?: AliasEntry['scalarType'];
   readonly entry: (f: Relation) => Expression;
   readonly same: (f: Relation, col: string) => Expression;
 }
@@ -136,9 +137,10 @@ function endBindingOf(out: Stream): EndBinding | null {
   };
   if (out.kind === 'scalar') return {
     rel: out.rel, carried: out.carried, payload: streamPayloadCols(out), shape: 'value',
-    // Carry the static type tag so a numeric/date-valued var reframes correctly on the way
-    // out, exactly as a value label bound by as() does.
-    entry: (f) => aliasEntry('value', f.c.v, staticTypeOf(out.type) ?? null),
+    // A per-row stored type crosses this relation boundary in the entry itself;
+    // a later select() recreates a fresh vtype column from it.
+    entry: (f) => aliasEntry('value', f.c.v, perRowColumnOf(out.type) ? f.c[perRowColumnOf(out.type)!] : staticTypeOf(out.type) ?? null),
+    scalarType: aliasScalarTypeOf(out.type),
     same: (f, col) => q`${f.c.v}=${aliasScalar(f.c[col], 'last')}`,
   };
   return null;
@@ -242,7 +244,10 @@ function applyPattern(st: ElementStream, p: Extract<Pattern, { kind: 'bind' }>, 
         throw new Error(`match() re-binds "${p.end}" as ${bound.shape} but it already holds ${[...prior.shapes].join('|')} — a cross-shape constraint is not yet supported`);
       conds.push(bound.same(f, prior.col));
     } else {
-      proj.push(q`${aliasSeed(bound.entry(f))} AS ${bind(p.end, bound.shape)}`); // bind() mutates `aliases`
+      const col = bind(p.end, bound.shape); // bind() mutates `aliases`
+      const added = aliases.get(p.end)!;
+      aliases.set(p.end, { ...added, scalarType: bound.scalarType });
+      proj.push(q`${aliasSeed(bound.entry(f))} AS ${col}`);
     }
   }
   const where = conds.length ? q` WHERE ${list(conds, ' AND ')}` : empty;

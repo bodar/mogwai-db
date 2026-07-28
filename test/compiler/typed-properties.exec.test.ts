@@ -129,6 +129,31 @@ describe('typed property values (P1) — vtype capture + collection storage', ()
     expect(n("g.V().values('when').asNumber(GType.LONG).is(typeOf(GType.LONG))")).toBe(1);
   });
 
+  test('scalar aliases preserve stored types through history, select(), records, and list members', async () => {
+    const store = fresh();
+    executeQuery(store, "g.addV('t').property('gid',UUID('0-1')).property('when',datetime('2024-01-01T00:00:00Z')).property('big',9007199254740993L)", {});
+    const decoded = async (g: string) => decodeAll(executeQuery(store, g, {}));
+
+    // All three values begin as values()' per-row storage channel. `as()` must put
+    // the concrete tag into each JSON history entry so select() does not infer UUID/
+    // datetime/Long from their indistinguishable JS representations.
+    expect(await decoded("g.V().values('gid').as('x').select('x')")).toEqual(await decoded("g.V().values('gid')"));
+    expect(await decoded("g.V().values('when').as('x').select('x')")).toEqual(await decoded("g.V().values('when')"));
+    expect(await decoded("g.V().values('big').as('x').select('x')")).toEqual(await decoded("g.V().values('big')"));
+
+    // A record field is another scalar framing boundary; it gets a fresh prefixed
+    // vtype column rather than relying on raw JS inference.
+    const record = (await decoded("g.V().as('v').values('gid').as('x').select('v','x')"))[0] as Map<string, unknown>;
+    expect(record).toBeInstanceOf(Map);
+    expect(record.get('x')).toEqual((await decoded("g.V().values('gid')"))[0]);
+
+    // A folded list carries its member descriptor through its alias entry, so select
+    // returns a typed list that frames the original UUID rather than a plain string.
+    expect(await decoded("g.V().values('gid').fold().as('xs').select('xs')")).toEqual([
+      await decoded("g.V().values('gid')"),
+    ]);
+  });
+
   test('has(edgeKey, typeOf(X)) matches the stored edge vtype', () => {
     const store = fresh();
     executeQuery(store, "g.addV('p').as('a').addV('p').as('b').addE('knows').from('a').to('b').property('weight',0.5)", {});

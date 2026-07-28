@@ -1,15 +1,15 @@
 import { q, list, raw, empty, value, type Expression } from '../../../sql/kernel/q.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { aliasElem, aliasIsElement, carriedCols, carriedWith, carryFrag, withShape, type AliasEntry, type Carried, type Carry, type ElementStream } from '../context/context.ts';
+import { aliasElem, aliasIsElement, aliasScalarTypeOf, carriedCols, carriedWith, carryFrag, scalarTypeFromAlias, withShape, type AliasEntry, type AliasScalarType, type Carried, type Carry, type ElementStream } from '../context/context.ts';
 import {
-  aliasAppend, aliasEntry, aliasId, aliasPop, aliasPresent, aliasScalar, aliasSeed, elemEntry, shapeElem,
+  aliasAppend, aliasEntry, aliasId, aliasPop, aliasPresent, aliasScalar, aliasSeed, elemEntry, entryTypeTag, shapeElem,
   type AliasShape,
 } from '../context/alias.ts';
 import {
   assertStreamColumns, carryOf, pathColumns, streamColumns, toElementStream, toListStream, toPropertyStream, toScalarStream, PROPERTY_PAYLOAD,
   type ListOf, type PropertyStream, type Stream,
 } from '../context/stream.ts';
-import { PER_ROW, staticTypeOf, type ValueType } from '../../../sql/kernel/render.ts';
+import { PER_ROW, perRowColumnOf, staticTypeOf, type ValueType } from '../../../sql/kernel/render.ts';
 
 // ---------- as()/select() over path-history labels, any stream shape ----------
 //
@@ -26,13 +26,15 @@ const payloadOf = (s: Exclude<Stream, { kind: 'result' }>): string[] => {
 
 /** The tagged current-object entry for a non-element stream, its shape, and (for a
  *  value) its compile-time type tag. */
-function currentEntry(s: Exclude<Stream, { kind: 'result' }>, p: any): { entry: Expression; shape: AliasShape; as?: ValueType } {
+function currentEntry(s: Exclude<Stream, { kind: 'result' }>, p: any): { entry: Expression; shape: AliasShape; scalarType?: AliasScalarType; listOf?: ListOf } {
   switch (s.kind) {
-    case 'scalar':
-      const sAs = staticTypeOf(s.type);
-      return { entry: aliasEntry('value', p.c.v, sAs ?? null), shape: 'value', as: sAs };
+    case 'scalar': {
+      const scalarType = aliasScalarTypeOf(s.type);
+      const perRow = perRowColumnOf(s.type);
+      return { entry: aliasEntry('value', p.c.v, perRow ? p.c[perRow] : staticTypeOf(s.type) ?? null), shape: 'value', scalarType };
+    }
     case 'list':
-      return { entry: aliasEntry('list', p.c.list), shape: 'list' };
+      return { entry: aliasEntry('list', p.c.list), shape: 'list', listOf: s.of };
     case 'path': {
       // A Path binds as a LIST entry — it IS an ordered sequence of its positions, and that is
       // exactly what select(label) must yield (TinkerPop Select.feature
@@ -78,7 +80,7 @@ function currentEntry(s: Exclude<Stream, { kind: 'result' }>, p: any): { entry: 
 export function asOnStream(s: Exclude<Stream, { kind: 'result' | 'elements' }>, step: PStep): Stream {
   const labels = step.args.filter((a): a is string => typeof a === 'string');
   const p = s.rel.as('p');
-  const { entry, shape, as } = currentEntry(s, p);
+  const { entry, shape, scalarType, listOf } = currentEntry(s, p);
   const aliases = new Map<string, AliasEntry>(s.carried.aliases);
   const setExpr = new Map<string, Expression>();
   for (const lbl of labels) {
@@ -87,7 +89,11 @@ export function asOnStream(s: Exclude<Stream, { kind: 'result' | 'elements' }>, 
     aliases.set(lbl, {
       col,
       shapes: withShape(existing?.shapes, shape),
-      as: existing && existing.as !== as ? undefined : as,
+      scalarType: shape === 'value'
+        ? (!existing ? scalarType : existing.scalarType?.kind === 'static' && scalarType?.kind === 'static' && existing.scalarType.type === scalarType.type
+          ? scalarType : { kind: 'perRow' })
+        : existing?.scalarType,
+      listOf: shape === 'list' ? listOf : existing?.listOf,
       binds: (existing?.binds ?? 0) + 1,
       propertyElem: shape === 'property' && s.kind === 'property' ? s.ownerElem : existing?.propertyElem,
     });
@@ -144,6 +150,11 @@ export function popIsListResult(entry: AliasEntry, pop: string): boolean {
  *  mixed list (element rowids or scalar values). */
 export const historyValues = (col: Expression): Expression =>
   q`(SELECT jsonb_group_array(je.value ->> '$.v') FROM json_each(${col}) je)`;
+
+/** Scalar Pop.all/mixed members retain an entry's exact type when it has one,
+ * while bare unknown members stay bare. The typed-list reader accepts both forms. */
+export const historyScalarValues = (col: Expression): Expression =>
+  q`(SELECT jsonb_group_array(CASE WHEN ${entryTypeTag(q`je.value`)} IS NULL THEN json(je.value -> '$.v') ELSE jsonb_object('t', ${entryTypeTag(q`je.value`)}, 'v', json(je.value -> '$.v')) END) FROM json_each(${col}) je)`;
 
 export const historyPropertyValues = (col: Expression): Expression =>
   q`json(COALESCE((SELECT json_group_array(json(je.value -> '$.v') ORDER BY je.key) FROM json_each(${col}) je), json('[]')))`;
@@ -215,11 +226,11 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
     // is fully handled by the property block above, so this path never sees 'property'.
     if (entry.shapes.size !== 1) throw new Error('select(Pop.all/mixed) over a mixed-shape label history not yet supported');
     const shape = [...entry.shapes][0] as AliasShape;
-    const of: ListOf = shape === 'value' ? { kind: 'scalar', as: entry.as }
+    const of: ListOf = shape === 'value' ? { kind: 'scalar', typed: true }
       : (shape === 'vertex' || shape === 'edge') ? { kind: 'elem', elem: shapeElem(shape) }
       : (() => { throw new Error(`select(Pop.all) over a ${shape} label not yet supported`); })();
     const rel = s.q.cte(
-      q`SELECT ${historyValues(col)} AS list${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,
+      q`SELECT ${(shape === 'value' ? historyScalarValues : historyValues)(col)} AS list${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,
       ['list', ...carriedCols(carried)],
     );
     return toListStream(carry, rel, of);
@@ -243,15 +254,17 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
       q`SELECT json(${aliasPop(col, end)} ->> '$.v') AS list${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,
       ['list', ...carriedCols(carried)],
     );
-    // The member shape is not recorded on the entry (a list entry stores the array verbatim), so
-    // stay honest: an untyped scalar list. A path/element-list label that needs its members framed
-    // AS elements needs the member shape carried on AliasEntry — a separate, wider change.
-    return toListStream(carry, rel, { kind: 'scalar', as: undefined });
+    // Path aliases predate member metadata and can be heterogeneous under by(); retain
+    // their existing conservative scalar fallback. Ordinary ListStream aliases always
+    // have `listOf`, so a new list route cannot silently discard it.
+    return toListStream(carry, rel, entry.listOf ?? { kind: 'scalar', as: undefined });
   }
   // A single scalar value.
+  const type = scalarTypeFromAlias(entry.scalarType);
+  const vtype = perRowColumnOf(type);
   const rel = s.q.cte(
-    q`SELECT ${aliasScalar(col, end)} AS v${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,
-    ['v', ...carriedCols(carried)],
+    q`SELECT ${aliasScalar(col, end)} AS v${vtype ? q`, ${entryTypeTag(aliasPop(col, end))} AS ${vtype}` : empty}${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,
+    ['v', ...(vtype ? [vtype] : []), ...carriedCols(carried)],
   );
-  return toScalarStream(carry, rel, entry.as);
+  return toScalarStream(carry, rel, undefined, { type });
 }

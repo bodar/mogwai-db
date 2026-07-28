@@ -31,10 +31,13 @@ export const isElementShape = (shape: AliasShape): boolean => shape === 'vertex'
  *  element entry's value is its rowid; a value entry may carry a ValueType tag `t`
  *  so a numeric/date label reframes correctly on the way out. A list/map entry wraps
  *  a JSON structure via json() so SQLite stores it AS json (not a quoted string). */
-export function aliasEntry(shape: AliasShape, valueExpr: Expression, typeTag?: string | null): Expression {
+/** `typeTag` may be a compile-time tag or a per-row SQL expression. This is the
+ * history boundary where a ScalarType.perRow column stops being a relation column
+ * and becomes a self-describing entry field. */
+export function aliasEntry(shape: AliasShape, valueExpr: Expression, typeTag?: string | Expression | null): Expression {
   const k = SHAPE_K[shape];
   const val = shape === 'list' || shape === 'map' || shape === 'property' ? q`json(${valueExpr})` : valueExpr;
-  const t = typeTag ? q`, 't', ${value(typeTag)}` : empty;
+  const t = typeTag ? q`, 't', ${typeof typeTag === 'string' ? value(typeTag) : typeTag}` : empty;
   return q`jsonb_object('k', ${value(k)}, 'v', ${val}${t})`;
 }
 

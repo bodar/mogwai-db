@@ -3,7 +3,7 @@ import { nodes, edges } from '../../../sql/schema.ts';
 import { aliasCtx, type Elem, type ScalarCtx } from '../../plan/plan.ts';
 import { aliasId, aliasPresent, type AliasShape } from './alias.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import type { ValueType, ListOf } from '../../../sql/kernel/render.ts';
+import type { ValueType, ListOf, ScalarType } from '../../../sql/kernel/render.ts';
 
 // ---------- prefix-compilation state (Seam 2) ----------
 //
@@ -24,7 +24,13 @@ import type { ValueType, ListOf } from '../../../sql/kernel/render.ts';
 export type AliasEntry = {
   col: string;
   shapes: ReadonlySet<AliasShape>;
-  as?: ValueType;
+  /** The scalar type channel after it has crossed into JSON history. A per-row
+   * stream no longer has its original relation column, so it is represented by
+   * the entry's own `t` field and restored into a fresh `vtype` column on select. */
+  scalarType?: AliasScalarType;
+  /** Member descriptor for a list value held in history. This is deliberately
+   * alias-local: it says how to re-enter THIS JSON list, not what a Stream is. */
+  listOf?: ListOf;
   /** Compile-time binding count along the traverser's path: 1 for a once-bound label,
    *  >1 after rebinds. `undefined` = dynamic depth (bound inside repeat()/a branch arm),
    *  where the count is only known at runtime and Pop must resolve via SQL. Lets Pop.all/
@@ -39,6 +45,33 @@ export type AliasEntry = {
   propertyElem?: Elem;
 };
 export type AliasMap = ReadonlyMap<string, AliasEntry>;
+
+export type AliasScalarType =
+  | { readonly kind: 'static'; readonly type: ValueType }
+  | { readonly kind: 'perRow' }
+  | { readonly kind: 'unknown' };
+
+export const aliasScalarTypeOf = (type: ScalarType): AliasScalarType =>
+  type.kind === 'static' ? { kind: 'static', type: type.type }
+    : type.kind === 'perRow' ? { kind: 'perRow' }
+      : { kind: 'unknown' };
+
+/** Restore an alias history type to a scalar relation. `perRow` deliberately
+ * names the NEW projection column, not the source relation's vanished column. */
+export const scalarTypeFromAlias = (type: AliasScalarType | undefined, vtype = 'vtype'): ScalarType =>
+  type?.kind === 'static' ? { kind: 'static', type: type.type }
+    : type?.kind === 'perRow' ? { kind: 'perRow', column: vtype }
+      : { kind: 'unknown' };
+
+const mergeAliasScalarTypes = (types: readonly (AliasScalarType | undefined)[]): AliasScalarType | undefined => {
+  const present = types.filter((type): type is AliasScalarType => type !== undefined);
+  if (!present.length) return undefined;
+  if (present.every((type) => type.kind === 'static' && type.type === (present[0] as any).type)) return present[0];
+  if (present.every((type) => type.kind === 'unknown')) return { kind: 'unknown' };
+  // Different static tags and branch-local types are all faithfully represented by
+  // the JSON entry's `t`; a selected relation must expose that per-row channel.
+  return { kind: 'perRow' };
+};
 
 /** The element kind of a homogeneously-element label (node/edge). Throws if the
  *  label is a value/list/map or a mixed-shape history — callers that need a single
@@ -199,7 +232,10 @@ export function mergeAliasMaps(seed: AliasMap, arms: readonly Carried[]): AliasM
     const counts = perArm.map((e) => e?.binds ?? 0); // absent in an arm → 0 bindings on that path
     const defined = perArm.every((e) => !e || e.binds !== undefined);
     const binds = defined && counts.every((c) => c === counts[0]) ? counts[0] : undefined;
-    merged.set(lbl, { col, shapes, binds });
+    const entries = perArm.filter((entry): entry is AliasEntry => !!entry);
+    const listOf = entries.length && entries.every((entry) => JSON.stringify(entry.listOf) === JSON.stringify(entries[0].listOf))
+      ? entries[0].listOf : undefined;
+    merged.set(lbl, { col, shapes, binds, scalarType: mergeAliasScalarTypes(entries.map((entry) => entry.scalarType)), listOf });
   });
   return merged;
 }
