@@ -15,6 +15,7 @@ import { predicateSql, rangeToOffsetLimit } from '../../plan/plan.ts';
 import { elementOrderDrop, elementOrderSql } from './modulation.ts';
 import {
   childCtx, childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, labelSelectOf,
+  CHILD_SCALAR_REDUCERS,
   ELEMENT_CHILD_STEPS, isBareBranchChildAllCard, isElementChildStep, reuseCurrentFrame, ROOT_SCOPE, scalarChildPrefixOk,
   type ChildFrame, type ChildParent, type ChildPlan, type ChildScope, type ChildUse, type CompileScope,
 } from './child-shape.ts';
@@ -115,10 +116,10 @@ export function popChildScope(child: ElementStream, frame: ChildFrame): ElementS
   return advance(child, q`SELECT ${p.c.id} AS id${carryFrag(carried, p)} FROM ${p}`, { origins: nextOrigins });
 }
 
-/** Child scalar reducers (compiler-side: the terminal barrier vocabulary the row compilers
- *  weight/aggregate on). The classify half of this vocabulary lives in child-shape.ts.
- *  Exported for the scalar-arm consumers (scalar-arm.ts). */
-export const CHILD_SCALAR_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
+// The terminal barrier vocabulary the row compilers aggregate on is ONE set, defined in the pure
+// classify leaf (child-shape.ts) and re-exported here for the scalar-arm consumers — the two halves
+// declared it separately before, which is one edit away from a classify/emit disagreement.
+export { CHILD_SCALAR_REDUCERS };
 /** The scalar continuation a property/element scalar child may carry after its projection
  *  (compiler-side; the classify twin is CHILD_SCALAR_ROW_STEPS in child-shape.ts). */
 const SHARED_SCALAR_CHILD_STEPS = new Set([
@@ -604,8 +605,18 @@ export function tryCompileScalarChild(
   return applySuffix(compileScalarChildRows(parent, nested, use, scope, false, undefined, bodyOf(body))?.stream ?? null, suffixOf(body));
 }
 
-/** One public scalar-valued child entry point. Consumers must not know whether a
- * scalar came from projected rows or a total scope-aware count barrier. */
+/** One public scalar-valued child entry point. Consumers must not know whether a scalar came from
+ * projected rows or a total scope-aware count barrier.
+ *
+ * The `??` is a UNION, not a precedence: the two arms are disjoint by classification — the count
+ * arm needs an element-PRESERVING prefix before a bare `count()`, and a scalar producer
+ * (values/id/label/constant/call/math/sack/format, a value-shaped select) never is one. So no body
+ * can be claimed by both, and the order cannot change an answer. Its classify twin is
+ * `classifyScalarChild`, which must admit the same union — and did not, keying on the terminal
+ * step instead (see the note there).
+ *
+ * `use` reaches only the scalar arm. A count child is one row per parent BY CONSTRUCTION (the
+ * barrier groups the preserved domain by ordinal), so `first` and `all` are the same stream. */
 export function tryCompileScalarValueChild(
   parent: ChildParent,
   nested: any,

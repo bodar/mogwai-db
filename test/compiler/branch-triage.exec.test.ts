@@ -12,6 +12,17 @@ import {
   isElementChild, isListChild, isScalarChild, type BranchKind, type ChildCtx,
 } from '../../src/compiler/steps/tail/child-shape.ts';
 import { type PStep } from '../../src/compiler/ir/strategies.ts';
+import { compile } from '../../src/compiler/compiler.ts';
+import { seeded } from '../support/graph.ts';
+import { MODERN_SEED } from '../fixtures/seed-modern.ts';
+
+/** The nested child body of the FIRST step that carries one — how a consumer hands a body to the
+ *  classifiers. */
+const nestedOf = (gremlin: string): any => {
+  for (const s of normalize(stepChain(parseGremlin(gremlin), {})).steps)
+    for (const a of s.args ?? []) if (a && typeof a === 'object' && 'nested' in a) return a.nested;
+  throw new Error(`no nested child body in ${gremlin}`);
+};
 
 /** Every branch-family step in a traversal, as the compiler sees it (parsed + normalized, so a
  *  folded order().by()/repeat cluster is already canonical). */
@@ -185,5 +196,56 @@ describe('branchNeedsShapeDispatch === the ten-boolean predicate it replaced', (
     }
     // guards against the corpus silently emptying (a parse change that stops yielding branch steps)
     expect(checked).toBeGreaterThanOrEqual(44);
+  });
+});
+
+// ---------- classifyScalarChild ⟺ tryCompileScalarValueChild ----------
+//
+// The classify twin of the scalar-child EMITTER must admit exactly what the emitter lowers. Half
+// the consumers call the emitter directly (map/flatMap/by) and half gate on the classifier
+// (choose/coalesce/local/path/select/branch arms), so a disagreement shows up as one Gremlin body
+// answering in one position and failing closed in another — which is what `values('age').count()`
+// did, because the classifier keyed on the terminal step (`count` → the movement-count arm only)
+// instead of taking the union of its three readings.
+describe('classifyScalarChild admits what the scalar-child emitter lowers', () => {
+  const store = seeded(MODERN_SEED);
+  /** The scalar values a traversal yields (the scalar payload column), for shape-agnostic compare. */
+  const scalars = (gremlin: string): unknown[] => {
+    const p = compile(gremlin, {});
+    if (p.kind !== 'read') throw new Error('expected read plan');
+    return store.query<Record<string, unknown>>(p.sql, p.binds).map((r) => Object.values(r)[0]);
+  };
+
+  test('a projection-with-reducer body lowers in EVERY consumer position, with one answer', () => {
+    // 4 persons have an age (1 value each), 2 software vertices have none (0).
+    const expected = [1, 1, 1, 1, 0, 0];
+    expect(isScalarChild(nestedOf("g.V().map(__.values('age').count())"), CTX)).toBe(true);
+    // the emitter-direct consumers (these already worked)
+    expect(scalars("g.V().map(__.values('age').count())")).toEqual(expected);
+    expect(scalars("g.V().project('a').by(__.values('age').count())")).toEqual(expected);
+    // the classifier-gated consumers (these failed closed: "not yet supported (scalar/projection
+    // body)" for the branches, "local() child shape not yet supported" for local)
+    expect(scalars("g.V().local(__.values('age').count())")).toEqual(expected);
+    expect(scalars("g.V().choose(__.has('age'), __.values('age').count(), __.values('age').count())")).toEqual(expected);
+    expect(scalars("g.V().coalesce(__.values('age').count(), __.constant(-1))")).toEqual(expected);
+    expect(scalars("g.V().path().by(__.values('age').count())")).toEqual(expected);
+    // …and the movement-count reading of a count terminal still works next to it, in both
+    // positions — the two arms are disjoint, so admitting one never shadows the other.
+    expect(scalars("g.V().local(__.out().count())")).toEqual([3, 0, 2, 1, 0, 0]);
+    expect(scalars("g.V().choose(__.has('age'), __.out().count(), __.values('age').count())"))
+      .toEqual([3, 0, 2, 1, 0, 0]);
+  });
+
+  test('a producer the projection builder cannot read + a reducer stays a CLEAN deferral', () => {
+    // format() lowers through the generic path, which has no scoped barrier, so `format().count()`
+    // is outside the emitter — and therefore outside the classifier too. The consumers that ASSERT
+    // on the classification would crash on a mismatch here, so this is the fail-closed half of the
+    // same invariant, not a support gap worth closing quietly.
+    const body = "__.format('%{name}').count()";
+    expect(isScalarChild(nestedOf(`g.V().map(${body})`), CTX)).toBe(false);
+    expect(() => scalars(`g.V().map(${body})`)).toThrow(/not supported by generic scalar lowering/);
+    expect(() => scalars(`g.V().local(${body})`)).toThrow(/not yet supported by generic child lowering/);
+    expect(() => scalars(`g.V().choose(__.has('age'), ${body}, __.out().count())`))
+      .toThrow(/not yet supported \(scalar\/projection body\)/);
   });
 });

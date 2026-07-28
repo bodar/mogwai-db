@@ -10,8 +10,8 @@ import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
 import { advance, aliasColsOf, elemRel, labelScope, prevRel, carryFrag, carryFragMint, carriedCols, carriedWith, mergeCarried, rehomeCarried, rigidCols, partitionOver, type AliasEntry, type AliasMap, type Carried, type Carry, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type AliasShape } from '../context/alias.ts';
 import { keyedChildRelation, keyedKeySet } from '../tail/keyed.ts';
-import { pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarModulations, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
-import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, isGlobalBarrier, optionMapMerge, optionMapNeedsPassthrough, readOptionMapArms, ROOT_SCOPE, type BranchArmShape, type ChildCtx } from '../tail/child-shape.ts';
+import { pushChildScope, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
+import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, isGlobalBarrier, optionMapMerge, optionMapNeedsPassthrough, readOptionMapArms, ROOT_SCOPE, type BranchArmShape, type ChildCtx, type ChildPlan } from '../tail/child-shape.ts';
 import { emptyElementLike } from '../tail/labelselect.ts';
 import { carryOf, toVariantStream, type ListStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
 import { finishListMerge, mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
@@ -254,10 +254,11 @@ export function tryLowerScalarUnion(s: Step, st: ElementStream): ScalarStream | 
   const arms: ScalarStream[] = [];
   for (const branch of branches) {
     // Classify first so a trailing as() run is peeled and handed to the emitter; unionScalarStreams
-    // already unions the arms' label sets, so the bound label survives the merge.
+    // already unions the arms' label sets, so the bound label survives the merge. The two-arm
+    // dispatch is tryCompileScalarValueChild's job — inlining it here (in the opposite arm order,
+    // which is how nobody noticed) was a second copy of that façade.
     const plan = classifyScalarChild(branch.nested, childCtx(st));
-    const arm = tryCompileScalarChild(st, branch.nested, 'all', ROOT_SCOPE, plan ?? undefined)
-      ?? tryCompileCountChild(st, branch.nested, ROOT_SCOPE, plan ?? undefined);
+    const arm = tryCompileScalarValueChild(st, branch.nested, 'all', ROOT_SCOPE, plan ?? undefined);
     if (!arm) return null;
     arms.push(arm);
   }
@@ -388,9 +389,13 @@ export function tryLowerScalarCoalesce(s: Step, st: ElementStream): ScalarStream
   const plans = branches.map((b) => classifyScalarChild(b.nested, childCtx(st)));
   if (plans.some((p) => !p)) return null;
   const { seedSt, ord } = originSeed(st);
-  const arms = branches.map((branch, i) =>
-    (tryCompileScalarChild(seedSt, branch.nested, 'all', ROOT_SCOPE, plans[i]!)
-      ?? tryCompileCountChild(seedSt, branch.nested, ROOT_SCOPE, plans[i]!))!);
+  const lowered = branches.map((branch, i) =>
+    tryCompileScalarValueChild(seedSt, branch.nested, 'all', ROOT_SCOPE, plans[i]!));
+  // classifyScalarChild admits exactly what this emitter lowers, so a null here is a classify/emit
+  // disagreement — decline rather than assert, and the caller's own deferral stays authoritative
+  // (the assertion this replaces is what would turn such a disagreement into a crash).
+  if (lowered.some((a) => !a)) return null;
+  const arms = lowered as ScalarStream[];
   return unionScalarStreams(st, arms, (a, k) =>
     k === 0 ? undefined : list(arms.slice(0, k).map((p) => q`${a.c[ord]} NOT IN (SELECT ${ord} FROM ${p.rel})`), ' AND '));
 }
@@ -1036,11 +1041,14 @@ export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream |
   const elsePlan = classifyScalarChild(elseArg.nested, childCtx(st));
   if (!thenPlan || !elsePlan) return null;
   const seedFor = chooseGate(st, predArg.nested);
-  const lowerArm = (arg: any, body: ReturnType<typeof stepChain>, seed: ElementStream): ScalarStream =>
-    (tryCompileScalarChild(seed, arg.nested, 'all', ROOT_SCOPE, body)
-      ?? tryCompileCountChild(seed, arg.nested, ROOT_SCOPE, body))!;
-  const thenEnd = lowerArm(thenArg, thenPlan.body, seedFor(false));
-  const elseEnd = lowerArm(elseArg, elsePlan.body, seedFor(true));
+  // The whole ChildPlan rides through (not just its body), so a peeled trailing suffix is lowered
+  // by the emitter rather than dropped — and the two-arm dispatch stays in the ONE façade.
+  const lowerArm = (arg: any, plan: ChildPlan, seed: ElementStream): ScalarStream | null =>
+    tryCompileScalarValueChild(seed, arg.nested, 'all', ROOT_SCOPE, plan);
+  const thenEnd = lowerArm(thenArg, thenPlan, seedFor(false));
+  const elseEnd = lowerArm(elseArg, elsePlan, seedFor(true));
+  // As above: classified but not lowerable is a disagreement, so fail closed here.
+  if (!thenEnd || !elseEnd) return null;
   return unionScalarStreams(st, [thenEnd, elseEnd]);
 }
 

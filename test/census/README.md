@@ -64,6 +64,36 @@ deferral or a fix; the gate holds the count from growing meanwhile.
 Telemetry, reported but never gating: newly-executing traversals, emission-order changes, and
 reworded deferral messages.
 
+## The blind spot: a newly-executing traversal has no baseline to be wrong against
+
+Gate 3 compares an executing traversal's digest to the one recorded for it. A traversal that
+**previously threw has no recorded digest**, so when it starts executing there is nothing to compare
+and the census reports `+1 newly executing` — a green run, and a line that reads like a win.
+
+It is not a win until someone looks at the VALUE. The row count being plausible proves nothing:
+
+> This has already happened once, and it is the reason this section exists. A change made
+> `select(...).by(__.in("created").values("name").fold().order(Scope.local))` compile for the first
+> time. The census said `+1 newly executing`, `mise run ci` was green, and L3 went up. The list came
+> back `["marko","josh","peter"]` — the `order(Scope.local)` was being silently dropped. Right
+> arity, right shape, wrong answer. The baseline had already been re-recorded by then, which banked
+> the wrong result as the new truth.
+
+So, when `record.ts` prints a `+` line:
+
+1. **Read the value, not the count.** Decode the result and check it against what TinkerPop says the
+   traversal means. `decodeAll` returns a `Map` for a map-shaped result, and `JSON.stringify` renders
+   a `Map` as `{}` — that will happily show you an empty object for a perfectly good answer, so
+   convert to a plain object before you judge it.
+2. **Pin it in a test that asserts the VALUE**, not `.length`. An arity assertion would have passed
+   on the unsorted list.
+3. **Only then re-record.** `record.ts` prints the delta *before* it writes precisely so this order
+   is possible; running it first and reading after is how the wrong answer got banked.
+
+The same reasoning applies in reverse to a `deferred → crashed` transition, which gate 4 does catch,
+and to a message rewording, which is telemetry. The asymmetry is inherent: the census can compare
+anything it has seen before, and can only *notice* something it hasn't.
+
 ## Two deliberate departures from the other ratchets
 
 **It does not auto-record.** `l3-state.json` rewrites itself on a clean local run, and that is safe
@@ -109,3 +139,7 @@ flapping with no diagnosis.
 Re-record to make a red build green without a written reason. That is the one thing this file
 exists to prevent, and a re-record with no explanation in the commit message is indistinguishable
 from the regression it hides.
+
+Re-record a `+N newly executing` delta before you have decoded those N results and checked the
+values. A green run says the traversal now compiles; it does not say the answer is right, and once
+recorded the wrong answer becomes the baseline that every later run is measured against.

@@ -295,9 +295,16 @@ export const isSackMutate = (s: PStep): boolean =>
   s.name === 'sack' && (s.args ?? []).some((a: any) => a && typeof a === 'object' && 'operator' in a);
 /** A bare read `sack()` — the scalar-producing form (rebinds the value to the carried sack). */
 const isSackRead = (s: PStep): boolean => s.name === 'sack' && !isSackMutate(s);
+/** The projections compileScalarChildRows reads with its own element-projection SQL builder (and
+ *  so can continue through any scalar row tail). Every other producer lowers via lowerSteps. */
+const BESPOKE_PROJECTIONS = new Set(['values', 'id', 'label', 'constant']);
+/** The terminal barrier vocabulary a scalar child row-run may reduce through. Defined in this
+ *  pure leaf and re-exported by child.ts (the compiler half) so the classify and emit sides read
+ *  ONE set — they used to declare it twice. */
+export const CHILD_SCALAR_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
 const CHILD_SCALAR_ROW_STEPS = new Set([
   ...SCALAR_TRANSFORMS, 'is', 'order', 'limit', 'skip', 'range', 'tail', 'dedup',
-  'count', 'sum', 'min', 'max', 'mean', 'as',
+  ...CHILD_SCALAR_REDUCERS, 'as',
 ]);
 
 /** Walk a run of SCALAR-row steps, threading the label env (an `as()` here binds the label to
@@ -427,6 +434,14 @@ function scalarRowParts(body: ReturnType<typeof stepChain>, ctx?: ChildCtx): { p
   if (projection.name === 'values' && (projection.args.length !== 1 || typeof projection.args[0] !== 'string')) return null;
   if ((projection.name === 'id' || projection.name === 'label') && projection.args.length) return null;
   if (projection.name === 'constant' && projection.args.length !== 1) return null;
+  // …and a REDUCER in the row tail needs a projection the bespoke builder can read. Only that
+  // builder continues a row-run through a scoped reducer (compileScalarChildRows' continueScalar);
+  // a generalized producer's body goes through lowerSteps, which absorbs the shared row vocabulary
+  // but not a scoped barrier. Rejecting it HERE — rather than letting the emitter decline it later
+  // — is what keeps classify and emit admitting the same set, and consumers ASSERT on this
+  // classification (a path/select/branch arm's `!`), so a mismatch is a crash, not a deferral.
+  if (!BESPOKE_PROJECTIONS.has(projection.name) && suffix.some((s) => CHILD_SCALAR_REDUCERS.has(s.name)))
+    return null;
   return { prefix, projection, suffix };
 }
 
@@ -493,17 +508,22 @@ export function elementScalarBranchArm(body: ReturnType<typeof stepChain>, ctx: 
 /** PURE. An element-parent scalar child (the strict isScalarChild shape): a movement-only
  * total count(), a values/id/label/constant projection with a scalar-row tail, or a nested
  * scalar-armed branch (elementScalarBranchArm). Returns the parsed body so the emitter reuses
- * it — one parse per arm, classify-then-emit. */
+ * it — one parse per arm, classify-then-emit.
+ *
+ * The three readings are a UNION, not a cascade keyed on the terminal step, and they are mutually
+ * exclusive anyway: the count arm needs an element-PRESERVING prefix, and a scalar producer never
+ * is one. Discriminating on `terminal.name === 'count'` instead made this classifier STRICTER than
+ * the emitter it gates (tryCompileScalarValueChild, which tries both arms): `values('age').count()`
+ * is a projection with a reducer tail, so the count arm declined it and the scalar arm was never
+ * asked — and `longestClassifying` cannot recover that, since splitting `count()` into the suffix
+ * is exactly what its barrier gate forbids. `map()` compiled that body (it calls the emitter
+ * directly) while `choose()`/`coalesce()`/`local()`, which gate on this, failed closed on it. */
 export function classifyScalarChild(nested: any, ctx: ChildCtx): ChildPlan | null {
   if (!nested) return null;
-  return longestClassifying(childSteps(nested, ctx.params), (body) => {
-    const terminal = body.at(-1);
-    if (!terminal) return false;
-    return terminal.name === 'count'
-      ? classifyCountChild(body, ctx) !== null
-      : classifyScalarChildRows('element', body, ctx)?.kind === 'element'
-        || elementScalarBranchArm(body, ctx);
-  });
+  return longestClassifying(childSteps(nested, ctx.params), (body) =>
+    classifyCountChild(body, ctx) !== null
+    || classifyScalarChildRows('element', body, ctx)?.kind === 'element'
+    || elementScalarBranchArm(body, ctx));
 }
 
 /**
