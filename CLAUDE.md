@@ -35,6 +35,9 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
   layer: which duplication is load-bearing, which is an unfinished consolidation, and the refined
   bright line (a Pass may CONSULT shape; it may never CONSTRUCT it). Refutes three cross-layer
   refactors — read before proposing one
+- `docs/2026-07-28-scalartype-refactoring-pattern.md` — `ScalarType` as the reusable template for a
+  vocabulary cleanup (N optionals → one total union; coarse views DERIVED; pair with a named
+  preserving rebuild + a runtime contract), and the ordered list of what it fits next
 
 ## Working rules
 
