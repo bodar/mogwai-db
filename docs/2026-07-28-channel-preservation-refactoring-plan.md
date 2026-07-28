@@ -41,13 +41,22 @@ Completed ScalarType/planner tranche:
 - `63efc68` — `MapEntry { sub: 'value' }` now owns a required
   `ScalarType`; record projection carries prefixed per-row type columns, scalar
   field re-entry restores them, and Map framing uses the declared channel.
+- `4eaddbc` — deletes the deprecated `ScalarOpts.vtype` construction adapter and
+  the `scalarType(as, vtype)` bridge; every compiler scalar-stream constructor now
+  declares `STATIC`, `PER_ROW`, or `UNKNOWN` explicitly.
 
-The current worktree completes **Phase 2, scope item 4** as one atomic migration:
-prefixed per-row type columns travel with record fields, static/unknown fields are
-explicit, and `execute.ts` frames from that channel. The UUID-equivalence and
-physical-layout assertions pass. The census delta is six known answers: projected
-stored count values now frame as GraphBinary Long rather than an inferred Int;
-the corpus's execution, deferral, and crash counts are unchanged.
+The current baseline is CI-green and pushed to `origin/trunk` at `4eaddbc`.
+Phase 2 scope item 4 is complete: prefixed per-row type columns travel with record
+fields, static/unknown fields are explicit, and `execute.ts` frames from that
+channel. The UUID-equivalence and physical-layout assertions pass. The census
+delta is six known answers: projected stored count values now frame as GraphBinary
+Long rather than an inferred Int; the corpus's execution, deferral, and crash
+counts are unchanged.
+
+The next measured ScalarType seam is scalar label history: `as()` must retain a
+per-row stored type through the JSON history entry so a later `select()` can frame
+UUID/date/long values exactly. List-member shape/type preservation remains part of
+that alias tranche; do not treat a scalar-label fix as a complete alias migration.
 
 ## North star
 
