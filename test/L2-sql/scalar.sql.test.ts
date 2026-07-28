@@ -639,20 +639,20 @@ describe('scalar-parent / projection SQL', () => {
   test('select().by(key) maps every entry to a scalar; by mods cycle', () => {
     const both = read('g.V().as("a").out().as("b").select("a","b").by("name")');
     expect(both.shape).toEqual({ kind: 'map', entries: [
-      { key: 'a', prefix: 'e0', sub: 'value' },
-      { key: 'b', prefix: 'e1', sub: 'value' },
+      { key: 'a', prefix: 'e0', sub: 'value', type: PER_ROW('e0_vtype') },
+      { key: 'b', prefix: 'e1', sub: 'value', type: PER_ROW('e1_vtype') },
     ] });
     const cyc = read('g.V().as("a").out().as("b").select("a","b").by("age").by("name")');
     // e0 uses by('age'), e1 uses by('name')
-    expect(cyc.sql).toContain("(SELECT value FROM vertex_properties WHERE node=e0n.id AND key=? ORDER BY id LIMIT 1) AS e0_v");
-    expect(cyc.sql).toContain("(SELECT value FROM vertex_properties WHERE node=e1n.id AND key=? ORDER BY id LIMIT 1) AS e1_v");
+    expect(cyc.sql).toContain('AS e0_vtype');
+    expect(cyc.sql).toContain('AS e1_vtype');
   });
 
   test('project() applies by mods to the current traverser under fresh keys', () => {
     const p = read('g.V().project("n","a").by("name").by("age")');
     expect(p.shape).toEqual({ kind: 'map', entries: [
-      { key: 'n', prefix: 'e0', sub: 'value' },
-      { key: 'a', prefix: 'e1', sub: 'value' },
+      { key: 'n', prefix: 'e0', sub: 'value', type: PER_ROW('e0_vtype') },
+      { key: 'a', prefix: 'e1', sub: 'value', type: PER_ROW('e1_vtype') },
     ] });
     // both entries source the current traverser (p.id), not an alias column
     expect(p.sql).toContain('JOIN nodes e0n ON e0n.id=p.id');
@@ -664,8 +664,8 @@ describe('scalar-parent / projection SQL', () => {
     expect(p.shape).toEqual({
       kind: 'map',
       entries: [
-        { key: 'name', prefix: 'e0', sub: 'value' },
-        { key: 'friend', prefix: 'e1', sub: 'value' },
+        { key: 'name', prefix: 'e0', sub: 'value', type: PER_ROW('e0_vtype') },
+        { key: 'friend', prefix: 'e1', sub: 'value', type: PER_ROW('e1_vtype') },
       ],
     });
     expect(p.sql).toContain('ROW_NUMBER() OVER () AS o0');
@@ -673,7 +673,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(p.sql).toContain('JOIN c');
     expect(p.sql).toContain('ON b1.o0=b0.o0');
     expect(read('g.V().project("friend").by(__.out().values("name")).select("friend")').shape)
-      .toEqual({ kind: 'value', type: UNKNOWN });
+      .toEqual({ kind: 'value', type: PER_ROW('e0_vtype') });
     const mixed = read('g.V().project("name","degree").by("name").by(__.out().count())');
     expect(mixed.sql).toContain('SELECT value FROM vertex_properties WHERE node=p0.id AND key=?');
     expect(mixed.sql).toContain('ON b1.o0=b0.o0');
@@ -683,7 +683,7 @@ describe('scalar-parent / projection SQL', () => {
       kind: 'map',
       entries: [
         { key: 'self', prefix: 'e0', sub: 'vertex' },
-        { key: 'friend', prefix: 'e1', sub: 'value' },
+        { key: 'friend', prefix: 'e1', sub: 'value', type: PER_ROW('e1_vtype') },
       ],
     });
     expect(element.sql).toContain('b0.rid AS e0_rid');
@@ -717,8 +717,8 @@ describe('scalar-parent / projection SQL', () => {
     expect(selected.shape).toEqual({
       kind: 'map',
       entries: [
-        { key: 'a', prefix: 'e0', sub: 'value' },
-        { key: 'b', prefix: 'e1', sub: 'value' },
+        { key: 'a', prefix: 'e0', sub: 'value', type: STATIC('long') },
+        { key: 'b', prefix: 'e1', sub: 'value', type: PER_ROW('e1_vtype') },
       ],
     });
     expect(selected.sql).toContain('SELECT CAST(p0.a0 ->> ? AS INTEGER) AS id');
@@ -731,14 +731,14 @@ describe('scalar-parent / projection SQL', () => {
       kind: 'map',
       entries: [
         { key: 'a', prefix: 'e0', sub: 'vertex' },
-        { key: 'b', prefix: 'e1', sub: 'value' },
+        { key: 'b', prefix: 'e1', sub: 'value', type: STATIC('long') },
       ],
     });
   });
 
   test('order() on a record stream sorts by a by(__.select(field)) modulator', () => {
     const p = read("g.V().out('created').project('a','b').by('name').by(__.in('created').count()).order().by(__.select('b'), Order.desc).select('a')");
-    expect(p.shape).toEqual({ kind: 'value', type: UNKNOWN });
+    expect(p.shape).toEqual({ kind: 'value', type: PER_ROW('e0_vtype') });
     // the order CTE sorts the record rows by field b's value column, descending
     expect(p.sql).toContain('ORDER BY r.e1_v DESC');
     // a following limit fuses into the same ORDER BY query (LIMIT after the sort)
@@ -792,9 +792,9 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().project("n","a").by("name").by("age").select(Column.keys).unfold().count()').shape)
       .toEqual({ kind: 'value', type: STATIC('long') });
     expect(read('g.V().project("n","a").by("name").by("age").limit(Scope.local,1)').shape)
-      .toEqual({ kind: 'map', entries: [{ key: 'n', prefix: 'e0', sub: 'value' }] });
+      .toEqual({ kind: 'map', entries: [{ key: 'n', prefix: 'e0', sub: 'value', type: PER_ROW('e0_vtype') }] });
     expect(read('g.V().project("n","a").by("name").by("age").tail(Scope.local,1)').shape)
-      .toEqual({ kind: 'map', entries: [{ key: 'a', prefix: 'e1', sub: 'value' }] });
+      .toEqual({ kind: 'map', entries: [{ key: 'a', prefix: 'e1', sub: 'value', type: PER_ROW('e1_vtype') }] });
   });
 
   test('dedup().by() is a windowed modulation-key consumer with explicit encounter order', () => {

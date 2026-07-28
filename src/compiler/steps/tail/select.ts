@@ -1,13 +1,13 @@
 import { q, list, empty, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { nodes, edges, labels } from '../../../sql/schema.ts';
-import { framedProps, labelNameSub, nodePropScalar, edgePropScalar, edgePropsAgg, predicateSql, propExtract, extIdOf, P_OPS } from '../../plan/plan.ts';
+import { framedProps, labelNameSub, nodePropScalar, nodePropType, edgePropScalar, edgePropType, edgePropsAgg, predicateSql, propExtract, extIdOf, P_OPS, storedValueExpr } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { aliasElem, aliasIsElement, carryFrag, carriedCols, type AliasMap, type ElementStream } from '../context/context.ts';
 import { aliasId, aliasPresent, aliasScalar, shapeElem } from '../context/alias.ts';
 import { emptyElementLike, historyPropertyValues, historyValues, popEnd, popIsListResult, selectOneFromAlias } from './labelselect.ts';
 import { carryOf, continueLowering, dispatchShapeTail, recordFieldColumns, toElementStream, toListStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type ListStream, type LoweringResult, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
-import { type Compiled } from '../../../sql/kernel/render.ts';
+import { PER_ROW, STATIC, UNKNOWN, perRowColumnOf, type Compiled, type ScalarType } from '../../../sql/kernel/render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
 import { lowerGlobalCount } from './barrier.ts';
 import { applyChildCardinality, lowerElementBody, mintChildEncounter, pushChildScope, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
@@ -22,6 +22,28 @@ function byToEntry(byArgs: any[] | undefined): { sub: 'vertex' | 'value'; key?: 
   if (by.kind === 'key') return { sub: 'value', key: by.key };
   if (by.kind === 'nested') throw new Error('by(traversal) modulator not yet supported');
   throw new Error(`by(T.${by.token}) modulator not yet supported`);
+}
+
+/** Re-name a scalar's per-row type column as it enters a wide record field. Static
+ * and unknown channels need no physical column but stay explicit in the metadata. */
+function recordScalarType(prefix: string, type: ScalarType): ScalarType {
+  return type.kind === 'perRow' ? PER_ROW(`${prefix}_vtype`) : type;
+}
+
+function scalarRecordField(key: string, prefix: string, type: ScalarType): Extract<RecordField, { sub: 'value' }> {
+  return { key, prefix, sub: 'value', type: recordScalarType(prefix, type) };
+}
+
+function scalarRecordCols(rel: Relation, prefix: string, type: ScalarType): Expression[] {
+  const perRow = perRowColumnOf(type);
+  return [
+    q`${rel.c.v} AS ${`${prefix}_v`}`,
+    ...(perRow ? [q`${rel.c[perRow]} AS ${`${prefix}_vtype`}`] : []),
+  ];
+}
+
+function storedPropertyRecordField(key: string, prefix: string): Extract<RecordField, { sub: 'value' }> {
+  return { key, prefix, sub: 'value', type: PER_ROW(`${prefix}_vtype`) };
 }
 
 /** Re-root the current traverser on an element id held in one of its carried alias
@@ -85,10 +107,11 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
       if (plan.kind === 'scalar') {
         const child = tryCompileScalarValueChild(seed, nested[i], 'first', reuseCurrentFrame(outer.scope, outer.frame), plan.plan)!;
         const rel = child.rel.as(`b${i}`);
+        const field = scalarRecordField(keys[i], prefix, child.type);
         return {
           rel,
-          field: { key: keys[i], prefix, sub: 'value' as const },
-          cols: [q`${rel.c.v} AS ${`${prefix}_v`}`],
+          field,
+          cols: scalarRecordCols(rel, prefix, child.type),
         };
       }
       if (plan.kind === 'list') {
@@ -147,19 +170,23 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
     }
     if (typeof spec === 'string' && source.elem === 'vertex') {
       const expr = nodePropScalar(source.id, spec);
+      const vtype = nodePropType(source.id, spec);
+      const field = storedPropertyRecordField(keys[i], prefix);
       const rel = st.q.cte(
-        q`SELECT ${expr} AS v${carryFrag(outer.seed.carried, p)} FROM ${p}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
-        ['v', ...carriedCols(outer.seed.carried)],
+        q`SELECT ${storedValueExpr(expr, vtype)} AS v, ${vtype} AS vtype${carryFrag(outer.seed.carried, p)} FROM ${p}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
+        ['v', 'vtype', ...carriedCols(outer.seed.carried)],
       ).as(`b${i}`);
-      return { rel, field: { key: keys[i], prefix, sub: 'value' as const }, cols: [q`${rel.c.v} AS ${`${prefix}_v`}`] };
+      return { rel, field, cols: scalarRecordCols(rel, prefix, PER_ROW('vtype')) };
     }
     if (typeof spec === 'string') {
       const expr = edgePropScalar(n.c.id, spec);
+      const vtype = edgePropType(n.c.id, spec);
+      const field = storedPropertyRecordField(keys[i], prefix);
       const rel = st.q.cte(
-        q`SELECT ${expr} AS v${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${source.id}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
-        ['v', ...carriedCols(outer.seed.carried)],
+        q`SELECT ${storedValueExpr(expr, vtype)} AS v, ${vtype} AS vtype${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${source.id}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
+        ['v', 'vtype', ...carriedCols(outer.seed.carried)],
       ).as(`b${i}`);
-      return { rel, field: { key: keys[i], prefix, sub: 'value' as const }, cols: [q`${rel.c.v} AS ${`${prefix}_v`}`] };
+      return { rel, field, cols: scalarRecordCols(rel, prefix, PER_ROW('vtype')) };
     }
     const scalar = spec.token === 'label'
       ? labelNameSub(n.c.label)
@@ -168,7 +195,8 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
       q`SELECT ${scalar} AS v${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${source.id}`,
       ['v', ...carriedCols(outer.seed.carried)],
     ).as(`b${i}`);
-    return { rel, field: { key: keys[i], prefix, sub: 'value' as const }, cols: [q`${rel.c.v} AS ${`${prefix}_v`}`] };
+    const type = spec.token === 'label' ? STATIC('string') : UNKNOWN;
+    return { rel, field: scalarRecordField(keys[i], prefix, type), cols: scalarRecordCols(rel, prefix, type) };
   });
   const fields = branches.map((branch) => branch.field);
   const cols = branches.flatMap((branch) => branch.cols);
@@ -328,8 +356,9 @@ export function lowerScalarProject(s: ScalarStream, proj: PStep): RecordStream |
       : outer.seed;
     if (!child) return null;
     const rel = child.rel.as(`b${i}`);
-    const field: RecordField = { key, prefix: `e${i}`, sub: 'value' };
-    return { rel, field, cols: [q`${rel.c.v} AS ${`e${i}_v`}`] };
+    const prefix = `e${i}`;
+    const field = scalarRecordField(key, prefix, child.type);
+    return { rel, field, cols: scalarRecordCols(rel, prefix, child.type) };
   });
   if (branches.some((b) => !b)) return null;
   const bs = branches as { rel: Relation; field: RecordField; cols: Expression[] }[];
@@ -397,9 +426,10 @@ export function lowerRecordSelectProject(st: ElementStream, proj: PStep): Stream
         cols.push(q`${en.c.id} AS ${`${prefix}_rid`}, COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${framedProps(en, 'vertex')} AS ${`${prefix}_props`}`);
     } else {
       const prop = src.elem === 'edge' ? edgePropScalar(en.c.id, e.key!) : nodePropScalar(en.c.id, e.key!);
-      cols.push(q`${prop} AS ${`${prefix}_v`}`); // first-under-multi; projection, not indexed
+      const vtype = src.elem === 'edge' ? edgePropType(en.c.id, e.key!) : nodePropType(en.c.id, e.key!);
+      cols.push(q`${storedValueExpr(prop, vtype)} AS ${`${prefix}_v`}, ${vtype} AS ${`${prefix}_vtype`}`);
     }
-    return { key: k, prefix, sub: e.sub === 'value' ? 'value' : src.elem };
+    return e.sub === 'value' ? storedPropertyRecordField(k, prefix) : { key: k, prefix, sub: src.elem };
   });
 
   const relCols = [...fields.flatMap(recordFieldColumns), ...carriedCols(st.carried)];
@@ -472,8 +502,9 @@ export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, st
       joins.push(q` JOIN ${en} ON ${en.c.id}=${aliasId(col, end)}`);
       if (by.sub === 'value') {
         const prop = elem === 'edge' ? edgePropScalar(en.c.id, by.key!) : nodePropScalar(en.c.id, by.key!);
-        cols.push(q`${prop} AS ${`${prefix}_v`}`);
-        return { key: k, prefix, sub: 'value' };
+        const vtype = elem === 'edge' ? edgePropType(en.c.id, by.key!) : nodePropType(en.c.id, by.key!);
+        cols.push(q`${storedValueExpr(prop, vtype)} AS ${`${prefix}_v`}, ${vtype} AS ${`${prefix}_vtype`}`);
+        return storedPropertyRecordField(k, prefix);
       }
       const el = labels.as(`${prefix}l`);
       joins.push(q` JOIN ${el} ON ${el.c.id}=${en.c.label}`);
@@ -485,7 +516,7 @@ export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, st
     }
     // A scalar value label (by() does not apply to a non-element value).
     cols.push(q`${aliasScalar(col, end)} AS ${`${prefix}_v`}`);
-    return { key: k, prefix, sub: 'value' };
+    return scalarRecordField(k, prefix, entry.as ? STATIC(entry.as) : UNKNOWN);
   });
   const where = presents.length ? q` WHERE ${list(presents, ' AND ')}` : empty;
   const relCols = [...fields.flatMap(recordFieldColumns), ...carriedCols(s.carried)];
@@ -695,11 +726,12 @@ const recordSelect: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
   const field = s.fields.find((f) => f.key === keys[0]);
   if (!field) throw new Error(`select("${keys[0]}"): record has no such key`);
   if (field.sub === 'value') {
+    const perRow = perRowColumnOf(field.type);
     const rel = s.q.cte(
-      q`SELECT ${r.c[`${field.prefix}_v`]} AS v${carryFrag(s.carried, r)} FROM ${r}`,
-      ['v', ...carriedCols(s.carried)],
+      q`SELECT ${r.c[`${field.prefix}_v`]} AS v${perRow ? q`, ${r.c[perRow]} AS ${perRow}` : empty}${carryFrag(s.carried, r)} FROM ${r}`,
+      ['v', ...(perRow ? [perRow] : []), ...carriedCols(s.carried)],
     );
-    return continueLowering(toScalarStream(carryOf(s), rel), at + 1);
+    return continueLowering(toScalarStream(carryOf(s), rel, undefined, { type: field.type }), at + 1);
   }
   if (field.sub === 'list') {
     const rel = s.q.cte(

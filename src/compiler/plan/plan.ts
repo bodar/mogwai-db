@@ -531,6 +531,11 @@ export const typedScalarNode = (
 export const nodePropScalar = (nodeIdExpr: Expression, key: string): Expression =>
   q`(SELECT value FROM vertex_properties WHERE node=${nodeIdExpr} AND key=${value(key)} ORDER BY id LIMIT 1)`;
 
+/** The stored type paired with nodePropScalar's first-under-multi value. Keep this as
+ * a sibling subquery rather than inferring from SQLite's lossy storage class. */
+export const nodePropType = (nodeIdExpr: Expression, key: string): Expression =>
+  q`(SELECT vtype FROM vertex_properties WHERE node=${nodeIdExpr} AND key=${value(key)} ORDER BY id LIMIT 1)`;
+
 /** node: does ANY value under `key` satisfy `pred` (undefined → the key exists at
  *  all). EXISTS over vertex_properties → multi-property has() semantics. The generic LIKE
  *  path is the semantic authority; the ftsSubstringPredicate fast path (FtsSubstringFastPath)
@@ -547,6 +552,10 @@ export const nodeHasProp = (nodeIdExpr: Expression, key: string, pred: any): Exp
  *  the mirror of nodePropScalar for the normalized edge_properties table. */
 export const edgePropScalar = (edgeIdExpr: Expression, key: string): Expression =>
   q`(SELECT value FROM edge_properties WHERE edge=${edgeIdExpr} AND key=${value(key)})`;
+
+/** The stored type paired with edgePropScalar's single-cardinality value. */
+export const edgePropType = (edgeIdExpr: Expression, key: string): Expression =>
+  q`(SELECT vtype FROM edge_properties WHERE edge=${edgeIdExpr} AND key=${value(key)})`;
 
 /** edge: does `key` satisfy `pred` (undefined → the key exists). EXISTS over
  *  edge_properties — mirror of nodeHasProp. */

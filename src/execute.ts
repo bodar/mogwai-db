@@ -1,4 +1,4 @@
-import { compilePlan, staticTypeOf, type Compiled, type WritePlan, type ListOf, type MapEntry, type MapOf, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType, type FastPathConfig } from './compiler/compiler.ts';
+import { compilePlan, staticTypeOf, type Compiled, type WritePlan, type ListOf, type MapEntry, type MapOf, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ScalarType, type ValueType, type FastPathConfig } from './compiler/compiler.ts';
 import { hasSerializer, isCollectionType, valueNodeFromStored, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import type { GraphStore } from './storage.ts';
 import type { ServiceRegistry } from './services/spi/types.ts';
@@ -152,7 +152,7 @@ function mapBuffer(row: any, entries: MapEntry[]): Buffer {
   for (const e of entries) {
     parts.push(ioc.anySerializer.serialize(e.key));
     parts.push(e.sub === 'value'
-      ? ioc.anySerializer.serialize(row[`${e.prefix}_v`])
+      ? recordValueBuffer(row, e.prefix, e.type)
       : e.sub === 'list'
         ? listFieldBuffer(row[`${e.prefix}_list`], e.of)
         : e.nullable && row[`${e.prefix}_id`] === null
@@ -160,6 +160,15 @@ function mapBuffer(row: any, entries: MapEntry[]): Buffer {
           : elementBuffer(row, e.prefix, e.sub));
   }
   return Buffer.concat(parts);
+}
+
+/** Frame a scalar field from its declared record channel. Unlike a bare JS value,
+ * a stored UUID/date/long needs its sibling vtype to avoid storage-class inference. */
+function recordValueBuffer(row: any, prefix: string, type: ScalarType): Buffer {
+  const v = row[`${prefix}_v`];
+  if (type.kind !== 'perRow') return frameValue(v, staticTypeOf(type));
+  const vtype = row[type.column];
+  return isCollectionType(vtype) ? frameStoredValue(v, vtype) : frameValue(v, vtypeToValueType(vtype));
 }
 
 // One side (key/value) of a Map.Entry row → a fully-qualified GraphBinary buffer, per

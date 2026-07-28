@@ -8,7 +8,7 @@
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
 import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
-import { STATIC } from '../../src/sql/kernel/render.ts';
+import { PER_ROW, STATIC } from '../../src/sql/kernel/render.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery, executeFramed } from '../support/executor.ts';
@@ -68,6 +68,11 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     expect(toRecordStream(carry, q.cte({} as any, recordCols), fields).kind).toBe('record');
     expect(() => toRecordStream(carry, q.cte({} as any, recordCols.slice(1)), fields)).toThrow(
       'record stream column mismatch',
+    );
+    const typedField = [{ key: 'x', prefix: 'e0', sub: 'value' as const, type: PER_ROW('e0_vtype') }];
+    expect(toRecordStream(carry, q.cte({} as any, ['e0_v', 'e0_vtype']), typedField).kind).toBe('record');
+    expect(() => toRecordStream(carry, q.cte({} as any, ['e0_v']), typedField)).toThrow(
+      'record stream column mismatch: expected [e0_v, e0_vtype], got [e0_v]',
     );
     const groupKey = { kind: 'scalar' as const };
     const groupVal = { kind: 'count' as const };

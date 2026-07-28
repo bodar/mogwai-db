@@ -34,6 +34,21 @@ async function elementTypeCodes(buf: Buffer): Promise<number[]> {
   }
   return codes;
 }
+
+/** The type byte of every value in a fully-qualified GraphBinary MAP. This proves
+ * record-field framing uses its declared scalar channel rather than JS inference. */
+async function mapValueTypeCodes(buf: Buffer): Promise<number[]> {
+  const body = buf.subarray(2);
+  const r = StreamReader.fromBuffer(body);
+  const count = await r.readInt32BE();
+  const codes: number[] = [];
+  for (let i = 0; i < count; i++) {
+    await ioc.anySerializer.deserialize(r); // key
+    codes.push(body[r.position]);
+    await ioc.anySerializer.deserialize(r); // value
+  }
+  return codes;
+}
 const rawList = (s: GraphStore, g: string): Buffer => executeQuery(s, g, {})[0];
 
 describe('typed collection values round-trip over GraphBinary', () => {
@@ -110,6 +125,23 @@ describe('typed collection values round-trip over GraphBinary', () => {
     executeQuery(s, "g.addV('p').as('a').addV('p').as('b').addE('knows').from('a').to('b').property('tags',['x', 5L])", {});
     const buf = rawList(s, "g.E().hasLabel('knows').values('tags').is(typeOf(GType.LIST))");
     expect(await elementTypeCodes(buf)).toEqual([D.STRING, D.LONG]);
+  });
+});
+
+describe('record map fields preserve their scalar type channel', () => {
+  test('a UUID property frames identically through values() and project().by(key)', async () => {
+    const s = store();
+    const uuid = 'c32f2a16-2dac-4f1e-a5a0-b3021db7ef5a';
+    executeQuery(s, `g.addV('t').property('gid',UUID('${uuid}')).property('name','typed')`, {});
+
+    const direct = rawList(s, "g.V().values('gid')");
+    const projected = rawList(s, "g.V().project('gid','name').by('gid').by('name')");
+    expect(direct[0]).toBe(D.UUID);
+    expect(await mapValueTypeCodes(projected)).toEqual([D.UUID, D.STRING]);
+
+    const decoded = await dec(projected) as Map<string, unknown>;
+    expect(decoded.get('gid')).toBe(uuid);
+    expect(decoded.get('name')).toBe('typed');
   });
 });
 

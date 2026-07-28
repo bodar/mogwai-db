@@ -399,7 +399,7 @@ describe('unified lowering characterization', () => {
     const mixed = read('g.V(1).as("a").values("name").as("b").select("a","b")');
     expect(mixed.shape).toEqual({ kind: 'map', entries: [
       { key: 'a', prefix: 'e0', sub: 'vertex' },
-      { key: 'b', prefix: 'e1', sub: 'value' },
+      { key: 'b', prefix: 'e1', sub: 'value', type: UNKNOWN },
     ] });
   });
 });

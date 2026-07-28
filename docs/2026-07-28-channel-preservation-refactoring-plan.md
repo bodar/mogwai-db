@@ -38,16 +38,16 @@ Completed ScalarType/planner tranche:
   This is intentionally NOT a unification of the two vocabularies: stream
   `ScalarType.perRow` names a relation column; planner `TypeCtx.perRow` owns the
   SQL expression for that column in its current scope.
+- pending local checkpoint — `MapEntry { sub: 'value' }` now owns a required
+  `ScalarType`; record projection carries prefixed per-row type columns, scalar
+  field re-entry restores them, and Map framing uses the declared channel.
 
-The current baseline is CI-green at `5c1f759`; the only uncommitted file is this
-plan document. The next authorized seam is **Phase 2, scope item 4**: make
-`MapEntry { sub: 'value' }` carry an explicit scalar type source through record
-field projection and Map framing. Do it as one atomic migration: prefixed
-per-row type columns must travel with the value field, static/unknown fields must
-be explicit, and `execute.ts` must frame from that channel. Do not introduce an
-optional compatibility `type?` field; it recreates the absence case this phase is
-eliminating. Update the existing shape assertions and add the UUID-equivalence
-end-to-end test before recording any census delta.
+The current worktree completes **Phase 2, scope item 4** as one atomic migration:
+prefixed per-row type columns travel with record fields, static/unknown fields are
+explicit, and `execute.ts` frames from that channel. The UUID-equivalence and
+physical-layout assertions pass. The census delta is six known answers: projected
+stored count values now frame as GraphBinary Long rather than an inferred Int;
+the corpus's execution, deferral, and crash counts are unchanged.
 
 ## North star
 

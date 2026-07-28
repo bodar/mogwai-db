@@ -13,6 +13,7 @@ import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery, executeFramed } from '../support/executor.ts';
 import { ioc } from '../../src/io.ts';
 import { Query } from '../../src/sql/kernel/q.ts';
+import { PER_ROW } from '../../src/sql/kernel/render.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { assertStreamColumns, toGroupStream, toPathStream, toPropertyStream, toRecordStream, toScalarStream, toVariantStream } from '../../src/compiler/steps/context/stream.ts';
 import { popChildScope, pushChildScope, reuseCurrentFrame } from '../../src/compiler/steps/tail/child.ts';
@@ -102,7 +103,7 @@ describe('movement / edge sources SQL', () => {
     expect(selected.shape).toEqual({ kind: 'edge' });
     expect(selected.sql).toContain('FROM edges n JOIN');
     expect(read('g.V(1).outE().project("w").by("weight")').shape).toEqual({
-      kind: 'map', entries: [{ key: 'w', prefix: 'e0', sub: 'value' }],
+      kind: 'map', entries: [{ key: 'w', prefix: 'e0', sub: 'value', type: PER_ROW('e0_vtype') }],
     });
   });
 });

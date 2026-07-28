@@ -299,7 +299,7 @@ export const pathColumns = (layout: PathLayout): string[] => {
 };
 
 export const recordFieldColumns = (f: RecordField): string[] => f.sub === 'value'
-  ? [`${f.prefix}_v`]
+  ? [`${f.prefix}_v`, ...perRowCols(f.type)]
   : f.sub === 'list'
     ? [`${f.prefix}_list`]
   : f.sub === 'edge'

@@ -38,7 +38,9 @@ export type MapOf =
 // key plus the SQL column prefix carrying its typed payload.
 export type MapEntry =
   | { key: string; prefix: string; sub: 'vertex' | 'edge'; nullable?: boolean }
-  | { key: string; prefix: string; sub: 'value' }
+  // A record/map scalar has the same total type channel as ScalarStream. Its per-row
+  // member names the prefixed sibling column in the wide record relation.
+  | { key: string; prefix: string; sub: 'value'; type: ScalarType }
   | { key: string; prefix: string; sub: 'list'; of: ListOf };
 
 // The element kind an element-shaped column carries, and the columns that frame
