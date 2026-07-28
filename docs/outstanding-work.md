@@ -78,6 +78,31 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    (`g_match_anyXknowsX_any_selectXaX_byXnameX_concatX…X`), but it has nothing to do with `match()`.
    *Medium-High — silent wrong answer, and probably small.*
 
+0c. **17 fail-closed VIOLATIONS, surfaced by the census** (`test/census/deferrals.tsv`, status
+   `crashed`). Each throws a raw runtime error instead of a clear deferral, which the project's
+   root rule forbids outright. They were invisible before because a crash and a deferral both just
+   "fail"; the census separates them and gates the count from growing. Five root causes:
+   - **`Cardinality.set(v)`/`list(v)`/`single(v)` as a merge-map VALUE — 8 cases.**
+     `g.mergeV([name:"marko"]).option(Merge.onMatch, [age: Cardinality.set(31)])` reaches SQLite
+     with the tagged `{cardinality}` object still wrapping the value: *"Binding expected string,
+     TypedArray, boolean, number, bigint or null"*. The value needs unwrapping (and the
+     cardinality honouring, or a clean deferral) at the merge-map seam. Biggest single cluster and
+     probably the cheapest. *Medium.*
+   - **A `datetime` property beyond int32 — 2 cases.** `property("birthday", datetime(...))` with
+     an epoch-ms outside ±2^31 throws Node's *"The value of \"value\" is out of range"* — an Int32
+     write on a value that is a Long. A framing/serializer bug, not a storage one. *Medium.*
+   - **`g.addV().property(T.id, 1)` on an existing id — 1 case.** Raw *"UNIQUE constraint failed:
+     nodes.id"*. Should be a clear "vertex id already exists". *Low.*
+   - **We emit syntactically invalid SQL — 1 case.**
+     `g.V().as("a").out("knows").as("a").select(Pop.all, __.constant("a"))` produces SQL SQLite
+     rejects with *near ",": syntax error*. A rebound label under `select(Pop.all, …)` with a
+     traversal argument. **The most concerning of the five** — every other entry fails on a value,
+     this one means the emitted string is malformed. *Medium-High.*
+   - **Two `null`/`undefined` dereferences — 3 cases.** `child.stream` on a `project()` whose
+     `by()` bodies are `select(first/last, "v")` over a rebound label; and `node.constructor` on
+     the named-loop `repeat("a", …)` form (already tracked in item 3, listed here for completeness
+     — the census counts it as a crash either way). *Low-Med.*
+
 1. **List members frame as bare values, not elements.** `AliasEntry` does not record the member
    shape, so a path/element-list label cannot frame its members as vertices. Blocks
    `g_V_hasXperson_name_markoX_path_asXaX_unionXidentity_identityX_selectXaX_unfold` (which also
