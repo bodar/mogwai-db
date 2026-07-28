@@ -111,10 +111,12 @@ function lowerPathPositionChild(
     throw new Error(`path().by(traversal): a branch (choose/coalesce/union) at a path position must be the whole by() body; a movement/filter around it is not yet supported (needs first-collapse)`);
   // Flat value/transform/reducer body → the generic scalar child seam with `first` cardinality
   // (encounter = ROW_NUMBER PARTITION BY ordinal) collapses a fan-out prefix to one value.
-  // A trailing as() run has no emitter at a path position, so a plan carrying one is not usable
-  // here and falls through to the deferral below — exactly what a null classification did before.
   const plan = classifyScalarChild(nested, childCtx(seed));
-  if (plan && !plan.binds) return tryCompileScalarValueChild(seed, nested, 'first', reuseCurrentFrame(outer.scope, outer.frame), plan.body)!;
+  if (plan) {
+    const out = tryCompileScalarValueChild(seed, nested, 'first', reuseCurrentFrame(outer.scope, outer.frame), plan);
+    if (out) return out;
+    // A suffix the generic loop cannot lower here declines, and falls to the deferral below.
+  }
   throw new Error(`path().by(traversal) position must be a scalar child (value/transform/reducer, or a bare choose()/coalesce()); __.${armDesc()} not yet supported`);
 }
 

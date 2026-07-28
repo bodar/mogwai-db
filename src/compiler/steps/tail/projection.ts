@@ -396,7 +396,7 @@ const tailOptional: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
   const nested = step.args[0]?.nested;
   const listPlan = classifyListChild(nested, childCtx(st));
   if (listPlan) {
-    const lowered = tryCompileListChild(st, nested, ROOT_SCOPE, listPlan.body);
+    const lowered = tryCompileListChild(st, nested, ROOT_SCOPE, listPlan);
     if (lowered) return continueLowering(lowered, stop + 1);
   }
   const countPlan = classifyTotalScalarChild(nested, childCtx(st));

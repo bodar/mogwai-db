@@ -256,8 +256,8 @@ export function tryLowerScalarUnion(s: Step, st: ElementStream): ScalarStream | 
     // Classify first so a trailing as() run is peeled and handed to the emitter; unionScalarStreams
     // already unions the arms' label sets, so the bound label survives the merge.
     const plan = classifyScalarChild(branch.nested, childCtx(st));
-    const arm = tryCompileScalarChild(st, branch.nested, 'all', ROOT_SCOPE, plan?.body, plan?.binds)
-      ?? tryCompileCountChild(st, branch.nested, ROOT_SCOPE, plan?.body, plan?.binds);
+    const arm = tryCompileScalarChild(st, branch.nested, 'all', ROOT_SCOPE, plan ?? undefined)
+      ?? tryCompileCountChild(st, branch.nested, ROOT_SCOPE, plan ?? undefined);
     if (!arm) return null;
     arms.push(arm);
   }
@@ -272,7 +272,7 @@ export function tryLowerListUnion(s: Step, st: ElementStream): ListStream | null
   // body — so a partly-list union never emits arm0's CTEs before a later arm disqualifies.
   const plans = branches.map((b) => classifyListChild(b.nested, childCtx(st)));
   if (plans.some((p) => !p)) return null;
-  const arms = branches.map((branch, i) => tryCompileListChild(st, branch.nested, ROOT_SCOPE, plans[i]!.body, plans[i]!.binds)!);
+  const arms = branches.map((branch, i) => tryCompileListChild(st, branch.nested, ROOT_SCOPE, plans[i]!)!);
   return finishListMerge(carryOf(st), arms);
 }
 
@@ -330,7 +330,6 @@ export const optional: StepFn = (s, st) => {
 export function tryLowerVariantOptional(s: Step, st: ElementStream): VariantStream | null {
   const nested = s.args[0]?.nested;
   const plan = classifyScalarChild(nested, childCtx(st));
-  if (plan?.binds) return null; // trailing as() on this arm shape has no emitter yet — fail closed, never drop the label
   if (!plan) return null;
   // Same fail-closed wall as the three mixed-shape siblings (union/coalesce/choose above): the
   // hit arm is a scalar row (no path position) and the miss arm the original element (keeps
@@ -390,8 +389,8 @@ export function tryLowerScalarCoalesce(s: Step, st: ElementStream): ScalarStream
   if (plans.some((p) => !p)) return null;
   const { seedSt, ord } = originSeed(st);
   const arms = branches.map((branch, i) =>
-    (tryCompileScalarChild(seedSt, branch.nested, 'all', ROOT_SCOPE, plans[i]!.body, plans[i]!.binds)
-      ?? tryCompileCountChild(seedSt, branch.nested, ROOT_SCOPE, plans[i]!.body))!);
+    (tryCompileScalarChild(seedSt, branch.nested, 'all', ROOT_SCOPE, plans[i]!)
+      ?? tryCompileCountChild(seedSt, branch.nested, ROOT_SCOPE, plans[i]!))!);
   return unionScalarStreams(st, arms, (a, k) =>
     k === 0 ? undefined : list(arms.slice(0, k).map((p) => q`${a.c[ord]} NOT IN (SELECT ${ord} FROM ${p.rel})`), ' AND '));
 }
@@ -1035,7 +1034,6 @@ export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream |
   const [predArg, thenArg, elseArg] = args;
   const thenPlan = classifyScalarChild(thenArg.nested, childCtx(st));
   const elsePlan = classifyScalarChild(elseArg.nested, childCtx(st));
-  if (thenPlan?.binds || elsePlan?.binds) return null; // as above
   if (!thenPlan || !elsePlan) return null;
   const seedFor = chooseGate(st, predArg.nested);
   const lowerArm = (arg: any, body: ReturnType<typeof stepChain>, seed: ElementStream): ScalarStream =>
@@ -1056,8 +1054,8 @@ export function tryLowerListChoose(s: Step, st: ElementStream): ListStream | nul
   const elsePlan = classifyListChild(elseArg.nested, childCtx(st));
   if (!thenPlan || !elsePlan) return null;
   const seedFor = chooseGate(st, predArg.nested);
-  const thenEnd = tryCompileListChild(seedFor(false), thenArg.nested, ROOT_SCOPE, thenPlan.body)!;
-  const elseEnd = tryCompileListChild(seedFor(true), elseArg.nested, ROOT_SCOPE, elsePlan.body)!;
+  const thenEnd = tryCompileListChild(seedFor(false), thenArg.nested, ROOT_SCOPE, thenPlan)!;
+  const elseEnd = tryCompileListChild(seedFor(true), elseArg.nested, ROOT_SCOPE, elsePlan)!;
   return finishListMerge(carryOf(st), [thenEnd, elseEnd]);
 }
 

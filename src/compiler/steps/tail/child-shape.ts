@@ -446,7 +446,7 @@ function elementOptionMapScalarBranch(branch: PStep, ctx: ChildCtx): boolean {
 
   const choice = branch.args[0];
   const choiceIsScalar = choice && typeof choice === 'object' && 'nested' in choice
-    ? noBinds(classifyScalarChild(choice.nested, ctx))
+    ? classifyScalarChild(choice.nested, ctx) !== null
     : choice && typeof choice === 'object' && 'token' in choice
       && (choice.token === 'label' || choice.token === 'id');
   if (!choiceIsScalar) return false;
@@ -484,43 +484,67 @@ export function elementScalarBranchArm(body: ReturnType<typeof stepChain>, ctx: 
     // predicate-form choose(pred, then, else): only the two value arms must be scalar (the
     // predicate is a gate). Other arities defer to tryLowerScalarChoose's own decline.
     if (kids.length !== 3) return false;
-    return noBinds(classifyScalarChild(kids[1].nested, armCtx)) && noBinds(classifyScalarChild(kids[2].nested, armCtx));
+    return classifyScalarChild(kids[1].nested, armCtx) !== null && classifyScalarChild(kids[2].nested, armCtx) !== null;
   }
   const min = branch.name === 'union' ? 2 : 1; // union needs ≥2 arms; coalesce ≥1
-  return kids.length >= min && kids.every((a: any) => noBinds(classifyScalarChild(a.nested, armCtx)));
+  return kids.length >= min && kids.every((a: any) => classifyScalarChild(a.nested, armCtx) !== null);
 }
 
 /** PURE. An element-parent scalar child (the strict isScalarChild shape): a movement-only
  * total count(), a values/id/label/constant projection with a scalar-row tail, or a nested
  * scalar-armed branch (elementScalarBranchArm). Returns the parsed body so the emitter reuses
  * it — one parse per arm, classify-then-emit. */
-export function classifyScalarChild(nested: any, ctx: ChildCtx): { body: ReturnType<typeof stepChain>; binds?: PStep[] } | null {
+export function classifyScalarChild(nested: any, ctx: ChildCtx): ChildPlan | null {
   if (!nested) return null;
-  const full = childSteps(nested, ctx.params);
-  // A trailing as() run binds the SCALAR the body produced (`out().count().as("x")`) and is
-  // shape-preserving, so it is peeled and reported separately. Reported, NOT silently accepted:
-  // this classifier has ten consumers and only the branch arms have an emitter that can re-apply
-  // the binds. Everyone else must decline when `binds` is set — which keeps their behaviour
-  // exactly as it was, since a trailing as() made this return null before.
-  let end = full.length;
-  while (end > 0 && full[end - 1]!.name === 'as') end--;
-  const binds = full.slice(end);
-  const body = full.slice(0, end);
-  const terminal = body.at(-1);
-  if (!terminal) return null;
-  const ok = terminal.name === 'count'
-    ? classifyCountChild(body, ctx) !== null
-    : classifyScalarChildRows('element', body, ctx)?.kind === 'element'
-      || elementScalarBranchArm(body, ctx);
-  return ok ? { body, binds: binds.length ? binds : undefined } : null;
+  return longestClassifying(childSteps(nested, ctx.params), (body) => {
+    const terminal = body.at(-1);
+    if (!terminal) return false;
+    return terminal.name === 'count'
+      ? classifyCountChild(body, ctx) !== null
+      : classifyScalarChildRows('element', body, ctx)?.kind === 'element'
+        || elementScalarBranchArm(body, ctx);
+  });
 }
 
-/** A classification a bind-unaware consumer may act on: present, and with no trailing as() run to
- *  honour. Everything but the branch arms goes through this. */
-export const noBinds = (p: { binds?: PStep[] } | null): boolean => !!p && !p.binds;
+/**
+ * A classified child body: the PREFIX that determines the shape, plus whatever trailed it.
+ *
+ * The suffix is not a vocabulary — it is whatever the shape-determining prefix did not need, and
+ * the emitter lowers it through `Engine.lowerStepsStrict`, the same generic loop the root uses.
+ * That is why `as()` needs no plumbing here: it already works on a list/scalar stream at root, and
+ * so does everything else in SCALAR_TAIL/LIST_TAIL. Peeling one step name into a side-channel
+ * instead would support exactly that step and nothing else.
+ */
+export interface ChildPlan { body: PStep[]; suffix: PStep[] }
+
+/**
+ * The LONGEST prefix that classifies, and the rest as a suffix. Longest-first, so a body that
+ * classifies whole keeps its existing single-shot behaviour and an empty suffix.
+ *
+ * The suffix must be BARRIER-FREE, and that is a contract rather than a taste: the emitter lowers
+ * it via `Engine.lowerStepsStrict`, which `engine/deps.ts` defines as "lowerSteps for a scope that
+ * structurally cannot host a barrier (child / nested sub-compile)". Handing it one does not throw —
+ * it emits malformed SQL. Measured: without this gate,
+ * `union(__.out().values("name").fold().count(Scope.local), …)` classifies `values("name")` as the
+ * scalar prefix, lowers `fold().count(local)` as the suffix, and SQLite rejects the result with
+ * `near "FROM": syntax error`. A body whose tail contains a barrier therefore does not split; it
+ * either classifies whole or defers, exactly as before.
+ */
+function longestClassifying(full: PStep[], ok: (body: PStep[]) => boolean): ChildPlan | null {
+  // Scope.local narrows a would-be barrier to one list VALUE, so `order(Scope.local)` is a
+  // row-local transform and rides the suffix fine; bare `order()`/`fold()` do not.
+  const barriers = (steps: PStep[]) => steps.some((s) =>
+    isGlobalBarrier(s) && !s.args.some((a: any) => a?.scope === 'local'));
+  for (let end = full.length; end > 0; end--) {
+    if (barriers(full.slice(end))) continue;
+    const body = full.slice(0, end);
+    if (ok(body)) return { body, suffix: full.slice(end) };
+  }
+  return null;
+}
 
 export function isScalarChild(nested: any, ctx: ChildCtx): boolean {
-  return noBinds(classifyScalarChild(nested, ctx));
+  return classifyScalarChild(nested, ctx) !== null;
 }
 
 /** Syntax-only recognizer for a PROPERTY-parent scalar child. A property traverser's
@@ -672,20 +696,13 @@ export function isTotalScalarChild(nested: any, ctx: ChildCtx): boolean {
  * instead of re-parsing — one parse per arm, classify-all-then-emit-all. Deliberately
  * stricter than compileElementChildRows' fold path (routing control): a scalar-rows-before-
  * fold OR a pure-movement before-fold; a strict body always emits, so no lockstep throw. */
-export function classifyListChild(nested: any, ctx: ChildCtx): { body: ReturnType<typeof stepChain>; binds?: PStep[] } | null {
+export function classifyListChild(nested: any, ctx: ChildCtx): ChildPlan | null {
   if (!nested) return null;
-  const full = childSteps(nested, ctx.params);
-  // A trailing as() run binds the LIST traverser the fold produced — `out().fold().as("x")` — and
-  // is shape-preserving, so it is peeled here and re-applied after the fold by the emitter. This
-  // is NOT the same as a label bound BEFORE the fold: that one the barrier legitimately consumes.
-  let end = full.length;
-  while (end > 0 && full[end - 1]!.name === 'as') end--;
-  const binds = full.slice(end);
-  const body = full.slice(0, end);
-  if (body.at(-1)?.name !== 'fold') return null;
-  const before = body.slice(0, -1);
-  return classifyScalarChildRows('element', before, ctx)?.kind === 'element' || !!elementRun(before, ctx)
-    ? { body, binds: binds.length ? binds : undefined } : null;
+  return longestClassifying(childSteps(nested, ctx.params), (body) => {
+    if (body.at(-1)?.name !== 'fold') return false;
+    const before = body.slice(0, -1);
+    return classifyScalarChildRows('element', before, ctx)?.kind === 'element' || !!elementRun(before, ctx);
+  });
 }
 
 /** PURE. A bare branch step whose merge is LIST (uniform `…fold()` arms) or VARIANT (genuinely
@@ -785,15 +802,10 @@ export interface BranchArms {
  *  arm, so a single arm and a whole branch can never classify differently. The ORDER is
  *  significant: element first, so a homogeneous element branch stays on the prefix-fold hot path
  *  even though an element body can also satisfy the scalar/list classifiers. */
-/** A branch ARM's shape. Bind-TOLERANT, unlike `isScalarChild`/`isListChild`: the arm merges
- *  union the arms' label sets and their emitters re-apply a peeled trailing as() run, so an arm
- *  ending in one is a perfectly good scalar/list arm. Every other consumer of those two predicates
- *  has no such emitter and stays bind-intolerant — which is the whole reason the peel is REPORTED
- *  rather than silently swallowed by the classifier. */
 export function classifyArmShape(nested: any, ctx: ChildCtx): BranchArmShape {
   return isElementChild(nested, ctx) ? 'element'
-    : classifyScalarChild(nested, ctx) !== null ? 'scalar'
-    : classifyListChild(nested, ctx) !== null ? 'list'
+    : isScalarChild(nested, ctx) ? 'scalar'
+    : isListChild(nested, ctx) ? 'list'
     : null;
 }
 

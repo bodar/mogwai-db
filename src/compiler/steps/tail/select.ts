@@ -50,12 +50,13 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
   if (!nested.some(Boolean)) return null; // leave the mature all-direct path untouched
   // Classify each traversal-valued field ONCE (scalar > list > element, matching the emit
   // dispatch order), keeping the parsed body so emit reuses it — no separate is*Child re-parse.
+  // The whole ChildPlan rides through, not just its body: the emitters take one argument so a
+  // dropped suffix is impossible rather than merely unlikely.
   const recordChildPlan = (n: any) => {
-    const s0 = classifyScalarChild(n, childCtx(st));
-    const s = s0 && !s0.binds ? s0 : null; // a trailing as() has no emitter here — unusable, as before
-    if (s) return { kind: 'scalar' as const, body: s.body };
+    const s = classifyScalarChild(n, childCtx(st));
+    if (s) return { kind: 'scalar' as const, plan: s };
     const l = classifyListChild(n, childCtx(st));
-    if (l) return { kind: 'list' as const, body: l.body };
+    if (l) return { kind: 'list' as const, plan: l };
     const e = classifyElementChild(n, childCtx(st));
     return e ? { kind: 'element' as const, body: e.body } : null;
   };
@@ -82,7 +83,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
       const seed = isProject ? outer.seed : reRootElement(outer.seed, p, source.id, source.elem);
       const plan = plans[i]!;
       if (plan.kind === 'scalar') {
-        const child = tryCompileScalarValueChild(seed, nested[i], 'first', reuseCurrentFrame(outer.scope, outer.frame), plan.body)!;
+        const child = tryCompileScalarValueChild(seed, nested[i], 'first', reuseCurrentFrame(outer.scope, outer.frame), plan.plan)!;
         const rel = child.rel.as(`b${i}`);
         return {
           rel,
@@ -91,7 +92,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
         };
       }
       if (plan.kind === 'list') {
-        const child = tryCompileListChild(seed, nested[i], reuseCurrentFrame(outer.scope, outer.frame), plan.body)!;
+        const child = tryCompileListChild(seed, nested[i], reuseCurrentFrame(outer.scope, outer.frame), plan.plan)!;
         const rel = child.rel.as(`b${i}`);
         return {
           rel,
@@ -209,12 +210,13 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
     const seed = reRootElement(st, p, aliasId(p.c[selected.col], 'last'), aliasElem(selected));
     // Classify once (pure) → emit reusing the parsed body; each classify guarantees its
     // emitter succeeds, so no preflight/compiler mismatch throw is possible.
-    // A bind-carrying plan (trailing as()) has no emitter here — fall through to the list/element
-    // classifiers and then the deferral, as a null classification did before.
     const scalarPlan = classifyScalarChild(nested.nested, childCtx(st));
-    if (scalarPlan && !scalarPlan.binds) return tryCompileScalarValueChild(seed, nested.nested, 'first', ROOT_SCOPE, scalarPlan.body)!;
+    if (scalarPlan) {
+      const out = tryCompileScalarValueChild(seed, nested.nested, 'first', ROOT_SCOPE, scalarPlan);
+      if (out) return out;
+    }
     const listPlan = classifyListChild(nested.nested, childCtx(st));
-    if (listPlan) return tryCompileListChild(seed, nested.nested, ROOT_SCOPE, listPlan.body)!;
+    if (listPlan) return tryCompileListChild(seed, nested.nested, ROOT_SCOPE, listPlan)!;
     const elemPlan = classifyElementChild(nested.nested, childCtx(st));
     if (elemPlan) return tryCompileElementChild(seed, nested.nested, 'first', ROOT_SCOPE, elemPlan.body)!.stream;
     throw new Error('by(traversal) child shape not yet supported');

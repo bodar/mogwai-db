@@ -5,7 +5,7 @@ import { edges, labels, nodes, vertexProperties, edgeProperties } from '../../..
 import { advance, carriedWith, carryFrag, carryFragMint, carriedCols, partitionOver, prevRel, withCarried, type Carried, type ElementStream } from '../context/context.ts';
 import { aliasId } from '../context/alias.ts';
 import { asOnStream, selectOneFromAlias } from './labelselect.ts';
-import { carryOf, streamPayloadCols, toMapStream, toScalarStream, PROPERTY_PAYLOAD, type ListStream, type MapStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
+import { carryOf, streamPayloadCols, toMapStream, toScalarStream, PROPERTY_PAYLOAD, type ListStream, type MapStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream , type RelationalStream} from '../context/stream.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { lowerScalarRows, unionScalarStreams, SCALAR_TRANSFORMS } from './scalar.ts';
 import { lowerReSource } from '../resource.ts';
@@ -16,7 +16,7 @@ import { elementOrderDrop, elementOrderSql } from './modulation.ts';
 import {
   childCtx, childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, labelSelectOf,
   ELEMENT_CHILD_STEPS, isBareBranchChildAllCard, isElementChildStep, reuseCurrentFrame, ROOT_SCOPE, scalarChildPrefixOk,
-  type ChildFrame, type ChildParent, type ChildScope, type ChildUse, type CompileScope,
+  type ChildFrame, type ChildParent, type ChildPlan, type ChildScope, type ChildUse, type CompileScope,
 } from './child-shape.ts';
 // The scope-construction trio (pushChildScope/popChildScope below + reuseCurrentFrame) is the
 // compiler's public scope vocabulary; re-export reuseCurrentFrame (defined as a pure spread in the
@@ -207,19 +207,42 @@ function compileCountChildRows(
 /** Compile a terminal child count as a true scope-aware barrier, at PARENT cardinality: the
  * count row per origin, rejoined by the one shape-agnostic rejoin (which drops the child
  * ordinal and the per-origin encounter with it). */
+/**
+ * Lower a child body's SUFFIX over the already-rejoined arm stream, through the SAME generic loop
+ * the root uses (`Engine.lowerStepsStrict` — deps.ts documents it as the child/nested sub-compile
+ * entry). This is why `as()` needed no plumbing: it already works on a list or scalar stream at
+ * root, and so does everything else in SCALAR_TAIL/LIST_TAIL. Threading one step name through
+ * every emitter instead would have supported exactly that step.
+ *
+ * Fail-closed: the arm was CLASSIFIED on its prefix, so if the suffix retypes the stream that
+ * classification is no longer true and the merge would be handed a shape it never agreed to.
+ * Decline instead — the caller then falls through to its existing deferral.
+ */
+/**
+ * A pre-parsed child body, optionally with the suffix its classifier split off. ONE parameter, so a
+ * caller physically cannot hand an emitter the body and forget the suffix — which is exactly what
+ * happened when they were two: six of twelve call sites passed `plan.body` alone, and the dropped
+ * `order(Scope.local)` turned a clean deferral into a silently unsorted list.
+ */
+export type ChildBody = PStep[] | ChildPlan;
+const bodyOf = (b?: ChildBody): PStep[] | undefined => Array.isArray(b) ? b : b?.body;
+const suffixOf = (b?: ChildBody): readonly PStep[] => Array.isArray(b) || !b ? [] : b.suffix;
+
+function applySuffix<S extends RelationalStream>(s: S | null, suffix: readonly PStep[]): S | null {
+  if (!s || !suffix.length) return s;
+  const out = engineOf(s).lowerStepsStrict(s, [...suffix], 0);
+  return out.kind === s.kind ? out as S : null;
+}
+
 export function tryCompileCountChild(
   parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
-  preParsed?: ReturnType<typeof stepChain>,
-  binds?: PStep[],
+  body?: ChildBody,
 ): ScalarStream | null {
-  const rows = compileCountChildRows(parent, nested, scope, preParsed, false);
+  const rows = compileCountChildRows(parent, nested, scope, bodyOf(body), false);
   if (!rows) return null;
-  const out = applyChildCardinality(parent, rows.frame, rows.stream, 'all').stream as ScalarStream;
-  // A trailing as() run peeled by classifyScalarChild binds the counted scalar; applied after the
-  // rejoin so the label rides the parent-cardinality rows the arm merge will union.
-  return binds?.length ? binds.reduce((acc, b) => asOnStream(acc, b) as ScalarStream, out) : out;
+  return applySuffix(applyChildCardinality(parent, rows.frame, rows.stream, 'all').stream as ScalarStream, suffixOf(body));
 }
 
 /** Count child with the origin retained for a consumer-owned by()/barrier policy.
@@ -576,13 +599,9 @@ export function tryCompileScalarChild(
   nested: any,
   use: ChildUse = 'first',
   scope: CompileScope = ROOT_SCOPE,
-  preParsed?: ReturnType<typeof stepChain>,
-  binds?: PStep[],
+  body?: ChildBody,
 ): ScalarStream | null {
-  const s = compileScalarChildRows(parent, nested, use, scope, false, undefined, preParsed)?.stream ?? null;
-  // A trailing as() run peeled by classifyScalarChild binds the SCALAR the body produced; applied
-  // here so the label rides into the arm merge, which unions the arms' label sets already.
-  return s && binds?.length ? binds.reduce((acc, b) => asOnStream(acc, b) as ScalarStream, s) : s;
+  return applySuffix(compileScalarChildRows(parent, nested, use, scope, false, undefined, bodyOf(body))?.stream ?? null, suffixOf(body));
 }
 
 /** One public scalar-valued child entry point. Consumers must not know whether a
@@ -592,10 +611,10 @@ export function tryCompileScalarValueChild(
   nested: any,
   use: ChildUse = 'first',
   scope: CompileScope = ROOT_SCOPE,
-  preParsed?: ReturnType<typeof stepChain>,
+  body?: ChildBody,
 ): ScalarStream | null {
-  return tryCompileCountChild(parent, nested, scope, preParsed)
-    ?? tryCompileScalarChild(parent, nested, use, scope, preParsed);
+  return tryCompileCountChild(parent, nested, scope, body)
+    ?? tryCompileScalarChild(parent, nested, use, scope, body);
 }
 
 export interface ScalarModulationSpec {
@@ -715,8 +734,7 @@ export function tryCompileListChild(
   parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
-  preParsed?: ReturnType<typeof stepChain>,
-  binds?: PStep[],
+  body?: ChildBody,
 ): ListStream | null {
   // Both arms are the same three operations — generic rows (the engine, via the shared row
   // compilers) ▸ the scope-aware fold barrier ▸ the ONE cardinality rejoin. Only the middle one
@@ -725,18 +743,15 @@ export function tryCompileListChild(
   // cannot come from the engine's own fold(): that one is GLOBAL (one list for the whole
   // stream), and the per-parent form needs the frame's domain relation for its empty-child `[]`,
   // which is child-seam state and deliberately not reachable from a Stream.
-  const scoped = compileScalarChildRows(parent, nested, 'all', scope, true, 'fold', preParsed);
+  const scoped = compileScalarChildRows(parent, nested, 'all', scope, true, 'fold', bodyOf(body));
   const rows = scoped
     ? { ...scoped, fold: () => lowerScopedScalarFold(scoped.stream, { kind: 'child', frames: [scoped.frame] }) }
     : (() => {
-      const element = compileElementChildRows(parent, nested, scope, 'fold', false, preParsed);
+      const element = compileElementChildRows(parent, nested, scope, 'fold', false, bodyOf(body));
       return element && { ...element, fold: () => lowerScopedElementFold(element.stream, { kind: 'child', frames: [element.frame] }) };
     })();
   if (!rows) return null;
-  const l = applyChildCardinality(parent, rows.frame, rows.fold(), 'all').stream as ListStream;
-  // A trailing as() run peeled by classifyListChild binds the LIST the fold produced. It is
-  // applied AFTER the rejoin, so the label rides the parent-cardinality rows the merge will see.
-  return binds?.length ? binds.reduce((acc, b) => asOnStream(acc, b) as ListStream, l) : l;
+  return applySuffix(applyChildCardinality(parent, rows.frame, rows.fold(), 'all').stream as ListStream, suffixOf(body));
 }
 
 /** Productive scalar rows immediately before fold(). Group-like consumers use

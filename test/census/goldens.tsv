@@ -333,6 +333,7 @@ ran	4	4	32eae6f91f23aa9d	379a1adc785fe516	g.V().hasLabel("person").values("name"
 ran	4	4	2549b22df1007d4b	85ac38c4b59b49ed	g.V().hasLabel("person").values("name").substring(-3)
 ran	6	6	6a72838f15adf7d6	12fa697a0781a272	g.V().hasLabel("person","software", "blah")
 ran	2	2	5e314d5148d34178	e3290eb62e2c39b3	g.V().hasLabel("software").as("a").values("name").concat(" uses ").concat(__.select("a").values("lang"))
+ran	2	2	883ff15c14c2d86f	1d2031928752d98e	g.V().hasLabel("software").as("name").as("language").as("creators").select("name", "language", "creators").by("name").by("lang"). by(__.in("created").values("name").fold().order(Scope.local))
 ran	1	1	ddd6a4d9c0444bb0	48905a30a91acac3	g.V().hasLabel("software").group().by("name").by(__.bothE().values("weight").max())
 ran	1	1	16407116ccfdb354	8d9cfd940773d7c2	g.V().hasLabel("software").group().by("name").by(__.bothE().values("weight").mean())
 ran	1	1	d2d5c7d26f8458d7	93462f817eae593a	g.V().hasLabel("software").group().by("name").by(__.bothE().values("weight").min())

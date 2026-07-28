@@ -6,6 +6,7 @@ import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
+import { decodeAll } from '../support/decode.ts';
 import { ioc } from '../../src/io.ts';
 import { parseRequest } from '../../src/wire.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
@@ -325,6 +326,31 @@ test('a label bound AFTER fold() inside a branch arm survives the merge', () => 
   expect(run(store, 'g.V(1).union(__.out().count().as("x"), __.in().count().as("x")).select("x")').length).toBe(2);
   expect(run(store, 'g.V(1).union(__.out().count().as("x"), __.in().count()).select("x")').length).toBe(1);
   expect(run(store, 'g.V(1).union(__.as("x").out().count(), __.as("x").in().count()).select("x")').length).toBe(0);
+
+  // The point of lowering the suffix through the generic loop rather than special-casing as():
+  // every other shape-preserving tail step comes free. None of these is about labels.
+  expect(run(store, 'g.V(1).union(__.out().values("name").fold().order(Scope.local), __.in().values("name").fold())').length).toBe(2);
+  expect(run(store, 'g.V().union(__.out().count().is(P.gt(0)), __.in().count())').length).toBe(9);
+
+  // A suffix containing a real BARRIER must not split: lowerStepsStrict is documented as a scope
+  // that cannot host one, and handing it a barrier emits malformed SQL rather than throwing.
+  // Whole-body classification still handles this (fold().count(local) collapses to count()).
+  expect(run(store, 'g.V(1).union(__.out().values("name").fold().count(Scope.local), __.in().values("name").fold().count(Scope.local))').length).toBe(2);
+});
+
+test('a select().by() body carries its shape-preserving suffix too', async () => {
+  const store = seededStore();
+  // Not a branch arm — the same ChildPlan flows through select()'s by-bodies, which is what
+  // unlocked the one corpus traversal this change moves. The suffix must actually APPLY: with the
+  // suffix silently dropped this returned the unsorted ["marko","josh","peter"] and still looked
+  // like a win, because the row COUNT was right. Assert the order, not the arity.
+  const rows = await decodeAll(executeQuery(store,
+    'g.V().hasLabel("software").as("n").as("c").select("n","c").by("name").by(__.in("created").values("name").fold().order(Scope.local))', {}));
+  const plain = rows.map((m: any) => Object.fromEntries([...m]));
+  expect(plain).toEqual([
+    { n: 'lop', c: ['josh', 'marko', 'peter'] },
+    { n: 'ripple', c: ['josh'] },
+  ]);
 });
 
 test('a list-armed branch composes as an all-cardinality (local/flatMap) child body', () => {

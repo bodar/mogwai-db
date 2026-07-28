@@ -217,7 +217,6 @@ deferred	split() on a list value not yet supported	g.V().hasLabel("person").valu
 deferred	path() requires element input (a scalar stream has no path)	g.V().hasLabel("person").values("name").path().is(P.typeOf(GType.PATH))
 unbound	Unbound parameter 'xx1'	g.V().hasLabel("person",xx1)
 unbound	Unbound parameter 'vid1'	g.V().hasLabel("software"). has("name", P.without(__.union(__.V(vid1).out("created").values("name"), __.V(vid4).out("created").values("name")).fold()))
-deferred	by(traversal) modulator not yet supported	g.V().hasLabel("software").as("name").as("language").as("creators").select("name", "language", "creators").by("name").by("lang"). by(__.in("created").values("name").fold().order(Scope.local))
 deferred	step not implemented: connectedComponent()	g.V().hasLabel("software").connectedComponent().project("name","component").by("name").by("gremlin.connectedComponentVertexProgram.component")
 deferred	step not implemented: pageRank()	g.V().hasLabel("software").has("name", "ripple").pageRank(1.0).with("~tinkerpop.pageRank.edges",__.inE("created")).with("~tinkerpop.pageRank.times",1).with("~tinkerpop.pageRank.propertyName","priors").in("created").union(__.both(), __.identity()).valueMap("name", "priors")
 deferred	step not implemented: index()	g.V().hasLabel("software").index().unfold()
