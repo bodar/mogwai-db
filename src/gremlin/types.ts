@@ -12,7 +12,6 @@
 // consumed on read (typeOf filter + per-row framing).
 
 import { ioc } from '../io.ts';
-import type { ValueType } from '../sql/kernel/render.ts';
 
 // ---------- exact big-value carriers (BigDecimal / Duration) ----------
 //
@@ -93,6 +92,28 @@ export type CanonicalType =
   | 'datetime' | 'uuid' | 'char' | 'duration'
   | 'list' | 'map' | 'set';
 
+/**
+ * The framing tag on a scalar value: CanonicalType minus the collections.
+ *
+ * This USED to be an independent 14-name union in `sql/kernel/render.ts`, spelling two of those
+ * names differently (`bool`/`boolean`, `date`/`datetime`) for no reason anyone recorded — the two
+ * vocabularies then needed a bidirectional adapter, which grew FOUR hand-written copies
+ * (`plan.ts AS_TO_CANONICAL`, `write.ts VT_TO_CANON`, `execute.ts VTYPE_TO_VALUETYPE`, plus an
+ * implicit cast in `inject.ts`) and shipped a real bug: a bare `inject(datetime(…))` compared a
+ * CanonicalType against a Set<ValueType>, lost its type at the seed, and made a following
+ * `is(typeOf(DATETIME))` return [] rather than fail (commit 853a416).
+ *
+ * Derived, the whole class is gone: there is one vocabulary, and the only thing left to say is
+ * which subset frames per-row. The EXCLUSION is the real content and is load-bearing — a
+ * collection is reached through the list/map substrate (`is(typeOf(LIST))` retypes the stream so
+ * the JSONB blob becomes the `list` column), never framed by a per-row scalar tag.
+ *
+ * Owned here, not in render.ts, because render.ts would otherwise have to import CanonicalType
+ * while types.ts imported ValueType back — and `storage.ts` already closes that loop
+ * (`types.ts → render.ts → storage.ts → types.ts`, harmless only because two edges are type-only).
+ */
+export type ValueType = Exclude<CanonicalType, 'list' | 'map' | 'set'>;
+
 /** The recursively-captured wire/parse type of a value. A scalar leaf is a bare
  *  CanonicalType string (so every existing argType consumer keeps working — an unknown
  *  container node falls through gremlinTypeOf to JS inference). A container carries its
@@ -141,26 +162,6 @@ export const WIRE_TYPE_TO_NAME: Record<number, CanonicalType> = {
   [ioc.DataType.MAP]: 'map',
   [ioc.DataType.SET]: 'set',
 };
-
-/** CanonicalType ⇄ render.ts `ValueType` — the SAME vocabulary in two spellings. Every
- *  scalar ValueType is a CanonicalType except two: `bool`/`boolean` and `date`/`datetime`.
- *  The collection types (list/map/set) have no ValueType: a collection is reached through
- *  the list/map substrate, never framed by a per-row scalar tag.
- *
- *  These two directions used to be hand-written per consumer (write.ts VT_TO_CANON,
- *  plan.ts AS_TO_CANONICAL, and an implicit `as CanonicalType` cast in inject.ts that
- *  silently mismatched for datetime/uuid). They live here, derived from one another, so a
- *  new type cannot be added to one direction and forgotten in the other. */
-export const VALUETYPE_TO_CANONICAL = {
-  bool: 'boolean', date: 'datetime', byte: 'byte', short: 'short', int: 'int',
-  long: 'long', bigint: 'bigint', float: 'float', double: 'double',
-  string: 'string', uuid: 'uuid', bigdecimal: 'bigdecimal', char: 'char', duration: 'duration',
-} as const satisfies Record<ValueType, CanonicalType>;
-
-export const CANONICAL_TO_VALUETYPE: Partial<Record<CanonicalType, ValueType>> =
-  Object.fromEntries(
-    Object.entries(VALUETYPE_TO_CANONICAL).map(([vt, canon]) => [canon, vt as ValueType]),
-  ) as Partial<Record<CanonicalType, ValueType>>;
 
 /** typeOf/GType-token spelling → canonical name. `integer`→`int`, `biginteger`→
  *  `bigint`, and the vertex-property token aliases. Names already canonical map to

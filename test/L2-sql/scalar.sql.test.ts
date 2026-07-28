@@ -365,7 +365,7 @@ describe('scalar-parent / projection SQL', () => {
 
   test('asBool() resolves inject constants at compile time + tags the value shape', () => {
     // The value shape carries `as:'bool'` so the handler frames the 0/1 as Boolean.
-    expect(read('g.inject(1).asBool()').shape).toEqual({ kind: 'value', type: STATIC('bool') });
+    expect(read('g.inject(1).asBool()').shape).toEqual({ kind: 'value', type: STATIC('boolean') });
     // TinkerPop truthiness: NaN/0/-0 → false, nonzero → true, "true"/"false"
     // (case-insensitive), bool → itself. Constants resolve to the bound values.
     expect(read('g.inject(1).asBool()').binds).toEqual([true]);
@@ -383,7 +383,7 @@ describe('scalar-parent / projection SQL', () => {
     // on a runtime (V-rooted) stream asBool defers — needs local()/sack()
     expect(() => compile('g.V().values("name").asBool()', {})).toThrow('scalar transform asBool() not supported');
     // fold preserves the uniform item tag; a heterogeneous trailing inject still defers.
-    expect(read('g.inject(1,0).asBool().fold()').shape).toEqual({ kind: 'jsonbList', as: 'bool' });
+    expect(read('g.inject(1,0).asBool().fold()').shape).toEqual({ kind: 'jsonbList', as: 'boolean' });
     expect(() => compile('g.inject(1).asBool().inject(5)', {})).toThrow('after typed/reduced/carried scalar state');
   });
 
@@ -500,7 +500,7 @@ describe('scalar-parent / projection SQL', () => {
 
   test('asDate() casts to a date-tagged epoch-millis value (const-fold + runtime)', () => {
     // inject const-fold: ISO string / int / long epoch → millis, tagged date
-    expect(read('g.inject("2023-08-02T00:00:00Z").asDate()').shape).toEqual({ kind: 'value', type: STATIC('date') });
+    expect(read('g.inject("2023-08-02T00:00:00Z").asDate()').shape).toEqual({ kind: 'value', type: STATIC('datetime') });
     expect(read('g.inject("2023-08-02T00:00:00Z").asDate()').binds).toEqual([Date.parse('2023-08-02T00:00:00Z')]);
     // an offset-bearing ISO string folds into the correct instant
     expect(read('g.inject("2023-08-02T00:00:00-07:00").asDate()').binds).toEqual([Date.parse('2023-08-02T07:00:00Z')]);
@@ -511,13 +511,13 @@ describe('scalar-parent / projection SQL', () => {
     expect(() => compile('g.inject(null).asDate()', {})).toThrow("Can't parse");
     // runtime: an ISO-text property → unixepoch()*1000; an integer/real is already millis
     const rt = read('g.V().values("birthday").asDate()');
-    expect(rt.shape).toEqual({ kind: 'value', type: STATIC('date') });
+    expect(rt.shape).toEqual({ kind: 'value', type: STATIC('datetime') });
     expect(rt.sql).toContain("unixepoch(p.v) * 1000");
     // bare asNumber() over a date → its epoch-millis (Long, identity); asDate composes back
-    expect(read('g.V().values("birthday").asDate().asNumber().asDate()').shape).toEqual({ kind: 'value', type: STATIC('date') });
+    expect(read('g.V().values("birthday").asDate().asNumber().asDate()').shape).toEqual({ kind: 'value', type: STATIC('datetime') });
     // bare asNumber() as the ms-string leg feeding asDate() is allowed; standalone it
     // can't recover a subtype from a runtime value → fail closed (not a silent CAST)
-    expect(read('g.V().values("birthday").asNumber().asDate()').shape).toEqual({ kind: 'value', type: STATIC('date') });
+    expect(read('g.V().values("birthday").asNumber().asDate()').shape).toEqual({ kind: 'value', type: STATIC('datetime') });
     expect(() => compile('g.V().values("weight").asNumber()', {})).toThrow('non-date runtime value');
     // an offset-less datetime literal is UTC-normalized (not host-local) so Bun ≡ DO
     expect(read("g.inject(datetime('2023-08-02T00:00:00')).dateAdd(second, 0)").binds).toEqual([Date.parse('2023-08-02T00:00:00Z')]);
@@ -528,7 +528,7 @@ describe('scalar-parent / projection SQL', () => {
     const base = Date.parse('2023-08-02T00:00:00Z');
     expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(DT.hour, 2)").binds).toEqual([base + 2 * 3600000]);
     expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(hour, -1)").binds).toEqual([base - 3600000]);
-    expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(day, 11)").shape).toEqual({ kind: 'value', type: STATIC('date') });
+    expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(day, 11)").shape).toEqual({ kind: 'value', type: STATIC('datetime') });
     // only second/minute/hour/day are valid DT units — the grammar rejects the rest
     expect(() => compile("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(month, 1)", {})).toThrow('parse error');
     // dateDiff = self − other → signed Long; literal / constant(datetime) / constant(null)→0

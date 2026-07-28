@@ -1,7 +1,7 @@
 import { flattenListArgs, isNested, type Pred } from '../../gremlin/frontend.ts';
 import { q, list, values, empty, value, raw, jsonExtract, type Expression, type Relation } from '../../sql/kernel/q.ts';
 import type { FastPath } from '../options/fast-paths.ts';
-import { normalizeTypeName, BigDecimal, Duration, VALUETYPE_TO_CANONICAL } from '../../gremlin/types.ts';
+import { normalizeTypeName, BigDecimal, Duration } from '../../gremlin/types.ts';
 import { type ValueType } from '../../sql/kernel/render.ts';
 
 // ---------- SQL node builders ----------
@@ -141,7 +141,6 @@ const GTYPE_SQL: Record<string, string | null> = {
 
 // A compile-time scalar `as` tag (ValueType, render.ts) → canonical Gremlin type name, for
 // the static-fold typeOf mode. The one vocabulary correspondence lives in gremlin/types.ts.
-const AS_TO_CANONICAL = VALUETYPE_TO_CANONICAL;
 
 /** How to resolve the CURRENT scalar's type for a typeOf test:
  *  - `staticAs`  — the value's GraphBinary type is known at compile time (inject literal,
@@ -170,7 +169,7 @@ function typeOfSql(expr: Expression, arg: any, ctx: TypeCtx = {}): Expression {
     throw new Error(`typeOf(): unregistered type '${rawName}'`);
   }
   // Mode 1 — compile-time known type → constant fold.
-  if (ctx.staticAs !== undefined) return AS_TO_CANONICAL[ctx.staticAs] === canonical ? q`1` : q`0`;
+  if (ctx.staticAs !== undefined) return ctx.staticAs === canonical ? q`1` : q`0`;
   const storage = GTYPE_SQL[canonical];
   const byStorage = storage ? q`typeof(${expr}) = ${value(storage)}` : q`0`;
   // Mode 2 — per-row stored vtype, with a storage-class fallback for legacy NULL rows.

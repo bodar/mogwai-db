@@ -1,5 +1,6 @@
 import type { GraphStore } from '../../storage.ts';
 import { q, type Expression, type Query, type Relation } from './q.ts';
+import type { ValueType } from '../../gremlin/types.ts';
 
 // ---------- compile output contract ----------
 //
@@ -85,18 +86,22 @@ export type PathPos =
 // from the SQLite storage class (which collapses byte..long → INTEGER, float/double →
 // REAL). The handler frames `v` with the matching serializer. `undefined` = infer
 // from the JS value (anySerializer), the default for untyped projections.
-// Emitted by asBool ('bool') and asNumber(GType.X) (the numeric subtypes). The
+// Emitted by asBool ('boolean') and asNumber(GType.X) (the numeric subtypes). The
 // numeric tag names the GraphBinary type; SQLite carries the value in whichever
 // storage class fits (INTEGER/REAL), and frameValue picks the serializer.
 // 'string'/'uuid' frame a stored TEXT value by its true GraphBinary type (a uuid is
 // storage-ambiguous with a plain string, so it needs the stored vtype to disambiguate).
-// Collections (list/map/set) are NOT ValueTypes: a list-valued property is reached via
+// Collections (list/map/set) are excluded from ValueType: a list-valued property is reached via
 // is(typeOf(LIST)) which retypes the scalar stream to a ListStream (the JSONB value
 // becomes the `list` column), so it frames through the list substrate, not this tag.
 // bigdecimal/char/duration frame from a stored TEXT value (canonical decimal / 1-char /
 // total-nanos) via our hand-rolled serializers (serializers.ts) — the value was stored
 // as text precisely so its precision survives (see storedScalar / do-sqlite-bind-precision).
-export type ValueType = 'bool' | 'byte' | 'short' | 'int' | 'long' | 'bigint' | 'float' | 'double' | 'date' | 'string' | 'uuid' | 'bigdecimal' | 'char' | 'duration';
+// Declared in gremlin/types.ts as `Exclude<CanonicalType, 'list'|'map'|'set'>` — ONE vocabulary,
+// with the collection exclusion as its only real content. Re-exported here because this module is
+// the compiler's shared type surface and ~24 files take it from here; owning it there is what
+// breaks the `types.ts → render.ts → storage.ts → types.ts` loop.
+export type { ValueType };
 
 // ---------- the ONE scalar type channel ----------
 //

@@ -1,5 +1,5 @@
 import { compilePlan, staticTypeOf, type Compiled, type WritePlan, type ListOf, type MapEntry, type MapOf, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ValueType, type FastPathConfig } from './compiler/compiler.ts';
-import { isCollectionType, valueNodeFromStored, type TypeNode, type ValueNode } from './gremlin/types.ts';
+import { hasSerializer, isCollectionType, valueNodeFromStored, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import type { GraphStore } from './storage.ts';
 import type { ServiceRegistry } from './services/spi/types.ts';
 import type { Executor as ExecutorApi, ForeignRow } from './api.ts';
@@ -345,19 +345,12 @@ const countBuffer = (v: any): Buffer => ioc.longSerializer.serialize(BigInt(v), 
 // GraphBinary type comes from the producing step, not the SQLite storage class. No
 // tag → infer from the JS value (anySerializer). 'bool': SQLite carries the boolean
 // as 0/1, so frame Boolean(v) explicitly (anySerializer would otherwise emit Int).
-// A stored canonical vtype → the framing ValueType tag. datetime/boolean spell
-// differently ('date'/'bool'); numeric subtypes are identical. uuid frames via
+// A stored canonical vtype IS the framing tag (one vocabulary). uuid frames via
 // uuidSerializer (storage-ambiguous with string, so the stored vtype disambiguates);
 // string via stringSerializer. list/map/set are deliberately absent: a stored
 // collection value is a JSONB blob, reached through is(typeOf(LIST))→ListStream (which
 // json()s it in SQL and frames via the list substrate), never this per-row scalar tag.
 // bigdecimal/char/duration frame from their stored canonical TEXT via our serializers.
-const VTYPE_TO_VALUETYPE: Record<string, ValueType> = {
-  datetime: 'date', boolean: 'bool', string: 'string', uuid: 'uuid',
-  byte: 'byte', short: 'short', int: 'int', long: 'long', bigint: 'bigint', float: 'float', double: 'double',
-  bigdecimal: 'bigdecimal', char: 'char', duration: 'duration',
-};
-
 // Our three hand-rolled serializers (serializers.ts, registered onto ioc by io.ts). Each
 // serialize() accepts the stored canonical TEXT (BigDecimal.from / Duration.from / a
 // 1-char string) → the exact GraphBinary value, no precision lost through a JS number.
@@ -365,12 +358,17 @@ const serializers = ioc.serializers as Record<number, { serialize(v: any, fq?: b
 const bigDecimalSerializer = serializers[ioc.DataType.BIGDECIMAL];
 const durationSerializer = serializers[ioc.DataType.DURATION];
 const charSerializer = serializers[ioc.DataType.CHAR];
-const vtypeToValueType = (vt: string | null): ValueType | undefined => (vt ? VTYPE_TO_VALUETYPE[vt] : undefined);
+// A stored canonical vtype IS a ValueType unless it names a collection — those are JSONB blobs
+// reached through the list/map substrate, and `undefined` here means "infer from the JS value".
+// hasSerializer also rejects an unrecognized name, so a corrupt vtype degrades to inference
+// rather than falling off frameValue's non-exhaustive switch and returning an empty Buffer.
+const vtypeToValueType = (vt: string | null): ValueType | undefined =>
+  vt && !isCollectionType(vt) && hasSerializer(vt) ? (vt as ValueType) : undefined;
 
 function frameValue(v: any, as: ValueType | undefined): Buffer {
   switch (as) {
     case undefined: return ioc.anySerializer.serialize(v);
-    case 'bool': return ioc.booleanSerializer.serialize(Boolean(v), true);
+    case 'boolean': return ioc.booleanSerializer.serialize(Boolean(v), true);
     case 'byte': return ioc.byteSerializer.serialize(Number(v), true);
     case 'short': return ioc.shortSerializer.serialize(Number(v), true);
     case 'int': return ioc.intSerializer.serialize(Number(v), true);
@@ -382,7 +380,7 @@ function frameValue(v: any, as: ValueType | undefined): Buffer {
     case 'double': return ioc.doubleSerializer.serialize(Number(v), true);
     // Datetime is carried as epoch-millis (INTEGER); the client's DateTimeSerializer
     // takes a JS Date (GraphBinary DATETIME 0x04, UTC wire), so reconstruct it here.
-    case 'date': return ioc.dateTimeSerializer.serialize(new Date(Number(v)), true);
+    case 'datetime': return ioc.dateTimeSerializer.serialize(new Date(Number(v)), true);
     // A stored TEXT value framed by its true type: uuid via UuidSerializer (16-byte
     // GraphBinary UUID from the string), string explicitly (anySerializer would also
     // pick String, but the stored vtype lets uuid win over a look-alike string).

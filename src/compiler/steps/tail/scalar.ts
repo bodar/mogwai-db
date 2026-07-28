@@ -111,13 +111,13 @@ function scalarTransform(step: PStep, currentAs: ValueType | undefined, expr: Ex
   if (step.name === 'asNumber') {
     const spec = numericSpec(step.args[0]);
     if (spec) { expr = asNumberSql(spec, expr); as = spec.as; }
-    else if (currentAs === 'date') as = 'long';
+    else if (currentAs === 'datetime') as = 'long';
     else if (next?.name === 'asDate') { expr = q`CAST(${expr} AS INTEGER)`; as = 'long'; }
     else throw new Error('bare asNumber() over a non-date runtime value not yet supported');
   } else if (step.name === 'asDate') {
-    expr = asDateSql(expr); as = 'date';
+    expr = asDateSql(expr); as = 'datetime';
   } else if (step.name === 'dateAdd') {
-    expr = q`(${expr} + ${value(Number(step.args[1]) * dtFactor(step.args[0]))})`; as = 'date';
+    expr = q`(${expr} + ${value(Number(step.args[1]) * dtFactor(step.args[0]))})`; as = 'datetime';
   } else if (step.name === 'dateDiff') {
     expr = q`(${expr} - ${value(dateDiffOtherMs(step.args[0], {}))})`; as = 'long';
   } else {

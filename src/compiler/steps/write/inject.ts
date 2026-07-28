@@ -1,7 +1,7 @@
 import { q, value, list } from '../../../sql/kernel/q.ts';
 import { jsonbArrayOf } from '../../plan/plan.ts';
 import { flattenListArgs, type SackSpec } from '../../../gremlin/frontend.ts';
-import { flatType, CANONICAL_TO_VALUETYPE, type CanonicalType } from '../../../gremlin/types.ts';
+import { flatType, type CanonicalType } from '../../../gremlin/types.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { type Carry } from '../context/context.ts';
 import { toListStream, toScalarStream, type Stream } from '../context/stream.ts';
@@ -40,7 +40,7 @@ function bareInjectTag(steps: PStep[], count: number): ValueType | undefined {
   if (!count) return undefined;
   const names = Array.from({ length: count }, (_, i) => flatType(argTypes[i]));
   const uniform = names.every((n) => n === names[0]) ? names[0] : undefined;
-  return uniform && DECLARED_TYPE_REQUIRED.has(uniform) ? CANONICAL_TO_VALUETYPE[uniform] : undefined;
+  return uniform && DECLARED_TYPE_REQUIRED.has(uniform) ? (uniform as ValueType) : undefined;
 }
 
 /** Apply the leading coercion prefix while the inject values are still JS constants.
@@ -54,7 +54,7 @@ function foldConstantCoercions(steps: PStep[], vals: any[]): { at: number; as?: 
     const step = steps[at];
     if (step.name === 'asBool') {
       for (let i = 0; i < vals.length; i++) vals[i] = asBoolConst(vals[i]);
-      as = 'bool';
+      as = 'boolean';
       continue;
     }
     if (step.name === 'asNumber') {
@@ -63,7 +63,7 @@ function foldConstantCoercions(steps: PStep[], vals: any[]): { at: number; as?: 
         for (let i = 0; i < vals.length; i++) vals[i] = asNumberConst(vals[i], spec);
         as = spec.as;
       } else {
-        if (as === 'date') {
+        if (as === 'datetime') {
           as = 'long';
           continue;
         }
@@ -83,13 +83,13 @@ function foldConstantCoercions(steps: PStep[], vals: any[]): { at: number; as?: 
     if (step.name === 'asDate') {
       const argTypes = at === 1 ? (steps[0].argTypes ?? []) : [];
       for (let i = 0; i < vals.length; i++) vals[i] = asDateConst(vals[i], flatType(argTypes[i]));
-      as = 'date';
+      as = 'datetime';
       continue;
     }
     if (step.name === 'dateAdd') {
       const delta = Number(step.args[1]) * dtFactor(step.args[0]);
       for (let i = 0; i < vals.length; i++) vals[i] = Number(vals[i]) + delta;
-      as = 'date';
+      as = 'datetime';
       continue;
     }
     const other = dateDiffOtherMs(step.args[0], {});
