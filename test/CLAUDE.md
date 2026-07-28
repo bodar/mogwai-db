@@ -34,7 +34,10 @@
   **fast paths on ≡ fast paths off**, over the L1 corpus AND generated traversals, all-six-off and
   one-at-a-time. Self-oracling — `FastPathConfig` declares the generic path the semantic authority,
   so a disagreement is always a defect on the optimized side. Ratcheted like L3 (`known.ts`, one
-  entry per ROOT CAUSE with a diagnosis, never per traversal). Fixed seed in CI;
+  entry per ROOT CAUSE with a diagnosis, never per traversal). **A SECOND oracle** (`laws.ts`,
+  `metamorphic.test.ts`) checks metamorphic laws — `out(l) ≡ outE(l).inV()`, `dedup()` idempotence,
+  `where(b) ⊎ where(¬b)` partitioning — over generated prefixes; it exists because a differential is
+  blind to a defect BOTH lowerings share, and it found two such on its first deep run. Fixed seed in CI;
   `mise run L5-random` explores. **L5 is the CEILING instrument** — it measures what composes,
   which is the thing the L3 count structurally cannot. Current state + runbook:
   `L5-properties/README.md`; design rationale + the unbuilt oracles:

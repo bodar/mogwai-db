@@ -238,7 +238,11 @@ export function mergeElementArms(base: Carry, arms: readonly ElementStream[]): E
 export const union: StepFn = (s, st) => {
   assertForkSafe('union', st);
   const branches = s.args.filter(isNested);
-  if (branches.length < 2) throw new Error('union() needs at least two branches');
+  // A SINGLE branch is legal Gremlin — union() is varargs and `union(t)` is just t — and the arm
+  // merge handles one arm fine (it is a UNION ALL of one). Rejecting it was the same artificial
+  // arity guard and()/or() carried: it broke the metamorphic law `union(q) === q`. ZERO branches
+  // still throws (nothing to merge).
+  if (branches.length === 0) throw new Error('union() needs at least one branch');
   const ends = branches.map((b) => tryCompileElementTraversal(st, b.nested)
     ?? (() => { throw new Error(`union() branch __.${armDescription(b.nested, st.params)} not yet supported (scalar/projection body)`); })());
   return mergeElementArms(carryOf(st), ends);
@@ -251,7 +255,11 @@ export const union: StepFn = (s, st) => {
 export function tryLowerScalarUnion(s: Step, st: ElementStream): ScalarStream | null {
   assertForkSafe('union', st);
   const branches = s.args.filter(isNested);
-  if (branches.length < 2) throw new Error('union() needs at least two branches');
+  // A SINGLE branch is legal Gremlin — union() is varargs and `union(t)` is just t — and the arm
+  // merge handles one arm fine (it is a UNION ALL of one). Rejecting it was the same artificial
+  // arity guard and()/or() carried: it broke the metamorphic law `union(q) === q`. ZERO branches
+  // still throws (nothing to merge).
+  if (branches.length === 0) throw new Error('union() needs at least one branch');
   const arms: ScalarStream[] = [];
   for (const branch of branches) {
     const arm = tryCompileScalarChild(st, branch.nested, 'all')

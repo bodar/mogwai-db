@@ -38,6 +38,19 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    to centralise the policy, and that is wrong — the rewrite is only valid over an ELEMENT stream and
    the IR layer has no shape information, so it broke all six non-element `order().by(key)` forms
    (list/map/group/record/scalar/path). Shape is exactly what the lowering knows and the IR does not. Still open, from the same investigation:
+   - **`otherV()` miscounts while PATH TRACKING is live.** `g.V().out().simplePath().bothE('created')
+     .otherV()` yields lop×3/marko×2 where `.both('created')` yields lop×1/marko×3. The `simplePath()`
+     is provably a no-op there (a one-hop path cannot revisit), so the law must hold exactly as it does
+     without it — and it does, which identifies the path form as broken. Likely the otherV() position
+     projector picking the wrong endpoint off the exploded path row: `POSITION_MOVEMENTS`
+     (`steps/tail/path.ts`) lists `bothV` but otherV reaches it separately. Found by the METAMORPHIC
+     oracle; invisible to the differential (both configs agree). *High — silent wrong answer.*
+   - **A non-terminal `fold()` after `dedup()` folds the UN-deduplicated multiset.**
+     `g.V().out().dedup()` gives 4; `.dedup().fold().unfold()` gives 6. The TERMINAL fold is correct
+     (`buildProjection` renders `SELECT DISTINCT` off `acc.distinct`), so this is the retype route only:
+     `foldTailAcc` stops at a non-terminal `fold()` as a shape boundary and the list built there drops
+     the dedup the acc had already absorbed. Found by the metamorphic oracle. *High — silent wrong
+     answer.*
    - **An unproductive `sum()`/`min()`/`max()`/`mean()` body in a filter position wrongly KEEPS the
      traverser.** `g.V().where(__.out().values('age').sum())` returns all 6 vertices; only marko has
      an out-neighbour carrying an `age`, so TinkerPop returns 1. Those four reducers emit NOTHING

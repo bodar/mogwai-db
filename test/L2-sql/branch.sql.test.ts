@@ -116,7 +116,10 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(scalar.shape).toEqual({ kind: 'count' });
     expect(scalar.sql).toContain(' AS v FROM');
     expect(scalar.sql).toContain('UNION ALL');
-    expect(() => compile('g.V().union(__.out())', {})).toThrow('needs at least two branches');
+    // A SINGLE branch is legal Gremlin — union() is varargs and `union(t)` is just t, so the arm merge
+    // is a UNION ALL of one. Rejecting it broke the metamorphic law `union(q) === q` (laws.ts), which
+    // is how the guard was found. ZERO branches still throws.
+    expect(read('g.V().union(__.out())').sql).toContain('FROM');
     // as() before union now threads the alias column through the merge (carried-schema, Move B)
     const ua = read('g.V().as("a").union(__.out(), __.in()).select("a")');
     expect(ua.sql).toContain('UNION ALL');

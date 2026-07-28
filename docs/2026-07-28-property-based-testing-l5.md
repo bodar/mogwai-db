@@ -24,13 +24,13 @@ the compiler's generic lowering path.** That turned out to matter — see the fi
 ## The oracle design space
 
 A generator is easy; the oracle is the hard part. Four designs were considered, all of which avoid a
-reference implementation. Only the first is built.
+reference implementation. Three are built.
 
 | | Oracle | Cost | Covers | Status |
 |---|---|---|---|---|
 | 1 | **Fast-path differential** — `run(q, on) ≡ run(q, off)` | lowest | the six optimized lowerings | **built** |
-| 2 | **Transparent-wrapper equivalence** — if `q` yields rows so must `local(q)` / `union(q)` / `filter(__.identity())`-wrapped `q` | low | the silent-`[]` class CLAUDE.md flags twice | not built |
-| 3 | **Metamorphic laws** — `out(l) ≡ outE(l).inV()`, `count() ≡ fold().count(local)`, `where(b) ⊎ where(not(b)) = identity` | medium | semantics BOTH lowerings share | not built |
+| 2 | **Transparent-wrapper equivalence** — if `q` yields rows so must `local(q)` / `union(q)` / `filter(__.identity())`-wrapped `q` | low | the silent-`[]` class CLAUDE.md flags twice | **built** — folded into 3 (same comparison, same harness) |
+| 3 | **Metamorphic laws** — `out(l) ≡ outE(l).inV()`, `count() ≡ fold().count(local)`, `where(b) ⊎ where(not(b)) = identity` | medium | semantics BOTH lowerings share | **built** (`laws.ts`, `metamorphic.test.ts`) |
 | 4 | **Fail-closed discipline** — every outcome is rows or a *clear deferral*, never a raw `TypeError`/SQLite error | low | the guardrail's own claim | not built |
 
 Differential-vs-TinkerPop (a real JVM reference) was rejected: it is the gold oracle and needs a JVM
@@ -41,7 +41,22 @@ authority*, so a disagreement is by definition a defect on the optimized side �
 table, no reference, nothing to maintain. It also happened to cover the code with the least prior
 coverage, since nothing had ever run the generic path.
 
-**Why 3 matters most next.** See the blind spot below.
+**Why 3 mattered most, and what it found.** It is the only oracle that can see a defect the two
+lowerings share, and it justified itself on its first deep run: two silent wrong answers the
+differential is structurally blind to — `otherV()` miscounting under live path tracking, and a
+non-terminal `fold()` after `dedup()` folding the un-deduplicated multiset. Both are in
+`outstanding-work` item 0, and both are diagnosed as `knownBroken` entries on their laws (same
+discipline as `known.ts`: a tracked bug, never an acceptable exception).
+
+Two design points worth keeping. **A law is instantiated over a GENERATED prefix** — `out(l) ≡
+outE(l).inV()` as a fixed pair is one assertion; over a few hundred generated vertex-shaped contexts it
+is a claim about composition, and shrinking then reduces a break to the smallest context that causes
+it (both findings shrank to three-step prefixes). **Gating differs from the differential**: there, one
+side throwing IS a defect, because a fast path must not change what is supported; here it only means
+the law is not evaluable, so it is counted and reported, split by whether the PREFIX or the law's own
+FORM was unsupported — the latter being the more interesting signal.
+
+Oracle 4 (fail-closed discipline) remains unbuilt.
 
 ## The blind spot — and why it is structural
 
@@ -49,8 +64,8 @@ The differential compares the two lowerings *against each other*. It can therefo
 **disagreement**. A defect present in both, or one whose two halves cancel, is invisible to it by
 construction. This is not a gap to patch; it is what the design is.
 
-Two such defects were found by hand while diagnosing the differential's output, and neither could ever
-have been found by it:
+Four such defects are now known. The first two were found by hand while diagnosing the differential's
+output; the last two by oracle 3, which exists precisely to find them:
 
 - **Non-productive `by(key)` was not applied at `order()`.** `g.V().order().by('age')` returned all
   six modern-graph vertices; TinkerPop returns four (the two software vertices have no `age`). Both
@@ -59,12 +74,18 @@ have been found by it:
   traverser.** `g.V().where(__.out().values('age').sum())` returns all six; TinkerPop returns one.
   Both configs agree. **Still open** — `docs/outstanding-work.md` item 0.
 
-Worse than invisible: the first of those **cancelled** one of the differential's own findings on the
+- **`otherV()` miscounts while path tracking is live** — `g.V().out().simplePath().bothE('created')
+  .otherV()` disagrees with `.both('created')`, though the `simplePath()` is provably a no-op there.
+  **Open.**
+- **A non-terminal `fold()` after `dedup()` folds the un-deduplicated multiset** — `dedup()` gives 4,
+  `dedup().fold().unfold()` gives 6. The terminal fold is correct. **Open.**
+
+Worse than invisible: the first of the four **cancelled** one of the differential's own findings on the
 traversal that surfaced it, so the corresponding L3 scenario *passed for entirely the wrong reason*
 while its `@WithProductiveByStrategy` twin failed. Two compensating bugs read as conformance.
 
-That is the case for oracle 3: a metamorphic law compares against a *law*, not against another
-implementation, so shared defects have nowhere to hide.
+That is the case for oracle 3, and it paid out: a metamorphic law compares against a *law*, not
+against another implementation, so shared defects have nowhere to hide.
 
 ## Why the shape lattice is hand-written
 

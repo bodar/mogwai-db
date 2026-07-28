@@ -90,3 +90,63 @@ export const traversal = (budget: Budget): fc.Arbitrary<Generated> =>
  *  controls the shape of what it emits, so a `name(` scan cannot mis-read it. */
 const stepNames = (q: string): string[] =>
   [...q.matchAll(/(?:^|[.(])([a-zA-Z]\w*)\(/g)].map((m) => m[1]).filter((n) => n !== 'g' && n !== '__');
+
+/**
+ * A generated PREFIX that is guaranteed to LAND on `shape` — the context a metamorphic law is
+ * instantiated over (`laws.ts`).
+ *
+ * A law like `out(l) ≡ outE(l).inV()` only means anything applied to something; what makes it a
+ * property test rather than a fixed example is that the something is generated. The law appends its
+ * two variants to this prefix and must get the same answer for every one of them.
+ *
+ * Landing on a known shape is done by restricting the walk to SHAPE-PRESERVING transitions
+ * (`to === shape`) rather than by searching for a path to it. That is a deliberate trade: it costs
+ * the shape-changing steps (a prefix can't route vertex→edge→vertex), and it buys a generator that
+ * cannot fail to satisfy the constraint. For `vertex` the preserved set is still the whole
+ * interesting surface — movement, filters, branches, repeat, order/slice, dedup.
+ */
+export const prefix = (shape: Shape, budget: Budget): fc.Arbitrary<{ src: string; steps: readonly string[] }> =>
+  fc.gen().map((gen) => {
+    const pick = <T>(options: readonly T[]): T => options[gen(fc.nat, { max: options.length - 1 })]!;
+    const sources = SOURCES.filter((s) => s.to === shape);
+    if (!sources.length) throw new Error(`no source lands on ${shape}`);
+    const parts: string[] = [pick(sources).render(ctxFrom([], pick))];
+    const preserving = TRANSITIONS[shape].filter((t) => t.to === shape && !t.terminal);
+    const n = gen(fc.nat, { max: Math.max(0, budget.steps) });
+    for (let i = 0; i < n; i++) {
+      const legal = preserving.filter((t) => (t.bodies?.length ?? 0) === 0 || budget.depth > 0);
+      if (!legal.length) break;
+      const t = pick(legal);
+      const bodies = (t.bodies ?? []).map((bodyShape) => {
+        const inner = walkAny(bodyShape, { steps: Math.max(1, budget.steps - 1), depth: budget.depth - 1 }, pick, gen);
+        return `__.${inner === '' ? 'identity()' : inner}`;
+      });
+      parts.push(t.render(ctxFrom(bodies, pick)));
+    }
+    const src = `g.${parts.join('.')}`;
+    return { src, steps: stepNames(src) };
+  });
+
+/** An unconstrained child-body walk, for the bodies a prefix's branch/filter steps need. Shares the
+ *  confinement rule with `traversal`'s walk; kept separate only because that one is a closure over
+ *  its own `gen`. */
+function walkAny(from: Shape, budget: Budget, pick: <T>(o: readonly T[]) => T, gen: any): string {
+  const parts: string[] = [];
+  let shape = from;
+  let folded: Shape = from;
+  const n = gen(fc.nat, { max: Math.max(1, budget.steps) });
+  for (let i = 0; i < n; i++) {
+    const legal = TRANSITIONS[shape].filter((t) => (t.bodies?.length ?? 0) === 0 || budget.depth > 0);
+    if (!legal.length) break;
+    const t = pick(legal);
+    const bodies = (t.bodies ?? []).map((b) => {
+      const inner = walkAny(b, { steps: Math.max(1, budget.steps - 1), depth: budget.depth - 1 }, pick, gen);
+      return `__.${inner === '' ? 'identity()' : inner}`;
+    });
+    parts.push(t.render(ctxFrom(bodies, pick)));
+    if (t.to === 'list') folded = shape;
+    shape = t.to === 'inherit' ? folded : t.to;
+    if (t.terminal) break;
+  }
+  return parts.join('.');
+}

@@ -7,7 +7,8 @@ there now.
 ```
 mise run L5          # fixed seed 42, 300 generated traversals; also runs inside `mise run test`
 mise run L5-random   # random seed, 3,000 traversals — exploration, NOT a CI gate
-L5_SEED=n L5_RUNS=n  # override either
+L5_SEED=n L5_RUNS=n  # override seed / generated-traversal count
+L5_LAW_RUNS=n        # per-law instantiations for the metamorphic oracle
 ```
 
 Both need the **submodule**, unlike L1/L2: the differential executes its traversals through the real
@@ -16,7 +17,13 @@ has. Parsing and compiling are submodule-free; running is not.
 
 ## Status
 
-- **The ratchet (`known.ts`) is EMPTY.** No known fast-path divergence.
+**Two oracles.** The differential compares the two *lowerings*; the metamorphic laws compare against a
+*law*, which is the only way to see a defect both lowerings share.
+
+- **The differential ratchet (`known.ts`) is EMPTY.** No known fast-path divergence.
+- **Laws: 19, all holding**, except two diagnosed contexts carried as `knownBroken` on their law
+  (`otherV()` under live path tracking; a non-terminal `fold()` after `dedup()`) — both real, both
+  open in `docs/outstanding-work.md` item 0, both found BY the laws.
 - Corpus: 2,298 traversals, **~1,368 executable**, 0 unexplained divergences.
 - Generated: 300 @ seed 42, **~203 executable**, 0 unexplained divergences.
 - Verified at a larger scale than CI runs: 4,000 generated traversals with every switch off, plus 900
@@ -24,7 +31,7 @@ has. Parsing and compiling are submodule-free; running is not.
 - Lattice: 7 shapes, 108 transitions, covering 54 step names (the corpus uses 131 — `table.test.ts`
   prints the gap as a table-growth list).
 
-## The property
+## Oracle 1 — the fast-path differential
 
 `src/compiler/options/fast-paths.ts` defines six independently switchable optimized lowerings, each
 promising *"Disabling routes through the generic path — result-equivalent."* L5 checks that claim:
@@ -84,6 +91,17 @@ weight behind.
 
 The gate is a constant zero unexplained divergences — the list only ever shrinks. It is empty today.
 
+## Oracle 2 — metamorphic laws
+
+Each law is a pair of traversals Gremlin's semantics require to agree, instantiated over a **generated
+prefix** so it is a claim about composition rather than one example. Both sides run through the same
+lowering with the same config, so this tests semantics — the axis the differential cannot reach.
+
+Gating differs from oracle 1 deliberately: there, one side throwing IS a defect (a fast path must not
+change what is supported); here it only means the law is not evaluable, so it is counted and reported,
+split by whether the *prefix* or the law's own *form* was unsupported. Only both-ran-and-disagreed
+fails a run.
+
 ## Files
 
 | File | |
@@ -94,3 +112,5 @@ The gate is a constant zero unexplained divergences — the list only ever shrin
 | `known.ts` | the ratchet (currently empty) |
 | `differential.test.ts` | the properties, over corpus + generated, all-off and one-at-a-time |
 | `table.test.ts` | the lattice's own guards (parse/chain, transition coverage, corpus gap) |
+| `laws.ts` | oracle 2: the metamorphic law table, each with its spec reasoning |
+| `metamorphic.test.ts` | every law over generated prefixes; `L5_LAW_RUNS` sets the per-law count |
