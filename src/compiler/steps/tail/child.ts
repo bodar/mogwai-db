@@ -697,6 +697,7 @@ export function tryCompileListChild(
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
   preParsed?: ReturnType<typeof stepChain>,
+  binds?: PStep[],
 ): ListStream | null {
   // Both arms are the same three operations — generic rows (the engine, via the shared row
   // compilers) ▸ the scope-aware fold barrier ▸ the ONE cardinality rejoin. Only the middle one
@@ -713,7 +714,10 @@ export function tryCompileListChild(
       return element && { ...element, fold: () => lowerScopedElementFold(element.stream, { kind: 'child', frames: [element.frame] }) };
     })();
   if (!rows) return null;
-  return applyChildCardinality(parent, rows.frame, rows.fold(), 'all').stream;
+  const l = applyChildCardinality(parent, rows.frame, rows.fold(), 'all').stream as ListStream;
+  // A trailing as() run peeled by classifyListChild binds the LIST the fold produced. It is
+  // applied AFTER the rejoin, so the label rides the parent-cardinality rows the merge will see.
+  return binds?.length ? binds.reduce((acc, b) => asOnStream(acc, b) as ListStream, l) : l;
 }
 
 /** Productive scalar rows immediately before fold(). Group-like consumers use

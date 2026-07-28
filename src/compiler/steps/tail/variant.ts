@@ -14,7 +14,7 @@ import { type ValueType } from '../../../sql/kernel/render.ts';
 import { rangeToOffsetLimit } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toListStream, toVariantStream, type ListStream, type LoweringResult, type ScalarStream, type ShapeTailFn, type VariantArms, type VariantStream } from '../context/stream.ts';
-import { carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, type Carry } from '../context/context.ts';
+import { aliasArmProjection, carryFrag, carryFragMint, carriedCols, carriedWith, mergeAliasMaps, partitionOver, type Carry } from '../context/context.ts';
 import { lowerGlobalCount } from './barrier.ts';
 
 // ---------- variant-arm merge builders (parent-agnostic; element- and scalar-parent share) ----------
@@ -60,20 +60,38 @@ export function finishListMerge(
 ): ListStream {
   const of = unifyLists(arms);
   const enc = base.carried.encounter;
+  // Union the arms' LABEL SETS onto the base. An arm may bind a label the base never saw —
+  // `union(__.out().fold().as("x"), …)` binds it on the LIST the fold produced, which survives the
+  // barrier because it is bound after it. Without the union that column is absent from the merged
+  // schema and a later select() reads nothing: a silent [].
+  //
+  // Only the aliases: NOT mergeCarried. These arms are child-scoped and tryCompileListChild has
+  // already re-homed them onto the parent, so mergeCarried's rigid-role assertion is false here
+  // (a child scope pushed an ordinal the base lacks) — asserting it breaks coalesce outright.
+  const mergedAliases = mergeAliasMaps(base.carried.aliases, arms.map((a) => a.carried));
+  const grew = mergedAliases.size !== base.carried.aliases.size;
+  const withAliases = (c: Carry['carried']) => grew ? { ...c, aliases: mergedAliases } : c;
   const armSelect = (arm: ListStream, k: number, carried: Carry['carried'], tag: boolean): Expression => {
     const a = arm.rel.as('a');
     const armEnc = tag ? q`, ${k} AS arm_idx, ${arm.carried.encounter ? a.c[arm.carried.encounter] : q`1`} AS arm_encounter` : empty;
     const gate = gateFor?.(a, k);
-    return q`SELECT ${a.c.list} AS list${armEnc}${carryFrag(carried, a)} FROM ${a}${gate ? q` WHERE ${gate}` : empty}`;
+    // Alias columns come from the ARM (remapped, NULL where it never bound the label); every other
+    // carried column is state the arms share with the base and rides through unchanged.
+    const frag = grew
+      ? list([...aliasArmProjection(arm.carried.aliases, mergedAliases, a).map((e) => q`, ${e}`),
+              ...carriedCols({ ...carried, aliases: new Map() }).map((c) => q`, ${a.c[c]}`)], '')
+      : carryFrag(carried, a);
+    return q`SELECT ${a.c.list} AS list${armEnc}${frag} FROM ${a}${gate ? q` WHERE ${gate}` : empty}`;
   };
   if (!enc) {
+    const out = withAliases(base.carried);
     const rel = base.q.cte(
-      list(arms.map((arm, k) => armSelect(arm, k, base.carried, false)), ' UNION ALL '),
-      ['list', ...carriedCols(base.carried)],
+      list(arms.map((arm, k) => armSelect(arm, k, out, false)), ' UNION ALL '),
+      ['list', ...carriedCols(out)],
     );
-    return toListStream(base, rel, of);
+    return toListStream(carryWith(base, out), rel, of);
   }
-  const baseNoEnc = carriedWith(base.carried, { encounter: null });
+  const baseNoEnc = carriedWith(withAliases(base.carried), { encounter: null });
   const inner = base.q.cte(
     list(arms.map((arm, k) => armSelect(arm, k, baseNoEnc, true)), ' UNION ALL '),
     ['list', 'arm_idx', 'arm_encounter', ...carriedCols(baseNoEnc)],

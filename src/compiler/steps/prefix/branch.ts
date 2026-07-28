@@ -269,7 +269,7 @@ export function tryLowerListUnion(s: Step, st: ElementStream): ListStream | null
   // body — so a partly-list union never emits arm0's CTEs before a later arm disqualifies.
   const plans = branches.map((b) => classifyListChild(b.nested, childCtx(st)));
   if (plans.some((p) => !p)) return null;
-  const arms = branches.map((branch, i) => tryCompileListChild(st, branch.nested, ROOT_SCOPE, plans[i]!.body)!);
+  const arms = branches.map((branch, i) => tryCompileListChild(st, branch.nested, ROOT_SCOPE, plans[i]!.body, plans[i]!.binds)!);
   return finishListMerge(carryOf(st), arms);
 }
 

@@ -298,6 +298,29 @@ test('a uniform-element branch composes as a child-body value at every position'
     .toEqual(['a', 'b']);
 });
 
+test('a label bound AFTER fold() inside a branch arm survives the merge', () => {
+  const store = seededStore();
+  // `out().fold().as("x")` binds the LIST the fold produced. That is bound AFTER the barrier, so
+  // it is well-defined and must survive — unlike a label bound BEFORE the fold, which the barrier
+  // legitimately consumes (asserted below so the two cases stay distinguishable).
+  //
+  // This used to be a deferral: classifyListChild required fold() to be the LAST step, so the
+  // trailing as() fell off the end into the generic "scalar/projection body" throw. The arm-bound
+  // label then had to survive two more places — tryCompileListChild re-homes each arm onto the
+  // PARENT's carried, and finishListMerge projected the BASE's alias columns off each arm by name.
+  //
+  // marko(1): out has 3 neighbours (one list), in has 0. Only arm 1 binds x, so select("x") keeps
+  // that one traverser and drops arm 2's — TinkerPop's drop-not-throw for an unbound label.
+  expect(run(store, 'g.V(1).union(__.out().fold().as("x"), __.in().fold()).select("x")').length).toBe(1);
+  // both arms bind it → both survive
+  expect(run(store, 'g.V(1).union(__.out().fold().as("x"), __.in().fold().as("x")).select("x")').length).toBe(2);
+  // bound BEFORE the fold: the barrier eats it, select() correctly yields nothing. Not a bug —
+  // pinned so a future change to the merge cannot quietly start answering it.
+  expect(run(store, 'g.V(1).union(__.as("x").out().fold(), __.as("x").in().fold()).select("x")').length).toBe(0);
+  // the element-shaped twin was always fine; kept adjacent so the shapes stay comparable
+  expect(run(store, 'g.V(1).union(__.out().as("x"), __.in().as("x")).select("x")').length).toBe(3);
+});
+
 test('a list-armed branch composes as an all-cardinality (local/flatMap) child body', () => {
   const store = seededStore();
   // union of two folded arms → one list per arm per input. flatMap/local emit both; sizes keep the

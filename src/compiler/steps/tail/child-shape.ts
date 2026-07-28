@@ -659,13 +659,20 @@ export function isTotalScalarChild(nested: any, ctx: ChildCtx): boolean {
  * instead of re-parsing — one parse per arm, classify-all-then-emit-all. Deliberately
  * stricter than compileElementChildRows' fold path (routing control): a scalar-rows-before-
  * fold OR a pure-movement before-fold; a strict body always emits, so no lockstep throw. */
-export function classifyListChild(nested: any, ctx: ChildCtx): { body: ReturnType<typeof stepChain> } | null {
+export function classifyListChild(nested: any, ctx: ChildCtx): { body: ReturnType<typeof stepChain>; binds?: PStep[] } | null {
   if (!nested) return null;
-  const body = childSteps(nested, ctx.params);
+  const full = childSteps(nested, ctx.params);
+  // A trailing as() run binds the LIST traverser the fold produced — `out().fold().as("x")` — and
+  // is shape-preserving, so it is peeled here and re-applied after the fold by the emitter. This
+  // is NOT the same as a label bound BEFORE the fold: that one the barrier legitimately consumes.
+  let end = full.length;
+  while (end > 0 && full[end - 1]!.name === 'as') end--;
+  const binds = full.slice(end);
+  const body = full.slice(0, end);
   if (body.at(-1)?.name !== 'fold') return null;
   const before = body.slice(0, -1);
   return classifyScalarChildRows('element', before, ctx)?.kind === 'element' || !!elementRun(before, ctx)
-    ? { body } : null;
+    ? { body, binds: binds.length ? binds : undefined } : null;
 }
 
 /** PURE. A bare branch step whose merge is LIST (uniform `…fold()` arms) or VARIANT (genuinely
