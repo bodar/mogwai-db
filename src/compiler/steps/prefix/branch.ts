@@ -7,7 +7,7 @@ import { normalize } from '../../ir/passes.ts';
 import { analyze, type ChainFacts } from '../../ir/analyze.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem } from '../../plan/plan.ts';
 import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
-import { advance, aliasColsOf, elemRel, labelScope, prevRel, carryFrag, carryFragMint, carriedCols, carriedWith, mergeCarried, rigidCols, partitionOver, type AliasEntry, type AliasMap, type Carried, type Carry, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
+import { advance, aliasColsOf, elemRel, labelScope, prevRel, carryFrag, carryFragMint, carriedCols, carriedWith, mergeCarried, rehomeCarried, rigidCols, partitionOver, type AliasEntry, type AliasMap, type Carried, type Carry, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type AliasShape } from '../context/alias.ts';
 import { keyedChildRelation, keyedKeySet } from '../tail/keyed.ts';
 import { pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarModulations, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
@@ -317,7 +317,7 @@ export const optional: StepFn = (s, st) => {
   // path at its incoming length). Pad to max; POP this branch's ordinal on output (restore
   // the outer origins), keeping any outer ordinals threaded.
   const merged = mergeBranchCarried(seedSt.carried, [end.carried, seedSt.carried]);
-  const out: Carried = { ...merged, origins: st.carried.origins };
+  const out = rehomeCarried(merged, st.carried.origins);
   const baseSt: ElementStream = { ...seedSt, rel: base };
   const hit = q`SELECT ${armProjection(end, out, out.encounter ? 0 : undefined)} FROM ${end.rel}`;
   const miss = q`SELECT ${armProjection(baseSt, out, out.encounter ? 1 : undefined)} FROM ${base} WHERE ${ord} NOT IN (SELECT ${ord} FROM ${end.rel})`;
@@ -368,7 +368,7 @@ export const coalesce: StepFn = (s, st) => {
   if (ends.some((e) => e.elem !== elem)) throw new Error('coalesce() branches produce different element kinds (mixed-shape) not yet supported');
   // Pad ragged path arms; POP this branch's ordinal on output (restore the outer origins).
   const merged = mergeBranchCarried(seedSt.carried, ends.map((e) => e.carried));
-  const out: Carried = { ...merged, origins: st.carried.origins };
+  const out = rehomeCarried(merged, st.carried.origins);
   const parts = ends.map((end, k) => {
     const sel = armProjection(end, out, out.encounter ? k : undefined);
     if (k === 0) return q`SELECT ${sel} FROM ${end.rel}`;

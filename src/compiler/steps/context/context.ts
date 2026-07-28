@@ -366,6 +366,12 @@ export function carriedWith(c: Carried, o: CarriedOpts): Carried {
   };
 }
 
+/** Re-home child-scoped carried state onto its parent schema. This is deliberately
+ * narrower than `mergeCarried`: a child ordinal is meaningful only inside the child
+ * relation, so a caller restores the parent origin stack before any peer-arm merge. */
+export const rehomeCarried = (child: Carried, parentOrigins: readonly string[]): Carried =>
+  carriedWith(child, { origins: parentOrigins });
+
 /** Return a new stream state with its carried schema shallow-patched (explicit undefined
  *  CLEARS — for the branch/local seeds that reset aliases/path). The escape hatch for the
  *  few sites that rebuild carried directly rather than through advance. */
