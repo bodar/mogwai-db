@@ -174,7 +174,7 @@ function scopedElementRowCount(
     ['v', ...carriedCols(outCarried)],
   );
   return {
-    stream: toScalarStream({ ...carryOf(el), carried: outCarried }, rel, 'long', { result: 'count' }),
+    stream: toScalarStream(carryOf(el, outCarried), rel, 'long', { result: 'count' }),
     frame: pushed.frame,
   };
 }
@@ -590,7 +590,7 @@ function compileScalarChildRows(
     q`SELECT ${scalar} AS v${carryFragMint(outCarried, c, 'encounter', encMint)} FROM ${from}`,
     ['v', ...carriedCols(outCarried)],
   );
-  const lowered = continueScalar(toScalarStream({ ...carryOf(end), carried: outCarried }, rows, undefined, { result: 'value' }));
+  const lowered = continueScalar(toScalarStream(carryOf(end, outCarried), rows, undefined, { result: 'value' }));
   return applyScalarChildCardinality(parent, pushed, lowered, use, retainChildScope);
 }
 
@@ -1020,7 +1020,7 @@ export function tryCompileRowsBeforeReducer(
     ['v', ...carriedCols(outCarried)],
   );
   return {
-    stream: toScalarStream({ ...carryOf(element.stream), carried: outCarried }, rel, undefined, { result: 'value' }),
+    stream: toScalarStream(carryOf(element.stream, outCarried), rel, undefined, { result: 'value' }),
     frame: element.frame,
     reducer,
   };
@@ -1060,4 +1060,3 @@ export function tryCompileElementTraversal(
     throw new Error('repeat() inside a correlated element child not yet supported (recursive walk does not carry the parent ordinal)');
   return engineOf(parent).tryLowerElementSteps(body, parent);
 }
-

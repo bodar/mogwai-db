@@ -6,7 +6,7 @@ import {
   type AliasShape,
 } from '../context/alias.ts';
 import {
-  assertStreamColumns, carryOf, pathColumns, streamColumns, toListStream, toScalarStream, PROPERTY_PAYLOAD,
+  assertStreamColumns, carryOf, pathColumns, streamColumns, toElementStream, toListStream, toPropertyStream, toScalarStream, PROPERTY_PAYLOAD,
   type ListOf, type PropertyStream, type Stream,
 } from '../context/stream.ts';
 import { staticTypeOf, type ValueType } from '../../../sql/kernel/render.ts';
@@ -164,7 +164,7 @@ function selectPropertyAlias(s: Exclude<Stream, { kind: 'result' }>, entry: Alia
     q`SELECT ${fields}${carryFrag(s.carried, p)} FROM ${p} WHERE ${aliasPresent(col)}`,
     [...PROPERTY_PAYLOAD, ...carriedCols(s.carried)],
   );
-  return { ...carryOf(s), kind: 'property', rel, ownerElem: entry.propertyElem };
+  return toPropertyStream(carryOf(s), rel, entry.propertyElem);
 }
 
 /** select(label) / select(Pop, label) with ONE label, over any stream shape. Reads the

@@ -6,7 +6,7 @@ import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { aliasElem, aliasIsElement, carryFrag, carriedCols, type AliasMap, type ElementStream } from '../context/context.ts';
 import { aliasId, aliasPresent, aliasScalar, shapeElem } from '../context/alias.ts';
 import { emptyElementLike, historyPropertyValues, historyValues, popEnd, popIsListResult, selectOneFromAlias } from './labelselect.ts';
-import { carryOf, continueLowering, dispatchShapeTail, recordFieldColumns, toListStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type ListStream, type LoweringResult, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
+import { carryOf, continueLowering, dispatchShapeTail, recordFieldColumns, toElementStream, toListStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type ListStream, type LoweringResult, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
 import { type Compiled } from '../../../sql/kernel/render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
 import { lowerGlobalCount } from './barrier.ts';
@@ -720,7 +720,7 @@ const recordSelect: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
     q`SELECT ${r.c[`${field.prefix}_rid`]} AS id${carryFrag(s.carried, r)} FROM ${r}`,
     ['id', ...carriedCols(s.carried)],
   );
-  return continueLowering({ ...carryOf(s), kind: 'elements', rel, elem: field.sub === 'edge' ? 'edge' : 'vertex' }, at + 1);
+  return continueLowering(toElementStream(carryOf(s), rel, field.sub === 'edge' ? 'edge' : 'vertex'), at + 1);
 };
 
 const RECORD_TAIL = new Map<string, ShapeTailFn<RecordStream>>([

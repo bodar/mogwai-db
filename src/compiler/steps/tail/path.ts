@@ -228,7 +228,7 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   const node = q`SELECT ${dist}${list(cols, ', ')}${carryCols} FROM ${p}${list(joins, '')}${whereNode}${tailSql}`;
   const layout = { kind: 'linear' as const, positions };
   const rel = st.q.cte(node, [...pathColumns(layout), ...aliasCols]);
-  return toPathStream({ ...carryOf(st), carried: outCarried }, rel, layout);
+  return toPathStream(carryOf(st, outCarried), rel, layout);
 }
 
 /**

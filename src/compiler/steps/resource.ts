@@ -2,7 +2,7 @@ import { q, list, value, empty, type Expression } from '../../sql/kernel/q.ts';
 import { nodes, edges } from '../../sql/schema.ts';
 import { flattenListArgs } from '../../gremlin/frontend.ts';
 import { carriedCols, carryFrag, type ElementStream } from './context/context.ts';
-import { carryOf, type ScalarStream } from './context/stream.ts';
+import { carryOf, toElementStream, type ScalarStream } from './context/stream.ts';
 import { type PStep } from '../ir/strategies.ts';
 
 // ---------- V()/E() as a MID-TRAVERSAL re-source (a shared leaf) ----------
@@ -47,5 +47,5 @@ export function lowerReSource(s: ScalarStream | ElementStream, step: PStep): Ele
     q`SELECT ${n.c.id} AS id${carryFrag(s.carried, p)} FROM ${p} CROSS JOIN ${n}${where}`,
     ['id', ...cols],
   );
-  return { ...carryOf(s), kind: 'elements', rel, elem };
+  return toElementStream(carryOf(s), rel, elem);
 }

@@ -359,14 +359,22 @@ export function assertStreamColumns<T extends Stream>(s: T): T {
 export const carryThrough = <T extends RelationalStream>(s: T, rel: Relation): T =>
   assertStreamColumns({ ...s, rel }) as T;
 
-/** Project a stream's shape-independent state (for building the next phase's stream). */
-export const carryOf = (s: Stream): Carry =>
+/** Project a stream's shape-independent state for a new stream. Supplying `carried`
+ * makes a re-home/retype explicit without reopening the rest of Carry through an
+ * object spread. */
+export const carryOf = (s: Stream, carried?: Carry['carried']): Carry =>
   s.kind === 'result'
     ? (() => { throw new Error('a terminal result stream has no traverser carry'); })()
-    : ({ q: s.q, params: s.params, sideEffects: s.sideEffects, carried: s.carried });
+    : ({ q: s.q, params: s.params, sideEffects: s.sideEffects, carried: carried ?? s.carried });
 
 export const toResultStream = (q: Query, tail: Expression, shape: Shape): ResultStream =>
   ({ kind: 'result', q, tail, shape });
+
+/** Construct an element stream at a shape boundary. Unlike `advance`, this may
+ * retype a non-element payload, but it still validates that every carried role is
+ * physically present on the replacement relation. */
+export const toElementStream = (c: Carry, rel: Relation, elem: ElementStream['elem']): ElementStream =>
+  assertStreamColumns({ ...c, kind: 'elements', rel, elem });
 
 /** The non-payload scalar-stream facets, as an options bag. Emission order is NOT here —
  *  it lives in `carried.encounter` (the one unified slot), threaded via carryFrag like every

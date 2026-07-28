@@ -8,7 +8,7 @@ import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { isMapLocalOrder } from './list.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { advance, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, partitionOver, prevRel, withCarried, withoutCarried, type Carried, type Carry, type ElementStream } from '../context/context.ts';
-import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
+import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toElementStream, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
 import { PER_ROW, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { applyChildCardinality, lowerElementBody, mintChildEncounter, pushChildScope, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows } from './child.ts';
@@ -572,7 +572,7 @@ export function lowerValueMap(st: ElementStream, proj: PStep): MapStream {
     ['map', ...outCols],
   );
   // One blob row per element, carrying whatever the element carried (bar bulk, consumed here).
-  const carry: Carry = { ...carryOf(st), carried: outCarried };
+  const carry: Carry = carryOf(st, outCarried);
   return toMapStream(carry, rel, { kind: 'scalar' }, { kind: 'list', of: { kind: 'scalar' } });
 }
 
@@ -805,7 +805,7 @@ function propertyScalar(s: PropertyStream, col: 'vpid' | 'pk' | 'pv'): ScalarStr
     q`SELECT ${p.c[col]} AS v${vsel}${carryFragMint(carried, p, 'encounter', mint)} FROM ${p}`,
     ['v', ...(col === 'pv' ? ['vtype'] : []), ...carriedCols(carried)],
   );
-  return toScalarStream({ ...carryOf(s), carried }, rel, undefined, { result: 'value', ...vtag });
+  return toScalarStream(carryOf(s, carried), rel, undefined, { result: 'value', ...vtag });
 }
 
 /** The canonical property tie-break ORDER BY terms (all ASC), qualified to `p`. A node
@@ -890,7 +890,7 @@ function propertyOrder(s: PropertyStream, step: PStep): PropertyStream {
       q`SELECT ${list(PROPERTY_PAYLOAD.map((col) => d.c[col]), ', ')}${carryFragMint(carried, d, 'encounter', mint)} FROM ${d} LEFT JOIN ${f} ON ${f.c.ord}=${d.c[ord]} AND ${f.c.rn}=1`,
       [...PROPERTY_PAYLOAD, ...carriedCols(carried)],
     );
-    return toPropertyStream({ ...carryOf(s), carried }, rel, s.ownerElem);
+    return toPropertyStream(carryOf(s, carried), rel, s.ownerElem);
   }
   if (token && token !== 'key' && token !== 'value') throw new Error(`properties().order().by(T.${token}) not yet supported`);
   if (by.some((a: any) => typeof a === 'string')) throw new Error('properties().order().by(key) not yet supported');
@@ -913,7 +913,7 @@ function propertyOrder(s: PropertyStream, step: PStep): PropertyStream {
     q`SELECT ${list(PROPERTY_PAYLOAD.map((c) => p.c[c]), ', ')}${carryFragMint(carried, p, 'encounter', mint)} FROM ${p}`,
     [...PROPERTY_PAYLOAD, ...carriedCols(carried)],
   );
-  return toPropertyStream({ ...carryOf(s), carried }, rel, s.ownerElem);
+  return toPropertyStream(carryOf(s, carried), rel, s.ownerElem);
 }
 
 /** Consume a PropertyStream. Only property-specific operations live here; once a
@@ -961,7 +961,7 @@ const propertyElement: ShapeTailFn<PropertyStream> = (s, _step, _steps, at) => {
     q`SELECT ${p.c.owner} AS id${carryFrag(s.carried, p)} FROM ${p}`,
     ['id', ...carriedCols(s.carried)],
   );
-  const out: ElementStream = { ...carryOf(s), kind: 'elements', rel, elem: s.ownerElem };
+  const out: ElementStream = toElementStream(carryOf(s), rel, s.ownerElem);
   return continueLowering(out, at + 1);
 };
 

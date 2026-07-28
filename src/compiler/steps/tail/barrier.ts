@@ -105,7 +105,7 @@ export function lowerScopedScalarFold(
     q`SELECT jsonb(COALESCE(json_group_array(${member} ORDER BY ${s.c[enc]}) FILTER (WHERE ${s.c[enc]} IS NOT NULL), json('[]'))) AS list${carryFrag(carried, d)} FROM ${d} LEFT JOIN ${s} ON ${s.c[ordinal]}=${d.c[ordinal]} GROUP BY ${d.c[ordinal]}`,
     ['list', ...carriedCols(carried)],
   );
-  return toListStream({ ...carryOf(input), carried }, rel, of);
+  return toListStream(carryOf(input, carried), rel, of);
 }
 
 /** Element child fold stores rowids in encounter order; ListStream metadata retains
@@ -127,7 +127,7 @@ export function lowerScopedElementFold(
     q`SELECT jsonb(COALESCE(json_group_array(${r.c.id} ORDER BY ${r.c.encounter}) FILTER (WHERE ${r.c.encounter} IS NOT NULL), json('[]'))) AS list${carryFrag(carried, d)} FROM ${d} LEFT JOIN ${r} ON ${r.c[ordinal]}=${d.c[ordinal]} GROUP BY ${d.c[ordinal]}`,
     ['list', ...carriedCols(carried)],
   );
-  return toListStream({ ...carryOf(input), carried }, rel, { kind: 'elem', elem: input.elem });
+  return toListStream(carryOf(input, carried), rel, { kind: 'elem', elem: input.elem });
 }
 
 export type NumericReducer = 'sum' | 'min' | 'max' | 'mean';
@@ -212,7 +212,7 @@ export function lowerScopedScalarReducer(
     q`SELECT ${aggregate}${carryFragMint(outCarried, d, 'encounter', q`1`)} FROM ${join} GROUP BY ${d.c[ordinal]}`,
     [...(result === 'number' ? ['v', 'vt'] : ['v']), ...carriedCols(outCarried)],
   );
-  return toScalarStream({ ...carryOf(input), carried: outCarried }, rel, as, { result });
+  return toScalarStream(carryOf(input, outCarried), rel, as, { result });
 }
 
 /** A numeric/comparable reduction carries SQLite's winning storage class as `vt`.

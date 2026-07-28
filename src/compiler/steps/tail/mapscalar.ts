@@ -404,7 +404,7 @@ export function lowerChooseOptions(st: ElementStream, steps: PStep[], stop: numb
       : carryFrag(carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id} WHERE ${predicateSql(productive, undefined)}`,
     ['v', ...carriedCols(carried)],
   );
-  return toScalarStream(carryOf({ ...st, carried }), rel);
+  return toScalarStream(carryOf(st, carried), rel);
 }
 
 /**
