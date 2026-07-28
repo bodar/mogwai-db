@@ -212,9 +212,14 @@ export function tryCompileCountChild(
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
   preParsed?: ReturnType<typeof stepChain>,
+  binds?: PStep[],
 ): ScalarStream | null {
   const rows = compileCountChildRows(parent, nested, scope, preParsed, false);
-  return rows ? applyChildCardinality(parent, rows.frame, rows.stream, 'all').stream : null;
+  if (!rows) return null;
+  const out = applyChildCardinality(parent, rows.frame, rows.stream, 'all').stream as ScalarStream;
+  // A trailing as() run peeled by classifyScalarChild binds the counted scalar; applied after the
+  // rejoin so the label rides the parent-cardinality rows the arm merge will union.
+  return binds?.length ? binds.reduce((acc, b) => asOnStream(acc, b) as ScalarStream, out) : out;
 }
 
 /** Count child with the origin retained for a consumer-owned by()/barrier policy.
@@ -572,8 +577,12 @@ export function tryCompileScalarChild(
   use: ChildUse = 'first',
   scope: CompileScope = ROOT_SCOPE,
   preParsed?: ReturnType<typeof stepChain>,
+  binds?: PStep[],
 ): ScalarStream | null {
-  return compileScalarChildRows(parent, nested, use, scope, false, undefined, preParsed)?.stream ?? null;
+  const s = compileScalarChildRows(parent, nested, use, scope, false, undefined, preParsed)?.stream ?? null;
+  // A trailing as() run peeled by classifyScalarChild binds the SCALAR the body produced; applied
+  // here so the label rides into the arm merge, which unions the arms' label sets already.
+  return s && binds?.length ? binds.reduce((acc, b) => asOnStream(acc, b) as ScalarStream, s) : s;
 }
 
 /** One public scalar-valued child entry point. Consumers must not know whether a

@@ -319,6 +319,12 @@ test('a label bound AFTER fold() inside a branch arm survives the merge', () => 
   expect(run(store, 'g.V(1).union(__.as("x").out().fold(), __.as("x").in().fold()).select("x")').length).toBe(0);
   // the element-shaped twin was always fine; kept adjacent so the shapes stay comparable
   expect(run(store, 'g.V(1).union(__.out().as("x"), __.in().as("x")).select("x")').length).toBe(3);
+
+  // SCALAR arms, same rule. Both arms count → two traversers; only the labelled one survives
+  // select("x") when a single arm binds it.
+  expect(run(store, 'g.V(1).union(__.out().count().as("x"), __.in().count().as("x")).select("x")').length).toBe(2);
+  expect(run(store, 'g.V(1).union(__.out().count().as("x"), __.in().count()).select("x")').length).toBe(1);
+  expect(run(store, 'g.V(1).union(__.as("x").out().count(), __.as("x").in().count()).select("x")').length).toBe(0);
 });
 
 test('a list-armed branch composes as an all-cardinality (local/flatMap) child body', () => {

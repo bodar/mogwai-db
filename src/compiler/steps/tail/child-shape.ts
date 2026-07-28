@@ -446,7 +446,7 @@ function elementOptionMapScalarBranch(branch: PStep, ctx: ChildCtx): boolean {
 
   const choice = branch.args[0];
   const choiceIsScalar = choice && typeof choice === 'object' && 'nested' in choice
-    ? classifyScalarChild(choice.nested, ctx) !== null
+    ? noBinds(classifyScalarChild(choice.nested, ctx))
     : choice && typeof choice === 'object' && 'token' in choice
       && (choice.token === 'label' || choice.token === 'id');
   if (!choiceIsScalar) return false;
@@ -484,30 +484,43 @@ export function elementScalarBranchArm(body: ReturnType<typeof stepChain>, ctx: 
     // predicate-form choose(pred, then, else): only the two value arms must be scalar (the
     // predicate is a gate). Other arities defer to tryLowerScalarChoose's own decline.
     if (kids.length !== 3) return false;
-    return classifyScalarChild(kids[1].nested, armCtx) !== null && classifyScalarChild(kids[2].nested, armCtx) !== null;
+    return noBinds(classifyScalarChild(kids[1].nested, armCtx)) && noBinds(classifyScalarChild(kids[2].nested, armCtx));
   }
   const min = branch.name === 'union' ? 2 : 1; // union needs ≥2 arms; coalesce ≥1
-  return kids.length >= min && kids.every((a: any) => classifyScalarChild(a.nested, armCtx) !== null);
+  return kids.length >= min && kids.every((a: any) => noBinds(classifyScalarChild(a.nested, armCtx)));
 }
 
 /** PURE. An element-parent scalar child (the strict isScalarChild shape): a movement-only
  * total count(), a values/id/label/constant projection with a scalar-row tail, or a nested
  * scalar-armed branch (elementScalarBranchArm). Returns the parsed body so the emitter reuses
  * it — one parse per arm, classify-then-emit. */
-export function classifyScalarChild(nested: any, ctx: ChildCtx): { body: ReturnType<typeof stepChain> } | null {
+export function classifyScalarChild(nested: any, ctx: ChildCtx): { body: ReturnType<typeof stepChain>; binds?: PStep[] } | null {
   if (!nested) return null;
-  const body = childSteps(nested, ctx.params);
+  const full = childSteps(nested, ctx.params);
+  // A trailing as() run binds the SCALAR the body produced (`out().count().as("x")`) and is
+  // shape-preserving, so it is peeled and reported separately. Reported, NOT silently accepted:
+  // this classifier has ten consumers and only the branch arms have an emitter that can re-apply
+  // the binds. Everyone else must decline when `binds` is set — which keeps their behaviour
+  // exactly as it was, since a trailing as() made this return null before.
+  let end = full.length;
+  while (end > 0 && full[end - 1]!.name === 'as') end--;
+  const binds = full.slice(end);
+  const body = full.slice(0, end);
   const terminal = body.at(-1);
   if (!terminal) return null;
   const ok = terminal.name === 'count'
     ? classifyCountChild(body, ctx) !== null
     : classifyScalarChildRows('element', body, ctx)?.kind === 'element'
       || elementScalarBranchArm(body, ctx);
-  return ok ? { body } : null;
+  return ok ? { body, binds: binds.length ? binds : undefined } : null;
 }
 
+/** A classification a bind-unaware consumer may act on: present, and with no trailing as() run to
+ *  honour. Everything but the branch arms goes through this. */
+export const noBinds = (p: { binds?: PStep[] } | null): boolean => !!p && !p.binds;
+
 export function isScalarChild(nested: any, ctx: ChildCtx): boolean {
-  return classifyScalarChild(nested, ctx) !== null;
+  return noBinds(classifyScalarChild(nested, ctx));
 }
 
 /** Syntax-only recognizer for a PROPERTY-parent scalar child. A property traverser's
@@ -772,10 +785,15 @@ export interface BranchArms {
  *  arm, so a single arm and a whole branch can never classify differently. The ORDER is
  *  significant: element first, so a homogeneous element branch stays on the prefix-fold hot path
  *  even though an element body can also satisfy the scalar/list classifiers. */
+/** A branch ARM's shape. Bind-TOLERANT, unlike `isScalarChild`/`isListChild`: the arm merges
+ *  union the arms' label sets and their emitters re-apply a peeled trailing as() run, so an arm
+ *  ending in one is a perfectly good scalar/list arm. Every other consumer of those two predicates
+ *  has no such emitter and stays bind-intolerant — which is the whole reason the peel is REPORTED
+ *  rather than silently swallowed by the classifier. */
 export function classifyArmShape(nested: any, ctx: ChildCtx): BranchArmShape {
   return isElementChild(nested, ctx) ? 'element'
-    : isScalarChild(nested, ctx) ? 'scalar'
-    : isListChild(nested, ctx) ? 'list'
+    : classifyScalarChild(nested, ctx) !== null ? 'scalar'
+    : classifyListChild(nested, ctx) !== null ? 'list'
     : null;
 }
 
