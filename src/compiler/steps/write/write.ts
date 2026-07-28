@@ -70,10 +70,9 @@ function runNested(engine: Engine, store: GraphStore, nestedNode: any, params: R
 // `as`), else null → inferred from the value. Fails closed on a non-scalar result shape.
 function nestedScalar(engine: Engine, store: GraphStore, nestedNode: any, params: Record<string, any>, seed?: { id: number; elem: 'node' | 'edge' }): { has: boolean; value: any; vtype: CanonicalType | null } {
   const { rows, shape } = runNested(engine, store, nestedNode, params, seed);
-  if (shape.kind !== 'value' && shape.kind !== 'scalar' && shape.kind !== 'count')
+  if (shape.kind !== 'value' && shape.kind !== 'scalar')
     throw new Error(`property() traversal value producing a ${shape.kind} not yet supported`);
   if (!rows.length || rows[0].v == null) return { has: false, value: undefined, vtype: null };
-  if (shape.kind === 'count') return { has: true, value: Number(rows[0].v), vtype: 'long' };
   // Only a STATIC type can be written as the literal's vtype; a per-row/unknown type is
   // not a compile-time fact, so the write channel records nothing and storage class rules.
   const staticAs = shape.kind === 'value' ? staticTypeOf(shape.type) : undefined;

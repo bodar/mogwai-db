@@ -86,8 +86,8 @@ describe('group / properties SQL', () => {
     const vals = read("g.V().valueMap('location').select(Column.values).unfold()");
     expect(vals.sql).toContain('je.key IN (?)');
     // count() over maps = one per element = count of elements; is(typeOf(MAP)) is identity
-    expect(read('g.V().valueMap().count()').shape).toEqual({ kind: 'count' });
-    expect(read('g.V().valueMap().is(typeOf(GType.MAP)).count()').shape).toEqual({ kind: 'count' });
+    expect(read('g.V().valueMap().count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
+    expect(read('g.V().valueMap().is(typeOf(GType.MAP)).count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
     // per-element list ops (unfold + set-ops) compose over the derived value list (was a crash)
     const combined = read("g.V().valueMap('location').select(Column.values).unfold().combine(['seattle'])");
     expect(combined.sql).toContain('json_each');
@@ -145,7 +145,7 @@ describe('group / properties SQL', () => {
     expect(t.sql).toContain("= ?");                      // WHERE vtype = 'map'
     // count(Scope.local) → entry count (map size) via json_array_length
     const cnt = read("g.V().values('m').is(typeOf(GType.MAP)).count(Scope.local)");
-    expect(cnt.shape).toEqual({ kind: 'count' });
+    expect(cnt.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(cnt.sql).toContain('json_array_length');
     // select(values)/select(keys) → one list value (typed items); unfold() → per-entry MapEntryStream
     expect(read("g.V().values('m').is(typeOf(GType.MAP)).select(values)").shape).toEqual({ kind: 'jsonbList', typed: true });
@@ -196,10 +196,10 @@ describe('group / properties SQL', () => {
   test('P3 Stage C2: count()/is(typeOf(MAP)) re-enter a group value', () => {
     // count() over a group = number of entries (distinct keys) → COUNT(DISTINCT gk)
     const c = read('g.V().group().by(T.label).count()');
-    expect(c.shape).toEqual({ kind: 'count' });
+    expect(c.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(c.sql).toContain('COUNT(DISTINCT');
     // count(Scope.local) on a Map = its size, same value
-    expect(read('g.V().group().by(T.label).count(Scope.local)').shape).toEqual({ kind: 'count' });
+    expect(read('g.V().group().by(T.label).count(Scope.local)').shape).toEqual({ kind: 'value', type: STATIC('long') });
     // is(typeOf(MAP)) is identity — a group IS a Map
     expect(read('g.V().groupCount().by(T.label).is(typeOf(GType.MAP))').shape.kind).toBe('group');
     // non-scalar-key count + non-MAP typeOf fail closed
@@ -419,14 +419,14 @@ describe('group / properties SQL', () => {
   test('properties() follow-ons: key/value/count/element project the right column', () => {
     expect(read('g.V().properties().key()').sql).toContain('SELECT p.pk AS v');
     expect(read('g.V().properties().value()').sql).toContain('SELECT p.pv AS v');
-    expect(read('g.V().properties().count()').shape).toEqual({ kind: 'count' });
+    expect(read('g.V().properties().count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(read('g.V().properties().element()').shape).toEqual({ kind: 'vertex' });
     expect(read('g.V().properties().element().values("name")').sql).toContain("JOIN vertex_properties vp ON vp.node=n.id AND vp.key=?");
   });
 
   test('PropertyStream projections re-enter scalar/element lowering', () => {
     expect(read('g.V(1).properties().key().limit(1)').shape).toEqual({ kind: 'value', type: UNKNOWN });
-    expect(read('g.V(1).properties().element().values("name").count()').shape).toEqual({ kind: 'count' });
+    expect(read('g.V(1).properties().element().values("name").count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
     // element() retypes to an ordinary owner stream, including edge materialization.
     expect(read('g.E(7).properties().element().label()').shape).toEqual({ kind: 'value', type: STATIC('string') });
     expect(read('g.E(7).properties().element()').shape).toEqual({ kind: 'edge' });

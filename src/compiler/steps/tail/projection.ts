@@ -1013,7 +1013,7 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
     // count().is(P): filter the single count value (0 or 1 result rows).
     if (isPreds.length)
       countNode = q`SELECT v FROM (${countNode}) WHERE ${list(isPreds.map((pr) => predicateSql(q`v`, pr)), ' AND ')}`;
-    return toResultStream(st.q, countNode, { kind: 'count' });
+    return toResultStream(st.q, countNode, { kind: 'value', type: STATIC('long') });
   }
 
   const n = elemRel(st);

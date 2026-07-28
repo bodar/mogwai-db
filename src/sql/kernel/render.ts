@@ -165,7 +165,6 @@ export type Shape =
   // for every row; unknown → infer from the JS value.
   | { kind: 'value'; type: ScalarType }
   | { kind: 'variant'; scalarAs?: ValueType; node?: boolean; edge?: boolean; listOf?: ListOf; list?: boolean } // per-row tag: null/scalar/node/edge/list; `list` wraps ALL rows into one outer List (cap)
-  | { kind: 'count' }
   | { kind: 'scalar'; productiveNull?: boolean } // numeric reducer; productive NULL may be a real result
   | { kind: 'list'; elem: ElemShape | 'scalar'; as?: ValueType } // legacy row-fold; scalar items may carry a uniform type
   | { kind: 'jsonbList'; as?: ValueType; typed?: boolean; of?: ListOf } // list-VALUE rows; `typed` → items are {t,v} nodes framed via frameTypedNode; `as` is a uniform item type; `of` is the per-member descriptor (a nested/element list, OR a flat list of property or scalar members) framed by frameListOf

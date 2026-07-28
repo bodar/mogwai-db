@@ -100,7 +100,7 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     const p = read('g.V().count().is(P.gt(3))');
     expect(p.sql).toContain('SELECT COALESCE(SUM(s.bulk), 0) AS v FROM c0 s');
     expect(p.sql).toContain('WHERE p.v > ?');
-    expect(p.shape).toEqual({ kind: 'count' });
+    expect(p.shape).toEqual({ kind: 'value', type: STATIC('long') });
   });
 
   test('is() on a non-scalar projection throws', () => {

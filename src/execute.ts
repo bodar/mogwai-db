@@ -538,7 +538,6 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
     case 'vertex': case 'edge': return; // framed in framedResults with per-row bulk
     case 'valueMap': for (const r of rows) yield valueMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys, shape.tokens); return;
     case 'elementMap': for (const r of rows) yield elementMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys); return;
-    case 'count': for (const r of rows) yield countBuffer(r.v); return;
     // Per-row framing: values() of a typed prop frames each row by its own stored vtype
     // (like variant frames by vk); a collection vtype frames the stored {t,v} tree via
     // frameStoredValue (fixes bare values(collectionProp)); otherwise the single `as` applies.

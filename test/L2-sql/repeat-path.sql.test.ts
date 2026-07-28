@@ -300,11 +300,11 @@ describe('repeat / path SQL', () => {
   test('P3 Stage A: path() is re-enterable — count()/is(typeOf(PATH))', () => {
     // count() over a linear path → COUNT(*) (one row per path)
     const c = read('g.V(1).out().out().path().count()');
-    expect(c.shape).toEqual({ kind: 'count' });
+    expect(c.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(c.sql).toContain('COUNT(*) AS v');
     // count() over a recursive (grouped) path → COUNT(DISTINCT pk), not exploded elements
     const rc = read('g.V(1).repeat(__.out()).times(2).path().count()');
-    expect(rc.shape).toEqual({ kind: 'count' });
+    expect(rc.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(rc.sql).toContain('COUNT(DISTINCT');
     // is(typeOf(GType.PATH)) is identity — a path IS a Path, so the result stays a path
     const t = read('g.V(1).out().out().path().is(typeOf(GType.PATH))');

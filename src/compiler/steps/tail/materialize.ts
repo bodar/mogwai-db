@@ -22,10 +22,12 @@ export function materializeRoot(query: Query, tail: Expression, shape: Shape): C
  * stream, so terminal position no longer decides whether a Long count or an
  * ordinary value is framed. */
 export function materializeScalarRoot(stream: ScalarStream): Compiled {
-  const shape: Shape = stream.result === 'count'
-    ? { kind: 'count' }
-    : stream.result === 'number'
-      ? { kind: 'scalar', productiveNull: stream.productiveNull }
+  // `result: 'count'` needs no arm of its own — every one of its five producers already passes
+  // 'long' as the type, so the generic value arm frames it identically (countBuffer and
+  // frameValue(v,'long') were the same expression). Retiring the redundant `result` value itself
+  // is a separate change: it still distinguishes a count from a 'number' reducer for column sets.
+  const shape: Shape = stream.result === 'number'
+    ? { kind: 'scalar', productiveNull: stream.productiveNull }
     : { kind: 'value', type: stream.type };
   // A per-row stored vtype column (values() of a typed prop) rides alongside v so the
   // handler frames each row by its own type, not one compile-time tag.

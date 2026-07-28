@@ -8,6 +8,7 @@
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
 import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
+import { STATIC } from '../../src/sql/kernel/render.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery, executeFramed } from '../support/executor.ts';
@@ -159,7 +160,7 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
 
   test('traverser bulking: times(n).count() unrolls to GROUP-BY-SUM(bulk) CTEs, not a recursion', () => {
     const c = read('g.V().repeat(__.out()).times(3).count()');
-    expect(c.shape).toEqual({ kind: 'count' });
+    expect(c.shape).toEqual({ kind: 'value', type: STATIC('long') });
     // The bulk path: a per-depth GROUP-BY-SUM, one non-recursive CTE per hop, summed at
     // the end. SQLite rejects an aggregate in a recursive term, so it MUST NOT recurse.
     expect(c.sql).not.toContain('recursive');
@@ -177,7 +178,7 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     const selected = read('g.V().repeat(__.out()).times(5).as("a").out("writtenBy").as("b").select("a","b").count()');
     expect(selected.sql).not.toContain('recursive');
     expect((selected.sql.match(/GROUP BY nb/g) ?? []).length).toBe(5);
-    expect(selected.shape).toEqual({ kind: 'count' });
+    expect(selected.shape).toEqual({ kind: 'value', type: STATIC('long') });
     // A NON-bulkable repeat (path/emit/complex body) stays the enumerate-walk
     // recursion — bulking must not hijack it. emit() has no compile-time depth.
     expect(read('g.V(1).repeat(__.out()).emit().times(2).count()').sql).toContain('recursive');

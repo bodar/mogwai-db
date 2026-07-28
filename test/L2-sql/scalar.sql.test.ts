@@ -103,7 +103,7 @@ describe('scalar-parent / projection SQL', () => {
     // once a ListStream, the list substrate composes: unfold/count(local)/range reuse it.
     // typed unfold carries each element's own stored vtype (perRowType framing).
     expect(read('g.V().values("list").is(typeOf(GType.LIST)).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
-    expect(read('g.V().values("list").is(typeOf(GType.LIST)).count(Scope.local)').shape).toEqual({ kind: 'count' });
+    expect(read('g.V().values("list").is(typeOf(GType.LIST)).count(Scope.local)').shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(read('g.V().values("list").is(typeOf(GType.LIST)).unfold().range(1,3)').sql).toContain('json_each');
 
     // End-to-end framing: a list value frames as ONE List, unfold explodes it, uuid
@@ -121,10 +121,10 @@ describe('scalar-parent / projection SQL', () => {
     // A fold() collapses the stream into ONE list traverser. A GLOBAL count() counts the list
     // TRAVERSERS (1), distinct from count(Scope.local) which is the list LENGTH — so it routes
     // through the shared relational barrier, not the per-list reducer.
-    expect(read("g.V().values('name').fold().count()").shape).toEqual({ kind: 'count' });
+    expect(read("g.V().values('name').fold().count()").shape).toEqual({ kind: 'value', type: STATIC('long') });
     // is(typeOf(LIST)) on a list value is an identity type-assert (a list IS a list) — the
     // terminal stream stays a list, then count() reports 1.
-    expect(read("g.V().values('name').fold().is(typeOf(GType.LIST)).count()").shape).toEqual({ kind: 'count' });
+    expect(read("g.V().values('name').fold().is(typeOf(GType.LIST)).count()").shape).toEqual({ kind: 'value', type: STATIC('long') });
     const store = new GraphStore(new BunSqlite(':memory:'));
     for (const w of MODERN_SEED) executeQuery(store, w, {});
     const dec = (b: Buffer) => decode(b);
@@ -188,7 +188,7 @@ describe('scalar-parent / projection SQL', () => {
     // continuation after the roundtrip: movement/projection resume as a fresh phase.
     expect(read('g.V().hasLabel("person").fold().unfold().values("name")').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // Scope.local reducers reduce EACH folded list to one scalar (per-list, not global).
-    expect(read('g.V().fold().count(Scope.local)').shape).toEqual({ kind: 'count' });
+    expect(read('g.V().fold().count(Scope.local)').shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(read('g.V().values("age").fold().sum(Scope.local)').shape).toEqual({ kind: 'scalar' });
     expect(read('g.V().values("age").fold().sum(Scope.local)').sql).toContain('json_each');
     // Local reducers are ScalarStream transitions, so a later predicate composes.
@@ -303,7 +303,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.inject(1,2,3).sum()').shape).toEqual({ kind: 'scalar' });
     expect(read('g.inject(1,2,3).sum()').sql).toContain('SUM(s.v)');
     expect(read('g.inject(1,2,3).mean()').sql).toContain('AVG(s.v)');
-    expect(read('g.inject(1,2,3).count()').shape).toEqual({ kind: 'count' });
+    expect(read('g.inject(1,2,3).count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(read('g.inject(1,2,3).fold()').shape).toEqual({ kind: 'jsonbList' });
     // is() BEFORE count() filters the pre-count stream (WHERE inside the counted set)
     expect(read('g.inject(1,2,3).is(P.gt(1)).count()').sql).toContain('WHERE p.v > ?');
@@ -325,7 +325,7 @@ describe('scalar-parent / projection SQL', () => {
     // retypes to a ScalarStream and counts the value ROWS (multi-valued keys counted
     // per-value, matching TinkerPop's values()-flatMap semantics).
     const c = read('g.V().values("age").count()');
-    expect(c.shape).toEqual({ kind: 'count' });
+    expect(c.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(c.sql).toContain('SELECT COALESCE(SUM(s.bulk), 0) AS v FROM c1 s');
     // the values() flatMap (now carrying per-row vtype; a collection value → json() text)
     // feeds the count.
@@ -334,7 +334,7 @@ describe('scalar-parent / projection SQL', () => {
     const dedupCount = read('g.V().values("age").dedup().count()').sql;
     expect(dedupCount).toContain('SELECT DISTINCT p.v AS v');
     expect(dedupCount).toContain('SELECT COUNT(*) AS v FROM c2');
-    expect(read('g.V().out().id().count()').shape).toEqual({ kind: 'count' });
+    expect(read('g.V().out().id().count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
     // The reducer is another scalar stream, so lowering can continue past it.
     expect(read('g.V().values("age").count().is(P.gt(2))').sql).toContain('WHERE p.v > ?');
 
@@ -342,7 +342,7 @@ describe('scalar-parent / projection SQL', () => {
     // projected rows re-enter the same scalar dispatcher. This was the last route
     // through the old one-projection accumulator ceiling.
     const ordered = read('g.V().order().by("age").limit(2).values("name").count()');
-    expect(ordered.shape).toEqual({ kind: 'count' });
+    expect(ordered.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(ordered.sql).toContain('ORDER BY (SELECT (CASE WHEN vtype IN');
     expect(ordered.sql).toContain('LIMIT 2 OFFSET 0), c2(v) as (SELECT COALESCE(SUM(s.bulk), 0) AS v FROM c1 s)');
     expect(run(seededStore(), 'g.V().order().by("age").limit(2).values("name").count()').map((r) => r.v))
@@ -352,12 +352,12 @@ describe('scalar-parent / projection SQL', () => {
 
   test('count is a relational scalar boundary and can continue lowering', () => {
     const filtered = read('g.V().values("age").count().is(P.gt(3))');
-    expect(filtered.shape).toEqual({ kind: 'count' });
+    expect(filtered.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(filtered.sql).toContain('SELECT COALESCE(SUM(s.bulk), 0) AS v');
     expect(filtered.sql).toContain('WHERE p.v > ?');
 
     const countedAgain = read('g.V().values("age").count().count()');
-    expect(countedAgain.shape).toEqual({ kind: 'count' });
+    expect(countedAgain.shape).toEqual({ kind: 'value', type: STATIC('long') });
     const store = seededStore();
     expect(run(store, 'g.V().values("age").count().is(P.gt(3))').map((r) => r.v)).toEqual([4]);
     expect(run(store, 'g.V().values("age").count().count()').map((r) => r.v)).toEqual([1]);
@@ -462,7 +462,7 @@ describe('scalar-parent / projection SQL', () => {
     // cbrt splits on sign (POW domain-errors on a negative base + fractional exponent)
     expect(read('g.V().math("cbrt(_)").by("age")').sql).toContain('CASE WHEN');
     // math is a relational producer; a later barrier is dispatched independently.
-    expect(read('g.V().math("_").by("age").is(P.gt(30)).count()').shape).toEqual({ kind: 'count' });
+    expect(read('g.V().math("_").by("age").is(P.gt(30)).count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
   });
 
   test('format("…%{token}…") templates a string from properties + by() modulators', () => {
@@ -476,7 +476,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().format("%{_} is %{_}").by(values("name")).by(values("age"))').sql).toContain(' || ');
     // a by()-traversal placeholder (bothE().count()) resolves as a correlated scalar.
     expect(read('g.V().format("%{name} has %{_}").by(__.bothE().count())').sql).toContain('COUNT');
-    expect(read('g.V().format("%{name}").count()').shape).toEqual({ kind: 'count' });
+    expect(read('g.V().format("%{name}").count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
   });
 
   test('math() variables: `_` = current, an identifier = an as()-bound alias', () => {
@@ -689,7 +689,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(element.sql).toContain('b0.rid AS e0_rid');
     expect(element.sql).toContain('ON b1.o0=b0.o0');
     expect(read('g.V(1).project("self","friend").by().by(__.out().values("name")).select("self").out().count()').shape)
-      .toEqual({ kind: 'count' });
+      .toEqual({ kind: 'value', type: STATIC('long') });
   });
 
   test('project/select traversal fields carry typed list and element shapes', () => {
@@ -705,7 +705,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(shaped.sql).toContain('b1.rid AS e1_rid');
     expect(shaped.sql).toContain('ON b1.o0=b0.o0');
     expect(read('g.V(1).project("friends").by(__.out().values("name").fold()).select("friends").unfold().count()').shape)
-      .toEqual({ kind: 'count' });
+      .toEqual({ kind: 'value', type: STATIC('long') });
     expect(read('g.V(1).project("friends","created").by(__.out().values("name").fold()).by(__.out("created").values("name").fold()).select(Column.values).unfold()').shape)
       .toEqual({ kind: 'jsonbList', typed: true });
     expect(read('g.V(1).as("a").out().select("a").by(__.out()).values("name")').shape)
@@ -784,13 +784,13 @@ describe('scalar-parent / projection SQL', () => {
 
   test('record fields re-enter element/scalar/list lowering', () => {
     expect(read('g.V().project("n","a").by("name").by("age").select("a").is(P.gt(30)).count()').shape)
-      .toEqual({ kind: 'count' });
+      .toEqual({ kind: 'value', type: STATIC('long') });
     expect(read('g.V().as("a").out().as("b").select("a","b").select("b").out().count()').shape)
-      .toEqual({ kind: 'count' });
+      .toEqual({ kind: 'value', type: STATIC('long') });
     expect(read('g.V().project("n","a").by("name").by("age").select(Column.values).unfold().count()').shape)
-      .toEqual({ kind: 'count' });
+      .toEqual({ kind: 'value', type: STATIC('long') });
     expect(read('g.V().project("n","a").by("name").by("age").select(Column.keys).unfold().count()').shape)
-      .toEqual({ kind: 'count' });
+      .toEqual({ kind: 'value', type: STATIC('long') });
     expect(read('g.V().project("n","a").by("name").by("age").limit(Scope.local,1)').shape)
       .toEqual({ kind: 'map', entries: [{ key: 'n', prefix: 'e0', sub: 'value' }] });
     expect(read('g.V().project("n","a").by("name").by("age").tail(Scope.local,1)').shape)
@@ -851,7 +851,7 @@ describe('scalar-parent / projection SQL', () => {
 
   test('scalar row operators lower left-to-right instead of commuting through a tail accumulator', () => {
     const p = read('g.V().values("age").count().limit(1).is(P.gt(3))');
-    expect(p.shape).toEqual({ kind: 'count' });
+    expect(p.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(p.sql).toContain('LIMIT 1 OFFSET 0');
     expect(p.sql).toContain('WHERE p.v > ?');
     expect(p.sql.indexOf('LIMIT 1 OFFSET 0')).toBeLessThan(p.sql.indexOf('WHERE p.v > ?'));

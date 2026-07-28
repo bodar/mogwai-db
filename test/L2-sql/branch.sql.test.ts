@@ -52,7 +52,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(p.sql).toContain('UNION ALL');
     expect(p.sql).toContain('vp.value END AS v');
     // branches sharing the one WITH clause
-    expect(read("g.union(__.V().hasLabel('software'),__.V().hasLabel('person')).count()").shape).toEqual({ kind: 'count' });
+    expect(read("g.union(__.V().hasLabel('software'),__.V().hasLabel('person')).count()").shape).toEqual({ kind: 'value', type: STATIC('long') });
     // mid-chain union() still works (the element StepFn — same merge, a parent to fork from)
     expect(read("g.V().union(__.out(),__.in()).values('name')").sql).toContain('UNION ALL');
     // Each branch is a fully ROOTED traversal lowered to its natural shape, so the merge is
@@ -113,7 +113,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // Homogeneous scalar arms lower at the shape-aware dispatcher and re-enter the
     // scalar pipeline; this is not the element-only PREFIX union.
     const scalar = read('g.V(1).union(__.values("name"), __.constant("x")).count()');
-    expect(scalar.shape).toEqual({ kind: 'count' });
+    expect(scalar.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(scalar.sql).toContain(' AS v FROM');
     expect(scalar.sql).toContain('UNION ALL');
     // A SINGLE branch is legal Gremlin — union() is varargs and `union(t)` is just t, so the arm merge
@@ -277,10 +277,10 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(c.sql).toContain('WHERE o0 NOT IN (SELECT o0 FROM');
     expect(c.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     const scalar = read('g.V().coalesce(__.values("age"), __.constant(0)).count()');
-    expect(scalar.shape).toEqual({ kind: 'count' });
+    expect(scalar.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(scalar.sql).toContain('a.o0 NOT IN (SELECT o0 FROM');
     expect(read('g.V().coalesce(__.values("missing").fold(), __.values("name").fold()).unfold().count()').shape)
-      .toEqual({ kind: 'count' });
+      .toEqual({ kind: 'value', type: STATIC('long') });
     // mixed element+scalar arms now merge as a dynamic-tag VariantStream (P4), gated
     // per input ordinal like the homogeneous coalesce.
     const mixedC = read('g.V().coalesce(__.out(), __.values("name"))');
@@ -354,7 +354,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(read('g.V().map(__.select("a"))').sql).toContain('WHERE 0');
     expect(() => compile('g.V().map(__.values("name")).map(__.values("age"))', {})).toThrow('map() after a scalar stream not yet supported');
     // The leaf now returns a ScalarStream instead of materializing terminal SQL.
-    expect(read('g.V().map(__.out().count()).is(P.gt(0)).count()').shape).toEqual({ kind: 'count' });
+    expect(read('g.V().map(__.out().count()).is(P.gt(0)).count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
   });
 
   test('map(__.<element body>) uses child scope + first-per-parent cardinality', () => {
@@ -380,7 +380,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // 2-arg form: else absent → identity passthrough of the NOT-pred seed
     expect(read('g.V().choose(__.hasLabel("software"), __.in("created"))').sql).toContain('UNION ALL');
     const scalar = read('g.V().choose(__.hasLabel("person"), __.values("name"), __.constant("software")).count()');
-    expect(scalar.shape).toEqual({ kind: 'count' });
+    expect(scalar.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(scalar.sql).toContain(' AS v FROM');
     expect(scalar.sql).toContain('UNION ALL');
   });
