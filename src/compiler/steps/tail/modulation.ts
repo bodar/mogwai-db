@@ -37,15 +37,24 @@ export function directElementModulation(
  * the other policy (keep them; nulls sort first, which this engine already does), so a marked host
  * returns null here.
  *
- * WHY THIS IS A LOWERING CONCERN AND NOT AN IR PASS. It was first written as a `decoration` Pass
- * injecting `has(key)` before the order() — one central place, every order() lowering path inheriting
- * it. That is wrong, and instructively so: the rewrite is only valid over an ELEMENT stream, and the
- * IR layer has no shape information at all. It duly broke all six non-element `order().by(key)`
- * forms — over a list (`fold().order(Scope.local).by(k)`), a map, a group, a record, a scalar and a
- * path — because `has(key)` means nothing on any of them. Shape is exactly what the lowering knows
- * and the IR does not, so the policy lives here, and the way it avoids N divergent copies is by
- * being ONE predicate builder that shares `classifyBy` with `elementOrderSql` above: the sort terms
- * and the productivity filter cannot disagree about which by()s project a key.
+ * WHY THIS IS NOT AN IR PASS — the ANCHOR RULE, not "shape belongs downstream". It was first written
+ * as a `decoration` Pass injecting `has(key)` before the order(), and broke all six non-element
+ * `order().by(key)` forms — a list (`fold().order(Scope.local).by(k)`), a map, group, record, scalar
+ * and path — because `has(key)` means nothing on any of them.
+ *
+ * The lesson is NARROWER than the coarse "the IR has no shape" this comment used to claim, and that
+ * claim is refuted two files away: `injectSubgraphRec`/`injectPartitionRec` DO inject shape-specifically
+ * from the IR, correctly, because they anchor on `VERTEX_PRODUCERS`/`EDGE_PRODUCERS`
+ * (`ir/strategies.ts:201-203`) — step names whose output shape is fixed BY THE NAME ALONE. `order()`'s
+ * output shape is its INPUT shape, so it had no such anchor. The defect was an unchecked shape claim,
+ * not absent information. Full boundary + why the field is not simply added to `PassContext` (a
+ * declining Pass is SILENT where a declining lowering THROWS, and the L5 differential cannot see a
+ * silent decline because both configs decline identically):
+ * `docs/2026-07-28-shape-vocabulary-architecture.md` §6.
+ *
+ * The policy therefore lives here, and avoids N divergent copies by being ONE predicate builder that
+ * shares `classifyBy` with `elementOrderSql` above: the sort terms and the productivity filter cannot
+ * disagree about which by()s project a key.
  *
  * (`dedup().by()` had already reached the same conclusion independently — see the `productiveBy`
  * WHERE in prefix/filter.ts. This generalises that one line rather than adding a second idea.)

@@ -161,31 +161,58 @@ real defect, two of them silent wrong answers. Fixing them took L3 from 1,479 to
 
 Each is pinned in an L4 `.feature`, so the ceiling finding became floor.
 
-## Architectural lesson: shape is a lowering concern, not an IR one
+## Architectural lesson: the anchor rule (superseded framing — see the shape doc)
 
-Worth recording because the wrong version was written first and looked better.
+**This section originally drew the wrong lesson from its own evidence.** It is corrected here rather
+than deleted, because the coarse version got cited. The authority on the boundary is
+`docs/2026-07-28-shape-vocabulary-architecture.md` §6.
 
-Non-productive `by(key)` at `order()` was initially implemented as a `decoration` **Pass** injecting
-`has(key)` before the order — one central place, every one of `order()`'s four lowering routes
-inheriting it for free. That is wrong, and the tests said so immediately: the rewrite is only valid
-over an **element** stream, and the IR layer has no shape information at all. It broke all six
-non-element `order().by(key)` forms (list, map, group, record, scalar, path), because `has(key)` means
-nothing on any of them.
+The history. Non-productive `by(key)` at `order()` was first implemented as a `decoration` **Pass**
+injecting `has(key)` before the order — one central place, all four of `order()`'s lowering routes
+inheriting it. It broke all six non-element `order().by(key)` forms (list, map, group, record, scalar,
+path), because `has(key)` means nothing on any of them.
 
-Shape is exactly what the lowering knows and the IR does not. So the boundary is:
+What this section used to conclude — *"an IR Pass may rewrite what is decidable from the chain;
+anything needing the stream's shape belongs in the lowering"* — is **too wide, and refuted by two
+correct Passes in the file I was editing.** `injectSubgraphRec` and `injectPartitionRec` inject
+shape-specifically from the IR and are right to: they anchor on `VERTEX_PRODUCERS`/`EDGE_PRODUCERS`
+(`ir/strategies.ts:201-203`), step names whose output shape is fixed **by the name alone**. `order()`'s
+output shape is its input shape, so it had no such anchor. The failure was not missing information —
+it was an **unchecked shape claim**.
 
-> An IR Pass may rewrite what is decidable from the **chain**. Anything needing the **stream's shape**
-> belongs in the lowering.
+Two facts I had wrong, both from the shape doc. "The IR has no shape" is not a law: `PassContext`
+(`ir/pass.ts:39-55`) has no shape field *and no `ChainFacts` field*, and `analyze()` runs **after**
+`runPasses()` — it is a property of a struct definition. And `child-shape.ts` already holds a
+syntax-only shape **propagation** engine (pure `Step[]` reasoning, no Query or schema); what it cannot
+do is manufacture an entry shape.
 
-The way to avoid N divergent copies in the lowering is not to move the decision upstream, but to make
-it one representation-neutral predicate builder that each site feeds its own key expression —
-`orderProductivityFilter` (`steps/tail/modulation.ts`), sharing `classifyBy` with the sort terms so the
-filter and the `ORDER BY` cannot disagree about which `by()`s project a key. `dedup().by()` had reached
-the same conclusion independently; this generalised its one line rather than adding a second idea.
+So the rule to apply is the shape doc's, which subsumes this section:
 
-The same distinction cuts the other way for the always-productive filter (`alwaysProductiveFilterIsNoOp`,
-a `simplify` Pass): "does this body always produce a traverser" is decidable from the chain alone, so it
-*is* a Pass — and being one is what makes `predicateInlining` disable-safe by construction there, since
+> **Shape may be an annotation a Pass CONSULTS and may decline on. It must never be a representation
+> a Pass CONSTRUCTS or lowering CONSUMES. Sharing across shapes is by registration into a Map, never a
+> widening fallback chain.**
+
+And the reason not to simply add the field, which is the sharper half: **a fail-closed lowering
+throws; a declining decoration Pass is silent.** A shape-guarded Pass hitting `unknown` silently
+reproduces the original wrong answer — and L5's differential cannot see it, because both configs
+decline identically. The loud variant is no better: throwing when element-ness is unprovable would
+reject every non-element `order().by(key)` form that works today, violating "never reject a valid input
+to keep scope small". Both failure modes argue for the anchor rule as a **type-level prohibition**
+(shape doc §8 step 5) rather than a documented convention — this repo has the receipt for the
+difference in `FastPath.equivalentWhen`, a required field whose claim had never been checked.
+
+Keep the proportion in view: of 36 diagnosed defects, exactly **one** was missing shape information —
+this revert — and it argues against shape-in-the-IR rather than for it (shape doc §5).
+
+What survives unchanged is the *mechanical* conclusion, which was never the contested part: the way to
+avoid N divergent copies in the lowering is one representation-neutral predicate builder each site
+feeds its own key expression — `orderProductivityFilter` (`steps/tail/modulation.ts`), sharing
+`classifyBy` with the sort terms so the filter and the `ORDER BY` cannot disagree about which `by()`s
+project a key. `dedup().by()` had reached that independently; this generalised its one line.
+
+And the contrast still holds for `alwaysProductiveFilterIsNoOp` (a `simplify` Pass): "does this body
+always produce a traverser" is decidable from the chain alone — no shape claim, anchored or otherwise —
+so it *is* correctly a Pass, and being one is what makes `predicateInlining` disable-safe there, since
 neither lowering ever sees the removed step.
 
 ## Open
