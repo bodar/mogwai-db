@@ -1,6 +1,6 @@
 import { q, list, raw, empty, value, type Expression } from '../../../sql/kernel/q.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { aliasElem, aliasIsElement, carriedCols, carryFrag, withShape, type AliasEntry, type Carried, type Carry, type ElementStream } from '../context/context.ts';
+import { aliasElem, aliasIsElement, carriedCols, carriedWith, carryFrag, withShape, type AliasEntry, type Carried, type Carry, type ElementStream } from '../context/context.ts';
 import {
   aliasAppend, aliasEntry, aliasId, aliasPop, aliasPresent, aliasScalar, aliasSeed, elemEntry, shapeElem,
   type AliasShape,
@@ -93,7 +93,7 @@ export function asOnStream(s: Exclude<Stream, { kind: 'result' | 'elements' }>, 
     });
     setExpr.set(col, existing ? aliasAppend(p.c[col], entry) : aliasSeed(entry));
   }
-  const carried: Carried = { ...s.carried, aliases };
+  const carried: Carried = carriedWith(s.carried, { aliases });
   const newCols = [...payloadOf(s), ...carriedCols(carried)];
   const proj = newCols.map((c) => {
     const e = setExpr.get(c);

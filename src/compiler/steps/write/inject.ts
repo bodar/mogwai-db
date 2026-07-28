@@ -3,7 +3,7 @@ import { jsonbArrayOf } from '../../plan/plan.ts';
 import { flattenListArgs, type SackSpec } from '../../../gremlin/frontend.ts';
 import { flatType, type CanonicalType } from '../../../gremlin/types.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { type Carry } from '../context/context.ts';
+import { carriedWith, type Carry } from '../context/context.ts';
 import { toListStream, toScalarStream, type Stream } from '../context/stream.ts';
 import type { Engine } from '../../engine/deps.ts';
 import { materializeFinal } from '../tail/materialize.ts';
@@ -126,7 +126,7 @@ export function seedInject(carry: Carry, steps: PStep[], sackInit?: SackSpec): {
   // withSack(init) seeds every inject traverser's carried sack column (`sk`), exactly
   // as seedSource does for V()/E() — so withSack(x).inject(v).sack(...) carries state.
   const sackCarry: Carry = sackInit
-    ? { ...carry, carried: { ...carry.carried, sack: 'sk' } }
+    ? { ...carry, carried: carriedWith(carry.carried, { sack: 'sk' }) }
     : carry;
   const cols = sackInit ? ['v', 'sk'] : ['v'];
   const row = (v: any) => sackInit ? q`(${value(v)}, ${value(sackInit.init)})` : q`(${value(v)})`;

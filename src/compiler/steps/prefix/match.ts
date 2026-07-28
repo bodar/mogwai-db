@@ -4,7 +4,7 @@ import { where } from './filter.ts';
 import { isNested, stepChain, type Step } from '../../../gremlin/frontend.ts';
 import { MATCH_FILTER_HEADS, type PStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
-import { advance, aliasColsOf, prevRel, type AliasEntry, type Carried, type ElementStream, type StepFn } from '../context/context.ts';
+import { advance, aliasColsOf, prevRel, withCarried, type AliasEntry, type Carried, type ElementStream, type StepFn } from '../context/context.ts';
 import { aliasEntry, aliasId, aliasScalar, aliasSeed, elemEntry, elemShape, isElementShape, nodeEntry, shapeElem, type AliasShape } from '../context/alias.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { type Stream } from '../context/stream.ts';
@@ -315,6 +315,6 @@ export const match: StepFn = (s, st) => {
   // The internal traverser binding is not a Gremlin label — drop it so a downstream select()/where()
   // sees exactly the variables the patterns declared. Its COLUMN stays (id was restored from it).
   if (root === undefined)
-    cur = { ...cur, carried: { ...cur.carried, aliases: new Map([...cur.carried.aliases].filter(([k]) => k !== TRAVERSER_LABEL)) } };
+    cur = withCarried(cur, { aliases: new Map([...cur.carried.aliases].filter(([k]) => k !== TRAVERSER_LABEL)) });
   return cur;
 };

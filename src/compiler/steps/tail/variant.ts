@@ -79,7 +79,7 @@ export function finishListMerge(
     // carried column is state the arms share with the base and rides through unchanged.
     const frag = grew
       ? list([...aliasArmProjection(arm.carried.aliases, mergedAliases, a).map((e) => q`, ${e}`),
-              ...carriedCols({ ...carried, aliases: new Map() }).map((c) => q`, ${a.c[c]}`)], '')
+              ...carriedCols(carriedWith(carried, { aliases: new Map() })).map((c) => q`, ${a.c[c]}`)], '')
       : carryFrag(carried, a);
     return q`SELECT ${a.c.list} AS list${armEnc}${frag} FROM ${a}${gate ? q` WHERE ${gate}` : empty}`;
   };

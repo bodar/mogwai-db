@@ -1,7 +1,7 @@
 import { isNested } from '../../../gremlin/frontend.ts';
 import { derived, q, list, type Expression } from '../../../sql/kernel/q.ts';
 import { scalarProp, labelNameSub, predicateSql, elemCtx } from '../../plan/plan.ts';
-import { advance, elemRel, prevRel, carriedCols, type ElementStream, type StepFn } from '../context/context.ts';
+import { advance, elemRel, prevRel, carriedCols, carriedWith, type ElementStream, type StepFn } from '../context/context.ts';
 import { tryCompileScalarValueRows } from '../tail/child.ts';
 import { SACK_OPS, combineSack } from '../tail/scalar.ts';
 
@@ -67,7 +67,7 @@ export const sack: StepFn = (s, st) => {
       );
       const d = rows.frame.domain.as('d');
       const newSack = combine(f.c.v, st.carried.sack ? d.c[st.carried.sack] : null);
-      const proj = carriedCols({ ...st.carried, sack: 'sk' }).map((c) => c === 'sk' ? q`${newSack} AS sk` : d.c[c]);
+      const proj = carriedCols(carriedWith(st.carried, { sack: 'sk' })).map((c) => c === 'sk' ? q`${newSack} AS sk` : d.c[c]);
       return advance(st,
         q`SELECT ${d.c.id}, ${list(proj, ', ')} FROM ${d} JOIN ${f} ON ${f.c[rows.frame.ordinal]}=${d.c[rows.frame.ordinal]} AND ${f.c.rn}=1`,
         { sack: 'sk' },
@@ -84,7 +84,7 @@ export const sack: StepFn = (s, st) => {
   // so appending sk would desync the CTE's declared vs physical columns whenever another
   // column is co-carried — e.g. sack + otherV() (fromV): sk would silently get fromV.
   const n = elemRel(st);
-  const proj = carriedCols({ ...st.carried, sack: 'sk' }).map((c) => (c === 'sk' ? q`${newSack} AS sk` : p.c[c]));
+  const proj = carriedCols(carriedWith(st.carried, { sack: 'sk' })).map((c) => (c === 'sk' ? q`${newSack} AS sk` : p.c[c]));
   // A by() that yields nothing (a missing property) drops the traverser (TinkerPop's
   // by-modulator semantics — same as values()); label/id/constant by-values are never
   // null so the guard is a harmless always-true there.

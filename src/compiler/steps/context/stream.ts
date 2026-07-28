@@ -351,6 +351,14 @@ export function assertStreamColumns<T extends Stream>(s: T): T {
   return s;
 }
 
+/** Rebuild a relational stream over a new relation without changing its traversers or
+ * carried state. This is the preservation authority for a pass-through projection:
+ * callers that alter a payload, re-home a child, or change carried roles must use a
+ * more specific helper instead. The assertion keeps the declared carried contract
+ * coupled to the replacement relation. */
+export const carryThrough = <T extends RelationalStream>(s: T, rel: Relation): T =>
+  assertStreamColumns({ ...s, rel }) as T;
+
 /** Project a stream's shape-independent state (for building the next phase's stream). */
 export const carryOf = (s: Stream): Carry =>
   s.kind === 'result'
@@ -390,9 +398,11 @@ export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, opts: Sc
  *  that area was one of those sites forgetting a field. Naming it means the preserving case
  *  cannot drop a channel, and a site that DOESN'T preserve has to say so explicitly. */
 export const rebuildScalar = (s: ScalarStream, rel: Relation, over: Partial<ScalarOpts> = {}): ScalarStream =>
-  toScalarStream(carryOf(s), rel, undefined, {
-    type: s.type, result: s.result, productiveNull: s.productiveNull, literalNull: s.literalNull, ...over,
-  });
+  Object.keys(over).length === 0
+    ? carryThrough(s, rel)
+    : toScalarStream(carryOf(s), rel, undefined, {
+      type: s.type, result: s.result, productiveNull: s.productiveNull, literalNull: s.literalNull, ...over,
+    });
 
 export const toVariantStream = (c: Carry, rel: Relation, arms: VariantArms, result: VariantStream['result'] = 'rows'): VariantStream =>
   assertStreamColumns({ ...c, kind: 'variant', rel, scalarAs: arms.scalarAs, node: arms.node, edge: arms.edge, listOf: arms.listOf, result });

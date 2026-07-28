@@ -107,7 +107,7 @@ export const toVertex: StepFn = (s, st) => {
   const cols = s.name === 'outV' ? ['src'] : s.name === 'inV' ? ['tgt'] : ['src', 'tgt'];
   const e = edges.as('e');
   const p = prevRel(st, 'p');
-  const cf = carryFrag({ ...st.carried, fromV: undefined }, p); // fv is dropped at the vertex
+  const cf = carryFrag(carriedWith(st.carried, { fromV: null }), p); // fv is dropped at the vertex
   const pa = pathAppend(st, 'vertex');
   const selects = cols.map((col) =>
     q`SELECT ${e.c[col]} AS id${cf}${pa.frag(e.c[col])} FROM ${e} JOIN ${p} ON ${e.c.id}=${p.c.id}`);
@@ -123,7 +123,7 @@ export const otherV: StepFn = (s, st) => {
   const e = edges.as('e');
   const p = prevRel(st, 'p');
   const fv = p.c[st.carried.fromV];
-  const cf = carryFrag({ ...st.carried, fromV: undefined }, p); // fv is consumed here
+  const cf = carryFrag(carriedWith(st.carried, { fromV: null }), p); // fv is consumed here
   const other = q`CASE WHEN ${e.c.src}=${fv} THEN ${e.c.tgt} ELSE ${e.c.src} END`;
   const pa = pathAppend(st, 'vertex');
   const body = q`SELECT ${other} AS id${cf}${pa.frag(other)} FROM ${e} JOIN ${p} ON ${e.c.id}=${p.c.id}`;
