@@ -788,7 +788,7 @@ function propertyScalar(s: PropertyStream, col: 'vpid' | 'pk' | 'pv'): ScalarStr
   // value() carries the value's stored type (pvtype) as the scalar's vtype, so a downstream
   // numeric comparison/order over a TEXT-stored number (long/bigdecimal/…) can compareKey it.
   // key()/id() are plain strings/ids — no vtype needed.
-  const vtag = col === 'pv' ? { vtype: 'vtype' } : {};
+  const vtag = col === 'pv' ? { type: PER_ROW('vtype') } : {};
   const vsel = col === 'pv' ? q`, ${p.c.pvtype} AS vtype` : empty;
   // In a child scope (a property-group by(__.key()/value())) the correlated cardinality
   // policy needs a per-origin encounter marker, exactly as lowerScalarProjection mints for

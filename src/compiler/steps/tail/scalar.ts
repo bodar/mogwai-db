@@ -7,7 +7,7 @@ import { aliasArmProjection, carryFrag, carryFragMint, carriedCols, carriedWith,
 import { carryOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, numericSpec } from './coerce.ts';
 import { normalizeTypeName } from '../../../gremlin/types.ts';
-import { perRowColumnOf, perRowCols, scalarType, staticTypeOf, UNKNOWN, type ScalarType, type ValueType } from '../../../sql/kernel/render.ts';
+import { perRowColumnOf, perRowCols, STATIC, staticTypeOf, UNKNOWN, type ScalarType, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf } from '../../engine/deps.ts';
 
 /** If `step` is `is(typeOf(GType.X))` for a COLLECTION type, the canonical collection name
@@ -166,7 +166,7 @@ function fuseScalarSegment(s: ScalarStream, steps: readonly PStep[], from: numbe
   // value, so the type channel becomes whatever the transform statically produced (`as`,
   // possibly unknown). A pure is()-only segment is row-preserving and keeps the channel
   // it was handed. This is the one rule; it replaces reasoning about two fields at once.
-  const outType = transformed ? scalarType(as) : s.type;
+  const outType = transformed ? (as ? STATIC(as) : UNKNOWN) : s.type;
   const keepVtype = perRowColumnOf(outType);
   const valueCols = transformed
     ? q`${expr} AS v`

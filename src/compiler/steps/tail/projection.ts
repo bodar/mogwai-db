@@ -635,7 +635,7 @@ function lowerScalarProjection(st: ElementStream, projStep: PStep, acc: TailAcc)
       q`SELECT ${proj.colsNode}${vtypeCol}${carryFragMint(carried, p, 'encounter', mint)} FROM ${proj.fromNode}${where}`,
       ['v', ...(vt ? ['vtype'] : []), ...carriedCols(carried)],
     );
-    return toScalarStream(carryOf(st, carried), rel, asTag, { result: 'value', vtype: vt });
+    return toScalarStream(carryOf(st, carried), rel, asTag, { result: 'value', type: vt ? PER_ROW(vt) : undefined });
   }
 
   // Root scope. An explicit order().by(key) mints the carried encounter; LIMIT/OFFSET
@@ -667,13 +667,13 @@ function lowerScalarProjection(st: ElementStream, projStep: PStep, acc: TailAcc)
       q`SELECT ${proj.colsNode}${vtypeCol}${carryFragMint(carried, p, 'encounter', mint)} FROM ${proj.fromNode}${where}${orderNode}${limitNode}`,
       ['v', ...(vt ? ['vtype'] : []), ...carriedCols(carried)],
     );
-    return toScalarStream(carryOf(st, carried), rel, asTag, { result: 'value', vtype: vt });
+    return toScalarStream(carryOf(st, carried), rel, asTag, { result: 'value', type: vt ? PER_ROW(vt) : undefined });
   }
   const rel = st.q.cte(
     q`SELECT ${proj.colsNode}${vtypeCol}${carryFrag(st.carried, p)} FROM ${proj.fromNode}${where}${orderNode}${limitNode}`,
     ['v', ...(vt ? ['vtype'] : []), ...carriedCols(st.carried)],
   );
-  return toScalarStream(carryOf(st), rel, asTag, { result: 'value', vtype: vt });
+  return toScalarStream(carryOf(st), rel, asTag, { result: 'value', type: vt ? PER_ROW(vt) : undefined });
 }
 
 /**

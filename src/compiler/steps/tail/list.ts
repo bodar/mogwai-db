@@ -630,5 +630,5 @@ export function compileFromMapEntry(s: MapEntryStream, steps: PStep[], at: numbe
   // A typed {t,v} scalar side → a typed single-value list is wrong; re-enter as a typed scalar
   // stream (each entry's key/value, its own type via the vtype carried in the {t,v} node).
   const rel = s.q.cte(q`SELECT ${src} ->> '$.v' AS v, ${src} ->> '$.t' AS vtype${carryFrag(s.carried, c)} FROM ${c}`, ['v', 'vtype', ...carriedCols(s.carried)]);
-  return continueLowering(toScalarStream(carryOf(s), rel, undefined, { result: 'value', vtype: 'vtype' }), at + 1);
+  return continueLowering(toScalarStream(carryOf(s), rel, undefined, { result: 'value', type: PER_ROW('vtype') }), at + 1);
 }

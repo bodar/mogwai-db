@@ -16,7 +16,7 @@
 import { type Expression, type Query, type Relation } from '../../../sql/kernel/q.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { type Elem } from '../../plan/plan.ts';
-import { perRowColumnOf, perRowCols, scalarType, staticTypeOf, type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from '../../../sql/kernel/render.ts';
+import { perRowColumnOf, perRowCols, staticTypeOf, type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from '../../../sql/kernel/render.ts';
 import { carriedCols, type Carry, type ElementStream } from './context.ts';
 
 /** What a list stream holds — i.e. the shape `unfold` produces from it. `elem` → bare
@@ -382,10 +382,8 @@ export const toElementStream = (c: Carry, rel: Relation, elem: ElementStream['el
 export interface ScalarOpts {
   readonly result?: ScalarStream['result'];
   readonly productiveNull?: boolean;
-  /** The ONE type channel. When set it wins outright over the legacy `as`/`vtype` pair. */
+  /** The ONE scalar-type channel. */
   readonly type?: ScalarType;
-  /** @deprecated the old per-row spelling — pass `type: PER_ROW(col)` instead. */
-  readonly vtype?: string;
   readonly literalNull?: boolean;
 }
 /** Build a scalar stream. The type is the ONE channel (`opts.type`). The positional `as`
@@ -393,7 +391,7 @@ export interface ScalarOpts {
  *  (`toScalarStream(c, rel, 'long')`); it folds into the same union, so the two can never
  *  disagree — there is no second field to forget. */
 export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, opts: ScalarOpts = {}): ScalarStream => {
-  const type = opts.type ?? scalarType(as, opts.vtype);
+  const type = opts.type ?? (as ? { kind: 'static', type: as } : { kind: 'unknown' });
   return assertStreamColumns({
     ...c, kind: 'scalar', rel, type,
     result: opts.result ?? 'value', productiveNull: opts.productiveNull, literalNull: opts.literalNull,
@@ -402,7 +400,7 @@ export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, opts: Sc
 /** A ROW-PRESERVING rebuild of a scalar stream: same traversers, same types, new relation
  *  (a filter, an order, a slice, a carried-column reshuffle). This is the idiom that used to
  *  be spelled out longhand at ~15 sites as `toScalarStream(carryOf(s), rel, s.as, {result:
- *  s.result, productiveNull: s.productiveNull, vtype: s.vtype})` — and every barrier bug in
+ *  s.result, productiveNull: s.productiveNull, type: s.type})` — and every barrier bug in
  *  that area was one of those sites forgetting a field. Naming it means the preserving case
  *  cannot drop a channel, and a site that DOESN'T preserve has to say so explicitly. */
 export const rebuildScalar = (s: ScalarStream, rel: Relation, over: Partial<ScalarOpts> = {}): ScalarStream =>

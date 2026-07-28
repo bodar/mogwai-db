@@ -9,7 +9,7 @@ import {
   assertStreamColumns, carryOf, pathColumns, streamColumns, toElementStream, toListStream, toPropertyStream, toScalarStream, PROPERTY_PAYLOAD,
   type ListOf, type PropertyStream, type Stream,
 } from '../context/stream.ts';
-import { staticTypeOf, type ValueType } from '../../../sql/kernel/render.ts';
+import { PER_ROW, staticTypeOf, type ValueType } from '../../../sql/kernel/render.ts';
 
 // ---------- as()/select() over path-history labels, any stream shape ----------
 //
@@ -207,7 +207,7 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
       q`SELECT ${propertyAliasField(selected, field)} AS v${by.token === 'value' ? q`, ${propertyAliasField(selected, 'pvtype')} AS vtype` : empty}${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,
       ['v', ...(by.token === 'value' ? ['vtype'] : []), ...carriedCols(carried)],
     );
-    return toScalarStream(carry, rel, undefined, by.token === 'value' ? { vtype: 'vtype' } : {});
+    return toScalarStream(carry, rel, undefined, by.token === 'value' ? { type: PER_ROW('vtype') } : {});
   }
 
   if (isList) {

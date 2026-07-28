@@ -134,12 +134,6 @@ export const STATIC = (type: ValueType): ScalarType => ({ kind: 'static', type }
 export const PER_ROW = (column: string): ScalarType => ({ kind: 'perRow', column });
 export const UNKNOWN: ScalarType = { kind: 'unknown' };
 
-/** The bridge from the old two-channel spelling. A per-row column is the TRUTH channel
- *  (what the write channel actually recorded), so it beats a compile-time tag; a bare `as`
- *  is a static tag; neither → genuinely unknown. */
-export const scalarType = (as?: ValueType, vtypeCol?: string): ScalarType =>
-  vtypeCol ? PER_ROW(vtypeCol) : as ? STATIC(as) : UNKNOWN;
-
 /** The static tag, when there is one — for the consumers that can only act on a
  *  compile-time type (a uniform item tag, a serializer choice). A perRow/unknown type
  *  yields undefined, which those consumers already read as "infer at the wire". */
