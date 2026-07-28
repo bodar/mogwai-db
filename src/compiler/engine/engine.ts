@@ -4,7 +4,7 @@ import { type Elem } from '../plan/plan.ts';
 import { flattenListArgs } from '../../gremlin/frontend.ts';
 import { type PStep } from '../ir/strategies.ts';
 import { analyze, type ChainFacts } from '../ir/analyze.ts';
-import { withCarried, type Carry, type ElementStream, type StepFn } from '../steps/context/context.ts';
+import { trackFromV, type Carry, type ElementStream, type StepFn } from '../steps/context/context.ts';
 import { move, toEdge, toVertex, otherV, reSource } from '../steps/prefix/movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from '../steps/prefix/filter.ts';
 import { union, optional, repeat, choose, coalesce, sourceUnion } from '../steps/prefix/branch.ts';
@@ -279,7 +279,7 @@ export class LoweringEngine implements Engine {
     // here, so deriving it once at this single choke point fixes them all. Ordinary edge
     // chains carry no otherV → stay index-only (no dead fv column).
     let st = (!seedSt.carried.trackFromV && steps.some((s) => s.name === 'otherV'))
-      ? withCarried(seedSt, { trackFromV: true })
+      ? trackFromV(seedSt)
       : seedSt;
     let i = from;
     for (; i < steps.length; i++) {
@@ -350,7 +350,7 @@ export class LoweringEngine implements Engine {
       throw new Error(`${steps[0].name}() as a source produces a ${stream.kind} value, which is not an element prefix`);
     // Gate the otherV() entering-vertex tracking on the chain; local()'s body inherits
     // the flag through its {...st} seed, so an inner edge step records it too.
-    const st0 = chainNeedsFromV(steps) ? withCarried(stream, { trackFromV: true }) : stream;
+    const st0 = chainNeedsFromV(steps) ? trackFromV(stream) : stream;
     const lowered = this.lowerElementSteps(steps, st0, at);
     return { st: lowered.stream, stop: lowered.next };
   }

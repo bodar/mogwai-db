@@ -3,7 +3,7 @@ import { q, list, empty, type Expression, type Relation } from '../../../sql/ker
 import { nodes, edges, labels } from '../../../sql/schema.ts';
 import { framedProps, labelNameSub, predicateSql, extIdOf, elemCtx, aliasCtx, scalarProp, type Elem, type ScalarCtx } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { carryFrag, carriedCols, scopePathCols, withoutCarried, type Carried, type ElementStream } from '../context/context.ts';
+import { carryFrag, carriedCols, scopePathCols, withoutCarried, withoutPath, type Carried, type ElementStream } from '../context/context.ts';
 import { carryOf, continueLowering, pathColumns, toListStream, toPathStream, toScalarStream, type ListStream, type LoweringResult, type PathStream, type ScalarStream } from '../context/stream.ts';
 import { compileFromList } from './list.ts';
 import { type PathPos } from '../../../sql/kernel/render.ts';
@@ -175,7 +175,7 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
       // The child computes ONE scalar for this position — it must NOT extend the outer path
       // (its own movement would append a path column, corrupting the carried schema). Strip
       // path from the child seed; the ordinal (for the ordinal join) is preserved.
-      const childParent = { ...outer!.seed, carried: { ...outer!.seed.carried, path: undefined } };
+      const childParent = withoutPath(outer!.seed);
       const seed = reRootElement(childParent, p, p.c[pos.col], pos.elem);
       const child = lowerPathPositionChild(seed, byClass.nested, outer!, st.params);
       const b = child.rel.as(`b${i}`);

@@ -378,6 +378,16 @@ export const rehomeCarried = (child: Carried, parentOrigins: readonly string[]):
 export const withCarried = <T extends Carry>(st: T, patch: Partial<Carried>): T =>
   ({ ...st, carried: { ...st.carried, ...patch } });
 
+/** Chain-level capability marker: otherV() needs the entering vertex retained by
+ * every preceding edge movement. It changes no physical schema until that movement. */
+export const trackFromV = <T extends Carry>(st: T): T =>
+  withCarried(st, { trackFromV: true });
+
+/** A child derived from a path position must not inherit the outer path history:
+ * its movements are implementation detail, not new positions in the output path. */
+export const withoutPath = <T extends Carry>(st: T): T =>
+  withCarried(st, { path: undefined });
+
 /** Drop row-associated state at a global barrier while retaining ambient compile
  * context and chain requirements. A barrier result is a new traverser and cannot
  * honestly claim aliases/origins/path/sack/fromV/encounter/bulk from any one input row
