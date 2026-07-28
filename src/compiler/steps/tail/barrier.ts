@@ -160,7 +160,25 @@ export function numericReducerAggregate(
 /** Scope-aware scalar barrier. The parent domain is the aggregate's left side, so
  * every origin produces one result even when the child row stream is empty. The
  * explicit encounter column is the non-null productivity marker: COUNT(v) would
- * incorrectly ignore productive null traversers. */
+ * incorrectly ignore productive null traversers.
+ *
+ * A SCOPED barrier does NOT weight by `bulk`, and that is the axis — the same column means
+ * opposite things either side of it:
+ *   • an aggregate that COLLAPSES the multiset it reads into one total (the global count/reducers
+ *     below; a per-key group total, `valBulk` in group.ts) MUST flatten each row by its
+ *     multiplicity — a bulk-N traverser contributes N times. Pinned by P1.1.
+ *   • an aggregate that emits one row PER PARENT — this one — must not. `bulk` on these child rows
+ *     is the PARENT's multiplicity, inherited: `pushChildScope` projects the parent's whole carried
+ *     schema into the child domain, and a movement inside a child scope does not itself collapse.
+ *     So a collapsed parent row `(d, bulk=2)` hands every child row `bulk=2`, and those 2
+ *     traversers each see the SAME children — the per-traverser answer is 2 neighbours, not 4. The
+ *     domain re-projects that same bulk onto the result row, so the outer consumer applies it
+ *     exactly once; weighting here applied it TWICE and silently answered `[]` for
+ *     `where(__.out().values('age').sum().is(11))` as soon as the outer chain collapsed — a
+ *     movementCollapse equivalence violation on the DEFAULT config. Pinned by P1.2.
+ * (Both pins: test/L2-sql/repeat-path.sql.test.ts.)
+ * Bulk minted INSIDE a child body (a collapse of convergent CHILD walks) would need weighting;
+ * nothing can produce one today, so that policy is deliberately absent rather than guessed. */
 export function lowerScopedScalarReducer(
   input: ScalarStream,
   reducer: ScalarReducer,
@@ -172,20 +190,17 @@ export function lowerScopedScalarReducer(
   const d = domain.as('d');
   const s = input.rel.as('s');
   const join = q`${d} LEFT JOIN ${s} ON ${s.c[ordinal]}=${d.c[ordinal]}`;
-  const bulk = input.carried.bulk ? s.c[input.carried.bulk] : undefined;
   let aggregate: Expression;
   let result: ScalarStream['result'];
   let as = staticTypeOf(input.type);
   if (reducer === 'count') {
-    // Count the productive (non-null encounter) child rows, weighted by bulk when present
-    // — the LEFT JOIN's null-padded empty-child rows contribute 0.
-    aggregate = bulk
-      ? q`COALESCE(SUM(CASE WHEN ${s.c[inEnc]} IS NOT NULL THEN ${bulk} END), 0) AS v`
-      : q`COUNT(${s.c[inEnc]}) AS v`;
+    // Count the productive (non-null encounter) child rows — the LEFT JOIN's null-padded
+    // empty-child rows contribute 0. Unweighted: see the bulk rule above.
+    aggregate = q`COUNT(${s.c[inEnc]}) AS v`;
     result = 'count';
     as = 'long';
   } else {
-    const reduced = numericReducerAggregate(s.c.v, reducer, bulk);
+    const reduced = numericReducerAggregate(s.c.v, reducer);
     aggregate = q`${reduced.value} AS v, ${reduced.type} AS vt`;
     result = 'number';
     as = undefined;

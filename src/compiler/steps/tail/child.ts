@@ -131,32 +131,90 @@ const SHARED_SCALAR_CHILD_STEPS = new Set([
 const isSharedScalarChildStep = (s: PStep): boolean =>
   SHARED_SCALAR_CHILD_STEPS.has(s.name) || labelSelectOf(s) !== null;
 
-/** Compile a terminal child count as a true scope-aware barrier. The preserved
- * parent domain is the left side of the aggregate, so an unproductive child still
- * emits one Long zero for that parent. Grouping by the child ordinal (rather than
- * element id) keeps equal/duplicate parent traversers multiset-distinct. */
+// ---------- the scoped element-row count: ONE aggregate ----------
+//
+// "How many rows did this child body produce for each parent traverser?" has three consumers — a
+// terminal count child (tryCompileCountChild), the origin-retaining form an existence/by()
+// consumer drives (tryCompileCountValueRows), and a bare movement count (scopedMovementCount,
+// which the degree-centrality service composes). They were three aggregates.
+//
+// It is deliberately NOT lowerScopedScalarReducer with a `1 AS v` marker CTE in front (which is
+// what the third one did): element rows have no value to reduce, so the marker relation and the
+// per-origin encounter it minted existed only to satisfy that function's SCALAR contract, while
+// COUNT over the domain join is the whole operation. The scalar barrier stays the authority for
+// reducing child VALUES; this is the row-algebraic twin, and the two are not a duplication —
+// counting rows never needs an expression denoting the traverser's value.
+//
+// BULK is unweighted here, which is the same rule the scalar barrier now follows and NOT a
+// difference between them — see the bulk axis documented on lowerScopedScalarReducer (barrier.ts).
+
+/** N child rows per parent origin → one Long per origin. The preserved parent domain is the
+ *  aggregate's left side, so an unproductive child still emits a zero for that parent, and
+ *  grouping by the child ORDINAL (not element id) keeps equal/duplicate parents multiset-distinct.
+ *  `having` filters the aggregate itself — `out().count().is(gt(1))` — so an existence consumer
+ *  reads row-present ⟺ the count comparison holds. The origin stays live; the caller decides
+ *  whether to rejoin at parent cardinality. */
+function scopedElementRowCount(
+  el: ElementStream,
+  pushed: ReturnType<typeof pushChildScope>,
+  having: readonly any[] = [],
+): { stream: ScalarStream; frame: ChildFrame } {
+  const ord = pushed.frame.ordinal;
+  const d = pushed.frame.domain.as('d');
+  const c = el.rel.as('c');
+  const count = q`COUNT(${c.c.id})`;
+  const filter = having.length
+    ? q` HAVING ${list(having.map((p) => predicateSql(count, p)), ' AND ')}`
+    : empty;
+  // One count row per origin — mint a constant encounter into its carried slot as the per-origin
+  // order marker a following scoped slice/reducer or cardinality policy reads.
+  const outCarried = carriedWith(pushed.frame.carried, { encounter: 'encounter' });
+  const rel = el.q.cte(
+    q`SELECT ${count} AS v${carryFragMint(outCarried, d, 'encounter', q`1`)} FROM ${d} LEFT JOIN ${c} ON ${c.c[ord]}=${d.c[ord]} GROUP BY ${d.c[ord]}${filter}`,
+    ['v', ...carriedCols(outCarried)],
+  );
+  return {
+    stream: toScalarStream({ ...carryOf(el), carried: outCarried }, rel, 'long', { result: 'count' }),
+    frame: pushed.frame,
+  };
+}
+
+/** Classify + lower a count-shaped child body, then count its rows. `trailingIs` is the
+ *  consumer-policy switch: an existence consumer owns `<move>.count().is(P)` and takes the
+ *  predicates as a HAVING; a value consumer does not admit them at all (its classify sees the
+ *  whole body and declines), so the two entry points differ ONLY in that flag. */
+function compileCountChildRows(
+  parent: ChildParent,
+  nested: any,
+  scope: CompileScope,
+  preParsed: ReturnType<typeof stepChain> | undefined,
+  trailingIs: boolean,
+): { stream: ScalarStream; frame: ChildFrame } | null {
+  if ((!nested && !preParsed) || isPropertyParent(parent) || isScalarParent(parent)) return null;
+  const body = preParsed ?? childSteps(nested, parent.params);
+  let cut = body.length;
+  const isPreds: any[] = [];
+  if (trailingIs)
+    while (cut > 0 && body[cut - 1].name === 'is') { isPreds.unshift(body[cut - 1].args[0]); cut--; }
+  const counted = classifyCountChild(cut === body.length ? body : body.slice(0, cut), childCtx(parent));
+  if (!counted) return null;
+  const pushed = pushChildScope(parent, scope);
+  const end = lowerElementBody(pushed.seed, counted.prefix);
+  if (!end) return null;
+  return scopedElementRowCount(end, pushed, isPreds);
+}
+
+/** Compile a terminal child count as a true scope-aware barrier, at PARENT cardinality: the
+ * count row per origin, rejoined by the one shape-agnostic rejoin (which drops the child
+ * ordinal and the per-origin encounter with it). */
 export function tryCompileCountChild(
   parent: ChildParent,
   nested: any,
   scope: CompileScope = ROOT_SCOPE,
   preParsed?: ReturnType<typeof stepChain>,
 ): ScalarStream | null {
-  if ((!nested && !preParsed) || isPropertyParent(parent) || isScalarParent(parent)) return null;
-  const counted = classifyCountChild(preParsed ?? childSteps(nested, parent.params), childCtx(parent));
-  if (!counted) return null;
-  const { prefix } = counted;
-
-  const pushed = pushChildScope(parent, scope);
-  const end = lowerElementBody(pushed.seed, prefix);
-  if (!end) return null;
-
-  const d = pushed.frame.domain.as('d');
-  const c = end.rel.as('c');
-  const rel = parent.q.cte(
-    q`SELECT COUNT(${c.c.id}) AS v${carryFrag(parent.carried, d)} FROM ${d} LEFT JOIN ${c} ON ${c.c[pushed.frame.ordinal]}=${d.c[pushed.frame.ordinal]} GROUP BY ${d.c[pushed.frame.ordinal]}`,
-    ['v', ...carriedCols(parent.carried)],
-  );
-  return toScalarStream(carryOf(parent), rel, 'long');
+  const rows = compileCountChildRows(parent, nested, scope, preParsed, false);
+  return rows ? applyChildCardinality(parent, rows.frame, rows.stream, 'all').stream : null;
 }
 
 /** Count child with the origin retained for a consumer-owned by()/barrier policy.
@@ -168,37 +226,7 @@ function tryCompileCountValueRows(
   scope: CompileScope = ROOT_SCOPE,
   preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ScalarStream; frame: ChildFrame } | null {
-  if ((!nested && !preParsed) || isPropertyParent(parent) || isScalarParent(parent)) return null;
-  const body = preParsed ?? childSteps(nested, parent.params);
-  // A trailing is() run is a filter on the count value — `out().count().is(gt(1))`.
-  // It composes as a HAVING on the aggregate: the row (one per parent, incl. the
-  // LEFT-JOIN zero) survives only when the count satisfies every predicate, so an
-  // existence consumer reads row-present ⟺ the count comparison holds. This is the
-  // bare-movement counterpart to the values-based reducer path (compileScalarChildRows
-  // continueScalar already applies a trailing is), so `<move>.count().is(P)` lowers
-  // through the generic reducer machinery instead of a hand-rolled correlated aggregate.
-  let cut = body.length;
-  const isPreds: any[] = [];
-  while (cut > 0 && body[cut - 1].name === 'is') { isPreds.unshift(body[cut - 1].args[0]); cut--; }
-  const counted = classifyCountChild(body.slice(0, cut), childCtx(parent));
-  if (!counted) return null;
-  const { prefix } = counted;
-  const pushed = pushChildScope(parent, scope);
-  const end = lowerElementBody(pushed.seed, prefix);
-  if (!end) return null;
-  const d = pushed.frame.domain.as('d');
-  const c = end.rel.as('c');
-  const count = q`COUNT(${c.c.id})`;
-  const having = isPreds.length
-    ? q` HAVING ${list(isPreds.map((p) => predicateSql(count, p)), ' AND ')}`
-    : empty;
-  // One count row per origin — mint a constant encounter into its carried slot.
-  const outCarried = carriedWith(pushed.seed.carried, { encounter: 'encounter' });
-  const rel = parent.q.cte(
-    q`SELECT ${count} AS v${carryFragMint(outCarried, d, 'encounter', q`1`)} FROM ${d} LEFT JOIN ${c} ON ${c.c[pushed.frame.ordinal]}=${d.c[pushed.frame.ordinal]} GROUP BY ${d.c[pushed.frame.ordinal]}${having}`,
-    ['v', ...carriedCols(outCarried)],
-  );
-  return { stream: toScalarStream({ ...carryOf(pushed.seed), carried: outCarried }, rel, 'long', { result: 'value' }), frame: pushed.frame };
+  return compileCountChildRows(parent, nested, scope, preParsed, true);
 }
 
 // ---------- the cardinality rejoin: ONE operation, every shape ----------
@@ -311,12 +339,8 @@ export function resourceElement(seed: ScalarStream, head: PStep, after: PStep[])
   return lowerElementBody(el, after);
 }
 
-/** Count the element rows of a re-sourced child per parent origin. Each row is marked with a
- *  per-origin encounter, then the SHARED scoped count barrier (LEFT JOIN domain → 0 for an
- *  empty child, bulk-weighted) reduces it — no bespoke aggregate, the same path an element
- *  count arm uses (tryCompileRowsBeforeReducer's count branch). */
-/** GENERIC child-seam primitive: the per-parent neighbour count in a direction, bulk-aware —
- *  pushChildScope → one movement over the pushed seed → scopedElementCount (LEFT JOIN domain,
+/** GENERIC child-seam primitive: the per-parent neighbour count in a direction —
+ *  pushChildScope → one movement over the pushed seed → scopedElementRowCount (LEFT JOIN domain,
  *  so a parent with no such edges scores 0). Not service-specific: it is "scoped movement
  *  count", the substrate a bare `both().count()` child also is. tinker.degree.centrality is
  *  its first caller; it composes this from the service, keeping child-seam internals here. */
@@ -327,23 +351,9 @@ export function scopedMovementCount(parent: ElementStream, scope: CompileScope, 
   const moveStep = { name: direction, args: [], ctx: null as any } as PStep;
   const { stream: moved, next } = engineOf(pushed.seed).lowerElementSteps([moveStep], pushed.seed);
   if (next !== 1) throw new Error(`could not lower ${direction}()`);
-  return scopedElementCount(moved, pushed);
-}
-
-function scopedElementCount(el: ElementStream, pushed: ReturnType<typeof pushChildScope>): ScalarStream {
-  const c = el.rel.as('c');
-  const ord = pushed.frame.ordinal;
-  const mc = carriedWith(el.carried, { encounter: 'encounter' });
-  const mint = q`ROW_NUMBER() OVER (PARTITION BY ${c.c[ord]} ORDER BY ${c.c.id})`;
-  const marked = toScalarStream(
-    { ...carryOf(el), carried: mc },
-    el.q.cte(
-      q`SELECT 1 AS v${carryFragMint(mc, c, 'encounter', mint)} FROM ${c}`,
-      ['v', ...carriedCols(mc)],
-    ),
-    undefined, { result: 'value' },
-  );
-  return lowerScopedScalarReducer(marked, 'count', pushed.scope);
+  // The pushed ordinal deliberately stays live (the call() seam's contract — an existence
+  // consumer correlates on it); only the count's own encounter is minted on top.
+  return scopedElementRowCount(moved, pushed).stream;
 }
 
 function compileScalarChildRows(
@@ -419,7 +429,7 @@ function compileScalarChildRows(
         const pushed = pushChildScope(parent, scope);
         const moved = resourceElement(pushed.seed, rest[0], after);
         if (!moved) return null;
-        return applyScalarChildCardinality(parent, pushed, scopedElementCount(moved, pushed), use, retainChildScope);
+        return applyScalarChildCardinality(parent, pushed, scopedElementRowCount(moved, pushed).stream, use, retainChildScope);
       }
       // ends in a projection (values/id/label) → scalar; lowerSteps folds V→element→projection.
       if (classifyScalarChildRows('element', after, childCtx(parent))?.kind !== 'element') return null;

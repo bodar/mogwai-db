@@ -223,6 +223,67 @@ describe('repeat / path SQL', () => {
     }
   });
 
+  test('P1.2 a SCOPED reducer does NOT weight by bulk — a child answers per traverser', () => {
+    // The other side of P1.1's axis. Both live in one column called `bulk`, and they mean opposite
+    // things: P1.1 counts the TRAVERSERS in a group (weight by their multiplicity), while a child
+    // body's reducer counts what ONE traverser produced. `pushChildScope` projects the parent's
+    // carried schema into the child domain, so a collapsed parent row hands every child row the
+    // PARENT's bulk — and the domain re-projects it onto the result row too, so weighting the
+    // scoped aggregate applied it twice. Diamond with a tail: a→b, a→c, b→d, c→d, d→e, d→f. The
+    // two 2-hop walks converge, so `V(a).out().out()` collapses to the single row (d, bulk=2),
+    // and d has exactly 2 children (ages 5 and 6). Per traverser that is count 2 and sum 11 —
+    // weighted it was 4 and 22, so every predicate below silently matched NOTHING as soon as the
+    // outer chain collapsed (a movementCollapse equivalence violation on the DEFAULT config).
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    for (const [n, age] of [['a', 1], ['b', 2], ['c', 3], ['d', 4], ['e', 5], ['f', 6]] as [string, number][])
+      executeQuery(store, `g.addV('n').property('name','${n}').property('age',${age})`, {});
+    const ids = store.query<{ id: number }>('SELECT id FROM nodes ORDER BY id').map((r) => r.id);
+    const [a, b, c, d] = ids;
+    for (const [s, t] of [[a, b], [a, c], [b, d], [c, d], [d, ids[4]], [d, ids[5]]])
+      store.query('INSERT INTO edges(src,label,tgt) VALUES (?,?,?)', [s, 0, t]);
+
+    // Two switches decide WHICH lowering answers, so the pin has to hold across their product:
+    // movementCollapse is what makes bulk exceed 1 at all, and predicateInlining OFF is what
+    // routes the child body through the materialized child seam (the inline correlated predicate
+    // is a separate lowering, and it was always unweighted — which is how the two disagreed).
+    const total = (q: string, fastPaths: CompileOptions['fastPaths']) =>
+      Number((runWith(store, q, { fastPaths })[0] as any).v);
+    const everyLowering = (q: string, expected: number) => {
+      for (const movementCollapse of [true, false])
+        for (const inline of [true, false]) {
+          const fastPaths = { movementCollapse, predicateInlining: inline, scalarPredicateInlining: inline };
+          // The flags ride in the expectation so a failure names the combination that broke.
+          expect({ movementCollapse, inline, v: total(q, fastPaths) })
+            .toEqual({ movementCollapse, inline, v: expected });
+        }
+    };
+    const surviving = (body: string) => `g.V(${a}).out().out().where(${body}).count()`;
+    everyLowering(surviving("__.out().count().is(P.eq(2))"), 2);                  // element ROWS
+    everyLowering(surviving("__.out().values('age').count().is(P.eq(2))"), 2);    // scalar rows
+    everyLowering(surviving("__.out().values('age').sum().is(P.eq(11))"), 2);     // 5+6, not 22
+    everyLowering(surviving("__.out().values('age').mean().is(P.eq(5.5))"), 2);   // uniform bulk cancels
+    everyLowering(surviving("__.out().values('age').max().is(P.eq(6))"), 2);      // bulk-invariant
+    // The weighted answers must now be rejected under every lowering — without this the pin
+    // passes for a stream that merely stopped collapsing.
+    everyLowering(surviving("__.out().count().is(P.eq(4))"), 0);
+    everyLowering(surviving("__.out().values('age').sum().is(P.eq(22))"), 0);
+
+    // The rule as SQL shape, in BOTH directions — the same query collapses its frontier and
+    // weights its GLOBAL count by that bulk, while the SCOPED reducer inside it does not.
+    const off = { fastPaths: { movementCollapse: true, predicateInlining: false, scalarPredicateInlining: false } };
+    const sumSql = read(surviving("__.out().values('age').sum().is(P.eq(11))"), off).sql;
+    expect(sumSql).toContain('SUM(bulk) AS bulk');                                  // frontier collapsed
+    expect(sumSql).toContain('COALESCE(SUM(s.bulk), 0) AS v');                      // GLOBAL count weights
+    expect(sumSql).not.toContain('* s.bulk');                                       // scoped sum does not
+    const cntSql = read(surviving('__.out().count().is(P.eq(2))'), off).sql;
+    expect(cntSql).not.toContain('CASE WHEN s.encounter IS NOT NULL THEN s.bulk');  // scoped count does not
+    // ONE aggregate for a scoped element-row count: the domain LEFT JOIN carries it, with no
+    // `1 AS v` marker relation in front to satisfy a scalar reducer's contract.
+    expect(cntSql).toContain('COUNT(c.id) AS v, d.bulk, d.o0, 1 AS encounter');
+    expect(cntSql).toContain('HAVING COUNT(c.id) = ?');
+    expect(cntSql).not.toContain('1 AS v');
+  });
+
   test('repeat requires an exit modulator; emit()/until() run unbounded; sequential repeats chain', () => {
     // bare repeat() has no termination AND no output semantics → reject
     expect(() => compile('g.V().repeat(__.out())', {})).toThrow('repeat() requires times(), until(), or emit()');

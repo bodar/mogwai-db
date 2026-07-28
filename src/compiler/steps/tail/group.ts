@@ -45,7 +45,14 @@ export interface GroupSource {
   /** The per-CHILD-ROW multiplicity that weights a value reducer over child rows
    * (`by(__.count())` → SUM(bulk); `by(__.values(x).sum())` → SUM(v·bulk)). The child rows
    * inherit the source traverser's bulk through the child scope, so a fanned-out reducer
-   * counts each contribution the right number of times. */
+   * counts each contribution the right number of times.
+   *
+   * This is the COLLAPSING side of the bulk axis documented on `lowerScopedScalarReducer`
+   * (barrier.ts) — a group value reducer folds the whole group's multiset into ONE total per key,
+   * so every contribution must be flattened by its traverser's multiplicity. Do not "unify" it
+   * with the scoped (per-parent) reducer, which must NOT weight: measured, dropping the weighting
+   * here makes `repeat(__.both()).times(2).group().by(T.label).by(__.count())` answer 4/2 (the
+   * distinct collapsed rows) instead of 20/10 (the traversers). */
   valBulk?: Expression;
   /** Raw rows folded once per final group key. `valOrder` is parent encounter then
    * child encounter, so folding never relies on incidental join order. */

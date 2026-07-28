@@ -338,7 +338,11 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(read('g.V(1).local(__.out().values("name").tail(2))').sql)
       .toContain('PARTITION BY p.o0 ORDER BY p.encounter DESC');
     const reducedChild = read('g.V().map(__.out().values("name").is("lop").count())');
-    expect(reducedChild.sql).toContain('COALESCE(SUM(CASE WHEN s.encounter IS NOT NULL THEN s.bulk END), 0) AS v');
+    // A SCOPED reducer counts child rows per parent and does NOT weight by bulk — that column
+    // holds the PARENT's multiplicity here, and the domain re-projects it onto the result row, so
+    // weighting would apply it twice (test/L2-sql/repeat-path.sql.test.ts P1.2 pins the semantics;
+    // the rule is on lowerScopedScalarReducer). A per-key GROUP total does weight — that is P1.1.
+    expect(reducedChild.sql).toContain('COUNT(s.encounter) AS v');
     expect(reducedChild.sql).toContain('LEFT JOIN');
     const foldedChild = read('g.V().map(__.out().values("name").fold()).count(Scope.local)');
     // The folded member now carries the per-list encoding decision (bare vs {t,v}); the
