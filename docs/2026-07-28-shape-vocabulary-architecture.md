@@ -251,19 +251,29 @@ decision — two logically equal lists from different producers can be different
 
 ## 8. The plan, ordered by evidence
 
-**0 — Two oracles first.** The L5 *differential* is structurally blind to refactor regressions: it
-compares two lowerings, so a defect in both is invisible. Oracle 2 (metamorphic laws, `fa6c0aa`,
-`laws.ts`) mitigates a different axis — it checks 19 semantic identities, not "this traversal
-returns what it returned yesterday" — so it does not substitute. And 672 of 2,298 corpus traversals
-do not compile: a 35% surface no oracle executes, where every silent-`[]` defect in the record has
-lived.
-- **P1 — golden-outcome differential.** Retarget `oracle.ts`'s existing `Outcome` +
-  bulk-weighted multiset comparator (`:56-58`) from *two configs, one build* to *one build, two
-  commits*. ~60 lines.
-- **P2 — deferral census.** Compile all 2,298 corpus traversals; record compiled-or-threw-with-this-
-  message; assert unchanged. The only instrument that distinguishes "still fails closed" from "now
-  answers wrongly". The ~40-line probe exists in scratch form (`2026-07-27-hand-rolled-sql-audit.md`
-  method note); commit it.
+**0 — Two oracles first. ✅ LANDED as ONE instrument (`test/census/`).** The L5 *differential* is
+structurally blind to refactor regressions: it compares two lowerings, so a defect in both is
+invisible. Oracle 2 (metamorphic laws, `fa6c0aa`, `laws.ts`) mitigates a different axis — 19
+semantic identities, not "this traversal returns what it returned yesterday" — so it does not
+substitute. And 873 of 2,298 corpus traversals do not execute: a 38% surface no oracle touches,
+where every silent-`[]` defect in the record has lived.
+
+P1 and P2 were specified as two artifacts; they shipped as one, because **executing a traversal
+surfaces its compile failure anyway**, so one pass yields both halves for 11s instead of 17.5s and
+strictly more information — the transition that matters most (*used to fail closed, now returns
+rows*) is only visible when both facts live in one record. Measured at the baseline: 1,425 `ran`,
+475 `deferred`, 381 `unbound`, **17 `crashed`**. Determinism was the gate on the whole approach and
+was verified over 7 runs including separate processes, plus a `reverse_unordered_selects` planner
+perturbation. Two corrections the probe forced:
+- **Sorting the outer multiset is NOT order-immune.** When `fold()`/`cap()`/`group()` collapses a
+  stream to one traverser, member order lives *inside* its GraphBinary buffer — 50 traversals are
+  order-sensitive this way. `ms` gates; `ord` is telemetry (356 move under perturbation, so gating
+  it guarantees a suite that flaps on a Bun bump).
+- **A bare `compile()` is the wrong instrument** — it resolves no service registry, so all 12
+  `call()` traversals would have been committed as false deferrals.
+
+Both gates were verified against a *real* injected regression, not a doctored artifact: an
+artifact edit can only simulate a gain, never a loss.
 
 **1 — Free deletions.** Drop `VTYPE_TO_VALUETYPE`; declare `ValueType = Exclude<CanonicalType,
 'list'|'map'|'set'>` and delete both bridge tables plus the two rename-aliases; delete

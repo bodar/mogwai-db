@@ -20,7 +20,8 @@
 import { test, expect, describe } from 'bun:test';
 import fc from 'fast-check';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
-import { seeded, outcomeOf, diverge, GATING } from './oracle.ts';
+import { outcomeOf, diverge, GATING } from './oracle.ts';
+import { seeded } from '../support/graph.ts';
 import { DEFAULT_FAST_PATHS } from '../../src/compiler/options/fast-paths.ts';
 import { prefix } from './generate.ts';
 import { LAWS } from './laws.ts';

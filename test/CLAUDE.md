@@ -42,7 +42,33 @@
   which is the thing the L3 count structurally cannot. Current state + runbook:
   `L5-properties/README.md`; design rationale + the unbuilt oracles:
   `docs/2026-07-28-property-based-testing-l5.md`.
-- Shared reference-graph seeds live in `test/fixtures/`.
+- Shared reference-graph seeds live in `test/fixtures/`; shared graph-minting helpers
+  (`seeded`/`isWrite`) live in `test/support/graph.ts` — used by both L5 and the census, so they
+  live in neither.
+
+## The census — not a ladder level
+
+`test/census/` asks the one question no level above can: **did anything CHANGE?** Every L1–L5 test
+asserts correctness; a behaviour-preserving refactor's success criterion is a number that does NOT
+move, which — with the ladder alone — is indistinguishable from a refactor that quietly turned
+fail-closed deferrals into wrong answers. Two committed TSVs record what the engine DOES with all
+2,298 corpus traversals (`goldens.tsv` 1,425 executing + a result digest; `deferrals.tsv` 873
+throwing + the message). `mise run census`; re-record with `mise run census-record`.
+
+Five gates: the artifact covers exactly the corpus · no traversal stops executing · **no executing
+traversal changes its answer** (the regression nothing else can see) · no clean deferral becomes a
+crash · a coverage floor. Runbook + the status vocabulary: `test/census/README.md`.
+
+**It deliberately does NOT auto-record.** L3 rewrites its state on a clean local run and that is
+safe there because its artifact is a monotone floor. The census is a two-way baseline whose most
+dangerous transition is *still runs, different answer* — an auto-record would launder exactly the
+regression it exists to catch. Re-recording is a command, and a re-record with no reason in the
+commit message is indistinguishable from the regression it hides.
+
+**It records 17 `crashed` rows — fail-closed VIOLATIONS that exist today** (10 bun:sqlite bind
+rejections, 3 raw `TypeError`s, 2 `RangeError`s, 1 `UNIQUE constraint`, and 1 case of us emitting
+syntactically invalid SQL). The gate holds that count from growing; each one should become a clear
+deferral or a fix.
 
 ## Guardrails
 

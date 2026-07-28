@@ -19,9 +19,10 @@ import { readFileSync } from 'node:fs';
 import fc from 'fast-check';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import {
-  differential, gatingDivergences, seeded, ran, onlyDisabled, FAST_PATH_NAMES, GATING,
+  differential, gatingDivergences, ran, onlyDisabled, FAST_PATH_NAMES, GATING,
   type Divergence,
 } from './oracle.ts';
+import { seeded } from '../support/graph.ts';
 import { traversal } from './generate.ts';
 import { isKnown, staleEntries } from './known.ts';
 

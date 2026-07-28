@@ -12,12 +12,15 @@
 // no reference implementation, no expected-value table and no JVM is needed to find it. That makes
 // it the cheapest of the four oracle designs and the one that covers the riskiest code — the
 // movement collapse, the bulk repeat-count, the two predicate inliners.
-import { GraphStore } from '../../src/storage.ts';
-import { BunSqlite } from '../../src/bun/BunSqlite.ts';
+import type { GraphStore } from '../../src/storage.ts';
 import { exec } from '../support/executor.ts';
+import { isWrite, type StoreFactory } from '../support/graph.ts';
 import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
-import { compile } from '../../src/compiler/compiler.ts';
 import type { Framed } from '../../src/execute.ts';
+
+// `seeded`/`isWrite`/`StoreFactory` moved to test/support/graph.ts when the census became a second
+// consumer — a shared helper living inside one of its consumers is how a third ends up
+// hand-rolling a copy. Imported, never re-exported: one name, one import path.
 
 /** Every fast path off — the generic lowering, i.e. the semantic authority to compare against. */
 export const ALL_GENERIC: FastPathConfig = Object.freeze(
@@ -29,27 +32,6 @@ export const FAST_PATH_NAMES = Object.keys(DEFAULT_FAST_PATHS) as (keyof FastPat
 /** Default config with exactly one fast path disabled — isolates which switch a diff belongs to. */
 export const onlyDisabled = (name: keyof FastPathConfig): FastPathConfig =>
   Object.freeze({ ...DEFAULT_FAST_PATHS, [name]: false });
-
-/** Seed a fresh in-memory graph by running write traversals through the normal query path (the
- *  same way every other test seeds — no runtime-specific store hook). */
-export function seeded(seed: readonly string[]): GraphStore {
-  const store = new GraphStore(new BunSqlite(':memory:'));
-  for (const q of seed) exec(store).buffers(q, {});
-  return store;
-}
-
-/** Mints a graph at the differential's baseline state. A READ differential reuses one store (reads
- *  don't mutate); a WRITE differential needs a fresh one per side, or side two would run against
- *  side one's mutations and "diverge" on rowids alone — a harness artifact, not a defect. */
-export type StoreFactory = () => GraphStore;
-
-/** Does this traversal mutate? Decided by the compiler's own routing (`kind === 'write'`), not by
- *  string-matching for addV/drop — a chain like `V().property(k,v)` is a write with no add* in it,
- *  and the compiler is the only authority on which chains route to routeWrite. A traversal that
- *  fails to compile is not a write (it will throw identically on both sides). */
-export function isWrite(q: string): boolean {
-  try { return compile(q, {}).kind === 'write'; } catch { return false; }
-}
 
 /** The result of running one traversal under one config. A THROW is an outcome, not a crash: the
  *  project's fail-closed rule means an unsupported shape must throw a clear deferral, and whether

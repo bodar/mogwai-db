@@ -73,6 +73,20 @@ description = "L5 exploration — random seed, 3000 generated traversals (not a 
 depends = ["install", "check", "submodule"]
 run = "L5_SEED=$RANDOM L5_RUNS=3000 bun test test/L5-properties"
 
+# The refactor guard, NOT a ladder level: it asserts nothing about correctness, only that behaviour
+# has not CHANGED. `submodule` because it executes traversals (same reason as L5).
+[tasks.census]
+description = "Census — the refactor guard: every corpus traversal's outcome vs the committed baseline"
+depends = ["install", "check", "submodule"]
+run = "bun test test/census"
+
+# Re-record the baseline. Deliberately a command rather than the test rewriting itself: the census
+# is a two-way baseline, so an auto-record would launder the very regression it exists to catch.
+[tasks.census-record]
+description = "Re-record the census baseline (prints the delta first; commit the two .tsv files)"
+depends = ["install", "check", "submodule"]
+run = "bun run test/census/record.ts"
+
 [tasks.generate]
 description = "Regenerate parser/ from the submodule's origin/master Gremlin grammar (antlr-ng)"
 depends = ["install", "submodule"]
