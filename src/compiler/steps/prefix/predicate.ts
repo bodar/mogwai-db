@@ -68,7 +68,7 @@ const AGG_FN: Record<string, string> = { count: 'COUNT', sum: 'SUM', min: 'MIN',
  * reducer child.
  */
 export function correlatedReduce(engine: Engine, body: Step[], ctx: ScalarCtx, params: Record<string, any>, labels?: LabelScope): Expression | null {
-  if (ctx.elem !== 'node') return null; // movement reduces from a vertex
+  if (ctx.elem !== 'vertex') return null; // movement reduces from a vertex
   const mv = body[0];
   if (!mv || !MOVES.has(mv.name)) return null;
 
@@ -311,7 +311,7 @@ function compileInlinePredicate(
     // A movement chain → a correlated EXISTS over the path. Movement is only valid on a
     // vertex; on an edge the outer traverser can't out()/in() (a hard error, NOT a
     // fallthrough). count/sum terminals are handled above.
-    if (ctx.elem !== 'node') throw new Error(`where(__.${head}()) expects a vertex, not an ${ctx.elem}`);
+    if (ctx.elem !== 'vertex') throw new Error(`where(__.${head}()) expects a vertex, not an ${ctx.elem}`);
     const exists = correlatedExists(engine, body, ctx.idExpr, isPred, hasIs, params, labels);
     if (!exists) decline(`movement beyond inline lowering: __.${body.map((s) => s.name + '()').join('.')}`);
     return exists;

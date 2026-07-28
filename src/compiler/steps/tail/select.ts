@@ -104,7 +104,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
       const l = labels.as(`l${i}`);
       const payload = child.stream.elem === 'edge'
         ? q`${n.c.id} AS rid, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${extIdOf(n.c.src)} AS src, ${extIdOf(n.c.tgt)} AS tgt, ${framedProps(n, 'edge')} AS props`
-        : q`${n.c.id} AS rid, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props`;
+        : q`${n.c.id} AS rid, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'vertex')} AS props`;
       const payloadCols = child.stream.elem === 'edge'
         ? ['rid', 'id', 'label', 'src', 'tgt', 'props']
         : ['rid', 'id', 'label', 'props'];
@@ -112,7 +112,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
         q`SELECT ${payload}${carryFrag(child.stream.carried, cp)} FROM ${cp} JOIN ${n} ON ${n.c.id}=${cp.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}`,
         [...payloadCols, ...carriedCols(child.stream.carried)],
       ).as(`b${i}`);
-      const field: RecordField = { key: keys[i], prefix, sub: child.stream.elem === 'edge' ? 'edge' : 'vertex', nullable: productive || undefined };
+      const field: RecordField = { key: keys[i], prefix, sub: child.stream.elem, nullable: productive || undefined };
       return {
         rel,
         field,
@@ -125,7 +125,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
       const l = labels.as(`l${i}`);
       const payload = source.elem === 'edge'
         ? q`${n.c.id} AS rid, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${extIdOf(n.c.src)} AS src, ${extIdOf(n.c.tgt)} AS tgt, ${framedProps(n, 'edge')} AS props`
-        : q`${n.c.id} AS rid, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props`;
+        : q`${n.c.id} AS rid, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'vertex')} AS props`;
       const payloadCols = source.elem === 'edge'
         ? ['rid', 'id', 'label', 'src', 'tgt', 'props']
         : ['rid', 'id', 'label', 'props'];
@@ -133,7 +133,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
         q`SELECT ${payload}${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${source.id} JOIN ${l} ON ${l.c.id}=${n.c.label}`,
         [...payloadCols, ...carriedCols(outer.seed.carried)],
       ).as(`b${i}`);
-      const field: RecordField = { key: keys[i], prefix, sub: source.elem === 'edge' ? 'edge' : 'vertex' };
+      const field: RecordField = { key: keys[i], prefix, sub: source.elem };
       return {
         rel,
         field,
@@ -143,7 +143,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
         }),
       };
     }
-    if (typeof spec === 'string' && source.elem === 'node') {
+    if (typeof spec === 'string' && source.elem === 'vertex') {
       const expr = nodePropScalar(source.id, spec);
       const rel = st.q.cte(
         q`SELECT ${expr} AS v${carryFrag(outer.seed.carried, p)} FROM ${p}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
@@ -307,8 +307,8 @@ export function lowerScalarProject(s: ScalarStream, proj: PStep): RecordStream |
       const idExpr = aliasId(p.c[aliasField.entry.col], 'last');
       const payload = elem === 'edge'
         ? q`${n.c.id} AS ${`e${i}_rid`}, COALESCE(${n.c.uid}, ${n.c.id}) AS ${`e${i}_id`}, ${l.c.name} AS ${`e${i}_label`}, ${extIdOf(n.c.src)} AS ${`e${i}_src`}, ${extIdOf(n.c.tgt)} AS ${`e${i}_tgt`}, ${framedProps(n, 'edge')} AS ${`e${i}_props`}`
-        : q`${n.c.id} AS ${`e${i}_rid`}, COALESCE(${n.c.uid}, ${n.c.id}) AS ${`e${i}_id`}, ${l.c.name} AS ${`e${i}_label`}, ${framedProps(n, 'node')} AS ${`e${i}_props`}`;
-      const field: RecordField = { key, prefix: `e${i}`, sub: elem === 'edge' ? 'edge' : 'vertex' };
+        : q`${n.c.id} AS ${`e${i}_rid`}, COALESCE(${n.c.uid}, ${n.c.id}) AS ${`e${i}_id`}, ${l.c.name} AS ${`e${i}_label`}, ${framedProps(n, 'vertex')} AS ${`e${i}_props`}`;
+      const field: RecordField = { key, prefix: `e${i}`, sub: elem };
       const rel = s.q.cte(
         q`SELECT ${p.c[ord]} AS ${ord}, ${payload}${carryFrag(s.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${idExpr} JOIN ${l} ON ${l.c.id}=${n.c.label}`,
         [ord, ...recordFieldColumns(field), ...carriedCols(s.carried)],
@@ -363,7 +363,7 @@ export function lowerRecordSelectProject(st: ElementStream, proj: PStep): Stream
   const traversalRecord = tryLowerTraversalRecord(st, proj, keys);
   if (traversalRecord) return traversalRecord;
 
-  const sourceOf = (k: string): { expr: Expression; elem: 'node' | 'edge' } => {
+  const sourceOf = (k: string): { expr: Expression; elem: 'vertex' | 'edge' } => {
     if (isProject) {
       return { expr: st.rel.as('p').c.id, elem: curElem };
     }
@@ -389,12 +389,12 @@ export function lowerRecordSelectProject(st: ElementStream, proj: PStep): Stream
       if (src.elem === 'edge')
         cols.push(q`${en.c.id} AS ${`${prefix}_rid`}, COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${en.c.src} AS ${`${prefix}_src`}, ${en.c.tgt} AS ${`${prefix}_tgt`}, ${edgePropsAgg(en.c.id)} AS ${`${prefix}_props`}`);
       else
-        cols.push(q`${en.c.id} AS ${`${prefix}_rid`}, COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${framedProps(en, 'node')} AS ${`${prefix}_props`}`);
+        cols.push(q`${en.c.id} AS ${`${prefix}_rid`}, COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${framedProps(en, 'vertex')} AS ${`${prefix}_props`}`);
     } else {
       const prop = src.elem === 'edge' ? edgePropScalar(en.c.id, e.key!) : nodePropScalar(en.c.id, e.key!);
       cols.push(q`${prop} AS ${`${prefix}_v`}`); // first-under-multi; projection, not indexed
     }
-    return { key: k, prefix, sub: e.sub === 'value' ? 'value' : src.elem === 'edge' ? 'edge' : 'vertex' };
+    return { key: k, prefix, sub: e.sub === 'value' ? 'value' : src.elem };
   });
 
   const relCols = [...fields.flatMap(recordFieldColumns), ...carriedCols(st.carried)];
@@ -451,7 +451,7 @@ export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, st
       if (entry.shapes.size !== 1) throw new Error('select(Pop.all/mixed) over a mixed-shape label history not yet supported');
       const shape = [...entry.shapes][0];
       const of: ListOf = shape === 'value' ? { kind: 'scalar', as: entry.as }
-        : (shape === 'node' || shape === 'edge') ? { kind: 'elem', elem: shapeElem(shape) }
+        : (shape === 'vertex' || shape === 'edge') ? { kind: 'elem', elem: shapeElem(shape) }
         : shape === 'property' ? { kind: 'property', elem: entry.propertyElem! }
         : (() => { throw new Error(`select(Pop.all) over a ${shape} label not yet supported`); })();
       // A property list must retain each member's full JSON object (historyPropertyValues,
@@ -475,8 +475,8 @@ export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, st
       if (elem === 'edge')
         cols.push(q`${en.c.id} AS ${`${prefix}_rid`}, COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${en.c.src} AS ${`${prefix}_src`}, ${en.c.tgt} AS ${`${prefix}_tgt`}, ${edgePropsAgg(en.c.id)} AS ${`${prefix}_props`}`);
       else
-        cols.push(q`${en.c.id} AS ${`${prefix}_rid`}, COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${framedProps(en, 'node')} AS ${`${prefix}_props`}`);
-      return { key: k, prefix, sub: elem === 'edge' ? 'edge' : 'vertex' };
+        cols.push(q`${en.c.id} AS ${`${prefix}_rid`}, COALESCE(${en.c.uid}, ${en.c.id}) AS ${`${prefix}_id`}, ${el.c.name} AS ${`${prefix}_label`}, ${framedProps(en, 'vertex')} AS ${`${prefix}_props`}`);
+      return { key: k, prefix, sub: elem };
     }
     // A scalar value label (by() does not apply to a non-element value).
     cols.push(q`${aliasScalar(col, end)} AS ${`${prefix}_v`}`);
@@ -715,7 +715,7 @@ const recordSelect: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
     q`SELECT ${r.c[`${field.prefix}_rid`]} AS id${carryFrag(s.carried, r)} FROM ${r}`,
     ['id', ...carriedCols(s.carried)],
   );
-  return continueLowering({ ...carryOf(s), kind: 'elements', rel, elem: field.sub === 'edge' ? 'edge' : 'node' }, at + 1);
+  return continueLowering({ ...carryOf(s), kind: 'elements', rel, elem: field.sub === 'edge' ? 'edge' : 'vertex' }, at + 1);
 };
 
 const RECORD_TAIL = new Map<string, ShapeTailFn<RecordStream>>([

@@ -81,7 +81,7 @@ export function compileCorrelatedChild(
     q: inlineEngine.q,
     params,
     rel: derived(q`SELECT ${list(seedProj, ', ')}`, ['id', ...aliasCols], inlineQ.alias()),
-    elem: 'node',
+    elem: 'vertex',
     carried,
   };
   const stream = inlineEngine.tryLowerElementSteps(steps, seed);

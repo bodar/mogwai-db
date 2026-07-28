@@ -967,7 +967,7 @@ const PROJECTORS = new Map<string, ProjFn>([
     // Endpoints resolve to external ids (COALESCE(uid,id)) so a materialized edge
     // reports the SAME src/tgt as the write path — not the raw rowid.
     ? { shape: { kind: 'edge' }, colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${extIdOf(c.n.c.src)} AS src, ${extIdOf(c.n.c.tgt)} AS tgt, ${framedProps(c.n, 'edge')} AS props`, fromNode: c.vlJoin }
-    : { shape: { kind: 'vertex' }, colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${framedProps(c.n, 'node')} AS props`, fromNode: c.vlJoin }],
+    : { shape: { kind: 'vertex' }, colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${framedProps(c.n, 'vertex')} AS props`, fromNode: c.vlJoin }],
 ]);
 
 /** An order().by(key) resolver over the current element (aliased `n`): node → the
@@ -1117,7 +1117,7 @@ function compileCap(st: ElementStream | ScalarStream, steps: PStep[], stop: numb
     return continueLowering(ls, stop + 1);
   }
   if (def.kind === 'variant')
-    return continueLowering(toVariantStream(withoutCarried(carryOf(st)), def.rel, { scalarAs: def.scalarAs, node: def.elem === 'node' || undefined, edge: def.elem === 'edge' || undefined }, 'list'), stop + 1);
+    return continueLowering(toVariantStream(withoutCarried(carryOf(st)), def.rel, { scalarAs: def.scalarAs, node: def.elem === 'vertex' || undefined, edge: def.elem === 'edge' || undefined }, 'list'), stop + 1);
   // group('a')/groupCount('a') side-effect → re-emit the same rich GroupStream as an
   // inline group; terminal framing and Column consumers share its dispatch. The stashed
   // def.parent carries the element source, so the SAME elementGroupSource that built the

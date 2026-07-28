@@ -1,6 +1,7 @@
 import type { GraphStore } from '../../storage.ts';
 import { q, type Expression, type Query, type Relation } from './q.ts';
 import type { ValueType } from '../../gremlin/types.ts';
+import type { Elem } from '../../compiler/plan/plan.ts';
 
 // ---------- compile output contract ----------
 //
@@ -12,8 +13,8 @@ import type { ValueType } from '../../gremlin/types.ts';
 /** Shape nested inside a relational list value. Kept at the render boundary because
  * both ListStream and map/record fields must agree on how GraphBinary frames it. */
 export type ListOf =
-  | { kind: 'elem'; elem: 'node' | 'edge' }
-  | { kind: 'property'; elem: 'node' | 'edge' }
+  | { kind: 'elem'; elem: Elem }
+  | { kind: 'property'; elem: Elem }
   // `typed`: items are self-describing {t,v} ValueNodes (a stored typed collection),
   // so unfold carries each element's own vtype and framing routes through frameTypedNode
   // (not the single `as` tag). A computed scalar list (fold of scalars) stays untyped.
@@ -30,7 +31,7 @@ export type MapOf =
   // producer (group/groupCount/valueMap/is(typeOf(MAP))) emits this one encoding. An element
   // (rejoined from a rowid) or a list value can't be a scalar envelope → their own kinds.
   | { kind: 'scalar' }
-  | { kind: 'elem'; elem: 'node' | 'edge' }
+  | { kind: 'elem'; elem: Elem }
   | { kind: 'list'; of: ListOf };
 
 // select(labels…)/project(keys…): a Map per row. Each entry names its result
@@ -44,7 +45,7 @@ export type MapEntry =
 // it. `node`→vertexBuffer(v_id,v_label,v_props); `edge`→edgeBuffer(+v_src,v_tgt);
 // `property`→propertyBuffer(v_owner,v_pk,v_pv). Prefix lets a group key AND value
 // each carry their own element columns (k_* / v_*).
-export type ElemShape = 'vertex' | 'edge' | 'property';
+export type ElemShape = Elem | 'property';
 
 // group()/groupCount(): the whole stream collapses into ONE Map (a barrier).
 // The key is a scalar (gk), a token (label/id), an element (framed like a value),

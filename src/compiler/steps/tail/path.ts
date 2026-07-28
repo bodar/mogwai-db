@@ -194,7 +194,7 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
         cols.push(q`${extId} AS ${`${prefix}_id`}, ${l.c.name} AS ${`${prefix}_label`}, ${extIdOf(tbl.c.src)} AS ${`${prefix}_src`}, ${extIdOf(tbl.c.tgt)} AS ${`${prefix}_tgt`}, ${framedProps(tbl, 'edge')} AS ${`${prefix}_props`}`);
         return { render: 'element', elem: 'edge', prefix };
       }
-      cols.push(q`${extId} AS ${`${prefix}_id`}, ${l.c.name} AS ${`${prefix}_label`}, ${framedProps(tbl, 'node')} AS ${`${prefix}_props`}`);
+      cols.push(q`${extId} AS ${`${prefix}_id`}, ${l.c.name} AS ${`${prefix}_label`}, ${framedProps(tbl, 'vertex')} AS ${`${prefix}_props`}`);
       return { render: 'element', elem: 'vertex', prefix };
     }
     // by(key/T.token): one scalar per position. A missing value drops the whole path
@@ -259,7 +259,7 @@ function groupedPositionChild(st: ElementStream, paths: Relation, nested: any, p
   // would append a column and corrupt the carried schema), and the walk's label history is
   // consumed by this barrier — the same reason the linear regime strips `path` from its child seed.
   const elemStream: ElementStream = {
-    ...st, rel: elemRows, elem: 'node',
+    ...st, rel: elemRows, elem: 'vertex',
     carried: { aliases: new Map(), origins: ['pk', 'ord'] },
   };
   const outer = pushChildScope(elemStream);
@@ -297,12 +297,12 @@ function compilePathArray(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   // because it is needed at two sites over two different `je` scopes (here and the
   // non-productive drop guard below) — one projector, no second hardcode. A by(TRAVERSAL)
   // position is not a flat expression at all; it runs the positional child below.
-  const posValue = (idExpr: Expression) => positionScalar(aliasCtx(idExpr, 'node'), by);
+  const posValue = (idExpr: Expression) => positionScalar(aliasCtx(idExpr, 'vertex'), by);
   // Whether this by() projects a SCALAR per position (key or T.token) or leaves the whole
   // element. Drives both the emitted columns and the wire framing (pathColumns / execute.ts
   // pathGroupedBuffers read `byKey` as exactly this question), so a T.token position needs no
   // wire change — it is a scalar like any other.
-  const scalarPos = nested !== undefined || positionScalar(aliasCtx(q`je.value`, 'node'), by) !== undefined;
+  const scalarPos = nested !== undefined || positionScalar(aliasCtx(q`je.value`, 'vertex'), by) !== undefined;
   const productive = proj.productiveBy === true;
   // dedup() must collapse equal paths BEFORE row-numbering: ROW_NUMBER() is computed
   // with the SELECT list, so a `SELECT DISTINCT path, ROW_NUMBER()…` never removes a
@@ -335,7 +335,7 @@ function compilePathArray(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
     : (() => {
         const n = nodes.as('n');
         const l = labels.as('l');
-        return q`SELECT pp.pk, je.key AS ord, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props FROM ${paths} pp, json_each(pp.path) je JOIN ${n} ON ${n.c.id}=je.value JOIN ${l} ON ${l.c.id}=${n.c.label} ORDER BY pp.pk, je.key`;
+        return q`SELECT pp.pk, je.key AS ord, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'vertex')} AS props FROM ${paths} pp, json_each(pp.path) je JOIN ${n} ON ${n.c.id}=je.value JOIN ${l} ON ${l.c.id}=${n.c.label} ORDER BY pp.pk, je.key`;
       })();
   const rel = st.q.cte(node, pathColumns(layout));
   return toPathStream(withoutCarried(carryOf(st)), rel, layout);

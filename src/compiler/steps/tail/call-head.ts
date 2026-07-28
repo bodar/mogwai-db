@@ -44,7 +44,7 @@ export function buildCallHead(parent: ElementStream, scope: CompileScope, inject
   const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
   const payload = elem === 'edge'
     ? q`${extId} AS id, ${l.c.name} AS label, ${extIdOf(n.c.src)} AS src, ${extIdOf(n.c.tgt)} AS tgt, ${framedProps(n, 'edge')} AS props`
-    : q`${extId} AS id, ${l.c.name} AS label, ${framedProps(n, 'node')} AS props`;
+    : q`${extId} AS id, ${l.c.name} AS label, ${framedProps(n, 'vertex')} AS props`;
   const elemJoin = q`${d} JOIN ${n} ON ${n.c.id}=${d.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
 
   const ord = pushed.frame.ordinal;
@@ -56,6 +56,6 @@ export function buildCallHead(parent: ElementStream, scope: CompileScope, inject
     injJoin = q` LEFT JOIN ${s} ON ${s.c[ord]}=${d.c[ord]}`;
   }
   const sql = q`SELECT ${payload}, ${d.c[ord]} AS o, ${injCol} FROM ${elemJoin}${injJoin}`;
-  const head = materializeRoot(parent.q, sql, { kind: elem === 'edge' ? 'edge' : 'vertex' });
+  const head = materializeRoot(parent.q, sql, { kind: elem });
   return { head, frame: pushed.frame };
 }

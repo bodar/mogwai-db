@@ -251,7 +251,7 @@ function applyPattern(st: ElementStream, p: Extract<Pattern, { kind: 'bind' }>, 
 }
 
 export const match: StepFn = (s, st) => {
-  if (st.elem !== 'node') throw new Error('match() on edges not yet supported');
+  if (st.elem !== 'vertex') throw new Error('match() on edges not yet supported');
   if (st.carried.path) throw new Error('path tracking through match() not yet supported');
   const patArgs = s.args.filter(isNested);
   if (!patArgs.length) throw new Error('match() needs at least one pattern');
@@ -273,7 +273,7 @@ export const match: StepFn = (s, st) => {
   const root: string | undefined = roots[0];
 
   const aliases = new Map(st.carried.aliases);
-  // `shape` is what the var actually holds — recorded rather than assumed 'node', so a later
+  // `shape` is what the var actually holds — recorded rather than assumed 'vertex', so a later
   // pattern starting from it re-roots with the right elem and a re-bind can be shape-checked.
   const bind = (v: string, shape: AliasShape): string => {
     let e = aliases.get(v);
@@ -286,7 +286,7 @@ export const match: StepFn = (s, st) => {
   // TRAVERSER_LABEL when they do not — either way `restoreId` reads an alias column, which is the
   // only thing a scalar-ending pattern body carries through (see IdSource).
   const prev0 = prevRel(st, 'p');
-  const idCol = bind(root ?? TRAVERSER_LABEL, 'node');
+  const idCol = bind(root ?? TRAVERSER_LABEL, 'vertex');
   const restoreId: IdSource = (f) => aliasId(f.c[idCol], 'last');
   const seedProj: Expression[] = [q`${prev0.c.id}`, ...aliasColsOf(st.carried.aliases).map((c) => q`${prev0.c[c]}`),
     q`${aliasSeed(nodeEntry(prev0.c.id))} AS ${idCol}`];

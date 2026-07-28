@@ -76,7 +76,7 @@ export interface KeyedRelation {
  * why each exclusion is a wall rather than a gap.
  *
  * `landOn` constrains the element the body must end on (a walk id is a vertex rowid, so
- * `repeat()` passes 'node'); omit it when the consumer only cares that rows exist.
+ * `repeat()` passes 'vertex'); omit it when the consumer only cares that rows exist.
  */
 export function keyedChildRelation(
   st: ElementStream,
@@ -95,7 +95,7 @@ export function keyedChildRelation(
   // must match carriedCols (aliases, sack, bulk, origins, …) or assertStreamColumns trips.
   const seedCarried: Carried = { aliases: new Map(), origins: ['o'], bulk: 'bulk' };
   const seed: ElementStream = {
-    kind: 'elements', q: st.q, params: st.params, elem: 'node',
+    kind: 'elements', q: st.q, params: st.params, elem: 'vertex',
     rel: st.q.cte(q`SELECT id, 1 AS bulk, id AS o FROM ${nodes}`, ['id', 'bulk', 'o']),
     carried: seedCarried,
   };

@@ -59,8 +59,8 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
       'variant stream column mismatch',
     );
     const propertyCols = ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pvtype', 'pmeta'];
-    expect(toPropertyStream(carry, q.cte({} as any, propertyCols), 'node').kind).toBe('property');
-    expect(() => toPropertyStream(carry, q.cte({} as any, propertyCols.slice(1)), 'node')).toThrow(
+    expect(toPropertyStream(carry, q.cte({} as any, propertyCols), 'vertex').kind).toBe('property');
+    expect(() => toPropertyStream(carry, q.cte({} as any, propertyCols.slice(1)), 'vertex')).toThrow(
       'property stream column mismatch',
     );
     const fields = [{ key: 'x', prefix: 'e0', sub: 'vertex' as const }];
@@ -109,7 +109,7 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
   test('child scope retains a parent domain and pushes/pops one physical ordinal', () => {
     const q = new Query();
     const parent = {
-      kind: 'elements' as const, elem: 'node' as const, q, params: {},
+      kind: 'elements' as const, elem: 'vertex' as const, q, params: {},
       rel: q.cte({} as any, ['id']), carried: { aliases: new Map(), origins: [] as string[] },
     };
     const { frame, scope, seed } = pushChildScope(parent);

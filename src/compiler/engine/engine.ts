@@ -183,7 +183,7 @@ export class LoweringEngine implements Engine {
    *  extra `p0` column). */
   private seedSource(first: PStep, params: Record<string, any>, trackPath: boolean, sackInit?: SackSpec, wantsEncounter = false): ElementStream {
     const query = this.q;
-    const elem: Elem = first.name === 'E' ? 'edge' : 'node';
+    const elem: Elem = first.name === 'E' ? 'edge' : 'vertex';
     const srcRel = elem === 'edge' ? edges : nodes;
     // The source projection, assembled in carriedCols order (sack, bulk, encounter, path) so the
     // physical SELECT matches the declared column list exactly. withSack() seeds the sack
@@ -437,7 +437,7 @@ export class LoweringEngine implements Engine {
         // the pre-object behavior where the resume carry carried no fastPaths).
         const eng = this.child(params, bp.restSteps);
         const carry: Carry = { q: eng.q, params, carried: { aliases: new Map(), origins: [] } };
-        const elem = foreign[0]?.kind === 'edge' ? 'edge' : 'node';
+        const elem: Elem = foreign[0]?.kind ?? 'vertex';
         const seed = landForeignElements(carry, foreign, elem);
         return { kind: 'sql', compiled: materializeFinal(eng.lowerStepsStrict(seed, bp.restSteps, bp.restAt)) };
       },

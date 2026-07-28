@@ -72,11 +72,11 @@ function pathAppend(st: ElementStream, newElem: Elem): { frag: (idExpr: Expressi
 
 /** out()/in()/both(): vertex → neighbour vertices over the (from,to) edge pairs. */
 export const move: StepFn = (s, st) => {
-  if (st.elem !== 'node') throw new Error(`${s.name}() expects a vertex, not an ${st.elem}`);
+  if (st.elem !== 'vertex') throw new Error(`${s.name}() expects a vertex, not an ${st.elem}`);
   const e = edges.as('e');
   const p = prevRel(st, 'p');
   const cf = carryFrag(st.carried, p);
-  const pa = pathAppend(st, 'node');
+  const pa = pathAppend(st, 'vertex');
   const selects = dirsFor(s.name).map(([from, to]) =>
     q`SELECT ${e.c[to]} AS id${cf}${pa.frag(e.c[to])} FROM ${e} JOIN ${p} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(s.args)}`);
   return finishMove(st, list(selects, ' UNION ALL '), pa.opts);
@@ -86,7 +86,7 @@ export const move: StepFn = (s, st) => {
  *  the entering vertex (`p.id`) in a carried `fv` column so a following otherV() knows
  *  which end to skip; bothE's two UNION branches both entered from `p.id`. */
 export const toEdge: StepFn = (s, st) => {
-  if (st.elem !== 'node') throw new Error(`${s.name}() expects a vertex, not an ${st.elem}`);
+  if (st.elem !== 'vertex') throw new Error(`${s.name}() expects a vertex, not an ${st.elem}`);
   const froms = s.name === 'outE' ? ['src'] : s.name === 'inE' ? ['tgt'] : ['src', 'tgt'];
   const e = edges.as('e');
   const p = prevRel(st, 'p');
@@ -108,10 +108,10 @@ export const toVertex: StepFn = (s, st) => {
   const e = edges.as('e');
   const p = prevRel(st, 'p');
   const cf = carryFrag({ ...st.carried, fromV: undefined }, p); // fv is dropped at the vertex
-  const pa = pathAppend(st, 'node');
+  const pa = pathAppend(st, 'vertex');
   const selects = cols.map((col) =>
     q`SELECT ${e.c[col]} AS id${cf}${pa.frag(e.c[col])} FROM ${e} JOIN ${p} ON ${e.c.id}=${p.c.id}`);
-  return finishMove(st, list(selects, ' UNION ALL '), { elem: 'node', fromV: null, ...pa.opts });
+  return finishMove(st, list(selects, ' UNION ALL '), { elem: 'vertex', fromV: null, ...pa.opts });
 };
 
 /** otherV(): edge → the endpoint that ISN'T the one the traverser was on before the
@@ -125,9 +125,9 @@ export const otherV: StepFn = (s, st) => {
   const fv = p.c[st.carried.fromV];
   const cf = carryFrag({ ...st.carried, fromV: undefined }, p); // fv is consumed here
   const other = q`CASE WHEN ${e.c.src}=${fv} THEN ${e.c.tgt} ELSE ${e.c.src} END`;
-  const pa = pathAppend(st, 'node');
+  const pa = pathAppend(st, 'vertex');
   const body = q`SELECT ${other} AS id${cf}${pa.frag(other)} FROM ${e} JOIN ${p} ON ${e.c.id}=${p.c.id}`;
-  return advance(st, body, { elem: 'node', fromV: null, ...pa.opts });
+  return advance(st, body, { elem: 'vertex', fromV: null, ...pa.opts });
 };
 
 /** V()/E() MID-TRAVERSAL: re-source the graph, discarding the current element.

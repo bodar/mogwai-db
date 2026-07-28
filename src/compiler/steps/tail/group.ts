@@ -77,7 +77,7 @@ export function elementGroupSource(st: ElementStream, productiveBy?: boolean): G
   return {
     from: q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`,
     ctx: elemCtx(n, st.elem),
-    elem: st.elem === 'edge' ? 'edge' : 'vertex',
+    elem: st.elem,
     parent: st,
     productiveBy,
     bulk: st.carried.bulk ? p.c[st.carried.bulk] : undefined,
@@ -366,7 +366,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     joins.push(q` LEFT JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]} LEFT JOIN ${e} ON ${e.c.id}=${c.c.id}`);
     valMarker = c.c.id;
     valOrder = q`${p.c[outer.frame.ordinal]}, ${c.c.id}`;
-    valElement = { elem: rows.stream.elem === 'edge' ? 'edge' : 'vertex', ctx: elemCtx(e, rows.stream.elem) };
+    valElement = { elem: rows.stream.elem, ctx: elemCtx(e, rows.stream.elem) };
   }
   let valNestedMap: GroupSource['valNestedMap'];
   if (genericGroupVal) {
@@ -415,7 +415,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   return {
     from: q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}${list(joins, '')}`,
     ctx: elemCtx(n, parent.elem),
-    elem: parent.elem === 'edge' ? 'edge' : 'vertex',
+    elem: parent.elem,
     ...common,
   };
 }
@@ -686,7 +686,11 @@ function deriveGroupMap(s: GroupStream): { rel: Relation; keyOf: MapOf; valOf: M
   }
   else if (s.key.kind === 'element') {
     keyNode = g.c.k_rid; groupKey = g.c.k_rid;
-    keyOf = { kind: 'elem', elem: s.key.elem === 'edge' ? 'edge' : 'node' };
+    // ElemShape is Elem + 'property', and a property key has no rowid to rejoin on. The ternary
+    // this replaces collapsed it to a vertex silently; unreachable today (no producer mints a
+    // property group key) but the type permits it, so it fails closed like its value-side twin.
+    if (s.key.elem === 'property') throw new Error('select(Column)/unfold() over a group of property-element keys not yet supported');
+    keyOf = { kind: 'elem', elem: s.key.elem };
   } else throw new Error('select(Column)/unfold() over a composite project() group key not yet supported');
   const where = s.key.kind === 'scalar' && !s.key.productive ? q` WHERE ${g.c.gk} IS NOT NULL` : empty;
 
@@ -696,7 +700,7 @@ function deriveGroupMap(s: GroupStream): { rel: Relation; keyOf: MapOf; valOf: M
   let valNode: Expression, valOf: MapOf;
   if (s.val.kind === 'elementList') {
     if (s.val.elem === 'property') throw new Error('select(Column)/unfold() over a group of property-element values not yet supported');
-    const elem = s.val.elem === 'edge' ? 'edge' : 'node';
+    const elem = s.val.elem; // narrowed to Elem by the property guard above
     valNode = q`jsonb(COALESCE(json_group_array(${g.c.v_rid}) FILTER (WHERE ${g.c.v_rid} IS NOT NULL), json('[]')))`;
     valOf = { kind: 'list', of: { kind: 'elem', elem } };
   } else if (s.val.kind === 'elementLast') {
@@ -801,8 +805,8 @@ function propertyScalar(s: PropertyStream, col: 'vpid' | 'pk' | 'pv'): ScalarStr
  * property is uniquely identified by its vpid; an edge Property has no id, so its full
  * (owner,key,type,value) tuple is the stable key. Shared by dedup (survivor selection) and
  * order (encounter tie-break) so "which row wins" is consistent across both. */
-const propertyTieBreak = (p: Relation, ownerElem: 'node' | 'edge'): Expression[] =>
-  ownerElem === 'node'
+const propertyTieBreak = (p: Relation, ownerElem: 'vertex' | 'edge'): Expression[] =>
+  ownerElem === 'vertex'
     ? [q`${p.c.vpid} ASC`]
     : [q`${p.c.owner} ASC`, q`${p.c.pk} ASC`, q`${p.c.pvtype} ASC`, q`${p.c.pv} ASC`];
 
@@ -819,7 +823,7 @@ function propertyDedup(s: PropertyStream, step: PStep): PropertyStream {
   const by = bys[0]?.[0];
   let key: Expression;
   if (by === undefined) {
-    key = s.ownerElem === 'node' ? q`p.vpid` : q`p.pk, p.pv`;
+    key = s.ownerElem === 'vertex' ? q`p.vpid` : q`p.pk, p.pv`;
   } else if (by && typeof by === 'object' && 'token' in by && by.token === 'value') {
     key = q`p.pv`;
   } else {
@@ -892,7 +896,7 @@ function propertyOrder(s: PropertyStream, step: PStep): PropertyStream {
     ? [q`${p.c.pk}${suffix}`]
     : token === 'value'
       ? [q`${valueKey}${suffix}`]
-      : s.ownerElem === 'node'
+      : s.ownerElem === 'vertex'
         ? [q`${p.c.vpid}${suffix}`]
         : [q`${p.c.pk}${suffix}`, q`${valueKey}${suffix}`];
   const orderKey = list([...primary, ...propertyTieBreak(p, s.ownerElem)], ', ');

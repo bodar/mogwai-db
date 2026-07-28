@@ -1,6 +1,6 @@
 import type { GraphStore } from '../../../storage.ts';
 import { q, value, list, empty, raw, render, type Expression } from '../../../sql/kernel/q.ts';
-import { labelIn, nodeHasProp, edgeHasProp } from '../../plan/plan.ts';
+import { labelIn, nodeHasProp, edgeHasProp, sqlElem, type Elem } from '../../plan/plan.ts';
 import { gremlinTypeOf, isCollectionType, storedScalar, flatType, mapEntryType, valueNodeOf, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
 import { stepChain, isNested, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
@@ -51,7 +51,7 @@ function constFromNested(nested: any, sideEffects: Map<string, any> | undefined,
 // Compile a nested traversal (optionally seeded at a driver element) and run it against
 // the store, returning its raw result rows + the compiled shape. Seeding prepends a
 // V/E source on the driver's internal rowid so the child is anchored at that element.
-function runNested(engine: Engine, store: GraphStore, nestedNode: any, params: Record<string, any>, seed?: { id: number; elem: 'node' | 'edge' }): { rows: any[]; shape: Shape } {
+function runNested(engine: Engine, store: GraphStore, nestedNode: any, params: Record<string, any>, seed?: { id: number; elem: Elem }): { rows: any[]; shape: Shape } {
   let chain: PStep[] = normalize(stepChain(nestedNode, params)).steps;
   // Seed at the driver element: a synthetic V/E source on the internal rowid (numeric
   // arg → rowid match). It borrows the nested node's parse ctx (no ctx of its own).
@@ -68,7 +68,7 @@ function runNested(engine: Engine, store: GraphStore, nestedNode: any, params: R
 // value (single-cardinality write), or has:false for an empty traversal (→ no property).
 // The stored vtype comes from the read spine's own type (count→long, a typed value→its
 // `as`), else null → inferred from the value. Fails closed on a non-scalar result shape.
-function nestedScalar(engine: Engine, store: GraphStore, nestedNode: any, params: Record<string, any>, seed?: { id: number; elem: 'node' | 'edge' }): { has: boolean; value: any; vtype: CanonicalType | null } {
+function nestedScalar(engine: Engine, store: GraphStore, nestedNode: any, params: Record<string, any>, seed?: { id: number; elem: Elem }): { has: boolean; value: any; vtype: CanonicalType | null } {
   const { rows, shape } = runNested(engine, store, nestedNode, params, seed);
   if (shape.kind !== 'value' && shape.kind !== 'scalar')
     throw new Error(`property() traversal value producing a ${shape.kind} not yet supported`);
@@ -85,7 +85,7 @@ function nestedScalar(engine: Engine, store: GraphStore, nestedNode: any, params
 // empty nested traversal → has:false. vtype from the read shape, else inferred from the
 // produced value (the honest fallback for an untyped channel). Reused by property values
 // (resolveSpecValue), addV labels (insertVertex), and merge map values (resolveMergeSpec).
-function nestedScalarValue(engine: Engine, store: GraphStore, nested: any, params: Record<string, any>, seed?: { id: number; elem: 'node' | 'edge' }, sideEffects?: Map<string, any>): { has: boolean; value: any; vtype: CanonicalType | null } {
+function nestedScalarValue(engine: Engine, store: GraphStore, nested: any, params: Record<string, any>, seed?: { id: number; elem: Elem }, sideEffects?: Map<string, any>): { has: boolean; value: any; vtype: CanonicalType | null } {
   const c = constFromNested(nested, sideEffects, params);
   if (c.has) return c;
   const r = nestedScalar(engine, store, nested.nested, params, seed);
@@ -94,7 +94,7 @@ function nestedScalarValue(engine: Engine, store: GraphStore, nested: any, param
 
 // Resolve a PropSpec's value for one target element: a literal passes through with its
 // captured vtype; a nested traversal is evaluated correlated at the element.
-function resolveSpecValue(engine: Engine, store: GraphStore, sp: PropSpec, id: number, elem: 'node' | 'edge', params: Record<string, any>, sideEffects?: Map<string, any>): { has: boolean; value: any; vtype: CanonicalType | null; typeNode: TypeNode | null } {
+function resolveSpecValue(engine: Engine, store: GraphStore, sp: PropSpec, id: number, elem: Elem, params: Record<string, any>, sideEffects?: Map<string, any>): { has: boolean; value: any; vtype: CanonicalType | null; typeNode: TypeNode | null } {
   // A literal keeps its full typeNode (collection element/key fidelity); a nested traversal
   // resolves to a SCALAR (nested collection values are deferred), so its scalar vtype IS a
   // valid TypeNode (a bare CanonicalType), used directly as typeNode.
@@ -139,7 +139,7 @@ function compileDrop(engine: Engine, steps: PStep[]): WritePlan {
         // FTS rows for both the incident edges and this vertex's own props go with them.
         const incidentEdges = store.query<{ id: number }>(`SELECT id FROM edges WHERE src IN (${ph}) OR tgt IN (${ph})`, [...ids, ...ids]).map((r) => r.id);
         deleteFtsForOwners(store, 'edge', incidentEdges);
-        deleteFtsForOwners(store, 'node', ids);
+        deleteFtsForOwners(store, sqlElem('vertex'), ids);
         store.query(`DELETE FROM edge_properties WHERE edge IN (SELECT id FROM edges WHERE src IN (${ph}) OR tgt IN (${ph}))`, [...ids, ...ids]);
         store.query(`DELETE FROM edges WHERE src IN (${ph}) OR tgt IN (${ph})`, [...ids, ...ids]);
         store.query(`DELETE FROM vertex_properties WHERE node IN (${ph})`, ids);
@@ -201,7 +201,7 @@ function compileSetProperty(engine: Engine, steps: PStep[], params: Record<strin
     kind: 'write',
     run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
       for (const sp of specs) {
-        const r = resolveSpecValue(engine, store, sp, id, 'node', params, sideEffects);
+        const r = resolveSpecValue(engine, store, sp, id, 'vertex', params, sideEffects);
         if (r.has) applyVertexProperty(store, id, sp.key, r.value, r.vtype, sp.meta, sp.cardinality, r.typeNode);
       }
       const cur = store.query<any>(readCur, [id])[0];
@@ -349,7 +349,7 @@ export function applyVertexProperty(
   if (cardinality === 'single') {
     // single = replace all rows for the key: drop their FTS rows too, then the rows.
     for (const r of store.query<{ id: number }>('SELECT id FROM vertex_properties WHERE node=? AND key=?', [node, key]))
-      deleteFtsFor(store, 'node', r.id);
+      deleteFtsFor(store, sqlElem('vertex'), r.id);
     store.query('DELETE FROM vertex_properties WHERE node=? AND key=?', [node, key]);
   }
   if (cardinality === 'set') {
@@ -364,7 +364,7 @@ export function applyVertexProperty(
     `INSERT INTO vertex_properties(node, key, value, vtype, meta) VALUES(?, ?, ${valPh}, ?, ${metaJson === null ? 'NULL' : 'jsonb(?)'}) RETURNING id`,
     metaJson === null ? [node, key, storedVal, vtype] : [node, key, storedVal, vtype, metaJson],
   )[0];
-  indexProperty(store, 'node', id, node, key, val, typeNode);
+  indexProperty(store, sqlElem('vertex'), id, node, key, val, typeNode);
 }
 
 // Set ONE edge property (single cardinality — edge Property has no meta/multi). One
@@ -432,7 +432,7 @@ function insertVertex(engine: Engine, store: GraphStore, spec: VertexSpec, param
   } else label = spec.label;
   const row = insertRow(store, 'nodes', ['label'], [store.labelId(label)], spec.uid);
   for (const p of spec.props) {
-    const r = resolveSpecValue(engine, store, p, row.id, 'node', params, sideEffects);
+    const r = resolveSpecValue(engine, store, p, row.id, 'vertex', params, sideEffects);
     if (r.has) applyVertexProperty(store, row.id, p.key, r.value, r.vtype, p.meta, p.cardinality, r.typeNode);
   }
   return { ...row, label };
@@ -684,7 +684,7 @@ function normalizeMergeMap(raw: any, typeNode: TypeNode | null, sideEffects?: Ma
 // A non-nested spec passes through unchanged (the constant case stays bit-identical, so
 // mergeMatchQuery renders the same SQL+binds it did at compile time). Fails closed on a
 // nested map value that produces nothing (a match/create value must exist).
-function resolveMergeSpec(engine: Engine, store: GraphStore, spec: MergeSpec, seed: { id: number; elem: 'node' | 'edge' } | undefined, params: Record<string, any>, sideEffects?: Map<string, any>): MergeSpec {
+function resolveMergeSpec(engine: Engine, store: GraphStore, spec: MergeSpec, seed: { id: number; elem: Elem } | undefined, params: Record<string, any>, sideEffects?: Map<string, any>): MergeSpec {
   // Resolve one value to {value, vtype}: a literal keeps its captured propType; a nested
   // traversal resolves correlated at the seed and carries the read shape's vtype.
   const rv = (v: any, propKey: string | null, what: string): { value: any; typeNode: TypeNode | null } => {
@@ -709,18 +709,18 @@ function resolveMergeSpec(engine: Engine, store: GraphStore, spec: MergeSpec, se
 
 // The label / id-or-uid / per-prop equality conditions shared by the vertex and
 // edge merge-match queries.
-function commonMergeConds(spec: MergeSpec, elem: 'node' | 'edge'): Expression[] {
+function commonMergeConds(spec: MergeSpec, elem: Elem): Expression[] {
   const conds: Expression[] = [];
   if (spec.label != null) conds.push(labelIn('label', [spec.label]));
   if (spec.id != null) conds.push(typeof spec.id === 'number' ? q`id=${value(spec.id)}` : q`uid=${value(spec.id)}`);
   for (const [k, v] of Object.entries(spec.props))
     // An ANY-match EXISTS over the element's normalized properties table.
-    conds.push(elem === 'node' ? nodeHasProp(raw('nodes.id'), k, v) : edgeHasProp(raw('edges.id'), k, v));
+    conds.push(elem === 'vertex' ? nodeHasProp(raw('nodes.id'), k, v) : edgeHasProp(raw('edges.id'), k, v));
   return conds;
 }
 
 function mergeMatchQuery(spec: MergeSpec): { sql: string; binds: any[] } {
-  const conds = commonMergeConds(spec, 'node');
+  const conds = commonMergeConds(spec, 'vertex');
   const where = conds.length ? list(conds, ' AND ') : q`1`;
   return render(q`SELECT id, uid, (SELECT name FROM labels WHERE id=nodes.label) AS label FROM nodes WHERE ${where}`);
 }
@@ -766,7 +766,7 @@ function compileMergeV(engine: Engine, steps: PStep[], params: Record<string, an
         // The merge map (match + onCreate/onMatch) is completed per incoming traverser:
         // resolve nested values seeded at the driver, then build the match query from the
         // resolved spec. A constant spec resolves to itself → identical SQL each iteration.
-        const seed = driver != null ? { id: driver, elem: 'node' as const } : undefined;
+        const seed = driver != null ? { id: driver, elem: 'vertex' as const } : undefined;
         const matchSpec = resolveMergeSpec(engine, store, matchSpecRaw, seed, params, sideEffects);
         const oc = onCreate ? resolveMergeSpec(engine, store, onCreate, seed, params, sideEffects) : null;
         const om = onMatch ? resolveMergeSpec(engine, store, onMatch, seed, params, sideEffects) : null;
@@ -824,7 +824,7 @@ function compileMergeE(engine: Engine, steps: PStep[], params: Record<string, an
       for (const cur of drivers(store)) {
         // Complete the merge map per incoming traverser (nested values seeded at cur),
         // then build the match query from the resolved spec.
-        const seed = cur != null ? { id: cur, elem: 'node' as const } : undefined;
+        const seed = cur != null ? { id: cur, elem: 'vertex' as const } : undefined;
         const matchSpec = resolveMergeSpec(engine, store, matchSpecRaw, seed, params, sideEffects);
         const oc = onCreate ? resolveMergeSpec(engine, store, onCreate, seed, params, sideEffects) : null;
         const om = onMatch ? resolveMergeSpec(engine, store, onMatch, seed, params, sideEffects) : null;

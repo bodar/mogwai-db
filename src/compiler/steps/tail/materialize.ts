@@ -59,7 +59,7 @@ export function materializeVariantRoot(stream: VariantStream): Compiled {
     const l = labels.as('l');
     const idParts = [n && q`WHEN 2 THEN COALESCE(${n.c.uid}, ${n.c.id})`, e && q`WHEN 3 THEN COALESCE(${e.c.uid}, ${e.c.id})`].filter(Boolean) as Expression[];
     const labelParts = [n && q`WHEN 2 THEN ${l.c.name}`, e && q`WHEN 3 THEN ${l.c.name}`].filter(Boolean) as Expression[];
-    const propParts = [n && q`WHEN 2 THEN json(${framedProps(n, 'node')})`, e && q`WHEN 3 THEN json(${framedProps(e, 'edge')})`].filter(Boolean) as Expression[];
+    const propParts = [n && q`WHEN 2 THEN json(${framedProps(n, 'vertex')})`, e && q`WHEN 3 THEN json(${framedProps(e, 'edge')})`].filter(Boolean) as Expression[];
     cols.push(q`CASE ${v.c.vk} ${list(idParts, ' ')} END AS id`);
     cols.push(q`CASE ${v.c.vk} ${list(labelParts, ' ')} END AS label`);
     cols.push(q`CASE ${v.c.vk} ${list(propParts, ' ')} END AS props`);
@@ -76,7 +76,7 @@ export function materializeVariantRoot(stream: VariantStream): Compiled {
 /** Turn a JSON list of internal element rowids into an ordered JSON array carrying
  * the complete public element payload. The raw relational list remains rowids for
  * downstream unfold; only the root wire projection expands it. */
-function elementListResult(listExpr: Expression, elem: 'node' | 'edge'): Expression {
+function elementListResult(listExpr: Expression, elem: 'vertex' | 'edge'): Expression {
   const n = (elem === 'edge' ? edges : nodes).as('n');
   const l = labels.as('l');
   const object = elem === 'edge'
@@ -115,7 +115,7 @@ export function materializeListRoot(stream: ListStream): Compiled {
     return materializeRoot(
       stream.q,
       q`SELECT ${elementListResult(c.c.list, elem)} AS list FROM ${c}`,
-      { kind: 'jsonbElementList', elem: elem === 'edge' ? 'edge' : 'vertex' },
+      { kind: 'jsonbElementList', elem },
     );
   }
   // A nested list whose leaf is an element list (e.g. a terminal select(Column.values)
@@ -137,7 +137,7 @@ export function materializeListRoot(stream: ListStream): Compiled {
  * payload (id/label/props[/src/tgt]) — the single-value twin of elementListResult, for a
  * Map.Entry key/value that holds an element. json_object over a correlated join to
  * nodes/edges + labels; NULL rowid → SQL NULL (framed as a null value). */
-function elementValueResult(ridExpr: Expression, elem: 'node' | 'edge'): Expression {
+function elementValueResult(ridExpr: Expression, elem: 'vertex' | 'edge'): Expression {
   const n = (elem === 'edge' ? edges : nodes).as('en');
   const l = labels.as('el');
   const object = elem === 'edge'
@@ -239,7 +239,7 @@ export function materializeForeignRoot(stream: ForeignStream): Compiled {
   const cols: Expression[] = [q`${p.c.fid} AS id`, q`${p.c.flabel} AS label`];
   if (stream.elem === 'edge') cols.push(q`${p.c.fsrc} AS src`, q`${p.c.ftgt} AS tgt`);
   cols.push(q`json(${p.c.fprops}) AS props`);
-  return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${p}`, { kind: stream.elem === 'edge' ? 'edge' : 'vertex' });
+  return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${p}`, { kind: stream.elem });
 }
 
 /** The single terminal dispatch for every fully-typed relational stream. ElementStream

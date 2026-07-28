@@ -29,7 +29,7 @@ import { type PStep } from '../ir/strategies.ts';
  */
 export function lowerReSource(s: ScalarStream | ElementStream, step: PStep): ElementStream | null {
   if (s.carried.path || s.carried.sack || s.carried.fromV) return null;
-  const elem: 'node' | 'edge' = step.name === 'E' ? 'edge' : 'node';
+  const elem: 'vertex' | 'edge' = step.name === 'E' ? 'edge' : 'vertex';
   const n = (elem === 'edge' ? edges : nodes).as('n');
   const p = s.rel.as('p');
   const cols = carriedCols(s.carried);

@@ -50,7 +50,7 @@ function currentEntry(s: Exclude<Stream, { kind: 'result' }>, p: any): { entry: 
     case 'variant': {
       // 0=null / 1=scalar / 2=node / 3=edge / 4=list (per-row tag)
       const arms: Expression[] = [];
-      if (s.node) arms.push(q`WHEN 2 THEN ${elemEntry('node', p.c.rid)}`);
+      if (s.node) arms.push(q`WHEN 2 THEN ${elemEntry('vertex', p.c.rid)}`);
       if (s.edge) arms.push(q`WHEN 3 THEN ${elemEntry('edge', p.c.rid)}`);
       if (s.listOf) arms.push(q`WHEN 4 THEN ${aliasEntry('list', p.c.list)}`);
       return {
@@ -121,7 +121,7 @@ export function emptyElementLike(s: Carry): ElementStream {
   const rel = s.q.cte(q`SELECT 1 AS id${nulls} WHERE 0`, ['id', ...cols]);
   return {
     q: s.q, params: s.params, sideEffects: s.sideEffects,
-    carried: s.carried, kind: 'elements', rel, elem: 'node',
+    carried: s.carried, kind: 'elements', rel, elem: 'vertex',
   };
 }
 
@@ -216,7 +216,7 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
     if (entry.shapes.size !== 1) throw new Error('select(Pop.all/mixed) over a mixed-shape label history not yet supported');
     const shape = [...entry.shapes][0] as AliasShape;
     const of: ListOf = shape === 'value' ? { kind: 'scalar', as: entry.as }
-      : (shape === 'node' || shape === 'edge') ? { kind: 'elem', elem: shapeElem(shape) }
+      : (shape === 'vertex' || shape === 'edge') ? { kind: 'elem', elem: shapeElem(shape) }
       : (() => { throw new Error(`select(Pop.all) over a ${shape} label not yet supported`); })();
     const rel = s.q.cte(
       q`SELECT ${historyValues(col)} AS list${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,

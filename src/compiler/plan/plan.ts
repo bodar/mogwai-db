@@ -363,9 +363,9 @@ export const FtsSubstringFastPath: FastPath<[ScalarCtx, string, any], Expression
   name: 'ftsSubstringPredicate',
   equivalentWhen: 'test/L5-properties/differential.test.ts — the fast-path differential; has(k, >=3-char substring) via property_fts vs. the LIKE fallback, both sides generated either side of the 3-char boundary',
   appliesWhen: (ctx, scalarCtx, _key, pred) =>
-    ctx.enabled.ftsSubstringPredicate && (scalarCtx.elem === 'node' || scalarCtx.elem === 'edge') && ftsSubstringMatch(pred) !== null,
+    ctx.enabled.ftsSubstringPredicate && (scalarCtx.elem === 'vertex' || scalarCtx.elem === 'edge') && ftsSubstringMatch(pred) !== null,
   tryLower: (_ctx, scalarCtx, key, pred) =>
-    ftsSubstringExists(scalarCtx.elem as 'node' | 'edge', scalarCtx.idExpr, key, ftsSubstringMatch(pred)!),
+    ftsSubstringExists(sqlElem(scalarCtx.elem as Elem), scalarCtx.idExpr, key, ftsSubstringMatch(pred)!),
 };
 
 /** range(low, high) → SQL [offset, limit]. high < 0 means "no upper bound". */
@@ -378,7 +378,15 @@ export function rangeToOffsetLimit(args: any[]): { offset: number; limit: number
 /** Whether the current traverser's `id` column is a node id or an edge id. The
  *  id-relation is typed but the type is *static* — known from the step chain, so
  *  no runtime tag is needed. V()/out()/…V() → node; E()/…E() → edge. */
-export type Elem = 'node' | 'edge';
+export type Elem = 'vertex' | 'edge';
+
+/** The persisted `property_fts.owner_elem` spelling. The ONE place a compiler ElemKind becomes
+ *  the 'node' string, because that column holds real rows in a real Durable Object: renaming its
+ *  VALUES is a silent data-compatibility break (pre-existing rows say 'node', new code would
+ *  query 'vertex', and every TextP predicate would return [] with no error). Pinned by
+ *  test/fts-index.test.ts. The `nodes` TABLE and `vertex_properties.node` COLUMN are the same
+ *  rule at the schema level and likewise keep their names. */
+export const sqlElem = (e: Elem): 'node' | 'edge' => (e === 'edge' ? 'edge' : 'node');
 
 /** The (from,to) edge-column pairs a directional step walks: out→src/tgt,
  *  in→tgt/src, both→both. One place so the movement CTE and the correlated
@@ -392,7 +400,7 @@ export const dirsFor = (name: string): [string, string][] =>
  *  (aliased `n`). A nested by(__.…) compiles to a scalar expression correlated
  *  on these. Property context carries the json_each expansion's columns. */
 export interface ScalarCtx {
-  elem: 'node' | 'edge' | 'property';
+  elem: Elem | 'property';
   idExpr: Expression;        // n.id  (rowid — for correlated joins)
   extIdExpr?: Expression;    // COALESCE(n.uid, n.id) — the outward-facing id for framing
   // Both nodes AND edges now read props via idExpr into their normalized *_properties

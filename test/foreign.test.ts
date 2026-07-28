@@ -50,7 +50,7 @@ function landAndRun(rows: readonly ForeignRow[], elem: Elem, trailing = '') {
 
 describe('foreign element landing + root framing', () => {
   test('vertices land with id/label/props columns (no local join)', () => {
-    const { plan, rows } = landAndRun([vrow(1, 'person', { name: 'marko', age: 29 }), vrow(2, 'software', { name: 'lop' })], 'node');
+    const { plan, rows } = landAndRun([vrow(1, 'person', { name: 'marko', age: 29 }), vrow(2, 'software', { name: 'lop' })], 'vertex');
     expect(plan.shape.kind).toBe('vertex');
     expect(rows.map((r) => [r.id, r.label])).toEqual([['1', 'person'], ['2', 'software']]);
     // props is JSON text in the {key:[{t,v}]} shape rowVertex parses
@@ -65,35 +65,35 @@ describe('foreign element landing + root framing', () => {
   });
 
   test('empty landing yields zero rows, right shape', () => {
-    const { plan, rows } = landAndRun([], 'node');
+    const { plan, rows } = landAndRun([], 'vertex');
     expect(plan.shape.kind).toBe('vertex');
     expect(rows).toEqual([]);
   });
 
   test('string uid ids survive as-is', () => {
-    const { rows } = landAndRun([vrow('u-42', 'person')], 'node');
+    const { rows } = landAndRun([vrow('u-42', 'person')], 'vertex');
     expect(rows[0].id).toBe('u-42');
   });
 });
 
 describe('foreign read tail (no local join)', () => {
   test('id() reads the landed fid', () => {
-    const { rows } = landAndRun([vrow(1, 'person'), vrow(2, 'software')], 'node', '.id()');
+    const { rows } = landAndRun([vrow(1, 'person'), vrow(2, 'software')], 'vertex', '.id()');
     expect(rows.map((r) => r.v)).toEqual(['1', '2']);
   });
 
   test('label() reads the landed flabel', () => {
-    const { rows } = landAndRun([vrow(1, 'person'), vrow(2, 'software')], 'node', '.label()');
+    const { rows } = landAndRun([vrow(1, 'person'), vrow(2, 'software')], 'vertex', '.label()');
     expect(rows.map((r) => r.v)).toEqual(['person', 'software']);
   });
 
   test('values(k) reads straight from the landed props JSON', () => {
-    const { rows } = landAndRun([vrow(1, 'person', { name: 'marko', age: 29 })], 'node', ".values('name')");
+    const { rows } = landAndRun([vrow(1, 'person', { name: 'marko', age: 29 })], 'vertex', ".values('name')");
     expect(rows.map((r) => r.v)).toEqual(['marko']);
   });
 
   test('values() with no key returns all property values', () => {
-    const { rows } = landAndRun([vrow(1, 'person', { name: 'marko', age: 29 })], 'node', '.values()');
+    const { rows } = landAndRun([vrow(1, 'person', { name: 'marko', age: 29 })], 'vertex', '.values()');
     expect(rows.map((r) => r.v).sort()).toEqual([29, 'marko']);
   });
 
@@ -141,7 +141,7 @@ describe('Executor.raw — the internal raw-row transfer (no GraphBinary)', () =
 });
 
 describe('foreign element fails closed on local movement', () => {
-  const attempt = (trailing: string) => () => landAndRun([vrow(1, 'person')], 'node', trailing);
+  const attempt = (trailing: string) => () => landAndRun([vrow(1, 'person')], 'vertex', trailing);
   test('out() over a detached reference throws a clear deferral', () => {
     expect(attempt(".out('knows')")).toThrow(/detached federated element/);
   });

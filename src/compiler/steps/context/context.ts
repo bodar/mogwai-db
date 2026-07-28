@@ -46,13 +46,13 @@ export type AliasMap = ReadonlyMap<string, AliasEntry>;
 export function aliasElem(entry: AliasEntry): Elem {
   if (entry.shapes.size !== 1) throw new Error('alias with mixed-shape history has no single element kind');
   const [s] = entry.shapes;
-  if (s !== 'node' && s !== 'edge') throw new Error(`alias holds a ${s}, not an element`);
+  if (s !== 'vertex' && s !== 'edge') throw new Error(`alias holds a ${s}, not an element`);
   return s;
 }
 
 /** True iff every binding of the label is the same element kind (node XOR edge). */
 export const aliasIsElement = (entry: AliasEntry): boolean =>
-  entry.shapes.size === 1 && (entry.shapes.has('node') || entry.shapes.has('edge'));
+  entry.shapes.size === 1 && (entry.shapes.has('vertex') || entry.shapes.has('edge'));
 
 /** Merge a shape into a label's shape set (rebind may add a new shape). */
 export const withShape = (prev: ReadonlySet<AliasShape> | undefined, shape: AliasShape): Set<AliasShape> =>

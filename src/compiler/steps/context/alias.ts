@@ -16,14 +16,16 @@ import { type Elem } from '../../plan/plan.ts';
 //   k=3 list   {"k":3,"v":<json array>}
 //   k=4 map    {"k":4,"v":<json object>}
 
-export type AliasShape = 'node' | 'edge' | 'value' | 'list' | 'map' | 'property';
+export type AliasShape = 'vertex' | 'edge' | 'value' | 'list' | 'map' | 'property';
 
-const SHAPE_K: Record<AliasShape, number> = { node: 0, edge: 1, value: 2, list: 3, map: 4, property: 5 };
-const K_SHAPE: Record<number, AliasShape> = { 0: 'node', 1: 'edge', 2: 'value', 3: 'list', 4: 'map', 5: 'property' };
+const SHAPE_K: Record<AliasShape, number> = { vertex: 0, edge: 1, value: 2, list: 3, map: 4, property: 5 };
+const K_SHAPE: Record<number, AliasShape> = { 0: 'vertex', 1: 'edge', 2: 'value', 3: 'list', 4: 'map', 5: 'property' };
 
-export const elemShape = (elem: Elem): AliasShape => (elem === 'edge' ? 'edge' : 'node');
-export const shapeElem = (shape: AliasShape): Elem => (shape === 'edge' ? 'edge' : 'node');
-export const isElementShape = (shape: AliasShape): boolean => shape === 'node' || shape === 'edge';
+// Elem ⊂ AliasShape now that both spell an element the same way — these were two ternaries
+// bridging a gratuitous spelling difference.
+export const elemShape = (elem: Elem): AliasShape => elem;
+export const shapeElem = (shape: AliasShape): Elem => (shape === 'edge' ? 'edge' : 'vertex');
+export const isElementShape = (shape: AliasShape): boolean => shape === 'vertex' || shape === 'edge';
 
 /** One tagged history entry `jsonb_object('k',<k>,'v',<value>[,'t',<type>])`. An
  *  element entry's value is its rowid; a value entry may carry a ValueType tag `t`
@@ -36,7 +38,7 @@ export function aliasEntry(shape: AliasShape, valueExpr: Expression, typeTag?: s
   return q`jsonb_object('k', ${value(k)}, 'v', ${val}${t})`;
 }
 
-export const nodeEntry = (idExpr: Expression): Expression => aliasEntry('node', idExpr);
+export const nodeEntry = (idExpr: Expression): Expression => aliasEntry('vertex', idExpr);
 export const edgeEntry = (idExpr: Expression): Expression => aliasEntry('edge', idExpr);
 export const elemEntry = (elem: Elem, idExpr: Expression): Expression => aliasEntry(elemShape(elem), idExpr);
 

@@ -203,7 +203,7 @@ function tryBulkRepeat(engine: Engine, steps: PStep[], params: Record<string, an
   // The prefix must fold completely to a bare vertex id-relation. Anything else
   // (an unconsumed tail, an edge type, or live alias/path/sack) is not bulkable —
   // fall back rather than emit wrong SQL.
-  if (stop !== pre.length || st.elem !== 'node' || st.carried.aliases.size > 0 || st.carried.path || st.carried.sack) return null;
+  if (stop !== pre.length || st.elem !== 'vertex' || st.carried.aliases.size > 0 || st.carried.path || st.carried.sack) return null;
 
   // f0: the seed frontier, one row per distinct vertex carrying HOW MANY TRAVERSERS sit on it.
   //
@@ -238,7 +238,7 @@ function tryBulkRepeat(engine: Engine, steps: PStep[], params: Record<string, an
   // element terminal) folds over it exactly as over any other bulk-carrying stream, weighting
   // every reduction by SUM(bulk). No bulk arithmetic lives here — this is the fast MIDDLE only.
   const seed: ElementStream = {
-    kind: 'elements', q: query, params, rel: cur, elem: 'node',
+    kind: 'elements', q: query, params, rel: cur, elem: 'vertex',
     carried: { aliases: new Map(), origins: [], bulk: 'bulk' },
   };
   return materializeFinal(eng.lowerStepsStrict(seed, steps, plan.suffixAt));

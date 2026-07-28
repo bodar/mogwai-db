@@ -86,7 +86,7 @@ describe('movement / edge sources SQL', () => {
   });
 
   test('edge steps reject the wrong element kind', () => {
-    expect(() => compile('g.V().outV()', {})).toThrow('outV() expects an edge, not a node');
+    expect(() => compile('g.V().outV()', {})).toThrow('outV() expects an edge, not a vertex');
     expect(() => compile('g.E().out()', {})).toThrow('out() expects a vertex, not an edge');
     expect(() => compile('g.E().elementMap()', {})).toThrow('elementMap() on edges not yet supported');
   });

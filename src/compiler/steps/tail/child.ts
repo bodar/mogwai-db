@@ -316,7 +316,7 @@ export function resourceElement(seed: ScalarStream, head: PStep, after: PStep[])
  *  count", the substrate a bare `both().count()` child also is. tinker.degree.centrality is
  *  its first caller; it composes this from the service, keeping child-seam internals here. */
 export function scopedMovementCount(parent: ElementStream, scope: CompileScope, direction: 'out' | 'in' | 'both'): ScalarStream {
-  if (parent.elem !== 'node') throw new Error(`${direction}() degree expects a vertex input`);
+  if (parent.elem !== 'vertex') throw new Error(`${direction}() degree expects a vertex input`);
   const pushed = pushChildScope(parent, scope);
   // A synthetic movement step — the StepFn reads only name/args, never .ctx.
   const moveStep = { name: direction, args: [], ctx: null as any } as PStep;
@@ -478,7 +478,7 @@ function compileScalarChildRows(
     const elem = (end.elem === 'edge' ? edges : nodes).as('e');
     if (terminal.name === 'values') {
       const key = terminal.args[0];
-      if (end.elem === 'node') {
+      if (end.elem === 'vertex') {
         const vp = vertexProperties.as('vp');
         scalar = vp.c.value;
         from = q`${c} JOIN ${vp} ON ${vp.c.node}=${c.c.id} AND ${vp.c.key}=${value(key)}`;

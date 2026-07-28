@@ -159,3 +159,38 @@ describe('index is trigram-served', () => {
     expect(plan).toContain('VIRTUAL TABLE INDEX');
   });
 });
+
+// ---------- the persisted spelling is a DATA contract, not an internal name ----------
+
+describe('property_fts.owner_elem stores the SQL spelling, permanently', () => {
+  // `owner_elem` values live in a real table in a real Durable Object. The compiler's element
+  // vocabulary is 'vertex'|'edge'; this column's is 'node'|'edge', and it must STAY that way,
+  // because renaming it is a silent data-compatibility break rather than a test failure: new code
+  // would write and query 'vertex' while every pre-existing row still said 'node', so
+  // tinker.search and every TextP predicate would return [] against an existing graph with no
+  // error anywhere. The census cannot catch this — it seeds a fresh graph every run, so both
+  // sides of the mismatch would agree.
+  //
+  // Nothing here is about correctness of search; it is about the ONE seam where an internal
+  // rename must stop. If you are here because you renamed something and this went red, the fix is
+  // to route through `sqlElem()`, not to update the expectation.
+  test('a vertex property indexes as owner_elem="node", an edge property as "edge"', () => {
+    const store = freshStore([
+      "g.addV('person').property(T.id, 1).property('name', 'marko')",
+      "g.addV('person').property(T.id, 2).property('name', 'vadas')",
+      "g.V(1).addE('knows').to(__.V(2)).property('how', 'college')",
+    ]);
+    expect([...new Set(fts(store).map((r) => r.owner_elem))].sort()).toEqual(['edge', 'node']);
+  });
+
+  test('rows written earlier stay readable — the spelling is stable across writes', () => {
+    // The migration scenario in miniature: index a row, then index another, then read with the
+    // same predicate the compiler emits. A spelling drift between write and read shows up as the
+    // second query missing the first row.
+    const store = freshStore(["g.addV('person').property(T.id, 1).property('name', 'marko')"]);
+    const before = fts(store, "WHERE owner_elem='node'").length;
+    executeQuery(store, "g.addV('person').property(T.id, 2).property('name', 'markus')", {});
+    expect(fts(store, "WHERE owner_elem='node'").length).toBeGreaterThan(before);
+    expect(fts(store, "WHERE owner_elem='vertex'")).toEqual([]);
+  });
+});

@@ -1,6 +1,6 @@
 import { q, value, raw, type Relation } from '../../sql/kernel/q.ts';
 import { propertyFts, vertexProperties, edgeProperties, nodes, edges, labels } from '../../sql/schema.ts';
-import { storedValueExpr } from '../../compiler/plan/plan.ts';
+import { sqlElem, storedValueExpr, type Elem } from '../../compiler/plan/plan.ts';
 import { PROPERTY_PAYLOAD, toPropertyStream, type PropertyStream } from '../../compiler/steps/context/stream.ts';
 import type { Carried } from '../../compiler/steps/context/context.ts';
 import type { Service, ServiceCallCtx, CallParams } from '../spi/types.ts';
@@ -31,12 +31,12 @@ const TRIGRAM_FLOOR = 3;
 
 /** Search `type` → the owner_elem scope we search, or 'vertexproperty' (empty on the
  *  reference graphs). Default Vertex (matches TinkerGraph's reference impl). */
-function ownerScopeOf(params: CallParams): 'node' | 'edge' | 'vertexproperty' {
+function ownerScopeOf(params: CallParams): Elem | 'vertexproperty' {
   const t = params.type;
   const raw = (typeof t === 'string' ? t
     : t && typeof t === 'object' && 'elementName' in t ? String((t as { elementName: unknown }).elementName)
     : 'Vertex').toLowerCase();
-  if (raw === 'vertex') return 'node';
+  if (raw === 'vertex') return 'vertex';
   if (raw === 'edge') return 'edge';
   if (raw === 'vertexproperty') return 'vertexproperty';
   throw new Error(`tinker.search: unsupported type '${raw}' (expected Vertex, Edge, or VertexProperty)`);
@@ -58,7 +58,7 @@ function searchPattern(params: CallParams): string {
 
 /** The empty PropertyStream (type=VertexProperty, or a genuinely unmatched scope): a
  *  PROPERTY_PAYLOAD CTE with no rows. */
-function emptyProperties(ctx: ServiceCallCtx, ownerElem: 'node' | 'edge'): PropertyStream {
+function emptyProperties(ctx: ServiceCallCtx, ownerElem: Elem): PropertyStream {
   const carried: Carried = { aliases: new Map(), origins: [] };
   // The column names are the fixed PROPERTY_PAYLOAD list (SQL identifiers, never user data),
   // so a raw `NULL AS <col>` projection with a WHERE 0 guard yields the empty relation.
@@ -70,13 +70,13 @@ function emptyProperties(ctx: ServiceCallCtx, ownerElem: 'node' | 'edge'): Prope
 /** Build the matched-properties PropertyStream for a node/edge scope. Joins property_fts
  *  (kind='value', the searched scope, text LIKE %term%) back to the property table for the
  *  full payload (pk/pv/pvtype/meta) and to the owner + its label. */
-function searchProperties(ctx: ServiceCallCtx, ownerElem: 'node' | 'edge', pattern: string): PropertyStream {
+function searchProperties(ctx: ServiceCallCtx, ownerElem: Elem, pattern: string): PropertyStream {
   const carried: Carried = { aliases: new Map(), origins: [] };
   const f = propertyFts.as('f');
   const likeMatch = q`${f.c.text} LIKE ${value(pattern)} ESCAPE ${value('\\')}`;
-  const scope = q`${f.c.owner_elem}=${value(ownerElem)} AND ${f.c.kind}=${value('value')} AND ${likeMatch}`;
+  const scope = q`${f.c.owner_elem}=${value(sqlElem(ownerElem))} AND ${f.c.kind}=${value('value')} AND ${likeMatch}`;
   let body;
-  if (ownerElem === 'node') {
+  if (ownerElem === 'vertex') {
     const vp = vertexProperties.as('vp');
     const nd = nodes.as('n');
     const l = labels.as('l');
@@ -106,7 +106,7 @@ export const searchService: Service = {
       const pattern = searchPattern(c.params);
       // VertexProperty (meta-property) search is empty on the reference graphs — a static,
       // documented gap. Return an empty vertex-owner PropertyStream so .element() is empty.
-      if (scope === 'vertexproperty') return emptyProperties(c, 'node');
+      if (scope === 'vertexproperty') return emptyProperties(c, 'vertex');
       return searchProperties(c, scope, pattern);
     },
   }),

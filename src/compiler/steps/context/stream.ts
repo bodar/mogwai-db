@@ -9,7 +9,7 @@
 // compiling. Each arm shares `Carry` (context.ts) so a retype preserves the query
 // builder / params / aliases / path.
 //
-// CRITICAL: `ElementStream.elem` stays 'node'|'edge' only, and the 20+ movement/filter/branch
+// CRITICAL: `ElementStream.elem` stays 'vertex'|'edge' only, and the 20+ movement/filter/branch
 // StepFns only ever see `ElementStream`. The union lives at the ORCHESTRATION layer, never
 // inside a StepFn.
 

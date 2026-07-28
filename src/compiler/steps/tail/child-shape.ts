@@ -113,7 +113,7 @@ const NO_LABELS: LabelEnv = new Map();
 function entryShape(shapes: ReadonlySet<string>): ChildShape | null {
   if (shapes.size !== 1) return null; // a heterogeneous history has no single re-entry shape
   const [s] = shapes;
-  return s === 'node' || s === 'edge' ? 'element' : s === 'value' ? 'scalar' : s === 'list' ? 'list' : null;
+  return s === 'vertex' || s === 'edge' ? 'element' : s === 'value' ? 'scalar' : s === 'list' ? 'list' : null;
 }
 
 // Memoized per alias Map: classifiers run in tight cascades (every branch arm, every by()), and

@@ -26,7 +26,7 @@ const walkNodeCtx = (idExpr: Expression): ScalarCtx => {
   const sub = (col: string) => q`(SELECT ${col} FROM nodes WHERE id=${idExpr})`;
   // Node ctx: props are read from vertex_properties via idExpr (hasProp/scalarProp),
   // so no propsExpr (that's edge-only now).
-  return { elem: 'node', idExpr, extIdExpr: sub('COALESCE(uid, id)'), labelIdExpr: sub('label') };
+  return { elem: 'vertex', idExpr, extIdExpr: sub('COALESCE(uid, id)'), labelIdExpr: sub('label') };
 };
 
 
@@ -297,7 +297,7 @@ export const SingleHopOptionalFastPath: FastPath<[ElementStream, Step[]], Elemen
   equivalentWhen: 'test/L5-properties/differential.test.ts — the fast-path differential (this switch off vs. on, over the L1 corpus + generated traversals)',
   appliesWhen: (ctx, st, body) =>
     ctx.enabled.singleHopOptional && !st.carried.origins.length && !st.carried.path
-    && body.length === 1 && (body[0].name === 'out' || body[0].name === 'in') && st.elem === 'node',
+    && body.length === 1 && (body[0].name === 'out' || body[0].name === 'in') && st.elem === 'vertex',
   tryLower: (_ctx, st, body) => {
     const [from, to] = dirsFor(body[0].name)[0];
     const e = edges.as('e');
@@ -592,14 +592,14 @@ function dirCombos(moves: Step[]): [string, string][][] {
  *  Vertex→edge steps land ON the joined edge (so a following sack().by('weight') reads it);
  *  edge→vertex steps read the current edge's endpoint (no new join). `sackExpr` is null when
  *  the incoming stream has no sack and the body folds none. `finalElem` is the walk endpoint
- *  kind — always 'node' (the walk id is a vertex rowid; a body ending on an edge is rejected). */
+ *  kind — always 'vertex' (the walk id is a vertex rowid; a body ending on an edge is rejected). */
 function expandRepeatBody(
   self: Relation, core: Step[], sackCol: string | undefined,
 ): { finalId: Expression; from: Expression; conds: Expression[]; sackExpr: Expression | null; finalElem: Elem }[] {
   const moves = core.filter((c) => REPEAT_MOVE_ALL.has(c.name));
   return dirCombos(moves).map((dirs) => {
     let curId: Expression = self.c.id;
-    let curElem: Elem = 'node';
+    let curElem: Elem = 'vertex';
     let curEdge: Relation | null = null; // the edge alias we're currently ON (after a vertex→edge step)
     let sackExpr: Expression | null = sackCol ? self.c[sackCol] : null;
     const joins: Expression[] = [];
@@ -612,13 +612,13 @@ function expandRepeatBody(
         const e = edges.as(`re${mi}`);
         joins.push(q` JOIN ${e} ON ${e.c[from]}=${curId}${step.args.length ? q` AND ${labelIn(`${e.name}.label`, step.args)}` : empty}`);
         if (TO_EDGE.has(step.name)) { curId = e.c.id; curElem = 'edge'; curEdge = e; }
-        else { curId = e.c[to]; curElem = 'node'; curEdge = null; }
+        else { curId = e.c[to]; curElem = 'vertex'; curEdge = null; }
       } else if (TO_VERTEX.has(step.name)) {
         // Edge→vertex: read the current edge's endpoint column (no new join). Requires being
         // on an edge (a body starting/continuing off an edge is a compile error, guarded here).
         if (!curEdge) throw new Error(`${step.name}() in a repeat() body requires being on an edge (a preceding outE()/inE()/bothE())`);
         const [, to] = dirs[mi++];
-        curId = curEdge.c[to]; curElem = 'node'; curEdge = null;
+        curId = curEdge.c[to]; curElem = 'vertex'; curEdge = null;
       } else if (step.name === 'has') {
         // has() only (hasLabel/complex has deferred at validation): a correlated EXISTS on the
         // current element (a vertex, or an edge when paused on one after outE()/inE()).
@@ -640,7 +640,7 @@ function expandRepeatBody(
     }
     // The walk id is a vertex rowid; a body must net back to a vertex (outE()…inV()). A body
     // left ON an edge (outE() with no closing …V()) is rejected — the walk can't carry an edge id.
-    if (curElem !== 'node') throw new Error('a repeat() body must end on a vertex (an edge step needs a closing inV()/outV()/otherV())');
+    if (curElem !== 'vertex') throw new Error('a repeat() body must end on a vertex (an edge step needs a closing inV()/outV()/otherV())');
     return { finalId: curId, from: q`${self}${list(joins, '')}`, conds, sackExpr, finalElem: curElem };
   });
 }
@@ -675,7 +675,7 @@ function expandRepeatBody(
  *  array) and simplePath()'s cycle guard compose in. Deferred forms (emit-pred,
  *  until+times/emit, complex body) throw — the fold gathered the cluster, not validated it. */
 export const repeat: StepFn = (s, st) => {
-  if (st.elem !== 'node') throw new Error('repeat() on edges not yet supported');
+  if (st.elem !== 'vertex') throw new Error('repeat() on edges not yet supported');
   // A label bound BEFORE the walk is LOOP-INVARIANT: the walk moves the traverser, it never
   // rebinds an existing label, so the alias column's value is the same on every row of every
   // iteration. Carrying it is therefore a projection, not a fold — seed it from the outer row and
@@ -785,7 +785,7 @@ export const repeat: StepFn = (s, st) => {
   // running value, not just the hop) nor the path array (positions are recorded per iteration), so
   // those stay with the flat expansion; a body needing both is a clean deferral.
   // The walk id is a vertex rowid, so the body must net back to a vertex (outE()…inV()).
-  const bodyRel = flatOk || sackCol || trackArray ? null : keyedChildRelation(st, core, { landOn: 'node' });
+  const bodyRel = flatOk || sackCol || trackArray ? null : keyedChildRelation(st, core, { landOn: 'vertex' });
   if (!flatOk && !bodyRel) {
     const names = body.map((c) => c.name + '()').join('.');
     // Name the ACTUAL obstacle rather than reciting a vocabulary. A per-iteration global barrier is
@@ -927,7 +927,7 @@ export const repeat: StepFn = (s, st) => {
   // NOT carry it — a match() pattern seed, whose multiplicity is its row count — hit the skew.
   const bulkOut = { bulk: 'bulk' as const };
   const out = wantsPathOutput
-    ? advance(st, q`SELECT id${aliasOut}${sackOut}, 1 AS bulk${originOut}, path FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, ...bulkOut, path: { kind: 'array', col: 'path', elem: 'node' } })
+    ? advance(st, q`SELECT id${aliasOut}${sackOut}, 1 AS bulk${originOut}, path FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, ...bulkOut, path: { kind: 'array', col: 'path', elem: 'vertex' } })
     : advance(st, q`SELECT id${aliasOut}${sackOut}, 1 AS bulk${originOut} FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, ...bulkOut });
   if (!aggName) return out;
   // A body-terminal aggregate('x'): collect every vertex the body emitted — the walk rows at
@@ -945,7 +945,7 @@ export const repeat: StepFn = (s, st) => {
     q`SELECT ${jsonbGroupArray(q`m`)} AS list FROM (${priorMembers}SELECT ${w.c.id} AS m FROM ${w} WHERE ${raw('w.depth')} >= 1)`,
     ['list'],
   );
-  const def: SideEffectDef = { kind: 'list', rel: bagRel, of: { kind: 'elem', elem: 'node' } };
+  const def: SideEffectDef = { kind: 'list', rel: bagRel, of: { kind: 'elem', elem: 'vertex' } };
   return { ...out, sideEffects: new Map([...(out.sideEffects ?? []), [aggName, def]]) };
 };
 
