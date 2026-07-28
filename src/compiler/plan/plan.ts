@@ -2,7 +2,7 @@ import { flattenListArgs, isNested, type Pred } from '../../gremlin/frontend.ts'
 import { q, list, values, empty, value, raw, jsonExtract, type Expression, type Relation } from '../../sql/kernel/q.ts';
 import type { FastPath } from '../options/fast-paths.ts';
 import { normalizeTypeName, BigDecimal, Duration } from '../../gremlin/types.ts';
-import { type ValueType } from '../../sql/kernel/render.ts';
+import { type ScalarType, type ValueType } from '../../sql/kernel/render.ts';
 
 // ---------- SQL node builders ----------
 //
@@ -154,6 +154,15 @@ export type TypeCtx =
 export const TYPE_STATIC = (type: ValueType): TypeCtx => ({ kind: 'static', type });
 export const TYPE_PER_ROW = (expr: Expression): TypeCtx => ({ kind: 'perRow', expr });
 export const TYPE_UNKNOWN: TypeCtx = { kind: 'unknown' };
+
+/** Bridge a stream-level type channel into the planner's expression-level vocabulary.
+ * `ScalarType.perRow` names a relation column; TypeCtx.perRow carries that column's
+ * expression in the current SQL scope. Keeping the conversion here prevents every
+ * predicate consumer from reimplementing the boundary. */
+export const typeCtxOf = (type: ScalarType, column: (name: string) => Expression): TypeCtx =>
+  type.kind === 'static' ? TYPE_STATIC(type.type)
+    : type.kind === 'perRow' ? TYPE_PER_ROW(column(type.column))
+      : TYPE_UNKNOWN;
 
 /** P.typeOf(GType|"ClassName") → a SQL type test over `expr`, resolved by `ctx` (see
  *  TypeCtx). A recognized non-value GType (vertex/edge/tree/graph/…) can never match a
