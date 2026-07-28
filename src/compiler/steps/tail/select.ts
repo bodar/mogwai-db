@@ -426,7 +426,7 @@ export function tryCompileRecordChild(
   try { lowered = lowerRecordSelectProject(withEnc, shape.proj); }
   catch { return null; } // the builder's own deferrals stay authoritative
   if (lowered.kind !== 'record') return null; // an unbound label → its own empty-stream answer
-  return applyChildCardinality(parent, pushed, lowered, use).stream;
+  return applyChildCardinality(parent, pushed.frame, lowered, use).stream;
 }
 
 /** Multi-label select(Pop, "a", "b", …) over a value-shaped stream (scalar/list/variant):

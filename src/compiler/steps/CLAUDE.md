@@ -34,6 +34,12 @@ fails closed is better than a special-case that entrenches the non-generic path.
   `fields` and `layout` ride along untouched. **Adding a shape to the child seam must add nothing
   here.** A shape-specific rejoin is how the scalar path grew its own copy (retired); if a new shape
   seems to need one, the payload authority is what's missing, not the rejoin.
+  It takes the **frame**, not the whole `pushChildScope` triple — a POST-BARRIER caller (a child
+  `fold()`, a bare-branch child) holds only the frame a row compiler handed back, and demanding the
+  triple is what made those sites hand-roll the projection (the same "cannot be HANDED this"
+  argument-type tell as below). A child body's tail barrier still cannot come from the engine's own
+  step: `fold()`/reducers there are GLOBAL, and the per-parent form needs the frame's domain
+  relation for its empty-child `[]`, which is child-seam state and not reachable from a `Stream`.
   Likewise `classifyProjectionChildRows` (`tail/child-shape.ts`) is the ONE classifier for
   `<element prefix>.<terminal projection>`, parameterized by which projection it accepts — map and
   record are two predicates over it, not two classifiers.

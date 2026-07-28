@@ -608,7 +608,7 @@ export function tryCompileMapChild(
   let lowered: MapStream;
   try { lowered = lowerValueMap(withEnc, proj); }
   catch { return null; } // the builder's own carried/token deferrals stay authoritative
-  return applyChildCardinality(parent, pushed, lowered, use).stream;
+  return applyChildCardinality(parent, pushed.frame, lowered, use).stream;
 }
 
 /** groupCount() over a SCALAR value stream — a barrier grouping by the value itself:

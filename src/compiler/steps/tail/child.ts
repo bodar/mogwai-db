@@ -5,7 +5,7 @@ import { edges, labels, nodes, vertexProperties, edgeProperties } from '../../..
 import { advance, carriedWith, carryFrag, carryFragMint, carriedCols, partitionOver, prevRel, withCarried, type Carried, type ElementStream } from '../context/context.ts';
 import { aliasId } from '../context/alias.ts';
 import { asOnStream, selectOneFromAlias } from './labelselect.ts';
-import { carryOf, streamPayloadCols, toListStream, toMapStream, toScalarStream, toVariantStream, PROPERTY_PAYLOAD, type ListStream, type MapStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
+import { carryOf, streamPayloadCols, toMapStream, toScalarStream, PROPERTY_PAYLOAD, type ListStream, type MapStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { lowerScalarRows, unionScalarStreams, SCALAR_TRANSFORMS } from './scalar.ts';
 import { lowerReSource } from '../resource.ts';
@@ -213,10 +213,15 @@ function tryCompileCountValueRows(
 //     along untouched, which is exactly what a re-projection must preserve.
 // So there is one rejoin, and adding a shape to the child seam adds nothing here.
 
-/** Re-project child rows at parent cardinality, preserving the child's shape. */
+/** Re-project child rows at parent cardinality, preserving the child's shape.
+ *
+ * Takes the FRAME, not the whole `pushChildScope` result: the rejoin needs only the ordinal to
+ * rank/partition on, and demanding the pushed triple is what kept the post-barrier callers (a
+ * child fold/branch, which hold a frame handed back by a row compiler and no longer have the
+ * pushed object) out of this seam — so they hand-rolled the projection instead. */
 export function applyChildCardinality<S extends Exclude<Stream, { kind: 'result' }>>(
   parent: ChildParent,
-  pushed: ReturnType<typeof pushChildScope>,
+  frame: ChildFrame,
   lowered: S,
   use: ChildUse,
 ): { stream: S; frame: ChildFrame } {
@@ -230,15 +235,15 @@ export function applyChildCardinality<S extends Exclude<Stream, { kind: 'result'
   if (use === 'all')
     return {
       stream: rehome(derived(q`SELECT ${project(r)}${carryFrag(parent.carried, r)} FROM ${r}`, cols, 'all_rows')),
-      frame: pushed.frame,
+      frame,
     };
   if (!lowered.carried.encounter) throw new Error('child first cardinality requires explicit encounter order');
   const first = derived(
-    q`SELECT ${project(r)}${carryFrag(parent.carried, r)}, ROW_NUMBER() OVER (PARTITION BY ${r.c[pushed.frame.ordinal]} ORDER BY ${r.c[lowered.carried.encounter]}) AS rn FROM ${r}`,
+    q`SELECT ${project(r)}${carryFrag(parent.carried, r)}, ROW_NUMBER() OVER (PARTITION BY ${r.c[frame.ordinal]} ORDER BY ${r.c[lowered.carried.encounter]}) AS rn FROM ${r}`,
     [...cols, 'rn'], 'f');
   return {
     stream: rehome(derived(q`SELECT ${project(first)}${carryFrag(parent.carried, first)} FROM ${first} WHERE ${first.c.rn}=1`, cols, 'first_row')),
-    frame: pushed.frame,
+    frame,
   };
 }
 
@@ -270,7 +275,7 @@ function applyScalarChildCardinality(
   retainChildScope: boolean,
 ): { stream: ScalarStream; frame: ChildFrame } {
   if (retainChildScope) return { stream: lowered, frame: pushed.frame };
-  return applyChildCardinality(parent, pushed, lowered, use);
+  return applyChildCardinality(parent, pushed.frame, lowered, use);
 }
 
 /** Fold an ELEMENT-preserving child body — the engine's ONE whole-body fold, which crosses a
@@ -678,26 +683,10 @@ export function tryCompileBranchChildAllCard(
   const pushed = pushChildScope(parent, scope);
   const lowered = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, body, 0);
   if (lowered.kind !== 'list' && lowered.kind !== 'variant') return null;
-  const l = lowered.rel.as('l');
-  if (lowered.kind === 'list') {
-    const rel = parent.q.cte(
-      q`SELECT ${l.c.list} AS list${carryFrag(parent.carried, l)} FROM ${l}`,
-      ['list', ...carriedCols(parent.carried)],
-    );
-    return toListStream(carryOf(parent), rel, lowered.of);
-  }
-  if (lowered.kind === 'variant') {
-    // A VariantStream's payload columns (vk, v, rid, and list when a list arm is present) are
-    // re-projected verbatim; the pushed ordinal is dropped by projecting only the parent's carried.
-    const payload = ['vk', 'v', 'rid', ...(lowered.listOf ? ['list'] : [])];
-    const rel = parent.q.cte(
-      q`SELECT ${list(payload.map((c) => q`${l.c[c]} AS ${c}`), ', ')}${carryFrag(parent.carried, l)} FROM ${l}`,
-      [...payload, ...carriedCols(parent.carried)],
-    );
-    return toVariantStream(carryOf(parent), rel,
-      { scalarAs: lowered.scalarAs, node: lowered.node, edge: lowered.edge, listOf: lowered.listOf }, lowered.result);
-  }
-  return null;
+  // The ONE rejoin: `all` keeps every arm row, and the payload (a list's `list`; a variant's
+  // vk/v/rid + list when a list arm is present) comes from streamPayloadCols, so neither shape
+  // is spelled out here. Projecting only the parent's carried is what drops the pushed ordinal.
+  return applyChildCardinality(parent, pushed.frame, lowered, 'all').stream;
 }
 
 /** Scalar rows followed by fold() become one ListStream per parent. This is a true
@@ -709,26 +698,22 @@ export function tryCompileListChild(
   scope: CompileScope = ROOT_SCOPE,
   preParsed?: ReturnType<typeof stepChain>,
 ): ListStream | null {
+  // Both arms are the same three operations — generic rows (the engine, via the shared row
+  // compilers) ▸ the scope-aware fold barrier ▸ the ONE cardinality rejoin. Only the middle one
+  // differs by shape, because the value being aggregated does (a scalar `v` vs a rowid), so the
+  // shape-specific part is a function reference, not a second copy of the plumbing. The fold
+  // cannot come from the engine's own fold(): that one is GLOBAL (one list for the whole
+  // stream), and the per-parent form needs the frame's domain relation for its empty-child `[]`,
+  // which is child-seam state and deliberately not reachable from a Stream.
   const scoped = compileScalarChildRows(parent, nested, 'all', scope, true, 'fold', preParsed);
-  if (scoped) {
-    const folded = lowerScopedScalarFold(scoped.stream, { kind: 'child', frames: [scoped.frame] });
-    const l = folded.rel.as('l');
-    const rel = parent.q.cte(
-      q`SELECT ${l.c.list} AS list${carryFrag(parent.carried, l)} FROM ${l}`,
-      ['list', ...carriedCols(parent.carried)],
-    );
-    return toListStream(carryOf(parent), rel, folded.of);
-  }
-
-  const element = compileElementChildRows(parent, nested, scope, 'fold', false, preParsed);
-  if (!element) return null;
-  const folded = lowerScopedElementFold(element.stream, { kind: 'child', frames: [element.frame] });
-  const l = folded.rel.as('l');
-  const rel = parent.q.cte(
-    q`SELECT ${l.c.list} AS list${carryFrag(parent.carried, l)} FROM ${l}`,
-    ['list', ...carriedCols(parent.carried)],
-  );
-  return toListStream(carryOf(parent), rel, folded.of);
+  const rows = scoped
+    ? { ...scoped, fold: () => lowerScopedScalarFold(scoped.stream, { kind: 'child', frames: [scoped.frame] }) }
+    : (() => {
+      const element = compileElementChildRows(parent, nested, scope, 'fold', false, preParsed);
+      return element && { ...element, fold: () => lowerScopedElementFold(element.stream, { kind: 'child', frames: [element.frame] }) };
+    })();
+  if (!rows) return null;
+  return applyChildCardinality(parent, rows.frame, rows.fold(), 'all').stream;
 }
 
 /** Productive scalar rows immediately before fold(). Group-like consumers use
