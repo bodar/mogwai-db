@@ -204,6 +204,42 @@ export function mergeAliasMaps(seed: AliasMap, arms: readonly Carried[]): AliasM
   return merged;
 }
 
+/** The RIGID carried columns — sack/bulk/origins/fromV/encounter (everything but aliases and
+ *  path). These are per-traverser physical state a branch cannot fork or reconcile, so they must
+ *  be identical across arms; aliases fork and merge, path pads. */
+export const rigidCols = (c: Carried): string[] => carriedCols({ ...c, aliases: new Map(), path: undefined });
+
+/**
+ * THE merge authority — the one `context.ts:122` and `prefix/branch.ts:234` have cited all along
+ * while it did not exist. Every arm merge routes through this.
+ *
+ * It does two things and refuses to guess at a third. It UNIONS the arms' label sets onto the seed
+ * (an arm may bind an `as()` label the seed never saw), and it ASSERTS the rigid roles agree —
+ * those are per-traverser state a fork cannot reconcile, so a disagreement fails closed rather
+ * than emitting SQL that references a column one arm lacks.
+ *
+ * What it deliberately does NOT do: mint or clear `encounter` (each merge re-mints it in its own
+ * window, and `carryFragMint` requires the column to be already declared), and merge `path` (the
+ * pad-to-max is branch-specific; every other merge declines a live path outright). The caller
+ * hands in an already-merged path or nothing.
+ *
+ * Why this had to exist: the element merge and the scalar merge each grew the alias union
+ * independently, and the list and variant merges never grew it at all — they projected the SEED's
+ * alias columns off each arm by name, so a label an arm minted itself was silently unread.
+ * `g.V(1).union(__.as("x").out().fold(), __.as("x").in().fold()).select("x")` returned 0 rows
+ * where the element-shaped twin returns 3. A silent empty result, which is the failure mode this
+ * project treats as worse than a crash.
+ */
+export function mergeCarried(seed: Carried, arms: readonly Carried[], path?: PathState): Carried {
+  const want = rigidCols(seed);
+  for (const a of arms) {
+    const got = rigidCols(a);
+    if (got.length !== want.length || got.some((x, i) => x !== want[i]))
+      throw new Error('branch arms disagree on carried columns (a step binding new sack/origin state inside a branch arm not yet supported)');
+  }
+  return { ...seed, aliases: mergeAliasMaps(seed.aliases, arms), path: path ?? seed.path };
+}
+
 /** One arm's projection of the MERGED alias columns: the arm's own physical column aliased onto
  *  the canonical name, or NULL where the arm never bound that label (a `select()` of it then
  *  drops that arm's rows via aliasPresent — TinkerPop's drop-not-throw). The alias half of

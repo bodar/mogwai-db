@@ -7,7 +7,7 @@ import { normalize } from '../../ir/passes.ts';
 import { analyze, type ChainFacts } from '../../ir/analyze.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem } from '../../plan/plan.ts';
 import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
-import { advance, aliasColsOf, elemRel, labelScope, prevRel, carryFrag, carryFragMint, carriedCols, carriedWith, mergeAliasMaps, partitionOver, type AliasEntry, type AliasMap, type Carried, type Carry, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
+import { advance, aliasColsOf, elemRel, labelScope, prevRel, carryFrag, carryFragMint, carriedCols, carriedWith, mergeCarried, rigidCols, partitionOver, type AliasEntry, type AliasMap, type Carried, type Carry, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type AliasShape } from '../context/alias.ts';
 import { keyedChildRelation, keyedKeySet } from '../tail/keyed.ts';
 import { pushChildScope, tryCompileCountChild, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarChild, tryCompileScalarModulations, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
@@ -131,11 +131,6 @@ function assertForkSafe(name: string, st: ElementStream): void {
 // element-KIND conflict (union(outE(), out())) and on a dynamic-length (array/repeat)
 // arm — both would need the tagged-array regime (a separate, larger piece).
 
-/** The RIGID carried columns — origin/sack/fromV/encounter (everything but aliases and
- *  path). These are per-traverser physical state a branch cannot fork/merge, so they
- *  must be identical across arms; aliases fork/merge (mergeAliasMaps) and path pads. */
-const rigidCols = (c: Carried): string[] => carriedCols({ ...c, aliases: new Map(), path: undefined });
-
 /** Merge cols() PATH states by padding to the max length. */
 function mergePaths(arms: PathState[]): PathState {
   if (arms.some((p) => p.kind !== 'cols'))
@@ -159,13 +154,9 @@ function mergePaths(arms: PathState[]): PathState {
  *  Divergent as() labels are NO LONGER rejected — they union into the merged label set and
  *  armProjection pads each arm's missing labels with an empty (NULL) history. */
 function mergeBranchCarried(seed: Carried, arms: Carried[]): Carried {
-  const want = rigidCols(seed);
-  for (const a of arms) {
-    const got = rigidCols(a);
-    if (got.length !== want.length || got.some((x, i) => x !== want[i]))
-      throw new Error('branch arms disagree on carried columns (a step binding new sack/origin state inside a branch arm not yet supported)');
-  }
-  return { ...seed, aliases: mergeAliasMaps(seed.aliases, arms), path: seed.path ? mergePaths(arms.map((a) => a.path!)) : undefined };
+  // The path pad-to-max is branch-specific (every other merge declines a live path), so it is
+  // computed here and handed to the shared authority.
+  return mergeCarried(seed, arms, seed.path ? mergePaths(arms.map((a) => a.path!)) : undefined);
 }
 
 /** One arm's merge SELECT column list. Order MUST match carriedCols(out): id, aliases,
