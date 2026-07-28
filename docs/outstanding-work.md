@@ -63,6 +63,12 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      which compares against a law rather than another implementation. *Medium-High — silent wrong
      answer.*
 
+   The IR-vs-shape boundary this item states is **refined** (not overturned) in
+   [shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md): the Pass failed as
+   an unchecked shape CLAIM, not for want of information — the correct shape-specific injectors
+   anchor on steps whose output shape is fixed by name. Same doc measures where the defects actually
+   come from (carried-channel drops 33%, shape/vocabulary 8%) and names the higher-yield work.
+
 1. **List members frame as bare values, not elements.** `AliasEntry` does not record the member
    shape, so a path/element-list label cannot frame its members as vertices. Blocks
    `g_V_hasXperson_name_markoX_path_asXaX_unionXidentity_identityX_selectXaX_unfold` (which also
@@ -196,7 +202,17 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    `lowerScalarRows`, `scalar-arm.ts`). Where a step needs a genuinely different builder over a
    scalar parent (`group()` has no element to project and its default `elementList` value mode does
    not apply) that is real work, not a gate.
-   → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md)
+
+   **The "one parent shape at a time" cut is challenged** by a fresh in-process measurement
+   ([shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md) §7): 84
+   parent-shape failures, not 67 (record/property/variant/map/group parents are the same disease and
+   are missing from the tally, and 268 traversals never reached shape dispatch — so 84 is a lower
+   bound). Sorted by MECHANISM rather than by parent shape they are ~10 set-drift, ~14
+   `ResultStream` residue, ~30 ceiling cells of row-ops copied per shape, ~35 genuinely per-step —
+   and the first three cut ACROSS parent shapes. Both cautions above stand (not one substrate fix;
+   not one item); the axis does not. Re-file before picking this up.
+   → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md),
+   [shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md)
 
 6. **`order().by()` of paths (path natural-order comparability).** Unlocks the Orderability
    conformance cluster. **Medium.**

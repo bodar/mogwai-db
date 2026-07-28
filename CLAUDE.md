@@ -30,6 +30,10 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
 - `docs/2026-07-25-wire-and-storage-facts.md` — Map.Entry wire framing + the `MapStream` model
 - `docs/2026-07-28-property-based-testing-l5.md` — L5's oracle design space; shape is a lowering
   concern, not an IR one
+- `docs/2026-07-28-shape-vocabulary-architecture.md` — the shape/type vocabularies across every
+  layer: which duplication is load-bearing, which is an unfinished consolidation, and the refined
+  bright line (a Pass may CONSULT shape; it may never CONSTRUCT it). Refutes three cross-layer
+  refactors — read before proposing one
 
 ## Working rules
 
