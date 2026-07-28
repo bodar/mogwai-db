@@ -28,6 +28,8 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
 - `.claude/rules/{wire-protocol,schema-storage,management-api}.md` — glob-scoped, fire on the
   matching files
 - `docs/2026-07-25-wire-and-storage-facts.md` — Map.Entry wire framing + the `MapStream` model
+- `docs/2026-07-28-property-based-testing-l5.md` — L5's oracle design space; shape is a lowering
+  concern, not an IR one
 
 ## Working rules
 

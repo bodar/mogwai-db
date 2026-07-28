@@ -3,7 +3,7 @@
 - **Run `mise run test`, NOT bare `bun test`.** The mise task carries the `depends` that set up
   the environment — `install`, `submodule`, and crucially `check` (`tsc --noEmit`). Bare `bun test`
   skips type-checking and the submodule, so green there can hide broken types. `bun test <file>` is
-  fine for a fast inner loop on one already-type-checked file, never as the gate. `mise run L1`..`L4`
+  fine for a fast inner loop on one already-type-checked file, never as the gate. `mise run L1`..`L5`
   run one level each; `mise run ci` is the full gate.
 
 ## The conformance ladder — one folder per level
@@ -35,8 +35,10 @@
   one-at-a-time. Self-oracling — `FastPathConfig` declares the generic path the semantic authority,
   so a disagreement is always a defect on the optimized side. Ratcheted like L3 (`known.ts`, one
   entry per ROOT CAUSE with a diagnosis, never per traversal). Fixed seed in CI;
-  `mise run L5-random` explores. **L5 is the CEILING instrument** — it measures what composes, which
-  is the thing the L3 count structurally cannot. Runbook: `L5-properties/README.md`.
+  `mise run L5-random` explores. **L5 is the CEILING instrument** — it measures what composes,
+  which is the thing the L3 count structurally cannot. Current state + runbook:
+  `L5-properties/README.md`; design rationale + the unbuilt oracles:
+  `docs/2026-07-28-property-based-testing-l5.md`.
 - Shared reference-graph seeds live in `test/fixtures/`.
 
 ## Guardrails

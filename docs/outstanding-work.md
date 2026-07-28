@@ -22,7 +22,8 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-0. **The L5 findings — ALL LANDED; one adjacent defect still open.** The fast-path differential
+0. **The L5 findings — ALL LANDED; one adjacent defect still open.** Design rationale +
+   the three unbuilt oracles: `docs/2026-07-28-property-based-testing-l5.md`. The fast-path differential
    (`test/L5-properties/`) found 22 divergent traversals in 17 signature groups, reducing to four
    root causes, all fixed: infix-composed predicates (front-end `parseComposedPredicate`), 3-arg
    `has(LABEL,k,v)` in the inline predicate leaf, always-producing filter bodies
