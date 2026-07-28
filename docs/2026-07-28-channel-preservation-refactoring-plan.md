@@ -38,7 +38,7 @@ Completed ScalarType/planner tranche:
   This is intentionally NOT a unification of the two vocabularies: stream
   `ScalarType.perRow` names a relation column; planner `TypeCtx.perRow` owns the
   SQL expression for that column in its current scope.
-- pending local checkpoint — `MapEntry { sub: 'value' }` now owns a required
+- `63efc68` — `MapEntry { sub: 'value' }` now owns a required
   `ScalarType`; record projection carries prefixed per-row type columns, scalar
   field re-entry restores them, and Map framing uses the declared channel.
 
