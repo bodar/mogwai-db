@@ -31,7 +31,10 @@ if [ -n "$BUN_BIN" ]; then
   [ -n "$BUN_PIN" ] && mise link --force "bun@$BUN_PIN" "$BUN_PREFIX" >/dev/null
 fi
 
-# 4. Install project dependencies.
+# 4. Install project dependencies. NB this now provisions the submodule and builds the gremlin
+#    client too, because `install` depends on `submodule` (gremlin is a `link:` dep — see
+#    mise.toml). Slower on a cold session, and deliberately so: the previous npm-dep arrangement
+#    meant this very step reinstalled 4.0.0-beta.2 over the client symlink at every session start.
 mise run install
 
 # 5. Persist env for the session: mise on PATH + quiet version checks.

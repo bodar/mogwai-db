@@ -60,13 +60,20 @@ if [ ! -f "$GLV/build/esm/structure/io/binary/GraphBinary.js" ]; then
   (cd "$GLV" && bun run build)
 fi
 
-# Register + consume the link. `bun link` in the package registers it globally;
-# `bun link gremlin` in the superproject swaps node_modules/gremlin for a symlink.
-# Both are idempotent. Guarded so a plain `bun install` that restored the npm
-# package re-points it back to the submodule.
-if [ "$(readlink "$ROOT/node_modules/gremlin" 2>/dev/null)" != "../$GLV" ]; then
-  echo "[submodule] linking gremlin -> $GLV"
-  (cd "$GLV" && bun link >/dev/null)
-  bun link gremlin >/dev/null
-fi
+# REGISTER the link only. `bun link` inside the package publishes it to bun's global link
+# registry; CONSUMING it is package.json's job now (`"gremlin": "link:gremlin"`), which is why
+# this no longer runs `bun link gremlin` in the superproject or guards on readlink.
+#
+# That inversion is the point: while the superproject declared the npm dep, any plain
+# `bun install` re-installed 4.0.0-beta.2 over the symlink and only a later `mise run submodule`
+# healed it — so the client silently changed under whatever ran in between. With the link: dep,
+# `bun install` reproduces the symlink, and on a machine where this registration has NOT happened
+# it fails outright instead of falling back to npm. Hence `[tasks.install]` depends on this task:
+# registration must precede the superproject's install, and this script deliberately needs nothing
+# from the superproject's node_modules, which is what keeps that edge acyclic.
+#
+# Unconditional (not guarded): re-registering is idempotent and costs milliseconds, and the guard
+# it replaces was itself the workaround for the clobber that no longer happens.
+echo "[submodule] registering the gremlin link -> $GLV"
+(cd "$GLV" && bun link >/dev/null)
 echo "[submodule] ready"

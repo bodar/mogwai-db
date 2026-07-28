@@ -34,7 +34,7 @@
     "@bodar/lazyrecords": "npm:@jsr/bodar__lazyrecords",
     "@bodar/yadic": "^0.495.349",
     "antlr4ng": "^3.0.16",
-    "gremlin": "^4.0.0-beta.2"
+    "gremlin": "link:gremlin"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260711.1",

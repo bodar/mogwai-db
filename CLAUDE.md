@@ -93,7 +93,11 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
 
 - Runtime is **Bun** (pinned in `mise.toml`), not Node — TS runs natively.
 - **Test via `mise run test`, NOT bare `bun test`** (bare skips `tsc --noEmit` + the submodule). See
-  `test/CLAUDE.md`. Build graph: `install ─▶ {test, build} ─▶ ci`; CI just runs `mise run ci`.
+  `test/CLAUDE.md`. Build graph: `submodule ─▶ install ─▶ {check, test, build} ─▶ ci`; CI just runs
+  `mise run ci`. **`install` depends on `submodule` and that edge is load-bearing** — `gremlin` is a
+  `link:` dep resolving to the submodule-built client, so `bun install` FAILS (rather than falling
+  back to npm's beta.2) if the submodule has not registered the link. Consequence: nothing is
+  submodule-free, `check`/L1/L2 included.
 - Storage runtimes meet at the sync **`Sql` interface** (`src/storage.ts`): `bun:sqlite` (dev) and
   DO `ctx.storage.sql` (prod). Compiler + frame tier are storage-agnostic; the HTTP edge never
   touches a store. **Bind-type gotcha:** DO SQLite throws on `boolean`/`bigint` binds — `GraphStore`

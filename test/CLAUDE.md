@@ -74,9 +74,13 @@ deferral or a fix.
 
 - **Everything tracks tinkerpop `origin/master` — the version split is GONE** (2026-07-26). The
   submodule, the L3 corpus, and the CLIENT itself are all master; `gremlin` resolves to the
-  submodule via `bun link` (`scripts/init-submodule.sh` builds + links it), because the server
-  must frame with the same client the suite tests it against. npm's newest v4 is still
-  4.0.0-beta.2, ~300 commits behind and without the `gremlin/io` export.
+  submodule because **package.json declares it as `link:gremlin`**, against the link
+  `scripts/init-submodule.sh` registers after building the client — the server must frame with the
+  same client the suite tests it against. npm's newest v4 is still 4.0.0-beta.2, ~300 commits behind
+  and without the `gremlin/io` export, and it is now UNREACHABLE: a `bun install` with no registered
+  link fails rather than falling back to it. That is why `[tasks.install]` depends on `submodule`,
+  and why no task is submodule-free any more — the previous npm-dep-plus-relink arrangement let a
+  bare `bun install` swap the client out from under whatever ran next.
   The old rule here said "pinning L3 to master breaks it for zero gain" — **measured, and it is
   false**: master is L3 1363/2297 vs beta.2's 1347/2041 (+16 passing, +256 scenarios in scope).
   What master actually needs is two runner details, each of which fails SILENTLY: cucumber 13
