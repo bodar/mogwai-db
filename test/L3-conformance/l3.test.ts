@@ -82,6 +82,10 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
       '--tags', L3_TAGS,
       '--format', `json:${report}`,
       '--format', 'summary',
+      // The cucumber process has its own GLV module graph. Load our GraphBinary
+      // extensions there as well, otherwise a valid server BigDecimal/Char/Duration
+      // response fails before the official assertion can inspect it.
+      '--import', '../../../../test/L3-conformance/glv-compat.ts',
       // Also a glob: cucumber 13 does not expand a bare step-definition DIRECTORY either,
       // so every step comes back `undefined` and the run reports 0 passing.
       '--import', 'test/cucumber/*.js',

@@ -375,7 +375,7 @@ describe('unified lowering characterization', () => {
     expect(run(store, 'g.V(1).values("name").as("a").select(Pop.last, "a")').map((r) => r.v)).toEqual(['marko']);
     expect(run(store, 'g.V(1).values("name").as("a").select(Pop.mixed, "a")').map((r) => r.v)).toEqual(['marko']);
     expect(run(store, 'g.V(1).values("name").as("a").select(Pop.all, "a")').map((r) => JSON.parse(r.list)))
-      .toEqual([['marko']]);
+      .toEqual([[{ t: 'string', v: 'marko' }]]);
     // a labelled count (a scalar) round-trips
     expect(run(store, 'g.V().hasLabel("person").count().as("a").select("a")').map((r) => r.v)).toEqual([4]);
   });
@@ -387,19 +387,21 @@ describe('unified lowering characterization', () => {
     expect(run(store, q('"a"')).map((r) => r.v)).toEqual([6]);          // bare = last = length("markoX")
     expect(run(store, q('Pop.last, "a"')).map((r) => r.v)).toEqual([6]);
     expect(run(store, q('Pop.first, "a"')).map((r) => r.v)).toEqual(['marko']);
-    expect(run(store, q('Pop.all, "a"')).map((r) => JSON.parse(r.list))).toEqual([['marko', 'markoX', 6]]);
+    expect(run(store, q('Pop.all, "a"')).map((r) => JSON.parse(r.list)))
+      .toEqual([[{ t: 'string', v: 'marko' }, 'markoX', 6]]);
     // mixed with >1 binding behaves like all
-    expect(run(store, q('Pop.mixed, "a"')).map((r) => JSON.parse(r.list))).toEqual([['marko', 'markoX', 6]]);
+    expect(run(store, q('Pop.mixed, "a"')).map((r) => JSON.parse(r.list)))
+      .toEqual([[{ t: 'string', v: 'marko' }, 'markoX', 6]]);
   });
 
   test('multi-label select mixes a scalar label and an element label into one Map', () => {
     const record = read('g.V(1).values("name").as("a").select("a")');
-    expect(record.shape).toEqual({ kind: 'value', type: UNKNOWN });
+    expect(record.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // a → element (vertex), b → its name (scalar): a heterogeneous record
     const mixed = read('g.V(1).as("a").values("name").as("b").select("a","b")');
     expect(mixed.shape).toEqual({ kind: 'map', entries: [
       { key: 'a', prefix: 'e0', sub: 'vertex' },
-      { key: 'b', prefix: 'e1', sub: 'value', type: UNKNOWN },
+      { key: 'b', prefix: 'e1', sub: 'value', type: PER_ROW('e1_vtype') },
     ] });
   });
 });
@@ -418,7 +420,11 @@ describe('child body with movement under path tracking (pushChildScope ordinal-o
   });
   test('project().by(__.out().count()) under simplePath', () => {
     expect(run(seededStore(), 'g.V(1).out().simplePath().project("name","oc").by("name").by(__.out().count())'))
-      .toEqual([{ e0_v: 'vadas', e1_v: 0 }, { e0_v: 'josh', e1_v: 2 }, { e0_v: 'lop', e1_v: 0 }]);
+      .toEqual([
+        { e0_v: 'vadas', e0_vtype: 'string', e1_v: 0 },
+        { e0_v: 'josh', e0_vtype: 'string', e1_v: 2 },
+        { e0_v: 'lop', e0_vtype: 'string', e1_v: 0 },
+      ]);
   });
   test('group().by(T.label).by(__.out().values().fold()) under simplePath', () => {
     expect(run(seededStore(), 'g.V().out().simplePath().group().by(T.label).by(__.out().values("name").fold())'))
