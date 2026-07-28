@@ -13,7 +13,7 @@ import { keyedChildRelation, keyedKeySet } from '../tail/keyed.ts';
 import { pushChildScope, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
 import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, isGlobalBarrier, optionMapMerge, optionMapNeedsPassthrough, readOptionMapArms, ROOT_SCOPE, type BranchArmShape, type ChildCtx, type ChildPlan } from '../tail/child-shape.ts';
 import { emptyElementLike } from '../tail/labelselect.ts';
-import { carryOf, toVariantStream, type ListStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
+import { carryOf, toElementStream, toVariantStream, type ListStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
 import { finishListMerge, mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
 import { unionScalarStreams, SACK_OPS, combineSack } from '../tail/scalar.ts';
 import { engineOf, fastPathContextOf, type Engine } from '../../engine/deps.ts';
@@ -202,7 +202,7 @@ function finishElementMerge(base: Carry, out: Carried, parts: Expression[], opts
     body = q`SELECT ${m.c.id} AS id${carryFragMint(out, m, out.encounter, q`ROW_NUMBER() OVER (${over})`)} FROM ${m}`;
   }
   const carried = carriedWith(base.carried, opts);
-  return { ...base, kind: 'elements', elem: opts.elem, carried, rel: base.q.cte(body, ['id', ...carriedCols(carried)]) };
+  return toElementStream({ ...base, carried }, base.q.cte(body, ['id', ...carriedCols(carried)]), opts.elem);
 }
 
 /** Merge a set of ELEMENT arms into one element stream — the ungated entry to the element merge,

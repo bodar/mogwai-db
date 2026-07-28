@@ -8,7 +8,7 @@ import {
 } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { advance, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, partitionOver, withoutCarried, type ElementStream } from '../context/context.ts';
-import { carryOf, continueLowering, dispatchShapeTail, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
+import { carryOf, continueLowering, dispatchShapeTail, toElementStream, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
 import { tryLowerLocalAggregate, lowerScalarAggregate } from '../prefix/sideeffect.ts';
 import { PER_ROW, STATIC, UNKNOWN, staticTypeOf, type Shape } from '../../../sql/kernel/render.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
@@ -304,7 +304,7 @@ function lowerElementOrderReenter(st: ElementStream, step: PStep): ElementStream
   // order()-followed-by-a-movement route, so it needs it independently but must not restate it.
   const drop = elementOrderDrop(st, n, step);
   const body = q`SELECT ${p.c.id} AS id${carryFragMint(carried, p, 'encounter', mint)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}${drop ? q` WHERE ${drop}` : empty}`;
-  return { ...st, carried, rel: st.q.cte(body, ['id', ...carriedCols(carried)]) };
+  return toElementStream(carryOf(st, carried), st.q.cte(body, ['id', ...carriedCols(carried)]), st.elem);
 }
 
 // order().[barrier()].dedup().by(): lower both observations as one window policy so the

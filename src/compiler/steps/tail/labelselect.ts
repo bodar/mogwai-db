@@ -231,7 +231,7 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
       q`SELECT ${aliasId(col, end)} AS id${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,
       ['id', ...carriedCols(carried)],
     );
-    return { ...(s as any), kind: 'elements', rel, elem: aliasElem(entry), carried } as ElementStream;
+    return toElementStream(carryOf(s, carried), rel, aliasElem(entry));
   }
   // A single LIST-shaped entry (a fold()ed list, or a path() bound whole) must come back OUT as a
   // ListStream, not as its JSON text: the entry's `v` already holds a json array, so unwrap it to
