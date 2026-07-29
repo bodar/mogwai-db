@@ -19,7 +19,7 @@
 
 import { ALWAYS_PRODUCTIVE_TERMINAL } from '../../ir/productivity.ts';
 import type { Relation } from '../../../sql/kernel/q.ts';
-import { isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { isColumnArg, isOperatorArg, isOrderArg, isPickArg, isScopeArg, isTokenArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import type { AliasMap, Carried, ElementStream } from '../context/context.ts';
 import type { PropertyStream, ScalarStream, Stream } from '../context/stream.ts';
 import { type PStep } from '../../ir/strategies.ts';
@@ -153,7 +153,7 @@ function bindLabels(ctx: ChildCtx | undefined, s: PStep, shape: ChildShape): Chi
 export function labelSelectOf(step: PStep): string | null {
   if (step.name !== 'select' || step.bys?.length) return null;
   const args = step.args ?? [];
-  if (args.some((a: any) => a && typeof a === 'object' && 'column' in a)) return null;
+  if (args.some(isColumnArg)) return null;
   const uniq = [...new Set(args.filter((a: any): a is string => typeof a === 'string'))];
   return uniq.length === 1 ? uniq[0] : null;
 }
@@ -292,7 +292,7 @@ const isScalarProducer = (s: PStep, ctx: ChildCtx | undefined): boolean =>
  *  prefix, NOT as a scalar producer. Only the BARE read form `sack()` produces a scalar. Mirror
  *  of engine.ts isSackMutate, kept here so this pure leaf has no engine dependency. */
 export const isSackMutate = (s: PStep): boolean =>
-  s.name === 'sack' && (s.args ?? []).some((a: any) => a && typeof a === 'object' && 'operator' in a);
+  s.name === 'sack' && (s.args ?? []).some(isOperatorArg);
 /** A bare read `sack()` — the scalar-producing form (rebinds the value to the carried sack). */
 const isSackRead = (s: PStep): boolean => s.name === 'sack' && !isSackMutate(s);
 /** The projections compileScalarChildRows reads with its own element-projection SQL builder (and
@@ -460,9 +460,9 @@ function elementOptionMapScalarBranch(branch: PStep, ctx: ChildCtx): boolean {
   if (branch.name !== 'choose' || !branch.options) return false;
 
   const choice = branch.args[0];
-  const choiceIsScalar = choice && typeof choice === 'object' && 'nested' in choice
+  const choiceIsScalar = isNested(choice)
     ? classifyScalarChild(choice.nested, ctx) !== null
-    : choice && typeof choice === 'object' && 'token' in choice
+    : isTokenArg(choice)
       && (choice.token === 'label' || choice.token === 'id');
   if (!choiceIsScalar) return false;
   // The shape question goes through the ONE option-map triage. Asking it per option body (which
@@ -554,7 +554,7 @@ function longestClassifying(full: PStep[], ok: (body: PStep[]) => boolean): Chil
   // Scope.local narrows a would-be barrier to one list VALUE, so `order(Scope.local)` is a
   // row-local transform and rides the suffix fine; bare `order()`/`fold()` do not.
   const barriers = (steps: PStep[]) => steps.some((s) =>
-    isGlobalBarrier(s) && !s.args.some((a: any) => a?.scope === 'local'));
+    isGlobalBarrier(s) && !s.args.some((a: unknown) => isScopeArg(a) && a.scope === 'local'));
   for (let end = full.length; end > 0; end--) {
     if (barriers(full.slice(end))) continue;
     const body = full.slice(0, end);
@@ -912,10 +912,10 @@ export type ByClass =
  *  `by('age', desc)` yields `{kind:'key', key:'age', dir:'desc'}`. This is the single
  *  triage every by()-consuming host shares — no host should re-scan `byArgs` inline. */
 export function classifyBy(byArgs: readonly any[] | undefined): ByClass {
-  const dir = byArgs?.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order as ByDirection | undefined;
+  const dir = byArgs?.find(isOrderArg)?.order as ByDirection | undefined;
   const nested = byArgs?.find(isNested);
   if (nested) return { kind: 'nested', nested: nested.nested, dir };
-  const token = byArgs?.find((a: any) => a && typeof a === 'object' && 'token' in a);
+  const token = byArgs?.find(isTokenArg);
   if (token) return { kind: 'token', token: token.token, dir };
   const key = byArgs?.find((a: any) => typeof a === 'string');
   if (key !== undefined) return { kind: 'key', key, dir };
@@ -976,13 +976,13 @@ export function readOptionMapArms(step: PStep, params: Record<string, any>): Cho
   const out: ChooseOptionArm[] = [];
   const seen = new Set<OptionPick>();
   for (const opt of step.options ?? []) {
-    const bodyArg = (opt.args ?? []).find((x: any) => x && typeof x === 'object' && 'nested' in x);
+    const bodyArg = (opt.args ?? []).find(isNested);
     if (!bodyArg) return null;
     const keyArg = (opt.args ?? []).find((x: any) => x !== bodyArg);
-    const token = keyArg && typeof keyArg === 'object' && 'pick' in keyArg ? keyArg.pick : undefined;
+    const token = isPickArg(keyArg) ? keyArg.pick : undefined;
+    if (token !== undefined && token !== 'none' && token !== 'unproductive') return null; // Pick.any
     const pick: OptionPick = keyArg === undefined ? 'none' : token ?? 'key';
     if (pick !== 'key') {
-      if (token !== undefined && token !== 'none' && token !== 'unproductive') return null; // Pick.any
       if (seen.has(pick)) continue; // first wins
       seen.add(pick);
     }
@@ -1019,7 +1019,7 @@ export const optionMapNeedsPassthrough = (step: PStep, arms: readonly ChooseOpti
  *  reasoning would drift. The rationale for which terminals qualify is documented there.
  *  Anything else (a property read, a movement) can be empty. */
 function choiceCanBeUnproductive(a0: any, params: Record<string, any>): boolean {
-  if (a0 && typeof a0 === 'object' && 'token' in a0) return false;
+  if (isTokenArg(a0)) return false;
   if (!isNested(a0)) return true; // no recognizable choice — assume the worst, the emitter defers anyway
   const body = childSteps(a0.nested, params);
   const last = body.at(-1);
