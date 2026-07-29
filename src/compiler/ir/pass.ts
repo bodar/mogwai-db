@@ -34,7 +34,7 @@ export type PassCategory = typeof PASS_CATEGORIES[number];
 // verify     — ReadOnly/EdgeLabel/ReservedKeys: assert legality, throw. Runs LAST.
 
 /** Per-compile state a Pass reads/writes. NOT a DI scope (nothing here is ambient infra shared
- *  across compiles) — a one-shot data bag threaded by value through the fold, exactly as Carry is
+ *  across compiles) — a one-shot data bag threaded by value through the fold, exactly as LoweringState is
  *  for the lowering half. Built once per compilePlan() call. */
 export interface PassContext {
   readonly params: Record<string, any>;

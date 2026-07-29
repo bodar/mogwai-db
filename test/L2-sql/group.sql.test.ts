@@ -430,7 +430,7 @@ describe('group / properties SQL', () => {
     // element() retypes to an ordinary owner stream, including edge materialization.
     expect(read('g.E(7).properties().element().label()').shape).toEqual({ kind: 'value', type: STATIC('string') });
     expect(read('g.E(7).properties().element()').shape).toEqual({ kind: 'edge' });
-    // Carried aliases survive the property payload and the owner retype.
+    // Layout aliases survive the property payload and the owner retype.
     expect(read('g.V(1).as("a").properties().element().select("a")').shape).toEqual({ kind: 'vertex' });
   });
 
@@ -532,7 +532,7 @@ describe('group / properties SQL', () => {
     expect(read('g.withSack(0).V().sack(assign).by(__.outE().count()).sack()').sql)
       .toContain('ROW_NUMBER() OVER (PARTITION BY');
     // sack + a co-carried column (otherV's fromV): the mutate CTE re-projects sk in its
-    // carriedCols SLOT, not appended last — so the sk/fv columns don't desync. Regression
+    // layoutCols SLOT, not appended last — so the sk/fv columns don't desync. Regression
     // for the pre-existing bug where sk silently got the fromV rowid.
     expect(read('g.withSack(0).V(1).outE().sack(assign).by(T.label).otherV().sack()').sql)
       .toContain('(SELECT name FROM labels WHERE id=n.label) AS sk'); // sk = the label, not the fv rowid

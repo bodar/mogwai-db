@@ -40,7 +40,7 @@ export interface BarrierPoint {
   readonly restSteps: PStep[];
   /** Where restSteps begins in the original chain (the index the resumer lowers from). */
   readonly restAt: number;
-  /** The traversal's bound-param table, for the resumed lowering's Carry. */
+  /** The traversal's bound-param table, for the resumed lowering's LoweringState. */
   readonly compileParams: Record<string, any>;
 }
 

@@ -32,8 +32,8 @@ TinkerPop implementation name because an approximate analogue exists — see
   facts (path/encounter/collapse-safety) are `analyzeChain()` annotations, not rewrites.
 - **Dependencies vs state are separate — do not conflate.** Ambient capabilities (registry,
   fastPaths, federationDepth, the lowering engine, the store source) are DI, grouped by lifecycle
-  into `AppScope`/`CompilerScope` (`src/scopes.ts`). `Carry` is PURE per-query state (q/params/
-  carried/sideEffects). Never put a dependency on `Carry` or thread it through signatures — add a
+  into `AppScope`/`CompilerScope` (`src/scopes.ts`). `LoweringState` is PURE per-query state (q/params/
+  carried/sideEffects). Never put a dependency on `LoweringState` or thread it through signatures — add a
   scope field + an `Engine` accessor instead.
 - **One engine, families are free functions.** The `LoweringEngine` (`engine/engine.ts`) holds the
   recursive surface; step families reach it via `engineOf(stream)` and import only the leaf

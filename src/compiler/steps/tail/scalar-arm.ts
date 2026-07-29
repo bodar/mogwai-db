@@ -24,8 +24,8 @@
 import { isNested } from '../../../gremlin/frontend.ts';
 import { UNKNOWN, staticTypeOf, perRowColumnOf, perRowCols } from '../../../sql/kernel/render.ts';
 import { empty, list, paren, q, value, type Expression } from '../../../sql/kernel/q.ts';
-import { carriedCols, carriedWith, carryFrag, type ElementStream } from '../context/context.ts';
-import { carryOf, rebuildScalar, toScalarStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
+import { layoutCols, patchLayout, layoutProjection, type ElementStream } from '../context/context.ts';
+import { loweringStateOf, rebuildScalar, toScalarStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
 import { mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm } from './variant.ts';
 import { engineOf, fastPathContextOf } from '../../engine/deps.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
@@ -66,7 +66,7 @@ import {
 // only when it carries a type arg.
 // Row ops with a throw-free non-origin (root-scope) path. `tail`/`dedup` are excluded on
 // purpose: tail() requires an encounter column (throws at root) and dedup() clears the
-// carried schema (withoutCarried), which would desync the union/choose merge that projects
+// carried schema (dropLayoutAtBarrier), which would desync the union/choose merge that projects
 // the outer carried columns off every arm — both defer cleanly as an arm instead.
 const SCALAR_ARM_ROW = new Set(['as', 'is', 'constant', 'identity', 'order', 'limit', 'skip', 'range', 'unfold']);
 const SCALAR_ARM_FILTER = new Set(['and', 'or', 'not', 'filter', 'where']);
@@ -234,7 +234,7 @@ function genericScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): S
     const c = child.stream.rel.as('c');
     bools.push(q`EXISTS (SELECT 1 FROM ${c} WHERE ${c.c[frame.ordinal]}=${d.c[frame.ordinal]})`);
   }
-  // encounter now rides in carried (carryFrag), so it's NOT listed in the payload — the
+  // encounter now rides in carried (layoutProjection), so it's NOT listed in the payload — the
   // transient pushed frame's ordinal is dropped; the parent's carried (incl. its encounter)
   // is restored verbatim from the domain.
   const payloadCols = ['v', ...(s.result === 'number' ? ['vt'] : []), ...perRowCols(s.type)];
@@ -242,8 +242,8 @@ function genericScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): S
     seed: (combine) => {
       const proj = payloadCols.map((col) => q`${d.c[col]} AS ${col}`);
       const rel = s.q.cte(
-        q`SELECT ${list(proj, ', ')}${carryFrag(s.carried, d)} FROM ${d} WHERE ${combine(bools)}`,
-        [...payloadCols, ...carriedCols(s.carried)],
+        q`SELECT ${list(proj, ', ')}${layoutProjection(s.traverserLayout, d)} FROM ${d} WHERE ${combine(bools)}`,
+        [...payloadCols, ...layoutCols(s.traverserLayout)],
       );
       return rebuildScalar(s, rel);
     },
@@ -343,7 +343,7 @@ export function tryScalarCoalesceChild(s: ScalarStream, step: PStep): ScalarStre
 // (unionScalarStreams assumes every arm has a `v`). They merge into the SAME VariantStream
 // the element parent produces: each arm compiles to its natural shape and the rows carry a
 // `vk` tag (1 scalar / 2 node / 3 edge / 4 list). The merge builders (mergeVariantArms/
-// mergeVariantParts/variantArmsMeta, variant.ts) are parent-agnostic (Carry-typed) so this reuses
+// mergeVariantParts/variantArmsMeta, variant.ts) are parent-agnostic (LoweringState-typed) so this reuses
 // them verbatim — including the arm-merge encounter mint; only the per-arm compiler differs (a
 // scalar re-sources rather than walks).
 
@@ -406,7 +406,7 @@ function compileScalarVariantArm(seed: ScalarStream, nested: any): VariantArm {
  *  gating). Declines (null) when the arms are homogeneous (tryScalarUnionChild owns those) or
  *  any arm is unclassifiable, or under carried path/sack/fromV (fork/merge unworked). */
 export function tryScalarVariantUnion(s: ScalarStream, step: PStep): VariantStream | null {
-  if (s.carried.path || s.carried.sack || s.carried.fromV) return null;
+  if (s.traverserLayout.path || s.traverserLayout.sack || s.traverserLayout.fromV) return null;
   const branches = (step.args ?? []).filter(isNested);
   if (branches.length < 2) return null;
   const shapes = branches.map((b: any) => scalarArmShape(b.nested, s.params));
@@ -422,7 +422,7 @@ export function tryScalarVariantUnion(s: ScalarStream, step: PStep): VariantStre
  *  identity-else form, or any arm is unclassifiable. */
 export function tryScalarVariantChoose(s: ScalarStream, step: PStep): VariantStream | null {
   if (step.options) return null; // option-map form is the modulation seam
-  if (s.carried.path || s.carried.sack || s.carried.fromV) return null;
+  if (s.traverserLayout.path || s.traverserLayout.sack || s.traverserLayout.fromV) return null;
   const args = step.args ?? [];
   const nested = args.filter(isNested);
   const predIsTraversal = args[0] && typeof args[0] === 'object' && 'nested' in args[0];
@@ -446,7 +446,7 @@ export function tryScalarVariantChoose(s: ScalarStream, step: PStep): VariantStr
  *  rule, exactly branch.ts's tryLowerVariantCoalesce, over a scalar seed. Declines for
  *  homogeneous arms (tryScalarCoalesceChild owns those) or an unclassifiable arm. */
 export function tryScalarVariantCoalesce(s: ScalarStream, step: PStep): VariantStream | null {
-  if (s.carried.path || s.carried.sack || s.carried.fromV) return null;
+  if (s.traverserLayout.path || s.traverserLayout.sack || s.traverserLayout.fromV) return null;
   const branches = (step.args ?? []).filter(isNested);
   if (!branches.length) return null;
   const shapes = branches.map((b: any) => scalarArmShape(b.nested, s.params));
@@ -462,7 +462,7 @@ export function tryScalarVariantCoalesce(s: ScalarStream, step: PStep): VariantS
  *  it produces, else the input value restored (a filter arm that drops a value → the original
  *  passes through). Homogeneous → a scalar stream; an element/list arm takes the variant path. */
 export function tryScalarOptionalChild(s: ScalarStream, step: PStep): ScalarStream | null {
-  if (s.carried.sack || s.carried.fromV) return null;
+  if (s.traverserLayout.sack || s.traverserLayout.fromV) return null;
   const arg = step.args?.[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
   if (!scalarArmClassifies(childSteps(arg.nested, s.params), s.params)) return null;
@@ -471,25 +471,25 @@ export function tryScalarOptionalChild(s: ScalarStream, step: PStep): ScalarStre
   const arm = tryCompileScalarArm(seed, arg.nested);
   if (!arm) return null;
   const numeric = arm.result === 'number';
-  const cols = ['v', ...(numeric ? ['vt'] : []), ...carriedCols(s.carried)];
+  const cols = ['v', ...(numeric ? ['vt'] : []), ...layoutCols(s.traverserLayout)];
   const a = arm.rel.as('a');
   const d = frame.domain.as('d');
   const am = arm.rel.as('am');
-  const hit = q`SELECT ${a.c.v} AS v${numeric ? q`, ${a.c.vt} AS vt` : empty}${carryFrag(s.carried, a)} FROM ${a}`;
-  const miss = q`SELECT ${d.c.v} AS v${numeric ? q`, NULL AS vt` : empty}${carryFrag(s.carried, d)} FROM ${d} WHERE NOT EXISTS (SELECT 1 FROM ${am} WHERE ${am.c[ord]}=${d.c[ord]})`;
+  const hit = q`SELECT ${a.c.v} AS v${numeric ? q`, ${a.c.vt} AS vt` : empty}${layoutProjection(s.traverserLayout, a)} FROM ${a}`;
+  const miss = q`SELECT ${d.c.v} AS v${numeric ? q`, NULL AS vt` : empty}${layoutProjection(s.traverserLayout, d)} FROM ${d} WHERE NOT EXISTS (SELECT 1 FROM ${am} WHERE ${am.c[ord]}=${d.c[ord]})`;
   const rel = s.q.cte(list([hit, miss], ' UNION ALL '), cols);
   // The merged projection is (v[, vt]) + carried — no vtype column — and the miss arm's
   // values come from the parent anyway, so a per-row arm type cannot survive: degrade to
   // `unknown` (inferred at the wire) rather than claim a column the relation lacks.
   const merged = arm.type.kind === 'perRow' ? UNKNOWN : arm.type;
-  return toScalarStream(carryOf(s), rel, undefined, { type: merged, result: numeric ? 'number' : 'value' });
+  return toScalarStream(loweringStateOf(s), rel, undefined, { type: merged, result: numeric ? 'number' : 'value' });
 }
 
 /** optional(t) over a scalar with an ELEMENT/LIST arm → a VariantStream: the arm's rows where it
  *  produces (vk 2/3/4), else the input VALUE restored (vk 1). The scalar twin of branch.ts's
  *  tryLowerVariantOptional (flipped: there the miss is an element, here the miss is the value). */
 export function tryScalarVariantOptional(s: ScalarStream, step: PStep): VariantStream | null {
-  if (s.carried.path || s.carried.sack || s.carried.fromV) return null;
+  if (s.traverserLayout.path || s.traverserLayout.sack || s.traverserLayout.fromV) return null;
   const arg = step.args?.[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
   const shape = scalarArmShape(arg.nested, s.params);
@@ -506,8 +506,8 @@ export function tryScalarVariantOptional(s: ScalarStream, step: PStep): VariantS
   // the pushed domain). When emission order is live both must carry the arm tags so
   // mergeVariantParts can re-mint the canonical encounter — hit before miss, matching
   // coalesce(t, identity), which is what optional() IS.
-  const enc = s.carried.encounter;
-  const baseNoEnc = enc ? carriedWith(s.carried, { encounter: null }) : s.carried;
+  const enc = s.traverserLayout.encounter;
+  const baseNoEnc = enc ? patchLayout(s.traverserLayout, { encounter: null }) : s.traverserLayout;
   const armTag = (k: number, r: typeof d) => enc ? q`, ${k} AS arm_idx, ${r.c[enc]} AS arm_encounter` : empty;
   const a = arm.rel.as('a');
   const hitCols: Expression[] = [
@@ -516,8 +516,8 @@ export function tryScalarVariantOptional(s: ScalarStream, step: PStep): VariantS
     q`${arm.vk === 2 || arm.vk === 3 ? a.c.id : q`NULL`} AS rid`,
   ];
   if (hasList) hitCols.push(q`${arm.vk === 4 ? a.c.list : q`NULL`} AS list`);
-  const hit = q`SELECT ${list(hitCols, ', ')}${armTag(0, a)}${carryFrag(baseNoEnc, a)} FROM ${a}`;
-  const miss = q`SELECT 1 AS vk, ${d.c.v} AS v, NULL AS rid${listNull}${armTag(1, d)}${carryFrag(baseNoEnc, d)} FROM ${d} WHERE NOT EXISTS (SELECT 1 FROM ${am} WHERE ${am.c[ord]}=${d.c[ord]})`;
+  const hit = q`SELECT ${list(hitCols, ', ')}${armTag(0, a)}${layoutProjection(baseNoEnc, a)} FROM ${a}`;
+  const miss = q`SELECT 1 AS vk, ${d.c.v} AS v, NULL AS rid${listNull}${armTag(1, d)}${layoutProjection(baseNoEnc, d)} FROM ${d} WHERE NOT EXISTS (SELECT 1 FROM ${am} WHERE ${am.c[ord]}=${d.c[ord]})`;
   return mergeVariantParts(s, [hit, miss], meta);
 }
 
@@ -545,12 +545,12 @@ export function tryScalarFilterByChildExistence(s: ScalarStream, step: PStep): S
   const combined = paren(list(terms.map(paren), step.name === 'or' ? ' OR ' : ' AND '));
   const cond = step.name === 'not' ? q`NOT (${combined})` : combined;
   // Restore the parent's exact scalar payload from the pushed domain (drop the pushed ordinal).
-  // encounter rides in carried (carryFrag), so it is NOT listed in the payload.
+  // encounter rides in carried (layoutProjection), so it is NOT listed in the payload.
   const payloadCols = ['v', ...(s.result === 'number' ? ['vt'] : []), ...perRowCols(s.type)];
   const proj = payloadCols.map((col) => q`${d.c[col]} AS ${col}`);
   const rel = s.q.cte(
-    q`SELECT ${list(proj, ', ')}${carryFrag(s.carried, d)} FROM ${d} WHERE ${cond}`,
-    [...payloadCols, ...carriedCols(s.carried)],
+    q`SELECT ${list(proj, ', ')}${layoutProjection(s.traverserLayout, d)} FROM ${d} WHERE ${cond}`,
+    [...payloadCols, ...layoutCols(s.traverserLayout)],
   );
   return rebuildScalar(s, rel);
 }

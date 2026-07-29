@@ -12,7 +12,7 @@ through the ordinary kernel + streams — no new orchestrator.
 - **Keep the registry cycle-free.** `spi/types.ts` (leaf) ◂ `spi/registry.ts` (mechanism the
   compiler core imports) ◂ `standard.ts` (service impls, reached ONLY by DI/entry points). Do not
   make the compiler core import the service impls — that reintroduces the cycle.
-- **The registry is an app-scope dependency, not `Carry` state** (reached via
+- **The registry is an app-scope dependency, not `LoweringState` state** (reached via
   `engineOf(stream).registry`). A `call()` with no injected registry throws "unknown service".
 - **Standard services keep TinkerPop's canonical names** (`--list`, `tinker.search`,
   `tinker.degree.centrality`); our own extensions are `mogwai.*`.

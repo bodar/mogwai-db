@@ -3,8 +3,8 @@ import { q, list, empty, type Expression, type Relation } from '../../../sql/ker
 import { nodes, edges, labels } from '../../../sql/schema.ts';
 import { framedProps, labelNameSub, predicateSql, extIdOf, elemCtx, aliasCtx, scalarProp, type Elem, type ScalarCtx } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { carryFrag, carriedCols, scopePathCols, withoutCarried, withoutPath, type Carried, type ElementStream } from '../context/context.ts';
-import { carryOf, continueLowering, pathColumns, toListStream, toPathStream, toScalarStream, type ListStream, type LoweringResult, type PathStream, type ScalarStream } from '../context/stream.ts';
+import { layoutProjection, layoutCols, scopePathCols, dropLayoutAtBarrier, withoutPath, type TraverserLayout, type ElementStream } from '../context/context.ts';
+import { loweringStateOf, continueLowering, pathColumns, toListStream, toPathStream, toScalarStream, type ListStream, type LoweringResult, type PathStream, type ScalarStream } from '../context/stream.ts';
 import { compileFromList } from './list.ts';
 import { type PathPos } from '../../../sql/kernel/render.ts';
 import { type TailAcc } from './projection.ts';
@@ -134,9 +134,9 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   // from the chain's own text, so this means the stream was re-typed by a barrier that consumed
   // the positions (a cap()/unfold() re-entry) rather than walked to here. Mid-chain
   // union()/optional()/repeat() are caught earlier by their own path guards.
-  if (!st.carried.path) throw new Error('path() after a barrier that consumed the path positions is not yet supported');
-  if (st.carried.path.kind === 'array') return compilePathArray(st, proj, acc);
-  const pathState = st.carried.path; // narrowed to 'cols'; held in a local so the .map closure keeps the narrowing
+  if (!st.traverserLayout.path) throw new Error('path() after a barrier that consumed the path positions is not yet supported');
+  if (st.traverserLayout.path.kind === 'array') return compilePathArray(st, proj, acc);
+  const pathState = st.traverserLayout.path; // narrowed to 'cols'; held in a local so the .map closure keeps the narrowing
   if (acc.orders.length) throw new Error('order() after path() not yet supported');
   if (acc.reducer) throw new Error(`${acc.reducer}() after path() not yet supported`);
   if (acc.isPreds.length) throw new Error('is() after path() not yet supported');
@@ -144,7 +144,7 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   // from(l)/to(l): scope the Path to the positions between two as() labels, resolved to
   // their static linear positions (recorded on the alias entry at bind time). Inclusive
   // of both endpoints; an unbound label / empty range fails closed.
-  const scopedCols = scopePathCols(pathState.cols, proj.from, proj.to, st.carried.aliases);
+  const scopedCols = scopePathCols(pathState.cols, proj.from, proj.to, st.traverserLayout.aliases);
   const bys = proj.bys ?? [];
   const productive = proj.productiveBy === true;
   // A branched path (pad-to-max cols) has nullable positions: a shorter arm left them
@@ -218,18 +218,18 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   // after path() must resolve (TinkerPop Select.feature
   // g_V_hasXperson_name_markoX_path_asXaX_unionXidentity_identityX_selectXaX_unfold). Only the
   // path/origin state this barrier genuinely CONSUMES is dropped; the alias columns ride through
-  // via carryFrag. The recursive/grouped regime (compilePathArray) explodes one path into
+  // via layoutProjection. The recursive/grouped regime (compilePathArray) explodes one path into
   // (pk, ord) rows and so is NOT row-preserving — it keeps dropping them.
-  const outCarried: Carried = {
-    aliases: st.carried.aliases, origins: [], trackFromV: st.carried.trackFromV,
-    ...(st.carried.consumedAliases ? { consumedAliases: st.carried.consumedAliases } : {}),
+  const outCarried: TraverserLayout = {
+    aliases: st.traverserLayout.aliases, origins: [], trackFromV: st.traverserLayout.trackFromV,
+    ...(st.traverserLayout.consumedAliases ? { consumedAliases: st.traverserLayout.consumedAliases } : {}),
   };
-  const aliasCols = carriedCols(outCarried);
+  const aliasCols = layoutCols(outCarried);
   const carryCols = aliasCols.length ? list(aliasCols.map((c) => q`, ${p.c[c]}`), '') : empty;
   const node = q`SELECT ${dist}${list(cols, ', ')}${carryCols} FROM ${p}${list(joins, '')}${whereNode}${tailSql}`;
   const layout = { kind: 'linear' as const, positions };
   const rel = st.q.cte(node, [...pathColumns(layout), ...aliasCols]);
-  return toPathStream(carryOf(st, outCarried), rel, layout);
+  return toPathStream(loweringStateOf(st, outCarried), rel, layout);
 }
 
 /**
@@ -245,7 +245,7 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
  * has always had, now over `json_each` instead of over static position columns.
  *
  * The trick that unlocks it: the explode is naturally `(id, pk, ord)`, and an ElementStream's
- * physical schema is `['id', ...carriedCols]`, so `pk`/`ord` cannot just ride alongside. They ride
+ * physical schema is `['id', ...layoutCols]`, so `pk`/`ord` cannot just ride alongside. They ride
  * as **`origins`** — which is precisely what that slot means ("which parent did this row come
  * from"), and for a path element the answer literally is "path `pk`, position `ord`". So the
  * exploded relation is an ordinary element stream, `pushChildScope` mints its ordinal after them,
@@ -265,7 +265,7 @@ function groupedPositionChild(st: ElementStream, paths: Relation, nested: any, p
   // consumed by this barrier — the same reason the linear regime strips `path` from its child seed.
   const elemStream: ElementStream = {
     ...st, rel: elemRows, elem: 'vertex',
-    carried: { aliases: new Map(), origins: ['pk', 'ord'] },
+    traverserLayout: { aliases: new Map(), origins: ['pk', 'ord'] },
   };
   const outer = pushChildScope(elemStream);
   const child = lowerPathPositionChild(outer.seed, nested, outer, st.params);
@@ -343,7 +343,7 @@ function compilePathArray(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
         return q`SELECT pp.pk, je.key AS ord, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'vertex')} AS props FROM ${paths} pp, json_each(pp.path) je JOIN ${n} ON ${n.c.id}=je.value JOIN ${l} ON ${l.c.id}=${n.c.label} ORDER BY pp.pk, je.key`;
       })();
   const rel = st.q.cte(node, pathColumns(layout));
-  return toPathStream(withoutCarried(carryOf(st)), rel, layout);
+  return toPathStream(dropLayoutAtBarrier(loweringStateOf(st)), rel, layout);
 }
 
 /** Collection ops with unambiguous list semantics when applied to a Path: the Path is
@@ -362,10 +362,10 @@ function linearScalarList(s: PathStream): ListStream | null {
   const p = s.rel.as('p');
   const vals = s.layout.positions.map((pos) => p.c[`${pos.prefix}_v`]);
   const rel = s.q.cte(
-    q`SELECT jsonb(json_array(${list(vals, ', ')})) AS list${carryFrag(s.carried, p)} FROM ${p}`,
-    ['list', ...carriedCols(s.carried)],
+    q`SELECT jsonb(json_array(${list(vals, ', ')})) AS list${layoutProjection(s.traverserLayout, p)} FROM ${p}`,
+    ['list', ...layoutCols(s.traverserLayout)],
   );
-  return toListStream(carryOf(s), rel, { kind: 'scalar' });
+  return toListStream(loweringStateOf(s), rel, { kind: 'scalar' });
 }
 
 /** The path arm of lowerSteps — steps AFTER path() over a PathStream (P3 Stage A).
@@ -388,7 +388,7 @@ export function compileFromPath(s: PathStream, steps: PStep[], at: number): Lowe
       const p = s.rel.as('p');
       const cols = pathColumns(s.layout);
       const rel = s.q.cte(q`SELECT ${list(cols.map((c) => p.c[c]), ', ')} FROM ${p} WHERE 0`, cols);
-      return continueLowering(toPathStream(carryOf(s), rel, s.layout), at + 1);
+      return continueLowering(toPathStream(loweringStateOf(s), rel, s.layout), at + 1);
     }
     throw new Error('is() after path() supports only is(typeOf(GType.PATH))');
   }

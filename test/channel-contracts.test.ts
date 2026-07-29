@@ -26,11 +26,11 @@ describe('channel contracts', () => {
   });
 
   test('relational cardinality distinguishes rows, whole results, and path runs', () => {
-    expect(cardinalityOf({ kind: 'scalar', rel: { cols: [] }, carried: {} } as any)).toEqual({ kind: 'perRow' });
-    expect(cardinalityOf({ kind: 'group', rel: { cols: [] }, carried: {} } as any)).toEqual({ kind: 'wholeResult' });
-    expect(cardinalityOf({ kind: 'path', layout: { kind: 'grouped', elem: 'vertex' }, rel: { cols: ['pk', 'ord'] }, carried: {} } as any))
+    expect(cardinalityOf({ kind: 'scalar', rel: { cols: [] }, traverserLayout: {} } as any)).toEqual({ kind: 'perRow' });
+    expect(cardinalityOf({ kind: 'group', rel: { cols: [] }, traverserLayout: {} } as any)).toEqual({ kind: 'wholeResult' });
+    expect(cardinalityOf({ kind: 'path', layout: { kind: 'grouped', elem: 'vertex' }, rel: { cols: ['pk', 'ord'] }, traverserLayout: {} } as any))
       .toEqual({ kind: 'runsByKey', key: 'pk' });
-    expect(() => cardinalityOf({ kind: 'path', layout: { kind: 'grouped', elem: 'vertex' }, rel: { cols: ['ord'] }, carried: {} } as any))
+    expect(() => cardinalityOf({ kind: 'path', layout: { kind: 'grouped', elem: 'vertex' }, rel: { cols: ['ord'] }, traverserLayout: {} } as any))
       .toThrow('requires its pk run key');
   });
 });

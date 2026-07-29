@@ -13,20 +13,20 @@ import { q, list, empty, type Expression, type Relation } from '../../../sql/ker
 import { type ValueType } from '../../../sql/kernel/render.ts';
 import { rangeToOffsetLimit } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { carryOf, continueLowering, dispatchShapeTail, toListStream, toVariantStream, type ListStream, type LoweringResult, type ScalarStream, type ShapeTailFn, type VariantArms, type VariantStream } from '../context/stream.ts';
-import { aliasArmProjection, carryFrag, carryFragMint, carriedCols, carriedWith, mergeAliasMaps, partitionOver, type Carry } from '../context/context.ts';
+import { loweringStateOf, continueLowering, dispatchShapeTail, toListStream, toVariantStream, type ListStream, type LoweringResult, type ScalarStream, type ShapeTailFn, type VariantArms, type VariantStream } from '../context/stream.ts';
+import { aliasArmProjection, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, mergeAliasMaps, partitionOver, type LoweringState } from '../context/context.ts';
 import { lowerGlobalCount } from './barrier.ts';
 
 // ---------- variant-arm merge builders (parent-agnostic; element- and scalar-parent share) ----------
 //
 // A branch (union/choose/coalesce) whose arms disagree on shape merges them into a VariantStream.
 // Each arm compiles to its natural shape (element/scalar/list) tagged `vk`, and these builders
-// stitch the tagged rows into one relation. They touch only a bare Carry (carried columns), so
+// stitch the tagged rows into one relation. They touch only a bare LoweringState (carried columns), so
 // an element parent (branch.ts) and a scalar parent (child.ts) reuse them verbatim — only the
 // per-arm compiler differs (a scalar re-sources rather than walks).
 
-const carryWith = (base: Carry, carried: Carry['carried']): Carry =>
-  ({ q: base.q, params: base.params, sideEffects: base.sideEffects, carried });
+const stateWithLayout = (base: LoweringState, layout: LoweringState['traverserLayout']): LoweringState =>
+  ({ q: base.q, params: base.params, sideEffects: base.sideEffects, traverserLayout: layout });
 
 /** The item-shape a set of list arms unify to (or throws if incompatible). */
 export const unifyLists = (arms: readonly ListStream[]): ListStream['of'] => {
@@ -45,7 +45,7 @@ export const unifyLists = (arms: readonly ListStream[]): ListStream['of'] => {
 /** Merge a set of HOMOGENEOUS list arms (union/coalesce/choose over `…fold()` bodies) into one
  *  ListStream — the list twin of finishElementMerge/unionScalarStreams/mergeVariantArms, which
  *  the three element-parent list branches previously hand-rolled verbatim. Parent-agnostic (a
- *  bare Carry) so a future scalar-parent homogeneous-list branch reuses it rather than growing a
+ *  bare LoweringState) so a future scalar-parent homogeneous-list branch reuses it rather than growing a
  *  fourth copy. `gateFor` supplies a per-arm WHERE (coalesce's not-in-prior).
  *
  *  EMISSION ORDER: each arm's fold() already collapsed its own multiset to ONE row per input, so
@@ -56,59 +56,59 @@ export const unifyLists = (arms: readonly ListStream[]): ListStream['of'] => {
  *  re-mints `ROW_NUMBER() OVER (… ORDER BY arm_idx, arm_encounter)` and is correct by
  *  construction rather than a silent take-first bug. */
 export function finishListMerge(
-  base: Carry, arms: readonly ListStream[], gateFor?: (a: Relation, k: number) => Expression | undefined,
+  base: LoweringState, arms: readonly ListStream[], gateFor?: (a: Relation, k: number) => Expression | undefined,
 ): ListStream {
   const of = unifyLists(arms);
-  const enc = base.carried.encounter;
+  const enc = base.traverserLayout.encounter;
   // Union the arms' LABEL SETS onto the base. An arm may bind a label the base never saw —
   // `union(__.out().fold().as("x"), …)` binds it on the LIST the fold produced, which survives the
   // barrier because it is bound after it. Without the union that column is absent from the merged
   // schema and a later select() reads nothing: a silent [].
   //
-  // Only the aliases: NOT mergeCarried. These arms are child-scoped and tryCompileListChild has
-  // already re-homed them onto the parent, so mergeCarried's rigid-role assertion is false here
+  // Only the aliases: NOT mergeLayouts. These arms are child-scoped and tryCompileListChild has
+  // already re-homed them onto the parent, so mergeLayouts's rigid-role assertion is false here
   // (a child scope pushed an ordinal the base lacks) — asserting it breaks coalesce outright.
-  const mergedAliases = mergeAliasMaps(base.carried.aliases, arms.map((a) => a.carried));
-  const grew = mergedAliases.size !== base.carried.aliases.size;
-  const withAliases = (c: Carry['carried']) => grew ? { ...c, aliases: mergedAliases } : c;
-  const armSelect = (arm: ListStream, k: number, carried: Carry['carried'], tag: boolean): Expression => {
+  const mergedAliases = mergeAliasMaps(base.traverserLayout.aliases, arms.map((a) => a.traverserLayout));
+  const grew = mergedAliases.size !== base.traverserLayout.aliases.size;
+  const withAliases = (c: LoweringState['traverserLayout']) => grew ? { ...c, aliases: mergedAliases } : c;
+  const armSelect = (arm: ListStream, k: number, layout: LoweringState['traverserLayout'], tag: boolean): Expression => {
     const a = arm.rel.as('a');
-    const armEnc = tag ? q`, ${k} AS arm_idx, ${arm.carried.encounter ? a.c[arm.carried.encounter] : q`1`} AS arm_encounter` : empty;
+    const armEnc = tag ? q`, ${k} AS arm_idx, ${arm.traverserLayout.encounter ? a.c[arm.traverserLayout.encounter] : q`1`} AS arm_encounter` : empty;
     const gate = gateFor?.(a, k);
     // Alias columns come from the ARM (remapped, NULL where it never bound the label); every other
     // carried column is state the arms share with the base and rides through unchanged.
     const frag = grew
-      ? list([...aliasArmProjection(arm.carried.aliases, mergedAliases, a).map((e) => q`, ${e}`),
-              ...carriedCols(carriedWith(carried, { aliases: new Map() })).map((c) => q`, ${a.c[c]}`)], '')
-      : carryFrag(carried, a);
+      ? list([...aliasArmProjection(arm.traverserLayout.aliases, mergedAliases, a).map((e) => q`, ${e}`),
+              ...layoutCols(patchLayout(layout, { aliases: new Map() })).map((c) => q`, ${a.c[c]}`)], '')
+      : layoutProjection(layout, a);
     return q`SELECT ${a.c.list} AS list${armEnc}${frag} FROM ${a}${gate ? q` WHERE ${gate}` : empty}`;
   };
   if (!enc) {
-    const out = withAliases(base.carried);
+    const out = withAliases(base.traverserLayout);
     const rel = base.q.cte(
       list(arms.map((arm, k) => armSelect(arm, k, out, false)), ' UNION ALL '),
-      ['list', ...carriedCols(out)],
+      ['list', ...layoutCols(out)],
     );
-    return toListStream(carryWith(base, out), rel, of);
+    return toListStream(stateWithLayout(base, out), rel, of);
   }
-  const baseNoEnc = carriedWith(withAliases(base.carried), { encounter: null });
+  const baseNoEnc = patchLayout(withAliases(base.traverserLayout), { encounter: null });
   const inner = base.q.cte(
     list(arms.map((arm, k) => armSelect(arm, k, baseNoEnc, true)), ' UNION ALL '),
-    ['list', 'arm_idx', 'arm_encounter', ...carriedCols(baseNoEnc)],
+    ['list', 'arm_idx', 'arm_encounter', ...layoutCols(baseNoEnc)],
   );
   const m = inner.as('m');
-  const over = partitionOver(base.carried, m, q`${m.c.arm_idx}, ${m.c.arm_encounter}`);
-  const outCarried = carriedWith(baseNoEnc, { encounter: 'encounter' });
+  const over = partitionOver(base.traverserLayout, m, q`${m.c.arm_idx}, ${m.c.arm_encounter}`);
+  const outCarried = patchLayout(baseNoEnc, { encounter: 'encounter' });
   const rel = base.q.cte(
-    q`SELECT ${m.c.list} AS list${carryFragMint(outCarried, m, 'encounter', q`ROW_NUMBER() OVER (${over})`)} FROM ${m}`,
-    ['list', ...carriedCols(outCarried)],
+    q`SELECT ${m.c.list} AS list${layoutProjectionMinting(outCarried, m, 'encounter', q`ROW_NUMBER() OVER (${over})`)} FROM ${m}`,
+    ['list', ...layoutCols(outCarried)],
   );
-  return toListStream(carryWith(base, outCarried), rel, of);
+  return toListStream(stateWithLayout(base, outCarried), rel, of);
 }
 
 /** One compiled branch arm tagged by its natural shape (vk 1 scalar / 2 node / 3 edge /
  *  4 list). Parent-agnostic: an element-parent (branch.ts) and a scalar-parent (child.ts)
- *  both build these, so the merge builders below take a bare Carry, not an ElementStream. */
+ *  both build these, so the merge builders below take a bare LoweringState, not an ElementStream. */
 export interface VariantArm {
   readonly rel: Relation;
   readonly vk: 1 | 2 | 3 | 4;
@@ -127,8 +127,8 @@ export function variantArmsMeta(arms: readonly VariantArm[]): VariantArms {
 
 /** One arm's variant-row SELECT: `vk, v, rid[, list]` + the outer carried columns.
  *  `gate` (coalesce's not-in-prior / any per-arm filter) receives the aliased arm rel.
- *  Takes a bare Carry so element- and scalar-parent merges share it. */
-export function variantArmSelect(arm: VariantArm, carry: Carry, hasList: boolean, gate?: (a: Relation) => Expression | undefined): Expression {
+ *  Takes a bare LoweringState so element- and scalar-parent merges share it. */
+export function variantArmSelect(arm: VariantArm, carry: LoweringState, hasList: boolean, gate?: (a: Relation) => Expression | undefined): Expression {
   const a = arm.rel.as('a');
   const cols: Expression[] = [
     q`${arm.vk} AS vk`,
@@ -137,11 +137,11 @@ export function variantArmSelect(arm: VariantArm, carry: Carry, hasList: boolean
   ];
   if (hasList) cols.push(q`${arm.vk === 4 ? a.c.list : q`NULL`} AS list`);
   const g = gate?.(a);
-  return q`SELECT ${list(cols, ', ')}${carryFrag(carry.carried, a)} FROM ${a}${g ? q` WHERE ${g}` : empty}`;
+  return q`SELECT ${list(cols, ', ')}${layoutProjection(carry.traverserLayout, a)} FROM ${a}${g ? q` WHERE ${g}` : empty}`;
 }
 
-export const variantCols = (carry: Carry, hasList: boolean): string[] =>
-  ['vk', 'v', 'rid', ...(hasList ? ['list'] : []), ...carriedCols(carry.carried)];
+export const variantCols = (carry: LoweringState, hasList: boolean): string[] =>
+  ['vk', 'v', 'rid', ...(hasList ? ['list'] : []), ...layoutCols(carry.traverserLayout)];
 
 
 /** Merge a set of variant arms (mixed-shape branch) into one VariantStream. Parent-agnostic
@@ -150,9 +150,9 @@ export const variantCols = (carry: Carry, hasList: boolean): string[] =>
  *  `encounter = ROW_NUMBER() OVER (<partition> ORDER BY arm_idx, arm_encounter)` in the carried
  *  slot — arm a before arm b, matching TinkerPop union/coalesce/choose order. Without a live
  *  encounter it is a plain UNION ALL. `gateFor` supplies a per-arm WHERE (coalesce's not-in-prior). */
-export function mergeVariantArms(base: Carry, arms: readonly VariantArm[], meta: VariantArms, gateFor?: (a: Relation, k: number) => Expression | undefined): VariantStream {
+export function mergeVariantArms(base: LoweringState, arms: readonly VariantArm[], meta: VariantArms, gateFor?: (a: Relation, k: number) => Expression | undefined): VariantStream {
   const hasList = !!meta.listOf;
-  const enc = base.carried.encounter;
+  const enc = base.traverserLayout.encounter;
   if (!enc) {
     return mergeVariantParts(
       base,
@@ -160,7 +160,7 @@ export function mergeVariantArms(base: Carry, arms: readonly VariantArm[], meta:
       meta,
     );
   }
-  const baseNoEnc = carriedWith(base.carried, { encounter: null });
+  const baseNoEnc = patchLayout(base.traverserLayout, { encounter: null });
   const parts = arms.map((arm, k) => {
     const a = arm.rel.as('a');
     const cols: Expression[] = [
@@ -171,7 +171,7 @@ export function mergeVariantArms(base: Carry, arms: readonly VariantArm[], meta:
     if (hasList) cols.push(q`${arm.vk === 4 ? a.c.list : q`NULL`} AS list`);
     cols.push(q`${k} AS arm_idx`, q`${a.c[enc]} AS arm_encounter`);
     const gate = gateFor?.(a, k);
-    return q`SELECT ${list(cols, ', ')}${carryFrag(baseNoEnc, a)} FROM ${a}${gate ? q` WHERE ${gate}` : empty}`;
+    return q`SELECT ${list(cols, ', ')}${layoutProjection(baseNoEnc, a)} FROM ${a}${gate ? q` WHERE ${gate}` : empty}`;
   });
   return mergeVariantParts(base, parts, meta);
 }
@@ -183,23 +183,23 @@ export function mergeVariantArms(base: Carry, arms: readonly VariantArm[], meta:
  *  pushed DOMAIN — reuses the identical mint rather than hand-rolling a second copy. When the
  *  encounter is live, every `part` MUST carry trailing `arm_idx, arm_encounter` columns (the
  *  no-encounter form must not); a mismatch trips assertStreamColumns immediately. */
-export function mergeVariantParts(base: Carry, parts: readonly Expression[], meta: VariantArms): VariantStream {
+export function mergeVariantParts(base: LoweringState, parts: readonly Expression[], meta: VariantArms): VariantStream {
   const hasList = !!meta.listOf;
   const payloadCols = ['vk', 'v', 'rid', ...(hasList ? ['list'] : [])];
-  if (!base.carried.encounter) {
+  if (!base.traverserLayout.encounter) {
     return toVariantStream(base, base.q.cte(list(parts, ' UNION ALL '), variantCols(base, hasList)), meta);
   }
-  const baseNoEnc = carriedWith(base.carried, { encounter: null });
-  const inner = base.q.cte(list(parts, ' UNION ALL '), [...payloadCols, 'arm_idx', 'arm_encounter', ...carriedCols(baseNoEnc)]);
+  const baseNoEnc = patchLayout(base.traverserLayout, { encounter: null });
+  const inner = base.q.cte(list(parts, ' UNION ALL '), [...payloadCols, 'arm_idx', 'arm_encounter', ...layoutCols(baseNoEnc)]);
   const m = inner.as('m');
-  const over = partitionOver(base.carried, m, q`${m.c.arm_idx}, ${m.c.arm_encounter}`);
-  const outCarried = carriedWith(baseNoEnc, { encounter: 'encounter' });
+  const over = partitionOver(base.traverserLayout, m, q`${m.c.arm_idx}, ${m.c.arm_encounter}`);
+  const outCarried = patchLayout(baseNoEnc, { encounter: 'encounter' });
   const proj = list(payloadCols.map((c) => q`${m.c[c]} AS ${c}`), ', ');
   const rel = base.q.cte(
-    q`SELECT ${proj}${carryFragMint(outCarried, m, 'encounter', q`ROW_NUMBER() OVER (${over})`)} FROM ${m}`,
-    [...payloadCols, ...carriedCols(outCarried)],
+    q`SELECT ${proj}${layoutProjectionMinting(outCarried, m, 'encounter', q`ROW_NUMBER() OVER (${over})`)} FROM ${m}`,
+    [...payloadCols, ...layoutCols(outCarried)],
   );
-  return toVariantStream(carryWith(base, outCarried), rel, meta);
+  return toVariantStream(stateWithLayout(base, outCarried), rel, meta);
 }
 
 const armsOf = (s: VariantStream) => ({ scalarAs: s.scalarAs, node: s.node, edge: s.edge, listOf: s.listOf });
@@ -214,9 +214,9 @@ function reselect(s: VariantStream, opts: { distinct?: boolean; suffix?: Express
   // A positional consumer has a canonical answer whenever the chain requested an
   // encounter channel. Keep unordered relations unordered rather than inventing a
   // SQLite scan order; source/merge builders are responsible for minting that channel.
-  const order = opts.orderByEncounter && s.carried.encounter ? q` ORDER BY ${p.c[s.carried.encounter]}` : empty;
+  const order = opts.orderByEncounter && s.traverserLayout.encounter ? q` ORDER BY ${p.c[s.traverserLayout.encounter]}` : empty;
   const body = q`SELECT ${opts.distinct ? q`DISTINCT ` : empty}${projected} FROM ${p}${order}${opts.suffix ?? empty}`;
-  return toVariantStream(carryOf(s), s.q.cte(body, cols), armsOf(s), s.result);
+  return toVariantStream(loweringStateOf(s), s.q.cte(body, cols), armsOf(s), s.result);
 }
 
 const variantSlice = (suffix: (step: PStep) => Expression): ShapeTailFn<VariantStream> =>
@@ -243,7 +243,7 @@ const VARIANT_DISPATCH = new Map<string, ShapeTailFn<VariantStream>>([
     if ((step.bys ?? []).length) throw new Error('dedup().by() over a variant value not yet supported');
     // A carried bulk column rides through the DISTINCT re-projection (bulk≡1 today, so
     // DISTINCT is unaffected); real path/label state still defers.
-    if (carriedCols(s.carried).some((c) => c !== s.carried.bulk)) throw new Error('dedup() over a variant with carried path/label state not yet supported (path-distinct semantics)');
+    if (layoutCols(s.traverserLayout).some((c) => c !== s.traverserLayout.bulk)) throw new Error('dedup() over a variant with carried path/label state not yet supported (path-distinct semantics)');
     return continueLowering(reselect(s, { distinct: true }), at + 1);
   }],
 ]);

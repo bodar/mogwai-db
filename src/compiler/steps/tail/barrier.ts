@@ -1,8 +1,8 @@
 import { derived, empty, q, raw, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { perRowColumnOf, staticTypeOf, type ListOf } from '../../../sql/kernel/render.ts';
 import { typedScalarNode } from '../../plan/plan.ts';
-import { cardinalityOf, carryOf, toListStream, toScalarStream, type ListStream, type RelationalStream, type ScalarStream } from '../context/stream.ts';
-import { carriedCols, carryFrag, carryFragMint, carriedWith, withoutCarried, type ElementStream } from '../context/context.ts';
+import { cardinalityOf, loweringStateOf, toListStream, toScalarStream, type ListStream, type RelationalStream, type ScalarStream } from '../context/stream.ts';
+import { layoutCols, layoutProjection, layoutProjectionMinting, patchLayout, dropLayoutAtBarrier, type ElementStream } from '../context/context.ts';
 import { type ChildScope } from './child-shape.ts';
 
 const currentFrame = (scope: ChildScope) => {
@@ -17,7 +17,7 @@ const currentFrame = (scope: ChildScope) => {
  * (a collapse merged convergent walks into (row, N) pairs), else the plain row COUNT
  * (identical while bulk≡1). */
 export function lowerGlobalCount(input: RelationalStream): ScalarStream {
-  const bulk = input.carried.bulk;
+  const bulk = input.traverserLayout.bulk;
   const s = input.rel.as('s');
   const cardinality = cardinalityOf(input);
   const agg = cardinality.kind === 'wholeResult'
@@ -28,7 +28,7 @@ export function lowerGlobalCount(input: RelationalStream): ScalarStream {
   const rel = cardinality.kind === 'wholeResult'
     ? input.q.cte(q`SELECT ${agg} AS v`, ['v'])
     : input.q.cte(q`SELECT ${agg} AS v FROM ${s}`, ['v']);
-  return toScalarStream(withoutCarried(carryOf(input)), rel, 'long', { result: 'count' });
+  return toScalarStream(dropLayoutAtBarrier(loweringStateOf(input)), rel, 'long', { result: 'count' });
 }
 
 /** The canonical types a bare member round-trips WITHOUT an envelope — i.e. the types the
@@ -86,13 +86,13 @@ export function lowerGlobalFold(input: ScalarStream): ListStream {
   const src = input.rel.as('s');
   // Order the folded list by the carried emission encounter when the chain tracks one
   // (canonical emission order, Stage B); otherwise the list keeps incidental row order.
-  const order = input.carried.encounter ? q` ORDER BY ${src.c[input.carried.encounter]}` : empty;
+  const order = input.traverserLayout.encounter ? q` ORDER BY ${src.c[input.traverserLayout.encounter]}` : empty;
   const { member, of } = foldMember(input, src);
   const rel = input.q.cte(
     q`SELECT jsonb(COALESCE(json_group_array(${member}${order}), json('[]'))) AS list FROM ${src}`,
     ['list'],
   );
-  return toListStream(withoutCarried(carryOf(input)), rel, of);
+  return toListStream(dropLayoutAtBarrier(loweringStateOf(input)), rel, of);
 }
 
 /** Child-scoped fold produces exactly one list traverser per parent origin. The
@@ -102,17 +102,17 @@ export function lowerScopedScalarFold(
   input: ScalarStream,
   scope: ChildScope,
 ): ListStream {
-  const { domain, ordinal, carried } = currentFrame(scope);
-  if (!input.carried.encounter) throw new Error('scoped scalar fold requires explicit encounter order');
-  const enc = input.carried.encounter;
+  const { domain, ordinal, traverserLayout: layout } = currentFrame(scope);
+  if (!input.traverserLayout.encounter) throw new Error('scoped scalar fold requires explicit encounter order');
+  const enc = input.traverserLayout.encounter;
   const d = domain.as('d');
   const s = input.rel.as('s');
   const { member, of } = foldMember(input, s);
   const rel = input.q.cte(
-    q`SELECT jsonb(COALESCE(json_group_array(${member} ORDER BY ${s.c[enc]}) FILTER (WHERE ${s.c[enc]} IS NOT NULL), json('[]'))) AS list${carryFrag(carried, d)} FROM ${d} LEFT JOIN ${s} ON ${s.c[ordinal]}=${d.c[ordinal]} GROUP BY ${d.c[ordinal]}`,
-    ['list', ...carriedCols(carried)],
+    q`SELECT jsonb(COALESCE(json_group_array(${member} ORDER BY ${s.c[enc]}) FILTER (WHERE ${s.c[enc]} IS NOT NULL), json('[]'))) AS list${layoutProjection(layout, d)} FROM ${d} LEFT JOIN ${s} ON ${s.c[ordinal]}=${d.c[ordinal]} GROUP BY ${d.c[ordinal]}`,
+    ['list', ...layoutCols(layout)],
   );
-  return toListStream(carryOf(input, carried), rel, of);
+  return toListStream(loweringStateOf(input, layout), rel, of);
 }
 
 /** Element child fold stores rowids in encounter order; ListStream metadata retains
@@ -122,7 +122,7 @@ export function lowerScopedElementFold(
   input: ElementStream,
   scope: ChildScope,
 ): ListStream {
-  const { domain, ordinal, carried } = currentFrame(scope);
+  const { domain, ordinal, traverserLayout: layout } = currentFrame(scope);
   const c = input.rel.as('c');
   const r = derived(
     q`SELECT ${c.c.id} AS id, ${c.c[ordinal]} AS ${ordinal}, ROW_NUMBER() OVER (PARTITION BY ${c.c[ordinal]} ORDER BY ${c.c.id}) AS encounter FROM ${c}`,
@@ -131,10 +131,10 @@ export function lowerScopedElementFold(
   );
   const d = domain.as('d');
   const rel = input.q.cte(
-    q`SELECT jsonb(COALESCE(json_group_array(${r.c.id} ORDER BY ${r.c.encounter}) FILTER (WHERE ${r.c.encounter} IS NOT NULL), json('[]'))) AS list${carryFrag(carried, d)} FROM ${d} LEFT JOIN ${r} ON ${r.c[ordinal]}=${d.c[ordinal]} GROUP BY ${d.c[ordinal]}`,
-    ['list', ...carriedCols(carried)],
+    q`SELECT jsonb(COALESCE(json_group_array(${r.c.id} ORDER BY ${r.c.encounter}) FILTER (WHERE ${r.c.encounter} IS NOT NULL), json('[]'))) AS list${layoutProjection(layout, d)} FROM ${d} LEFT JOIN ${r} ON ${r.c[ordinal]}=${d.c[ordinal]} GROUP BY ${d.c[ordinal]}`,
+    ['list', ...layoutCols(layout)],
   );
-  return toListStream(carryOf(input, carried), rel, { kind: 'elem', elem: input.elem });
+  return toListStream(loweringStateOf(input, layout), rel, { kind: 'elem', elem: input.elem });
 }
 
 export type NumericReducer = 'sum' | 'min' | 'max' | 'mean';
@@ -191,9 +191,9 @@ export function lowerScopedScalarReducer(
   reducer: ScalarReducer,
   scope: ChildScope,
 ): ScalarStream {
-  const { domain, ordinal, carried } = currentFrame(scope);
-  if (!input.carried.encounter) throw new Error('scoped scalar reducer requires explicit encounter order');
-  const inEnc = input.carried.encounter;
+  const { domain, ordinal, traverserLayout: layout } = currentFrame(scope);
+  if (!input.traverserLayout.encounter) throw new Error('scoped scalar reducer requires explicit encounter order');
+  const inEnc = input.traverserLayout.encounter;
   const d = domain.as('d');
   const s = input.rel.as('s');
   const join = q`${d} LEFT JOIN ${s} ON ${s.c[ordinal]}=${d.c[ordinal]}`;
@@ -214,12 +214,12 @@ export function lowerScopedScalarReducer(
   }
   // One result row per origin — mint a constant encounter (1) into its carried slot as the
   // per-origin order marker a following scoped slice/reducer needs.
-  const outCarried = carriedWith(carried, { encounter: 'encounter' });
+  const outCarried = patchLayout(layout, { encounter: 'encounter' });
   const rel = input.q.cte(
-    q`SELECT ${aggregate}${carryFragMint(outCarried, d, 'encounter', q`1`)} FROM ${join} GROUP BY ${d.c[ordinal]}`,
-    [...(result === 'number' ? ['v', 'vt'] : ['v']), ...carriedCols(outCarried)],
+    q`SELECT ${aggregate}${layoutProjectionMinting(outCarried, d, 'encounter', q`1`)} FROM ${join} GROUP BY ${d.c[ordinal]}`,
+    [...(result === 'number' ? ['v', 'vt'] : ['v']), ...layoutCols(outCarried)],
   );
-  return toScalarStream(carryOf(input, outCarried), rel, as, { result });
+  return toScalarStream(loweringStateOf(input, outCarried), rel, as, { result });
 }
 
 /** A numeric/comparable reduction carries SQLite's winning storage class as `vt`.
@@ -227,7 +227,7 @@ export function lowerScopedScalarReducer(
  * can remain relational without losing GraphBinary numeric framing. */
 export function lowerGlobalNumericReducer(input: ScalarStream, reducer: NumericReducer): ScalarStream {
   const src = input.rel.as('s');
-  const bulk = input.carried.bulk ? src.c[input.carried.bulk] : undefined;
+  const bulk = input.traverserLayout.bulk ? src.c[input.traverserLayout.bulk] : undefined;
   let body;
   if (reducer === 'sum') {
     const sum = bulk ? q`SUM(${src.c.v} * ${bulk})` : q`SUM(${src.c.v})`;
@@ -243,5 +243,5 @@ export function lowerGlobalNumericReducer(input: ScalarStream, reducer: NumericR
     body = q`SELECT ${fn}(${src.c.v}) AS v, typeof(${fn}(${src.c.v})) AS vt FROM ${src} WHERE typeof(${src.c.v}) in ('integer', 'real', 'text')`;
   }
   const rel = input.q.cte(body, ['v', 'vt']);
-  return toScalarStream(withoutCarried(carryOf(input)), rel, undefined, { result: 'number', productiveNull: input.productiveNull });
+  return toScalarStream(dropLayoutAtBarrier(loweringStateOf(input)), rel, undefined, { result: 'number', productiveNull: input.productiveNull });
 }

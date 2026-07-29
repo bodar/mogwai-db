@@ -7,8 +7,8 @@ import {
 import { gtypeName, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { isMapLocalOrder } from './list.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { advance, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, partitionOver, prevRel, withCarried, withoutCarried, type Carried, type Carry, type ElementStream } from '../context/context.ts';
-import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toElementStream, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
+import { advance, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, partitionOver, prevRel, withLayout, dropLayoutAtBarrier, type TraverserLayout, type LoweringState, type ElementStream } from '../context/context.ts';
+import { loweringStateOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toElementStream, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
 import { PER_ROW, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { applyChildCardinality, lowerElementBody, mintChildEncounter, pushChildScope, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows } from './child.ts';
@@ -87,7 +87,7 @@ export function elementGroupSource(st: ElementStream, productiveBy?: boolean): G
     elem: st.elem,
     parent: st,
     productiveBy,
-    bulk: st.carried.bulk ? p.c[st.carried.bulk] : undefined,
+    bulk: st.traverserLayout.bulk ? p.c[st.traverserLayout.bulk] : undefined,
   };
 }
 
@@ -194,8 +194,8 @@ function nestedInnerKeyVal(
  *  productivity MARKER a LEFT-JOINed empty child is filtered by. Its absence is an internal
  *  contradiction (a rows-retaining child that minted no order), so say so instead of emitting
  *  `undefined` as a column name via a bare `!`. */
-const childEncounter = (rows: { carried: Carried }, site: string): string => {
-  const enc = rows.carried.encounter;
+const childEncounter = (rows: { traverserLayout: TraverserLayout }, site: string): string => {
+  const enc = rows.traverserLayout.encounter;
   if (!enc) throw new Error(`${site}: child rows carry no emission-order encounter to fold/mark on`);
   return enc;
 };
@@ -353,7 +353,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     // The child rows inherit the source traverser's bulk through the child scope; a value
     // reducer weights by it so a bulked (collapsed/repeat) parent counts each contribution
     // its multiplicity of times (identical while bulk≡1).
-    valBulk = rows.stream.carried.bulk ? c.c[rows.stream.carried.bulk] : undefined;
+    valBulk = rows.stream.traverserLayout.bulk ? c.c[rows.stream.traverserLayout.bulk] : undefined;
   }
   if (genericFold) {
     const rows = tryCompileScalarRowsBeforeFold(outer.seed, valArg.nested, reuse(), valBody)!;
@@ -390,7 +390,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
       const e = (rows.stream.elem === 'edge' ? edges : nodes).as('gnge');
       joins.push(q` JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]} JOIN ${e} ON ${e.c.id}=${c.c.id}`);
       innerCtx = elemCtx(e, rows.stream.elem);
-      innerBulk = rows.stream.carried.bulk ? c.c[rows.stream.carried.bulk] : undefined;
+      innerBulk = rows.stream.traverserLayout.bulk ? c.c[rows.stream.traverserLayout.bulk] : undefined;
     } else {
       // properties() over the outer element: its VertexProperty rows joined off the pushed
       // domain id. innerCtx reads the property's key (T.label) / value like propertyCtx.
@@ -402,7 +402,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
         elem: 'property', idExpr: vp.c.id, labelIdExpr: q`(SELECT label FROM nodes WHERE id=${vp.c.node})`,
         ownerExpr: vp.c.node, pkExpr: vp.c.key, pvExpr: storedValueExpr(vp.c.value, vp.c.vtype), metaExpr: q`json(${vp.c.meta})`,
       };
-      innerBulk = parent.carried.bulk ? p.c[parent.carried.bulk] : undefined;
+      innerBulk = parent.traverserLayout.bulk ? p.c[parent.traverserLayout.bulk] : undefined;
     }
     const kv = nestedInnerKeyVal(nestedGroup as PStep, innerCtx, parent.params, innerBulk);
     if (!kv) return null; // inner key/value shape not yet generic — clean deferral
@@ -410,7 +410,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   }
   // The pushed domain `p` re-projects the parent traverser's bulk, so a source-level count
   // (bare groupCount() over a by(traversal) key) weights by it just like the direct path.
-  const bulk = parent.carried.bulk ? p.c[parent.carried.bulk] : undefined;
+  const bulk = parent.traverserLayout.bulk ? p.c[parent.traverserLayout.bulk] : undefined;
   const common = { keyExpr, keyParts, valExpr, valReducer, valMarker, valFold, valOrder, valElement, valNestedMap, valBulk, bulk, productiveBy: src.productiveBy };
   // Property parent: the pushed domain `p` already carries owner/pk/pv, so the source is
   // `p` itself (plus the child joins) — no element table to rejoin. Element parent rejoins
@@ -433,7 +433,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
  * GROUP BY aggregate; an element value can't be aggregated in SQL (props must be
  * framed), so we emit rows ORDER BY the key and the handler folds runs into the Map.
  */
-export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: GroupSource): GroupStream {
+export function lowerGroup(st: LoweringState, isCount: boolean, bys: any[][], src: GroupSource): GroupStream {
   if (bys.length > 2) throw new Error('group() with more than two by() modulators not yet supported');
   src = tryLowerGroupChildSource(bys, src) ?? src;
   const key = buildGroupKey(bys[0], src, st.params);
@@ -454,7 +454,7 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
       q`SELECT ${l.c.gk} AS gk, json_group_object(${l.c.ik}, ${l.c.iv}) AS gv FROM ${l} WHERE ${l.c.ik} IS NOT NULL GROUP BY ${l.c.gk}`,
       ['gk', 'gv'],
     );
-    return toGroupStream(withoutCarried(st), rel, key.desc, { kind: 'nestedMap', innerVal: innerKind });
+    return toGroupStream(dropLayoutAtBarrier(st), rel, key.desc, { kind: 'nestedMap', innerVal: innerKind });
   }
 
   let val: GroupVal, valNode: Expression, groupBy = true;
@@ -510,7 +510,7 @@ export function lowerGroup(st: Carry, isCount: boolean, bys: any[][], src: Group
   const order = src.valElement && src.valOrder ? q`${key.group}, ${src.valOrder}` : key.group;
   const node = q`SELECT ${key.cols}, ${valNode} FROM ${src.from} ${groupBy ? 'GROUP BY' : 'ORDER BY'} ${order}`;
   const rel = st.q.cte(node, groupColumns({ key: key.desc, val }));
-  return toGroupStream(withoutCarried(st), rel, key.desc, val);
+  return toGroupStream(dropLayoutAtBarrier(st), rel, key.desc, val);
 }
 
 /**
@@ -530,7 +530,7 @@ export function lowerValueMap(st: ElementStream, proj: PStep): MapStream {
   // CHILD (`local(__.valueMap())`) and rejoin its parent. The other carried kinds still defer:
   // an alias/path history would have to be framed INTO the map, and sack/fromV are element state
   // the blob has no slot for.
-  if (st.carried.aliases.size || st.carried.path || st.carried.sack || st.carried.fromV)
+  if (st.traverserLayout.aliases.size || st.traverserLayout.path || st.traverserLayout.sack || st.traverserLayout.fromV)
     throw new Error('valueMap() re-entry carrying as()/path()/sack state not yet supported');
   const keys = proj.args.filter((a: any) => typeof a === 'string') as string[];
   const p = st.rel.as('p');
@@ -546,8 +546,8 @@ export function lowerValueMap(st: ElementStream, proj: PStep): MapStream {
   // off THIS relation and so needs every one present. Keeping it is simpler AND more correct: a
   // bulked element contributes its multiplicity to any downstream reducer, and the terminal framing
   // selects `map` alone, so the extra column costs nothing at the root.
-  const outCarried = st.carried;
-  const outCols = carriedCols(outCarried);
+  const outCarried = st.traverserLayout;
+  const outCols = layoutCols(outCarried);
   // One WHOLE-MAP blob per element (mapstream-blob-model): fold its {key:[values]} props into an
   // ordered [[keyNode, valueList], …] pairs array. The key is a string → a self-describing {t,v}
   // scalar node (the uniform typed encoding); the value is the property's value list (a JSON
@@ -555,7 +555,7 @@ export function lowerValueMap(st: ElementStream, proj: PStep): MapStream {
   // typed tree, matching the UNTYPED list substrate the value side feeds). Terminal valueMap()
   // framing uses the typed valueMapProps instead (this path is the re-enterable follower form).
   const base = st.q.cte(
-    q`SELECT ${bareValueMapProps(n, st.elem)} AS props${carryFrag(outCarried, p)} FROM ${vlJoin}`,
+    q`SELECT ${bareValueMapProps(n, st.elem)} AS props${layoutProjection(outCarried, p)} FROM ${vlJoin}`,
     ['props', ...outCols],
   );
   const b = base.as('b');
@@ -568,11 +568,11 @@ export function lowerValueMap(st: ElementStream, proj: PStep): MapStream {
   // became observable the moment a map could be FRAMED from here: the root form shows
   // {name, age} and this showed {age, name} for the same vertex.
   const rel = st.q.cte(
-    q`SELECT jsonb(COALESCE((SELECT json_group_array(${pair}) FROM json_each(${b.c.props}) je${keyFilter}), json('[]'))) AS map${carryFrag(outCarried, b)} FROM ${b}`,
+    q`SELECT jsonb(COALESCE((SELECT json_group_array(${pair}) FROM json_each(${b.c.props}) je${keyFilter}), json('[]'))) AS map${layoutProjection(outCarried, b)} FROM ${b}`,
     ['map', ...outCols],
   );
   // One blob row per element, carrying whatever the element carried (bar bulk, consumed here).
-  const carry: Carry = carryOf(st, outCarried);
+  const carry: LoweringState = loweringStateOf(st, outCarried);
   return toMapStream(carry, rel, { kind: 'scalar' }, { kind: 'list', of: { kind: 'scalar' } });
 }
 
@@ -611,7 +611,7 @@ export function tryCompileMapChild(
   if (!end) return null;
   // The `first` policy ranks per origin by an encounter, so mint one when the prefix carries
   // none — the same ROW_NUMBER-over-the-origin-partition mint every other child provider makes.
-  const withEnc = end.carried.encounter ? end : mintChildEncounter(end);
+  const withEnc = end.traverserLayout.encounter ? end : mintChildEncounter(end);
   let lowered: MapStream;
   try { lowered = lowerValueMap(withEnc, proj); }
   catch { return null; } // the builder's own carried/token deferrals stay authoritative
@@ -626,7 +626,7 @@ export function lowerScalarGroupCount(s: ScalarStream): GroupStream {
   const c = s.rel.as('c');
   // Per-key count = SUM(bulk) when the scalar stream carries a multiplicity, else the row
   // count (identical while bulk≡1) — matching values().count()'s weighting.
-  const gv = s.carried.bulk ? q`SUM(${c.c[s.carried.bulk]})` : q`COUNT(*)`;
+  const gv = s.traverserLayout.bulk ? q`SUM(${c.c[s.traverserLayout.bulk]})` : q`COUNT(*)`;
   // A per-row stored type rides through the barrier as a SIBLING column (gkt) rather than a
   // {t,v} envelope: a bare groupCount() has no map blob for the key to ride inside, and the
   // key is a GROUP BY term — an envelope would group by the JSON text. Grouping spans
@@ -638,10 +638,10 @@ export function lowerScalarGroupCount(s: ScalarStream): GroupStream {
       q`SELECT ${c.c.v} AS gk, ${c.c[perRow]} AS gkt, ${gv} AS gv FROM ${c} GROUP BY ${c.c.v}, ${c.c[perRow]}`,
       ['gk', 'gkt', 'gv'],
     );
-    return toGroupStream(withoutCarried(carryOf(s)), rel, { kind: 'scalar', productive: true, type: PER_ROW('gkt') }, { kind: 'count' });
+    return toGroupStream(dropLayoutAtBarrier(loweringStateOf(s)), rel, { kind: 'scalar', productive: true, type: PER_ROW('gkt') }, { kind: 'count' });
   }
   const rel = s.q.cte(q`SELECT ${c.c.v} AS gk, ${gv} AS gv FROM ${c} GROUP BY ${c.c.v}`, ['gk', 'gv']);
-  return toGroupStream(withoutCarried(carryOf(s)), rel, { kind: 'scalar', productive: true, type: s.type }, { kind: 'count' });
+  return toGroupStream(dropLayoutAtBarrier(loweringStateOf(s)), rel, { kind: 'scalar', productive: true, type: s.type }, { kind: 'count' });
 }
 
 /** Continue from the rich group barrier. Terminal framing consumes the same lowered
@@ -664,7 +664,7 @@ export function compileFromGroup(s: GroupStream, steps: PStep[], at: number): Lo
     if (s.key.kind !== 'scalar') throw new Error('count() over a non-scalar-key group not yet supported');
     const g = s.rel.as('g');
     const rel = s.q.cte(q`SELECT COUNT(DISTINCT ${g.c.gk}) AS v FROM ${g}`, ['v']);
-    return continueLowering(toScalarStream(withoutCarried(carryOf(s)), rel, 'long', { result: 'count' }), at + 1);
+    return continueLowering(toScalarStream(dropLayoutAtBarrier(loweringStateOf(s)), rel, 'long', { result: 'count' }), at + 1);
   }
   // unfold(), select(Column.keys/values), and order(Scope.local).by(Column.*) all consume the
   // group AS a map VALUE → derive the whole-map blob and re-enter as a MapStream (compileFromMap
@@ -672,7 +672,7 @@ export function compileFromGroup(s: GroupStream, steps: PStep[], at: number): Lo
   if (step.name !== 'unfold' && step.name !== 'select' && !isMapLocalOrder(step))
     throw new Error(`${step.name}() on a group value not yet supported`);
   const { rel, keyOf, valOf } = deriveGroupMap(s);
-  return continueLowering(toMapStream(carryOf(s), rel, keyOf, valOf), at);
+  return continueLowering(toMapStream(loweringStateOf(s), rel, keyOf, valOf), at);
 }
 
 /** Derive the whole-map VALUE blob of a rich group barrier: ONE JSONB `map` column per group
@@ -745,14 +745,14 @@ export function lowerProperties(st: ElementStream, step: PStep): PropertyStream 
   if (st.elem === 'edge') {
     const ep = edgeProperties.as('ep');
     const keyFilter: Expression = keys.length ? q` AND ${ep.c.key} IN (${list(keys.map(value), ',')})` : empty;
-    propBody = q`SELECT NULL AS vpid, ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, ${ep.c.key} AS pk, ${storedValueExpr(ep.c.value, ep.c.vtype)} AS pv, ${ep.c.vtype} AS pvtype, NULL AS pmeta${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label} JOIN ${ep} ON ${ep.c.edge}=${n.c.id}${keyFilter}`;
+    propBody = q`SELECT NULL AS vpid, ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, ${ep.c.key} AS pk, ${storedValueExpr(ep.c.value, ep.c.vtype)} AS pv, ${ep.c.vtype} AS pvtype, NULL AS pmeta${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label} JOIN ${ep} ON ${ep.c.edge}=${n.c.id}${keyFilter}`;
   } else {
     const vp = vertexProperties.as('vp');
     const keyFilter: Expression = keys.length ? q` AND ${vp.c.key} IN (${list(keys.map(value), ',')})` : empty;
-    propBody = q`SELECT ${vp.c.id} AS vpid, ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, ${vp.c.key} AS pk, ${storedValueExpr(vp.c.value, vp.c.vtype)} AS pv, ${vp.c.vtype} AS pvtype, json(${vp.c.meta}) AS pmeta${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label} JOIN ${vp} ON ${vp.c.node}=${n.c.id}${keyFilter}`;
+    propBody = q`SELECT ${vp.c.id} AS vpid, ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, ${vp.c.key} AS pk, ${storedValueExpr(vp.c.value, vp.c.vtype)} AS pv, ${vp.c.vtype} AS pvtype, json(${vp.c.meta}) AS pmeta${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label} JOIN ${vp} ON ${vp.c.node}=${n.c.id}${keyFilter}`;
   }
-  const rel = st.q.cte(propBody, [...PROPERTY_PAYLOAD, ...carriedCols(st.carried)]);
-  return toPropertyStream(carryOf(st), rel, st.elem);
+  const rel = st.q.cte(propBody, [...PROPERTY_PAYLOAD, ...layoutCols(st.traverserLayout)]);
+  return toPropertyStream(loweringStateOf(st), rel, st.elem);
 }
 
 /** A property framing/scalar ctx built from an (already-aliased) PropertyStream/domain
@@ -777,10 +777,10 @@ function filterProperty(s: PropertyStream, step: PStep): PropertyStream {
   } else if (step.name === 'hasKey') test = predicateSql(p.c.pk, step.args[0]);
   else test = predicateSql(p.c.pv, step.args[0]);
   const rel = s.q.cte(
-    q`SELECT ${list(PROPERTY_PAYLOAD.map((c) => p.c[c]), ', ')}${carryFrag(s.carried, p)} FROM ${p} WHERE ${test}`,
-    [...PROPERTY_PAYLOAD, ...carriedCols(s.carried)],
+    q`SELECT ${list(PROPERTY_PAYLOAD.map((c) => p.c[c]), ', ')}${layoutProjection(s.traverserLayout, p)} FROM ${p} WHERE ${test}`,
+    [...PROPERTY_PAYLOAD, ...layoutCols(s.traverserLayout)],
   );
-  return toPropertyStream(carryOf(s), rel, s.ownerElem);
+  return toPropertyStream(loweringStateOf(s), rel, s.ownerElem);
 }
 
 function propertyScalar(s: PropertyStream, col: 'vpid' | 'pk' | 'pv'): ScalarStream {
@@ -794,18 +794,18 @@ function propertyScalar(s: PropertyStream, col: 'vpid' | 'pk' | 'pv'): ScalarStr
   // policy needs a per-origin encounter marker, exactly as lowerScalarProjection mints for
   // element().values(). key()/value() are 1:1 with the property, so any deterministic order
   // suffices. At root (no live origin) the projection stays unchanged.
-  const origin = s.carried.origins.at(-1);
+  const origin = s.traverserLayout.origins.at(-1);
   if (!origin) {
-    const rel = s.q.cte(q`SELECT ${p.c[col]} AS v${vsel}${carryFrag(s.carried, p)} FROM ${p}`, ['v', ...(col === 'pv' ? ['vtype'] : []), ...carriedCols(s.carried)]);
-    return toScalarStream(carryOf(s), rel, undefined, { result: 'value', ...vtag });
+    const rel = s.q.cte(q`SELECT ${p.c[col]} AS v${vsel}${layoutProjection(s.traverserLayout, p)} FROM ${p}`, ['v', ...(col === 'pv' ? ['vtype'] : []), ...layoutCols(s.traverserLayout)]);
+    return toScalarStream(loweringStateOf(s), rel, undefined, { result: 'value', ...vtag });
   }
-  const carried = carriedWith(s.carried, { encounter: 'encounter' });
+  const layout = patchLayout(s.traverserLayout, { encounter: 'encounter' });
   const mint = q`ROW_NUMBER() OVER (PARTITION BY ${p.c[origin]} ORDER BY ${p.c[origin]})`;
   const rel = s.q.cte(
-    q`SELECT ${p.c[col]} AS v${vsel}${carryFragMint(carried, p, 'encounter', mint)} FROM ${p}`,
-    ['v', ...(col === 'pv' ? ['vtype'] : []), ...carriedCols(carried)],
+    q`SELECT ${p.c[col]} AS v${vsel}${layoutProjectionMinting(layout, p, 'encounter', mint)} FROM ${p}`,
+    ['v', ...(col === 'pv' ? ['vtype'] : []), ...layoutCols(layout)],
   );
-  return toScalarStream(carryOf(s, carried), rel, undefined, { result: 'value', ...vtag });
+  return toScalarStream(loweringStateOf(s, layout), rel, undefined, { result: 'value', ...vtag });
 }
 
 /** The canonical property tie-break ORDER BY terms (all ASC), qualified to `p`. A node
@@ -823,7 +823,7 @@ const propertyTieBreak = (p: Relation, ownerElem: 'vertex' | 'edge'): Expression
  * when they belong to different edges. `by(value)` deliberately changes the key to the
  * property value, matching dedup().by() on the property object. */
 function propertyDedup(s: PropertyStream, step: PStep): PropertyStream {
-  if (s.carried.aliases.size > 0 || s.carried.path)
+  if (s.traverserLayout.aliases.size > 0 || s.traverserLayout.path)
     throw new Error('properties().dedup() after as()/path() not yet supported (property-distinct semantics)');
   const bys = step.bys ?? [];
   if (bys.length > 1) throw new Error('properties().dedup() supports at most one by() modulator');
@@ -839,16 +839,16 @@ function propertyDedup(s: PropertyStream, step: PStep): PropertyStream {
   const p = s.rel.as('p');
   const partition = key;
   const ranked = s.q.cte(
-    q`SELECT ${list(PROPERTY_PAYLOAD.map((c) => p.c[c]), ', ')}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${partition} ORDER BY ${list(propertyTieBreak(p, s.ownerElem), ', ')}) AS rn FROM ${p}`,
-    [...PROPERTY_PAYLOAD, ...carriedCols(s.carried), 'rn'],
+    q`SELECT ${list(PROPERTY_PAYLOAD.map((c) => p.c[c]), ', ')}${layoutProjection(s.traverserLayout, p)}, ROW_NUMBER() OVER (PARTITION BY ${partition} ORDER BY ${list(propertyTieBreak(p, s.ownerElem), ', ')}) AS rn FROM ${p}`,
+    [...PROPERTY_PAYLOAD, ...layoutCols(s.traverserLayout), 'rn'],
   );
   const r = ranked.as('r');
-  const carried = carriedCols(s.carried).map((c) => c === s.carried.bulk ? q`1 AS ${c}` : q`${r.c[c]}`);
+  const layoutSel = layoutCols(s.traverserLayout).map((c) => c === s.traverserLayout.bulk ? q`1 AS ${c}` : q`${r.c[c]}`);
   const rel = s.q.cte(
-    q`SELECT ${list(PROPERTY_PAYLOAD.map((c) => r.c[c]), ', ')}${carried.length ? q`, ${list(carried, ', ')}` : empty} FROM ${r} WHERE ${r.c.rn}=1`,
-    [...PROPERTY_PAYLOAD, ...carriedCols(s.carried)],
+    q`SELECT ${list(PROPERTY_PAYLOAD.map((c) => r.c[c]), ', ')}${layoutSel.length ? q`, ${list(layoutSel, ', ')}` : empty} FROM ${r} WHERE ${r.c.rn}=1`,
+    [...PROPERTY_PAYLOAD, ...layoutCols(s.traverserLayout)],
   );
-  return toPropertyStream(carryOf(s), rel, s.ownerElem);
+  return toPropertyStream(loweringStateOf(s), rel, s.ownerElem);
 }
 
 /** Order a PropertyStream and retain the provider order as the shared encounter column.
@@ -857,7 +857,7 @@ function propertyDedup(s: PropertyStream, step: PStep): PropertyStream {
  * composite key. Stored property values use compareKey so exact long/decimal/duration
  * values sort numerically even when SQLite stores them as TEXT. */
 function propertyOrder(s: PropertyStream, step: PStep): PropertyStream {
-  if (s.carried.aliases.size > 0 || s.carried.path)
+  if (s.traverserLayout.aliases.size > 0 || s.traverserLayout.path)
     throw new Error('properties().order() after as()/path() not yet supported (property order semantics)');
   const bys = step.bys ?? [];
   if (bys.length > 1) throw new Error('properties().order() supports at most one by() modulator');
@@ -868,7 +868,7 @@ function propertyOrder(s: PropertyStream, step: PStep): PropertyStream {
     const dir = by.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
     if (dir === 'shuffle') throw new Error('properties().order().by(shuffle) not yet supported');
     const rows = tryCompileScalarValueRows(s, nested);
-    if (!rows?.stream.carried.encounter) throw new Error('properties().order().by(traversal) requires a scalar child with encounter order');
+    if (!rows?.stream.traverserLayout.encounter) throw new Error('properties().order().by(traversal) requires a scalar child with encounter order');
     const c = rows.stream.rel.as('c');
     const ord = rows.frame.ordinal;
     // Carry the child value's stored type so the sort key can compareKey it — a numeric
@@ -876,21 +876,21 @@ function propertyOrder(s: PropertyStream, step: PStep): PropertyStream {
     // token branch below does; without it a mixed-width value ("9" vs "35") sorts lexically.
     const vt = perRowColumnOf(rows.stream.type);
     const firstVal = s.q.cte(
-      q`SELECT ${c.c[ord]} AS ord, ${c.c.v} AS k${vt ? q`, ${c.c[vt]} AS kt` : empty}, ROW_NUMBER() OVER (PARTITION BY ${c.c[ord]} ORDER BY ${c.c[rows.stream.carried.encounter]}) AS rn FROM ${c}`,
+      q`SELECT ${c.c[ord]} AS ord, ${c.c.v} AS k${vt ? q`, ${c.c[vt]} AS kt` : empty}, ROW_NUMBER() OVER (PARTITION BY ${c.c[ord]} ORDER BY ${c.c[rows.stream.traverserLayout.encounter]}) AS rn FROM ${c}`,
       ['ord', 'k', ...(vt ? ['kt'] : []), 'rn'],
     );
     const d = rows.frame.domain.as('d');
     const f = firstVal.as('f');
-    const carried = carriedWith(s.carried, { encounter: 'encounter' });
+    const layout = patchLayout(s.traverserLayout, { encounter: 'encounter' });
     const cmpVal = vt ? q`(${compareKey(f.c.k, f.c.kt)})` : q`${f.c.k}`;
     const sortKey = dir === 'desc' ? q`${cmpVal} DESC` : q`${cmpVal} ASC`;
     const orderKey = list([sortKey, ...propertyTieBreak(d, s.ownerElem)], ', ');
-    const mint = q`ROW_NUMBER() OVER (${partitionOver(carried, d, orderKey)})`;
+    const mint = q`ROW_NUMBER() OVER (${partitionOver(layout, d, orderKey)})`;
     const rel = s.q.cte(
-      q`SELECT ${list(PROPERTY_PAYLOAD.map((col) => d.c[col]), ', ')}${carryFragMint(carried, d, 'encounter', mint)} FROM ${d} LEFT JOIN ${f} ON ${f.c.ord}=${d.c[ord]} AND ${f.c.rn}=1`,
-      [...PROPERTY_PAYLOAD, ...carriedCols(carried)],
+      q`SELECT ${list(PROPERTY_PAYLOAD.map((col) => d.c[col]), ', ')}${layoutProjectionMinting(layout, d, 'encounter', mint)} FROM ${d} LEFT JOIN ${f} ON ${f.c.ord}=${d.c[ord]} AND ${f.c.rn}=1`,
+      [...PROPERTY_PAYLOAD, ...layoutCols(layout)],
     );
-    return toPropertyStream(carryOf(s, carried), rel, s.ownerElem);
+    return toPropertyStream(loweringStateOf(s, layout), rel, s.ownerElem);
   }
   if (token && token !== 'key' && token !== 'value') throw new Error(`properties().order().by(T.${token}) not yet supported`);
   if (by.some((a: any) => typeof a === 'string')) throw new Error('properties().order().by(key) not yet supported');
@@ -907,13 +907,13 @@ function propertyOrder(s: PropertyStream, step: PStep): PropertyStream {
         ? [q`${p.c.vpid}${suffix}`]
         : [q`${p.c.pk}${suffix}`, q`${valueKey}${suffix}`];
   const orderKey = list([...primary, ...propertyTieBreak(p, s.ownerElem)], ', ');
-  const carried = carriedWith(s.carried, { encounter: 'encounter' });
-  const mint = q`ROW_NUMBER() OVER (${partitionOver(carried, p, orderKey)})`;
+  const layout = patchLayout(s.traverserLayout, { encounter: 'encounter' });
+  const mint = q`ROW_NUMBER() OVER (${partitionOver(layout, p, orderKey)})`;
   const rel = s.q.cte(
-    q`SELECT ${list(PROPERTY_PAYLOAD.map((c) => p.c[c]), ', ')}${carryFragMint(carried, p, 'encounter', mint)} FROM ${p}`,
-    [...PROPERTY_PAYLOAD, ...carriedCols(carried)],
+    q`SELECT ${list(PROPERTY_PAYLOAD.map((c) => p.c[c]), ', ')}${layoutProjectionMinting(layout, p, 'encounter', mint)} FROM ${p}`,
+    [...PROPERTY_PAYLOAD, ...layoutCols(layout)],
   );
-  return toPropertyStream(carryOf(s, carried), rel, s.ownerElem);
+  return toPropertyStream(loweringStateOf(s, layout), rel, s.ownerElem);
 }
 
 /** Consume a PropertyStream. Only property-specific operations live here; once a
@@ -936,7 +936,7 @@ const propertyGroup: ShapeTailFn<PropertyStream> = (s, step, _steps, at) => {
   // A live property parent — its by() sub-traversals lower through the generic child
   // seam (tryLowerGroupChildSource), exactly as an element group does.
   const p = s.rel.as('p');
-  const src: GroupSource = { from: p, ctx: propertyCtx(p), elem: 'property', parent: s, productiveBy: step.productiveBy, bulk: s.carried.bulk ? p.c[s.carried.bulk] : undefined };
+  const src: GroupSource = { from: p, ctx: propertyCtx(p), elem: 'property', parent: s, productiveBy: step.productiveBy, bulk: s.traverserLayout.bulk ? p.c[s.traverserLayout.bulk] : undefined };
   const isCount = step.name === 'groupCount';
   return continueLowering(lowerGroup(s, isCount, step.bys ?? [], src), at + 1);
 };
@@ -958,10 +958,10 @@ const propertyMetaProperties: ShapeTailFn<PropertyStream> = (s, step, steps, at)
 const propertyElement: ShapeTailFn<PropertyStream> = (s, _step, _steps, at) => {
   const p = s.rel.as('p');
   const rel = s.q.cte(
-    q`SELECT ${p.c.owner} AS id${carryFrag(s.carried, p)} FROM ${p}`,
-    ['id', ...carriedCols(s.carried)],
+    q`SELECT ${p.c.owner} AS id${layoutProjection(s.traverserLayout, p)} FROM ${p}`,
+    ['id', ...layoutCols(s.traverserLayout)],
   );
-  const out: ElementStream = toElementStream(carryOf(s), rel, s.ownerElem);
+  const out: ElementStream = toElementStream(loweringStateOf(s), rel, s.ownerElem);
   return continueLowering(out, at + 1);
 };
 

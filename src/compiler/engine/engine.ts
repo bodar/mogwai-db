@@ -4,7 +4,7 @@ import { type Elem } from '../plan/plan.ts';
 import { flattenListArgs, isColumnArg, isOperatorArg, isPopArg } from '../../gremlin/frontend.ts';
 import { type PStep } from '../ir/strategies.ts';
 import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
-import { trackFromV, type Carry, type ElementStream, type StepFn } from '../steps/context/context.ts';
+import { trackFromV, type LoweringState, type ElementStream, type StepFn } from '../steps/context/context.ts';
 import { move, toEdge, toVertex, otherV, reSource } from '../steps/prefix/movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from '../steps/prefix/filter.ts';
 import { union, optional, repeat, choose, coalesce, sourceUnion } from '../steps/prefix/branch.ts';
@@ -45,7 +45,7 @@ export { compileTail };
 // prefix fold (buildPrefix/lowerElementSteps) + the shaped lowering loop (lowerSteps/lowerStream)
 // + source seeding + the root read (compileRead). It was the free-function barrel `steps/index.ts`;
 // it is now an OBJECT built per-compile from a CompilerScope, holding the ambient dependencies
-// (fastPaths/registry/federationDepth) that used to ride Carry. It attaches itself to its compile's
+// (fastPaths/registry/federationDepth) that used to ride LoweringState. It attaches itself to its compile's
 // Query (`q.engine`) so every step family reaches lowering + deps through `stream.q.engine` — no
 // parameter threading, no dependency on a dispatcher module (which is what dissolved the old
 // index⇄child⇄projection import cycle: the families import only the leaf `Engine` interface).
@@ -185,7 +185,7 @@ export class LoweringEngine implements Engine {
     const query = this.q;
     const elem: Elem = first.name === 'E' ? 'edge' : 'vertex';
     const srcRel = elem === 'edge' ? edges : nodes;
-    // The source projection, assembled in carriedCols order (sack, bulk, encounter, path) so the
+    // The source projection, assembled in layoutCols order (sack, bulk, encounter, path) so the
     // physical SELECT matches the declared column list exactly. withSack() seeds the sack
     // column (a bound Value so a string init escapes safely); every element source seeds a
     // `bulk` multiplicity of 1 — the RLE traverser count SUM(bulk) reads at a reducer, and
@@ -216,7 +216,7 @@ export class LoweringEngine implements Engine {
       body = q`SELECT ${sel} FROM ${srcRel}`;
     }
     const path = trackPath ? { kind: 'cols' as const, cols: [{ col: 'p0', elem }] } : undefined;
-    return { kind: 'elements', q: query, params, rel: query.cte(body, cols), elem, carried: { aliases: new Map(), origins: [], path, sack: sackInit ? 'sk' : undefined, bulk: 'bulk', encounter: wantsEncounter ? 'encounter' : undefined } };
+    return { kind: 'elements', q: query, params, rel: query.cte(body, cols), elem, traverserLayout: { aliases: new Map(), origins: [], path, sack: sackInit ? 'sk' : undefined, bulk: 'bulk', encounter: wantsEncounter ? 'encounter' : undefined } };
   }
 
   /** Seed the SOURCE of a rooted chain → the initial Stream + the index of the first step after
@@ -234,7 +234,7 @@ export class LoweringEngine implements Engine {
     if (first.name === 'union')
       return { stream: sourceUnion(this, first, params, sackInit, facts), at: 1 };
     if (first.name === 'inject')
-      return seedInject({ q: this.q, params, carried: { aliases: new Map(), origins: [] } }, steps, sackInit);
+      return seedInject({ q: this.q, params, traverserLayout: { aliases: new Map(), origins: [] } }, steps, sackInit);
     if (first.name === 'call') {
       const seed = seedCall(first, this.q, params, this.registry, steps, this.federationDepth);
       if (isBarrierPoint(seed)) throw new Error('a barrier/federated call() source is only supported at the head of a traversal');
@@ -278,7 +278,7 @@ export class LoweringEngine implements Engine {
     // OTHER scope (correlated predicate, child count/scalar/element rows, match) folds through
     // here, so deriving it once at this single choke point fixes them all. Ordinary edge
     // chains carry no otherV → stay index-only (no dead fv column).
-    let st = (!seedSt.carried.trackFromV && steps.some((s) => s.name === 'otherV'))
+    let st = (!seedSt.traverserLayout.trackFromV && steps.some((s) => s.name === 'otherV'))
       ? trackFromV(seedSt)
       : seedSt;
     let i = from;
@@ -436,7 +436,7 @@ export class LoweringEngine implements Engine {
         // collapse on the resumed chain (a foreign source is never V/E → collapse off, matching
         // the pre-object behavior where the resume carry carried no fastPaths).
         const eng = this.child(params, bp.restSteps);
-        const carry: Carry = { q: eng.q, params, carried: { aliases: new Map(), origins: [] } };
+        const carry: LoweringState = { q: eng.q, params, traverserLayout: { aliases: new Map(), origins: [] } };
         const elem: Elem = foreign[0]?.kind ?? 'vertex';
         const seed = landForeignElements(carry, foreign, elem);
         return { kind: 'sql', compiled: materializeRootStream(eng.lowerStepsStrict(seed, bp.restSteps, bp.restAt)) };
@@ -454,7 +454,7 @@ export class LoweringEngine implements Engine {
    *  that SPANS the call is deferred: the parent's carried alias/path columns are not yet threaded
    *  through the segment boundary, so a parent carrying them fails closed with a clear deferral. */
   private segmentFromMidBarrier(bp: MidBarrierPoint): SegmentPlan {
-    if (bp.parent.carried.aliases.size > 0 || bp.parent.carried.path)
+    if (bp.parent.traverserLayout.aliases.size > 0 || bp.parent.traverserLayout.path)
       throw new Error('path()/as() spanning a mid-traversal federated call() is not yet supported (Phase 6b) — the federated result is a detached reference; select the value before the call or run it at the source position');
     return {
       kind: 'segment',
@@ -463,7 +463,7 @@ export class LoweringEngine implements Engine {
       apply: bp.apply,
       resume: (foreign: ForeignRow[], headRows: readonly ForeignRow[]) => {
         const eng = this.child(bp.compileParams, bp.restSteps);
-        const carry: Carry = { q: eng.q, params: bp.compileParams, carried: { aliases: new Map(), origins: [] } };
+        const carry: LoweringState = { q: eng.q, params: bp.compileParams, traverserLayout: { aliases: new Map(), origins: [] } };
         const elem = foreign[0]?.kind === 'edge' ? 'edge' : bp.parent.elem;
         // Scatter the batched pool back over the parents by the injected value (flatMap: a parent
         // that matched nothing drops), then continue the chain from the rejoined foreign stream.

@@ -1,6 +1,6 @@
 import { q, empty, type Expression } from '../../../sql/kernel/q.ts';
 import { rangeToOffsetLimit } from '../../plan/plan.ts';
-import { advance, carryFrag, prevRel, type StepFn } from '../context/context.ts';
+import { advance, layoutProjection, prevRel, type StepFn } from '../context/context.ts';
 
 // ---------- passthrough range/limit/skip (prefix phase) ----------
 //
@@ -20,21 +20,21 @@ export const identity: StepFn = (_s, st) => st;
 // A prefix slice picks a DETERMINISTIC window only when the chain carries emission order
 // (canonical emission order, Stage B — seeded when a positional consumer follows a fan-out);
 // otherwise it stays an order-free LIMIT over incidental row order (hot path unchanged).
-const orderByEncounter = (st: { carried: { encounter?: string } }, p: ReturnType<typeof prevRel>): Expression =>
-  st.carried.encounter ? q` ORDER BY ${p.c[st.carried.encounter]}` : empty;
+const orderByEncounter = (st: { traverserLayout: { encounter?: string } }, p: ReturnType<typeof prevRel>): Expression =>
+  st.traverserLayout.encounter ? q` ORDER BY ${p.c[st.traverserLayout.encounter]}` : empty;
 
 export const limit: StepFn = (s, st) => {
   const p = prevRel(st, 'p');
-  return advance(st, q`SELECT ${p.c.id}${carryFrag(st.carried, p)} FROM ${p}${orderByEncounter(st, p)} LIMIT ${Number(s.args[0])}`);
+  return advance(st, q`SELECT ${p.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${p}${orderByEncounter(st, p)} LIMIT ${Number(s.args[0])}`);
 };
 
 export const range: StepFn = (s, st) => {
   const { offset, limit } = rangeToOffsetLimit(s.args);
   const p = prevRel(st, 'p');
-  return advance(st, q`SELECT ${p.c.id}${carryFrag(st.carried, p)} FROM ${p}${orderByEncounter(st, p)} LIMIT ${limit} OFFSET ${offset}`);
+  return advance(st, q`SELECT ${p.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${p}${orderByEncounter(st, p)} LIMIT ${limit} OFFSET ${offset}`);
 };
 
 export const skip: StepFn = (s, st) => {
   const p = prevRel(st, 'p');
-  return advance(st, q`SELECT ${p.c.id}${carryFrag(st.carried, p)} FROM ${p}${orderByEncounter(st, p)} LIMIT -1 OFFSET ${Number(s.args[0])}`);
+  return advance(st, q`SELECT ${p.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${p}${orderByEncounter(st, p)} LIMIT -1 OFFSET ${Number(s.args[0])}`);
 };

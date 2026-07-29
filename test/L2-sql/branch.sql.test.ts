@@ -130,7 +130,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(divU.sql).toContain('SELECT id, a0, bulk FROM'); // the binding arm carries its history
     expect(divU.sql).toContain('SELECT id, NULL AS a0, bulk FROM'); // the other arm pads it
     // sack CLONES through a fork (TinkerPop split-only): the incoming sk column rides into
-    // every arm via carryFrag, passes through unchanged, and armProjection/rigidCols project
+    // every arm via layoutProjection, passes through unchanged, and armProjection/rigidCols project
     // it through the merge — so a following sack() reads the pre-fork accumulator per arm.
     const sackU = read('g.withSack(0.0d).V().sack(sum).by("age").union(__.out(), __.in()).sack()');
     expect(sackU.sql).toContain('sk'); // the sack column survives the branch merge
@@ -154,7 +154,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(read('g.V().optional(__.out().out()).count()').sql).toContain('ROW_NUMBER() OVER () AS o0');
     // a body that flips element kind would make self-on-miss mixed-shape → defer
     expect(() => compile('g.V().optional(__.outE())', {})).toThrow('changing element kind');
-    // as() before optional threads the alias through the fast path (carryFrag from the input)
+    // as() before optional threads the alias through the fast path (layoutProjection from the input)
     expect(read('g.V().as("a").optional(__.out()).select("a")').sql)
       .toContain('SELECT COALESCE(e.tgt, p.id) AS id, p.a0, p.bulk FROM');
     // NESTED optional/coalesce: each mints a UNIQUE ordinal (o0 outer, o1 inner) and

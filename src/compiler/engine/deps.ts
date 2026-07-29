@@ -2,7 +2,7 @@
 //
 // The compiler's lowering CORE is a dependency-injected OBJECT (the Engine, engine.ts) rather
 // than a bag of free functions that read their dependencies (fastPaths/registry/federationDepth)
-// off the per-query STATE object (Carry, context.ts). This module is the cycle-free LEAF that
+// off the per-query STATE object (LoweringState, context.ts). This module is the cycle-free LEAF that
 // declares the Engine's shape: the recursive-lowering surface every step family calls back into,
 // plus the ambient dependencies it exposes.
 //
@@ -15,8 +15,8 @@
 //
 // The Engine RIDES THE QUERY (`Query.engine`, q.ts): the per-compile `Query` (the CTE
 // accumulator) is exactly co-lifecycle with the ambient dependencies, and it already threads
-// through every Stream as `st.q`. Attaching the Engine there — NOT as a field on Carry — is what
-// lets the families reach lowering + deps without any parameter threading, while Carry stays PURE
+// through every Stream as `st.q`. Attaching the Engine there — NOT as a field on LoweringState — is what
+// lets the families reach lowering + deps without any parameter threading, while LoweringState stays PURE
 // per-query state (q/params/carried/sideEffects).
 
 import type { Query } from '../../sql/kernel/q.ts';
@@ -27,14 +27,14 @@ import type { PStep } from '../ir/strategies.ts';
 import type { ChainFacts } from '../ir/analyze.ts';
 import type { Compiled } from '../../sql/kernel/render.ts';
 import type { SegmentPlan } from '../segment.ts';
-import type { Carry, ElementStream } from '../steps/context/context.ts';
+import type { LoweringState, ElementStream } from '../steps/context/context.ts';
 import type { Stream, LoweringSuspension } from '../steps/context/stream.ts';
 
 /** The lowering engine: the recursive-traversal authority (dispatcher + prefix fold + shaped
  *  lowering loop) plus the ambient compile dependencies. Built per-compile from a CompilerScope
  *  and attached to that compile's Query, so every family reaches it via `stream.q.engine`. */
 export interface Engine {
-  // ---- ambient dependencies (were Carry fields; now held by the object) ----
+  // ---- ambient dependencies (were LoweringState fields; now held by the object) ----
   readonly fastPaths: FastPathConfig;
   readonly registry: ServiceRegistry;
   readonly federationDepth: number;
@@ -96,16 +96,16 @@ export interface Engine {
 }
 
 /** The lowering Engine riding a stream's Query. Every stream reached during a compile carries the
- *  Engine (attached at construction); reaching it here (rather than off Carry) is what keeps the
+ *  Engine (attached at construction); reaching it here (rather than off LoweringState) is what keeps the
  *  ambient dependencies OFF the per-query state. A missing engine is a wiring bug (a stream built
  *  outside a compile scope) — fail loud, never silently default. */
-export function engineOf(c: Carry): Engine {
+export function engineOf(c: LoweringState): Engine {
   const e = c.q.engine;
   if (!e) throw new Error('no lowering engine on this Query — a stream was built outside a compile scope');
   return e;
 }
 
-/** The FastPathContext for a stream/Carry — the two-hop `fastPathContext(engineOf(c).fastPaths)`
+/** The FastPathContext for a stream/LoweringState — the two-hop `fastPathContext(engineOf(c).fastPaths)`
  *  named once, since every family fast-path site needs exactly this. (facts stays out: the only
  *  chain-fact a FastPath reads, movementCollapse's collapseSafe, is already folded into the flag.) */
-export const fastPathContextOf = (c: Carry): FastPathContext => fastPathContext(engineOf(c).fastPaths);
+export const fastPathContextOf = (c: LoweringState): FastPathContext => fastPathContext(engineOf(c).fastPaths);

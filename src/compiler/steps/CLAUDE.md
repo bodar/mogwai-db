@@ -77,7 +77,7 @@ fails closed is better than a special-case that entrenches the non-generic path.
   be able to reach what already existed, and predicting otherwise was wrong every time (see the
   STATUS block in `docs/2026-07-27-hand-rolled-sql-audit.md`). The two tells, both cheap:
   a SCHEMA mismatch — `path()`'s `json_each` explode is `(id, pk, ord)` but an element stream is
-  `['id', ...carriedCols]`, fixed by carrying `pk`/`ord` as `origins`, which is what that slot
+  `['id', ...layoutCols]`, fixed by carrying `pk`/`ord` as `origins`, which is what that slot
   already means; and an ARGUMENT-TYPE mismatch — the scalar-child entry points demanded a `nested`
   parse tree, so `match()`, whose pattern body is a `Step[]` slice with no tree, could not call them
   even though they already accepted a pre-parsed body. Both were one-line unlocks that let an
@@ -114,10 +114,10 @@ fails closed is better than a special-case that entrenches the non-generic path.
   `BranchArmShape` return type to keep the parallel visible.
   The merges are `finishElementMerge`/`mergeElementArms` (`prefix/branch.ts`), `unionScalarStreams`
   (`tail/scalar.ts`), `mergeVariantArms`/`mergeVariantParts` and `finishListMerge`
-  (`tail/variant.ts`) — all parent-agnostic (a bare `Carry`), so an element parent, a scalar parent
+  (`tail/variant.ts`) — all parent-agnostic (a bare `LoweringState`), so an element parent, a scalar parent
   and a SOURCE (which has no parent at all) share them verbatim.
   **`union()` in SOURCE position is not a second branch implementation** (it was, and consolidating
-  it is what made `finishElementMerge` Carry-typed). `sourceUnion` (`prefix/branch.ts`) lowers each
+  it is what made `finishElementMerge` LoweringState-typed). `sourceUnion` (`prefix/branch.ts`) lowers each
   branch — a fully ROOTED traversal — through `Engine.lowerRootedArm`, then dispatches on the
   resulting Streams' KINDS to those same merges. It deliberately does NOT use `classifyBranchArms`:
   that triage describes a child body under a parent traverser, which a rooted branch is not. Every

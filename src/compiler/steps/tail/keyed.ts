@@ -2,7 +2,7 @@ import { q, type Relation } from '../../../sql/kernel/q.ts';
 import { nodes } from '../../../sql/schema.ts';
 import { type Elem } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { type Carried, type ElementStream } from '../context/context.ts';
+import { type TraverserLayout, type ElementStream } from '../context/context.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { childCtx, isElementChildStep, mentionsLabel } from './child-shape.ts';
 
@@ -91,20 +91,20 @@ export function keyedChildRelation(
   if (mentionsLabel(body, st.params)) return null;
   // Seed: one row per vertex, its own id doubling as the origin key. `origins` is the
   // carried slot designed for "which traverser did this row come from" and rides through
-  // movement/filter/branch via carryFrag, so nothing here threads it by hand. Column ORDER
-  // must match carriedCols (aliases, sack, bulk, origins, …) or assertStreamColumns trips.
-  const seedCarried: Carried = { aliases: new Map(), origins: ['o'], bulk: 'bulk' };
+  // movement/filter/branch via layoutProjection, so nothing here threads it by hand. Column ORDER
+  // must match layoutCols (aliases, sack, bulk, origins, …) or assertStreamColumns trips.
+  const seedCarried: TraverserLayout = { aliases: new Map(), origins: ['o'], bulk: 'bulk' };
   const seed: ElementStream = {
     kind: 'elements', q: st.q, params: st.params, elem: 'vertex',
     rel: st.q.cte(q`SELECT id, 1 AS bulk, id AS o FROM ${nodes}`, ['id', 'bulk', 'o']),
-    carried: seedCarried,
+    traverserLayout: seedCarried,
   };
   const { stream, next } = engineOf(st).lowerElementSteps(body as PStep[], seed);
   if (next !== body.length) return null;                            // a step the prefix fold won't take
   if (opts.landOn && stream.elem !== opts.landOn) return null;
   // A body that BINDS a label cannot be precompiled per-origin — the bind is per-iteration.
-  if (stream.carried.aliases.size) return null;
-  if (stream.carried.origins.length !== 1 || stream.carried.origins[0] !== 'o') return null;
+  if (stream.traverserLayout.aliases.size) return null;
+  if (stream.traverserLayout.origins.length !== 1 || stream.traverserLayout.origins[0] !== 'o') return null;
   const b = stream.rel.as('rb');
   // No DISTINCT: traversers are a MULTISET, so two parallel edges must stay two rows. A
   // consumer wanting set semantics asks for it explicitly — see keyedKeySet.

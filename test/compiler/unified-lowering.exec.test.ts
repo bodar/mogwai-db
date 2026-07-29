@@ -411,7 +411,7 @@ describe('child body with movement under path tracking (pushChildScope ordinal-o
   // carried-column mismatch: pushChildScope appended the child ordinal physically LAST — after
   // the path columns — desyncing the seed's declared schema (ordinal in its origins slot) from
   // its physical layout, so any child lowered via lowerSteps (assertStreamColumns) threw. The
-  // ordinal now lands in its carriedCols position, so these compile and run. Continuation arms
+  // ordinal now lands in its layoutCols position, so these compile and run. Continuation arms
   // (branch/local) still EXTEND the path — the reorder keeps path, it does not strip it.
   test('where(__.out()…) existence child under simplePath', () => {
     // Only josh (id 4) has an out-neighbour named lop; the where child moves under path.

@@ -2,7 +2,7 @@ import { DerivedQuery, derived, q, list, raw, type Expression, type Relation } f
 import { type Step } from '../../../gremlin/frontend.ts';
 import { type Elem } from '../../plan/plan.ts';
 import { normalize } from '../../ir/passes.ts';
-import { aliasColsOf, type Carried, type ElementStream, type LabelScope } from '../context/context.ts';
+import { aliasColsOf, type TraverserLayout, type ElementStream, type LabelScope } from '../context/context.ts';
 import type { Engine } from '../../engine/deps.ts';
 import { mentionsLabel } from './child-shape.ts';
 
@@ -69,12 +69,12 @@ export function compileCorrelatedChild(
   const inlineQ = new DerivedQuery();
   const inlineEngine = engine.withQuery(inlineQ);
   const aliasCols = labels ? aliasColsOf(labels.aliases) : [];
-  const carried: Carried = { aliases: labels?.aliases ?? new Map(), origins: [] };
+  const layout: TraverserLayout = { aliases: labels?.aliases ?? new Map(), origins: [] };
   // The alias columns correlate OUTWARD exactly as `idExpr` does: a FROM-clause derived table is
   // not laterally visible to its siblings, so `p.a0` here resolves through the EXISTS boundary to
   // the true outer scope, never to an intermediate the child's own StepFns introduce. From the
   // seed on they are ordinary carried columns — every movement/filter CTE threads them via
-  // carryFrag, with no change to `advance`/`Carry`.
+  // layoutProjection, with no change to `advance`/`LoweringState`.
   const seedProj = [q`${idExpr} AS id`, ...aliasCols.map((c) => q`${labels!.rel.c[c]} AS ${raw(c)}`)];
   const seed: ElementStream = {
     kind: 'elements',
@@ -82,7 +82,7 @@ export function compileCorrelatedChild(
     params,
     rel: derived(q`SELECT ${list(seedProj, ', ')}`, ['id', ...aliasCols], inlineQ.alias()),
     elem: 'vertex',
-    carried,
+    traverserLayout: layout,
   };
   const stream = inlineEngine.tryLowerElementSteps(steps, seed);
   if (!stream) return null;
@@ -92,6 +92,6 @@ export function compileCorrelatedChild(
   // made inside a filter body anyway, which is precisely what dropping the relation does to it.
   // path/origins are different: they mean the body was NOT a pure movement+filter chain, so fall
   // through to the generic gate.
-  if (stream.carried.path || stream.carried.origins.length) return null;
+  if (stream.traverserLayout.path || stream.traverserLayout.origins.length) return null;
   return { rel: stream.rel, elem: stream.elem };
 }

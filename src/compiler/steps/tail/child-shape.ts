@@ -20,7 +20,7 @@
 import { ALWAYS_PRODUCTIVE_TERMINAL } from '../../ir/productivity.ts';
 import type { Relation } from '../../../sql/kernel/q.ts';
 import { isColumnArg, isOperatorArg, isOrderArg, isPickArg, isScopeArg, isTokenArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
-import type { AliasMap, Carried, ElementStream } from '../context/context.ts';
+import type { AliasMap, TraverserLayout, ElementStream } from '../context/context.ts';
 import type { PropertyStream, ScalarStream, Stream } from '../context/stream.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
@@ -39,7 +39,7 @@ export interface ChildFrame {
    *  reduce barrier (fold/reducer) emits one row per origin and MUST carry THIS — not the
    *  child body's carried, which may have grown a path position / alias from movement inside
    *  the child. The child's internal additions collapse at the barrier, by definition. */
-  readonly carried: Carried;
+  readonly traverserLayout: TraverserLayout;
 }
 export interface ChildScope {
   readonly kind: 'child';
@@ -133,8 +133,8 @@ export function labelEnvOf(aliases: AliasMap): LabelEnv {
 
 /** The classify context of a parent stream. Any Stream satisfies the structural shape, so call
  *  sites pass the parent itself rather than picking `.params` off it. */
-export const childCtx = (s: { params: Record<string, any>; carried: Carried }): ChildCtx =>
-  ({ params: s.params, labels: labelEnvOf(s.carried.aliases) });
+export const childCtx = (s: { params: Record<string, any>; traverserLayout: TraverserLayout }): ChildCtx =>
+  ({ params: s.params, labels: labelEnvOf(s.traverserLayout.aliases) });
 
 /** A ctx whose visible labels are `ctx`'s plus the ones `s` binds, when `s` is an as(). Called
  *  as a body is walked, so a label is visible to exactly the steps that FOLLOW its binding. */
@@ -223,7 +223,7 @@ function selectShape(step: PStep, ctx: ChildCtx | undefined): ChildShape | undef
  * by the consumer's boundary, not here, and the existing boundaries already get it right: a
  * MAPPING consumer pops the child stream (popChildScope carries the child's own carried, so the
  * label rides out — TinkerPop's map/local/flatMap/branch-arm semantics), while a FILTER or by()
- * consumer re-projects the parent domain (carryFrag(parent.carried, …), so the label is confined
+ * consumer re-projects the parent domain (layoutProjection(parent.carried, …), so the label is confined
  * to the child — equally TinkerPop's). */
 // `otherV` belongs with the other eight movements and its absence here was the last gate on an
 // exploded-edge body: it is purely row-local (it reads the current edge's endpoint that ISN'T the

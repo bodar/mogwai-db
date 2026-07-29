@@ -33,9 +33,9 @@ export function materializeScalarRoot(stream: ScalarStream): Compiled {
   // handler frames each row by its own type, not one compile-time tag.
   const perRow = perRowColumnOf(stream.type);
   const cols = stream.result === 'number' ? q`v, vt` : perRow ? q`v, ${raw(perRow)}` : q`v`;
-  if (!stream.carried.encounter) return materializeRoot(stream.q, q`SELECT ${cols} FROM ${stream.rel}`, shape);
+  if (!stream.traverserLayout.encounter) return materializeRoot(stream.q, q`SELECT ${cols} FROM ${stream.rel}`, shape);
   const s = stream.rel.as('s');
-  return materializeRoot(stream.q, q`SELECT ${cols} FROM ${s} ORDER BY ${s.c[stream.carried.encounter]}`, shape);
+  return materializeRoot(stream.q, q`SELECT ${cols} FROM ${s} ORDER BY ${s.c[stream.traverserLayout.encounter]}`, shape);
 }
 
 /** Expand each present arm at the wire boundary (P4 dynamic-tag row). The tag is put
@@ -197,7 +197,7 @@ export function materializePropertyRoot(stream: PropertyStream): Compiled {
 }
 
 /** Materialize a per-traverser heterogeneous record as the existing map wire shape.
- * Carried compiler state is deliberately not projected across the root boundary. */
+ * Per-traverser layout state is deliberately not projected across the root boundary. */
 export function materializeRecordRoot(stream: RecordStream): Compiled {
   const r = stream.rel.as('r');
   const cols: Expression[] = [];

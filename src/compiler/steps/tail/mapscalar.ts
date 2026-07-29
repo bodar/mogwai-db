@@ -5,9 +5,9 @@ import {
 import { isNested } from '../../../gremlin/frontend.ts';
 import { mathToSql, mathVars } from '../../../gremlin/math.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { aliasElem, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, type ElementStream } from '../context/context.ts';
+import { aliasElem, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, type ElementStream } from '../context/context.ts';
 import { aliasId, aliasScalar } from '../context/alias.ts';
-import { carryOf, toScalarStream, type ListStream, type ScalarStream, type Stream } from '../context/stream.ts';
+import { loweringStateOf, toScalarStream, type ListStream, type ScalarStream, type Stream } from '../context/stream.ts';
 import { tryCompileElementChild, tryCompileBranchChildAllCard, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, type ModulationFallback, type ScalarModulationSpec } from './child.ts';
 import { childSteps, classifyByAt, optionMapIsCase, readOptionMapArms } from './child-shape.ts';
 import { engineOf } from '../../engine/deps.ts';
@@ -99,7 +99,7 @@ export function lowerMath(st: ElementStream, steps: PStep[], stop: number): Scal
     let col: string | undefined;
     let elem = st.elem;
     if (name !== '_') {
-      const entry = st.carried.aliases.get(name);
+      const entry = st.traverserLayout.aliases.get(name);
       if (!entry) throw new Error(`math("${formula}"): no such variable "${name}" — as("${name}") was not seen`);
       col = entry.col;
       elem = aliasElem(entry);
@@ -127,10 +127,10 @@ export function lowerMath(st: ElementStream, steps: PStep[], stop: number): Scal
 
   // Drop a non-productive by() or SQL domain-error result (both yield NULL).
   const rel = st.q.cte(
-    q`SELECT ${mathExpr} AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${predicateSql(mathExpr, undefined)}`,
-    ['v', ...carriedCols(st.carried)],
+    q`SELECT ${mathExpr} AS v${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${predicateSql(mathExpr, undefined)}`,
+    ['v', ...layoutCols(st.traverserLayout)],
   );
-  return toScalarStream(carryOf(st), rel, 'double');
+  return toScalarStream(loweringStateOf(st), rel, 'double');
 }
 
 /**
@@ -154,10 +154,10 @@ export function lowerMathScalar(s: ScalarStream, step: PStep): ScalarStream | nu
     const p = s.rel.as('p');
     const mathExpr = mathToSql(formula, () => p.c.v);
     const rel = s.q.cte(
-      q`SELECT ${mathExpr} AS v${carryFrag(s.carried, p)} FROM ${p} WHERE ${predicateSql(mathExpr, undefined)}`,
-      ['v', ...carriedCols(s.carried)],
+      q`SELECT ${mathExpr} AS v${layoutProjection(s.traverserLayout, p)} FROM ${p} WHERE ${predicateSql(mathExpr, undefined)}`,
+      ['v', ...layoutCols(s.traverserLayout)],
     );
-    return toScalarStream(carryOf(s), rel, 'double', { result: 'value' });
+    return toScalarStream(loweringStateOf(s), rel, 'double', { result: 'value' });
   }
 
   // Named variables → one scalar by()-child each, resolved against the value via the seam.
@@ -180,10 +180,10 @@ export function lowerMathScalar(s: ScalarStream, step: PStep): ScalarStream | nu
   };
   const mathExpr = mathToSql(formula, resolveVar);
   const rel = s.q.cte(
-    q`SELECT ${mathExpr} AS v${carryFrag(s.carried, p)} FROM ${p} WHERE ${predicateSql(mathExpr, undefined)}`,
-    ['v', ...carriedCols(s.carried)],
+    q`SELECT ${mathExpr} AS v${layoutProjection(s.traverserLayout, p)} FROM ${p} WHERE ${predicateSql(mathExpr, undefined)}`,
+    ['v', ...layoutCols(s.traverserLayout)],
   );
-  return toScalarStream(carryOf(s), rel, 'double');
+  return toScalarStream(loweringStateOf(s), rel, 'double');
 }
 
 // ---------- format() (per-traverser string templating) ----------
@@ -241,7 +241,7 @@ export function lowerFormat(st: ElementStream, steps: PStep[], stop: number): Sc
   // the traverser is filtered).
   const namedToken = (key: string): Expression => {
     const prop = scalarProp(ctx, key);
-    const entry = st.carried.aliases.get(key);
+    const entry = st.traverserLayout.aliases.get(key);
     return entry ? q`COALESCE(${prop}, ${aliasScalar(p.c[entry.col], 'last')})` : prop;
   };
   const pieces = parts.map((part): Expression => part.kind === 'literal'
@@ -255,10 +255,10 @@ export function lowerFormat(st: ElementStream, steps: PStep[], stop: number): Sc
 
   const where = hadToken ? q` WHERE ${predicateSql(expr, undefined)}` : q``;
   const rel = st.q.cte(
-    q`SELECT ${expr} AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}${where}`,
-    ['v', ...carriedCols(st.carried)],
+    q`SELECT ${expr} AS v${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}${where}`,
+    ['v', ...layoutCols(st.traverserLayout)],
   );
-  return toScalarStream(carryOf(st), rel);
+  return toScalarStream(loweringStateOf(st), rel);
 }
 
 /**
@@ -299,10 +299,10 @@ export function lowerFormatScalar(s: ScalarStream, step: PStep): ScalarStream | 
   const expr = pieces.length ? q`CAST(${list(pieces, ' || ')} AS TEXT)` : q`${value('')}`;
   const where = hadToken ? q` WHERE ${predicateSql(expr, undefined)}` : q``;
   const rel = s.q.cte(
-    q`SELECT ${expr} AS v${carryFrag(s.carried, p)} FROM ${p}${where}`,
-    ['v', ...carriedCols(s.carried)],
+    q`SELECT ${expr} AS v${layoutProjection(s.traverserLayout, p)} FROM ${p}${where}`,
+    ['v', ...layoutCols(s.traverserLayout)],
   );
-  return toScalarStream(carryOf(s), rel);
+  return toScalarStream(loweringStateOf(s), rel);
 }
 
 // ---------- concat() with TRAVERSAL arguments (the `apply` child-value contract) ----------
@@ -367,10 +367,10 @@ export function lowerConcatScalar(s: ScalarStream, step: PStep): ScalarStream | 
   const expr = scalarTx('concat', resolved, p.c.v);
   if (!expr) throw new Error('concat() scalar transform not available');
   const rel = s.q.cte(
-    q`SELECT ${expr} AS v${carryFrag(s.carried, p)} FROM ${p}`,
-    ['v', ...carriedCols(s.carried)],
+    q`SELECT ${expr} AS v${layoutProjection(s.traverserLayout, p)} FROM ${p}`,
+    ['v', ...layoutCols(s.traverserLayout)],
   );
-  return toScalarStream(carryOf(s), rel);
+  return toScalarStream(loweringStateOf(s), rel);
 }
 
 // ---------- option-map choose (scalar CASE projector) ----------
@@ -461,20 +461,20 @@ export function lowerChooseOptions(st: ElementStream, steps: PStep[], stop: numb
   // child cardinality policy needs an explicit per-origin encounter. Root option-map
   // choose() remains order-free; only mint when an active child scope needs first/all
   // semantics downstream.
-  const origin = st.carried.origins.at(-1);
-  const carried = origin && !st.carried.encounter
-    ? carriedWith(st.carried, { encounter: 'encounter' })
-    : st.carried;
-  const encounter = carried.encounter && carried.encounter !== st.carried.encounter
+  const origin = st.traverserLayout.origins.at(-1);
+  const layout = origin && !st.traverserLayout.encounter
+    ? patchLayout(st.traverserLayout, { encounter: 'encounter' })
+    : st.traverserLayout;
+  const encounter = layout.encounter && layout.encounter !== st.traverserLayout.encounter
     ? q`ROW_NUMBER() OVER (PARTITION BY ${p.c[origin!]} ORDER BY ${p.c.id})`
     : undefined;
   const rel = st.q.cte(
     q`SELECT ${result} AS v${encounter
-      ? carryFragMint(carried, p, 'encounter', encounter)
-      : carryFrag(carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id} WHERE ${predicateSql(productive, undefined)}`,
-    ['v', ...carriedCols(carried)],
+      ? layoutProjectionMinting(layout, p, 'encounter', encounter)
+      : layoutProjection(layout, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id} WHERE ${predicateSql(productive, undefined)}`,
+    ['v', ...layoutCols(layout)],
   );
-  return toScalarStream(carryOf(st, carried), rel);
+  return toScalarStream(loweringStateOf(st, layout), rel);
 }
 
 /**
@@ -524,8 +524,8 @@ export function lowerChooseOptionsScalar(s: ScalarStream, steps: PStep[], stop: 
   const result = q`CASE ${list(whens, ' ')} ELSE ${p.c[mods.values[fallback.mod].value]} END`;
   const productive = q`CASE ${list(productiveWhens, ' ')} ELSE ${p.c[mods.values[fallback.mod].present]} END`;
   const rel = s.q.cte(
-    q`SELECT ${result} AS v${carryFrag(s.carried, p)} FROM ${p} WHERE ${predicateSql(productive, undefined)}`,
-    ['v', ...carriedCols(s.carried)],
+    q`SELECT ${result} AS v${layoutProjection(s.traverserLayout, p)} FROM ${p} WHERE ${predicateSql(productive, undefined)}`,
+    ['v', ...layoutCols(s.traverserLayout)],
   );
-  return toScalarStream(carryOf(s), rel);
+  return toScalarStream(loweringStateOf(s), rel);
 }

@@ -521,7 +521,7 @@ function compileAddE(engine: Engine, steps: PStep[], params: Record<string, any>
   if (stop !== prefix.length) throw new Error(`addE after ${prefix[stop].name}() not yet supported`);
   // as() labels are JSONB history arrays; an addE endpoint is the label's last element
   // (a vertex). Extract its rowid in SQL so resolveEndpoint sees a plain id.
-  const aliasCols: [string, string][] = [...st.carried.aliases].map(([lbl, a]) => [lbl, a.col]);
+  const aliasCols: [string, string][] = [...st.traverserLayout.aliases].map(([lbl, a]) => [lbl, a.col]);
   const idExtract = (c: string) => `CAST(${c} ->> '$[#-1].v' AS INTEGER) AS ${c}`;
   const read = renderFrom(st.q, st.rel, ['id', ...aliasCols.map(([, c]) => idExtract(c))].join(', '));
   return {

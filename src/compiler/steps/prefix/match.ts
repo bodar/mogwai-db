@@ -4,7 +4,7 @@ import { where } from './filter.ts';
 import { isNested, stepChain, type Step } from '../../../gremlin/frontend.ts';
 import { MATCH_FILTER_HEADS, type PStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
-import { advance, aliasColsOf, aliasScalarTypeOf, prevRel, withCarried, type AliasEntry, type Carried, type ElementStream, type StepFn } from '../context/context.ts';
+import { advance, aliasColsOf, aliasScalarTypeOf, prevRel, withLayout, type AliasEntry, type TraverserLayout, type ElementStream, type StepFn } from '../context/context.ts';
 import { aliasEntry, aliasId, aliasScalar, aliasSeed, elemEntry, elemShape, isElementShape, nodeEntry, shapeElem, type AliasShape } from '../context/alias.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { type Stream } from '../context/stream.ts';
@@ -118,9 +118,9 @@ interface EndBinding {
   readonly rel: Relation;
   /** The lowered body's carried state — read here rather than off the un-narrowed Stream, so
    *  the intra-pattern-label guard below works for every bindable kind. */
-  readonly carried: Carried;
+  readonly traverserLayout: TraverserLayout;
   /** The body's OWN columns (`streamPayloadCols` for its kind) — the ones `entry`/`same` read.
-   *  Carried here for the same reason as `carried`: the Stream is un-narrowed by the time the
+   *  Kept here for the same reason as `traverserLayout`: the Stream is un-narrowed by the time the
    *  private-state guard below runs, and this is what tells a payload column apart from one. */
   readonly payload: readonly string[];
   readonly shape: AliasShape;
@@ -131,12 +131,12 @@ interface EndBinding {
 
 function endBindingOf(out: Stream): EndBinding | null {
   if (out.kind === 'elements') return {
-    rel: out.rel, carried: out.carried, payload: streamPayloadCols(out), shape: elemShape(out.elem),
+    rel: out.rel, traverserLayout: out.traverserLayout, payload: streamPayloadCols(out), shape: elemShape(out.elem),
     entry: (f) => elemEntry(out.elem, f.c.id),
     same: (f, col) => q`${f.c.id}=${aliasId(f.c[col], 'last')}`,
   };
   if (out.kind === 'scalar') return {
-    rel: out.rel, carried: out.carried, payload: streamPayloadCols(out), shape: 'value',
+    rel: out.rel, traverserLayout: out.traverserLayout, payload: streamPayloadCols(out), shape: 'value',
     // A per-row stored type crosses this relation boundary in the entry itself;
     // a later select() recreates a fresh vtype column from it.
     entry: (f) => aliasEntry('value', f.c.v, perRowColumnOf(out.type) ? f.c[perRowColumnOf(out.type)!] : staticTypeOf(out.type) ?? null),
@@ -178,7 +178,7 @@ function applyPattern(st: ElementStream, p: Extract<Pattern, { kind: 'bind' }>, 
   const seedRel = st.q.cte(
     q`SELECT ${aliasId(prev.c[startCol], 'last')} AS id${list(varCols.map((c) => q`, ${prev.c[c]}`), '')} FROM ${prev}`,
     ['id', ...varCols]);
-  const seed: ElementStream = { ...st, rel: seedRel, elem: startElem, carried: { aliases: new Map(aliases), origins: [] } };
+  const seed: ElementStream = { ...st, rel: seedRel, elem: startElem, traverserLayout: { aliases: new Map(aliases), origins: [] } };
 
   // TWO routes, and which one is right is decided by a real semantic fact, not a vocabulary.
   //
@@ -212,7 +212,7 @@ function applyPattern(st: ElementStream, p: Extract<Pattern, { kind: 'bind' }>, 
   })();
   const bound = endBindingOf(out);
   if (!bound) throw new Error(`match() pattern binding a ${out.kind} result not yet supported (the end var can hold an element or a scalar)`);
-  if (bound.carried.aliases.size !== aliases.size || bound.carried.path || bound.carried.origins.length)
+  if (bound.traverserLayout.aliases.size !== aliases.size || bound.traverserLayout.path || bound.traverserLayout.origins.length)
     throw new Error('match() pattern binding an intra-pattern label not yet supported');
   // A body may MINT carried state of its own that the binding table does not forward: `repeat()`
   // seeds a fresh `bulk` at its source (prefix/branch.ts, `1 AS bulk`), because any element source
@@ -224,9 +224,9 @@ function applyPattern(st: ElementStream, p: Extract<Pattern, { kind: 'bind' }>, 
   // `streamPayloadCols` is the authority per kind) plus the var columns; anything else is private
   // state, and only a re-seeded `bulk` is safe to drop. Asking the authority rather than listing
   // `bulk` keeps this closed against the next carried field that rides out the same way.
-  const consumed = new Set<string>([...bound.payload, ...aliasColsOf(bound.carried.aliases)]);
+  const consumed = new Set<string>([...bound.payload, ...aliasColsOf(bound.traverserLayout.aliases)]);
   const dropped = bound.rel.cols.filter((c) => !consumed.has(c));
-  if (dropped.some((c) => c !== bound.carried.bulk))
+  if (dropped.some((c) => c !== bound.traverserLayout.bulk))
     throw new Error(`match() pattern body carrying ${dropped.join('/')} not yet supported (the binding table forwards only the pattern variables)`);
 
   // Re-project: restore the traverser's id (`restoreId` — see IdSource), keep every var column,
@@ -257,7 +257,7 @@ function applyPattern(st: ElementStream, p: Extract<Pattern, { kind: 'bind' }>, 
 
 export const match: StepFn = (s, st) => {
   if (st.elem !== 'vertex') throw new Error('match() on edges not yet supported');
-  if (st.carried.path) throw new Error('path tracking through match() not yet supported');
+  if (st.traverserLayout.path) throw new Error('path tracking through match() not yet supported');
   const patArgs = s.args.filter(isNested);
   if (!patArgs.length) throw new Error('match() needs at least one pattern');
   const pats = patArgs.map((a) => parsePattern(stepChain(a.nested, st.params), st.params));
@@ -272,12 +272,12 @@ export const match: StepFn = (s, st) => {
   // Only a BIND declares a start/end — a filter reads variables, so it can never supply a root.
   const bindPats = pats.filter((p): p is Extract<Pattern, { kind: 'bind' }> => p.kind === 'bind');
   const ends = new Set(bindPats.map((p) => p.end).filter((e): e is string => !!e));
-  const roots = [...new Set(bindPats.map((p) => p.start))].filter((v) => !ends.has(v) && !st.carried.aliases.has(v));
+  const roots = [...new Set(bindPats.map((p) => p.start))].filter((v) => !ends.has(v) && !st.traverserLayout.aliases.has(v));
   if (roots.length > 1)
     throw new Error(`match() with ${roots.length} root variables not yet supported (needs at most one start-only var)`);
   const root: string | undefined = roots[0];
 
-  const aliases = new Map(st.carried.aliases);
+  const aliases = new Map(st.traverserLayout.aliases);
   // `shape` is what the var actually holds — recorded rather than assumed 'vertex', so a later
   // pattern starting from it re-roots with the right elem and a re-bind can be shape-checked.
   const bind = (v: string, shape: AliasShape): string => {
@@ -293,7 +293,7 @@ export const match: StepFn = (s, st) => {
   const prev0 = prevRel(st, 'p');
   const idCol = bind(root ?? TRAVERSER_LABEL, 'vertex');
   const restoreId: IdSource = (f) => aliasId(f.c[idCol], 'last');
-  const seedProj: Expression[] = [q`${prev0.c.id}`, ...aliasColsOf(st.carried.aliases).map((c) => q`${prev0.c[c]}`),
+  const seedProj: Expression[] = [q`${prev0.c.id}`, ...aliasColsOf(st.traverserLayout.aliases).map((c) => q`${prev0.c[c]}`),
     q`${aliasSeed(nodeEntry(prev0.c.id))} AS ${idCol}`];
   let cur: ElementStream = advance(st, q`SELECT ${list(seedProj, ', ')} FROM ${prev0}`, { aliases: new Map(aliases), cols: ['id', ...aliasColsOf(aliases)] });
 
@@ -320,6 +320,6 @@ export const match: StepFn = (s, st) => {
   // The internal traverser binding is not a Gremlin label — drop it so a downstream select()/where()
   // sees exactly the variables the patterns declared. Its COLUMN stays (id was restored from it).
   if (root === undefined)
-    cur = withCarried(cur, { aliases: new Map([...cur.carried.aliases].filter(([k]) => k !== TRAVERSER_LABEL)) });
+    cur = withLayout(cur, { aliases: new Map([...cur.traverserLayout.aliases].filter(([k]) => k !== TRAVERSER_LABEL)) });
   return cur;
 };

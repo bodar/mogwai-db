@@ -2,10 +2,10 @@ import { derived, empty, list, paren, q, value, type Expression, type Relation }
 import { perRowColumnOf, perRowCols } from '../../../sql/kernel/render.ts';
 import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
-import { advance, carriedWith, carryFrag, carryFragMint, carriedCols, partitionOver, prevRel, withCarried, type Carried, type ElementStream } from '../context/context.ts';
+import { advance, patchLayout, layoutProjection, layoutProjectionMinting, layoutCols, partitionOver, prevRel, withLayout, type TraverserLayout, type ElementStream } from '../context/context.ts';
 import { aliasId } from '../context/alias.ts';
 import { asOnStream, selectOneFromAlias } from './labelselect.ts';
-import { carryOf, streamPayloadCols, toMapStream, toScalarStream, PROPERTY_PAYLOAD, type ListStream, type MapStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream , type RelationalStream} from '../context/stream.ts';
+import { loweringStateOf, streamPayloadCols, toMapStream, toScalarStream, PROPERTY_PAYLOAD, type ListStream, type MapStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream , type RelationalStream} from '../context/stream.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { lowerScalarRows, unionScalarStreams } from './scalar.ts';
 import { SCALAR_TRANSFORMS } from './coerce.ts';
@@ -37,31 +37,31 @@ export function pushChildScope<P extends ChildParent>(
 ): { scope: ChildScope; frame: ChildFrame; seed: P } {
   if (scope.kind === 'child' && scope.reuseFrame) {
     const ordinal = scope.reuseFrame.ordinal;
-    if (parent.carried.origins.at(-1) !== ordinal)
-      throw new Error(`reused child scope mismatch: expected innermost ${ordinal}, got ${parent.carried.origins.at(-1) ?? 'none'}`);
-    const frame: ChildFrame = { ordinal, domain: parent.rel, parent, reused: true, carried: parent.carried };
+    if (parent.traverserLayout.origins.at(-1) !== ordinal)
+      throw new Error(`reused child scope mismatch: expected innermost ${ordinal}, got ${parent.traverserLayout.origins.at(-1) ?? 'none'}`);
+    const frame: ChildFrame = { ordinal, domain: parent.rel, parent, reused: true, traverserLayout: parent.traverserLayout };
     const frames = [...scope.frames.slice(0, -1), frame];
     return { scope: { kind: 'child', frames }, frame, seed: parent };
   }
   const p = parent.rel.as('p');
-  const ordinal = `o${parent.carried.origins.length}`;
+  const ordinal = `o${parent.traverserLayout.origins.length}`;
   // A SCALAR parent needs a CARRIED encounter (the per-origin order marker the scoped
   // reducer/fold and the `first` cardinality policy key productivity on). Reuse the parent's
   // if it already carries one; otherwise mint a constant (a scalar traverser never fans out
   // into its own child scope — each ordinal has exactly one value). Element/property parents
   // add no encounter here.
-  const needEnc = isScalarParent(parent) && !parent.carried.encounter;
+  const needEnc = isScalarParent(parent) && !parent.traverserLayout.encounter;
   // The seed carries the parent's schema PLUS the pushed ordinal (+ a minted scalar encounter
-  // when needed). Build the domain's carried columns in carriedCols ORDER — the ordinal in its
+  // when needed). Build the domain's carried columns in layoutCols ORDER — the ordinal in its
   // origins slot, NOT appended physically last — so the seed's declared schema equals its
   // physical layout. Otherwise, whenever the outer chain also tracks a path (or fromV/encounter,
-  // which carriedCols sorts AFTER origins), the ordinal-last domain desyncs from the
+  // which layoutCols sorts AFTER origins), the ordinal-last domain desyncs from the
   // ordinal-in-origins schema and any child body lowered via lowerSteps (assertStreamColumns)
   // trips a column mismatch. Minted columns (ordinal by ROW_NUMBER, a new encounter by a
   // constant) are computed fresh; every other carried column is projected from `p` by name.
-  const base = carriedWith(parent.carried, { origins: [...parent.carried.origins, ordinal] });
-  const seedCarried = needEnc ? carriedWith(base, { encounter: 'encounter' }) : base;
-  const seedCols = carriedCols(seedCarried);
+  const base = patchLayout(parent.traverserLayout, { origins: [...parent.traverserLayout.origins, ordinal] });
+  const seedCarried = needEnc ? patchLayout(base, { encounter: 'encounter' }) : base;
+  const seedCols = layoutCols(seedCarried);
   const carriedSelect = list(
     seedCols.map((c) =>
       c === ordinal ? q`ROW_NUMBER() OVER () AS ${ordinal}`
@@ -83,8 +83,8 @@ export function pushChildScope<P extends ChildParent>(
       q`SELECT ${payload}, ${carriedSelect} FROM ${p}`,
       [...head, ...vtypeCols, ...seedCols],
     );
-    const seed = { ...parent, rel: domain, carried: seedCarried } as P;
-    const frame: ChildFrame = { ordinal, domain, parent, carried: seedCarried };
+    const seed = { ...parent, rel: domain, traverserLayout: seedCarried } as P;
+    const frame: ChildFrame = { ordinal, domain, parent, traverserLayout: seedCarried };
     const frames = scope.kind === 'child' ? [...scope.frames, frame] : [frame];
     return { scope: { kind: 'child', frames }, frame, seed };
   }
@@ -99,8 +99,8 @@ export function pushChildScope<P extends ChildParent>(
     q`SELECT ${payload}, ${carriedSelect} FROM ${p}`,
     [...payloadCols, ...seedCols],
   );
-  const seed = { ...parent, rel: domain, carried: seedCarried } as P;
-  const frame: ChildFrame = { ordinal, domain, parent, carried: seedCarried };
+  const seed = { ...parent, rel: domain, traverserLayout: seedCarried } as P;
+  const frame: ChildFrame = { ordinal, domain, parent, traverserLayout: seedCarried };
   const frames = scope.kind === 'child' ? [...scope.frames, frame] : [frame];
   return { scope: { kind: 'child', frames }, frame, seed };
 }
@@ -108,13 +108,13 @@ export function pushChildScope<P extends ChildParent>(
 /** Remove exactly the innermost child identity after a child consumer has restored
  * parent cardinality. Outer origins remain live for nested children. */
 export function popChildScope(child: ElementStream, frame: ChildFrame): ElementStream {
-  const origins = child.carried.origins;
+  const origins = child.traverserLayout.origins;
   if (origins[origins.length - 1] !== frame.ordinal)
     throw new Error(`child scope mismatch: expected innermost ${frame.ordinal}, got ${origins.at(-1) ?? 'none'}`);
   const nextOrigins = origins.slice(0, -1);
-  const carried = carriedWith(child.carried, { origins: nextOrigins });
+  const layout = patchLayout(child.traverserLayout, { origins: nextOrigins });
   const p = child.rel.as('p');
-  return advance(child, q`SELECT ${p.c.id} AS id${carryFrag(carried, p)} FROM ${p}`, { origins: nextOrigins });
+  return advance(child, q`SELECT ${p.c.id} AS id${layoutProjection(layout, p)} FROM ${p}`, { origins: nextOrigins });
 }
 
 // The terminal barrier vocabulary the row compilers aggregate on is ONE set, defined in the pure
@@ -170,13 +170,13 @@ function scopedElementRowCount(
     : empty;
   // One count row per origin — mint a constant encounter into its carried slot as the per-origin
   // order marker a following scoped slice/reducer or cardinality policy reads.
-  const outCarried = carriedWith(pushed.frame.carried, { encounter: 'encounter' });
+  const outCarried = patchLayout(pushed.frame.traverserLayout, { encounter: 'encounter' });
   const rel = el.q.cte(
-    q`SELECT ${count} AS v${carryFragMint(outCarried, d, 'encounter', q`1`)} FROM ${d} LEFT JOIN ${c} ON ${c.c[ord]}=${d.c[ord]} GROUP BY ${d.c[ord]}${filter}`,
-    ['v', ...carriedCols(outCarried)],
+    q`SELECT ${count} AS v${layoutProjectionMinting(outCarried, d, 'encounter', q`1`)} FROM ${d} LEFT JOIN ${c} ON ${c.c[ord]}=${d.c[ord]} GROUP BY ${d.c[ord]}${filter}`,
+    ['v', ...layoutCols(outCarried)],
   );
   return {
-    stream: toScalarStream(carryOf(el, outCarried), rel, 'long', { result: 'count' }),
+    stream: toScalarStream(loweringStateOf(el, outCarried), rel, 'long', { result: 'count' }),
     frame: pushed.frame,
   };
 }
@@ -284,23 +284,23 @@ export function applyChildCardinality<S extends Exclude<Stream, { kind: 'result'
   use: ChildUse,
 ): { stream: S; frame: ChildFrame } {
   const payload = streamPayloadCols(lowered);
-  const parentCols = carriedCols(parent.carried);
+  const parentCols = layoutCols(parent.traverserLayout);
   const cols = [...payload, ...parentCols];
   const project = (r: Relation) => list(payload.map((c) => q`${r.c[c]} AS ${c}`), ', ');
-  const rehome = (rel: Relation): S => ({ ...lowered, ...carryOf(parent), rel });
+  const rehome = (rel: Relation): S => ({ ...lowered, ...loweringStateOf(parent), rel });
 
   const r = lowered.rel.as('r');
   if (use === 'all')
     return {
-      stream: rehome(derived(q`SELECT ${project(r)}${carryFrag(parent.carried, r)} FROM ${r}`, cols, 'all_rows')),
+      stream: rehome(derived(q`SELECT ${project(r)}${layoutProjection(parent.traverserLayout, r)} FROM ${r}`, cols, 'all_rows')),
       frame,
     };
-  if (!lowered.carried.encounter) throw new Error('child first cardinality requires explicit encounter order');
+  if (!lowered.traverserLayout.encounter) throw new Error('child first cardinality requires explicit encounter order');
   const first = derived(
-    q`SELECT ${project(r)}${carryFrag(parent.carried, r)}, ROW_NUMBER() OVER (PARTITION BY ${r.c[frame.ordinal]} ORDER BY ${r.c[lowered.carried.encounter]}) AS rn FROM ${r}`,
+    q`SELECT ${project(r)}${layoutProjection(parent.traverserLayout, r)}, ROW_NUMBER() OVER (PARTITION BY ${r.c[frame.ordinal]} ORDER BY ${r.c[lowered.traverserLayout.encounter]}) AS rn FROM ${r}`,
     [...cols, 'rn'], 'f');
   return {
-    stream: rehome(derived(q`SELECT ${project(first)}${carryFrag(parent.carried, first)} FROM ${first} WHERE ${first.c.rn}=1`, cols, 'first_row')),
+    stream: rehome(derived(q`SELECT ${project(first)}${layoutProjection(parent.traverserLayout, first)} FROM ${first} WHERE ${first.c.rn}=1`, cols, 'first_row')),
     frame,
   };
 }
@@ -310,9 +310,9 @@ export function applyChildCardinality<S extends Exclude<Stream, { kind: 'result'
  *  child provider needs and the expression nests badly inline. */
 export function mintChildEncounter(end: ElementStream): ElementStream {
   const pe = prevRel(end, 'pe');
-  const carried = withCarried(end, { encounter: 'encounter' }).carried;
-  const mint = q`ROW_NUMBER() OVER (${partitionOver(carried, pe, pe.c.id)})`;
-  return advance(end, q`SELECT ${pe.c.id} AS id${carryFragMint(carried, pe, 'encounter', mint)} FROM ${pe}`,
+  const layout = withLayout(end, { encounter: 'encounter' }).traverserLayout;
+  const mint = q`ROW_NUMBER() OVER (${partitionOver(layout, pe, pe.c.id)})`;
+  return advance(end, q`SELECT ${pe.c.id} AS id${layoutProjectionMinting(layout, pe, 'encounter', mint)} FROM ${pe}`,
     { encounter: 'encounter' });
 }
 
@@ -548,7 +548,7 @@ function compileScalarChildRows(
 
   // Mint the per-origin encounter into the child's carried slot (superseding none — end is an
   // element child with no encounter yet).
-  const outCarried = carriedWith(end.carried, { encounter: 'encounter' });
+  const outCarried = patchLayout(end.traverserLayout, { encounter: 'encounter' });
   const continueScalar = (base: ScalarStream): ScalarStream => {
     let stream = base;
     let at = 0;
@@ -589,10 +589,10 @@ function compileScalarChildRows(
   };
   const encMint = q`ROW_NUMBER() OVER (PARTITION BY ${c.c[pushed.frame.ordinal]} ORDER BY ${order})`;
   const rows = parent.q.cte(
-    q`SELECT ${scalar} AS v${carryFragMint(outCarried, c, 'encounter', encMint)} FROM ${from}`,
-    ['v', ...carriedCols(outCarried)],
+    q`SELECT ${scalar} AS v${layoutProjectionMinting(outCarried, c, 'encounter', encMint)} FROM ${from}`,
+    ['v', ...layoutCols(outCarried)],
   );
-  const lowered = continueScalar(toScalarStream(carryOf(end, outCarried), rows, undefined, { result: 'value' }));
+  const lowered = continueScalar(toScalarStream(loweringStateOf(end, outCarried), rows, undefined, { result: 'value' }));
   return applyScalarChildCardinality(parent, pushed, lowered, use, retainChildScope);
 }
 
@@ -715,8 +715,8 @@ export function tryCompileScalarModulations(
       const p = es.rel.as(`mr${i}`);
       // rootCol is an as()-label column: a JSONB history array. Re-root on its last id.
       const rel = parent.q.cte(
-        q`SELECT ${aliasId(p.c[spec.rootCol], 'last')} AS id${carryFrag(es.carried, p)} FROM ${p}`,
-        ['id', ...carriedCols(es.carried)],
+        q`SELECT ${aliasId(p.c[spec.rootCol], 'last')} AS id${layoutProjection(es.traverserLayout, p)} FROM ${p}`,
+        ['id', ...layoutCols(es.traverserLayout)],
       );
       seed = { ...es, rel, elem: spec.rootElem ?? es.elem };
     }
@@ -742,8 +742,8 @@ export function tryCompileScalarModulations(
   // nodes/edges on it) or a scalar parent's value `v` (the current object itself).
   const idCol = scalarParent ? 'v' : 'id';
   const rel = parent.q.cte(
-    q`SELECT ${d.c[idCol]} AS ${idCol}${carryFrag(parent.carried, d)}, ${list(payload, ', ')} FROM ${d}${list(joins, '')}`,
-    [idCol, ...carriedCols(parent.carried), ...values.flatMap((x) => [x.value, x.present])],
+    q`SELECT ${d.c[idCol]} AS ${idCol}${layoutProjection(parent.traverserLayout, d)}, ${list(payload, ', ')} FROM ${d}${list(joins, '')}`,
+    [idCol, ...layoutCols(parent.traverserLayout), ...values.flatMap((x) => [x.value, x.present])],
   );
   return { rel, values, idCol };
 }
@@ -912,7 +912,7 @@ export function tryCombineByChildExistence(
   }
   const combined = paren(list(terms.map(paren), ` ${op} `));
   return advance(parent,
-    q`SELECT ${d.c.id} AS id${carryFrag(parent.carried, d)} FROM ${d} WHERE ${negate ? q`NOT (${combined})` : combined}`,
+    q`SELECT ${d.c.id} AS id${layoutProjection(parent.traverserLayout, d)} FROM ${d} WHERE ${negate ? q`NOT (${combined})` : combined}`,
   );
 }
 
@@ -932,7 +932,7 @@ function childExistenceGate(
     const c = child.stream.rel.as('c');
     const exists = q`EXISTS (SELECT 1 FROM ${c} WHERE ${c.c[child.frame.ordinal]}=${d.c[child.frame.ordinal]})`;
     return advance(parent,
-      q`SELECT ${d.c.id} AS id${carryFrag(parent.carried, d)} FROM ${d} WHERE ${negate ? q`NOT (${exists})` : exists}`,
+      q`SELECT ${d.c.id} AS id${layoutProjection(parent.traverserLayout, d)} FROM ${d} WHERE ${negate ? q`NOT (${exists})` : exists}`,
     );
   };
 }
@@ -957,10 +957,10 @@ function compileElementChildRows(
   // kept here, distinct from the shared shape classification below.
   if (isPropertyParent(parent) || isScalarParent(parent)) return null;
   // A parent sack rides through the child scope unchanged — pushChildScope projects the full
-  // carriedCols (sack included) into the domain, and lowerElementSteps threads it — so a scoped
+  // layoutCols (sack included) into the domain, and lowerElementSteps threads it — so a scoped
   // sack fold (local(__.sack(op).by(...))) folds per parent correctly. fromV stays gated (an
   // edge's entering-vertex is undefined inside a child scope that may move off the edge).
-  if (!nested || parent.carried.fromV) return null;
+  if (!nested || parent.traverserLayout.fromV) return null;
   // ONE shape classification (the same classifyElementChildRows the element preflight peeks
   // use) — the bare-order strip, firstPolicy order modulator, and empty-before handling all
   // live in the shared helper, so preflight and compiler cannot diverge.
@@ -976,8 +976,8 @@ function compileElementChildRows(
   // Rank rows per parent traverser: order/slice/first all window over the child's origin
   // stack (partitionOver — equivalent to the innermost ordinal, which is globally unique,
   // and robust to nesting). One shared window builder so the three sites can't drift.
-  const rankPerParent = (carried: Carried, p: Relation, orderKey: Expression): Expression =>
-    q`ROW_NUMBER() OVER (${partitionOver(carried, p, orderKey)})`;
+  const rankPerParent = (layout: TraverserLayout, p: Relation, orderKey: Expression): Expression =>
+    q`ROW_NUMBER() OVER (${partitionOver(layout, p, orderKey)})`;
 
   let end = prefixed;
   for (const step of parts.suffix) {
@@ -991,14 +991,14 @@ function compileElementChildRows(
     }
     if (step.name === 'order') {
       const n = (end.elem === 'edge' ? edges : nodes).as('n');
-      const ordered = carriedWith(end.carried, { encounter: 'encounter' });
+      const ordered = patchLayout(end.traverserLayout, { encounter: 'encounter' });
       const orderExpr = elementOrderSql(end, n, step);
       // The non-productive by(key) drop applies inside a child body exactly as at the root — same
       // policy function, so `local(__.order().by('age'))` and `order().by('age')` cannot disagree.
       const drop = elementOrderDrop(end, n, step);
-      const rank = rankPerParent(end.carried, p, q`${orderExpr}, ${p.c.id}`);
+      const rank = rankPerParent(end.traverserLayout, p, q`${orderExpr}, ${p.c.id}`);
       end = advance(end,
-        q`SELECT ${p.c.id} AS id${carryFragMint(ordered, p, 'encounter', rank)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}${drop ? q` WHERE ${drop}` : empty}`,
+        q`SELECT ${p.c.id} AS id${layoutProjectionMinting(ordered, p, 'encounter', rank)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}${drop ? q` WHERE ${drop}` : empty}`,
         { encounter: 'encounter' },
       );
       continue;
@@ -1009,34 +1009,34 @@ function compileElementChildRows(
       // re-establishes set semantics and legitimately discards the prior emission order, so
       // drop encounter here — a following slice then falls back to ORDER BY id (the ternary
       // below already handles the cleared case).
-      const deduped = carriedWith(end.carried, { encounter: null });
-      end = advance(end, q`SELECT DISTINCT ${p.c.id} AS id${carryFrag(deduped, p)} FROM ${p}`, { encounter: null });
+      const deduped = patchLayout(end.traverserLayout, { encounter: null });
+      end = advance(end, q`SELECT DISTINCT ${p.c.id} AS id${layoutProjection(deduped, p)} FROM ${p}`, { encounter: null });
       continue;
     }
     const slice = step.name === 'range' ? rangeToOffsetLimit(step.args)
       : step.name === 'skip' ? { offset: Number(step.args[0]), limit: -1 }
       : { offset: 0, limit: Number(step.args[0]) };
-    const cols = carriedCols(end.carried);
+    const cols = layoutCols(end.traverserLayout);
     const r = derived(
-      q`SELECT ${p.c.id} AS id${carryFrag(end.carried, p)}, ${rankPerParent(end.carried, p, end.carried.encounter ? p.c[end.carried.encounter] : p.c.id)} AS rn FROM ${p}`,
+      q`SELECT ${p.c.id} AS id${layoutProjection(end.traverserLayout, p)}, ${rankPerParent(end.traverserLayout, p, end.traverserLayout.encounter ? p.c[end.traverserLayout.encounter] : p.c.id)} AS rn FROM ${p}`,
       ['id', ...cols, 'rn'],
       'r',
     );
     const hi = slice.limit < 0 ? null : slice.offset + slice.limit;
     const upper = hi === null ? empty : q` AND ${r.c.rn} <= ${hi}`;
-    end = advance(end, q`SELECT ${r.c.id} AS id${carryFrag(end.carried, r)} FROM ${r} WHERE ${r.c.rn} > ${slice.offset}${upper}`);
+    end = advance(end, q`SELECT ${r.c.id} AS id${layoutProjection(end.traverserLayout, r)} FROM ${r} WHERE ${r.c.rn} > ${slice.offset}${upper}`);
   }
   if (firstPolicy) {
     const p = end.rel.as('p');
     const n = (end.elem === 'edge' ? edges : nodes).as('n');
     const orderExpr = elementOrderSql(end, n, orderStep as PStep | undefined);
-    const cols = carriedCols(end.carried);
+    const cols = layoutCols(end.traverserLayout);
     const r = derived(
-      q`SELECT ${p.c.id} AS id${carryFrag(end.carried, p)}, ${rankPerParent(end.carried, p, q`${orderExpr}, ${p.c.id}`)} AS rn FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`,
+      q`SELECT ${p.c.id} AS id${layoutProjection(end.traverserLayout, p)}, ${rankPerParent(end.traverserLayout, p, q`${orderExpr}, ${p.c.id}`)} AS rn FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`,
       ['id', ...cols, 'rn'],
       'r',
     );
-    end = advance(end, q`SELECT ${r.c.id} AS id${carryFrag(end.carried, r)} FROM ${r} WHERE ${r.c.rn}=1`);
+    end = advance(end, q`SELECT ${r.c.id} AS id${layoutProjection(end.traverserLayout, r)} FROM ${r} WHERE ${r.c.rn}=1`);
   }
   return { stream: end, frame: pushed.frame };
 }
@@ -1074,14 +1074,14 @@ export function tryCompileRowsBeforeReducer(
   const element = compileElementChildRows(parent, nested, scope, reducer, false, body);
   if (!element) return null;
   const e = element.stream.rel.as('er');
-  const outCarried = carriedWith(element.stream.carried, { encounter: 'encounter' });
+  const outCarried = patchLayout(element.stream.traverserLayout, { encounter: 'encounter' });
   const encMint = q`ROW_NUMBER() OVER (PARTITION BY ${e.c[element.frame.ordinal]} ORDER BY ${e.c.id})`;
   const rel = parent.q.cte(
-    q`SELECT 1 AS v${carryFragMint(outCarried, e, 'encounter', encMint)} FROM ${e}`,
-    ['v', ...carriedCols(outCarried)],
+    q`SELECT 1 AS v${layoutProjectionMinting(outCarried, e, 'encounter', encMint)} FROM ${e}`,
+    ['v', ...layoutCols(outCarried)],
   );
   return {
-    stream: toScalarStream(carryOf(element.stream, outCarried), rel, undefined, { result: 'value' }),
+    stream: toScalarStream(loweringStateOf(element.stream, outCarried), rel, undefined, { result: 'value' }),
     frame: element.frame,
     reducer,
   };
@@ -1117,7 +1117,7 @@ export function tryCompileElementTraversal(
   if (scoped) return scoped.stream;
   if (!nested) return null;
   const body = childSteps(nested, parent.params);
-  if (parent.carried.origins.length && body.some((step) => step.name === 'repeat'))
+  if (parent.traverserLayout.origins.length && body.some((step) => step.name === 'repeat'))
     throw new Error('repeat() inside a correlated element child not yet supported (recursive walk does not carry the parent ordinal)');
   return engineOf(parent).tryLowerElementSteps(body, parent);
 }

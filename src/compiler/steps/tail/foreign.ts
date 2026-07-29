@@ -4,10 +4,10 @@ import { type Elem } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import type { ForeignRow, InjectionKind } from '../../../services/spi/types.ts';
 import {
-  carriedCols, carryFrag, type Carry,
+  layoutCols, layoutProjection, type LoweringState,
 } from '../context/context.ts';
 import {
-  carryOf, continueLowering, dispatchShapeTail, foreignPayload, toScalarStream, toResultStream,
+  loweringStateOf, continueLowering, dispatchShapeTail, foreignPayload, toScalarStream, toResultStream,
   type ForeignStream, type LoweringResult, type ShapeTailFn,
 } from '../context/stream.ts';
 
@@ -45,7 +45,7 @@ function foreignValuesRow(r: ForeignRow, extra: readonly (string | number)[]): E
  *  the payload that each row carries (a rejoin ordinal for the mid-traversal path); pass the
  *  matching value per row via `extraOf`. An empty `rows` yields a typed empty relation. */
 export function landForeignElements(
-  c: Carry,
+  c: LoweringState,
   rows: readonly ForeignRow[],
   elem: Elem,
   extraCols: readonly string[] = [],
@@ -67,9 +67,9 @@ const foreignScalarCol = { id: 'fid', label: 'flabel' } as const;
 const foreignScalarStep: ShapeTailFn<ForeignStream> = (s, step, _steps, at) => {
   const p = s.rel.as('p');
   const col = foreignScalarCol[step.name as keyof typeof foreignScalarCol];
-  const rel = s.q.cte(q`SELECT ${p.c[col]} AS v${carryFrag(s.carried, p)} FROM ${p}`, ['v', ...carriedCols(s.carried)]);
+  const rel = s.q.cte(q`SELECT ${p.c[col]} AS v${layoutProjection(s.traverserLayout, p)} FROM ${p}`, ['v', ...layoutCols(s.traverserLayout)]);
   // id frames as its stored external type (string uid or int); label is always a string.
-  return continueLowering(toScalarStream(carryOf(s), rel, step.name === 'label' ? 'string' : undefined), at + 1);
+  return continueLowering(toScalarStream(loweringStateOf(s), rel, step.name === 'label' ? 'string' : undefined), at + 1);
 };
 
 /** values(k…) → a scalar per matching property VALUE, read straight from the landed fprops
@@ -136,7 +136,7 @@ function foreignMatchExpr(inj: InjectionKind, p: Relation): Expression {
  *  Lands the pool, builds a parent-value VALUES CTE, INNER JOINs on the injected value (or cross-
  *  joins when there is no injection), and returns a ForeignStream of the per-parent-fanned results. */
 export function resumeMidBarrier(
-  c: Carry,
+  c: LoweringState,
   foreign: readonly ForeignRow[],
   headRows: readonly ForeignRow[],
   elem: Elem,

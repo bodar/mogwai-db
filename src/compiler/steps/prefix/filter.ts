@@ -6,7 +6,7 @@ import {
 } from '../../plan/plan.ts';
 import { runFastPath } from '../../options/fast-paths.ts';
 import { tryInlinePredicate, combineBranchPreds, PredicateInliningFastPath } from './predicate.ts';
-import { advance, aliasElem, carriedCols, carriedWith, carryFrag, elemRel, labelCtx, labelScope, pathColsOf, prevRel, scopePathCols, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from '../context/context.ts';
+import { advance, aliasElem, layoutCols, patchLayout, layoutProjection, elemRel, labelCtx, labelScope, pathColsOf, prevRel, scopePathCols, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from '../context/context.ts';
 import { aliasAppend, aliasId, aliasSeed, elemEntry, elemShape } from '../context/alias.ts';
 import { tryCombineByChildExistence, tryCompileScalarValueRows, tryFilterByChildExistence } from '../tail/child.ts';
 import { operandDeps, resolveTraversalOperands } from '../tail/operand.ts';
@@ -39,7 +39,7 @@ const currentCtx = (st: ElementStream) => elemCtx(elemRel(st), st.elem);
 function filterCte(st: ElementStream, test: Expression): ElementStream {
   const n = elemRel(st);
   const p = prevRel(st, 'p');
-  return advance(st, q`SELECT ${n.c.id}${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${test}`);
+  return advance(st, q`SELECT ${n.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${test}`);
 }
 
 /** as(): bind each label to the current traverser (rebinds reuse the label's
@@ -47,7 +47,7 @@ function filterCte(st: ElementStream, test: Expression): ElementStream {
  *  columns, (re)setting the bound ones to the current id. */
 export const as: StepFn = (s, st) => {
   const labels = s.args.filter((a): a is string => typeof a === 'string');
-  const aliases = new Map<string, AliasEntry>(st.carried.aliases);
+  const aliases = new Map<string, AliasEntry>(st.traverserLayout.aliases);
   const shape = elemShape(st.elem);
   const p = prevRel(st, 'p');
   const entry = elemEntry(st.elem, p.c.id); // the current object, tagged
@@ -55,7 +55,7 @@ export const as: StepFn = (s, st) => {
   // On a linear tracked path, this as() attaches to the current element, whose position
   // is the most-recently appended path column (statically known) — record it so
   // path().from(l)/to(l) can resolve a label to a position slice (Piece A, path-history).
-  const pathPos = st.carried.path?.kind === 'cols' ? st.carried.path.cols.length - 1 : undefined;
+  const pathPos = st.traverserLayout.path?.kind === 'cols' ? st.traverserLayout.path.cols.length - 1 : undefined;
   for (const lbl of labels) {
     const existing = aliases.get(lbl);
     const col = existing?.col ?? `a${aliases.size}`;
@@ -66,8 +66,8 @@ export const as: StepFn = (s, st) => {
   }
   // Rebuild from the ONE carried schema so origins/sack/fromV/encounter/path cannot
   // be dropped when as() rebinds alias columns. Only (re)bound aliases change value.
-  const carried = carriedWith(st.carried, { aliases });
-  const proj = ['id', ...carriedCols(carried)].map((c) => {
+  const layout = patchLayout(st.traverserLayout, { aliases });
+  const proj = ['id', ...layoutCols(layout)].map((c) => {
     if (c === 'id') return q`${p.c.id}`;
     const e = setExpr.get(c);
     return e ? q`${e} AS ${raw(c)}` : q`${p.c[c]}`;
@@ -84,13 +84,13 @@ export const as: StepFn = (s, st) => {
  *  scope the pair loop to the positions between two as() labels; by() scoping is deferred. */
 function pathDistinctTest(st: ElementStream, simple: boolean, from?: string, to?: string): Expression {
   const name = simple ? 'simplePath' : 'cyclicPath';
-  if (!st.carried.path) throw new Error(`${name}() requires a tracked path`);
+  if (!st.traverserLayout.path) throw new Error(`${name}() requires a tracked path`);
   // A standalone filter reads the linear per-position columns; over a recursive
   // repeat() walk, simplePath belongs INSIDE the repeat body (folded into the walk's
   // cycle guard), not as a post-filter.
-  if (st.carried.path.kind !== 'cols') throw new Error(`${name}() over a recursive repeat().path() is not yet supported (put simplePath() inside the repeat body)`);
+  if (st.traverserLayout.path.kind !== 'cols') throw new Error(`${name}() over a recursive repeat().path() is not yet supported (put simplePath() inside the repeat body)`);
   const p = prevRel(st, 'p');
-  const cols = scopePathCols(st.carried.path.cols, from, to, st.carried.aliases);
+  const cols = scopePathCols(st.traverserLayout.path.cols, from, to, st.traverserLayout.aliases);
   const pairs: Expression[] = [];
   for (let i = 0; i < cols.length; i++)
     for (let j = i + 1; j < cols.length; j++)
@@ -180,7 +180,7 @@ export const where: StepFn = (s, st) => {
   if (s.name === 'filter') throw new Error('filter(predicate) not supported; use filter(traversal)');
   const pw = prevRel(st, 'p');
   const [left, rawPred, leftElem]: [Expression, Pred, Elem] = typeof arg0 === 'string'
-    ? [aliasIdExpr(arg0, st.carried.aliases, pw).id, s.args[1] as Pred, aliasIdExpr(arg0, st.carried.aliases, pw).elem]
+    ? [aliasIdExpr(arg0, st.traverserLayout.aliases, pw).id, s.args[1] as Pred, aliasIdExpr(arg0, st.traverserLayout.aliases, pw).elem]
     : [q`n.id`, arg0 as Pred, st.elem];
   // P.not(<inner>) negates the alias comparison — unwrap it and flip the outer negation
   // (composing with a not() step). The inner predicate then resolves normally.
@@ -188,7 +188,7 @@ export const where: StepFn = (s, st) => {
   let pred = rawPred;
   if (pred?.op === 'not') { negate = !negate; pred = pred.values[0] as Pred; }
   if (!(pred?.op in P_OPS)) throw new Error(`where(P.${pred?.op}) alias comparison not yet supported`);
-  const rightRes = aliasIdExpr(pred.values[0], st.carried.aliases, pw);
+  const rightRes = aliasIdExpr(pred.values[0], st.traverserLayout.aliases, pw);
   const right = rightRes.id;
   const rightElem = rightRes.elem;
   // An alias-compare where() takes at most one by(key). foldByModulators absorbs
@@ -237,7 +237,7 @@ export const dedup: StepFn = (s, st) => {
 /** dedup(labels[, by()]): keep the first traverser per distinct tuple of the labels'
  *  current (Pop.last) values. Each label resolves to a correlated ScalarCtx through the shared
  *  label re-root (labelCtx, the same reading where(__.as("b")…) uses); the optional single by()
- *  projects a property / T.token off each label's element (bare → element identity). Carried
+ *  projects a property / T.token off each label's element (bare → element identity). Layout
  *  state (path, other aliases) rides through, so `as(a)…as(b)…dedup("a","b").path()` composes. */
 function dedupByLabels(st: ElementStream, s: PStep, labels: string[]): ElementStream {
   const bys = s.bys ?? [];
@@ -256,16 +256,16 @@ function dedupByLabels(st: ElementStream, s: PStep, labels: string[]): ElementSt
     throw new Error('dedup(labels).by(traversal) not yet supported');
   };
   const p = prevRel(st, 'p');
-  const existing = carriedCols(st.carried);
+  const existing = layoutCols(st.traverserLayout);
   // "First per key" = first-in-emission when the chain carries a canonical encounter
   // (Stage C), else lowest id (a deterministic fallback).
-  const firstBy = st.carried.encounter ? p.c[st.carried.encounter] : p.c.id;
+  const firstBy = st.traverserLayout.encounter ? p.c[st.traverserLayout.encounter] : p.c.id;
   const r = derived(
-    q`SELECT ${p.c.id} AS id${carryFrag(st.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${list(labels.map(keyOf), ', ')} ORDER BY ${firstBy}) AS rn FROM ${p}`,
+    q`SELECT ${p.c.id} AS id${layoutProjection(st.traverserLayout, p)}, ROW_NUMBER() OVER (PARTITION BY ${list(labels.map(keyOf), ', ')} ORDER BY ${firstBy}) AS rn FROM ${p}`,
     ['id', ...existing, 'rn'],
     'r',
   );
-  return advance(st, q`SELECT ${r.c.id} AS id${carryFrag(st.carried, r)} FROM ${r} WHERE ${r.c.rn}=1`);
+  return advance(st, q`SELECT ${r.c.id} AS id${layoutProjection(st.traverserLayout, r)} FROM ${r} WHERE ${r.c.rn}=1`);
 }
 
 /** Element dedup is a key-cardinality consumer. Ordinary by() drops an
@@ -279,8 +279,8 @@ export function lowerElementDedup(st: ElementStream, s: PStep, order?: PStep): E
   const labelArgs = s.args.filter((a): a is string => typeof a === 'string');
   if (labelArgs.length) return dedupByLabels(st, s, labelArgs);
   if (s.args.length > 0) throw new Error('dedup(Scope.local, …) over an element stream not yet supported');
-  if (st.carried.aliases.size > 0) throw new Error('dedup() after as() not yet supported (path-distinct semantics)');
-  if (st.carried.path) throw new Error('dedup() with path tracking not yet supported (path-distinct semantics)');
+  if (st.traverserLayout.aliases.size > 0) throw new Error('dedup() after as() not yet supported (path-distinct semantics)');
+  if (st.traverserLayout.path) throw new Error('dedup() with path tracking not yet supported (path-distinct semantics)');
   const bys = s.bys ?? [];
   if (bys.length > 1) throw new Error('dedup() supports at most one by() modulator');
   if (!order && !bys.length) {
@@ -288,7 +288,7 @@ export function lowerElementDedup(st: ElementStream, s: PStep, order?: PStep): E
     // dedup yields ONE traverser per distinct id → RESET bulk to 1: a collapsed (v, N) becomes
     // (v, 1). Every other carried column rides through unchanged. At bulk≡1 this is identical to
     // carrying p.bulk, so a non-collapsed dedup is unaffected.
-    const cols = carriedCols(st.carried).map((c) => c === st.carried.bulk ? q`1 AS bulk` : q`${p.c[c]}`);
+    const cols = layoutCols(st.traverserLayout).map((c) => c === st.traverserLayout.bulk ? q`1 AS bulk` : q`${p.c[c]}`);
     const cf = cols.length ? q`, ${list(cols, ', ')}` : q``;
     return advance(st, q`SELECT DISTINCT ${p.c.id} AS id${cf} FROM ${p}`);
   }
@@ -297,13 +297,13 @@ export function lowerElementDedup(st: ElementStream, s: PStep, order?: PStep): E
   const n = elemRel(st);
   // A new ordered barrier supersedes, rather than physically duplicating, any
   // encounter role inherited from an earlier ordered boundary.
-  const carried = order ? carriedWith(st.carried, { encounter: null }) : st.carried;
+  const layout = order ? patchLayout(st.traverserLayout, { encounter: null }) : st.traverserLayout;
   const key = directElementModulation(st, n, bys[0]);
   if (!key) {
     const nested = bys[0]?.[0]?.nested;
     const rows = nested ? tryCompileScalarValueRows(st, nested) : null;
-    if (!rows?.stream.carried.encounter) throw new Error('dedup().by(traversal) requires a scalar child with encounter order');
-    const childEnc = rows.stream.carried.encounter;
+    if (!rows?.stream.traverserLayout.encounter) throw new Error('dedup().by(traversal) requires a scalar child with encounter order');
+    const childEnc = rows.stream.traverserLayout.encounter;
     const c = rows.stream.rel.as('c');
     const childRank = st.q.cte(
       q`SELECT ${c.c.v} AS k, ${c.c[rows.frame.ordinal]} AS ${rows.frame.ordinal}, ROW_NUMBER() OVER (PARTITION BY ${c.c[rows.frame.ordinal]} ORDER BY ${c.c[childEnc]}) AS child_rn FROM ${c}`,
@@ -316,27 +316,27 @@ export function lowerElementDedup(st: ElementStream, s: PStep, order?: PStep): E
       ? q`${d} LEFT JOIN ${f} ON ${f.c[rows.frame.ordinal]}=${d.c[rows.frame.ordinal]} AND ${f.c.child_rn}=1 JOIN ${en} ON ${en.c.id}=${d.c.id}`
       : q`${d} JOIN ${f} ON ${f.c[rows.frame.ordinal]}=${d.c[rows.frame.ordinal]} AND ${f.c.child_rn}=1 JOIN ${en} ON ${en.c.id}=${d.c.id}`;
     const orderSql = elementOrderSql(st, en, order);
-    const existing = carriedCols(carried);
+    const existing = layoutCols(layout);
     const encounter = order ? 'encounter' : undefined;
     const encounterExpr = order ? q`, ROW_NUMBER() OVER (ORDER BY ${orderSql}, ${d.c.id}) AS encounter` : q``;
     const r = derived(
-      q`SELECT ${d.c.id} AS id${carryFrag(carried, d)}, ROW_NUMBER() OVER (PARTITION BY ${f.c.k} ORDER BY ${orderSql}, ${d.c.id}) AS rn${encounterExpr} FROM ${source}`,
+      q`SELECT ${d.c.id} AS id${layoutProjection(layout, d)}, ROW_NUMBER() OVER (PARTITION BY ${f.c.k} ORDER BY ${orderSql}, ${d.c.id}) AS rn${encounterExpr} FROM ${source}`,
       ['id', ...existing, 'rn', ...(encounter ? [encounter] : [])],
       'r',
     );
-    const body = q`SELECT ${r.c.id} AS id${carryFrag(carried, r)}${encounter ? q`, ${r.c[encounter]} AS ${encounter}` : q``} FROM ${r} WHERE ${r.c.rn}=1`;
+    const body = q`SELECT ${r.c.id} AS id${layoutProjection(layout, r)}${encounter ? q`, ${r.c[encounter]} AS ${encounter}` : q``} FROM ${r} WHERE ${r.c.rn}=1`;
     return advance(st, body, encounter ? { encounter } : {});
   }
   const orderSql = elementOrderSql(st, n, order);
   const where = bys.length && !s.productiveBy ? q` WHERE ${predicateSql(key, undefined)}` : q``;
-  const existing = carriedCols(carried);
+  const existing = layoutCols(layout);
   const encounter = order ? 'encounter' : undefined;
   const encounterExpr = order ? q`, ROW_NUMBER() OVER (ORDER BY ${orderSql}, ${p.c.id}) AS encounter` : q``;
   const r = derived(
-    q`SELECT ${p.c.id} AS id${carryFrag(carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${key} ORDER BY ${orderSql}, ${p.c.id}) AS rn${encounterExpr} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}${where}`,
+    q`SELECT ${p.c.id} AS id${layoutProjection(layout, p)}, ROW_NUMBER() OVER (PARTITION BY ${key} ORDER BY ${orderSql}, ${p.c.id}) AS rn${encounterExpr} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}${where}`,
     ['id', ...existing, 'rn', ...(encounter ? [encounter] : [])],
     'r',
   );
-  const body = q`SELECT ${r.c.id} AS id${carryFrag(carried, r)}${encounter ? q`, ${r.c[encounter]} AS ${encounter}` : q``} FROM ${r} WHERE ${r.c.rn}=1`;
+  const body = q`SELECT ${r.c.id} AS id${layoutProjection(layout, r)}${encounter ? q`, ${r.c[encounter]} AS ${encounter}` : q``} FROM ${r} WHERE ${r.c.rn}=1`;
   return advance(st, body, encounter ? { encounter } : {});
 }

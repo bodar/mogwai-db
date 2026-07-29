@@ -7,7 +7,7 @@ import { aliasCtx, labelNameSub, scalarProp, type ScalarCtx } from '../../plan/p
 import { compileCorrelatedChild } from './correlated.ts';
 import { correlatedReduce } from '../prefix/predicate.ts';
 import type { PStep } from '../../ir/strategies.ts';
-import type { Carried, Carry, LabelScope } from '../context/context.ts';
+import type { TraverserLayout, LoweringState, LabelScope } from '../context/context.ts';
 
 // ---------- predicate operands that are TRAVERSALS ----------
 //
@@ -102,17 +102,17 @@ function correlatedOperand(nested: any, deps: OperandDeps, ctx: ScalarCtx, label
 /** What an operand needs from the compile, independent of the host's stream shape: the Engine (to
  *  build a sub-read) and the bound params (to parse the body). `carried` is present only when the
  *  host actually has a traverser schema — the inline predicate renderer does not. Taking this
- *  rather than a `Carry` is what lets predicate.ts, which never sees a Stream, resolve operands
+ *  rather than a `LoweringState` is what lets predicate.ts, which never sees a Stream, resolve operands
  *  through the same path as the StepFns. */
 export interface OperandDeps {
   readonly engine: Engine;
   readonly params: Record<string, any>;
-  readonly carried?: Carried;
+  readonly traverserLayout?: TraverserLayout;
 }
 
 /** The deps a Stream-holding host already has to hand. */
-export const operandDeps = (carry: Carry): OperandDeps =>
-  ({ engine: engineOf(carry), params: carry.params, carried: carry.carried });
+export const operandDeps = (carry: LoweringState): OperandDeps =>
+  ({ engine: engineOf(carry), params: carry.params, traverserLayout: carry.traverserLayout });
 
 /** What the HOST can offer an operand beyond the query itself. All optional: a host that offers
  *  nothing still resolves the re-sourced form, which needs no context at all. */
@@ -133,10 +133,10 @@ export interface OperandHost {
  *  sack. Declines when the body is anything else or no sack is carried (a bare `sack()` with no
  *  `withSack()` is an error the sack step itself reports, not something to answer here). */
 function sackOperand(nested: any, deps: OperandDeps, row: Relation | undefined): Expression | null {
-  if (!row || !deps.carried?.sack) return null;
+  if (!row || !deps.traverserLayout?.sack) return null;
   const body = childSteps(nested, deps.params);
   if (body.length !== 1 || body[0].name !== 'sack' || (body[0].args ?? []).length) return null;
-  return row.c[deps.carried.sack];
+  return row.c[deps.traverserLayout.sack];
 }
 
 /** Replace every resolvable traversal operand in `pred` with its subquery Expression, leaving

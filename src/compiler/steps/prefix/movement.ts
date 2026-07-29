@@ -1,14 +1,14 @@
 import { q, list, empty, derived, type Expression } from '../../../sql/kernel/q.ts';
 import { edges } from '../../../sql/schema.ts';
 import { dirsFor, edgeLabelFilter, type Elem } from '../../plan/plan.ts';
-import { advance, appendPathPos, carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, prevRel, type Carried, type PathState, type ElementStream, type StepFn } from '../context/context.ts';
+import { advance, appendPathPos, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, partitionOver, prevRel, type TraverserLayout, type PathState, type ElementStream, type StepFn } from '../context/context.ts';
 import { fastPathContextOf } from '../../engine/deps.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
 import { lowerReSource } from '../graph-source.ts';
 
 /** True iff the ONLY live carried column is bulk — no per-traverser identity (aliases/path/
  *  sack/fromV) and no branch origin. Frontier collapse is result-preserving exactly here. */
-const isBulkOnly = (c: Carried): boolean =>
+const isBulkOnly = (c: TraverserLayout): boolean =>
   !!c.bulk && c.aliases.size === 0 && !c.path && c.origins.length === 0 && !c.sack && !c.fromV && !c.encounter;
 
 type MoveOpts = { elem?: Elem; fromV?: string | null; path?: PathState };
@@ -22,7 +22,7 @@ type MoveOpts = { elem?: Elem; fromV?: string | null; path?: PathState };
 export const MovementCollapseFastPath: FastPath<[ElementStream, Expression, MoveOpts], ElementStream> = {
   name: 'movementCollapse',
   equivalentWhen: 'test/L5-properties/differential.test.ts — the fast-path differential (this switch off vs. on, over the L1 corpus + generated traversals)',
-  appliesWhen: (ctx, st, _body, opts) => ctx.enabled.movementCollapse && isBulkOnly(st.carried) && !opts.fromV && !opts.path,
+  appliesWhen: (ctx, st, _body, opts) => ctx.enabled.movementCollapse && isBulkOnly(st.traverserLayout) && !opts.fromV && !opts.path,
   tryLower: (_ctx, st, body, opts) => advance(st, q`SELECT id, SUM(bulk) AS bulk FROM (${body}) mv GROUP BY id`, opts),
 };
 
@@ -32,19 +32,19 @@ export const MovementCollapseFastPath: FastPath<[ElementStream, Expression, Move
 function finishMove(st: ElementStream, body: Expression, opts: MoveOpts): ElementStream {
   const collapsed = runFastPath(MovementCollapseFastPath, fastPathContextOf(st), st, body, opts);
   if (collapsed) return collapsed;
-  if (!st.carried.encounter) return advance(st, body, opts);
+  if (!st.traverserLayout.encounter) return advance(st, body, opts);
   // Emission-order refine: a movement fans a traverser out to several neighbours/edges, so the
   // encounter must be recomputed — a fresh ROW_NUMBER over (the traverser's prior encounter,
   // then the new element id as the local tiebreak, an implementation-defined but deterministic
   // movement order). A window can't span the body's UNION-ALL direction arms, so wrap the whole
   // body as a derived table and number over it (per-origin inside a child scope via partitionOver).
-  const carried = carriedWith(st.carried, opts as { fromV?: string | null; path?: PathState });
-  const enc = carried.encounter!;
-  const cols = ['id', ...carriedCols(carried)];
+  const layout = patchLayout(st.traverserLayout, opts as { fromV?: string | null; path?: PathState });
+  const enc = layout.encounter!;
+  const cols = ['id', ...layoutCols(layout)];
   const mv = derived(body, cols, 'mv');
-  const over = partitionOver(carried, mv, q`${mv.c[enc]}, ${mv.c.id}`);
-  const outBody = q`SELECT ${mv.c.id} AS id${carryFragMint(carried, mv, enc, q`ROW_NUMBER() OVER (${over})`)} FROM ${mv}`;
-  return { ...st, carried, elem: opts.elem ?? st.elem, rel: st.q.cte(outBody, cols) };
+  const over = partitionOver(layout, mv, q`${mv.c[enc]}, ${mv.c.id}`);
+  const outBody = q`SELECT ${mv.c.id} AS id${layoutProjectionMinting(layout, mv, enc, q`ROW_NUMBER() OVER (${over})`)} FROM ${mv}`;
+  return { ...st, traverserLayout: layout, elem: opts.elem ?? st.elem, rel: st.q.cte(outBody, cols) };
 }
 
 // ---------- movement (vertex ⇄ edge traversal) ----------
@@ -65,8 +65,8 @@ function finishMove(st: ElementStream, body: Expression, opts: MoveOpts): Elemen
  *  register the position, and undefined-fragments/opts when not tracking. `idExpr`
  *  is the branch's own moved-id expression (the same value bound to `id`). */
 function pathAppend(st: ElementStream, newElem: Elem): { frag: (idExpr: Expression) => Expression; opts: { path?: PathState } } {
-  if (!st.carried.path) return { frag: () => empty, opts: {} };
-  const { path, col } = appendPathPos(st.carried.path, newElem);
+  if (!st.traverserLayout.path) return { frag: () => empty, opts: {} };
+  const { path, col } = appendPathPos(st.traverserLayout.path, newElem);
   return { frag: (idExpr) => q`, ${idExpr} AS ${col}`, opts: { path } };
 }
 
@@ -75,7 +75,7 @@ export const move: StepFn = (s, st) => {
   if (st.elem !== 'vertex') throw new Error(`${s.name}() expects a vertex, not an ${st.elem}`);
   const e = edges.as('e');
   const p = prevRel(st, 'p');
-  const cf = carryFrag(st.carried, p);
+  const cf = layoutProjection(st.traverserLayout, p);
   const pa = pathAppend(st, 'vertex');
   const selects = dirsFor(s.name).map(([from, to]) =>
     q`SELECT ${e.c[to]} AS id${cf}${pa.frag(e.c[to])} FROM ${e} JOIN ${p} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(s.args)}`);
@@ -90,14 +90,14 @@ export const toEdge: StepFn = (s, st) => {
   const froms = s.name === 'outE' ? ['src'] : s.name === 'inE' ? ['tgt'] : ['src', 'tgt'];
   const e = edges.as('e');
   const p = prevRel(st, 'p');
-  const cf = carryFrag(st.carried, p);
+  const cf = layoutProjection(st.traverserLayout, p);
   const pa = pathAppend(st, 'edge');
   // Only record the entering vertex when a downstream otherV() needs it (trackFromV) —
   // otherwise every edge step would carry a dead column off the index-only hot path.
-  const fvCol = (idExpr: Expression) => st.carried.trackFromV ? q`, ${idExpr} AS fv` : empty;
+  const fvCol = (idExpr: Expression) => st.traverserLayout.trackFromV ? q`, ${idExpr} AS fv` : empty;
   const selects = froms.map((from) =>
     q`SELECT ${e.c.id} AS id${cf}${pa.frag(e.c.id)}${fvCol(p.c.id)} FROM ${e} JOIN ${p} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(s.args)}`);
-  return finishMove(st, list(selects, ' UNION ALL '), { elem: 'edge', fromV: st.carried.trackFromV ? 'fv' : null, ...pa.opts });
+  return finishMove(st, list(selects, ' UNION ALL '), { elem: 'edge', fromV: st.traverserLayout.trackFromV ? 'fv' : null, ...pa.opts });
 };
 
 /** outV()/inV()/bothV(): edge → endpoint vertices. The new id is the NODE id. Landing
@@ -107,7 +107,7 @@ export const toVertex: StepFn = (s, st) => {
   const cols = s.name === 'outV' ? ['src'] : s.name === 'inV' ? ['tgt'] : ['src', 'tgt'];
   const e = edges.as('e');
   const p = prevRel(st, 'p');
-  const cf = carryFrag(carriedWith(st.carried, { fromV: null }), p); // fv is dropped at the vertex
+  const cf = layoutProjection(patchLayout(st.traverserLayout, { fromV: null }), p); // fv is dropped at the vertex
   const pa = pathAppend(st, 'vertex');
   const selects = cols.map((col) =>
     q`SELECT ${e.c[col]} AS id${cf}${pa.frag(e.c[col])} FROM ${e} JOIN ${p} ON ${e.c.id}=${p.c.id}`);
@@ -119,11 +119,11 @@ export const toVertex: StepFn = (s, st) => {
  *  context); bothE()'s ambiguous direction is exactly why this is needed. */
 export const otherV: StepFn = (s, st) => {
   if (st.elem !== 'edge') throw new Error(`otherV() expects an edge, not a ${st.elem}`);
-  if (!st.carried.fromV) throw new Error('otherV() requires a preceding edge step (no entering-vertex context)');
+  if (!st.traverserLayout.fromV) throw new Error('otherV() requires a preceding edge step (no entering-vertex context)');
   const e = edges.as('e');
   const p = prevRel(st, 'p');
-  const fv = p.c[st.carried.fromV];
-  const cf = carryFrag(carriedWith(st.carried, { fromV: null }), p); // fv is consumed here
+  const fv = p.c[st.traverserLayout.fromV];
+  const cf = layoutProjection(patchLayout(st.traverserLayout, { fromV: null }), p); // fv is consumed here
   const other = q`CASE WHEN ${e.c.src}=${fv} THEN ${e.c.tgt} ELSE ${e.c.src} END`;
   const pa = pathAppend(st, 'vertex');
   const body = q`SELECT ${other} AS id${cf}${pa.frag(other)} FROM ${e} JOIN ${p} ON ${e.c.id}=${p.c.id}`;

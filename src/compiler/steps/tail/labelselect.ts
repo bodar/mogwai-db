@@ -1,12 +1,12 @@
 import { q, list, raw, empty, value, type Expression } from '../../../sql/kernel/q.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { aliasElem, aliasIsElement, aliasScalarTypeOf, carriedCols, carriedWith, carryFrag, scalarTypeFromAlias, withShape, type AliasEntry, type AliasScalarType, type Carried, type Carry, type ElementStream } from '../context/context.ts';
+import { aliasElem, aliasIsElement, aliasScalarTypeOf, layoutCols, patchLayout, layoutProjection, scalarTypeFromAlias, withShape, type AliasEntry, type AliasScalarType, type TraverserLayout, type LoweringState, type ElementStream } from '../context/context.ts';
 import {
   aliasAppend, aliasEntry, aliasId, aliasPop, aliasPresent, aliasScalar, aliasSeed, elemEntry, entryTypeTag, shapeElem,
   type AliasShape,
 } from '../context/alias.ts';
 import {
-  assertStreamColumns, carryOf, pathColumns, streamColumns, toElementStream, toListStream, toPropertyStream, toScalarStream, PROPERTY_PAYLOAD,
+  assertStreamColumns, loweringStateOf, pathColumns, streamColumns, toElementStream, toListStream, toPropertyStream, toScalarStream, PROPERTY_PAYLOAD,
   type ListOf, type PropertyStream, type Stream,
 } from '../context/stream.ts';
 import { PER_ROW, perRowColumnOf, staticTypeOf, type ValueType } from '../../../sql/kernel/render.ts';
@@ -21,7 +21,7 @@ import { PER_ROW, perRowColumnOf, staticTypeOf, type ValueType } from '../../../
 /** Payload columns of a stream (everything before the carried schema). */
 const payloadOf = (s: Exclude<Stream, { kind: 'result' }>): string[] => {
   const all = streamColumns(s) as string[];
-  return all.slice(0, all.length - carriedCols(s.carried).length);
+  return all.slice(0, all.length - layoutCols(s.traverserLayout).length);
 };
 
 /** The tagged current-object entry for a non-element stream, its shape, and (for a
@@ -81,7 +81,7 @@ export function asOnStream(s: Exclude<Stream, { kind: 'result' | 'elements' }>, 
   const labels = step.args.filter((a): a is string => typeof a === 'string');
   const p = s.rel.as('p');
   const { entry, shape, scalarType, listOf } = currentEntry(s, p);
-  const aliases = new Map<string, AliasEntry>(s.carried.aliases);
+  const aliases = new Map<string, AliasEntry>(s.traverserLayout.aliases);
   const setExpr = new Map<string, Expression>();
   for (const lbl of labels) {
     const existing = aliases.get(lbl);
@@ -99,14 +99,14 @@ export function asOnStream(s: Exclude<Stream, { kind: 'result' | 'elements' }>, 
     });
     setExpr.set(col, existing ? aliasAppend(p.c[col], entry) : aliasSeed(entry));
   }
-  const carried: Carried = carriedWith(s.carried, { aliases });
-  const newCols = [...payloadOf(s), ...carriedCols(carried)];
+  const layout: TraverserLayout = patchLayout(s.traverserLayout, { aliases });
+  const newCols = [...payloadOf(s), ...layoutCols(layout)];
   const proj = newCols.map((c) => {
     const e = setExpr.get(c);
     return e ? q`${e} AS ${raw(c)}` : q`${p.c[c]}`;
   });
   const rel = s.q.cte(q`SELECT ${list(proj, ', ')} FROM ${p}`, newCols);
-  return assertStreamColumns({ ...s, carried, rel });
+  return assertStreamColumns({ ...s, traverserLayout: layout, rel });
 }
 
 /** An empty element stream (zero rows). select() of a label bound NOWHERE on the
@@ -119,15 +119,15 @@ export function asOnStream(s: Exclude<Stream, { kind: 'result' | 'elements' }>, 
  *  a relation without that column cannot be joined at all. Empty-but-well-typed makes "the
  *  label is unbound" behave exactly like "the child produced nothing" — which is what it is.
  *
- *  Takes a bare `Carry` (a Stream satisfies it): the shape being replaced is irrelevant, only
+ *  Takes a bare `LoweringState` (a Stream satisfies it): the shape being replaced is irrelevant, only
  *  the schema the empty relation must still declare. */
-export function emptyElementLike(s: Carry): ElementStream {
-  const cols = carriedCols(s.carried);
+export function emptyElementLike(s: LoweringState): ElementStream {
+  const cols = layoutCols(s.traverserLayout);
   const nulls = cols.length ? list(cols.map((c) => q`, NULL AS ${raw(c)}`), '') : empty;
   const rel = s.q.cte(q`SELECT 1 AS id${nulls} WHERE 0`, ['id', ...cols]);
   return {
     q: s.q, params: s.params, sideEffects: s.sideEffects,
-    carried: s.carried, kind: 'elements', rel, elem: 'vertex',
+    traverserLayout: s.traverserLayout, kind: 'elements', rel, elem: 'vertex',
   };
 }
 
@@ -172,17 +172,17 @@ function selectPropertyAlias(s: Exclude<Stream, { kind: 'result' }>, entry: Alia
   const selected = pop === 'first' ? q`${col} -> '$[0]'` : q`${col} -> '$[#-1]'`;
   const fields = list(PROPERTY_PAYLOAD.map((f) => q`${propertyAliasField(selected, f)} AS ${f}`), ', ');
   const rel = s.q.cte(
-    q`SELECT ${fields}${carryFrag(s.carried, p)} FROM ${p} WHERE ${aliasPresent(col)}`,
-    [...PROPERTY_PAYLOAD, ...carriedCols(s.carried)],
+    q`SELECT ${fields}${layoutProjection(s.traverserLayout, p)} FROM ${p} WHERE ${aliasPresent(col)}`,
+    [...PROPERTY_PAYLOAD, ...layoutCols(s.traverserLayout)],
   );
-  return toPropertyStream(carryOf(s), rel, entry.propertyElem);
+  return toPropertyStream(loweringStateOf(s), rel, entry.propertyElem);
 }
 
 /** select(label) / select(Pop, label) with ONE label, over any stream shape. Reads the
  *  label's history column (dropping traversers where it is unbound) and re-emits it as a
  *  scalar / element / list stream per its shape and the Pop mode. */
 export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step: PStep, label: string, pop: string): Stream {
-  const entry = s.carried.aliases.get(label);
+  const entry = s.traverserLayout.aliases.get(label);
   // No live binding → drop every traverser (an EMPTY result, never an error). TinkerPop pins this
   // for both reachable cases, so the same answer is right for both:
   //   · never bound at all           — Select.feature `g_V_selectXaX` → "the result should be empty"
@@ -194,8 +194,8 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
   if (!entry) return emptyElementLike(s);
   const p = s.rel.as('p');
   const col = p.c[entry.col];
-  const carried = s.carried;
-  const carry = carryOf(s);
+  const layout = s.traverserLayout;
+  const carry = loweringStateOf(s);
   const present = aliasPresent(col);
   const isList = popIsListResult(entry, pop);
   const end = pop === 'first' ? 'first' : 'last';
@@ -203,8 +203,8 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
   if (entry.shapes.size === 1 && entry.shapes.has('property')) {
     if (isList) {
       const rel = s.q.cte(
-        q`SELECT ${historyPropertyValues(col)} AS list${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,
-        ['list', ...carriedCols(carried)],
+        q`SELECT ${historyPropertyValues(col)} AS list${layoutProjection(layout, p)} FROM ${p} WHERE ${present}`,
+        ['list', ...layoutCols(layout)],
       );
       return toListStream(carry, rel, { kind: 'property', elem: entry.propertyElem! });
     }
@@ -215,8 +215,8 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
     const selected = end === 'first' ? q`${col} -> '$[0]'` : q`${col} -> '$[#-1]'`;
     const field = by.token === 'key' ? 'pk' : by.token === 'value' ? 'pv' : 'vpid';
     const rel = s.q.cte(
-      q`SELECT ${propertyAliasField(selected, field)} AS v${by.token === 'value' ? q`, ${propertyAliasField(selected, 'pvtype')} AS vtype` : empty}${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,
-      ['v', ...(by.token === 'value' ? ['vtype'] : []), ...carriedCols(carried)],
+      q`SELECT ${propertyAliasField(selected, field)} AS v${by.token === 'value' ? q`, ${propertyAliasField(selected, 'pvtype')} AS vtype` : empty}${layoutProjection(layout, p)} FROM ${p} WHERE ${present}`,
+      ['v', ...(by.token === 'value' ? ['vtype'] : []), ...layoutCols(layout)],
     );
     return toScalarStream(carry, rel, undefined, by.token === 'value' ? { type: PER_ROW('vtype') } : {});
   }
@@ -230,8 +230,8 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
       : (shape === 'vertex' || shape === 'edge') ? { kind: 'elem', elem: shapeElem(shape) }
       : (() => { throw new Error(`select(Pop.all) over a ${shape} label not yet supported`); })();
     const rel = s.q.cte(
-      q`SELECT ${(shape === 'value' ? historyScalarValues : historyValues)(col)} AS list${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,
-      ['list', ...carriedCols(carried)],
+      q`SELECT ${(shape === 'value' ? historyScalarValues : historyValues)(col)} AS list${layoutProjection(layout, p)} FROM ${p} WHERE ${present}`,
+      ['list', ...layoutCols(layout)],
     );
     return toListStream(carry, rel, of);
   }
@@ -239,10 +239,10 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
   // A single end element of the history.
   if (aliasIsElement(entry)) {
     const rel = s.q.cte(
-      q`SELECT ${aliasId(col, end)} AS id${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,
-      ['id', ...carriedCols(carried)],
+      q`SELECT ${aliasId(col, end)} AS id${layoutProjection(layout, p)} FROM ${p} WHERE ${present}`,
+      ['id', ...layoutCols(layout)],
     );
-    return toElementStream(carryOf(s, carried), rel, aliasElem(entry));
+    return toElementStream(loweringStateOf(s, layout), rel, aliasElem(entry));
   }
   // A single LIST-shaped entry (a fold()ed list, or a path() bound whole) must come back OUT as a
   // ListStream, not as its JSON text: the entry's `v` already holds a json array, so unwrap it to
@@ -251,8 +251,8 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
   // symptom that made `fold().as('b').select('b').unfold()` emit one text blob.
   if (entry.shapes.size === 1 && entry.shapes.has('list')) {
     const rel = s.q.cte(
-      q`SELECT json(${aliasPop(col, end)} ->> '$.v') AS list${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,
-      ['list', ...carriedCols(carried)],
+      q`SELECT json(${aliasPop(col, end)} ->> '$.v') AS list${layoutProjection(layout, p)} FROM ${p} WHERE ${present}`,
+      ['list', ...layoutCols(layout)],
     );
     // Path aliases predate member metadata and can be heterogeneous under by(); retain
     // their existing conservative scalar fallback. Ordinary ListStream aliases always
@@ -263,8 +263,8 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
   const type = scalarTypeFromAlias(entry.scalarType);
   const vtype = perRowColumnOf(type);
   const rel = s.q.cte(
-    q`SELECT ${aliasScalar(col, end)} AS v${vtype ? q`, ${entryTypeTag(aliasPop(col, end))} AS ${vtype}` : empty}${carryFrag(carried, p)} FROM ${p} WHERE ${present}`,
-    ['v', ...(vtype ? [vtype] : []), ...carriedCols(carried)],
+    q`SELECT ${aliasScalar(col, end)} AS v${vtype ? q`, ${entryTypeTag(aliasPop(col, end))} AS ${vtype}` : empty}${layoutProjection(layout, p)} FROM ${p} WHERE ${present}`,
+    ['v', ...(vtype ? [vtype] : []), ...layoutCols(layout)],
   );
   return toScalarStream(carry, rel, undefined, { type });
 }

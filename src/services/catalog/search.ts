@@ -2,7 +2,7 @@ import { q, value, raw, type Relation } from '../../sql/kernel/q.ts';
 import { propertyFts, vertexProperties, edgeProperties, nodes, edges, labels } from '../../sql/schema.ts';
 import { sqlElem, storedValueExpr, type Elem } from '../../compiler/plan/plan.ts';
 import { PROPERTY_PAYLOAD, toPropertyStream, type PropertyStream } from '../../compiler/steps/context/stream.ts';
-import type { Carried } from '../../compiler/steps/context/context.ts';
+import type { TraverserLayout } from '../../compiler/steps/context/context.ts';
 import type { Service, ServiceCallCtx, CallParams } from '../spi/types.ts';
 
 // ---------- tinker.search — full-text search over property values (pure, Start) ----------
@@ -59,19 +59,19 @@ function searchPattern(params: CallParams): string {
 /** The empty PropertyStream (type=VertexProperty, or a genuinely unmatched scope): a
  *  PROPERTY_PAYLOAD CTE with no rows. */
 function emptyProperties(ctx: ServiceCallCtx, ownerElem: Elem): PropertyStream {
-  const carried: Carried = { aliases: new Map(), origins: [] };
+  const layout: TraverserLayout = { aliases: new Map(), origins: [] };
   // The column names are the fixed PROPERTY_PAYLOAD list (SQL identifiers, never user data),
   // so a raw `NULL AS <col>` projection with a WHERE 0 guard yields the empty relation.
   const proj = raw(PROPERTY_PAYLOAD.map((c) => `NULL AS ${c}`).join(', '));
   const rel = ctx.q.cte(q`SELECT ${proj} WHERE 0`, [...PROPERTY_PAYLOAD]);
-  return toPropertyStream({ q: ctx.q, params: ctx.compileParams, carried }, rel, ownerElem);
+  return toPropertyStream({ q: ctx.q, params: ctx.compileParams, traverserLayout: layout }, rel, ownerElem);
 }
 
 /** Build the matched-properties PropertyStream for a node/edge scope. Joins property_fts
  *  (kind='value', the searched scope, text LIKE %term%) back to the property table for the
  *  full payload (pk/pv/pvtype/meta) and to the owner + its label. */
 function searchProperties(ctx: ServiceCallCtx, ownerElem: Elem, pattern: string): PropertyStream {
-  const carried: Carried = { aliases: new Map(), origins: [] };
+  const layout: TraverserLayout = { aliases: new Map(), origins: [] };
   const f = propertyFts.as('f');
   const likeMatch = q`${f.c.text} LIKE ${value(pattern)} ESCAPE ${value('\\')}`;
   const scope = q`${f.c.owner_elem}=${value(sqlElem(ownerElem))} AND ${f.c.kind}=${value('value')} AND ${likeMatch}`;
@@ -92,7 +92,7 @@ function searchProperties(ctx: ServiceCallCtx, ownerElem: Elem, pattern: string)
       FROM ${f} JOIN ${ep} ON ${ep.c.id}=${f.c.pid} JOIN ${ed} ON ${ed.c.id}=${ep.c.edge} JOIN ${l} ON ${l.c.id}=${ed.c.label} WHERE ${scope}`;
   }
   const rel: Relation = ctx.q.cte(body, [...PROPERTY_PAYLOAD]);
-  return toPropertyStream({ q: ctx.q, params: ctx.compileParams, carried }, rel, ownerElem);
+  return toPropertyStream({ q: ctx.q, params: ctx.compileParams, traverserLayout: layout }, rel, ownerElem);
 }
 
 export const searchService: Service = {

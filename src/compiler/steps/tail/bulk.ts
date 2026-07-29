@@ -203,7 +203,7 @@ function tryBulkRepeat(engine: Engine, steps: PStep[], params: Record<string, an
   // The prefix must fold completely to a bare vertex id-relation. Anything else
   // (an unconsumed tail, an edge type, or live alias/path/sack) is not bulkable —
   // fall back rather than emit wrong SQL.
-  if (stop !== pre.length || st.elem !== 'vertex' || st.carried.aliases.size > 0 || st.carried.path || st.carried.sack) return null;
+  if (stop !== pre.length || st.elem !== 'vertex' || st.traverserLayout.aliases.size > 0 || st.traverserLayout.path || st.traverserLayout.sack) return null;
 
   // f0: the seed frontier, one row per distinct vertex carrying HOW MANY TRAVERSERS sit on it.
   //
@@ -217,7 +217,7 @@ function tryBulkRepeat(engine: Engine, steps: PStep[], params: Record<string, an
   // Weighting by SUM is also exactly what the f1..fn hop loop below already does, so the seed now
   // states the same rule as every subsequent frontier rather than a special case for depth 0.
   const s0 = st.rel.as('s0');
-  const inBulk = st.carried.bulk;
+  const inBulk = st.traverserLayout.bulk;
   const weight = inBulk ? q`SUM(${s0.c[inBulk]})` : q`COUNT(*)`;
   let cur = query.cte(
     q`SELECT ${s0.c.id} AS id, CAST(${weight} AS INTEGER) AS bulk FROM ${s0} GROUP BY ${s0.c.id}`,
@@ -239,7 +239,7 @@ function tryBulkRepeat(engine: Engine, steps: PStep[], params: Record<string, an
   // every reduction by SUM(bulk). No bulk arithmetic lives here — this is the fast MIDDLE only.
   const seed: ElementStream = {
     kind: 'elements', q: query, params, rel: cur, elem: 'vertex',
-    carried: { aliases: new Map(), origins: [], bulk: 'bulk' },
+    traverserLayout: { aliases: new Map(), origins: [], bulk: 'bulk' },
   };
   return materializeRootStream(eng.lowerStepsStrict(seed, steps, plan.suffixAt));
 }

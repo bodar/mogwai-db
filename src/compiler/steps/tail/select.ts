@@ -3,10 +3,10 @@ import { nodes, edges, labels } from '../../../sql/schema.ts';
 import { framedProps, labelNameSub, nodePropScalar, nodePropType, edgePropScalar, edgePropType, edgePropsAgg, predicateSql, propExtract, extIdOf, P_OPS, storedValueExpr } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { isColumnArg, isPopArg, isScopeArg, isTokenArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
-import { aliasElem, aliasIsElement, carryFrag, carriedCols, scalarTypeFromAlias, type AliasMap, type ElementStream } from '../context/context.ts';
+import { aliasElem, aliasIsElement, layoutProjection, layoutCols, scalarTypeFromAlias, type AliasMap, type ElementStream } from '../context/context.ts';
 import { aliasId, aliasPop, aliasPresent, aliasScalar, entryTypeTag, shapeElem } from '../context/alias.ts';
 import { emptyElementLike, historyPropertyValues, historyScalarValues, historyValues, popEnd, popIsListResult, selectOneFromAlias } from './labelselect.ts';
-import { carryOf, continueLowering, dispatchShapeTail, recordFieldColumns, toElementStream, toListStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type ListStream, type LoweringResult, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
+import { loweringStateOf, continueLowering, dispatchShapeTail, recordFieldColumns, toElementStream, toListStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type ListStream, type LoweringResult, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
 import { PER_ROW, STATIC, UNKNOWN, perRowColumnOf, type Compiled, type ScalarType } from '../../../sql/kernel/render.ts';
 import { type TailAcc, type TailMods } from './projection.ts';
 import { lowerGlobalCount } from './barrier.ts';
@@ -51,8 +51,8 @@ function storedPropertyRecordField(key: string, prefix: string): Extract<RecordF
  * Shared with path.ts (the linear-regime position re-root). */
 export function reRootElement(st: ElementStream, p: Relation, id: Expression, elem: ElementStream['elem']): ElementStream {
   const rel = st.q.cte(
-    q`SELECT ${id} AS id${carryFrag(st.carried, p)} FROM ${p}`,
-    ['id', ...carriedCols(st.carried)],
+    q`SELECT ${id} AS id${layoutProjection(st.traverserLayout, p)} FROM ${p}`,
+    ['id', ...layoutCols(st.traverserLayout)],
   );
   return { ...st, rel, elem };
 }
@@ -97,7 +97,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
     const source = isProject
       ? { id: p.c.id, elem: st.elem }
       : (() => {
-          const selected = st.carried.aliases.get(keys[i]);
+          const selected = st.traverserLayout.aliases.get(keys[i]);
           if (!selected) throw new Error(`select("${keys[i]}"): no such label — as("${keys[i]}") was not seen`);
           return { id: aliasId(p.c[selected.col], 'last'), elem: aliasElem(selected) };
         })();
@@ -134,8 +134,8 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
         ? ['rid', 'id', 'label', 'src', 'tgt', 'props']
         : ['rid', 'id', 'label', 'props'];
       const rel = st.q.cte(
-        q`SELECT ${payload}${carryFrag(child.stream.carried, cp)} FROM ${cp} JOIN ${n} ON ${n.c.id}=${cp.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}`,
-        [...payloadCols, ...carriedCols(child.stream.carried)],
+        q`SELECT ${payload}${layoutProjection(child.stream.traverserLayout, cp)} FROM ${cp} JOIN ${n} ON ${n.c.id}=${cp.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}`,
+        [...payloadCols, ...layoutCols(child.stream.traverserLayout)],
       ).as(`b${i}`);
       const field: RecordField = { key: keys[i], prefix, sub: child.stream.elem, nullable: productive || undefined };
       return {
@@ -155,8 +155,8 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
         ? ['rid', 'id', 'label', 'src', 'tgt', 'props']
         : ['rid', 'id', 'label', 'props'];
       const rel = st.q.cte(
-        q`SELECT ${payload}${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${source.id} JOIN ${l} ON ${l.c.id}=${n.c.label}`,
-        [...payloadCols, ...carriedCols(outer.seed.carried)],
+        q`SELECT ${payload}${layoutProjection(outer.seed.traverserLayout, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${source.id} JOIN ${l} ON ${l.c.id}=${n.c.label}`,
+        [...payloadCols, ...layoutCols(outer.seed.traverserLayout)],
       ).as(`b${i}`);
       const field: RecordField = { key: keys[i], prefix, sub: source.elem };
       return {
@@ -173,8 +173,8 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
       const vtype = nodePropType(source.id, spec);
       const field = storedPropertyRecordField(keys[i], prefix);
       const rel = st.q.cte(
-        q`SELECT ${storedValueExpr(expr, vtype)} AS v, ${vtype} AS vtype${carryFrag(outer.seed.carried, p)} FROM ${p}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
-        ['v', 'vtype', ...carriedCols(outer.seed.carried)],
+        q`SELECT ${storedValueExpr(expr, vtype)} AS v, ${vtype} AS vtype${layoutProjection(outer.seed.traverserLayout, p)} FROM ${p}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
+        ['v', 'vtype', ...layoutCols(outer.seed.traverserLayout)],
       ).as(`b${i}`);
       return { rel, field, cols: scalarRecordCols(rel, prefix, PER_ROW('vtype')) };
     }
@@ -183,8 +183,8 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
       const vtype = edgePropType(n.c.id, spec);
       const field = storedPropertyRecordField(keys[i], prefix);
       const rel = st.q.cte(
-        q`SELECT ${storedValueExpr(expr, vtype)} AS v, ${vtype} AS vtype${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${source.id}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
-        ['v', 'vtype', ...carriedCols(outer.seed.carried)],
+        q`SELECT ${storedValueExpr(expr, vtype)} AS v, ${vtype} AS vtype${layoutProjection(outer.seed.traverserLayout, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${source.id}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
+        ['v', 'vtype', ...layoutCols(outer.seed.traverserLayout)],
       ).as(`b${i}`);
       return { rel, field, cols: scalarRecordCols(rel, prefix, PER_ROW('vtype')) };
     }
@@ -192,8 +192,8 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
       ? labelNameSub(n.c.label)
       : q`COALESCE(${n.c.uid}, ${n.c.id})`;
     const rel = st.q.cte(
-      q`SELECT ${scalar} AS v${carryFrag(outer.seed.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${source.id}`,
-      ['v', ...carriedCols(outer.seed.carried)],
+      q`SELECT ${scalar} AS v${layoutProjection(outer.seed.traverserLayout, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${source.id}`,
+      ['v', ...layoutCols(outer.seed.traverserLayout)],
     ).as(`b${i}`);
     const type = spec.token === 'label' ? STATIC('string') : UNKNOWN;
     return { rel, field: scalarRecordField(keys[i], prefix, type), cols: scalarRecordCols(rel, prefix, type) };
@@ -207,10 +207,10 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
     ? branches.map((branch) => q` LEFT JOIN ${branch.rel} ON ${branch.rel.c[outer.frame.ordinal]}=${domain.c[outer.frame.ordinal]}`)
     : branches.slice(1).map((branch) => q` JOIN ${branch.rel} ON ${branch.rel.c[outer.frame.ordinal]}=${first.c[outer.frame.ordinal]}`);
   const rel = st.q.cte(
-    q`SELECT ${list(cols, ', ')}${carryFrag(st.carried, from)} FROM ${from}${list(joins, '')}`,
-    [...fields.flatMap(recordFieldColumns), ...carriedCols(st.carried)],
+    q`SELECT ${list(cols, ', ')}${layoutProjection(st.traverserLayout, from)} FROM ${from}${list(joins, '')}`,
+    [...fields.flatMap(recordFieldColumns), ...layoutCols(st.traverserLayout)],
   );
-  return toRecordStream(carryOf(st), rel, fields);
+  return toRecordStream(loweringStateOf(st), rel, fields);
 }
 
 /** A one-label select is not a record: it emits the selected traverser directly.
@@ -222,7 +222,7 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
   if (proj.args.some(isColumnArg)) throw new Error('select(Column) not yet supported');
   const keys = proj.args.filter((a): a is string => typeof a === 'string');
   if (keys.length !== 1) throw new Error('lowerSingleSelect requires exactly one label');
-  const selected = st.carried.aliases.get(keys[0]);
+  const selected = st.traverserLayout.aliases.get(keys[0]);
   if (!selected) return emptyElementLike(st); // label bound nowhere → drop every traverser
   // A non-last Pop reads the label's history (first/all/mixed); the by()-less forms lower
   // through the shared shape-agnostic resolver. by()-modulated non-last Pop is uncommon.
@@ -261,17 +261,17 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
     const type = scalarTypeFromAlias(selected.scalarType);
     const vtype = perRowColumnOf(type);
     const rel = st.q.cte(
-      q`SELECT ${aliasScalar(p.c[selected.col], 'last')} AS v${vtype ? q`, ${entryTypeTag(aliasPop(p.c[selected.col], 'last'))} AS ${vtype}` : empty}${carryFrag(st.carried, p)} FROM ${p}${present ? q` WHERE ${present}` : empty}`,
-      ['v', ...(vtype ? [vtype] : []), ...carriedCols(st.carried)],
+      q`SELECT ${aliasScalar(p.c[selected.col], 'last')} AS v${vtype ? q`, ${entryTypeTag(aliasPop(p.c[selected.col], 'last'))} AS ${vtype}` : empty}${layoutProjection(st.traverserLayout, p)} FROM ${p}${present ? q` WHERE ${present}` : empty}`,
+      ['v', ...(vtype ? [vtype] : []), ...layoutCols(st.traverserLayout)],
     );
-    return toScalarStream(carryOf(st), rel, undefined, { type });
+    return toScalarStream(loweringStateOf(st), rel, undefined, { type });
   }
   const selElem = aliasElem(selected);
   const selId = aliasId(p.c[selected.col], 'last');
   if (by.sub === 'vertex') {
     const rel = st.q.cte(
-      q`SELECT ${selId} AS id${carryFrag(st.carried, p)} FROM ${p}${present ? q` WHERE ${present}` : empty}`,
-      ['id', ...carriedCols(st.carried)],
+      q`SELECT ${selId} AS id${layoutProjection(st.traverserLayout, p)} FROM ${p}${present ? q` WHERE ${present}` : empty}`,
+      ['id', ...layoutCols(st.traverserLayout)],
     );
     return { ...st, rel, elem: selElem };
   }
@@ -279,10 +279,10 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
   const expr = selElem === 'edge' ? edgePropScalar(n.c.id, by.key!) : nodePropScalar(n.c.id, by.key!);
   const conds = [...(present ? [present] : []), ...(productive ? [] : [predicateSql(expr, undefined)])];
   const rel = st.q.cte(
-    q`SELECT ${expr} AS v${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${selId}${conds.length ? q` WHERE ${list(conds, ' AND ')}` : empty}`,
-    ['v', ...carriedCols(st.carried)],
+    q`SELECT ${expr} AS v${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${selId}${conds.length ? q` WHERE ${list(conds, ' AND ')}` : empty}`,
+    ['v', ...layoutCols(st.traverserLayout)],
   );
-  return toScalarStream(carryOf(st), rel);
+  return toScalarStream(loweringStateOf(st), rel);
 }
 
 /**
@@ -310,7 +310,7 @@ function scalarProjectAliasField(nested: any, s: ScalarStream, params: Record<st
   if (body.length !== 1 || body[0].name !== 'select') return null;
   const strs = body[0].args.filter((a: any): a is string => typeof a === 'string');
   if (strs.length !== 1 || body[0].args.some((a: unknown) => isColumnArg(a) || isPopArg(a))) return null;
-  const entry = s.carried.aliases.get(strs[0]);
+  const entry = s.traverserLayout.aliases.get(strs[0]);
   return entry && aliasIsElement(entry) ? { label: strs[0], entry } : null;
 }
 
@@ -345,8 +345,8 @@ export function lowerScalarProject(s: ScalarStream, proj: PStep): RecordStream |
         : q`${n.c.id} AS ${`e${i}_rid`}, COALESCE(${n.c.uid}, ${n.c.id}) AS ${`e${i}_id`}, ${l.c.name} AS ${`e${i}_label`}, ${framedProps(n, 'vertex')} AS ${`e${i}_props`}`;
       const field: RecordField = { key, prefix: `e${i}`, sub: elem };
       const rel = s.q.cte(
-        q`SELECT ${p.c[ord]} AS ${ord}, ${payload}${carryFrag(s.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${idExpr} JOIN ${l} ON ${l.c.id}=${n.c.label}`,
-        [ord, ...recordFieldColumns(field), ...carriedCols(s.carried)],
+        q`SELECT ${p.c[ord]} AS ${ord}, ${payload}${layoutProjection(s.traverserLayout, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${idExpr} JOIN ${l} ON ${l.c.id}=${n.c.label}`,
+        [ord, ...recordFieldColumns(field), ...layoutCols(s.traverserLayout)],
       ).as(`j${i}`);
       // The element field's columns are already aliased on this branch's rel.
       return { rel, field, cols: recordFieldColumns(field).map((name) => q`${rel.c[name]} AS ${name}`) };
@@ -370,16 +370,16 @@ export function lowerScalarProject(s: ScalarStream, proj: PStep): RecordStream |
   const fields = bs.map((b) => b.field);
   const selectCols = bs.flatMap((b) => b.cols);
   const rel = s.q.cte(
-    q`SELECT ${list(selectCols, ', ')}${carryFrag(s.carried, first)} FROM ${first}${list(joins, '')}`,
-    [...fields.flatMap(recordFieldColumns), ...carriedCols(s.carried)],
+    q`SELECT ${list(selectCols, ', ')}${layoutProjection(s.traverserLayout, first)} FROM ${first}${list(joins, '')}`,
+    [...fields.flatMap(recordFieldColumns), ...layoutCols(s.traverserLayout)],
   );
-  return toRecordStream(carryOf(s), rel, fields);
+  return toRecordStream(loweringStateOf(s), rel, fields);
 }
 
 export function lowerRecordSelectProject(st: ElementStream, proj: PStep): Stream {
   const bys = proj.bys ?? [];
   const isProject = proj.name === 'project';
-  const aliases: AliasMap = st.carried.aliases;
+  const aliases: AliasMap = st.traverserLayout.aliases;
   const curElem = st.elem;
 
   // A non-last Pop on a multi-label select() reads each label's history; the
@@ -434,9 +434,9 @@ export function lowerRecordSelectProject(st: ElementStream, proj: PStep): Stream
     return e.sub === 'value' ? storedPropertyRecordField(k, prefix) : { key: k, prefix, sub: src.elem };
   });
 
-  const relCols = [...fields.flatMap(recordFieldColumns), ...carriedCols(st.carried)];
-  const rel = st.q.cte(q`SELECT ${list(cols, ', ')}${carryFrag(st.carried, p)} FROM ${p}${list(joins, '')}`, relCols);
-  return toRecordStream(carryOf(st), rel, fields);
+  const relCols = [...fields.flatMap(recordFieldColumns), ...layoutCols(st.traverserLayout)];
+  const rel = st.q.cte(q`SELECT ${list(cols, ', ')}${layoutProjection(st.traverserLayout, p)} FROM ${p}${list(joins, '')}`, relCols);
+  return toRecordStream(loweringStateOf(st), rel, fields);
 }
 
 /** `<element movement/filter prefix>.project(k…)|select(k…)` as a child body → one record per
@@ -458,7 +458,7 @@ export function tryCompileRecordChild(
   if (!end) return null;
   // `first` ranks per origin by an encounter; mint one when the prefix carries none (the same
   // mint every other child provider makes).
-  const withEnc = end.carried.encounter ? end : mintChildEncounter(end);
+  const withEnc = end.traverserLayout.encounter ? end : mintChildEncounter(end);
   let lowered: Stream;
   try { lowered = lowerRecordSelectProject(withEnc, shape.proj); }
   catch { return null; } // the builder's own deferrals stay authoritative
@@ -471,14 +471,14 @@ export function tryCompileRecordChild(
  * traverser is dropped unless EVERY requested label is bound (select's all-present rule).
  * by() modulators cycle per key (element fields honour by(key); value/list fields ignore it). */
 export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, step: PStep, keys: string[], pop: string): Stream {
-  if (keys.some((k) => !s.carried.aliases.has(k))) return emptyElementLike(s); // any unbound → drop all
+  if (keys.some((k) => !s.traverserLayout.aliases.has(k))) return emptyElementLike(s); // any unbound → drop all
   const bys = step.bys ?? [];
   const p = s.rel.as('p');
   const cols: Expression[] = [];
   const joins: Expression[] = [];
   const presents: Expression[] = [];
   const fields: RecordField[] = keys.map((k, i) => {
-    const entry = s.carried.aliases.get(k);
+    const entry = s.traverserLayout.aliases.get(k);
     if (!entry) throw new Error(`select("${k}"): no such label — as("${k}") was not seen`);
     const prefix = `e${i}`;
     const col = p.c[entry.col];
@@ -523,9 +523,9 @@ export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, st
     return scalarRecordField(k, prefix, type);
   });
   const where = presents.length ? q` WHERE ${list(presents, ' AND ')}` : empty;
-  const relCols = [...fields.flatMap(recordFieldColumns), ...carriedCols(s.carried)];
-  const rel = s.q.cte(q`SELECT ${list(cols, ', ')}${carryFrag(s.carried, p)} FROM ${p}${list(joins, '')}${where}`, relCols);
-  return toRecordStream(carryOf(s), rel, fields);
+  const relCols = [...fields.flatMap(recordFieldColumns), ...layoutCols(s.traverserLayout)];
+  const rel = s.q.cte(q`SELECT ${list(cols, ', ')}${layoutProjection(s.traverserLayout, p)} FROM ${p}${list(joins, '')}${where}`, relCols);
+  return toRecordStream(loweringStateOf(s), rel, fields);
 }
 
 /** Compatibility adapter for element modifiers accumulated before a terminal record
@@ -544,7 +544,7 @@ export function compileSelectProject(st: ElementStream, proj: PStep, tail: TailM
       q`SELECT ${tail.distinct ? 'DISTINCT ' : ''}${list(projected, ', ')} FROM ${r}${suffix}`,
       names,
     );
-    record = toRecordStream(carryOf(record), rel, record.fields);
+    record = toRecordStream(loweringStateOf(record), rel, record.fields);
   }
   return record;
 }
@@ -615,7 +615,7 @@ function recordWhere(s: RecordStream, step: PStep, at: number): LoweringResult {
   if (!(pred?.op in P_OPS)) throw new Error(`where(P.${pred?.op}) alias comparison on a record not yet supported`);
   const r = s.rel.as('r');
   const resolve = (label: string) => {
-    const entry = s.carried.aliases.get(label);
+    const entry = s.traverserLayout.aliases.get(label);
     if (!entry) throw new Error(`where("${label}"): no such label — as("${label}") was not seen`);
     return { id: aliasId(r.c[entry.col], 'last'), elem: aliasElem(entry) };
   };
@@ -634,7 +634,7 @@ function recordWhere(s: RecordStream, step: PStep, at: number): LoweringResult {
   const names = s.rel.cols;
   const whereExpr = negate ? q`NOT COALESCE((${test}), 0)` : test;
   const rel = s.q.cte(q`SELECT ${list(names.map((name) => r.c[name]), ', ')} FROM ${r} WHERE ${whereExpr}`, names);
-  return continueLowering(toRecordStream(carryOf(s), rel, s.fields), at + 1);
+  return continueLowering(toRecordStream(loweringStateOf(s), rel, s.fields), at + 1);
 }
 
 /** Continue from a per-traverser record. Selecting a named field retypes it to the
@@ -660,7 +660,7 @@ const recordOrder: ShapeTailFn<RecordStream> = (s, step, steps, at) => {
       suffix = q` LIMIT ${limit ?? -1} OFFSET ${offset}`;
     }
     const rel = s.q.cte(q`SELECT ${list(names.map((name) => r.c[name]), ', ')} FROM ${r} ORDER BY ${list(terms, ', ')}${suffix}`, names);
-    return continueLowering(toRecordStream(carryOf(s), rel, s.fields), fuse ? at + 2 : at + 1);
+    return continueLowering(toRecordStream(loweringStateOf(s), rel, s.fields), fuse ? at + 2 : at + 1);
 };
 
 const recordSlice: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
@@ -675,12 +675,12 @@ const recordSlice: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
       else { limit = nums[0] ?? 1; offset = Math.max(0, s.fields.length - limit); }
       if (offset < 0 || (limit !== null && limit < 0)) throw new Error(`Not a legal range: [${offset}, ${limit === null ? -1 : offset + limit}]`);
       const fields = s.fields.slice(offset, limit === null ? undefined : offset + limit);
-      if (!fields.length && carriedCols(s.carried).length === 0)
+      if (!fields.length && layoutCols(s.traverserLayout).length === 0)
         throw new Error(`${step.name}(Scope.local) producing an empty record needs a zero-field record layout`);
       const r = s.rel.as('r');
-      const names = [...fields.flatMap(recordFieldColumns), ...carriedCols(s.carried)];
+      const names = [...fields.flatMap(recordFieldColumns), ...layoutCols(s.traverserLayout)];
       const rel = s.q.cte(q`SELECT ${list(names.map((name) => r.c[name]), ', ')} FROM ${r}`, names);
-      return continueLowering(toRecordStream(carryOf(s), rel, fields), at + 1);
+      return continueLowering(toRecordStream(loweringStateOf(s), rel, fields), at + 1);
     }
     if (step.name === 'tail') throw new Error('tail() on a record stream needs explicit encounter-order metadata');
     const offset = step.name === 'skip' ? nums[0] : step.name === 'range' ? nums[0] : 0;
@@ -691,12 +691,12 @@ const recordSlice: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
     // Record rows are one traverser each. When the chain carries canonical
     // encounter order (the fan-out + positional case), use it here just as the
     // scalar/element slice builders do; otherwise retain the order-free contract.
-    const order = s.carried.encounter ? q` ORDER BY ${r.c[s.carried.encounter]}` : empty;
+    const order = s.traverserLayout.encounter ? q` ORDER BY ${r.c[s.traverserLayout.encounter]}` : empty;
     const rel = s.q.cte(
       q`SELECT ${list(names.map((name) => r.c[name]), ', ')} FROM ${r}${order} LIMIT ${limit ?? -1} OFFSET ${offset}`,
       names,
     );
-    return continueLowering(toRecordStream(carryOf(s), rel, s.fields), at + 1);
+    return continueLowering(toRecordStream(loweringStateOf(s), rel, s.fields), at + 1);
 };
 
 const recordSelect: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
@@ -722,10 +722,10 @@ const recordSelect: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
       } else throw new Error('select(Column.values) on heterogeneous scalar/element/list fields needs a variant list stream');
     }
     const rel = s.q.cte(
-      q`SELECT ${expr} AS list${carryFrag(s.carried, r)} FROM ${r}`,
-      ['list', ...carriedCols(s.carried)],
+      q`SELECT ${expr} AS list${layoutProjection(s.traverserLayout, r)} FROM ${r}`,
+      ['list', ...layoutCols(s.traverserLayout)],
     );
-    return continueLowering(toListStream(carryOf(s), rel, of), at + 1);
+    return continueLowering(toListStream(loweringStateOf(s), rel, of), at + 1);
   }
 
   const keys = step.args.filter((a): a is string => typeof a === 'string');
@@ -736,31 +736,31 @@ const recordSelect: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
   if (field.sub === 'value') {
     const perRow = perRowColumnOf(field.type);
     const rel = s.q.cte(
-      q`SELECT ${r.c[`${field.prefix}_v`]} AS v${perRow ? q`, ${r.c[perRow]} AS ${perRow}` : empty}${carryFrag(s.carried, r)} FROM ${r}`,
-      ['v', ...(perRow ? [perRow] : []), ...carriedCols(s.carried)],
+      q`SELECT ${r.c[`${field.prefix}_v`]} AS v${perRow ? q`, ${r.c[perRow]} AS ${perRow}` : empty}${layoutProjection(s.traverserLayout, r)} FROM ${r}`,
+      ['v', ...(perRow ? [perRow] : []), ...layoutCols(s.traverserLayout)],
     );
-    return continueLowering(toScalarStream(carryOf(s), rel, undefined, { type: field.type }), at + 1);
+    return continueLowering(toScalarStream(loweringStateOf(s), rel, undefined, { type: field.type }), at + 1);
   }
   if (field.sub === 'list') {
     const rel = s.q.cte(
-      q`SELECT ${r.c[`${field.prefix}_list`]} AS list${carryFrag(s.carried, r)} FROM ${r}`,
-      ['list', ...carriedCols(s.carried)],
+      q`SELECT ${r.c[`${field.prefix}_list`]} AS list${layoutProjection(s.traverserLayout, r)} FROM ${r}`,
+      ['list', ...layoutCols(s.traverserLayout)],
     );
-    return continueLowering(toListStream(carryOf(s), rel, field.of), at + 1);
+    return continueLowering(toListStream(loweringStateOf(s), rel, field.of), at + 1);
   }
   if (field.nullable) {
     const rid = r.c[`${field.prefix}_rid`];
     const rel = s.q.cte(
-      q`SELECT CASE WHEN ${rid} IS NULL THEN 0 ELSE 2 END AS vk, NULL AS v, ${rid} AS rid${carryFrag(s.carried, r)} FROM ${r}`,
-      ['vk', 'v', 'rid', ...carriedCols(s.carried)],
+      q`SELECT CASE WHEN ${rid} IS NULL THEN 0 ELSE 2 END AS vk, NULL AS v, ${rid} AS rid${layoutProjection(s.traverserLayout, r)} FROM ${r}`,
+      ['vk', 'v', 'rid', ...layoutCols(s.traverserLayout)],
     );
-    return continueLowering(toVariantStream(carryOf(s), rel, field.sub === 'edge' ? { edge: true } : { node: true }), at + 1);
+    return continueLowering(toVariantStream(loweringStateOf(s), rel, field.sub === 'edge' ? { edge: true } : { node: true }), at + 1);
   }
   const rel = s.q.cte(
-    q`SELECT ${r.c[`${field.prefix}_rid`]} AS id${carryFrag(s.carried, r)} FROM ${r}`,
-    ['id', ...carriedCols(s.carried)],
+    q`SELECT ${r.c[`${field.prefix}_rid`]} AS id${layoutProjection(s.traverserLayout, r)} FROM ${r}`,
+    ['id', ...layoutCols(s.traverserLayout)],
   );
-  return continueLowering(toElementStream(carryOf(s), rel, field.sub === 'edge' ? 'edge' : 'vertex'), at + 1);
+  return continueLowering(toElementStream(loweringStateOf(s), rel, field.sub === 'edge' ? 'edge' : 'vertex'), at + 1);
 };
 
 const RECORD_DISPATCH = new Map<string, ShapeTailFn<RecordStream>>([

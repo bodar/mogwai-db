@@ -605,7 +605,7 @@ describe('repeat / path SQL', () => {
     // movement-free accumulate + a sack-reading where guard (TinkerPop Repeat.feature:664).
     const p = read('g.withSack(0L).V().repeat(__.sack(sum).by("age").where(__.sack().is(lt(59)))).times(2)');
     // the recursive CTE declares `sk`, seeds it from the outer sack, folds per iteration…
-    expect(p.sql).toContain(', sk, bulk)'); // walk output carries sk before bulk (carriedCols order)
+    expect(p.sql).toContain(', sk, bulk)'); // walk output carries sk before bulk (layoutCols order)
     expect(p.sql).toContain('AS sk FROM c0'); // base term seeds sk from the source sack col
     expect(p.sql).toMatch(/\(c\d+\.sk \+ \(SELECT value FROM vertex_properties/); // fold: prev.sk + by('age')
     // …and the where(__.sack().is(lt(59))) guard reads the freshly-folded sack in the term.

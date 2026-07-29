@@ -14,7 +14,7 @@ import { classifyBy } from '../tail/child-shape.ts';
 //
 // aggregate('x') collects every traverser passing through into a named side-effect
 // (a BulkSet in TinkerPop), read back later by cap('x'). It's a PASS-THROUGH barrier:
-// it registers the collection on Carry.sideEffects and returns the stream unchanged,
+// it registers the collection on LoweringState.sideEffects and returns the stream unchanged,
 // so the traversal continues (V().aggregate('x').out()… works). (TinkerPop 4 dropped
 // the lazy store() step — aggregate(Scope.local) replaces it — so there is no store
 // rule in the grammar; only aggregate('x') reaches here.)
@@ -60,7 +60,7 @@ export const aggregate: StepFn = (s, st) => {
       const rows = tryCompileScalarValueRows(st, by.nested);
       if (rows) {
         const r = rows.stream.rel.as('r');
-        const encounter = rows.stream.carried.encounter;
+        const encounter = rows.stream.traverserLayout.encounter;
         if (!encounter) throw new Error('aggregate().by(traversal) requires child encounter order');
         // by(traversal) is a map-style modulator: retain its FIRST productive result
         // per input. ProductiveBy then LEFT-restores parents whose child had no row.
@@ -99,7 +99,7 @@ export const aggregate: StepFn = (s, st) => {
       throw new Error('aggregate().by() only supports a property key or a scalar/element traversal');
     }
   }
-  // Pass-through: same id-relation, extended registry. carryOf/advance preserve it.
+  // Pass-through: same id-relation, extended registry. loweringStateOf/advance preserve it.
   return register(st, name, def);
 };
 
@@ -139,7 +139,7 @@ export function lowerScalarAggregate(s: ScalarStream, step: PStep): ScalarStream
 const groupSideEffect = (isCount: boolean): StepFn => (s, st) => {
   const name = (s.args ?? []).find((a: any) => typeof a === 'string');
   if (typeof name !== 'string') throw new Error(`${isCount ? 'groupCount' : 'group'}() side-effect key must be a string`);
-  if (st.carried.aliases.size || st.carried.path)
+  if (st.traverserLayout.aliases.size || st.traverserLayout.path)
     throw new Error(`${isCount ? 'groupCount' : 'group'}('${name}') after as()/path() not yet supported`);
   // The source shape (element table JOIN parent CTE + ctx + elem) is rebuilt from `parent`
   // by cap('a') via elementGroupSource — the SAME kernel builder the terminal group() tail

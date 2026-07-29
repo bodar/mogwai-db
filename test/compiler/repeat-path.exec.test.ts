@@ -97,7 +97,7 @@ test('a label bound before repeat() rides the walk (loop-invariant carried colum
   expect(names('g.V(1).as("a").repeat(__.out()).times(2).values("name")')).toEqual(['lop', 'ripple']);
   expect(run(store, 'g.V(1).as("a").repeat(__.out()).emit().times(2).count()').map((r: any) => r.v)).toEqual([5]);
   // …nor the OTHER carried columns it rides beside — path (a separate array column, ordered
-  // after the aliases in carriedCols) and simplePath's cycle guard both still work.
+  // after the aliases in layoutCols) and simplePath's cycle guard both still work.
   expect(names('g.V(1).as("a").repeat(__.out()).times(2).path().by("name")').flat().length).toBe(6);
   expect(run(store, 'g.V(1).as("a").repeat(__.out().simplePath()).times(2).count()').map((r: any) => r.v)).toEqual([2]);
 
@@ -189,7 +189,7 @@ test('the SAME path().by() answers identically in both regimes (one position pro
 });
 
 test('path().by(traversal) works on a RECURSIVE path, via the SAME positional child', () => {
-  // The explode is (id, pk, ord) but an ElementStream's schema is ['id', ...carriedCols], so
+  // The explode is (id, pk, ord) but an ElementStream's schema is ['id', ...layoutCols], so
   // pk/ord ride as `origins` — which is what that slot means, and for a path element the answer
   // literally is "path pk, position ord". That makes the exploded rows an ordinary element
   // stream, so `lowerPathPositionChild` (fan-out guards, branch route, `first` collapse) is

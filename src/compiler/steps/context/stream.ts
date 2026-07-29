@@ -6,7 +6,7 @@
 // strictly terminal, so these value shapes had nowhere to go; the `Stream` union +
 // the dispatcher (index.ts `lowerSteps`) make the tail RE-ENTERABLE — a step can
 // retype the stream (fold: elements→list, unfold: list→elements/scalar) and keep
-// compiling. Each arm shares `Carry` (context.ts) so a retype preserves the query
+// compiling. Each arm shares `LoweringState` (context.ts) so a retype preserves the query
 // builder / params / aliases / path.
 //
 // CRITICAL: `ElementStream.elem` stays 'vertex'|'edge' only, and the 20+ movement/filter/branch
@@ -17,7 +17,7 @@ import { type Expression, type Query, type Relation } from '../../../sql/kernel/
 import { type PStep } from '../../ir/strategies.ts';
 import { type Elem } from '../../plan/plan.ts';
 import { perRowColumnOf, perRowCols, staticTypeOf, type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from '../../../sql/kernel/render.ts';
-import { carriedCols, type Carry, type ElementStream } from './context.ts';
+import { layoutCols, type LoweringState, type ElementStream } from './context.ts';
 
 /** What a list stream holds — i.e. the shape `unfold` produces from it. `elem` → bare
  *  rowids (rejoin nodes/edges on unfold) → a fresh `ElementStream`; `scalar` → typed scalars → a
@@ -42,7 +42,7 @@ export const WHOLE_RESULT_CARDINALITY: RelationalCardinality = { kind: 'wholeRes
  *  compile-time tag, a per-row stored-vtype column, or genuinely unknown. `as`/`vtype`
  *  are DERIVED accessors over it, kept only so the existing consumers still read; new
  *  code should read `type` and handle all three cases. */
-export interface ScalarStream extends Carry {
+export interface ScalarStream extends LoweringState {
   readonly kind: 'scalar';
   readonly rel: Relation;
   readonly type: ScalarType;
@@ -69,7 +69,7 @@ export interface ScalarStream extends Carry {
  * genuinely heterogeneous-TYPE scalar arm would need a per-row vtype column, the
  * documented extension point, not built until a scenario needs it). Row existence
  * keeps null distinct from an unproductive child. */
-export interface VariantStream extends Carry {
+export interface VariantStream extends LoweringState {
   readonly kind: 'variant';
   readonly rel: Relation;
   readonly scalarAs?: ValueType;
@@ -94,7 +94,7 @@ export interface VariantArms {
 /** A single list value in a one-row relation with a JSONB `list` column (fold /
  *  inject-of-a-list / select(Column.values)), plus any carried columns. `of` says
  *  what the list holds so unfold/framing knows how to explode it. */
-export interface ListStream extends Carry {
+export interface ListStream extends LoweringState {
   readonly kind: 'list';
   readonly rel: Relation;
   readonly of: ListOf;
@@ -116,21 +116,21 @@ export type { MapOf };
  * framing) is pushed to unfold() / the root, never baked into the stream. Every producer
  * (group/groupCount/valueMap/is(typeOf(MAP))) builds this one shape. `keyOf`/`valOf` describe
  * each side's shape (scalar/element/list) so unfold/select(Column)/framing know how to read it. */
-export interface MapStream extends Carry { readonly kind: 'map'; readonly rel: Relation; readonly keyOf: MapOf; readonly valOf: MapOf; }
+export interface MapStream extends LoweringState { readonly kind: 'map'; readonly rel: Relation; readonly keyOf: MapOf; readonly valOf: MapOf; }
 
 /** The per-entry stream unfold() produces FROM a MapStream — a `(mk, mv)` row relation, one
  * row per Map.Entry. It exists only between unfold() and its consumer (select(Column.keys/
  * values), map(__.select(…)), or the root, where each entry frames as a size-1 MAP). Keeping
  * it distinct from MapStream is the point: a map is a blob VALUE in the core; entries are a
  * near-wire shape that appears only once you explode the map. `keyOf`/`valOf` carry over. */
-export interface MapEntryStream extends Carry { readonly kind: 'mapEntry'; readonly rel: Relation; readonly keyOf: MapOf; readonly valOf: MapOf; }
+export interface MapEntryStream extends LoweringState { readonly kind: 'mapEntry'; readonly rel: Relation; readonly keyOf: MapOf; readonly valOf: MapOf; }
 
 /** The traverser stream shapes a compile phase can be in. */
 /** A stream of Property/VertexProperty traversers. Properties are element-like at
  * the Gremlin level but deliberately are not ElementStream: movement/filter StepFns
  * only understand node/edge rowids. The payload keeps the owner and property fields
  * relational until key/value/id/element/materialization chooses the next shape. */
-export interface PropertyStream extends Carry {
+export interface PropertyStream extends LoweringState {
   readonly kind: 'property';
   readonly rel: Relation;
   readonly ownerElem: Elem;
@@ -147,7 +147,7 @@ export const PROPERTY_PAYLOAD = ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pvt
  * is one wide row per incoming traverser and may have heterogeneous field shapes. */
 export type RecordField = MapEntry;
 
-export interface RecordStream extends Carry {
+export interface RecordStream extends LoweringState {
   readonly kind: 'record';
   readonly rel: Relation;
   readonly fields: readonly RecordField[];
@@ -164,7 +164,7 @@ export interface RecordStream extends Carry {
  * than a silent local-table join. Reads that need only the landed columns — id()/label()/
  * values()/valueMap() and root framing — read them directly, no join. `elem` says which
  * element kind the landed rows are (so root framing picks vertex vs edge). */
-export interface ForeignStream extends Carry {
+export interface ForeignStream extends LoweringState {
   readonly kind: 'foreign';
   readonly rel: Relation;
   readonly elem: Elem;
@@ -179,7 +179,7 @@ export const foreignPayload = (elem: Elem): string[] =>
 /** The rich relational result of a global group()/groupCount() barrier. This keeps
  * terminal element/composite/list layouts honest; simple key/value layouts may later
  * derive the narrow `(mk,mv)` MapStream used by select(Column.*). */
-export interface GroupStream extends Carry {
+export interface GroupStream extends LoweringState {
   readonly kind: 'group';
   readonly rel: Relation;
   readonly key: GroupKey;
@@ -194,7 +194,7 @@ export type PathLayout =
 
 /** A fully lowered Path value. Linear paths carry one wide row per path; recursive
  * paths carry `(pk,ord,element...)` rows that root framing groups by path key. */
-export interface PathStream extends Carry {
+export interface PathStream extends LoweringState {
   readonly kind: 'path';
   readonly rel: Relation;
   readonly layout: PathLayout;
@@ -341,7 +341,7 @@ export const recordResultColumns = (f: RecordField): string[] =>
  * may never claim a column that its Relation does not expose. */
 export function streamColumns(s: Stream): readonly string[] {
   if (s.kind === 'result') return [];
-  return [...streamPayloadCols(s), ...carriedCols(s.carried)];
+  return [...streamPayloadCols(s), ...layoutCols(s.traverserLayout)];
 }
 
 /** A stream's OWN columns — its shape payload, without the carried schema. Split out of
@@ -381,16 +381,16 @@ export function assertStreamColumns<T extends Stream>(s: T): T {
  * callers that alter a payload, re-home a child, or change carried roles must use a
  * more specific helper instead. The assertion keeps the declared carried contract
  * coupled to the replacement relation. */
-export const carryThrough = <T extends RelationalStream>(s: T, rel: Relation): T =>
+export const withRelation = <T extends RelationalStream>(s: T, rel: Relation): T =>
   assertStreamColumns({ ...s, rel }) as T;
 
 /** Project a stream's shape-independent state for a new stream. Supplying `carried`
- * makes a re-home/retype explicit without reopening the rest of Carry through an
+ * makes a re-home/retype explicit without reopening the rest of LoweringState through an
  * object spread. */
-export const carryOf = (s: Stream, carried?: Carry['carried']): Carry =>
+export const loweringStateOf = (s: Stream, carried?: LoweringState['traverserLayout']): LoweringState =>
   s.kind === 'result'
     ? (() => { throw new Error('a terminal result stream has no traverser carry'); })()
-    : ({ q: s.q, params: s.params, sideEffects: s.sideEffects, carried: carried ?? s.carried });
+    : ({ q: s.q, params: s.params, sideEffects: s.sideEffects, traverserLayout: carried ?? s.traverserLayout });
 
 export const toResultStream = (q: Query, tail: Expression, shape: Shape): ResultStream =>
   ({ kind: 'result', q, tail, shape });
@@ -398,11 +398,11 @@ export const toResultStream = (q: Query, tail: Expression, shape: Shape): Result
 /** Construct an element stream at a shape boundary. Unlike `advance`, this may
  * retype a non-element payload, but it still validates that every carried role is
  * physically present on the replacement relation. */
-export const toElementStream = (c: Carry, rel: Relation, elem: ElementStream['elem']): ElementStream =>
+export const toElementStream = (c: LoweringState, rel: Relation, elem: ElementStream['elem']): ElementStream =>
   assertStreamColumns({ ...c, kind: 'elements', rel, elem });
 
 /** The non-payload scalar-stream facets, as an options bag. Emission order is NOT here —
- *  it lives in `carried.encounter` (the one unified slot), threaded via carryFrag like every
+ *  it lives in `carried.encounter` (the one unified slot), threaded via layoutProjection like every
  *  other carried column. */
 export interface ScalarOpts {
   readonly result?: ScalarStream['result'];
@@ -415,7 +415,7 @@ export interface ScalarOpts {
  *  remains as a convenience for the many callers whose type IS a bare static tag
  *  (`toScalarStream(c, rel, 'long')`); it folds into the same union, so the two can never
  *  disagree — there is no second field to forget. */
-export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, opts: ScalarOpts = {}): ScalarStream => {
+export const toScalarStream = (c: LoweringState, rel: Relation, as?: ValueType, opts: ScalarOpts = {}): ScalarStream => {
   const type = opts.type ?? (as ? { kind: 'static', type: as } : { kind: 'unknown' });
   return assertStreamColumns({
     ...c, kind: 'scalar', rel, type,
@@ -424,32 +424,32 @@ export const toScalarStream = (c: Carry, rel: Relation, as?: ValueType, opts: Sc
 };
 /** A ROW-PRESERVING rebuild of a scalar stream: same traversers, same types, new relation
  *  (a filter, an order, a slice, a carried-column reshuffle). This is the idiom that used to
- *  be spelled out longhand at ~15 sites as `toScalarStream(carryOf(s), rel, s.as, {result:
+ *  be spelled out longhand at ~15 sites as `toScalarStream(loweringStateOf(s), rel, s.as, {result:
  *  s.result, productiveNull: s.productiveNull, type: s.type})` — and every barrier bug in
  *  that area was one of those sites forgetting a field. Naming it means the preserving case
  *  cannot drop a channel, and a site that DOESN'T preserve has to say so explicitly. */
 export const rebuildScalar = (s: ScalarStream, rel: Relation, over: Partial<ScalarOpts> = {}): ScalarStream =>
   Object.keys(over).length === 0
-    ? carryThrough(s, rel)
-    : toScalarStream(carryOf(s), rel, undefined, {
+    ? withRelation(s, rel)
+    : toScalarStream(loweringStateOf(s), rel, undefined, {
       type: s.type, result: s.result, productiveNull: s.productiveNull, literalNull: s.literalNull, ...over,
     });
 
-export const toVariantStream = (c: Carry, rel: Relation, arms: VariantArms, result: VariantStream['result'] = 'rows'): VariantStream =>
+export const toVariantStream = (c: LoweringState, rel: Relation, arms: VariantArms, result: VariantStream['result'] = 'rows'): VariantStream =>
   assertStreamColumns({ ...c, kind: 'variant', rel, scalarAs: arms.scalarAs, node: arms.node, edge: arms.edge, listOf: arms.listOf, result });
-export const toListStream = (c: Carry, rel: Relation, of: ListOf, set?: boolean): ListStream =>
+export const toListStream = (c: LoweringState, rel: Relation, of: ListOf, set?: boolean): ListStream =>
   assertStreamColumns({ ...c, kind: 'list', rel, of, set });
-export const toMapStream = (c: Carry, rel: Relation, keyOf: MapOf, valOf: MapOf): MapStream =>
+export const toMapStream = (c: LoweringState, rel: Relation, keyOf: MapOf, valOf: MapOf): MapStream =>
   assertStreamColumns({ ...c, kind: 'map', rel, keyOf, valOf });
-export const toMapEntryStream = (c: Carry, rel: Relation, keyOf: MapOf, valOf: MapOf): MapEntryStream =>
+export const toMapEntryStream = (c: LoweringState, rel: Relation, keyOf: MapOf, valOf: MapOf): MapEntryStream =>
   assertStreamColumns({ ...c, kind: 'mapEntry', rel, keyOf, valOf });
-export const toPropertyStream = (c: Carry, rel: Relation, ownerElem: Elem): PropertyStream =>
+export const toPropertyStream = (c: LoweringState, rel: Relation, ownerElem: Elem): PropertyStream =>
   assertStreamColumns({ ...c, kind: 'property', rel, ownerElem });
-export const toRecordStream = (c: Carry, rel: Relation, fields: readonly RecordField[]): RecordStream =>
+export const toRecordStream = (c: LoweringState, rel: Relation, fields: readonly RecordField[]): RecordStream =>
   assertStreamColumns({ ...c, kind: 'record', rel, fields });
-export const toGroupStream = (c: Carry, rel: Relation, key: GroupKey, val: GroupVal): GroupStream =>
+export const toGroupStream = (c: LoweringState, rel: Relation, key: GroupKey, val: GroupVal): GroupStream =>
   assertStreamColumns({ ...c, kind: 'group', rel, key, val });
-export const toPathStream = (c: Carry, rel: Relation, layout: PathLayout): PathStream =>
+export const toPathStream = (c: LoweringState, rel: Relation, layout: PathLayout): PathStream =>
   assertStreamColumns({ ...c, kind: 'path', rel, layout });
 
 /** A map key/value column's shape → the list shape it produces when select(Column.*)

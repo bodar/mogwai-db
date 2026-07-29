@@ -49,40 +49,40 @@ const runWith = (store: GraphStore, q: string, options: CompileOptions) => {
 describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
   test('stream physical schemas are exact and fail immediately on column drift', () => {
     const q = new Query();
-    const carry = { q, params: {}, carried: { aliases: new Map(), origins: [] } };
-    expect(assertStreamColumns(toScalarStream(carry, q.cte({} as any, ['v']))).kind).toBe('scalar');
-    expect(() => toScalarStream(carry, q.cte({} as any, ['value']))).toThrow(
+    const state = { q, params: {}, traverserLayout: { aliases: new Map(), origins: [] } };
+    expect(assertStreamColumns(toScalarStream(state, q.cte({} as any, ['v']))).kind).toBe('scalar');
+    expect(() => toScalarStream(state, q.cte({} as any, ['value']))).toThrow(
       'scalar stream column mismatch: expected [v], got [value]',
     );
-    expect(toVariantStream(carry, q.cte({} as any, ['vk', 'v', 'rid']), { node: true }).kind).toBe('variant');
-    expect(() => toVariantStream(carry, q.cte({} as any, ['v', 'rid']), { node: true })).toThrow(
+    expect(toVariantStream(state, q.cte({} as any, ['vk', 'v', 'rid']), { node: true }).kind).toBe('variant');
+    expect(() => toVariantStream(state, q.cte({} as any, ['v', 'rid']), { node: true })).toThrow(
       'variant stream column mismatch',
     );
     const propertyCols = ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pvtype', 'pmeta'];
-    expect(toPropertyStream(carry, q.cte({} as any, propertyCols), 'vertex').kind).toBe('property');
-    expect(() => toPropertyStream(carry, q.cte({} as any, propertyCols.slice(1)), 'vertex')).toThrow(
+    expect(toPropertyStream(state, q.cte({} as any, propertyCols), 'vertex').kind).toBe('property');
+    expect(() => toPropertyStream(state, q.cte({} as any, propertyCols.slice(1)), 'vertex')).toThrow(
       'property stream column mismatch',
     );
     const fields = [{ key: 'x', prefix: 'e0', sub: 'vertex' as const }];
     const recordCols = ['e0_rid', 'e0_id', 'e0_label', 'e0_props'];
-    expect(toRecordStream(carry, q.cte({} as any, recordCols), fields).kind).toBe('record');
-    expect(() => toRecordStream(carry, q.cte({} as any, recordCols.slice(1)), fields)).toThrow(
+    expect(toRecordStream(state, q.cte({} as any, recordCols), fields).kind).toBe('record');
+    expect(() => toRecordStream(state, q.cte({} as any, recordCols.slice(1)), fields)).toThrow(
       'record stream column mismatch',
     );
     const typedField = [{ key: 'x', prefix: 'e0', sub: 'value' as const, type: PER_ROW('e0_vtype') }];
-    expect(toRecordStream(carry, q.cte({} as any, ['e0_v', 'e0_vtype']), typedField).kind).toBe('record');
-    expect(() => toRecordStream(carry, q.cte({} as any, ['e0_v']), typedField)).toThrow(
+    expect(toRecordStream(state, q.cte({} as any, ['e0_v', 'e0_vtype']), typedField).kind).toBe('record');
+    expect(() => toRecordStream(state, q.cte({} as any, ['e0_v']), typedField)).toThrow(
       'record stream column mismatch: expected [e0_v, e0_vtype], got [e0_v]',
     );
     const groupKey = { kind: 'scalar' as const };
     const groupVal = { kind: 'count' as const };
-    expect(toGroupStream(carry, q.cte({} as any, ['gk', 'gv']), groupKey, groupVal).kind).toBe('group');
-    expect(() => toGroupStream(carry, q.cte({} as any, ['mk', 'mv']), groupKey, groupVal)).toThrow(
+    expect(toGroupStream(state, q.cte({} as any, ['gk', 'gv']), groupKey, groupVal).kind).toBe('group');
+    expect(() => toGroupStream(state, q.cte({} as any, ['mk', 'mv']), groupKey, groupVal)).toThrow(
       'group stream column mismatch',
     );
     const pathLayout = { kind: 'linear' as const, positions: [{ render: 'value' as const, prefix: 'x0' }] };
-    expect(toPathStream(carry, q.cte({} as any, ['x0_v']), pathLayout).kind).toBe('path');
-    expect(() => toPathStream(carry, q.cte({} as any, ['v']), pathLayout)).toThrow(
+    expect(toPathStream(state, q.cte({} as any, ['x0_v']), pathLayout).kind).toBe('path');
+    expect(() => toPathStream(state, q.cte({} as any, ['v']), pathLayout)).toThrow(
       'path stream column mismatch',
     );
   });
@@ -115,23 +115,23 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     const q = new Query();
     const parent = {
       kind: 'elements' as const, elem: 'vertex' as const, q, params: {},
-      rel: q.cte({} as any, ['id']), carried: { aliases: new Map(), origins: [] as string[] },
+      rel: q.cte({} as any, ['id']), traverserLayout: { aliases: new Map(), origins: [] as string[] },
     };
     const { frame, scope, seed } = pushChildScope(parent);
     expect(frame.domain).toBe(seed.rel);
     expect(frame.ordinal).toBe('o0');
     expect(scope.frames).toEqual([frame]);
-    expect(seed.carried.origins).toEqual(['o0']);
+    expect(seed.traverserLayout.origins).toEqual(['o0']);
     expect(assertStreamColumns(seed)).toBe(seed);
 
     const reused = pushChildScope(seed, reuseCurrentFrame(scope, frame));
     expect(reused.seed).toBe(seed);
     expect(reused.frame.ordinal).toBe('o0');
     expect(reused.frame.reused).toBe(true);
-    expect(reused.seed.carried.origins).toEqual(['o0']);
+    expect(reused.seed.traverserLayout.origins).toEqual(['o0']);
 
     const popped = popChildScope(seed, frame);
-    expect(popped.carried.origins).toEqual([]);
+    expect(popped.traverserLayout.origins).toEqual([]);
     expect(popped.rel.cols).toEqual(['id']);
     expect(assertStreamColumns(popped)).toBe(popped);
   });
@@ -159,7 +159,7 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
 
     const local = read('g.V().local(__.out().values("name").order().limit(2))');
     expect(local.sql.split(' as (')).toHaveLength(6); // five CTEs
-    // The child order()+limit() slice keys off the per-origin carried encounter.
+    // The child order()+limit() slice keys off the per-origin layout encounter.
     expect(local.sql).toContain('ROW_NUMBER() OVER (PARTITION BY p.o0 ORDER BY p.encounter) AS rn');
   });
 

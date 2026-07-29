@@ -1,8 +1,8 @@
 import { q, list, value, empty, type Expression } from '../../sql/kernel/q.ts';
 import { nodes, edges } from '../../sql/schema.ts';
 import { flattenListArgs } from '../../gremlin/frontend.ts';
-import { carriedCols, carryFrag, type ElementStream } from './context/context.ts';
-import { carryOf, toElementStream, type ScalarStream } from './context/stream.ts';
+import { layoutCols, layoutProjection, type ElementStream } from './context/context.ts';
+import { loweringStateOf, toElementStream, type ScalarStream } from './context/stream.ts';
 import { type PStep } from '../ir/strategies.ts';
 
 // ---------- V()/E() as a MID-TRAVERSAL re-source (a shared leaf) ----------
@@ -22,17 +22,17 @@ import { type PStep } from '../ir/strategies.ts';
  * step share it verbatim rather than growing a second CROSS JOIN.
  * The carried schema (as()-labels) rides forward on the join, so `inject(1).as('a').V()…` keeps
  * its label. A pushed child ordinal (origins) rides through the CROSS JOIN unchanged via
- * carryFrag — so re-sourcing INSIDE a scalar child scope (a branch/map arm `__.V().count()`)
+ * layoutProjection — so re-sourcing INSIDE a scalar child scope (a branch/map arm `__.V().count()`)
  * is fine: the re-sourced elements carry the parent ordinal and a following scoped reducer/fold
  * groups by it. Defers (null) only for path/sack/fromV, whose fork/merge through a re-source is
  * not worked out.
  */
 export function lowerReSource(s: ScalarStream | ElementStream, step: PStep): ElementStream | null {
-  if (s.carried.path || s.carried.sack || s.carried.fromV) return null;
+  if (s.traverserLayout.path || s.traverserLayout.sack || s.traverserLayout.fromV) return null;
   const elem: 'vertex' | 'edge' = step.name === 'E' ? 'edge' : 'vertex';
   const n = (elem === 'edge' ? edges : nodes).as('n');
   const p = s.rel.as('p');
-  const cols = carriedCols(s.carried);
+  const cols = layoutCols(s.traverserLayout);
   const rawIds = flattenListArgs(step.args ?? []);
   let where: Expression = empty;
   if (rawIds.length) {
@@ -44,8 +44,8 @@ export function lowerReSource(s: ScalarStream | ElementStream, step: PStep): Ele
     where = clauses.length ? q` WHERE ${list(clauses, ' OR ')}` : q` WHERE 0`; // only-null ids → no match
   }
   const rel = s.q.cte(
-    q`SELECT ${n.c.id} AS id${carryFrag(s.carried, p)} FROM ${p} CROSS JOIN ${n}${where}`,
+    q`SELECT ${n.c.id} AS id${layoutProjection(s.traverserLayout, p)} FROM ${p} CROSS JOIN ${n}${where}`,
     ['id', ...cols],
   );
-  return toElementStream(carryOf(s), rel, elem);
+  return toElementStream(loweringStateOf(s), rel, elem);
 }

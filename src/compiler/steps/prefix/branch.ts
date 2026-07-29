@@ -7,13 +7,13 @@ import { normalize } from '../../ir/passes.ts';
 import { analyzeChain, type ChainFacts } from '../../ir/analyze.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem } from '../../plan/plan.ts';
 import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
-import { advance, aliasColsOf, elemRel, labelScope, prevRel, carryFrag, carryFragMint, carriedCols, carriedWith, mergeCarried, rehomeCarried, rigidCols, partitionOver, type AliasEntry, type AliasMap, type Carried, type Carry, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
+import { advance, aliasColsOf, elemRel, labelScope, prevRel, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, mergeLayouts, rehomeLayout, rigidCols, partitionOver, type AliasEntry, type AliasMap, type TraverserLayout, type LoweringState, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type AliasShape } from '../context/alias.ts';
 import { keyedChildRelation, keyedKeySet } from '../tail/keyed.ts';
 import { pushChildScope, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
 import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, isGlobalBarrier, optionMapMerge, optionMapNeedsPassthrough, readOptionMapArms, ROOT_SCOPE, type BranchArmShape, type ChildCtx, type ChildPlan } from '../tail/child-shape.ts';
 import { emptyElementLike } from '../tail/labelselect.ts';
-import { carryOf, toElementStream, toVariantStream, type ListStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
+import { loweringStateOf, toElementStream, toVariantStream, type ListStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
 import { finishListMerge, mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
 import { unionScalarStreams, SACK_OPS, combineSack } from '../tail/scalar.ts';
 import { engineOf, fastPathContextOf, type Engine } from '../../engine/deps.ts';
@@ -113,12 +113,12 @@ const armDescription = (nested: any, params: Record<string, any>): string =>
 /** A branch forks a traverser into arms. TinkerPop split-only semantics: each arm gets a
  *  CLONE of the incoming per-traverser state and the arms never recombine. as() aliases,
  *  path positions AND the sack all clone cleanly — the incoming sack column rides into every
- *  arm via carryFrag, passes through unchanged (a mutate sack(op) inside an arm is separately
+ *  arm via layoutProjection, passes through unchanged (a mutate sack(op) inside an arm is separately
  *  deferred — it isn't in the child-body vocabulary), and armProjection/rigidCols project it
  *  through the merge. Only fromV stays gated: an edge's otherV() entering-vertex has no
  *  defined meaning once a fork moves off the edge, so fail closed rather than carry a stale id. */
 function assertForkSafe(name: string, st: ElementStream): void {
-  if (st.carried.fromV) throw new Error(`otherV() context through ${name}() not yet supported`);
+  if (st.traverserLayout.fromV) throw new Error(`otherV() context through ${name}() not yet supported`);
 }
 
 // ---------- path-through-branch merge (pad-to-max cols) ----------
@@ -148,32 +148,32 @@ function mergePaths(arms: PathState[]): PathState {
   return { kind: 'cols', cols: merged };
 }
 
-/** Merge the arms into the post-branch Carried: fork/merge the alias label set
+/** Merge the arms into the post-branch TraverserLayout: fork/merge the alias label set
  *  (mergeAliasMaps), pad the PATH, and assert the RIGID cols (origin/sack/fromV/encounter)
  *  agree across arms (those are per-traverser state a fork can't reconcile → fail closed).
  *  Divergent as() labels are NO LONGER rejected — they union into the merged label set and
  *  armProjection pads each arm's missing labels with an empty (NULL) history. */
-function mergeBranchCarried(seed: Carried, arms: Carried[]): Carried {
+function mergeBranchCarried(seed: TraverserLayout, arms: TraverserLayout[]): TraverserLayout {
   // The path pad-to-max is branch-specific (every other merge declines a live path), so it is
   // computed here and handed to the shared authority.
-  return mergeCarried(seed, arms, seed.path ? mergePaths(arms.map((a) => a.path!)) : undefined);
+  return mergeLayouts(seed, arms, seed.path ? mergePaths(arms.map((a) => a.path!)) : undefined);
 }
 
-/** One arm's merge SELECT column list. Order MUST match carriedCols(out): id, aliases,
+/** One arm's merge SELECT column list. Order MUST match layoutCols(out): id, aliases,
  *  origin/sack/fromV/encounter, then path LAST. Each canonical alias column selects the
  *  arm's PHYSICAL column that holds that label (arms mint columns independently, so the
  *  names can differ → alias with `AS`); a label the arm never bound is padded with a NULL
  *  history (drop-not-throw: select() of it drops the traverser). Trailing path positions a
  *  shorter arm lacks are likewise NULL-padded. */
-function armProjection(arm: ElementStream, out: Carried, armIdx?: number): string {
+function armProjection(arm: ElementStream, out: TraverserLayout, armIdx?: number): string {
   const parts = ['id'];
   for (const [label, entry] of out.aliases) {
-    const got = arm.carried.aliases.get(label);
+    const got = arm.traverserLayout.aliases.get(label);
     parts.push(!got ? `NULL AS ${entry.col}` : got.col === entry.col ? entry.col : `${got.col} AS ${entry.col}`);
   }
   parts.push(...rigidCols(out));
   if (out.path?.kind === 'cols') {
-    const armLen = arm.carried.path?.kind === 'cols' ? arm.carried.path.cols.length : 0;
+    const armLen = arm.traverserLayout.path?.kind === 'cols' ? arm.traverserLayout.path.cols.length : 0;
     out.path.cols.forEach((pos, j) => parts.push(j < armLen ? pos.col : `NULL AS ${pos.col}`));
   }
   // When emission order is live, tag the arm with its index so the merge can re-mint a
@@ -189,20 +189,20 @@ function armProjection(arm: ElementStream, out: Carried, armIdx?: number): strin
  *  encounters `armProjection` tagged. Otherwise a plain UNION ALL (hot path unchanged). `parts`
  *  are the per-arm SELECTs (each already carrying `arm_idx` when `out.encounter` is live).
  *
- *  Takes a bare `Carry`, like its three siblings (unionScalarStreams / finishListMerge /
+ *  Takes a bare `LoweringState`, like its three siblings (unionScalarStreams / finishListMerge /
  *  mergeVariantArms): the arms' PARENT is not part of a merge, only the carried schema they
  *  forked from — which lets a `union()` SOURCE, whose arms are rooted and have no parent at all,
  *  reuse it with a synthesized base (sourceUnion, below). */
-function finishElementMerge(base: Carry, out: Carried, parts: Expression[], opts: { elem: Elem; aliases: AliasMap; origins?: readonly string[]; path?: PathState }): ElementStream {
+function finishElementMerge(base: LoweringState, out: TraverserLayout, parts: Expression[], opts: { elem: Elem; aliases: AliasMap; origins?: readonly string[]; path?: PathState }): ElementStream {
   let body = list(parts, ' UNION ALL ');
   if (out.encounter) {
-    const inner = base.q.cte(body, ['id', ...carriedCols(out), 'arm_idx']);
+    const inner = base.q.cte(body, ['id', ...layoutCols(out), 'arm_idx']);
     const m = inner.as('m');
     const over = partitionOver(out, m, q`${m.c.arm_idx}, ${m.c[out.encounter]}`);
-    body = q`SELECT ${m.c.id} AS id${carryFragMint(out, m, out.encounter, q`ROW_NUMBER() OVER (${over})`)} FROM ${m}`;
+    body = q`SELECT ${m.c.id} AS id${layoutProjectionMinting(out, m, out.encounter, q`ROW_NUMBER() OVER (${over})`)} FROM ${m}`;
   }
-  const carried = carriedWith(base.carried, opts);
-  return toElementStream({ ...base, carried }, base.q.cte(body, ['id', ...carriedCols(carried)]), opts.elem);
+  const layout = patchLayout(base.traverserLayout, opts);
+  return toElementStream({ ...base, traverserLayout: layout }, base.q.cte(body, ['id', ...layoutCols(layout)]), opts.elem);
 }
 
 /** Merge a set of ELEMENT arms into one element stream — the ungated entry to the element merge,
@@ -211,18 +211,18 @@ function finishElementMerge(base: Carry, out: Carried, parts: Expression[], opts
  *  unions with theirs (a label bound in only one arm NULL-pads), and its path — when live — pads
  *  to the longest arm. The gated merges (coalesce/optional/choose) call finishElementMerge
  *  directly: they add a per-arm WHERE and pop their own ordinal, which this shape has no room for. */
-export function mergeElementArms(base: Carry, arms: readonly ElementStream[]): ElementStream {
+export function mergeElementArms(base: LoweringState, arms: readonly ElementStream[]): ElementStream {
   const elem = arms[0].elem;
   if (arms.some((e) => e.elem !== elem)) throw new Error('union() branches produce different element kinds (mixed-shape) not yet supported');
-  const out = mergeBranchCarried(base.carried, arms.map((e) => e.carried)); // merges alias sets, pads ragged path arms
+  const out = mergeBranchCarried(base.traverserLayout, arms.map((e) => e.traverserLayout)); // merges alias sets, pads ragged path arms
   const selects = arms.map((e, k) => q`SELECT ${armProjection(e, out, out.encounter ? k : undefined)} FROM ${e.rel}`);
   return finishElementMerge(base, out, selects, { elem, aliases: out.aliases, path: out.path });
 }
 
 /** union(): UNION ALL of each branch, each folded from the CURRENT relation (so the
  *  incoming carried columns — as() aliases, the coalesce/optional ordinal when nested —
- *  ride into every arm via carryFrag) through the full dispatch (multi-hop bodies work).
- *  Same-shape branches only (all node or all edge). mergeCarried asserts every arm
+ *  ride into every arm via layoutProjection) through the full dispatch (multi-hop bodies work).
+ *  Same-shape branches only (all node or all edge). mergeLayouts asserts every arm
  *  exposes the same carried schema (an arm binding a NEW as() diverges → deferred) and
  *  the merge projects it, so `union(...).select('a')` resolves. path tracking through a
  *  branch (1b) still defers. */
@@ -236,7 +236,7 @@ export const union: StepFn = (s, st) => {
   if (branches.length === 0) throw new Error('union() needs at least one branch');
   const ends = branches.map((b) => tryCompileElementTraversal(st, b.nested)
     ?? (() => { throw new Error(`union() branch __.${armDescription(b.nested, st.params)} not yet supported (scalar/projection body)`); })());
-  return mergeElementArms(carryOf(st), ends);
+  return mergeElementArms(loweringStateOf(st), ends);
 };
 
 /** Homogeneous scalar union through the generic child compiler. Every arm applies
@@ -274,7 +274,7 @@ export function tryLowerListUnion(s: Step, st: ElementStream): ListStream | null
   const plans = branches.map((b) => classifyListChild(b.nested, childCtx(st)));
   if (plans.some((p) => !p)) return null;
   const arms = branches.map((branch, i) => tryCompileListChild(st, branch.nested, ROOT_SCOPE, plans[i]!)!);
-  return finishListMerge(carryOf(st), arms);
+  return finishListMerge(loweringStateOf(st), arms);
 }
 
 /** optional(t) = t where it yields output, else the traverser itself. Fast path: a
@@ -291,13 +291,13 @@ export const SingleHopOptionalFastPath: FastPath<[ElementStream, Step[]], Elemen
   name: 'singleHopOptional',
   equivalentWhen: 'test/L5-properties/differential.test.ts — the fast-path differential (this switch off vs. on, over the L1 corpus + generated traversals)',
   appliesWhen: (ctx, st, body) =>
-    ctx.enabled.singleHopOptional && !st.carried.origins.length && !st.carried.path
+    ctx.enabled.singleHopOptional && !st.traverserLayout.origins.length && !st.traverserLayout.path
     && body.length === 1 && (body[0].name === 'out' || body[0].name === 'in') && st.elem === 'vertex',
   tryLower: (_ctx, st, body) => {
     const [from, to] = dirsFor(body[0].name)[0];
     const e = edges.as('e');
     const p = prevRel(st, 'p');
-    return advance(st, q`SELECT COALESCE(${e.c[to]}, ${p.c.id}) AS id${carryFrag(st.carried, p)} FROM ${p} LEFT JOIN ${e} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(body[0].args)}`);
+    return advance(st, q`SELECT COALESCE(${e.c[to]}, ${p.c.id}) AS id${layoutProjection(st.traverserLayout, p)} FROM ${p} LEFT JOIN ${e} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(body[0].args)}`);
   },
 };
 
@@ -317,12 +317,12 @@ export const optional: StepFn = (s, st) => {
   // Two ragged arms: the HIT (body, path extended) and the MISS (base = input unchanged,
   // path at its incoming length). Pad to max; POP this branch's ordinal on output (restore
   // the outer origins), keeping any outer ordinals threaded.
-  const merged = mergeBranchCarried(seedSt.carried, [end.carried, seedSt.carried]);
-  const out = rehomeCarried(merged, st.carried.origins);
+  const merged = mergeBranchCarried(seedSt.traverserLayout, [end.traverserLayout, seedSt.traverserLayout]);
+  const out = rehomeLayout(merged, st.traverserLayout.origins);
   const baseSt: ElementStream = { ...seedSt, rel: base };
   const hit = q`SELECT ${armProjection(end, out, out.encounter ? 0 : undefined)} FROM ${end.rel}`;
   const miss = q`SELECT ${armProjection(baseSt, out, out.encounter ? 1 : undefined)} FROM ${base} WHERE ${ord} NOT IN (SELECT ${ord} FROM ${end.rel})`;
-  return finishElementMerge(carryOf(st), out, [hit, miss], { elem: end.elem, aliases: out.aliases, origins: st.carried.origins, path: out.path });
+  return finishElementMerge(loweringStateOf(st), out, [hit, miss], { elem: end.elem, aliases: out.aliases, origins: st.traverserLayout.origins, path: out.path });
 };
 
 /** Shape-changing optional: productive scalar child rows win; an unproductive
@@ -337,7 +337,7 @@ export function tryLowerVariantOptional(s: Step, st: ElementStream): VariantStre
   // its positions), so the merged rows are ragged in a way the array regime would have to
   // reconcile. Consuming path() off a variant already throws in the variant tail; guarding HERE
   // names the real cause (the branch) instead of the downstream symptom.
-  if (st.carried.path) throw new Error('path() through a mixed-shape optional() not yet supported');
+  if (st.traverserLayout.path) throw new Error('path() through a mixed-shape optional() not yet supported');
   const rows = tryCompileScalarValueRows(st, nested, ROOT_SCOPE, plan.body);
   if (!rows) return null;
   const meta = { scalarAs: staticTypeOf(rows.stream.type), ...(st.elem === 'edge' ? { edge: true } : { node: true }) } as const;
@@ -346,12 +346,12 @@ export function tryLowerVariantOptional(s: Step, st: ElementStream): VariantStre
   // Hit (the scalar child rows) before miss (the unproductive parent, restored) — optional() IS
   // coalesce(t, identity), so arm order is the take-first order. Tag both arms when emission
   // order is live so mergeVariantParts re-mints the canonical encounter once.
-  const enc = st.carried.encounter;
-  const baseNoEnc = enc ? carriedWith(st.carried, { encounter: null }) : st.carried;
+  const enc = st.traverserLayout.encounter;
+  const baseNoEnc = enc ? patchLayout(st.traverserLayout, { encounter: null }) : st.traverserLayout;
   const armTag = (k: number, r: Relation) => enc ? q`, ${k} AS arm_idx, ${r.c[enc]} AS arm_encounter` : empty;
-  const hit = q`SELECT 1 AS vk, ${c.c.v} AS v, NULL AS rid${armTag(0, c)}${carryFrag(baseNoEnc, c)} FROM ${c}`;
-  const miss = q`SELECT 2 AS vk, NULL AS v, ${d.c.id} AS rid${armTag(1, d)}${carryFrag(baseNoEnc, d)} FROM ${d} WHERE NOT EXISTS (SELECT 1 FROM ${c} WHERE ${c.c[rows.frame.ordinal]}=${d.c[rows.frame.ordinal]})`;
-  return mergeVariantParts(carryOf(st), [hit, miss], meta);
+  const hit = q`SELECT 1 AS vk, ${c.c.v} AS v, NULL AS rid${armTag(0, c)}${layoutProjection(baseNoEnc, c)} FROM ${c}`;
+  const miss = q`SELECT 2 AS vk, NULL AS v, ${d.c.id} AS rid${armTag(1, d)}${layoutProjection(baseNoEnc, d)} FROM ${d} WHERE NOT EXISTS (SELECT 1 FROM ${c} WHERE ${c.c[rows.frame.ordinal]}=${d.c[rows.frame.ordinal]})`;
+  return mergeVariantParts(loweringStateOf(st), [hit, miss], meta);
 }
 
 /** coalesce(t1, …, tn): the first branch that yields output, per input traverser.
@@ -368,15 +368,15 @@ export const coalesce: StepFn = (s, st) => {
   const elem = ends[0].elem;
   if (ends.some((e) => e.elem !== elem)) throw new Error('coalesce() branches produce different element kinds (mixed-shape) not yet supported');
   // Pad ragged path arms; POP this branch's ordinal on output (restore the outer origins).
-  const merged = mergeBranchCarried(seedSt.carried, ends.map((e) => e.carried));
-  const out = rehomeCarried(merged, st.carried.origins);
+  const merged = mergeBranchCarried(seedSt.traverserLayout, ends.map((e) => e.traverserLayout));
+  const out = rehomeLayout(merged, st.traverserLayout.origins);
   const parts = ends.map((end, k) => {
     const sel = armProjection(end, out, out.encounter ? k : undefined);
     if (k === 0) return q`SELECT ${sel} FROM ${end.rel}`;
     const notPrior = list(ends.slice(0, k).map((pr) => q`${ord} NOT IN (SELECT ${ord} FROM ${pr.rel})`), ' AND ');
     return q`SELECT ${sel} FROM ${end.rel} WHERE ${notPrior}`;
   });
-  return finishElementMerge(carryOf(st), out, parts, { elem, aliases: out.aliases, origins: st.carried.origins, path: out.path });
+  return finishElementMerge(loweringStateOf(st), out, parts, { elem, aliases: out.aliases, origins: st.traverserLayout.origins, path: out.path });
 };
 
 /** Homogeneous scalar coalesce: compile every arm from one ordinal-tagged seed, then
@@ -410,7 +410,7 @@ export function tryLowerListCoalesce(s: Step, st: ElementStream): ListStream | n
   const arms = branches.map((branch, i) => tryCompileListChild(seedSt, branch.nested, ROOT_SCOPE, plans[i]!.body)!);
   // The merge projects the OUTER carried (st), not the seed's — the pushed ordinal is consumed by
   // the not-in-prior gate and must not leak into the merged list stream's declared schema.
-  return finishListMerge(carryOf(st), arms, (a, k) => k === 0 ? undefined
+  return finishListMerge(loweringStateOf(st), arms, (a, k) => k === 0 ? undefined
     : list(arms.slice(0, k).map((p) => q`${a.c[ord]} NOT IN (SELECT ${ord} FROM ${p.rel})`), ' AND '));
 }
 
@@ -453,7 +453,7 @@ export function tryLowerVariantUnion(s: Step, st: ElementStream): VariantStream 
   assertForkSafe('union', st);
   const branches = s.args.filter(isNested);
   if (branches.length < 2 || !branchesAreMixed(branches, childCtx(st))) return null;
-  if (st.carried.path) throw new Error('path() through a mixed-shape union() not yet supported');
+  if (st.traverserLayout.path) throw new Error('path() through a mixed-shape union() not yet supported');
   const arms = branches.map((b) => compileVariantArm(st, b.nested));
   return mergeVariantArms(st, arms, variantArmsMeta(arms));
 }
@@ -464,7 +464,7 @@ export function tryLowerVariantCoalesce(s: Step, st: ElementStream): VariantStre
   assertForkSafe('coalesce', st);
   const branches = s.args.filter(isNested);
   if (!branches.length || !branchesAreMixed(branches, childCtx(st))) return null;
-  if (st.carried.path) throw new Error('path() through a mixed-shape coalesce() not yet supported');
+  if (st.traverserLayout.path) throw new Error('path() through a mixed-shape coalesce() not yet supported');
   const { seedSt, ord } = originSeed(st);
   const arms = branches.map((b) => compileVariantArm(seedSt, b.nested));
   return mergeVariantArms(st, arms, variantArmsMeta(arms), (a, k) => k === 0 ? undefined
@@ -482,7 +482,7 @@ export function tryLowerVariantChoose(s: Step, st: ElementStream): VariantStream
   const thenShape = armShape(thenArg.nested, childCtx(st));
   const elseShape = armShape(elseArg.nested, childCtx(st));
   if (!thenShape || !elseShape || thenShape === elseShape) return null;
-  if (st.carried.path) throw new Error('path() through a mixed-shape choose() not yet supported');
+  if (st.traverserLayout.path) throw new Error('path() through a mixed-shape choose() not yet supported');
   const seedFor = chooseGate(st, predArg.nested);
   const thenArm = compileVariantArm(seedFor(false), thenArg.nested); // then before else (lazy gate bind order)
   const elseArm = compileVariantArm(seedFor(true), elseArg.nested);
@@ -499,7 +499,7 @@ export const flatMap: StepFn = (s, st) => {
   const nested = s.args[0]?.nested;
   const end = tryCompileElementTraversal(st, nested)
     ?? (() => { throw new Error(`flatMap() branch __.${armDescription(nested, st.params)} not yet supported (scalar/projection body)`); })();
-  mergeBranchCarried(st.carried, [end.carried]); // single arm: assert rigid cols agree; a new as() label rides on `end`
+  mergeBranchCarried(st.traverserLayout, [end.traverserLayout]); // single arm: assert rigid cols agree; a new as() label rides on `end`
   return end;
 };
 
@@ -753,7 +753,7 @@ export const repeat: StepFn = (s, st) => {
   const singleMove = core.length === 1 && REPEAT_MOVES.has(core[0].name);
   // The carried sack column: live if the incoming stream has one (withSack()/prior sack(op))
   // or the body folds one. A body fold with no prior sack seeds fresh at the base term.
-  const sackCol = st.carried.sack ?? (bodyFoldsSack ? 'sk' : undefined);
+  const sackCol = st.traverserLayout.sack ?? (bodyFoldsSack ? 'sk' : undefined);
   // times() → its fixed depth (the ONLY depth bound). until()/emit() have none —
   // they terminate at the natural fixpoint (see the docstring). null = no bound.
   const maxDepth = timesStep ? Number(timesStep.args[0]) : null;
@@ -761,12 +761,12 @@ export const repeat: StepFn = (s, st) => {
   // Path tracking. `wantsPathOutput`: a downstream path() (chain seeded st.carried.path at V).
   // simplePath() in the body needs the accumulated path for its cycle guard even
   // when nothing outputs it. Either → accumulate a JSONB array through the walk.
-  const wantsPathOutput = !!st.carried.path;
+  const wantsPathOutput = !!st.traverserLayout.path;
   // Fail closed on path() spanning more than one movement segment: either a linear
   // hop before repeat (`cols` length > 1) OR a path already accumulated by a PRIOR
   // repeat cluster (`array`). Both would need the walk seeded from the carried path,
   // not a fresh jsonb_array(id) — deferred rather than silently dropping the prefix.
-  if (wantsPathOutput && (st.carried.path!.kind === 'array' || st.carried.path!.cols.length > 1))
+  if (wantsPathOutput && (st.traverserLayout.path!.kind === 'array' || st.traverserLayout.path!.cols.length > 1))
     throw new Error('path() spanning more than one repeat()/movement is not yet supported');
   if (wantsPathOutput && emitStep) throw new Error('emit() with path() not yet supported');
   const trackArray = wantsPathOutput || simplePathInBody;
@@ -821,16 +821,16 @@ export const repeat: StepFn = (s, st) => {
   //     recursive question and still fails closed).
   //   • ORIGIN columns — a walk is row-local (each traverser walks independently), so the ordinal
   //     saying which parent a row came from is just carried, exactly as movement carries it via
-  //     carryFrag. Threading it is what lets `repeat()` be a CHILD body (`local`/`map`/`where`/
+  //     layoutProjection. Threading it is what lets `repeat()` be a CHILD body (`local`/`map`/`where`/
   //     `group`/`order` over a walk) and lets a repeat NEST in another repeat's body.
   // `ride` re-projects them from whichever relation the caller is selecting from — the outer row
   // in the seed, the walk itself in the recursive term, bare at the output.
-  const aliasCols = aliasColsOf(st.carried.aliases);
-  const originCols = st.carried.origins;
+  const aliasCols = aliasColsOf(st.traverserLayout.aliases);
+  const originCols = st.traverserLayout.origins;
   const ride = (cols: readonly string[], r: Relation | null): Expression =>
     cols.length ? list(cols.map((c) => (r ? q`, ${r.c[c]}` : q`, ${raw(c)}`)), '') : empty;
   // Inside the walk the column order is only self-consistency, so the two groups sit together;
-  // the OUTPUT below must instead match carriedCols (aliases, sack, bulk, origins, path).
+  // the OUTPUT below must instead match layoutCols (aliases, sack, bulk, origins, path).
   const throughCols = [...aliasCols, ...originCols];
   const walkCols = ['id', 'depth', ...throughCols, ...(sackCol ? [sackCol] : []), ...(trackArray ? ['path'] : []), ...(hasUntil ? ['done'] : []), ...(hasEmitPred ? ['emit'] : [])];
   const walk = st.q.recursiveCte(walkCols, (self: Relation) => {
@@ -884,7 +884,7 @@ export const repeat: StepFn = (s, st) => {
     // Seed the sack from the outer row (withSack()/prior sack(op)); NULL when the body
     // folds fresh with no prior seed (assign overwrites; a numeric fold with no seed is
     // undefined per TinkerPop and yields NULL → the row drops, matching the linear path).
-    const seedSackExpr = sackCol ? (st.carried.sack ? seedSrc.c[st.carried.sack] : q`NULL`) : null;
+    const seedSackExpr = sackCol ? (st.traverserLayout.sack ? seedSrc.c[st.traverserLayout.sack] : q`NULL`) : null;
     const seedSack = sackCol ? q`, ${seedSackExpr!} AS ${sackCol}` : q``;
     const seedPath = trackArray ? q`, jsonb_array(${seedId}) AS path` : q``;
     const seedDone = hasUntil ? (untilFirst ? doneCol(seedId, q`0`, seedSackExpr) : q`, 0 AS done`) : q``;
@@ -911,11 +911,11 @@ export const repeat: StepFn = (s, st) => {
   // reweights bulk through an unrolled times(n) is a later stage (a recursive GROUP BY is
   // rejected). `bulk` is the source-seeded carried column, always live here.
   // The folded sack rides out of the walk as the carried `sk` column (bare `sack()` reads
-  // it downstream). advance() declares `sack: 'sk'` so carriedCols threads it forward.
-  // Column ORDER on the SELECT must match carriedCols(out): sack, bulk, ORIGINS, then path.
+  // it downstream). advance() declares `sack: 'sk'` so layoutCols threads it forward.
+  // Column ORDER on the SELECT must match layoutCols(out): sack, bulk, ORIGINS, then path.
   // The walk names its accumulator `sackCol`; the outbound carried name is always `sk`.
   const sackOut = sackCol ? q`, ${raw(sackCol)} AS sk` : empty;
-  // Column ORDER must match carriedCols(out) EXACTLY: aliases, sack, bulk, origins, path. The two
+  // Column ORDER must match layoutCols(out) EXACTLY: aliases, sack, bulk, origins, path. The two
   // ride-groups are therefore NOT contiguous here (bulk sits between them), unlike inside the walk.
   const aliasOut = ride(aliasCols, null);
   const originOut = ride(originCols, null);
@@ -983,7 +983,7 @@ function chooseGate(st: ElementStream, predNested: any): (negate: boolean) => El
 function gate(st: ElementStream, test: Expression): ElementStream {
   const n = elemRel(st);
   const p = prevRel(st, 'p');
-  return advance(st, q`SELECT ${n.c.id}${carryFrag(st.carried, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${test}`);
+  return advance(st, q`SELECT ${n.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${test}`);
 }
 
 /**
@@ -1020,12 +1020,12 @@ export const choose: StepFn = (s, st) => {
   if (thenEnd.elem !== elseEnd.elem)
     throw new Error('choose() branches produce different element kinds (mixed-shape) not yet supported');
 
-  const out = mergeBranchCarried(st.carried, [thenEnd.carried, elseEnd.carried]); // merges alias sets, pads ragged path arms
+  const out = mergeBranchCarried(st.traverserLayout, [thenEnd.traverserLayout, elseEnd.traverserLayout]); // merges alias sets, pads ragged path arms
   const parts = [
     q`SELECT ${armProjection(thenEnd, out, out.encounter ? 0 : undefined)} FROM ${thenEnd.rel}`,
     q`SELECT ${armProjection(elseEnd, out, out.encounter ? 1 : undefined)} FROM ${elseEnd.rel}`,
   ];
-  return finishElementMerge(carryOf(st), out, parts, { elem: thenEnd.elem, aliases: out.aliases, path: out.path });
+  return finishElementMerge(loweringStateOf(st), out, parts, { elem: thenEnd.elem, aliases: out.aliases, path: out.path });
 };
 
 /** Predicate choose with two homogeneous scalar result arms. The predicate gates
@@ -1064,7 +1064,7 @@ export function tryLowerListChoose(s: Step, st: ElementStream): ListStream | nul
   const seedFor = chooseGate(st, predArg.nested);
   const thenEnd = tryCompileListChild(seedFor(false), thenArg.nested, ROOT_SCOPE, thenPlan)!;
   const elseEnd = tryCompileListChild(seedFor(true), elseArg.nested, ROOT_SCOPE, elsePlan)!;
-  return finishListMerge(carryOf(st), [thenEnd, elseEnd]);
+  return finishListMerge(loweringStateOf(st), [thenEnd, elseEnd]);
 }
 
 // ---------- union() as a SOURCE — g.union(b1, b2, …) ----------
@@ -1090,14 +1090,14 @@ type ArmStream = ElementStream | ScalarStream | ListStream;
  *  RIGID state (sack/bulk/encounter) and the path regime the arms actually carry. Arms are seeded
  *  from the same facts, so they agree by construction — a divergence means an arm's tail consumed
  *  state the others kept (a barrier eating `bulk`), which no merge can reconcile: fail closed. */
-function sourceBaseCarried(arms: readonly ArmStream[]): Carried {
-  const want = rigidCols(arms[0].carried);
+function sourceBaseCarried(arms: readonly ArmStream[]): TraverserLayout {
+  const want = rigidCols(arms[0].traverserLayout);
   for (const a of arms) {
-    const got = rigidCols(a.carried);
+    const got = rigidCols(a.traverserLayout);
     if (got.length !== want.length || got.some((x, i) => x !== want[i]))
       throw new Error('union() source branches disagree on carried columns (sack/bulk/emission order) — a branch whose tail consumes per-traverser state cannot merge with one that keeps it');
   }
-  const c = arms[0].carried;
+  const c = arms[0].traverserLayout;
   return { aliases: new Map(), origins: c.origins, sack: c.sack, bulk: c.bulk, encounter: c.encounter, path: c.path };
 }
 
@@ -1114,7 +1114,7 @@ const isVariantArmKind = (s: Stream): s is ArmStream =>
 
 /** Lower `union(b1, b2, …)` in SOURCE position to one merged Stream. */
 export function sourceUnion(engine: Engine, step: PStep, params: Record<string, any>, sackInit: SackSpec | undefined, facts: ChainFacts): Stream {
-  const seed: Carry = { q: engine.q, params, carried: { aliases: new Map(), origins: [] } };
+  const seed: LoweringState = { q: engine.q, params, traverserLayout: { aliases: new Map(), origins: [] } };
   const branches = (step.args ?? []).filter(isNested);
   // union() with no branches emits nothing (TinkerPop: the result is empty). Not an arity error —
   // g.union() is a legal traversal, and one arm is legal too (there is nothing to disagree about).
@@ -1135,13 +1135,13 @@ export function sourceUnion(engine: Engine, step: PStep, params: Record<string, 
   // has no merge in the family, and inventing a fifth is what this consolidation exists to prevent.
   const unmergeable = arms.find((a) => !isVariantArmKind(a));
   if (unmergeable) throw new Error(`union() source branch producing a ${unmergeable.kind} value not yet supported`);
-  const base: Carry = { ...seed, carried: sourceBaseCarried(arms as ArmStream[]) };
+  const base: LoweringState = { ...seed, traverserLayout: sourceBaseCarried(arms as ArmStream[]) };
   if (arms.every((a) => a.kind === 'elements')) return mergeElementArms(base, arms as ElementStream[]);
   if (arms.every((a) => a.kind === 'scalar')) return unionScalarStreams(base, arms as ScalarStream[]);
   if (arms.every((a) => a.kind === 'list')) return finishListMerge(base, arms as ListStream[]);
   // Same wall as the mid-traversal mixed-shape merges: a scalar/list arm holds no path position,
   // so the merged rows are ragged in a way only the tagged-array regime could reconcile.
-  if (base.carried.path) throw new Error('path() through a mixed-shape union() source not yet supported');
+  if (base.traverserLayout.path) throw new Error('path() through a mixed-shape union() source not yet supported');
   const vs = (arms as ArmStream[]).map(sourceVariantArm);
   return mergeVariantArms(base, vs, variantArmsMeta(vs));
 }
@@ -1170,14 +1170,14 @@ export function sourceUnion(engine: Engine, step: PStep, params: Record<string, 
  *  A nested choice goes through the SAME correlated modulation seam the CASE projector uses, so
  *  the two agree on what a choice can be. */
 function chooseChoiceDomain(st: ElementStream, a0: any): Relation | null {
-  const cols = ['id', 'ch', 'ch_at', ...carriedCols(st.carried)];
+  const cols = ['id', 'ch', 'ch_at', ...layoutCols(st.traverserLayout)];
   if (a0 && typeof a0 === 'object' && 'nested' in a0) {
     // Not `required`: an unproductive choice routes to Pick.unproductive/none, it never drops the
     // parent — so the modulation is a LEFT join and `present` is the signal, not a filter.
     const mods = tryCompileScalarModulations(st, [{ nested: a0.nested, contract: 'presence' }]);
     if (!mods) return null;
     const p = mods.rel.as('p');
-    return st.q.cte(q`SELECT ${p.c.id} AS id, ${p.c[mods.values[0].value]} AS ch, ${p.c[mods.values[0].present]} AS ch_at${carryFrag(st.carried, p)} FROM ${p}`, cols);
+    return st.q.cte(q`SELECT ${p.c.id} AS id, ${p.c[mods.values[0].value]} AS ch, ${p.c[mods.values[0].present]} AS ch_at${layoutProjection(st.traverserLayout, p)} FROM ${p}`, cols);
   }
   if (!(a0 && typeof a0 === 'object' && 'token' in a0)) return null;
   const n = elemRel(st);
@@ -1185,7 +1185,7 @@ function chooseChoiceDomain(st: ElementStream, a0: any): Relation | null {
   const ch = a0.token === 'label' ? labelNameSub(ctx.labelIdExpr) : a0.token === 'id' ? ctx.extIdExpr! : null;
   if (!ch) return null;
   const p = prevRel(st, 'p');
-  return st.q.cte(q`SELECT ${p.c.id} AS id, ${ch} AS ch, 1 AS ch_at${carryFrag(st.carried, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`, cols);
+  return st.q.cte(q`SELECT ${p.c.id} AS id, ${ch} AS ch, 1 AS ch_at${layoutProjection(st.traverserLayout, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`, cols);
 }
 
 /** `choose(choiceFn).option(k, body)…` routed through the arm triage + merge family. Returns null
@@ -1215,7 +1215,7 @@ export function tryLowerOptionMapBranch(st: ElementStream, step: PStep): Stream 
   const noneTest = list([productive, ...unmatched], ' AND ');
   const unproductiveTest = q`${d.c.ch_at} IS NULL`;
   const seedFor = (test: Expression): ElementStream =>
-    advance(st, q`SELECT ${d.c.id} AS id${carryFrag(st.carried, d)} FROM ${d} WHERE ${test}`);
+    advance(st, q`SELECT ${d.c.id} AS id${layoutProjection(st.traverserLayout, d)} FROM ${d} WHERE ${test}`);
 
   // Arm order = declaration order, then the implicit pass-through last. Seeds are built lazily in
   // that order because an inline predicate re-emits its binds at each interpolation, and the
@@ -1248,18 +1248,18 @@ export function tryLowerOptionMapBranch(st: ElementStream, step: PStep): Stream 
       arms.push(got);
     }
     if (needsPassthrough) arms.push(seedFor(passthroughTest)); // element identity
-    const base = carryOf(st);
+    const base = loweringStateOf(st);
     if (merge === 'element') return mergeElementArms(base, arms as ElementStream[]);
     if (merge === 'scalar') return unionScalarStreams(base, arms as ScalarStream[]);
     return finishListMerge(base, arms as ListStream[]);
   }
   // Genuinely mixed arms → the variant merge. Same wall as its siblings: a scalar/list arm holds
   // no path position, so a live path would make the merged rows ragged.
-  if (st.carried.path) throw new Error('path() through a mixed-shape choose().option() not yet supported');
+  if (st.traverserLayout.path) throw new Error('path() through a mixed-shape choose().option() not yet supported');
   const vs: VariantArm[] = plan.map((a) => compileVariantArm(seedFor(a.test), a.nested));
   if (needsPassthrough) {
     const seed = seedFor(passthroughTest);
     vs.push({ rel: seed.rel, vk: seed.elem === 'edge' ? 3 : 2 });
   }
-  return mergeVariantArms(carryOf(st), vs, variantArmsMeta(vs));
+  return mergeVariantArms(loweringStateOf(st), vs, variantArmsMeta(vs));
 }

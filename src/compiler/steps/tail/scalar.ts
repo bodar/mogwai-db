@@ -3,8 +3,8 @@ import { hasUnresolvedOperand, operandDeps, resolveTraversalOperands } from './o
 import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx, TYPE_PER_ROW, TYPE_STATIC, TYPE_UNKNOWN, typeCtxOf } from '../../plan/plan.ts';
 import { gtypeName, isNested, isOperatorArg, isOrderArg, isScopeArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { aliasArmProjection, carryFrag, carryFragMint, carriedCols, carriedWith, mergeAliasMaps, partitionOver, withoutCarried, type Carry } from '../context/context.ts';
-import { carryOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
+import { aliasArmProjection, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, mergeAliasMaps, partitionOver, dropLayoutAtBarrier, type LoweringState } from '../context/context.ts';
+import { loweringStateOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, numericSpec, SCALAR_TRANSFORMS } from './coerce.ts';
 import { normalizeTypeName } from '../../../gremlin/types.ts';
 import { perRowColumnOf, perRowCols, STATIC, staticTypeOf, UNKNOWN, type ScalarType, type ValueType } from '../../../sql/kernel/render.ts';
@@ -37,10 +37,10 @@ export function scalarCollectionRetype(s: ScalarStream, kind: 'list' | 'set'): L
   if (!vtype) return null;
   const p = s.rel.as('p');
   const rel = s.q.cte(
-    q`SELECT json(${p.c.v}) AS list${carryFrag(s.carried, p)} FROM ${p} WHERE ${p.c[vtype]} = ${value(kind)}`,
-    ['list', ...carriedCols(s.carried)],
+    q`SELECT json(${p.c.v}) AS list${layoutProjection(s.traverserLayout, p)} FROM ${p} WHERE ${p.c[vtype]} = ${value(kind)}`,
+    ['list', ...layoutCols(s.traverserLayout)],
   );
-  return toListStream(carryOf(s), rel, { kind: 'scalar', typed: true }, kind === 'set');
+  return toListStream(loweringStateOf(s), rel, { kind: 'scalar', typed: true }, kind === 'set');
 }
 
 /** Retype a scalar value stream at is(typeOf(MAP)): keep only rows whose stored vtype is 'map'
@@ -53,10 +53,10 @@ export function scalarMapRetype(s: ScalarStream): MapStream | null {
   if (!vtype) return null;
   const p = s.rel.as('p');
   const rel = s.q.cte(
-    q`SELECT json(${p.c.v}) AS map${carryFrag(s.carried, p)} FROM ${p} WHERE ${p.c[vtype]} = ${value('map')}`,
-    ['map', ...carriedCols(s.carried)],
+    q`SELECT json(${p.c.v}) AS map${layoutProjection(s.traverserLayout, p)} FROM ${p} WHERE ${p.c[vtype]} = ${value('map')}`,
+    ['map', ...layoutCols(s.traverserLayout)],
   );
-  return toMapStream(carryOf(s), rel, { kind: 'scalar' }, { kind: 'scalar' });
+  return toMapStream(loweringStateOf(s), rel, { kind: 'scalar' }, { kind: 'scalar' });
 }
 
 export { SCALAR_TRANSFORMS } from './coerce.ts';
@@ -87,19 +87,19 @@ const isLocal = (step: PStep): boolean =>
   (step.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
 
 // Payload = the value/type projection columns; emission order (encounter) is a CARRIED
-// column now, so it rides via carryFrag alongside every other carried column (never here).
+// column now, so it rides via layoutProjection alongside every other carried column (never here).
 const payload = (s: ScalarStream, p: ReturnType<ScalarStream['rel']['as']>): Expression =>
   q`${s.result === 'number' ? q`${p.c.v} AS v, ${p.c.vt} AS vt` : q`${p.c.v} AS v`}${perRowColumnOf(s.type) ? q`, ${p.c[perRowColumnOf(s.type)!]} AS ${perRowColumnOf(s.type)!}` : empty}`;
 
 const cols = (s: ScalarStream): string[] =>
-  [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...perRowCols(s.type), ...carriedCols(s.carried)];
+  [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...perRowCols(s.type), ...layoutCols(s.traverserLayout)];
 
 function rowPreserving(s: ScalarStream, suffix: Expression, orderByEnc = false): ScalarStream {
   const p = s.rel.as('p');
   // A root slice (limit/skip/range) picks a DETERMINISTIC window only when the chain carries
   // emission order (Stage B); otherwise it stays order-free over incidental row order.
-  const order = orderByEnc && s.carried.encounter ? q` ORDER BY ${p.c[s.carried.encounter]}` : empty;
-  const rel = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)} FROM ${p}${order}${suffix}`, cols(s));
+  const order = orderByEnc && s.traverserLayout.encounter ? q` ORDER BY ${p.c[s.traverserLayout.encounter]}` : empty;
+  const rel = s.q.cte(q`SELECT ${payload(s, p)}${layoutProjection(s.traverserLayout, p)} FROM ${p}${order}${suffix}`, cols(s));
   return rebuildScalar(s, rel);
 }
 
@@ -176,11 +176,11 @@ function fuseScalarSegment(s: ScalarStream, steps: readonly PStep[], from: numbe
     : q`${p.c.v} AS v${s.result === 'number' ? q`, ${p.c.vt} AS vt` : empty}`;
   const where = predicates.length ? q` WHERE ${list(predicates, ' AND ')}` : empty;
   const rel = s.q.cte(
-    q`SELECT ${valueCols}${keepVtype ? q`, ${p.c[keepVtype]} AS ${keepVtype}` : empty}${carryFrag(s.carried, p)} FROM ${p}${where}`,
-    ['v', ...(!transformed && s.result === 'number' ? ['vt'] : []), ...(keepVtype ? [keepVtype] : []), ...carriedCols(s.carried)],
+    q`SELECT ${valueCols}${keepVtype ? q`, ${p.c[keepVtype]} AS ${keepVtype}` : empty}${layoutProjection(s.traverserLayout, p)} FROM ${p}${where}`,
+    ['v', ...(!transformed && s.result === 'number' ? ['vt'] : []), ...(keepVtype ? [keepVtype] : []), ...layoutCols(s.traverserLayout)],
   );
   return {
-    stream: toScalarStream(carryOf(s), rel, undefined, {
+    stream: toScalarStream(loweringStateOf(s), rel, undefined, {
       type: outType,
       result: transformed ? 'value' : s.result,
       productiveNull: transformed ? undefined : s.productiveNull,
@@ -190,33 +190,33 @@ function fuseScalarSegment(s: ScalarStream, steps: readonly PStep[], from: numbe
 }
 
 function partitionedSlice(s: ScalarStream, offset: number, limit: number | null): ScalarStream {
-  if (!s.carried.encounter) throw new Error('correlated scalar slice requires explicit encounter order');
-  const enc = s.carried.encounter;
+  if (!s.traverserLayout.encounter) throw new Error('correlated scalar slice requires explicit encounter order');
+  const enc = s.traverserLayout.encounter;
   const p = s.rel.as('p');
-  const partitions = s.carried.origins.map((name) => p.c[name]);
+  const partitions = s.traverserLayout.origins.map((name) => p.c[name]);
   const over = partitions.length ? q`PARTITION BY ${list(partitions, ', ')} ORDER BY ${p.c[enc]}` : q`ORDER BY ${p.c[enc]}`;
   const rankedCols = [...cols(s), 'rn'];
-  const r = derived(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER (${over}) AS rn FROM ${p}`, rankedCols, 'r');
+  const r = derived(q`SELECT ${payload(s, p)}${layoutProjection(s.traverserLayout, p)}, ROW_NUMBER() OVER (${over}) AS rn FROM ${p}`, rankedCols, 'r');
   const hi = limit == null ? empty : q` AND ${r.c.rn}<=${offset + limit}`;
-  const rel = derived(q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn}>${offset}${hi}`, cols(s), 'slice');
+  const rel = derived(q`SELECT ${payload(s, r)}${layoutProjection(s.traverserLayout, r)} FROM ${r} WHERE ${r.c.rn}>${offset}${hi}`, cols(s), 'slice');
   return rebuildScalar(s, rel);
 }
 
 function partitionedTail(s: ScalarStream, limit: number): ScalarStream {
-  if (!s.carried.encounter) throw new Error('scalar tail requires explicit encounter order');
-  const enc = s.carried.encounter;
+  if (!s.traverserLayout.encounter) throw new Error('scalar tail requires explicit encounter order');
+  const enc = s.traverserLayout.encounter;
   const p = s.rel.as('p');
-  const partitions = s.carried.origins.map((name) => p.c[name]);
+  const partitions = s.traverserLayout.origins.map((name) => p.c[name]);
   const over = partitions.length
     ? q`PARTITION BY ${list(partitions, ', ')} ORDER BY ${p.c[enc]} DESC`
     : q`ORDER BY ${p.c[enc]} DESC`;
   const r = derived(
-    q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER (${over}) AS rn FROM ${p}`,
+    q`SELECT ${payload(s, p)}${layoutProjection(s.traverserLayout, p)}, ROW_NUMBER() OVER (${over}) AS rn FROM ${p}`,
     [...cols(s), 'rn'],
     'r',
   );
   const rel = derived(
-    q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn}<=${limit}`,
+    q`SELECT ${payload(s, r)}${layoutProjection(s.traverserLayout, r)} FROM ${r} WHERE ${r.c.rn}<=${limit}`,
     cols(s),
     'tail_rows',
   );
@@ -231,14 +231,14 @@ function rootTail(s: ScalarStream, limit: number): ScalarStream {
   const p = s.rel.as('p');
   // With emission order (Stage B) the trailing window is the last N BY encounter; otherwise it
   // is the last N of the relation's incidental order (an empty window).
-  const over = s.carried.encounter ? q`ORDER BY ${p.c[s.carried.encounter]}` : empty;
+  const over = s.traverserLayout.encounter ? q`ORDER BY ${p.c[s.traverserLayout.encounter]}` : empty;
   const r = derived(
-    q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER (${over}) AS rn, COUNT(*) OVER () AS cnt FROM ${p}`,
+    q`SELECT ${payload(s, p)}${layoutProjection(s.traverserLayout, p)}, ROW_NUMBER() OVER (${over}) AS rn, COUNT(*) OVER () AS cnt FROM ${p}`,
     [...cols(s), 'rn', 'cnt'],
     'r',
   );
   const rel = derived(
-    q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn} > ${r.c.cnt} - ${limit}`,
+    q`SELECT ${payload(s, r)}${layoutProjection(s.traverserLayout, r)} FROM ${r} WHERE ${r.c.rn} > ${r.c.cnt} - ${limit}`,
     cols(s),
     'tail_rows',
   );
@@ -246,31 +246,31 @@ function rootTail(s: ScalarStream, limit: number): ScalarStream {
 }
 
 function partitionedOrder(s: ScalarStream, order: Expression): ScalarStream {
-  if (!s.carried.encounter) throw new Error('correlated scalar order requires explicit encounter order');
-  const enc = s.carried.encounter;
+  if (!s.traverserLayout.encounter) throw new Error('correlated scalar order requires explicit encounter order');
+  const enc = s.traverserLayout.encounter;
   const p = s.rel.as('p');
-  const partitions = s.carried.origins.map((name) => p.c[name]);
+  const partitions = s.traverserLayout.origins.map((name) => p.c[name]);
   const over = partitions.length ? q`PARTITION BY ${list(partitions, ', ')} ORDER BY ${order}, ${p.c[enc]}` : q`ORDER BY ${order}, ${p.c[enc]}`;
   // order SUPERSEDES the encounter column (a fresh ROW_NUMBER) in its declared carried slot
-  // (carryFragMint), preserving each row's value + stored type. cols(s) = [v,(vt),(vtype),carried].
+  // (layoutProjectionMinting), preserving each row's value + stored type. cols(s) = [v,(vt),(vtype),carried].
   const valuePayload = s.result === 'number' ? q`${p.c.v} AS v, ${p.c.vt} AS vt` : q`${p.c.v} AS v`;
   const sPerRow = perRowColumnOf(s.type);
   const vtypeCol = sPerRow ? q`, ${p.c[sPerRow]} AS ${sPerRow}` : empty;
-  const rel = s.q.cte(q`SELECT ${valuePayload}${vtypeCol}${carryFragMint(s.carried, p, enc, q`ROW_NUMBER() OVER (${over})`)} FROM ${p}`, cols(s));
+  const rel = s.q.cte(q`SELECT ${valuePayload}${vtypeCol}${layoutProjectionMinting(s.traverserLayout, p, enc, q`ROW_NUMBER() OVER (${over})`)} FROM ${p}`, cols(s));
   return rebuildScalar(s, rel);
 }
 
 function partitionedDedup(s: ScalarStream): ScalarStream {
-  if (!s.carried.encounter) throw new Error('correlated scalar dedup requires explicit encounter order');
-  const enc = s.carried.encounter;
+  if (!s.traverserLayout.encounter) throw new Error('correlated scalar dedup requires explicit encounter order');
+  const enc = s.traverserLayout.encounter;
   const p = s.rel.as('p');
-  const partitions = [...s.carried.origins.map((name) => p.c[name]), p.c.v, ...(s.result === 'number' ? [p.c.vt] : [])];
+  const partitions = [...s.traverserLayout.origins.map((name) => p.c[name]), p.c.v, ...(s.result === 'number' ? [p.c.vt] : [])];
   const r = derived(
-    q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)}, ROW_NUMBER() OVER (PARTITION BY ${list(partitions, ', ')} ORDER BY ${p.c[enc]}) AS rn FROM ${p}`,
+    q`SELECT ${payload(s, p)}${layoutProjection(s.traverserLayout, p)}, ROW_NUMBER() OVER (PARTITION BY ${list(partitions, ', ')} ORDER BY ${p.c[enc]}) AS rn FROM ${p}`,
     [...cols(s), 'rn'],
     'r',
   );
-  const rel = derived(q`SELECT ${payload(s, r)}${carryFrag(s.carried, r)} FROM ${r} WHERE ${r.c.rn}=1`, cols(s), 'dedup_rows');
+  const rel = derived(q`SELECT ${payload(s, r)}${layoutProjection(s.traverserLayout, r)} FROM ${r} WHERE ${r.c.rn}=1`, cols(s), 'dedup_rows');
   return rebuildScalar(s, rel);
 }
 
@@ -280,10 +280,10 @@ function partitionedDedup(s: ScalarStream): ScalarStream {
 function localMeanScalar(s: ScalarStream): ScalarStream {
   const p = s.rel.as('p');
   const rel = s.q.cte(
-    q`SELECT CAST(${p.c.v} AS REAL) AS v${carryFrag(s.carried, p)} FROM ${p}`,
-    ['v', ...carriedCols(s.carried)],
+    q`SELECT CAST(${p.c.v} AS REAL) AS v${layoutProjection(s.traverserLayout, p)} FROM ${p}`,
+    ['v', ...layoutCols(s.traverserLayout)],
   );
-  return toScalarStream(carryOf(s), rel, 'double', { result: 'value' });
+  return toScalarStream(loweringStateOf(s), rel, 'double', { result: 'value' });
 }
 
 function appendScalar(s: ScalarStream, step: PStep): ScalarStream {
@@ -295,10 +295,10 @@ function appendScalar(s: ScalarStream, step: PStep): ScalarStream {
   // inject() prepends its values, so each gets a NEGATIVE encounter (sorts before every existing
   // row) — no MAX() subquery needed. Real carried state (aliases/path/origins/…) and a
   // typed/reduced scalar still defer.
-  const bulk = s.carried.bulk;
-  const enc = s.carried.encounter;
+  const bulk = s.traverserLayout.bulk;
+  const enc = s.traverserLayout.encounter;
   const benign = new Set([bulk, enc].filter(Boolean) as string[]);
-  if (s.result !== 'value' || s.type.kind === 'static' || carriedCols(s.carried).some((c) => !benign.has(c)))
+  if (s.result !== 'value' || s.type.kind === 'static' || layoutCols(s.traverserLayout).some((c) => !benign.has(c)))
     throw new Error('inject() after typed/reduced/carried scalar state not yet supported');
   const p = s.rel.as('p');
   const n = step.args.length;
@@ -309,7 +309,7 @@ function appendScalar(s: ScalarStream, step: PStep): ScalarStream {
     q`SELECT ${p.c.v} AS v${bulk ? q`, ${p.c[bulk]}` : empty}${enc ? q`, ${p.c[enc]}` : empty} FROM ${p} UNION ALL ${list(appended, ' UNION ALL ')}`,
     ['v', ...carryCols],
   );
-  return toScalarStream(carryOf(s), rel);
+  return toScalarStream(loweringStateOf(s), rel);
 }
 
 // ---------- shape-agnostic filter/branch over a scalar current object ----------
@@ -396,7 +396,7 @@ export function tryInlineScalarPredicate(body: PStep[], current: Expression, par
 
 /** Row-preserving WHERE over the scalar value — the shared projection for a filter cond. */
 function filterScalarByCond(s: ScalarStream, p: ReturnType<ScalarStream['rel']['as']>, cond: Expression): ScalarStream {
-  const rel = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)} FROM ${p} WHERE ${cond}`, cols(s));
+  const rel = s.q.cte(q`SELECT ${payload(s, p)}${layoutProjection(s.traverserLayout, p)} FROM ${p} WHERE ${cond}`, cols(s));
   return rebuildScalar(s, rel);
 }
 
@@ -461,10 +461,10 @@ export function lowerScalarSplit(s: ScalarStream, step: PStep): ListStream {
   const nullMode = sep === null || sep === undefined;
 
   const rk = 'rk';
-  const cols = carriedCols(s.carried);
+  const cols = layoutCols(s.traverserLayout);
   const p0 = s.rel.as('p0');
   const src = s.q.cte(
-    q`SELECT ${p0.c.v} AS v${carryFrag(s.carried, p0)}, ROW_NUMBER() OVER () AS ${rk} FROM ${p0}`,
+    q`SELECT ${p0.c.v} AS v${layoutProjection(s.traverserLayout, p0)}, ROW_NUMBER() OVER () AS ${rk} FROM ${p0}`,
     ['v', ...cols, rk],
   );
   const sa = src.as('s');
@@ -495,10 +495,10 @@ export function lowerScalarSplit(s: ScalarStream, step: PStep): ListStream {
   );
   const g = grouped.as('g');
   const rel = s.q.cte(
-    q`SELECT ${g.c.list} AS list${carryFrag(s.carried, sa)} FROM ${sa} LEFT JOIN ${g} ON ${g.c[rk]}=${sa.c[rk]}`,
+    q`SELECT ${g.c.list} AS list${layoutProjection(s.traverserLayout, sa)} FROM ${sa} LEFT JOIN ${g} ON ${g.c[rk]}=${sa.c[rk]}`,
     ['list', ...cols],
   );
-  return toListStream(carryOf(s), rel, { kind: 'scalar', as: 'string' });
+  return toListStream(loweringStateOf(s), rel, { kind: 'scalar', as: 'string' });
 }
 
 // ---------- scalar-parent branch primitives (gate + union) ----------
@@ -518,7 +518,7 @@ export function gateScalar(s: ScalarStream, buildCond: (v: Expression, vt: Expre
   const p = s.rel.as('p');
   const isPerRow = perRowColumnOf(s.type);
   const vt = isPerRow ? p.c[isPerRow] : undefined;
-  const rel = s.q.cte(q`SELECT ${payload(s, p)}${carryFrag(s.carried, p)} FROM ${p} WHERE ${buildCond(p.c.v, vt)}`, cols(s));
+  const rel = s.q.cte(q`SELECT ${payload(s, p)}${layoutProjection(s.traverserLayout, p)} FROM ${p} WHERE ${buildCond(p.c.v, vt)}`, cols(s));
   return rebuildScalar(s, rel);
 }
 
@@ -530,41 +530,41 @@ export function gateScalar(s: ScalarStream, buildCond: (v: Expression, vt: Expre
  *  arm_idx, arm_encounter)` is minted into the carried slot (per-origin inside a child scope).
  *  This matches TinkerPop's union order (arm a before arm b) and unblocks take-first after a
  *  branch (map/path() fan-out arm). */
-export function unionScalarStreams(base: Carry, arms: readonly ScalarStream[], gateFor?: (a: Relation, k: number) => Expression | undefined): ScalarStream {
+export function unionScalarStreams(base: LoweringState, arms: readonly ScalarStream[], gateFor?: (a: Relation, k: number) => Expression | undefined): ScalarStream {
   const numeric = arms.every((a) => a.result === 'number');
   // Merge the arms' LABEL SETS onto the base (an arm may bind a NEW as() label), exactly as the
   // element-parent merge does. Without this an arm-grown alias column is absent from the merged
   // relation's declared schema and a later select() reads nothing — a silent empty result. Each
   // arm then projects the CANONICAL alias columns (its own physical column remapped, NULL where it
-  // never bound the label) instead of a flat carryFrag of the base's.
-  const mergedAliases = mergeAliasMaps(base.carried.aliases, arms.map((a) => a.carried));
-  const armsGrewAlias = mergedAliases.size !== base.carried.aliases.size;
+  // never bound the label) instead of a flat layoutProjection of the base's.
+  const mergedAliases = mergeAliasMaps(base.traverserLayout.aliases, arms.map((a) => a.traverserLayout));
+  const armsGrewAlias = mergedAliases.size !== base.traverserLayout.aliases.size;
   // Forward the base carried EXCEPT any prior encounter — the merge supersedes it.
-  const baseNoEnc = carriedWith(base.carried, { encounter: null, aliases: mergedAliases });
-  const nonAlias = carriedCols({ ...baseNoEnc, aliases: new Map() });
+  const baseNoEnc = patchLayout(base.traverserLayout, { encounter: null, aliases: mergedAliases });
+  const nonAlias = layoutCols({ ...baseNoEnc, aliases: new Map() });
   const inner = base.q.cte(
     list(arms.map((a, k) => {
       const r = a.rel.as('a');
-      const armEnc = a.carried.encounter ? r.c[a.carried.encounter] : q`1`;
+      const armEnc = a.traverserLayout.encounter ? r.c[a.traverserLayout.encounter] : q`1`;
       const gate = gateFor?.(r, k);
       // The alias columns come from the ARM (remapped/padded); every other carried column is
       // per-traverser state the arms share with the base, so it rides straight through.
       const aliasFrag = armsGrewAlias
-        ? list(aliasArmProjection(a.carried.aliases, mergedAliases, r).map((e: Expression) => q`, ${e}`), '')
+        ? list(aliasArmProjection(a.traverserLayout.aliases, mergedAliases, r).map((e: Expression) => q`, ${e}`), '')
         : empty;
       const restFrag = armsGrewAlias
         ? (nonAlias.length ? list(nonAlias.map((c) => q`, ${r.c[c]}`), '') : empty)
-        : carryFrag(baseNoEnc, r);
+        : layoutProjection(baseNoEnc, r);
       return q`SELECT ${r.c.v} AS v${numeric ? q`, ${r.c.vt} AS vt` : empty}, ${value(k)} AS arm_idx, ${armEnc} AS arm_encounter${aliasFrag}${restFrag} FROM ${r}${gate ? q` WHERE ${gate}` : empty}`;
     }), ' UNION ALL '),
-    ['v', ...(numeric ? ['vt'] : []), 'arm_idx', 'arm_encounter', ...carriedCols(baseNoEnc)],
+    ['v', ...(numeric ? ['vt'] : []), 'arm_idx', 'arm_encounter', ...layoutCols(baseNoEnc)],
   );
   const m = inner.as('m');
-  const outCarried = carriedWith(baseNoEnc, { encounter: 'encounter' });
+  const outCarried = patchLayout(baseNoEnc, { encounter: 'encounter' });
   const over = partitionOver(outCarried, m, q`${m.c.arm_idx}, ${m.c.arm_encounter}`);
   const rel = base.q.cte(
-    q`SELECT ${m.c.v} AS v${numeric ? q`, ${m.c.vt} AS vt` : empty}${carryFragMint(outCarried, m, 'encounter', q`ROW_NUMBER() OVER (${over})`)} FROM ${m}`,
-    ['v', ...(numeric ? ['vt'] : []), ...carriedCols(outCarried)],
+    q`SELECT ${m.c.v} AS v${numeric ? q`, ${m.c.vt} AS vt` : empty}${layoutProjectionMinting(outCarried, m, 'encounter', q`ROW_NUMBER() OVER (${over})`)} FROM ${m}`,
+    ['v', ...(numeric ? ['vt'] : []), ...layoutCols(outCarried)],
   );
   // The merged relation projects only `v` (+ `vt`), so a per-row type column cannot cross
   // the union — an arm carrying one degrades to `unknown` (inferred at the wire) rather than
@@ -572,7 +572,7 @@ export function unionScalarStreams(base: Carry, arms: readonly ScalarStream[], g
   const first = arms[0].type;
   const merged: ScalarType = first.kind === 'static' && arms.every((a) => a.type.kind === 'static' && a.type.type === first.type)
     ? first : UNKNOWN;
-  return toScalarStream({ q: base.q, params: base.params, sideEffects: base.sideEffects, carried: outCarried }, rel, undefined, { type: merged, result: numeric ? 'number' : 'value' });
+  return toScalarStream({ q: base.q, params: base.params, sideEffects: base.sideEffects, traverserLayout: outCarried }, rel, undefined, { type: merged, result: numeric ? 'number' : 'value' });
 }
 
 /** sack over a scalar stream. The mutate form sack(Operator.x) folds the CURRENT VALUE
@@ -580,21 +580,21 @@ export function unionScalarStreams(base: Carry, arms: readonly ScalarStream[], g
  *  merge value (no by() modulator). The read form (bare sack()) rebinds the current
  *  object to the sack value. Reuses combineSack (the element sack's operator logic). */
 export function lowerScalarSack(s: ScalarStream, step: PStep): ScalarStream {
-  if (!s.carried.sack) throw new Error('sack() over a scalar stream requires withSack() or a preceding sack step');
-  const sk = s.carried.sack;
+  if (!s.traverserLayout.sack) throw new Error('sack() over a scalar stream requires withSack() or a preceding sack step');
+  const sk = s.traverserLayout.sack;
   const p = s.rel.as('p');
   const op = (step.args ?? []).find(isOperatorArg)?.operator;
   if (!op) {
     // bare sack() read: the sack value becomes the current object.
     if ((step.args ?? []).length) throw new Error('sack(argument) read form not supported (bare sack() only)');
-    const rel = s.q.cte(q`SELECT ${p.c[sk]} AS v${carryFrag(s.carried, p)} FROM ${p}`, ['v', ...carriedCols(s.carried)]);
-    return toScalarStream(carryOf(s), rel);
+    const rel = s.q.cte(q`SELECT ${p.c[sk]} AS v${layoutProjection(s.traverserLayout, p)} FROM ${p}`, ['v', ...layoutCols(s.traverserLayout)]);
+    return toScalarStream(loweringStateOf(s), rel);
   }
   if (!SACK_OPS.has(op)) throw new Error(`sack(Operator.${op}) not yet supported`);
   if (((step as any).bys ?? []).length)
     throw new Error('sack(Operator.x).by() over a scalar stream not yet supported (the scalar value is the merge value)');
   const newSack = combineSack(op, p.c.v, p.c[sk]);
-  const carriedProj = carriedCols(s.carried).map((c) => c === sk ? q`${newSack} AS ${sk}` : p.c[c]);
+  const carriedProj = layoutCols(s.traverserLayout).map((c) => c === sk ? q`${newSack} AS ${sk}` : p.c[c]);
   const rel = s.q.cte(
     q`SELECT ${payload(s, p)}${carriedProj.length ? q`, ${list(carriedProj, ', ')}` : empty} FROM ${p}`,
     cols(s),
@@ -611,23 +611,23 @@ export function lowerScalarSack(s: ScalarStream, step: PStep): ScalarStream {
 export function lowerScalarConstant(s: ScalarStream, args: any[]): ScalarStream {
   const p = s.rel.as('p');
   const rel = s.q.cte(
-    q`SELECT ${value(args[0])} AS v${carryFrag(s.carried, p)} FROM ${p}`,
-    ['v', ...carriedCols(s.carried)],
+    q`SELECT ${value(args[0])} AS v${layoutProjection(s.traverserLayout, p)} FROM ${p}`,
+    ['v', ...layoutCols(s.traverserLayout)],
   );
-  return toScalarStream(carryOf(s), rel, undefined, { result: 'value' });
+  return toScalarStream(loweringStateOf(s), rel, undefined, { result: 'value' });
 }
 
 /** constant(x): replace the current object with the literal x, one per input row. Shape-
  *  agnostic — the source relation may be an element or a scalar; only row identity and
  *  the carried schema matter. A child scope (origins live) defers: constant loses the
  *  encounter order downstream partitioned operators require. */
-export function lowerConstant(carry: Carry, rel: Relation, args: any[]): ScalarStream {
-  if (carry.carried.origins.length)
+export function lowerConstant(carry: LoweringState, rel: Relation, args: any[]): ScalarStream {
+  if (carry.traverserLayout.origins.length)
     throw new Error('constant() inside a child scope not yet supported');
   const p = rel.as('p');
   const out = carry.q.cte(
-    q`SELECT ${value(args[0])} AS v${carryFrag(carry.carried, p)} FROM ${p}`,
-    ['v', ...carriedCols(carry.carried)],
+    q`SELECT ${value(args[0])} AS v${layoutProjection(carry.traverserLayout, p)} FROM ${p}`,
+    ['v', ...layoutCols(carry.traverserLayout)],
   );
   return toScalarStream(carry, out, undefined, { result: 'value' });
 }
@@ -680,14 +680,14 @@ export function lowerScalarRows(
         : step.name === 'skip'
           ? { offset: Number(step.args[0]), limit: null }
           : rangeToOffsetLimit(step.args);
-      stream = stream.carried.origins.length
+      stream = stream.traverserLayout.origins.length
         ? partitionedSlice(stream, offset, limit)
         : rowPreserving(stream, q` LIMIT ${limit ?? -1} OFFSET ${offset}`, true);
       continue;
     }
     if (step.name === 'tail') {
       const n = Number(step.args.find((a: any) => typeof a === 'number') ?? 1);
-      stream = stream.carried.origins.length ? partitionedTail(stream, n) : rootTail(stream, n);
+      stream = stream.traverserLayout.origins.length ? partitionedTail(stream, n) : rootTail(stream, n);
       continue;
     }
     if (step.name === 'order') {
@@ -710,7 +710,7 @@ export function lowerScalarRows(
       // via partitionedOrder (empty partition at root), so a following fold/limit/tail/materialize
       // orders by THIS sort rather than the stale seed. Each positional consumer then reads
       // carried.encounter on its own iteration.
-      if (stream.carried.origins.length || stream.carried.encounter) {
+      if (stream.traverserLayout.origins.length || stream.traverserLayout.encounter) {
         stream = partitionedOrder(stream, order);
         continue;
       }
@@ -727,17 +727,17 @@ export function lowerScalarRows(
       continue;
     }
     if (step.name === 'dedup') {
-      if (stream.carried.origins.length) {
+      if (stream.traverserLayout.origins.length) {
         stream = partitionedDedup(stream);
         continue;
       }
-      const clean = withoutCarried(carryOf(stream));
+      const clean = dropLayoutAtBarrier(loweringStateOf(stream));
       const p = stream.rel.as('p');
       // payload/cols (not a hand-rolled projection) so the per-row stored vtype survives the
       // dedup like it does every other row-preserving op. DISTINCT over (v, vtype) is also the
       // correct multiset semantics: equal values of DIFFERENT stored types are distinct
       // Gremlin values and must not collapse into one traverser.
-      const rel = stream.q.cte(q`SELECT DISTINCT ${payload(stream, p)} FROM ${p}`, cols({ ...stream, carried: clean.carried }));
+      const rel = stream.q.cte(q`SELECT DISTINCT ${payload(stream, p)} FROM ${p}`, cols({ ...stream, traverserLayout: clean.traverserLayout }));
       stream = toScalarStream(clean, rel, undefined, { type: stream.type, result: stream.result });
       continue;
     }

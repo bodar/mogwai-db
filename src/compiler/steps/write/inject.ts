@@ -3,7 +3,7 @@ import { jsonbArrayOf } from '../../plan/plan.ts';
 import { flattenListArgs, type SackSpec } from '../../../gremlin/frontend.ts';
 import { flatType, type CanonicalType } from '../../../gremlin/types.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { carriedWith, type Carry } from '../context/context.ts';
+import { patchLayout, type LoweringState } from '../context/context.ts';
 import { toListStream, toScalarStream, type Stream } from '../context/stream.ts';
 import type { Engine } from '../../engine/deps.ts';
 import { materializeRootStream } from '../tail/materialize.ts';
@@ -104,11 +104,11 @@ function foldConstantCoercions(steps: PStep[], vals: any[]): { at: number; as?: 
  * prefix is folded into the literals here, so it may be > 1). List literals seed ListStream rows;
  * ordinary values seed ScalarStream rows.
  *
- * Takes a bare `Carry` rather than an Engine so the seed lands on whichever Query the caller is
+ * Takes a bare `LoweringState` rather than an Engine so the seed lands on whichever Query the caller is
  * building: its own fresh one at the top of a traversal (compileInject, below), or the SHARED one
  * when inject() heads a `union()` SOURCE branch (`g.union(__.inject(1), __.inject(2))`) — where
  * the arm's relation has to sit in the same WITH as its siblings'. */
-export function seedInject(carry: Carry, steps: PStep[], sackInit?: SackSpec): { stream: Stream; at: number } {
+export function seedInject(carry: LoweringState, steps: PStep[], sackInit?: SackSpec): { stream: Stream; at: number } {
   const Q = carry.q;
 
   // Each all-array argument is one list traverser, not scalar varargs.
@@ -125,8 +125,8 @@ export function seedInject(carry: Carry, steps: PStep[], sackInit?: SackSpec): {
   const folded = foldConstantCoercions(steps, vals);
   // withSack(init) seeds every inject traverser's carried sack column (`sk`), exactly
   // as seedSource does for V()/E() — so withSack(x).inject(v).sack(...) carries state.
-  const sackCarry: Carry = sackInit
-    ? { ...carry, carried: carriedWith(carry.carried, { sack: 'sk' }) }
+  const sackCarry: LoweringState = sackInit
+    ? { ...carry, traverserLayout: patchLayout(carry.traverserLayout, { sack: 'sk' }) }
     : carry;
   const cols = sackInit ? ['v', 'sk'] : ['v'];
   const row = (v: any) => sackInit ? q`(${value(v)}, ${value(sackInit.init)})` : q`(${value(v)})`;
@@ -149,7 +149,7 @@ export function compileInject(engine: Engine, steps: PStep[], sackInit?: SackSpe
   // seeds its own relation on this Query and lowers the chain through the same engine — which the
   // seed stream reaches via `q.engine`.
   const eng = engine.subEngine({});
-  const carry: Carry = { q: eng.q, params: {}, carried: { aliases: new Map(), origins: [] } };
+  const carry: LoweringState = { q: eng.q, params: {}, traverserLayout: { aliases: new Map(), origins: [] } };
   const { stream, at } = seedInject(carry, steps, sackInit);
   return materializeRootStream(eng.lowerStepsStrict(stream, steps, at));
 }

@@ -7,8 +7,8 @@ import {
   nodePropScalar, edgePropScalar, nodePropSortKey, edgePropSortKey, scalarPropSortKey, compareKey, labelNameSub, framedProps, valueMapProps, storedValueExpr,
 } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { advance, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, partitionOver, withoutCarried, type ElementStream } from '../context/context.ts';
-import { carryOf, continueLowering, dispatchShapeTail, toElementStream, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
+import { advance, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, partitionOver, dropLayoutAtBarrier, type ElementStream } from '../context/context.ts';
+import { loweringStateOf, continueLowering, dispatchShapeTail, toElementStream, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
 import { tryLowerLocalAggregate, lowerScalarAggregate } from '../prefix/sideeffect.ts';
 import { PER_ROW, STATIC, UNKNOWN, staticTypeOf, type Shape } from '../../../sql/kernel/render.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
@@ -209,9 +209,9 @@ function lowerValueMapTail(st: ElementStream, proj: PStep, acc: TailAcc, steps: 
   // would need the map to carry path history — defer that.
   if (step.name === 'select') {
     const labels = (step.args ?? []).filter((a: any) => typeof a === 'string') as string[];
-    if (labels.length && labels.every((l) => !st.carried.aliases.has(l))) {
+    if (labels.length && labels.every((l) => !st.traverserLayout.aliases.has(l))) {
       const rel = st.q.cte(q`SELECT NULL AS v WHERE 0`, ['v']);
-      return continueLowering(toScalarStream(withoutCarried(carryOf(st)), rel, undefined), i + 1);
+      return continueLowering(toScalarStream(dropLayoutAtBarrier(loweringStateOf(st)), rel, undefined), i + 1);
     }
     throw new Error('select(bound-label) after valueMap() not yet supported');
   }
@@ -234,7 +234,7 @@ function lowerElementOrderByTraversal(st: ElementStream, step: PStep): ElementSt
   const classes = bys.map(classifyBy);
   if (!classes.some((c) => c.kind === 'nested')) return null; // all-direct → acc.orders machinery
   if (classes.some((c) => c.dir === 'shuffle')) return null;   // shuffle has no composite meaning
-  if (st.carried.encounter || st.carried.path)
+  if (st.traverserLayout.encounter || st.traverserLayout.path)
     throw new Error('order().by(traversal) while tracking a path/encounter not yet supported');
 
   // Compile ALL traversal terms against ONE shared parent domain through the proven
@@ -258,7 +258,7 @@ function lowerElementOrderByTraversal(st: ElementStream, step: PStep): ElementSt
   const orderKey = list([...orderExprs, q`${d.c.id}`], ', ');
   return advance(
     st,
-    q`SELECT ${d.c.id} AS id${carryFrag(st.carried, d)}, ROW_NUMBER() OVER (ORDER BY ${orderKey}) AS encounter FROM ${d} JOIN ${n} ON ${n.c.id}=${d.c.id}`,
+    q`SELECT ${d.c.id} AS id${layoutProjection(st.traverserLayout, d)}, ROW_NUMBER() OVER (ORDER BY ${orderKey}) AS encounter FROM ${d} JOIN ${n} ON ${n.c.id}=${d.c.id}`,
     { encounter: 'encounter' },
   );
 }
@@ -283,7 +283,7 @@ function directOrderExpr(by: ByClass, n: Relation, st: ElementStream): Expressio
  *  So retype back to an ElementStream (an ordered element stream is still elements — item 5b's
  *  TailAcc→ElementStream boundary) by minting a fresh emission `encounter` (ROW_NUMBER over the
  *  composite order key). The mint SUPERSEDES any encounter seeded by the demand pass, in its
- *  declared carried slot (carryFragMint), so a downstream limit/branch observes THIS order. The
+ *  declared carried slot (layoutProjectionMinting), so a downstream limit/branch observes THIS order. The
  *  same encounter substrate then threads through movement (finishMove) and the branch merges. The
  *  caller re-enters generic lowering; final materialization sorts by the carried encounter.
  *  Returns null for a shuffle order (no stable re-mint) or a traversal term (that is
@@ -294,18 +294,18 @@ function lowerElementOrderReenter(st: ElementStream, step: PStep): ElementStream
   const classes: ByClass[] = bys.length ? bys.map(classifyBy) : [{ kind: 'none' }];
   if (classes.some((c) => c.kind === 'nested')) return null; // → lowerElementOrderByTraversal
   if (classes.some((c) => c.dir === 'shuffle')) return null;  // shuffle has no stable encounter
-  if (st.carried.path)
+  if (st.traverserLayout.path)
     throw new Error('order() before a movement/branch while tracking a path not yet supported');
   const n = elemRel(st);
   const p = st.rel.as('p');
   const orderKey = list([...classes.map((by) => directOrderExpr(by, n, st)), q`${p.c.id}`], ', ');
-  const carried = carriedWith(st.carried, { encounter: 'encounter' });
-  const mint = q`ROW_NUMBER() OVER (${partitionOver(carried, p, orderKey)})`;
+  const layout = patchLayout(st.traverserLayout, { encounter: 'encounter' });
+  const mint = q`ROW_NUMBER() OVER (${partitionOver(layout, p, orderKey)})`;
   // Same non-productive by(key) drop as the acc projection, same policy function — this is the
   // order()-followed-by-a-movement route, so it needs it independently but must not restate it.
   const drop = elementOrderDrop(st, n, step);
-  const body = q`SELECT ${p.c.id} AS id${carryFragMint(carried, p, 'encounter', mint)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}${drop ? q` WHERE ${drop}` : empty}`;
-  return toElementStream(carryOf(st, carried), st.q.cte(body, ['id', ...carriedCols(carried)]), st.elem);
+  const body = q`SELECT ${p.c.id} AS id${layoutProjectionMinting(layout, p, 'encounter', mint)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}${drop ? q` WHERE ${drop}` : empty}`;
+  return toElementStream(loweringStateOf(st, layout), st.q.cte(body, ['id', ...layoutCols(layout)]), st.elem);
 }
 
 // order().[barrier()].dedup().by(): lower both observations as one window policy so the
@@ -500,7 +500,7 @@ const ELEMENT_DISPATCH = new Map<string, ShapeTailFn<ElementStream>>([
   ['union', tailUnion],
   ['coalesce', tailCoalesce],
   // constant(x) rebinds every traverser to the literal x — element in, scalar out.
-  ['constant', (st, step, _steps, stop) => continueLowering(lowerConstant(carryOf(st), st.rel, step.args), stop + 1)],
+  ['constant', (st, step, _steps, stop) => continueLowering(lowerConstant(loweringStateOf(st), st.rel, step.args), stop + 1)],
   // math("<formula>") → one SQL arithmetic scalar (always Double); its variables resolve
   // through the by() modulators folded onto it.
   ['math', (st, _step, steps, stop) => continueLowering(lowerMath(st, steps, stop), stop + 1)],
@@ -572,7 +572,7 @@ function compileTailFold(st: ElementStream, steps: PStep[], stop: number): Lower
     const result = buildProjection(st, acc);
     if (result.shape.kind !== 'value') throw new Error(`${acc.projStep.name}() did not produce a scalar stream`);
     const rel = st.q.cte(result.tail, ['v']);
-    return continueLowering(toScalarStream(withoutCarried(carryOf(st)), rel, undefined, { type: result.shape.type }), at);
+    return continueLowering(toScalarStream(dropLayoutAtBarrier(loweringStateOf(st)), rel, undefined, { type: result.shape.type }), at);
   }
   if (PROJECTION_NAMES.has(steps[at].name))
     throw new Error(`${steps[at].name}() cannot consume the ${acc.projStep?.name ?? 'element'} result shape`);
@@ -623,7 +623,7 @@ function lowerScalarProjection(st: ElementStream, projStep: PStep, acc: TailAcc)
     ? (proj.baseWhere ? q`${proj.baseWhere} AND ${orderDrop}` : orderDrop)
     : proj.baseWhere;
   const where = baseWhere ? q` WHERE ${baseWhere}` : empty;
-  const origin = st.carried.origins.at(-1);
+  const origin = st.traverserLayout.origins.at(-1);
 
   // Child scope: a physical per-origin encounter partitions downstream scalar row ops.
   // Preceding element order/limit/dedup at a child scope defer — the encounter this mints IS
@@ -635,18 +635,18 @@ function lowerScalarProjection(st: ElementStream, projStep: PStep, acc: TailAcc)
   if (origin) {
     if (acc.orders.length || acc.limit !== null || acc.offset > 0 || acc.distinct)
       throw new Error('order()/limit()/dedup() before a projection inside a child scope not yet supported');
-    const carried = carriedWith(st.carried, { encounter: 'encounter' });
+    const layout = patchLayout(st.traverserLayout, { encounter: 'encounter' });
     const mint = q`ROW_NUMBER() OVER (PARTITION BY ${p.c[origin]} ORDER BY ${proj.encounterKey ?? p.c.id})`;
     const rel = st.q.cte(
-      q`SELECT ${proj.colsNode}${vtypeCol}${carryFragMint(carried, p, 'encounter', mint)} FROM ${proj.fromNode}${where}`,
-      ['v', ...(vt ? ['vtype'] : []), ...carriedCols(carried)],
+      q`SELECT ${proj.colsNode}${vtypeCol}${layoutProjectionMinting(layout, p, 'encounter', mint)} FROM ${proj.fromNode}${where}`,
+      ['v', ...(vt ? ['vtype'] : []), ...layoutCols(layout)],
     );
-    return toScalarStream(carryOf(st, carried), rel, asTag, { result: 'value', type: vt ? PER_ROW(vt) : undefined });
+    return toScalarStream(loweringStateOf(st, layout), rel, asTag, { result: 'value', type: vt ? PER_ROW(vt) : undefined });
   }
 
   // Root scope. An explicit order().by(key) mints the carried encounter; LIMIT/OFFSET
   // apply in this projection CTE. Otherwise an upstream carried encounter (e.g.
-  // order().dedup()) rides through unchanged via carryFrag.
+  // order().dedup()) rides through unchanged via layoutProjection.
   if (acc.distinct) throw new Error('dedup() before a scalar projection not yet supported');
   const orderExprs = acc.orders.map((o) => {
     if (o.dir === 'shuffle') return q`RANDOM()`;
@@ -656,9 +656,9 @@ function lowerScalarProjection(st: ElementStream, projStep: PStep, acc: TailAcc)
   });
   const hasNewEncounter = orderExprs.length > 0;
   // A pre-existing carried encounter (seeded by the emission-order demand pass) is SUPERSEDED
-  // by order().by(key) — carryFragMint re-mints it in its declared slot below. Only a live path
+  // by order().by(key) — layoutProjectionMinting re-mints it in its declared slot below. Only a live path
   // still defers (order() before a projection while tracking a path is not yet supported).
-  if (hasNewEncounter && st.carried.path)
+  if (hasNewEncounter && st.traverserLayout.path)
     throw new Error('order() before a projection while tracking a path not yet supported');
   const hasLimit = acc.limit !== null || acc.offset > 0;
   // The ROW_NUMBER window already captures order (materializeScalarRoot sorts by the
@@ -667,19 +667,19 @@ function lowerScalarProjection(st: ElementStream, projStep: PStep, acc: TailAcc)
   const limitNode = hasLimit ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
   if (hasNewEncounter) {
     // order().by(key) SUPERSEDES the carried encounter (fresh ROW_NUMBER) in its declared slot.
-    const carried = carriedWith(st.carried, { encounter: 'encounter' });
+    const layout = patchLayout(st.traverserLayout, { encounter: 'encounter' });
     const mint = q`ROW_NUMBER() OVER (ORDER BY ${list(orderExprs, ', ')})`;
     const rel = st.q.cte(
-      q`SELECT ${proj.colsNode}${vtypeCol}${carryFragMint(carried, p, 'encounter', mint)} FROM ${proj.fromNode}${where}${orderNode}${limitNode}`,
-      ['v', ...(vt ? ['vtype'] : []), ...carriedCols(carried)],
+      q`SELECT ${proj.colsNode}${vtypeCol}${layoutProjectionMinting(layout, p, 'encounter', mint)} FROM ${proj.fromNode}${where}${orderNode}${limitNode}`,
+      ['v', ...(vt ? ['vtype'] : []), ...layoutCols(layout)],
     );
-    return toScalarStream(carryOf(st, carried), rel, asTag, { result: 'value', type: vt ? PER_ROW(vt) : undefined });
+    return toScalarStream(loweringStateOf(st, layout), rel, asTag, { result: 'value', type: vt ? PER_ROW(vt) : undefined });
   }
   const rel = st.q.cte(
-    q`SELECT ${proj.colsNode}${vtypeCol}${carryFrag(st.carried, p)} FROM ${proj.fromNode}${where}${orderNode}${limitNode}`,
-    ['v', ...(vt ? ['vtype'] : []), ...carriedCols(st.carried)],
+    q`SELECT ${proj.colsNode}${vtypeCol}${layoutProjection(st.traverserLayout, p)} FROM ${proj.fromNode}${where}${orderNode}${limitNode}`,
+    ['v', ...(vt ? ['vtype'] : []), ...layoutCols(st.traverserLayout)],
   );
-  return toScalarStream(carryOf(st), rel, asTag, { result: 'value', type: vt ? PER_ROW(vt) : undefined });
+  return toScalarStream(loweringStateOf(st), rel, asTag, { result: 'value', type: vt ? PER_ROW(vt) : undefined });
 }
 
 /**
@@ -696,12 +696,12 @@ function lowerScalarProjection(st: ElementStream, projStep: PStep, acc: TailAcc)
 function compileFold(st: ElementStream, acc: TailAcc): ListStream {
   if (acc.reducer || acc.isPreds.length || acc.distinct || acc.offset || acc.limit !== null)
     throw new Error('dedup()/limit()/range()/is() before a non-terminal fold() not yet supported');
-  if (st.carried.aliases.size || st.carried.path || st.carried.origins.length)
+  if (st.traverserLayout.aliases.size || st.traverserLayout.path || st.traverserLayout.origins.length)
     throw new Error('fold() carrying as()/path()/branch state into a list value not yet supported');
   // A global fold is a barrier: every traverser collapses into ONE list value, so carried
   // bulk (and any other per-traverser state) is consumed here — the list is a fresh bulk-1
   // traverser (an unfold later re-enumerates its members).
-  const carry = withoutCarried(carryOf(st));
+  const carry = dropLayoutAtBarrier(loweringStateOf(st));
   const projName = acc.projStep?.name;
   // A single bare order() before the fold sorts the folded elements by their projected
   // scalar value (values('x').order().fold() → a sorted list). Only the by-nothing /
@@ -1046,7 +1046,7 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
       const dir = o.dir === 'desc' ? ' DESC' : ' ASC';
       return o.key !== null ? q`${nodePropOrderKey(st)(o.key)}${dir}` : q`n.id${dir}`;
     });
-  } else if (st.carried.encounter) keyNodes = [q`${p.c[st.carried.encounter]}`];
+  } else if (st.traverserLayout.encounter) keyNodes = [q`${p.c[st.traverserLayout.encounter]}`];
   const orderNode = keyNodes.length ? q` ORDER BY ${list(keyNodes, ', ')}` : empty;
   const limitNode = (limit !== null || offset > 0) ? q` LIMIT ${limit ?? -1} OFFSET ${offset}` : empty;
   // Under movementCollapse a bare vertex/edge leaf carries the collapsed multiplicity out to
@@ -1056,7 +1056,7 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
   // bulkRepeatCount fast path reaches this leaf through a sub-engine with movementCollapse forced
   // on (its unrolled frontier IS a collapsed stream), so the SAME gate serves both producers with
   // no bulkRepeatCount coupling here — an uncollapsed compile's projection stays untouched.
-  const wantBulk = !!engineOf(st).fastPaths.movementCollapse && !!st.carried.bulk && !reducer && !distinct
+  const wantBulk = !!engineOf(st).fastPaths.movementCollapse && !!st.traverserLayout.bulk && !reducer && !distinct
     && (proj.shape.kind === 'vertex' || proj.shape.kind === 'edge');
 
   // Bulk-aware limit/range: slicing a COLLAPSED leaf must count TRAVERSERS, not rows. A cumulative-
@@ -1066,7 +1066,7 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
   // AFTER an order, so keyNodes is populated. (order()-without-slice needs no window — the sorted
   // (v, N) rows already frame correctly, the client expanding each in place.)
   if (wantBulk && (limit !== null || offset > 0)) {
-    const b = p.c[st.carried.bulk!];
+    const b = p.c[st.traverserLayout.bulk!];
     const lo = offset;
     const hi = limit !== null ? offset + limit : null; // exclusive upper traverser index (null = unbounded)
     const win = list(keyNodes.length ? keyNodes : [q`n.id`], ', ');
@@ -1079,7 +1079,7 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
     return toResultStream(st.q, windowed, proj.shape);
   }
 
-  const bulkCol = wantBulk ? q`, ${p.c[st.carried.bulk!]} AS bulk` : empty;
+  const bulkCol = wantBulk ? q`, ${p.c[st.traverserLayout.bulk!]} AS bulk` : empty;
   const tailNode = q`SELECT ${distinct ? 'DISTINCT ' : ''}${proj.colsNode}${bulkCol} FROM ${proj.fromNode}${elemDrop ? q` WHERE ${elemDrop}` : empty}${orderNode}${limitNode}`;
 
   // fold() collapses an element projection into ONE List of vertices/edges (the handler's
@@ -1093,20 +1093,20 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
   return toResultStream(st.q, tailNode, proj.shape);
 }
 
-/** bare sack() — read the carried per-traverser sack column (context.ts Carry.sack)
+/** bare sack() — read the carried per-traverser sack column (context.ts LoweringState.sack)
  *  as a scalar value, then run the shared value tail (a trailing sum()/dedup/order/is
  *  composes). The value's GraphBinary type is inferred (as:undefined → anySerializer),
  *  matching values(): sack holds whatever the withSack seed / sack(op) arithmetic
  *  produced (int age, double weight, string label). */
 function lowerSackRead(st: ElementStream, step: PStep): ScalarStream {
-  if (!st.carried.sack) throw new Error('sack() requires withSack() or a preceding sack(Operator.x) step');
+  if (!st.traverserLayout.sack) throw new Error('sack() requires withSack() or a preceding sack(Operator.x) step');
   if ((step.args ?? []).length) throw new Error('sack(argument) read form not supported (bare sack() only)');
   const p = st.rel.as('p');
   const rel = st.q.cte(
-    q`SELECT ${p.c[st.carried.sack]} AS v${carryFrag(st.carried, p)} FROM ${p}`,
-    ['v', ...carriedCols(st.carried)],
+    q`SELECT ${p.c[st.traverserLayout.sack]} AS v${layoutProjection(st.traverserLayout, p)} FROM ${p}`,
+    ['v', ...layoutCols(st.traverserLayout)],
   );
-  return toScalarStream(carryOf(st), rel);
+  return toScalarStream(loweringStateOf(st), rel);
 }
 
 /** cap('x') — emit a named side-effect collection. A list/variant aggregate is ONE
@@ -1124,11 +1124,11 @@ function compileCap(st: ElementStream | ScalarStream, steps: PStep[], stop: numb
   // cap() yields the accumulated side-effect COLLECTION as one fresh traverser — the
   // barrier-built list/variant rel carries no per-traverser bulk, so reset the carry.
   if (def.kind === 'list') {
-    const ls = toListStream(withoutCarried(carryOf(st)), def.rel, def.of);
+    const ls = toListStream(dropLayoutAtBarrier(loweringStateOf(st)), def.rel, def.of);
     return continueLowering(ls, stop + 1);
   }
   if (def.kind === 'variant')
-    return continueLowering(toVariantStream(withoutCarried(carryOf(st)), def.rel, { scalarAs: def.scalarAs, node: def.elem === 'vertex' || undefined, edge: def.elem === 'edge' || undefined }, 'list'), stop + 1);
+    return continueLowering(toVariantStream(dropLayoutAtBarrier(loweringStateOf(st)), def.rel, { scalarAs: def.scalarAs, node: def.elem === 'vertex' || undefined, edge: def.elem === 'edge' || undefined }, 'list'), stop + 1);
   // group('a')/groupCount('a') side-effect → re-emit the same rich GroupStream as an
   // inline group; terminal framing and Column consumers share its dispatch. The stashed
   // def.parent carries the element source, so the SAME elementGroupSource that built the

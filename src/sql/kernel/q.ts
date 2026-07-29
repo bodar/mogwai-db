@@ -123,7 +123,7 @@ export class Query {
   /** The lowering engine for THIS compile — the recursive-traversal authority + ambient
    *  compile dependencies (fastPaths/registry/federationDepth). Attached once per compile by the
    *  compile-scope container (see steps/engine.ts); the step families reach lowering + deps
-   *  through it (`stream.q.engine`) so those dependencies never ride Carry. Typed as the leaf
+   *  through it (`stream.q.engine`) so those dependencies never ride LoweringState. Typed as the leaf
    *  `Engine` interface (steps/deps.ts, a type-only import — no runtime cycle: q.ts stays a
    *  leaf). Optional so a bare `new Query()` (tests, the SQL kernel in isolation) is still valid;
    *  a lowering call on an engine-less Query is a wiring bug and throws where it is read. */

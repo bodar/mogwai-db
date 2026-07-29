@@ -1,14 +1,14 @@
 import { isNested } from '../../../gremlin/frontend.ts';
 import { derived, q, list, type Expression } from '../../../sql/kernel/q.ts';
 import { scalarProp, labelNameSub, predicateSql, elemCtx } from '../../plan/plan.ts';
-import { advance, elemRel, prevRel, carriedCols, carriedWith, type ElementStream, type StepFn } from '../context/context.ts';
+import { advance, elemRel, prevRel, layoutCols, patchLayout, type ElementStream, type StepFn } from '../context/context.ts';
 import { tryCompileScalarValueRows } from '../tail/child.ts';
 import { SACK_OPS, combineSack } from '../tail/scalar.ts';
 
 // ---------- sack (per-traverser carried scalar) ----------
 //
-// sack is a carried column on Carry (context.ts), threaded through movement/filter
-// CTEs by carryFrag exactly like origin/path. This module is the MUTATE form
+// sack is a carried column on LoweringState (context.ts), threaded through movement/filter
+// CTEs by layoutProjection exactly like origin/path. This module is the MUTATE form
 // `sack(Operator.x).by(<value>)` (a prefix StepFn: element→element, replacing the
 // carried column). The READ form (bare `sack()`) is a tail projection in
 // projection.ts (compileSackRead). withSack() seeds the column at the source
@@ -46,10 +46,10 @@ export const sack: StepFn = (s, st) => {
   const bys = (s as any).bys ?? [];
   if (bys.length > 1) throw new Error('Sack step can only have one by modulator');
   // aliases/path + a mutable sack still defer (fork/merge over as()/path history unverified).
-  // A pushed child-scope ORIGIN is fine: the carriedCols-ordered re-projection below copies
+  // A pushed child-scope ORIGIN is fine: the layoutCols-ordered re-projection below copies
   // every origin column through unchanged, so a scoped sack (local(__.sack(op).by(...))) folds
   // correctly per parent traverser — the origin is bookkeeping, not branch state.
-  if (st.carried.aliases.size || st.carried.path)
+  if (st.traverserLayout.aliases.size || st.traverserLayout.path)
     throw new Error('sack(Operator.x) after as()/path() state not yet supported');
 
   const combine = (byVal: Expression, oldSack: Expression | null): Expression => combineSack(op, byVal, oldSack);
@@ -59,15 +59,15 @@ export const sack: StepFn = (s, st) => {
     const rows = tryCompileScalarValueRows(st, nested.nested);
     if (rows) {
       const r = rows.stream.rel.as('r');
-      if (!rows.stream.carried.encounter) throw new Error('sack().by(traversal) requires child encounter order');
+      if (!rows.stream.traverserLayout.encounter) throw new Error('sack().by(traversal) requires child encounter order');
       const f = derived(
-        q`SELECT ${r.c.v} AS v, ${r.c[rows.frame.ordinal]} AS ${rows.frame.ordinal}, ROW_NUMBER() OVER (PARTITION BY ${r.c[rows.frame.ordinal]} ORDER BY ${r.c[rows.stream.carried.encounter]}) AS rn FROM ${r}`,
+        q`SELECT ${r.c.v} AS v, ${r.c[rows.frame.ordinal]} AS ${rows.frame.ordinal}, ROW_NUMBER() OVER (PARTITION BY ${r.c[rows.frame.ordinal]} ORDER BY ${r.c[rows.stream.traverserLayout.encounter]}) AS rn FROM ${r}`,
         ['v', rows.frame.ordinal, 'rn'],
         'f',
       );
       const d = rows.frame.domain.as('d');
-      const newSack = combine(f.c.v, st.carried.sack ? d.c[st.carried.sack] : null);
-      const proj = carriedCols(carriedWith(st.carried, { sack: 'sk' })).map((c) => c === 'sk' ? q`${newSack} AS sk` : d.c[c]);
+      const newSack = combine(f.c.v, st.traverserLayout.sack ? d.c[st.traverserLayout.sack] : null);
+      const proj = layoutCols(patchLayout(st.traverserLayout, { sack: 'sk' })).map((c) => c === 'sk' ? q`${newSack} AS sk` : d.c[c]);
       return advance(st,
         q`SELECT ${d.c.id}, ${list(proj, ', ')} FROM ${d} JOIN ${f} ON ${f.c[rows.frame.ordinal]}=${d.c[rows.frame.ordinal]} AND ${f.c.rn}=1`,
         { sack: 'sk' },
@@ -77,14 +77,14 @@ export const sack: StepFn = (s, st) => {
 
   const byVal = sackByValue(bys[0], st);
   const p = prevRel(st, 'p');
-  const newSack = combine(byVal, st.carried.sack ? p.c[st.carried.sack] : null);
+  const newSack = combine(byVal, st.traverserLayout.sack ? p.c[st.traverserLayout.sack] : null);
 
-  // Re-project id + every carried column in carriedCols ORDER, computing the new sack
-  // value in the `sk` SLOT (NOT appended last). carriedCols orders sk before fromV/path,
+  // Re-project id + every carried column in layoutCols ORDER, computing the new sack
+  // value in the `sk` SLOT (NOT appended last). layoutCols orders sk before fromV/path,
   // so appending sk would desync the CTE's declared vs physical columns whenever another
   // column is co-carried — e.g. sack + otherV() (fromV): sk would silently get fromV.
   const n = elemRel(st);
-  const proj = carriedCols(carriedWith(st.carried, { sack: 'sk' })).map((c) => (c === 'sk' ? q`${newSack} AS sk` : p.c[c]));
+  const proj = layoutCols(patchLayout(st.traverserLayout, { sack: 'sk' })).map((c) => (c === 'sk' ? q`${newSack} AS sk` : p.c[c]));
   // A by() that yields nothing (a missing property) drops the traverser (TinkerPop's
   // by-modulator semantics — same as values()); label/id/constant by-values are never
   // null so the guard is a harmless always-true there.

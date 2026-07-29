@@ -9,8 +9,8 @@ import { q, value, raw, list, empty, type Expression, type Relation } from '../.
 import { predicateSql, scalarTx, compareKey, inferVtypeSql } from '../../plan/plan.ts';
 import { gtypeName, isNested, isOrderArg, isScopeArg, stepChain } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { carryOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, mapOfToListOf, PROPERTY_PAYLOAD, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type PropertyStream, type ScalarStream, type MapStream, type ShapeTailFn } from '../context/stream.ts';
-import { carryFrag, carriedCols, type ElementStream } from '../context/context.ts';
+import { loweringStateOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, mapOfToListOf, PROPERTY_PAYLOAD, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type PropertyStream, type ScalarStream, type MapStream, type ShapeTailFn } from '../context/stream.ts';
+import { layoutProjection, layoutCols, type ElementStream } from '../context/context.ts';
 import { PER_ROW, STATIC, type Compiled, type ListOf, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf, type Engine } from '../../engine/deps.ts';
 import { lowerGlobalCount } from './barrier.ts';
@@ -80,11 +80,11 @@ function lowerListReducer(s: ListStream, name: string): ScalarStream {
   // Each list row reduces to one scalar, so the row's carried schema (as() alias
   // history, path, …) rides through unchanged — one reduced value per original
   // traverser. So `as("v")…map(...).sum(Scope.local).as("s")` keeps "v".
-  const carry = carryFrag(s.carried, c);
-  const carried = carriedCols(s.carried);
+  const carry = layoutProjection(s.traverserLayout, c);
+  const cols = layoutCols(s.traverserLayout);
   if (name === 'count') {
-    const rel = s.q.cte(q`SELECT (SELECT COUNT(*) FROM json_each(${c.c.list}) je) AS v${carry} FROM ${c}`, ['v', ...carried]);
-    return toScalarStream(carryOf(s), rel, 'long', { result: 'count' });
+    const rel = s.q.cte(q`SELECT (SELECT COUNT(*) FROM json_each(${c.c.list}) je) AS v${carry} FROM ${c}`, ['v', ...cols]);
+    return toScalarStream(loweringStateOf(s), rel, 'long', { result: 'count' });
   }
   // A stored typed list carries {t,v} nodes; extract each element's payload (`->> '$.v'`)
   // so the numeric typeof guard sees the underlying value (an INTEGER/REAL/TEXT), not the
@@ -95,12 +95,12 @@ function lowerListReducer(s: ListStream, name: string): ScalarStream {
   const types = (name === 'min' || name === 'max') ? "('integer', 'real', 'text')" : "('integer', 'real')";
   const agg = (fn: string): Expression => q`(SELECT ${fn}(${elem}) FROM json_each(${c.c.list}) je WHERE typeof(${elem}) in ${types})`;
   if (name === 'mean') {
-    const rel = s.q.cte(q`SELECT ${agg('AVG')} AS v, 'real' AS vt${carry} FROM ${c}`, ['v', 'vt', ...carried]);
-    return toScalarStream(carryOf(s), rel, undefined, { result: 'number', productiveNull: s.of.kind === 'scalar' && s.of.productiveNull });
+    const rel = s.q.cte(q`SELECT ${agg('AVG')} AS v, 'real' AS vt${carry} FROM ${c}`, ['v', 'vt', ...cols]);
+    return toScalarStream(loweringStateOf(s), rel, undefined, { result: 'number', productiveNull: s.of.kind === 'scalar' && s.of.productiveNull });
   }
   const fn = name === 'sum' ? 'SUM' : name === 'min' ? 'MIN' : 'MAX';
-  const rel = s.q.cte(q`SELECT ${agg(fn)} AS v, typeof(${agg(fn)}) AS vt${carry} FROM ${c}`, ['v', 'vt', ...carried]);
-  return toScalarStream(carryOf(s), rel, undefined, { result: 'number', productiveNull: s.of.kind === 'scalar' && s.of.productiveNull });
+  const rel = s.q.cte(q`SELECT ${agg(fn)} AS v, typeof(${agg(fn)}) AS vt${carry} FROM ${c}`, ['v', 'vt', ...cols]);
+  return toScalarStream(loweringStateOf(s), rel, undefined, { result: 'number', productiveNull: s.of.kind === 'scalar' && s.of.productiveNull });
 }
 
 /**
@@ -113,11 +113,11 @@ function lowerListReducer(s: ListStream, name: string): ScalarStream {
  * folds and record fields preserve their parent traverser identity through re-entry.
  */
 export function compileUnfold(s: ListStream): ElementStream | PropertyStream | ScalarStream | ListStream {
-  const c = carryOf(s);
+  const c = loweringStateOf(s);
   const p = s.rel.as('c');
   const explode = (col: string): Relation => s.q.cte(
-    q`SELECT je.value AS ${col}${carryFrag(s.carried, p)} FROM ${p}, json_each(${p.c.list}) je ORDER BY je.key`,
-    [col, ...carriedCols(s.carried)],
+    q`SELECT je.value AS ${col}${layoutProjection(s.traverserLayout, p)} FROM ${p}, json_each(${p.c.list}) je ORDER BY je.key`,
+    [col, ...layoutCols(s.traverserLayout)],
   );
   if (s.of.kind === 'elem') {
     const rel = explode('id');
@@ -132,8 +132,8 @@ export function compileUnfold(s: ListStream): ElementStream | PropertyStream | S
   if (s.of.kind === 'property') {
     const cols = list(PROPERTY_PAYLOAD.map((col) => q`json_extract(je.value, ${value(`$.${col}`)}) AS ${col}`), ', ');
     const rel = s.q.cte(
-      q`SELECT ${cols}${carryFrag(s.carried, p)} FROM ${p}, json_each(${p.c.list}) je ORDER BY je.key`,
-      [...PROPERTY_PAYLOAD, ...carriedCols(s.carried)],
+      q`SELECT ${cols}${layoutProjection(s.traverserLayout, p)} FROM ${p}, json_each(${p.c.list}) je ORDER BY je.key`,
+      [...PROPERTY_PAYLOAD, ...layoutCols(s.traverserLayout)],
     );
     return toPropertyStream(c, rel, s.of.elem);
   }
@@ -147,8 +147,8 @@ export function compileUnfold(s: ListStream): ElementStream | PropertyStream | S
     const val = memberValue(s.of);
     const vt = q`CASE WHEN je.type='object' THEN je.value ->> '$.t' ELSE ${inferVtypeSql(q`je.value`)} END`;
     const rel = s.q.cte(
-      q`SELECT ${val} AS v, ${vt} AS vtype${carryFrag(s.carried, p)} FROM ${p}, json_each(${p.c.list}) je ORDER BY je.key`,
-      ['v', 'vtype', ...carriedCols(s.carried)],
+      q`SELECT ${val} AS v, ${vt} AS vtype${layoutProjection(s.traverserLayout, p)} FROM ${p}, json_each(${p.c.list}) je ORDER BY je.key`,
+      ['v', 'vtype', ...layoutCols(s.traverserLayout)],
     );
     return toScalarStream(c, rel, undefined, { type: PER_ROW('vtype'), result: 'value' });
   }
@@ -160,8 +160,8 @@ export function compileUnfold(s: ListStream): ElementStream | PropertyStream | S
  *  per-element list (valueMap().select(Column.*)) carries an origin ordinal, so every
  *  per-row list op must thread it through or the stream-column contract breaks. */
 function listCte(s: ListStream, c: Relation, listExpr: Expression, of: ListStream['of'], where: Expression = empty): ListStream {
-  const rel = s.q.cte(q`SELECT ${listExpr} AS list${carryFrag(s.carried, c)} FROM ${c}${where}`, ['list', ...carriedCols(s.carried)]);
-  return toListStream(carryOf(s), rel, of);
+  const rel = s.q.cte(q`SELECT ${listExpr} AS list${layoutProjection(s.traverserLayout, c)} FROM ${c}${where}`, ['list', ...layoutCols(s.traverserLayout)]);
+  return toListStream(loweringStateOf(s), rel, of);
 }
 
 /** none(pred): keep each list where NO element satisfies pred (a per-list collection
@@ -447,8 +447,8 @@ const listConjoin: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
   // Joins the PAYLOADS into one string — the result is a string whatever the members were.
   const memberVal = memberValue(s.of, raw('value'), raw('type'));
   const joined = q`(SELECT COALESCE(group_concat(mv, ${value(delim)}), '') FROM (SELECT ${memberVal} AS mv FROM json_each(${c.c.list}) WHERE ${memberVal} IS NOT NULL ORDER BY key))`;
-  const rel = s.q.cte(q`SELECT ${joined} AS v${carryFrag(s.carried, c)} FROM ${c}`, ['v', ...carriedCols(s.carried)]);
-  return continueLowering(toScalarStream(carryOf(s), rel, undefined, { type: STATIC('string') }), at + 1);
+  const rel = s.q.cte(q`SELECT ${joined} AS v${layoutProjection(s.traverserLayout, c)} FROM ${c}`, ['v', ...layoutCols(s.traverserLayout)]);
+  return continueLowering(toScalarStream(loweringStateOf(s), rel, undefined, { type: STATIC('string') }), at + 1);
 };
 
 // set-op family (combine/intersect/difference/disjunct/product) over a list operand.
@@ -576,24 +576,24 @@ export function compileFromMap(s: MapStream, steps: PStep[], at: number): Loweri
     const sortKey = compareKey(q`${side} ->> '$.v'`, q`${side} ->> '$.t'`);
     const dir = raw(localOrder.dir === 'desc' ? 'DESC' : 'ASC');
     const rel = s.q.cte(
-      q`SELECT jsonb(COALESCE((SELECT json_group_array(je.value ORDER BY ${sortKey} ${dir}, je.key) FROM json_each(json(${c.c.map})) je), json('[]'))) AS map${carryFrag(s.carried, c)} FROM ${c}`,
-      ['map', ...carriedCols(s.carried)],
+      q`SELECT jsonb(COALESCE((SELECT json_group_array(je.value ORDER BY ${sortKey} ${dir}, je.key) FROM json_each(json(${c.c.map})) je), json('[]'))) AS map${layoutProjection(s.traverserLayout, c)} FROM ${c}`,
+      ['map', ...layoutCols(s.traverserLayout)],
     );
-    return continueLowering(toMapStream(carryOf(s), rel, s.keyOf, s.valOf), at + 1);
+    return continueLowering(toMapStream(loweringStateOf(s), rel, s.keyOf, s.valOf), at + 1);
   }
   // count(Scope.local) → number of entries (map size).
   if (step.name === 'count' && isLocal(step)) {
-    const rel = s.q.cte(q`SELECT json_array_length(json(${c.c.map})) AS v${carryFrag(s.carried, c)} FROM ${c}`, ['v', ...carriedCols(s.carried)]);
-    return continueLowering(toScalarStream(carryOf(s), rel, 'long', { result: 'count' }), at + 1);
+    const rel = s.q.cte(q`SELECT json_array_length(json(${c.c.map})) AS v${layoutProjection(s.traverserLayout, c)} FROM ${c}`, ['v', ...layoutCols(s.traverserLayout)]);
+    return continueLowering(toScalarStream(loweringStateOf(s), rel, 'long', { result: 'count' }), at + 1);
   }
   // unfold() → a per-entry Map.Entry stream (explode the pairs; each side extracted per its shape).
   if (step.name === 'unfold') {
     const je = q`json_each(json(${c.c.map})) je`;
     const rel = s.q.cte(
-      q`SELECT ${pairSide(q`je.value`, 0, s.keyOf)} AS mk, ${pairSide(q`je.value`, 1, s.valOf)} AS mv${carryFrag(s.carried, c)} FROM ${c}, ${je} ORDER BY je.key`,
-      ['mk', 'mv', ...carriedCols(s.carried)],
+      q`SELECT ${pairSide(q`je.value`, 0, s.keyOf)} AS mk, ${pairSide(q`je.value`, 1, s.valOf)} AS mv${layoutProjection(s.traverserLayout, c)} FROM ${c}, ${je} ORDER BY je.key`,
+      ['mk', 'mv', ...layoutCols(s.traverserLayout)],
     );
-    return continueLowering(toMapEntryStream(carryOf(s), rel, s.keyOf, s.valOf), at + 1);
+    return continueLowering(toMapEntryStream(loweringStateOf(s), rel, s.keyOf, s.valOf), at + 1);
   }
   // select(Column.keys/values) → aggregate one side of every entry into a single list VALUE.
   if (step.name === 'select') {
@@ -602,10 +602,10 @@ export function compileFromMap(s: MapStream, steps: PStep[], at: number): Loweri
     const [idx, of] = col === 'values' ? [1 as const, s.valOf] : [0 as const, s.keyOf];
     const side = pairSide(q`je.value`, idx, of);
     const rel = s.q.cte(
-      q`SELECT jsonb(COALESCE((SELECT json_group_array(${side} ORDER BY je.key) FROM json_each(json(${c.c.map})) je), json('[]'))) AS list${carryFrag(s.carried, c)} FROM ${c}`,
-      ['list', ...carriedCols(s.carried)],
+      q`SELECT jsonb(COALESCE((SELECT json_group_array(${side} ORDER BY je.key) FROM json_each(json(${c.c.map})) je), json('[]'))) AS list${layoutProjection(s.traverserLayout, c)} FROM ${c}`,
+      ['list', ...layoutCols(s.traverserLayout)],
     );
-    return continueLowering(toListStream(carryOf(s), rel, mapOfToListOf(of)), at + 1);
+    return continueLowering(toListStream(loweringStateOf(s), rel, mapOfToListOf(of)), at + 1);
   }
   throw new Error(`${step.name}() on a map value not yet supported`);
 }
@@ -626,9 +626,9 @@ export function compileFromMapEntry(s: MapEntryStream, steps: PStep[], at: numbe
   const [src, of] = col === 'values' ? [c.c.mv, s.valOf] : [c.c.mk, s.keyOf];
   if (of.kind === 'elem') throw new Error('select(Column) of an element key/value on unfolded entries not yet supported');
   if (of.kind === 'list')
-    return continueLowering(toListStream(carryOf(s), s.q.cte(q`SELECT json(${src}) AS list${carryFrag(s.carried, c)} FROM ${c}`, ['list', ...carriedCols(s.carried)]), of.of), at + 1);
+    return continueLowering(toListStream(loweringStateOf(s), s.q.cte(q`SELECT json(${src}) AS list${layoutProjection(s.traverserLayout, c)} FROM ${c}`, ['list', ...layoutCols(s.traverserLayout)]), of.of), at + 1);
   // A typed {t,v} scalar side → a typed single-value list is wrong; re-enter as a typed scalar
   // stream (each entry's key/value, its own type via the vtype carried in the {t,v} node).
-  const rel = s.q.cte(q`SELECT ${src} ->> '$.v' AS v, ${src} ->> '$.t' AS vtype${carryFrag(s.carried, c)} FROM ${c}`, ['v', 'vtype', ...carriedCols(s.carried)]);
-  return continueLowering(toScalarStream(carryOf(s), rel, undefined, { result: 'value', type: PER_ROW('vtype') }), at + 1);
+  const rel = s.q.cte(q`SELECT ${src} ->> '$.v' AS v, ${src} ->> '$.t' AS vtype${layoutProjection(s.traverserLayout, c)} FROM ${c}`, ['v', 'vtype', ...layoutCols(s.traverserLayout)]);
+  return continueLowering(toScalarStream(loweringStateOf(s), rel, undefined, { result: 'value', type: PER_ROW('vtype') }), at + 1);
 }

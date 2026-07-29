@@ -137,7 +137,7 @@ export function scopePathCols<C extends { col: string }>(
 }
 
 /** A named side-effect collection (aggregate()/store()/group('a')) — the registry
- *  value threaded through Carry.sideEffects. Registered where the step appears (may be
+ *  value threaded through LoweringState.sideEffects. Registered where the step appears (may be
  *  mid-chain), read back at cap('name'). A `list` def is a materialized JSONB list CTE
  *  (aggregate: element rowids or a by()-projected scalar); a `group` def is a stashed
  *  group-spec re-run by cap (see steps/group.ts, Stage 3). Unlike the id-relation,
@@ -151,13 +151,13 @@ export type SideEffectMap = ReadonlyMap<string, SideEffectDef>;
 /** The per-traverser CARRIED SCHEMA: the columns physically present on the id-relation
  *  beyond `id`, threaded UNCHANGED across every hop and REQUIRED to agree across a
  *  branch merge. These roles travel together as ONE unit — grouping them here (rather than
- *  as loose siblings on Carry) is what makes a branch/tail step that silently drops them
- *  structurally obvious, and keeps carriedCols/carryFrag/mergeCarried the single source
+ *  as loose siblings on LoweringState) is what makes a branch/tail step that silently drops them
+ *  structurally obvious, and keeps layoutCols/layoutProjection/mergeLayouts the single source
  *  of truth. A struct of TYPED ROLES on purpose, NOT a flat column list: aliases is a
  *  name→col Map (select/where lookup), path a two-regime union, sack is mutable, fromV
  *  clears on landing, origin drops at a branch output — homogenising them would re-lose
  *  the structure each reader needs. */
-export interface Carried {
+export interface TraverserLayout {
   readonly aliases: AliasMap;
   readonly path?: PathState;             // present iff the chain tracks a linear path
   readonly origins: readonly string[];   // coalesce/optional input-ordinal columns — a STACK (nested branches each push their own unique ordinal; the innermost is last)
@@ -168,7 +168,7 @@ export interface Carried {
   readonly trackFromV?: boolean;         // seeded true iff the chain uses otherV() — gates fromV emission (hot-path: no extra column otherwise)
   /** Labels a REDUCING barrier consumed (`fold`/`count`/`sum`/… collapsed N rows to 1, so no
    *  single input row's binding survives). METADATA ONLY — never a physical column, so it cannot
-   *  affect carriedCols/carryFrag or any CTE schema. It exists so `select(label)` can tell
+   *  affect layoutCols/layoutProjection or any CTE schema. It exists so `select(label)` can tell
    *  "this label was never bound" (TinkerPop's drop-every-traverser rule) apart from "this label
    *  existed but a barrier ate it" (a deferral we must NOT answer as an empty result). Without it
    *  both look like a missing alias entry and the second silently returns []. */
@@ -181,20 +181,20 @@ export interface Carried {
  *  the CTE-accumulator `q` + bound `params`, the named side-effect registry (`sideEffects` — CTEs
  *  that OUTLIVE the traverser), and the per-traverser carried column schema (`carried`). The
  *  ambient compile DEPENDENCIES (fastPaths/registry/federationDepth) are NOT here — they live on
- *  the lowering Engine (steps/engine.ts), reached via `q.engine`; keeping them off Carry is what
+ *  the lowering Engine (steps/engine.ts), reached via `q.engine`; keeping them off LoweringState is what
  *  separates dependency from state (see docs/2026-07-23-directory-restructure-plan.md, Movement 1). */
-export interface Carry {
+export interface LoweringState {
   readonly q: Query;
   readonly params: Record<string, any>;
   readonly sideEffects?: SideEffectMap;  // named side-effect collections (aggregate/store/group('a'))
-  readonly carried: Carried;             // the per-traverser carried column schema
+  readonly traverserLayout: TraverserLayout;             // the per-traverser carried column schema
 }
 
 /** Immutable prefix state threaded through the step fold. Everything the dispatch
  *  reasons about is replaced wholesale by each StepFn's return; `q` is the shared
  *  append-only CTE builder. The `elements` arm of the `Stream` union (stream.ts):
  *  movement/filter/branch StepFns are ONLY ever handed this shape. */
-export interface ElementStream extends Carry {
+export interface ElementStream extends LoweringState {
   readonly kind: 'elements';
   readonly rel: Relation;               // the current id-relation (a CTE handle)
   readonly elem: Elem;
@@ -220,7 +220,7 @@ export const aliasColsOf = (a: AliasMap): string[] => [...a.values()].map((x) =>
  *  scalar (tail/scalar.ts) and variant (tail/variant.ts) — and variant.ts cannot import from
  *  branch.ts (branch.ts imports variant.ts; that direction would cycle). Pure Map algebra, no
  *  SQL, so context.ts is the right leaf. */
-export function mergeAliasMaps(seed: AliasMap, arms: readonly Carried[]): AliasMap {
+export function mergeAliasMaps(seed: AliasMap, arms: readonly TraverserLayout[]): AliasMap {
   const order: string[] = [...seed.keys()];
   for (const a of arms) for (const lbl of a.aliases.keys()) if (!order.includes(lbl)) order.push(lbl);
   const merged = new Map<string, AliasEntry>();
@@ -243,7 +243,7 @@ export function mergeAliasMaps(seed: AliasMap, arms: readonly Carried[]): AliasM
 /** The RIGID carried columns — sack/bulk/origins/fromV/encounter (everything but aliases and
  *  path). These are per-traverser physical state a branch cannot fork or reconcile, so they must
  *  be identical across arms; aliases fork and merge, path pads. */
-export const rigidCols = (c: Carried): string[] => carriedCols({ ...c, aliases: new Map(), path: undefined });
+export const rigidCols = (c: TraverserLayout): string[] => layoutCols({ ...c, aliases: new Map(), path: undefined });
 
 /**
  * THE merge authority — the one `context.ts:122` and `prefix/branch.ts:234` have cited all along
@@ -255,7 +255,7 @@ export const rigidCols = (c: Carried): string[] => carriedCols({ ...c, aliases: 
  * than emitting SQL that references a column one arm lacks.
  *
  * What it deliberately does NOT do: mint or clear `encounter` (each merge re-mints it in its own
- * window, and `carryFragMint` requires the column to be already declared), and merge `path` (the
+ * window, and `layoutProjectionMinting` requires the column to be already declared), and merge `path` (the
  * pad-to-max is branch-specific; every other merge declines a live path outright). The caller
  * hands in an already-merged path or nothing.
  *
@@ -266,7 +266,7 @@ export const rigidCols = (c: Carried): string[] => carriedCols({ ...c, aliases: 
  * where the element-shaped twin returns 3. A silent empty result, which is the failure mode this
  * project treats as worse than a crash.
  */
-export function mergeCarried(seed: Carried, arms: readonly Carried[], path?: PathState): Carried {
+export function mergeLayouts(seed: TraverserLayout, arms: readonly TraverserLayout[], path?: PathState): TraverserLayout {
   const want = rigidCols(seed);
   for (const a of arms) {
     const got = rigidCols(a);
@@ -310,7 +310,7 @@ export interface LabelScope {
 /** The LabelScope of a site that joins `prevRel(st,'p')` alongside the current element — the
  *  `SELECT n.id … FROM <elem> n JOIN <prev> p … WHERE <test>` shape shared by filter.ts's
  *  filterCte and branch.ts's choose() gate, which is where every correlated predicate lands. */
-export const labelScope = (st: ElementStream): LabelScope => ({ aliases: st.carried.aliases, rel: prevRel(st, 'p') });
+export const labelScope = (st: ElementStream): LabelScope => ({ aliases: st.traverserLayout.aliases, rel: prevRel(st, 'p') });
 
 /** RE-ROOT on a label: the ScalarCtx of the element it currently (Pop.last) holds, correlating
  *  on the carried alias column. This is how `where(__.as("b").out())`, `dedup("a","b")` and any
@@ -341,32 +341,32 @@ export const elemRel = (st: ElementStream, alias = 'n'): Relation => (st.elem ==
  *  (armProjection).
  *
  *  ORDER RULE — a column appended later must sort later. `bulk` is seeded at the element
- *  source (like sack), so it sits BEFORE origins: pushChildScope emits carryFrag(parent)
+ *  source (like sack), so it sits BEFORE origins: pushChildScope emits layoutProjection(parent)
  *  then appends the new ordinal at the very end, so the newest origin has to be the last
  *  carried column of the child — which only holds if bulk precedes every origin. Path MUST
- *  be last for the same reason: movement APPENDS each new path position after carryFrag of
- *  the old set, so carriedCols(old) has to stay a prefix of carriedCols(new). Any column
+ *  be last for the same reason: movement APPENDS each new path position after layoutProjection of
+ *  the old set, so layoutCols(old) has to stay a prefix of layoutCols(new). Any column
  *  ordered after the site that physically appends it desyncs declared vs physical columns
  *  (the coalesce/optional+path() / +bulk bug). */
-export const carriedCols = (c: Carried): string[] =>
+export const layoutCols = (c: TraverserLayout): string[] =>
   [...aliasColsOf(c.aliases), ...(c.sack ? [c.sack] : []), ...(c.bulk ? [c.bulk] : []), ...c.origins, ...(c.fromV ? [c.fromV] : []), ...(c.encounter ? [c.encounter] : []), ...pathColsOf(c.path)];
 
 /** `, p.a0, p.p0, …` — the carried columns qualified by `p`; empty when nothing is
  *  live. Movement/filter CTEs splice this after the moved id so labelled traversers
  *  and path positions ride forward. */
-export function carryFrag(c: Carried, p: Relation): Expression {
-  const cols = carriedCols(c);
+export function layoutProjection(c: TraverserLayout, p: Relation): Expression {
+  const cols = layoutCols(c);
   return cols.length ? list(cols.map((x) => q`, ${p.c[x]}`), '') : empty;
 }
 
-/** Like carryFrag, but ONE named carried column is computed fresh (`mint`) rather than
+/** Like layoutProjection, but ONE named carried column is computed fresh (`mint`) rather than
  *  projected unchanged from `p` — the generalization of the ordinal special-case already
  *  inline in pushChildScope's carriedSelect. Used at every encounter mint/supersede site
- *  so the replacement lands in its DECLARED carriedCols slot, never duplicated or
- *  reordered. `col` MUST already be present in carriedCols(c) (i.e. the patched carried
+ *  so the replacement lands in its DECLARED layoutCols slot, never duplicated or
+ *  reordered. `col` MUST already be present in layoutCols(c) (i.e. the patched carried
  *  that declares it) — the mint replaces the forward, it does not add a column. */
-export function carryFragMint(c: Carried, p: Relation, col: string, mint: Expression): Expression {
-  const cols = carriedCols(c);
+export function layoutProjectionMinting(c: TraverserLayout, p: Relation, col: string, mint: Expression): Expression {
+  const cols = layoutCols(c);
   return cols.length ? list(cols.map((x) => (x === col ? q`, ${mint} AS ${col}` : q`, ${p.c[x]}`)), '') : empty;
 }
 
@@ -375,18 +375,18 @@ export function carryFragMint(c: Carried, p: Relation, col: string, mint: Expres
  *  (`PARTITION BY <ordinal stack> ORDER BY <key>`). The full origins stack partitions
  *  correctly under nested child scopes. Shared by every fan-out mint (branch merges,
  *  movement refine, re-source). `p` qualifies the origin columns. */
-export function partitionOver(c: Carried, p: Relation, orderKey: Expression): Expression {
+export function partitionOver(c: TraverserLayout, p: Relation, orderKey: Expression): Expression {
   const parts = c.origins.map((o) => p.c[o]);
   return parts.length ? q`PARTITION BY ${list(parts, ', ')} ORDER BY ${orderKey}` : q`ORDER BY ${orderKey}`;
 }
 
-type CarriedOpts = { aliases?: AliasMap; path?: PathState; origins?: readonly string[]; sack?: string | null; fromV?: string | null; encounter?: string | null; bulk?: string | null };
+type LayoutPatch = { aliases?: AliasMap; path?: PathState; origins?: readonly string[]; sack?: string | null; fromV?: string | null; encounter?: string | null; bulk?: string | null };
 
 /** Apply a carried-column patch: aliases/path/origins — a value overrides, undefined
  *  keeps; sack/fromV/encounter — `null` CLEARS, undefined keeps, a string sets. `origins` is the
  *  whole ordinal stack (a branch push/pop passes the new array explicitly). trackFromV is
  *  chain-global (never changed by advance). */
-export function carriedWith(c: Carried, o: CarriedOpts): Carried {
+export function patchLayout(c: TraverserLayout, o: LayoutPatch): TraverserLayout {
   return {
     aliases: o.aliases ?? c.aliases,
     path: o.path ?? c.path,
@@ -403,26 +403,26 @@ export function carriedWith(c: Carried, o: CarriedOpts): Carried {
 }
 
 /** Re-home child-scoped carried state onto its parent schema. This is deliberately
- * narrower than `mergeCarried`: a child ordinal is meaningful only inside the child
+ * narrower than `mergeLayouts`: a child ordinal is meaningful only inside the child
  * relation, so a caller restores the parent origin stack before any peer-arm merge. */
-export const rehomeCarried = (child: Carried, parentOrigins: readonly string[]): Carried =>
-  carriedWith(child, { origins: parentOrigins });
+export const rehomeLayout = (child: TraverserLayout, parentOrigins: readonly string[]): TraverserLayout =>
+  patchLayout(child, { origins: parentOrigins });
 
 /** Return a new stream state with its carried schema shallow-patched (explicit undefined
  *  CLEARS — for the branch/local seeds that reset aliases/path). The escape hatch for the
  *  few sites that rebuild carried directly rather than through advance. */
-export const withCarried = <T extends Carry>(st: T, patch: Partial<Carried>): T =>
-  ({ ...st, carried: { ...st.carried, ...patch } });
+export const withLayout = <T extends LoweringState>(st: T, patch: Partial<TraverserLayout>): T =>
+  ({ ...st, traverserLayout: { ...st.traverserLayout, ...patch } });
 
 /** Chain-level capability marker: otherV() needs the entering vertex retained by
  * every preceding edge movement. It changes no physical schema until that movement. */
-export const trackFromV = <T extends Carry>(st: T): T =>
-  withCarried(st, { trackFromV: true });
+export const trackFromV = <T extends LoweringState>(st: T): T =>
+  withLayout(st, { trackFromV: true });
 
 /** A child derived from a path position must not inherit the outer path history:
  * its movements are implementation detail, not new positions in the output path. */
-export const withoutPath = <T extends Carry>(st: T): T =>
-  withCarried(st, { path: undefined });
+export const withoutPath = <T extends LoweringState>(st: T): T =>
+  withLayout(st, { path: undefined });
 
 /** Drop row-associated state at a global barrier while retaining ambient compile
  * context and chain requirements. A barrier result is a new traverser and cannot
@@ -434,30 +434,30 @@ export const withoutPath = <T extends Carry>(st: T): T =>
  * result — the two are indistinguishable from the alias Map alone, and `selectOneFromAlias`'s
  * drop-not-throw rule is only correct for a label that was genuinely never bound. Labels already
  * consumed upstream stay recorded, so the diagnosis survives a second barrier. */
-export const withoutCarried = <T extends Carry>(st: T): T => {
-  const consumed = [...st.carried.consumedAliases ?? [], ...st.carried.aliases.keys()];
+export const dropLayoutAtBarrier = <T extends LoweringState>(st: T): T => {
+  const consumed = [...st.traverserLayout.consumedAliases ?? [], ...st.traverserLayout.aliases.keys()];
   return {
     ...st,
-    carried: {
+    traverserLayout: {
       aliases: new Map(),
       origins: [],
-      trackFromV: st.carried.trackFromV,
+      trackFromV: st.traverserLayout.trackFromV,
       ...(consumed.length ? { consumedAliases: [...new Set(consumed)] } : {}),
     },
   };
 };
 
 /**
- * Append `body` as the new id-relation and advance to it. Carried-column opts route
- * through carriedWith (same tri-state as before); `cols` defaults to id + the resulting
+ * Append `body` as the new id-relation and advance to it. Layout-column opts route
+ * through patchLayout (same tri-state as before); `cols` defaults to id + the resulting
  * carried columns; `elem` overrides when a step changes the element kind (…E/…V). Flat
  * opts kept identical, so every call site is unchanged. Returns a fresh ElementStream.
  */
 export function advance(
   st: ElementStream, body: Expression,
-  opts: CarriedOpts & { elem?: Elem; cols?: readonly string[] } = {},
+  opts: LayoutPatch & { elem?: Elem; cols?: readonly string[] } = {},
 ): ElementStream {
-  const carried = carriedWith(st.carried, opts);
-  const cols = opts.cols ?? ['id', ...carriedCols(carried)];
-  return { ...st, carried, elem: opts.elem ?? st.elem, rel: st.q.cte(body, cols) };
+  const layout = patchLayout(st.traverserLayout, opts);
+  const cols = opts.cols ?? ['id', ...layoutCols(layout)];
+  return { ...st, traverserLayout: layout, elem: opts.elem ?? st.elem, rel: st.q.cte(body, cols) };
 }

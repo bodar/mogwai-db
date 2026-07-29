@@ -1,6 +1,6 @@
 // ---------- dependency scopes (DI lifecycles) ----------
 //
-// The compiler's dependencies are separated from per-query STATE (Carry, compiler/steps/context.ts)
+// The compiler's dependencies are separated from per-query STATE (LoweringState, compiler/steps/context.ts)
 // and grouped by LIFECYCLE into named scopes. Downstream code depends ONLY on the scope
 // INTERFACES below (`Dependency<K,V>` contracts) — never on the LazyMap backing them, so the
 // DI mechanism stays hidden and swappable (a test can build a scope and override one entry).
