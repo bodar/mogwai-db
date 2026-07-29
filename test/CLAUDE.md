@@ -37,8 +37,11 @@
   entry per ROOT CAUSE with a diagnosis, never per traversal). **A SECOND oracle** (`laws.ts`,
   `metamorphic.test.ts`) checks metamorphic laws — `out(l) ≡ outE(l).inV()`, `dedup()` idempotence,
   `where(b) ⊎ where(¬b)` partitioning — over generated prefixes; it exists because a differential is
-  blind to a defect BOTH lowerings share, and it found two such on its first deep run. Fixed seed in CI;
-  `mise run L5-random` explores. **L5 is the CEILING instrument** — it measures what composes,
+  blind to a defect BOTH lowerings share, and it found two such on its first deep run. Seed is pinned
+  at 42 today — a deterministic generated corpus that discovers nothing after its first run; the
+  intended end state is a ROTATING seed in the ordinary build, printed and gated by the witness
+  ratchets so only a NEW signature fails (item 0d — explicitly NOT a scheduled job).
+  `mise run L5-random` is the deeper sweep. **L5 is the CEILING instrument** — it measures what composes,
   which is the thing the L3 count structurally cannot. Current state + runbook:
   `L5-properties/README.md`; design rationale + the unbuilt oracles:
   `docs/2026-07-28-property-based-testing-l5.md`.

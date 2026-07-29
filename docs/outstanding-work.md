@@ -12,8 +12,10 @@ comments and other docs cite them.
 (the ratchet floor), `census/{goldens,deferrals}.tsv` (the two-way behavioural baseline, 5
 `crashed` rows = item 0c), and the two hand-curated L5 ratchets — `L5-properties/known.ts` and
 `capability-baseline.ts`, plus the `knownBroken` entries inside `laws.ts`. A defect parked in any of
-them must ALSO appear here; a ratchet entry is tracked, not defended. **`mise run L5-random` is not
-in `ci` and it is currently RED at essentially every seed** — item 0d.
+them must ALSO appear here; a ratchet entry is tracked, not defended. **No generated-input discovery
+runs in the standard build today — the seed is pinned at 42 — and `mise run L5-random` is RED at
+essentially every seed** — item 0d, whose fix is to rotate the seed inside `mise run test` behind
+those same ratchets.
 
 > **Verify an item's premise against the code before picking it — this index has been stale in BOTH
 > directions.** The cheapest check is usually a 10-line probe that compiles the traversals the item
@@ -77,11 +79,21 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      *Medium — cheap fix, and it is measuring instrument integrity.*
 
    **The process gap is the actual item here.** Discovery depends on someone remembering to run
-   `L5-random` after touching a fast path, the child seam or the predicate layer. The intended fix
-   (`docs/2026-07-28-property-based-testing-l5.md`) is a SCHEDULED random-seed run that REPORTS rather
-   than blocks — deliberately outside `ci`, because a random-seed property test that fails
-   intermittently is one people learn to ignore. Until then this item will keep rotting silently.
-   Once fixed, promote each into an L4 `.feature` per `test/CLAUDE.md`.
+   `L5-random` after touching a fast path, the child seam or the predicate layer — and it rots
+   silently when nobody does. The fix (`docs/2026-07-28-property-based-testing-l5.md`, "Seeds") is a
+   **ROTATING SEED IN THE STANDARD BUILD**, gated by the committed witness ratchets: every
+   `mise run test` draws a fresh seed and PRINTS it (`L5_SEED=<n>` reproduces), a raw failure already
+   recorded in `capability-baseline.ts`/`known.ts` is reported but not fatal, and only a NEW signature
+   fails the build. That is what makes rotation non-flaky — a fresh seed buys fresh coverage, not a
+   fresh failure — and it puts discovery on the build everyone already runs instead of one nobody
+   remembers. **Not a scheduled/nightly job: an out-of-band run is a report someone has to read, and
+   this item is the evidence that they don't.** **CI must run exactly what a developer runs** — today
+   `ci → test → L5`, with no CI-specific seed or sample size, and rotation must not introduce one; the
+   `HEAD`-derived draw rule keeps a given commit's corpus identical on a laptop and a runner (see the
+   doc's Seeds table). Sequencing: fix the `bothV('label')` table bug and
+   diagnose the two support-divergences above FIRST (the ratchet must be able to absorb what is
+   already known), then turn on rotation. Once fixed, promote each into an L4 `.feature` per
+   `test/CLAUDE.md`.
 
 1. **List members frame as bare values, not elements.** `AliasEntry` does not record the member
    shape, so a path/element-list label cannot frame its members as vertices. Blocks
@@ -522,7 +534,9 @@ proves nothing — read the deferral clusters instead.
   is not a file of its own). Each has exactly ONE reader. **The cost is measured, not hypothetical:**
   the 2026-07-29 refresh found item 0d only by running `L5-random` by hand, and the skill that
   refreshes this index had never looked at any of the three. The obvious target is one committed file
-  per the `l3-state.json` precedent.
+  per the `l3-state.json` precedent. **Item 0d's rotating seed raises the stakes here** — it makes
+  these three consulted on every build rather than on a manual run, so their matchers become the
+  build's gate and an entry without a diagnosis silences a finding every run.
   **But do not do this as a naive merge — the three differ on properties that are load-bearing:**
   - **Hand-authored vs generated.** `l3-state.json` and the census TSVs are machine-written
     (`census.ts` `writeFileSync`); all three L5 lists are hand-curated *because* each entry must carry

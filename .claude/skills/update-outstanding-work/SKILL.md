@@ -79,7 +79,7 @@ Then read the telemetry (NOT the raw run log — it's huge):
 nothing after its first run. So this skill must run the exploration:
 
 ```
-mise run L5-random   # random seed, 3000 traversals; NOT a CI gate — expect it to be red
+mise run L5-random   # random seed, 3000 traversals; the deep sweep, not the build gate — expect red
 ```
 
 A single red run tells you little; **run 3–5 FIXED seeds instead**, so findings are reproducible and
@@ -116,7 +116,11 @@ Reading the output, in this order:
    `vendor/tinkerpop/gremlin-language/src/main/antlr4/Gremlin.g4`.
 
 File each cause as ONE item (never one per seed or per traversal), and note in the index that the
-process gap — no scheduled random-seed run — is itself the item, since otherwise this rots again.
+process gap — generated-input discovery not running in the STANDARD BUILD — is itself the item, since
+otherwise this rots again. The intended fix is a rotating seed inside `mise run test` gated by the
+committed witness ratchets (only a NEW signature fails), **not** a scheduled/nightly job: an
+out-of-band report is one nobody reads, which is how this rotted the first time. See
+`docs/2026-07-28-property-based-testing-l5.md` "Seeds" and index item 0d.
 
 ### 2. Sweep newer docs (subagent, `general-purpose`)
 
@@ -182,8 +186,10 @@ file's own dir; check every `docs/…​.md` prose path exists).
   `test/CLAUDE.md`).
 - Read telemetry JSON, never tail the full L3 log into context. L5's logs ARE small enough to grep —
   filter to `^\(fail\)` and `Counterexample`.
-- **`mise run L5-random` being red is the expected state, not a blocker** — it is deliberately outside
-  `ci`. Diagnose and file; do not "fix" it by adding ratchet entries, and never add an entry to
+- **`mise run L5-random` being red is the expected state, not a blocker** — it draws seeds the pinned
+  build never reaches (until item 0d's rotating seed lands, at which point a NEW signature is fatal in
+  the ordinary build and this run is just the deeper sweep). Diagnose and file; do not "fix" it by
+  adding ratchet entries, and never add an entry to
   `known.ts` / `capability-baseline.ts` without a diagnosis (the header of each forbids it) or without
   a matching index line.
 - **Never silence a baseline to make a run green.** Do not hand-edit `l3-state.json`'s `passed`, and do

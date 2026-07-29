@@ -129,19 +129,66 @@ Entries are **one per root cause, not per traversal**: the first sweep's 22 dive
 into 17 signature groups that reduced to four causes. Recording signatures would have written 17
 near-identical entries and buried the fact that a couple of lines in one file explained most of them.
 
-## Seeds: what a fixed one buys, and what it costs
+## Seeds: why a fixed one is a dead instrument, and the scheme that replaces it
 
-CI runs seed 42, because a property test that flakes is a property test people disable. Be honest
-about the consequence: **seed 42 + `numRuns: 300` is a deterministic generated corpus** — the same 300
-traversals every run. In CI, L5 is a regression gate over generated inputs, not an explorer; after the
-first run it discovers nothing new on its own. Its standing value there is holding the equivalence
-property over inputs no human curated, plus re-checking the whole L1 corpus through the generic path.
+**First, the invariant this whole section is subordinate to: CI runs exactly what a developer runs.**
+`ci → test → L5` with no CI-specific seed, sample size or skip — the seed is 42 everywhere because it
+is the default everywhere, not because CI pins it. Any scheme that makes the build behave one way on a
+laptop and another on a runner is rejected on that ground alone, whatever else it buys. (Earlier
+versions of this doc said "CI runs seed 42", which read as a CI-specific policy. There has never been
+one.)
 
-Discovery lives in `mise run L5-random`, and **nothing invokes it automatically** — today it depends
-on someone remembering, after touching a fast path, the child seam, or the predicate layer. The
-intended fix is a scheduled run that *reports* rather than blocks (a nightly opening an issue on a new
-signature). Deliberately not in `ci`: a random-seed failure blocking a PR is how this level would get
-disabled.
+A fixed seed buys determinism and costs the entire point of the level. **Seed 42 + `numRuns: 300` is a
+deterministic generated corpus** — the same 300 traversals every run, on every machine. Under it L5 is
+a regression gate over generated inputs, not an explorer; after the first run it discovers nothing new
+on its own. Its only standing value is holding the equivalence property over inputs no human curated,
+plus re-checking the whole L1 corpus through the generic path.
+
+The original argument for fixing it was sound but drew the wrong conclusion: *a property test that
+flakes is a property test people disable.* True — and the inference "therefore pin the seed" throws out
+discovery to buy stability. **The fix is to make a fresh seed non-flaky, not to stop drawing one.**
+
+**The scheme: a rotating seed plus a witness ratchet, inside the standard build.** Every run of
+`mise run test` — laptop or runner, same task, no branching on `$CI` — draws a fresh seed, PRINTS it,
+and gates the outcome against the committed witness lists rather than against "did anything fail":
+
+- **The seed rotates and is printed.** `L5 generated: 300 traversals @ seed 81423 (rotating;
+  L5_SEED=81423 to reproduce)`. Reproduction is one env var, which is the whole poor-man's solution
+  and is non-negotiable regardless of how clever the rest gets.
+- **The gate is NEW signatures only.** A raw failure already recorded in `capability-baseline.ts`
+  (with its diagnosis) is drawn, counted and reported — it does not fail the build. A signature not in
+  any ratchet fails it. So the build is green on a novel seed that only re-finds tracked defects, and
+  red exactly when the seed found something nobody has diagnosed.
+- **That is what makes rotation safe.** The flake objection assumes a fresh seed means a fresh
+  failure; with the ratchet consulted, a fresh seed means fresh *coverage*, and only genuinely new
+  information stops the build.
+
+Two properties fall out that a scheduled run could never have. Discovery becomes **unmissable rather
+than remembered** — it happens on the build everyone already runs, so there is no step to skip after
+touching a fast path. And a new signature arrives **attached to the change that exposed it**, at the
+moment its author has the context to diagnose it, instead of in a report someone reads later.
+
+The cost is honest and worth stating: the ratchets become load-bearing at build time, so an entry
+without a diagnosis silences a real finding on every future run. Both files already say exactly that,
+and both already have stale-entry checks — this scheme is what those checks were written for.
+
+**Reproducibility of a red build.** The printed seed makes any failure re-runnable verbatim
+(`L5_SEED=81423 mise run L5`), so "it failed on CI and I can't reproduce it" is not a failure mode
+here — and because CI and local run the same task with the same draw rule, a runner failure reproduces
+on a laptop by construction rather than by luck.
+
+**Draw rule — the one open sub-decision.** Two candidates, both compatible with everything above:
+
+| | Per-run `$RANDOM` | Derived from `HEAD` |
+|---|---|---|
+| Discovery | every run, maximal | every commit |
+| Re-running the SAME commit | a different corpus | identical — retry-stable |
+| A red build | reproduces via the printed seed | reproduces by checking out the commit |
+
+`HEAD`-derived is the better fit for the "CI runs what you run" invariant: the same commit gives the
+same corpus everywhere, so CI cannot fail on a draw the author's identical local run never made, and a
+flaky-looking retry is impossible. Per-run `$RANDOM` finds more per unit time and suits `L5-random`,
+which is the deep sweep and not the gate.
 
 ## What it found (the case for the level)
 
@@ -231,7 +278,17 @@ every seed** (5, 11, 27, 91, 143 all fail), while CI's fixed seed 42 is green �
 been seen. Every divergence is `kind: "support"` ("generic threw, fast paths ON ran"), not a wrong
 answer, which is why `known.ts` is legitimately empty and still nothing was caught. This is exactly the
 gap this doc predicted: a fixed seed is *a deterministic generated corpus*, and it discovers nothing
-after its first run. The fix named here — **a SCHEDULED random-seed run that REPORTS rather than
-blocks**, deliberately outside `ci` — is the open item. Until it exists, discovery depends on someone
-remembering to run `L5-random` after touching a fast path, the child seam, or the predicate layer, and
-2026-07-29 is the evidence that nobody does.
+after its first run.
+
+The fix is the **rotating seed + witness ratchet** described in the seeds section above, and the
+decisive property is that it lives in the STANDARD BUILD — not in a separate scheduled or manual run.
+Discovery that depends on remembering does not happen; 2026-07-29 is the evidence. Sequencing, since
+the ratchet must be able to absorb what is already known before rotation can be turned on:
+
+1. **Fix or record item 0d's three causes** — the `table.test.ts` `bothV('label')` table bug is a
+   straight fix (and until it is fixed those traversals always throw, which *empties* differential
+   coverage rather than failing anything). The two support-divergences get diagnosed entries.
+2. **Rotate the seed in `mise run test`, printing it**, with the ratchets consulted so only a NEW
+   signature is fatal.
+3. `L5-random` then keeps its role as the deeper sweep — a bigger `numRuns` at higher depth — rather
+   than being the only place a non-42 seed is ever drawn.

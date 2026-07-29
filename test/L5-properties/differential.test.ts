@@ -10,10 +10,16 @@
 //               which is the "ceiling" test/CLAUDE.md asks about and the floor cannot measure. It
 //               found 16 of the 17 signatures in the first sweep; the corpus found the other 1.
 //
-// Both are gated against the same ratchet (known.ts). CI runs a FIXED SEED so a green run stays
-// green — a property test that flakes is a property test people disable. `mise run L5-random` takes a
-// random seed for exploration; anything it finds gets diagnosed into known.ts (or fixed) and, per
-// test/CLAUDE.md, promoted into an L4 `.feature` so the floor rises permanently.
+// Both are gated against the same ratchet (known.ts). The seed is FIXED at 42 today — everywhere, not
+// as a CI policy: CI runs the same `mise run test` a developer does, and 42 is just the default. That
+// makes this a deterministic generated corpus: it discovers nothing after its first run. The intended
+// end state is a ROTATING seed here in the ordinary build, printed for reproduction (`L5_SEED=n`) and
+// gated by the witness ratchets so only a NEW signature fails — that is what makes rotation non-flaky,
+// rather than pinning the seed and moving discovery to a run nobody remembers. Whatever draw rule is
+// chosen must keep CI and local identical. Index item 0d;
+// docs/2026-07-28-property-based-testing-l5.md "Seeds". `mise run L5-random` is the deeper sweep;
+// anything it finds gets diagnosed into known.ts (or fixed) and, per test/CLAUDE.md, promoted into an
+// L4 `.feature` so the floor rises permanently.
 import { test, expect, describe } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import fc from 'fast-check';
