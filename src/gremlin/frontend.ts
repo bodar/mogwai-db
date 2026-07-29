@@ -92,11 +92,46 @@ export const isScopeArg = (arg: unknown): arg is Extract<TaggedArg, { scope: str
 export const gtypeName = (arg: unknown): string | null =>
   isGTypeArg(arg) ? arg.gtype : typeof arg === 'string' ? arg : null;
 
-// Numeric-literal suffix → subtype. No suffix: an integer literal defaults to `int`,
-// a float literal to `double` (TinkerPop's literal typing).
+// Numeric-literal suffix → subtype. A bare integer is the *narrowest* Java integral
+// type that can represent it (int → long → BigInteger), matching TinkerPop's
+// GenericLiteralVisitor. That range decision is part of the wire contract: calling a
+// large literal an int reaches GraphBinary's strict Int serializer long after parsing.
 const INT_LIT_SUFFIX: Record<string, CanonicalType> = { b: 'byte', s: 'short', i: 'int', l: 'long', n: 'bigint' };
 const FLOAT_LIT_SUFFIX: Record<string, CanonicalType> = { f: 'float', d: 'double', m: 'bigdecimal' };
-const intLitType = (text: string): CanonicalType => INT_LIT_SUFFIX[text.slice(-1).toLowerCase()] ?? 'int';
+const INT_RANGES: Record<'byte' | 'short' | 'int' | 'long', readonly [bigint, bigint]> = {
+  byte: [-128n, 127n],
+  short: [-32768n, 32767n],
+  int: [-2147483648n, 2147483647n],
+  long: [-9223372036854775808n, 9223372036854775807n],
+};
+
+/** Parse Gremlin/Java integral spellings exactly enough to decide their canonical
+ * type without first losing precision to JS Number. `Integer.decode` semantics mean
+ * a leading zero is octal and `0x` is hexadecimal; signs apply outside the radix. */
+function integralLiteral(text: string): bigint {
+  let s = text.replace(/_/g, '');
+  if (INT_LIT_SUFFIX[s.slice(-1).toLowerCase()]) s = s.slice(0, -1);
+  let sign = 1n;
+  if (s[0] === '+' || s[0] === '-') { if (s[0] === '-') sign = -1n; s = s.slice(1); }
+  if (/^0[xX]/.test(s)) return sign * BigInt(`0x${s.slice(2)}`);
+  if (s.length > 1 && s[0] === '0') return sign * BigInt(`0o${s.slice(1)}`);
+  return sign * BigInt(s);
+}
+
+const intLitType = (text: string): CanonicalType => {
+  const explicit = INT_LIT_SUFFIX[text.slice(-1).toLowerCase()];
+  const n = integralLiteral(text);
+  if (explicit) {
+    if (explicit !== 'bigint') {
+      const [min, max] = INT_RANGES[explicit as keyof typeof INT_RANGES];
+      if (n < min || n > max) throw new Error(`${explicit} literal out of range: ${text}`);
+    }
+    return explicit;
+  }
+  if (n >= INT_RANGES.int[0] && n <= INT_RANGES.int[1]) return 'int';
+  if (n >= INT_RANGES.long[0] && n <= INT_RANGES.long[1]) return 'long';
+  return 'bigint';
+};
 const floatLitType = (text: string): CanonicalType => FLOAT_LIT_SUFFIX[text.slice(-1).toLowerCase()] ?? 'double';
 
 /** Flatten any bracketed-list arguments back to varargs (depth 1). Collection
@@ -276,10 +311,10 @@ function walkArgs(node: any, out: any[], params: Record<string, any>, types: (Ty
     // class, native index usage, and existing V()/has()/id consumers that expect number);
     // only the genuinely-big tail becomes BigInt (which every bind seam normalizes).
     if (t === 'long' || t === 'bigint') {
-      const b = BigInt(text.replace(/[lnLN]$/, ''));
+      const b = integralLiteral(text);
       emit(fitsSafeInteger(b) ? Number(b) : b, t); return;
     }
-    emit(parseInt(text.replace(/[lL]$/, ''), 10), t); return;
+    emit(Number(integralLiteral(text)), t); return;
   }
   // bigdecimal (`m` suffix) carries EXACT via a BigDecimal parsed from the literal text —
   // parseFloat would collapse it to a lossy f64. float/double stay parseFloat.

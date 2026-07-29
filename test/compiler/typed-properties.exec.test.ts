@@ -62,6 +62,16 @@ describe('typed property values (P1) — vtype capture + collection storage', ()
     expect(got).toEqual({ b: 'boolean', d: 'double', gid: 'uuid', i: 'int', l: 'long', s: 'string', when: 'datetime' });
   });
 
+  test('an unsuffixed integer outside int32 is a long through the write-response framer', async () => {
+    const store = fresh();
+    const ms = 1_596_326_400_000;
+    // This used to parse as `int`, store correctly, then crash only while framing
+    // addV's response through GraphBinary's strict Int serializer.
+    expect(await decodeAll(executeQuery(store, `g.addV('person').property('birthday', ${ms})`, {}))).toHaveLength(1);
+    expect(vprops(store, ['birthday'])).toEqual([{ key: 'birthday', value: ms, vtype: 'long' }]);
+    expect(await decodeAll(executeQuery(store, "g.V().values('birthday')", {}))).toEqual([ms]);
+  });
+
   test('a list-valued property stores a self-describing typed-JSON tree (vtype=list)', async () => {
     const store = fresh();
     // Was "Binding expected string…" before collections serialized to JSONB; now the value
