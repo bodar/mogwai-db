@@ -12,7 +12,7 @@
 // underlying choice sequence, which walks the traversal back down to the smallest chain that still
 // diverges. `fc.letrec` gives the recursion a shrinkable spine.
 import fc from 'fast-check';
-import { TRANSITIONS, SOURCES, type RenderCtx, type Shape, type Transition } from './shape.ts';
+import { SHAPES, TRANSITIONS, SOURCES, type RenderCtx, type Shape, type Transition } from './shape.ts';
 
 /** How big a traversal to build. `steps` bounds the chain length; `depth` bounds child-body
  *  nesting (0 = no step that takes a child body may be chosen). */
@@ -126,6 +126,40 @@ export const prefix = (shape: Shape, budget: Budget): fc.Arbitrary<{ src: string
     const src = `g.${parts.join('.')}`;
     return { src, steps: stepNames(src) };
   });
+
+/**
+ * One deterministic, independently-typed witness for every lattice edge. This is
+ * deliberately much smaller than the random walker: it proves that every declared
+ * `(input shape, transition)` reaches the capability oracle at least once, while
+ * the random generator continues to explore compositions and nesting. Child bodies
+ * use identity(), which is valid at every declared body input shape and leaves the
+ * transition itself as the only capability under test.
+ */
+export interface TransitionWitness {
+  readonly from: Shape;
+  readonly transition: Transition;
+  readonly query: string;
+}
+
+const witnessSource: Readonly<Record<Shape, string>> = {
+  vertex: 'g.V()',
+  edge: 'g.E()',
+  scalar: "g.V().values('age')",
+  list: "g.V().values('age').fold()",
+  record: 'g.V().valueMap()',
+  group: 'g.V().groupCount()',
+  path: 'g.V().out().path()',
+};
+
+const first = <T>(options: readonly T[]): T => options[0]!;
+
+export const transitionWitnesses = (): readonly TransitionWitness[] =>
+  SHAPES.flatMap((from) => TRANSITIONS[from]
+    .filter((transition) => transition.requiresListOf === undefined || transition.requiresListOf === 'scalar')
+    .map((transition) => {
+      const bodies = (transition.bodies ?? []).map(() => '__.identity()');
+      return { from, transition, query: `${witnessSource[from]}.${transition.render(ctxFrom(bodies, first))}` };
+    }));
 
 /** An unconstrained child-body walk, for the bodies a prefix's branch/filter steps need. Shares the
  *  confinement rule with `traversal`'s walk; kept separate only because that one is a closure over
