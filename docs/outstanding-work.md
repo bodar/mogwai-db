@@ -30,22 +30,7 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-0. **The L5 findings — ALL LANDED; one adjacent defect still open.** Design rationale +
-   the three unbuilt oracles: `docs/2026-07-28-property-based-testing-l5.md`. The fast-path differential
-   (`test/L5-properties/`) found 22 divergent traversals in 17 signature groups, reducing to four
-   root causes, all fixed: infix-composed predicates (front-end `parseComposedPredicate`), 3-arg
-   `has(LABEL,k,v)` in the inline predicate leaf, always-producing filter bodies
-   (`alwaysProductiveFilterIsNoOp`, plus relaxing the bogus `and()/or() needs two branches` guard
-   that made the inline path narrower than the path it accelerates), and `bulkRepeatCount` seeding
-   its frontier with `COUNT(*)` instead of `SUM(bulk)`, losing the input multiplicity — a wrong
-   answer in the DEFAULT config. L3 1475 → 1490 (+15, −0); each pinned in an L4 `.feature`; the L5
-   ratchet is empty and the differential finds no disagreement over ~4,000 generated traversals with
-   every switch off and each one off alone. Fixed alongside: the non-productive `by(key)` drop at
-   `order()` — one shared policy (`orderProductivityFilter`) applied at each element-order route.
-   Worth knowing if you touch it: this was FIRST written as a `decoration` Pass injecting `has(key)`,
-   to centralise the policy, and that is wrong — the rewrite is only valid over an ELEMENT stream and
-   the IR layer has no shape information, so it broke all six non-element `order().by(key)` forms
-   (list/map/group/record/scalar/path). Shape is exactly what the lowering knows and the IR does not. Still open, from the same investigation:
+0. **L5 metamorphic-law residuals.** These laws still fail:
    - **`otherV()` miscounts while PATH TRACKING is live.** `g.V().out().simplePath().bothE('created')
      .otherV()` yields lop×3/marko×2 where `.both('created')` yields lop×1/marko×3. The `simplePath()`
      is provably a no-op there (a one-hop path cannot revisit), so the law must hold exactly as it does
@@ -70,30 +55,11 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      blind-spot class as the `order().by()` defect, and the argument for L5's metamorphic-law oracle,
      which compares against a law rather than another implementation. *Medium-High — silent wrong
      answer.*
-
-   The IR-vs-shape boundary this item states is **refined** (not overturned) in
-   [shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md): the Pass failed as
-   an unchecked shape CLAIM, not for want of information — the correct shape-specific injectors
-   anchor on steps whose output shape is fixed by name. Same doc measures where the defects actually
-   come from (carried-channel drops 33%, shape/vocabulary 8%) and names the higher-yield work.
-
-0b. **`concat(<traversal>)` — LANDED 2026-07-29, and it built the `apply` child-value seam.** The
-   five wrong goldens are re-recorded (each hand-verified against upstream's `Concat.feature`) and
-   L3 is 1504 → 1511. What the work actually established, and what is left of it:
-   - **TinkerPop has TWO child-value contracts and we modelled one.** `TraversalUtil.produce`
-     returns a `TraversalProduct` and its consumer FILTERS when unproductive (`FormatStep extends
-     MapStep` → `EmptyTraverser`). `TraversalUtil.apply` returns the value, THROWS when
-     unproductive, and can never filter — `ConcatStep extends ScalarMapStep`, whose
-     `processNextStart` is `traverser.split(map(traverser), this)` (1-in-1-out), and whose
-     `prepare()` sets `setBulk(1L)` so a child cannot multiply the parent either. The modulation
-     seam's `required?: boolean` conflated them; it is now `ModulationContract`
-     (`'produce' | 'apply' | 'presence'`, `steps/tail/child.ts`) with the JOIN derived from the
-     contract. `'presence'` is the third real case — `choose()`/`order().by()` read the `present`
-     column themselves and are neither TinkerPop method.
-   - **The seam is unchanged for provisioning** (still PARENT STREAM / `pushChildScope`), so the
-     remaining `TraversalUtil.apply(traverser, …)` consumers plug in by DECLARING
-     `contract: 'apply'` and need no new substrate: `Parameters.java:125,177,178`
-     (`property(k, __.t)` — see item 2's `property() after addV()` — plus merge-map KEYS and
+0b. **Apply-contract consumers.** `ModulationContract` (`'produce' | 'apply' | 'presence'`) is
+   available in `steps/tail/child.ts`. The remaining `TraversalUtil.apply(traverser, …)` consumers
+   need only declare `contract: 'apply'`:
+   - `Parameters.java:125,177,178` (`property(k, __.t)` — see item 2's `property() after addV()` —
+     plus merge-map KEYS and
      VALUES, item 0c's biggest cluster), `DateDiffStep:82`, `ListFunction`/`ConjoinStep`,
      `MergeStep`/`MergeElementStep`/`MergeEdgeStep`, `AddVertexStep` (which is what still blocks
      `g.addV(constant('prefix_').concat(__.V(vid1).label())).label()`). **This is the compounding
@@ -106,21 +72,6 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      `PARTITION BY origin ORDER BY <projection key>`. Its comment said "unreached in practice";
      a re-sourced modulation child now reaches it. **The opening: for a re-sourced body the
      partition is redundant** (the child ignores the traverser). *Medium.*
-   - **A fast-path contract violation, fixed in passing and invisible to every artifact.**
-     `tryInlineScalarPredicate` is the `scalarPredicateInlining` recognizer, whose contract is
-     "recognition-failure falls through, never throws" — but `scalarTx`'s deferral escaped it, so
-     `g.V().values('name').filter(__.concat(__.select('a')).is('x'))` hard-failed with the switch
-     both ON and OFF. No corpus traversal has that shape, so neither the census nor L3 could see
-     it. Same class as `predicateInlining` not being disable-safe (item 0). **The lesson worth
-     keeping: adding a `throw` to a shared pure leaf can silently narrow every fast path that
-     calls it.**
-   - Semantics pinned in `test/L4-addendum/concat-traversal.feature` (8 scenarios), SQL contract in
-     `test/L2-sql/scalar.sql.test.ts` (asserts `format()` keeps INNER while `concat()` gets LEFT).
-     The trap worth knowing: `concat(__.inject('c'))` is `aa`/`bb`, NOT `ac`/`bc` — `InjectStep
-     extends StartStep`, whose `processNextStart` APPENDS its injections while `prepare()` already
-     queued the split traverser, so `.next()` returns the traverser's own value.
-   - Item 7b's `MatchString.feature` claim was that this was the ONE thing between it and 25/25.
-     `match()` itself is still an unsupported source step, so re-measure rather than assume.
 
 0c. **17 fail-closed VIOLATIONS, surfaced by the census** (`test/census/deferrals.tsv`, status
    `crashed`). Each throws a raw runtime error instead of a clear deferral, which the project's
@@ -231,11 +182,6 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      A further 8 fail the adjacent "body must be row-local" gate. That makes the unroll the
      highest-count generic lift the telemetry names, and `order` alone is over a third of it.
      *Medium.*
-   - ~~**`walkPredicate` (`until()`/`emit()`) has no generic fallback.**~~ **LANDED.** A row-local
-     predicate compiles once over every vertex via `keyedChildRelation` (`steps/tail/keyed.ts`) and
-     the recursive term reads `id IN <origin set>` — until/emit are existence, so that is the whole
-     semantics. Inline is still tried FIRST because it alone reads the walk's per-iteration state
-     (`loops()`, the sack), which is why it is a capability rather than a declared FastPath.
    - **The named-loop form `repeat("a", …)`/`loops("a")` CRASHES** rather than failing closed
      (`undefined is not an object (evaluating 'node.constructor')`, 4 corpus cases). Cheap, isolated.
    - A label bound INSIDE the body (`repeat(__.out().as("b"))`) genuinely rebinds per iteration, so
@@ -256,9 +202,7 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    "two encounters" reconciliation. **Low-Med.**
    → [canonical-emission-order](./2026-07-19-canonical-emission-order.md)
 
-4d. **`within()`/`without()` over a folded traversal — LIST membership.** The scalar-substitution
-   reading landed as `withinList`/`withoutList` (a `json_each` scan over the folded sub-read, sharing
-   `foldedListSubquery` with the set-op operands). Open:
+4d. **`within()`/`without()` folded-traversal residuals.** Open:
    - a UNION-rooted operand (`within(__.union(__.V(1)…, __.V(4)…).fold())`, ~4 queries). Widening the
      rooted test to admit a union whose arms are all rooted was tried and **REVERTED**: it compiles
      but returns unfiltered rows, so something in the source-union fold's shape does not reach the
@@ -355,7 +299,7 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      shared row-op cannot be REGISTERED into a switch, so transpose these four first and the lift
      becomes "add 11 Map entries" instead of "edit 11 sites".
    - **Why it is architectural, not just mechanical:** `cardinalityOf` (`context/stream.ts`) was named
-     and landed with exactly ONE consumer. Spreading row-ops without routing them through it produces
+     and has exactly ONE consumer. Spreading row-ops without routing them through it produces
      WRONG ANSWERS, not free coverage — a grouped `PathStream` has one row per *position*. The
      criterion to copy is `applyChildCardinality`, which generalised precisely because it never needs
      an expression denoting the traverser's value.
@@ -393,7 +337,7 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 
 ## P2 — feature / conformance buckets
 
-7. **`match()` generic patterns.** The END-VAR shapes are done (see 7d): a variable holds an
+7. **`match()` generic patterns.** End variables can hold an
    element, an edge, or a scalar, and a reducer pattern binds per binding. What remains is
    STRUCTURAL rather than shape: a pattern not starting with `as()` (6), 0-root-variable patterns
    (3), `or`/`not`/nested-match patterns, a LIST-shaped end var (`fold()`), and `where(var,P)` on a
@@ -404,15 +348,11 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 7b. **`g.match("MATCH (a:person)-[:knows]->(b:person)")` — the GQL pattern-STRING form. DESIGNED
    2026-07-28; no decision left, and it is not Large.** 25 scenarios (all of `MatchString.feature`),
    **0 passing**, the single largest remaining L3 bucket, every one failing
-   `unsupported source step: match`. Both premises this item was filed on were falsified by
-   measurement: upstream DOES ship a grammar (`gql-gremlin/src/main/antlr4/GQL.g4` on
+   `unsupported source step: match`. Upstream ships a grammar
+   (`gql-gremlin/src/main/antlr4/GQL.g4` on
    `origin/master`, generated cleanly by our own antlr-ng invocation — 21/21 corpus patterns parse),
-   so locked decision #2 is satisfied by the mechanism it already names; and the COMPILER needs no
-   change — hand-desugaring every scenario into Gremlin trunk compiles today reproduces **24 of 25**
-   expected result sets, the 25th blocked by an unrelated `concat()` defect. **That 25th is now
-   unblocked — `concat(<traversal>)` landed 2026-07-29 (item 0b), so the ceiling is the full +25 and
-   the design doc's own risk section is stale on this point.** Still worth re-measuring rather than
-   assuming, since `match()` remains an unsupported source step. The work is: generate a second parser
+   so locked decision #2 is satisfied. The compiler needs no change: hand-desugaring the corpus into
+   Gremlin trunk compiles. The work is: generate a second parser
    (`parser/gql/`), add one front-end translator (`src/gremlin/gql.ts`, sitting where `math.ts` sits),
    add one `extract`-category Pass. Named residuals the headline omits:
    - `__.match("<gql>")` in a NESTED position — the Gremlin grammar admits it; the desugar would have
@@ -439,18 +379,6 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    - the `none()` host; an operand with no scalar to read (a filter body such as
      `__.not(__.identity())`); a scalar-parent `is()` (correlation needs an element ScalarCtx).
    *Low.*
-
-7d. ~~**`match()`: lower each pattern through the FULL loop, not `lowerElementSteps`.**~~
-   **LANDED 2026-07-27.** And the premise above was wrong in a way worth keeping: the binding table
-   was never the limitation — `aliasEntry` has tagged node/edge/value/list/map since labels became
-   path histories. What walled it in was folding only the ELEMENT prefix, which stops at the first
-   non-element step. `applyPattern` now runs prefix fold → `lowerStepsStrict` and binds on the
-   result's `kind`; a var's SHAPE is recorded at bind time (an edge rowid read as a node id is
-   silently wrong, both being integers), which also lets an edge var START a pattern. A REDUCER body
-   is a separate defect — a global barrier over the binding table — and routes through the child
-   seam for per-binding scoping, verified equal to `map(__.<same body>)`.
-   Still open there: `fold()` (list-shaped end var) and the MATCH-string form (7b).
-   → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md) #3
 
 7e. **The correlated predicate fast path is a SECOND movement implementation.** Not in this index
    before, and it has a committed spike. `correlatedExists`/`incidentExists`/`correlatedReduce`
@@ -485,7 +413,7 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
     → [compiler-consolidation](./2026-07-16-compiler-consolidation-plan.md) §6,
     [write-args-through-read-spine](./archive/2026-07-16-write-args-through-read-spine.md)
 
-11. **Federation tail** (call() Phases 1–6b landed): CF-parity test on the DO harness (Low-Med);
+11. **Federation tail:** CF-parity test on the DO harness (Low-Med);
     map-valued injection for mid-traversal federation (Med); import-a-graph (Med/Large);
     federated *traversal* via local scratch (Large); async failure/timeout/retry policy (Low-Med).
     → [call-service-registry](./archive/2026-07-20-call-service-registry-plan.md)
@@ -494,8 +422,7 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
     meta-properties + partition-aware upsert (`mergeV`/`mergeE`), nested-body descent. **Medium/Low.**
     → [with-strategies-exploration](./2026-07-13-with-strategies-exploration.md)
 
-13. **`with(...)` / `OptionsStrategy` sugar — remaining hosts.** The all-tokens
-    `valueMap().with(WithOptions.tokens)` form landed. Open: the SELECTIVE token subsets
+13. **`with(...)` / `OptionsStrategy` sugar — remaining hosts.** SELECTIVE token subsets
     `with(tokens, ids|labels)` (a proper subset paired with `by(unfold)` that also flattens the value
     lists — no `valueMap(true)` equivalent; fails closed today), `index().with(WithOptions.indexer,
     WithOptions.map)` (needs item 14), and any other `with()`/OptionsStrategy host. **Low-Medium.**
@@ -531,10 +458,7 @@ Each fails closed (clear error, never mis-executes). Do only when a concrete sce
   mixed linear+repeat, recursive-regime `from()`/`to()`, multiple `by()`s (round-robin needs a known
   length; a recursive path's is dynamic). Also `order()` before a movement/branch while a path is
   live (a fresh emission encounter would collide with the path's positional ordering).
-  **`path().by()` in the array regime is DONE** — `by(key)`/`by(T.token)` share ONE position
-  projector with the linear regime, and `by(__.trav)` runs the SAME positional child compiler: the
-  `json_each` explode carries `(pk, ord)` as its `origins`, which makes it an ordinary element
-  stream, so no new substrate was needed. *Low-Med.*
+  *Low-Med.*
   → [path-history-substrate](./2026-07-18-path-history-substrate.md)
 - **Group re-entry matrix-fill** — element/property-valued inner keys+values, composite `project()`
   keys, `elementMap()` followers, `keys→SET`, `as()`/`order()` on a group. `steps/tail/group.ts` is
@@ -629,16 +553,13 @@ proves nothing — read the deferral clusters instead.
   — each is a field read a future LSP rename yields `undefined` for, silently and invisibly to `tsc`.
   Convert to a cast that NAMES a real type as encountered; it is the only defence against defect class
   1 of the 2026-07-29 rename sweep.
-- **§6 vocabulary-set derivation is only partly done** — `{path,simplePath,cyclicPath}` was deduped,
-  but the reducers and movement families were not: `{count,sum,min,max,mean}` still appears verbatim at
+- **§6 vocabulary-set derivation** — reducers and movement families remain: `{count,sum,min,max,mean}` still appears verbatim at
   6 sites and ~10 movement spellings persist. One family per commit, gated on byte-identical
   `test/L2-sql/` snapshots. **Do not fix a membership bug inside a rename** — `POSITION_MOVEMENTS`
   missing `otherV` (item 0's path defect) must land with a test FIRST, or the fix arrives disguised as
   a rename. → [tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md) §6
-- **`feature-support-matrix.md`'s legend over-promises** — line 4 says a ✅ step works "anywhere in a
-  traversal, however deeply nested", which item 5c falsifies for ~35 steps. The capability ratchet that
-  can generate a per-step shape strip has now LANDED (`test/L5-properties/capability.test.ts`), so
-  generating that strip into the matrix is cheap and stops the file making a claim we know is false.
+- **`feature-support-matrix.md`'s legend over-promises** — generate the capability ratchet's per-step
+  shape strip (`test/L5-properties/capability.test.ts`) into the matrix so its ✅ claim matches item 5c.
 - **Deterministic variant/record slicing shipped UNPINNED** — `variantSlice` now passes
   `orderByEncounter: true` (`tail/variant.ts`), so `g.V().values('x').limit(2)` picks a deterministic
   window; the instruction to pin each newly-deterministic result in an L4 `.feature` was not done, so
@@ -752,42 +673,21 @@ Sources: [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md),
 ## Research / vision (reference — no build items)
 
 - **[agent-memory-vision](./2026-07-17-agent-memory-vision.md)** — sibling `mogwai-memory` repo;
-  path-decayed ranking (partly enabled now `sack()` landed). Separate-repo, exploratory.
+  separate-repo, exploratory.
 - **[graph-algorithms](./2026-07-24-graph-algorithms-plan.md)** — build spec for P2·8.
-- **[conformance-structural-bets](./2026-07-12-conformance-structural-bets.md)** — the strategic
-  unlock map; bets largely landed, tails folded into P1–P3.
-- **[cross-do-federation-prior-art](./2026-07-13-cross-do-federation-prior-art.md)** — federation
-  prior-art (ATTACH rejected; `call(federate)` landed).
-- **[path-tracking-prior-art](./2026-07-12-path-tracking-prior-art.md)** — path prior-art; two-regime
-  plan implemented, only P3 tails remain.
+- **[conformance-structural-bets](./2026-07-12-conformance-structural-bets.md)** — strategic unlock map;
+  live tails are indexed in P1–P3.
+- **[cross-do-federation-prior-art](./2026-07-13-cross-do-federation-prior-art.md)** — federation prior-art.
+- **[path-tracking-prior-art](./2026-07-12-path-tracking-prior-art.md)** — path prior-art for P3 tails.
 - **[wire-and-storage-facts](./2026-07-25-wire-and-storage-facts.md)** — Map.Entry framing + MapStream
   model. Durable reference, not a plan.
 - **[channel-preservation](./2026-07-28-channel-preservation-refactoring-plan.md)** — design-of-record
-  for P1·18 and the only home of the 10-rule migration constitution. Phases 2–6 are landed or resolved;
-  **Phase 6 is a committed NEGATIVE result** (IR shape annotation, 56.8% ⊤ vs a 10% ceiling) — the
-  reason not to re-propose it. Its "authorizes no push" execution log is stale; the tranches are on
-  `origin/trunk`.
+  for P1·18; Phase 6's IR-shape annotation is a committed negative result (56.8% ⊤ vs 10% ceiling).
 - **[correlated-child-rendering](./2026-07-17-correlated-child-rendering-plan.md)** — design-of-record
   for P2·7e, unstarted, with a committed spike (EXPLAIN + timings) that would be expensive to
   re-derive. **All its landmark paths predate the 2026-07-23 restructure and the 2026-07-29 rename** —
   read it through the rename map.
-- **[scalartype-refactoring-pattern](./2026-07-28-scalartype-refactoring-pattern.md)** — the reusable
-  vocabulary-cleanup template (N optionals → one total union; coarse views DERIVED; pair with a named
-  preserving rebuild + a runtime contract). Its five-target list is down to two live entries: `AliasShape`
-  member shape (= item 1) and the front-end's tagged-token accessors (re-measure first — the tagged
-  argument union landed but the claim was about consumers). `ScalarCtx` and `IRStep` are named
-  rule-1 candidates with no defect filed against them.
-- **[tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md)** — **LANDED**,
-  and now the naming authority behind the root `CLAUDE.md`'s **Naming** section. Our vocabulary read
-  against TinkerPop `gremlin-core` on `origin/master`. Names the prior art for `TraverserLayout`
-  (`TraverserRequirement`'s declare→union→derive); all seven rename groups are done (both dangerous
-  collisions closed — `CompileScope`/`CompilerScope` and `Carry`/`Carried`), with **a rename map** that
-  decodes every pre-2026-07-29 doc, and a record of the three defect classes an LSP rename cannot see
-  (`as any` reads, literal keys under a spread, comments). One item is deliberately open: the
-  `ir/rewrites.ts`/`ir/strategies.ts` partition, which needs a shared-helper home decided first. Also
-  records
-  **four TinkerPop patterns to refuse** — marker-interface `instanceof` dispatch, the Global/Local
-  step-class split, `GValue` placeholder duality (elegant, but worthless without a plan cache), and
-  the already-refuted typed core IR. Read before proposing a naming change or porting a TinkerPop
-  mechanism. Its structural half defers to
-  [channel-preservation](./2026-07-28-channel-preservation-refactoring-plan.md).
+- **[scalartype-refactoring-pattern](./2026-07-28-scalartype-refactoring-pattern.md)** — vocabulary-cleanup
+  template; live targets are `AliasShape` member shape (item 1) and front-end tagged-token accessors.
+- **[tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md)** — naming authority
+  and rename map. The open `ir/rewrites.ts`/`ir/strategies.ts` partition needs a shared-helper home.
