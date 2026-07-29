@@ -204,7 +204,7 @@ function compileInlinePredicate(
     return compileInlinePredicate(engine, nested.slice(1), labelCtx(labels, soleLabel), params, labels);
 
   // NB there is no infix `.and()`/`.or()` handling here any more. That fold is
-  // ConnectiveStrategy (a `fold` Pass, ir/strategies.ts foldConnectives), so by the time a body
+  // ConnectiveStrategy (a `fold` Pass, ir/strategies.ts canonicalizeConnectives), so by the time a body
   // reaches this fast path the connectives are already the step form handled below — which is
   // what makes this path genuinely disable-safe. It lived here until 2026-07-27, where it was
   // reachable only in a child body and only while `predicateInlining` was on.

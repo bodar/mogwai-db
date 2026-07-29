@@ -17,7 +17,7 @@
 // FOUR root causes, all now fixed (L3 1475 → 1490, +15/−0, each pinned in an L4 `.feature`):
 //   1. infix-composed predicates flattened by the front-end          → parseComposedPredicate
 //   2. 3-arg has(LABEL,k,v) mis-read inside an inline predicate leaf  → prefix/predicate.ts
-//   3. an always-producing filter body neither path could agree on    → alwaysProductiveFilterIsNoOp
+//   3. an always-producing filter body neither path could agree on    → isAlwaysProductiveFilterNoOp
 //      (+ the artificial `and()/or() needs two branches` guard, which made the inline path
 //      narrower than the path it accelerates)
 //   4. bulkRepeatCount's seed frontier weighting by COUNT(*) instead of SUM(bulk), losing the

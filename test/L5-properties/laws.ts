@@ -107,7 +107,7 @@ export const LAWS: readonly Law[] = [
   },
   {
     name: 'filter(identity()) is transparent', on: 'vertex',
-    why: 'A filter whose body always produces admits every traverser — the fact alwaysProductiveFilterIsNoOp relies on, asserted independently of it.',
+    why: 'A filter whose body always produces admits every traverser — the fact isAlwaysProductiveFilterNoOp relies on, asserted independently of it.',
     lhs: (p) => p, rhs: (p) => `${p}.filter(__.identity())`,
   },
   {

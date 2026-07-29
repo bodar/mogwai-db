@@ -21,9 +21,9 @@ import { bodyAlwaysProduces } from './productivity.ts';
 /**
  * A Step optionally carrying folded modulator data, so no step compiler ever
  * peeks at sibling steps:
- *  - `repeatRegion` — the repeat/emit/times/until run (`foldRepeatClusters`).
+ *  - `repeatRegion` — the repeat/emit/times/until run (`formRepeatRegions`).
  *  - `modulators` — the trailing by() modulator arg-lists absorbed onto a host step
- *    (`foldByModulators`): order/select/project/group's by(), and the single
+ *    (`absorbModulators`): order/select/project/group's by(), and the single
  *    by(key) an alias-compare where()/not() carries.
  * The compilers read these fields instead of re-scanning, so the whole read
  * dispatch is a peek-free fold over the step list.
@@ -94,7 +94,7 @@ export const NO_OP_STRATEGIES = new Set([
   // SeedStrategy stop being no-ops the day with()/profile()/coin()-sample() land — revisit then.
   'OptionsStrategy', 'ProfileStrategy', 'SeedStrategy',
   // ConnectiveStrategy's effect (infix .and()/.or() folding) is unconditionally applied as the
-  // `fold` Pass of the same name (foldConnectives, this file), so REQUESTING it is a genuine
+  // `fold` Pass of the same name (canonicalizeConnectives, this file), so REQUESTING it is a genuine
   // no-op; DISABLING it (withoutStrategies) is rejected — see ALWAYS_ON_STRATEGIES. Until
   // 2026-07-27 this claim was false: the fold lived inside the predicateInlining fast path, so it
   // applied only in a child body and only while that flag was on.
@@ -167,7 +167,7 @@ const EXISTENCE_FILTER_HOSTS = new Set(['where', 'filter', 'not']);
  * "constant false" concept). `and`/`or` are handled by dropping always-true ARMS — for `or` a single
  * true arm makes the whole step inert, for `and` the remaining arms still have to hold.
  */
-export function alwaysProductiveFilterIsNoOp(steps: Step[], params: Record<string, any>): Step[] {
+export function isAlwaysProductiveFilterNoOp(steps: Step[], params: Record<string, any>): Step[] {
   return recurseInject(steps, params, (level) => {
     const out: Step[] = [];
     for (const s of level) {
@@ -387,12 +387,12 @@ export function verify(spec: StrategySpec, steps: Step[]): void {
 // orchestration.
 
 /** Absorb every `with(key, value)` step immediately following a `call` onto that call's
- *  `withArgs`, mirroring foldByModulators — so the call() compiler reads its modulators
+ *  `withArgs`, mirroring absorbModulators — so the call() compiler reads its modulators
  *  without peeking at siblings. `value` may be a string/literal OR a `{nested}` traversal
  *  (`__.constant(...)`); both are carried verbatim and resolved to a constant later
  *  (call-params.ts). A `with()` NOT preceded by a call() is left untouched (it is not a
  *  supported step elsewhere, so it will fail closed at dispatch if it ever appears). */
-export function foldCallWith(steps: IRStep[]): IRStep[] {
+export function absorbCallWith(steps: IRStep[]): IRStep[] {
   const out: IRStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
@@ -571,9 +571,9 @@ export function verifyReadOnlyChildren(steps: IRStep[], params: Record<string, a
  *  with(). SELECTIVE token subsets (with(tokens, ids|labels|…), which pick a proper token subset and
  *  pair with a by(unfold) that also flattens the value lists) have no valueMap(true) equivalent yet,
  *  so they are LEFT in place to fail closed at dispatch — never silently widened to all-tokens. A
- *  with() on any other host is untouched (call().with() folds in foldCallWith; every other with()
+ *  with() on any other host is untouched (call().with() folds in absorbCallWith; every other with()
  *  falls through to its clear "cannot consume" deferral). */
-export function foldValueMapWith(steps: IRStep[]): IRStep[] {
+export function absorbValueMapWith(steps: IRStep[]): IRStep[] {
   const out: IRStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
@@ -615,7 +615,7 @@ const ORDER_INSENSITIVE_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean'
 /** Drop a keyless `order()` immediately before an order-insensitive reducer: it is a
  *  provable no-op (count/sum/min/max/mean ignore order, and a keyless order filters
  *  nothing — unlike order().by(key), which may drop missing-key traversers, so that form
- *  is left intact). Runs after foldByModulators so an order carrying a by() has its `.modulators`
+ *  is left intact). Runs after absorbModulators so an order carrying a by() has its `.modulators`
  *  set and is skipped. Unblocks group value children like by(__.out().order().count())
  *  and is a general optimization for root chains too. */
 export function dropRedundantOrder(steps: IRStep[]): IRStep[] {
@@ -705,7 +705,7 @@ function splitOnConnective(steps: Step[]): { name: 'and' | 'or'; segments: Step[
 
 /** One chain level: fold its bare connectives into the step form. The leading anchor run
  *  (source/write steps) is held out and re-prepended, so the fold never swallows `V()`. */
-function foldConnectivesLevel(steps: Step[]): Step[] {
+function canonicalizeConnectivesLevel(steps: Step[]): Step[] {
   if (!steps.some((s) => isBareConnective(s, 'and') || isBareConnective(s, 'or'))) return steps;
   const a = anchorRunLength(steps);
   const anchors = steps.slice(0, a);
@@ -714,7 +714,7 @@ function foldConnectivesLevel(steps: Step[]): Step[] {
   if (split.segments.some((seg) => seg.length === 0))
     throw new Error('malformed infix .and()/.or() connector (empty operand)');
   // Each segment may still hold a higher-precedence connective — recurse before wrapping.
-  const args = split.segments.map((seg) => nestedArg(foldConnectivesLevel(seg)));
+  const args = split.segments.map((seg) => nestedArg(canonicalizeConnectivesLevel(seg)));
   return [...anchors, synth(split.name, args, split.at.ctx)];
 }
 
@@ -731,14 +731,14 @@ function foldConnectivesLevel(steps: Step[]): Step[] {
  *  federate param with `tree.accept is not a function`. So this recursion is IDENTITY-PRESERVING:
  *  an arg (and a whole level) the fold does not change is returned by reference, and only a branch
  *  that genuinely folded is rebuilt. */
-export function foldConnectives(steps: Step[], params: Record<string, any>): IRStep[] {
+export function canonicalizeConnectives(steps: Step[], params: Record<string, any>): IRStep[] {
   let anyChild = false;
   const mapped = steps.map((s) => {
     let changed = false;
     const args = s.args.map((a) => {
       if (!isNested(a)) return a;
       const inner = stepChain(a.nested, params);
-      const folded = foldConnectives(inner, params);
+      const folded = canonicalizeConnectives(inner, params);
       if (folded === inner) return a; // untouched → keep the ORIGINAL arg, parse tree intact
       changed = true;
       return nestedArg(folded);
@@ -747,7 +747,7 @@ export function foldConnectives(steps: Step[], params: Record<string, any>): IRS
     anyChild = true;
     return { ...s, args };
   });
-  return foldConnectivesLevel(anyChild ? mapped : steps) as IRStep[];
+  return canonicalizeConnectivesLevel(anyChild ? mapped : steps) as IRStep[];
 }
 
 /**
@@ -760,7 +760,7 @@ export function foldConnectives(steps: Step[], params: Record<string, any>): IRS
  * repeat() still reaches its "without repeat()" throw). Validation and SQL build
  * stay in the branch compiler — this pass only removes the index arithmetic.
  */
-export function foldRepeatClusters(steps: Step[]): IRStep[] {
+export function formRepeatRegions(steps: Step[]): IRStep[] {
   const out: IRStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     if (!REPEAT_CLUSTER.has(steps[i].name)) { out.push(steps[i]); continue; }
@@ -793,7 +793,7 @@ function isAliasCompareWhere(s: Step): boolean {
  *  single by(key) all become a field on their host, so the tail dispatch reads
  *  `.modulators` and never looks at the next step. by() validation (token/traversal
  *  modulators still unsupported) stays in the compilers that read `.modulators`. */
-export function foldByModulators(steps: IRStep[]): IRStep[] {
+export function absorbModulators(steps: IRStep[]): IRStep[] {
   const out: IRStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
@@ -823,7 +823,7 @@ export function foldByModulators(steps: IRStep[]): IRStep[] {
  *  — the option-map form choose(choiceFn).option(key, traversal)…. A choose with no
  *  trailing option() is the predicate form (untouched → the prefix branch compiler).
  *  The compiler reads `.optionArms` and never scans siblings. */
-export function foldChooseOptions(steps: IRStep[]): IRStep[] {
+export function absorbOptionArms(steps: IRStep[]): IRStep[] {
   const out: IRStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];

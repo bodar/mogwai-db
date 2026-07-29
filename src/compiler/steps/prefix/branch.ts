@@ -706,7 +706,7 @@ export const repeat: StepFn = (s, st) => {
   // term (expandRepeatBody). Barrier/collection bodies still defer.
   // The body is a sub-traversal, not a special case — so canonicalize it with the SAME `normalize()`
   // every other nested body uses (match patterns, correlated predicates, write targets), not a
-  // hand-picked single fold. This used to be `foldByModulators` alone, which meant a NESTED
+  // hand-picked single fold. This used to be `absorbModulators` alone, which meant a NESTED
   // repeat/times cluster in the body never folded: the inner `times()` stayed a separate step, so
   // the inner repeat saw no cluster and reported `repeat() requires times(), until(), or emit()`.
   const body = normalize(stepChain(rep.args[0]?.nested, st.params)).steps;

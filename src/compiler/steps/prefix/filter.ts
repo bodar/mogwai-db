@@ -191,7 +191,7 @@ export const where: StepFn = (s, st) => {
   const rightRes = aliasIdExpr(pred.values[0], st.traverserLayout.aliases, pw);
   const right = rightRes.id;
   const rightElem = rightRes.elem;
-  // An alias-compare where() takes at most one by(key). foldByModulators absorbs
+  // An alias-compare where() takes at most one by(key). absorbModulators absorbs
   // every contiguous by(); a second one is not a valid modulator here — fail
   // closed rather than silently answer a different question (matches group()'s
   // bys.length>2 guard; the original consumed exactly one by() and let the rest throw).

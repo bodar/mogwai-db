@@ -1,11 +1,11 @@
 import { isNested, type Step, type StrategyUse } from '../../gremlin/frontend.ts';
 import { PASS_CATEGORIES, type Pass, type PassContext } from './pass.ts';
 import {
-  stripTerminal, foldRepeatClusters, foldByModulators, foldChooseOptions, foldCallWith,
-  foldConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
+  stripTerminal, formRepeatRegions, absorbModulators, absorbOptionArms, absorbCallWith,
+  canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
   verifyReadOnlyChildren,
-  foldValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
-  injectSubgraphRec, injectPartitionRec, markProductiveBy, alwaysProductiveFilterIsNoOp, verify,
+  absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
+  injectSubgraphRec, injectPartitionRec, markProductiveBy, isAlwaysProductiveFilterNoOp, verify,
   NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
   type IRStep,
 } from './strategies.ts';
@@ -34,7 +34,7 @@ const EXTRACT: Pass[] = [
 // historical composition order for review locality. The Stage 3 test pins the ordering that IS
 // load-bearing (fold before simplify) as a guard.
 const FOLD: Pass[] = [
-  // These two both need the RAW `{nested}` args (before foldRepeatClusters/foldChooseOptions move a
+  // These two both need the RAW `{nested}` args (before formRepeatRegions/absorbOptionArms move a
   // body into `.repeatRegion`/`.optionArms`), so both lead the group. Their relative order follows
   // TinkerPop: a where()'s variable LOCATIONS are resolved when the step is CONSTRUCTED
   // (GraphTraversal.where → TraversalHelper.getVariableLocations), i.e. before any strategy runs,
@@ -43,7 +43,7 @@ const FOLD: Pass[] = [
   // trailing as("b") inside the and()'s last operand, where the end-label rewrite can no longer
   // see it as the body's last step.
   {
-    name: 'rewriteWhereEndLabels', category: 'fold',
+    name: 'rewriteWhereEndLabels', category: 'canonicalize',
     // Nothing to do without a label to bind or a child body to hold a where(): no as() and no
     // nested arg at the top level means no where() host exists anywhere below either.
     applies: (steps) => steps.some((s) => s.name === 'as' || (s.args ?? []).some(isNested)),
@@ -54,21 +54,21 @@ const FOLD: Pass[] = [
   // after it — should see the canonical shape. Its own recursion visits every depth, and each body
   // it mints is `normalize()`d again when compiled as a child, so a by()/repeat cluster inside a
   // folded operand still canonicalizes.
-  { name: 'ConnectiveStrategy', category: 'fold', run: (steps, ctx) => foldConnectives(steps, ctx.params) },
-  { name: 'foldRepeatClusters', category: 'fold', run: (steps) => foldRepeatClusters(steps) },
-  // Desugar valueMap().with(WithOptions.tokens) → valueMap(true) BEFORE foldByModulators, so a
+  { name: 'ConnectiveStrategy', category: 'canonicalize', run: (steps, ctx) => canonicalizeConnectives(steps, ctx.params) },
+  { name: 'formRepeatRegions', category: 'canonicalize', run: (steps) => formRepeatRegions(steps) },
+  // Desugar valueMap().with(WithOptions.tokens) → valueMap(true) BEFORE absorbModulators, so a
   // following by() (e.g. the selective-token form's by(unfold)) folds onto the host once landed.
-  { name: 'foldConstantPredicateOperands', category: 'fold', run: (steps, ctx) => foldConstantPredicateOperands(steps, ctx.params) },
-  { name: 'foldValueMapWith', category: 'fold', run: (steps) => foldValueMapWith(steps) },
-  { name: 'foldByModulators', category: 'fold', run: (steps) => foldByModulators(steps) },
-  { name: 'foldChooseOptions', category: 'fold', run: (steps) => foldChooseOptions(steps) },
-  { name: 'foldCallWith', category: 'fold', run: (steps) => foldCallWith(steps) },
+  { name: 'foldConstantPredicateOperands', category: 'canonicalize', run: (steps, ctx) => foldConstantPredicateOperands(steps, ctx.params) },
+  { name: 'absorbValueMapWith', category: 'canonicalize', run: (steps) => absorbValueMapWith(steps) },
+  { name: 'absorbModulators', category: 'canonicalize', run: (steps) => absorbModulators(steps) },
+  { name: 'absorbOptionArms', category: 'canonicalize', run: (steps) => absorbOptionArms(steps) },
+  { name: 'absorbCallWith', category: 'canonicalize', run: (steps) => absorbCallWith(steps) },
 ];
 
 // ---------- simplify (provable no-op removals) ----------
 // collapseFoldCountLocal MUST precede dropRedundantOrder (it can expose an order().count() the
-// latter then drops); foldByModulators (fold) MUST precede dropRedundantOrder so an order().by()
-// has its .bys set and is skipped. Both satisfied by fold < simplify + this intra-group order.
+// latter then drops); absorbModulators (fold) MUST precede dropRedundantOrder so an order().by()
+// has its .modulators set and is skipped. Both satisfied by canonicalize < simplify + this intra-group order.
 const SIMPLIFY: Pass[] = [
   { name: 'collapseFoldCountLocal', category: 'simplify', run: (steps) => collapseFoldCountLocal(steps) },
   { name: 'dropRedundantOrder', category: 'simplify', run: (steps) => dropRedundantOrder(steps) },
@@ -77,10 +77,10 @@ const SIMPLIFY: Pass[] = [
     // is provably inert — the same category of fact as the two above. Removing it here is also what
     // makes `predicateInlining` disable-safe for this whole family: neither the inline path nor the
     // generic gate ever sees the step, so they cannot answer differently. See
-    // alwaysProductiveFilterIsNoOp for why this is not a gap in the child-existence gate.
-    name: 'alwaysProductiveFilterIsNoOp', category: 'simplify',
+    // isAlwaysProductiveFilterNoOp for why this is not a gap in the child-existence gate.
+    name: 'isAlwaysProductiveFilterNoOp', category: 'simplify',
     applies: (steps) => steps.some((s) => ['where', 'filter', 'not', 'and', 'or'].includes(s.name)),
-    run: (steps, ctx) => alwaysProductiveFilterIsNoOp(steps, ctx.params) as IRStep[],
+    run: (steps, ctx) => isAlwaysProductiveFilterNoOp(steps, ctx.params) as IRStep[],
   },
 ];
 
@@ -132,7 +132,7 @@ const VERIFY: Pass[] = [
 ];
 
 /** The ordered pipeline. Declaration order across groups fixes cross-category order (extract <
- *  decoration < fold < simplify < verify); the Stage 3 test checks THIS array against
+ *  decoration < canonicalize < simplify < verify); the Stage 3 test checks THIS array against
  *  PASS_CATEGORIES so a future append to the wrong group fails loudly. */
 export const PASSES: Pass[] = [...EXTRACT, ...DECORATION, ...FOLD, ...SIMPLIFY, ...VERIFY];
 

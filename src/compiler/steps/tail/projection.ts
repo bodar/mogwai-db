@@ -36,7 +36,7 @@ import { engineOf } from '../../engine/deps.ts';
 interface OrderClause { key: string | null; dir: 'asc' | 'desc' | 'shuffle'; }
 
 /** The tail modifiers accumulated left-to-right (a pure fold — no sibling peeking;
- *  by() modulators already live on their host step via strategies.foldByModulators). */
+ *  by() modulators already live on their host step via strategies.absorbModulators). */
 export interface TailAcc {
   projStep: IRStep | null;
   orders: OrderClause[];

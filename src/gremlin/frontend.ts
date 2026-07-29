@@ -371,7 +371,7 @@ function walkArgs(node: any, out: any[], params: Record<string, any>, types: (Ty
   // WithOptions.tokens/all/none/ids/labels/keys/values/indexer/list/map — the OptionsStrategy
   // selectors for valueMap()/index()'s with(). Each grammar constant is its own context
   // (WithOptionsConstants_*), so match the shared prefix rather than list ten cases. Captured as
-  // {withOption} so foldValueMapWith can desugar with(WithOptions.tokens) to valueMap(true);
+  // {withOption} so absorbValueMapWith can desugar with(WithOptions.tokens) to valueMap(true);
   // without this the generic recursion dropped them and with() saw no argument.
   if (cls.startsWith('WithOptionsConstants_')) { emit({ withOption: enumSuffix(node) }); return; }
   // datetime('iso') / DateTime('iso') / datetime() (now) — a date literal, captured as

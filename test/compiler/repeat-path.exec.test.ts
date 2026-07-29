@@ -593,7 +593,7 @@ describe('repeat() as a child body', () => {
   test('a repeat NESTS inside another repeat body', () => {
     // Needs both halves: the body relation admits the inner walk as a row-local body, and the inner
     // walk carries the outer body-relation's origin. Also needed normalizing the body with the same
-    // normalize() every other nested body uses — with only foldByModulators the inner times() never
+    // normalize() every other nested body uses — with only absorbModulators the inner times() never
     // folded onto its repeat(), which reported `repeat() requires times(), until(), or emit()`.
     const store = seededStore();
     expect(names(store, 'g.V(1).repeat(__.out().repeat(__.out()).times(1)).times(1).values("name")'))

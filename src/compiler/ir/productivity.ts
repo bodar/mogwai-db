@@ -5,7 +5,7 @@ import { isNested, stepChain, type Step } from '../../gremlin/frontend.ts';
 // One authority, two consumers that were each about to answer this independently:
 //   • `choose()`'s option-map classifier (steps/tail/child-shape.ts `choiceCanBeUnproductive`) —
 //     is an unclaimed `Pick.unproductive` arm reachable?
-//   • the `alwaysProductiveFilterIsNoOp` Pass (ir/strategies.ts) — is this filter provably a no-op?
+//   • the `isAlwaysProductiveFilterNoOp` Pass (ir/strategies.ts) — is this filter provably a no-op?
 // The set began as a private const in child-shape.ts; it moved here because `ir/` cannot import from
 // `steps/` (the layering runs deps ◂ families ◂ engine ◂ compiler, and Passes run before dispatch),
 // and because duplicating the reasoning below into two sets is exactly how they would drift.
