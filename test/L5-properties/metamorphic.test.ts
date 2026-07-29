@@ -25,8 +25,9 @@ import { seeded } from '../support/graph.ts';
 import { DEFAULT_FAST_PATHS } from '../../src/compiler/options/fast-paths.ts';
 import { prefix } from './generate.ts';
 import { LAWS } from './laws.ts';
+import { L5_SEED } from './seed.ts';
 
-const SEED = Number(process.env.L5_SEED ?? 42);
+const SEED = L5_SEED;
 /** Per-law instantiations. Modest by default (there are ~17 laws, so this is ~1,300 pairs and ~2,600
  *  compiles); L5_RUNS raises it for an exploration pass. */
 const RUNS = Number(process.env.L5_LAW_RUNS ?? Math.max(40, Math.floor(Number(process.env.L5_RUNS ?? 300) / 4)));

@@ -1013,6 +1013,16 @@ function compileElementChildRows(
   let end = prefixed;
   for (const step of parts.suffix) {
     const p = end.rel.as('p');
+    // A scoped row barrier preserves an ElementStream, so the next phase can use the
+    // same element StepFns as the prefix. The classifier has already established that
+    // every non-barrier suffix step is element-preserving; keep the emitter on that
+    // one generic fold instead of giving each barrier a private follower vocabulary.
+    if (!['local', 'order', 'dedup', 'range', 'skip', 'limit'].includes(step.name)) {
+      const reentered = lowerElementBody(end, [step]);
+      if (!reentered) return null;
+      end = reentered;
+      continue;
+    }
     if (step.name === 'local') {
       const nested = step.args[0]?.nested;
       const lowered = nested ? tryCompileElementChild(end, nested, 'all') : null;

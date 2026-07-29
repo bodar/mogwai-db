@@ -132,11 +132,9 @@ near-identical entries and buried the fact that a couple of lines in one file ex
 ## Seeds: why a fixed one is a dead instrument, and the scheme that replaces it
 
 **First, the invariant this whole section is subordinate to: CI runs exactly what a developer runs.**
-`ci → test → L5` with no CI-specific seed, sample size or skip — the seed is 42 everywhere because it
-is the default everywhere, not because CI pins it. Any scheme that makes the build behave one way on a
-laptop and another on a runner is rejected on that ground alone, whatever else it buys. (Earlier
-versions of this doc said "CI runs seed 42", which read as a CI-specific policy. There has never been
-one.)
+`ci → test → L5` with no CI-specific seed, sample size or skip. L5 now derives its seed from `HEAD`,
+so the same commit draws the same corpus on a laptop and a runner while each commit explores a new
+one. Any scheme that makes those two builds behave differently is rejected on that ground alone.
 
 A fixed seed buys determinism and costs the entire point of the level. **Seed 42 + `numRuns: 300` is a
 deterministic generated corpus** — the same 300 traversals every run, on every machine. Under it L5 is
@@ -148,13 +146,14 @@ The original argument for fixing it was sound but drew the wrong conclusion: *a 
 flakes is a property test people disable.* True — and the inference "therefore pin the seed" throws out
 discovery to buy stability. **The fix is to make a fresh seed non-flaky, not to stop drawing one.**
 
-**The scheme: a rotating seed plus a witness ratchet, inside the standard build.** Every run of
-`mise run test` — laptop or runner, same task, no branching on `$CI` — draws a fresh seed, PRINTS it,
-and gates the outcome against the committed witness lists rather than against "did anything fail":
+**The landed scheme: a HEAD-derived seed plus a witness ratchet, inside the standard build.** Every
+run of `mise run test` — laptop or runner, same task, no branching on `$CI` — derives a seed from the
+commit, PRINTS it, and gates the outcome against the committed witness lists rather than against
+"did anything fail":
 
-- **The seed rotates and is printed.** `L5 generated: 300 traversals @ seed 81423 (rotating;
-  L5_SEED=81423 to reproduce)`. Reproduction is one env var, which is the whole poor-man's solution
-  and is non-negotiable regardless of how clever the rest gets.
+- **The seed changes per commit and is printed.** `L5 generated: 300 traversals @ seed 81423
+  (HEAD-derived; L5_SEED=81423 to reproduce)`. Reproduction is one env var, which is the whole
+  poor-man's solution and is non-negotiable regardless of how clever the rest gets.
 - **The gate is NEW signatures only.** A raw failure already recorded in `capability-baseline.ts`
   (with its diagnosis) is drawn, counted and reported — it does not fail the build. A signature not in
   any ratchet fails it. So the build is green on a novel seed that only re-finds tracked defects, and
@@ -177,7 +176,7 @@ and both already have stale-entry checks — this scheme is what those checks we
 here — and because CI and local run the same task with the same draw rule, a runner failure reproduces
 on a laptop by construction rather than by luck.
 
-**Draw rule — the one open sub-decision.** Two candidates, both compatible with everything above:
+**Draw rule — settled.** Two candidates were considered:
 
 | | Per-run `$RANDOM` | Derived from `HEAD` |
 |---|---|---|
@@ -268,27 +267,7 @@ neither lowering ever sees the removed step.
 
 ## Open
 
-`docs/outstanding-work.md` item 0 — the unproductive-reducer filter defect. **Oracles 2 and 3 are
-built** (`metamorphic.test.ts` + `laws.ts`, `shape-annotation.test.ts`) and **oracle 4 is built twice**
-(see the correction above), so the oracle list is no longer the open part.
-
-**What IS open is the discovery process, and it is the one that matters** —
-`docs/outstanding-work.md` item 0d. Measured 2026-07-29: **`mise run L5-random` is RED at essentially
-every seed** (5, 11, 27, 91, 143 all fail), while CI's fixed seed 42 is green — so none of it had ever
-been seen. Every divergence is `kind: "support"` ("generic threw, fast paths ON ran"), not a wrong
-answer, which is why `known.ts` is legitimately empty and still nothing was caught. This is exactly the
-gap this doc predicted: a fixed seed is *a deterministic generated corpus*, and it discovers nothing
-after its first run.
-
-The fix is the **rotating seed + witness ratchet** described in the seeds section above, and the
-decisive property is that it lives in the STANDARD BUILD — not in a separate scheduled or manual run.
-Discovery that depends on remembering does not happen; 2026-07-29 is the evidence. Sequencing, since
-the ratchet must be able to absorb what is already known before rotation can be turned on:
-
-1. **Fix or record item 0d's three causes** — the `table.test.ts` `bothV('label')` table bug is a
-   straight fix (and until it is fixed those traversals always throw, which *empties* differential
-   coverage rather than failing anything). The two support-divergences get diagnosed entries.
-2. **Rotate the seed in `mise run test`, printing it**, with the ratchets consulted so only a NEW
-   signature is fatal.
-3. `L5-random` then keeps its role as the deeper sweep — a bigger `numRuns` at higher depth — rather
-   than being the only place a non-42 seed is ever drawn.
+`docs/outstanding-work.md` tracks the remaining compiler and oracle work. The L5 discovery process is
+no longer open: the former support divergences were fixed, regression-promoted to L4, and the standard
+build now derives and prints its seed. `L5-random` remains the larger, deliberately random sweep;
+its high-depth table integrity failure is tracked separately as item 0e.

@@ -866,6 +866,12 @@ describe('scalar-parent / projection SQL', () => {
     expect(runWith(store, query, { fastPaths: { scalarPredicateInlining: false } }).map((r) => r.v)).toEqual([1]);
   });
 
+  test('an element child re-enters ordinary lowering after a scoped dedup barrier', () => {
+    const store = seededStore();
+    const query = 'g.V(1).where(__.out().dedup().hasLabel("person")).values("name")';
+    expect(runWith(store, query, { fastPaths: { predicateInlining: false } }).map((r) => r.v)).toEqual(['marko']);
+  });
+
   test('fold() wraps the projection in a list shape (element or scalar)', () => {
     expect(read('g.V().fold()').shape).toEqual({ kind: 'list', elem: 'vertex' });
     expect(read('g.V().values("name").fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', typed: true } });

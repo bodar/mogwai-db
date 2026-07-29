@@ -12,10 +12,9 @@ comments and other docs cite them.
 (the ratchet floor), `census/{goldens,deferrals}.tsv` (the two-way behavioural baseline, 5
 `crashed` rows = item 0c), and the two hand-curated L5 ratchets — `L5-properties/known.ts` and
 `capability-baseline.ts`, plus the `knownBroken` entries inside `laws.ts`. A defect parked in any of
-them must ALSO appear here; a ratchet entry is tracked, not defended. **No generated-input discovery
-runs in the standard build today — the seed is pinned at 42 — and `mise run L5-random` is RED at
-essentially every seed** — item 0d, whose fix is to rotate the seed inside `mise run test` behind
-those same ratchets.
+them must ALSO appear here; a ratchet entry is tracked, not defended. **L5 derives its ordinary
+generated-input seed from `HEAD` and prints the `L5_SEED=<n>` reproduction command**, so each commit
+gets new coverage while CI and a local checkout execute the same corpus.
 
 > **Verify an item's premise against the code before picking it — this index has been stale in BOTH
 > directions.** The cheapest check is usually a 10-line probe that compiles the traversals the item
@@ -50,50 +49,15 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      a re-sourced modulation child now reaches it. **The opening: for a re-sourced body the
      partition is redundant** (the child ignores the traverser). *Medium.*
 
-0d. **`mise run L5-random` is RED at essentially every seed — and CI's fixed seed 42 is green, so
-   none of it has ever been visible.** Measured 2026-07-29: seeds 5, 11, 27, 91, 143 all fail, each
-   with 1–2 failing tests. `known.ts` is EMPTY and correctly so — none of this is a fast-path
-   *wrong answer*. Every divergence is `kind: "support"`, i.e. **"generic threw, fast paths ON ran"**:
-   the fast path answers where the generic path — the declared semantic authority — has no lowering.
-   Same class as `predicateInlining` not being disable-safe (item 0) and the `tryInlineScalarPredicate`
-   violation (item 0b). Three distinct causes, all reproduced standalone:
-   - **A set-narrowing barrier FOLLOWED BY another step in a filter-position child body**, attributed
-     to `predicateInlining` by the isolation test. `g.V(1).where(__.out().dedup().hasLabel('person'))`
-     answers with fast paths on and throws `where() traversal not supported by inline predicate or
-     generic child existence lowering` with them off. The rule is sharp: `dedup()`/`limit(n)` then any
-     further step diverges; `order()`/`tail(n)` then a step does NOT (they cannot change an existence
-     answer), and a barrier as the LAST step is fine. Same for `where`/`filter`/`not`. So the generic
-     child-existence lowering needs the set-narrowing barriers in its body vocabulary — this is item
-     3's per-iteration-barrier question in a child scope rather than a repeat body. *Medium-High — a
-     fast path that is not disable-safe, which the FastPathConfig contract forbids outright.*
-   - **`where()` over a SCALAR/map parent** — `g.E().valueMap().select('a').where(__.where(__.count()))`
-     runs by default and throws `where() after a scalar stream not yet supported` generically. NOT
-     attributed to `predicateInlining` (`onlyDisabled` shows no divergence), so it is a second switch
-     or the default route itself. Straight item 5c parent-shape work, reached from a new direction.
-   - **The shape table emits `bothV('label')`, which the GRAMMAR REJECTS** (`table.test.ts` fails at
-     seeds 27 and others with `no viable alternative`). `bothV` takes NO label argument in
-     `Gremlin.g4` (unlike `bothE`/`both`); `shape.ts:171`'s own `render` is correct, so the arg is
-     interpolated by a generic label-decoration path in `generate.ts`. **This is a TABLE bug, exactly
-     what `table.test.ts`'s header says it exists to catch** — and its real cost is silent: those
-     traversals always throw, which empties differential coverage rather than failing anything.
-     *Medium — cheap fix, and it is measuring instrument integrity.*
-
-   **The process gap is the actual item here.** Discovery depends on someone remembering to run
-   `L5-random` after touching a fast path, the child seam or the predicate layer — and it rots
-   silently when nobody does. The fix (`docs/2026-07-28-property-based-testing-l5.md`, "Seeds") is a
-   **ROTATING SEED IN THE STANDARD BUILD**, gated by the committed witness ratchets: every
-   `mise run test` draws a fresh seed and PRINTS it (`L5_SEED=<n>` reproduces), a raw failure already
-   recorded in `capability-baseline.ts`/`known.ts` is reported but not fatal, and only a NEW signature
-   fails the build. That is what makes rotation non-flaky — a fresh seed buys fresh coverage, not a
-   fresh failure — and it puts discovery on the build everyone already runs instead of one nobody
-   remembers. **Not a scheduled/nightly job: an out-of-band run is a report someone has to read, and
-   this item is the evidence that they don't.** **CI must run exactly what a developer runs** — today
-   `ci → test → L5`, with no CI-specific seed or sample size, and rotation must not introduce one; the
-   `HEAD`-derived draw rule keeps a given commit's corpus identical on a laptop and a runner (see the
-   doc's Seeds table). Sequencing: fix the `bothV('label')` table bug and
-   diagnose the two support-divergences above FIRST (the ratchet must be able to absorb what is
-   already known), then turn on rotation. Once fixed, promote each into an L4 `.feature` per
-   `test/CLAUDE.md`.
+0e. **The deep L5 table sweep still finds a parser-integrity failure at high nesting depth.**
+   `mise run L5-random` now supplies a real random positive seed, but its `table.test.ts` parse+chain
+   phase fails around 8–10k generated inputs for forms such as
+   `g.V(1).hasLabel('person').repeat(__.not(__.or(__.identity(), __.hasLabel('person').hasLabel('person')))).times(1)`.
+   The minimized string parses in a fresh process, so this is not yet proven to be a bad table edge;
+   first determine whether ANTLR's shared prediction state is contaminated by an earlier generated
+   input or whether the shrinker is reporting a non-reproducing witness. Keep the table fail-closed —
+   excluding deep shapes or downgrading the assertion would recreate the coverage blind spot it found.
+   *Medium — measurement integrity.*
 
 1. **List members frame as bare values, not elements.** `AliasEntry` does not record the member
    shape, so a path/element-list label cannot frame its members as vertices. Blocks
@@ -532,11 +496,11 @@ proves nothing — read the deferral clusters instead.
   failures from generated compositions) and the `knownBroken` entries buried inside `laws.ts`
   (metamorphic violations — the highest-severity class, and the easiest of the three to miss because it
   is not a file of its own). Each has exactly ONE reader. **The cost is measured, not hypothetical:**
-  the 2026-07-29 refresh found item 0d only by running `L5-random` by hand, and the skill that
-  refreshes this index had never looked at any of the three. The obvious target is one committed file
-  per the `l3-state.json` precedent. **Item 0d's rotating seed raises the stakes here** — it makes
-  these three consulted on every build rather than on a manual run, so their matchers become the
-  build's gate and an entry without a diagnosis silences a finding every run.
+  the 2026-07-29 refresh found the now-landed L5 discovery gap only by running `L5-random` by hand,
+  and the skill that refreshes this index had never looked at any of the three. The obvious target is
+  one committed file per the `l3-state.json` precedent. **The HEAD-derived seed raises the stakes
+  here** — it makes these three consulted on every build rather than on a manual run, so their
+  matchers become the build's gate and an entry without a diagnosis silences a finding every run.
   **But do not do this as a naive merge — the three differ on properties that are load-bearing:**
   - **Hand-authored vs generated.** `l3-state.json` and the census TSVs are machine-written
     (`census.ts` `writeFileSync`); all three L5 lists are hand-curated *because* each entry must carry

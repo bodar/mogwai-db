@@ -382,15 +382,23 @@ function elementRowParts(body: ReturnType<typeof stepChain>, ctx?: ChildCtx): { 
   // With a ctx, a uniform-element branch (union(out(),in())) is likewise element-preserving and
   // rides the prefix fold — as is an as() bind and a select() re-root onto an element label,
   // which elementRun threads the env across (a bind types the selects that follow it).
-  if (!prefix.length || !elementRun(prefix, ctx)) return null;
-  // The suffix's `local` is emitted by recursing into tryCompileElementChild, which needs an
-  // ELEMENT-shaped body — so classify has to ask the same question. Without this the classifier
-  // over-claims (`by(__.out().local(__.values('name')).fold())`), the emitter returns null, and
-  // the caller's non-null assertion turns a clean deferral into a null-deref crash. Keeping the
-  // two in lockstep is this leaf's whole point. A ctx-free caller can't classify the inner body,
-  // so it conservatively rejects a local suffix.
-  const localBodyOk = (s: IRStep) => ctx !== undefined && isElementChild((s.args ?? [])[0]?.nested, ctx);
-  if (suffix.some((s) => !CHILD_ELEMENT_ROW_STEPS.has(s.name) || (s.name === 'local' && !localBodyOk(s)))) return null;
+  const initial = elementRun(prefix, ctx);
+  if (!prefix.length || !initial) return null;
+  // A scoped row barrier preserves the element shape. Consequently an element body may re-enter
+  // the ordinary element fold after it: out().dedup().hasLabel(), or a further movement before
+  // the next scoped barrier. Thread the label environment through those phases exactly as the
+  // initial prefix does; `local` itself confines its body's binds, so it does not update `cur`.
+  let cur = initial.ctx;
+  for (const s of suffix) {
+    if (CHILD_ELEMENT_ROW_STEPS.has(s.name)) {
+      // local's body is emitted through tryCompileElementChild, so its element shape must be
+      // established here as well. Use the labels visible at THIS phase, not the outer context.
+      if (s.name === 'local' && (cur === undefined || !isElementChild((s.args ?? [])[0]?.nested, cur))) return null;
+      continue;
+    }
+    if (!isElementChildStep(s, cur)) return null;
+    cur = bindLabels(cur, s, 'element');
+  }
   return { prefix, suffix };
 }
 

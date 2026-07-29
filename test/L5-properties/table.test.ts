@@ -16,8 +16,9 @@ import fc from 'fast-check';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import { traversal } from './generate.ts';
 import { TRANSITIONS, SHAPES, namesByShape, type Shape } from './shape.ts';
+import { L5_SEED } from './seed.ts';
 
-const SEED = Number(process.env.L5_SEED ?? 42);
+const SEED = L5_SEED;
 const RUNS = Number(process.env.L5_RUNS ?? 300);
 /** The permissive params proxy L1's corpus test uses: every name is "bound", so a traversal
  *  referencing a variable still chains. */

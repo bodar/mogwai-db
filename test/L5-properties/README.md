@@ -5,17 +5,16 @@ in `docs/2026-07-28-property-based-testing-l5.md` — this file deliberately des
 there now.
 
 ```
-mise run L5          # seed 42, 300 generated traversals; also runs inside `mise run test`
+mise run L5          # HEAD-derived seed, 300 generated traversals; also runs inside `mise run test`
 mise run L5-random   # random seed, 3,000 traversals — the deeper sweep (size keeps it out of `ci`)
 L5_SEED=n L5_RUNS=n  # override seed / generated-traversal count
 L5_LAW_RUNS=n        # per-law instantiations for the metamorphic oracle
 ```
 
-**CI runs exactly this** — `ci → test → L5`, no CI-specific seed, sample size or skip. Seed 42 is the
-default everywhere, not a CI policy. The consequence is that the generated half is currently a *fixed
-corpus* that discovers nothing after its first run; the intended fix is a rotating, printed seed in
-this same build gated by the witness ratchets (index item 0d, and "Seeds" in the design doc). It is
-deliberately **not** a scheduled job — an out-of-band run is one nobody reads.
+**CI runs exactly this** — `ci → test → L5`, no CI-specific seed, sample size or skip. The generated
+half derives one deterministic seed from `HEAD`, prints it, and accepts `L5_SEED=n` to reproduce an
+exact failing draw. Thus every commit explores a new corpus while a local checkout and CI test the
+same one. It is deliberately **not** a scheduled job — an out-of-band run is one nobody reads.
 
 Both need the **submodule**, unlike L1/L2: the differential executes its traversals through the real
 `Executor`, which frames via `src/io.ts` → `gremlin/io`, an export only the submodule-linked client

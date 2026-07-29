@@ -8,12 +8,13 @@ import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { outcomeOf, ALL_GENERIC } from './oracle.ts';
 import { transitionWitnesses, traversal } from './generate.ts';
 import { KNOWN_RAW_WITNESSES } from './capability-baseline.ts';
+import { L5_SEED } from './seed.ts';
 
 const RAW_FAILURE = /^(?:Binding expected |.*\b(?:TypeError|RangeError)\b)|\b(?:syntax error|constraint failed|no such (?:column|table))\b/i;
 
 describe('L5 capability ratchet', () => {
   test('every declared transition witness and generated composition either execute or fail closed', () => {
-    const seed = Number(process.env.L5_SEED ?? 42);
+    const seed = L5_SEED;
     const samples = fc.sample(traversal({ steps: 5, depth: 2 }), { seed, numRuns: 240 });
     const witnesses = transitionWitnesses();
     const raw: string[] = [];

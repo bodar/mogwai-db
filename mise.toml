@@ -79,7 +79,7 @@ depends = ["install", "check", "submodule"]
 run = "bun test test/L4-addendum"
 
 [tasks.L5]
-description = "L5 — property-based fast-path differential (fixed seed)"
+description = "L5 — property-based fast-path differential (HEAD-derived seed)"
 # `submodule` listed explicitly, unlike L1/L2: the differential EXECUTES its traversals through the
 # real Executor, which frames results via src/io.ts → `gremlin/io` — an export only the master
 # client has. Anything that runs a traversal consumes submodule content; parsing and compiling do
@@ -91,15 +91,15 @@ run = "bun test test/L5-properties"
 # The DEEP sweep: a random seed and a much larger sample. Findings get diagnosed into
 # test/L5-properties/known.ts (or fixed), then promoted into an L4 .feature so the floor rises.
 #
-# Not in `ci` only because of its SIZE (3000 traversals). The seed being random is not the reason and
-# must not become one: the intended end state is that `L5` itself rotates its seed inside the ordinary
-# build, printed for reproduction and gated by the committed witness ratchets so only a NEW signature
-# fails. Discovery that lives in a run someone has to remember does not happen — see index item 0d and
-# docs/2026-07-28-property-based-testing-l5.md "Seeds".
+# Not in `ci` only because of its SIZE (3000 traversals). Ordinary L5 derives its seed from HEAD,
+# so CI and a local checkout of the same commit draw the same corpus; this deeper sweep remains
+# intentionally random for breadth and prints its seed for reproduction.
 [tasks.L5-random]
 description = "L5 exploration — random seed, 3000 generated traversals (not a CI gate)"
 depends = ["install", "check", "submodule"]
-run = "L5_SEED=$RANDOM L5_RUNS=3000 bun test test/L5-properties"
+# mise's task shell is not required to provide Bash's $RANDOM. Ask Bun for a portable positive
+# integer explicitly, then pass it through the normal L5_SEED reproduction channel.
+run = "L5_SEED=$(bun -e 'console.log(Math.floor(Math.random() * 0x7fffffff))') L5_RUNS=3000 bun test test/L5-properties"
 
 # The refactor guard, NOT a ladder level: it asserts nothing about correctness, only that behaviour
 # has not CHANGED. `submodule` because it executes traversals (same reason as L5).

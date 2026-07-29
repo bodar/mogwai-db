@@ -31,9 +31,10 @@ import {
 import { seeded } from '../support/graph.ts';
 import { traversal } from './generate.ts';
 import { isKnown, staleEntries } from './known.ts';
+import { L5_SEED, L5_SEED_SOURCE } from './seed.ts';
 
-/** Fixed unless L5_SEED is set — see the header on why CI must not run a random seed. */
-const SEED = Number(process.env.L5_SEED ?? 42);
+/** One reproducible draw per HEAD; L5_SEED is the exact reproduction override. */
+const SEED = L5_SEED;
 /** Generated-traversal count. Deliberately modest by default so L5 stays inside a normal test run;
  *  L5_RUNS raises it for an exploration pass. */
 const RUNS = Number(process.env.L5_RUNS ?? 300);
@@ -103,7 +104,7 @@ describe('L5 — fast-path differential', () => {
     const shared = mint();
     const executed = fc.sample(traversal({ steps: 5, depth: 2 }), { seed: SEED, numRuns: RUNS })
       .filter((g) => ran(shared, g.query)).length;
-    console.log(`L5 generated: ${RUNS} traversals @ seed ${SEED}, ${executed} executable`);
+    console.log(`L5 generated: ${RUNS} traversals @ seed ${SEED} (${L5_SEED_SOURCE}; L5_SEED=${SEED} to reproduce), ${executed} executable`);
     expect(executed).toBeGreaterThan(RUNS / 4);
   }, 600_000);
 
