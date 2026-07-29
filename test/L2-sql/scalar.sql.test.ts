@@ -857,6 +857,15 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().order().by(__.out().count()).values("name")').sql).toContain('ROW_NUMBER() OVER');
   });
 
+  test('a canonicalized empty child remains identity in the generic scalar existence gate', () => {
+    const store = seededStore();
+    // The inner where is inert because count() always emits. Its removal leaves an
+    // empty nested body, which is Gremlin identity — including when it sits inside
+    // another scalar where() whose inline predicate fast path is disabled.
+    const query = 'g.V(1).id().where(__.where(__.is(P.gt(0)).count()))';
+    expect(runWith(store, query, { fastPaths: { scalarPredicateInlining: false } }).map((r) => r.v)).toEqual([1]);
+  });
+
   test('fold() wraps the projection in a list shape (element or scalar)', () => {
     expect(read('g.V().fold()').shape).toEqual({ kind: 'list', elem: 'vertex' });
     expect(read('g.V().values("name").fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', typed: true } });

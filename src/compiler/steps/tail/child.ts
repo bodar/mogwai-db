@@ -445,7 +445,14 @@ function compileScalarChildRows(
     const last = body.at(-1);
     const reducer = last && CHILD_SCALAR_REDUCERS.has(last.name) ? last.name as ScalarReducer : undefined;
     const rest = reducer ? body.slice(0, -1) : body;
-    if (!body.length) return null;
+    // A canonicalization pass may erase every step from a nested body. An empty
+    // traversal is identity, so it remains productive once per pushed parent row.
+    // Keep that semantic rule at the shared child seam rather than making each
+    // existence consumer recognize the particular body a pass erased.
+    if (!body.length) {
+      const pushed = pushChildScope(parent, scope);
+      return applyScalarChildCardinality(parent, pushed, pushed.seed, use, retainChildScope);
+    }
 
     // (b) re-source body: V()/E() head (no nested-traversal id arg) then an element remainder.
     if (isResourceHead(rest)) {
@@ -976,11 +983,19 @@ function compileElementChildRows(
   // layoutCols (sack included) into the domain, and lowerElementSteps threads it — so a scoped
   // sack fold (local(__.sack(op).by(...))) folds per parent correctly. fromV stays gated (an
   // edge's entering-vertex is undefined inside a child scope that may move off the edge).
-  if (!nested || parent.traverserLayout.fromV) return null;
+  if (!nested && !preParsed) return null;
+  // See the scalar counterpart above. This must precede shape classification:
+  // identity has the parent's element shape and requires no prefix StepFn.
+  const body = preParsed ?? childSteps(nested, parent.params);
+  if (!body.length) {
+    const pushed = pushChildScope(parent, scope);
+    return { stream: pushed.seed, frame: pushed.frame };
+  }
+  if (parent.traverserLayout.fromV) return null;
   // ONE shape classification (the same classifyElementChildRows the element preflight peeks
   // use) — the bare-order strip, firstPolicy order modulator, and empty-before handling all
   // live in the shared helper, so preflight and compiler cannot diverge.
-  const shape = classifyElementChildRows(preParsed ?? childSteps(nested, parent.params), stripTerminal, firstPolicy, childCtx(parent));
+  const shape = classifyElementChildRows(body, stripTerminal, firstPolicy, childCtx(parent));
   if (!shape) return null;
   const { parts, orderStep } = shape;
   const pushed = pushChildScope(parent, scope);

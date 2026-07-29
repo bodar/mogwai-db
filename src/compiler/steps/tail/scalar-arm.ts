@@ -537,15 +537,6 @@ export function tryScalarFilterByChildExistence(s: ScalarStream, step: IRStep): 
   const d = frame.domain.as('d');
   const terms: Expression[] = [];
   for (const arm of nested) {
-    // A scalar child starts with one current-value traverser per parent. These row
-    // operations only reorder that singleton (or leave it untouched), so their
-    // existence predicate is tautological. Keeping this fact at the generic
-    // child-existence boundary makes the inline and non-inline routes agree.
-    const body = stepChain(arm.nested, s.params) as IRStep[];
-    if (body.length > 0 && body.every((x) => x.name === 'identity' || x.name === 'order')) {
-      terms.push(q`1`);
-      continue;
-    }
     const child = tryCompileScalarValueRows(seed, arm.nested, reuseCurrentFrame(scope, frame));
     if (!child) return null;
     const c = child.stream.rel.as('c');
