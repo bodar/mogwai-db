@@ -375,6 +375,23 @@ test('mergeV option(onMatch) patches props on the matched vertex', () => {
   expect(run(store, 'g.V().has("name","marko").values("age")').map((r) => r.v)).toEqual([30]);
 });
 
+test('mergeV option maps preserve CardinalityValueTraversal and the option default', () => {
+  const ages = (option: string) => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    run(store, 'g.addV("person").property("name","marko").property(Cardinality.list,"age",29).property(Cardinality.list,"age",31).property(Cardinality.list,"age",32)');
+    run(store, `g.mergeV([(T.label): "person", name: "marko"]).option(Merge.onMatch, ${option})`);
+    return run(store, 'g.V().has("name","marko").values("age")').map((r) => r.v).sort();
+  };
+  expect(ages('[age: Cardinality.list(33)]')).toEqual([29, 31, 32, 33]);
+  expect(ages('[age: Cardinality.set(31)]')).toEqual([29, 31, 32]);
+  expect(ages('[age: Cardinality.single(33)]')).toEqual([33]);
+  expect(ages('[age: 33], Cardinality.set')).toEqual([29, 31, 32, 33]);
+
+  const created = new GraphStore(new BunSqlite(':memory:'));
+  run(created, 'g.mergeV([(T.label): "person", name: "alice"]).option(Merge.onCreate, [age: Cardinality.set(81)])');
+  expect(run(created, 'g.V().has("name","alice").values("age")').map((r) => r.v)).toEqual([81]);
+});
+
 test('mergeV option(onCreate) adds props only on the create branch', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
   run(store, 'g.mergeV([(T.label): "person", name: "stephen"]).option(Merge.onCreate, [created: "Y"])');

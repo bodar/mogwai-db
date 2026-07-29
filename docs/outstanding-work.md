@@ -9,7 +9,7 @@ numbers are stable IDs — landed items are deleted and their numbers are not re
 comments and other docs cite them.
 
 **The five committed test baselines are inputs to this index, not just gates.** `l3-state.json`
-(the ratchet floor), `census/{goldens,deferrals}.tsv` (the two-way behavioural baseline, 17
+(the ratchet floor), `census/{goldens,deferrals}.tsv` (the two-way behavioural baseline, 9
 `crashed` rows = item 0c), and the two hand-curated L5 ratchets — `L5-properties/known.ts` and
 `capability-baseline.ts`, plus the `knownBroken` entries inside `laws.ts`. A defect parked in any of
 them must ALSO appear here; a ratchet entry is tracked, not defended. **`mise run L5-random` is not
@@ -48,16 +48,10 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      a re-sourced modulation child now reaches it. **The opening: for a re-sourced body the
      partition is redundant** (the child ignores the traverser). *Medium.*
 
-0c. **17 fail-closed VIOLATIONS, surfaced by the census** (`test/census/deferrals.tsv`, status
+0c. **9 fail-closed VIOLATIONS, surfaced by the census** (`test/census/deferrals.tsv`, status
    `crashed`). Each throws a raw runtime error instead of a clear deferral, which the project's
    root rule forbids outright. They were invisible before because a crash and a deferral both just
    "fail"; the census separates them and gates the count from growing. Five root causes:
-   - **`Cardinality.set(v)`/`list(v)`/`single(v)` as a merge-map VALUE — 8 cases.**
-     `g.mergeV([name:"marko"]).option(Merge.onMatch, [age: Cardinality.set(31)])` reaches SQLite
-     with the tagged `{cardinality}` object still wrapping the value: *"Binding expected string,
-     TypedArray, boolean, number, bigint or null"*. The value needs unwrapping (and the
-     cardinality honouring, or a clean deferral) at the merge-map seam. Biggest single cluster and
-     probably the cheapest. *Medium.*
    - **A `datetime` property beyond int32 — 2 cases.** `property("birthday", datetime(...))` with
      an epoch-ms outside ±2^31 throws Node's *"The value of \"value\" is out of range"* — an Int32
      write on a value that is a Long. A framing/serializer bug, not a storage one. *Medium.*
@@ -72,6 +66,10 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      `by()` bodies are `select(first/last, "v")` over a rebound label; and `node.constructor` on
      the named-loop `repeat("a", …)` form (already tracked in item 3, listed here for completeness
      — the census counts it as a crash either way). *Low-Med.*
+   - **Ordering a heterogeneous injected collection — 2 cases.** `g.inject(...scalars, maps,
+     sets...).order()` and `.order().by(desc)` bind a raw collection object while constructing the
+     sort key. Either provide a total Gremlin ordering across every admitted injected value or
+     defer before rendering; never leak a SQLite bind error. *Medium.*
 
 0d. **`mise run L5-random` is RED at essentially every seed — and CI's fixed seed 42 is green, so
    none of it has ever been visible.** Measured 2026-07-29: seeds 5, 11, 27, 91, 143 all fail, each

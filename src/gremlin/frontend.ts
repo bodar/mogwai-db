@@ -54,7 +54,10 @@ export type TaggedArg =
   | { readonly token: string }
   | { readonly direction: string }
   | { readonly merge: string }
-  | { readonly cardinality: string }
+  /** A bare Cardinality token, or its value-bearing form used inside a map.
+   * `Cardinality.set(v)` is TinkerPop's CardinalityValueTraversal: its cardinality
+   * overrides a map/default cardinality for this one property. */
+  | { readonly cardinality: string; readonly value?: any }
   | { readonly gtype: string }
   | { readonly pick: string }
   | { readonly withOption: string }
@@ -76,6 +79,8 @@ export const isTokenArg = (arg: unknown): arg is Extract<TaggedArg, { token: str
 export const isDirectionArg = (arg: unknown): arg is Extract<TaggedArg, { direction: string }> => tagged(arg, 'direction');
 export const isMergeArg = (arg: unknown): arg is Extract<TaggedArg, { merge: string }> => tagged(arg, 'merge');
 export const isCardinalityArg = (arg: unknown): arg is Extract<TaggedArg, { cardinality: string }> => tagged(arg, 'cardinality');
+export const isCardinalityValueArg = (arg: unknown): arg is { readonly cardinality: string; readonly value: any } =>
+  isCardinalityArg(arg) && 'value' in arg;
 export const isGTypeArg = (arg: unknown): arg is Extract<TaggedArg, { gtype: string }> => tagged(arg, 'gtype');
 export const isPickArg = (arg: unknown): arg is Extract<TaggedArg, { pick: string }> => tagged(arg, 'pick');
 export const isWithOptionArg = (arg: unknown): arg is Extract<TaggedArg, { withOption: string }> => tagged(arg, 'withOption');
@@ -353,8 +358,16 @@ function walkArgs(node: any, out: any[], params: Record<string, any>, types: (Ty
   }
   // Merge.onCreate/onMatch/outV/inV — mergeV/mergeE option() selector + endpoints.
   if (cls === 'TraversalMergeContext') { emit({ merge: enumSuffix(node) }); return; }
-  // Cardinality.list/set/single — property() cardinality (list/set deferred to W4).
-  if (cls === 'TraversalCardinalityContext') { emit({ cardinality: enumSuffix(node) }); return; }
+  // Cardinality.list/set/single is either a bare property() cardinality or the
+  // value-bearing CardinalityValueTraversal used by property/merge maps. Preserve
+  // the latter as one value instead of recursively flattening its payload into the
+  // surrounding map/step arguments.
+  if (cls === 'TraversalCardinalityContext') {
+    const literal = node.genericLiteral?.();
+    const cardinality = node.getText().match(/(?:^|\.)(single|set|list)(?:\(|$)/i)?.[1]?.toLowerCase();
+    if (!cardinality) throw new Error(`unrecognized Cardinality form: ${node.getText()}`);
+    emit(literal ? { cardinality, value: argOf(literal, params) } : { cardinality }); return;
+  }
   // A map literal [k: v, …] / [:] — a real JS Map so it matches how a bound map
   // parameter (xx1) arrives after GraphBinary deserialization. Keys are tagged
   // ({token}/{direction}) or strings; values recurse via argOf. Do NOT fall

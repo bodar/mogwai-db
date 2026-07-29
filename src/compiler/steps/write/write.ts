@@ -2,7 +2,7 @@ import type { GraphStore } from '../../../storage.ts';
 import { q, value, list, empty, raw, render, type Expression } from '../../../sql/kernel/q.ts';
 import { labelIn, nodeHasProp, edgeHasProp, sqlElem, type Elem } from '../../plan/plan.ts';
 import { gremlinTypeOf, isCollectionType, storedScalar, flatType, mapEntryType, valueNodeOf, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
-import { stepChain, isNested, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
+import { stepChain, isNested, isCardinalityArg, isCardinalityValueArg, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { staticTypeOf, readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../../../sql/kernel/render.ts';
@@ -270,10 +270,10 @@ function metaOf(metaArgs: any[]): Record<string, any> | null {
 // captured propTypes (the map's TypeNode: a literal subtype or a typed client's wire
 // DataType; a nested value's read-shape type), falling back to JS inference where the
 // channel said nothing (a JS client that dropped the type / an untyped bound map).
-const singleProps = (rec: Record<string, any>, types: Record<string, TypeNode | null> = {}): PropSpec[] =>
+const singleProps = (rec: Record<string, any>, types: Record<string, TypeNode | null> = {}, cardinalities: Record<string, Cardinality> = {}): PropSpec[] =>
   Object.entries(rec).map(([key, value]) => ({
     key, value, typeNode: types[key] ?? null,
-    vtype: gremlinTypeOf(value, types[key] ?? null), meta: null, cardinality: 'single' as Cardinality,
+    vtype: gremlinTypeOf(value, types[key] ?? null), meta: null, cardinality: cardinalities[key] ?? 'single',
   }));
 
 // An addV(...) step + its trailing property() steps → a vertex spec. A property key or
@@ -648,6 +648,9 @@ interface MergeSpec {
   props: Record<string, any>;
   propTypes: Record<string, TypeNode | null>;
   propKeys: Record<string, string | { nested: any }>;
+  /** The per-key property cardinality. A map's CardinalityValueTraversal wins over
+   * its enclosing option(..., Cardinality.x) default, matching TinkerPop. */
+  propCardinalities: Record<string, Cardinality>;
 }
 
 function classifyMergeKey(k: any): { kind: 'label' | 'id' | 'outV' | 'inV' | 'prop'; name?: string } {
@@ -695,9 +698,9 @@ function resolveMergeArg(raw: any, sideEffects: Map<string, any> | undefined, pa
   throw new Error(`merge whole-arg traversal __.${names} not yet supported`);
 }
 
-function normalizeMergeMap(raw: any, typeNode: TypeNode | null, sideEffects?: Map<string, any>, params: Record<string, any> = {}): MergeSpec {
+function normalizeMergeMap(raw: any, typeNode: TypeNode | null, sideEffects?: Map<string, any>, params: Record<string, any> = {}, defaultCardinality: Cardinality = 'single'): MergeSpec {
   raw = resolveMergeArg(raw, sideEffects, params);
-  const spec: MergeSpec = { label: null, id: null, outV: undefined, inV: undefined, props: {}, propTypes: {}, propKeys: {} };
+  const spec: MergeSpec = { label: null, id: null, outV: undefined, inV: undefined, props: {}, propTypes: {}, propKeys: {}, propCardinalities: {} };
   if (raw == null) return spec; // mergeV(null) — match anything
   if (!(raw instanceof Map))
     throw new Error('merge argument must be a map ([k:v] / bound Map), null, or empty ([:])');
@@ -711,6 +714,7 @@ function normalizeMergeMap(raw: any, typeNode: TypeNode | null, sideEffects?: Ma
       spec.props[slot] = v;
       spec.propTypes[slot] = null;
       spec.propKeys[slot] = k;
+      spec.propCardinalities[slot] = defaultCardinality;
       continue;
     }
     const c = classifyMergeKey(k);
@@ -721,12 +725,18 @@ function normalizeMergeMap(raw: any, typeNode: TypeNode | null, sideEffects?: Ma
     else if (c.kind === 'outV') spec.outV = classifyMergeVal(v);
     else if (c.kind === 'inV') spec.inV = classifyMergeVal(v);
     else {
-      spec.props[c.name!] = v;
+      const cardinalityValue = isCardinalityValueArg(v) ? v : null;
+      const value = cardinalityValue ? cardinalityValue.value : v;
+      const cardinality = cardinalityValue?.cardinality ?? defaultCardinality;
+      if (cardinality !== 'single' && cardinality !== 'list' && cardinality !== 'set')
+        throw new Error(`unsupported merge property cardinality '${cardinality}'`);
+      spec.props[c.name!] = value;
       spec.propKeys[c.name!] = c.name!;
       // A literal value's FULL type tree comes from the map's TypeNode (the parser subtype /
       // the typed client's wire DataType) — kept whole so a collection value's elements/keys
       // stay typed; a nested value's type is filled per driver (a scalar, in resolveMergeSpec).
-      spec.propTypes[c.name!] = isNested(v) ? null : mapEntryType(typeNode, String(k));
+      spec.propTypes[c.name!] = isNested(value) ? null : mapEntryType(typeNode, String(k));
+      spec.propCardinalities[c.name!] = cardinality;
     }
   }
   return spec;
@@ -748,6 +758,7 @@ function resolveMergeSpec(engine: Engine, store: GraphStore, spec: MergeSpec, se
   };
   const props: Record<string, any> = {};
   const propTypes: Record<string, TypeNode | null> = {};
+  const propCardinalities: Record<string, Cardinality> = {};
   for (const [slot, v] of Object.entries(spec.props)) {
     const rawKey = spec.propKeys[slot] ?? slot;
     const k = isNested(rawKey)
@@ -759,13 +770,13 @@ function resolveMergeSpec(engine: Engine, store: GraphStore, spec: MergeSpec, se
         })()
       : rawKey;
     const r = rv(v, slot, `value for '${k}'`);
-    props[k] = r.value; propTypes[k] = r.typeNode;
+    props[k] = r.value; propTypes[k] = r.typeNode; propCardinalities[k] = spec.propCardinalities[slot] ?? 'single';
   }
   return {
     label: isNested(spec.label) ? String(rv(spec.label, null, 'label').value) : spec.label,
     id: rv(spec.id, null, 'id').value,
     outV: spec.outV, inV: spec.inV,
-    props, propTypes, propKeys: Object.fromEntries(Object.keys(props).map((k) => [k, k])),
+    props, propTypes, propKeys: Object.fromEntries(Object.keys(props).map((k) => [k, k])), propCardinalities,
   };
 }
 
@@ -791,10 +802,15 @@ function parseMergeOptions(mods: Step[], step: string, sideEffects: Map<string, 
   let onCreate: MergeSpec | null = null, onMatch: MergeSpec | null = null;
   for (const s of mods) {
     if (s.name !== 'option') throw new Error(`step not implemented after ${step}(): ${s.name}()`);
-    const [sel, mapArg] = s.args;
+    const [sel, mapArg, cardinalityArg] = s.args;
     if (!sel || typeof sel !== 'object' || !('merge' in sel))
       throw new Error(`${step} option() selector must be Merge.onCreate/onMatch`);
-    const spec = normalizeMergeMap(mapArg, s.argTypes?.[1] ?? null, sideEffects, params);
+    if (cardinalityArg != null && (!isCardinalityArg(cardinalityArg) || isCardinalityValueArg(cardinalityArg)))
+      throw new Error(`${step} option() third argument must be Cardinality.single/list/set`);
+    const defaultCardinality = cardinalityArg?.cardinality ?? 'single';
+    if (defaultCardinality !== 'single' && defaultCardinality !== 'list' && defaultCardinality !== 'set')
+      throw new Error(`${step} option() has unsupported cardinality '${defaultCardinality}'`);
+    const spec = normalizeMergeMap(mapArg, s.argTypes?.[1] ?? null, sideEffects, params, defaultCardinality);
     if (sel.merge === 'oncreate') onCreate = spec;
     else if (sel.merge === 'onmatch') onMatch = spec;
     else throw new Error(`${step} option(Merge.${sel.merge}) not supported`);
@@ -836,14 +852,16 @@ function compileMergeV(engine: Engine, steps: IRStep[], params: Record<string, a
         const matches = store.query<any>(match.sql, match.binds);
         if (matches.length) {
           for (const m of matches) {
-            if (om) for (const [k, v] of Object.entries(om.props)) applyVertexProperty(store, m.id, k, v, gremlinTypeOf(v, om.propTypes[k] ?? null), null, 'single', om.propTypes[k] ?? null);
+            if (om) for (const [k, v] of Object.entries(om.props))
+              applyVertexProperty(store, m.id, k, v, gremlinTypeOf(v, om.propTypes[k] ?? null), null, om.propCardinalities[k] ?? 'single', om.propTypes[k] ?? null);
             out.push({ vertex: { id: m.uid ?? m.id, label: m.label, props: readVertexProps(store, m.id) } });
           }
         } else {
           const label = (oc?.label as string) ?? (matchSpec.label as string) ?? 'vertex';
           const props = { ...matchSpec.props, ...(oc?.props ?? {}) };
           const propTypes = { ...matchSpec.propTypes, ...(oc?.propTypes ?? {}) };
-          const v = insertVertex(engine, store, { label, props: singleProps(props, propTypes), uid: matchSpec.id ?? oc?.id ?? null }, params, sideEffects);
+          const propCardinalities = { ...matchSpec.propCardinalities, ...(oc?.propCardinalities ?? {}) };
+          const v = insertVertex(engine, store, { label, props: singleProps(props, propTypes, propCardinalities), uid: matchSpec.id ?? oc?.id ?? null }, params, sideEffects);
           // Echo typed props read back from storage ({t,v}), not the raw resolved values.
           out.push({ vertex: { id: v.extId, label, props: readVertexProps(store, v.id) } });
         }
@@ -890,6 +908,8 @@ function compileMergeE(engine: Engine, steps: IRStep[], params: Record<string, a
         const matchSpec = resolveMergeSpec(engine, store, matchSpecRaw, seed, params, sideEffects);
         const oc = onCreate ? resolveMergeSpec(engine, store, onCreate, seed, params, sideEffects) : null;
         const om = onMatch ? resolveMergeSpec(engine, store, onMatch, seed, params, sideEffects) : null;
+        if (Object.values(oc?.propCardinalities ?? {}).some((c) => c !== 'single') || Object.values(om?.propCardinalities ?? {}).some((c) => c !== 'single'))
+          throw new Error('mergeE option() does not support vertex-property cardinality');
         const outV = endpoint(matchSpec.outV, oc?.outV, cur, 'outV');
         const inV = endpoint(matchSpec.inV, oc?.inV, cur, 'inV');
         const match = edgeMatchQuery(matchSpec, outV, inV);
