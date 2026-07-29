@@ -149,6 +149,16 @@ export const perRowColumnOf = (t: ScalarType | undefined): string | undefined =>
 export const perRowCols = (t: ScalarType | undefined): string[] =>
   t?.kind === 'perRow' ? [t.column] : [];
 
+/** One concrete arm in the wire representation of a VariantStream. A variant is
+ * a per-row tagged union, so its framing contract records the arms directly rather
+ * than encoding them as unrelated optional flags on Shape. Scalar rows are always
+ * present as an arm because a missing static tag means `unknown`, not no scalar arm. */
+export type VariantShapeArm =
+  | { readonly kind: 'scalar'; readonly type: ScalarType }
+  | { readonly kind: 'vertex' }
+  | { readonly kind: 'edge' }
+  | { readonly kind: 'list'; readonly of: ListOf };
+
 export type Shape =
   | { kind: 'vertex' }
   | { kind: 'edge' }
@@ -161,7 +171,9 @@ export type Shape =
   // collection vtype frames the stored {t,v} tree via frameStoredValue); static → one tag
   // for every row; unknown → infer from the JS value.
   | { kind: 'value'; type: ScalarType }
-  | { kind: 'variant'; scalarAs?: ValueType; node?: boolean; edge?: boolean; listOf?: ListOf; list?: boolean } // per-row tag: null/scalar/node/edge/list; `list` wraps ALL rows into one outer List (cap)
+  // A per-row tag: null/scalar/vertex/edge/list. `arms` is the complete declared
+  // framing vocabulary; `wholeResult` makes cap() wrap all framed rows in one List.
+  | { kind: 'variant'; arms: readonly VariantShapeArm[]; wholeResult?: true }
   | { kind: 'scalar'; productiveNull?: boolean } // numeric reducer; productive NULL may be a real result
   | { kind: 'list'; elem: ElemShape | 'scalar'; as?: ValueType } // legacy row-fold; scalar items may carry a uniform type
   // One JSON list value per row. `items` is total: the former `as`/`typed`/`of`

@@ -154,11 +154,11 @@ describe('scalar-parent branch/map (Stage 1)', () => {
   // dynamic-tag shape the element parent produces, via the parent-agnostic merge builders.
   test('mixed-shape union over a scalar → a VariantStream', async () => {
     // scalar 'x' + element re-source (all 6 vertices) → 7 tagged rows.
-    expect(read("g.V(1).values('age').union(__.constant('x'),__.V())").shape).toEqual({ kind: 'variant', node: true });
+    expect(read("g.V(1).values('age').union(__.constant('x'),__.V())").shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: UNKNOWN }, { kind: 'vertex' }], wholeResult: undefined });
     expect(executeQuery(store, "g.V(1).values('age').union(__.constant('x'),__.V())", {})).toHaveLength(7);
     // scalar + list arm (fold of re-sourced names).
     expect(read("g.V(1).values('age').union(__.constant('x'),__.V().values('name').fold())").shape)
-      .toEqual({ kind: 'variant', listOf: { kind: 'scalar' } });
+      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: UNKNOWN }, { kind: 'list', of: { kind: 'scalar' } }], wholeResult: undefined });
     expect(executeQuery(store, "g.V(1).values('age').union(__.constant('x'),__.V().values('name').fold())", {})).toHaveLength(2);
     // shape-agnostic count() composes over the variant (variant.ts VARIANT_TAIL).
     expect(await vals("g.V(1).values('age').union(__.constant('x'),__.V()).count()")).toEqual(['7']);
@@ -174,14 +174,14 @@ describe('scalar-parent branch/map (Stage 1)', () => {
     expect(await vals("g.V().hasLabel('person').values('age').optional(__.constant('x'))")).toEqual(['x', 'x', 'x', 'x']);
     expect(await vals("g.V().hasLabel('person').values('age').optional(__.V().count())")).toEqual(['6', '6', '6', '6']);
     // element arm → a VariantStream: arm rows where productive, else the value restored.
-    expect(read("g.V(1).values('age').optional(__.V())").shape).toEqual({ kind: 'variant', node: true });
+    expect(read("g.V(1).values('age').optional(__.V())").shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: UNKNOWN }, { kind: 'vertex' }], wholeResult: undefined });
     expect(executeQuery(store, "g.V(1).values('age').optional(__.V())", {})).toHaveLength(6); // V() productive → 6 vertices
     // arm unproductive for the input → the value is restored (vk 1).
     expect(await vals("g.V(1).values('age').optional(__.V().hasLabel('nope'))")).toEqual(['29']);
   });
 
   test('mixed-shape coalesce over a scalar → a VariantStream (ordinal-gated first-productive)', async () => {
-    expect(read("g.V(1).values('age').coalesce(__.is(gt(100)),__.V())").shape).toEqual({ kind: 'variant', node: true });
+    expect(read("g.V(1).values('age').coalesce(__.is(gt(100)),__.V())").shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: UNKNOWN }, { kind: 'vertex' }], wholeResult: undefined });
     // is(gt 100) never fires → every input falls to V() (6 vertices).
     expect(await vals("g.V(1).values('age').coalesce(__.is(gt(100)),__.V()).count()")).toEqual(['6']);
     // is(gt 30) fires for 32/35 (their value passes) → 2 values; 29/27 fall to V() → 2×6.
@@ -193,7 +193,7 @@ describe('scalar-parent branch/map (Stage 1)', () => {
 
   test('mixed-shape choose over a scalar → a VariantStream (gate partitions then/else)', () => {
     expect(read("g.V(1).values('age').choose(__.is(lt(30)),__.V(),__.constant('old'))").shape)
-      .toEqual({ kind: 'variant', node: true });
+      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: UNKNOWN }, { kind: 'vertex' }], wholeResult: undefined });
     // age 29 < 30 → the then (re-source, 6 vertices) wins; else 'old' is unproductive here.
     expect(executeQuery(store, "g.V(1).values('age').choose(__.is(lt(30)),__.V(),__.constant('old'))", {})).toHaveLength(6);
     // age 29 not > 30 → the else scalar 'young' wins.

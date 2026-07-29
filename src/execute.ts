@@ -563,15 +563,19 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
     // P4 dynamic-tag row: dispatch each row by its own `vk` — null / scalar / node /
     // edge / list — mirroring the per-row `vtype` dispatch of `case 'value'`.
     case 'variant': {
+      const scalar = shape.arms.find((arm) => arm.kind === 'scalar');
+      const vertex = shape.arms.some((arm) => arm.kind === 'vertex');
+      const edge = shape.arms.some((arm) => arm.kind === 'edge');
+      const list = shape.arms.find((arm): arm is Extract<typeof arm, { kind: 'list' }> => arm.kind === 'list');
       const framed = rows.map((r) => {
         if (r.vk === 0) return frameValue(null, undefined);
-        if (r.vk === 1) return frameValue(r.v, shape.scalarAs);
-        if (r.vk === 2 && shape.node) return rowVertex(r);
-        if (r.vk === 3 && shape.edge) return rowEdge(r);
-        if (r.vk === 4 && shape.listOf) return frameListOf(r.list, shape.listOf);
+        if (r.vk === 1 && scalar) return frameValue(r.v, staticTypeOf(scalar.type));
+        if (r.vk === 2 && vertex) return rowVertex(r);
+        if (r.vk === 3 && edge) return rowEdge(r);
+        if (r.vk === 4 && list) return frameListOf(r.list, list.of);
         throw new Error(`invalid variant result tag ${r.vk}`);
       });
-      if (shape.list) yield listBuffer(framed);
+      if (shape.wholeResult) yield listBuffer(framed);
       else yield* framed;
       return;
     }

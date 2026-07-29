@@ -137,7 +137,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(sackU.sql).toContain('UNION ALL');
     // mixed scalar+element arms now merge as a dynamic-tag VariantStream (P4)
     const mixedU = read('g.V().union(__.values("name"), __.out())');
-    expect(mixedU.shape).toEqual({ kind: 'variant', scalarAs: undefined, node: true });
+    expect(mixedU.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }], wholeResult: undefined });
     expect(mixedU.sql).toContain('1 AS vk'); // scalar arm
     expect(mixedU.sql).toContain('2 AS vk'); // node arm
     // mixed element kinds across branches (both element-class) stays the legacy defer
@@ -174,7 +174,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
   test('optional non-total scalar child lowers to a scalar-or-element VariantStream', () => {
     const store = seededStore();
     const plan = read('g.V().optional(__.values("age"))');
-    expect(plan.shape).toEqual({ kind: 'variant', scalarAs: undefined, node: true });
+    expect(plan.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }], wholeResult: undefined });
     const rows = run(store, 'g.V().optional(__.values("age"))');
     expect(rows.filter((r) => r.vk === 1).map((r) => r.v).sort((a, b) => a - b)).toEqual([27, 29, 32, 35]);
     expect(rows.filter((r) => r.vk === 2).map((r) => r.label)).toEqual(['software', 'software']);
@@ -248,7 +248,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // limit/skip/range re-project the variant relation, slicing rows without touching
     // the per-row tag — the whole union (all arms) rides through the LIMIT/OFFSET.
     const lim = read(`${base}.limit(2)`);
-    expect(lim.shape).toEqual({ kind: 'variant', scalarAs: undefined, node: true });
+    expect(lim.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }], wholeResult: undefined });
     expect(lim.sql).toContain('SELECT p.vk, p.v, p.rid, p.bulk, p.encounter FROM'); // full column re-projection (encounter seeded: union fan-out + limit)
     expect(lim.sql).toContain('LIMIT 2');
     expect(run(store, `${base}.limit(2)`).length).toBe(2);
@@ -284,7 +284,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // mixed element+scalar arms now merge as a dynamic-tag VariantStream (P4), gated
     // per input ordinal like the homogeneous coalesce.
     const mixedC = read('g.V().coalesce(__.out(), __.values("name"))');
-    expect(mixedC.shape).toEqual({ kind: 'variant', scalarAs: undefined, node: true });
+    expect(mixedC.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }], wholeResult: undefined });
     expect(mixedC.sql).toContain('o0 NOT IN (SELECT o0 FROM'); // second arm gated
     expect(() => compile('g.V().coalesce(__.out(), __.outE())', {})).toThrow('different element kinds');
     // dedup now preserves both the branch ordinal and its inner child ordinal.
@@ -395,7 +395,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
       .toThrow('predicate form');
     // mixed element+scalar then/else now merge as a dynamic-tag VariantStream (P4)
     const mixedCh = read('g.V().choose(__.has("x"), __.out(), __.values("name"))');
-    expect(mixedCh.shape).toEqual({ kind: 'variant', scalarAs: undefined, node: true });
+    expect(mixedCh.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }], wholeResult: undefined });
     // mixed element kinds across arms (both element-class) stays the legacy defer
     expect(() => compile('g.V().choose(__.has("x"), __.out(), __.outE())', {}))
       .toThrow('different element kinds');
@@ -445,7 +445,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // No Pick.none: TinkerPop passes unmatched inputs through as the ELEMENT, so the result is
     // genuinely mixed scalar/element → the variant merge, not a deferral.
     const passthrough = read('g.V().choose(__.out().count()).option(1, __.values("name")).option(2, __.values("age"))');
-    expect(passthrough.shape).toMatchObject({ kind: 'variant', node: true });
+    expect(passthrough.shape).toMatchObject({ kind: 'variant', arms: expect.arrayContaining([{ kind: 'vertex' }]) });
     expect(passthrough.sql).toContain('NOT COALESCE'); // the unmatched (element) arm's gate
     // An ELEMENT option body is an arm, not a CASE branch → the element merge.
     expect(read('g.V().choose(T.label).option("person", __.out("knows")).option(Pick.none, __.identity()).values("name")').shape.kind)

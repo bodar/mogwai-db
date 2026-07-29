@@ -291,7 +291,7 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     expect(nullableRecord.filter((r) => r.e0_id == null)).toHaveLength(3);
     expect(executeQuery(store, 'g.withStrategies(ProductiveByStrategy).V().project("x").by(__.out().order().by("name"))', {})).toHaveLength(6);
     expect(read('g.withStrategies(ProductiveByStrategy).V().project("x").by(__.out().order().by("name")).select("x")').shape)
-      .toEqual({ kind: 'variant', scalarAs: undefined, node: true });
+      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }], wholeResult: undefined });
     expect(() => compile('g.withStrategies(ProductiveByStrategy).V().order().by("age")', {})).not.toThrow();
     expect(read('g.withStrategies(ProductiveByStrategy).V().as("a").out().as("b").where("a",eq("b")).by("age")').sql)
       .toContain(' IS ');

@@ -7,7 +7,7 @@
 // readCompiled islands while those leaves are converted to Stream -> Stream lowerers.
 
 import { raw, type Expression, type Query } from '../../../sql/kernel/q.ts';
-import { perRowColumnOf, readCompiled, type Compiled, type ListOf, type Shape } from '../../../sql/kernel/render.ts';
+import { perRowColumnOf, readCompiled, STATIC, UNKNOWN, type Compiled, type ListOf, type Shape, type VariantShapeArm } from '../../../sql/kernel/render.ts';
 import { list, q } from '../../../sql/kernel/q.ts';
 import { framedProps, extIdOf } from '../../plan/plan.ts';
 import { edges, labels, nodes } from '../../../sql/schema.ts';
@@ -46,11 +46,11 @@ export function materializeScalarRoot(stream: ScalarStream): Compiled {
  * Internal rowids remain available until this final SELECT. */
 export function materializeVariantRoot(stream: VariantStream): Compiled {
   const v = stream.rel.as('v');
-  const shape: Shape = {
-    kind: 'variant', scalarAs: stream.scalarAs,
-    node: stream.node || undefined, edge: stream.edge || undefined, listOf: stream.listOf,
-    list: stream.result === 'list' || undefined,
-  };
+  const arms: VariantShapeArm[] = [{ kind: 'scalar', type: stream.scalarAs ? STATIC(stream.scalarAs) : UNKNOWN }];
+  if (stream.node) arms.push({ kind: 'vertex' });
+  if (stream.edge) arms.push({ kind: 'edge' });
+  if (stream.listOf) arms.push({ kind: 'list', of: stream.listOf });
+  const shape: Shape = { kind: 'variant', arms, wholeResult: stream.result === 'list' || undefined };
   const cols: Expression[] = [v.c.vk, v.c.v];
   const joins: Expression[] = [];
   if (stream.node || stream.edge) {
