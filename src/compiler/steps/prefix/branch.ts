@@ -685,6 +685,12 @@ export const repeat: StepFn = (s, st) => {
   const region = s.repeatRegion ?? [s];
   const rep = region.find((c) => c.name === 'repeat');
   if (!rep) throw new Error(`${s.name}() without repeat() not yet supported`);
+  // `repeat(name, body)` carries a counter namespace which loops(name) can read
+  // from nested predicates. The ordinary recursive walk has one anonymous depth
+  // column, not a stack of named counters, so accept the common body layout from
+  // the front end but defer this semantic form until that substrate exists.
+  if (rep.loopName)
+    throw new Error('repeat(name, body)/loops(name) named-loop form not yet supported (requires named loop counters)');
   const emitStep = region.find((c) => c.name === 'emit');
   const hasEmitPred = !!emitStep && emitStep.args.length > 0;
   const timesStep = region.find((c) => c.name === 'times');

@@ -48,14 +48,12 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      a re-sourced modulation child now reaches it. **The opening: for a re-sourced body the
      partition is redundant** (the child ignores the traverser). *Medium.*
 
-0c. **5 fail-closed VIOLATIONS, surfaced by the census** (`test/census/deferrals.tsv`, status
+0c. **3 fail-closed VIOLATIONS, surfaced by the census** (`test/census/deferrals.tsv`, status
    `crashed`). Each throws a raw runtime error instead of a clear deferral, which the project's
    root rule forbids outright. They were invisible before because a crash and a deferral both just
    "fail"; the census separates them and gates the count from growing. Two root causes:
-   - **Two `null`/`undefined` dereferences — 3 cases.** `child.stream` on a `project()` whose
-     `by()` bodies are `select(first/last, "v")` over a rebound label; and `node.constructor` on
-     the named-loop `repeat("a", …)` form (already tracked in item 3, listed here for completeness
-     — the census counts it as a crash either way). *Low-Med.*
+   - **One `null`/`undefined` dereference — 1 case.** `child.stream` on a `project()` whose
+     `by()` bodies are `select(first/last, "v")` over a rebound label. *Low-Med.*
    - **Ordering a heterogeneous injected collection — 2 cases.** `g.inject(...scalars, maps,
      sets...).order()` and `.order().by(desc)` bind a raw collection object while constructing the
      sort key. Either provide a total Gremlin ordering across every admitted injected value or
@@ -145,8 +143,9 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      A further 8 fail the adjacent "body must be row-local" gate. That makes the unroll the
      highest-count generic lift the telemetry names, and `order` alone is over a third of it.
      *Medium.*
-   - **The named-loop form `repeat("a", …)`/`loops("a")` CRASHES** rather than failing closed
-     (`undefined is not an object (evaluating 'node.constructor')`, 4 corpus cases). Cheap, isolated.
+   - **The named-loop form `repeat("a", …)`/`loops("a")` cleanly defers.** Its front-end
+     representation has the ordinary body channel plus explicit loop-name metadata; support still
+     needs named loop counters rather than the anonymous recursive depth column. *Low-Med.*
    - A label bound INSIDE the body (`repeat(__.out().as("b"))`) genuinely rebinds per iteration, so
      it is a fold, not a projection — `as` stays out of the body vocabulary (fails closed). *Low-Med.*
    - `path()`/`simplePath()` + `sack()` bodies stay with the flat expansion (both are per-iteration

@@ -153,6 +153,10 @@ function bulkPlan(steps: IRStep[], params: Record<string, any>, sackInit?: SackS
   const rep = steps[repAt];
   const cluster = rep.repeatRegion;
   if (!cluster) return null;
+  // Named repeat carries a loop-counter namespace. The ordinary recursive lowering
+  // owns the explicit deferral for that semantic form; this optimization must not
+  // bypass it merely because its movement body is otherwise bulkable.
+  if (rep.loopName) return null;
 
   // Path/as BEFORE the repeat defeats bulking because it makes history live. A path()
   // ANYWHERE in the suffix is likewise identity — suffixBulkSafe rejects it below.

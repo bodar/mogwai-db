@@ -37,7 +37,15 @@ export function parseGremlin(query: string) {
 // in parallel so `args` stays plain values for every consumer; read by bare asNumber()/
 // asDate() (to recover the input subtype the value can't carry) and by the write seam
 // (to store vertex_properties/edge_properties.vtype — see gremlin-types.ts).
-export interface Step { name: string; args: any[]; ctx: ParserRuleContext; argTypes?: (TypeNode | null)[]; }
+export interface Step {
+  name: string;
+  args: any[];
+  ctx: ParserRuleContext;
+  argTypes?: (TypeNode | null)[];
+  /** `repeat(name, body)` has the same body channel as `repeat(body)`; its name
+   * remains explicit metadata for the lowering that owns named loop counters. */
+  loopName?: string;
+}
 
 // ---------- tagged non-value arguments ----------
 //
@@ -173,7 +181,17 @@ export function stepChain(tree: any, params: Record<string, any>, paramTypes: Re
     const name = stepName(cls, 'TraversalSourceSpawnMethod_') ?? stepName(cls, 'TraversalMethod_');
     if (!insideNested && name) {
       const { args, types } = extractArgs(node, params, paramTypes);
-      steps.push({ name, args, ctx: node, argTypes: types });
+      // The grammar deliberately exposes the named repeat overload as
+      // repeat(name, body), while every repeat consumer needs one uniform body
+      // channel. Canonicalize that overload at the front-end boundary and retain
+      // the public loop name as metadata; lowerers can therefore either implement
+      // named loop counters or reject them without ever misreading a string as a
+      // nested traversal.
+      if (name === 'repeat' && typeof args[0] === 'string' && isNested(args[1])) {
+        steps.push({ name, args: [args[1]], ctx: node, argTypes: [types[1]], loopName: args[0] });
+      } else {
+        steps.push({ name, args, ctx: node, argTypes: types });
+      }
       // nested traversals inside this step's args must not contribute to the top chain
       for (let i = 0; i < node.getChildCount(); i++) visit(node.getChild(i), true);
       return;

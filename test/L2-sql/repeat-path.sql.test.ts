@@ -307,6 +307,10 @@ describe('repeat / path SQL', () => {
     expect(em.sql).toContain('WHERE depth >= 1');   // emit-after band
     // a barrier body step (order/dedup/limit/…) can't live in a recursive term → defers.
     expect(() => compile('g.V().repeat(__.out().order()).times(2)', {})).toThrow('not yet supported');
+    // The named overload is normalized to the same body channel before lowering;
+    // its counter namespace is deferred explicitly until named loops are modeled.
+    expect(() => compile('g.V().repeat("a", __.out()).times(2)', {}))
+      .toThrow('named-loop form not yet supported');
     expect(() => compile('g.V().emit().times(2)', {})).toThrow('without repeat()');
     // a second repeat is NOT swallowed — it compiles as a chained cluster (two walks)
     const chained = read('g.V().repeat(__.out()).times(1).repeat(__.out()).times(1).values("name")');
