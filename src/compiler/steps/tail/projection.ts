@@ -1,6 +1,6 @@
 import { q, value, list, empty, raw, Relation, Query, type Expression } from '../../../sql/kernel/q.ts';
 import { nodes, edges, labels, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
-import { flattenListArgs, gtypeName } from '../../../gremlin/frontend.ts';
+import { flattenListArgs, gtypeName, isColumnArg, isNested, isOrderArg, isScopeArg, isTokenArg } from '../../../gremlin/frontend.ts';
 import { elementOrderDrop, orderProductivityFilter } from './modulation.ts';
 import {
   predicateSql, rangeToOffsetLimit, elemCtx, extIdOf, jsonbGroupArray,
@@ -62,7 +62,7 @@ const PROJECTION_NAMES = new Set(['values', 'id', 'label', 'count', 'valueMap', 
 const SCALAR_PROJ = new Set(['values', 'id', 'label']);
 const isMapProj = (p: PStep | null) => p?.name === 'select' || p?.name === 'project';
 const isScopeLocalStep = (s: PStep | undefined): boolean =>
-  !!s && (s.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local');
+  !!s && (s.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
 const NUMERIC_REDUCERS = new Set<NumericReducer>(['sum', 'min', 'max', 'mean']);
 
 /** A tail modifier: fold the step into the accumulator. `at` gives position so a
@@ -84,10 +84,10 @@ const MODIFIERS = new Map<string, ModFn>([
     for (const byArgs of bys) {
       // Reject deferred modulators rather than let a {token}/{nested} arg fall
       // through to key=null and silently sort by id.
-      const bad = byArgs.find((a: any) => a && typeof a === 'object' && ('token' in a || 'nested' in a));
-      if (bad) throw new Error('token' in bad ? `by(T.${bad.token}) modulator not yet supported` : 'by(traversal) modulator not yet supported');
+      const bad = byArgs.find((a: unknown) => isTokenArg(a) || isNested(a));
+      if (bad) throw new Error(isTokenArg(bad) ? `by(T.${bad.token}) modulator not yet supported` : 'by(traversal) modulator not yet supported');
       const key = byArgs.find((a: any) => typeof a === 'string') ?? null;
-      const ord = byArgs.find((a: any) => a && typeof a === 'object' && 'order' in a);
+      const ord = byArgs.find(isOrderArg);
       acc.orders.push({ key, dir: (ord?.order ?? 'asc') as OrderClause['dir'] });
     }
   }],
@@ -184,7 +184,7 @@ function isMapTypeOf(step: PStep): boolean {
 }
 
 const hasColumnArg = (step: PStep): boolean =>
-  (step.args ?? []).some((a: any) => a && typeof a === 'object' && (a.column === 'keys' || a.column === 'values'));
+  (step.args ?? []).some((a: unknown) => isColumnArg(a) && (a.column === 'keys' || a.column === 'values'));
 
 /** valueMap()/elementMap() followers. is(typeOf(MAP)) is identity (skip); count() counts
  *  the maps (one per element → count of elements); select(Column.*) re-types to the
