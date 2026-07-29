@@ -39,6 +39,54 @@ export function parseGremlin(query: string) {
 // (to store vertex_properties/edge_properties.vtype — see gremlin-types.ts).
 export interface Step { name: string; args: any[]; ctx: ParserRuleContext; argTypes?: (TypeNode | null)[]; }
 
+// ---------- tagged non-value arguments ----------
+//
+// The grammar has a small family of enum-like arguments that are neither Gremlin
+// values nor nested traversals.  Keeping them as one declared union prevents a
+// consumer from treating an arbitrary object as a token merely because it happens
+// to have a similarly named key.  `Step.args` intentionally remains `any[]`: it is
+// the front-end/compiler boundary and values may be supplied by any GLV.  Consumers
+// narrow through these guards instead of open-coding `'token' in arg`.
+export type TaggedArg =
+  | { readonly order: string }
+  | { readonly pop: string }
+  | { readonly column: string }
+  | { readonly token: string }
+  | { readonly direction: string }
+  | { readonly merge: string }
+  | { readonly cardinality: string }
+  | { readonly gtype: string }
+  | { readonly pick: string }
+  | { readonly withOption: string }
+  | { readonly dt: string }
+  | { readonly operator: string }
+  | { readonly scope: string }
+  | { readonly nested: any };
+
+type TaggedKey = 'order' | 'pop' | 'column' | 'token' | 'direction' | 'merge' | 'cardinality'
+  | 'gtype' | 'pick' | 'withOption' | 'dt' | 'operator' | 'scope' | 'nested';
+
+const tagged = <K extends TaggedKey>(arg: unknown, key: K): arg is Extract<TaggedArg, Record<K, unknown>> =>
+  arg !== null && typeof arg === 'object' && key in arg;
+
+export const isOrderArg = (arg: unknown): arg is Extract<TaggedArg, { order: string }> => tagged(arg, 'order');
+export const isPopArg = (arg: unknown): arg is Extract<TaggedArg, { pop: string }> => tagged(arg, 'pop');
+export const isColumnArg = (arg: unknown): arg is Extract<TaggedArg, { column: string }> => tagged(arg, 'column');
+export const isTokenArg = (arg: unknown): arg is Extract<TaggedArg, { token: string }> => tagged(arg, 'token');
+export const isDirectionArg = (arg: unknown): arg is Extract<TaggedArg, { direction: string }> => tagged(arg, 'direction');
+export const isMergeArg = (arg: unknown): arg is Extract<TaggedArg, { merge: string }> => tagged(arg, 'merge');
+export const isCardinalityArg = (arg: unknown): arg is Extract<TaggedArg, { cardinality: string }> => tagged(arg, 'cardinality');
+export const isGTypeArg = (arg: unknown): arg is Extract<TaggedArg, { gtype: string }> => tagged(arg, 'gtype');
+export const isPickArg = (arg: unknown): arg is Extract<TaggedArg, { pick: string }> => tagged(arg, 'pick');
+export const isWithOptionArg = (arg: unknown): arg is Extract<TaggedArg, { withOption: string }> => tagged(arg, 'withOption');
+export const isDtArg = (arg: unknown): arg is Extract<TaggedArg, { dt: string }> => tagged(arg, 'dt');
+export const isOperatorArg = (arg: unknown): arg is Extract<TaggedArg, { operator: string }> => tagged(arg, 'operator');
+export const isScopeArg = (arg: unknown): arg is Extract<TaggedArg, { scope: string }> => tagged(arg, 'scope');
+
+/** A GType token or its string spelling, normalized for consumers that accept both. */
+export const gtypeName = (arg: unknown): string | null =>
+  isGTypeArg(arg) ? arg.gtype : typeof arg === 'string' ? arg : null;
+
 // Numeric-literal suffix → subtype. No suffix: an integer literal defaults to `int`,
 // a float literal to `double` (TinkerPop's literal typing).
 const INT_LIT_SUFFIX: Record<string, CanonicalType> = { b: 'byte', s: 'short', i: 'int', l: 'long', n: 'bigint' };
@@ -99,8 +147,7 @@ export function stepChain(tree: any, params: Record<string, any>, paramTypes: Re
 /** A nested-traversal argument. Its `nested` payload is an ANTLR NestedTraversalContext or,
  *  for a strategy-synthesized body, an already-lowered Step[] — stepChain resolves either.
  *  The one type-guard every consumer uses to detect a sub-traversal arg. */
-export const isNested = (a: any): a is { nested: any } =>
-  a != null && typeof a === 'object' && 'nested' in a;
+export const isNested = (a: unknown): a is Extract<TaggedArg, { nested: any }> => tagged(a, 'nested');
 
 // ---------- traversal-strategy extraction ----------
 //

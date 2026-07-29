@@ -1,6 +1,6 @@
 import { q, value, type Expression } from '../../../sql/kernel/q.ts';
 import { type ValueType } from '../../../sql/kernel/render.ts';
-import { parseIsoMs, stepChain } from '../../../gremlin/frontend.ts';
+import { isGTypeArg, parseIsoMs, stepChain } from '../../../gremlin/frontend.ts';
 
 // ---------- scalar value coercion (asBool / asNumber / asDate + date arithmetic) ----------
 //
@@ -55,7 +55,7 @@ const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
  *  the input subtype, which the frontend flattens away, so it defers). A non-numeric
  *  token (e.g. GType.VERTEX) raises TinkerPop's error. */
 export function numericSpec(arg: any): (typeof NUMERIC_GTYPES[string] & { name: string }) | null {
-  const name = arg && typeof arg === 'object' && 'gtype' in arg ? String(arg.gtype) : null;
+  const name = isGTypeArg(arg) ? arg.gtype : null;
   if (name === null) return null;
   const spec = NUMERIC_GTYPES[name];
   if (!spec) throw new Error(`asNumber() requires a numeric type token, got ${name.toUpperCase()}`);

@@ -7,7 +7,7 @@
 
 import { q, value, raw, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { predicateSql, scalarTx, compareKey, inferVtypeSql } from '../../plan/plan.ts';
-import { isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { gtypeName, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, mapOfToListOf, PROPERTY_PAYLOAD, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type PropertyStream, type ScalarStream, type MapStream, type ShapeTailFn } from '../context/stream.ts';
 import { carryFrag, carriedCols, type ElementStream } from '../context/context.ts';
@@ -538,7 +538,7 @@ function isMapTypeOf(step: PStep): boolean {
   const pred = (step.args ?? [])[0];
   if (!pred || typeof pred !== 'object' || pred.op !== 'typeOf') return false;
   const arg = pred.values?.[0];
-  const name = (arg && typeof arg === 'object' && 'gtype' in arg) ? String(arg.gtype) : typeof arg === 'string' ? arg : null;
+  const name = gtypeName(arg);
   return !!name && name.toUpperCase() === 'MAP';
 }
 

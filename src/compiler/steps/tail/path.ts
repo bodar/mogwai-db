@@ -1,4 +1,4 @@
-import { isNested } from '../../../gremlin/frontend.ts';
+import { gtypeName, isNested } from '../../../gremlin/frontend.ts';
 import { q, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { nodes, edges, labels } from '../../../sql/schema.ts';
 import { framedProps, labelNameSub, predicateSql, extIdOf, elemCtx, aliasCtx, scalarProp, type Elem, type ScalarCtx } from '../../plan/plan.ts';
@@ -10,6 +10,7 @@ import { type PathPos } from '../../../sql/kernel/render.ts';
 import { type TailAcc } from './projection.ts';
 import { reRootElement } from './select.ts';
 import { pushChildScope, tryCompileScalarValueChild } from './child.ts';
+import { lowerGlobalCount } from './barrier.ts';
 import { byAt, childCtx, classifyBy, childSteps, classifyScalarChild, reuseCurrentFrame, type ChildFrame, type ChildScope } from './child-shape.ts';
 import { tryLowerScalarChoose, tryLowerScalarCoalesce } from '../prefix/branch.ts';
 
@@ -375,18 +376,13 @@ function linearScalarList(s: PathStream): ListStream | null {
 export function compileFromPath(s: PathStream, steps: PStep[], at: number): LoweringResult {
   const step = steps[at];
   if (step.name === 'count') {
-    // One path per row (linear) vs one row per path ELEMENT (grouped, recursive repeat):
-    // count paths, so grouped counts DISTINCT path keys, not exploded elements.
-    const p = s.rel.as('p');
-    const countExpr = s.layout.kind === 'grouped' ? q`COUNT(DISTINCT ${p.c.pk})` : q`COUNT(*)`;
-    const rel = s.q.cte(q`SELECT ${countExpr} AS v FROM ${p}`, ['v']);
-    return continueLowering(toScalarStream(withoutCarried(carryOf(s)), rel, 'long', { result: 'count' }), at + 1);
+    return continueLowering(lowerGlobalCount(s), at + 1);
   }
   if (step.name === 'is') {
     const pred = (step.args ?? [])[0];
     if (pred && typeof pred === 'object' && pred.op === 'typeOf') {
       const arg = pred.values?.[0];
-      const name = (arg && typeof arg === 'object' && 'gtype' in arg) ? String(arg.gtype) : typeof arg === 'string' ? arg : null;
+      const name = gtypeName(arg);
       // A path IS a Path → is(typeOf(PATH)) is identity; any other type matches nothing.
       if (name && name.toUpperCase() === 'PATH') return continueLowering(s, at + 1);
       const p = s.rel.as('p');

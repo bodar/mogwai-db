@@ -290,6 +290,11 @@ export type ValueNode =
   | { t: 'list' | 'set'; v: ValueNode[] }
   | { t: 'map'; v: [ValueNode, ValueNode][] };      // ordered pairs → typed/non-string keys
 
+/** Inputs accepted by the wire framer. Relational list/map producers may omit an
+ * envelope when SQLite/JSON already supplies the structural type; those cases are
+ * explicit here rather than being undocumented holes in `ValueNode`. */
+export type FrameNode = ValueNode | null | string | number | boolean | FrameNode[];
+
 /** A collection leaf's JSON-safe canonical storage form, keyed on its canonical type.
  *  Reuses storedScalar for the exact tail (long/bigint>2^53, bigdecimal, duration →
  *  decimal TEXT; char → 1-char string); datetime → epoch-millis (a Date carrier off the

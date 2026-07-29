@@ -25,6 +25,18 @@ import { carriedCols, type Carry, type ElementStream } from './context.ts';
  *  list-valued map) → a ListStream of the inner shape. ('entry' reserved for Map-unfold.) */
 export type { ListOf } from '../../../sql/kernel/render.ts';
 
+/** The relationship between rows in a relation and Gremlin traversers. This is
+ * intentionally lowering-local: it describes SQL cardinality, not an IR shape or
+ * wire representation. Helpers that count or slice may share an implementation only
+ * after handling all three cases. */
+export type RelationalCardinality =
+  | { readonly kind: 'perRow' }
+  | { readonly kind: 'wholeResult' }
+  | { readonly kind: 'runsByKey'; readonly key: string };
+
+export const PER_ROW_CARDINALITY: RelationalCardinality = { kind: 'perRow' };
+export const WHOLE_RESULT_CARDINALITY: RelationalCardinality = { kind: 'wholeResult' };
+
 /** A stream of scalars in a one-column relation `v` (values/id/label/inject/unfold-
  *  of-scalars). `type` is the ONE type channel (render.ts ScalarType): a static
  *  compile-time tag, a per-row stored-vtype column, or genuinely unknown. `as`/`vtype`
@@ -200,6 +212,19 @@ export interface ResultStream {
 
 export type RelationalStream = ElementStream | ScalarStream | VariantStream | ListStream | MapStream | MapEntryStream | PropertyStream | RecordStream | GroupStream | PathStream | ForeignStream;
 export type Stream = RelationalStream | ResultStream;
+
+/** Derive the cardinality contract from the stream that owns the physical layout.
+ * Keeping this a total accessor makes the exceptional group/path cases visible to
+ * every shared row helper instead of smuggling them through shape-specific SQL. */
+export function cardinalityOf(stream: RelationalStream): RelationalCardinality {
+  if (stream.kind === 'group') return WHOLE_RESULT_CARDINALITY;
+  if (stream.kind === 'path' && stream.layout.kind === 'grouped') {
+    if (!stream.rel.cols.includes('pk'))
+      throw new Error('grouped path cardinality requires its pk run key in the relation');
+    return { kind: 'runsByKey', key: 'pk' };
+  }
+  return PER_ROW_CARDINALITY;
+}
 
 /** A shape compiler yields this token when lowering should continue with a new
  * relational stream. The central lowerSteps loop consumes it; leaves never recurse

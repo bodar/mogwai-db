@@ -1,6 +1,6 @@
 import { q, value, list, empty, raw, Relation, Query, type Expression } from '../../../sql/kernel/q.ts';
 import { nodes, edges, labels, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
-import { flattenListArgs } from '../../../gremlin/frontend.ts';
+import { flattenListArgs, gtypeName } from '../../../gremlin/frontend.ts';
 import { elementOrderDrop, orderProductivityFilter } from './modulation.ts';
 import {
   predicateSql, rangeToOffsetLimit, elemCtx, extIdOf, jsonbGroupArray,
@@ -179,7 +179,7 @@ function isMapTypeOf(step: PStep): boolean {
   const pred = (step.args ?? [])[0];
   if (!pred || typeof pred !== 'object' || pred.op !== 'typeOf') return false;
   const arg = pred.values?.[0];
-  const name = (arg && typeof arg === 'object' && 'gtype' in arg) ? String(arg.gtype) : typeof arg === 'string' ? arg : null;
+  const name = gtypeName(arg);
   return !!name && name.toUpperCase() === 'MAP';
 }
 

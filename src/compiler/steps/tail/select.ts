@@ -688,8 +688,12 @@ const recordSlice: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
     if (offset < 0 || (limit !== null && limit < 0)) throw new Error(`Not a legal range: [${offset}, ${limit === null ? -1 : offset + limit}]`);
     const r = s.rel.as('r');
     const names = s.rel.cols;
+    // Record rows are one traverser each. When the chain carries canonical
+    // encounter order (the fan-out + positional case), use it here just as the
+    // scalar/element slice builders do; otherwise retain the order-free contract.
+    const order = s.carried.encounter ? q` ORDER BY ${r.c[s.carried.encounter]}` : empty;
     const rel = s.q.cte(
-      q`SELECT ${list(names.map((name) => r.c[name]), ', ')} FROM ${r} LIMIT ${limit ?? -1} OFFSET ${offset}`,
+      q`SELECT ${list(names.map((name) => r.c[name]), ', ')} FROM ${r}${order} LIMIT ${limit ?? -1} OFFSET ${offset}`,
       names,
     );
     return continueLowering(toRecordStream(carryOf(s), rel, s.fields), at + 1);

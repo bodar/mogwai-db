@@ -1,7 +1,7 @@
 import { derived, empty, q, raw, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { perRowColumnOf, staticTypeOf, type ListOf } from '../../../sql/kernel/render.ts';
 import { typedScalarNode } from '../../plan/plan.ts';
-import { carryOf, toListStream, toScalarStream, type ListStream, type RelationalStream, type ScalarStream } from '../context/stream.ts';
+import { cardinalityOf, carryOf, toListStream, toScalarStream, type ListStream, type RelationalStream, type ScalarStream } from '../context/stream.ts';
 import { carriedCols, carryFrag, carryFragMint, carriedWith, withoutCarried, type ElementStream } from '../context/context.ts';
 import { type ChildScope } from './child-shape.ts';
 
@@ -19,8 +19,15 @@ const currentFrame = (scope: ChildScope) => {
 export function lowerGlobalCount(input: RelationalStream): ScalarStream {
   const bulk = input.carried.bulk;
   const s = input.rel.as('s');
-  const agg = bulk ? q`COALESCE(SUM(${s.c[bulk]}), 0)` : q`COUNT(*)`;
-  const rel = input.q.cte(q`SELECT ${agg} AS v FROM ${s}`, ['v']);
+  const cardinality = cardinalityOf(input);
+  const agg = cardinality.kind === 'wholeResult'
+    ? q`1`
+    : cardinality.kind === 'runsByKey'
+      ? q`COUNT(DISTINCT ${s.c[cardinality.key]})`
+      : bulk ? q`COALESCE(SUM(${s.c[bulk]}), 0)` : q`COUNT(*)`;
+  const rel = cardinality.kind === 'wholeResult'
+    ? input.q.cte(q`SELECT ${agg} AS v`, ['v'])
+    : input.q.cte(q`SELECT ${agg} AS v FROM ${s}`, ['v']);
   return toScalarStream(withoutCarried(carryOf(input)), rel, 'long', { result: 'count' });
 }
 

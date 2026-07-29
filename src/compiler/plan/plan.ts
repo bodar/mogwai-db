@@ -1,4 +1,4 @@
-import { flattenListArgs, isNested, type Pred } from '../../gremlin/frontend.ts';
+import { flattenListArgs, gtypeName, isNested, type Pred } from '../../gremlin/frontend.ts';
 import { q, list, values, empty, value, raw, jsonExtract, type Expression, type Relation } from '../../sql/kernel/q.ts';
 import type { FastPath } from '../options/fast-paths.ts';
 import { normalizeTypeName, BigDecimal, Duration } from '../../gremlin/types.ts';
@@ -169,9 +169,8 @@ export const typeCtxOf = (type: ScalarType, column: (name: string) => Expression
  *  stored scalar → folds to false; a truly unregistered name raises (spec: "traversal
  *  will raise an error"). */
 function typeOfSql(expr: Expression, arg: any, ctx: TypeCtx = TYPE_UNKNOWN): Expression {
-  const rawName = (arg && typeof arg === 'object' && 'gtype' in arg) ? String(arg.gtype)
-    : typeof arg === 'string' ? arg.toLowerCase()
-    : (() => { throw new Error('typeOf() requires a GType argument'); })();
+  const rawName = gtypeName(arg)?.toLowerCase()
+    ?? (() => { throw new Error('typeOf() requires a GType argument'); })();
   if (rawName === 'null') return q`${expr} is null`;
   const canonical = normalizeTypeName(rawName);
   if (!canonical) {

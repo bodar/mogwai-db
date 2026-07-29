@@ -4,7 +4,7 @@ import {
   scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps,
   storedValueExpr, bareValueMapProps, typedScalarNode, compareKey, type ScalarCtx,
 } from '../../plan/plan.ts';
-import { isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { gtypeName, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { isMapLocalOrder } from './list.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { advance, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, partitionOver, prevRel, withCarried, withoutCarried, type Carried, type Carry, type ElementStream } from '../context/context.ts';
@@ -653,7 +653,7 @@ export function compileFromGroup(s: GroupStream, steps: PStep[], at: number): Lo
   if (step.name === 'is') {
     const pred = (step.args ?? [])[0];
     const tn = pred && typeof pred === 'object' && pred.op === 'typeOf'
-      ? (() => { const a = pred.values?.[0]; return (a && typeof a === 'object' && 'gtype' in a) ? String(a.gtype) : typeof a === 'string' ? a : null; })()
+      ? gtypeName(pred.values?.[0])
       : null;
     if (tn && tn.toUpperCase() === 'MAP') return continueLowering(s, at + 1);
     throw new Error('is() on a group value supports only is(typeOf(GType.MAP))');

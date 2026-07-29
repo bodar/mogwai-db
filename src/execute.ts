@@ -1,5 +1,5 @@
 import { compilePlan, staticTypeOf, type Compiled, type WritePlan, type ListOf, type MapEntry, type MapOf, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ScalarType, type ValueType, type FastPathConfig } from './compiler/compiler.ts';
-import { hasSerializer, isCollectionType, valueNodeFromStored, type TypeNode, type ValueNode } from './gremlin/types.ts';
+import { hasSerializer, isCollectionType, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import type { GraphStore } from './storage.ts';
 import type { ServiceRegistry } from './services/spi/types.ts';
 import type { Executor as ExecutorApi, ForeignRow } from './api.ts';
@@ -228,7 +228,7 @@ function setBuffer(items: Buffer[]): Buffer {
 // (value, vtype) column pair: a scalar frames straight; a collection JSON.parses the bare
 // top `v` (the vtype column names the outer shape) and frames the reconstructed node.
 
-function frameTypedNode(node: ValueNode): Buffer {
+function frameTypedNode(node: FrameNode): Buffer {
   if (node == null) return frameValue(null, undefined);
   // A BARE member: the producer omitted the envelope because the storage class already
   // determines the type (a fold whose members are all string/int/long/double — see
@@ -241,16 +241,16 @@ function frameTypedNode(node: ValueNode): Buffer {
   // map's value side is a naked array of property values (the untyped list substrate's contract),
   // and it now frames without the blob being rebuilt into a typed tree first.
   if (Array.isArray(node)) return listBuffer(node.map(frameTypedNode));
-  if (node.t === 'list') return listBuffer((node.v as ValueNode[]).map(frameTypedNode));
-  if (node.t === 'set') return setBuffer((node.v as ValueNode[]).map(frameTypedNode));
-  if (node.t === 'map') return typedMapBuffer(node.v as [ValueNode, ValueNode][]);
+  if (node.t === 'list') return listBuffer((node.v as FrameNode[]).map(frameTypedNode));
+  if (node.t === 'set') return setBuffer((node.v as FrameNode[]).map(frameTypedNode));
+  if (node.t === 'map') return typedMapBuffer(node.v as [FrameNode, FrameNode][]);
   return frameValue(node.v, vtypeToValueType(node.t));
 }
 
 // A GraphBinary MAP from ordered typed [key, value] node pairs — keys AND values framed
 // by the typed framer (so a non-string / typed key rides its true type). Layout mirrors
 // mapBuffer: [MAP, 0x00], bare int32 count, then key/value fully-qualified buffers.
-function typedMapBuffer(pairs: [ValueNode, ValueNode][]): Buffer {
+function typedMapBuffer(pairs: [FrameNode, FrameNode][]): Buffer {
   const parts: Buffer[] = [Buffer.from([ioc.DataType.MAP, 0x00]), ioc.intSerializer.serialize(pairs.length, false)];
   for (const [k, v] of pairs) { parts.push(frameTypedNode(k), frameTypedNode(v)); }
   return Buffer.concat(parts);
@@ -522,7 +522,7 @@ function* frameResolved(store: GraphStore, plan: Compiled | WritePlan): Generato
     for (const r of plan.run(store)) {
       // Write responses carry a flat {key:value} prop bag; vertexBuffer wants
       // {key:[values]}, so wrap each value in a 1-list (single-cardinality write).
-      if (r.vertex) yield { buf: vertexBuffer(r.vertex.id, r.vertex.label,
+      if ('vertex' in r) yield { buf: vertexBuffer(r.vertex.id, r.vertex.label,
         Object.fromEntries(Object.entries(r.vertex.props as Record<string, any>).map(([k, v]) => [k, [v]]))), bulk: 1n };
       else {
         const e = r.edge;

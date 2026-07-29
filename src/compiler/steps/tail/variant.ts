@@ -207,16 +207,20 @@ const armsOf = (s: VariantStream) => ({ scalarAs: s.scalarAs, node: s.node, edge
 /** Re-project every physical column of the variant relation, optionally slicing rows
  *  or collapsing duplicates. Shape-agnostic: it names only the declared columns and
  *  never touches the per-row tag, so all arms survive intact. */
-function reselect(s: VariantStream, opts: { distinct?: boolean; suffix?: Expression }): VariantStream {
+function reselect(s: VariantStream, opts: { distinct?: boolean; suffix?: Expression; orderByEncounter?: boolean }): VariantStream {
   const p = s.rel.as('p');
   const cols = s.rel.cols;
   const projected = list(cols.map((c) => q`${p.c[c]}`), ', ');
-  const body = q`SELECT ${opts.distinct ? q`DISTINCT ` : empty}${projected} FROM ${p}${opts.suffix ?? empty}`;
+  // A positional consumer has a canonical answer whenever the chain requested an
+  // encounter channel. Keep unordered relations unordered rather than inventing a
+  // SQLite scan order; source/merge builders are responsible for minting that channel.
+  const order = opts.orderByEncounter && s.carried.encounter ? q` ORDER BY ${p.c[s.carried.encounter]}` : empty;
+  const body = q`SELECT ${opts.distinct ? q`DISTINCT ` : empty}${projected} FROM ${p}${order}${opts.suffix ?? empty}`;
   return toVariantStream(carryOf(s), s.q.cte(body, cols), armsOf(s), s.result);
 }
 
 const variantSlice = (suffix: (step: PStep) => Expression): ShapeTailFn<VariantStream> =>
-  (s, step, _steps, at) => continueLowering(reselect(s, { suffix: suffix(step) }), at + 1);
+  (s, step, _steps, at) => continueLowering(reselect(s, { suffix: suffix(step), orderByEncounter: true }), at + 1);
 
 const VARIANT_TAIL = new Map<string, ShapeTailFn<VariantStream>>([
   // count is a relational barrier over any shaped row stream → one Long scalar.

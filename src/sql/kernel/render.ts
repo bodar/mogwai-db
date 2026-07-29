@@ -1,6 +1,6 @@
 import type { GraphStore } from '../../storage.ts';
 import { q, type Expression, type Query, type Relation } from './q.ts';
-import type { ValueType } from '../../gremlin/types.ts';
+import type { ValueNode, ValueType } from '../../gremlin/types.ts';
 import type { Elem } from '../../compiler/plan/plan.ts';
 
 // ---------- compile output contract ----------
@@ -184,7 +184,11 @@ export interface Compiled {
   shape: Shape;
 }
 
-export interface WritePlan { kind: 'write'; run: (store: GraphStore) => any[]; }
+export type WriteResult =
+  | { readonly vertex: { readonly id: any; readonly label: string; readonly props: Record<string, ValueNode> } }
+  | { readonly edge: { readonly id: any; readonly label: string; readonly src: any; readonly tgt: any; readonly props: Record<string, ValueNode> } };
+
+export interface WritePlan { kind: 'write'; run: (store: GraphStore) => WriteResult[]; }
 
 /** Boundary: assemble the Query's CTE prefix + `tail` into one tree (Query.render)
  *  and wrap as a read Compiled. Every bound value lives as a Value token in a CTE

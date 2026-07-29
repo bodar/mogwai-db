@@ -9,7 +9,7 @@ import { type Plan } from './segment.ts';
 import { resolveFastPaths, resolveRegistry, resolveFederationDepth, type CompileOptions } from './options/fast-paths.ts';
 import { createAppScope, createCompilerScope } from '../scopes.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
-export type { Compiled, WritePlan, Shape, ValueType, ListOf, MapEntry, MapOf, ElemShape, GroupKey, GroupVal, PathPos } from '../sql/kernel/render.ts';
+export type { Compiled, WritePlan, WriteResult, Shape, ValueType, ListOf, MapEntry, MapOf, ElemShape, GroupKey, GroupVal, PathPos } from '../sql/kernel/render.ts';
 export { staticTypeOf, perRowColumnOf, PER_ROW, STATIC, UNKNOWN } from '../sql/kernel/render.ts';
 export type { ScalarType } from '../sql/kernel/render.ts';
 export type { CompileOptions, FastPathConfig } from './options/fast-paths.ts';

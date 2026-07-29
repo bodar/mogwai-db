@@ -1,7 +1,7 @@
 import { derived, empty, list, paren, q, raw, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { hasUnresolvedOperand, operandDeps, resolveTraversalOperands } from './operand.ts';
 import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx, TYPE_PER_ROW, TYPE_STATIC, TYPE_UNKNOWN, typeCtxOf } from '../../plan/plan.ts';
-import { isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { gtypeName, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { aliasArmProjection, carryFrag, carryFragMint, carriedCols, carriedWith, mergeAliasMaps, partitionOver, withoutCarried, type Carry } from '../context/context.ts';
 import { carryOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
@@ -21,7 +21,7 @@ export function collectionTypeOf(step: PStep): 'list' | 'set' | 'map' | null {
   const pred = (step.args ?? [])[0];
   if (!pred || typeof pred !== 'object' || pred.op !== 'typeOf') return null;
   const arg = pred.values?.[0];
-  const name = (arg && typeof arg === 'object' && 'gtype' in arg) ? String(arg.gtype) : typeof arg === 'string' ? arg : null;
+  const name = gtypeName(arg);
   const c = name ? normalizeTypeName(name) : null;
   return c === 'list' || c === 'set' || c === 'map' ? c : null;
 }
