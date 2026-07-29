@@ -10,7 +10,7 @@
  * cannot ship. The native server is the only type-aware option that is definitionally
  * in agreement with the compiler — and it needs no new dependency.
  *
- *   bun tools/rename.ts <file> <oldName> <newName> [--dry] [--at <line>:<col>]
+ *   bun scripts/rename.ts <file> <oldName> <newName> [--dry] [--at <line>:<col>]
  *
  * Position is found for you: every whole-word occurrence of `oldName` in `<file>` is
  * offered to `textDocument/prepareRename`, and the first the server accepts is used. That
@@ -36,7 +36,7 @@ const [file, oldName, newName] = args.filter((a, i) =>
   !a.startsWith('--') && !(atIdx >= 0 && i === atIdx + 1));
 
 if (!file || !oldName || !newName) {
-  console.error('usage: bun tools/rename.ts <file> <oldName> <newName> [--dry] [--at line:col]');
+  console.error('usage: bun scripts/rename.ts <file> <oldName> <newName> [--dry] [--at line:col]');
   process.exit(1);
 }
 

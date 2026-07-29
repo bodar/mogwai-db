@@ -38,6 +38,47 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
 - `docs/2026-07-28-scalartype-refactoring-pattern.md` — `ScalarType` as the reusable template for a
   vocabulary cleanup (N optionals → one total union; coarse views DERIVED; pair with a named
   preserving rebuild + a runtime contract), and the ordered list of what it fits next
+- `docs/2026-07-29-tinkerpop-core-engine-alignment.md` — the naming authority behind the **Naming**
+  section below: the full layered vocabulary, every rename that landed (with the three the code
+  refuted), the four TinkerPop patterns we refuse, and what a large LSP-driven rename cannot see
+
+## Naming
+
+**Layered vocabulary — TinkerPop's words for Gremlin, compiler/relational words for our machinery.**
+The question is never "does TinkerPop have a name for this?" but *is this concept part of Gremlin's
+public semantic model, or an implementation detail of a compiler that lowers Gremlin to SQL?*
+TinkerPop is excellent prior art for the first and often the wrong prior art for the second — it is an
+interpreter with an open Java step hierarchy; we are a staged compiler with a SQL-producing IR. So:
+
+- **Gremlin semantics and observable behaviour → TinkerPop.** `traverser`, `bulk`, `encounter`,
+  `modulator`, `barrier`, `productivity`, side effect, local/global, option arm.
+- **Analysis, rewriting, lowering, IR, SQL → compiler and relational literature.** `Pass`,
+  `ChainFacts`, `canonicalize`, `IRStep`, region, `LoweringState`, `TraverserLayout`,
+  `layoutProjection`, CTE, relation.
+- **Never invent private terminology** (`Seam 3`, `Layer C2` — both retired), and **never copy a
+  TinkerPop implementation name because an approximate analogue exists**: its `TraversalStrategy`
+  category model is good prior art for a categorized pre-evaluation rewrite, not a reason to call our
+  passes strategies.
+- **Name the thing, not a phase it went through.** `IRStep`, not `NormalizedStep` — a phase name goes
+  stale the moment the pipeline is reordered, which has already happened here once.
+- Two questions settle a name, and blast radius is not one of them (an LSP rename costs the same at
+  12 references as at 1,200): does it say what the thing *is*, and can it be confused with something
+  else?
+
+Full vocabulary table, the worked cases, and the four TinkerPop patterns we deliberately refuse:
+`docs/2026-07-29-tinkerpop-core-engine-alignment.md`.
+
+**Renaming: `bun scripts/rename.ts <file> <oldName> <newName> [--dry] [--at line:col]`** — type-aware,
+driven by the LSP inside our pinned `typescript` (`tsc --lsp --stdio`), so it cannot disagree with what
+`mise run check` gates on. Three traps it CANNOT see, each of which has already produced a silent wrong
+answer here:
+
+- **`as any` reads.** `(s as any).field` survives a rename and yields `undefined` — invisible to
+  `tsc` too. Prefer `(s as IRStep).field`; a cast that names a real type is rename-safe.
+- **Object-literal keys under a spread.** `{ ...s, oldName }` keeps its key, so the intended override
+  silently stops happening (excess properties are legal on a generic target).
+- **Comments.** LSP rename never touches prose, and prose is not sed-able either — `Carry`/`Carried`
+  are also English words. Rename the symbol, then read the comments.
 
 ## Working rules
 

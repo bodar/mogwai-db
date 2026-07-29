@@ -19,10 +19,9 @@ archived doc); the names below are the whole vocabulary.
 | `ChainFacts` (`ir/analyze.ts`) | annotates the chain | rewrites | `TraverserRequirement` aggregation |
 | `FastPath` (`options/fast-paths.ts`) | lowers a recognized sub-shape to **specialized** SQL | is the semantic authority | `ProviderOptimizationStrategy` |
 
-Vocabulary rule for anything new here: TinkerPop's words for Gremlin semantics and observable
-behaviour, compiler and relational words for our analysis, rewriting, lowering and SQL. Do not copy a
-TinkerPop implementation name because an approximate analogue exists — see
-`docs/2026-07-29-tinkerpop-core-engine-alignment.md`.
+Naming anything new in here follows the layered vocabulary in the root `CLAUDE.md` (**Naming**) —
+these three names are that rule applied: the roles are compiler concepts, so they take compiler words,
+while what they operate on keeps TinkerPop's.
 
 ## Guardrails
 

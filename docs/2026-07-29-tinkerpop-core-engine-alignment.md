@@ -413,14 +413,14 @@ by `GremlinLang` (a canonical Gremlin string plus a parameter map, reachable via
 `Traversal.Admin.getGremlinLang()`). Independent confirmation of locked decision #1 in the root
 `CLAUDE.md`.
 
-## The mechanism: `tools/rename.ts`
+## The mechanism: `scripts/rename.ts`
 
-Renames go through `tools/rename.ts`, which drives the LSP server **inside our pinned `typescript`
+Renames go through `scripts/rename.ts`, which drives the LSP server **inside our pinned `typescript`
 dependency** — `tsc --lsp --stdio`. No new dependency, and the rename is definitionally in agreement
 with the compiler `mise run check` gates on.
 
 ```
-bun tools/rename.ts <file> <oldName> <newName> [--dry] [--at line:col]
+bun scripts/rename.ts <file> <oldName> <newName> [--dry] [--at line:col]
 ```
 
 Why not the obvious alternatives: typescript@7 is the native Go port and deleted both `tsserver.js`
@@ -511,7 +511,7 @@ inherently safe is what makes them dangerous.
    an `any`.
 4. **A `--at` position computed before an earlier rename in the same batch is stale.** A longer
    replacement shifts every later column on that line, and the tool silently renamed a neighbouring
-   symbol (aliasing an imported type to `type Step as modulators`). `tools/rename.ts` now asserts the
+   symbol (aliasing an imported type to `type Step as modulators`). `scripts/rename.ts` now asserts the
    token at `--at` matches and exits 1.
 
 So: **comments are half of a rename, and prose is not sed-able.** A blind substitution of
