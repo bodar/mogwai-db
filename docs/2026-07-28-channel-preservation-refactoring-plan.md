@@ -69,6 +69,30 @@ Completed alias checkpoint:
   or a scalar-ending `match()` is now framed as GraphBinary Long rather than
   inferred Int. Execution, deferral, and crash counts are unchanged.
 
+Completed local-shape/cardinality checkpoints:
+
+- `1af3424` — closes the front-end tagged-argument union, explicit frame/write
+  contracts, and the lowering-local `RelationalCardinality` vocabulary. Global
+  count now has one authority that distinguishes per-row, whole-result, and
+  grouped-path relations; record/variant positional operations honour encounter
+  order when it is live.
+- `653b8c7` — makes `Shape.jsonbList.items: ListOf` total. The prior competing
+  `as`/`typed`/`of` optional channels are gone; materialization and framing carry
+  the same member descriptor without reconstruction.
+- `5686ee2` — makes `Shape.variant` a declared list of scalar/vertex/edge/list
+  arms. The scalar arm has an explicit `ScalarType` (`unknown` rather than an
+  absent tag), and the framer validates a row tag against the declared arms.
+
+Completed capability-ratchet checkpoint:
+
+- `523173d` — the L5 capability gate now generates one deterministic witness
+  for each independently-authored `(input shape, transition)` edge (112 at the
+  current table), in addition to 240 random nested compositions. It permits
+  executions and declared deferrals, while rejecting new raw failures against
+  the committed generated-witness baseline. The focused run reported 266
+  executions and 86 declared deferrals; full CI stayed green with the census at
+  `ran: 1426, deferred: 474, unbound: 381, crashed: 17`.
+
 ## North star
 
 Every compiler boundary must make one of three outcomes explicit:
