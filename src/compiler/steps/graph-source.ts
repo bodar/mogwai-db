@@ -47,5 +47,5 @@ export function lowerReSource(s: ScalarStream | ElementStream, step: IRStep): El
     q`SELECT ${n.c.id} AS id${layoutProjection(s.traverserLayout, p)} FROM ${p} CROSS JOIN ${n}${where}`,
     ['id', ...cols],
   );
-  return toElementStream(loweringStateOf(s), rel, elem);
+  return { ...toElementStream(loweringStateOf(s), rel, elem), reSourced: true };
 }

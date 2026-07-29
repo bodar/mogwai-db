@@ -568,10 +568,9 @@ describe('scalar-parent / projection SQL', () => {
     const two = read("g.V().values('name').concat(__.constant('X'), __.constant('Y'))");
     expect(two.sql).toContain('m0');
     expect(two.sql).toContain('m1');
-    // Still fails CLOSED where the seam cannot reach the child: a re-sourced body with a
-    // pre-projection order() hits the child-scope barrier (see lowerScalarProjection).
-    expect(() => compile("g.inject('hello').concat(__.V().order().by('name').values('name'))", {}))
-      .toThrow('concat() after a scalar stream not yet supported');
+    // A re-sourced body is input-independent. Its order and slice run per child origin,
+    // then the apply contract takes the first value without a concat-specific lowering.
+    expect(() => compile("g.inject('hello').concat(__.V().order().by('name').values('name'))", {})).not.toThrow();
     // A nested arg inside an INLINE predicate body must make the fast path DECLINE, not throw —
     // the recognizer's contract is fall-through, so this compiles via the generic gate.
     expect(() => compile("g.V().values('name').as('a').not(__.concat(__.select('a')).is('x'))", {})).not.toThrow();

@@ -461,8 +461,15 @@ function compileScalarChildRows(
         if (!moved) return null;
         return applyScalarChildCardinality(parent, pushed, scopedElementRowCount(moved, pushed).stream, use, retainChildScope);
       }
-      // ends in a projection (values/id/label) → scalar; lowerSteps folds V→element→projection.
-      if (classifyScalarChildRows('element', after, childCtx(parent))?.kind !== 'element') return null;
+      // Ends in a projection (values/id/label) → scalar. A re-source is the one
+      // input-independent element body, so it may carry the ordinary root element
+      // barriers before that projection; lowerSteps is their single lowering authority.
+      // The syntax guard keeps this preflight pure (no speculative CTEs): only the
+      // root-tail barrier vocabulary is admitted between the re-source and projection.
+      const projectionAt = after.findIndex((s) => ['values', 'id', 'label'].includes(s.name));
+      if (projectionAt < 0
+        || !after.slice(0, projectionAt).every((s) => ELEMENT_CHILD_STEPS.has(s.name)
+          || ['order', 'limit', 'skip', 'range', 'dedup'].includes(s.name))) return null;
       const pushed = pushChildScope(parent, scope);
       const lowered = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, rest, 0);
       if (lowered.kind !== 'scalar') return null;
@@ -669,8 +676,9 @@ export interface ScalarModulationSpec {
  *  declines. It exists because the SCALAR-parent child vocabulary lives downstream of this file
  *  (`scalar-arm.ts` imports `child.ts`, never the reverse), so a scalar-parent consumer injects
  *  its own reach rather than this module growing an upward import. The seam still owns
- *  provisioning: the fallback is handed the pushed SEED and the reused frame's scope, so whatever
- *  it builds rejoins on the same ordinal as every other modulator. */
+ *  provisioning: the fallback is handed the pushed SEED and the reused frame's scope. It returns
+ *  RAW child rows; this seam owns the first-row policy before the common rejoin, so a fallback
+ *  cannot accidentally turn a scalar modulation into a fan-out. */
 export type ModulationFallback = (
   seed: ElementStream | ScalarStream,
   nested: any,
@@ -721,9 +729,13 @@ export function tryCompileScalarModulations(
       seed = { ...es, rel, elem: spec.rootElem ?? es.elem };
     }
     const childScope = reuseCurrentFrame(outer.scope, outer.frame);
-    const stream = tryCompileScalarValueChild(seed, spec.nested, 'first', childScope)
-      ?? fallback?.(seed, spec.nested, childScope)
-      ?? null;
+    const direct = tryCompileScalarValueChild(seed, spec.nested, 'first', childScope);
+    const rawFallback = direct ? null : fallback?.(seed, spec.nested, childScope) ?? null;
+    // The ordinary scalar child compiler already applies its use policy. A fallback
+    // extends only the lowering vocabulary, so apply the SAME policy here at the seam.
+    const stream = direct ?? (rawFallback
+      ? applyChildCardinality(parent, outer.frame, rawFallback, 'first').stream as ScalarStream
+      : null);
     return stream ? { stream, contract: spec.contract ?? 'produce' } : null;
   });
   if (children.some((x) => !x)) return null;

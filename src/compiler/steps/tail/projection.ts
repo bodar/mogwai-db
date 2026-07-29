@@ -626,13 +626,50 @@ function lowerScalarProjection(st: ElementStream, projStep: IRStep, acc: TailAcc
   const origin = st.traverserLayout.origins.at(-1);
 
   // Child scope: a physical per-origin encounter partitions downstream scalar row ops.
-  // Preceding element order/limit/dedup at a child scope defer — the encounter this mints IS
-  // `PARTITION BY origin ORDER BY <projection key>`, so an earlier order() would have to feed that
-  // key rather than sort rows already emitted. REACHABLE: a re-sourced concat/modulation child
-  // (`concat(__.V().order().by("name").values("name"))`, Concat.feature) lands here. For a
-  // re-sourced body the partition is redundant (the child ignores the traverser), which is the
-  // shape a fix would exploit; it fails closed meanwhile.
+  // A re-sourced body discarded its input before reaching this projection, so its element
+  // barriers are ordinary independent copies of the same global relation. Lower those barriers
+  // with per-origin windows here, then hand their ranked encounter to the shared scalar child
+  // cardinality policy. This is a provenance fact from lowerReSource, not a concat special case.
   if (origin) {
+    if (st.reSourced && acc.distinct) {
+      // Bare element dedup is keyed by the current element identity. Its input relation
+      // already contains one cross-joined copy per child origin, so rank that identity
+      // within the origin before continuing through the same order/slice/projection path.
+      const d = st.rel.as('d');
+      const rankOrder = st.traverserLayout.encounter ? d.c[st.traverserLayout.encounter] : d.c.id;
+      const marked = st.q.cte(
+        q`SELECT ${d.c.id} AS id${layoutProjection(st.traverserLayout, d)}, ROW_NUMBER() OVER (PARTITION BY ${d.c[origin]}, ${d.c.id} ORDER BY ${rankOrder}) AS drn FROM ${d}`,
+        ['id', ...layoutCols(st.traverserLayout), 'drn'],
+      );
+      const m = marked.as('m');
+      const deduped = st.q.cte(
+        q`SELECT ${m.c.id} AS id${layoutProjection(st.traverserLayout, m)} FROM ${m} WHERE ${m.c.drn}=1`,
+        ['id', ...layoutCols(st.traverserLayout)],
+      );
+      return lowerScalarProjection({ ...st, rel: deduped }, projStep, { ...acc, distinct: false });
+    }
+    if (st.reSourced) {
+      const orderExprs = acc.orders.map((o) => {
+        if (o.dir === 'shuffle') return q`RANDOM()`;
+        const dir = o.dir === 'desc' ? ' DESC' : ' ASC';
+        return o.key !== null ? q`${nodePropOrderKey(st)(o.key)}${dir}` : q`${proj.scalarExpr ?? p.c.id}${dir}`;
+      });
+      const layout = patchLayout(st.traverserLayout, { encounter: 'encounter' });
+      const ranking = q`ROW_NUMBER() OVER (PARTITION BY ${p.c[origin]} ORDER BY ${list(orderExprs.length ? orderExprs : [proj.encounterKey ?? p.c.id], ', ')})`;
+      const ranked = st.q.cte(
+        q`SELECT ${proj.colsNode}${vtypeCol}${layoutProjectionMinting(layout, p, 'encounter', ranking)} FROM ${proj.fromNode}${where}`,
+        ['v', ...(vt ? ['vtype'] : []), ...layoutCols(layout)],
+      );
+      if (acc.limit === null && acc.offset === 0)
+        return toScalarStream(loweringStateOf(st, layout), ranked, asTag, { result: 'value', type: vt ? PER_ROW(vt) : undefined });
+      const r = ranked.as('r');
+      const stop = acc.limit === null ? null : acc.offset + acc.limit;
+      const slice = st.q.cte(
+        q`SELECT ${r.c.v} AS v${vt ? q`, ${r.c.vtype} AS vtype` : empty}${layoutProjection(layout, r)} FROM ${r} WHERE ${r.c.encounter} > ${value(acc.offset)}${stop === null ? empty : q` AND ${r.c.encounter} <= ${value(stop)}`}`,
+        ['v', ...(vt ? ['vtype'] : []), ...layoutCols(layout)],
+      );
+      return toScalarStream(loweringStateOf(st, layout), slice, asTag, { result: 'value', type: vt ? PER_ROW(vt) : undefined });
+    }
     if (acc.orders.length || acc.limit !== null || acc.offset > 0 || acc.distinct)
       throw new Error('order()/limit()/dedup() before a projection inside a child scope not yet supported');
     const layout = patchLayout(st.traverserLayout, { encounter: 'encounter' });

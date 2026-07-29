@@ -85,6 +85,14 @@ describe('scalar-parent branch/map (Stage 1)', () => {
     expect(await vals("g.V().hasLabel('person').values('age').map(__.is(gt(30)))")).toEqual(['32', '35']);
   });
 
+  test('a re-sourced apply child owns its element order before first-row cardinality', () => {
+    const store = seededStore();
+    expect(run(store, "g.inject('hello','hi').concat(__.V().order().by('name').values('name'))").map((r: any) => r.v))
+      .toEqual(['hellojosh', 'hijosh']);
+    expect(run(store, "g.inject('hello','hi').concat(__.V().dedup().limit(1).values('name'))").map((r: any) => r.v))
+      .toEqual(['hellomarko', 'himarko']);
+  });
+
   test('union() over a scalar concatenates every arm (multiset-faithful)', async () => {
     const p = read("g.V().hasLabel('person').values('age').union(__.constant('a'),__.constant('b'))");
     expect(p.sql).toContain('UNION ALL');

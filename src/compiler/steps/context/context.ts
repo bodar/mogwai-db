@@ -198,6 +198,10 @@ export interface ElementStream extends LoweringState {
   readonly kind: 'elements';
   readonly rel: Relation;               // the current id-relation (a CTE handle)
   readonly elem: Elem;
+  /** This stream was re-sourced by a mid-traversal V()/E(). The incoming traverser
+   * remains only as carried state, so a child-scope barrier may safely operate per
+   * origin after this point rather than treating the projection encounter as its input. */
+  readonly reSourced?: boolean;
 }
 
 /** A prefix step compiler: consume the step, return the next state. */
