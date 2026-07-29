@@ -48,15 +48,6 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      a re-sourced modulation child now reaches it. **The opening: for a re-sourced body the
      partition is redundant** (the child ignores the traverser). *Medium.*
 
-0c. **2 fail-closed VIOLATIONS, surfaced by the census** (`test/census/deferrals.tsv`, status
-   `crashed`). Each throws a raw runtime error instead of a clear deferral, which the project's
-   root rule forbids outright. They were invisible before because a crash and a deferral both just
-   "fail"; the census separates them and gates the count from growing. One root cause:
-   - **Ordering a heterogeneous injected collection — 2 cases.** `g.inject(...scalars, maps,
-     sets...).order()` and `.order().by(desc)` bind a raw collection object while constructing the
-     sort key. Either provide a total Gremlin ordering across every admitted injected value or
-     defer before rendering; never leak a SQLite bind error. *Medium.*
-
 0d. **`mise run L5-random` is RED at essentially every seed — and CI's fixed seed 42 is green, so
    none of it has ever been visible.** Measured 2026-07-29: seeds 5, 11, 27, 91, 143 all fail, each
    with 1–2 failing tests. `known.ts` is EMPTY and correctly so — none of this is a fast-path

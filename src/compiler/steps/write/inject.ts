@@ -125,6 +125,14 @@ export function seedInject(carry: LoweringState, steps: IRStep[], sackInit?: Sac
   // Mixed list/scalar inject remains the historical flattened representation until
   // ScalarStream gains a per-row shape/type discriminant.
   const vals = flattenListArgs(steps[0].args);
+  // A bare rich value can still be framed at the root (Duration/Set/Map each has
+  // established support), but scalar SQL ordering needs a bindable, typed compare
+  // key for EVERY row. Do not let the untyped scalar representation reach SQLite
+  // with a raw container bind: Orderability needs the variant stream's per-row
+  // payload *and scalar-type* discriminants, not SQLite's storage-class order.
+  const hasRichValue = vals.some((v) => v !== null && typeof v === 'object' && !(v instanceof Uint8Array));
+  if (hasRichValue && steps.slice(1).some((s) => s.name === 'order'))
+    throw new Error('order() on heterogeneous injected values requires typed variant Orderability');
   const folded = foldConstantCoercions(steps, vals);
   // withSack(init) seeds every inject traverser's carried sack column (`sk`), exactly
   // as seedSource does for V()/E() — so withSack(x).inject(v).sack(...) carries state.
