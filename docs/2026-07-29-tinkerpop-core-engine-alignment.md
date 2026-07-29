@@ -1,6 +1,12 @@
 # Naming the compiler: a layered vocabulary
 
-**Status: design session, 2026-07-29. No code landed.** Revised the same day after review. The first
+**Status: LANDED, 2026-07-29 — all seven groups, one exception (§4.5's rewrites/strategies
+partition, left open with reasons).** Every group gated on `mise run ci` (which includes the census)
+and pushed green. What the execution taught, recorded at the end under "What the sweep actually
+found", because three of the four defects it produced were invisible to `tsc` and are the reusable
+part.
+
+Revised the same day after review. The first
 pass asked one question — *does TinkerPop have an established name for this?* — and that is the wrong
 test for two thirds of the surface. The revision replaces it with a layered rule (§0), and most of the
 proposed renames changed as a result: three because the code refutes the proposal outright (§4.1), one
@@ -476,6 +482,45 @@ tabulated.
 **Caveat, inherited from the shape doc**: expect L3 delta = 0 across all of this. That is the point of
 the census — without it, "behaviour preserved" is indistinguishable from "20 deferrals quietly became
 wrong answers".
+
+## What the sweep actually found
+
+The renames were the easy half. Four defects came out of executing them, and **three were invisible
+to `tsc`** — which is the transferable lesson, because the instinct that a type-scoped rename is
+inherently safe is what makes them dangerous.
+
+**An LSP rename is exact about what it can see, and every `any` is a hole in what it can see.**
+
+1. **`as any` defeats it entirely — 16 sites (group 4).** `(s as any).options` / `(step as any).bys`
+   reads survive a field rename and silently yield `undefined`. Nine were *decline guards* for the
+   option-map `choose()` form, so the guard would stop firing and that form would take a lowering
+   meant only for the arg form; the rest silently dropped `by()` modulators from
+   `sack()`/`aggregate()`. `tsc` cannot help: `any` accepts a property that no longer exists. One was
+   in a test helper (`steps.find((s: any) => s.bys?.length)`), which matched nothing and made seven
+   assertions compare against `[]` — the suite went green→7-red once the reads were fixed, which is
+   the gate doing its job. All 16 are now `(s as IRStep).<field>`, so the next rename either follows
+   them or fails to compile.
+2. **An object-literal key under a spread is not reached (group 3).** `{ ...s, carried, rel }` kept
+   its shorthand key while the field became `traverserLayout`, so it set a stray property and the
+   intended layout override silently stopped happening. Invisible to `tsc` because the target is
+   generic and excess properties are allowed. Same shape in `absorbModulators`: `{ ...s, bys }` wrote
+   a key no reader looks at any more, which would have dropped *every* `by()` modulator.
+3. **Structural typing is a separate symbol set (group 3).** Four inline parameter types declared
+   their own `carried` property and were duck-typed against `Carry`; renaming the interface left them
+   behind. This one `tsc` *did* catch — 64 errors — because the mismatch is a type error rather than
+   an `any`.
+4. **A `--at` position computed before an earlier rename in the same batch is stale.** A longer
+   replacement shifts every later column on that line, and the tool silently renamed a neighbouring
+   symbol (aliasing an imported type to `type Step as modulators`). `tools/rename.ts` now asserts the
+   token at `--at` matches and exits 1.
+
+So: **comments are half of a rename, and prose is not sed-able.** A blind substitution of
+`Carry` → `LoweringState` wrecked eight sentences where "Carry"/"Carried" were English words ("Carry
+the labels or decline the body"). Rename the symbol with the LSP, then read the comments.
+
+And the ordering advice in the sequencing table was right for a reason that was not the stated one:
+groups sharing a file conflict, but the real reason to keep groups small is that each one's *prose and
+`any`-shaped* residue has to be reviewed by hand, and that review does not scale with batch size.
 
 ## The base rate this doc is subject to
 
