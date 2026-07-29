@@ -93,6 +93,17 @@ Completed capability-ratchet checkpoint:
   executions and 86 declared deferrals; full CI stayed green with the census at
   `ran: 1426, deferred: 474, unbound: 381, crashed: 17`.
 
+Completed IR-annotation experiment (negative result):
+
+- A test-only, conservative root-chain probe was run over all 2,298 L1 inputs
+  plus 600 independently generated L5 chains. It had zero disagreement with the
+  generated terminal shapes, but 1,645/2,898 inputs (56.8%) were `unknown`, far
+  above the pre-committed 10% adoption ceiling. The existing pure child
+  classifiers are therefore not evidence for adding a production root-shape
+  annotation; lowering remains the sole owner of shape interpretation. The probe
+  also corrected the L5 walker's member-shape bookkeeping: list-preserving local
+  transforms no longer overwrite the shape remembered by a preceding `fold()`.
+
 ## North star
 
 Every compiler boundary must make one of three outcomes explicit:

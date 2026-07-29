@@ -72,7 +72,10 @@ export const traversal = (budget: Budget): fc.Arbitrary<Generated> =>
           return `__.${inner.src === '' ? 'identity()' : inner.src}`;
         });
         parts.push(t.render(ctxFrom(bodies, pick)));
-        if (t.to === 'list') folded = shape;
+        // Only fold() establishes the member shape an ensuing unfold() restores.
+        // List-preserving transforms such as order(local) must not replace that
+        // remembered pre-fold shape with `list` itself.
+        if (t.name === 'fold') folded = shape;
         shape = t.to === 'inherit' ? folded : t.to;
         if (t.terminal) break; // nothing meaningful follows a reducer
       }
@@ -178,7 +181,7 @@ function walkAny(from: Shape, budget: Budget, pick: <T>(o: readonly T[]) => T, g
       return `__.${inner === '' ? 'identity()' : inner}`;
     });
     parts.push(t.render(ctxFrom(bodies, pick)));
-    if (t.to === 'list') folded = shape;
+    if (t.name === 'fold') folded = shape;
     shape = t.to === 'inherit' ? folded : t.to;
     if (t.terminal) break;
   }
