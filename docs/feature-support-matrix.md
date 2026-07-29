@@ -210,7 +210,7 @@ characters, `null` → whitespace runs); `format("…%{key}…%{_}…")` reads p
 
 ## 12. Side-effect state
 
-One home (`Carry`): a named registry (aggregate/cap/group('a')) and a carried column (sack),
+One home (`LoweringState`): a named registry (aggregate/cap/group('a')) and a carried column (sack),
 each staying one SQL statement.
 
 | Step | | Notes |

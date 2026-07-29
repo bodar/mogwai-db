@@ -6,6 +6,11 @@ architects including a designated skeptic) against `fa6c0aa`. Every claim below 
 are marked **[verified]**. Read this before proposing a cross-layer shape refactor — three of the
 obvious ones are already refuted here, one of them by prior art in this repo.
 
+**Names here predate the 2026-07-29 rename** (`Carry`/`Carried` → `LoweringState`/
+`TraverserLayout`, `PStep` → `IRStep`, and the whole `carry*` family). The measurements below are
+dated and left as they were taken; decode them with the rename map in
+[tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md).
+
 ## The question that framed it
 
 > The IR-vs-lowering lesson: a non-productive `by()` drop as a decoration Pass broke all six
@@ -105,7 +110,7 @@ Top optional-field grab bags: `ScalarCtx` (`plan.ts:395` — 3-way discriminant,
 property-only, 2 edge-only, one fully orthogonal; read with `!` at 5+ sites); `Shape.variant`
 (`render.ts:162` — 5 optionals, **zero required fields**); `Shape.jsonbList` (`render.ts:166` —
 three mutually-exclusive item-type channels that `execute.ts:606` reconstructs into a fourth);
-`PStep` (`strategies.ts:31` — 7 optionals, each owned by one pass); `Carried` (`context.ts:127` — 8
+`IRStep` (`ir/step.ts` — 7 optionals, each owned by one pass); `TraverserLayout` (`context.ts` — 8
 optionals mixing column names, a chain-global boolean, and pure diagnostics).
 
 Two undeclared unions worth closing regardless: `frameTypedNode` (`execute.ts:228,234`) accepts two

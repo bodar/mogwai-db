@@ -483,6 +483,37 @@ tabulated.
 the census — without it, "behaviour preserved" is indistinguishable from "20 deferrals quietly became
 wrong answers".
 
+## Rename map — the decoder for older docs
+
+Every doc written before 2026-07-29 uses the left column, and several of them are still live guidance.
+Rather than rewrite their dated measurements (which would falsify them), they point here. This table
+is the authority; a doc that *plans* future work uses the right column directly.
+
+| Was | Is | Was | Is |
+|---|---|---|---|
+| `Carry` | `LoweringState` | `carryFrag` | `layoutProjection` |
+| `Carried` | `TraverserLayout` | `carryFragMint` | `layoutProjectionMinting` |
+| `carried` (field) | `traverserLayout` | `mergeCarried` | `mergeLayouts` |
+| `CarriedOpts` | `LayoutPatch` | `withCarried` | `withLayout` |
+| `carriedWith` | `patchLayout` | `rehomeCarried` | `rehomeLayout` |
+| `carriedCols` | `layoutCols` | `withoutCarried` | `dropLayoutAtBarrier` |
+| `carryThrough` | `withRelation` | `carryOf` | `loweringStateOf` |
+| `PStep` | `IRStep` | `advance` | `appendCte` |
+| `PStep.cluster` | `IRStep.repeatRegion` | `PStep.bys` | `IRStep.modulators` |
+| `PStep.options` | `IRStep.optionArms` | `CompileScope` | `ChildFrameStack` |
+| `materializeFinal` | `materializeRootStream` | `analyze` | `analyzeChain` |
+| `*_TAIL` tables | `*_DISPATCH` | bare `TAIL` | `ELEMENT_DISPATCH` |
+| `steps/resource.ts` | `steps/graph-source.ts` | `PassCategory` `fold` | `canonicalize` |
+| `foldRepeatClusters` | `formRepeatRegions` | `foldByModulators` | `absorbModulators` |
+| `foldChooseOptions` | `absorbOptionArms` | `foldConnectives` | `canonicalizeConnectives` |
+| `foldCallWith` | `absorbCallWith` | `foldValueMapWith` | `absorbValueMapWith` |
+| `alwaysProductiveFilterIsNoOp` | `isAlwaysProductiveFilterNoOp` | | |
+
+Unchanged on merit, and NOT to be "fixed" later: `rigidCols`, `stripTerminal`,
+`collapseFoldCountLocal`, `dropRedundantOrder`, `rewriteWhereEndLabels`,
+`foldConstantPredicateOperands` (the one genuine constant fold), `FastPath`, `ChainFacts`, `Stream`,
+`encounter`, `bulk`, `productivity`, and the `steps/tail/` directory.
+
 ## What the sweep actually found
 
 The renames were the easy half. Four defects came out of executing them, and **three were invisible

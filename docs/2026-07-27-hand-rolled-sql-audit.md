@@ -4,6 +4,12 @@ _Swept 2026-07-27, then re-measured twice as trunk moved under it. Every count b
 not estimated: the method is at the bottom. Ranked by (duplication × family unblock × reach at depth),
 which is not the same as ranking by lines._
 
+**Names in this doc predate the 2026-07-29 rename** (`Carry` → `LoweringState`, `carryFrag` →
+`layoutProjection`, `carriedCols` → `layoutCols`, `foldByModulators` → `absorbModulators`,
+`foldConnectives` → `canonicalizeConnectives`). The narrative is a record of closed sites and is
+left as written; the full map is in
+[tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md).
+
 > **STATUS 2026-07-27 (L3 1475).** SIX of the nine sites are closed, and THREE premises in this doc
 > were **falsified by measurement** — read the notes below before using the rankings, because the
 > original entry text still reflects the pre-fix state in each case.

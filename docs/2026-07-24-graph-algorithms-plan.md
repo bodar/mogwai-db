@@ -68,7 +68,7 @@ overstatement in `docs/2026-07-13-cross-do-federation-prior-art.md`):**
    never mis-execute, never silently answer a different question, never drop to JS filtering.
 6. **Rides the existing seam — no new orchestrator.** Global iterative algorithms are `'barrier'`
    contributions (the async/multi-statement variant already present in the registry). Results flow
-   back through the ordinary `lowerSteps`/`materializeFinal` machinery and the existing write path
+   back through the ordinary `lowerSteps`/`materializeRootStream` machinery and the existing write path
    for `mutate`.
 
 ---

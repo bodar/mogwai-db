@@ -8,6 +8,11 @@ it deliberately rather than rediscover it. Line citations and counts re-verified
 (several of the shape doc's had drifted since `fa6c0aa`, and one of its findings has since been
 fixed — see the `Carried` item).
 
+**Names here predate the 2026-07-29 rename** (`Carry`/`Carried` → `LoweringState`/
+`TraverserLayout`, `PStep` → `IRStep`, and the whole `carry*` family). The measurements below are
+dated and left as they were taken; decode them with the rename map in
+[tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md).
+
 ## Why this one gets held up
 
 `ScalarType` (`sql/kernel/render.ts:126-133`) is the only cross-file vocabulary unification in this
@@ -189,7 +194,7 @@ re-implemented at **7** sites (verified), and `{order}` is scanned inline at 7 d
 
 Other optional-field grab bags the pattern fits, lower priority because no defect is filed against
 them: `ScalarCtx` (`plan.ts:402` — a 3-way discriminant with 10 optionals, read with `!` at 5+
-sites) and `PStep` (`strategies.ts` — 7 optionals, each owned by one pass).
+sites) and `IRStep` (`ir/step.ts` — 7 optionals, each owned by one pass).
 
 ## Caveat
 

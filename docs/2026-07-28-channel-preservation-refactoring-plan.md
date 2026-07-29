@@ -15,6 +15,12 @@ local checkpoint. The current branch also merged upstream `origin/trunk` at
 `9483d75` (including `c75ff5d`, the scalar-child classify/emitter agreement fix)
 and CI passed after that merge.
 
+**The whole channel was RENAMED on 2026-07-29** (`Carry`/`Carried` → `LoweringState`/
+`TraverserLayout`, and every `carry*` function with them). The completed-tranche log below keeps the
+names those commits actually used — it is a record, not instructions — so read it against the rename
+map in [tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md). Everything
+from Phase 1 onward is remaining work and uses the CURRENT names.
+
 Completed preservation tranches:
 
 - `2096c41` — adds `carryThrough`, routes scalar preserving rebuilds through it,
@@ -171,22 +177,22 @@ Every candidate must pass this sequence before implementation begins.
    differential agreement alone is insufficient because both configurations can
    share the same wrong answer.
 
-## Phase 1 — Measure, then make `Carried` a preservation contract
+## Phase 1 — Measure, then make `TraverserLayout` a preservation contract
 
 **Why first.** The historical defect census found dropped carried/optional roles in
 12 of 36 written diagnoses (33%). That is evidence for this direction, not a claim
-about the remaining work: `mergeCarried` and subsequent fixes have already reduced
+about the remaining work: `mergeLayouts` and subsequent fixes have already reduced
 the surface. Before changing code, re-measure the current diagnosed defects,
-`carriedWith` call sites, hand-written `...carried` spreads, and the locations of
-each carried role. Record the commit and measurement in the phase design note.
+`patchLayout` call sites, hand-written `...traverserLayout` spreads, and the locations of
+each layout role. Record the commit and measurement in the phase design note.
 
-This phase applies the `rebuildScalar` half of the ScalarType pattern; `Carried` is
+This phase applies the `rebuildScalar` half of the ScalarType pattern; `TraverserLayout` is
 intentionally a collection of distinct roles, not a candidate for one monolithic
 shape union.
 
 ### Current trunk anchor
 
-`mergeCarried` now exists, but its deployment is intentionally narrow: the
+`mergeLayouts` now exists, but its deployment is intentionally narrow: the
 same-scope element-arm merge calls it after supplying that merge's path policy. It
 unions aliases and asserts that rigid physical roles agree. This is a useful first
 authority, not evidence that every apparent merge can call it unchanged.
@@ -197,12 +203,12 @@ calling the current rigid-role assertion there would reject valid `coalesce` and
 related forms. Those sites deliberately merge aliases only after re-homing. The
 generalisation must preserve that distinction: normalize/re-home a child result at
 the child boundary, then merge only the roles that remain meaningful in the parent
-scope. Do not weaken `mergeCarried`'s assertion merely to make such a call type
+scope. Do not weaken `mergeLayouts`'s assertion merely to make such a call type
 check.
 
 ### Design
 
-- Make `mergeCarried` the sole authority for **same-scope peer-arm merges**. Map
+- Make `mergeLayouts` the sole authority for **same-scope peer-arm merges**. Map
   every candidate boundary first: a child rejoin, keyed relation, or recursive term
   may instead be a preservation/re-home boundary, not a peer merge.
 - Where a merge combines child-scoped arms, establish the explicit sequence
@@ -213,17 +219,18 @@ check.
   - unionable (for example aliases);
   - preserving/identical (for example a compatible origin or encounter role);
   - incompatible, producing a declared deferral rather than an invented value.
-- Add `carryThrough`, the `rebuildScalar` analogue. Any operation that changes only
-  its relation calls it; an operation that changes carried state uses an explicit
-  `retype`, `rehome`, `drop`, or `degrade` operation instead.
-- Extend `assertStreamColumns` to verify declared carried-role columns as well as
+- **`withRelation` (was `carryThrough`) already exists** — landed in `2096c41`, so this is a
+  DEPLOYMENT task, not a construction one. Any operation that changes only its relation calls it;
+  an operation that changes layout state uses an explicit `retype`, `rehome`, `drop`, or `degrade`
+  operation instead.
+- Extend `assertStreamColumns` to verify declared layout-role columns as well as
   payload and per-row type columns.
-- Replace hand-written `...carried` spreads. The migration is complete only when
+- Replace hand-written `...traverserLayout` spreads. The migration is complete only when
   the remaining spreads are documented intentional construction sites, not routine
   preservation paths.
 - Introduce the preserving/transformation verbs with the helpers themselves. In
-  particular, routine paths must not use `{ ...stream }` or `{ ...carried }` to
-  mean “preserve semantics”; they call `carryThrough`, `mergeCarried`, or a named
+  particular, routine paths must not use `{ ...stream }` or `{ ...traverserLayout }` to
+  mean “preserve semantics”; they call `withRelation`, `mergeLayouts`, or a named
   `retype`, `rehome`, `drop`, or `degrade` helper.
 
 ### Proof and exit gate
@@ -382,9 +389,9 @@ an annotation is useful before changing production IR.
 
 The execution order is:
 
-1. Re-measure and scope `Carried`, including focused preservation regressions.
+1. Re-measure and scope `TraverserLayout`, including focused preservation regressions.
 2. Build the matrix ratchet, seeded with its known-failure baseline.
-3. Complete the `Carried` preservation contract.
+3. Complete the `TraverserLayout` preservation contract.
 4. Complete ScalarType; its named transformation vocabulary is introduced as part
    of this and the preceding phase, not as a later rename pass.
 5. Repair weak local shape vocabularies.

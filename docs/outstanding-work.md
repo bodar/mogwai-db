@@ -204,7 +204,7 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    (`steps/tail/scalar-arm.ts`) and `positionArmFansOut` (`steps/tail/path.ts`). Minting
    `encounter = new element id` at a re-source is the one missing primitive. `repeat()`/`match()`
    stay deliberately outside (a recursive CTE can't window across iterations — `analyze.ts` returns
-   `demandsEncounter: false` by design). There is ONE slot, `Carried.encounter`; do not re-derive a
+   `demandsEncounter: false` by design). There is ONE slot, `TraverserLayout.encounter`; do not re-derive a
    "two encounters" reconciliation. **Low-Med.**
    → [canonical-emission-order](./2026-07-19-canonical-emission-order.md)
 
@@ -268,7 +268,7 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    parent (`groupCount`, `choose`, `coalesce`, `math`) while others do not (`group`, `none`,
    `repeat`, `order().by(traversal)`), so it is per-step dispatch, ~2-3 scenarios each. **Do NOT
    treat the 67 as one item to "fix" — that is floor-chasing.** The honest unit of work is one parent
-   shape at a time; the scalar parent is biggest and has the most machinery (`SCALAR_TAIL`,
+   shape at a time; the scalar parent is biggest and has the most machinery (`SCALAR_DISPATCH`,
    `lowerScalarRows`, `scalar-arm.ts`). Where a step needs a genuinely different builder over a
    scalar parent (`group()` has no element to project and its default `elementList` value mode does
    not apply) that is real work, not a gate.
@@ -552,10 +552,15 @@ Sources: [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md),
   plan implemented, only P3 tails remain.
 - **[wire-and-storage-facts](./2026-07-25-wire-and-storage-facts.md)** — Map.Entry framing + MapStream
   model. Durable reference, not a plan.
-- **[tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md)** — our
-  vocabulary read against TinkerPop `gremlin-core` on `origin/master`. Names the prior art for
-  `Carried` (`TraverserRequirement`'s declare→union→derive), lists the renames worth doing
-  (incl. two dangerous collisions: `CompileScope`/`CompilerScope`, `Carry`/`Carried`), and records
+- **[tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md)** — **LANDED**,
+  and now the naming authority behind the root `CLAUDE.md`'s **Naming** section. Our vocabulary read
+  against TinkerPop `gremlin-core` on `origin/master`. Names the prior art for `TraverserLayout`
+  (`TraverserRequirement`'s declare→union→derive); all seven rename groups are done (both dangerous
+  collisions closed — `CompileScope`/`CompilerScope` and `Carry`/`Carried`), with **a rename map** that
+  decodes every pre-2026-07-29 doc, and a record of the three defect classes an LSP rename cannot see
+  (`as any` reads, literal keys under a spread, comments). One item is deliberately open: the
+  `ir/rewrites.ts`/`ir/strategies.ts` partition, which needs a shared-helper home decided first. Also
+  records
   **four TinkerPop patterns to refuse** — marker-interface `instanceof` dispatch, the Global/Local
   step-class split, `GValue` placeholder duality (elegant, but worthless without a plan cache), and
   the already-refuted typed core IR. Read before proposing a naming change or porting a TinkerPop
