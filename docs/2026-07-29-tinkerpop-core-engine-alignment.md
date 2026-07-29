@@ -2,14 +2,22 @@
 
 **Status: design session, 2026-07-29. No code landed.** Revised the same day after review. The first
 pass asked one question — *does TinkerPop have an established name for this?* — and that is the wrong
-test for two thirds of the surface. The revision replaces it with a layered rule (§0), and six of the
-proposed renames changed as a result, three of them because the code refutes the proposal outright
-(§4.1).
+test for two thirds of the surface. The revision replaces it with a layered rule (§0), and most of the
+proposed renames changed as a result: three because the code refutes the proposal outright (§4.1), one
+because the rule cuts *against* TinkerPop (§4.1), and two reversals of direction — §4.6 reverses the
+first draft, §4.3 reverses this revision's own first attempt at it.
 
-Basis: a read of TinkerPop `gremlin-core` on `origin/master` (`f475bca`) against `src/compiler/**`.
-Counts re-taken at `ddef441` (they had drifted badly — see §4.4), and every "keep it" and "rename it"
-below is checked against what the code actually does, not against what the previous draft's summary
-of it said.
+Basis: a read of TinkerPop `gremlin-core` on `origin/master` (`f475bca`) against `src/compiler/**` at
+`ddef441`. Every "keep it" and "rename it" below is checked against what the code actually does, not
+against what the previous draft's summary of it said.
+
+**Blast radius is not an input.** An LSP rename costs the same at 12 references as at 1,200, so a
+reference count is not evidence about a name. The first draft carried a `Sites` column and let it
+argue for deferring one rename as "too big for the payoff"; both are gone. Two questions decide every
+row below, and nothing else does:
+
+1. Does the name say what the thing *is*?
+2. Can it be confused with a different thing?
 
 The structural half of the answer is **already in flight** — see
 [channel-preservation](./2026-07-28-channel-preservation-refactoring-plan.md), which this doc defers
@@ -151,31 +159,30 @@ Recorded because each looked right from the prose and is wrong against the sourc
   `analyzeChain` and the pairing reads as compiler code should: `const facts: ChainFacts =
   analyzeChain(steps)`.
 - **`materializeFinal` → `materializeRoot`: IMPOSSIBLE as written.** `materializeRoot(query, tail,
-  shape)` already exists (`steps/tail/materialize.ts:17`, 18 uses) as the low-level primitive that
-  every `materialize<Kind>Root` sibling calls. The defect the first draft found is real — "final"
-  and "root" name one boundary — but the free name is a third one. `materializeFinal` (13 uses) is
-  the root entry point that rejects an unprojected element stream and dispatches by kind, so
+  shape)` already exists (`steps/tail/materialize.ts:17`) as the low-level primitive every
+  `materialize<Kind>Root` sibling calls. The defect the first draft found is real — "final" and
+  "root" name one boundary — but the free name is a third one. `materializeFinal` is the root entry
+  point that rejects an unprojected element stream and dispatches by kind, so
   **`materializeRootStream`**: consistent with the `*Root` family, distinct from the primitive, and
   it says what it takes. "Materialize" itself stays — `materialize.ts:1` is "the one read
   materialization boundary", which is the strong database sense of the word, correctly used.
 
 ### 4.2 The renames to make
 
-Kind = which row of §0's table the name is drawn from. Sites = identifier occurrences across `src/` +
-`test/` at `ddef441`, comments included (see §4.4 on why these are not the first draft's numbers).
+Kind = which row of §0's table the name is drawn from.
 
-| Ours | Rename to | Kind | Sites | Why |
-|---|---|---|---|---|
-| `Carry` | `LoweringState` | pipeline | 109 | Its contents are `q`/`params`/`sideEffects`/`carried` — an append-only query builder plus threaded state, not an *environment* (no name bindings, no symbol table). Its own doc-comment already says "PURE per-query STATE". And `Lowering*` is established here: `LoweringEngine`, `LoweringResult`, `LoweringSuspension`, `LoweringContinuation`. |
-| `Carried` | `TraverserLayout` | row state | 54 | "Traverser" grounds it in Gremlin; "Layout" admits physical columns *plus* layout metadata. `Schema` would over-promise: `trackFromV` is a capability flag and `consumedAliases` is marked "METADATA ONLY — never a physical column" (`context.ts:171`). `Frame` would misread as an activation record. |
-| `PStep` | `IRStep` | IR | 333 | Single unexplained letter. Name the object, not a phase it once went through: `NormalizedStep` (the first draft's pick) goes stale as soon as a later pass runs, and §4.4 shows a phase-named field already drifting. `Step` stays the front-end's flat node; `IRStep` is the compiler's, carrying folded children. |
-| `advance` | `appendCte` | SQL construction | 33 calls | It appends a CTE and returns state rebased on it (`context.ts:456`); "advance" reads like a cursor op and `emitCte` (the first draft's pick) reads like final code emission. Document the pair: `q.cte()` mints a relation, `appendCte()` mints one *and* rebases the stream's layout onto it. |
-| `cluster` (`IRStep` field) | `repeatRegion` | IR | 55 | It is exactly the fused `repeat/until/emit/times` run (`REPEAT_CLUSTER`, `ir/strategies.ts:33`). "Region" is the compiler word for a structured IR part that may contain nested control flow, which this does; "cluster" implies an optimisation grouping with no defined semantics. Not `Block` — this is not single-entry/single-exit and "basic block" means something specific. |
-| `bys` (`IRStep` field) | `modulators` | Gremlin | 214 | Moves *towards* TinkerPop, correctly: `by()` is a Gremlin-language concept and TinkerPop models it as `ByModulating`/`modulateBy`. A pluralized step name is not a field name. Not `projections` — `by()` is step-dependent and only sometimes a projection. |
-| `options` (`IRStep` field) | `optionArms` | structure | 34 reads + 26 writes, inside 173 uses of the token | Collides with `CompileOptions` (76 uses) and `FastPathConfig` throughout — the count split is the whole reason this one needs care. Close to TinkerPop's `TraversalOptionParent.addChildOption`; "arm" is established for `choose`/branching. |
-| `materializeFinal` | `materializeRootStream` | SQL construction | 15 | §4.1. |
-| `CompileScope` | `ChildFrameStack` | IR | 42 | Kills the `CompilerScope` collision. The element type `ChildFrame` already exists, so this needs no imported vocabulary. The arms `RootScope`/`ChildScope` **keep** their names: a `ChildFrame`'s `domain`+`ordinal` genuinely determine what relation is visible to the body, which is what a scope is. |
-| six `*_TAIL` tables + bare `TAIL` | `<SHAPE>_DISPATCH`, bare `TAIL` → `ELEMENT_DISPATCH` | IR | 28 | They are shape-keyed dispatch tables, not positions; the unqualified one is an odd-one-out asymmetry. |
+| Ours | Rename to | Kind | Why |
+|---|---|---|---|
+| `Carry` | `LoweringState` | pipeline | Its contents are `q`/`params`/`sideEffects`/`carried` — an append-only query builder plus threaded state, not an *environment* (no name bindings, no symbol table). Its own doc-comment already says "PURE per-query STATE". `Lowering*` is established here (`LoweringEngine`, `LoweringResult`, `LoweringSuspension`, `LoweringContinuation`), and it makes the phase pairing explicit: `PassContext` is the pass phase's threaded state, this is the lowering phase's — which `pass.ts:37` already says in prose. |
+| `Carried` | `TraverserLayout` | row state | "Traverser" grounds it in Gremlin; "Layout" admits physical columns *plus* layout metadata. `Schema` would over-promise: `trackFromV` is a capability flag and `consumedAliases` is marked "METADATA ONLY — never a physical column" (`context.ts:171`). `Frame` would misread as an activation record. |
+| `PStep` | `IRStep` | IR | Single unexplained letter. Name the object, not a phase it once went through: `NormalizedStep` (the first draft's pick) goes stale the moment a later pass runs — and §4.4 is a phase-named field that already drifted. `Step` stays the front-end's flat node; `IRStep` is the compiler's, carrying folded children. |
+| `advance` | `appendCte` | SQL construction | It appends a CTE and returns state rebased on it (`context.ts:456`); "advance" reads like a cursor op and `emitCte` (the first draft's pick) reads like final code emission. Document the pair, since the ambiguity is real: `q.cte()` mints a relation; `appendCte()` mints one *and* rebases the traverser layout onto it. |
+| `cluster` (`IRStep` field) | `repeatRegion` | IR | It is exactly the fused `repeat/until/emit/times` run (`REPEAT_CLUSTER`, `ir/strategies.ts:33`). "Region" is the compiler word for a structured IR part that may contain nested control flow, which this does; "cluster" implies an optimisation grouping with no defined semantics. Not `Block` — this is not single-entry/single-exit and "basic block" means something specific. |
+| `bys` (`IRStep` field) | `modulators` | Gremlin | Moves *towards* TinkerPop, correctly: `by()` is a Gremlin-language concept and TinkerPop models it as `ByModulating`/`modulateBy`. A pluralized step name is not a field name. Not `projections` — `by()` is step-dependent and only sometimes a projection. |
+| `options` (`IRStep` field) | `optionArms` | structure | The token is overloaded three ways — this field, `CompileOptions`, and `FastPathConfig` — so an accurate name has to distinguish them, and the rename must be driven off the *type* (LSP, field-scoped), never a text match on `options`. Close to TinkerPop's `TraversalOptionParent.addChildOption`; "arm" is established for `choose`/branching. |
+| `materializeFinal` | `materializeRootStream` | SQL construction | §4.1. |
+| `CompileScope` | `ChildFrameStack` | IR | Kills the `CompilerScope` collision. The element type `ChildFrame` already exists, so this needs no imported vocabulary. The arms `RootScope`/`ChildScope` **keep** their names: a `ChildFrame`'s `domain`+`ordinal` genuinely determine what relation is visible to the body, which is what a scope is. |
+| six `*_TAIL` tables + bare `TAIL` | `<SHAPE>_DISPATCH`, bare `TAIL` → `ELEMENT_DISPATCH` | IR | They are shape-keyed dispatch tables, not positions; the unqualified one is an odd-one-out asymmetry. |
 
 **Keep, and document once instead**: `encounter`, `bulk`, `productivity.ts` (all three are TinkerPop's
 own words — `ProductiveByStrategy`, `TraversalProduct.isProductive`, "encounter order", a Traverser's
@@ -187,48 +194,52 @@ a mid-traversal `V()`/`E()` and `GraphStep` is TinkerPop's name for exactly that
 `q` → `query` was considered and declined: it is a good name badly abbreviated, but it is the single
 most-threaded identifier in the compiler and the abbreviation is unambiguous within it.
 
-### 4.3 The `carried` field and the `carry*` family: rename the types, defer the rest
+### 4.3 The whole `carry*` family, named
 
-The first draft called `PStep` "the biggest and most mechanical" item. It is not the biggest — the
-`Carry`/`Carried` family is, by an order of magnitude:
+An earlier revision of this section proposed renaming only the two type names and deferring the field
+and the eleven functions as "cosmetic", on the grounds that the sweep was large. That was a cost
+argument wearing a correctness costume, and it is withdrawn. If `Carried` becomes `TraverserLayout`,
+then `st.carried` is an adjective standing where a noun belongs and `carryFrag` names a fragment of a
+thing that no longer exists. Half a rename is a worse state than either end of it.
 
-| | Sites |
-|---|---|
-| the two **type** names (`Carry` 109, `Carried` 54, `CarriedOpts`) | ~165 |
-| the `carried` **field** (`.carried` 505 reads, `carried:` 49 writes) | ~554 |
-| the function family (`carriedCols` 169, `carryFrag` 167, `carryFragMint`, `carriedWith` 54, `mergeCarried`, `rigidCols`, `withCarried`, `rehomeCarried`, `withoutCarried`, `carryThrough`, `carryOf`) | ~500 |
+So the family gets named, member by member — not by prefix-substituting `carry` → `layout`, which
+would preserve two abbreviations (`Frag`, `Opts`) and one outright inaccuracy (`withoutCarried`):
 
-So split it, and take only the first part:
+| Now | Rename to | Why this name |
+|---|---|---|
+| `carried` (field on `LoweringState`) | `traverserLayout` | Not bare `layout`: `PathStream.layout` already exists (`tail/path.ts:230,333,360`) and means the linear-vs-grouped *path* layout. Two different `layout` fields on two stream types is exactly the confusion §0's second question rules out. The qualifier goes on the general one because the specific one is self-evident in context — a `PathStream`'s layout is obviously a path layout. |
+| `CarriedOpts` | `LayoutPatch` | It is a tri-state patch, not options: a value sets, `null` clears, `undefined` keeps (`context.ts:389-403`). "Opts" says nothing about that. |
+| `carriedWith` | `patchLayout` | Applies that patch. The `X`-`With` shape reads as a constructor; this is a patch application. |
+| `carriedCols` | `layoutCols` | Keep `Cols` abbreviated: `Relation.cols` is the SQL kernel's own spelling, so `layoutColumns` would drift from the layer it feeds. |
+| `rigidCols` | unchanged | "Rigid" is a defined term with a stated contract (per-traverser state a branch cannot fork or reconcile) and it is the distinguishing word. |
+| `carryFrag` | `layoutProjection` | It emits `, p.a0, p.p0, …` — a SQL projection list. "Frag" abbreviates "fragment", which was never the concept. |
+| `carryFragMint` | `layoutProjectionMinting` | Same projection with one named column computed fresh instead of forwarded. `mint` stays: it is this codebase's consistent word for allocating a fresh column or ordinal, used at every mint site. |
+| `mergeCarried` | `mergeLayouts` | |
+| `withCarried` | `withLayout` | |
+| `rehomeCarried` | `rehomeLayout` | "Rehome" is accurate and already documented (child-scoped state onto the parent's schema). |
+| `withoutCarried` | `dropLayoutAtBarrier` | The current name is the one *inaccuracy* in the family. It does not produce a stream without a layout: it resets the layout while retaining `trackFromV` and **recording the dropped label names in `consumedAliases`** so a downstream `select(label)` can throw a clear deferral instead of silently returning `[]` (`context.ts:437-448`). It is barrier-specific by contract, and the name should say so — a caller reaching for a generic "clear the layout" helper is a caller about to lose that diagnosis. |
+| `carryThrough` | `withRelation` | A new stream over a new relation with everything else identical, column-asserted (`stream.ts:384`). Joins the `withX` preserving-rebuild convention already in this file. |
+| `carryOf` | `loweringStateOf` | Projects the shape-independent state out of a stream; the `XOf` accessor shape is already the convention here (`carriedCols`, `pathColsOf`, `aliasColsOf`). |
 
-- **Do**: rename the two type names (~165 sites, pure LSP). This alone closes the §2.1 collision
-  completely — the collision *is* `Carry` vs `Carried`, and `st.carried: TraverserLayout` beside
-  `loweringStateOf(st)` cannot be misread as a typo.
-- **Defer**: the ~1,050-site field-and-function sweep. It buys cosmetic consistency only, and it
-  collides with the in-flight channel-preservation work, which is actively editing these exact call
-  sites. Note also that the field cannot simply become `layout`: `PathStream.layout` already exists
-  (`steps/tail/path.ts:230,333,360`) and means something else, so the field would have to be the
-  full `traverserLayout` — 554 sites of a 16-character field name to remove a confusion the type
-  rename has already removed.
+Two members keep their names on merit: `withoutPath` and `trackFromV` both say exactly what they do.
 
-If the sweep is ever done, the derived names are `layoutCols`, `layoutFrag`, `layoutFragMint`,
-`layoutWith`, `mergeLayouts`, `rehomeLayout`.
+The one real sequencing constraint is unchanged and is not about size: this family is the same set of
+call sites the in-flight [channel-preservation](./2026-07-28-channel-preservation-refactoring-plan.md)
+work is editing, so it lands after that, or it produces conflicts in every file it touches.
 
-### 4.4 The counts were stale, and one of them is evidence
+### 4.4 A phase-named field that already drifted (fixed in `bd6dfaf`)
 
-The first draft's site counts were taken at `a2b8d4b` and verified by hand. Re-taken at `ddef441`,
-most are 2–3× larger (`bys` 72 → 214, `cluster` 7 → 55, `PStep` 304 → 333). The counting method
-differed more than the code did, which is the real lesson: **re-count immediately before starting a
-group, and treat any number in this doc as an order of magnitude, not a target.**
+`PassContext.originalChain` was documented as "The chain AFTER `fold` but BEFORE any `decoration`
+pass ran" (`ir/pass.ts:46`), echoed as "folded but not injected" (`ir/passes.ts:115`). But
+`PASS_CATEGORIES` orders `decoration` *before* `fold` (`pass.ts:22`, and `pass.ts:26-29` explains why
+it must), and the driver snapshots at the boundary into decoration (`passes.ts:183`), where its own
+comment correctly reads "extract-only: … nothing injected/folded". The behaviour is the driver's; two
+doc-comments described a pipeline order that does not exist.
 
-One stale artefact found while checking, worth its own fix because it is a *comment that is now
-wrong about behaviour*: `PassContext.originalChain`'s doc-comment says "The chain AFTER `fold` but
-BEFORE any `decoration` pass ran" (`ir/pass.ts:46`), echoed as "folded but not injected"
-(`ir/passes.ts:115`). But `PASS_CATEGORIES` orders `decoration` *before* `fold` (`pass.ts:22`, and
-`pass.ts:26-29` explains why it must), and the driver snapshots at the boundary into decoration
-(`passes.ts:183`), where its own comment correctly reads "extract-only: … nothing injected/folded".
-The behaviour is the driver's; two doc-comments describe a pipeline order that does not exist.
-Comment-only fix, no behaviour change — and a live example of §4.2's argument for naming things after
-what they are rather than after a phase.
+Fixed as a comment-only change. It stays recorded here because it is the concrete case for §4.2's
+`IRStep`-over-`NormalizedStep` argument: a name or a comment that pins something to a *pipeline phase*
+has to be re-verified every time the pipeline is reordered, and this one was not. Names that say what
+a thing is do not carry that maintenance obligation.
 
 ### 4.5 `ir/strategies.ts` — the one structural split
 
@@ -247,23 +258,27 @@ same commit so importers move separately:
 
 **Reversing the first draft.** It proposed `steps/tail/` → `steps/shaped/` on the grounds that "tail"
 names the layer by *position* when the real axis is element-typed fold (`prefix/`) versus
-shape-polymorphic dispatch. The axis claim is right, and `shaped/` is a bad name for it
-(`shape-dispatch/` would be the right one) — but the premise is weaker than it looks:
+shape-polymorphic dispatch. `shaped/` is a bad name for that axis (`shape-dispatch/` would be the
+right one), but the premise itself is what fails: **position is the defining property of this layer,
+and shape-polymorphism is a consequence of it.**
 
-- The position is real and load-bearing, not incidental. `engine.ts`'s prefix fold *stops* at the
-  first step absent from the prefix table, and everything after that stop-boundary is the tail. The
-  `range`/`limit`-before-vs-after-`order()` split is decided by exactly that boundary
-  (`ir/strategies.ts:16-19`).
-- "Tail" is entrenched as *prose* far beyond the import paths: `src/compiler/steps/CLAUDE.md` alone
-  uses it 12 times ("a TAIL step", "the tail cascades", "at a tail boundary", "a child body's tail
-  barrier"), plus four other `CLAUDE.md`s and comments throughout. Moving the directory without
-  rewriting all of that leaves the codebase saying "tail" and the filesystem saying something else —
-  strictly worse than either.
-- It moves 51 files' import paths, so it conflicts with every other item here.
+What makes these files one group is that they are what the prefix fold falls through *to*.
+`engine.ts`'s fold stops at the first step absent from the prefix table, and the
+`range`/`limit`-before-vs-after-`order()` split is decided by exactly that stop-boundary
+(`ir/strategies.ts:16-19`) — a structural fact of the compiler, not a filing convention. The shape
+polymorphism follows: once a chain leaves elements it is in twelve shapes, so anything past the
+boundary has to dispatch on shape. Naming the layer `shape-dispatch/` would name the consequence and
+lose the cause.
+
+The corollary matters too. "Tail" is not just in import paths — it is the vocabulary of the prose
+contract (`src/compiler/steps/CLAUDE.md`: "a TAIL step", "the tail cascades", "at a tail boundary",
+"a child body's tail barrier", plus four other `CLAUDE.md`s). If `shape-dispatch/` were the more
+correct name, the right move would be to rename that prose too, not to leave the code and the
+filesystem disagreeing. It isn't, so neither happens.
 
 So: **keep `steps/tail/` and `steps/prefix/`**, and take the part of the finding that stands on its
 own — the `*_TAIL` **tables** are shape-keyed dispatch tables, not positions, and become `*_DISPATCH`
-(§4.2, 28 sites, no file moves). Two lodgers to fix while there: `PROPERTY_TAIL` +
+(§4.2 — a rename, no file moves). Two lodgers to fix while there: `PROPERTY_TAIL` +
 `compileFromProperty` live in `tail/group.ts`, and `compileFromMap`/`compileFromMapEntry` live in
 `tail/list.ts`.
 
@@ -383,15 +398,17 @@ by `GremlinLang` (a canonical Gremlin string plus a parameter map, reachable via
 mechanical risk of a rename; it does not remove the risk of renaming the *wrong* `options` or `fold`,
 which is why the groups stay small and the gates stay.
 
-| # | Group | Sites | Depends on |
-|---|---|---|---|
-| 1 | §2/§3 comment-only: retire `Seam`/`Layer`, fix the `FastPath` row, fix `originalChain` (§4.4) | — | nothing |
-| 2 | `CompileScope` → `ChildFrameStack`; `*_TAIL` → `*_DISPATCH`; `materializeFinal` → `materializeRootStream`; `analyze` → `analyzeChain`; `steps/resource.ts` → `steps/graph-source.ts` | ~90 | nothing |
-| 3 | `Carry`/`Carried` → `LoweringState`/`TraverserLayout` (types only, §4.3) | ~165 | in-flight channel work |
-| 4 | `advance` → `appendCte`; `cluster` → `repeatRegion`; `bys` → `modulators`; `options` → `optionArms` | ~330 | 3 |
-| 5 | `PStep` → `IRStep` | 333 | 4 |
-| 6 | §5 rewrite verbs + `PassCategory` `fold` → `canonicalize` + §4.5 file split | ~60 | 5 |
-| 7 | §6 vocabulary sets, one commit per family | — | 6 |
+Ordering is by dependency and edit-conflict only — a group is not "later" for being larger.
+
+| # | Group | Why here |
+|---|---|---|
+| 1 | §2/§3 comment-only: retire `Seam`/`Layer`, fix the `FastPath` row | Nothing depends on it and it depends on nothing. §4.4's comment fix already landed in `bd6dfaf`. |
+| 2 | `CompileScope` → `ChildFrameStack`; `*_TAIL` → `*_DISPATCH`; `materializeFinal` → `materializeRootStream`; `analyze` → `analyzeChain`; `steps/resource.ts` → `steps/graph-source.ts` | Five independent names, no shared files with any other group. |
+| 3 | The whole `carry*` family (§4.3) | Must follow the in-flight [channel-preservation](./2026-07-28-channel-preservation-refactoring-plan.md) work, which is editing these exact call sites. A real conflict, not a cost. |
+| 4 | `advance` → `appendCte`; `cluster` → `repeatRegion`; `bys` → `modulators`; `options` → `optionArms` | `appendCte`'s signature takes the patch type group 3 renames, and both edit `context.ts` — adjacent to 3 so that file is touched once per concern. |
+| 5 | `PStep` → `IRStep` | The three field renames in group 4 are fields *of* this type; doing the fields first keeps each commit's diff about one name. |
+| 6 | §5 rewrite verbs + `PassCategory` `fold` → `canonicalize` + §4.5 file split | The split creates `ir/step.ts` around `IRStep`, so it needs group 5's name to exist. |
+| 7 | §6 vocabulary sets, one commit per family | The sets move into `ir/step.ts` in group 6, and this group alone carries the byte-identical SQL gate below — it should not have another rename in flight to confuse a snapshot diff. |
 
 Every item uses the same gate: `mise run test` (**not** bare `bun test` — it skips `tsc --noEmit` and
 the submodule), and **the census is the real gate** (`test/census/`, which fails the build if a
@@ -412,6 +429,14 @@ wrong answers".
 Structural need predicted forward from an architecture sketch has been falsified by measurement
 roughly twelve times in this repo
 ([shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md):164-180). Three
-falsifications in §4.1 and one reversal in §4.6 arrived within a day of the first draft, from nothing
-more than reading the code the draft was about. Nothing here is a proposal for a universal algebra;
-that is ruled out in the same doc and is not relitigated.
+falsifications in §4.1 and the reversal in §4.6 arrived within a day of the first draft, from nothing
+more than reading the code the draft was about.
+
+§4.3 failed differently and is worth recording as its own mode: nothing about it was falsified by
+measurement, it was *decided* by measurement that should never have been admitted as evidence. A
+reference count made a half-rename look prudent, and "large" got written down as "cosmetic". A rename
+is right or wrong on the name; the only legitimate use of scale here is edit-conflict ordering, which
+is what the sequencing table now says and all it says.
+
+Nothing here is a proposal for a universal algebra; that is ruled out in the same doc and is not
+relitigated.
