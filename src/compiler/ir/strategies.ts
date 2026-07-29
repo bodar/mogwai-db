@@ -1,5 +1,10 @@
 import { stepChain, isNested, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
 import { bodyAlwaysProduces } from './productivity.ts';
+import { type IRStep } from './step.ts';
+
+// IRStep moved to ir/step.ts (it is needed by both halves of ir/). Re-exported here so the
+// ~36 existing importers keep working and can move to ./step.ts independently.
+export type { IRStep } from './step.ts';
 
 // ---------- pass BODIES: the concrete Step[]→Step[] rewrites ----------
 //
@@ -18,17 +23,6 @@ import { bodyAlwaysProduces } from './productivity.ts';
 // absent from the prefix table), after which they fall to the tail as ORDER BY/LIMIT modifiers. So
 // it lives in the dispatch itself, not here.
 
-/**
- * A Step optionally carrying folded modulator data, so no step compiler ever
- * peeks at sibling steps:
- *  - `repeatRegion` — the repeat/emit/times/until run (`formRepeatRegions`).
- *  - `modulators` — the trailing by() modulator arg-lists absorbed onto a host step
- *    (`absorbModulators`): order/select/project/group's by(), and the single
- *    by(key) an alias-compare where()/not() carries.
- * The compilers read these fields instead of re-scanning, so the whole read
- * dispatch is a peek-free fold over the step list.
- */
-export type IRStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; from?: string; to?: string; withArgs?: [string, any][] };
 
 const REPEAT_CLUSTER = new Set(['repeat', 'emit', 'times', 'until']);
 /** Steps that absorb trailing by() modulators. Alias-compare where()/not() also

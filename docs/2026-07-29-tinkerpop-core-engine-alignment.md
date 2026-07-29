@@ -243,16 +243,31 @@ a thing is do not carry that maintenance obligation.
 
 ### 4.5 `ir/strategies.ts` — the one structural split
 
-1013 lines, 35 importers, and its own header (`:4`) calls the contents "pass BODIES". Two thirds have
-nothing to do with TraversalStrategies. Split three ways, re-exporting from `strategies.ts` in the
+1013 lines, ~36 importers, and its own header (`:4`) calls the contents "pass BODIES". Two thirds have
+nothing to do with TraversalStrategies. Intended three ways, re-exporting from `strategies.ts` in the
 same commit so importers move separately:
 
-- **`ir/rewrites.ts`** — the rewrite bodies, renamed per §5.
+- **`ir/step.ts`** — `IRStep` plus the vocabulary sets from §6. **DONE** (`ir/step.ts` exists,
+  `strategies.ts` re-exports `IRStep`); §6's sets land here.
+- **`ir/rewrites.ts`** — the rewrite bodies, renamed per §5. **NOT DONE — deliberately.**
 - **`ir/strategies.ts`** — what the name promises, and the part with a real TinkerPop counterpart
   (`strategy/{decoration,verification}`): `NO_OP_STRATEGIES`, `ALWAYS_ON_STRATEGIES`,
   `VERIFICATION_STRATEGIES`, `injectSubgraphRec`, `injectPartitionRec`, `markProductiveBy`, `verify`,
   `verifyReadOnlyChildren`, `rejectMsg`.
-- **`ir/step.ts`** — `IRStep` plus the vocabulary sets from §6.
+
+**Why the rewrites/strategies partition is still open.** It is not the mechanical move the first
+draft assumed. The two halves are *interleaved*, and several private helpers are shared across the
+line: `nestedArg` and `someStepDeep`/`recurseInject` serve both `canonicalizeConnectives` and the
+injectors; `MUTATING_STEPS` serves both `verify` and `verifyReadOnlyChildren`; the
+`VERTEX_PRODUCERS`/`EDGE_PRODUCERS`/`EXPLODE_EDGE` sets sit between two rewrite bodies but belong to
+the injectors. So the split needs a third decision the plan never made — where shared helpers live —
+and a cross-import between the two new modules risks the very cycle the `deps ◂ families ◂ engine`
+DAG exists to prevent.
+
+That makes it a design question, not a file move, and it is the lowest-yield item in this doc:
+`IRStep` was the part with a real dependency (§6 needs a home), and it is done. Whoever takes the
+rest should decide the shared-helper home FIRST — most likely a fourth leaf, since both halves
+importing a shared `ir/step-vocabulary.ts` is acyclic while `rewrites ⇄ strategies` is not.
 
 ### 4.6 `tail/`: keep it — rename only the dispatch tables
 
