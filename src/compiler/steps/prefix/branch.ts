@@ -1174,7 +1174,7 @@ function chooseChoiceDomain(st: ElementStream, a0: any): Relation | null {
   if (a0 && typeof a0 === 'object' && 'nested' in a0) {
     // Not `required`: an unproductive choice routes to Pick.unproductive/none, it never drops the
     // parent — so the modulation is a LEFT join and `present` is the signal, not a filter.
-    const mods = tryCompileScalarModulations(st, [{ nested: a0.nested, required: false }]);
+    const mods = tryCompileScalarModulations(st, [{ nested: a0.nested, contract: 'presence' }]);
     if (!mods) return null;
     const p = mods.rel.as('p');
     return st.q.cte(q`SELECT ${p.c.id} AS id, ${p.c[mods.values[0].value]} AS ch, ${p.c[mods.values[0].present]} AS ch_at${carryFrag(st.carried, p)} FROM ${p}`, cols);

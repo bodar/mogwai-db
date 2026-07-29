@@ -3,7 +3,7 @@
 What you can rely on. Each step gets one mark based on how much of it works and how
 freely it composes — a ✅ step works **anywhere in a traversal**, however deeply nested,
 not just at the top. Notes call out **only the cases that don't work yet**; if a row has
-no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,504<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,511<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 | Mark | Meaning |
 |---|---|
@@ -190,7 +190,12 @@ All ✅.
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
 | | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
-`trim`/`lTrim`/`rTrim` strip Java whitespace; `concat` skips nulls; `split(sep)` → a List (`""` → characters, `null` → whitespace runs); `format("…%{key}…%{_}…")` reads props / `by()` modulators.
+`trim`/`lTrim`/`rTrim` strip Java whitespace; `concat` skips nulls and takes STRING **or TRAVERSAL**
+args (`concat(__.select("a").values("lang"))` — each resolved per traverser, first result only, and
+never filtering; note `concat(__.inject("c"))` is TinkerPop-correct as the traverser doubled, not the
+literal appended). Not yet: a traversal arg whose body orders before its projection
+(`concat(__.V().order().by("name").values("name"))` — fails closed). `split(sep)` → a List (`""` →
+characters, `null` → whitespace runs); `format("…%{key}…%{_}…")` reads props / `by()` modulators.
 
 ## 11. Writes
 

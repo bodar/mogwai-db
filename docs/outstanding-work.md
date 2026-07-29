@@ -69,14 +69,50 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    anchor on steps whose output shape is fixed by name. Same doc measures where the defects actually
    come from (carried-channel drops 33%, shape/vocabulary 8%) and names the higher-yield work.
 
-0b. **`concat(<traversal>)` needs the scalar-child value seam.** `concat(' knows ')` (the STRING
-   form) is correct. Traversal arguments now fail closed with
-   `concat() traversal arguments not yet supported`, rather than being silently dropped and
-   returning the receiver unchanged. The remaining work is generic: lower each traversal argument
-   to its per-traverser scalar value and concatenate it in argument order. Found 2026-07-28 while
-   measuring the MATCH-string design (7b); it is the ONE thing between that design and 25/25 on
-   `MatchString.feature` (`g_match_anyXknowsX_any_selectXaX_byXnameX_concatX…X`), but it has
-   nothing to do with `match()`. *Medium — fail-closed gap.*
+0b. **`concat(<traversal>)` — LANDED 2026-07-29, and it built the `apply` child-value seam.** The
+   five wrong goldens are re-recorded (each hand-verified against upstream's `Concat.feature`) and
+   L3 is 1504 → 1511. What the work actually established, and what is left of it:
+   - **TinkerPop has TWO child-value contracts and we modelled one.** `TraversalUtil.produce`
+     returns a `TraversalProduct` and its consumer FILTERS when unproductive (`FormatStep extends
+     MapStep` → `EmptyTraverser`). `TraversalUtil.apply` returns the value, THROWS when
+     unproductive, and can never filter — `ConcatStep extends ScalarMapStep`, whose
+     `processNextStart` is `traverser.split(map(traverser), this)` (1-in-1-out), and whose
+     `prepare()` sets `setBulk(1L)` so a child cannot multiply the parent either. The modulation
+     seam's `required?: boolean` conflated them; it is now `ModulationContract`
+     (`'produce' | 'apply' | 'presence'`, `steps/tail/child.ts`) with the JOIN derived from the
+     contract. `'presence'` is the third real case — `choose()`/`order().by()` read the `present`
+     column themselves and are neither TinkerPop method.
+   - **The seam is unchanged for provisioning** (still PARENT STREAM / `pushChildScope`), so the
+     remaining `TraversalUtil.apply(traverser, …)` consumers plug in by DECLARING
+     `contract: 'apply'` and need no new substrate: `Parameters.java:125,177,178`
+     (`property(k, __.t)` — see item 2's `property() after addV()` — plus merge-map KEYS and
+     VALUES, item 0c's biggest cluster), `DateDiffStep:82`, `ListFunction`/`ConjoinStep`,
+     `MergeStep`/`MergeElementStep`/`MergeEdgeStep`, `AddVertexStep` (which is what still blocks
+     `g.addV(constant('prefix_').concat(__.V(vid1).label())).label()`). **This is the compounding
+     part and none of it is built.** *Medium-High — one declared contract each.*
+   - **Still deferring, fail-closed (1 corpus row):**
+     `g.inject('hello','hi').concat(__.V().order().by('name').values('name'))` throws
+     `concat() after a scalar stream not yet supported`. The cause is generic and predates this
+     work: `lowerScalarProjection` (`steps/tail/projection.ts`) rejects `order()/limit()/dedup()`
+     before a projection inside a child scope, because the encounter it mints IS
+     `PARTITION BY origin ORDER BY <projection key>`. Its comment said "unreached in practice";
+     a re-sourced modulation child now reaches it. **The opening: for a re-sourced body the
+     partition is redundant** (the child ignores the traverser). *Medium.*
+   - **A fast-path contract violation, fixed in passing and invisible to every artifact.**
+     `tryInlineScalarPredicate` is the `scalarPredicateInlining` recognizer, whose contract is
+     "recognition-failure falls through, never throws" — but `scalarTx`'s deferral escaped it, so
+     `g.V().values('name').filter(__.concat(__.select('a')).is('x'))` hard-failed with the switch
+     both ON and OFF. No corpus traversal has that shape, so neither the census nor L3 could see
+     it. Same class as `predicateInlining` not being disable-safe (item 0). **The lesson worth
+     keeping: adding a `throw` to a shared pure leaf can silently narrow every fast path that
+     calls it.**
+   - Semantics pinned in `test/L4-addendum/concat-traversal.feature` (8 scenarios), SQL contract in
+     `test/L2-sql/scalar.sql.test.ts` (asserts `format()` keeps INNER while `concat()` gets LEFT).
+     The trap worth knowing: `concat(__.inject('c'))` is `aa`/`bb`, NOT `ac`/`bc` — `InjectStep
+     extends StartStep`, whose `processNextStart` APPENDS its injections while `prepare()` already
+     queued the split traverser, so `.next()` returns the traverser's own value.
+   - Item 7b's `MatchString.feature` claim was that this was the ONE thing between it and 25/25.
+     `match()` itself is still an unsupported source step, so re-measure rather than assume.
 
 0c. **17 fail-closed VIOLATIONS, surfaced by the census** (`test/census/deferrals.tsv`, status
    `crashed`). Each throws a raw runtime error instead of a clear deferral, which the project's

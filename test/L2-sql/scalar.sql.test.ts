@@ -544,6 +544,33 @@ describe('scalar-parent / projection SQL', () => {
     expect(() => compile("g.inject(datetime('2023-08-08T00:00:00Z')).dateDiff(inject(datetime('2023-10-11T00:00:00Z')))", {})).toThrow('datetime literal or constant');
   });
 
+  // concat(<traversal>) is the `TraversalUtil.apply` child-value contract, NOT format()'s
+  // `TraversalUtil.produce`: ConcatStep extends ScalarMapStep (1-in-1-out) and prepare() sets
+  // setBulk(1L), so a child can neither drop nor multiply the parent traverser. Relationally that
+  // is a LEFT JOIN over the modulation seam at 'first' cardinality. Values are pinned in
+  // test/L4-addendum/concat-traversal.feature; here we pin the SQL contract.
+  test('concat(<traversal>) resolves each argument through the modulation seam', () => {
+    // LEFT JOIN, never INNER: an unproductive child must not filter the traverser.
+    const c = read("g.V().values('name').concat(__.constant('X'))");
+    expect(c.sql).toContain('LEFT JOIN');
+    expect(c.sql).toContain("concat_ws('',");
+    // format() over the same seam keeps its INNER join — the two contracts stay distinct.
+    expect(read("g.V().values('name').format('%{_}').by(__.constant('X'))").sql).not.toContain('LEFT JOIN');
+    // A label-carried child resolves (select('a') re-roots on the carried alias).
+    expect(() => compile("g.V().hasLabel('person').values('name').as('a').constant('Mr.').concat(__.select('a'))", {})).not.toThrow();
+    // Multiple traversal args concatenate in ARGUMENT order, one modulation column each.
+    const two = read("g.V().values('name').concat(__.constant('X'), __.constant('Y'))");
+    expect(two.sql).toContain('m0');
+    expect(two.sql).toContain('m1');
+    // Still fails CLOSED where the seam cannot reach the child: a re-sourced body with a
+    // pre-projection order() hits the child-scope barrier (see lowerScalarProjection).
+    expect(() => compile("g.inject('hello').concat(__.V().order().by('name').values('name'))", {}))
+      .toThrow('concat() after a scalar stream not yet supported');
+    // A nested arg inside an INLINE predicate body must make the fast path DECLINE, not throw —
+    // the recognizer's contract is fall-through, so this compiles via the generic gate.
+    expect(() => compile("g.V().values('name').as('a').not(__.concat(__.select('a')).is('x'))", {})).not.toThrow();
+  });
+
   test('inject().<scalar transform>() maps to SQLite scalar functions', () => {
     // concat skips nulls (concat_ws) so an all-null result is null, not '' (Gremlin semantics)
     expect(read('g.inject("a","b").concat("c")').sql).toContain("concat_ws('', p.v, ?)");
@@ -570,10 +597,6 @@ describe('scalar-parent / projection SQL', () => {
     expect(read("g.V().values('name').substring(2)").sql).toContain("substr(p.v");
     expect(read("g.V().values('name').toUpper()").sql).toContain("upper(p.v)");
     expect(read("g.V().values('name').concat('X')").sql).toContain("concat_ws('', p.v, ?)");
-    // A traversal arg needs the scalar-child seam; it must fail closed rather than
-    // being silently ignored (which previously returned the receiver unchanged).
-    expect(() => compile("g.V().values('name').concat(__.constant('X'))", {}))
-      .toThrow('concat() traversal arguments not yet supported');
     // chained; is()/order() see the transformed value
     expect(read("g.V().values('name').toUpper().is('MARKO')").sql).toContain('upper(');
     // transform on a non-scalar projection is rejected (no scalar stream to transform)

@@ -15,10 +15,10 @@ import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type Nume
 import { lowerScalarFilter, lowerConstant, lowerScalarConstant, lowerScalarSack, lowerScalarSplit, collectionTypeOf, scalarCollectionRetype, scalarMapRetype } from './scalar.ts';
 import { compileSelectProject, tryCompileRecordChild, lowerRecordSelectProject, lowerScalarProject, lowerSingleSelect } from './select.ts';
 import { lowerPath } from './path.ts';
-import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
+import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, lowerConcatScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerElementChoose, coalesce as lowerElementCoalesce, flatMap as lowerElementFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, tryLowerOptionMapBranch, union as lowerElementUnion } from '../prefix/branch.ts';
 import { elementGroupSource, lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, tryCompileMapChild, type GroupSource } from './group.ts';
-import { tryCompileCountChild, tryCompileBranchChildAllCard, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueRows } from './child.ts';
+import { tryCompileCountChild, tryCompileBranchChildAllCard, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueRows, type ScalarModulationSpec } from './child.ts';
 import { tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './scalar-arm.ts';
 import { BRANCH_SHAPE_ORDER, childCtx, childSteps, classifyBy, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, type BranchKind, type ByClass } from './child-shape.ts';
 import { lowerElementDedup } from '../prefix/filter.ts';
@@ -244,7 +244,8 @@ function lowerElementOrderByTraversal(st: ElementStream, step: PStep): ElementSt
   // `id` column rejoins the element table for the direct (key/token/bare) terms. Optional
   // modulation (a non-productive traversal term → NULL) sorts NULLs first, matching TinkerPop's
   // "an element with no such value sorts before ones that have it" for a comparator key.
-  const travSpecs = classes.flatMap((by) => by.kind === 'nested' ? [{ nested: by.nested, required: false }] : []);
+  const travSpecs = classes.flatMap((by): ScalarModulationSpec[] =>
+    by.kind === 'nested' ? [{ nested: by.nested, contract: 'presence' }] : []);
   const mods = tryCompileScalarModulations(st, travSpecs);
   if (!mods) throw new Error('order().by(traversal) child shape not yet supported by generic child lowering');
   const d = mods.rel.as('d');
@@ -625,7 +626,12 @@ function lowerScalarProjection(st: ElementStream, projStep: PStep, acc: TailAcc)
   const origin = st.carried.origins.at(-1);
 
   // Child scope: a physical per-origin encounter partitions downstream scalar row ops.
-  // Preceding element order/limit/dedup at a child scope defer (unreached in practice).
+  // Preceding element order/limit/dedup at a child scope defer — the encounter this mints IS
+  // `PARTITION BY origin ORDER BY <projection key>`, so an earlier order() would have to feed that
+  // key rather than sort rows already emitted. REACHABLE: a re-sourced concat/modulation child
+  // (`concat(__.V().order().by("name").values("name"))`, Concat.feature) lands here. For a
+  // re-sourced body the partition is redundant (the child ignores the traverser), which is the
+  // shape a fix would exploit; it fails closed meanwhile.
   if (origin) {
     if (acc.orders.length || acc.limit !== null || acc.offset > 0 || acc.distinct)
       throw new Error('order()/limit()/dedup() before a projection inside a child scope not yet supported');
@@ -817,6 +823,11 @@ const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
   // split(sep) retypes a scalar string → a List of substrings (recursive CTE). Throws
   // TinkerPop's error on a non-string separator (matches the spec).
   ['split', (s, step, _steps, at) => continueLowering(lowerScalarSplit(s, step), at + 1)],
+  // concat(<traversal>…) — the `apply` child-value contract. Only the TRAVERSAL-argument form
+  // reaches here: lowerScalarRows yields at one because each argument needs its own child scope
+  // (a row boundary), while the string-only form stays fused in the row run. A miss returns null
+  // → the generic deferral, so an unsupported child body still fails closed.
+  ['concat', scalarBranch(lowerConcatScalar)],
   // V()/E() after a scalar re-source the graph per traverser (a flatMap → ElementStream).
   ['V', (s, step, _steps, at) => { const r = lowerReSource(s, step); return r ? continueLowering(r, at + 1) : null; }],
   ['E', (s, step, _steps, at) => { const r = lowerReSource(s, step); return r ? continueLowering(r, at + 1) : null; }],

@@ -140,6 +140,12 @@ function fuseScalarSegment(s: ScalarStream, steps: readonly PStep[], from: numbe
     // A Scope.local scalar transform ignores scope (a scalar is a one-element list); a
     // non-transform local step ends the fused segment (handled by lowerScalarRows).
     if (isLocal(step) && !SCALAR_TRANSFORMS.has(step.name)) break;
+    // A concat() carrying a traversal argument is a ROW BOUNDARY, not a value transform: each
+    // argument needs its own child scope (the `apply` child-value contract, lowerConcatScalar).
+    // End the fused segment here so lowerScalarRows re-dispatches it — the same way a retyping
+    // is(typeOf(LIST)) ends one. Without this the fuse swallows it and reaches the pure leaf,
+    // which correctly fails closed but never gives the seam a chance.
+    if (step.name === 'concat' && (step.args ?? []).some(isNested)) break;
     if (SCALAR_TRANSFORMS.has(step.name)) {
       const out = scalarTransform(step, as, expr, steps[i + 1]);
       expr = out.expr;
@@ -371,6 +377,12 @@ export function tryInlineScalarPredicate(body: PStep[], current: Expression, par
       continue;
     }
     if (SCALAR_TRANSFORMS.has(s.name)) {
+      // A traversal argument (concat(__.…)) is a per-traverser CHILD VALUE, which needs a child
+      // scope this inline expression form has no way to build — and `scalarTx` THROWS on one. A
+      // recognizer must DECLINE, never throw: its contract is "return null and the caller falls
+      // through to the generic gate", so letting the throw escape would define support by
+      // vocabulary exhaustion and hard-fail a shape the generic path can still consider.
+      if ((s.args ?? []).some(isNested)) return null;
       const tx = scalarTx(s.name, s.args ?? [], expr);
       if (tx === null) return null; // asBool etc — outside the inline transform vocabulary
       expr = tx;
@@ -651,6 +663,11 @@ export function lowerScalarRows(
     // filter — stop so compileFromScalar builds the ListStream. Without a per-row stored
     // vtype (a computed scalar) it stays a fused is() that static-folds to empty.
     if (step.name === 'is' && perRowColumnOf(stream.type) && collectionTypeOf(step) !== null) break;
+    // concat(<traversal>) needs a child scope per argument (the `apply` child-value contract),
+    // which is a ROW BOUNDARY, not a value transform the expression fuse can express. Stop the
+    // row run so SCALAR_TAIL owns it (lowerConcatScalar) — the same yield as a retyping
+    // is(typeOf(LIST)) above. The string-only form is untouched and still fuses.
+    if (step.name === 'concat' && (step.args ?? []).some(isNested)) break;
     if (SCALAR_TRANSFORMS.has(step.name) || step.name === 'is') {
       const fused = fuseScalarSegment(stream, steps, i);
       stream = fused.stream;

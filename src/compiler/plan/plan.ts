@@ -86,15 +86,31 @@ export function scalarTx(name: string, args: any[], v: Expression): Expression |
     // null passes null through). The all-null guard is only live when there is no
     // non-null string arg (a literal arg makes the result non-null regardless of v).
     case 'concat': {
-      // A traversal argument is semantically a per-traverser child value, not a
-      // string literal. This SQL leaf has no child relation to read, and silently
-      // filtering it out used to return the receiver unchanged. Decline until the
-      // generic scalar-child seam supplies those values.
+      // A traversal argument is semantically a per-traverser child value, not a string
+      // literal — `TraversalUtil.apply(traverser, child)`, whose value this pure SQL leaf
+      // has no child relation to compute. The CALLER resolves it (lowerConcatScalar,
+      // steps/tail/mapscalar.ts) and substitutes the resulting Expression into `args`,
+      // exactly as operandSql's Expression operands arrive pre-built. A raw `nested` tag
+      // still here means no caller resolved it (the list-local per-member phase, which has
+      // no parent traverser to correlate against), so fail closed rather than silently
+      // dropping the argument — which is what used to return the receiver unchanged.
       if (args.some(isNested)) throw new Error('concat() traversal arguments not yet supported');
       if (!args.length) return v; // bare concat() = identity (v || nothing)
-      const parts = list([v, ...strs.map((a) => value(a))], ', ');
+      // ConcatStep's two constructors are mutually exclusive (the grammar splits a mixed
+      // call into two steps), so the operands are uniformly string literals or uniformly
+      // resolved child values; `value()` forwards an Expression untouched and binds a
+      // literal, so both ride one path. Order is `args` order, matching ConcatStep.map().
+      const parts = list([v, ...args.map((a) => value(a))], ', ');
       const body = q`concat_ws('', ${parts})`;
-      return strs.length ? body : q`CASE WHEN ${v} IS NULL THEN NULL ELSE ${body} END`;
+      // concat_ws skips NULLs, so an all-null concat must yield NULL, not ''. A non-null
+      // literal string makes the result non-null regardless of `v`, so no guard is needed.
+      // Otherwise TinkerPop returns null exactly when the traverser AND every child AND
+      // every string arg is null (ConcatStep.map's three isNull* flags) — so the guard tests
+      // that every operand IS NULL, never that the concatenation is empty (an operand of ''
+      // is a non-null contribution and must yield '', not NULL).
+      if (strs.length) return body;
+      const allNull = list([v, ...args.map((a) => value(a))].map((e) => q`${e} IS NULL`), ' AND ');
+      return q`CASE WHEN ${allNull} THEN NULL ELSE ${body} END`;
     }
     case 'length': return q`length(${v})`;
     case 'toUpper': return q`upper(${v})`;

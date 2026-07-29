@@ -631,6 +631,7 @@ unbound	Unbound parameter 'xx1'	g.call("tinker.search", xx1).with("type", "Verte
 unbound	Unbound parameter 'xx1'	g.call("tinker.search", xx1).with("type", "VertexProperty").element()
 deferred	Can't parse string '1,000' as number.	g.inject("1,000").asNumber(GType.BIGINT)
 deferred	Char must be exactly one codepoint, got 6	g.inject("\u00E9"c)
+deferred	concat() after a scalar stream not yet supported	g.inject("hello", "hi").concat(__.V().order().by("name").values("name"))
 deferred	Can't parse string 'test' as number.	g.inject("test").asNumber()
 crashed	Binding expected string, TypedArray, boolean, number, bigint or null	g.inject("zzz","foo",UUID("6100808b-62f9-42b7-957e-ed66c30f40d1"),["a","b","c","d"],1,datetime("2023-08-01T00:00:00Z"),["a","b","c"],[a:"a",b:"b"],null,2.0d,datetime("2023-01-01T00:00:00Z"),{"x","y","z"},[a:"a",b:false,c:"c"],"bar",UUID("5100808b-62f9-42b7-957e-ed66c30f40d1"),true,false,Infinity,NaN,-Infinity).order()
 crashed	Binding expected string, TypedArray, boolean, number, bigint or null	g.inject("zzz","foo",UUID("6100808b-62f9-42b7-957e-ed66c30f40d1"),["a","b","c","d"],1,datetime("2023-08-01T00:00:00Z"),["a","b","c"],[a:"a",b:"b"],null,2.0d,datetime("2023-01-01T00:00:00Z"),{"x","y","z"},[a:"a",b:false,c:"c"],"bar",UUID("5100808b-62f9-42b7-957e-ed66c30f40d1"),true,false,Infinity,NaN,-Infinity).order().by(desc)

@@ -629,14 +629,53 @@ export function tryCompileScalarValueChild(
     ?? tryCompileScalarChild(parent, nested, use, scope, body);
 }
 
+/** Which of TinkerPop's TWO child-value contracts a consumer is enacting. Named for the
+ *  `TraversalUtil` method each corresponds to, because the difference is a SEMANTIC contract
+ *  the caller owns, not a join shape — the join is DERIVED from it (`joinsInner` below).
+ *
+ *   · `'produce'` — `TraversalUtil.produce` (the `MapStep` family: `format()`). Returns a
+ *     `TraversalProduct` carrying `isProductive()`, and the consumer FILTERS the traverser when
+ *     the child is unproductive (`FormatStep` returns `EmptyTraverser.instance()`). → INNER JOIN.
+ *   · `'apply'` — `TraversalUtil.apply` (the `ScalarMapStep` family: `concat()`). Returns the
+ *     value directly and THROWS on an unproductive child, so it can never filter:
+ *     `ScalarMapStep.processNextStart` is `traverser.split(map(traverser), this)`, strictly
+ *     1-in-1-out, and `prepare()` sets `setBulk(1L)` so the child cannot multiply the parent's
+ *     multiplicity either. → LEFT JOIN, and the value is read as an ordinary (possibly-NULL)
+ *     column. We diverge from TinkerPop only in that an unproductive child yields NULL where
+ *     TinkerPop raises — erring toward a null/empty answer rather than a value it would reject.
+ *   · `'presence'` — no TinkerPop method: the consumer reads the `present` column itself and
+ *     routes on it (`choose()` → `Pick.none`/`Pick.unproductive`; `order().by()` → NULLs-first).
+ *     Mechanically a LEFT JOIN like `'apply'`, but kept distinct because the consumer's obligation
+ *     differs: it MUST read `present`, where an `'apply'` consumer must NOT need to.
+ *
+ *  `math()` uses `'produce'`: a non-numeric/absent variable drops the traverser. */
+export type ModulationContract = 'produce' | 'apply' | 'presence';
+
+/** Does this contract rejoin with an INNER join? The one place the join shape is decided, so a
+ *  consumer states its CONTRACT and never spells out a join. */
+const joinsInner = (c: ModulationContract): boolean => c === 'produce';
+
 export interface ScalarModulationSpec {
   readonly nested: any;
   /** Re-root the child on a carried as()-label while retaining the outer row. */
   readonly rootCol?: string;
   readonly rootElem?: ElementStream['elem'];
-  /** Required = ordinary productive modulation; optional = expose row presence. */
-  readonly required?: boolean;
+  /** Which child-value contract this modulator enacts. Defaults to `'produce'` (filter on an
+   *  unproductive child) — the behaviour every pre-existing caller had. */
+  readonly contract?: ModulationContract;
 }
+
+/** A caller-supplied compiler for one modulator body, tried when the shared scalar-child route
+ *  declines. It exists because the SCALAR-parent child vocabulary lives downstream of this file
+ *  (`scalar-arm.ts` imports `child.ts`, never the reverse), so a scalar-parent consumer injects
+ *  its own reach rather than this module growing an upward import. The seam still owns
+ *  provisioning: the fallback is handed the pushed SEED and the reused frame's scope, so whatever
+ *  it builds rejoins on the same ordinal as every other modulator. */
+export type ModulationFallback = (
+  seed: ElementStream | ScalarStream,
+  nested: any,
+  scope: CompileScope,
+) => ScalarStream | null;
 
 export interface ScalarModulationDomain {
   readonly rel: Relation;
@@ -649,12 +688,19 @@ export interface ScalarModulationDomain {
 
 /** Compile independent scalar traversal modulators against ONE multiset-safe parent
  * domain. Every child gets its own nested scope, then rejoins on the shared outer
- * ordinal. Optional children expose an explicit presence column, so productive NULL
+ * ordinal. Every child exposes an explicit presence column, so productive NULL
  * is never confused with an unproductive child. This is the common relational seam
- * for multi-input consumers such as math(), format(), and option-map choose(). */
+ * for multi-input consumers such as math(), format(), concat(), and option-map choose().
+ *
+ * PROVISIONING is fixed here (the PARENT STREAM route — `pushChildScope` + a rejoin on the
+ * shared ordinal); what varies per spec is only the child-value CONTRACT
+ * (`ModulationContract`), which the consumer owns and this function merely enacts. That split
+ * is why a new consumer needs no new substrate: `concat()` differs from `format()` by one
+ * declared contract, not by a second child pipeline. */
 export function tryCompileScalarModulations(
   parent: ChildParent,
   specs: readonly ScalarModulationSpec[],
+  fallback?: ModulationFallback,
 ): ScalarModulationDomain | null {
   if (!specs.length || isPropertyParent(parent)) return null;
   const scalarParent = isScalarParent(parent);
@@ -674,8 +720,11 @@ export function tryCompileScalarModulations(
       );
       seed = { ...es, rel, elem: spec.rootElem ?? es.elem };
     }
-    const stream = tryCompileScalarValueChild(seed, spec.nested, 'first', reuseCurrentFrame(outer.scope, outer.frame));
-    return stream ? { stream, required: spec.required !== false } : null;
+    const childScope = reuseCurrentFrame(outer.scope, outer.frame);
+    const stream = tryCompileScalarValueChild(seed, spec.nested, 'first', childScope)
+      ?? fallback?.(seed, spec.nested, childScope)
+      ?? null;
+    return stream ? { stream, contract: spec.contract ?? 'produce' } : null;
   });
   if (children.some((x) => !x)) return null;
 
@@ -683,7 +732,7 @@ export function tryCompileScalarModulations(
   const aliases = children.map((child, i) => ({ child: child!, rel: child!.stream.rel.as(`ms${i}`) }));
   const values = aliases.map((_, i) => ({ value: `m${i}`, present: `m${i}_present` }));
   const joins = aliases.map(({ child, rel }) =>
-    q`${child.required ? q` JOIN ` : q` LEFT JOIN `}${rel} ON ${rel.c[outer.frame.ordinal]}=${d.c[outer.frame.ordinal]}`,
+    q`${joinsInner(child.contract) ? q` JOIN ` : q` LEFT JOIN `}${rel} ON ${rel.c[outer.frame.ordinal]}=${d.c[outer.frame.ordinal]}`,
   );
   const payload = aliases.flatMap(({ rel }, i) => [
     q`${rel.c.v} AS ${values[i].value}`,

@@ -1,14 +1,16 @@
 import { q, list, value, type Expression } from '../../../sql/kernel/q.ts';
 import {
-  elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, type ScalarCtx,
+  elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, scalarTx, type ScalarCtx,
 } from '../../plan/plan.ts';
+import { isNested } from '../../../gremlin/frontend.ts';
 import { mathToSql, mathVars } from '../../../gremlin/math.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { aliasElem, carryFrag, carryFragMint, carriedCols, carriedWith, elemRel, type ElementStream } from '../context/context.ts';
 import { aliasId, aliasScalar } from '../context/alias.ts';
 import { carryOf, toScalarStream, type ListStream, type ScalarStream, type Stream } from '../context/stream.ts';
-import { tryCompileElementChild, tryCompileBranchChildAllCard, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, type ScalarModulationSpec } from './child.ts';
-import { classifyByAt, optionMapIsCase, readOptionMapArms } from './child-shape.ts';
+import { tryCompileElementChild, tryCompileBranchChildAllCard, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, type ModulationFallback, type ScalarModulationSpec } from './child.ts';
+import { childSteps, classifyByAt, optionMapIsCase, readOptionMapArms } from './child-shape.ts';
+import { engineOf } from '../../engine/deps.ts';
 
 // ---------- map (scalar body → per-traverser scalar projector) ----------
 
@@ -104,7 +106,7 @@ export function lowerMath(st: ElementStream, steps: PStep[], stop: number): Scal
     }
     if (by.kind === 'nested') {
       const mod = specs.length;
-      specs.push({ nested: by.nested, rootCol: col, rootElem: elem, required: true });
+      specs.push({ nested: by.nested, rootCol: col, rootElem: elem, contract: 'produce' });
       resolved.set(name, { mod, col, elem });
     } else if (by.kind === 'key') resolved.set(name, { key: by.key, col, elem });
     else throw new Error(`math("${formula}"): by() modulator must be a property key or a traversal`);
@@ -167,7 +169,7 @@ export function lowerMathScalar(s: ScalarStream, step: PStep): ScalarStream | nu
     const by = classifyByAt(bys, varOrder.indexOf(name));
     if (by.kind !== 'nested') return null; // a property-key by() has no scalar meaning
     resolved.set(name, specs.length);
-    specs.push({ nested: by.nested, required: true });
+    specs.push({ nested: by.nested, contract: 'produce' });
   }
   const mods = specs.length ? tryCompileScalarModulations(s, specs) : null;
   if (specs.length && !mods) return null;
@@ -216,7 +218,7 @@ export function lowerFormat(st: ElementStream, steps: PStep[], stop: number): Sc
       const by = classifyByAt(bys, u++);
       if (by.kind === 'nested') {
         const index = specs.length;
-        specs.push({ nested: by.nested, required: true });
+        specs.push({ nested: by.nested, contract: 'produce' });
         parts.push({ kind: 'mod', index });
       } else if (by.kind === 'key') parts.push({ kind: 'property', key: by.key });
       else throw new Error(`format("${tmpl}"): a by() modulator must be a property key or a traversal`);
@@ -284,7 +286,7 @@ export function lowerFormatScalar(s: ScalarStream, step: PStep): ScalarStream | 
     const by = classifyByAt(bys, u++);
     if (by.kind !== 'nested') return null; // a property-key by() has no scalar meaning
     parts.push({ kind: 'mod', index: specs.length });
-    specs.push({ nested: by.nested, required: true });
+    specs.push({ nested: by.nested, contract: 'produce' });
     last = m.index + m[0].length;
   }
   if (last < tmpl.length) parts.push({ kind: 'literal', text: tmpl.slice(last) });
@@ -298,6 +300,74 @@ export function lowerFormatScalar(s: ScalarStream, step: PStep): ScalarStream | 
   const where = hadToken ? q` WHERE ${predicateSql(expr, undefined)}` : q``;
   const rel = s.q.cte(
     q`SELECT ${expr} AS v${carryFrag(s.carried, p)} FROM ${p}${where}`,
+    ['v', ...carriedCols(s.carried)],
+  );
+  return toScalarStream(carryOf(s), rel);
+}
+
+// ---------- concat() with TRAVERSAL arguments (the `apply` child-value contract) ----------
+
+/**
+ * `concat(<traversal>…)` over a scalar parent → each traversal argument's per-traverser value,
+ * concatenated onto the incoming value in argument order.
+ *
+ * This is the `TraversalUtil.apply` contract (`ConcatStep extends ScalarMapStep`), which differs
+ * from `format()`'s `TraversalUtil.produce` in exactly one respect that matters relationally: it
+ * can NEVER filter. `ScalarMapStep.processNextStart` is `traverser.split(map(traverser), this)`
+ * — strictly one row out per row in — and `prepare()` sets `setBulk(1L)` so a multi-row child
+ * cannot multiply the parent either. Hence `contract: 'apply'` (a LEFT JOIN) and the seam's
+ * standing `'first'` cardinality, which together are `apply`'s `traversal.next()`.
+ *
+ * The child's INPUT is the current traverser (`prepare` splits it in as the child's start), which
+ * is why `concat(__.inject("c"))` yields `aa`/`bb` and not `ac`/`bc`: `inject()` PREPENDS to its
+ * incoming stream, so the child's first result is the traverser's own value. That is TinkerPop's
+ * documented behaviour, not an accident — `inject` was deliberately de-special-cased here (see
+ * the CHANGELOG entry for "use TraversalUtil.apply on it as with any other child traversals").
+ *
+ * Returns null when there is no traversal argument (the string-only form is the pure-SQL leaf's
+ * job, unchanged) or when the seam cannot compile one of the children — the caller then keeps its
+ * clear deferral. Divergence, deliberate: TinkerPop RAISES on an unproductive child, where the
+ * LEFT JOIN yields NULL, which `concat_ws` then skips. That errs toward a null/short answer rather
+ * than fabricating a value TinkerPop would have rejected.
+ */
+export function lowerConcatScalar(s: ScalarStream, step: PStep): ScalarStream | null {
+  const args = step.args ?? [];
+  if (!args.some(isNested)) return null; // string-only concat() — the scalarTx leaf handles it
+  const specs: ScalarModulationSpec[] = args.filter(isNested).map((a: any) => ({ nested: a.nested, contract: 'apply' }));
+  // The scalar-parent child vocabulary (a label re-root, a `V()`/`E()` re-source) lives in
+  // scalar-arm.ts, which imports this file's neighbourhood — so rather than an upward import,
+  // reach the SAME generic loop it uses (`Engine.lowerStepsStrict`, the one whole-body fold) over
+  // the seam's own pushed seed. A body outside that vocabulary throws, which is a decline here.
+  const viaEngine: ModulationFallback = (seed, nested) => {
+    const body = childSteps(nested, s.params);
+    if (!body.length) return null;
+    // A bare `inject(…)` body is the INCOMING TRAVERSER, not the injected literals.
+    // `InjectStep extends StartStep`, and `StartStep.processNextStart` APPENDS its injections to
+    // the starts queue — while `TraversalUtil.prepare` has already added the split traverser. So
+    // `next()` returns the traverser's own value and the literals are never reached, which is why
+    // `g.inject("a","b").concat(__.inject("c"))` is `aa`/`bb` (Concat.feature) rather than
+    // `ac`/`bc`, and why `concat(__.inject(["b","c"]))` is `aa`. Recognizing it here keeps that
+    // TinkerPop rule in ONE place; lowering `inject` as an ordinary child would seed the literals
+    // as the child's stream and answer a different question.
+    if (body.length === 1 && body[0].name === 'inject') return seed.kind === 'scalar' ? seed : null;
+    try {
+      const end = engineOf(seed).lowerStepsStrict(seed, body as PStep[], 0);
+      return end.kind === 'scalar' ? end : null;
+    } catch { return null; }
+  };
+  const mods = tryCompileScalarModulations(s, specs, viaEngine);
+  if (!mods) return null;
+  const p = mods.rel.as('p');
+  // Substitute each traversal argument with its resolved modulation column, IN PLACE, so the
+  // leaf sees the arguments in their original order. Non-nested args cannot occur alongside a
+  // nested one (the grammar's two productions are mutually exclusive), but mapping positionally
+  // rather than filtering keeps that a property of the grammar and not an assumption here.
+  let i = 0;
+  const resolved = args.map((a: any) => (isNested(a) ? p.c[mods.values[i++].value] : a));
+  const expr = scalarTx('concat', resolved, p.c.v);
+  if (!expr) throw new Error('concat() scalar transform not available');
+  const rel = s.q.cte(
+    q`SELECT ${expr} AS v${carryFrag(s.carried, p)} FROM ${p}`,
     ['v', ...carriedCols(s.carried)],
   );
   return toScalarStream(carryOf(s), rel);
@@ -342,7 +412,7 @@ export function lowerChooseOptions(st: ElementStream, steps: PStep[], stop: numb
     choiceMod = specs.length;
     // An unproductive choice is still routed to Pick.none; it does not drop the
     // parent. The LEFT join therefore differs deliberately from by()-productivity.
-    specs.push({ nested: a0.nested, required: false });
+    specs.push({ nested: a0.nested, contract: 'presence' });
   } else if (!(a0 && typeof a0 === 'object' && 'token' in a0))
     throw new Error('choose() choice must be a traversal or a T token');
 
@@ -361,7 +431,7 @@ export function lowerChooseOptions(st: ElementStream, steps: PStep[], stop: numb
       sawNone = true;
     }
     const mod = specs.length;
-    specs.push({ nested: bodyArg.nested, required: false });
+    specs.push({ nested: bodyArg.nested, contract: 'presence' });
     options.push({ key: keyArg, mod, isNone });
   }
   if (!options.some((x) => !x.isNone)) throw new Error('choose().option() needs at least one keyed option');
@@ -422,7 +492,7 @@ export function lowerChooseOptionsScalar(s: ScalarStream, steps: PStep[], stop: 
   const specs: ScalarModulationSpec[] = [];
   if (!(a0 && typeof a0 === 'object' && 'nested' in a0)) return null; // scalar choice must be a traversal over the value
   const choiceMod = specs.length;
-  specs.push({ nested: a0.nested, required: false });
+  specs.push({ nested: a0.nested, contract: 'presence' });
 
   const options: { key: any; mod: number; isNone: boolean }[] = [];
   let sawNone = false;
@@ -439,7 +509,7 @@ export function lowerChooseOptionsScalar(s: ScalarStream, steps: PStep[], stop: 
       sawNone = true;
     }
     const mod = specs.length;
-    specs.push({ nested: bodyArg.nested, required: false });
+    specs.push({ nested: bodyArg.nested, contract: 'presence' });
     options.push({ key: keyArg, mod, isNone });
   }
   if (!options.some((x) => !x.isNone) || !sawNone) return null; // need a keyed option AND a Pick.none default
