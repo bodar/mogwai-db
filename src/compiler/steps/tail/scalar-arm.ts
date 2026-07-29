@@ -21,7 +21,7 @@
 // child.ts <-> projection.ts already is (every reference is inside a function body, never at
 // module top level), so it is resolution-safe.
 
-import { isNested } from '../../../gremlin/frontend.ts';
+import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { UNKNOWN, staticTypeOf, perRowColumnOf, perRowCols } from '../../../sql/kernel/render.ts';
 import { empty, list, paren, q, value, type Expression } from '../../../sql/kernel/q.ts';
 import { layoutCols, patchLayout, layoutProjection, type ElementStream } from '../context/context.ts';
@@ -537,6 +537,15 @@ export function tryScalarFilterByChildExistence(s: ScalarStream, step: IRStep): 
   const d = frame.domain.as('d');
   const terms: Expression[] = [];
   for (const arm of nested) {
+    // A scalar child starts with one current-value traverser per parent. These row
+    // operations only reorder that singleton (or leave it untouched), so their
+    // existence predicate is tautological. Keeping this fact at the generic
+    // child-existence boundary makes the inline and non-inline routes agree.
+    const body = stepChain(arm.nested, s.params) as IRStep[];
+    if (body.length > 0 && body.every((x) => x.name === 'identity' || x.name === 'order')) {
+      terms.push(q`1`);
+      continue;
+    }
     const child = tryCompileScalarValueRows(seed, arm.nested, reuseCurrentFrame(scope, frame));
     if (!child) return null;
     const c = child.stream.rel.as('c');
