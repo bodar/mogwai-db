@@ -1,5 +1,5 @@
 import { q, list, raw, empty, value, type Expression } from '../../../sql/kernel/q.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { aliasElem, aliasIsElement, aliasScalarTypeOf, layoutCols, patchLayout, layoutProjection, scalarTypeFromAlias, withShape, type AliasEntry, type AliasScalarType, type TraverserLayout, type LoweringState, type ElementStream } from '../context/context.ts';
 import {
   aliasAppend, aliasEntry, aliasId, aliasPop, aliasPresent, aliasScalar, aliasSeed, elemEntry, entryTypeTag, shapeElem,
@@ -77,7 +77,7 @@ function currentEntry(s: Exclude<Stream, { kind: 'result' }>, p: any): { entry: 
 
 /** as() on a non-element stream: append the current object to each label's history,
  *  preserving the stream's shape (a pass-through CTE that rebuilds only the alias cols). */
-export function asOnStream(s: Exclude<Stream, { kind: 'result' | 'elements' }>, step: PStep): Stream {
+export function asOnStream(s: Exclude<Stream, { kind: 'result' | 'elements' }>, step: IRStep): Stream {
   const labels = step.args.filter((a): a is string => typeof a === 'string');
   const p = s.rel.as('p');
   const { entry, shape, scalarType, listOf } = currentEntry(s, p);
@@ -181,7 +181,7 @@ function selectPropertyAlias(s: Exclude<Stream, { kind: 'result' }>, entry: Alia
 /** select(label) / select(Pop, label) with ONE label, over any stream shape. Reads the
  *  label's history column (dropping traversers where it is unbound) and re-emits it as a
  *  scalar / element / list stream per its shape and the Pop mode. */
-export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step: PStep, label: string, pop: string): Stream {
+export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step: IRStep, label: string, pop: string): Stream {
   const entry = s.traverserLayout.aliases.get(label);
   // No live binding → drop every traverser (an EMPTY result, never an error). TinkerPop pins this
   // for both reachable cases, so the same answer is right for both:

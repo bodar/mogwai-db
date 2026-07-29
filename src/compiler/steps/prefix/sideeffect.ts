@@ -1,7 +1,7 @@
 import { derived, q } from '../../../sql/kernel/q.ts';
 import { scalarProp, predicateSql, jsonbGroupArray, elemCtx } from '../../plan/plan.ts';
 import { stepChain } from '../../../gremlin/frontend.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { elemRel, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type ScalarStream } from '../context/stream.ts';
@@ -34,7 +34,7 @@ const aggregateName = (s: any): string => {
 
 export const aggregate: StepFn = (s, st) => {
   const name = aggregateName(s);
-  const modulators = (s as PStep).modulators ?? [];
+  const modulators = (s as IRStep).modulators ?? [];
   if (modulators.length > 1) throw new Error('aggregate() with more than one by() modulator not yet supported');
   const by = classifyBy(modulators[0]);
   let def: SideEffectDef;
@@ -43,7 +43,7 @@ export const aggregate: StepFn = (s, st) => {
     const rel = st.q.cte(q`SELECT ${jsonbGroupArray(q`p.id`)} AS list FROM ${st.rel.as('p')}`, ['list']);
     def = { kind: 'list', rel, of: { kind: 'elem', elem: st.elem } };
   } else {
-    const productive = (s as PStep).productiveBy === true;
+    const productive = (s as IRStep).productiveBy === true;
     if (by.kind === 'key') {
       const n = elemRel(st);
       const p = st.rel.as('p');
@@ -113,9 +113,9 @@ const register = (st: ElementStream, name: string, def: SideEffectDef): ElementS
  * by()-modulator over a scalar aggregate re-projects each value and defers here (return null →
  * the clear generic message) until wired through the modulation seam.
  */
-export function lowerScalarAggregate(s: ScalarStream, step: PStep): ScalarStream | null {
+export function lowerScalarAggregate(s: ScalarStream, step: IRStep): ScalarStream | null {
   const name = aggregateName(step);
-  if (((step as PStep).modulators ?? []).length) return null;
+  if (((step as IRStep).modulators ?? []).length) return null;
   const p = s.rel.as('p');
   // Same encoding decision as fold() — a per-row type channel becomes self-describing
   // members, so cap() frames each one by its own stored type.
@@ -147,7 +147,7 @@ const groupSideEffect = (isCount: boolean): StepFn => (s, st) => {
   const def: SideEffectDef = {
     kind: 'group',
     isCount,
-    modulators: (s as PStep).modulators ?? [],
+    modulators: (s as IRStep).modulators ?? [],
     parent: st,
     productiveBy: (s as any).productiveBy,
   };
@@ -161,7 +161,7 @@ export const groupCount: StepFn = groupSideEffect(true);
  * side-effect to the current traverser and returns that traverser unchanged. Lower
  * the canonical one-step child through the same aggregate StepFn, so this syntax is
  * not a second side-effect compiler. */
-export function tryLowerLocalAggregate(st: ElementStream, step: PStep): ElementStream | null {
+export function tryLowerLocalAggregate(st: ElementStream, step: IRStep): ElementStream | null {
   const nested = step.args[0]?.nested;
   if (!nested) return null;
   const normalized = normalize(stepChain(nested, st.params)).steps;

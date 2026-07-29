@@ -10,7 +10,7 @@ import { engineOf } from '../../engine/deps.ts';
 import { lowerScalarRows, unionScalarStreams } from './scalar.ts';
 import { SCALAR_TRANSFORMS } from './coerce.ts';
 import { lowerReSource } from '../graph-source.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
 import { predicateSql, rangeToOffsetLimit } from '../../plan/plan.ts';
 import { elementOrderDrop, elementOrderSql } from './modulation.ts';
@@ -130,7 +130,7 @@ const SHARED_SCALAR_CHILD_STEPS = new Set([
  *  plus a single-label select(), which re-types the row to the label's contents and is owned by
  *  the engine's one alias dispatch. Kept a predicate rather than a name in the Set because
  *  select(Column.*) / a multi-label select are different steps with different consumers. */
-const isSharedScalarChildStep = (s: PStep): boolean =>
+const isSharedScalarChildStep = (s: IRStep): boolean =>
   SHARED_SCALAR_CHILD_STEPS.has(s.name) || labelSelectOf(s) !== null;
 
 // ---------- the scoped element-row count: ONE aggregate ----------
@@ -226,11 +226,11 @@ function compileCountChildRows(
  * happened when they were two: six of twelve call sites passed `plan.body` alone, and the dropped
  * `order(Scope.local)` turned a clean deferral into a silently unsorted list.
  */
-export type ChildBody = PStep[] | ChildPlan;
-const bodyOf = (b?: ChildBody): PStep[] | undefined => Array.isArray(b) ? b : b?.body;
-const suffixOf = (b?: ChildBody): readonly PStep[] => Array.isArray(b) || !b ? [] : b.suffix;
+export type ChildBody = IRStep[] | ChildPlan;
+const bodyOf = (b?: ChildBody): IRStep[] | undefined => Array.isArray(b) ? b : b?.body;
+const suffixOf = (b?: ChildBody): readonly IRStep[] => Array.isArray(b) || !b ? [] : b.suffix;
 
-function applySuffix<S extends RelationalStream>(s: S | null, suffix: readonly PStep[]): S | null {
+function applySuffix<S extends RelationalStream>(s: S | null, suffix: readonly IRStep[]): S | null {
   if (!s || !suffix.length) return s;
   const out = engineOf(s).lowerStepsStrict(s, [...suffix], 0);
   return out.kind === s.kind ? out as S : null;
@@ -341,18 +341,18 @@ function applyScalarChildCardinality(
  *  seam's five seeds read as one operation; it adds nothing of its own. The correlated inline
  *  child (correlated.ts) reaches the SAME method, so a label re-root composes identically
  *  whether the body materializes or renders as a nested correlated subquery. */
-export const lowerElementBody = (seed: ElementStream, steps: PStep[]): ElementStream | null =>
+export const lowerElementBody = (seed: ElementStream, steps: IRStep[]): ElementStream | null =>
   engineOf(seed).tryLowerElementSteps(steps, seed);
 
 /** The Pop mode of a select(Pop, label) — default last, matching the root dispatch. */
-const popOf = (step: PStep): string =>
+const popOf = (step: IRStep): string =>
   (step.args.find((a: any) => a && typeof a === 'object' && 'pop' in a) as { pop: string } | undefined)?.pop ?? 'last';
 
 /** PURE. A scalar child body that RE-SOURCES the graph: a `V()`/`E()` head (with no
  *  nested-traversal id argument, which is a different shape) over which the pushed scalar seed
  *  CROSS JOINs per value. The head discards the value and re-enters element space — the one
  *  way a scalar arm reaches movement/adjacency. */
-export function isResourceHead(rest: PStep[]): boolean {
+export function isResourceHead(rest: IRStep[]): boolean {
   const head = rest[0];
   return !!head && (head.name === 'V' || head.name === 'E')
     && !(head.args ?? []).some(isNested);
@@ -363,7 +363,7 @@ export function isResourceHead(rest: PStep[]): boolean {
  *  Shared by the re-source reducer path (compileScalarChildRows) and the mixed-shape variant
  *  element arm (tryScalarResourceElement); the value is discarded by the re-source (a flatMap
  *  CROSS JOIN), and a pushed ordinal rides through it unchanged. */
-export function resourceElement(seed: ScalarStream, head: PStep, after: PStep[]): ElementStream | null {
+export function resourceElement(seed: ScalarStream, head: IRStep, after: IRStep[]): ElementStream | null {
   const el = lowerReSource(seed, head);
   if (!el) return null;
   return lowerElementBody(el, after);
@@ -378,7 +378,7 @@ export function scopedMovementCount(parent: ElementStream, scope: ChildFrameStac
   if (parent.elem !== 'vertex') throw new Error(`${direction}() degree expects a vertex input`);
   const pushed = pushChildScope(parent, scope);
   // A synthetic movement step — the StepFn reads only name/args, never .ctx.
-  const moveStep = { name: direction, args: [], ctx: null as any } as PStep;
+  const moveStep = { name: direction, args: [], ctx: null as any } as IRStep;
   const { stream: moved, next } = engineOf(pushed.seed).lowerElementSteps([moveStep], pushed.seed);
   if (next !== 1) throw new Error(`could not lower ${direction}()`);
   // The pushed ordinal deliberately stays live (the call() seam's contract — an existence
@@ -1029,7 +1029,7 @@ function compileElementChildRows(
   if (firstPolicy) {
     const p = end.rel.as('p');
     const n = (end.elem === 'edge' ? edges : nodes).as('n');
-    const orderExpr = elementOrderSql(end, n, orderStep as PStep | undefined);
+    const orderExpr = elementOrderSql(end, n, orderStep as IRStep | undefined);
     const cols = layoutCols(end.traverserLayout);
     const r = derived(
       q`SELECT ${p.c.id} AS id${layoutProjection(end.traverserLayout, p)}, ${rankPerParent(end.traverserLayout, p, q`${orderExpr}, ${p.c.id}`)} AS rn FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`,

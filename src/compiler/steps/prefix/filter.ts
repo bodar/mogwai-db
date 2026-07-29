@@ -11,7 +11,7 @@ import { aliasAppend, aliasId, aliasSeed, elemEntry, elemShape } from '../contex
 import { tryCombineByChildExistence, tryCompileScalarValueRows, tryFilterByChildExistence } from '../tail/child.ts';
 import { operandDeps, resolveTraversalOperands } from '../tail/operand.ts';
 import { directElementModulation, elementOrderSql } from '../tail/modulation.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { isInjectionMarker, injectedValues } from '../injection.ts';
 import { engineOf, fastPathContextOf } from '../../engine/deps.ts';
 
@@ -239,7 +239,7 @@ export const dedup: StepFn = (s, st) => {
  *  label re-root (labelCtx, the same reading where(__.as("b")…) uses); the optional single by()
  *  projects a property / T.token off each label's element (bare → element identity). Layout
  *  state (path, other aliases) rides through, so `as(a)…as(b)…dedup("a","b").path()` composes. */
-function dedupByLabels(st: ElementStream, s: PStep, labels: string[]): ElementStream {
+function dedupByLabels(st: ElementStream, s: IRStep, labels: string[]): ElementStream {
   const modulators = s.modulators ?? [];
   if (modulators.length > 1) throw new Error('dedup(labels) supports at most one by() modulator');
   const by = modulators[0]?.[0];
@@ -272,7 +272,7 @@ function dedupByLabels(st: ElementStream, s: PStep, labels: string[]): ElementSt
  * unproductive modulation; ProductiveBy retains one NULL-key representative.
  * When preceded by order().barrier(), two windows encode both observations:
  * first row per dedup key and the retained stream's explicit encounter order. */
-export function lowerElementDedup(st: ElementStream, s: PStep, order?: PStep): ElementStream {
+export function lowerElementDedup(st: ElementStream, s: IRStep, order?: IRStep): ElementStream {
   // dedup(labels): dedup by the tuple of the given as() labels' current values (optional
   // single by() modulator applied to each). Explicit-scope, so unlike bare dedup it is
   // well-defined under as()/path tracking — the kept traverser rides its carried state.

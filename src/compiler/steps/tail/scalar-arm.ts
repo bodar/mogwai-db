@@ -31,7 +31,7 @@ import { engineOf, fastPathContextOf } from '../../engine/deps.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
 import { gateScalar, tryInlineScalarPredicate, unionScalarStreams } from './scalar.ts';
 import { predicateSql, TYPE_PER_ROW, TYPE_UNKNOWN } from '../../plan/plan.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import {
   CHILD_SCALAR_REDUCERS, isResourceHead, pushChildScope, resourceElement,
   tryCompileListChild, tryCompileScalarValueChild, tryCompileScalarValueRows,
@@ -80,11 +80,11 @@ const SCALAR_ARM_BRANCH = new Set(['choose', 'union', 'coalesce', 'map', 'flatMa
 /** A single scalar-arm leaf step the engine lowers without throwing. Kept in lockstep with
  *  what lowerScalarRows/SCALAR_DISPATCH actually support so the recognizer never accepts a body
  *  that would throw mid-lowering (breaking the return-null fall-through contract). */
-const scalarArmLeafOk = (s: PStep): boolean =>
+const scalarArmLeafOk = (s: IRStep): boolean =>
   SCALAR_ARM_TX.has(s.name) || SCALAR_ARM_ROW.has(s.name)
   || (s.name === 'asNumber' && (s.args ?? []).length > 0);
 
-function scalarBranchArm(body: PStep[], params: Record<string, any>): boolean {
+function scalarBranchArm(body: IRStep[], params: Record<string, any>): boolean {
   return body.length > 0 && body.every((s) => {
     const kids = (s.args ?? []).filter(isNested);
     // The filter family lowers via lowerScalarFilter, which requires a nested traversal —
@@ -93,7 +93,7 @@ function scalarBranchArm(body: PStep[], params: Record<string, any>): boolean {
     if (SCALAR_ARM_FILTER.has(s.name)) return kids.length > 0 && kids.every((a: any) => scalarBranchArm(childSteps(a.nested, params), params));
     // A nested value-branch: every arm must itself be a scalar value arm so the whole thing
     // stays scalar and never throws mid-lowering. Option-map choose (s.optionArms) is excluded.
-    if (SCALAR_ARM_BRANCH.has(s.name) && !(s as PStep).optionArms)
+    if (SCALAR_ARM_BRANCH.has(s.name) && !(s as IRStep).optionArms)
       return kids.length > 0 && kids.every((a: any) => scalarBranchArm(childSteps(a.nested, params), params));
     return scalarArmLeafOk(s) && kids.length === 0;
   });
@@ -103,7 +103,7 @@ function scalarBranchArm(body: PStep[], params: Record<string, any>): boolean {
  *  child-scoped scalar arm that tryCompileScalarValueChild lowers per value. This is the
  *  reducer half of scalarArmClassifies: scalarBranchArm covers value/nested-branch arms at
  *  root scope, this covers the per-value reduction that needs the pushed child scope. */
-function scalarReducerArm(body: PStep[]): boolean {
+function scalarReducerArm(body: IRStep[]): boolean {
   const last = body.at(-1);
   if (!last || !CHILD_SCALAR_REDUCERS.has(last.name)) return false;
   return body.slice(0, -1).every(scalarChildPrefixOk);
@@ -114,7 +114,7 @@ function scalarReducerArm(body: PStep[]): boolean {
  *  movement-only re-source needs a terminal count(); a projecting one (values/id/label) needs
  *  a valid element-child tail. Kept in lockstep with that branch so the recognizer never
  *  accepts a body the child compiler would decline. */
-function scalarResourceArm(body: PStep[]): boolean {
+function scalarResourceArm(body: IRStep[]): boolean {
   const last = body.at(-1);
   const reducer = last && CHILD_SCALAR_REDUCERS.has(last.name) ? last.name : undefined;
   const rest = reducer ? body.slice(0, -1) : body;
@@ -128,7 +128,7 @@ function scalarResourceArm(body: PStep[]): boolean {
 /** PURE. Predicts tryCompileScalarArm success without appending CTEs — the classify half of
  *  the gated consumers (choose/coalesce build a gate before lowering arms, so they must know
  *  every arm lowers before committing CTEs, matching the element-parent classify-then-emit). */
-function scalarArmClassifies(body: PStep[], params: Record<string, any>): boolean {
+function scalarArmClassifies(body: IRStep[], params: Record<string, any>): boolean {
   return scalarBranchArm(body, params) || scalarReducerArm(body) || scalarResourceArm(body);
 }
 
@@ -144,7 +144,7 @@ export function tryCompileScalarArm(parent: ScalarStream, nested: any, scope: Ch
 
 /** Lower one scalar arm body over the scalar parent, returning null (defer) if it falls
  *  outside the Stage-1 vocabulary or does not stay scalar (e.g. a fold() → list). */
-function lowerScalarArm(s: ScalarStream, body: PStep[]): ScalarStream | null {
+function lowerScalarArm(s: ScalarStream, body: IRStep[]): ScalarStream | null {
   if (!scalarBranchArm(body, s.params)) return null;
   const end = engineOf(s).lowerStepsStrict(s, body, 0);
   return end.kind === 'scalar' ? end : null;
@@ -155,7 +155,7 @@ function lowerScalarArm(s: ScalarStream, body: PStep[]): ScalarStream | null {
  *  fans out; a nested choose/coalesce fans out only if a reachable arm does. Used to gate
  *  `map()` (first-result-only) — it fails closed on a fan-out body it would otherwise
  *  over-produce, rather than returning the wrong count. */
-function armFansOut(body: PStep[], params: Record<string, any>): boolean {
+function armFansOut(body: IRStep[], params: Record<string, any>): boolean {
   const last = body.at(-1);
   if (last && (CHILD_SCALAR_REDUCERS.has(last.name) || last.name === 'fold')) return false;
   if (isResourceHead(body)) return true;
@@ -173,7 +173,7 @@ function armFansOut(body: PStep[], params: Record<string, any>): boolean {
  *  (unionScalarStreams). A bare re-source (V()/E()) fan-out carries no encounter yet (Stage B),
  *  so it still fails closed inside the 'first' policy. A ≤1 body (transform/filter/choose/
  *  coalesce/reducer) is identical under map/flatMap/local. */
-export function tryScalarMapChild(s: ScalarStream, step: PStep, allowFanout = true): ScalarStream | null {
+export function tryScalarMapChild(s: ScalarStream, step: IRStep, allowFanout = true): ScalarStream | null {
   const arg = step.args?.[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
   if (!allowFanout && armFansOut(childSteps(arg.nested, s.params), s.params))
@@ -273,7 +273,7 @@ function buildScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): Sca
  *  EXISTS when the switch is off / the body is beyond the inline vocabulary). It gates the
  *  value rows into disjoint then/else seeds, each arm lowers over its seed, and the two merge
  *  with UNION ALL. else absent → the value passes through unchanged (identity). */
-export function tryScalarChooseChild(s: ScalarStream, step: PStep): ScalarStream | null {
+export function tryScalarChooseChild(s: ScalarStream, step: IRStep): ScalarStream | null {
   if (step.optionArms) return null; // option-map form is a later stage (modulator consumer)
   const args = step.args ?? [];
   const nested = args.filter(isNested);
@@ -299,7 +299,7 @@ export function tryScalarChooseChild(s: ScalarStream, step: PStep): ScalarStream
 
 /** union(a, b, …) over a scalar: every arm consumes the whole value stream; UNION ALL
  *  concatenates their productive rows (multiset-faithful, so a value can appear per arm). */
-export function tryScalarUnionChild(s: ScalarStream, step: PStep): ScalarStream | null {
+export function tryScalarUnionChild(s: ScalarStream, step: IRStep): ScalarStream | null {
   const branches = (step.args ?? []).filter(isNested);
   if (branches.length < 2) return null;
   const arms: ScalarStream[] = [];
@@ -315,12 +315,12 @@ export function tryScalarUnionChild(s: ScalarStream, step: PStep): ScalarStream 
  *  gated by "still unclaimed by every earlier arm AND this arm produces"; productivity is each
  *  arm body's gate boolean (buildScalarGate — inline over `v`, or a correlated EXISTS when the
  *  switch is off / the body is beyond the inline vocabulary). All arms share ONE gate/scope. */
-export function tryScalarCoalesceChild(s: ScalarStream, step: PStep): ScalarStream | null {
+export function tryScalarCoalesceChild(s: ScalarStream, step: IRStep): ScalarStream | null {
   const branches = (step.args ?? []).filter(isNested);
   if (branches.length < 1) return null;
   const bodies = branches.map((b: any) => childSteps(b.nested, s.params));
   // Classify-then-emit: every arm must lower before the shared gate commits its CTEs.
-  if (bodies.some((body: PStep[]) => !scalarArmClassifies(body, s.params))) return null;
+  if (bodies.some((body: IRStep[]) => !scalarArmClassifies(body, s.params))) return null;
   const gate = buildScalarGate(s, branches.map((b: any) => ({ nested: b.nested })));
   if (!gate) return null;
   const arms: ScalarStream[] = [];
@@ -360,7 +360,7 @@ function tryScalarResourceElement(seed: ScalarStream, nested: any): ElementStrea
 
 /** PURE. A fold list arm over a scalar: a value-op body OR a re-source projection, then
  *  fold(). The classify twin of tryCompileListChild's scalar path. */
-function scalarListArm(body: PStep[]): boolean {
+function scalarListArm(body: IRStep[]): boolean {
   if (body.at(-1)?.name !== 'fold') return false;
   const before = body.slice(0, -1);
   if (before.length > 0 && before.every(scalarChildPrefixOk)) return true;
@@ -405,7 +405,7 @@ function compileScalarVariantArm(seed: ScalarStream, nested: any): VariantArm {
 /** union(a, b, …) over a scalar with MIXED-shape arms → a VariantStream (plain UNION ALL, no
  *  gating). Declines (null) when the arms are homogeneous (tryScalarUnionChild owns those) or
  *  any arm is unclassifiable, or under carried path/sack/fromV (fork/merge unworked). */
-export function tryScalarVariantUnion(s: ScalarStream, step: PStep): VariantStream | null {
+export function tryScalarVariantUnion(s: ScalarStream, step: IRStep): VariantStream | null {
   if (s.traverserLayout.path || s.traverserLayout.sack || s.traverserLayout.fromV) return null;
   const branches = (step.args ?? []).filter(isNested);
   if (branches.length < 2) return null;
@@ -420,7 +420,7 @@ export function tryScalarVariantUnion(s: ScalarStream, step: PStep): VariantStre
  *  tryScalarChooseChild's gate — and each arm compiles to its natural variant shape over its
  *  seed. Declines when the arms are the same shape (tryScalarChooseChild owns those), the 2-arg
  *  identity-else form, or any arm is unclassifiable. */
-export function tryScalarVariantChoose(s: ScalarStream, step: PStep): VariantStream | null {
+export function tryScalarVariantChoose(s: ScalarStream, step: IRStep): VariantStream | null {
   if (step.optionArms) return null; // option-map form is the modulation seam
   if (s.traverserLayout.path || s.traverserLayout.sack || s.traverserLayout.fromV) return null;
   const args = step.args ?? [];
@@ -445,7 +445,7 @@ export function tryScalarVariantChoose(s: ScalarStream, step: PStep): VariantStr
  *  only for inputs no earlier arm produced a row for (`ord NOT IN prior`) — the first-productive
  *  rule, exactly branch.ts's tryLowerVariantCoalesce, over a scalar seed. Declines for
  *  homogeneous arms (tryScalarCoalesceChild owns those) or an unclassifiable arm. */
-export function tryScalarVariantCoalesce(s: ScalarStream, step: PStep): VariantStream | null {
+export function tryScalarVariantCoalesce(s: ScalarStream, step: IRStep): VariantStream | null {
   if (s.traverserLayout.path || s.traverserLayout.sack || s.traverserLayout.fromV) return null;
   const branches = (step.args ?? []).filter(isNested);
   if (!branches.length) return null;
@@ -461,7 +461,7 @@ export function tryScalarVariantCoalesce(s: ScalarStream, step: PStep): VariantS
 /** optional(t) over a scalar with a SCALAR arm ≡ coalesce(t, identity): the arm's value where
  *  it produces, else the input value restored (a filter arm that drops a value → the original
  *  passes through). Homogeneous → a scalar stream; an element/list arm takes the variant path. */
-export function tryScalarOptionalChild(s: ScalarStream, step: PStep): ScalarStream | null {
+export function tryScalarOptionalChild(s: ScalarStream, step: IRStep): ScalarStream | null {
   if (s.traverserLayout.sack || s.traverserLayout.fromV) return null;
   const arg = step.args?.[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
@@ -488,7 +488,7 @@ export function tryScalarOptionalChild(s: ScalarStream, step: PStep): ScalarStre
 /** optional(t) over a scalar with an ELEMENT/LIST arm → a VariantStream: the arm's rows where it
  *  produces (vk 2/3/4), else the input VALUE restored (vk 1). The scalar twin of branch.ts's
  *  tryLowerVariantOptional (flipped: there the miss is an element, here the miss is the value). */
-export function tryScalarVariantOptional(s: ScalarStream, step: PStep): VariantStream | null {
+export function tryScalarVariantOptional(s: ScalarStream, step: IRStep): VariantStream | null {
   if (s.traverserLayout.path || s.traverserLayout.sack || s.traverserLayout.fromV) return null;
   const arg = step.args?.[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
@@ -530,7 +530,7 @@ export function tryScalarVariantOptional(s: ScalarStream, step: PStep): VariantS
  * domain (only rows drop). Returns null if an arm has no generic scalar compilation, or for the
  * predicate-P form (which has no traversal child — that path is inline-only).
  */
-export function tryScalarFilterByChildExistence(s: ScalarStream, step: PStep): ScalarStream | null {
+export function tryScalarFilterByChildExistence(s: ScalarStream, step: IRStep): ScalarStream | null {
   const nested = (step.args ?? []).filter(isNested);
   if (!nested.length) return null;
   const { scope, frame, seed } = pushChildScope(s);

@@ -2,7 +2,7 @@ import { gtypeName, isNested } from '../../../gremlin/frontend.ts';
 import { q, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { nodes, edges, labels } from '../../../sql/schema.ts';
 import { framedProps, labelNameSub, predicateSql, extIdOf, elemCtx, aliasCtx, scalarProp, type Elem, type ScalarCtx } from '../../plan/plan.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { layoutProjection, layoutCols, scopePathCols, dropLayoutAtBarrier, withoutPath, type TraverserLayout, type ElementStream } from '../context/context.ts';
 import { loweringStateOf, continueLowering, pathColumns, toListStream, toPathStream, toScalarStream, type ListStream, type LoweringResult, type PathStream, type ScalarStream } from '../context/stream.ts';
 import { compileFromList } from './list.ts';
@@ -54,12 +54,12 @@ const ELEMENT_POSITION_BRANCH = new Set(['choose', 'coalesce', 'union']);
  *  arms are. `values()` is treated as ≤1 here (single-cardinality is the norm; a genuinely
  *  multi-value property in a branch arm is the residual take-first case, matching the value
  *  route/by(key) which both take first). */
-function positionArmFansOut(body: PStep[], params: Record<string, any>): boolean {
+function positionArmFansOut(body: IRStep[], params: Record<string, any>): boolean {
   const last = body.at(-1);
   if (last && (last.name === 'count' || last.name === 'sum' || last.name === 'min' || last.name === 'max' || last.name === 'mean' || last.name === 'fold')) return false;
   return body.some((s) => {
     if (POSITION_MOVEMENTS.has(s.name) || s.name === 'V' || s.name === 'E' || s.name === 'union') return true;
-    if ((s.name === 'choose' || s.name === 'coalesce') && !(s as PStep).optionArms) {
+    if ((s.name === 'choose' || s.name === 'coalesce') && !(s as IRStep).optionArms) {
       const kids = (s.args ?? []).filter(isNested);
       // choose(pred, then, else): the predicate (kids[0]) gates, only then/else can fan out.
       const arms = s.name === 'choose' && kids.length === 3 ? kids.slice(1) : kids;
@@ -93,7 +93,7 @@ function lowerPathPositionChild(
   // NOT the value route: the branch compilers have no `first`-collapse, so the fan-out guard is
   // the position's 1-to-1 safety. (classifyScalarChild now ACCEPTS nested-branch bodies, so the
   // value route below would grab them and hit applyScalarChildCardinality's encounter throw.)
-  const hasBranch = body.some((s) => ELEMENT_POSITION_BRANCH.has(s.name) && !(s as PStep).optionArms);
+  const hasBranch = body.some((s) => ELEMENT_POSITION_BRANCH.has(s.name) && !(s as IRStep).optionArms);
   const branch = body.length === 1 && hasBranch ? body[0] : undefined;
   if (branch) {
     if (branch.name === 'union')
@@ -129,7 +129,7 @@ function lowerPathPositionChild(
  * by(key) (missing property) drops the whole path (TinkerPop's default — only
  * ProductiveByStrategy would emit null). order()/reducers/from()/to() defer.
  */
-export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStream {
+export function lowerPath(st: ElementStream, proj: IRStep, acc: TailAcc): PathStream {
   // The chain reached path() with no path state carried. `analyze` seeds tracking at the SOURCE
   // from the chain's own text, so this means the stream was re-typed by a barrier that consumed
   // the positions (a cap()/unfold() re-entry) rather than walked to here. Mid-chain
@@ -284,7 +284,7 @@ function groupedPositionChild(st: ElementStream, paths: Relation, nested: any, p
   return q`SELECT ${v.c.pk} AS pk, ${v.c.ord} AS ord, ${v.c.v} AS v FROM ${v}${drop} ORDER BY ${v.c.pk}, ${v.c.ord}`;
 }
 
-function compilePathArray(st: ElementStream, proj: PStep, acc: TailAcc): PathStream {
+function compilePathArray(st: ElementStream, proj: IRStep, acc: TailAcc): PathStream {
   if (acc.orders.length || acc.reducer || acc.isPreds.length)
     throw new Error('order()/reducer/is() after a recursive repeat().path() not yet supported');
   // from()/to() need static per-position labels; a recursive walk has dynamic length.
@@ -373,7 +373,7 @@ function linearScalarList(s: PathStream): ListStream | null {
  * loop, and a homogeneous scalar path (path().by(key)) retypes into the list-value
  * engine for the collection ops (set-ops/reverse/unfold/…). select(Column)/whole-stream
  * order still defer (they need the path's as()-label history — separate slices). */
-export function compileFromPath(s: PathStream, steps: PStep[], at: number): LoweringResult {
+export function compileFromPath(s: PathStream, steps: IRStep[], at: number): LoweringResult {
   const step = steps[at];
   if (step.name === 'count') {
     return continueLowering(lowerGlobalCount(s), at + 1);

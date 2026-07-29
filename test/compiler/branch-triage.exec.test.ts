@@ -11,7 +11,7 @@ import {
   asBranchKind, branchNeedsShapeDispatch, classifyBranchArms,
   isElementChild, isListChild, isScalarChild, type BranchKind, type ChildCtx,
 } from '../../src/compiler/steps/tail/child-shape.ts';
-import { type PStep } from '../../src/compiler/ir/strategies.ts';
+import { type IRStep } from '../../src/compiler/ir/strategies.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { seeded } from '../support/graph.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
@@ -26,7 +26,7 @@ const nestedOf = (gremlin: string): any => {
 
 /** Every branch-family step in a traversal, as the compiler sees it (parsed + normalized, so a
  *  folded order().by()/repeat cluster is already canonical). */
-const branchSteps = (gremlin: string): PStep[] =>
+const branchSteps = (gremlin: string): IRStep[] =>
   normalize(stepChain(parseGremlin(gremlin), {})).steps.filter((s) => asBranchKind(s.name));
 
 /** A label-free classify context (no bound params, no as() in scope) — what a root-position
@@ -110,12 +110,12 @@ describe('classifyBranchArms — the shape verdict', () => {
 /** The ORIGINAL ten-boolean break predicate, transcribed verbatim from the pre-consolidation
  *  lowerElementSteps (engine.ts). Kept as the reference oracle: branchNeedsShapeDispatch must
  *  agree with it for every branch shape, or the prefix fold and the tail cascade have drifted. */
-function tenBooleanBreak(step: PStep, params: ChildCtx): boolean {
+function tenBooleanBreak(step: IRStep, params: ChildCtx): boolean {
   const nested = (a: any) => a && typeof a === 'object' && 'nested' in a;
   const unionBranches = step.name === 'union' ? step.args.filter(nested) : [];
   const scalarUnion = unionBranches.length >= 2 && unionBranches.every((a: any) => isScalarChild(a.nested, params));
   const listUnion = unionBranches.length >= 2 && unionBranches.every((a: any) => isListChild(a.nested, params));
-  const chooseArgs = step.name === 'choose' && !(step as PStep).optionArms ? step.args.filter(nested) : [];
+  const chooseArgs = step.name === 'choose' && !(step as IRStep).optionArms ? step.args.filter(nested) : [];
   const scalarChoose = chooseArgs.length === 3
     && isScalarChild(chooseArgs[1].nested, params) && isScalarChild(chooseArgs[2].nested, params);
   const listChoose = chooseArgs.length === 3

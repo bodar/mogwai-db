@@ -1,4 +1,4 @@
-import { type PStep } from './strategies.ts';
+import { type IRStep } from './strategies.ts';
 
 // ---------- whole-chain analysis: annotate, never rewrite ----------
 //
@@ -40,7 +40,7 @@ const PATH_STEPS = new Set(['path', 'simplePath', 'cyclicPath']);
  *  scans call this one predicate so they cannot disagree on what an order() does — the drift
  *  risk the old two-file prose "must agree" comment carried. order().by(traversal) is NOT
  *  plain (it mints its own encounter / is a nested sort) and returns false. */
-function isPlainOrder(step: PStep): boolean {
+function isPlainOrder(step: IRStep): boolean {
   return step.name === 'order' && (step.modulators ?? []).every((by: any[]) => by.length === 0 || typeof by[0] === 'string');
 }
 
@@ -65,7 +65,7 @@ const POSITIONAL_CONSUMERS = new Set(['limit', 'range', 'skip', 'tail', 'fold'])
 /** Does this chain need a threaded emission-order encounter? True iff a positional consumer
  *  appears after a fan-out. repeat()/match() are opaque boundaries this substrate doesn't
  *  cross yet — return false there (preserving today's behaviour, never a silent mis-order). */
-function computeDemandsEncounter(steps: PStep[]): boolean {
+function computeDemandsEncounter(steps: IRStep[]): boolean {
   let sawFanout = false;
   for (const s of steps) {
     if (s.name === 'repeat' || s.name === 'match') return false;
@@ -105,7 +105,7 @@ const COLLAPSE_REDUCERS = new Set(['count', 'sum', 'mean', 'min', 'max']);
  *  traverser → many keys), which a GROUP BY-id merge would corrupt → left unsafe. group()
  *  (element/list values) and group().by().by(reducer) are NOT admitted here: their weighting
  *  is correct-by-construction but their collapse gating is deferred (see the wire-bulking doc). */
-function groupCountCollapseTerminal(step: PStep): boolean {
+function groupCountCollapseTerminal(step: IRStep): boolean {
   if (step.name !== 'groupCount' || (step.args?.length ?? 0) !== 0) return false;
   const modulators = step.modulators ?? [];
   if (modulators.length === 0) return true;
@@ -114,7 +114,7 @@ function groupCountCollapseTerminal(step: PStep): boolean {
   return a === undefined || typeof a === 'string' || (a && typeof a === 'object' && 'token' in a);
 }
 
-function computeCollapseSafe(steps: PStep[]): boolean {
+function computeCollapseSafe(steps: IRStep[]): boolean {
   const n = steps.length;
   if (n < 2) return false; // need a source + ≥1 movement
   if (steps[0].name !== 'V' && steps[0].name !== 'E') return false;
@@ -157,7 +157,7 @@ function computeCollapseSafe(steps: PStep[]): boolean {
  *  and collapseSafe run as separate loops (their state machines track different things), but
  *  both call `isPlainOrder`, so they cannot disagree on how an order() neutralizes a fan-out.
  *  One call site per distinct chain replaces up to three separate re-scans. */
-export function analyzeChain(steps: PStep[]): ChainFacts {
+export function analyzeChain(steps: IRStep[]): ChainFacts {
   return {
     tracksPath: steps.some((s) => PATH_STEPS.has(s.name)),
     demandsEncounter: computeDemandsEncounter(steps),

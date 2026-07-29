@@ -1,7 +1,7 @@
 import { q, value, list, empty, type Relation, type Expression } from '../../../sql/kernel/q.ts';
 import { PER_ROW } from '../../../sql/kernel/render.ts';
 import { type Elem } from '../../plan/plan.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import type { ForeignRow, InjectionKind } from '../../../services/spi/types.ts';
 import {
   layoutCols, layoutProjection, type LoweringState,
@@ -102,7 +102,7 @@ const FOREIGN_DISPATCH = new Map<string, ShapeTailFn<ForeignStream>>([
 /** Consume a ForeignStream. Only reads over the landed columns are supported; anything that
  *  needs live local adjacency (out/in/both/…) or an unimplemented follow-on falls through to a
  *  clear deferral — never a silent local-table join. */
-export function compileFromForeign(s: ForeignStream, steps: PStep[], at: number): LoweringResult {
+export function compileFromForeign(s: ForeignStream, steps: IRStep[], at: number): LoweringResult {
   return dispatchShapeTail(FOREIGN_DISPATCH, s, steps, at, () => {
     throw new Error(`step not supported on a detached federated element: ${steps[at].name}() — federated results are detached references; push the traversal into the sub-query instead`);
   });

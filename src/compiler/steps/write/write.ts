@@ -3,7 +3,7 @@ import { q, value, list, empty, raw, render, type Expression } from '../../../sq
 import { labelIn, nodeHasProp, edgeHasProp, sqlElem, type Elem } from '../../plan/plan.ts';
 import { gremlinTypeOf, isCollectionType, storedScalar, flatType, mapEntryType, valueNodeOf, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
 import { stepChain, isNested, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { staticTypeOf, readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../../../sql/kernel/render.ts';
 import type { Engine } from '../../engine/deps.ts';
@@ -52,10 +52,10 @@ function constFromNested(nested: any, sideEffects: Map<string, any> | undefined,
 // the store, returning its raw result rows + the compiled shape. Seeding prepends a
 // V/E source on the driver's internal rowid so the child is anchored at that element.
 function runNested(engine: Engine, store: GraphStore, nestedNode: any, params: Record<string, any>, seed?: { id: number; elem: Elem }): { rows: any[]; shape: Shape } {
-  let chain: PStep[] = normalize(stepChain(nestedNode, params)).steps;
+  let chain: IRStep[] = normalize(stepChain(nestedNode, params)).steps;
   // Seed at the driver element: a synthetic V/E source on the internal rowid (numeric
   // arg → rowid match). It borrows the nested node's parse ctx (no ctx of its own).
-  if (seed) chain = [{ name: seed.elem === 'edge' ? 'E' : 'V', args: [seed.id], ctx: nestedNode } as PStep, ...chain];
+  if (seed) chain = [{ name: seed.elem === 'edge' ? 'E' : 'V', args: [seed.id], ctx: nestedNode } as IRStep, ...chain];
   const compiled = engine.compileReadCompiled(chain, params);
   return { rows: store.query<any>(compiled.sql, compiled.binds), shape: compiled.shape };
 }
@@ -115,7 +115,7 @@ function resolveSpecValue(engine: Engine, store: GraphStore, sp: PropSpec, id: n
 // drop() — remove the target elements. Vertices (g.V()…drop()) take their
 // incident edges with them; edges (g.E()…drop(), g.V().outE()…drop()) delete
 // only the matched edge rows.
-function compileDrop(engine: Engine, steps: PStep[]): WritePlan {
+function compileDrop(engine: Engine, steps: IRStep[]): WritePlan {
   const { st, stop } = engine.buildPrefixFresh(steps.slice(0, -1));
   if (stop !== steps.length - 1) throw new Error(`drop() after ${steps[stop].name}() not yet supported`);
   const isEdge = st.elem === 'edge';
@@ -152,7 +152,7 @@ function compileDrop(engine: Engine, steps: PStep[]): WritePlan {
 
 // g.V(x).<filters>.property(k, v)[.property(...)] — set properties on the matched
 // existing element(s), single cardinality (last write wins).
-function compileSetProperty(engine: Engine, steps: PStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
+function compileSetProperty(engine: Engine, steps: IRStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
   const firstProp = steps.findIndex((s) => s.name === 'property');
   const prefix = steps.slice(0, firstProp);
   const { st, stop } = engine.buildPrefixFresh(prefix, params);
@@ -439,7 +439,7 @@ function insertVertex(engine: Engine, store: GraphStore, spec: VertexSpec, param
 }
 
 // g.addV('label').property(k, v)... — and multi-element chains (a graph initializer).
-function compileAddV(engine: Engine, steps: PStep[], params: Record<string, any> = {}, sideEffects?: Map<string, any>): WritePlan {
+function compileAddV(engine: Engine, steps: IRStep[], params: Record<string, any> = {}, sideEffects?: Map<string, any>): WritePlan {
   if (steps.some((s, i) => i > 0 && s.name !== 'property'))
     return { kind: 'write', run: (store) => runWriteChainFull(engine, store, steps, params, sideEffects) };
   const spec = parseVertexSpec(steps[0], steps.slice(1), sideEffects, params);
@@ -508,7 +508,7 @@ function applyEdgeCluster(engine: Engine, store: GraphStore, c: EdgeCluster, ali
 
 // addE — general form. A pure write chain goes to the sequential interpreter;
 // otherwise a single addE with a V()-rooted prefix, one edge per resulting traverser.
-function compileAddE(engine: Engine, steps: PStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
+function compileAddE(engine: Engine, steps: IRStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
   const CHAIN = new Set(['addV', 'as', 'addE', 'from', 'to', 'property']);
   if (steps.every((s) => CHAIN.has(s.name)))
     return { kind: 'write', run: (store) => runWriteChainFull(engine, store, steps, params, sideEffects) };
@@ -741,7 +741,7 @@ function parseMergeOptions(mods: Step[], step: string, sideEffects: Map<string, 
 }
 
 // The incoming traversers a merge runs once per, evaluated at run time.
-function mergeDrivers(engine: Engine, prefix: PStep[], params: Record<string, any>): (store: GraphStore) => (number | null)[] {
+function mergeDrivers(engine: Engine, prefix: IRStep[], params: Record<string, any>): (store: GraphStore) => (number | null)[] {
   if (prefix.length === 0) return () => [null];
   if (prefix.length === 1 && prefix[0].name === 'inject') { const nulls = prefix[0].args.map(() => null); return () => nulls; }
   const { st, stop } = engine.buildPrefixFresh(prefix, params);
@@ -751,7 +751,7 @@ function mergeDrivers(engine: Engine, prefix: PStep[], params: Record<string, an
 }
 
 // g.mergeV(map) [.option(Merge.onCreate, map)] [.option(Merge.onMatch, map)]
-function compileMergeV(engine: Engine, steps: PStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
+function compileMergeV(engine: Engine, steps: IRStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
   const mvIdx = steps.findIndex((s) => s.name === 'mergeV');
   if (steps[mvIdx].args.length === 0)
     throw new Error('mergeV() with no argument (uses the incoming traverser as the map) not yet supported');
@@ -805,7 +805,7 @@ function edgeMatchQuery(spec: MergeSpec, outV: number, inV: number): { sql: stri
 }
 
 // g.mergeE(map) [.option(Merge.onCreate, map)] [.option(Merge.onMatch, map)]
-function compileMergeE(engine: Engine, steps: PStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
+function compileMergeE(engine: Engine, steps: IRStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
   const meIdx = steps.findIndex((s) => s.name === 'mergeE');
   if (steps[meIdx].args.length === 0)
     throw new Error('mergeE() with no argument (uses the incoming traverser as the map) not yet supported');
@@ -855,7 +855,7 @@ function compileMergeE(engine: Engine, steps: PStep[], params: Record<string, an
 // Ordered rules: the first whose `match` fires compiles the chain. Order matters
 // (addE before addV; drop must be the terminal step) — hence a rule list, not a
 // name→fn Map. Returns null when the chain is a read (compiler falls to compileRead).
-interface WriteRule { match: (steps: PStep[]) => boolean; compile: (engine: Engine, steps: PStep[], params: Record<string, any>, sackInit?: SackSpec, sideEffects?: Map<string, any>) => WritePlan | Compiled; }
+interface WriteRule { match: (steps: IRStep[]) => boolean; compile: (engine: Engine, steps: IRStep[], params: Record<string, any>, sackInit?: SackSpec, sideEffects?: Map<string, any>) => WritePlan | Compiled; }
 
 const WRITE_RULES: WriteRule[] = [
   { match: (s) => s.some((x) => x.name === 'addE'), compile: (e, s, p, _sk, se) => compileAddE(e, s, p, se) },
@@ -874,7 +874,7 @@ const WRITE_RULES: WriteRule[] = [
  *  the compiler for this compilation) is threaded so write compilers reach the read spine (a nested
  *  value/endpoint read, a target-id prefix) through it — each such sub-compile mints its own fresh
  *  child engine (buildPrefixFresh / compileReadCompiled). */
-export function routeWrite(engine: Engine, steps: PStep[], params: Record<string, any>, sackInit?: SackSpec, sideEffects?: Map<string, any>): WritePlan | Compiled | null {
+export function routeWrite(engine: Engine, steps: IRStep[], params: Record<string, any>, sackInit?: SackSpec, sideEffects?: Map<string, any>): WritePlan | Compiled | null {
   for (const rule of WRITE_RULES) if (rule.match(steps)) return rule.compile(engine, steps, params, sackInit, sideEffects);
   return null;
 }

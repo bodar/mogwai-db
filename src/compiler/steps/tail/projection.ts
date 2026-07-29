@@ -6,7 +6,7 @@ import {
   predicateSql, rangeToOffsetLimit, elemCtx, extIdOf, jsonbGroupArray,
   nodePropScalar, edgePropScalar, nodePropSortKey, edgePropSortKey, scalarPropSortKey, compareKey, labelNameSub, framedProps, valueMapProps, storedValueExpr,
 } from '../../plan/plan.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { appendCte, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, partitionOver, dropLayoutAtBarrier, type ElementStream } from '../context/context.ts';
 import { loweringStateOf, continueLowering, dispatchShapeTail, toElementStream, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
 import { tryLowerLocalAggregate, lowerScalarAggregate } from '../prefix/sideeffect.ts';
@@ -38,7 +38,7 @@ interface OrderClause { key: string | null; dir: 'asc' | 'desc' | 'shuffle'; }
 /** The tail modifiers accumulated left-to-right (a pure fold — no sibling peeking;
  *  by() modulators already live on their host step via strategies.foldByModulators). */
 export interface TailAcc {
-  projStep: PStep | null;
+  projStep: IRStep | null;
   orders: OrderClause[];
   offset: number;
   limit: number | null;
@@ -60,14 +60,14 @@ const PROJECTION_NAMES = new Set(['values', 'id', 'label', 'count', 'valueMap', 
 // so the whole value tail (transforms/is/reducers/inject + framing) routes through the
 // scalar pipeline (lowerScalarProjection → scalar.ts/barrier.ts), never this accumulator.
 const SCALAR_PROJ = new Set(['values', 'id', 'label']);
-const isMapProj = (p: PStep | null) => p?.name === 'select' || p?.name === 'project';
-const isScopeLocalStep = (s: PStep | undefined): boolean =>
+const isMapProj = (p: IRStep | null) => p?.name === 'select' || p?.name === 'project';
+const isScopeLocalStep = (s: IRStep | undefined): boolean =>
   !!s && (s.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
 const NUMERIC_REDUCERS = new Set<NumericReducer>(['sum', 'min', 'max', 'mean']);
 
 /** A tail modifier: fold the step into the accumulator. `at` gives position so a
  *  terminal reducer (fold/sum) can reject anything following it. */
-type ModFn = (s: PStep, acc: TailAcc, at: { last: boolean; next?: string }) => void;
+type ModFn = (s: IRStep, acc: TailAcc, at: { last: boolean; next?: string }) => void;
 
 /** A re-enterable non-scalar projection (path/valueMap/elementMap) folds only these as
  *  its OWN tail modifiers; any other following step is a shape boundary routed to its
@@ -133,7 +133,7 @@ function reducerMod(name: NonNullable<TailAcc['reducer']>): ModFn {
  *  scalar transforms, inject-appends, and the value-shape modifiers (MODIFIERS).
  *  Shared by compileTail (element-rooted) and compileInject (scalar-stream-rooted)
  *  so both consume one modifier vocabulary — add a value-tail step once, here. */
-export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop: number } {
+export function foldTailAcc(steps: IRStep[], from: number): { acc: TailAcc; stop: number } {
   const acc: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, productiveBy: false, reducer: null, isPreds: [] };
   let i = from;
   for (; i < steps.length; i++) {
@@ -174,7 +174,7 @@ export function foldTailAcc(steps: PStep[], from: number): { acc: TailAcc; stop:
 }
 
 /** is(typeOf(GType.MAP)) — the identity type-assert on a valueMap/map result. */
-function isMapTypeOf(step: PStep): boolean {
+function isMapTypeOf(step: IRStep): boolean {
   if (step.name !== 'is') return false;
   const pred = (step.args ?? [])[0];
   if (!pred || typeof pred !== 'object' || pred.op !== 'typeOf') return false;
@@ -183,14 +183,14 @@ function isMapTypeOf(step: PStep): boolean {
   return !!name && name.toUpperCase() === 'MAP';
 }
 
-const hasColumnArg = (step: PStep): boolean =>
+const hasColumnArg = (step: IRStep): boolean =>
   (step.args ?? []).some((a: unknown) => isColumnArg(a) && (a.column === 'keys' || a.column === 'values'));
 
 /** valueMap()/elementMap() followers. is(typeOf(MAP)) is identity (skip); count() counts
  *  the maps (one per element → count of elements); select(Column.*) re-types to the
  *  per-element MapStream that compileFromMap aggregates. Modifiers before the follower,
  *  and any other follower, defer. */
-function lowerValueMapTail(st: ElementStream, proj: PStep, acc: TailAcc, steps: PStep[], at: number): LoweringResult {
+function lowerValueMapTail(st: ElementStream, proj: IRStep, acc: TailAcc, steps: IRStep[], at: number): LoweringResult {
   if (acc.orders.length || acc.reducer || acc.distinct || acc.offset || acc.limit !== null)
     throw new Error(`a modifier before a re-entered ${proj.name}() is not yet supported`);
   let i = at;
@@ -228,7 +228,7 @@ function lowerValueMapTail(st: ElementStream, proj: PStep, acc: TailAcc, steps: 
  *  observe the order. Returns null when NO term is a traversal (the acc.orders key machinery
  *  handles the all-direct case) or a term is shuffle; throws for path/encounter-tracking
  *  streams (a fresh encounter would collide) and unsupported child shapes. */
-function lowerElementOrderByTraversal(st: ElementStream, step: PStep): ElementStream | null {
+function lowerElementOrderByTraversal(st: ElementStream, step: IRStep): ElementStream | null {
   const bys = step.modulators ?? [];
   if (!bys.length) return null;
   const classes = bys.map(classifyBy);
@@ -289,7 +289,7 @@ function directOrderExpr(by: ByClass, n: Relation, st: ElementStream): Expressio
  *  Returns null for a shuffle order (no stable re-mint) or a traversal term (that is
  *  lowerElementOrderByTraversal's job); defers a live path (a fresh encounter would collide with
  *  the path's positional ordering). */
-function lowerElementOrderReenter(st: ElementStream, step: PStep): ElementStream | null {
+function lowerElementOrderReenter(st: ElementStream, step: IRStep): ElementStream | null {
   const bys = step.modulators ?? [];
   const classes: ByClass[] = bys.length ? bys.map(classifyBy) : [{ kind: 'none' }];
   if (classes.some((c) => c.kind === 'nested')) return null; // → lowerElementOrderByTraversal
@@ -418,10 +418,10 @@ const tailOptional: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
 // path, when classifyBranchArms says every arm is an element) and here as the final fallback, and
 // it is the only one that throws.
 interface BranchLowerers {
-  readonly list: (step: PStep, st: ElementStream) => Stream | null;
-  readonly scalar: (step: PStep, st: ElementStream) => Stream | null;
-  readonly variant: (step: PStep, st: ElementStream) => Stream | null;
-  readonly element: (step: PStep, st: ElementStream) => Stream;
+  readonly list: (step: IRStep, st: ElementStream) => Stream | null;
+  readonly scalar: (step: IRStep, st: ElementStream) => Stream | null;
+  readonly variant: (step: IRStep, st: ElementStream) => Stream | null;
+  readonly element: (step: IRStep, st: ElementStream) => Stream;
 }
 
 const BRANCH_LOWERERS = new Map<BranchKind, BranchLowerers>([
@@ -431,7 +431,7 @@ const BRANCH_LOWERERS = new Map<BranchKind, BranchLowerers>([
 ]);
 
 /** Try each shape in BRANCH_SHAPE_ORDER; the element lowerer terminates the cascade. */
-function lowerBranchByShape(kind: BranchKind, st: ElementStream, step: PStep): Stream {
+function lowerBranchByShape(kind: BranchKind, st: ElementStream, step: IRStep): Stream {
   const l = BRANCH_LOWERERS.get(kind)!;
   for (const shape of BRANCH_SHAPE_ORDER) {
     if (shape === 'element') return l.element(step, st);
@@ -527,13 +527,13 @@ const ELEMENT_DISPATCH = new Map<string, ShapeTailFn<ElementStream>>([
 /** Compile the tail: `st` is the finished prefix state, `steps[stop]` the first step the
  *  prefix dispatch didn't consume. A recognized shape-changing step dispatches through
  *  ELEMENT_DISPATCH; everything else (projection + modifiers) folds through compileTailFold. */
-export function compileTail(st: ElementStream, steps: PStep[], stop: number): LoweringResult {
+export function compileTail(st: ElementStream, steps: IRStep[], stop: number): LoweringResult {
   return dispatchShapeTail(ELEMENT_DISPATCH, st, steps, stop, compileTailFold);
 }
 
 /** The projection tail: accumulate the projection + value modifiers into a TailAcc, then
  *  render terminally or cross a retype boundary (fold→list, unfold, valueMap→map). */
-function compileTailFold(st: ElementStream, steps: PStep[], stop: number): LoweringResult {
+function compileTailFold(st: ElementStream, steps: IRStep[], stop: number): LoweringResult {
   // Tail fold: accumulate the projection + modifiers, stopping at a retype boundary
   // (unfold / a non-terminal fold) or at a scalar projection (values/id/label) — which
   // foldTailAcc leaves as projStep so the whole value tail routes through the scalar
@@ -602,7 +602,7 @@ function compileTailFold(st: ElementStream, steps: PStep[], stop: number): Lower
  * its per-origin physical encounter. Per-row stored vtype (values() of a typed prop)
  * rides alongside `v` for a following is(typeOf(X)) and typed framing.
  */
-function lowerScalarProjection(st: ElementStream, projStep: PStep, acc: TailAcc): ScalarStream {
+function lowerScalarProjection(st: ElementStream, projStep: IRStep, acc: TailAcc): ScalarStream {
   const n = elemRel(st);
   const l = labels.as('l');
   const p = st.rel.as('p');
@@ -802,7 +802,7 @@ const scalarGroupCount: ShapeTailFn<ScalarStream> = (s, step, _steps, at) =>
 /** Wrap a scalar-parent branch consumer (child.ts) as a ShapeTailFn: a produced stream
  *  continues lowering; a null (arm outside the scalar-arm vocabulary) falls through to the
  *  generic scalar deferral. */
-const scalarBranch = (fn: (s: ScalarStream, step: PStep) => ScalarStream | null): ShapeTailFn<ScalarStream> =>
+const scalarBranch = (fn: (s: ScalarStream, step: IRStep) => ScalarStream | null): ShapeTailFn<ScalarStream> =>
   (s, step, _steps, at) => { const r = fn(s, step); return r ? continueLowering(r, at + 1) : null; };
 
 const SCALAR_DISPATCH = new Map<string, ShapeTailFn<ScalarStream>>([
@@ -897,7 +897,7 @@ const SCALAR_DISPATCH = new Map<string, ShapeTailFn<ScalarStream>>([
   ...[...SCALAR_LIST_ONLY].map((n): [string, ShapeTailFn<ScalarStream>] => [n, scalarListOnly]),
 ]);
 
-export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number): LoweringResult {
+export function compileFromScalar(s: ScalarStream, steps: IRStep[], from: number): LoweringResult {
   // Every scalar row op (transforms/is/order/limit/skip/range/tail/dedup/inject) and every
   // Scope.local case is consumed by lowerScalarRows before we reach here, and SCALAR_DISPATCH
   // owns the barriers (count/reducers/fold/unfold/filter/constant/sack). So a miss is
@@ -920,7 +920,7 @@ export interface TailMods { orders: OrderClause[]; distinct: boolean; offset: nu
 interface ProjCtx {
   st: ElementStream; n: Relation; p: Relation; l: Relation; extId: Expression;
   vJoin: Expression; vlJoin: Expression;
-  projStep: PStep | null;
+  projStep: IRStep | null;
 }
 export interface ProjResult { shape: Shape; colsNode: Expression; fromNode: Expression; scalarExpr?: Expression | null; baseWhere?: Expression | null; encounterKey?: Expression; vtypeExpr?: Expression | null; }
 type ProjFn = (c: ProjCtx) => ProjResult;
@@ -1098,7 +1098,7 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
  *  composes). The value's GraphBinary type is inferred (as:undefined → anySerializer),
  *  matching values(): sack holds whatever the withSack seed / sack(op) arithmetic
  *  produced (int age, double weight, string label). */
-function lowerSackRead(st: ElementStream, step: PStep): ScalarStream {
+function lowerSackRead(st: ElementStream, step: IRStep): ScalarStream {
   if (!st.traverserLayout.sack) throw new Error('sack() requires withSack() or a preceding sack(Operator.x) step');
   if ((step.args ?? []).length) throw new Error('sack(argument) read form not supported (bare sack() only)');
   const p = st.rel.as('p');
@@ -1116,7 +1116,7 @@ function lowerSackRead(st: ElementStream, step: PStep): ScalarStream {
 // cap('x') reads a named side-effect. It only touches `sideEffects` + the shared carry, so it
 // is shape-agnostic (a scalar stream that registered an aggregate reads it identically); only
 // the group('a') re-emit needs the element parent that stashed it.
-function compileCap(st: ElementStream | ScalarStream, steps: PStep[], stop: number): LoweringResult {
+function compileCap(st: ElementStream | ScalarStream, steps: IRStep[], stop: number): LoweringResult {
   const names = (steps[stop].args ?? []).filter((a: any) => typeof a === 'string');
   if (names.length !== 1) throw new Error('cap() with multiple side-effect keys not yet supported');
   const def = st.sideEffects?.get(names[0]);

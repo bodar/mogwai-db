@@ -1,7 +1,7 @@
 import { q, type Relation } from '../../../sql/kernel/q.ts';
 import { nodes } from '../../../sql/schema.ts';
 import { type Elem } from '../../plan/plan.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { type TraverserLayout, type ElementStream } from '../context/context.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { childCtx, isElementChildStep, mentionsLabel } from './child-shape.ts';
@@ -80,7 +80,7 @@ export interface KeyedRelation {
  */
 export function keyedChildRelation(
   st: ElementStream,
-  body: readonly PStep[],
+  body: readonly IRStep[],
   opts: { landOn?: Elem } = {},
 ): KeyedRelation | null {
   // `childCtx(st)` supplies the labels visible at the call site so a body is classified
@@ -99,7 +99,7 @@ export function keyedChildRelation(
     rel: st.q.cte(q`SELECT id, 1 AS bulk, id AS o FROM ${nodes}`, ['id', 'bulk', 'o']),
     traverserLayout: seedCarried,
   };
-  const { stream, next } = engineOf(st).lowerElementSteps(body as PStep[], seed);
+  const { stream, next } = engineOf(st).lowerElementSteps(body as IRStep[], seed);
   if (next !== body.length) return null;                            // a step the prefix fold won't take
   if (opts.landOn && stream.elem !== opts.landOn) return null;
   // A body that BINDS a label cannot be precompiled per-origin — the bind is per-iteration.

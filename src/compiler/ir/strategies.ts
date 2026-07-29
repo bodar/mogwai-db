@@ -28,7 +28,7 @@ import { bodyAlwaysProduces } from './productivity.ts';
  * The compilers read these fields instead of re-scanning, so the whole read
  * dispatch is a peek-free fold over the step list.
  */
-export type PStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; from?: string; to?: string; withArgs?: [string, any][] };
+export type IRStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; from?: string; to?: string; withArgs?: [string, any][] };
 
 const REPEAT_CLUSTER = new Set(['repeat', 'emit', 'times', 'until']);
 /** Steps that absorb trailing by() modulators. Alias-compare where()/not() also
@@ -392,8 +392,8 @@ export function verify(spec: StrategySpec, steps: Step[]): void {
  *  (`__.constant(...)`); both are carried verbatim and resolved to a constant later
  *  (call-params.ts). A `with()` NOT preceded by a call() is left untouched (it is not a
  *  supported step elsewhere, so it will fail closed at dispatch if it ever appears). */
-export function foldCallWith(steps: PStep[]): PStep[] {
-  const out: PStep[] = [];
+export function foldCallWith(steps: IRStep[]): IRStep[] {
+  const out: IRStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
     if (s.name !== 'call') { out.push(s); continue; }
@@ -481,7 +481,7 @@ function foldPredOperands(pred: any, params: Record<string, any>): any {
   };
 }
 
-export function foldConstantPredicateOperands(steps: PStep[], params: Record<string, any>): PStep[] {
+export function foldConstantPredicateOperands(steps: IRStep[], params: Record<string, any>): IRStep[] {
   return steps.map((s) => {
     const slots = VALUE_OPERAND_SLOTS[s.name]?.(s.args ?? []) ?? [];
     let changed = false;
@@ -545,7 +545,7 @@ function valueArgTraversals(s: Step): any[] {
  *
  *  ALWAYS ON, like TinkerPop's: it is a standard strategy, not opt-in, so the Pass carries no
  *  `applies` gate. Naming it in withStrategies() stays a no-op (it is already applied). */
-export function verifyReadOnlyChildren(steps: PStep[], params: Record<string, any>): void {
+export function verifyReadOnlyChildren(steps: IRStep[], params: Record<string, any>): void {
   const scan = (chain: Step[]) => {
     for (const s of chain) {
       for (const nested of valueArgTraversals(s)) {
@@ -573,8 +573,8 @@ export function verifyReadOnlyChildren(steps: PStep[], params: Record<string, an
  *  so they are LEFT in place to fail closed at dispatch — never silently widened to all-tokens. A
  *  with() on any other host is untouched (call().with() folds in foldCallWith; every other with()
  *  falls through to its clear "cannot consume" deferral). */
-export function foldValueMapWith(steps: PStep[]): PStep[] {
-  const out: PStep[] = [];
+export function foldValueMapWith(steps: IRStep[]): IRStep[] {
+  const out: IRStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
     const w = steps[i + 1];
@@ -593,8 +593,8 @@ export function foldValueMapWith(steps: PStep[]): PStep[] {
  *  elements = `count()`. A provable identity that also unblocks group value children like
  *  by(__.out().order().fold().count(Scope.local)) (then dropRedundantOrder removes the
  *  order). Runs before dropRedundantOrder so the resulting order().count() is caught. */
-export function collapseFoldCountLocal(steps: PStep[]): PStep[] {
-  const out: PStep[] = [];
+export function collapseFoldCountLocal(steps: IRStep[]): IRStep[] {
+  const out: IRStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
     const next = steps[i + 1];
@@ -618,8 +618,8 @@ const ORDER_INSENSITIVE_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean'
  *  is left intact). Runs after foldByModulators so an order carrying a by() has its `.modulators`
  *  set and is skipped. Unblocks group value children like by(__.out().order().count())
  *  and is a general optimization for root chains too. */
-export function dropRedundantOrder(steps: PStep[]): PStep[] {
-  const out: PStep[] = [];
+export function dropRedundantOrder(steps: IRStep[]): IRStep[] {
+  const out: IRStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
     if (s.name === 'order' && !s.modulators && ORDER_INSENSITIVE_REDUCERS.has(steps[i + 1]?.name)) continue;
@@ -731,7 +731,7 @@ function foldConnectivesLevel(steps: Step[]): Step[] {
  *  federate param with `tree.accept is not a function`. So this recursion is IDENTITY-PRESERVING:
  *  an arg (and a whole level) the fold does not change is returned by reference, and only a branch
  *  that genuinely folded is rebuilt. */
-export function foldConnectives(steps: Step[], params: Record<string, any>): PStep[] {
+export function foldConnectives(steps: Step[], params: Record<string, any>): IRStep[] {
   let anyChild = false;
   const mapped = steps.map((s) => {
     let changed = false;
@@ -747,7 +747,7 @@ export function foldConnectives(steps: Step[], params: Record<string, any>): PSt
     anyChild = true;
     return { ...s, args };
   });
-  return foldConnectivesLevel(anyChild ? mapped : steps) as PStep[];
+  return foldConnectivesLevel(anyChild ? mapped : steps) as IRStep[];
 }
 
 /**
@@ -760,8 +760,8 @@ export function foldConnectives(steps: Step[], params: Record<string, any>): PSt
  * repeat() still reaches its "without repeat()" throw). Validation and SQL build
  * stay in the branch compiler — this pass only removes the index arithmetic.
  */
-export function foldRepeatClusters(steps: Step[]): PStep[] {
-  const out: PStep[] = [];
+export function foldRepeatClusters(steps: Step[]): IRStep[] {
+  const out: IRStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     if (!REPEAT_CLUSTER.has(steps[i].name)) { out.push(steps[i]); continue; }
     const region: Step[] = [];
@@ -793,8 +793,8 @@ function isAliasCompareWhere(s: Step): boolean {
  *  single by(key) all become a field on their host, so the tail dispatch reads
  *  `.modulators` and never looks at the next step. by() validation (token/traversal
  *  modulators still unsupported) stays in the compilers that read `.modulators`. */
-export function foldByModulators(steps: PStep[]): PStep[] {
-  const out: PStep[] = [];
+export function foldByModulators(steps: IRStep[]): IRStep[] {
+  const out: IRStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
     const pathHost = PATH_MODULATOR_HOSTS.has(s.name);
@@ -823,8 +823,8 @@ export function foldByModulators(steps: PStep[]): PStep[] {
  *  — the option-map form choose(choiceFn).option(key, traversal)…. A choose with no
  *  trailing option() is the predicate form (untouched → the prefix branch compiler).
  *  The compiler reads `.optionArms` and never scans siblings. */
-export function foldChooseOptions(steps: PStep[]): PStep[] {
-  const out: PStep[] = [];
+export function foldChooseOptions(steps: IRStep[]): IRStep[] {
+  const out: IRStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
     if (s.name !== 'choose') { out.push(s); continue; }
@@ -963,7 +963,7 @@ function rewriteEndLabel(body: Step[], bound: ReadonlySet<string>): Step[] {
  *  bound BEFORE each host. Walks left to right so an `as()` types only the where()s that follow
  *  it, and descends into every nested body with the labels visible where that body sits — so the
  *  rule holds at any nesting depth, not just on the root chain. */
-export function rewriteWhereEndLabels(steps: PStep[], params: Record<string, any>): PStep[] {
+export function rewriteWhereEndLabels(steps: IRStep[], params: Record<string, any>): IRStep[] {
   // IDENTITY-PRESERVING: an arg is rebuilt ONLY when the rewrite actually changed something below
   // it. `nestedArg` swaps a raw parse tree for a Step[], which every ordinary consumer accepts
   // (stepChain is idempotent on a Step[]) — but call()'s param path serializes a nested traversal
@@ -1009,5 +1009,5 @@ export function rewriteWhereEndLabels(steps: PStep[], params: Record<string, any
     });
     return chainChanged ? out : null;
   };
-  return (walk(steps, new Set()) ?? steps) as PStep[];
+  return (walk(steps, new Set()) ?? steps) as IRStep[];
 }

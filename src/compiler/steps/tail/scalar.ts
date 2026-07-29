@@ -2,7 +2,7 @@ import { derived, empty, list, paren, q, raw, value, type Expression, type Relat
 import { hasUnresolvedOperand, operandDeps, resolveTraversalOperands } from './operand.ts';
 import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx, TYPE_PER_ROW, TYPE_STATIC, TYPE_UNKNOWN, typeCtxOf } from '../../plan/plan.ts';
 import { gtypeName, isNested, isOperatorArg, isOrderArg, isScopeArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { aliasArmProjection, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, mergeAliasMaps, partitionOver, dropLayoutAtBarrier, type LoweringState } from '../context/context.ts';
 import { loweringStateOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, numericSpec, SCALAR_TRANSFORMS } from './coerce.ts';
@@ -16,7 +16,7 @@ import { engineOf } from '../../engine/deps.ts';
  *  (unfold/count(local)/range/…) reuses it — see scalarCollectionRetype. MAP stays a plain
  *  scalar vtype filter (no MapStream relational unfold yet — deferred); a bare map value
  *  still frames whole via the per-row vtype path (execute.ts case 'value' → frameStoredValue). */
-export function collectionTypeOf(step: PStep): 'list' | 'set' | 'map' | null {
+export function collectionTypeOf(step: IRStep): 'list' | 'set' | 'map' | null {
   if (step.name !== 'is') return null;
   const pred = (step.args ?? [])[0];
   if (!pred || typeof pred !== 'object' || pred.op !== 'typeOf') return null;
@@ -83,7 +83,7 @@ export const SCALAR_ROW_STEPS = new Set([
   'count', 'sum', 'min', 'max', 'mean', 'fold', 'unfold', 'inject',
 ]);
 
-const isLocal = (step: PStep): boolean =>
+const isLocal = (step: IRStep): boolean =>
   (step.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
 
 // Payload = the value/type projection columns; emission order (encounter) is a CARRIED
@@ -103,7 +103,7 @@ function rowPreserving(s: ScalarStream, suffix: Expression, orderByEnc = false):
   return rebuildScalar(s, rel);
 }
 
-function scalarTransform(step: PStep, currentAs: ValueType | undefined, expr: Expression, next?: PStep): { expr: Expression; as?: ValueType } {
+function scalarTransform(step: IRStep, currentAs: ValueType | undefined, expr: Expression, next?: IRStep): { expr: Expression; as?: ValueType } {
   let as: ValueType | undefined;
   if (step.name === 'asNumber') {
     const spec = numericSpec(step.args[0]);
@@ -128,7 +128,7 @@ function scalarTransform(step: PStep, currentAs: ValueType | undefined, expr: Ex
  * expression visible at their exact position, so `tx().is().tx()` remains ordered even
  * though the final SQL has no intermediate CTE. Physical row boundaries are still
  * emitted for order/slice/dedup/barriers, where sequence changes cardinality/order. */
-function fuseScalarSegment(s: ScalarStream, steps: readonly PStep[], from: number): { stream: ScalarStream; stop: number } {
+function fuseScalarSegment(s: ScalarStream, steps: readonly IRStep[], from: number): { stream: ScalarStream; stop: number } {
   const p = s.rel.as('p');
   let expr: Expression = p.c.v;
   let as = staticTypeOf(s.type);
@@ -286,7 +286,7 @@ function localMeanScalar(s: ScalarStream): ScalarStream {
   return toScalarStream(loweringStateOf(s), rel, 'double', { result: 'value' });
 }
 
-function appendScalar(s: ScalarStream, step: PStep): ScalarStream {
+function appendScalar(s: ScalarStream, step: IRStep): ScalarStream {
   if (step.args.length === 0) return s;
   if (step.args.some(Array.isArray))
     throw new Error('inject(list) into a scalar stream needs a mixed-shape row discriminant');
@@ -333,14 +333,14 @@ function appendScalar(s: ScalarStream, step: PStep): ScalarStream {
  * reducer step, or an unsupported transform like asBool) — the caller then falls through to the
  * generic child-existence gate (never a throw defining support by vocab exhaustion).
  */
-export function tryInlineScalarPredicate(body: PStep[], current: Expression, params: Record<string, any>, vtypeExpr?: Expression): Expression | null {
+export function tryInlineScalarPredicate(body: IRStep[], current: Expression, params: Record<string, any>, vtypeExpr?: Expression): Expression | null {
   let expr = current;
   // The per-row stored type of the CURRENT value, so is(P) compares vtype-aware (a TEXT-stored
   // big long/bigdecimal orders numerically) — matching the generic child path exactly. A
   // transform or constant() changes the value's type, so the stored vtype no longer applies.
   let vtype = vtypeExpr;
   const preds: Expression[] = [];
-  const nestedOf = (s: PStep) => s.args.filter(isNested);
+  const nestedOf = (s: IRStep) => s.args.filter(isNested);
   for (const s of body) {
     if (s.name === 'is') {
       // An unresolved traversal operand is outside THIS inliner's vocabulary (resolving one needs
@@ -409,7 +409,7 @@ function filterScalarByCond(s: ScalarStream, p: ReturnType<ScalarStream['rel']['
  * it is always inlined regardless of the switch (`where('a',P)` — an element alias compare —
  * still declines). Row-preserving: only rows drop.
  */
-export function lowerScalarFilter(s: ScalarStream, step: PStep): ScalarStream | null {
+export function lowerScalarFilter(s: ScalarStream, step: IRStep): ScalarStream | null {
   const p = s.rel.as('p');
   const cur = p.c.v;
   const vtPerRow = perRowColumnOf(s.type);
@@ -450,7 +450,7 @@ export function lowerScalarFilter(s: ScalarStream, step: PStep): ScalarStream | 
  * ROW_NUMBER), collecting parts in order into a JSONB array; a LEFT JOIN restores NULL-value
  * rows as a NULL list. The Scope.local form operates on a list (needs a preceding fold()).
  */
-export function lowerScalarSplit(s: ScalarStream, step: PStep): ListStream {
+export function lowerScalarSplit(s: ScalarStream, step: IRStep): ListStream {
   const args = step.args ?? [];
   if (args.some((a: unknown) => isScopeArg(a) && a.scope === 'local'))
     throw new Error('split(Scope.local) requires a preceding list-producing step (e.g. fold())');
@@ -579,7 +579,7 @@ export function unionScalarStreams(base: LoweringState, arms: readonly ScalarStr
  *  (`v`) into the carried sack — a scalar has no properties, so the value itself is the
  *  merge value (no by() modulator). The read form (bare sack()) rebinds the current
  *  object to the sack value. Reuses combineSack (the element sack's operator logic). */
-export function lowerScalarSack(s: ScalarStream, step: PStep): ScalarStream {
+export function lowerScalarSack(s: ScalarStream, step: IRStep): ScalarStream {
   if (!s.traverserLayout.sack) throw new Error('sack() over a scalar stream requires withSack() or a preceding sack step');
   const sk = s.traverserLayout.sack;
   const p = s.rel.as('p');
@@ -591,7 +591,7 @@ export function lowerScalarSack(s: ScalarStream, step: PStep): ScalarStream {
     return toScalarStream(loweringStateOf(s), rel);
   }
   if (!SACK_OPS.has(op)) throw new Error(`sack(Operator.${op}) not yet supported`);
-  if (((step as PStep).modulators ?? []).length)
+  if (((step as IRStep).modulators ?? []).length)
     throw new Error('sack(Operator.x).by() over a scalar stream not yet supported (the scalar value is the merge value)');
   const newSack = combineSack(op, p.c.v, p.c[sk]);
   const carriedProj = layoutCols(s.traverserLayout).map((c) => c === sk ? q`${newSack} AS ${sk}` : p.c[c]);
@@ -636,7 +636,7 @@ export function lowerConstant(carry: LoweringState, rel: Relation, args: any[]):
  * predicates share one relational node; cardinality/order boundaries remain explicit. */
 export function lowerScalarRows(
   input: ScalarStream,
-  steps: readonly PStep[],
+  steps: readonly IRStep[],
   from: number,
 ): { stream: ScalarStream; stop: number } {
   let stream = input;

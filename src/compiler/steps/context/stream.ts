@@ -14,7 +14,7 @@
 // inside a StepFn.
 
 import { type Expression, type Query, type Relation } from '../../../sql/kernel/q.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { type Elem } from '../../plan/plan.ts';
 import { perRowColumnOf, perRowCols, staticTypeOf, type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from '../../../sql/kernel/render.ts';
 import { layoutCols, type LoweringState, type ElementStream } from './context.ts';
@@ -267,7 +267,7 @@ export const isSuspension = (r: LoweringResult | Stream): r is LoweringSuspensio
  * declined, so dispatch falls to the fallback. This is what lets one Map entry own a
  * step whose recognition is conditional (a Scope.local guard, a mixed-shape peek).
  */
-export type ShapeTailFn<S> = (s: S, step: PStep, steps: PStep[], at: number) => LoweringResult | null;
+export type ShapeTailFn<S> = (s: S, step: IRStep, steps: IRStep[], at: number) => LoweringResult | null;
 
 /**
  * Per-shape tail dispatch: a `Map<stepName, handler>` + a fallback. This is the CLAUDE.md
@@ -279,9 +279,9 @@ export type ShapeTailFn<S> = (s: S, step: PStep, steps: PStep[], at: number) => 
 export function dispatchShapeTail<S>(
   table: Map<string, ShapeTailFn<S>>,
   s: S,
-  steps: PStep[],
+  steps: IRStep[],
   at: number,
-  fallback: (s: S, steps: PStep[], at: number) => LoweringResult,
+  fallback: (s: S, steps: IRStep[], at: number) => LoweringResult,
 ): LoweringResult {
   const handler = table.get(steps[at]?.name);
   if (handler) {

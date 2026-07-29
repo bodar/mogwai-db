@@ -2,7 +2,7 @@ import { q, value, list, Query, type Expression } from '../../sql/kernel/q.ts';
 import { nodes, edges } from '../../sql/schema.ts';
 import { type Elem } from '../plan/plan.ts';
 import { flattenListArgs, isColumnArg, isOperatorArg, isPopArg } from '../../gremlin/frontend.ts';
-import { type PStep } from '../ir/strategies.ts';
+import { type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
 import { trackFromV, type LoweringState, type ElementStream, type StepFn } from '../steps/context/context.ts';
 import { move, toEdge, toVertex, otherV, reSource } from '../steps/prefix/movement.ts';
@@ -58,16 +58,16 @@ export { compileTail };
 
 /** A sack step in its mutate form (has an Operator arg); the bare read form is a tail
  *  projection, so it must NOT dispatch as a prefix step. */
-const isSackMutate = (s: PStep): boolean => (s.args ?? []).some(isOperatorArg);
+const isSackMutate = (s: IRStep): boolean => (s.args ?? []).some(isOperatorArg);
 
 /** A side-effecting group('a')/groupCount('a') (has a string side-effect key); the bare
  *  form is a terminal barrier handled by compileTail, so it must break out of the prefix. */
-const isSideEffectGroup = (s: PStep): boolean => (s.args ?? []).some((a: any) => typeof a === 'string');
+const isSideEffectGroup = (s: IRStep): boolean => (s.args ?? []).some((a: any) => typeof a === 'string');
 
 /** Every recognized local() body belongs at shape-aware dispatch. The generic child
  * compiler applies `all` cardinality, so row operators and reducers partition by
  * parent without a prefix-local parser. */
-const isShapedLocal = (s: PStep, ctx: ChildCtx): boolean => {
+const isShapedLocal = (s: IRStep, ctx: ChildCtx): boolean => {
   const nested = (s.args ?? [])[0]?.nested;
   return !!nested && (isElementChild(nested, ctx) || isScalarChild(nested, ctx) || isListChild(nested, ctx));
 };
@@ -77,7 +77,7 @@ const isShapedLocal = (s: PStep, ctx: ChildCtx): boolean => {
  *  This is chain-global at the root but ALSO re-derived per-scope at lowerElementSteps
  *  over each child scope's own step slice, so it is a local predicate here — NOT a
  *  ChainFact (see ir/analyze.ts's header for why the fromV/trackFromV split stays). */
-const chainNeedsFromV = (steps: PStep[]): boolean => steps.some((s) => s.name === 'otherV');
+const chainNeedsFromV = (steps: IRStep[]): boolean => steps.some((s) => s.name === 'otherV');
 
 /** A value-shaped stream (scalar/list/variant) whose current object can be labelled and
  *  whose select("label") reads a path-history alias — as opposed to record/map/group
@@ -88,7 +88,7 @@ const chainNeedsFromV = (steps: PStep[]): boolean => steps.some((s) => s.name ==
 const isValueShape = (s: Stream): boolean => s.kind === 'scalar' || s.kind === 'list' || s.kind === 'variant' || s.kind === 'property' || s.kind === 'path';
 
 /** select(label…) reading path-history labels (string args), not select(Column). */
-const isLabelSelect = (step: PStep): boolean =>
+const isLabelSelect = (step: IRStep): boolean =>
   step.name === 'select'
   && step.args.some((a: any) => typeof a === 'string')
   && !step.args.some(isColumnArg);
@@ -96,13 +96,13 @@ const isLabelSelect = (step: PStep): boolean =>
 /** The shape-agnostic label steps: as() binds and select(label) reads a path-history
  *  label. They are dispatched in ONE place (dispatchAlias, at the top of lowerStream);
  *  every per-shape row-consumer just yields the step back to that dispatch. */
-const isAliasStep = (step: PStep): boolean => step.name === 'as' || isLabelSelect(step);
+const isAliasStep = (step: IRStep): boolean => step.name === 'as' || isLabelSelect(step);
 
-const popOf = (step: PStep): string =>
+const popOf = (step: IRStep): string =>
   step.args.find(isPopArg)?.pop ?? 'last';
 
 /** Dispatch as()/select(label) over a value-shaped (scalar/list/variant) stream. */
-function dispatchAlias(s: Exclude<Stream, { kind: 'result' }>, steps: PStep[], at: number): LoweringResult {
+function dispatchAlias(s: Exclude<Stream, { kind: 'result' }>, steps: IRStep[], at: number): LoweringResult {
   const step = steps[at];
   if (step.name === 'as') return continueLowering(asOnStream(s as any, step), at + 1);
   const uniq = [...new Set(step.args.filter((a: any): a is string => typeof a === 'string'))];
@@ -172,7 +172,7 @@ export class LoweringEngine implements Engine {
   /** Mint a FRESH child Engine (fresh Query, SAME app scope) for a nested sub-compile. `steps`, when
    *  given, re-gates movementCollapse for the child's OWN chain (per-chain result-safety); absent
    *  → carry the base fastPaths (a resume closure whose chain is already lowered). */
-  private child(params: Record<string, any>, steps?: PStep[], q?: Query): LoweringEngine {
+  private child(params: Record<string, any>, steps?: IRStep[], q?: Query): LoweringEngine {
     const scope = createCompilerScope(this.app, { params, federationDepth: this.federationDepth, q });
     const fp = steps ? collapseSafeFastPaths(scope.fastPaths, analyzeChain(steps)) : scope.fastPaths;
     return new LoweringEngine(this.app, scope, fp);
@@ -181,7 +181,7 @@ export class LoweringEngine implements Engine {
   /** Seed the source CTE (c0) from V(...)/E(...) and its optional id list. When the
    *  chain tracks a path, the source element is path position p0 (projected as the
    *  extra `p0` column). */
-  private seedSource(first: PStep, params: Record<string, any>, trackPath: boolean, sackInit?: SackSpec, wantsEncounter = false): ElementStream {
+  private seedSource(first: IRStep, params: Record<string, any>, trackPath: boolean, sackInit?: SackSpec, wantsEncounter = false): ElementStream {
     const query = this.q;
     const elem: Elem = first.name === 'E' ? 'edge' : 'vertex';
     const srcRel = elem === 'edge' ? edges : nodes;
@@ -227,7 +227,7 @@ export class LoweringEngine implements Engine {
    *  `ElementStream`); a `call()` service seeds whatever shape it produces. A BARRIER call()
    *  source suspends into a SegmentPlan, which only compileRead can build — it intercepts that
    *  form before reaching here, so a barrier arriving at this seam is out of position. */
-  private seedRooted(steps: PStep[], params: Record<string, any>, sackInit: SackSpec | undefined, facts: ChainFacts): { stream: Stream; at: number } {
+  private seedRooted(steps: IRStep[], params: Record<string, any>, sackInit: SackSpec | undefined, facts: ChainFacts): { stream: Stream; at: number } {
     const first = steps[0];
     if (first.name === 'V' || first.name === 'E')
       return { stream: this.seedSource(first, params, facts.tracksPath, sackInit, facts.demandsEncounter), at: 1 };
@@ -249,7 +249,7 @@ export class LoweringEngine implements Engine {
    *  the root element projection, because a branch merge consumes a relation, not a framed leaf.
    *  `facts` lets the caller impose the OUTER chain's path/encounter demands, which the arm's own
    *  text cannot show. */
-  lowerRootedArm(steps: PStep[], params: Record<string, any>, sackInit?: SackSpec, facts: ChainFacts = analyzeChain(steps)): Stream {
+  lowerRootedArm(steps: IRStep[], params: Record<string, any>, sackInit?: SackSpec, facts: ChainFacts = analyzeChain(steps)): Stream {
     const seeded = this.seedRooted(steps, params, sackInit, facts);
     // An element seed folds its movement/filter prefix here so a pure element chain can stop
     // before compileTail; every other shape goes straight to the shared loop.
@@ -271,7 +271,7 @@ export class LoweringEngine implements Engine {
    * through the CHILD seam carries no strategies normalization, so a repeat/by cluster inside such
    * an arm defers via its own compiler's guards.
    */
-  lowerElementSteps(steps: PStep[], seedSt: ElementStream, from = 0): { stream: ElementStream; next: number } {
+  lowerElementSteps(steps: IRStep[], seedSt: ElementStream, from = 0): { stream: ElementStream; next: number } {
     // trackFromV is per-scope: a chain that lands via otherV() (e.g. an exploded
     // both()→bothE().otherV() injected by SubgraphStrategy's edge criterion) needs each edge
     // step in THIS chain to record its entering vertex. The root sets it in buildPrefix; every
@@ -324,7 +324,7 @@ export class LoweringEngine implements Engine {
    * — at ANY nesting depth. Both seeds physically carry the parent's alias columns
    * (pushChildScope projects them into each frame; the correlated seed projects them from its
    * LabelScope), so the read the fold makes is always physically there to make. */
-  tryLowerElementSteps(steps: PStep[], seed: ElementStream): ElementStream | null {
+  tryLowerElementSteps(steps: IRStep[], seed: ElementStream): ElementStream | null {
     let st = seed;
     let at = 0;
     for (;;) {
@@ -344,7 +344,7 @@ export class LoweringEngine implements Engine {
   /** Seed an ELEMENT source + fold its movement/filter prefix. The write path's entry into the
    *  read spine (a target-id relation); a source whose merge is not element-shaped fails closed
    *  here rather than being silently mis-typed. */
-  buildPrefix(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec, facts: ChainFacts = analyzeChain(steps)): { st: ElementStream; stop: number } {
+  buildPrefix(steps: IRStep[], params: Record<string, any> = {}, sackInit?: SackSpec, facts: ChainFacts = analyzeChain(steps)): { st: ElementStream; stop: number } {
     const { stream, at } = this.seedRooted(steps, params, sackInit, facts);
     if (stream.kind !== 'elements')
       throw new Error(`${steps[0].name}() as a source produces a ${stream.kind} value, which is not an element prefix`);
@@ -364,7 +364,7 @@ export class LoweringEngine implements Engine {
    * its own ≤1 projection. This is what dissolves the old "one projection per traversal"
    * ceiling structurally (each phase has a fresh accumulator).
    */
-  private lowerStream(s: Stream, steps: PStep[], at: number): LoweringResult {
+  private lowerStream(s: Stream, steps: IRStep[], at: number): LoweringResult {
     assertStreamColumns(s);
     if (s.kind === 'result') throw new Error('a terminal result stream cannot have following steps');
     // as()/select(label) over a value-shaped stream bind/read path-history labels — the
@@ -399,7 +399,7 @@ export class LoweringEngine implements Engine {
    * orchestrator" invariant). Only compileRead (the sole ROOT caller) resumes it; every
    * child-scope / inner-compile caller goes through lowerStepsStrict, which asserts a suspension
    * never escapes (a barrier cannot legally occur inside a child scope — it fails closed earlier). */
-  lowerSteps(initial: Stream, steps: PStep[], from: number): Stream | LoweringSuspension {
+  lowerSteps(initial: Stream, steps: IRStep[], from: number): Stream | LoweringSuspension {
     let stream = initial;
     let at = from;
     for (;;) {
@@ -415,7 +415,7 @@ export class LoweringEngine implements Engine {
   /** lowerSteps for a scope that structurally cannot host a barrier (any child scope / inner
    * sub-traversal compile). A barrier mid-child already fails closed upstream, so a suspension
    * here is an internal contradiction — throw loudly rather than silently mis-type. */
-  lowerStepsStrict(initial: Stream, steps: PStep[], from: number): Stream {
+  lowerStepsStrict(initial: Stream, steps: IRStep[], from: number): Stream {
     const out = this.lowerSteps(initial, steps, from);
     if (isSuspension(out)) throw new Error('a barrier call() is not supported in this scope (child/nested sub-traversal)');
     return out;
@@ -475,7 +475,7 @@ export class LoweringEngine implements Engine {
 
   /** A read traversal: prefix fold + shaped lowering loop.
    *  `sackInit` (from withSack()) seeds the carried sack column at the source. */
-  compileRead(steps: PStep[], params: Record<string, any> = this.params, sackInit?: SackSpec): Compiled | SegmentPlan {
+  compileRead(steps: IRStep[], params: Record<string, any> = this.params, sackInit?: SackSpec): Compiled | SegmentPlan {
     // call() as a SOURCE (g.call(...)): the service seeds the initial Stream (of whatever
     // shape it produces — a list of names, a Property stream), and the generic shaped
     // lowering loop takes over from step 1. A peer of the buildPrefix (V/E/union) path, not
@@ -512,7 +512,7 @@ export class LoweringEngine implements Engine {
    *  for each independent target-id relation it materializes in one traversal — each gets its own
    *  WITH and its own engine attached to the returned stream's Query (so a nested movement/filter
    *  reaches deps). Collapse is gated off (a write prefix is not a reducer-terminal read chain). */
-  buildPrefixFresh(steps: PStep[], params: Record<string, any> = {}): { st: ElementStream; stop: number } {
+  buildPrefixFresh(steps: IRStep[], params: Record<string, any> = {}): { st: ElementStream; stop: number } {
     // A write prefix is not a reducer-terminal read chain: collapse is gated off (via child()'s
     // fastPaths) and the emission encounter is forced off — honour the chain's own path tracking.
     return this.child(params, steps).buildPrefix(steps, params, undefined, { ...analyzeChain(steps), demandsEncounter: false });
@@ -539,7 +539,7 @@ export class LoweringEngine implements Engine {
    *  source (only a TOP-LEVEL g.call(barrier) suspends). Mints a FRESH child scope (fresh Query,
    *  SAME app scope) so the nested compile inherits registry/fastPaths. Asserts the invariant
    *  rather than silently mis-typing. */
-  compileReadCompiled(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec): Compiled {
+  compileReadCompiled(steps: IRStep[], params: Record<string, any> = {}, sackInit?: SackSpec): Compiled {
     const plan = this.child(params, steps).compileRead(steps, params, sackInit);
     if (plan.kind === 'segment') throw new Error('a nested sub-traversal cannot be a barrier/federated source');
     return plan;

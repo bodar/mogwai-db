@@ -6,16 +6,16 @@ import { test, expect, describe } from 'bun:test';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import { normalize } from '../../src/compiler/ir/passes.ts';
 import { classifyBy, byAt, classifyByAt } from '../../src/compiler/steps/tail/child-shape.ts';
-import { type PStep } from '../../src/compiler/ir/strategies.ts';
+import { type IRStep } from '../../src/compiler/ir/strategies.ts';
 
 /** Normalize a traversal and return the folded `.modulators` of its first host step carrying them
  *  (order/group/select/project/dedup — whichever appears). */
 const bysOf = (gremlin: string): any[][] => {
   const steps = normalize(stepChain(parseGremlin(gremlin), {})).steps;
-  // Typed as PStep, not `any`: an `any`-typed probe here silently matched nothing when
+  // Typed as IRStep, not `any`: an `any`-typed probe here silently matched nothing when
   // `bys` became `modulators`, so every assertion below compared against [] instead of failing
   // at the read. A typed field access makes the next rename a compile error instead.
-  const host = steps.find((s: PStep) => s.modulators?.length);
+  const host = steps.find((s: IRStep) => s.modulators?.length);
   return (host?.modulators ?? []) as any[][];
 };
 

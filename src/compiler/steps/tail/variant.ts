@@ -12,7 +12,7 @@
 import { q, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { type ValueType } from '../../../sql/kernel/render.ts';
 import { rangeToOffsetLimit } from '../../plan/plan.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { loweringStateOf, continueLowering, dispatchShapeTail, toListStream, toVariantStream, type ListStream, type LoweringResult, type ScalarStream, type ShapeTailFn, type VariantArms, type VariantStream } from '../context/stream.ts';
 import { aliasArmProjection, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, mergeAliasMaps, partitionOver, type LoweringState } from '../context/context.ts';
 import { lowerGlobalCount } from './barrier.ts';
@@ -219,7 +219,7 @@ function reselect(s: VariantStream, opts: { distinct?: boolean; suffix?: Express
   return toVariantStream(loweringStateOf(s), s.q.cte(body, cols), armsOf(s), s.result);
 }
 
-const variantSlice = (suffix: (step: PStep) => Expression): ShapeTailFn<VariantStream> =>
+const variantSlice = (suffix: (step: IRStep) => Expression): ShapeTailFn<VariantStream> =>
   (s, step, _steps, at) => continueLowering(reselect(s, { suffix: suffix(step), orderByEncounter: true }), at + 1);
 
 const VARIANT_DISPATCH = new Map<string, ShapeTailFn<VariantStream>>([
@@ -250,7 +250,7 @@ const VARIANT_DISPATCH = new Map<string, ShapeTailFn<VariantStream>>([
 
 /** The variant arm of lowerSteps: shape-agnostic row-ops over a widened union; every
  *  step that would need per-arm shape knowledge fails closed here. */
-export function compileFromVariant(s: VariantStream, steps: PStep[], at: number): LoweringResult {
+export function compileFromVariant(s: VariantStream, steps: IRStep[], at: number): LoweringResult {
   return dispatchShapeTail(VARIANT_DISPATCH, s, steps, at, () => {
     throw new Error(`${steps[at].name}() on a variant value not yet supported`);
   });

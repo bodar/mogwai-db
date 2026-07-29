@@ -8,7 +8,7 @@ import { normalize } from '../../src/compiler/ir/passes.ts';
 import { analyzeChain } from '../../src/compiler/ir/analyze.ts';
 
 /** Parse + normalize (so order().by() has its .bys folded, exactly as the compiler sees it),
- *  then analyze. Facts are computed over the canonical PStep chain, not the raw parse. */
+ *  then analyze. Facts are computed over the canonical IRStep chain, not the raw parse. */
 const facts = (gremlin: string) => analyzeChain(normalize(stepChain(parseGremlin(gremlin), {})).steps);
 
 describe('ChainFacts.tracksPath', () => {

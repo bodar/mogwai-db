@@ -1,7 +1,7 @@
 import { q, list, empty, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { nodes, edges, labels } from '../../../sql/schema.ts';
 import { framedProps, labelNameSub, nodePropScalar, nodePropType, edgePropScalar, edgePropType, edgePropsAgg, predicateSql, propExtract, extIdOf, P_OPS, storedValueExpr } from '../../plan/plan.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { isColumnArg, isPopArg, isScopeArg, isTokenArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { aliasElem, aliasIsElement, layoutProjection, layoutCols, scalarTypeFromAlias, type AliasMap, type ElementStream } from '../context/context.ts';
 import { aliasId, aliasPop, aliasPresent, aliasScalar, entryTypeTag, shapeElem } from '../context/alias.ts';
@@ -62,7 +62,7 @@ export function reRootElement(st: ElementStream, p: Relation, id: Expression, el
  * child `first` cardinality while bare by() branches retain the whole source
  * element. Inner joins implement ordinary productive-by semantics: a missing child
  * drops the record row, while a produced SQL NULL remains a real field value. */
-function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[]): RecordStream | null {
+function tryLowerTraversalRecord(st: ElementStream, proj: IRStep, keys: string[]): RecordStream | null {
   if ((proj.name !== 'project' && proj.name !== 'select') || !proj.modulators?.length) return null;
   const isProject = proj.name === 'project';
   const productive = proj.productiveBy === true;
@@ -216,7 +216,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
 /** A one-label select is not a record: it emits the selected traverser directly.
  * Lower it to the ordinary element/scalar stream model so movement, projections and
  * barriers after select() are handled by the common dispatcher. */
-export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
+export function lowerSingleSelect(st: ElementStream, proj: IRStep): Stream {
   const pop = proj.args.find(isPopArg);
   const popMode = pop?.pop ?? 'last';
   if (proj.args.some(isColumnArg)) throw new Error('select(Column) not yet supported');
@@ -314,7 +314,7 @@ function scalarProjectAliasField(nested: any, s: ScalarStream, params: Record<st
   return entry && aliasIsElement(entry) ? { label: strs[0], entry } : null;
 }
 
-export function lowerScalarProject(s: ScalarStream, proj: PStep): RecordStream | null {
+export function lowerScalarProject(s: ScalarStream, proj: IRStep): RecordStream | null {
   if (proj.name !== 'project') return null;
   if (proj.args.some((a: unknown) => isColumnArg(a) || isPopArg(a))) return null;
   const keys = proj.args.filter((a): a is string => typeof a === 'string');
@@ -376,7 +376,7 @@ export function lowerScalarProject(s: ScalarStream, proj: PStep): RecordStream |
   return toRecordStream(loweringStateOf(s), rel, fields);
 }
 
-export function lowerRecordSelectProject(st: ElementStream, proj: PStep): Stream {
+export function lowerRecordSelectProject(st: ElementStream, proj: IRStep): Stream {
   const bys = proj.modulators ?? [];
   const isProject = proj.name === 'project';
   const aliases: AliasMap = st.traverserLayout.aliases;
@@ -470,7 +470,7 @@ export function tryCompileRecordChild(
  * a Map per traverser whose fields come from path-history labels, resolved by Pop. A
  * traverser is dropped unless EVERY requested label is bound (select's all-present rule).
  * by() modulators cycle per key (element fields honour by(key); value/list fields ignore it). */
-export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, step: PStep, keys: string[], pop: string): Stream {
+export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, step: IRStep, keys: string[], pop: string): Stream {
   if (keys.some((k) => !s.traverserLayout.aliases.has(k))) return emptyElementLike(s); // any unbound → drop all
   const bys = step.modulators ?? [];
   const p = s.rel.as('p');
@@ -530,7 +530,7 @@ export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, st
 
 /** Compatibility adapter for element modifiers accumulated before a terminal record
  * projection. New projection-first chains take the RecordStream path directly. */
-export function compileSelectProject(st: ElementStream, proj: PStep, tail: TailMods): Stream {
+export function compileSelectProject(st: ElementStream, proj: IRStep, tail: TailMods): Stream {
   if (tail.orders.length) throw new Error('order() after select()/project() not yet supported');
   const lowered = lowerRecordSelectProject(st, proj);
   if (lowered.kind !== 'record') return lowered; // unbound label → empty stream
@@ -605,7 +605,7 @@ function recordOrderTerms(s: RecordStream, r: Relation, bys: any[][]): Expressio
  * so the labels resolve exactly as on an element stream — element identity by default, or
  * a property with a trailing by(key). P.not unwraps + negates. Traversal-predicate and
  * whole-map single-predicate forms defer (they'd need re-rooting a child on the map). */
-function recordWhere(s: RecordStream, step: PStep, at: number): LoweringResult {
+function recordWhere(s: RecordStream, step: IRStep, at: number): LoweringResult {
   const arg0 = step.args[0];
   if (typeof arg0 !== 'string')
     throw new Error('where() on a record supports only the alias-compare form where("a", P.eq/neq(...)["b"])');
@@ -771,7 +771,7 @@ const RECORD_DISPATCH = new Map<string, ShapeTailFn<RecordStream>>([
   ['select', recordSelect],
 ]);
 
-export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): LoweringResult {
+export function compileFromRecord(s: RecordStream, steps: IRStep[], at: number): LoweringResult {
   return dispatchShapeTail(RECORD_DISPATCH, s, steps, at, () => {
     throw new Error(`${steps[at].name}() on a record value not yet supported`);
   });

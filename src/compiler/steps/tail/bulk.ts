@@ -2,7 +2,7 @@ import { q, list } from '../../../sql/kernel/q.ts';
 import { edges } from '../../../sql/schema.ts';
 import { dirsFor, edgeLabelFilter } from '../../plan/plan.ts';
 import { stepChain, type SackSpec } from '../../../gremlin/frontend.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { type Compiled } from '../../../sql/kernel/render.ts';
 import { materializeRootStream } from './materialize.ts';
 import { type ElementStream } from '../context/context.ts';
@@ -55,7 +55,7 @@ const BULK_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
  *  token key) is bulk-mergeable: lowerGroup weights every group by SUM(bulk), so a collapsed
  *  (element, N) frontier gives the same per-key totals. A by(traversal) key can fan one
  *  traverser to many keys, which the id-merge would corrupt → not bulk-safe. */
-function nonFanoutGroupCount(step: PStep): boolean {
+function nonFanoutGroupCount(step: IRStep): boolean {
   if (step.name !== 'groupCount' || (step.args?.length ?? 0) !== 0) return false;
   const bys = step.modulators ?? [];
   if (bys.length === 0) return true;
@@ -69,7 +69,7 @@ function nonFanoutGroupCount(step: PStep): boolean {
  *  the key follows the element's identity, so a collapsed frontier keeps every group total
  *  correct. Any other value shape (element list, numeric-over-values, nested group) is left
  *  to the generic recursive path — correct there, just not bulk-collapsed. */
-function bulkCountGroup(step: PStep, params: Record<string, any>): boolean {
+function bulkCountGroup(step: IRStep, params: Record<string, any>): boolean {
   if (step.name !== 'group' || (step.args?.length ?? 0) !== 0) return false;
   const bys = step.modulators ?? [];
   if (bys.length === 0 || bys.length > 2) return false;
@@ -100,7 +100,7 @@ function bulkCountGroup(step: PStep, params: Record<string, any>): boolean {
  *
  *  Anything else (path/dedup/order/limit/branch/…) → not bulk-safe → fall through to the generic
  *  recursive walk (correct, just enumerated). */
-function suffixBulkSafe(suffix: PStep[], params: Record<string, any>): boolean {
+function suffixBulkSafe(suffix: IRStep[], params: Record<string, any>): boolean {
   const last = suffix.at(-1);
 
   // count()-terminal cardinality-only form: movements + as()/select(labels) that count discards.
@@ -143,7 +143,7 @@ interface BulkPlan {
 /** Recognize `V()<filters> repeat(<single out/in/both>).times(n) <bulk-safe suffix>` — with
  *  no path/as/sack live. The shape traverser bulking makes tractable. Returns the plan, or null
  *  to fall through to the normal (enumerate-every-walk) compile path. */
-function bulkPlan(steps: PStep[], params: Record<string, any>, sackInit?: SackSpec): BulkPlan | null {
+function bulkPlan(steps: IRStep[], params: Record<string, any>, sackInit?: SackSpec): BulkPlan | null {
   if (sackInit) return null;                              // sack is per-traverser identity
   const n = steps.length;
   if (n < 2) return null;                                 // need a source + the repeat cluster
@@ -186,7 +186,7 @@ function bulkPlan(steps: PStep[], params: Record<string, any>, sackInit?: SackSp
  *  weighting by that multiplicity — the RLE the wire/reducer expands, instead of enumerating every
  *  (exponential) walk. Returns null (falling back to the normal path) if the prefix carries
  *  alias/path/sack state or isn't vertex-typed. */
-function tryBulkRepeat(engine: Engine, steps: PStep[], params: Record<string, any>, sackInit?: SackSpec): Compiled | null {
+function tryBulkRepeat(engine: Engine, steps: IRStep[], params: Record<string, any>, sackInit?: SackSpec): Compiled | null {
   const plan = bulkPlan(steps, params, sackInit);
   if (!plan) return null;
 
@@ -248,7 +248,7 @@ function tryBulkRepeat(engine: Engine, steps: PStep[], params: Record<string, an
  *  definitive gate requires building the prefix (see tryBulkRepeat's stop/elem/identity check) —
  *  so the shape test lives inside tryLower (null = not the bulkable shape), and appliesWhen is the
  *  flag alone, exactly as compileRead dispatched it before. Fires at compileRead, before buildPrefix. */
-export const BulkRepeatCountFastPath: FastPath<[Engine, PStep[], Record<string, any>, SackSpec | undefined], Compiled> = {
+export const BulkRepeatCountFastPath: FastPath<[Engine, IRStep[], Record<string, any>, SackSpec | undefined], Compiled> = {
   name: 'bulkRepeatCount',
   equivalentWhen: 'test/L5-properties/differential.test.ts — the fast-path differential (this switch off vs. on, over the L1 corpus + generated traversals)',
   appliesWhen: (ctx) => ctx.enabled.bulkRepeatCount,

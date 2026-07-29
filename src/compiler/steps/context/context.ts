@@ -2,7 +2,7 @@ import { q, list, empty, raw, Query, Relation, type Expression } from '../../../
 import { nodes, edges } from '../../../sql/schema.ts';
 import { aliasCtx, type Elem, type ScalarCtx } from '../../plan/plan.ts';
 import { aliasId, aliasPresent, type AliasShape } from './alias.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import type { ValueType, ListOf, ScalarType } from '../../../sql/kernel/render.ts';
 
 // ---------- prefix-compilation state ----------
@@ -201,7 +201,7 @@ export interface ElementStream extends LoweringState {
 }
 
 /** A prefix step compiler: consume the step, return the next state. */
-export type StepFn = (s: PStep, st: ElementStream) => ElementStream;
+export type StepFn = (s: IRStep, st: ElementStream) => ElementStream;
 
 /** The carried alias columns, in bind order (a0, a1, …). */
 export const aliasColsOf = (a: AliasMap): string[] => [...a.values()].map((x) => x.col);

@@ -4,7 +4,7 @@ import {
 } from '../../plan/plan.ts';
 import { isNested } from '../../../gremlin/frontend.ts';
 import { mathToSql, mathVars } from '../../../gremlin/math.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { aliasElem, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, type ElementStream } from '../context/context.ts';
 import { aliasId, aliasScalar } from '../context/alias.ts';
 import { loweringStateOf, toScalarStream, type ListStream, type ScalarStream, type Stream } from '../context/stream.ts';
@@ -17,7 +17,7 @@ import { engineOf } from '../../engine/deps.ts';
 /** Element-valued map body through the generic child-domain compiler. Null means the
  * body is outside the currently origin-safe element vocabulary, so the scalar child
  * fast path (or its clear deferral) should handle it. */
-export function tryLowerMapElement(st: ElementStream, step: PStep): ElementStream | null {
+export function tryLowerMapElement(st: ElementStream, step: IRStep): ElementStream | null {
   const arg = step.args[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
   return tryCompileElementChild(st, arg.nested, 'first')?.stream ?? null;
@@ -26,7 +26,7 @@ export function tryLowerMapElement(st: ElementStream, step: PStep): ElementStrea
 /** local() consumes every row produced by one child invocation per incoming
  * traverser. The child compiler owns origin-partitioned element barriers, so local
  * no longer needs a movement-only parser or a private window implementation. */
-export function tryLowerLocalElement(st: ElementStream, step: PStep): ElementStream | null {
+export function tryLowerLocalElement(st: ElementStream, step: IRStep): ElementStream | null {
   const arg = step.args[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
   return tryCompileElementChild(st, arg.nested, 'all')?.stream ?? null;
@@ -35,7 +35,7 @@ export function tryLowerLocalElement(st: ElementStream, step: PStep): ElementStr
 /** flatMap() consumes every productive child row. Keeping this next to map() makes
  * `first` versus `all` an explicit consumer policy over one child compiler, for both
  * element and scalar output shapes. */
-export function tryLowerFlatMap(st: ElementStream, step: PStep): Stream | null {
+export function tryLowerFlatMap(st: ElementStream, step: IRStep): Stream | null {
   const arg = step.args[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
   return tryCompileElementChild(st, arg.nested, 'all')?.stream
@@ -44,7 +44,7 @@ export function tryLowerFlatMap(st: ElementStream, step: PStep): Stream | null {
     ?? tryCompileBranchChildAllCard(st, arg.nested); // a bare list-armed / mixed-shape branch (all-cardinality)
 }
 
-export function tryLowerListChild(st: ElementStream, step: PStep): ListStream | null {
+export function tryLowerListChild(st: ElementStream, step: IRStep): ListStream | null {
   const arg = step.args[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
   return tryCompileListChild(st, arg.nested);
@@ -57,7 +57,7 @@ export function tryLowerListChild(st: ElementStream, step: PStep): ListStream | 
  * The produced ScalarStream re-enters the common dispatcher, so scalar followers
  * compose without this leaf owning a private tail compiler.
  */
-export function lowerMapScalar(st: ElementStream, steps: PStep[], stop: number): ScalarStream {
+export function lowerMapScalar(st: ElementStream, steps: IRStep[], stop: number): ScalarStream {
   const name = steps[stop].name; // 'map' or a scalar-reduction 'local'
   const arg = steps[stop].args[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) throw new Error(`${name}(traversal) required`);
@@ -84,7 +84,7 @@ export function lowerMapScalar(st: ElementStream, steps: PStep[], stop: number):
  * local()/sack()), withSideEffect-bound variables, and reading project()/select()
  * map columns (math inside order().by(__.math(...))).
  */
-export function lowerMath(st: ElementStream, steps: PStep[], stop: number): ScalarStream {
+export function lowerMath(st: ElementStream, steps: IRStep[], stop: number): ScalarStream {
   const s = steps[stop];
   const formula = s.args[0];
   if (typeof formula !== 'string') throw new Error('math(string) required');
@@ -143,7 +143,7 @@ export function lowerMath(st: ElementStream, steps: PStep[], stop: number): Scal
  * `by(__.math('_*10'))`) composes with partitioned followers. Deferred (return null): a
  * variable with no by(), a property-key by() (a scalar has no properties).
  */
-export function lowerMathScalar(s: ScalarStream, step: PStep): ScalarStream | null {
+export function lowerMathScalar(s: ScalarStream, step: IRStep): ScalarStream | null {
   const formula = step.args[0];
   if (typeof formula !== 'string') return null;
   const bys = step.modulators ?? [];
@@ -198,7 +198,7 @@ export function lowerMathScalar(s: ScalarStream, step: PStep): ScalarStream | nu
  * map columns, and the as()-alias fallback for a missing property. The resulting
  * ScalarStream composes through the common scalar dispatcher.
  */
-export function lowerFormat(st: ElementStream, steps: PStep[], stop: number): ScalarStream {
+export function lowerFormat(st: ElementStream, steps: IRStep[], stop: number): ScalarStream {
   const s = steps[stop];
   const tmpl = s.args[0];
   if (typeof tmpl !== 'string') throw new Error('format(string) required');
@@ -269,7 +269,7 @@ export function lowerFormat(st: ElementStream, steps: PStep[], stop: number): Sc
  * (matching FormatStep). A token-free template is a constant string. Returns null to defer
  * (a `%{key}` token, or a `%{_}` with no/property-key by()).
  */
-export function lowerFormatScalar(s: ScalarStream, step: PStep): ScalarStream | null {
+export function lowerFormatScalar(s: ScalarStream, step: IRStep): ScalarStream | null {
   const tmpl = step.args[0];
   if (typeof tmpl !== 'string') return null;
   const bys = step.modulators ?? [];
@@ -330,7 +330,7 @@ export function lowerFormatScalar(s: ScalarStream, step: PStep): ScalarStream | 
  * LEFT JOIN yields NULL, which `concat_ws` then skips. That errs toward a null/short answer rather
  * than fabricating a value TinkerPop would have rejected.
  */
-export function lowerConcatScalar(s: ScalarStream, step: PStep): ScalarStream | null {
+export function lowerConcatScalar(s: ScalarStream, step: IRStep): ScalarStream | null {
   const args = step.args ?? [];
   if (!args.some(isNested)) return null; // string-only concat() — the scalarTx leaf handles it
   const specs: ScalarModulationSpec[] = args.filter(isNested).map((a: any) => ({ nested: a.nested, contract: 'apply' }));
@@ -351,7 +351,7 @@ export function lowerConcatScalar(s: ScalarStream, step: PStep): ScalarStream | 
     // as the child's stream and answer a different question.
     if (body.length === 1 && body[0].name === 'inject') return seed.kind === 'scalar' ? seed : null;
     try {
-      const end = engineOf(seed).lowerStepsStrict(seed, body as PStep[], 0);
+      const end = engineOf(seed).lowerStepsStrict(seed, body as IRStep[], 0);
       return end.kind === 'scalar' ? end : null;
     } catch { return null; }
   };
@@ -386,7 +386,7 @@ export function lowerConcatScalar(s: ScalarStream, step: PStep): ScalarStream | 
  * (through the shared child-row compiler); element bodies and
  * Pick.unproductive/any defer. The CASE result is a composable ScalarStream.
  */
-export function lowerChooseOptions(st: ElementStream, steps: PStep[], stop: number): ScalarStream | null {
+export function lowerChooseOptions(st: ElementStream, steps: IRStep[], stop: number): ScalarStream | null {
   const cs = steps[stop];
   const a0 = cs.args[0];
   // A CASE has exactly ONE fallthrough (its ELSE), so it can serve an option map only when the
@@ -486,7 +486,7 @@ export function lowerChooseOptions(st: ElementStream, steps: PStep[], stop: numb
  * domain). Returns null to DEFER (a scalar has no element/T-token choice, no Pick.none, a
  * non-scalar option body) so the caller falls through to the clear generic message.
  */
-export function lowerChooseOptionsScalar(s: ScalarStream, steps: PStep[], stop: number): ScalarStream | null {
+export function lowerChooseOptionsScalar(s: ScalarStream, steps: IRStep[], stop: number): ScalarStream | null {
   const cs = steps[stop];
   const a0 = cs.args[0];
   const specs: ScalarModulationSpec[] = [];

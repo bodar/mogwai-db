@@ -6,7 +6,7 @@ import { engineOf, type Engine } from '../../engine/deps.ts';
 import { aliasCtx, labelNameSub, scalarProp, type ScalarCtx } from '../../plan/plan.ts';
 import { compileCorrelatedChild } from './correlated.ts';
 import { correlatedReduce } from '../prefix/predicate.ts';
-import type { PStep } from '../../ir/strategies.ts';
+import type { IRStep } from '../../ir/strategies.ts';
 import type { TraverserLayout, LoweringState, LabelScope } from '../context/context.ts';
 
 // ---------- predicate operands that are TRAVERSALS ----------
@@ -57,7 +57,7 @@ function operandSubquery(nested: any, deps: OperandDeps): Expression | null {
 /** The scalar an operand's TERMINAL step reads off the element it lands on. These are the same
  *  leaves the predicate fast path already builds from (plan.ts), so a correlated operand and a
  *  correlated filter agree by construction rather than by parallel implementations. */
-const OPERAND_PROJECTORS: Record<string, (ctx: ScalarCtx, s: PStep) => Expression | undefined> = {
+const OPERAND_PROJECTORS: Record<string, (ctx: ScalarCtx, s: IRStep) => Expression | undefined> = {
   values: (ctx, s) => (typeof s.args?.[0] === 'string' ? scalarProp(ctx, s.args[0]) : undefined),
   id: (ctx) => ctx.extIdExpr,
   label: (ctx) => labelNameSub(ctx.labelIdExpr),
@@ -78,7 +78,7 @@ const OPERAND_PROJECTORS: Record<string, (ctx: ScalarCtx, s: PStep) => Expressio
  *  TinkerPop pins: `eq(NULL)` is falsy so the traverser drops, and a NULL member of a within()
  *  set contributes nothing while a sibling constant can still match. */
 function correlatedOperand(nested: any, deps: OperandDeps, ctx: ScalarCtx, labels?: LabelScope): Expression | null {
-  const body = childSteps(nested, deps.params) as PStep[];
+  const body = childSteps(nested, deps.params) as IRStep[];
   if (!body.length) return null;
   const engine = deps.engine;
   // A terminal reducer over a movement (`__.out().count()`) is already a correlated subquery
@@ -195,7 +195,7 @@ function tryListMembership(pred: any, deps: OperandDeps): any | null {
   // A recognizer must DECLINE, never throw: the body is rooted by shape, but a source form the
   // seed layer does not yet cover still has to fall through to the caller's clear deferral.
   let listExpr: Expression | null = null;
-  try { listExpr = foldedListSubquery(deps.engine, body as PStep[], deps.params); } catch { return null; }
+  try { listExpr = foldedListSubquery(deps.engine, body as IRStep[], deps.params); } catch { return null; }
   if (!listExpr) return null;
   return { op: pred.op === 'within' ? 'withinList' : 'withoutList', values: [listExpr] };
 }

@@ -2,7 +2,7 @@ import { q, value, list } from '../../../sql/kernel/q.ts';
 import { jsonbArrayOf } from '../../plan/plan.ts';
 import { flattenListArgs, type SackSpec } from '../../../gremlin/frontend.ts';
 import { flatType, type CanonicalType } from '../../../gremlin/types.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { patchLayout, type LoweringState } from '../context/context.ts';
 import { toListStream, toScalarStream, type Stream } from '../context/stream.ts';
 import type { Engine } from '../../engine/deps.ts';
@@ -35,7 +35,7 @@ const DECLARED_TYPE_REQUIRED = new Set<CanonicalType>([
  *  the canonical name into the framing vocabulary. Mixed types keep per-value inference
  *  (undefined): inject has no per-row vtype column to carry a heterogeneous type on, and the
  *  client hands over plain JS values, so per-value inference is the honest floor there. */
-function bareInjectTag(steps: PStep[], count: number): ValueType | undefined {
+function bareInjectTag(steps: IRStep[], count: number): ValueType | undefined {
   const argTypes = steps[0].argTypes ?? [];
   if (!count) return undefined;
   const names = Array.from({ length: count }, (_, i) => flatType(argTypes[i]));
@@ -47,7 +47,7 @@ function bareInjectTag(steps: PStep[], count: number): ValueType | undefined {
  * These steps have TinkerPop parse/overflow errors SQL cannot reproduce faithfully.
  * The returned index is the first ordinary step, which enters the shared relational
  * dispatcher. Later coercions remain normal scalar transforms (or fail closed there). */
-function foldConstantCoercions(steps: PStep[], vals: any[]): { at: number; as?: ValueType } {
+function foldConstantCoercions(steps: IRStep[], vals: any[]): { at: number; as?: ValueType } {
   let at = 1;
   let as: ValueType | undefined;
   for (; at < steps.length && CONST_COERCIONS.has(steps[at].name); at++) {
@@ -108,7 +108,7 @@ function foldConstantCoercions(steps: PStep[], vals: any[]): { at: number; as?: 
  * building: its own fresh one at the top of a traversal (compileInject, below), or the SHARED one
  * when inject() heads a `union()` SOURCE branch (`g.union(__.inject(1), __.inject(2))`) — where
  * the arm's relation has to sit in the same WITH as its siblings'. */
-export function seedInject(carry: LoweringState, steps: PStep[], sackInit?: SackSpec): { stream: Stream; at: number } {
+export function seedInject(carry: LoweringState, steps: IRStep[], sackInit?: SackSpec): { stream: Stream; at: number } {
   const Q = carry.q;
 
   // Each all-array argument is one list traverser, not scalar varargs.
@@ -144,7 +144,7 @@ export function seedInject(carry: LoweringState, steps: PStep[], sackInit?: Sack
 
 /** g.inject(v1, v2, …) as a whole traversal: seed the source, then lower every following step
  * through lowerSteps — the same lowering engine used after values()/unfold(). */
-export function compileInject(engine: Engine, steps: PStep[], sackInit?: SackSpec): Compiled {
+export function compileInject(engine: Engine, steps: IRStep[], sackInit?: SackSpec): Compiled {
   // A fresh child engine (fresh Query, same app scope): inject() is a SOURCE constructor, so it
   // seeds its own relation on this Query and lowers the chain through the same engine — which the
   // seed stream reaches via `q.engine`.

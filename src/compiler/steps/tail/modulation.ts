@@ -7,7 +7,7 @@
 
 import { empty, list, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { elemCtx, labelNameSub, scalarProp, scalarPropSortKey } from '../../plan/plan.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { type ElementStream } from '../context/context.ts';
 import { classifyBy } from './child-shape.ts';
 
@@ -74,8 +74,8 @@ export function orderProductivityFilter(
   return terms.length ? list(terms, ' AND ') : null;
 }
 
-/** `orderProductivityFilter` for a site holding a folded `order()` PStep. */
-export function elementOrderDrop(st: ElementStream, n: Relation, order?: PStep): Expression | null {
+/** `orderProductivityFilter` for a site holding a folded `order()` IRStep. */
+export function elementOrderDrop(st: ElementStream, n: Relation, order?: IRStep): Expression | null {
   if (!order) return null;
   const clauses = (order.modulators ?? []).map(classifyBy)
     .map((by) => ({ key: by.kind === 'key' ? (by as { key: string }).key : null }));
@@ -85,7 +85,7 @@ export function elementOrderDrop(st: ElementStream, n: Relation, order?: PStep):
 
 /** SQL ordering terms for an element order() host. A stable internal rowid tie-break
  * is appended by the caller because it knows the current relation alias. */
-export function elementOrderSql(st: ElementStream, n: Relation, order?: PStep): Expression {
+export function elementOrderSql(st: ElementStream, n: Relation, order?: IRStep): Expression {
   if (!order) return n.c.id;
   const bys = order.modulators ?? [];
   if (!bys.length) return q`${n.c.id} ASC`;

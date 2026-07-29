@@ -2,7 +2,7 @@ import { q, list, empty, paren, value, raw, Relation, type Expression } from '..
 import { staticTypeOf } from '../../../sql/kernel/render.ts';
 import { edges } from '../../../sql/schema.ts';
 import { isNested, stepChain, type SackSpec, type Step } from '../../../gremlin/frontend.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { analyzeChain, type ChainFacts } from '../../ir/analyze.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem } from '../../plan/plan.ts';
@@ -73,7 +73,7 @@ function walkPredicate(st: ElementStream, step: Step, kind: 'until' | 'emit'): (
     if (keySet === undefined) {
       // Normalized with the SAME normalize() every other nested body uses — not a hand-picked
       // fold — so a modulator inside the predicate folds as it would anywhere else.
-      const k = keyedChildRelation(st, normalize(nested as PStep[]).steps);
+      const k = keyedChildRelation(st, normalize(nested as IRStep[]).steps);
       keySet = k ? keyedKeySet(st, k) : null;
     }
     // until(traversal)/emit(traversal) are EXISTENCE: "does the body produce a result for this
@@ -474,7 +474,7 @@ export function tryLowerVariantCoalesce(s: Step, st: ElementStream): VariantStre
 /** choose(pred, then, else) with mixed-shape then/else → a VariantStream. The gate
  *  partitions the input (pred / NOT pred); each arm folds from its gated seed. */
 export function tryLowerVariantChoose(s: Step, st: ElementStream): VariantStream | null {
-  if ((s as PStep).optionArms) return null;
+  if ((s as IRStep).optionArms) return null;
   assertForkSafe('choose', st);
   const args = s.args.filter(isNested);
   if (args.length !== 3) return null; // two-arg choose has an element identity else arm
@@ -628,7 +628,7 @@ function expandRepeatBody(
         const op = (step.args ?? []).find((a: any) => a && typeof a === 'object' && 'operator' in a)?.operator;
         if (!op) throw new Error('bare sack() (read) inside a repeat() body is not a fold — use where(__.sack()...) to guard');
         if (!SACK_OPS.has(op)) throw new Error(`sack(Operator.${op}) not yet supported`);
-        sackExpr = combineSack(op, repeatSackByValue((step as PStep).modulators?.[0], curId, curElem), sackExpr);
+        sackExpr = combineSack(op, repeatSackByValue((step as IRStep).modulators?.[0], curId, curElem), sackExpr);
       } else {
         // where(__.sack().is(P)): expand only from rows whose current sack satisfies P.
         const pred = sackWhereGuard(step);
@@ -719,10 +719,10 @@ export const repeat: StepFn = (s, st) => {
   // shape); a mid-body aggregate (out().aggregate().out()) would collect an intermediate frontier and
   // stays deferred. by()-modulated aggregate-in-repeat also defers (collect element rowids only).
   const bodyAggName = (c: Step): string | null => {
-    if (c.name === 'aggregate' && (c.args ?? []).length === 1 && typeof c.args[0] === 'string' && !(c as PStep).modulators?.length) return c.args[0];
+    if (c.name === 'aggregate' && (c.args ?? []).length === 1 && typeof c.args[0] === 'string' && !(c as IRStep).modulators?.length) return c.args[0];
     if (c.name === 'local') {
       const inner = stepChain(c.args[0]?.nested, st.params);
-      if (inner.length === 1 && inner[0].name === 'aggregate' && typeof inner[0].args[0] === 'string' && !(inner[0] as PStep).modulators?.length) return inner[0].args[0];
+      if (inner.length === 1 && inner[0].name === 'aggregate' && typeof inner[0].args[0] === 'string' && !(inner[0] as IRStep).modulators?.length) return inner[0].args[0];
     }
     return null;
   };
@@ -1032,7 +1032,7 @@ export const choose: StepFn = (s, st) => {
  * two ElementStream seeds exactly like element choose; each gated seed then enters
  * the generic child compiler and the resulting scalar rows merge with UNION ALL. */
 export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream | null {
-  if ((s as PStep).optionArms) return null;
+  if ((s as IRStep).optionArms) return null;
   assertForkSafe('choose', st);
   const args = s.args.filter(isNested);
   if (args.length !== 3) return null; // two-arg choose has an element identity else arm
@@ -1053,7 +1053,7 @@ export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream |
 }
 
 export function tryLowerListChoose(s: Step, st: ElementStream): ListStream | null {
-  if ((s as PStep).optionArms) return null;
+  if ((s as IRStep).optionArms) return null;
   assertForkSafe('choose', st);
   const args = s.args.filter(isNested);
   if (args.length !== 3) return null;
@@ -1113,7 +1113,7 @@ const isVariantArmKind = (s: Stream): s is ArmStream =>
   s.kind === 'elements' || s.kind === 'scalar' || s.kind === 'list';
 
 /** Lower `union(b1, b2, …)` in SOURCE position to one merged Stream. */
-export function sourceUnion(engine: Engine, step: PStep, params: Record<string, any>, sackInit: SackSpec | undefined, facts: ChainFacts): Stream {
+export function sourceUnion(engine: Engine, step: IRStep, params: Record<string, any>, sackInit: SackSpec | undefined, facts: ChainFacts): Stream {
   const seed: LoweringState = { q: engine.q, params, traverserLayout: { aliases: new Map(), origins: [] } };
   const branches = (step.args ?? []).filter(isNested);
   // union() with no branches emits nothing (TinkerPop: the result is empty). Not an arity error —
@@ -1192,7 +1192,7 @@ function chooseChoiceDomain(st: ElementStream, a0: any): Relation | null {
  *  to DEFER (an unsupported option form, a choice the modulation seam cannot compile, an
  *  unclassifiable body) so the caller keeps its clear message — never a throw, which would break
  *  the CASE projector's fall-through. */
-export function tryLowerOptionMapBranch(st: ElementStream, step: PStep): Stream | null {
+export function tryLowerOptionMapBranch(st: ElementStream, step: IRStep): Stream | null {
   assertForkSafe('choose', st);
   const ctx = childCtx(st);
   const opts = readOptionMapArms(step, st.params);

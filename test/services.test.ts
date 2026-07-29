@@ -17,7 +17,7 @@ import { ioc } from '../src/io.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { decode, decodeAll } from './support/decode.ts';
 
-/** Parse a gremlin string, normalize, and return the (single) folded call PStep. */
+/** Parse a gremlin string, normalize, and return the (single) folded call IRStep. */
 const callStep = (gremlin: string, params: Record<string, any> = {}) => {
   const steps = normalize(stepChain(parseGremlin(gremlin), params)).steps;
   return steps.find((s) => s.name === 'call')!;

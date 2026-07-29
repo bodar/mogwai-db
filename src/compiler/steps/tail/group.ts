@@ -6,7 +6,7 @@ import {
 } from '../../plan/plan.ts';
 import { gtypeName, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { isMapLocalOrder } from './list.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { appendCte, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, partitionOver, prevRel, withLayout, dropLayoutAtBarrier, type TraverserLayout, type LoweringState, type ElementStream } from '../context/context.ts';
 import { loweringStateOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toElementStream, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
 import { PER_ROW, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
@@ -162,7 +162,7 @@ const GROUP_VALUE_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
  *  inner reducer weights by it exactly like the outer level — a bulked outer traverser folds
  *  each inner contribution its multiplicity of times (identical while bulk≡1). */
 function nestedInnerKeyVal(
-  innerGroup: PStep,
+  innerGroup: IRStep,
   ctx: ScalarCtx,
   params: Record<string, any>,
   bulk?: Expression,
@@ -404,7 +404,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
       };
       innerBulk = parent.traverserLayout.bulk ? p.c[parent.traverserLayout.bulk] : undefined;
     }
-    const kv = nestedInnerKeyVal(nestedGroup as PStep, innerCtx, parent.params, innerBulk);
+    const kv = nestedInnerKeyVal(nestedGroup as IRStep, innerCtx, parent.params, innerBulk);
     if (!kv) return null; // inner key/value shape not yet generic — clean deferral
     valNestedMap = { innerKey: kv.key, innerVal: kv.val, innerKind: kv.kind };
   }
@@ -522,7 +522,7 @@ export function lowerGroup(st: LoweringState, isCount: boolean, bys: any[][], sr
  * carried alias/path/branch/sack state defer (the origin ordinal would collide / tokens
  * need extra entry keys).
  */
-export function lowerValueMap(st: ElementStream, proj: PStep): MapStream {
+export function lowerValueMap(st: ElementStream, proj: IRStep): MapStream {
   if (proj.name === 'elementMap') throw new Error('elementMap() re-entry not yet supported');
   if (proj.args.includes(true)) throw new Error('valueMap(true)/token re-entry not yet supported');
   // ORIGINS are admitted (and threaded below): a map is ONE blob per element, so a per-parent
@@ -647,7 +647,7 @@ export function lowerScalarGroupCount(s: ScalarStream): GroupStream {
 /** Continue from the rich group barrier. Terminal framing consumes the same lowered
  * relation; a supported Column selection derives the narrow entry MapStream without
  * recompiling group semantics based on terminal position. */
-export function compileFromGroup(s: GroupStream, steps: PStep[], at: number): LoweringResult {
+export function compileFromGroup(s: GroupStream, steps: IRStep[], at: number): LoweringResult {
   const step = steps[at];
   // is(typeOf(MAP)) — a group IS a Map → identity.
   if (step.name === 'is') {
@@ -732,7 +732,7 @@ function deriveGroupMap(s: GroupStream): { rel: Relation; keyOf: MapOf; valOf: M
 
 /** properties()/properties(keys) is a genuine shape transition. The property row
  * stays relational so filters and projections can consume it one step at a time. */
-export function lowerProperties(st: ElementStream, step: PStep): PropertyStream {
+export function lowerProperties(st: ElementStream, step: IRStep): PropertyStream {
   const keys = step.args.filter((a): a is string => typeof a === 'string');
   const n = elemRel(st);
   const p = st.rel.as('p');
@@ -767,7 +767,7 @@ const propertyCtx = (p: Relation): ScalarCtx => ({
   ownerExpr: p.c.owner, pkExpr: p.c.pk, pvExpr: p.c.pv, metaExpr: p.c.pmeta,
 });
 
-function filterProperty(s: PropertyStream, step: PStep): PropertyStream {
+function filterProperty(s: PropertyStream, step: IRStep): PropertyStream {
   const p = s.rel.as('p');
   let test: Expression;
   if (step.name === 'has') {
@@ -822,7 +822,7 @@ const propertyTieBreak = (p: Relation, ownerElem: 'vertex' | 'edge'): Expression
  * key/value-based, so repeated edge properties with the same key and value collapse even
  * when they belong to different edges. `by(value)` deliberately changes the key to the
  * property value, matching dedup().by() on the property object. */
-function propertyDedup(s: PropertyStream, step: PStep): PropertyStream {
+function propertyDedup(s: PropertyStream, step: IRStep): PropertyStream {
   if (s.traverserLayout.aliases.size > 0 || s.traverserLayout.path)
     throw new Error('properties().dedup() after as()/path() not yet supported (property-distinct semantics)');
   const bys = step.modulators ?? [];
@@ -856,7 +856,7 @@ function propertyDedup(s: PropertyStream, step: PStep): PropertyStream {
  * T.key/T.value select one component; a direction-only by(desc) reverses the natural
  * composite key. Stored property values use compareKey so exact long/decimal/duration
  * values sort numerically even when SQLite stores them as TEXT. */
-function propertyOrder(s: PropertyStream, step: PStep): PropertyStream {
+function propertyOrder(s: PropertyStream, step: IRStep): PropertyStream {
   if (s.traverserLayout.aliases.size > 0 || s.traverserLayout.path)
     throw new Error('properties().order() after as()/path() not yet supported (property order semantics)');
   const bys = step.modulators ?? [];
@@ -977,7 +977,7 @@ const PROPERTY_DISPATCH = new Map<string, ShapeTailFn<PropertyStream>>([
   ['element', propertyElement],
 ]);
 
-export function compileFromProperty(s: PropertyStream, steps: PStep[], at: number): LoweringResult {
+export function compileFromProperty(s: PropertyStream, steps: IRStep[], at: number): LoweringResult {
   return dispatchShapeTail(PROPERTY_DISPATCH, s, steps, at, () => {
     throw new Error(`step not implemented after properties(): ${steps[at].name}()`);
   });

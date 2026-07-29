@@ -8,7 +8,7 @@
 import { q, value, raw, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { predicateSql, scalarTx, compareKey, inferVtypeSql } from '../../plan/plan.ts';
 import { gtypeName, isNested, isOrderArg, isScopeArg, stepChain } from '../../../gremlin/frontend.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { loweringStateOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, mapOfToListOf, PROPERTY_PAYLOAD, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type PropertyStream, type ScalarStream, type MapStream, type ShapeTailFn } from '../context/stream.ts';
 import { layoutProjection, layoutCols, type ElementStream } from '../context/context.ts';
 import { PER_ROW, STATIC, type Compiled, type ListOf, type ValueType } from '../../../sql/kernel/render.ts';
@@ -17,7 +17,7 @@ import { lowerGlobalCount } from './barrier.ts';
 import { collectionTypeOf } from './scalar.ts';
 
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
-const isLocal = (s: PStep): boolean => (s.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
+const isLocal = (s: IRStep): boolean => (s.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
 
 // ---------- the member seam: one encoding decision, read in one place ----------
 //
@@ -187,7 +187,7 @@ const STRING_LOCAL_TX = new Set(['toUpper', 'toLower', 'trim', 'lTrim', 'rTrim',
 /** A per-element string transform over a list value (Scope.local): rebuild each row's
  *  list applying scalarTx to every element, preserving position order. Null elements
  *  pass through (SQLite null propagation → the transformed element stays null). */
-function listStringTransform(s: ListStream, step: PStep): ListStream {
+function listStringTransform(s: ListStream, step: IRStep): ListStream {
   const c = s.rel.as('c');
   // The transform REWRITES each member, so it reads the payload and emits a BARE value —
   // the stored type no longer describes the result. length() yields an int, the rest
@@ -220,7 +220,7 @@ function listReverse(s: ListStream): ListStream {
  * occurrence (GROUP BY value ORDER BY MIN(key)). Stays a ListStream, so downstream
  * (unfold / another list op / terminal) continues. by()/nested comparators defer.
  */
-function listLocalTransform(s: ListStream, step: PStep): ListStream {
+function listLocalTransform(s: ListStream, step: IRStep): ListStream {
   const c = s.rel.as('c');
   const name = step.name;
   const nums = (step.args ?? []).filter((a: any) => typeof a === 'number') as number[];
@@ -324,7 +324,7 @@ function operandList(engine: Engine, arg: any, op: string, params: Record<string
  *  operand.ts) — the same "a folded re-sourced read is a list value" fact, so the two cannot
  *  disagree about which traversals qualify. Returns null when the read is not a scalar list,
  *  leaving the caller to raise its own vocabulary-appropriate error. */
-export function foldedListSubquery(engine: Engine, inner: PStep[], params: Record<string, any>): Expression | null {
+export function foldedListSubquery(engine: Engine, inner: IRStep[], params: Record<string, any>): Expression | null {
   const sub = engine.compileReadCompiled(inner, params);
   if (sub.shape.kind === 'jsonbList') return q`(SELECT jsonb(list) FROM (${embedSql(sub)}))`;
   if (sub.shape.kind !== 'list' || sub.shape.elem !== 'scalar') return null;
@@ -380,7 +380,7 @@ function setOpExpr(name: string, self: Expression, op: Expression, selfTyped = f
  *  filter — the list itself passes through, like none()). `IS TRUE`/`IS NOT TRUE` make
  *  null elements fail a predicate (all([null,x]) drops); an eq/neq(null) predicate is
  *  null-aware so all([null,null], eq(null)) keeps. */
-function listAllAny(s: ListStream, step: PStep): ListStream {
+function listAllAny(s: ListStream, step: IRStep): ListStream {
   const c = s.rel.as('c');
   const pred = step.args[0];
   const je = q`json_each(${c.c.list})`;
@@ -493,14 +493,14 @@ const LIST_DISPATCH = new Map<string, ShapeTailFn<ListStream>>([
   ['is', listIs],
 ]);
 
-export function compileFromList(s: ListStream, steps: PStep[], at: number): LoweringResult {
+export function compileFromList(s: ListStream, steps: IRStep[], at: number): LoweringResult {
   return dispatchShapeTail(LIST_DISPATCH, s, steps, at, () => {
     throw new Error(`${steps[at].name}() on a list value not yet supported`);
   });
 }
 
 /** The single Column arg of a select() over a map, if any. */
-const columnOf = (step: PStep): 'keys' | 'values' | undefined =>
+const columnOf = (step: IRStep): 'keys' | 'values' | undefined =>
   (step.args ?? []).map((a: any) => a && typeof a === 'object' && a.column).find((c: any) => c === 'keys' || c === 'values');
 
 /** order(Scope.local).by(Column.keys|values [, Order]) over a map value — the ONE by()
@@ -509,7 +509,7 @@ const columnOf = (step: PStep): 'keys' | 'values' | undefined =>
  *  Column order and defers). Shared by compileFromMap and compileFromGroup (via the
  *  re-exported isMapLocalOrder) so group/groupCount/valueMap/elementMap/stored maps all
  *  route one implementation. */
-export function mapLocalOrder(step: PStep): { col: 'keys' | 'values'; dir: 'asc' | 'desc' } | null {
+export function mapLocalOrder(step: IRStep): { col: 'keys' | 'values'; dir: 'asc' | 'desc' } | null {
   if (step.name !== 'order' || !isLocal(step)) return null;
   const bys = step.modulators ?? [];
   if (bys.length !== 1) return null;
@@ -520,11 +520,11 @@ export function mapLocalOrder(step: PStep): { col: 'keys' | 'values'; dir: 'asc'
   if (order === 'shuffle') return null; // shuffle-local over a map defers (no worked-out form)
   return { col, dir: order === 'desc' ? 'desc' : 'asc' };
 }
-export const isMapLocalOrder = (step: PStep): boolean => mapLocalOrder(step) !== null;
+export const isMapLocalOrder = (step: IRStep): boolean => mapLocalOrder(step) !== null;
 
 /** map(__.select(Column)) over a Map.Entry is the 1-to-1 form of a per-entry column
  *  select — unwrap its single-step body to that select() step (else null → deferral). */
-function mapOfSelect(step: PStep, params: Record<string, any>): PStep | null {
+function mapOfSelect(step: IRStep, params: Record<string, any>): IRStep | null {
   if (step.name !== 'map') return null;
   const arg = (step.args ?? [])[0];
   if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
@@ -533,7 +533,7 @@ function mapOfSelect(step: PStep, params: Record<string, any>): PStep | null {
 }
 
 /** Is this an is(typeOf(GType.MAP)) identity assert? (A map value IS a map.) */
-function isMapTypeOf(step: PStep): boolean {
+function isMapTypeOf(step: IRStep): boolean {
   if (step.name !== 'is') return false;
   const pred = (step.args ?? [])[0];
   if (!pred || typeof pred !== 'object' || pred.op !== 'typeOf') return false;
@@ -555,7 +555,7 @@ const pairSide = (pair: Expression, idx: 0 | 1, of: MapOf): Expression =>
  * explodes the pairs into a per-entry MapEntryStream; a bare terminal frames each blob as a
  * whole MAP (materializeMapRoot). fold()/where and richer followers defer with a clear message.
  */
-export function compileFromMap(s: MapStream, steps: PStep[], at: number): LoweringResult {
+export function compileFromMap(s: MapStream, steps: IRStep[], at: number): LoweringResult {
   if (at >= steps.length) throw new Error('a map value at end of chain should not be a MapStream');
   const step = steps[at];
   const c = s.rel.as('c');
@@ -615,7 +615,7 @@ export function compileFromMap(s: MapStream, steps: PStep[], at: number): Loweri
  * MapStream. select(Column.keys/values) (or its 1-to-1 map(__.select(…)) form) projects THIS
  * entry's key/value per row; a bare terminal frames each entry as a size-1 MAP.
  */
-export function compileFromMapEntry(s: MapEntryStream, steps: PStep[], at: number): LoweringResult {
+export function compileFromMapEntry(s: MapEntryStream, steps: IRStep[], at: number): LoweringResult {
   if (at >= steps.length) throw new Error('a map entry at end of chain should not be a MapEntryStream');
   const step = steps[at];
   const sel = step.name === 'select' ? step : mapOfSelect(step, s.params);

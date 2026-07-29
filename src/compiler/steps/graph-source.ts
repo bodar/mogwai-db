@@ -3,7 +3,7 @@ import { nodes, edges } from '../../sql/schema.ts';
 import { flattenListArgs } from '../../gremlin/frontend.ts';
 import { layoutCols, layoutProjection, type ElementStream } from './context/context.ts';
 import { loweringStateOf, toElementStream, type ScalarStream } from './context/stream.ts';
-import { type PStep } from '../ir/strategies.ts';
+import { type IRStep } from '../ir/strategies.ts';
 
 // ---------- V()/E() as a MID-TRAVERSAL re-source (a shared leaf) ----------
 //
@@ -27,7 +27,7 @@ import { type PStep } from '../ir/strategies.ts';
  * groups by it. Defers (null) only for path/sack/fromV, whose fork/merge through a re-source is
  * not worked out.
  */
-export function lowerReSource(s: ScalarStream | ElementStream, step: PStep): ElementStream | null {
+export function lowerReSource(s: ScalarStream | ElementStream, step: IRStep): ElementStream | null {
   if (s.traverserLayout.path || s.traverserLayout.sack || s.traverserLayout.fromV) return null;
   const elem: 'vertex' | 'edge' = step.name === 'E' ? 'edge' : 'vertex';
   const n = (elem === 'edge' ? edges : nodes).as('n');

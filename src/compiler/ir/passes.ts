@@ -7,7 +7,7 @@ import {
   foldValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
   injectSubgraphRec, injectPartitionRec, markProductiveBy, alwaysProductiveFilterIsNoOp, verify,
   NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
-  type PStep,
+  type IRStep,
 } from './strategies.ts';
 
 // ---------- the Pass pipeline: the concrete PASSES array + the driver ----------
@@ -24,7 +24,7 @@ const EXTRACT: Pass[] = [
     run: (steps, ctx) => {
       const r = stripTerminal(steps);
       ctx.out.discard = r.discard;
-      return r.steps as PStep[];
+      return r.steps as IRStep[];
     },
   },
 ];
@@ -80,7 +80,7 @@ const SIMPLIFY: Pass[] = [
     // alwaysProductiveFilterIsNoOp for why this is not a gap in the child-existence gate.
     name: 'alwaysProductiveFilterIsNoOp', category: 'simplify',
     applies: (steps) => steps.some((s) => ['where', 'filter', 'not', 'and', 'or'].includes(s.name)),
-    run: (steps, ctx) => alwaysProductiveFilterIsNoOp(steps, ctx.params) as PStep[],
+    run: (steps, ctx) => alwaysProductiveFilterIsNoOp(steps, ctx.params) as IRStep[],
   },
 ];
 
@@ -91,22 +91,22 @@ const SIMPLIFY: Pass[] = [
 // (before fold): the injectors recurse into raw `{nested}` args, so a repeat()/choose() body must
 // still be an arg, not yet folded into `.repeatRegion`/`.optionArms`. The injected has()/where()/property()
 // steps are then folded + simplified like any parsed step (they carry no by()/cluster of their own).
-const specNamed = (name: string) => (_steps: readonly PStep[], ctx: PassContext) =>
+const specNamed = (name: string) => (_steps: readonly IRStep[], ctx: PassContext) =>
   ctx.strategies.with.some((s) => s.name === name);
 const specFor = (name: string, ctx: PassContext) => ctx.strategies.with.find((s) => s.name === name)!;
 
 const DECORATION: Pass[] = [
   {
     name: 'SubgraphStrategy', category: 'decoration', applies: specNamed('SubgraphStrategy'),
-    run: (steps, ctx) => injectSubgraphRec(steps, specFor('SubgraphStrategy', ctx), ctx.params) as PStep[],
+    run: (steps, ctx) => injectSubgraphRec(steps, specFor('SubgraphStrategy', ctx), ctx.params) as IRStep[],
   },
   {
     name: 'PartitionStrategy', category: 'decoration', applies: specNamed('PartitionStrategy'),
-    run: (steps, ctx) => injectPartitionRec(steps, specFor('PartitionStrategy', ctx), ctx.params) as PStep[],
+    run: (steps, ctx) => injectPartitionRec(steps, specFor('PartitionStrategy', ctx), ctx.params) as IRStep[],
   },
   {
     name: 'ProductiveByStrategy', category: 'decoration', applies: specNamed('ProductiveByStrategy'),
-    run: (steps) => markProductiveBy(steps) as PStep[],
+    run: (steps) => markProductiveBy(steps) as IRStep[],
   },
 ];
 
@@ -122,12 +122,12 @@ const VERIFY: Pass[] = [
   // strategy, not opt-in. Naming it in withStrategies() is therefore a genuine no-op.
   {
     name: 'readOnlyChildTraversals', category: 'verify' as const,
-    run: (steps: PStep[], ctx: PassContext) => { verifyReadOnlyChildren(ctx.originalChain as PStep[], ctx.params); return steps; },
+    run: (steps: IRStep[], ctx: PassContext) => { verifyReadOnlyChildren(ctx.originalChain as IRStep[], ctx.params); return steps; },
   },
   ...[...VERIFICATION_STRATEGIES].map((name) => ({
   name, category: 'verify' as const,
   applies: specNamed(name),
-  run: (steps: PStep[], ctx: PassContext) => { verify(specFor(name, ctx), ctx.originalChain as PStep[]); return steps; },
+  run: (steps: IRStep[], ctx: PassContext) => { verify(specFor(name, ctx), ctx.originalChain as IRStep[]); return steps; },
   })),
 ];
 
@@ -145,7 +145,7 @@ const DECORATION_ORDINAL = PASS_CATEGORIES.indexOf('decoration');
  *  entry point every NESTED sub-chain uses (child bodies, match patterns, write targets, correlated
  *  predicates). A sub-chain carries no withStrategies of its own, so EMPTY_STRATEGY_USE is exactly
  *  right; this is `runPasses` with no strategies, named for the sub-chain intent. */
-export function normalize(steps: Step[]): { steps: PStep[]; discard: boolean } {
+export function normalize(steps: Step[]): { steps: IRStep[]; discard: boolean } {
   return runPasses(steps, EMPTY_STRATEGY_USE);
 }
 
@@ -157,7 +157,7 @@ export function normalize(steps: Step[]): { steps: PStep[]; discard: boolean } {
  *  do something (drop withoutStrategies-suppressed + no-op entries); then require every remaining
  *  named strategy to be claimed by SOME pass's `applies` — the fail-closed catch-all, now a pipeline
  *  invariant instead of a ladder `else throw`. `discard` rides out-of-band on ctx.out. */
-export function runPasses(steps: Step[], use: StrategyUse, params: Record<string, any> = {}): { steps: PStep[]; discard: boolean } {
+export function runPasses(steps: Step[], use: StrategyUse, params: Record<string, any> = {}): { steps: IRStep[]; discard: boolean } {
   for (const name of use.without)
     if (ALWAYS_ON_STRATEGIES.has(name))
       throw new Error(`withoutStrategies(${name}) is not supported: its effect (infix .and()/.or() folding) is unconditionally applied by this compiler and cannot be disabled.`);
@@ -172,7 +172,7 @@ export function runPasses(steps: Step[], use: StrategyUse, params: Record<string
     if (!PASSES.some((p) => (p.category === 'decoration' || p.category === 'verify') && p.name === spec.name))
       throw new Error(rejectMsg(spec.name));
 
-  let chain = steps as PStep[];
+  let chain = steps as IRStep[];
   let lastOrdinal = -1;
   for (const pass of PASSES) {
     const ordinal = PASS_CATEGORIES.indexOf(pass.category);

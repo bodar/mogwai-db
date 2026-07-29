@@ -2,7 +2,7 @@ import { q, list, empty, type Expression, type Relation } from '../../../sql/ker
 import { streamPayloadCols } from '../context/stream.ts';
 import { where } from './filter.ts';
 import { isNested, stepChain, type Step } from '../../../gremlin/frontend.ts';
-import { MATCH_FILTER_HEADS, type PStep } from '../../ir/strategies.ts';
+import { MATCH_FILTER_HEADS, type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { appendCte, aliasColsOf, aliasScalarTypeOf, prevRel, withLayout, type AliasEntry, type TraverserLayout, type ElementStream, type StepFn } from '../context/context.ts';
 import { aliasEntry, aliasId, aliasScalar, aliasSeed, elemEntry, elemShape, isElementShape, nodeEntry, shapeElem, type AliasShape } from '../context/alias.ts';
@@ -70,8 +70,8 @@ import { perRowColumnOf, staticTypeOf } from '../../../sql/kernel/render.ts';
  *  after the variables it reads are bound. Building a private evaluator here would be a second
  *  implementation of a filter path that already exists. */
 type Pattern =
-  | { kind: 'bind'; start: string; body: PStep[]; end: string | null }
-  | { kind: 'filter'; step: PStep; reads: readonly string[] };
+  | { kind: 'bind'; start: string; body: IRStep[]; end: string | null }
+  | { kind: 'filter'; step: IRStep; reads: readonly string[] };
 
 
 /** How a fold step recovers the TRAVERSER's id after a pattern has re-rooted the stream onto some
@@ -153,7 +153,7 @@ function endBindingOf(out: Stream): EndBinding | null {
  *  previous relation, so the traverser id and every var column ride through untouched; a filter only
  *  removes rows. And no new machinery: the binding table is an ordinary element stream whose carried
  *  aliases ARE the pattern variables, which is exactly what `labelScope`/`aliasIdExpr` read. */
-function applyFilter(st: ElementStream, step: PStep): ElementStream {
+function applyFilter(st: ElementStream, step: IRStep): ElementStream {
   return where(step, st);
 }
 

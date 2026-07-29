@@ -1,6 +1,6 @@
 import { isNested } from '../../../gremlin/frontend.ts';
 import { type Query } from '../../../sql/kernel/q.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { type Stream, type LoweringResult, continueLowering, suspendLowering } from '../context/stream.ts';
 import { type ElementStream } from '../context/context.ts';
 import { type ServiceRegistry, type ServiceCallCtx, type Contribution, type ForeignRow, type CallParams, type InjectionKind } from '../../../services/spi/types.ts';
@@ -37,7 +37,7 @@ export interface BarrierPoint {
   readonly params: CallParams;
   readonly apply: (rows: readonly ForeignRow[], source: FederationSource) => Promise<ForeignRow[]>;
   /** The chain steps AFTER this call() — resumed against the landed foreign stream. */
-  readonly restSteps: PStep[];
+  readonly restSteps: IRStep[];
   /** Where restSteps begins in the original chain (the index the resumer lowers from). */
   readonly restAt: number;
   /** The traversal's bound-param table, for the resumed lowering's LoweringState. */
@@ -66,7 +66,7 @@ export interface MidBarrierPoint {
   readonly frame: ChildFrame;
   readonly parent: ElementStream;
   /** The chain steps AFTER this call() — resumed against the rejoined foreign stream. */
-  readonly restSteps: PStep[];
+  readonly restSteps: IRStep[];
   readonly restAt: number;
   readonly compileParams: Record<string, any>;
   readonly registry: ServiceRegistry;
@@ -89,7 +89,7 @@ function resolveContribution(spec: ReturnType<typeof parseCallSpec>, registry: S
  *  service (Phase 6 federate) returns a BarrierPoint instead: its rows arrive from an awaited
  *  sibling call, so it cannot lower synchronously; compileRead surfaces it to the segment
  *  orchestrator, which resumes lowering from `restSteps` once the rows land. */
-export function seedCall(first: PStep, query: Query, params: Record<string, any>, registry: ServiceRegistry, steps: PStep[], depth: number): Stream | BarrierPoint {
+export function seedCall(first: IRStep, query: Query, params: Record<string, any>, registry: ServiceRegistry, steps: IRStep[], depth: number): Stream | BarrierPoint {
   const spec = parseCallSpec(first, params);
   const ctx: ServiceCallCtx = { params: spec.params, q: query, compileParams: params, registry };
   const contribution = resolveContribution(spec, registry, ctx);
@@ -125,7 +125,7 @@ export function seedCall(first: PStep, query: Query, params: Record<string, any>
  *  (buildCallHead) and returns a MidBarrierPoint wrapped as a LoweringSuspension, which lowerSteps
  *  relays to compileRead. `steps`/`stop` are the caller's chain + cursor so restSteps/restAt name
  *  what resumes after the call(). */
-export function lowerCall(step: PStep, parent: ElementStream, scope: ChildFrameStack, steps: PStep[], stop: number): LoweringResult {
+export function lowerCall(step: IRStep, parent: ElementStream, scope: ChildFrameStack, steps: IRStep[], stop: number): LoweringResult {
   const spec = parseCallSpec(step, parent.params);
   const registry = engineOf(parent).registry;
   const ctx: ServiceCallCtx = {

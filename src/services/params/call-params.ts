@@ -1,5 +1,5 @@
 import { stepChain, isNested } from '../../gremlin/frontend.ts';
-import type { PStep } from '../../compiler/ir/strategies.ts';
+import type { IRStep } from '../../compiler/ir/strategies.ts';
 import { DIRECTORY_SERVICE_NAME } from '../spi/types.ts';
 import type { CallSpec, CallParams, InjectionKind } from '../spi/types.ts';
 import { nestedTraversalToGremlin } from './traversal-param.ts';
@@ -99,7 +99,7 @@ function constMapFromTraversal(nested: any, params: Record<string, any>): CallPa
 }
 
 /** Build the CallSpec (service name + resolved constant params + optional mid-traversal injection)
- *  for a `call` PStep, from its args (string name, optional Map / project-traversal, optional
+ *  for a `call` IRStep, from its args (string name, optional Map / project-traversal, optional
  *  injection traversal) and folded withArgs.
  *
  *  Arg disambiguation follows the grammar's call() overloads
@@ -109,7 +109,7 @@ function constMapFromTraversal(nested: any, params: Record<string, any>): CallPa
  *  INJECTION only when it CLASSIFIES as a direct value read (`__.values('k')`/`__.id()`/`__.label()`
  *  — injectionKindOf) — precise so the `--list` 3-arg form (a project-traversal) is untouched and
  *  never captured as an injection (that would both mis-route AND retain a huge cyclic antlr node). */
-export function parseCallSpec(step: PStep, params: Record<string, any>): CallSpec {
+export function parseCallSpec(step: IRStep, params: Record<string, any>): CallSpec {
   const [name, ...rest] = step.args;
   // Bare g.call() ≡ g.call("--list") (the directory). A missing name defaults to it.
   const serviceName = typeof name === 'string' ? name : DIRECTORY_SERVICE_NAME;

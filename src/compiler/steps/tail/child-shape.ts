@@ -22,7 +22,7 @@ import type { Relation } from '../../../sql/kernel/q.ts';
 import { isColumnArg, isOperatorArg, isOrderArg, isPickArg, isScopeArg, isTokenArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import type { AliasMap, TraverserLayout, ElementStream } from '../context/context.ts';
 import type { PropertyStream, ScalarStream, Stream } from '../context/stream.ts';
-import { type PStep } from '../../ir/strategies.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { SCALAR_TRANSFORMS } from './coerce.ts';
 
@@ -66,7 +66,7 @@ export type ChildUse = 'all' | 'first';
 export type ChildParent = ElementStream | PropertyStream | ScalarStream;
 
 /** Child chains cross the same normalization seam as the root. In particular,
- * order().by() must arrive as one PStep before shape-aware scalar lowering. */
+ * order().by() must arrive as one IRStep before shape-aware scalar lowering. */
 export const childSteps = (nested: any, params: Record<string, any>) => {
   const rawSteps = stepChain(nested, params);
   const normalized = normalize(rawSteps);
@@ -138,7 +138,7 @@ export const childCtx = (s: { params: Record<string, any>; traverserLayout: Trav
 
 /** A ctx whose visible labels are `ctx`'s plus the ones `s` binds, when `s` is an as(). Called
  *  as a body is walked, so a label is visible to exactly the steps that FOLLOW its binding. */
-function bindLabels(ctx: ChildCtx | undefined, s: PStep, shape: ChildShape): ChildCtx | undefined {
+function bindLabels(ctx: ChildCtx | undefined, s: IRStep, shape: ChildShape): ChildCtx | undefined {
   if (!ctx || s.name !== 'as') return ctx;
   const labels = (s.args ?? []).filter((a: any): a is string => typeof a === 'string');
   if (!labels.length) return ctx;
@@ -150,7 +150,7 @@ function bindLabels(ctx: ChildCtx | undefined, s: PStep, shape: ChildShape): Chi
 /** PURE. The single-label path-history read `select("a")` / `select(Pop.first, "a")` — as
  *  opposed to select(Column.*), a multi-label select (a Record) or a by()-modulated one. Those
  *  have their own consumers; only this form re-types the stream to a label's contents. */
-export function labelSelectOf(step: PStep): string | null {
+export function labelSelectOf(step: IRStep): string | null {
   if (step.name !== 'select' || step.modulators?.length) return null;
   const args = step.args ?? [];
   if (args.some(isColumnArg)) return null;
@@ -172,7 +172,7 @@ const LABEL_STEPS = new Set(['as', 'select', 'where', 'dedup']);
  *  inline path declines any body that mentions a label and the caller falls through to the
  *  materialized generic gate, which carries the full schema. Exactly the fast-path contract:
  *  recognition-failure falls through, never mis-executes. */
-export function mentionsLabel(steps: readonly PStep[], params: Record<string, any>): boolean {
+export function mentionsLabel(steps: readonly IRStep[], params: Record<string, any>): boolean {
   return labelsMentioned(steps, params).size > 0;
 }
 
@@ -182,7 +182,7 @@ export function mentionsLabel(steps: readonly PStep[], params: Record<string, an
  *  apply once every variable it reads is bound, so it needs the names, not just whether there are
  *  any. One scanner answers both questions — the boolean is this set being non-empty — so the two
  *  can never disagree about what counts as mentioning a label. */
-export function labelsMentioned(steps: readonly PStep[], params: Record<string, any>): Set<string> {
+export function labelsMentioned(steps: readonly IRStep[], params: Record<string, any>): Set<string> {
   const out = new Set<string>();
   for (const s of steps) {
     if (LABEL_STEPS.has(s.name)) {
@@ -204,7 +204,7 @@ export function labelsMentioned(steps: readonly PStep[], params: Record<string, 
 
 /** PURE. The shape a `select(label)` yields here, or undefined when the child seam must decline
  *  (no context to resolve against, or a bound-but-unmappable label — see LabelEnv). */
-function selectShape(step: PStep, ctx: ChildCtx | undefined): ChildShape | undefined {
+function selectShape(step: IRStep, ctx: ChildCtx | undefined): ChildShape | undefined {
   const label = labelSelectOf(step);
   if (label === null || !ctx) return undefined;
   const held = ctx.labels.get(label);
@@ -249,7 +249,7 @@ export const ELEMENT_CHILD_STEPS = new Set([
  *  and a label re-root reuses the root select — no bespoke child reader. Bare read sack() is NOT
  *  here (it's a scalar producer). A ctx-free caller conservatively rejects the two context-
  *  dependent forms. */
-export const isElementChildStep = (s: PStep, ctx?: ChildCtx): boolean =>
+export const isElementChildStep = (s: IRStep, ctx?: ChildCtx): boolean =>
   ELEMENT_CHILD_STEPS.has(s.name) || isSackMutate(s)
   || selectShape(s, ctx) === 'element'
   || (ctx !== undefined && isUniformElementBranch(s, ctx));
@@ -264,9 +264,9 @@ export const isElementChildStep = (s: PStep, ctx?: ChildCtx): boolean =>
  *  which also covers optional's unclassified-arm fallback) — an unclassifiable arm defers cleanly to
  *  the caller's deferral rather than admitting a body compile would throw on. Needs params to
  *  classify the arms; a params-free caller conservatively rejects (backward-compatible). */
-export function isUniformElementBranch(s: PStep, ctx: ChildCtx): boolean {
+export function isUniformElementBranch(s: IRStep, ctx: ChildCtx): boolean {
   const kind = asBranchKind(s.name);
-  if (!kind || (s as PStep).optionArms) return false;
+  if (!kind || (s as IRStep).optionArms) return false;
   const { shapes } = classifyBranchArms(kind, s, ctx);
   return shapes.length > 0 && shapes.every((sh) => sh === 'element');
 }
@@ -284,17 +284,17 @@ const SCALAR_PRODUCER = new Set(['values', 'id', 'label', 'constant', 'call', 'm
  *  vocabulary, or a `select(label)` reading a VALUE-shaped label (the label's contents are the
  *  scalar — the read-a-label twin of read-a-property). A mutate sack(op) is element-preserving,
  *  never a producer. */
-const isScalarProducer = (s: PStep, ctx: ChildCtx | undefined): boolean =>
+const isScalarProducer = (s: IRStep, ctx: ChildCtx | undefined): boolean =>
   (SCALAR_PRODUCER.has(s.name) && !isSackMutate(s)) || selectShape(s, ctx) === 'scalar';
 
 /** A sack step in its MUTATE form (`sack(Operator.x)` — carries an operator arg). This is
  *  element-PRESERVING (element→element, folds the carried sack), so it belongs in an element
  *  prefix, NOT as a scalar producer. Only the BARE read form `sack()` produces a scalar. Mirror
  *  of engine.ts isSackMutate, kept here so this pure leaf has no engine dependency. */
-export const isSackMutate = (s: PStep): boolean =>
+export const isSackMutate = (s: IRStep): boolean =>
   s.name === 'sack' && (s.args ?? []).some(isOperatorArg);
 /** A bare read `sack()` — the scalar-producing form (rebinds the value to the carried sack). */
-const isSackRead = (s: PStep): boolean => s.name === 'sack' && !isSackMutate(s);
+const isSackRead = (s: IRStep): boolean => s.name === 'sack' && !isSackMutate(s);
 /** The projections compileScalarChildRows reads with its own element-projection SQL builder (and
  *  so can continue through any scalar row tail). Every other producer lowers via lowerSteps. */
 const BESPOKE_PROJECTIONS = new Set(['values', 'id', 'label', 'constant']);
@@ -311,7 +311,7 @@ const CHILD_SCALAR_ROW_STEPS = new Set([
  *  the row's VALUE, and a following select() of a value label stays on the scalar row). Returns
  *  the extended ctx, or null when a step is outside the vocabulary. `{ctx: undefined}` is the
  *  ctx-free caller's answer — the run is still valid, just unable to resolve labels. */
-function scalarRowRun(steps: readonly PStep[], ctx: ChildCtx | undefined): { ctx: ChildCtx | undefined } | null {
+function scalarRowRun(steps: readonly IRStep[], ctx: ChildCtx | undefined): { ctx: ChildCtx | undefined } | null {
   let cur = ctx;
   for (const s of steps) {
     if (CHILD_SCALAR_ROW_STEPS.has(s.name)) { cur = bindLabels(cur, s, 'scalar'); continue; }
@@ -325,7 +325,7 @@ function scalarRowRun(steps: readonly PStep[], ctx: ChildCtx | undefined): { ctx
  *  label to the current ELEMENT). Returns the extended ctx, or null on the first step outside
  *  the element-preserving vocabulary. This is the single place a child body's prefix is
  *  validated, so label visibility is derived identically wherever a prefix is scanned. */
-function elementRun(steps: readonly PStep[], ctx: ChildCtx | undefined): { ctx: ChildCtx | undefined } | null {
+function elementRun(steps: readonly IRStep[], ctx: ChildCtx | undefined): { ctx: ChildCtx | undefined } | null {
   let cur = ctx;
   for (const s of steps) {
     if (!isElementChildStep(s, cur)) return null;
@@ -348,7 +348,7 @@ export const GLOBAL_BARRIER_STEPS = new Set([
   'dedup', 'order', 'limit', 'range', 'skip', 'tail', 'sample', 'barrier',
   'group', 'groupCount', 'aggregate', 'local', 'fold', 'count', 'sum', 'min', 'max', 'mean',
 ]);
-export const isGlobalBarrier = (s: PStep): boolean => GLOBAL_BARRIER_STEPS.has(s.name);
+export const isGlobalBarrier = (s: IRStep): boolean => GLOBAL_BARRIER_STEPS.has(s.name);
 
 const CHILD_ELEMENT_ROW_STEPS = new Set(['order', 'limit', 'skip', 'range', 'dedup', 'local']);
 
@@ -369,7 +369,7 @@ export const SCALAR_ARM_TX = new Set([
  *  has no scalarTx impl. PURE — shared by compileScalarChildRows (child.ts) + the scalar
  *  reducer/list arm recognizers (scalar-arm.ts). */
 const SCALAR_CHILD_PREFIX = new Set([...SCALAR_ARM_TX, 'is', 'and', 'or', 'not', 'filter', 'where', 'constant', 'identity', 'unfold', 'math', 'order', 'limit', 'skip', 'range', 'tail', 'dedup']);
-export const scalarChildPrefixOk = (s: PStep): boolean =>
+export const scalarChildPrefixOk = (s: IRStep): boolean =>
   SCALAR_CHILD_PREFIX.has(s.name) || (s.name === 'asNumber' && (s.args ?? []).length > 0);
 
 function elementRowParts(body: ReturnType<typeof stepChain>, ctx?: ChildCtx): { prefix: ReturnType<typeof stepChain>; suffix: ReturnType<typeof stepChain> } | null {
@@ -388,7 +388,7 @@ function elementRowParts(body: ReturnType<typeof stepChain>, ctx?: ChildCtx): { 
   // the caller's non-null assertion turns a clean deferral into a null-deref crash. Keeping the
   // two in lockstep is this leaf's whole point. A ctx-free caller can't classify the inner body,
   // so it conservatively rejects a local suffix.
-  const localBodyOk = (s: PStep) => ctx !== undefined && isElementChild((s.args ?? [])[0]?.nested, ctx);
+  const localBodyOk = (s: IRStep) => ctx !== undefined && isElementChild((s.args ?? [])[0]?.nested, ctx);
   if (suffix.some((s) => !CHILD_ELEMENT_ROW_STEPS.has(s.name) || (s.name === 'local' && !localBodyOk(s)))) return null;
   return { prefix, suffix };
 }
@@ -456,7 +456,7 @@ const ELEMENT_ARM_BRANCH = new Set(['choose', 'coalesce', 'union']);
  * option body can be compiled by the existing scalar-child seam. The emitter already
  * owns this form (lowerChooseOptions); this recognizer only keeps the classify/emit
  * contract intact when the choose lives inside map()/local()/flatMap(). */
-function elementOptionMapScalarBranch(branch: PStep, ctx: ChildCtx): boolean {
+function elementOptionMapScalarBranch(branch: IRStep, ctx: ChildCtx): boolean {
   if (branch.name !== 'choose' || !branch.optionArms) return false;
 
   const choice = branch.args[0];
@@ -481,7 +481,7 @@ function elementOptionMapScalarBranch(branch: PStep, ctx: ChildCtx): boolean {
  * no bespoke reader. Precise (all arms scalar) so it never claims a list/variant-armed branch. */
 export function elementScalarBranchArm(body: ReturnType<typeof stepChain>, ctx: ChildCtx): boolean {
   const at = body.findIndex((s) => ELEMENT_ARM_BRANCH.has(s.name)
-    && (!(s as PStep).optionArms || elementOptionMapScalarBranch(s as PStep, ctx)));
+    && (!(s as IRStep).optionArms || elementOptionMapScalarBranch(s as IRStep, ctx)));
   if (at < 0) return false;
   const prefix = body.slice(0, at);
   const branch = body[at];
@@ -492,8 +492,8 @@ export function elementScalarBranchArm(body: ReturnType<typeof stepChain>, ctx: 
   if (!scoped) return false;
   const armCtx = scoped.ctx ?? ctx;
   if (!scalarRowRun(suffix, armCtx)) return false;
-  if (branch.name === 'choose' && (branch as PStep).optionArms)
-    return elementOptionMapScalarBranch(branch as PStep, armCtx);
+  if (branch.name === 'choose' && (branch as IRStep).optionArms)
+    return elementOptionMapScalarBranch(branch as IRStep, armCtx);
   const kids = (branch.args ?? []).filter(isNested);
   if (branch.name === 'choose') {
     // predicate-form choose(pred, then, else): only the two value arms must be scalar (the
@@ -535,7 +535,7 @@ export function classifyScalarChild(nested: any, ctx: ChildCtx): ChildPlan | nul
  * so does everything else in SCALAR_DISPATCH/LIST_DISPATCH. Peeling one step name into a side-channel
  * instead would support exactly that step and nothing else.
  */
-export interface ChildPlan { body: PStep[]; suffix: PStep[] }
+export interface ChildPlan { body: IRStep[]; suffix: IRStep[] }
 
 /**
  * The LONGEST prefix that classifies, and the rest as a suffix. Longest-first, so a body that
@@ -550,10 +550,10 @@ export interface ChildPlan { body: PStep[]; suffix: PStep[] }
  * `near "FROM": syntax error`. A body whose tail contains a barrier therefore does not split; it
  * either classifies whole or defers, exactly as before.
  */
-function longestClassifying(full: PStep[], ok: (body: PStep[]) => boolean): ChildPlan | null {
+function longestClassifying(full: IRStep[], ok: (body: IRStep[]) => boolean): ChildPlan | null {
   // Scope.local narrows a would-be barrier to one list VALUE, so `order(Scope.local)` is a
   // row-local transform and rides the suffix fine; bare `order()`/`fold()` do not.
-  const barriers = (steps: PStep[]) => steps.some((s) =>
+  const barriers = (steps: IRStep[]) => steps.some((s) =>
     isGlobalBarrier(s) && !s.args.some((a: unknown) => isScopeArg(a) && a.scope === 'local'));
   for (let end = full.length; end > 0; end--) {
     if (barriers(full.slice(end))) continue;
@@ -635,9 +635,9 @@ export function classifyScalarChildRows(
  *  peek with no Query, no engine and no SQL, and the emit half consumes exactly these parts. */
 export function classifyProjectionChildRows(
   body: ReturnType<typeof stepChain>,
-  accepts: (proj: PStep) => boolean,
+  accepts: (proj: IRStep) => boolean,
   ctx?: ChildCtx,
-): { prefix: PStep[]; proj: PStep } | null {
+): { prefix: IRStep[]; proj: IRStep } | null {
   if (!body.length) return null;
   const proj = body[body.length - 1];
   if (!accepts(proj)) return null;
@@ -678,13 +678,13 @@ export function classifyElementChildRows(
   stripTerminal: string | undefined,
   firstPolicy: boolean,
   ctx?: ChildCtx,
-): { body: ReturnType<typeof stepChain>; parts: ElementRowParts; orderStep?: PStep } | null {
+): { body: ReturnType<typeof stepChain>; parts: ElementRowParts; orderStep?: IRStep } | null {
   if (stripTerminal && fullBody.at(-1)?.name !== stripTerminal) return null;
   const orderStep = firstPolicy && fullBody.at(-1)?.name === 'order' ? fullBody.at(-1) : undefined;
   let body = stripTerminal || orderStep ? fullBody.slice(0, -1) : fullBody;
-  if (!firstPolicy && body.at(-1)?.name === 'order' && !(body.at(-1) as PStep).modulators) body = body.slice(0, -1);
+  if (!firstPolicy && body.at(-1)?.name === 'order' && !(body.at(-1) as IRStep).modulators) body = body.slice(0, -1);
   const parts = body.length ? elementRowParts(body, ctx) : stripTerminal ? { prefix: [], suffix: [] } : null;
-  return parts ? { body, parts, orderStep: orderStep as PStep | undefined } : null;
+  return parts ? { body, parts, orderStep: orderStep as IRStep | undefined } : null;
 }
 
 export function isPropertyScalarChild(nested: any, ctx: ChildCtx): boolean {
@@ -742,7 +742,7 @@ export function isBareBranchChildAllCard(nested: any, ctx: ChildCtx): boolean {
   // role, same vocabulary (optionMapMerge, below). It reaches the identical List/Variant merges,
   // so a `local(__.choose(..).option(k, __.values('n').fold())..)` composes here like any other
   // branch-of-lists; excluding it was the last thing keeping those bodies out.
-  const merge = (body[0] as PStep).optionArms
+  const merge = (body[0] as IRStep).optionArms
     ? optionMapMerge(body[0], ctx)
     : classifyBranchArms(kind, body[0], ctx).merge;
   return merge === 'list' || merge === 'variant';
@@ -834,8 +834,8 @@ export function classifyArmShape(nested: any, ctx: ChildCtx): BranchArmShape {
  *  with the element lowerer), optional exactly 1. `null` = "no shape question to ask", which
  *  classifyBranchArms reports as merge 'element' so the element lowerer owns the arity/option-map
  *  error message (fail closed, one authority). */
-function branchValueArgs(kind: BranchKind, step: PStep): readonly any[] | null {
-  if (kind === 'choose' && (step as PStep).optionArms) return null; // option-map form: a tail CASE projector
+function branchValueArgs(kind: BranchKind, step: IRStep): readonly any[] | null {
+  if (kind === 'choose' && (step as IRStep).optionArms) return null; // option-map form: a tail CASE projector
   const nested = (step.args ?? []).filter(isNested);
   if (kind === 'union') return nested.length >= 2 ? nested : null;
   if (kind === 'coalesce') return nested.length >= 1 ? nested : null;
@@ -847,7 +847,7 @@ function branchValueArgs(kind: BranchKind, step: PStep): readonly any[] | null {
  *  same shape → that shape's homogeneous merge; every arm classifiable but NOT all the same →
  *  'variant'; anything else (an unclassifiable arm, wrong arity, the option-map choose form) →
  *  'element', where the element lowerer either handles it or throws the authoritative error. */
-export function classifyBranchArms(kind: BranchKind, step: PStep, ctx: ChildCtx): BranchArms {
+export function classifyBranchArms(kind: BranchKind, step: IRStep, ctx: ChildCtx): BranchArms {
   const args = branchValueArgs(kind, step);
   if (!args) return { kind, shapes: [], args: [], merge: 'element' };
   const shapes: BranchArmShape[] = args.map((a: any) => classifyArmShape(a.nested, ctx));
@@ -880,7 +880,7 @@ export function classifyBranchArms(kind: BranchKind, step: PStep, ctx: ChildCtx)
  *  tail dispatch can pick a shape-changing merge? True iff the arms are not uniformly element.
  *  Derived from classifyBranchArms, so the fold's `break` and the tail's cascade cannot disagree
  *  — the drift the ten ad-hoc booleans invited. */
-export function branchNeedsShapeDispatch(kind: BranchKind, step: PStep, ctx: ChildCtx): boolean {
+export function branchNeedsShapeDispatch(kind: BranchKind, step: IRStep, ctx: ChildCtx): boolean {
   return classifyBranchArms(kind, step, ctx).merge !== 'element';
 }
 
@@ -972,7 +972,7 @@ const isDiscardBody = (nested: any, params: Record<string, any>): boolean => {
  *  vocabulary (`Pick.any`, a bodyless option, no keyed option at all). FIRST WINS per Pick token:
  *  TinkerPop takes the first `Pick.none`/`Pick.unproductive` and ignores later duplicates, which is
  *  what makes the corpus's trailing `option(Pick.none, __.fail())` unreachable rather than a wall. */
-export function readOptionMapArms(step: PStep, params: Record<string, any>): ChooseOptionArm[] | null {
+export function readOptionMapArms(step: IRStep, params: Record<string, any>): ChooseOptionArm[] | null {
   const out: ChooseOptionArm[] = [];
   const seen = new Set<OptionPick>();
   for (const opt of step.optionArms ?? []) {
@@ -1003,7 +1003,7 @@ export function readOptionMapArms(step: PStep, params: Record<string, any>): Cho
  *  Shared by the triage and the emitter (branch.ts) precisely because getting it wrong is
  *  invisible: the classifier would call a list-bodied option map a homogeneous LIST merge while
  *  the emitter handed it an element arm. */
-export const optionMapNeedsPassthrough = (step: PStep, arms: readonly ChooseOptionArm[], params: Record<string, any>): boolean =>
+export const optionMapNeedsPassthrough = (step: IRStep, arms: readonly ChooseOptionArm[], params: Record<string, any>): boolean =>
   !arms.some((o) => o.pick === 'none')
   || (!arms.some((o) => o.pick === 'unproductive') && choiceCanBeUnproductive(step.args?.[0], params));
 
@@ -1029,7 +1029,7 @@ function choiceCanBeUnproductive(a0: any, params: Record<string, any>): boolean 
 /** PURE. The merge an option-map choose routes to, or null when an arm is unclassifiable (the
  *  caller then defers). Folds `classifyArmShape` over the written arms exactly as
  *  `classifyBranchArms` does, plus the implicit element pass-through when one is live. */
-export function optionMapMerge(step: PStep, ctx: ChildCtx): BranchMerge | null {
+export function optionMapMerge(step: IRStep, ctx: ChildCtx): BranchMerge | null {
   const arms = readOptionMapArms(step, ctx.params);
   if (!arms) return null;
   const bodies: BranchArmShape[] = arms.filter((o) => !o.discard).map((o) => classifyArmShape(o.nested, ctx));

@@ -1,5 +1,5 @@
 import type { StrategyUse } from '../../gremlin/frontend.ts';
-import type { PStep } from './strategies.ts';
+import type { IRStep } from './strategies.ts';
 
 // ---------- the Pass contract: rewrite the chain ----------
 //
@@ -50,7 +50,7 @@ export interface PassContext {
    *  (property(key,val) after addV) must not trip ReservedKeysVerificationStrategy, and an exploded
    *  out()→outE().inV() must not change what EdgeLabelVerification sees. Written once by the driver
    *  at the extract→decoration boundary; passes never write it. */
-  originalChain: readonly PStep[];
+  originalChain: readonly IRStep[];
   /** Out-of-band results a pass may set. Mutable bag, written only by the `extract` category
    *  (stripTerminal's discard flag → the iterate() "run for effect, return nothing" shape). */
   readonly out: { discard: boolean };
@@ -62,9 +62,9 @@ export interface Pass {
   /** Cheap gate: skip `run` when this chain can't contain the pass's trigger. Absent → always
    *  runs. For a decoration/verify Pass this reads ctx.strategies (an O(1)-ish name lookup), NOT
    *  the chain — keeping the pipeline O(passes), not O(passes·rescans). */
-  applies?(steps: readonly PStep[], ctx: PassContext): boolean;
+  applies?(steps: readonly IRStep[], ctx: PassContext): boolean;
   /** The rewrite. Pure w.r.t. `steps`; may read/write ctx.out. A verify-category pass ignores its
    *  `steps` argument (it asserts against ctx.originalChain instead) and returns it unchanged —
    *  verify never rewrites. */
-  run(steps: PStep[], ctx: PassContext): PStep[];
+  run(steps: IRStep[], ctx: PassContext): IRStep[];
 }
