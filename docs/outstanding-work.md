@@ -9,7 +9,7 @@ numbers are stable IDs — landed items are deleted and their numbers are not re
 comments and other docs cite them.
 
 **The five committed test baselines are inputs to this index, not just gates.** `l3-state.json`
-(the ratchet floor), `census/{goldens,deferrals}.tsv` (the two-way behavioural baseline, 7
+(the ratchet floor), `census/{goldens,deferrals}.tsv` (the two-way behavioural baseline, 6
 `crashed` rows = item 0c), and the two hand-curated L5 ratchets — `L5-properties/known.ts` and
 `capability-baseline.ts`, plus the `knownBroken` entries inside `laws.ts`. A defect parked in any of
 them must ALSO appear here; a ratchet entry is tracked, not defended. **`mise run L5-random` is not
@@ -48,12 +48,10 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      a re-sourced modulation child now reaches it. **The opening: for a re-sourced body the
      partition is redundant** (the child ignores the traverser). *Medium.*
 
-0c. **7 fail-closed VIOLATIONS, surfaced by the census** (`test/census/deferrals.tsv`, status
+0c. **6 fail-closed VIOLATIONS, surfaced by the census** (`test/census/deferrals.tsv`, status
    `crashed`). Each throws a raw runtime error instead of a clear deferral, which the project's
    root rule forbids outright. They were invisible before because a crash and a deferral both just
-   "fail"; the census separates them and gates the count from growing. Five root causes:
-   - **`g.addV().property(T.id, 1)` on an existing id — 1 case.** Raw *"UNIQUE constraint failed:
-     nodes.id"*. Should be a clear "vertex id already exists". *Low.*
+   "fail"; the census separates them and gates the count from growing. Four root causes:
    - **We emit syntactically invalid SQL — 1 case.**
      `g.V().as("a").out("knows").as("a").select(Pop.all, __.constant("a"))` produces SQL SQLite
      rejects with *near ",": syntax error*. A rebound label under `select(Pop.all, …)` with a

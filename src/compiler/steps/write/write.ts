@@ -312,7 +312,22 @@ function parseVertexSpec(addV: Step, propSteps: Step[], sideEffects?: Map<string
 // INSERT one row into nodes/edges with the shared optional-uid/id column splice.
 // A string uid writes the `uid` column; a numeric uid writes the rowid `id`
 // directly. Returns the rowid + external id (uid ?? rowid).
-function insertRow(store: GraphStore, table: string, baseCols: string[], baseVals: any[], uid: string | number | null, jsonbCol?: string): { id: number; extId: string | number } {
+type ElementTable = 'nodes' | 'edges';
+
+/** Validate a caller-provided public element id before the shared INSERT boundary.
+ * SQLite's rowid/UNIQUE errors are storage-engine implementation details; Gremlin's
+ * observable contract is an element identity conflict. Keeping this next to the one
+ * writer covers addV, addE, and merge-create uniformly (numeric ids occupy rowid,
+ * string ids the uid namespace; vertex and edge namespaces remain distinct). */
+function assertAvailableElementId(store: GraphStore, table: ElementTable, uid: string | number | null): void {
+  if (uid == null) return;
+  const col = typeof uid === 'number' ? 'id' : 'uid';
+  if (store.query<{ found: number }>(`SELECT 1 AS found FROM ${table} WHERE ${col}=? LIMIT 1`, [uid]).length)
+    throw new Error(`${table === 'nodes' ? 'vertex' : 'edge'} id already exists: ${uid}`);
+}
+
+function insertRow(store: GraphStore, table: ElementTable, baseCols: string[], baseVals: any[], uid: string | number | null, jsonbCol?: string): { id: number; extId: string | number } {
+  assertAvailableElementId(store, table, uid);
   const uidCol = typeof uid === 'string' ? uid : null;
   const idCol = typeof uid === 'number' ? uid : null;
   const cols = [...baseCols, ...(uidCol !== null ? ['uid'] : []), ...(idCol !== null ? ['id'] : [])];

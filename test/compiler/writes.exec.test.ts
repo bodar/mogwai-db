@@ -198,6 +198,14 @@ test('addE sets its own uid via property(T.id)', () => {
   expect(run(store, 'g.E("e:marko-vadas").label()').map((r) => r.v)).toEqual(['knows']);
 });
 
+test('custom vertex and edge ids fail at the shared identity boundary', () => {
+  const store = seededStore();
+  expect(() => run(store, 'g.addV().property(T.id, 1)')).toThrow('vertex id already exists: 1');
+  run(store, 'g.addV().property(T.id, "marko")');
+  expect(() => run(store, 'g.addV().property(T.id, "marko")')).toThrow('vertex id already exists: marko');
+  expect(() => run(store, 'g.addE("knows").from(__.V(1)).to(__.V(2)).property(T.id, 7)')).toThrow('edge id already exists: 7');
+});
+
 test('addE write-chain graph initializer (addV.as.addV.as.addE.from.to)', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
   run(store, 'g.addV("person").property("name","marko").as("a").addV("person").property("name","vadas").as("b").addE("knows").from("a").to("b").property("weight", 0.5)');
