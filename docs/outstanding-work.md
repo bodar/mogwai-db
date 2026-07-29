@@ -30,31 +30,6 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-0. **L5 metamorphic-law residuals.** These laws still fail:
-   - **`otherV()` miscounts while PATH TRACKING is live.** `g.V().out().simplePath().bothE('created')
-     .otherV()` yields lop×3/marko×2 where `.both('created')` yields lop×1/marko×3. The `simplePath()`
-     is provably a no-op there (a one-hop path cannot revisit), so the law must hold exactly as it does
-     without it — and it does, which identifies the path form as broken. Likely the otherV() position
-     projector picking the wrong endpoint off the exploded path row: `POSITION_MOVEMENTS`
-     (`steps/tail/path.ts`) lists `bothV` but otherV reaches it separately. Found by the METAMORPHIC
-     oracle; invisible to the differential (both configs agree). *High — silent wrong answer.*
-   - **A non-terminal `fold()` after `dedup()` folds the UN-deduplicated multiset.**
-     `g.V().out().dedup()` gives 4; `.dedup().fold().unfold()` gives 6. The TERMINAL fold is correct
-     (`buildProjection` renders `SELECT DISTINCT` off `acc.distinct`), so this is the retype route only:
-     `foldTailAcc` stops at a non-terminal `fold()` as a shape boundary and the list built there drops
-     the dedup the acc had already absorbed. Found by the metamorphic oracle. *High — silent wrong
-     answer.*
-   - **An unproductive `sum()`/`min()`/`max()`/`mean()` body in a filter position wrongly KEEPS the
-     traverser.** `g.V().where(__.out().values('age').sum())` returns all 6 vertices; only marko has
-     an out-neighbour carrying an `age`, so TinkerPop returns 1. Those four reducers emit NOTHING
-     over empty input — exactly the distinction `ir/productivity.ts ALWAYS_PRODUCTIVE_TERMINAL`
-     draws against `count()`/`fold()` — so an empty body must DROP the traverser, and the natural fix
-     is the mirror of `alwaysProductiveFilterIsNoOp`: a NEVER-productive-on-empty body needs the
-     existence gate, not a constant. **Invisible to the L5 differential** (both configs answer
-     identically), found only by reading the semantics while diagnosing the four above. Same
-     blind-spot class as the `order().by()` defect, and the argument for L5's metamorphic-law oracle,
-     which compares against a law rather than another implementation. *Medium-High — silent wrong
-     answer.*
 0b. **Apply-contract consumers.** `ModulationContract` (`'produce' | 'apply' | 'presence'`) is
    available in `steps/tail/child.ts`. The remaining `TraversalUtil.apply(traverser, …)` consumers
    need only declare `contract: 'apply'`:

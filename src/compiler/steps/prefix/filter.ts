@@ -286,11 +286,13 @@ export function lowerElementDedup(st: ElementStream, s: IRStep, order?: IRStep):
   if (!order && !modulators.length) {
     const p = prevRel(st, 'p');
     // dedup yields ONE traverser per distinct id → RESET bulk to 1: a collapsed (v, N) becomes
-    // (v, 1). Every other carried column rides through unchanged. At bulk≡1 this is identical to
-    // carrying p.bulk, so a non-collapsed dedup is unaffected.
-    const cols = layoutCols(st.traverserLayout).map((c) => c === st.traverserLayout.bulk ? q`1 AS bulk` : q`${p.c[c]}`);
+    // (v, 1). Its preceding encounter is per-row unique, so carrying it through SELECT DISTINCT
+    // would make every duplicate distinct; the set barrier therefore clears it, matching the
+    // child-scope dedup implementation. At bulk≡1 this is identical to carrying p.bulk.
+    const layout = patchLayout(st.traverserLayout, { encounter: null });
+    const cols = layoutCols(layout).map((c) => c === layout.bulk ? q`1 AS bulk` : q`${p.c[c]}`);
     const cf = cols.length ? q`, ${list(cols, ', ')}` : q``;
-    return appendCte(st, q`SELECT DISTINCT ${p.c.id} AS id${cf} FROM ${p}`);
+    return appendCte(st, q`SELECT DISTINCT ${p.c.id} AS id${cf} FROM ${p}`, { encounter: null });
   }
 
   const p = prevRel(st, 'p');

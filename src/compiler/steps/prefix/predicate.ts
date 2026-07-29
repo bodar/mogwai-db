@@ -10,7 +10,8 @@ import { resolveTraversalOperands } from '../tail/operand.ts';
 import { labelCtx, labelIsBound, type LabelScope } from '../context/context.ts';
 import type { Engine } from '../../engine/deps.ts';
 import type { FastPath } from '../../options/fast-paths.ts';
-import { VERTEX_MOVES, EDGE_MOVES, unionOf } from '../../ir/step.ts';
+import { VERTEX_MOVES, EDGE_MOVES, REDUCERS, unionOf } from '../../ir/step.ts';
+import { ALWAYS_PRODUCTIVE_TERMINAL } from '../../ir/productivity.ts';
 
 // ---------- where()/not()/filter(__.…) → a boolean filter predicate ----------
 //
@@ -234,14 +235,17 @@ function compileInlinePredicate(
 
   const term = body[body.length - 1]?.name;
 
-  // A reducing scalar (count/sum) compared by is(P). Bare (no is) always yields one value
-  // → the traverser always passes, so it's a no-op filter. The compared form is an
-  // index-only fast path: correlatedReduce renders the reduction as a correlated subquery
-  // (no materialized child). A shape it can't render returns null → the caller falls
-  // through to the generic reducer child (childExistenceGate over <move>.count().is),
-  // which is result-equivalent.
-  if (term === 'count' || term === 'sum') {
-    if (!hasIs) return q`1`;
+  // A reducer in filter position is a productivity question, not a truthiness test. Only
+  // count() is always productive; sum/min/max/mean emit no traverser over an empty input.
+  // Keep that fact in ir/productivity.ts, shared with the no-op Pass, and decline every
+  // unproductive-capable bare reducer to the generic child-existence gate. Returning `1`
+  // here used to make predicateInlining silently retain every parent for
+  // where(__.out().values('age').sum()).
+  if (term && REDUCERS.has(term)) {
+    if (!hasIs) {
+      if (ALWAYS_PRODUCTIVE_TERMINAL.has(term)) return q`1`;
+      decline(`bare reducer needs generic productivity lowering: __.${body.map((s) => s.name + '()').join('.')}`);
+    }
     const reduced = correlatedReduce(engine, body, ctx, params, labels);
     if (!reduced) decline(`reduction beyond inline lowering: __.${body.map((s) => s.name + '()').join('.')}`);
     return predicateSql(reduced, isPred);

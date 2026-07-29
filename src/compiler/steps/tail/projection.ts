@@ -694,7 +694,7 @@ function lowerScalarProjection(st: ElementStream, projStep: IRStep, acc: TailAcc
  * beats a peephole nobody's query needs (see the plan's decision log).
  */
 function compileFold(st: ElementStream, acc: TailAcc): ListStream {
-  if (acc.reducer || acc.isPreds.length || acc.distinct || acc.offset || acc.limit !== null)
+  if (acc.reducer || acc.isPreds.length || acc.offset || acc.limit !== null)
     throw new Error('dedup()/limit()/range()/is() before a non-terminal fold() not yet supported');
   if (st.traverserLayout.aliases.size || st.traverserLayout.path || st.traverserLayout.origins.length)
     throw new Error('fold() carrying as()/path()/branch state into a list value not yet supported');
@@ -716,7 +716,16 @@ function compileFold(st: ElementStream, acc: TailAcc): ListStream {
   }
   if (!projName) {
     // Element list: fold the bare rowids; unfold/framing rejoins nodes/edges.
-    const rel = st.q.cte(q`SELECT ${jsonbGroupArray(q`p.id`)} AS list FROM ${st.rel.as('p')}`, ['list']);
+    // Retyping at a non-terminal fold must consume every modifier already absorbed by the
+    // value-tail accumulator. In particular, dedup() is a set barrier over the input
+    // traversers, not a terminal-rendering detail — putting DISTINCT in the relation fed to
+    // the aggregate keeps fold().unfold() multiset-faithful.
+    const p = st.rel.as('p');
+    const source = acc.distinct
+      ? q`(SELECT DISTINCT ${p.c.id} AS id FROM ${p}) AS f`
+      : q`${p}`;
+    const member = acc.distinct ? q`f.id` : p.c.id;
+    const rel = st.q.cte(q`SELECT ${jsonbGroupArray(member)} AS list FROM ${source}`, ['list']);
     return toListStream(carry, rel, { kind: 'elem', elem: st.elem });
   }
   if (projName === 'values' || projName === 'id' || projName === 'label') {
@@ -730,10 +739,17 @@ function compileFold(st: ElementStream, acc: TailAcc): ListStream {
     // values() drops missing-property elements (baseWhere = IS NOT NULL), matching
     // TinkerPop's fold-of-values. id/label have no baseWhere.
     const where = proj.baseWhere ? q` WHERE ${proj.baseWhere}` : empty;
+    // As with element lists, dedup belongs to the rows entering fold, before their JSON
+    // aggregation. A derived relation also composes with the existing order form without
+    // relying on SQLite's DISTINCT aggregate syntax restrictions.
+    const selected = acc.distinct
+      ? q`SELECT DISTINCT ${proj.scalarExpr!} AS v FROM ${proj.fromNode}${where}`
+      : q`SELECT ${proj.scalarExpr!} AS v FROM ${proj.fromNode}${where}`;
+    const source = q`(${selected})`;
     const arr = orderDir
-      ? q`jsonb(json_group_array(${proj.scalarExpr!} ORDER BY ${proj.scalarExpr!} ${orderDir === 'desc' ? 'DESC' : 'ASC'}))`
-      : jsonbGroupArray(proj.scalarExpr!);
-    const rel = st.q.cte(q`SELECT ${arr} AS list FROM ${proj.fromNode}${where}`, ['list']);
+      ? q`jsonb(json_group_array(f.v ORDER BY f.v ${orderDir === 'desc' ? 'DESC' : 'ASC'}))`
+      : jsonbGroupArray(q`f.v`);
+    const rel = st.q.cte(q`SELECT ${arr} AS list FROM ${source} AS f`, ['list']);
     return toListStream(carry, rel, { kind: 'scalar' });
   }
   throw new Error(`fold() of a ${projName}() projection not yet supported`);

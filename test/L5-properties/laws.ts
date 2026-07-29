@@ -69,21 +69,6 @@ export const LAWS: readonly Law[] = [
       name: `bothE(${l}).otherV() = both(${l})`, on: 'vertex',
       why: 'The edge-mediated form of both(), which routes through otherV() rather than a direct neighbour hop.',
       lhs: (p) => `${p}.bothE('${l}').otherV()`, rhs: (p) => `${p}.both('${l}')`,
-      knownBroken: [{
-        prefix: /simplePath\(\)|cyclicPath\(\)|\.path\(/,
-        diagnosis:
-          'SILENT WRONG ANSWER — otherV() miscounts while PATH TRACKING is live. '
-          + 'g.V().out().simplePath().bothE("created").otherV() yields lop x3 / marko x2 where '
-          + 'g.V().out().simplePath().both("created") yields lop x1 / marko x3. The simplePath() here is '
-          + 'provably a NO-OP (g.V().out().simplePath() equals g.V().out(), since a one-hop path cannot '
-          + 'revisit), so the law must hold exactly as it does without it — and it does hold without it, '
-          + 'which is what identifies the path-tracking form as the broken one. Likely cause: '
-          + 'bothE().otherV() appends TWO path positions per hop where both() appends one, and the '
-          + 'otherV() position projector picks the wrong endpoint off the exploded path row (compare '
-          + 'POSITION_MOVEMENTS in steps/tail/path.ts, which lists bothV but reaches otherV separately). '
-          + 'Invisible to the fast-path differential: both configs agree on the wrong answer. '
-          + 'Tracked in docs/outstanding-work.md item 0.',
-      }],
     },
   ]),
 
@@ -124,17 +109,6 @@ export const LAWS: readonly Law[] = [
     name: 'fold().unfold() = q', on: 'vertex',
     why: 'The documented retype round-trip (steps/CLAUDE.md): collecting to a list and re-emitting restores the stream, so the whole fold/unfold substrate must be multiset-faithful.',
     lhs: (p) => p, rhs: (p) => `${p}.fold().unfold()`,
-    knownBroken: [{
-      prefix: /dedup\(\)/,
-      diagnosis:
-        'SILENT WRONG ANSWER — a NON-TERMINAL fold() after dedup() folds the UN-deduplicated multiset. '
-        + 'g.V().out().dedup() gives 4 vertices; g.V().out().dedup().fold().unfold() gives 6 (lop x3). '
-        + 'The terminal fold is fine — buildProjection renders SELECT DISTINCT from acc.distinct — so '
-        + 'this is the retype route only: foldTailAcc stops at a non-terminal fold() as a shape '
-        + 'boundary, and the list built there does not carry the dedup the acc had already absorbed. '
-        + 'Invisible to the fast-path differential: both configs agree on the wrong answer. '
-        + 'Tracked in docs/outstanding-work.md item 0.',
-    }],
   },
 
   // ---- barrier identities ----

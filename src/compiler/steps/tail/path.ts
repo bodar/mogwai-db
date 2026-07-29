@@ -13,7 +13,7 @@ import { pushChildScope, tryCompileScalarValueChild } from './child.ts';
 import { lowerGlobalCount } from './barrier.ts';
 import { byAt, childCtx, classifyBy, childSteps, classifyScalarChild, reuseCurrentFrame, type ChildFrame, type ChildScope } from './child-shape.ts';
 import { tryLowerScalarChoose, tryLowerScalarCoalesce } from '../prefix/branch.ts';
-import { VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, unionOf } from '../../ir/step.ts';
+import { VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, unionOf } from '../../ir/step.ts';
 
 // ---------- path() (linear regime) ----------
 
@@ -41,10 +41,12 @@ function positionScalar(ctx: ScalarCtx, byArgs: any[] | undefined): Expression |
   throw new Error('unsupported path().by() modulator');
 }
 
-// The absent OTHER_V here is the OPEN BUG in docs/outstanding-work.md item 0 (otherV() after a
-// path position is not tracked). Written as a union so it reads as missing rather than unnoticed;
-// adding it needs its own test, so it stays out until then.
-const POSITION_MOVEMENTS = unionOf(VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES);
+// `otherV()` is an endpoint movement too, but is deliberately separate from ENDPOINT_MOVES:
+// unlike outV/inV/bothV it consumes the carried entering-vertex context. Position fan-out must
+// nevertheless recognize it exactly like every other path-appending movement; otherwise
+// bothE().otherV() projects the edge position instead of the reached vertex while path tracking
+// is live.
+const POSITION_MOVEMENTS = unionOf(VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V);
 const ELEMENT_POSITION_BRANCH = new Set(['choose', 'coalesce', 'union']);
 
 /** PURE. Does this branch-arm body produce MORE than one value per input element? A path

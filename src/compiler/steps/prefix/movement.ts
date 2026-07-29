@@ -1,7 +1,7 @@
 import { q, list, empty, derived, type Expression } from '../../../sql/kernel/q.ts';
 import { edges } from '../../../sql/schema.ts';
 import { dirsFor, edgeLabelFilter, type Elem } from '../../plan/plan.ts';
-import { appendCte, appendPathPos, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, partitionOver, prevRel, type TraverserLayout, type PathState, type ElementStream, type StepFn } from '../context/context.ts';
+import { appendCte, appendPathPos, layoutProjection, layoutProjectionMinting, layoutProjectionMintingMany, layoutCols, patchLayout, partitionOver, prevRel, type TraverserLayout, type PathState, type ElementStream, type StepFn } from '../context/context.ts';
 import { fastPathContextOf } from '../../engine/deps.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
 import { lowerReSource } from '../graph-source.ts';
@@ -64,10 +64,10 @@ function finishMove(st: ElementStream, body: Expression, opts: MoveOpts): Elemen
  *  fragment `, <idExpr> AS p{k}` to splice into each branch, the advance()-opts to
  *  register the position, and undefined-fragments/opts when not tracking. `idExpr`
  *  is the branch's own moved-id expression (the same value bound to `id`). */
-function pathAppend(st: ElementStream, newElem: Elem): { frag: (idExpr: Expression) => Expression; opts: { path?: PathState } } {
+function pathAppend(st: ElementStream, newElem: Elem): { frag: (idExpr: Expression) => Expression; col?: string; opts: { path?: PathState } } {
   if (!st.traverserLayout.path) return { frag: () => empty, opts: {} };
   const { path, col } = appendPathPos(st.traverserLayout.path, newElem);
-  return { frag: (idExpr) => q`, ${idExpr} AS ${col}`, opts: { path } };
+  return { frag: (idExpr) => q`, ${idExpr} AS ${col}`, col, opts: { path } };
 }
 
 /** out()/in()/both(): vertex → neighbour vertices over the (from,to) edge pairs. */
@@ -90,13 +90,18 @@ export const toEdge: StepFn = (s, st) => {
   const froms = s.name === 'outE' ? ['src'] : s.name === 'inE' ? ['tgt'] : ['src', 'tgt'];
   const e = edges.as('e');
   const p = prevRel(st, 'p');
-  const cf = layoutProjection(st.traverserLayout, p);
   const pa = pathAppend(st, 'edge');
+  const outLayout = patchLayout(st.traverserLayout, { fromV: st.traverserLayout.trackFromV ? 'fv' : null, ...pa.opts });
   // Only record the entering vertex when a downstream otherV() needs it (trackFromV) —
   // otherwise every edge step would carry a dead column off the index-only hot path.
-  const fvCol = (idExpr: Expression) => st.traverserLayout.trackFromV ? q`, ${idExpr} AS fv` : empty;
+  const carry = (idExpr: Expression) => {
+    const mints = new Map<string, Expression>();
+    if (st.traverserLayout.trackFromV) mints.set('fv', idExpr);
+    if (pa.col) mints.set(pa.col, q`e.id`);
+    return layoutProjectionMintingMany(outLayout, p, mints);
+  };
   const selects = froms.map((from) =>
-    q`SELECT ${e.c.id} AS id${cf}${pa.frag(e.c.id)}${fvCol(p.c.id)} FROM ${e} JOIN ${p} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(s.args)}`);
+    q`SELECT ${e.c.id} AS id${carry(p.c.id)} FROM ${e} JOIN ${p} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(s.args)}`);
   return finishMove(st, list(selects, ' UNION ALL '), { elem: 'edge', fromV: st.traverserLayout.trackFromV ? 'fv' : null, ...pa.opts });
 };
 

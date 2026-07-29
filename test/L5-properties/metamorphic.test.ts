@@ -82,22 +82,6 @@ describe('L5 — metamorphic laws', () => {
     }, 600_000);
   });
 
-  test('every knownBroken exemption still reproduces', () => {
-    // A stale exemption is worse than none: it silently suppresses a law that now holds. Each entry
-    // names a concrete reproduction in its diagnosis; assert the pair still disagrees.
-    const stale: string[] = [];
-    for (const [q, r] of [
-      ['g.V().out().simplePath().bothE(\'created\').otherV()', 'g.V().out().simplePath().both(\'created\')'],
-      ['g.V().out().dedup().fold().unfold()', 'g.V().out().dedup()'],
-    ] as const) {
-      const a = outcomeOf(store, q, DEFAULT_FAST_PATHS);
-      const b = outcomeOf(store, r, DEFAULT_FAST_PATHS);
-      const d = a.kind === 'rows' && b.kind === 'rows' ? diverge(a, b, store) : null;
-      if (!d || !GATING.has(d.kind)) stale.push(`${q} now agrees with ${r} — drop its knownBroken entry`);
-    }
-    expect(stale).toEqual([]);
-  });
-
   test('every law states its reasoning', () => {
     // A law without a stated spec fact is an assumption: when it fails, nobody can tell whether the
     // engine or the law is wrong. Cheap structural guard, in the spirit of FastPath.equivalentWhen.

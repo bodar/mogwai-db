@@ -150,18 +150,23 @@ export function numericReducerAggregate(
   value: Expression,
   reducer: NumericReducer,
   bulk?: Expression,
-): { value: Expression; type: Expression } {
+): { value: Expression; type: Expression; productive: Expression } {
   const eligible = reducer === 'min' || reducer === 'max'
     ? q`CASE WHEN typeof(${value}) in ('integer', 'real', 'text') THEN ${value} END`
     : q`CASE WHEN typeof(${value}) in ('integer', 'real') THEN ${value} END`;
-  if (bulk && reducer === 'sum')
-    return { value: q`SUM(${eligible} * ${bulk})`, type: q`typeof(SUM(${eligible} * ${bulk}))` };
+  if (bulk && reducer === 'sum') {
+    const reduced = q`SUM(${eligible} * ${bulk})`;
+    return { value: reduced, type: q`typeof(${reduced})`, productive: q`${reduced} IS NOT NULL` };
+  }
   if (bulk && reducer === 'mean')
     // Weighted mean, forced to REAL (avoid integer division): Σ(v·bulk) / Σ(bulk over eligible rows).
-    return { value: q`SUM(${eligible} * ${bulk}) * 1.0 / SUM(CASE WHEN ${eligible} IS NOT NULL THEN ${bulk} END)`, type: q`'real'` };
+    {
+      const reduced = q`SUM(${eligible} * ${bulk}) * 1.0 / SUM(CASE WHEN ${eligible} IS NOT NULL THEN ${bulk} END)`;
+      return { value: reduced, type: q`'real'`, productive: q`${reduced} IS NOT NULL` };
+    }
   const fn = reducer === 'sum' ? 'SUM' : reducer === 'mean' ? 'AVG' : reducer === 'min' ? 'MIN' : 'MAX';
   const reduced = q`${fn}(${eligible})`;
-  return { value: reduced, type: reducer === 'mean' ? q`'real'` : q`typeof(${reduced})` };
+  return { value: reduced, type: reducer === 'mean' ? q`'real'` : q`typeof(${reduced})`, productive: q`${reduced} IS NOT NULL` };
 }
 
 /** Scope-aware scalar barrier. The parent domain is the aggregate's left side, so
@@ -198,6 +203,7 @@ export function lowerScopedScalarReducer(
   const s = input.rel.as('s');
   const join = q`${d} LEFT JOIN ${s} ON ${s.c[ordinal]}=${d.c[ordinal]}`;
   let aggregate: Expression;
+  let having: Expression = empty;
   let result: ScalarStream['result'];
   let as = staticTypeOf(input.type);
   if (reducer === 'count') {
@@ -209,6 +215,11 @@ export function lowerScopedScalarReducer(
   } else {
     const reduced = numericReducerAggregate(s.c.v, reducer);
     aggregate = q`${reduced.value} AS v, ${reduced.type} AS vt`;
+    // Numeric reducers are unproductive over an empty (or wholly ineligible) child
+    // stream. The domain LEFT JOIN remains required for always-productive count(), but
+    // these reducers must remove its null aggregate row so every child consumer observes
+    // ordinary apply cardinality.
+    having = q` HAVING ${reduced.productive}`;
     result = 'number';
     as = undefined;
   }
@@ -216,7 +227,7 @@ export function lowerScopedScalarReducer(
   // per-origin order marker a following scoped slice/reducer needs.
   const outCarried = patchLayout(layout, { encounter: 'encounter' });
   const rel = input.q.cte(
-    q`SELECT ${aggregate}${layoutProjectionMinting(outCarried, d, 'encounter', q`1`)} FROM ${join} GROUP BY ${d.c[ordinal]}`,
+    q`SELECT ${aggregate}${layoutProjectionMinting(outCarried, d, 'encounter', q`1`)} FROM ${join} GROUP BY ${d.c[ordinal]}${having}`,
     [...(result === 'number' ? ['v', 'vt'] : ['v']), ...layoutCols(outCarried)],
   );
   return toScalarStream(loweringStateOf(input, outCarried), rel, as, { result });
@@ -233,8 +244,6 @@ export function lowerGlobalNumericReducer(input: ScalarStream, reducer: NumericR
     const sum = bulk ? q`SUM(${src.c.v} * ${bulk})` : q`SUM(${src.c.v})`;
     body = q`SELECT ${sum} AS v, typeof(${sum}) AS vt FROM ${src}`;
   } else if (reducer === 'mean') {
-    // Weighted mean over the numeric rows (WHERE already restricts to them): Σ(v·bulk)/Σbulk,
-    // forced REAL. bulk absent → AVG. Both = AVG while bulk≡1.
     body = bulk
       ? q`SELECT SUM(${src.c.v} * ${bulk}) * 1.0 / SUM(${bulk}) AS v, 'real' AS vt FROM ${src} WHERE typeof(${src.c.v}) in ('integer', 'real')`
       : q`SELECT AVG(${src.c.v}) AS v, 'real' AS vt FROM ${src} WHERE typeof(${src.c.v}) in ('integer', 'real')`;

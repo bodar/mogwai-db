@@ -193,6 +193,10 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().values("age").fold().sum(Scope.local)').sql).toContain('json_each');
     // Local reducers are ScalarStream transitions, so a later predicate composes.
     expect(read('g.V().values("age").fold().sum(Scope.local).is(P.gt(1))').shape).toEqual({ kind: 'scalar' });
+    // A retype boundary consumes the already-accumulated dedup before materialising the
+    // list; it cannot defer that set semantics to terminal framing.
+    expect(run(seededStore(), 'g.V().out().dedup().fold().unfold().values("name")').map((r: any) => r.v).sort())
+      .toEqual(run(seededStore(), 'g.V().out().dedup().values("name")').map((r: any) => r.v).sort());
   });
 
   test('fold preserves uniform scalar item types through ListStream materialization', async () => {

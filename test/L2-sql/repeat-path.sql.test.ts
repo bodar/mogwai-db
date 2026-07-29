@@ -268,6 +268,18 @@ describe('repeat / path SQL', () => {
     everyLowering(surviving("__.out().count().is(P.eq(4))"), 0);
     everyLowering(surviving("__.out().values('age').sum().is(P.eq(22))"), 0);
 
+    // Numeric reducers differ from count()/fold(): an empty child emits no traverser, so an
+    // existence consumer must reject its parent. Check every reducer and both the inline and
+    // materialized routes; the fast path may only accelerate the generic contract.
+    const namesFor = (reducer: string, inline: boolean) =>
+      runWith(seededStore(), `g.V().where(__.out().values('age').${reducer}()).values('name')`, {
+        fastPaths: { predicateInlining: inline, scalarPredicateInlining: inline },
+      }).map((r: any) => r.v).sort();
+    for (const reducer of ['sum', 'min', 'max', 'mean']) {
+      expect(namesFor(reducer, true)).toEqual(['marko']);
+      expect(namesFor(reducer, false)).toEqual(['marko']);
+    }
+
     // The rule as SQL shape, in BOTH directions — the same query collapses its frontier and
     // weights its GLOBAL count by that bulk, while the SCOPED reducer inside it does not.
     const off = { fastPaths: { movementCollapse: true, predicateInlining: false, scalarPredicateInlining: false } };

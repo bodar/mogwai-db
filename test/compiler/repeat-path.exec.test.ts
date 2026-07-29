@@ -462,6 +462,15 @@ describe('repeat() body: the generic body relation', () => {
     expect(names(store, 'g.V(1).repeat(__.bothE().otherV().has("age",P.lt(30))).times(1).values("name")')).toEqual(['vadas']);
   });
 
+  test('otherV preserves the carried schema when path tracking and entering-vertex state meet', () => {
+    // bothE() mints BOTH an entering-vertex column (for otherV) and a path position. Their
+    // declared slots differ, so this pin catches a physical CTE-column reorder rather than only
+    // the visible movement result.
+    const store = seededStore();
+    expect(names(store, 'g.V().out().simplePath().bothE("created").otherV().values("name")'))
+      .toEqual(names(store, 'g.V().out().simplePath().both("created").values("name")'));
+  });
+
   test('traversers stay a MULTISET through the body relation', () => {
     // The relation must NOT be built with DISTINCT: two parallel edges are two traversers. josh
     // reaches lop and ripple, and marko/josh/peter all reach lop, so a one-hop walk from every

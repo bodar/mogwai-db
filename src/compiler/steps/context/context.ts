@@ -366,8 +366,24 @@ export function layoutProjection(c: TraverserLayout, p: Relation): Expression {
  *  reordered. `col` MUST already be present in layoutCols(c) (i.e. the patched carried
  *  that declares it) — the mint replaces the forward, it does not add a column. */
 export function layoutProjectionMinting(c: TraverserLayout, p: Relation, col: string, mint: Expression): Expression {
+  return layoutProjectionMintingMany(c, p, new Map([[col, mint]]));
+}
+
+/** Like layoutProjectionMinting, but for a step that creates multiple carried values at
+ * once. The projection is still driven by layoutCols, so a newly-created rigid column
+ * (fromV) lands before an also-new path position even though both values originate at
+ * the same movement. This is the multi-column form of the same schema-preservation
+ * contract; callers must only name columns already declared by `c`. */
+export function layoutProjectionMintingMany(
+  c: TraverserLayout,
+  p: Relation,
+  mints: ReadonlyMap<string, Expression>,
+): Expression {
   const cols = layoutCols(c);
-  return cols.length ? list(cols.map((x) => (x === col ? q`, ${mint} AS ${col}` : q`, ${p.c[x]}`)), '') : empty;
+  return cols.length ? list(cols.map((x) => {
+    const mint = mints.get(x);
+    return mint ? q`, ${mint} AS ${x}` : q`, ${p.c[x]}`;
+  }), '') : empty;
 }
 
 /** The window frame for minting an emission-order encounter: a GLOBAL sequence at root

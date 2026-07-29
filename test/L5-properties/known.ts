@@ -34,10 +34,10 @@
 //
 // WHAT THIS ORACLE CANNOT SEE, so an empty list is not a claim of correctness: the differential
 // compares the two lowerings against each other, so a defect PRESENT IN BOTH is invisible to it.
-// Two such were found by hand while diagnosing these four, and both are recorded in
-// docs/outstanding-work.md rather than here (they are not divergences):
-// non-productive `by(key)` at `order()` (since fixed), and an unproductive `sum()`/`min()`/`max()`
-// body in a filter position, which still wrongly keeps the traverser.
+// Two such were found by hand while diagnosing these four and were fixed through the generic
+// lowering paths: non-productive `by(key)` at `order()`, and unproductive numeric reducers in a
+// filter position. Keep adding metamorphic laws for this blind-spot class rather than treating an
+// empty differential ratchet as a proof of correctness.
 
 export interface KnownDivergence {
   /** The minimal reproduction, verbatim. Also what the stale-entry check re-runs. */
