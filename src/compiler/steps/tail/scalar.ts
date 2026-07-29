@@ -1,7 +1,7 @@
 import { derived, empty, list, paren, q, raw, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { hasUnresolvedOperand, operandDeps, resolveTraversalOperands } from './operand.ts';
 import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx, TYPE_PER_ROW, TYPE_STATIC, TYPE_UNKNOWN, typeCtxOf } from '../../plan/plan.ts';
-import { gtypeName, isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { gtypeName, isNested, isOperatorArg, isOrderArg, isScopeArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { aliasArmProjection, carryFrag, carryFragMint, carriedCols, carriedWith, mergeAliasMaps, partitionOver, withoutCarried, type Carry } from '../context/context.ts';
 import { carryOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
@@ -84,7 +84,7 @@ export const SCALAR_ROW_STEPS = new Set([
 ]);
 
 const isLocal = (step: PStep): boolean =>
-  (step.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local');
+  (step.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
 
 // Payload = the value/type projection columns; emission order (encounter) is a CARRIED
 // column now, so it rides via carryFrag alongside every other carried column (never here).
@@ -440,7 +440,7 @@ export function lowerScalarFilter(s: ScalarStream, step: PStep): ScalarStream | 
  */
 export function lowerScalarSplit(s: ScalarStream, step: PStep): ListStream {
   const args = step.args ?? [];
-  if (args.some((a: any) => a && typeof a === 'object' && a.scope === 'local'))
+  if (args.some((a: unknown) => isScopeArg(a) && a.scope === 'local'))
     throw new Error('split(Scope.local) requires a preceding list-producing step (e.g. fold())');
   const sep = args[0];
   if (sep !== null && sep !== undefined && typeof sep !== 'string')
@@ -571,7 +571,7 @@ export function lowerScalarSack(s: ScalarStream, step: PStep): ScalarStream {
   if (!s.carried.sack) throw new Error('sack() over a scalar stream requires withSack() or a preceding sack step');
   const sk = s.carried.sack;
   const p = s.rel.as('p');
-  const op = (step.args ?? []).find((a: any) => a && typeof a === 'object' && 'operator' in a)?.operator;
+  const op = (step.args ?? []).find(isOperatorArg)?.operator;
   if (!op) {
     // bare sack() read: the sack value becomes the current object.
     if ((step.args ?? []).length) throw new Error('sack(argument) read form not supported (bare sack() only)');
@@ -684,9 +684,9 @@ export function lowerScalarRows(
       if (bys.length > 1) throw new Error('multiple order().by() modulators on a scalar stream not yet supported');
       if (bys.length === 1) {
         const by = bys[0];
-        if (by.some((a: any) => typeof a === 'string' || (a && typeof a === 'object' && ('nested' in a || 'token' in a))))
+        if (by.some((a: unknown) => typeof a === 'string' || isNested(a) || isTokenArg(a)))
           throw new Error('order().by(key/traversal) on a scalar stream not supported (no properties)');
-        const dir = by.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
+        const dir = by.find(isOrderArg)?.order;
         order = dir === 'shuffle' ? q`RANDOM()` : dir === 'desc' ? q`${sortVal} DESC` : q`${sortVal} ASC`;
       }
       // A child scope OR a demanded root chain (carried.encounter live) mints a fresh encounter

@@ -7,7 +7,7 @@
 
 import { q, value, raw, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { predicateSql, scalarTx, compareKey, inferVtypeSql } from '../../plan/plan.ts';
-import { gtypeName, isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { gtypeName, isNested, isOrderArg, isScopeArg, stepChain } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { carryOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, mapOfToListOf, PROPERTY_PAYLOAD, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type PropertyStream, type ScalarStream, type MapStream, type ShapeTailFn } from '../context/stream.ts';
 import { carryFrag, carriedCols, type ElementStream } from '../context/context.ts';
@@ -17,7 +17,7 @@ import { lowerGlobalCount } from './barrier.ts';
 import { collectionTypeOf } from './scalar.ts';
 
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
-const isLocal = (s: PStep): boolean => (s.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local');
+const isLocal = (s: PStep): boolean => (s.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
 
 // ---------- the member seam: one encoding decision, read in one place ----------
 //
@@ -248,7 +248,7 @@ function listLocalTransform(s: ListStream, step: PStep): ListStream {
     for (const by of step.bys ?? []) {
       if (by.some((a: any) => typeof a === 'string' || (isNested(a))))
         throw new Error('order(Scope.local).by(key/traversal) not yet supported');
-      const ord = by.find((a: any) => a && typeof a === 'object' && 'order' in a);
+      const ord = by.find(isOrderArg);
       if (ord?.order === 'shuffle') throw new Error('order(Scope.local) shuffle not yet supported');
       desc = ord?.order === 'desc';
     }
