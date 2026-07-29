@@ -552,3 +552,12 @@ Sources: [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md),
   plan implemented, only P3 tails remain.
 - **[wire-and-storage-facts](./2026-07-25-wire-and-storage-facts.md)** — Map.Entry framing + MapStream
   model. Durable reference, not a plan.
+- **[tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md)** — our
+  vocabulary read against TinkerPop `gremlin-core` on `origin/master`. Names the prior art for
+  `Carried` (`TraverserRequirement`'s declare→union→derive), lists the renames worth doing
+  (incl. two dangerous collisions: `CompileScope`/`CompilerScope`, `Carry`/`Carried`), and records
+  **four TinkerPop patterns to refuse** — marker-interface `instanceof` dispatch, the Global/Local
+  step-class split, `GValue` placeholder duality (elegant, but worthless without a plan cache), and
+  the already-refuted typed core IR. Read before proposing a naming change or porting a TinkerPop
+  mechanism. Its structural half defers to
+  [channel-preservation](./2026-07-28-channel-preservation-refactoring-plan.md).
