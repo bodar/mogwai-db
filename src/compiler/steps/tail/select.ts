@@ -15,6 +15,16 @@ import { byAt, childCtx, childSteps, classifyBy, classifyElementChild, classifyL
 
 // ---------- select()/project() ----------
 
+/** `select(__.keyTraversal)` is TinkerPop's TraversalSelectStep, not a malformed
+ * multi-key SelectStep. A dynamic label requires a runtime alias lookup whose result
+ * shape can vary by key; until that uniform lookup substrate exists, reject it here
+ * before any record/single-select builder drops the child and renders an empty SELECT. */
+function staticSelectKeys(step: IRStep): string[] {
+  if (step.name === 'select' && step.args.some(isNested))
+    throw new Error('select() with a traversal key not yet supported (needs dynamic alias lookup)');
+  return step.args.filter((a): a is string => typeof a === 'string');
+}
+
 /** Interpret one by() modulator's args into a projected sub-value kind. */
 function byToEntry(byArgs: any[] | undefined): { sub: 'vertex' | 'value'; key?: string } {
   const by = classifyBy(byArgs);
@@ -220,7 +230,7 @@ export function lowerSingleSelect(st: ElementStream, proj: IRStep): Stream {
   const pop = proj.args.find(isPopArg);
   const popMode = pop?.pop ?? 'last';
   if (proj.args.some(isColumnArg)) throw new Error('select(Column) not yet supported');
-  const keys = proj.args.filter((a): a is string => typeof a === 'string');
+  const keys = staticSelectKeys(proj);
   if (keys.length !== 1) throw new Error('lowerSingleSelect requires exactly one label');
   const selected = st.traverserLayout.aliases.get(keys[0]);
   if (!selected) return emptyElementLike(st); // label bound nowhere → drop every traverser
@@ -388,12 +398,12 @@ export function lowerRecordSelectProject(st: ElementStream, proj: IRStep): Strea
   const pop = proj.args.find(isPopArg);
   if (pop && pop.pop !== 'last') {
     if (isProject) throw new Error(`project(Pop.${pop.pop}) is not a valid form`);
-    const keys = proj.args.filter((a): a is string => typeof a === 'string');
+    const keys = staticSelectKeys(proj);
     return selectRecordFromAlias(st, proj, [...new Set(keys)], pop.pop);
   }
   if (proj.args.some(isColumnArg)) throw new Error('select(Column) not yet supported');
 
-  const keys = proj.args.filter((a): a is string => typeof a === 'string');
+  const keys = staticSelectKeys(proj);
   if (!keys.length) throw new Error(`${proj.name}() requires at least one key`);
   if (!isProject && keys.some((k) => !aliases.has(k))) return emptyElementLike(st); // any unbound → drop all
   const traversalRecord = tryLowerTraversalRecord(st, proj, keys);

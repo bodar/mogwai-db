@@ -261,6 +261,11 @@ describe('scalar-parent branch/map (Stage 1)', () => {
   });
 });
 
+test('select() traversal keys fail closed until dynamic alias lookup has a uniform shape', () => {
+  expect(() => compile('g.V().as("a").out("knows").as("a").select(Pop.all, __.constant("a"))', {}))
+    .toThrow('select() with a traversal key not yet supported');
+});
+
 // Stage 2: math("<formula>") over a scalar parent — `_` = the value, one arithmetic Double.
 describe('scalar math (Stage 2)', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));

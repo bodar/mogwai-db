@@ -474,6 +474,7 @@ const tailGroup: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
 const tailSelectProject: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
   if (step.name === 'select'
     && step.args.filter((a) => typeof a === 'string').length === 1
+    && !step.args.some(isNested)
     && !step.args.some((a) => a && typeof a === 'object' && 'column' in a))
     return continueLowering(lowerSingleSelect(st, step), stop + 1);
   return continueLowering(lowerRecordSelectProject(st, step), stop + 1);
