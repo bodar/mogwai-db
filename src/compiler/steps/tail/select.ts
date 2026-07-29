@@ -2,7 +2,7 @@ import { q, list, empty, value, type Expression, type Relation } from '../../../
 import { nodes, edges, labels } from '../../../sql/schema.ts';
 import { framedProps, labelNameSub, nodePropScalar, nodePropType, edgePropScalar, edgePropType, edgePropsAgg, predicateSql, propExtract, extIdOf, P_OPS, storedValueExpr } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { isColumnArg, isPopArg, isScopeArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { aliasElem, aliasIsElement, carryFrag, carriedCols, scalarTypeFromAlias, type AliasMap, type ElementStream } from '../context/context.ts';
 import { aliasId, aliasPop, aliasPresent, aliasScalar, entryTypeTag, shapeElem } from '../context/alias.ts';
 import { emptyElementLike, historyPropertyValues, historyScalarValues, historyValues, popEnd, popIsListResult, selectOneFromAlias } from './labelselect.ts';
@@ -664,7 +664,7 @@ const recordOrder: ShapeTailFn<RecordStream> = (s, step, steps, at) => {
 };
 
 const recordSlice: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
-    const local = step.args.some((a: any) => a && typeof a === 'object' && a.scope === 'local');
+    const local = step.args.some((a: unknown) => isScopeArg(a) && a.scope === 'local');
     const nums = step.args.filter((a): a is number => typeof a === 'number').map(Number);
     if (local) {
       let offset = 0;
@@ -700,9 +700,9 @@ const recordSlice: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
 };
 
 const recordSelect: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
-  const pop = step.args.find((a) => a && typeof a === 'object' && 'pop' in a) as { pop: string } | undefined;
+  const pop = step.args.find(isPopArg);
   if (pop && pop.pop !== 'last') throw new Error(`select(Pop.${pop.pop}) on a record not yet supported`);
-  const column = step.args.map((a: any) => a && typeof a === 'object' && a.column)
+  const column = step.args.map((a: unknown) => isColumnArg(a) ? a.column : undefined)
     .find((c: any) => c === 'keys' || c === 'values') as 'keys' | 'values' | undefined;
   const r = s.rel.as('r');
   if (column) {
