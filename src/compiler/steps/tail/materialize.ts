@@ -123,13 +123,11 @@ export function materializeListRoot(stream: ListStream): Compiled {
   // listResult recurses and only the leaf join hits nodes/edges. The `of` descriptor rides
   // on the jsonbList shape so frameListOf recurses the same nesting on the framing side.
   if (stream.of.kind === 'list')
-    return materializeRoot(stream.q, q`SELECT ${listResult(c.c.list, stream.of)} AS list FROM ${c}`, { kind: 'jsonbList', of: stream.of });
+    return materializeRoot(stream.q, q`SELECT ${listResult(c.c.list, stream.of)} AS list FROM ${c}`, { kind: 'jsonbList', items: stream.of });
   const typed = stream.of.kind === 'scalar' && stream.of.typed ? true : undefined;
-  const as = stream.of.kind === 'scalar' ? stream.of.as : undefined;
   const shape: Shape = stream.set
     ? { kind: 'jsonbSet', typed }
-    : stream.of.kind === 'property' ? { kind: 'jsonbList', of: stream.of }
-    : typed ? { kind: 'jsonbList', typed } : as ? { kind: 'jsonbList', as } : { kind: 'jsonbList' };
+    : { kind: 'jsonbList', items: stream.of };
   return materializeRoot(stream.q, q`SELECT json(${c.c.list}) AS list FROM ${c}`, shape);
 }
 

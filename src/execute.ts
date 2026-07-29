@@ -609,7 +609,7 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
     // text via json(), so it JSON.parses; scalar elements frame via listSerializer).
     // A list-VALUE stream: frame each row's list by its item descriptor (shared with the
     // variant list arm + record list fields) — typed {t,v} items, a uniform `as` tag, or infer.
-    case 'jsonbList': for (const r of rows) yield frameListOf(r.list, shape.of ?? { kind: 'scalar', as: shape.as, typed: shape.typed }); return;
+    case 'jsonbList': for (const r of rows) yield frameListOf(r.list, shape.items); return;
     // Relational element-list values materialize as ordered JSON object arrays in
     // SQL, then frame each member through the same property-preserving element
     // encoders as ordinary vertex/edge rows.

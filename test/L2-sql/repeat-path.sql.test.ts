@@ -378,8 +378,8 @@ describe('repeat / path SQL', () => {
     // A homogeneous scalar path coerces to one list value per row, so the whole list-value
     // engine composes: combine/reverse → List, merge/difference/intersect/disjunct → Set,
     // conjoin → String, unfold → the exploded scalars.
-    expect(read('g.V().out().out().path().by("name").reverse()').shape).toEqual({ kind: 'jsonbList' });
-    expect(read('g.V().out().out().path().by("name").combine(["x"])').shape).toEqual({ kind: 'jsonbList' });
+    expect(read('g.V().out().out().path().by("name").reverse()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
+    expect(read('g.V().out().out().path().by("name").combine(["x"])').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
     expect(read('g.V().out().out().path().by("name").merge(["x"])').shape).toEqual({ kind: 'jsonbSet' });
     expect(read('g.V().out().out().path().by("name").difference(["x"])').shape).toEqual({ kind: 'jsonbSet' });
     expect(read('g.V().out().out().path().by("name").conjoin("-")').shape).toEqual({ kind: 'value', type: STATIC('string') });

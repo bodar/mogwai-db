@@ -164,7 +164,10 @@ export type Shape =
   | { kind: 'variant'; scalarAs?: ValueType; node?: boolean; edge?: boolean; listOf?: ListOf; list?: boolean } // per-row tag: null/scalar/node/edge/list; `list` wraps ALL rows into one outer List (cap)
   | { kind: 'scalar'; productiveNull?: boolean } // numeric reducer; productive NULL may be a real result
   | { kind: 'list'; elem: ElemShape | 'scalar'; as?: ValueType } // legacy row-fold; scalar items may carry a uniform type
-  | { kind: 'jsonbList'; as?: ValueType; typed?: boolean; of?: ListOf } // list-VALUE rows; `typed` → items are {t,v} nodes framed via frameTypedNode; `as` is a uniform item type; `of` is the per-member descriptor (a nested/element list, OR a flat list of property or scalar members) framed by frameListOf
+  // One JSON list value per row. `items` is total: the former `as`/`typed`/`of`
+  // flag bag made four encodings look like optional metadata and forced the framer
+  // to reconstruct a fifth. `ListOf` already owns the item question.
+  | { kind: 'jsonbList'; items: ListOf }
   | { kind: 'jsonbElementList'; elem: Exclude<ElemShape, 'property'> } // one JSON object-array per relational element list
   | { kind: 'jsonbSet'; typed?: boolean }    // a set-VALUE stream (intersect/difference/disjunct OR a stored typed set): one Set per row, from a JSONB `list` column
   | { kind: 'valueMap'; keys: string[] | null; tokens: boolean }
