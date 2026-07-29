@@ -265,7 +265,7 @@ export function materializeStream(stream: Exclude<Stream, ElementStream>): Compi
 /** Cross the read boundary after lowering has finished. Keeping the ElementStream
  * rejection here makes `lowerSteps` reusable without letting a caller accidentally
  * frame an element relation before its public element projection is built. */
-export function materializeFinal(stream: Stream): Compiled {
+export function materializeRootStream(stream: Stream): Compiled {
   if (stream.kind === 'elements') throw new Error('element lowering ended before root projection');
   return materializeStream(stream);
 }

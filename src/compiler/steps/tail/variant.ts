@@ -222,7 +222,7 @@ function reselect(s: VariantStream, opts: { distinct?: boolean; suffix?: Express
 const variantSlice = (suffix: (step: PStep) => Expression): ShapeTailFn<VariantStream> =>
   (s, step, _steps, at) => continueLowering(reselect(s, { suffix: suffix(step), orderByEncounter: true }), at + 1);
 
-const VARIANT_TAIL = new Map<string, ShapeTailFn<VariantStream>>([
+const VARIANT_DISPATCH = new Map<string, ShapeTailFn<VariantStream>>([
   // count is a relational barrier over any shaped row stream → one Long scalar.
   ['count', (s, _step, _steps, at) => continueLowering(lowerGlobalCount(s), at + 1)],
   // unfold() only re-opens a cap()'d aggregate (result:'list') back into member rows;
@@ -251,7 +251,7 @@ const VARIANT_TAIL = new Map<string, ShapeTailFn<VariantStream>>([
 /** The variant arm of lowerSteps: shape-agnostic row-ops over a widened union; every
  *  step that would need per-arm shape knowledge fails closed here. */
 export function compileFromVariant(s: VariantStream, steps: PStep[], at: number): LoweringResult {
-  return dispatchShapeTail(VARIANT_TAIL, s, steps, at, () => {
+  return dispatchShapeTail(VARIANT_DISPATCH, s, steps, at, () => {
     throw new Error(`${steps[at].name}() on a variant value not yet supported`);
   });
 }

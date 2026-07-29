@@ -3,7 +3,7 @@ import { nodes, edges } from '../../sql/schema.ts';
 import { type Elem } from '../plan/plan.ts';
 import { flattenListArgs, isColumnArg, isOperatorArg, isPopArg } from '../../gremlin/frontend.ts';
 import { type PStep } from '../ir/strategies.ts';
-import { analyze, type ChainFacts } from '../ir/analyze.ts';
+import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
 import { trackFromV, type Carry, type ElementStream, type StepFn } from '../steps/context/context.ts';
 import { move, toEdge, toVertex, otherV, reSource } from '../steps/prefix/movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from '../steps/prefix/filter.ts';
@@ -28,7 +28,7 @@ import { runFastPath, fastPathContext, type FastPathConfig } from '../options/fa
 import type { ServiceRegistry } from '../../services/spi/types.ts';
 import { lowerScalarRows } from '../steps/tail/scalar.ts';
 import { seedCall, isBarrierPoint, type BarrierPoint, type MidBarrierPoint } from '../steps/tail/call.ts';
-import { materializeFinal } from '../steps/tail/materialize.ts';
+import { materializeRootStream } from '../steps/tail/materialize.ts';
 import { compileFromVariant } from '../steps/tail/variant.ts';
 import { compileFromForeign, landForeignElements, resumeMidBarrier } from '../steps/tail/foreign.ts';
 import type { SegmentPlan } from '../segment.ts';
@@ -174,7 +174,7 @@ export class LoweringEngine implements Engine {
    *  → carry the base fastPaths (a resume closure whose chain is already lowered). */
   private child(params: Record<string, any>, steps?: PStep[], q?: Query): LoweringEngine {
     const scope = createCompilerScope(this.app, { params, federationDepth: this.federationDepth, q });
-    const fp = steps ? collapseSafeFastPaths(scope.fastPaths, analyze(steps)) : scope.fastPaths;
+    const fp = steps ? collapseSafeFastPaths(scope.fastPaths, analyzeChain(steps)) : scope.fastPaths;
     return new LoweringEngine(this.app, scope, fp);
   }
 
@@ -249,7 +249,7 @@ export class LoweringEngine implements Engine {
    *  the root element projection, because a branch merge consumes a relation, not a framed leaf.
    *  `facts` lets the caller impose the OUTER chain's path/encounter demands, which the arm's own
    *  text cannot show. */
-  lowerRootedArm(steps: PStep[], params: Record<string, any>, sackInit?: SackSpec, facts: ChainFacts = analyze(steps)): Stream {
+  lowerRootedArm(steps: PStep[], params: Record<string, any>, sackInit?: SackSpec, facts: ChainFacts = analyzeChain(steps)): Stream {
     const seeded = this.seedRooted(steps, params, sackInit, facts);
     // An element seed folds its movement/filter prefix here so a pure element chain can stop
     // before compileTail; every other shape goes straight to the shared loop.
@@ -313,7 +313,7 @@ export class LoweringEngine implements Engine {
    * materializer.
    *
    * lowerElementSteps folds the movement/filter/as()/branch prefix but stops at select() — that is
-   * a TAIL step, not a prefix StepFn. Rather than teach the prefix table a second select
+   * a tail step, not a prefix StepFn. Rather than teach the prefix table a second select
    * implementation, apply the ONE that already exists (selectOneFromAlias, the same code the root
    * tail runs) and keep folding. An element-shaped label re-roots the traverser and the body
    * continues; anything else returns null, so every caller keeps its existing decline.
@@ -344,7 +344,7 @@ export class LoweringEngine implements Engine {
   /** Seed an ELEMENT source + fold its movement/filter prefix. The write path's entry into the
    *  read spine (a target-id relation); a source whose merge is not element-shaped fails closed
    *  here rather than being silently mis-typed. */
-  buildPrefix(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec, facts: ChainFacts = analyze(steps)): { st: ElementStream; stop: number } {
+  buildPrefix(steps: PStep[], params: Record<string, any> = {}, sackInit?: SackSpec, facts: ChainFacts = analyzeChain(steps)): { st: ElementStream; stop: number } {
     const { stream, at } = this.seedRooted(steps, params, sackInit, facts);
     if (stream.kind !== 'elements')
       throw new Error(`${steps[0].name}() as a source produces a ${stream.kind} value, which is not an element prefix`);
@@ -439,7 +439,7 @@ export class LoweringEngine implements Engine {
         const carry: Carry = { q: eng.q, params, carried: { aliases: new Map(), origins: [] } };
         const elem: Elem = foreign[0]?.kind ?? 'vertex';
         const seed = landForeignElements(carry, foreign, elem);
-        return { kind: 'sql', compiled: materializeFinal(eng.lowerStepsStrict(seed, bp.restSteps, bp.restAt)) };
+        return { kind: 'sql', compiled: materializeRootStream(eng.lowerStepsStrict(seed, bp.restSteps, bp.restAt)) };
       },
     };
   }
@@ -468,7 +468,7 @@ export class LoweringEngine implements Engine {
         // Scatter the batched pool back over the parents by the injected value (flatMap: a parent
         // that matched nothing drops), then continue the chain from the rejoined foreign stream.
         const seed = resumeMidBarrier(carry, foreign, headRows, elem, bp.injection);
-        return { kind: 'sql', compiled: materializeFinal(eng.lowerStepsStrict(seed, bp.restSteps, bp.restAt)) };
+        return { kind: 'sql', compiled: materializeRootStream(eng.lowerStepsStrict(seed, bp.restSteps, bp.restAt)) };
       },
     };
   }
@@ -486,7 +486,7 @@ export class LoweringEngine implements Engine {
       // compile suspends into a SegmentPlan. resume lands the awaited ForeignRow[] as a fresh
       // foreign root stream and finishes lowering the rest of the chain synchronously.
       if (isBarrierPoint(seed)) return this.segmentFromBarrier(seed, params);
-      return materializeFinal(this.lowerStepsStrict(seed, steps, 1));
+      return materializeRootStream(this.lowerStepsStrict(seed, steps, 1));
     }
 
     // Traverser bulking: a `repeat(...).times(n).count()` (path/as/sack-free) compiles to
@@ -500,12 +500,12 @@ export class LoweringEngine implements Engine {
     // source seed, and the movementCollapse gate already read collapseSafe at engine construction
     // (collapseSafeFastPaths). Movement collapse discards per-row identity, so it is mutually
     // exclusive with a live encounter — analyze folds that into collapseSafe && !demandsEncounter.
-    const facts = analyze(steps);
+    const facts = analyzeChain(steps);
     const { stream, at } = this.seedRooted(steps, params, sackInit, facts);
     const lowered = this.lowerSteps(stream, steps, at);
     // A mid-traversal barrier call() (V().call(federate)) suspended the fold — build its SegmentPlan.
     if (isSuspension(lowered)) return this.segmentFromMidBarrier(lowered.point as MidBarrierPoint);
-    return materializeFinal(lowered);
+    return materializeRootStream(lowered);
   }
 
   /** buildPrefix on a FRESH child engine (fresh Query, same app scope). The write path calls this
@@ -515,7 +515,7 @@ export class LoweringEngine implements Engine {
   buildPrefixFresh(steps: PStep[], params: Record<string, any> = {}): { st: ElementStream; stop: number } {
     // A write prefix is not a reducer-terminal read chain: collapse is gated off (via child()'s
     // fastPaths) and the emission encounter is forced off — honour the chain's own path tracking.
-    return this.child(params, steps).buildPrefix(steps, params, undefined, { ...analyze(steps), demandsEncounter: false });
+    return this.child(params, steps).buildPrefix(steps, params, undefined, { ...analyzeChain(steps), demandsEncounter: false });
   }
 
   /** A FRESH child engine (fresh Query, same app scope) — see the interface. An explicit
@@ -548,7 +548,7 @@ export class LoweringEngine implements Engine {
 
 /** Whether movement collapse is result-safe for this whole chain (see ChainFacts.collapseSafe).
  *  Exposed so the compile-scope wiring can gate the fastPaths flag once per compilation. Takes
- *  ChainFacts (not steps) so the caller's single analyze() serves both this gate and the seed. */
+ *  ChainFacts (not steps) so the caller's single analyzeChain() serves both this gate and the seed. */
 export function collapseSafeFastPaths(base: FastPathConfig, facts: ChainFacts): FastPathConfig {
   return { ...base, movementCollapse: base.movementCollapse && facts.collapseSafe && !facts.demandsEncounter };
 }

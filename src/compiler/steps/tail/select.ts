@@ -11,7 +11,7 @@ import { PER_ROW, STATIC, UNKNOWN, perRowColumnOf, type Compiled, type ScalarTyp
 import { type TailAcc, type TailMods } from './projection.ts';
 import { lowerGlobalCount } from './barrier.ts';
 import { applyChildCardinality, lowerElementBody, mintChildEncounter, pushChildScope, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
-import { byAt, childCtx, childSteps, classifyBy, classifyElementChild, classifyListChild, classifyRecordChildRows, classifyScalarChild, reuseCurrentFrame, ROOT_SCOPE, type ChildParent, type ChildUse, type CompileScope } from './child-shape.ts';
+import { byAt, childCtx, childSteps, classifyBy, classifyElementChild, classifyListChild, classifyRecordChildRows, classifyScalarChild, reuseCurrentFrame, ROOT_SCOPE, type ChildParent, type ChildUse, type ChildFrameStack } from './child-shape.ts';
 
 // ---------- select()/project() ----------
 
@@ -448,7 +448,7 @@ export function tryCompileRecordChild(
   parent: ChildParent,
   nested: any,
   use: ChildUse = 'first',
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
 ): RecordStream | null {
   if (!nested || parent.kind !== 'elements') return null;
   const shape = classifyRecordChildRows(childSteps(nested, parent.params), childCtx(parent));
@@ -763,7 +763,7 @@ const recordSelect: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
   return continueLowering(toElementStream(carryOf(s), rel, field.sub === 'edge' ? 'edge' : 'vertex'), at + 1);
 };
 
-const RECORD_TAIL = new Map<string, ShapeTailFn<RecordStream>>([
+const RECORD_DISPATCH = new Map<string, ShapeTailFn<RecordStream>>([
   ['where', recordFilter], ['not', recordFilter], ['filter', recordFilter],
   ['count', (s, _step, _steps, at) => continueLowering(lowerGlobalCount(s), at + 1)],
   ['order', recordOrder],
@@ -772,7 +772,7 @@ const RECORD_TAIL = new Map<string, ShapeTailFn<RecordStream>>([
 ]);
 
 export function compileFromRecord(s: RecordStream, steps: PStep[], at: number): LoweringResult {
-  return dispatchShapeTail(RECORD_TAIL, s, steps, at, () => {
+  return dispatchShapeTail(RECORD_DISPATCH, s, steps, at, () => {
     throw new Error(`${steps[at].name}() on a record value not yet supported`);
   });
 }

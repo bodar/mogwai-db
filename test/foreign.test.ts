@@ -6,7 +6,7 @@ import { executeQuery, exec } from './support/executor.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { LoweringEngine } from '../src/compiler/engine/engine.ts';
 import { createAppScope, createCompilerScope } from '../src/scopes.ts';
-import { materializeFinal } from '../src/compiler/steps/tail/materialize.ts';
+import { materializeRootStream } from '../src/compiler/steps/tail/materialize.ts';
 import { normalize } from '../src/compiler/ir/passes.ts';
 import { stepChain, parseGremlin } from '../src/gremlin/frontend.ts';
 import type { ForeignRow } from '../src/services/spi/types.ts';
@@ -43,7 +43,7 @@ function landAndRun(rows: readonly ForeignRow[], elem: Elem, trailing = '') {
   const c: Carry = { q: engine.q, params: {}, carried: { aliases: new Map(), origins: [] } };
   const seed: ForeignStream = landForeignElements(c, rows, elem);
   const steps = trailing ? normalize(stepChain(parseGremlin(`g.V()${trailing}`), {})).steps.slice(1) : [];
-  const plan = materializeFinal(engine.lowerStepsStrict(seed, steps, 0));
+  const plan = materializeRootStream(engine.lowerStepsStrict(seed, steps, 0));
   if (plan.kind !== 'read') throw new Error('expected read plan');
   return { plan, rows: store.query(plan.sql, plan.binds) as any[] };
 }

@@ -1,5 +1,5 @@
 import type { Stream } from '../../compiler/steps/context/stream.ts';
-import type { CompileScope, ChildParent } from '../../compiler/steps/tail/child-shape.ts';
+import type { ChildFrameStack, ChildParent } from '../../compiler/steps/tail/child-shape.ts';
 import type { Query } from '../../sql/kernel/q.ts';
 
 // ---------- the call() service seam ----------
@@ -34,7 +34,7 @@ export type InjectionKind =
  *  traversal AST of a mid-traversal call's per-parent injection arg (the third positional arg);
  *  undefined for a source-form call or a mid call with no injection (a constant sub-traversal —
  *  the service runs once, the degenerate collapse). Kept un-lowered so lowerCall can classify it
- *  (→ InjectionKind) and push it against the correct CompileScope. */
+ *  (→ InjectionKind) and push it against the correct ChildFrameStack. */
 export interface CallSpec {
   readonly serviceName: string;
   readonly params: CallParams;
@@ -51,7 +51,7 @@ export interface ServiceCallCtx {
   readonly compileParams: Record<string, any>;   // the traversal's bound-param table
   readonly registry: ServiceRegistry;            // so --list can enumerate the live registry
   readonly parent?: ChildParent;                 // present only for mid-traversal call()
-  readonly scope?: CompileScope;
+  readonly scope?: ChildFrameStack;
 }
 
 /** ForeignRow lives in the outer API surface (src/api.ts) — it's a leaf data type on the

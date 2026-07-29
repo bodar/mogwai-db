@@ -8,7 +8,7 @@
 // on it without a cycle.
 //
 // NOT here (on purpose): the service-AUTHOR SPI — Service / Contribution / ServiceCallCtx /
-// CallSpec / CallParams — which is entangled with the compiler's Stream / Query / CompileScope
+// CallSpec / CallParams — which is entangled with the compiler's Stream / Query / ChildFrameStack
 // and therefore lives next to the compiler in services/types.ts. The distinction is real: this
 // file is "how you WIRE and DRIVE the system"; the SPI is "how you AUTHOR a service."
 

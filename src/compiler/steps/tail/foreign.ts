@@ -94,7 +94,7 @@ const foreignValues: ShapeTailFn<ForeignStream> = (s, step, steps, at) => {
   return continueLowering(toResultStream(s.q, body, { kind: 'value', type: PER_ROW('vtype') }), at + 1);
 };
 
-const FOREIGN_TAIL = new Map<string, ShapeTailFn<ForeignStream>>([
+const FOREIGN_DISPATCH = new Map<string, ShapeTailFn<ForeignStream>>([
   ['id', foreignScalarStep], ['label', foreignScalarStep],
   ['values', foreignValues],
 ]);
@@ -103,7 +103,7 @@ const FOREIGN_TAIL = new Map<string, ShapeTailFn<ForeignStream>>([
  *  needs live local adjacency (out/in/both/…) or an unimplemented follow-on falls through to a
  *  clear deferral — never a silent local-table join. */
 export function compileFromForeign(s: ForeignStream, steps: PStep[], at: number): LoweringResult {
-  return dispatchShapeTail(FOREIGN_TAIL, s, steps, at, () => {
+  return dispatchShapeTail(FOREIGN_DISPATCH, s, steps, at, () => {
     throw new Error(`step not supported on a detached federated element: ${steps[at].name}() — federated results are detached references; push the traversal into the sub-query instead`);
   });
 }

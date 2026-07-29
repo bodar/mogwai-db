@@ -404,7 +404,7 @@ function filterScalarByCond(s: ScalarStream, p: ReturnType<ScalarStream['rel']['
  * and/or/not/filter/where over a scalar stream → a WHERE on the value `v` — the INLINE fast
  * path (the scalar twin of the element inline predicate). Returns `null` to decline — when the
  * `scalarPredicateInlining` switch is off, or a traversal arm is outside the inline vocabulary
- * (tryInlineScalarPredicate) — so the caller (SCALAR_TAIL) falls through to the generic
+ * (tryInlineScalarPredicate) — so the caller (SCALAR_DISPATCH) falls through to the generic
  * child-existence gate. A `where(P)`/`filter(P)` predicate over the value has no child form, so
  * it is always inlined regardless of the switch (`where('a',P)` — an element alias compare —
  * still declines). Row-preserving: only rows drop.
@@ -665,7 +665,7 @@ export function lowerScalarRows(
     if (step.name === 'is' && perRowColumnOf(stream.type) && collectionTypeOf(step) !== null) break;
     // concat(<traversal>) needs a child scope per argument (the `apply` child-value contract),
     // which is a ROW BOUNDARY, not a value transform the expression fuse can express. Stop the
-    // row run so SCALAR_TAIL owns it (lowerConcatScalar) — the same yield as a retyping
+    // row run so SCALAR_DISPATCH owns it (lowerConcatScalar) — the same yield as a retyping
     // is(typeOf(LIST)) above. The string-only form is untouched and still fuses.
     if (step.name === 'concat' && (step.args ?? []).some(isNested)) break;
     if (SCALAR_TRANSFORMS.has(step.name) || step.name === 'is') {

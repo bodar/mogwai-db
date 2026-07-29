@@ -4,7 +4,7 @@ import { dirsFor, edgeLabelFilter, type Elem } from '../../plan/plan.ts';
 import { advance, appendPathPos, carryFrag, carryFragMint, carriedCols, carriedWith, partitionOver, prevRel, type Carried, type PathState, type ElementStream, type StepFn } from '../context/context.ts';
 import { fastPathContextOf } from '../../engine/deps.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
-import { lowerReSource } from '../resource.ts';
+import { lowerReSource } from '../graph-source.ts';
 
 /** True iff the ONLY live carried column is bulk — no per-traverser identity (aliases/path/
  *  sack/fromV) and no branch origin. Frontier collapse is result-preserving exactly here. */

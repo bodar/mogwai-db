@@ -38,7 +38,7 @@ import {
 } from './child.ts';
 import {
   childSteps, classifyScalarChildRows, ELEMENT_CHILD_STEPS, reuseCurrentFrame, ROOT_SCOPE,
-  SCALAR_ARM_TX, scalarChildPrefixOk, type BranchArmShape, type CompileScope,
+  SCALAR_ARM_TX, scalarChildPrefixOk, type BranchArmShape, type ChildFrameStack,
 } from './child-shape.ts';
 
 // ---------- scalar-PARENT branch consumers (map/local/flatMap/choose/union/coalesce) ----------
@@ -78,7 +78,7 @@ const SCALAR_ARM_FILTER = new Set(['and', 'or', 'not', 'filter', 'where']);
 const SCALAR_ARM_BRANCH = new Set(['choose', 'union', 'coalesce', 'map', 'flatMap', 'local']);
 
 /** A single scalar-arm leaf step the engine lowers without throwing. Kept in lockstep with
- *  what lowerScalarRows/SCALAR_TAIL actually support so the recognizer never accepts a body
+ *  what lowerScalarRows/SCALAR_DISPATCH actually support so the recognizer never accepts a body
  *  that would throw mid-lowering (breaking the return-null fall-through contract). */
 const scalarArmLeafOk = (s: PStep): boolean =>
   SCALAR_ARM_TX.has(s.name) || SCALAR_ARM_ROW.has(s.name)
@@ -137,7 +137,7 @@ function scalarArmClassifies(body: PStep[], params: Record<string, any>): boolea
  *  lowers at root scope (lowerScalarArm — transforms/is/filter/nested value-branch); a body
  *  whose terminal reduces per value (count/sum/min/max/mean) needs the pushed scalar child
  *  scope (tryCompileScalarValueChild). Shared by map/flatMap/local AND union/choose/coalesce. */
-export function tryCompileScalarArm(parent: ScalarStream, nested: any, scope: CompileScope = ROOT_SCOPE): ScalarStream | null {
+export function tryCompileScalarArm(parent: ScalarStream, nested: any, scope: ChildFrameStack = ROOT_SCOPE): ScalarStream | null {
   return lowerScalarArm(parent, childSteps(nested, parent.params))
     ?? tryCompileScalarValueChild(parent, nested, 'all', scope);
 }

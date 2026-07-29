@@ -12,7 +12,7 @@ import { carryOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PA
 import { PER_ROW, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { applyChildCardinality, lowerElementBody, mintChildEncounter, pushChildScope, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows } from './child.ts';
-import { childCtx, childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyMapChildRows, classifyScalarChildRows, elementScalarBranchArm, reuseCurrentFrame, ROOT_SCOPE, type ChildParent, type ChildUse, type CompileScope } from './child-shape.ts';
+import { childCtx, childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyMapChildRows, classifyScalarChildRows, elementScalarBranchArm, reuseCurrentFrame, ROOT_SCOPE, type ChildParent, type ChildUse, type ChildFrameStack } from './child-shape.ts';
 
 /** The numeric reducers that terminate a nested-group inner value `by(__.values(x).<r>())`. */
 const SCALAR_REDUCERS = new Set(['sum', 'min', 'max', 'mean']);
@@ -597,7 +597,7 @@ export function tryCompileMapChild(
   parent: ChildParent,
   nested: any,
   use: ChildUse = 'first',
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
 ): MapStream | null {
   if (!nested || parent.kind !== 'elements') return null;
   // ONE classification, in the pure classify leaf with its siblings — this compiler never decides
@@ -965,7 +965,7 @@ const propertyElement: ShapeTailFn<PropertyStream> = (s, _step, _steps, at) => {
   return continueLowering(out, at + 1);
 };
 
-const PROPERTY_TAIL = new Map<string, ShapeTailFn<PropertyStream>>([
+const PROPERTY_DISPATCH = new Map<string, ShapeTailFn<PropertyStream>>([
   ['has', propertyFilter], ['hasKey', propertyFilter], ['hasValue', propertyFilter],
   ['dedup', propertyDedupStep],
   ['order', propertyOrderStep],
@@ -978,7 +978,7 @@ const PROPERTY_TAIL = new Map<string, ShapeTailFn<PropertyStream>>([
 ]);
 
 export function compileFromProperty(s: PropertyStream, steps: PStep[], at: number): LoweringResult {
-  return dispatchShapeTail(PROPERTY_TAIL, s, steps, at, () => {
+  return dispatchShapeTail(PROPERTY_DISPATCH, s, steps, at, () => {
     throw new Error(`step not implemented after properties(): ${steps[at].name}()`);
   });
 }

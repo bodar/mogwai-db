@@ -56,7 +56,7 @@ fails closed is better than a special-case that entrenches the non-generic path.
   nested arm classifies against the labels visible where it sits — one rule that holds at any
   depth, rather than a per-position vocabulary patch. A ctx-free caller conservatively rejects.
 - **`as()` is element-preserving; a label re-root rides the same fold.** `as()` sits in
-  `ELEMENT_CHILD_STEPS` because it preserves every shape; `select(label)` is a TAIL step, so the
+  `ELEMENT_CHILD_STEPS` because it preserves every shape; `select(label)` is a tail step, so the
   element-body fold applies the ONE existing `selectOneFromAlias` and keeps folding — never a
   second select in the prefix table. That fold is **`Engine.tryLowerElementSteps`**, the single
   whole-body fold for every child position, materialized and correlated alike. Don't grow a second.

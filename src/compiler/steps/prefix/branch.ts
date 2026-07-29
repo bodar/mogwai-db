@@ -4,7 +4,7 @@ import { edges } from '../../../sql/schema.ts';
 import { isNested, stepChain, type SackSpec, type Step } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
-import { analyze, type ChainFacts } from '../../ir/analyze.ts';
+import { analyzeChain, type ChainFacts } from '../../ir/analyze.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem } from '../../plan/plan.ts';
 import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
 import { advance, aliasColsOf, elemRel, labelScope, prevRel, carryFrag, carryFragMint, carriedCols, carriedWith, mergeCarried, rehomeCarried, rigidCols, partitionOver, type AliasEntry, type AliasMap, type Carried, type Carry, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
@@ -1124,7 +1124,7 @@ export function sourceUnion(engine: Engine, step: PStep, params: Record<string, 
   // sits AFTER the union, and the demand never appears in the arm's own text. Force both uniformly
   // over every arm — either all carry the column or none does, because a merge projects one
   // declared carried schema off every arm relation.
-  const own = bodies.map(analyze);
+  const own = bodies.map(analyzeChain);
   const armFacts: ChainFacts = {
     tracksPath: facts.tracksPath || own.some((f) => f.tracksPath),
     demandsEncounter: facts.demandsEncounter || own.some((f) => f.demandsEncounter),

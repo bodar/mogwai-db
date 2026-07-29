@@ -9,7 +9,7 @@ import { carryOf, streamPayloadCols, toMapStream, toScalarStream, PROPERTY_PAYLO
 import { engineOf } from '../../engine/deps.ts';
 import { lowerScalarRows, unionScalarStreams } from './scalar.ts';
 import { SCALAR_TRANSFORMS } from './coerce.ts';
-import { lowerReSource } from '../resource.ts';
+import { lowerReSource } from '../graph-source.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
 import { predicateSql, rangeToOffsetLimit } from '../../plan/plan.ts';
@@ -18,7 +18,7 @@ import {
   childCtx, childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, labelSelectOf,
   CHILD_SCALAR_REDUCERS,
   ELEMENT_CHILD_STEPS, isBareBranchChildAllCard, isElementChildStep, reuseCurrentFrame, ROOT_SCOPE, scalarChildPrefixOk,
-  type ChildFrame, type ChildParent, type ChildPlan, type ChildScope, type ChildUse, type CompileScope,
+  type ChildFrame, type ChildParent, type ChildPlan, type ChildScope, type ChildUse, type ChildFrameStack,
 } from './child-shape.ts';
 // The scope-construction trio (pushChildScope/popChildScope below + reuseCurrentFrame) is the
 // compiler's public scope vocabulary; re-export reuseCurrentFrame (defined as a pure spread in the
@@ -33,7 +33,7 @@ const isScalarParent = (p: ChildParent): p is ScalarStream => p.kind === 'scalar
  * the returned frame even when later child lowering produces no rows. */
 export function pushChildScope<P extends ChildParent>(
   parent: P,
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
 ): { scope: ChildScope; frame: ChildFrame; seed: P } {
   if (scope.kind === 'child' && scope.reuseFrame) {
     const ordinal = scope.reuseFrame.ordinal;
@@ -188,7 +188,7 @@ function scopedElementRowCount(
 function compileCountChildRows(
   parent: ChildParent,
   nested: any,
-  scope: CompileScope,
+  scope: ChildFrameStack,
   preParsed: ReturnType<typeof stepChain> | undefined,
   trailingIs: boolean,
 ): { stream: ScalarStream; frame: ChildFrame } | null {
@@ -213,7 +213,7 @@ function compileCountChildRows(
  * Lower a child body's SUFFIX over the already-rejoined arm stream, through the SAME generic loop
  * the root uses (`Engine.lowerStepsStrict` — deps.ts documents it as the child/nested sub-compile
  * entry). This is why `as()` needed no plumbing: it already works on a list or scalar stream at
- * root, and so does everything else in SCALAR_TAIL/LIST_TAIL. Threading one step name through
+ * root, and so does everything else in SCALAR_DISPATCH/LIST_DISPATCH. Threading one step name through
  * every emitter instead would have supported exactly that step.
  *
  * Fail-closed: the arm was CLASSIFIED on its prefix, so if the suffix retypes the stream that
@@ -239,7 +239,7 @@ function applySuffix<S extends RelationalStream>(s: S | null, suffix: readonly P
 export function tryCompileCountChild(
   parent: ChildParent,
   nested: any,
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
   body?: ChildBody,
 ): ScalarStream | null {
   const rows = compileCountChildRows(parent, nested, scope, bodyOf(body), false);
@@ -253,7 +253,7 @@ export function tryCompileCountChild(
 function tryCompileCountValueRows(
   parent: ChildParent,
   nested: any,
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
   preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ScalarStream; frame: ChildFrame } | null {
   return compileCountChildRows(parent, nested, scope, preParsed, true);
@@ -374,7 +374,7 @@ export function resourceElement(seed: ScalarStream, head: PStep, after: PStep[])
  *  so a parent with no such edges scores 0). Not service-specific: it is "scoped movement
  *  count", the substrate a bare `both().count()` child also is. tinker.degree.centrality is
  *  its first caller; it composes this from the service, keeping child-seam internals here. */
-export function scopedMovementCount(parent: ElementStream, scope: CompileScope, direction: 'out' | 'in' | 'both'): ScalarStream {
+export function scopedMovementCount(parent: ElementStream, scope: ChildFrameStack, direction: 'out' | 'in' | 'both'): ScalarStream {
   if (parent.elem !== 'vertex') throw new Error(`${direction}() degree expects a vertex input`);
   const pushed = pushChildScope(parent, scope);
   // A synthetic movement step — the StepFn reads only name/args, never .ctx.
@@ -390,7 +390,7 @@ function compileScalarChildRows(
   parent: ChildParent,
   nested: any,
   use: ChildUse = 'first',
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
   retainChildScope = false,
   stripTerminal?: string,
   preParsed?: ReturnType<typeof stepChain>,
@@ -600,7 +600,7 @@ export function tryCompileScalarChild(
   parent: ChildParent,
   nested: any,
   use: ChildUse = 'first',
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
   body?: ChildBody,
 ): ScalarStream | null {
   return applySuffix(compileScalarChildRows(parent, nested, use, scope, false, undefined, bodyOf(body))?.stream ?? null, suffixOf(body));
@@ -622,7 +622,7 @@ export function tryCompileScalarValueChild(
   parent: ChildParent,
   nested: any,
   use: ChildUse = 'first',
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
   body?: ChildBody,
 ): ScalarStream | null {
   return tryCompileCountChild(parent, nested, scope, body)
@@ -674,7 +674,7 @@ export interface ScalarModulationSpec {
 export type ModulationFallback = (
   seed: ElementStream | ScalarStream,
   nested: any,
-  scope: CompileScope,
+  scope: ChildFrameStack,
 ) => ScalarStream | null;
 
 export interface ScalarModulationDomain {
@@ -754,7 +754,7 @@ export function tryCompileScalarModulations(
 export function tryCompileScalarValueRows(
   parent: ChildParent,
   nested: any,
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
   preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ScalarStream; frame: ChildFrame } | null {
   return tryCompileCountValueRows(parent, nested, scope, preParsed)
@@ -774,7 +774,7 @@ export function tryCompileScalarValueRows(
 export function tryCompileBranchChildAllCard(
   parent: ChildParent,
   nested: any,
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
 ): ListStream | VariantStream | null {
   if (!nested || isPropertyParent(parent) || isScalarParent(parent)) return null;
   if (!isBareBranchChildAllCard(nested, childCtx(parent))) return null;
@@ -794,7 +794,7 @@ export function tryCompileBranchChildAllCard(
 export function tryCompileListChild(
   parent: ChildParent,
   nested: any,
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
   body?: ChildBody,
 ): ListStream | null {
   // Both arms are the same three operations — generic rows (the engine, via the shared row
@@ -821,7 +821,7 @@ export function tryCompileListChild(
 export function tryCompileScalarRowsBeforeFold(
   parent: ChildParent,
   nested: any,
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
   preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ScalarStream; frame: ChildFrame } | null {
   return compileScalarChildRows(parent, nested, 'all', scope, true, 'fold', preParsed);
@@ -832,7 +832,7 @@ export function tryCompileScalarRowsBeforeFold(
 export function tryCompileElementRowsBeforeFold(
   parent: ChildParent,
   nested: any,
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
   preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ElementStream; frame: ChildFrame } | null {
   return compileElementChildRows(parent, nested, scope, 'fold', false, preParsed);
@@ -844,7 +844,7 @@ export function tryCompileElementRowsBeforeFold(
 export function tryCompileElementImplicitFoldRows(
   parent: ChildParent,
   nested: any,
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
   preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ElementStream; frame: ChildFrame } | null {
   return compileElementChildRows(parent, nested, scope, undefined, false, preParsed);
@@ -855,7 +855,7 @@ export function tryCompileElementImplicitFoldRows(
 export function tryCompileElementValueRows(
   parent: ElementStream,
   nested: any,
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
 ): { stream: ElementStream; frame: ChildFrame } | null {
   return compileElementChildRows(parent, nested, scope);
 }
@@ -867,7 +867,7 @@ export function tryFilterByChildExistence(
   parent: ElementStream,
   nested: any,
   negate = false,
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
 ): ElementStream | null {
   return childExistenceGate(parent, nested, scope)?.(negate) ?? null;
 }
@@ -879,7 +879,7 @@ export function tryFilterByChildExistence(
 export function tryGateByChildExistence(
   parent: ElementStream,
   nested: any,
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
 ): { then: ElementStream; else: ElementStream } | null {
   const gate = childExistenceGate(parent, nested, scope);
   return gate ? { then: gate(false), else: gate(true) } : null;
@@ -922,7 +922,7 @@ export function tryCombineByChildExistence(
 function childExistenceGate(
   parent: ElementStream,
   nested: any,
-  scope: CompileScope,
+  scope: ChildFrameStack,
 ): ((negate: boolean) => ElementStream) | null {
   const child = tryCompileElementValueRows(parent, nested, scope)
     ?? tryCompileScalarValueRows(parent, nested, scope);
@@ -945,7 +945,7 @@ function childExistenceGate(
 function compileElementChildRows(
   parent: ChildParent,
   nested: any,
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
   stripTerminal?: string,
   firstPolicy = false,
   preParsed?: ReturnType<typeof stepChain>,
@@ -1047,7 +1047,7 @@ function compileElementChildRows(
 export function tryCompileFirstElementValueRows(
   parent: ElementStream,
   nested: any,
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
 ): { stream: ElementStream; frame: ChildFrame } | null {
   return compileElementChildRows(parent, nested, scope, undefined, true);
 }
@@ -1059,7 +1059,7 @@ export function tryCompileFirstElementValueRows(
 export function tryCompileRowsBeforeReducer(
   parent: ChildParent,
   nested: any,
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
   preParsed?: ReturnType<typeof stepChain>,
 ): { stream: ScalarStream; frame: ChildFrame; reducer: ScalarReducer } | null {
   if (!nested) return null;
@@ -1091,9 +1091,9 @@ export function tryCompileElementChild(
   parent: ElementStream,
   nested: any,
   use: ChildUse,
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
   preParsed?: ReturnType<typeof stepChain>,
-): { stream: ElementStream; scope: CompileScope } | null {
+): { stream: ElementStream; scope: ChildFrameStack } | null {
   const lowered = compileElementChildRows(parent, nested, scope, undefined, use === 'first', preParsed);
   if (!lowered) return null;
   const { stream: end, frame } = lowered;
@@ -1111,7 +1111,7 @@ export function tryCompileElementChild(
 export function tryCompileElementTraversal(
   parent: ElementStream,
   nested: any,
-  scope: CompileScope = ROOT_SCOPE,
+  scope: ChildFrameStack = ROOT_SCOPE,
 ): ElementStream | null {
   const scoped = tryCompileElementChild(parent, nested, 'all', scope);
   if (scoped) return scoped.stream;

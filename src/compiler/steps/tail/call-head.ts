@@ -5,7 +5,7 @@ import { type Compiled } from '../../../sql/kernel/render.ts';
 import { materializeRoot } from './materialize.ts';
 import { type ElementStream } from '../context/context.ts';
 import { pushChildScope, tryCompileScalarValueChild } from './child.ts';
-import { type ChildFrame, type CompileScope } from './child-shape.ts';
+import { type ChildFrame, type ChildFrameStack } from './child-shape.ts';
 
 // ---------- the mid-traversal barrier call() HEAD (Phase 6b) ----------
 //
@@ -31,7 +31,7 @@ export interface CallHead {
 /** Build the per-parent head for a mid-traversal barrier call() over an element parent. Pushes a
  *  child scope on `parent` (minting the rejoin ordinal), computes the injected scalar per parent
  *  via the generic child-scalar seam, and materializes (id, label, props[, src, tgt], o, injVal). */
-export function buildCallHead(parent: ElementStream, scope: CompileScope, injection: any): CallHead {
+export function buildCallHead(parent: ElementStream, scope: ChildFrameStack, injection: any): CallHead {
   const pushed = pushChildScope(parent, scope);
   const injScalar = injection ? tryCompileScalarValueChild(pushed.seed, injection, 'first', pushed.scope) : null;
   if (injection && !injScalar)

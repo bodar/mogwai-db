@@ -29,7 +29,7 @@ TinkerPop implementation name because an approximate analogue exists — see
 - **IR rewrites are Passes, not switches.** Every `Step[]→Step[]` rewrite is one `Pass` in the
   ordered pipeline (`ir/pass.ts`/`passes.ts`), categories `extract < decoration < fold < simplify
   < verify`. Add a Pass; never grow a switch or do index arithmetic in a step compiler. Whole-chain
-  facts (path/encounter/collapse-safety) are `analyze()` annotations, not rewrites.
+  facts (path/encounter/collapse-safety) are `analyzeChain()` annotations, not rewrites.
 - **Dependencies vs state are separate — do not conflate.** Ambient capabilities (registry,
   fastPaths, federationDepth, the lowering engine, the store source) are DI, grouped by lifecycle
   into `AppScope`/`CompilerScope` (`src/scopes.ts`). `Carry` is PURE per-query state (q/params/

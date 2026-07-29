@@ -5,11 +5,11 @@
 import { test, expect, describe } from 'bun:test';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import { normalize } from '../../src/compiler/ir/passes.ts';
-import { analyze } from '../../src/compiler/ir/analyze.ts';
+import { analyzeChain } from '../../src/compiler/ir/analyze.ts';
 
 /** Parse + normalize (so order().by() has its .bys folded, exactly as the compiler sees it),
  *  then analyze. Facts are computed over the canonical PStep chain, not the raw parse. */
-const facts = (gremlin: string) => analyze(normalize(stepChain(parseGremlin(gremlin), {})).steps);
+const facts = (gremlin: string) => analyzeChain(normalize(stepChain(parseGremlin(gremlin), {})).steps);
 
 describe('ChainFacts.tracksPath', () => {
   test('true iff a top-level path-family step is present', () => {

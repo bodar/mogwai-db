@@ -2,7 +2,7 @@ import { parseGremlin, stepChain, extractStrategies, extractSack, extractSideEff
 import { type TypeNode } from '../gremlin/types.ts';
 import { runPasses } from './ir/passes.ts';
 import { LoweringEngine, collapseSafeFastPaths } from './engine/engine.ts';
-import { analyze } from './ir/analyze.ts';
+import { analyzeChain } from './ir/analyze.ts';
 import { routeWrite } from './steps/write/write.ts';
 import { type Compiled, type WritePlan } from '../sql/kernel/render.ts';
 import { type Plan } from './segment.ts';
@@ -58,7 +58,7 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   // off it (buildPrefixFresh / compileReadCompiled), so building it before the write check is safe.
   const app = options?.app ?? createAppScope({ registry: resolveRegistry(options), fastPaths: resolveFastPaths(options) });
   const scope = createCompilerScope(app, { params, federationDepth: resolveFederationDepth(options) });
-  const engine = new LoweringEngine(app, scope, collapseSafeFastPaths(scope.fastPaths, analyze(steps)));
+  const engine = new LoweringEngine(app, scope, collapseSafeFastPaths(scope.fastPaths, analyzeChain(steps)));
 
   const write = routeWrite(engine, steps, params, sackInit ?? undefined, sideEffects);
   if (write) return { kind: 'sql', compiled: discard ? applyDiscard(write) : write };

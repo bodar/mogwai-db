@@ -53,7 +53,7 @@ export interface Engine {
   /** Seed an ELEMENT source (V/E, or a union whose arms merge to elements) + fold its prefix;
    *  returns the stream and where the prefix ends. Uses THIS engine's Query — one prefix per
    *  engine. `facts` supplies tracksPath + demandsEncounter for the seed; omitted → the impl
-   *  computes analyze(steps) itself. */
+   *  computes analyzeChain(steps) itself. */
   buildPrefix(steps: PStep[], params?: Record<string, any>, sackInit?: SackSpec, facts?: ChainFacts): { st: ElementStream; stop: number };
 
   /** Lower a fully ROOTED chain to its relational Stream, of whatever shape it produces — the

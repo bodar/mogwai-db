@@ -4,7 +4,7 @@ import { dirsFor, edgeLabelFilter } from '../../plan/plan.ts';
 import { stepChain, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { type Compiled } from '../../../sql/kernel/render.ts';
-import { materializeFinal } from './materialize.ts';
+import { materializeRootStream } from './materialize.ts';
 import { type ElementStream } from '../context/context.ts';
 import type { Engine } from '../../engine/deps.ts';
 import type { FastPath } from '../../options/fast-paths.ts';
@@ -241,7 +241,7 @@ function tryBulkRepeat(engine: Engine, steps: PStep[], params: Record<string, an
     kind: 'elements', q: query, params, rel: cur, elem: 'vertex',
     carried: { aliases: new Map(), origins: [], bulk: 'bulk' },
   };
-  return materializeFinal(eng.lowerStepsStrict(seed, steps, plan.suffixAt));
+  return materializeRootStream(eng.lowerStepsStrict(seed, steps, plan.suffixAt));
 }
 
 /** The bulkRepeatCount fast path. Recognition (bulkPlan) and lowering are intertwined — the

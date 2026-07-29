@@ -7,7 +7,7 @@ import { type PStep } from './strategies.ts';
 // movement-collapse result-safe here? Each was previously a separate re-walk of `steps`
 // scattered across engine.ts + strategies.ts; two of them re-scanned the SAME array (the
 // `demandsEncounterOrder` double-call), and two shared an order()-neutralizes-fanout
-// predicate that had to be kept in sync by a prose comment. `analyze(steps)` computes all
+// predicate that had to be kept in sync by a prose comment. `analyzeChain(steps)` computes all
 // three in one place, with the shared predicate (`isPlainOrder`) defined ONCE so the two
 // scans that consume it cannot drift.
 //
@@ -157,7 +157,7 @@ function computeCollapseSafe(steps: PStep[]): boolean {
  *  and collapseSafe run as separate loops (their state machines track different things), but
  *  both call `isPlainOrder`, so they cannot disagree on how an order() neutralizes a fan-out.
  *  One call site per distinct chain replaces up to three separate re-scans. */
-export function analyze(steps: PStep[]): ChainFacts {
+export function analyzeChain(steps: PStep[]): ChainFacts {
   return {
     tracksPath: steps.some((s) => PATH_STEPS.has(s.name)),
     demandsEncounter: computeDemandsEncounter(steps),

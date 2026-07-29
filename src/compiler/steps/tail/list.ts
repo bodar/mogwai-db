@@ -473,7 +473,7 @@ const listSetOp: ShapeTailFn<ListStream> = (s, step, steps, at) => {
   return continueLowering(listCte(s, c, listExpr, of), at + 1);
 };
 
-const LIST_TAIL = new Map<string, ShapeTailFn<ListStream>>([
+const LIST_DISPATCH = new Map<string, ShapeTailFn<ListStream>>([
   ['unfold', (s, _step, _steps, at) => continueLowering(compileUnfold(s), at + 1)],
   // none(pred): keep each list where NO element satisfies pred (a collection filter).
   ['none', (s, step, _steps, at) => continueLowering(listNoneFilter(s, step.args[0]), at + 1)],
@@ -494,7 +494,7 @@ const LIST_TAIL = new Map<string, ShapeTailFn<ListStream>>([
 ]);
 
 export function compileFromList(s: ListStream, steps: PStep[], at: number): LoweringResult {
-  return dispatchShapeTail(LIST_TAIL, s, steps, at, () => {
+  return dispatchShapeTail(LIST_DISPATCH, s, steps, at, () => {
     throw new Error(`${steps[at].name}() on a list value not yet supported`);
   });
 }

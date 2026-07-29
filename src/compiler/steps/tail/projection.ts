@@ -22,7 +22,7 @@ import { tryCompileCountChild, tryCompileBranchChildAllCard, tryCompileListChild
 import { tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './scalar-arm.ts';
 import { BRANCH_SHAPE_ORDER, childCtx, childSteps, classifyBy, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, type BranchKind, type ByClass } from './child-shape.ts';
 import { lowerElementDedup } from '../prefix/filter.ts';
-import { lowerReSource } from '../resource.ts';
+import { lowerReSource } from '../graph-source.ts';
 import { lowerCall } from './call.ts';
 import { engineOf } from '../../engine/deps.ts';
 
@@ -486,7 +486,7 @@ const tailSelectProject: ShapeTailFn<ElementStream> = (st, step, _steps, stop) =
 const tailScalarProj: ShapeTailFn<ElementStream> = (st, step, _steps, stop) =>
   continueLowering(lowerScalarProjection(st, step, EMPTY_TAIL_ACC), stop + 1);
 
-const TAIL = new Map<string, ShapeTailFn<ElementStream>>([
+const ELEMENT_DISPATCH = new Map<string, ShapeTailFn<ElementStream>>([
   ['order', tailOrder],
   ['count', tailCount],
   // properties() turns the traverser into a relational PropertyStream. Property-specific
@@ -526,9 +526,9 @@ const TAIL = new Map<string, ShapeTailFn<ElementStream>>([
 
 /** Compile the tail: `st` is the finished prefix state, `steps[stop]` the first step the
  *  prefix dispatch didn't consume. A recognized shape-changing step dispatches through
- *  TAIL; everything else (projection + modifiers) folds through compileTailFold. */
+ *  ELEMENT_DISPATCH; everything else (projection + modifiers) folds through compileTailFold. */
 export function compileTail(st: ElementStream, steps: PStep[], stop: number): LoweringResult {
-  return dispatchShapeTail(TAIL, st, steps, stop, compileTailFold);
+  return dispatchShapeTail(ELEMENT_DISPATCH, st, steps, stop, compileTailFold);
 }
 
 /** The projection tail: accumulate the projection + value modifiers into a TailAcc, then
@@ -805,7 +805,7 @@ const scalarGroupCount: ShapeTailFn<ScalarStream> = (s, step, _steps, at) =>
 const scalarBranch = (fn: (s: ScalarStream, step: PStep) => ScalarStream | null): ShapeTailFn<ScalarStream> =>
   (s, step, _steps, at) => { const r = fn(s, step); return r ? continueLowering(r, at + 1) : null; };
 
-const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
+const SCALAR_DISPATCH = new Map<string, ShapeTailFn<ScalarStream>>([
   ['is', scalarIsCollectionRetype],
   ['and', scalarFilter], ['or', scalarFilter], ['not', scalarFilter], ['filter', scalarFilter], ['where', scalarFilter],
   // constant(x) rebinds every traverser to the literal x — the scalar form preserves the
@@ -899,11 +899,11 @@ const SCALAR_TAIL = new Map<string, ShapeTailFn<ScalarStream>>([
 
 export function compileFromScalar(s: ScalarStream, steps: PStep[], from: number): LoweringResult {
   // Every scalar row op (transforms/is/order/limit/skip/range/tail/dedup/inject) and every
-  // Scope.local case is consumed by lowerScalarRows before we reach here, and SCALAR_TAIL
+  // Scope.local case is consumed by lowerScalarRows before we reach here, and SCALAR_DISPATCH
   // owns the barriers (count/reducers/fold/unfold/filter/constant/sack). So a miss is
   // unsupported — fail closed with a precise message (this is why the scalar tail no
   // longer needs foldTailAcc/renderProjection).
-  return dispatchShapeTail(SCALAR_TAIL, s, steps, from, () => {
+  return dispatchShapeTail(SCALAR_DISPATCH, s, steps, from, () => {
     const step = steps[from];
     if (isScopeLocalStep(step))
       throw new Error(`${step.name}(Scope.local) requires a preceding list-producing step (e.g. fold())`);

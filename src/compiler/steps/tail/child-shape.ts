@@ -47,7 +47,7 @@ export interface ChildScope {
   /** One-shot proof that the next child seed is still one row per current frame. */
   readonly reuseFrame?: ChildFrame;
 }
-export type CompileScope = RootScope | ChildScope;
+export type ChildFrameStack = RootScope | ChildScope;
 
 export const ROOT_SCOPE: RootScope = { kind: 'root' };
 
@@ -274,9 +274,9 @@ export function isUniformElementBranch(s: PStep, ctx: ChildCtx): boolean {
  *  a step that, over an element prefix, lowers to one scalar per input. `values`/`id`/`label`
  *  read the element; `constant` rebinds it; `call`/`math`/`sack`/`format` are the generalized
  *  producers (a service, a formula, sack read, a string template) — each already lowers to a
- *  ScalarStream at root via its own TAIL StepFn, so recognizing it here lets the generic emit
+ *  ScalarStream at root via its own tail StepFn, so recognizing it here lets the generic emit
  *  path (pushChildScope → lowerSteps) run it per parent WITHOUT a bespoke child reader.
- *  Kept in lockstep with the scalar-producing TAIL entries in projection.ts (SCALAR_PROJ +
+ *  Kept in lockstep with the scalar-producing tail entries in projection.ts (SCALAR_PROJ +
  *  call/math/sack/format); count() is a reducer/barrier with its own classifyCountChild path. */
 const SCALAR_PRODUCER = new Set(['values', 'id', 'label', 'constant', 'call', 'math', 'sack', 'format']);
 
@@ -532,7 +532,7 @@ export function classifyScalarChild(nested: any, ctx: ChildCtx): ChildPlan | nul
  * The suffix is not a vocabulary — it is whatever the shape-determining prefix did not need, and
  * the emitter lowers it through `Engine.lowerStepsStrict`, the same generic loop the root uses.
  * That is why `as()` needs no plumbing here: it already works on a list/scalar stream at root, and
- * so does everything else in SCALAR_TAIL/LIST_TAIL. Peeling one step name into a side-channel
+ * so does everything else in SCALAR_DISPATCH/LIST_DISPATCH. Peeling one step name into a side-channel
  * instead would support exactly that step and nothing else.
  */
 export interface ChildPlan { body: PStep[]; suffix: PStep[] }

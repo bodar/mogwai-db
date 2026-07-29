@@ -6,7 +6,7 @@ import { type PStep } from '../../ir/strategies.ts';
 import { carriedWith, type Carry } from '../context/context.ts';
 import { toListStream, toScalarStream, type Stream } from '../context/stream.ts';
 import type { Engine } from '../../engine/deps.ts';
-import { materializeFinal } from '../tail/materialize.ts';
+import { materializeRootStream } from '../tail/materialize.ts';
 import { type Compiled, type ValueType } from '../../../sql/kernel/render.ts';
 import {
   numericSpec, asBoolConst, asNumberConst, asNumberBare, asDateConst,
@@ -151,5 +151,5 @@ export function compileInject(engine: Engine, steps: PStep[], sackInit?: SackSpe
   const eng = engine.subEngine({});
   const carry: Carry = { q: eng.q, params: {}, carried: { aliases: new Map(), origins: [] } };
   const { stream, at } = seedInject(carry, steps, sackInit);
-  return materializeFinal(eng.lowerStepsStrict(stream, steps, at));
+  return materializeRootStream(eng.lowerStepsStrict(stream, steps, at));
 }

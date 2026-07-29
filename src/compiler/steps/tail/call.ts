@@ -6,7 +6,7 @@ import { type ElementStream } from '../context/context.ts';
 import { type ServiceRegistry, type ServiceCallCtx, type Contribution, type ForeignRow, type CallParams, type InjectionKind } from '../../../services/spi/types.ts';
 import { type FederationSource } from '../../segment.ts';
 import { parseCallSpec, injectionKindOf } from '../../../services/params/call-params.ts';
-import { type ChildFrame, type CompileScope } from './child-shape.ts';
+import { type ChildFrame, type ChildFrameStack } from './child-shape.ts';
 import { buildCallHead } from './call-head.ts';
 import { type Compiled } from '../../../sql/kernel/render.ts';
 import { engineOf } from '../../engine/deps.ts';
@@ -21,14 +21,14 @@ import { engineOf } from '../../engine/deps.ts';
 // 'barrier' Contribution (Phase 6 federated/async) is not yet supported and throws a clear
 // deferral. There is NO second movement/projection/materializer here — a service builds a
 // Stream through the ordinary q-kernel + stream constructors, and the generic
-// lowerSteps/materializeFinal engine takes it from there.
+// lowerSteps/materializeRootStream engine takes it from there.
 
 /** A compile SUSPENDED at a barrier call() (Phase 6). Unlike a 'stream' service (which lowers to
  *  SQL synchronously), a barrier's rows arrive from an awaited external call — so instead of a
  *  Stream, seedCall/lowerCall yield this descriptor: the service's `apply` pre-bound to the
  *  resolved params (run at execution time with the per-runtime env) plus enough context to
  *  RESUME lowering once the rows land. The consumer (compileRead, which owns lowerSteps /
- *  materializeFinal / foreign landing) builds the SegmentPlan.resume closure from `restSteps` —
+ *  materializeRootStream / foreign landing) builds the SegmentPlan.resume closure from `restSteps` —
  *  keeping the lowerSteps dependency OUT of call.ts (call.ts is imported by index.ts; importing
  *  lowerSteps back would cycle). `params`/`compileParams` seed the resumed foreign root stream. */
 export interface BarrierPoint {
@@ -85,7 +85,7 @@ function resolveContribution(spec: ReturnType<typeof parseCallSpec>, registry: S
 }
 
 /** g.call(...) as a SOURCE. A pure 'stream' service builds its initial Stream inline (--list,
- *  tinker.search) — fed straight into lowerSteps/materializeFinal by compileRead. A 'barrier'
+ *  tinker.search) — fed straight into lowerSteps/materializeRootStream by compileRead. A 'barrier'
  *  service (Phase 6 federate) returns a BarrierPoint instead: its rows arrive from an awaited
  *  sibling call, so it cannot lower synchronously; compileRead surfaces it to the segment
  *  orchestrator, which resumes lowering from `restSteps` once the rows land. */
@@ -108,12 +108,12 @@ export function seedCall(first: PStep, query: Query, params: Record<string, any>
 }
 
 /** V().call(...) mid-traversal: a per-parent step. The service receives the parent
- *  ElementStream + the current CompileScope and pushes its OWN child scope (via the
+ *  ElementStream + the current ChildFrameStack and pushes its OWN child scope (via the
  *  child-seam helpers, e.g. scopedMovementCount) so each input vertex gets a multiset-safe
  *  ordinal — exactly like a count()-child. tinker.degree.centrality reduces to a scalar
  *  per input.
  *
- *  Scope is stream-carried, not a lowerSteps parameter (see child.ts). The TAIL dispatch hands
+ *  Scope is stream-carried, not a lowerSteps parameter (see child.ts). The tail dispatch hands
  *  a nominal ROOT_SCOPE, but when call() appears INSIDE a child body (e.g.
  *  where(call(...).is(3))) the parent stream already carries the outer ordinal(s) in
  *  `carried.origins`; the service's pushChildScope reads those and mints a frame NESTED under
@@ -125,7 +125,7 @@ export function seedCall(first: PStep, query: Query, params: Record<string, any>
  *  (buildCallHead) and returns a MidBarrierPoint wrapped as a LoweringSuspension, which lowerSteps
  *  relays to compileRead. `steps`/`stop` are the caller's chain + cursor so restSteps/restAt name
  *  what resumes after the call(). */
-export function lowerCall(step: PStep, parent: ElementStream, scope: CompileScope, steps: PStep[], stop: number): LoweringResult {
+export function lowerCall(step: PStep, parent: ElementStream, scope: ChildFrameStack, steps: PStep[], stop: number): LoweringResult {
   const spec = parseCallSpec(step, parent.params);
   const registry = engineOf(parent).registry;
   const ctx: ServiceCallCtx = {
