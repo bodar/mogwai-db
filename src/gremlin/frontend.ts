@@ -1,4 +1,6 @@
-import { CharStream, CommonTokenStream, BaseErrorListener, ParserRuleContext } from 'antlr4ng';
+import {
+  CharStream, CommonTokenStream, BaseErrorListener, ParserRuleContext,
+} from 'antlr4ng';
 import { GremlinLexer } from '../../parser/GremlinLexer.ts';
 import { GremlinParser } from '../../parser/GremlinParser.ts';
 import { flatType, fitsSafeInteger, BigDecimal, Duration, type TypeNode, type CanonicalType, type MapEntryType } from './types.ts';
@@ -17,9 +19,26 @@ class Errors extends BaseErrorListener {
   }
 }
 
-export function parseGremlin(query: string) {
+/**
+ * antlr-ng's generated recognizers share a static DFA array by default.  That
+ * cache is an optimisation, not part of a Gremlin parse's semantics; a bad
+ * cached prediction must never let one request affect another.  Keep generated
+ * code byte-stable and reset the runtime state at the one front-end
+ * construction seam instead. `clearDFA()` is the antlr-ng API for that reset;
+ * unlike replacing the array, it avoids allocating an entire grammar's DFA
+ * graph for every request.
+ */
+function createGremlinParser(query: string) {
   const lexer = new GremlinLexer(CharStream.fromString(query));
+  lexer.interpreter.clearDFA();
+
   const parser = new GremlinParser(new CommonTokenStream(lexer));
+  parser.interpreter.clearDFA();
+  return { lexer, parser };
+}
+
+export function parseGremlin(query: string) {
+  const { lexer, parser } = createGremlinParser(query);
   const errs = new Errors();
   lexer.removeErrorListeners(); parser.removeErrorListeners();
   lexer.addErrorListener(errs); parser.addErrorListener(errs);

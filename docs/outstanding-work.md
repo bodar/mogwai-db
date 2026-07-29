@@ -49,16 +49,6 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      a re-sourced modulation child now reaches it. **The opening: for a re-sourced body the
      partition is redundant** (the child ignores the traverser). *Medium.*
 
-0e. **The deep L5 table sweep still finds a parser-integrity failure at high nesting depth.**
-   `mise run L5-random` now supplies a real random positive seed, but its `table.test.ts` parse+chain
-   phase fails around 8–10k generated inputs for forms such as
-   `g.V(1).hasLabel('person').repeat(__.not(__.or(__.identity(), __.hasLabel('person').hasLabel('person')))).times(1)`.
-   The minimized string parses in a fresh process, so this is not yet proven to be a bad table edge;
-   first determine whether ANTLR's shared prediction state is contaminated by an earlier generated
-   input or whether the shrinker is reporting a non-reproducing witness. Keep the table fail-closed —
-   excluding deep shapes or downgrading the assertion would recreate the coverage blind spot it found.
-   *Medium — measurement integrity.*
-
 1. **List members frame as bare values, not elements.** `AliasEntry` does not record the member
    shape, so a path/element-list label cannot frame its members as vertices. Blocks
    `g_V_hasXperson_name_markoX_path_asXaX_unionXidentity_identityX_selectXaX_unfold` (which also
