@@ -42,12 +42,14 @@ export interface PassContext {
    *  and no-op strategies are removed before the pipeline runs, so a decoration/verify Pass's
    *  `applies` only ever asks "is this strategy named", never re-litigates suppression. */
   readonly strategies: StrategyUse;
-  /** The chain AFTER `fold` but BEFORE any `decoration` pass ran — i.e. the user's own authored
-   *  chain, canonicalised but not yet injected. Verify passes assert legality against THIS, never
+  /** The chain BEFORE any `decoration` pass ran — i.e. the user's own authored chain, with only
+   *  `extract` applied (a trailing terminal stripped), neither folded nor injected. `decoration`
+   *  precedes `fold` in PASS_CATEGORIES (see the category notes above for why it must), so this
+   *  snapshot is necessarily pre-fold too. Verify passes assert legality against THIS, never
    *  the live (possibly decoration-injected) `steps`: a PartitionStrategy write-stamp
    *  (property(key,val) after addV) must not trip ReservedKeysVerificationStrategy, and an exploded
    *  out()→outE().inV() must not change what EdgeLabelVerification sees. Written once by the driver
-   *  at the fold→decoration boundary; passes never write it. */
+   *  at the extract→decoration boundary; passes never write it. */
   originalChain: readonly PStep[];
   /** Out-of-band results a pass may set. Mutable bag, written only by the `extract` category
    *  (stripTerminal's discard flag → the iterate() "run for effect, return nothing" shape). */

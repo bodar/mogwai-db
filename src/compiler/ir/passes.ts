@@ -112,7 +112,7 @@ const DECORATION: Pass[] = [
 
 // ---------- verify (assert legality against ctx.originalChain; never rewrites) ----------
 // A verify pass IGNORES its `steps` argument (the live, possibly-decorated chain) and asserts
-// against ctx.originalChain — the user's authored chain, folded but not injected. This is correct,
+// against ctx.originalChain — the user's authored chain, neither folded nor injected. This is correct,
 // not legacy mimicry: a PartitionStrategy write-stamp (property(key,val) after addV) must not trip
 // ReservedKeysVerificationStrategy, and a SubgraphStrategy out()→outE().inV() explosion must not
 // change what EdgeLabelVerification sees. verify() throws the spec's canonical message on a
