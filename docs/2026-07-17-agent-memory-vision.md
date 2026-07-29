@@ -384,7 +384,7 @@ Engram/Nexus close the gap.
 
 ## Sources
 
-- Official Apache `gremlin-mcp`: `~/Projects/tinkerpop/gremlin-js/gremlin-mcp` (beta.2 + master diff).
+- Official Apache `gremlin-mcp`: `vendor/tinkerpop/gremlin-js/gremlin-mcp` (in the pinned submodule).
 - Competitor landscape + pricing (mid-2026): Mem0, Zep/Graphiti, Letta, Cognee, Supermemory, LangMem,
   Pinecone/Nexus, Weaviate/Engram, Chroma, Neo4j Aura/NAMS, Papr, Memobase, Hindsight, MemoClaw, Redis
   Iris, MongoDB Atlas — vendor pricing pages + docs (see conversation research for per-vendor URLs).

@@ -13,9 +13,19 @@ proposed renames changed as a result: three because the code refutes the proposa
 because the rule cuts *against* TinkerPop (§4.1), and two reversals of direction — §4.6 reverses the
 first draft, §4.3 reverses this revision's own first attempt at it.
 
-Basis: a read of TinkerPop `gremlin-core` on `origin/master` (`f475bca`) against `src/compiler/**` at
-`ddef441`. Every "keep it" and "rename it" below is checked against what the code actually does, not
-against what the previous draft's summary of it said.
+Basis: a read of TinkerPop `gremlin-core` against `src/compiler/**` at `ddef441`. Every "keep it" and
+"rename it" below is checked against what the code actually does, not against what the previous
+draft's summary of it said.
+
+**The Java side is now in-tree and citable.** The original read used a clone at `~/Projects/tinkerpop`
+(`f475bca`) — outside this repo, at a SHA that is not even a valid object in our submodule's blobless
+history, so no reader and no CI run could check a single citation. `gremlin-core` was therefore added
+to the sparse set in `scripts/init-submodule.sh` (2026-07-29, +9.8MB against ~400MB already checked
+out); every TinkerPop path below now resolves under `vendor/tinkerpop/` at the pinned gitlink
+(`2e56ccc`). Two claims this doc leans on hardest were re-verified there rather than trusted:
+`find . -name "Bytecode*.java"` returns nothing repo-wide and `GremlinLang.java` exists (§8), and
+`TraverserRequirement` has exactly the nine values listed in §1. `gremlin-core` is reference only —
+never built, never imported.
 
 **Blast radius is not an input.** An LSP rename costs the same at 12 references as at 1,200, so a
 reference count is not evidence about a name. The first draft carried a `Sites` column and let it
@@ -408,10 +418,16 @@ The one *unambiguous* duplicate found: `{path, simplePath, cyclicPath}` is spell
 
 ## 8. One thing TinkerPop master confirms
 
-`Bytecode` is **gone** on master — `find . -name "Bytecode*.java"` returns nothing repo-wide, replaced
-by `GremlinLang` (a canonical Gremlin string plus a parameter map, reachable via
+`Bytecode` is **gone** on master — `find vendor/tinkerpop -name "Bytecode*.java"` returns nothing,
+replaced by `GremlinLang` (a canonical Gremlin string plus a parameter map, reachable via
 `Traversal.Admin.getGremlinLang()`). Independent confirmation of locked decision #1 in the root
-`CLAUDE.md`.
+`CLAUDE.md`, and re-verified in-tree at the pinned gitlink rather than taken from the original
+out-of-repo read.
+
+Worth knowing because it corrected a *different* doc: `2026-07-12-path-tracking-prior-art.md` §2 had
+recorded this as "v4 deleted the Java step engine", which is too strong — what v4 deleted is
+bytecode. `gremlin-core` is alive and is the prior art this doc rests on. That line is now fixed,
+and it is a fair sample of why the citations had to become checkable.
 
 ## The mechanism: `scripts/rename.ts`
 

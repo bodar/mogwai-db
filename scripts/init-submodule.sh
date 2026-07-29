@@ -19,7 +19,13 @@ cd "$ROOT"
 
 SM=vendor/tinkerpop
 URL=https://github.com/apache/tinkerpop.git
-SPARSE=(gremlin-language gremlin-js gremlin-test)
+# gremlin-language: the Gremlin.g4 grammar source (locked decision #2).
+# gremlin-js: the GLV we link as `gremlin` + the cucumber runner. gremlin-test: the .feature corpus.
+# gremlin-core: READ-ONLY reference, never built or imported — the Java core engine our naming and
+# semantics claims cite. Without it those citations point at a clone outside the repo, at a
+# different SHA than the gitlink, so nobody else and no CI run can check them (see
+# docs/2026-07-29-tinkerpop-core-engine-alignment.md). +9.8MB against ~400MB already checked out.
+SPARSE=(gremlin-language gremlin-js gremlin-test gremlin-core)
 
 if [ ! -e "$SM/.git" ]; then
   echo "[submodule] fresh blobless+sparse provision of $SM"

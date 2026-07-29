@@ -139,6 +139,12 @@ answer here:
   `link:` dep resolving to the submodule-built client, so `bun install` FAILS (rather than falling
   back to npm's beta.2) if the submodule has not registered the link. Consequence: nothing is
   submodule-free, `check`/L1/L2 included.
+- **The submodule is sparse — four dirs, set in `scripts/init-submodule.sh` (`SPARSE=`), re-asserted
+  on every run.** `gremlin-language` (the `Gremlin.g4` source), `gremlin-js` (the linked GLV +
+  cucumber runner), `gremlin-test` (the `.feature` corpus), and `gremlin-core` — the Java core engine,
+  **reference only, never built or imported**. Cite TinkerPop as `vendor/tinkerpop/...` so the claim
+  resolves at the pinned gitlink; a path outside the repo is uncheckable by anyone else and by CI, and
+  the outside clone is typically at a SHA that is not even a valid object in our blobless history.
 - Storage runtimes meet at the sync **`Sql` interface** (`src/storage.ts`): `bun:sqlite` (dev) and
   DO `ctx.storage.sql` (prod). Compiler + frame tier are storage-agnostic; the HTTP edge never
   touches a store. **Bind-type gotcha:** DO SQLite throws on `boolean`/`bigint` binds — `GraphStore`

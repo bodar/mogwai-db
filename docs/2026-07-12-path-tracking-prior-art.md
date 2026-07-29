@@ -25,9 +25,14 @@ reuses the *label-carry rails we already have*. That split is the main finding.
 - **JanusGraph** (`~/Projects/janusgraph`) — distributed, step-at-a-time over
   pluggable storage; interprets rather than compiles, so it's a semantics
   reference, not an architecture one. Not load-bearing for us here.
-- **TinkerPop 4 reference** (`~/Projects/tinkerpop`) — but see the surprise in
-  §2: v4 *deleted* the Java step engine. The Gherkin features are now the only
-  authoritative contract.
+- **TinkerPop 4 reference** (`vendor/tinkerpop/gremlin-core`, in the pinned
+  submodule since 2026-07-29) — but see the surprise in §2: v4 deleted
+  *bytecode*, not the step engine. `gremlin-core` is very much alive on
+  `origin/master`; what went is `Bytecode`, replaced by `GremlinLang` (a
+  canonical Gremlin string + a parameter map). The Gherkin features remain the
+  authoritative *behavioural* contract, but the Java engine is readable prior art
+  again — verified in-tree, not from memory. See
+  [tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md).
 - Wider field (web): DuckPGQ, DuckDB `USING KEY`, Apache AGE, SQL:2023/SQL-PGQ,
   IBM SQLGraph, Cytosm, GraphflowDB.
 
