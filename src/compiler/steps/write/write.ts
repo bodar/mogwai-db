@@ -103,6 +103,17 @@ function resolveSpecValue(engine: Engine, store: GraphStore, sp: PropSpec, id: n
   return { ...r, typeNode: r.vtype };
 }
 
+/** Resolve a property key through the same TraversalUtil.apply-style authority as a
+ * property value.  Keys are per-target inputs too: evaluating them at write-plan build time
+ * would lose correlation (and would be a second child evaluator). */
+function resolveSpecKey(engine: Engine, store: GraphStore, sp: PropSpec, id: number, elem: Elem, params: Record<string, any>, sideEffects?: Map<string, any>): string {
+  if (!isNested(sp.key)) return sp.key;
+  const r = nestedScalarValue(engine, store, sp.key, params, { id, elem }, sideEffects);
+  if (!r.has) throw new Error('property() key traversal produced no value');
+  if (typeof r.value !== 'string') throw new Error(`property() key traversal must produce a string, got ${typeof r.value}`);
+  return r.value;
+}
+
 // ---------- write compilers ----------
 //
 // Writes are an imperative interpreter (sequential INSERT/UPDATE/DELETE threading
@@ -164,12 +175,8 @@ function compileSetProperty(engine: Engine, steps: IRStep[], params: Record<stri
     const { cardinality, rest, off } = readCardinality(s.args);
     let [key] = rest; const [, val, ...metaArgs] = rest;
     { const ck = constFromNested(key, sideEffects, params); if (ck.has) key = ck.value; }
-    // A nested-traversal KEY that isn't a compile-time constant fails CLOSED (never a
-    // silent drop): the live-read key case (property(__.values(k), …)) needs addV-mid-chain
-    // and has no reachable consumer yet.
-    if (isNested(key)) throw new Error('property() with a nested-traversal key not yet supported (only __.select(const)/__.constant() keys resolve)');
     // null/map-form property() is a no-op (see parseVertexSpec).
-    if (key == null || (typeof key === 'object' && !('token' in key))) continue;
+    if (key == null || (typeof key === 'object' && !isNested(key) && !('token' in key))) continue;
     if (typeof key === 'object' && 'token' in key)
       throw new Error(`property(T.${key.token}) on an existing element not yet supported`);
     specs.push({ key, value: val, vtype: propVtype(s, val, off), typeNode: propTypeNode(s, off), meta: metaOf(metaArgs), cardinality });
@@ -188,7 +195,7 @@ function compileSetProperty(engine: Engine, steps: IRStep[], params: Record<stri
       run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
         for (const sp of specs) {
           const r = resolveSpecValue(engine, store, sp, id, 'edge', params, sideEffects);
-          if (r.has) insertEdgeProperty(store, id, sp.key, r.value, r.vtype, r.typeNode);
+          if (r.has) insertEdgeProperty(store, id, resolveSpecKey(engine, store, sp, id, 'edge', params, sideEffects), r.value, r.vtype, r.typeNode);
         }
         const cur = store.query<any>(readCur, [id])[0];
         return { edge: { id: cur.uid ?? id, label: cur.label, src: nodeExtId(store, cur.src), tgt: nodeExtId(store, cur.tgt), props: readEdgeProps(store, id) } };
@@ -202,7 +209,7 @@ function compileSetProperty(engine: Engine, steps: IRStep[], params: Record<stri
     run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
       for (const sp of specs) {
         const r = resolveSpecValue(engine, store, sp, id, 'vertex', params, sideEffects);
-        if (r.has) applyVertexProperty(store, id, sp.key, r.value, r.vtype, sp.meta, sp.cardinality, r.typeNode);
+          if (r.has) applyVertexProperty(store, id, resolveSpecKey(engine, store, sp, id, 'vertex', params, sideEffects), r.value, r.vtype, sp.meta, sp.cardinality, r.typeNode);
       }
       const cur = store.query<any>(readCur, [id])[0];
       return { vertex: { id: cur.uid ?? id, label: cur.label, props: readVertexProps(store, id) } };
@@ -219,7 +226,7 @@ type Cardinality = 'single' | 'list' | 'set';
 // the FULL recursive type tree, threaded so a collection value tags each element/entry/key
 // losslessly (valueNodeOf). A scalar's typeNode is redundant with vtype; a nested-traversal
 // value has no literal typeNode (its type is resolved at run time as a scalar).
-interface PropSpec { key: string; value: any; vtype: CanonicalType | null; typeNode: TypeNode | null; meta: Record<string, any> | null; cardinality: Cardinality; }
+interface PropSpec { key: string | { nested: any }; value: any; vtype: CanonicalType | null; typeNode: TypeNode | null; meta: Record<string, any> | null; cardinality: Cardinality; }
 interface VertexSpec { label: string | { nested: any }; props: PropSpec[]; uid: string | number | null; }
 
 // A leading Cardinality token on property() args (default single). Returns it plus
@@ -286,13 +293,10 @@ function parseVertexSpec(addV: Step, propSteps: Step[], sideEffects?: Map<string
     let [key, val, ...metaArgs] = rest;
     { const ck = constFromNested(key, sideEffects, params); if (ck.has) key = ck.value; }
     { const cv = constFromSelect(val, sideEffects, params); if (cv.has) val = cv.value; }
-    // A nested-traversal KEY that isn't a compile-time constant fails CLOSED (never a
-    // silent drop): a live-read key (property(__.values(k), …)) needs addV-mid-chain.
-    if (isNested(key)) throw new Error('property() with a nested-traversal key not yet supported (only __.select(const)/__.constant() keys resolve)');
     // property(null) / property([:]) / property([map]) — a null or map-form key adds
     // nothing (map-form property() is a no-op for now, matching TinkerPop's null/empty
     // cases; a populated map would add its entries, not yet implemented).
-    if (key == null || (typeof key === 'object' && !('token' in key))) continue;
+    if (key == null || (typeof key === 'object' && !isNested(key) && !('token' in key))) continue;
     if (typeof key === 'object' && 'token' in key) {
       if (metaArgs.length) throw new Error(`property(T.${key.token}) does not take meta-properties`);
       if (key.token === 'id') uid = val;
@@ -433,7 +437,7 @@ function insertVertex(engine: Engine, store: GraphStore, spec: VertexSpec, param
   const row = insertRow(store, 'nodes', ['label'], [store.labelId(label)], spec.uid);
   for (const p of spec.props) {
     const r = resolveSpecValue(engine, store, p, row.id, 'vertex', params, sideEffects);
-    if (r.has) applyVertexProperty(store, row.id, p.key, r.value, r.vtype, p.meta, p.cardinality, r.typeNode);
+    if (r.has) applyVertexProperty(store, row.id, resolveSpecKey(engine, store, p, row.id, 'vertex', params, sideEffects), r.value, r.vtype, p.meta, p.cardinality, r.typeNode);
   }
   return { ...row, label };
 }
@@ -638,7 +642,17 @@ function resolveEndpoint(engine: Engine, store: GraphStore, spec: any, d: { alia
 // propTypes carries each prop VALUE's canonical type: from the map's TypeNode (a literal
 // subtype or a typed client's wire DataType) for a literal value, or from the read shape
 // for a nested value (filled by resolveMergeSpec). null = infer from the JS value.
-interface MergeSpec { label: string | null | { nested: any }; id: any; outV: any; inV: any; props: Record<string, any>; propTypes: Record<string, TypeNode | null>; }
+interface MergeSpec {
+  label: string | null | { nested: any };
+  id: any;
+  outV: any;
+  inV: any;
+  /** Props are keyed by a stable internal slot until resolveMergeSpec turns a nested
+   * map key into its actual string. Static keys use themselves as the slot. */
+  props: Record<string, any>;
+  propTypes: Record<string, TypeNode | null>;
+  propKeys: Record<string, string | { nested: any }>;
+}
 
 function classifyMergeKey(k: any): { kind: 'label' | 'id' | 'outV' | 'inV' | 'prop'; name?: string } {
   const enumName = (typeName: string) => k && typeof k === 'object' && k.typeName === typeName ? String(k.elementName).toLowerCase() : null;
@@ -687,11 +701,22 @@ function resolveMergeArg(raw: any, sideEffects: Map<string, any> | undefined, pa
 
 function normalizeMergeMap(raw: any, typeNode: TypeNode | null, sideEffects?: Map<string, any>, params: Record<string, any> = {}): MergeSpec {
   raw = resolveMergeArg(raw, sideEffects, params);
-  const spec: MergeSpec = { label: null, id: null, outV: undefined, inV: undefined, props: {}, propTypes: {} };
+  const spec: MergeSpec = { label: null, id: null, outV: undefined, inV: undefined, props: {}, propTypes: {}, propKeys: {} };
   if (raw == null) return spec; // mergeV(null) — match anything
   if (!(raw instanceof Map))
     throw new Error('merge argument must be a map ([k:v] / bound Map), null, or empty ([:])');
   for (const [k, v] of raw) {
+    // Parameters resolves map KEYS with TraversalUtil.apply as well as values. A
+    // traversal key cannot be classified until it has the incoming driver, so retain it
+    // under an internal slot for resolveMergeSpec rather than coercing it to
+    // "[object Object]" at parse time.
+    if (isNested(k)) {
+      const slot = `@nested-key:${Object.keys(spec.props).length}`;
+      spec.props[slot] = v;
+      spec.propTypes[slot] = null;
+      spec.propKeys[slot] = k;
+      continue;
+    }
     const c = classifyMergeKey(k);
     // label/id/prop VALUES may be nested traversals — keep them UNRESOLVED (deferred to
     // resolveMergeSpec, per driver). Only a non-nested label collapses to a string now.
@@ -701,6 +726,7 @@ function normalizeMergeMap(raw: any, typeNode: TypeNode | null, sideEffects?: Ma
     else if (c.kind === 'inV') spec.inV = classifyMergeVal(v);
     else {
       spec.props[c.name!] = v;
+      spec.propKeys[c.name!] = c.name!;
       // A literal value's FULL type tree comes from the map's TypeNode (the parser subtype /
       // the typed client's wire DataType) — kept whole so a collection value's elements/keys
       // stay typed; a nested value's type is filled per driver (a scalar, in resolveMergeSpec).
@@ -726,15 +752,24 @@ function resolveMergeSpec(engine: Engine, store: GraphStore, spec: MergeSpec, se
   };
   const props: Record<string, any> = {};
   const propTypes: Record<string, TypeNode | null> = {};
-  for (const [k, v] of Object.entries(spec.props)) {
-    const r = rv(v, k, `value for '${k}'`);
+  for (const [slot, v] of Object.entries(spec.props)) {
+    const rawKey = spec.propKeys[slot] ?? slot;
+    const k = isNested(rawKey)
+      ? (() => {
+          const r = nestedScalarValue(engine, store, rawKey, params, seed, sideEffects);
+          if (!r.has) throw new Error('merge map key traversal produced no value');
+          if (typeof r.value !== 'string') throw new Error(`merge map key traversal must produce a string, got ${typeof r.value}`);
+          return r.value;
+        })()
+      : rawKey;
+    const r = rv(v, slot, `value for '${k}'`);
     props[k] = r.value; propTypes[k] = r.typeNode;
   }
   return {
     label: isNested(spec.label) ? String(rv(spec.label, null, 'label').value) : spec.label,
     id: rv(spec.id, null, 'id').value,
     outV: spec.outV, inV: spec.inV,
-    props, propTypes,
+    props, propTypes, propKeys: Object.fromEntries(Object.keys(props).map((k) => [k, k])),
   };
 }
 

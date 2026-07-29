@@ -272,15 +272,15 @@ test('addV nested LABEL __.constant(...) resolves (shared value authority)', () 
   expect(run(store, 'g.V().has("name","w").label()').map((r) => r.v)).toEqual(['widget']);
 });
 
-test('property() with a __.constant(...) KEY resolves; a live-read key fails closed', () => {
+test('property() keys use the shared correlated scalar-value resolver', () => {
   const store = seededStore();
   run(store, 'g.addV("person").property(__.constant("nick"), "bob")');
   expect(run(store, 'g.V().has("nick","bob").count()').map((r) => r.v)).toEqual([1]);
-  // a non-constant nested key is fail-closed (never a silent drop / "[object Object]")
-  expect(() => run(store, 'g.V(1).property(__.union(__.constant("k")), "v")'))
-    .toThrow(/nested-traversal key not yet supported/);
-  expect(() => run(store, 'g.addE("knows").from(__.V(1)).to(__.V(2)).property(__.union(__.constant("k")), "v")'))
-    .toThrow(/nested-traversal key not yet supported/);
+  // A non-constant child takes the same read-spine route as a traversal-valued property.
+  run(store, 'g.V(1).property(__.constant("person").toUpper(), "marko-key")');
+  expect(run(store, 'g.V(1).values("PERSON")').map((r) => r.v)).toEqual(['marko-key']);
+  run(store, 'g.E(7).property(__.constant("checked"), true)');
+  expect(run(store, 'g.E(7).values("checked")').map((r) => r.v)).toEqual([1]);
 });
 
 test('addV property value __.constant(UUID(...)) keeps the uuid vtype (not string)', () => {
