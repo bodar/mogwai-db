@@ -2,7 +2,7 @@ import { q, list, empty, value, type Expression, type Relation } from '../../../
 import { nodes, edges, labels } from '../../../sql/schema.ts';
 import { framedProps, labelNameSub, nodePropScalar, nodePropType, edgePropScalar, edgePropType, edgePropsAgg, predicateSql, propExtract, extIdOf, P_OPS, storedValueExpr } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { isColumnArg, isPopArg, isScopeArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { isColumnArg, isPopArg, isScopeArg, isTokenArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { aliasElem, aliasIsElement, carryFrag, carriedCols, scalarTypeFromAlias, type AliasMap, type ElementStream } from '../context/context.ts';
 import { aliasId, aliasPop, aliasPresent, aliasScalar, entryTypeTag, shapeElem } from '../context/alias.ts';
 import { emptyElementLike, historyPropertyValues, historyScalarValues, historyValues, popEnd, popIsListResult, selectOneFromAlias } from './labelselect.ts';
@@ -87,7 +87,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
     if (nested[i]) return !plans[i];
     if (a === undefined) return false;
     if (typeof a === 'string') return false;
-    return !(isProject && a && typeof a === 'object' && 'token' in a && (a.token === 'id' || a.token === 'label'));
+    return !(isProject && isTokenArg(a) && (a.token === 'id' || a.token === 'label'));
   })) return null;
 
   const outer = pushChildScope(st);
@@ -217,9 +217,9 @@ function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[])
  * Lower it to the ordinary element/scalar stream model so movement, projections and
  * barriers after select() are handled by the common dispatcher. */
 export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
-  const pop = proj.args.find((a) => a && typeof a === 'object' && 'pop' in a) as { pop: string } | undefined;
+  const pop = proj.args.find(isPopArg);
   const popMode = pop?.pop ?? 'last';
-  if (proj.args.some((a) => a && typeof a === 'object' && 'column' in a)) throw new Error('select(Column) not yet supported');
+  if (proj.args.some(isColumnArg)) throw new Error('select(Column) not yet supported');
   const keys = proj.args.filter((a): a is string => typeof a === 'string');
   if (keys.length !== 1) throw new Error('lowerSingleSelect requires exactly one label');
   const selected = st.carried.aliases.get(keys[0]);
@@ -309,14 +309,14 @@ function scalarProjectAliasField(nested: any, s: ScalarStream, params: Record<st
   const body = stepChain(nested, params);
   if (body.length !== 1 || body[0].name !== 'select') return null;
   const strs = body[0].args.filter((a: any): a is string => typeof a === 'string');
-  if (strs.length !== 1 || body[0].args.some((a: any) => a && typeof a === 'object' && ('column' in a || 'pop' in a))) return null;
+  if (strs.length !== 1 || body[0].args.some((a: unknown) => isColumnArg(a) || isPopArg(a))) return null;
   const entry = s.carried.aliases.get(strs[0]);
   return entry && aliasIsElement(entry) ? { label: strs[0], entry } : null;
 }
 
 export function lowerScalarProject(s: ScalarStream, proj: PStep): RecordStream | null {
   if (proj.name !== 'project') return null;
-  if (proj.args.some((a) => a && typeof a === 'object' && ('column' in a || 'pop' in a))) return null;
+  if (proj.args.some((a: unknown) => isColumnArg(a) || isPopArg(a))) return null;
   const keys = proj.args.filter((a): a is string => typeof a === 'string');
   if (!keys.length) return null;
   const bys = proj.bys ?? [];
@@ -385,13 +385,13 @@ export function lowerRecordSelectProject(st: ElementStream, proj: PStep): Stream
   // A non-last Pop on a multi-label select() reads each label's history; the
   // shared shape-agnostic record builder resolves them. project() (current-object
   // keys) has no Pop dimension. Column args stay rejected below.
-  const pop = proj.args.find((a) => a && typeof a === 'object' && 'pop' in a) as { pop: string } | undefined;
+  const pop = proj.args.find(isPopArg);
   if (pop && pop.pop !== 'last') {
     if (isProject) throw new Error(`project(Pop.${pop.pop}) is not a valid form`);
     const keys = proj.args.filter((a): a is string => typeof a === 'string');
     return selectRecordFromAlias(st, proj, [...new Set(keys)], pop.pop);
   }
-  if (proj.args.some((a) => a && typeof a === 'object' && 'column' in a)) throw new Error('select(Column) not yet supported');
+  if (proj.args.some(isColumnArg)) throw new Error('select(Column) not yet supported');
 
   const keys = proj.args.filter((a): a is string => typeof a === 'string');
   if (!keys.length) throw new Error(`${proj.name}() requires at least one key`);
@@ -650,7 +650,7 @@ const recordOrder: ShapeTailFn<RecordStream> = (s, step, steps, at) => {
     // one query (a following Scope.local limit is a per-field slice, not a row cut → skip).
     const nxt = steps[at + 1];
     const fuse = nxt && (nxt.name === 'limit' || nxt.name === 'skip' || nxt.name === 'range')
-      && !nxt.args.some((a: any) => a && typeof a === 'object' && a.scope === 'local');
+      && !nxt.args.some((a: unknown) => isScopeArg(a) && a.scope === 'local');
     let suffix: Expression = empty;
     if (fuse) {
       const nums = nxt.args.filter((a): a is number => typeof a === 'number').map(Number);

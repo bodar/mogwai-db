@@ -1,6 +1,6 @@
 import { q, value, type Expression } from '../../../sql/kernel/q.ts';
 import { type ValueType } from '../../../sql/kernel/render.ts';
-import { isGTypeArg, parseIsoMs, stepChain } from '../../../gremlin/frontend.ts';
+import { isDtArg, isGTypeArg, isNested, parseIsoMs, stepChain } from '../../../gremlin/frontend.ts';
 
 // ---------- scalar value coercion (asBool / asNumber / asDate + date arithmetic) ----------
 //
@@ -10,6 +10,14 @@ import { isGTypeArg, parseIsoMs, stepChain } from '../../../gremlin/frontend.ts'
 // const input is an inject() literal); the SQL emitters wrap a runtime scalar in a
 // CAST. Shared by renderProjection (runtime path, projection.ts) and compileInject
 // (const path, inject.ts).
+
+/** The syntax-only scalar transform vocabulary. It lives in this cycle-free leaf
+ * because child-shape classification must consult it without importing the scalar
+ * emitter (which reaches the engine and therefore the classifier). */
+export const SCALAR_TRANSFORMS = new Set([
+  'concat', 'length', 'toUpper', 'toLower', 'asString', 'substring', 'replace',
+  'trim', 'lTrim', 'rTrim', 'reverse', 'asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff',
+]);
 
 /** asBool() over a compile-time constant — TinkerPop's parse semantics. Its
  *  per-value errors (null / non-bool string / list → "Can't parse …") can't be
@@ -123,7 +131,7 @@ const DT_MS: Record<string, number> = { second: 1000, minute: 60000, hour: 36000
 
 /** dateAdd's DT unit token → its millisecond factor. */
 export function dtFactor(arg: any): number {
-  const u = arg && typeof arg === 'object' && 'dt' in arg ? String(arg.dt) : null;
+  const u = isDtArg(arg) ? arg.dt : null;
   const f = u ? DT_MS[u] : undefined;
   if (!f) throw new Error(`dateAdd() requires a DT unit (second/minute/hour/day), got ${u ?? arg}`);
   return f;
@@ -153,7 +161,7 @@ export function asDateConst(v: any, subtype: string | null): number {
  *  = new Date(null)). A nested inject()/movement defers. */
 export function dateDiffOtherMs(arg: any, params: Record<string, any>): number {
   if (typeof arg === 'number') return arg;
-  if (arg && typeof arg === 'object' && 'nested' in arg) {
+  if (isNested(arg)) {
     const inner = stepChain(arg.nested, params);
     if (inner.length === 1 && inner[0].name === 'constant') {
       const c = inner[0].args[0];

@@ -5,7 +5,7 @@ import { gtypeName, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import { aliasArmProjection, carryFrag, carryFragMint, carriedCols, carriedWith, mergeAliasMaps, partitionOver, withoutCarried, type Carry } from '../context/context.ts';
 import { carryOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
-import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, numericSpec } from './coerce.ts';
+import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, numericSpec, SCALAR_TRANSFORMS } from './coerce.ts';
 import { normalizeTypeName } from '../../../gremlin/types.ts';
 import { perRowColumnOf, perRowCols, STATIC, staticTypeOf, UNKNOWN, type ScalarType, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf } from '../../engine/deps.ts';
@@ -59,10 +59,7 @@ export function scalarMapRetype(s: ScalarStream): MapStream | null {
   return toMapStream(carryOf(s), rel, { kind: 'scalar' }, { kind: 'scalar' });
 }
 
-export const SCALAR_TRANSFORMS = new Set([
-  'concat', 'length', 'toUpper', 'toLower', 'asString', 'substring', 'replace',
-  'trim', 'lTrim', 'rTrim', 'reverse', 'asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff',
-]);
+export { SCALAR_TRANSFORMS } from './coerce.ts';
 
 export const SACK_OPS = new Set(['assign', 'sum', 'minus', 'mult', 'div', 'min', 'max']);
 

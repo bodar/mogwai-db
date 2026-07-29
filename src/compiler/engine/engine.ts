@@ -1,7 +1,7 @@
 import { q, value, list, Query, type Expression } from '../../sql/kernel/q.ts';
 import { nodes, edges } from '../../sql/schema.ts';
 import { type Elem } from '../plan/plan.ts';
-import { flattenListArgs } from '../../gremlin/frontend.ts';
+import { flattenListArgs, isColumnArg, isOperatorArg, isPopArg } from '../../gremlin/frontend.ts';
 import { type PStep } from '../ir/strategies.ts';
 import { analyze, type ChainFacts } from '../ir/analyze.ts';
 import { trackFromV, type Carry, type ElementStream, type StepFn } from '../steps/context/context.ts';
@@ -58,7 +58,7 @@ export { compileTail };
 
 /** A sack step in its mutate form (has an Operator arg); the bare read form is a tail
  *  projection, so it must NOT dispatch as a prefix step. */
-const isSackMutate = (s: PStep): boolean => (s.args ?? []).some((a: any) => a && typeof a === 'object' && 'operator' in a);
+const isSackMutate = (s: PStep): boolean => (s.args ?? []).some(isOperatorArg);
 
 /** A side-effecting group('a')/groupCount('a') (has a string side-effect key); the bare
  *  form is a terminal barrier handled by compileTail, so it must break out of the prefix. */
@@ -91,7 +91,7 @@ const isValueShape = (s: Stream): boolean => s.kind === 'scalar' || s.kind === '
 const isLabelSelect = (step: PStep): boolean =>
   step.name === 'select'
   && step.args.some((a: any) => typeof a === 'string')
-  && !step.args.some((a: any) => a && typeof a === 'object' && 'column' in a);
+  && !step.args.some(isColumnArg);
 
 /** The shape-agnostic label steps: as() binds and select(label) reads a path-history
  *  label. They are dispatched in ONE place (dispatchAlias, at the top of lowerStream);
@@ -99,7 +99,7 @@ const isLabelSelect = (step: PStep): boolean =>
 const isAliasStep = (step: PStep): boolean => step.name === 'as' || isLabelSelect(step);
 
 const popOf = (step: PStep): string =>
-  (step.args.find((a: any) => a && typeof a === 'object' && 'pop' in a) as { pop: string } | undefined)?.pop ?? 'last';
+  step.args.find(isPopArg)?.pop ?? 'last';
 
 /** Dispatch as()/select(label) over a value-shaped (scalar/list/variant) stream. */
 function dispatchAlias(s: Exclude<Stream, { kind: 'result' }>, steps: PStep[], at: number): LoweringResult {
