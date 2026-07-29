@@ -48,12 +48,10 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      a re-sourced modulation child now reaches it. **The opening: for a re-sourced body the
      partition is redundant** (the child ignores the traverser). *Medium.*
 
-0c. **3 fail-closed VIOLATIONS, surfaced by the census** (`test/census/deferrals.tsv`, status
+0c. **2 fail-closed VIOLATIONS, surfaced by the census** (`test/census/deferrals.tsv`, status
    `crashed`). Each throws a raw runtime error instead of a clear deferral, which the project's
    root rule forbids outright. They were invisible before because a crash and a deferral both just
-   "fail"; the census separates them and gates the count from growing. Two root causes:
-   - **One `null`/`undefined` dereference — 1 case.** `child.stream` on a `project()` whose
-     `by()` bodies are `select(first/last, "v")` over a rebound label. *Low-Med.*
+   "fail"; the census separates them and gates the count from growing. One root cause:
    - **Ordering a heterogeneous injected collection — 2 cases.** `g.inject(...scalars, maps,
      sets...).order()` and `.order().by(desc)` bind a raw collection object while constructing the
      sort key. Either provide a total Gremlin ordering across every admitted injected value or

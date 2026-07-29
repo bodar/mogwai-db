@@ -115,7 +115,8 @@ function tryLowerTraversalRecord(st: ElementStream, proj: IRStep, keys: string[]
       const seed = isProject ? outer.seed : reRootElement(outer.seed, p, source.id, source.elem);
       const plan = plans[i]!;
       if (plan.kind === 'scalar') {
-        const child = tryCompileScalarValueChild(seed, nested[i], 'first', reuseCurrentFrame(outer.scope, outer.frame), plan.plan)!;
+        const child = tryCompileScalarValueChild(seed, nested[i], 'first', reuseCurrentFrame(outer.scope, outer.frame), plan.plan);
+        if (!child) return null;
         const rel = child.rel.as(`b${i}`);
         const field = scalarRecordField(keys[i], prefix, child.type);
         return {
@@ -125,7 +126,8 @@ function tryLowerTraversalRecord(st: ElementStream, proj: IRStep, keys: string[]
         };
       }
       if (plan.kind === 'list') {
-        const child = tryCompileListChild(seed, nested[i], reuseCurrentFrame(outer.scope, outer.frame), plan.plan)!;
+        const child = tryCompileListChild(seed, nested[i], reuseCurrentFrame(outer.scope, outer.frame), plan.plan);
+        if (!child) return null;
         const rel = child.rel.as(`b${i}`);
         return {
           rel,
@@ -133,7 +135,11 @@ function tryLowerTraversalRecord(st: ElementStream, proj: IRStep, keys: string[]
           cols: [q`${rel.c.list} AS ${`${prefix}_list`}`],
         };
       }
-      const child = tryCompileElementChild(seed, nested[i], 'first', reuseCurrentFrame(outer.scope, outer.frame), plan.body)!;
+      const child = tryCompileElementChild(seed, nested[i], 'first', reuseCurrentFrame(outer.scope, outer.frame), plan.body);
+      // Classification is deliberately pure and reusable, while emission also
+      // checks this concrete frame's carried aliases. A mismatch is unsupported
+      // child composition, never permission to dereference a missing stream.
+      if (!child) return null;
       const cp = child.stream.rel.as(`cp${i}`);
       const n = (child.stream.elem === 'edge' ? edges : nodes).as(`n${i}`);
       const l = labels.as(`l${i}`);
@@ -208,14 +214,18 @@ function tryLowerTraversalRecord(st: ElementStream, proj: IRStep, keys: string[]
     const type = spec.token === 'label' ? STATIC('string') : UNKNOWN;
     return { rel, field: scalarRecordField(keys[i], prefix, type), cols: scalarRecordCols(rel, prefix, type) };
   });
-  const fields = branches.map((branch) => branch.field);
-  const cols = branches.flatMap((branch) => branch.cols);
-  const first = branches[0].rel;
+  // Every classified child must also emit in this parent frame. Returning null
+  // lets the normal projection dispatcher issue its established deferral instead
+  // of turning a classification/emission mismatch into a raw TypeError.
+  if (branches.some((branch) => branch === null)) return null;
+  const fields = branches.map((branch) => branch!.field);
+  const cols = branches.flatMap((branch) => branch!.cols);
+  const first = branches[0]!.rel;
   const domain = outer.seed.rel.as('prd');
   const from = productive ? domain : first;
   const joins = productive
-    ? branches.map((branch) => q` LEFT JOIN ${branch.rel} ON ${branch.rel.c[outer.frame.ordinal]}=${domain.c[outer.frame.ordinal]}`)
-    : branches.slice(1).map((branch) => q` JOIN ${branch.rel} ON ${branch.rel.c[outer.frame.ordinal]}=${first.c[outer.frame.ordinal]}`);
+    ? branches.map((branch) => q` LEFT JOIN ${branch!.rel} ON ${branch!.rel.c[outer.frame.ordinal]}=${domain.c[outer.frame.ordinal]}`)
+    : branches.slice(1).map((branch) => q` JOIN ${branch!.rel} ON ${branch!.rel.c[outer.frame.ordinal]}=${first.c[outer.frame.ordinal]}`);
   const rel = st.q.cte(
     q`SELECT ${list(cols, ', ')}${layoutProjection(st.traverserLayout, from)} FROM ${from}${list(joins, '')}`,
     [...fields.flatMap(recordFieldColumns), ...layoutCols(st.traverserLayout)],
