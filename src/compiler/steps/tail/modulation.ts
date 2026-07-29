@@ -77,7 +77,7 @@ export function orderProductivityFilter(
 /** `orderProductivityFilter` for a site holding a folded `order()` PStep. */
 export function elementOrderDrop(st: ElementStream, n: Relation, order?: PStep): Expression | null {
   if (!order) return null;
-  const clauses = (order.bys ?? []).map(classifyBy)
+  const clauses = (order.modulators ?? []).map(classifyBy)
     .map((by) => ({ key: by.kind === 'key' ? (by as { key: string }).key : null }));
   return orderProductivityFilter(clauses, (order as any).productiveBy === true,
     (key) => scalarPropSortKey(elemCtx(n, st.elem), key));
@@ -87,7 +87,7 @@ export function elementOrderDrop(st: ElementStream, n: Relation, order?: PStep):
  * is appended by the caller because it knows the current relation alias. */
 export function elementOrderSql(st: ElementStream, n: Relation, order?: PStep): Expression {
   if (!order) return n.c.id;
-  const bys = order.bys ?? [];
+  const bys = order.modulators ?? [];
   if (!bys.length) return q`${n.c.id} ASC`;
   const terms = bys.map((byArgs) => {
     const by = classifyBy(byArgs);

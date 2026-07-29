@@ -4,7 +4,7 @@ import { where } from './filter.ts';
 import { isNested, stepChain, type Step } from '../../../gremlin/frontend.ts';
 import { MATCH_FILTER_HEADS, type PStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
-import { advance, aliasColsOf, aliasScalarTypeOf, prevRel, withLayout, type AliasEntry, type TraverserLayout, type ElementStream, type StepFn } from '../context/context.ts';
+import { appendCte, aliasColsOf, aliasScalarTypeOf, prevRel, withLayout, type AliasEntry, type TraverserLayout, type ElementStream, type StepFn } from '../context/context.ts';
 import { aliasEntry, aliasId, aliasScalar, aliasSeed, elemEntry, elemShape, isElementShape, nodeEntry, shapeElem, type AliasShape } from '../context/alias.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { type Stream } from '../context/stream.ts';
@@ -251,7 +251,7 @@ function applyPattern(st: ElementStream, p: Extract<Pattern, { kind: 'bind' }>, 
     }
   }
   const where = conds.length ? q` WHERE ${list(conds, ' AND ')}` : empty;
-  return advance(st, q`SELECT ${list(proj, ', ')} FROM ${f}${where}`,
+  return appendCte(st, q`SELECT ${list(proj, ', ')} FROM ${f}${where}`,
     { aliases: new Map(aliases), bulk: null, cols: ['id', ...aliasColsOf(aliases)] });
 }
 
@@ -295,7 +295,7 @@ export const match: StepFn = (s, st) => {
   const restoreId: IdSource = (f) => aliasId(f.c[idCol], 'last');
   const seedProj: Expression[] = [q`${prev0.c.id}`, ...aliasColsOf(st.traverserLayout.aliases).map((c) => q`${prev0.c[c]}`),
     q`${aliasSeed(nodeEntry(prev0.c.id))} AS ${idCol}`];
-  let cur: ElementStream = advance(st, q`SELECT ${list(seedProj, ', ')} FROM ${prev0}`, { aliases: new Map(aliases), cols: ['id', ...aliasColsOf(aliases)] });
+  let cur: ElementStream = appendCte(st, q`SELECT ${list(seedProj, ', ')} FROM ${prev0}`, { aliases: new Map(aliases), cols: ['id', ...aliasColsOf(aliases)] });
 
   // Greedy dependency order, one readiness rule for both argument kinds: an argument may run once
   // the variables it READS are bound — the start var for a bind (its end is what it produces), every

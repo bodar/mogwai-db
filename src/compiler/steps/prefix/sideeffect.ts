@@ -34,9 +34,9 @@ const aggregateName = (s: any): string => {
 
 export const aggregate: StepFn = (s, st) => {
   const name = aggregateName(s);
-  const bys = (s as any).bys ?? [];
-  if (bys.length > 1) throw new Error('aggregate() with more than one by() modulator not yet supported');
-  const by = classifyBy(bys[0]);
+  const modulators = (s as PStep).modulators ?? [];
+  if (modulators.length > 1) throw new Error('aggregate() with more than one by() modulator not yet supported');
+  const by = classifyBy(modulators[0]);
   let def: SideEffectDef;
   if (by.kind === 'none') {
     // Element bag: store the rowids; cap('x') rejoins nodes/edges when framing.
@@ -115,7 +115,7 @@ const register = (st: ElementStream, name: string, def: SideEffectDef): ElementS
  */
 export function lowerScalarAggregate(s: ScalarStream, step: PStep): ScalarStream | null {
   const name = aggregateName(step);
-  if (((step as any).bys ?? []).length) return null;
+  if (((step as PStep).modulators ?? []).length) return null;
   const p = s.rel.as('p');
   // Same encoding decision as fold() — a per-row type channel becomes self-describing
   // members, so cap() frames each one by its own stored type.
@@ -147,7 +147,7 @@ const groupSideEffect = (isCount: boolean): StepFn => (s, st) => {
   const def: SideEffectDef = {
     kind: 'group',
     isCount,
-    bys: (s as any).bys ?? [],
+    modulators: (s as PStep).modulators ?? [],
     parent: st,
     productiveBy: (s as any).productiveBy,
   };

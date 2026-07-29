@@ -7,7 +7,7 @@ import {
   nodePropScalar, edgePropScalar, nodePropSortKey, edgePropSortKey, scalarPropSortKey, compareKey, labelNameSub, framedProps, valueMapProps, storedValueExpr,
 } from '../../plan/plan.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { advance, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, partitionOver, dropLayoutAtBarrier, type ElementStream } from '../context/context.ts';
+import { appendCte, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, partitionOver, dropLayoutAtBarrier, type ElementStream } from '../context/context.ts';
 import { loweringStateOf, continueLowering, dispatchShapeTail, toElementStream, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
 import { tryLowerLocalAggregate, lowerScalarAggregate } from '../prefix/sideeffect.ts';
 import { PER_ROW, STATIC, UNKNOWN, staticTypeOf, type Shape } from '../../../sql/kernel/render.ts';
@@ -79,7 +79,7 @@ const MODIFIERS = new Map<string, ModFn>([
   ['order', (s, acc) => {
     // Each folded by() → one order clause; a bare order() sorts by identity.
     if ((s as any).productiveBy) acc.productiveBy = true;
-    const bys = s.bys ?? [];
+    const bys = s.modulators ?? [];
     if (bys.length === 0) { acc.orders.push({ key: null, dir: 'asc' }); return; }
     for (const byArgs of bys) {
       // Reject deferred modulators rather than let a {token}/{nested} arg fall
@@ -229,7 +229,7 @@ function lowerValueMapTail(st: ElementStream, proj: PStep, acc: TailAcc, steps: 
  *  handles the all-direct case) or a term is shuffle; throws for path/encounter-tracking
  *  streams (a fresh encounter would collide) and unsupported child shapes. */
 function lowerElementOrderByTraversal(st: ElementStream, step: PStep): ElementStream | null {
-  const bys = step.bys ?? [];
+  const bys = step.modulators ?? [];
   if (!bys.length) return null;
   const classes = bys.map(classifyBy);
   if (!classes.some((c) => c.kind === 'nested')) return null; // all-direct → acc.orders machinery
@@ -256,7 +256,7 @@ function lowerElementOrderByTraversal(st: ElementStream, step: PStep): ElementSt
       ? q`${d.c[mods.values[travIdx++].value]}${by.dir === 'desc' ? q` DESC` : q` ASC`}`
       : directOrderExpr(by, n, st));
   const orderKey = list([...orderExprs, q`${d.c.id}`], ', ');
-  return advance(
+  return appendCte(
     st,
     q`SELECT ${d.c.id} AS id${layoutProjection(st.traverserLayout, d)}, ROW_NUMBER() OVER (ORDER BY ${orderKey}) AS encounter FROM ${d} JOIN ${n} ON ${n.c.id}=${d.c.id}`,
     { encounter: 'encounter' },
@@ -290,7 +290,7 @@ function directOrderExpr(by: ByClass, n: Relation, st: ElementStream): Expressio
  *  lowerElementOrderByTraversal's job); defers a live path (a fresh encounter would collide with
  *  the path's positional ordering). */
 function lowerElementOrderReenter(st: ElementStream, step: PStep): ElementStream | null {
-  const bys = step.bys ?? [];
+  const bys = step.modulators ?? [];
   const classes: ByClass[] = bys.length ? bys.map(classifyBy) : [{ kind: 'none' }];
   if (classes.some((c) => c.kind === 'nested')) return null; // → lowerElementOrderByTraversal
   if (classes.some((c) => c.dir === 'shuffle')) return null;  // shuffle has no stable encounter
@@ -451,7 +451,7 @@ const tailUnion: ShapeTailFn<ElementStream> = (st, step, _steps, stop) =>
 // no-Pick.none pass-through, and tryLowerOptionMapBranch then routes the arms through the ordinary
 // triage + merge family. The predicate form takes the shape cascade.
 const tailChoose: ShapeTailFn<ElementStream> = (st, step, steps, stop) => {
-  if (!step.options) return continueLowering(lowerBranchByShape('choose', st, step), stop + 1);
+  if (!step.optionArms) return continueLowering(lowerBranchByShape('choose', st, step), stop + 1);
   const lowered = lowerChooseOptions(st, steps, stop) ?? tryLowerOptionMapBranch(st, step);
   if (!lowered) throw new Error('choose().option() not yet supported by generic lowering (an option body outside the element/scalar/list arm shapes, or a choice the correlated seam cannot compile)');
   return continueLowering(lowered, stop + 1);
@@ -465,7 +465,7 @@ const tailCoalesce: ShapeTailFn<ElementStream> = (st, step, _steps, stop) =>
 const tailGroup: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
   const isCount = step.name === 'groupCount';
   const src = elementGroupSource(st, step.productiveBy);
-  return continueLowering(lowerGroup(st, isCount, step.bys ?? [], src), stop + 1);
+  return continueLowering(lowerGroup(st, isCount, step.modulators ?? [], src), stop + 1);
 };
 
 // A one-label select emits the labelled traverser itself (or its by(key) scalar), not a
@@ -796,7 +796,7 @@ const scalarFold: ShapeTailFn<ScalarStream> = (s, step, _steps, at) =>
 // Bare groupCount() over a scalar stream → group by the value (Map{value:count}). A
 // name-keyed side effect (groupCount('a')) or a by()/re-key defers to the fallback.
 const scalarGroupCount: ShapeTailFn<ScalarStream> = (s, step, _steps, at) =>
-  (step.args ?? []).length === 0 && !(step.bys?.length) ? continueLowering(lowerScalarGroupCount(s), at + 1) : null;
+  (step.args ?? []).length === 0 && !(step.modulators?.length) ? continueLowering(lowerScalarGroupCount(s), at + 1) : null;
 
 
 /** Wrap a scalar-parent branch consumer (child.ts) as a ShapeTailFn: a produced stream
@@ -837,7 +837,7 @@ const SCALAR_DISPATCH = new Map<string, ShapeTailFn<ScalarStream>>([
   // choose: predicate form → gated UNION arms; option-map form (choose(fn).option(k,body)…)
   // → a CASE over the value through the modulation seam.
   ['choose', (s, step, steps, at) => {
-    const r = step.options ? lowerChooseOptionsScalar(s, steps, at)
+    const r = step.optionArms ? lowerChooseOptionsScalar(s, steps, at)
       : (tryScalarChooseChild(s, step) ?? tryScalarVariantChoose(s, step));
     return r ? continueLowering(r, at + 1) : null;
   }],
@@ -1134,5 +1134,5 @@ function compileCap(st: ElementStream | ScalarStream, steps: PStep[], stop: numb
   // def.parent carries the element source, so the SAME elementGroupSource that built the
   // terminal group() tail rebuilds the source here — no re-derived from/ctx to drift.
   const src = elementGroupSource(def.parent, def.productiveBy);
-  return continueLowering(lowerGroup(def.parent, def.isCount, def.bys, src), stop + 1);
+  return continueLowering(lowerGroup(def.parent, def.isCount, def.modulators, src), stop + 1);
 }

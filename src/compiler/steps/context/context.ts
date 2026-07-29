@@ -145,7 +145,7 @@ export function scopePathCols<C extends { col: string }>(
 export type SideEffectDef =
   | { kind: 'list'; rel: Relation; of: ListOf }
   | { kind: 'variant'; rel: Relation; scalarAs?: ValueType; elem?: Elem }
-  | { kind: 'group'; isCount: boolean; bys: any[][]; parent: ElementStream; productiveBy?: boolean };
+  | { kind: 'group'; isCount: boolean; modulators: any[][]; parent: ElementStream; productiveBy?: boolean };
 export type SideEffectMap = ReadonlyMap<string, SideEffectDef>;
 
 /** The per-traverser CARRIED SCHEMA: the columns physically present on the id-relation
@@ -453,7 +453,7 @@ export const dropLayoutAtBarrier = <T extends LoweringState>(st: T): T => {
  * carried columns; `elem` overrides when a step changes the element kind (…E/…V). Flat
  * opts kept identical, so every call site is unchanged. Returns a fresh ElementStream.
  */
-export function advance(
+export function appendCte(
   st: ElementStream, body: Expression,
   opts: LayoutPatch & { elem?: Elem; cols?: readonly string[] } = {},
 ): ElementStream {

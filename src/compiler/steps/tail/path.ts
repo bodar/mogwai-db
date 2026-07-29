@@ -59,7 +59,7 @@ function positionArmFansOut(body: PStep[], params: Record<string, any>): boolean
   if (last && (last.name === 'count' || last.name === 'sum' || last.name === 'min' || last.name === 'max' || last.name === 'mean' || last.name === 'fold')) return false;
   return body.some((s) => {
     if (POSITION_MOVEMENTS.has(s.name) || s.name === 'V' || s.name === 'E' || s.name === 'union') return true;
-    if ((s.name === 'choose' || s.name === 'coalesce') && !(s as any).options) {
+    if ((s.name === 'choose' || s.name === 'coalesce') && !(s as PStep).optionArms) {
       const kids = (s.args ?? []).filter(isNested);
       // choose(pred, then, else): the predicate (kids[0]) gates, only then/else can fan out.
       const arms = s.name === 'choose' && kids.length === 3 ? kids.slice(1) : kids;
@@ -93,7 +93,7 @@ function lowerPathPositionChild(
   // NOT the value route: the branch compilers have no `first`-collapse, so the fan-out guard is
   // the position's 1-to-1 safety. (classifyScalarChild now ACCEPTS nested-branch bodies, so the
   // value route below would grab them and hit applyScalarChildCardinality's encounter throw.)
-  const hasBranch = body.some((s) => ELEMENT_POSITION_BRANCH.has(s.name) && !(s as any).options);
+  const hasBranch = body.some((s) => ELEMENT_POSITION_BRANCH.has(s.name) && !(s as PStep).optionArms);
   const branch = body.length === 1 && hasBranch ? body[0] : undefined;
   if (branch) {
     if (branch.name === 'union')
@@ -145,7 +145,7 @@ export function lowerPath(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   // their static linear positions (recorded on the alias entry at bind time). Inclusive
   // of both endpoints; an unbound label / empty range fails closed.
   const scopedCols = scopePathCols(pathState.cols, proj.from, proj.to, st.traverserLayout.aliases);
-  const bys = proj.bys ?? [];
+  const bys = proj.modulators ?? [];
   const productive = proj.productiveBy === true;
   // A branched path (pad-to-max cols) has nullable positions: a shorter arm left them
   // NULL. LEFT JOIN those (an INNER JOIN would drop the whole short-arm path), and the
@@ -293,7 +293,7 @@ function compilePathArray(st: ElementStream, proj: PStep, acc: TailAcc): PathStr
   // path().by(key): every position projects the same property (a repeat path has dynamic
   // length, so a single by() applies uniformly; multiple by()s would round-robin over an
   // unknown length → defer). A by(traversal)/by(T.token) also defers via pathBy.
-  const bys = proj.bys ?? [];
+  const bys = proj.modulators ?? [];
   if (bys.length > 1) throw new Error('path().by() with multiple modulators over a recursive repeat().path() not yet supported');
   const by = bys.length ? bys[0] : undefined;
   const nested = classifyBy(by).kind === 'nested' ? (classifyBy(by) as { nested: any }).nested : undefined;

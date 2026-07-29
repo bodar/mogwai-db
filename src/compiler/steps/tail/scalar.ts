@@ -591,7 +591,7 @@ export function lowerScalarSack(s: ScalarStream, step: PStep): ScalarStream {
     return toScalarStream(loweringStateOf(s), rel);
   }
   if (!SACK_OPS.has(op)) throw new Error(`sack(Operator.${op}) not yet supported`);
-  if (((step as any).bys ?? []).length)
+  if (((step as PStep).modulators ?? []).length)
     throw new Error('sack(Operator.x).by() over a scalar stream not yet supported (the scalar value is the merge value)');
   const newSack = combineSack(op, p.c.v, p.c[sk]);
   const carriedProj = layoutCols(s.traverserLayout).map((c) => c === sk ? q`${newSack} AS ${sk}` : p.c[c]);
@@ -697,7 +697,7 @@ export function lowerScalarRows(
       const streamPerRow = perRowColumnOf(stream.type);
       const sortVal: Expression = streamPerRow ? compareKey(q`p.v`, raw(`p.${streamPerRow}`)) : q`p.v`;
       let order: Expression = q`${sortVal} ASC`;
-      const bys = step.bys ?? [];
+      const bys = step.modulators ?? [];
       if (bys.length > 1) throw new Error('multiple order().by() modulators on a scalar stream not yet supported');
       if (bys.length === 1) {
         const by = bys[0];

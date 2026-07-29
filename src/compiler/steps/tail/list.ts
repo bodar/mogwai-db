@@ -245,7 +245,7 @@ function listLocalTransform(s: ListStream, step: PStep): ListStream {
     // Bare order(Scope.local) = ascending by element value. A direction-only
     // by(Order.desc/asc) flips it; a by(key)/by(traversal)/shuffle defers.
     let desc = false;
-    for (const by of step.bys ?? []) {
+    for (const by of step.modulators ?? []) {
       if (by.some((a: any) => typeof a === 'string' || (isNested(a))))
         throw new Error('order(Scope.local).by(key/traversal) not yet supported');
       const ord = by.find(isOrderArg);
@@ -511,7 +511,7 @@ const columnOf = (step: PStep): 'keys' | 'values' | undefined =>
  *  route one implementation. */
 export function mapLocalOrder(step: PStep): { col: 'keys' | 'values'; dir: 'asc' | 'desc' } | null {
   if (step.name !== 'order' || !isLocal(step)) return null;
-  const bys = step.bys ?? [];
+  const bys = step.modulators ?? [];
   if (bys.length !== 1) return null;
   const by = bys[0];
   const col = by.map((a: any) => a && typeof a === 'object' && a.column).find((c: any) => c === 'keys' || c === 'values') as 'keys' | 'values' | undefined;

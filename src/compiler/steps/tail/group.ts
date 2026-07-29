@@ -7,7 +7,7 @@ import {
 import { gtypeName, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { isMapLocalOrder } from './list.ts';
 import { type PStep } from '../../ir/strategies.ts';
-import { advance, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, partitionOver, prevRel, withLayout, dropLayoutAtBarrier, type TraverserLayout, type LoweringState, type ElementStream } from '../context/context.ts';
+import { appendCte, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, partitionOver, prevRel, withLayout, dropLayoutAtBarrier, type TraverserLayout, type LoweringState, type ElementStream } from '../context/context.ts';
 import { loweringStateOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toElementStream, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
 import { PER_ROW, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
@@ -167,7 +167,7 @@ function nestedInnerKeyVal(
   params: Record<string, any>,
   bulk?: Expression,
 ): { key: Expression; val: Expression; kind: 'count' | 'number' } | null {
-  const innerBys: any[][] = innerGroup.bys ?? [];
+  const innerBys: any[][] = innerGroup.modulators ?? [];
   const keyArg = innerBys[0]?.[0];
   let key: Expression | null = null;
   if (keyArg && typeof keyArg === 'object' && 'token' in keyArg)
@@ -825,7 +825,7 @@ const propertyTieBreak = (p: Relation, ownerElem: 'vertex' | 'edge'): Expression
 function propertyDedup(s: PropertyStream, step: PStep): PropertyStream {
   if (s.traverserLayout.aliases.size > 0 || s.traverserLayout.path)
     throw new Error('properties().dedup() after as()/path() not yet supported (property-distinct semantics)');
-  const bys = step.bys ?? [];
+  const bys = step.modulators ?? [];
   if (bys.length > 1) throw new Error('properties().dedup() supports at most one by() modulator');
   const by = bys[0]?.[0];
   let key: Expression;
@@ -859,7 +859,7 @@ function propertyDedup(s: PropertyStream, step: PStep): PropertyStream {
 function propertyOrder(s: PropertyStream, step: PStep): PropertyStream {
   if (s.traverserLayout.aliases.size > 0 || s.traverserLayout.path)
     throw new Error('properties().order() after as()/path() not yet supported (property order semantics)');
-  const bys = step.bys ?? [];
+  const bys = step.modulators ?? [];
   if (bys.length > 1) throw new Error('properties().order() supports at most one by() modulator');
   const by = bys[0] ?? [];
   const token = by.find((a: any) => a && typeof a === 'object' && 'token' in a)?.token;
@@ -938,7 +938,7 @@ const propertyGroup: ShapeTailFn<PropertyStream> = (s, step, _steps, at) => {
   const p = s.rel.as('p');
   const src: GroupSource = { from: p, ctx: propertyCtx(p), elem: 'property', parent: s, productiveBy: step.productiveBy, bulk: s.traverserLayout.bulk ? p.c[s.traverserLayout.bulk] : undefined };
   const isCount = step.name === 'groupCount';
-  return continueLowering(lowerGroup(s, isCount, step.bys ?? [], src), at + 1);
+  return continueLowering(lowerGroup(s, isCount, step.modulators ?? [], src), at + 1);
 };
 
 const propertyValueMap: ShapeTailFn<PropertyStream> = (s, _step, steps, at) => {

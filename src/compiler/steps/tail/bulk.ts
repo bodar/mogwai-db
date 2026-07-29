@@ -57,7 +57,7 @@ const BULK_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
  *  traverser to many keys, which the id-merge would corrupt → not bulk-safe. */
 function nonFanoutGroupCount(step: PStep): boolean {
   if (step.name !== 'groupCount' || (step.args?.length ?? 0) !== 0) return false;
-  const bys = step.bys ?? [];
+  const bys = step.modulators ?? [];
   if (bys.length === 0) return true;
   if (bys.length !== 1) return false;
   const a = bys[0]?.[0];
@@ -71,7 +71,7 @@ function nonFanoutGroupCount(step: PStep): boolean {
  *  to the generic recursive path — correct there, just not bulk-collapsed. */
 function bulkCountGroup(step: PStep, params: Record<string, any>): boolean {
   if (step.name !== 'group' || (step.args?.length ?? 0) !== 0) return false;
-  const bys = step.bys ?? [];
+  const bys = step.modulators ?? [];
   if (bys.length === 0 || bys.length > 2) return false;
   // Key by (bys[0]) must be non-fan-out: bare, a property string, or a token.
   const keyArg = bys[0]?.[0];
@@ -108,7 +108,7 @@ function suffixBulkSafe(suffix: PStep[], params: Record<string, any>): boolean {
     return suffix.slice(0, -1).every((s) =>
       BULK_MOVES.has(s.name)
       || (s.name === 'as' && s.args.every((a: any) => typeof a === 'string'))
-      || (s.name === 'select' && s.args.length > 0 && s.args.every((a: any) => typeof a === 'string') && !(s.bys?.length)));
+      || (s.name === 'select' && s.args.length > 0 && s.args.every((a: any) => typeof a === 'string') && !(s.modulators?.length)));
   }
 
   // Bare element frontier (repeat(...).times(n) with nothing after, or only movements).
@@ -147,10 +147,10 @@ function bulkPlan(steps: PStep[], params: Record<string, any>, sackInit?: SackSp
   if (sackInit) return null;                              // sack is per-traverser identity
   const n = steps.length;
   if (n < 2) return null;                                 // need a source + the repeat cluster
-  const repAt = steps.findIndex((s) => s.name === 'repeat' && s.cluster);
+  const repAt = steps.findIndex((s) => s.name === 'repeat' && s.repeatRegion);
   if (repAt < 1) return null;
   const rep = steps[repAt];
-  const cluster = rep.cluster;
+  const cluster = rep.repeatRegion;
   if (!cluster) return null;
 
   // Path/as BEFORE the repeat defeats bulking because it makes history live. A path()

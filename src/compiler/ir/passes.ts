@@ -35,7 +35,7 @@ const EXTRACT: Pass[] = [
 // load-bearing (fold before simplify) as a guard.
 const FOLD: Pass[] = [
   // These two both need the RAW `{nested}` args (before foldRepeatClusters/foldChooseOptions move a
-  // body into `.cluster`/`.options`), so both lead the group. Their relative order follows
+  // body into `.repeatRegion`/`.optionArms`), so both lead the group. Their relative order follows
   // TinkerPop: a where()'s variable LOCATIONS are resolved when the step is CONSTRUCTED
   // (GraphTraversal.where → TraversalHelper.getVariableLocations), i.e. before any strategy runs,
   // whereas ConnectiveStrategy is a strategy. Concretely it matters for
@@ -89,7 +89,7 @@ const SIMPLIFY: Pass[] = [
 // chain — withoutStrategies suppression + the no-op filter are resolved ONCE in runPasses before
 // any pass runs, so `applies` here only asks "is this named". Decoration runs on the RAW chain
 // (before fold): the injectors recurse into raw `{nested}` args, so a repeat()/choose() body must
-// still be an arg, not yet folded into `.cluster`/`.options`. The injected has()/where()/property()
+// still be an arg, not yet folded into `.repeatRegion`/`.optionArms`. The injected has()/where()/property()
 // steps are then folded + simplified like any parsed step (they carry no by()/cluster of their own).
 const specNamed = (name: string) => (_steps: readonly PStep[], ctx: PassContext) =>
   ctx.strategies.with.some((s) => s.name === name);

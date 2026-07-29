@@ -1,7 +1,7 @@
 import { isNested } from '../../../gremlin/frontend.ts';
 import { derived, q, list, type Expression } from '../../../sql/kernel/q.ts';
 import { scalarProp, labelNameSub, predicateSql, elemCtx } from '../../plan/plan.ts';
-import { advance, elemRel, prevRel, layoutCols, patchLayout, type ElementStream, type StepFn } from '../context/context.ts';
+import { appendCte, elemRel, prevRel, layoutCols, patchLayout, type ElementStream, type StepFn } from '../context/context.ts';
 import { tryCompileScalarValueRows } from '../tail/child.ts';
 import { SACK_OPS, combineSack } from '../tail/scalar.ts';
 
@@ -43,8 +43,8 @@ export const sack: StepFn = (s, st) => {
   const op = (s.args ?? []).find((a: any) => a && typeof a === 'object' && 'operator' in a)?.operator;
   if (!op) throw new Error('sack() read form should not dispatch as a prefix step'); // guarded in lowerElementSteps
   if (!SACK_OPS.has(op)) throw new Error(`sack(Operator.${op}) not yet supported`);
-  const bys = (s as any).bys ?? [];
-  if (bys.length > 1) throw new Error('Sack step can only have one by modulator');
+  const modulators = (s as any).modulators ?? [];
+  if (modulators.length > 1) throw new Error('Sack step can only have one by modulator');
   // aliases/path + a mutable sack still defer (fork/merge over as()/path history unverified).
   // A pushed child-scope ORIGIN is fine: the layoutCols-ordered re-projection below copies
   // every origin column through unchanged, so a scoped sack (local(__.sack(op).by(...))) folds
@@ -54,7 +54,7 @@ export const sack: StepFn = (s, st) => {
 
   const combine = (byVal: Expression, oldSack: Expression | null): Expression => combineSack(op, byVal, oldSack);
 
-  const nested = bys[0]?.find(isNested);
+  const nested = modulators[0]?.find(isNested);
   if (nested) {
     const rows = tryCompileScalarValueRows(st, nested.nested);
     if (rows) {
@@ -68,14 +68,14 @@ export const sack: StepFn = (s, st) => {
       const d = rows.frame.domain.as('d');
       const newSack = combine(f.c.v, st.traverserLayout.sack ? d.c[st.traverserLayout.sack] : null);
       const proj = layoutCols(patchLayout(st.traverserLayout, { sack: 'sk' })).map((c) => c === 'sk' ? q`${newSack} AS sk` : d.c[c]);
-      return advance(st,
+      return appendCte(st,
         q`SELECT ${d.c.id}, ${list(proj, ', ')} FROM ${d} JOIN ${f} ON ${f.c[rows.frame.ordinal]}=${d.c[rows.frame.ordinal]} AND ${f.c.rn}=1`,
         { sack: 'sk' },
       );
     }
   }
 
-  const byVal = sackByValue(bys[0], st);
+  const byVal = sackByValue(modulators[0], st);
   const p = prevRel(st, 'p');
   const newSack = combine(byVal, st.traverserLayout.sack ? p.c[st.traverserLayout.sack] : null);
 
@@ -89,5 +89,5 @@ export const sack: StepFn = (s, st) => {
   // by-modulator semantics — same as values()); label/id/constant by-values are never
   // null so the guard is a harmless always-true there.
   const body = q`SELECT ${p.c.id}, ${list(proj, ', ')} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${predicateSql(byVal, undefined)}`;
-  return advance(st, body, { sack: 'sk' });
+  return appendCte(st, body, { sack: 'sk' });
 };

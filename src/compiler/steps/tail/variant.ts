@@ -240,7 +240,7 @@ const VARIANT_DISPATCH = new Map<string, ShapeTailFn<VariantStream>>([
   // mirroring element dedup (filter.ts).
   ['dedup', (s, step, _steps, at) => {
     if (step.args.length > 0) throw new Error('dedup(label) not yet supported');
-    if ((step.bys ?? []).length) throw new Error('dedup().by() over a variant value not yet supported');
+    if ((step.modulators ?? []).length) throw new Error('dedup().by() over a variant value not yet supported');
     // A carried bulk column rides through the DISTINCT re-projection (bulk≡1 today, so
     // DISTINCT is unaffected); real path/label state still defers.
     if (layoutCols(s.traverserLayout).some((c) => c !== s.traverserLayout.bulk)) throw new Error('dedup() over a variant with carried path/label state not yet supported (path-distinct semantics)');

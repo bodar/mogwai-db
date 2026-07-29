@@ -97,6 +97,16 @@ const lines = text.split('\n');
 const candidates: Pos[] = [];
 if (at) {
   const [l, c] = at.split(':').map(Number);
+  // Assert the token really is there. An `--at` computed BEFORE an earlier rename in the same
+  // batch is stale — a longer replacement shifts every later column on that line — and without
+  // this guard the position silently lands on a neighbouring symbol and renames THAT. It cost
+  // one aliased import (`type Step as modulators`) to learn; a stale position must fail loudly.
+  const found = lines[l - 1]?.slice(c, c + oldName.length);
+  if (found !== oldName) {
+    console.error(`--at ${l}:${c} is "${found}", not "${oldName}" — stale position? ` +
+      `(recompute it against the CURRENT file: earlier renames shift columns)`);
+    proc.kill(); process.exit(1);
+  }
   candidates.push({ line: l - 1, character: c });
 } else {
   const word = new RegExp(`\\b${oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');

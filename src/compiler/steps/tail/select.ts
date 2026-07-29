@@ -63,10 +63,10 @@ export function reRootElement(st: ElementStream, p: Relation, id: Expression, el
  * element. Inner joins implement ordinary productive-by semantics: a missing child
  * drops the record row, while a produced SQL NULL remains a real field value. */
 function tryLowerTraversalRecord(st: ElementStream, proj: PStep, keys: string[]): RecordStream | null {
-  if ((proj.name !== 'project' && proj.name !== 'select') || !proj.bys?.length) return null;
+  if ((proj.name !== 'project' && proj.name !== 'select') || !proj.modulators?.length) return null;
   const isProject = proj.name === 'project';
   const productive = proj.productiveBy === true;
-  const args = keys.map((_, i) => byAt(proj.bys, i));
+  const args = keys.map((_, i) => byAt(proj.modulators, i));
   const specs = args.map((by) => by?.[0]);
   const nested = args.map((by) => { const c = classifyBy(by); return c.kind === 'nested' ? c.nested : null; });
   if (!nested.some(Boolean)) return null; // leave the mature all-direct path untouched
@@ -226,13 +226,13 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
   if (!selected) return emptyElementLike(st); // label bound nowhere → drop every traverser
   // A non-last Pop reads the label's history (first/all/mixed); the by()-less forms lower
   // through the shared shape-agnostic resolver. by()-modulated non-last Pop is uncommon.
-  const hasNestedBy = !!(proj.bys?.[0]?.[0] && typeof proj.bys[0][0] === 'object' && 'nested' in proj.bys[0][0]);
-  if (popMode !== 'last' && !hasNestedBy && !(proj.bys?.length))
+  const hasNestedBy = !!(proj.modulators?.[0]?.[0] && typeof proj.modulators[0][0] === 'object' && 'nested' in proj.modulators[0][0]);
+  if (popMode !== 'last' && !hasNestedBy && !(proj.modulators?.length))
     return selectOneFromAlias(st, proj, keys[0], popMode);
   if (popMode !== 'last') throw new Error(`select(Pop.${popMode}).by(...) not yet supported`);
   const p = st.rel.as('p');
   const productive = proj.productiveBy === true;
-  const nested = proj.bys?.[0]?.[0];
+  const nested = proj.modulators?.[0]?.[0];
   if (nested && typeof nested === 'object' && 'nested' in nested) {
     if (productive) throw new Error('ProductiveByStrategy with a traversal-valued single select is not yet supported');
     const seed = reRootElement(st, p, aliasId(p.c[selected.col], 'last'), aliasElem(selected));
@@ -249,7 +249,7 @@ export function lowerSingleSelect(st: ElementStream, proj: PStep): Stream {
     if (elemPlan) return tryCompileElementChild(seed, nested.nested, 'first', ROOT_SCOPE, elemPlan.body)!.stream;
     throw new Error('by(traversal) child shape not yet supported');
   }
-  const by = byToEntry(proj.bys?.[0]);
+  const by = byToEntry(proj.modulators?.[0]);
   // A dynamically-bound label (bound inside a branch arm / repeat) may be UNBOUND on some
   // rows (a traverser through an arm that never bound it) → drop those (aliasPresent). A
   // statically-bound linear label is always present, so no guard (same SQL).
@@ -319,7 +319,7 @@ export function lowerScalarProject(s: ScalarStream, proj: PStep): RecordStream |
   if (proj.args.some((a: unknown) => isColumnArg(a) || isPopArg(a))) return null;
   const keys = proj.args.filter((a): a is string => typeof a === 'string');
   if (!keys.length) return null;
-  const bys = proj.bys ?? [];
+  const bys = proj.modulators ?? [];
   const byClasses = keys.map((_, i) => classifyBy(byAt(bys, i)));
   // Only a bare by() (→ the value), a nested scalar-value traversal, or a by(select(elementLabel))
   // reading a path-history ELEMENT alias; a string key / T-token has no scalar meaning → defer.
@@ -377,7 +377,7 @@ export function lowerScalarProject(s: ScalarStream, proj: PStep): RecordStream |
 }
 
 export function lowerRecordSelectProject(st: ElementStream, proj: PStep): Stream {
-  const bys = proj.bys ?? [];
+  const bys = proj.modulators ?? [];
   const isProject = proj.name === 'project';
   const aliases: AliasMap = st.traverserLayout.aliases;
   const curElem = st.elem;
@@ -472,7 +472,7 @@ export function tryCompileRecordChild(
  * by() modulators cycle per key (element fields honour by(key); value/list fields ignore it). */
 export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, step: PStep, keys: string[], pop: string): Stream {
   if (keys.some((k) => !s.traverserLayout.aliases.has(k))) return emptyElementLike(s); // any unbound → drop all
-  const bys = step.bys ?? [];
+  const bys = step.modulators ?? [];
   const p = s.rel.as('p');
   const cols: Expression[] = [];
   const joins: Expression[] = [];
@@ -621,8 +621,8 @@ function recordWhere(s: RecordStream, step: PStep, at: number): LoweringResult {
   };
   const leftRes = resolve(arg0);
   const rightRes = resolve(pred.values[0]);
-  if ((step.bys?.length ?? 0) > 1) throw new Error('by() is only supported as an order() or select()/project() modulator');
-  const byKey = step.bys?.[0]?.find((x: any) => typeof x === 'string') as string | undefined;
+  if ((step.modulators?.length ?? 0) > 1) throw new Error('by() is only supported as an order() or select()/project() modulator');
+  const byKey = step.modulators?.[0]?.find((x: any) => typeof x === 'string') as string | undefined;
   let test: Expression;
   if (byKey !== undefined) {
     if (leftRes.elem === 'edge' || rightRes.elem === 'edge') throw new Error('where().by(key) on an edge-typed label not yet supported');
@@ -645,7 +645,7 @@ const recordFilter: ShapeTailFn<RecordStream> = (s, step, _steps, at) => recordW
 const recordOrder: ShapeTailFn<RecordStream> = (s, step, steps, at) => {
     const r = s.rel.as('r');
     const names = s.rel.cols;
-    const terms = recordOrderTerms(s, r, step.bys ?? []);
+    const terms = recordOrderTerms(s, r, step.modulators ?? []);
     // Fuse a directly-following limit/skip/range so the LIMIT applies AFTER the sort in
     // one query (a following Scope.local limit is a per-field slice, not a row cut → skip).
     const nxt = steps[at + 1];
@@ -706,7 +706,7 @@ const recordSelect: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
     .find((c: any) => c === 'keys' || c === 'values') as 'keys' | 'values' | undefined;
   const r = s.rel.as('r');
   if (column) {
-    if (step.bys?.length) throw new Error('by() after select(Column) on a record not yet supported');
+    if (step.modulators?.length) throw new Error('by() after select(Column) on a record not yet supported');
     let expr: Expression;
     let of: ListOf = { kind: 'scalar' };
     if (column === 'keys') expr = q`jsonb(${value(JSON.stringify(s.fields.map((f) => f.key)))})`;
@@ -730,7 +730,7 @@ const recordSelect: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
 
   const keys = step.args.filter((a): a is string => typeof a === 'string');
   if (keys.length !== 1) throw new Error('select() on a record requires exactly one key');
-  if (step.bys?.length) throw new Error('by() after selecting a record field not yet supported');
+  if (step.modulators?.length) throw new Error('by() after selecting a record field not yet supported');
   const field = s.fields.find((f) => f.key === keys[0]);
   if (!field) throw new Error(`select("${keys[0]}"): record has no such key`);
   if (field.sub === 'value') {

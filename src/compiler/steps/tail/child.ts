@@ -2,7 +2,7 @@ import { derived, empty, list, paren, q, value, type Expression, type Relation }
 import { perRowColumnOf, perRowCols } from '../../../sql/kernel/render.ts';
 import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
-import { advance, patchLayout, layoutProjection, layoutProjectionMinting, layoutCols, partitionOver, prevRel, withLayout, type TraverserLayout, type ElementStream } from '../context/context.ts';
+import { appendCte, patchLayout, layoutProjection, layoutProjectionMinting, layoutCols, partitionOver, prevRel, withLayout, type TraverserLayout, type ElementStream } from '../context/context.ts';
 import { aliasId } from '../context/alias.ts';
 import { asOnStream, selectOneFromAlias } from './labelselect.ts';
 import { loweringStateOf, streamPayloadCols, toMapStream, toScalarStream, PROPERTY_PAYLOAD, type ListStream, type MapStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream , type RelationalStream} from '../context/stream.ts';
@@ -114,7 +114,7 @@ export function popChildScope(child: ElementStream, frame: ChildFrame): ElementS
   const nextOrigins = origins.slice(0, -1);
   const layout = patchLayout(child.traverserLayout, { origins: nextOrigins });
   const p = child.rel.as('p');
-  return advance(child, q`SELECT ${p.c.id} AS id${layoutProjection(layout, p)} FROM ${p}`, { origins: nextOrigins });
+  return appendCte(child, q`SELECT ${p.c.id} AS id${layoutProjection(layout, p)} FROM ${p}`, { origins: nextOrigins });
 }
 
 // The terminal barrier vocabulary the row compilers aggregate on is ONE set, defined in the pure
@@ -312,7 +312,7 @@ export function mintChildEncounter(end: ElementStream): ElementStream {
   const pe = prevRel(end, 'pe');
   const layout = withLayout(end, { encounter: 'encounter' }).traverserLayout;
   const mint = q`ROW_NUMBER() OVER (${partitionOver(layout, pe, pe.c.id)})`;
-  return advance(end, q`SELECT ${pe.c.id} AS id${layoutProjectionMinting(layout, pe, 'encounter', mint)} FROM ${pe}`,
+  return appendCte(end, q`SELECT ${pe.c.id} AS id${layoutProjectionMinting(layout, pe, 'encounter', mint)} FROM ${pe}`,
     { encounter: 'encounter' });
 }
 
@@ -911,7 +911,7 @@ export function tryCombineByChildExistence(
     terms.push(q`EXISTS (SELECT 1 FROM ${c} WHERE ${c.c[frame.ordinal]}=${d.c[frame.ordinal]})`);
   }
   const combined = paren(list(terms.map(paren), ` ${op} `));
-  return advance(parent,
+  return appendCte(parent,
     q`SELECT ${d.c.id} AS id${layoutProjection(parent.traverserLayout, d)} FROM ${d} WHERE ${negate ? q`NOT (${combined})` : combined}`,
   );
 }
@@ -931,7 +931,7 @@ function childExistenceGate(
     const d = child.frame.domain.as('d');
     const c = child.stream.rel.as('c');
     const exists = q`EXISTS (SELECT 1 FROM ${c} WHERE ${c.c[child.frame.ordinal]}=${d.c[child.frame.ordinal]})`;
-    return advance(parent,
+    return appendCte(parent,
       q`SELECT ${d.c.id} AS id${layoutProjection(parent.traverserLayout, d)} FROM ${d} WHERE ${negate ? q`NOT (${exists})` : exists}`,
     );
   };
@@ -997,7 +997,7 @@ function compileElementChildRows(
       // policy function, so `local(__.order().by('age'))` and `order().by('age')` cannot disagree.
       const drop = elementOrderDrop(end, n, step);
       const rank = rankPerParent(end.traverserLayout, p, q`${orderExpr}, ${p.c.id}`);
-      end = advance(end,
+      end = appendCte(end,
         q`SELECT ${p.c.id} AS id${layoutProjectionMinting(ordered, p, 'encounter', rank)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}${drop ? q` WHERE ${drop}` : empty}`,
         { encounter: 'encounter' },
       );
@@ -1010,7 +1010,7 @@ function compileElementChildRows(
       // drop encounter here — a following slice then falls back to ORDER BY id (the ternary
       // below already handles the cleared case).
       const deduped = patchLayout(end.traverserLayout, { encounter: null });
-      end = advance(end, q`SELECT DISTINCT ${p.c.id} AS id${layoutProjection(deduped, p)} FROM ${p}`, { encounter: null });
+      end = appendCte(end, q`SELECT DISTINCT ${p.c.id} AS id${layoutProjection(deduped, p)} FROM ${p}`, { encounter: null });
       continue;
     }
     const slice = step.name === 'range' ? rangeToOffsetLimit(step.args)
@@ -1024,7 +1024,7 @@ function compileElementChildRows(
     );
     const hi = slice.limit < 0 ? null : slice.offset + slice.limit;
     const upper = hi === null ? empty : q` AND ${r.c.rn} <= ${hi}`;
-    end = advance(end, q`SELECT ${r.c.id} AS id${layoutProjection(end.traverserLayout, r)} FROM ${r} WHERE ${r.c.rn} > ${slice.offset}${upper}`);
+    end = appendCte(end, q`SELECT ${r.c.id} AS id${layoutProjection(end.traverserLayout, r)} FROM ${r} WHERE ${r.c.rn} > ${slice.offset}${upper}`);
   }
   if (firstPolicy) {
     const p = end.rel.as('p');
@@ -1036,7 +1036,7 @@ function compileElementChildRows(
       ['id', ...cols, 'rn'],
       'r',
     );
-    end = advance(end, q`SELECT ${r.c.id} AS id${layoutProjection(end.traverserLayout, r)} FROM ${r} WHERE ${r.c.rn}=1`);
+    end = appendCte(end, q`SELECT ${r.c.id} AS id${layoutProjection(end.traverserLayout, r)} FROM ${r} WHERE ${r.c.rn}=1`);
   }
   return { stream: end, frame: pushed.frame };
 }

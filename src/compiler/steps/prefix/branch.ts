@@ -7,7 +7,7 @@ import { normalize } from '../../ir/passes.ts';
 import { analyzeChain, type ChainFacts } from '../../ir/analyze.ts';
 import { dirsFor, edgeLabelFilter, labelIn, nodeHasProp, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem } from '../../plan/plan.ts';
 import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
-import { advance, aliasColsOf, elemRel, labelScope, prevRel, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, mergeLayouts, rehomeLayout, rigidCols, partitionOver, type AliasEntry, type AliasMap, type TraverserLayout, type LoweringState, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
+import { appendCte, aliasColsOf, elemRel, labelScope, prevRel, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, mergeLayouts, rehomeLayout, rigidCols, partitionOver, type AliasEntry, type AliasMap, type TraverserLayout, type LoweringState, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type AliasShape } from '../context/alias.ts';
 import { keyedChildRelation, keyedKeySet } from '../tail/keyed.ts';
 import { pushChildScope, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
@@ -297,7 +297,7 @@ export const SingleHopOptionalFastPath: FastPath<[ElementStream, Step[]], Elemen
     const [from, to] = dirsFor(body[0].name)[0];
     const e = edges.as('e');
     const p = prevRel(st, 'p');
-    return advance(st, q`SELECT COALESCE(${e.c[to]}, ${p.c.id}) AS id${layoutProjection(st.traverserLayout, p)} FROM ${p} LEFT JOIN ${e} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(body[0].args)}`);
+    return appendCte(st, q`SELECT COALESCE(${e.c[to]}, ${p.c.id}) AS id${layoutProjection(st.traverserLayout, p)} FROM ${p} LEFT JOIN ${e} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(body[0].args)}`);
   },
 };
 
@@ -474,7 +474,7 @@ export function tryLowerVariantCoalesce(s: Step, st: ElementStream): VariantStre
 /** choose(pred, then, else) with mixed-shape then/else → a VariantStream. The gate
  *  partitions the input (pred / NOT pred); each arm folds from its gated seed. */
 export function tryLowerVariantChoose(s: Step, st: ElementStream): VariantStream | null {
-  if ((s as any).options) return null;
+  if ((s as PStep).optionArms) return null;
   assertForkSafe('choose', st);
   const args = s.args.filter(isNested);
   if (args.length !== 3) return null; // two-arg choose has an element identity else arm
@@ -628,7 +628,7 @@ function expandRepeatBody(
         const op = (step.args ?? []).find((a: any) => a && typeof a === 'object' && 'operator' in a)?.operator;
         if (!op) throw new Error('bare sack() (read) inside a repeat() body is not a fold — use where(__.sack()...) to guard');
         if (!SACK_OPS.has(op)) throw new Error(`sack(Operator.${op}) not yet supported`);
-        sackExpr = combineSack(op, repeatSackByValue((step as any).bys?.[0], curId, curElem), sackExpr);
+        sackExpr = combineSack(op, repeatSackByValue((step as PStep).modulators?.[0], curId, curElem), sackExpr);
       } else {
         // where(__.sack().is(P)): expand only from rows whose current sack satisfies P.
         const pred = sackWhereGuard(step);
@@ -681,14 +681,14 @@ export const repeat: StepFn = (s, st) => {
   // pass it through the recursive term unchanged (see aliasCols below). A label bound INSIDE the
   // body is the different, genuinely-recursive question; `as` is not in REPEAT_BODY_OK, so those
   // bodies still defer there rather than here.
-  const cluster = s.cluster ?? [s];
-  const rep = cluster.find((c) => c.name === 'repeat');
+  const region = s.repeatRegion ?? [s];
+  const rep = region.find((c) => c.name === 'repeat');
   if (!rep) throw new Error(`${s.name}() without repeat() not yet supported`);
-  const emitStep = cluster.find((c) => c.name === 'emit');
+  const emitStep = region.find((c) => c.name === 'emit');
   const hasEmitPred = !!emitStep && emitStep.args.length > 0;
-  const timesStep = cluster.find((c) => c.name === 'times');
+  const timesStep = region.find((c) => c.name === 'times');
   if (timesStep && typeof timesStep.args[0] !== 'number') throw new Error('times(predicate) not yet supported');
-  const untilStep = cluster.find((c) => c.name === 'until');
+  const untilStep = region.find((c) => c.name === 'until');
   const hasUntil = !!untilStep;
   // Interactions not built yet — fail closed rather than silently mis-terminate.
   if (hasUntil && timesStep) throw new Error('until() together with times() not yet supported');
@@ -698,7 +698,7 @@ export const repeat: StepFn = (s, st) => {
   // repeat() has no termination AND no output semantics → reject. Note: unbounded
   // until()/emit() on a cyclic body are infinite by spec — see the docstring.
   if (!timesStep && !hasUntil && !emitStep) throw new Error('repeat() requires times(), until(), or emit()');
-  const emitBefore = !!emitStep && cluster.indexOf(emitStep) < cluster.indexOf(rep);
+  const emitBefore = !!emitStep && region.indexOf(emitStep) < region.indexOf(rep);
 
   // Body: movements (out/in/both) + has() filters + a mutate sack(op).by() fold +
   // a where(__.sack().is(P)) loop guard, optionally a trailing simplePath(). A bare single
@@ -719,10 +719,10 @@ export const repeat: StepFn = (s, st) => {
   // shape); a mid-body aggregate (out().aggregate().out()) would collect an intermediate frontier and
   // stays deferred. by()-modulated aggregate-in-repeat also defers (collect element rowids only).
   const bodyAggName = (c: Step): string | null => {
-    if (c.name === 'aggregate' && (c.args ?? []).length === 1 && typeof c.args[0] === 'string' && !(c as any).bys?.length) return c.args[0];
+    if (c.name === 'aggregate' && (c.args ?? []).length === 1 && typeof c.args[0] === 'string' && !(c as PStep).modulators?.length) return c.args[0];
     if (c.name === 'local') {
       const inner = stepChain(c.args[0]?.nested, st.params);
-      if (inner.length === 1 && inner[0].name === 'aggregate' && typeof inner[0].args[0] === 'string' && !(inner[0] as any).bys?.length) return inner[0].args[0];
+      if (inner.length === 1 && inner[0].name === 'aggregate' && typeof inner[0].args[0] === 'string' && !(inner[0] as PStep).modulators?.length) return inner[0].args[0];
     }
     return null;
   };
@@ -801,7 +801,7 @@ export const repeat: StepFn = (s, st) => {
   // AFTER repeat) leaves the seed untested (body runs ≥1×); while-do (until BEFORE)
   // tests the seed too. Expansion continues only from done=0 rows; done=1 rows exit.
   const untilFn = hasUntil ? walkPredicate(st, untilStep!, 'until') : null;
-  const untilFirst = hasUntil && cluster.indexOf(untilStep!) < cluster.indexOf(rep);
+  const untilFirst = hasUntil && region.indexOf(untilStep!) < region.indexOf(rep);
   // `sackAt` is the accumulated sack at the row being tested (post-fold in the recursive term,
   // the seed value on the seed) — passed so a sack-reading until/emit predicate can read it.
   const doneCol = (id: Expression, depth: Expression, sackAt: Expression | null): Expression => q`, CASE WHEN ${untilFn!(id, depth, sackAt)} THEN 1 ELSE 0 END AS done`;
@@ -926,8 +926,8 @@ export const repeat: StepFn = (s, st) => {
   // NOT carry it — a match() pattern seed, whose multiplicity is its row count — hit the skew.
   const bulkOut = { bulk: 'bulk' as const };
   const out = wantsPathOutput
-    ? advance(st, q`SELECT id${aliasOut}${sackOut}, 1 AS bulk${originOut}, path FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, ...bulkOut, path: { kind: 'array', col: 'path', elem: 'vertex' } })
-    : advance(st, q`SELECT id${aliasOut}${sackOut}, 1 AS bulk${originOut} FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, ...bulkOut });
+    ? appendCte(st, q`SELECT id${aliasOut}${sackOut}, 1 AS bulk${originOut}, path FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, ...bulkOut, path: { kind: 'array', col: 'path', elem: 'vertex' } })
+    : appendCte(st, q`SELECT id${aliasOut}${sackOut}, 1 AS bulk${originOut} FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, ...bulkOut });
   if (!aggName) return out;
   // A body-terminal aggregate('x'): collect every vertex the body emitted — the walk rows at
   // depth ≥ 1 (the seed is the pre-body input, not a body output). If the name already holds a
@@ -983,7 +983,7 @@ function chooseGate(st: ElementStream, predNested: any): (negate: boolean) => El
 function gate(st: ElementStream, test: Expression): ElementStream {
   const n = elemRel(st);
   const p = prevRel(st, 'p');
-  return advance(st, q`SELECT ${n.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${test}`);
+  return appendCte(st, q`SELECT ${n.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${test}`);
 }
 
 /**
@@ -1032,7 +1032,7 @@ export const choose: StepFn = (s, st) => {
  * two ElementStream seeds exactly like element choose; each gated seed then enters
  * the generic child compiler and the resulting scalar rows merge with UNION ALL. */
 export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream | null {
-  if ((s as any).options) return null;
+  if ((s as PStep).optionArms) return null;
   assertForkSafe('choose', st);
   const args = s.args.filter(isNested);
   if (args.length !== 3) return null; // two-arg choose has an element identity else arm
@@ -1053,7 +1053,7 @@ export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream |
 }
 
 export function tryLowerListChoose(s: Step, st: ElementStream): ListStream | null {
-  if ((s as any).options) return null;
+  if ((s as PStep).optionArms) return null;
   assertForkSafe('choose', st);
   const args = s.args.filter(isNested);
   if (args.length !== 3) return null;
@@ -1215,7 +1215,7 @@ export function tryLowerOptionMapBranch(st: ElementStream, step: PStep): Stream 
   const noneTest = list([productive, ...unmatched], ' AND ');
   const unproductiveTest = q`${d.c.ch_at} IS NULL`;
   const seedFor = (test: Expression): ElementStream =>
-    advance(st, q`SELECT ${d.c.id} AS id${layoutProjection(st.traverserLayout, d)} FROM ${d} WHERE ${test}`);
+    appendCte(st, q`SELECT ${d.c.id} AS id${layoutProjection(st.traverserLayout, d)} FROM ${d} WHERE ${test}`);
 
   // Arm order = declaration order, then the implicit pass-through last. Seeds are built lazily in
   // that order because an inline predicate re-emits its binds at each interpolation, and the

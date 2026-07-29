@@ -298,7 +298,7 @@ export class LoweringEngine implements Engine {
       const ctx = childCtx(st);
       if (!fn
         || (branchKind && branchNeedsShapeDispatch(branchKind, steps[i], ctx))
-        || (steps[i].name === 'choose' && steps[i].options)
+        || (steps[i].name === 'choose' && steps[i].optionArms)
         || (steps[i].name === 'sack' && !isSackMutate(steps[i]))
         || ((steps[i].name === 'group' || steps[i].name === 'groupCount') && !isSideEffectGroup(steps[i]))
         || (steps[i].name === 'local' && isShapedLocal(steps[i], ctx))) break;

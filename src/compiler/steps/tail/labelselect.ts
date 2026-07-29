@@ -208,7 +208,7 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
       );
       return toListStream(carry, rel, { kind: 'property', elem: entry.propertyElem! });
     }
-    const by = step.bys?.[0]?.[0];
+    const by = step.modulators?.[0]?.[0];
     if (by === undefined) return selectPropertyAlias(s, entry, col, end);
     if (!(by && typeof by === 'object' && 'token' in by && (by.token === 'key' || by.token === 'value' || by.token === 'id')))
       throw new Error('select(property).by() supports only T.key, T.value, or T.id');

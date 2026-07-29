@@ -21,14 +21,14 @@ import { bodyAlwaysProduces } from './productivity.ts';
 /**
  * A Step optionally carrying folded modulator data, so no step compiler ever
  * peeks at sibling steps:
- *  - `cluster` — the repeat/emit/times/until run (`foldRepeatClusters`).
- *  - `bys` — the trailing by() modulator arg-lists absorbed onto a host step
+ *  - `repeatRegion` — the repeat/emit/times/until run (`foldRepeatClusters`).
+ *  - `modulators` — the trailing by() modulator arg-lists absorbed onto a host step
  *    (`foldByModulators`): order/select/project/group's by(), and the single
  *    by(key) an alias-compare where()/not() carries.
  * The compilers read these fields instead of re-scanning, so the whole read
  * dispatch is a peek-free fold over the step list.
  */
-export type PStep = Step & { cluster?: Step[]; bys?: any[][]; options?: Step[]; productiveBy?: boolean; from?: string; to?: string; withArgs?: [string, any][] };
+export type PStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; from?: string; to?: string; withArgs?: [string, any][] };
 
 const REPEAT_CLUSTER = new Set(['repeat', 'emit', 'times', 'until']);
 /** Steps that absorb trailing by() modulators. Alias-compare where()/not() also
@@ -598,7 +598,7 @@ export function collapseFoldCountLocal(steps: PStep[]): PStep[] {
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
     const next = steps[i + 1];
-    if (s.name === 'fold' && !s.bys && next?.name === 'count'
+    if (s.name === 'fold' && !s.modulators && next?.name === 'count'
       && next.args.some((a: any) => a && typeof a === 'object' && a.scope === 'local')) {
       out.push({ ...next, args: next.args.filter((a: any) => !(a && typeof a === 'object' && a.scope === 'local')) });
       i++; // consume both fold and count(Scope.local)
@@ -615,14 +615,14 @@ const ORDER_INSENSITIVE_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean'
 /** Drop a keyless `order()` immediately before an order-insensitive reducer: it is a
  *  provable no-op (count/sum/min/max/mean ignore order, and a keyless order filters
  *  nothing — unlike order().by(key), which may drop missing-key traversers, so that form
- *  is left intact). Runs after foldByModulators so an order carrying a by() has its `.bys`
+ *  is left intact). Runs after foldByModulators so an order carrying a by() has its `.modulators`
  *  set and is skipped. Unblocks group value children like by(__.out().order().count())
  *  and is a general optimization for root chains too. */
 export function dropRedundantOrder(steps: PStep[]): PStep[] {
   const out: PStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
-    if (s.name === 'order' && !s.bys && ORDER_INSENSITIVE_REDUCERS.has(steps[i + 1]?.name)) continue;
+    if (s.name === 'order' && !s.modulators && ORDER_INSENSITIVE_REDUCERS.has(steps[i + 1]?.name)) continue;
     out.push(s);
   }
   return out;
@@ -764,14 +764,14 @@ export function foldRepeatClusters(steps: Step[]): PStep[] {
   const out: PStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     if (!REPEAT_CLUSTER.has(steps[i].name)) { out.push(steps[i]); continue; }
-    const cluster: Step[] = [];
+    const region: Step[] = [];
     const seen = new Set<string>();
     let j = i;
     while (j < steps.length && REPEAT_CLUSTER.has(steps[j].name) && !seen.has(steps[j].name)) {
-      seen.add(steps[j].name); cluster.push(steps[j]); j++;
+      seen.add(steps[j].name); region.push(steps[j]); j++;
     }
-    const anchor = cluster.find((s) => s.name === 'repeat') ?? cluster[0];
-    out.push({ ...anchor, cluster });
+    const anchor = region.find((s) => s.name === 'repeat') ?? region[0];
+    out.push({ ...anchor, repeatRegion: region });
     i = j - 1;
   }
   return out;
@@ -788,30 +788,30 @@ function isAliasCompareWhere(s: Step): boolean {
   return typeof a === 'string' || (a != null && typeof a === 'object' && 'op' in a);
 }
 
-/** Absorb each host step's trailing contiguous by() steps into `host.bys`. The
+/** Absorb each host step's trailing contiguous by() steps into `host.modulators`. The
  *  order()/select()/project()/group() modulators and an alias-compare where()'s
  *  single by(key) all become a field on their host, so the tail dispatch reads
- *  `.bys` and never looks at the next step. by() validation (token/traversal
- *  modulators still unsupported) stays in the compilers that read `.bys`. */
+ *  `.modulators` and never looks at the next step. by() validation (token/traversal
+ *  modulators still unsupported) stays in the compilers that read `.modulators`. */
 export function foldByModulators(steps: PStep[]): PStep[] {
   const out: PStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
     const pathHost = PATH_MODULATOR_HOSTS.has(s.name);
     if (!BY_HOSTS.has(s.name) && !pathHost && !isAliasCompareWhere(s)) { out.push(s); continue; }
-    const bys: any[][] = [];
+    const modulators: any[][] = [];
     let from: string | undefined, to: string | undefined;
     let j = i + 1;
     for (; j < steps.length; j++) {
       const m = steps[j];
-      if (m.name === 'by') { bys.push(m.args); continue; }
+      if (m.name === 'by') { modulators.push(m.args); continue; }
       // from()/to() are path-scoping modulators only on a path-family host.
       if (pathHost && m.name === 'from' && typeof m.args[0] === 'string') { from = m.args[0]; continue; }
       if (pathHost && m.name === 'to' && typeof m.args[0] === 'string') { to = m.args[0]; continue; }
       break;
     }
-    const folded = bys.length || from !== undefined || to !== undefined
-      ? { ...s, ...(bys.length ? { bys } : {}), ...(from !== undefined ? { from } : {}), ...(to !== undefined ? { to } : {}) }
+    const folded = modulators.length || from !== undefined || to !== undefined
+      ? { ...s, ...(modulators.length ? { modulators } : {}), ...(from !== undefined ? { from } : {}), ...(to !== undefined ? { to } : {}) }
       : s;
     out.push(folded);
     i = j - 1;
@@ -819,10 +819,10 @@ export function foldByModulators(steps: PStep[]): PStep[] {
   return out;
 }
 
-/** Absorb each choose()'s trailing contiguous option() steps into `choose.options`
+/** Absorb each choose()'s trailing contiguous option() steps into `choose.optionArms`
  *  — the option-map form choose(choiceFn).option(key, traversal)…. A choose with no
  *  trailing option() is the predicate form (untouched → the prefix branch compiler).
- *  The compiler reads `.options` and never scans siblings. */
+ *  The compiler reads `.optionArms` and never scans siblings. */
 export function foldChooseOptions(steps: PStep[]): PStep[] {
   const out: PStep[] = [];
   for (let i = 0; i < steps.length; i++) {
@@ -831,7 +831,7 @@ export function foldChooseOptions(steps: PStep[]): PStep[] {
     const options: Step[] = [];
     let j = i + 1;
     for (; j < steps.length && steps[j].name === 'option'; j++) options.push(steps[j]);
-    out.push(options.length ? { ...s, options } : s);
+    out.push(options.length ? { ...s, optionArms: options } : s);
     i = j - 1;
   }
   return out;

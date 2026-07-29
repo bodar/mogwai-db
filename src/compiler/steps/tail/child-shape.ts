@@ -151,7 +151,7 @@ function bindLabels(ctx: ChildCtx | undefined, s: PStep, shape: ChildShape): Chi
  *  opposed to select(Column.*), a multi-label select (a Record) or a by()-modulated one. Those
  *  have their own consumers; only this form re-types the stream to a label's contents. */
 export function labelSelectOf(step: PStep): string | null {
-  if (step.name !== 'select' || step.bys?.length) return null;
+  if (step.name !== 'select' || step.modulators?.length) return null;
   const args = step.args ?? [];
   if (args.some(isColumnArg)) return null;
   const uniq = [...new Set(args.filter((a: any): a is string => typeof a === 'string'))];
@@ -266,7 +266,7 @@ export const isElementChildStep = (s: PStep, ctx?: ChildCtx): boolean =>
  *  classify the arms; a params-free caller conservatively rejects (backward-compatible). */
 export function isUniformElementBranch(s: PStep, ctx: ChildCtx): boolean {
   const kind = asBranchKind(s.name);
-  if (!kind || (s as any).options) return false;
+  if (!kind || (s as PStep).optionArms) return false;
   const { shapes } = classifyBranchArms(kind, s, ctx);
   return shapes.length > 0 && shapes.every((sh) => sh === 'element');
 }
@@ -457,7 +457,7 @@ const ELEMENT_ARM_BRANCH = new Set(['choose', 'coalesce', 'union']);
  * owns this form (lowerChooseOptions); this recognizer only keeps the classify/emit
  * contract intact when the choose lives inside map()/local()/flatMap(). */
 function elementOptionMapScalarBranch(branch: PStep, ctx: ChildCtx): boolean {
-  if (branch.name !== 'choose' || !branch.options) return false;
+  if (branch.name !== 'choose' || !branch.optionArms) return false;
 
   const choice = branch.args[0];
   const choiceIsScalar = isNested(choice)
@@ -481,7 +481,7 @@ function elementOptionMapScalarBranch(branch: PStep, ctx: ChildCtx): boolean {
  * no bespoke reader. Precise (all arms scalar) so it never claims a list/variant-armed branch. */
 export function elementScalarBranchArm(body: ReturnType<typeof stepChain>, ctx: ChildCtx): boolean {
   const at = body.findIndex((s) => ELEMENT_ARM_BRANCH.has(s.name)
-    && (!(s as PStep).options || elementOptionMapScalarBranch(s as PStep, ctx)));
+    && (!(s as PStep).optionArms || elementOptionMapScalarBranch(s as PStep, ctx)));
   if (at < 0) return false;
   const prefix = body.slice(0, at);
   const branch = body[at];
@@ -492,7 +492,7 @@ export function elementScalarBranchArm(body: ReturnType<typeof stepChain>, ctx: 
   if (!scoped) return false;
   const armCtx = scoped.ctx ?? ctx;
   if (!scalarRowRun(suffix, armCtx)) return false;
-  if (branch.name === 'choose' && (branch as PStep).options)
+  if (branch.name === 'choose' && (branch as PStep).optionArms)
     return elementOptionMapScalarBranch(branch as PStep, armCtx);
   const kids = (branch.args ?? []).filter(isNested);
   if (branch.name === 'choose') {
@@ -682,7 +682,7 @@ export function classifyElementChildRows(
   if (stripTerminal && fullBody.at(-1)?.name !== stripTerminal) return null;
   const orderStep = firstPolicy && fullBody.at(-1)?.name === 'order' ? fullBody.at(-1) : undefined;
   let body = stripTerminal || orderStep ? fullBody.slice(0, -1) : fullBody;
-  if (!firstPolicy && body.at(-1)?.name === 'order' && !(body.at(-1) as PStep).bys) body = body.slice(0, -1);
+  if (!firstPolicy && body.at(-1)?.name === 'order' && !(body.at(-1) as PStep).modulators) body = body.slice(0, -1);
   const parts = body.length ? elementRowParts(body, ctx) : stripTerminal ? { prefix: [], suffix: [] } : null;
   return parts ? { body, parts, orderStep: orderStep as PStep | undefined } : null;
 }
@@ -738,11 +738,11 @@ export function isBareBranchChildAllCard(nested: any, ctx: ChildCtx): boolean {
   if (body.length !== 1) return false;
   const kind = asBranchKind(body[0].name);
   if (!kind) return false;
-  // The option-map choose() reads its arms off `step.options`, so it has its own triage — same
+  // The option-map choose() reads its arms off `step.optionArms`, so it has its own triage — same
   // role, same vocabulary (optionMapMerge, below). It reaches the identical List/Variant merges,
   // so a `local(__.choose(..).option(k, __.values('n').fold())..)` composes here like any other
   // branch-of-lists; excluding it was the last thing keeping those bodies out.
-  const merge = (body[0] as any).options
+  const merge = (body[0] as PStep).optionArms
     ? optionMapMerge(body[0], ctx)
     : classifyBranchArms(kind, body[0], ctx).merge;
   return merge === 'list' || merge === 'variant';
@@ -835,7 +835,7 @@ export function classifyArmShape(nested: any, ctx: ChildCtx): BranchArmShape {
  *  classifyBranchArms reports as merge 'element' so the element lowerer owns the arity/option-map
  *  error message (fail closed, one authority). */
 function branchValueArgs(kind: BranchKind, step: PStep): readonly any[] | null {
-  if (kind === 'choose' && (step as any).options) return null; // option-map form: a tail CASE projector
+  if (kind === 'choose' && (step as PStep).optionArms) return null; // option-map form: a tail CASE projector
   const nested = (step.args ?? []).filter(isNested);
   if (kind === 'union') return nested.length >= 2 ? nested : null;
   if (kind === 'coalesce') return nested.length >= 1 ? nested : null;
@@ -935,7 +935,7 @@ export const classifyByAt = (bys: readonly any[][] | undefined, i: number): ByCl
 // ---------- the option-map choose() arm triage ----------
 //
 // `choose(fn).option(k, body)…` picks its arm by an N-way lookup on a choice scalar rather than by
-// position, so its arms hang off `step.options`, not `step.args` — which is exactly why
+// position, so its arms hang off `step.optionArms`, not `step.args` — which is exactly why
 // `branchValueArgs` returns null for it and `classifyBranchArms` cannot describe it. This is that
 // form's triage: the SAME role, different arm extraction, and read by BOTH the child-body
 // classifier (`isBareBranchChildAllCard`) and the emitter (`tryLowerOptionMapBranch`, branch.ts) so
@@ -975,7 +975,7 @@ const isDiscardBody = (nested: any, params: Record<string, any>): boolean => {
 export function readOptionMapArms(step: PStep, params: Record<string, any>): ChooseOptionArm[] | null {
   const out: ChooseOptionArm[] = [];
   const seen = new Set<OptionPick>();
-  for (const opt of step.options ?? []) {
+  for (const opt of step.optionArms ?? []) {
     const bodyArg = (opt.args ?? []).find(isNested);
     if (!bodyArg) return null;
     const keyArg = (opt.args ?? []).find((x: any) => x !== bodyArg);

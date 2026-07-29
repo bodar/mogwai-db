@@ -1,7 +1,7 @@
 import { q, list, empty, derived, type Expression } from '../../../sql/kernel/q.ts';
 import { edges } from '../../../sql/schema.ts';
 import { dirsFor, edgeLabelFilter, type Elem } from '../../plan/plan.ts';
-import { advance, appendPathPos, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, partitionOver, prevRel, type TraverserLayout, type PathState, type ElementStream, type StepFn } from '../context/context.ts';
+import { appendCte, appendPathPos, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, partitionOver, prevRel, type TraverserLayout, type PathState, type ElementStream, type StepFn } from '../context/context.ts';
 import { fastPathContextOf } from '../../engine/deps.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
 import { lowerReSource } from '../graph-source.ts';
@@ -23,7 +23,7 @@ export const MovementCollapseFastPath: FastPath<[ElementStream, Expression, Move
   name: 'movementCollapse',
   equivalentWhen: 'test/L5-properties/differential.test.ts — the fast-path differential (this switch off vs. on, over the L1 corpus + generated traversals)',
   appliesWhen: (ctx, st, _body, opts) => ctx.enabled.movementCollapse && isBulkOnly(st.traverserLayout) && !opts.fromV && !opts.path,
-  tryLower: (_ctx, st, body, opts) => advance(st, q`SELECT id, SUM(bulk) AS bulk FROM (${body}) mv GROUP BY id`, opts),
+  tryLower: (_ctx, st, body, opts) => appendCte(st, q`SELECT id, SUM(bulk) AS bulk FROM (${body}) mv GROUP BY id`, opts),
 };
 
 /** Append a movement CTE. The movementCollapse fast path merges convergent walks when no identity
@@ -32,7 +32,7 @@ export const MovementCollapseFastPath: FastPath<[ElementStream, Expression, Move
 function finishMove(st: ElementStream, body: Expression, opts: MoveOpts): ElementStream {
   const collapsed = runFastPath(MovementCollapseFastPath, fastPathContextOf(st), st, body, opts);
   if (collapsed) return collapsed;
-  if (!st.traverserLayout.encounter) return advance(st, body, opts);
+  if (!st.traverserLayout.encounter) return appendCte(st, body, opts);
   // Emission-order refine: a movement fans a traverser out to several neighbours/edges, so the
   // encounter must be recomputed — a fresh ROW_NUMBER over (the traverser's prior encounter,
   // then the new element id as the local tiebreak, an implementation-defined but deterministic
@@ -127,7 +127,7 @@ export const otherV: StepFn = (s, st) => {
   const other = q`CASE WHEN ${e.c.src}=${fv} THEN ${e.c.tgt} ELSE ${e.c.src} END`;
   const pa = pathAppend(st, 'vertex');
   const body = q`SELECT ${other} AS id${cf}${pa.frag(other)} FROM ${e} JOIN ${p} ON ${e.c.id}=${p.c.id}`;
-  return advance(st, body, { elem: 'vertex', fromV: null, ...pa.opts });
+  return appendCte(st, body, { elem: 'vertex', fromV: null, ...pa.opts });
 };
 
 /** V()/E() MID-TRAVERSAL: re-source the graph, discarding the current element.

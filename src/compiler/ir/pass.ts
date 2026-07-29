@@ -24,8 +24,8 @@ export type PassCategory = typeof PASS_CATEGORIES[number];
 // extract    — stripTerminal: pull out-of-band flags (discard). Runs first.
 // decoration — Subgraph/Partition/ProductiveBy: inject filters/stamps into the RAW chain (external,
 //              config-driven). MUST run before fold: the injectors recurse into raw `{nested}` args
-//              (recurseInject), which foldRepeatClusters/foldChooseOptions move into `.cluster`/
-//              `.options` — decorating after fold would silently miss a repeat()/choose() body (a
+//              (recurseInject), which foldRepeatClusters/foldChooseOptions move into `.repeatRegion`/
+//              `.optionArms` — decorating after fold would silently miss a repeat()/choose() body (a
 //              subgraph/partition criterion NOT injected = an unfiltered leak, the fail-closed hole).
 // fold       — repeat/by/choose/callWith clustering: canonicalize multi-step shapes. Injected
 //              has()/where()/property() steps carry no by()/cluster, so folding them is a no-op —

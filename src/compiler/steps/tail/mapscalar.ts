@@ -88,7 +88,7 @@ export function lowerMath(st: ElementStream, steps: PStep[], stop: number): Scal
   const s = steps[stop];
   const formula = s.args[0];
   if (typeof formula !== 'string') throw new Error('math(string) required');
-  const bys = s.bys ?? [];
+  const bys = s.modulators ?? [];
   const varOrder = mathVars(formula);
 
   const specs: ScalarModulationSpec[] = [];
@@ -146,7 +146,7 @@ export function lowerMath(st: ElementStream, steps: PStep[], stop: number): Scal
 export function lowerMathScalar(s: ScalarStream, step: PStep): ScalarStream | null {
   const formula = step.args[0];
   if (typeof formula !== 'string') return null;
-  const bys = step.bys ?? [];
+  const bys = step.modulators ?? [];
   const varOrder = mathVars(formula);
 
   // Fast path: `_`-only, no by() — one expression straight over the value, encounter preserved.
@@ -202,7 +202,7 @@ export function lowerFormat(st: ElementStream, steps: PStep[], stop: number): Sc
   const s = steps[stop];
   const tmpl = s.args[0];
   if (typeof tmpl !== 'string') throw new Error('format(string) required');
-  const bys = s.bys ?? [];
+  const bys = s.modulators ?? [];
   // Split into alternating literal / token parts. Each `||` operand is a bound literal
   // (a plain string) or a resolved value expression; concatenate them all.
   const re = /%\{([^}]*)\}/g;
@@ -272,7 +272,7 @@ export function lowerFormat(st: ElementStream, steps: PStep[], stop: number): Sc
 export function lowerFormatScalar(s: ScalarStream, step: PStep): ScalarStream | null {
   const tmpl = step.args[0];
   if (typeof tmpl !== 'string') return null;
-  const bys = step.bys ?? [];
+  const bys = step.modulators ?? [];
   const re = /%\{([^}]*)\}/g;
   const specs: ScalarModulationSpec[] = [];
   const parts: ({ kind: 'literal'; text: string } | { kind: 'mod'; index: number })[] = [];
@@ -418,7 +418,7 @@ export function lowerChooseOptions(st: ElementStream, steps: PStep[], stop: numb
 
   const options: { key: any; mod: number; isNone: boolean }[] = [];
   let sawNone = false;
-  for (const opt of cs.options!) {
+  for (const opt of cs.optionArms!) {
     const bodyArg = opt.args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
     if (!bodyArg) return null;
     const keyArg = opt.args.find((x: any) => x !== bodyArg);
@@ -496,7 +496,7 @@ export function lowerChooseOptionsScalar(s: ScalarStream, steps: PStep[], stop: 
 
   const options: { key: any; mod: number; isNone: boolean }[] = [];
   let sawNone = false;
-  for (const opt of cs.options ?? []) {
+  for (const opt of cs.optionArms ?? []) {
     const bodyArg = opt.args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
     if (!bodyArg) return null;
     const keyArg = opt.args.find((x: any) => x !== bodyArg);

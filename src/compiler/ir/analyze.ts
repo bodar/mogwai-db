@@ -41,7 +41,7 @@ const PATH_STEPS = new Set(['path', 'simplePath', 'cyclicPath']);
  *  risk the old two-file prose "must agree" comment carried. order().by(traversal) is NOT
  *  plain (it mints its own encounter / is a nested sort) and returns false. */
 function isPlainOrder(step: PStep): boolean {
-  return step.name === 'order' && (step.bys ?? []).every((by: any[]) => by.length === 0 || typeof by[0] === 'string');
+  return step.name === 'order' && (step.modulators ?? []).every((by: any[]) => by.length === 0 || typeof by[0] === 'string');
 }
 
 // ---------- demandsEncounter (moved verbatim from strategies.ts demandsEncounterOrder) ----------
@@ -107,10 +107,10 @@ const COLLAPSE_REDUCERS = new Set(['count', 'sum', 'mean', 'min', 'max']);
  *  is correct-by-construction but their collapse gating is deferred (see the wire-bulking doc). */
 function groupCountCollapseTerminal(step: PStep): boolean {
   if (step.name !== 'groupCount' || (step.args?.length ?? 0) !== 0) return false;
-  const bys = step.bys ?? [];
-  if (bys.length === 0) return true;
-  if (bys.length !== 1) return false;
-  const a = bys[0]?.[0];
+  const modulators = step.modulators ?? [];
+  if (modulators.length === 0) return true;
+  if (modulators.length !== 1) return false;
+  const a = modulators[0]?.[0];
   return a === undefined || typeof a === 'string' || (a && typeof a === 'object' && 'token' in a);
 }
 
@@ -141,7 +141,7 @@ function computeCollapseSafe(steps: PStep[]): boolean {
     // distinct id), so a GROUP BY-id merge around it is correct. After an order() it is instead a
     // tail ordered-dedup (first-per-key), which does not compose with a collapsed bulk stream →
     // unsafe. dedup(label)/dedup().by() carry extra semantics → unsafe.
-    if (nm === 'dedup' && !sawOrder && (steps[i].bys?.length ?? 0) === 0 && (steps[i].args?.length ?? 0) === 0) continue;
+    if (nm === 'dedup' && !sawOrder && (steps[i].modulators?.length ?? 0) === 0 && (steps[i].args?.length ?? 0) === 0) continue;
     // Element-terminal only: order() by a property key (or bare) just sorts the collapsed (v, N)
     // rows, and a limit/range/skip AFTER it is bulk-aware (the tail cumulative-bulk window). Both
     // stay identity-free. A reducer terminal routes limit/count through the bulk-UNAWARE count

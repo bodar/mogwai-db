@@ -115,7 +115,7 @@ function tenBooleanBreak(step: PStep, params: ChildCtx): boolean {
   const unionBranches = step.name === 'union' ? step.args.filter(nested) : [];
   const scalarUnion = unionBranches.length >= 2 && unionBranches.every((a: any) => isScalarChild(a.nested, params));
   const listUnion = unionBranches.length >= 2 && unionBranches.every((a: any) => isListChild(a.nested, params));
-  const chooseArgs = step.name === 'choose' && !(step as any).options ? step.args.filter(nested) : [];
+  const chooseArgs = step.name === 'choose' && !(step as PStep).optionArms ? step.args.filter(nested) : [];
   const scalarChoose = chooseArgs.length === 3
     && isScalarChild(chooseArgs[1].nested, params) && isScalarChild(chooseArgs[2].nested, params);
   const listChoose = chooseArgs.length === 3

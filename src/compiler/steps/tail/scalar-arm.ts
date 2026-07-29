@@ -73,7 +73,7 @@ const SCALAR_ARM_FILTER = new Set(['and', 'or', 'not', 'filter', 'where']);
 // Nested per-traverser branches whose own arms are recursively scalar-arm bodies: a value
 // branch inside a value arm lowers through lowerSteps→the same tryScalar*Child consumer, so
 // choose(P,__.union(__.constant('a'),__.constant('b')),…) composes. The option-map choose
-// form (step.options) carries its arm bodies off step.options, not step.args, so it is NOT
+// form (step.optionArms) carries its arm bodies off step.optionArms, not step.args, so it is NOT
 // recursed here (defers cleanly rather than being under-checked).
 const SCALAR_ARM_BRANCH = new Set(['choose', 'union', 'coalesce', 'map', 'flatMap', 'local']);
 
@@ -92,8 +92,8 @@ function scalarBranchArm(body: PStep[], params: Record<string, any>): boolean {
     // an unsupported nested body defers here rather than throwing mid-lowering.
     if (SCALAR_ARM_FILTER.has(s.name)) return kids.length > 0 && kids.every((a: any) => scalarBranchArm(childSteps(a.nested, params), params));
     // A nested value-branch: every arm must itself be a scalar value arm so the whole thing
-    // stays scalar and never throws mid-lowering. Option-map choose (s.options) is excluded.
-    if (SCALAR_ARM_BRANCH.has(s.name) && !(s as any).options)
+    // stays scalar and never throws mid-lowering. Option-map choose (s.optionArms) is excluded.
+    if (SCALAR_ARM_BRANCH.has(s.name) && !(s as PStep).optionArms)
       return kids.length > 0 && kids.every((a: any) => scalarBranchArm(childSteps(a.nested, params), params));
     return scalarArmLeafOk(s) && kids.length === 0;
   });
@@ -274,7 +274,7 @@ function buildScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): Sca
  *  value rows into disjoint then/else seeds, each arm lowers over its seed, and the two merge
  *  with UNION ALL. else absent → the value passes through unchanged (identity). */
 export function tryScalarChooseChild(s: ScalarStream, step: PStep): ScalarStream | null {
-  if (step.options) return null; // option-map form is a later stage (modulator consumer)
+  if (step.optionArms) return null; // option-map form is a later stage (modulator consumer)
   const args = step.args ?? [];
   const nested = args.filter(isNested);
   const predIsTraversal = args[0] && typeof args[0] === 'object' && 'nested' in args[0];
@@ -421,7 +421,7 @@ export function tryScalarVariantUnion(s: ScalarStream, step: PStep): VariantStre
  *  seed. Declines when the arms are the same shape (tryScalarChooseChild owns those), the 2-arg
  *  identity-else form, or any arm is unclassifiable. */
 export function tryScalarVariantChoose(s: ScalarStream, step: PStep): VariantStream | null {
-  if (step.options) return null; // option-map form is the modulation seam
+  if (step.optionArms) return null; // option-map form is the modulation seam
   if (s.traverserLayout.path || s.traverserLayout.sack || s.traverserLayout.fromV) return null;
   const args = step.args ?? [];
   const nested = args.filter(isNested);

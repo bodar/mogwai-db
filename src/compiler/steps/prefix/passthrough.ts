@@ -1,6 +1,6 @@
 import { q, empty, type Expression } from '../../../sql/kernel/q.ts';
 import { rangeToOffsetLimit } from '../../plan/plan.ts';
-import { advance, layoutProjection, prevRel, type StepFn } from '../context/context.ts';
+import { appendCte, layoutProjection, prevRel, type StepFn } from '../context/context.ts';
 
 // ---------- passthrough range/limit/skip (prefix phase) ----------
 //
@@ -25,16 +25,16 @@ const orderByEncounter = (st: { traverserLayout: { encounter?: string } }, p: Re
 
 export const limit: StepFn = (s, st) => {
   const p = prevRel(st, 'p');
-  return advance(st, q`SELECT ${p.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${p}${orderByEncounter(st, p)} LIMIT ${Number(s.args[0])}`);
+  return appendCte(st, q`SELECT ${p.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${p}${orderByEncounter(st, p)} LIMIT ${Number(s.args[0])}`);
 };
 
 export const range: StepFn = (s, st) => {
   const { offset, limit } = rangeToOffsetLimit(s.args);
   const p = prevRel(st, 'p');
-  return advance(st, q`SELECT ${p.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${p}${orderByEncounter(st, p)} LIMIT ${limit} OFFSET ${offset}`);
+  return appendCte(st, q`SELECT ${p.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${p}${orderByEncounter(st, p)} LIMIT ${limit} OFFSET ${offset}`);
 };
 
 export const skip: StepFn = (s, st) => {
   const p = prevRel(st, 'p');
-  return advance(st, q`SELECT ${p.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${p}${orderByEncounter(st, p)} LIMIT -1 OFFSET ${Number(s.args[0])}`);
+  return appendCte(st, q`SELECT ${p.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${p}${orderByEncounter(st, p)} LIMIT -1 OFFSET ${Number(s.args[0])}`);
 };

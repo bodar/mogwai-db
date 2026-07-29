@@ -6,7 +6,7 @@ import {
 } from '../../plan/plan.ts';
 import { runFastPath } from '../../options/fast-paths.ts';
 import { tryInlinePredicate, combineBranchPreds, PredicateInliningFastPath } from './predicate.ts';
-import { advance, aliasElem, layoutCols, patchLayout, layoutProjection, elemRel, labelCtx, labelScope, pathColsOf, prevRel, scopePathCols, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from '../context/context.ts';
+import { appendCte, aliasElem, layoutCols, patchLayout, layoutProjection, elemRel, labelCtx, labelScope, pathColsOf, prevRel, scopePathCols, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from '../context/context.ts';
 import { aliasAppend, aliasId, aliasSeed, elemEntry, elemShape } from '../context/alias.ts';
 import { tryCombineByChildExistence, tryCompileScalarValueRows, tryFilterByChildExistence } from '../tail/child.ts';
 import { operandDeps, resolveTraversalOperands } from '../tail/operand.ts';
@@ -39,7 +39,7 @@ const currentCtx = (st: ElementStream) => elemCtx(elemRel(st), st.elem);
 function filterCte(st: ElementStream, test: Expression): ElementStream {
   const n = elemRel(st);
   const p = prevRel(st, 'p');
-  return advance(st, q`SELECT ${n.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${test}`);
+  return appendCte(st, q`SELECT ${n.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} WHERE ${test}`);
 }
 
 /** as(): bind each label to the current traverser (rebinds reuse the label's
@@ -72,7 +72,7 @@ export const as: StepFn = (s, st) => {
     const e = setExpr.get(c);
     return e ? q`${e} AS ${raw(c)}` : q`${p.c[c]}`;
   });
-  return advance(st, q`SELECT ${list(proj, ', ')} FROM ${p}`, { aliases });
+  return appendCte(st, q`SELECT ${list(proj, ', ')} FROM ${p}`, { aliases });
 };
 
 /** simplePath()/cyclicPath(): a whole-path object-identity filter. simplePath keeps
@@ -195,8 +195,8 @@ export const where: StepFn = (s, st) => {
   // every contiguous by(); a second one is not a valid modulator here — fail
   // closed rather than silently answer a different question (matches group()'s
   // bys.length>2 guard; the original consumed exactly one by() and let the rest throw).
-  if ((s.bys?.length ?? 0) > 1) throw new Error('by() is only supported as an order() or select()/project() modulator');
-  const byKey = s.bys?.[0]?.find((x: any) => typeof x === 'string') as string | undefined;
+  if ((s.modulators?.length ?? 0) > 1) throw new Error('by() is only supported as an order() or select()/project() modulator');
+  const byKey = s.modulators?.[0]?.find((x: any) => typeof x === 'string') as string | undefined;
   let testNode: Expression;
   if (byKey !== undefined) {
     // nodePropScalar reads vertex_properties; an edge-typed operand would silently read
@@ -240,9 +240,9 @@ export const dedup: StepFn = (s, st) => {
  *  projects a property / T.token off each label's element (bare → element identity). Layout
  *  state (path, other aliases) rides through, so `as(a)…as(b)…dedup("a","b").path()` composes. */
 function dedupByLabels(st: ElementStream, s: PStep, labels: string[]): ElementStream {
-  const bys = s.bys ?? [];
-  if (bys.length > 1) throw new Error('dedup(labels) supports at most one by() modulator');
-  const by = bys[0]?.[0];
+  const modulators = s.modulators ?? [];
+  if (modulators.length > 1) throw new Error('dedup(labels) supports at most one by() modulator');
+  const by = modulators[0]?.[0];
   const scope = labelScope(st);
   const keyOf = (label: string): Expression => {
     const ctx = labelCtx(scope, label);
@@ -265,7 +265,7 @@ function dedupByLabels(st: ElementStream, s: PStep, labels: string[]): ElementSt
     ['id', ...existing, 'rn'],
     'r',
   );
-  return advance(st, q`SELECT ${r.c.id} AS id${layoutProjection(st.traverserLayout, r)} FROM ${r} WHERE ${r.c.rn}=1`);
+  return appendCte(st, q`SELECT ${r.c.id} AS id${layoutProjection(st.traverserLayout, r)} FROM ${r} WHERE ${r.c.rn}=1`);
 }
 
 /** Element dedup is a key-cardinality consumer. Ordinary by() drops an
@@ -281,16 +281,16 @@ export function lowerElementDedup(st: ElementStream, s: PStep, order?: PStep): E
   if (s.args.length > 0) throw new Error('dedup(Scope.local, …) over an element stream not yet supported');
   if (st.traverserLayout.aliases.size > 0) throw new Error('dedup() after as() not yet supported (path-distinct semantics)');
   if (st.traverserLayout.path) throw new Error('dedup() with path tracking not yet supported (path-distinct semantics)');
-  const bys = s.bys ?? [];
-  if (bys.length > 1) throw new Error('dedup() supports at most one by() modulator');
-  if (!order && !bys.length) {
+  const modulators = s.modulators ?? [];
+  if (modulators.length > 1) throw new Error('dedup() supports at most one by() modulator');
+  if (!order && !modulators.length) {
     const p = prevRel(st, 'p');
     // dedup yields ONE traverser per distinct id → RESET bulk to 1: a collapsed (v, N) becomes
     // (v, 1). Every other carried column rides through unchanged. At bulk≡1 this is identical to
     // carrying p.bulk, so a non-collapsed dedup is unaffected.
     const cols = layoutCols(st.traverserLayout).map((c) => c === st.traverserLayout.bulk ? q`1 AS bulk` : q`${p.c[c]}`);
     const cf = cols.length ? q`, ${list(cols, ', ')}` : q``;
-    return advance(st, q`SELECT DISTINCT ${p.c.id} AS id${cf} FROM ${p}`);
+    return appendCte(st, q`SELECT DISTINCT ${p.c.id} AS id${cf} FROM ${p}`);
   }
 
   const p = prevRel(st, 'p');
@@ -298,9 +298,9 @@ export function lowerElementDedup(st: ElementStream, s: PStep, order?: PStep): E
   // A new ordered barrier supersedes, rather than physically duplicating, any
   // encounter role inherited from an earlier ordered boundary.
   const layout = order ? patchLayout(st.traverserLayout, { encounter: null }) : st.traverserLayout;
-  const key = directElementModulation(st, n, bys[0]);
+  const key = directElementModulation(st, n, modulators[0]);
   if (!key) {
-    const nested = bys[0]?.[0]?.nested;
+    const nested = modulators[0]?.[0]?.nested;
     const rows = nested ? tryCompileScalarValueRows(st, nested) : null;
     if (!rows?.stream.traverserLayout.encounter) throw new Error('dedup().by(traversal) requires a scalar child with encounter order');
     const childEnc = rows.stream.traverserLayout.encounter;
@@ -325,10 +325,10 @@ export function lowerElementDedup(st: ElementStream, s: PStep, order?: PStep): E
       'r',
     );
     const body = q`SELECT ${r.c.id} AS id${layoutProjection(layout, r)}${encounter ? q`, ${r.c[encounter]} AS ${encounter}` : q``} FROM ${r} WHERE ${r.c.rn}=1`;
-    return advance(st, body, encounter ? { encounter } : {});
+    return appendCte(st, body, encounter ? { encounter } : {});
   }
   const orderSql = elementOrderSql(st, n, order);
-  const where = bys.length && !s.productiveBy ? q` WHERE ${predicateSql(key, undefined)}` : q``;
+  const where = modulators.length && !s.productiveBy ? q` WHERE ${predicateSql(key, undefined)}` : q``;
   const existing = layoutCols(layout);
   const encounter = order ? 'encounter' : undefined;
   const encounterExpr = order ? q`, ROW_NUMBER() OVER (ORDER BY ${orderSql}, ${p.c.id}) AS encounter` : q``;
@@ -338,5 +338,5 @@ export function lowerElementDedup(st: ElementStream, s: PStep, order?: PStep): E
     'r',
   );
   const body = q`SELECT ${r.c.id} AS id${layoutProjection(layout, r)}${encounter ? q`, ${r.c[encounter]} AS ${encounter}` : q``} FROM ${r} WHERE ${r.c.rn}=1`;
-  return advance(st, body, encounter ? { encounter } : {});
+  return appendCte(st, body, encounter ? { encounter } : {});
 }
