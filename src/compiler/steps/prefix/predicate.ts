@@ -10,6 +10,7 @@ import { resolveTraversalOperands } from '../tail/operand.ts';
 import { labelCtx, labelIsBound, type LabelScope } from '../context/context.ts';
 import type { Engine } from '../../engine/deps.ts';
 import type { FastPath } from '../../options/fast-paths.ts';
+import { VERTEX_MOVES, EDGE_MOVES, unionOf } from '../../ir/step.ts';
 
 // ---------- where()/not()/filter(__.…) → a boolean filter predicate ----------
 //
@@ -51,7 +52,7 @@ import type { FastPath } from '../../options/fast-paths.ts';
 // label form there keeps failing closed.
 
 /** Vertex→edge/neighbour movement steps that seed a correlated movement child. */
-const MOVES = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE']);
+const MOVES = unionOf(VERTEX_MOVES, EDGE_MOVES);
 
 /** SQL aggregate for a terminal reducer over a correlated stream. */
 const AGG_FN: Record<string, string> = { count: 'COUNT', sum: 'SUM', min: 'MIN', max: 'MAX', mean: 'AVG' };

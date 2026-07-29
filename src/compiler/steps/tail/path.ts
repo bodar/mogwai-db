@@ -13,6 +13,7 @@ import { pushChildScope, tryCompileScalarValueChild } from './child.ts';
 import { lowerGlobalCount } from './barrier.ts';
 import { byAt, childCtx, classifyBy, childSteps, classifyScalarChild, reuseCurrentFrame, type ChildFrame, type ChildScope } from './child-shape.ts';
 import { tryLowerScalarChoose, tryLowerScalarCoalesce } from '../prefix/branch.ts';
+import { VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, unionOf } from '../../ir/step.ts';
 
 // ---------- path() (linear regime) ----------
 
@@ -40,7 +41,10 @@ function positionScalar(ctx: ScalarCtx, byArgs: any[] | undefined): Expression |
   throw new Error('unsupported path().by() modulator');
 }
 
-const POSITION_MOVEMENTS = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'bothV']);
+// The absent OTHER_V here is the OPEN BUG in docs/outstanding-work.md item 0 (otherV() after a
+// path position is not tracked). Written as a union so it reads as missing rather than unnoticed;
+// adding it needs its own test, so it stays out until then.
+const POSITION_MOVEMENTS = unionOf(VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES);
 const ELEMENT_POSITION_BRANCH = new Set(['choose', 'coalesce', 'union']);
 
 /** PURE. Does this branch-arm body produce MORE than one value per input element? A path

@@ -18,6 +18,7 @@ import { finishListMerge, mergeVariantArms, mergeVariantParts, variantArmsMeta, 
 import { unionScalarStreams, SACK_OPS, combineSack } from '../tail/scalar.ts';
 import { engineOf, fastPathContextOf, type Engine } from '../../engine/deps.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
+import { VERTEX_MOVES } from '../../ir/step.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
  *  read back from `nodes` by subquery (the walk row carries only the id). Lets
@@ -515,7 +516,7 @@ export const flatMap: StepFn = (s, st) => {
 // mutate sack(op).by(v) IS supported — it folds a carried accumulator (context.ts sack)
 // through the walk, and a where(__.sack().is(P)) guard reads the freshly-folded value.
 
-const REPEAT_MOVES = new Set(['out', 'in', 'both']);
+const REPEAT_MOVES = VERTEX_MOVES;
 // Vertex→edge steps (land on an edge) and edge→vertex steps (land on an endpoint vertex).
 // Together with REPEAT_MOVES these are the walk's movement vocabulary; edge steps let a body
 // pause ON an edge to fold its property (path-weight accumulation: outE().sack().by('weight').inV()).

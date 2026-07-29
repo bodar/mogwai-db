@@ -15,6 +15,7 @@ import { PER_ROW, STATIC, type Compiled, type ListOf, type ValueType } from '../
 import { engineOf, type Engine } from '../../engine/deps.ts';
 import { lowerGlobalCount } from './barrier.ts';
 import { collectionTypeOf } from './scalar.ts';
+import { REDUCERS } from '../../ir/step.ts';
 
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
 const isLocal = (s: IRStep): boolean => (s.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
@@ -402,7 +403,7 @@ const LIST_OPERAND_OPS = new Set(['combine', 'intersect', 'difference', 'disjunc
  * retypes and re-enters; Scope.local reductions/transforms reshape each list; the
  * set-op family reshapes the list (set/list/product) or reduces it (conjoin/all/any).
  */
-const LIST_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
+const LIST_REDUCERS = REDUCERS;
 
 // Scope.local collection transforms (order/dedup/limit/skip/range/tail) — reshape each
 // list and stay a ListStream. Without Scope.local it isn't this step → fall to default.

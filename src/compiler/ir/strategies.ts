@@ -1,6 +1,7 @@
 import { stepChain, isNested, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
 import { bodyAlwaysProduces } from './productivity.ts';
 import { type IRStep } from './step.ts';
+import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf } from './step.ts';
 
 // IRStep moved to ir/step.ts (it is needed by both halves of ir/). Re-exported here so the
 // ~36 existing importers keep working and can move to ./step.ts independently.
@@ -32,7 +33,7 @@ const BY_HOSTS = new Set(['order', 'select', 'project', 'group', 'groupCount', '
  *  to the positions between two as() labels). `simplePath`/`cyclicPath` are hosts here only
  *  (not general BY_HOSTS) so their by()/from()/to() fold too. `to` also names a movement
  *  step; the fold only fires when it immediately follows a path host, so no collision. */
-const PATH_MODULATOR_HOSTS = new Set(['path', 'simplePath', 'cyclicPath']);
+const PATH_MODULATOR_HOSTS = PATH_FAMILY;
 
 // ---------- withStrategies / withoutStrategies: the decoration + verify bodies ----------
 //
@@ -192,9 +193,11 @@ export function isAlwaysProductiveFilterNoOp(steps: Step[], params: Record<strin
  *  injected after each). V()/E() are also the source step, at index 0. Includes otherV
  *  (an edge→endpoint landing) — TinkerPop's SubgraphStrategy filters EdgeOtherVertexStep
  *  too, so omitting it silently skipped the criterion after bothE().otherV(). */
-const VERTEX_PRODUCERS = new Set(['V', 'out', 'in', 'both', 'outV', 'inV', 'bothV', 'otherV']);
+// Includes OTHER_V, unlike COLLAPSE_MOVES/POSITION_MOVEMENTS: a partition/subgraph vertex
+// criterion must fire after otherV like any other vertex-producing hop.
+const VERTEX_PRODUCERS = unionOf(VERTEX_SOURCE, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V);
 /** Steps whose output traverser is an edge (a partition edge filter injects after). */
-const EDGE_PRODUCERS = new Set(['E', 'outE', 'inE', 'bothE']);
+const EDGE_PRODUCERS = unionOf(EDGE_SOURCE, EDGE_MOVES);
 /** Movement explosion (SubgraphStrategy edge criterion only). To filter the traversed
  *  EDGE, a vertex→vertex hop must first land on the edge: out→outE.inV, in→inE.outV,
  *  both→bothE.otherV — the same rewrite TinkerPop performs when an edgeCriterion is set.
@@ -604,7 +607,7 @@ export function collapseFoldCountLocal(steps: IRStep[]): IRStep[] {
 }
 
 /** Reducers whose result is independent of input order. */
-const ORDER_INSENSITIVE_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
+const ORDER_INSENSITIVE_REDUCERS = REDUCERS;
 
 /** Drop a keyless `order()` immediately before an order-insensitive reducer: it is a
  *  provable no-op (count/sum/min/max/mean ignore order, and a keyless order filters

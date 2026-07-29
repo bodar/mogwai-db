@@ -1,4 +1,5 @@
 import { type IRStep } from './strategies.ts';
+import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, unionOf } from './step.ts';
 
 // ---------- whole-chain analysis: annotate, never rewrite ----------
 //
@@ -31,7 +32,7 @@ export interface ChainFacts {
 
 /** Steps that need the linear path threaded through the fold: the source vertex becomes path
  *  position p0 and every hop appends a position. */
-const PATH_STEPS = new Set(['path', 'simplePath', 'cyclicPath']);
+const PATH_STEPS = PATH_FAMILY;
 
 /** A bare/keyed `order()` (no by(traversal)) re-establishes a deterministic total order. It
  *  is THE shared hinge of the two scans below: such an order() both clears "needs an emission
@@ -91,10 +92,12 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
 // between the collapse and the reducer's SUM(bulk). Anything outside these sets → not safe →
 // the plain UNION-ALL movement (identical result, unbounded rows). otherV is deliberately
 // excluded (its fromV context is per-traverser identity).
-const COLLAPSE_MOVES = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'bothV']);
+// NOTE the absent OTHER_V: otherV carries fromV (per-traverser identity), which a
+// GROUP BY-id collapse would destroy. Excluded deliberately, and now visibly so.
+const COLLAPSE_MOVES = unionOf(VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES);
 const COLLAPSE_FILTERS = new Set(['has', 'hasLabel', 'hasId', 'where', 'filter', 'not', 'and', 'or']);
 const COLLAPSE_PROJ = new Set(['values', 'id', 'label']); // a scalar projection feeding a numeric reducer
-const COLLAPSE_REDUCERS = new Set(['count', 'sum', 'mean', 'min', 'max']);
+const COLLAPSE_REDUCERS = REDUCERS;
 
 /** A `groupCount()` terminal whose key does NOT fan out is a bulk-mergeable barrier: it
  *  weights every group by SUM(bulk) (see lowerGroup's isCount), so collapsing convergent

@@ -25,6 +25,7 @@ import type { PropertyStream, ScalarStream, Stream } from '../context/stream.ts'
 import { type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { SCALAR_TRANSFORMS } from './coerce.ts';
+import { REDUCERS } from '../../ir/step.ts';
 
 /** Root/child compilation context. A child frame retains the complete parent domain,
  * not merely an ordinal on productive child rows: reducers need that domain to
@@ -301,7 +302,7 @@ const BESPOKE_PROJECTIONS = new Set(['values', 'id', 'label', 'constant']);
 /** The terminal barrier vocabulary a scalar child row-run may reduce through. Defined in this
  *  pure leaf and re-exported by child.ts (the compiler half) so the classify and emit sides read
  *  ONE set — they used to declare it twice. */
-export const CHILD_SCALAR_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
+export const CHILD_SCALAR_REDUCERS = REDUCERS;
 const CHILD_SCALAR_ROW_STEPS = new Set([
   ...SCALAR_TRANSFORMS, 'is', 'order', 'limit', 'skip', 'range', 'tail', 'dedup',
   ...CHILD_SCALAR_REDUCERS, 'as',

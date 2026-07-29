@@ -13,9 +13,10 @@ import { PER_ROW, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, t
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { applyChildCardinality, lowerElementBody, mintChildEncounter, pushChildScope, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows } from './child.ts';
 import { childCtx, childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyMapChildRows, classifyScalarChildRows, elementScalarBranchArm, reuseCurrentFrame, ROOT_SCOPE, type ChildParent, type ChildUse, type ChildFrameStack } from './child-shape.ts';
+import { REDUCERS, NUMERIC_REDUCERS } from '../../ir/step.ts';
 
 /** The numeric reducers that terminate a nested-group inner value `by(__.values(x).<r>())`. */
-const SCALAR_REDUCERS = new Set(['sum', 'min', 'max', 'mean']);
+const SCALAR_REDUCERS = NUMERIC_REDUCERS;  // no `count`: a count needs no scalar input
 
 // ---------- group()/groupCount() (barrier → one Map) ----------
 
@@ -152,7 +153,7 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
   }
 }
 
-const GROUP_VALUE_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
+const GROUP_VALUE_REDUCERS = REDUCERS;
 
 /** The inner key + reduced value of a nested-group value body `__.<move>.<group|groupCount>`,
  *  read off the child-expanded inner element/property ctx. Returns null for shapes not yet

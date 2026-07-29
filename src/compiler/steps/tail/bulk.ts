@@ -8,6 +8,7 @@ import { materializeRootStream } from './materialize.ts';
 import { type ElementStream } from '../context/context.ts';
 import type { Engine } from '../../engine/deps.ts';
 import type { FastPath } from '../../options/fast-paths.ts';
+import { VERTEX_MOVES, PATH_FAMILY } from '../../ir/step.ts';
 
 // ---------- traverser bulking: repeat(...).times(n).<bulk-aware terminal> ----------
 //
@@ -46,7 +47,7 @@ import type { FastPath } from '../../options/fast-paths.ts';
 /** The bulk-preserving post-repeat movements (each is another frontier hop, still bounded
  *  by |V|). Threaded through the generic engine, whose movementCollapse fast path keeps them
  *  collapsed; recognized here only so the suffix gate can walk past them to the terminal. */
-const BULK_MOVES = new Set(['out', 'in', 'both']);
+const BULK_MOVES = VERTEX_MOVES;
 /** Global reducers the generic tail already weights by the carried bulk (count → SUM(bulk),
  *  sum/mean → SUM(v·bulk)/Σbulk, min/max bulk-invariant). */
 const BULK_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
@@ -155,7 +156,7 @@ function bulkPlan(steps: IRStep[], params: Record<string, any>, sackInit?: SackS
 
   // Path/as BEFORE the repeat defeats bulking because it makes history live. A path()
   // ANYWHERE in the suffix is likewise identity — suffixBulkSafe rejects it below.
-  const PATH = new Set(['path', 'simplePath', 'cyclicPath']);
+  const PATH = PATH_FAMILY;
   if (steps.slice(0, repAt).some((s) => s.name === 'as' || PATH.has(s.name))) return null;
 
   if (cluster.some((c) => c.name === 'until' || c.name === 'emit')) return null; // no compile-time depth
