@@ -13,6 +13,10 @@ import { scopedMovementCount } from '../../compiler/steps/tail/child.ts';
  *  Direction enum token ({direction:'out'}) or a bare string. */
 function directionOf(params: Record<string, unknown>): 'out' | 'in' | 'both' {
   const d = params.direction;
+  // This registry leaf deliberately stays independent of the parser/front-end import
+  // graph (services are resolved while compiler scopes are assembled). The token has
+  // already been declared at the front-end boundary; this is a local structural read
+  // of a service parameter, not a second parser vocabulary.
   const raw = (d && typeof d === 'object' && 'direction' in d ? (d as { direction: string }).direction
     : typeof d === 'string' ? d
     : 'in').toLowerCase();
