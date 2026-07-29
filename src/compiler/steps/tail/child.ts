@@ -734,7 +734,11 @@ export function tryCompileScalarModulations(
     // The ordinary scalar child compiler already applies its use policy. A fallback
     // extends only the lowering vocabulary, so apply the SAME policy here at the seam.
     const stream = direct ?? (rawFallback
-      ? applyChildCardinality(parent, outer.frame, rawFallback, 'first').stream as ScalarStream
+      // The fallback runs over `outer.seed`, not the caller's pre-push parent. Its raw rows
+      // therefore carry this frame's ordinal; cardinality must retain that same layout so the
+      // common modulation rejoin below can correlate on it. Re-homing on `parent` drops the
+      // ordinal (and rendered an empty column reference for scalar parents).
+      ? applyChildCardinality(outer.seed, outer.frame, rawFallback, 'first').stream as ScalarStream
       : null);
     return stream ? { stream, contract: spec.contract ?? 'produce' } : null;
   });

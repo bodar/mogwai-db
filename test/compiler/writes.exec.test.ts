@@ -281,6 +281,8 @@ test('property() keys use the shared correlated scalar-value resolver', () => {
   expect(run(store, 'g.V(1).values("PERSON")').map((r) => r.v)).toEqual(['marko-key']);
   run(store, 'g.E(7).property(__.constant("checked"), true)');
   expect(run(store, 'g.E(7).values("checked")').map((r) => r.v)).toEqual([1]);
+  run(store, 'g.addE("knows").from(__.V(1)).to(__.V(2)).property(__.constant("score").toUpper(), 1)');
+  expect(run(store, 'g.V(1).outE("knows").values("SCORE")').map((r) => r.v)).toEqual([1]);
 });
 
 test('addV property value __.constant(UUID(...)) keeps the uuid vtype (not string)', () => {

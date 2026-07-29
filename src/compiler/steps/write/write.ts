@@ -481,13 +481,12 @@ function compileAddV(engine: Engine, steps: IRStep[], params: Record<string, any
   return { kind: 'write', run: (store) => { const v = insertVertex(engine, store, spec, params, sideEffects); return [{ vertex: { id: v.extId, label: v.label, props: readVertexProps(store, v.id) } }]; } };
 }
 
-interface EdgeCluster { label: string; fromSpec: any; toSpec: any; edgeUid: string | number | null; props: Record<string, any>; propTypes: Record<string, TypeNode | null>; next: number; }
+interface EdgeCluster { label: string; fromSpec: any; toSpec: any; edgeUid: string | number | null; props: PropSpec[]; next: number; }
 function parseEdgeCluster(steps: Step[], addEIdx: number): EdgeCluster {
   const label = steps[addEIdx].args[0];
   if (typeof label !== 'string') throw new Error('addE(label): nested-traversal label not supported');
   let fromSpec: any, toSpec: any, edgeUid: string | number | null = null;
-  const props: Record<string, any> = {};
-  const propTypes: Record<string, TypeNode | null> = {};
+  const props: PropSpec[] = [];
   let i = addEIdx + 1;
   for (; i < steps.length && (steps[i].name === 'from' || steps[i].name === 'to' || steps[i].name === 'property'); i++) {
     const m = steps[i];
@@ -499,13 +498,12 @@ function parseEdgeCluster(steps: Step[], addEIdx: number): EdgeCluster {
       if (cardinality !== 'single') throw new Error('Cardinality is not valid on an edge property');
       if (metaArgs.length) throw new Error('meta-properties are not valid on an edge property');
       if (k && typeof k === 'object' && 'token' in k) { if (k.token === 'id') edgeUid = v; else throw new Error(`property(T.${k.token}) on an edge not supported`); }
-      // A nested-traversal KEY fails CLOSED (a plain props[k]=v would coerce {nested} to
-      // the string "[object Object]" and write under a garbage key).
-      else if (isNested(k)) throw new Error('addE property() with a nested-traversal key not yet supported');
-      else { props[k] = v; propTypes[k] = propTypeNode(m, off); }
+      else if (typeof k === 'string' || isNested(k))
+        props.push({ key: k, value: v, vtype: gremlinTypeOf(v, propTypeNode(m, off)), typeNode: propTypeNode(m, off), meta: null, cardinality: 'single' });
+      else throw new Error('addE property() key must be a string or traversal');
     }
   }
-  return { label, fromSpec, toSpec, edgeUid, props, propTypes, next: i };
+  return { label, fromSpec, toSpec, edgeUid, props, next: i };
 }
 
 function nodeExtId(store: GraphStore, rowid: number): any {
@@ -520,11 +518,9 @@ function insertEdge(engine: Engine, store: GraphStore, c: EdgeCluster, src: numb
   // Each inline prop VALUE routes through resolveSpecValue (a nested value is evaluated
   // correlated at the new edge). The response echoes the RESOLVED values, never the raw
   // {nested} args.
-  for (const [k, v] of Object.entries(c.props)) {
-    const tn = c.propTypes[k] ?? null;
-    const sp: PropSpec = { key: k, value: v, vtype: gremlinTypeOf(v, tn), typeNode: tn, meta: null, cardinality: 'single' };
+  for (const sp of c.props) {
     const r = resolveSpecValue(engine, store, sp, id, 'edge', params, sideEffects);
-    if (r.has) insertEdgeProperty(store, id, k, r.value, r.vtype ?? gremlinTypeOf(r.value, null), r.typeNode);
+    if (r.has) insertEdgeProperty(store, id, resolveSpecKey(engine, store, sp, id, 'edge', params, sideEffects), r.value, r.vtype ?? gremlinTypeOf(r.value, null), r.typeNode);
   }
   // Echo the RESOLVED props by reading them back typed (valueNodeFromStored {t,v}), so the response
   // frames with the same full fidelity as a read (execute.ts frameTypedNode).
@@ -908,7 +904,7 @@ function compileMergeE(engine: Engine, steps: IRStep[], params: Record<string, a
           if (!label) throw new Error('mergeE cannot create an edge without a label');
           const props = { ...matchSpec.props, ...(oc?.props ?? {}) };
           const propTypes = { ...matchSpec.propTypes, ...(oc?.propTypes ?? {}) };
-          out.push(insertEdge(engine, store, { label, fromSpec: undefined, toSpec: undefined, edgeUid: matchSpec.id ?? oc?.id ?? null, props, propTypes, next: 0 }, outV, inV, params, sideEffects));
+          out.push(insertEdge(engine, store, { label, fromSpec: undefined, toSpec: undefined, edgeUid: matchSpec.id ?? oc?.id ?? null, props: singleProps(props, propTypes), next: 0 }, outV, inV, params, sideEffects));
         }
       }
       return out;
