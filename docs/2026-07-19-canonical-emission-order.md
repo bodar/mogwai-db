@@ -14,10 +14,10 @@ re-picked (see `outstanding-work.md` item 4).
 | **A — branch-merge encounter** | ✅ **Landed**, all four merge families | `finishElementMerge` (`steps/prefix/branch.ts`), `unionScalarStreams` (`steps/tail/scalar.ts`), `mergeVariantArms`/`mergeVariantParts` + `finishListMerge` (`steps/tail/variant.ts`). The four scalar-parent mixed-shape merges were the last hole — they hand-inlined the no-encounter branch and silently dropped arm order; fixed 2026-07-25. |
 | **B — positional determinism** | ✅ Landed for movement refine, source seed, element-prefix `limit`/`range`/`skip`, scalar root `tail`, root + scoped `fold`, child `first`, `values()`/`id()`/`label()` | `movement.ts` `finishMove`, `engine.ts` `seedSource`, `passthrough.ts`, `scalar.ts`, `barrier.ts`, `child.ts` |
 | **B — the demand pre-pass** | ✅ Landed as a ChainFact, not a strategies Pass | `ir/analyze.ts` `computeDemandsEncounter`; shares `isPlainOrder` with `collapseSafe` so the two cannot disagree (`test/compiler/analyze.exec.test.ts`) |
-| **B — `union()` as a SOURCE** | ❌ Not started — explicit throw | `engine.ts` `seedUnion` |
+| **B — `union()` as a SOURCE** | ✅ **Landed** (corrected 2026-07-29 — this row read "❌ Not started" long after the fact, exactly the staleness this doc's header warns about) | `seedRooted` dispatches `first.name === 'union'` to `sourceUnion` (`engine/engine.ts:235`); there is no `seedUnion` symbol in `src/` at all. Recorded as closed site #2 in [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md). |
 | **B — bare re-source `V()`/`E()` arm** | ❌ No encounter minted, so the take-first guards still fail closed | `armFansOut` (`scalar-arm.ts`), `positionArmFansOut` (`path.ts`). `map()` over a `union`/`choose` arm already works. |
 | **C — `dedup(labels)` first-in-emission** | ✅ Landed | `filter.ts` |
-| **C — reconcile the "two encounters"** | ✅ Moot — there is ONE slot | `Carried.encounter`; `ScalarStream` has no separate field (`context/stream.ts` says so explicitly). Do not re-litigate this. |
+| **C — reconcile the "two encounters"** | ✅ Moot — there is ONE slot | `TraverserLayout.encounter` (was `Carried.encounter` before the 2026-07-29 rename); `ScalarStream` has no separate field (`context/stream.ts` says so explicitly). Do not re-litigate this. |
 | **C — lift the take-first guards** | ❌ Blocked only on the re-source mint above | |
 | **`repeat()`/`match()`** | Deliberately outside, as designed | `analyze.ts` returns false for them |
 

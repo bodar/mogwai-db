@@ -4,8 +4,16 @@ The de-duplicated index of open work across the `docs/` corpus. **Each line sets
 why, where to start — not a spec.** The linked doc holds the rationale; the picking agent does the
 detailed validation and design. Live per-step capability: `feature-support-matrix.md`.
 
-**Refreshed** 2026-07-27 against L3 1475 / 2297. Item numbers are stable IDs — landed items are
-deleted and their numbers are not reused, because code comments and other docs cite them.
+**Refreshed** 2026-07-29 against L3 1511 / 2297 (1509 unique names — see the won't-do note). Item
+numbers are stable IDs — landed items are deleted and their numbers are not reused, because code
+comments and other docs cite them.
+
+**The five committed test baselines are inputs to this index, not just gates.** `l3-state.json`
+(the ratchet floor), `census/{goldens,deferrals}.tsv` (the two-way behavioural baseline, 17
+`crashed` rows = item 0c), and the two hand-curated L5 ratchets — `L5-properties/known.ts` and
+`capability-baseline.ts`, plus the `knownBroken` entries inside `laws.ts`. A defect parked in any of
+them must ALSO appear here; a ratchet entry is tracked, not defended. **`mise run L5-random` is not
+in `ci` and it is currently RED at essentially every seed** — item 0d.
 
 > **Verify an item's premise against the code before picking it — this index has been stale in BOTH
 > directions.** The cheapest check is usually a 10-line probe that compiles the traversals the item
@@ -139,6 +147,41 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      the named-loop `repeat("a", …)` form (already tracked in item 3, listed here for completeness
      — the census counts it as a crash either way). *Low-Med.*
 
+0d. **`mise run L5-random` is RED at essentially every seed — and CI's fixed seed 42 is green, so
+   none of it has ever been visible.** Measured 2026-07-29: seeds 5, 11, 27, 91, 143 all fail, each
+   with 1–2 failing tests. `known.ts` is EMPTY and correctly so — none of this is a fast-path
+   *wrong answer*. Every divergence is `kind: "support"`, i.e. **"generic threw, fast paths ON ran"**:
+   the fast path answers where the generic path — the declared semantic authority — has no lowering.
+   Same class as `predicateInlining` not being disable-safe (item 0) and the `tryInlineScalarPredicate`
+   violation (item 0b). Three distinct causes, all reproduced standalone:
+   - **A set-narrowing barrier FOLLOWED BY another step in a filter-position child body**, attributed
+     to `predicateInlining` by the isolation test. `g.V(1).where(__.out().dedup().hasLabel('person'))`
+     answers with fast paths on and throws `where() traversal not supported by inline predicate or
+     generic child existence lowering` with them off. The rule is sharp: `dedup()`/`limit(n)` then any
+     further step diverges; `order()`/`tail(n)` then a step does NOT (they cannot change an existence
+     answer), and a barrier as the LAST step is fine. Same for `where`/`filter`/`not`. So the generic
+     child-existence lowering needs the set-narrowing barriers in its body vocabulary — this is item
+     3's per-iteration-barrier question in a child scope rather than a repeat body. *Medium-High — a
+     fast path that is not disable-safe, which the FastPathConfig contract forbids outright.*
+   - **`where()` over a SCALAR/map parent** — `g.E().valueMap().select('a').where(__.where(__.count()))`
+     runs by default and throws `where() after a scalar stream not yet supported` generically. NOT
+     attributed to `predicateInlining` (`onlyDisabled` shows no divergence), so it is a second switch
+     or the default route itself. Straight item 5c parent-shape work, reached from a new direction.
+   - **The shape table emits `bothV('label')`, which the GRAMMAR REJECTS** (`table.test.ts` fails at
+     seeds 27 and others with `no viable alternative`). `bothV` takes NO label argument in
+     `Gremlin.g4` (unlike `bothE`/`both`); `shape.ts:171`'s own `render` is correct, so the arg is
+     interpolated by a generic label-decoration path in `generate.ts`. **This is a TABLE bug, exactly
+     what `table.test.ts`'s header says it exists to catch** — and its real cost is silent: those
+     traversals always throw, which empties differential coverage rather than failing anything.
+     *Medium — cheap fix, and it is measuring instrument integrity.*
+
+   **The process gap is the actual item here.** Discovery depends on someone remembering to run
+   `L5-random` after touching a fast path, the child seam or the predicate layer. The intended fix
+   (`docs/2026-07-28-property-based-testing-l5.md`) is a SCHEDULED random-seed run that REPORTS rather
+   than blocks — deliberately outside `ci`, because a random-seed property test that fails
+   intermittently is one people learn to ignore. Until then this item will keep rotting silently.
+   Once fixed, promote each into an L4 `.feature` per `test/CLAUDE.md`.
+
 1. **List members frame as bare values, not elements.** `AliasEntry` does not record the member
    shape, so a path/element-list label cannot frame its members as vertices. Blocks
    `g_V_hasXperson_name_markoX_path_asXaX_unionXidentity_identityX_selectXaX_unfold` (which also
@@ -182,7 +225,12 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    (`isElementChildStep`).
    - **A barrier body under a fixed `times(n)`** could be UNROLLED into n generic phases (that route
      hosts barriers; `bulk.ts` already unrolls a specialized version for the count case). The natural
-     next slice. *Medium.*
+     next slice. **Now measured as the single biggest L3 mechanism: 41 failing queries** (2026-07-29
+     telemetry), spread across four of the top five clusters (sizes 19, 17, 15, 9) — by barrier step:
+     `order` 15, `limit` 7, `local` 5, `dedup` 4, `range` 4, `groupCount` 3, `sample` 2, `group` 1.
+     A further 8 fail the adjacent "body must be row-local" gate. That makes the unroll the
+     highest-count generic lift the telemetry names, and `order` alone is over a third of it.
+     *Medium.*
    - ~~**`walkPredicate` (`until()`/`emit()`) has no generic fallback.**~~ **LANDED.** A row-local
      predicate compiles once over every vertex via `keyedChildRelation` (`steps/tail/keyed.ts`) and
      the recursive term reads `id IN <origin set>` — until/emit are existence, so that is the whole
@@ -281,12 +329,65 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    `ResultStream` residue, ~30 ceiling cells of row-ops copied per shape, ~35 genuinely per-step —
    and the first three cut ACROSS parent shapes. Both cautions above stand (not one substrate fix;
    not one item); the axis does not. Re-file before picking this up.
+
+   **The ~30 row-op cells are now their own item — take item 17 FIRST.** The 2026-07-29 audit measured
+   the (shape × row-op) matrix at 55/100 gaps and confirmed `RelationalCardinality` is the named axis
+   that makes sharing safe, so that slice is no longer "per-step dispatch" work at all. What is left
+   here after item 17 is the ~35 genuinely per-step cases plus the `ResultStream` residue (below).
    → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md),
    [shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md)
 
 6. **`order().by()` of paths (path natural-order comparability).** Unlocks the Orderability
    conformance cluster. **Medium.**
    → [path-history-substrate](./2026-07-18-path-history-substrate.md)
+
+17. **Share the row-ops: the (shape × row-op) matrix is 55/100 GAPS, and the axis is now named.**
+   Measured 2026-07-29. `count()` is the only row-op routed through a shared implementation
+   (`lowerGlobalCount`, `barrier.ts`, reading `cardinalityOf`) and it is 9/10; every other op is
+   hand-written per shape or absent. `mapEntry` is 0/10. Three near-verbatim slice builders already
+   exist — `rowPreserving` (`tail/scalar.ts`), `reselect` (`tail/variant.ts`), `recordSlice`'s global
+   branch (`tail/select.ts`) — differing only in the payload column list, which `streamPayloadCols`
+   already owns. **This is item 5c re-sorted by MECHANISM** (~30 of its 84 parent-shape failures are
+   these copied row-ops), and it cuts ACROSS parent shapes, so it does four unrelated jobs at once
+   instead of one shape at a time.
+   - **The precondition, and it is mechanical:** four of eleven shape arms are `if`-chains rather than
+     `dispatchShapeTail` Maps (`tail/list.ts` map + mapEntry, `tail/group.ts`, `tail/path.ts`). A
+     shared row-op cannot be REGISTERED into a switch, so transpose these four first and the lift
+     becomes "add 11 Map entries" instead of "edit 11 sites".
+   - **Why it is architectural, not just mechanical:** `cardinalityOf` (`context/stream.ts`) was named
+     and landed with exactly ONE consumer. Spreading row-ops without routing them through it produces
+     WRONG ANSWERS, not free coverage — a grouped `PathStream` has one row per *position*. The
+     criterion to copy is `applyChildCardinality`, which generalised precisely because it never needs
+     an expression denoting the traverser's value.
+   This is the work [shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md) §8
+   step 4 sanctions ("name the cardinality axis, **then** share row-ops") — and the axis is now named,
+   so the gate is open. **High — the largest single ceiling block measured.**
+   → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md)
+
+18. **Channel-preservation Phase 1 — deployment, not construction.** The largest MEASURED defect
+   category (carried-channel drops, 33%) and the index has never carried it. `withRelation`,
+   `mergeLayouts` and `rehomeLayout` all exist, so the work is converting the hand-written
+   `...traverserLayout` spreads (last measured 104, against 32 `patchLayout` sites) so each survivor
+   must *say* what it drops. Concentrated in `steps/tail/`; start `steps/context/context.ts`.
+   - **`assertStreamColumns` does not yet check declared layout-role columns** — it validates payload
+     and per-row-type columns only. Extending it is the "runtime contract" third of the ScalarType
+     pattern and the assertion point Phase 1's own exit criterion names. `steps/context/stream.ts`.
+   - **`mergeLayouts` is declared "THE merge authority — every arm merge routes through this" and has
+     ONE caller** (`tail/branch.ts`); `tail/scalar.ts` and `tail/variant.ts` call `mergeAliasMaps`
+     directly. That is NOT drift — `variant.ts` documents that child-scoped arms make the rigid-role
+     assertion false and asserting "breaks coalesce outright". The real duplication is one layer up:
+     `unionScalarStreams`, `finishListMerge` and `mergeVariantArms` are three copies of one algorithm
+     (alias-union → `grew` check → per-arm tag → `ROW_NUMBER()` re-mint). The missing concept is a
+     `mergeLayouts` that takes the rigid-role check as a POLICY (`assert` vs `child-scoped`). **Do not
+     weaken the assertion to make a call type-check** — the plan says so explicitly, and the recorded
+     silent-`[]` bug (`union(__.as("x").out().fold(), …).select("x")`) lived in the one copy that never
+     grew the alias union.
+   - **The paired exit-gate regression tests are unwritten** — "a label bound AFTER a barrier survives
+     an arm merge while a label consumed BY that barrier is not silently resurrected", and for each
+     migrated merge both a same-scope and a child-scoped arm.
+   **Phase 6 is a committed NEGATIVE result — do not re-propose it** (IR shape annotation: 56.8%
+   unknown against a 10% ceiling). **High.**
+   → [channel-preservation](./2026-07-28-channel-preservation-refactoring-plan.md)
 
 ---
 
@@ -308,9 +409,22 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    `origin/master`, generated cleanly by our own antlr-ng invocation — 21/21 corpus patterns parse),
    so locked decision #2 is satisfied by the mechanism it already names; and the COMPILER needs no
    change — hand-desugaring every scenario into Gremlin trunk compiles today reproduces **24 of 25**
-   expected result sets, the 25th blocked by an unrelated `concat()` defect. The work is: generate a
-   second parser (`parser/gql/`), add one front-end translator (`src/gremlin/gql.ts`, sitting where
-   `math.ts` sits), add one `extract`-category Pass. **Medium.**
+   expected result sets, the 25th blocked by an unrelated `concat()` defect. **That 25th is now
+   unblocked — `concat(<traversal>)` landed 2026-07-29 (item 0b), so the ceiling is the full +25 and
+   the design doc's own risk section is stale on this point.** Still worth re-measuring rather than
+   assuming, since `match()` remains an unsupported source step. The work is: generate a second parser
+   (`parser/gql/`), add one front-end translator (`src/gremlin/gql.ts`, sitting where `math.ts` sits),
+   add one `extract`-category Pass. Named residuals the headline omits:
+   - `__.match("<gql>")` in a NESTED position — the Gremlin grammar admits it; the desugar would have
+     to mint the `V()` re-source inside a child body.
+   - `-[e:l]-` (undirected WITH an edge variable) — needs `as('e').otherV()`, which throws for want of
+     entering-vertex context. No corpus case, fails closed.
+   - **The `extract`-category placement is load-bearing and SILENT** — nothing fails loudly if the Pass
+     later moves to `fold`; a `SubgraphStrategy` criterion just quietly stops reaching pattern bodies.
+     Land the one pinning test (`withStrategies(SubgraphStrategy)` over a match-string traversal), and
+     widen `PassCategory.extract`'s doc comment (`src/compiler/ir/pass.ts`) from "pull out-of-band
+     flags" to include "surface desugars that must precede decoration".
+   **Medium.**
    → [match-string-frontend-design](./2026-07-28-match-string-frontend-design.md)
 
 7c. **Predicate operands that are TRAVERSALS — narrow tails only.** The four shapes (constant,
@@ -337,6 +451,25 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    seam for per-binding scoping, verified equal to `map(__.<same body>)`.
    Still open there: `fold()` (list-shaped end var) and the MATCH-string form (7b).
    → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md) #3
+
+7e. **The correlated predicate fast path is a SECOND movement implementation.** Not in this index
+   before, and it has a committed spike. `correlatedExists`/`incidentExists`/`correlatedReduce`
+   hand-roll the `xe`/`xn` join chain beside the generic child seam, because the predicate compiler
+   lives in the SQL-node layer *below* `steps/` and cannot reach `lowerElementSteps` without inverting
+   the layering. The fix: relocate the movement/EXISTS + count-compare branches UP into `steps/`, then
+   render the generic child pipeline in an inline-correlated mode via a `Query`-shaped shim whose
+   `.cte()` returns `derived()`. **The spike proves it stays index-only** — 0.61ms vs 0.44ms at one
+   hop, and *faster* at two (1.11 vs 1.75), so the perf objection is already answered. Start:
+   `correlatedExists` (`src/sql/plan/plan.ts`), `compileInlinePredicate`, `steps/tail/child.ts`.
+   - `until()` is the one consumer with no materialized fallback (it correlates on a recursive-walk
+     `walk.id`), so it would route through `compileCorrelatedChild(idExpr = walk.id)`.
+   - **Resolve the doc's own CHECK first:** grep tests + corpus for `values(k).sum()/min()/max()/mean()`
+     inside `where`/`is` before deciding whether `correlatedReduce`'s E-form aggregate is extended or
+     allowed to fail closed — "do NOT silently regress a working shape".
+   **Its landmark paths all predate the 2026-07-23 restructure** (`src/plan.ts`, `src/steps/*`,
+   `src/fast-paths.ts`) and it cites `Carry`, now `LoweringState`; read it through the rename map in
+   [tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md). **Medium.**
+   → [correlated-child-rendering](./2026-07-17-correlated-child-rendering-plan.md)
 
 8. **Graph-algorithms layer (new cluster).** Algorithms as `call()` services + OLAP step names
    (`pageRank`/`connectedComponent`/`peerPressure`/`shortestPath`) as desugar Passes. Nothing built;
@@ -458,6 +591,83 @@ All → [phased-roadmap](./2026-07-11-phased-roadmap-plan.md) unless noted.
 
 ## Internal debt / give-backs (Low)
 
+**There is no TODO/FIXME/XXX/HACK anywhere in `src/compiler/`, `src/sql/` or `src/execute.ts`**
+(verified 2026-07-29; the one repo-wide hit is `src/serializers.ts`, an upstream-TinkerPop note). Debt
+here is encoded as typed `throw` deferrals and in-code prose, so grep for markers finds nothing and
+proves nothing — read the deferral clusters instead.
+
+- **`is(typeOf(GType.X))` is decoded independently at 5 sites** (`tail/{list,scalar,group,path}.ts`,
+  `tail/projection.ts`) — each re-writes `pred.op === 'typeOf'` → `gtypeName` → uppercase-compare.
+  **They disagree on the same input:** the `group` arm THROWS on a non-MAP typeOf where `path`
+  correctly returns an empty relation. One pure classifier (`typeOfAssert`) beside `classifyBy`, then
+  5 readers; no SQL moves. Prerequisite for registering `is` into item 17's tables.
+- **`classifyBy` says "no host should re-scan byArgs inline" — 5 hosts still do**
+  (`tail/list.ts`, `tail/select.ts`, `tail/group.ts` ×2, `tail/projection.ts` inside
+  `MODIFIERS['order']`). Each hand-rolls `by.find(a => 'order' in a)?.order`, the exact scan the
+  classifier retired, and each silently sorts by IDENTITY on an unrecognized arg. `isOrderArg` is
+  already imported at 3 of the 5.
+- **`NUMERIC_REDUCERS` re-declared despite `ir/step.ts` being the named base** (`tail/projection.ts`,
+  and `BULK_REDUCERS` in `tail/bulk.ts`) — 8 consumers follow the "export BASES only, derive with a
+  named difference" rule; these 2 hand-write the member list, so a new reducer lands in 10 places and
+  misses 2. Two imports.
+- **`lowerGlobalNumericReducer` bypasses its own extracted policy helper** — `numericReducerAggregate`
+  (`tail/barrier.ts`) is documented as the one shared reducer policy and owns the eligible-storage-class
+  `CASE WHEN typeof(...)` guard; the root barrier 60 lines below re-derives sum/mean/min/max inline with
+  a `WHERE typeof(...)`. **Not a pure transposition** — `WHERE` and `CASE WHEN` differ on
+  empty/all-ineligible input (no row vs a NULL row), which interacts with `productiveNull`. Latent
+  divergence the L5 metamorphic oracle would attribute to the wrong layer.
+- **Ten independent `LIMIT ${limit ?? -1} OFFSET ${offset}` derivations** — `rangeToOffsetLimit`
+  (`sql/plan/plan.ts`) exists and 6 sites use it; `recordOrder`/`recordSlice` (`tail/select.ts`) instead
+  hand-derive offset/limit from `nxt.args` including a duplicated `Not a legal range` validation, and
+  re-implement the negative-range guard twice. **Subsumed by item 17** if that lands.
+- **The `ResultStream` residue is the one worthwhile `Shape` retirement** — six orphan `Shape` kinds
+  serving `ResultStream` across 13 `toResultStream` call sites, and ~14 of item 5c's parent-shape
+  failures. [shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md) §9 says
+  retiring *that* is finishing a migration (unlike merging `Stream` into `Shape`, which it refutes).
+  Zero corpus demand, so it is a give-back, not a feature.
+- **The remaining `as any` reads are a live rename-safety hole** (`tail/path.ts`, `tail/scalar-arm.ts`)
+  — each is a field read a future LSP rename yields `undefined` for, silently and invisibly to `tsc`.
+  Convert to a cast that NAMES a real type as encountered; it is the only defence against defect class
+  1 of the 2026-07-29 rename sweep.
+- **§6 vocabulary-set derivation is only partly done** — `{path,simplePath,cyclicPath}` was deduped,
+  but the reducers and movement families were not: `{count,sum,min,max,mean}` still appears verbatim at
+  6 sites and ~10 movement spellings persist. One family per commit, gated on byte-identical
+  `test/L2-sql/` snapshots. **Do not fix a membership bug inside a rename** — `POSITION_MOVEMENTS`
+  missing `otherV` (item 0's path defect) must land with a test FIRST, or the fix arrives disguised as
+  a rename. → [tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md) §6
+- **`feature-support-matrix.md`'s legend over-promises** — line 4 says a ✅ step works "anywhere in a
+  traversal, however deeply nested", which item 5c falsifies for ~35 steps. The capability ratchet that
+  can generate a per-step shape strip has now LANDED (`test/L5-properties/capability.test.ts`), so
+  generating that strip into the matrix is cheap and stops the file making a claim we know is false.
+- **Deterministic variant/record slicing shipped UNPINNED** — `variantSlice` now passes
+  `orderByEncounter: true` (`tail/variant.ts`), so `g.V().values('x').limit(2)` picks a deterministic
+  window; the instruction to pin each newly-deterministic result in an L4 `.feature` was not done, so
+  a user-visible semantic is live but unspecified.
+- **L5's known-bad state is scattered across THREE hand-curated artifacts in two languages** —
+  `known.ts` (`KNOWN`, fast-path divergences), `capability-baseline.ts` (`KNOWN_RAW_WITNESSES`, raw
+  failures from generated compositions) and the `knownBroken` entries buried inside `laws.ts`
+  (metamorphic violations — the highest-severity class, and the easiest of the three to miss because it
+  is not a file of its own). Each has exactly ONE reader. **The cost is measured, not hypothetical:**
+  the 2026-07-29 refresh found item 0d only by running `L5-random` by hand, and the skill that
+  refreshes this index had never looked at any of the three. The obvious target is one committed file
+  per the `l3-state.json` precedent.
+  **But do not do this as a naive merge — the three differ on properties that are load-bearing:**
+  - **Hand-authored vs generated.** `l3-state.json` and the census TSVs are machine-written
+    (`census.ts` `writeFileSync`); all three L5 lists are hand-curated *because* each entry must carry
+    a prose diagnosis, and both file headers say an entry without one is "a silenced test, not a
+    tracked finding". A generated JSON cannot hold that, and the discipline is the point.
+  - **They are keyed differently and deliberately.** `known.ts` matches on an exact query OR a
+    `family` RegExp over the divergence's own message (because a generator rediscovers one root cause
+    in a new chain every run); `capability-baseline.ts` is an exact query→message Map;
+    `laws.ts.knownBroken` keys on a PREFIX RegExp, per-law, because those two defects are about the
+    state the prefix leaves live rather than the law's shape. One schema must keep all three.
+  - **`laws.ts` entries arguably belong beside their law**, not in a central file — the diagnosis is
+    only meaningful against the specific identity it breaks.
+  So the honest shape is probably ONE file with a tagged union (`kind: 'divergence' | 'raw-witness' |
+  'law-break'`) and a shared stale-entry check, keeping the per-kind matcher — not one flat list. Both
+  existing stale-entry checks (`staleEntries`, and `capability.test.ts`'s `seenKnown` diff) should
+  become one. **Low (maintainability), but it is the reason a P1 defect went unseen — so do it before
+  the next refresh, not after.**
 - **Duplicate property→owner projection in `services/catalog/search.ts:73`** — `searchProperties`
   hand-builds the payload join its own comment says is "mirroring `lowerProperties`"
   (`tail/group.ts:648`). Zero deferrals; a schema change lands twice. The contrast worth keeping:
@@ -552,6 +762,21 @@ Sources: [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md),
   plan implemented, only P3 tails remain.
 - **[wire-and-storage-facts](./2026-07-25-wire-and-storage-facts.md)** — Map.Entry framing + MapStream
   model. Durable reference, not a plan.
+- **[channel-preservation](./2026-07-28-channel-preservation-refactoring-plan.md)** — design-of-record
+  for P1·18 and the only home of the 10-rule migration constitution. Phases 2–6 are landed or resolved;
+  **Phase 6 is a committed NEGATIVE result** (IR shape annotation, 56.8% ⊤ vs a 10% ceiling) — the
+  reason not to re-propose it. Its "authorizes no push" execution log is stale; the tranches are on
+  `origin/trunk`.
+- **[correlated-child-rendering](./2026-07-17-correlated-child-rendering-plan.md)** — design-of-record
+  for P2·7e, unstarted, with a committed spike (EXPLAIN + timings) that would be expensive to
+  re-derive. **All its landmark paths predate the 2026-07-23 restructure and the 2026-07-29 rename** —
+  read it through the rename map.
+- **[scalartype-refactoring-pattern](./2026-07-28-scalartype-refactoring-pattern.md)** — the reusable
+  vocabulary-cleanup template (N optionals → one total union; coarse views DERIVED; pair with a named
+  preserving rebuild + a runtime contract). Its five-target list is down to two live entries: `AliasShape`
+  member shape (= item 1) and the front-end's tagged-token accessors (re-measure first — the tagged
+  argument union landed but the claim was about consumers). `ScalarCtx` and `IRStep` are named
+  rule-1 candidates with no defect filed against them.
 - **[tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md)** — **LANDED**,
   and now the naming authority behind the root `CLAUDE.md`'s **Naming** section. Our vocabulary read
   against TinkerPop `gremlin-core` on `origin/master`. Names the prior art for `TraverserLayout`

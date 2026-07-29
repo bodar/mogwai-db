@@ -17,7 +17,7 @@
 //     keys and typed leaves inside a collection are INDIVIDUALLY searchable (the "handle
 //     JSON properly" capability, beyond bare tinker.search).
 //
-// See docs/2026-07-20-call-service-registry-plan.md ("FTS5 + proper JSON handling").
+// See docs/archive/2026-07-20-call-service-registry-plan.md ("FTS5 + proper JSON handling").
 import type { GraphStore } from '../storage.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../gremlin/types.ts';
 

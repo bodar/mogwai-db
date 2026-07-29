@@ -356,7 +356,7 @@ function likePattern(op: string, value: unknown): { pat: string; neg: boolean } 
 // literal term over a STORED property routes through the property_fts trigram index instead
 // of a base-table LIKE scan. The generic LIKE (nodeHasProp/edgeHasProp fall-through) stays
 // the semantic authority + equivalence fallback (ftsSubstringPredicate:false, or a term
-// too short / a computed-scalar context). See docs/2026-07-20-call-service-registry-plan.md
+// too short / a computed-scalar context). See docs/archive/2026-07-20-call-service-registry-plan.md
 // "Substring rule (final)". NEGATED ops (not*) stay on LIKE: the trigram index finds values
 // that MATCH, not the "exists a value that does NOT match" the ANY-match negation needs.
 

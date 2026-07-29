@@ -182,7 +182,7 @@ export interface TraverserLayout {
  *  that OUTLIVE the traverser), and the per-traverser carried column schema (`carried`). The
  *  ambient compile DEPENDENCIES (fastPaths/registry/federationDepth) are NOT here — they live on
  *  the lowering Engine (steps/engine.ts), reached via `q.engine`; keeping them off LoweringState is what
- *  separates dependency from state (see docs/2026-07-23-directory-restructure-plan.md, Movement 1). */
+ *  separates dependency from state (see docs/archive/2026-07-23-directory-restructure-plan.md, Movement 1). */
 export interface LoweringState {
   readonly q: Query;
   readonly params: Record<string, any>;

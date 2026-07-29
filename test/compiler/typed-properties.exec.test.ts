@@ -48,7 +48,7 @@ const runWith = (store: GraphStore, q: string, options: CompileOptions) => {
   return store.query(p.sql, p.binds);
 };
 
-// ---- typed property values, P1: canonical vtype stored on write (docs/2026-07-16-typed-property-values-plan.md) ----
+// ---- typed property values, P1: canonical vtype stored on write (docs/archive/2026-07-16-typed-property-values-plan.md) ----
 describe('typed property values (P1) — vtype capture + collection storage', () => {
   const fresh = () => new GraphStore(new BunSqlite(':memory:'));
   const vprops = (store: GraphStore, keys: string[]) =>

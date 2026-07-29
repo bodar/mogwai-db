@@ -56,7 +56,11 @@ side throwing IS a defect, because a fast path must not change what is supported
 the law is not evaluable, so it is counted and reported, split by whether the PREFIX or the law's own
 FORM was unsupported — the latter being the more interesting signal.
 
-Oracle 4 (fail-closed discipline) remains unbuilt.
+Oracle 4 (fail-closed discipline) **is now BUILT — twice over, from two directions** (corrected
+2026-07-29): `test/census/` separates `crashed` from `deferred` over the whole corpus and gates the
+count from growing, and `test/L5-properties/capability.test.ts` + `capability-baseline.ts` permit
+executions and *declared* deferrals over generated compositions while failing on any new raw failure.
+The census covers what somebody wrote down; the capability ratchet covers what the lattice can compose.
 
 ## The blind spot — and why it is structural
 
@@ -217,4 +221,17 @@ neither lowering ever sees the removed step.
 
 ## Open
 
-`docs/outstanding-work.md` item 0 — the unproductive-reducer filter defect, plus oracles 2–4 above.
+`docs/outstanding-work.md` item 0 — the unproductive-reducer filter defect. **Oracles 2 and 3 are
+built** (`metamorphic.test.ts` + `laws.ts`, `shape-annotation.test.ts`) and **oracle 4 is built twice**
+(see the correction above), so the oracle list is no longer the open part.
+
+**What IS open is the discovery process, and it is the one that matters** —
+`docs/outstanding-work.md` item 0d. Measured 2026-07-29: **`mise run L5-random` is RED at essentially
+every seed** (5, 11, 27, 91, 143 all fail), while CI's fixed seed 42 is green — so none of it had ever
+been seen. Every divergence is `kind: "support"` ("generic threw, fast paths ON ran"), not a wrong
+answer, which is why `known.ts` is legitimately empty and still nothing was caught. This is exactly the
+gap this doc predicted: a fixed seed is *a deterministic generated corpus*, and it discovers nothing
+after its first run. The fix named here — **a SCHEDULED random-seed run that REPORTS rather than
+blocks**, deliberately outside `ci` — is the open item. Until it exists, discovery depends on someone
+remembering to run `L5-random` after touching a fast path, the child seam, or the predicate layer, and
+2026-07-29 is the evidence that nobody does.

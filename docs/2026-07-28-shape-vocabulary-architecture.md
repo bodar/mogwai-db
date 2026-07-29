@@ -302,29 +302,45 @@ Two defects fixed in passing: `outV()`'s deferral read "not a node", and `group.
 path silently collapsed `ElemShape`'s `'property'` arm to a vertex rather than failing closed.
 
 **2 — Make `Carried` total.** The largest measured category (33%), still firing (`4cefade`,
-2026-07-28: `repeat()` emitting `1 AS bulk` without declaring it). **Its designated authority
-`mergeCarried` does not exist** — cited at `context.ts:122` and `branch.ts:234`, defined nowhere in
-`src/` **[verified]**; the seven non-alias roles are merged ad hoc across four merge builders, the
+2026-07-28: `repeat()` emitting `1 AS bulk` without declaring it).
+
+> **STALE as of 2026-07-29 — the construction is DONE; what remains is deployment.** This section said
+> the designated authority "does not exist, defined nowhere in `src/` **[verified]**". It exists as
+> **`mergeLayouts`** (`steps/context/context.ts:269`) — the name changed in the 2026-07-29 rename, so
+> the original grep was correct about `mergeCarried` and wrong about the concept. `carryThrough` exists
+> too. The live work is the remaining deployment + the ONE assertion extension, tracked as item 18 in
+> [outstanding-work](./outstanding-work.md); read it there rather than re-deriving from this paragraph.
+> Note also that `mergeLayouts` deliberately has one caller — `steps/tail/variant.ts` documents why a
+> child-scoped arm cannot satisfy its rigid-role assertion. **Do not weaken that assertion to make a
+> call type-check.**
+
+The seven non-alias roles are merged ad hoc across four merge builders, the
 child rejoin, the keyed relation and the recursive term. `carriedWith` (the total, role-naming
 helper) has 31 call sites against **109 hand-written `...carried` spreads** **[verified]**,
-concentrated in `steps/tail/`. Write `mergeCarried`; add `carryThrough` (the `rebuildScalar` of this
-channel); convert the spreads so each survivor must *say* what it drops; extend
+concentrated in `steps/tail/`. Convert the spreads so each survivor must *say* what it drops; extend
 `assertStreamColumns` to check declared roles against present columns.
 
-**3 — The matrix ratchet.** No compiler change, cannot regress anything, and it is oracle #4 from
-the L5 design doc, listed as unbuilt. For every `(shape, transition)`, synthesize a witness and
-classify: compiles / throws a **declared** deferral / **anything else fails the gate**. That third
-case checks the fail-closed claim itself for the first time. Ratchet discipline copied from
-`known.ts`. Generate the per-step shape strip into `feature-support-matrix.md`, whose legend
-currently claims a ✅ step works *"anywhere in a traversal"* — which item 5c falsifies for ~35 steps.
+**3 — The matrix ratchet. ✅ BUILT** (`test/L5-properties/capability.test.ts` +
+`capability-baseline.ts`, 2026-07-29). It is oracle #4 from the L5 design doc, which still lists it as
+unbuilt. For every `(shape, transition)`, synthesize a witness and classify: compiles / throws a
+**declared** deferral / **anything else fails the gate**. That third case checks the fail-closed claim
+itself for the first time. Ratchet discipline copied from `known.ts`. **Still open, and now cheap
+because the ratchet exists:** generate the per-step shape strip into `feature-support-matrix.md`, whose
+legend claims a ✅ step works *"anywhere in a traversal"* — which item 5c falsifies for ~35 steps.
 Keep the L5 lattice independent (`shape.ts:11-18`); reflecting it out of the dispatch maps would
 define validity as "what we already support".
 
-**4 — Name the cardinality axis, then share row-ops** (§7). Only after naming it. This also fixes
-variant/record slicing's missing `ORDER BY`, which will move L2 snapshots semantically — pin each
-newly-deterministic result in an L4 `.feature`.
+**4 — Name the cardinality axis, then share row-ops** (§7). Only after naming it. **The axis is now
+NAMED** (`RelationalCardinality` / `cardinalityOf`, `steps/context/stream.ts`) and has exactly one
+consumer, so the gate is open and the sharing is the live work — tracked as item 17 in
+[outstanding-work](./outstanding-work.md), where the matrix is measured at 55/100 gaps. The
+variant/record `ORDER BY` half landed (`variantSlice` passes `orderByEncounter: true`); **pinning each
+newly-deterministic result in an L4 `.feature` did NOT** — a shipped semantic still unspecified.
 
-**5 — The IR-shape question as an experiment, not a design.** A **test-only** oracle (~150 lines,
+**5 — The IR-shape question as an experiment, not a design. ✅ RAN, and the answer is NO — do not
+re-propose it.** `shape-annotation.test.ts` measured **56.8% ⊤ against a 10% kill criterion**, so the
+classifiers stay in `steps/`. The committed-in-advance kill criterion did its job; §9 records this as
+settled. Original design, for the record: a **test-only** oracle (~150 lines,
 zero `src/` changes) reusing the existing classifiers, over L1 + L5's generated set, reporting
 soundness (must be 0) and ⊤-rate, with the kill criterion committed *before* the run. Under ~10% ⊤ →
 hoisting the classifiers into `ir/` is viable (nearly free: `ir/` imports nothing from `steps/`

@@ -10,7 +10,7 @@ import type { Query } from '../../sql/kernel/q.ts';
 // pipeline stays synchronous. The 'barrier' variant is the async/federated shape
 // (Phase 6); it lives in the type NOW so the seam is provably additive, but its executor
 // path throws a clear deferral until that phase lands. See
-// docs/2026-07-20-call-service-registry-plan.md.
+// docs/archive/2026-07-20-call-service-registry-plan.md.
 
 /** A call() parameter map, AFTER the front-end has unified every param-source form
  *  (map literal / bound-param map / __.project().by(__.constant()) traversal / .with(k,v))
