@@ -392,6 +392,44 @@ by `GremlinLang` (a canonical Gremlin string plus a parameter map, reachable via
 `Traversal.Admin.getGremlinLang()`). Independent confirmation of locked decision #1 in the root
 `CLAUDE.md`.
 
+## The mechanism: `tools/rename.ts`
+
+Renames go through `tools/rename.ts`, which drives the LSP server **inside our pinned `typescript`
+dependency** — `tsc --lsp --stdio`. No new dependency, and the rename is definitionally in agreement
+with the compiler `mise run check` gates on.
+
+```
+bun tools/rename.ts <file> <oldName> <newName> [--dry] [--at line:col]
+```
+
+Why not the obvious alternatives: typescript@7 is the native Go port and deleted both `tsserver.js`
+and the `typescript.js` compiler-API bundle (`node_modules/typescript/lib/` holds only `tsc.js`,
+`version.cjs`, `getExePath.js`). `typescript-language-server` and `vtsls` spawn a `tsserver` that no
+longer exists; ts-morph bundles its own TypeScript 5.x, so it would analyse with a *different*
+compiler than the gate uses. TS 7's own JS API (`typescript/unstable/sync`) exposes references
+(`Checker.getReferencedSymbolsForNode`) but **no `findRenameLocations`**, so renames must go through
+the LSP rather than be reconstructed from references — reconstruction would miss
+`import { x as y }`, shorthand property assignments and string element access.
+
+Three properties that matter for this plan:
+
+- **Position is discovered, not hand-counted.** Every whole-word occurrence in the target file is
+  offered to `textDocument/prepareRename`, and the first the server *accepts* is used. The server's
+  own answer to "is this a renameable symbol here" is what skips comments and strings — no heuristic
+  of ours. A word that appears only in prose exits 1 with a clear message.
+- **Field renames are type-scoped.** Pointing it at a declaration renames that symbol only, so
+  `optionArms` cannot touch `CompileOptions`. This is the entire reason §4.2's `options` row is safe
+  and a text substitution would not be.
+- **Comments are never touched.** LSP `textDocument/rename` has no `findInComments` option (that was
+  tsserver-only). So every group below has a second, deliberate half: the prose that names the
+  symbol. Treat a rename as unfinished until the comments around it read correctly — for the
+  `carry*` family that prose is most of the work, not a tidy-up.
+
+Two protocol notes recorded because they cost real debugging time: the server sends
+`client/registerCapability` as a **request**, and ignoring it deadlocks every later request (a rename
+that never returns); and `--stdio` is only a legal flag alongside `--lsp`, which is otherwise absent
+from `tsc --help --all`.
+
 ## Sequencing and gates
 
 **Land semantic groups separately, one commit each, census after every one.** The LSP removes the
