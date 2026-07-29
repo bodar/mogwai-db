@@ -373,6 +373,28 @@ export function lowerConcatScalar(s: ScalarStream, step: IRStep): ScalarStream |
   return toScalarStream(loweringStateOf(s), rel);
 }
 
+// ---------- dateDiff() with a traversal operand (the `apply` child-value contract) ----------
+
+/**
+ * `dateDiff(__.traversal)` reads exactly one date from the current traverser, just as
+ * `DateDiffStep` calls `TraversalUtil.apply`.  The literal form remains a fused scalar
+ * transform; this row boundary is only for the nested form, whose child needs a correlated
+ * scope and must not filter its parent when it is unproductive.
+ */
+export function lowerDateDiffScalar(s: ScalarStream, step: IRStep): ScalarStream | null {
+  const arg = step.args[0];
+  if (!isNested(arg)) return null;
+  const mods = tryCompileScalarModulations(s, [{ nested: arg.nested, contract: 'apply' }]);
+  if (!mods) return null;
+  const p = mods.rel.as('p');
+  const other = p.c[mods.values[0].value];
+  const rel = s.q.cte(
+    q`SELECT (${p.c.v} - ${other}) AS v${layoutProjection(s.traverserLayout, p)} FROM ${p}`,
+    ['v', ...layoutCols(s.traverserLayout)],
+  );
+  return toScalarStream(loweringStateOf(s), rel, 'long');
+}
+
 // ---------- option-map choose (scalar CASE projector) ----------
 
 /**

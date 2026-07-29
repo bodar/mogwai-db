@@ -440,6 +440,37 @@ function insertVertex(engine: Engine, store: GraphStore, spec: VertexSpec, param
 
 // g.addV('label').property(k, v)... — and multi-element chains (a graph initializer).
 function compileAddV(engine: Engine, steps: IRStep[], params: Record<string, any> = {}, sideEffects?: Map<string, any>): WritePlan {
+  let firstFollower = 1;
+  while (firstFollower < steps.length && steps[firstFollower].name === 'property') firstFollower++;
+  // A source addV has produced a real vertex before its follower runs. Preserve that
+  // mutation boundary, then hand the remaining read chain back to the normal compiler using
+  // the inserted internal rowid as its source. This is the generic write→read substrate;
+  // label()/values()/path()/… therefore share SQL lowering and wire framing with g.V(...).
+  const writeFollower = new Set(['addV', 'addE', 'mergeV', 'mergeE', 'property', 'drop']);
+  if (firstFollower < steps.length && !steps.slice(firstFollower).some((s) => writeFollower.has(s.name))) {
+    const suffix = steps.slice(firstFollower);
+    const source = (id: number): IRStep => ({ name: 'V', args: [id], ctx: steps[0].ctx });
+    const probe = engine.compileReadCompiled([source(0), ...suffix], params);
+    let created: number | undefined;
+    const spec = parseVertexSpec(steps[0], steps.slice(1, firstFollower), sideEffects, params);
+    return {
+      kind: 'write',
+      run: (store) => {
+        const v = insertVertex(engine, store, spec, params, sideEffects);
+        created = v.id;
+        return [{ vertex: { id: v.extId, label: v.label, props: readVertexProps(store, v.id) } }];
+      },
+      continuation: {
+        shape: probe.shape,
+        run: (store) => {
+          const id = created;
+          if (id === undefined) throw new Error('write continuation ran before addV()');
+          const read = engine.compileReadCompiled([source(id), ...suffix], params);
+          return store.query(read.sql, read.binds);
+        },
+      },
+    };
+  }
   if (steps.some((s, i) => i > 0 && s.name !== 'property'))
     return { kind: 'write', run: (store) => runWriteChainFull(engine, store, steps, params, sideEffects) };
   const spec = parseVertexSpec(steps[0], steps.slice(1), sideEffects, params);

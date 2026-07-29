@@ -234,6 +234,16 @@ test('addV nested-traversal LABEL is evaluated at run time (no silent "vertex" d
   expect(run(store, 'g.V().has("name","clone").label()').map((r) => r.v)).toEqual(['person']);
 });
 
+test('addV traversal label composes an apply child, then resumes through the read spine', () => {
+  const store = seededStore();
+  const plan = compile('g.addV(constant("prefix_").concat(__.V(1).label())).label()', {});
+  if (plan.kind !== 'write' || !plan.continuation) throw new Error('expected addV write/read plan');
+  plan.run(store);
+  // The mutation's follower is compiled as a normal V(<inserted-rowid>).label() read,
+  // rather than being a bespoke write response projection.
+  expect(plan.continuation.run(store).map((r) => r.v)).toEqual(['prefix_person']);
+});
+
 test('addE endpoint to(__.select("a")) ≡ to("a") (as()-label via nested select)', () => {
   const store = seededStore();
   run(store, 'g.V(1).as("a").out("created").addE("createdBy").to(__.select("a"))');

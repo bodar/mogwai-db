@@ -519,6 +519,15 @@ const bulkOf = (r: any): bigint => (r?.bulk != null ? BigInt(r.bulk) : 1n);
 // element leaves read the column here, so the multiplicity plumbing touches exactly two cases.
 function* frameResolved(store: GraphStore, plan: Compiled | WritePlan): Generator<Framed> {
   if (plan.kind === 'write') {
+    if (plan.continuation) {
+      plan.run(store);
+      const { shape, run } = plan.continuation;
+      const rows = run(store);
+      if (shape.kind === 'vertex') { for (const r of rows) yield { buf: rowVertex(r), bulk: bulkOf(r) }; return; }
+      if (shape.kind === 'edge') { for (const r of rows) yield { buf: rowEdge(r), bulk: bulkOf(r) }; return; }
+      for (const buf of frameValues(rows, shape)) yield { buf, bulk: 1n };
+      return;
+    }
     for (const r of plan.run(store)) {
       // Write responses carry a flat {key:value} prop bag; vertexBuffer wants
       // {key:[values]}, so wrap each value in a 1-list (single-cardinality write).

@@ -15,7 +15,7 @@ import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type Nume
 import { lowerScalarFilter, lowerConstant, lowerScalarConstant, lowerScalarSack, lowerScalarSplit, collectionTypeOf, scalarCollectionRetype, scalarMapRetype } from './scalar.ts';
 import { compileSelectProject, tryCompileRecordChild, lowerRecordSelectProject, lowerScalarProject, lowerSingleSelect } from './select.ts';
 import { lowerPath } from './path.ts';
-import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, lowerConcatScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
+import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, lowerConcatScalar, lowerDateDiffScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerElementChoose, coalesce as lowerElementCoalesce, flatMap as lowerElementFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, tryLowerOptionMapBranch, union as lowerElementUnion } from '../prefix/branch.ts';
 import { elementGroupSource, lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, tryCompileMapChild, type GroupSource } from './group.ts';
 import { tryCompileCountChild, tryCompileBranchChildAllCard, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueRows, type ScalarModulationSpec } from './child.ts';
@@ -844,6 +844,9 @@ const SCALAR_DISPATCH = new Map<string, ShapeTailFn<ScalarStream>>([
   // (a row boundary), while the string-only form stays fused in the row run. A miss returns null
   // → the generic deferral, so an unsupported child body still fails closed.
   ['concat', scalarBranch(lowerConcatScalar)],
+  // dateDiff(__.traversal) follows DateDiffStep's TraversalUtil.apply contract. The
+  // literal form stays in the fused scalar transform; only a child operand reaches here.
+  ['dateDiff', scalarBranch(lowerDateDiffScalar)],
   // V()/E() after a scalar re-source the graph per traverser (a flatMap → ElementStream).
   ['V', (s, step, _steps, at) => { const r = lowerReSource(s, step); return r ? continueLowering(r, at + 1) : null; }],
   ['E', (s, step, _steps, at) => { const r = lowerReSource(s, step); return r ? continueLowering(r, at + 1) : null; }],

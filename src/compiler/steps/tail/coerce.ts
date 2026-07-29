@@ -172,6 +172,14 @@ export function dateDiffOtherMs(arg: any, params: Record<string, any>): number {
   throw new Error('dateDiff() requires a datetime literal or constant(datetime) argument');
 }
 
+/** Whether dateDiff's nested operand is the constant form the fused transform can fold
+ * without a child scope. Every other nested body belongs to the apply-contract seam. */
+export const isDateDiffConstant = (arg: any, params: Record<string, any>): boolean =>
+  isNested(arg) && (() => {
+    const inner = stepChain(arg.nested, params);
+    return inner.length === 1 && inner[0].name === 'constant';
+  })();
+
 /** asDate() over a runtime scalar → epoch-millis. An integer/real value is already
  *  millis; a text value is an ISO-8601 string (unixepoch resolves any offset into the
  *  instant; ×1000 → millis). */

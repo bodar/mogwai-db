@@ -5,7 +5,7 @@ import { gtypeName, isNested, isOperatorArg, isOrderArg, isScopeArg, isTokenArg,
 import { type IRStep } from '../../ir/strategies.ts';
 import { aliasArmProjection, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, mergeAliasMaps, partitionOver, dropLayoutAtBarrier, type LoweringState } from '../context/context.ts';
 import { loweringStateOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
-import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, numericSpec, SCALAR_TRANSFORMS } from './coerce.ts';
+import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec, SCALAR_TRANSFORMS } from './coerce.ts';
 import { normalizeTypeName } from '../../../gremlin/types.ts';
 import { perRowColumnOf, perRowCols, STATIC, staticTypeOf, UNKNOWN, type ScalarType, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf } from '../../engine/deps.ts';
@@ -145,7 +145,8 @@ function fuseScalarSegment(s: ScalarStream, steps: readonly IRStep[], from: numb
     // End the fused segment here so lowerScalarRows re-dispatches it — the same way a retyping
     // is(typeOf(LIST)) ends one. Without this the fuse swallows it and reaches the pure leaf,
     // which correctly fails closed but never gives the seam a chance.
-    if (step.name === 'concat' && (step.args ?? []).some(isNested)) break;
+    if ((step.name === 'concat' && (step.args ?? []).some(isNested))
+      || (step.name === 'dateDiff' && isNested(step.args?.[0]) && !isDateDiffConstant(step.args[0], s.params))) break;
     if (SCALAR_TRANSFORMS.has(step.name)) {
       const out = scalarTransform(step, as, expr, steps[i + 1]);
       expr = out.expr;
@@ -663,11 +664,10 @@ export function lowerScalarRows(
     // filter — stop so compileFromScalar builds the ListStream. Without a per-row stored
     // vtype (a computed scalar) it stays a fused is() that static-folds to empty.
     if (step.name === 'is' && perRowColumnOf(stream.type) && collectionTypeOf(step) !== null) break;
-    // concat(<traversal>) needs a child scope per argument (the `apply` child-value contract),
-    // which is a ROW BOUNDARY, not a value transform the expression fuse can express. Stop the
-    // row run so SCALAR_DISPATCH owns it (lowerConcatScalar) — the same yield as a retyping
-    // is(typeOf(LIST)) above. The string-only form is untouched and still fuses.
-    if (step.name === 'concat' && (step.args ?? []).some(isNested)) break;
+    // An apply-style traversal operand needs a child scope per argument, which is a row
+    // boundary rather than an expression the fuse can represent. Literal forms stay fused.
+    if ((step.name === 'concat' && (step.args ?? []).some(isNested))
+      || (step.name === 'dateDiff' && isNested(step.args?.[0]) && !isDateDiffConstant(step.args[0], stream.params))) break;
     if (SCALAR_TRANSFORMS.has(step.name) || step.name === 'is') {
       const fused = fuseScalarSegment(stream, steps, i);
       stream = fused.stream;

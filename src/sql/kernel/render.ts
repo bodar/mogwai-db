@@ -203,7 +203,11 @@ export type WriteResult =
   | { readonly vertex: { readonly id: any; readonly label: string; readonly props: Record<string, ValueNode> } }
   | { readonly edge: { readonly id: any; readonly label: string; readonly src: any; readonly tgt: any; readonly props: Record<string, ValueNode> } };
 
-export interface WritePlan { kind: 'write'; run: (store: GraphStore) => WriteResult[]; }
+/** A mutation may continue as a normal read traversal (e.g. `addV(...).label()`). The
+ * mutation remains imperative at the storage seam, while its follower is compiled/framed by
+ * the ordinary read spine rather than growing a second output vocabulary in write.ts. */
+export interface WriteContinuation { shape: Shape; run: (store: GraphStore) => any[]; }
+export interface WritePlan { kind: 'write'; run: (store: GraphStore) => WriteResult[]; continuation?: WriteContinuation; }
 
 /** Boundary: assemble the Query's CTE prefix + `tail` into one tree (Query.render)
  *  and wrap as a read Compiled. Every bound value lives as a Value token in a CTE

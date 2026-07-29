@@ -544,8 +544,10 @@ describe('scalar-parent / projection SQL', () => {
     const rd = read('g.V().values("birthday").asNumber().asDate().dateDiff(datetime("1970-01-01T00:00Z"))');
     expect(rd.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(rd.binds).toEqual(['birthday', Date.parse('1970-01-01T00:00Z')]); // the values() join key, then the later dateDiff operand
-    // nested inject() as the dateDiff operand defers (not a literal/constant)
-    expect(() => compile("g.inject(datetime('2023-08-08T00:00:00Z')).dateDiff(inject(datetime('2023-10-11T00:00:00Z')))", {})).toThrow('datetime literal or constant');
+    // A traversal operand is DateDiffStep's TraversalUtil.apply contract: it is a
+    // row-boundary child, not a literal-only special case.
+    const child = read("g.inject(datetime('2023-08-08T00:00:00Z')).dateDiff(__.constant(datetime('2023-10-11T00:00:00Z')))");
+    expect(child.shape).toEqual({ kind: 'value', type: STATIC('long') });
   });
 
   // concat(<traversal>) is the `TraversalUtil.apply` child-value contract, NOT format()'s

@@ -1,6 +1,6 @@
 import { q, value, list } from '../../../sql/kernel/q.ts';
 import { jsonbArrayOf } from '../../plan/plan.ts';
-import { flattenListArgs, type SackSpec } from '../../../gremlin/frontend.ts';
+import { flattenListArgs, isNested, type SackSpec } from '../../../gremlin/frontend.ts';
 import { flatType, type CanonicalType } from '../../../gremlin/types.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { patchLayout, type LoweringState } from '../context/context.ts';
@@ -10,7 +10,7 @@ import { materializeRootStream } from '../tail/materialize.ts';
 import { type Compiled, type ValueType } from '../../../sql/kernel/render.ts';
 import {
   numericSpec, asBoolConst, asNumberConst, asNumberBare, asDateConst,
-  dtFactor, dateDiffOtherMs,
+  dtFactor, dateDiffOtherMs, isDateDiffConstant,
 } from '../tail/coerce.ts';
 
 const CONST_COERCIONS = new Set(['asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff']);
@@ -52,6 +52,9 @@ function foldConstantCoercions(steps: IRStep[], vals: any[]): { at: number; as?:
   let as: ValueType | undefined;
   for (; at < steps.length && CONST_COERCIONS.has(steps[at].name); at++) {
     const step = steps[at];
+    // A traversal date is an apply-style child value, not a constant coercion. Leave it
+    // for the scalar dispatcher, which provisions the correlated child scope.
+    if (step.name === 'dateDiff' && isNested(step.args[0]) && !isDateDiffConstant(step.args[0], {})) break;
     if (step.name === 'asBool') {
       for (let i = 0; i < vals.length; i++) vals[i] = asBoolConst(vals[i]);
       as = 'boolean';

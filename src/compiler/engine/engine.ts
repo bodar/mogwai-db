@@ -21,7 +21,7 @@ import { compileFromList, compileFromMap, compileFromMapEntry } from '../steps/t
 import { compileFromRecord, selectRecordFromAlias } from '../steps/tail/select.ts';
 import { compileFromPath } from '../steps/tail/path.ts';
 import { asOnStream, selectOneFromAlias } from '../steps/tail/labelselect.ts';
-import { assertStreamColumns, continueLowering, isSuspension, type LoweringResult, type LoweringSuspension, type Stream } from '../steps/context/stream.ts';
+import { assertStreamColumns, continueLowering, isSuspension, toScalarStream, type LoweringResult, type LoweringSuspension, type Stream } from '../steps/context/stream.ts';
 import { type Compiled } from '../../sql/kernel/render.ts';
 import { BulkRepeatCountFastPath } from '../steps/tail/bulk.ts';
 import { runFastPath, fastPathContext, type FastPathConfig } from '../options/fast-paths.ts';
@@ -235,6 +235,15 @@ export class LoweringEngine implements Engine {
       return { stream: sourceUnion(this, first, params, sackInit, facts), at: 1 };
     if (first.name === 'inject')
       return seedInject({ q: this.q, params, traverserLayout: { aliases: new Map(), origins: [] } }, steps, sackInit);
+    // An anonymous `__.constant(x)` is a legitimate source-shaped child: it has one
+    // synthetic start which scalar constant() then replaces.  Keeping that start as a
+    // normal ScalarStream (rather than folding the literal here) means every follower,
+    // including an `apply` modulation such as concat(__.V().label()), takes the shared
+    // scalar dispatcher and keeps the original parameter environment.
+    if (first.name === 'constant') {
+      const rel = this.q.cte(q`SELECT NULL AS v`, ['v']);
+      return { stream: toScalarStream({ q: this.q, params, traverserLayout: { aliases: new Map(), origins: [] } }, rel), at: 0 };
+    }
     if (first.name === 'call') {
       const seed = seedCall(first, this.q, params, this.registry, steps, this.federationDepth);
       if (isBarrierPoint(seed)) throw new Error('a barrier/federated call() source is only supported at the head of a traversal');
