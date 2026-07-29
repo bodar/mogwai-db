@@ -69,14 +69,14 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    anchor on steps whose output shape is fixed by name. Same doc measures where the defects actually
    come from (carried-channel drops 33%, shape/vocabulary 8%) and names the higher-yield work.
 
-0b. **`concat(<traversal>)` silently drops its traversal arguments.** `concat(' knows ')` (the
-   STRING form) is correct; `concat(__.constant(' knows '))` and
-   `concat(__.constant('x'), __.constant('y'))` both return the receiver unchanged, and
-   `concat(__.select('a').by('name'))` likewise. Not a deferral — a **silent wrong answer**, so it
-   violates the fail-closed rule outright. Found 2026-07-28 while measuring the MATCH-string design
-   (7b); it is the ONE thing between that design and 25/25 on `MatchString.feature`
-   (`g_match_anyXknowsX_any_selectXaX_byXnameX_concatX…X`), but it has nothing to do with `match()`.
-   *Medium-High — silent wrong answer, and probably small.*
+0b. **`concat(<traversal>)` needs the scalar-child value seam.** `concat(' knows ')` (the STRING
+   form) is correct. Traversal arguments now fail closed with
+   `concat() traversal arguments not yet supported`, rather than being silently dropped and
+   returning the receiver unchanged. The remaining work is generic: lower each traversal argument
+   to its per-traverser scalar value and concatenate it in argument order. Found 2026-07-28 while
+   measuring the MATCH-string design (7b); it is the ONE thing between that design and 25/25 on
+   `MatchString.feature` (`g_match_anyXknowsX_any_selectXaX_byXnameX_concatX…X`), but it has
+   nothing to do with `match()`. *Medium — fail-closed gap.*
 
 0c. **17 fail-closed VIOLATIONS, surfaced by the census** (`test/census/deferrals.tsv`, status
    `crashed`). Each throws a raw runtime error instead of a clear deferral, which the project's

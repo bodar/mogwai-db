@@ -86,6 +86,11 @@ export function scalarTx(name: string, args: any[], v: Expression): Expression |
     // null passes null through). The all-null guard is only live when there is no
     // non-null string arg (a literal arg makes the result non-null regardless of v).
     case 'concat': {
+      // A traversal argument is semantically a per-traverser child value, not a
+      // string literal. This SQL leaf has no child relation to read, and silently
+      // filtering it out used to return the receiver unchanged. Decline until the
+      // generic scalar-child seam supplies those values.
+      if (args.some(isNested)) throw new Error('concat() traversal arguments not yet supported');
       if (!args.length) return v; // bare concat() = identity (v || nothing)
       const parts = list([v, ...strs.map((a) => value(a))], ', ');
       const body = q`concat_ws('', ${parts})`;

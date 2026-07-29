@@ -570,6 +570,10 @@ describe('scalar-parent / projection SQL', () => {
     expect(read("g.V().values('name').substring(2)").sql).toContain("substr(p.v");
     expect(read("g.V().values('name').toUpper()").sql).toContain("upper(p.v)");
     expect(read("g.V().values('name').concat('X')").sql).toContain("concat_ws('', p.v, ?)");
+    // A traversal arg needs the scalar-child seam; it must fail closed rather than
+    // being silently ignored (which previously returned the receiver unchanged).
+    expect(() => compile("g.V().values('name').concat(__.constant('X'))", {}))
+      .toThrow('concat() traversal arguments not yet supported');
     // chained; is()/order() see the transformed value
     expect(read("g.V().values('name').toUpper().is('MARKO')").sql).toContain('upper(');
     // transform on a non-scalar projection is rejected (no scalar stream to transform)
