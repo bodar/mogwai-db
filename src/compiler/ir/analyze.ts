@@ -1,6 +1,6 @@
 import { type PStep } from './strategies.ts';
 
-// ---------- whole-chain analysis (Layer C1: annotation, not rewrite) ----------
+// ---------- whole-chain analysis: annotate, never rewrite ----------
 //
 // The chain-global properties the lowering Engine needs to know BEFORE it starts folding
 // steps: does the chain track a path? does it need a threaded emission-order encounter? is

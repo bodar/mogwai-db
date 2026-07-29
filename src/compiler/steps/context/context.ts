@@ -5,7 +5,7 @@ import { aliasId, aliasPresent, type AliasShape } from './alias.ts';
 import { type PStep } from '../../ir/strategies.ts';
 import type { ValueType, ListOf, ScalarType } from '../../../sql/kernel/render.ts';
 
-// ---------- prefix-compilation state (Seam 2) ----------
+// ---------- prefix-compilation state ----------
 //
 // The movement/filter/branch step compilers are a *functional fold*: each is a
 // StepFn `(step, ElementStream) => ElementStream` that appends its CTE and returns a NEW state pointing

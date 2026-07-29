@@ -39,7 +39,7 @@ import type { Engine } from './deps.ts';
 
 export { compileTail };
 
-// ---------- the lowering Engine (Seam 2 dispatcher, as a dependency object) ----------
+// ---------- the lowering Engine (the dispatch stage's recursive surface, as a dependency object) ----------
 //
 // The Engine is the compiler's recursive-traversal authority: the PREFIX dispatch table + the
 // prefix fold (buildPrefix/lowerElementSteps) + the shaped lowering loop (lowerSteps/lowerStream)

@@ -18,11 +18,11 @@ export type { CompileOptions, FastPathConfig } from './options/fast-paths.ts';
 //
 // The compiler is three stages, each in its own module:
 //   1. front-end (frontend.ts)   — parse → Step[] IR
-//   2. rewrite   (ir/passes.ts)  — Seam 3: ONE categorized, ordered Pass pipeline (runPasses) —
+//   2. rewrite   (ir/passes.ts)  — ONE categorized, ordered Pass pipeline (runPasses) —
 //                                   internal folds AND external withStrategies decoration/
 //                                   verification — so the dispatch sees a canonical, peek-free,
 //                                   policy-honoured chain. Chain-global facts come from ir/analyze.ts.
-//   3. dispatch  (steps/*.ts)    — Seam 2: prefix fold (buildPrefix) + tail
+//   3. dispatch  (steps/*.ts)    — prefix fold (buildPrefix) + tail
 //                                   (compileTail) for reads; routeWrite for writes
 // This file is just the wiring. Traversal-strategy handling — parsing the withStrategies/
 // withoutStrategies specs (extractStrategies front-end) and applying them as decoration/verify

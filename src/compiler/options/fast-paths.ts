@@ -67,13 +67,13 @@ export const resolveRegistry = (options?: CompileOptions): ServiceRegistry =>
 export const resolveFederationDepth = (options?: CompileOptions): number =>
   options?.federationDepth ?? 0;
 
-// ---------- the FastPath contract (Layer C2: select a SQL lowering) ----------
+// ---------- the FastPath contract ----------
 //
 // The prose contract CLAUDE.md states for a fast path, turned into a TYPE. A FastPath recognizes a
-// sub-shape and lowers it to specialized SQL, with the generic path as the fallback + semantic
-// authority. ONE verb: SELECT a lowering (or decline via appliesWhen=false / tryLower=null). It is
-// NOT a Pass (it does not rewrite Step[]) and NOT a ChainFacts (it does not annotate) — the third
-// sibling. Dispatch stays FAMILY-LOCAL: each FastPath object is defined in its own family file next
+// sub-shape and lowers it to SPECIALIZED SQL, with the generic path retained as both the fallback
+// and the semantic authority. That retention is the whole definition: a lowering required for
+// correctness is not a fast path, which is why `equivalentWhen` below is mandatory. It is NOT a Pass
+// (it does not rewrite Step[]) and NOT a ChainFacts (it does not annotate) — the third sibling. Dispatch stays FAMILY-LOCAL: each FastPath object is defined in its own family file next
 // to its tryLower body, and fires at its own natural lowering site. This interface + the shared
 // FastPathContext give the six a common SHAPE, not a single call point.
 //

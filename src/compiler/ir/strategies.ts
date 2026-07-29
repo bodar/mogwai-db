@@ -1,7 +1,7 @@
 import { stepChain, isNested, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
 import { bodyAlwaysProduces } from './productivity.ts';
 
-// ---------- pass BODIES: the concrete Step[]→Step[] rewrites (Seam 3) ----------
+// ---------- pass BODIES: the concrete Step[]→Step[] rewrites ----------
 //
 // This module holds the concrete rewrite functions + the strategy-classification Sets. The
 // ORCHESTRATION — the categorized, ordered pipeline that sequences them (folds AND external

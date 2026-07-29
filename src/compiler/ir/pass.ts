@@ -1,7 +1,7 @@
 import type { StrategyUse } from '../../gremlin/frontend.ts';
 import type { PStep } from './strategies.ts';
 
-// ---------- the Pass contract (Layer A + B: rewrite the chain) ----------
+// ---------- the Pass contract: rewrite the chain ----------
 //
 // ONE shape for every Step[]→Step[] transform the compiler applies before lowering — the
 // internal normalization folds (repeat/by/choose/callWith clustering, provable no-op removals)

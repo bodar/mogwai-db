@@ -7,6 +7,23 @@ kernel is `src/sql/CLAUDE.md`. Root `CLAUDE.md` holds cross-cutting rules._
 `docs/archive/2026-07-24-unified-rewrite-passes-plan.md` and
 `docs/archive/2026-07-23-directory-restructure-plan.md`.
 
+## Three roles, named plainly
+
+Pre-lowering work splits three ways, and each has exactly one verb. Earlier comments numbered these
+(`Seam 2`/`Seam 3`, `Layer A/B/C1/C2` — two incompatible schemes for one split, defined only in an
+archived doc); the names below are the whole vocabulary.
+
+| Role | Verb | Never | TinkerPop analogue |
+|---|---|---|---|
+| `Pass` (`ir/pass.ts`) | rewrites the chain, or verifies and throws | annotates, selects SQL | `TraversalStrategy` |
+| `ChainFacts` (`ir/analyze.ts`) | annotates the chain | rewrites | `TraverserRequirement` aggregation |
+| `FastPath` (`options/fast-paths.ts`) | lowers a recognized sub-shape to **specialized** SQL | is the semantic authority | `ProviderOptimizationStrategy` |
+
+Vocabulary rule for anything new here: TinkerPop's words for Gremlin semantics and observable
+behaviour, compiler and relational words for our analysis, rewriting, lowering and SQL. Do not copy a
+TinkerPop implementation name because an approximate analogue exists — see
+`docs/2026-07-29-tinkerpop-core-engine-alignment.md`.
+
 ## Guardrails
 
 - **IR rewrites are Passes, not switches.** Every `Step[]→Step[]` rewrite is one `Pass` in the
