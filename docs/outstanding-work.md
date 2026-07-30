@@ -4,8 +4,10 @@ The de-duplicated index of open work across the `docs/` corpus. **Each line sets
 why, where to start — not a spec.** The linked doc holds the rationale; the picking agent does the
 detailed validation and design. Live per-step capability: `feature-support-matrix.md`.
 
-**Refreshed** 2026-07-30 against L3 **1595 / 2280** (the denominator moved: `@SingleLabelDefault` and
-`@MultiLabelDefault` left scope — see `tags.ts` and item 19b). Item
+**Refreshed** 2026-07-30 against L3 **1598 / 2267**. The denominator moved twice this day, both
+times to drop scenarios the harness cannot adjudicate rather than gaps of ours — see `tags.ts`,
+which now names which of three KINDS each exclusion is, and `runner-skips.test.ts`, which fails if
+the vendored runner's own skip set ever diverges from it. Item
 numbers are stable IDs — landed items are deleted and their numbers are not reused, because code
 comments and other docs cite them.
 
@@ -433,8 +435,18 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
     **We are apparently that provider** — our `labelRegime` falls back to the declared cardinality,
     so we answer all 10 today and cannot be asked. That fallback is a deliberate divergence from the
     reference, recorded as such at `labelRegime` (`src/api.ts`).
-    The write-up (suggested shape, the smaller alternative, and the caveat that upstream might
-    instead decide the scenarios should be deleted) is
+    **A SECOND symptom makes the declaration unsatisfiable, not merely untestable.** Three scenarios
+    carry NO label-default tag, use no `with()`, and assert a BARE string `T.label`:
+    `g_VX1X_elementMap_orderXlocalX_byXkeys_{asc,desc}Xunfold` (`map/Order.feature`) and
+    `g_V_hasXname_markoX_elementMap_mergeXV_hasXname_lopX_elementMapX` (`map/Merge.feature`).
+    Untagged means every provider runs them, so a provider declaring a blanket multi-label default
+    forfeits all three by construction, and their `@SingleLabelDefault` twins do not exist. **This is
+    also why we do NOT declare a blanket multi-label default**: `labelRegime` derives it from the
+    graph's cardinality, which satisfies those three AND the `@MultiLabelDefault` scenarios on
+    multi-label graphs. The two that expect a set on the single-label MODERN graph are the ones we
+    deliberately do not match — recorded in `test/L4-addendum/multilabel-default.feature`.
+    The write-up (both symptoms, suggested shape, the smaller alternative, and the caveat that
+    upstream might instead decide the scenarios should be deleted) is
     `docs/upstream-patches/03-multilabel-default-untestable.md`. Raise it as an ISSUE first — it is a
     `gremlin-core` API addition, not a patch. Precedent: `apache/tinkerpop#3511` came from here and
     merged. *Medium — 10 scenarios back for every provider, not just ours.*
