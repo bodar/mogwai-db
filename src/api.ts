@@ -29,6 +29,46 @@ export interface Sql {
   close?(): void;
 }
 
+// ---- graph capabilities ----
+
+/**
+ * How many labels an element may carry, and whether they can be mutated — TinkerPop 4's
+ * `LabelCardinality`, which a provider declares through `Graph.Features` and which
+ * `addLabel()`/`dropLabel()`/`dropLabels()` validate against.
+ *
+ * Modelled as the min/max/mutable triple upstream uses rather than as a set of booleans,
+ * because the three values disagree in ways a boolean pair cannot express: `ONE_OR_MORE`
+ * permits `dropLabel(x)` while `dropLabels()` always throws under it, and only
+ * `ZERO_OR_MORE` allows an element to end up with no labels at all.
+ */
+export const LabelCardinality = {
+  /** Exactly one label, immutable. TinkerGraph's default and 3.x-compatible; all mutation throws. */
+  ONE: { min: 1, max: 1, mutable: false },
+  /** One or more. `dropLabels()` always throws; `dropLabel(x)` only while one label remains. */
+  ONE_OR_MORE: { min: 1, max: Infinity, mutable: true },
+  /** Zero or more — no constraints, an element may carry no labels. */
+  ZERO_OR_MORE: { min: 0, max: Infinity, mutable: true },
+} as const;
+
+export type LabelCardinality = (typeof LabelCardinality)[keyof typeof LabelCardinality];
+
+/** The message TinkerPop's conformance suite matches on when a graph refuses label mutation. */
+export const LABEL_MUTATION_UNSUPPORTED = 'Label mutation is not supported';
+
+/**
+ * A graph's declared label cardinality. VERTEX cardinality is a provider choice; EDGE
+ * cardinality is fixed at `ONE` by the spec ("Edge labels are always LabelCardinality.ONE"),
+ * which is why `edges.label` stays inline while a vertex's labels normalize into
+ * `vertex_labels`.
+ *
+ * The vertex value is a constant today: the storage is multi-label-capable but the declared
+ * capability is still `ONE`, so mutation refuses and every vertex carries exactly one label.
+ * Turning multi-label on is a change to THIS value plus the steps that consult it — the point
+ * of routing the refusal through a declared capability rather than a per-step stub.
+ */
+export const VERTEX_LABEL_CARDINALITY: LabelCardinality = LabelCardinality.ONE;
+export const EDGE_LABEL_CARDINALITY: LabelCardinality = LabelCardinality.ONE;
+
 // ---- the federated-transfer row ----
 
 /** One row of a sibling graph's result, decoded to plain JS values (NOT GraphBinary — a

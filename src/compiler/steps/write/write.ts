@@ -11,6 +11,7 @@ import type { ElementReadDriver } from '../../engine/deps.ts';
 import { compileInject } from './inject.ts';
 import { indexProperty, deleteFtsFor, deleteFtsForOwners } from '../../../services/fts-index.ts';
 import { layoutCols, type ElementStream } from '../context/context.ts';
+import { VERTEX_LABEL_CARDINALITY, LABEL_MUTATION_UNSUPPORTED } from '../../../api.ts';
 
 // ---------- nested-traversal write arguments (read spine reuse) ----------
 //
@@ -1065,7 +1066,23 @@ function compileMergeE(engine: Engine, steps: IRStep[], params: Record<string, a
 // name→fn Map. Returns null when the chain is a read (compiler falls to compileRead).
 interface WriteRule { match: (steps: IRStep[]) => boolean; compile: (engine: Engine, steps: IRStep[], params: Record<string, any>, sackInit?: SackSpec, sideEffects?: Map<string, any>) => WritePlan | Compiled; }
 
+/** The label-mutation steps. They are WRITE steps, so they route here — and under a graph whose
+ *  declared LabelCardinality is immutable that routing ends in a refusal, which is the SPECIFIED
+ *  answer rather than a gap: `AddLabel.feature`/`DropLabel.feature` assert the message on a
+ *  single-label graph. Edges refuse under every cardinality (edge label cardinality is fixed at
+ *  ONE by spec), which is why the check reads the element kind rather than a global flag. */
+const LABEL_MUTATIONS = new Set(['addLabel', 'dropLabel', 'dropLabels']);
+
+function compileLabelMutation(steps: IRStep[]): never {
+  const step = steps.find((s) => LABEL_MUTATIONS.has(s.name))!;
+  // Only the vertex cardinality is a provider choice; when it becomes mutable this check starts
+  // passing for vertices and the mutation compilers take over, with edges still refusing.
+  if (!VERTEX_LABEL_CARDINALITY.mutable) throw new Error(`${LABEL_MUTATION_UNSUPPORTED}: ${step.name}()`);
+  throw new Error(`${step.name}() is not yet implemented for a mutable-label graph`);
+}
+
 const WRITE_RULES: WriteRule[] = [
+  { match: (s) => s.some((x) => LABEL_MUTATIONS.has(x.name)), compile: (_e, s) => compileLabelMutation(s) },
   { match: (s) => s.some((x) => x.name === 'addE'), compile: (e, s, p, _sk, se) => compileAddE(e, s, p, se) },
   { match: (s) => s.some((x) => x.name === 'addV'), compile: (e, s, p, _sk, se) => compileAddV(e, s, p, se) },
   { match: (s) => s.some((x) => x.name === 'mergeV'), compile: (e, s, p, _sk, se) => compileMergeV(e, s, p, se) },

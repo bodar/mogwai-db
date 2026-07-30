@@ -1,5 +1,5 @@
 import { q, value, list, empty, raw, Relation, type Expression } from '../../../sql/kernel/q.ts';
-import { labels, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
+import { labels, vertexLabels, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
 import { gtypeName, isColumnArg, isNested, isOrderArg, isScopeArg, isTokenArg } from '../../../gremlin/frontend.ts';
 import { elementOrderDrop, orderProductivityFilter } from './modulation.ts';
 import {
@@ -55,11 +55,11 @@ export interface TailAcc {
  *  order/limit/dedup) routes through lowerScalarProjection with this. */
 const EMPTY_TAIL_ACC: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, productiveBy: false, reducer: null, isPreds: [] };
 
-const PROJECTION_NAMES = new Set(['values', 'id', 'label', 'count', 'valueMap', 'elementMap', 'select', 'project', 'path']);
+const PROJECTION_NAMES = new Set(['values', 'id', 'label', 'labels', 'count', 'valueMap', 'elementMap', 'select', 'project', 'path']);
 // Scalar-producing projections: one `v` value per row. foldTailAcc stops at one of these
 // so the whole value tail (transforms/is/reducers/inject + framing) routes through the
 // scalar pipeline (lowerScalarProjection → scalar.ts/barrier.ts), never this accumulator.
-const SCALAR_PROJ = new Set(['values', 'id', 'label']);
+const SCALAR_PROJ = new Set(['values', 'id', 'label', 'labels']);
 const isMapProj = (p: IRStep | null) => p?.name === 'select' || p?.name === 'project';
 const isScopeLocalStep = (s: IRStep | undefined): boolean =>
   !!s && (s.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
@@ -764,7 +764,7 @@ function compileFold(st: ElementStream, acc: TailAcc): ListStream {
     const rel = st.q.cte(q`SELECT ${jsonbGroupArray(member)} AS list FROM ${source}`, ['list']);
     return toListStream(carry, rel, { kind: 'elem', elem: st.elem });
   }
-  if (projName === 'values' || projName === 'id' || projName === 'label') {
+  if (projName === 'values' || projName === 'id' || projName === 'label' || projName === 'labels') {
     const n = elemRel(st);
     const p = st.rel.as('p');
     const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
@@ -1013,6 +1013,27 @@ const PROJECTORS = new Map<string, ProjFn>([
   ['label', (c) => ({
     shape: { kind: 'value', type: STATIC('string') }, colsNode: q`${c.lbl} AS v`, fromNode: c.vJoin, scalarExpr: c.lbl, encounterKey: c.p.c.id,
   })],
+  // labels() is label()'s FLAT-MAP twin and THE ONLY reader allowed to join vertex_labels —
+  // one row per label, exactly as values() is one row per property value. Every other label
+  // reader is a scalar position and must pick (see the seam comment in plan.ts).
+  // An EDGE carries exactly one label by spec, so there it is one row, read inline: LabelsStep
+  // "for edges, the single label is emitted".
+  ['labels', (c) => {
+    if (c.st.elem === 'edge') return {
+      shape: { kind: 'value', type: STATIC('string') } as Shape,
+      colsNode: q`${c.lbl} AS v`, fromNode: c.vJoin, scalarExpr: c.lbl, encounterKey: c.p.c.id,
+    };
+    const vl = vertexLabels.as('vl');
+    const l = labels.as('l');
+    return {
+      shape: { kind: 'value', type: STATIC('string') } as Shape,
+      colsNode: q`${l.c.name} AS v`,
+      // INNER JOIN, so a ZERO-label vertex contributes no rows — which is the specified answer
+      // (`g.addV()` then `labels()` has a count of 0), not an accident of the join kind.
+      fromNode: q`${c.vJoin} JOIN ${vl} ON ${vl.c.node}=${c.n.c.id} JOIN ${l} ON ${l.c.id}=${vl.c.label}`,
+      scalarExpr: l.c.name, baseWhere: null, encounterKey: q`${c.p.c.id}, ${vl.c.label}`,
+    };
+  }],
   ['valueMap', (c) => {
     const keys = c.projStep!.args.filter((a) => typeof a === 'string') as string[];
     // valueMap props are ALWAYS {key:[values]} (node: multi from the table; edge: each
