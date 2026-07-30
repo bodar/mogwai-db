@@ -20,7 +20,6 @@ import { read, run, seededStore } from '../support/harness.ts';
 describe('scalar-parent branch/map (Stage 1)', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
   for (const q of MODERN_SEED) executeQuery(store, q, {});
-  const dec = (b: Buffer) => decode(b);
   const vals = async (g: string) =>
     (await decodeAll(executeQuery(store, g, {}))).map((x) => x === null ? '∅' : String(x)).sort();
 
@@ -239,7 +238,6 @@ describe('scalar math (Stage 2)', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
   executeQuery(store, "g.addV('t').property('age',29).property('d',2.5)", {});
   executeQuery(store, "g.addV('t').property('age',27).property('d',1.2)", {});
-  const dec = (b: Buffer) => decode(b);
   const vals = async (g: string) =>
     (await decodeAll(executeQuery(store, g, {}))).map(String).sort();
 
@@ -272,7 +270,6 @@ describe('scalar math (Stage 2)', () => {
 describe('scalar format (Stage 2)', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
   for (const n of ['marko', 'vadas']) executeQuery(store, `g.addV('p').property('name','${n}')`, {});
-  const dec = (b: Buffer) => decode(b);
   const vals = async (g: string) =>
     (await decodeAll(executeQuery(store, g, {}))).map(String).sort();
 
@@ -295,7 +292,6 @@ describe('V()/E() after a scalar — mid-traversal re-source (Stage 4)', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
   executeQuery(store, "g.addV('person').property('name','marko').property('age',29)", {});
   executeQuery(store, "g.addV('software').property('name','lop')", {});
-  const dec = async (b: Buffer) => await decode(b);
   const names = async (g: string) =>
     (await decodeAll(executeQuery(store, g, {}))).sort();
 
@@ -343,7 +339,6 @@ describe('scalar split (Stage 2)', () => {
 // Root-scope tail(N) on a scalar stream: the last N of the natural order, no encounter
 // column required (previously threw "scalar tail requires explicit encounter order").
 describe('scalar tail at root (Stage 2 fix)', () => {
-  const dec = (b: Buffer) => decode(b);
   const vals = async (g: string) => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     return (await decodeAll(executeQuery(store, g, {}))).map(String);
@@ -385,7 +380,6 @@ describe('scalar child scope — pushChildScope substrate (Stage 2)', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
   executeQuery(store, "g.addV('p').property('name','marko').property('age',29)", {});
   executeQuery(store, "g.addV('p').property('name','vadas').property('age',27)", {});
-  const dec = (b: Buffer) => decode(b);
   const vals = async (g: string) =>
     (await decodeAll(executeQuery(store, g, {}))).map(String).sort();
 
@@ -416,7 +410,6 @@ describe('scalar project — modulation over the value (Stage 2)', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
   executeQuery(store, "g.addV('p').property('name','marko').property('age',29)", {});
   executeQuery(store, "g.addV('p').property('name','vadas').property('age',27)", {});
-  const dec = (b: Buffer) => decode(b);
   const recs = async (g: string) =>
     (await decodeAll(executeQuery(store, g, {})))
       .map((m: any) => (m instanceof Map ? Object.fromEntries([...m]) : m))
@@ -452,7 +445,6 @@ describe('scalar project — modulation over the value (Stage 2)', () => {
 describe('scalar option-map choose (Stage 2)', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
   for (const age of [29, 27, 35]) executeQuery(store, `g.addV('p').property('age',${age})`, {});
-  const dec = (b: Buffer) => decode(b);
   const vals = async (g: string) =>
     (await decodeAll(executeQuery(store, g, {}))).map(String).sort();
 

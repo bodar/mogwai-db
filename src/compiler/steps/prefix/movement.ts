@@ -122,7 +122,7 @@ export const toVertex: StepFn = (s, st) => {
 /** otherV(): edge → the endpoint that ISN'T the one the traverser was on before the
  *  edge step (the carried `fv`). Well-defined only right after an edge step (the fv
  *  context); bothE()'s ambiguous direction is exactly why this is needed. */
-export const otherV: StepFn = (s, st) => {
+export const otherV: StepFn = (_s, st) => {
   if (st.elem !== 'edge') throw new Error(`otherV() expects an edge, not a ${st.elem}`);
   if (!st.traverserLayout.fromV) throw new Error('otherV() requires a preceding edge step (no entering-vertex context)');
   const e = edges.as('e');

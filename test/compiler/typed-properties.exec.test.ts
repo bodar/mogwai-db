@@ -8,7 +8,7 @@ import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
 import { ioc } from '../../src/io.ts';
 import { parseRequest } from '../../src/wire.ts';
-import { decode, decodeAll } from '../support/decode.ts';
+import { decodeAll } from '../support/decode.ts';
 
 // ---------- execution semantics against a seeded store ----------
 
@@ -50,7 +50,6 @@ describe('typed property values (P1) — vtype capture + collection storage', ()
       { t: 'string', v: 'a' }, { t: 'string', v: 'b' }, { t: 'string', v: 'c' },
     ]]);
     // round-trips back to the plain list value.
-    const dec = (b: Buffer) => decode(b);
     expect(await decodeAll(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST))", {}))).toEqual([['a', 'b', 'c']]);
   });
 

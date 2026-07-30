@@ -98,27 +98,28 @@ export type Divergence =
 /** The divergence kinds that FAIL a run. `order` is excluded — see its comment above. */
 export const GATING: ReadonlySet<Divergence['kind']> = new Set<Divergence['kind']>(['support', 'multiset']);
 
-const preview = (m: ReadonlyMap<string, bigint>, store: GraphStore) => {
+const preview = (m: ReadonlyMap<string, bigint>) => {
   const parts = [...m.entries()].slice(0, 4).map(([hex, bulk]) => `${hex.slice(0, 24)}…×${bulk}`);
   return `${m.size} distinct value(s): ${parts.join(', ')}${m.size > 4 ? ', …' : ''}`;
 };
 
-/** Compare two outcomes. `null` = equivalent (nothing to report). */
-export function diverge(a: Outcome, b: Outcome, store: GraphStore): Divergence | null {
+/** Compare two outcomes. `null` = equivalent (nothing to report). Pure in the two outcomes: it
+ *  took a `store` only to hand to `preview`, which never read it. */
+export function diverge(a: Outcome, b: Outcome): Divergence | null {
   // Both threw: agreement. The messages need not match — a fast path may decline earlier than the
   // generic path and word its deferral differently; what matters is that neither ANSWERED.
   if (a.kind === 'threw' && b.kind === 'threw') return null;
   if (a.kind === 'threw' || b.kind === 'threw') {
     const [threw, ran] = a.kind === 'threw' ? [a, b] : [b, a];
     const side = a.kind === 'threw' ? 'fast paths ON threw, generic ran' : 'generic threw, fast paths ON ran';
-    return { kind: 'support', detail: `${side}: ${threw.kind === 'threw' ? threw.message : ''} · other side gave ${ran.kind === 'rows' ? preview(ran.weighed, store) : ''}` };
+    return { kind: 'support', detail: `${side}: ${threw.kind === 'threw' ? threw.message : ''} · other side gave ${ran.kind === 'rows' ? preview(ran.weighed) : ''}` };
   }
   if (a.weighed.size !== b.weighed.size || [...a.weighed].some(([k, v]) => b.weighed.get(k) !== v)) {
     const missing = [...a.weighed].filter(([k, v]) => b.weighed.get(k) !== v);
     const extra = [...b.weighed].filter(([k, v]) => a.weighed.get(k) !== v);
     return {
       kind: 'multiset',
-      detail: `fast=${preview(a.weighed, store)} · generic=${preview(b.weighed, store)}` +
+      detail: `fast=${preview(a.weighed)} · generic=${preview(b.weighed)}` +
         ` · ${missing.length} value(s) differ from fast side, ${extra.length} from generic side`,
     };
   }
@@ -138,7 +139,7 @@ export function differential(mint: StoreFactory, q: string, generic: FastPathCon
   const fast = outcomeOf(shared ?? mint(), q, DEFAULT_FAST_PATHS);
   const store = shared ?? mint();
   const slow = outcomeOf(store, q, generic);
-  const d = diverge(fast, slow, store);
+  const d = diverge(fast, slow);
   return d ? [d] : [];
 }
 

@@ -1,5 +1,5 @@
 import { q, value, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { labels, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
+import { vertexProperties, edgeProperties } from '../../../sql/schema.ts';
 import {
     scalarProp,
     framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx,
@@ -538,7 +538,6 @@ export function lowerValueMap(st: ElementStream, proj: IRStep): MapStream {
   const keys = proj.args.filter((a: any) => typeof a === 'string') as string[];
   const p = st.rel.as('p');
   const n = elemRel(st);
-  const l = labels.as('l');
   const vlJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
   // The carried columns the blob rides out with, declared once and used for both CTEs so each
   // relation's declared schema equals its physical projection.
@@ -739,7 +738,6 @@ export function lowerProperties(st: ElementStream, step: IRStep): PropertyStream
   const keys = step.args.filter((a): a is string => typeof a === 'string');
   const n = elemRel(st);
   const p = st.rel.as('p');
-  const l = labels.as('l');
   // Node: the property stream IS the vertex_properties rows (one per instance, so a
   // multi-valued key yields several) — vpid is the real VertexProperty id, pmeta its
   // meta bag. Edge: the edge_properties rows (edge Property has no id/meta/multi, so

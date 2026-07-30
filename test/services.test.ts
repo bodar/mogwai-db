@@ -172,7 +172,7 @@ describe('call() routing (seedCall)', () => {
       name: '--list',
       type: 'start',
       describeParams: () => ({}),
-      resolve: (ctx) => ({
+      resolve: () => ({
         kind: 'stream',
         build: (c) => { seenParams = c.params; throw new Error('probe-reached'); },
       }),
@@ -248,7 +248,6 @@ describe('--list (DirectoryService) — end to end over GraphBinary', () => {
     directoryService, stubService('tinker.search'), stubService('tinker.degree.centrality'),
   ]);
   const store = new GraphStore(new BunSqlite(':memory:'));
-  const dec = async (b: Buffer) => await decode(b) as string;
   const run = async (g: string, params: Record<string, any> = {}) =>
     decodeAll(executeQuery(store, g, params, {}, reg));
 
@@ -373,7 +372,6 @@ describe('barrier source form via Executor (stub source → drive → land → f
   const store = new GraphStore(new BunSqlite(':memory:')); // empty — foreign rows are literals
   const reg = createRegistry([stubFederate]);
   const ex = new Executor(store, reg, stubSource); // Executor bound directly to the stub source
-  const dec = (b: Buffer) => decode(b);
   const run = async (g: string) => decodeAll((await ex.framedAsync(g, {})).map((f: any) => f.buf));
 
   test('g.call(federate) lands the sibling vertices as detached references', async () => {

@@ -672,7 +672,9 @@ export class Executor implements ExecutorApi {
   private readonly app: AppScope;
   constructor(
     private readonly store: GraphStore,
-    private readonly registry: ServiceRegistry,
+    // NOT a `private readonly` field: it is read once here to build the AppScope and never
+    // through `this`, so the modifier declared a property nothing uses.
+    registry: ServiceRegistry,
     private readonly source: FederationSource,
     /** Override the ambient fast-path config for every compile on this executor. Omitted in
      *  production (DEFAULT_FAST_PATHS). `createAppScope` has always accepted it; the Executor

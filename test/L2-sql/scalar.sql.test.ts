@@ -82,7 +82,6 @@ describe('scalar-parent / projection SQL', () => {
     // round-trips through UuidSerializer.
     const store = new GraphStore(new BunSqlite(':memory:'));
     executeQuery(store, "g.addV('data').property('list',['a','b','c']).property('uuid', UUID('0263f28b-eff9-4c17-8e33-0b41c74b6d4c'))", {});
-    const dec = (b: Buffer) => decode(b);
     expect(await decodeAll(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST))", {}))).toEqual([['a', 'b', 'c']]);
     expect(await decodeAll(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST)).unfold()", {}))).toEqual(['a', 'b', 'c']);
     expect(await decodeAll(executeQuery(store, "g.V().values('list').is(typeOf(GType.LIST)).count(Scope.local)", {}))).toEqual([3]);
@@ -99,7 +98,6 @@ describe('scalar-parent / projection SQL', () => {
     expect(read("g.V().values('name').fold().is(typeOf(GType.LIST)).count()").shape).toEqual({ kind: 'value', type: STATIC('long') });
     const store = new GraphStore(new BunSqlite(':memory:'));
     for (const w of MODERN_SEED) executeQuery(store, w, {});
-    const dec = (b: Buffer) => decode(b);
     // one list of 6 names → count 1 (a Long that decodes to a Number after the Int64 fix).
     expect(await decodeAll(executeQuery(store, "g.V().values('name').fold().count()", {}))).toEqual([1]);
     expect(await decodeAll(executeQuery(store, "g.V().values('name').fold().is(typeOf(GType.LIST)).count()", {}))).toEqual([1]);

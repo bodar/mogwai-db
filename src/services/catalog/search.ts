@@ -98,7 +98,7 @@ export const searchService: Service = {
   name: 'tinker.search',
   type: 'start',
   describeParams: () => ({ search: 'string (substring, ≥3 chars, case-insensitive)', type: 'Vertex | Edge | VertexProperty (default Vertex)' }),
-  resolve: (ctx: ServiceCallCtx) => ({
+  resolve: () => ({
     kind: 'stream',
     build: (c) => {
       const scope = ownerScopeOf(c.params);

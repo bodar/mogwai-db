@@ -18,7 +18,6 @@ import { run, seededStore } from '../support/harness.ts';
 describe('compiler execution semantics', () => {
 // Decode every Path from a framed GraphBinary response (shared by the recursive tests).
 async function decodePaths(store: GraphStore, gremlin: string): Promise<any[]> {
-  const { ioc } = await import('../../src/io.ts');
   const buffers = executeQuery(store, gremlin, {}); // one framed Path per result value
   return decodeAll(buffers);
 }
@@ -205,7 +204,6 @@ test('a recursive path().by(traversal) honours productive-by and the shared fan-
 });
 
 test('path() interleaves edges and vertices with materialized props (via framing)', async () => {
-  const { ioc } = await import('../../src/io.ts');
   const buffers = executeQuery(seededStore(), 'g.V(1).outE("created").inV().path()', {});
   const path = await decode(Buffer.concat(buffers)); // one framed Path value
   expect(path.constructor.name).toBe('Path');

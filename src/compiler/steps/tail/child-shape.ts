@@ -294,8 +294,6 @@ const isScalarProducer = (s: IRStep, ctx: ChildCtx | undefined): boolean =>
  *  of engine.ts isSackMutate, kept here so this pure leaf has no engine dependency. */
 export const isSackMutate = (s: IRStep): boolean =>
   s.name === 'sack' && (s.args ?? []).some(isOperatorArg);
-/** A bare read `sack()` — the scalar-producing form (rebinds the value to the carried sack). */
-const isSackRead = (s: IRStep): boolean => s.name === 'sack' && !isSackMutate(s);
 /** The projections compileScalarChildRows reads with its own element-projection SQL builder (and
  *  so can continue through any scalar row tail). Every other producer lowers via lowerSteps. */
 const BESPOKE_PROJECTIONS = new Set(['values', 'id', 'label', 'constant']);

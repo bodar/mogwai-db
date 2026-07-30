@@ -26,7 +26,7 @@ export const directoryService: Service = {
   name: DIRECTORY_SERVICE_NAME,
   type: 'start',
   describeParams: () => ({ service: 'string (filter)', verbose: 'boolean' }),
-  resolve: (ctx) => ({
+  resolve: () => ({
     kind: 'stream',
     build: (c) => {
       const services = c.registry.list();

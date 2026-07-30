@@ -56,7 +56,7 @@ describe('L5 — metamorphic laws', () => {
             return true;
           }
           evaluated++;
-          const d = diverge(a, b, store);
+          const d = diverge(a, b);
           if (!d) return true;
           if (!GATING.has(d.kind)) { orderDiffs++; return true; }
           // A diagnosed context (laws.ts knownBroken) — a bug we have not fixed, tracked rather than

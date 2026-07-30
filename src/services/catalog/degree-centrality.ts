@@ -1,4 +1,4 @@
-import type { Service, ServiceCallCtx } from '../spi/types.ts';
+import type { Service } from '../spi/types.ts';
 import { scopedMovementCount } from '../../compiler/steps/tail/child.ts';
 
 // ---------- tinker.degree.centrality — per-vertex edge count (pure, Streaming) ----------
@@ -28,7 +28,7 @@ export const degreeCentralityService: Service = {
   name: 'tinker.degree.centrality',
   type: 'streaming',
   describeParams: () => ({ direction: 'Direction (OUT | IN | BOTH), default IN' }),
-  resolve: (ctx: ServiceCallCtx) => ({
+  resolve: () => ({
     kind: 'stream',
     build: (c) => {
       if (!c.parent || c.parent.kind !== 'elements' || !c.scope)
