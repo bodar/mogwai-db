@@ -226,7 +226,9 @@ const nestedArg = (steps: Step[]): any => ({ nested: steps });
 /** Does any step in the tree (at ANY nesting depth) satisfy `pred`? Recurses through every
  *  {nested} arg — the generalization of the old nestedProducesElements walk, now used to
  *  scan for movement/otherV/writes across sub-traversal bodies too. */
-function someStepDeep(steps: Step[], params: Record<string, any>, pred: (s: Step) => boolean): boolean {
+/** Does any step at ANY nesting depth satisfy `pred`? Exported because a child-seam guard has to
+ *  ask about the whole body, nested arms included, not just its top level. */
+export function someStepDeep(steps: Step[], params: Record<string, any>, pred: (s: Step) => boolean): boolean {
   return steps.some((s) =>
     pred(s) || s.args.some((a) => isNested(a) && someStepDeep(stepChain(a.nested, params), params, pred)));
 }

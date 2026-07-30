@@ -10,7 +10,7 @@ import { engineOf } from '../../engine/deps.ts';
 import { lowerScalarRows } from './scalar.ts';
 import { SCALAR_TRANSFORMS } from './coerce.ts';
 import { lowerReSource } from '../graph-source.ts';
-import { type IRStep } from '../../ir/strategies.ts';
+import { someStepDeep, type IRStep } from '../../ir/strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
 import { predicateSql, rangeToOffsetLimit, elemTable, labelNameFor } from '../../plan/plan.ts';
 import { elementOrderDrop, elementOrderSql } from './modulation.ts';
@@ -991,7 +991,18 @@ function compileElementChildRows(
     const pushed = pushChildScope(parent, scope);
     return { stream: pushed.seed, frame: pushed.frame };
   }
-  if (parent.traverserLayout.fromV) return null;
+  // An edge's entering-vertex context is only MEANINGFUL to a body that reads it, and `otherV()`
+  // is the sole reader (`prefix/movement.ts`). A body that reads it inside a child scope would get
+  // the PARENT's entering vertex — which is undefined once the body moves — so that stays declined.
+  // A body that never mentions it (a plain filter, the common case) carries the column through
+  // unread and is perfectly compilable.
+  //
+  // The blanket form of this guard was a fast-path DISABLE-SAFETY hole, found by L5's rotating
+  // seed: `g.V().outE().where(__.has('weight', P.gt(1))).otherV()` puts a trailing otherV() on the
+  // chain, which turns trackFromV on for the whole prefix, so outE() carries fromV and this
+  // declined a where() body containing nothing but a property filter. The inline predicate answered
+  // it and the generic path threw, so the two disagreed with fast paths off.
+  if (parent.traverserLayout.fromV && someStepDeep(body, parent.params, (s) => s.name === 'otherV')) return null;
   // ONE shape classification (the same classifyElementChildRows the element preflight peeks
   // use) — the bare-order strip, firstPolicy order modulator, and empty-before handling all
   // live in the shared helper, so preflight and compiler cannot diverge.
