@@ -321,6 +321,28 @@ that part we mirror.
    admits `kind === 'key'` only, matching what emit serves (`by(T.id)` showed the mismatch: the
    classifier would have admitted a token by that the emitter rejects).
 
+   **✅ Landed 2026-07-30 — FOUR of the five positions**, and the emitter needed nothing new after
+   all: `tailSelectProject` already routes a single-label select to `lowerSingleSelect`, which owns
+   modulator application. Two narrow changes did it — `selectShape` asking the modulator-indifferent
+   question (via a new `singleLabelSelectOf`, since widening `labelSelectOf` would turn
+   `tryLowerElementSteps`' graceful decline into a throw against the now-strict resolver), and
+   `oneRowEncounter` giving a provably 1:1 scalar child the trivial encounter `first` ranks on. That
+   second one is gated on the 1:1 PROOF, not on "the stream carries no encounter" — the latter is the
+   condition `applyChildCardinality`'s guard exists to catch, and relaxing it would let `first` pick
+   an arbitrary row from a fan-out body.
+
+   | position | |
+   |---|---|
+   | `map` / `order().by` / `group().by` | ✅ each pinned equal to its `values(key)` form |
+   | `where` | ✅ productive-existence filter |
+   | `concat` | ❌ **the remaining half** |
+
+   **Why `concat` is the harder half, and it is the same wall as the fail-closed fix above.** Its
+   parent is a SCALAR stream, so the seed is scalar and the body routes through `dispatchAlias` →
+   `selectOneFromAlias` (which now throws) rather than through `lowerSingleSelect`, whose entry
+   demands an ElementStream. Reaching the modulator owner from a value-shaped parent is the one
+   remaining piece, and it is what scenario 25 needs.
+
    **A second, separable defect at the same site: the deferral message is wrong.**
    `concat() after a scalar stream not yet supported` names the PARENT shape when the obstacle is the
    ARGUMENT — a scalar parent is fully supported for `concat(' knows ')`, `concat(__.constant(…))`,
