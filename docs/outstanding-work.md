@@ -418,14 +418,28 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
     - `elementMap()` on EDGES (3 scenarios) is a pre-existing gap unrelated to labels — it needs
       the IN/OUT direction tokens (`tail/projection.ts`).
 
-19b. **The vendored cucumber runner hard-skips `@MultiLabelDefault`.** `Before({tags:
-    "@MultiLabelDefault"}, () => 'skipped')` in gremlin-js's `world.js`, alongside
-    `@StepWrite`/`@DataChar`/`@DataDuration`. Those three are genuinely unsupported features; this
-    one looks like a **stub left behind** — the scenarios are ordinary elementMap/valueMap
-    assertions a multi-label provider can answer, and `@SingleLabelDefault`, their twin, is NOT
-    skipped. Consequence: 10 scenarios can never pass through the JS GLV whatever a provider
-    declares, so `tags.ts` scopes both defaults out. Worth raising on the fork with the other
-    upstream payloads (see the give-backs section); the fix is deleting four lines.
+19b. **The GLV conformance suites cannot test a multi-label-DEFAULT graph — a fixable upstream gap,
+    and a good fork contribution.** All three GLVs skip `@MultiLabelDefault` (10 scenarios):
+    gremlin-js `Before({tags:"@MultiLabelDefault"}, () => 'skipped')`, gremlin-go
+    `~@MultiLabelDefault` in its godog tag filter, gremlin-python `context.ignore`. **Go states the
+    reason and it is not a stub:** *"The GLV suite does not test against a graph that defaults to
+    multi-label output."* So this is a TEST-SERVER CONFIGURATION gap, not four deletable lines —
+    correcting an earlier reading in this index.
+    The scenarios themselves are ordinary `elementMap()`/`valueMap(true)` assertions any
+    multi-label provider can answer; we answer them today (verified by probe — `T.label` frames as
+    `s[person,employee]`), we just cannot be ASKED. Their `@SingleLabelDefault` twins are not
+    skipped, so the suite tests one declaration and not the other.
+    **The fix, and it is a real contribution rather than a patch:** add a traversal source to the
+    reference test-server config whose vertex label cardinality AND default `T.label` rendering are
+    multi-label (the existing `gmultilabel` declares `ZERO_OR_MORE` but evidently still renders
+    single by default), point the `@MultiLabelDefault` scenarios at it, and drop the three skips.
+    Multi-label landed in `bc2d939562` (TINKERPOP-3261) with the skips already in it, so this is
+    finishing that work, not disputing it. We have the fork (`danielbodart/tinkerpop`) and upstream
+    has taken changes from us before (`apache/tinkerpop#3511`, merged). *Medium — 10 scenarios back
+    for every provider, not just ours.*
+    Until then `tags.ts` scopes both label-default tags out and `runner-skips.test.ts` fails if the
+    runner's skip set ever changes, so a fix upstream surfaces here instead of silently keeping
+    scenarios out.
 
 ---
 
@@ -481,8 +495,16 @@ Each fails closed (clear error, never mis-executes). Do only when a concrete sce
   → [foldable-carried-column](./2026-07-24-foldable-carried-column-plan.md)
 - **`repeat`/`match` emission order** — recursive-CTE can't window across iterations. *Low.*
   → [canonical-emission-order](./2026-07-19-canonical-emission-order.md)
-- **L3 ratchet hygiene** — descope OLAP/GraphComputer + `io` source in `tags.ts`. *Low.*
-  → [with-strategies-exploration](./2026-07-13-with-strategies-exploration.md)
+- **L3 ratchet hygiene — REWRITTEN 2026-07-30, and its original instruction was wrong on both
+  halves.** It said "descope OLAP/GraphComputer + `io` source in `tags.ts`". GraphComputer is
+  already descoped, and descoping it *permanently* is the wrong instinct — 4 of its 6 scenarios are
+  the OLAP step names P2·8 plans to serve, so that exclusion should NARROW when item 8 lands, not
+  harden. The `io` SOURCE (`io(...).read()`, 6 scenarios, in scope and failing) we actively WANT:
+  loading a GraphSON/kryo file into a graph is a real capability, unlike `io().write()`, which needs
+  a filesystem a Durable Object does not have. **Do not descope either.** `tags.ts` now states which
+  of its three exclusion KINDS each tag belongs to, and `runner-skips.test.ts` gates the one kind
+  that depends on someone else's code. *Low — the remaining hygiene is keeping those three kinds
+  honest.*
 
 ---
 
@@ -652,8 +674,15 @@ proves nothing — read the deferral clusters instead.
 - **Cross-DO federation via `ATTACH` coordinator** → rejected; per-request `call(federate)` landed
   instead (open tail in P2·11).
 - **Client-side partition → DO routing** → out of scope; server-side soft filtering is the path.
-- **Platform walls** — regex UDFs, `typeOf` over some stored props, bigdecimal, lambdas,
-  OLAP/GraphComputer → architectural limits, fail-closed by design.
+- **Platform walls** — regex UDFs, `typeOf` over some stored props, bigdecimal, lambdas →
+  architectural limits, fail-closed by design.
+  **OLAP/GraphComputer was on this list and should NOT have been** (corrected 2026-07-30; it
+  contradicted P2·8, which plans exactly this). `graph-algorithms` verified that GraphComputer is
+  not removed in TinkerPop 4 and that the v4 LANGUAGE carries the four OLAP step names with no
+  execution surface — "that gap is exactly what we fill" with an OLTP compile-to-SQL execution. The
+  genuine wall is much narrower: a `VertexProgram` execution surface (2 `@WithVertexProgramStrategy`
+  scenarios). The four step scenarios come back as a give-back when item 8 lands.
+  → [graph-algorithms](./2026-07-24-graph-algorithms-plan.md)
 - **Child-scope split-seed + 4-consumer migration** → superseded by the smaller carried-cols fix.
 - **"`asNumber(GType.BIGINT)` of a small value should downcast on the wire"** → **our framing is
   already correct; the blocker is a vendored-harness defect.** TinkerPop's
