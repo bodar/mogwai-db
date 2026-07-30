@@ -4,6 +4,16 @@ _Written 2026-07-30, after `8c33450` landed on trunk. Everything below is measur
 commit, not estimated. Verify a premise before acting on it — the numbers here go stale the moment
 someone runs `fix.ts`._
 
+> **Status 2026-07-30, after `4f10149`.** All four items are resolved: 1 and 2 landed as CI gates,
+> 3 landed as an instrument with its findings partly actioned, 4 split into a landed file-mover and
+> a measured, blocked symbol-mover. Doing them re-confirmed the warning above — every headline
+> number in the original text was stale within the day (46 → 76 errors, 16 → 24 exempt, 14 → 8
+> orphans), so the tools were built to re-measure rather than to assert a count.
+>
+> **What is left is not implementation.** §3b lists four design decisions a sweep is the wrong
+> instrument to settle, §2's "one option NOT tested" is explicitly the user's call, and §4's blocked
+> half needs a decision about whether to take on a second language server.
+
 ## What already landed (do not redo)
 
 `scripts/lsp.ts` is a **session-scoped library**, not a daemon and not a per-script copy of the
@@ -220,14 +230,42 @@ wrong instrument to settle it:
 
 This directly serves the technical-debt sweep in `docs/outstanding-work.md`.
 
-## 4. `moveToFile` — not started
+## 4. `moveToFile` — SPLIT: file moves LANDED (`4f10149`), symbol moves BLOCKED
 
-The server advertises `workspace.fileOperations.willRename`, which is the real mechanism. A move
-that rewrites import paths across the workspace is currently a manual multi-file fixup.
+The item assumed one capability; there are two, and only one exists here. Measured, so nobody
+re-derives it:
 
-The motivating case is the subsystem boundary the docs already state: `src/gremlin/` must not reach
-into the compiler (locked decision 5). Moving a symbol to the correct side of that line is the use
-case; a general-purpose file mover is not.
+| | capability | status |
+|---|---|---|
+| move a FILE, rewrite importers | `workspace/willRenameFiles` | **advertised and answers** — `scripts/move.ts` |
+| move a SYMBOL between files | `refactor.move` code action | **not exposed by this server** |
+
+`codeActionProvider.codeActionKinds` is `quickfix, source.organizeImports,
+source.removeUnusedImports, source.sortImports, source.fixAll` — **no `refactor.*` kind at all** —
+and a `textDocument/codeAction` asking for `refactor` or `refactor.move` over a declaration returns
+zero actions, with or without `codeActionLiteralSupport` declared at initialize. `tsc --lsp` is not
+`tsserver`: the refactor surface is simply not part of it.
+
+**So the item's motivating case is the half that is blocked.** Moving a symbol to the correct side
+of the `src/gremlin/` ↔ compiler boundary (locked decision 5) still has no tool. Options, none
+attempted: drive `tsserver` instead (a second server, a second protocol, and it would no longer be
+"the same TypeScript `mise run check` uses" — that property is why these tools are trustworthy), or
+do it by hand and let `mise run check` catch the fallout.
+
+### What `scripts/move.ts` does
+
+`bun scripts/move.ts <from> <to> [--dry]`. No mise task, matching `rename.ts`/`fix.ts` — two
+positional paths, a manual operation.
+
+**Order is load-bearing: edits first, then the move.** A depth-changing move rewrites the moved
+file's OWN relative imports, and those edits come back keyed to its OLD uri. Both cases measured:
+`src/services/` → `src/sql/` is depth-preserving, 1 edit (its single real importer — the other
+textual hits were comments); `src/services/` → `src/` needs 3, two of them inside the moved file.
+
+Verified by a real apply, per this doc's own rule that a dry run cannot catch an applier bug: moved
+`fts-index.ts` up a level, `check` clean, git recorded a **rename**, then moved it back with the same
+tool and the tree returned byte-identical. `git mv` rather than a raw rename keeps `git log --follow`
+working, which is precisely when someone wants it.
 
 ---
 
