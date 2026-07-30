@@ -694,17 +694,6 @@ export function classifyElementChildRows(
   return parts ? { body, parts, orderStep: orderStep as IRStep | undefined } : null;
 }
 
-export function isPropertyScalarChild(nested: any, ctx: ChildCtx): boolean {
-  if (!nested) return false;
-  return classifyScalarChildRows('property', childSteps(nested, ctx.params)) !== null;
-}
-
-/** A property scalar child terminated by fold() — the group-value list form. */
-export function isPropertyScalarFoldChild(nested: any, ctx: ChildCtx): boolean {
-  if (!nested) return false;
-  const body = childSteps(nested, ctx.params);
-  return body.at(-1)?.name === 'fold' && classifyScalarChildRows('property', body.slice(0, -1)) !== null;
-}
 
 /** PURE. A total scope-aware count() child (movement-only prefix): optional(child) ≡ child
  * because the identity fallback is unreachable. Returns the parsed body for reuse. */
@@ -714,9 +703,6 @@ export function classifyTotalScalarChild(nested: any, ctx: ChildCtx): { body: Re
   return classifyCountChild(body, ctx) ? { body } : null;
 }
 
-export function isTotalScalarChild(nested: any, ctx: ChildCtx): boolean {
-  return classifyTotalScalarChild(nested, ctx) !== null;
-}
 
 /** PURE. A fold()-terminated list child (element parent): the strict shape the branch/list
  * consumers gate on. Returns the parsed body so the emitter (tryCompileListChild) reuses it
@@ -759,26 +745,6 @@ export function isListChild(nested: any, ctx: ChildCtx): boolean {
   return classifyListChild(nested, ctx) !== null;
 }
 
-export function isScalarFoldChild(nested: any, ctx: ChildCtx): boolean {
-  if (!nested) return false;
-  const body = childSteps(nested, ctx.params);
-  return body.at(-1)?.name === 'fold' && classifyScalarChildRows('element', body.slice(0, -1), ctx)?.kind === 'element';
-}
-
-export function isElementFoldChild(nested: any, ctx: ChildCtx): boolean {
-  if (!nested) return false;
-  return classifyElementChildRows(childSteps(nested, ctx.params), 'fold', false, ctx) !== null;
-}
-
-/** An element traversal used as a group VALUE with no terminal reducer/fold. Per
- *  TinkerPop, an unreduced group value collects its results into a list, so this is an
- *  implicit fold — e.g. by(__.out()) ≡ by(__.out().fold()). A trailing bare order() is
- *  the fold's natural id order (accepted, stripped when compiled); order().by(key) is
- *  NOT (it would need key-ordered folding — deferred). */
-export function isElementImplicitFoldChild(nested: any, ctx: ChildCtx): boolean {
-  if (!nested) return false;
-  return classifyElementChildRows(childSteps(nested, ctx.params), undefined, false, ctx) !== null;
-}
 
 // ---------- branch-family arm triage (the ONE canonical shape decision) ----------
 //
