@@ -294,11 +294,32 @@ that part we mirror.
    | `concat` (scalar parent) | ❌ still `result`-kinded |
    | `by(T.id)` | ❌ `by(T.id) modulator not yet supported` — emit is narrower than the classifier |
 
-   So the remaining work is emit-side and specific: a modulated single-label select must be a
-   recognized **1:1 scalar projection** in the bespoke route (`BESPOKE_PROJECTIONS` /
-   `compileScalarChildRows`), which is what tells the child seam it needs no encounter order for
-   `first`. And the classifier must admit only what emit serves — `kind === 'key'` only, not
-   `'token'`.
+   **The substrate, found 2026-07-30 — and the child-BODY route is the wrong road entirely.** The
+   `encounter order` error is a symptom of asking the wrong question: `select(label).by(key)` is not a
+   child body at all, it is a **scalar EXPRESSION over the parent row** — project `key` off the
+   element named by the label's alias column. No child scope, no cardinality policy, no encounter.
+   That is why every fix aimed at the child-body machinery produced a new error one layer down.
+
+   Two candidate homes were checked and rejected before the right one:
+
+   - **`BESPOKE_PROJECTIONS` / `compileScalarChildRows`** — a 5th hard-coded entry in a
+     four-projection table the hand-rolled-SQL audit already files as duplication (its item 7).
+     Entrenches debt.
+   - **The generic `PROJECTORS` table** (audit item 7's own fix) — does not help: every projector
+     there builds against the CURRENT element (`c.n`, `c.st.elem`). A select-by projects off a
+     *different* element, the one in the alias history, which that table has no notion of.
+
+   The right substrate already exists and **already serves this exact computation**:
+   `scalarProp(ctx, key)` with `ctx = aliasCtx(aliasId(col, 'last'), elem)` — the ONE scalar
+   projector the audit's item 4 consolidated, parameterized by a `ScalarCtx`. `lowerMathScalar`
+   (`tail/mapscalar.ts`) uses precisely that shape today for `math("a + b")`'s `by(key)` modulators
+   over as()-label variables. `select(label).by(key)` is the same computation with one variable.
+
+   So the emit half is: recognize the shape in the shared scalar-child entry
+   (`tryCompileScalarValueChild`), not in `concat`'s own fallback — one change and all five positions
+   get it, versus a per-consumer special case that `steps/CLAUDE.md` forbids. The classifier half then
+   admits `kind === 'key'` only, matching what emit serves (`by(T.id)` showed the mismatch: the
+   classifier would have admitted a token by that the emitter rejects).
 
    **A second, separable defect at the same site: the deferral message is wrong.**
    `concat() after a scalar stream not yet supported` names the PARENT shape when the obstacle is the
