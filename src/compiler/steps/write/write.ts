@@ -260,7 +260,7 @@ interface PropSpec { key: string | { nested: any }; value: any; vtype: Canonical
 /** `labels` is a LIST because a vertex carries a set: `addV("a","b")` is two labels, and
  *  `addV()` with no argument is the single default 'vertex'. Under LabelCardinality.ONE a spec
  *  with more than one is rejected at insert time rather than silently truncated. */
-interface VertexSpec { labels: (string | { nested: any })[]; props: PropSpec[]; uid: string | number | null; }
+interface VertexSpec { labels: (string | string[] | { nested: any })[]; props: PropSpec[]; uid: string | number | null; }
 
 // A leading Cardinality token on property() args (default single). Returns it plus
 // the remaining [key, value, ...metaArgs], and `off` — how many leading args were
@@ -311,24 +311,31 @@ const singleProps = (rec: Record<string, any>, types: Record<string, TypeNode | 
 
 // An addV(...) step + its trailing property() steps → a vertex spec. A property key or
 // value that is __.select(k) of a withSideEffect constant resolves at parse time.
+/** `addV(…)` plus its followers. An `addLabel(…)` follower on a JUST-CREATED vertex is simply more
+ *  labels — `addV("person").addLabel("employee")` is the same vertex as `addV("person","employee")`
+ *  — so it folds into the spec here rather than routing to the mutation compiler, whose prefix
+ *  would be the addV itself and therefore not a readable element stream. */
 function parseVertexSpec(addV: Step, propSteps: Step[], sideEffects?: Map<string, any>, params: Record<string, any> = {}): VertexSpec {
   // A nested-traversal label (addV(__.…)) stays UNRESOLVED here (it needs the store) —
   // insertVertex evaluates it at run time. A __.select(sideEffectConst) collapses now.
   // addV() takes N labels. Each stays UNRESOLVED if it is a traversal (insertVertex evaluates
   // it against the store); a __.select(sideEffectConst) collapses now. No argument at all is
   // the single default label 'vertex'.
-  const asLabel = (a: any): string | { nested: any } =>
+  // A resolved constant keeps its SHAPE: `addV(constant(["a","b"]))` is two labels, and
+  // String()-ing it here turned them into the single label "a,b".
+  const asLabel = (a: any): string | string[] | { nested: any } =>
     typeof a === 'string' ? a
-    : isNested(a) ? ((c) => c.has ? String(c.value) : a)(constFromNested(a, sideEffects, params))
+    : isNested(a) ? ((c) => c.has ? (Array.isArray(c.value) ? c.value.map(String) : String(c.value)) : a)(constFromNested(a, sideEffects, params))
     : String(a);
   // No argument means "whatever this graph's default is", which is NOT always 'vertex': under
   // LabelCardinality.ZERO_OR_MORE a bare addV() creates a vertex with NO labels (`g_addV_labels`
   // asserts labels() has a count of 0). insertVertex applies the default, because only it can see
   // the declared cardinality. An empty list here therefore means "unspecified", not "none".
-  let labels: (string | { nested: any })[] = addV.args.map(asLabel);
+  let labels: (string | string[] | { nested: any })[] = addV.args.map(asLabel);
   const props: PropSpec[] = [];
   let uid: string | number | null = null;
   for (const s of propSteps) {
+    if (s.name === 'addLabel') { labels.push(...s.args.map(asLabel)); continue; }
     const { cardinality, rest, off } = readCardinality(s.args);
     let [key, val, ...metaArgs] = rest;
     { const ck = constFromNested(key, sideEffects, params); if (ck.has) key = ck.value; }
@@ -550,7 +557,7 @@ function compileMidAddV(engine: Engine, steps: IRStep[], addVAt: number, params:
   if (st.traverserLayout.path) throw new Error('mid-traversal addV() under path() is not yet supported (write driver cannot append the new vertex path position)');
 
   let firstTail = addVAt + 1;
-  while (firstTail < steps.length && steps[firstTail].name === 'property') firstTail++;
+  while (firstTail < steps.length && ADDV_FOLLOWERS.has(steps[firstTail].name)) firstTail++;
   const spec = parseVertexSpec(steps[addVAt], steps.slice(addVAt + 1, firstTail), sideEffects, params);
   const suffix = steps.slice(firstTail);
   const writeSteps = new Set(['addV', 'addE', 'mergeV', 'mergeE', 'property', 'drop']);
@@ -589,7 +596,7 @@ function compileAddV(engine: Engine, steps: IRStep[], params: Record<string, any
   const addVAt = steps.findIndex((s) => s.name === 'addV');
   if (addVAt > 0) return compileMidAddV(engine, steps, addVAt, params, sideEffects);
   let firstFollower = 1;
-  while (firstFollower < steps.length && steps[firstFollower].name === 'property') firstFollower++;
+  while (firstFollower < steps.length && ADDV_FOLLOWERS.has(steps[firstFollower].name)) firstFollower++;
   // A source addV has produced a real vertex before its follower runs. Preserve that
   // mutation boundary, then hand the remaining read chain back to the normal compiler using
   // the inserted internal rowid as its source. This is the generic write→read substrate;
@@ -715,7 +722,7 @@ function runWriteChainFull(engine: Engine, store: GraphStore, steps: Step[], par
     const s = steps[i];
     if (s.name === 'addV') {
       const propSteps: Step[] = [];
-      while (i + 1 < steps.length && steps[i + 1].name === 'property') propSteps.push(steps[++i]);
+      while (i + 1 < steps.length && ADDV_FOLLOWERS.has(steps[i + 1].name)) propSteps.push(steps[++i]);
       const spec = parseVertexSpec(s, propSteps, sideEffects, params);
       const v = insertVertex(engine, store, spec, params, sideEffects);
       currentV = v.id; last = { vertex: { id: v.extId, label: v.label, props: readVertexProps(store, v.id) } };
@@ -1124,6 +1131,8 @@ function labelNames(v: any, sole: boolean, step: string): string[] {
 const DEFAULT_VERTEX_LABEL = 'vertex';
 
 const LABEL_MUTATIONS = new Set(['addLabel', 'dropLabel', 'dropLabels']);
+/** Steps that CONFIGURE the vertex addV() is creating, rather than reading from it. */
+const ADDV_FOLLOWERS = new Set(['property', 'addLabel']);
 /** Write steps that cannot follow a label mutation — the same set mid-addV refuses to continue past. */
 const MUTATING_TAIL = new Set(['addV', 'addE', 'mergeV', 'mergeE', 'property', 'drop', ...LABEL_MUTATIONS]);
 
@@ -1205,9 +1214,11 @@ function compileLabelMutation(engine: Engine, steps: IRStep[], params: Record<st
 }
 
 const WRITE_RULES: WriteRule[] = [
-  { match: (s) => s.some((x) => LABEL_MUTATIONS.has(x.name)), compile: (e, s, p, _sk, se) => compileLabelMutation(e, s, p, se) },
+  // The element-CREATING rules come first, so `addV("person").addLabel("employee")` is one
+  // creation with two labels rather than a mutation whose prefix is an addV.
   { match: (s) => s.some((x) => x.name === 'addE'), compile: (e, s, p, _sk, se) => compileAddE(e, s, p, se) },
   { match: (s) => s.some((x) => x.name === 'addV'), compile: (e, s, p, _sk, se) => compileAddV(e, s, p, se) },
+  { match: (s) => s.some((x) => LABEL_MUTATIONS.has(x.name)), compile: (e, s, p, _sk, se) => compileLabelMutation(e, s, p, se) },
   { match: (s) => s.some((x) => x.name === 'mergeV'), compile: (e, s, p, _sk, se) => compileMergeV(e, s, p, se) },
   { match: (s) => s.some((x) => x.name === 'mergeE'), compile: (e, s, p, _sk, se) => compileMergeE(e, s, p, se) },
   // inject is a scalar-stream READ, not a write — it lives here only because it's a
