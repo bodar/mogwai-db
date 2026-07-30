@@ -73,10 +73,13 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    the L1 corpus; the rejected alternative, `clearDFA()` per parse, was ~20x. Still open: the fix is
    **not upstream** — it is unchanged on antlr4ng `main` and still 3.0.16 on npm, so every antlr4ng
    consumer has it, and any version bump here silently drops our patch (guarded by
-   `test/L1-corpus/parser-state.test.ts`, which asserts the mechanism, not just the symptom). A
-   ready-to-push branch sits in the untracked `vendor/antlr4ng` clone
-   (`fix/dfa-state-hash-collision`: the `DFA.ts` fix plus a `tests/bugs/` spec); it needs a fork
-   under a personal account to push from, which the session that found this could not create.
+   `test/L1-corpus/parser-state.test.ts`, which asserts the mechanism, not just the symptom). The
+   upstream-facing change is committed at `patches/upstream/antlr4ng-dfa-state-hash-collision.patch`
+   — the `src/dfa/DFA.ts` fix plus a `tests/bugs/` vitest spec, applying to antlr4ng `main`. To land
+   it: fork `mike-lischke/antlr4ng`, `git am` that patch, open the PR. A Claude session cannot do
+   the fork step — GitHub access is scoped per session and `add_repo` refuses an owner the session
+   did not start with — so it needs a session opened against the fork itself. There is no upstream
+   issue for it; the nearest is #50, the other symptom of the same `addState` early return.
    *High — we are carrying someone else's correctness bug as a local patch.*
 
 1. **List members frame as bare values, not elements.** `AliasEntry` does not record the member
