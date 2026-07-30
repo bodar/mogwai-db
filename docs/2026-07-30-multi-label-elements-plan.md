@@ -66,6 +66,11 @@ Established by reading the code, not assumed. Each removes a phase someone would
   src)` (`src/storage.ts:53-54`) bake the edge label into the two covering indexes every movement
   step rides. **So `edges.label` is untouched by this plan** — only `g.E().labels()` (a read,
   returning the one label) changes. This halves the blast radius.
+  Note this makes vertex and edge label storage diverge, and that is *correct and precedented*:
+  `edge_properties` already lacks `vertex_properties`' `meta` column and pins `UNIQUE(edge, key)`,
+  because — per the DDL's own comment — "TinkerPop's edge Property has no id/meta/multi". Our
+  storage already mirrors TinkerPop's vertex/edge model rather than forcing symmetry, so a
+  vertex-only label set is the established pattern.
 - **`label()` is deprecated but live**, and on a multi-label vertex returns exactly one of the
   labels (`g_V_label_deprecated_multilabel_value_is_one_of_labels` asserts only that it is *within*
   the set). It does not have to become a list.
@@ -131,22 +136,38 @@ and should not be attempted first.
 
 ## The one real decision — how a vertex's label set is stored
 
-**Recommendation: `nodes.label` keeps the FIRST label; a `vertex_labels(node, label)` table holds
-the whole set, and is the only thing `labels()` reads.** Under `ONE` the side table has exactly one
-row per vertex, so there is one representation, not two.
+Two options, and **this plan does NOT pick one**, because the first draft's reasons for picking
+did not survive review. They are recorded here with what actually decides between them.
 
-The alternative — **drop `nodes.label` and make the side table the sole home** — is cleaner
-vocabulary and should be recorded as seriously considered. It is rejected on a measured cost, not
-taste: `n_label ON nodes(label)` is what `hasLabel` rides today, and every `labelIn` call site
-would become a join. Since `edges.label` is staying regardless (the covering indexes above), that
-alternative buys uniformity for vertices while *creating* an asymmetry with edges.
+- **(a) Supplement.** `nodes.label` keeps the first label; `vertex_labels(node, label)` holds the
+  whole set and is what `labels()` reads. Under `ONE` the side table is one row per vertex.
+- **(b) Replace.** `nodes.label` goes; `vertex_labels` is the sole home for a vertex's labels.
+  `edges.label` stays inline either way.
 
-The recommendation's own risk, stated plainly: a denormalized first-label column can drift from
-the set. Mitigate by making the write path the only writer of both and asserting the invariant in
-the storage tier — do **not** let two steps maintain them independently.
+**A retracted argument, recorded so it is not re-made.** The first draft rejected (b) partly
+because it "creates an asymmetry with edges". That is void: `vertex_properties` and
+`edge_properties` are *already* asymmetric — the latter has no `meta` column and carries
+`UNIQUE(edge, key)` — and the DDL comment gives the reason: "TinkerPop's edge Property has no
+id/meta/multi". The split tracks TinkerPop's model. Labels are the same shape (vertices multi,
+edges single), so a vertex-only label table is **the existing precedent, not a departure from it**.
+Under (b) the asymmetry is if anything more honest, because the storage would then say
+out loud that multi-label is a vertex concept.
 
-**Do not decide this from the plan alone.** Phase 0 and Phase 1 are both unaffected by it, so
-land those first and take the decision with the Phase 2 code in front of you.
+**The surviving argument is a perf claim, and it is UNMEASURED — treat it as the spike to run,
+not as a finding.** The concern is that `n_label ON nodes(label)` is what `hasLabel` rides and
+that (b) turns every `labelIn` into a join. On inspection that is overstated:
+`V().hasLabel('person').out()` seeks `n_label` for node ids and feeds `e_out` without ever reading
+the `nodes` row, and an index on `vertex_labels(label, node)` serves the same index-only seek
+producing the same ids. The join (b) adds is often to a table the query was not reading.
+So: **EXPLAIN + time `hasLabel` seek, `hasLabel().out()`, and a `has(T.label, within(...))` under
+both shapes before choosing.** That measurement is the deciding input.
+
+The counterweight is on (a): a denormalized first-label column can drift from the set, and
+"which is the real label" becomes a question every read path must answer. (b) has one home and
+therefore no drift class at all.
+
+**Phase 0 and Phase 1 are unaffected either way**, so land those first and take this decision with
+the Phase 2 code and the measurement in front of you.
 
 ## Traps
 
