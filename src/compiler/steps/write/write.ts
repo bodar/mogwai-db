@@ -496,11 +496,12 @@ function insertVertex(
   // Unseeded: an addV label traversal is a standalone read / invariant (a source addV has no
   // incoming element). Routes through the same value authority so __.constant(x) and
   // __.select(const) labels resolve, not just seeded reads.
-  const resolved = spec.labels.map((l) => {
-    if (!isNested(l)) return l;
+  const sole = spec.labels.length === 1;
+  const resolved = spec.labels.flatMap((l) => {
+    if (!isNested(l)) return labelNames(l, sole, 'addV');
     const r = nestedScalarValue(engine, store, l, params, undefined, sideEffects, driver);
     if (!r.has) throw new Error('addV(traversal) label produced no value');
-    return String(r.value);
+    return labelNames(r.value, sole, 'addV');
   });
   // A SET, so duplicates collapse before the count is checked — addV('a','a') is one label.
   // An UNSPECIFIED label list (bare addV()) takes the graph's default: 'vertex' when the
@@ -782,7 +783,8 @@ function resolveEndpoint(engine: Engine, store: GraphStore, spec: any, d: { alia
 // subtype or a typed client's wire DataType) for a literal value, or from the read shape
 // for a nested value (filled by resolveMergeSpec). null = infer from the JS value.
 interface MergeSpec {
-  label: string | null | { nested: any };
+  /** A LIST because a merge map's T.label may be `["a","b"]`; null = the key was absent. */
+  label: string[] | null | { nested: any };
   id: any;
   outV: any;
   inV: any;
@@ -863,7 +865,7 @@ function normalizeMergeMap(raw: any, typeNode: TypeNode | null, sideEffects?: Ma
     const c = classifyMergeKey(k);
     // label/id/prop VALUES may be nested traversals — keep them UNRESOLVED (deferred to
     // resolveMergeSpec, per driver). Only a non-nested label collapses to a string now.
-    if (c.kind === 'label') spec.label = isNested(v) ? v : String(v);
+    if (c.kind === 'label') spec.label = isNested(v) ? v : labelNames(v, true, 'mergeV');
     else if (c.kind === 'id') spec.id = v;
     else if (c.kind === 'outV') spec.outV = classifyMergeVal(v);
     else if (c.kind === 'inV') spec.inV = classifyMergeVal(v);
@@ -916,7 +918,7 @@ function resolveMergeSpec(engine: Engine, store: GraphStore, spec: MergeSpec, se
     props[k] = r.value; propTypes[k] = r.typeNode; propCardinalities[k] = spec.propCardinalities[slot] ?? 'single';
   }
   return {
-    label: isNested(spec.label) ? String(rv(spec.label, null, 'label').value) : spec.label,
+    label: isNested(spec.label) ? labelNames(rv(spec.label, null, 'label').value, true, 'mergeV') : spec.label,
     id: rv(spec.id, null, 'id').value,
     outV: spec.outV, inV: spec.inV,
     props, propTypes, propKeys: Object.fromEntries(Object.keys(props).map((k) => [k, k])), propCardinalities,
@@ -929,8 +931,14 @@ function commonMergeConds(spec: MergeSpec, elem: Elem): Expression[] {
   const conds: Expression[] = [];
   // ANY-label match: a vertex matches mergeV's label if it CARRIES that label. Under the
   // declared ONE cardinality that is the old `label = ?`; it is already the multi-label rule.
-  if (spec.label != null)
-    conds.push(elem === 'vertex' ? vertexLabelIn(raw('nodes.id'), [spec.label]) : labelIn('label', [spec.label]));
+  // ANY-label match per name, and EVERY name must be carried: mergeV([(T.label): ["person",
+  // "employee"]]) matches the vertex that has BOTH, which is what
+  // `g.V().hasLabel("person").hasLabel("employee")` counts in the scenario.
+  if (spec.label != null) {
+    const names = spec.label as string[];
+    if (elem === 'vertex') for (const n of names) conds.push(vertexLabelIn(raw('nodes.id'), [n]));
+    else conds.push(labelIn('label', names));
+  }
   if (spec.id != null) conds.push(typeof spec.id === 'number' ? q`id=${value(spec.id)}` : q`uid=${value(spec.id)}`);
   for (const [k, v] of Object.entries(spec.props))
     // An ANY-match EXISTS over the element's normalized properties table.
@@ -998,18 +1006,28 @@ function compileMergeV(engine: Engine, steps: IRStep[], params: Record<string, a
         const matches = store.query<any>(match.sql, match.binds);
         if (matches.length) {
           for (const m of matches) {
+            // onMatch T.label ADDS to the existing set rather than replacing it: the scenario
+            // asserts the vertex still carries `person` and `employee` after onMatch adds
+            // `manager`. Under an immutable cardinality that is a refusal, same as addLabel().
+            const omLabels = Array.isArray(om?.label) ? om.label : null;
+            if (omLabels?.length) {
+              if (!engine.labelCardinality.mutable)
+                throw new Error(`${LABEL_MUTATION_UNSUPPORTED}: mergeV(onMatch) with a label`);
+              store.addVertexLabels(m.id, omLabels);
+              assertLabelCount(engine, store.vertexLabels(m.id).length, 'mergeV');
+            }
             if (om) for (const [k, v] of Object.entries(om.props))
               applyVertexProperty(store, m.id, k, v, gremlinTypeOf(v, om.propTypes[k] ?? null), null, om.propCardinalities[k] ?? 'single', om.propTypes[k] ?? null);
             out.push({ vertex: { id: m.uid ?? m.id, label: m.label, props: readVertexProps(store, m.id) } });
           }
         } else {
-          const label = (oc?.label as string) ?? (matchSpec.label as string) ?? 'vertex';
+          const labels = (oc?.label as string[]) ?? (matchSpec.label as string[]) ?? [];
           const props = { ...matchSpec.props, ...(oc?.props ?? {}) };
           const propTypes = { ...matchSpec.propTypes, ...(oc?.propTypes ?? {}) };
           const propCardinalities = { ...matchSpec.propCardinalities, ...(oc?.propCardinalities ?? {}) };
-          const v = insertVertex(engine, store, { labels: [label], props: singleProps(props, propTypes, propCardinalities), uid: matchSpec.id ?? oc?.id ?? null }, params, sideEffects);
+          const v = insertVertex(engine, store, { labels, props: singleProps(props, propTypes, propCardinalities), uid: matchSpec.id ?? oc?.id ?? null }, params, sideEffects);
           // Echo typed props read back from storage ({t,v}), not the raw resolved values.
-          out.push({ vertex: { id: v.extId, label, props: readVertexProps(store, v.id) } });
+          out.push({ vertex: { id: v.extId, label: v.label, props: readVertexProps(store, v.id) } });
         }
       }
       return out;
@@ -1066,7 +1084,10 @@ function compileMergeE(engine: Engine, steps: IRStep[], params: Record<string, a
             out.push({ edge: { id: m.uid ?? m.id, label: m.label, src: nodeExtId(store, m.src), tgt: nodeExtId(store, m.tgt), props: readEdgeProps(store, m.id) } });
           }
         } else {
-          const label = (matchSpec.label as string) ?? (oc?.label as string);
+          // An edge carries exactly ONE label, so a merge map's list must hold exactly one name.
+          const edgeLabels = (matchSpec.label ?? oc?.label) as string[] | null | undefined;
+          if (edgeLabels && edgeLabels.length > 1) throw new Error('mergeE: an edge takes exactly one label');
+          const label = edgeLabels?.[0];
           if (!label) throw new Error('mergeE cannot create an edge without a label');
           const props = { ...matchSpec.props, ...(oc?.props ?? {}) };
           const propTypes = { ...matchSpec.propTypes, ...(oc?.propTypes ?? {}) };
@@ -1090,6 +1111,15 @@ interface WriteRule { match: (steps: IRStep[]) => boolean; compile: (engine: Eng
  *  answer rather than a gap: `AddLabel.feature`/`DropLabel.feature` assert the message on a
  *  single-label graph. Edges refuse under every cardinality (edge label cardinality is fixed at
  *  ONE by spec), which is why the check reads the element kind rather than a global flag. */
+/** A label value in a merge map / an addV() argument is a string OR a list of strings; a list is
+ *  only legal as the sole argument (TinkerPop rejects mixing, with a message naming Collection).
+ *  Returns the flattened names. `sole` says whether this value was the only argument. */
+function labelNames(v: any, sole: boolean, step: string): string[] {
+  if (!Array.isArray(v)) return [String(v)];
+  if (!sole) throw new Error(`${step}(): a Collection argument must be the only argument`);
+  return v.map(String);
+}
+
 /** TinkerPop's `Vertex.DEFAULT_LABEL` — what a bare addV() means on a graph that requires a label. */
 const DEFAULT_VERTEX_LABEL = 'vertex';
 
