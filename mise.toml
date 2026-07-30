@@ -37,6 +37,19 @@ description = "Type-check (tsc --noEmit); no emit — Bun/esbuild run the TS dir
 depends = ["install"]
 run = "bunx tsc --noEmit"
 
+# Sits next to `check`, NOT in the ladder. L1–L5 assert runtime behaviour over traversals; this
+# asserts a STATIC property of the source, so numbering it "L6" would break what the ladder means.
+# `depends = ["install"]` only, deliberately: the LSP reads source, so this needs no submodule, no
+# graph and no traversal execution — unlike every ladder level and the census.
+#
+# Not a ratchet. It passes at zero today, so the gate is zero; a committed allowlist would only be
+# somewhere for a real violation to hide. A deliberate exception goes in the script as ONE named
+# entry with a diagnosis, the way test/L5-properties/known.ts does.
+[tasks.arch]
+description = "Architectural invariants: no Pass reaches ChainFacts or the fast-path layer"
+depends = ["install"]
+run = "bun scripts/arch-check.ts"
+
 # The ROOT of the graph now — `install` depends on it, because `gremlin` is a link: dep. It runs its
 # own `bun install` inside the submodule (a separate bun project) and builds the client there, so it
 # needs bun but never the superproject's node_modules; that is what keeps the inverted edge
@@ -137,6 +150,6 @@ depends = ["install", "submodule"]
 run = "bunx wrangler deploy --dry-run --outdir dist"
 
 [tasks.ci]
-description = "CI gate: type-check + test + worker build"
-depends = ["check", "test", "build"]
+description = "CI gate: type-check + architectural invariants + test + worker build"
+depends = ["check", "arch", "test", "build"]
 run = "echo 'CI passed'"
