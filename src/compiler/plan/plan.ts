@@ -731,6 +731,14 @@ const bareCols = <K extends string>(t: Relation<K>): Record<K, Expression> =>
 const VP = bareCols(vertexProperties);
 const EP = bareCols(edgeProperties);
 
+/** The normalized property table for an element kind — `elemTable`'s twin, for the callers that
+ *  need to ALIAS and JOIN it rather than correlate a subquery. Aliased as the two-letter name
+ *  every pinned plan reads (`vp` / `ep`). */
+export const propRel = (elem: Elem): Relation => elem === 'edge' ? edgeProperties.as('ep') : vertexProperties.as('vp');
+
+/** The owner column on that table — `vertex_properties.node` / `edge_properties.edge`. */
+export const propOwnerCol = (elem: Elem): 'node' | 'edge' => elem === 'edge' ? 'edge' : 'node';
+
 const propSource = (elem: Elem): PropSource => elem === 'edge'
   ? { table: edgeProperties, owner: EP.edge, key: EP.key, value: EP.value, vtype: EP.vtype, first: empty }
   : {

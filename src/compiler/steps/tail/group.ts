@@ -1,7 +1,7 @@
 import { gtypeName, isNested, stepChain } from '../../../gremlin/frontend.ts';
-import { empty, list, q, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
+import { empty, list, q, raw, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { PER_ROW, perRowColumnOf, staticTypeOf, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
-import { edgeProperties, vertexProperties } from '../../../sql/schema.ts';
+import { vertexProperties } from '../../../sql/schema.ts';
 import { NUMERIC_REDUCERS, REDUCERS } from '../../ir/step.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import {
@@ -13,10 +13,13 @@ import {
     labelNameFor,
     predicateSql,
     propExtract,
+    propOwnerCol,
+    propRel,
     scalarProp,
     storedValueExpr,
     typedScalarNode,
     vertexLabelIn, vertexLabelName, vertexLabelsJson,
+    type Elem,
     type ScalarCtx
 } from '../../plan/plan.ts';
 import { dropLayoutAtBarrier, elemRel, layoutCols, layoutProjection, layoutProjectionMinting, partitionOver, patchLayout, type ElementStream, type LoweringState, type TraverserLayout } from '../context/context.ts';
@@ -736,26 +739,42 @@ function deriveGroupMap(s: GroupStream): { rel: Relation; keyOf: MapOf; valOf: M
 
 // ---------- properties() ----------
 
+/** The `PROPERTY_PAYLOAD` projection for one property row, given the ALIASED property table
+ *  `pr` and its owner element `n`. **The one authority on what a property row is**, and it is
+ *  derived FROM `PROPERTY_PAYLOAD` rather than transcribing it, so adding a payload column is a
+ *  compile error here instead of a silently-short SELECT at one of the two callers.
+ *
+ *  The whole vertex/edge difference is TinkerPop's VertexProperty-vs-Property split: a
+ *  VertexProperty is itself an element (its own id) and carries meta-properties; an edge
+ *  Property is neither, so `vpid`/`pmeta` are NULL there.
+ *
+ *  Two callers, deliberately: `lowerProperties` (the properties() step, keyed off a traverser)
+ *  and `tinker.search` (keyed off the FTS index). They provision the ROWS differently and share
+ *  the payload — which is what stops a schema change from having to land in two places. */
+export function propertyPayload(elem: Elem, pr: Relation, n: Relation): Expression {
+  const cols: Record<(typeof PROPERTY_PAYLOAD)[number], Expression> = {
+    vpid: elem === 'edge' ? raw('NULL') : pr.c.id,
+    owner: n.c.id,
+    ownerLabel: labelNameFor(n, elem),
+    pk: pr.c.key,
+    pv: storedValueExpr(pr.c.value, pr.c.vtype),
+    pvtype: pr.c.vtype,
+    pmeta: elem === 'edge' ? raw('NULL') : q`json(${pr.c.meta})`,
+  };
+  return list(PROPERTY_PAYLOAD.map((c) => q`${cols[c]} AS ${raw(c)}`), ', ');
+}
+
 /** properties()/properties(keys) is a genuine shape transition. The property row
  * stays relational so filters and projections can consume it one step at a time. */
 export function lowerProperties(st: ElementStream, step: IRStep): PropertyStream {
   const keys = step.args.filter((a): a is string => typeof a === 'string');
   const n = elemRel(st);
   const p = st.rel.as('p');
-  // Node: the property stream IS the vertex_properties rows (one per instance, so a
-  // multi-valued key yields several) — vpid is the real VertexProperty id, pmeta its
-  // meta bag. Edge: the edge_properties rows (edge Property has no id/meta/multi, so
-  // vpid/pmeta are NULL — one row per (edge,key)).
-  let propBody: Expression;
-  if (st.elem === 'edge') {
-    const ep = edgeProperties.as('ep');
-    const keyFilter: Expression = keys.length ? q` AND ${ep.c.key} IN (${list(keys.map(value), ',')})` : empty;
-    propBody = q`SELECT NULL AS vpid, ${n.c.id} AS owner, ${labelNameFor(n, 'edge')} AS ownerLabel, ${ep.c.key} AS pk, ${storedValueExpr(ep.c.value, ep.c.vtype)} AS pv, ${ep.c.vtype} AS pvtype, NULL AS pmeta${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${ep} ON ${ep.c.edge}=${n.c.id}${keyFilter}`;
-  } else {
-    const vp = vertexProperties.as('vp');
-    const keyFilter: Expression = keys.length ? q` AND ${vp.c.key} IN (${list(keys.map(value), ',')})` : empty;
-    propBody = q`SELECT ${vp.c.id} AS vpid, ${n.c.id} AS owner, ${vertexLabelName(n.c.id)} AS ownerLabel, ${vp.c.key} AS pk, ${storedValueExpr(vp.c.value, vp.c.vtype)} AS pv, ${vp.c.vtype} AS pvtype, json(${vp.c.meta}) AS pmeta${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${vp} ON ${vp.c.node}=${n.c.id}${keyFilter}`;
-  }
+  // The property stream IS the normalized property rows — one per INSTANCE, so a multi-valued
+  // vertex key yields several (an edge key is single-cardinality, one row per (edge,key)).
+  const pr = propRel(st.elem);
+  const keyFilter: Expression = keys.length ? q` AND ${pr.c.key} IN (${list(keys.map(value), ',')})` : empty;
+  const propBody = q`SELECT ${propertyPayload(st.elem, pr, n)}${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${pr} ON ${pr.c[propOwnerCol(st.elem)]}=${n.c.id}${keyFilter}`;
   const rel = st.q.cte(propBody, [...PROPERTY_PAYLOAD, ...layoutCols(st.traverserLayout)]);
   return toPropertyStream(loweringStateOf(st), rel, st.elem);
 }

@@ -1,6 +1,7 @@
 import { q, value, raw, type Relation } from '../../sql/kernel/q.ts';
-import { propertyFts, vertexProperties, edgeProperties, nodes, edges, labels } from '../../sql/schema.ts';
-import { sqlElem, storedValueExpr, type Elem, vertexLabelName } from '../../compiler/plan/plan.ts';
+import { propertyFts } from '../../sql/schema.ts';
+import { elemTable, propOwnerCol, propRel, sqlElem, type Elem } from '../../compiler/plan/plan.ts';
+import { propertyPayload } from '../../compiler/steps/tail/group.ts';
 import { PROPERTY_PAYLOAD, toPropertyStream, type PropertyStream } from '../../compiler/steps/context/stream.ts';
 import type { TraverserLayout } from '../../compiler/steps/context/context.ts';
 import type { Service, ServiceCallCtx, CallParams } from '../spi/types.ts';
@@ -75,21 +76,13 @@ function searchProperties(ctx: ServiceCallCtx, ownerElem: Elem, pattern: string)
   const f = propertyFts.as('f');
   const likeMatch = q`${f.c.text} LIKE ${value(pattern)} ESCAPE ${value('\\')}`;
   const scope = q`${f.c.owner_elem}=${value(sqlElem(ownerElem))} AND ${f.c.kind}=${value('value')} AND ${likeMatch}`;
-  let body;
-  if (ownerElem === 'vertex') {
-    const vp = vertexProperties.as('vp');
-    const nd = nodes.as('n');
-    // vpid = the VertexProperty id; owner = the vertex; pmeta = its meta bag.
-    body = q`SELECT ${vp.c.id} AS vpid, ${nd.c.id} AS owner, ${vertexLabelName(nd.c.id)} AS ownerLabel, ${vp.c.key} AS pk, ${storedValueExpr(vp.c.value, vp.c.vtype)} AS pv, ${vp.c.vtype} AS pvtype, json(${vp.c.meta}) AS pmeta
-      FROM ${f} JOIN ${vp} ON ${vp.c.id}=${f.c.pid} JOIN ${nd} ON ${nd.c.id}=${vp.c.node} WHERE ${scope}`;
-  } else {
-    const ep = edgeProperties.as('ep');
-    const ed = edges.as('e');
-    const l = labels.as('l');
-    // An edge Property has no id/meta/multi → vpid/pmeta NULL, mirroring lowerProperties.
-    body = q`SELECT NULL AS vpid, ${ed.c.id} AS owner, ${l.c.name} AS ownerLabel, ${ep.c.key} AS pk, ${storedValueExpr(ep.c.value, ep.c.vtype)} AS pv, ${ep.c.vtype} AS pvtype, NULL AS pmeta
-      FROM ${f} JOIN ${ep} ON ${ep.c.id}=${f.c.pid} JOIN ${ed} ON ${ed.c.id}=${ep.c.edge} JOIN ${l} ON ${l.c.id}=${ed.c.label} WHERE ${scope}`;
-  }
+  // The PAYLOAD is `lowerProperties`' — this service differs only in how the rows are
+  // PROVISIONED (an FTS hit rather than a traverser), so it must not have its own opinion
+  // about what a property row carries.
+  const pr = propRel(ownerElem);
+  const owner = elemTable(ownerElem).as('n');
+  const body = q`SELECT ${propertyPayload(ownerElem, pr, owner)}
+      FROM ${f} JOIN ${pr} ON ${pr.c.id}=${f.c.pid} JOIN ${owner} ON ${owner.c.id}=${pr.c[propOwnerCol(ownerElem)]} WHERE ${scope}`;
   const rel: Relation = ctx.q.cte(body, [...PROPERTY_PAYLOAD]);
   return toPropertyStream({ q: ctx.q, params: ctx.compileParams, traverserLayout: layout }, rel, ownerElem);
 }
