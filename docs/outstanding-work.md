@@ -45,15 +45,18 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    cardinality, so `g.inject('hello','hi').concat(__.V().order().by('name').values('name'))`
    executes rather than receiving a concat-specific exception.
 
-0e. **The deep L5 table sweep still finds a parser-integrity failure at high nesting depth.**
-   `mise run L5-random` now supplies a real random positive seed, but its `table.test.ts` parse+chain
-   phase fails around 8–10k generated inputs for forms such as
-   `g.V(1).hasLabel('person').repeat(__.not(__.or(__.identity(), __.hasLabel('person').hasLabel('person')))).times(1)`.
-   The minimized string parses in a fresh process, so this is not yet proven to be a bad table edge;
-   first determine whether ANTLR's shared prediction state is contaminated by an earlier generated
-   input or whether the shrinker is reporting a non-reproducing witness. Keep the table fail-closed —
-   excluding deep shapes or downgrading the assertion would recreate the coverage blind spot it found.
-   *Medium — measurement integrity.*
+0e. **Nothing detects a stale `parser/`.** The L5-random parser-integrity failure at high nesting
+   depth is diagnosed and fixed: `parser/` had never been regenerated since the initial import, so
+   its serialized ATN (36,523 ints) came from an older `Gremlin.g4` than the `origin/master` grammar
+   we track (37,307). With antlr-ng's shared static prediction DFA that mispredicted deep
+   `repeat(__.not(__.or(...)))` and cached the miss, so one valid query permanently broke another —
+   in a DO, for every later request the isolate serves. `mise run generate` fixed it;
+   `test/L1-corpus/parser-state.test.ts` is the regression test. What is still missing is the guard:
+   nothing fails when `parser/` drifts from the grammar again. A byte-compare against a fresh
+   generation is the obvious check, but note the ref mismatch it would have to resolve — the
+   generate script sources `origin/master` (a moving ref) while the submodule pins a gitlink, so a
+   naive comparison against the pinned checkout's output is only accidentally green today (the two
+   grammars are currently identical). *Medium — measurement integrity.*
 
 1. **List members frame as bare values, not elements.** `AliasEntry` does not record the member
    shape, so a path/element-list label cannot frame its members as vertices. Blocks

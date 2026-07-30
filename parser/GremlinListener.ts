@@ -18,7 +18,9 @@ import { TraversalSourceSelfMethod_withoutStrategiesContext } from "./GremlinPar
 import { TraversalSourceSelfMethod_withContext } from "./GremlinParser.js";
 import { TraversalSourceSpawnMethodContext } from "./GremlinParser.js";
 import { TraversalSourceSpawnMethod_addEContext } from "./GremlinParser.js";
-import { TraversalSourceSpawnMethod_addVContext } from "./GremlinParser.js";
+import { TraversalSourceSpawnMethod_addV_EmptyContext } from "./GremlinParser.js";
+import { TraversalSourceSpawnMethod_addV_StringContext } from "./GremlinParser.js";
+import { TraversalSourceSpawnMethod_addV_TraversalContext } from "./GremlinParser.js";
 import { TraversalSourceSpawnMethod_EContext } from "./GremlinParser.js";
 import { TraversalSourceSpawnMethod_VContext } from "./GremlinParser.js";
 import { TraversalSourceSpawnMethod_injectContext } from "./GremlinParser.js";
@@ -158,6 +160,12 @@ import { TraversalMethod_is_ObjectContext } from "./GremlinParser.js";
 import { TraversalMethod_is_PContext } from "./GremlinParser.js";
 import { TraversalMethod_keyContext } from "./GremlinParser.js";
 import { TraversalMethod_labelContext } from "./GremlinParser.js";
+import { TraversalMethod_labelsContext } from "./GremlinParser.js";
+import { TraversalMethod_addLabel_StringContext } from "./GremlinParser.js";
+import { TraversalMethod_addLabel_TraversalContext } from "./GremlinParser.js";
+import { TraversalMethod_dropLabels_EmptyContext } from "./GremlinParser.js";
+import { TraversalMethod_dropLabel_StringContext } from "./GremlinParser.js";
+import { TraversalMethod_dropLabel_TraversalContext } from "./GremlinParser.js";
 import { TraversalMethod_length_EmptyContext } from "./GremlinParser.js";
 import { TraversalMethod_length_ScopeContext } from "./GremlinParser.js";
 import { TraversalMethod_limit_Scope_longContext } from "./GremlinParser.js";
@@ -386,6 +394,7 @@ import { IoOptionsStringConstantContext } from "./GremlinParser.js";
 import { BooleanArgumentContext } from "./GremlinParser.js";
 import { IntegerArgumentContext } from "./GremlinParser.js";
 import { StringArgumentContext } from "./GremlinParser.js";
+import { StringArgumentVarargsContext } from "./GremlinParser.js";
 import { StringNullableArgumentContext } from "./GremlinParser.js";
 import { StringNullableArgumentVarargsContext } from "./GremlinParser.js";
 import { DateArgumentContext } from "./GremlinParser.js";
@@ -407,6 +416,7 @@ import { GenericMapNullableLiteralContext } from "./GremlinParser.js";
 import { GenericRangeLiteralContext } from "./GremlinParser.js";
 import { GenericSetLiteralContext } from "./GremlinParser.js";
 import { StringNullableLiteralVarargsContext } from "./GremlinParser.js";
+import { StringLiteralVarargsContext } from "./GremlinParser.js";
 import { GenericLiteralContext } from "./GremlinParser.js";
 import { GenericMapLiteralContext } from "./GremlinParser.js";
 import { MapKeyContext } from "./GremlinParser.js";
@@ -598,15 +608,41 @@ export class GremlinListener implements ParseTreeListener {
      */
     exitTraversalSourceSpawnMethod_addE?: (ctx: TraversalSourceSpawnMethod_addEContext) => void;
     /**
-     * Enter a parse tree produced by `GremlinParser.traversalSourceSpawnMethod_addV`.
+     * Enter a parse tree produced by the `traversalSourceSpawnMethod_addV_Empty`
+     * labeled alternative in `GremlinParser.traversalSourceSpawnMethod_addV`.
      * @param ctx the parse tree
      */
-    enterTraversalSourceSpawnMethod_addV?: (ctx: TraversalSourceSpawnMethod_addVContext) => void;
+    enterTraversalSourceSpawnMethod_addV_Empty?: (ctx: TraversalSourceSpawnMethod_addV_EmptyContext) => void;
     /**
-     * Exit a parse tree produced by `GremlinParser.traversalSourceSpawnMethod_addV`.
+     * Exit a parse tree produced by the `traversalSourceSpawnMethod_addV_Empty`
+     * labeled alternative in `GremlinParser.traversalSourceSpawnMethod_addV`.
      * @param ctx the parse tree
      */
-    exitTraversalSourceSpawnMethod_addV?: (ctx: TraversalSourceSpawnMethod_addVContext) => void;
+    exitTraversalSourceSpawnMethod_addV_Empty?: (ctx: TraversalSourceSpawnMethod_addV_EmptyContext) => void;
+    /**
+     * Enter a parse tree produced by the `traversalSourceSpawnMethod_addV_String`
+     * labeled alternative in `GremlinParser.traversalSourceSpawnMethod_addV`.
+     * @param ctx the parse tree
+     */
+    enterTraversalSourceSpawnMethod_addV_String?: (ctx: TraversalSourceSpawnMethod_addV_StringContext) => void;
+    /**
+     * Exit a parse tree produced by the `traversalSourceSpawnMethod_addV_String`
+     * labeled alternative in `GremlinParser.traversalSourceSpawnMethod_addV`.
+     * @param ctx the parse tree
+     */
+    exitTraversalSourceSpawnMethod_addV_String?: (ctx: TraversalSourceSpawnMethod_addV_StringContext) => void;
+    /**
+     * Enter a parse tree produced by the `traversalSourceSpawnMethod_addV_Traversal`
+     * labeled alternative in `GremlinParser.traversalSourceSpawnMethod_addV`.
+     * @param ctx the parse tree
+     */
+    enterTraversalSourceSpawnMethod_addV_Traversal?: (ctx: TraversalSourceSpawnMethod_addV_TraversalContext) => void;
+    /**
+     * Exit a parse tree produced by the `traversalSourceSpawnMethod_addV_Traversal`
+     * labeled alternative in `GremlinParser.traversalSourceSpawnMethod_addV`.
+     * @param ctx the parse tree
+     */
+    exitTraversalSourceSpawnMethod_addV_Traversal?: (ctx: TraversalSourceSpawnMethod_addV_TraversalContext) => void;
     /**
      * Enter a parse tree produced by `GremlinParser.traversalSourceSpawnMethod_E`.
      * @param ctx the parse tree
@@ -2193,6 +2229,76 @@ export class GremlinListener implements ParseTreeListener {
      * @param ctx the parse tree
      */
     exitTraversalMethod_label?: (ctx: TraversalMethod_labelContext) => void;
+    /**
+     * Enter a parse tree produced by `GremlinParser.traversalMethod_labels`.
+     * @param ctx the parse tree
+     */
+    enterTraversalMethod_labels?: (ctx: TraversalMethod_labelsContext) => void;
+    /**
+     * Exit a parse tree produced by `GremlinParser.traversalMethod_labels`.
+     * @param ctx the parse tree
+     */
+    exitTraversalMethod_labels?: (ctx: TraversalMethod_labelsContext) => void;
+    /**
+     * Enter a parse tree produced by the `traversalMethod_addLabel_String`
+     * labeled alternative in `GremlinParser.traversalMethod_addLabel`.
+     * @param ctx the parse tree
+     */
+    enterTraversalMethod_addLabel_String?: (ctx: TraversalMethod_addLabel_StringContext) => void;
+    /**
+     * Exit a parse tree produced by the `traversalMethod_addLabel_String`
+     * labeled alternative in `GremlinParser.traversalMethod_addLabel`.
+     * @param ctx the parse tree
+     */
+    exitTraversalMethod_addLabel_String?: (ctx: TraversalMethod_addLabel_StringContext) => void;
+    /**
+     * Enter a parse tree produced by the `traversalMethod_addLabel_Traversal`
+     * labeled alternative in `GremlinParser.traversalMethod_addLabel`.
+     * @param ctx the parse tree
+     */
+    enterTraversalMethod_addLabel_Traversal?: (ctx: TraversalMethod_addLabel_TraversalContext) => void;
+    /**
+     * Exit a parse tree produced by the `traversalMethod_addLabel_Traversal`
+     * labeled alternative in `GremlinParser.traversalMethod_addLabel`.
+     * @param ctx the parse tree
+     */
+    exitTraversalMethod_addLabel_Traversal?: (ctx: TraversalMethod_addLabel_TraversalContext) => void;
+    /**
+     * Enter a parse tree produced by the `traversalMethod_dropLabels_Empty`
+     * labeled alternative in `GremlinParser.traversalMethod_dropLabels`.
+     * @param ctx the parse tree
+     */
+    enterTraversalMethod_dropLabels_Empty?: (ctx: TraversalMethod_dropLabels_EmptyContext) => void;
+    /**
+     * Exit a parse tree produced by the `traversalMethod_dropLabels_Empty`
+     * labeled alternative in `GremlinParser.traversalMethod_dropLabels`.
+     * @param ctx the parse tree
+     */
+    exitTraversalMethod_dropLabels_Empty?: (ctx: TraversalMethod_dropLabels_EmptyContext) => void;
+    /**
+     * Enter a parse tree produced by the `traversalMethod_dropLabel_String`
+     * labeled alternative in `GremlinParser.traversalMethod_dropLabel`.
+     * @param ctx the parse tree
+     */
+    enterTraversalMethod_dropLabel_String?: (ctx: TraversalMethod_dropLabel_StringContext) => void;
+    /**
+     * Exit a parse tree produced by the `traversalMethod_dropLabel_String`
+     * labeled alternative in `GremlinParser.traversalMethod_dropLabel`.
+     * @param ctx the parse tree
+     */
+    exitTraversalMethod_dropLabel_String?: (ctx: TraversalMethod_dropLabel_StringContext) => void;
+    /**
+     * Enter a parse tree produced by the `traversalMethod_dropLabel_Traversal`
+     * labeled alternative in `GremlinParser.traversalMethod_dropLabel`.
+     * @param ctx the parse tree
+     */
+    enterTraversalMethod_dropLabel_Traversal?: (ctx: TraversalMethod_dropLabel_TraversalContext) => void;
+    /**
+     * Exit a parse tree produced by the `traversalMethod_dropLabel_Traversal`
+     * labeled alternative in `GremlinParser.traversalMethod_dropLabel`.
+     * @param ctx the parse tree
+     */
+    exitTraversalMethod_dropLabel_Traversal?: (ctx: TraversalMethod_dropLabel_TraversalContext) => void;
     /**
      * Enter a parse tree produced by the `traversalMethod_length_Empty`
      * labeled alternative in `GremlinParser.traversalMethod_length`.
@@ -4672,6 +4778,16 @@ export class GremlinListener implements ParseTreeListener {
      */
     exitStringArgument?: (ctx: StringArgumentContext) => void;
     /**
+     * Enter a parse tree produced by `GremlinParser.stringArgumentVarargs`.
+     * @param ctx the parse tree
+     */
+    enterStringArgumentVarargs?: (ctx: StringArgumentVarargsContext) => void;
+    /**
+     * Exit a parse tree produced by `GremlinParser.stringArgumentVarargs`.
+     * @param ctx the parse tree
+     */
+    exitStringArgumentVarargs?: (ctx: StringArgumentVarargsContext) => void;
+    /**
      * Enter a parse tree produced by `GremlinParser.stringNullableArgument`.
      * @param ctx the parse tree
      */
@@ -4881,6 +4997,16 @@ export class GremlinListener implements ParseTreeListener {
      * @param ctx the parse tree
      */
     exitStringNullableLiteralVarargs?: (ctx: StringNullableLiteralVarargsContext) => void;
+    /**
+     * Enter a parse tree produced by `GremlinParser.stringLiteralVarargs`.
+     * @param ctx the parse tree
+     */
+    enterStringLiteralVarargs?: (ctx: StringLiteralVarargsContext) => void;
+    /**
+     * Exit a parse tree produced by `GremlinParser.stringLiteralVarargs`.
+     * @param ctx the parse tree
+     */
+    exitStringLiteralVarargs?: (ctx: StringLiteralVarargsContext) => void;
     /**
      * Enter a parse tree produced by `GremlinParser.genericLiteral`.
      * @param ctx the parse tree
