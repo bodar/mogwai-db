@@ -149,7 +149,7 @@ depends = ["install", "check", "submodule"]
 run = "bun run test/census/record.ts"
 
 [tasks.generate]
-description = "Regenerate parser/ from the submodule's origin/master Gremlin grammar (antlr-ng)"
+description = "Regenerate parser/ + parser/gql/ from the submodule's origin/master grammars (antlr-ng)"
 depends = ["install", "submodule"]
 run = "bash scripts/generate-parser.sh"
 
