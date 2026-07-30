@@ -163,6 +163,24 @@ describe('unified lowering characterization', () => {
       expect(runWith(store, query, on)).toEqual(runWith(store, query, off));
     }
 
+    // A repeat() INSIDE a filter body — found by L5's rotating seed, and the same contract
+    // violation from the other side: the inline renderer is a nested-derived query with no
+    // shared WITH, so it cannot host the recursive CTE and its kernel guard THREW, while the
+    // materialized gate compiled the body fine. A fast path that throws where the generic path
+    // answers is a capability switch. `compileCorrelatedChild` now recognizes the shape up front
+    // and declines. Do not delete: this is the guard for that decline.
+    for (const query of [
+      'g.V(1).where(__.out().repeat(__.identity()).times(1))',
+      'g.V(1).where(__.out().identity().repeat(__.has("age",gt(1))).times(1)).values("name")',
+      'g.V(1).filter(__.out().repeat(__.identity()).times(1)).values("name")',
+      'g.V(1).not(__.out().repeat(__.identity()).times(1)).values("name")',
+      'g.V().where(__.out().repeat(__.out()).times(1)).values("name").order()',
+    ]) {
+      const on = { fastPaths: { predicateInlining: true } } as CompileOptions;
+      const off = { fastPaths: { predicateInlining: false } } as CompileOptions;
+      expect(runWith(store, query, on)).toEqual(runWith(store, query, off));
+    }
+
     // Element-terminal movementCollapse can't use the raw-row comparison above: the vertex leaf
     // carries a `bulk` column and emits ONE (v, N) row per element (fastSql), so the rows
     // legitimately DIFFER from the per-walk generic form. Equivalence is at the RLE-expanded

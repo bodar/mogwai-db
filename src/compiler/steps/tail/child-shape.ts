@@ -200,6 +200,20 @@ export function mentionsLabel(steps: readonly IRStep[], params: Record<string, a
   return labelsMentioned(steps, params).size > 0;
 }
 
+/** PURE. Does lowering this body require a RECURSIVE CTE, at any nesting depth? `repeat()` is
+ *  the only step that needs one, so this is a syntax scan — but the question is the renderer's,
+ *  not the vocabulary's: mode B (a nested-derived `DerivedQuery`, `tail/correlated.ts`) has no
+ *  shared `WITH` to attach one to, and its fail-closed throw is a HARD error rather than a
+ *  decline. A fast path that throws where the generic path answers is a capability switch, not
+ *  an optimization — the FastPath law — so the correlated renderer asks this BEFORE it starts
+ *  and hands such a body to the materialized gate. */
+export function needsRecursiveCte(steps: readonly IRStep[], params: Record<string, any>): boolean {
+  return steps.some((s) =>
+    s.name === 'repeat'
+    || (s.args ?? []).filter(isNested).some((a) => needsRecursiveCte(childSteps((a as any).nested, params), params))
+    || (s.modulators ?? []).some((m) => (m ?? []).filter(isNested).some((a: any) => needsRecursiveCte(childSteps(a.nested, params), params))));
+}
+
 /** PURE. WHICH labels a body mentions, at any nesting depth — the set behind `mentionsLabel`.
  *
  *  The second consumer is match()'s scheduler (prefix/match.ts): a FILTER argument is ready to

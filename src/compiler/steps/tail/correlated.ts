@@ -4,7 +4,7 @@ import { type Elem } from '../../plan/plan.ts';
 import { normalize } from '../../ir/passes.ts';
 import { aliasColsOf, type TraverserLayout, type ElementStream, type LabelScope } from '../context/context.ts';
 import type { Engine } from '../../engine/deps.ts';
-import { mentionsLabel } from './child-shape.ts';
+import { mentionsLabel, needsRecursiveCte } from './child-shape.ts';
 
 // ---------- correlated inline-child rendering ----------
 //
@@ -61,11 +61,17 @@ export function compileCorrelatedChild(
   // it. WITH a scope the columns are really present, so an absent one is a genuinely unbound
   // label and the same drop-every-traverser answer is the correct one.
   if (!labels && mentionsLabel(steps, params)) return null;
+  // A DerivedQuery has no shared WITH, so it cannot host a recursive CTE — its `recursiveCte`
+  // fails closed with a hard THROW. That throw escaped as a compile error for bodies the
+  // materialized gate lowers fine (`g.V(1).where(__.out().repeat(__.identity()).times(1))`
+  // executed with `predicateInlining` off and threw with it on), which makes this renderer a
+  // capability switch rather than an optimization. Recognize the shape up front and decline.
+  if (needsRecursiveCte(steps, params)) return null;
   // A variant engine bound to a fresh DerivedQuery (nested derived subqueries, not shared CTEs),
   // sharing the parent engine's fastPaths — so the movement/filter StepFns read the right config.
   // The kernel owns the whole `x*` namespace: the seed below draws its alias from the same
   // counter the fold's relations do, so the two cannot drift apart. Its `recursiveCte`/`render`
-  // fail closed, which is what turns "a repeat() in a correlated body" into a clear error.
+  // fail closed, which is the backstop behind the decline above — not the decline itself.
   const inlineQ = new DerivedQuery();
   const inlineEngine = engine.withQuery(inlineQ);
   const aliasCols = labels ? aliasColsOf(labels.aliases) : [];
