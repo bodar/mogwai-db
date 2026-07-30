@@ -177,3 +177,10 @@ Remaining work on this tooling: `docs/2026-07-30-lsp-tooling-plan.md`.
   coerces them at the one seam so both runtimes agree.
 - Bun ⇄ Cloudflare via DI (`@bodar/yadic`): `application(deps)` wires the shared router from one
   injected `GraphManager`. Entry points: `src/bun/server.ts`, `src/cloudflare/worker.ts`.
+- **Claude web sessions: only the `unrestricted` environment builds this project.** The bootstrap
+  needs egress to `mise.run` and `npm.jsr.io` (the `@bodar/*` deps are JSR packages); both `Default`
+  environments block them, and without `@bodar/*` the `q` kernel and executor do not import, so
+  everything above L1 cannot run. `.claude/hooks/session-start.sh` preflights this and exits 2 with
+  the fix. It probes REACHABILITY, not environment identity, deliberately: no environment name or id
+  is exposed to the session, and `CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE` reports the kind
+  (`cloud_default` for every `anthropic_cloud` environment), so it cannot discriminate.
