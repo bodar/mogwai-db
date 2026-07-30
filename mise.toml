@@ -60,6 +60,16 @@ description = "Unused-code checks over our source (generated parser/ is exempt �
 depends = ["install"]
 run = "bun scripts/lint.ts"
 
+# An INSTRUMENT, not a gate, and deliberately absent from `ci`. An export with zero references is a
+# question, not a verdict: DI-registered leaves, names reached through the service registry, symbols
+# used only by a .feature step, and the worker/server entry points all look dead to a reference
+# query. Gating it would need an allowlist (somewhere for a real orphan to hide) or would force a
+# deletion the tool is explicitly not confident enough to make.
+[tasks.orphans]
+description = "Report exports nothing imports (instrument, not a gate — findings need judgement)"
+depends = ["install"]
+run = "bun scripts/orphans.ts"
+
 # The ROOT of the graph now — `install` depends on it, because `gremlin` is a link: dep. It runs its
 # own `bun install` inside the submodule (a separate bun project) and builds the client there, so it
 # needs bun but never the superproject's node_modules; that is what keeps the inverted edge
