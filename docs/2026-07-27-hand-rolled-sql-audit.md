@@ -14,6 +14,16 @@ left as written; the full map is in
 > were **falsified by measurement** — read the notes below before using the rankings, because the
 > original entry text still reflects the pre-fix state in each case.
 >
+> **STATUS 2026-07-30. Everything except #5 is now closed** (`write.ts` is the sole open site; #5 is
+> also the one whose residual is a design question, not a lowering gap). Two of the three closed
+> that day were mis-ranked in this doc, in the same direction and for the same reason: a duplicate
+> was filed as *cosmetic* because no divergent answer had been constructed, and in both cases one
+> existed — #9's property expansion was the safety argument for a vertex-only wall, and #7's second
+> projector answered NOTHING where the root answers a list. **A second implementation whose
+> equivalence rests on "I could not construct a counterexample" is unranked, not Low** — the probe
+> set is the thing to interrogate (both counterexamples needed a shape the reference graphs do not
+> contain).
+>
 > **The recurring lesson, now four times over: the abstraction usually already existed, and the site
 > was blocked on REACHING it.** #1 needed no new rendering mode (a recursive term may reference a
 > non-recursive CTE). #3 needed no new binding mechanism (the alias table was always shape-generic;
@@ -35,7 +45,7 @@ left as written; the full map is in
 > | 5 | `write.ts` merge/endpoint | open (largest by count, but terminal — never composes at depth) |
 > | 8 | `search.ts` duplicate property payload | ✅ closed 2026-07-30 — one payload, two provisionings |
 > | 9 | leaf dups | ✅ closed 2026-07-30 — both halves; the property one was hiding a vertex-only wall |
-> | 7 | `child.ts` residue | open, Low |
+> | 7 | `child.ts` residue | ✅ closed 2026-07-30 — it was a SILENT WRONG ANSWER, not Low |
 > | — | mode C *(this doc's "one structural finding")* | ❌ **retired — measured unnecessary, see below** |
 >
 > **Three premises here are FALSE — do not rebuild on them:**
@@ -624,16 +634,44 @@ inline form, so this shrinks the vocabulary rather than deleting it.
 
 ---
 
-### 7. `child.ts` — the third scalar-child projector residue
-`steps/tail/child.ts:423-…` (the "bespoke element-projection SQL builder", ~60 lines), reached from
-`compileScalarChildRows:313`
+### 7. `child.ts` — ✅ **CLOSED 2026-07-30, and the "Low" ranking was wrong**
+`steps/tail/child.ts` (the "bespoke element-projection SQL builder", ~60 lines), reached from
+`compileScalarChildRows`
 
-Already mostly reformed (the common path now runs `lowerStepsStrict`). What remains hard-codes
-`values`/`id`/`label`/`constant` against the generic `PROJECTORS` table's seven
-(`tail/projection.ts:908`), and reads `vp.value` raw where the generic projector reads
-`storedValueExpr(value, vtype)`. Now only reachable when the suffix carries a scoped reducer or a
-`constant()` terminal, so the blast radius is small — I could not construct a divergent answer
-through it. Confirms the existing Low debt item; do it opportunistically.
+The residue hard-coded `values`/`id`/`label`/`constant` against the generic `PROJECTORS` table's
+seven and read `vp.value` raw where the projector reads `storedValueExpr(value, vtype)` and tags
+the scalar `PER_ROW('vtype')`. **This entry ranked it Low because I could not construct a divergent
+answer. A LIST-valued property constructs one immediately** — the one thing `storedValueExpr`
+exists for:
+
+```
+g.V().values("nums").max()          -> the list      (root)
+g.V().map(__.values("nums").max())  -> NOTHING       (child — also local(), project())
+```
+
+A silent wrong answer, not a deferral. **The lesson for this doc: "I could not construct a
+divergent answer" is not evidence of equivalence when the two implementations differ in a
+TYPE-DEPENDENT expression** — it means the probe set was drawn from the reference graphs, which
+have no collection-valued property. Reach for the shape the divergent expression is *about*.
+
+**What landed — and the split it was missing is that only the TAIL is special.** A scoped reducer
+is per-ORIGIN in a child scope and global in the engine loop; that asymmetry is the entire reason
+this code existed. Everything BEFORE the tail is ordinary. So the element prefix and its scalar
+projection now lower through `lowerStepsStrict` — the same call the shared branch above it makes —
+and only the reducer tail is continued by hand. The builder and the divergence go together.
+
+**One capability was genuinely welded inside it**, which is the same tell as #6: `constant()` in a
+child scope. The generic route rejected it for a real reason (a literal has no emission order for
+the partitioned cardinality policy to rank on), so the fix is to SUPPLY the order, not to keep a
+second projector — the tail entry mints the per-origin encounter on the element stream first
+(`mintChildEncounter`), which is exactly what the retired builder did inline. `lowerConstant`'s
+guard now states the precondition it really has rather than deferring the whole shape.
+
+`BESPOKE_PROJECTIONS` became `SELF_ORDERING_PROJECTIONS` — same four names, now a property of each
+projector rather than a list of what one builder could read. **Open, and a genuine ceiling raise:**
+lifting that gate so `call`/`math`/`sack`/`format` may also take a scoped reducer. Measured — it
+leaves a clean deferral (`scoped scalar reducer requires explicit encounter order`), not an answer;
+the one-row-per-input producers would have to mint like `oneRowEncounter` does. Not built.
 
 ---
 
