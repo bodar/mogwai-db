@@ -1123,7 +1123,12 @@ interface WriteRule { match: (steps: IRStep[]) => boolean; compile: (engine: Eng
  *  Returns the flattened names. `sole` says whether this value was the only argument. */
 function labelNames(v: any, sole: boolean, step: string): string[] {
   if (!Array.isArray(v)) return [String(v)];
-  if (!sole) throw new Error(`${step}(): a Collection argument must be the only argument`);
+  // Upstream words the two rejections differently and the scenarios match on the text, so this
+  // is not one shared message: AddVertex asserts "must produce a scalar String when multiple
+  // traversals are provided", AddLabel asserts "Collection".
+  if (!sole) throw new Error(step === 'addV'
+    ? `${step}(): a label traversal must produce a scalar String when multiple traversals are provided`
+    : `${step}(): a Collection argument must be the only argument`);
   return v.map(String);
 }
 

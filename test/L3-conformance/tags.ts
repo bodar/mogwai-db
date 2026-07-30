@@ -5,15 +5,24 @@
 // kryo/graphson to file), NOT the data-write steps. The data-write steps carry
 // @StepAddV/@StepAddE/@StepMergeV/@StepMergeE (AddVertex/AddEdge/MergeVertex/MergeEdge)
 // — untagged here, so they are already IN scope and the ratchet guards them.
-// @SingleLabelDefault / @MultiLabelDefault are MUTUALLY EXCLUSIVE provider declarations, not a
-// capability we are missing: upstream ships both variants of each default-label-rendering scenario
-// over the same initializer and the same traversal, differing only in the expected shape, and a
-// provider runs whichever matches what it declares. mogwai-db declares MULTI-LABEL default (a
-// vertex genuinely holds a set, so rendering one of them by default would be the lossy answer —
-// see `labelRegime` in src/api.ts), so the 7 @SingleLabelDefault scenarios describe a different
-// provider and can never pass here. Excluding them is a feature-requirement exclusion of the same
-// kind as @GraphComputerOnly — NOT descoping a gap to improve the number, which is why
-// @MultiLabel itself stays firmly in scope.
+// @SingleLabelDefault / @MultiLabelDefault are MUTUALLY EXCLUSIVE provider declarations of how
+// elementMap()/valueMap(true) render T.label by DEFAULT. Upstream ships both variants of each such
+// scenario over the same initializer and the same traversal, differing only in the expected shape.
+// BOTH are out of scope here, for two different reasons:
+//
+//   @SingleLabelDefault — mogwai-db declares MULTI-LABEL default (a vertex genuinely holds a set,
+//     so rendering one of them by default would be the lossy answer — `labelRegime`, src/api.ts).
+//     These describe a different provider, so they are a feature-requirement exclusion of the same
+//     kind as @GraphComputerOnly.
+//   @MultiLabelDefault — the VENDORED JS runner hard-skips them itself:
+//     `Before({tags: "@MultiLabelDefault"}, () => 'skipped')` in gremlin-js's world.js, alongside
+//     @StepWrite/@DataChar/@DataDuration. A skipped scenario never issues its traversal, so it can
+//     never pass no matter what we declare — counting it as a gap in OUR engine would be a lie.
+//     That skip looks like an upstream stub rather than a real limitation (the other three are
+//     genuinely unsupported); it is tracked as fork work in docs/outstanding-work.md.
+//
+// @MultiLabel itself stays firmly in scope — this is not descoping a gap to improve the number.
 export const L3_TAGS =
   'not @StepWrite and not @GraphComputerOnly and not @AllowNullPropertyValues' +
-  ' and not @StepSample and not @StepCoin and not @SingleLabelDefault';
+  ' and not @StepSample and not @StepCoin' +
+  ' and not @SingleLabelDefault and not @MultiLabelDefault';

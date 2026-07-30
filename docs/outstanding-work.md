@@ -4,7 +4,8 @@ The de-duplicated index of open work across the `docs/` corpus. **Each line sets
 why, where to start — not a spec.** The linked doc holds the rationale; the picking agent does the
 detailed validation and design. Live per-step capability: `feature-support-matrix.md`.
 
-**Refreshed** 2026-07-30 against L3 1529 / 2297 (1527 unique names — see the won't-do note). Item
+**Refreshed** 2026-07-30 against L3 **1595 / 2280** (the denominator moved: `@SingleLabelDefault` and
+`@MultiLabelDefault` left scope — see `tags.ts` and item 19b). Item
 numbers are stable IDs — landed items are deleted and their numbers are not reused, because code
 comments and other docs cite them.
 
@@ -400,40 +401,31 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
     *typing* is touched today (P3), not the list/set write cluster. **Medium.**
     → [conformance-structural-bets](./2026-07-12-conformance-structural-bets.md) (W4)
 
-19. **Multi-label elements — the `@MultiLabel` feature. DESIGNED 2026-07-30; the largest open bucket
-    in the suite.** Filed a day earlier as "31 scenarios across three feature files" — **that was the
-    label-STEP files only. It is 84 scenarios, 81 failing, across 19 feature files**, all carrying
-    upstream's `@MultiLabel` tag (`ElementMap` 14, `DropLabel` 11, `ValueMap` 9, `MergeVertex` 9,
-    `AddLabel` 8, `AddVertex` 6, `Labels` 5, then `Label`/`HasLabel`/`Has` 3 each and a long tail).
-    Roughly **3× item 7b's match-string** and ~10% of everything still red. Reachable at all only
-    because the parser regeneration (`f5cddda`) added the four label steps to the tracked grammar.
-    The plan has the phasing, the measurements and the one open decision; the headline facts:
-    - **Motivation is CONFORMANCE, not user demand** — worth knowing before weighing it against
-      another P2 item. Multi-label is close to "a set-cardinality property with privileged status";
-      what it buys is `T.label` token rendering, an interned-integer partitioning key, and
-      `hasLabel`'s index status. The plan records the case and the counter-case.
-    - **It is a declared per-graph capability** (`LabelCardinality` = `ONE` / `ONE_OR_MORE` /
-      `ZERO_OR_MORE`), and the cucumber runner routes `@MultiLabel` scenarios to a *separate*
-      `gmultilabel` source. So the multi-label regime is opt-in and **cannot regress the 1,509
-      modern-graph scenarios**.
-    - **Declaring `ONE` and refusing correctly is itself conformance** — 7 untagged
-      `*_single_label_graph` scenarios assert `"Label mutation is not supported"`.
-    - **Storage is DECIDED: `vertex_labels(node, label)` becomes the sole home for vertex labels
-      (`nodes.label` and `n_label` are dropped); `edges.label` stays inline.** The rule is the one
-      properties already follow — normalize where cardinality is 0..N, keep inline where it is
-      exactly 1 — and upstream fixes edge label cardinality at "always `ONE`" by spec. **Taken now,
-      while there are no users, so no migration is written**: the schema goes multi-label-capable in
-      one commit with the capability still `ONE`.
-    - **No wire work:** GraphBinary already frames the label as a LIST and `vertexBuffer`/`edgeBuffer`
-      already write a bare list of one (`src/execute.ts:41,60`).
-    - **The trap, and it would pass every single-label test:** ~20 sites resolve a vertex's label in a
-      one-row-per-vertex projection; re-pointing them at a join through `vertex_labels` silently
-      multiplies rows. One named scalar accessor first, and `labels()` as the ONLY fan-out reader.
-    - Named blocker: the **zoo graph ships only as `.kryo`**, no GraphSON, so its 27 scenarios need a
-      hand-written seed like `MODERN_SEED`.
-    **Medium-High — sizeable but genuinely phased, and its first phase is a pure refactor whose exit
-    criterion is "L3 unchanged at 1529, census byte-identical".**
-    → [multi-label-elements](./2026-07-30-multi-label-elements-plan.md)
+19. **Multi-label vertices — LANDED except two narrow tails.** L3 1529 → 1595 across phases A–E
+    (`cbaab02`…`7f61f05`); **60 of the 67 in-scope `@MultiLabel` scenarios pass**. Storage, steps,
+    predicates, writes, the harness and the map-shape regimes are all in — design of record:
+    [multi-label-elements](./2026-07-30-multi-label-elements-plan.md). What is left:
+    - **A VERTEX ELEMENT on the wire still reports ONE label.** `vertexBuffer` (`src/execute.ts:33`)
+      writes `[label]`, a bare list of one, so `g.V()` over a multi-label vertex frames
+      `labels: Set(1)` where the graph holds several. The GraphBinary field is already a list, so
+      this is not a format change — it is that the vertex `label` COLUMN is a scalar pick at ~13
+      framing sites (path positions, select payloads, materialize, group values). Threading the set
+      through them is the work. No `@MultiLabel` scenario asserts it today (the runner reads only
+      the id off that fixture), so it is a LATENT wrong answer, not a failing one. *Low-Med.*
+    - **`labels()` as a CHILD BODY** — `group().by(__.labels().order().fold())`,
+      `order().by(labels()…)`, `dedup().by(labels()…)` (3 scenarios). Not label work: it is the
+      ordinary child seam (item 2) meeting a fan-out body.
+    - `elementMap()` on EDGES (3 scenarios) is a pre-existing gap unrelated to labels — it needs
+      the IN/OUT direction tokens (`tail/projection.ts`).
+
+19b. **The vendored cucumber runner hard-skips `@MultiLabelDefault`.** `Before({tags:
+    "@MultiLabelDefault"}, () => 'skipped')` in gremlin-js's `world.js`, alongside
+    `@StepWrite`/`@DataChar`/`@DataDuration`. Those three are genuinely unsupported features; this
+    one looks like a **stub left behind** — the scenarios are ordinary elementMap/valueMap
+    assertions a multi-label provider can answer, and `@SingleLabelDefault`, their twin, is NOT
+    skipped. Consequence: 10 scenarios can never pass through the JS GLV whatever a provider
+    declares, so `tags.ts` scopes both defaults out. Worth raising on the fork with the other
+    upstream payloads (see the give-backs section); the fix is deleting four lines.
 
 ---
 
