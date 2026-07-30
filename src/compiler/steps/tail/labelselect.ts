@@ -10,7 +10,7 @@ import {
     type ListOf, type PropertyStream, type Stream,
 } from '../context/stream.ts';
 import { PER_ROW, perRowColumnOf, staticTypeOf } from '../../../sql/kernel/render.ts';
-import { elemTable, nodePropScalar, edgePropScalar, predicateSql } from '../../plan/plan.ts';
+import { elemTable, propScalarFor, predicateSql } from '../../plan/plan.ts';
 
 // ---------- as()/select() over path-history labels, any stream shape ----------
 //
@@ -159,7 +159,7 @@ export function selectKeyFromAlias(
   const present = entry.binds === undefined ? aliasPresent(col) : null;
   const selElem = aliasElem(entry);
   const n = elemTable(selElem).as('n');
-  const expr = selElem === 'edge' ? edgePropScalar(n.c.id, key) : nodePropScalar(n.c.id, key);
+  const expr = propScalarFor(n.c.id, selElem, key);
   const conds = [...(present ? [present] : []), ...(opts.productive ? [] : [predicateSql(expr, undefined)])];
   const rel = s.q.cte(
     q`SELECT ${expr} AS v${layoutProjection(s.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${aliasId(col, 'last')}${conds.length ? q` WHERE ${list(conds, ' AND ')}` : empty}`,

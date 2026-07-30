@@ -2,7 +2,7 @@ import { flattenListArgs, gtypeName, isNested, type Pred } from '../../gremlin/f
 import { q, list, values, empty, value, raw, jsonExtract, type Expression, type Relation } from '../../sql/kernel/q.ts';
 import type { FastPath } from '../options/fast-paths.ts';
 import { normalizeTypeName, BigDecimal, Duration } from '../../gremlin/types.ts';
-import { nodes, edges, labels, vertexLabels } from '../../sql/schema.ts';
+import { nodes, edges, labels, vertexLabels, vertexProperties, edgeProperties } from '../../sql/schema.ts';
 import type { LabelRegime } from '../../api.ts';
 import { type ElemShape, type ScalarType, type ValueType } from '../../sql/kernel/render.ts';
 
@@ -348,22 +348,6 @@ export function compareBound(v: any): Expression {
   return operandSql(v);
 }
 
-/** node: the vtype-aware sort key for `key` (order().by(key)/min/max), correlated. Same
- *  first-under-multi row as nodePropScalar, but its value is the compareKey so ordering
- *  is numeric for numeric types regardless of TEXT-vs-numeric storage class. */
-export const nodePropSortKey = (nodeIdExpr: Expression, key: string): Expression =>
-  q`(SELECT ${compareKey(raw('value'), raw('vtype'))} FROM vertex_properties WHERE node=${nodeIdExpr} AND key=${value(key)} ORDER BY id LIMIT 1)`;
-export const edgePropSortKey = (edgeIdExpr: Expression, key: string): Expression =>
-  q`(SELECT ${compareKey(raw('value'), raw('vtype'))} FROM edge_properties WHERE edge=${edgeIdExpr} AND key=${value(key)})`;
-
-/** The vtype-aware sort key for `key` on the current element — the order()/min/max twin of
- *  scalarProp. Property (meta) elem falls back to the raw scalar (meta ordering is niche
- *  and its values carry no vtype column). */
-export const scalarPropSortKey = (ctx: ScalarCtx, key: string): Expression =>
-  ctx.elem === 'property' ? scalarProp(ctx, key)
-  : ctx.elem === 'edge' ? edgePropSortKey(ctx.idExpr, key)
-  : nodePropSortKey(ctx.idExpr, key);
-
 /** A predicate OPERAND as SQL. A bare `constant(x)` operand was already folded to its literal by
  *  the foldConstantPredicateOperands pass, so a traversal still here is one that reads the
  *  traverser (`has("name", __.V(1).out("knows").values("name"))` — TinkerPop compares against its
@@ -448,7 +432,7 @@ function likePattern(op: string, value: unknown): { pat: string; neg: boolean } 
 //
 // A POSITIVE substring predicate (containing/startingWith/endingWith) with a >= 3-char
 // literal term over a STORED property routes through the property_fts trigram index instead
-// of a base-table LIKE scan. The generic LIKE (nodeHasProp/edgeHasProp fall-through) stays
+// of a base-table LIKE scan. The generic LIKE (propHasFor's fall-through) stays
 // the semantic authority + equivalence fallback (ftsSubstringPredicate:false, or a term
 // too short / a computed-scalar context). See docs/archive/2026-07-20-call-service-registry-plan.md
 // "Substring rule (final)". NEGATED ops (not*) stay on LIKE: the trigram index finds values
@@ -483,7 +467,7 @@ function ftsSubstringExists(ownerElem: 'node' | 'edge', ownerIdExpr: Expression,
 
 /** The ftsSubstringPredicate fast path. Recognition (ftsSubstringMatch: a >=3-char positive
  *  substring op) and the enable flag are consolidated here in appliesWhen — the boolean no longer
- *  threads through hasProp/nodeHasProp/edgeHasProp. tryLower emits the property_fts trigram EXISTS
+ *  threads through hasProp/propHasFor. tryLower emits the property_fts trigram EXISTS
  *  (result-equivalent to the generic LIKE, which stays the fallback + semantic authority). Fires at
  *  the has() choke point (the one site with a fastPaths config in scope); every other has-prop
  *  caller uses the generic LIKE. */
@@ -711,40 +695,80 @@ export const typedScalarNode = (
     opts?.vtypeExpr ?? (opts?.staticType ? value(opts.staticType) : inferVtypeSql(valExpr)),
   );
 
-export const nodePropScalar = (nodeIdExpr: Expression, key: string): Expression =>
-  q`(SELECT value FROM vertex_properties WHERE node=${nodeIdExpr} AND key=${value(key)} ORDER BY id LIMIT 1)`;
+// ---------- the correlated property read, once per element kind ----------
+//
+// `elemTable`'s twin on the property side. Every correlated read of a property is the same
+// subquery — pick a COLUMN, from the element kind's normalized table, correlating the owner
+// column against the element's rowid — and the only thing the vertex and edge forms disagree
+// about is which table/owner column, and whether a key may hold SEVERAL values. Stating that
+// disagreement ONCE is what this descriptor is for: it was previously transcribed into eight
+// functions, four of them the other four with two nouns changed, and every caller outside this
+// file then re-spelled the `elem === 'edge' ? … : …` dispatch a ninth through sixteenth time.
 
-/** The stored type paired with nodePropScalar's first-under-multi value. Keep this as
- * a sibling subquery rather than inferring from SQLite's lossy storage class. */
-export const nodePropType = (nodeIdExpr: Expression, key: string): Expression =>
-  q`(SELECT vtype FROM vertex_properties WHERE node=${nodeIdExpr} AND key=${value(key)} ORDER BY id LIMIT 1)`;
+interface PropSource {
+  /** The normalized property table, ready for a FROM clause. */
+  table: Relation;
+  /** The owner column to correlate against the element's rowid (`node` / `edge`). */
+  owner: Expression;
+  key: Expression;
+  value: Expression;
+  vtype: Expression;
+  /** First-under-multi: a vertex key holds one row PER value, so a single-scalar read takes
+   *  the earliest by insertion order (TinkerPop's by(key) single-cardinality rule). An edge
+   *  key is UNIQUE per (edge,key), so there is nothing to pick between. */
+  first: Expression;
+}
 
-/** node: does ANY value under `key` satisfy `pred` (undefined → the key exists at
- *  all). EXISTS over vertex_properties → multi-property has() semantics. The generic LIKE
- *  path is the semantic authority; the ftsSubstringPredicate fast path (FtsSubstringFastPath)
- *  is applied one level up, at the has() choke point, and only replaces this when it fires. */
-export const nodeHasProp = (nodeIdExpr: Expression, key: string, pred: any): Expression => {
-  const base = q`SELECT 1 FROM vertex_properties WHERE node=${nodeIdExpr} AND key=${value(key)}`;
-  // The row's own `vtype` column is in scope inside the EXISTS, so has('k',typeOf(X))
-  // matches the stored canonical type (mode 2) instead of only storage class.
-  return pred === undefined ? q`EXISTS(${base})` : q`EXISTS(${base} AND ${predicateSql(raw('value'), pred, TYPE_PER_ROW(raw('vtype')))})`;
+/** A property table's columns UNQUALIFIED. The correlated subqueries below name their own columns bare —
+ *  `vertex_properties.key` would be identical SQL, but bare is what every plan pinned in
+ *  `test/L2-sql` reads — while the CORRELATING side must always arrive qualified (a bare `id`
+ *  there binds to the property table's own column and silently matches nothing; that is a real
+ *  bug this codebase has had, see `nodePropOrderKey`'s caller). Routing the bare names through
+ *  the relation's declared column list keeps a schema rename a compile error rather than a
+ *  string that stops resolving. */
+const bareCols = <K extends string>(t: Relation<K>): Record<K, Expression> =>
+  Object.fromEntries(t.cols.map((c) => [c, raw(c)] as const)) as unknown as Record<K, Expression>;
+const VP = bareCols(vertexProperties);
+const EP = bareCols(edgeProperties);
+
+const propSource = (elem: Elem): PropSource => elem === 'edge'
+  ? { table: edgeProperties, owner: EP.edge, key: EP.key, value: EP.value, vtype: EP.vtype, first: empty }
+  : {
+      table: vertexProperties, owner: VP.node, key: VP.key, value: VP.value, vtype: VP.vtype,
+      first: q` ORDER BY ${VP.id} LIMIT 1`,
+    };
+
+/** ONE correlated read of `col` for `key` on the element held in `idExpr`. */
+const propRead = (idExpr: Expression, elem: Elem, key: string, col: (s: PropSource) => Expression): Expression => {
+  const s = propSource(elem);
+  return q`(SELECT ${col(s)} FROM ${s.table} WHERE ${s.owner}=${idExpr} AND ${s.key}=${value(key)}${s.first})`;
 };
 
-/** edge: the value under `key` as a correlated scalar. Edge props are single-cardinality
- *  (one row per (edge,key), UNIQUE-enforced), so no ORDER BY / LIMIT dance is needed —
- *  the mirror of nodePropScalar for the normalized edge_properties table. */
-export const edgePropScalar = (edgeIdExpr: Expression, key: string): Expression =>
-  q`(SELECT value FROM edge_properties WHERE edge=${edgeIdExpr} AND key=${value(key)})`;
+/** The value under `key` as a correlated scalar (by(key)/order/group-key). */
+export const propScalarFor = (idExpr: Expression, elem: Elem, key: string): Expression =>
+  propRead(idExpr, elem, key, (s) => s.value);
 
-/** The stored type paired with edgePropScalar's single-cardinality value. */
-export const edgePropType = (edgeIdExpr: Expression, key: string): Expression =>
-  q`(SELECT vtype FROM edge_properties WHERE edge=${edgeIdExpr} AND key=${value(key)})`;
+/** The stored type paired with `propScalarFor`'s value — a sibling subquery rather than an
+ *  inference from SQLite's lossy storage class. */
+export const propTypeFor = (idExpr: Expression, elem: Elem, key: string): Expression =>
+  propRead(idExpr, elem, key, (s) => s.vtype);
 
-/** edge: does `key` satisfy `pred` (undefined → the key exists). EXISTS over
- *  edge_properties — mirror of nodeHasProp. */
-export const edgeHasProp = (edgeIdExpr: Expression, key: string, pred: any): Expression => {
-  const base = q`SELECT 1 FROM edge_properties WHERE edge=${edgeIdExpr} AND key=${value(key)}`;
-  return pred === undefined ? q`EXISTS(${base})` : q`EXISTS(${base} AND ${predicateSql(raw('value'), pred, TYPE_PER_ROW(raw('vtype')))})`;
+/** The vtype-aware sort key for `key` (order().by(key)/min/max) — the same row
+ *  `propScalarFor` reads, but as a compareKey so ordering is numeric for numeric types
+ *  regardless of TEXT-vs-numeric storage class. */
+export const propSortKeyFor = (idExpr: Expression, elem: Elem, key: string): Expression =>
+  propRead(idExpr, elem, key, (s) => compareKey(s.value, s.vtype));
+
+/** Does ANY value under `key` satisfy `pred` (undefined → the key exists at all)? EXISTS over
+ *  the normalized table → multi-property has() semantics. The generic LIKE path is the semantic
+ *  authority; the ftsSubstringPredicate fast path (FtsSubstringFastPath) is applied one level
+ *  up, at the has() choke point, and only replaces this when it fires. */
+export const propHasFor = (idExpr: Expression, elem: Elem, key: string, pred: any): Expression => {
+  const s = propSource(elem);
+  const base = q`SELECT 1 FROM ${s.table} WHERE ${s.owner}=${idExpr} AND ${s.key}=${value(key)}`;
+  // The row's own `vtype` column is in scope inside the EXISTS, so has('k',typeOf(X))
+  // matches the stored canonical type (mode 2) instead of only storage class.
+  return pred === undefined ? q`EXISTS(${base})` : q`EXISTS(${base} AND ${predicateSql(s.value, pred, TYPE_PER_ROW(s.vtype))})`;
 };
 
 /** edge: all props as flat JSON text `{key:value}` (single-valued per key), correlated
@@ -758,17 +782,33 @@ export const edgePropsAgg = (edgeIdExpr: Expression): Expression =>
 export const edgeValueMapProps = (edgeIdExpr: Expression): Expression =>
   q`COALESCE((SELECT json_group_object(key, json_array(${propNodeExpr(raw('value'), raw('vtype'))})) FROM edge_properties WHERE edge=${edgeIdExpr}), '{}')`;
 
+/** A stored property read for a value PROJECTION: the raw value, its stored type, and the two
+ *  already composed by `storedValueExpr`. The three always travel together — a value projected
+ *  without its vtype loses collection framing and every downstream typed compare — and the four
+ *  record-field builders that need them were each spelling the pair out. */
+export const storedPropFor = (idExpr: Expression, elem: Elem, key: string): { value: Expression; vtype: Expression; stored: Expression } => {
+  const value = propScalarFor(idExpr, elem, key);
+  const vtype = propTypeFor(idExpr, elem, key);
+  return { value, vtype, stored: storedValueExpr(value, vtype) };
+};
+
 /** A single scalar value for `key` on the current element (order/group-key/by(key)):
  *  node → first-under-multi; edge → the single value. Both read their normalized table. */
 export const scalarProp = (ctx: ScalarCtx, key: string): Expression =>
   ctx.elem === 'property' ? propExtract(ctx.metaExpr!, key).expr  // a VertexProperty's by(String) reads its meta-property
-  : ctx.elem === 'edge' ? edgePropScalar(ctx.idExpr, key)
-  : nodePropScalar(ctx.idExpr, key);
+  : propScalarFor(ctx.idExpr, ctx.elem, key);
 
-/** A boolean predicate on `key` for the current element (has/where/is): node → ANY-match
- *  EXISTS over vertex_properties; edge → EXISTS over edge_properties. */
+/** The vtype-aware sort key for `key` on the current element — the order()/min/max twin of
+ *  scalarProp. Property (meta) elem falls back to the raw scalar (meta ordering is niche
+ *  and its values carry no vtype column). */
+export const scalarPropSortKey = (ctx: ScalarCtx, key: string): Expression =>
+  ctx.elem === 'property' ? scalarProp(ctx, key)
+  : propSortKeyFor(ctx.idExpr, ctx.elem, key);
+
+/** A boolean predicate on `key` for the current element (has/where/is): an ANY-match EXISTS
+ *  over the element kind's normalized property table. */
 export const hasProp = (ctx: ScalarCtx, key: string, pred: any): Expression =>
-  ctx.elem === 'edge' ? edgeHasProp(ctx.idExpr, key, pred) : nodeHasProp(ctx.idExpr, key, pred);
+  propHasFor(ctx.idExpr, ctx.elem === 'property' ? 'vertex' : ctx.elem, key, pred);
 
 /** node: assemble ALL properties as JSON text `{key:[value,…]}` (multi-valued,
  *  insertion-ordered) from vertex_properties, correlated on the node rowid. Empty →

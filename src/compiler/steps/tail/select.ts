@@ -2,7 +2,7 @@ import { isColumnArg, isNested, isPopArg, isScopeArg, isTokenArg, stepChain } fr
 import { empty, list, q, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { PER_ROW, perRowColumnOf, STATIC, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { edgePropScalar, edgePropType, elemCtx, elementPayload, elemTable, labelNameFor, nodePropScalar, nodePropType, P_OPS, predicateSql, propExtract, storedValueExpr } from '../../plan/plan.ts';
+import { elemCtx, elementPayload, elemTable, labelNameFor, propScalarFor, P_OPS, predicateSql, propExtract, storedPropFor } from '../../plan/plan.ts';
 import { aliasId, aliasPop, aliasPresent, aliasScalar, entryTypeTag, shapeElem } from '../context/alias.ts';
 import { aliasElem, aliasIsElement, layoutCols, layoutProjection, scalarTypeFromAlias, type AliasMap, type ElementStream } from '../context/context.ts';
 import { continueLowering, dispatchShapeTail, loweringStateOf, recordFieldColumns, toElementStream, toListStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type LoweringResult, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
@@ -177,22 +177,13 @@ function tryLowerTraversalRecord(st: ElementStream, proj: IRStep, keys: string[]
         }),
       };
     }
-    if (typeof spec === 'string' && source.elem === 'vertex') {
-      const expr = nodePropScalar(source.id, spec);
-      const vtype = nodePropType(source.id, spec);
-      const field = storedPropertyRecordField(keys[i], prefix);
-      const rel = st.q.cte(
-        q`SELECT ${storedValueExpr(expr, vtype)} AS v, ${vtype} AS vtype${layoutProjection(outer.seed.traverserLayout, p)} FROM ${p}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
-        ['v', 'vtype', ...layoutCols(outer.seed.traverserLayout)],
-      ).as(`b${i}`);
-      return { rel, field, cols: scalarRecordCols(rel, prefix, PER_ROW('vtype')) };
-    }
     if (typeof spec === 'string') {
-      const expr = edgePropScalar(n.c.id, spec);
-      const vtype = edgePropType(n.c.id, spec);
+      // The correlated read keys off the source rowid for BOTH element kinds, so no element-table
+      // join is needed here — `n` serves the element/token branches around this one.
+      const { value: expr, vtype, stored } = storedPropFor(source.id, source.elem, spec);
       const field = storedPropertyRecordField(keys[i], prefix);
       const rel = st.q.cte(
-        q`SELECT ${storedValueExpr(expr, vtype)} AS v, ${vtype} AS vtype${layoutProjection(outer.seed.traverserLayout, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${source.id}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
+        q`SELECT ${stored} AS v, ${vtype} AS vtype${layoutProjection(outer.seed.traverserLayout, p)} FROM ${p}${productive ? empty : q` WHERE ${predicateSql(expr, undefined)}`}`,
         ['v', 'vtype', ...layoutCols(outer.seed.traverserLayout)],
       ).as(`b${i}`);
       return { rel, field, cols: scalarRecordCols(rel, prefix, PER_ROW('vtype')) };
@@ -429,9 +420,8 @@ export function lowerRecordSelectProject(st: ElementStream, proj: IRStep): Strea
     if (e.sub === 'vertex') {
       cols.push(elementPayload(elemCtx(en, src.elem), src.elem, prefix, true));
     } else {
-      const prop = src.elem === 'edge' ? edgePropScalar(en.c.id, e.key!) : nodePropScalar(en.c.id, e.key!);
-      const vtype = src.elem === 'edge' ? edgePropType(en.c.id, e.key!) : nodePropType(en.c.id, e.key!);
-      cols.push(q`${storedValueExpr(prop, vtype)} AS ${`${prefix}_v`}, ${vtype} AS ${`${prefix}_vtype`}`);
+      const { vtype, stored } = storedPropFor(en.c.id, src.elem, e.key!);
+      cols.push(q`${stored} AS ${`${prefix}_v`}, ${vtype} AS ${`${prefix}_vtype`}`);
     }
     return e.sub === 'value' ? storedPropertyRecordField(k, prefix) : { key: k, prefix, sub: src.elem };
   });
@@ -505,9 +495,8 @@ export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, st
       const en = elemTable(elem).as(`${prefix}n`);
       joins.push(q` JOIN ${en} ON ${en.c.id}=${aliasId(col, end)}`);
       if (by.sub === 'value') {
-        const prop = elem === 'edge' ? edgePropScalar(en.c.id, by.key!) : nodePropScalar(en.c.id, by.key!);
-        const vtype = elem === 'edge' ? edgePropType(en.c.id, by.key!) : nodePropType(en.c.id, by.key!);
-        cols.push(q`${storedValueExpr(prop, vtype)} AS ${`${prefix}_v`}, ${vtype} AS ${`${prefix}_vtype`}`);
+        const { vtype, stored } = storedPropFor(en.c.id, elem, by.key!);
+        cols.push(q`${stored} AS ${`${prefix}_v`}, ${vtype} AS ${`${prefix}_vtype`}`);
         return storedPropertyRecordField(k, prefix);
       }
       cols.push(elementPayload(elemCtx(en, elem), elem, prefix, true));
@@ -587,7 +576,7 @@ function recordOrderTerms(s: RecordStream, r: Relation, bys: any[][]): Expressio
       // (first-under-multi for a vertex) via its internal rowid.
       if (field.sub !== 'vertex' && field.sub !== 'edge')
         throw new Error(`order().by(select("${key}").values("${valuesKey}")) requires an element field`);
-      col = field.sub === 'edge' ? propExtract(r.c[`${field.prefix}_props`], valuesKey).expr : nodePropScalar(r.c[`${field.prefix}_rid`], valuesKey);
+      col = field.sub === 'edge' ? propExtract(r.c[`${field.prefix}_props`], valuesKey).expr : propScalarFor(r.c[`${field.prefix}_rid`], 'vertex', valuesKey);
     } else {
       col = field.sub === 'value' ? r.c[`${field.prefix}_v`]
         : (field.sub === 'vertex' || field.sub === 'edge') ? r.c[`${field.prefix}_id`]
@@ -624,7 +613,7 @@ function recordWhere(s: RecordStream, step: IRStep, at: number): LoweringResult 
   if (byKey !== undefined) {
     if (leftRes.elem === 'edge' || rightRes.elem === 'edge') throw new Error('where().by(key) on an edge-typed label not yet supported');
     const op = step.productiveBy && pred.op === 'eq' ? 'IS' : step.productiveBy && pred.op === 'neq' ? 'IS NOT' : P_OPS[pred.op];
-    test = q`${nodePropScalar(leftRes.id, byKey)} ${op} ${nodePropScalar(rightRes.id, byKey)}`;
+    test = q`${propScalarFor(leftRes.id, 'vertex', byKey)} ${op} ${propScalarFor(rightRes.id, 'vertex', byKey)}`;
   } else {
     test = q`${leftRes.id} ${P_OPS[pred.op]} ${rightRes.id}`;
   }

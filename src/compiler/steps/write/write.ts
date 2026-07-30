@@ -1,6 +1,6 @@
 import type { GraphStore } from '../../../storage.ts';
 import { q, value, list, raw, render, type Expression } from '../../../sql/kernel/q.ts';
-import { labelIn, nodeHasProp, edgeHasProp, sqlElem, type Elem, vertexLabelIn } from '../../plan/plan.ts';
+import { labelIn, propHasFor, sqlElem, elemTable, type Elem, vertexLabelIn } from '../../plan/plan.ts';
 import { gremlinTypeOf, isCollectionType, storedScalar, mapEntryType, valueNodeOf, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
 import { stepChain, isNested, isCardinalityArg, isCardinalityValueArg, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
@@ -947,7 +947,7 @@ function commonMergeConds(spec: MergeSpec, elem: Elem): Expression[] {
   if (spec.id != null) conds.push(typeof spec.id === 'number' ? q`id=${value(spec.id)}` : q`uid=${value(spec.id)}`);
   for (const [k, v] of Object.entries(spec.props))
     // An ANY-match EXISTS over the element's normalized properties table.
-    conds.push(elem === 'vertex' ? nodeHasProp(raw('nodes.id'), k, v) : edgeHasProp(raw('edges.id'), k, v));
+    conds.push(propHasFor(elemTable(elem).c.id, elem, k, v));
   return conds;
 }
 

@@ -5,13 +5,12 @@ import { edgeProperties, labels, vertexLabels, vertexProperties } from '../../..
 import { engineOf } from '../../engine/deps.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import {
-    edgePropSortKey,
     elemCtx,
     elementPayload,
     jsonbGroupArray,
     labelNameFor, labelTokenFor,
-    nodePropSortKey,
     predicateSql, rangeToOffsetLimit,
+    propSortKeyFor,
     scalarPropSortKey,
     storedValueExpr,
     valueMapProps
@@ -1081,7 +1080,7 @@ const PROJECTORS = new Map<string, ProjFn>([
  *  long/bigdecimal/duration orders numerically, not lexically. Shared by buildProjection
  *  and compileMath — both sort a value tail by an element prop. */
 export const nodePropOrderKey = (st: ElementStream) => (key: string): Expression =>
-  st.elem === 'edge' ? edgePropSortKey(raw('n.id'), key) : nodePropSortKey(raw('n.id'), key);
+  propSortKeyFor(raw('n.id'), st.elem, key);
 
 /** Render the NON-scalar element tail — __element (vertex/edge), valueMap, elementMap,
  *  count, and element fold() — with only its element-shape modifiers (order().by(key)
@@ -1109,7 +1108,7 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
     // vertex_properties' own column, not the counted relation's, and silently matched nothing.
     const cd = st.rel.as('cd');
     const countDrop = orderProductivityFilter(acc.orders, acc.productiveBy,
-      (key) => st.elem === 'edge' ? edgePropSortKey(cd.c.id, key) : nodePropSortKey(cd.c.id, key));
+      (key) => propSortKeyFor(cd.c.id, st.elem, key));
     const inner = countDrop
       ? q`SELECT ${distinct ? 'DISTINCT ' : ''}${cd.c.id} AS id FROM ${cd} WHERE ${countDrop}`
       : q`SELECT ${distinct ? 'DISTINCT ' : ''}id FROM ${st.rel}`;

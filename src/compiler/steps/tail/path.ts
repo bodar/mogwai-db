@@ -26,7 +26,7 @@ import { reRootElement } from './select.ts';
  * `elemCtx` over its joined position table (values read as direct columns), the GROUPED
  * regime an `aliasCtx` over the exploded `je.value` (values read back by correlated
  * subquery). Same `by()` ⇒ same answer. Previously these were two hand-rolled switches and
- * the grouped one hardcoded `nodePropScalar(key)`, so `by(T.id)`/`by(T.label)` worked on a
+ * the grouped one hardcoded the vertex-property read, so `by(T.id)`/`by(T.label)` worked on a
  * linear path and threw on a recursive one — the same modulator, two answers.
  */
 function positionScalar(ctx: ScalarCtx, byArgs: any[] | undefined): Expression | undefined {

@@ -2,7 +2,7 @@ import { derived, q, list, raw, type Expression, type Relation } from '../../../
 import { isNested, stepChain, type Pred } from '../../../gremlin/frontend.ts';
 import {
     P_OPS,
-    predicateSql, nodePropScalar, hasProp, elemCtx,
+    predicateSql, propScalarFor, hasProp, elemCtx,
     idPredFromArgs, scalarProp,
     FtsSubstringFastPath, type Elem, labelMatchFor,
     labelPredicateFor
@@ -206,13 +206,13 @@ export const where: StepFn = (s, st) => {
   const byKey = s.modulators?.[0]?.find((x: any) => typeof x === 'string') as string | undefined;
   let testNode: Expression;
   if (byKey !== undefined) {
-    // nodePropScalar reads vertex_properties; an edge-typed operand would silently read
-    // a vertex's props (ids collide across spaces) → reject.
+    // Both sides are read as VERTEX properties below; an edge-typed operand would silently
+    // read a vertex's props (ids collide across spaces) → reject.
     if (leftElem === 'edge' || rightElem === 'edge') throw new Error('where().by(key) on an edge-typed label not yet supported');
     const op = (s as any).productiveBy && pred.op === 'eq' ? 'IS'
       : (s as any).productiveBy && pred.op === 'neq' ? 'IS NOT'
       : P_OPS[pred.op];
-    testNode = q`${nodePropScalar(left, byKey)} ${op} ${nodePropScalar(right, byKey)}`;
+    testNode = q`${propScalarFor(left, 'vertex', byKey)} ${op} ${propScalarFor(right, 'vertex', byKey)}`;
   } else {
     testNode = q`${left} ${P_OPS[pred.op]} ${right}`;
   }
