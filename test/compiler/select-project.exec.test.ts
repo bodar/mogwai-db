@@ -277,6 +277,45 @@ test('alias-compare where — the co-creator idiom', () => {
 // reaching the modulator owner from a value-shaped parent (see
 // docs/2026-07-28-match-string-frontend-design.md). Pinned so it cannot regress to the wrong answer
 // — a test that accepted the vertex here would have locked the bug in.
+// `select(label).by(key)` composed in the MAIN chain but was declined at every CHILD position: the
+// shape classifier read only what the label held and never the modulator, so a by()-projected
+// element never registered as a scalar producer. Each case is pinned against its `values(key)`
+// equivalent rather than a literal — the two are the same computation, so an equivalence failure
+// means one of the routes drifted, which a hand-written expectation could not tell us.
+describe('select(label).by(key) as a child body', () => {
+  const cases: [string, string, string][] = [
+    ['map', 'map(__.select("a").by("name"))', 'map(__.select("a").values("name"))'],
+    ['order().by', 'order().by(__.select("a").by("name")).values("name")', 'order().by(__.select("a").values("name")).values("name")'],
+    ['group().by', 'group().by(__.select("a").by("name")).by(__.count())', 'group().by(__.select("a").values("name")).by(__.count())'],
+  ];
+  // Compared on VALUES, not raw rows: the two routes differ in the internal type CHANNEL —
+  // values() carries a per-row `vtype` tag, by(key) resolves a static type — which is
+  // representational, not observable. Verified separately that both frame a numeric property as a
+  // number (`by("age")`/`values("age")` → 29, and the same on an edge label's `weight`), so the
+  // channel difference does not reach the wire. Comparing raw rows would fail on `vtype` alone.
+  const values = (rows: any[]) => rows.map((r) => (Object.hasOwn(r, 'v') ? r.v : r));
+  for (const [name, byForm, valuesForm] of cases)
+    test(`${name} — by(key) equals the values(key) form`, () => {
+      const store = seededStore();
+      const head = 'g.V().as("a").out("knows").';
+      expect(values(run(store, head + byForm))).toEqual(values(run(store, head + valuesForm)));
+    });
+
+  test('where — the by() is a productive-existence filter, not a drop-everything', () => {
+    const store = seededStore();
+    expect(run(store, 'g.V().as("a").out("knows").where(__.select("a").by("name")).values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'vadas']);
+  });
+
+  // Classify must admit only what emit serves. A TOKEN by (`by(T.id)`) is rejected by the emitter,
+  // so the classifier must not admit it either — a classify/emit mismatch is a crash, not a
+  // deferral, because consumers assert on the classification.
+  test('a token by() stays declined, so classify and emit admit the same set', () => {
+    const store = seededStore();
+    expect(() => run(store, 'g.V().as("a").out("knows").map(__.select("a").by(T.id))')).toThrow();
+  });
+});
+
 test('select(label).by(key) over a value-shaped parent defers instead of dropping the by()', () => {
   const store = seededStore();
   expect(() => run(store, 'g.V().has("name","marko").as("a").values("name").select("a").by("name")'))

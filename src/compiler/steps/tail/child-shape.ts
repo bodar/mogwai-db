@@ -152,11 +152,34 @@ function bindLabels(ctx: ChildCtx | undefined, s: IRStep, shape: ChildShape): Ch
  *  opposed to select(Column.*), a multi-label select (a Record) or a by()-modulated one. Those
  *  have their own consumers; only this form re-types the stream to a label's contents. */
 export function labelSelectOf(step: IRStep): string | null {
-  if (step.name !== 'select' || step.modulators?.length) return null;
+  if (step.modulators?.length) return null;
+  return singleLabelSelectOf(step);
+}
+
+/** PURE. The same single-label shape but INDIFFERENT to modulators — `select("a")` and
+ *  `select("a").by("name")` alike.
+ *
+ *  Separate from `labelSelectOf` rather than a flag on it, because that function's modulator
+ *  exclusion is load-bearing for its three consumers: each hands the step to
+ *  `selectOneFromAlias`, which is the by()-LESS resolver and now throws rather than silently
+ *  dropping a modulator. Widening `labelSelectOf` would therefore turn a graceful decline
+ *  (`tryLowerElementSteps` returning null) into a throw. Only the SHAPE question — "what does this
+ *  select yield here" — wants the modulator-indifferent form. */
+export function singleLabelSelectOf(step: IRStep): string | null {
+  if (step.name !== 'select') return null;
   const args = step.args ?? [];
   if (args.some(isColumnArg)) return null;
   const uniq = [...new Set(args.filter((a: any): a is string => typeof a === 'string'))];
   return uniq.length === 1 ? uniq[0] : null;
+}
+
+/** PURE. A `select(label).by(<key>)` — provably ONE row per input (one alias column, one property
+ *  read), which is what lets a consumer skip the emission-order ranking `first` would otherwise
+ *  need. Key bys only: a token by is not served by the emitter (`by(T.id)` throws), and a NESTED
+ *  by's shape is its body's, so neither is 1:1-provable here. */
+export function isKeyModulatedLabelSelect(step: IRStep): boolean {
+  if (singleLabelSelectOf(step) === null || !step.modulators?.length) return false;
+  return classifyByAt(step.modulators, 0).kind === 'key';
 }
 
 /** Steps that resolve a path-history LABEL out of the carried alias columns: as() binds one,
@@ -206,12 +229,25 @@ export function labelsMentioned(steps: readonly IRStep[], params: Record<string,
 /** PURE. The shape a `select(label)` yields here, or undefined when the child seam must decline
  *  (no context to resolve against, or a bound-but-unmappable label — see LabelEnv). */
 function selectShape(step: IRStep, ctx: ChildCtx | undefined): ChildShape | undefined {
-  const label = labelSelectOf(step);
+  // Modulator-INDIFFERENT: what this select yields is a shape question, and a `by()` is part of
+  // the answer. `labelSelectOf` cannot be used here — its modulator exclusion protects the
+  // by()-less resolver, not the shape classification (see singleLabelSelectOf).
+  const label = singleLabelSelectOf(step);
   if (label === null || !ctx) return undefined;
   const held = ctx.labels.get(label);
   // Absent: no binding visible → every traverser drops. That is an EMPTY ELEMENT stream, the
   // same answer selectOneFromAlias gives at root, so the body stays element-shaped.
-  return held === undefined ? 'element' : held ?? undefined;
+  const shape = held === undefined ? 'element' : held ?? undefined;
+  // A `by(key)` re-shapes an ELEMENT-held label into the property read — a SCALAR. Reading only
+  // the label is what declined `select("a").by("name")` at every child position while the same body
+  // composed fine in the main chain: the modulator was invisible here, so `isScalarProducer` never
+  // reported a scalar. The emitter needs no new projection to match — `tailSelectProject` already
+  // routes a single-label select to `lowerSingleSelect`, which owns modulator application.
+  //
+  // Key bys only, so classify admits exactly what emit serves (a token by throws in the emitter, and
+  // a nested by's shape is its body's — a wider question). `by(Order.asc)` carries no accessor, so
+  // `classifyBy` reports 'none' and the shape is untouched.
+  return shape === 'element' && isKeyModulatedLabelSelect(step) ? 'scalar' : shape;
 }
 
 /** Prefix steps whose implementations physically preserve child origins. This first

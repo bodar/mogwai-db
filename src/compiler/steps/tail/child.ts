@@ -15,7 +15,7 @@ import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer
 import { predicateSql, rangeToOffsetLimit, elemTable, labelNameFor } from '../../plan/plan.ts';
 import { elementOrderDrop, elementOrderSql } from './modulation.ts';
 import {
-    childCtx, childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, labelSelectOf,
+    childCtx, childSteps, classifyCountChild, isKeyModulatedLabelSelect, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, labelSelectOf,
     CHILD_SCALAR_REDUCERS,
     ELEMENT_CHILD_STEPS, isBareBranchChildAllCard,
     reuseCurrentFrame, ROOT_SCOPE, scalarChildPrefixOk,
@@ -317,6 +317,32 @@ export function mintChildEncounter(end: ElementStream): ElementStream {
     { encounter: 'encounter' });
 }
 
+/** Give a provably ONE-ROW-PER-INPUT scalar child the trivial `encounter` that `first` cardinality
+ *  ranks on. A no-op for any other body.
+ *
+ *  `applyChildCardinality` demands an encounter for `use === 'first'`, and that guard is
+ *  load-bearing: without an emission order, "first" over a fan-out body picks an ARBITRARY row —
+ *  the silent-arbitrary-answer the canonical-emission-order work exists to prevent. A fanning body
+ *  mints its own key (`values()` carries `encounterKey` through the projector, since a multi-valued
+ *  property genuinely yields several rows).
+ *
+ *  `select(label).by(key)` mints none, because it cannot fan out: one alias column, one property
+ *  read, exactly one row per input. So `first` and `all` are the same stream and the ranking is
+ *  vacuous — which is precisely why minting here is safe where relaxing the guard would not be.
+ *  Gated on that proof rather than on "the stream happens to have no encounter", which is the
+ *  condition the guard is meant to catch. */
+function oneRowEncounter(stream: ScalarStream, terminal: IRStep): ScalarStream {
+  if (stream.traverserLayout.encounter || !isKeyModulatedLabelSelect(terminal)) return stream;
+  const p = stream.rel.as('oe');
+  const layout = patchLayout(stream.traverserLayout, { encounter: 'encounter' });
+  const payload = streamPayloadCols(stream);
+  const rel = stream.q.cte(
+    q`SELECT ${list(payload.map((c) => q`${p.c[c]} AS ${c}`), ', ')}${layoutProjectionMinting(layout, p, 'encounter', q`1`)} FROM ${p}`,
+    [...payload, ...layoutCols(layout)],
+  );
+  return { ...stream, traverserLayout: layout, rel };
+}
+
 /** Compile a scalar-producing child as rows, so productivity is represented by row
  * existence rather than SQL NULL. Movement/filter uses the ordinary element fold;
  * projection adds an explicit provider encounter key; the shared scalar pipeline
@@ -511,7 +537,7 @@ function compileScalarChildRows(
     const stream = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, body, 0);
     // As above: classify proved scalar, so a non-scalar is a contradiction — fail loud.
     if (stream.kind !== 'scalar') throw new Error('scalar child classified scalar but lowered to ' + stream.kind);
-    return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
+    return applyScalarChildCardinality(parent, pushed, oneRowEncounter(stream, terminal), use, retainChildScope);
   }
 
   // The bespoke element-projection SQL builder below reads the element directly
