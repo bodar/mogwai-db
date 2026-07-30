@@ -216,8 +216,11 @@ that part we mirror.
 
 ## Three defects found on the way (all independent of this work)
 
-1. **A `by()` modulator on a `concat()` traversal argument is declined.** Still the *only* thing
-   between the design and 25/25. **Re-measured 2026-07-30, and the original diagnosis here was
+1. ~~**A `by()` modulator on a `concat()` traversal argument is declined.**~~ **✅ CLOSED
+   2026-07-30 — the design's ceiling is now 25/25.** The entry is kept in full because the diagnosis
+   was wrong three times in a row, each time plausibly, and the sequence is the useful record: a
+   silent drop → a dropped modulator → a wrong-kind emit → a parent-shape signature that was
+   incidental. Read it before trusting a first reading of a decline on this seam. **Re-measured 2026-07-30, and the original diagnosis here was
    wrong** — it was written up as "`concat(<traversal>)` silently drops its arguments", which was
    true when measured and has since been fixed. What remains is one modulator, and the discriminator
    is not `select`, not the label scope, and not the scalar parent:
@@ -335,13 +338,26 @@ that part we mirror.
    |---|---|
    | `map` / `order().by` / `group().by` | ✅ each pinned equal to its `values(key)` form |
    | `where` | ✅ productive-existence filter |
-   | `concat` | ❌ **the remaining half** |
+   | `concat` | ✅ (closed straight after — see below) |
 
-   **Why `concat` is the harder half, and it is the same wall as the fail-closed fix above.** Its
-   parent is a SCALAR stream, so the seed is scalar and the body routes through `dispatchAlias` →
-   `selectOneFromAlias` (which now throws) rather than through `lowerSingleSelect`, whose entry
-   demands an ElementStream. Reaching the modulator owner from a value-shaped parent is the one
-   remaining piece, and it is what scenario 25 needs.
+   **✅ `concat` closed 2026-07-30, and the diagnosis held a fourth time.** Its parent is a SCALAR
+   stream, so the body routed through `dispatchAlias` → `selectOneFromAlias` rather than
+   `lowerSingleSelect`, whose entry demands an `ElementStream`. But **nothing in that projection ever
+   read the parent's element** — the whole computation is the alias COLUMN on the parent row, the
+   layout, and the query. The `ElementStream` signature was incidental, and it was the only thing
+   keeping a value-shaped parent from the same answer: the "cannot be HANDED this" tell again, not a
+   missing capability. Extracted verbatim as `selectKeyFromAlias` (`tail/labelselect.ts`) with both
+   routes calling it, so the two cannot disagree by construction rather than by test.
+
+   Consequences worth noting:
+   - **The deferral added one commit earlier became an ANSWER**, so its test flipped from asserting
+     the throw to asserting the value — and now pins the property that actually matters, that the
+     two parent shapes agree.
+   - **Scenario 25 desugars end-to-end and returns its expected rows exactly**
+     (`["marko knows vadas","marko knows josh"]`). The design's 24/25 ceiling is **25/25**: the
+     desugar itself is still unwritten, but nothing blocks it.
+   - Still fails closed, deliberately: a token `by()` and a non-`last` `Pop` under a `by()`. Neither
+     is served on the element route either, so answering them here would make the routes disagree.
 
    **A second, separable defect at the same site: the deferral message is wrong.**
    `concat() after a scalar stream not yet supported` names the PARENT shape when the obstacle is the
