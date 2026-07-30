@@ -238,6 +238,22 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
 
   // A single end element of the history.
   if (aliasIsElement(entry)) {
+    // This resolver is the by()-LESS one BY CONTRACT: `lowerSingleSelect` (tail/select.ts) owns
+    // modulator application over an element stream and delegates here only for the unmodulated
+    // forms. That contract was assumed, not enforced, and one reachable caller broke it —
+    // `dispatchAlias` (engine.ts) routes select() over a VALUE-shaped parent (scalar/list/variant)
+    // straight here, modulators and all. With an element-held label that silently returned the
+    // ELEMENT and dropped the by():
+    //
+    //   g.V().has('name','marko').as('a').values('name').select('a').by('name')
+    //     → v[marko]  (byte-identical to the by()-less form)   where 'marko' is correct
+    //
+    // A silent wrong answer, so fail closed instead. Applying the by() here would be the second
+    // implementation of modulator application; the fix is to reach the owner, which needs the
+    // element-stream entry `lowerSingleSelect` requires — tracked in
+    // docs/2026-07-28-match-string-frontend-design.md.
+    if (step.modulators?.length)
+      throw new Error(`select("${label}").by(...) over a value-shaped stream not yet supported (the label holds an element; only the element-stream route applies by() modulators)`);
     const rel = s.q.cte(
       q`SELECT ${aliasId(col, end)} AS id${layoutProjection(layout, p)} FROM ${p} WHERE ${present}`,
       ['id', ...layoutCols(layout)],

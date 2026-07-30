@@ -267,4 +267,27 @@ test('alias-compare where — the co-creator idiom', () => {
   expect(names).toEqual(['josh', 'josh', 'marko', 'marko', 'peter', 'peter']); // all three co-created lop
 });
 
+// `select(label).by(key)` over a VALUE-shaped parent used to return the labelled ELEMENT and drop
+// the by() — byte-identical to the by()-less form, so the modulator vanished silently. Only
+// `lowerSingleSelect` (over an element stream) applies modulators; `dispatchAlias` routes a
+// scalar/list/variant parent straight to the shape-agnostic resolver, which is by()-less by
+// contract. That contract is now enforced there rather than assumed.
+//
+// This asserts the DEFERRAL, not the answer: 'marko' is what TinkerPop gives, and reaching it means
+// reaching the modulator owner from a value-shaped parent (see
+// docs/2026-07-28-match-string-frontend-design.md). Pinned so it cannot regress to the wrong answer
+// — a test that accepted the vertex here would have locked the bug in.
+test('select(label).by(key) over a value-shaped parent defers instead of dropping the by()', () => {
+  const store = seededStore();
+  expect(() => run(store, 'g.V().has("name","marko").as("a").values("name").select("a").by("name")'))
+    .toThrow('only the element-stream route applies by() modulators');
+  // The by()-less form is unaffected — it legitimately yields the labelled vertex.
+  expect(run(store, 'g.V().has("name","marko").as("a").values("name").select("a")').map((r) => r.id))
+    .toEqual([1]);
+  // And over an ELEMENT parent the same by() works, which is what makes the above a reachability
+  // gap rather than a missing capability.
+  expect(run(store, 'g.V().has("name","marko").as("a").out("created").select("a").by("name")').map((r) => r.v))
+    .toEqual(['marko']);
+});
+
 });
