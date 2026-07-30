@@ -315,28 +315,20 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    downstream alias-compare gap, not a match one. **Medium.**
    → [conformance-structural-bets](./2026-07-12-conformance-structural-bets.md)
 
-7b. **`g.match("MATCH (a:person)-[:knows]->(b:person)")` — the GQL pattern-STRING form. DESIGNED
-   2026-07-28; no decision left, and it is not Large.** 25 scenarios (all of `MatchString.feature`),
-   **0 passing** (re-confirmed 2026-07-30), every one failing `unsupported source step: match`. The
-   largest remaining bucket contained in ONE feature file — item 19's `@MultiLabel` is 3× the size
-   but spans 19. Upstream ships a grammar
-   (`gql-gremlin/src/main/antlr4/GQL.g4` on
-   `origin/master`, generated cleanly by our own antlr-ng invocation — 21/21 corpus patterns parse),
-   so locked decision #2 is satisfied. The compiler needs no change: hand-desugaring the corpus into
-   Gremlin trunk compiles. The work is: generate a second parser
-   (`parser/gql/`), add one front-end translator (`src/gremlin/gql.ts`, sitting where `math.ts` sits),
-   add one `extract`-category Pass. Named residuals the headline omits:
-   - `__.match("<gql>")` in a NESTED position — the Gremlin grammar admits it; the desugar would have
-     to mint the `V()` re-source inside a child body.
-   - `-[e:l]-` (undirected WITH an edge variable) — needs `as('e').otherV()`, which throws for want of
-     entering-vertex context. No corpus case, fails closed.
-   - **The `extract`-category placement is load-bearing and SILENT** — nothing fails loudly if the Pass
-     later moves to `fold`; a `SubgraphStrategy` criterion just quietly stops reaching pattern bodies.
-     Land the one pinning test (`withStrategies(SubgraphStrategy)` over a match-string traversal), and
-     widen `PassCategory.extract`'s doc comment (`src/compiler/ir/pass.ts`) from "pull out-of-band
-     flags" to include "surface desugars that must precede decoration".
-   **Medium.**
+7b. ~~**`g.match("MATCH (a:person)-[:knows]->(b:person)")` — the GQL pattern-STRING form.**~~
+   **LANDED 2026-07-30. `MatchString.feature` 0/25 → 25/25; L3 1598 → 1623 (+25, −0).** Three pieces:
+   a second generated parser (`parser/gql/`, from upstream's `GQL.g4` — so locked decision #2 never
+   needed relitigating), a front-end translator (`src/gremlin/gql.ts`, where `math.ts` sits), and one
+   `extract`-category Pass. The compiler needed **no** lowering change, as predicted.
+   What it needed instead was a dependency nobody had filed: `select(label).by(key)` was declined at
+   every CHILD position while composing fine in the main chain. Closing that took three commits and
+   fixed a live silent wrong answer on the way (a `by()` dropped over a value-shaped parent). The
+   diagnosis was wrong FOUR times in sequence — silent drop → dropped modulator → wrong-kind emit →
+   an incidental `ElementStream` signature — which is the most reusable thing in the design doc.
+   Residuals, all fail-closed: an undirected edge carrying a VARIABLE; a terminal pattern declaring
+   no variables; `__.match("…")` in a nested position.
    → [match-string-frontend-design](./2026-07-28-match-string-frontend-design.md)
+
 
 7c. **Predicate operands that are TRAVERSALS — narrow tails only.** The four shapes (constant,
    re-sourced, mutating-rejected, correlated) lower. Left:
