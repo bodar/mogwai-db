@@ -31,8 +31,8 @@ const vprops = (o: Record<string, unknown>) =>
 const eprops = (o: Record<string, unknown>) =>
   Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { t: typeof v === 'number' ? 'int' : 'string', v }]));
 
-const vrow = (id: number | string, label: string, props: Record<string, unknown> = {}): ForeignRow =>
-  ({ kind: 'vertex', id, label, props: vprops(props) });
+const vrow = (id: number | string, label: string, props: Record<string, unknown> = {}, labels: string[] = [label]): ForeignRow =>
+  ({ kind: 'vertex', id, label, labels, props: vprops(props) });
 const erow = (id: number, label: string, src: number, tgt: number, props: Record<string, unknown> = {}): ForeignRow =>
   ({ kind: 'edge', id, label, src, tgt, props: eprops(props) });
 
@@ -52,7 +52,9 @@ describe('foreign element landing + root framing', () => {
   test('vertices land with id/label/props columns (no local join)', () => {
     const { plan, rows } = landAndRun([vrow(1, 'person', { name: 'marko', age: 29 }), vrow(2, 'software', { name: 'lop' })], 'vertex');
     expect(plan.shape.kind).toBe('vertex');
-    expect(rows.map((r) => [r.id, r.label])).toEqual([['1', 'person'], ['2', 'software']]);
+    // A vertex's landed `label` column is the PAYLOAD form — a JSON array of every label — because
+    // GraphBinary's {label} field is a list. The scalar pick rides separately as `flabel`.
+    expect(rows.map((r) => [r.id, r.label])).toEqual([['1', '["person"]'], ['2', '["software"]']]);
     // props is JSON text in the {key:[{t,v}]} shape rowVertex parses
     expect(JSON.parse(rows[0].props)).toEqual({ name: [{ t: 'string', v: 'marko' }], age: [{ t: 'int', v: 29 }] });
   });

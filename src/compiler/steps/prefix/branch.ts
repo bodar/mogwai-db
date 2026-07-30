@@ -1,23 +1,23 @@
-import { q, list, empty, paren, value, raw, Relation, type Expression } from '../../../sql/kernel/q.ts';
+import { isNested, stepChain, type SackSpec, type Step } from '../../../gremlin/frontend.ts';
+import { empty, list, paren, q, raw, Relation, value, type Expression } from '../../../sql/kernel/q.ts';
 import { staticTypeOf } from '../../../sql/kernel/render.ts';
 import { edges } from '../../../sql/schema.ts';
-import { isNested, stepChain, type SackSpec, type Step } from '../../../gremlin/frontend.ts';
-import { type IRStep } from '../../ir/strategies.ts';
-import { normalize } from '../../ir/passes.ts';
-import { analyzeChain, type ChainFacts } from '../../ir/analyze.ts';
-import { dirsFor, edgeLabelFilter, labelIn, hasProp, elemCtx, scalarProp, aliasCtx, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem, type EdgeEnd, vertexLabelIn, vertexLabelName } from '../../plan/plan.ts';
-import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
-import { appendCte, aliasColsOf, elemRel, labelScope, prevRel, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, mergeLayouts, rehomeLayout, rigidCols, partitionOver, type AliasMap, type TraverserLayout, type LoweringState, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
-import { keyedChildRelation, keyedKeySet } from '../tail/keyed.ts';
-import { pushChildScope, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
-import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, isGlobalBarrier, optionMapMerge, optionMapNeedsPassthrough, readOptionMapArms, ROOT_SCOPE, type ChildCtx, type ChildPlan } from '../tail/child-shape.ts';
-import { emptyElementLike } from '../tail/labelselect.ts';
-import { loweringStateOf, toElementStream, type ListStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
-import { finishListMerge, mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
-import { unionScalarStreams, SACK_OPS, combineSack } from '../tail/scalar.ts';
 import { engineOf, fastPathContextOf, type Engine } from '../../engine/deps.ts';
-import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
+import { analyzeChain, type ChainFacts } from '../../ir/analyze.ts';
+import { normalize } from '../../ir/passes.ts';
 import { VERTEX_MOVES } from '../../ir/step.ts';
+import { type IRStep } from '../../ir/strategies.ts';
+import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
+import { aliasCtx, dirsFor, edgeLabelFilter, elemCtx, hasProp, jsonbGroupArray, labelIn, predicateSql, scalarProp, vertexLabelIn, vertexLabelName, vertexLabelsJson, type EdgeEnd, type Elem, type ScalarCtx } from '../../plan/plan.ts';
+import { aliasColsOf, appendCte, elemRel, labelScope, layoutCols, layoutProjection, layoutProjectionMinting, mergeLayouts, partitionOver, patchLayout, prevRel, rehomeLayout, rigidCols, type AliasMap, type ElementStream, type LoweringState, type PathState, type SideEffectDef, type StepFn, type TraverserLayout } from '../context/context.ts';
+import { loweringStateOf, toElementStream, type ListStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
+import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, isGlobalBarrier, optionMapMerge, optionMapNeedsPassthrough, readOptionMapArms, ROOT_SCOPE, type ChildCtx, type ChildPlan } from '../tail/child-shape.ts';
+import { pushChildScope, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
+import { keyedChildRelation, keyedKeySet } from '../tail/keyed.ts';
+import { emptyElementLike } from '../tail/labelselect.ts';
+import { combineSack, SACK_OPS, unionScalarStreams } from '../tail/scalar.ts';
+import { finishListMerge, mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm } from '../tail/variant.ts';
+import { PredicateInliningFastPath, tryInlinePredicate } from './predicate.ts';
 
 /** A ScalarCtx correlating on a walk row's current vertex id — its props/label are
  *  read back from `nodes` by subquery (the walk row carries only the id). Lets
@@ -28,7 +28,8 @@ const walkNodeCtx = (idExpr: Expression): ScalarCtx => {
   // so no propsExpr (that's edge-only now).
   return {
     elem: 'vertex', idExpr, extIdExpr: sub('COALESCE(uid, id)'),
-    labelNameExpr: vertexLabelName(idExpr), labelMatch: (names) => vertexLabelIn(idExpr, names),
+    labelNameExpr: vertexLabelName(idExpr), labelPayloadExpr: vertexLabelsJson(idExpr),
+    labelMatch: (names) => vertexLabelIn(idExpr, names),
   };
 };
 

@@ -1,17 +1,17 @@
 import type { GraphStore } from '../../../storage.ts';
 import { q, value, list, raw, render, type Expression } from '../../../sql/kernel/q.ts';
-import { labelIn, nodeHasProp, edgeHasProp, sqlElem, type Elem, vertexLabelIn, vertexLabelName } from '../../plan/plan.ts';
+import { labelIn, nodeHasProp, edgeHasProp, sqlElem, type Elem, vertexLabelIn } from '../../plan/plan.ts';
 import { gremlinTypeOf, isCollectionType, storedScalar, mapEntryType, valueNodeOf, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
 import { stepChain, isNested, isCardinalityArg, isCardinalityValueArg, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
-import { staticTypeOf, renderFrom, type Compiled, type WritePlan, type Shape } from '../../../sql/kernel/render.ts';
+import { staticTypeOf, renderFrom, type Compiled, type WritePlan, type WriteResult, type Shape } from '../../../sql/kernel/render.ts';
 import type { Engine } from '../../engine/deps.ts';
 import type { ElementReadDriver } from '../../engine/deps.ts';
 import { compileInject } from './inject.ts';
 import { indexProperty, deleteFtsFor, deleteFtsForOwners } from '../../../services/fts-index.ts';
 import { layoutCols, type ElementStream } from '../context/context.ts';
-import { LABEL_MUTATION_UNSUPPORTED } from '../../../api.ts';
+import { DEFAULT_VERTEX_LABEL, LABEL_MUTATION_UNSUPPORTED } from '../../../api.ts';
 
 // ---------- nested-traversal write arguments (read spine reuse) ----------
 //
@@ -233,7 +233,7 @@ function compileSetProperty(engine: Engine, steps: IRStep[], params: Record<stri
     };
   }
   // Vertex props are normalized rows: apply each with its cardinality (+ meta).
-  const readCur = `SELECT uid, (SELECT l.name FROM vertex_labels vl JOIN labels l ON l.id=vl.label WHERE vl.node=nodes.id ORDER BY vl.label LIMIT 1) AS label FROM nodes WHERE id=?`;
+  const readCur = `SELECT uid FROM nodes WHERE id=?`;
   return {
     kind: 'write',
     run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
@@ -242,7 +242,7 @@ function compileSetProperty(engine: Engine, steps: IRStep[], params: Record<stri
           if (r.has) applyVertexProperty(store, id, resolveSpecKey(engine, store, sp, id, 'vertex', params, sideEffects), r.value, r.vtype, sp.meta, sp.cardinality, r.typeNode);
       }
       const cur = store.query<any>(readCur, [id])[0];
-      return { vertex: { id: cur.uid ?? id, label: cur.label, props: readVertexProps(store, id) } };
+      return { vertex: { id: cur.uid ?? id, labels: store.vertexLabels(id), props: readVertexProps(store, id) } };
     }),
   };
 }
@@ -499,7 +499,7 @@ function insertVertex(
   params: Record<string, any> = {},
   sideEffects?: Map<string, any>,
   driver?: ElementReadDriver,
-): { id: number; extId: string | number; label: string } {
+): { id: number; extId: string | number; labels: string[] } {
   // Unseeded: an addV label traversal is a standalone read / invariant (a source addV has no
   // incoming element). Routes through the same value authority so __.constant(x) and
   // __.select(const) labels resolve, not just seeded reads.
@@ -519,15 +519,13 @@ function insertVertex(
   assertLabelCount(engine, labels.length, 'addV');
   const row = insertRow(store, 'nodes', [], [], spec.uid);
   store.addVertexLabels(row.id, labels);
-  // The response frames ONE label (Element.label() is "an arbitrary label when multiple exist");
-  // the reader picks the lowest label id, so agree with it rather than with argument order. A
-  // zero-label vertex has none to frame, so it reports the default name.
-  const label = store.vertexLabels(row.id)[0] ?? DEFAULT_VERTEX_LABEL;
+  // Read the labels BACK rather than reusing `labels`: the response must agree with what a
+  // later read frames, and the reader orders by label id, not by argument order.
   for (const p of spec.props) {
     const r = resolveSpecValue(engine, store, p, row.id, 'vertex', params, sideEffects, driver);
     if (r.has) applyVertexProperty(store, row.id, resolveSpecKey(engine, store, p, row.id, 'vertex', params, sideEffects, driver), r.value, r.vtype, p.meta, p.cardinality, r.typeNode);
   }
-  return { ...row, label };
+  return { ...row, labels: store.vertexLabels(row.id) };
 }
 
 // g.addV('label').property(k, v)... — and multi-element chains (a graph initializer).
@@ -576,8 +574,8 @@ function compileMidAddV(engine: Engine, steps: IRStep[], addVAt: number, params:
         return { ...driver, id: v.id, elem: 'vertex' as const };
       });
       return created.map((driver) => {
-        const row = store.query<any>('SELECT uid, (SELECT l.name FROM vertex_labels vl JOIN labels l ON l.id=vl.label WHERE vl.node=nodes.id ORDER BY vl.label LIMIT 1) AS label FROM nodes WHERE id=?', [driver.id])[0];
-        return { vertex: { id: row.uid ?? driver.id, label: row.label, props: readVertexProps(store, driver.id) } };
+        const row = store.query<any>('SELECT uid FROM nodes WHERE id=?', [driver.id])[0];
+        return { vertex: { id: row.uid ?? driver.id, labels: store.vertexLabels(driver.id), props: readVertexProps(store, driver.id) } };
       });
     },
     ...(probe ? {
@@ -613,7 +611,7 @@ function compileAddV(engine: Engine, steps: IRStep[], params: Record<string, any
       run: (store) => {
         const v = insertVertex(engine, store, spec, params, sideEffects);
         created = v.id;
-        return [{ vertex: { id: v.extId, label: v.label, props: readVertexProps(store, v.id) } }];
+        return [{ vertex: { id: v.extId, labels: v.labels, props: readVertexProps(store, v.id) } }];
       },
       continuation: {
         shape: probe.shape,
@@ -629,7 +627,7 @@ function compileAddV(engine: Engine, steps: IRStep[], params: Record<string, any
   if (steps.some((s, i) => i > 0 && s.name !== 'property'))
     return { kind: 'write', run: (store) => runWriteChainFull(engine, store, steps, params, sideEffects) };
   const spec = parseVertexSpec(steps[0], steps.slice(1), sideEffects, params);
-  return { kind: 'write', run: (store) => { const v = insertVertex(engine, store, spec, params, sideEffects); return [{ vertex: { id: v.extId, label: v.label, props: readVertexProps(store, v.id) } }]; } };
+  return { kind: 'write', run: (store) => { const v = insertVertex(engine, store, spec, params, sideEffects); return [{ vertex: { id: v.extId, labels: v.labels, props: readVertexProps(store, v.id) } }]; } };
 }
 
 interface EdgeCluster { label: string; fromSpec: any; toSpec: any; edgeUid: string | number | null; props: PropSpec[]; next: number; }
@@ -725,7 +723,7 @@ function runWriteChainFull(engine: Engine, store: GraphStore, steps: Step[], par
       while (i + 1 < steps.length && ADDV_FOLLOWERS.has(steps[i + 1].name)) propSteps.push(steps[++i]);
       const spec = parseVertexSpec(s, propSteps, sideEffects, params);
       const v = insertVertex(engine, store, spec, params, sideEffects);
-      currentV = v.id; last = { vertex: { id: v.extId, label: v.label, props: readVertexProps(store, v.id) } };
+      currentV = v.id; last = { vertex: { id: v.extId, labels: v.labels, props: readVertexProps(store, v.id) } };
     } else if (s.name === 'as') {
       if (currentV == null) throw new Error('as() before any vertex in write chain');
       for (const lbl of s.args) if (typeof lbl === 'string') aliases.set(lbl, currentV);
@@ -956,7 +954,7 @@ function commonMergeConds(spec: MergeSpec, elem: Elem): Expression[] {
 function mergeMatchQuery(spec: MergeSpec): { sql: string; binds: any[] } {
   const conds = commonMergeConds(spec, 'vertex');
   const where = conds.length ? list(conds, ' AND ') : q`1`;
-  return render(q`SELECT id, uid, ${vertexLabelName(raw('nodes.id'))} AS label FROM nodes WHERE ${where}`);
+  return render(q`SELECT id, uid FROM nodes WHERE ${where}`);
 }
 
 function parseMergeOptions(mods: Step[], step: string, sideEffects: Map<string, any> | undefined, params: Record<string, any>): { onCreate: MergeSpec | null; onMatch: MergeSpec | null } {
@@ -1000,7 +998,7 @@ function compileMergeV(engine: Engine, steps: IRStep[], params: Record<string, a
   return {
     kind: 'write',
     run: (store) => {
-      const out: any[] = [];
+      const out: WriteResult[] = [];
       for (const driver of drivers(store)) {
         // The merge map (match + onCreate/onMatch) is completed per incoming traverser:
         // resolve nested values seeded at the driver, then build the match query from the
@@ -1025,7 +1023,8 @@ function compileMergeV(engine: Engine, steps: IRStep[], params: Record<string, a
             }
             if (om) for (const [k, v] of Object.entries(om.props))
               applyVertexProperty(store, m.id, k, v, gremlinTypeOf(v, om.propTypes[k] ?? null), null, om.propCardinalities[k] ?? 'single', om.propTypes[k] ?? null);
-            out.push({ vertex: { id: m.uid ?? m.id, label: m.label, props: readVertexProps(store, m.id) } });
+            // Read the labels back AFTER any onMatch addition, not off the match row.
+            out.push({ vertex: { id: m.uid ?? m.id, labels: store.vertexLabels(m.id), props: readVertexProps(store, m.id) } });
           }
         } else {
           const labels = (oc?.label as string[]) ?? (matchSpec.label as string[]) ?? [];
@@ -1034,7 +1033,7 @@ function compileMergeV(engine: Engine, steps: IRStep[], params: Record<string, a
           const propCardinalities = { ...matchSpec.propCardinalities, ...(oc?.propCardinalities ?? {}) };
           const v = insertVertex(engine, store, { labels, props: singleProps(props, propTypes, propCardinalities), uid: matchSpec.id ?? oc?.id ?? null }, params, sideEffects);
           // Echo typed props read back from storage ({t,v}), not the raw resolved values.
-          out.push({ vertex: { id: v.extId, label: v.label, props: readVertexProps(store, v.id) } });
+          out.push({ vertex: { id: v.extId, labels: v.labels, props: readVertexProps(store, v.id) } });
         }
       }
       return out;
@@ -1131,9 +1130,6 @@ function labelNames(v: any, sole: boolean, step: string): string[] {
     : `${step}(): a Collection argument must be the only argument`);
   return v.map(String);
 }
-
-/** TinkerPop's `Vertex.DEFAULT_LABEL` — what a bare addV() means on a graph that requires a label. */
-const DEFAULT_VERTEX_LABEL = 'vertex';
 
 const LABEL_MUTATIONS = new Set(['addLabel', 'dropLabel', 'dropLabels']);
 /** Steps that CONFIGURE the vertex addV() is creating, rather than reading from it. */

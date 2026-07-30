@@ -1,20 +1,30 @@
-import { q, value, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { vertexProperties, edgeProperties } from '../../../sql/schema.ts';
-import {
-    scalarProp,
-    framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx,
-    storedValueExpr, bareValueMapProps, typedScalarNode, compareKey, type ScalarCtx, elemTable, labelNameFor, vertexLabelIn, vertexLabelName
-} from '../../plan/plan.ts';
 import { gtypeName, isNested, stepChain } from '../../../gremlin/frontend.ts';
-import { isMapLocalOrder } from './list.ts';
-import { type IRStep } from '../../ir/strategies.ts';
-import { layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, partitionOver, dropLayoutAtBarrier, type TraverserLayout, type LoweringState, type ElementStream } from '../context/context.ts';
-import { loweringStateOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toElementStream, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
+import { empty, list, q, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { PER_ROW, perRowColumnOf, staticTypeOf, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
+import { edgeProperties, vertexProperties } from '../../../sql/schema.ts';
+import { NUMERIC_REDUCERS, REDUCERS } from '../../ir/step.ts';
+import { type IRStep } from '../../ir/strategies.ts';
+import {
+    bareValueMapProps,
+    compareKey,
+    elemCtx,
+    elementPayload,
+    elemTable,
+    labelNameFor,
+    predicateSql,
+    propExtract,
+    scalarProp,
+    storedValueExpr,
+    typedScalarNode,
+    vertexLabelIn, vertexLabelName, vertexLabelsJson,
+    type ScalarCtx
+} from '../../plan/plan.ts';
+import { dropLayoutAtBarrier, elemRel, layoutCols, layoutProjection, layoutProjectionMinting, partitionOver, patchLayout, type ElementStream, type LoweringState, type TraverserLayout } from '../context/context.ts';
+import { continueLowering, dispatchShapeTail, groupColumns, loweringStateOf, PROPERTY_PAYLOAD, toElementStream, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
+import { childCtx, childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyMapChildRows, classifyScalarChildRows, elementScalarBranchArm, reuseCurrentFrame, ROOT_SCOPE, type ChildFrameStack, type ChildParent, type ChildUse } from './child-shape.ts';
 import { applyChildCardinality, lowerElementBody, mintChildEncounter, pushChildScope, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows } from './child.ts';
-import { childCtx, childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyMapChildRows, classifyScalarChildRows, elementScalarBranchArm, reuseCurrentFrame, ROOT_SCOPE, type ChildParent, type ChildUse, type ChildFrameStack } from './child-shape.ts';
-import { REDUCERS, NUMERIC_REDUCERS } from '../../ir/step.ts';
+import { isMapLocalOrder } from './list.ts';
 
 /** The numeric reducers that terminate a nested-group inner value `by(__.values(x).<r>())`. */
 const SCALAR_REDUCERS = NUMERIC_REDUCERS;  // no `count`: a count needs no scalar input
@@ -93,18 +103,11 @@ export function elementGroupSource(st: ElementStream, productiveBy?: boolean): G
   };
 }
 
-/** Columns that frame one element (vertex/edge/property) under `prefix`. label
- *  rides as a subquery so the FROM needs no labels join. */
-function elementSelect(elem: ElemShape, prefix: string, ctx: ScalarCtx, internalId = false): Expression {
-  const extId = ctx.extIdExpr ?? ctx.idExpr;
-  const rid = internalId ? q`${ctx.idExpr} AS ${`${prefix}_rid`}, ` : empty;
-  if (elem === 'edge')
-    // Endpoints as external ids (see the __element edge projector).
-    return q`${rid}${extId} AS ${`${prefix}_id`}, ${ctx.labelNameExpr} AS ${`${prefix}_label`}, ${extIdOf(ctx.srcExpr!)} AS ${`${prefix}_src`}, ${extIdOf(ctx.tgtExpr!)} AS ${`${prefix}_tgt`}, ${framedPropsCtx(ctx)} AS ${`${prefix}_props`}`;
-  if (elem === 'property')
-    return q`${ctx.ownerExpr!} AS ${`${prefix}_owner`}, ${ctx.pkExpr!} AS ${`${prefix}_pk`}, ${ctx.pvExpr!} AS ${`${prefix}_pv`}`;
-  return q`${rid}${extId} AS ${`${prefix}_id`}, ${ctx.labelNameExpr} AS ${`${prefix}_label`}, ${framedPropsCtx(ctx)} AS ${`${prefix}_props`}`;
-}
+/** Columns that frame one element (vertex/edge/property) under `prefix`, with its internal
+ *  rowid — `elementPayload` (plan.ts) is the shared authority; group's element key/value is one
+ *  of its fourteen consumers. */
+const elementSelect = (elem: ElemShape, prefix: string, ctx: ScalarCtx): Expression =>
+  elementPayload(ctx, elem, prefix, true);
 
 /** The SQL expr to GROUP BY / frame an element by identity. */
 const elementIdExpr = (elem: ElemShape, ctx: ScalarCtx): Expression => elem === 'property' ? ctx.pkExpr! : ctx.idExpr;
@@ -128,7 +131,7 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
   const by = classifyBy(keyArgs);
   if (by.kind === 'none') { // bare by() → the element itself is the key
     if (src.elem === 'property') throw new Error('group().by() on a property element is not yet supported');
-    return { desc: { kind: 'element', elem: src.elem }, cols: elementSelect(src.elem, 'k', src.ctx, true), group: elementIdExpr(src.elem, src.ctx) };
+    return { desc: { kind: 'element', elem: src.elem }, cols: elementSelect(src.elem, 'k', src.ctx), group: elementIdExpr(src.elem, src.ctx) };
   }
   if (by.kind === 'key') { // by('name') — first-under-multi for a node
     const pe = scalarProp(src.ctx, by.key);
@@ -402,7 +405,8 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
       joins.push(q` JOIN ${vp} ON ${vp.c.node}=${p.c.id}${keyFilter}`);
       innerCtx = {
         elem: 'property', idExpr: vp.c.id,
-        labelNameExpr: vertexLabelName(vp.c.node), labelMatch: (names) => vertexLabelIn(vp.c.node, names),
+        labelNameExpr: vertexLabelName(vp.c.node), labelPayloadExpr: vertexLabelsJson(vp.c.node),
+        labelMatch: (names) => vertexLabelIn(vp.c.node, names),
         ownerExpr: vp.c.node, pkExpr: vp.c.key, pvExpr: storedValueExpr(vp.c.value, vp.c.vtype), metaExpr: q`json(${vp.c.meta})`,
       };
       innerBulk = parent.traverserLayout.bulk ? p.c[parent.traverserLayout.bulk] : undefined;
@@ -466,7 +470,7 @@ export function lowerGroup(st: LoweringState, isCount: boolean, bys: any[][], sr
   // stream carries a multiplicity (a movement collapse merged convergent walks into (row, N)),
   // else the plain COUNT — identical while bulk≡1, correct after a big fan-out/repeat.
   if (isCount) { val = { kind: 'count' }; valNode = src.bulk ? q`SUM(${src.bulk}) AS gv` : q`COUNT(*) AS gv`; }
-  else if (!valArgs || valArgs.length === 0) { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx, true); }
+  else if (!valArgs || valArgs.length === 0) { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx); }
   else if (src.valReducer === 'count') {
     // Count the productive (non-null marker) child rows, weighted by their carried bulk. The
     // reducer LEFT-JOINs the child rows, so an empty child's null-padded marker contributes 0.
@@ -487,7 +491,7 @@ export function lowerGroup(st: LoweringState, isCount: boolean, bys: any[][], sr
   else if (src.valElement) {
     val = { kind: 'elementList', elem: src.valElement.elem };
     groupBy = false;
-    valNode = elementSelect(src.valElement.elem, 'v', src.valElement.ctx, true);
+    valNode = elementSelect(src.valElement.elem, 'v', src.valElement.ctx);
   }
   else {
     const by = classifyBy(valArgs);
@@ -497,8 +501,8 @@ export function lowerGroup(st: LoweringState, isCount: boolean, bys: any[][], sr
     } else if (by.kind === 'nested') {
       const inner = stepChain(by.nested, st.params);
       const names = inner.map((s) => s.name);
-      if (names.length === 1 && names[0] === 'tail') { val = { kind: 'elementLast', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx, true); }
-      else if (names.length === 1 && names[0] === 'fold') { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx, true); }
+      if (names.length === 1 && names[0] === 'tail') { val = { kind: 'elementLast', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx); }
+      else if (names.length === 1 && names[0] === 'fold') { val = { kind: 'elementList', elem: src.elem }; groupBy = false; valNode = elementSelect(src.elem, 'v', src.ctx); }
       else if (names.length === 1 && names[0] === 'count') { val = { kind: 'count' }; valNode = src.bulk ? q`SUM(${src.bulk}) AS gv` : q`COUNT(*) AS gv`; } // per-key traverser count (weighted like isCount)
       else if (names[names.length - 1] === 'fold')
         throw new Error('this group fold shape is not yet supported by typed child lowering');
@@ -764,7 +768,8 @@ export function lowerProperties(st: ElementStream, step: IRStep): PropertyStream
  *  buildGroupKey.) */
 const propertyCtx = (p: Relation): ScalarCtx => ({
   elem: 'property', idExpr: p.c.vpid,
-  labelNameExpr: vertexLabelName(p.c.owner), labelMatch: (names) => vertexLabelIn(p.c.owner, names),
+  labelNameExpr: vertexLabelName(p.c.owner), labelPayloadExpr: vertexLabelsJson(p.c.owner),
+  labelMatch: (names) => vertexLabelIn(p.c.owner, names),
   ownerExpr: p.c.owner, pkExpr: p.c.pk, pvExpr: p.c.pv, metaExpr: p.c.pmeta,
 });
 

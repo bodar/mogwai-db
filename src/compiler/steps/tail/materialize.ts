@@ -6,13 +6,12 @@
 // expression directly; keeping that compatibility behind this function prevents new
 // readCompiled islands while those leaves are converted to Stream -> Stream lowerers.
 
-import { raw, type Expression, type Query } from '../../../sql/kernel/q.ts';
+import { list, q, raw, type Expression, type Query } from '../../../sql/kernel/q.ts';
 import { perRowColumnOf, readCompiled, STATIC, UNKNOWN, type Compiled, type ListOf, type Shape, type VariantShapeArm } from '../../../sql/kernel/render.ts';
-import { list, q } from '../../../sql/kernel/q.ts';
-import { framedProps, extIdOf, elemTable, labelNameFor, labelNameSub, vertexLabelName } from '../../plan/plan.ts';
 import { edges, nodes } from '../../../sql/schema.ts';
-import { groupResultColumns, pathColumns, recordResultColumns, type ForeignStream, type GroupStream, type ListStream, type MapEntryStream, type MapOf, type MapStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
+import { elemCtx, elementPayloadObject, elemTable, extIdOf, framedProps, labelNameSub, vertexLabelsJson } from '../../plan/plan.ts';
 import type { ElementStream } from '../context/context.ts';
+import { groupResultColumns, pathColumns, recordResultColumns, type ForeignStream, type GroupStream, type ListStream, type MapEntryStream, type MapOf, type MapStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
 
 export function materializeRoot(query: Query, tail: Expression, shape: Shape): Compiled {
   return readCompiled(query, tail, shape);
@@ -60,7 +59,7 @@ export function materializeVariantRoot(stream: VariantStream): Compiled {
     // Each arm reads its own label: the vertex correlates into vertex_labels and picks,
     // the edge reads its inline column. The old single `LEFT JOIN labels` keyed on
     // COALESCE(n.label, e.label) is gone with nodes.label.
-    const labelParts = [n && q`WHEN 2 THEN ${vertexLabelName(n.c.id)}`, e && q`WHEN 3 THEN ${labelNameSub(e.c.label)}`].filter(Boolean) as Expression[];
+    const labelParts = [n && q`WHEN 2 THEN ${vertexLabelsJson(n.c.id)}`, e && q`WHEN 3 THEN ${labelNameSub(e.c.label)}`].filter(Boolean) as Expression[];
     const propParts = [n && q`WHEN 2 THEN json(${framedProps(n, 'vertex')})`, e && q`WHEN 3 THEN json(${framedProps(e, 'edge')})`].filter(Boolean) as Expression[];
     cols.push(q`CASE ${v.c.vk} ${list(idParts, ' ')} END AS id`);
     cols.push(q`CASE ${v.c.vk} ${list(labelParts, ' ')} END AS label`);
@@ -78,10 +77,7 @@ export function materializeVariantRoot(stream: VariantStream): Compiled {
  * downstream unfold; only the root wire projection expands it. */
 function elementListResult(listExpr: Expression, elem: 'vertex' | 'edge'): Expression {
   const n = elemTable(elem).as('n');
-  const lbl = labelNameFor(n, elem);
-  const object = elem === 'edge'
-    ? q`json_object('id', COALESCE(${n.c.uid}, ${n.c.id}), 'label', ${lbl}, 'src', ${extIdOf(n.c.src)}, 'tgt', ${extIdOf(n.c.tgt)}, 'props', json(${framedProps(n, elem)}))`
-    : q`json_object('id', COALESCE(${n.c.uid}, ${n.c.id}), 'label', ${lbl}, 'props', json(${framedProps(n, elem)}))`;
+  const object = elementPayloadObject(elemCtx(n, elem), elem);
   const expanded = q`json_each(json(${listExpr})) AS j JOIN ${n} ON ${n.c.id}=j.value`;
   return q`json(COALESCE((SELECT json_group_array(${object} ORDER BY j.key) FROM ${expanded}), json('[]')))`;
 }
@@ -137,10 +133,7 @@ export function materializeListRoot(stream: ListStream): Compiled {
  * nodes/edges + labels; NULL rowid → SQL NULL (framed as a null value). */
 function elementValueResult(ridExpr: Expression, elem: 'vertex' | 'edge'): Expression {
   const n = elemTable(elem).as('en');
-  const lbl = labelNameFor(n, elem);
-  const object = elem === 'edge'
-    ? q`json_object('id', COALESCE(${n.c.uid}, ${n.c.id}), 'label', ${lbl}, 'src', ${extIdOf(n.c.src)}, 'tgt', ${extIdOf(n.c.tgt)}, 'props', json(${framedProps(n, elem)}))`
-    : q`json_object('id', COALESCE(${n.c.uid}, ${n.c.id}), 'label', ${lbl}, 'props', json(${framedProps(n, elem)}))`;
+  const object = elementPayloadObject(elemCtx(n, elem), elem);
   return q`(SELECT ${object} FROM ${n} WHERE ${n.c.id}=${ridExpr})`;
 }
 
@@ -234,7 +227,9 @@ export function materializePathRoot(stream: PathStream): Compiled {
  * framer ready payload. */
 export function materializeForeignRoot(stream: ForeignStream): Compiled {
   const p = stream.rel.as('p');
-  const cols: Expression[] = [q`${p.c.fid} AS id`, q`${p.c.flabel} AS label`];
+  // The wire's label field is the PAYLOAD form (all labels for a vertex, the name for an edge),
+  // so it reads `flabels` — the landed set — not the scalar `flabel` that label() reads.
+  const cols: Expression[] = [q`${p.c.fid} AS id`, q`${stream.elem === 'edge' ? p.c.flabel : p.c.flabels} AS label`];
   if (stream.elem === 'edge') cols.push(q`${p.c.fsrc} AS src`, q`${p.c.ftgt} AS tgt`);
   cols.push(q`json(${p.c.fprops}) AS props`);
   return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${p}`, { kind: stream.elem });

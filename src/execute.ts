@@ -1,11 +1,12 @@
-import { compilePlan, staticTypeOf, type Compiled, type WritePlan, type ListOf, type MapEntry, type MapOf, type ElemShape, type GroupKey, type GroupVal, type PathPos, type ScalarType, type ValueType, type FastPathConfig } from './compiler/compiler.ts';
-import { hasSerializer, isCollectionType, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
-import type { GraphStore } from './storage.ts';
-import type { ServiceRegistry } from './services/spi/types.ts';
 import type { Executor as ExecutorApi, ForeignRow } from './api.ts';
-import type { Plan, FederationSource } from './compiler/segment.ts';
+import { DEFAULT_VERTEX_LABEL } from './api.ts';
+import { compilePlan, staticTypeOf, type Compiled, type ElemShape, type FastPathConfig, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type ValueType, type WritePlan } from './compiler/compiler.ts';
+import type { FederationSource, Plan } from './compiler/segment.ts';
+import { hasSerializer, isCollectionType, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
+import { ioc, Property, t, VertexProperty } from './io.ts';
 import { createAppScope, type AppScope } from './scopes.ts';
-import { ioc, VertexProperty, Property, t } from './io.ts';
+import type { ServiceRegistry } from './services/spi/types.ts';
+import type { GraphStore } from './storage.ts';
 
 // ---- GraphBinary v4 result framing ----
 // This module is CONCERN B — execute + frame. `executeQuery` compiles a traversal,
@@ -30,18 +31,39 @@ import { ioc, VertexProperty, Property, t } from './io.ts';
 // propNodeExpr). We hand-roll every VertexProperty (value via frameTypedNode → its EXACT
 // GraphBinary type) instead of routing through the client's VertexPropertySerializer, which
 // re-infers the value type from its JS runtime value (the #5 bug).
-function vertexBuffer(id: number, label: string, props: Record<string, ValueNode[]>): Buffer {
+function vertexBuffer(id: number, labels: readonly string[], props: Record<string, ValueNode[]>): Buffer {
   let pid = 0;
   const vprops: Buffer[] = [];
   for (const [k, nodes] of Object.entries(props))
     for (const node of nodes) vprops.push(vertexPropertyBuffer(`${id}.${pid++}`, k, frameTypedNode(node), null));
   return Buffer.concat([
     Buffer.from([ioc.DataType.VERTEX, 0x00]),
-    ioc.anySerializer.serialize(id),            // {id}, fully qualified
-    ioc.listSerializer.serialize([label], false), // {label}, bare list of one
-    listBuffer(vprops),                           // {properties}: qualified LIST of hand-framed VertexProperty
+    ioc.anySerializer.serialize(id),                 // {id}, fully qualified
+    ioc.listSerializer.serialize([...labels], false), // {label}: a bare list of EVERY label
+    listBuffer(vprops),                               // {properties}: qualified LIST of hand-framed VertexProperty
   ]);
 }
+
+/** A vertex's label PAYLOAD → its label list. Every producer emits ALL of a vertex's labels
+ *  (`labelPayloadFor`, plan.ts), because GraphBinary's `{label}` field IS a list and the client
+ *  reads all of it — `VertexSerializer.deserializeValue` keeps `labels` and derives `.label` from
+ *  `labels[0]`.
+ *
+ *  TWO producer forms, both deterministic, neither sniffed: a relation COLUMN arrives as JSON
+ *  TEXT (SQLite's JSON subtype does not survive the value boundary), while a member of a
+ *  `json_object` payload (a materialized list item, a Map.Entry side) arrives ALREADY PARSED as an
+ *  array, because `elementPayloadObject` pins the subtype with `json()` so it nests. Anything else
+ *  throws here rather than silently framing a one-label vertex. */
+const labelsOf = (payload: string | string[]): string[] => Array.isArray(payload) ? payload : JSON.parse(payload);
+
+/** The two label fields a detached VERTEX carries across a federated hop, from the one payload
+ *  column: `labels` is the set the far side frames, `label` the scalar pick `Element.label()`
+ *  promises and the mid-traversal rejoin matches on. A zero-label vertex reports the default name
+ *  rather than `undefined` — the same fallback the write path applies. */
+const foreignLabels = (payload: string) => {
+  const labels = labelsOf(payload);
+  return { label: labels[0] ?? DEFAULT_VERTEX_LABEL, labels };
+};
 
 // Custom edge framing to MATERIALIZE properties — EdgeSerializer.serialize
 // hardcodes an empty property list, exactly like VertexSerializer. Wire layout
@@ -282,14 +304,14 @@ const framePropertyRow = (x: any): Buffer =>
 // Frame a vertex/edge from a plain (unprefixed) result row — the id/label/props
 // (+ src/tgt) projection the vertex/edge/list shapes share.
 const propsOf = (props: any): Record<string, any> => typeof props === 'string' ? JSON.parse(props) : props;
-const rowVertex = (r: any): Buffer => vertexBuffer(r.id, r.label, propsOf(r.props));
+const rowVertex = (r: any): Buffer => vertexBuffer(r.id, labelsOf(r.label), propsOf(r.props));
 const rowEdge = (r: any): Buffer => edgeBuffer(r.id, r.label, r.src, r.tgt, propsOf(r.props));
 
 // Frame one element (vertex/edge/property) from prefixed columns (k_* / v_*).
 function elementBuffer(r: any, prefix: string, elem: ElemShape): Buffer {
   if (elem === 'edge') return edgeBuffer(r[`${prefix}_id`], r[`${prefix}_label`], r[`${prefix}_src`], r[`${prefix}_tgt`], JSON.parse(r[`${prefix}_props`]));
   if (elem === 'property') return propertyBuffer(r[`${prefix}_owner`], r[`${prefix}_pk`], r[`${prefix}_pv`]);
-  return vertexBuffer(r[`${prefix}_id`], r[`${prefix}_label`], JSON.parse(r[`${prefix}_props`]));
+  return vertexBuffer(r[`${prefix}_id`], labelsOf(r[`${prefix}_label`]), JSON.parse(r[`${prefix}_props`]));
 }
 
 // path(): one GraphBinary Path per row (mirrors PathSerializer). {objects} is
@@ -540,7 +562,7 @@ function* frameResolved(store: GraphStore, plan: Compiled | WritePlan): Generato
     for (const r of plan.run(store)) {
       // Write responses carry a flat {key:value} prop bag; vertexBuffer wants
       // {key:[values]}, so wrap each value in a 1-list (single-cardinality write).
-      if ('vertex' in r) yield { buf: vertexBuffer(r.vertex.id, r.vertex.label,
+      if ('vertex' in r) yield { buf: vertexBuffer(r.vertex.id, r.vertex.labels,
         Object.fromEntries(Object.entries(r.vertex.props as Record<string, any>).map(([k, v]) => [k, [v]]))), bulk: 1n };
       else {
         const e = r.edge;
@@ -721,7 +743,7 @@ export class Executor implements ExecutorApi {
       throw new Error('federated traversal must be a read that yields vertices or edges, not a write');
     const rows = this.store.query(plan.sql, plan.binds) as any[];
     if (plan.shape.kind === 'vertex')
-      return rows.map((r) => ({ kind: 'vertex', id: r.id, label: r.label, props: propsOf(r.props) }));
+      return rows.map((r) => ({ kind: 'vertex', id: r.id, ...foreignLabels(r.label), props: propsOf(r.props) }));
     if (plan.shape.kind === 'edge')
       return rows.map((r) => ({ kind: 'edge', id: r.id, label: r.label, src: r.src, tgt: r.tgt, props: propsOf(r.props) }));
     throw new Error(`federated traversal must yield vertices or edges (detached references), not a ${plan.shape.kind} result`);
@@ -766,6 +788,6 @@ export class Executor implements ExecutorApi {
     const inj = (r: any) => ('injVal' in r ? { injectedValue: r.injVal } : {});
     if (head.shape.kind === 'edge')
       return rows.map((r) => ({ kind: 'edge', id: r.id, label: r.label, src: r.src, tgt: r.tgt, props: propsOf(r.props), ordinal: r.o, ...inj(r) }));
-    return rows.map((r) => ({ kind: 'vertex', id: r.id, label: r.label, props: propsOf(r.props), ordinal: r.o, ...inj(r) }));
+    return rows.map((r) => ({ kind: 'vertex', id: r.id, ...foreignLabels(r.label), props: propsOf(r.props), ordinal: r.o, ...inj(r) }));
   }
 }

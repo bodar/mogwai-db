@@ -21,6 +21,14 @@ paths:
   complete buffer, so those awaits never do I/O.
 - **The client's vertex/edge/VP serializers hardcode empty properties** — so we hand-roll that
   framing in `execute.ts`. Don't route elements through the stock serializers expecting props.
+- **A VERTEX element's `{label}` is a LIST and carries EVERY label, unconditionally.** The client
+  reads all of it (`VertexSerializer.deserializeValue` keeps `labels`, derives `.label` from
+  `labels[0]`), so `with("multilabel")`/`with("singlelabel")` do NOT reach here — they govern how
+  `elementMap()`/`valueMap(true)` render a `T.label` ENTRY (`labelTokenFor`), which is a different
+  question. The producer side is `labelPayloadFor` + the one `elementPayload` builder
+  (`compiler/plan/plan.ts`); the framer takes a `string[]`. Framing a list of one is the silent
+  failure mode this replaced, and **no `.feature` can catch it** — Gherkin's `v[x]` compares by id,
+  so the assertion lives in `test/multilabel-wire.test.ts` and decodes with the client's reader.
 - **`iterate()` = trailing `.discard()`** — strip it, execute, return no values.
 - **DO SQLite has no user-defined functions, and we do NOT filter in JS.** Anything SQL can't
   express (`regex`/`typeOf`) fails closed with a deferral (root CLAUDE.md decision #3). Text SQL

@@ -1,19 +1,19 @@
 import { gtypeName, isNested } from '../../../gremlin/frontend.ts';
-import { q, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { nodes } from '../../../sql/schema.ts';
-import { framedProps, predicateSql, extIdOf, elemCtx, aliasCtx, scalarProp, type ScalarCtx, elemTable, labelNameFor, vertexLabelName } from '../../plan/plan.ts';
-import { type IRStep } from '../../ir/strategies.ts';
-import { layoutProjection, layoutCols, scopePathCols, dropLayoutAtBarrier, withoutPath, type TraverserLayout, type ElementStream } from '../context/context.ts';
-import { loweringStateOf, continueLowering, pathColumns, toListStream, toPathStream, type ListStream, type LoweringResult, type PathStream, type ScalarStream } from '../context/stream.ts';
-import { compileFromList } from './list.ts';
+import { empty, list, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { type PathPos } from '../../../sql/kernel/render.ts';
+import { nodes } from '../../../sql/schema.ts';
+import { EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, VERTEX_MOVES, unionOf } from '../../ir/step.ts';
+import { type IRStep } from '../../ir/strategies.ts';
+import { aliasCtx, elemCtx, elemTable, elementPayload, predicateSql, scalarProp, type ScalarCtx } from '../../plan/plan.ts';
+import { dropLayoutAtBarrier, layoutCols, layoutProjection, scopePathCols, withoutPath, type ElementStream, type TraverserLayout } from '../context/context.ts';
+import { continueLowering, loweringStateOf, pathColumns, toListStream, toPathStream, type ListStream, type LoweringResult, type PathStream, type ScalarStream } from '../context/stream.ts';
+import { tryLowerScalarChoose, tryLowerScalarCoalesce } from '../prefix/branch.ts';
+import { lowerGlobalCount } from './barrier.ts';
+import { byAt, childCtx, childSteps, classifyBy, classifyScalarChild, reuseCurrentFrame, type ChildFrame, type ChildScope } from './child-shape.ts';
+import { pushChildScope, tryCompileScalarValueChild } from './child.ts';
+import { compileFromList } from './list.ts';
 import { type TailAcc } from './projection.ts';
 import { reRootElement } from './select.ts';
-import { pushChildScope, tryCompileScalarValueChild } from './child.ts';
-import { lowerGlobalCount } from './barrier.ts';
-import { byAt, childCtx, classifyBy, childSteps, classifyScalarChild, reuseCurrentFrame, type ChildFrame, type ChildScope } from './child-shape.ts';
-import { tryLowerScalarChoose, tryLowerScalarCoalesce } from '../prefix/branch.ts';
-import { VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, unionOf } from '../../ir/step.ts';
 
 // ---------- path() (linear regime) ----------
 
@@ -197,15 +197,8 @@ export function lowerPath(st: ElementStream, proj: IRStep, acc: TailAcc): PathSt
     joins.push(q` ${jn} ${tbl} ON ${tbl.c.id}=${p.c[pos.col]}`);
     const pe = positionScalar(elemCtx(tbl, pos.elem), byOf(i));
     if (pe === undefined) {
-      const lbl = labelNameFor(tbl, pos.elem);
-      const extId = q`COALESCE(${tbl.c.uid}, ${tbl.c.id})`;
-      if (pos.elem === 'edge') {
-        // Endpoints as external ids (see the __element edge projector).
-        cols.push(q`${extId} AS ${`${prefix}_id`}, ${lbl} AS ${`${prefix}_label`}, ${extIdOf(tbl.c.src)} AS ${`${prefix}_src`}, ${extIdOf(tbl.c.tgt)} AS ${`${prefix}_tgt`}, ${framedProps(tbl, 'edge')} AS ${`${prefix}_props`}`);
-        return { render: 'element', elem: 'edge', prefix };
-      }
-      cols.push(q`${extId} AS ${`${prefix}_id`}, ${lbl} AS ${`${prefix}_label`}, ${framedProps(tbl, 'vertex')} AS ${`${prefix}_props`}`);
-      return { render: 'element', elem: 'vertex', prefix };
+      cols.push(elementPayload(elemCtx(tbl, pos.elem), pos.elem, prefix));
+      return { render: 'element', elem: pos.elem, prefix };
     }
     // by(key/T.token): one scalar per position. A missing value drops the whole path
     // (ProductiveBy retains an explicit NULL position instead).
@@ -344,7 +337,7 @@ function compilePathArray(st: ElementStream, proj: IRStep, acc: TailAcc): PathSt
     ? q`SELECT pp.pk, je.key AS ord, ${posValue(q`je.value`)!} AS v FROM ${paths} pp, json_each(pp.path) je ORDER BY pp.pk, je.key`
     : (() => {
         const n = nodes.as('n');
-        return q`SELECT pp.pk, je.key AS ord, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${vertexLabelName(n.c.id)} AS label, ${framedProps(n, 'vertex')} AS props FROM ${paths} pp, json_each(pp.path) je JOIN ${n} ON ${n.c.id}=je.value ORDER BY pp.pk, je.key`;
+        return q`SELECT pp.pk, je.key AS ord, ${elementPayload(elemCtx(n, 'vertex'), 'vertex')} FROM ${paths} pp, json_each(pp.path) je JOIN ${n} ON ${n.c.id}=je.value ORDER BY pp.pk, je.key`;
       })();
   const rel = st.q.cte(node, pathColumns(layout));
   return toPathStream(dropLayoutAtBarrier(loweringStateOf(st)), rel, layout);

@@ -131,10 +131,16 @@ before any behaviour changes and never has to change again.
 
 Read off the code, not assumed. Each removes a phase someone would otherwise plan:
 
-- **The wire needs no change.** GraphBinary already frames an element's label as a LIST, and
-  `vertexBuffer`/`edgeBuffer` (`src/execute.ts:41,60`) already write `[label]` — a bare list of one,
+- **The wire FORMAT needs no change.** GraphBinary already frames an element's label as a LIST, and
+  `vertexBuffer`/`edgeBuffer` (`src/execute.ts`) already write `[label]` — a bare list of one,
   with the comment saying so. Upstream's `EdgeSerializer`/`GraphSerializer` read and write
   `List<String>` for the same reason. Multi-label reads are a longer list in a field already a list.
+  **CORRECTED 2026-07-30 (post-landing): "no format change" is not "no work".** The field being a
+  list meant nothing while every PRODUCER of the vertex `label` column was a scalar pick — the
+  element framed a truthful list of one label out of four. Getting the set there needed a fourth
+  position in the label seam (PAYLOAD, `labelPayloadFor`) and one shared builder for the payload
+  tuple, `elementPayload` (`plan.ts`), replacing fourteen hand-written copies. Read this bullet as
+  scoping out a SERIALIZER change, which it correctly did, and not the producer side.
 - **The label is already an interned id**, resolved through `labelIn` (`plan/plan.ts:32`). A label
   *set* extends an indirection that exists.
 - **`label()` is deprecated but live**, and on a multi-label vertex returns an arbitrary one of them

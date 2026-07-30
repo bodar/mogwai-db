@@ -4,7 +4,7 @@ import type { FastPath } from '../options/fast-paths.ts';
 import { normalizeTypeName, BigDecimal, Duration } from '../../gremlin/types.ts';
 import { nodes, edges, labels, vertexLabels } from '../../sql/schema.ts';
 import type { LabelRegime } from '../../api.ts';
-import { type ScalarType, type ValueType } from '../../sql/kernel/render.ts';
+import { type ElemShape, type ScalarType, type ValueType } from '../../sql/kernel/render.ts';
 
 // ---------- SQL node builders ----------
 //
@@ -44,10 +44,12 @@ export function labelIn(col: Expression | string, names: any[]): Expression {
 // label goes through one of the four builders below, and the split between them is the
 // load-bearing distinction:
 //
-//   SCALAR position  (label(), by(T.label), elementMap's T.label token, path/select/group
-//                     framing) → labelNameFor / vertexLabelName. These PICK one label.
+//   SCALAR position  (label(), by(T.label), order/group keys) → labelNameFor /
+//                     vertexLabelName. These PICK one label.
 //   PREDICATE        (hasLabel, has(T.label,…), the 3-arg has overload) → labelMatchFor /
 //                     vertexLabelIn. These match ANY label.
+//   PAYLOAD          (an ELEMENT on the wire, and elementMap()/valueMap(true)'s T.label token)
+//                     → labelPayloadFor / labelTokenFor. These carry ALL of them.
 //   FAN-OUT          (labels(), one row per label) → the ONLY place allowed to join
 //                     vertex_labels into a relation.
 //
@@ -69,12 +71,30 @@ export const vertexLabelName = (nodeIdExpr: Expression): Expression =>
 export const vertexLabelNames = (nodeIdExpr: Expression): Expression =>
   q`(SELECT json_group_array(${labels.c.name}) FROM ${vertexLabels} JOIN ${labels} ON ${labels.c.id}=${vertexLabels.c.label} WHERE ${vertexLabels.c.node}=${nodeIdExpr} ORDER BY ${vertexLabels.c.label})`;
 
+/** `vertexLabelNames` made TOTAL: a vertex with no labels at all (LabelCardinality.ZERO_OR_MORE)
+ *  has no `vertex_labels` rows, and `json_group_array` over no rows is NULL, not `[]`. */
+export const vertexLabelsJson = (nodeIdExpr: Expression): Expression =>
+  q`COALESCE(${vertexLabelNames(nodeIdExpr)}, json_array())`;
+
 /** The `T.label` expression for a map shape under `regime`, plus an EDGE's single-label form
  *  (an edge carries exactly one, so a set of one is still framed as a set when asked). */
 export const labelTokenFor = (n: Relation, elem: Elem, regime: LabelRegime): Expression =>
   regime === 'single' ? labelNameFor(n, elem)
   : elem === 'edge' ? q`json_array(${labelNameSub(n.c.label)})`
-  : q`COALESCE(${vertexLabelNames(n.c.id)}, json_array())`;
+  : vertexLabelsJson(n.c.id);
+
+/** The label field of an ELEMENT payload: a JSON array of every name for a vertex, the bare name
+ *  for an edge (TinkerPop fixes edge label cardinality at ONE).
+ *
+ *  The PAYLOAD position, and the one that was missing — a vertex element used to be filed under
+ *  SCALAR, so `g.V()` over a multi-label vertex framed one label where the graph held several.
+ *  GraphBinary's `{label}` field IS a list and the client reads the whole thing
+ *  (`VertexSerializer.deserializeValue` keeps `labels` and derives `.label` from `labels[0]`), so
+ *  this is UNCONDITIONAL — there is no `LabelRegime` here. `with("singlelabel")` governs how
+ *  elementMap()/valueMap(true) RENDER a `T.label` entry, which is `labelTokenFor`'s job; it says
+ *  nothing about what a vertex element carries. */
+export const labelPayloadFor = (n: Relation, elem: Elem): Expression =>
+  elem === 'edge' ? labelNameSub(n.c.label) : vertexLabelsJson(n.c.id);
 
 /** ANY of a vertex's labels is in `names`. Written as `<id> IN (SELECT node …)` so it seeks
  *  `vl_label(label, node)` and reads the node ids straight off the index. Correct under both
@@ -526,6 +546,8 @@ export interface ScalarCtx {
   // table (scalarProp/hasProp dispatch on elem) — there is no flat-blob propsExpr.
   /** The element's label NAME as a scalar (a vertex PICKS one of its set). */
   labelNameExpr: Expression;
+  /** The element's label as a wire PAYLOAD — ALL of them (see `labelPayloadFor`). */
+  labelPayloadExpr: Expression;
   /** ANY-label membership test — hasLabel/has(T.label) semantics under multi-label. */
   labelMatch: (names: any[]) => Expression;
   srcExpr?: Expression;      // n.src  (edge)
@@ -549,7 +571,8 @@ export interface ScalarCtx {
 export function elemCtx(n: Relation, elem: Elem): ScalarCtx {
   return {
     elem, idExpr: n.c.id, extIdExpr: q`COALESCE(${n.c.uid}, ${n.c.id})`,
-    labelNameExpr: labelNameFor(n, elem), labelMatch: (names) => labelMatchFor(n, elem, names),
+    labelNameExpr: labelNameFor(n, elem), labelPayloadExpr: labelPayloadFor(n, elem),
+    labelMatch: (names) => labelMatchFor(n, elem, names),
     ...(elem === 'edge' ? { srcExpr: n.c.src, tgtExpr: n.c.tgt } : {}),
   };
 }
@@ -569,6 +592,7 @@ export function aliasCtx(idExpr: Expression, elem: Elem): ScalarCtx {
     elem, idExpr,
     extIdExpr: sub('COALESCE(uid, id)'),
     labelNameExpr: elem === 'edge' ? labelNameSub(sub('label')) : vertexLabelName(idExpr),
+    labelPayloadExpr: elem === 'edge' ? labelNameSub(sub('label')) : vertexLabelsJson(idExpr),
     labelMatch: (names) => elem === 'edge' ? labelIn(sub('label'), names) : vertexLabelIn(idExpr, names),
     ...(elem === 'edge' ? { srcExpr: sub('src'), tgtExpr: sub('tgt') } : {}),
   };
@@ -582,6 +606,54 @@ export function aliasCtx(idExpr: Expression, elem: Elem): ScalarCtx {
  *  identical to the write path's (write.ts nodeExtId), instead of leaking the raw
  *  rowid that diverges from the user-supplied id. */
 export const extIdOf = (rowid: Expression): Expression => q`(SELECT COALESCE(uid, id) FROM nodes WHERE id=${rowid})`;
+
+// ---------- the element payload seam ----------
+//
+// An element on the wire is a FIXED tuple — id, label, (src, tgt for an edge), props — and it was
+// spelled out by hand at fourteen sites. They had already drifted: two of them emitted an edge's
+// endpoints as INTERNAL rowids where the other twelve resolve them to external ids. Multi-label
+// then had to be threaded through every one of them, which is the point at which a copied row-op
+// stops being a style question. So the tuple gets ONE authority.
+//
+// `elemColumns`/`recordFieldColumns`/`pathColumns` (steps/context/stream.ts) NAME these columns;
+// these build them, in the same order. Everything is derived from a `ScalarCtx` rather than a
+// Relation so the correlated positions (an as()-bound alias, a recursive walk row, a group key)
+// share it with the direct ones — `elemCtx(n, elem)` is the Relation adapter.
+
+const payloadCol = (prefix: string, name: string): string => prefix ? `${prefix}_${name}` : name;
+
+/** `expr AS name, …` for one element. `prefix` gives `e0_id`-style names ('' → bare `id`); `rid`
+ *  prepends the INTERNAL rowid that a re-enterable record/group field carries so a later
+ *  `select(Column.values)`/`unfold()` can rejoin even when the external id is a string uid. */
+export function elementPayload(ctx: ScalarCtx, elem: ElemShape, prefix = '', rid = false): Expression {
+  const as = (e: Expression, name: string) => q`${e} AS ${payloadCol(prefix, name)}`;
+  if (elem === 'property')
+    return list([as(ctx.ownerExpr!, 'owner'), as(ctx.pkExpr!, 'pk'), as(ctx.pvExpr!, 'pv')], ', ');
+  return list([
+    ...(rid ? [as(ctx.idExpr, 'rid')] : []),
+    as(ctx.extIdExpr ?? ctx.idExpr, 'id'),
+    as(ctx.labelPayloadExpr, 'label'),
+    // Endpoints as EXTERNAL ids, so the read path's edge endpoints match the write path's.
+    ...(elem === 'edge' ? [as(extIdOf(ctx.srcExpr!), 'src'), as(extIdOf(ctx.tgtExpr!), 'tgt')] : []),
+    as(framedPropsCtx(ctx), 'props'),
+  ], ', ');
+}
+
+/** The same payload as a `json_object(…)` — the form a materialized list member or a Map.Entry
+ *  key/value carries, where the element rides inside a JSON value rather than as columns. */
+export function elementPayloadObject(ctx: ScalarCtx, elem: Elem): Expression {
+  return q`json_object(${list([
+    q`'id', ${ctx.extIdExpr ?? ctx.idExpr}`,
+    // A VERTEX's label payload is a JSON array, and `json()` pins SQLite's JSON SUBTYPE on it so
+    // json_object NESTS it rather than quoting it as a string — the column form has no subtype to
+    // carry, so the two producers hand the framer an array and a JSON string respectively, and
+    // `labelsOf` takes both. Without the explicit json() this rides on the subtype surviving
+    // COALESCE, which is not a guarantee worth depending on.
+    elem === 'edge' ? q`'label', ${ctx.labelPayloadExpr}` : q`'label', json(${ctx.labelPayloadExpr})`,
+    ...(elem === 'edge' ? [q`'src', ${extIdOf(ctx.srcExpr!)}`, q`'tgt', ${extIdOf(ctx.tgtExpr!)}`] : []),
+    q`'props', json(${framedPropsCtx(ctx)})`,
+  ], ', ')})`;
+}
 
 // ---------- W4 property source seam (vertex_properties table vs edge JSONB) ----------
 //

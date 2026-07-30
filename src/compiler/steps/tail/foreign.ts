@@ -35,6 +35,7 @@ export type { ForeignStream } from '../context/stream.ts';
 function foreignValuesRow(r: ForeignRow, extra: readonly (string | number)[]): Expression {
   const cells: Expression[] = [value(String(r.id)), value(r.label)];
   if (r.kind === 'edge') cells.push(value(String(r.src)), value(String(r.tgt)));
+  else cells.push(value(JSON.stringify(r.labels)));
   cells.push(value(JSON.stringify(r.props)));
   for (const x of extra) cells.push(value(x));
   return q`(${list(cells, ', ')})`;

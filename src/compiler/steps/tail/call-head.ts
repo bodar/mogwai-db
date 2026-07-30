@@ -1,10 +1,10 @@
-import { q, empty, type Expression } from '../../../sql/kernel/q.ts';
-import { framedProps, extIdOf, elemTable, labelNameFor } from '../../plan/plan.ts';
+import { empty, q, type Expression } from '../../../sql/kernel/q.ts';
 import { type Compiled } from '../../../sql/kernel/render.ts';
-import { materializeRoot } from './materialize.ts';
+import { elemCtx, elementPayload, elemTable } from '../../plan/plan.ts';
 import { type ElementStream } from '../context/context.ts';
-import { pushChildScope, tryCompileScalarValueChild } from './child.ts';
 import { type ChildFrame, type ChildFrameStack } from './child-shape.ts';
+import { pushChildScope, tryCompileScalarValueChild } from './child.ts';
+import { materializeRoot } from './materialize.ts';
 
 // ---------- the mid-traversal barrier call() HEAD (Phase 6b) ----------
 //
@@ -39,11 +39,7 @@ export function buildCallHead(parent: ElementStream, scope: ChildFrameStack, inj
   const elem = parent.elem;
   const d = pushed.frame.domain.as('d');
   const n = elemTable(elem).as('n');
-  const lbl = labelNameFor(n, elem);
-  const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
-  const payload = elem === 'edge'
-    ? q`${extId} AS id, ${lbl} AS label, ${extIdOf(n.c.src)} AS src, ${extIdOf(n.c.tgt)} AS tgt, ${framedProps(n, 'edge')} AS props`
-    : q`${extId} AS id, ${lbl} AS label, ${framedProps(n, 'vertex')} AS props`;
+  const payload = elementPayload(elemCtx(n, elem), elem);
   const elemJoin = q`${d} JOIN ${n} ON ${n.c.id}=${d.c.id}`;
 
   const ord = pushed.frame.ordinal;

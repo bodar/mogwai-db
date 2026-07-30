@@ -1,31 +1,38 @@
-import { q, value, list, empty, raw, Relation, type Expression } from '../../../sql/kernel/q.ts';
-import { labels, vertexLabels, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
 import { gtypeName, isColumnArg, isNested, isOrderArg, isScopeArg, isTokenArg } from '../../../gremlin/frontend.ts';
-import { elementOrderDrop, orderProductivityFilter } from './modulation.ts';
-import {
-    predicateSql, rangeToOffsetLimit, elemCtx, extIdOf, jsonbGroupArray,
-    nodePropSortKey, edgePropSortKey, scalarPropSortKey,
-    framedProps, valueMapProps, storedValueExpr, labelNameFor, labelTokenFor
-} from '../../plan/plan.ts';
-import { type IRStep } from '../../ir/strategies.ts';
-import { appendCte, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, partitionOver, dropLayoutAtBarrier, type ElementStream } from '../context/context.ts';
-import { loweringStateOf, continueLowering, dispatchShapeTail, toElementStream, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
-import { tryLowerLocalAggregate, lowerScalarAggregate } from '../prefix/sideeffect.ts';
-import { PER_ROW, STATIC, UNKNOWN, staticTypeOf, type Shape } from '../../../sql/kernel/render.ts';
-import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
-import { lowerScalarFilter, lowerConstant, lowerScalarConstant, lowerScalarSack, lowerScalarSplit, collectionTypeOf, scalarCollectionRetype, scalarMapRetype } from './scalar.ts';
-import { compileSelectProject, tryCompileRecordChild, lowerRecordSelectProject, lowerScalarProject, lowerSingleSelect } from './select.ts';
-import { lowerPath } from './path.ts';
-import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, lowerConcatScalar, lowerDateDiffScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
-import { choose as lowerElementChoose, coalesce as lowerElementCoalesce, flatMap as lowerElementFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, tryLowerOptionMapBranch, union as lowerElementUnion } from '../prefix/branch.ts';
-import { elementGroupSource, lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, tryCompileMapChild } from './group.ts';
-import { tryCompileCountChild, tryCompileBranchChildAllCard, tryCompileListChild, tryCompileScalarModulations, type ScalarModulationSpec } from './child.ts';
-import { tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './scalar-arm.ts';
-import { BRANCH_SHAPE_ORDER, childCtx, childSteps, classifyBy, classifyListChild, classifyTotalScalarChild, isScalarChild, ROOT_SCOPE, type BranchKind, type ByClass } from './child-shape.ts';
-import { lowerElementDedup } from '../prefix/filter.ts';
-import { lowerReSource } from '../graph-source.ts';
-import { lowerCall } from './call.ts';
+import { empty, list, q, raw, Relation, value, type Expression } from '../../../sql/kernel/q.ts';
+import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type Shape } from '../../../sql/kernel/render.ts';
+import { edgeProperties, labels, vertexLabels, vertexProperties } from '../../../sql/schema.ts';
 import { engineOf } from '../../engine/deps.ts';
+import { type IRStep } from '../../ir/strategies.ts';
+import {
+    edgePropSortKey,
+    elemCtx,
+    elementPayload,
+    jsonbGroupArray,
+    labelNameFor, labelTokenFor,
+    nodePropSortKey,
+    predicateSql, rangeToOffsetLimit,
+    scalarPropSortKey,
+    storedValueExpr,
+    valueMapProps
+} from '../../plan/plan.ts';
+import { appendCte, dropLayoutAtBarrier, elemRel, layoutCols, layoutProjection, layoutProjectionMinting, partitionOver, patchLayout, type ElementStream } from '../context/context.ts';
+import { continueLowering, dispatchShapeTail, loweringStateOf, toElementStream, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
+import { lowerReSource } from '../graph-source.ts';
+import { choose as lowerElementChoose, coalesce as lowerElementCoalesce, flatMap as lowerElementFlatMap, union as lowerElementUnion, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerOptionMapBranch, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion } from '../prefix/branch.ts';
+import { lowerElementDedup } from '../prefix/filter.ts';
+import { lowerScalarAggregate, tryLowerLocalAggregate } from '../prefix/sideeffect.ts';
+import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
+import { lowerCall } from './call.ts';
+import { BRANCH_SHAPE_ORDER, childCtx, childSteps, classifyBy, classifyListChild, classifyTotalScalarChild, isScalarChild, ROOT_SCOPE, type BranchKind, type ByClass } from './child-shape.ts';
+import { tryCompileBranchChildAllCard, tryCompileCountChild, tryCompileListChild, tryCompileScalarModulations, type ScalarModulationSpec } from './child.ts';
+import { elementGroupSource, lowerGroup, lowerProperties, lowerScalarGroupCount, lowerValueMap, tryCompileMapChild } from './group.ts';
+import { lowerChooseOptions, lowerChooseOptionsScalar, lowerConcatScalar, lowerDateDiffScalar, lowerFormat, lowerFormatScalar, lowerMapScalar, lowerMath, lowerMathScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
+import { elementOrderDrop, orderProductivityFilter } from './modulation.ts';
+import { lowerPath } from './path.ts';
+import { tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './scalar-arm.ts';
+import { collectionTypeOf, lowerConstant, lowerScalarConstant, lowerScalarFilter, lowerScalarSack, lowerScalarSplit, scalarCollectionRetype, scalarMapRetype } from './scalar.ts';
+import { compileSelectProject, lowerRecordSelectProject, lowerScalarProject, lowerSingleSelect, tryCompileRecordChild } from './select.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
 //
@@ -1061,11 +1068,11 @@ const PROJECTORS = new Map<string, ProjFn>([
       colsNode: q`${c.extId} AS id, ${c.labelToken} AS label, ${valueMapProps(c.n, c.st.elem)} AS props`, fromNode: c.vJoin,
     };
   }],
-  ['__element', (c) => c.st.elem === 'edge'
-    // Endpoints resolve to external ids (COALESCE(uid,id)) so a materialized edge
-    // reports the SAME src/tgt as the write path — not the raw rowid.
-    ? { shape: { kind: 'edge' }, colsNode: q`${c.extId} AS id, ${c.lbl} AS label, ${extIdOf(c.n.c.src)} AS src, ${extIdOf(c.n.c.tgt)} AS tgt, ${framedProps(c.n, 'edge')} AS props`, fromNode: c.vJoin }
-    : { shape: { kind: 'vertex' }, colsNode: q`${c.extId} AS id, ${c.lbl} AS label, ${framedProps(c.n, 'vertex')} AS props`, fromNode: c.vJoin }],
+  ['__element', (c) => ({
+    shape: { kind: c.st.elem },
+    colsNode: elementPayload(elemCtx(c.n, c.st.elem), c.st.elem),
+    fromNode: c.vJoin,
+  })],
 ]);
 
 /** An order().by(key) resolver over the current element (aliased `n`): node → the

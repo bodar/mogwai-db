@@ -172,9 +172,13 @@ export interface ForeignStream extends LoweringState {
 
 /** The physical payload columns of a ForeignStream relation, in order. `fid`/`flabel`/`fprops`
  *  for a vertex; edges add `fsrc`/`ftgt`. `fprops` is JSON text in the SAME per-key {t,v}-node
- *  shape vertexBuffer/edgeBuffer consume, so root framing reuses the vertex/edge path verbatim. */
+ *  shape vertexBuffer/edgeBuffer consume, so root framing reuses the vertex/edge path verbatim.
+ *
+ *  A VERTEX carries BOTH label forms, because the two positions want different answers: `flabel`
+ *  is the scalar pick that `label()` and the mid-traversal rejoin compare on, `flabels` the JSON
+ *  array the wire payload carries. An edge's label cardinality is ONE, so one column serves both. */
 export const foreignPayload = (elem: Elem): string[] =>
-  elem === 'edge' ? ['fid', 'flabel', 'fsrc', 'ftgt', 'fprops'] : ['fid', 'flabel', 'fprops'];
+  elem === 'edge' ? ['fid', 'flabel', 'fsrc', 'ftgt', 'fprops'] : ['fid', 'flabel', 'flabels', 'fprops'];
 
 /** The rich relational result of a global group()/groupCount() barrier. This keeps
  * terminal element/composite/list layouts honest; simple key/value layouts may later

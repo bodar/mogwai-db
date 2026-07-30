@@ -262,6 +262,14 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      WRONG ANSWERS, not free coverage — a grouped `PathStream` has one row per *position*. The
      criterion to copy is `applyChildCardinality`, which generalised precisely because it never needs
      an expression denoting the traverser's value.
+   - **Precedent, done small (2026-07-30):** the ELEMENT PAYLOAD tuple (`id/label[/src/tgt]/props`)
+     was the same pathology one layer down — hand-written at fourteen sites, already drifted at two
+     of them, and multi-label had to be threaded through every one. It is now `elementPayload` /
+     `elementPayloadObject` (`plan.ts`), derived from a `ScalarCtx` so the correlated positions
+     share it with the direct ones. Two things that transfer: the NAME authority already existed
+     (`elemColumns`/`recordFieldColumns`/`pathColumns`) and only the EXPRESSION side was missing,
+     and it needed none of the `dispatchShapeTail` precondition below — worth checking whether some
+     of the row-ops are the same shape of unlock.
    This is the work [shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md) §8
    step 4 sanctions ("name the cardinality axis, **then** share row-ops") — and the axis is now named,
    so the gate is open. **High — the largest single ceiling block measured.**
@@ -403,17 +411,23 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
     *typing* is touched today (P3), not the list/set write cluster. **Medium.**
     → [conformance-structural-bets](./2026-07-12-conformance-structural-bets.md) (W4)
 
-19. **Multi-label vertices — LANDED except two narrow tails.** L3 1529 → 1595 across phases A–E
+19. **Multi-label vertices — LANDED except two narrow tails.** L3 1529 → 1598 across phases A–E
     (`cbaab02`…`7f61f05`); **60 of the 67 in-scope `@MultiLabel` scenarios pass**. Storage, steps,
     predicates, writes, the harness and the map-shape regimes are all in — design of record:
     [multi-label-elements](./2026-07-30-multi-label-elements-plan.md). What is left:
-    - **A VERTEX ELEMENT on the wire still reports ONE label.** `vertexBuffer` (`src/execute.ts:33`)
-      writes `[label]`, a bare list of one, so `g.V()` over a multi-label vertex frames
-      `labels: Set(1)` where the graph holds several. The GraphBinary field is already a list, so
-      this is not a format change — it is that the vertex `label` COLUMN is a scalar pick at ~13
-      framing sites (path positions, select payloads, materialize, group values). Threading the set
-      through them is the work. No `@MultiLabel` scenario asserts it today (the runner reads only
-      the id off that fixture), so it is a LATENT wrong answer, not a failing one. *Low-Med.*
+    - ~~A VERTEX ELEMENT on the wire reports ONE label~~ — **LANDED**, with the payload authority
+      it needed. The estimate was right that the vertex `label` COLUMN was a scalar pick, and wrong
+      about the fix being regime-aware: GraphBinary's `{label}` field IS a list and the client reads
+      all of it, so a vertex element carries the whole set UNCONDITIONALLY —
+      `with("singlelabel")` governs elementMap()/valueMap() rendering, not the element. What the
+      count missed is that the payload tuple was hand-written at **fourteen** sites, and they had
+      already drifted (two emitted an edge's endpoints as internal rowids). So the tuple is now ONE
+      builder, `elementPayload`/`elementPayloadObject` (`plan.ts`), beside a new fourth position in
+      the label seam (PAYLOAD, next to SCALAR/PREDICATE/FAN-OUT). Federation carries both forms
+      (`flabel` the scalar the rejoin matches on, `flabels` the payload). **The corpus cannot
+      express this assertion** — Gherkin's `v[tux]` compares by id, which is why no scenario caught
+      it — so it is pinned by `test/multilabel-wire.test.ts`, which decodes with the client's own
+      reader; recorded as a third symptom in the 19b write-up.
     - **`labels()` as a CHILD BODY** — `group().by(__.labels().order().fold())`,
       `order().by(labels()…)`, `dedup().by(labels()…)` (3 scenarios). Not label work: it is the
       ordinary child seam (item 2) meeting a fan-out body.

@@ -146,7 +146,9 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(plan.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }], wholeResult: undefined });
     const rows = run(store, 'g.V().optional(__.values("age"))');
     expect(rows.filter((r) => r.vk === 1).map((r) => r.v).sort((a, b) => a - b)).toEqual([27, 29, 32, 35]);
-    expect(rows.filter((r) => r.vk === 2).map((r) => r.label)).toEqual(['software', 'software']);
+    // The variant's vertex arm carries the payload label form (a JSON array); the edge arm, whose
+    // label cardinality is ONE, carries the bare name.
+    expect(rows.filter((r) => r.vk === 2).map((r) => r.label)).toEqual(['["software"]', '["software"]']);
     expect(executeQuery(store, 'g.V().optional(__.values("age"))', {})).toHaveLength(6);
     expect(run(store, 'g.V().optional(__.values("age")).count()').map((r) => r.v)).toEqual([6]);
   });

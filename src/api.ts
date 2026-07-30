@@ -90,6 +90,10 @@ export function labelRegime(sourceOptions: ReadonlyMap<string, any>, cardinality
 /** The message TinkerPop's conformance suite matches on when a graph refuses label mutation. */
 export const LABEL_MUTATION_UNSUPPORTED = 'Label mutation is not supported';
 
+/** The label a vertex takes when none is supplied and the cardinality demands at least one —
+ *  TinkerPop's `Vertex.DEFAULT_LABEL`. Also the name a zero-label vertex reports for `label()`. */
+export const DEFAULT_VERTEX_LABEL = 'vertex';
+
 // ---- the federated-transfer row ----
 
 /** One row of a sibling graph's result, decoded to plain JS values (NOT GraphBinary — a
@@ -97,6 +101,11 @@ export const LABEL_MUTATION_UNSUPPORTED = 'Label mutation is not supported';
  *  GraphBinary only at the client edge; see the 2026-07-21 federation addendum). Enough to build
  *  a TinkerPop DETACHED reference: id + label + a property snapshot. `props` is the SAME per-key
  *  {t,v}-node JSON the local element framer consumes, so landing needs no re-typing.
+ *
+ *  A vertex carries BOTH label forms and they answer different questions: `label` is the scalar
+ *  pick `Element.label()` promises ("an arbitrary label when multiple exist") and the value the
+ *  mid-traversal rejoin matches on; `labels` is the full set the wire element frames. An edge's
+ *  label cardinality is ONE by spec, so it has only the scalar.
  *
  *  Two mid-traversal-only optional fields (both undefined for a source-form g.call(...), exactly
  *  like `ordinal`'s existing convention):
@@ -107,7 +116,7 @@ export const LABEL_MUTATION_UNSUPPORTED = 'Label mutation is not supported';
  *    (values(key)/id()/label()) `apply` batches on. The federate rejoin then matches a returned
  *    element's own property/id/label against this value in SQL (mid-traversal V().call(federate)). */
 export type ForeignRow =
-  | { readonly kind: 'vertex'; readonly id: string | number; readonly label: string; readonly props: Record<string, unknown>; readonly ordinal?: number; readonly injectedValue?: unknown }
+  | { readonly kind: 'vertex'; readonly id: string | number; readonly label: string; readonly labels: readonly string[]; readonly props: Record<string, unknown>; readonly ordinal?: number; readonly injectedValue?: unknown }
   | { readonly kind: 'edge'; readonly id: string | number; readonly label: string; readonly src: string | number; readonly tgt: string | number; readonly props: Record<string, unknown>; readonly ordinal?: number; readonly injectedValue?: unknown };
 
 // ---- execution ----

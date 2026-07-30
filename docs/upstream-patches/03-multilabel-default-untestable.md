@@ -2,6 +2,8 @@
 
 **Target:** `apache/tinkerpop` (`master`). **Status:** written up, not yet raised.
 **Kind:** a `gremlin-core` API gap + its three GLV harness consequences — an ISSUE first, not a PR.
+**Three symptoms, escalating:** the declaration is untestable · it is also unsatisfiable · and the
+corpus cannot assert a vertex element's label set at all, so a single-label wire passes everything.
 **Ours:** `docs/outstanding-work.md` item 19b.
 
 ## The observation
@@ -70,6 +72,30 @@ those three, which is how `g_V_elementMap` itself already pins the single-label 
 This also, in fairness, argues that a provider should think twice before declaring multi-label
 default at all — which is why mogwai-db derives the default from the graph's declared
 `LabelCardinality` instead. See the caveat at the end.
+
+## A third symptom: the corpus cannot assert a vertex element's label SET at all
+
+Separate from the default, and arguably more consequential: **no Gherkin syntax exists for
+asserting the labels a returned VERTEX ELEMENT carries.** A vertex result is written `v[tux]`,
+which the runners resolve to the fixture vertex and compare BY ID. `s[…]`/`t[label]` only appear
+inside a `elementMap`/`valueMap` result, i.e. the RENDERED `T.label` entry — never on an element.
+
+That matters because the element and the map entry are different questions with different answers.
+GraphBinary's Vertex `{label}` field is a bare LIST, and the client reads all of it —
+`VertexSerializer.deserializeValue` keeps `labels` and derives `.label` from `labels[0]`. So a
+vertex element should carry every label regardless of `with("multilabel")`/`with("singlelabel")`,
+which govern only the map rendering. A provider that frames a one-element list there passes **every
+scenario in `gremlin-test`**, including all 84 `@MultiLabel` ones.
+
+We know because we were that provider until 2026-07-30, and nothing in the corpus said so. We
+found it by reading `VertexSerializer`, not by running the suite, and it is pinned in our own
+tree by a test that decodes with the client's reader (`test/multilabel-wire.test.ts`) because
+there is no `.feature` that could host it.
+
+Worth deciding upstream whether that is a corpus gap to close (an element-label assertion form) or
+a deliberate scope line. Either way it is worth stating explicitly, since the silent failure mode —
+multi-label storage, single-label wire — is exactly what a provider implementing TINKERPOP-3261
+from the scenarios alone would ship.
 
 ## Suggested shape (for discussion, not a patch)
 

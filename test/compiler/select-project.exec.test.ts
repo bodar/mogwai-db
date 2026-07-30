@@ -89,7 +89,9 @@ test('traversal-valued project fields use child productivity and preserve parent
   expect(run(store, 'g.V(1).project("id","kind","friend").by(T.id).by(T.label).by(__.out().values("name"))'))
     .toEqual([{ e0_v: 1, e1_v: 'person', e2_v: 'vadas', e2_vtype: 'string' }]);
   expect(run(store, 'g.V(1).project("self","friend").by().by(__.out().values("name"))')[0])
-    .toMatchObject({ e0_id: 1, e0_label: 'person', e1_v: 'vadas' });
+    // by() with no argument frames the element itself, so e0_label is the PAYLOAD form; the
+    // by(T.label) field above is a SCALAR position and still picks one name.
+    .toMatchObject({ e0_id: 1, e0_label: '["person"]', e1_v: 'vadas' });
   expect(run(store, 'g.V(1).project("self","friend").by().by(__.out().values("name")).select("self").out().count()')
     .map((r) => r.v)).toEqual([3]);
   expect(run(store, 'g.V(1).outE("knows").project("self","inName").by().by(__.inV().values("name")).select("self").inV().values("name")')
@@ -97,7 +99,7 @@ test('traversal-valued project fields use child productivity and preserve parent
 
   const shaped = run(store, 'g.V(1).project("friends","first").by(__.out().values("name").fold()).by(__.out())');
   expect(JSON.parse(shaped[0].e0_list)).toEqual(['vadas', 'lop', 'josh']);
-  expect(shaped[0]).toMatchObject({ e1_id: 2, e1_label: 'person' });
+  expect(shaped[0]).toMatchObject({ e1_id: 2, e1_label: '["person"]' });
   expect(run(store, 'g.V(1).project("friends").by(__.out().values("name").fold()).select("friends").unfold().order()').map((r) => r.v))
     .toEqual(['josh', 'lop', 'vadas']);
   expect(executeQuery(store, 'g.V(1).project("friends","first").by(__.out().fold()).by(__.out())', {}).length).toBe(1);

@@ -359,8 +359,8 @@ describe('barrier source form via Executor (stub source → drive → land → f
   // in ISOLATION, without a manager or real graphs. The source's executor(id).raw returns
   // synthetic detached rows. (The REAL two-graph stack is federation.test.ts.)
   const foreignVerts: ForeignRow[] = [
-    { kind: 'vertex', id: 1, label: 'person', props: { name: [{ t: 'string', v: 'alice' }] } },
-    { kind: 'vertex', id: 2, label: 'person', props: { name: [{ t: 'string', v: 'bob' }] } },
+    { kind: 'vertex', id: 1, label: 'person', labels: ['person'], props: { name: [{ t: 'string', v: 'alice' }] } },
+    { kind: 'vertex', id: 2, label: 'person', labels: ['person'], props: { name: [{ t: 'string', v: 'bob' }] } },
   ];
   const stubFederate: Service = {
     name: 'mogwai.graph.federate',
