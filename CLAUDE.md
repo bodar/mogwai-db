@@ -89,11 +89,22 @@ loudly. Fail-closed by default — the first failure stops the batch, leaving th
 the resume point; `--keep-going` only when the renames are genuinely unrelated, and `mise run check`
 after either, since a partial campaign can leave an importer on the old name.
 
-The shared LSP plumbing is `scripts/lsp.ts`. Its one load-bearing rule: **`Session.resync()` moves the
-server's buffer and our text cache together.** Splitting them — pushing `didChange` while a caller
-still holds text from `open()` — computes positions against text the server does not have, which
-silently lands edits mid-token (it produced `typeof PASSPASS_KINDSber]` before the cache was unified).
-Never read a file's content directly when a session has it open; go through the session.
+The shared LSP plumbing is `scripts/lsp.ts` — a SESSION-scoped library, deliberately not a daemon
+(measured: ~300ms cold start, ~1ms warm queries, so the win is open-once-query-many; a daemon would
+add a stale-buffer coherence problem to save that 300ms). Its one load-bearing rule:
+**`Session.resync()` moves the server's buffer and our text cache together.** Splitting them —
+pushing `didChange` while a caller still holds text from `open()` — computes positions against text
+the server does not have, which silently lands edits mid-token (it produced `typeof PASSPASS_KINDSber]`
+before the cache was unified). Never read a file's content directly when a session has it open; go
+through the session.
+
+Two more tools on that session: **`bun scripts/fix.ts [--organize] [--unused] [--dry] [paths…]`**
+applies TypeScript's own `source.*` code actions (so they cannot disagree with `mise run check`); and
+**`bun scripts/arch-check.ts`** statically checks the Pass role rule from `src/compiler/CLAUDE.md` —
+no Pass may reach `ChainFacts` or the fast-path layer — by walking LSP call hierarchy transitively.
+That check is why a Pass `run` containing real logic is a `function name(...)` declaration and not an
+arrow: `prepareCallHierarchy` returns NOTHING for an arrow assigned to an object-literal property.
+Remaining work on this tooling: `docs/2026-07-30-lsp-tooling-plan.md`.
 
 ## Working rules
 

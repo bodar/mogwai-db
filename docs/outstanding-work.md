@@ -438,6 +438,15 @@ All → [phased-roadmap](./2026-07-11-phased-roadmap-plan.md) unless noted.
 
 ## Internal debt / give-backs (Low)
 
+- **LSP refactoring tooling — four scripts landed (`8c33450`), four items remain.**
+  `docs/2026-07-30-lsp-tooling-plan.md` is the continuation plan, written against that commit with
+  every number measured. Highest value is wiring `scripts/arch-check.ts` into `ci` — it is written,
+  run, and adversarially verified (it catches an injected `analyzeChain` call from a Pass, exit 1),
+  so only the `mise` task remains. Also open: a `lint` task for the three unused-code tsconfig flags
+  (46 real errors to clear first; generated `parser/` cannot be exempted at config level — the plan
+  records all four mechanisms measured and the one untested option), plus a dead-export sweep and
+  `moveToFile`.
+
 **There is no TODO/FIXME/XXX/HACK anywhere in `src/compiler/`, `src/sql/` or `src/execute.ts`**
 (verified 2026-07-29; the one repo-wide hit is `src/serializers.ts`, an upstream-TinkerPop note). Debt
 here is encoded as typed `throw` deferrals and in-code prose, so grep for markers finds nothing and
