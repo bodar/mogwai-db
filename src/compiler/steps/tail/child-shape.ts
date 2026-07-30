@@ -344,9 +344,10 @@ const isScalarProducer = (s: IRStep, ctx: ChildCtx | undefined): boolean =>
  *  of engine.ts isSackMutate, kept here so this pure leaf has no engine dependency. */
 export const isSackMutate = (s: IRStep): boolean =>
   s.name === 'sack' && (s.args ?? []).some(isOperatorArg);
-/** The projections compileScalarChildRows reads with its own element-projection SQL builder (and
- *  so can continue through any scalar row tail). Every other producer lowers via lowerSteps. */
-const BESPOKE_PROJECTIONS = new Set(['values', 'id', 'label', 'constant']);
+/** The scalar projections that carry a per-origin EMISSION ORDER out of a child scope, so a
+ *  scoped reducer in the row tail has something to partition on. Not a list of what some builder
+ *  can read — that builder is gone — but a property of each projector. */
+const SELF_ORDERING_PROJECTIONS = new Set(['values', 'id', 'label', 'constant']);
 /** The terminal barrier vocabulary a scalar child row-run may reduce through. Defined in this
  *  pure leaf and re-exported by child.ts (the compiler half) so the classify and emit sides read
  *  ONE set — they used to declare it twice. */
@@ -484,20 +485,22 @@ function scalarRowParts(body: ReturnType<typeof stepChain>, ctx?: ChildCtx): { p
   const projection = body[at];
   const suffix = body.slice(at + 1);
   if (!scalarRowRun(suffix, cur)) return null;
-  // Per-projection arg shape for the bespoke values/id/label/constant SQL builder. The
-  // generalized producers (call/math/sack/format) carry their own args and route through the
-  // generic emit path (lowerSteps), so their arg validation lives in their own StepFns — here
-  // they only need the element-prefix + scalar-suffix shape above.
+  // Arg shape for the four projections whose args this classifier reads. The generalized
+  // producers (call/math/sack/format) carry their own args and validate them in their own
+  // StepFns — here they only need the element-prefix + scalar-suffix shape above.
   if (projection.name === 'values' && (projection.args.length !== 1 || typeof projection.args[0] !== 'string')) return null;
   if ((projection.name === 'id' || projection.name === 'label') && projection.args.length) return null;
   if (projection.name === 'constant' && projection.args.length !== 1) return null;
-  // …and a REDUCER in the row tail needs a projection the bespoke builder can read. Only that
-  // builder continues a row-run through a scoped reducer (compileScalarChildRows' continueScalar);
-  // a generalized producer's body goes through lowerSteps, which absorbs the shared row vocabulary
-  // but not a scoped barrier. Rejecting it HERE — rather than letting the emitter decline it later
-  // — is what keeps classify and emit admitting the same set, and consumers ASSERT on this
-  // classification (a path/select/branch arm's `!`), so a mismatch is a crash, not a deferral.
-  if (!BESPOKE_PROJECTIONS.has(projection.name) && suffix.some((s) => CHILD_SCALAR_REDUCERS.has(s.name)))
+  // …and a scoped REDUCER in the row tail needs a projection that mints a per-origin EMISSION
+  // ORDER for it to partition on. The four above do (`values` carries `encounterKey` through the
+  // projector because a multi-valued key genuinely fans out; `id`/`label`/`constant` are one row
+  // per input and mint the trivial rank); the generalized producers — call/math/sack/format — do
+  // not, so `lowerScopedScalarReducer` would refuse them mid-CTE. Rejecting HERE keeps classify
+  // and emit admitting the same set, and consumers ASSERT on this classification (a
+  // path/select/branch arm's `!`), so a mismatch is a crash, not a deferral. Lifting this wants
+  // the one-row-per-input producers to mint like `oneRowEncounter` does — a real ceiling raise,
+  // measured to leave a clean deferral rather than an answer today.
+  if (!SELF_ORDERING_PROJECTIONS.has(projection.name) && suffix.some((s) => CHILD_SCALAR_REDUCERS.has(s.name)))
     return null;
   return { prefix, projection, suffix };
 }

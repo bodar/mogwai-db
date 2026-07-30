@@ -271,6 +271,28 @@ describe('unified lowering characterization', () => {
     }
   });
 
+  test('a scalar projection answers the same at root and in every child position', () => {
+    // The child projector used to be a SECOND implementation — its own values/id/label/constant
+    // switch — and it read `vp.value` raw where the generic PROJECTORS entry reads
+    // `storedValueExpr(value, vtype)`. A LIST-valued property is where the two diverge: at root
+    // `values("nums").max()` yields the list, and in a child it yielded NOTHING — a silent wrong
+    // answer, not a deferral. The child now lowers `<prefix>.<projection>` through the same
+    // `lowerStepsStrict` the root does and continues only the per-origin reducer tail by hand.
+    const store = seededStore();
+    executeQuery(store, 'g.V().has("name","marko").property("nums", [1,2,3])', {});
+    const rootAnswer = run(store, 'g.V().has("name","marko").values("nums").max()').map((r: any) => r.v);
+    expect(rootAnswer).toHaveLength(1);
+    for (const body of [
+      'g.V().has("name","marko").map(__.values("nums").max())',
+      'g.V().has("name","marko").local(__.values("nums").max())',
+    ]) expect(run(store, body).map((r: any) => r.v)).toEqual(rootAnswer);
+    // …and the shapes that already agreed still do, through the one route rather than two.
+    expect(run(store, 'g.V().map(__.out().id().count())').map((r: any) => Number(r.v)).sort())
+      .toEqual(run(store, 'g.V().map(__.out().count())').map((r: any) => Number(r.v)).sort());
+    expect(run(store, 'g.V(1).map(__.out().label().max())').map((r: any) => r.v)).toEqual(['software']);
+    expect(run(store, 'g.V(1).map(__.out().constant("z").count())').map((r: any) => Number(r.v))).toEqual([3]);
+  });
+
   test('duplicate parent traversers remain distinct through a child reduction', () => {
     const store = seededStore();
     // The two identity arms are two traversers with the same vertex id. A future

@@ -1,7 +1,6 @@
-import { derived, empty, list, paren, q, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
+import { derived, empty, list, paren, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { perRowCols } from '../../../sql/kernel/render.ts';
 import { isNested, stepChain } from '../../../gremlin/frontend.ts';
-import { vertexProperties, edgeProperties } from '../../../sql/schema.ts';
 import { appendCte, patchLayout, layoutProjection, layoutProjectionMinting, layoutCols, partitionOver, prevRel, withLayout, type TraverserLayout, type ElementStream } from '../context/context.ts';
 import { aliasId } from '../context/alias.ts';
 import { asOnStream, selectOneFromAlias } from './labelselect.ts';
@@ -12,7 +11,7 @@ import { SCALAR_TRANSFORMS } from './coerce.ts';
 import { lowerReSource } from '../graph-source.ts';
 import { someStepDeep, type IRStep } from '../../ir/strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
-import { predicateSql, rangeToOffsetLimit, elemTable, labelNameFor } from '../../plan/plan.ts';
+import { predicateSql, rangeToOffsetLimit, elemTable } from '../../plan/plan.ts';
 import { elementOrderDrop, elementOrderSql } from './modulation.ts';
 import {
     childCtx, childSteps, classifyCountChild, isKeyModulatedLabelSelect, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, labelSelectOf,
@@ -540,55 +539,23 @@ function compileScalarChildRows(
     return applyScalarChildCardinality(parent, pushed, oneRowEncounter(stream, terminal), use, retainChildScope);
   }
 
-  // The bespoke element-projection SQL builder below reads the element directly
-  // (values/id/label) or emits the literal (constant). The generalized producers
-  // (call/math/sack/format) have no element-projection SQL here — they only ever lower
-  // through the generic path above; a suffix that failed the generic gate (e.g. a terminal
-  // scoped reducer) defers cleanly so the caller's clear deferral stays authoritative,
-  // rather than mis-routing through the label branch of the builder.
-  if (!['values', 'id', 'label', 'constant'].includes(terminal.name)) return null;
-
+  // A scoped reducer / a `constant()` terminal in the row tail is the ONE thing the generic
+  // loop above cannot absorb — those barriers are per-ORIGIN here and global there. Everything
+  // BEFORE the tail is ordinary: the element prefix and its scalar projection lower through
+  // `lowerStepsStrict`, exactly as the loop above does, and only the tail is continued by hand.
+  //
+  // This used to be a bespoke element-projection SQL builder — its own values/id/label/constant
+  // switch against the generic `PROJECTORS` table's seven — and it answered DIFFERENTLY, because
+  // it read `vp.value` raw where the projector reads `storedValueExpr(value, vtype)` and tags the
+  // scalar `PER_ROW('vtype')`. Measured: with a list-valued property,
+  // `g.V().values("nums").max()` yields the list at root and `map(__.values("nums").max())`
+  // yielded NOTHING — a silent wrong answer, not a deferral. Splitting projection from
+  // continuation removes the second implementation and the divergence with it.
   const pushed = pushChildScope(parent, scope);
-  const end = lowerElementBody(pushed.seed, prefix);
-  if (!end) return null;
+  const head = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, [...prefix, terminal], 0);
+  // classify proved the head scalar, so a non-scalar is a classify↔lowerSteps contradiction.
+  if (head.kind !== 'scalar') throw new Error('scalar child projection classified scalar but lowered to ' + head.kind);
 
-  const c = end.rel.as('c');
-  let scalar: Expression;
-  let from: Expression;
-  let order: Expression;
-  if (terminal.name === 'constant') {
-    scalar = value(terminal.args[0]);
-    from = q`${c}`;
-    order = c.c.id;
-  } else {
-    const elem = elemTable(end.elem).as('e');
-    if (terminal.name === 'values') {
-      const key = terminal.args[0];
-      if (end.elem === 'vertex') {
-        const vp = vertexProperties.as('vp');
-        scalar = vp.c.value;
-        from = q`${c} JOIN ${vp} ON ${vp.c.node}=${c.c.id} AND ${vp.c.key}=${value(key)}`;
-        order = q`${c.c.id}, ${vp.c.id}`;
-      } else {
-        const ep = edgeProperties.as('ep');
-        scalar = ep.c.value;
-        from = q`${c} JOIN ${ep} ON ${ep.c.edge}=${c.c.id} AND ${ep.c.key}=${value(key)}`;
-        order = c.c.id;
-      }
-    } else if (terminal.name === 'id') {
-      scalar = q`COALESCE(${elem.c.uid}, ${elem.c.id})`;
-      from = q`${c} JOIN ${elem} ON ${elem.c.id}=${c.c.id}`;
-      order = c.c.id;
-    } else {
-      scalar = labelNameFor(elem, end.elem);
-      from = q`${c} JOIN ${elem} ON ${elem.c.id}=${c.c.id}`;
-      order = c.c.id;
-    }
-  }
-
-  // Mint the per-origin encounter into the child's carried slot (superseding none — end is an
-  // element child with no encounter yet).
-  const outCarried = patchLayout(end.traverserLayout, { encounter: 'encounter' });
   const continueScalar = (base: ScalarStream): ScalarStream => {
     let stream = base;
     let at = 0;
@@ -627,12 +594,7 @@ function compileScalarChildRows(
     }
     return stream;
   };
-  const encMint = q`ROW_NUMBER() OVER (PARTITION BY ${c.c[pushed.frame.ordinal]} ORDER BY ${order})`;
-  const rows = parent.q.cte(
-    q`SELECT ${scalar} AS v${layoutProjectionMinting(outCarried, c, 'encounter', encMint)} FROM ${from}`,
-    ['v', ...layoutCols(outCarried)],
-  );
-  const lowered = continueScalar(toScalarStream(loweringStateOf(end, outCarried), rows, undefined, { result: 'value' }));
+  const lowered = continueScalar(oneRowEncounter(head, terminal));
   return applyScalarChildCardinality(parent, pushed, lowered, use, retainChildScope);
 }
 

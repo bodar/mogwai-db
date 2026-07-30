@@ -24,7 +24,7 @@ import { lowerScalarAggregate, tryLowerLocalAggregate } from '../prefix/sideeffe
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
 import { lowerCall } from './call.ts';
 import { BRANCH_SHAPE_ORDER, childCtx, childSteps, classifyBy, classifyListChild, classifyTotalScalarChild, isScalarChild, ROOT_SCOPE, type BranchKind, type ByClass } from './child-shape.ts';
-import { tryCompileBranchChildAllCard, tryCompileCountChild, tryCompileListChild, tryCompileScalarModulations, type ScalarModulationSpec } from './child.ts';
+import { mintChildEncounter, tryCompileBranchChildAllCard, tryCompileCountChild, tryCompileListChild, tryCompileScalarModulations, type ScalarModulationSpec } from './child.ts';
 import { elementGroupSource, lowerGroup, lowerProperties, lowerScalarGroupCount, lowerValueMap, tryCompileMapChild } from './group.ts';
 import { lowerChooseOptions, lowerChooseOptionsScalar, lowerConcatScalar, lowerDateDiffScalar, lowerFormat, lowerFormatScalar, lowerMapScalar, lowerMath, lowerMathScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { elementOrderDrop, orderProductivityFilter } from './modulation.ts';
@@ -511,7 +511,15 @@ const ELEMENT_DISPATCH = new Map<string, ShapeTailFn<ElementStream>>([
   ['union', tailUnion],
   ['coalesce', tailCoalesce],
   // constant(x) rebinds every traverser to the literal x — element in, scalar out.
-  ['constant', (st, step, _steps, stop) => continueLowering(lowerConstant(loweringStateOf(st), st.rel, step.args), stop + 1)],
+  // In a CHILD scope a literal has no emission order of its own, which is what the partitioned
+  // `first` cardinality policy ranks on — so mint the per-origin encounter on the ELEMENT stream
+  // first (one row per input, ordered by element id). That is exactly what the retired bespoke
+  // child projector did inline, and doing it HERE is what lets constant() compose in a child
+  // scope through the ordinary loop instead of through a second implementation.
+  ['constant', (st, step, _steps, stop) => {
+    const seed = st.traverserLayout.origins.length && !st.traverserLayout.encounter ? mintChildEncounter(st) : st;
+    return continueLowering(lowerConstant(loweringStateOf(seed), seed.rel, step.args), stop + 1);
+  }],
   // math("<formula>") → one SQL arithmetic scalar (always Double); its variables resolve
   // through the by() modulators folded onto it.
   ['math', (st, _step, steps, stop) => continueLowering(lowerMath(st, steps, stop), stop + 1)],

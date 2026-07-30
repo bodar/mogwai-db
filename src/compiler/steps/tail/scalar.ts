@@ -620,11 +620,13 @@ export function lowerScalarConstant(s: ScalarStream, args: any[]): ScalarStream 
 
 /** constant(x): replace the current object with the literal x, one per input row. Shape-
  *  agnostic — the source relation may be an element or a scalar; only row identity and
- *  the carried schema matter. A child scope (origins live) defers: constant loses the
- *  encounter order downstream partitioned operators require. */
+ *  the carried schema matter. In a child scope the caller must have MINTED the encounter
+ *  already (the tail entry does, on the element stream): a literal has no order of its own, so
+ *  without one the partitioned cardinality policy would rank on nothing. Carrying an encounter
+ *  in is the whole precondition — constant() then preserves it like any other carried column. */
 export function lowerConstant(carry: LoweringState, rel: Relation, args: any[]): ScalarStream {
-  if (carry.traverserLayout.origins.length)
-    throw new Error('constant() inside a child scope not yet supported');
+  if (carry.traverserLayout.origins.length && !carry.traverserLayout.encounter)
+    throw new Error('constant() inside a child scope requires a minted encounter (no emission order to rank on)');
   const p = rel.as('p');
   const out = carry.q.cte(
     q`SELECT ${value(args[0])} AS v${layoutProjection(carry.traverserLayout, p)} FROM ${p}`,
