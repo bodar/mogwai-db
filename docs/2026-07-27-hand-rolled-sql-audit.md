@@ -33,7 +33,7 @@ left as written; the full map is in
 > | 3 | `match()` binding table | ✅ shape-generic ends + per-binding reducers; residual is `fold()` and the MATCH-string form (7b) |
 > | 4 | `path.ts` grouped positional projector | ✅ one projector AND one positional child compiler; both regimes agree |
 > | 5 | `write.ts` merge/endpoint | open (largest by count, but terminal — never composes at depth) |
-> | 7–9 | `child.ts` residue, `search.ts`, leaf dups | open, Low |
+> | 7–9 | `child.ts` residue, `search.ts`, leaf dups | open, Low — **9's `plan.ts` half closed 2026-07-30** |
 > | — | mode C *(this doc's "one structural finding")* | ❌ **retired — measured unnecessary, see below** |
 >
 > **Three premises here are FALSE — do not rebuild on them:**
@@ -330,10 +330,12 @@ recursive-path tails.
   `until(__.union(…))`, `coalesce`), 0 regressions; corpus +1, **L3 1473 → 1474**, and the newly
   passing scenario is exactly the nested case
   `g_V_repeatXoutXknowsXX_untilXrepeatXoutXcreatedXX_emitXhasXname_lopXXX_path_byXnameX`.
-- **The named-loop form still crashes rather than deferring** —
-  `g.V().emit().repeat("a", __.out("knows").filter(__.loops("a").is(0)))` →
-  `undefined is not an object (evaluating 'node.constructor')`, 4 corpus cases. A cheap guard,
-  independent of everything above.
+- ✅ **The named-loop form now defers instead of crashing** (verified 2026-07-30 by probe, not by
+  reading): `g.V().emit().repeat("a", __.out("knows").filter(__.loops("a").is(0)))` and
+  `g.V().repeat("a", __.out()).times(2)` both throw
+  `repeat(name, body)/loops(name) named-loop form not yet supported (requires named loop counters)`.
+  It is L3's 4th-largest failure cluster (15 scenarios, 10 types) — but as a fail-closed deferral,
+  which is where this entry wanted it. Implementing named loop counters is a separate feature.
 
 ---
 
@@ -630,8 +632,21 @@ philosophies; the second one is the model.
 ### 9. Leaf-level, cosmetic
 - `tail/group.ts:377` — the `properties()` inner-group expansion hand-joins `vertex_properties`
   where the sibling branch two lines up correctly routes through the child seam.
-- `plan/plan.ts` `nodeProp*`/`edgeProp*` pairs — one `propSource(elem)` descriptor halves it.
-  Already filed; opportunistic.
+- ✅ **`plan/plan.ts` `nodeProp*`/`edgeProp*` pairs — CLOSED 2026-07-30, and it was bigger than
+  "cosmetic".** The eight builders were four pairs, each the other with two nouns changed; the real
+  cost was OUTSIDE the file, where eight call sites re-spelled the `elem === 'edge' ? … : …`
+  dispatch by hand. `propSource(elem)` states the three actual disagreements once (table, owner
+  column, whether a key may hold several values), `propRead` is the one correlated subquery over
+  it, and the four public readers (`propScalarFor`/`propTypeFor`/`propSortKeyFor`/`propHasFor`) are
+  TOTAL over `Elem` — so a caller passes the elem it already had instead of branching. That is
+  `elemTable`'s twin on the property side, and the shape this entry predicted.
+  `storedPropFor` fell out and was not predicted: the value, its stored vtype and their
+  `storedValueExpr` composition always travel together, and four record-field builders in
+  `select.ts` were each spelling the trio out — two of them as a vertex branch and an edge branch
+  differing only in the dispatch plus a redundant element-table JOIN. Now one branch.
+  **Emitted SQL is byte-identical** (the subqueries still name their own columns unqualified, via
+  the relation's declared column list, so a schema rename stays a compile error) — which is the
+  right bar for a pure dedup and is what the census exists to check. CI 1083/0, L3 1623.
 
 ### Sanctioned — do NOT "consolidate" these
 - **`tail/bulk.ts:215`** — the unrolled hop join is a `FastPath` with a declared equivalence
