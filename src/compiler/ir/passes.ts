@@ -1,7 +1,7 @@
 import { isNested, type Step, type StrategyUse } from '../../gremlin/frontend.ts';
 import { PASS_CATEGORIES, type Pass, type PassCategory, type PassContext } from './pass.ts';
 import {
-    stripTerminal, formRepeatRegions, absorbModulators, absorbOptionArms, absorbCallWith,
+    stripTerminal, desugarMatchString, formRepeatRegions, absorbModulators, absorbOptionArms, absorbCallWith,
     canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
     verifyReadOnlyChildren,
     absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
@@ -54,6 +54,19 @@ const EXTRACT: Pass[] = group('extract', [
       ctx.out.discard = r.discard;
       return r.steps as IRStep[];
     },
+  },
+  // AFTER stripTerminal, and before everything else. Both halves matter:
+  //   · after — stripTerminal removes an out-of-band terminal FLAG (discard/none), which is not a
+  //     real step, so running second lets the desugar see the chain's true end. It needs that to
+  //     decide whether the match() is terminal (and so whether to project the binding map).
+  //   · before decoration — it mints pattern bodies as raw `{nested}` args, exactly what the
+  //     Subgraph/Partition injectors recurse into. A desugar placed after them would leave a
+  //     criterion uninjected: the unfiltered-leak hole this category order exists to prevent.
+  {
+    name: 'desugarMatchString',
+    // Cheap gate: only a `match` step carrying a STRING first argument is the string form.
+    applies: (steps) => steps.some((s) => s.name === 'match' && typeof (s.args ?? [])[0] === 'string'),
+    run: desugarMatchString,
   },
 ]);
 

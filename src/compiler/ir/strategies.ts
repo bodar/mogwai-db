@@ -1,5 +1,6 @@
 import { stepChain, isNested, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
 import { bodyAlwaysProduces } from './productivity.ts';
+import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { type IRStep } from './step.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf } from './step.ts';
 
@@ -1009,4 +1010,54 @@ export function rewriteWhereEndLabels(steps: IRStep[], params: Record<string, an
     return chainChanged ? out : null;
   };
   return (walk(steps, new Set()) ?? steps) as IRStep[];
+}
+
+// ---------- the MATCH-string desugar ----------
+
+/** Just enough of `PassContext` to keep this module free of a `pass.ts` import (pass.ts already
+ *  depends on this one). The desugar reads nothing from it — a pattern's `$name` bindings are scoped
+ *  to the match() call, not to the wire params. */
+type PassContextLike = { readonly params: Record<string, any> };
+
+/** Is this a `match("<gql>")` — the string form rather than the traversal form? The two share a step
+ *  name (both the source-spawn and traversal-method grammar rules yield `match`), so the ARGUMENT
+ *  decides: the string form's first argument is the pattern text. */
+const isMatchString = (s: IRStep): boolean => s.name === 'match' && typeof (s.args ?? [])[0] === 'string';
+
+/** The `$name` bindings a pattern may reference: the optional SECOND argument of
+ *  `match(str, [k: v])`, which reaches here as a JS Map (a map literal and a bound map parameter
+ *  both arrive that way). Not the wire params — a pattern's `$name` is scoped to its own call. */
+function matchStringParams(step: IRStep): Record<string, any> {
+  const arg = (step.args ?? [])[1];
+  if (arg instanceof Map) return Object.fromEntries(arg);
+  if (arg && typeof arg === 'object') return arg as Record<string, any>;
+  return {};
+}
+
+/**
+ * `match("MATCH …")` → the ordinary `match()` IR, via the front end's GQL translator.
+ *
+ * An `extract`-category Pass, and that placement is LOAD-BEARING rather than tidy: `decoration`
+ * (Subgraph/Partition injection) recurses into raw `{nested}` args and must therefore run AFTER this
+ * mints the pattern bodies, or a `withStrategies(SubgraphStrategy)` criterion would never reach them
+ * — the unfiltered-leak hole `ir/pass.ts` describes. Running here also puts the desugared chain in
+ * `ctx.originalChain`, so `EdgeLabelVerification` sees the GQL edge labels. Nothing fails loudly if
+ * this is later moved to `canonicalize`; a criterion just quietly stops being injected, which is why
+ * a pinning test exists.
+ *
+ * The translator is handed whether the `match` is TERMINAL (last in its chain), because TinkerPop's
+ * match-string step emits one binding Map per row while our `match()` emits the traverser — so a
+ * terminal one needs a projection appended and a non-terminal one must not have it.
+ */
+export function desugarMatchString(steps: IRStep[], _ctx: PassContextLike): IRStep[] {
+  if (!steps.some(isMatchString)) return steps;
+  const out: IRStep[] = [];
+  steps.forEach((s, i) => {
+    if (!isMatchString(s)) { out.push(s); return; }
+    // The desugar opens with `V()`. At the head of the chain that IS the source; mid-chain it is a
+    // re-source, which is what TinkerPop's mid-traversal match-string does — it ignores the incoming
+    // traverser's value and emits the bindings once per traverser (`g.inject(1).match(…)`).
+    out.push(...gqlMatchSteps(s.args[0] as string, matchStringParams(s), s.ctx, i === steps.length - 1) as IRStep[]);
+  });
+  return out;
 }

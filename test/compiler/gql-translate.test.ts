@@ -117,6 +117,30 @@ describe('GQL MATCH translation — shape', () => {
   });
 });
 
+// The desugar Pass sits in the `extract` category, and that placement is LOAD-BEARING but SILENT:
+// nothing fails loudly if it moves to `canonicalize`. The injectors (decoration) recurse into raw
+// `{nested}` args, so a desugar running after them would mint pattern bodies the criterion never
+// reaches — an unfiltered leak, not an error. This is the guard the design doc asked for.
+describe('the MATCH-string desugar runs before decoration', () => {
+  test('a SubgraphStrategy criterion reaches the minted pattern bodies', () => {
+    const store = seeded(MODERN_SEED);
+    const crit = 'new SubgraphStrategy(vertices: __.has("name", P.within("marko","vadas")))';
+    // Unfiltered, marko knows both vadas and josh. The criterion excludes josh, so only the
+    // marko→vadas binding may survive — and the pattern body is where `b` is bound, so a criterion
+    // that failed to reach it would leave josh in.
+    const rows = exec(store).buffers(
+      `g.withStrategies(${crit}).match("MATCH (a:person)-[:knows]->(b:person)").select("a","b").by("name")`, {});
+    expect(rows.length).toBe(1);
+  });
+
+  test('the desugar leaves the chain end intact for stripTerminal', () => {
+    // stripTerminal runs FIRST so the desugar sees the true last step; if the two were swapped, a
+    // trailing discard would make the match look non-terminal.
+    const store = seeded(MODERN_SEED);
+    expect(exec(store).buffers('g.match("MATCH (a:person)-[:knows]->(b:person)").discard()', {}).length).toBe(0);
+  });
+});
+
 // The feature's own expected rows, against the graph it names. This is the translator's real bar:
 // the shape assertions above say we emitted what we intended, these say what we intended is right.
 describe('GQL MATCH translation — executes to MatchString.feature\'s expected results', () => {

@@ -24,9 +24,17 @@ describe('Pass pipeline ordering invariants', () => {
     }
   });
 
-  test('extract runs first: stripTerminal is the unique extract member at PASSES[0]', () => {
+  test('extract runs first, and stripTerminal leads it', () => {
+    // stripTerminal must be the very first Pass in the pipeline: it removes an out-of-band terminal
+    // FLAG (discard/none) rather than a step, so every later Pass — desugarMatchString included,
+    // which reads whether a match() is LAST to decide on the binding-map projection — should see the
+    // chain's true end.
     expect(PASSES[0].name).toBe('stripTerminal');
-    expect(PASSES.filter((p) => p.category === 'extract')).toHaveLength(1);
+    // The invariant is that extract precedes every other category, NOT that it has one member (it
+    // used to, and asserting the count made adding a second one look like a violation).
+    const lastExtract = PASSES.findLastIndex((p) => p.category === 'extract');
+    const firstNonExtract = PASSES.findIndex((p) => p.category !== 'extract');
+    expect(lastExtract).toBeLessThan(firstNonExtract);
   });
 
   test('decoration precedes fold — injectors recurse into RAW {nested} args', () => {
