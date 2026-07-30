@@ -7,43 +7,14 @@ import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
-import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { rawVertex } from '../support/graph.ts';
-
-const read = (q: string, options?: CompileOptions) => {
-  const p = compile(q, {}, options);
-  if (p.kind !== 'read') throw new Error('expected read plan');
-  return p;
-};
+import { bare, read, run, runWith, seededStore } from '../support/harness.ts';
 
 // ---------- execution semantics against a seeded store ----------
-
-function seededStore() {
-  const store = new GraphStore(new BunSqlite(':memory:'));
-  for (const q of MODERN_SEED) executeQuery(store, q, {}); // seed by running the write traversals
-  return store;
-}
-
-const run = (store: GraphStore, q: string) => {
-  const p = compile(q, {});
-  if (p.kind === 'write') return p.run(store);
-  return store.query(p.sql, p.binds);
-};
 
 // A write-response echo now carries each prop value as a self-describing {t,v} typed node
 // (so the wire frames it exactly). Tests that assert the written VALUES (not their types)
 // unwrap the nodes to plain values with this recursive helper.
-const bare = (v: any): any =>
-  Array.isArray(v) ? v.map(bare)
-  : v && typeof v === 'object' && 't' in v && 'v' in v ? bare(v.v)
-  : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, bare(x)]))
-  : v;
-
-const runWith = (store: GraphStore, q: string, options: CompileOptions) => {
-  const p = compile(q, {}, options);
-  if (p.kind === 'write') return p.run(store);
-  return store.query(p.sql, p.binds);
-};
 
 describe('compiler execution semantics', () => {
 describe('unified lowering characterization', () => {

@@ -9,18 +9,11 @@
 // and the edge frames a buffered 500 — there is no partial/truncated body.
 import { test, expect, describe } from 'bun:test';
 import { GraphStore } from '../src/storage.ts';
-import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { executeQuery, executeFramed } from './support/executor.ts';
 import { streamBuffers, errorResponse } from '../src/http.ts';
 import { parseRequest } from '../src/wire.ts';
 import { ioc } from '../src/io.ts';
-import { MODERN_SEED } from './fixtures/seed-modern.ts';
-
-function seededStore() {
-  const store = new GraphStore(new BunSqlite(':memory:'));
-  for (const q of MODERN_SEED) executeQuery(store, q, {}); // seed by running the write traversals
-  return store;
-}
+import { seededStore } from './support/harness.ts';
 
 // Drain a Response's ReadableStream body into the list of DISCRETE chunks streamBuffers
 // enqueued (header / each batch / trailer), plus the reassembled buffer.

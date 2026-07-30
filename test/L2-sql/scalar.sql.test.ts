@@ -8,38 +8,16 @@
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
 import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
-import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
+import { compile } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { decode, decodeAll } from '../support/decode.ts';
-
-const read = (q: string, options?: CompileOptions) => {
-  const p = compile(q, {}, options);
-  if (p.kind !== 'read') throw new Error('expected read plan');
-  return p;
-};
+import { read, run, runWith, seededStore } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
-function seededStore() {
-  const store = new GraphStore(new BunSqlite(':memory:'));
-  for (const q of MODERN_SEED) executeQuery(store, q, {}); // seed by running the write traversals
-  return store;
-}
-
-const run = (store: GraphStore, q: string) => {
-  const p = compile(q, {});
-  if (p.kind === 'write') return p.run(store);
-  return store.query(p.sql, p.binds);
-};
-
-const runWith = (store: GraphStore, q: string, options: CompileOptions) => {
-  const p = compile(q, {}, options);
-  if (p.kind === 'write') return p.run(store);
-  return store.query(p.sql, p.binds);
-};
 
 describe('scalar-parent / projection SQL', () => {
   test('order().by(key[, dir]) folds ORDER BY into the projection select', () => {

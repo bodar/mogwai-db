@@ -12,34 +12,11 @@ import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery, executeFramed } from '../support/executor.ts';
-import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { decodeAll } from '../support/decode.ts';
-
-const read = (q: string, options?: CompileOptions) => {
-  const p = compile(q, {}, options);
-  if (p.kind !== 'read') throw new Error('expected read plan');
-  return p;
-};
+import { read, run, runWith, seededStore } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
-function seededStore() {
-  const store = new GraphStore(new BunSqlite(':memory:'));
-  for (const q of MODERN_SEED) executeQuery(store, q, {}); // seed by running the write traversals
-  return store;
-}
-
-const run = (store: GraphStore, q: string) => {
-  const p = compile(q, {});
-  if (p.kind === 'write') return p.run(store);
-  return store.query(p.sql, p.binds);
-};
-
-const runWith = (store: GraphStore, q: string, options: CompileOptions) => {
-  const p = compile(q, {}, options);
-  if (p.kind === 'write') return p.run(store);
-  return store.query(p.sql, p.binds);
-};
 
 describe('repeat / path SQL', () => {
   test('dedup(labels): dedup by an as()-label tuple (optional by()), composes with path()', () => {

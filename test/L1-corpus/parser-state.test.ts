@@ -1,4 +1,4 @@
-import { expect, test, describe } from 'bun:test';
+import { expect, test } from 'bun:test';
 import { DFA, DFAState, type ATNConfigSet } from 'antlr4ng';
 import { parseGremlin } from '../../src/gremlin/frontend.ts';
 
