@@ -1,15 +1,15 @@
 import { q, value, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
 import {
-  scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx, valueMapProps,
-  storedValueExpr, bareValueMapProps, typedScalarNode, compareKey, type ScalarCtx,
+    scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx,
+    storedValueExpr, bareValueMapProps, typedScalarNode, compareKey, type ScalarCtx
 } from '../../plan/plan.ts';
 import { gtypeName, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { isMapLocalOrder } from './list.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { appendCte, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, partitionOver, prevRel, withLayout, dropLayoutAtBarrier, type TraverserLayout, type LoweringState, type ElementStream } from '../context/context.ts';
+import { layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, partitionOver, dropLayoutAtBarrier, type TraverserLayout, type LoweringState, type ElementStream } from '../context/context.ts';
 import { loweringStateOf, continueLowering, dispatchShapeTail, groupColumns, PROPERTY_PAYLOAD, toElementStream, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
-import { PER_ROW, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
+import { PER_ROW, perRowColumnOf, staticTypeOf, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
 import { lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
 import { applyChildCardinality, lowerElementBody, mintChildEncounter, pushChildScope, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows } from './child.ts';
 import { childCtx, childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyMapChildRows, classifyScalarChildRows, elementScalarBranchArm, reuseCurrentFrame, ROOT_SCOPE, type ChildParent, type ChildUse, type ChildFrameStack } from './child-shape.ts';

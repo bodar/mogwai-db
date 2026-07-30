@@ -10,6 +10,36 @@
     "noEmit": true,
     "skipLibCheck": true,
 
+    // Beyond `strict`, and free on this tree — each measured at 0 errors before being enabled.
+    // These are CORRECTNESS checks, so they apply everywhere, generated `parser/` included.
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "isolatedModules": true,
+
+    // The UNUSED-CODE checks (noUnusedLocals, noUnusedParameters, verbatimModuleSyntax) are NOT
+    // here — `mise run lint` passes them on the command line, over src/test/scripts only.
+    //
+    // Why not here: generated `parser/` fails 16 of them (unused `Token`/`int` imports, unused
+    // `previousContext` locals, a value-position type import) and must never be hand-edited
+    // (locked decision 2). There is NO config-level way to exempt it — all measured:
+    //   - `include`/`exclude` only filter the ROOT set. An imported file is still checked with the
+    //     root config's flags, so parser/ returns via src/gremlin/frontend.ts.
+    //   - project references would scope it, but `composite` REQUIRES emit (TS6310) and this
+    //     project is noEmit by design — Bun and Wrangler consume the TS directly.
+    //   - a workspace or `link:` package does not help: tsc resolves the symlink back to the real
+    //     path, and even a REAL copy under node_modules/ is still linted. `skipLibCheck` covers
+    //     `.d.ts` only; there is no source equivalent.
+    // So the exemption lives in the INVOCATION, which is `mise run lint`.
+    //
+    // Measured but NOT enabled anywhere yet — each is a project, not a flag flip:
+    //   exactOptionalPropertyTypes          95 errors / 37 files
+    //   noPropertyAccessFromIndexSignature 782 errors / 48 files  (style, not safety)
+    //   noUncheckedIndexedAccess          1367 errors / 71 files  (highest value of the three)
+    // Re-measure with: tsc --noEmit --<flag> true
+
     "allowImportingTsExtensions": true,
     "esModuleInterop": true,
     "resolveJsonModule": true

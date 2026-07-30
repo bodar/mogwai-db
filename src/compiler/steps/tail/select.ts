@@ -6,9 +6,9 @@ import { isColumnArg, isPopArg, isScopeArg, isTokenArg, isNested, stepChain } fr
 import { aliasElem, aliasIsElement, layoutProjection, layoutCols, scalarTypeFromAlias, type AliasMap, type ElementStream } from '../context/context.ts';
 import { aliasId, aliasPop, aliasPresent, aliasScalar, entryTypeTag, shapeElem } from '../context/alias.ts';
 import { emptyElementLike, historyPropertyValues, historyScalarValues, historyValues, popEnd, popIsListResult, selectOneFromAlias } from './labelselect.ts';
-import { loweringStateOf, continueLowering, dispatchShapeTail, recordFieldColumns, toElementStream, toListStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type ListStream, type LoweringResult, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
-import { PER_ROW, STATIC, UNKNOWN, perRowColumnOf, type Compiled, type ScalarType } from '../../../sql/kernel/render.ts';
-import { type TailAcc, type TailMods } from './projection.ts';
+import { loweringStateOf, continueLowering, dispatchShapeTail, recordFieldColumns, toElementStream, toListStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type LoweringResult, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
+import { PER_ROW, STATIC, UNKNOWN, perRowColumnOf, type ScalarType } from '../../../sql/kernel/render.ts';
+import { type TailMods } from './projection.ts';
 import { lowerGlobalCount } from './barrier.ts';
 import { applyChildCardinality, lowerElementBody, mintChildEncounter, pushChildScope, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
 import { byAt, childCtx, childSteps, classifyBy, classifyElementChild, classifyListChild, classifyRecordChildRows, classifyScalarChild, reuseCurrentFrame, ROOT_SCOPE, type ChildParent, type ChildUse, type ChildFrameStack } from './child-shape.ts';

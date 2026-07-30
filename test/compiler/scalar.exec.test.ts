@@ -2,16 +2,12 @@
 // Runs compiled SQL against a seeded in-memory store, asserting RESULTS. Pure cut-
 // and-paste relocation; the SQL-string snapshots live at test/L2-sql/*.sql.test.ts.
 import { test, expect, describe } from 'bun:test';
-import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
+import { STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
-import { ioc } from '../../src/io.ts';
-import { parseRequest } from '../../src/wire.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
-import { assertStreamColumns } from '../../src/compiler/steps/context/stream.ts';
-import { pushChildScope } from '../../src/compiler/steps/tail/child.ts';
 import { decode, decodeAll } from '../support/decode.ts';
 
 const read = (q: string, options?: CompileOptions) => {

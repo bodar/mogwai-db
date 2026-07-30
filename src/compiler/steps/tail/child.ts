@@ -1,13 +1,13 @@
 import { derived, empty, list, paren, q, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { perRowColumnOf, perRowCols } from '../../../sql/kernel/render.ts';
+import { perRowCols } from '../../../sql/kernel/render.ts';
 import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
 import { appendCte, patchLayout, layoutProjection, layoutProjectionMinting, layoutCols, partitionOver, prevRel, withLayout, type TraverserLayout, type ElementStream } from '../context/context.ts';
 import { aliasId } from '../context/alias.ts';
 import { asOnStream, selectOneFromAlias } from './labelselect.ts';
-import { loweringStateOf, streamPayloadCols, toMapStream, toScalarStream, PROPERTY_PAYLOAD, type ListStream, type MapStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream , type RelationalStream} from '../context/stream.ts';
+import { loweringStateOf, streamPayloadCols, toScalarStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream, type RelationalStream } from '../context/stream.ts';
 import { engineOf } from '../../engine/deps.ts';
-import { lowerScalarRows, unionScalarStreams } from './scalar.ts';
+import { lowerScalarRows } from './scalar.ts';
 import { SCALAR_TRANSFORMS } from './coerce.ts';
 import { lowerReSource } from '../graph-source.ts';
 import { type IRStep } from '../../ir/strategies.ts';
@@ -15,10 +15,11 @@ import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer
 import { predicateSql, rangeToOffsetLimit } from '../../plan/plan.ts';
 import { elementOrderDrop, elementOrderSql } from './modulation.ts';
 import {
-  childCtx, childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, labelSelectOf,
-  CHILD_SCALAR_REDUCERS,
-  ELEMENT_CHILD_STEPS, isBareBranchChildAllCard, isElementChildStep, reuseCurrentFrame, ROOT_SCOPE, scalarChildPrefixOk,
-  type ChildFrame, type ChildParent, type ChildPlan, type ChildScope, type ChildUse, type ChildFrameStack,
+    childCtx, childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, labelSelectOf,
+    CHILD_SCALAR_REDUCERS,
+    ELEMENT_CHILD_STEPS, isBareBranchChildAllCard,
+    reuseCurrentFrame, ROOT_SCOPE, scalarChildPrefixOk,
+    type ChildFrame, type ChildParent, type ChildPlan, type ChildScope, type ChildUse, type ChildFrameStack
 } from './child-shape.ts';
 // The scope-construction trio (pushChildScope/popChildScope below + reuseCurrentFrame) is the
 // compiler's public scope vocabulary; re-export reuseCurrentFrame (defined as a pure spread in the

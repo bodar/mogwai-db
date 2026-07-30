@@ -1,6 +1,8 @@
 import type { Stream } from '../../compiler/steps/context/stream.ts';
 import type { ChildFrameStack, ChildParent } from '../../compiler/steps/tail/child-shape.ts';
 import type { Query } from '../../sql/kernel/q.ts';
+import type { ForeignRow } from '../../api.ts';
+import type { FederationSource } from '../../compiler/segment.ts';
 
 // ---------- the call() service seam ----------
 //
@@ -57,8 +59,6 @@ export interface ServiceCallCtx {
 /** ForeignRow lives in the outer API surface (src/api.ts) — it's a leaf data type on the
  *  federated-transfer contract. Re-exported here so service-author code keeps one import. */
 export type { ForeignRow } from '../../api.ts';
-import type { ForeignRow } from '../../api.ts';
-import type { FederationSource } from '../../compiler/segment.ts';
 
 /** How a Service contributes to the plan. 'stream' is a pure, inline-SQL contribution
  *  (Phases 1-5): it lowers to SQL synchronously and the generic engine takes over. 'barrier'

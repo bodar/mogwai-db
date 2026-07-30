@@ -1,12 +1,12 @@
 import { derived, q, list, raw, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { isNested, stepChain, type Pred } from '../../../gremlin/frontend.ts';
 import {
-  P_OPS, labelIn, predicateSql, nodePropScalar, hasProp, elemCtx, aliasCtx,
-  idPredFromArgs, scalarProp, labelNameSub, FtsSubstringFastPath, type Elem, type ScalarCtx,
+    P_OPS, labelIn, predicateSql, nodePropScalar, hasProp, elemCtx,
+    idPredFromArgs, scalarProp, labelNameSub, FtsSubstringFastPath, type Elem
 } from '../../plan/plan.ts';
 import { runFastPath } from '../../options/fast-paths.ts';
 import { tryInlinePredicate, combineBranchPreds, PredicateInliningFastPath } from './predicate.ts';
-import { appendCte, aliasElem, layoutCols, patchLayout, layoutProjection, elemRel, labelCtx, labelScope, pathColsOf, prevRel, scopePathCols, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from '../context/context.ts';
+import { appendCte, aliasElem, layoutCols, patchLayout, layoutProjection, elemRel, labelCtx, labelScope, prevRel, scopePathCols, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from '../context/context.ts';
 import { aliasAppend, aliasId, aliasSeed, elemEntry, elemShape } from '../context/alias.ts';
 import { tryCombineByChildExistence, tryCompileScalarValueRows, tryFilterByChildExistence } from '../tail/child.ts';
 import { operandDeps, resolveTraversalOperands } from '../tail/operand.ts';

@@ -1,4 +1,4 @@
-import { q, value, type Expression } from '../../../sql/kernel/q.ts';
+import { q, type Expression } from '../../../sql/kernel/q.ts';
 import { type ValueType } from '../../../sql/kernel/render.ts';
 import { isDtArg, isGTypeArg, isNested, parseIsoMs, stepChain } from '../../../gremlin/frontend.ts';
 

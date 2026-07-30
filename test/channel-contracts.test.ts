@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  gtypeName, isCardinalityArg, isColumnArg, isDirectionArg, isDtArg, isGTypeArg,
-  isMergeArg, isOperatorArg, isOrderArg, isPickArg, isPopArg, isScopeArg,
-  isTokenArg, isWithOptionArg,
+    gtypeName, isCardinalityArg, isColumnArg, isDirectionArg, isDtArg, isGTypeArg,
+    isMergeArg, isOperatorArg, isOrderArg, isPickArg, isPopArg, isScopeArg,
+    isTokenArg, isWithOptionArg,
 } from '../src/gremlin/frontend.ts';
 import { cardinalityOf } from '../src/compiler/steps/context/stream.ts';
 

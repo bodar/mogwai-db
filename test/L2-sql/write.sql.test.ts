@@ -10,14 +10,8 @@ import { test, expect, describe } from 'bun:test';
 import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
-import { executeQuery, executeFramed } from '../support/executor.ts';
-import { ioc } from '../../src/io.ts';
-import { Query } from '../../src/sql/kernel/q.ts';
+import { executeQuery } from '../support/executor.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
-import { assertStreamColumns, toGroupStream, toPathStream, toPropertyStream, toRecordStream, toScalarStream, toVariantStream } from '../../src/compiler/steps/context/stream.ts';
-import { popChildScope, pushChildScope, reuseCurrentFrame } from '../../src/compiler/steps/tail/child.ts';
-import { standardRegistry } from '../../src/services/standard.ts';
-import { readdirSync, readFileSync } from 'node:fs';
 
 const read = (q: string, options?: CompileOptions) => {
   const p = compile(q, {}, options);

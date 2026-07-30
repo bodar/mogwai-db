@@ -2,14 +2,14 @@ import { q, list, raw, empty, value, type Expression } from '../../../sql/kernel
 import { type IRStep } from '../../ir/strategies.ts';
 import { aliasElem, aliasIsElement, aliasScalarTypeOf, layoutCols, patchLayout, layoutProjection, scalarTypeFromAlias, withShape, type AliasEntry, type AliasScalarType, type TraverserLayout, type LoweringState, type ElementStream } from '../context/context.ts';
 import {
-  aliasAppend, aliasEntry, aliasId, aliasPop, aliasPresent, aliasScalar, aliasSeed, elemEntry, entryTypeTag, shapeElem,
-  type AliasShape,
+    aliasAppend, aliasEntry, aliasId, aliasPop, aliasPresent, aliasScalar, aliasSeed, elemEntry, entryTypeTag, shapeElem,
+    type AliasShape,
 } from '../context/alias.ts';
 import {
-  assertStreamColumns, loweringStateOf, pathColumns, streamColumns, toElementStream, toListStream, toPropertyStream, toScalarStream, PROPERTY_PAYLOAD,
-  type ListOf, type PropertyStream, type Stream,
+    assertStreamColumns, loweringStateOf, pathColumns, streamColumns, toElementStream, toListStream, toPropertyStream, toScalarStream, PROPERTY_PAYLOAD,
+    type ListOf, type PropertyStream, type Stream,
 } from '../context/stream.ts';
-import { PER_ROW, perRowColumnOf, staticTypeOf, type ValueType } from '../../../sql/kernel/render.ts';
+import { PER_ROW, perRowColumnOf, staticTypeOf } from '../../../sql/kernel/render.ts';
 
 // ---------- as()/select() over path-history labels, any stream shape ----------
 //

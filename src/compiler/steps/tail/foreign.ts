@@ -4,11 +4,11 @@ import { type Elem } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import type { ForeignRow, InjectionKind } from '../../../services/spi/types.ts';
 import {
-  layoutCols, layoutProjection, type LoweringState,
+    layoutCols, layoutProjection, type LoweringState,
 } from '../context/context.ts';
 import {
-  loweringStateOf, continueLowering, dispatchShapeTail, foreignPayload, toScalarStream, toResultStream,
-  type ForeignStream, type LoweringResult, type ShapeTailFn,
+    loweringStateOf, continueLowering, dispatchShapeTail, foreignPayload, toScalarStream, toResultStream,
+    type ForeignStream, type LoweringResult, type ShapeTailFn,
 } from '../context/stream.ts';
 
 export type { ForeignStream } from '../context/stream.ts';

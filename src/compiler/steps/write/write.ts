@@ -1,11 +1,11 @@
 import type { GraphStore } from '../../../storage.ts';
-import { q, value, list, empty, raw, render, type Expression } from '../../../sql/kernel/q.ts';
+import { q, value, list, raw, render, type Expression } from '../../../sql/kernel/q.ts';
 import { labelIn, nodeHasProp, edgeHasProp, sqlElem, type Elem } from '../../plan/plan.ts';
-import { gremlinTypeOf, isCollectionType, storedScalar, flatType, mapEntryType, valueNodeOf, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
+import { gremlinTypeOf, isCollectionType, storedScalar, mapEntryType, valueNodeOf, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
 import { stepChain, isNested, isCardinalityArg, isCardinalityValueArg, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
-import { staticTypeOf, readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../../../sql/kernel/render.ts';
+import { staticTypeOf, renderFrom, type Compiled, type WritePlan, type Shape } from '../../../sql/kernel/render.ts';
 import type { Engine } from '../../engine/deps.ts';
 import type { ElementReadDriver } from '../../engine/deps.ts';
 import { compileInject } from './inject.ts';

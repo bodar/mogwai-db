@@ -1,13 +1,13 @@
 import { isNested, type Step, type StrategyUse } from '../../gremlin/frontend.ts';
-import { PASS_CATEGORIES, type Pass, type PassContext } from './pass.ts';
+import { PASS_CATEGORIES, type Pass, type PassCategory, type PassContext } from './pass.ts';
 import {
-  stripTerminal, formRepeatRegions, absorbModulators, absorbOptionArms, absorbCallWith,
-  canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
-  verifyReadOnlyChildren,
-  absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
-  injectSubgraphRec, injectPartitionRec, markProductiveBy, isAlwaysProductiveFilterNoOp, verify,
-  NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
-  type IRStep,
+    stripTerminal, formRepeatRegions, absorbModulators, absorbOptionArms, absorbCallWith,
+    canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
+    verifyReadOnlyChildren,
+    absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
+    injectSubgraphRec, injectPartitionRec, markProductiveBy, isAlwaysProductiveFilterNoOp, verify,
+    NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
+    type IRStep,
 } from './strategies.ts';
 
 // ---------- the Pass pipeline: the concrete PASSES array + the driver ----------
@@ -17,23 +17,51 @@ import {
 // rewrite layer. `runPasses` folds it over the chain, replacing the inside-out normalize() nesting
 // (and, from Stage 2 on, applyStrategies too). Adding a rewrite = append a Pass to the right group.
 
+/**
+ * Build the Pass members of one category.
+ *
+ * Passes are CONSTRUCTED rather than written as object literals so **the category is stated once,
+ * by the group**. A literal repeating `category: 'verify'` can disagree with the array it sits in;
+ * the ordering test would catch the ordering consequence but not the mislabel itself. Here the
+ * group supplies it and the disagreement is unrepresentable.
+ *
+ * A run whose body is REAL LOGIC (rather than a one-line delegation to an already-named helper) is
+ * written as a `function name(...)` declaration, not an arrow. That is not style: an arrow assigned
+ * to an object-literal property is anonymous to STATIC analysis, and
+ * `textDocument/prepareCallHierarchy` returns nothing for it — measured on this file. A named
+ * declaration is what lets a call-hierarchy walk confirm a Pass never reaches ChainFacts or the
+ * fast-path layer (the `Never` column of the role table in ../CLAUDE.md). A one-line delegation
+ * needs no name of its own: the call to the real helper is what a walk follows anyway.
+ *
+ * `applies` stays optional and keeps its meaning: absent → always runs.
+ */
+const group = (
+  category: PassCategory,
+  members: Array<{
+    name: string;
+    applies?: (steps: readonly IRStep[], ctx: PassContext) => boolean;
+    run: (steps: IRStep[], ctx: PassContext) => IRStep[];
+  }>,
+): Pass[] => members.map(({ name, applies, run }) =>
+  applies ? { name, category, applies, run } : { name, category, run });
+
 // ---------- extract (out-of-band flags; runs first) ----------
-const EXTRACT: Pass[] = [
+const EXTRACT: Pass[] = group('extract', [
   {
-    name: 'stripTerminal', category: 'extract',
-    run: (steps, ctx) => {
+    name: 'stripTerminal',
+    run: function stripTerminalPass(steps, ctx) {
       const r = stripTerminal(steps);
       ctx.out.discard = r.discard;
       return r.steps as IRStep[];
     },
   },
-];
+]);
 
 // ---------- fold (canonicalize multi-step shapes into carried fields) ----------
 // These five target disjoint step names, so their relative order is not load-bearing; kept in the
 // historical composition order for review locality. The Stage 3 test pins the ordering that IS
 // load-bearing (fold before simplify) as a guard.
-const FOLD: Pass[] = [
+const FOLD: Pass[] = group('canonicalize', [
   // These two both need the RAW `{nested}` args (before formRepeatRegions/absorbOptionArms move a
   // body into `.repeatRegion`/`.optionArms`), so both lead the group. Their relative order follows
   // TinkerPop: a where()'s variable LOCATIONS are resolved when the step is CONSTRUCTED
@@ -43,7 +71,7 @@ const FOLD: Pass[] = [
   // trailing as("b") inside the and()'s last operand, where the end-label rewrite can no longer
   // see it as the body's last step.
   {
-    name: 'rewriteWhereEndLabels', category: 'canonicalize',
+    name: 'rewriteWhereEndLabels',
     // Nothing to do without a label to bind or a child body to hold a where(): no as() and no
     // nested arg at the top level means no where() host exists anywhere below either.
     applies: (steps) => steps.some((s) => s.name === 'as' || (s.args ?? []).some(isNested)),
@@ -54,35 +82,35 @@ const FOLD: Pass[] = [
   // after it — should see the canonical shape. Its own recursion visits every depth, and each body
   // it mints is `normalize()`d again when compiled as a child, so a by()/repeat cluster inside a
   // folded operand still canonicalizes.
-  { name: 'ConnectiveStrategy', category: 'canonicalize', run: (steps, ctx) => canonicalizeConnectives(steps, ctx.params) },
-  { name: 'formRepeatRegions', category: 'canonicalize', run: (steps) => formRepeatRegions(steps) },
+  { name: 'ConnectiveStrategy', run: (steps, ctx) => canonicalizeConnectives(steps, ctx.params) },
+  { name: 'formRepeatRegions', run: (steps) => formRepeatRegions(steps) },
   // Desugar valueMap().with(WithOptions.tokens) → valueMap(true) BEFORE absorbModulators, so a
   // following by() (e.g. the selective-token form's by(unfold)) folds onto the host once landed.
-  { name: 'foldConstantPredicateOperands', category: 'canonicalize', run: (steps, ctx) => foldConstantPredicateOperands(steps, ctx.params) },
-  { name: 'absorbValueMapWith', category: 'canonicalize', run: (steps) => absorbValueMapWith(steps) },
-  { name: 'absorbModulators', category: 'canonicalize', run: (steps) => absorbModulators(steps) },
-  { name: 'absorbOptionArms', category: 'canonicalize', run: (steps) => absorbOptionArms(steps) },
-  { name: 'absorbCallWith', category: 'canonicalize', run: (steps) => absorbCallWith(steps) },
-];
+  { name: 'foldConstantPredicateOperands', run: (steps, ctx) => foldConstantPredicateOperands(steps, ctx.params) },
+  { name: 'absorbValueMapWith', run: (steps) => absorbValueMapWith(steps) },
+  { name: 'absorbModulators', run: (steps) => absorbModulators(steps) },
+  { name: 'absorbOptionArms', run: (steps) => absorbOptionArms(steps) },
+  { name: 'absorbCallWith', run: (steps) => absorbCallWith(steps) },
+]);
 
 // ---------- simplify (provable no-op removals) ----------
 // collapseFoldCountLocal MUST precede dropRedundantOrder (it can expose an order().count() the
 // latter then drops); absorbModulators (fold) MUST precede dropRedundantOrder so an order().by()
 // has its .modulators set and is skipped. Both satisfied by canonicalize < simplify + this intra-group order.
-const SIMPLIFY: Pass[] = [
-  { name: 'collapseFoldCountLocal', category: 'simplify', run: (steps) => collapseFoldCountLocal(steps) },
-  { name: 'dropRedundantOrder', category: 'simplify', run: (steps) => dropRedundantOrder(steps) },
+const SIMPLIFY: Pass[] = group('simplify', [
+  { name: 'collapseFoldCountLocal', run: (steps) => collapseFoldCountLocal(steps) },
+  { name: 'dropRedundantOrder', run: (steps) => dropRedundantOrder(steps) },
   {
     // An existence filter whose body ALWAYS produces a traverser cannot reject anything, so the step
     // is provably inert — the same category of fact as the two above. Removing it here is also what
     // makes `predicateInlining` disable-safe for this whole family: neither the inline path nor the
     // generic gate ever sees the step, so they cannot answer differently. See
     // isAlwaysProductiveFilterNoOp for why this is not a gap in the child-existence gate.
-    name: 'isAlwaysProductiveFilterNoOp', category: 'simplify',
+    name: 'isAlwaysProductiveFilterNoOp',
     applies: (steps) => steps.some((s) => ['where', 'filter', 'not', 'and', 'or'].includes(s.name)),
     run: (steps, ctx) => isAlwaysProductiveFilterNoOp(steps, ctx.params) as IRStep[],
   },
-];
+]);
 
 // ---------- decoration (external withStrategies; config-gated) ----------
 // Each `applies` is a linear scan of ctx.strategies.with (typically 0-2 entries), never the step
@@ -95,20 +123,20 @@ const specNamed = (name: string) => (_steps: readonly IRStep[], ctx: PassContext
   ctx.strategies.with.some((s) => s.name === name);
 const specFor = (name: string, ctx: PassContext) => ctx.strategies.with.find((s) => s.name === name)!;
 
-const DECORATION: Pass[] = [
+const DECORATION: Pass[] = group('decoration', [
   {
-    name: 'SubgraphStrategy', category: 'decoration', applies: specNamed('SubgraphStrategy'),
+    name: 'SubgraphStrategy', applies: specNamed('SubgraphStrategy'),
     run: (steps, ctx) => injectSubgraphRec(steps, specFor('SubgraphStrategy', ctx), ctx.params) as IRStep[],
   },
   {
-    name: 'PartitionStrategy', category: 'decoration', applies: specNamed('PartitionStrategy'),
+    name: 'PartitionStrategy', applies: specNamed('PartitionStrategy'),
     run: (steps, ctx) => injectPartitionRec(steps, specFor('PartitionStrategy', ctx), ctx.params) as IRStep[],
   },
   {
-    name: 'ProductiveByStrategy', category: 'decoration', applies: specNamed('ProductiveByStrategy'),
+    name: 'ProductiveByStrategy', applies: specNamed('ProductiveByStrategy'),
     run: (steps) => markProductiveBy(steps) as IRStep[],
   },
-];
+]);
 
 // ---------- verify (assert legality against ctx.originalChain; never rewrites) ----------
 // A verify pass IGNORES its `steps` argument (the live, possibly-decorated chain) and asserts
@@ -117,19 +145,27 @@ const DECORATION: Pass[] = [
 // ReservedKeysVerificationStrategy, and a SubgraphStrategy out()→outE().inV() explosion must not
 // change what EdgeLabelVerification sees. verify() throws the spec's canonical message on a
 // violation; a passing traversal returns the chain unchanged.
-const VERIFY: Pass[] = [
+const VERIFY: Pass[] = group('verify', [
   // ALWAYS ON (no `applies`), matching TinkerPop: StandardVerificationStrategy is a standard
   // strategy, not opt-in. Naming it in withStrategies() is therefore a genuine no-op.
   {
-    name: 'readOnlyChildTraversals', category: 'verify' as const,
-    run: (steps: IRStep[], ctx: PassContext) => { verifyReadOnlyChildren(ctx.originalChain as IRStep[], ctx.params); return steps; },
+    name: 'readOnlyChildTraversals',
+    run: function readOnlyChildTraversalsPass(steps, ctx) {
+      verifyReadOnlyChildren(ctx.originalChain as IRStep[], ctx.params);
+      return steps;
+    },
   },
+  // One pass per named verification strategy. `name` is captured per iteration, so each pass's
+  // `run` verifies ITS OWN spec — the reason this is a map and not a single pass that loops.
   ...[...VERIFICATION_STRATEGIES].map((name) => ({
-  name, category: 'verify' as const,
-  applies: specNamed(name),
-  run: (steps: IRStep[], ctx: PassContext) => { verify(specFor(name, ctx), ctx.originalChain as IRStep[]); return steps; },
+    name,
+    applies: specNamed(name),
+    run: function verificationStrategyPass(steps: IRStep[], ctx: PassContext) {
+      verify(specFor(name, ctx), ctx.originalChain as IRStep[]);
+      return steps;
+    },
   })),
-];
+]);
 
 /** The ordered pipeline. Declaration order across groups fixes cross-category order (extract <
  *  decoration < canonicalize < simplify < verify); the Stage 3 test checks THIS array against

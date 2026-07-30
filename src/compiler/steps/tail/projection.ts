@@ -1,10 +1,11 @@
-import { q, value, list, empty, raw, Relation, Query, type Expression } from '../../../sql/kernel/q.ts';
-import { nodes, edges, labels, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
-import { flattenListArgs, gtypeName, isColumnArg, isNested, isOrderArg, isScopeArg, isTokenArg } from '../../../gremlin/frontend.ts';
+import { q, value, list, empty, raw, Relation, type Expression } from '../../../sql/kernel/q.ts';
+import { labels, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
+import { gtypeName, isColumnArg, isNested, isOrderArg, isScopeArg, isTokenArg } from '../../../gremlin/frontend.ts';
 import { elementOrderDrop, orderProductivityFilter } from './modulation.ts';
 import {
-  predicateSql, rangeToOffsetLimit, elemCtx, extIdOf, jsonbGroupArray,
-  nodePropScalar, edgePropScalar, nodePropSortKey, edgePropSortKey, scalarPropSortKey, compareKey, labelNameSub, framedProps, valueMapProps, storedValueExpr,
+    predicateSql, rangeToOffsetLimit, elemCtx, extIdOf, jsonbGroupArray,
+    nodePropSortKey, edgePropSortKey, scalarPropSortKey,
+    labelNameSub, framedProps, valueMapProps, storedValueExpr
 } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { appendCte, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, partitionOver, dropLayoutAtBarrier, type ElementStream } from '../context/context.ts';
@@ -17,10 +18,10 @@ import { compileSelectProject, tryCompileRecordChild, lowerRecordSelectProject, 
 import { lowerPath } from './path.ts';
 import { lowerMapScalar, lowerMath, lowerMathScalar, lowerFormat, lowerFormatScalar, lowerChooseOptions, lowerChooseOptionsScalar, lowerConcatScalar, lowerDateDiffScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { choose as lowerElementChoose, coalesce as lowerElementCoalesce, flatMap as lowerElementFlatMap, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion, tryLowerOptionMapBranch, union as lowerElementUnion } from '../prefix/branch.ts';
-import { elementGroupSource, lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, tryCompileMapChild, type GroupSource } from './group.ts';
-import { tryCompileCountChild, tryCompileBranchChildAllCard, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueRows, type ScalarModulationSpec } from './child.ts';
+import { elementGroupSource, lowerGroup, lowerProperties, lowerValueMap, lowerScalarGroupCount, tryCompileMapChild } from './group.ts';
+import { tryCompileCountChild, tryCompileBranchChildAllCard, tryCompileListChild, tryCompileScalarModulations, type ScalarModulationSpec } from './child.ts';
 import { tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './scalar-arm.ts';
-import { BRANCH_SHAPE_ORDER, childCtx, childSteps, classifyBy, classifyListChild, classifyTotalScalarChild, isScalarChild, isListChild, isTotalScalarChild, ROOT_SCOPE, type BranchKind, type ByClass } from './child-shape.ts';
+import { BRANCH_SHAPE_ORDER, childCtx, childSteps, classifyBy, classifyListChild, classifyTotalScalarChild, isScalarChild, ROOT_SCOPE, type BranchKind, type ByClass } from './child-shape.ts';
 import { lowerElementDedup } from '../prefix/filter.ts';
 import { lowerReSource } from '../graph-source.ts';
 import { lowerCall } from './call.ts';

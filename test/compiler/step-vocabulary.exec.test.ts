@@ -14,8 +14,8 @@
 // shows up as a deliberate edit to this file rather than as an invisible side effect.
 import { test, expect, describe } from 'bun:test';
 import {
-  unionOf, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, VERTEX_SOURCE, EDGE_SOURCE,
-  PATH_FAMILY, NUMERIC_REDUCERS, REDUCERS,
+    unionOf, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, VERTEX_SOURCE, EDGE_SOURCE,
+    PATH_FAMILY, NUMERIC_REDUCERS, REDUCERS,
 } from '../../src/compiler/ir/step.ts';
 
 const sorted = (s: ReadonlySet<string>) => [...s].sort();

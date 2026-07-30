@@ -16,7 +16,7 @@
 import { type Expression, type Query, type Relation } from '../../../sql/kernel/q.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { type Elem } from '../../plan/plan.ts';
-import { perRowColumnOf, perRowCols, staticTypeOf, type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from '../../../sql/kernel/render.ts';
+import { perRowCols, type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from '../../../sql/kernel/render.ts';
 import { layoutCols, type LoweringState, type ElementStream } from './context.ts';
 
 /** What a list stream holds — i.e. the shape `unfold` produces from it. `elem` → bare

@@ -1,7 +1,6 @@
 import { test, expect, describe, beforeAll } from 'bun:test';
 import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { extendedRegistry } from '../src/services/standard.ts';
-import { ioc } from '../src/io.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { CREW_SEED } from './fixtures/seed-crew.ts';
 import { MAX_FEDERATION_DEPTH, guardFederationDepth } from '../src/services/params/federation-depth.ts';

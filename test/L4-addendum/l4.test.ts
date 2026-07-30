@@ -19,12 +19,11 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
-import { ioc } from '../../src/io.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { CREW_SEED } from '../fixtures/seed-crew.ts';
 import { BigDecimal, Duration } from '../../src/gremlin/types.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
-import { decode, decodeAll } from '../support/decode.ts';
+import { decodeAll } from '../support/decode.ts';
 
 // A vertex carrying one property of each type our extended GraphBinary serializers cover, so a
 // `Given the typed graph` scenario can read each back and exercise serialize+decode end-to-end.

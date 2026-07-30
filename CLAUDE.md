@@ -80,6 +80,21 @@ answer here:
 - **Comments.** LSP rename never touches prose, and prose is not sed-able either — `Carry`/`Carried`
   are also English words. Rename the symbol, then read the comments.
 
+**For a vocabulary campaign use `bun scripts/rename-batch.ts <plan.tsv> [--dry] [--keep-going]`** — a
+TSV of `file<TAB>old<TAB>new[<TAB>line:col]`, all driven through ONE LSP session. Not a speed wrapper:
+N invocations of `rename.ts` all compute positions against the ORIGINAL files, so rename 1 invalidates
+the rest (a shorter replacement shifts every later column on that line). The batch resolves each
+position against the CURRENT file, so the stale-`--at` trap cannot arise rather than merely failing
+loudly. Fail-closed by default — the first failure stops the batch, leaving the remaining plan lines as
+the resume point; `--keep-going` only when the renames are genuinely unrelated, and `mise run check`
+after either, since a partial campaign can leave an importer on the old name.
+
+The shared LSP plumbing is `scripts/lsp.ts`. Its one load-bearing rule: **`Session.resync()` moves the
+server's buffer and our text cache together.** Splitting them — pushing `didChange` while a caller
+still holds text from `open()` — computes positions against text the server does not have, which
+silently lands edits mid-token (it produced `typeof PASSPASS_KINDSber]` before the cache was unified).
+Never read a file's content directly when a session has it open; go through the session.
+
 ## Working rules
 
 - **No new dependencies without explicit approval** — runtime or dev, and no second

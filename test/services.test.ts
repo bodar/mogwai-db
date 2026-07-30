@@ -13,7 +13,6 @@ import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { executeQuery } from './support/executor.ts';
 import { Executor } from '../src/execute.ts';
-import { ioc } from '../src/io.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { decode, decodeAll } from './support/decode.ts';
 

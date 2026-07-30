@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 import fc from 'fast-check';
 import { parseGremlin, stepChain, type Step } from '../../src/gremlin/frontend.ts';
 import { runPasses } from '../../src/compiler/ir/passes.ts';
-import { extractSack, extractSideEffects, extractStrategies } from '../../src/gremlin/frontend.ts';
+import { extractStrategies } from '../../src/gremlin/frontend.ts';
 import { traversal } from './generate.ts';
 import type { Shape } from './shape.ts';
 

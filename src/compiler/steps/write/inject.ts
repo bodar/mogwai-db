@@ -9,8 +9,8 @@ import type { Engine } from '../../engine/deps.ts';
 import { materializeRootStream } from '../tail/materialize.ts';
 import { type Compiled, type ValueType } from '../../../sql/kernel/render.ts';
 import {
-  numericSpec, asBoolConst, asNumberConst, asNumberBare, asDateConst,
-  dtFactor, dateDiffOtherMs, isDateDiffConstant,
+    numericSpec, asBoolConst, asNumberConst, asNumberBare, asDateConst,
+    dtFactor, dateDiffOtherMs, isDateDiffConstant,
 } from '../tail/coerce.ts';
 
 const CONST_COERCIONS = new Set(['asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff']);

@@ -1,0 +1,25 @@
+{
+  // The generated ANTLR parser is its own module, so it carries its own config.
+  //
+  // This exists because `parser/` is GENERATED (`mise run generate`, from the submodule's
+  // Gremlin.g4 via antlr-ng) and must never be hand-edited — see the root CLAUDE.md's locked
+  // decision 2. The root config turns on unused-code and import-style checks that antlr-ng's output
+  // does not satisfy (16 errors: unused `Token`/`int` imports, unused `previousContext`/`localContext`
+  // locals, a value-position type import). Those are defects in nothing: they are artifacts of a
+  // code generator that targets several TypeScript configurations.
+  //
+  // The alternative — a second lint-only tsconfig at the root that excludes this directory — puts
+  // the exemption far away from the thing exempted, where it goes stale. A module owning its own
+  // config keeps the boundary where the ownership already is.
+  //
+  // Type CORRECTNESS is not relaxed here: `strict` stays on, and everything the root config enables
+  // that a generator can reasonably satisfy stays on too. Only the unused-code and module-syntax
+  // checks are off.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "verbatimModuleSyntax": false
+  },
+  "include": ["."]
+}

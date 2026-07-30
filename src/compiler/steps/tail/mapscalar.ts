@@ -1,6 +1,6 @@
 import { q, list, value, type Expression } from '../../../sql/kernel/q.ts';
 import {
-  elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, scalarTx, type ScalarCtx,
+    elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, scalarTx, type ScalarCtx,
 } from '../../plan/plan.ts';
 import { isNested } from '../../../gremlin/frontend.ts';
 import { mathToSql, mathVars } from '../../../gremlin/math.ts';

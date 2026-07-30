@@ -21,7 +21,7 @@
 // child.ts <-> projection.ts already is (every reference is inside a function body, never at
 // module top level), so it is resolution-safe.
 
-import { isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { isNested } from '../../../gremlin/frontend.ts';
 import { UNKNOWN, staticTypeOf, perRowColumnOf, perRowCols } from '../../../sql/kernel/render.ts';
 import { empty, list, paren, q, value, type Expression } from '../../../sql/kernel/q.ts';
 import { layoutCols, patchLayout, layoutProjection, type ElementStream } from '../context/context.ts';
@@ -33,12 +33,12 @@ import { gateScalar, tryInlineScalarPredicate, unionScalarStreams } from './scal
 import { predicateSql, TYPE_PER_ROW, TYPE_UNKNOWN } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import {
-  CHILD_SCALAR_REDUCERS, isResourceHead, pushChildScope, resourceElement,
-  tryCompileListChild, tryCompileScalarValueChild, tryCompileScalarValueRows,
+    CHILD_SCALAR_REDUCERS, isResourceHead, pushChildScope, resourceElement,
+    tryCompileListChild, tryCompileScalarValueChild, tryCompileScalarValueRows,
 } from './child.ts';
 import {
-  childSteps, classifyScalarChildRows, ELEMENT_CHILD_STEPS, reuseCurrentFrame, ROOT_SCOPE,
-  SCALAR_ARM_TX, scalarChildPrefixOk, type BranchArmShape, type ChildFrameStack,
+    childSteps, classifyScalarChildRows, ELEMENT_CHILD_STEPS, reuseCurrentFrame, ROOT_SCOPE,
+    SCALAR_ARM_TX, scalarChildPrefixOk, type BranchArmShape, type ChildFrameStack,
 } from './child-shape.ts';
 
 // ---------- scalar-PARENT branch consumers (map/local/flatMap/choose/union/coalesce) ----------

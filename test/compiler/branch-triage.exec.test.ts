@@ -8,8 +8,8 @@ import { test, expect, describe } from 'bun:test';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import { normalize } from '../../src/compiler/ir/passes.ts';
 import {
-  asBranchKind, branchNeedsShapeDispatch, classifyBranchArms,
-  isElementChild, isListChild, isScalarChild, type BranchKind, type ChildCtx,
+    asBranchKind, branchNeedsShapeDispatch, classifyBranchArms,
+    isElementChild, isListChild, isScalarChild, type BranchKind, type ChildCtx,
 } from '../../src/compiler/steps/tail/child-shape.ts';
 import { type IRStep } from '../../src/compiler/ir/strategies.ts';
 import { compile } from '../../src/compiler/compiler.ts';

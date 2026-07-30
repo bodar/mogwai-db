@@ -13,7 +13,7 @@ import { q, list, empty, type Expression, type Relation } from '../../../sql/ker
 import { type ValueType } from '../../../sql/kernel/render.ts';
 import { rangeToOffsetLimit } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { loweringStateOf, continueLowering, dispatchShapeTail, toListStream, toVariantStream, type ListStream, type LoweringResult, type ScalarStream, type ShapeTailFn, type VariantArms, type VariantStream } from '../context/stream.ts';
+import { loweringStateOf, continueLowering, dispatchShapeTail, toListStream, toVariantStream, type ListStream, type LoweringResult, type ShapeTailFn, type VariantArms, type VariantStream } from '../context/stream.ts';
 import { aliasArmProjection, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, mergeAliasMaps, partitionOver, type LoweringState } from '../context/context.ts';
 import { lowerGlobalCount } from './barrier.ts';
 
