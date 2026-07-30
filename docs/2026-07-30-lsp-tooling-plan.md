@@ -60,21 +60,34 @@ annotating — that is ChainFacts (ir/analyze.ts), not a Pass` with the path
 
 ---
 
-## 2. `mise run lint` — the unused-code flags
+## 2. `mise run lint` — the unused-code flags — LANDED (`7821875`)
 
-**Current state: 76 errors in our code, 16 in generated `parser/`** (re-measured at `bf10425`; it
-was 46 at `8c33450`, so this grows by roughly one a day when ungated — which is the argument for
-the gate, not against it).
+`scripts/lint.ts` + `[tasks.lint]`, and `ci` depends on it. Our source is at **0**; generated
+`parser/` is at 24 and exempt. Adversarially verified — an injected unused local was reported with
+its site, exit 1.
 
-Ours breaks down as 70 × TS6133 (declared but never read), 5 × TS6192 (whole import declaration
-unused), 1 × TS6138 (unused private property). Two facts the earlier count obscured:
+The backlog was cleared first, in three passes, because a gate cannot go green over 76 errors:
 
-- **`verbatimModuleSyntax` is already clean in our code.** Its only hit (TS1484) is in generated
-  `parser/`. So that flag costs nothing to adopt and can go straight into `tsconfig.json` the day
-  `parser/` stops being in the root program — it is not part of the 76.
-- **The test-file half is not 30 separate defects.** `read`, `seededStore`, `run`, `runWith` and
-  `bare` are copy-pasted into 18–20 test files each; the errors are just the copies that happened to
-  go unused. Deleting them one by one treats the symptom. See §2a.
+| | | |
+|---|---|---|
+| 76 → 52 | `3181430` | extract the duplicated test harness (§2a) |
+| 52 → 25 | `fda7a27` | `fix.ts --unused` over `src/` — 227 edits, ordinary drift since `8c33450` |
+| 25 → 0 | `0635cab` | the judgement calls, each read in context (§2b) |
+
+**The count moves, so do not pin it.** It was 46 at `8c33450`, 76 at `bf10425`, and the exempt side
+went 16 → 24 mid-task when the GQL sub-language parser landed. `lint.ts` therefore filters by
+DIRECTORY and prints a per-directory tally; a pinned number would have been wrong within the day.
+
+Two facts the original count obscured:
+
+- **`verbatimModuleSyntax` was already clean in our code.** Its only hit (TS1484) is in `parser/`.
+  It can go straight into `tsconfig.json` the day `parser/` stops being in the root program.
+- **The test-file half was not 30 separate defects** but one duplication — see §2a.
+
+**Why filtering OUTPUT is not a hole**, since this is the part that looks like cheating: the lint
+run ADDS three flags to those `mise run check` already gates on, and `check` exempts nothing. Real
+type errors in generated code remain `check`'s job; only unused-code noise is suppressed. A
+diagnostic that does not parse into a file path fails the run rather than being assumed exempt.
 
 The six *correctness* flags are already in `tsconfig.json` (measured at 0 errors each). The three
 *unused-code* flags — `noUnusedLocals`, `noUnusedParameters`, `verbatimModuleSyntax` — are
@@ -98,25 +111,30 @@ consume `.d.ts` rather than the generated `.ts`, and `skipLibCheck` would cover 
 not pursued: it reintroduces a build step for a project that is deliberately build-free. That is a
 real trade, and it is the user's call — do not treat "no config-level way" as covering this case.
 
-The pragmatic path is an invocation-scoped task:
+### 2b. The judgement calls, and how each was settled
 
-```toml
-[tasks.lint]
-description = "Unused-code checks over src/test/scripts (generated parser/ is exempt — see tsconfig.json)"
-depends = ["install"]
-run = "bun scripts/lint.ts"
-```
+`fix.ts` cannot make these — it removes unused *imports* only. Recorded because the reasoning, not
+the edit, is the reusable part, and because "delete the unused thing" was the wrong answer in three
+of the six:
 
-A `tsc --noEmit --noUnusedLocals …` invocation still pulls `parser/` in via the import graph, so the
-task needs to filter `parser/` out of the OUTPUT and exit on what remains. That filtering is the
-whole job — keep it honest: print what was filtered, never silently drop.
-
-**Clear the 76 first, or the gate cannot go green.** `fix.ts` will NOT fix them — it only removes
-unused *imports*, and it already did that (506 edits, 46 files, landed in `8c33450`). These need
-judgement: some are a signal that a code path was abandoned mid-refactor, which is worth a look
-rather than a deletion. Categories: unused destructured params (`ctx` in several
-`src/services/catalog/*.ts`), an unused private field (`registry` in `src/execute.ts:675`), dead
-locals (`isSackRead` in `child-shape.ts:298`), and the duplicated test harness below.
+- **Unused param in a positional signature → rename `_x`, never drop.** `otherV`'s `s` is
+  positional in `StepFn` and `st` is used. `passthrough.ts`'s `identity: StepFn = (_s, st)` is the
+  same shape and already spelled it this way.
+- **Unused param that is the LAST/only one → drop it.** The three `resolve: (ctx) =>` services;
+  `federate.ts` already wrote `resolve: () => ({`, so the convention was in the tree. A narrower
+  function still satisfies the wider signature.
+- **An unused `private readonly` constructor property → drop the MODIFIER, keep the param.**
+  `execute.ts`'s `registry` is read once to build the AppScope and never through `this`.
+- **A param threaded purely to reach a callee that ignores it → remove at BOTH levels.**
+  `oracle.ts` passed a `GraphStore` through `diverge` into `preview`, which never read it. `diverge`
+  is now pure in its two outcomes, which is what it always was.
+- **Dead local → delete, but check whether the CONCEPT is duplicated first.** `isSackRead` was dead;
+  its concept survives inline at `engine.ts:315`, and the two files' `isSackMutate` are *not* the
+  same predicate (engine's omits the name check), so there was no unification to do. Noted, not
+  attempted.
+- **Deleting by line number needs a shape guard.** The line-driven pass asserted the text matched
+  the expected form, and earned it twice: two `dec` sites were `async` variants, and a blind delete
+  would have taken the wrong line.
 
 ### 2a. The duplicated test harness — LANDED (`3181430`)
 
