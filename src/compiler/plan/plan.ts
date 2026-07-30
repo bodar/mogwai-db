@@ -3,6 +3,7 @@ import { q, list, values, empty, value, raw, jsonExtract, type Expression, type 
 import type { FastPath } from '../options/fast-paths.ts';
 import { normalizeTypeName, BigDecimal, Duration } from '../../gremlin/types.ts';
 import { nodes, edges, labels, vertexLabels } from '../../sql/schema.ts';
+import type { LabelRegime } from '../../api.ts';
 import { type ScalarType, type ValueType } from '../../sql/kernel/render.ts';
 
 // ---------- SQL node builders ----------
@@ -61,6 +62,19 @@ export function labelIn(col: Expression | string, names: any[]): Expression {
  *  `Element.label()` promises — "an arbitrary label when multiple exist". Never joins. */
 export const vertexLabelName = (nodeIdExpr: Expression): Expression =>
   q`(SELECT ${labels.c.name} FROM ${vertexLabels} JOIN ${labels} ON ${labels.c.id}=${vertexLabels.c.label} WHERE ${vertexLabels.c.node}=${nodeIdExpr} ORDER BY ${vertexLabels.c.label} LIMIT 1)`;
+
+/** ALL of a vertex's labels as a JSON array of names, ordered like `vertexLabelName`'s pick so the
+ *  two agree on which label comes first. The multi-label rendering of `T.label` in
+ *  elementMap()/valueMap(true); it is a scalar subquery, so it still never multiplies the row. */
+export const vertexLabelNames = (nodeIdExpr: Expression): Expression =>
+  q`(SELECT json_group_array(${labels.c.name}) FROM ${vertexLabels} JOIN ${labels} ON ${labels.c.id}=${vertexLabels.c.label} WHERE ${vertexLabels.c.node}=${nodeIdExpr} ORDER BY ${vertexLabels.c.label})`;
+
+/** The `T.label` expression for a map shape under `regime`, plus an EDGE's single-label form
+ *  (an edge carries exactly one, so a set of one is still framed as a set when asked). */
+export const labelTokenFor = (n: Relation, elem: Elem, regime: LabelRegime): Expression =>
+  regime === 'single' ? labelNameFor(n, elem)
+  : elem === 'edge' ? q`json_array(${labelNameSub(n.c.label)})`
+  : q`COALESCE(${vertexLabelNames(n.c.id)}, json_array())`;
 
 /** ANY of a vertex's labels is in `names`. Written as `<id> IN (SELECT node …)` so it seeks
  *  `vl_label(label, node)` and reads the node ids straight off the index. Correct under both

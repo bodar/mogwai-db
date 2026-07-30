@@ -52,6 +52,27 @@ export const LabelCardinality = {
 
 export type LabelCardinality = (typeof LabelCardinality)[keyof typeof LabelCardinality];
 
+/**
+ * How `elementMap()` / `valueMap(true)` render an element's `T.label`.
+ *
+ * `set` emits every label (`s[animal,bird,aquatic,endangered]`); `single` emits one. A traversal
+ * selects it explicitly with `g.with("multilabel")` / `g.with("singlelabel")`; with neither, the
+ * GRAPH's declared default applies — which is what upstream's mutually exclusive
+ * `@MultiLabelDefault` / `@SingleLabelDefault` scenario tags describe. mogwai-db declares
+ * MULTI-LABEL default: a vertex genuinely holds a set, so rendering one of them by default would
+ * be the lossy answer.
+ */
+export type LabelRegime = 'set' | 'single';
+export const MULTILABEL_OPTION = 'multilabel';
+export const SINGLELABEL_OPTION = 'singlelabel';
+
+/** The regime for a compile: an explicit `with()` wins, else the graph's cardinality decides. */
+export function labelRegime(sourceOptions: ReadonlyMap<string, any>, cardinality: LabelCardinality): LabelRegime {
+  if (sourceOptions.has(MULTILABEL_OPTION)) return 'set';
+  if (sourceOptions.has(SINGLELABEL_OPTION)) return 'single';
+  return cardinality.max > 1 ? 'set' : 'single';
+}
+
 /** The message TinkerPop's conformance suite matches on when a graph refuses label mutation. */
 export const LABEL_MUTATION_UNSUPPORTED = 'Label mutation is not supported';
 

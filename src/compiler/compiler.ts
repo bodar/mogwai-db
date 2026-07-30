@@ -1,4 +1,4 @@
-import { parseGremlin, stepChain, extractStrategies, extractSack, extractSideEffects } from '../gremlin/frontend.ts';
+import { parseGremlin, stepChain, extractStrategies, extractSack, extractSideEffects, extractSourceOptions } from '../gremlin/frontend.ts';
 import { type TypeNode } from '../gremlin/types.ts';
 import { runPasses } from './ir/passes.ts';
 import { LoweringEngine, collapseSafeFastPaths } from './engine/engine.ts';
@@ -57,7 +57,9 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   // stream without any parameter threading. The write path only ever mints fresh child engines
   // off it (buildPrefixFresh / compileReadCompiled), so building it before the write check is safe.
   const app = options?.app ?? createAppScope({ registry: resolveRegistry(options), fastPaths: resolveFastPaths(options) });
-  const scope = createCompilerScope(app, { params, federationDepth: resolveFederationDepth(options) });
+  const scope = createCompilerScope(app, {
+    params, federationDepth: resolveFederationDepth(options), sourceOptions: extractSourceOptions(tree, params),
+  });
   const engine = new LoweringEngine(app, scope, collapseSafeFastPaths(scope.fastPaths, analyzeChain(steps)));
 
   const write = routeWrite(engine, steps, params, sackInit ?? undefined, sideEffects);

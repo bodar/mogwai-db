@@ -42,7 +42,9 @@ export type CompilerScope =
   & AppScope
   & Dependency<'q', Query>
   & Dependency<'params', Record<string, any>>
-  & Dependency<'federationDepth', number>;
+  & Dependency<'federationDepth', number>
+  /** Source-level `g.with(k[,v])` options — a per-TRAVERSAL configuration, so compiler scope. */
+  & Dependency<'sourceOptions', ReadonlyMap<string, any>>;
 
 /** Build an app scope. Every field is optional at the call site; unset falls back to the
  *  reference-safe defaults (empty registry, all fast paths on, no federation source). */
@@ -66,9 +68,11 @@ export function createCompilerScope(app: AppScope, deps: {
   params?: Record<string, any>;
   federationDepth?: number;
   q?: Query;
+  sourceOptions?: ReadonlyMap<string, any>;
 }): CompilerScope {
   return LazyMap.create(app)
     .set('q', instance(deps.q ?? new Query()))
     .set('params', instance(deps.params ?? {}))
-    .set('federationDepth', instance(deps.federationDepth ?? 0));
+    .set('federationDepth', instance(deps.federationDepth ?? 0))
+    .set('sourceOptions', instance(deps.sourceOptions ?? new Map()));
 }

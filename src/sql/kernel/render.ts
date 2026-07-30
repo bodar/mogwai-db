@@ -182,8 +182,11 @@ export type Shape =
   | { kind: 'jsonbList'; items: ListOf }
   | { kind: 'jsonbElementList'; elem: Exclude<ElemShape, 'property'> } // one JSON object-array per relational element list
   | { kind: 'jsonbSet'; typed?: boolean }    // a set-VALUE stream (intersect/difference/disjunct OR a stored typed set): one Set per row, from a JSONB `list` column
-  | { kind: 'valueMap'; keys: string[] | null; tokens: boolean }
-  | { kind: 'elementMap'; keys: string[] | null }
+  // `labelSet` says the `label` column holds a JSON ARRAY of names (the multi-label regime)
+  // rather than one name. Carried on the shape because the SQL and the framer must agree, and the
+  // regime is a per-traversal decision the framer cannot re-derive.
+  | { kind: 'valueMap'; keys: string[] | null; tokens: boolean; labelSet?: boolean }
+  | { kind: 'elementMap'; keys: string[] | null; labelSet?: boolean }
   | { kind: 'map'; entries: MapEntry[] }
   | { kind: 'mapValue' } // one whole map VALUE per row: a `map` JSONB column [[keyNode,valNode],…] with self-describing {t,v} scalar sides → one GraphBinary MAP (frameTypedNode)
   | { kind: 'mapEntry'; keyOf: MapOf; valOf: MapOf } // one Map.Entry per row (a MapStream unfold) → each frames as a size-1 GraphBinary MAP

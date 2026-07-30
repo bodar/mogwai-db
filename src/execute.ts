@@ -116,10 +116,19 @@ function mapFromEntries(pairs: [Buffer, Buffer][]): Buffer {
   for (const [k, v] of pairs) { parts.push(k, v); }
   return Buffer.concat(parts);
 }
+/** The `T.label` value of a map shape. Under the MULTI-LABEL regime the `label` column carries a
+ *  JSON array of every name and frames as a GraphBinary SET (`s[animal,bird,…]`); under the
+ *  single-label regime it is one name and frames as a plain string. The regime rides on the Shape
+ *  because SQL and framer must agree and the framer cannot re-derive it. */
+function labelTokenBuffer(label: string, labelSet: boolean): Buffer {
+  if (!labelSet) return ioc.anySerializer.serialize(label);
+  return setBuffer((JSON.parse(label) as string[]).map((n) => ioc.anySerializer.serialize(n)));
+}
+
 function valueMapBuffer(id: number, label: string, props: Record<string, ValueNode[]>,
-                        keys: string[] | null, tokens: boolean): Buffer {
+                        keys: string[] | null, tokens: boolean, labelSet = false): Buffer {
   const pairs: [Buffer, Buffer][] = [];
-  if (tokens) { pairs.push([ioc.anySerializer.serialize(t.id), ioc.anySerializer.serialize(id)]); pairs.push([ioc.anySerializer.serialize(t.label), ioc.anySerializer.serialize(label)]); }
+  if (tokens) { pairs.push([ioc.anySerializer.serialize(t.id), ioc.anySerializer.serialize(id)]); pairs.push([ioc.anySerializer.serialize(t.label), labelTokenBuffer(label, labelSet)]); }
   for (const key of keys ?? Object.keys(props)) if (key in props)
     pairs.push([ioc.anySerializer.serialize(key), listBuffer(props[key].map(frameTypedNode))]);
   return mapFromEntries(pairs);
@@ -128,10 +137,10 @@ function valueMapBuffer(id: number, label: string, props: Record<string, ValueNo
 // elementMap(): flat Map with ONE value per key (first under multi); id/label tokens
 // are ALWAYS present. The single value frames typed via frameTypedNode.
 function elementMapBuffer(id: number, label: string, props: Record<string, ValueNode[]>,
-                          keys: string[] | null): Buffer {
+                          keys: string[] | null, labelSet = false): Buffer {
   const pairs: [Buffer, Buffer][] = [
     [ioc.anySerializer.serialize(t.id), ioc.anySerializer.serialize(id)],
-    [ioc.anySerializer.serialize(t.label), ioc.anySerializer.serialize(label)],
+    [ioc.anySerializer.serialize(t.label), labelTokenBuffer(label, labelSet)],
   ];
   for (const key of keys ?? Object.keys(props)) if (key in props)
     pairs.push([ioc.anySerializer.serialize(key), frameTypedNode(props[key][0])]);
@@ -554,8 +563,8 @@ function* frameResolved(store: GraphStore, plan: Compiled | WritePlan): Generato
 function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape): Generator<Buffer> {
   switch (shape.kind) {
     case 'vertex': case 'edge': return; // framed in framedResults with per-row bulk
-    case 'valueMap': for (const r of rows) yield valueMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys, shape.tokens); return;
-    case 'elementMap': for (const r of rows) yield elementMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys); return;
+    case 'valueMap': for (const r of rows) yield valueMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys, shape.tokens, shape.labelSet); return;
+    case 'elementMap': for (const r of rows) yield elementMapBuffer(r.id, r.label, JSON.parse(r.props), shape.keys, shape.labelSet); return;
     // Per-row framing: values() of a typed prop frames each row by its own stored vtype
     // (like variant frames by vk); a collection vtype frames the stored {t,v} tree via
     // frameStoredValue (fixes bare values(collectionProp)); otherwise the single `as` applies.

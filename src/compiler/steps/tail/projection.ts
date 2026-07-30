@@ -5,7 +5,7 @@ import { elementOrderDrop, orderProductivityFilter } from './modulation.ts';
 import {
     predicateSql, rangeToOffsetLimit, elemCtx, extIdOf, jsonbGroupArray,
     nodePropSortKey, edgePropSortKey, scalarPropSortKey,
-    labelNameSub, framedProps, valueMapProps, storedValueExpr, labelNameFor } from '../../plan/plan.ts';
+    labelNameSub, framedProps, valueMapProps, storedValueExpr, labelNameFor, labelTokenFor } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { appendCte, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, partitionOver, dropLayoutAtBarrier, type ElementStream } from '../context/context.ts';
 import { loweringStateOf, continueLowering, dispatchShapeTail, toElementStream, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
@@ -54,6 +54,9 @@ export interface TailAcc {
 /** A TailAcc with no modifiers — the bare scalar projection case (no preceding
  *  order/limit/dedup) routes through lowerScalarProjection with this. */
 const EMPTY_TAIL_ACC: TailAcc = { projStep: null, orders: [], offset: 0, limit: null, distinct: false, productiveBy: false, reducer: null, isPreds: [] };
+
+/** This traversal's label regime, resolved once per compile on the Engine. */
+const regime = (st: ElementStream) => engineOf(st).labelRegime;
 
 const PROJECTION_NAMES = new Set(['values', 'id', 'label', 'labels', 'count', 'valueMap', 'elementMap', 'select', 'project', 'path']);
 // Scalar-producing projections: one `v` value per row. foldTailAcc stops at one of these
@@ -608,7 +611,7 @@ function lowerScalarProjection(st: ElementStream, projStep: IRStep, acc: TailAcc
   const p = st.rel.as('p');
   const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
   const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
-  const proj = PROJECTORS.get(projStep.name)!({ st, n, p, lbl: labelNameFor(n, st.elem), extId, vJoin, projStep });
+  const proj = PROJECTORS.get(projStep.name)!({ st, n, p, lbl: labelNameFor(n, st.elem), labelToken: labelTokenFor(n, st.elem, regime(st)), labelSet: regime(st) === 'set', extId, vJoin, projStep });
   const asTag = proj.shape.kind === 'value' ? staticTypeOf(proj.shape.type) : undefined;
   const vt = proj.vtypeExpr ? 'vtype' : undefined;
   const vtypeCol = proj.vtypeExpr ? q`, ${proj.vtypeExpr} AS vtype` : empty;
@@ -769,7 +772,7 @@ function compileFold(st: ElementStream, acc: TailAcc): ListStream {
     const p = st.rel.as('p');
     const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
     const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
-    const proj = PROJECTORS.get(projName)!({ st, n, p, lbl: labelNameFor(n, st.elem), extId, vJoin, projStep: acc.projStep });
+    const proj = PROJECTORS.get(projName)!({ st, n, p, lbl: labelNameFor(n, st.elem), labelToken: labelTokenFor(n, st.elem, regime(st)), labelSet: regime(st) === 'set', extId, vJoin, projStep: acc.projStep });
     // values() drops missing-property elements (baseWhere = IS NOT NULL), matching
     // TinkerPop's fold-of-values. id/label have no baseWhere.
     const where = proj.baseWhere ? q` WHERE ${proj.baseWhere}` : empty;
@@ -975,6 +978,12 @@ interface ProjCtx {
   /** The element's label NAME as a scalar — a vertex picks one of its set (never a join,
    *  which would multiply the row). Replaces the old `l: Relation` + `vlJoin`. */
   lbl: Expression;
+  /** The `T.label` token for a MAP shape: `lbl` under the single-label regime, a JSON array of
+   *  every label under the multi-label one. Only elementMap/valueMap(true) use it — `label()` and
+   *  `by(T.label)` are scalar positions and stay on `lbl`. */
+  labelToken: Expression;
+  /** Whether `labelToken` is that JSON array, so the framer knows to emit a SET. */
+  labelSet: boolean;
   vJoin: Expression;
   projStep: IRStep | null;
 }
@@ -1039,16 +1048,16 @@ const PROJECTORS = new Map<string, ProjFn>([
     // valueMap props are ALWAYS {key:[values]} (node: multi from the table; edge: each
     // flat value wrapped in a 1-list) so the handler frames both uniformly.
     return {
-      shape: { kind: 'valueMap', keys: keys.length ? keys : null, tokens: c.projStep!.args.includes(true) },
-      colsNode: q`${c.extId} AS id, ${c.lbl} AS label, ${valueMapProps(c.n, c.st.elem)} AS props`, fromNode: c.vJoin,
+      shape: { kind: 'valueMap', keys: keys.length ? keys : null, tokens: c.projStep!.args.includes(true), labelSet: c.labelSet },
+      colsNode: q`${c.extId} AS id, ${c.labelToken} AS label, ${valueMapProps(c.n, c.st.elem)} AS props`, fromNode: c.vJoin,
     };
   }],
   ['elementMap', (c) => {
     if (c.st.elem === 'edge') throw new Error('elementMap() on edges not yet supported'); // needs IN/OUT direction tokens
     const keys = c.projStep!.args.filter((a) => typeof a === 'string') as string[];
     return {
-      shape: { kind: 'elementMap', keys: keys.length ? keys : null },
-      colsNode: q`${c.extId} AS id, ${c.lbl} AS label, ${valueMapProps(c.n, c.st.elem)} AS props`, fromNode: c.vJoin,
+      shape: { kind: 'elementMap', keys: keys.length ? keys : null, labelSet: c.labelSet },
+      colsNode: q`${c.extId} AS id, ${c.labelToken} AS label, ${valueMapProps(c.n, c.st.elem)} AS props`, fromNode: c.vJoin,
     };
   }],
   ['__element', (c) => c.st.elem === 'edge'
@@ -1108,7 +1117,7 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
   const p = st.rel.as('p');
   const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
   const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
-  const proj = PROJECTORS.get(projName)!({ st, n, p, lbl: labelNameFor(n, st.elem), extId, vJoin, projStep: acc.projStep });
+  const proj = PROJECTORS.get(projName)!({ st, n, p, lbl: labelNameFor(n, st.elem), labelToken: labelTokenFor(n, st.elem, regime(st)), labelSet: regime(st) === 'set', extId, vJoin, projStep: acc.projStep });
 
   // order().by(key) sorts by an element property; a bare order() by n.id; else an upstream
   // carried encounter (an ordered dedup) fixes the result order.

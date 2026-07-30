@@ -273,6 +273,27 @@ export function extractSack(tree: any, params: Record<string, any>): SackSpec | 
   return { init: out[0], initType: flatType(types[0]), mergeOp: op ? enumSuffix(op) : undefined };
 }
 
+/** Pull SOURCE-level `g.with(key[, value])` options into a key→value registry.
+ *
+ *  These are `TraversalSourceSelfMethod_with` nodes — a source-configuration boundary like
+ *  withStrategies/withSack, NOT steps — so `stepChain` skips them and they were, until now,
+ *  silently DISCARDED: `g.with('multilabel').V()` compiled as a bare `g.V()`. A bare key with no
+ *  value registers `true`, which is the `with('multilabel')` / `with('singlelabel')` spelling.
+ *
+ *  Distinct from the two `with()` forms already handled elsewhere: a `valueMap().with(tokens)`
+ *  MODULATOR (ir/strategies.ts) and a `call().with(k,v)` argument (ir/strategies.ts). Those attach
+ *  to a step; this attaches to the traversal source. */
+export function extractSourceOptions(tree: any, params: Record<string, any>): Map<string, any> {
+  const out = new Map<string, any>();
+  for (const w of descendants(tree, 'TraversalSourceSelfMethod_withContext')) {
+    const args: any[] = [];
+    for (const n of [...descendants(w, 'StringLiteralContext'), ...descendants(w, 'GenericLiteralContext')])
+      walkArgs(n, args, params, []);
+    if (typeof args[0] === 'string') out.set(args[0], args.length > 1 ? args[1] : true);
+  }
+  return out;
+}
+
 /** Pull withSideEffect(key, constValue) declarations into a name→constant registry.
  *  withSideEffect values are compile-time constants (a map/list/scalar literal or a bound
  *  param), so a later select(key) resolves to the constant directly. The reducer form

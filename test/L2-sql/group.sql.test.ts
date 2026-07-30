@@ -43,10 +43,10 @@ const runWith = (store: GraphStore, q: string, options: CompileOptions) => {
 
 describe('group / properties SQL', () => {
   test('valueMap variants set shape, reuse the vertex row source', () => {
-    expect(read('g.V().valueMap()').shape).toEqual({ kind: 'valueMap', keys: null, tokens: false });
-    expect(read('g.V().valueMap(true)').shape).toEqual({ kind: 'valueMap', keys: null, tokens: true });
-    expect(read('g.V().valueMap("name","age")').shape).toEqual({ kind: 'valueMap', keys: ['name', 'age'], tokens: false });
-    expect(read('g.V().elementMap()').shape).toEqual({ kind: 'elementMap', keys: null });
+    expect(read('g.V().valueMap()').shape).toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: false });
+    expect(read('g.V().valueMap(true)').shape).toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: true });
+    expect(read('g.V().valueMap("name","age")').shape).toEqual({ kind: 'valueMap', labelSet: false, keys: ['name', 'age'], tokens: false });
+    expect(read('g.V().elementMap()').shape).toEqual({ kind: 'elementMap', labelSet: false, keys: null });
   });
 
   test('valueMap().with(WithOptions.tokens) desugars to valueMap(true) (item 13)', () => {
@@ -59,9 +59,9 @@ describe('group / properties SQL', () => {
     expect(read('g.V().valueMap("name","age").with("~tinkerpop.valueMap.tokens")').shape)
       .toEqual(read('g.V().valueMap(true,"name","age")').shape);
     expect(read('g.V().valueMap().with("~tinkerpop.valueMap.tokens", 15)').shape)
-      .toEqual({ kind: 'valueMap', keys: null, tokens: true });
+      .toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: true });
     expect(read('g.V().valueMap().with(WithOptions.tokens)').shape) // enum form (typed at our server)
-      .toEqual({ kind: 'valueMap', keys: null, tokens: true });
+      .toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: true });
     // A SELECTIVE token subset (labels=2) has no valueMap(true) equivalent yet → fail closed,
     // never silently widened to all-tokens.
     expect(() => read('g.V().valueMap("name","age").with("~tinkerpop.valueMap.tokens", 2).by(__.unfold())'))
@@ -90,7 +90,7 @@ describe('group / properties SQL', () => {
     expect(read("g.V().valueMap().select(Pop.first,'a')").sql).toContain('WHERE 0');
     expect(() => compile("g.V().as('a').valueMap().select('a')", {})).toThrow('select(bound-label) after valueMap() not yet supported');
     // terminal valueMap unchanged; still-unsupported followers fail closed
-    expect(read('g.V().valueMap()').shape).toEqual({ kind: 'valueMap', keys: null, tokens: false });
+    expect(read('g.V().valueMap()').shape).toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: false });
     expect(() => compile('g.V().valueMap(true).select(Column.keys)', {})).toThrow('valueMap(true)/token re-entry not yet supported');
   });
 

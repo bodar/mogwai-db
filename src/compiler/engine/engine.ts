@@ -36,7 +36,7 @@ import type { ForeignRow } from '../../services/spi/types.ts';
 import type { AppScope, CompilerScope } from '../../scopes.ts';
 import { createCompilerScope } from '../../scopes.ts';
 import type { ElementReadDriver, Engine } from './deps.ts';
-import type { LabelCardinality } from '../../api.ts';
+import { labelRegime, type LabelCardinality, type LabelRegime } from '../../api.ts';
 
 export { compileTail };
 
@@ -125,6 +125,7 @@ export class LoweringEngine implements Engine {
   readonly fastPaths: FastPathConfig;
   readonly registry: ServiceRegistry;
   readonly labelCardinality: LabelCardinality;
+  readonly labelRegime: LabelRegime;
   readonly federationDepth: number;
   private readonly PREFIX: Map<string, StepFn>;
 
@@ -138,6 +139,7 @@ export class LoweringEngine implements Engine {
     this.fastPaths = fastPaths ?? scope.fastPaths;
     this.registry = scope.registry;
     this.labelCardinality = scope.labelCardinality;
+    this.labelRegime = labelRegime(scope.sourceOptions, scope.labelCardinality);
     this.federationDepth = scope.federationDepth;
     this.q.engine = this; // ride the Query so families reach us via stream.q.engine
     // The movement/filter/branch/passthrough compilers, keyed by step name. A step absent from
