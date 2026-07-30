@@ -1,7 +1,6 @@
 import { gtypeName, isNested, stepChain } from '../../../gremlin/frontend.ts';
-import { empty, list, q, raw, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
+import { empty, list, q, raw, value, values, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { PER_ROW, perRowColumnOf, staticTypeOf, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
-import { vertexProperties } from '../../../sql/schema.ts';
 import { NUMERIC_REDUCERS, REDUCERS } from '../../ir/step.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import {
@@ -18,7 +17,8 @@ import {
     scalarProp,
     storedValueExpr,
     typedScalarNode,
-    vertexLabelIn, vertexLabelName, vertexLabelsJson,
+    vertexLabelIn,
+    vertexLabelsJson,
     type Elem,
     type ScalarCtx
 } from '../../plan/plan.ts';
@@ -295,7 +295,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   const nestedPropertiesMove = !!nestedGroup && !nestedElementMove
     && nestedPrefix.length === 1 && nestedPrefix[0].name === 'properties'
     && ((nestedPrefix[0] as any).args ?? []).every((a: any) => typeof a === 'string')
-    && parent.kind === 'elements' && parent.elem !== 'edge';
+    && parent.kind === 'elements';
   const genericGroupVal = nestedElementMove || nestedPropertiesMove;
   if (!genericKey && !genericProjectKey && !genericVal && !genericReducer && !genericFold && !genericElementFold && !genericElementImplicitFold && !genericGroupVal) return null;
 
@@ -400,18 +400,19 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
       innerCtx = elemCtx(e, rows.stream.elem);
       innerBulk = rows.stream.traverserLayout.bulk ? c.c[rows.stream.traverserLayout.bulk] : undefined;
     } else {
-      // properties() over the outer element: its VertexProperty rows joined off the pushed
-      // domain id. innerCtx reads the property's key (T.label) / value like propertyCtx.
-      const keys = ((nestedPrefix[0] as any).args ?? []).filter((a: any): a is string => typeof a === 'string');
-      const vp = vertexProperties.as('gnv');
-      const keyFilter = keys.length ? q` AND ${vp.c.key} IN (${list(keys.map(value), ', ')})` : empty;
-      joins.push(q` JOIN ${vp} ON ${vp.c.node}=${p.c.id}${keyFilter}`);
-      innerCtx = {
-        elem: 'property', idExpr: vp.c.id,
-        labelNameExpr: vertexLabelName(vp.c.node), labelPayloadExpr: vertexLabelsJson(vp.c.node),
-        labelMatch: (names) => vertexLabelIn(vp.c.node, names),
-        ownerExpr: vp.c.node, pkExpr: vp.c.key, pvExpr: storedValueExpr(vp.c.value, vp.c.vtype), metaExpr: q`json(${vp.c.meta})`,
-      };
+      // properties() over the outer element: the SAME `lowerProperties` the properties() step
+      // itself runs, over the pushed domain, rejoined on the ordinal — the sibling branch's
+      // shape. It used to hand-join `vertex_properties` and hand-build a property ScalarCtx
+      // that was `propertyCtx` with the payload names substituted, which is also why it could
+      // only be reached over a VERTEX parent (an edge rowid read against `vertex_properties`
+      // is a silent wrong answer, so the guard was the only thing making it safe).
+      // nestedPropertiesMove is only set over an element parent, so the pushed seed is one —
+      // a non-element here is a classify↔emit contradiction, not a fallback.
+      if (outer.seed.kind !== 'elements') throw new Error('properties() nested group classified over a non-element parent');
+      const props = lowerProperties(outer.seed, nestedPrefix[0]);
+      const pp = props.rel.as('gnv');
+      joins.push(q` JOIN ${pp} ON ${pp.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
+      innerCtx = propertyCtx(pp, props.ownerElem);
       innerBulk = parent.traverserLayout.bulk ? p.c[parent.traverserLayout.bulk] : undefined;
     }
     const kv = nestedInnerKeyVal(nestedGroup as IRStep, innerCtx, parent.params, innerBulk);
@@ -426,7 +427,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   // `p` itself (plus the child joins) — no element table to rejoin. Element parent rejoins
   // nodes/edges `n` on the domain id so key/value ctx reads its columns.
   if (parent.kind === 'property')
-    return { from: q`${p}${list(joins, '')}`, ctx: propertyCtx(p), elem: 'property', ...common };
+    return { from: q`${p}${list(joins, '')}`, ctx: propertyCtx(p, parent.ownerElem), elem: 'property', ...common };
   if (parent.kind !== 'elements') throw new Error(`group() by-child over a ${parent.kind} parent not yet supported`);
   const n = elemRel(parent, 'gn');
   return {
@@ -784,11 +785,18 @@ export function lowerProperties(st: ElementStream, step: IRStep): PropertyStream
  *  owner; `pk` is its T.label; `pmeta` backs by(String) meta-property reads. owner/pk/pv
  *  frame the VertexProperty as a group value. (labelNameExpr resolves the OWNER's label,
  *  retained only for the element-framing helpers; a property's own T.label is pk, see
- *  buildGroupKey.) */
-const propertyCtx = (p: Relation): ScalarCtx => ({
+ *  buildGroupKey.)
+ *
+ *  The owner's label NAME rides in the payload already (`ownerLabel`, resolved for the right
+ *  element kind by `propertyPayload`), so this reads it rather than re-deriving it as a vertex
+ *  lookup — which was wrong for an EDGE-owned property. The two positions that cannot come off
+ *  a name (ALL labels as a payload, ANY-label membership) take `ownerElem`: an edge carries
+ *  exactly one label, so both reduce to that same name. */
+const propertyCtx = (p: Relation, ownerElem: Elem): ScalarCtx => ({
   elem: 'property', idExpr: p.c.vpid,
-  labelNameExpr: vertexLabelName(p.c.owner), labelPayloadExpr: vertexLabelsJson(p.c.owner),
-  labelMatch: (names) => vertexLabelIn(p.c.owner, names),
+  labelNameExpr: p.c.ownerLabel,
+  labelPayloadExpr: ownerElem === 'edge' ? p.c.ownerLabel : vertexLabelsJson(p.c.owner),
+  labelMatch: (names) => ownerElem === 'edge' ? q`${p.c.ownerLabel} IN (${values(names)})` : vertexLabelIn(p.c.owner, names),
   ownerExpr: p.c.owner, pkExpr: p.c.pk, pvExpr: p.c.pv, metaExpr: p.c.pmeta,
 });
 
@@ -961,7 +969,7 @@ const propertyGroup: ShapeTailFn<PropertyStream> = (s, step, _steps, at) => {
   // A live property parent — its by() sub-traversals lower through the generic child
   // seam (tryLowerGroupChildSource), exactly as an element group does.
   const p = s.rel.as('p');
-  const src: GroupSource = { from: p, ctx: propertyCtx(p), elem: 'property', parent: s, productiveBy: step.productiveBy, bulk: s.traverserLayout.bulk ? p.c[s.traverserLayout.bulk] : undefined };
+  const src: GroupSource = { from: p, ctx: propertyCtx(p, s.ownerElem), elem: 'property', parent: s, productiveBy: step.productiveBy, bulk: s.traverserLayout.bulk ? p.c[s.traverserLayout.bulk] : undefined };
   const isCount = step.name === 'groupCount';
   return continueLowering(lowerGroup(s, isCount, step.modulators ?? [], src), at + 1);
 };
