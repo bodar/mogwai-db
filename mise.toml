@@ -50,6 +50,16 @@ description = "Architectural invariants: no Pass reaches ChainFacts or the fast-
 depends = ["install"]
 run = "bun scripts/arch-check.ts"
 
+# The three unused-code flags, which cannot live in tsconfig.json because generated `parser/` fails
+# them and must never be hand-edited. Every config-level exemption was measured and none work — the
+# long comment in tsconfig.json is the record — so the exemption is invocation-scoped: run tsc with
+# the flags, filter `parser/` out of the OUTPUT, and print what was filtered rather than dropping it
+# silently. Same `depends` reasoning as `arch`: source only, no submodule, no graph.
+[tasks.lint]
+description = "Unused-code checks over our source (generated parser/ is exempt — see tsconfig.json)"
+depends = ["install"]
+run = "bun scripts/lint.ts"
+
 # The ROOT of the graph now — `install` depends on it, because `gremlin` is a link: dep. It runs its
 # own `bun install` inside the submodule (a separate bun project) and builds the client there, so it
 # needs bun but never the superproject's node_modules; that is what keeps the inverted edge
@@ -150,6 +160,6 @@ depends = ["install", "submodule"]
 run = "bunx wrangler deploy --dry-run --outdir dist"
 
 [tasks.ci]
-description = "CI gate: type-check + architectural invariants + test + worker build"
-depends = ["check", "arch", "test", "build"]
+description = "CI gate: type-check + lint + architectural invariants + test + worker build"
+depends = ["check", "lint", "arch", "test", "build"]
 run = "echo 'CI passed'"

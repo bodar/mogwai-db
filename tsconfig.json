@@ -22,9 +22,12 @@
     // The UNUSED-CODE checks (noUnusedLocals, noUnusedParameters, verbatimModuleSyntax) are NOT
     // here — `mise run lint` passes them on the command line, over src/test/scripts only.
     //
-    // Why not here: generated `parser/` fails 16 of them (unused `Token`/`int` imports, unused
+    // Why not here: generated `parser/` fails 24 of them (unused `Token`/`int` imports, unused
     // `previousContext` locals, a value-position type import) and must never be hand-edited
-    // (locked decision 2). There is NO config-level way to exempt it — all measured:
+    // (locked decision 2). That count is per-generator, not fixed — it was 16 until the GQL
+    // sub-language parser landed and added 8, which is why `scripts/lint.ts` filters by DIRECTORY
+    // and prints the tally rather than asserting a number. There is NO config-level way to exempt
+    // it — all measured:
     //   - `include`/`exclude` only filter the ROOT set. An imported file is still checked with the
     //     root config's flags, so parser/ returns via src/gremlin/frontend.ts.
     //   - project references would scope it, but `composite` REQUIRES emit (TS6310) and this
