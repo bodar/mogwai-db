@@ -16,6 +16,8 @@ import { application } from '../../src/application.ts';
 import { LoggingGraphManager, telemetryPath, clearTelemetry, expectedErrorSubstrings, progressMark } from './telemetry.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { CREW_SEED } from '../fixtures/seed-crew.ts';
+import { ZOO_SEED } from '../fixtures/seed-zoo.ts';
+import { LabelCardinality } from '../../src/api.ts';
 import { UID_SEED } from '../fixtures/seed-uid.ts';
 import { graphsonSeed } from '../fixtures/seed-graphson.ts';
 
@@ -45,6 +47,13 @@ const SEEDS: Record<string, string[]> = {
   // (match/union-in-repeat/order-in-repeat), so none execute a runaway materialization
   // (verified by running all 39 grateful queries in isolation: zero hangs).
   ggrateful: graphsonSeed(relToRepo(`${GRAPHSON}/grateful-dead-v3.json`)),
+  // gzoo: the TinkerPop 4 multi-label showcase. Hand-transcribed rather than loaded, because the
+  // shipped .kryo cannot carry multi-label vertices — see test/fixtures/seed-zoo.ts.
+  gzoo: ZOO_SEED,
+  // gmultilabel: EMPTY, like ggraph — @MultiLabel scenarios build it with their own graph
+  // initializer and the runner cleans it with g.V().drop() between scenarios. It needs no seed,
+  // only its declared cardinality (above), which provisioning applies on first access.
+  gmultilabel: [],
 };
 
 /**
@@ -66,7 +75,13 @@ export async function startConformanceServer(port = 45940, graphs: readonly stri
   // --list returns exactly the reference set, so registering our federated service (which --list
   // enumerates live) would break them. Passing a federation-free `standardRegistry()` (no env)
   // omits mogwai.graph.federate here; production Bun/CF keeps it. See docs feature matrix.
-  const manager = new BunGraphManager(undefined, standardRegistry);
+  // gmultilabel and gzoo are the MULTI-LABEL sources the official runner expects beside the
+  // single-label reference graphs: feature-steps.js routes an @MultiLabel scenario's empty graph
+  // to `gmultilabel`, and the zoo graph "requires a graph configured with
+  // LabelCardinality.ZERO_OR_MORE" (LoadGraphWith.GraphData.ZOO). Everything else stays ONE, so
+  // the untagged *_single_label_graph scenarios still get their refusal.
+  const manager = new BunGraphManager(undefined, standardRegistry, (id) =>
+    id === 'gmultilabel' || id === 'gzoo' ? LabelCardinality.ZERO_OR_MORE : LabelCardinality.ONE);
   // Seed before serving so the first scenario sees a populated graph. Each write
   // traversal goes through the manager seam exactly as a client request would.
   for (const g of graphs) {

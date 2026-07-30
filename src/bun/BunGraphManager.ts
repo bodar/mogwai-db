@@ -1,6 +1,7 @@
 import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { GraphStore } from '../storage.ts';
+import { LabelCardinality } from '../api.ts';
 import { type GraphManager, type GraphInfo, graphInfo } from '../manager.ts';
 import { Executor } from '../execute.ts';
 import type { Executor as ExecutorApi } from '../api.ts';
@@ -37,7 +38,16 @@ export class BunGraphManager implements GraphManager {
    * manager (the FederationSource), threaded to its apply at execution time — no manager↔registry
    * construction cycle, because executor(id) isn't CALLED until query time.
    */
-  constructor(private dir: string | undefined, registry: ServiceRegistry) {
+  /** `labelCardinalityFor` declares a graph's VERTEX label cardinality at provisioning time,
+   *  which is where TinkerPop puts it too (a provider's `Graph.Features`). Defaults to `ONE` —
+   *  TinkerGraph's default and 3.x-compatible — so a graph is single-label unless something asks
+   *  for otherwise. The conformance host uses it to serve `gmultilabel`/`gzoo` as ZERO_OR_MORE
+   *  beside single-label reference graphs, which is exactly what the official runner expects. */
+  constructor(
+    private dir: string | undefined,
+    registry: ServiceRegistry,
+    private labelCardinalityFor: (id: string) => LabelCardinality = () => LabelCardinality.ONE,
+  ) {
     if (dir) mkdirSync(dir, { recursive: true });
     this.registry = registry;
   }
@@ -51,7 +61,7 @@ export class BunGraphManager implements GraphManager {
     let g = this.graphs.get(id);
     if (!g) {
       const sql = new BunSqlite(this.dir ? this.fileFor(id) : ':memory:');
-      const store = new GraphStore(sql); // ctor runs the schema DDL
+      const store = new GraphStore(sql, this.labelCardinalityFor(id)); // ctor runs the schema DDL
       g = { store, sql };
       this.graphs.set(id, g);
     }

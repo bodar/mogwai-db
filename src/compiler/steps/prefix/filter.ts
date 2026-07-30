@@ -2,7 +2,7 @@ import { derived, q, list, raw, type Expression, type Relation } from '../../../
 import { isNested, stepChain, type Pred } from '../../../gremlin/frontend.ts';
 import {
     P_OPS, labelIn, predicateSql, nodePropScalar, hasProp, elemCtx,
-    idPredFromArgs, scalarProp, labelNameSub, FtsSubstringFastPath, type Elem, labelMatchFor, labelNameFor } from '../../plan/plan.ts';
+    idPredFromArgs, scalarProp, labelNameSub, FtsSubstringFastPath, type Elem, labelMatchFor, labelNameFor, labelPredicateFor } from '../../plan/plan.ts';
 import { runFastPath } from '../../options/fast-paths.ts';
 import { tryInlinePredicate, combineBranchPreds, PredicateInliningFastPath } from './predicate.ts';
 import { appendCte, aliasElem, layoutCols, patchLayout, layoutProjection, elemRel, labelCtx, labelScope, prevRel, scopePathCols, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from '../context/context.ts';
@@ -143,10 +143,14 @@ export const has: StepFn = (s, st) => {
     // has(T.label|T.id, v|P): predicate over the label name / external id. Routing
     // through predicateSql accepts both a bare value (→ equality) and a P/TextP.
     const n = elemRel(st);
-    const expr: Expression = key.token === 'label' ? labelNameFor(n, st.elem)
-      : key.token === 'id' ? q`COALESCE(${n.c.uid}, ${n.c.id})`
-      : (() => { throw new Error(`has(T.${key.token}) not supported`); })();
-    conds.push(predicateSql(expr, val));
+    // T.label is a PREDICATE position, not a scalar one: it matches if ANY label satisfies the
+    // predicate, so it cannot go through the scalar label pick (which would test only one).
+    if (key.token === 'label') { conds.push(labelPredicateFor(n, st.elem, val)); }
+    else {
+      const expr: Expression = key.token === 'id' ? q`COALESCE(${n.c.uid}, ${n.c.id})`
+        : (() => { throw new Error(`has(T.${key.token}) not supported`); })();
+      conds.push(predicateSql(expr, val));
+    }
   } else {
     // ANY-match EXISTS over the element's normalized properties table (vertex_properties
     // for a node, edge_properties for an edge). hasProp dispatches on elem (current

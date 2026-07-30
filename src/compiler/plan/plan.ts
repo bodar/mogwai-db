@@ -73,9 +73,25 @@ export const vertexLabelIn = (nodeIdExpr: Expression, names: any[]): Expression 
 export const labelNameFor = (n: Relation, elem: Elem): Expression =>
   elem === 'edge' ? labelNameSub(n.c.label) : vertexLabelName(n.c.id);
 
-/** ANY-label membership for the element held in `n`. The ONE spelling for hasLabel/has(T.label). */
+/** ANY-label membership for the element held in `n`. The ONE spelling for hasLabel(). */
 export const labelMatchFor = (n: Relation, elem: Elem, names: any[]): Expression =>
   elem === 'edge' ? labelIn(n.c.label, names) : vertexLabelIn(n.c.id, names);
+
+/** `has(T.label, P)` — SOME label of the element satisfies `P`.
+ *
+ *  Existential UNIFORMLY, with no special case for a negated predicate, because that is what
+ *  upstream specifies. `Has.feature` spells it out on the scenario itself: "Because label
+ *  predicates match if ANY label satisfies them, has(T.label, without('animal')) matches every
+ *  vertex that carries some label other than 'animal' — which is all of them. To exclude vertices
+ *  labeled 'animal', use not(hasLabel('animal')) instead." So `without` here does NOT mean "carries
+ *  no such label"; reading it that way is the tempting wrong answer.
+ *
+ *  An edge has exactly one label, where ∃ over a singleton is just the compare, so it keeps the
+ *  cheaper inline form. */
+export const labelPredicateFor = (n: Relation, elem: Elem, pred: any): Expression =>
+  elem === 'edge'
+    ? predicateSql(labelNameSub(n.c.label), pred)
+    : q`EXISTS (SELECT 1 FROM ${vertexLabels} JOIN ${labels} ON ${labels.c.id}=${vertexLabels.c.label} WHERE ${vertexLabels.c.node}=${n.c.id} AND ${predicateSql(labels.c.name, pred)})`;
 
 /** Aggregate a value column into a single JSONB array (the fold()/select(values)
  *  producer). `jsonb(json_group_array(..))` is the universally-valid form — the
