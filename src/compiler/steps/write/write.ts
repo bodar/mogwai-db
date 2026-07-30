@@ -321,8 +321,11 @@ function parseVertexSpec(addV: Step, propSteps: Step[], sideEffects?: Map<string
     typeof a === 'string' ? a
     : isNested(a) ? ((c) => c.has ? String(c.value) : a)(constFromNested(a, sideEffects, params))
     : String(a);
-  let labels: (string | { nested: any })[] =
-    addV.args.length ? addV.args.map(asLabel) : ['vertex'];
+  // No argument means "whatever this graph's default is", which is NOT always 'vertex': under
+  // LabelCardinality.ZERO_OR_MORE a bare addV() creates a vertex with NO labels (`g_addV_labels`
+  // asserts labels() has a count of 0). insertVertex applies the default, because only it can see
+  // the declared cardinality. An empty list here therefore means "unspecified", not "none".
+  let labels: (string | { nested: any })[] = addV.args.map(asLabel);
   const props: PropSpec[] = [];
   let uid: string | number | null = null;
   for (const s of propSteps) {
@@ -500,13 +503,18 @@ function insertVertex(
     return String(r.value);
   });
   // A SET, so duplicates collapse before the count is checked — addV('a','a') is one label.
-  const labels = [...new Set(resolved)];
+  // An UNSPECIFIED label list (bare addV()) takes the graph's default: 'vertex' when the
+  // cardinality requires at least one label, nothing at all when it permits zero.
+  const labels = resolved.length || engine.labelCardinality.min === 0
+    ? [...new Set(resolved)]
+    : [DEFAULT_VERTEX_LABEL];
   assertLabelCount(engine, labels.length, 'addV');
   const row = insertRow(store, 'nodes', [], [], spec.uid);
   store.addVertexLabels(row.id, labels);
   // The response frames ONE label (Element.label() is "an arbitrary label when multiple exist");
-  // the reader picks the lowest label id, so agree with it rather than with argument order.
-  const label = store.vertexLabels(row.id)[0];
+  // the reader picks the lowest label id, so agree with it rather than with argument order. A
+  // zero-label vertex has none to frame, so it reports the default name.
+  const label = store.vertexLabels(row.id)[0] ?? DEFAULT_VERTEX_LABEL;
   for (const p of spec.props) {
     const r = resolveSpecValue(engine, store, p, row.id, 'vertex', params, sideEffects, driver);
     if (r.has) applyVertexProperty(store, row.id, resolveSpecKey(engine, store, p, row.id, 'vertex', params, sideEffects, driver), r.value, r.vtype, p.meta, p.cardinality, r.typeNode);
@@ -1082,7 +1090,12 @@ interface WriteRule { match: (steps: IRStep[]) => boolean; compile: (engine: Eng
  *  answer rather than a gap: `AddLabel.feature`/`DropLabel.feature` assert the message on a
  *  single-label graph. Edges refuse under every cardinality (edge label cardinality is fixed at
  *  ONE by spec), which is why the check reads the element kind rather than a global flag. */
+/** TinkerPop's `Vertex.DEFAULT_LABEL` — what a bare addV() means on a graph that requires a label. */
+const DEFAULT_VERTEX_LABEL = 'vertex';
+
 const LABEL_MUTATIONS = new Set(['addLabel', 'dropLabel', 'dropLabels']);
+/** Write steps that cannot follow a label mutation — the same set mid-addV refuses to continue past. */
+const MUTATING_TAIL = new Set(['addV', 'addE', 'mergeV', 'mergeE', 'property', 'drop', ...LABEL_MUTATIONS]);
 
 /** Reject a label count the declared cardinality forbids, naming the step so the error says which
  *  operation overstepped. `min` is checked by dropLabel/dropLabels, `max` by addV/addLabel. */
@@ -1106,12 +1119,18 @@ function compileLabelMutation(engine: Engine, steps: IRStep[], params: Record<st
   // exactly that, and checking the tail first answered "step not implemented after addLabel()".
   if (st.elem === 'edge') throw new Error(`${LABEL_MUTATION_UNSUPPORTED}: ${step.name}() on an edge`);
   if (!engine.labelCardinality.mutable) throw new Error(`${LABEL_MUTATION_UNSUPPORTED}: ${step.name}()`);
-  const tail = steps.slice(at + 1);
-  if (tail.length) throw new Error(`step not implemented after ${step.name}(): ${tail[0].name}()`);
+
+  // These are SIDE-EFFECT steps: they mutate and pass the SAME traverser on, so a read tail is
+  // the norm rather than the exception (`addLabel("employee").labels().fold()`). The element is
+  // unchanged, so unlike mid-traversal addV there is no new vertex to re-root on — the suffix
+  // simply re-reads each driver after the mutation, through the ordinary read compiler.
+  const suffix = steps.slice(at + 1);
+  if (suffix.some((s) => MUTATING_TAIL.has(s.name)))
+    throw new Error(`write continuation after ${step.name}() not yet supported: ${suffix.find((s) => MUTATING_TAIL.has(s.name))!.name}()`);
 
   // The arguments are label NAMES, and each may be a traversal yielding a string OR a list of
   // strings — `addLabel(constant(["a","b"]))`. A collection is only legal as the SOLE argument
-  // (TinkerPop rejects mixing), which is why the flatten counts what it expanded.
+  // (TinkerPop rejects mixing), which the expansion enforces.
   const argNames = (store: GraphStore): string[] => {
     const out: string[] = [];
     for (const a of step.args) {
@@ -1123,24 +1142,35 @@ function compileLabelMutation(engine: Engine, steps: IRStep[], params: Record<st
     }
     return out;
   };
-  const target = renderFrom(st.q, st.rel);
+
+  const carried = Object.fromEntries(layoutCols(st.traverserLayout).map((col) => [col, null]));
+  const probeDriver: ElementReadDriver = { id: 0, elem: 'vertex', traverserLayout: st.traverserLayout, carried };
+  const probe = suffix.length ? engine.compileReadFromElementDriver(suffix, params, probeDriver) : null;
+  let touched: ElementReadDriver[] = [];
   return {
     kind: 'write',
     run: (store) => {
-      const ids = store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id);
+      touched = materializeElementDrivers(store, st);
       const names = step.name === 'dropLabels' ? null : argNames(store);
-      for (const id of ids) {
-        if (step.name === 'addLabel') {
-          store.addVertexLabels(id, names!);
-          assertLabelCount(engine, store.vertexLabels(id).length, step.name);
-        } else {
-          // dropLabel(x) on a label the vertex does not carry is a NO-OP, not an error.
-          store.dropVertexLabels(id, names);
-          assertLabelCount(engine, store.vertexLabels(id).length, step.name);
-        }
+      for (const d of touched) {
+        if (step.name === 'addLabel') store.addVertexLabels(d.id, names!);
+        // dropLabel(x) on a label the vertex does not carry is a NO-OP, not an error.
+        else store.dropVertexLabels(d.id, names);
+        assertLabelCount(engine, store.vertexLabels(d.id).length, step.name);
       }
+      // With no read tail these steps are terminal side effects and yield nothing, matching
+      // `g.V().hasLabel("person").addLabel("employee")` iterating to an empty list.
       return [];
     },
+    ...(probe ? {
+      continuation: {
+        shape: probe.shape,
+        run: (store: GraphStore) => touched.flatMap((driver) => {
+          const read = engine.compileReadFromElementDriver(suffix, params, driver);
+          return store.query(read.sql, read.binds);
+        }),
+      },
+    } : {}),
   };
 }
 
