@@ -20,6 +20,8 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
+import { ZOO_SEED } from '../fixtures/seed-zoo.ts';
+import { LabelCardinality } from '../../src/api.ts';
 import { CREW_SEED } from '../fixtures/seed-crew.ts';
 import { BigDecimal, Duration } from '../../src/gremlin/types.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
@@ -52,7 +54,27 @@ const SEARCH_SEED = [
 
 const ADDENDUM = new URL('./', import.meta.url).pathname;
 
-interface Scenario { feature: string; name: string; graph: string; gremlin: string; expected: string[]; }
+/** `assertion` mirrors TinkerPop's own Then-steps, because L4 features are REAL Gherkin in the
+ *  official format — that is what lets a @gap family harvest straight into a gremlin-test PR, and
+ *  it is why the reader grows to match upstream rather than the features being rewritten to match
+ *  the reader.
+ *    unordered/ordered — compare the whole multiset against the table
+ *    empty             — no results
+ *    count             — only the cardinality is pinned
+ *    of                — every result must be ONE OF the table's rows (alternatives), which
+ *                        upstream pairs with `count` when several answers are all correct */
+type Assertion = 'unordered' | 'ordered' | 'empty' | 'count' | 'of';
+
+interface Scenario {
+  feature: string; name: string; graph: string;
+  /** `And the graph initializer of` — write traversals run before the scenario's own. */
+  initializer: string | null;
+  gremlin: string;
+  assertion: Assertion;
+  /** `Then the result should have a count of N`. */
+  count: number | null;
+  expected: string[];
+}
 
 // A minimal Gherkin reader for our own feature files: name + `Given the X graph` + the
 // `the traversal of """…"""` docstring + the `| result |` table. Deliberately tiny — it only
@@ -60,18 +82,47 @@ interface Scenario { feature: string; name: string; graph: string; gremlin: stri
 function parseFeature(featureName: string, text: string): Scenario[] {
   const lines = text.split('\n');
   const out: Scenario[] = [];
+  // Tags accumulate onto the next Scenario (or onto the Feature, in which case they apply to all).
+  let featureTags = '', pending = '';
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].trim().match(/^Scenario:\s*(.+)$/);
-    if (!m) continue;
-    const s: Scenario = { feature: featureName, name: m[1].trim(), graph: 'empty', gremlin: '', expected: [] };
+    const raw = lines[i].trim();
+    if (raw.startsWith('@')) { pending += raw + ' '; continue; }
+    if (raw.startsWith('Feature:')) { featureTags = pending; pending = ''; continue; }
+    const m = raw.match(/^Scenario:\s*(.+)$/);
+    if (!m) { if (raw) pending = ''; continue; }
+    const tags = featureTags + pending; pending = '';
+    const s: Scenario = {
+      feature: featureName, name: m[1].trim(), graph: 'empty',
+      initializer: null, gremlin: '', assertion: 'unordered', count: null, expected: [],
+    };
+    // The routing the official runner does (`feature-steps.js`): a @MultiLabel scenario's EMPTY
+    // graph is the multi-label source, not the plain one. Mirrored here so a scenario can be
+    // copied in with its `Given the empty graph` intact.
+    const multiLabel = /@MultiLabel\b/.test(tags);
+    // Which docstring we are reading — a scenario may carry an initializer AND a traversal, so the
+    // preceding step line decides, not the order of appearance.
+    let docTarget: 'gremlin' | 'initializer' = 'gremlin';
     for (i++; i < lines.length && !/^\s*Scenario:/.test(lines[i]); i++) {
       const l = lines[i].trim();
       const g = l.match(/^(?:Given|And)\s+(?:the|an?)\s+(\w+)\s+graph$/);
-      if (g) s.graph = g[1];
+      if (g) s.graph = multiLabel && g[1] === 'empty' ? 'multilabel' : g[1];
+      if (/^(?:Given|And)\s+the\s+graph\s+initializer\s+of$/.test(l)) docTarget = 'initializer';
+      else if (/^(?:Given|And)\s+the\s+traversal\s+of$/.test(l)) docTarget = 'gremlin';
+      const cnt = l.match(/^(?:Then|And)\s+the\s+result\s+should\s+have\s+a\s+count\s+of\s+(\d+)$/);
+      if (cnt) { s.assertion = 'count'; s.count = Number(cnt[1]); }
+      else if (/^(?:Then|And)\s+the\s+result\s+should\s+be\s+unordered$/.test(l)) s.assertion = 'unordered';
+      else if (/^(?:Then|And)\s+the\s+result\s+should\s+be\s+ordered$/.test(l)) s.assertion = 'ordered';
+      else if (/^(?:Then|And)\s+the\s+result\s+should\s+be\s+empty$/.test(l)) s.assertion = 'empty';
+      // `should be of` may FOLLOW a count (upstream pairs them), so it wins the assertion slot
+      // while `count` survives as an extra check.
+      else if (/^(?:Then|And)\s+the\s+result\s+should\s+be\s+of$/.test(l)) s.assertion = 'of';
+      // Fail loudly on a Then we do not implement. Silently ignoring one used to mean an
+      // unrecognized assertion compared against an EMPTY table — a test that cannot fail.
+      else if (/^Then\s/.test(l)) throw new Error(`${featureName}: unsupported step "${l}" (extend parseFeature)`);
       if (l === '"""') {
         const body: string[] = [];
         for (i++; i < lines.length && lines[i].trim() !== '"""'; i++) body.push(lines[i].trim());
-        s.gremlin = body.join(' ');
+        if (docTarget === 'initializer') s.initializer = body.join(' '); else s.gremlin = body.join(' ');
       } else if (l.startsWith('|')) {
         const cell = l.replace(/^\|/, '').replace(/\|$/, '').trim();
         if (cell !== 'result') s.expected.push(cell);
@@ -90,19 +141,21 @@ function parseFeature(featureName: string, text: string): Scenario[] {
 // A parsed `m[…]` map (or nested leaf) → the SAME canonical key canon() yields for a decoded
 // Map: string leaves reuse the typed notation (expectedCanon), arrays stay ordered, nested
 // objects sort by entry. Mirrors the official parseMapValue recursion.
-function canonMapExpected(v: unknown): string {
+function canonMapExpected(v: unknown, refs?: ReadonlyMap<string, unknown>): string {
   if (v === null) return 'null';
-  if (typeof v === 'string') return expectedCanon(v);
-  if (Array.isArray(v)) return '[' + v.map(canonMapExpected).join(',') + ']';
+  if (typeof v === 'string') return expectedCanon(v, refs);
+  if (Array.isArray(v)) return '[' + v.map((x) => canonMapExpected(x, refs)).join(',') + ']';
   if (typeof v === 'object')
     return 'm{' + Object.entries(v as Record<string, unknown>)
-      .map(([k, x]) => expectedCanon(k) + '=' + canonMapExpected(x)).sort().join(',') + '}';
+      .map(([k, x]) => expectedCanon(k, refs) + '=' + canonMapExpected(x, refs)).sort().join(',') + '}';
   return 'N' + v;
 }
 
-function expectedCanon(tok: string): string {
+function expectedCanon(tok: string, refs?: ReadonlyMap<string, unknown>): string {
   const t = tok.trim();
   if (t === 'null') return 'null';
+  // v[marko].id — an element reference, resolved against the seeded store by the caller.
+  if (refs?.has(t)) return canon(refs.get(t));
   // Match the JS client's actual GraphBinary decode: a bigint (`.n`, BigInteger 0x23) is ALWAYS a
   // JS BigInt; a long (`.l`, Int64 0x02) decodes to a Number within ±2^53 and a BigInt beyond
   // (the client's Long deserializer is magnitude-dependent) — so count()/groupCount() longs, which
@@ -120,18 +173,25 @@ function expectedCanon(tok: string): string {
   const bd = t.match(/^bd\[(.+)\]$/); if (bd) return 'BD' + bd[1];
   const dt = t.match(/^dt\[(.+)\]$/); if (dt) return 'DT' + new Date(dt[1]).toISOString();
   const du = t.match(/^du\[(.+)\]$/); if (du) return 'DU' + du[1];
-  if ((t.startsWith('l[') || t.startsWith('s[')) && t.endsWith(']')) {
+  // A SET compares unordered (sorted); a LIST keeps its written order.
+  if (t.startsWith('s[') && t.endsWith(']')) {
     const inner = t.slice(2, -1);
-    return '[' + (inner === '' ? '' : splitTopLevel(inner).map(expectedCanon).join(',')) + ']';
+    return 's[' + (inner === '' ? '' : splitTopLevel(inner).map((x) => expectedCanon(x, refs)).sort().join(',')) + ']';
   }
+  if (t.startsWith('l[') && t.endsWith(']')) {
+    const inner = t.slice(2, -1);
+    return '[' + (inner === '' ? '' : splitTopLevel(inner).map((x) => expectedCanon(x, refs)).join(',')) + ']';
+  }
+  // t[id] / t[label] — a T token in a map key position.
+  const ttok = t.match(/^t\[(\w+)\]$/); if (ttok) return 'T' + ttok[1];
   // p[…] — a Path, framed by its ordered objects (each in typed notation).
   if (t.startsWith('p[') && t.endsWith(']')) {
     const inner = t.slice(2, -1);
-    return 'p[' + (inner === '' ? '' : splitTopLevel(inner).map(expectedCanon).join(',')) + ']';
+    return 'p[' + (inner === '' ? '' : splitTopLevel(inner).map((x) => expectedCanon(x, refs)).join(',')) + ']';
   }
   // m[{…}] — a Map (JSON object; values in typed-string notation, mirrors the official
   // parseMapValue). Same canonical form as canon() of a decoded Map so the two compare.
-  if (t.startsWith('m[') && t.endsWith(']')) return canonMapExpected(JSON.parse(t.slice(2, -1)));
+  if (t.startsWith('m[') && t.endsWith(']')) return canonMapExpected(JSON.parse(t.slice(2, -1)), refs);
   return 'S' + t;
 }
 
@@ -163,11 +223,38 @@ function canon(v: unknown): string {
   // unordered by key, each key+value recursively canonicalized (lists stay ordered within).
   if (v instanceof Map)
     return 'm{' + [...v.entries()].map(([k, val]) => canon(k) + '=' + canon(val)).sort().join(',') + '}';
+  // A SET is unordered, so it canonicalizes sorted — unlike a list, which keeps its order. This is
+  // what `t[label]` frames as under the multi-label regime.
+  if (v instanceof Set) return 's[' + [...v].map(canon).sort().join(',') + ']';
   if (Array.isArray(v)) return '[' + v.map(canon).join(',') + ']';
+  // A T token (`t[id]`/`t[label]` as a map KEY) decodes to the client's EnumValue; match the token
+  // spelling the feature table uses rather than its JSON shape.
+  if (v && typeof v === 'object' && (v as any).typeName === 'T' && typeof (v as any).elementName === 'string')
+    return 'T' + (v as any).elementName;
   return 'J' + JSON.stringify(v);
 }
 
-const GRAPHS: Record<string, readonly string[]> = { modern: MODERN_SEED, crew: CREW_SEED, typed: TYPED_SEED, mapdata: MAPDATA_SEED, search: SEARCH_SEED, empty: [] };
+/** A fixture is a seed AND the capability the graph declares — `multilabel`/`zoo` need
+ *  ZERO_OR_MORE, everything else keeps TinkerGraph's ONE default. */
+interface Fixture { seed: readonly string[]; labelCardinality?: LabelCardinality; }
+const GRAPHS: Record<string, Fixture> = {
+  modern: { seed: MODERN_SEED }, crew: { seed: CREW_SEED }, typed: { seed: TYPED_SEED },
+  mapdata: { seed: MAPDATA_SEED }, search: { seed: SEARCH_SEED }, empty: { seed: [] },
+  multilabel: { seed: [], labelCardinality: LabelCardinality.ZERO_OR_MORE },
+  zoo: { seed: ZOO_SEED, labelCardinality: LabelCardinality.ZERO_OR_MORE },
+};
+
+/** Resolve upstream's element REFERENCES — `v[marko].id` is "the id of the vertex named marko".
+ *  The official runner does this from a cache it builds with `g.V().group().by('name').by(tail())`;
+ *  L4 reads the same thing straight off the store after seeding, so a scenario can be copied in
+ *  verbatim instead of being rewritten around literal ids. */
+function elementRefs(store: GraphStore): Map<string, unknown> {
+  const refs = new Map<string, unknown>();
+  for (const r of store.query<{ name: unknown; id: unknown }>(
+    'SELECT vp.value AS name, vp.node AS id FROM vertex_properties vp WHERE vp.key = ?', ['name']))
+    refs.set(`v[${String(r.name)}].id`, r.id);
+  return refs;
+}
 
 function loadScenarios(): Scenario[] {
   return readdirSync(ADDENDUM)
@@ -181,15 +268,34 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
 
   for (const s of scenarios) {
     test(`[${s.graph}] ${s.name}`, async () => {
-      if (!(s.graph in GRAPHS)) throw new Error(`unknown graph '${s.graph}' (add its seed to GRAPHS)`);
-      const store = new GraphStore(new BunSqlite(':memory:'));
-      for (const w of GRAPHS[s.graph]) executeQuery(store, w, {});
+      if (!(s.graph in GRAPHS)) throw new Error(`unknown graph '${s.graph}' (add its fixture to GRAPHS)`);
+      const fixture = GRAPHS[s.graph];
+      const store = new GraphStore(new BunSqlite(':memory:'), fixture.labelCardinality);
+      for (const w of fixture.seed) executeQuery(store, w, {});
+      // A scenario's own `graph initializer` runs after the fixture seed and before its traversal,
+      // exactly as upstream orders them.
+      if (s.initializer) executeQuery(store, s.initializer, {}, {}, standardRegistry);
       // The standard service registry is injected so call() scenarios (tinker.search / degree)
       // resolve; a non-call scenario is unaffected (it never looks a service up).
-      const decoded =await decodeAll( executeQuery(store, s.gremlin, {}, {}, standardRegistry));
-      const got = decoded.map(canon).sort();
-      const want = s.expected.map(expectedCanon).sort();
-      expect(got).toEqual(want);
+      const decoded = await decodeAll(executeQuery(store, s.gremlin, {}, {}, standardRegistry));
+      const got = decoded.map(canon);
+      // Element references (`v[marko].id`) resolve against the seeded store, so a scenario copied
+      // in verbatim from gremlin-test needs no rewriting around literal ids.
+      const refs = elementRefs(store);
+      const want = s.expected.map((e) => expectedCanon(e, refs));
+
+      if (s.count !== null) expect(got.length).toBe(s.count);
+      switch (s.assertion) {
+        case 'empty': expect(got).toEqual([]); break;
+        // Ordered compares as written; unordered sorts BOTH sides. (`ordered` used to sort too —
+        // it did not actually assert order — so this is a tightening, not just a move.)
+        case 'ordered': expect(got).toEqual(want); break;
+        case 'unordered': expect([...got].sort()).toEqual([...want].sort()); break;
+        // `of` — every result must be one of the listed alternatives; the count (if given) is
+        // already checked above, and that pair is how upstream pins a legitimately ambiguous answer.
+        case 'of': for (const g of got) expect(want).toContain(g); break;
+        case 'count': break; // the count above IS the assertion
+      }
     });
   }
 });
