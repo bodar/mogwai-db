@@ -25,34 +25,23 @@ content directly when a session has it open; go through the session.
 
 ---
 
-## 1. Wire `arch-check.ts` into the build — READY, highest value
+## 1. Wire `arch-check.ts` into the build — LANDED (`9a2fdea`)
 
-**Status: written, run, and adversarially verified. It is not speculative.**
+`[tasks.arch]` exists and `[tasks.ci]` depends on it. Re-measured at `cbfc2be` before wiring rather
+than trusting the number below: still 17 Pass runs, still zero violations, 40-odd commits after it
+was first written down. The task costs 735ms.
 
-- Clean tree: `17 Pass run(s) analysed / no violations`, exit 0.
-- Injected a real violation (`analyzeChain(steps)` inside `stripTerminalPass`): correctly reported
-  `stripTerminalPass: annotating — that is ChainFacts (ir/analyze.ts), not a Pass` with the path
-  `stripTerminalPass -> analyzeChain`, exit **1**.
+It sits next to `check`, not in the ladder, for the reason recorded in `mise.toml`: L1–L5 assert
+runtime behaviour over traversals, this asserts a static property of the source. `depends =
+["install"]` only — no submodule, no graph, no traversal execution.
 
-So it detects what it claims to detect. What remains is only wiring:
+Not a ratchet, deliberately: it passes at zero, so the gate is zero. A deliberate exception goes in
+the script as ONE named entry with a diagnosis, the way `L5-properties/known.ts` does.
 
-```toml
-[tasks.arch]
-description = "Architectural invariants: no Pass reaches ChainFacts or the fast-path layer"
-depends = ["install"]
-run = "bun scripts/arch-check.ts"
-```
-
-Then add `arch` to `[tasks.ci]`. Note `depends = ["install"]` only — this needs no submodule, no
-graph, no traversal execution, unlike every ladder level and the census.
-
-**Do NOT make it a ratchet.** It passes at zero today, so the gate is zero. A committed allowlist
-would only be somewhere for a real violation to hide. If a deliberate exception ever becomes
-necessary, add ONE named entry with a diagnosis in the script, the way `L5-properties/known.ts` does.
-
-**Where it goes in the doc structure:** it is not a ladder level. L1–L5 assert runtime behaviour over
-traversals; this asserts a static property of the source. Adding it as "L6" would break what the
-ladder means. It belongs next to `check`.
+How it was verified before landing, so nobody re-does it: injecting a real violation
+(`analyzeChain(steps)` inside `stripTerminalPass`) correctly reported `stripTerminalPass:
+annotating — that is ChainFacts (ir/analyze.ts), not a Pass` with the path
+`stripTerminalPass -> analyzeChain`, exit **1**. It detects what it claims to detect.
 
 ### Known limits — state these, do not quietly widen the claim
 
@@ -73,7 +62,19 @@ ladder means. It belongs next to `check`.
 
 ## 2. `mise run lint` — the unused-code flags
 
-**Current state: 46 errors in our code, 16 in generated `parser/`.**
+**Current state: 76 errors in our code, 16 in generated `parser/`** (re-measured at `bf10425`; it
+was 46 at `8c33450`, so this grows by roughly one a day when ungated — which is the argument for
+the gate, not against it).
+
+Ours breaks down as 70 × TS6133 (declared but never read), 5 × TS6192 (whole import declaration
+unused), 1 × TS6138 (unused private property). Two facts the earlier count obscured:
+
+- **`verbatimModuleSyntax` is already clean in our code.** Its only hit (TS1484) is in generated
+  `parser/`. So that flag costs nothing to adopt and can go straight into `tsconfig.json` the day
+  `parser/` stops being in the root program — it is not part of the 76.
+- **The test-file half is not 30 separate defects.** `read`, `seededStore`, `run`, `runWith` and
+  `bare` are copy-pasted into 18–20 test files each; the errors are just the copies that happened to
+  go unused. Deleting them one by one treats the symptom. See §2a.
 
 The six *correctness* flags are already in `tsconfig.json` (measured at 0 errors each). The three
 *unused-code* flags — `noUnusedLocals`, `noUnusedParameters`, `verbatimModuleSyntax` — are
@@ -110,12 +111,27 @@ A `tsc --noEmit --noUnusedLocals …` invocation still pulls `parser/` in via th
 task needs to filter `parser/` out of the OUTPUT and exit on what remains. That filtering is the
 whole job — keep it honest: print what was filtered, never silently drop.
 
-**Clear the 46 first, or the gate cannot go green.** Most are genuinely dead. Categories seen:
-unused destructured params (`ctx` in several `src/services/catalog/*.ts`), an unused private field
-(`registry` in `src/execute.ts:666`), and dead locals (`isSackRead` in `child-shape.ts:298`).
-`fix.ts` will NOT fix these — it only removes unused *imports*, and it already did that (506 edits,
-46 files, landed in `8c33450`). These 46 need judgement: some may be a signal that a code path was
-abandoned mid-refactor, which is worth a look rather than a deletion.
+**Clear the 76 first, or the gate cannot go green.** `fix.ts` will NOT fix them — it only removes
+unused *imports*, and it already did that (506 edits, 46 files, landed in `8c33450`). These need
+judgement: some are a signal that a code path was abandoned mid-refactor, which is worth a look
+rather than a deletion. Categories: unused destructured params (`ctx` in several
+`src/services/catalog/*.ts`), an unused private field (`registry` in `src/execute.ts:675`), dead
+locals (`isSackRead` in `child-shape.ts:298`), and the duplicated test harness below.
+
+### 2a. The duplicated test harness — do this BEFORE deleting test-file locals
+
+`read` (20 files), `seededStore` (19), `run` (19), `runWith` (18) and `bare` (10) are byte-identical
+copy-paste across `test/L2-sql/`, `test/compiler/` and a few singletons. Roughly 86 duplicated
+definitions; the unused-code flags only see the subset that happens to be unused in a given file,
+which is why this reads as ~30 scattered defects instead of one.
+
+Extract to `test/support/` — the precedent is already in the tree and is explicitly documented:
+`test/support/decode.ts`'s header records that it replaced a line "copy-pasted into ~34 assertions
+across a dozen files". Same move, same directory.
+
+This is the ordering that matters: extract first, and most of the test-file errors disappear because
+each file then imports only what it uses. Delete first and you spend the judgement, then still have
+the duplication.
 
 ---
 

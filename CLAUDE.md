@@ -102,6 +102,9 @@ Two more tools on that session: **`bun scripts/fix.ts [--organize] [--unused] [-
 applies TypeScript's own `source.*` code actions (so they cannot disagree with `mise run check`); and
 **`bun scripts/arch-check.ts`** statically checks the Pass role rule from `src/compiler/CLAUDE.md` —
 no Pass may reach `ChainFacts` or the fast-path layer — by walking LSP call hierarchy transitively.
+It is a CI gate, not just a tool: `mise run arch`, and `ci` depends on it. Zero violations IS the
+gate — it is deliberately not a ratchet, so a new violation fails the build rather than widening an
+allowlist.
 That check is why a Pass `run` containing real logic is a `function name(...)` declaration and not an
 arrow: `prepareCallHierarchy` returns NOTHING for an arrow assigned to an object-literal property.
 Remaining work on this tooling: `docs/2026-07-30-lsp-tooling-plan.md`.
