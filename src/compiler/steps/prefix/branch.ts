@@ -610,7 +610,7 @@ function expandRepeatBody(
         // Vertex movement (lands on the far vertex) or vertex→edge step (lands on the edge).
         const [from, to] = dirs[mi++];
         const e = edges.as(`re${mi}`);
-        joins.push(q` JOIN ${e} ON ${e.c[from]}=${curId}${step.args.length ? q` AND ${labelIn(`${e.name}.label`, step.args)}` : empty}`);
+        joins.push(q` JOIN ${e} ON ${e.c[from]}=${curId}${step.args.length ? q` AND ${labelIn(e.c.label, step.args)}` : empty}`);
         if (TO_EDGE.has(step.name)) { curId = e.c.id; curElem = 'edge'; curEdge = e; }
         else { curId = e.c[to]; curElem = 'vertex'; curEdge = null; }
       } else if (TO_VERTEX.has(step.name)) {

@@ -462,6 +462,15 @@ describe('repeat() body: the generic body relation', () => {
     expect(names(store, 'g.V(1).repeat(__.bothE().otherV().has("age",P.lt(30))).times(1).values("name")')).toEqual(['vadas']);
   });
 
+  test('an exploded-edge body filters its joined edge alias, not the base edges table', () => {
+    const store = seededStore();
+    // bothE('knows') enters each of marko's two knows edges, then outV() returns marko twice.
+    // This reaches the multi-step flat repeat expander, whose label filter must qualify the
+    // fresh recursive edge alias rather than the schema relation name.
+    expect(names(store, 'g.V(1).repeat(__.bothE("knows").outV()).times(1).values("name")'))
+      .toEqual(['marko', 'marko']);
+  });
+
   test('otherV preserves the carried schema when path tracking and entering-vertex state meet', () => {
     // bothE() mints BOTH an entering-vertex column (for otherV) and a path position. Their
     // declared slots differ, so this pin catches a physical CTE-column reorder rather than only
