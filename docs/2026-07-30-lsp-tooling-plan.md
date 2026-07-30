@@ -159,19 +159,66 @@ reference sweep is the instrument that can see it; the flags are not.
 
 ---
 
-## 3. Dead-code / orphan-export sweep — not started
+## 3. Dead-code / orphan-export sweep — LANDED (`8214b3f`), findings partly actioned (`b0e2c71`)
 
-`textDocument/references` with `includeDeclaration: false` over every exported symbol; zero
-references outside its own file means either delete or unexport. Verified working on this server
-(8 real hits for `analyzeChain`).
+`scripts/orphans.ts` + `mise run orphans`. Over `src` and `scripts`: **725 exported declarations,
+86 local-only, 13 test-only, 8 orphan** (was 14 before the wrapper deletion below).
 
-Design notes:
+**An instrument, not a gate, and deliberately not in `ci`** — gating would need an allowlist
+(somewhere for a real orphan to hide) or would force a deletion the tool is not confident enough to
+make. Three verdicts, in descending confidence:
 
-- **Exclude test files from the "is it referenced" question** or every test helper looks orphaned.
-- **An export with zero refs is a QUESTION, not a verdict.** Public API surface, DI-registered
-  leaves, and things referenced only from `.feature` step definitions will all look dead. Report,
-  do not auto-delete.
-- This directly serves the technical-debt sweep in `docs/outstanding-work.md`.
+| verdict | meaning | fix |
+|---|---|---|
+| `local-only` (86) | referenced only inside its own file | drop the `export` keyword — mechanical |
+| `test-only` (13) | no product file outside its own references it | judgement: is the test the only user? |
+| `orphan` (8) | no references at all | delete, unexport, or a reflective edge |
+
+Two design choices that turned out to matter more than expected:
+
+- **Scan `src`+`scripts`, but COUNT test references.** The plan's "exclude test files" rule applies
+  to the scan set, not the reference set. Excluding test references instead would turn `test-only`
+  from a category into a false negative — and `test-only` is the signal the sweep exists to find.
+- **Every finding carries a whole-repo textual mention count** (including `.feature` and `.md`),
+  because the reflective edges this codebase really has — DI leaves, registry-resolved services,
+  Gherkin step names, the worker/server entry points — are invisible to a reference query. Zero
+  references *and* zero prose mentions is a much stronger candidate than zero references alone.
+
+**Verify a finding before believing it.** Two looked like tool bugs and were not: `compile` and
+`standardRegistry` are genuinely test-only — `src/execute.ts` imports `compilePlan`, not `compile`,
+and every other mention of `standardRegistry` in `src/` sits inside a comment. That `compile()`, the
+named public entry, is exercised only by tests while production goes through `compilePlan` is a real
+finding about the API surface and is left standing here deliberately.
+
+### 3a. Actioned: the superseded predicate wrappers (`b0e2c71`)
+
+Six exports deleted as ONE finding, not six: `isPropertyScalarChild`, `isPropertyScalarFoldChild`,
+`isTotalScalarChild`, `isScalarFoldChild`, `isElementFoldChild`, `isElementImplicitFoldChild` were
+each a thin `classifyX(...) !== null` wrapper whose `classifyX` is alive and called directly. The
+reason is in `classifyListChild`'s own comment — the classifier "returns the parsed body so the
+emitter reuses it instead of re-parsing". Once a caller wants the body, a boolean wrapper has
+nothing left to offer. Re-running the sweep after showed no NEW orphan, so they held nothing alive.
+
+### 3b. NOT actioned — these are design decisions, not dead code
+
+Left for whoever owns each seam. Deleting them is defensible; so is keeping them, and a sweep is the
+wrong instrument to settle it:
+
+- **`alias.ts` exposes a symmetric accessor vocabulary of which one member is used.**
+  `entryId`/`entryScalar`/`entryKind`/`entryTypeTag` are four spellings of the same extraction and
+  only `entryTypeTag` has a caller; likewise `nodeEntry`/`elemEntry` are used while `edgeEntry` is
+  not, and `popIsList`/`kindShape` are unused. The trade is a complete, discoverable vocabulary
+  against less dead code — a judgement about what that module's API *is*.
+- **`isMidBarrierPoint` (`tail/call.ts`)** — a type guard for `MidBarrierPoint` with no caller. Same
+  question in miniature: guards usually come as a set.
+- **`SCALAR_ROW_STEPS` (`tail/scalar.ts`)** — an unused step-vocabulary Set. Worth checking against
+  the "declared twice" hazard in `src/compiler/steps/CLAUDE.md` before either deleting or wiring it
+  up; a second copy of a vocabulary is the failure mode that section warns about.
+- **The 86 `local-only` exports.** Mechanically safe to unexport, but it is 86 edits asserting that
+  each module's public surface should be exactly what is currently consumed. That is a module-
+  boundary policy, and it should be decided once and applied, not drifted into by a tool.
+
+This directly serves the technical-debt sweep in `docs/outstanding-work.md`.
 
 ## 4. `moveToFile` — not started
 
