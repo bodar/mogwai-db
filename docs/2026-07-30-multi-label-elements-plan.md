@@ -1,13 +1,50 @@
-# Multi-label elements — `labels()` / `addLabel()` / `dropLabel()` / `dropLabels()`
+# Multi-label vertices — `labels()` / `addLabel()` / `dropLabel()` / `dropLabels()`
 
 **Status:** planned, not started. Measured 2026-07-30 against L3 1529 / 2297.
 Design-of-record for `docs/outstanding-work.md` item 19.
 
-## The measurement, and the correction it forces
+**Storage is DECIDED, not open:** vertex labels normalize into a `vertex_labels` table which becomes
+their sole home; `edges.label` stays inline. Taken deliberately **now, while the project has no
+users, so there is no migration** — see "Storage" below.
 
-Item 19 was filed as "31 scenarios across three feature files". **That was the label-STEP files
-only. The real feature is 84 scenarios, 81 of them failing** (3 pass incidentally), spread over
-**19 feature files** — every one carrying the `@MultiLabel` tag:
+## Why build this at all
+
+Worth stating plainly, because the honest answer is not a user-demand story.
+
+**What a label is, as distinct from a property** — three things that are real in this engine, not
+just in the abstract:
+
+1. **Label is structure; a property is data.** TinkerPop models it as a token (`T.label`), not a
+   key, so it cannot collide with a user property literally named `"label"`, and
+   `elementMap`/`valueMap` render it in a separate position from the property map. Every element
+   has one; properties are optional.
+2. **It is the physical partitioning key.** Literally, here: `n_label ON nodes(label)`, and the
+   label sits *inside* `e_out(src, label, tgt)` / `e_in(tgt, label, src)`. `out('knows')` reads the
+   label straight out of the covering index — locked decision #3 working. A property cannot do
+   that; it is a `(key, value)` row you must join to.
+3. **Labels are interned** — an integer FK into `labels`, so comparison is integer equality, where
+   a property key is text per row.
+
+**Why more than one:** orthogonal facets. Upstream's own fixture is the tell — `tux` is `animal`,
+`bird`, `aquatic`, `endangered`, which is not a hierarchy but four independent classifications.
+With one label you either invent combinatorial labels (`endangered_aquatic_bird`) or demote
+classification to a list property, losing `hasLabel`'s index and traversal-primitive status. The
+other canonical case is mixins — `Person` + `Employee` + `Manager`, where `hasLabel('Employee')`
+should find you whatever else you are. It is the Neo4j model.
+
+**The counterweight, recorded so it is not rediscovered as an objection:** multi-label is close to
+"a set-cardinality property with privileged status". If you need none of the three properties
+above, `has('type','bird')` does the job.
+
+**So the reason to build it is CONFORMANCE** — 81 failing scenarios, ~10% of everything still red,
+specified in TinkerPop 4. Not that anyone is asking for facet classification. Anyone weighing this
+against another P2 item should weigh it on that basis.
+
+## The measurement, and the correction it forced
+
+Item 19 was first filed as "31 scenarios across three feature files". **That was the label-STEP
+files only. It is 84 scenarios, 81 failing** (3 pass incidentally), across **19 feature files**,
+all carrying upstream's `@MultiLabel` tag:
 
 | feature | @MultiLabel | feature | @MultiLabel |
 |---|---|---|---|
@@ -20,12 +57,12 @@ only. The real feature is 84 scenarios, 81 of them failing** (3 pass incidentall
 | `map/Labels` | 5 | | |
 
 At 81 failing this is **the largest single open bucket in L3 — roughly 3× item 7b's match-string
-(25)**, and about 10% of everything still red. It is also the only bucket of that size whose
-blocker is a *storage* decision rather than the child seam.
+(25)**. Reachable at all only because the parser regeneration (`f5cddda`) added the four label
+steps to the tracked grammar.
 
-## The governing concept — it is a declared per-graph capability, not a global switch
+## The governing concept — a declared per-graph capability
 
-`vendor/tinkerpop/gremlin-core/.../structure/LabelCardinality.java` is the whole design axis:
+`vendor/tinkerpop/gremlin-core/.../structure/LabelCardinality.java`:
 
 | | min | max | mutable | notes |
 |---|---|---|---|---|
@@ -33,160 +70,175 @@ blocker is a *storage* decision rather than the child seam.
 | `ONE_OR_MORE` | 1 | ∞ | yes | `dropLabels()` always throws; `dropLabel(x)` only if one remains. |
 | `ZERO_OR_MORE` | 0 | ∞ | yes | no constraints; zero labels is legal. |
 
+Providers declare it through `Graph.Features`, and the two element kinds differ **by spec**:
+
+- `VertexFeatures.getLabelCardinality()` — configurable, defaults to `ONE`.
+- `EdgeFeatures.getLabelCardinality()` — javadoc: *"Edge labels are **always** … @return the label
+  cardinality for edges, **always** `LabelCardinality.ONE`"*.
+
 Two consequences that shape everything below:
 
-1. **Declaring `ONE` and throwing correctly IS conformance.** The scenarios *without* the
-   `@MultiLabel` tag — `g_V_addLabelXemployeeX_single_label_graph`,
-   `g_V_dropLabels_single_label_graph`, and five siblings — assert that a single-label graph
-   raises `"Label mutation is not supported"`. Seven scenarios are won by refusing correctly.
-2. **Multi-label is opt-in per graph**, which is what makes this safe to build: the cucumber
-   runner routes `@MultiLabel` + empty-graph scenarios to a *separate traversal source*
-   (`gmultilabel`, `feature-steps.js:103-105`), leaving `gmodern` and the plain empty graph at
-   `ONE`. **So Phase 2 below cannot regress the 1,509 modern-graph scenarios** — they never see
-   the multi-label regime.
+1. **Declaring `ONE` and refusing correctly IS conformance.** The scenarios *without* the
+   `@MultiLabel` tag assert that a single-label graph raises `"Label mutation is not supported"`.
+   Seven scenarios are won by refusing properly.
+2. **Multi-label is opt-in per graph.** The cucumber runner routes `@MultiLabel` + empty-graph
+   scenarios to a separate traversal source (`gmultilabel`, `feature-steps.js:103-105`), leaving
+   `gmodern` and the plain empty graph at `ONE`. **So turning the capability on cannot regress the
+   1,509 modern-graph scenarios** — they never see the multi-label regime.
 
-The target for `gmultilabel` is `ZERO_OR_MORE`, pinned by three scenarios: `g_addV_labels`
-(`g.addV()` → `labels()` has count 0), `g_V_dropLabels_labels` (count 0), and
-`g_V_elementMap_zero_label_vertex_multi_label_default`.
+The target for `gmultilabel` is `ZERO_OR_MORE`, pinned by `g_addV_labels` (`g.addV()` → `labels()`
+count 0), `g_V_dropLabels_labels` (count 0) and `g_V_elementMap_zero_label_vertex_multi_label_default`.
 
-## What is already true — the de-risking findings
+## Storage — decided
 
-Established by reading the code, not assumed. Each removes a phase someone would otherwise plan:
+```sql
+CREATE TABLE IF NOT EXISTS vertex_labels(
+  node  INTEGER NOT NULL REFERENCES nodes(id),
+  label INTEGER NOT NULL REFERENCES labels(id),
+  PRIMARY KEY (node, label));
+CREATE INDEX IF NOT EXISTS vl_label ON vertex_labels(label, node);
+```
+
+- **`nodes` becomes `(id, uid)`** — the `label` column and `n_label` are dropped. `vertex_labels` is
+  the sole home for a vertex's labels; there is no denormalized copy and therefore no drift class.
+- **`edges` is untouched**: `(id, uid, src, label, tgt)`, with `e_out`/`e_in` intact.
+- `vl_label ON vertex_labels(label, node)` replaces `n_label` and serves `hasLabel` as the same
+  index-only seek producing node ids.
+
+**The rule this follows, read off what we already did for properties:** *normalize where cardinality
+is 0..N; keep inline where it is exactly 1.* `edge_properties` is a table because an edge has many
+properties — and it lacks `vertex_properties`' `meta` column and pins `UNIQUE(edge, key)` because,
+per its own DDL comment, "TinkerPop's edge Property has no id/meta/multi". Our storage already
+mirrors TinkerPop's vertex/edge model rather than forcing symmetry. Labels are the same shape:
+vertex labels are 0..N, an edge label is fixed at 1 by spec, so an `edge_labels` table would be a
+strict 1:1 side table buying no expressiveness while taking the label out of the two covering
+indexes every movement rides.
+
+**Two things the schema gives for free**, both of which would otherwise be step logic:
+
+- `PRIMARY KEY (node, label)` makes it a SET. `addLabel("person")` on a vertex already labelled
+  `person` is a no-op via `INSERT OR IGNORE` — which is exactly
+  `g_V_addLabelXexistingX_labels_count` → 1, enforced by the schema rather than by a step.
+- **Zero-label vertices become expressible** (zero rows). They are impossible against a `NOT NULL`
+  column, and `ZERO_OR_MORE` requires them.
+
+**No migration path is written, deliberately.** The schema change lands in one commit while there
+are no users, with the declared capability still `ONE`, so storage becomes multi-label-capable
+before any behaviour changes and never has to change again.
+
+## What is already true — de-risking findings
+
+Read off the code, not assumed. Each removes a phase someone would otherwise plan:
 
 - **The wire needs no change.** GraphBinary already frames an element's label as a LIST, and
-  `vertexBuffer`/`edgeBuffer` (`src/execute.ts:41,60`) already write `[label]` — a bare list of
-  one, with the comment saying so. Multi-label reads are a longer list in a field that is already
-  a list. There is no serializer work in this plan.
-- **The label column is already an id, not a string.** `nodes`/`edges` hold an FK into a `labels`
-  intern table, and `labelIn` (`src/compiler/plan/plan.ts:32`) resolves names through it. A
-  set-of-labels table is an extension of an indirection that exists, not a new one.
-- **Edges stay single-label, and our schema and TinkerPop agree.** Every `g_E_addLabel*` /
-  `g_E_dropLabel*` scenario expects `"Label mutation is not supported"` *even under
-  `@MultiLabel`*. Independently, `e_out ON edges(src, label, tgt)` and `e_in ON edges(tgt, label,
-  src)` (`src/storage.ts:53-54`) bake the edge label into the two covering indexes every movement
-  step rides. **So `edges.label` is untouched by this plan** — only `g.E().labels()` (a read,
-  returning the one label) changes. This halves the blast radius.
-  Note this makes vertex and edge label storage diverge, and that is *correct and precedented*:
-  `edge_properties` already lacks `vertex_properties`' `meta` column and pins `UNIQUE(edge, key)`,
-  because — per the DDL's own comment — "TinkerPop's edge Property has no id/meta/multi". Our
-  storage already mirrors TinkerPop's vertex/edge model rather than forcing symmetry, so a
-  vertex-only label set is the established pattern.
-- **`label()` is deprecated but live**, and on a multi-label vertex returns exactly one of the
-  labels (`g_V_label_deprecated_multilabel_value_is_one_of_labels` asserts only that it is *within*
-  the set). It does not have to become a list.
+  `vertexBuffer`/`edgeBuffer` (`src/execute.ts:41,60`) already write `[label]` — a bare list of one,
+  with the comment saying so. Upstream's `EdgeSerializer`/`GraphSerializer` read and write
+  `List<String>` for the same reason. Multi-label reads are a longer list in a field already a list.
+- **The label is already an interned id**, resolved through `labelIn` (`plan/plan.ts:32`). A label
+  *set* extends an indirection that exists.
+- **`label()` is deprecated but live**, and on a multi-label vertex returns an arbitrary one of them
+  — `Element.label()`'s javadoc says so, and `g_V_label_deprecated_multilabel_value_is_one_of_labels`
+  asserts only that it is *within* the set. It does not become a list.
+- **Edges read but never mutate.** `g.E().labels()` must answer (returning the one label); every
+  `g_E_addLabel*` / `g_E_dropLabel*` expects the mutation error even under `@MultiLabel`.
+
+## Blast radius, measured 2026-07-30 — and the one trap that matters
+
+Dropping `nodes.label` touches:
+
+- **~20 sites doing `JOIN labels l ON l.c.id = n.c.label`** to resolve a vertex's label name —
+  `tail/{group,path,select,projection,modulation}.ts`, `prefix/filter.ts`, `plan/plan.ts`,
+  `services/catalog/search.ts`.
+- **9 `labelIn` call sites, but only 4 are VERTEX** (`prefix/filter.ts:106,123`,
+  `prefix/predicate.ts:271,289` via `ctx.labelIdExpr`, `write/write.ts:899`). The other five are
+  `e.label` and **do not move**.
+- 28 `labelNameSub` references, and `write/write.ts:233`'s raw response-framing SQL.
+
+> **THE TRAP: a scalar label position must not become a join.** Every one of those ~20 sites reads
+> the label in a ONE-row-per-vertex projection — `label()`, `by(T.label)`, `elementMap`/`valueMap`'s
+> `T.label` token, path framing, select payloads. Replacing the join to `labels` with a join through
+> `vertex_labels` **silently multiplies rows**: N labels become N copies of the vertex. That is
+> precisely the "silently answer a different question" failure CLAUDE.md forbids, and it would pass
+> every single-label test.
+>
+> **The fix is one named accessor, introduced first and mechanically.** `vertexLabelName(idExpr)`
+> returns a scalar subquery with a deterministic pick (`… ORDER BY vl.label LIMIT 1`); every scalar
+> position routes through it, and **`labels()` is the ONLY consumer that fans out**. One accessor,
+> N readers — the same shape as `classifyBy`.
 
 ## Phases
 
-Ordered so each lands independently and the cheap, zero-risk one is first. Scenario counts are
-what that phase alone turns green.
+Ordered so the schema lands first and each phase is independently provable. Counts are what that
+phase alone turns green.
 
-### Phase 0 — declare `ONE`, implement `labels()`, refuse mutation (**+7 scenarios, no schema change**)
+### Phase A — schema + accessor (**+0 scenarios; a pure refactor, and must be provable as one**)
 
-The whole of this phase is correct behaviour for the graph we already have.
+- Add `vertex_labels`; drop `nodes.label` and `n_label`. The write path inserts exactly one row.
+- Introduce `vertexLabelName` (scalar) and the set reader; route all ~20 sites and the 4 vertex
+  `labelIn` sites through them. No behaviour changes; declared capability stays `ONE`.
+- **Exit criterion: L3 still 1529, and the census TSVs are byte-identical.** If either moves, the
+  refactor changed semantics and the trap above is the first place to look.
 
-- `labels()` lowers as a scalar projection of the element's label name — one row per element,
-  reusing `labelNameSub` (`plan/plan.ts:471`). It is `label()`'s row-shape twin, so it registers
-  beside it rather than needing new machinery.
-- `addLabel()` / `dropLabel()` / `dropLabels()` throw `"Label mutation is not supported"` —
-  the exact message the scenarios match on. This is a *deliberate* fail-closed refusal that is
-  also the specified answer, so it should read as a capability check against a declared
-  `LabelCardinality.ONE`, not as a `step not implemented` stub. Do it that way now and Phase 2
-  changes a constant instead of finding the sites again.
+### Phase B — `labels()` and correct refusal (**+7 scenarios**)
+
+- `labels()` lowers as the fan-out reader over `vertex_labels` — one row per label, and the only
+  site allowed to join. On edges it yields the single inline label.
+- `addLabel` / `dropLabel` / `dropLabels` throw `"Label mutation is not supported"` — the exact
+  message scenarios match on. Write it as a **capability check against the declared
+  `LabelCardinality`**, not a `step not implemented` stub, so Phase D changes a constant rather than
+  re-finding the sites.
 - Clears 36 unique `step not implemented` deferrals from the census in passing.
 
-**Exit:** the 7 untagged `*_single_label_graph` scenarios pass; `g.V().labels()` and
-`g.E().labels()` answer on `gmodern`.
+### Phase C — conformance harness (**+0; prerequisite for D and E**)
 
-### Phase 1 — the conformance harness (**+0 scenarios, prerequisite for everything below**)
+Named separately so its cost is not hidden inside Phase D.
 
-Named as its own phase precisely because it wins nothing and would otherwise hide inside Phase 2's
-estimate.
+- A **`gmultilabel` traversal source** in `conformance-server.ts`'s `SEEDS`, declaring
+  `ZERO_OR_MORE` while `ggraph` stays `ONE` — the first time our host serves two graphs with
+  *different capabilities*, so the capability must reach the store, not just the seed.
+- A **`gzoo` reference graph**, and it has a real blocker: the zoo graph ships in the submodule
+  **only as `tinkerpop-zoo-v3.kryo`** — no GraphSON — so `graphsonSeed` cannot read it and we should
+  not grow a Gryo reader. Hand-transcribe it as write traversals, as `MODERN_SEED` and `CREW_SEED`
+  already are. 27 of the 84 scenarios need it.
 
-- **A `gmultilabel` traversal source** on the conformance host (`test/L3-conformance/conformance-server.ts`
-  `SEEDS`) — a graph whose declared cardinality is `ZERO_OR_MORE` while `ggraph` stays `ONE`. This
-  is the first time our host has served two graphs with *different capabilities*, so the capability
-  has to reach the store, not just the seed.
-- **A `gzoo` reference graph, and this one has a real blocker:** the zoo graph ships in the
-  submodule **only as `tinkerpop-zoo-v3.kryo`** — there is no GraphSON v3 file, so
-  `graphsonSeed` cannot read it and we have no Gryo reader (nor should we grow one). It must be
-  hand-transcribed as write traversals, the way `MODERN_SEED` and `CREW_SEED` already are.
-  27 of the 84 scenarios need it (`tux` the penguin: `animal`, `bird`, `aquatic`, `endangered`).
+### Phase D — turn the capability on (**~40 scenarios**)
 
-### Phase 2 — vertex label sets (**the bulk: ~40 scenarios**)
-
-Storage, then the read paths, then the writes.
-
-- `addLabel(...)` / `dropLabel(...)` / `dropLabels()`, including **traversal-valued arguments**
+- `addLabel` / `dropLabel` / `dropLabels`, including **traversal-valued arguments**
   (`addLabel(constant("employee"))`, `addLabel(constant(["a","b"]))`) — that is item 0b's
-  apply-contract, so it reuses `ElementReadDriver` rather than growing a fourth argument
-  evaluator. Note the specified error for a collection in a *multi-argument* position
+  apply-contract, so reuse `ElementReadDriver` rather than growing a fourth argument evaluator.
+  Note the specified error for a collection in a *multi-argument* position
   (`addLabel(constant(["a","b"]), constant("c"))` → message containing `"Collection"`).
-- `hasLabel(...)` and `has(T.label, P)` become **ANY-match over the set**. This is the change with
-  the widest reach — `labelIn` has many callers — and the one to write the equivalence test for.
+- `hasLabel(...)` and `has(T.label, P)` become **ANY-match over the set** — the widest-reaching
+  change, and the one to write the equivalence test for.
 - `addV("a","b")` (AddVertex, 6) and `mergeV({T.label: ["a","b"]})` (MergeVertex, 9).
-- `label()` keeps returning one label; `dedup().by(labels().order().fold())` must work, which it
-  should for free once `labels()` is a list producer.
+- `dedup().by(labels().order().fold())` should follow once `labels()` is a list producer.
 
-### Phase 3 — the map shapes (**~23 scenarios, gated on item 13**)
+### Phase E — the map shapes (**~23; gated on item 13**)
 
-`ElementMap` (14) and `ValueMap` (9) render labels differently per regime, selected by a
-traversal-source option — `g.with("multilabel")` / `g.with("single-label")`. That selector is
-index item 13 (`with(...)` / `OptionsStrategy` sugar), so this phase is genuinely blocked on it
-and should not be attempted first.
-
-## The one real decision — how a vertex's label set is stored
-
-Two options, and **this plan does NOT pick one**, because the first draft's reasons for picking
-did not survive review. They are recorded here with what actually decides between them.
-
-- **(a) Supplement.** `nodes.label` keeps the first label; `vertex_labels(node, label)` holds the
-  whole set and is what `labels()` reads. Under `ONE` the side table is one row per vertex.
-- **(b) Replace.** `nodes.label` goes; `vertex_labels` is the sole home for a vertex's labels.
-  `edges.label` stays inline either way.
-
-**A retracted argument, recorded so it is not re-made.** The first draft rejected (b) partly
-because it "creates an asymmetry with edges". That is void: `vertex_properties` and
-`edge_properties` are *already* asymmetric — the latter has no `meta` column and carries
-`UNIQUE(edge, key)` — and the DDL comment gives the reason: "TinkerPop's edge Property has no
-id/meta/multi". The split tracks TinkerPop's model. Labels are the same shape (vertices multi,
-edges single), so a vertex-only label table is **the existing precedent, not a departure from it**.
-Under (b) the asymmetry is if anything more honest, because the storage would then say
-out loud that multi-label is a vertex concept.
-
-**The surviving argument is a perf claim, and it is UNMEASURED — treat it as the spike to run,
-not as a finding.** The concern is that `n_label ON nodes(label)` is what `hasLabel` rides and
-that (b) turns every `labelIn` into a join. On inspection that is overstated:
-`V().hasLabel('person').out()` seeks `n_label` for node ids and feeds `e_out` without ever reading
-the `nodes` row, and an index on `vertex_labels(label, node)` serves the same index-only seek
-producing the same ids. The join (b) adds is often to a table the query was not reading.
-So: **EXPLAIN + time `hasLabel` seek, `hasLabel().out()`, and a `has(T.label, within(...))` under
-both shapes before choosing.** That measurement is the deciding input.
-
-The counterweight is on (a): a denormalized first-label column can drift from the set, and
-"which is the real label" becomes a question every read path must answer. (b) has one home and
-therefore no drift class at all.
-
-**Phase 0 and Phase 1 are unaffected either way**, so land those first and take this decision with
-the Phase 2 code and the measurement in front of you.
+`ElementMap` (14) and `ValueMap` (9) render labels per regime, selected by a traversal-source option
+— `g.with("multilabel")` / `g.with("single-label")`. That selector is index item 13
+(`with(...)` / `OptionsStrategy` sugar), so this phase is genuinely blocked on it.
 
 ## Traps
 
-- **`dropLabels()` on `ONE_OR_MORE` always throws, but on `ZERO_OR_MORE` succeeds.** Two of the
-  three cardinalities are mutable and they disagree. Encode the cardinality as data with the
-  min/max/mutable triple, exactly as TinkerPop does, rather than as three booleans at call sites.
-- **`dropLabel("xyz")` on a vertex that lacks that label is a no-op, not an error**
+- **The scalar-vs-fan-out trap above is the big one.** Everything else here is smaller.
+- **A negated predicate over a set is not the negation of the member test.**
+  `has(T.label, without('animal'))` means *no* label is `animal`, **not** *some* label is not
+  `animal`. `g_V_hasXlabel_withoutXanimalXX_name_multilabel` pins it. Get the quantifier wrong and
+  it passes on single-label graphs and is wrong everywhere else.
+- **`dropLabels()` throws on `ONE_OR_MORE` but succeeds on `ZERO_OR_MORE`.** Two of the three
+  cardinalities are mutable and they disagree — encode the min/max/mutable triple as data, as
+  TinkerPop does, rather than as booleans at call sites.
+- **`dropLabel("xyz")` on a vertex lacking that label is a no-op, not an error**
   (`g_V_dropLabelXnonExistentX_labels`).
-- **`addLabel("person")` on a vertex already labelled `person` leaves one label, not two**
-  (`g_V_addLabelXexistingX_labels_count` → 1). It is a SET.
-- **A zero-label vertex must still be a vertex** — it appears in `g.V()`, has properties, and
-  frames on the wire with an empty label list. Any read path that assumes a label exists breaks
-  here, and `ZERO_OR_MORE` is the target regime.
-- **Do not descope `@MultiLabel` in `tags.ts` to make the number look better.** These are
-  supportable scenarios against a graph we choose to configure; descoping would shrink the
-  denominator and hide the largest bucket in the suite. (Contrast the standing P3 hygiene item,
-  which descopes OLAP/GraphComputer — genuine architectural walls.)
+- **A zero-label vertex is still a vertex** — it appears in `g.V()`, has properties, and frames with
+  an empty label list. Any read path assuming a label exists breaks here.
+- **Do not descope `@MultiLabel` in `tags.ts` to improve the number.** These are supportable
+  scenarios against a graph we configure; descoping shrinks the denominator and hides the largest
+  bucket in the suite. (Contrast the standing P3 hygiene item, which descopes OLAP/GraphComputer —
+  genuine architectural walls.)
 
 ## Not covered
 
-`labels()` as a *child body* shape, and `order().by(labels())`, follow the ordinary child-seam
-rules (index items 2 and 5) — this plan does not special-case them.
+`labels()` as a *child body* shape, and `order().by(labels())`, follow the ordinary child-seam rules
+(index items 2 and 5); this plan does not special-case them.

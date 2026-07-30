@@ -408,22 +408,31 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
     Roughly **3× item 7b's match-string** and ~10% of everything still red. Reachable at all only
     because the parser regeneration (`f5cddda`) added the four label steps to the tracked grammar.
     The plan has the phasing, the measurements and the one open decision; the headline facts:
+    - **Motivation is CONFORMANCE, not user demand** — worth knowing before weighing it against
+      another P2 item. Multi-label is close to "a set-cardinality property with privileged status";
+      what it buys is `T.label` token rendering, an interned-integer partitioning key, and
+      `hasLabel`'s index status. The plan records the case and the counter-case.
     - **It is a declared per-graph capability** (`LabelCardinality` = `ONE` / `ONE_OR_MORE` /
       `ZERO_OR_MORE`), and the cucumber runner routes `@MultiLabel` scenarios to a *separate*
       `gmultilabel` source. So the multi-label regime is opt-in and **cannot regress the 1,509
       modern-graph scenarios**.
     - **Declaring `ONE` and refusing correctly is itself conformance** — 7 untagged
-      `*_single_label_graph` scenarios assert `"Label mutation is not supported"`. Phase 0 wins them
-      with no schema change.
+      `*_single_label_graph` scenarios assert `"Label mutation is not supported"`.
+    - **Storage is DECIDED: `vertex_labels(node, label)` becomes the sole home for vertex labels
+      (`nodes.label` and `n_label` are dropped); `edges.label` stays inline.** The rule is the one
+      properties already follow — normalize where cardinality is 0..N, keep inline where it is
+      exactly 1 — and upstream fixes edge label cardinality at "always `ONE`" by spec. **Taken now,
+      while there are no users, so no migration is written**: the schema goes multi-label-capable in
+      one commit with the capability still `ONE`.
     - **No wire work:** GraphBinary already frames the label as a LIST and `vertexBuffer`/`edgeBuffer`
       already write a bare list of one (`src/execute.ts:41,60`).
-    - **Edges stay single-label** — upstream expects the mutation error on edges even under
-      `@MultiLabel`, and `e_out`/`e_in` bake `edges.label` into the covering indexes every movement
-      rides. Only vertices are in scope, which halves the blast radius.
+    - **The trap, and it would pass every single-label test:** ~20 sites resolve a vertex's label in a
+      one-row-per-vertex projection; re-pointing them at a join through `vertex_labels` silently
+      multiplies rows. One named scalar accessor first, and `labels()` as the ONLY fan-out reader.
     - Named blocker: the **zoo graph ships only as `.kryo`**, no GraphSON, so its 27 scenarios need a
       hand-written seed like `MODERN_SEED`.
-    **Medium-High — sizeable but genuinely phased, and unlike most of P2 it is bounded by a storage
-    choice rather than by the child seam.**
+    **Medium-High — sizeable but genuinely phased, and its first phase is a pure refactor whose exit
+    criterion is "L3 unchanged at 1529, census byte-identical".**
     → [multi-label-elements](./2026-07-30-multi-label-elements-plan.md)
 
 ---
