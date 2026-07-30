@@ -1,10 +1,10 @@
-import { q, value, list, Query, type Expression } from '../../sql/kernel/q.ts';
+import { empty, q, value, list, Query, type Expression } from '../../sql/kernel/q.ts';
 import { nodes, edges } from '../../sql/schema.ts';
 import { type Elem } from '../plan/plan.ts';
 import { flattenListArgs, isColumnArg, isOperatorArg, isPopArg } from '../../gremlin/frontend.ts';
 import { type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
-import { trackFromV, type LoweringState, type ElementStream, type StepFn } from '../steps/context/context.ts';
+import { layoutCols, trackFromV, type LoweringState, type ElementStream, type StepFn } from '../steps/context/context.ts';
 import { move, toEdge, toVertex, otherV, reSource } from '../steps/prefix/movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from '../steps/prefix/filter.ts';
 import { union, optional, repeat, choose, coalesce, sourceUnion } from '../steps/prefix/branch.ts';
@@ -35,7 +35,7 @@ import type { SegmentPlan } from '../segment.ts';
 import type { ForeignRow } from '../../services/spi/types.ts';
 import type { AppScope, CompilerScope } from '../../scopes.ts';
 import { createCompilerScope } from '../../scopes.ts';
-import type { Engine } from './deps.ts';
+import type { ElementReadDriver, Engine } from './deps.ts';
 
 export { compileTail };
 
@@ -552,6 +552,28 @@ export class LoweringEngine implements Engine {
     const plan = this.child(params, steps).compileRead(steps, params, sackInit);
     if (plan.kind === 'segment') throw new Error('a nested sub-traversal cannot be a barrier/federated source');
     return plan;
+  }
+
+  /** Re-enter the ordinary read lowering from one materialized write traverser. The write path
+   * gives us concrete carried values, while the layout remains the compiler's usual alias/path/
+   * bulk schema; binding those values into a fresh source relation is therefore a provisioning
+   * change, not a second nested-traversal evaluator. */
+  compileReadFromElementDriver(steps: IRStep[], params: Record<string, any>, driver: ElementReadDriver): Compiled {
+    if (!steps.length) throw new Error('a write driver needs a non-empty read continuation');
+    const eng = this.child(params, steps);
+    const source: IRStep = { name: driver.elem === 'edge' ? 'E' : 'V', args: [driver.id], ctx: steps[0].ctx };
+    const seeded = eng.seedSource(source, params, false, undefined, false);
+    const cols = layoutCols(driver.traverserLayout);
+    for (const col of cols)
+      if (!(col in driver.carried)) throw new Error(`write driver is missing carried column '${col}'`);
+    const p = seeded.rel.as('wd');
+    const carried = cols.map((col) => q`${value(driver.carried[col])} AS ${col}`);
+    const rel = eng.q.cte(
+      q`SELECT ${p.c.id} AS id${carried.length ? q`, ${list(carried, ', ')}` : empty} FROM ${p}`,
+      ['id', ...cols],
+    );
+    const stream: ElementStream = { ...seeded, rel, elem: driver.elem, traverserLayout: driver.traverserLayout };
+    return materializeRootStream(eng.lowerStepsStrict(stream, steps, 0));
   }
 }
 

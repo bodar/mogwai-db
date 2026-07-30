@@ -32,22 +32,18 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 ## P1 — ceiling-raising generic-substrate lifts
 
 0b. **Apply-contract consumers.** `ModulationContract` (`'produce' | 'apply' | 'presence'`) is
-   available in `steps/tail/child.ts`. The remaining `TraversalUtil.apply(traverser, …)` consumers
-   need only declare `contract: 'apply'`:
-   - `Parameters.java:125,177,178` (`property(k, __.t)` — see item 2's `property() after addV()` —
-     plus merge-map KEYS and
-     VALUES, item 0c's biggest cluster), `DateDiffStep:82`, `ListFunction`/`ConjoinStep`,
-     `MergeStep`/`MergeElementStep`/`MergeEdgeStep`, `AddVertexStep` (which is what still blocks
-     `g.addV(constant('prefix_').concat(__.V(vid1).label())).label()`). **This is the compounding
-     part and none of it is built.** *Medium-High — one declared contract each.*
-   - **Still deferring, fail-closed (1 corpus row):**
-     `g.inject('hello','hi').concat(__.V().order().by('name').values('name'))` throws
-     `concat() after a scalar stream not yet supported`. The cause is generic and predates this
-     work: `lowerScalarProjection` (`steps/tail/projection.ts`) rejects `order()/limit()/dedup()`
-     before a projection inside a child scope, because the encounter it mints IS
-     `PARTITION BY origin ORDER BY <projection key>`. Its comment said "unreached in practice";
-     a re-sourced modulation child now reaches it. **The opening: for a re-sourced body the
-     partition is redundant** (the child ignores the traverser). *Medium.*
+   available in `steps/tail/child.ts`; the imperative write path has the analogous
+   `ElementReadDriver`, which re-enters the ordinary read compiler with the exact incoming
+   element + carried aliases. It now covers `Parameters.java:125,177,178` for nested property
+   keys/values, merge-map keys/values, and `AddVertexStep` labels/parameters — including
+   `g.V().as('a').out().addV(__.select('a').label()).property(k, __.select('a')…)` and the
+   source `constant(...).concat(__.V(...).label())` form. The remaining consumers are
+   `ListFunction`/`ConjoinStep`, plus whole-map `MergeStep`/`MergeElementStep`/`MergeEdgeStep`
+   bodies (which need a map-shaped, not scalar, driver). *Medium-High — extend the declared
+   contract rather than another argument evaluator.*
+   The re-sourced scalar child route now owns its own per-origin ordering and first-row
+   cardinality, so `g.inject('hello','hi').concat(__.V().order().by('name').values('name'))`
+   executes rather than receiving a concat-specific exception.
 
 1. **List members frame as bare values, not elements.** `AliasEntry` does not record the member
    shape, so a path/element-list label cannot frame its members as vertices. Blocks

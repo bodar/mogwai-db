@@ -27,8 +27,20 @@ import type { IRStep } from '../ir/strategies.ts';
 import type { ChainFacts } from '../ir/analyze.ts';
 import type { Compiled } from '../../sql/kernel/render.ts';
 import type { SegmentPlan } from '../segment.ts';
-import type { LoweringState, ElementStream } from '../steps/context/context.ts';
+import type { LoweringState, ElementStream, TraverserLayout } from '../steps/context/context.ts';
+import type { Elem } from '../plan/plan.ts';
 import type { Stream, LoweringSuspension } from '../steps/context/stream.ts';
+
+/** A materialized element traverser re-entering the read compiler from a write.
+ * The driver preserves every carried column (especially alias histories), so a
+ * nested write argument sees the same current object and labels as TinkerPop's
+ * `TraversalUtil.apply(traverser, child)`, not a hand-built approximation. */
+export interface ElementReadDriver {
+  readonly id: number;
+  readonly elem: Elem;
+  readonly traverserLayout: TraverserLayout;
+  readonly carried: Readonly<Record<string, unknown>>;
+}
 
 /** The lowering engine: the recursive-traversal authority (dispatcher + prefix fold + shaped
  *  lowering loop) plus the ambient compile dependencies. Built per-compile from a CompilerScope
@@ -93,6 +105,10 @@ export interface Engine {
   /** compileRead narrowed to a synchronous Compiled, minting a FRESH compile scope (fresh Query,
    *  same app scope) for the nested sub-traversal — a within()/all() operand, a merge body. */
   compileReadCompiled(steps: IRStep[], params?: Record<string, any>, sackInit?: SackSpec): Compiled;
+
+  /** Compile a nested read body from one materialized element traverser. This is the write
+   * argument seam: it preserves the driver's carried schema rather than rebuilding only V(id). */
+  compileReadFromElementDriver(steps: IRStep[], params: Record<string, any>, driver: ElementReadDriver): Compiled;
 }
 
 /** The lowering Engine riding a stream's Query. Every stream reached during a compile carries the

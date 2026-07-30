@@ -7,8 +7,10 @@ import { type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { staticTypeOf, readCompiled, renderFrom, type Compiled, type WritePlan, type Shape } from '../../../sql/kernel/render.ts';
 import type { Engine } from '../../engine/deps.ts';
+import type { ElementReadDriver } from '../../engine/deps.ts';
 import { compileInject } from './inject.ts';
 import { indexProperty, deleteFtsFor, deleteFtsForOwners } from '../../../services/fts-index.ts';
+import { layoutCols, type ElementStream } from '../context/context.ts';
 
 // ---------- nested-traversal write arguments (read spine reuse) ----------
 //
@@ -51,12 +53,22 @@ function constFromNested(nested: any, sideEffects: Map<string, any> | undefined,
 // Compile a nested traversal (optionally seeded at a driver element) and run it against
 // the store, returning its raw result rows + the compiled shape. Seeding prepends a
 // V/E source on the driver's internal rowid so the child is anchored at that element.
-function runNested(engine: Engine, store: GraphStore, nestedNode: any, params: Record<string, any>, seed?: { id: number; elem: Elem }): { rows: any[]; shape: Shape } {
+function runNested(
+  engine: Engine,
+  store: GraphStore,
+  nestedNode: any,
+  params: Record<string, any>,
+  seed?: { id: number; elem: Elem },
+  driver?: ElementReadDriver,
+): { rows: any[]; shape: Shape } {
   let chain: IRStep[] = normalize(stepChain(nestedNode, params)).steps;
   // Seed at the driver element: a synthetic V/E source on the internal rowid (numeric
   // arg → rowid match). It borrows the nested node's parse ctx (no ctx of its own).
+  if (seed && driver) throw new Error('nested write read cannot have both a seed and a driver');
   if (seed) chain = [{ name: seed.elem === 'edge' ? 'E' : 'V', args: [seed.id], ctx: nestedNode } as IRStep, ...chain];
-  const compiled = engine.compileReadCompiled(chain, params);
+  const compiled = driver
+    ? engine.compileReadFromElementDriver(chain, params, driver)
+    : engine.compileReadCompiled(chain, params);
   return { rows: store.query<any>(compiled.sql, compiled.binds), shape: compiled.shape };
 }
 
@@ -68,8 +80,15 @@ function runNested(engine: Engine, store: GraphStore, nestedNode: any, params: R
 // value (single-cardinality write), or has:false for an empty traversal (→ no property).
 // The stored vtype comes from the read spine's own type (count→long, a typed value→its
 // `as`), else null → inferred from the value. Fails closed on a non-scalar result shape.
-function nestedScalar(engine: Engine, store: GraphStore, nestedNode: any, params: Record<string, any>, seed?: { id: number; elem: Elem }): { has: boolean; value: any; vtype: CanonicalType | null } {
-  const { rows, shape } = runNested(engine, store, nestedNode, params, seed);
+function nestedScalar(
+  engine: Engine,
+  store: GraphStore,
+  nestedNode: any,
+  params: Record<string, any>,
+  seed?: { id: number; elem: Elem },
+  driver?: ElementReadDriver,
+): { has: boolean; value: any; vtype: CanonicalType | null } {
+  const { rows, shape } = runNested(engine, store, nestedNode, params, seed, driver);
   if (shape.kind !== 'value' && shape.kind !== 'scalar')
     throw new Error(`property() traversal value producing a ${shape.kind} not yet supported`);
   if (!rows.length || rows[0].v == null) return { has: false, value: undefined, vtype: null };
@@ -85,30 +104,38 @@ function nestedScalar(engine: Engine, store: GraphStore, nestedNode: any, params
 // empty nested traversal → has:false. vtype from the read shape, else inferred from the
 // produced value (the honest fallback for an untyped channel). Reused by property values
 // (resolveSpecValue), addV labels (insertVertex), and merge map values (resolveMergeSpec).
-function nestedScalarValue(engine: Engine, store: GraphStore, nested: any, params: Record<string, any>, seed?: { id: number; elem: Elem }, sideEffects?: Map<string, any>): { has: boolean; value: any; vtype: CanonicalType | null } {
+function nestedScalarValue(
+  engine: Engine,
+  store: GraphStore,
+  nested: any,
+  params: Record<string, any>,
+  seed?: { id: number; elem: Elem },
+  sideEffects?: Map<string, any>,
+  driver?: ElementReadDriver,
+): { has: boolean; value: any; vtype: CanonicalType | null } {
   const c = constFromNested(nested, sideEffects, params);
   if (c.has) return c;
-  const r = nestedScalar(engine, store, nested.nested, params, seed);
+  const r = nestedScalar(engine, store, nested.nested, params, seed, driver);
   return { has: r.has, value: r.value, vtype: r.vtype ?? (r.has ? gremlinTypeOf(r.value, null) : null) };
 }
 
 // Resolve a PropSpec's value for one target element: a literal passes through with its
 // captured vtype; a nested traversal is evaluated correlated at the element.
-function resolveSpecValue(engine: Engine, store: GraphStore, sp: PropSpec, id: number, elem: Elem, params: Record<string, any>, sideEffects?: Map<string, any>): { has: boolean; value: any; vtype: CanonicalType | null; typeNode: TypeNode | null } {
+function resolveSpecValue(engine: Engine, store: GraphStore, sp: PropSpec, id: number, elem: Elem, params: Record<string, any>, sideEffects?: Map<string, any>, driver?: ElementReadDriver): { has: boolean; value: any; vtype: CanonicalType | null; typeNode: TypeNode | null } {
   // A literal keeps its full typeNode (collection element/key fidelity); a nested traversal
   // resolves to a SCALAR (nested collection values are deferred), so its scalar vtype IS a
   // valid TypeNode (a bare CanonicalType), used directly as typeNode.
   if (!isNested(sp.value)) return { has: true, value: sp.value, vtype: sp.vtype, typeNode: sp.typeNode };
-  const r = nestedScalarValue(engine, store, sp.value, params, { id, elem }, sideEffects);
+  const r = nestedScalarValue(engine, store, sp.value, params, driver ? undefined : { id, elem }, sideEffects, driver);
   return { ...r, typeNode: r.vtype };
 }
 
 /** Resolve a property key through the same TraversalUtil.apply-style authority as a
  * property value.  Keys are per-target inputs too: evaluating them at write-plan build time
  * would lose correlation (and would be a second child evaluator). */
-function resolveSpecKey(engine: Engine, store: GraphStore, sp: PropSpec, id: number, elem: Elem, params: Record<string, any>, sideEffects?: Map<string, any>): string {
+function resolveSpecKey(engine: Engine, store: GraphStore, sp: PropSpec, id: number, elem: Elem, params: Record<string, any>, sideEffects?: Map<string, any>, driver?: ElementReadDriver): string {
   if (!isNested(sp.key)) return sp.key;
-  const r = nestedScalarValue(engine, store, sp.key, params, { id, elem }, sideEffects);
+  const r = nestedScalarValue(engine, store, sp.key, params, driver ? undefined : { id, elem }, sideEffects, driver);
   if (!r.has) throw new Error('property() key traversal produced no value');
   if (typeof r.value !== 'string') throw new Error(`property() key traversal must produce a string, got ${typeof r.value}`);
   return r.value;
@@ -439,26 +466,96 @@ function readVertexProps(store: GraphStore, node: number): Record<string, ValueN
 // value (__.constant/__.values/__.out().count()) is evaluated correlated at the NEW
 // vertex (fresh + edge-less → __.out().count() = 0, per TinkerPop). An empty nested
 // value writes no property (r.has=false).
-function insertVertex(engine: Engine, store: GraphStore, spec: VertexSpec, params: Record<string, any> = {}, sideEffects?: Map<string, any>): { id: number; extId: string | number; label: string } {
+function insertVertex(
+  engine: Engine,
+  store: GraphStore,
+  spec: VertexSpec,
+  params: Record<string, any> = {},
+  sideEffects?: Map<string, any>,
+  driver?: ElementReadDriver,
+): { id: number; extId: string | number; label: string } {
   let label: string;
   if (isNested(spec.label)) {
     // Unseeded: an addV label traversal is a standalone read / invariant (a source addV
     // has no incoming element). Routes through the same value authority so __.constant(x)
     // and __.select(const) labels resolve, not just seeded reads.
-    const r = nestedScalarValue(engine, store, spec.label, params, undefined, sideEffects);
+    const r = nestedScalarValue(engine, store, spec.label, params, undefined, sideEffects, driver);
     if (!r.has) throw new Error('addV(traversal) label produced no value');
     label = String(r.value);
   } else label = spec.label;
   const row = insertRow(store, 'nodes', ['label'], [store.labelId(label)], spec.uid);
   for (const p of spec.props) {
-    const r = resolveSpecValue(engine, store, p, row.id, 'vertex', params, sideEffects);
-    if (r.has) applyVertexProperty(store, row.id, resolveSpecKey(engine, store, p, row.id, 'vertex', params, sideEffects), r.value, r.vtype, p.meta, p.cardinality, r.typeNode);
+    const r = resolveSpecValue(engine, store, p, row.id, 'vertex', params, sideEffects, driver);
+    if (r.has) applyVertexProperty(store, row.id, resolveSpecKey(engine, store, p, row.id, 'vertex', params, sideEffects, driver), r.value, r.vtype, p.meta, p.cardinality, r.typeNode);
   }
   return { ...row, label };
 }
 
 // g.addV('label').property(k, v)... — and multi-element chains (a graph initializer).
+/** Materialize an element prefix as read drivers for a following imperative write. The driver
+ * carries the layout's actual column values, so a nested write argument re-enters normal read
+ * lowering with the same current object and aliases the prefix produced. */
+function materializeElementDrivers(store: GraphStore, st: ElementStream): ElementReadDriver[] {
+  const cols = layoutCols(st.traverserLayout);
+  const read = renderFrom(st.q, st.rel, ['id', ...cols].join(', '));
+  return store.query<Record<string, unknown>>(read.sql, read.binds).map((row) => ({
+    id: Number(row.id),
+    elem: st.elem,
+    traverserLayout: st.traverserLayout,
+    carried: Object.fromEntries(cols.map((col) => [col, row[col]])),
+  }));
+}
+
+/** Mid-traversal addV is a write fan-out over a materialized element prefix. Its parameters use
+ * the original traverser as their apply-contract input; the new vertex becomes the continuation's
+ * current object while the original carried layout stays live. */
+function compileMidAddV(engine: Engine, steps: IRStep[], addVAt: number, params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
+  const prefix = steps.slice(0, addVAt);
+  const { st, stop } = engine.buildPrefixFresh(prefix, params);
+  if (stop !== prefix.length) throw new Error(`addV() after ${prefix[stop].name}() not yet supported`);
+  // A new vertex is a new path position. Until the write driver can append that position to the
+  // carried path encoding, preserving the old path would be a wrong answer.
+  if (st.traverserLayout.path) throw new Error('mid-traversal addV() under path() is not yet supported (write driver cannot append the new vertex path position)');
+
+  let firstTail = addVAt + 1;
+  while (firstTail < steps.length && steps[firstTail].name === 'property') firstTail++;
+  const spec = parseVertexSpec(steps[addVAt], steps.slice(addVAt + 1, firstTail), sideEffects, params);
+  const suffix = steps.slice(firstTail);
+  const writeSteps = new Set(['addV', 'addE', 'mergeV', 'mergeE', 'property', 'drop']);
+  if (suffix.some((s) => writeSteps.has(s.name)))
+    throw new Error(`write continuation after mid-traversal addV() not yet supported: ${suffix.find((s) => writeSteps.has(s.name))!.name}()`);
+
+  const carried = Object.fromEntries(layoutCols(st.traverserLayout).map((col) => [col, null]));
+  const probeDriver: ElementReadDriver = { id: 0, elem: 'vertex', traverserLayout: st.traverserLayout, carried };
+  const probe = suffix.length ? engine.compileReadFromElementDriver(suffix, params, probeDriver) : null;
+  let created: ElementReadDriver[] = [];
+  return {
+    kind: 'write',
+    run: (store) => {
+      created = materializeElementDrivers(store, st).map((driver) => {
+        const v = insertVertex(engine, store, spec, params, sideEffects, driver);
+        return { ...driver, id: v.id, elem: 'vertex' as const };
+      });
+      return created.map((driver) => {
+        const row = store.query<any>('SELECT uid, (SELECT name FROM labels WHERE id=nodes.label) AS label FROM nodes WHERE id=?', [driver.id])[0];
+        return { vertex: { id: row.uid ?? driver.id, label: row.label, props: readVertexProps(store, driver.id) } };
+      });
+    },
+    ...(probe ? {
+      continuation: {
+        shape: probe.shape,
+        run: (store: GraphStore) => created.flatMap((driver) => {
+          const read = engine.compileReadFromElementDriver(suffix, params, driver);
+          return store.query(read.sql, read.binds);
+        }),
+      },
+    } : {}),
+  };
+}
+
 function compileAddV(engine: Engine, steps: IRStep[], params: Record<string, any> = {}, sideEffects?: Map<string, any>): WritePlan {
+  const addVAt = steps.findIndex((s) => s.name === 'addV');
+  if (addVAt > 0) return compileMidAddV(engine, steps, addVAt, params, sideEffects);
   let firstFollower = 1;
   while (firstFollower < steps.length && steps[firstFollower].name === 'property') firstFollower++;
   // A source addV has produced a real vertex before its follower runs. Preserve that
@@ -956,7 +1053,7 @@ interface WriteRule { match: (steps: IRStep[]) => boolean; compile: (engine: Eng
 
 const WRITE_RULES: WriteRule[] = [
   { match: (s) => s.some((x) => x.name === 'addE'), compile: (e, s, p, _sk, se) => compileAddE(e, s, p, se) },
-  { match: (s) => s[0].name === 'addV', compile: (e, s, p, _sk, se) => compileAddV(e, s, p, se) },
+  { match: (s) => s.some((x) => x.name === 'addV'), compile: (e, s, p, _sk, se) => compileAddV(e, s, p, se) },
   { match: (s) => s.some((x) => x.name === 'mergeV'), compile: (e, s, p, _sk, se) => compileMergeV(e, s, p, se) },
   { match: (s) => s.some((x) => x.name === 'mergeE'), compile: (e, s, p, _sk, se) => compileMergeE(e, s, p, se) },
   // inject is a scalar-stream READ, not a write — it lives here only because it's a

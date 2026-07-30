@@ -252,6 +252,26 @@ test('addV traversal label composes an apply child, then resumes through the rea
   expect(plan.continuation.run(store).map((r) => r.v)).toEqual(['prefix_person']);
 });
 
+test('mid-traversal addV applies every parameter against the incoming driver, including aliases', () => {
+  const store = seededStore();
+  const p = compile("g.V(1).as('a').out('created').addV(__.select('a').label()).property('source', __.select('a').values('name')).values('source')", {});
+  if (p.kind !== 'write' || !p.continuation) throw new Error('expected addV write/read plan');
+  p.run(store);
+  // The new vertex inherits values from marko, the incoming traverser. It must not read from
+  // itself (it has no source property) and select('a') proves the alias history survived the
+  // imperative boundary.
+  expect(p.continuation.run(store).map((r) => r.v)).toEqual(['marko']);
+  expect(run(store, "g.V().has('source','marko').label()").map((r) => r.v)).toEqual(['person']);
+});
+
+test('mid-traversal addV fans out once per incoming traverser', () => {
+  const store = seededStore();
+  const p = compile("g.V().hasLabel('person').addV(__.values('name')).property('source', __.values('name')).values('source')", {});
+  if (p.kind !== 'write' || !p.continuation) throw new Error('expected addV write/read plan');
+  p.run(store);
+  expect(p.continuation.run(store).map((r) => r.v).sort()).toEqual(['josh', 'marko', 'peter', 'vadas']);
+});
+
 test('addE endpoint to(__.select("a")) ≡ to("a") (as()-label via nested select)', () => {
   const store = seededStore();
   run(store, 'g.V(1).as("a").out("created").addE("createdBy").to(__.select("a"))');
