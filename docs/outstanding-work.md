@@ -307,8 +307,8 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 7b. **`g.match("MATCH (a:person)-[:knows]->(b:person)")` — the GQL pattern-STRING form. DESIGNED
    2026-07-28; no decision left, and it is not Large.** 25 scenarios (all of `MatchString.feature`),
    **0 passing** (re-confirmed 2026-07-30), every one failing `unsupported source step: match`. The
-   largest remaining L3 bucket *in one feature file* — item 19's 31 label scenarios are more, but
-   spread over three. Upstream ships a grammar
+   largest remaining bucket contained in ONE feature file — item 19's `@MultiLabel` is 3× the size
+   but spans 19. Upstream ships a grammar
    (`gql-gremlin/src/main/antlr4/GQL.g4` on
    `origin/master`, generated cleanly by our own antlr-ng invocation — 21/21 corpus patterns parse),
    so locked decision #2 is satisfied. The compiler needs no change: hand-desugaring the corpus into
@@ -400,23 +400,31 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
     *typing* is touched today (P3), not the list/set write cluster. **Medium.**
     → [conformance-structural-bets](./2026-07-12-conformance-structural-bets.md) (W4)
 
-19. **Multi-label elements — `labels()`/`addLabel()`/`dropLabel()`/`dropLabels()`. NEW, and it is a
-    consequence of landed work.** The parser regeneration (`f5cddda`) added these four to the tracked
-    grammar, so **31 scenarios became REACHABLE and 0 pass**: `map/Labels.feature` (8),
-    `sideEffect/AddLabel.feature` (10), `sideEffect/DropLabel.feature` (13). Measured 2026-07-30 at 36
-    unique failing queries (`labels` 13, `addLabel` 10, `dropLabel` 9, `dropLabels` 3, plus one
-    `write-chain step not supported: addLabel()`). **That is more scenarios than any other single
-    open bucket, 7b's match-string included** (31 v 25) — and the index has never carried it.
-    **Do the schema decision before any step work.** TinkerPop 4 lets an element carry a SET of
-    labels; we store exactly one — `nodes`/`edges` each have a single `label` column interned against
-    a `labels` table (`src/sql/schema.ts`). So this is a storage question first, and `hasLabel()`,
-    `label()`, `elementMap()` and the `T.label` write drivers all have to agree with whatever it
-    becomes. Both regimes are pinned upstream and must keep working:
-    `g_E_elementMap_multi_label_default` vs `g_E_elementMap_single_label_default` /
-    `…_single_label_graph`. All four steps fail closed today (`step not implemented`), so there is no
-    wrong answer being served — only absence.
-    **Medium — sizeable, self-contained, and unlike most of P2 it is bounded by a schema choice
-    rather than by the child seam.**
+19. **Multi-label elements — the `@MultiLabel` feature. DESIGNED 2026-07-30; the largest open bucket
+    in the suite.** Filed a day earlier as "31 scenarios across three feature files" — **that was the
+    label-STEP files only. It is 84 scenarios, 81 failing, across 19 feature files**, all carrying
+    upstream's `@MultiLabel` tag (`ElementMap` 14, `DropLabel` 11, `ValueMap` 9, `MergeVertex` 9,
+    `AddLabel` 8, `AddVertex` 6, `Labels` 5, then `Label`/`HasLabel`/`Has` 3 each and a long tail).
+    Roughly **3× item 7b's match-string** and ~10% of everything still red. Reachable at all only
+    because the parser regeneration (`f5cddda`) added the four label steps to the tracked grammar.
+    The plan has the phasing, the measurements and the one open decision; the headline facts:
+    - **It is a declared per-graph capability** (`LabelCardinality` = `ONE` / `ONE_OR_MORE` /
+      `ZERO_OR_MORE`), and the cucumber runner routes `@MultiLabel` scenarios to a *separate*
+      `gmultilabel` source. So the multi-label regime is opt-in and **cannot regress the 1,509
+      modern-graph scenarios**.
+    - **Declaring `ONE` and refusing correctly is itself conformance** — 7 untagged
+      `*_single_label_graph` scenarios assert `"Label mutation is not supported"`. Phase 0 wins them
+      with no schema change.
+    - **No wire work:** GraphBinary already frames the label as a LIST and `vertexBuffer`/`edgeBuffer`
+      already write a bare list of one (`src/execute.ts:41,60`).
+    - **Edges stay single-label** — upstream expects the mutation error on edges even under
+      `@MultiLabel`, and `e_out`/`e_in` bake `edges.label` into the covering indexes every movement
+      rides. Only vertices are in scope, which halves the blast radius.
+    - Named blocker: the **zoo graph ships only as `.kryo`**, no GraphSON, so its 27 scenarios need a
+      hand-written seed like `MODERN_SEED`.
+    **Medium-High — sizeable but genuinely phased, and unlike most of P2 it is bounded by a storage
+    choice rather than by the child seam.**
+    → [multi-label-elements](./2026-07-30-multi-label-elements-plan.md)
 
 ---
 
