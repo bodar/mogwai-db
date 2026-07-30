@@ -33,7 +33,8 @@ left as written; the full map is in
 > | 3 | `match()` binding table | ✅ shape-generic ends + per-binding reducers; residual is `fold()` and the MATCH-string form (7b) |
 > | 4 | `path.ts` grouped positional projector | ✅ one projector AND one positional child compiler; both regimes agree |
 > | 5 | `write.ts` merge/endpoint | open (largest by count, but terminal — never composes at depth) |
-> | 7–9 | `child.ts` residue, `search.ts`, leaf dups | open, Low — **9's `plan.ts` half closed 2026-07-30** |
+> | 8 | `search.ts` duplicate property payload | ✅ closed 2026-07-30 — one payload, two provisionings |
+> | 7, 9 | `child.ts` residue, leaf dups | open, Low — **9's `plan.ts` half closed 2026-07-30** |
 > | — | mode C *(this doc's "one structural finding")* | ❌ **retired — measured unnecessary, see below** |
 >
 > **Three premises here are FALSE — do not rebuild on them:**
@@ -615,12 +616,27 @@ through it. Confirms the existing Low debt item; do it opportunistically.
 
 ---
 
-### 8. `services/catalog/search.ts` — a duplicate property→owner projection
-`services/catalog/search.ts:73` (`searchProperties`, ~25 lines of SQL)
+### 8. `services/catalog/search.ts` — ✅ **CLOSED 2026-07-30.** One payload, two provisionings
+`services/catalog/search.ts` (`searchProperties`) vs `tail/group.ts` (`lowerProperties`)
 
-Builds the vertex/edge property payload join by hand and its own comment admits it: *"mirroring
-`lowerProperties`"* — which exists, at `tail/group.ts:648`. Zero deferrals today; pure duplication,
-and a schema change has to land in two places.
+Built the vertex/edge property payload join by hand and its own comment admitted it: *"mirroring
+`lowerProperties`"*. Zero deferrals, pure duplication — and the two had already **drifted**: search
+joined `labels` for an edge's `ownerLabel` where `lowerProperties` correlates, so the "mirror" was
+not one.
+
+**What landed.** `propertyPayload(elem, pr, n)` is the projection, and the split it makes explicit
+is the one that was missing: the two callers **provision the ROWS** differently (a traverser vs an
+FTS hit) and **share the payload**. It is DERIVED from `PROPERTY_PAYLOAD` — a `Record` keyed by
+that list — rather than transcribing it, so adding a payload column is a compile error at the one
+site instead of a silently-short SELECT at the other. The vertex/edge difference it encodes is
+exactly TinkerPop's VertexProperty-vs-Property split (a VertexProperty is an element and carries
+meta-properties; an edge Property is neither → `vpid`/`pmeta` NULL).
+
+Two things fell out. `lowerProperties` lost its own vertex/edge branch — given `propRel` /
+`propOwnerCol` (the aliased-and-joined form of #9's property source, which this reused rather than
+re-derived) the two bodies were the same statement. And search's edge scope now reads its owner
+label through the same correlated subquery as everything else, which is the drift closing.
+`properties()` SQL is byte-identical. CI 1083/0, L3 1623.
 
 The contrast is instructive and belongs in the same entry: `services/catalog/degree-centrality.ts`
 does the opposite — it calls `scopedMovementCount` and therefore gets
