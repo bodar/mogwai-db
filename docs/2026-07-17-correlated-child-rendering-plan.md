@@ -1,6 +1,20 @@
 # Correlated-child rendering — make the predicate fast path fall out of the generic substrate
 
-**Status:** planned, not started. Spike done (feasibility proven). This is a focused
+**Status: BUILT** (verified 2026-07-30). The predicate compiler moved to
+`src/compiler/steps/prefix/predicate.ts`, `incidentExists` is deleted, and
+`correlatedExists`/`correlatedReduce` are thin wrappers over `compileCorrelatedChild`
+(`src/compiler/steps/tail/correlated.ts`) — the real StepFns in inline-correlated mode.
+One residue remains: `correlatedReduce`'s E-form `values(k).<sum|min|max|mean>()` aggregate
+still hand-writes an `edgeProperties` join. See `docs/outstanding-work.md` item 7e.
+
+The text below is the original plan, kept for the spike (EXPLAIN + timings) and the layering
+argument, both of which would be expensive to re-derive. Read its paths through the rename map
+in `docs/2026-07-29-tinkerpop-core-engine-alignment.md` — they predate the 2026-07-23
+restructure.
+
+---
+
+**Original status:** planned, not started. Spike done (feasibility proven). This is a focused
 cross-layer refactor; everything it builds on is already committed + CI-green on trunk.
 
 ## Goal

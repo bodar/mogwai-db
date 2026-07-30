@@ -4,13 +4,14 @@ The de-duplicated index of open work across the `docs/` corpus. **Each line sets
 why, where to start — not a spec.** The linked doc holds the rationale; the picking agent does the
 detailed validation and design. Live per-step capability: `feature-support-matrix.md`.
 
-**Refreshed** 2026-07-29 against L3 1511 / 2297 (1509 unique names — see the won't-do note). Item
+**Refreshed** 2026-07-30 against L3 1529 / 2297 (1527 unique names — see the won't-do note). Item
 numbers are stable IDs — landed items are deleted and their numbers are not reused, because code
 comments and other docs cite them.
 
 **The five committed test baselines are inputs to this index, not just gates.** `l3-state.json`
-(the ratchet floor), `census/{goldens,deferrals}.tsv` (the two-way behavioural baseline, 5
-`crashed` rows = item 0c), and the two hand-curated L5 ratchets — `L5-properties/known.ts` and
+(the ratchet floor), `census/{goldens,deferrals}.tsv` (the two-way behavioural baseline — **0
+`crashed` rows** as of `cdaa7b9`, down from 17; the antlr4ng patch of item 0f cleared every one, and
+item 0c with them), and the two hand-curated L5 ratchets — `L5-properties/known.ts` and
 `capability-baseline.ts`, plus the `knownBroken` entries inside `laws.ts`. A defect parked in any of
 them must ALSO appear here; a ratchet entry is tracked, not defended. **L5 derives its ordinary
 generated-input seed from `HEAD` and prints the `L5_SEED=<n>` reproduction command**, so each commit
@@ -75,12 +76,17 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    consumer has it, and any version bump here silently drops our patch (guarded by
    `test/L1-corpus/parser-state.test.ts`, which asserts the mechanism, not just the symptom). The
    upstream-facing change is committed at `patches/upstream/antlr4ng-dfa-state-hash-collision.patch`
-   — the `src/dfa/DFA.ts` fix plus a `tests/bugs/` vitest spec, applying to antlr4ng `main`. To land
-   it: fork `mike-lischke/antlr4ng`, `git am` that patch, open the PR. A Claude session cannot do
-   the fork step — GitHub access is scoped per session and `add_repo` refuses an owner the session
-   did not start with — so it needs a session opened against the fork itself. There is no upstream
-   issue for it; the nearest is #50, the other symptom of the same `addState` early return.
-   *High — we are carrying someone else's correctness bug as a local patch.*
+   — the `src/dfa/DFA.ts` fix plus a `tests/bugs/` vitest spec, applying to antlr4ng `main`.
+   **That PR is now OPEN: [mike-lischke/antlr4ng#109](https://github.com/mike-lischke/antlr4ng/pull/109)**
+   ("Resolve hash collisions in the DFA state table", opened 2026-07-30, full CI-equivalent run green
+   at 560 passed / 4 skipped). There was no upstream issue; the nearest is #50, the other symptom of
+   the same `addState` early return.
+   **What is left is not ours to do — the item stays open only as a watch:** until #109 merges and
+   ships in a release, keep `patches/antlr4ng@3.0.16.patch` and the `overrides.antlr4ng` pin, because
+   a version bump silently drops the local patch. When it does ship, the close-out is: bump, drop the
+   local patch, keep `test/L1-corpus/parser-state.test.ts` (it asserts the mechanism, so it guards the
+   upstream fix just as well), and delete this item.
+   *High while it lasts — we are carrying someone else's correctness bug as a local patch.*
 
 1. **List members frame as bare values, not elements.** `AliasEntry` does not record the member
    shape, so a path/element-list label cannot frame its members as vertices. Blocks
@@ -125,12 +131,12 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    (`isElementChildStep`).
    - **A barrier body under a fixed `times(n)`** could be UNROLLED into n generic phases (that route
      hosts barriers; `bulk.ts` already unrolls a specialized version for the count case). The natural
-     next slice. **Now measured as the single biggest L3 mechanism: 41 failing queries** (2026-07-29
-     telemetry), spread across four of the top five clusters (sizes 19, 17, 15, 9) — by barrier step:
-     `order` 15, `limit` 7, `local` 5, `dedup` 4, `range` 4, `groupCount` 3, `sample` 2, `group` 1.
-     A further 8 fail the adjacent "body must be row-local" gate. That makes the unroll the
-     highest-count generic lift the telemetry names, and `order` alone is over a third of it.
-     *Medium.*
+     next slice. **Measured as the single biggest L3 mechanism: 41 failing queries** — by barrier
+     step: `order` 15, `limit` 7, `local` 5, `dedup` 4, `range` 4, `groupCount` 3, `sample` 2,
+     `group` 1. A further 8 fail the adjacent "body must be row-local" gate. **Re-measured 2026-07-30
+     and every number is unchanged from the 2026-07-29 telemetry** — nothing since has eroded it, so
+     the unroll is still the highest-count generic lift the telemetry names, and `order` alone is over
+     a third of it. *Medium.*
    - **The named-loop form `repeat("a", …)`/`loops("a")` cleanly defers.** Its front-end
      representation has the ordinary body channel plus explicit loop-name metadata; support still
      needs named loop counters rather than the anonymous recursive depth column. *Low-Med.*
@@ -260,9 +266,12 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 
 18. **Channel-preservation Phase 1 — deployment, not construction.** The largest MEASURED defect
    category (carried-channel drops, 33%) and the index has never carried it. `withRelation`,
-   `mergeLayouts` and `rehomeLayout` all exist, so the work is converting the hand-written
-   `...traverserLayout` spreads (last measured 104, against 32 `patchLayout` sites) so each survivor
-   must *say* what it drops. Concentrated in `steps/tail/`; start `steps/context/context.ts`.
+   `mergeLayouts` and `rehomeLayout` all exist, so the work is converting the hand-written layout
+   spreads so each survivor must *say* what it drops. **Re-measured 2026-07-30: 113 spreads against
+   42 `patchLayout` sites.** (The previously recorded 104/32 was taken before the `Carry` →
+   `LoweringState`/`TraverserLayout` rename and counted a different pattern, so read the two as
+   independent snapshots, not a trend — the honest reading is that Phase 1 has not started.)
+   Concentrated in `steps/tail/`; start `steps/context/context.ts`.
    - **`assertStreamColumns` does not yet check declared layout-role columns** — it validates payload
      and per-row-type columns only. Extending it is the "runtime contract" third of the ScalarType
      pattern and the assertion point Phase 1's own exit criterion names. `steps/context/stream.ts`.
@@ -297,8 +306,9 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 
 7b. **`g.match("MATCH (a:person)-[:knows]->(b:person)")` — the GQL pattern-STRING form. DESIGNED
    2026-07-28; no decision left, and it is not Large.** 25 scenarios (all of `MatchString.feature`),
-   **0 passing**, the single largest remaining L3 bucket, every one failing
-   `unsupported source step: match`. Upstream ships a grammar
+   **0 passing** (re-confirmed 2026-07-30), every one failing `unsupported source step: match`. The
+   largest remaining L3 bucket *in one feature file* — item 19's 31 label scenarios are more, but
+   spread over three. Upstream ships a grammar
    (`gql-gremlin/src/main/antlr4/GQL.g4` on
    `origin/master`, generated cleanly by our own antlr-ng invocation — 21/21 corpus patterns parse),
    so locked decision #2 is satisfied. The compiler needs no change: hand-desugaring the corpus into
@@ -330,24 +340,24 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      `__.not(__.identity())`); a scalar-parent `is()` (correlation needs an element ScalarCtx).
    *Low.*
 
-7e. **The correlated predicate fast path is a SECOND movement implementation.** Not in this index
-   before, and it has a committed spike. `correlatedExists`/`incidentExists`/`correlatedReduce`
-   hand-roll the `xe`/`xn` join chain beside the generic child seam, because the predicate compiler
-   lives in the SQL-node layer *below* `steps/` and cannot reach `lowerElementSteps` without inverting
-   the layering. The fix: relocate the movement/EXISTS + count-compare branches UP into `steps/`, then
-   render the generic child pipeline in an inline-correlated mode via a `Query`-shaped shim whose
-   `.cte()` returns `derived()`. **The spike proves it stays index-only** — 0.61ms vs 0.44ms at one
-   hop, and *faster* at two (1.11 vs 1.75), so the perf objection is already answered. Start:
-   `correlatedExists` (`src/sql/plan/plan.ts`), `compileInlinePredicate`, `steps/tail/child.ts`.
-   - `until()` is the one consumer with no materialized fallback (it correlates on a recursive-walk
-     `walk.id`), so it would route through `compileCorrelatedChild(idExpr = walk.id)`.
-   - **Resolve the doc's own CHECK first:** grep tests + corpus for `values(k).sum()/min()/max()/mean()`
-     inside `where`/`is` before deciding whether `correlatedReduce`'s E-form aggregate is extended or
-     allowed to fail closed — "do NOT silently regress a working shape".
-   **Its landmark paths all predate the 2026-07-23 restructure** (`src/plan.ts`, `src/steps/*`,
-   `src/fast-paths.ts`) and it cites `Carry`, now `LoweringState`; read it through the rename map in
-   [tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md). **Medium.**
-   → [correlated-child-rendering](./2026-07-17-correlated-child-rendering-plan.md)
+7e. **Correlated predicate fast path — LANDED; one hand-rolled aggregate left.** Verified 2026-07-30,
+   and the index was stale in the "still open" direction: the plan's end state is essentially built.
+   The predicate compiler now lives in `steps/prefix/predicate.ts` (not `plan.ts`), `incidentExists`
+   is **deleted**, and `correlatedExists`/`correlatedReduce` are thin wrappers that compile the body
+   through `compileCorrelatedChild` (`steps/tail/correlated.ts`) — the real movement/filter StepFns
+   rendered in inline-correlated mode. So the "second movement implementation" premise is now FALSE;
+   `predicate.ts`'s own header asserts it, and `until()` routes through the same call (it correlates
+   on the recursive-walk row, the one consumer with no materialized fallback).
+   The residue, and it is the doc's own open CHECK: **`correlatedReduce`'s E-form aggregate still
+   hand-writes an `edgeProperties` join** (`…outE().values(k).<sum|min|max|mean>()` inside
+   `where`/`is` — `predicate.ts` ~line 90). Its COUNT sibling already goes through the child; only the
+   aggregate does not. Before touching it, grep tests + corpus for that shape and decide whether to
+   extend it or let it fail closed — "do NOT silently regress a working shape". Bare `out()`/`in()`
+   deliberately stays out (the value would come from the neighbour vertex, a different join).
+   *Low — a narrow residue, no longer a cross-layer refactor.*
+   → [correlated-child-rendering](./2026-07-17-correlated-child-rendering-plan.md) (its landmark
+   paths predate the 2026-07-23 restructure and the 2026-07-29 rename; read it through the rename map
+   in [tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md))
 
 8. **Graph-algorithms layer (new cluster).** Algorithms as `call()` services + OLAP step names
    (`pageRank`/`connectedComponent`/`peerPressure`/`shortestPath`) as desugar Passes. Nothing built;
@@ -389,6 +399,24 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 16. **W4 — multi/meta-property schema rework → `Cardinality.list/set` writes.** Only meta-property
     *typing* is touched today (P3), not the list/set write cluster. **Medium.**
     → [conformance-structural-bets](./2026-07-12-conformance-structural-bets.md) (W4)
+
+19. **Multi-label elements — `labels()`/`addLabel()`/`dropLabel()`/`dropLabels()`. NEW, and it is a
+    consequence of landed work.** The parser regeneration (`f5cddda`) added these four to the tracked
+    grammar, so **31 scenarios became REACHABLE and 0 pass**: `map/Labels.feature` (8),
+    `sideEffect/AddLabel.feature` (10), `sideEffect/DropLabel.feature` (13). Measured 2026-07-30 at 36
+    unique failing queries (`labels` 13, `addLabel` 10, `dropLabel` 9, `dropLabels` 3, plus one
+    `write-chain step not supported: addLabel()`). **That is more scenarios than any other single
+    open bucket, 7b's match-string included** (31 v 25) — and the index has never carried it.
+    **Do the schema decision before any step work.** TinkerPop 4 lets an element carry a SET of
+    labels; we store exactly one — `nodes`/`edges` each have a single `label` column interned against
+    a `labels` table (`src/sql/schema.ts`). So this is a storage question first, and `hasLabel()`,
+    `label()`, `elementMap()` and the `T.label` write drivers all have to agree with whatever it
+    becomes. Both regimes are pinned upstream and must keep working:
+    `g_E_elementMap_multi_label_default` vs `g_E_elementMap_single_label_default` /
+    `…_single_label_graph`. All four steps fail closed today (`step not implemented`), so there is no
+    wrong answer being served — only absence.
+    **Medium — sizeable, self-contained, and unlike most of P2 it is bounded by a schema choice
+    rather than by the child seam.**
 
 ---
 
@@ -484,11 +512,11 @@ proves nothing — read the deferral clusters instead.
   **They disagree on the same input:** the `group` arm THROWS on a non-MAP typeOf where `path`
   correctly returns an empty relation. One pure classifier (`typeOfAssert`) beside `classifyBy`, then
   5 readers; no SQL moves. Prerequisite for registering `is` into item 17's tables.
-- **`classifyBy` says "no host should re-scan byArgs inline" — 5 hosts still do**
-  (`tail/list.ts`, `tail/select.ts`, `tail/group.ts` ×2, `tail/projection.ts` inside
-  `MODIFIERS['order']`). Each hand-rolls `by.find(a => 'order' in a)?.order`, the exact scan the
-  classifier retired, and each silently sorts by IDENTITY on an unrecognized arg. `isOrderArg` is
-  already imported at 3 of the 5.
+- **`classifyBy` says "no host should re-scan byArgs inline" — 4 hosts still do**
+  (`tail/list.ts:520`, `tail/select.ts:581`, `tail/group.ts:869,898`). Each hand-rolls
+  `by.find(a => 'order' in a)?.order`, the exact scan the classifier retired, and each silently sorts
+  by IDENTITY on an unrecognized arg. Was 5 — `tail/projection.ts`'s copy inside `MODIFIERS['order']`
+  has since gone, so this is a shrinking list. `isOrderArg` is already imported at `list.ts`.
 - **`NUMERIC_REDUCERS` re-declared despite `ir/step.ts` being the named base** (`tail/projection.ts`,
   and `BULK_REDUCERS` in `tail/bulk.ts`) — 8 consumers follow the "export BASES only, derive with a
   named difference" rule; these 2 hand-write the member list, so a new reducer lands in 10 places and
@@ -500,16 +528,23 @@ proves nothing — read the deferral clusters instead.
   empty/all-ineligible input (no row vs a NULL row), which interacts with `productiveNull`. Latent
   divergence the L5 metamorphic oracle would attribute to the wrong layer.
 - **Ten independent `LIMIT ${limit ?? -1} OFFSET ${offset}` derivations** — `rangeToOffsetLimit`
-  (`sql/plan/plan.ts`) exists and 6 sites use it; `recordOrder`/`recordSlice` (`tail/select.ts`) instead
-  hand-derive offset/limit from `nxt.args` including a duplicated `Not a legal range` validation, and
-  re-implement the negative-range guard twice. **Subsumed by item 17** if that lands.
+  (`src/compiler/plan/plan.ts:406`, NOT `sql/`) exists and 6 sites use it;
+  `recordOrder`/`recordSlice` (`tail/select.ts`) instead hand-derive offset/limit from `nxt.args`
+  including a duplicated `Not a legal range` validation, and re-implement the negative-range guard
+  three times (`select.ts:679,696,708`). **Subsumed by item 17** if that lands.
 - **The `ResultStream` residue is the one worthwhile `Shape` retirement** — six orphan `Shape` kinds
   serving `ResultStream` across 13 `toResultStream` call sites, and ~14 of item 5c's parent-shape
   failures. [shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md) §9 says
   retiring *that* is finishing a migration (unlike merging `Stream` into `Shape`, which it refutes).
   Zero corpus demand, so it is a give-back, not a feature.
-- **The remaining `as any` reads are a live rename-safety hole** (`tail/path.ts`, `tail/scalar-arm.ts`)
-  — each is a field read a future LSP rename yields `undefined` for, silently and invisibly to `tsc`.
+- **The remaining `as any` reads are a live rename-safety hole** — each is a field read a future LSP
+  rename yields `undefined` for, silently and invisibly to `tsc`. **Re-scoped 2026-07-30: the two
+  files this item used to name (`tail/path.ts`, `tail/scalar-arm.ts`) are now clean.** 35 `as any`
+  remain in `src/`, but most are benign row/bind casts; the rename-unsafe FIELD READS are the ones to
+  convert — `(s as any).modulators` (`prefix/sack.ts:46`), `(s as any).productiveBy`
+  (`prefix/sideeffect.ts:152`, `prefix/filter.ts:205-206`), `(arg as any).nested`
+  (`tail/list.ts:532`), `(a as any).nested` (`ir/strategies.ts:856`), `(pred as any).values`
+  (`ir/strategies.ts:471,474`) and `(nestedPrefix[0] as any).args` (`tail/group.ts:290,398`).
   Convert to a cast that NAMES a real type as encountered; it is the only defence against defect class
   1 of the 2026-07-29 rename sweep.
 - **§6 vocabulary-set derivation** — reducers and movement families remain: `{count,sum,min,max,mean}` still appears verbatim at
@@ -645,9 +680,10 @@ Sources: [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md),
 - **[channel-preservation](./2026-07-28-channel-preservation-refactoring-plan.md)** — design-of-record
   for P1·18; Phase 6's IR-shape annotation is a committed negative result (56.8% ⊤ vs 10% ceiling).
 - **[correlated-child-rendering](./2026-07-17-correlated-child-rendering-plan.md)** — design-of-record
-  for P2·7e, unstarted, with a committed spike (EXPLAIN + timings) that would be expensive to
-  re-derive. **All its landmark paths predate the 2026-07-23 restructure and the 2026-07-29 rename** —
-  read it through the rename map.
+  for P2·7e, **now essentially BUILT** (verified 2026-07-30; only the E-form aggregate residue is
+  left). Keep it for the spike (EXPLAIN + timings) that would be expensive to re-derive and for the
+  layering argument its "why the hand-roll exists" section records. **All its landmark paths predate
+  the 2026-07-23 restructure and the 2026-07-29 rename** — read it through the rename map.
 - **[scalartype-refactoring-pattern](./2026-07-28-scalartype-refactoring-pattern.md)** — vocabulary-cleanup
   template; live targets are `AliasShape` member shape (item 1) and front-end tagged-token accessors.
 - **[tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md)** — naming authority
