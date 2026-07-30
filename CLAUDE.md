@@ -104,7 +104,20 @@ applies TypeScript's own `source.*` code actions (so they cannot disagree with `
 no Pass may reach `ChainFacts` or the fast-path layer — by walking LSP call hierarchy transitively.
 It is a CI gate, not just a tool: `mise run arch`, and `ci` depends on it. Zero violations IS the
 gate — it is deliberately not a ratchet, so a new violation fails the build rather than widening an
-allowlist.
+allowlist. **`mise run lint`** (`scripts/lint.ts`) is the other one: the three unused-code flags that
+cannot live in `tsconfig.json` because generated `parser/` fails them, run with `parser/` filtered
+out of the OUTPUT and every suppression counted and attributed. Also at zero, also gated.
+
+Two INSTRUMENTS, deliberately not gates — each answers a question whose answer needs judgement:
+**`mise run orphans`** (`scripts/orphans.ts`) reports exports nothing imports, split into
+`local-only` / `test-only` / `orphan` and carrying a whole-repo textual mention count, because the
+reflective edges here (DI leaves, registry-resolved services, Gherkin step names, the worker/server
+entry points) are invisible to a reference query — an export with zero references is a QUESTION.
+**`bun scripts/move.ts <from> <to> [--dry]`** moves a file and rewrites every import that pointed at
+it, via `workspace/willRenameFiles`. Order is load-bearing: it applies the edits BEFORE the move,
+because a depth-changing move rewrites the moved file's own relative imports and those edits are
+keyed to its OLD path. It moves FILES only — TypeScript's "Move to file" refactor for a SYMBOL is
+not exposed by our server (measured: `codeActionProvider.codeActionKinds` has no `refactor.*` kind).
 That check is why a Pass `run` containing real logic is a `function name(...)` declaration and not an
 arrow: `prepareCallHierarchy` returns NOTHING for an arrow assigned to an object-literal property.
 Remaining work on this tooling: `docs/2026-07-30-lsp-tooling-plan.md`.
