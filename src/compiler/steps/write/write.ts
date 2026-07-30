@@ -1,6 +1,6 @@
 import type { GraphStore } from '../../../storage.ts';
 import { q, value, list, raw, render, type Expression } from '../../../sql/kernel/q.ts';
-import { labelIn, propHasFor, sqlElem, elemTable, type Elem, vertexLabelIn } from '../../plan/plan.ts';
+import { labelIn, labelNameFor, propHasFor, sqlElem, elemTable, type Elem, vertexLabelIn } from '../../plan/plan.ts';
 import { gremlinTypeOf, isCollectionType, storedScalar, mapEntryType, valueNodeOf, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
 import { stepChain, isNested, isCardinalityArg, isCardinalityValueArg, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
@@ -1051,7 +1051,10 @@ function resolveMergeEndpoint(store: GraphStore, raw: any): number {
 
 function edgeMatchQuery(spec: MergeSpec, outV: number, inV: number): { sql: string; binds: any[] } {
   const conds: Expression[] = [q`src=${value(outV)}`, q`tgt=${value(inV)}`, ...commonMergeConds(spec, 'edge')];
-  return render(q`SELECT id, uid, src, tgt, (SELECT name FROM labels WHERE id=edges.label) AS label FROM edges WHERE ${list(conds, ' AND ')}`);
+  // The label name comes from the label seam (plan.ts), not a fourth hand-written spelling of
+  // its correlated subquery — a scalar label position has exactly one authority.
+  const e = elemTable('edge');
+  return render(q`SELECT id, uid, src, tgt, ${labelNameFor(e, 'edge')} AS label FROM ${e} WHERE ${list(conds, ' AND ')}`);
 }
 
 // g.mergeE(map) [.option(Merge.onCreate, map)] [.option(Merge.onMatch, map)]
