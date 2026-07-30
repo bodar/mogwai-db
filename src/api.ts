@@ -66,29 +66,29 @@ export type LabelRegime = 'set' | 'single';
 export const MULTILABEL_OPTION = 'multilabel';
 export const SINGLELABEL_OPTION = 'singlelabel';
 
-/** The regime for a compile: an explicit `with()` wins, else the graph's cardinality decides. */
+/** The regime for a compile: an explicit `with()` wins, else the graph's cardinality decides.
+ *
+ *  The two options are MUTUALLY EXCLUSIVE — `WithOptions.MULTILABEL_KEY`'s javadoc says
+ *  "configuring both on the same traversal source is rejected during traversal strategy
+ *  verification" — so setting both throws rather than letting one quietly win.
+ *
+ *  **Our fallback is a deliberate DIVERGENCE from the reference implementation, and it is the
+ *  behaviour upstream's own scenarios describe.** TinkerPop's `TraversalHelper.isMultilabelEnabled`
+ *  reads the `with()` option and nothing else — `.orElse(false)` — so the reference default is
+ *  always single-label whatever a graph's cardinality is, and there is no knob to change it. That
+ *  is precisely why every GLV skips `@MultiLabelDefault`: those scenarios describe a provider the
+ *  reference cannot configure into existence. We are that provider. See item 19b. */
 export function labelRegime(sourceOptions: ReadonlyMap<string, any>, cardinality: LabelCardinality): LabelRegime {
-  if (sourceOptions.has(MULTILABEL_OPTION)) return 'set';
-  if (sourceOptions.has(SINGLELABEL_OPTION)) return 'single';
+  const multi = sourceOptions.has(MULTILABEL_OPTION), single = sourceOptions.has(SINGLELABEL_OPTION);
+  if (multi && single)
+    throw new Error(`with("${MULTILABEL_OPTION}") and with("${SINGLELABEL_OPTION}") are mutually exclusive`);
+  if (multi) return 'set';
+  if (single) return 'single';
   return cardinality.max > 1 ? 'set' : 'single';
 }
 
 /** The message TinkerPop's conformance suite matches on when a graph refuses label mutation. */
 export const LABEL_MUTATION_UNSUPPORTED = 'Label mutation is not supported';
-
-/**
- * A graph's declared label cardinality. VERTEX cardinality is a provider choice; EDGE
- * cardinality is fixed at `ONE` by the spec ("Edge labels are always LabelCardinality.ONE"),
- * which is why `edges.label` stays inline while a vertex's labels normalize into
- * `vertex_labels`.
- *
- * The vertex value is a constant today: the storage is multi-label-capable but the declared
- * capability is still `ONE`, so mutation refuses and every vertex carries exactly one label.
- * Turning multi-label on is a change to THIS value plus the steps that consult it — the point
- * of routing the refusal through a declared capability rather than a per-step stub.
- */
-export const VERTEX_LABEL_CARDINALITY: LabelCardinality = LabelCardinality.ONE;
-export const EDGE_LABEL_CARDINALITY: LabelCardinality = LabelCardinality.ONE;
 
 // ---- the federated-transfer row ----
 

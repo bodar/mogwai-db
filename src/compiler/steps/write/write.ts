@@ -11,7 +11,7 @@ import type { ElementReadDriver } from '../../engine/deps.ts';
 import { compileInject } from './inject.ts';
 import { indexProperty, deleteFtsFor, deleteFtsForOwners } from '../../../services/fts-index.ts';
 import { layoutCols, type ElementStream } from '../context/context.ts';
-import { VERTEX_LABEL_CARDINALITY, LABEL_MUTATION_UNSUPPORTED } from '../../../api.ts';
+import { LABEL_MUTATION_UNSUPPORTED } from '../../../api.ts';
 
 // ---------- nested-traversal write arguments (read spine reuse) ----------
 //

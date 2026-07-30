@@ -418,28 +418,29 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
     - `elementMap()` on EDGES (3 scenarios) is a pre-existing gap unrelated to labels — it needs
       the IN/OUT direction tokens (`tail/projection.ts`).
 
-19b. **The GLV conformance suites cannot test a multi-label-DEFAULT graph — a fixable upstream gap,
-    and a good fork contribution.** All three GLVs skip `@MultiLabelDefault` (10 scenarios):
-    gremlin-js `Before({tags:"@MultiLabelDefault"}, () => 'skipped')`, gremlin-go
-    `~@MultiLabelDefault` in its godog tag filter, gremlin-python `context.ignore`. **Go states the
-    reason and it is not a stub:** *"The GLV suite does not test against a graph that defaults to
-    multi-label output."* So this is a TEST-SERVER CONFIGURATION gap, not four deletable lines —
-    correcting an earlier reading in this index.
-    The scenarios themselves are ordinary `elementMap()`/`valueMap(true)` assertions any
-    multi-label provider can answer; we answer them today (verified by probe — `T.label` frames as
-    `s[person,employee]`), we just cannot be ASKED. Their `@SingleLabelDefault` twins are not
-    skipped, so the suite tests one declaration and not the other.
-    **The fix, and it is a real contribution rather than a patch:** add a traversal source to the
-    reference test-server config whose vertex label cardinality AND default `T.label` rendering are
-    multi-label (the existing `gmultilabel` declares `ZERO_OR_MORE` but evidently still renders
-    single by default), point the `@MultiLabelDefault` scenarios at it, and drop the three skips.
-    Multi-label landed in `bc2d939562` (TINKERPOP-3261) with the skips already in it, so this is
-    finishing that work, not disputing it. We have the fork (`danielbodart/tinkerpop`) and upstream
-    has taken changes from us before (`apache/tinkerpop#3511`, merged). *Medium — 10 scenarios back
-    for every provider, not just ours.*
-    Until then `tags.ts` scopes both label-default tags out and `runner-skips.test.ts` fails if the
-    runner's skip set ever changes, so a fix upstream surfaces here instead of silently keeping
-    scenarios out.
+19b. **No provider can declare a multi-label DEFAULT, so `@MultiLabelDefault` is untestable for
+    everyone — a real upstream gap and a good fork contribution.** All three GLVs skip its 10
+    scenarios (gremlin-js `Before(… () => 'skipped')`, gremlin-go `~@MultiLabelDefault`,
+    gremlin-python `context.ignore`), and gremlin-go says why: *"The GLV suite does not test against
+    a graph that defaults to multi-label output."*
+    **Verified in `gremlin-core`, and it is not a harness stub** (this index said "a stub, four
+    lines" and then "a test-server config gap"; both were wrong).
+    `TraversalHelper.isMultilabelEnabled` reads the source-level `with()` option and nothing else —
+    `.orElse(false)` — so the reference default is ALWAYS single-label whatever a graph's declared
+    `LabelCardinality` is, and no knob exists. `tinkergraph-multilabel.properties` therefore gets a
+    graph that STORES many labels and RENDERS one. `@MultiLabelDefault` describes a provider the
+    reference cannot be configured into being; its `@SingleLabelDefault` twins are not skipped.
+    **We are apparently that provider** — our `labelRegime` falls back to the declared cardinality,
+    so we answer all 10 today and cannot be asked. That fallback is a deliberate divergence from the
+    reference, recorded as such at `labelRegime` (`src/api.ts`).
+    The write-up (suggested shape, the smaller alternative, and the caveat that upstream might
+    instead decide the scenarios should be deleted) is
+    `docs/upstream-patches/03-multilabel-default-untestable.md`. Raise it as an ISSUE first — it is a
+    `gremlin-core` API addition, not a patch. Precedent: `apache/tinkerpop#3511` came from here and
+    merged. *Medium — 10 scenarios back for every provider, not just ours.*
+    Meanwhile `tags.ts` scopes both label-default tags out and `runner-skips.test.ts` fails if the
+    runner's skip set changes, so a fix upstream surfaces here instead of silently keeping scenarios
+    out of scope.
 
 ---
 
