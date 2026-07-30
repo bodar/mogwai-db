@@ -142,6 +142,32 @@ const intLitType = (text: string): CanonicalType => {
 };
 const floatLitType = (text: string): CanonicalType => FLOAT_LIT_SUFFIX[text.slice(-1).toLowerCase()] ?? 'double';
 
+/** An integral literal's JS value AND canonical type, from its source text.
+ *
+ *  Exported because Gremlin is not the only grammar that spells these: `GQL.g4`'s MATCH-pattern
+ *  literals are specified to follow Gremlin's type system exactly ("no suffix defaults to smallest
+ *  fitting type"), so `gql.ts` reads them through this rather than re-deriving the rules. Two
+ *  spellings of the same contract is how the two would drift.
+ *
+ *  long/bigint stay a JS number WHILE they fit ±2^53 exactly (keeps numeric storage class, native
+ *  index usage, and existing V()/has()/id consumers that expect number); only the genuinely-big
+ *  tail becomes BigInt, which every bind seam normalizes. */
+export function integerLiteralValue(text: string): { value: number | bigint; type: CanonicalType } {
+  const type = intLitType(text);
+  const b = integralLiteral(text);
+  if (type === 'long' || type === 'bigint') return { value: fitsSafeInteger(b) ? Number(b) : b, type };
+  return { value: Number(b), type };
+}
+
+/** A floating literal's JS value AND canonical type. `bigdecimal` (`m` suffix) carries EXACT via a
+ *  BigDecimal parsed from the text — parseFloat would collapse it to a lossy f64. Exported for the
+ *  same reason as its integral sibling above. */
+export function floatLiteralValue(text: string): { value: number | BigDecimal; type: CanonicalType } {
+  const type = floatLitType(text);
+  if (type === 'bigdecimal') return { value: BigDecimal.fromText(text.replace(/[mM]$/, '')), type };
+  return { value: parseFloat(text), type };
+}
+
 /** Flatten any bracketed-list arguments back to varargs (depth 1). Collection
  *  literals now parse as one array value (see walkArgs); the varargs-style steps
  *  that spread a Collection id/value in TinkerPop — V/E/hasId (`hasId(1,[2,6])` ≡
@@ -345,22 +371,14 @@ function walkArgs(node: any, out: any[], params: Record<string, any>, types: (Ty
   // pre-existing precision bug; see do-sqlite-bind-precision). byte/short/int fit a JS
   // number, so they stay parseInt (numeric storage class + native index usage).
   if (cls === 'IntegerLiteralContext') {
-    const text = node.getText(); const t = intLitType(text);
-    // long/bigint stay a JS number WHILE they fit ±2^53 exactly (keeps numeric storage
-    // class, native index usage, and existing V()/has()/id consumers that expect number);
-    // only the genuinely-big tail becomes BigInt (which every bind seam normalizes).
-    if (t === 'long' || t === 'bigint') {
-      const b = integralLiteral(text);
-      emit(fitsSafeInteger(b) ? Number(b) : b, t); return;
-    }
-    emit(Number(integralLiteral(text)), t); return;
+    const { value, type } = integerLiteralValue(node.getText());
+    emit(value, type); return;
   }
   // bigdecimal (`m` suffix) carries EXACT via a BigDecimal parsed from the literal text —
   // parseFloat would collapse it to a lossy f64. float/double stay parseFloat.
   if (cls === 'FloatLiteralContext') {
-    const text = node.getText(); const t = floatLitType(text);
-    if (t === 'bigdecimal') { emit(BigDecimal.fromText(text.replace(/[mM]$/, '')), 'bigdecimal'); return; }
-    emit(parseFloat(text), t); return;
+    const { value, type } = floatLiteralValue(node.getText());
+    emit(value, type); return;
   }
   if (cls === 'BooleanLiteralContext') { emit(node.getText() === 'true', 'boolean'); return; }
   // 'x'c — a quoted single character with a `c` suffix. Strip the suffix, then unquote to
