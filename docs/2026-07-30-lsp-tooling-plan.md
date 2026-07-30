@@ -118,20 +118,26 @@ rather than a deletion. Categories: unused destructured params (`ctx` in several
 `src/services/catalog/*.ts`), an unused private field (`registry` in `src/execute.ts:675`), dead
 locals (`isSackRead` in `child-shape.ts:298`), and the duplicated test harness below.
 
-### 2a. The duplicated test harness — do this BEFORE deleting test-file locals
+### 2a. The duplicated test harness — LANDED (`3181430`)
 
-`read` (20 files), `seededStore` (19), `run` (19), `runWith` (18) and `bare` (10) are byte-identical
-copy-paste across `test/L2-sql/`, `test/compiler/` and a few singletons. Roughly 86 duplicated
-definitions; the unused-code flags only see the subset that happens to be unused in a given file,
-which is why this reads as ~30 scattered defects instead of one.
+`test/support/harness.ts` now holds `read`, `seededStore`, `run`, `runWith` and `bare`; −532/+87
+across 21 files. Backlog 76 → 52. CI 1041/0 and census 5/5, which is the assertion that matters for
+a refactor.
 
-Extract to `test/support/` — the precedent is already in the tree and is explicitly documented:
-`test/support/decode.ts`'s header records that it replaced a line "copy-pasted into ~34 assertions
-across a dozen files". Same move, same directory.
+Identity was verified before unifying, not assumed: whitespace-normalised hashes put `seededStore`
+at 19/19 identical, `run` 18/18, `runWith` 18/18, `bare` 9/9, `read` 18/19. Three lookalikes are
+deliberately untouched because they are unrelated functions sharing a name — `read` in
+`test/serializers.test.ts` (deserializes a buffer), `read` in `test/L3-conformance/glv-compat.ts` (a
+bound `deserializeValue`), and `bare` in `test/L2-sql/group.sql.test.ts` (a test-local variable).
 
-This is the ordering that matters: extract first, and most of the test-file errors disappear because
-each file then imports only what it uses. Delete first and you spend the judgement, then still have
-the duplication.
+**The finding worth keeping:** `bare` in `typed-properties.exec.test.ts` was referenced only by its
+own recursive calls. TypeScript counts a self-reference as a use, so `noUnusedLocals` cannot see a
+dead *recursive* helper — no flag would ever have reported it. It took removing the definition and
+asking whether anything still named it. All five of that file's helpers turned out dead.
+
+Generalise that before trusting the gate: **the unused-code flags under-report by construction.** A
+dead mutually-recursive pair, or a helper used only by other dead code, is invisible to them. §3's
+reference sweep is the instrument that can see it; the flags are not.
 
 ---
 
