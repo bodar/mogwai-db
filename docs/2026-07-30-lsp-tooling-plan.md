@@ -13,6 +13,9 @@ someone runs `fix.ts`._
 > **What is left is not implementation.** §3b lists four design decisions a sweep is the wrong
 > instrument to settle, §2's "one option NOT tested" is explicitly the user's call, and §4's blocked
 > half needs a decision about whether to take on a second language server.
+>
+> A fifth tool the plan did not anticipate landed alongside them — `scripts/refs.ts` (§5). The
+> tooling table in the root `CLAUDE.md` is the index; this doc is the rationale.
 
 ## What already landed (do not redo)
 
@@ -101,8 +104,9 @@ diagnostic that does not parse into a file path fails the run rather than being 
 
 The six *correctness* flags are already in `tsconfig.json` (measured at 0 errors each). The three
 *unused-code* flags — `noUnusedLocals`, `noUnusedParameters`, `verbatimModuleSyntax` — are
-deliberately NOT in the config, because generated `parser/` fails 16 of them and must never be
-hand-edited (locked decision 2).
+deliberately NOT in the config, because generated `parser/` fails them and must never be
+hand-edited (locked decision 2). (Count deliberately not repeated here — it is per-generator and
+moved 16 → 24 during this work; `mise run lint` prints the current tally.)
 
 **Read the long comment in `tsconfig.json` before trying to "fix" this.** Every config-level
 exemption was measured and none work:
@@ -296,3 +300,35 @@ working, which is precisely when someone wants it.
 different answer"), and `bun test test/compiler test/L2-sql` (542 pass at `8c33450`). The census
 deliberately does not auto-record; a re-record with no reason in the commit message is
 indistinguishable from the regression it hides.
+
+---
+
+## 5. `refs.ts` — find real uses of a symbol — LANDED (`ff8352d`)
+
+Not one of the original four. It came out of §3: three orphan findings (`compile`,
+`standardRegistry`, `PASSES`) looked like tool bugs because `grep` showed dozens of "uses" that
+were all comments, and checking each by hand is exactly the cost this removes.
+
+`bun scripts/refs.ts <name> [--fuzzy] [--decl]`, or `<file>:<line>:<col>` to skip resolution.
+
+**What it buys, measured:**
+
+| symbol | `git grep --word-regexp` | real references |
+|---|---|---|
+| `standardRegistry` | 16 | **11, all in `test/`** |
+| `PASSES` | 17 | 9 (src 2, test 7) |
+| `analyzeChain` | — | 8 (matches this doc's original figure) |
+
+The five extra `standardRegistry` hits are `src/` comments, and they are the entire reason it read
+as production-used. `textDocument/references` is the type checker's own resolution: a comment is not
+a reference, and a same-named symbol in another scope is not a reference.
+
+Two design points, both forced by the server's behaviour rather than chosen:
+
+- **`workspace/symbol` is FUZZY.** A query for `compile` returns 75 hits including `compileAddV`. So
+  exact name matching is the default and `--fuzzy` opts out — otherwise the common case answers a
+  wider question than was asked.
+- **A name can resolve to several declarations, and that is not an error.** `lowerSteps` is declared
+  on both `engine/deps.ts` (the leaf interface) and `engine/engine.ts` (the implementation). Each is
+  reported with its own references, because they are genuinely different questions and picking one
+  silently would answer the wrong one.
