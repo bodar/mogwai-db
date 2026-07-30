@@ -1,5 +1,6 @@
 import { q, list, value, empty, type Expression } from '../../sql/kernel/q.ts';
 import { nodes, edges } from '../../sql/schema.ts';
+import { elemTable } from '../plan/plan.ts';
 import { flattenListArgs } from '../../gremlin/frontend.ts';
 import { layoutCols, layoutProjection, type ElementStream } from './context/context.ts';
 import { loweringStateOf, toElementStream, type ScalarStream } from './context/stream.ts';
@@ -30,7 +31,7 @@ import { type IRStep } from '../ir/strategies.ts';
 export function lowerReSource(s: ScalarStream | ElementStream, step: IRStep): ElementStream | null {
   if (s.traverserLayout.path || s.traverserLayout.sack || s.traverserLayout.fromV) return null;
   const elem: 'vertex' | 'edge' = step.name === 'E' ? 'edge' : 'vertex';
-  const n = (elem === 'edge' ? edges : nodes).as('n');
+  const n = elemTable(elem).as('n');
   const p = s.rel.as('p');
   const cols = layoutCols(s.traverserLayout);
   const rawIds = flattenListArgs(step.args ?? []);

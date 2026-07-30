@@ -5,7 +5,7 @@ import { isNested, stepChain, type SackSpec, type Step } from '../../../gremlin/
 import { type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { analyzeChain, type ChainFacts } from '../../ir/analyze.ts';
-import { dirsFor, edgeLabelFilter, labelIn, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem } from '../../plan/plan.ts';
+import { dirsFor, edgeLabelFilter, labelIn, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem, type EdgeEnd } from '../../plan/plan.ts';
 import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
 import { appendCte, aliasColsOf, elemRel, labelScope, prevRel, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, mergeLayouts, rehomeLayout, rigidCols, partitionOver, type AliasMap, type TraverserLayout, type LoweringState, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { keyedChildRelation, keyedKeySet } from '../tail/keyed.ts';
@@ -568,7 +568,7 @@ export function sackWhereGuard(step: Step): any | null {
  *  (out/in/both) and vertex→edge steps (outE/inE/bothE) both join a NEW edge on `from`; a
  *  bothX forks into two. Edge→vertex steps (outV/inV/bothV) read the CURRENT edge's endpoint,
  *  so they carry the endpoint column choice(s) but add no join (handled in the expander). */
-function moveDirs(name: string): [string, string][] {
+function moveDirs(name: string): [EdgeEnd, EdgeEnd][] {
   if (name === 'out' || name === 'outE') return [['src', 'tgt']];
   if (name === 'in' || name === 'inE') return [['tgt', 'src']];
   if (name === 'both' || name === 'bothE') return [['src', 'tgt'], ['tgt', 'src']];
@@ -578,9 +578,9 @@ function moveDirs(name: string): [string, string][] {
 }
 
 /** Cartesian product of each movement's direction choices (both/bothE/bothV fork into two). */
-function dirCombos(moves: Step[]): [string, string][][] {
-  let combos: [string, string][][] = [[]];
-  for (const m of moves) combos = combos.flatMap((c) => moveDirs(m.name).map((d) => [...c, d] as [string, string][]));
+function dirCombos(moves: Step[]): [EdgeEnd, EdgeEnd][][] {
+  let combos: [EdgeEnd, EdgeEnd][][] = [[]];
+  for (const m of moves) combos = combos.flatMap((c) => moveDirs(m.name).map((d): [EdgeEnd, EdgeEnd][] => [...c, d]));
   return combos;
 }
 

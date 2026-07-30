@@ -1,6 +1,6 @@
 import { q, list, empty, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { nodes, edges, labels } from '../../../sql/schema.ts';
-import { framedProps, labelNameSub, nodePropScalar, nodePropType, edgePropScalar, edgePropType, edgePropsAgg, predicateSql, propExtract, extIdOf, P_OPS, storedValueExpr } from '../../plan/plan.ts';
+import { framedProps, labelNameSub, nodePropScalar, nodePropType, edgePropScalar, edgePropType, edgePropsAgg, predicateSql, propExtract, extIdOf, P_OPS, storedValueExpr, elemTable } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { isColumnArg, isPopArg, isScopeArg, isTokenArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { aliasElem, aliasIsElement, layoutProjection, layoutCols, scalarTypeFromAlias, type AliasMap, type ElementStream } from '../context/context.ts';
@@ -141,7 +141,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: IRStep, keys: string[]
       // child composition, never permission to dereference a missing stream.
       if (!child) return null;
       const cp = child.stream.rel.as(`cp${i}`);
-      const n = (child.stream.elem === 'edge' ? edges : nodes).as(`n${i}`);
+      const n = elemTable(child.stream.elem).as(`n${i}`);
       const l = labels.as(`l${i}`);
       const payload = child.stream.elem === 'edge'
         ? q`${n.c.id} AS rid, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${extIdOf(n.c.src)} AS src, ${extIdOf(n.c.tgt)} AS tgt, ${framedProps(n, 'edge')} AS props`
@@ -161,7 +161,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: IRStep, keys: string[]
       };
     }
 
-    const n = (source.elem === 'edge' ? edges : nodes).as(`n${i}`);
+    const n = elemTable(source.elem).as(`n${i}`);
     if (spec === undefined) {
       const l = labels.as(`l${i}`);
       const payload = source.elem === 'edge'
@@ -295,7 +295,7 @@ export function lowerSingleSelect(st: ElementStream, proj: IRStep): Stream {
     );
     return { ...st, rel, elem: selElem };
   }
-  const n = (selElem === 'edge' ? edges : nodes).as('n');
+  const n = elemTable(selElem).as('n');
   const expr = selElem === 'edge' ? edgePropScalar(n.c.id, by.key!) : nodePropScalar(n.c.id, by.key!);
   const conds = [...(present ? [present] : []), ...(productive ? [] : [predicateSql(expr, undefined)])];
   const rel = st.q.cte(
@@ -357,7 +357,7 @@ export function lowerScalarProject(s: ScalarStream, proj: IRStep): RecordStream 
     if (aliasField) {
       const elem = aliasElem(aliasField.entry);
       const p = outer.seed.rel.as(`b${i}`);
-      const n = (elem === 'edge' ? edges : nodes).as(`n${i}`);
+      const n = elemTable(elem).as(`n${i}`);
       const l = labels.as(`l${i}`);
       const idExpr = aliasId(p.c[aliasField.entry.col], 'last');
       const payload = elem === 'edge'
@@ -437,7 +437,7 @@ export function lowerRecordSelectProject(st: ElementStream, proj: IRStep): Strea
     const prefix = `e${i}`;
     const e = entryKind(i);
     const src = sourceOf(k);
-    const en = (src.elem === 'edge' ? edges : nodes).as(`${prefix}n`);
+    const en = elemTable(src.elem).as(`${prefix}n`);
     joins.push(q` JOIN ${en} ON ${en.c.id}=${src.expr}`);
     if (e.sub === 'vertex') {
       const el = labels.as(`${prefix}l`);
@@ -520,7 +520,7 @@ export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, st
     const end = popEnd(pop);
     if (aliasIsElement(entry)) {
       const elem = aliasElem(entry);
-      const en = (elem === 'edge' ? edges : nodes).as(`${prefix}n`);
+      const en = elemTable(elem).as(`${prefix}n`);
       joins.push(q` JOIN ${en} ON ${en.c.id}=${aliasId(col, end)}`);
       if (by.sub === 'value') {
         const prop = elem === 'edge' ? edgePropScalar(en.c.id, by.key!) : nodePropScalar(en.c.id, by.key!);

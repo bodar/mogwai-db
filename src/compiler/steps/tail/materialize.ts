@@ -9,7 +9,7 @@
 import { raw, type Expression, type Query } from '../../../sql/kernel/q.ts';
 import { perRowColumnOf, readCompiled, STATIC, UNKNOWN, type Compiled, type ListOf, type Shape, type VariantShapeArm } from '../../../sql/kernel/render.ts';
 import { list, q } from '../../../sql/kernel/q.ts';
-import { framedProps, extIdOf } from '../../plan/plan.ts';
+import { framedProps, extIdOf, elemTable } from '../../plan/plan.ts';
 import { edges, labels, nodes } from '../../../sql/schema.ts';
 import { groupResultColumns, pathColumns, recordResultColumns, type ForeignStream, type GroupStream, type ListStream, type MapEntryStream, type MapOf, type MapStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
 import type { ElementStream } from '../context/context.ts';
@@ -77,7 +77,7 @@ export function materializeVariantRoot(stream: VariantStream): Compiled {
  * the complete public element payload. The raw relational list remains rowids for
  * downstream unfold; only the root wire projection expands it. */
 function elementListResult(listExpr: Expression, elem: 'vertex' | 'edge'): Expression {
-  const n = (elem === 'edge' ? edges : nodes).as('n');
+  const n = elemTable(elem).as('n');
   const l = labels.as('l');
   const object = elem === 'edge'
     ? q`json_object('id', COALESCE(${n.c.uid}, ${n.c.id}), 'label', ${l.c.name}, 'src', ${extIdOf(n.c.src)}, 'tgt', ${extIdOf(n.c.tgt)}, 'props', json(${framedProps(n, elem)}))`
@@ -136,7 +136,7 @@ export function materializeListRoot(stream: ListStream): Compiled {
  * Map.Entry key/value that holds an element. json_object over a correlated join to
  * nodes/edges + labels; NULL rowid → SQL NULL (framed as a null value). */
 function elementValueResult(ridExpr: Expression, elem: 'vertex' | 'edge'): Expression {
-  const n = (elem === 'edge' ? edges : nodes).as('en');
+  const n = elemTable(elem).as('en');
   const l = labels.as('el');
   const object = elem === 'edge'
     ? q`json_object('id', COALESCE(${n.c.uid}, ${n.c.id}), 'label', ${l.c.name}, 'src', ${extIdOf(n.c.src)}, 'tgt', ${extIdOf(n.c.tgt)}, 'props', json(${framedProps(n, elem)}))`

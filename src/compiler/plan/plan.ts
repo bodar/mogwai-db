@@ -2,6 +2,7 @@ import { flattenListArgs, gtypeName, isNested, type Pred } from '../../gremlin/f
 import { q, list, values, empty, value, raw, jsonExtract, type Expression, type Relation } from '../../sql/kernel/q.ts';
 import type { FastPath } from '../options/fast-paths.ts';
 import { normalizeTypeName, BigDecimal, Duration } from '../../gremlin/types.ts';
+import { nodes, edges } from '../../sql/schema.ts';
 import { type ScalarType, type ValueType } from '../../sql/kernel/render.ts';
 
 // ---------- SQL node builders ----------
@@ -425,7 +426,18 @@ export const sqlElem = (e: Elem): 'node' | 'edge' => (e === 'edge' ? 'edge' : 'n
 /** The (from,to) edge-column pairs a directional step walks: out→src/tgt,
  *  in→tgt/src, both→both. One place so the movement CTE and the correlated
  *  edge-count (edgeCountFrom) can't diverge. */
-export const dirsFor = (name: string): [string, string][] =>
+/** An edge's endpoint COLUMNS. Named because movement indexes `edges.c[dir]` dynamically,
+ *  and `Relation` now types its column map — so a bare `string` here would be an implicit
+ *  `any` read of a column that may not exist. */
+export type EdgeEnd = 'src' | 'tgt';
+
+/** The base table for an element kind — the ONE spelling of `elem === 'edge' ? edges : nodes`,
+ *  which was written out at 17 sites. Returns the LOOSE `Relation` deliberately: callers branch
+ *  on `elem` at runtime to reach the edge-only `src`/`tgt`, and a union of the two column maps
+ *  cannot express that. `elemRel` (context.ts) is the ElementStream-shaped wrapper over this. */
+export const elemTable = (elem: Elem): Relation => elem === 'edge' ? edges : nodes;
+
+export const dirsFor = (name: string): [EdgeEnd, EdgeEnd][] =>
   name === 'out' ? [['src', 'tgt']] : name === 'in' ? [['tgt', 'src']] : [['src', 'tgt'], ['tgt', 'src']];
 
 // ---------- nested-traversal by() → correlated scalar (shared with where) ----------

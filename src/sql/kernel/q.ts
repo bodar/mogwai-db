@@ -66,23 +66,30 @@ const colRef = (qualifier: string, name: string): Text => raw(`${quote(qualifier
 /** A base table OR a generated CTE. `${rel}` renders the FROM form (`nodes`, or
  *  `nodes n` when aliased); `rel.c.x` renders `qualifier.x`. `.as()` rebinds the
  *  column qualifier — the one trick that makes columns follow the alias. */
-export class Relation {
+export class Relation<K extends string = string> {
   /** The FROM-clause form: `name` unaliased, `name alias` aliased. */
   readonly from: Expression;
   /** Columns, qualified by alias (if any) else the table name. */
-  readonly c: Record<string, Text>;
-  constructor(readonly name: string, readonly cols: readonly string[], readonly alias?: string, readonly body?: Expression) {
+  readonly c: Record<K, Text>;
+  constructor(readonly name: string, readonly cols: readonly K[], readonly alias?: string, readonly body?: Expression) {
     const qualifier = alias ?? name;
     this.from = body
       ? q`(${body}) ${raw(quote(qualifier))}`
       : raw(alias ? `${quote(name)} ${quote(alias)}` : quote(name));
-    this.c = Object.fromEntries(cols.map((col) => [col, colRef(qualifier, col)]));
+    this.c = Object.fromEntries(cols.map((col) => [col, colRef(qualifier, col)])) as Record<K, Text>;
   }
-  as(alias: string): Relation { return new Relation(this.name, this.cols, alias, this.body); }
+  as(alias: string): Relation<K> { return new Relation<K>(this.name, this.cols, alias, this.body); }
 }
 
-/** Declare a base table once: `relation('nodes', ['id','props',…])`. */
-export const relation = (name: string, cols: readonly string[]): Relation => new Relation(name, cols);
+/** Declare a base table once: `relation('nodes', ['id','props',…])`.
+ *
+ *  The column list is captured in the TYPE, so `nodes.c.lable` and — the case this was
+ *  introduced for — a column that has been REMOVED from the schema are compile errors
+ *  rather than an `undefined` spliced into a `q` template. `derived()` stays deliberately
+ *  loose (`Relation<string>`): its column lists are computed at runtime, so there is
+ *  nothing to check against. */
+export const relation = <const K extends string>(name: string, cols: readonly K[]): Relation<K> =>
+  new Relation(name, cols);
 
 /** A typed derived table: a required subquery boundary without a separately named CTE. */
 export const derived = (body: Expression, cols: readonly string[], alias: string): Relation =>

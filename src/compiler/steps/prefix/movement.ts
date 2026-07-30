@@ -1,6 +1,6 @@
 import { q, list, empty, derived, type Expression } from '../../../sql/kernel/q.ts';
 import { edges } from '../../../sql/schema.ts';
-import { dirsFor, edgeLabelFilter, type Elem } from '../../plan/plan.ts';
+import { dirsFor, edgeLabelFilter, type Elem, type EdgeEnd } from '../../plan/plan.ts';
 import { appendCte, appendPathPos, layoutProjection, layoutProjectionMinting, layoutProjectionMintingMany, layoutCols, patchLayout, partitionOver, prevRel, type TraverserLayout, type PathState, type ElementStream, type StepFn } from '../context/context.ts';
 import { fastPathContextOf } from '../../engine/deps.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
@@ -87,7 +87,7 @@ export const move: StepFn = (s, st) => {
  *  which end to skip; bothE's two UNION branches both entered from `p.id`. */
 export const toEdge: StepFn = (s, st) => {
   if (st.elem !== 'vertex') throw new Error(`${s.name}() expects a vertex, not an ${st.elem}`);
-  const froms = s.name === 'outE' ? ['src'] : s.name === 'inE' ? ['tgt'] : ['src', 'tgt'];
+  const froms: EdgeEnd[] = s.name === 'outE' ? ['src'] : s.name === 'inE' ? ['tgt'] : ['src', 'tgt'];
   const e = edges.as('e');
   const p = prevRel(st, 'p');
   const pa = pathAppend(st, 'edge');
@@ -109,7 +109,7 @@ export const toEdge: StepFn = (s, st) => {
  *  on a vertex clears the edge-entered-from context (fv). */
 export const toVertex: StepFn = (s, st) => {
   if (st.elem !== 'edge') throw new Error(`${s.name}() expects an edge, not a ${st.elem}`);
-  const cols = s.name === 'outV' ? ['src'] : s.name === 'inV' ? ['tgt'] : ['src', 'tgt'];
+  const cols: EdgeEnd[] = s.name === 'outV' ? ['src'] : s.name === 'inV' ? ['tgt'] : ['src', 'tgt'];
   const e = edges.as('e');
   const p = prevRel(st, 'p');
   const cf = layoutProjection(patchLayout(st.traverserLayout, { fromV: null }), p); // fv is dropped at the vertex

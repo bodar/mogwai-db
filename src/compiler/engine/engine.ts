@@ -1,6 +1,6 @@
 import { empty, q, value, list, Query, type Expression } from '../../sql/kernel/q.ts';
 import { nodes, edges } from '../../sql/schema.ts';
-import { type Elem } from '../plan/plan.ts';
+import { type Elem, elemTable } from '../plan/plan.ts';
 import { flattenListArgs, isColumnArg, isOperatorArg, isPopArg } from '../../gremlin/frontend.ts';
 import { type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
@@ -184,7 +184,7 @@ export class LoweringEngine implements Engine {
   private seedSource(first: IRStep, params: Record<string, any>, trackPath: boolean, sackInit?: SackSpec, wantsEncounter = false): ElementStream {
     const query = this.q;
     const elem: Elem = first.name === 'E' ? 'edge' : 'vertex';
-    const srcRel = elem === 'edge' ? edges : nodes;
+    const srcRel = elemTable(elem);
     // The source projection, assembled in layoutCols order (sack, bulk, encounter, path) so the
     // physical SELECT matches the declared column list exactly. withSack() seeds the sack
     // column (a bound Value so a string init escapes safely); every element source seeds a

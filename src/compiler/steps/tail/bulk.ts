@@ -1,6 +1,6 @@
 import { q, list } from '../../../sql/kernel/q.ts';
 import { edges } from '../../../sql/schema.ts';
-import { dirsFor, edgeLabelFilter } from '../../plan/plan.ts';
+import { dirsFor, edgeLabelFilter, type EdgeEnd } from '../../plan/plan.ts';
 import { stepChain, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { type Compiled } from '../../../sql/kernel/render.ts';
@@ -135,7 +135,7 @@ function suffixBulkSafe(suffix: IRStep[], params: Record<string, any>): boolean 
 
 interface BulkPlan {
   preLen: number;              // steps[0..preLen) = the source + leading filters (foldable prefix)
-  dirs: [string, string][];    // the repeat body's movement directions (out/in/both)
+  dirs: [EdgeEnd, EdgeEnd][];    // the repeat body's movement directions (out/in/both)
   labels: any[];               // the body movement's edge-label filter args
   times: number;               // the (compile-time) loop depth
   suffixAt: number;            // steps index where the post-repeat suffix begins (repAt + 1)

@@ -1,6 +1,6 @@
 import { q, list, empty, raw, Query, Relation, type Expression } from '../../../sql/kernel/q.ts';
 import { nodes, edges } from '../../../sql/schema.ts';
-import { aliasCtx, type Elem, type ScalarCtx } from '../../plan/plan.ts';
+import { aliasCtx, type Elem, type ScalarCtx, elemTable } from '../../plan/plan.ts';
 import { aliasId, aliasPresent, type AliasShape } from './alias.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import type { ValueType, ListOf, ScalarType } from '../../../sql/kernel/render.ts';
@@ -335,7 +335,7 @@ export const labelIsBound = (labels: LabelScope, label: string): Expression => {
 };
 
 /** The current element's table aliased `n` (nodes/edges by elem). */
-export const elemRel = (st: ElementStream, alias = 'n'): Relation => (st.elem === 'edge' ? edges : nodes).as(alias);
+export const elemRel = (st: ElementStream, alias = 'n'): Relation => elemTable(st.elem).as(alias);
 
 /** Every column carried UNCHANGED across a hop, in a STABLE order: alias columns and
  *  source-seeded state (sack, bulk) first, then the columns a LATER hop appends

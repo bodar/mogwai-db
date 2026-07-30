@@ -2,8 +2,7 @@ import { q, value, list, empty, type Expression, type Relation } from '../../../
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
 import {
     scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx,
-    storedValueExpr, bareValueMapProps, typedScalarNode, compareKey, type ScalarCtx
-} from '../../plan/plan.ts';
+    storedValueExpr, bareValueMapProps, typedScalarNode, compareKey, type ScalarCtx, elemTable } from '../../plan/plan.ts';
 import { gtypeName, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { isMapLocalOrder } from './list.ts';
 import { type IRStep } from '../../ir/strategies.ts';
@@ -370,7 +369,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
       ? tryCompileElementRowsBeforeFold(outer.seed, valArg.nested, reuse(), valBody)
       : tryCompileElementImplicitFoldRows(outer.seed, valArg.nested, reuse(), valBody))!;
     const c = rows.stream.rel.as('gef');
-    const e = (rows.stream.elem === 'edge' ? edges : nodes).as('gev');
+    const e = elemTable(rows.stream.elem).as('gev');
     joins.push(q` LEFT JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]} LEFT JOIN ${e} ON ${e.c.id}=${c.c.id}`);
     valMarker = c.c.id;
     valOrder = q`${p.c[outer.frame.ordinal]}, ${c.c.id}`;
@@ -388,7 +387,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
       // so the inner key/value ctx can read the inner element's label/props.
       const rows = tryCompileElementImplicitFoldRows(outer.seed, valArg.nested, reuse(), nestedPrefix)!;
       const c = rows.stream.rel.as('gng');
-      const e = (rows.stream.elem === 'edge' ? edges : nodes).as('gnge');
+      const e = elemTable(rows.stream.elem).as('gnge');
       joins.push(q` JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]} JOIN ${e} ON ${e.c.id}=${c.c.id}`);
       innerCtx = elemCtx(e, rows.stream.elem);
       innerBulk = rows.stream.traverserLayout.bulk ? c.c[rows.stream.traverserLayout.bulk] : undefined;

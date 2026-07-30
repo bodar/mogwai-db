@@ -12,7 +12,7 @@ import { SCALAR_TRANSFORMS } from './coerce.ts';
 import { lowerReSource } from '../graph-source.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
-import { predicateSql, rangeToOffsetLimit } from '../../plan/plan.ts';
+import { predicateSql, rangeToOffsetLimit, elemTable } from '../../plan/plan.ts';
 import { elementOrderDrop, elementOrderSql } from './modulation.ts';
 import {
     childCtx, childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, labelSelectOf,
@@ -535,7 +535,7 @@ function compileScalarChildRows(
     from = q`${c}`;
     order = c.c.id;
   } else {
-    const elem = (end.elem === 'edge' ? edges : nodes).as('e');
+    const elem = elemTable(end.elem).as('e');
     if (terminal.name === 'values') {
       const key = terminal.args[0];
       if (end.elem === 'vertex') {
@@ -1032,7 +1032,7 @@ function compileElementChildRows(
       continue;
     }
     if (step.name === 'order') {
-      const n = (end.elem === 'edge' ? edges : nodes).as('n');
+      const n = elemTable(end.elem).as('n');
       const ordered = patchLayout(end.traverserLayout, { encounter: 'encounter' });
       const orderExpr = elementOrderSql(end, n, step);
       // The non-productive by(key) drop applies inside a child body exactly as at the root — same
@@ -1070,7 +1070,7 @@ function compileElementChildRows(
   }
   if (firstPolicy) {
     const p = end.rel.as('p');
-    const n = (end.elem === 'edge' ? edges : nodes).as('n');
+    const n = elemTable(end.elem).as('n');
     const orderExpr = elementOrderSql(end, n, orderStep as IRStep | undefined);
     const cols = layoutCols(end.traverserLayout);
     const r = derived(

@@ -1,7 +1,7 @@
 import { gtypeName, isNested } from '../../../gremlin/frontend.ts';
 import { q, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { nodes, edges, labels } from '../../../sql/schema.ts';
-import { framedProps, labelNameSub, predicateSql, extIdOf, elemCtx, aliasCtx, scalarProp, type ScalarCtx } from '../../plan/plan.ts';
+import { framedProps, labelNameSub, predicateSql, extIdOf, elemCtx, aliasCtx, scalarProp, type ScalarCtx, elemTable } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { layoutProjection, layoutCols, scopePathCols, dropLayoutAtBarrier, withoutPath, type TraverserLayout, type ElementStream } from '../context/context.ts';
 import { loweringStateOf, continueLowering, pathColumns, toListStream, toPathStream, type ListStream, type LoweringResult, type PathStream, type ScalarStream } from '../context/stream.ts';
@@ -192,7 +192,7 @@ export function lowerPath(st: ElementStream, proj: IRStep, acc: TailAcc): PathSt
       if (!productive) whereParts.push(dropIfMissing(pos, b.c.v));
       return pos.nullable ? { render: 'value', prefix, optional: true } : { render: 'value', prefix };
     }
-    const tbl = (pos.elem === 'edge' ? edges : nodes).as(`${prefix}n`);
+    const tbl = elemTable(pos.elem).as(`${prefix}n`);
     const jn = pos.nullable ? 'LEFT JOIN' : 'JOIN';
     joins.push(q` ${jn} ${tbl} ON ${tbl.c.id}=${p.c[pos.col]}`);
     const pe = positionScalar(elemCtx(tbl, pos.elem), byOf(i));

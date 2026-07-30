@@ -1,5 +1,5 @@
 import { q, empty, type Expression } from '../../../sql/kernel/q.ts';
-import { framedProps, extIdOf } from '../../plan/plan.ts';
+import { framedProps, extIdOf, elemTable } from '../../plan/plan.ts';
 import { edges, labels, nodes } from '../../../sql/schema.ts';
 import { type Compiled } from '../../../sql/kernel/render.ts';
 import { materializeRoot } from './materialize.ts';
@@ -39,7 +39,7 @@ export function buildCallHead(parent: ElementStream, scope: ChildFrameStack, inj
 
   const elem = parent.elem;
   const d = pushed.frame.domain.as('d');
-  const n = (elem === 'edge' ? edges : nodes).as('n');
+  const n = elemTable(elem).as('n');
   const l = labels.as('l');
   const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
   const payload = elem === 'edge'
