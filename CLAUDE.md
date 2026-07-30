@@ -68,6 +68,34 @@ interpreter with an open Java step hierarchy; we are a staged compiler with a SQ
 Full vocabulary table, the worked cases, and the four TinkerPop patterns we deliberately refuse:
 `docs/2026-07-29-tinkerpop-core-engine-alignment.md`.
 
+## Tooling
+
+Every tool below is driven by the LSP inside our **pinned `typescript`** (`tsc --lsp --stdio`), so
+none of them can disagree with what `mise run check` gates on. That property is the whole point —
+it is why a second linter is not wanted and why adopting `tsserver` would be a real trade, not a
+free upgrade.
+
+| Command | Use it for | Role |
+|---|---|---|
+| `bun scripts/refs.ts <name>` | every real USE of a symbol | **reach for this before `grep`** |
+| `bun scripts/rename.ts <file> <old> <new> [--dry] [--at l:c]` | type-aware rename | tool |
+| `bun scripts/rename-batch.ts <plan.tsv> [--dry] [--keep-going]` | a vocabulary campaign, one session | tool |
+| `bun scripts/move.ts <from> <to> [--dry]` | move a FILE + rewrite every importer | tool |
+| `bun scripts/fix.ts [--organize] [--unused] [--dry] [paths…]` | TypeScript's own `source.*` code actions | tool |
+| `mise run arch` (`scripts/arch-check.ts`) | no Pass reaches `ChainFacts`/fast paths | **CI gate**, at zero |
+| `mise run lint` (`scripts/lint.ts`) | unused locals/params/value-position type imports | **CI gate**, at zero |
+| `mise run orphans` (`scripts/orphans.ts`) | exports nothing imports | instrument — findings need judgement |
+| `scripts/lsp.ts` | the shared session library — build new tools on it | library |
+
+**`refs.ts` answers the question `grep` cannot.** `textDocument/references` is the type checker's own
+resolution, so a comment mentioning the name is not a reference and a same-named symbol in another
+scope is not a reference. Measured: `standardRegistry` shows 16 textual hits and has 11 references,
+**all of them in `test/`** — the five extra are `src/` comments, and they are exactly why grep made it
+look like production code used it. Resolution goes through `workspace/symbol`, which is FUZZY (a query
+for `compile` returns 75 hits including `compileAddV`), so exact matching is the default and `--fuzzy`
+opts out; a name resolving to several declarations reports each with its own references rather than
+silently picking one.
+
 **Renaming: `bun scripts/rename.ts <file> <oldName> <newName> [--dry] [--at line:col]`** — type-aware,
 driven by the LSP inside our pinned `typescript` (`tsc --lsp --stdio`), so it cannot disagree with what
 `mise run check` gates on. Three traps it CANNOT see, each of which has already produced a silent wrong
@@ -108,7 +136,7 @@ allowlist. **`mise run lint`** (`scripts/lint.ts`) is the other one: the three u
 cannot live in `tsconfig.json` because generated `parser/` fails them, run with `parser/` filtered
 out of the OUTPUT and every suppression counted and attributed. Also at zero, also gated.
 
-Two INSTRUMENTS, deliberately not gates — each answers a question whose answer needs judgement:
+One INSTRUMENT, deliberately not a gate, because its answer needs judgement:
 **`mise run orphans`** (`scripts/orphans.ts`) reports exports nothing imports, split into
 `local-only` / `test-only` / `orphan` and carrying a whole-repo textual mention count, because the
 reflective edges here (DI leaves, registry-resolved services, Gherkin step names, the worker/server
@@ -118,9 +146,9 @@ it, via `workspace/willRenameFiles`. Order is load-bearing: it applies the edits
 because a depth-changing move rewrites the moved file's own relative imports and those edits are
 keyed to its OLD path. It moves FILES only — TypeScript's "Move to file" refactor for a SYMBOL is
 not exposed by our server (measured: `codeActionProvider.codeActionKinds` has no `refactor.*` kind).
-That check is why a Pass `run` containing real logic is a `function name(...)` declaration and not an
-arrow: `prepareCallHierarchy` returns NOTHING for an arrow assigned to an object-literal property.
-Remaining work on this tooling: `docs/2026-07-30-lsp-tooling-plan.md`.
+**The arch check** is why a Pass `run` containing real logic is a `function name(...)` declaration and
+not an arrow: `prepareCallHierarchy` returns NOTHING for an arrow assigned to an object-literal
+property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-tooling-plan.md`.
 
 ## Working rules
 
