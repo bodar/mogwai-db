@@ -1,11 +1,12 @@
 # Multi-label vertices — `labels()` / `addLabel()` / `dropLabel()` / `dropLabels()`
 
-**Status:** planned, not started. Measured 2026-07-30 against L3 1529 / 2297.
-Design-of-record for `docs/outstanding-work.md` item 19.
+**Status: Phases A–D LANDED** (2026-07-30). L3 1529 → 1586, +57 scenarios; 52 of the 84
+`@MultiLabel` scenarios now pass. **Phase E is the remainder and is BLOCKED — see "Phase E" below,
+which now carries a decision that has to be taken before the code.**
 
-**Storage is DECIDED, not open:** vertex labels normalize into a `vertex_labels` table which becomes
-their sole home; `edges.label` stays inline. Taken deliberately **now, while the project has no
-users, so there is no migration** — see "Storage" below.
+Storage decided and shipped: vertex labels normalize into `vertex_labels`, `edges.label` stays
+inline, no migration (there were no users). See the git history from `cbaab02` for the phase
+commits.
 
 ## Why build this at all
 
@@ -213,19 +214,47 @@ Named separately so its cost is not hidden inside Phase D.
 - `addV("a","b")` (AddVertex, 6) and `mergeV({T.label: ["a","b"]})` (MergeVertex, 9).
 - `dedup().by(labels().order().fold())` should follow once `labels()` is a list producer.
 
-### Phase E — the map shapes (**~23; gated on item 13**)
+### Phase E — the map shapes (**~23 scenarios; BLOCKED, and it carries a decision**)
 
-`ElementMap` (14) and `ValueMap` (9) render labels per regime, selected by a traversal-source option
-— `g.with("multilabel")` / `g.with("single-label")`. That selector is index item 13
-(`with(...)` / `OptionsStrategy` sugar), so this phase is genuinely blocked on it.
+`ElementMap` (14) and `ValueMap` (9) render an element's label differently per REGIME, and the
+regime has two selectors:
 
+- **Explicit**: `g.with("multilabel")` renders `T.label` as a SET
+  (`s[animal,bird,aquatic,endangered]`); `g.with("singlelabel")` renders one label.
+- **Implicit**: with no `with()`, the graph's DECLARED DEFAULT applies — and upstream ships BOTH
+  variants of each such scenario, tagged `@MultiLabelDefault` (10) and `@SingleLabelDefault` (7).
+  They are mutually exclusive provider declarations over the same initializer and the same
+  traversal, differing only in the expected shape.
+
+**The decision, which is not the implementer's to make:** which default does mogwai-db DECLARE?
+Declaring `@MultiLabelDefault` is the honest reading of our storage (a vertex genuinely holds a
+set), and it means the 7 `@SingleLabelDefault` scenarios can never pass and should be scoped out of
+`tags.ts` — a legitimate feature-requirement exclusion, NOT the number-gaming the trap below
+forbids, because they describe a different provider. Declaring `@SingleLabelDefault` inverts that.
+Take the decision before writing the rendering, because it IS the rendering.
+
+**Two pieces of substrate are missing, and the first is index item 13's:**
+
+1. **A source-level `with(k)` never reaches the compiler.** Verified 2026-07-30:
+   `stepChain(parseGremlin("g.with('multilabel').V().elementMap()"))` yields `[V, elementMap]` —
+   the front-end drops it silently, so `with()` is accepted and ignored. Capturing it needs an
+   `extract`-category Pass, the same shape `withStrategies` uses. That is item 13
+   (`with(...)`/`OptionsStrategy` sugar), which this phase was always gated on.
+2. **A set-valued `T.label` on the wire.** `elementMapBuffer`/`valueMapBuffer` (`src/execute.ts`)
+   take a single label string and frame it as one value; the multi-label regime needs a SET.
+   Note this does NOT contradict the "no wire work" finding above — that was about the
+   Vertex/Edge serializers, whose label field is already a list. This is the token map, a
+   different site.
 ## Traps
 
 - **The scalar-vs-fan-out trap above is the big one.** Everything else here is smaller.
-- **A negated predicate over a set is not the negation of the member test.**
-  `has(T.label, without('animal'))` means *no* label is `animal`, **not** *some* label is not
-  `animal`. `g_V_hasXlabel_withoutXanimalXX_name_multilabel` pins it. Get the quantifier wrong and
-  it passes on single-label graphs and is wrong everywhere else.
+- **RETRACTED, and the opposite is true: a label predicate is existential UNIFORMLY.** This plan
+  originally claimed `has(T.label, without('animal'))` means *no* label is `animal`. It does not.
+  `Has.feature` says so on the scenario itself: "Because label predicates match if ANY label
+  satisfies them, has(T.label, without('animal')) matches every vertex that carries some label
+  other than 'animal' — which is all of them. To exclude vertices labeled 'animal', use
+  not(hasLabel('animal')) instead." There is no polarity special case. Reading it the other way is
+  the tempting wrong answer, and it would have passed every single-label graph.
 - **`dropLabels()` throws on `ONE_OR_MORE` but succeeds on `ZERO_OR_MORE`.** Two of the three
   cardinalities are mutable and they disagree — encode the min/max/mutable triple as data, as
   TinkerPop does, rather than as booleans at call sites.
