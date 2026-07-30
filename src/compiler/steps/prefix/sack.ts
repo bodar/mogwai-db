@@ -1,6 +1,6 @@
 import { isNested } from '../../../gremlin/frontend.ts';
 import { derived, q, list, type Expression } from '../../../sql/kernel/q.ts';
-import { scalarProp, labelNameSub, predicateSql, elemCtx } from '../../plan/plan.ts';
+import { scalarProp, predicateSql, elemCtx } from '../../plan/plan.ts';
 import { appendCte, elemRel, prevRel, layoutCols, patchLayout, type ElementStream, type StepFn } from '../context/context.ts';
 import { tryCompileScalarValueRows } from '../tail/child.ts';
 import { SACK_OPS, combineSack } from '../tail/scalar.ts';

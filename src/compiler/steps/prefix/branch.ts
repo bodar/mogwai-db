@@ -5,7 +5,7 @@ import { isNested, stepChain, type SackSpec, type Step } from '../../../gremlin/
 import { type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { analyzeChain, type ChainFacts } from '../../ir/analyze.ts';
-import { dirsFor, edgeLabelFilter, labelIn, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem, type EdgeEnd, vertexLabelIn, vertexLabelName } from '../../plan/plan.ts';
+import { dirsFor, edgeLabelFilter, labelIn, hasProp, elemCtx, scalarProp, aliasCtx, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem, type EdgeEnd, vertexLabelIn, vertexLabelName } from '../../plan/plan.ts';
 import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
 import { appendCte, aliasColsOf, elemRel, labelScope, prevRel, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, mergeLayouts, rehomeLayout, rigidCols, partitionOver, type AliasMap, type TraverserLayout, type LoweringState, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { keyedChildRelation, keyedKeySet } from '../tail/keyed.ts';

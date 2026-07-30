@@ -5,7 +5,8 @@ import { elementOrderDrop, orderProductivityFilter } from './modulation.ts';
 import {
     predicateSql, rangeToOffsetLimit, elemCtx, extIdOf, jsonbGroupArray,
     nodePropSortKey, edgePropSortKey, scalarPropSortKey,
-    labelNameSub, framedProps, valueMapProps, storedValueExpr, labelNameFor, labelTokenFor } from '../../plan/plan.ts';
+    framedProps, valueMapProps, storedValueExpr, labelNameFor, labelTokenFor
+} from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { appendCte, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, partitionOver, dropLayoutAtBarrier, type ElementStream } from '../context/context.ts';
 import { loweringStateOf, continueLowering, dispatchShapeTail, toElementStream, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';

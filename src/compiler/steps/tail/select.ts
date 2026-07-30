@@ -1,6 +1,5 @@
 import { q, list, empty, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { nodes, edges, labels } from '../../../sql/schema.ts';
-import { framedProps, labelNameSub, nodePropScalar, nodePropType, edgePropScalar, edgePropType, edgePropsAgg, predicateSql, propExtract, extIdOf, P_OPS, storedValueExpr, elemTable, labelNameFor } from '../../plan/plan.ts';
+import { framedProps, nodePropScalar, nodePropType, edgePropScalar, edgePropType, edgePropsAgg, predicateSql, propExtract, extIdOf, P_OPS, storedValueExpr, elemTable, labelNameFor } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { isColumnArg, isPopArg, isScopeArg, isTokenArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { aliasElem, aliasIsElement, layoutProjection, layoutCols, scalarTypeFromAlias, type AliasMap, type ElementStream } from '../context/context.ts';

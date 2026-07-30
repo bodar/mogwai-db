@@ -2,8 +2,10 @@ import { q, list, paren, value, raw, type Expression } from '../../../sql/kernel
 import { isNested, stepChain, type Step } from '../../../gremlin/frontend.ts';
 import { edgeProperties } from '../../../sql/schema.ts';
 import {
-    predicateSql, labelIn, hasProp, idPredFromArgs, labelNameSub, aliasCtx,
-    type ScalarCtx,
+    predicateSql,
+    hasProp, idPredFromArgs,
+    aliasCtx,
+    type ScalarCtx
 } from '../../plan/plan.ts';
 import { compileCorrelatedChild } from '../tail/correlated.ts';
 import { resolveTraversalOperands } from '../tail/operand.ts';

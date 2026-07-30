@@ -1,6 +1,5 @@
 import { q, empty, type Expression } from '../../../sql/kernel/q.ts';
 import { framedProps, extIdOf, elemTable, labelNameFor } from '../../plan/plan.ts';
-import { edges, labels, nodes } from '../../../sql/schema.ts';
 import { type Compiled } from '../../../sql/kernel/render.ts';
 import { materializeRoot } from './materialize.ts';
 import { type ElementStream } from '../context/context.ts';

@@ -6,7 +6,7 @@
 // is read. Traversal-valued modulators still go through child.ts.
 
 import { empty, list, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { elemCtx, labelNameSub, scalarProp, scalarPropSortKey, labelNameFor } from '../../plan/plan.ts';
+import { elemCtx, scalarProp, scalarPropSortKey, labelNameFor } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { type ElementStream } from '../context/context.ts';
 import { classifyBy } from './child-shape.ts';

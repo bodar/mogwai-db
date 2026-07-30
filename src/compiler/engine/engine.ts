@@ -1,5 +1,4 @@
 import { empty, q, value, list, Query, type Expression } from '../../sql/kernel/q.ts';
-import { nodes, edges } from '../../sql/schema.ts';
 import { type Elem, elemTable } from '../plan/plan.ts';
 import { flattenListArgs, isColumnArg, isOperatorArg, isPopArg } from '../../gremlin/frontend.ts';
 import { type IRStep } from '../ir/strategies.ts';

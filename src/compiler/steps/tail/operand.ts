@@ -3,7 +3,7 @@ import { isNested } from '../../../gremlin/frontend.ts';
 import { childSteps } from './child-shape.ts';
 import { embedSql, foldedListSubquery } from './list.ts';
 import { engineOf, type Engine } from '../../engine/deps.ts';
-import { aliasCtx, labelNameSub, scalarProp, type ScalarCtx } from '../../plan/plan.ts';
+import { aliasCtx, scalarProp, type ScalarCtx } from '../../plan/plan.ts';
 import { compileCorrelatedChild } from './correlated.ts';
 import { correlatedReduce } from '../prefix/predicate.ts';
 import type { IRStep } from '../../ir/strategies.ts';

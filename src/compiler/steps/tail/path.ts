@@ -1,7 +1,7 @@
 import { gtypeName, isNested } from '../../../gremlin/frontend.ts';
 import { q, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { nodes, edges, labels } from '../../../sql/schema.ts';
-import { framedProps, labelNameSub, predicateSql, extIdOf, elemCtx, aliasCtx, scalarProp, type ScalarCtx, elemTable, labelNameFor, vertexLabelName } from '../../plan/plan.ts';
+import { nodes } from '../../../sql/schema.ts';
+import { framedProps, predicateSql, extIdOf, elemCtx, aliasCtx, scalarProp, type ScalarCtx, elemTable, labelNameFor, vertexLabelName } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { layoutProjection, layoutCols, scopePathCols, dropLayoutAtBarrier, withoutPath, type TraverserLayout, type ElementStream } from '../context/context.ts';
 import { loweringStateOf, continueLowering, pathColumns, toListStream, toPathStream, type ListStream, type LoweringResult, type PathStream, type ScalarStream } from '../context/stream.ts';

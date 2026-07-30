@@ -1,5 +1,4 @@
 import { q, list, empty, raw, Query, Relation, type Expression } from '../../../sql/kernel/q.ts';
-import { nodes, edges } from '../../../sql/schema.ts';
 import { aliasCtx, type Elem, type ScalarCtx, elemTable } from '../../plan/plan.ts';
 import { aliasId, aliasPresent, type AliasShape } from './alias.ts';
 import { type IRStep } from '../../ir/strategies.ts';

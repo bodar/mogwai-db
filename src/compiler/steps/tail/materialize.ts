@@ -10,7 +10,7 @@ import { raw, type Expression, type Query } from '../../../sql/kernel/q.ts';
 import { perRowColumnOf, readCompiled, STATIC, UNKNOWN, type Compiled, type ListOf, type Shape, type VariantShapeArm } from '../../../sql/kernel/render.ts';
 import { list, q } from '../../../sql/kernel/q.ts';
 import { framedProps, extIdOf, elemTable, labelNameFor, labelNameSub, vertexLabelName } from '../../plan/plan.ts';
-import { edges, labels, nodes } from '../../../sql/schema.ts';
+import { edges, nodes } from '../../../sql/schema.ts';
 import { groupResultColumns, pathColumns, recordResultColumns, type ForeignStream, type GroupStream, type ListStream, type MapEntryStream, type MapOf, type MapStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
 import type { ElementStream } from '../context/context.ts';
 

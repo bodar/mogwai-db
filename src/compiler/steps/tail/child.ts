@@ -1,7 +1,7 @@
 import { derived, empty, list, paren, q, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { perRowCols } from '../../../sql/kernel/render.ts';
 import { isNested, stepChain } from '../../../gremlin/frontend.ts';
-import { edges, labels, nodes, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
+import { vertexProperties, edgeProperties } from '../../../sql/schema.ts';
 import { appendCte, patchLayout, layoutProjection, layoutProjectionMinting, layoutCols, partitionOver, prevRel, withLayout, type TraverserLayout, type ElementStream } from '../context/context.ts';
 import { aliasId } from '../context/alias.ts';
 import { asOnStream, selectOneFromAlias } from './labelselect.ts';

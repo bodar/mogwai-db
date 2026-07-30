@@ -1,8 +1,10 @@
 import { q, value, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { edges, labels, nodes, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
+import { labels, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
 import {
-    scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx,
-    storedValueExpr, bareValueMapProps, typedScalarNode, compareKey, type ScalarCtx, elemTable, labelNameFor, vertexLabelIn, vertexLabelName } from '../../plan/plan.ts';
+    scalarProp,
+    framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx,
+    storedValueExpr, bareValueMapProps, typedScalarNode, compareKey, type ScalarCtx, elemTable, labelNameFor, vertexLabelIn, vertexLabelName
+} from '../../plan/plan.ts';
 import { gtypeName, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { isMapLocalOrder } from './list.ts';
 import { type IRStep } from '../../ir/strategies.ts';

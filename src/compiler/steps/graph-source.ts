@@ -1,5 +1,4 @@
 import { q, list, value, empty, type Expression } from '../../sql/kernel/q.ts';
-import { nodes, edges } from '../../sql/schema.ts';
 import { elemTable } from '../plan/plan.ts';
 import { flattenListArgs } from '../../gremlin/frontend.ts';
 import { layoutCols, layoutProjection, type ElementStream } from './context/context.ts';
