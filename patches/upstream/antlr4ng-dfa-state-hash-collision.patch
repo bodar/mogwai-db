@@ -1,0 +1,228 @@
+From 6a6129955640b643970e5e314420bf897e15288a Mon Sep 17 00:00:00 2001
+From: Daniel Bodart <dan@bodar.com>
+Date: Thu, 30 Jul 2026 12:09:15 +0000
+Subject: [PATCH] Resolve hash collisions in the DFA state table
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+`DFA` stored a decision's states in `Map<number, DFAState>` keyed on
+`ATNConfigSet.hashCode()`, and `getState`/`getStateForConfigs`/`addState` never
+consulted `ATNConfigSet.equals()`. A 32-bit hash is not injective, so two
+structurally different configuration sets sharing a hash were conflated:
+`addState` silently dropped the second, and every later lookup for it returned a
+state describing a different decision. `ParserATNSimulator` then followed the
+wrong DFA state and reported "no viable alternative" on input that parses
+correctly in isolation.
+
+Because generated recognizers share one static `decisionToDFA` array, the bad
+entry is not transient — whichever input populates the bucket first keeps it for
+the life of the process, so one valid input permanently breaks another. The
+effect is order-dependent, sticky and symmetric: swap the order of two colliding
+inputs and the other one fails instead.
+
+The reference Java runtime is unaffected because it keys the table on
+`HashMap<DFAState, DFAState>`, which resolves a collision with
+`DFAState.equals()`. `DFAState.equals` already exists here; it was simply
+unreachable. This restores the reference semantics: bucket per hash, then
+disambiguate by configuration-set equality, keeping the identity fast path for
+the common case. `getStates`, `[Symbol.iterator]` and `length` are updated to
+read through the buckets, and insertion numbering moves to an explicit counter.
+
+Found against TinkerPop 4's `Gremlin.g4`, where it is not a rare curiosity: a
+2,298-query corpus collides 19 times, and 18 of those queries went from failing
+to parsing once collisions are resolved. Cost is a configuration-set comparison
+on a hash hit, which is what the Java runtime already pays; measured at roughly
+1.0 -> 1.1 ms/query over that corpus.
+---
+ src/dfa/DFA.ts                       | 58 ++++++++++++++++++-----
+ tests/bugs/dfaStateCollision.spec.ts | 71 ++++++++++++++++++++++++++++
+ 2 files changed, 117 insertions(+), 12 deletions(-)
+ create mode 100644 tests/bugs/dfaStateCollision.spec.ts
+
+diff --git a/src/dfa/DFA.ts b/src/dfa/DFA.ts
+index b4f9ce6..4c0e250 100644
+--- a/src/dfa/DFA.ts
++++ b/src/dfa/DFA.ts
+@@ -32,10 +32,23 @@ export class DFA {
+     public readonly isPrecedenceDfa: boolean;
+ 
+     /**
+-     * A mapping from an ATNConfigSet hash to a DFAState.
+-     * Used to quick look up the DFA state for a particular configuration set.
++     * A mapping from an ATNConfigSet hash to the DFA states whose configuration sets carry that
++     * hash. Used to quickly look up the DFA state for a particular configuration set.
++     *
++     * Each entry is a bucket rather than a single state because a 32-bit hash is not injective:
++     * two different configuration sets can share one. Buckets are disambiguated with
++     * {@link DFAState.equals}, so a state is only ever returned for the configuration set it was
++     * actually computed from. Resolving collisions is required for correctness, not merely for
++     * hygiene — handing back a state that describes a *different* configuration set makes the
++     * simulator follow the wrong decision, which surfaces as a spurious "no viable alternative"
++     * on input that parses fine on its own. Because the DFA is cached across parses (the
++     * generated recognizers share one `decisionToDFA` array), such a state also persists, so
++     * whichever input populates a bucket first can permanently break a later one.
+      */
+-    private states = new Map<number, DFAState>();
++    private states = new Map<number, DFAState[]>();
++
++    /** Counts the states in {@link states}, so insertion can number them without a scan. */
++    private stateCount = 0;
+ 
+     public constructor(atnStartState: DecisionState | null, decision?: number) {
+         this.atnStartState = atnStartState;
+@@ -53,7 +66,7 @@ export class DFA {
+     }
+ 
+     public [Symbol.iterator] = (): Iterator<DFAState> => {
+-        return this.states.values()[Symbol.iterator]();
++        return this.getStates()[Symbol.iterator]();
+     };
+ 
+     /**
+@@ -103,7 +116,11 @@ export class DFA {
+      * @returns a list of all states in this DFA, ordered by state number.
+      */
+     public getStates(): DFAState[] {
+-        const result = [...this.states.values()];
++        const result: DFAState[] = [];
++        for (const bucket of this.states.values()) {
++            result.push(...bucket);
++        }
++
+         result.sort((o1: DFAState, o2: DFAState): number => {
+             return o1.stateNumber - o2.stateNumber;
+         });
+@@ -112,21 +129,38 @@ export class DFA {
+     };
+ 
+     public getState(state: DFAState): DFAState | null {
+-        return this.states.get(state.configs.hashCode()) ?? null;
++        return this.getStateForConfigs(state.configs);
+     }
+ 
+     public getStateForConfigs(configs: ATNConfigSet): DFAState | null {
+-        return this.states.get(configs.hashCode()) ?? null;
++        const bucket = this.states.get(configs.hashCode());
++        if (bucket) {
++            for (const state of bucket) {
++                if (state.configs === configs || state.configs.equals(configs)) {
++                    return state;
++                }
++            }
++        }
++
++        return null;
+     }
+ 
+     public addState(state: DFAState): void {
+         const hash = state.configs.hashCode();
+-        if (this.states.has(hash)) {
+-            return;
++        let bucket = this.states.get(hash);
++        if (!bucket) {
++            bucket = [];
++            this.states.set(hash, bucket);
++        }
++
++        for (const existing of bucket) {
++            if (DFAState.equals(existing, state)) {
++                return;
++            }
+         }
+ 
+-        this.states.set(hash, state);
+-        state.stateNumber = this.states.size - 1;
++        bucket.push(state);
++        state.stateNumber = this.stateCount++;
+     }
+ 
+     public toString(vocabulary?: Vocabulary): string {
+@@ -154,6 +188,6 @@ export class DFA {
+     };
+ 
+     public get length(): number {
+-        return this.states.size;
++        return this.stateCount;
+     }
+ }
+diff --git a/tests/bugs/dfaStateCollision.spec.ts b/tests/bugs/dfaStateCollision.spec.ts
+new file mode 100644
+index 0000000..8fd9bcb
+--- /dev/null
++++ b/tests/bugs/dfaStateCollision.spec.ts
+@@ -0,0 +1,71 @@
++/*
++ * Copyright (c) The ANTLR Project. All rights reserved.
++ * Use of this file is governed by the BSD 3-clause license that
++ * can be found in the LICENSE.txt file in the project root.
++ */
++
++import { describe, expect, it } from "vitest";
++
++import { DFA, DFAState } from "../../src/index.js";
++import type { ATNConfigSet } from "../../src/index.js";
++
++/**
++ * `DFA` indexes its states by `ATNConfigSet.hashCode()`. A 32-bit hash is not injective, so the
++ * table has to disambiguate a shared hash with `ATNConfigSet.equals()`; without that, two
++ * different configuration sets are conflated and the simulator is handed a state describing a
++ * decision it did not ask about. That surfaces far from here, as a spurious "no viable
++ * alternative" on input that parses correctly in isolation, and — because the generated
++ * recognizers share one `decisionToDFA` array across parses — it persists for the life of the
++ * process, so whichever input populates the bucket first permanently breaks the other.
++ *
++ * A collision is impractical to provoke through a real grammar in a unit test, so these stubs
++ * pin the hash directly. That is exactly the contract under test: `DFA` must not assume the hash
++ * identifies the configuration set.
++ */
++const configs = (hash: number, id: string): ATNConfigSet => {
++    const stub = {
++        id,
++        hashCode: () => hash,
++        equals: (other: ATNConfigSet) => (other as unknown as { id: string; }).id === id,
++    };
++
++    return stub as unknown as ATNConfigSet;
++};
++
++describe("DFA state table", () => {
++    it("keeps different configuration sets that share a hash apart", () => {
++        const dfa = new DFA(null, 0);
++        const first = DFAState.fromConfigs(configs(42, "first"));
++        const second = DFAState.fromConfigs(configs(42, "second"));
++
++        dfa.addState(first);
++        dfa.addState(second);
++
++        expect(dfa.getState(first)).toBe(first);
++        expect(dfa.getState(second)).toBe(second);
++        expect(dfa.getStateForConfigs(second.configs)).toBe(second);
++        expect(dfa.length).toBe(2);
++        expect(first.stateNumber).not.toBe(second.stateNumber);
++        expect(dfa.getStates()).toEqual([first, second]);
++    });
++
++    it("still returns the stored state for an equal configuration set", () => {
++        const dfa = new DFA(null, 0);
++        const stored = DFAState.fromConfigs(configs(42, "same"));
++        const equivalent = DFAState.fromConfigs(configs(42, "same"));
++
++        dfa.addState(stored);
++        dfa.addState(equivalent);
++
++        expect(dfa.getState(equivalent)).toBe(stored);
++        expect(dfa.length).toBe(1);
++    });
++
++    it("reports no state for a hash that is present but does not match", () => {
++        const dfa = new DFA(null, 0);
++        const stored = DFAState.fromConfigs(configs(42, "stored"));
++        dfa.addState(stored);
++
++        expect(dfa.getStateForConfigs(configs(42, "absent"))).toBeNull();
++    });
++});
+-- 
+2.43.0
+

@@ -1,0 +1,182 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index f9ad4706c071278b89d815b2079db9089d2611bf..5ee8f333ac8946b314277a4c15e4694f5bd5b075 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -6600,10 +6600,15 @@ var DFA = class {
+    */
+   isPrecedenceDfa;
+   /**
+-   * A mapping from an ATNConfigSet hash to a DFAState.
+-   * Used to quick look up the DFA state for a particular configuration set.
++   * A mapping from an ATNConfigSet hash to the DFA states whose configuration sets carry that
++   * hash. Each entry is a bucket because a 32-bit hash is not injective; buckets are
++   * disambiguated with DFAState.equals so a state is only returned for the configuration set it
++   * was computed from. Conflating two different sets makes the simulator follow the wrong
++   * decision, surfacing as a spurious "no viable alternative", and because the DFA is shared
++   * across parses such a state persists for the life of the process.
+    */
+   states = /* @__PURE__ */ new Map();
++  stateCount = 0;
+   constructor(atnStartState, decision) {
+     this.atnStartState = atnStartState;
+     this.decision = decision ?? 0;
+@@ -6617,7 +6622,7 @@ var DFA = class {
+     this.isPrecedenceDfa = precedenceDfa;
+   }
+   [Symbol.iterator] = () => {
+-    return this.states.values()[Symbol.iterator]();
++    return this.getStates()[Symbol.iterator]();
+   };
+   /**
+    * Get the start state for a specific precedence value.
+@@ -6657,25 +6662,43 @@ var DFA = class {
+    * @returns a list of all states in this DFA, ordered by state number.
+    */
+   getStates() {
+-    const result = [...this.states.values()];
++    const result = [];
++    for (const bucket of this.states.values()) {
++      result.push(...bucket);
++    }
+     result.sort((o1, o2) => {
+       return o1.stateNumber - o2.stateNumber;
+     });
+     return result;
+   }
+   getState(state) {
+-    return this.states.get(state.configs.hashCode()) ?? null;
++    return this.getStateForConfigs(state.configs);
+   }
+   getStateForConfigs(configs) {
+-    return this.states.get(configs.hashCode()) ?? null;
++    const bucket = this.states.get(configs.hashCode());
++    if (bucket) {
++      for (const state of bucket) {
++        if (state.configs === configs || state.configs.equals(configs)) {
++          return state;
++        }
++      }
++    }
++    return null;
+   }
+   addState(state) {
+     const hash = state.configs.hashCode();
+-    if (this.states.has(hash)) {
+-      return;
++    let bucket = this.states.get(hash);
++    if (!bucket) {
++      bucket = [];
++      this.states.set(hash, bucket);
++    }
++    for (const existing of bucket) {
++      if (DFAState.equals(existing, state)) {
++        return;
++      }
+     }
+-    this.states.set(hash, state);
+-    state.stateNumber = this.states.size - 1;
++    bucket.push(state);
++    state.stateNumber = this.stateCount++;
+   }
+   toString(vocabulary) {
+     if (!vocabulary) {
+@@ -6695,7 +6718,7 @@ var DFA = class {
+     return serializer.toString() ?? "";
+   }
+   get length() {
+-    return this.states.size;
++    return this.stateCount;
+   }
+ };
+ 
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 18f6f576f4d0dd3e229acde65ad06215162f433d..dc9ef3839f63e0f97f39f05944437be0fe7aaab2 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -6431,10 +6431,15 @@ var DFA = class {
+    */
+   isPrecedenceDfa;
+   /**
+-   * A mapping from an ATNConfigSet hash to a DFAState.
+-   * Used to quick look up the DFA state for a particular configuration set.
++   * A mapping from an ATNConfigSet hash to the DFA states whose configuration sets carry that
++   * hash. Each entry is a bucket because a 32-bit hash is not injective; buckets are
++   * disambiguated with DFAState.equals so a state is only returned for the configuration set it
++   * was computed from. Conflating two different sets makes the simulator follow the wrong
++   * decision, surfacing as a spurious "no viable alternative", and because the DFA is shared
++   * across parses such a state persists for the life of the process.
+    */
+   states = /* @__PURE__ */ new Map();
++  stateCount = 0;
+   constructor(atnStartState, decision) {
+     this.atnStartState = atnStartState;
+     this.decision = decision ?? 0;
+@@ -6448,7 +6453,7 @@ var DFA = class {
+     this.isPrecedenceDfa = precedenceDfa;
+   }
+   [Symbol.iterator] = () => {
+-    return this.states.values()[Symbol.iterator]();
++    return this.getStates()[Symbol.iterator]();
+   };
+   /**
+    * Get the start state for a specific precedence value.
+@@ -6488,25 +6493,43 @@ var DFA = class {
+    * @returns a list of all states in this DFA, ordered by state number.
+    */
+   getStates() {
+-    const result = [...this.states.values()];
++    const result = [];
++    for (const bucket of this.states.values()) {
++      result.push(...bucket);
++    }
+     result.sort((o1, o2) => {
+       return o1.stateNumber - o2.stateNumber;
+     });
+     return result;
+   }
+   getState(state) {
+-    return this.states.get(state.configs.hashCode()) ?? null;
++    return this.getStateForConfigs(state.configs);
+   }
+   getStateForConfigs(configs) {
+-    return this.states.get(configs.hashCode()) ?? null;
++    const bucket = this.states.get(configs.hashCode());
++    if (bucket) {
++      for (const state of bucket) {
++        if (state.configs === configs || state.configs.equals(configs)) {
++          return state;
++        }
++      }
++    }
++    return null;
+   }
+   addState(state) {
+     const hash = state.configs.hashCode();
+-    if (this.states.has(hash)) {
+-      return;
++    let bucket = this.states.get(hash);
++    if (!bucket) {
++      bucket = [];
++      this.states.set(hash, bucket);
++    }
++    for (const existing of bucket) {
++      if (DFAState.equals(existing, state)) {
++        return;
++      }
+     }
+-    this.states.set(hash, state);
+-    state.stateNumber = this.states.size - 1;
++    bucket.push(state);
++    state.stateNumber = this.stateCount++;
+   }
+   toString(vocabulary) {
+     if (!vocabulary) {
+@@ -6526,7 +6549,7 @@ var DFA = class {
+     return serializer.toString() ?? "";
+   }
+   get length() {
+-    return this.states.size;
++    return this.stateCount;
+   }
+ };
+ 

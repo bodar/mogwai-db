@@ -20,6 +20,12 @@
       },
     },
   },
+  "patchedDependencies": {
+    "antlr4ng@3.0.16": "patches/antlr4ng@3.0.16.patch",
+  },
+  "overrides": {
+    "antlr4ng": "3.0.16",
+  },
   "packages": {
     "@bodar/lazyrecords": ["@jsr/bodar__lazyrecords@0.494.348", "https://npm.jsr.io/~/11/@jsr/bodar__lazyrecords/0.494.348.tgz", { "dependencies": { "@jsr/bodar__totallylazy": "^0.494.348" } }, "sha512-rB3j/YgZC35uM8rCIZO4dNG+l8Yb2tBYz1FFA2KCepVCIMGccjkoGMjqJvePcwoGZhqza/jDYL7xzHYay0mzSg=="],
 
@@ -286,7 +292,5 @@
     "youch": ["youch@4.1.0-beta.10", "", { "dependencies": { "@poppinss/colors": "^4.1.5", "@poppinss/dumper": "^0.6.4", "@speed-highlight/core": "^1.2.7", "cookie": "^1.0.2", "youch-core": "^0.3.3" } }, "sha512-rLfVLB4FgQneDr0dv1oddCVZmKjcJ6yX6mS4pU82Mq/Dt9a3cLZQ62pDBL4AUO+uVrCvtWz3ZFUL2HFAFJ/BXQ=="],
 
     "youch-core": ["youch-core@0.3.3", "", { "dependencies": { "@poppinss/exception": "^1.2.2", "error-stack-parser-es": "^1.0.5" } }, "sha512-ho7XuGjLaJ2hWHoK8yFnsUGy2Y5uDpqSTq1FkHLK4/oqKtyUU1AFbOOxY4IpC9f0fTLjwYbslUz0Po5BpD1wrA=="],
-
-    "stringtemplate4ts/antlr4ng": ["antlr4ng@3.0.15", "", {}, "sha512-VELFqTfcpGI2bj6ScMWuxM3FI6HOsojrgmnw3cCbUtsQ1DNOq32wJsjOt7vLvfIniyyuE1DIYegGcuFmn+jgyw=="],
   }
 }

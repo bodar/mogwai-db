@@ -159,6 +159,13 @@ Remaining work on this tooling: `docs/2026-07-30-lsp-tooling-plan.md`.
 ## Environment notes
 
 - Runtime is **Bun** (pinned in `mise.toml`), not Node — TS runs natively.
+- **`antlr4ng` is patched (`bun patch`) and the patch is load-bearing — never drop it on a version
+  bump.** `patches/antlr4ng@3.0.16.patch` fixes a correctness bug in the shared prediction DFA:
+  upstream keys a decision's states on `ATNConfigSet.hashCode()` with no equality check, so a hash
+  collision conflates two different configuration sets and one valid query permanently breaks
+  another — in a DO, for every later request the isolate serves. Not upstream yet, so a bump
+  re-exposes it; `package.json` also pins `overrides.antlr4ng` so only ONE copy exists to patch.
+  `test/L1-corpus/parser-state.test.ts` fails if the patch goes missing. Detail: `docs/outstanding-work.md` 0f.
 - **Test via `mise run test`, NOT bare `bun test`** (bare skips `tsc --noEmit` + the submodule). See
   `test/CLAUDE.md`. Build graph: `submodule ─▶ install ─▶ {check, test, build} ─▶ ci`; CI just runs
   `mise run ci`. **`install` depends on `submodule` and that edge is load-bearing** — `gremlin` is a

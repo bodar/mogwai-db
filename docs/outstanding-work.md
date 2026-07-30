@@ -45,18 +45,39 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    cardinality, so `g.inject('hello','hi').concat(__.V().order().by('name').values('name'))`
    executes rather than receiving a concat-specific exception.
 
-0e. **Nothing detects a stale `parser/`.** The L5-random parser-integrity failure at high nesting
-   depth is diagnosed and fixed: `parser/` had never been regenerated since the initial import, so
-   its serialized ATN (36,523 ints) came from an older `Gremlin.g4` than the `origin/master` grammar
-   we track (37,307). With antlr-ng's shared static prediction DFA that mispredicted deep
-   `repeat(__.not(__.or(...)))` and cached the miss, so one valid query permanently broke another —
-   in a DO, for every later request the isolate serves. `mise run generate` fixed it;
-   `test/L1-corpus/parser-state.test.ts` is the regression test. What is still missing is the guard:
-   nothing fails when `parser/` drifts from the grammar again. A byte-compare against a fresh
-   generation is the obvious check, but note the ref mismatch it would have to resolve — the
-   generate script sources `origin/master` (a moving ref) while the submodule pins a gitlink, so a
-   naive comparison against the pinned checkout's output is only accidentally green today (the two
-   grammars are currently identical). *Medium — measurement integrity.*
+0e. **Nothing detects a stale `parser/`.** A byte-compare against a fresh generation is the obvious
+   check, but note the ref mismatch it would have to resolve — the generate script sources
+   `origin/master` (a moving ref) while the submodule pins a gitlink, so a naive comparison against
+   the pinned checkout's output is only accidentally green today (the two grammars are currently
+   identical). *Medium — measurement integrity.*
+   Note this is now a hygiene item only. It was previously written up as the diagnosis of the
+   L5-random parser-integrity failure; that diagnosis was **wrong** and the item no longer carries
+   it (see 0f).
+
+0f. **We carry a patch against antlr4ng's prediction DFA; it must go upstream.** The L5-random
+   parser-integrity failure at high nesting depth has its real root cause: antlr4ng indexes a
+   decision's DFA states in `Map<number, DFAState>` keyed on `ATNConfigSet.hashCode()` and never
+   consults `ATNConfigSet.equals()` (`DFA.getState`/`addState`). A 32-bit hash is not injective, so
+   two structurally different configuration sets are conflated — the simulator gets a state for a
+   decision it did not ask about and reports "no viable alternative" on input that parses fine
+   alone. Whichever query populates the bucket first wins, permanently, which is why the failure is
+   order-dependent, sticky and symmetric. Java's table is `HashMap<DFAState, DFAState>` and resolves
+   collisions by equality, so the reference runtime does not reproduce it.
+   Evidence, since the earlier stale-`parser/` story was plausible and wrong: it reproduces on a
+   freshly generated parser, identically on upstream gremlin-js's own generated parser, and not at
+   all on the reference Java runtime given the same `Gremlin.g4`; disabling the hash-keyed lookup
+   cures it; the L1 corpus alone collides **19** times and the fix moved **18** corpus traversals
+   from failing to executing (banked in the census baseline).
+   Fixed here by `patches/antlr4ng@3.0.16.patch` (`bun patch`), which restores the reference
+   semantics: bucket per hash, disambiguate with `DFAState.equals`. Cost is ~1.0 → ~1.1 ms/query on
+   the L1 corpus; the rejected alternative, `clearDFA()` per parse, was ~20x. Still open: the fix is
+   **not upstream** — it is unchanged on antlr4ng `main` and still 3.0.16 on npm, so every antlr4ng
+   consumer has it, and any version bump here silently drops our patch (guarded by
+   `test/L1-corpus/parser-state.test.ts`, which asserts the mechanism, not just the symptom). A
+   ready-to-push branch sits in the untracked `vendor/antlr4ng` clone
+   (`fix/dfa-state-hash-collision`: the `DFA.ts` fix plus a `tests/bugs/` spec); it needs a fork
+   under a personal account to push from, which the session that found this could not create.
+   *High — we are carrying someone else's correctness bug as a local patch.*
 
 1. **List members frame as bare values, not elements.** `AliasEntry` does not record the member
    shape, so a path/element-list label cannot frame its members as vertices. Blocks

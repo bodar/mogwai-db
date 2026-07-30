@@ -43,5 +43,11 @@
     "fast-check": "^4.9.0",
     "typescript": "^7.0.2",
     "wrangler": "^4.110.0"
+  },
+  "overrides": {
+    "antlr4ng": "3.0.16"
+  },
+  "patchedDependencies": {
+    "antlr4ng@3.0.16": "patches/antlr4ng@3.0.16.patch"
   }
 }
