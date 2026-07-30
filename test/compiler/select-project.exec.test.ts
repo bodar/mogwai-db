@@ -318,17 +318,31 @@ describe('select(label).by(key) as a child body', () => {
   });
 });
 
-test('select(label).by(key) over a value-shaped parent defers instead of dropping the by()', () => {
+// This case went through three states, and the sequence is the point: it returned the labelled
+// ELEMENT and silently dropped the by() (byte-identical to the by()-less form); then it failed
+// closed, once the by()-less resolver's contract was enforced rather than assumed; now it ANSWERS,
+// because the modulator projection was extracted shape-agnostically (`selectKeyFromAlias`) rather
+// than reimplemented per parent shape. ONE implementation, so the two routes cannot disagree — which
+// is the property this test defends.
+test('select(label).by(key) answers the same over a value-shaped parent as over an element one', () => {
   const store = seededStore();
-  expect(() => run(store, 'g.V().has("name","marko").as("a").values("name").select("a").by("name")'))
-    .toThrow('only the element-stream route applies by() modulators');
-  // The by()-less form is unaffected — it legitimately yields the labelled vertex.
-  expect(run(store, 'g.V().has("name","marko").as("a").values("name").select("a")').map((r) => r.id))
-    .toEqual([1]);
-  // And over an ELEMENT parent the same by() works, which is what makes the above a reachability
-  // gap rather than a missing capability.
+  expect(run(store, 'g.V().has("name","marko").as("a").values("name").select("a").by("name")').map((r) => r.v))
+    .toEqual(['marko']);
   expect(run(store, 'g.V().has("name","marko").as("a").out("created").select("a").by("name")').map((r) => r.v))
     .toEqual(['marko']);
+  // The by()-less form is unaffected — it legitimately yields the labelled vertex, not a property.
+  expect(run(store, 'g.V().has("name","marko").as("a").values("name").select("a")').map((r) => r.id))
+    .toEqual([1]);
+});
+
+// The shared projection serves a KEY by at Pop.last and nothing else. A token by has no shared
+// implementation to reach, and a non-last Pop under a by() is unsupported on the element route too,
+// so answering either here would make the two routes disagree — the very failure the extraction
+// exists to prevent. Both still fail closed.
+test('a token by() over a value-shaped parent still fails closed', () => {
+  const store = seededStore();
+  expect(() => run(store, 'g.V().has("name","marko").as("a").values("name").select("a").by(T.id)'))
+    .toThrow('supports only a property-key by()');
 });
 
 });

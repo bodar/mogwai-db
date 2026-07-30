@@ -10,6 +10,7 @@ import {
     type ListOf, type PropertyStream, type Stream,
 } from '../context/stream.ts';
 import { PER_ROW, perRowColumnOf, staticTypeOf } from '../../../sql/kernel/render.ts';
+import { elemTable, nodePropScalar, edgePropScalar, predicateSql } from '../../plan/plan.ts';
 
 // ---------- as()/select() over path-history labels, any stream shape ----------
 //
@@ -131,6 +132,47 @@ export function emptyElementLike(s: LoweringState): ElementStream {
   };
 }
 
+/** `select(label).by(key)` — project a property off the element a label HOLDS, for ANY parent shape.
+ *
+ *  Extracted from `lowerSingleSelect` unchanged. It was written against an `ElementStream` but
+ *  nothing in it reads the parent's element: the whole computation is the alias COLUMN (`entry.col`
+ *  on the parent row), the layout, and the query. So the element signature was incidental, and it
+ *  was the only thing keeping a value-shaped parent from reaching the same answer — which is exactly
+ *  the "cannot be HANDED this" tell from `steps/CLAUDE.md`, not a missing capability.
+ *
+ *  ONE implementation, two callers: `lowerSingleSelect` (element parent, via the tail dispatch) and
+ *  `selectOneFromAlias` below (every other shape, via `dispatchAlias`). Applying the modulator in
+ *  both places independently is precisely the second implementation the guardrails forbid.
+ *
+ *  `productive` is ProductiveByStrategy's contract: normally an absent property DROPS the traverser
+ *  (the `predicateSql` IS NOT NULL guard); under the strategy it is retained. */
+export function selectKeyFromAlias(
+  s: Exclude<Stream, { kind: 'result' }>,
+  entry: AliasEntry,
+  key: string,
+  opts: { productive?: boolean } = {},
+): Stream {
+  const p = s.rel.as('p');
+  const col = p.c[entry.col];
+  // A dynamically-bound label (bound inside a branch arm / repeat) may be UNBOUND on some rows →
+  // drop those. A statically-bound linear label is always present, so no guard (same SQL).
+  const present = entry.binds === undefined ? aliasPresent(col) : null;
+  const selElem = aliasElem(entry);
+  const n = elemTable(selElem).as('n');
+  const expr = selElem === 'edge' ? edgePropScalar(n.c.id, key) : nodePropScalar(n.c.id, key);
+  const conds = [...(present ? [present] : []), ...(opts.productive ? [] : [predicateSql(expr, undefined)])];
+  const rel = s.q.cte(
+    q`SELECT ${expr} AS v${layoutProjection(s.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${aliasId(col, 'last')}${conds.length ? q` WHERE ${list(conds, ' AND ')}` : empty}`,
+    ['v', ...layoutCols(s.traverserLayout)],
+  );
+  return toScalarStream(loweringStateOf(s), rel);
+}
+
+/** The single string key of a `by(...)` group, or null for a token/nested/absent by. Key bys are
+ *  the only form `selectKeyFromAlias` serves. */
+const byKeyOf = (byArgs: readonly any[] | undefined): string | null =>
+  byArgs?.find((a: any) => typeof a === 'string') ?? null;
+
 // ---------- select(Pop, label) over a non-element stream ----------
 
 /** Which end index a single-value Pop reads. */
@@ -248,12 +290,19 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
     //   g.V().has('name','marko').as('a').values('name').select('a').by('name')
     //     → v[marko]  (byte-identical to the by()-less form)   where 'marko' is correct
     //
-    // A silent wrong answer, so fail closed instead. Applying the by() here would be the second
-    // implementation of modulator application; the fix is to reach the owner, which needs the
-    // element-stream entry `lowerSingleSelect` requires — tracked in
-    // docs/2026-07-28-match-string-frontend-design.md.
-    if (step.modulators?.length)
-      throw new Error(`select("${label}").by(...) over a value-shaped stream not yet supported (the label holds an element; only the element-stream route applies by() modulators)`);
+    // That silent drop is now ANSWERED rather than merely deferred: `selectKeyFromAlias` above is
+    // the one modulator implementation, extracted from `lowerSingleSelect` and shape-agnostic
+    // because it only ever reads the alias column. A key by() therefore gives the same value here
+    // as it does over an element parent.
+    //
+    // Still fails closed for the rest: a token/nested by has no shared implementation to reach, and
+    // a non-`last` Pop under a by() is unsupported on the element route too (so answering it here
+    // would make the two routes disagree).
+    if (step.modulators?.length) {
+      const key = byKeyOf(step.modulators[0]);
+      if (key !== null && end === 'last') return selectKeyFromAlias(s, entry, key);
+      throw new Error(`select("${label}").by(...) over a value-shaped stream supports only a property-key by() at Pop.last (this one is ${key === null ? 'a token or traversal by()' : `Pop.${pop}`})`);
+    }
     const rel = s.q.cte(
       q`SELECT ${aliasId(col, end)} AS id${layoutProjection(layout, p)} FROM ${p} WHERE ${present}`,
       ['id', ...layoutCols(layout)],

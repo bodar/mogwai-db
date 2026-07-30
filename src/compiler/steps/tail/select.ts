@@ -9,7 +9,7 @@ import { continueLowering, dispatchShapeTail, loweringStateOf, recordFieldColumn
 import { lowerGlobalCount } from './barrier.ts';
 import { byAt, childCtx, childSteps, classifyBy, classifyElementChild, classifyListChild, classifyRecordChildRows, classifyScalarChild, reuseCurrentFrame, ROOT_SCOPE, type ChildFrameStack, type ChildParent, type ChildUse } from './child-shape.ts';
 import { applyChildCardinality, lowerElementBody, mintChildEncounter, pushChildScope, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
-import { emptyElementLike, historyPropertyValues, historyScalarValues, historyValues, popEnd, popIsListResult, selectOneFromAlias } from './labelselect.ts';
+import { emptyElementLike, historyPropertyValues, historyScalarValues, historyValues, popEnd, popIsListResult, selectKeyFromAlias, selectOneFromAlias } from './labelselect.ts';
 import { type TailMods } from './projection.ts';
 
 // ---------- select()/project() ----------
@@ -288,14 +288,11 @@ export function lowerSingleSelect(st: ElementStream, proj: IRStep): Stream {
     );
     return { ...st, rel, elem: selElem };
   }
-  const n = elemTable(selElem).as('n');
-  const expr = selElem === 'edge' ? edgePropScalar(n.c.id, by.key!) : nodePropScalar(n.c.id, by.key!);
-  const conds = [...(present ? [present] : []), ...(productive ? [] : [predicateSql(expr, undefined)])];
-  const rel = st.q.cte(
-    q`SELECT ${expr} AS v${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${selId}${conds.length ? q` WHERE ${list(conds, ' AND ')}` : empty}`,
-    ['v', ...layoutCols(st.traverserLayout)],
-  );
-  return toScalarStream(loweringStateOf(st), rel);
+  // The by(key) projection is shape-agnostic — it reads the alias COLUMN, never this stream's
+  // element — so it lives in labelselect.ts and is shared with the value-shaped route
+  // (`selectOneFromAlias`). Keeping a copy here is what made `select(label).by(key)` answer over an
+  // element parent and silently drop the modulator over a scalar one.
+  return selectKeyFromAlias(st, selected, by.key!, { productive });
 }
 
 /**
