@@ -60,7 +60,7 @@ function operandSubquery(nested: any, deps: OperandDeps): Expression | null {
 const OPERAND_PROJECTORS: Record<string, (ctx: ScalarCtx, s: IRStep) => Expression | undefined> = {
   values: (ctx, s) => (typeof s.args?.[0] === 'string' ? scalarProp(ctx, s.args[0]) : undefined),
   id: (ctx) => ctx.extIdExpr,
-  label: (ctx) => labelNameSub(ctx.labelIdExpr),
+  label: (ctx) => ctx.labelNameExpr,
 };
 
 /** A TRAVERSER-DEPENDENT operand → a correlated scalar Expression, or null when this shape is not

@@ -613,5 +613,8 @@ test('choose().option() RESULTS across the arm shapes (the merge and the CASE ag
   // back as values, the four unmatched as vertices.
   const mixed = run(store, 'g.V().choose(__.out().count()).option(2,__.values("name")).option(3,__.values("age"))') as any[];
   expect(mixed.filter((r) => r.v !== null).map((r) => r.v).sort()).toEqual([29, 'josh']);
-  expect(mixed.filter((r) => r.id !== null).map((r) => r.label)).toEqual(['person', 'person', 'software', 'software']);
+  // Compared as a multiset: g.V() now scans in rowid order (labels moved to vertex_labels, so
+  // there is no label-grouped index driving the scan), and this assertion is about WHICH four
+  // vertices came back unmatched, not the order they arrive in.
+  expect(mixed.filter((r) => r.id !== null).map((r) => r.label).sort()).toEqual(['person', 'person', 'software', 'software']);
 });

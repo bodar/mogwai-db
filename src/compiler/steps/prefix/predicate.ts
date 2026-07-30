@@ -268,14 +268,14 @@ function compileInlinePredicate(
     let args: any[] = [...body[0].args];
     let labelCond: Expression | null = null;
     if (args.length === 3 && typeof args[0] === 'string') {
-      labelCond = labelIn(ctx.labelIdExpr, [args[0]]);
+      labelCond = ctx.labelMatch([args[0]]);
       args = args.slice(1);
     }
     const [key, val] = args;
     // has(T.label|T.id, v|P): predicate over the label name / external id (mirrors
     // filter.ts has()'s token branch, so choose(__.has(T.label,'person')) etc work).
     if (key && typeof key === 'object' && 'token' in key) {
-      const expr: Expression = key.token === 'label' ? labelNameSub(ctx.labelIdExpr)
+      const expr: Expression = key.token === 'label' ? ctx.labelNameExpr
         : key.token === 'id' ? ctx.extIdExpr!
         : decline(`has(T.${key.token}) has no inline form`);
       return predicateSql(expr, val);
@@ -286,13 +286,13 @@ function compileInlinePredicate(
     }
   }
   if (head === 'hasLabel' && body.length === 1)
-    return labelIn(ctx.labelIdExpr, body[0].args);
+    return ctx.labelMatch(body[0].args);
   if (head === 'hasId' && body.length === 1)
     return predicateSql(ctx.extIdExpr!, idPredFromArgs(body[0].args));
 
   // where(__.label()[.is(P)]) — predicate on the current element's label name.
   if (head === 'label' && body.length === 1)
-    return predicateSql(labelNameSub(ctx.labelIdExpr), hasIs ? isPred : undefined);
+    return predicateSql(ctx.labelNameExpr, hasIs ? isPred : undefined);
 
   // until(__.loops().is(P)) — the repeat-loop counter compared. loops() is only
   // meaningful inside an until() predicate (ctx.loopsExpr = the walk depth); elsewhere

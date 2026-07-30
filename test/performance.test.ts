@@ -2,6 +2,7 @@ import { test, expect, describe, beforeAll } from 'bun:test';
 import { compile, type Compiled } from '../src/compiler/compiler.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
+import { rawVertex } from './support/graph.ts';
 
 // Performance regression guard for property access (W4).
 //
@@ -18,12 +19,10 @@ describe('property indexes: static vp indexes engage (no full scan)', () => {
   beforeAll(() => {
     raw = new BunSqlite(':memory:');
     store = new GraphStore(raw);
-    const person = store.labelId('person');
     raw.exec('BEGIN');
-    const node = 'INSERT INTO nodes(id,label) VALUES(?,?)';
     const prop = 'INSERT INTO vertex_properties(node,key,value) VALUES(?,?,?)';
     for (let i = 1; i <= 5000; i++) {
-      store.query(node, [i, person]);
+      rawVertex(store, i, 'person');
       store.query(prop, [i, 'name', 'n' + i]);
       store.query(prop, [i, 'age', 18 + (i % 60)]);
     }

@@ -418,7 +418,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
       .toContain('ch_at');
     // T.label choice, literal-equality keys
     expect(read('g.V().choose(T.label).option("person", __.constant("p")).option(Pick.none, __.constant("o"))').sql)
-      .toContain('CASE WHEN (SELECT name FROM labels WHERE id=n.label) = ? THEN p.m0 ELSE p.m1 END');
+      .toContain('CASE WHEN (SELECT labels.name FROM vertex_labels JOIN labels ON labels.id=vertex_labels.label WHERE vertex_labels.node=n.id ORDER BY vertex_labels.label LIMIT 1) = ? THEN p.m0 ELSE p.m1 END');
     // count() choice is a total generic child barrier
     expect(read('g.V().choose(__.out().count()).option(1, __.values("name")).option(Pick.none, __.values("age"))').sql)
       .toContain('COUNT(c.id) AS v');

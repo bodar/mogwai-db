@@ -2,8 +2,7 @@ import { derived, q, list, raw, type Expression, type Relation } from '../../../
 import { isNested, stepChain, type Pred } from '../../../gremlin/frontend.ts';
 import {
     P_OPS, labelIn, predicateSql, nodePropScalar, hasProp, elemCtx,
-    idPredFromArgs, scalarProp, labelNameSub, FtsSubstringFastPath, type Elem
-} from '../../plan/plan.ts';
+    idPredFromArgs, scalarProp, labelNameSub, FtsSubstringFastPath, type Elem, labelMatchFor, labelNameFor } from '../../plan/plan.ts';
 import { runFastPath } from '../../options/fast-paths.ts';
 import { tryInlinePredicate, combineBranchPreds, PredicateInliningFastPath } from './predicate.ts';
 import { appendCte, aliasElem, layoutCols, patchLayout, layoutProjection, elemRel, labelCtx, labelScope, prevRel, scopePathCols, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from '../context/context.ts';
@@ -103,7 +102,7 @@ function pathDistinctTest(st: ElementStream, simple: boolean, from?: string, to?
 export const simplePath: StepFn = (s, st) => filterCte(st, pathDistinctTest(st, true, s.from, s.to));
 export const cyclicPath: StepFn = (s, st) => filterCte(st, pathDistinctTest(st, false, s.from, s.to));
 
-export const hasLabel: StepFn = (s, st) => filterCte(st, labelIn('n.label', s.args));
+export const hasLabel: StepFn = (s, st) => filterCte(st, labelMatchFor(elemRel(st), st.elem, s.args));
 
 /** hasId(id…|P): filter the current element by its external id (COALESCE(uid,id)).
  *  A lone predicate passes through; bare ids become a `within` set. */
@@ -120,7 +119,7 @@ export const has: StepFn = (s, st) => {
   let a = s.args;
   // has(label, key, value) — the 3-arg overload folds in a label filter.
   if (a.length === 3 && typeof a[0] === 'string') {
-    conds.push(labelIn('n.label', [a[0]]));
+    conds.push(labelMatchFor(elemRel(st), st.elem, [a[0]]));
     a = a.slice(1);
   }
   let [key, val] = a;
@@ -144,7 +143,7 @@ export const has: StepFn = (s, st) => {
     // has(T.label|T.id, v|P): predicate over the label name / external id. Routing
     // through predicateSql accepts both a bare value (→ equality) and a P/TextP.
     const n = elemRel(st);
-    const expr: Expression = key.token === 'label' ? q`(SELECT name FROM labels WHERE id=${n.c.label})`
+    const expr: Expression = key.token === 'label' ? labelNameFor(n, st.elem)
       : key.token === 'id' ? q`COALESCE(${n.c.uid}, ${n.c.id})`
       : (() => { throw new Error(`has(T.${key.token}) not supported`); })();
     conds.push(predicateSql(expr, val));
@@ -249,7 +248,7 @@ function dedupByLabels(st: ElementStream, s: IRStep, labels: string[]): ElementS
     if (by === undefined) return ctx.idExpr; // dedup by element identity
     if (typeof by === 'string') return scalarProp(ctx, by);
     if (by && typeof by === 'object' && 'token' in by) {
-      if (by.token === 'label') return labelNameSub(ctx.labelIdExpr);
+      if (by.token === 'label') return ctx.labelNameExpr;
       if (by.token === 'id') return ctx.extIdExpr!;
       throw new Error(`dedup(labels).by(T.${by.token}) not yet supported`);
     }

@@ -217,8 +217,17 @@ describe('classifyScalarChild admits what the scalar-child emitter lowers', () =
   };
 
   test('a projection-with-reducer body lowers in EVERY consumer position, with one answer', () => {
-    // 4 persons have an age (1 value each), 2 software vertices have none (0).
-    const expected = [1, 1, 1, 1, 0, 0];
+    // 4 persons have an age (1 value each), 2 software vertices have none (0). TWO orderings are
+    // in play here and they used to look identical, which is why they were one constant:
+    //  - a per-traverser consumer (map/local/project/coalesce/path) emits in g.V() order, i.e. the
+    //    modern graph's VERTEX order — marko, vadas, lop, josh, ripple, peter;
+    //  - choose() emits ARM by arm (every matched traverser, then every unmatched one), so on this
+    //    predicate it groups the four with an age ahead of the two without.
+    // They coincided while g.V() was scanned through the old n_label index and so came back
+    // grouped by label. Labels now live in vertex_labels, the scan is rowid order (TinkerPop's),
+    // and the two orderings separate. Only the first constant moved.
+    const expected = [1, 1, 0, 1, 0, 1];
+    const expectedByArm = [1, 1, 1, 1, 0, 0];
     expect(isScalarChild(nestedOf("g.V().map(__.values('age').count())"), CTX)).toBe(true);
     // the emitter-direct consumers (these already worked)
     expect(scalars("g.V().map(__.values('age').count())")).toEqual(expected);
@@ -226,14 +235,14 @@ describe('classifyScalarChild admits what the scalar-child emitter lowers', () =
     // the classifier-gated consumers (these failed closed: "not yet supported (scalar/projection
     // body)" for the branches, "local() child shape not yet supported" for local)
     expect(scalars("g.V().local(__.values('age').count())")).toEqual(expected);
-    expect(scalars("g.V().choose(__.has('age'), __.values('age').count(), __.values('age').count())")).toEqual(expected);
+    expect(scalars("g.V().choose(__.has('age'), __.values('age').count(), __.values('age').count())")).toEqual(expectedByArm);
     expect(scalars("g.V().coalesce(__.values('age').count(), __.constant(-1))")).toEqual(expected);
     expect(scalars("g.V().path().by(__.values('age').count())")).toEqual(expected);
     // …and the movement-count reading of a count terminal still works next to it, in both
     // positions — the two arms are disjoint, so admitting one never shadows the other.
-    expect(scalars("g.V().local(__.out().count())")).toEqual([3, 0, 2, 1, 0, 0]);
+    expect(scalars("g.V().local(__.out().count())")).toEqual([3, 0, 0, 2, 0, 1]);
     expect(scalars("g.V().choose(__.has('age'), __.out().count(), __.values('age').count())"))
-      .toEqual([3, 0, 2, 1, 0, 0]);
+      .toEqual([3, 0, 2, 1, 0, 0]); // by arm, as above
   });
 
   test('a producer the projection builder cannot read + a reducer stays a CLEAN deferral', () => {

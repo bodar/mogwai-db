@@ -1,6 +1,6 @@
 import type { GraphStore } from '../../../storage.ts';
 import { q, value, list, raw, render, type Expression } from '../../../sql/kernel/q.ts';
-import { labelIn, nodeHasProp, edgeHasProp, sqlElem, type Elem } from '../../plan/plan.ts';
+import { labelIn, nodeHasProp, edgeHasProp, sqlElem, type Elem, vertexLabelIn, vertexLabelName } from '../../plan/plan.ts';
 import { gremlinTypeOf, isCollectionType, storedScalar, mapEntryType, valueNodeOf, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
 import { stepChain, isNested, isCardinalityArg, isCardinalityValueArg, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
@@ -181,6 +181,8 @@ function compileDrop(engine: Engine, steps: IRStep[]): WritePlan {
         store.query(`DELETE FROM edge_properties WHERE edge IN (SELECT id FROM edges WHERE src IN (${ph}) OR tgt IN (${ph}))`, [...ids, ...ids]);
         store.query(`DELETE FROM edges WHERE src IN (${ph}) OR tgt IN (${ph})`, [...ids, ...ids]);
         store.query(`DELETE FROM vertex_properties WHERE node IN (${ph})`, ids);
+        // vertex_labels references nodes(id), so the label set goes before the vertex.
+        store.query(`DELETE FROM vertex_labels WHERE node IN (${ph})`, ids);
         store.query(`DELETE FROM nodes WHERE id IN (${ph})`, ids);
       }
       return [];
@@ -230,7 +232,7 @@ function compileSetProperty(engine: Engine, steps: IRStep[], params: Record<stri
     };
   }
   // Vertex props are normalized rows: apply each with its cardinality (+ meta).
-  const readCur = `SELECT uid, (SELECT name FROM labels WHERE id=nodes.label) AS label FROM nodes WHERE id=?`;
+  const readCur = `SELECT uid, (SELECT l.name FROM vertex_labels vl JOIN labels l ON l.id=vl.label WHERE vl.node=nodes.id ORDER BY vl.label LIMIT 1) AS label FROM nodes WHERE id=?`;
   return {
     kind: 'write',
     run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
@@ -362,8 +364,14 @@ function insertRow(store: GraphStore, table: ElementTable, baseCols: string[], b
   // A JSONB column binds its JSON *text* and wraps jsonb(?) so SQLite builds the blob
   // (both runtimes accept a string bind; a raw Buffer bind would diverge — see storage.ts).
   const ph = (c: string) => c === jsonbCol ? 'jsonb(?)' : '?';
+  // A vertex with no user-supplied id now has NOTHING to insert — its label moved to
+  // vertex_labels — and `INSERT INTO nodes() VALUES()` is a syntax error. DEFAULT VALUES is
+  // the spelling for "one row, all defaults", and the rowid is what we actually want back.
+  const body = cols.length
+    ? `(${cols.join(', ')}) VALUES(${cols.map(ph).join(', ')})`
+    : 'DEFAULT VALUES';
   const row = store.query<{ id: number; uid: string | null }>(
-    `INSERT INTO ${table}(${cols.join(', ')}) VALUES(${cols.map(ph).join(', ')}) RETURNING id, uid`, vals)[0];
+    `INSERT INTO ${table} ${body} RETURNING id, uid`, vals)[0];
   return { id: row.id, extId: row.uid ?? row.id };
 }
 
@@ -483,7 +491,10 @@ function insertVertex(
     if (!r.has) throw new Error('addV(traversal) label produced no value');
     label = String(r.value);
   } else label = spec.label;
-  const row = insertRow(store, 'nodes', ['label'], [store.labelId(label)], spec.uid);
+  const row = insertRow(store, 'nodes', [], [], spec.uid);
+  // A vertex's labels live in vertex_labels. The declared cardinality is ONE, so exactly one
+  // row goes in here; addLabel()/multi-label addV widen this to the whole set.
+  store.addVertexLabels(row.id, [label]);
   for (const p of spec.props) {
     const r = resolveSpecValue(engine, store, p, row.id, 'vertex', params, sideEffects, driver);
     if (r.has) applyVertexProperty(store, row.id, resolveSpecKey(engine, store, p, row.id, 'vertex', params, sideEffects, driver), r.value, r.vtype, p.meta, p.cardinality, r.typeNode);
@@ -537,7 +548,7 @@ function compileMidAddV(engine: Engine, steps: IRStep[], addVAt: number, params:
         return { ...driver, id: v.id, elem: 'vertex' as const };
       });
       return created.map((driver) => {
-        const row = store.query<any>('SELECT uid, (SELECT name FROM labels WHERE id=nodes.label) AS label FROM nodes WHERE id=?', [driver.id])[0];
+        const row = store.query<any>('SELECT uid, (SELECT l.name FROM vertex_labels vl JOIN labels l ON l.id=vl.label WHERE vl.node=nodes.id ORDER BY vl.label LIMIT 1) AS label FROM nodes WHERE id=?', [driver.id])[0];
         return { vertex: { id: row.uid ?? driver.id, label: row.label, props: readVertexProps(store, driver.id) } };
       });
     },
@@ -896,7 +907,10 @@ function resolveMergeSpec(engine: Engine, store: GraphStore, spec: MergeSpec, se
 // edge merge-match queries.
 function commonMergeConds(spec: MergeSpec, elem: Elem): Expression[] {
   const conds: Expression[] = [];
-  if (spec.label != null) conds.push(labelIn('label', [spec.label]));
+  // ANY-label match: a vertex matches mergeV's label if it CARRIES that label. Under the
+  // declared ONE cardinality that is the old `label = ?`; it is already the multi-label rule.
+  if (spec.label != null)
+    conds.push(elem === 'vertex' ? vertexLabelIn(raw('nodes.id'), [spec.label]) : labelIn('label', [spec.label]));
   if (spec.id != null) conds.push(typeof spec.id === 'number' ? q`id=${value(spec.id)}` : q`uid=${value(spec.id)}`);
   for (const [k, v] of Object.entries(spec.props))
     // An ANY-match EXISTS over the element's normalized properties table.
@@ -907,7 +921,7 @@ function commonMergeConds(spec: MergeSpec, elem: Elem): Expression[] {
 function mergeMatchQuery(spec: MergeSpec): { sql: string; binds: any[] } {
   const conds = commonMergeConds(spec, 'vertex');
   const where = conds.length ? list(conds, ' AND ') : q`1`;
-  return render(q`SELECT id, uid, (SELECT name FROM labels WHERE id=nodes.label) AS label FROM nodes WHERE ${where}`);
+  return render(q`SELECT id, uid, ${vertexLabelName(raw('nodes.id'))} AS label FROM nodes WHERE ${where}`);
 }
 
 function parseMergeOptions(mods: Step[], step: string, sideEffects: Map<string, any> | undefined, params: Record<string, any>): { onCreate: MergeSpec | null; onMatch: MergeSpec | null } {

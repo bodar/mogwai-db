@@ -214,7 +214,8 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     expect(read('g.V().where(__.out("knows").has("age", P.gt(30)))').sql)
       .toContain("ELSE value END) > ?");
     // terminal hasLabel()
-    expect(read('g.V().where(__.out("created").hasLabel("software"))').sql).toContain('n.label IN (SELECT id FROM labels');
+    // hasLabel is ANY-label membership over vertex_labels — a seek on vl_label(label, node).
+    expect(read('g.V().where(__.out("created").hasLabel("software"))').sql).toContain('n.id IN (SELECT vertex_labels.node FROM vertex_labels WHERE vertex_labels.label IN (SELECT id FROM labels');
     // a lone bare movement keeps the leaner single-hop EXISTS over the movement child
     expect(read('g.V().where(__.out()).count()').sql).toContain('EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.src=p.id) c)');
   });

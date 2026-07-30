@@ -8,6 +8,7 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
+import { rawVertex } from '../support/graph.ts';
 
 const read = (q: string, options?: CompileOptions) => {
   const p = compile(q, {}, options);
@@ -627,9 +628,8 @@ test('traversers are a multiset — both() preserves duplicates', () => {
 
 test('both() on a self-loop yields the vertex twice', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
-  const person = store.labelId('person');
   const self = store.labelId('self');
-  store.query('INSERT INTO nodes(id,label) VALUES(?,?)', [1, person]);
+  rawVertex(store, 1, 'person');
   store.query('INSERT INTO vertex_properties(node,key,value) VALUES(?,?,?)', [1, 'name', 'ouro']);
   store.query('INSERT INTO edges(id,src,label,tgt) VALUES(?,?,?,?)', [2, 1, self, 1]);
   expect(run(store, 'g.V(1).both().count()').map((r) => r.v)).toEqual([2]);

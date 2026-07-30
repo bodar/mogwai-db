@@ -8,6 +8,7 @@ import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { decode, decodeAll } from '../support/decode.ts';
+import { rawVertex } from '../support/graph.ts';
 
 const read = (q: string, options?: CompileOptions) => {
   const p = compile(q, {}, options);
@@ -272,8 +273,9 @@ test('simplePath() inside repeat() prunes cycles even without path() output', ()
 
 test('dedup() after a recursive path() collapses equal paths (multigraph parallel edges)', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
-  const person = store.labelId('person'), knows = store.labelId('knows');
-  store.query('INSERT INTO nodes(id,label) VALUES(1,?),(2,?)', [person, person]);
+  const knows = store.labelId('knows');
+  rawVertex(store, 1, 'person');
+  rawVertex(store, 2, 'person');
   store.query('INSERT INTO edges(id,src,label,tgt) VALUES(10,1,?,2),(11,1,?,2)', [knows, knows]);
   const npaths = (q: string) => new Set((run(store, q) as any[]).map((r) => r.pk)).size;
   // two parallel 1→2 edges → out() reaches 2 twice → two identical [1,2] paths.
@@ -322,13 +324,11 @@ test('until() has NO depth cap: reaches a target deeper than the retired 32-hop 
   // until() walk the whole way. Under the old cap this silently returned [] (the
   // target sat beyond depth 32) — a wrong answer masquerading as "no match".
   const store = new GraphStore(new BunSqlite(':memory:'));
-  const person = store.labelId('person');
   const knows = store.labelId('knows');
-  const node = 'INSERT INTO nodes(id, label) VALUES(?,?)';
   const prop = 'INSERT INTO vertex_properties(node, key, value) VALUES(?,?,?)';
   const edge = 'INSERT INTO edges(id, src, label, tgt) VALUES(?,?,?,?)';
   const N = 40; // deeper than the retired cap
-  for (let i = 0; i <= N; i++) { store.query(node, [i + 1, person]); store.query(prop, [i + 1, 'name', `n${i}`]); }
+  for (let i = 0; i <= N; i++) { rawVertex(store, i + 1, 'person'); store.query(prop, [i + 1, 'name', `n${i}`]); }
   for (let i = 0; i < N; i++) store.query(edge, [100 + i, i + 1, knows, i + 2]); // n0→n1→…→n40
   expect(uNames(store, `g.V(1).repeat(__.out()).until(__.has("name","n${N}"))`)).toEqual([`n${N}`]);
 });

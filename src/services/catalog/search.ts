@@ -1,6 +1,6 @@
 import { q, value, raw, type Relation } from '../../sql/kernel/q.ts';
 import { propertyFts, vertexProperties, edgeProperties, nodes, edges, labels } from '../../sql/schema.ts';
-import { sqlElem, storedValueExpr, type Elem } from '../../compiler/plan/plan.ts';
+import { sqlElem, storedValueExpr, type Elem, vertexLabelName } from '../../compiler/plan/plan.ts';
 import { PROPERTY_PAYLOAD, toPropertyStream, type PropertyStream } from '../../compiler/steps/context/stream.ts';
 import type { TraverserLayout } from '../../compiler/steps/context/context.ts';
 import type { Service, ServiceCallCtx, CallParams } from '../spi/types.ts';
@@ -79,10 +79,9 @@ function searchProperties(ctx: ServiceCallCtx, ownerElem: Elem, pattern: string)
   if (ownerElem === 'vertex') {
     const vp = vertexProperties.as('vp');
     const nd = nodes.as('n');
-    const l = labels.as('l');
     // vpid = the VertexProperty id; owner = the vertex; pmeta = its meta bag.
-    body = q`SELECT ${vp.c.id} AS vpid, ${nd.c.id} AS owner, ${l.c.name} AS ownerLabel, ${vp.c.key} AS pk, ${storedValueExpr(vp.c.value, vp.c.vtype)} AS pv, ${vp.c.vtype} AS pvtype, json(${vp.c.meta}) AS pmeta
-      FROM ${f} JOIN ${vp} ON ${vp.c.id}=${f.c.pid} JOIN ${nd} ON ${nd.c.id}=${vp.c.node} JOIN ${l} ON ${l.c.id}=${nd.c.label} WHERE ${scope}`;
+    body = q`SELECT ${vp.c.id} AS vpid, ${nd.c.id} AS owner, ${vertexLabelName(nd.c.id)} AS ownerLabel, ${vp.c.key} AS pk, ${storedValueExpr(vp.c.value, vp.c.vtype)} AS pv, ${vp.c.vtype} AS pvtype, json(${vp.c.meta}) AS pmeta
+      FROM ${f} JOIN ${vp} ON ${vp.c.id}=${f.c.pid} JOIN ${nd} ON ${nd.c.id}=${vp.c.node} WHERE ${scope}`;
   } else {
     const ep = edgeProperties.as('ep');
     const ed = edges.as('e');

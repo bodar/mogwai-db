@@ -20,7 +20,19 @@ const SCHEMA = [
   // optional TinkerPop user-supplied id (string/custom); UNIQUE auto-indexes it
   // for the V(uid) lookup. Elements report COALESCE(uid, id) as their id.
   `CREATE TABLE IF NOT EXISTS nodes(
-     id INTEGER PRIMARY KEY, uid TEXT UNIQUE, label INTEGER NOT NULL REFERENCES labels(id))`,
+     id INTEGER PRIMARY KEY, uid TEXT UNIQUE)`,
+  // A vertex's labels are a SET (TinkerPop 4 multi-label), so they normalize out of `nodes`
+  // exactly as properties did — the rule being "normalize where cardinality is 0..N, keep
+  // inline where it is exactly 1", which is also why an EDGE label stays on `edges` (upstream
+  // fixes edge label cardinality at ONE by spec). Two things fall out of the schema rather
+  // than out of step logic: PRIMARY KEY(node,label) makes it a set, so re-adding a label a
+  // vertex already carries is an INSERT OR IGNORE no-op; and a ZERO-label vertex is simply
+  // zero rows, which a NOT NULL column could not represent and LabelCardinality.ZERO_OR_MORE
+  // requires. The declared capability is still ONE — see labelCardinality in api.ts — so
+  // today every vertex has exactly one row here.
+  `CREATE TABLE IF NOT EXISTS vertex_labels(
+     node INTEGER NOT NULL REFERENCES nodes(id), label INTEGER NOT NULL REFERENCES labels(id),
+     PRIMARY KEY (node, label))`,
   // Vertex properties are normalized (W4): one row per VertexProperty instance, so a
   // key may repeat (multi-property, Cardinality.list/set). `id` (rowid) IS the
   // VertexProperty id. `value` has NO declared type → BLOB affinity keeps whatever
@@ -49,7 +61,9 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS edge_properties(
      id INTEGER PRIMARY KEY, edge INTEGER NOT NULL REFERENCES edges(id),
      key TEXT NOT NULL, value, vtype TEXT, UNIQUE(edge, key))`,
-  `CREATE INDEX IF NOT EXISTS n_label ON nodes(label)`,
+  // Replaces n_label: (label, node) is the seek order hasLabel wants — find the label id,
+  // read the node ids off the index without touching `nodes` at all.
+  `CREATE INDEX IF NOT EXISTS vl_label ON vertex_labels(label, node)`,
   `CREATE INDEX IF NOT EXISTS e_out ON edges(src, label, tgt)`,
   `CREATE INDEX IF NOT EXISTS e_in  ON edges(tgt, label, src)`,
   // Static covering indexes replace the old self-tuning per-key expression index on
@@ -102,6 +116,23 @@ export class GraphStore {
       'INSERT INTO labels(name) VALUES(?) ON CONFLICT(name) DO UPDATE SET name=name RETURNING id',
       [name],
     )[0].id;
+  }
+
+  /** Bind labels to a vertex. `INSERT OR IGNORE` because (node,label) is the primary key,
+   *  so re-adding a label the vertex already carries is a no-op — which is exactly
+   *  `addLabel()`'s SET semantics, enforced by the schema rather than by the step. */
+  addVertexLabels(node: number, names: readonly string[]): void {
+    for (const name of names)
+      this.query('INSERT OR IGNORE INTO vertex_labels(node, label) VALUES(?, ?)', [node, this.labelId(name)]);
+  }
+
+  /** A vertex's labels, in the same deterministic order the SQL reader picks from
+   *  (`ORDER BY label`), so the write path's framing agrees with the read path's. */
+  vertexLabels(node: number): string[] {
+    return this.query<{ name: string }>(
+      'SELECT l.name AS name FROM vertex_labels vl JOIN labels l ON l.id=vl.label WHERE vl.node=? ORDER BY vl.label',
+      [node],
+    ).map((r) => r.name);
   }
 
   labelName(id: number): string {

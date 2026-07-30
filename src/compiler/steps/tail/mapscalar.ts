@@ -470,7 +470,7 @@ export function lowerChooseOptions(st: ElementStream, steps: IRStep[], stop: num
   const ctx = elemCtx(n, st.elem);
   const choice = choiceMod !== undefined
     ? p.c[mods.values[choiceMod].value]
-    : a0.token === 'label' ? labelNameSub(ctx.labelIdExpr)
+    : a0.token === 'label' ? ctx.labelNameExpr
       : a0.token === 'id' ? ctx.extIdExpr!
       : (() => { throw new Error(`choose(T.${a0.token}) not yet supported`); })();
   const keyed = options.filter((x) => !x.isNone);

@@ -12,7 +12,7 @@ import { SCALAR_TRANSFORMS } from './coerce.ts';
 import { lowerReSource } from '../graph-source.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
-import { predicateSql, rangeToOffsetLimit, elemTable } from '../../plan/plan.ts';
+import { predicateSql, rangeToOffsetLimit, elemTable, labelNameFor } from '../../plan/plan.ts';
 import { elementOrderDrop, elementOrderSql } from './modulation.ts';
 import {
     childCtx, childSteps, classifyCountChild, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, labelSelectOf,
@@ -554,9 +554,8 @@ function compileScalarChildRows(
       from = q`${c} JOIN ${elem} ON ${elem.c.id}=${c.c.id}`;
       order = c.c.id;
     } else {
-      const l = labels.as('l');
-      scalar = l.c.name;
-      from = q`${c} JOIN ${elem} ON ${elem.c.id}=${c.c.id} JOIN ${l} ON ${l.c.id}=${elem.c.label}`;
+      scalar = labelNameFor(elem, end.elem);
+      from = q`${c} JOIN ${elem} ON ${elem.c.id}=${c.c.id}`;
       order = c.c.id;
     }
   }

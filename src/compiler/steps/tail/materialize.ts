@@ -9,7 +9,7 @@
 import { raw, type Expression, type Query } from '../../../sql/kernel/q.ts';
 import { perRowColumnOf, readCompiled, STATIC, UNKNOWN, type Compiled, type ListOf, type Shape, type VariantShapeArm } from '../../../sql/kernel/render.ts';
 import { list, q } from '../../../sql/kernel/q.ts';
-import { framedProps, extIdOf, elemTable } from '../../plan/plan.ts';
+import { framedProps, extIdOf, elemTable, labelNameFor, labelNameSub, vertexLabelName } from '../../plan/plan.ts';
 import { edges, labels, nodes } from '../../../sql/schema.ts';
 import { groupResultColumns, pathColumns, recordResultColumns, type ForeignStream, type GroupStream, type ListStream, type MapEntryStream, type MapOf, type MapStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
 import type { ElementStream } from '../context/context.ts';
@@ -56,9 +56,11 @@ export function materializeVariantRoot(stream: VariantStream): Compiled {
   if (stream.node || stream.edge) {
     const n = stream.node ? nodes.as('n') : undefined;
     const e = stream.edge ? edges.as('e') : undefined;
-    const l = labels.as('l');
     const idParts = [n && q`WHEN 2 THEN COALESCE(${n.c.uid}, ${n.c.id})`, e && q`WHEN 3 THEN COALESCE(${e.c.uid}, ${e.c.id})`].filter(Boolean) as Expression[];
-    const labelParts = [n && q`WHEN 2 THEN ${l.c.name}`, e && q`WHEN 3 THEN ${l.c.name}`].filter(Boolean) as Expression[];
+    // Each arm reads its own label: the vertex correlates into vertex_labels and picks,
+    // the edge reads its inline column. The old single `LEFT JOIN labels` keyed on
+    // COALESCE(n.label, e.label) is gone with nodes.label.
+    const labelParts = [n && q`WHEN 2 THEN ${vertexLabelName(n.c.id)}`, e && q`WHEN 3 THEN ${labelNameSub(e.c.label)}`].filter(Boolean) as Expression[];
     const propParts = [n && q`WHEN 2 THEN json(${framedProps(n, 'vertex')})`, e && q`WHEN 3 THEN json(${framedProps(e, 'edge')})`].filter(Boolean) as Expression[];
     cols.push(q`CASE ${v.c.vk} ${list(idParts, ' ')} END AS id`);
     cols.push(q`CASE ${v.c.vk} ${list(labelParts, ' ')} END AS label`);
@@ -66,8 +68,6 @@ export function materializeVariantRoot(stream: VariantStream): Compiled {
     if (e) cols.push(q`${extIdOf(e.c.src)} AS src`, q`${extIdOf(e.c.tgt)} AS tgt`);
     if (n) joins.push(q` LEFT JOIN ${n} ON ${n.c.id}=${v.c.rid} AND ${v.c.vk}=2`);
     if (e) joins.push(q` LEFT JOIN ${e} ON ${e.c.id}=${v.c.rid} AND ${v.c.vk}=3`);
-    // one labels join keyed on whichever element table matched (only one does per row)
-    joins.push(q` LEFT JOIN ${l} ON ${l.c.id}=${n && e ? q`COALESCE(${n.c.label}, ${e.c.label})` : n ? n.c.label : e!.c.label}`);
   }
   if (stream.listOf) cols.push(q`${listResult(v.c.list, stream.listOf)} AS list`);
   return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${v}${list(joins, '')}`, shape);
@@ -78,11 +78,11 @@ export function materializeVariantRoot(stream: VariantStream): Compiled {
  * downstream unfold; only the root wire projection expands it. */
 function elementListResult(listExpr: Expression, elem: 'vertex' | 'edge'): Expression {
   const n = elemTable(elem).as('n');
-  const l = labels.as('l');
+  const lbl = labelNameFor(n, elem);
   const object = elem === 'edge'
-    ? q`json_object('id', COALESCE(${n.c.uid}, ${n.c.id}), 'label', ${l.c.name}, 'src', ${extIdOf(n.c.src)}, 'tgt', ${extIdOf(n.c.tgt)}, 'props', json(${framedProps(n, elem)}))`
-    : q`json_object('id', COALESCE(${n.c.uid}, ${n.c.id}), 'label', ${l.c.name}, 'props', json(${framedProps(n, elem)}))`;
-  const expanded = q`json_each(json(${listExpr})) AS j JOIN ${n} ON ${n.c.id}=j.value JOIN ${l} ON ${l.c.id}=${n.c.label}`;
+    ? q`json_object('id', COALESCE(${n.c.uid}, ${n.c.id}), 'label', ${lbl}, 'src', ${extIdOf(n.c.src)}, 'tgt', ${extIdOf(n.c.tgt)}, 'props', json(${framedProps(n, elem)}))`
+    : q`json_object('id', COALESCE(${n.c.uid}, ${n.c.id}), 'label', ${lbl}, 'props', json(${framedProps(n, elem)}))`;
+  const expanded = q`json_each(json(${listExpr})) AS j JOIN ${n} ON ${n.c.id}=j.value`;
   return q`json(COALESCE((SELECT json_group_array(${object} ORDER BY j.key) FROM ${expanded}), json('[]')))`;
 }
 
@@ -137,11 +137,11 @@ export function materializeListRoot(stream: ListStream): Compiled {
  * nodes/edges + labels; NULL rowid → SQL NULL (framed as a null value). */
 function elementValueResult(ridExpr: Expression, elem: 'vertex' | 'edge'): Expression {
   const n = elemTable(elem).as('en');
-  const l = labels.as('el');
+  const lbl = labelNameFor(n, elem);
   const object = elem === 'edge'
-    ? q`json_object('id', COALESCE(${n.c.uid}, ${n.c.id}), 'label', ${l.c.name}, 'src', ${extIdOf(n.c.src)}, 'tgt', ${extIdOf(n.c.tgt)}, 'props', json(${framedProps(n, elem)}))`
-    : q`json_object('id', COALESCE(${n.c.uid}, ${n.c.id}), 'label', ${l.c.name}, 'props', json(${framedProps(n, elem)}))`;
-  return q`(SELECT ${object} FROM ${n} JOIN ${l} ON ${l.c.id}=${n.c.label} WHERE ${n.c.id}=${ridExpr})`;
+    ? q`json_object('id', COALESCE(${n.c.uid}, ${n.c.id}), 'label', ${lbl}, 'src', ${extIdOf(n.c.src)}, 'tgt', ${extIdOf(n.c.tgt)}, 'props', json(${framedProps(n, elem)}))`
+    : q`json_object('id', COALESCE(${n.c.uid}, ${n.c.id}), 'label', ${lbl}, 'props', json(${framedProps(n, elem)}))`;
+  return q`(SELECT ${object} FROM ${n} WHERE ${n.c.id}=${ridExpr})`;
 }
 
 /** One side (key/value) of a Map.Entry row projected to a wire-ready column. A scalar rides

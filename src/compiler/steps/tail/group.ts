@@ -2,7 +2,7 @@ import { q, value, list, empty, type Expression, type Relation } from '../../../
 import { edges, labels, nodes, vertexProperties, edgeProperties } from '../../../sql/schema.ts';
 import {
     scalarProp, labelNameSub, framedPropsCtx, extIdOf, propExtract, predicateSql, elemCtx,
-    storedValueExpr, bareValueMapProps, typedScalarNode, compareKey, type ScalarCtx, elemTable } from '../../plan/plan.ts';
+    storedValueExpr, bareValueMapProps, typedScalarNode, compareKey, type ScalarCtx, elemTable, labelNameFor, vertexLabelIn, vertexLabelName } from '../../plan/plan.ts';
 import { gtypeName, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { isMapLocalOrder } from './list.ts';
 import { type IRStep } from '../../ir/strategies.ts';
@@ -98,10 +98,10 @@ function elementSelect(elem: ElemShape, prefix: string, ctx: ScalarCtx, internal
   const rid = internalId ? q`${ctx.idExpr} AS ${`${prefix}_rid`}, ` : empty;
   if (elem === 'edge')
     // Endpoints as external ids (see the __element edge projector).
-    return q`${rid}${extId} AS ${`${prefix}_id`}, ${labelNameSub(ctx.labelIdExpr)} AS ${`${prefix}_label`}, ${extIdOf(ctx.srcExpr!)} AS ${`${prefix}_src`}, ${extIdOf(ctx.tgtExpr!)} AS ${`${prefix}_tgt`}, ${framedPropsCtx(ctx)} AS ${`${prefix}_props`}`;
+    return q`${rid}${extId} AS ${`${prefix}_id`}, ${ctx.labelNameExpr} AS ${`${prefix}_label`}, ${extIdOf(ctx.srcExpr!)} AS ${`${prefix}_src`}, ${extIdOf(ctx.tgtExpr!)} AS ${`${prefix}_tgt`}, ${framedPropsCtx(ctx)} AS ${`${prefix}_props`}`;
   if (elem === 'property')
     return q`${ctx.ownerExpr!} AS ${`${prefix}_owner`}, ${ctx.pkExpr!} AS ${`${prefix}_pk`}, ${ctx.pvExpr!} AS ${`${prefix}_pv`}`;
-  return q`${rid}${extId} AS ${`${prefix}_id`}, ${labelNameSub(ctx.labelIdExpr)} AS ${`${prefix}_label`}, ${framedPropsCtx(ctx)} AS ${`${prefix}_props`}`;
+  return q`${rid}${extId} AS ${`${prefix}_id`}, ${ctx.labelNameExpr} AS ${`${prefix}_label`}, ${framedPropsCtx(ctx)} AS ${`${prefix}_props`}`;
 }
 
 /** The SQL expr to GROUP BY / frame an element by identity. */
@@ -136,7 +136,7 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
     // A VertexProperty's T.label is its key (pk); its T.id is vpid (ctx.idExpr). For an
     // element, T.label resolves the interned label id to its name.
     const expr = by.token === 'label'
-      ? (src.elem === 'property' ? src.ctx.pkExpr! : labelNameSub(src.ctx.labelIdExpr))
+      ? (src.elem === 'property' ? src.ctx.pkExpr! : src.ctx.labelNameExpr)
       : by.token === 'id' ? src.ctx.idExpr : null;
     if (!expr) throw new Error(`group().by(T.${by.token}) not yet supported`);
     return { desc: scalarGroupKey(src.productiveBy), cols: q`${expr} AS gk`, group: 'gk' };
@@ -171,7 +171,7 @@ function nestedInnerKeyVal(
   const keyArg = innerBys[0]?.[0];
   let key: Expression | null = null;
   if (keyArg && typeof keyArg === 'object' && 'token' in keyArg)
-    key = keyArg.token === 'label' ? (ctx.elem === 'property' ? ctx.pkExpr! : labelNameSub(ctx.labelIdExpr))
+    key = keyArg.token === 'label' ? (ctx.elem === 'property' ? ctx.pkExpr! : ctx.labelNameExpr)
       : keyArg.token === 'id' ? ctx.idExpr : null;
   else if (typeof keyArg === 'string') key = scalarProp(ctx, keyArg);
   if (!key) return null; // bare/element inner key deferred
@@ -399,7 +399,8 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
       const keyFilter = keys.length ? q` AND ${vp.c.key} IN (${list(keys.map(value), ', ')})` : empty;
       joins.push(q` JOIN ${vp} ON ${vp.c.node}=${p.c.id}${keyFilter}`);
       innerCtx = {
-        elem: 'property', idExpr: vp.c.id, labelIdExpr: q`(SELECT label FROM nodes WHERE id=${vp.c.node})`,
+        elem: 'property', idExpr: vp.c.id,
+        labelNameExpr: vertexLabelName(vp.c.node), labelMatch: (names) => vertexLabelIn(vp.c.node, names),
         ownerExpr: vp.c.node, pkExpr: vp.c.key, pvExpr: storedValueExpr(vp.c.value, vp.c.vtype), metaExpr: q`json(${vp.c.meta})`,
       };
       innerBulk = parent.traverserLayout.bulk ? p.c[parent.traverserLayout.bulk] : undefined;
@@ -536,7 +537,7 @@ export function lowerValueMap(st: ElementStream, proj: IRStep): MapStream {
   const p = st.rel.as('p');
   const n = elemRel(st);
   const l = labels.as('l');
-  const vlJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
+  const vlJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
   // The carried columns the blob rides out with, declared once and used for both CTEs so each
   // relation's declared schema equals its physical projection.
   //
@@ -745,11 +746,11 @@ export function lowerProperties(st: ElementStream, step: IRStep): PropertyStream
   if (st.elem === 'edge') {
     const ep = edgeProperties.as('ep');
     const keyFilter: Expression = keys.length ? q` AND ${ep.c.key} IN (${list(keys.map(value), ',')})` : empty;
-    propBody = q`SELECT NULL AS vpid, ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, ${ep.c.key} AS pk, ${storedValueExpr(ep.c.value, ep.c.vtype)} AS pv, ${ep.c.vtype} AS pvtype, NULL AS pmeta${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label} JOIN ${ep} ON ${ep.c.edge}=${n.c.id}${keyFilter}`;
+    propBody = q`SELECT NULL AS vpid, ${n.c.id} AS owner, ${labelNameFor(n, 'edge')} AS ownerLabel, ${ep.c.key} AS pk, ${storedValueExpr(ep.c.value, ep.c.vtype)} AS pv, ${ep.c.vtype} AS pvtype, NULL AS pmeta${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${ep} ON ${ep.c.edge}=${n.c.id}${keyFilter}`;
   } else {
     const vp = vertexProperties.as('vp');
     const keyFilter: Expression = keys.length ? q` AND ${vp.c.key} IN (${list(keys.map(value), ',')})` : empty;
-    propBody = q`SELECT ${vp.c.id} AS vpid, ${n.c.id} AS owner, ${l.c.name} AS ownerLabel, ${vp.c.key} AS pk, ${storedValueExpr(vp.c.value, vp.c.vtype)} AS pv, ${vp.c.vtype} AS pvtype, json(${vp.c.meta}) AS pmeta${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label} JOIN ${vp} ON ${vp.c.node}=${n.c.id}${keyFilter}`;
+    propBody = q`SELECT ${vp.c.id} AS vpid, ${n.c.id} AS owner, ${vertexLabelName(n.c.id)} AS ownerLabel, ${vp.c.key} AS pk, ${storedValueExpr(vp.c.value, vp.c.vtype)} AS pv, ${vp.c.vtype} AS pvtype, json(${vp.c.meta}) AS pmeta${layoutProjection(st.traverserLayout, p)} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id} JOIN ${vp} ON ${vp.c.node}=${n.c.id}${keyFilter}`;
   }
   const rel = st.q.cte(propBody, [...PROPERTY_PAYLOAD, ...layoutCols(st.traverserLayout)]);
   return toPropertyStream(loweringStateOf(st), rel, st.elem);
@@ -758,12 +759,12 @@ export function lowerProperties(st: ElementStream, step: IRStep): PropertyStream
 /** A property framing/scalar ctx built from an (already-aliased) PropertyStream/domain
  *  relation. `idExpr` is the VertexProperty's OWN id (vpid) — its Gremlin T.id — NOT the
  *  owner; `pk` is its T.label; `pmeta` backs by(String) meta-property reads. owner/pk/pv
- *  frame the VertexProperty as a group value. (labelIdExpr resolves the owner's label,
- *  retained only for the element-framing helpers; a property's T.label is pk, see
+ *  frame the VertexProperty as a group value. (labelNameExpr resolves the OWNER's label,
+ *  retained only for the element-framing helpers; a property's own T.label is pk, see
  *  buildGroupKey.) */
 const propertyCtx = (p: Relation): ScalarCtx => ({
   elem: 'property', idExpr: p.c.vpid,
-  labelIdExpr: q`(SELECT label FROM nodes WHERE id=${p.c.owner})`,
+  labelNameExpr: vertexLabelName(p.c.owner), labelMatch: (names) => vertexLabelIn(p.c.owner, names),
   ownerExpr: p.c.owner, pkExpr: p.c.pk, pvExpr: p.c.pv, metaExpr: p.c.pmeta,
 });
 

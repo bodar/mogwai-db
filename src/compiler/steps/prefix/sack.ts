@@ -26,7 +26,7 @@ function sackByValue(byArgs: any[] | undefined, st: ElementStream): Expression {
   if (typeof a === 'string') return scalarProp(elemCtx(elemRel(st), st.elem), a);
   if (a && typeof a === 'object' && 'token' in a) {
     const ctx = elemCtx(elemRel(st), st.elem);
-    if (a.token === 'label') return labelNameSub(ctx.labelIdExpr);
+    if (a.token === 'label') return ctx.labelNameExpr;
     if (a.token === 'id') return ctx.idExpr;
     throw new Error(`sack().by(T.${a.token}) not yet supported`);
   }

@@ -9,11 +9,17 @@
 
 import { relation } from './kernel/q.ts';
 
-export const nodes = relation('nodes', ['id', 'uid', 'label']);
+export const nodes = relation('nodes', ['id', 'uid']);
 export const vertexProperties = relation('vertex_properties', ['id', 'node', 'key', 'value', 'vtype', 'meta']);
 export const edges = relation('edges', ['id', 'uid', 'src', 'label', 'tgt']);
 export const edgeProperties = relation('edge_properties', ['id', 'edge', 'key', 'value', 'vtype']);
 export const labels = relation('labels', ['id', 'name']);
+// A vertex carries a SET of labels (TinkerPop 4 multi-label); an EDGE label is fixed at
+// exactly one by spec (`EdgeFeatures.getLabelCardinality()` is "always ONE"), so it stays
+// inline on `edges` — inside the e_out/e_in covering indexes every movement rides. This is
+// the same rule that gave edge_properties no `meta` column: normalize where cardinality is
+// 0..N, keep inline where it is exactly 1.
+export const vertexLabels = relation('vertex_labels', ['node', 'label']);
 // The FTS5 trigram index over property text (maintained in the write path — see
 // services/fts-index.ts). `text` is the tokenized column; the rest are UNINDEXED but
 // stored + filterable (owner_elem/pid/owner/pk/kind scope a search).

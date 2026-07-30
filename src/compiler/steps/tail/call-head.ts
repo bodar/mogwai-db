@@ -1,5 +1,5 @@
 import { q, empty, type Expression } from '../../../sql/kernel/q.ts';
-import { framedProps, extIdOf, elemTable } from '../../plan/plan.ts';
+import { framedProps, extIdOf, elemTable, labelNameFor } from '../../plan/plan.ts';
 import { edges, labels, nodes } from '../../../sql/schema.ts';
 import { type Compiled } from '../../../sql/kernel/render.ts';
 import { materializeRoot } from './materialize.ts';
@@ -40,12 +40,12 @@ export function buildCallHead(parent: ElementStream, scope: ChildFrameStack, inj
   const elem = parent.elem;
   const d = pushed.frame.domain.as('d');
   const n = elemTable(elem).as('n');
-  const l = labels.as('l');
+  const lbl = labelNameFor(n, elem);
   const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
   const payload = elem === 'edge'
-    ? q`${extId} AS id, ${l.c.name} AS label, ${extIdOf(n.c.src)} AS src, ${extIdOf(n.c.tgt)} AS tgt, ${framedProps(n, 'edge')} AS props`
-    : q`${extId} AS id, ${l.c.name} AS label, ${framedProps(n, 'vertex')} AS props`;
-  const elemJoin = q`${d} JOIN ${n} ON ${n.c.id}=${d.c.id} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
+    ? q`${extId} AS id, ${lbl} AS label, ${extIdOf(n.c.src)} AS src, ${extIdOf(n.c.tgt)} AS tgt, ${framedProps(n, 'edge')} AS props`
+    : q`${extId} AS id, ${lbl} AS label, ${framedProps(n, 'vertex')} AS props`;
+  const elemJoin = q`${d} JOIN ${n} ON ${n.c.id}=${d.c.id}`;
 
   const ord = pushed.frame.ordinal;
   let injCol: Expression = q`NULL AS injVal`;

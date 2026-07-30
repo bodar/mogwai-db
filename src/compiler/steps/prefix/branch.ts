@@ -5,7 +5,7 @@ import { isNested, stepChain, type SackSpec, type Step } from '../../../gremlin/
 import { type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { analyzeChain, type ChainFacts } from '../../ir/analyze.ts';
-import { dirsFor, edgeLabelFilter, labelIn, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem, type EdgeEnd } from '../../plan/plan.ts';
+import { dirsFor, edgeLabelFilter, labelIn, hasProp, elemCtx, scalarProp, aliasCtx, labelNameSub, predicateSql, jsonbGroupArray, type ScalarCtx, type Elem, type EdgeEnd, vertexLabelIn, vertexLabelName } from '../../plan/plan.ts';
 import { tryInlinePredicate, PredicateInliningFastPath } from './predicate.ts';
 import { appendCte, aliasColsOf, elemRel, labelScope, prevRel, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, mergeLayouts, rehomeLayout, rigidCols, partitionOver, type AliasMap, type TraverserLayout, type LoweringState, type PathState, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { keyedChildRelation, keyedKeySet } from '../tail/keyed.ts';
@@ -26,7 +26,10 @@ const walkNodeCtx = (idExpr: Expression): ScalarCtx => {
   const sub = (col: string) => q`(SELECT ${col} FROM nodes WHERE id=${idExpr})`;
   // Node ctx: props are read from vertex_properties via idExpr (hasProp/scalarProp),
   // so no propsExpr (that's edge-only now).
-  return { elem: 'vertex', idExpr, extIdExpr: sub('COALESCE(uid, id)'), labelIdExpr: sub('label') };
+  return {
+    elem: 'vertex', idExpr, extIdExpr: sub('COALESCE(uid, id)'),
+    labelNameExpr: vertexLabelName(idExpr), labelMatch: (names) => vertexLabelIn(idExpr, names),
+  };
 };
 
 
@@ -539,7 +542,7 @@ export function repeatSackByValue(byArgs: any[] | undefined, curId: Expression, 
   if (a === undefined) throw new Error('sack(Operator.x) in a repeat() body requires a by() modulator');
   if (typeof a === 'string') return scalarProp(aliasCtx(curId, curElem), a);
   if (a && typeof a === 'object' && 'token' in a) {
-    if (a.token === 'label') return labelNameSub(aliasCtx(curId, curElem).labelIdExpr);
+    if (a.token === 'label') return aliasCtx(curId, curElem).labelNameExpr;
     if (a.token === 'id') return curId;
     throw new Error(`sack().by(T.${a.token}) in a repeat() body not yet supported`);
   }
@@ -1188,7 +1191,7 @@ function chooseChoiceDomain(st: ElementStream, a0: any): Relation | null {
   if (!(a0 && typeof a0 === 'object' && 'token' in a0)) return null;
   const n = elemRel(st);
   const ctx = elemCtx(n, st.elem);
-  const ch = a0.token === 'label' ? labelNameSub(ctx.labelIdExpr) : a0.token === 'id' ? ctx.extIdExpr! : null;
+  const ch = a0.token === 'label' ? ctx.labelNameExpr : a0.token === 'id' ? ctx.extIdExpr! : null;
   if (!ch) return null;
   const p = prevRel(st, 'p');
   return st.q.cte(q`SELECT ${p.c.id} AS id, ${ch} AS ch, 1 AS ch_at${layoutProjection(st.traverserLayout, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`, cols);

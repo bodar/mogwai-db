@@ -7,6 +7,15 @@ import { exec } from './executor.ts';
 // when the census (test/census/) became a second consumer, because a helper used by two levels
 // that lives inside one of them is how a third consumer ends up hand-rolling a copy.
 
+/** Insert a vertex at a KNOWN rowid with its labels, by raw SQL — the fixture shape used by the
+ *  handful of tests that need exact ids (a self-loop, a 40-deep chain, the 5k perf graph). A
+ *  vertex's labels live in `vertex_labels`, so this is two statements; going through
+ *  `addVertexLabels` keeps the set semantics (and the interning) in one place. */
+export function rawVertex(store: GraphStore, id: number, ...labelNames: string[]): void {
+  store.query('INSERT INTO nodes(id) VALUES(?)', [id]);
+  store.addVertexLabels(id, labelNames);
+}
+
 /** Seed a fresh in-memory graph by running write traversals through the normal query path (the
  *  same way every other test seeds — no runtime-specific store hook). */
 export function seeded(seed: readonly string[]): GraphStore {

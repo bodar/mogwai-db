@@ -5,8 +5,7 @@ import { elementOrderDrop, orderProductivityFilter } from './modulation.ts';
 import {
     predicateSql, rangeToOffsetLimit, elemCtx, extIdOf, jsonbGroupArray,
     nodePropSortKey, edgePropSortKey, scalarPropSortKey,
-    labelNameSub, framedProps, valueMapProps, storedValueExpr
-} from '../../plan/plan.ts';
+    labelNameSub, framedProps, valueMapProps, storedValueExpr, labelNameFor } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { appendCte, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, partitionOver, dropLayoutAtBarrier, type ElementStream } from '../context/context.ts';
 import { loweringStateOf, continueLowering, dispatchShapeTail, toElementStream, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
@@ -270,7 +269,7 @@ function lowerElementOrderByTraversal(st: ElementStream, step: IRStep): ElementS
 function directOrderExpr(by: ByClass, n: Relation, st: ElementStream): Expression {
   const dirSql = by.dir === 'desc' ? q` DESC` : q` ASC`;
   if (by.kind === 'token') {
-    if (by.token === 'label') return q`${labelNameSub(n.c.label)}${dirSql}`;
+    if (by.token === 'label') return q`${labelNameFor(n, st.elem)}${dirSql}`;
     if (by.token === 'id') return q`${elemCtx(n, st.elem).extIdExpr!}${dirSql}`;
     throw new Error(`order().by(T.${by.token}) not yet supported`);
   }
@@ -606,12 +605,10 @@ function compileTailFold(st: ElementStream, steps: IRStep[], stop: number): Lowe
  */
 function lowerScalarProjection(st: ElementStream, projStep: IRStep, acc: TailAcc): ScalarStream {
   const n = elemRel(st);
-  const l = labels.as('l');
   const p = st.rel.as('p');
   const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
-  const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
   const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
-  const proj = PROJECTORS.get(projStep.name)!({ st, n, p, l, extId, vJoin, vlJoin, projStep });
+  const proj = PROJECTORS.get(projStep.name)!({ st, n, p, lbl: labelNameFor(n, st.elem), extId, vJoin, projStep });
   const asTag = proj.shape.kind === 'value' ? staticTypeOf(proj.shape.type) : undefined;
   const vt = proj.vtypeExpr ? 'vtype' : undefined;
   const vtypeCol = proj.vtypeExpr ? q`, ${proj.vtypeExpr} AS vtype` : empty;
@@ -770,11 +767,9 @@ function compileFold(st: ElementStream, acc: TailAcc): ListStream {
   if (projName === 'values' || projName === 'id' || projName === 'label') {
     const n = elemRel(st);
     const p = st.rel.as('p');
-    const l = labels.as('l');
     const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
-    const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
     const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
-    const proj = PROJECTORS.get(projName)!({ st, n, p, l, extId, vJoin, vlJoin, projStep: acc.projStep });
+    const proj = PROJECTORS.get(projName)!({ st, n, p, lbl: labelNameFor(n, st.elem), extId, vJoin, projStep: acc.projStep });
     // values() drops missing-property elements (baseWhere = IS NOT NULL), matching
     // TinkerPop's fold-of-values. id/label have no baseWhere.
     const where = proj.baseWhere ? q` WHERE ${proj.baseWhere}` : empty;
@@ -976,8 +971,11 @@ export interface TailMods { orders: OrderClause[]; distinct: boolean; offset: nu
 // ---------- projection resolution (values/id/label/valueMap/elementMap/element) ----------
 
 interface ProjCtx {
-  st: ElementStream; n: Relation; p: Relation; l: Relation; extId: Expression;
-  vJoin: Expression; vlJoin: Expression;
+  st: ElementStream; n: Relation; p: Relation; extId: Expression;
+  /** The element's label NAME as a scalar — a vertex picks one of its set (never a join,
+   *  which would multiply the row). Replaces the old `l: Relation` + `vlJoin`. */
+  lbl: Expression;
+  vJoin: Expression;
   projStep: IRStep | null;
 }
 export interface ProjResult { shape: Shape; colsNode: Expression; fromNode: Expression; scalarExpr?: Expression | null; baseWhere?: Expression | null; encounterKey?: Expression; vtypeExpr?: Expression | null; }
@@ -1013,7 +1011,7 @@ const PROJECTORS = new Map<string, ProjFn>([
     shape: { kind: 'value', type: UNKNOWN }, colsNode: q`${c.extId} AS v`, fromNode: c.vJoin, scalarExpr: c.extId, encounterKey: c.p.c.id,
   })],
   ['label', (c) => ({
-    shape: { kind: 'value', type: STATIC('string') }, colsNode: q`${c.l.c.name} AS v`, fromNode: c.vlJoin, scalarExpr: c.l.c.name, encounterKey: c.p.c.id,
+    shape: { kind: 'value', type: STATIC('string') }, colsNode: q`${c.lbl} AS v`, fromNode: c.vJoin, scalarExpr: c.lbl, encounterKey: c.p.c.id,
   })],
   ['valueMap', (c) => {
     const keys = c.projStep!.args.filter((a) => typeof a === 'string') as string[];
@@ -1021,7 +1019,7 @@ const PROJECTORS = new Map<string, ProjFn>([
     // flat value wrapped in a 1-list) so the handler frames both uniformly.
     return {
       shape: { kind: 'valueMap', keys: keys.length ? keys : null, tokens: c.projStep!.args.includes(true) },
-      colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${valueMapProps(c.n, c.st.elem)} AS props`, fromNode: c.vlJoin,
+      colsNode: q`${c.extId} AS id, ${c.lbl} AS label, ${valueMapProps(c.n, c.st.elem)} AS props`, fromNode: c.vJoin,
     };
   }],
   ['elementMap', (c) => {
@@ -1029,14 +1027,14 @@ const PROJECTORS = new Map<string, ProjFn>([
     const keys = c.projStep!.args.filter((a) => typeof a === 'string') as string[];
     return {
       shape: { kind: 'elementMap', keys: keys.length ? keys : null },
-      colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${valueMapProps(c.n, c.st.elem)} AS props`, fromNode: c.vlJoin,
+      colsNode: q`${c.extId} AS id, ${c.lbl} AS label, ${valueMapProps(c.n, c.st.elem)} AS props`, fromNode: c.vJoin,
     };
   }],
   ['__element', (c) => c.st.elem === 'edge'
     // Endpoints resolve to external ids (COALESCE(uid,id)) so a materialized edge
     // reports the SAME src/tgt as the write path — not the raw rowid.
-    ? { shape: { kind: 'edge' }, colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${extIdOf(c.n.c.src)} AS src, ${extIdOf(c.n.c.tgt)} AS tgt, ${framedProps(c.n, 'edge')} AS props`, fromNode: c.vlJoin }
-    : { shape: { kind: 'vertex' }, colsNode: q`${c.extId} AS id, ${c.l.c.name} AS label, ${framedProps(c.n, 'vertex')} AS props`, fromNode: c.vlJoin }],
+    ? { shape: { kind: 'edge' }, colsNode: q`${c.extId} AS id, ${c.lbl} AS label, ${extIdOf(c.n.c.src)} AS src, ${extIdOf(c.n.c.tgt)} AS tgt, ${framedProps(c.n, 'edge')} AS props`, fromNode: c.vJoin }
+    : { shape: { kind: 'vertex' }, colsNode: q`${c.extId} AS id, ${c.lbl} AS label, ${framedProps(c.n, 'vertex')} AS props`, fromNode: c.vJoin }],
 ]);
 
 /** An order().by(key) resolver over the current element (aliased `n`): node → the
@@ -1087,11 +1085,9 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
 
   const n = elemRel(st);
   const p = st.rel.as('p');
-  const l = labels.as('l');
   const vJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
-  const vlJoin = q`${vJoin} JOIN ${l} ON ${l.c.id}=${n.c.label}`;
   const extId = q`COALESCE(${n.c.uid}, ${n.c.id})`;
-  const proj = PROJECTORS.get(projName)!({ st, n, p, l, extId, vJoin, vlJoin, projStep: acc.projStep });
+  const proj = PROJECTORS.get(projName)!({ st, n, p, lbl: labelNameFor(n, st.elem), extId, vJoin, projStep: acc.projStep });
 
   // order().by(key) sorts by an element property; a bare order() by n.id; else an upstream
   // carried encounter (an ordered dedup) fixes the result order.

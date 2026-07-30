@@ -2,7 +2,7 @@ import { flattenListArgs, gtypeName, isNested, type Pred } from '../../gremlin/f
 import { q, list, values, empty, value, raw, jsonExtract, type Expression, type Relation } from '../../sql/kernel/q.ts';
 import type { FastPath } from '../options/fast-paths.ts';
 import { normalizeTypeName, BigDecimal, Duration } from '../../gremlin/types.ts';
-import { nodes, edges } from '../../sql/schema.ts';
+import { nodes, edges, labels, vertexLabels } from '../../sql/schema.ts';
 import { type ScalarType, type ValueType } from '../../sql/kernel/render.ts';
 
 // ---------- SQL node builders ----------
@@ -29,10 +29,53 @@ export function propExtract(col: Expression | string, key: unknown): { expr: Exp
 }
 
 /** `<col> IN (SELECT id FROM labels WHERE name IN (?,?))` — the canonical
- *  label-name→id filter as a node. Names ride as bound Value tokens (no splice). */
+ *  label-name→id filter as a node. Names ride as bound Value tokens (no splice).
+ *  `col` is a label-ID column, so this is the EDGE form; a vertex's labels live in
+ *  `vertex_labels` and go through `vertexLabelIn`. */
 export function labelIn(col: Expression | string, names: any[]): Expression {
   return q`${col} IN (SELECT id FROM labels WHERE name IN (${values(names)}))`;
 }
+
+// ---------- the vertex label seam (multi-label) ----------
+//
+// A vertex carries a SET of labels in `vertex_labels`; an edge carries exactly one, inline
+// on `edges.label` (TinkerPop fixes edge label cardinality at ONE). Everything that reads a
+// label goes through one of the four builders below, and the split between them is the
+// load-bearing distinction:
+//
+//   SCALAR position  (label(), by(T.label), elementMap's T.label token, path/select/group
+//                     framing) → labelNameFor / vertexLabelName. These PICK one label.
+//   PREDICATE        (hasLabel, has(T.label,…), the 3-arg has overload) → labelMatchFor /
+//                     vertexLabelIn. These match ANY label.
+//   FAN-OUT          (labels(), one row per label) → the ONLY place allowed to join
+//                     vertex_labels into a relation.
+//
+// The trap this exists to prevent: every scalar site used to read `l.name` off a
+// `JOIN labels l ON l.id = n.label`. Re-pointing those joins at `vertex_labels` would
+// silently MULTIPLY the row — N labels, N copies of the vertex — and would pass every
+// single-label test, because under LabelCardinality.ONE the join yields exactly one row.
+// So a scalar position must never join; it correlates and picks.
+
+/** The label NAME of a vertex, as a scalar. Deterministic pick (lowest label id) so a
+ *  multi-label vertex still yields a stable `label()`/`T.label`, which is what
+ *  `Element.label()` promises — "an arbitrary label when multiple exist". Never joins. */
+export const vertexLabelName = (nodeIdExpr: Expression): Expression =>
+  q`(SELECT ${labels.c.name} FROM ${vertexLabels} JOIN ${labels} ON ${labels.c.id}=${vertexLabels.c.label} WHERE ${vertexLabels.c.node}=${nodeIdExpr} ORDER BY ${vertexLabels.c.label} LIMIT 1)`;
+
+/** ANY of a vertex's labels is in `names`. Written as `<id> IN (SELECT node …)` so it seeks
+ *  `vl_label(label, node)` and reads the node ids straight off the index. Correct under both
+ *  regimes: under ONE the set is a singleton, so this is exactly the old `n.label IN (…)`. */
+export const vertexLabelIn = (nodeIdExpr: Expression, names: any[]): Expression =>
+  q`${nodeIdExpr} IN (SELECT ${vertexLabels.c.node} FROM ${vertexLabels} WHERE ${labelIn(vertexLabels.c.label, names)})`;
+
+/** The scalar label name of the element held in `n` (which must be `elemTable(elem)`). The
+ *  ONE spelling for every one-row-per-element position. */
+export const labelNameFor = (n: Relation, elem: Elem): Expression =>
+  elem === 'edge' ? labelNameSub(n.c.label) : vertexLabelName(n.c.id);
+
+/** ANY-label membership for the element held in `n`. The ONE spelling for hasLabel/has(T.label). */
+export const labelMatchFor = (n: Relation, elem: Elem, names: any[]): Expression =>
+  elem === 'edge' ? labelIn(n.c.label, names) : vertexLabelIn(n.c.id, names);
 
 /** Aggregate a value column into a single JSONB array (the fold()/select(values)
  *  producer). `jsonb(json_group_array(..))` is the universally-valid form — the
@@ -451,7 +494,10 @@ export interface ScalarCtx {
   extIdExpr?: Expression;    // COALESCE(n.uid, n.id) — the outward-facing id for framing
   // Both nodes AND edges now read props via idExpr into their normalized *_properties
   // table (scalarProp/hasProp dispatch on elem) — there is no flat-blob propsExpr.
-  labelIdExpr: Expression;   // n.label
+  /** The element's label NAME as a scalar (a vertex PICKS one of its set). */
+  labelNameExpr: Expression;
+  /** ANY-label membership test — hasLabel/has(T.label) semantics under multi-label. */
+  labelMatch: (names: any[]) => Expression;
   srcExpr?: Expression;      // n.src  (edge)
   tgtExpr?: Expression;      // n.tgt  (edge)
   ownerExpr?: Expression;      // property: owning node id
@@ -473,7 +519,7 @@ export interface ScalarCtx {
 export function elemCtx(n: Relation, elem: Elem): ScalarCtx {
   return {
     elem, idExpr: n.c.id, extIdExpr: q`COALESCE(${n.c.uid}, ${n.c.id})`,
-    labelIdExpr: n.c.label,
+    labelNameExpr: labelNameFor(n, elem), labelMatch: (names) => labelMatchFor(n, elem, names),
     ...(elem === 'edge' ? { srcExpr: n.c.src, tgtExpr: n.c.tgt } : {}),
   };
 }
@@ -490,7 +536,10 @@ export function aliasCtx(idExpr: Expression, elem: Elem): ScalarCtx {
   const tbl = elem === 'edge' ? 'edges' : 'nodes';
   const sub = (c: string) => q`(SELECT ${c} FROM ${raw(tbl)} WHERE id=${idExpr})`;
   return {
-    elem, idExpr, extIdExpr: sub('COALESCE(uid, id)'), labelIdExpr: sub('label'),
+    elem, idExpr,
+    extIdExpr: sub('COALESCE(uid, id)'),
+    labelNameExpr: elem === 'edge' ? labelNameSub(sub('label')) : vertexLabelName(idExpr),
+    labelMatch: (names) => elem === 'edge' ? labelIn(sub('label'), names) : vertexLabelIn(idExpr, names),
     ...(elem === 'edge' ? { srcExpr: sub('src'), tgtExpr: sub('tgt') } : {}),
   };
 }

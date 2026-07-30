@@ -1,7 +1,7 @@
 import { gtypeName, isNested } from '../../../gremlin/frontend.ts';
 import { q, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { nodes, edges, labels } from '../../../sql/schema.ts';
-import { framedProps, labelNameSub, predicateSql, extIdOf, elemCtx, aliasCtx, scalarProp, type ScalarCtx, elemTable } from '../../plan/plan.ts';
+import { framedProps, labelNameSub, predicateSql, extIdOf, elemCtx, aliasCtx, scalarProp, type ScalarCtx, elemTable, labelNameFor, vertexLabelName } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { layoutProjection, layoutCols, scopePathCols, dropLayoutAtBarrier, withoutPath, type TraverserLayout, type ElementStream } from '../context/context.ts';
 import { loweringStateOf, continueLowering, pathColumns, toListStream, toPathStream, type ListStream, type LoweringResult, type PathStream, type ScalarStream } from '../context/stream.ts';
@@ -34,7 +34,7 @@ function positionScalar(ctx: ScalarCtx, byArgs: any[] | undefined): Expression |
   if (by.kind === 'none') return undefined; // no by()/bare by() → the element
   if (by.kind === 'key') return scalarProp(ctx, by.key);
   if (by.kind === 'token') {
-    if (by.token === 'label') return labelNameSub(ctx.labelIdExpr);
+    if (by.token === 'label') return ctx.labelNameExpr;
     if (by.token === 'id') return ctx.extIdExpr!;
     throw new Error(`path().by(T.${by.token}) modulator not yet supported`);
   }
@@ -197,15 +197,14 @@ export function lowerPath(st: ElementStream, proj: IRStep, acc: TailAcc): PathSt
     joins.push(q` ${jn} ${tbl} ON ${tbl.c.id}=${p.c[pos.col]}`);
     const pe = positionScalar(elemCtx(tbl, pos.elem), byOf(i));
     if (pe === undefined) {
-      const l = labels.as(`${prefix}l`);
-      joins.push(q` ${jn} ${l} ON ${l.c.id}=${tbl.c.label}`);
+      const lbl = labelNameFor(tbl, pos.elem);
       const extId = q`COALESCE(${tbl.c.uid}, ${tbl.c.id})`;
       if (pos.elem === 'edge') {
         // Endpoints as external ids (see the __element edge projector).
-        cols.push(q`${extId} AS ${`${prefix}_id`}, ${l.c.name} AS ${`${prefix}_label`}, ${extIdOf(tbl.c.src)} AS ${`${prefix}_src`}, ${extIdOf(tbl.c.tgt)} AS ${`${prefix}_tgt`}, ${framedProps(tbl, 'edge')} AS ${`${prefix}_props`}`);
+        cols.push(q`${extId} AS ${`${prefix}_id`}, ${lbl} AS ${`${prefix}_label`}, ${extIdOf(tbl.c.src)} AS ${`${prefix}_src`}, ${extIdOf(tbl.c.tgt)} AS ${`${prefix}_tgt`}, ${framedProps(tbl, 'edge')} AS ${`${prefix}_props`}`);
         return { render: 'element', elem: 'edge', prefix };
       }
-      cols.push(q`${extId} AS ${`${prefix}_id`}, ${l.c.name} AS ${`${prefix}_label`}, ${framedProps(tbl, 'vertex')} AS ${`${prefix}_props`}`);
+      cols.push(q`${extId} AS ${`${prefix}_id`}, ${lbl} AS ${`${prefix}_label`}, ${framedProps(tbl, 'vertex')} AS ${`${prefix}_props`}`);
       return { render: 'element', elem: 'vertex', prefix };
     }
     // by(key/T.token): one scalar per position. A missing value drops the whole path
@@ -345,8 +344,7 @@ function compilePathArray(st: ElementStream, proj: IRStep, acc: TailAcc): PathSt
     ? q`SELECT pp.pk, je.key AS ord, ${posValue(q`je.value`)!} AS v FROM ${paths} pp, json_each(pp.path) je ORDER BY pp.pk, je.key`
     : (() => {
         const n = nodes.as('n');
-        const l = labels.as('l');
-        return q`SELECT pp.pk, je.key AS ord, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${l.c.name} AS label, ${framedProps(n, 'vertex')} AS props FROM ${paths} pp, json_each(pp.path) je JOIN ${n} ON ${n.c.id}=je.value JOIN ${l} ON ${l.c.id}=${n.c.label} ORDER BY pp.pk, je.key`;
+        return q`SELECT pp.pk, je.key AS ord, COALESCE(${n.c.uid}, ${n.c.id}) AS id, ${vertexLabelName(n.c.id)} AS label, ${framedProps(n, 'vertex')} AS props FROM ${paths} pp, json_each(pp.path) je JOIN ${n} ON ${n.c.id}=je.value ORDER BY pp.pk, je.key`;
       })();
   const rel = st.q.cte(node, pathColumns(layout));
   return toPathStream(dropLayoutAtBarrier(loweringStateOf(st)), rel, layout);

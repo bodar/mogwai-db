@@ -6,7 +6,7 @@
 // is read. Traversal-valued modulators still go through child.ts.
 
 import { empty, list, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { elemCtx, labelNameSub, scalarProp, scalarPropSortKey } from '../../plan/plan.ts';
+import { elemCtx, labelNameSub, scalarProp, scalarPropSortKey, labelNameFor } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { type ElementStream } from '../context/context.ts';
 import { classifyBy } from './child-shape.ts';
@@ -21,7 +21,7 @@ export function directElementModulation(
   if (by.kind === 'key') return scalarProp(elemCtx(n, st.elem), by.key);
   if (by.kind === 'token') {
     if (by.token === 'id') return elemCtx(n, st.elem).extIdExpr!;
-    if (by.token === 'label') return labelNameSub(n.c.label);
+    if (by.token === 'label') return labelNameFor(n, st.elem);
     throw new Error(`by(T.${by.token}) element modulation not yet supported`);
   }
   return null; // nested → the caller lowers it through the generic child seam
