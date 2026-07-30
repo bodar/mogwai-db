@@ -271,6 +271,35 @@ that part we mirror.
    Both halves are the audit doc's recurring shape — the seam exists and cannot be *handed* the
    step — so the payoff is all five child positions from one change, not one scenario.
 
+   **✅ Landed 2026-07-30: the fail-closed half.** Enforcing `selectOneFromAlias`'s by()-less
+   contract turned out to fix a **live silent wrong answer**, reachable today with no match() in
+   sight — `dispatchAlias` routes select() over a VALUE-shaped parent straight to that resolver,
+   modulators and all, so `…as('a').values('name').select('a').by('name')` returned `v[marko]`,
+   byte-identical to the by()-less form, where `'marko'` is correct. It now defers. No baseline moved
+   (no corpus traversal takes that route), and the test pins the DEFERRAL plus both neighbours — the
+   by()-less form and the same by() over an ELEMENT parent — so it cannot regress into accepting the
+   vertex. **This is also the prerequisite for the classifier half:** relaxing `labelSelectOf`
+   without it would have converted a deferral into the wrong answer at five more positions.
+
+   **What is left, and what the first attempt measured.** Relaxing the classifier
+   (`labelSelectOf` + folding the by into `selectShape`) was tried and **backed out**, because it
+   admits shapes the emitter cannot serve — precisely the classify/emit parity the guardrails
+   require ("consumers ASSERT on this classification, so a mismatch is a crash, not a deferral").
+   Measured with the relaxation in place:
+
+   | position | with the classifier relaxed |
+   |---|---|
+   | `where(__.select('a').by('name'))` | ✅ works |
+   | `map` / `order().by` / `group().by` | ❌ `child first cardinality requires explicit encounter order` |
+   | `concat` (scalar parent) | ❌ still `result`-kinded |
+   | `by(T.id)` | ❌ `by(T.id) modulator not yet supported` — emit is narrower than the classifier |
+
+   So the remaining work is emit-side and specific: a modulated single-label select must be a
+   recognized **1:1 scalar projection** in the bespoke route (`BESPOKE_PROJECTIONS` /
+   `compileScalarChildRows`), which is what tells the child seam it needs no encounter order for
+   `first`. And the classifier must admit only what emit serves — `kind === 'key'` only, not
+   `'token'`.
+
    **A second, separable defect at the same site: the deferral message is wrong.**
    `concat() after a scalar stream not yet supported` names the PARENT shape when the obstacle is the
    ARGUMENT — a scalar parent is fully supported for `concat(' knows ')`, `concat(__.constant(…))`,
