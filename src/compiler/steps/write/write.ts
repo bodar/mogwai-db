@@ -257,7 +257,10 @@ type Cardinality = 'single' | 'list' | 'set';
 // losslessly (valueNodeOf). A scalar's typeNode is redundant with vtype; a nested-traversal
 // value has no literal typeNode (its type is resolved at run time as a scalar).
 interface PropSpec { key: string | { nested: any }; value: any; vtype: CanonicalType | null; typeNode: TypeNode | null; meta: Record<string, any> | null; cardinality: Cardinality; }
-interface VertexSpec { label: string | { nested: any }; props: PropSpec[]; uid: string | number | null; }
+/** `labels` is a LIST because a vertex carries a set: `addV("a","b")` is two labels, and
+ *  `addV()` with no argument is the single default 'vertex'. Under LabelCardinality.ONE a spec
+ *  with more than one is rejected at insert time rather than silently truncated. */
+interface VertexSpec { labels: (string | { nested: any })[]; props: PropSpec[]; uid: string | number | null; }
 
 // A leading Cardinality token on property() args (default single). Returns it plus
 // the remaining [key, value, ...metaArgs], and `off` — how many leading args were
@@ -311,11 +314,15 @@ const singleProps = (rec: Record<string, any>, types: Record<string, TypeNode | 
 function parseVertexSpec(addV: Step, propSteps: Step[], sideEffects?: Map<string, any>, params: Record<string, any> = {}): VertexSpec {
   // A nested-traversal label (addV(__.…)) stays UNRESOLVED here (it needs the store) —
   // insertVertex evaluates it at run time. A __.select(sideEffectConst) collapses now.
-  const a0 = addV.args[0];
-  let label: string | { nested: any } =
-    typeof a0 === 'string' ? a0
-    : isNested(a0) ? ((c) => c.has ? String(c.value) : a0)(constFromNested(a0, sideEffects, params))
-    : 'vertex';
+  // addV() takes N labels. Each stays UNRESOLVED if it is a traversal (insertVertex evaluates
+  // it against the store); a __.select(sideEffectConst) collapses now. No argument at all is
+  // the single default label 'vertex'.
+  const asLabel = (a: any): string | { nested: any } =>
+    typeof a === 'string' ? a
+    : isNested(a) ? ((c) => c.has ? String(c.value) : a)(constFromNested(a, sideEffects, params))
+    : String(a);
+  let labels: (string | { nested: any })[] =
+    addV.args.length ? addV.args.map(asLabel) : ['vertex'];
   const props: PropSpec[] = [];
   let uid: string | number | null = null;
   for (const s of propSteps) {
@@ -330,13 +337,13 @@ function parseVertexSpec(addV: Step, propSteps: Step[], sideEffects?: Map<string
     if (typeof key === 'object' && 'token' in key) {
       if (metaArgs.length) throw new Error(`property(T.${key.token}) does not take meta-properties`);
       if (key.token === 'id') uid = val;
-      else if (key.token === 'label') label = String(val);
+      else if (key.token === 'label') labels = [String(val)];
       else throw new Error(`property(T.${key.token}) not supported`);
       continue;
     }
     props.push({ key, value: val, vtype: propVtype(s, val, off), typeNode: propTypeNode(s, off), meta: metaOf(metaArgs), cardinality });
   }
-  return { label, props, uid };
+  return { labels, props, uid };
 }
 
 // INSERT one row into nodes/edges with the shared optional-uid/id column splice.
@@ -483,19 +490,23 @@ function insertVertex(
   sideEffects?: Map<string, any>,
   driver?: ElementReadDriver,
 ): { id: number; extId: string | number; label: string } {
-  let label: string;
-  if (isNested(spec.label)) {
-    // Unseeded: an addV label traversal is a standalone read / invariant (a source addV
-    // has no incoming element). Routes through the same value authority so __.constant(x)
-    // and __.select(const) labels resolve, not just seeded reads.
-    const r = nestedScalarValue(engine, store, spec.label, params, undefined, sideEffects, driver);
+  // Unseeded: an addV label traversal is a standalone read / invariant (a source addV has no
+  // incoming element). Routes through the same value authority so __.constant(x) and
+  // __.select(const) labels resolve, not just seeded reads.
+  const resolved = spec.labels.map((l) => {
+    if (!isNested(l)) return l;
+    const r = nestedScalarValue(engine, store, l, params, undefined, sideEffects, driver);
     if (!r.has) throw new Error('addV(traversal) label produced no value');
-    label = String(r.value);
-  } else label = spec.label;
+    return String(r.value);
+  });
+  // A SET, so duplicates collapse before the count is checked — addV('a','a') is one label.
+  const labels = [...new Set(resolved)];
+  assertLabelCount(engine, labels.length, 'addV');
   const row = insertRow(store, 'nodes', [], [], spec.uid);
-  // A vertex's labels live in vertex_labels. The declared cardinality is ONE, so exactly one
-  // row goes in here; addLabel()/multi-label addV widen this to the whole set.
-  store.addVertexLabels(row.id, [label]);
+  store.addVertexLabels(row.id, labels);
+  // The response frames ONE label (Element.label() is "an arbitrary label when multiple exist");
+  // the reader picks the lowest label id, so agree with it rather than with argument order.
+  const label = store.vertexLabels(row.id)[0];
   for (const p of spec.props) {
     const r = resolveSpecValue(engine, store, p, row.id, 'vertex', params, sideEffects, driver);
     if (r.has) applyVertexProperty(store, row.id, resolveSpecKey(engine, store, p, row.id, 'vertex', params, sideEffects, driver), r.value, r.vtype, p.meta, p.cardinality, r.typeNode);
@@ -988,7 +999,7 @@ function compileMergeV(engine: Engine, steps: IRStep[], params: Record<string, a
           const props = { ...matchSpec.props, ...(oc?.props ?? {}) };
           const propTypes = { ...matchSpec.propTypes, ...(oc?.propTypes ?? {}) };
           const propCardinalities = { ...matchSpec.propCardinalities, ...(oc?.propCardinalities ?? {}) };
-          const v = insertVertex(engine, store, { label, props: singleProps(props, propTypes, propCardinalities), uid: matchSpec.id ?? oc?.id ?? null }, params, sideEffects);
+          const v = insertVertex(engine, store, { labels: [label], props: singleProps(props, propTypes, propCardinalities), uid: matchSpec.id ?? oc?.id ?? null }, params, sideEffects);
           // Echo typed props read back from storage ({t,v}), not the raw resolved values.
           out.push({ vertex: { id: v.extId, label, props: readVertexProps(store, v.id) } });
         }
@@ -1073,16 +1084,68 @@ interface WriteRule { match: (steps: IRStep[]) => boolean; compile: (engine: Eng
  *  ONE by spec), which is why the check reads the element kind rather than a global flag. */
 const LABEL_MUTATIONS = new Set(['addLabel', 'dropLabel', 'dropLabels']);
 
-function compileLabelMutation(steps: IRStep[]): never {
-  const step = steps.find((s) => LABEL_MUTATIONS.has(s.name))!;
-  // Only the vertex cardinality is a provider choice; when it becomes mutable this check starts
-  // passing for vertices and the mutation compilers take over, with edges still refusing.
-  if (!VERTEX_LABEL_CARDINALITY.mutable) throw new Error(`${LABEL_MUTATION_UNSUPPORTED}: ${step.name}()`);
-  throw new Error(`${step.name}() is not yet implemented for a mutable-label graph`);
+/** Reject a label count the declared cardinality forbids, naming the step so the error says which
+ *  operation overstepped. `min` is checked by dropLabel/dropLabels, `max` by addV/addLabel. */
+function assertLabelCount(engine: Engine, n: number, step: string): void {
+  const c = engine.labelCardinality;
+  if (n > c.max) throw new Error(`${step}(): this graph allows at most ${c.max} label(s) per vertex`);
+  if (n < c.min) throw new Error(`${step}(): this graph requires at least ${c.min} label(s) per vertex`);
+}
+
+/** addLabel/dropLabel/dropLabels over the elements a read prefix selects.
+ *
+ *  An EDGE always refuses: edge label cardinality is fixed at ONE by spec, so this is the
+ *  specified answer and not a gap. A VERTEX refuses when the graph declares an immutable
+ *  cardinality, with the message the conformance suite matches on. */
+function compileLabelMutation(engine: Engine, steps: IRStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
+  const at = steps.findIndex((s) => LABEL_MUTATIONS.has(s.name));
+  const step = steps[at];
+  const { st } = engine.buildPrefix(steps.slice(0, at), params);
+  // The REFUSAL comes first, before any question about what follows: a graph that cannot mutate
+  // labels must say so whatever the tail is. `g.E().addLabel("friend").labels().fold()` asserts
+  // exactly that, and checking the tail first answered "step not implemented after addLabel()".
+  if (st.elem === 'edge') throw new Error(`${LABEL_MUTATION_UNSUPPORTED}: ${step.name}() on an edge`);
+  if (!engine.labelCardinality.mutable) throw new Error(`${LABEL_MUTATION_UNSUPPORTED}: ${step.name}()`);
+  const tail = steps.slice(at + 1);
+  if (tail.length) throw new Error(`step not implemented after ${step.name}(): ${tail[0].name}()`);
+
+  // The arguments are label NAMES, and each may be a traversal yielding a string OR a list of
+  // strings — `addLabel(constant(["a","b"]))`. A collection is only legal as the SOLE argument
+  // (TinkerPop rejects mixing), which is why the flatten counts what it expanded.
+  const argNames = (store: GraphStore): string[] => {
+    const out: string[] = [];
+    for (const a of step.args) {
+      const v = isNested(a) ? nestedScalarValue(engine, store, a, params, undefined, sideEffects).value : a;
+      if (Array.isArray(v)) {
+        if (step.args.length > 1) throw new Error(`${step.name}(): a Collection argument must be the only argument`);
+        out.push(...v.map(String));
+      } else out.push(String(v));
+    }
+    return out;
+  };
+  const target = renderFrom(st.q, st.rel);
+  return {
+    kind: 'write',
+    run: (store) => {
+      const ids = store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id);
+      const names = step.name === 'dropLabels' ? null : argNames(store);
+      for (const id of ids) {
+        if (step.name === 'addLabel') {
+          store.addVertexLabels(id, names!);
+          assertLabelCount(engine, store.vertexLabels(id).length, step.name);
+        } else {
+          // dropLabel(x) on a label the vertex does not carry is a NO-OP, not an error.
+          store.dropVertexLabels(id, names);
+          assertLabelCount(engine, store.vertexLabels(id).length, step.name);
+        }
+      }
+      return [];
+    },
+  };
 }
 
 const WRITE_RULES: WriteRule[] = [
-  { match: (s) => s.some((x) => LABEL_MUTATIONS.has(x.name)), compile: (_e, s) => compileLabelMutation(s) },
+  { match: (s) => s.some((x) => LABEL_MUTATIONS.has(x.name)), compile: (e, s, p, _sk, se) => compileLabelMutation(e, s, p, se) },
   { match: (s) => s.some((x) => x.name === 'addE'), compile: (e, s, p, _sk, se) => compileAddE(e, s, p, se) },
   { match: (s) => s.some((x) => x.name === 'addV'), compile: (e, s, p, _sk, se) => compileAddV(e, s, p, se) },
   { match: (s) => s.some((x) => x.name === 'mergeV'), compile: (e, s, p, _sk, se) => compileMergeV(e, s, p, se) },

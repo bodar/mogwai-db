@@ -5,7 +5,7 @@
 // above it (schema, label interning, the whole compiler) is runtime-agnostic.
 // (Deliberately synchronous, unlike an async D1-style adapter: DO SQL is sync.)
 import { coerceBindValue } from './gremlin/types.ts';
-import type { Sql } from './api.ts';
+import { LabelCardinality, type Sql } from './api.ts';
 // The `Sql` seam now lives in the API surface (src/api.ts). Re-exported here so the many
 // existing `import { Sql } from './storage.ts'` sites keep working.
 export type { Sql } from './api.ts';
@@ -89,7 +89,12 @@ const SCHEMA = [
 ];
 
 export class GraphStore {
-  constructor(private sql: Sql) {
+  /** This graph's declared VERTEX label cardinality (TinkerPop's `Graph.Features`). The storage
+   *  is multi-label-capable regardless; this is what the label-mutation steps validate against
+   *  and what `addV` may write more than one row for. Edge cardinality is fixed at ONE by spec. */
+  readonly labelCardinality: LabelCardinality;
+  constructor(private sql: Sql, labelCardinality: LabelCardinality = LabelCardinality.ONE) {
+    this.labelCardinality = labelCardinality;
     this.initSchema();
   }
 
@@ -124,6 +129,16 @@ export class GraphStore {
   addVertexLabels(node: number, names: readonly string[]): void {
     for (const name of names)
       this.query('INSERT OR IGNORE INTO vertex_labels(node, label) VALUES(?, ?)', [node, this.labelId(name)]);
+  }
+
+  /** Remove labels from a vertex — `names` for `dropLabel(…)`, or NULL for `dropLabels()`,
+   *  which removes them all. A name the vertex does not carry is a no-op, matching
+   *  `dropLabel(nonExistent)`; the CARDINALITY floor is the caller's check, not this one's,
+   *  because only the caller knows which step to name in the error. */
+  dropVertexLabels(node: number, names: readonly string[] | null): void {
+    if (names === null) { this.query('DELETE FROM vertex_labels WHERE node=?', [node]); return; }
+    for (const name of names)
+      this.query('DELETE FROM vertex_labels WHERE node=? AND label=(SELECT id FROM labels WHERE name=?)', [node, name]);
   }
 
   /** A vertex's labels, in the same deterministic order the SQL reader picks from

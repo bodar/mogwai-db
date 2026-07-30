@@ -672,7 +672,7 @@ export class Executor implements ExecutorApi {
      *  off and asserts the generic lowering answers identically. */
     fastPaths?: FastPathConfig,
   ) {
-    this.app = createAppScope({ registry, source, fastPaths });
+    this.app = createAppScope({ registry, source, fastPaths, labelCardinality: store.labelCardinality });
   }
 
   /** SYNC GraphBinary buffers with per-value bulk (concern C appends it as a Long). A

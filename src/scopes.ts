@@ -25,12 +25,17 @@ import { DEFAULT_FAST_PATHS, type FastPathConfig } from './compiler/options/fast
 import type { ServiceRegistry } from './services/spi/types.ts';
 import { EMPTY_REGISTRY } from './services/spi/registry.ts';
 import type { FederationSource } from './compiler/segment.ts';
+import { LabelCardinality } from './api.ts';
 
 /** The process/runtime-scoped dependency contract. */
 export type AppScope =
   & Dependency<'registry', ServiceRegistry>
   & Dependency<'fastPaths', FastPathConfig>
-  & Dependency<'source', FederationSource | undefined>;
+  & Dependency<'source', FederationSource | undefined>
+  // A GRAPH capability, and app scope is per-graph (one Executor, one store, one scope), so this
+  // is its lifecycle. Only the VERTEX cardinality is a provider choice — edges are fixed at ONE
+  // by spec, so there is nothing to declare for them.
+  & Dependency<'labelCardinality', LabelCardinality>;
 
 /** The per-compilation dependency contract (an AppScope plus the per-compile collaborators). */
 export type CompilerScope =
@@ -45,11 +50,13 @@ export function createAppScope(deps?: Partial<{
   registry: ServiceRegistry;
   fastPaths: FastPathConfig;
   source: FederationSource | undefined;
+  labelCardinality: LabelCardinality;
 }>): AppScope {
   return LazyMap.create()
     .set('registry', instance(deps?.registry ?? EMPTY_REGISTRY))
     .set('fastPaths', instance(deps?.fastPaths ?? DEFAULT_FAST_PATHS))
-    .set('source', instance(deps?.source));
+    .set('source', instance(deps?.source))
+    .set('labelCardinality', instance(deps?.labelCardinality ?? LabelCardinality.ONE));
 }
 
 /** Mint a fresh compiler scope from an app scope for ONE traversal compile. `q` defaults to a
