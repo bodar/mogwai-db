@@ -34,7 +34,8 @@ left as written; the full map is in
 > | 4 | `path.ts` grouped positional projector | ✅ one projector AND one positional child compiler; both regimes agree |
 > | 5 | `write.ts` merge/endpoint | open (largest by count, but terminal — never composes at depth) |
 > | 8 | `search.ts` duplicate property payload | ✅ closed 2026-07-30 — one payload, two provisionings |
-> | 7, 9 | `child.ts` residue, leaf dups | open, Low — **9's `plan.ts` half closed 2026-07-30** |
+> | 9 | leaf dups | ✅ closed 2026-07-30 — both halves; the property one was hiding a vertex-only wall |
+> | 7 | `child.ts` residue | open, Low |
 > | — | mode C *(this doc's "one structural finding")* | ❌ **retired — measured unnecessary, see below** |
 >
 > **Three premises here are FALSE — do not rebuild on them:**
@@ -594,6 +595,26 @@ capability welded inside it. Three things followed, all landed:
 3. **The equivalence test could not see the violation** — its 6 hand-picked shapes all happened to
    have fallbacks. It now carries the infix cases as a standing regression guard.
 
+**The same law broken from the other side — found 2026-07-30 by L5, fixed.** The 2026-07-27 entry
+found `predicateInlining` LOSING a capability when disabled. The rotating L5 seed found it GAINING
+a throw when enabled: `g.V(1).where(__.out().repeat(__.identity()).times(1))` executes with the
+flag off and throws *"a nested-derived Query has no shared WITH and cannot host a recursive CTE"*
+with it on (same for `filter()`/`not()`, and for any body where a movement precedes the `repeat`
+— a `repeat` FIRST never reaches the inline renderer, which is why nothing caught it).
+
+The kernel guard was correct: mode B genuinely has no shared `WITH` to attach a recursive CTE to.
+A fail-closed THROW is simply the wrong signal at a site whose contract is *recognition failure
+falls through*. `needsRecursiveCte` (the pure classify leaf) now answers the renderer's question
+before it starts, at any nesting depth, and `compileCorrelatedChild` declines to the materialized
+gate; the kernel guard is the backstop behind that, not the mechanism. Pinned beside the infix
+cases in the `predicateInlining` equivalence test.
+
+**The transferable part:** "compile the corpus with the flag off and diff" (this entry's cheap
+check) only finds the LOSE direction. The GAIN direction — a shape the fast path claims and then
+fails — needs generated input, because nobody writes `where(__.out().repeat(__.identity()))` by
+hand. That is exactly what L5's per-commit seed rotation is for, and it is the first defect it has
+paid for.
+
 **Still true:** the leaf vocabulary (`has`/`hasLabel`/`hasId`/`values`/`label`/`loops`/`not`) remains
 duplicated, and is now kept for exactly one reason — `until()`/`emit()`, where `walkPredicate` has no
 fallback. That is #1's territory, and #1's body-relation route discharges it too: compile an
@@ -645,9 +666,18 @@ philosophies; the second one is the model.
 
 ---
 
-### 9. Leaf-level, cosmetic
-- `tail/group.ts:377` — the `properties()` inner-group expansion hand-joins `vertex_properties`
-  where the sibling branch two lines up correctly routes through the child seam.
+### 9. Leaf-level, cosmetic — ✅ **BOTH CLOSED 2026-07-30**
+- ✅ **The `properties()` inner-group expansion — CLOSED, and "cosmetic" undersold it.** It
+  hand-joined `vertex_properties` off the pushed domain and hand-built a property `ScalarCtx` that
+  was `propertyCtx` with the payload column names substituted; it now runs `lowerProperties` over
+  the pushed seed and rejoins on the ordinal, which is its sibling branch's shape exactly.
+  **The hand-join was also the reason the branch was VERTEX-only** — an edge rowid read against
+  `vertex_properties` is a silent wrong answer, so `parent.elem !== 'edge'` was the only thing
+  making it safe. Running the real step removes the reason for the guard, so the guard went too.
+  One more latent vertex-assumption fell out: `propertyCtx` re-derived the OWNER's label as a
+  vertex lookup, which is wrong for an edge-owned property and is reachable today through
+  `g.E().properties().group()`. It now reads the `ownerLabel` the payload already carries (#8's
+  work), and takes an `ownerElem` for the two positions a name cannot serve.
 - ✅ **`plan/plan.ts` `nodeProp*`/`edgeProp*` pairs — CLOSED 2026-07-30, and it was bigger than
   "cosmetic".** The eight builders were four pairs, each the other with two nouns changed; the real
   cost was OUTSIDE the file, where eight call sites re-spelled the `elem === 'edge' ? … : …`
