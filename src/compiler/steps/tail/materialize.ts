@@ -22,7 +22,7 @@ import { cardinalityOf, groupResultColumns, pathColumns, recordResultColumns, ty
  * ORDER BY with them was not. `materializeScalarRoot` was the only root that kept it, so
  * `order().by('name').values('name')` was stable while the same prefix followed by `.properties()`
  * or `.local(__.out().fold())` returned whatever order SQLite's scan happened to produce — visible
- * under `mise run test:perturbed`, invisible otherwise (docs/outstanding-work.md item 26). Every
+ * under `mise run test:perturbed`, invisible otherwise. Every
  * ordering item upstream only reached the wire on scalar results because of this one omission.
  *
  * SQL lets `ORDER BY` name a column the SELECT list does not, which is why this needs nothing from

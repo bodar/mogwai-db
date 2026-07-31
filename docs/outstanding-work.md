@@ -31,10 +31,15 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-**Ranked entry point.** Numbers are IDs, not an order. Correctness first: **26** → **2** →
+**Ranked entry point.** Numbers are IDs, not an order. Correctness first: **2** → **21** →
 **17**'s `tail`/`sample` + **28** → **29** → **3**'s `times(n)` unroll. Both fail-closed
 VIOLATIONS landed 2026-07-31 — item 27's seven `Scope.local` slices (one argument decode,
-`sliceOf`) and item 22's 24 write-path non-validations (`steps/write/validate.ts`).
+`sliceOf`) and item 22's 24 write-path non-validations (`steps/write/validate.ts`). So did the
+root-materialization ordering gap (was 26): `rootOrder` (`tail/materialize.ts`) is now the one
+place the wire's row order is decided, all eleven roots ask it, and two L4 scenarios pin it under
+`test:perturbed`. **That is what makes 21 measurable at all**, and it stops masking 20's worklist
+downstream of the root — the perturbed census moved 324 → 321 emission-order changes, the honest
+size of the corpus's exposure to a defect that was large in SHAPES and small in traversals.
 
 22. **Validation the spec MANDATES and we do not perform — the write family LANDED; 9 scenarios of
    three unrelated causes are left.** 60 L3 scenarios fail AT the error-assertion step because we
@@ -45,14 +50,6 @@ VIOLATIONS landed 2026-07-31 — item 27's seven `Scope.local` slices (one argum
    one family — **6 = a string step in `Scope.local` over a LIST passes the list through** (the same
    missing "member count" authority as item 17's `tail`), **2 = `groupCount()` taking two `by()`s**
    (a modulator-arity rule, item 23's ground), **1 = `property(single,k,traversal)`**. *Low each.*
-
-26. **The root materialization boundary DROPS emission order for 9 of 11 shapes, so every ordering item
-   only reaches the wire on scalar results.** `materializeScalarRoot` (`tail/materialize.ts:37`) is the
-   only root emitting `ORDER BY <encounter>`; the rest project bare even when the CTE declares one.
-   Under `reverse_unordered_selects`, `order().by('name').values('name')` is stable while the same
-   prefix with `.properties()`, `.local(__.out().fold())` or `.union(…)` FLIP. **Reframes 4, 20, 21** —
-   20 names an ABSENT encounter, this is a PRESENT one discarded for nine shapes; 21 cannot be measured
-   until the root determines order. One `orderByEncounter` in `materializeStream` (`:244`). **High.**
 
 2. **Universal child-seam acceptance.** Element, scalar, list, count, branch, `repeat`,
    `as()`/`select(label)` and option-map bodies compose everywhere. Still throwing or wrong:
@@ -137,7 +134,8 @@ VIOLATIONS landed 2026-07-31 — item 27's seven `Scope.local` slices (one argum
    whole stream. Every corpus `union` scenario asserts *unordered*, so nothing catches it, and
    `emission-order.feature`'s "arm 0 fully before arm 1" comment is right only for its single-traverser
    scenario. One clause on a `ROW_NUMBER() OVER`, but it moves emission order for every branch shape —
-   use the census as the instrument, and note item 26 gates measuring it at all. *Med.*
+   use the census as the instrument. **No longer blocked**: the root now emits the order it was
+   handed, so arm order reaches the wire and a scenario can observe it. *Med.*
 
 5. **Non-element child bodies.** Map and record bodies compile. **Two premises that were FALSE — do not
    rebuild on them:** the element terminal does not need a relational form, and `project`/`group`/`path`
