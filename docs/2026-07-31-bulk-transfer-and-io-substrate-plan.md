@@ -1,10 +1,11 @@
 # Bulk transfer + the `io()` substrate — one primitive under five threads
 
-**Build status (2026-07-31):** phases **0, 1, 2, 3 have landed, and 4's READER half**. Every live
-wrong-answer wall on the production runtime is closed, `mise run binds` fails the build on the idiom,
-the bulk loader is gated table-by-table against the write path, and the conformance host seeds its two
-GraphSON graphs through the reader (host startup 5.0s → 1.1s; ggrateful 4.4s → 0.14s; L3 unchanged at
-1650). What is left is phase 4's WRITER, then 5–7. Two findings from building it
+**Build status (2026-07-31):** phases **0, 1, 2, 3 and 4 have landed**. Every live wrong-answer wall on
+the production runtime is closed, `mise run binds` fails the build on the idiom, the bulk loader is
+gated table-by-table against the write path, the conformance host seeds its two GraphSON graphs through
+the reader (host startup 5.0s → 1.1s; ggrateful 4.4s → 0.14s; L3 unchanged at 1650), and the v4 writer
+round-trips modern/crew/sink/grateful-dead/**gzoo** canonically. What is left is 5–7 (`IoStore` + `io()`,
+CSV interop, the remap pass). Two findings from building it
 are folded in below rather than appended: §5's "scratch relation, chunked" is **superseded** (a
 compiled read plan is ONE statement — see §5), and the whole-suite CF-parity run is **green** before
 any fix, which is itself the measurement that says why the ladder could not have found §1c/§1d (§2's
@@ -368,6 +369,20 @@ It also covers the three structural things CSV cannot:
 codec serves the graph file format, the export/backup story, and the fast seed. No homegrown format,
 no XML, and no second writer.
 
+**Built, and the round-trip gate found exactly one loss — in STORAGE, not in the format.**
+`vertex_properties.meta` is a flat `{metaKey: scalar}` JSONB bag with no per-value type, so a
+meta-property value round-trips as whatever JSON gives back (int/double/string/bool). GraphSON could
+carry more; we have nothing more to give it. Everything else is exact, including a typed `g:Map` key,
+which no Gremlin map literal can even spell.
+
+**One JavaScript-specific hazard worth recording, because it is invisible until it silently rounds:**
+GraphSON's numbers are arbitrary-precision by spec (`max-long-v4.json` is `9223372036854775807`,
+`neg-bigdecimal-v4.json` a 33-digit decimal) and **JS's JSON cannot carry them** — `JSON.parse` yields a
+`number` (9007199254740993 → …992) and `JSON.stringify` cannot emit a bigint at all. So those digits
+ride as a STRING across both JSON boundaries, quoted before a parse and unquoted after a stringify, by
+one shared pattern. It is provably safe rather than merely unlikely: inside a JSON string every quote is
+escaped, so the literal text `{"@type":"g:Int64","@value":…}` can only be a real GraphSON object.
+
 **What CSV is for, then, is interop and only interop** — and its losses stop being a problem the
 moment it is not also the backup path. For the record, measured against Neptune's spec
 (`Bool/Byte/Short/Int/Long/Float/Double/String/Date/Datetime`, `[]` arrays, `(single|set)`): it
@@ -391,6 +406,13 @@ branch. Read from `gremlin-core` at the pinned gitlink:
   `InetAddress`, and the `Order`/`Pick`/`Pop`/`Scope`/`Column`/`Operator` enums — plus the `gx:`
   pruning above. Nothing we store. Meta-properties, VertexProperty ids, nesting and typed `g:Map`
   keys are present in both (verified in `tinkerpop-crew-v3.json` *and* `tinker-graph-v4.json`).
+- **CORRECTION, found while building the reader: the type NAMES changed prefix.** v4 moved the
+  extended types from `gx:` to `g:` — measured over every `@type` in the shipped `-v4` fixtures:
+  `g:BigDecimal`, `g:BigInteger`, `g:Byte`, `g:Char`, `g:DateTime`, `g:Duration`, `g:Int16` (plus
+  `g:Binary`, which we have no canonical type for and refuse). §4b's table lists the `gx:` spellings
+  under a "GraphSON v4" heading; **those are the v3/`GraphSONXModule` names.** The conclusion survives
+  — the reader accepts both prefixes, so it is still ONE reader, and "the whole delta is the vertex
+  label" holds for the star-graph SHAPE, which is what that claim was about.
 - **The container is the same and it is line-oriented in BOTH.** `GraphSONWriter.writeGraph`
   delegates to `writeVertices`, which emits one vertex per line (`writer.newLine()`) through
   `DirectionalStarGraph` → `StarGraphGraphSONSerializerV{3,4}`. So the adjacency form streams: read
@@ -404,6 +426,15 @@ branch. Read from `gremlin-core` at the pinned gitlink:
   + writeLabels(jsonGenerator, starGraph.starVertex.labels());
   ```
   v3 writes `"label": "person"`, v4 writes `"label": ["person"]`.
+
+**A second finding the plan did not have, and it decides the writer's output: an adjacency file
+carrying only `outE` reads as EDGELESS in TinkerPop.** `GraphSONWriter.writeGraph` emits
+`writeVertices(…, Direction.BOTH)`, but `GraphSONReader.readGraph` reads
+`readVertex(…, Direction.IN)` and then attaches `kv.getKey().edges(Direction.IN)` — the IN side only.
+So the duplication in the adjacency form (every edge listed once as its source's `outE` and once as its
+target's `inE`) is not redundancy a writer may drop. **We write both and read `outE`**, which
+interoperates in both directions; `tinkerpop-sink-v3.json` is the fixture that catches the reading half
+getting it wrong, since its two self-loops appear as both `inE` and `outE` of the same vertex.
 
 **So: read both, write v4.** Reading v3 is not optional — **every whole-graph fixture the corpus
 ships is v3** (modern, crew, sink, classic, grateful-dead; every `-v4` file is a single-value or
@@ -582,7 +613,7 @@ Each phase lands green and is useful alone.
 | **1** ✅ | `RowBatch` load/drain on the `Sql` seam; FTS row *construction* extracted from `indexProperty` | modern graph loads batched ≡ loads via write traversals, byte-identical incl. `property_fts` (`test/bulk.test.ts`), in 15 statements vs 137. `propertyValueBind` came out with it — the value channel was the SECOND thing a loader would have re-derived. DRAIN is not built: it is the writer's need, so it lands with phase 4's writer |
 | **2** ✅ | Fix §1d (`drop`) and §1c (`landForeignElements`, `within`) through `RowBatch` | done at 250–500 elements under the phase-0 store, which is what makes those tests gates rather than ordinary behaviour tests |
 | **3** ✅ | `mise run binds` static gate | at zero, fails the build (not a ratchet) — scoped to the IDIOM, because "is this bind list bounded?" is undecidable locally (§2) |
-| **4** ◐ | **Typed GraphSON reader (v3 + v4) and writer (v4)** over `RowBatch`, line-oriented adjacency form; conformance host seeds through it | READER done: L3 unchanged at 1650, ggrateful seeds in 0.14 s (statement count 98,198 → 1,482 is the deterministic half, so it is what the test asserts), census unchanged, and the reader's own gate is that the file's TYPES survive — the retired string-building fixture re-emitted a `g:Double` of 1.0 as an int. WRITER outstanding, with it the `gcrew`/`gzoo` round-trip gates |
+| **4** ✅ | **Typed GraphSON reader (v3 + v4) and writer (v4)** over `RowBatch`, line-oriented adjacency form; conformance host seeds through it | L3 unchanged at 1650, ggrateful seeds in 0.14 s (statement count 98,198 → 1,482 is the deterministic half, so it is what the test asserts), census unchanged, the file's TYPES survive (the retired string-building fixture re-emitted a `g:Double` of 1.0 as an int), and **`gcrew` + `gzoo` + modern + sink + grateful-dead all round-trip canonically**. Two findings the plan had wrong are in §4c |
 | **5** | `IoStore` (Bun FS / CF R2 / L3 host mapping) + `io()` as a barrier service | the 2 `.json` `Read.feature` scenarios pass; `.xml` and `.kryo` fail closed naming the format; `tags.ts` reclassified (§4) |
 | **6** | Neptune/Neo4j CSV reader/writer (**interop only**); `io().write()` to R2 | round-trip through CSV for the types CSV *can* carry, with the lossy cases documented and asserted as lossy rather than silently wrong |
 | **7** | remap pass (non-empty target, label re-interning, `uid` preservation) | load-into-non-empty round-trip |
