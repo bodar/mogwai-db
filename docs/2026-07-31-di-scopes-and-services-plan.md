@@ -1,6 +1,6 @@
 # Dependencies vs arguments: a request tier, and services in DI
 
-**Status: in progress — step 1 landed 2026-07-31, steps 2-6 outstanding (see §6).** Origin: phase 5 of
+**Status: in progress — steps 1-2 landed 2026-07-31, steps 3-6 outstanding (see §6).** Origin: phase 5 of
 `2026-07-31-bulk-transfer-and-io-substrate-plan.md` needed `io().read()` to reach a `GraphStore` and an
 `IoStore`, and the barrier contribution's signature had nowhere to put them. The first answer was to
 widen the signature into a context object. **That was the wrong shape**, and noticing why turned a
@@ -121,9 +121,9 @@ exists."*
 
 ## 5. Open questions, deliberately not answered here
 
-- **Does `params` stay an argument or move to the ctx?** Upstream keeps it an argument
-  (`execute(ctx, in, params)`) while getting dependencies by construction. Either is defensible for us;
-  the ctx already carries it, so the argument may be redundant.
+- ~~**Does `params` stay an argument or move to the ctx?**~~ **Answered in step 2: the ctx.** Upstream
+  keeps it an argument (`execute(ctx, in, params)`) because ITS service instance is shared across
+  calls; ours is resolved per call site, so the argument was pure redundancy.
 - **Does the compile tier survive?** §2's `scope.q` check decides it.
 - **Do the two param TIERS upstream has matter to us?** `createService(isStart, params)` (static —
   which service INSTANCE you get) vs `execute(…, params)` (per call). We collapse both into one map.
@@ -144,8 +144,19 @@ This is a **behaviour-preserving refactor**: no traversal changes its answer, so
    ≡ {`tinker.search`, `tinker.degree.centrality`}) rather than implied — so a later internal service
    that forgets the flag fails a unit test instead of an L3 scenario. Answer to "what may an internal
    service be called": anything. The name carries no policy now.
-2. Services as scope entries; `Contribution.apply` shrinks; `federate` stops taking `source`/`depth`
-   positionally.
+2. ~~Services as scope entries; `Contribution.apply` shrinks; `federate` stops taking `source`/`depth`
+   positionally.~~ **Landed.** `RegistryProvider = (app: AppScope) => ServiceRegistry` (`scopes.ts`);
+   `createFederateService(source)` + `createDirectoryService(app)`; `apply(rows)`; `federationDepth`
+   joins `ServiceCallCtx`, `registry` leaves it. §5's first open question is answered by the code:
+   **`params` moved to the ctx** — `resolve` already received it, so keeping it an argument as well
+   would have been the redundancy, and upstream's reason for the argument (a service instance shared
+   across calls) does not apply when `resolve` runs per call site.
+   One thing the plan did not predict: yadic types a `.set()` provider against the scope built SO
+   FAR, so a provider needing the whole `AppScope` (the directory needs `registry`) does not
+   typecheck against it. `createAppScope` therefore names the scope and closes over it
+   (`const app: AppScope = ….set('registry', () => provider(app))`) — the laziness constraint 1
+   relies on, made explicit rather than cast away. Two dead things fell out: `MidBarrierPoint.registry`
+   (nothing read it) and `Executor.source` as a field.
 3. The request tier: `CompilerScope` → `RequestScope`, `params`/`federationDepth`/`sourceOptions` move
    up, nested compiles stop restating them.
 4. `q` out of the scope (or a two-field compile tier), resolving the `LoweringState` duplication.
