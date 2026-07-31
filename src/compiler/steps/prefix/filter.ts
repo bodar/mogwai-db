@@ -209,8 +209,9 @@ export const where: StepFn = (s, st) => {
     // Both sides are read as VERTEX properties below; an edge-typed operand would silently
     // read a vertex's props (ids collide across spaces) → reject.
     if (leftElem === 'edge' || rightElem === 'edge') throw new Error('where().by(key) on an edge-typed label not yet supported');
-    const op = (s as any).productiveBy && pred.op === 'eq' ? 'IS'
-      : (s as any).productiveBy && pred.op === 'neq' ? 'IS NOT'
+    const productiveBy = (s as IRStep).productiveBy;
+    const op = productiveBy && pred.op === 'eq' ? 'IS'
+      : productiveBy && pred.op === 'neq' ? 'IS NOT'
       : P_OPS[pred.op];
     testNode = q`${propScalarFor(left, 'vertex', byKey)} ${op} ${propScalarFor(right, 'vertex', byKey)}`;
   } else {

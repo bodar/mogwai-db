@@ -7,7 +7,7 @@
 
 import { q, value, raw, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { predicateSql, scalarTx, compareKey, inferVtypeSql } from '../../plan/plan.ts';
-import { isColumnArg, isScopeArg, stepChain } from '../../../gremlin/frontend.ts';
+import { isColumnArg, isNested, isScopeArg, stepChain } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { loweringStateOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, mapOfToListOf, PROPERTY_PAYLOAD, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type PropertyStream, type ScalarStream, type MapStream, type ShapeTailFn } from '../context/stream.ts';
 import { layoutProjection, layoutCols, type ElementStream } from '../context/context.ts';
@@ -540,8 +540,8 @@ export const isMapLocalOrder = (step: IRStep): boolean => mapLocalOrder(step) !=
 function mapOfSelect(step: IRStep, params: Record<string, any>): IRStep | null {
   if (step.name !== 'map') return null;
   const arg = (step.args ?? [])[0];
-  if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
-  const body = stepChain((arg as any).nested, params);
+  if (!isNested(arg)) return null; // the guard narrows, so `.nested` below is rename-safe
+  const body = stepChain(arg.nested, params);
   return body.length === 1 && body[0].name === 'select' && columnOf(body[0]) ? body[0] : null;
 }
 

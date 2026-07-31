@@ -294,7 +294,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   const nestedElementMove = !!nestedGroup && classifyElementChildRows(nestedPrefix, undefined, false) !== null;
   const nestedPropertiesMove = !!nestedGroup && !nestedElementMove
     && nestedPrefix.length === 1 && nestedPrefix[0].name === 'properties'
-    && ((nestedPrefix[0] as any).args ?? []).every((a: any) => typeof a === 'string')
+    && ((nestedPrefix[0] as IRStep).args ?? []).every((a: any) => typeof a === 'string')
     && parent.kind === 'elements';
   const genericGroupVal = nestedElementMove || nestedPropertiesMove;
   if (!genericKey && !genericProjectKey && !genericVal && !genericReducer && !genericFold && !genericElementFold && !genericElementImplicitFold && !genericGroupVal) return null;

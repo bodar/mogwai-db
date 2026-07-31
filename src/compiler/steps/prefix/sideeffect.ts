@@ -162,7 +162,7 @@ const groupSideEffect = (isCount: boolean): StepFn => (s, st) => {
     isCount,
     modulators: (s as IRStep).modulators ?? [],
     parent: st,
-    productiveBy: (s as any).productiveBy,
+    productiveBy: (s as IRStep).productiveBy,
   };
   return register(st, name, def);
 };

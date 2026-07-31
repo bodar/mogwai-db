@@ -1,4 +1,5 @@
 import { isNested } from '../../../gremlin/frontend.ts';
+import { type IRStep } from '../../ir/strategies.ts';
 import { derived, q, list, type Expression } from '../../../sql/kernel/q.ts';
 import { scalarProp, predicateSql, elemCtx } from '../../plan/plan.ts';
 import { appendCte, elemRel, prevRel, layoutCols, patchLayout, type ElementStream, type StepFn } from '../context/context.ts';
@@ -43,7 +44,7 @@ export const sack: StepFn = (s, st) => {
   const op = (s.args ?? []).find((a: any) => a && typeof a === 'object' && 'operator' in a)?.operator;
   if (!op) throw new Error('sack() read form should not dispatch as a prefix step'); // guarded in lowerElementSteps
   if (!SACK_OPS.has(op)) throw new Error(`sack(Operator.${op}) not yet supported`);
-  const modulators = (s as any).modulators ?? [];
+  const modulators = (s as IRStep).modulators ?? [];
   if (modulators.length > 1) throw new Error('Sack step can only have one by modulator');
   // aliases/path + a mutable sack still defer (fork/merge over as()/path history unverified).
   // A pushed child-scope ORIGIN is fine: the layoutCols-ordered re-projection below copies

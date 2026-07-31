@@ -1,4 +1,4 @@
-import { stepChain, isNested, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
+import { stepChain, isNested, isPred, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
 import { bodyAlwaysProduces } from './productivity.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { type IRStep } from './step.ts';
@@ -471,10 +471,10 @@ const VALUE_OPERAND_SLOTS: Record<string, (args: readonly any[]) => readonly num
 
 /** Fold constants inside a predicate object's `values`, recursively (P.not(P.gt(…)) nests). */
 function foldPredOperands(pred: any, params: Record<string, any>): any {
-  if (!pred || typeof pred !== 'object' || !('op' in pred) || !Array.isArray((pred as any).values)) return pred;
+  if (!isPred(pred) || !Array.isArray(pred.values)) return pred;
   return {
     ...pred,
-    values: (pred as any).values.map((v: any) => {
+    values: pred.values.map((v: any) => {
       if (isNested(v)) { const c = constantOperand(v.nested, params); return c ? c.value : v; }
       return foldPredOperands(v, params);
     }),
@@ -856,7 +856,7 @@ const matchLabelsOf = (s: Step, params: Record<string, any>): string[] => {
   const out: string[] = [];
   for (const a of s.args ?? []) {
     if (!isNested(a)) continue;
-    const chain = stepChain((a as any).nested, params);
+    const chain = stepChain(a.nested, params);
     if (chain[0]?.name !== 'as') continue;
     out.push(...asLabelsOf(chain[0]));
     if (chain.length > 1) out.push(...asLabelsOf(chain[chain.length - 1]));
