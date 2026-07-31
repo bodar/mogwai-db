@@ -31,8 +31,8 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-**Ranked entry point.** Numbers are IDs, not an order. **2** → **21**'s T3 (needs a
-hand-derived L4 pin first; T1+T2 landed) →
+**Ranked entry point.** Numbers are IDs, not an order. **21**'s T3 (needs a hand-derived L4 pin
+first; T1+T2 landed) → **2** →
 **17**'s `tail`/`sample` + **28** → **29** → **3**'s `times(n)` unroll. Both fail-closed
 VIOLATIONS landed 2026-07-31 — item 27's seven `Scope.local` slices (one argument decode,
 `sliceOf`) and item 22's 24 write-path non-validations (`steps/write/validate.ts`). So did the
@@ -53,17 +53,26 @@ size of the corpus's exposure to a defect that was large in SHAPES and small in 
    (a modulator-arity rule, item 23's ground), **1 = `property(single,k,traversal)`**. *Low each.*
 
 2. **Universal child-seam acceptance.** Element, scalar, list, count, branch, `repeat`,
-   `as()`/`select(label)` and option-map bodies compose everywhere. Still throwing or wrong:
-   map/group/record child bodies (→ 5); `group().by(project(…))` composite keys; a child-in-child body
-   whose inner child is not element-shaped (`local(__.local(__.out().values('n')))`); **a label REBOUND
-   inside `filter()`** dropping rows TinkerPop keeps
-   (`g.V().as("a").out().as("b").filter(__.as("a").out("knows")).count()` = 0 vs 1); and
-   **`choose().option()` with only `Pick.none` plus an unproductive choice — a real wrong answer**, whose
-   fix measures +1/−1, the loss being `groupCount` over a `VariantStream`, so it is gated on
-   group-over-VariantStream rather than on the option map.
+   `as()`/`select(label)` and option-map bodies compose everywhere. **Two of the four things this item
+   called wrong answers were the REFERENCE's answers** — probed 2026-07-31 against the vendored
+   `gremlin-core` and now pinned in L4 (`child-body-labels.feature`, `nested-branch-arms.feature`)
+   with the file and line each was read from, so they cannot be re-filed:
+   - a label rebound inside `filter()` is NOT a dropped row. TinkerPop routes by variable location in
+     `where()` and only where() (`WhereTraversalStep.configureStartAndEndSteps` installs a
+     `WhereStartStep`); `filter()` builds a plain `TraversalFilterStep`, so a leading `as("a")` is an
+     ordinary rebind and `filter(__.as("a").out("knows"))` ≡ `filter(__.out("knows"))`. The two hosts
+     MUST disagree, which `src/compiler/steps/CLAUDE.md` already said.
+   - `choose().option(Pick.none, …)` with an unproductive choice takes the none arm and we do too
+     (`pickBranches` falls back to `Pick.none` whenever nothing matched). The only-`Pick.none` spelling
+     the item named DEFERS with a clear message rather than answering, so nothing in that family
+     mis-executes.
+   **What is genuinely open, all of it fail-closed:** map/group/record child bodies (→ 5);
+   `group().by(project(…))` composite keys; a child-in-child body whose inner child is not
+   element-shaped (`local(__.local(__.out().values('n')))`); and the only-`Pick.none` option-map
+   deferral above.
    Start `steps/tail/{child-shape,child,scalar-arm}.ts`. **Two invariants:** the ONE arm triage is
    `classifyBranchArms` (two documented exceptions); a renderer that cannot carry alias columns must
-   DECLINE, not answer. **High.**
+   DECLINE, not answer. **Medium** (was High — the wrong-answer half evaporated on measurement).
    → [carried-schema-and-projection-reentry](./2026-07-14-carried-schema-and-projection-reentry-plan.md),
    [group-value-generic-seam](./2026-07-18-group-value-generic-seam-plan.md)
 
@@ -437,7 +446,8 @@ deferral clusters in 5c instead.
   check, keeping the per-kind matcher. Fix the README as part of it.
 - **`feature-support-matrix.md` over-promises.** (a) Generate the capability ratchet's per-step shape
   strip into it so its ✅ matches 5c. (b) It states "There are currently NO 🐞 rows — no form is known to
-  mis-execute", which is false (items 2, 20, 21, and 22's remaining 9), and the legend points at `known.ts`,
+  mis-execute", which is false (items 20 and 21's T3; items 2 and 22's write half were MEASURED clean
+  on 2026-07-31), and the legend points at `known.ts`,
   which is empty — so the mark has no source of truth.
 - **The `ResultStream` residue is the one worthwhile `Shape` retirement** — six orphan `Shape` kinds
   across 13 `toResultStream` sites, and ~14 of 5c's failures. Zero corpus demand, so it is a give-back.
