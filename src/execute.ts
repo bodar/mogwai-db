@@ -767,7 +767,7 @@ export class Executor implements ExecutorApi {
    *  boundary, and the ONLY async loop outside a runtime entry point. A pure single-segment
    *  traversal (all of Phases 1-5) returns immediately, zero async overhead. A barrier (federate)
    *  loops: read+drain head → await apply() → land + resume. `federationDepth` rides
-   *  CompileOptions beside the registry, reaching the service's ServiceCallCtx so the barrier's
+   *  CompileOptions beside the registry, reaching the service's CallSite so the barrier's
    *  apply closure captures it (a recursive federate hops at depth+1). */
   private async drive(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>, federationDepth: number): Promise<Compiled | WritePlan> {
     let p: Plan = compilePlan(gremlin, params, { app: this.app, federationDepth }, paramTypes);

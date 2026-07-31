@@ -42,15 +42,26 @@ export interface CallSpec {
   readonly injectionTraversal?: any;
 }
 
-/** Compile-time context handed to a Service — what a CALL is, never what a service DEPENDS on
- *  (a dependency arrives at construction, off the app scope: see standard.ts). A superset the
- *  resolver reads selectively: a source service (--list, tinker.search) ignores `parent`/`scope`;
- *  a per-parent service (tinker.degree.centrality) requires them (lowerCall pushes the child scope
- *  BEFORE building, so `parent` is already the pushed seed). */
-export interface ServiceCallCtx {
+/** ONE call() occurrence, with everything a service needs to lower into it: this call's resolved
+ *  arguments, where to build SQL (`q` + the traversal's `boundParams`), the request's hop depth,
+ *  and — for a mid-traversal call — the enclosing traverser position. Never what a service DEPENDS
+ *  on: a dependency arrives at construction, off the app scope (see standard.ts).
+ *
+ *  Distinct from `CallSpec` above, and the pair is the parse/lower split: a `CallSpec` is what the
+ *  step TEXT parsed to, before registry lookup; a `CallSite` is what the resolved service is handed
+ *  to contribute. A superset the resolver reads selectively — a source service (--list,
+ *  tinker.search) ignores `parent`/`scope`; a per-parent service (tinker.degree.centrality) requires
+ *  them (lowerCall pushes the child scope BEFORE building, so `parent` is already the pushed seed).
+ *
+ *  It was `ServiceCallCtx`, which borrowed TinkerPop's `ServiceCallContext` — a different thing
+ *  ({traversal, step} + generateTraverser/split, for barrier services building their own
+ *  path-preserving Traversers, which we do not do because path rides in columns). */
+export interface CallSite {
+  /** THIS call's resolved params — `g.call(name, {k: v})` / `.with(k, v)`. Not to be confused with
+   *  `boundParams`: these are the call's arguments, those are the traversal's wire bindings. */
   readonly params: CallParams;
   readonly q: Query;
-  readonly compileParams: Record<string, any>;   // the traversal's bound-param table
+  readonly boundParams: Record<string, any>;   // the traversal's bound-param table (wire bindings)
   /** This compile's federation hop depth — request-scoped, so a barrier's `apply` closure can
    *  capture it at resolve time and recurse at depth+1 without an `apply` parameter. */
   readonly federationDepth: number;
@@ -72,9 +83,9 @@ export type { ForeignRow } from '../../api.ts';
  *  `apply` takes ONLY the drained input rows (empty for a source-form call) — the one value that
  *  is genuinely per-execution. Everything it used to take positionally now arrives where it
  *  belongs: the FederationSource at construction (an app-scope dependency), the params and this
- *  hop's federation depth off the `ServiceCallCtx` that `resolve` already receives. */
+ *  hop's federation depth off the `CallSite` that `resolve` already receives. */
 export type Contribution =
-  | { readonly kind: 'stream'; build(ctx: ServiceCallCtx): Stream }
+  | { readonly kind: 'stream'; build(site: CallSite): Stream }
   | { readonly kind: 'barrier'; apply(rows: readonly ForeignRow[]): Promise<ForeignRow[]> };
 
 export interface Service {
@@ -90,7 +101,7 @@ export interface Service {
   readonly internal?: boolean;
   /** The describe blob for `--list --verbose`. A minimal `{}` is fine for now. */
   describeParams(): Record<string, unknown>;
-  resolve(ctx: ServiceCallCtx): Contribution;
+  resolve(site: CallSite): Contribution;
 }
 
 export interface ServiceRegistry {

@@ -42,7 +42,7 @@ function traversalOf(params: CallParams): string {
 
 /** The federated service. Registered by standard.ts's extendedRegistry only. Takes the
  *  FederationSource — how to reach other graphs — at CONSTRUCTION, off the app scope where it
- *  already lived; the per-call values (params, this hop's depth) come from the ServiceCallCtx
+ *  already lived; the per-call values (params, this hop's depth) come from the CallSite
  *  `resolve` already receives, so `apply` carries only the rows that are genuinely per-call.
  *  The sibling runs one level deeper (depth + 1), guarded first. */
 export const createFederateService = (source: FederationSource | undefined): Service => ({

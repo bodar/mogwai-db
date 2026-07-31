@@ -486,8 +486,8 @@ export class LoweringEngine implements Engine {
       params: bp.params,
       apply: bp.apply,
       resume: (foreign: ForeignRow[], headRows: readonly ForeignRow[]) => {
-        const eng = this.child(bp.compileParams, bp.restSteps);
-        const carry: LoweringState = { q: eng.q, params: bp.compileParams, traverserLayout: { aliases: new Map(), origins: [] } };
+        const eng = this.child(bp.boundParams, bp.restSteps);
+        const carry: LoweringState = { q: eng.q, params: bp.boundParams, traverserLayout: { aliases: new Map(), origins: [] } };
         const elem = foreign[0]?.kind === 'edge' ? 'edge' : bp.parent.elem;
         // Scatter the batched pool back over the parents by the injected value (flatMap: a parent
         // that matched nothing drops), then continue the chain from the rejoined foreign stream.

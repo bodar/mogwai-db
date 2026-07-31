@@ -3,7 +3,7 @@ import { type Query } from '../../../sql/kernel/q.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { type Stream, type LoweringResult, continueLowering, suspendLowering } from '../context/stream.ts';
 import { type ElementStream } from '../context/context.ts';
-import { type ServiceRegistry, type ServiceCallCtx, type Contribution, type ForeignRow, type CallParams, type InjectionKind } from '../../../services/spi/types.ts';
+import { type ServiceRegistry, type CallSite, type Contribution, type ForeignRow, type CallParams, type InjectionKind } from '../../../services/spi/types.ts';
 import { parseCallSpec, injectionKindOf } from '../../../services/params/call-params.ts';
 import { type ChildFrame, type ChildFrameStack } from './child-shape.ts';
 import { buildCallHead } from './call-head.ts';
@@ -29,7 +29,7 @@ import { engineOf } from '../../engine/deps.ts';
  *  RESUME lowering once the rows land. The consumer (compileRead, which owns lowerSteps /
  *  materializeRootStream / foreign landing) builds the SegmentPlan.resume closure from `restSteps` —
  *  keeping the lowerSteps dependency OUT of call.ts (call.ts is imported by index.ts; importing
- *  lowerSteps back would cycle). `params`/`compileParams` seed the resumed foreign root stream. */
+ *  lowerSteps back would cycle). `params`/`boundParams` seed the resumed foreign root stream. */
 export interface BarrierPoint {
   readonly kind: 'barrier-point';
   readonly serviceName: string;
@@ -40,7 +40,7 @@ export interface BarrierPoint {
   /** Where restSteps begins in the original chain (the index the resumer lowers from). */
   readonly restAt: number;
   /** The traversal's bound-param table, for the resumed lowering's LoweringState. */
-  readonly compileParams: Record<string, any>;
+  readonly boundParams: Record<string, any>;
 }
 
 export const isBarrierPoint = (x: unknown): x is BarrierPoint =>
@@ -67,7 +67,7 @@ export interface MidBarrierPoint {
   /** The chain steps AFTER this call() — resumed against the rejoined foreign stream. */
   readonly restSteps: IRStep[];
   readonly restAt: number;
-  readonly compileParams: Record<string, any>;
+  readonly boundParams: Record<string, any>;
 }
 
 export const isMidBarrierPoint = (x: unknown): x is MidBarrierPoint =>
@@ -76,7 +76,7 @@ export const isMidBarrierPoint = (x: unknown): x is MidBarrierPoint =>
 /** Resolve the service + take its Contribution. A 'stream' kind is returned for inline lowering;
  *  a 'barrier' kind is returned as-is so the caller (seedCall/lowerCall) can build a BarrierPoint.
  *  Shared by the source and mid-traversal paths. */
-function resolveContribution(spec: ReturnType<typeof parseCallSpec>, registry: ServiceRegistry, ctx: ServiceCallCtx): Contribution {
+function resolveContribution(spec: ReturnType<typeof parseCallSpec>, registry: ServiceRegistry, ctx: CallSite): Contribution {
   const service = registry.get(spec.serviceName);
   if (!service) throw new Error(`call(): unknown service '${spec.serviceName}'`);
   return service.resolve(ctx);
@@ -91,7 +91,7 @@ export function seedCall(first: IRStep, query: Query, params: Record<string, any
   const spec = parseCallSpec(first, params);
   // depth is this compile's federation depth (request-scoped DI, captured from CompileOptions) —
   // on the ctx, so the service's apply closure captures it and a recursive federate hops at depth+1.
-  const ctx: ServiceCallCtx = { params: spec.params, q: query, compileParams: params, federationDepth: depth };
+  const ctx: CallSite = { params: spec.params, q: query, boundParams: params, federationDepth: depth };
   const contribution = resolveContribution(spec, registry, ctx);
   if (contribution.kind === 'stream') return contribution.build(ctx);
   return {
@@ -101,7 +101,7 @@ export function seedCall(first: IRStep, query: Query, params: Record<string, any
     apply: contribution.apply,
     restSteps: steps,
     restAt: 1, // a source call() is steps[0]; the rest begins at 1
-    compileParams: params,
+    boundParams: params,
   };
 }
 
@@ -126,10 +126,10 @@ export function seedCall(first: IRStep, query: Query, params: Record<string, any
 export function lowerCall(step: IRStep, parent: ElementStream, scope: ChildFrameStack, steps: IRStep[], stop: number): LoweringResult {
   const spec = parseCallSpec(step, parent.params);
   const registry = engineOf(parent).registry;
-  const ctx: ServiceCallCtx = {
+  const ctx: CallSite = {
     params: spec.params,
     q: parent.q,
-    compileParams: parent.params,
+    boundParams: parent.params,
     federationDepth: engineOf(parent).federationDepth,
     parent,
     scope,
@@ -160,7 +160,7 @@ export function lowerCall(step: IRStep, parent: ElementStream, scope: ChildFrame
     head, apply, injection, frame, parent,
     restSteps: steps,
     restAt: stop + 1,
-    compileParams: parent.params,
+    boundParams: parent.params,
   };
   return suspendLowering(point);
 }
