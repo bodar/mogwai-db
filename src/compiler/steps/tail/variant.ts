@@ -79,7 +79,7 @@ export function finishListMerge(
       ? q`, ${k} AS arm_idx, ${arm.traverserLayout.encounter ? a.c[arm.traverserLayout.encounter] : q`1`} AS arm_encounter`
       : empty;
     const gate = gateFor?.(a, k);
-    return q`SELECT ${a.c.list} AS list${tag}${layoutArmProjection(out, arm.traverserLayout.aliases, a, grew)} FROM ${a}${gate ? q` WHERE ${gate}` : empty}`;
+    return q`SELECT ${a.c.list} AS list${tag}${layoutArmProjection(out, arm.traverserLayout, a, grew)} FROM ${a}${gate ? q` WHERE ${gate}` : empty}`;
   });
   const armMerge = mergeArmRelation(base, out, ['list'], parts, mint);
   return toListStream(stateWithLayout(base, armMerge.traverserLayout), armMerge.rel, of);

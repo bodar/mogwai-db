@@ -5,14 +5,15 @@ import { edges } from '../../../sql/schema.ts';
 import { engineOf, fastPathContextOf, type Engine } from '../../engine/deps.ts';
 import { analyzeChain, type ChainFacts } from '../../ir/analyze.ts';
 import { normalize } from '../../ir/passes.ts';
-import { VERTEX_MOVES } from '../../ir/step.ts';
+import { armCollapses, VERTEX_MOVES } from '../../ir/step.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
 import { aliasCtx, dirsFor, edgeLabelFilter, elemCtx, hasProp, jsonbGroupArray, labelIn, predicateSql, scalarProp, vertexLabelIn, vertexLabelName, vertexLabelsJson, type EdgeEnd, type Elem, type ScalarCtx } from '../../plan/plan.ts';
-import { aliasColsOf, appendCte, elemRel, labelScope, layoutCols, layoutProjection, layoutProjectionMinting, mergeLayouts, partitionOver, patchLayout, prevRel, rehomeLayout, rigidCols, type AliasMap, type ElementStream, type LoweringState, type PathState, type SideEffectDef, type StepFn, type TraverserLayout } from '../context/context.ts';
+import { aliasColsOf, appendCte, collapsedArmAdmissible, elemRel, labelScope, layoutCols, layoutProjection, layoutProjectionMinting, mergeLayouts, partitionOver, patchLayout, prevRel, rehomeLayout, rigidCols, type AliasMap, type ElementStream, type LoweringState, type PathState, type SideEffectDef, type StepFn, type TraverserLayout } from '../context/context.ts';
 import { loweringStateOf, toElementStream, type ListStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
 import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, isGlobalBarrier, optionMapMerge, optionMapNeedsPassthrough, readOptionMapArms, ROOT_SCOPE, type ChildCtx, type ChildPlan } from '../tail/child-shape.ts';
 import { pushChildScope, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
+import { gateArmOnNonEmptyInput } from '../tail/barrier.ts';
 import { keyedChildRelation, keyedKeySet } from '../tail/keyed.ts';
 import { emptyElementLike } from '../tail/labelselect.ts';
 import { combineSack, SACK_OPS, unionScalarStreams } from '../tail/scalar.ts';
@@ -273,11 +274,40 @@ export function tryLowerScalarUnion(s: Step, st: ElementStream): ScalarStream | 
     // dispatch is tryCompileScalarValueChild's job — inlining it here (in the opposite arm order,
     // which is how nobody noticed) was a second copy of that façade.
     const plan = classifyScalarChild(branch.nested, childCtx(st));
-    const arm = tryCompileScalarValueChild(st, branch.nested, 'all', ROOT_SCOPE, plan ?? undefined);
+    const arm = tryCompileBatchedElementArm(st, branch.nested, plan)
+      ?? tryCompileScalarValueChild(st, branch.nested, 'all', ROOT_SCOPE, plan ?? undefined);
     if (!arm) return null;
     arms.push(arm);
   }
   return unionScalarStreams(st, arms);
+}
+
+/**
+ * A COLLAPSING arm of a BATCHING branch over an ELEMENT parent, lowered over the branch's whole
+ * input — the element twin of `tryCompileBatchedScalarArm` (scalar-arm.ts), and the case
+ * `branch/Union.feature` already pins on both readings:
+ *
+ *     g.V(v1,v2).union(outE().count(), inE().count(), outE().values("weight").sum())        → 3 rows
+ *     g.V(v1,v2).local(union(outE().count(), inE().count(), outE().values("weight").sum())) → 5 rows
+ *
+ * We returned the `local()` answer to both, because every arm was provisioned as a per-origin child
+ * body — and `local()` is precisely TinkerPop's marker for the per-traverser form, so the two
+ * collapsed into one for us. `BranchStep.standardAlgorithm` injects every start at once when an
+ * option holds a `Barrier` (`hasBarrier`), which is what makes the bare form 3 rows.
+ *
+ * As with the scalar twin this adds nothing: the arm is lowered by the ORDINARY engine over the
+ * element stream, exactly as `g.V(v1,v2).outE().count()` lowers as a main chain, so the collapsing
+ * terminal reaches `lowerGlobalCount`/`lowerGlobalNumericReducer` instead of their per-origin
+ * siblings. `classifyScalarChild` stays the gate — it is the classifier that already decides whether
+ * this body lowers to a scalar at all, so the recognizer cannot accept one the engine would throw
+ * partway through.
+ */
+function tryCompileBatchedElementArm(st: ElementStream, nested: any, plan: ReturnType<typeof classifyScalarChild>): ScalarStream | null {
+  if (!plan || !collapsedArmAdmissible(st.traverserLayout)) return null;
+  const body = childSteps(nested, st.params);
+  if (!armCollapses(body)) return null;
+  const end = engineOf(st).lowerStepsStrict(st, body, 0);
+  return end.kind === 'scalar' ? gateArmOnNonEmptyInput(end, st.rel) : null;
 }
 
 export function tryLowerListUnion(s: Step, st: ElementStream): ListStream | null {

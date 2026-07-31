@@ -4,7 +4,7 @@ import { compareKey, limitOffset, predicateSql, scalarTx, TYPE_PER_ROW, TYPE_STA
 import { isNested, isOperatorArg, isOrderArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { isLocalScope, REDUCERS, sliceOf } from '../../ir/step.ts';
-import { collapsedArmProjection, isCollapsedArm, layoutProjection, layoutProjectionMinting, layoutCols, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, dropLayoutAtBarrier, type LoweringState } from '../context/context.ts';
+import { layoutProjection, layoutProjectionMinting, layoutCols, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, dropLayoutAtBarrier, type LoweringState } from '../context/context.ts';
 import { loweringStateOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec, SCALAR_TRANSFORMS } from './coerce.ts';
 import { perRowColumnOf, perRowCols, STATIC, staticTypeOf, UNKNOWN, type ScalarType, type ValueType } from '../../../sql/kernel/render.ts';
@@ -541,12 +541,10 @@ export function unionScalarStreams(base: LoweringState, arms: readonly ScalarStr
     const r = a.rel.as('a');
     const armEnc = a.traverserLayout.encounter ? r.c[a.traverserLayout.encounter] : q`1`;
     const gate = gateFor?.(r, k);
-    // A COLLAPSED arm (a batching branch's barrier arm, reduced over the whole input) declares no
-    // carried columns at all, so it cannot project the merged schema — it FILLS it: aliases NULL,
-    // `bulk` 1, which is what the reference's freshly generated reducer traverser carries.
-    const carried = isCollapsedArm(a.traverserLayout, out)
-      ? collapsedArmProjection(out)
-      : layoutArmProjection(out, a.traverserLayout.aliases, r, armsGrewAlias);
+    // `layoutArmProjection` resolves per COLUMN, so an arm that a collapsing barrier stripped of
+    // `bulk` fills it with 1 (what the reference's generated reducer traverser carries) while still
+    // projecting a label it bound after the barrier.
+    const carried = layoutArmProjection(out, a.traverserLayout, r, armsGrewAlias);
     return q`SELECT ${r.c.v} AS v${numeric ? q`, ${r.c.vt} AS vt` : empty}, ${value(k)} AS arm_idx, ${armEnc} AS arm_encounter${carried} FROM ${r}${gate ? q` WHERE ${gate}` : empty}`;
   });
   // `mint: true` UNCONDITIONALLY, unlike the list/variant siblings: a scalar stream's positional

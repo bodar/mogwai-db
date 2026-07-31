@@ -374,59 +374,45 @@ export function aliasArmProjection(armAliases: AliasMap, out: AliasMap, p: Relat
 /** ONE arm's projection of the MERGED carried schema, as the `, col, col, …` fragment an arm
  *  SELECT splices after its payload.
  *
- *  When the merge GREW the label set, the alias columns must come from the ARM — its own physical
- *  column remapped onto the canonical name, NULL where it never bound the label — while every
- *  other carried column is state the arms share with the seed and rides straight through. When it
- *  did NOT grow, each arm's alias columns ARE the seed's, so a flat `layoutProjection` is the same
- *  relation and the cheaper hot path.
+ *  Resolved per COLUMN, and that is load-bearing rather than tidy. Three cases, and an arm can be in
+ *  more than one at once:
  *
- *  The scalar, list and variant merges each spelled this out, and the branch that skipped the
- *  remap is where a label an arm minted itself went silently unread. */
-export function layoutArmProjection(out: TraverserLayout, armAliases: AliasMap, a: Relation, grew: boolean): Expression {
-  if (!grew) return layoutProjection(out, a);
-  const cols = [...aliasArmProjection(armAliases, out.aliases, a), ...nonAliasCols(out).map((c) => a.c[c])];
+ *  - an ALIAS the arm bound under a different physical name → remapped onto the canonical one;
+ *  - an ALIAS the arm never bound → NULL, so a `select()` of it drops that arm's traversers via
+ *    `aliasPresent` (TinkerPop's drop-not-throw);
+ *  - a NON-ALIAS role the arm no longer has, because a COLLAPSING barrier in it ran
+ *    `dropLayoutAtBarrier` → filled with what the reference's freshly generated reducer traverser
+ *    carries, which for `bulk` is the literal 1.
+ *
+ *  The third case is why this cannot be decided per ARM. A batched collapsing arm that then binds a
+ *  label (`union(__.out().count().as("x"), …)`) has LOST `bulk` and GAINED `a0`, so "is this arm
+ *  collapsed?" has no answer — asking it produced `SELECT a.v, ?, 1, a.a0,  FROM …`, a trailing comma
+ *  where `a.bulk` resolved to nothing. Asking per column cannot reach that state.
+ *
+ *  Any other missing role throws: a live `path`/`sack`/`fromV`/origin is per-traverser state a
+ *  collapse destroyed, and NULL-padding it would hand a consumer a channel reading "absent" when the
+ *  truth is "unanswerable". The caller must decline before lowering such an arm
+ *  (`collapsedArmAdmissible`) — a deferral has to happen before any CTE is appended.
+ *
+ *  When neither an alias remap nor a fill is needed, a flat `layoutProjection` is the same relation
+ *  and the cheaper hot path. The scalar, list and variant merges each spelled this out, and the
+ *  branch that skipped the remap is where a label an arm minted itself went silently unread. */
+export function layoutArmProjection(out: TraverserLayout, arm: TraverserLayout, a: Relation, grew: boolean): Expression {
+  const have = new Set(layoutCols(arm));
+  const missing = nonAliasCols(out).filter((c) => !have.has(c));
+  if (!grew && !missing.length) return layoutProjection(out, a);
+  const nonAlias = nonAliasCols(out).map((c) => {
+    if (have.has(c)) return a.c[c];
+    if (c === out.bulk) return q`1 AS ${raw(c)}`;
+    throw new Error(`a branch arm that dropped its carried '${c}' cannot be merged — the caller must decline before lowering it`);
+  });
+  const cols = [...aliasArmProjection(arm.aliases, out.aliases, a), ...nonAlias];
   return cols.length ? list(cols.map((e) => q`, ${e}`), '') : empty;
 }
 
-/**
- * Is this arm's carried schema the one a COLLAPSING barrier left behind? `dropLayoutAtBarrier`
- * removes every per-traverser channel, so a collapsed arm declares NO carried columns while the
- * merged schema still declares the ones its per-row siblings carry. That difference is the signal —
- * asked of the LAYOUT, which is the physical contract, rather than tracked as a flag a caller could
- * forget to pass.
- */
-export const isCollapsedArm = (arm: TraverserLayout, out: TraverserLayout): boolean =>
-  layoutCols(arm).length === 0 && layoutCols(out).length > 0;
-
-/**
- * ONE COLLAPSED arm's projection of the merged carried schema.
- *
- * A collapsed arm is one traverser, and the reference says what it carries: `ReducingBarrierStep`
- * emits a freshly GENERATED traverser, so no labels, no path, and a bulk of one. So the alias
- * columns NULL-pad — the same answer `layoutArmProjection` already gives a label an arm never bound
- * — and `bulk` is the literal 1.
- *
- * **Every other role has no honest fill, and the caller must have refused before reaching here.**
- * A live `path`/`sack`/`fromV` is per-traverser state the collapse destroyed, and a non-empty
- * `origins` means the collapse crossed the very ordinals the merge partitions by — NULL-padding any
- * of them would hand a downstream consumer a channel that reads as "absent" when the truth is
- * "unanswerable". The assertion here is therefore a contract check on the caller, not a deferral
- * point: a deferral has to happen before any CTE is appended (the classify-then-emit rule).
- *
- * It takes no relation, and that is the whole difference from `layoutArmProjection`: every column a
- * collapsed arm contributes is a CONSTANT, because there is no per-traverser row left to read one
- * from.
- */
-export function collapsedArmProjection(out: TraverserLayout): Expression {
-  if (out.origins.length || out.path || out.sack || out.fromV)
-    throw new Error('a collapsed branch arm cannot fill a carried path/sack/fromV/origin role — the caller must decline before lowering it');
-  const bulk = out.bulk;
-  const cols = layoutCols(out).map((c) => c === bulk ? q`1 AS ${c}` : q`NULL AS ${c}`);
-  return cols.length ? list(cols.map((e) => q`, ${e}`), '') : empty;
-}
-
-/** The carried roles a COLLAPSED arm can honestly fill — asked of the branch's INPUT layout,
- *  before any arm is lowered, because that is the only place a decline is still free. */
+/** The carried roles a COLLAPSING arm can honestly fill — asked of the branch's INPUT layout,
+ *  before any arm is lowered, because that is the only place a decline is still free. The roles it
+ *  names are exactly the ones `layoutArmProjection` refuses to invent. */
 export const collapsedArmAdmissible = (input: TraverserLayout): boolean =>
   !input.origins.length && !input.path && !input.sack && !input.fromV;
 

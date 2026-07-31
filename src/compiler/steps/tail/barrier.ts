@@ -38,6 +38,9 @@ export function lowerGlobalCount(input: RelationalStream): ScalarStream {
  *  deterministic when — and only when — the chain actually carries emission order. */
 export interface RowOpts {
   readonly distinct?: boolean;
+  /** A row FILTER, applied before any ORDER BY/LIMIT — so it composes with a slice the way a
+   *  `WHERE` does and not the way a second `LIMIT` would. */
+  readonly where?: Expression;
   readonly suffix?: Expression;
   readonly orderByEncounter?: boolean;
 }
@@ -74,7 +77,8 @@ export function reprojectRows<T extends RelationalStream>(s: T, opts: RowOpts = 
   // encounter channel is the source/merge builders' job, and a positional consumer has a canonical
   // answer exactly when the chain asked for one.
   const order = opts.orderByEncounter && s.traverserLayout.encounter ? q` ORDER BY ${p.c[s.traverserLayout.encounter]}` : empty;
-  const body = q`SELECT ${opts.distinct ? q`DISTINCT ` : empty}${list(cols.map((c) => p.c[c]), ', ')} FROM ${p}${order}${opts.suffix ?? empty}`;
+  const where = opts.where ? q` WHERE ${opts.where}` : empty;
+  const body = q`SELECT ${opts.distinct ? q`DISTINCT ` : empty}${list(cols.map((c) => p.c[c]), ', ')} FROM ${p}${where}${order}${opts.suffix ?? empty}`;
   return withRelation(s, s.q.cte(body, cols));
 }
 
@@ -96,6 +100,27 @@ export const firstOf = <T>(...fns: readonly ShapeTailFn<T>[]): ShapeTailFn<T> =>
     if (result) return result;
   }
   return null;
+};
+
+/**
+ * A branch ARM that received NO traversers emits nothing — even when the barrier in it has a seed
+ * value.
+ *
+ * `count()` over an empty stream is 0, and that is right for a main chain. It is wrong for a
+ * `choose(pred, __.count(), …)` arm whose predicate routed nothing to it: `ChooseStep` never runs
+ * that option, so there is no traverser to carry the 0. The BATCHED lowering of a collapsing arm
+ * (`tryCompileBatchedScalarArm`, `tryCompileBatchedElementArm`) reaches the ordinary global reducer,
+ * which cannot know it is standing in for an arm — so the emptiness question is asked here, of the
+ * arm's own INPUT relation.
+ *
+ * Measured: without it, `g.V(1).values('age').choose(__.is(gt(30)), __.V().count(), __.constant(0))`
+ * emitted a spurious `0` for the then-arm beside the else-arm's real one. A `V()` RE-SOURCE arm makes
+ * that unmissable — its rows do not come from the arm's input at all, so nothing downstream of the
+ * re-source could have noticed the arm was empty.
+ */
+export const gateArmOnNonEmptyInput = <T extends RelationalStream>(arm: T, input: Relation): T => {
+  const src = input.as('armin');
+  return reprojectRows(arm, { where: q`EXISTS (SELECT 1 FROM ${src})` });
 };
 
 /**

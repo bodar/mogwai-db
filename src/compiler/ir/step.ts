@@ -197,6 +197,23 @@ export const COLLAPSING_BARRIERS: ReadonlySet<string> = REDUCERS;
  */
 export const BATCHING_BRANCHES: ReadonlySet<string> = new Set(['union', 'choose']);
 
+/**
+ * Does this arm body COLLAPSE — does a barrier in it reduce the branch's whole input to a single
+ * traverser?
+ *
+ * Position-INDEPENDENT on purpose. `hasBarrier` is set by
+ * `getStepsOfAssignableClassRecursively(Barrier.class, …)`, which asks whether the option CONTAINS
+ * one, not whether it ends in one — so `union(__.out().count().is(gt(0)), …)` batches, and gating on
+ * the TERMINAL step would route it down the per-origin path. Measured: that spelling is what a
+ * committed test caught, and it is a real 4-vs-2 row difference.
+ *
+ * The scan is flat, so a barrier that sits only inside a NESTED branch arm is not seen here and that
+ * arm keeps its per-origin lowering. The reference's scan recurses; matching it is the same widening
+ * that T3 needs and is deliberately not bundled in.
+ */
+export const armCollapses = (body: readonly { readonly name: string }[]): boolean =>
+  body.some((s) => COLLAPSING_BARRIERS.has(s.name));
+
 /** The four steps that fork a traverser into arms and merge the results. */
 export type BranchKind = 'union' | 'choose' | 'coalesce' | 'optional';
 export const BRANCH_KINDS: ReadonlySet<string> = new Set<string>(['union', 'choose', 'coalesce', 'optional']);

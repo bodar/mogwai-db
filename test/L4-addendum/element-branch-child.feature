@@ -93,3 +93,71 @@ Feature: mogwai addendum — a uniform-element branch as a child-body value
     Then the result should be unordered
       | result |
       | m[{"person":"d[8].l","software":"d[4].l"}] |
+
+  # ---- a COLLAPSING arm of a BATCHING branch (docs/2026-08-01-branch-arm-barrier-scope-plan.md) ----
+  #
+  # `BranchStep.standardAlgorithm` injects EVERY start at once when any option contains a `Barrier`
+  # (`hasBarrier`), so a reducer arm reduces over the branch's whole input. We provisioned every arm
+  # as a per-origin child body, which is the `local(union(…))` reading — and `Union.feature` ships
+  # both readings on one graph, so we answered the wrong one of its two halves.
+  #
+  # These pin the element-parent half. The scalar-parent half is in scalar-reentry.feature, and only
+  # `union`/`choose` are affected: `CoalesceStep extends FlatMapStep` and `OptionalStep extends
+  # AbstractStep` take one start at a time unconditionally, so their arms genuinely are per-traverser.
+
+  @gap:element-branch-child
+  Scenario: g_V_unionXcount__outXcreatedX_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().union(__.count(), __.out("created").count())
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | d[6].l |
+      | d[4].l |
+
+  # The barrier is NOT the terminal step here — `hasBarrier` asks whether the option CONTAINS one —
+  # so `is(gt(0))` filters ONE collapsed value per arm, not one per vertex.
+  @gap:element-branch-child
+  Scenario: g_V_unionXoutXcreatedX_count_isXgtX0XX__inXcreatedX_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().union(__.out("created").count().is(P.gt(0)), __.in("created").count())
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | d[4].l |
+      | d[4].l |
+
+  # An arm that received NO traversers emits nothing, even though its barrier has a seed value:
+  # `count()` over an empty stream is 0 as a main chain, and `ChooseStep` never runs an option no
+  # start was routed to. A `V()` re-source arm makes it unmissable — its rows do not come from the
+  # arm's input at all.
+  @gap:element-branch-child
+  Scenario: g_V_hasLabelXnoneX_unionXcount__outXcreatedX_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("nonexistent").union(__.count(), __.out("created").count())
+      """
+    When iterated to list
+    Then the result should be empty
+
+  # A label bound AFTER the collapsing barrier still survives the merge: the arm has LOST `bulk` and
+  # GAINED its alias column, so the merge has to resolve the carried schema per COLUMN rather than
+  # deciding "is this arm collapsed?" once.
+  @gap:element-branch-child
+  Scenario: g_V_unionXcount_asXxX__outXcreatedX_countX_selectXxX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().union(__.count().as("x"), __.out("created").count()).select("x")
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | d[6].l |

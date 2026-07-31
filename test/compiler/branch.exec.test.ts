@@ -294,7 +294,12 @@ test('a label bound AFTER fold() inside a branch arm survives the merge', () => 
   // The point of lowering the suffix through the generic loop rather than special-casing as():
   // every other shape-preserving tail step comes free. None of these is about labels.
   expect(run(store, 'g.V(1).union(__.out().values("name").fold().order(Scope.local), __.in().values("name").fold())').length).toBe(2);
-  expect(run(store, 'g.V().union(__.out().count().is(P.gt(0)), __.in().count())').length).toBe(9);
+  // 2, not 9: `count()` anywhere in an arm sets `hasBarrier`, so BOTH arms of this union see the
+  // whole input and each collapses to one row (6 out-edges, 6 in-edges) — `is(gt(0))` then filters a
+  // single value rather than six. The old 9 was 3 surviving per-vertex out-counts plus 6 per-vertex
+  // in-counts, i.e. the `local(union(…))` reading. The barrier is not TERMINAL here, which is why
+  // `armCollapses` scans the whole body.
+  expect(run(store, 'g.V().union(__.out().count().is(P.gt(0)), __.in().count())').map((r: any) => r.v)).toEqual([6, 6]);
 
   // A suffix containing a real BARRIER must not split: lowerStepsStrict is documented as a scope
   // that cannot host one, and handing it a barrier emits malformed SQL rather than throwing.

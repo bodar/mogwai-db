@@ -29,10 +29,11 @@ import { loweringStateOf, rebuildScalar, toScalarStream, type ScalarStream, type
 import { mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm } from './variant.ts';
 import { engineOf, fastPathContextOf } from '../../engine/deps.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
+import { gateArmOnNonEmptyInput } from './barrier.ts';
 import { gateScalar, tryInlineScalarPredicate, unionScalarStreams } from './scalar.ts';
 import { predicateSql, TYPE_PER_ROW, TYPE_UNKNOWN } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { COLLAPSING_BARRIERS } from '../../ir/step.ts';
+import { armCollapses } from '../../ir/step.ts';
 import {
     CHILD_SCALAR_REDUCERS, isResourceHead, pushChildScope, resourceElement,
     tryCompileListChild, tryCompileScalarValueChild, tryCompileScalarValueRows,
@@ -343,12 +344,9 @@ export function tryScalarUnionChild(s: ScalarStream, step: IRStep): ScalarStream
 function tryCompileBatchedScalarArm(parent: ScalarStream, nested: any): ScalarStream | null {
   if (!collapsedArmAdmissible(parent.traverserLayout)) return null;
   const body = childSteps(nested, parent.params);
-  const last = body.at(-1);
-  if (!last || !COLLAPSING_BARRIERS.has(last.name)) return null;
-  const prefix = body.slice(0, -1);
-  if (prefix.length && !scalarBranchArm(prefix, parent.params)) return null;
+  if (!armCollapses(body) || !scalarArmClassifies(body, parent.params)) return null;
   const end = engineOf(parent).lowerStepsStrict(parent, body, 0);
-  return end.kind === 'scalar' ? end : null;
+  return end.kind === 'scalar' ? gateArmOnNonEmptyInput(end, parent.rel) : null;
 }
 
 /** coalesce(a, b, …) over a scalar: the first arm that PRODUCES a value, per input row. Arm k is
