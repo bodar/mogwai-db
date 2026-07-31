@@ -5,6 +5,11 @@ import {
     isTokenArg, isWithOptionArg,
 } from '../src/gremlin/frontend.ts';
 import { cardinalityOf } from '../src/compiler/steps/context/stream.ts';
+import {
+    layoutCols, layoutGrewAliases, mergeArmRelation, mergeLayouts, nonAliasCols, rigidCols,
+    type AliasEntry, type TraverserLayout,
+} from '../src/compiler/steps/context/context.ts';
+import { Query, q } from '../src/sql/kernel/q.ts';
 
 describe('channel contracts', () => {
   test('front-end tagged arguments narrow only through their declared tag', () => {
@@ -32,5 +37,84 @@ describe('channel contracts', () => {
       .toEqual({ kind: 'runsByKey', key: 'pk' });
     expect(() => cardinalityOf({ kind: 'path', layout: { kind: 'grouped', elem: 'vertex' }, rel: { cols: ['ord'] }, traverserLayout: {} } as any))
       .toThrow('requires its pk run key');
+  });
+});
+
+// ---------- the arm-merge authority (channel-preservation Phase 1) ----------
+//
+// These pin the STRUCTURE the four arm merges now share, which the execution-level tests
+// (test/compiler/branch.exec.test.ts) can only observe indirectly. The plan's exit gate asks for
+// both a same-scope arm and a CHILD-SCOPED arm at every migrated merge: the first must fail closed
+// when a rigid role diverges, the second must merge label sets without ever comparing an ordinal
+// the parent does not have.
+
+const alias = (col: string): AliasEntry => ({ col, shapes: new Set(['vertex']), binds: 1 });
+
+const layout = (over: Partial<TraverserLayout> = {}): TraverserLayout =>
+  ({ aliases: new Map(), origins: [], ...over });
+
+describe('arm-merge authority', () => {
+  test('the peer policy fails closed when an arm diverges on a rigid role', () => {
+    const seed = layout({ aliases: new Map([['a', alias('a0')]]) });
+    // A CHILD-SCOPED arm: the child pushed its own ordinal, so it carries a rigid column the seed
+    // does not. As a same-scope PEER that is unreconcilable per-traverser state → deferral.
+    const childScoped = layout({ aliases: new Map([['a', alias('a0')]]), origins: ['o0'] });
+    expect(() => mergeLayouts(seed, [childScoped], { rigid: 'peer' }))
+      .toThrow('branch arms disagree on carried columns');
+    // …and a genuine peer arm merges. Same rigid roles, so nothing to reconcile.
+    expect(rigidCols(mergeLayouts(seed, [layout({ aliases: new Map([['a', alias('a0')]]) })], { rigid: 'peer' })))
+      .toEqual([]);
+  });
+
+  test('the rehomed policy merges label sets without comparing the ordinal a child minted', () => {
+    const seed = layout({ aliases: new Map([['a', alias('a0')]]) });
+    const childScoped = layout({ aliases: new Map([['a', alias('a0')]]), origins: ['o0'] });
+    const merged = mergeLayouts(seed, [childScoped], { rigid: 'rehomed' });
+    // The SEED's rigid roles survive — a re-homed merge must never inherit the child-only ordinal.
+    expect(merged.origins).toEqual([]);
+    expect([...merged.aliases.keys()]).toEqual(['a']);
+    expect(layoutGrewAliases(seed, merged)).toBe(false);
+  });
+
+  test('an arm-minted label joins the merged set and reports as grown', () => {
+    const seed = layout({ aliases: new Map([['a', alias('a0')]]) });
+    // Each arm mints columns independently from the same seed size, so both spell the new label
+    // `a1`; the merge assigns ONE canonical column and each arm remaps onto it.
+    const armWithX = layout({ aliases: new Map([['a', alias('a0')], ['x', alias('a1')]]) });
+    const merged = mergeLayouts(seed, [armWithX, seed], { rigid: 'rehomed' });
+    expect([...merged.aliases.keys()]).toEqual(['a', 'x']);
+    expect(layoutGrewAliases(seed, merged)).toBe(true);
+    // Only ONE arm binds it, so the bind count is not static — Pop must resolve off the array.
+    expect(merged.aliases.get('x')!.binds).toBeUndefined();
+    // The canonical column lands after the seed's, so layoutCols(seed) stays a PREFIX.
+    expect(layoutCols(merged).slice(0, 1)).toEqual(layoutCols(seed));
+  });
+
+  test('nonAliasCols and rigidCols differ by exactly the path positions', () => {
+    const c = layout({
+      aliases: new Map([['a', alias('a0')]]),
+      sack: 'sk', origins: ['o0'], encounter: 'encounter',
+      path: { kind: 'cols', cols: [{ col: 'p0', elem: 'vertex' }] },
+    });
+    expect(layoutCols(c)).toEqual(['a0', 'sk', 'o0', 'encounter', 'p0']);
+    expect(nonAliasCols(c)).toEqual(['sk', 'o0', 'encounter', 'p0']);
+    expect(rigidCols(c)).toEqual(['sk', 'o0', 'encounter']);
+  });
+
+  test('the shared merge core declares the minted encounter in its layoutCols slot', () => {
+    const base = { q: new Query(), params: {}, traverserLayout: layout({ sack: 'sk', encounter: 'e0' }) };
+    const parts = [q`SELECT 1 AS v, 0 AS arm_idx, 1 AS arm_encounter, 2 AS sk`];
+    const minted = mergeArmRelation(base, layout({ sack: 'sk' }), ['v'], parts, true);
+    // The mint SUPERSEDES the incoming encounter rather than adding a second slot, and lands in
+    // the position layoutCols declares — after sack, never appended past it.
+    expect(minted.traverserLayout.encounter).toBe('encounter');
+    expect(minted.rel.cols).toEqual(['v', 'sk', 'encounter']);
+    expect(layoutCols(minted.traverserLayout)).toEqual(['sk', 'encounter']);
+
+    // Not minting is a plain UNION ALL over the declared schema, and the parts must NOT carry the
+    // tag columns — the declared list is what assertStreamColumns checks at the caller.
+    const plain = mergeArmRelation(base, layout({ sack: 'sk' }), ['v'], [q`SELECT 1 AS v, 2 AS sk`], false);
+    expect(plain.traverserLayout.encounter).toBeUndefined();
+    expect(plain.rel.cols).toEqual(['v', 'sk']);
   });
 });

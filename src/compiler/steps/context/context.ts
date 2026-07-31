@@ -245,8 +245,17 @@ function mergeAliasMaps(seed: AliasMap, arms: readonly TraverserLayout[]): Alias
 
 /** The RIGID carried columns — sack/bulk/origins/fromV/encounter (everything but aliases and
  *  path). These are per-traverser physical state a branch cannot fork or reconcile, so they must
- *  be identical across arms; aliases fork and merge, path pads. */
+ *  be identical across arms; aliases fork and merge, path pads.
+ *
+ *  The spread is a deliberate CONSTRUCTION of a throwaway layout to ask layoutCols a narrower
+ *  question, not a preservation route — `patchLayout` cannot express it, because clearing `path`
+ *  there means "keep". */
 export const rigidCols = (c: TraverserLayout): string[] => layoutCols({ ...c, aliases: new Map(), path: undefined });
+
+/** Every carried column EXCEPT the alias columns — including the path positions, unlike
+ *  `rigidCols`. This is the half an arm merge projects STRAIGHT THROUGH from each arm while the
+ *  alias half is remapped per arm, and the scalar and list merges each derived it inline. */
+export const nonAliasCols = (c: TraverserLayout): string[] => layoutCols(patchLayout(c, { aliases: new Map() }));
 
 /** How an arm merge treats the RIGID roles (sack/bulk/origins/fromV/encounter). This is a
  *  POLICY, not a strictness dial: the two cases describe genuinely different boundaries, so a
@@ -320,6 +329,72 @@ export function aliasArmProjection(armAliases: AliasMap, out: AliasMap, p: Relat
       : got.col === entry.col ? q`${p.c[entry.col]}`
       : q`${p.c[got.col]} AS ${raw(entry.col)}`;
   });
+}
+
+/** ONE arm's projection of the MERGED carried schema, as the `, col, col, …` fragment an arm
+ *  SELECT splices after its payload.
+ *
+ *  When the merge GREW the label set, the alias columns must come from the ARM — its own physical
+ *  column remapped onto the canonical name, NULL where it never bound the label — while every
+ *  other carried column is state the arms share with the seed and rides straight through. When it
+ *  did NOT grow, each arm's alias columns ARE the seed's, so a flat `layoutProjection` is the same
+ *  relation and the cheaper hot path.
+ *
+ *  The scalar, list and variant merges each spelled this out, and the branch that skipped the
+ *  remap is where a label an arm minted itself went silently unread. */
+export function layoutArmProjection(out: TraverserLayout, armAliases: AliasMap, a: Relation, grew: boolean): Expression {
+  if (!grew) return layoutProjection(out, a);
+  const cols = [...aliasArmProjection(armAliases, out.aliases, a), ...nonAliasCols(out).map((c) => a.c[c])];
+  return cols.length ? list(cols.map((e) => q`, ${e}`), '') : empty;
+}
+
+/** The relation an arm merge produces, plus the carried schema it declares.
+ *  `mergeArmRelation` owns both, so a caller cannot take one without the other. */
+export interface ArmMergeRelation {
+  readonly rel: Relation;
+  readonly traverserLayout: TraverserLayout;
+}
+
+/**
+ * The UNION-ALL core of an arm merge, over per-arm SELECTs the caller has already built. The
+ * scalar, list and variant merges were three copies of exactly this — per-arm payload plus an
+ * `arm_idx`/`arm_encounter` tag, an inner CTE, then `ROW_NUMBER() OVER (<partition> ORDER BY
+ * arm_idx, arm_encounter)` re-minted into the carried `encounter` slot so arm a lands wholly before
+ * arm b (TinkerPop's union/coalesce/choose order). Only the PAYLOAD column list differed between
+ * them, and `streamPayloadCols` already owns that per shape.
+ *
+ * `out` is the merged carried schema with `encounter` ALREADY CLEARED: the mint supersedes any
+ * incoming encounter rather than adding a second one, and `layoutProjectionMinting` requires the
+ * replacement column to be declared, so the two halves have to be sequenced this way.
+ *
+ * `mint` is the CALLER's decision, not derived from `out`, because the three disagree for a real
+ * reason: the scalar merge always establishes emission order (its positional consumers —
+ * `limit()`/`range()` over a scalar stream — are reachable today), while the list and variant
+ * merges mint only when an encounter is already live, since a list-valued `limit()` still throws
+ * and minting would be dead SQL. When `mint` is true every `part` MUST carry trailing
+ * `arm_idx, arm_encounter` columns, and when it is false none may — `assertStreamColumns` at the
+ * caller's stream constructor trips immediately either way.
+ */
+export function mergeArmRelation(
+  base: LoweringState,
+  out: TraverserLayout,
+  payload: readonly string[],
+  parts: readonly Expression[],
+  mint: boolean,
+): ArmMergeRelation {
+  const body = list(parts, ' UNION ALL ');
+  if (!mint) return { rel: base.q.cte(body, [...payload, ...layoutCols(out)]), traverserLayout: out };
+  const m = base.q.cte(body, [...payload, 'arm_idx', 'arm_encounter', ...layoutCols(out)]).as('m');
+  const merged = patchLayout(out, { encounter: 'encounter' });
+  const over = partitionOver(out, m, q`${m.c.arm_idx}, ${m.c.arm_encounter}`);
+  const projected = list(payload.map((c) => q`${m.c[c]} AS ${c}`), ', ');
+  return {
+    rel: base.q.cte(
+      q`SELECT ${projected}${layoutProjectionMinting(merged, m, 'encounter', q`ROW_NUMBER() OVER (${over})`)} FROM ${m}`,
+      [...payload, ...layoutCols(merged)],
+    ),
+    traverserLayout: merged,
+  };
 }
 
 /** The current id-relation, optionally aliased. Its columns are id + every carried

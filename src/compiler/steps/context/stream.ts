@@ -327,6 +327,12 @@ export const pathColumns = (layout: PathLayout): string[] => {
     : elemColumns(p.prefix, p.elem));
 };
 
+/** The payload columns of a variant relation. Reachable BEFORE a VariantStream exists, because an
+ *  arm merge has to declare the merged schema in order to build it — the one place the payload
+ *  authority is needed from the outside. `streamPayloadCols` reads it too, so the merge and the
+ *  built stream cannot disagree (and `assertStreamColumns` would catch it if they did). */
+export const variantPayloadCols = (hasList: boolean): string[] => ['vk', 'v', 'rid', ...(hasList ? ['list'] : [])];
+
 export const recordFieldColumns = (f: RecordField): string[] => f.sub === 'value'
   ? [`${f.prefix}_v`, ...perRowCols(f.type)]
   : f.sub === 'list'
@@ -357,7 +363,7 @@ export function streamColumns(s: Stream): readonly string[] {
 export function streamPayloadCols(s: RelationalStream): readonly string[] {
   return s.kind === 'elements' ? ['id']
     : s.kind === 'scalar' ? [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...perRowCols(s.type)]
-    : s.kind === 'variant' ? ['vk', 'v', 'rid', ...(s.listOf ? ['list'] : [])]
+    : s.kind === 'variant' ? variantPayloadCols(!!s.listOf)
     : s.kind === 'list' ? ['list']
     : s.kind === 'map' ? ['map']
     : s.kind === 'mapEntry' ? ['mk', 'mv']

@@ -3,7 +3,7 @@ import { hasUnresolvedOperand, operandDeps, resolveTraversalOperands } from './o
 import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx, TYPE_PER_ROW, TYPE_STATIC, TYPE_UNKNOWN, typeCtxOf } from '../../plan/plan.ts';
 import { gtypeName, isNested, isOperatorArg, isOrderArg, isScopeArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { aliasArmProjection, layoutProjection, layoutProjectionMinting, layoutCols, layoutGrewAliases, patchLayout, mergeLayouts, partitionOver, dropLayoutAtBarrier, type LoweringState } from '../context/context.ts';
+import { layoutProjection, layoutProjectionMinting, layoutCols, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, dropLayoutAtBarrier, type LoweringState } from '../context/context.ts';
 import { loweringStateOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec, SCALAR_TRANSFORMS } from './coerce.ts';
 import { normalizeTypeName } from '../../../gremlin/types.ts';
@@ -544,39 +544,28 @@ export function unionScalarStreams(base: LoweringState, arms: readonly ScalarStr
   const mergedAliases = mergedLayout.aliases;
   const armsGrewAlias = layoutGrewAliases(base.traverserLayout, mergedLayout);
   // Forward the base carried EXCEPT any prior encounter — the merge supersedes it.
-  const baseNoEnc = patchLayout(base.traverserLayout, { encounter: null, aliases: mergedAliases });
-  const nonAlias = layoutCols({ ...baseNoEnc, aliases: new Map() });
-  const inner = base.q.cte(
-    list(arms.map((a, k) => {
-      const r = a.rel.as('a');
-      const armEnc = a.traverserLayout.encounter ? r.c[a.traverserLayout.encounter] : q`1`;
-      const gate = gateFor?.(r, k);
-      // The alias columns come from the ARM (remapped/padded); every other carried column is
-      // per-traverser state the arms share with the base, so it rides straight through.
-      const aliasFrag = armsGrewAlias
-        ? list(aliasArmProjection(a.traverserLayout.aliases, mergedAliases, r).map((e: Expression) => q`, ${e}`), '')
-        : empty;
-      const restFrag = armsGrewAlias
-        ? (nonAlias.length ? list(nonAlias.map((c) => q`, ${r.c[c]}`), '') : empty)
-        : layoutProjection(baseNoEnc, r);
-      return q`SELECT ${r.c.v} AS v${numeric ? q`, ${r.c.vt} AS vt` : empty}, ${value(k)} AS arm_idx, ${armEnc} AS arm_encounter${aliasFrag}${restFrag} FROM ${r}${gate ? q` WHERE ${gate}` : empty}`;
-    }), ' UNION ALL '),
-    ['v', ...(numeric ? ['vt'] : []), 'arm_idx', 'arm_encounter', ...layoutCols(baseNoEnc)],
-  );
-  const m = inner.as('m');
-  const outCarried = patchLayout(baseNoEnc, { encounter: 'encounter' });
-  const over = partitionOver(outCarried, m, q`${m.c.arm_idx}, ${m.c.arm_encounter}`);
-  const rel = base.q.cte(
-    q`SELECT ${m.c.v} AS v${numeric ? q`, ${m.c.vt} AS vt` : empty}${layoutProjectionMinting(outCarried, m, 'encounter', q`ROW_NUMBER() OVER (${over})`)} FROM ${m}`,
-    ['v', ...(numeric ? ['vt'] : []), ...layoutCols(outCarried)],
-  );
-  // The merged relation projects only `v` (+ `vt`), so a per-row type column cannot cross
-  // the union — an arm carrying one degrades to `unknown` (inferred at the wire) rather than
-  // claiming a column that isn't there. A STATIC type survives only if every arm agrees.
+  const out = patchLayout(base.traverserLayout, { encounter: null, aliases: mergedAliases });
+  // The merged relation projects only `v` (+ `vt`), so a per-row type column cannot cross the
+  // union: this payload list is also why an arm carrying one degrades to `unknown` below.
+  const payload = ['v', ...(numeric ? ['vt'] : [])];
+  const parts = arms.map((a, k) => {
+    const r = a.rel.as('a');
+    const armEnc = a.traverserLayout.encounter ? r.c[a.traverserLayout.encounter] : q`1`;
+    const gate = gateFor?.(r, k);
+    return q`SELECT ${r.c.v} AS v${numeric ? q`, ${r.c.vt} AS vt` : empty}, ${value(k)} AS arm_idx, ${armEnc} AS arm_encounter${layoutArmProjection(out, a.traverserLayout.aliases, r, armsGrewAlias)} FROM ${r}${gate ? q` WHERE ${gate}` : empty}`;
+  });
+  // `mint: true` UNCONDITIONALLY, unlike the list/variant siblings: a scalar stream's positional
+  // consumers (limit/range/take-first after a branch) are reachable today, so the merge has to
+  // establish the canonical order even when nothing upstream asked for one.
+  const armMerge = mergeArmRelation(base, out, payload, parts, true);
+  // A STATIC type survives only if every arm agrees; anything else is inferred at the wire.
   const first = arms[0].type;
   const merged: ScalarType = first.kind === 'static' && arms.every((a) => a.type.kind === 'static' && a.type.type === first.type)
     ? first : UNKNOWN;
-  return toScalarStream({ q: base.q, params: base.params, sideEffects: base.sideEffects, traverserLayout: outCarried }, rel, undefined, { type: merged, result: numeric ? 'number' : 'value' });
+  return toScalarStream(
+    { q: base.q, params: base.params, sideEffects: base.sideEffects, traverserLayout: armMerge.traverserLayout },
+    armMerge.rel, undefined, { type: merged, result: numeric ? 'number' : 'value' },
+  );
 }
 
 /** sack over a scalar stream. The mutate form sack(Operator.x) folds the CURRENT VALUE
