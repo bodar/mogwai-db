@@ -197,19 +197,25 @@ export function lowerScopedScalarReducer(
   scope: ChildScope,
 ): ScalarStream {
   const { domain, ordinal, traverserLayout: layout } = currentFrame(scope);
-  if (!input.traverserLayout.encounter) throw new Error('scoped scalar reducer requires explicit encounter order');
-  const inEnc = input.traverserLayout.encounter;
   const d = domain.as('d');
   const s = input.rel.as('s');
   const join = q`${d} LEFT JOIN ${s} ON ${s.c[ordinal]}=${d.c[ordinal]}`;
+  // The PRODUCTIVITY marker: what tells a real child row from the LEFT JOIN's null padding. The
+  // carried `encounter` is it when the stream has one — but note this reads it for existence ONLY,
+  // never as an ORDER, because every aggregate below is order-insensitive. So a stream carrying no
+  // encounter is not a deferral: the child row's own ORDINAL is non-null on exactly the real rows
+  // and NULL on the padding, which is the same discrimination. (It cannot stand in for an emission
+  // order, and nothing here asks it to — a `first` cardinality policy downstream ranks on the
+  // per-origin marker this step MINTS on its own one-row-per-origin output.)
+  const productive = input.traverserLayout.encounter ? s.c[input.traverserLayout.encounter] : s.c[ordinal];
   let aggregate: Expression;
   let having: Expression = empty;
   let result: ScalarStream['result'];
   let as = staticTypeOf(input.type);
   if (reducer === 'count') {
-    // Count the productive (non-null encounter) child rows — the LEFT JOIN's null-padded
-    // empty-child rows contribute 0. Unweighted: see the bulk rule above.
-    aggregate = q`COUNT(${s.c[inEnc]}) AS v`;
+    // Count the productive child rows — the LEFT JOIN's null-padded empty-child rows
+    // contribute 0. Unweighted: see the bulk rule above.
+    aggregate = q`COUNT(${productive}) AS v`;
     result = 'count';
     as = 'long';
   } else {

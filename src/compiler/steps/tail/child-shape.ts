@@ -344,10 +344,6 @@ const isScalarProducer = (s: IRStep, ctx: ChildCtx | undefined): boolean =>
  *  of engine.ts isSackMutate, kept here so this pure leaf has no engine dependency. */
 export const isSackMutate = (s: IRStep): boolean =>
   s.name === 'sack' && (s.args ?? []).some(isOperatorArg);
-/** The scalar projections that carry a per-origin EMISSION ORDER out of a child scope, so a
- *  scoped reducer in the row tail has something to partition on. Not a list of what some builder
- *  can read — that builder is gone — but a property of each projector. */
-const SELF_ORDERING_PROJECTIONS = new Set(['values', 'id', 'label', 'constant']);
 /** The terminal barrier vocabulary a scalar child row-run may reduce through. Defined in this
  *  pure leaf and re-exported by child.ts (the compiler half) so the classify and emit sides read
  *  ONE set — they used to declare it twice. */
@@ -491,17 +487,6 @@ function scalarRowParts(body: ReturnType<typeof stepChain>, ctx?: ChildCtx): { p
   if (projection.name === 'values' && (projection.args.length !== 1 || typeof projection.args[0] !== 'string')) return null;
   if ((projection.name === 'id' || projection.name === 'label') && projection.args.length) return null;
   if (projection.name === 'constant' && projection.args.length !== 1) return null;
-  // …and a scoped REDUCER in the row tail needs a projection that mints a per-origin EMISSION
-  // ORDER for it to partition on. The four above do (`values` carries `encounterKey` through the
-  // projector because a multi-valued key genuinely fans out; `id`/`label`/`constant` are one row
-  // per input and mint the trivial rank); the generalized producers — call/math/sack/format — do
-  // not, so `lowerScopedScalarReducer` would refuse them mid-CTE. Rejecting HERE keeps classify
-  // and emit admitting the same set, and consumers ASSERT on this classification (a
-  // path/select/branch arm's `!`), so a mismatch is a crash, not a deferral. Lifting this wants
-  // the one-row-per-input producers to mint like `oneRowEncounter` does — a real ceiling raise,
-  // measured to leave a clean deferral rather than an answer today.
-  if (!SELF_ORDERING_PROJECTIONS.has(projection.name) && suffix.some((s) => CHILD_SCALAR_REDUCERS.has(s.name)))
-    return null;
   return { prefix, projection, suffix };
 }
 

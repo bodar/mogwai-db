@@ -245,16 +245,24 @@ describe('classifyScalarChild admits what the scalar-child emitter lowers', () =
       .toEqual([3, 0, 2, 1, 0, 0]); // by arm, as above
   });
 
-  test('a producer the projection builder cannot read + a reducer stays a CLEAN deferral', () => {
-    // format() lowers through the generic path, which has no scoped barrier, so `format().count()`
-    // is outside the emitter — and therefore outside the classifier too. The consumers that ASSERT
-    // on the classification would crash on a mismatch here, so this is the fail-closed half of the
-    // same invariant, not a support gap worth closing quietly.
+  test('EVERY scalar producer may carry a scoped reducer — the projection is not the axis', () => {
+    // This used to be the fail-closed half of the invariant: a generalized producer (format/math/
+    // call/sack) plus a reducer was rejected by the classifier, because only values/id/label/
+    // constant carried an `encounter` and the scoped reducer demanded one. That demand was
+    // mis-stated — the reducer reads the encounter for EXISTENCE (real child row vs the domain
+    // LEFT JOIN's null padding), never as an ORDER, since every aggregate below it is
+    // order-insensitive. The child row's own ordinal answers the same question, so the
+    // projection's identity was never the axis and the whole gate went away.
     const body = "__.format('%{name}').count()";
-    expect(isScalarChild(nestedOf(`g.V().map(${body})`), CTX)).toBe(false);
-    expect(() => scalars(`g.V().map(${body})`)).toThrow(/not supported by generic scalar lowering/);
-    expect(() => scalars(`g.V().local(${body})`)).toThrow(/not yet supported by generic child lowering/);
-    expect(() => scalars(`g.V().choose(__.has('age'), ${body}, __.out().count())`))
-      .toThrow(/not yet supported \(scalar\/projection body\)/);
+    expect(isScalarChild(nestedOf(`g.V().map(${body})`), CTX)).toBe(true);
+    expect(scalars(`g.V().map(${body})`)).toEqual([1, 1, 1, 1, 1, 1]);
+    expect(scalars(`g.V().local(${body})`)).toEqual([1, 1, 1, 1, 1, 1]);
+    // by ARM, as in the test above: the four age-carrying vertices take format().count()=1, the
+    // two without take out().count().
+    expect(scalars(`g.V().choose(__.has('age'), ${body}, __.out().count())`)).toEqual([1, 1, 1, 1, 0, 0]);
+    // A FANNING prefix under a generalized producer counts the same as under a bare movement —
+    // which is the check that the productivity marker really is counting rows, not ranking them.
+    expect(scalars("g.V().map(__.out().format('%{name}').count())"))
+      .toEqual(scalars('g.V().map(__.out().count())'));
   });
 });
