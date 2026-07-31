@@ -10,19 +10,30 @@ which is not the same as ranking by lines._
 left as written; the full map is in
 [tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md).
 
-> **STATUS 2026-07-27 (L3 1475).** SIX of the nine sites are closed, and THREE premises in this doc
-> were **falsified by measurement** — read the notes below before using the rankings, because the
-> original entry text still reflects the pre-fix state in each case.
+> ## STATUS 2026-07-30 (L3 1623) — **this audit is DONE. All nine sites are closed.**
 >
-> **STATUS 2026-07-30. Everything except #5 is now closed** (`write.ts` is the sole open site; #5 is
-> also the one whose residual is a design question, not a lowering gap). Two of the three closed
-> that day were mis-ranked in this doc, in the same direction and for the same reason: a duplicate
-> was filed as *cosmetic* because no divergent answer had been constructed, and in both cases one
-> existed — #9's property expansion was the safety argument for a vertex-only wall, and #7's second
-> projector answered NOTHING where the root answers a list. **A second implementation whose
-> equivalence rests on "I could not construct a counterexample" is unranked, not Low** — the probe
-> set is the thing to interrogate (both counterexamples needed a shape the reference graphs do not
-> contain).
+> _Six closed by 2026-07-27, when THREE premises in this doc were also falsified by measurement (see
+> below — the original entry text still reflects the pre-fix state in each case). The last four
+> closed 2026-07-30._
+>
+> What remains under #5 is not
+> hand-rolled SQL and never was: a MAP-shaped merge driver (~22 of the ~25 real merge deferrals —
+> tracked as `outstanding-work` item 0b) and a decision about the write path's row-at-a-time
+> execution model. **Neither is this doc's subject, so re-measure before treating #5 as open work
+> here** — its entry now records what is actually left.
+>
+> **Three of the four closed that day were MIS-RANKED in this doc, all in the same direction and for
+> the same reason: a duplicate filed as *cosmetic* or *Low* because no divergent answer had been
+> constructed.** In every case one existed. #9's property expansion was the entire safety argument
+> for a vertex-only wall; #7's second projector answered NOTHING where the root answers a list;
+> #8's "mirror" of `lowerProperties` had already drifted. **A second implementation whose
+> equivalence rests on "I could not construct a counterexample" is UNRANKED, not Low** — and the
+> thing to interrogate is the probe set, because all three counterexamples needed a shape the
+> reference graphs do not contain (a collection-valued property, an edge-owned property).
+>
+> **The fourth was found by generated input, not by reading.** L5's per-commit seed rotation caught
+> `predicateInlining` THROWING where the generic path answers — the same FastPath law as #6, broken
+> in the opposite direction, and structurally invisible to this doc's own cheap check (see #6).
 >
 > **The recurring lesson, now four times over: the abstraction usually already existed, and the site
 > was blocked on REACHING it.** #1 needed no new rendering mode (a recursive term may reference a
@@ -42,7 +53,7 @@ left as written; the full map is in
 > | — | the child seam's shape ceiling *(not originally a numbered site)* | ✅ now shape-generic: ONE rejoin, map + record bodies |
 > | 3 | `match()` binding table | ✅ shape-generic ends + per-binding reducers; residual is `fold()` and the MATCH-string form (7b) |
 > | 4 | `path.ts` grouped positional projector | ✅ one projector AND one positional child compiler; both regimes agree |
-> | 5 | `write.ts` merge/endpoint | open (largest by count, but terminal — never composes at depth) |
+> | 5 | `write.ts` merge/endpoint | ✅ no hand-rolled SQL left (2026-07-30); the residual is a map-shaped driver + a write-path execution-model decision, both tracked elsewhere |
 > | 8 | `search.ts` duplicate property payload | ✅ closed 2026-07-30 — one payload, two provisionings |
 > | 9 | leaf dups | ✅ closed 2026-07-30 — both halves; the property one was hiding a vertex-only wall |
 > | 7 | `child.ts` residue | ✅ closed 2026-07-30 — it was a SILENT WRONG ANSWER, not Low |
@@ -523,34 +534,53 @@ not a vocabulary gap.
 
 ---
 
-### 5. `write.ts` — a hand-rolled match SELECT plus a row-at-a-time JS driver loop
-`steps/write/write.ts:714-878` (`commonMergeConds`, `mergeMatchQuery`, `edgeMatchQuery`,
-`mergeDrivers`, `resolveEndpoint`) — ~276 lines in the merge region
+### 5. `write.ts` — the only open site, and **its "hand-rolled SQL" half is now closed too**
+`steps/write/write.ts` (`commonMergeConds`, `mergeMatchQuery`, `edgeMatchQuery`, `mergeDrivers`,
+`resolveEndpoint`)
 
-`mergeMatchQuery` assembles `SELECT id, uid, (SELECT name FROM labels …) FROM nodes WHERE <conds>` —
-which is precisely what `V().hasLabel(l).has(k,v)` lowers to. It reuses the *leaf* builders
-(`labelIn`, `nodeHasProp`) but not the *relation*, and it is re-rendered and re-executed **once per
-incoming driver** inside a JS `for` loop (`compileMergeV:767`), each iteration a separate
-`store.query`. `resolveEndpoint:593` and `mergeDrivers:749` do the same: `buildPrefixFresh` →
-render → execute → read rows back into JS.
+**Re-measured 2026-07-30, and this entry was stale in the direction that matters: there is no
+hand-rolled SQL left here.** The original complaint was that `mergeMatchQuery` assembles
+`SELECT id, uid, (SELECT name FROM labels …) FROM nodes WHERE <conds>` — reusing the *leaf*
+builders but not the *relation*. Today `commonMergeConds` builds through `propHasFor` /
+`vertexLabelIn` / `labelIn`, `mergeMatchQuery` is five lines with no projection of its own, and the
+last hand-written label subquery (it had moved to `edgeMatchQuery`) now goes through the label
+seam. The six remaining raw SQL strings in the file are single-row imperative reads/writes
+(`insertVertexProperty`, `nodeExtId`, …) — the acknowledged imperative write surface, not a second
+implementation of traversal semantics, which is what this audit hunts. **Rebuilding the match as a
+lowered `V().hasLabel(l).has(k,v)` relation would produce heavier SQL inside a per-driver loop and
+buy nothing; do not do it as a "consolidation".**
 
-**Measured:** ~26 real deferrals (of 67 mergeV/mergeE corpus failures, **41 are a probe artifact** —
-`mergeV(xx1)` with an unbound Map param — do not count them). Gates PartitionStrategy-aware upsert,
-map-valued merge drivers, `property()` after `addV()`, `drop()` after `properties()`.
+**What is genuinely open here is not SQL shape at all**, and it splits in two — neither of which
+belongs to this doc's subject:
 
-Ranked below #4 despite the line count for one reason the user's criterion makes decisive: this is
-the write path, so fixing it unblocks a *cluster* but never composes at depth. It is the acknowledged
-`write.ts` row-at-a-time debt in `outstanding-work.md` and `.claude/rules/schema-storage.md`;
-this sweep confirms it open and sizes it.
+1. **The row-at-a-time execution model.** `run` renders and executes once per incoming driver, and
+   it interleaves reads with INSERTs and reads back what it wrote — so a set-based form has to
+   decide match-vs-create for the whole driver set *before* writing. Both set-based routes were
+   verified in 2026-07-27 (`drivers ⋈ match` in one query; the per-driver merge-map value as a
+   keyed `(driver, value)` relation), so **rendering was never the blocker**. This is the
+   acknowledged debt in `outstanding-work.md` and `.claude/rules/schema-storage.md`, and it is a
+   design decision about the write path's execution model, not a lowering gap.
+2. **A MAP-shaped merge driver** — which is what the failures actually are.
 
-**Re-measured 2026-07-27: this is NOT a rendering-mode problem, so don't wait on one.** The driver
-id is resolved in JS and bound as a literal, so `mergeMatchQuery` correlates with nothing — it is
-mode A with the correlation done by a round-trip. Verified routes: `drivers ⋈ match` returns every
-driver's match in ONE query, and the genuinely per-driver part (a merge map whose value is a
-traversal seeded at the driver) compiles once as a keyed `(driver, value)` relation and joins. The
-residual difficulty here is not SQL shape at all — it is that `run` interleaves reads with INSERTs
-and reads back what it wrote, so the set-based form has to decide match-vs-create for the whole
-driver set before writing. That is the actual design question; rendering was never the blocker.
+**Measured 2026-07-30** from the census deferrals (a two-way baseline, better than the original
+compile sweep): of the mergeV/mergeE deferrals, **48 are the `xx1` unbound-Map-param probe
+artifact** (the original entry said 41 — same artifact, do not count them), and a further handful
+are TinkerPop-SPECIFIED errors we raise correctly ("merge step can only take an array or an
+Iterable", "can't be null"). The ~25 real ones are dominated by one theme:
+
+| n | deferral | what it needs |
+|---|---|---|
+| 11 | `merge with select('m') needs a withSideEffect('m', map) constant` | a map-shaped driver |
+| 6 | `merge whole-arg traversal … not yet supported` | a map-shaped driver |
+| 3 | `mergeE: missing outV endpoint` | endpoint from the incoming traverser |
+| 3 | `mergeV()/mergeE() with no argument` | a map-shaped driver (the traverser IS the map) |
+| 2 | `merge() cannot consume the elementMap result shape` | a map-shaped driver |
+| 1 | `merge() on a record value` | a map-shaped driver |
+
+So **~22 of ~25 are one feature**: the merge map arriving as a MAP-shaped stream rather than a
+literal with per-key nested traversals. That is `outstanding-work` item **0b**'s named remaining
+consumer (`ElementReadDriver` has a scalar driver; whole-map `MergeStep`/`MergeElementStep`/
+`MergeEdgeStep` bodies need a map-shaped one) — a feature, tracked there, not hand-rolled SQL.
 
 ---
 
